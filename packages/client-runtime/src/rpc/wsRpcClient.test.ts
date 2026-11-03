@@ -5,7 +5,8 @@ import type {
 } from "@ryco/contracts";
 import { WS_METHODS } from "@ryco/contracts";
 import { AGENT_CONTROL_WS_METHODS } from "@ryco/contracts/agent-control";
-import { Effect } from "effect";
+import { GitManagerError } from "@ryco/contracts/git";
+import { Effect, Stream } from "effect";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 vi.mock("./wsTransport.ts", () => ({
@@ -96,6 +97,25 @@ describe("wsRpcClient", () => {
     });
   });
 
+  it("routes involved change requests to their wire method", async () => {
+    const result = { entries: [], sources: [], skippedCwds: [], truncated: false };
+    const wire = vi.fn(() => Effect.succeed(result));
+    const transport = {
+      request: vi.fn((invoke: (client: unknown) => Effect.Effect<unknown>) =>
+        Effect.runPromise(invoke({ [WS_METHODS.sourceControlListInvolvedChangeRequests]: wire })),
+      ),
+    };
+    const client = createWsRpcClient(transport as unknown as WsTransport);
+    const input = {
+      cwds: ["/repo/app"],
+      state: "open" as const,
+      involvements: ["review-requested" as const],
+      sources: "hosts" as const,
+    };
+    await expect(client.sourceControl.listInvolvedChangeRequests(input)).resolves.toEqual(result);
+    expect(wire).toHaveBeenCalledWith(input);
+  });
+
   it("calls the worktree notes wire methods", async () => {
     const snapshot = { projectId: "project", notes: [], limit: 500, truncated: false };
     const listWireMethod = vi.fn(() => Effect.succeed(snapshot));
@@ -122,6 +142,25 @@ describe("wsRpcClient", () => {
     await expect(client.notes.command(command as never)).resolves.toEqual(snapshot);
     expect(commandWireMethod).toHaveBeenCalledWith(command);
     expect(transport.request).toHaveBeenCalledTimes(2);
+  });
+
+  it("passes the daily recap caller's abort signal to the transport", async () => {
+    const recapWireMethod = vi.fn(() => Effect.succeed({ date: "2026-10-23" }));
+    const transport = {
+      request: vi.fn((invoke: (client: unknown) => Effect.Effect<unknown>, _options?: unknown) =>
+        Effect.runPromise(invoke({ [WS_METHODS.serverGetDailyRecap]: recapWireMethod })),
+      ),
+    };
+    const client = createWsRpcClient(transport as unknown as WsTransport);
+    const input = { date: "2026-10-23", timeZone: "Europe/Berlin" };
+    const controller = new AbortController();
+    await client.server.getDailyRecap(input, { signal: controller.signal });
+    await client.server.getDailyRecap(input);
+    expect(recapWireMethod).toHaveBeenCalledWith(input);
+    expect(transport.request.mock.calls.map((call) => call[1])).toEqual([
+      { signal: controller.signal },
+      undefined,
+    ]);
   });
 
   it("reduces vcs status stream events into flat status snapshots", () => {
@@ -230,6 +269,26 @@ it("turns response version decoding failures into an update instruction without 
   await expect(
     client.server.getUsageSummary({ contractVersion: 2, endDate: "2026-08-10", timeZone: "UTC" }),
   ).rejects.toThrow("Update Ryco");
+});
+
+it("routes content search to its wire method with the caller's abort signal", async () => {
+  const searchContent = vi.fn(() => Effect.succeed({ matches: [] }));
+  const requestOptions: unknown[] = [];
+  const transport = {
+    request: (invoke: (client: unknown) => Effect.Effect<unknown>, options?: unknown) => {
+      requestOptions.push(options);
+      return Effect.runPromise(invoke({ [WS_METHODS.projectsSearchContent]: searchContent }));
+    },
+  } as unknown as WsTransport;
+  const client = createWsRpcClient(transport);
+  const input = { cwd: "/repo", query: "needle", limit: 200, cursor: "v1:a.ts" };
+  const controller = new AbortController();
+  await expect(
+    client.projects.searchContent(input, { signal: controller.signal }),
+  ).resolves.toEqual({ matches: [] });
+  await client.projects.searchContent(input);
+  expect(searchContent).toHaveBeenCalledWith(input);
+  expect(requestOptions).toEqual([{ signal: controller.signal }, undefined]);
 });
 
 it("routes import source selection and reconciliation through the shared transport", async () => {
@@ -351,4 +410,146 @@ it("asks for the tolerant plan view on every proposal read", async () => {
   expect(listProposals).toHaveBeenCalledWith({ recentLimit: 5, planView: "tolerant" });
   expect(getProposal).toHaveBeenCalledWith({ proposalId, planView: "tolerant" });
   expect(subscribeProposals).toHaveBeenCalledWith({ planView: "tolerant" });
+});
+
+describe("git stacked actions", () => {
+  const actionInput = {
+    actionId: "6f1c0d3e-8a5b-4c2d-9e7f-1a2b3c4d5e6f",
+    cwd: "/repo",
+    action: "create_pr" as const,
+  };
+  const base = { actionId: actionInput.actionId, cwd: "/repo", action: "create_pr" as const };
+  const result = { action: "create_pr", pr: { status: "created" } };
+  const started = { ...base, kind: "action_started", phases: ["pr"] };
+  const finished = { ...base, kind: "action_finished", result };
+  const linkFailure = new GitManagerError({
+    operation: "git.runStackedAction",
+    detail: "Failed to load worktree for pull request link update",
+  });
+
+  function streamTransport(wire: Record<string, (input: unknown) => unknown>) {
+    return {
+      request: (invoke: (client: unknown) => Effect.Effect<unknown>) =>
+        Effect.runPromise(invoke(wire)),
+      requestStream: (
+        connect: (client: unknown) => Stream.Stream<unknown, Error>,
+        listener: (value: unknown) => void,
+      ) =>
+        Effect.runPromise(
+          Stream.runForEach(connect(wire), (value) => Effect.sync(() => listener(value))),
+        ),
+    } as unknown as WsTransport;
+  }
+
+  it("keeps the reported result when the stream fails after action_finished", async () => {
+    const run = vi.fn(() =>
+      Stream.concat(Stream.make(started, finished), Stream.fail(linkFailure)),
+    );
+    const client = createWsRpcClient(streamTransport({ [WS_METHODS.gitRunStackedAction]: run }));
+    const progress: unknown[] = [];
+
+    await expect(
+      client.git.runStackedAction(actionInput, { onProgress: (event) => progress.push(event) }),
+    ).resolves.toEqual(result);
+    expect(progress).toEqual([started, finished]);
+    expect(run).toHaveBeenCalledWith(actionInput);
+  });
+
+  it("keeps the reported result when the progress handler throws on it", async () => {
+    const client = createWsRpcClient(
+      streamTransport({ [WS_METHODS.gitRunStackedAction]: () => Stream.make(started, finished) }),
+    );
+
+    await expect(
+      client.git.runStackedAction(actionInput, {
+        onProgress: (event) => {
+          if (event.kind === "action_finished") throw new Error("notice failed");
+        },
+      }),
+    ).resolves.toEqual(result);
+  });
+
+  it("fails with the stream's failure when no result was reported", async () => {
+    const client = createWsRpcClient(
+      streamTransport({
+        [WS_METHODS.gitRunStackedAction]: () =>
+          Stream.concat(Stream.make(started), Stream.fail(linkFailure)),
+      }),
+    );
+    await expect(client.git.runStackedAction(actionInput)).rejects.toBe(linkFailure);
+
+    const silent = createWsRpcClient(
+      streamTransport({ [WS_METHODS.gitRunStackedAction]: () => Stream.make(started) }),
+    );
+    await expect(silent.git.runStackedAction(actionInput)).rejects.toThrow(
+      "Git action stream completed without a final result.",
+    );
+  });
+
+  it("follows and stops an action through their own wire methods", async () => {
+    const resume = vi.fn(() =>
+      Stream.concat(Stream.make(started, finished), Stream.fail(linkFailure)),
+    );
+    const cancel = vi.fn(() => Effect.succeed({ cancelled: true }));
+    const run = vi.fn(() => Stream.empty);
+    const client = createWsRpcClient(
+      streamTransport({
+        [WS_METHODS.gitRunStackedAction]: run,
+        [WS_METHODS.gitResumeStackedAction]: resume,
+        [WS_METHODS.gitCancelStackedAction]: cancel,
+      }),
+    );
+    const progress: unknown[] = [];
+
+    await expect(
+      client.git.resumeStackedAction(actionInput, { onProgress: (event) => progress.push(event) }),
+    ).resolves.toEqual(result);
+    expect(resume).toHaveBeenCalledWith(actionInput);
+    expect(progress).toEqual([started, finished]);
+    await expect(
+      client.git.cancelStackedAction({ actionId: actionInput.actionId }),
+    ).resolves.toEqual({ cancelled: true });
+    expect(cancel).toHaveBeenCalledWith({ actionId: actionInput.actionId });
+    expect(run).not.toHaveBeenCalled();
+  });
+});
+
+it("routes provider sign-in through the shared transport, re-subscribing like any stream", async () => {
+  const subscribeWire = vi.fn(() => Stream.empty);
+  const start = vi.fn(() => Effect.succeed({ phase: "starting" }));
+  const respond = vi.fn(() => Effect.void);
+  const wire = {
+    [WS_METHODS.providerSignInSubscribe]: subscribeWire,
+    [WS_METHODS.providerSignInStart]: start,
+    [WS_METHODS.providerSignInRespond]: respond,
+  };
+  const subscribe = vi.fn(
+    (_connect: (client: unknown) => unknown, _listener: unknown, _options: unknown) => () =>
+      undefined,
+  );
+  const transport = {
+    request: (invoke: (client: unknown) => Effect.Effect<unknown>) =>
+      Effect.runPromise(invoke(wire)),
+    subscribe,
+  } as unknown as WsTransport;
+  const client = createWsRpcClient(transport);
+  const instanceId = "codex" as Parameters<typeof client.providerSignIn.start>[0]["instanceId"];
+  const listener = vi.fn();
+  const onResubscribe = vi.fn();
+
+  client.providerSignIn.subscribe({ instanceId }, listener, { onResubscribe });
+  await client.providerSignIn.start({ instanceId });
+  await client.providerSignIn.respond({ instanceId, flowId: "flow-1", action: { type: "cancel" } });
+
+  const [connect, subscribedListener, options] = subscribe.mock.calls[0]!;
+  connect(wire);
+  expect(subscribeWire).toHaveBeenCalledWith({ instanceId });
+  expect(subscribedListener).toBe(listener);
+  expect(options).toEqual({ onResubscribe, tag: WS_METHODS.providerSignInSubscribe });
+  expect(start).toHaveBeenCalledWith({ instanceId });
+  expect(respond).toHaveBeenCalledWith({
+    instanceId,
+    flowId: "flow-1",
+    action: { type: "cancel" },
+  });
 });

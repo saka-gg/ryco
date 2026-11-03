@@ -16,6 +16,7 @@ import {
 import {
   CHANGE_REQUEST_FILE_CONTENTS_MAX_BYTES,
   PositiveInt,
+  SourceControlProviderErrorReason,
   TrimmedNonEmptyString,
   type ChangeRequestActivity,
   type ChangeRequestDraftReviewComment,
@@ -52,6 +53,15 @@ import { parseGitHubRepositoryIdentityFromUrl } from "@ryco/shared/sourceControl
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import { readCheckoutHead } from "../vcs/gitCheckoutHead.ts";
 import { inBackgroundProcessLane } from "../processGovernor.ts";
+import { classifyForgeFailure, type ForgeFailureKind } from "./forgeFailure.ts";
+import { forgeFailureFields } from "./forgeHttpRateLimit.ts";
+import { isForgeRequestRefusedWhilePaused } from "./forgeRequestPaused.ts";
+import {
+  forgeChildAdmission,
+  forgeRequestPausedFailure,
+  forgeRequestPausedRefusal,
+} from "./forgeRateLimit.ts";
+import * as GitHubApi from "./gitHubApi.ts";
 import * as GitHubIssues from "./gitHubIssues.ts";
 import type { NormalizedGitHubIssueDetail, NormalizedGitHubIssueRecord } from "./gitHubIssues.ts";
 import * as GitHubActions from "./gitHubActions.ts";
@@ -65,7 +75,13 @@ import * as GitHubPullRequestMutations from "./gitHubPullRequestMutations.ts";
 import * as GitHubPullRequests from "./gitHubPullRequests.ts";
 import * as GitHubPullRequestStacks from "./gitHubPullRequestStacks.ts";
 import * as GitHubRequiredChecks from "./gitHubRequiredChecks.ts";
+import {
+  GITHUB_FINGERPRINT_QUIET_AFTER_MS,
+  makeGitHubPullRequestFingerprintBoard,
+} from "./gitHubPullRequestFingerprintBoard.ts";
+import * as GitHubPullRequestWatchFingerprint from "./gitHubPullRequestWatchFingerprint.ts";
 import * as GitHubRepositoryLists from "./gitHubRepositoryLists.ts";
+import type { ChangeRequestWatchFingerprint } from "./SourceControlProvider.ts";
 import {
   decodeGitHubReactionGroupsBySubjectJson,
   formatGitHubReactionGroupsDecodeError,
@@ -194,6 +210,10 @@ export class GitHubCliError extends Schema.TaggedError<GitHubCliError>()("GitHub
   operation: Schema.String,
   detail: Schema.String,
   reason: Schema.optional(Schema.Literal("async-merge-unavailable")),
+  /** Why GitHub refused, read from what gh or GitHub said (never the command line). */
+  failureKind: Schema.optional(SourceControlProviderErrorReason),
+  /** Epoch ms GitHub named for the retry, with failureKind "rate-limited". */
+  retryAt: Schema.optional(Schema.Number),
   cause: Schema.optional(Schema.Defect()),
 }) {
   override get message(): string {
@@ -238,6 +258,17 @@ export interface GitHubPullRequestSummary {
 export interface GitHubPullRequestListItem {
   readonly summary: GitHubPullRequestSummary;
   readonly stackSummary: SourceControlChangeRequestStackSummary | null;
+}
+
+/** One page of a search across every repository on a host (`searchInvolvedPullRequests`). */
+export interface GitHubInvolvedPullRequestSearch {
+  readonly host: string;
+  readonly viewerLogin: string | null;
+  readonly items: ReadonlyArray<GitHubPullRequestListItem>;
+  /** More pull requests matched than the page holds. */
+  readonly truncated: boolean;
+  /** Matches GitHub did not return to this account (SAML SSO, OAuth app restrictions). */
+  readonly skippedRows: number;
 }
 
 /** Resolved identity of a pull request, used to address API calls precisely. */
@@ -361,6 +392,21 @@ export interface GitHubCliShape {
     GitHubCliError
   >;
 
+  /**
+   * What a pull request watch (and a pull request row) compares between passes,
+   * batched per host: one GraphQL point for up to 25 pull requests (see
+   * `gitHubPullRequestFingerprintBoard`). Null when GitHub resolves no such
+   * repository or pull request, so the watch reads it in full instead.
+   */
+  readonly getPullRequestWatchFingerprint: (input: {
+    readonly cwd: string;
+    readonly repository: string;
+    readonly host: string;
+    readonly number: number;
+    /** An answer GitHub gave at or after this time may stand in, within the board's window. */
+    readonly reuseSinceMs?: number | undefined;
+  }) => Effect.Effect<ChangeRequestWatchFingerprint | null, GitHubCliError>;
+
   readonly mergePullRequestAsync: (input: {
     readonly cwd: string;
     readonly repository: string;
@@ -444,12 +490,6 @@ export interface GitHubCliShape {
   }) => Effect.Effect<ReadonlyArray<GitHubPullRequestSummary>, GitHubCliError>;
 
   /**
-   * The repository's pull request list as list rows show it, in one GraphQL
-   * request per 100 rows: comment counts (not bodies), checks, review state,
-   * diff stats and each row's stack summary. `involvement` makes it the same
-   * GitHub search `gh pr list --search` runs.
-   */
-  /**
    * States of several pull requests and issues of `cwd`'s repository: one GraphQL request
    * per 50 numbers. Numbers GitHub does not resolve are absent.
    */
@@ -459,15 +499,42 @@ export interface GitHubCliShape {
     readonly issues: ReadonlyArray<number>;
   }) => Effect.Effect<GitHubRepositoryLists.GitHubLinkStates, GitHubCliError>;
 
+  /**
+   * The repository's pull request list as list rows show it, in one GraphQL
+   * request per 100 rows: comment counts (not bodies), checks, review state,
+   * diff stats and each row's stack summary. `involvement` makes it the same
+   * GitHub search `gh pr list --search` runs.
+   */
   readonly listPullRequests: (input: {
     readonly cwd: string;
     readonly state: GitHubRepositoryLists.GitHubPullRequestListState;
     readonly headSelector?: string;
     readonly involvement?: ChangeRequestInvolvement;
     readonly limit?: number;
-    /** Ask for stack summaries in the same request (default `true`). */
+    /** Ask for stack summaries in the same request (default `true`; never for `summary`). */
     readonly includeStackSummary?: boolean;
+    /**
+     * `summary`: identity, branches, state and timestamps only (the fields of
+     * `gh pr list --json <summary fields>`), for the change request index and
+     * branch lookups. Default `full`, the list row fields.
+     */
+    readonly fields?: "full" | "summary";
   }) => Effect.Effect<ReadonlyArray<GitHubPullRequestListItem>, GitHubCliError>;
+
+  /**
+   * Pull requests involving the viewer across every repository on a host, newest activity
+   * first, archived repositories left out: one GraphQL search of up to 100 rows. `github.com`
+   * is searched as is; for any other `host`, the one `gh` resolves for `cwd`'s repository (it
+   * knows SSH host aliases), else `host`, so a checkout whose repository is gone still searches.
+   */
+  readonly searchInvolvedPullRequests: (input: {
+    readonly cwd: string;
+    readonly host: string;
+    readonly involvement: ChangeRequestInvolvement;
+    readonly state: GitHubRepositoryLists.GitHubPullRequestListState;
+    /** Clamped to 1..100. */
+    readonly limit?: number;
+  }) => Effect.Effect<GitHubInvolvedPullRequestSearch, GitHubCliError>;
 
   readonly getPullRequest: (input: {
     readonly cwd: string;
@@ -584,6 +651,8 @@ export interface GitHubCliShape {
   readonly getCommentReactionGroups: (input: {
     readonly cwd: string;
     readonly commentIds: ReadonlyArray<string>;
+    /** The comments' host (from their pull request's or issue's URL); gh's default host otherwise. */
+    readonly host?: string;
   }) => Effect.Effect<ReadonlyArray<NormalizedGitHubSubjectReactions>, GitHubCliError>;
 
   readonly listLabels: (input: {
@@ -735,35 +804,85 @@ function withGitHubMessage(prefix: string, message: string | null, suffix = ""):
   return message ? `${prefix}: ${message}.${suffix}` : `${prefix}.${suffix}`;
 }
 
+const GITHUB_RATE_LIMIT_DETAIL =
+  "GitHub API rate limit exceeded. Wait for the reset window and retry.";
+
+function mentionsMissingGh(lower: string): boolean {
+  return lower.includes("command not found: gh") || lower.includes("enoent");
+}
+
+function mentionsGhSignIn(lower: string): boolean {
+  return (
+    lower.includes("authentication failed") ||
+    lower.includes("not logged in") ||
+    lower.includes("gh auth login") ||
+    lower.includes("no oauth token")
+  );
+}
+
+function mentionsMissingPullRequest(lower: string): boolean {
+  return (
+    lower.includes("could not resolve to a pullrequest") ||
+    lower.includes("repository.pullrequest") ||
+    lower.includes("no pull requests found for branch") ||
+    lower.includes("pull request not found")
+  );
+}
+
+function mentionsMissingActionsRun(lower: string): boolean {
+  return (
+    lower.includes("not found") ||
+    lower.includes("http 404") ||
+    lower.includes("no workflow runs found")
+  );
+}
+
+function mentionsMissingResource(lower: string): boolean {
+  return (
+    lower.includes("http 404") ||
+    lower.includes("not found") ||
+    lower.includes("could not resolve to a node")
+  );
+}
+
+/**
+ * Turns a failed `gh` call into a `GitHubCliError`. Detail strings match on the
+ * whole error text, as before. `failureKind` comes only from what gh or GitHub
+ * said (`forgeFailureText`): the command line holds titles and branch names and
+ * the cwd a folder name, so "Handle rate limit errors" as a title must not read
+ * as a rate limit.
+ */
 export function normalizeGitHubCliError(
   operation: string,
   error: VcsError | unknown,
   domain: GitHubCliErrorDomain = "general",
 ): GitHubCliError {
+  // Refused before it ran: GitHub was paused after a rate limit while it queued.
+  const refusal = forgeRequestPausedRefusal(error);
+  if (refusal !== null) {
+    return new GitHubCliError({ operation, ...forgeRequestPausedFailure(refusal), cause: refusal });
+  }
   const text = errorText(error);
   const lower = text.toLowerCase();
+  const forge = classifyForgeFailure(error);
+  const { kindIf } = forge;
   const message = gitHubErrorMessage(error)?.replace(/\.$/u, "") ?? null;
-  const fail = (detail: string) => new GitHubCliError({ operation, detail, cause: error });
+  const fail = (detail: string, failureKind?: ForgeFailureKind) =>
+    new GitHubCliError({ operation, detail, ...forgeFailureFields({ failureKind }), cause: error });
 
-  if (lower.includes("command not found: gh") || lower.includes("enoent")) {
-    return fail("GitHub CLI (`gh`) is required but not available on PATH.");
+  // Before the sign-in rule: a rate-limit reply must not read as "not authenticated".
+  if (forge.rateLimited) return fail(GITHUB_RATE_LIMIT_DETAIL, "rate-limited");
+
+  const missingTool = forge.missingToolIf(mentionsMissingGh);
+  if (missingTool !== undefined || mentionsMissingGh(lower)) {
+    return fail("GitHub CLI (`gh`) is required but not available on PATH.", missingTool);
   }
 
-  if (
-    lower.includes("authentication failed") ||
-    lower.includes("not logged in") ||
-    lower.includes("gh auth login") ||
-    lower.includes("no oauth token")
-  ) {
-    return fail("GitHub CLI is not authenticated. Run `gh auth login` and retry.");
-  }
-
-  if (
-    lower.includes("api rate limit exceeded") ||
-    lower.includes("secondary rate limit") ||
-    lower.includes("rate limit")
-  ) {
-    return fail("GitHub API rate limit exceeded. Wait for the reset window and retry.");
+  if (mentionsGhSignIn(lower)) {
+    return fail(
+      "GitHub CLI is not authenticated. Run `gh auth login` and retry.",
+      kindIf("unauthenticated", mentionsGhSignIn),
+    );
   }
 
   if (domain === "general") {
@@ -819,37 +938,31 @@ export function normalizeGitHubCliError(
     return fail("GitHub Actions logs are no longer available for this run.");
   }
 
-  if (
-    lower.includes("could not resolve to a pullrequest") ||
-    lower.includes("repository.pullrequest") ||
-    lower.includes("no pull requests found for branch") ||
-    lower.includes("pull request not found")
-  ) {
-    return fail("Pull request not found. Check the PR number or URL and try again.");
+  if (mentionsMissingPullRequest(lower)) {
+    return fail(
+      "Pull request not found. Check the PR number or URL and try again.",
+      kindIf("not-found", mentionsMissingPullRequest),
+    );
   }
 
   if (domain === "actions") {
-    if (
-      lower.includes("not found") ||
-      lower.includes("http 404") ||
-      lower.includes("no workflow runs found")
-    ) {
-      return fail("GitHub Actions run or repository was not found.");
+    if (mentionsMissingActionsRun(lower)) {
+      return fail(
+        "GitHub Actions run or repository was not found.",
+        kindIf("not-found", mentionsMissingActionsRun),
+      );
     }
     return fail(text);
   }
 
-  if (
-    lower.includes("http 404") ||
-    lower.includes("not found") ||
-    lower.includes("could not resolve to a node")
-  ) {
+  if (mentionsMissingResource(lower)) {
     return fail(
       withGitHubMessage(
         "GitHub could not find what this action refers to",
         message,
         " It may have been deleted, or your account may not have access.",
       ),
+      kindIf("not-found", mentionsMissingResource),
     );
   }
 
@@ -995,6 +1108,7 @@ function withGitHubCliOperation<A>(
             options?.normalizeWorkflowRerunErrors === true && isWorkflowRerunStateError(error)
               ? "GitHub Actions cannot rerun this workflow run or job in its current state."
               : error.detail,
+          ...forgeFailureFields(error),
           cause: error,
         }),
     ),
@@ -1147,8 +1261,35 @@ function staleHeadError(operation: string): GitHubCliError {
   });
 }
 
+/** What a direct GraphQL answer's errors are attributed to (the `gh api graphql` they replace). */
+const GITHUB_API_GRAPHQL_ARGS = ["api", "graphql"] as const;
+
+/** gh's GraphQL exit/stdout rules for one document's output, from either transport. */
+function graphqlDocumentResult(
+  operation: string,
+  args: ReadonlyArray<string>,
+  output: VcsProcess.VcsProcessOutput,
+  acceptPartialData: boolean,
+): Effect.Effect<string, GitHubCliError> {
+  if (output.exitCode === 0) {
+    // A GraphQL error must never pass as success, even if gh exits cleanly.
+    return hasGraphQlErrors(output.stdout) && !acceptPartialData
+      ? Effect.fail(gitHubApiFailure(operation, args, output))
+      : Effect.succeed(output.stdout);
+  }
+  return acceptPartialData && hasGraphQlData(output.stdout)
+    ? Effect.succeed(output.stdout)
+    : Effect.fail(gitHubApiFailure(operation, args, output));
+}
+
+/**
+ * The GitHub client. Hot reads go over HTTPS through `GitHubApi` when a token
+ * for the host resolves, and take their exact gh call otherwise; everything
+ * else (mutations, `gh pr checkout`, `gh pr view`, search, Actions) uses gh.
+ */
 export const make = Effect.fn("makeGitHubCli")(function* () {
   const process = yield* VcsProcess.VcsProcess;
+  const directApi = yield* GitHubApi.GitHubApi;
 
   const execute: GitHubCliShape["execute"] = (input) =>
     process
@@ -1163,6 +1304,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
           : {}),
         timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         ...(input.maxOutputBytes !== undefined ? { maxOutputBytes: input.maxOutputBytes } : {}),
+        admit: forgeChildAdmission,
       })
       .pipe(
         Effect.mapError((error) =>
@@ -1225,18 +1367,93 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
       }),
       allowNonZeroExit: true,
     }).pipe(
-      Effect.flatMap((output) => {
-        if (output.exitCode === 0) {
-          // A GraphQL error must never pass as success, even if gh exits cleanly.
-          return hasGraphQlErrors(output.stdout) && input.acceptPartialData !== true
-            ? Effect.fail(gitHubApiFailure(input.operation, args, output))
-            : Effect.succeed(output.stdout);
-        }
-        return input.acceptPartialData === true && hasGraphQlData(output.stdout)
-          ? Effect.succeed(output.stdout)
-          : Effect.fail(gitHubApiFailure(input.operation, args, output));
-      }),
+      Effect.flatMap((output) =>
+        graphqlDocumentResult(input.operation, args, output, input.acceptPartialData === true),
+      ),
     );
+  };
+
+  /**
+   * A GraphQL read over HTTPS when a credential for the host resolves, else
+   * the read's exact gh call ({@link graphqlDocument}). The answer becomes
+   * the output gh would have printed for it, so both transports share every
+   * decoder, partial-data rule and error text. A timeout after GitHub
+   * accepted the connection is not retried through gh (it would hit the same
+   * slow host).
+   */
+  const graphqlRead = (input: Parameters<typeof graphqlDocument>[0]) =>
+    directApi
+      .graphql({
+        host: input.host,
+        operation: input.operation,
+        query: input.query,
+        variables: input.variables,
+      })
+      .pipe(
+        Effect.catchTag("GitHubApiTimeoutError", (cause) =>
+          Effect.fail(
+            new GitHubCliError({
+              operation: input.operation,
+              detail: `GitHub did not answer within ${GitHubApi.GITHUB_API_TIMEOUT_MS / 1000} seconds.`,
+              cause,
+            }),
+          ),
+        ),
+        Effect.flatMap((outcome) =>
+          outcome._tag === "Unavailable"
+            ? graphqlDocument(input)
+            : graphqlDocumentResult(
+                input.operation,
+                GITHUB_API_GRAPHQL_ARGS,
+                GitHubApi.ghEquivalentOutput(outcome.answer, "graphql"),
+                input.acceptPartialData === true,
+              ),
+        ),
+      );
+
+  /**
+   * A REST GET over HTTPS when a credential for the host resolves, else its
+   * exact `gh api` call; the answer as gh would have printed it, as for
+   * {@link graphqlRead}. With `revalidate`, the direct path sends the last
+   * answer's ETag, and a 304 (which GitHub does not count against the REST
+   * rate limit) answers from it.
+   */
+  const restRead = (input: {
+    readonly cwd: string;
+    readonly host: string;
+    readonly operation: string;
+    readonly path: string;
+    readonly revalidate?: boolean;
+  }) => {
+    const args = ["api", "--hostname", input.host, ...githubApiVersionArgs(), input.path];
+    return directApi
+      .rest({
+        host: input.host,
+        operation: input.operation,
+        path: input.path,
+        apiVersion: GITHUB_API_VERSION,
+        ...(input.revalidate ? { revalidate: true } : {}),
+      })
+      .pipe(
+        Effect.catchTag("GitHubApiTimeoutError", (cause) =>
+          Effect.fail(
+            new GitHubCliError({
+              operation: input.operation,
+              detail: `GitHub did not answer within ${GitHubApi.GITHUB_API_TIMEOUT_MS / 1000} seconds.`,
+              cause,
+            }),
+          ),
+        ),
+        Effect.flatMap((outcome) => {
+          if (outcome._tag === "Unavailable") {
+            return execute({ cwd: input.cwd, args }).pipe(Effect.map((result) => result.stdout));
+          }
+          const output = GitHubApi.ghEquivalentOutput(outcome.answer, "rest");
+          return output.exitCode === 0
+            ? Effect.succeed(output.stdout)
+            : Effect.fail(gitHubApiFailure(input.operation, args, output));
+        }),
+      );
   };
 
   /**
@@ -1287,7 +1504,12 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
     {
       capacity: LIST_REPOSITORY_CAPACITY,
       timeToLive: (exit) =>
-        Exit.isSuccess(exit) ? LIST_REPOSITORY_MAX_AGE : LIST_REPOSITORY_FAILURE_TTL,
+        Exit.isSuccess(exit)
+          ? LIST_REPOSITORY_MAX_AGE
+          : // A `gh repo view` refused during a rate-limit pause never ran: ask again next time.
+            isForgeRequestRefusedWhilePaused(Option.getOrUndefined(Exit.findErrorOption(exit)))
+            ? Duration.zero
+            : LIST_REPOSITORY_FAILURE_TTL,
     },
   );
   const refreshingListRepositories = new Set<string>();
@@ -1328,14 +1550,19 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
   // Hosts whose GraphQL schema has no native stacks (older GHES): lists skip
   // those fields there instead of failing first every time.
   const stacklessHosts = new Map<string, number>();
-  const hostHasStacks = (host: string) => {
+  const hostHasStacks = (host: string, nowMs: number) => {
     const until = stacklessHosts.get(host);
     if (until === undefined) return true;
-    if (until > Date.now()) return false;
+    if (until > nowMs) return false;
     stacklessHosts.delete(host);
     return true;
   };
 
+  /**
+   * A list, one GraphQL page at a time. Each page goes over HTTPS when it can
+   * and through gh when it cannot, so a list that loses the API part way
+   * finishes through gh: the same token, so the cursor stays valid.
+   */
   const readListPages = <T>(input: {
     readonly cwd: string;
     readonly host: string;
@@ -1363,7 +1590,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
           GitHubRepositoryLists.GITHUB_REPOSITORY_LIST_PAGE_SIZE,
           input.limit - items.length,
         );
-        const raw: string = yield* graphqlDocument({
+        const raw: string = yield* graphqlRead({
           cwd: input.cwd,
           host: input.host,
           operation: input.operation,
@@ -1400,7 +1627,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
       const batch = GitHubRepositoryLists.GITHUB_LINK_STATES_BATCH_SIZE;
       for (let start = 0; start < aliases.length; start += batch) {
         const slice = aliases.slice(start, start + batch);
-        const raw: string = yield* graphqlDocument({
+        const raw: string = yield* graphqlRead({
           cwd: input.cwd,
           host: repository.host,
           operation: "getLinkStates",
@@ -1464,7 +1691,18 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
           decode: (raw) =>
             GitHubRepositoryLists.decodeGitHubPullRequestListPageJson(raw, { search }),
         });
-      const stack = input.includeStackSummary !== false && hostHasStacks(repository.host);
+      const toItems = (rows: ReadonlyArray<GitHubRepositoryLists.GitHubPullRequestListRow>) =>
+        rows.map((row): GitHubPullRequestListItem => ({
+          summary: withPresentUpdatedAt(row.record),
+          stackSummary: row.stackSummary,
+        }));
+      if (input.fields === "summary") {
+        // Neither checks nor stacks are selected, so neither retry below applies.
+        return toItems(yield* read({ checks: false, stack: false, summary: true }));
+      }
+      const stack =
+        input.includeStackSummary !== false &&
+        hostHasStacks(repository.host, yield* Clock.currentTimeMillis);
       const withoutChecks = (fields: GitHubRepositoryLists.GitHubPullRequestListFields) =>
         read(fields).pipe(
           Effect.catchIf(isStatusCheckRollupAccessError, () => read({ ...fields, checks: false })),
@@ -1477,16 +1715,72 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
               `${errorText(error)}\n${error.cause ? errorText(error.cause) : ""}`,
             ),
           () =>
-            Effect.suspend(() => {
-              stacklessHosts.set(repository.host, Date.now() + STACKLESS_HOST_TTL_MS);
-              return withoutChecks({ checks: true, stack: false });
-            }),
+            Clock.currentTimeMillis.pipe(
+              Effect.flatMap((nowMs) => {
+                stacklessHosts.set(repository.host, nowMs + STACKLESS_HOST_TTL_MS);
+                return withoutChecks({ checks: true, stack: false });
+              }),
+            ),
         ),
       );
-      return rows.map((row): GitHubPullRequestListItem => ({
-        summary: withPresentUpdatedAt(row.record),
-        stackSummary: row.stackSummary,
-      }));
+      return toItems(rows);
+    });
+
+  const searchInvolvedPullRequests: GitHubCliShape["searchInvolvedPullRequests"] = (input) =>
+    Effect.gen(function* () {
+      // github.com needs no resolution. Other names may be SSH host aliases, which gh's
+      // resolution (cached, shared with the lists) translates; a failed one (the repository
+      // was deleted, renamed or made private) must not fail a search that spans the host.
+      const host =
+        input.host === "github.com"
+          ? input.host
+          : yield* listRepository(input.cwd).pipe(
+              Effect.map((repository) => repository.host),
+              Effect.orElseSucceed(() => input.host),
+            );
+      const pageSize = GitHubRepositoryLists.GITHUB_REPOSITORY_LIST_PAGE_SIZE;
+      const first = Math.min(pageSize, Math.max(1, Math.trunc(input.limit ?? pageSize)));
+      const q = GitHubRepositoryLists.buildGitHubPullRequestInvolvementSearch({
+        involvement: input.involvement,
+        state: input.state,
+        excludeArchived: true,
+        sort: "updated",
+      });
+      const read = (checks: boolean) =>
+        graphqlDocument({
+          cwd: input.cwd,
+          host,
+          operation: "searchInvolvedPullRequests",
+          query: GitHubRepositoryLists.buildGitHubInvolvedPullRequestSearchQuery({ checks }),
+          variables: { q, first },
+          // Rows from organizations this login may not read fail alone; the decoder decides.
+          acceptPartialData: true,
+        }).pipe(
+          Effect.flatMap((raw) => {
+            const decoded = GitHubRepositoryLists.decodeGitHubInvolvedSearchJson(raw);
+            return Result.isSuccess(decoded)
+              ? Effect.succeed(decoded.success)
+              : Effect.fail(
+                  new GitHubCliError({
+                    operation: "searchInvolvedPullRequests",
+                    detail: decoded.failure,
+                  }),
+                );
+          }),
+        );
+      const page = yield* read(true).pipe(
+        Effect.catchIf(isStatusCheckRollupAccessError, () => read(false)),
+      );
+      return {
+        host,
+        viewerLogin: page.viewerLogin,
+        items: page.rows.map((row): GitHubPullRequestListItem => ({
+          summary: withPresentUpdatedAt(row.record),
+          stackSummary: null,
+        })),
+        truncated: page.hasNextPage,
+        skippedRows: page.skippedRows,
+      };
     });
 
   const listIssues: GitHubCliShape["listIssues"] = (input) =>
@@ -1743,6 +2037,8 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
       args: [
         "api",
         "graphql",
+        // Node ids belong to one host: ask that one, not gh's default (github.com).
+        ...(input.host ? ["--hostname", input.host] : []),
         "-f",
         `query=${COMMENT_REACTION_GROUPS_QUERY}`,
         ...commentIds.flatMap((id) => ["-F", `ids[]=${id}`]),
@@ -1769,6 +2065,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
 
   const hydrateCommentReactionGroups = <
     T extends {
+      readonly url?: string;
       readonly comments: ReadonlyArray<{
         readonly id?: string;
         readonly reactions?: ReadonlyArray<NormalizedGitHubReaction>;
@@ -1780,7 +2077,8 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
   ): Effect.Effect<T, GitHubCliError> => {
     const commentIds = detail.comments.flatMap((comment) => (comment.id ? [comment.id] : []));
     if (commentIds.length === 0) return Effect.succeed(detail);
-    return getCommentReactionGroups({ cwd, commentIds }).pipe(
+    const host = parseGitHubRepositoryIdentityFromUrl(detail.url)?.host;
+    return getCommentReactionGroups({ cwd, commentIds, ...(host ? { host } : {}) }).pipe(
       Effect.map(
         (groups) =>
           ({
@@ -1910,22 +2208,22 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
       return summaries;
     });
 
+  // Read with every pull request detail (the focused pull request every 30 s, rows when they
+  // move, watches), and repository settings rarely change: revalidated with its ETag, so an
+  // unchanged answer is a 304 GitHub does not count (T3 Code 0ea5e5a53e, #22078).
   const getRepositoryMergeCapabilities: GitHubCliShape["getRepositoryMergeCapabilities"] = (
     input,
   ) =>
-    execute({
+    restRead({
       cwd: input.cwd,
-      args: [
-        "api",
-        "--hostname",
-        input.host,
-        ...githubApiVersionArgs(),
-        `repos/${input.repository}`,
-      ],
+      host: input.host,
+      operation: "getRepositoryMergeCapabilities",
+      path: `repos/${input.repository}`,
+      revalidate: true,
     }).pipe(
-      Effect.flatMap((result) =>
+      Effect.flatMap((raw) =>
         githubResultOrError(
-          GitHubPullRequestStacks.decodeGitHubRepositoryMergeCapabilitiesJson(result.stdout.trim()),
+          GitHubPullRequestStacks.decodeGitHubRepositoryMergeCapabilitiesJson(raw.trim()),
           "getRepositoryMergeCapabilities",
         ),
       ),
@@ -1980,6 +2278,65 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
         after = cursor;
       }
       return checks;
+    });
+
+  const fingerprintBoard = makeGitHubPullRequestFingerprintBoard<GitHubCliError>({
+    read: ({ cwd, host, targets }) =>
+      Effect.gen(function* () {
+        const operation = "getPullRequestWatchFingerprint";
+        const document =
+          GitHubPullRequestWatchFingerprint.buildGitHubPullRequestWatchFingerprintsQuery(targets);
+        const raw = yield* graphqlRead({
+          cwd,
+          host,
+          operation,
+          query: document.query,
+          variables: document.variables,
+          // A pull request or repository GitHub cannot resolve answers null; the decoder decides.
+          acceptPartialData: true,
+        });
+        const decoded =
+          GitHubPullRequestWatchFingerprint.decodeGitHubPullRequestWatchFingerprintsJson(
+            raw,
+            targets.length,
+            { quietAfterMs: GITHUB_FINGERPRINT_QUIET_AFTER_MS },
+          );
+        return Result.isSuccess(decoded)
+          ? decoded.success
+          : yield* normalizeGitHubCliError(operation, { detail: decoded.failure });
+      }),
+    failed: (detail) => normalizeGitHubCliError("getPullRequestWatchFingerprint", { detail }),
+  });
+
+  const getPullRequestWatchFingerprint: GitHubCliShape["getPullRequestWatchFingerprint"] = (
+    input,
+  ) =>
+    Effect.gen(function* () {
+      const operation = "getPullRequestWatchFingerprint";
+      const parts = repositoryParts(input.repository);
+      if (!parts) {
+        return yield* new GitHubCliError({
+          operation,
+          detail: "GitHub repository must be in owner/repository form.",
+        });
+      }
+      // GraphQL's Int is 32-bit.
+      if (!Number.isSafeInteger(input.number) || input.number <= 0 || input.number > 2 ** 31 - 1) {
+        return yield* new GitHubCliError({
+          operation,
+          detail: `GitHub pull request number is out of range: ${input.number}`,
+        });
+      }
+      return yield* fingerprintBoard.get(
+        {
+          cwd: input.cwd,
+          host: input.host,
+          owner: parts.owner,
+          name: parts.name,
+          number: input.number,
+        },
+        { nowMs: yield* Clock.currentTimeMillis, reuseSinceMs: input.reuseSinceMs },
+      );
     });
 
   const mergePullRequestAsync: GitHubCliShape["mergePullRequestAsync"] = (input) =>
@@ -2821,6 +3178,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
     getPullRequestStackSummaries,
     getRepositoryMergeCapabilities,
     getPullRequestRequiredChecks,
+    getPullRequestWatchFingerprint,
     mergePullRequestAsync,
     deleteBranch,
     getPullRequestTarget,
@@ -2833,6 +3191,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
     updatePullRequest,
     getPullRequestFileContents,
     listPullRequests,
+    searchInvolvedPullRequests,
     getLinkStates,
     listOpenPullRequests: (input) =>
       executePrJson({
@@ -3342,4 +3701,27 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
   });
 });
 
-export const layer = Layer.effect(GitHubCli, make());
+/** The gh-only client: every read takes its gh call (tests that script gh's argv use it). */
+export const layer = Layer.effect(GitHubCli, make()).pipe(Layer.provide(GitHubApi.layerCliOnly));
+
+/** Production: hot reads over HTTPS with the token gh would use, gh otherwise. */
+export const makeWithDirectApi = () =>
+  make().pipe(Effect.provideServiceEffect(GitHubApi.GitHubApi, GitHubApi.make));
+
+/**
+ * The client with the direct API for tests: the environment tokens are read
+ * from and the API endpoints are always explicit, so no test reads ambient
+ * `GH_TOKEN` or reaches the real GitHub.
+ */
+export const layerDirectApi = (options: {
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly endpoints: (host: string) => GitHubApi.GitHubApiUrls;
+}) =>
+  Layer.effect(GitHubCli, makeWithDirectApi()).pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.succeed(GitHubApi.GitHubApiEnvironment, options.env),
+        Layer.succeed(GitHubApi.GitHubApiEndpoints, options.endpoints),
+      ),
+    ),
+  );

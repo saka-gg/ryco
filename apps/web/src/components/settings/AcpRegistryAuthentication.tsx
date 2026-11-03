@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { type AcpRegistryAuthMethod, type ProviderInstanceId, WS_METHODS } from "@ryco/contracts";
+import {
+  type AcpAgentSource,
+  type AcpRegistryAuthMethod,
+  type ProviderInstanceId,
+  WS_METHODS,
+} from "@ryco/contracts";
 import { readEnvironmentApi } from "../../environmentApi";
 import { ensureLocalApi } from "../../localApi";
 import { useSettingsTarget } from "../../settingsTarget";
@@ -9,8 +14,10 @@ import { Button } from "../ui/button";
 
 function AcpRegistryAuthenticationContent({
   instanceId,
+  source,
 }: {
   readonly instanceId: ProviderInstanceId;
+  readonly source: AcpAgentSource;
 }) {
   const target = useSettingsTarget();
   const capability = useHostedRpcCapability(
@@ -78,8 +85,10 @@ function AcpRegistryAuthenticationContent({
       <div className="space-y-1">
         <p className="text-xs font-medium">Authentication</p>
         <p className="text-xs text-muted-foreground">
-          Check starts the installed agent to discover its sign-in methods. Sign-in runs on this
-          node and may require interaction on the host.
+          {source === "local"
+            ? "Check starts the configured command to discover its sign-in methods."
+            : "Check starts the installed agent to discover its sign-in methods."}{" "}
+          Sign-in runs on this node and may require interaction on the host.
         </p>
       </div>
       <Button size="xs" variant="outline" disabled={!allowed || busy} onClick={() => void run()}>
@@ -149,12 +158,14 @@ function AcpRegistryAuthenticationContent({
 export function AcpRegistryAuthentication(props: {
   readonly instanceId: ProviderInstanceId;
   readonly installationKey: string;
+  readonly source?: AcpAgentSource;
 }) {
   const target = useSettingsTarget();
   return (
     <AcpRegistryAuthenticationContent
       key={`${target?.environmentId ?? "primary"}:${props.instanceId}:${props.installationKey}`}
       instanceId={props.instanceId}
+      source={props.source ?? "registry"}
     />
   );
 }

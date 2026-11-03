@@ -1,7 +1,7 @@
 import type { EnvironmentId, NodeUpdateInput, NodeUpdateState } from "@ryco/contracts";
 
 import type { WsRpcClient } from "../../rpc/wsRpcClient.ts";
-import { isUnsupportedRpcError } from "../../rpc/wsTransport.ts";
+import { isAuthRpcError, isUnsupportedRpcError } from "../../rpc/wsTransport.ts";
 
 /** How long `waitForOutcome` follows a node by default before it reports `unknown`. */
 export const NODE_UPDATE_OUTCOME_TIMEOUT_MS = 10 * 60_000;
@@ -96,14 +96,6 @@ export function readNodeUpdateOutcome(
 /** States are small, plain decoded values: their JSON tells whether anything changed. */
 function sameState(left: NodeUpdateState, right: NodeUpdateState): boolean {
   return left === right || JSON.stringify(left) === JSON.stringify(right);
-}
-
-function isAuthRpcError(cause: unknown): boolean {
-  return (
-    typeof cause === "object" &&
-    cause !== null &&
-    (cause as { readonly _tag?: unknown })._tag === "AuthRpcError"
-  );
 }
 
 interface Attachment {

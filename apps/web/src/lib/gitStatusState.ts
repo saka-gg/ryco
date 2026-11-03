@@ -6,8 +6,8 @@ import {
   type VcsStatusView,
 } from "@ryco/contracts";
 import type { GitStatusPollIntervalMs } from "@ryco/contracts/settings";
-import { Cause } from "effect";
-import { Atom } from "effect/reactivity";
+import type * as Cause from "effect/Cause";
+import * as Atom from "effect/reactivity/Atom";
 import { useEffect } from "react";
 
 import { appAtomRegistry } from "@ryco/client-runtime/rpc";

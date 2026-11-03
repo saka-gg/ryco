@@ -4,6 +4,10 @@ import {
 } from "./workspace/WorkspaceLifecycle.ts";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
+import {
+  NODE_BROWSER_FRAME_CLOSE,
+  NODE_BROWSER_FRAME_WS_PATH,
+} from "@ryco/shared/nodeBrowserFrame";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeHttp from "node:http";
 import { brotliCompressSync, gzipSync } from "node:zlib";
@@ -39,7 +43,9 @@ import {
   WsHostedRpcGroup,
   WsRpcGroup,
   EditorId,
+  type GitActionProgressEvent,
 } from "@ryco/contracts";
+import { isUnknownUnionMember, type UnknownUnionMember } from "@ryco/contracts/base-schemas";
 import { assert, it } from "@effect/vitest";
 import { assertFailure, assertInclude, assertTrue } from "@effect/vitest/utils";
 import {
@@ -52,10 +58,12 @@ import {
   Fiber,
   FileSystem,
   Layer,
+  Logger,
   ManagedRuntime,
   Option,
   Path,
   PubSub,
+  Redacted,
   Ref,
   Stream,
 } from "effect";
@@ -101,6 +109,7 @@ import {
 } from "./orchestration/Services/ThreadDeletionReactor.ts";
 import {
   OrchestrationCommandInvariantError,
+  OrchestrationModelSwitchBlockedError,
   OrchestrationListenerCallbackError,
 } from "./orchestration/Errors.ts";
 import { ChatFolders, type ChatFoldersShape } from "./project/chatFolders.ts";
@@ -119,6 +128,12 @@ import { StatisticsQuery, type StatisticsQueryShape } from "./statistics/Statist
 import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
 import { PersistenceSqlError } from "./persistence/Errors.ts";
 import {
+  GitActionRunner,
+  GitActionRunnerLive,
+  type GitActionRunnerShape,
+} from "./git/GitActionRunner.ts";
+import { makeGitActionRunner } from "./git/gitActionRunnerCore.ts";
+import {
   ProjectionWorktreeRepository,
   type ProjectionWorktreeRepositoryShape,
 } from "./persistence/Services/ProjectionWorktrees.ts";
@@ -127,6 +142,7 @@ import {
   type ProviderRegistryShape,
 } from "./provider/Services/ProviderRegistry.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "./provider/providerMaintenance.ts";
+import { makeProviderInstallLockLive } from "./provider/Layers/ProviderInstallLock.ts";
 import { ServerLifecycleEvents, type ServerLifecycleEventsShape } from "./serverLifecycleEvents.ts";
 import { ServerRuntimeStartup, type ServerRuntimeStartupShape } from "./serverRuntimeStartup.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "./serverSettings.ts";
@@ -157,6 +173,7 @@ import {
   ServerEnvironment,
   type ServerEnvironmentShape,
 } from "./environment/Services/ServerEnvironment.ts";
+import { WorkspaceContentSearchLive } from "./workspace/Layers/WorkspaceContentSearch.ts";
 import { WorkspaceEntriesLive } from "./workspace/Layers/WorkspaceEntries.ts";
 import { WorkspaceFileSystemLive } from "./workspace/Layers/WorkspaceFileSystem.ts";
 import { WorkspacePathsLive } from "./workspace/Layers/WorkspacePaths.ts";
@@ -208,7 +225,6 @@ const testEnvironmentDescriptor = {
   capabilities: {
     repositoryIdentity: true,
     threadSettlement: true,
-    threadPriorityRanking: false,
   },
 };
 
@@ -562,11 +578,16 @@ const buildAppUnderTest = (options?: {
     chatFolders?: ChatFoldersShape;
     /** Absent by default, as in other route tests. */
     projectionProjectRepository?: ProjectionProjectRepositoryShape;
+    /** The node's runner by default, shared by every socket of the test server. */
+    gitActionRunner?: GitActionRunnerShape;
   };
 }) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
     const tempBaseDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "ryco-router-test-" });
+    const providerInstallLockDir = yield* fileSystem.makeTempDirectoryScoped({
+      prefix: "ryco-install-lock-test-",
+    });
     const baseDir = options?.config?.baseDir ?? tempBaseDir;
     const devUrl = options?.config?.devUrl;
     const derivedPaths = yield* deriveServerPaths(baseDir, devUrl);
@@ -709,6 +730,10 @@ const buildAppUnderTest = (options?: {
       WorkspaceAccessPolicyLayer(config.workspaceAccessRoot),
       WorkspacePathsLive,
       workspaceEntriesLayer,
+      WorkspaceContentSearchLive.pipe(
+        Layer.provide(WorkspacePathsLive),
+        Layer.provide(workspaceEntriesLayer),
+      ),
       WorkspaceFileSystemLive.pipe(
         Layer.provide(WorkspacePathsLive),
         Layer.provide(workspaceEntriesLayer),
@@ -763,6 +788,7 @@ const buildAppUnderTest = (options?: {
             stop: async () => undefined,
             localIntroduction: stubLocalIntroductionService(),
             nativeNodeClaim: stubNativeNodeClaimService(),
+            proveDirectRouteIdentity: async () => undefined,
             e2ee: stubE2eeOperator(),
             ...options?.layers?.hubConnector,
           }),
@@ -774,6 +800,8 @@ const buildAppUnderTest = (options?: {
             streamChanges: Stream.empty,
             ...options?.layers?.keybindings,
           }),
+          // Never the host's shared lock folder.
+          makeProviderInstallLockLive(providerInstallLockDir),
         ),
       ),
       Layer.provide(
@@ -890,7 +918,7 @@ const buildAppUnderTest = (options?: {
             streamDomainEvents: Stream.empty,
             subscribeDomainEvents: Effect.gen(function* () {
               const pubsub = yield* PubSub.unbounded<OrchestrationEvent>();
-              return yield* PubSub.subscribe(pubsub);
+              return Stream.fromSubscription(yield* PubSub.subscribe(pubsub));
             }),
             ...options?.layers?.orchestrationEngine,
           }),
@@ -1057,6 +1085,12 @@ const buildAppUnderTest = (options?: {
       Layer.provideMerge(
         Layer.mock(WorkspaceLifecycle)({ ...options?.layers?.workspaceLifecycle }),
       ),
+      // Above the auth layer, so the runner sees session revocations.
+      Layer.provide(
+        options?.layers?.gitActionRunner
+          ? Layer.succeed(GitActionRunner, options.layers.gitActionRunner)
+          : GitActionRunnerLive,
+      ),
       Layer.provideMerge(makeAuthTestLayer()),
       Layer.provideMerge(LocalDiagnosticsMetricsLive),
       Layer.provideMerge(AdvertisedEndpointRegistryLive),
@@ -1119,6 +1153,16 @@ const withWsRpcClient = <A, E, R>(
   wsUrl: string,
   f: (client: WsRpcClient) => Effect.Effect<A, E, R>,
 ) => makeWsRpcClient.pipe(Effect.flatMap(f), Effect.provide(wsRpcProtocolLayer(wsUrl)));
+
+/** What the server under test sends: its own contract knows every member (see `WsTestClient`). */
+const knownMember = <A>(value: A): Exclude<A, UnknownUnionMember> => {
+  if (isUnknownUnionMember(value)) {
+    throw new Error(
+      `The server sent ${value.tag} "${value.value}", which its contract does not know`,
+    );
+  }
+  return value as Exclude<A, UnknownUnionMember>;
+};
 
 const makeWsMainRpcClient = RpcClient.make(WsHostedRpcGroup);
 
@@ -1261,9 +1305,12 @@ const getAuthenticatedBearerSessionToken = (credential = defaultDesktopBootstrap
   });
 
 const getAuthenticatedWebSocketToken = (credential = defaultDesktopBootstrapToken) =>
+  getAuthenticatedSessionCookieHeader(credential).pipe(Effect.flatMap(getWebSocketTokenForCookie));
+
+/** A websocket token of an existing browser session: several sockets of one client. */
+const getWebSocketTokenForCookie = (cookie: string) =>
   Effect.gen(function* () {
     const wsTokenUrl = yield* getHttpServerUrl("/api/auth/ws-token");
-    const cookie = yield* getAuthenticatedSessionCookieHeader(credential);
     const response = yield* Effect.promise(() =>
       fetch(wsTokenUrl, {
         method: "POST",
@@ -1301,6 +1348,14 @@ const splitHeaderTokens = (value: string | null) =>
     .map((token) => token.trim())
     .filter((token) => token.length > 0)
     .toSorted();
+
+/** The `/ws` URL of a socket authenticated as the browser session `cookie`. */
+const getWsServerUrlForCookie = (cookie: string) =>
+  Effect.gen(function* () {
+    const next = new URL(yield* getWsServerUrl("/ws", { authenticated: false }));
+    next.searchParams.set("wsToken", yield* getWebSocketTokenForCookie(cookie));
+    return next.toString();
+  });
 
 const getWsServerUrl = (
   pathname = "",
@@ -2277,6 +2332,43 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("lets only operator sessions watch node browser tabs", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest({ config: { host: "0.0.0.0" } });
+      const ownerCookie = yield* getAuthenticatedSessionCookieHeader();
+      const pairingResponse = yield* HttpClient.post("/api/auth/pairing-token", {
+        headers: { cookie: ownerCookie },
+      });
+      const pairingBody = (yield* pairingResponse.json) as { readonly credential: string };
+      const pairedCookie = yield* getAuthenticatedSessionCookieHeader(pairingBody.credential);
+      const frameUrl = (socketUrl: string) => {
+        const url = new URL(socketUrl);
+        url.pathname = NODE_BROWSER_FRAME_WS_PATH;
+        url.searchParams.set("tab", "no-such-tab");
+        return url.toString();
+      };
+      const closeCode = (url: string) =>
+        Effect.promise(
+          () =>
+            new Promise<number>((resolve) => {
+              const socket = new NodeSocket.NodeWS.WebSocket(url);
+              socket.once("close", (code) => resolve(code));
+              socket.once("error", () => undefined);
+            }),
+        );
+      // A paired client is a viewer: the socket opens, then closes with the role refusal.
+      assert.equal(
+        yield* closeCode(frameUrl(yield* getWsServerUrlForCookie(pairedCookie))),
+        NODE_BROWSER_FRAME_CLOSE.forbidden,
+      );
+      // The owner passes the role check; this app runs no node browser.
+      assert.equal(
+        yield* closeCode(frameUrl(yield* getWsServerUrlForCookie(ownerCookie))),
+        NODE_BROWSER_FRAME_CLOSE.unavailable,
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("revokes an individual paired client session", () =>
     Effect.gen(function* () {
       yield* buildAppUnderTest({
@@ -2310,6 +2402,20 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const pairedSessionId = clients.find((entry) => !entry.current)?.sessionId;
       assert.isDefined(pairedSessionId);
 
+      // The paired client is connected; revoking it closes that socket too.
+      const pairedSocketUrl = yield* getWsServerUrlForCookie(pairedSessionCookie);
+      const pairedSocket = new NodeSocket.NodeWS.WebSocket(pairedSocketUrl);
+      const pairedSocketClosed = new Promise<void>((resolve) => {
+        pairedSocket.once("close", () => resolve());
+      });
+      yield* Effect.promise(
+        () =>
+          new Promise<void>((resolve, reject) => {
+            pairedSocket.once("open", () => resolve());
+            pairedSocket.once("error", reject);
+          }),
+      );
+
       const revokeUrl = yield* getHttpServerUrl("/api/auth/clients/revoke");
       const revokeResponse = yield* Effect.promise(() =>
         fetch(revokeUrl, {
@@ -2329,6 +2435,14 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(revokeResponse.status, 200);
       assert.equal(pairedClientPairingResponse.status, 401);
+      const closedInTime = yield* Effect.promise(() =>
+        Promise.race([
+          pairedSocketClosed.then(() => true),
+          new Promise<false>((resolve) => setTimeout(() => resolve(false), 10_000)),
+        ]),
+      );
+      pairedSocket.terminate();
+      assert.isTrue(closedInTime, "The revoked client's socket stayed open.");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -3146,6 +3260,185 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  /** Answers every request with `status`, or with what `status` picks from its headers. */
+  const makeRecordingCollector = (
+    status: number | ((headers: NodeHttp.IncomingHttpHeaders) => number),
+  ) =>
+    Effect.acquireRelease(
+      Effect.promise(
+        () =>
+          new Promise<{
+            readonly url: string;
+            readonly requests: Array<{
+              readonly headers: NodeHttp.IncomingHttpHeaders;
+              readonly body: Buffer;
+            }>;
+            readonly close: () => Promise<void>;
+          }>((resolve, reject) => {
+            const requests: Array<{
+              readonly headers: NodeHttp.IncomingHttpHeaders;
+              readonly body: Buffer;
+            }> = [];
+            const server = NodeHttp.createServer((request, response) => {
+              const chunks: Buffer[] = [];
+              request.on("data", (chunk: Buffer) => chunks.push(chunk));
+              request.on("end", () => {
+                requests.push({ headers: request.headers, body: Buffer.concat(chunks) });
+                response.statusCode = typeof status === "number" ? status : status(request.headers);
+                response.end();
+              });
+            });
+            server.on("error", reject);
+            server.listen(0, "127.0.0.1", () => {
+              const address = server.address();
+              if (!address || typeof address === "string") {
+                reject(new Error("Expected TCP collector address"));
+                return;
+              }
+              resolve({
+                url: `http://127.0.0.1:${address.port}/v1/traces?api_key=query-secret`,
+                requests,
+                close: () => new Promise<void>((done) => server.close(() => done())),
+              });
+            });
+          }),
+      ),
+      ({ close }) => Effect.promise(close),
+    );
+
+  /** A collector that takes only protobuf, as some OTLP/HTTP backends do. */
+  const protobufOnly = (headers: NodeHttp.IncomingHttpHeaders) =>
+    headers["content-type"] === "application/x-protobuf" ? 204 : 415;
+
+  const otelTracesExport = {
+    protocol: "http/protobuf",
+    headers: Redacted.make({ "x-honeycomb-team": "header-secret" }),
+    endpointVariable: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+  } as const;
+
+  const postBrowserTraces = (payload: unknown) =>
+    Effect.gen(function* () {
+      return yield* HttpClient.post("/api/observability/v1/traces", {
+        headers: {
+          cookie: yield* getAuthenticatedSessionCookieHeader(),
+          "content-type": "application/json",
+        },
+        body: HttpBody.text(JSON.stringify(payload), "application/json"),
+      });
+    });
+
+  it.effect("forwards browser OTLP exports as protobuf with the OTEL trace headers", () =>
+    Effect.gen(function* () {
+      const collector = yield* makeRecordingCollector(protobufOnly);
+      const payload = yield* makeBrowserOtlpPayload("client.headers");
+      yield* buildAppUnderTest({
+        config: { otlpTracesUrl: collector.url, otlpExports: { traces: otelTracesExport } },
+        layers: { browserTraceCollector: { record: () => Effect.void } },
+      });
+
+      const response = yield* postBrowserTraces(payload);
+
+      assert.equal(response.status, 204);
+      assert.equal(collector.requests.length, 1);
+      const forwarded = collector.requests[0]!;
+      assert.equal(forwarded.headers["x-honeycomb-team"], "header-secret");
+      // The endpoint was configured for `http/protobuf`, so the browser's JSON is re-encoded.
+      assert.equal(forwarded.headers["content-type"], "application/x-protobuf");
+      const expected = yield* Effect.map(
+        Effect.service(OtlpSerialization.OtlpSerialization),
+        (serialization) => serialization.traces(payload),
+      ).pipe(Effect.provide(OtlpSerialization.layerProtobuf));
+      assert.deepEqual(new Uint8Array(forwarded.body), (expected as HttpBody.Uint8Array).body);
+      assert.include(forwarded.body.toString("latin1"), "client.headers");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("forwards browser OTLP exports as JSON to an http/json OTEL endpoint", () =>
+    Effect.gen(function* () {
+      const collector = yield* makeRecordingCollector(204);
+      const payload = yield* makeBrowserOtlpPayload("client.json");
+      yield* buildAppUnderTest({
+        config: {
+          otlpTracesUrl: collector.url,
+          otlpExports: { traces: { ...otelTracesExport, protocol: "http/json" } },
+        },
+        layers: { browserTraceCollector: { record: () => Effect.void } },
+      });
+
+      const response = yield* postBrowserTraces(payload);
+
+      assert.equal(response.status, 204);
+      assert.equal(collector.requests.length, 1);
+      const forwarded = collector.requests[0]!;
+      assert.equal(forwarded.headers["x-honeycomb-team"], "header-secret");
+      assert.equal(forwarded.headers["content-type"], "application/json");
+      assert.deepEqual(JSON.parse(forwarded.body.toString("utf8")), payload);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("refuses a browser OTLP export that cannot be encoded as protobuf", () =>
+    Effect.gen(function* () {
+      const collector = yield* makeRecordingCollector(protobufOnly);
+      const payload = yield* makeBrowserOtlpPayload("client.malformed");
+      const span = payload.resourceSpans[0]?.scopeSpans[0]?.spans[0];
+      assert.isDefined(span);
+      yield* buildAppUnderTest({
+        config: { otlpTracesUrl: collector.url, otlpExports: { traces: otelTracesExport } },
+        layers: { browserTraceCollector: { record: () => Effect.void } },
+      });
+
+      const response = yield* postBrowserTraces({
+        resourceSpans: [
+          {
+            ...payload.resourceSpans[0],
+            scopeSpans: [
+              {
+                ...payload.resourceSpans[0]?.scopeSpans[0],
+                spans: [{ ...span, startTimeUnixNano: "soon" }],
+              },
+            ],
+          },
+        ],
+      });
+
+      assert.equal(response.status, 400);
+      assert.equal(collector.requests.length, 0);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("logs a failed browser OTLP export without its headers or query values", () => {
+    const logged: Array<string> = [];
+    const captureLogs = Logger.layer([
+      Logger.make((options) => {
+        logged.push(JSON.stringify(options.message));
+      }),
+    ]);
+    return Effect.gen(function* () {
+      const collector = yield* makeRecordingCollector(500);
+      const payload = yield* makeBrowserOtlpPayload("client.failure");
+      yield* buildAppUnderTest({
+        config: { otlpTracesUrl: collector.url, otlpExports: { traces: otelTracesExport } },
+        layers: { browserTraceCollector: { record: () => Effect.void } },
+      });
+
+      const response = yield* HttpClient.post("/api/observability/v1/traces", {
+        headers: {
+          cookie: yield* getAuthenticatedSessionCookieHeader(),
+          "content-type": "application/json",
+        },
+        body: HttpBody.text(JSON.stringify(payload), "application/json"),
+      });
+
+      assert.equal(response.status, 502);
+      const failure = logged.find((line) => line.includes("Failed to export browser OTLP traces"));
+      assert.isDefined(failure);
+      assert.include(failure, "StatusCodeError");
+      assert.include(failure, "500");
+      assert.notInclude(logged.join("\n"), "header-secret");
+      assert.notInclude(logged.join("\n"), "query-secret");
+    }).pipe(Effect.provide(Layer.mergeAll(NodeHttpServer.layerTest, captureLogs)));
+  });
+
   it.effect("responds to browser OTLP trace preflight requests with CORS headers", () =>
     Effect.gen(function* () {
       yield* buildAppUnderTest();
@@ -3582,7 +3875,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const wsUrl = yield* getWsServerUrl("/ws");
       const events = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
-          client[WS_METHODS.subscribeServerConfig]({}).pipe(Stream.take(2), Stream.runCollect),
+          client[WS_METHODS.subscribeServerConfig]({}).pipe(
+            Stream.map(knownMember),
+            Stream.take(2),
+            Stream.runCollect,
+          ),
         ),
       );
 
@@ -3643,6 +3940,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         const events = yield* Effect.scoped(
           withWsRpcClient(wsUrl, (client) =>
             client[WS_METHODS.subscribeServerConfig]({ providerStatuses: "delta" }).pipe(
+              Stream.map(knownMember),
               Stream.take(2),
               Stream.runCollect,
             ),
@@ -3701,6 +3999,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           Effect.scoped(
             withWsRpcClient(wsUrl, (client) =>
               client[WS_METHODS.subscribeServerConfig](input).pipe(
+                Stream.map(knownMember),
                 Stream.take(1),
                 Stream.runCollect,
                 Effect.map((events) => Array.from(events)[0]),
@@ -3761,7 +4060,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const wsUrl = yield* getWsServerUrl("/ws");
       const events = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
-          client[WS_METHODS.subscribeServerConfig]({}).pipe(Stream.take(2), Stream.runCollect),
+          client[WS_METHODS.subscribeServerConfig]({}).pipe(
+            Stream.map(knownMember),
+            Stream.take(2),
+            Stream.runCollect,
+          ),
         ),
       );
       const [first, second] = Array.from(events);
@@ -3940,6 +4243,57 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("routes websocket rpc projects.searchContent", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspaceDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "ryco-ws-project-content-search-",
+      });
+      yield* fs.writeFileString(
+        path.join(workspaceDir, "needle-file.ts"),
+        "const a = 1;\nexport const needle = a;\n",
+      );
+
+      yield* buildAppUnderTest();
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const response = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.projectsSearchContent]({
+            cwd: workspaceDir,
+            query: "needle",
+            limit: 10,
+          }),
+        ),
+      );
+      assert.deepEqual(response, {
+        matches: [
+          {
+            path: "needle-file.ts",
+            lineNumber: 2,
+            preview: "export const needle = a;",
+            ranges: [{ start: 13, end: 19 }],
+          },
+        ],
+      });
+
+      const stale = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.projectsSearchContent]({
+            cwd: workspaceDir,
+            query: "needle",
+            limit: 10,
+            cursor: "not-issued-here",
+          }),
+        ).pipe(Effect.result),
+      );
+      assertTrue(stale._tag === "Failure");
+      assertTrue(stale.failure._tag === "ProjectSearchContentError");
+      assert.equal(stale.failure.reason, "cursor");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("routes websocket rpc projects.writeFile", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -4064,6 +4418,107 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         result.failure.message,
         "Workspace file path must stay within the project root.",
       );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("routes websocket rpc workspace read errors with one wording", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const workspaceDir = yield* fs.makeTempDirectoryScoped({ prefix: "ryco-ws-project-read-" });
+
+      yield* buildAppUnderTest();
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const failures = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) => {
+          const input = { cwd: workspaceDir, relativePath: "../escape.pdf" };
+          return Effect.all([
+            client[WS_METHODS.projectsReadFile](input).pipe(Effect.flip),
+            client[WS_METHODS.projectsReadFileBinary](input).pipe(Effect.flip),
+            client[WS_METHODS.projectsReadFileChunk]({ ...input, offset: 0 }).pipe(Effect.flip),
+          ]);
+        }),
+      );
+
+      assert.deepEqual(
+        failures.map((failure) => [failure._tag, failure.message]),
+        [
+          ["ProjectReadFileError", "Workspace file path must stay within the project root."],
+          ["ProjectReadFileBinaryError", "Workspace file path must stay within the project root."],
+          ["ProjectReadFileChunkError", "Workspace file path must stay within the project root."],
+        ],
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("routes websocket rpc projects.subscribeFileChanges", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const workspaceDir = yield* fs.makeTempDirectoryScoped({ prefix: "ryco-ws-project-watch-" });
+      yield* fs.writeFileString(`${workspaceDir}/app.ts`, "const answer = 42;\n");
+
+      yield* buildAppUnderTest();
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const [events, outside] = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.all([
+            client[WS_METHODS.projectsSubscribeFileChanges]({
+              cwd: workspaceDir,
+              relativePath: "app.ts",
+            }).pipe(Stream.take(1), Stream.runCollect),
+            client[WS_METHODS.projectsSubscribeFileChanges]({
+              cwd: workspaceDir,
+              relativePath: "../escape.ts",
+            }).pipe(Stream.runDrain, Effect.flip),
+          ]),
+        ),
+      );
+
+      // The version a read of these bytes returns, and never the content.
+      const read = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.projectsReadFile]({ cwd: workspaceDir, relativePath: "app.ts" }),
+        ),
+      );
+      assert.deepEqual(Array.from(events), [{ type: "current", version: read.version }]);
+      assertTrue(outside._tag === "ProjectWatchFileError");
+      assert.equal(outside.reason, "outside-root");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("routes websocket rpc threads.subscribeLocalServers and threads.stopLocalServer", () =>
+    Effect.gen(function* () {
+      // Windows refuses both (`threadLocalServers` is false there).
+      if (process.platform === "win32") return;
+      yield* buildAppUnderTest();
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const threadId = ThreadId.make(`thread-route-servers-${process.pid}`);
+      const [lists, stopped] = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.all([
+            client[WS_METHODS.threadsSubscribeLocalServers]({ threadId }).pipe(
+              Stream.take(1),
+              Stream.runCollect,
+            ),
+            client[WS_METHODS.threadsStopLocalServer]({
+              threadId,
+              pid: 2_147_483_000,
+              startTimeMs: 1,
+              port: 65_000,
+            }).pipe(Effect.flip),
+          ]),
+        ),
+      );
+
+      // Nothing on this machine carries the thread's marker.
+      assert.deepEqual(
+        Array.from(lists).map((list) => [list.threadId, list.servers]),
+        [[threadId, []]],
+      );
+      assertTrue(stopped._tag === "ThreadStopLocalServerError");
+      assert.equal(stopped.reason, "not-found");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -5966,6 +6421,294 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  /** A git manager whose push reports its start and phase, then waits for `release`. */
+  const makeHeldPushGitManager = Effect.gen(function* () {
+    const release = yield* Deferred.make<void>();
+    const interrupted = yield* Deferred.make<void>();
+    const localRefreshStarted = yield* Deferred.make<void>();
+    const state = { runs: 0 };
+    const gitManager: Partial<GitManagerShape> = {
+      invalidateLocalStatus: () => Effect.void,
+      invalidateRemoteStatus: () => Effect.void,
+      localStatus: () =>
+        Deferred.succeed(localRefreshStarted, undefined).pipe(
+          Effect.as({
+            isRepo: true,
+            hasPrimaryRemote: true,
+            isDefaultRef: false,
+            refName: "feature/demo",
+            hasWorkingTreeChanges: false,
+            workingTree: { files: [], insertions: 0, deletions: 0 },
+          }),
+        ),
+      remoteStatus: () =>
+        Effect.succeed({ hasUpstream: true, aheadCount: 0, behindCount: 0, pr: null }),
+      runStackedAction: (input, options) =>
+        Effect.gen(function* () {
+          state.runs += 1;
+          const base = { actionId: input.actionId, cwd: input.cwd, action: input.action };
+          const publish = (event: GitActionProgressEvent) =>
+            options?.progressReporter?.publish(event) ?? Effect.void;
+          yield* publish({ ...base, kind: "action_started", phases: ["push"] });
+          yield* publish({ ...base, kind: "phase_started", phase: "push", label: "Pushing..." });
+          yield* Deferred.await(release);
+          const result = {
+            action: input.action,
+            branch: { status: "skipped_not_requested" as const },
+            commit: { status: "skipped_not_requested" as const },
+            push: { status: "pushed" as const, branch: "feature/demo" },
+            pr: { status: "skipped_not_requested" as const },
+            toast: { title: "Pushed feature/demo", cta: { kind: "none" as const } },
+          };
+          yield* publish({ ...base, kind: "action_finished", result });
+          return result;
+        }).pipe(Effect.onInterrupt(() => Deferred.succeed(interrupted, undefined))),
+    };
+    return { release, interrupted, localRefreshStarted, state, gitManager };
+  });
+
+  const recoverablePush = () => ({
+    actionId: crypto.randomUUID(),
+    cwd: "/tmp/repo",
+    action: "push" as const,
+    recoverable: true,
+  });
+
+  it.effect(
+    "keeps a recoverable git.runStackedAction running when its socket closes and re-attaches on a new socket",
+    () =>
+      Effect.gen(function* () {
+        const push = yield* makeHeldPushGitManager;
+        // The node's runner, told when the server lets go of a socket's stream: the
+        // deterministic sign that the first socket's request is gone.
+        const runner = yield* makeGitActionRunner;
+        const observerReleased = yield* Deferred.make<void>();
+        yield* buildAppUnderTest({
+          layers: {
+            vcsDriver: { isInsideWorkTree: () => Effect.succeed(true) },
+            gitManager: push.gitManager,
+            gitActionRunner: {
+              ...runner,
+              start: (input) =>
+                runner
+                  .start(input)
+                  .pipe(Stream.ensuring(Deferred.succeed(observerReleased, undefined))),
+            },
+          },
+        });
+        const cookie = yield* getAuthenticatedSessionCookieHeader();
+        const input = recoverablePush();
+
+        // The first socket closes mid-push.
+        const first = yield* Effect.scoped(
+          withWsRpcClient(yield* getWsServerUrlForCookie(cookie), (client) =>
+            client[WS_METHODS.gitRunStackedAction](input).pipe(Stream.take(2), Stream.runCollect),
+          ),
+        );
+        assert.deepEqual(
+          [...first].map((event) => event.kind),
+          ["action_started", "phase_started"],
+        );
+        // The server let go of the first socket's stream: the push either goes on (the
+        // runner's stream ended) or stopped with its request (a request-owned action).
+        yield* Effect.raceFirst(Deferred.await(observerReleased), Deferred.await(push.interrupted));
+        assert.isFalse(yield* Deferred.isDone(push.interrupted));
+
+        // A new socket of the same client attaches again and sees it through.
+        const events = yield* Effect.scoped(
+          withWsRpcClient(yield* getWsServerUrlForCookie(cookie), (client) =>
+            Effect.gen(function* () {
+              const seen: GitActionProgressEvent[] = [];
+              const attached = yield* Deferred.make<void>();
+              const following = yield* client[WS_METHODS.gitResumeStackedAction](input).pipe(
+                Stream.runForEach((event) =>
+                  Effect.sync(() => void seen.push(event)).pipe(
+                    Effect.andThen(Deferred.succeed(attached, undefined)),
+                  ),
+                ),
+                Effect.forkScoped,
+              );
+              yield* Deferred.await(attached);
+              yield* Deferred.succeed(push.release, undefined);
+              yield* Fiber.join(following);
+              return seen;
+            }),
+          ),
+        );
+        assert.deepEqual(
+          events.map((event) => event.kind),
+          ["action_started", "phase_started", "action_finished"],
+        );
+        assert.equal(push.state.runs, 1);
+        assert.isFalse(yield* Deferred.isDone(push.interrupted));
+        yield* Deferred.await(push.localRefreshStarted);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("still stops an older client's git.runStackedAction when its socket closes", () =>
+    Effect.gen(function* () {
+      const push = yield* makeHeldPushGitManager;
+      yield* buildAppUnderTest({
+        layers: {
+          vcsDriver: { isInsideWorkTree: () => Effect.succeed(true) },
+          gitManager: push.gitManager,
+        },
+      });
+      const { recoverable: _recoverable, ...legacy } = recoverablePush();
+      yield* Effect.scoped(
+        withWsRpcClient(yield* getWsServerUrl("/ws"), (client) =>
+          client[WS_METHODS.gitRunStackedAction](legacy).pipe(Stream.take(1), Stream.runDrain),
+        ),
+      );
+      yield* Deferred.await(push.interrupted);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("stops a running recoverable git action through git.cancelStackedAction", () =>
+    Effect.gen(function* () {
+      const push = yield* makeHeldPushGitManager;
+      yield* buildAppUnderTest({
+        layers: {
+          vcsDriver: { isInsideWorkTree: () => Effect.succeed(true) },
+          gitManager: push.gitManager,
+        },
+      });
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+      const input = recoverablePush();
+
+      yield* Effect.scoped(
+        withWsRpcClient(yield* getWsServerUrlForCookie(cookie), (client) =>
+          Effect.gen(function* () {
+            const seen: GitActionProgressEvent[] = [];
+            const pushing = yield* Deferred.make<void>();
+            const following = yield* client[WS_METHODS.gitRunStackedAction](input).pipe(
+              Stream.runForEach((event) =>
+                Effect.sync(() => void seen.push(event)).pipe(
+                  Effect.andThen(
+                    event.kind === "phase_started"
+                      ? Deferred.succeed(pushing, undefined)
+                      : Effect.void,
+                  ),
+                ),
+              ),
+              Effect.result,
+              Effect.forkScoped,
+            );
+            yield* Deferred.await(pushing);
+
+            // An id nothing of this client runs under stops nothing.
+            assert.deepEqual(
+              yield* client[WS_METHODS.gitCancelStackedAction]({
+                actionId: crypto.randomUUID(),
+              }),
+              { cancelled: false },
+            );
+            assert.deepEqual(
+              yield* client[WS_METHODS.gitCancelStackedAction]({ actionId: input.actionId }),
+              { cancelled: true },
+            );
+            const outcome = yield* Fiber.join(following);
+            assertTrue(outcome._tag === "Failure");
+            assert.equal(
+              outcome._tag === "Failure" ? outcome.failure._tag : null,
+              "GitActionStoppedError",
+            );
+            assert.deepEqual(seen.at(-1), {
+              actionId: input.actionId,
+              cwd: input.cwd,
+              action: input.action,
+              kind: "action_failed",
+              phase: "push",
+              message: "Stopped.",
+            });
+            assert.deepEqual(
+              yield* client[WS_METHODS.gitCancelStackedAction]({ actionId: input.actionId }),
+              { cancelled: false },
+            );
+          }),
+        ),
+      );
+      yield* Deferred.await(push.interrupted);
+      assert.equal(push.state.runs, 1);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("keeps a pull request action's result when its worktree link update fails", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest({
+        layers: {
+          vcsDriver: { isInsideWorkTree: () => Effect.succeed(true) },
+          projectionWorktreeRepository: {
+            getById: () =>
+              Effect.fail(
+                new PersistenceSqlError({
+                  operation: "ProjectionWorktreeRepository.getById:query",
+                  detail: "database is locked",
+                }),
+              ),
+          },
+          gitManager: {
+            invalidateLocalStatus: () => Effect.void,
+            invalidateRemoteStatus: () => Effect.void,
+            localStatus: () =>
+              Effect.succeed({
+                isRepo: true,
+                hasPrimaryRemote: true,
+                isDefaultRef: false,
+                refName: "feature/demo",
+                hasWorkingTreeChanges: false,
+                workingTree: { files: [], insertions: 0, deletions: 0 },
+              }),
+            remoteStatus: () =>
+              Effect.succeed({ hasUpstream: true, aheadCount: 0, behindCount: 0, pr: null }),
+            runStackedAction: (input, options) =>
+              Effect.gen(function* () {
+                const result = {
+                  action: input.action,
+                  branch: { status: "skipped_not_requested" as const },
+                  commit: { status: "skipped_not_requested" as const },
+                  push: { status: "skipped_not_requested" as const },
+                  pr: {
+                    status: "created" as const,
+                    number: 42,
+                    url: "https://example.test/pull/42",
+                    title: "Demo",
+                  },
+                  toast: { title: "Created PR #42", cta: { kind: "none" as const } },
+                };
+                yield* (
+                  options?.progressReporter?.publish({
+                    actionId: input.actionId,
+                    cwd: input.cwd,
+                    action: input.action,
+                    kind: "action_finished",
+                    result,
+                  }) ?? Effect.void
+                );
+                return result;
+              }),
+          },
+        },
+      });
+
+      const events = yield* Effect.scoped(
+        withWsRpcClient(yield* getWsServerUrl("/ws"), (client) =>
+          client[WS_METHODS.gitRunStackedAction]({
+            actionId: "action-pr",
+            cwd: "/tmp/repo",
+            action: "create_pr",
+            worktreeId: WorktreeId.make("worktree-pr"),
+          }).pipe(Stream.runCollect),
+        ),
+      );
+      // The pull request exists: a failed link update is logged, not reported as a failure.
+      assert.deepEqual(
+        [...events].map((event) => event.kind),
+        ["action_finished"],
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("routes websocket rpc orchestration methods", () =>
     Effect.gen(function* () {
       const now = new Date().toISOString();
@@ -6154,7 +6897,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               const subscription = yield* PubSub.subscribe(livePubSub);
               yield* PubSub.publish(livePubSub, replayedEvent);
               yield* PubSub.publish(livePubSub, liveEvent);
-              return subscription;
+              return Stream.fromSubscription(subscription);
             }),
           },
           projectionSnapshotQuery: {
@@ -6173,6 +6916,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const result = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeShell]({}).pipe(
+            Stream.map(knownMember),
             Stream.take(3),
             Stream.runCollect,
             Effect.map((items) => Array.from(items)),
@@ -6227,7 +6971,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         orchestrationEngine: {
           readEventsPage: (fromSequenceExclusive) =>
             Effect.succeed({ events: [], nextSequence: fromSequenceExclusive, hasMore: false }),
-          subscribeDomainEvents: PubSub.subscribe(livePubSub),
+          subscribeDomainEvents: Effect.map(PubSub.subscribe(livePubSub), Stream.fromSubscription),
         },
         projectionSnapshotQuery: {
           getShellSnapshot: () => Effect.succeed(pagedShellSnapshot()),
@@ -6244,6 +6988,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const items = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeShell]({ snapshotDelivery: "paged" }).pipe(
+            Stream.map(knownMember),
             Stream.takeUntil((item) => item.kind === "snapshot-end"),
             Stream.runCollect,
             Effect.map((collected) => Array.from(collected)),
@@ -6277,6 +7022,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const first = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeShell]({}).pipe(
+            Stream.map(knownMember),
             Stream.take(1),
             Stream.runCollect,
             Effect.map((collected) => Array.from(collected)[0]),
@@ -6300,7 +7046,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           orchestrationEngine: {
             readEventsPage: (fromSequenceExclusive) =>
               Effect.succeed({ events: [], nextSequence: fromSequenceExclusive, hasMore: false }),
-            subscribeDomainEvents: PubSub.subscribe(livePubSub),
+            subscribeDomainEvents: Effect.map(
+              PubSub.subscribe(livePubSub),
+              Stream.fromSubscription,
+            ),
           },
           projectionSnapshotQuery: {
             getShellSnapshot: () => Effect.succeed(pagedShellSnapshot()),
@@ -6317,6 +7066,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const first = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeShell]({}).pipe(
+            Stream.map(knownMember),
             Stream.take(1),
             Stream.runCollect,
             Effect.map((collected) => Array.from(collected)[0]),
@@ -6335,6 +7085,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       return yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeShell](subscribeShellInput(input)).pipe(
+            Stream.map(knownMember),
             Stream.takeUntil((item) => item.kind === "snapshot-end" || item.kind === "snapshot"),
             Stream.runCollect,
             Effect.map((collected) => Array.from(collected)),
@@ -6533,7 +7284,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 hasMore: after.length > limit,
               });
             },
-            subscribeDomainEvents: PubSub.subscribe(livePubSub),
+            subscribeDomainEvents: Effect.map(
+              PubSub.subscribe(livePubSub),
+              Stream.fromSubscription,
+            ),
           },
           projectionSnapshotQuery: {
             getShellSnapshot: () =>
@@ -6559,6 +7313,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const result = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeShell]({ resumeFromSequence: 10 }).pipe(
+            Stream.map(knownMember),
             Stream.take(3),
             Stream.runCollect,
             Effect.map((items) => Array.from(items)),
@@ -6585,6 +7340,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             threadId: ThreadId.make("thread-shell-resume"),
             resumeFromSequence: 10,
           }).pipe(
+            Stream.map(knownMember),
             Stream.take(3),
             Stream.runCollect,
             Effect.map((items) => Array.from(items)),
@@ -6607,6 +7363,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const first = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeShell]({ resumeFromSequence: 10 }).pipe(
+            Stream.map(knownMember),
             Stream.take(1),
             Stream.runCollect,
             Effect.map((items) => Array.from(items)[0]),
@@ -6625,6 +7382,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const first = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeShell]({ resumeFromSequence: 1 }).pipe(
+            Stream.map(knownMember),
             Stream.take(1),
             Stream.runCollect,
             Effect.map((items) => Array.from(items)[0]),
@@ -6691,7 +7449,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             subscribeDomainEvents: Effect.gen(function* () {
               const subscription = yield* PubSub.subscribe(livePubSub);
               yield* PubSub.publish(livePubSub, liveBoundaryEvent);
-              return subscription;
+              return Stream.fromSubscription(subscription);
             }),
           },
           projectionSnapshotQuery: {
@@ -6710,6 +7468,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const result = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeShell]({}).pipe(
+            Stream.map(knownMember),
             Stream.take(3),
             Stream.runCollect,
             Effect.map((items) => Array.from(items)),
@@ -6774,7 +7533,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               const subscription = yield* PubSub.subscribe(livePubSub);
               yield* PubSub.publish(livePubSub, replayedEvent);
               yield* PubSub.publish(livePubSub, liveEvent);
-              return subscription;
+              return Stream.fromSubscription(subscription);
             }),
           },
           projectionSnapshotQuery: {
@@ -6796,6 +7555,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const result = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeThread]({ threadId }).pipe(
+            Stream.map(knownMember),
             Stream.take(3),
             Stream.runCollect,
             Effect.map((items) => Array.from(items)),
@@ -6853,7 +7613,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               }),
             subscribeDomainEvents: Effect.gen(function* () {
               const subscription = yield* PubSub.subscribe(livePubSub);
-              return subscription;
+              return Stream.fromSubscription(subscription);
             }),
           },
           projectionSnapshotQuery: {
@@ -6875,6 +7635,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const result = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeThread]({ threadId }).pipe(
+            Stream.map(knownMember),
             Stream.tap((item) => {
               const next = item.kind === "event" ? item.event.sequence + 1 : 11;
               return next <= 22 ? PubSub.publish(livePubSub, makeActivityEvent(next)) : Effect.void;
@@ -7055,7 +7816,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
 
-      const replayedEvent = replayResult.events[0];
+      const replayedEvent = replayResult.events.map(knownMember)[0];
       assert.equal(replayedEvent?.type, "project.created");
       assert.deepEqual(
         replayedEvent && replayedEvent.type === "project.created"
@@ -7135,6 +7896,95 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.equal(sessionStopCommand.threadId, threadId);
       }
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect(
+    "carries a model switch's blocking background tasks to the client and its stop choice back",
+    () =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("thread-handoff-background");
+        const dispatchedCommands: Array<OrchestrationCommand> = [];
+        yield* buildAppUnderTest({
+          layers: {
+            orchestrationEngine: {
+              dispatch: (command) => {
+                dispatchedCommands.push(command);
+                return command.type === "thread.turn.start" &&
+                  command.keepBackgroundWork === true &&
+                  command.stopBackgroundWork !== true
+                  ? Effect.fail(
+                      new OrchestrationModelSwitchBlockedError({
+                        threadId,
+                        taskIds: ["task-agent", "task-watch"],
+                      }),
+                    )
+                  : Effect.succeed({ sequence: dispatchedCommands.length });
+              },
+            },
+          },
+        });
+
+        const turnStart = {
+          type: "thread.turn.start",
+          commandId: CommandId.make("composer-send:handoff"),
+          threadId,
+          message: {
+            messageId: MessageId.make("handoff-message"),
+            role: "user",
+            text: "Continue with Claude",
+            attachments: [],
+          },
+          modelSelection: { instanceId: ProviderInstanceId.make("claudeAgent"), model: "fixture" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          keepBackgroundWork: true,
+          createdAt: new Date().toISOString(),
+        } as const;
+        const { keepBackgroundWork: _keep, ...unmarked } = turnStart;
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const [refused, accepted] = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            Effect.all([
+              Effect.flip(client[ORCHESTRATION_WS_METHODS.dispatchCommand](turnStart)),
+              client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+                ...unmarked,
+                stopBackgroundWork: true,
+              }),
+            ]),
+          ),
+        );
+
+        // The tasks travel in their own key; the message stays readable without the choice.
+        assert.deepInclude(refused, {
+          _tag: "OrchestrationDispatchCommandError",
+          modelSwitchBlockedByBackgroundWork: { taskIds: ["task-agent", "task-watch"] },
+        });
+        assertInclude(refused.message, "background tasks running");
+        assert.equal(accepted.sequence, 2);
+        assert.deepEqual(
+          dispatchedCommands.map((command) =>
+            command.type === "thread.turn.start"
+              ? {
+                  commandId: command.commandId,
+                  keepBackgroundWork: command.keepBackgroundWork,
+                  stopBackgroundWork: command.stopBackgroundWork,
+                }
+              : null,
+          ),
+          [
+            {
+              commandId: turnStart.commandId,
+              keepBackgroundWork: true,
+              stopBackgroundWork: undefined,
+            },
+            {
+              commandId: turnStart.commandId,
+              keepBackgroundWork: undefined,
+              stopBackgroundWork: true,
+            },
+          ],
+        );
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
   it.effect("checks session status before archiving removes the thread from active lookups", () =>

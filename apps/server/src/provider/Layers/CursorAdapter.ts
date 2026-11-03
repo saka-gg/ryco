@@ -42,13 +42,13 @@ import {
 import { ChildProcessSpawner } from "effect/process";
 import type * as EffectAcpSchema from "effect-acp/schema";
 
-import {
-  appendAttachmentPathLines,
-  formatAttachmentPathLines,
-  type AttachmentPathLineEntry,
-} from "@ryco/shared/attachmentPrompt";
+import { appendAttachmentPathLines } from "@ryco/shared/attachmentPrompt";
 
-import { isPersistableChatAttachment, resolveAttachmentPath } from "../../attachmentStore.ts";
+import {
+  attachmentPathLines,
+  isPersistableChatAttachment,
+  resolveAttachmentPath,
+} from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { createProcessDeviceToolBinding } from "../../providerTools/deviceToolGateway.ts";
 import {
@@ -79,6 +79,12 @@ import {
   parsePermissionRequest,
 } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggers } from "../acp/AcpNativeLogging.ts";
+import { providerThreadSnapshotFromTurnIds } from "../providerThreadSnapshot.ts";
+import {
+  acpAvailableCommandsToSlashCommands,
+  makeRecentProjectCommands,
+} from "../providerSlashCommands.ts";
+import { isSlashCommandInput } from "../attachmentInstructionDelivery.ts";
 import { requireRuntimeSessionId, stampRuntimeEvent } from "../runtimeSession.ts";
 import { applyCursorAcpModelSelection, makeCursorAcpRuntime } from "../acp/CursorAcpSupport.ts";
 import {
@@ -92,6 +98,7 @@ import {
 import { type CursorAdapterShape } from "../Services/CursorAdapter.ts";
 import { resolveCursorAcpBaseModelId } from "./CursorProvider.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import type { AgentProcessPriorityShape } from "../agentProcessPriority.ts";
 import {
   agentControlHostContext,
   installAgentControlAcp,
@@ -128,6 +135,8 @@ export interface CursorAdapterLiveOptions {
   readonly resolveSettings?: Effect.Effect<CursorSettings>;
   readonly agentControl?: AgentControlProviderBridge;
   readonly stdioProxy?: { readonly command: string; readonly entryPoint: string };
+  /** Lowers each session's agent process; undefined spawns it unchanged. */
+  readonly processPriority?: AgentProcessPriorityShape | undefined;
 }
 
 interface PendingApproval {
@@ -150,7 +159,8 @@ interface CursorSessionContext {
   notificationFiber: Fiber.Fiber<void, never> | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
-  readonly turns: Array<{ id: TurnId; items: Array<unknown> }>;
+  /** Completed turn ids only; never prompts (base64 images) or results. */
+  readonly turnIds: Array<TurnId>;
   readonly subagentEvents: ReturnType<typeof makeAcpSubagentRuntimeEvents>;
   lastPlanFingerprint: string | undefined;
   activeTurnId: TurnId | undefined;
@@ -353,6 +363,9 @@ export function makeCursorAdapter(
     const sessions = new Map<ThreadId, CursorSessionContext>();
     const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
     const runtimeEventPubSub = yield* PubSub.bounded<ProviderRuntimeEvent>(2_048);
+    // Cursor's own commands per directory (`readLiveProjectCommands`): ACP lists them only
+    // inside a session, so a stopped session's list keeps serving its directory.
+    const recentCommands = makeRecentProjectCommands();
 
     const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
     const nextEventId = Effect.map(
@@ -573,8 +586,10 @@ export function makeCursorAdapter(
             : cursorSettings;
 
           const acp = yield* makeCursorAcpRuntime({
+            threadId: input.threadId,
             cursorSettings: effectiveCursorSettings,
             ...(options?.environment ? { environment: options.environment } : {}),
+            ...(options?.processPriority ? { processPriority: options.processPriority } : {}),
             childProcessSpawner,
             cwd,
             ...(resumeSessionId ? { resumeSessionId } : {}),
@@ -844,18 +859,28 @@ export function makeCursorAdapter(
             notificationFiber: undefined,
             pendingApprovals,
             pendingUserInputs,
-            turns: [],
+            turnIds: [],
             subagentEvents: makeAcpSubagentRuntimeEvents(),
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
             stopped: false,
           };
 
+          // Fork into the session scope, not the calling fiber: ProviderService runs
+          // `startSession` in its own detached fiber that ends once the session has
+          // started, and Effect interrupts a fiber's `forkChild` children when it
+          // ends, which dropped every `session/update` (text, tools, plans).
           const nf = yield* Stream.runDrain(
             Stream.mapEffect(acp.getEvents(), (event) =>
               Effect.gen(function* () {
                 switch (event._tag) {
                   case "ModeChanged":
+                    return;
+                  case "CommandsUpdated":
+                    // A late update after a close is dropped. Only the mapped copy is kept,
+                    // never the raw payload.
+                    if (ctx.stopped) return;
+                    recentCommands.record(cwd, acpAvailableCommandsToSlashCommands(event.commands));
                     return;
                   case "AssistantItemStarted":
                     yield* offerRuntimeEventForRuntime(
@@ -988,7 +1013,7 @@ export function makeCursorAdapter(
                 }
               }),
             ),
-          ).pipe(Effect.forkChild);
+          ).pipe(Effect.forkIn(sessionScope));
 
           ctx.notificationFiber = nf;
           sessions.set(input.threadId, ctx);
@@ -1065,29 +1090,21 @@ export function makeCursorAdapter(
         let terminalEmitted = false;
         return yield* Effect.gen(function* () {
           const promptParts: Array<EffectAcpSchema.ContentBlock> = [];
-          if (!ctx.agentControlHostContextDelivered && ctx.agentControlHostContext.length > 0) {
+          // A slash command must lead the prompt; the context waits for the next turn.
+          if (
+            !isSlashCommandInput(input.input) &&
+            !ctx.agentControlHostContextDelivered &&
+            ctx.agentControlHostContext.length > 0
+          ) {
             promptParts.push({
               type: "text",
               text: `<ryco_host_context>${ctx.agentControlHostContext}</ryco_host_context>`,
             });
             ctx.agentControlHostContextDelivered = true;
           }
-          const pathLineEntries: AttachmentPathLineEntry[] = [];
           const imageParts: Array<EffectAcpSchema.ContentBlock> = [];
           for (const attachment of input.attachments ?? []) {
             if (!isPersistableChatAttachment(attachment) || attachment.type !== "image") {
-              pathLineEntries.push({
-                attachment,
-                ...(attachment.id === undefined
-                  ? {}
-                  : {
-                      resolvedPath:
-                        resolveAttachmentPath({
-                          attachmentsDir: serverConfig.attachmentsDir,
-                          attachment,
-                        }) ?? undefined,
-                    }),
-              });
               continue;
             }
             const attachmentPath = resolveAttachmentPath({
@@ -1120,7 +1137,10 @@ export function makeCursorAdapter(
           }
           const promptText = appendAttachmentPathLines(
             input.input?.trim(),
-            formatAttachmentPathLines(pathLineEntries),
+            attachmentPathLines({
+              attachmentsDir: serverConfig.attachmentsDir,
+              attachments: input.attachments,
+            }),
           );
           if (promptText?.trim()) {
             promptParts.push({ type: "text", text: promptText });
@@ -1152,7 +1172,7 @@ export function makeCursorAdapter(
               Effect.ensuring(ctx.agentControl ? ctx.agentControl.retireTurn(turnId) : Effect.void),
             );
 
-          ctx.turns.push({ id: turnId, items: [{ prompt: promptParts, result }] });
+          ctx.turnIds.push(turnId);
           ctx.session = {
             ...ctx.session,
             activeTurnId: turnId,
@@ -1250,7 +1270,7 @@ export function makeCursorAdapter(
     const readThread: CursorAdapterShape["readThread"] = (threadId) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(threadId);
-        return { threadId, turns: ctx.turns };
+        return providerThreadSnapshotFromTurnIds(threadId, ctx.turnIds);
       });
 
     // Cursor cannot forget turns; ProviderService refuses before reaching this.
@@ -1304,6 +1324,8 @@ export function makeCursorAdapter(
       provider: PROVIDER,
       capabilities: {
         sessionModelSwitch: "in-session",
+        // A steer stops the turn (session/cancel) and sends the message next (ProviderService).
+        turnSteering: "interrupt-restart",
         // sendTurn awaits the whole prompt after emitting turn.started.
         turnSubmission: "completion",
         // Unverified: session/load is sent with the new cwd.
@@ -1320,6 +1342,8 @@ export function makeCursorAdapter(
       listSessions,
       hasSession,
       stopAll,
+      readLiveProjectCommands: (cwd) =>
+        Effect.sync(() => recentCommands.read(nodePath.resolve(cwd))),
       streamEvents,
     } satisfies CursorAdapterShape;
   });

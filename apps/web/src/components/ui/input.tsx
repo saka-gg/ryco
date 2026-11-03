@@ -61,19 +61,21 @@ function Input({
       data-size={size}
       data-slot="input-control"
     >
+      {/* A caller's `data-slot` (autocomplete-input, combobox-input) must win over "input":
+          those wrappers pad the inner control for their start addon by that slot. */}
       {nativeInput ? (
         <input
+          data-slot="input"
           {...(props as React.ComponentPropsWithRef<"input">)}
           className={inputClassName}
-          data-slot="input"
           size={typeof size === "number" ? size : undefined}
           style={typeof style === "function" ? undefined : style}
         />
       ) : (
         <InputPrimitive
+          data-slot="input"
           {...props}
           className={inputClassName}
-          data-slot="input"
           size={typeof size === "number" ? size : undefined}
           style={style}
         />

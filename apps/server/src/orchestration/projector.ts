@@ -36,6 +36,8 @@ import {
   projectCreatedWorktreePullRequests,
   projectWorktreeSourceControlState,
 } from "./worktreePullRequestProjection.ts";
+import type { FollowUpQueueEventDraft, FollowUpQueueEventType } from "./followUpQueue.ts";
+import { loadFollowUpQueueRules } from "./followUpQueueLoader.ts";
 import { withThreadLineage } from "./threadLineage.ts";
 import { findThreadInArray, updateThreadInArray } from "./threadIndex.ts";
 import { latestUserMessage } from "./userMessageOrder.ts";
@@ -55,14 +57,26 @@ import {
   ThreadMetaUpdatedPayload,
   ThreadProposedPlanUpsertedPayload,
   ThreadRuntimeModeSetPayload,
+  ThreadHiddenPayload,
+  ThreadSettleDeferredPayload,
   ThreadSettledPayload,
   ThreadSnoozedPayload,
+  ThreadUnhiddenPayload,
   ThreadUnsnoozedPayload,
   ThreadUsageLimitClearedPayload,
   ThreadUsageLimitSetPayload,
   ThreadTokenModeSetPayload,
   ThreadGoalUpdatedPayload,
   ThreadGoalClearedPayload,
+  ThreadPullRequestWatchUpdatedPayload,
+  ThreadCommandWatchUpdatedPayload,
+  ThreadQueueEntriesRemovedPayload,
+  ThreadQueueEntryAddedPayload,
+  ThreadQueueEntryEditedPayload,
+  ThreadQueueEntryFailedPayload,
+  ThreadQueueHeldPayload,
+  ThreadQueueReleasedPayload,
+  ThreadQueueReorderedPayload,
   ThreadUnarchivedPayload,
   ThreadUnsettledPayload,
   ThreadRevertedPayload,
@@ -84,6 +98,16 @@ import {
 } from "./Schemas.ts";
 
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id" | "projectId">>;
+
+const FOLLOW_UP_QUEUE_PAYLOADS: Record<FollowUpQueueEventType, Schema.Schema<unknown>> = {
+  "thread.queue-entry-added": ThreadQueueEntryAddedPayload,
+  "thread.queue-entry-edited": ThreadQueueEntryEditedPayload,
+  "thread.queue-reordered": ThreadQueueReorderedPayload,
+  "thread.queue-entries-removed": ThreadQueueEntriesRemovedPayload,
+  "thread.queue-entry-failed": ThreadQueueEntryFailedPayload,
+  "thread.queue-held": ThreadQueueHeldPayload,
+  "thread.queue-released": ThreadQueueReleasedPayload,
+};
 
 type WorktreePatch = Partial<Omit<OrchestrationWorktreeShell, "worktreeId" | "projectId">>;
 const MAX_THREAD_MESSAGES = 2_000;
@@ -506,6 +530,10 @@ export function projectEvent(
             deletedAt: payload.deletedAt,
             trashedAt: null,
             updatedAt: payload.deletedAt,
+            // The projection drops the row too; a later incarnation starts without watches.
+            pullRequestWatchState: undefined,
+            commandWatchState: undefined,
+            followUpQueue: undefined,
           }),
         })),
       );
@@ -542,6 +570,7 @@ export function projectEvent(
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             archivedAt: payload.archivedAt,
+            settleWhenIdleAt: null,
             updatedAt: payload.updatedAt,
           }),
         })),
@@ -565,6 +594,7 @@ export function projectEvent(
           threads: updateThread(nextBase.threads, payload.threadId, {
             settledOverride: "active",
             settledAt: null,
+            settleWhenIdleAt: null,
             snoozedUntil: payload.snoozedUntil,
             snoozedAt: payload.snoozedAt,
             updatedAt: payload.updatedAt,
@@ -595,7 +625,43 @@ export function projectEvent(
             settledOverride: "settled",
             snoozedUntil: null,
             snoozedAt: null,
+            settleWhenIdleAt: null,
             settledAt: payload.settledAt,
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "thread.settle-deferred":
+      return decodeForEvent(ThreadSettleDeferredPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            settleWhenIdleAt: payload.settleWhenIdleAt,
+            snoozedUntil: null,
+            snoozedAt: null,
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "thread.hidden":
+      return decodeForEvent(ThreadHiddenPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            hiddenAt: payload.hiddenAt,
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "thread.unhidden":
+      return decodeForEvent(ThreadUnhiddenPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            hiddenAt: null,
             updatedAt: payload.updatedAt,
           }),
         })),
@@ -608,6 +674,7 @@ export function projectEvent(
           threads: updateThread(nextBase.threads, payload.threadId, {
             settledOverride: payload.reason === "user" ? "active" : null,
             settledAt: null,
+            settleWhenIdleAt: null,
             updatedAt: payload.updatedAt,
             ...payload.restoredSidebarState,
           }),
@@ -721,6 +788,69 @@ export function projectEvent(
           }),
         })),
       );
+
+    case "thread.pull-request-watch-updated":
+      // Watch progress is not thread activity: `updatedAt` stays, as in the projection.
+      return decodeForEvent(
+        ThreadPullRequestWatchUpdatedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            pullRequestWatchState: payload.watches,
+          }),
+        })),
+      );
+
+    case "thread.command-watch-updated":
+      // Like the pull request watch's: not thread activity, so `updatedAt` stays.
+      return decodeForEvent(
+        ThreadCommandWatchUpdatedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            commandWatchState: payload.watches,
+          }),
+        })),
+      );
+
+    case "thread.queue-entry-added":
+    case "thread.queue-entry-edited":
+    case "thread.queue-reordered":
+    case "thread.queue-entries-removed":
+    case "thread.queue-entry-failed":
+    case "thread.queue-held":
+    case "thread.queue-released": {
+      // The queue is not thread activity: `updatedAt` stays, as in the projection.
+      const type = event.type;
+      return Effect.gen(function* () {
+        const payload = yield* decodeForEvent(
+          FOLLOW_UP_QUEUE_PAYLOADS[type],
+          event.payload,
+          type,
+          "payload",
+        );
+        const rules = yield* loadFollowUpQueueRules;
+        const draft = { type, payload } as FollowUpQueueEventDraft;
+        return {
+          ...nextBase,
+          threads: updateThreadInArray(nextBase.threads, draft.payload.threadId, (thread) => ({
+            ...thread,
+            followUpQueue: rules.project(
+              thread.followUpQueue ?? { entries: [], hold: null },
+              draft,
+            ),
+          })),
+        };
+      });
+    }
 
     case "thread.message-sent":
       return Effect.gen(function* () {

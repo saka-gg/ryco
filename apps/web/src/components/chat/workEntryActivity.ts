@@ -2,25 +2,17 @@
 // Purpose: Derives the status + timing a tool-call row reports inline and in its
 //          expanded Activity card, from the fields the work log already carries.
 // Layer: Web chat presentation helpers
-// Exports: WorkEntryStatus, resolveWorkEntryStatus, formatWorkEntryStatusLabel,
-//          formatWorkEntryElapsed, workEntryActivityMeta
+// Exports: formatWorkEntryStatusLabel, formatWorkEntryElapsed, workEntryActivityMeta
+//          (the status rule itself, resolveWorkEntryStatus, is shared from client-runtime)
 
-import { formatDuration, type WorkLogEntry } from "../../session-logic";
-
-export type WorkEntryStatus = "running" | "completed" | "failed";
+import {
+  formatDuration,
+  resolveWorkEntryStatus,
+  type WorkEntryStatus,
+  type WorkLogEntry,
+} from "../../session-logic";
 
 type WorkEntryStatusInput = Pick<WorkLogEntry, "completed" | "exitCode" | "tone">;
-
-/**
- * A row is failed when the activity reported an error tone or a non-zero exit,
- * completed once its lifecycle settled, and running until then.
- */
-export function resolveWorkEntryStatus(entry: WorkEntryStatusInput): WorkEntryStatus {
-  if (entry.tone === "error" || (entry.exitCode !== undefined && entry.exitCode !== 0)) {
-    return "failed";
-  }
-  return entry.completed ? "completed" : "running";
-}
 
 export function formatWorkEntryStatusLabel(status: WorkEntryStatus): string {
   switch (status) {

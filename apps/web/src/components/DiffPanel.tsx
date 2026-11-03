@@ -5,8 +5,16 @@ import { DiffLineBlame } from "./DiffLineBlame";
 import { DiffComparisonControls } from "./DiffComparisonControls";
 import { DiffImagePreview } from "./DiffImagePreview";
 import { useComparison } from "../rpc/useComparison";
+import type { DiffLineAnnotation, SelectedLineRange } from "@pierre/diffs";
 import { FileDiff, type FileDiffMetadata, Virtualizer } from "@pierre/diffs/react";
-import { useDebouncedValue } from "@tanstack/react-pacer";
+import {
+  formatFileReferenceTitle,
+  normalizeFileReferencePath,
+} from "@ryco/client-runtime/state/composer";
+import {
+  repositoryPathToWorkspacePath,
+  workspacePathWithinRepository,
+} from "@ryco/client-runtime/state/files";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { TurnId } from "@ryco/contracts";
@@ -18,10 +26,12 @@ import {
   Columns2Icon,
   PilcrowIcon,
   Rows3Icon,
-  SearchIcon,
   TextWrapIcon,
-  XIcon,
 } from "lucide-react";
+import {
+  buildReviewFileTree,
+  type PullRequestFileStatus,
+} from "@ryco/client-runtime/state/pull-request-review";
 import {
   type WheelEvent as ReactWheelEvent,
   useCallback,
@@ -30,13 +40,12 @@ import {
   useRef,
   useState,
 } from "react";
-import { openInPreferredEditor } from "../editorPreferences";
+import { openPathInEditorWithToast } from "../editorPreferences";
 import { useGitStatus } from "~/lib/gitStatusState";
 import { useCheckpointDiff } from "~/rpc/useProvider";
 import { cn } from "~/lib/utils";
-import { readLocalApi } from "../localApi";
 import { parseDiffRouteSearch, stripDiffSearchParams } from "../diffRouteSearch";
-import { useDiffLayout, type DiffRenderMode } from "../hooks/useDiffLayout";
+import { useDiffLayout } from "../hooks/useDiffLayout";
 import { useTheme } from "../hooks/useTheme";
 import {
   buildDiffParseCacheKey,
@@ -48,31 +57,53 @@ import {
 import { getOffThreadDiffParser, OFF_THREAD_DIFF_PARSE_MIN_CHARS } from "../lib/diffParseOffThread";
 import { ActiveDiffParser, type RenderablePatch } from "../lib/diffParsing";
 import { useDiffFileNavigation } from "../hooks/useDiffFileNavigation";
-import { DIFF_SURFACE_BASE_UNSAFE_CSS, resolveDiffThemeName } from "../lib/diffRendering";
+import { useDiffHunkNavigation } from "../hooks/useDiffHunkNavigation";
+import {
+  areAllDiffFilesCollapsed,
+  buildDiffHunkAnchors,
+  diffPatchTotals,
+  toggleAllDiffFiles,
+} from "../lib/diffReviewNavigation";
+import { DiffChangeMarkers } from "./DiffChangeMarkers";
+import { DiffReviewToolbar } from "./DiffReviewToolbar";
+import { FileTreePane, type FileTreeFiles } from "./pullRequests/files/FileTreePane";
+import { fileStatusOf } from "./pullRequests/files/pullRequestFiles.logic";
+import {
+  DIFF_SURFACE_BASE_UNSAFE_CSS,
+  GUTTER_UTILITY_UNSAFE_CSS,
+  NEUTRAL_LINE_SELECTION_UNSAFE_CSS,
+  PLAIN_ANNOTATION_UNSAFE_CSS,
+  resolveDiffThemeName,
+} from "../lib/diffRendering";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import { selectProjectByRef, useStore } from "../store";
-import { createThreadSelectorByRef } from "../storeSelectors";
+import { createThreadStructureSelectorByRef } from "../storeSelectors";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { useSettings } from "../hooks/useSettings";
 import { formatShortTimestamp } from "../timestampFormat";
 import { usePerfMark } from "../perf/tabSwitchInstrumentation";
 import { DiffPanelLoadingState, DiffPanelShell, type DiffPanelMode } from "./DiffPanelShell";
 import { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
-import { ToggleGroup, Toggle } from "./ui/toggle-group";
 import {
-  buildDiffSearchIndex,
-  deriveDiffSearchFileIndexes,
-  EMPTY_DIFF_SEARCH_INDEX,
-  doesDiffSearchMatchRenderedLine,
-  type DiffSearchMatch,
-  findDiffSearchMatches,
-  getDiffSearchMatchRenderedLineIndex,
-  getNextDiffSearchMatchIndex,
-  groupDiffSearchMatchesByFileIndex,
-  normalizeDiffSearchQuery,
-  parseDiffRenderedLineIndexes,
-  resolveDiffFilePath,
-} from "./DiffPanel.search.logic";
+  diffFileReference,
+  diffLineSelection,
+  fileLineSelectionRange,
+  fileLineSelectionSide,
+} from "./fileReferences/fileReferenceSelection";
+import { FileReferenceNoteComposer } from "./fileReferences/FileReferenceNoteComposer";
+import { useFileReferencePicker } from "./fileReferences/useFileReferencePicker";
+import { ToggleGroup, Toggle } from "./ui/toggle-group";
+import { type DiffSearchMatch, resolveDiffFilePath } from "../lib/diffSearch";
+import { useDiffFindSurface } from "./diffSearch/diffFindSurface";
+import { DiffSearchBar } from "./diffSearch/DiffSearchBar";
+import {
+  diffSearchHighlightCss,
+  findRenderedDiffLineElement,
+  hasRenderedDiffRows,
+  waitForRenderedDiffRows,
+} from "./diffSearch/diffSearchDom";
+import { useDiffSearch } from "./diffSearch/useDiffSearch";
+import { nextFrame, revealDiffLine } from "./pullRequests/files/diffReveal";
 import { resolveDiffOpenInEditorTarget } from "./DiffPanel.openInEditor.logic";
 
 type DiffThemeType = "light" | "dark";
@@ -101,15 +132,15 @@ const DIFF_PANEL_EDITOR_OPEN_UNSAFE_CSS = `
 }
 `;
 
-const DIFF_PANEL_SEARCH_UNSAFE_CSS = `
-::highlight(ryco-diff-search-match) {
-  background-color: color-mix(in srgb, var(--warning) 60%, transparent);
-  color: var(--foreground);
-}
-`;
+/** Find highlights: `ryco-diff-search-match` and `ryco-diff-search-current`. */
+const DIFF_SEARCH_HIGHLIGHT_NAME = "ryco-diff-search";
 
-const DIFF_PANEL_UNSAFE_CSS = `${DIFF_SURFACE_BASE_UNSAFE_CSS}${DIFF_PANEL_EDITOR_OPEN_UNSAFE_CSS}${DIFF_PANEL_SEARCH_UNSAFE_CSS}`;
-const DIFF_PANEL_PHONE_UNSAFE_CSS = `${DIFF_SURFACE_BASE_UNSAFE_CSS}${DIFF_PANEL_SEARCH_UNSAFE_CSS}`;
+// Desktop only: the gutter `+` that adds lines to the chat, its picked range
+// and its note row.
+const DIFF_PANEL_UNSAFE_CSS = `${DIFF_SURFACE_BASE_UNSAFE_CSS}${DIFF_PANEL_EDITOR_OPEN_UNSAFE_CSS}${diffSearchHighlightCss(DIFF_SEARCH_HIGHLIGHT_NAME)}${NEUTRAL_LINE_SELECTION_UNSAFE_CSS}${PLAIN_ANNOTATION_UNSAFE_CSS}${GUTTER_UTILITY_UNSAFE_CSS}`;
+const NO_FILE_ANNOTATIONS: DiffLineAnnotation[] = [];
+// The frozen phone tier keeps one match colour (no separate current match).
+const DIFF_PANEL_PHONE_UNSAFE_CSS = `${DIFF_SURFACE_BASE_UNSAFE_CSS}${diffSearchHighlightCss(DIFF_SEARCH_HIGHLIGHT_NAME, { current: false })}`;
 
 function resolveFileDiffPath(fileDiff: FileDiffMetadata): string {
   return resolveDiffFilePath(fileDiff);
@@ -149,201 +180,6 @@ const DIFF_PANEL_PARSE_SCOPE = "diff-panel";
 
 function buildFileDiffRenderKey(fileDiff: FileDiffMetadata): string {
   return fileDiff.cacheKey ?? `${fileDiff.prevName ?? "none"}:${fileDiff.name}`;
-}
-
-const DIFF_SEARCH_HIGHLIGHT_NAME = "ryco-diff-search-match";
-const DIFF_SEARCH_DEBOUNCE_MS = 150;
-const DIFF_SEARCH_HIGHLIGHT_REFRESH_DELAY_MS = 80;
-const DIFF_SEARCH_HIGHLIGHT_VIEWPORT_MARGIN_PX = 1600;
-
-function isCSSHighlightSupported(): boolean {
-  return (
-    typeof CSS !== "undefined" &&
-    typeof (CSS as unknown as { highlights?: unknown }).highlights !== "undefined" &&
-    typeof globalThis.Highlight !== "undefined"
-  );
-}
-
-function isNearViewport(
-  element: Element,
-  viewport: Element,
-  margin = DIFF_SEARCH_HIGHLIGHT_VIEWPORT_MARGIN_PX,
-): boolean {
-  const elementRect = element.getBoundingClientRect();
-  const viewportRect = viewport.getBoundingClientRect();
-  return (
-    elementRect.bottom >= viewportRect.top - margin &&
-    elementRect.top <= viewportRect.bottom + margin &&
-    elementRect.right >= viewportRect.left - margin &&
-    elementRect.left <= viewportRect.right + margin
-  );
-}
-
-function collectDiffLineTextOffsets(lineElement: HTMLElement): {
-  readonly textLength: number;
-  readonly offsets: readonly {
-    readonly node: Text;
-    readonly start: number;
-    readonly end: number;
-  }[];
-} {
-  const offsets: { node: Text; start: number; end: number }[] = [];
-  const walker = document.createTreeWalker(lineElement, NodeFilter.SHOW_TEXT, {
-    acceptNode(node) {
-      const parent = node.parentElement;
-      if (parent && parent.closest("[data-line-number-content]")) {
-        return NodeFilter.FILTER_REJECT;
-      }
-      return NodeFilter.FILTER_ACCEPT;
-    },
-  });
-  let current = walker.nextNode();
-  let textLength = 0;
-  while (current) {
-    const textNode = current as Text;
-    const nextTextLength = textLength + textNode.data.length;
-    offsets.push({
-      node: textNode,
-      start: textLength,
-      end: nextTextLength,
-    });
-    textLength = nextTextLength;
-    current = walker.nextNode();
-  }
-  return { offsets, textLength };
-}
-
-function findTextOffsetPosition(
-  offsets: readonly { readonly node: Text; readonly start: number; readonly end: number }[],
-  offset: number,
-  edge: "start" | "end",
-): { readonly node: Text; readonly offset: number } | null {
-  for (const info of offsets) {
-    if (offset < info.start || offset > info.end) {
-      continue;
-    }
-    if (offset === info.end && edge === "start") {
-      continue;
-    }
-    return {
-      node: info.node,
-      offset: offset - info.start,
-    };
-  }
-  return null;
-}
-
-function appendDiffLineSearchRange(
-  lineElement: HTMLElement,
-  match: DiffSearchMatch,
-  ranges: Range[],
-): void {
-  const { offsets, textLength } = collectDiffLineTextOffsets(lineElement);
-  if (
-    offsets.length === 0 ||
-    match.start < 0 ||
-    match.end > textLength ||
-    match.start >= match.end
-  ) {
-    return;
-  }
-
-  const start = findTextOffsetPosition(offsets, match.start, "start");
-  const end = findTextOffsetPosition(offsets, match.end, "end");
-  if (!start || !end) return;
-
-  const range = document.createRange();
-  range.setStart(start.node, start.offset);
-  range.setEnd(end.node, end.offset);
-  ranges.push(range);
-}
-
-function getRenderedLineSearchMatches(input: {
-  readonly matches: readonly DiffSearchMatch[];
-  readonly renderMode: DiffRenderMode;
-  readonly lineIndexAttr: string | null;
-  readonly lineType: string | null;
-}): DiffSearchMatch[] {
-  const lineIndexes = parseDiffRenderedLineIndexes(input.lineIndexAttr);
-  if (!lineIndexes) return [];
-  return input.matches.filter((match) =>
-    doesDiffSearchMatchRenderedLine(match, {
-      renderMode: input.renderMode,
-      lineIndexes,
-      lineType: input.lineType,
-    }),
-  );
-}
-
-function findRenderedDiffLineElement(input: {
-  readonly fileElement: HTMLElement;
-  readonly match: DiffSearchMatch;
-  readonly renderMode: DiffRenderMode;
-}): HTMLElement | null {
-  const renderedLineIndex = getDiffSearchMatchRenderedLineIndex(input.match, input.renderMode);
-  if (renderedLineIndex === null) {
-    return null;
-  }
-
-  const containers = input.fileElement.querySelectorAll<HTMLElement>("diffs-container");
-  for (const container of containers) {
-    const candidates = container.shadowRoot?.querySelectorAll<HTMLElement>(
-      "[data-line][data-line-index]",
-    );
-    for (const candidate of candidates ?? []) {
-      const lineIndexes = parseDiffRenderedLineIndexes(candidate.getAttribute("data-line-index"));
-      if (!lineIndexes) continue;
-      if (
-        doesDiffSearchMatchRenderedLine(input.match, {
-          renderMode: input.renderMode,
-          lineIndexes,
-          lineType: candidate.getAttribute("data-line-type"),
-        })
-      ) {
-        return candidate;
-      }
-    }
-  }
-
-  return null;
-}
-
-function findDiffSearchRanges(input: {
-  readonly rootElement: HTMLElement;
-  readonly viewportElement: HTMLElement;
-  readonly matchesByFileIndex: ReadonlyMap<number, readonly DiffSearchMatch[]>;
-  readonly renderMode: DiffRenderMode;
-}): Range[] {
-  const ranges: Range[] = [];
-  const fileElements = input.rootElement.querySelectorAll<HTMLElement>("[data-diff-file-index]");
-  for (const fileElement of fileElements) {
-    if (!isNearViewport(fileElement, input.viewportElement)) continue;
-    const rawFileIndex = fileElement.dataset.diffFileIndex;
-    const fileIndex = rawFileIndex ? Number.parseInt(rawFileIndex, 10) : Number.NaN;
-    if (!Number.isFinite(fileIndex)) continue;
-    const matches = input.matchesByFileIndex.get(fileIndex);
-    if (!matches || matches.length === 0) continue;
-
-    const containers = fileElement.querySelectorAll<HTMLElement>("diffs-container");
-    for (const container of containers) {
-      const lineElements = container.shadowRoot?.querySelectorAll<HTMLElement>(
-        "[data-line][data-line-index]",
-      );
-      for (const lineElement of lineElements ?? []) {
-        if (!isNearViewport(lineElement, input.viewportElement)) continue;
-        const lineMatches = getRenderedLineSearchMatches({
-          matches,
-          renderMode: input.renderMode,
-          lineIndexAttr: lineElement.getAttribute("data-line-index"),
-          lineType: lineElement.getAttribute("data-line-type"),
-        });
-        for (const match of lineMatches) {
-          appendDiffLineSearchRange(lineElement, match, ranges);
-        }
-      }
-    }
-  }
-  return ranges;
 }
 
 function getDiffCollapseIconClassName(fileDiff: FileDiffMetadata): string {
@@ -395,15 +231,9 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
   const [collapsedDiffFileKeys, setCollapsedDiffFileKeys] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
-  const [diffSearchQuery, setDiffSearchQuery] = useState("");
-  const [debouncedDiffSearchQuery] = useDebouncedValue(diffSearchQuery, {
-    wait: DIFF_SEARCH_DEBOUNCE_MS,
-  });
-  const effectiveDiffSearchQuery =
-    diffSearchQuery.trim().length === 0 ? "" : debouncedDiffSearchQuery;
-  const [currentDiffMatchIndex, setCurrentDiffMatchIndex] = useState(0);
-  const diffSearchInputRef = useRef<HTMLInputElement>(null);
   const patchViewportRef = useRef<HTMLDivElement>(null);
+  const [fileTreeOpen, setFileTreeOpen] = useState(false);
+  const fileTreeFilterRef = useRef<HTMLInputElement>(null);
   const [activeDiffParser] = useState(() => new ActiveDiffParser());
   const turnStripRef = useRef<HTMLDivElement>(null);
   const consumedFileJumpRef = useRef<string | null>(null);
@@ -421,7 +251,7 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
   const diffOpen = diffSearch.diff === "1";
   const activeThreadId = routeThreadRef?.threadId ?? null;
   const activeThread = useStore(
-    useMemo(() => createThreadSelectorByRef(routeThreadRef), [routeThreadRef]),
+    useMemo(() => createThreadStructureSelectorByRef(routeThreadRef), [routeThreadRef]),
   );
   const activeProjectId = activeThread?.projectId ?? null;
   const activeProject = useStore((store) =>
@@ -433,12 +263,15 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
       : undefined,
   );
   const activeCwd = activeThread?.worktreePath ?? activeProject?.cwd;
+  // "Add to chat" from the gutter; the frozen phone tier does not get it.
+  const fileReferencePicker = useFileReferencePicker(isPhonePresentation ? null : routeThreadRef);
   const gitStatusQuery = useGitStatus({
     environmentId: activeThread?.environmentId ?? null,
     cwd: activeCwd ?? null,
   });
   const isGitRepo = gitStatusQuery.data?.isRepo ?? true;
   const [localScope, setLocalScope] = useState<GitLocalChangesScope | null>(null);
+  const [stagedCommitMessage, setStagedCommitMessage] = useState("");
   const reviewingLocal =
     localScope !== null && !isPhonePresentation && diffSearch.diffTurnId == null;
   const localChanges = useLocalChanges(
@@ -593,6 +426,22 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
         : null;
   // Local patches name repository-root paths; checkpoint and comparison images are read by blob ID.
   const imagePreviewCwd = reviewingLocal ? localChanges.data?.worktreePath : activeCwd;
+  // The new side of these patches is a working file, not a stored blob.
+  const comparingWorkingTree = comparing && comparison.data?.source.target === "workingTree";
+  const afterIsWorkingTree = (reviewingLocal && localScope === "unstaged") || comparingWorkingTree;
+  // Every review patch names repository-root paths, while the agent and the
+  // Files panel work in the thread's folder, which can sit deeper in the
+  // repository. When the two cannot be related, the folder is taken as the
+  // root (a symlinked path, a repository without a remote).
+  const diffRepositoryRoot = reviewingLocal
+    ? (localChanges.data?.worktreePath ?? null)
+    : comparing
+      ? (comparison.data?.source.worktreePath ?? null)
+      : (activeThread?.worktreePath ?? activeProject?.repositoryIdentity?.rootPath ?? null);
+  const diffWorkspacePrefix =
+    (activeCwd && diffRepositoryRoot
+      ? workspacePathWithinRepository(activeCwd, diffRepositoryRoot)
+      : null) ?? "";
   const hasResolvedPatch = typeof selectedPatch === "string";
   const hasNoNetChanges = hasResolvedPatch && selectedPatch.trim().length === 0;
   // The latest off-thread parse result, shown while it matches the pending parse.
@@ -715,35 +564,113 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
   const renderablePatch = renderableContent.patch;
   const renderableFiles = renderableContent.files;
 
-  const normalizedDiffSearchQuery = useMemo(
-    () => normalizeDiffSearchQuery(effectiveDiffSearchQuery),
-    [effectiveDiffSearchQuery],
+  // Find can ask again before the unfolded file renders, so this never folds (T3 Code).
+  const unfoldDiffFile = useCallback((fileKey: string) => {
+    setCollapsedDiffFileKeys((current) => {
+      if (!current.has(fileKey)) return current;
+      const next = new Set(current);
+      next.delete(fileKey);
+      return next;
+    });
+  }, []);
+  const revealDiffSearchMatch = useCallback(
+    async (match: DiffSearchMatch, signal: AbortSignal) => {
+      const fileDiff = renderableFiles[match.fileIndex];
+      if (!fileDiff) return;
+      unfoldDiffFile(buildFileDiffRenderKey(fileDiff));
+      // The unfold commits before the next frame.
+      await nextFrame();
+      const root = patchViewportRef.current;
+      const fileElement = root?.querySelector<HTMLElement>(
+        `[data-diff-file-index="${match.fileIndex}"]`,
+      );
+      const scroller = root?.querySelector<HTMLElement>(".diff-render-surface");
+      if (signal.aborted || !fileElement || !scroller) return;
+      if (match.side === undefined || match.lineNumber === undefined) {
+        fileElement.scrollIntoView({ block: "nearest", behavior: "instant" });
+        return;
+      }
+      if (fileElement.querySelector("diffs-container") && !hasRenderedDiffRows(fileElement)) {
+        // A just-unfolded or not yet drawn file: bring it in and let pierre draw its rows,
+        // which waits for the highlighter (cold on a first search).
+        fileElement.scrollIntoView({ block: "start", behavior: "instant" });
+        await waitForRenderedDiffRows(fileElement, signal);
+        if (signal.aborted) return;
+      }
+      const line = await revealDiffLine({
+        scroller,
+        fileElement,
+        side: match.side,
+        line: match.lineNumber,
+        signal,
+      });
+      if (line || signal.aborted) return;
+      // No row with that line number: fall back to the rendered row index.
+      (
+        findRenderedDiffLineElement({ fileElement, match, renderMode: diffRenderMode }) ??
+        fileElement
+      ).scrollIntoView({ block: "center", behavior: "instant" });
+    },
+    [diffRenderMode, renderableFiles, unfoldDiffFile],
   );
-  // Indexing every line of a large patch is only worth it once someone searches.
-  const diffSearchActive = normalizedDiffSearchQuery.length > 0;
-  const diffSearchIndex = useMemo(
-    () => (diffSearchActive ? buildDiffSearchIndex(renderableFiles) : EMPTY_DIFF_SEARCH_INDEX),
-    [diffSearchActive, renderableFiles],
-  );
-  const diffSearchMatches = useMemo(
-    () => findDiffSearchMatches(diffSearchIndex, effectiveDiffSearchQuery),
-    [diffSearchIndex, effectiveDiffSearchQuery],
-  );
-  const diffSearchMatchesByFileIndex = useMemo(
-    () => groupDiffSearchMatchesByFileIndex(diffSearchMatches),
-    [diffSearchMatches],
+  const diffSearchFilePathOf = useCallback(
+    (fileIndex: number) => {
+      const fileDiff = renderableFiles[fileIndex];
+      return fileDiff ? resolveFileDiffPath(fileDiff) : "";
+    },
+    [renderableFiles],
   );
   const renderableFileEntries = useMemo(
     () => renderableFiles.map((fileDiff, fileIndex) => ({ fileDiff, fileIndex })),
     [renderableFiles],
   );
+  const diffFind = useDiffSearch({
+    files: renderableFiles,
+    rootRef: patchViewportRef,
+    renderMode: diffRenderMode,
+    highlightName: DIFF_SEARCH_HIGHLIGHT_NAME,
+    paintCurrent: !isPhonePresentation,
+    revealMatch: revealDiffSearchMatch,
+    filePathOf: diffSearchFilePathOf,
+  });
+  const clearDiffSearch = diffFind.clear;
+  const resetDiffSearch = diffFind.reset;
+  // An invalid pattern does not filter; files a partial search did not reach stay listed.
   const filteredFileEntries = useMemo(() => {
-    if (!normalizedDiffSearchQuery) return renderableFileEntries;
-    return deriveDiffSearchFileIndexes(diffSearchMatches).map((index) => ({
+    if (!diffFind.active) return renderableFileEntries;
+    return diffFind.listedFileIndexes.map((index) => ({
       fileDiff: renderableFiles[index]!,
       fileIndex: index,
     }));
-  }, [diffSearchMatches, normalizedDiffSearchQuery, renderableFileEntries, renderableFiles]);
+  }, [diffFind.active, diffFind.listedFileIndexes, renderableFileEntries, renderableFiles]);
+  // Folded files are done: previous/next hunk and the scrollbar markers pass them by.
+  const hunkAnchors = useMemo(
+    () =>
+      buildDiffHunkAnchors(
+        filteredFileEntries,
+        diffRenderMode === "split" ? "split" : "unified",
+        (fileIndex) => {
+          const fileDiff = renderableFiles[fileIndex];
+          return !fileDiff || collapsedDiffFileKeys.has(buildFileDiffRenderKey(fileDiff));
+        },
+      ),
+    [collapsedDiffFileKeys, diffRenderMode, filteredFileEntries, renderableFiles],
+  );
+  const hunkNavigation = useDiffHunkNavigation({
+    viewportRef: patchViewportRef,
+    anchors: hunkAnchors,
+    enabled: diffOpen && !isPhonePresentation,
+  });
+  const findSurface = useDiffFindSurface({
+    onFind: diffFind.focusFind,
+    onHunk: hunkNavigation.go,
+    // The frozen phone tier keeps today's bar: no find key.
+    enabled: !isPhonePresentation && renderablePatch?.kind === "files",
+    scope: activeThread
+      ? { environmentId: activeThread.environmentId, projectId: activeThread.projectId }
+      : null,
+    threadRef: routeThreadRef ?? null,
+  });
 
   const navigationPaths = useMemo(
     () => filteredFileEntries.map(({ fileDiff }) => resolveFileDiffPath(fileDiff)),
@@ -754,132 +681,29 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
     navigationPaths,
     diffOpen && !isPhonePresentation,
   );
-
-  useEffect(() => {
-    setCurrentDiffMatchIndex(0);
-  }, [normalizedDiffSearchQuery, renderableFiles]);
-
-  useEffect(() => {
-    setCurrentDiffMatchIndex((current) => {
-      if (diffSearchMatches.length === 0) return 0;
-      return Math.min(current, diffSearchMatches.length - 1);
-    });
-  }, [diffSearchMatches.length]);
-
-  const goToDiffMatch = useCallback(
-    (delta: 1 | -1) => {
-      if (diffSearchMatches.length === 0) return;
-      const next = getNextDiffSearchMatchIndex(
-        currentDiffMatchIndex,
-        diffSearchMatches.length,
-        delta,
-      );
-      setCurrentDiffMatchIndex(next);
-      const match = diffSearchMatches[next];
-      const root = patchViewportRef.current;
-      if (!match || !root) return;
-      const targetFile = root.querySelector<HTMLElement>(
-        `[data-diff-file-index="${match.fileIndex}"]`,
-      );
-      if (!targetFile) return;
-
-      const targetLine = findRenderedDiffLineElement({
-        fileElement: targetFile,
-        match,
-        renderMode: diffRenderMode,
-      });
-      (targetLine ?? targetFile).scrollIntoView({ block: "center", behavior: "smooth" });
-      if (!targetLine && getDiffSearchMatchRenderedLineIndex(match, diffRenderMode) !== null) {
-        window.requestAnimationFrame(() => {
-          findRenderedDiffLineElement({
-            fileElement: targetFile,
-            match,
-            renderMode: diffRenderMode,
-          })?.scrollIntoView({ block: "center", behavior: "smooth" });
-        });
-      }
-    },
-    [currentDiffMatchIndex, diffRenderMode, diffSearchMatches],
+  // Totals describe this patch, not the checkout's status.
+  const patchTotals = useMemo(() => diffPatchTotals(renderableFiles), [renderableFiles]);
+  const listedFileKeys = useMemo(
+    () => filteredFileEntries.map(({ fileDiff }) => buildFileDiffRenderKey(fileDiff)),
+    [filteredFileEntries],
   );
-
-  useEffect(() => {
-    if (!isCSSHighlightSupported()) return;
-    const cssHighlights = (CSS as unknown as { highlights: Map<string, Highlight> }).highlights;
-    const root = patchViewportRef.current;
-    if (!root || !normalizedDiffSearchQuery || diffSearchMatches.length === 0) {
-      cssHighlights.delete(DIFF_SEARCH_HIGHLIGHT_NAME);
-      return;
+  const allListedFilesCollapsed = areAllDiffFilesCollapsed(listedFileKeys, collapsedDiffFileKeys);
+  const toggleAllListedFilesCollapsed = useCallback(
+    () => setCollapsedDiffFileKeys((current) => toggleAllDiffFiles(listedFileKeys, current)),
+    [listedFileKeys],
+  );
+  // The tree lists what the diff lists (find filters both); a path listed twice (a type
+  // change is a deletion and an addition) has one row, which reveals its first file.
+  const fileTreeFiles = useMemo<FileTreeFiles | null>(() => {
+    if (!fileTreeOpen) return null;
+    const byPath = new Map<string, { readonly status: PullRequestFileStatus }>();
+    for (const { fileDiff } of filteredFileEntries) {
+      const path = resolveFileDiffPath(fileDiff);
+      if (!byPath.has(path)) byPath.set(path, { status: fileStatusOf(fileDiff) });
     }
-
-    let frameId = 0;
-    let refreshTimeoutId = 0;
-    const shadowObservers = new Map<ShadowRoot, MutationObserver>();
-    const viewport =
-      root.querySelector<HTMLElement>(".diff-render-surface") ??
-      root.querySelector<HTMLElement>("[data-virtualizer]") ??
-      root;
-    const refreshHighlights = () => {
-      frameId = 0;
-      observeNewShadowRoots();
-      const ranges = findDiffSearchRanges({
-        rootElement: root,
-        viewportElement: viewport,
-        matchesByFileIndex: diffSearchMatchesByFileIndex,
-        renderMode: diffRenderMode,
-      });
-      if (ranges.length === 0) {
-        cssHighlights.delete(DIFF_SEARCH_HIGHLIGHT_NAME);
-        return;
-      }
-      cssHighlights.set(DIFF_SEARCH_HIGHLIGHT_NAME, new Highlight(...ranges));
-    };
-    const scheduleRefresh = () => {
-      if (frameId !== 0 || refreshTimeoutId !== 0) return;
-      refreshTimeoutId = window.setTimeout(() => {
-        refreshTimeoutId = 0;
-        frameId = window.requestAnimationFrame(refreshHighlights);
-      }, DIFF_SEARCH_HIGHLIGHT_REFRESH_DELAY_MS);
-    };
-    const observeNewShadowRoots = () => {
-      const fileElements = root.querySelectorAll<HTMLElement>("[data-diff-file-index]");
-      for (const fileElement of fileElements) {
-        if (!isNearViewport(fileElement, viewport)) continue;
-        const containers = fileElement.querySelectorAll<HTMLElement>("diffs-container");
-        for (const container of containers) {
-          const shadow = container.shadowRoot;
-          if (!shadow || shadowObservers.has(shadow)) continue;
-          const observer = new MutationObserver(scheduleRefresh);
-          observer.observe(shadow, { childList: true, subtree: true });
-          shadowObservers.set(shadow, observer);
-        }
-      }
-    };
-
-    const lightObserver = new MutationObserver(scheduleRefresh);
-    lightObserver.observe(root, { childList: true, subtree: true });
-    viewport.addEventListener("scroll", scheduleRefresh, { passive: true });
-    const resizeObserver = new ResizeObserver(scheduleRefresh);
-    resizeObserver.observe(viewport);
-    scheduleRefresh();
-
-    return () => {
-      lightObserver.disconnect();
-      viewport.removeEventListener("scroll", scheduleRefresh);
-      resizeObserver.disconnect();
-      for (const observer of shadowObservers.values()) {
-        observer.disconnect();
-      }
-      shadowObservers.clear();
-      if (refreshTimeoutId !== 0) window.clearTimeout(refreshTimeoutId);
-      if (frameId !== 0) window.cancelAnimationFrame(frameId);
-      cssHighlights.delete(DIFF_SEARCH_HIGHLIGHT_NAME);
-    };
-  }, [
-    diffRenderMode,
-    diffSearchMatches.length,
-    diffSearchMatchesByFileIndex,
-    normalizedDiffSearchQuery,
-  ]);
+    const paths = [...byPath.keys()];
+    return { paths, byPath, tree: buildReviewFileTree(paths) };
+  }, [fileTreeOpen, filteredFileEntries]);
 
   useEffect(() => {
     if (renderableFiles.length === 0) {
@@ -898,14 +722,21 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
     if (diffOpen && !previousDiffOpenRef.current) {
       setDiffWordWrap(isPhonePresentation ? true : settings.diffWordWrap);
       setDiffIgnoreWhitespace(settings.diffIgnoreWhitespace);
-      setDiffSearchQuery("");
+      // Search options last while the panel stays open, not across openings.
+      resetDiffSearch();
     }
     previousDiffOpenRef.current = diffOpen;
-  }, [diffOpen, isPhonePresentation, settings.diffIgnoreWhitespace, settings.diffWordWrap]);
+  }, [
+    diffOpen,
+    isPhonePresentation,
+    resetDiffSearch,
+    settings.diffIgnoreWhitespace,
+    settings.diffWordWrap,
+  ]);
 
   useEffect(() => {
-    setDiffSearchQuery("");
-  }, [selectedTurnId]);
+    clearDiffSearch();
+  }, [clearDiffSearch, selectedTurnId]);
 
   useEffect(() => {
     if (!selectedFilePath || !patchViewportRef.current) {
@@ -937,20 +768,19 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
     renderableFiles,
   ]);
 
+  const diffEnvironmentId = activeThread?.environmentId;
   const openDiffFileInEditor = useCallback(
     (filePath: string, lineNumber?: number) => {
-      const api = readLocalApi();
-      if (!api) return;
+      const workspacePath = repositoryPathToWorkspacePath(filePath, diffWorkspacePrefix);
       const target = resolveDiffOpenInEditorTarget({
-        cwd: activeCwd,
-        filePath,
+        // A file outside the thread's folder resolves against the repository.
+        cwd: workspacePath === null ? (diffRepositoryRoot ?? activeCwd) : activeCwd,
+        filePath: workspacePath ?? filePath,
         lineNumber,
       });
-      void openInPreferredEditor(api, target).catch((error) => {
-        console.warn("Failed to open diff in editor.", error);
-      });
+      openPathInEditorWithToast(diffEnvironmentId, target);
     },
-    [activeCwd],
+    [activeCwd, diffEnvironmentId, diffRepositoryRoot, diffWorkspacePrefix],
   );
   const toggleDiffFileCollapsed = useCallback((fileKey: string) => {
     setCollapsedDiffFileKeys((current) => {
@@ -1274,7 +1104,7 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
   );
 
   return (
-    <DiffPanelShell mode={mode} header={headerRow}>
+    <DiffPanelShell mode={mode} header={headerRow} surfaceProps={findSurface.props}>
       {comparing &&
         comparison.data &&
         activeThread &&
@@ -1292,13 +1122,14 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
 
       {!isPhonePresentation && activeThread && isGitRepo && (
         <DiffComparisonControls
-          key={`${activeThread.environmentId}:${activeProject?.cwd}:${comparison.selection?.mode}:${comparison.selection?.ref}`}
+          key={`${activeThread.environmentId}:${activeProject?.cwd}:${comparison.selection?.mode}:${comparison.selection?.target}:${comparison.selection?.ref}`}
           selection={comparing ? comparison.selection : null}
           data={comparing ? comparison.data : null}
           turnSelected={!reviewingLocal && !comparing}
           isLoading={comparing && comparison.isLoading}
           error={comparing ? comparison.error : null}
           refMoved={comparing && comparison.refMoved}
+          workingTreeAvailable={comparison.workingTreeAvailable === true}
           onSelect={(selection) => {
             setLocalScope(null);
             comparison.setSelection(selection);
@@ -1345,11 +1176,50 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
               <button
                 type="button"
                 className="rounded border px-2 py-1"
-                disabled={localChanges.isLoading || localChanges.isApplying}
+                disabled={
+                  localChanges.isLoading || localChanges.isApplying || localChanges.isCommitting
+                }
                 onClick={() => void localChanges.refresh()}
               >
                 Refresh local changes
               </button>
+            )}
+            {reviewingLocal && localScope === "staged" && localChanges.commitStaged && (
+              <>
+                <input
+                  type="text"
+                  className="min-w-40 flex-1 rounded border bg-transparent px-2 py-1"
+                  aria-label="Commit message"
+                  placeholder="Commit message (blank: generate)"
+                  value={stagedCommitMessage}
+                  disabled={localChanges.isCommitting}
+                  onChange={(event) => setStagedCommitMessage(event.target.value)}
+                />
+                <button
+                  type="button"
+                  className="rounded border px-2 py-1 font-medium"
+                  disabled={
+                    localChanges.isLoading ||
+                    localChanges.isApplying ||
+                    localChanges.isCommitting ||
+                    !localChanges.data?.stagedRevision ||
+                    localChanges.data.staged.files.length === 0
+                  }
+                  title="Commit exactly these staged changes; unstaged edits stay in your working files."
+                  onClick={() =>
+                    void localChanges
+                      .commitStaged?.(
+                        { threadRef: scopeThreadRef(activeThread.environmentId, activeThread.id) },
+                        stagedCommitMessage,
+                      )
+                      .then((committed) => {
+                        if (committed) setStagedCommitMessage("");
+                      })
+                  }
+                >
+                  Commit staged
+                </button>
+              </>
             )}
           </div>
           {reviewingLocal && (
@@ -1357,9 +1227,17 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
               {localScope === "staged"
                 ? "HEAD → index. Unstage keeps your working files."
                 : "Index → working files. Later agent edits appear here; refresh to read external changes."}{" "}
-              Staging does not commit. Existing commit actions stage their selected files.
+              {localChanges.commitStaged
+                ? "Commit staged records exactly this index. Other commit actions stage their selected files first."
+                : "Staging does not commit. Existing commit actions stage their selected files."}
               {localChanges.isApplying && <span role="status"> Updating index…</span>}
+              {localChanges.isCommitting && <span role="status"> Committing staged changes…</span>}
               {localChanges.isLoading && <span role="status"> Refreshing local changes…</span>}
+            </p>
+          )}
+          {reviewingLocal && localScope === "staged" && localChanges.commitError && (
+            <p role="alert" className="mt-1 text-destructive">
+              {localChanges.commitError}
             </p>
           )}
         </section>
@@ -1411,269 +1289,313 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
               )
             ) : renderablePatch.kind === "files" ? (
               <>
-                <div className="flex shrink-0 items-center gap-2 border-b border-border/50 bg-card/40 px-2.5 py-1.5 [-webkit-app-region:no-drag]">
-                  <SearchIcon className="size-3.5 shrink-0 text-muted-foreground/70" />
-                  <input
-                    ref={diffSearchInputRef}
-                    type="text"
-                    value={diffSearchQuery}
-                    onChange={(event) => setDiffSearchQuery(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Escape") {
-                        setDiffSearchQuery("");
-                        event.currentTarget.blur();
-                        return;
-                      }
-                      if (event.key === "Enter" && normalizedDiffSearchQuery) {
-                        event.preventDefault();
-                        goToDiffMatch(event.shiftKey ? -1 : 1);
-                      }
-                    }}
-                    placeholder="Search files or hunks..."
-                    aria-label="Search diff"
-                    className={cn(
-                      "min-w-0 flex-1 bg-transparent text-xs text-foreground outline-none placeholder:text-muted-foreground/55",
-                      isPhonePresentation && "min-h-[44px]",
-                    )}
+                <DiffSearchBar
+                  search={diffFind}
+                  label="Search diff"
+                  placeholder="Search files or hunks..."
+                  presentation={isPhonePresentation ? "phone" : "desktop"}
+                  onEscape={() => {
+                    diffFind.clear();
+                    if (isPhonePresentation) {
+                      diffFind.inputRef.current?.blur();
+                      return;
+                    }
+                    // Focus stays in the diff: the find key and keyboard scrolling keep working.
+                    window.requestAnimationFrame(findSurface.focus);
+                  }}
+                />
+                {isPhonePresentation ? null : (
+                  <DiffReviewToolbar
+                    fileTreeOpen={fileTreeOpen}
+                    onFileTreeOpenChange={setFileTreeOpen}
+                    totals={patchTotals}
+                    canPreviousHunk={hunkNavigation.canPrevious}
+                    canNextHunk={hunkNavigation.canNext}
+                    onHunk={hunkNavigation.go}
+                    allCollapsed={listedFileKeys.length === 0 ? null : allListedFilesCollapsed}
+                    onToggleCollapseAll={toggleAllListedFilesCollapsed}
                   />
-                  {normalizedDiffSearchQuery && (
-                    <>
-                      <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground/70">
-                        {diffSearchMatches.length === 0 ? 0 : currentDiffMatchIndex + 1} of{" "}
-                        {diffSearchMatches.length}
-                      </span>
-                      <div className="flex shrink-0 items-center">
-                        <button
-                          type="button"
-                          onClick={() => goToDiffMatch(-1)}
-                          disabled={diffSearchMatches.length === 0}
-                          className={cn(
-                            "inline-flex size-5 cursor-pointer items-center justify-center rounded-sm text-muted-foreground/70 transition-colors hover:bg-foreground/10 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground/70",
-                            isPhonePresentation && "size-[44px]",
-                          )}
-                          aria-label="Previous match"
-                          title="Previous match (Shift+Enter)"
-                        >
-                          <ChevronUpIcon className="size-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => goToDiffMatch(1)}
-                          disabled={diffSearchMatches.length === 0}
-                          className={cn(
-                            "inline-flex size-5 cursor-pointer items-center justify-center rounded-sm text-muted-foreground/70 transition-colors hover:bg-foreground/10 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground/70",
-                            isPhonePresentation && "size-[44px]",
-                          )}
-                          aria-label="Next match"
-                          title="Next match (Enter)"
-                        >
-                          <ChevronDownIcon className="size-3.5" />
-                        </button>
-                      </div>
-                    </>
-                  )}
-                  {diffSearchQuery && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setDiffSearchQuery("");
-                        diffSearchInputRef.current?.focus();
-                      }}
-                      className={cn(
-                        "inline-flex size-4 shrink-0 cursor-pointer items-center justify-center rounded-sm text-muted-foreground/70 transition-colors hover:bg-foreground/10 hover:text-foreground",
-                        isPhonePresentation && "size-[44px]",
-                      )}
-                      aria-label="Clear search"
-                      title="Clear search"
-                    >
-                      <XIcon className="size-3" />
-                    </button>
-                  )}
-                </div>
+                )}
                 {filteredFileEntries.length === 0 ? (
                   <div className="flex flex-1 items-center justify-center px-3 py-2 text-xs text-muted-foreground/70">
-                    <p>No files match &ldquo;{diffSearchQuery}&rdquo;.</p>
+                    <p>No files match &ldquo;{diffFind.query}&rdquo;.</p>
                   </div>
                 ) : (
-                  <Virtualizer
-                    className={cn(
-                      "diff-render-surface min-h-0 flex-1 overflow-auto px-2 pb-2",
-                      // Horizontal diff overflow belongs to the code block the
-                      // renderer scrolls itself. On the phone surface the file
-                      // list must not become a second horizontal scroller and
-                      // must not chain a horizontal swipe outward to the page
-                      // (which is a back-navigation gesture on a phone), so it
-                      // scrolls on one axis and contains overscroll on the
-                      // other. Desktop keeps `overflow: auto` on both axes.
-                      isPhonePresentation &&
-                        "overflow-x-hidden overflow-y-auto overscroll-x-contain",
+                  <div className="flex min-h-0 min-w-0 flex-1">
+                    {fileTreeFiles && (
+                      <FileTreePane
+                        className="w-[min(40%,15rem)] shrink-0 border-r border-border/60"
+                        files={fileTreeFiles}
+                        currentPath={fileNavigation.path}
+                        onSelectFile={fileNavigation.reveal}
+                        filterRef={fileTreeFilterRef}
+                        filterKeyHint={null}
+                      />
                     )}
-                    config={{
-                      overscrollSize: 600,
-                      intersectionObserverMargin: 1200,
-                    }}
-                  >
-                    {filteredFileEntries.map(({ fileDiff, fileIndex }) => {
-                      const filePath = resolveFileDiffPath(fileDiff);
-                      const localFile =
-                        reviewingLocal &&
-                        localScope &&
-                        renderablePatch?.kind === "files" &&
-                        renderablePatch.files.length ===
-                          localChanges.data?.[localScope].files.length
-                          ? localChanges.data[localScope].files[
-                              renderablePatch.files.indexOf(fileDiff)
-                            ]
-                          : undefined;
-                      const fileKey = buildFileDiffRenderKey(fileDiff);
-                      const themedFileKey = `${fileKey}:${resolvedTheme}`;
-                      const collapsed = collapsedDiffFileKeys.has(fileKey);
-                      return (
-                        <div
-                          key={themedFileKey}
-                          data-diff-file-path={filePath}
-                          data-diff-file-index={fileIndex}
-                          className="diff-render-file group/diff-file mb-2 rounded-md first:mt-2 last:mb-0"
-                          // Open-in-editor fires a local RPC that cannot
-                          // succeed from a phone; the phone surface renders
-                          // the title as plain text instead of a dead tap.
-                          onClickCapture={
-                            isPhonePresentation
-                              ? undefined
-                              : (event) => {
-                                  const nativeEvent = event.nativeEvent as MouseEvent;
-                                  const composedPath = nativeEvent.composedPath?.() ?? [];
-                                  const clickedHeader = composedPath.some((node) => {
-                                    if (!(node instanceof Element)) return false;
-                                    return node.hasAttribute("data-title");
-                                  });
-                                  if (!clickedHeader) return;
-                                  openDiffFileInEditor(filePath);
-                                }
-                          }
-                        >
-                          <FileDiff
-                            fileDiff={fileDiff}
-                            renderHeaderMetadata={() =>
-                              reviewingLocal && localScope && localFile ? (
-                                <DiffStagingActions
-                                  key={`${localChanges.data?.revision}:${localFile.id}`}
-                                  scope={localScope}
-                                  file={localFile}
-                                  name={filePath}
-                                  disabled={
-                                    localChanges.isLoading ||
-                                    localChanges.isApplying ||
-                                    !!localChanges.error
-                                  }
-                                  onApply={(input) => {
-                                    void localChanges.apply(input);
-                                  }}
-                                />
-                              ) : comparing && comparison.data ? (
-                                <button
-                                  type="button"
-                                  className="rounded px-2 py-1 text-xs hover:bg-foreground/10"
-                                  aria-label={`Blame line in ${fileDiff.name}`}
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    if (comparison.data)
-                                      setBlameSelection({
-                                        source: comparison.data.source,
-                                        file: fileDiff,
-                                        side: "base",
-                                        line: fileDiff.hunks[0]?.deletionStart || 1,
+                    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+                      <Virtualizer
+                        className={cn(
+                          // Focusable for find and keyboard scrolling: a ring only when focus came
+                          // from the keyboard (Escape in the find field), none after a click.
+                          "diff-render-surface min-h-0 flex-1 overflow-auto px-2 pb-2 outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring/70",
+                          // Horizontal diff overflow belongs to the code block the
+                          // renderer scrolls itself. On the phone surface the file
+                          // list must not become a second horizontal scroller and
+                          // must not chain a horizontal swipe outward to the page
+                          // (which is a back-navigation gesture on a phone), so it
+                          // scrolls on one axis and contains overscroll on the
+                          // other. Desktop keeps `overflow: auto` on both axes.
+                          isPhonePresentation &&
+                            "overflow-x-hidden overflow-y-auto overscroll-x-contain",
+                        )}
+                        config={{
+                          overscrollSize: 600,
+                          intersectionObserverMargin: 1200,
+                        }}
+                      >
+                        {filteredFileEntries.map(({ fileDiff, fileIndex }) => {
+                          const filePath = resolveFileDiffPath(fileDiff);
+                          const localFile =
+                            reviewingLocal &&
+                            localScope &&
+                            renderablePatch?.kind === "files" &&
+                            renderablePatch.files.length ===
+                              localChanges.data?.[localScope].files.length
+                              ? localChanges.data[localScope].files[
+                                  renderablePatch.files.indexOf(fileDiff)
+                                ]
+                              : undefined;
+                          const fileKey = buildFileDiffRenderKey(fileDiff);
+                          const themedFileKey = `${fileKey}:${resolvedTheme}`;
+                          const collapsed = collapsedDiffFileKeys.has(fileKey);
+                          const filePick =
+                            fileReferencePicker.pick?.fileKey === fileKey
+                              ? fileReferencePicker.pick
+                              : null;
+                          // Lines go to the chat under the path the agent sees;
+                          // a file outside the thread's folder cannot be named.
+                          const referencePath = repositoryPathToWorkspacePath(
+                            filePath,
+                            diffWorkspacePrefix,
+                          );
+                          const pickPath =
+                            fileReferencePicker.available &&
+                            referencePath !== null &&
+                            normalizeFileReferencePath(referencePath) !== null
+                              ? referencePath
+                              : null;
+                          return (
+                            <div
+                              key={themedFileKey}
+                              data-diff-file-path={filePath}
+                              data-diff-file-index={fileIndex}
+                              className="diff-render-file group/diff-file mb-2 rounded-md first:mt-2 last:mb-0"
+                              // Open-in-editor fires a local RPC that cannot
+                              // succeed from a phone; the phone surface renders
+                              // the title as plain text instead of a dead tap.
+                              onClickCapture={
+                                isPhonePresentation
+                                  ? undefined
+                                  : (event) => {
+                                      const nativeEvent = event.nativeEvent as MouseEvent;
+                                      const composedPath = nativeEvent.composedPath?.() ?? [];
+                                      const clickedHeader = composedPath.some((node) => {
+                                        if (!(node instanceof Element)) return false;
+                                        return node.hasAttribute("data-title");
                                       });
-                                  }}
-                                >
-                                  Line blame
-                                </button>
-                              ) : null
-                            }
-                            renderHeaderPrefix={() => (
-                              <button
-                                type="button"
-                                className={cn(
-                                  "inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-sm border-0 bg-transparent p-0 transition-colors hover:bg-foreground/10 focus-visible:outline-hidden",
-                                  // Phone: the 44px floor comes from the real
-                                  // box, not from hit slop. The previous
-                                  // `after:size-11` expansion measured 32x32
-                                  // of outward reach here, because
-                                  // `.diff-render-file` is `overflow: clip`
-                                  // and the file header row clips again — a
-                                  // bounding-box or computed-style assertion
-                                  // on the pseudo-element cannot see that.
-                                  isPhonePresentation && "size-[44px]",
-                                  getDiffCollapseIconClassName(fileDiff),
-                                )}
-                                aria-label={
-                                  collapsed ? `Expand ${filePath}` : `Collapse ${filePath}`
+                                      if (!clickedHeader) return;
+                                      openDiffFileInEditor(filePath);
+                                    }
+                              }
+                            >
+                              <FileDiff
+                                fileDiff={fileDiff}
+                                lineAnnotations={
+                                  filePick
+                                    ? [
+                                        {
+                                          side: fileLineSelectionSide(filePick.selection),
+                                          lineNumber: filePick.selection.lineEnd,
+                                        },
+                                      ]
+                                    : NO_FILE_ANNOTATIONS
                                 }
-                                aria-expanded={!collapsed}
-                                title={collapsed ? "Expand diff" : "Collapse diff"}
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  toggleDiffFileCollapsed(fileKey);
-                                }}
-                              >
-                                {collapsed ? (
-                                  <ChevronRightIcon className="size-4" />
-                                ) : (
-                                  <ChevronDownIcon className="size-4" />
+                                selectedLines={
+                                  filePick ? fileLineSelectionRange(filePick.selection) : null
+                                }
+                                renderAnnotation={() =>
+                                  filePick ? (
+                                    <FileReferenceNoteComposer
+                                      key={filePick.id}
+                                      title={formatFileReferenceTitle(filePick.selection)}
+                                      restoreComment={fileReferencePicker.restoreComment}
+                                      onCommentChange={fileReferencePicker.rememberComment}
+                                      onCancel={fileReferencePicker.cancel}
+                                      onAdd={(comment) =>
+                                        fileReferencePicker.add(
+                                          diffFileReference({
+                                            fileDiff,
+                                            selection: filePick.selection,
+                                            comment,
+                                          }),
+                                        )
+                                      }
+                                    />
+                                  ) : null
+                                }
+                                renderHeaderMetadata={() =>
+                                  reviewingLocal && localScope && localFile ? (
+                                    <DiffStagingActions
+                                      key={`${localChanges.data?.revision}:${localFile.id}`}
+                                      scope={localScope}
+                                      file={localFile}
+                                      name={filePath}
+                                      disabled={
+                                        localChanges.isLoading ||
+                                        localChanges.isApplying ||
+                                        localChanges.isCommitting ||
+                                        !!localChanges.error
+                                      }
+                                      onApply={(input) => {
+                                        void localChanges.apply(input);
+                                      }}
+                                    />
+                                  ) : comparing && comparison.data ? (
+                                    <button
+                                      type="button"
+                                      className="rounded px-2 py-1 text-xs hover:bg-foreground/10"
+                                      aria-label={`Blame line in ${fileDiff.name}`}
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        if (comparison.data)
+                                          setBlameSelection({
+                                            source: comparison.data.source,
+                                            file: fileDiff,
+                                            side: "base",
+                                            line: fileDiff.hunks[0]?.deletionStart || 1,
+                                          });
+                                      }}
+                                    >
+                                      Line blame
+                                    </button>
+                                  ) : null
+                                }
+                                renderHeaderPrefix={() => (
+                                  <button
+                                    type="button"
+                                    className={cn(
+                                      "inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-sm border-0 bg-transparent p-0 transition-colors hover:bg-foreground/10 focus-visible:outline-hidden",
+                                      // Phone: the 44px floor comes from the real
+                                      // box, not from hit slop. The previous
+                                      // `after:size-11` expansion measured 32x32
+                                      // of outward reach here, because
+                                      // `.diff-render-file` is `overflow: clip`
+                                      // and the file header row clips again — a
+                                      // bounding-box or computed-style assertion
+                                      // on the pseudo-element cannot see that.
+                                      isPhonePresentation && "size-[44px]",
+                                      getDiffCollapseIconClassName(fileDiff),
+                                    )}
+                                    aria-label={
+                                      collapsed ? `Expand ${filePath}` : `Collapse ${filePath}`
+                                    }
+                                    aria-expanded={!collapsed}
+                                    title={collapsed ? "Expand diff" : "Collapse diff"}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      toggleDiffFileCollapsed(fileKey);
+                                    }}
+                                  >
+                                    {collapsed ? (
+                                      <ChevronRightIcon className="size-4" />
+                                    ) : (
+                                      <ChevronDownIcon className="size-4" />
+                                    )}
+                                  </button>
                                 )}
-                              </button>
-                            )}
-                            options={{
-                              collapsed,
-                              diffStyle: diffRenderMode === "split" ? "split" : "unified",
-                              lineDiffType: "none",
-                              overflow: diffWordWrap ? "wrap" : "scroll",
-                              theme: resolveDiffThemeName(resolvedTheme),
-                              themeType: resolvedTheme as DiffThemeType,
-                              unsafeCSS: isPhonePresentation
-                                ? DIFF_PANEL_PHONE_UNSAFE_CSS
-                                : DIFF_PANEL_UNSAFE_CSS,
-                              lineHoverHighlight: "number",
-                              ...(comparing && comparison.data
-                                ? {
-                                    onLineClick: (line) => {
-                                      if (line.numberColumn || !window.getSelection()?.isCollapsed)
-                                        return;
-                                      if (comparison.data)
-                                        setBlameSelection({
-                                          source: comparison.data.source,
-                                          file: fileDiff,
-                                          side:
-                                            line.annotationSide === "deletions" ? "base" : "head",
-                                          line: line.lineNumber,
-                                        });
-                                    },
-                                  }
-                                : {}),
-                              // Line-number editor-open taps are suppressed on
-                              // the phone surface (same RPC constraint as the
-                              // title click above).
-                              ...(isPhonePresentation
-                                ? {}
-                                : {
-                                    onLineNumberClick: ({ lineNumber }: { lineNumber: number }) => {
-                                      openDiffFileInEditor(filePath, lineNumber);
-                                    },
-                                  }),
-                            }}
-                          />
-                          {!collapsed && activeThread && imagePreviewCwd ? (
-                            <DiffImagePreview
-                              environmentId={activeThread.environmentId}
-                              cwd={imagePreviewCwd}
-                              fileDiff={fileDiff}
-                              afterIsWorkingTree={reviewingLocal && localScope === "unstaged"}
-                            />
-                          ) : null}
-                        </div>
-                      );
-                    })}
-                  </Virtualizer>
+                                options={{
+                                  collapsed,
+                                  diffStyle: diffRenderMode === "split" ? "split" : "unified",
+                                  // Applies only without highlight workers: the pool's own options
+                                  // (word-level, see diffWorkerPool.ts) win while it runs, and the
+                                  // main thread skips the word diff.
+                                  lineDiffType: "none",
+                                  overflow: diffWordWrap ? "wrap" : "scroll",
+                                  theme: resolveDiffThemeName(resolvedTheme),
+                                  themeType: resolvedTheme as DiffThemeType,
+                                  unsafeCSS: isPhonePresentation
+                                    ? DIFF_PANEL_PHONE_UNSAFE_CSS
+                                    : DIFF_PANEL_UNSAFE_CSS,
+                                  lineHoverHighlight: "number",
+                                  ...(pickPath !== null
+                                    ? {
+                                        enableGutterUtility: true,
+                                        onGutterUtilityClick: (range: SelectedLineRange) =>
+                                          fileReferencePicker.open(
+                                            fileKey,
+                                            diffLineSelection(fileDiff, pickPath, range),
+                                          ),
+                                      }
+                                    : {}),
+                                  ...(comparing && comparison.data
+                                    ? {
+                                        onLineClick: (line) => {
+                                          if (
+                                            line.numberColumn ||
+                                            !window.getSelection()?.isCollapsed
+                                          )
+                                            return;
+                                          const side =
+                                            line.annotationSide === "deletions" ? "base" : "head";
+                                          // Working-file lines have no commit to blame.
+                                          if (side === "head" && comparingWorkingTree) return;
+                                          if (comparison.data)
+                                            setBlameSelection({
+                                              source: comparison.data.source,
+                                              file: fileDiff,
+                                              side,
+                                              line: line.lineNumber,
+                                            });
+                                        },
+                                      }
+                                    : {}),
+                                  // Line-number editor-open taps are suppressed on
+                                  // the phone surface (same RPC constraint as the
+                                  // title click above).
+                                  ...(isPhonePresentation
+                                    ? {}
+                                    : {
+                                        onLineNumberClick: ({
+                                          lineNumber,
+                                        }: {
+                                          lineNumber: number;
+                                        }) => {
+                                          openDiffFileInEditor(filePath, lineNumber);
+                                        },
+                                      }),
+                                }}
+                              />
+                              {!collapsed && activeThread && imagePreviewCwd ? (
+                                <DiffImagePreview
+                                  environmentId={activeThread.environmentId}
+                                  cwd={imagePreviewCwd}
+                                  fileDiff={fileDiff}
+                                  afterIsWorkingTree={afterIsWorkingTree}
+                                />
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                      </Virtualizer>
+                      {isPhonePresentation ? null : (
+                        <DiffChangeMarkers
+                          viewportRef={patchViewportRef}
+                          anchors={hunkAnchors}
+                          onReveal={(index) => void hunkNavigation.reveal(index)}
+                        />
+                      )}
+                    </div>
+                  </div>
                 )}
               </>
             ) : (

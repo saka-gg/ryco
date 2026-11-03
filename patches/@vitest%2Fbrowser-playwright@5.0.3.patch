@@ -1,0 +1,39 @@
+diff --git a/dist/index.js b/dist/index.js
+index d7ab805a2b671f27fa8d91f3684b0e88aa3009ce..daab4269e4ef1468e3e8770444736863de1168d3 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -1058,6 +1058,15 @@ class PlaywrightBrowserProvider {
+ 		return this.browserPromise;
+ 	}
+ 	createMocker() {
++		// A mock removed or replaced while its request waits (for the manual factory, say) is
++		// unrouted, and Playwright then lets the request through on its own. The handler still
++		// running finds the route handled; that is not an error, and left to reject it ended
++		// the whole run as an unhandled rejection.
++		const ignoreRouteHandledMeanwhile = (error) => {
++			if (!(error instanceof Error && error.message.includes("Route is already handled"))) {
++				throw error;
++			}
++		};
+ 		const idPredicates = new Map();
+ 		const sessionIds = new Map();
+ 		function createPredicate(url) {
+@@ -1106,7 +1115,7 @@ class PlaywrightBrowserProvider {
+ 				ids.add(moduleUrl);
+ 				sessionIds.set(sessionId, ids);
+ 				idPredicates.set(key, predicate);
+-				await page.context().route(predicate, async (route) => {
++				const serve = async (route) => {
+ 					if (module.type === "manual") {
+ 						const exports = Object.keys(await module.resolve());
+ 						const body = createManualModuleSource(module.url, exports);
+@@ -1155,7 +1164,8 @@ class PlaywrightBrowserProvider {
+ 							headers: { Location: url.href }
+ 						});
+ 					} else ;
+-				});
++				};
++				await page.context().route(predicate, (route) => serve(route).catch(ignoreRouteHandledMeanwhile));
+ 			},
+ 			delete: async (sessionId, id) => {
+ 				const page = this.getPage(sessionId);

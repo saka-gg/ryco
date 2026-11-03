@@ -1,4 +1,4 @@
-import type { KeybindingCommand } from "@ryco/contracts";
+import type { KeybindingCommand, StaticKeybindingCommand } from "@ryco/contracts";
 
 export interface KeybindingCategory {
   readonly id: string;
@@ -6,22 +6,27 @@ export interface KeybindingCategory {
   readonly sortWeight: number;
 }
 
-export const KEYBINDING_CATEGORIES: Record<string, KeybindingCategory> = {
+/** Keyed by command prefix (`thread.next` → Threads). Categories without commands are not shown. */
+export const KEYBINDING_CATEGORIES = {
   terminal: { id: "terminal", label: "Terminal", sortWeight: 10 },
   workspace: { id: "workspace", label: "Workspace", sortWeight: 20 },
   diff: { id: "diff", label: "Diff", sortWeight: 30 },
   commandPalette: { id: "commandPalette", label: "Command palette", sortWeight: 40 },
   sidebar: { id: "sidebar", label: "Sidebar", sortWeight: 50 },
+  navigation: { id: "navigation", label: "Navigation", sortWeight: 55 },
   chat: { id: "chat", label: "Chat", sortWeight: 60 },
+  sideChat: { id: "sideChat", label: "Side chat", sortWeight: 65 },
   composer: { id: "composer", label: "Composer", sortWeight: 70 },
   editor: { id: "editor", label: "Editor", sortWeight: 80 },
   modelPicker: { id: "modelPicker", label: "Model picker", sortWeight: 90 },
   thread: { id: "thread", label: "Threads", sortWeight: 100 },
+  threadTab: { id: "threadTab", label: "Chat tabs", sortWeight: 103 },
+  view: { id: "view", label: "Tabs and panes", sortWeight: 104 },
   pane: { id: "pane", label: "Split view", sortWeight: 105 },
   pullRequests: { id: "pullRequests", label: "Pull requests", sortWeight: 107 },
   projects: { id: "projects", label: "Projects", sortWeight: 108 },
   script: { id: "script", label: "Project scripts", sortWeight: 110 },
-} as const;
+} as const satisfies Record<string, KeybindingCategory>;
 
 export interface KeybindingCommandMeta {
   readonly category: KeybindingCategory;
@@ -29,7 +34,11 @@ export interface KeybindingCommandMeta {
   readonly sortWeight: number;
 }
 
-const STATIC_COMMAND_META: Record<string, Omit<KeybindingCommandMeta, "category">> = {
+type StaticCommandMeta = Omit<KeybindingCommandMeta, "category">;
+type StaticCommandMetaGroup = Partial<Record<StaticKeybindingCommand, StaticCommandMeta>>;
+
+// Commands outside the feature groups below.
+const CORE_COMMAND_META = {
   "terminal.toggle": { title: "Toggle terminal drawer", sortWeight: 1 },
   "terminal.split": { title: "Split terminal", sortWeight: 2 },
   "terminal.new": { title: "New terminal", sortWeight: 3 },
@@ -77,14 +86,90 @@ const STATIC_COMMAND_META: Record<string, Omit<KeybindingCommandMeta, "category"
   "pullRequests.open": { title: "Open pull requests", sortWeight: 1 },
   // Not "Show Projects": that is the sidebar mode (`sidebar.showProjects`).
   "projects.open": { title: "Open projects page", sortWeight: 1 },
+} satisfies StaticCommandMetaGroup;
+
+// Quick open and find in files.
+const FILE_SEARCH_COMMAND_META = {
+  "workspace.quickOpen": { title: "Quick open file", sortWeight: 5 },
+  "workspace.findInFiles": { title: "Find in files", sortWeight: 6 },
+} satisfies StaticCommandMetaGroup;
+
+// Settle, snooze, archive, mark unread and undo for threads (Threads, sort weights from 20).
+const THREAD_LIFECYCLE_COMMAND_META = {
+  "thread.settle": { title: "Settle current thread or move it to Active", sortWeight: 20 },
+  "thread.snooze": { title: "Snooze or unsnooze current thread", sortWeight: 21 },
+  "thread.archive": { title: "Archive current thread", sortWeight: 22 },
+  "thread.markUnread": { title: "Mark current thread unread", sortWeight: 23 },
+  "thread.undo": { title: "Undo last thread action", sortWeight: 24 },
+} satisfies StaticCommandMetaGroup;
+
+// The next thread that needs attention (Threads, sort weights from 30).
+const THREAD_ATTENTION_COMMAND_META = {
+  "thread.attention.next": { title: "Next thread that needs you", sortWeight: 30 },
+  "thread.attention.previous": { title: "Previous thread that needs you", sortWeight: 31 },
+} satisfies StaticCommandMetaGroup;
+
+// Back and forward (Navigation), and the thread commands that ship with them (Threads, sort
+// weights from 40).
+const NAVIGATION_COMMAND_META = {
+  "navigation.back": { title: "Go back", sortWeight: 1 },
+  "navigation.forward": { title: "Go forward", sortWeight: 2 },
+  "thread.interrupt": { title: "Interrupt turn", sortWeight: 40 },
+  "thread.copyReference": { title: "Copy pull request link or thread ID", sortWeight: 41 },
+} satisfies StaticCommandMetaGroup;
+
+// Close and reopen views and tabs.
+const VIEW_COMMAND_META = {
+  "view.close": { title: "Close tab or pane", sortWeight: 1 },
+  "view.reopenClosed": { title: "Reopen closed tab or pane", sortWeight: 2 },
+} satisfies StaticCommandMetaGroup;
+
+// Open or minimize the current thread's side chat.
+const SIDE_CHAT_COMMAND_META = {
+  "sideChat.toggle": { title: "Open or minimize side chat", sortWeight: 1 },
+} satisfies StaticCommandMetaGroup;
+
+// Step through the hunks of the diff panel (Diff, sort weights from 10).
+const DIFF_HUNK_COMMAND_META = {
+  "diff.hunk.next": { title: "Next hunk in the diff", sortWeight: 10 },
+  "diff.hunk.previous": { title: "Previous hunk in the diff", sortWeight: 11 },
+} satisfies StaticCommandMetaGroup;
+
+// The next or previous open chat tab in the chat header.
+const THREAD_TAB_COMMAND_META = {
+  "threadTab.next": { title: "Next chat tab", sortWeight: 1 },
+  "threadTab.previous": { title: "Previous chat tab", sortWeight: 2 },
+} satisfies StaticCommandMetaGroup;
+
+// Typed over every static command, so a command without a title fails typecheck.
+const STATIC_COMMAND_META: Readonly<Record<StaticKeybindingCommand, StaticCommandMeta>> = {
+  ...CORE_COMMAND_META,
+  ...FILE_SEARCH_COMMAND_META,
+  ...THREAD_LIFECYCLE_COMMAND_META,
+  ...THREAD_ATTENTION_COMMAND_META,
+  ...NAVIGATION_COMMAND_META,
+  ...VIEW_COMMAND_META,
+  ...SIDE_CHAT_COMMAND_META,
+  ...DIFF_HUNK_COMMAND_META,
+  ...THREAD_TAB_COMMAND_META,
 };
+
+function isStaticCommand(command: KeybindingCommand): command is StaticKeybindingCommand {
+  return Object.hasOwn(STATIC_COMMAND_META, command);
+}
 
 function categoryForCommand(command: KeybindingCommand): KeybindingCategory {
   const dotIndex = command.indexOf(".");
   const root = dotIndex === -1 ? command : command.slice(0, dotIndex);
-  if (root === "script") return KEYBINDING_CATEGORIES.script!;
-  const category = KEYBINDING_CATEGORIES[root];
-  return category ?? KEYBINDING_CATEGORIES.script!;
+  // `projectScript.*` joins `script.*` under Project scripts. Every static command has a category.
+  return Object.hasOwn(KEYBINDING_CATEGORIES, root)
+    ? KEYBINDING_CATEGORIES[root as keyof typeof KEYBINDING_CATEGORIES]
+    : KEYBINDING_CATEGORIES.script;
+}
+
+/** The id of a command's row in the Keybindings panel, which settings search results reveal. */
+export function keybindingRowId(command: KeybindingCommand): string {
+  return `keybinding-${command}`;
 }
 
 export function getCommandMeta(
@@ -92,8 +177,8 @@ export function getCommandMeta(
   scriptTitle?: string,
 ): KeybindingCommandMeta {
   const category = categoryForCommand(command);
-  const staticMeta = STATIC_COMMAND_META[command];
-  if (staticMeta) {
+  if (isStaticCommand(command)) {
+    const staticMeta = STATIC_COMMAND_META[command];
     return { category, title: staticMeta.title, sortWeight: staticMeta.sortWeight };
   }
   // script.<id>.run — derive title from the id if no friendly title was provided.

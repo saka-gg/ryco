@@ -1,10 +1,16 @@
 import * as SqlClient from "effect/sql/SqlClient";
 import { acquireStoragePathUseLeaseHandle } from "../../storage/lifecycle.ts";
-import { isClaudeNativeCompaction } from "../../provider/claudeNativeCompaction.ts";
+import {
+  compactsOnRequest,
+  isNativeCompactionCommand,
+  NATIVE_COMPACTION_COMMAND,
+} from "@ryco/shared/threadActivity";
+import { modelSelectionChangeRestartsSession } from "../../provider/sessionModelRestart.ts";
 import { computerToolInstructions } from "../../computer/tools/computerGuidance.ts";
 import type { ComputerTurnIntent } from "@ryco/contracts";
 import { stageComputerTurn, computerTurnPlan } from "../../computer/computerTurnLifecycle.ts";
 import { parseComputerInvocation } from "@ryco/shared/computerInvocation";
+import { sameModelSelection } from "@ryco/shared/model";
 import {
   hasRetiredProjectMemory,
   REMOVED_PROJECT_MEMORY_MESSAGE,
@@ -36,6 +42,8 @@ import {
   recoveryCopy,
   type TrackedProviderIntentEvent,
 } from "../providerEffectIntents.ts";
+import { serverWakeCopy, serverWakeSource } from "../serverWake.ts";
+import type { ServerWakeSource } from "@ryco/contracts";
 import { matchesApprovalAttempt, questionAsCallback } from "../approvalResponses.ts";
 import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
 import { ProjectionPendingApprovalRepositoryLive } from "../../persistence/Layers/ProjectionPendingApprovals.ts";
@@ -68,6 +76,7 @@ import {
   type RuntimeMode,
   type AgentTokenMode,
   type TurnId,
+  type TurnOrigin,
   type TurnSteerRejectionReason,
   type WorktreeId,
 } from "@ryco/contracts";
@@ -89,7 +98,6 @@ import {
   Fiber,
   Layer,
   Option,
-  PubSub,
   Schedule,
   Schema,
   Scope,
@@ -115,6 +123,8 @@ import {
   type ProviderRuntimeActivity,
 } from "../../provider/Services/ProviderService.ts";
 import { findThreadSession } from "../../provider/threadSessionLookup.ts";
+import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
+import { resolveReadyTextGenerationSelection } from "../../serverSettings.ts";
 import { ProviderSessionPrewarm } from "../Services/ProviderSessionPrewarm.ts";
 import {
   projectStartSystemPrompt,
@@ -125,14 +135,18 @@ import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import {
   ProjectionSnapshotQuery,
   readPendingGoalSyncThreads,
+  type ThreadUserMessageCountBound,
 } from "../Services/ProjectionSnapshotQuery.ts";
 import { ContextHandoffCoordinator } from "../Services/ContextHandoffCoordinator.ts";
 import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
+import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
+import { ThreadSessionModelSelectionsService } from "../ThreadSessionModelSelections.ts";
 import {
-  cwdRelocationHandoffReference,
-  makeCwdRelocationRequestedActivity,
-} from "../contextHandoff/ContextHandoffRelocation.ts";
+  makeResumeFallbackRequestedActivity,
+  type ResumeFallbackReason,
+  resumeFallbackHandoffReference,
+} from "../contextHandoff/ContextHandoffResumeFallback.ts";
 import { TURN_FINALIZATION_REASON } from "../turnFinalization.ts";
 import { type CwdRelocation, resolveCwdRelocation, worktreeIdentity } from "../cwdRelocation.ts";
 import {
@@ -142,8 +156,11 @@ import {
 } from "../Services/ProviderCommandReactor.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
+import { readCheckoutHead } from "../../vcs/gitCheckoutHead.ts";
+import { isBranchPreconditionFailure } from "../commandInvariants.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import { withProviderGoalPrompt } from "../../provider/goalMode.ts";
+import { withTurnOriginLine } from "../turnOrigin.ts";
 import {
   type ProviderFailureActivityInput,
   providerFailureActivityCommand,
@@ -299,6 +316,25 @@ const cwdRelocationError = (
     reason,
     detail: CWD_RELOCATION_RESTART_DETAIL,
   });
+
+/**
+ * The provider no longer has the native conversation of a thread with history to carry (Claude
+ * removed an old transcript, a Codex rollout is gone, a node moved to a machine without the
+ * provider's store). Claude's pre-check reports a missing transcript only when the instance's
+ * `projects` directory exists without it: a config root without `projects/` (Claude never ran a
+ * session there, or runs through a wrapper or in a container) reads as unknown, so the resume
+ * goes ahead and Claude fails the first send as before. An ACP runtime that does not resume
+ * strictly (Cursor) still starts a new session silently (a follow-up). Only a turn start raises it:
+ * like a relocation, the turn carries the conversation over with a context handoff into a fresh
+ * session on the same provider instance. A restart has no message to carry the conversation, so
+ * on such a thread it keeps the provider's failure, and the next turn hands off.
+ */
+class NativeHistoryUnavailableError extends Data.TaggedError("NativeHistoryUnavailableError")<{
+  /** The provider's failure, user-facing; shown only if this ever escapes the handoff. */
+  readonly detail: string;
+}> {}
+
+type ResumeFallbackError = CwdRelocationResumeUnavailableError | NativeHistoryUnavailableError;
 
 const decodeContextHandoffActivity = Schema.decodeUnknownOption(ContextHandoffActivityPayload);
 
@@ -461,6 +497,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   const sessionPrewarm = yield* Effect.serviceOption(ProviderSessionPrewarm);
   // Optional: without it a turn whose completion was lost on a live runtime waits for a reopen.
   const runtimeIngestion = yield* Effect.serviceOption(ProviderRuntimeIngestionService);
+  // Optional: without provider snapshots, generation runs on the configured provider as set.
+  const providerRegistry = yield* Effect.serviceOption(ProviderRegistry);
   const reactorScope = yield* Effect.scope;
   const handledTurnStartKeys = yield* Cache.make<string, true>({
     capacity: HANDLED_TURN_START_KEY_MAX,
@@ -475,7 +513,10 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       ),
     );
 
-  const threadModelSelections = new Map<string, ModelSelection>();
+  // What each session runs, shared with the engine's background-work check on turn starts.
+  const threadModelSelections = yield* ThreadSessionModelSelectionsService;
+  // Optional: without it a turn that names no selection never counts as stopping background work.
+  const backgroundLiveness = yield* Effect.serviceOption(ThreadBackgroundLivenessService);
   /** `threadId:runtimeSessionId` of runtimes that reported no goal, and whether goals are native there. */
   const goallessRuntimes = new Map<string, "native" | "unsupported">();
   const rememberGoallessRuntime = (runtimeKey: string, kind: "native" | "unsupported") => {
@@ -614,20 +655,50 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     );
   };
 
-  const resolveUserMessageCount = (threadId: ThreadId) => {
+  const resolveUserMessageCount = (threadId: ThreadId, bound?: ThreadUserMessageCountBound) => {
     const targeted = projectionSnapshotQuery.countThreadUserMessages;
     if (targeted) {
-      return targeted(threadId);
+      return targeted(threadId, bound);
     }
     return projectionSnapshotQuery.getThreadDetailById(threadId).pipe(
       Effect.map(
         Option.match({
           onNone: () => 0,
-          onSome: (thread) => thread.messages.filter((entry) => entry.role === "user").length,
+          onSome: (thread) =>
+            thread.messages.filter(
+              (entry) =>
+                entry.role === "user" &&
+                (bound === undefined ||
+                  (entry.createdAt <= bound.createdAtOrBefore &&
+                    entry.id !== bound.excludingMessageId)),
+            ).length,
         }),
       ),
     );
   };
+
+  /**
+   * Whether a fresh session would lose part of the thread's conversation: a turn reached the
+   * provider, whatever its outcome (a stopped or failed turn still left its prompt and partial
+   * work in the native conversation), a user message was sent before this start (its prompt may
+   * have reached the provider before the projection shows its turn started), or the thread
+   * inherits a parent's history. Only messages recorded before the start count (`earlierThan`):
+   * a turn start's own message, and one queued after it (or after the restart was requested),
+   * never reached the provider. One created at the same instant counts, as the order is unknown.
+   * The one rule that decides, when the native conversation is missing, between starting fresh
+   * and carrying the conversation over (`recoverMissingConversation`). Read only then, and a
+   * count that cannot be read counts as history: nothing is ever dropped silently.
+   */
+  const threadCarriesHistory = (
+    thread: OrchestrationThreadShell,
+    earlierThan: ThreadUserMessageCountBound,
+  ) =>
+    thread.latestCompletedTurnAt != null || thread.latestTurn !== null || thread.lineage != null
+      ? Effect.succeed(true)
+      : resolveUserMessageCount(thread.id, earlierThan).pipe(
+          Effect.map((count) => count > 0),
+          Effect.catch(() => Effect.succeed(true)),
+        );
 
   const ensureRecordedWorktreeAvailable = Effect.fn("ensureRecordedWorktreeAvailable")(function* (
     thread: OrchestrationThreadShell,
@@ -690,41 +761,43 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
           );
         }
 
-        const localBranches = yield* gitWorkflow.listLocalBranchNames(repositoryRoot);
-        if (!localBranches.includes(branch)) {
-          return yield* failRecovery(
-            `Cannot recreate missing worktree '${worktreePath}' because branch '${branch}' no longer exists.`,
-          );
-        }
-
-        yield* gitWorkflow.pruneWorktrees(repositoryRoot);
-
-        // Another process may have recreated the path while the stale metadata was pruned.
-        if (pathEntryExists(worktreePath)) {
-          const registeredPaths = yield* registeredWorktreePaths();
-          if (registeredPaths.includes(worktreeIdentity(worktreePath))) {
-            yield* gitWorkflow.assertWorktreeSetupComplete(worktreePath);
+        // The same routine as Restore: a stale registration of this exact path is replaced,
+        // and no other registration is pruned. Loaded on first use, off the boot path.
+        const recreation = yield* Effect.exit(
+          Effect.promise(() => import("../../workspace/checkoutRecreation.ts")).pipe(
+            Effect.flatMap(({ recreateRecordedCheckout }) =>
+              recreateRecordedCheckout(gitWorkflow, {
+                projectId: project.id,
+                repositoryRoot,
+                path: worktreePath,
+                branch,
+              }),
+            ),
+            Effect.catchTag("CheckoutRecreationError", (error) =>
+              Effect.fail(
+                failRecovery(
+                  error.reason === "branch-missing"
+                    ? `Cannot recreate missing worktree '${worktreePath}' because branch '${branch}' no longer exists.`
+                    : `Worktree recovery returned unexpected metadata for '${worktreePath}' and branch '${branch}'.`,
+                ),
+              ),
+            ),
+          ),
+        );
+        if (recreation._tag === "Failure") {
+          // Recreate checkout on the Projects page may have checked it out here first (the
+          // driver then refuses the existing destination): use that checkout when Git registers
+          // it and its setup completed; otherwise this attempt's error stands.
+          if (
+            pathEntryExists(worktreePath) &&
+            (yield* registeredWorktreePaths().pipe(
+              Effect.orElseSucceed((): readonly string[] => []),
+            )).includes(worktreeIdentity(worktreePath)) &&
+            (yield* Effect.exit(gitWorkflow.assertWorktreeSetupComplete(worktreePath)))._tag ===
+              "Success"
+          )
             return false;
-          }
-          return yield* failRecovery(
-            `Refusing to recreate worktree '${worktreePath}' because another filesystem entry now occupies that path.`,
-          );
-        }
-
-        const created = yield* gitWorkflow.createWorktree({
-          projectId: project.id,
-          cwd: repositoryRoot,
-          path: worktreePath,
-          refName: branch,
-          dependencyHydration: "none",
-        });
-        if (
-          worktreeIdentity(created.worktree.path) !== worktreeIdentity(worktreePath) ||
-          created.worktree.refName !== branch
-        ) {
-          return yield* failRecovery(
-            `Worktree recovery returned unexpected metadata for '${worktreePath}' and branch '${branch}'.`,
-          );
+          return yield* Effect.failCause(recreation.cause);
         }
 
         const changedAt = new Date().toISOString();
@@ -752,27 +825,6 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     yield* vcsStatusBroadcaster.refreshStatus(worktreePath).pipe(Effect.ignoreCause({ log: true }));
   }, Effect.scoped);
 
-  /**
-   * A turn's resume after a cwd move that finds no conversation (Codex lost
-   * its rollout, a provider that resumed anyway) fails as a relocation, so the
-   * turn continues with a context handoff instead of failing. Restarts keep
-   * their own failure: they have no message to carry the conversation.
-   */
-  const failMissingMovedConversation =
-    (relocation: CwdRelocation | undefined, kind: StartKind) =>
-    <A, E, R>(
-      start: Effect.Effect<A, E, R>,
-    ): Effect.Effect<A, E | CwdRelocationResumeUnavailableError, R> =>
-      relocation === undefined || kind !== "turn"
-        ? start
-        : start.pipe(
-            Effect.mapError((error): E | CwdRelocationResumeUnavailableError =>
-              isMissingConversationError(error)
-                ? cwdRelocationError(relocation, "resume-failed")
-                : error,
-            ),
-          );
-
   const ensureSessionForThread = Effect.fn("ensureSessionForThread")(function* (
     threadId: ThreadId,
     createdAt: string,
@@ -780,6 +832,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       /** The lane item's fence: a later Stop cancels this start. */
       readonly fenceSequence: number;
       readonly kind: StartKind;
+      /** A turn start's own message: history is what was recorded before it. */
+      readonly turnMessage?: { readonly id: MessageId; readonly createdAt: string };
       readonly modelSelection?: ModelSelection;
       readonly computerCatalogChanged?: boolean;
       /** Shells the caller read for this same lane item, to skip re-reading them. */
@@ -958,25 +1012,6 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         });
       });
 
-    /**
-     * A start that finds no conversation to resume, on a thread no turn ever completed in and
-     * that inherits none, starts fresh instead: the persisted cursor can only name a
-     * conversation the provider never kept (a prewarm's unused thread/start, a crash before
-     * the first turn; Codex writes a rollout with the first turn), so nothing is lost. Other
-     * threads keep the failure, since their context would need a handoff.
-     */
-    const startFreshWhenConversationMissing = (start: ReturnType<typeof startProviderSession>) =>
-      thread.latestCompletedTurnAt != null || thread.lineage != null
-        ? start
-        : start.pipe(
-            Effect.catchIf(isMissingConversationError, (error) =>
-              Effect.logInfo(
-                "provider command reactor started fresh after the persisted conversation was not found",
-                { threadId, kind: options.kind, cause: Cause.pretty(Cause.fail(error)) },
-              ).pipe(Effect.andThen(startProviderSession({ resumePolicy: "fresh" }))),
-            ),
-          );
-
     const existingSessionThreadId =
       thread.session && thread.session.status !== "stopped" && activeSession ? thread.id : null;
     const relocation = yield* resolveCwdRelocation(providerService, {
@@ -987,6 +1022,52 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     });
     const unresumableRelocation =
       relocation !== undefined && !relocation.resumeSurvives ? relocation : undefined;
+
+    /**
+     * A start or restart whose resume finds no conversation (`isMissingConversationError`):
+     * - On a thread without history (`threadCarriesHistory`) it starts fresh: the cursor can only
+     *   name a conversation the provider never kept (a prewarm's unused thread/start, a crash
+     *   before the first turn, a Claude session never prompted; Codex writes a rollout and Claude
+     *   a transcript with the first turn), so nothing is lost.
+     * - A turn on any other thread continues with a context handoff instead of failing: as a
+     *   relocation after a cwd move (Codex lost its rollout, a provider that resumed anyway),
+     *   otherwise as missing native history.
+     * - A restart on such a thread keeps the provider's failure: it has no message to carry the
+     *   conversation, and the next turn hands it off.
+     */
+    const recoverMissingConversation = (start: ReturnType<typeof startProviderSession>) =>
+      start.pipe(
+        Effect.catchIf(isMissingConversationError, (error) =>
+          Effect.gen(function* () {
+            const cause = Cause.pretty(Cause.fail(error));
+            const earlierThan: ThreadUserMessageCountBound = options.turnMessage
+              ? {
+                  createdAtOrBefore: options.turnMessage.createdAt,
+                  excludingMessageId: options.turnMessage.id,
+                }
+              : { createdAtOrBefore: createdAt };
+            if (!(yield* threadCarriesHistory(thread, earlierThan))) {
+              yield* Effect.logInfo(
+                "provider command reactor started fresh after the persisted conversation was not found",
+                { threadId, kind: options.kind, cause },
+              );
+              return yield* startProviderSession({ resumePolicy: "fresh" });
+            }
+            if (options.kind !== "turn") return yield* Effect.fail(error);
+            yield* Effect.logInfo(
+              "provider command reactor continues a turn by handoff after its native conversation was not found",
+              { threadId, moved: relocation !== undefined, cause },
+            );
+            return yield* Effect.fail<ResumeFallbackError>(
+              relocation !== undefined
+                ? cwdRelocationError(relocation, "resume-failed")
+                : new NativeHistoryUnavailableError({
+                    detail: userFacingFailureDetail(Cause.fail(error)),
+                  }),
+            );
+          }),
+        ),
+      );
     if (existingSessionThreadId) {
       const runtimeModeChanged = thread.runtimeMode !== thread.session?.runtimeMode;
       const currentThreadSessionTokenMode = thread.session?.tokenMode ?? DEFAULT_TOKEN_MODE;
@@ -1019,10 +1100,11 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         });
       }
       const previousModelSelection = threadModelSelections.get(threadId);
-      const shouldRestartForModelSelectionChange =
-        preferredProvider === "claudeAgent" &&
-        requestedModelSelection !== undefined &&
-        !Equal.equals(previousModelSelection, requestedModelSelection);
+      const shouldRestartForModelSelectionChange = modelSelectionChangeRestartsSession({
+        driver: preferredProvider,
+        previous: previousModelSelection,
+        requested: requestedModelSelection,
+      });
 
       if (
         !options.computerCatalogChanged &&
@@ -1119,7 +1201,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       });
       const restartedSession = yield* startProviderSession(
         resumeCursor !== undefined ? { resumeCursor } : undefined,
-      ).pipe(failMissingMovedConversation(relocation, options.kind));
+      ).pipe(recoverMissingConversation);
       yield* Effect.logInfo("provider command reactor restarted provider session", {
         threadId,
         previousSessionId: existingSessionThreadId,
@@ -1148,10 +1230,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         return prewarmed.threadId;
       }
     }
-    const startedSession = yield* startProviderSession(undefined).pipe(
-      startFreshWhenConversationMissing,
-      failMissingMovedConversation(relocation, options.kind),
-    );
+    const startedSession = yield* startProviderSession(undefined).pipe(recoverMissingConversation);
     yield* bindSessionToThread(startedSession);
     return startedSession.threadId;
   }, Effect.scoped);
@@ -1291,9 +1370,12 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     readonly thread: OrchestrationThreadShell;
     readonly project: OrchestrationProjectShell | undefined;
     readonly fenceSequence: number;
+    readonly turnMessage: { readonly id: MessageId; readonly createdAt: string };
     readonly messageText: string;
     /** Excerpts of the threads the message mentions; provider input only. */
     readonly referenceContext?: string;
+    /** Where the user sent the turn from (`turnOrigin`): another device adds one line. */
+    readonly origin?: TurnOrigin;
     readonly computerUse?: ComputerTurnIntent;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
@@ -1341,6 +1423,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     yield* ensureSessionForThread(input.threadId, input.createdAt, {
       fenceSequence: input.fenceSequence,
       kind: "turn",
+      turnMessage: input.turnMessage,
       ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
       computerCatalogChanged,
       prefetched: { thread, project },
@@ -1348,17 +1431,23 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     const { goal, native } = yield* reconcileThreadGoal(input.threadId);
     if (input.modelSelection !== undefined) {
       threadModelSelections.set(input.threadId, input.modelSelection);
+    } else if (threadModelSelections.get(input.threadId) === undefined) {
+      // A session this process has no record for started on the thread's stored selection.
+      threadModelSelections.set(input.threadId, thread.modelSelection);
     }
-    const normalizedInput = appendThreadReferenceContext(
-      withProviderGoalPrompt({
-        message: toNonEmptyProviderInput(
-          input.computerUse
-            ? (parseComputerInvocation(input.messageText)?.prompt ?? input.messageText)
-            : input.messageText,
-        ),
-        goal: native ? null : goal,
-      }),
-      input.referenceContext,
+    const normalizedInput = withTurnOriginLine(
+      appendThreadReferenceContext(
+        withProviderGoalPrompt({
+          message: toNonEmptyProviderInput(
+            input.computerUse
+              ? (parseComputerInvocation(input.messageText)?.prompt ?? input.messageText)
+              : input.messageText,
+          ),
+          goal: native ? null : goal,
+        }),
+        input.referenceContext,
+      ),
+      input.origin,
     );
     const normalizedAttachments = input.attachments ?? [];
     const customSystemPrompt = project?.customSystemPrompt?.trim() || undefined;
@@ -1387,12 +1476,12 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         : input.modelSelection;
 
     const nativeCompaction =
-      activeSession?.provider === "claudeAgent" &&
+      compactsOnRequest(activeSession?.provider) &&
       !input.computerUse &&
-      isClaudeNativeCompaction({ input: input.messageText, attachments: normalizedAttachments });
+      isNativeCompactionCommand({ input: input.messageText, attachments: normalizedAttachments });
     return {
       threadId: input.threadId,
-      ...(nativeCompaction ? { input: "/compact" } : {}),
+      ...(nativeCompaction ? { input: NATIVE_COMPACTION_COMMAND } : {}),
       ...(!nativeCompaction && normalizedInput
         ? {
             input: input.computerUse
@@ -1423,20 +1512,20 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     Effect.scoped(
       Effect.gen(function* () {
         // Subscribed before every check, so a release in between is not missed.
-        const subscription = yield* orchestrationEngine.subscribeDomainEvents;
-        while (true) {
-          const thread = yield* resolveThread(threadId);
-          if (!thread || !isThreadWorking(thread)) return thread;
-          while (true) {
-            const event = yield* PubSub.take(subscription);
-            if (
+        const events = yield* orchestrationEngine.subscribeDomainEvents;
+        const thread = yield* resolveThread(threadId);
+        if (!thread || !isThreadWorking(thread)) return thread;
+        return yield* events.pipe(
+          Stream.filter(
+            (event) =>
               event.aggregateId === threadId &&
-              (event.type === "thread.session-set" || event.type === "thread.deleted")
-            ) {
-              break;
-            }
-          }
-        }
+              (event.type === "thread.session-set" || event.type === "thread.deleted"),
+          ),
+          Stream.mapEffect(() => resolveThread(threadId)),
+          Stream.filter((current) => !current || !isThreadWorking(current)),
+          Stream.runHead,
+          Effect.map(Option.getOrUndefined),
+        );
       }),
     );
 
@@ -1448,19 +1537,22 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
    */
   const awaitFirstTurnUnderway = (input: {
     readonly threadId: ThreadId;
-    readonly subscription: PubSub.Subscription<OrchestrationEvent>;
+    readonly events: Stream.Stream<OrchestrationEvent>;
     readonly turnStarted: Deferred.Deferred<void>;
   }) => {
-    const watch = Effect.gen(function* () {
-      while (true) {
-        const event = yield* PubSub.take(input.subscription);
-        if (event.aggregateId !== input.threadId) continue;
-        if (event.type === "thread.message-sent" && event.payload.role === "assistant") return;
-        if (event.type === "thread.session-set" && event.payload.session.activeTurnId !== null) {
-          yield* Deferred.succeed(input.turnStarted, undefined);
-        }
-      }
-    });
+    const watch = input.events.pipe(
+      Stream.filter((event) => event.aggregateId === input.threadId),
+      Stream.mapEffect((event) =>
+        event.type === "thread.message-sent" && event.payload.role === "assistant"
+          ? Effect.succeed(true)
+          : event.type === "thread.session-set" && event.payload.session.activeTurnId !== null
+            ? Deferred.succeed(input.turnStarted, undefined).pipe(Effect.as(false))
+            : Effect.succeed(false),
+      ),
+      Stream.filter(Boolean),
+      Stream.runHead,
+      Effect.asVoid,
+    );
     return Effect.raceFirst(
       watch,
       Deferred.await(input.turnStarted).pipe(
@@ -1486,7 +1578,9 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
 
   /**
    * Renames a worktree's temporary branch once the agent stopped working, so a
-   * running turn never sees its branch move under its git commands.
+   * running turn never sees its branch move under its git commands. A branch
+   * checked out or recorded meanwhile wins: the rename never moves it, and
+   * never writes the generated name over it.
    */
   const renameWorktreeBranchWhenIdle = Effect.fn("renameWorktreeBranchWhenIdle")(function* (input: {
     readonly threadId: ThreadId;
@@ -1508,29 +1602,61 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     ) {
       return;
     }
+    // The checkout is on another branch (the agent made its own): that stays, and
+    // the abandoned temporary branch keeps its name. A detached HEAD or a layout
+    // the file read cannot follow (null) renames as before; git itself refuses
+    // while the branch is being rebased or bisected.
+    const head = yield* readCheckoutHead(input.worktreePath);
+    if (head !== null && head.branch !== null && head.branch !== input.oldBranch) return;
     const renamed = yield* gitWorkflow.renameBranch({
       cwd: input.worktreePath,
       oldBranch: input.oldBranch,
       newBranch: input.targetBranch,
     });
+    // git renamed the branch already, so each record that still holds the old
+    // name moves on its own: one that lost its guard to a newer branch must not
+    // leave the other on a branch that no longer exists.
+    const recordRename = (record: "workspace" | "thread") =>
+      Effect.catch((error: OrchestrationDispatchError) =>
+        isBranchPreconditionFailure(error)
+          ? Effect.logInfo("worktree branch rename kept a newer branch", {
+              threadId: input.threadId,
+              record,
+              detail: error.message,
+            })
+          : Effect.logWarning("worktree branch rename could not record the renamed branch", {
+              threadId: input.threadId,
+              record,
+              branch: renamed.branch,
+              detail: error.message,
+            }),
+      );
     // The worktree record moves first: clients trust a temporary live branch over
     // the thread's stored one only while the record still agrees with it.
     if (input.worktreeId !== null) {
-      yield* orchestrationEngine.dispatch({
-        type: "worktree.meta.update",
-        commandId: serverCommandId("worktree-branch-rename-meta"),
-        worktreeId: input.worktreeId,
-        branch: renamed.branch,
-        changedAt: new Date().toISOString(),
-      });
+      yield* orchestrationEngine
+        .dispatch({
+          type: "worktree.meta.update",
+          commandId: serverCommandId("worktree-branch-rename-meta"),
+          worktreeId: input.worktreeId,
+          branch: renamed.branch,
+          expectedBranch: input.oldBranch,
+          changedAt: new Date().toISOString(),
+        })
+        .pipe(Effect.asVoid, recordRename("workspace"));
     }
-    yield* orchestrationEngine.dispatch({
-      type: "thread.meta.update",
-      commandId: serverCommandId("worktree-branch-rename"),
-      threadId: input.threadId,
-      branch: renamed.branch,
-      worktreePath: input.worktreePath,
-    });
+    // Branch only: the guard covers the branch, and the thread's path was checked
+    // above, so writing it again could only put back a path that moved meanwhile.
+    yield* orchestrationEngine
+      .dispatch({
+        type: "thread.meta.update",
+        commandId: serverCommandId("worktree-branch-rename"),
+        threadId: input.threadId,
+        branch: renamed.branch,
+        expectedBranch: input.oldBranch,
+      })
+      .pipe(Effect.asVoid, recordRename("thread"));
+    // Always: the checkout's branch changed even when a record kept a newer one.
     yield* vcsStatusBroadcaster
       .refreshStatus(input.worktreePath)
       .pipe(Effect.ignoreCause({ log: true }));
@@ -1575,13 +1701,30 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         ),
       );
       if (Option.isNone(settings)) return;
-      const { textGenerationModelSelection: modelSelection, worktreeBranchChangeTypes } =
-        settings.value;
+      const { textGenerationModelSelection } = settings.value;
+      // A signed-out or failing provider would only retry its errors in the
+      // background: generation moves to a ready provider, or is skipped.
+      const modelSelection = Option.isSome(providerRegistry)
+        ? resolveReadyTextGenerationSelection(
+            textGenerationModelSelection,
+            yield* providerRegistry.value.getProviders,
+          )
+        : textGenerationModelSelection;
+      if (modelSelection === null) {
+        yield* Effect.logDebug("provider command reactor skipped first-turn generation", {
+          threadId,
+          reason: "no ready text generation provider",
+        });
+        return;
+      }
       // The temporary branch was named with the project's effective prefix.
-      const worktreeBranchPrefix = resolveProjectPreferences({
+      const effective = resolveProjectPreferences({
         settings: settings.value,
         ...(input.project !== undefined ? { project: input.project } : {}),
-      }).worktreeBranchPrefix.value;
+      });
+      const worktreeBranchPrefix = effective.worktreeBranchPrefix.value;
+      const worktreeBranchChangeTypes =
+        effective.worktreeBranchChangeTypes?.value ?? settings.value.worktreeBranchChangeTypes;
       const wantsTitle = canReplaceThreadTitle(thread.title, input.titleSeed);
       const oldBranch = thread.branch;
       const worktreePath = thread.worktreePath;
@@ -1890,15 +2033,24 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         ),
       ),
     ).pipe(Effect.ensuring(laneControl.endTurnOwnership(threadId)));
+    // The coordinator started the target session on the handoff's selection, or restored the
+    // source: then the thread's selection stands in for what it runs.
+    const target = event.payload.modelSelection;
+    const live = yield* findThreadSession(providerService, threadId);
+    if (target !== undefined && live?.providerInstanceId === target.instanceId) {
+      threadModelSelections.set(threadId, target);
+    } else {
+      threadModelSelections.forget(threadId);
+    }
   });
 
   /**
-   * A relocation handoff's terminal divider is its turn start's outcome, but
-   * the intent row was recorded before the handoff existed and so carries no
-   * handoff id to settle by. Settles it once that outcome is visible; otherwise
-   * the next boot resolves it through the coordinator.
+   * A resume-fallback handoff's terminal divider is its turn start's outcome,
+   * but the intent row was recorded before the handoff existed and so carries
+   * no handoff id to settle by. Settles it once that outcome is visible;
+   * otherwise the next boot resolves it through the coordinator.
    */
-  const settleCwdRelocationTurnStart = Effect.fnUntraced(function* (
+  const settleResumeFallbackTurnStart = Effect.fnUntraced(function* (
     event: TurnStartRequestedEvent,
     reference: ContextHandoffReference,
   ) {
@@ -1917,35 +2069,47 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   });
 
   /**
-   * Continues a turn whose native conversation cannot follow the thread's
-   * moved working directory. A server-initiated context handoff on the same
-   * provider instance starts a fresh session in the new directory and sends
-   * the deterministic context document ahead of the exact message, like any
-   * handoff; the visible message is never rewritten.
+   * Continues a turn whose native conversation cannot be resumed: it cannot
+   * follow the thread's moved working directory, or the provider no longer has
+   * it. A server-initiated context handoff on the same provider instance starts
+   * a fresh session in the thread's directory and sends the deterministic
+   * context document ahead of the exact message, like any handoff; the visible
+   * message is never rewritten.
    */
-  const continueAfterCwdRelocation = Effect.fn("continueAfterCwdRelocation")(function* (input: {
+  const continueWithoutResume = Effect.fn("continueWithoutResume")(function* (input: {
     readonly event: TurnStartRequestedEvent;
     readonly fenceSequence: number;
     readonly thread: OrchestrationThreadShell;
     readonly messageText: string;
-    readonly relocation: CwdRelocationResumeUnavailableError;
+    readonly fallback: ResumeFallbackError;
     readonly baselineConfirmed: boolean;
   }) {
-    const { event, thread, relocation } = input;
-    const reference = cwdRelocationHandoffReference(event);
-    yield* Effect.logInfo("provider command reactor continues a moved conversation by handoff", {
+    const { event, thread, fallback } = input;
+    const relocation = fallback._tag === "CwdRelocationResumeUnavailableError" ? fallback : null;
+    const reason: ResumeFallbackReason = relocation
+      ? "cwd-relocation"
+      : "native-history-unavailable";
+    const reference = resumeFallbackHandoffReference(event);
+    yield* Effect.logInfo("provider command reactor continues a conversation by handoff", {
       threadId: thread.id,
       handoffId: reference.handoffId,
-      previousCwd: relocation.previousCwd,
-      cwd: relocation.cwd,
-      reason: relocation.reason,
+      reason,
+      ...(relocation
+        ? {
+            previousCwd: relocation.previousCwd,
+            cwd: relocation.cwd,
+            relocationReason: relocation.reason,
+          }
+        : {}),
     });
-    // Deterministic command id: a replay of this turn start reuses the receipt.
+    // Deterministic command id, one per turn start whatever the reason: a replay
+    // of this turn start reuses the receipt.
     yield* orchestrationEngine.dispatch({
       type: "thread.activity.append",
       commandId: CommandId.make(`server:cwd-relocation-handoff:${event.eventId}`),
       threadId: thread.id,
-      activity: makeCwdRelocationRequestedActivity({
+      activity: makeResumeFallbackRequestedActivity({
+        reason,
         reference,
         sourceSelection: thread.modelSelection,
         targetSelection: event.payload.modelSelection ?? thread.modelSelection,
@@ -1963,15 +2127,18 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     });
     // Best-effort: the outcome is already visible, and the next boot settles a
     // row this misses.
-    yield* settleCwdRelocationTurnStart(event, reference).pipe(
+    yield* settleResumeFallbackTurnStart(event, reference).pipe(
       Effect.catchCause((cause) =>
         Cause.hasInterruptsOnly(cause)
           ? Effect.failCause(cause)
-          : Effect.logWarning("provider command reactor could not settle a relocation turn start", {
-              threadId: thread.id,
-              handoffId: reference.handoffId,
-              cause: Cause.pretty(cause),
-            }),
+          : Effect.logWarning(
+              "provider command reactor could not settle a resume-fallback turn start",
+              {
+                threadId: thread.id,
+                handoffId: reference.handoffId,
+                cause: Cause.pretty(cause),
+              },
+            ),
       ),
     );
   });
@@ -2048,6 +2215,30 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       );
   };
 
+  /**
+   * The chat's stored selection for a turn that names none (`implicitTurnModelSelection`), or
+   * undefined to run on what the session applied last. Clients store a pick on the thread when
+   * it is made; a model change never restarts or interrupts the session then, the next turn
+   * applies it.
+   */
+  const resolveImplicitTurnModelSelection = (thread: OrchestrationThreadShell) => {
+    const applied = threadModelSelections.get(thread.id);
+    if (applied === undefined || sameModelSelection(applied, thread.modelSelection)) {
+      return Effect.succeed(undefined);
+    }
+    return Effect.promise(() => import("../implicitTurnModelSelection.ts")).pipe(
+      Effect.flatMap((module) =>
+        module.resolveImplicitTurnModelSelection({
+          thread,
+          applied,
+          providerService,
+          backgroundLiveness: Option.getOrUndefined(backgroundLiveness),
+          changeRestartsSession: modelSelectionChangeRestartsSession,
+        }),
+      ),
+    );
+  };
+
   const prepareAndSubmitTurnStart = Effect.fn("prepareAndSubmitTurnStart")(function* (
     event: TurnStartRequestedEvent,
     fenceSequence: number,
@@ -2105,17 +2296,23 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       return yield* Effect.fail(new Error(REMOVED_PROJECT_MEMORY_MESSAGE));
     }
 
-    // A delegated wake is a normal queued turn start: ensureSessionForThread creates or
-    // resumes the session. The decider requires an unchanged model selection, so a handoff
-    // is unreachable here; keep the defensive check (never hand off on untrusted input).
-    if (event.payload.delegationReturnGuard && event.payload.contextHandoff !== undefined) {
+    // A server wake (delegated result, pull request update) is a normal queued turn start:
+    // ensureSessionForThread creates or resumes the session. The decider requires an
+    // unchanged model selection, so a handoff is unreachable here; keep the defensive check
+    // (never hand off on untrusted input). A queued follow-up is the user's own message: it
+    // keeps the model it was queued with and hands off like a send.
+    if (
+      event.payload.delegationReturnGuard &&
+      serverWakeSource(event.payload.delegationReturnGuard) !== "follow-up-queue" &&
+      event.payload.contextHandoff !== undefined
+    ) {
+      const refused = serverWakeCopy(event.payload.delegationReturnGuard).handoffRefused;
       yield* appendProviderFailureActivity({
         threadId: event.payload.threadId,
         kind: "provider.turn.start.failed",
         messageId: event.payload.messageId,
-        summary: "Delegated return was not submitted",
-        detail:
-          "A delegated result cannot start a model handoff. Inspect this result before sending it manually.",
+        summary: refused.summary,
+        detail: refused.detail,
         turnId: null,
         createdAt: event.payload.createdAt,
       });
@@ -2143,37 +2340,41 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       projectionSnapshotQuery,
       event.payload.threadReferences,
     );
+    const turnModelSelection =
+      event.payload.modelSelection ?? (yield* resolveImplicitTurnModelSelection(thread));
     const prepared = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
       thread,
       project,
       fenceSequence,
+      turnMessage: { id: message.id, createdAt: message.createdAt },
       messageText: message.text,
       ...(referenceContext !== undefined ? { referenceContext } : {}),
+      ...(event.payload.origin !== undefined ? { origin: event.payload.origin } : {}),
       ...(event.payload.computerUse ? { computerUse: event.payload.computerUse } : {}),
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
-      ...(event.payload.modelSelection !== undefined
-        ? { modelSelection: event.payload.modelSelection }
-        : {}),
+      ...(turnModelSelection !== undefined ? { modelSelection: turnModelSelection } : {}),
       interactionMode: event.payload.interactionMode,
       tokenMode: event.payload.tokenMode,
       createdAt: event.payload.createdAt,
     }).pipe(
       Effect.map(Option.some),
-      Effect.catchTag("CwdRelocationResumeUnavailableError", (relocation) =>
-        joinPreTurnBaseline(baseline, event, fenceSequence).pipe(
-          Effect.flatMap((baselineConfirmed) =>
-            continueAfterCwdRelocation({
-              event,
-              fenceSequence,
-              thread,
-              messageText: message.text,
-              relocation,
-              baselineConfirmed,
-            }),
+      Effect.catchTag(
+        ["CwdRelocationResumeUnavailableError", "NativeHistoryUnavailableError"],
+        (fallback) =>
+          joinPreTurnBaseline(baseline, event, fenceSequence).pipe(
+            Effect.flatMap((baselineConfirmed) =>
+              continueWithoutResume({
+                event,
+                fenceSequence,
+                thread,
+                messageText: message.text,
+                fallback,
+                baselineConfirmed,
+              }),
+            ),
+            Effect.as(Option.none()),
           ),
-          Effect.as(Option.none()),
-        ),
       ),
     );
     if (Option.isNone(prepared)) return;
@@ -2185,7 +2386,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       // Best-effort and detached: it must never fail or delay a turn whose
       // session is already started. Subscribed now, so the turn's start is seen.
       const generationScope = yield* Scope.make();
-      const subscription = yield* orchestrationEngine.subscribeDomainEvents.pipe(
+      const events = yield* orchestrationEngine.subscribeDomainEvents.pipe(
         Scope.provide(generationScope),
       );
       yield* generateFirstTurnTitleAndBranch({
@@ -2198,21 +2399,41 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         messageText: message.text,
         ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
         ...(event.payload.titleSeed !== undefined ? { titleSeed: event.payload.titleSeed } : {}),
-        underway: awaitFirstTurnUnderway({ threadId, subscription, turnStarted }).pipe(
+        underway: awaitFirstTurnUnderway({ threadId, events, turnStarted }).pipe(
           Effect.ensuring(Scope.close(generationScope, Exit.void)),
         ),
       }).pipe(Effect.ensuring(Scope.close(generationScope, Exit.void)), Effect.forkScoped);
     }
 
-    const commitAcceptedModelSelection: Effect.Effect<unknown, OrchestrationDispatchError> =
-      event.payload.modelSelection !== undefined &&
-      !Equal.equals(thread.modelSelection, event.payload.modelSelection)
-        ? orchestrationEngine.dispatch({
-            type: "thread.meta.update",
-            commandId: serverCommandId("accepted-model-selection"),
-            threadId: event.payload.threadId,
-            modelSelection: event.payload.modelSelection,
-          })
+    // The thread's stored selection is the chat's: clients store a pick when it is made, and
+    // the session takes it at its next turn. A turn's own selection becomes the chat's when it
+    // differs (an older client stores a pick only by sending it, or by queueing it), but never
+    // over a pick stored since the turn was started: since this turn started for a send, since
+    // the entry was queued for a person's queued follow-up (`queuedOverModelSelection`; absent
+    // on entries queued before it was recorded, which then keep the chat's pick). Server wakes
+    // name no selection, so they never change the chat's.
+    const acceptedModelSelection = event.payload.modelSelection;
+    const startedOverModelSelection =
+      serverWakeSource(event.payload.delegationReturnGuard) === "follow-up-queue"
+        ? event.payload.queuedOverModelSelection
+        : thread.modelSelection;
+    const commitAcceptedModelSelection =
+      acceptedModelSelection !== undefined &&
+      startedOverModelSelection !== undefined &&
+      !Equal.equals(thread.modelSelection, acceptedModelSelection)
+        ? resolveThread(threadId).pipe(
+            Effect.flatMap((current) =>
+              current !== undefined &&
+              sameModelSelection(current.modelSelection, startedOverModelSelection)
+                ? orchestrationEngine.dispatch({
+                    type: "thread.meta.update",
+                    commandId: serverCommandId("accepted-model-selection"),
+                    threadId: event.payload.threadId,
+                    modelSelection: acceptedModelSelection,
+                  })
+                : Effect.void,
+            ),
+          )
         : Effect.void;
 
     // A Stop that arrived while the session was prepared, or while the baseline
@@ -2605,6 +2826,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
           readonly error: string;
           readonly reason: TurnSteerRejectionReason;
           readonly deliveryUncertain?: boolean;
+          readonly restartedTurn?: true;
           readonly resolvedAt: string;
         },
     commandId: CommandId = serverCommandId("turn-steer-resolve"),
@@ -2630,9 +2852,15 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   ) {
     const key = turnStartKeyForEvent(event);
     if (yield* hasHandledRecently(key)) return;
-    const steerInput = appendThreadReferenceContext(
-      toNonEmptyProviderInput(event.payload.message.text),
-      yield* resolveThreadReferenceContext(projectionSnapshotQuery, event.payload.threadReferences),
+    const steerInput = withTurnOriginLine(
+      appendThreadReferenceContext(
+        toNonEmptyProviderInput(event.payload.message.text),
+        yield* resolveThreadReferenceContext(
+          projectionSnapshotQuery,
+          event.payload.threadReferences,
+        ),
+      ),
+      event.payload.origin,
     );
     const steer = Effect.suspend(() =>
       providerService.steerTurn({
@@ -2676,6 +2904,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
                   status: "rejected",
                   error: classified.error,
                   reason: classified.reason,
+                  ...(classified.restartedTurn ? { restartedTurn: true as const } : {}),
                   resolvedAt: new Date().toISOString(),
                 });
               }),
@@ -2700,9 +2929,10 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         : { userInputIdentity: identity }
       : {};
     const key = { threadId: event.payload.threadId, requestId: event.payload.requestId };
+    const question = isApproval ? Option.none() : yield* questions.getByRequestId(key);
     const claim = isApproval
       ? yield* approvals.getByRequestId(key)
-      : Option.map(yield* questions.getByRequestId(key), questionAsCallback);
+      : Option.map(question, questionAsCallback);
     if (
       Option.isNone(claim) ||
       claim.value.status !== "pending" ||
@@ -2710,6 +2940,40 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       !matchesApprovalAttempt(claim.value, identity, event.commandId)
     )
       return;
+    const optional = Option.isSome(question) && question.value.nonBlocking === true;
+    const settle = (summary: string) =>
+      orchestrationEngine.dispatch({
+        type: "thread.activity.append",
+        commandId: serverCommandId(`${kind}-settled`),
+        threadId: key.threadId,
+        activity: {
+          id: EventId.make(`${kind}-settled:${event.commandId}`),
+          kind: `${kind}.resolved`,
+          tone: "info",
+          summary,
+          payload: {
+            requestId: key.requestId,
+            ...identityPayload,
+            runtimeSessionId: identity?.runtimeSessionId,
+            responseAttemptId: event.commandId,
+            ...(event.type === "thread.approval-response-requested"
+              ? { decision: event.payload.decision }
+              : { answers: event.payload.answers }),
+          },
+          turnId: null,
+          createdAt: new Date().toISOString(),
+        },
+        createdAt: new Date().toISOString(),
+      });
+    // Dismissing an optional question sends the agent nothing: the node settles it itself,
+    // during its turn or after it, whatever became of the session.
+    if (
+      optional &&
+      event.type === "thread.user-input-response-requested" &&
+      Object.keys(event.payload.answers).length === 0
+    ) {
+      return yield* settle("Question dismissed");
+    }
     const fail = (detail: string, responseState: ApprovalResponseState) =>
       appendProviderFailureActivity({
         ...key,
@@ -2722,13 +2986,18 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         ...(event.commandId ? { responseAttemptId: event.commandId } : {}),
         responseState,
       });
+    // An optional question's steer that never went out leaves the question open: once its
+    // turn ended, the answer is sent again as a new message, which starts the next turn.
+    const failNotSent = optional
+      ? fail("The turn ended before this answer reached it. Send it again.", "retryable")
+      : fail(stalePendingRequestDetail(kind, key.requestId), "invalidated");
     const thread = yield* resolveThread(key.threadId);
     if (
       !thread?.session ||
       thread.session.status === "stopped" ||
       thread.session.runtimeSessionId !== identity?.runtimeSessionId
     ) {
-      return yield* fail(stalePendingRequestDetail(kind, key.requestId), "invalidated");
+      return yield* failNotSent;
     }
     const runtime = identity?.runtimeSessionId
       ? { expectedRuntimeSessionId: identity.runtimeSessionId }
@@ -2748,6 +3017,20 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     yield* respond.pipe(
       Effect.matchCauseEffect({
         onFailure: (cause) => {
+          // The process-local authority no longer holds an optional question once its turn
+          // ended: nothing was sent, so its answer may go again, as a new message.
+          if (
+            optional &&
+            (isUnknownPendingUserInputRequestError(cause) ||
+              cause.reasons.some(
+                (reason) =>
+                  Cause.isFailReason(reason) &&
+                  (Schema.is(ProviderSessionNotFoundError)(reason.error) ||
+                    Schema.is(ProviderAdapterSessionNotFoundError)(reason.error)),
+              ))
+          ) {
+            return failNotSent;
+          }
           const stale =
             (isApproval
               ? isUnknownPendingApprovalRequestError(cause)
@@ -2782,30 +3065,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
             ),
           );
         },
-        onSuccess: () =>
-          orchestrationEngine.dispatch({
-            type: "thread.activity.append",
-            commandId: serverCommandId(`${kind}-settled`),
-            threadId: key.threadId,
-            activity: {
-              id: EventId.make(`${kind}-settled:${event.commandId}`),
-              kind: `${kind}.resolved`,
-              tone: "info",
-              summary: `${label} response delivered`,
-              payload: {
-                requestId: key.requestId,
-                ...identityPayload,
-                runtimeSessionId: identity?.runtimeSessionId,
-                responseAttemptId: event.commandId,
-                ...(event.type === "thread.approval-response-requested"
-                  ? { decision: event.payload.decision }
-                  : { answers: event.payload.answers }),
-              },
-              turnId: null,
-              createdAt: new Date().toISOString(),
-            },
-            createdAt: new Date().toISOString(),
-          }),
+        onSuccess: () => settle(`${label} response delivered`),
       }),
     );
   });
@@ -2852,6 +3112,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       return yield* providerEffectIntents.settle({ sequence: event.sequence });
     }
 
+    // A stopped session runs nothing: the next turn starts one on the chat's stored selection.
+    threadModelSelections.forget(threadId);
     const now = input.at === "now" ? new Date().toISOString() : event.payload.createdAt;
     if (Option.isNone(outOfBand) && thread.session && thread.session.status !== "stopped") {
       // Bounded inside ProviderService; a timed-out stop is retried by the reaper.
@@ -3526,10 +3788,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
 
     // Subscribed synchronously: every request committed after this point is
     // delivered live, and startup intent recovery replays the ones before it.
-    const subscription = yield* orchestrationEngine.subscribeDomainEvents;
-    yield* Effect.forkScoped(
-      Stream.runForEach(Stream.fromSubscription(subscription), processEvent),
-    );
+    const events = yield* orchestrationEngine.subscribeDomainEvents;
+    yield* Effect.forkScoped(Stream.runForEach(events, processEvent));
     yield* Effect.forkScoped(
       sweepLiveness.pipe(
         Effect.repeat(
@@ -3620,13 +3880,13 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   const cancelTurnStart = (input: {
     readonly row: ProviderEffectIntentRow;
     readonly messageId: MessageId;
-    readonly delegatedReturn: boolean;
+    readonly serverWake: ServerWakeSource | null;
     readonly deliveryState: "not-sent" | "uncertain";
   }) => {
     const copy = recoveryCopy({
       kind: "turn-start",
       deliveryState: input.deliveryState,
-      delegatedReturn: input.delegatedReturn,
+      serverWake: input.serverWake,
     });
     return commitRecoveryOutcome(
       input.row,
@@ -3710,8 +3970,9 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
             const turnStart = event?.type === "thread.turn-start-requested" ? event : undefined;
             const messageId = turnStart?.payload.messageId ?? row.messageId;
             if (messageId === null) return yield* settleWithoutOutcome(row, "event-unreadable");
-            // A plain start may have become a working-directory relocation handoff,
-            // whose deterministic reference finds the operation if it exists.
+            // A plain start may have become a resume-fallback handoff (a moved working
+            // directory or missing native history), whose deterministic reference finds
+            // the operation if it exists.
             const relocated =
               turnStart !== undefined && turnStart.payload.contextHandoff === undefined;
             const handoffStart =
@@ -3722,7 +3983,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
                       ...turnStart,
                       payload: {
                         ...turnStart.payload,
-                        contextHandoff: cwdRelocationHandoffReference(turnStart),
+                        contextHandoff: resumeFallbackHandoffReference(turnStart),
                       },
                     }
                   : turnStart;
@@ -3732,7 +3993,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
                 recoveryCopy({
                   kind: "turn-start",
                   deliveryState,
-                  delegatedReturn: handoffStart.payload.delegationReturnGuard !== undefined,
+                  serverWake: serverWakeSource(handoffStart.payload.delegationReturnGuard),
                 }).detail,
               );
               if (result === "owned") return yield* settleWithoutOutcome(row, "handoff-owned");
@@ -3747,7 +4008,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
             yield* cancelTurnStart({
               row,
               messageId,
-              delegatedReturn: turnStart?.payload.delegationReturnGuard !== undefined,
+              serverWake: serverWakeSource(turnStart?.payload.delegationReturnGuard),
               // An unreadable request cannot prove it was never sent.
               deliveryState: turnStart === undefined ? "uncertain" : deliveryState,
             });
@@ -3768,7 +4029,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
                 event,
                 {
                   status: "rejected",
-                  error: recoveryCopy({ kind: "turn-steer", deliveryState, delegatedReturn: false })
+                  error: recoveryCopy({ kind: "turn-steer", deliveryState, serverWake: null })
                     .detail,
                   // Only a steer that provably never reached the provider defers
                   // (stays queued, sent next). One that may have reached it fails

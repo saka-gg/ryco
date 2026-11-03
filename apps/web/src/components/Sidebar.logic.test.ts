@@ -21,6 +21,7 @@ import {
   resolveSidebarNewThreadSeedContext,
   resolveSidebarNewThreadEnvMode,
   resolveThreadRowClassName,
+  resolveThreadSelectionClick,
   resolveThreadStatusPill,
   shouldAutoAnimateSidebarProjectList,
   shouldAutoAnimateSidebarThreadLists,
@@ -388,6 +389,39 @@ describe("shouldClearThreadSelectionOnMouseDown", () => {
     } as unknown as HTMLElement;
 
     expect(shouldClearThreadSelectionOnMouseDown(unrelated)).toBe(true);
+  });
+
+  it("clears selection for presses on no element", () => {
+    expect(shouldClearThreadSelectionOnMouseDown(null)).toBe(true);
+    expect(shouldClearThreadSelectionOnMouseDown({} as EventTarget)).toBe(true);
+  });
+});
+
+describe("resolveThreadSelectionClick", () => {
+  const click = (keys: { metaKey?: boolean; ctrlKey?: boolean; shiftKey?: boolean }) => ({
+    metaKey: false,
+    ctrlKey: false,
+    shiftKey: false,
+    ...keys,
+  });
+
+  it("toggles with Cmd on Mac and Ctrl elsewhere", () => {
+    expect(resolveThreadSelectionClick(click({ metaKey: true }), true)).toBe("toggle");
+    expect(resolveThreadSelectionClick(click({ ctrlKey: true }), false)).toBe("toggle");
+    expect(resolveThreadSelectionClick(click({ ctrlKey: true }), true)).toBeNull();
+    expect(resolveThreadSelectionClick(click({ metaKey: true }), false)).toBeNull();
+  });
+
+  it("selects a range with Shift unless the toggle key is held too", () => {
+    expect(resolveThreadSelectionClick(click({ shiftKey: true }), true)).toBe("range");
+    expect(resolveThreadSelectionClick(click({ shiftKey: true, metaKey: true }), true)).toBe(
+      "toggle",
+    );
+  });
+
+  it("opens the row on a plain click", () => {
+    expect(resolveThreadSelectionClick(click({}), true)).toBeNull();
+    expect(resolveThreadSelectionClick(click({}), false)).toBeNull();
   });
 });
 

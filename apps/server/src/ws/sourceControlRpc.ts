@@ -1,5 +1,6 @@
-import { DateTime, Effect, Exit, Option } from "effect";
+import { Effect, Option } from "effect";
 import {
+  PullRequestWatchError,
   SourceControlProviderError,
   WS_METHODS,
   type ChangeRequest,
@@ -9,21 +10,16 @@ import {
   type OrchestrationCommand,
   type WorktreeId,
 } from "@ryco/contracts";
-import {
-  applyPullRequestLinkChanges,
-  readWorktreePullRequestLinks,
-} from "@ryco/shared/worktreePullRequests";
-
 import { observeRpcEffect } from "../observability/RpcInstrumentation.ts";
 import {
   getChangeRequestHostCapabilities,
   type ChangeRequestHostRequest,
-} from "@ryco/shared/sourceControl";
+} from "@ryco/shared/changeRequestHostCapabilities";
 
 import {
-  azureRemoteRepositoryKey,
-  changeRequestRepositoryKey,
-} from "../sourceControl/changeRequestRepositoryKey.ts";
+  linkPullRequestToWorkspace,
+  pullRequestLinkFailure,
+} from "../sourceControl/manualPullRequestLink.ts";
 import {
   normalizeSourceBranch,
   parseSourceControlOwnerRef,
@@ -32,8 +28,10 @@ import {
   type OptionalChangeRequestOperation,
   type SourceControlProviderShape,
 } from "../sourceControl/SourceControlProvider.ts";
+import type { ChangeRequestRowRevalidation } from "../sourceControl/changeRequestRowRevalidation.ts";
 import { withSourceControlBodyFile } from "../sourceControl/sourceControlBodyFile.ts";
 import { PULL_REQUEST_INDEX_LIMIT } from "../sourceControl/pullRequestIndex.ts";
+import { markServedWhilePaused, pausedUntilOf } from "../sourceControl/lastGoodWhilePaused.ts";
 import { inBackgroundProcessLane } from "../processGovernor.ts";
 import { defineWsHandlers, type WsRpcContext } from "./context.ts";
 
@@ -88,6 +86,12 @@ export function selectCreatedChangeRequest(
   );
 }
 
+/**
+ * Each server's row revalidation, keyed by its git workflow service (built once per server), so
+ * connections share it and a second server in the same process (tests) gets its own.
+ */
+const rowRevalidationByServer = new WeakMap<object, Promise<ChangeRequestRowRevalidation>>();
+
 export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
   const {
     ownerEffect,
@@ -104,15 +108,25 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
     serverCommandId,
     toGitManagerError,
     gitWorkflow,
+    pullRequestWatch,
   } = ctx;
 
-  const linkFailure = (operation: string, detail: string, cause?: unknown) =>
-    new SourceControlProviderError({
-      provider: "unknown",
-      operation,
-      detail,
-      ...(cause !== undefined ? { cause } : {}),
-    });
+  const linkFailure = pullRequestLinkFailure;
+
+  /**
+   * Row reads on host fingerprints, loaded with the first row read (off the boot path). One per
+   * server, not per connection: every window, phone and reconnect shares what the rows learned.
+   */
+  const loadRowRevalidation = Effect.promise(() => {
+    let rowRevalidation = rowRevalidationByServer.get(gitWorkflow);
+    if (rowRevalidation === undefined) {
+      rowRevalidation = import("../sourceControl/changeRequestRowRevalidation.ts").then((module) =>
+        module.makeChangeRequestRowRevalidation(),
+      );
+      rowRevalidationByServer.set(gitWorkflow, rowRevalidation);
+    }
+    return rowRevalidation;
+  });
 
   /** A live workspace and the checkout its source-control calls run in. */
   const requireLinkableWorktree = (worktreeId: WorktreeId, operation: string) =>
@@ -277,7 +291,8 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
   /**
    * Picker rows: open and recent lists come from the repository's change request index (lean
    * rows shared with status and discovery reads, usually warm); other states ask the host for
-   * the same lean fields. Falls back to the host when the index cannot answer.
+   * the same lean fields. Falls back to the host when the index cannot answer, except while the
+   * host is rate limiting: it would answer the same list read the same way.
    */
   const listPickerChangeRequests = (
     provider: SourceControlProviderShape,
@@ -291,12 +306,19 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
       if (input.state === "open" || input.state === "all") {
         const indexed = yield* gitWorkflow
           .indexedChangeRequests({ cwd: input.cwd, scope: input.state })
-          .pipe(Effect.catch(() => Effect.succeed(null)));
+          .pipe(
+            Effect.catch((error) =>
+              error.reason === "rate-limited" ? Effect.fail(error) : Effect.succeed(null),
+            ),
+          );
         if (
           indexed !== null &&
           (indexed.length >= input.limit || indexed.length < PULL_REQUEST_INDEX_LIMIT)
         ) {
-          return indexed.slice(0, input.limit);
+          // Rows served while the forge is paused keep saying so.
+          const pausedUntil = pausedUntilOf(indexed);
+          const rows = indexed.slice(0, input.limit);
+          return pausedUntil === null ? rows : markServedWhilePaused(rows, pausedUntil);
         }
       }
       return yield* provider.listChangeRequests({
@@ -550,11 +572,15 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
             },
           }).pipe(
             Effect.tap((items) =>
-              refreshLinkedWorktreeSourceControlStates({
-                cwd,
-                reason: "sourceControl.listChangeRequests",
-                knownPullRequests: items,
-              }),
+              // Rows served while the forge is paused may be stale: they must not overwrite
+              // link states a live read wrote meanwhile.
+              pausedUntilOf(items) !== null
+                ? Effect.void
+                : refreshLinkedWorktreeSourceControlStates({
+                    cwd,
+                    reason: "sourceControl.listChangeRequests",
+                    knownPullRequests: items,
+                  }),
             ),
           ),
         ),
@@ -612,15 +638,31 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
             // Passive row glyphs: every visible row polls its change request,
             // which is several forge children each. They queue in the
             // background lane behind the focused surfaces, and rows of the
-            // same repository share one read for a few seconds.
-            return gitWorkflow
-              .cachedRepositoryList({
-                cwd,
-                key: JSON.stringify(["changeRequestDetail", reference, fullContent ?? false]),
-                load: read,
-                ttlMs: CHANGE_REQUEST_ROW_DETAIL_CACHE_TTL_MS,
-              })
-              .pipe(inBackgroundProcessLane);
+            // same repository share one read for a few seconds. Past that, a
+            // row is read again only when the host's fingerprint moved (see
+            // `changeRequestRowRevalidation`). While the forge is rate
+            // limiting, a row keeps its last good detail.
+            const key = JSON.stringify(["changeRequestDetail", reference, fullContent ?? false]);
+            return loadRowRevalidation.pipe(
+              Effect.flatMap((rows) =>
+                gitWorkflow.cachedRepositoryList({
+                  cwd,
+                  key,
+                  load: read,
+                  ttlMs: CHANGE_REQUEST_ROW_DETAIL_CACHE_TTL_MS,
+                  lastGood: fullContent !== true,
+                  revalidate: (changes) =>
+                    rows.read({
+                      cwd,
+                      key,
+                      changes,
+                      load: read,
+                      provider: sourceControlRegistry.resolve({ cwd }),
+                    }),
+                }),
+              ),
+              inBackgroundProcessLane,
+            );
           }),
         ),
         {
@@ -895,6 +937,15 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
         ),
         { "rpc.aggregate": "source-control" },
       ),
+    [WS_METHODS.sourceControlListChangeRequestTemplates]: (input) =>
+      observeRpcEffect(
+        WS_METHODS.sourceControlListChangeRequestTemplates,
+        ownerEffect(
+          WS_METHODS.sourceControlListChangeRequestTemplates,
+          gitWorkflow.listChangeRequestTemplates(input),
+        ),
+        { "rpc.aggregate": "source-control" },
+      ),
     [WS_METHODS.sourceControlCreateChangeRequest]: (input) =>
       observeRpcEffect(
         WS_METHODS.sourceControlCreateChangeRequest,
@@ -968,89 +1019,14 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
           Effect.gen(function* () {
             const operation = "linkWorktreePullRequest";
             const { worktree, cwd } = yield* requireLinkableWorktree(input.worktreeId, operation);
-            const handle = yield* sourceControlRegistry.resolveHandle({ cwd });
-            const provider = handle.provider;
-            const reference = input.reference.replace(/^#/u, "").trim();
-            const changeRequest = yield* provider.getChangeRequest({ cwd, reference });
-            const pastedUrl = /^https?:\/\//iu.test(reference);
-            const resolvedRepository = changeRequestRepositoryKey(changeRequest.url);
-            const foreign = linkFailure(
+            return yield* linkPullRequestToWorkspace({
+              registry: sourceControlRegistry,
+              worktree,
+              cwd,
+              reference: input.reference,
               operation,
-              `#${changeRequest.number} belongs to another repository.`,
-            );
-            // A pasted URL must name what it resolved to (some hosts resolve a
-            // URL by its number alone, in the checkout's repository).
-            if (pastedUrl) {
-              const pasted = changeRequestRepositoryKey(reference);
-              if (pasted === null || pasted !== resolvedRepository) return yield* foreign;
-            }
-            if (provider.kind === "azure-devops") {
-              // Azure pull request ids are organisation-wide (a number or a
-              // URL can resolve in a sibling repository): only the checkout's
-              // own remote says which repository the workspace is.
-              const own = azureRemoteRepositoryKey(handle.context?.remoteUrl);
-              if (own === null) {
-                return yield* linkFailure(
-                  operation,
-                  "Couldn't tell which Azure DevOps repository this checkout is.",
-                );
-              }
-              if (own !== resolvedRepository) return yield* foreign;
-            } else if (pastedUrl) {
-              // Elsewhere a number names the checkout repository's pull request:
-              // the pasted one must be that very one.
-              const own = yield* Effect.exit(
-                provider.getChangeRequest({ cwd, reference: String(changeRequest.number) }),
-              );
-              if (Exit.isFailure(own)) {
-                return yield* linkFailure(
-                  operation,
-                  `Couldn't confirm #${changeRequest.number} is this repository's pull request.`,
-                  own.cause,
-                );
-              }
-              if (changeRequestRepositoryKey(own.value.url) !== resolvedRepository) {
-                return yield* foreign;
-              }
-            }
-            const state = yield* provider
-              .getPullRequestState({ number: changeRequest.number, cwd })
-              .pipe(Effect.option);
-            const upsert = {
-              number: changeRequest.number,
-              title: changeRequest.title,
-              url: changeRequest.url,
-              state: Option.match(state, {
-                onNone: () => changeRequest.state,
-                onSome: (value) => value.state,
-              }),
-              isDraft: Option.match(state, {
-                onNone: () => changeRequest.isDraft ?? null,
-                onSome: (value) => value.isDraft,
-              }),
-              ...Option.match(state, {
-                onNone: () => ({}),
-                onSome: (value) =>
-                  value.terminalAt ? { terminalAt: DateTime.formatIso(value.terminalAt) } : {},
-              }),
-              headRefName: changeRequest.headRefName,
-              baseRefName: changeRequest.baseRefName,
-              source: "manual" as const,
-              restore: true,
-            };
-            yield* dispatchPullRequestLinks(
-              { worktreeId: worktree.worktreeId, upserts: [upsert] },
-              operation,
-            );
-            const linked = applyPullRequestLinkChanges(
-              readWorktreePullRequestLinks(worktree),
-              { upserts: [upsert] },
-              new Date().toISOString(),
-            ).find((link) => link.number === changeRequest.number);
-            if (!linked) {
-              return yield* linkFailure(operation, "The pull request could not be linked.");
-            }
-            return linked;
+              dispatch: (update) => dispatchPullRequestLinks(update, operation),
+            });
           }),
         ),
         { "rpc.aggregate": "source-control" },
@@ -1067,6 +1043,26 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
               { worktreeId: worktree.worktreeId, dismissals: [input.number] },
               operation,
             );
+          }),
+        ),
+        { "rpc.aggregate": "source-control" },
+      ),
+    [WS_METHODS.sourceControlSetPullRequestWatch]: (input) =>
+      observeRpcEffect(
+        WS_METHODS.sourceControlSetPullRequestWatch,
+        ownerEffect(
+          WS_METHODS.sourceControlSetPullRequestWatch,
+          Option.match(pullRequestWatch, {
+            // Clients hide the controls without `serverConfig.pullRequestWatch`; an older
+            // client or a test layer without the service still gets a plain answer.
+            onNone: () =>
+              Effect.fail(
+                new PullRequestWatchError({
+                  reason: "unsupported",
+                  detail: "This node does not watch pull requests.",
+                }),
+              ),
+            onSome: (service) => service.setWatch({ ...input, origin: "user" }),
           }),
         ),
         { "rpc.aggregate": "source-control" },

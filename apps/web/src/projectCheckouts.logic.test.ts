@@ -63,6 +63,35 @@ describe("buildProjectCheckoutOptions", () => {
     expect(options[1]?.name).toBe("ryco");
     expect(options[1]?.environmentLabel).toBe("Build box");
   });
+
+  it("carries each checkout's repository remote and host kind", () => {
+    const identified = {
+      ...local,
+      repositoryIdentity: {
+        canonicalKey: "github.com/acme/ryco",
+        locator: {
+          source: "git-remote",
+          remoteName: "upstream",
+          remoteUrl: "git@github.com:acme/ryco.git",
+        },
+        provider: "github",
+        remotes: [],
+      },
+    };
+    const options = buildProjectCheckoutOptions([
+      { ...snapshots[0], memberProjects: [remote, identified] },
+    ] as unknown as SidebarProjectSnapshot[]);
+    expect(
+      options.map((option) => [
+        option.projectId,
+        option.repositoryRemoteUrl,
+        option.repositoryProvider,
+      ]),
+    ).toEqual([
+      ["p-local", "git@github.com:acme/ryco.git", "github"],
+      ["p-remote", null, null],
+    ]);
+  });
 });
 
 describe("projectCheckoutQualifier", () => {

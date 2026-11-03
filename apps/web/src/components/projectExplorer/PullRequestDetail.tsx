@@ -560,6 +560,7 @@ function PullRequestDetailBody(props: {
               environmentId={props.environmentId}
               cwd={props.cwd}
               pullRequestNumber={detail.number}
+              pullRequestUrl={detail.url}
               title="Checks"
               description="GitHub Actions workflow runs for this pull request head commit."
             />

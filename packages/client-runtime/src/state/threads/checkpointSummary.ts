@@ -1,3 +1,5 @@
+import type { TurnId } from "@ryco/contracts";
+
 import type { TurnDiffSummary } from "./types.ts";
 
 /**
@@ -21,4 +23,31 @@ export function isMaterializableCheckpointSummary(
     summary.checkpointRef !== undefined &&
     !summary.checkpointRef.startsWith(PROVIDER_DIFF_CHECKPOINT_REF_PREFIX)
   );
+}
+
+/**
+ * Rollback target for each turn whose edits can still be undone, keyed by turn.
+ *
+ * A turn is undoable only when its checkpoint is real and reachable — the
+ * shared `isMaterializableCheckpointSummary` rule, which also decides whether a
+ * fork's worktree can start from the turn's checkpoint. The stored count is the
+ * turn *before* this one — undoing means returning the tree to how it looked
+ * when the turn started.
+ */
+export function deriveUndoTurnCountByTurnId(input: {
+  readonly turnDiffSummaries: ReadonlyArray<TurnDiffSummary>;
+  readonly inferredCheckpointTurnCountByTurnId: Readonly<
+    Partial<Record<TurnDiffSummary["turnId"], number>>
+  >;
+}): Map<TurnId, number> {
+  const byTurnId = new Map<TurnId, number>();
+  for (const summary of input.turnDiffSummaries) {
+    if (!isMaterializableCheckpointSummary(summary) || summary.files.length === 0) continue;
+    const turnCount =
+      summary.checkpointTurnCount ?? input.inferredCheckpointTurnCountByTurnId[summary.turnId];
+    if (typeof turnCount === "number") {
+      byTurnId.set(summary.turnId, Math.max(0, turnCount - 1));
+    }
+  }
+  return byTurnId;
 }

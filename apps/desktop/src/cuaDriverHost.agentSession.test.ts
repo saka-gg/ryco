@@ -194,6 +194,170 @@ describe("agent cursor style", () => {
 
 describe("task-owned user stop", () => {
   const task = { threadId: "thread", turnId: "turn" };
+  it.each([
+    { failure: "none", restored: true },
+    { failure: "lost-reply", restored: true },
+    { failure: "native-error", restored: false },
+  ] as const)(
+    "restores only the stopped task's saved clipboard after $failure without reopening input",
+    async ({ failure, restored }) => {
+      const f = await fixture(capability, {
+        clipboardPreservation: true,
+        ...(failure === "none" ? {} : { clipboardRestoreFailure: failure }),
+        clipboardRestored: restored,
+      });
+      const token = "2cfba20e-1536-4dd3-a92b-92667fefbefe";
+      const clipboard = (args: Record<string, unknown>, owner = task) =>
+        cuaRequest<CuaReply>(f.endpoint, {
+          method: "call",
+          name: "clipboard_write",
+          task: owner,
+          args,
+        });
+      await expect(
+        clipboard({ text: "temporary", preserve: true, preserve_token: token }),
+      ).resolves.toMatchObject({ ok: true });
+      await f.host.stopTaskByUser(task);
+      // Cleanup cannot carry new content, and another task cannot consume it.
+      await expect(clipboard({ restore_token: token, text: "new payload" })).resolves.toMatchObject(
+        {
+          ok: false,
+          effect: "not-dispatched",
+        },
+      );
+      await expect(
+        clipboard({ restore_token: token }, { threadId: "other", turnId: "turn" }),
+      ).resolves.toMatchObject({ ok: false, effect: "not-dispatched" });
+      if (failure !== "none") {
+        // A failed attempt keeps the receipt for a retry.
+        await expect(clipboard({ restore_token: token })).resolves.toMatchObject(
+          failure === "lost-reply"
+            ? { ok: false, effect: "dispatched-unknown" }
+            : { ok: true, result: { isError: true } },
+        );
+      }
+      await expect(clipboard({ restore_token: token })).resolves.toMatchObject({
+        ok: true,
+        result: { structuredContent: { clipboard_restored: restored } },
+      });
+      // Single use.
+      await expect(clipboard({ restore_token: token })).resolves.toMatchObject({ ok: false });
+      await expect(
+        cuaRequest(f.endpoint, {
+          method: "call",
+          name: "press_key",
+          task,
+          args: { key: "enter" },
+        }),
+      ).resolves.toMatchObject({ ok: false, effect: "not-dispatched" });
+      const events = await f.events();
+      expect(events.filter((event) => event.event.startsWith("clipboard:"))).toHaveLength(
+        failure === "none" ? 2 : 3,
+      );
+      expect(events.filter((event) => event.event === "start")).toHaveLength(1);
+      expect(events.some((event) => event.event === "key")).toBe(false);
+    },
+  );
+
+  it("never starts a replacement driver to restore an old clipboard token", async () => {
+    const f = await fixture(capability, { clipboardPreservation: true });
+    const token = "2cfba20e-1536-4dd3-a92b-92667fefbefe";
+    await cuaRequest(f.endpoint, {
+      method: "call",
+      name: "clipboard_write",
+      task,
+      args: { text: "temporary", preserve: true, preserve_token: token },
+    });
+    await f.host.stop();
+    await expect(
+      cuaRequest(f.endpoint, {
+        method: "call",
+        name: "clipboard_write",
+        task,
+        args: { restore_token: token },
+      }),
+    ).resolves.toMatchObject({ ok: false, effect: "not-dispatched" });
+    const events = await f.events();
+    expect(events.filter((event) => event.event.startsWith("clipboard:"))).toHaveLength(1);
+    expect(events.filter((event) => event.event === "start")).toHaveLength(1);
+  });
+
+  it("keeps clipboard cleanup available after a lost preparation reply only after native drain", async () => {
+    const f = await fixture(capability, { clipboardPreservation: true, clipboardReplyLost: true });
+    const token = "2cfba20e-1536-4dd3-a92b-92667fefbefe";
+    await expect(
+      cuaRequest(f.endpoint, {
+        method: "call",
+        name: "clipboard_write",
+        task,
+        args: { text: "temporary", preserve: true, preserve_token: token },
+      }),
+    ).resolves.toMatchObject({ ok: false, effect: "dispatched-unknown" });
+    await expect(
+      cuaRequest(f.endpoint, {
+        method: "call",
+        name: "clipboard_write",
+        task,
+        args: { restore_token: token },
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      result: { structuredContent: { clipboard_restored: true } },
+    });
+    const events = (await f.events()).map(({ event }) => event);
+    expect(events.filter((event) => event === "start")).toHaveLength(1);
+    expect(events.filter((event) => event.startsWith("clipboard:"))).toHaveLength(2);
+    expect(events.indexOf("interrupt-ack")).toBeGreaterThan(
+      events.findIndex((event) => event.startsWith("clipboard:")),
+    );
+    expect(events.findLastIndex((event) => event.startsWith("clipboard:"))).toBeGreaterThan(
+      events.indexOf("interrupt-ack"),
+    );
+    expect(events).not.toContain("cancel");
+  });
+
+  it.each(["incomplete", "once-incomplete"] as const)(
+    "rechecks a %s native drain before restoring a stopped task's clipboard",
+    async (interruptCleanup) => {
+      const f = await fixture(capability, { clipboardPreservation: true, interruptCleanup });
+      const token = "2cfba20e-1536-4dd3-a92b-92667fefbefe";
+      await cuaRequest(f.endpoint, {
+        method: "call",
+        name: "clipboard_write",
+        task,
+        args: { text: "temporary", preserve: true, preserve_token: token },
+      });
+      await expect(cuaRequest(f.endpoint, { method: "stop" })).resolves.toMatchObject({
+        ok: false,
+      });
+      // The user's Stop refuses the task's ordinary calls before any drain;
+      // only the restore-only path drains, and only it may restore.
+      await f.host.stopTaskByUser(task);
+      const restored = await cuaRequest(f.endpoint, {
+        method: "call",
+        name: "clipboard_write",
+        task,
+        args: { restore_token: token },
+      });
+      const confirmed = interruptCleanup === "once-incomplete";
+      expect(restored).toMatchObject(
+        confirmed
+          ? { ok: true, result: { structuredContent: { clipboard_restored: true } } }
+          : { ok: false, effect: "not-dispatched" },
+      );
+      const events = (await f.events()).map(({ event }) => event);
+      expect(events.filter((event) => event === "interrupt-ack")).toHaveLength(2);
+      expect(events.filter((event) => event.startsWith("clipboard:"))).toHaveLength(
+        confirmed ? 2 : 1,
+      );
+      if (confirmed)
+        expect(events.findLastIndex((event) => event.startsWith("clipboard:"))).toBeGreaterThan(
+          events.lastIndexOf("interrupt-ack"),
+        );
+      expect(events.filter((event) => event === "start")).toHaveLength(1);
+    },
+  );
+
   it("end_task succeeds without a native preview", async () => {
     const f = await fixture();
     await expect(cuaRequest(f.endpoint, { method: "end_task", task })).resolves.toMatchObject({

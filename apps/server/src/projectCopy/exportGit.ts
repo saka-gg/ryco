@@ -30,8 +30,8 @@ import {
   pickPrimaryRemote,
   remoteNamed,
 } from "../project/Layers/RepositoryIdentityResolver.ts";
-import { PORTABLE_PATCH_DIFF_ARGS } from "../vcs/GitIndexReview.ts";
 import { seedIndexFromCheckout } from "../vcs/GitTemporaryIndex.ts";
+import { BINARY_PATCH_DIFF_ARGS } from "../vcs/GitVcsDriver.ts";
 import { GIT_LFS_FILTER_OFF_ARGS } from "./gitProcess.ts";
 import type { GitNetworkShape } from "./Services/GitNetwork.ts";
 
@@ -893,7 +893,7 @@ export const buildChangesPatch = (input: {
     yield* requireSuccess(
       "git diff",
       yield* step("ProjectExport.diff", [
-        ...PORTABLE_PATCH_DIFF_ARGS,
+        ...BINARY_PATCH_DIFF_ARGS,
         "--cached",
         "--ignore-submodules=all",
         `--output=${input.file}`,

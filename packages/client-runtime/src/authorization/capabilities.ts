@@ -72,6 +72,7 @@ const HOSTED_EARLY_READ_METHODS: ReadonlySet<string> = new Set([
   WS_METHODS.projectsList,
   WS_METHODS.projectsListEntries,
   WS_METHODS.projectsSearchEntries,
+  WS_METHODS.projectsSearchContent,
   WS_METHODS.projectsReadFile,
   WS_METHODS.projectsReadIcon,
   WS_METHODS.vcsReadLocalChanges,

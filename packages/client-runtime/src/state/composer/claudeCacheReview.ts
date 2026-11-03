@@ -2,9 +2,11 @@ import type { ClaudeResumeGuard, OrchestrationThread } from "@ryco/contracts";
 import { CommandId, MessageId } from "@ryco/contracts/base-schemas";
 import {
   assessClaudeCacheResume,
+  CLAUDE_CACHE_REVIEW_WINDOW_LIMITS,
   claudeCompactUnavailableReason,
 } from "@ryco/shared/claudeCacheReview";
 import type { ClaudeCacheReview, ClaudeCacheReviewThread } from "@ryco/shared/claudeCacheReview";
+import { dispatchNativeCompaction } from "./nativeCompaction.ts";
 import type { CommitSendTurnDispatchInput } from "./sendEngine.ts";
 
 export {
@@ -61,6 +63,8 @@ export async function reviewClaudeResumeBeforeSend(
     (input.sourceProviderDriver !== undefined && input.sourceProviderDriver !== "claudeAgent")
   )
     return undefined;
+  // Before the no-presentation refusal below, so queued and background sends proceed too.
+  if (input.skipClaudeResumeReview?.() === true) return undefined;
   const getWindow = input.api.orchestration.getThreadWindow;
   if (
     !input.isServerThread ||
@@ -81,10 +85,7 @@ export async function reviewClaudeResumeBeforeSend(
   )
     return undefined;
   const readWindow = () =>
-    getWindow({
-      threadId: input.threadId,
-      limits: { messages: 1, activities: 40, checkpoints: 1, proposedPlans: 1 },
-    });
+    getWindow({ threadId: input.threadId, limits: CLAUDE_CACHE_REVIEW_WINDOW_LIMITS });
   const read = async () => (await readWindow()).thread;
   input.assertMutationReady?.();
   const window = await readWindow();
@@ -131,16 +132,16 @@ export async function reviewClaudeResumeBeforeSend(
   });
   try {
     input.assertMutationReady?.();
-    await input.api.orchestration.dispatchCommand({
-      type: "thread.turn.start",
-      claudeResumeGuard: guardFor(current),
-      commandId: CommandId.make(`claude-resume-compact:${input.messageId}`),
+    await dispatchNativeCompaction({
+      api: input.api,
       threadId: input.threadId,
-      message: { messageId: compactMessageId, role: "user", text: "/compact", attachments: [] },
+      messageId: compactMessageId,
+      commandId: CommandId.make(`claude-resume-compact:${input.messageId}`),
       modelSelection: input.modelSelection,
       runtimeMode: input.runtimeMode,
       interactionMode: input.interactionMode,
       tokenMode: input.tokenMode,
+      claudeResumeGuard: guardFor(current),
       createdAt: new Date().toISOString(),
     });
     const deadline = Date.now() + 120_000;

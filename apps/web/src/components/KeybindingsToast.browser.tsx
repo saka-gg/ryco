@@ -74,7 +74,6 @@ function createBaseServerConfig(): ServerConfig {
       capabilities: {
         repositoryIdentity: true,
         threadSettlement: false,
-        threadPriorityRanking: false,
       },
     },
     auth: {
@@ -111,7 +110,7 @@ function createBaseServerConfig(): ServerConfig {
     },
     settings: {
       ...DEFAULT_SERVER_SETTINGS,
-      enableLegacyTokenStreaming: false,
+      responseStreamingMode: "turn",
       defaultThreadEnvMode: "local" as const,
       textGenerationModelSelection: {
         instanceId: ProviderInstanceId.make("codex"),
@@ -131,6 +130,8 @@ function createBaseServerConfig(): ServerConfig {
           homePath: "",
           customModels: [],
           launchArgs: "",
+          autoCompact: "ryco",
+          autoCompactWindow: "",
         },
         copilot: {
           enabled: true,
@@ -269,7 +270,6 @@ function buildFixture(): TestFixture {
         capabilities: {
           repositoryIdentity: true,
           threadSettlement: false,
-          threadPriorityRanking: false,
         },
       },
       cwd: "/repo/project",

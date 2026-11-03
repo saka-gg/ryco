@@ -10,6 +10,8 @@ import {
   Columns2Icon,
   CopyIcon,
   ExternalLinkIcon,
+  EyeIcon,
+  EyeOffIcon,
   GitPullRequestIcon,
   FolderGit2Icon,
   FolderIcon,
@@ -30,6 +32,10 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 
+import { useProjectGroupingSettings } from "../../hooks/useProjectGroupingSettings";
+import { deriveLogicalProjectKeyFromSettings } from "../../logicalProject";
+import { dispatchThreadHidden, requestCustomSnooze } from "../../threadLifecycleCommands";
+import { DeviceIcon } from "../DeviceIcon";
 import type {
   ThreadMenuActionId,
   ThreadMenuActionItem,
@@ -42,10 +48,13 @@ import {
   MenuSubPopup,
   MenuSubTrigger,
 } from "../ui/menu";
+import { useInboxFilterStore } from "./inboxFilterStore";
 import type { InboxPullRequest } from "./inboxPullRequests";
+import { inboxRowFilterActions } from "./inboxRowFilters";
 import { formatInboxDayTime } from "./inboxRowPresentation";
 import type { InboxSidebarRow } from "./inboxSidebarModel";
 import type { InboxThreadActions } from "./InboxThreadRow";
+import type { InboxBulkRequest, InboxMenuSelection } from "./useInboxRowSelection";
 
 /**
  * Presentation for the shared thread action inventory: an icon and a group
@@ -120,6 +129,90 @@ export interface InboxSnoozePreset {
   readonly snoozedUntil: string;
 }
 
+/** The presets, then "Custom…" for a date and time or a duration the user picks. */
+function snoozePresetItems(
+  presets: ReadonlyArray<InboxSnoozePreset>,
+  onSnooze: (snoozedUntil: string) => void,
+): ReactNode[] {
+  return [
+    ...presets.map((preset) => (
+      <MenuItem key={preset.id} onClick={() => onSnooze(preset.snoozedUntil)}>
+        {preset.label}
+        <MenuShortcut className="tracking-normal">
+          {formatInboxDayTime(preset.snoozedUntil)}
+        </MenuShortcut>
+      </MenuItem>
+    )),
+    <MenuSeparator key="separator-custom" />,
+    <MenuItem
+      key="custom"
+      onClick={() =>
+        void requestCustomSnooze().then((snoozedUntil) => {
+          if (snoozedUntil) onSnooze(snoozedUntil);
+        })
+      }
+    >
+      Custom…
+    </MenuItem>,
+  ];
+}
+
+/**
+ * The menu of a multiple selection. Each count is the rows that action
+ * changes, at most 100; an action no selected row allows is disabled.
+ */
+export function InboxSelectionMenuItems(props: {
+  readonly selection: InboxMenuSelection;
+  readonly snoozePresets: ReadonlyArray<InboxSnoozePreset>;
+  readonly onRun: (request: InboxBulkRequest) => void;
+}) {
+  // It renders only in an open menu, fresh on each open, so memoizing it would
+  // only add code to the shell.
+  "use no memo";
+  const { rows, actions, deleteThreads } = props.selection;
+  const item = (
+    action: Exclude<InboxBulkRequest["action"], "snooze">,
+    Icon: LucideIcon,
+    label: string,
+  ) => (
+    <MenuItem
+      key={action}
+      variant={action === "delete" ? "destructive" : "default"}
+      disabled={actions[action].length === 0}
+      onClick={() => props.onRun({ action })}
+    >
+      <Icon aria-hidden />
+      {`${label} (${actions[action].length})`}
+    </MenuItem>
+  );
+  return [
+    item("settle", CheckIcon, "Settle"),
+    rows.some((row) => row.settled) ? item("unsettle", Undo2Icon, "Move to Active") : null,
+    <MenuSub key="snooze">
+      <MenuSubTrigger
+        className="[&>svg:first-child]:-mx-0.5 [&>svg]:opacity-80"
+        disabled={actions.snooze.length === 0}
+      >
+        <ClockIcon aria-hidden />
+        {`Snooze (${actions.snooze.length})`}
+      </MenuSubTrigger>
+      <MenuSubPopup className="min-w-52" data-thread-selection-safe>
+        {snoozePresetItems(props.snoozePresets, (snoozedUntil) =>
+          props.onRun({ action: "snooze", snoozedUntil }),
+        )}
+      </MenuSubPopup>
+    </MenuSub>,
+    rows.some((row) => row.snoozedUntil !== null)
+      ? item("unsnooze", AlarmClockOffIcon, "Unsnooze")
+      : null,
+    <MenuSeparator key="separator-unread" />,
+    item("markUnread", CircleDotIcon, "Mark unread"),
+    ...(deleteThreads
+      ? [<MenuSeparator key="separator-delete" />, item("delete", Trash2Icon, "Delete")]
+      : []),
+  ];
+}
+
 export function InboxThreadMenuItems(props: {
   readonly row: InboxSidebarRow;
   readonly threadActions?: InboxThreadActions | undefined;
@@ -130,6 +223,10 @@ export function InboxThreadMenuItems(props: {
   readonly settleLabel: string;
   readonly settleEnabled: boolean;
   readonly snoozePresets: ReadonlyArray<InboxSnoozePreset>;
+  /** Off on the frozen phone tier (AGENTS.md). */
+  readonly showFilters: boolean;
+  /** Hide and Show in Inbox; off on the frozen phone tier (AGENTS.md). */
+  readonly offerHide: boolean;
   readonly onSettle: () => void;
   readonly onSnooze: (snoozedUntil: string | null) => void;
   readonly onOpenPullRequest: (url: string) => void;
@@ -137,6 +234,11 @@ export function InboxThreadMenuItems(props: {
   readonly onReviewPullRequest?: (() => void) | undefined;
 }) {
   const { row } = props;
+  const projectFilter = useInboxFilterStore((store) => store.project);
+  const environmentFilter = useInboxFilterStore((store) => store.environmentId);
+  const setProjectFilter = useInboxFilterStore((store) => store.setProject);
+  const setEnvironmentFilter = useInboxFilterStore((store) => store.setEnvironmentId);
+  const projectGroupingSettings = useProjectGroupingSettings();
   const actions = props.threadActions?.listThreadMenuActions(row.key) ?? [];
   const actionItem = (item: ThreadMenuActionItem): ReactNode => {
     const Icon = actionPresentation(item.id).icon;
@@ -171,9 +273,41 @@ export function InboxThreadMenuItems(props: {
   const inGroup = (group: ActionGroup) =>
     actions.filter((item) => actionPresentation(item.id).group === group).map(actionItem);
   const pullRequestUrl = props.pullRequest?.url;
+  // Logical, so a repository grouped across machines narrows as one project.
+  const projectKey = row.project
+    ? deriveLogicalProjectKeyFromSettings(row.project, projectGroupingSettings)
+    : null;
+  const filterActions = props.showFilters
+    ? inboxRowFilterActions(row, projectKey, {
+        projectKey: projectFilter?.logicalKey ?? null,
+        environmentId: environmentFilter,
+      })
+    : [];
 
   const groups: ReadonlyArray<readonly [key: string, items: ReactNode[]]> = [
     ["organize", inGroup("organize")],
+    [
+      "filter",
+      filterActions.map((action) => (
+        <MenuItem
+          key={`filter-${action.kind}`}
+          onClick={() =>
+            action.kind === "project"
+              ? setProjectFilter(action.active ? null : action.project)
+              : setEnvironmentFilter(action.active ? null : action.environmentId)
+          }
+        >
+          {action.active ? (
+            <XIcon aria-hidden />
+          ) : action.kind === "project" ? (
+            <FolderIcon aria-hidden />
+          ) : (
+            <DeviceIcon environmentId={row.environmentId} label={row.machineLabel} />
+          )}
+          {action.label}
+        </MenuItem>
+      )),
+    ],
     [
       "pull-request",
       [
@@ -198,42 +332,56 @@ export function InboxThreadMenuItems(props: {
     ],
     [
       "lifecycle",
-      [
-        row.snoozedUntil ? (
-          <MenuItem
-            key="unsnooze"
-            disabled={!row.canUnsnooze || props.pending}
-            onClick={() => props.onSnooze(null)}
-          >
-            <AlarmClockOffIcon aria-hidden />
-            Unsnooze
-          </MenuItem>
-        ) : (
-          <MenuSub key="snooze">
-            <MenuSubTrigger
-              className="[&>svg:first-child]:-mx-0.5 [&>svg]:opacity-80"
-              disabled={!row.canSnooze || props.pending}
-            >
-              <ClockIcon aria-hidden />
-              Snooze
-            </MenuSubTrigger>
-            <MenuSubPopup className="min-w-52">
-              {props.snoozePresets.map((preset) => (
-                <MenuItem key={preset.id} onClick={() => props.onSnooze(preset.snoozedUntil)}>
-                  {preset.label}
-                  <MenuShortcut className="tracking-normal">
-                    {formatInboxDayTime(preset.snoozedUntil)}
-                  </MenuShortcut>
-                </MenuItem>
-              ))}
-            </MenuSubPopup>
-          </MenuSub>
-        ),
-        <MenuItem key="settle" disabled={!props.settleEnabled} onClick={props.onSettle}>
-          {row.settled ? <Undo2Icon aria-hidden /> : <CheckIcon aria-hidden />}
-          {props.settleLabel}
-        </MenuItem>,
-      ],
+      // A draft has nothing on its machine to settle, snooze or hide yet.
+      row.draftId !== undefined
+        ? []
+        : [
+            row.snoozedUntil ? (
+              <MenuItem
+                key="unsnooze"
+                disabled={!row.canUnsnooze || props.pending}
+                onClick={() => props.onSnooze(null)}
+              >
+                <AlarmClockOffIcon aria-hidden />
+                Unsnooze
+              </MenuItem>
+            ) : (
+              <MenuSub key="snooze">
+                <MenuSubTrigger
+                  className="[&>svg:first-child]:-mx-0.5 [&>svg]:opacity-80"
+                  disabled={!row.canSnooze || props.pending}
+                >
+                  <ClockIcon aria-hidden />
+                  Snooze
+                </MenuSubTrigger>
+                <MenuSubPopup className="min-w-52">
+                  {snoozePresetItems(props.snoozePresets, props.onSnooze)}
+                </MenuSubPopup>
+              </MenuSub>
+            ),
+            <MenuItem key="settle" disabled={!props.settleEnabled} onClick={props.onSettle}>
+              {row.settled ? <Undo2Icon aria-hidden /> : <CheckIcon aria-hidden />}
+              {props.settleLabel}
+            </MenuItem>,
+            // The Hidden shelf: out of the Inbox until the thread needs the person.
+            ...(props.offerHide
+              ? [
+                  <MenuItem
+                    key="hide"
+                    disabled={!row.hideActionEnabled || props.pending}
+                    onClick={() =>
+                      void dispatchThreadHidden(
+                        scopeThreadRef(row.environmentId, row.threadId),
+                        !row.hiddenByUser,
+                      )
+                    }
+                  >
+                    {row.hiddenByUser ? <EyeIcon aria-hidden /> : <EyeOffIcon aria-hidden />}
+                    {row.hiddenByUser ? "Show in Inbox" : "Hide until needed"}
+                  </MenuItem>,
+                ]
+              : []),
+          ],
     ],
     ["session", inGroup("session")],
     ["copy", inGroup("copy")],

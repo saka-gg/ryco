@@ -42,6 +42,8 @@ describe("isListedAuthAccessChange", () => {
       isListedAuthAccessChange({
         type: "clientRemoved",
         sessionId: AuthSessionId.make("session-1"),
+        chainId: AuthSessionId.make("session-1"),
+        reason: "revoked",
       }),
     ).toBe(true);
   });

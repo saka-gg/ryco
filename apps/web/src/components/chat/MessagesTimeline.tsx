@@ -1,12 +1,11 @@
 import { parseScopedThreadKey } from "@ryco/client-runtime/scoped";
-import {
-  readHostedThreadScroll,
-  saveHostedThreadScroll,
-} from "../../persistence/hostedReadViewState";
+import { interThreadMessageOf } from "@ryco/client-runtime/state/threads/interThreadMessage";
+import type { RememberedThreadReadingAnchor } from "@ryco/client-runtime/state/threads";
 import {
   type EnvironmentId,
   type MessageId,
   type ProviderDriverKind,
+  type ServerConfig,
   type ServerProviderSkill,
   type TurnId,
 } from "@ryco/contracts";
@@ -16,6 +15,7 @@ import {
   use,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -90,6 +90,7 @@ import {
   deriveTimelineMinimapItems,
   isErroredWorkEntry,
   isTimelineScrolledToEnd,
+  MAX_VISIBLE_CHANGED_FILES,
   deriveMessagesTimelineRows,
   findMessagesTimelineRowIndex,
   messagesOfTimelineRow,
@@ -116,21 +117,34 @@ import { LazyMessageActionsSheet } from "../shell/phone/lazyPhoneThreadSurfaces"
 import { usePhoneThreadSurfaceReady } from "../shell/phone/usePhoneThreadSurfaceReady";
 import { ContextHandoffMarkerRow } from "./ContextHandoffMarkerRow";
 import { ForkOriginMarkerRow } from "./ForkOriginMarkerRow";
+import { InterThreadMessageRow } from "./InterThreadMessageRow";
+import { UserInputExchangeRow } from "./UserInputExchangeRow";
 import { THREAD_FORK_COPY } from "@ryco/client-runtime/state/threads";
+import { EDIT_FROM_HERE_COPY } from "@ryco/client-runtime/state/session";
 import { useLongPress } from "~/hooks/useLongPress";
 import { usePresentationTier } from "~/hooks/usePresentationTier";
 import type { ThreadMessageSearchOccurrence } from "./ThreadMessageSearch.logic";
 import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
+import { QuoteCitationChip } from "./QuoteCitationChip";
+import { QuoteCitationContext } from "./quoteCitationContext";
+import { useQuoteSourceHighlight } from "./useQuoteSourceHighlight";
+import { usePendingQuoteHighlight } from "./usePendingQuoteHighlight";
+import type { NumberedQuoteCitation } from "@ryco/shared/quoteCitations";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
-  deriveDisplayedUserMessageState,
+  agentMessageFoldOf,
+  browserElementReferenceKey,
+  deriveDisplayedUserMessageContext,
+  fileReferenceKey,
   type ParsedTerminalContextEntry,
 } from "~/lib/terminalContext";
+import { BrowserElementChip, FileReferenceChip } from "./FileReferenceChip";
+import { deriveDisplayedUserMessageForTier } from "~/lib/userMessageDisplay";
 import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@ryco/contracts/settings";
 import { formatTimestamp } from "../../timestampFormat";
-import { usePerfMark } from "../../perf/tabSwitchInstrumentation";
+import { usePerfMark, useTimelineRevealMark } from "../../perf/tabSwitchInstrumentation";
 import { visibleSecondTicker } from "../../lib/perf/ticker";
 import {
   type ActivityPayloadOutput,
@@ -148,19 +162,33 @@ import { DisclosureChevron } from "../ui/DisclosureChevron";
 import { DisclosureRegion } from "../ui/DisclosureRegion";
 import { DISCLOSURE_CLEANUP_BUFFER_MS, DISCLOSURE_TRANSITION_MS } from "../../lib/disclosureMotion";
 import {
+  canHtmlRenderSendFromMessage,
   deriveReadableCommandDisplay,
   normalizeToolTextForComparison,
   resolveCommandVisualKind,
-} from "../../lib/toolCallLabel";
+  resolveWorkEntryStatus,
+} from "@ryco/client-runtime/state/session";
 import {
   formatWorkEntryElapsed,
   formatWorkEntryStatusLabel,
-  resolveWorkEntryStatus,
   workEntryActivityMeta,
 } from "./workEntryActivity";
-import { isFileReadToolEntry, workEntryPreview, workEntryRawCommand } from "./workChapters.logic";
+import {
+  classifyChapterStep,
+  isFileReadToolEntry,
+  workEntryPreview,
+  workEntryRawCommand,
+} from "./workChapters.logic";
 import { WorkChapterRow } from "./WorkChapterRow";
+import { WINDOW_FILE_ROWS_AFTER, WindowedRows } from "./WindowedRows";
+import { StreamedMessageMarkdown } from "./StreamedMessageMarkdown";
+import { useEnvironmentServerConfigSelector } from "../../hooks/useChatsAvailability";
 import { PROVIDER_ICON_BY_PROVIDER } from "./providerIconUtils";
+import {
+  useTimelineReadingPosition,
+  type ReadingPositionOutcome,
+} from "./useTimelineReadingPosition";
+import { useTimelineRowHeightHints } from "./useTimelineRowHeightHints";
 
 // ---------------------------------------------------------------------------
 // Context — shared state consumed by row components via useContext. Split into
@@ -219,6 +247,8 @@ const EMPTY_THREAD_MESSAGE_SEARCH_OCCURRENCES_BY_MESSAGE_ID: ReadonlyMap<
 > = new Map();
 const EMPTY_EXPANSION_OVERRIDES: Readonly<Record<string, boolean>> = {};
 const MESSAGE_SEARCH_HIGHLIGHT_DURATION_MS = 1_800;
+/** The transcript scroller's side padding; the row-width probe mirrors it. */
+const TIMELINE_SCROLLER_GUTTER_CLASS_NAME = "px-3 sm:px-5";
 const MESSAGE_ACTION_BUTTON_CLASS_NAME =
   "size-6 min-w-6 rounded-md border-0 bg-transparent px-0 text-muted-foreground/45 shadow-none transition-[background-color,color,box-shadow] before:hidden hover:bg-foreground/8 hover:text-foreground/75 hover:shadow-sm/5 focus-visible:ring-1 focus-visible:ring-ring/60 disabled:hover:bg-transparent disabled:hover:text-muted-foreground/35";
 
@@ -235,6 +265,8 @@ interface MessagesTimelineProps {
   activeTurnInProgress: boolean;
   activeTurnId?: TurnId | null;
   latestTurn?: TimelineLatestTurn | null;
+  /** The session ended in an error: an interrupted latest turn reads "Interrupted". */
+  latestTurnEndedBySession?: boolean;
   activeTurnStartedAt: string | null;
   listRef: React.RefObject<LegendListRef | null>;
   targetMessageId?: MessageId | null;
@@ -275,6 +307,19 @@ interface MessagesTimelineProps {
   onIsAtEndChange: (isAtEnd: boolean) => void;
   onManualNavigation?: () => void;
   onUserReachedEnd?: () => void;
+  /**
+   * Where the thread was left away from its end, as the chat view read it
+   * when the thread opened. Read on mount only: the view is keyed by thread.
+   * The chat view opens such a thread without live follow and learns from
+   * `onReadingPositionResolved` how the restore went.
+   */
+  readingAnchor?: RememberedThreadReadingAnchor | null;
+  /**
+   * The rows come from the thread's live detail. Rows painted from a read
+   * cache (message text only) or none yet may still gain the remembered row.
+   */
+  detailLive?: boolean;
+  onReadingPositionResolved?: (outcome: ReadingPositionOutcome) => void;
   canLoadOlder?: boolean;
   isLoadingOlder?: boolean;
   loadOlderError?: string | null;
@@ -310,6 +355,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   activeTurnInProgress,
   activeTurnId,
   latestTurn = null,
+  latestTurnEndedBySession = false,
   activeTurnStartedAt,
   listRef,
   targetMessageId = null,
@@ -341,6 +387,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onIsAtEndChange,
   onManualNavigation,
   onUserReachedEnd,
+  readingAnchor = null,
+  detailLive = true,
+  onReadingPositionResolved,
   canLoadOlder = false,
   isLoadingOlder = false,
   loadOlderError = null,
@@ -358,9 +407,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const offerFork = onForkFromMessage !== undefined && !isPhoneTier;
   // Messages open their action sheet on a phone long-press only.
   const messageActionsSheetReady = usePhoneThreadSurfaceReady(LazyMessageActionsSheet, isPhoneTier);
-  const initialScrollOffset = useMemo(
-    () => readHostedThreadScroll(routeThreadKey),
-    [routeThreadKey],
+  // Where this thread was left: the view is keyed by thread, and only its
+  // first layout restores.
+  const [rememberedAnchor] = useState(readingAnchor);
+  const smoothAssistantText = useEnvironmentServerConfigSelector(
+    activeThreadEnvironmentId,
+    selectSmoothsAssistantText,
   );
   const turnFoldExpandedById = useUiStateStore(
     (store) => store.threadTurnFoldExpandedById[routeThreadKey] ?? EMPTY_EXPANSION_OVERRIDES,
@@ -369,10 +421,18 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     (store) => store.threadWorkGroupExpandedById[routeThreadKey] ?? EMPTY_EXPANSION_OVERRIDES,
   );
   // Turns seen running in this view keep their chapter outline open once they
-  // settle; a fresh load starts every settled turn folded.
+  // settle; a fresh load starts every settled turn folded. A thread reopened
+  // at a remembered row keeps the turns it watched open, so that row is
+  // still there.
   const runningTurnIdForFolds = isWorking || activeTurnInProgress ? (activeTurnId ?? null) : null;
   const [observedRunningTurnIds, setObservedRunningTurnIds] = useState<ReadonlySet<TurnId>>(
-    () => new Set(runningTurnIdForFolds === null ? [] : [runningTurnIdForFolds]),
+    () =>
+      new Set([
+        ...(rememberedAnchor?.watchedTurnIds ?? []),
+        // The one the anchor sits in, also when read back after a reload.
+        ...(rememberedAnchor?.turnId === undefined ? [] : [rememberedAnchor.turnId]),
+        ...(runningTurnIdForFolds === null ? [] : [runningTurnIdForFolds]),
+      ]),
   );
   useEffect(() => {
     if (runningTurnIdForFolds === null) return;
@@ -391,6 +451,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       deriveMessagesTimelineRows({
         timelineEntries,
         latestTurn,
+        latestTurnEndedBySession,
         runningTurnId: runningTurnIdForFolds,
         turnFoldExpandedById,
         workGroupExpandedById,
@@ -405,6 +466,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         revealedMessageIds,
         offerFork,
         showForkOrigin: !isPhoneTier,
+        showUserInputExchanges: !isPhoneTier,
       }),
     [
       observedRunningTurnIds,
@@ -413,6 +475,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       isPhoneTier,
       timelineEntries,
       latestTurn,
+      latestTurnEndedBySession,
       runningTurnIdForFolds,
       turnFoldExpandedById,
       workGroupExpandedById,
@@ -426,11 +489,44 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     ],
   );
   const rows = useStableRows(rawRows);
-  const minimapItems = useMemo(() => deriveTimelineMinimapItems(rows), [rows]);
+  const readingPosition = useTimelineReadingPosition({
+    listRef,
+    routeThreadKey,
+    rows,
+    rowsLive: detailLive,
+    openingAnchor: rememberedAnchor,
+    restoreSuppressed: targetMessageId !== null,
+    liveFollowEnabled,
+    watchedTurnIds: observedRunningTurnIds,
+    onResolved: onReadingPositionResolved,
+  });
+  const {
+    cancelRestore: cancelReadingRestore,
+    hold: readingPositionHold,
+    holdRef: readingPositionHoldRef,
+    restoring: restoringReadingPosition,
+  } = readingPosition;
+  const minimapItems = useMemo(
+    () => deriveTimelineMinimapItems(rows, isPhoneTier ? "phone" : "desktop"),
+    [isPhoneTier, rows],
+  );
   const [minimapStripMap] = useState(() => new Map<string, HTMLSpanElement>());
   const [timelineViewportElement, setTimelineViewportElement] = useState<HTMLDivElement | null>(
     null,
   );
+  useQuoteSourceHighlight(routeThreadKey, timelineViewportElement);
+  // The frozen phone tier gets nothing new: no marks for a draft's quotes.
+  usePendingQuoteHighlight(routeThreadKey, isPhoneTier ? null : timelineViewportElement);
+  // Sized like the timeline column, which the Chat width setting widens without a viewport resize.
+  const timelineColumnProbeRef = useRef<HTMLDivElement | null>(null);
+  // Unmeasured rows are laid out at what they measured before (same thread, width and font)
+  // or at an estimate from their content, so the scroll range is right before rows render.
+  const {
+    getEstimatedItemSize,
+    onItemSizeChanged,
+    onRowColumnResize,
+    rowColumnRef: rowHeightColumnRef,
+  } = useTimelineRowHeightHints({ listRef, routeThreadKey });
   const [minimapHasPersistentGutter, setMinimapHasPersistentGutter] = useState(false);
   const [minimapHitStripWidth, setMinimapHitStripWidth] = useState(0);
   const [highlightedMessageId, setHighlightedMessageId] = useState<MessageId | null>(null);
@@ -457,7 +553,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   // flag is only refreshed inside the list's own layout/scroll passes, so a
   // transcript short enough never to scroll keeps whatever value it was
   // initialised with and the scroll-to-bottom pill sticks around forever.
+  // Silent while a reading-position restore holds the list: where it rests
+  // then (its end, while the restore waits for its row) is not the reader's,
+  // and a chat view told "at the end" pins it for a resizing composer, which
+  // ends the restore.
   const evaluateIsAtEnd = useCallback((): boolean | null => {
+    if (readingPositionHoldRef.current !== null) return null;
     const scrollNode = listRef.current?.getScrollableNode?.();
     if (!(scrollNode instanceof HTMLElement)) {
       return null;
@@ -465,13 +566,19 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     const isAtEnd = isTimelineScrolledToEnd(scrollNode);
     onIsAtEndChange(isAtEnd);
     return isAtEnd;
-  }, [listRef, onIsAtEndChange]);
+  }, [listRef, onIsAtEndChange, readingPositionHoldRef]);
 
+  const { rememberPosition } = readingPosition;
   const handleScroll = useCallback(() => {
+    // A restore owns the list while it waits for its row and until that row
+    // holds still; the next pass then reports the settled position.
+    if (readingPositionHoldRef.current !== null) return;
     const isAtEnd = evaluateIsAtEnd();
     const scrollNode = listRef.current?.getScrollableNode?.();
-    if (scrollNode instanceof HTMLElement)
-      saveHostedThreadScroll(routeThreadKey, scrollNode.scrollTop);
+    const state = listRef.current?.getState?.();
+    if (scrollNode instanceof HTMLElement && isAtEnd !== null) {
+      rememberPosition(state, scrollNode, isAtEnd);
+    }
     if (
       scrollNode instanceof HTMLElement &&
       scrollNode.scrollTop <= 320 &&
@@ -488,7 +595,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       }
       onUserReachedEnd?.();
     }
-    const state = listRef.current?.getState?.();
     if (!state || minimapItems.length === 0) {
       return;
     }
@@ -514,13 +620,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   }, [
     canLoadOlder,
     evaluateIsAtEnd,
-    routeThreadKey,
     isLoadingOlder,
     listRef,
     minimapItems,
     minimapStripMap,
     onLoadOlder,
     onUserReachedEnd,
+    readingPositionHoldRef,
+    rememberPosition,
   ]);
 
   const listHeader = useMemo(
@@ -528,7 +635,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       <>
         {TIMELINE_LIST_HEADER}
         {canLoadOlder || isLoadingOlder || loadOlderError ? (
-          <div className="mx-auto flex min-h-9 w-full max-w-3xl items-center justify-center px-3 pb-2 text-xs text-muted-foreground">
+          <div className="mx-auto flex min-h-9 w-full max-w-(--chat-timeline-max-width) items-center justify-center px-3 pb-2 text-xs text-muted-foreground">
             {isLoadingOlder ? (
               <span role="status">Loading earlier history…</span>
             ) : (
@@ -563,6 +670,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           onManualNavigation?.();
         };
         const handleWheel = (event: WheelEvent) => {
+          cancelReadingRestore();
           if (!contentOverflows()) return;
           if (event.deltaY < 0) {
             // Upward navigation can only move away from the end. Do not arm
@@ -575,10 +683,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           if (event.deltaY > 0) markManualScrollIntent();
         };
         const handleTouchMove = () => {
+          cancelReadingRestore();
           markManualScrollIntent();
           if (viewportIsAwayFromEnd()) onManualNavigation?.();
         };
         const handlePointerDown = (event: PointerEvent) => {
+          cancelReadingRestore();
           markManualScrollIntent();
           if (event.target === scrollNode ? contentOverflows() : viewportIsAwayFromEnd()) {
             onManualNavigation?.();
@@ -589,11 +699,13 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             case "PageUp":
             case "Home":
             case "ArrowUp":
+              cancelReadingRestore();
               if (contentOverflows()) breakLiveFollow();
               break;
             case "PageDown":
             case "End":
             case "ArrowDown":
+              cancelReadingRestore();
               markManualScrollIntent();
               break;
             default:
@@ -623,7 +735,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       if (frame !== null) window.cancelAnimationFrame(frame);
       removeListeners?.();
     };
-  }, [listRef, markManualScrollIntent, onManualNavigation]);
+  }, [cancelReadingRestore, listRef, markManualScrollIntent, onManualNavigation]);
 
   useEffect(
     () => () => {
@@ -634,10 +746,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [],
   );
 
+  // Also once a restore lets go of the list: a restore that settles, or one
+  // the reader takes over, emits no scroll event of its own.
   useEffect(() => {
     const frame = requestAnimationFrame(handleScroll);
     return () => cancelAnimationFrame(frame);
-  }, [handleScroll, rows.length]);
+  }, [handleScroll, readingPositionHold, rows.length]);
 
   // The scroller emits no event when rows grow, shrink, or finish measuring, so
   // re-check the bottom whenever LegendList republishes a content size. Without
@@ -667,13 +781,21 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       return;
     }
 
+    const columnProbe = timelineColumnProbeRef.current;
     const measure = () => {
       const viewportWidth = timelineViewportElement.getBoundingClientRect().width;
-      const nextHasPersistentGutter = resolveTimelineMinimapHasPersistentGutter(viewportWidth);
+      // Without the probe, treat the column as full width so the strip stays inert.
+      const contentWidth = columnProbe?.getBoundingClientRect().width ?? viewportWidth;
+      const nextHasPersistentGutter = resolveTimelineMinimapHasPersistentGutter(
+        viewportWidth,
+        contentWidth,
+      );
       setMinimapHasPersistentGutter((current) =>
         current === nextHasPersistentGutter ? current : nextHasPersistentGutter,
       );
-      setMinimapHitStripWidth(resolveTimelineMinimapHitStripWidth(viewportWidth));
+      setMinimapHitStripWidth(resolveTimelineMinimapHitStripWidth(viewportWidth, contentWidth));
+      // Rows wrap at a new width: remembered heights of the old one stop applying.
+      onRowColumnResize();
       // A shorter viewport can turn a non-scrolling transcript into a
       // scrolling one (and back), so the pill has to be re-decided here too.
       evaluateIsAtEnd();
@@ -682,12 +804,19 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     const frame = requestAnimationFrame(measure);
     const observer = new ResizeObserver(measure);
     observer.observe(timelineViewportElement);
+    if (columnProbe) observer.observe(columnProbe);
 
     return () => {
       cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [evaluateIsAtEnd, timelineViewportElement]);
+  }, [evaluateIsAtEnd, onRowColumnResize, timelineViewportElement]);
+
+  // The list mounts only when there is something to show (see the empty branch below).
+  const showsList = rows.length > 0 || isWorking;
+  // Opt-in perf marks for when the transcript actually becomes visible (LegendList keeps its rows
+  // hidden until its initial scroll lands).
+  useTimelineRevealMark(listRef, routeThreadKey, showsList);
 
   // Diagnostic: LegendList keeps its rows hidden until it decides the layout is
   // ready, and an opened thread has sometimes stayed blank until the user
@@ -730,14 +859,19 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       return;
     }
 
-    onIsAtEndChange(true);
+    // A restore bringing its row back owns the list. One still waiting for
+    // its row keeps the list at its end without telling the chat view, which
+    // would then pin the end for a resizing composer and end the wait.
+    const hold = readingPositionHoldRef.current;
+    if (hold?.kind === "restoring") return;
+    if (hold === null) onIsAtEndChange(true);
     const frameId = window.requestAnimationFrame(() => {
       void listRef.current?.scrollToEnd?.({ animated: false });
     });
     return () => {
       window.cancelAnimationFrame(frameId);
     };
-  }, [listRef, onIsAtEndChange, rows.length]);
+  }, [listRef, onIsAtEndChange, readingPositionHoldRef, rows.length]);
 
   useEffect(() => {
     if (targetMessageId === null) {
@@ -753,6 +887,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     }
 
     setHighlightedMessageId(targetMessageRowHighlight ? targetMessageId : null);
+    cancelReadingRestore();
     onManualNavigation?.();
     void listRef.current?.scrollToIndex?.({
       animated: true,
@@ -789,6 +924,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       window.clearTimeout(timeoutId);
     };
   }, [
+    cancelReadingRestore,
     listRef,
     onManualNavigation,
     rows,
@@ -831,6 +967,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         workspaceRoot,
         skills,
         activeThreadEnvironmentId,
+        smoothAssistantText,
         highlightedMessageId,
         threadMessageSearchQuery,
         threadMessageSearchOccurrencesByMessageId,
@@ -858,6 +995,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       workspaceRoot,
       skills,
       activeThreadEnvironmentId,
+      smoothAssistantText,
       highlightedMessageId,
       threadMessageSearchQuery,
       threadMessageSearchOccurrencesByMessageId,
@@ -878,7 +1016,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   // from the split timeline contexts, which propagate through LegendList's memo.
   const renderItem = useCallback(
     ({ item }: { item: MessagesTimelineRow }) => (
-      <div className="mx-auto w-full min-w-0 max-w-3xl overflow-x-hidden" data-timeline-root="true">
+      <div
+        className="mx-auto w-full min-w-0 max-w-(--chat-timeline-max-width) overflow-x-hidden"
+        data-timeline-root="true"
+      >
         <TimelineRowContent row={item} />
       </div>
     ),
@@ -889,7 +1030,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   // instead of mounting this timeline; the empty branch here only covers the
   // narrow window where an optimistic send has cleared the hero but no row has
   // materialized yet, so it stays blank rather than flashing placeholder copy.
-  if (rows.length === 0 && !isWorking) {
+  if (!showsList) {
     return <div aria-hidden className="h-full" />;
   }
 
@@ -899,20 +1040,52 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         <WorktreeSetupTimelineCtx.Provider value={worktreeSetup}>
           <EnteringMessageIdCtx.Provider value={enteringMessageId}>
             <HtmlRenderOpenerProvider onOpenInPanel={onOpenHtmlRender}>
-              <div ref={setTimelineViewportElement} className="relative h-full min-h-0">
+              <div
+                ref={setTimelineViewportElement}
+                className="relative h-full min-h-0"
+                data-reading-position-hold={readingPosition.hold ?? undefined}
+              >
+                <div
+                  ref={timelineColumnProbeRef}
+                  aria-hidden
+                  className="pointer-events-none invisible absolute inset-x-0 top-0 mx-auto h-0 max-w-(--chat-timeline-max-width)"
+                />
+                {/* Exactly as wide as a row: the scroller's gutter, then the row column. It
+                    precedes the list, so its width is readable when the list first lays out. */}
+                <div
+                  aria-hidden
+                  className={cn(
+                    "pointer-events-none invisible absolute inset-x-0 top-0 h-0",
+                    TIMELINE_SCROLLER_GUTTER_CLASS_NAME,
+                  )}
+                >
+                  <div
+                    ref={rowHeightColumnRef}
+                    data-timeline-row-column-probe=""
+                    className="mx-auto h-0 w-full max-w-(--chat-timeline-max-width)"
+                  />
+                </div>
                 <LegendList<MessagesTimelineRow>
                   ref={listRef}
                   data={rows}
                   keyExtractor={keyExtractor}
                   getItemType={timelineRowItemType}
+                  getEstimatedItemSize={getEstimatedItemSize}
+                  onItemSizeChanged={onItemSizeChanged}
                   renderItem={renderItem}
+                  // Sizes the initial container pool and the out-of-range fallback only; each
+                  // row's own height comes from `getEstimatedItemSize`.
                   estimatedItemSize={56}
                   recycleItems={false}
-                  initialScrollAtEnd={initialScrollOffset === undefined}
-                  {...(initialScrollOffset === undefined ? {} : { initialScrollOffset })}
-                  maintainScrollAtEnd={liveFollowEnabled}
+                  initialScrollAtEnd={readingPosition.initialScrollAtEnd}
+                  {...(readingPosition.alwaysRender
+                    ? { alwaysRender: readingPosition.alwaysRender }
+                    : {})}
+                  // A restore measures its row into place; the list must not
+                  // pin its end or shift content under it meanwhile.
+                  maintainScrollAtEnd={liveFollowEnabled && !restoringReadingPosition}
                   maintainScrollAtEndThreshold={0.1}
-                  maintainVisibleContentPosition
+                  maintainVisibleContentPosition={!restoringReadingPosition}
                   onScroll={handleScroll}
                   // The transcript scrolls without a visible scrollbar. Hiding it
                   // also removes the gutter entirely, so the content column no longer
@@ -920,7 +1093,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                   // stable` used to reserve space for. `chat-transcript-viewport`
                   // fades its edges under the floating bars on a translucent
                   // window (index.css).
-                  className="chat-transcript-viewport h-full overflow-x-hidden overscroll-y-contain px-3 [scrollbar-width:none] sm:px-5 [&::-webkit-scrollbar]:hidden"
+                  className={cn(
+                    "chat-transcript-viewport h-full overflow-x-hidden overscroll-y-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+                    TIMELINE_SCROLLER_GUTTER_CLASS_NAME,
+                  )}
                   ListHeaderComponent={listHeader}
                   ListFooterComponent={TIMELINE_LIST_FOOTER}
                 />
@@ -930,6 +1106,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                   items={minimapItems}
                   stripMap={minimapStripMap}
                   onSelect={(item) => {
+                    cancelReadingRestore();
                     markManualScrollIntent();
                     onManualNavigation?.();
                     void listRef.current?.scrollToIndex({
@@ -1213,6 +1390,16 @@ function TimelineMinimap({
 type TimelineWorkEntry = Extract<MessagesTimelineRow, { kind: "work" }>["groupedEntries"][number];
 type TimelineRow = MessagesTimelineRow;
 
+/**
+ * Token streaming lands text in network clumps that the reveal smooths. Paragraph and
+ * whole-message releases are finished blocks, so they appear at once (and fade in). Nodes
+ * that predate the modes stream as before.
+ */
+function selectSmoothsAssistantText(config: ServerConfig | null): boolean {
+  if (config?.environment.capabilities.responseStreamingModes !== true) return true;
+  return config.settings.responseStreamingMode === "token";
+}
+
 function renderChapterEntryPanel(entry: TimelineWorkEntry, panelId: string) {
   return (
     <WorkEntryExpandedPanel
@@ -1224,6 +1411,7 @@ function renderChapterEntryPanel(entry: TimelineWorkEntry, panelId: string) {
 }
 
 function TimelineRowContent({ row }: { row: TimelineRow }) {
+  const [agentFoldOpen, setAgentFoldOpen] = useState(false);
   // This row renderer reads both contexts (it depends on streaming + stable
   // fields), so it re-renders on streaming transitions as before. The merged
   // object is local — it does not propagate through any context boundary.
@@ -1232,11 +1420,18 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
   // Phone tier: long-press on a message bubble opens the message action
   // sheet with the same copy/revert actions as the desktop hover row.
   const isPhoneTier = usePresentationTier() === "phone";
+  // Another chat's message (an agent's, or a delegated task's result) sits between the
+  // person's and the agent's. The frozen phone tier keeps its one-line fold.
+  const interThread =
+    row.kind === "message" && !isPhoneTier ? interThreadMessageOf(row.message) : null;
+  // Ryco's own wakes (and, on the phone tier, other chats') read as one line until opened.
+  const agentFold =
+    row.kind === "message" && interThread === null ? agentMessageFoldOf(row.message) : null;
   const messageLongPress = useLongPress(
     () => {
       if (row.kind !== "message") return;
       if (row.message.role === "user") {
-        const displayedUserMessage = deriveDisplayedUserMessageState(row.message.text);
+        const displayedUserMessage = deriveDisplayedUserMessageContext(row.message.text);
         const copyText = displayedUserMessage.copyText ?? null;
         const canRevert = typeof row.revertTurnCount === "number";
         // No actions apply (nothing to copy, no checkpoint): open no sheet.
@@ -1346,6 +1541,7 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
           environmentId={ctx.activeThreadEnvironmentId}
           skills={ctx.skills}
           searchHighlight={chapterSearchHighlight}
+          smoothStreaming={ctx.smoothAssistantText}
           renderEntryPanel={renderChapterEntryPanel}
         />
       )}
@@ -1365,12 +1561,70 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
         <ForkOriginMarkerRow marker={row.marker} environmentId={ctx.activeThreadEnvironmentId} />
       )}
 
+      {row.kind === "user-input-exchange" && (
+        <UserInputExchangeRow exchange={row.exchange} timestampFormat={ctx.timestampFormat} />
+      )}
+
+      {row.kind === "message" && interThread !== null ? (
+        <InterThreadMessageRow
+          message={row.message}
+          inter={interThread}
+          environmentId={ctx.activeThreadEnvironmentId}
+          threadId={parseScopedThreadKey(ctx.routeThreadKey)?.threadId}
+        />
+      ) : null}
+
+      {row.kind === "message" && row.message.role === "user" && agentFold && !agentFoldOpen ? (
+        <div className="flex justify-end">
+          <button
+            type="button"
+            className="flex min-w-0 max-w-[80%] items-center gap-2 rounded-xl border border-border/60 px-3 py-1.5 text-left text-muted-foreground text-xs transition-colors hover:bg-foreground/5"
+            aria-expanded={false}
+            data-agent-message-fold={agentFold.kind}
+            onClick={() => setAgentFoldOpen(true)}
+          >
+            <BotIcon className="size-3.5 shrink-0" aria-hidden="true" />
+            <span className="shrink-0 font-medium text-foreground/80">{agentFold.label}</span>
+            {agentFold.summary ? (
+              <span className="min-w-0 truncate">{agentFold.summary}</span>
+            ) : null}
+            <ChevronDownIcon className="size-3.5 shrink-0" aria-hidden="true" />
+          </button>
+        </div>
+      ) : null}
+
+      {row.kind === "message" && row.message.role === "user" && agentFold && agentFoldOpen ? (
+        <div className="flex justify-end">
+          <button
+            type="button"
+            className="mb-1 flex items-center gap-1 text-muted-foreground text-xs hover:text-foreground"
+            aria-expanded={true}
+            onClick={() => setAgentFoldOpen(false)}
+          >
+            <BotIcon className="size-3.5" aria-hidden="true" />
+            {agentFold.label}
+            <ChevronDownIcon className="size-3.5 rotate-180" aria-hidden="true" />
+          </button>
+        </div>
+      ) : null}
+
       {row.kind === "message" &&
         row.message.role === "user" &&
+        interThread === null &&
+        (!agentFold || agentFoldOpen) &&
         (() => {
           const userImages = row.message.attachments ?? [];
-          const displayedUserMessage = deriveDisplayedUserMessageState(row.message.text);
+          const displayedUserMessage = deriveDisplayedUserMessageForTier(
+            row.message.text,
+            isPhoneTier ? "phone" : "desktop",
+          );
           const terminalContexts = displayedUserMessage.contexts;
+          const fileReferences = displayedUserMessage.fileReferences;
+          const browserElements = displayedUserMessage.browserElements;
+          const hasUserMessageBody =
+            displayedUserMessage.visibleText.trim().length > 0 ||
+            terminalContexts.length > 0 ||
+            displayedUserMessage.quotes.length > 0;
           const canRevertAgentWork = typeof row.revertTurnCount === "number";
           return (
             <div className="flex justify-end">
@@ -1387,16 +1641,51 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                     threadId={parseScopedThreadKey(ctx.routeThreadKey)?.threadId}
                     messageId={row.message.id}
                   />
-                  {(displayedUserMessage.visibleText.trim().length > 0 ||
-                    terminalContexts.length > 0) && (
-                    <UserMessageBody
-                      cwd={ctx.markdownCwd}
-                      environmentId={ctx.activeThreadEnvironmentId}
-                      text={displayedUserMessage.visibleText}
-                      terminalContexts={terminalContexts}
-                      skills={ctx.skills}
-                      searchHighlight={messageSearchHighlight}
-                    />
+                  {fileReferences.length > 0 || browserElements.length > 0 ? (
+                    <div
+                      className={cn("flex flex-wrap gap-1", hasUserMessageBody && "mb-1")}
+                      data-user-message-file-references="true"
+                    >
+                      {browserElements.map((element) => (
+                        <BrowserElementChip
+                          key={browserElementReferenceKey(element)}
+                          element={element}
+                        />
+                      ))}
+                      {fileReferences.map((reference) => (
+                        <FileReferenceChip
+                          key={fileReferenceKey(reference)}
+                          reference={reference}
+                          theme={ctx.resolvedTheme}
+                        />
+                      ))}
+                    </div>
+                  ) : null}
+                  {hasUserMessageBody && (
+                    <QuoteCitationContext
+                      value={
+                        isPhoneTier
+                          ? null
+                          : {
+                              quotes: displayedUserMessage.quotes,
+                              currentThreadKey: ctx.routeThreadKey,
+                            }
+                      }
+                    >
+                      <UserMessageQuotes
+                        text={displayedUserMessage.visibleText}
+                        quotes={displayedUserMessage.quotes}
+                      >
+                        <UserMessageBody
+                          cwd={ctx.markdownCwd}
+                          environmentId={ctx.activeThreadEnvironmentId}
+                          text={displayedUserMessage.visibleText}
+                          terminalContexts={terminalContexts}
+                          skills={ctx.skills}
+                          searchHighlight={messageSearchHighlight}
+                        />
+                      </UserMessageQuotes>
+                    </QuoteCitationContext>
                   )}
                 </div>
                 <div className="mt-1 flex items-center justify-end gap-2">
@@ -1418,7 +1707,8 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                         className={MESSAGE_ACTION_BUTTON_CLASS_NAME}
                         disabled={ctx.isRevertingCheckpoint || ctx.isWorking}
                         onClick={() => ctx.onRevertUserMessage(row.message.id)}
-                        title="Revert to this message"
+                        title={EDIT_FROM_HERE_COPY.action}
+                        aria-label={EDIT_FROM_HERE_COPY.action}
                       >
                         <Undo2Icon className="size-3" />
                       </Button>
@@ -1457,12 +1747,15 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                     assistantResponseStillInProgress ? undefined : row.message.id
                   }
                 >
-                  <ChatMarkdown
+                  <StreamedMessageMarkdown
+                    routeThreadKey={ctx.routeThreadKey}
+                    streamingMessageId={row.message.streaming ? row.message.id : null}
                     allowTerminalInsertion
                     text={messageText}
                     cwd={ctx.markdownCwd}
                     environmentId={ctx.activeThreadEnvironmentId}
                     isStreaming={assistantResponseStillInProgress}
+                    smoothStreaming={ctx.smoothAssistantText}
                     skills={ctx.skills}
                     searchHighlight={messageSearchHighlight}
                   />
@@ -1473,6 +1766,7 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                   environmentId={ctx.activeThreadEnvironmentId}
                   threadId={parseScopedThreadKey(ctx.routeThreadKey)?.threadId}
                   messageId={row.message.id}
+                  messageRole={row.message.role}
                 />
                 {!assistantResponseStillInProgress && row.turnHtmlRenders && (
                   <HtmlRenderCards
@@ -1480,6 +1774,8 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                     threadId={parseScopedThreadKey(ctx.routeThreadKey)?.threadId}
                     renders={row.turnHtmlRenders}
                     appearance={ctx.resolvedTheme}
+                    // A turn's pages are on this thread's agent's messages.
+                    onAgentMessages
                   />
                 )}
                 {!assistantResponseStillInProgress && (
@@ -1557,6 +1853,8 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
             messageId={row.messageId}
             attachment={row.attachment}
             htmlRender={row.htmlRender}
+            // A render row is a page on this thread's agent's message.
+            canSendMessages={canHtmlRenderSendFromMessage({ role: "assistant" }, row.attachment)}
           />
           {!(
             ctx.activeTurnInProgress &&
@@ -2190,9 +2488,6 @@ const AssistantChangedFilesSection = memo(function AssistantChangedFilesSection(
   );
 });
 
-// Long file lists collapse to this many rows; the rest hide behind "Show N more".
-const MAX_VISIBLE_CHANGED_FILES = 6;
-
 /** Inner component that only mounts when there are actual changed files,
  *  so the store subscription is unconditional (no hooks after early return). */
 function AssistantChangedFilesSectionInner({
@@ -2294,14 +2589,34 @@ function AssistantChangedFilesSectionInner({
         </div>
       </div>
       <DisclosureRegion open={expanded}>
-        {visibleFiles.map((file) => (
-          <ChangedFileRow
-            key={file.path}
-            file={file}
-            resolvedTheme={resolvedTheme}
-            onOpen={() => onOpenTurnDiff(turnSummary.turnId, file.path)}
+        {visibleFiles.length > WINDOW_FILE_ROWS_AFTER ? (
+          // "Show more" on a huge checkpoint renders only the rows in view.
+          <WindowedRows
+            rows={visibleFiles}
+            rowKey={changedFileRowKey}
+            renderRow={(file) => (
+              <ChangedFileRow
+                file={file}
+                first={file === visibleFiles[0]}
+                windowed
+                resolvedTheme={resolvedTheme}
+                onOpen={() => onOpenTurnDiff(turnSummary.turnId, file.path)}
+              />
+            )}
+            virtualized
+            rowStrideClassName={WINDOWED_CHANGED_FILE_ROW_HEIGHT_CLASS}
           />
-        ))}
+        ) : (
+          visibleFiles.map((file, index) => (
+            <ChangedFileRow
+              key={file.path}
+              file={file}
+              first={index === 0}
+              resolvedTheme={resolvedTheme}
+              onOpen={() => onOpenTurnDiff(turnSummary.turnId, file.path)}
+            />
+          ))
+        )}
         {overflowCount > 0 || fileListExpanded ? (
           <button
             type="button"
@@ -2323,9 +2638,17 @@ function AssistantChangedFilesSectionInner({
   );
 }
 
+// A changed-file row's height with its divider, fixed so a windowed list can lay rows out.
+const WINDOWED_CHANGED_FILE_ROW_HEIGHT_CLASS = "h-[35px]";
+const changedFileRowKey = (file: TurnDiffSummary["files"][number]) => file.path;
+
 /** One file in the changed-files card: icon, path, and its own +N/-M. */
 function ChangedFileRow(props: {
   file: TurnDiffSummary["files"][number];
+  /** The first row draws no divider above it. */
+  first: boolean;
+  /** In a windowed list, where every row is the same height. */
+  windowed?: boolean;
   resolvedTheme: "light" | "dark";
   onOpen: () => void;
 }) {
@@ -2339,7 +2662,11 @@ function ChangedFileRow(props: {
       type="button"
       data-changed-file-row="true"
       title={file.path}
-      className="group/file-row flex w-full items-center gap-2 border-t border-border/70 px-3 py-2 text-left transition-colors first:border-t-0 hover:bg-foreground/5"
+      className={cn(
+        "group/file-row flex w-full items-center gap-2 border-border/70 px-3 py-2 text-left transition-colors hover:bg-foreground/5",
+        !props.first && "border-t",
+        props.windowed && WINDOWED_CHANGED_FILE_ROW_HEIGHT_CLASS,
+      )}
       onClick={onOpen}
     >
       <VscodeEntryIcon
@@ -2409,6 +2736,63 @@ const UserMessageTerminalContextInlineLabel = memo(
     return <TerminalContextInlineChip label={props.context.header} tooltipText={tooltipText} />;
   },
 );
+
+type UserMessageQuotesProps = {
+  text: string;
+  quotes: ReadonlyArray<NumberedQuoteCitation>;
+  children: ReactNode;
+};
+
+function UserMessageQuotes(props: UserMessageQuotesProps) {
+  return props.quotes.length === 0 ? props.children : <UserMessageWithQuotes {...props} />;
+}
+
+function sameNumbers(left: ReadonlyArray<number>, right: ReadonlyArray<number>): boolean {
+  return left.length === right.length && left.every((number, index) => number === right[index]);
+}
+
+/**
+ * Each quote whose `[Quote N]` marker did not render as a chip (missing from
+ * the text, or read as Markdown syntax such as a link) leads the message
+ * instead, so no quote goes unseen.
+ */
+function UserMessageWithQuotes(props: UserMessageQuotesProps) {
+  const bodyRef = useRef<HTMLDivElement>(null);
+  // A first guess from the text; the chips that rendered settle it before paint.
+  const [unplacedNumbers, setUnplacedNumbers] = useState<ReadonlyArray<number>>(() =>
+    props.quotes
+      .filter((quote) => !props.text.includes(`[Quote ${quote.number}]`))
+      .map((quote) => quote.number),
+  );
+  // The quotes are derived from the message text, so they change with it.
+  const { quotes } = props;
+  useLayoutEffect(() => {
+    const placed = new Set<string>();
+    for (const chip of bodyRef.current?.querySelectorAll<HTMLElement>("[data-quote-number]") ??
+      []) {
+      if (chip.dataset.quoteNumber) placed.add(chip.dataset.quoteNumber);
+    }
+    const next = quotes
+      .map((quote) => quote.number)
+      .filter((number) => !placed.has(String(number)));
+    setUnplacedNumbers((previous) => (sameNumbers(previous, next) ? previous : next));
+  }, [quotes]);
+  const unplaced = props.quotes.filter((quote) => unplacedNumbers.includes(quote.number));
+  return (
+    <>
+      {unplaced.length > 0 ? (
+        <div className="mb-1 flex flex-wrap gap-1">
+          {unplaced.map((quote) => (
+            <QuoteCitationChip key={quote.number} citation={quote.citation} />
+          ))}
+        </div>
+      ) : null}
+      <div ref={bodyRef} className="contents">
+        {props.children}
+      </div>
+    </>
+  );
+}
 
 const UserMessageBody = memo(function UserMessageBody(props: {
   cwd: string | undefined;
@@ -3107,6 +3491,9 @@ const WorkEntryExpandedPanel = memo(function WorkEntryExpandedPanel(props: {
   // The collapsed row truncates its detail behind a hover tooltip, which taps
   // cannot reach; the panel carries the full text so it stays available.
   const detailText = workEntry.detail?.trim() || null;
+  // A runtime notice's detail is provider prose (a hook's reason, a slash command's
+  // output) with its own line breaks, and a notice has no output to miss.
+  const isNotice = classifyChapterStep(workEntry) === "note";
 
   return (
     <div
@@ -3118,6 +3505,7 @@ const WorkEntryExpandedPanel = memo(function WorkEntryExpandedPanel(props: {
       <WorkEntryActivitySection
         workEntry={workEntry}
         detailText={detailText !== inputLine ? detailText : null}
+        preserveDetailLineBreaks={isNotice}
         timestampFormat={timestampFormat}
       />
 
@@ -3128,7 +3516,7 @@ const WorkEntryExpandedPanel = memo(function WorkEntryExpandedPanel(props: {
           environmentId={activeThreadEnvironmentId}
           isStreaming={false}
         />
-      ) : fullOutput.status === "loading" ? null : (
+      ) : fullOutput.status === "loading" || isNotice ? null : (
         <p className="text-[11px] italic text-muted-foreground/45">No output was captured.</p>
       )}
       <WorkEntryOutputStatus fullOutput={fullOutput} />
@@ -3190,9 +3578,11 @@ function WorkEntryOutputStatus(props: { fullOutput: ActivityPayloadOutput }) {
 function WorkEntryActivitySection(props: {
   workEntry: TimelineWorkEntry;
   detailText: string | null;
+  /** Keep the detail's own line breaks (multi-line provider text) instead of reflowing it. */
+  preserveDetailLineBreaks: boolean;
   timestampFormat: TimestampFormat;
 }) {
-  const { workEntry, detailText, timestampFormat } = props;
+  const { workEntry, detailText, preserveDetailLineBreaks, timestampFormat } = props;
   const statusLabel = formatWorkEntryStatusLabel(resolveWorkEntryStatus(workEntry));
   const elapsed = formatWorkEntryElapsed(workEntry);
   const lastActivityAt = workEntry.lastActivityAt ?? workEntry.createdAt;
@@ -3231,7 +3621,13 @@ function WorkEntryActivitySection(props: {
             {/* The collapsed row truncates this and reveals the rest on hover,
                 which a touch device cannot do — so the panel carries the full
                 text on every tier, not just phone. */}
-            <dd data-work-entry-detail="true" className="wrap-break-word text-foreground/84">
+            <dd
+              data-work-entry-detail="true"
+              className={cn(
+                "wrap-break-word text-foreground/84",
+                preserveDetailLineBreaks && "whitespace-pre-wrap",
+              )}
+            >
               {detailText}
             </dd>
           </>

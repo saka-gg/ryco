@@ -7,6 +7,8 @@ import {
   AGENT_CONTROL_DELEGATION_MCP_TOOLS,
   AGENT_CONTROL_LOCAL_TASK_MCP_TOOLS,
   AGENT_CONTROL_MCP_TOOLS,
+  AGENT_CONTROL_QUEUE_MCP_TOOLS,
+  AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL,
   AgentControlProposalId,
   AgentControlRequestId,
   ProviderInstanceId,
@@ -16,15 +18,18 @@ import {
   TurnId,
   type AgentControlCapability,
   type OrchestrationCommand,
+  type OrchestrationEvent,
   type AgentControlProposal,
   type AgentControlProposalStreamProposalEvent,
 } from "@ryco/contracts";
 import { assert, it } from "@effect/vitest";
+import { vi } from "vitest";
 import {
   Context,
   Effect,
   Exit,
   Fiber,
+  Latch,
   Layer,
   Option,
   PubSub,
@@ -38,6 +43,16 @@ import {
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
+import { DeviceManager } from "../../device/DeviceManager.ts";
+import { FakeDeviceBackend } from "../../device/FakeDeviceBackend.ts";
+import { DeviceService } from "../../device/Services/DeviceService.ts";
+
+/** Counts loads of `ryco_device`'s module, which must never load at boot. */
+const deviceRoutineModule = vi.hoisted(() => ({ loads: 0 }));
+vi.mock("../Mcp/deviceRoutineTools.ts", async (importOriginal) => {
+  deviceRoutineModule.loads += 1;
+  return await importOriginal();
+});
 import { CompletionReturnRepositoryLive } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { AgentControlProposalRepositoryLive } from "../../persistence/Layers/AgentControlProposals.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
@@ -593,13 +608,35 @@ const providerRegistryStub = Layer.succeed(ProviderRegistry, {
   streamChanges: Stream.empty,
 });
 
-const makeMcpServerLayer = (settingsLayer: Layer.Layer<ServerSettingsService>) =>
+/** An engine double whose domain event feed never publishes unless a test passes its own. */
+const engineStub = (events?: PubSub.PubSub<OrchestrationEvent>) =>
+  Layer.effect(
+    OrchestrationEngineService,
+    Effect.gen(function* () {
+      const feed = events ?? (yield* PubSub.unbounded<OrchestrationEvent>());
+      return {
+        dispatch: die("dispatch"),
+        subscribeDomainEvents: Effect.map(PubSub.subscribe(feed), Stream.fromSubscription),
+      } as unknown as OrchestrationEngineShape;
+    }),
+  );
+
+const makeMcpServerLayer = (
+  settingsLayer: Layer.Layer<ServerSettingsService>,
+  options: {
+    readonly projections?: ProjectionSnapshotQueryShape;
+    readonly events?: PubSub.PubSub<OrchestrationEvent>;
+  } = {},
+) =>
   AgentControlMcpServerLive.pipe(
     Layer.provideMerge(AgentControlSessionRegistryLive),
     Layer.provideMerge(AgentControlPolicyLive),
     Layer.provideMerge(proposalServiceStub),
     Layer.provideMerge(proposalEventsStub),
-    Layer.provideMerge(Layer.succeed(ProjectionSnapshotQuery, projectionsStub)),
+    Layer.provideMerge(
+      Layer.succeed(ProjectionSnapshotQuery, options.projections ?? projectionsStub),
+    ),
+    Layer.provideMerge(engineStub(options.events)),
     Layer.provideMerge(providerRegistryStub),
     Layer.provideMerge(settingsLayer),
   );
@@ -652,6 +689,88 @@ it.live("attributes the initial listener start as a named startup phase", () =>
           phase.startsWith("agent-control.listener.start ("),
         ),
       );
+    }),
+  ),
+);
+
+it.live("wakes a private ryco_wait_threads on the engine's events for the waited thread", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const events = yield* PubSub.unbounded<OrchestrationEvent>();
+      const waitedThreadId = ThreadId.make("thread-waited");
+      let reads = 0;
+      const firstRead = yield* Latch.make(false);
+      const busyShell = {
+        id: waitedThreadId,
+        projectId: "project-1",
+        title: "Waited",
+        modelSelection: { instanceId: "codex", model: "gpt-5.6" },
+        runtimeMode: "auto",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        latestTurn: null,
+        createdAt: T0,
+        updatedAt: T0,
+        archivedAt: null,
+        session: null,
+        latestUserMessageAt: null,
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+        hasActionableProposedPlan: false,
+        backgroundLiveness: "working",
+      };
+      const projections: ProjectionSnapshotQueryShape = {
+        ...projectionsStub,
+        getThreadShellById: () =>
+          Effect.sync(() => {
+            reads += 1;
+            return Option.some(busyShell as never);
+          }).pipe(Effect.tap(() => firstRead.open)),
+      };
+      const context = yield* Layer.build(
+        makeMcpServerLayer(ServerSettingsService.layerTest({ agentControl: { enabled: true } }), {
+          projections,
+          events,
+        }),
+      );
+      const registry = Context.get(context, AgentControlSessionRegistry);
+      const endpoint = yield* registry.currentEndpoint;
+      const url = (endpoint as Option.Some<{ url: string }>).value.url;
+      const lease = yield* registry.issueLease({
+        threadId: callerThreadId,
+        providerInstanceId: codexInstance,
+        runtimeSessionId: RuntimeSessionId.make("runtime-wait"),
+        capabilities: [AGENT_CONTROL_CAPABILITIES.read],
+        injectionMode: "codex-http",
+      });
+      const bearer = Redacted.value(
+        (lease as Option.Some<AgentControlIssuedLease>).value.credential,
+      );
+      const call = yield* Effect.forkChild(
+        rpc(url, bearer, "tools/call", {
+          name: "ryco_wait_threads",
+          arguments: { threadIds: [waitedThreadId], timeoutMs: 1_200 },
+        }),
+      );
+      // The wait subscribes before its first read.
+      yield* firstRead.await;
+      yield* PubSub.publish(events, {
+        type: "thread.session-set",
+        aggregateKind: "thread",
+        aggregateId: waitedThreadId,
+        payload: { threadId: waitedThreadId },
+      } as unknown as OrchestrationEvent);
+      const response = yield* Fiber.join(call);
+      const result = parseBody(response).result as {
+        readonly isError?: boolean;
+        readonly structuredContent: { readonly timedOut: boolean };
+      };
+      assert.isUndefined(result.isError);
+      assert.isTrue(result.structuredContent.timedOut);
+      // The first check, the woken check and the final check at the deadline, then the result
+      // read. Without the engine's events the wait reads 3 times, the old 500 ms poll 5 times.
+      assert.strictEqual(reads, 4);
     }),
   ),
 );
@@ -721,11 +840,6 @@ const makeDeliveryLayer = (settingsLayer: Layer.Layer<ServerSettingsService>) =>
         assertExistingPath: die("assertExistingPath"),
       } as unknown as WorkspaceAccessPolicyShape),
     ),
-    Layer.provideMerge(
-      Layer.succeed(OrchestrationEngineService, {
-        dispatch: die("dispatch"),
-      } as unknown as OrchestrationEngineShape),
-    ),
   );
 
 it.live("installs the HTML render tools on the private listener when the service exists", () =>
@@ -783,6 +897,15 @@ it.live("installs the HTML render tools on the private listener when the service
       );
       assert.include(ungranted.listed, "ryco_attach_file");
       assert.notInclude(ungranted.listed, "ryco_html_render");
+      // `ryco_request_secret` loads lazily and is offered only with its own grant.
+      assert.notInclude(ungranted.listed, AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL);
+      const asker = yield* listFor(
+        withRender,
+        [AGENT_CONTROL_CAPABILITIES.read, AGENT_CONTROL_CAPABILITIES.requestSecrets],
+        "runtime-secret-granted",
+      );
+      assert.include(asker.listed, AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL);
+      assert.include(asker.advertised ?? [], AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL);
 
       const withoutRender = yield* Layer.build(makeDeliveryLayer(settings));
       const missing = yield* listFor(
@@ -825,6 +948,90 @@ it.live("installs the HTML render tools on the private listener when the service
         assert.include(manager.listed, name);
         assert.include(manager.advertised ?? [], name);
       }
+    }),
+  ),
+);
+
+it.live("installs ryco_device where devices exist, for sessions that may drive them", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const listFor = (
+        context: Context.Context<AgentControlSessionRegistry>,
+        capabilities: ReadonlyArray<AgentControlCapability>,
+        runtime: string,
+      ) =>
+        Effect.gen(function* () {
+          const registry = Context.get(context, AgentControlSessionRegistry);
+          const endpoint = yield* registry.currentEndpoint;
+          const url = (endpoint as Option.Some<{ url: string }>).value.url;
+          const lease = yield* registry.issueLease({
+            threadId: callerThreadId,
+            providerInstanceId: codexInstance,
+            runtimeSessionId: RuntimeSessionId.make(runtime),
+            capabilities,
+            injectionMode: "codex-http",
+          });
+          const bearer = Redacted.value(
+            (lease as Option.Some<AgentControlIssuedLease>).value.credential,
+          );
+          const listed = (
+            parseBody(yield* rpc(url, bearer, "tools/list")).result as {
+              tools: ReadonlyArray<{ name: string }>;
+            }
+          ).tools.map((tool) => tool.name);
+          const catalog = yield* rpc(url, bearer, "tools/call", {
+            name: AGENT_CONTROL_MCP_TOOLS.capabilities,
+            arguments: {},
+          });
+          const advertised = (
+            parseBody(catalog).result as { structuredContent?: { tools?: ReadonlyArray<string> } }
+          ).structuredContent?.tools;
+          return { listed, advertised };
+        });
+      const settings = ServerSettingsService.layerTest({ agentControl: { enabled: true } });
+      const manager = new DeviceManager({ backend: new FakeDeviceBackend() });
+      yield* Effect.addFinalizer(() => Effect.promise(() => manager.dispose()));
+      const deviceGrants = [
+        AGENT_CONTROL_CAPABILITIES.read,
+        AGENT_CONTROL_CAPABILITIES.readDevices,
+        AGENT_CONTROL_CAPABILITIES.readDeviceContent,
+        AGENT_CONTROL_CAPABILITIES.controlDevices,
+      ];
+
+      const withDevices = yield* Layer.build(
+        makeMcpServerLayer(settings).pipe(
+          Layer.provideMerge(Layer.succeed(DeviceService, { supported: true, manager })),
+        ),
+      );
+      // The listener runs, and the module still has not loaded (no other test in this
+      // file provides a device service, so nothing before this point can have loaded it).
+      assert.strictEqual(deviceRoutineModule.loads, 0);
+      const reader = yield* listFor(
+        withDevices,
+        [AGENT_CONTROL_CAPABILITIES.read, AGENT_CONTROL_CAPABILITIES.readDeviceContent],
+        "runtime-device-reader",
+      );
+      assert.notInclude(reader.listed, "ryco_device");
+      // A session that cannot drive devices never loads it either.
+      assert.strictEqual(deviceRoutineModule.loads, 0);
+      const driver = yield* listFor(withDevices, deviceGrants, "runtime-device-driver");
+      assert.include(driver.listed, "ryco_device");
+      assert.include(driver.advertised ?? [], "ryco_device");
+      assert.strictEqual(deviceRoutineModule.loads, 1);
+      // The device tools wrap the queue tools: both are there, with devices or without.
+      for (const listing of [reader, driver]) {
+        assert.include(listing.listed, AGENT_CONTROL_QUEUE_MCP_TOOLS.queueList);
+      }
+
+      const unsupported = yield* Layer.build(
+        makeMcpServerLayer(settings).pipe(
+          Layer.provideMerge(Layer.succeed(DeviceService, { supported: false, manager })),
+        ),
+      );
+      const nowhere = yield* listFor(unsupported, deviceGrants, "runtime-device-unsupported");
+      assert.notInclude(nowhere.listed, "ryco_device");
+      assert.notInclude(nowhere.advertised ?? [], "ryco_device");
+      assert.include(nowhere.listed, AGENT_CONTROL_QUEUE_MCP_TOOLS.queueList);
     }),
   ),
 );

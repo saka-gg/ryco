@@ -19,6 +19,7 @@ import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
 import type { ProviderClientDefinition } from "./providerDriverMeta";
+import { SettingsSelect } from "./SettingsSelect";
 
 export interface ProviderSettingsFieldModel {
   readonly key: string;
@@ -28,6 +29,9 @@ export interface ProviderSettingsFieldModel {
   readonly placeholder?: string | undefined;
   readonly clearWhenEmpty: "omit" | "persist";
   readonly defaultBooleanValue?: boolean | undefined;
+  /** A select's choices, and the value it shows while the key is unset. */
+  readonly options?: NonNullable<ProviderSettingsFormAnnotation["options"]> | undefined;
+  readonly defaultStringValue?: string | undefined;
 }
 
 function titleizeFieldKey(key: string): string {
@@ -65,15 +69,28 @@ function readProviderSettingsFormSchemaAnnotation(
   return Schema.resolveAnnotations(definition.settingsSchema)?.providerSettingsFormSchema ?? {};
 }
 
-function readFieldBooleanDefault(
+function readFieldDefault(
   fieldSchema: ProviderClientDefinition["settingsSchema"]["fields"][string],
-): boolean | undefined {
+): unknown {
   try {
-    const decoded = Schema.decodeUnknownSync(fieldSchema as Schema.Decoder<unknown>)(undefined);
-    return typeof decoded === "boolean" ? decoded : undefined;
+    return Schema.decodeUnknownSync(fieldSchema as Schema.Decoder<unknown>)(undefined);
   } catch {
     return undefined;
   }
+}
+
+function readFieldBooleanDefault(
+  fieldSchema: ProviderClientDefinition["settingsSchema"]["fields"][string],
+): boolean | undefined {
+  const decoded = readFieldDefault(fieldSchema);
+  return typeof decoded === "boolean" ? decoded : undefined;
+}
+
+function readFieldStringDefault(
+  fieldSchema: ProviderClientDefinition["settingsSchema"]["fields"][string],
+): string | undefined {
+  const decoded = readFieldDefault(fieldSchema);
+  return typeof decoded === "string" ? decoded : undefined;
 }
 
 export function deriveProviderSettingsFields(
@@ -112,6 +129,12 @@ export function deriveProviderSettingsFields(
           clearWhenEmpty: formAnnotation.clearWhenEmpty ?? "omit",
           ...(formAnnotation.control === "switch"
             ? { defaultBooleanValue: readFieldBooleanDefault(fieldSchema) }
+            : {}),
+          ...(formAnnotation.control === "select"
+            ? {
+                options: formAnnotation.options ?? [],
+                defaultStringValue: readFieldStringDefault(fieldSchema),
+              }
             : {}),
         } satisfies ProviderSettingsFieldModel,
       ];
@@ -175,7 +198,10 @@ export function nextProviderConfigWithFieldValue(
   }
 
   const trimmed = value.trim();
-  if (field.clearWhenEmpty === "omit" && trimmed.length === 0) {
+  if (
+    field.clearWhenEmpty === "omit" &&
+    (trimmed.length === 0 || trimmed === field.defaultStringValue)
+  ) {
     delete base[field.key];
   } else {
     base[field.key] = value;
@@ -241,6 +267,27 @@ function ProviderSettingsFieldRow({
             }
             aria-label={field.label}
           />
+        </div>
+      </FieldFrame>
+    );
+  }
+
+  if (field.control === "select") {
+    const stored = readProviderConfigString(value, field.key);
+    // An unset key shows the default; a value this client does not offer shows no choice.
+    return (
+      <FieldFrame variant={variant}>
+        <div>
+          {label}
+          <SettingsSelect
+            className={cn(variant === "card" && "mt-1.5")}
+            value={stored === "" ? field.defaultStringValue : stored}
+            onValueChange={(next) => onChange(nextProviderConfigWithFieldValue(value, field, next))}
+            options={field.options ?? []}
+            ariaLabel={field.label}
+            width="full"
+          />
+          {description}
         </div>
       </FieldFrame>
     );

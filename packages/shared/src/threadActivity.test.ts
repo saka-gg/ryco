@@ -5,17 +5,23 @@ import {
   CHANGED_FILE_SCAN_MAX_FILES,
   collectChangedFiles,
   compareThreadActivities,
+  compareThreadActivitiesInLifecycleOrder,
   compareThreadActivitySequence,
-  derivePendingThreadRequestState,
-  derivePendingThreadRequests,
+  compactsOnRequest,
   isContextCompactionActivity,
+  isNativeCompactionCommand,
   isTerminalContextHandoffActivity,
   isThreadActivityMilestone,
+  latestCheckpointRevertActivity,
   resolveRevertRetention,
   retainThreadMessagesAfterForkRevert,
   retainThreadMessagesAfterRevert,
   retainTurnItemsAfterRevert,
 } from "./threadActivity.ts";
+import {
+  derivePendingThreadRequestState,
+  derivePendingThreadRequests,
+} from "./pendingThreadRequests.ts";
 
 function activity(id: string, kind = "tool.completed", payload: unknown = {}) {
   return {
@@ -74,6 +80,23 @@ describe("threadActivity", () => {
     expect(isContextCompactionActivity(activity("tool"))).toBe(false);
   });
 
+  it("asks for native compaction only with the exact command and no attachments", () => {
+    expect(isNativeCompactionCommand({ input: "/compact" })).toBe(true);
+    expect(isNativeCompactionCommand({ input: " /compact\n", attachments: [] })).toBe(true);
+    expect(isNativeCompactionCommand({ input: "/compact", attachments: [{}] })).toBe(false);
+    expect(isNativeCompactionCommand({ input: "/compact now" })).toBe(false);
+    expect(isNativeCompactionCommand({ input: "please /compact" })).toBe(false);
+    expect(isNativeCompactionCommand({})).toBe(false);
+  });
+
+  it("knows which drivers compact on request", () => {
+    expect(compactsOnRequest("claudeAgent")).toBe(true);
+    expect(compactsOnRequest("codex")).toBe(true);
+    expect(compactsOnRequest("opencode")).toBe(false);
+    expect(compactsOnRequest(null)).toBe(false);
+    expect(compactsOnRequest(undefined)).toBe(false);
+  });
+
   it("identifies only terminal, schema-valid context handoffs as milestones", () => {
     expect(
       isTerminalContextHandoffActivity(
@@ -110,6 +133,44 @@ describe("threadActivity", () => {
 
     expect(result.map((entry) => entry.id)).toEqual([
       "old-compaction",
+      "recent-tool-1",
+      "recent-tool-2",
+    ]);
+  });
+
+  it("keeps open optional questions past the cap, however much came after them", () => {
+    const asked = (id: string, nonBlocking = true) =>
+      activity(`asked:${id}`, "user-input.requested", {
+        requestId: id,
+        ...(nonBlocking ? { nonBlocking: true } : {}),
+      });
+    const result = capThreadActivitiesPreservingMilestones(
+      [
+        asked("open"),
+        asked("retryable"),
+        activity("retry", "provider.user-input.respond.failed", {
+          requestId: "retryable",
+          responseState: "retryable",
+          detail: "This question's turn ended before the answer reached it.",
+        }),
+        asked("answered"),
+        activity("answer", "user-input.resolved", { requestId: "answered" }),
+        asked("cleared"),
+        activity("clear", "provider.user-input.respond.failed", {
+          requestId: "cleared",
+          responseState: "invalidated",
+          detail: "Stale pending user-input request: cleared.",
+        }),
+        asked("blocking", false),
+        activity("recent-tool-1"),
+        activity("recent-tool-2"),
+      ],
+      2,
+    );
+
+    expect(result.map((entry) => entry.id)).toEqual([
+      "asked:open",
+      "asked:retryable",
       "recent-tool-1",
       "recent-tool-2",
     ]);
@@ -275,6 +336,50 @@ describe("activity order", () => {
         entry("b", "2026-01-01T00:00:01.000Z", 7),
       ),
     ).toBeGreaterThan(0);
+  });
+
+  it("picks the newest revert journal row, past failed ones when asked", () => {
+    const revert = (id: string, status: string, createdAt: string, sequence?: number) => ({
+      ...entry(id, createdAt, sequence),
+      kind: "checkpoint.revert",
+      payload: { status },
+    });
+    const kept = revert("kept", "completed", "2026-01-01T00:00:01.000Z", 3);
+    const refused = revert("refused", "failed", "2026-01-01T00:00:02.000Z", 4);
+    const activities = [
+      refused,
+      kept,
+      { ...entry("tool", "2026-01-01T00:00:09.000Z", 9), kind: "tool.completed", payload: {} },
+    ];
+
+    expect(latestCheckpointRevertActivity(activities)).toBe(refused);
+    expect(latestCheckpointRevertActivity(activities, { skipFailed: true })).toBe(kept);
+    expect(latestCheckpointRevertActivity([refused], { skipFailed: true })).toBeNull();
+    expect(latestCheckpointRevertActivity([])).toBeNull();
+  });
+
+  it("orders a lifecycle recorded in the same instant before the id decides", () => {
+    const at = "2026-01-01T00:00:01.000Z";
+    const lifecycle = (id: string, kind: string, sequence?: number) => ({
+      ...entry(id, at, sequence),
+      kind,
+    });
+    const ordered = [
+      lifecycle("a", "user-input.resolved"),
+      lifecycle("b", "tool.completed"),
+      lifecycle("c", "tool.updated"),
+      lifecycle("d", "user-input.requested"),
+      lifecycle("e", "tool.started"),
+    ].toSorted(compareThreadActivitiesInLifecycleOrder);
+
+    expect(ordered.map((value) => value.id)).toEqual(["e", "c", "d", "a", "b"]);
+    // The sequence still decides first.
+    expect(
+      compareThreadActivitiesInLifecycleOrder(
+        lifecycle("a", "user-input.resolved", 1),
+        lifecycle("b", "user-input.requested", 2),
+      ),
+    ).toBeLessThan(0);
   });
 });
 

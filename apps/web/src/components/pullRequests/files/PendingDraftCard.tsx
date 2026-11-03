@@ -60,6 +60,7 @@ export const PendingDraftCard = memo(function PendingDraftCard(props: {
             <CommentField
               textareaRef={fieldRef}
               value={body}
+              savedValue={props.draft.body}
               onChange={setBody}
               placeholder="Edit comment"
               ariaLabel="Edit pending comment"

@@ -13,11 +13,19 @@ import {
   SETTINGS_SECTION_IDS,
   SETTINGS_SECTION_LABELS,
 } from "./SettingsPage";
+import { DESKTOP_KEEP_AWAKE_ROW_ID } from "./desktopKeepAwake.logic";
+import { KEYBINDING_SEARCH_ENTRIES } from "./keybindingSearchEntries";
 import { SETTINGS_SEARCH_INDEX } from "./settingsSearchIndex";
+import { PAIRING_LINK_TARGET_ID } from "./settingsSearchReveal";
 import {
   DESKTOP_ONLY_SETTINGS_SECTIONS,
   settingsSectionInDestination,
 } from "./settingsSections.logic";
+import {
+  settingsNodeStatus,
+  settingsScopeSentenceShown,
+  settingsSectionHasNodeFanOut,
+} from "./SettingsScopeSentence.logic";
 
 describe("settings destinations", () => {
   it("offers app keybindings offline and for every hosted role, never on headless nodes", () => {
@@ -48,7 +56,7 @@ describe("settings destinations", () => {
     expect(settingsSectionInDestination("integrations", "client", true)).toBe(true);
   });
   it("assigns every search result to exactly one destination", () => {
-    for (const entry of SETTINGS_SEARCH_INDEX) {
+    for (const entry of [...SETTINGS_SEARCH_INDEX, ...KEYBINDING_SEARCH_ENTRIES]) {
       expect(["client", "node"]).toContain(entry.owner);
       expect(settingsSectionInDestination(entry.section, entry.owner, true)).toBe(true);
     }
@@ -229,18 +237,49 @@ describe("§13.5's pointer names a section this dialog actually has", () => {
   });
 });
 
-describe("legacy token streaming search", () => {
-  it("routes the legacy result to the revealable General-settings row", () => {
+describe("response streaming search", () => {
+  it("routes paragraph and token queries to the General-settings row", () => {
     const entry = SETTINGS_SEARCH_INDEX.find(
-      (candidate) => candidate.title === "Stream token by token (legacy)",
+      (candidate) => candidate.title === "Response streaming",
     );
     expect(entry).toMatchObject({
       section: "general",
-      targetId: "legacy-token-streaming",
+      owner: "node",
+      targetId: "response-streaming",
     });
-    expect(`${entry?.title} ${entry?.description} ${entry?.keywords}`.toLowerCase()).toContain(
-      "token streaming",
+    const text = `${entry?.title} ${entry?.description} ${entry?.keywords}`.toLowerCase();
+    for (const query of ["paragraph", "token", "streaming", "legacy"]) {
+      expect(text).toContain(query);
+    }
+  });
+});
+
+describe("keep-awake search", () => {
+  it("is offered only by a desktop that can set the mode, and jumps to the row", () => {
+    const entry = SETTINGS_SEARCH_INDEX.find(
+      (candidate) => candidate.title === "Keep this computer awake",
     );
+    expect(entry).toMatchObject({
+      section: "connections",
+      owner: "client",
+      desktopCapability: "setKeepAwakeMode",
+      // The row's title names the device ("this Mac"), so the search jumps by its id.
+      targetId: DESKTOP_KEEP_AWAKE_ROW_ID,
+    });
+    const text = `${entry?.title} ${entry?.description} ${entry?.keywords}`.toLowerCase();
+    for (const query of ["sleep", "awake", "agents", "plugged in"]) {
+      expect(text).toContain(query);
+    }
+  });
+});
+
+describe("pairing link search", () => {
+  it("jumps to the row first-run setup links to, since no heading reads its title", () => {
+    expect(SETTINGS_SEARCH_INDEX.find((entry) => entry.title === "Pairing link")).toMatchObject({
+      section: "connections",
+      owner: "client",
+      targetId: PAIRING_LINK_TARGET_ID,
+    });
   });
 });
 
@@ -261,5 +300,51 @@ describe("MCP and integrations navigation", () => {
     expect(hostedSettingsSectionAllowed("integrations", "owner")).toBe(true);
     for (const role of [null, "viewer", "operator"] as const)
       expect(hostedSettingsSectionAllowed("integrations", role)).toBe(false);
+  });
+});
+
+describe("the scope sentence", () => {
+  it("names the node on node sections, never on this app's or this device's own", () => {
+    for (const section of SETTINGS_SECTION_IDS) {
+      expect(settingsScopeSentenceShown("client", section)).toBe(false);
+    }
+    for (const section of ["general", "providers", "source-control", "security"] as const) {
+      expect(settingsScopeSentenceShown("node", section)).toBe(true);
+    }
+    // Browser and device sections keep their one-line label even in the node destination.
+    for (const section of ["inbox", "appearance", "connections", "updates"] as const) {
+      expect(settingsScopeSentenceShown("node", section)).toBe(false);
+    }
+    for (const section of SETTINGS_SECTION_IDS) {
+      const scope = settingsSectionScope(section);
+      expect(settingsScopeSentenceShown("node", section)).toBe(
+        scope !== "browser" && scope !== "device",
+      );
+    }
+  });
+
+  it("explains Mixed only on sections whose rows apply to every node", () => {
+    expect(settingsSectionHasNodeFanOut("general")).toBe(true);
+    expect(settingsSectionHasNodeFanOut("source-control")).toBe(true);
+    expect(settingsSectionHasNodeFanOut("providers")).toBe(false);
+    expect(settingsSectionHasNodeFanOut("security")).toBe(false);
+  });
+
+  it("calls a node Offline or Connecting from the facts the empty state uses", () => {
+    expect(settingsNodeStatus({ connection: "connected" })).toBeNull();
+    // Its Hub machine record or directory says it is offline.
+    expect(settingsNodeStatus({ connection: "disconnected", online: false })).toBe("offline");
+    expect(settingsNodeStatus({ connection: "connected", online: false })).toBe("offline");
+    // A connection underway, or one its machine record allows.
+    expect(settingsNodeStatus({ connection: "connecting" })).toBe("connecting");
+    expect(settingsNodeStatus({ connection: "disconnected", online: true, canConnect: true })).toBe(
+      "connecting",
+    );
+    // Any other connection that is not up.
+    expect(settingsNodeStatus({ connection: "disconnected" })).toBe("offline");
+    expect(settingsNodeStatus({ connection: "error", canConnect: false })).toBe("offline");
+    // No connection by design (a hosted node the cursor is not on) only follows presence.
+    expect(settingsNodeStatus({ connection: undefined, online: true })).toBeNull();
+    expect(settingsNodeStatus({ connection: undefined })).toBeNull();
   });
 });

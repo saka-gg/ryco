@@ -5,14 +5,17 @@ import type {
   VcsStatusResult,
 } from "@ryco/contracts";
 import {
-  describeUnsupportedChangeRequestRequest,
-  getChangeRequestHostCapabilities,
   resolveChangeRequestPresentation,
-  type ChangeRequestHostCapabilities,
   type ChangeRequestPresentation,
 } from "@ryco/shared/sourceControl";
+import {
+  describeUnsupportedChangeRequestRequest,
+  getChangeRequestHostCapabilities,
+  type ChangeRequestHostCapabilities,
+} from "@ryco/shared/changeRequestHostCapabilities";
 import { CircleAlertIcon } from "lucide-react";
 import { useRef, useState, type KeyboardEvent, type RefObject } from "react";
+import { PULL_REQUESTS_LIST_LIMIT } from "@ryco/client-runtime/state/pull-request-review";
 
 import { cn } from "../../../lib/utils";
 import { refreshGitStatus, useGitBranches, useGitStatus } from "../../../rpc/useGit";
@@ -39,7 +42,6 @@ import {
   errorText,
   SubmitKeyHint,
 } from "../conversation/MarkdownEditor";
-import { PULL_REQUESTS_LIST_LIMIT } from "../pullRequestsModel.logic";
 import { BranchPicker } from "./BranchPicker";
 import {
   buildCreatePullRequestInput,
@@ -55,6 +57,8 @@ import {
 } from "./createPullRequest.logic";
 import type { CreatePullRequestTarget } from "./createPullRequestDialogStore";
 import { useRemoteBranchPresence } from "./useRemoteBranchPresence";
+import { TemplatePicker } from "./TemplatePicker";
+import { useTemplatedDescription } from "./useChangeRequestTemplates";
 
 export interface CreatePullRequestDialogProps {
   readonly open: boolean;
@@ -204,7 +208,13 @@ function CreatePullRequestFields(props: {
 
   // ── Fields ──
   const [title, setTitle] = useState("");
-  const [body, setBody] = useState("");
+  // The base branch's templates fill an untouched description.
+  const description = useTemplatedDescription({
+    environmentId,
+    cwd,
+    baseRefName: base?.name ?? null,
+  });
+  const body = description.body;
   const [draft, setDraft] = useState(false);
   const validation = validateCreatePullRequest({ head, base, title, pushState, existing });
   const create = useCreateChangeRequestMutation({ environmentId });
@@ -315,13 +325,22 @@ function CreatePullRequestFields(props: {
             className="block h-9 w-full bg-transparent px-3 text-sm font-medium text-foreground outline-none placeholder:font-normal placeholder:text-muted-foreground/70 disabled:opacity-64"
           />
         </div>
+        {description.templates.length > 0 ? (
+          <TemplatePicker
+            templates={description.templates}
+            selectedPath={description.selectedPath}
+            locked={description.locked}
+            disabled={pending}
+            onChoose={description.choose}
+          />
+        ) : null}
         <div className={COMPOSER_BOX_CLASS}>
           <textarea
             aria-label="Description"
             placeholder="Describe the change. Markdown works."
             value={body}
             disabled={pending}
-            onChange={(event) => setBody(event.target.value)}
+            onChange={(event) => description.setBody(event.target.value)}
             className={cn(COMPOSER_TEXTAREA_CLASS, "min-h-36")}
           />
         </div>

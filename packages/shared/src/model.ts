@@ -416,6 +416,12 @@ export function resolvePromptInjectedEffort(
   return null;
 }
 
+/**
+ * The `Ultrathink:` line `applyClaudePromptEffortPrefix` starts a prompt with, and what follows
+ * it up to the prompt's text, matched the way the composer's effort controls read it.
+ */
+export const CLAUDE_PROMPT_EFFORT_PREFIX_PATTERN = /^Ultrathink:\s*/i;
+
 export function applyClaudePromptEffortPrefix(
   text: string,
   effort: string | null | undefined,

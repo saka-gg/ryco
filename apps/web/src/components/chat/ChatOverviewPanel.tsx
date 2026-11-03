@@ -10,11 +10,13 @@ import GitActionsControl, {
   type GitActionPostPushEvent,
   type GitActionsControlAppearance,
 } from "../GitActionsControl";
+import { useSubagentStopAction } from "../agents/useSubagentStopAction";
 import { CrownOverview } from "../overview/crown/CrownOverview";
 import type { CrownOverviewProps } from "../overview/crown/crownTypes";
 import { useWorktreeNotes, type WorktreeNotesTarget } from "../overview/notes/useWorktreeNotes";
 import type { GitActionRunnerInput } from "../useGitActionRunner";
 import { type ChatProjectTarget, usePromoteChatBinding } from "./ChatProjectActions";
+import { useCrownServersBinding } from "./useCrownServersBinding";
 import { useCrownShipBinding } from "./useCrownShipBinding";
 import type { PostPushWorkflowDiscoveryWatch } from "../postPushWorkflowDiscovery.logic";
 import { type ChatOverviewModelInput, useChatOverviewModel } from "./useChatOverviewModel";
@@ -40,6 +42,11 @@ export type ChatOverviewCrownInput = Pick<
    * project in place of its source-control sections; null for projects.
    */
   chatProject: ChatProjectTarget | null;
+  /**
+   * Shows the thread's Browser panel. Set only when the thread runs on this
+   * desktop's own backend: the crown's Servers then open their pages there.
+   */
+  onOpenBrowserPanel?: (() => void) | null;
 };
 
 export type ChatOverviewPanelProps = Omit<
@@ -52,6 +59,8 @@ export type ChatOverviewPanelProps = Omit<
   sourceControlSync?: ReactNode;
   /** The checkout the crown's Ship button acts on; without it the button opens the branch card. */
   shipTarget?: Omit<GitActionRunnerInput, "detectedChangeRequest"> | undefined;
+  /** The server thread whose running servers the crown lists; null for drafts. */
+  serversThread?: ScopedThreadRef | null;
 } & (
     | {
         /** The frozen web phone tier's full-screen classic panel. */
@@ -210,6 +219,11 @@ export function ChatOverviewPanel(props: ChatOverviewPanelElementProps) {
       <CrownWithNotes
         notesTarget={props.notesTarget}
         chatProject={props.chatProject}
+        serversTarget={{
+          thread: props.serversThread ?? null,
+          cwd: props.workspaceRoot ?? null,
+          openInBrowserPanel: props.onOpenBrowserPanel ?? null,
+        }}
         shipTarget={
           props.shipTarget && props.isGitRepo
             ? { ...props.shipTarget, detectedChangeRequest }
@@ -238,7 +252,12 @@ export function ChatOverviewPanel(props: ChatOverviewPanelElementProps) {
 /** What ChatView hands the on-demand overview panel. */
 export type ChatOverviewPanelWithControlsProps = DistributiveOmit<
   ChatOverviewPanelElementProps,
-  "sourceControlActions" | "branchControl" | "sourceControlSync" | "shipTarget"
+  | "sourceControlActions"
+  | "branchControl"
+  | "sourceControlSync"
+  | "shipTarget"
+  | "stopAgent"
+  | "serversThread"
 > & {
   /** The thread's git controls, built here so ChatView stays free of them. */
   controls: OverviewPanelControlsInput;
@@ -247,9 +266,10 @@ export type ChatOverviewPanelWithControlsProps = DistributiveOmit<
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
 /**
- * The overview panel with its git controls. ChatView loads this module on
- * demand (see `chatOverviewPanelModule`), so the overview, crown, plan sidebar
- * and git action controls stay out of the chat route's first-frame graph.
+ * The overview panel with its git controls and, in the crown, Stop for the
+ * thread's agents. ChatView loads this module on demand (see
+ * `chatOverviewPanelModule`), so the overview, crown, plan sidebar and git
+ * action controls stay out of the chat route's first-frame graph.
  */
 export function ChatOverviewPanelWithControls({
   controls,
@@ -258,6 +278,8 @@ export function ChatOverviewPanelWithControls({
   const { sourceControlActions, branchControl, sourceControlSync } =
     useOverviewPanelControls(controls);
   const { gitCwd, activeThreadRef, routeKind, draftId, onPostPush } = controls;
+  // The phone sheet lists no runtime agents, so it never gates Stop.
+  const stopAgent = useSubagentStopAction(props.presentation === "crown" ? activeThreadRef : null);
   return props.presentation === "crown" ? (
     <ChatOverviewPanel
       {...props}
@@ -270,6 +292,8 @@ export function ChatOverviewPanelWithControls({
         ...(routeKind === "draft" && draftId ? { draftId } : {}),
         onPostPush,
       }}
+      serversThread={routeKind === "server" ? activeThreadRef : null}
+      stopAgent={stopAgent}
     />
   ) : (
     <ChatOverviewPanel
@@ -281,19 +305,35 @@ export function ChatOverviewPanelWithControls({
   );
 }
 
-/** The crown bound to the thread's notes, chat and Ship button; the phone sheet never reads them. */
+/**
+ * The crown bound to the thread's notes, chat, Ship button and servers; the phone sheet never
+ * reads them.
+ */
 function CrownWithNotes({
   notesTarget,
   chatProject,
   shipTarget,
+  serversTarget,
   ...props
-}: Omit<CrownOverviewProps, "notes" | "chat" | "ship"> & {
+}: Omit<CrownOverviewProps, "notes" | "chat" | "ship" | "servers"> & {
   readonly open: boolean;
   readonly notesTarget: WorktreeNotesTarget | null;
   readonly chatProject: ChatProjectTarget | null;
   readonly shipTarget: GitActionRunnerInput | null;
+  readonly serversTarget: {
+    readonly thread: ScopedThreadRef | null;
+    readonly cwd: string | null;
+    readonly openInBrowserPanel: (() => void) | null;
+  };
 }) {
   const notes = useWorktreeNotes(notesTarget);
+  const servers = useCrownServersBinding({
+    environmentId: serversTarget.thread?.environmentId ?? null,
+    threadId: serversTarget.thread?.threadId ?? null,
+    cwd: serversTarget.cwd,
+    enabled: props.open,
+    openInBrowserPanel: serversTarget.openInBrowserPanel,
+  });
   const chat = usePromoteChatBinding(chatProject);
   const { ship, dialog } = useCrownShipBinding({
     gitCwd: shipTarget?.gitCwd ?? null,
@@ -305,7 +345,7 @@ function CrownWithNotes({
   });
   return (
     <>
-      <CrownOverview {...props} notes={notes} chat={chat} ship={ship} />
+      <CrownOverview {...props} notes={notes} chat={chat} ship={ship} servers={servers} />
       {dialog}
     </>
   );

@@ -8,10 +8,13 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { assert, it } from "@effect/vitest";
 import { vi } from "vitest";
 import {
+  type DatabaseStorageReport,
   DEFAULT_SERVER_SETTINGS,
   GitCommandError,
   OrchestrationShellSnapshot,
   ProjectId,
+  StorageSnapshot,
+  type StorageError,
   ThreadId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -20,10 +23,12 @@ import {
 } from "@ryco/contracts";
 import * as NodeSqliteClient from "../persistence/NodeSqliteClient.ts";
 import { runMigrations } from "../persistence/Migrations.ts";
-import { type ServerConfigShape } from "../config.ts";
+import { ServerConfig, type ServerConfigShape } from "../config.ts";
 import { makeWorkspaceAccessPolicy } from "../workspace/Layers/WorkspaceAccessPolicy.ts";
 import { runProcess } from "../processRunner.ts";
 import { makeStorageService } from "./StorageService.ts";
+import { makeGitVcsDriverCore } from "../vcs/GitVcsDriverCore.ts";
+import { recreateRecordedCheckout } from "../workspace/checkoutRecreation.ts";
 import { resolveUsageProtectedPaths } from "../usage/usageProtectedPaths.ts";
 import {
   acquireWorktreeCreationLease,
@@ -35,12 +40,10 @@ import {
   storageLifecycleLock,
   noteStorageSettingsChange,
 } from "./lifecycle.ts";
-import {
-  assertCanonicalPath,
-  assertCleanWorktree,
-  measureDirectory,
-  removeVerifiedWorktree,
-} from "./filesystem.ts";
+import { assertCanonicalPath, measureDirectory } from "./filesystem.ts";
+import { assertRemovableWorktree, removeVerifiedWorktree } from "./quarantineRemoval.ts";
+import type { CheckoutMergeProverShape } from "../sourceControl/checkoutMergeProof.ts";
+import { makeCheckoutMergeProver } from "../sourceControl/checkoutMergeProver.ts";
 
 const projectId = ProjectId.make("fixture-project");
 const threadId = ThreadId.make("fixture-thread");
@@ -155,7 +158,7 @@ const fixture = Effect.gen(function* () {
     logsDir: path.join(root, "logs"),
   } as ServerConfigShape;
   const policy = yield* makeWorkspaceAccessPolicy(undefined);
-  const service = makeStorageService({
+  const deps: Parameters<typeof makeStorageService>[0] = {
     sql,
     config,
     providerProtection: {
@@ -212,11 +215,18 @@ const fixture = Effect.gen(function* () {
           });
         }).pipe(Effect.mapError((cause) => cause as never)),
     },
-  });
+  };
+  const service = makeStorageService(deps);
   const entry = (yield* service.scan()).entries.find((item) => item.path === checkout)!;
   return {
     sql,
     service,
+    /** The same node with a database report reader, as the server builds it. */
+    withDatabase: (readDatabase: Effect.Effect<DatabaseStorageReport>) =>
+      makeStorageService({ ...deps, readDatabase }),
+    /** The same node with more of the dependencies the server gives it. */
+    withDeps: (extra: Partial<Parameters<typeof makeStorageService>[0]>) =>
+      makeStorageService({ ...deps, ...extra }),
     root,
     repo,
     checkout,
@@ -245,10 +255,142 @@ const fixture = Effect.gen(function* () {
     },
   };
 });
+type Fixture = Effect.Success<typeof fixture>;
+/** Commits a `.gitignore` on the fixture branch and fast-forwards the project's main to it. */
+const ignoreAndMerge = (f: Fixture, ignore: string) =>
+  Effect.gen(function* () {
+    yield* io(() => fs.writeFile(path.join(f.checkout, ".gitignore"), ignore));
+    yield* f.git(f.checkout, ["add", ".gitignore"]);
+    yield* f.git(f.checkout, ["commit", "-m", "ignore caches"]);
+    yield* f.git(f.repo, ["merge", "--ff-only", "fixture-branch"]);
+  });
+/**
+ * A commit on the fixture branch that the project's main lacks, and pull request #7 linked to
+ * the workspace as merged: squash-merged upstream. `service` proves it as the forge would (only
+ * that pull request, only at that commit); `calls` records what it was asked.
+ */
+const squashMerged = (f: Fixture) =>
+  Effect.gen(function* () {
+    yield* io(() => fs.writeFile(path.join(f.checkout, "tracked.txt"), "squash-merged\n"));
+    yield* f.git(f.checkout, ["commit", "-am", "squash-merged work"]);
+    const head = (yield* f.git(f.checkout, ["rev-parse", "HEAD"])).stdout.trim();
+    f.setSnapshot((s) => ({
+      ...s,
+      worktrees: s.worktrees?.map((w) => ({ ...w, prNumber: 7, prState: "merged" as const })),
+    }));
+    const calls: Parameters<CheckoutMergeProverShape["prove"]>[0][] = [];
+    const mergeProof: CheckoutMergeProverShape = {
+      prove: (input) =>
+        Effect.sync(() => {
+          calls.push(input);
+          return input.pullRequest?.number === 7 &&
+            input.pullRequest.state === "merged" &&
+            input.head === head
+            ? { kind: "pull-request" as const, head, number: 7, baseRefName: "main" }
+            : null;
+        }),
+      remoteDefaultBranches: () => Effect.succeed(null),
+    };
+    return { head, calls, service: f.withDeps({ mergeProof }) };
+  });
+/** Quarantines and moved-out cache folders beside the checkout. */
+const cleanupSiblings = (f: Fixture) =>
+  io(async () => (await fs.readdir(f.root)).filter((name) => name.startsWith(".cleanup-")));
+const exists = (candidate: string) =>
+  io(() =>
+    fs.lstat(candidate).then(
+      () => true,
+      () => false,
+    ),
+  );
+/** Installed dependencies as package managers leave them, with fixtures packages ship. */
+const installDependencies = (checkout: string) =>
+  io(async () => {
+    const pkg = path.join(checkout, "node_modules", "pkg");
+    await fs.mkdir(pkg, { recursive: true });
+    await fs.writeFile(path.join(pkg, "index.js"), "module.exports = 1;\n");
+    // Certificates and `credentials.*` sources ship in packages; they are not the user's.
+    await fs.writeFile(path.join(pkg, "test.pem"), "fixture certificate");
+    await fs.writeFile(path.join(pkg, "credentials.js"), "export {};\n");
+    await fs.mkdir(path.join(checkout, "node_modules", ".bin"));
+    await fs.symlink("../pkg/index.js", path.join(checkout, "node_modules", ".bin", "pkg"));
+    const nested = path.join(checkout, "apps", "web", "node_modules", "x");
+    await fs.mkdir(nested, { recursive: true });
+    await fs.writeFile(path.join(nested, "y.js"), "y");
+    await fs.mkdir(path.join(checkout, ".turbo"));
+    await fs.writeFile(path.join(checkout, ".turbo", "cache.json"), "{}");
+  });
+// Root may change any folder, and Windows has no such modes.
+const permissionsApply = process.platform !== "win32" && process.getuid?.() !== 0;
+/**
+ * Makes `folder` read-only (holding `entry.json`) until the scope ends, as a container running
+ * as root leaves it; added after the fixture, so the fixture's own removal runs after it.
+ */
+const lockFolder = (f: Fixture, folder: string) =>
+  Effect.gen(function* () {
+    yield* io(async () => {
+      await fs.mkdir(folder, { recursive: true });
+      await fs.writeFile(path.join(folder, "entry.json"), "{}");
+      await fs.chmod(folder, 0o555);
+    });
+    // Wherever a removal moved it.
+    yield* Effect.addFinalizer(() =>
+      io(() =>
+        runProcess("chmod", ["-R", "u+rwx", f.root], {
+          timeoutMs: 10_000,
+          maxBufferBytes: 64 * 1024,
+        }),
+      ).pipe(Effect.orDie),
+    );
+  });
 
 it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory(), NodeServices.layer))(
   "safe node storage lifecycle",
   (it) => {
+    it.effect("carries the node's database report on every inventory page", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const report: DatabaseStorageReport = {
+            fileBytes: 8_192_000,
+            walBytes: 4_096,
+            pageSize: 4_096,
+            pageCount: 2_000,
+            freePages: 300,
+            autoVacuum: "incremental",
+            compaction: {
+              enabled: true,
+              headSequence: 900,
+              compactedThroughSequence: 450,
+              caughtUp: false,
+              lastPassCompletedAt: "2026-10-20T12:00:00.000Z",
+              removedEvents: 120,
+              removedBytes: 60_000,
+              estimatedCompactableBytes: 60_000,
+            },
+            reclaimableBytes: 300 * 4_096 + 60_000,
+          };
+          let reads = 0;
+          const f = yield* fixture;
+          const service = f.withDatabase(
+            Effect.sync(() => {
+              reads += 1;
+              return report;
+            }),
+          );
+          const first = yield* service.scan();
+          // A later page replaces the shown snapshot, so it carries the report too.
+          const later = yield* service.scan(undefined, "~after-every-entry");
+          assert.isAbove(first.entries.length, 0);
+          assert.deepEqual(first.database, report);
+          assert.deepEqual(later.database, report);
+          assert.strictEqual(reads, 2);
+          const wire = Schema.encodeSync(StorageSnapshot)(first);
+          assert.deepEqual(Schema.decodeUnknownSync(StorageSnapshot)(wire).database, report);
+          // Without a reader the key is absent, as from a node that predates it.
+          assert.isFalse("database" in (yield* f.service.scan()));
+        }),
+      ),
+    );
     it.effect(
       "previews clean owned checkouts, retains branches/history and replays only the recorded result",
       () =>
@@ -268,6 +410,92 @@ it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory(), NodeServices.layer))(
             assert.isTrue((yield* f.service.scan()).history.length > 0);
           }),
         ),
+    );
+    it.effect(
+      "brings a checkout storage cleanup removed back on its branch, over the registration it kept",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const f = yield* fixture;
+            const preview = yield* f.service.preview("owner", [f.entry.id]);
+            const result = yield* f.service.execute("owner", preview.token);
+            assert.strictEqual(result.results[0]?.status, "removed");
+            // Cleanup keeps Git's registration of the removed path, so a plain add refuses it.
+            assert.include(
+              (yield* f.git(f.repo, ["worktree", "list", "--porcelain"])).stdout,
+              `worktree ${f.checkout}\n`,
+            );
+            const driver = yield* makeGitVcsDriverCore().pipe(
+              Effect.provide(ServerConfig.layerTest(f.repo, path.join(f.root, "server"))),
+            );
+            const plain = yield* driver
+              .createWorktree({ cwd: f.repo, path: f.checkout, refName: "fixture-branch" })
+              .pipe(Effect.result);
+            assert.strictEqual(plain._tag, "Failure");
+
+            // Restore, Recreate checkout and a turn start's recovery all use this routine.
+            const created = yield* recreateRecordedCheckout(driver, {
+              projectId,
+              repositoryRoot: f.repo,
+              path: f.checkout,
+              branch: "fixture-branch",
+            });
+            assert.strictEqual(created.worktree.path, f.checkout);
+            assert.strictEqual(
+              (yield* f.git(f.checkout, ["branch", "--show-current"])).stdout.trim(),
+              "fixture-branch",
+            );
+            // Ownership is recorded again with a fresh retention clock, and the path is open.
+            const rows = yield* f.sql<{
+              state: string;
+              created_at: string;
+            }>`SELECT state, created_at FROM storage_owned_entries`;
+            assert.strictEqual(rows.length, 1);
+            assert.strictEqual(rows[0]?.state, "owned");
+            assert.isAbove(Date.parse(rows[0]!.created_at), Date.parse(old));
+            assert.isFalse(yield* isStoragePathBlocked(f.sql, f.checkout));
+          }),
+        ),
+    );
+    it.effect("lists the database backups as protected history with their size", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          const backupsDir = path.join(f.root, "backups");
+          yield* io(async () => {
+            await fs.mkdir(backupsDir);
+            await fs.writeFile(
+              path.join(backupsDir, "node-v092-before-v093-20261023T151230123Z.sqlite.zst"),
+              "x".repeat(4096),
+            );
+          });
+          const entry = (yield* f.service.scan()).entries.find(
+            (item) => item.id === "database-backups",
+          );
+          assert.isDefined(entry);
+          assert.strictEqual(entry?.category, "history");
+          assert.strictEqual(entry?.path, backupsDir);
+          assert.isFalse(entry?.eligible);
+          assert.isAtLeast(entry?.bytes ?? 0, 4096);
+        }),
+      ),
+    );
+    it.effect("reports no backups yet as empty, and the database with its write-ahead log", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          const dbPath = path.join(f.root, "node.sqlite");
+          yield* io(async () => {
+            await fs.writeFile(dbPath, "d".repeat(1000));
+            await fs.writeFile(`${dbPath}-wal`, "w".repeat(3000));
+          });
+          const entries = (yield* f.service.scan()).entries;
+          const backups = entries.find((item) => item.id === "database-backups");
+          assert.strictEqual(backups?.bytes, 0);
+          assert.strictEqual(backups?.sizeStatus, "complete");
+          assert.strictEqual(entries.find((item) => item.id === "history")?.bytes, 4000);
+        }),
+      ),
     );
     it.effect("refuses dirty/untracked work introduced after preview", () =>
       Effect.scoped(
@@ -528,7 +756,7 @@ it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory(), NodeServices.layer))(
             yield* f.git(f.repo, ["merge", "--ff-only", "fixture-branch"]);
             yield* io(() => fs.writeFile(path.join(f.checkout, "user-archive"), "keep"));
             assert.strictEqual(
-              (yield* Effect.exit(io(() => assertCleanWorktree(f.checkout, f.repo))))._tag,
+              (yield* Effect.exit(io(() => assertRemovableWorktree(f.checkout, f.repo))))._tag,
               "Failure",
             );
             const alias = path.join(f.root, "alias");
@@ -657,6 +885,8 @@ it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory(), NodeServices.layer))(
             yield* io(() => fs.writeFile(path.join(staging.path, "staged.txt"), "owned staging"));
             yield* f.service.completeTemporaryDirectory(staging.id);
             yield* f.sql`UPDATE storage_owned_entries SET created_at = ${old}, completed_at = ${old} WHERE id = ${staging.id}`;
+            // The checkout existed when its thread was archived (the clock starts at the later one).
+            yield* f.sql`UPDATE storage_owned_entries SET created_at = ${old} WHERE id = ${f.entry.id}`;
             f.setSettings({
               ...DEFAULT_SERVER_SETTINGS,
               storageRetention: {
@@ -1338,6 +1568,969 @@ it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory(), NodeServices.layer))(
             assert.isFalse(
               (yield* f.service.scan()).entries.find((entry) => entry.id === f.entry.id)!.eligible,
             );
+          }),
+        ),
+    );
+
+    it.effect(
+      "removes a checkout whose only ignored files are regenerable, by the rule Remove checkout uses",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const f = yield* fixture;
+            yield* io(() =>
+              fs.writeFile(path.join(f.checkout, ".gitignore"), "*.tsbuildinfo\n.DS_Store\n"),
+            );
+            yield* f.git(f.checkout, ["add", ".gitignore"]);
+            yield* f.git(f.checkout, ["commit", "-m", "ignore build info"]);
+            yield* f.git(f.repo, ["merge", "--ff-only", "fixture-branch"]);
+            yield* io(async () => {
+              await fs.writeFile(path.join(f.checkout, "tsconfig.tsbuildinfo"), "{}");
+              await fs.mkdir(path.join(f.checkout, "src"));
+              await fs.writeFile(path.join(f.checkout, "src", ".DS_Store"), "finder");
+              // An ignored folder holding only empty folders loses nothing either.
+              await fs.mkdir(path.join(f.checkout, "dist", "assets"), { recursive: true });
+            });
+            yield* io(() => fs.appendFile(path.join(f.checkout, ".gitignore"), "dist/\n"));
+            yield* f.git(f.checkout, ["commit", "-am", "ignore dist"]);
+            yield* f.git(f.repo, ["merge", "--ff-only", "fixture-branch"]);
+            const entry = (yield* f.service.scan()).entries.find((item) => item.id === f.entry.id)!;
+            assert.isTrue(entry.eligible, entry.reason);
+            const preview = yield* f.service.preview("owner", [f.entry.id]);
+            const result = yield* f.service.execute("owner", preview.token);
+            assert.strictEqual(result.results[0]?.status, "removed", result.results[0]?.detail);
+            assert.isFalse(
+              yield* io(() =>
+                fs.lstat(f.checkout).then(
+                  () => true,
+                  () => false,
+                ),
+              ),
+            );
+            assert.isNotEmpty(
+              (yield* f.git(f.repo, ["rev-parse", "refs/heads/fixture-branch"])).stdout,
+            );
+          }),
+        ),
+    );
+    it.effect(
+      "keeps credentials, databases, unknown ignored files and build output, with the lifecycle's reasons",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const f = yield* fixture;
+            yield* io(() =>
+              fs.writeFile(
+                path.join(f.checkout, ".gitignore"),
+                ".env\nid_ed25519\nlocal.sqlite\nuser-archive\nsigning.properties\nnode_modules/\ndist/\n",
+              ),
+            );
+            // A tracked folder with a cache-like name: Git lists its ignored files one by one.
+            yield* io(async () => {
+              await fs.mkdir(path.join(f.checkout, "build"));
+              await fs.writeFile(path.join(f.checkout, "build", "release.gradle"), "tracked");
+            });
+            yield* f.git(f.checkout, ["add", ".gitignore", "build/release.gradle"]);
+            yield* f.git(f.checkout, ["commit", "-m", "ignore local files"]);
+            yield* f.git(f.repo, ["merge", "--ff-only", "fixture-branch"]);
+            const reasonFor = Effect.gen(function* () {
+              const entry = (yield* f.service.scan()).entries.find(
+                (item) => item.id === f.entry.id,
+              )!;
+              assert.isFalse(entry.eligible);
+              return entry.reason;
+            });
+            for (const file of [
+              ".env",
+              "id_ed25519",
+              "local.sqlite",
+              "user-archive",
+              "build/signing.properties",
+            ]) {
+              yield* io(() => fs.writeFile(path.join(f.checkout, file), "keep"));
+              assert.include(
+                yield* reasonFor,
+                `1 ignored file that is not a known cache would be lost (${file}).`,
+                file,
+              );
+              yield* io(() => fs.rm(path.join(f.checkout, file)));
+            }
+            // Build output can hold signed artifacts: only Remove checkout, after its review,
+            // deletes it, even next to dependency folders storage cleanup would take.
+            yield* io(async () => {
+              await fs.mkdir(path.join(f.checkout, "node_modules", "pkg"), { recursive: true });
+              await fs.writeFile(path.join(f.checkout, "node_modules", "pkg", "index.js"), "");
+              await fs.mkdir(path.join(f.checkout, "dist"));
+              await fs.writeFile(path.join(f.checkout, "dist", "app.js"), "built");
+            });
+            assert.include(yield* reasonFor, "Ignored build output is protected (dist/).");
+            assert.isTrue(
+              yield* io(() =>
+                fs.lstat(path.join(f.checkout, "node_modules", "pkg", "index.js")).then(() => true),
+              ),
+            );
+          }),
+        ),
+    );
+    it.effect(
+      "keeps a checkout whose cache folders hold a secret, a repository or a pipe, deleting nothing",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const f = yield* fixture;
+            yield* ignoreAndMerge(f, "node_modules/\n.venv/\n");
+            // Due for retention too, which checks the contents before it claims anything.
+            yield* f.sql`UPDATE storage_owned_entries SET created_at = ${old}`;
+            f.setSettings({
+              ...DEFAULT_SERVER_SETTINGS,
+              storageRetention: {
+                automatic: true,
+                completedWorktreeDays: 30,
+                temporaryDataDays: null,
+              },
+            });
+            const findings = [
+              {
+                file: "node_modules/.env",
+                reason:
+                  "The cache folder node_modules/ holds node_modules/.env, which is not a cache.",
+              },
+              {
+                file: "node_modules/pkg/id_ed25519",
+                reason:
+                  "The cache folder node_modules/ holds node_modules/pkg/id_ed25519, which is not a cache.",
+              },
+              {
+                // An editable install's checkout may hold local work.
+                file: ".venv/src/pkg/.git/HEAD",
+                reason: "The cache folder .venv/ holds a Git repository (.venv/src/pkg/.git).",
+              },
+            ];
+            for (const { file, reason } of findings) {
+              yield* io(async () => {
+                await fs.mkdir(path.dirname(path.join(f.checkout, file)), { recursive: true });
+                await fs.writeFile(path.join(f.checkout, file), "keep");
+                await fs.writeFile(
+                  path.join(f.checkout, file.split("/")[0]!, "payload.js"),
+                  "x".repeat(50_000),
+                );
+              });
+              const entry = (yield* f.service.scan()).entries.find(
+                (item) => item.id === f.entry.id,
+              )!;
+              assert.isFalse(entry.eligible, file);
+              assert.include(entry.reason, reason);
+              // The size shown counts what the cache folders hold (the removal check skipped it).
+              assert.isAtLeast(entry.bytes ?? 0, 50_000, file);
+              // A preview checks the contents too, with its own budget.
+              assert.include(
+                (yield* f.service.preview("owner", [f.entry.id]).pipe(Effect.flip)).detail,
+                "contains protected data",
+              );
+              yield* f.service.runRetention;
+              assert.deepEqual(
+                yield* f.sql<{ state: string }>`SELECT state FROM storage_owned_entries`,
+                [{ state: "owned" }],
+                file,
+              );
+              assert.strictEqual(
+                yield* io(() => fs.readFile(path.join(f.checkout, file), "utf8")),
+                "keep",
+              );
+              yield* io(() =>
+                fs.rm(path.join(f.checkout, file.split("/")[0]!), { recursive: true }),
+              );
+            }
+            yield* io(async () => {
+              await fs.mkdir(path.join(f.checkout, "node_modules", "pkg"), { recursive: true });
+              await fs.writeFile(path.join(f.checkout, "node_modules", "pkg", "index.js"), "");
+              await runProcess("mkfifo", [path.join(f.checkout, "node_modules", "dev.pipe")], {
+                timeoutMs: 5_000,
+                maxBufferBytes: 4096,
+              });
+            });
+            const piped = (yield* f.service.scan()).entries.find((item) => item.id === f.entry.id)!;
+            assert.include(
+              piped.reason,
+              "The cache folder node_modules/ holds a socket, pipe or device (node_modules/dev.pipe).",
+            );
+          }),
+        ),
+    );
+    it.effect(
+      "verifies a removable checkout before protected records earlier in the ledger use the budget",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const f = yield* fixture;
+            yield* f.sql`UPDATE storage_owned_entries SET id = 'zz-checkout', created_at = ${old}`;
+            // A protected record that sorts first and alone exceeds a scan's shared budget.
+            const large = path.join(f.root, "unverified-checkout");
+            yield* io(async () => {
+              for (let directory = 0; directory < 160; directory++) {
+                const parent = path.join(large, `d${directory}`);
+                await fs.mkdir(parent, { recursive: true });
+                await Promise.all(
+                  Array.from({ length: 100 }, (_, index) =>
+                    fs.writeFile(path.join(parent, `f${index}`), ""),
+                  ),
+                );
+              }
+            });
+            yield* f.sql`INSERT INTO storage_owned_entries (id, path, category, identity_json, created_at, state) VALUES ('000-unverified', ${large}, 'worktree', '{}', ${old}, 'unverified')`;
+            const scan = yield* f.service.scan();
+            assert.isTrue(scan.entries.find((entry) => entry.id === "zz-checkout")!.eligible);
+            const protectedEntry = scan.entries.find((entry) => entry.id === "000-unverified")!;
+            assert.isFalse(protectedEntry.eligible);
+            assert.strictEqual(protectedEntry.sizeStatus, "bounded");
+            f.setSettings({
+              ...DEFAULT_SERVER_SETTINGS,
+              storageRetention: {
+                automatic: true,
+                completedWorktreeDays: 30,
+                temporaryDataDays: null,
+              },
+            });
+            yield* f.service.runRetention;
+            const states = yield* f.sql<{
+              id: string;
+              state: string;
+            }>`SELECT id, state FROM storage_owned_entries ORDER BY id`;
+            assert.deepEqual(states, [
+              { id: "000-unverified", state: "unverified" },
+              { id: "zz-checkout", state: "removed" },
+            ]);
+          }),
+        ),
+    );
+    it.effect("runs no Git check once a scan's shared budget is spent", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          yield* f.sql`UPDATE storage_owned_entries SET id = 'zz-checkout', created_at = ${old}`;
+          // A completed staging record that sorts first and alone exceeds the scan's budget.
+          const large = path.join(f.root, "storage-temporary", "large");
+          yield* io(async () => {
+            for (let directory = 0; directory < 160; directory++) {
+              const parent = path.join(large, `d${directory}`);
+              await fs.mkdir(parent, { recursive: true });
+              await Promise.all(
+                Array.from({ length: 100 }, (_, index) =>
+                  fs.writeFile(path.join(parent, `f${index}`), ""),
+                ),
+              );
+            }
+          });
+          yield* f.sql`INSERT INTO storage_owned_entries (id, path, project_id, category, identity_json, created_at, completed_at, state) VALUES ('000-large', ${large}, ${projectId}, 'temporary', '{}', ${old}, ${old}, 'owned')`;
+          let worktreeLists = 0;
+          f.duringListWorktrees(() =>
+            Effect.sync(() => {
+              worktreeLists++;
+            }),
+          );
+          const scan = yield* f.service.scan();
+          for (const id of ["000-large", "zz-checkout"]) {
+            const entry = scan.entries.find((item) => item.id === id)!;
+            assert.isFalse(entry.eligible, id);
+            assert.include(entry.reason, "Scan budget", id);
+          }
+          assert.strictEqual(worktreeLists, 0);
+          // Only the scan's budget refused it: a preview checks it with its own.
+          const preview = yield* f.service.preview("owner", ["zz-checkout"]);
+          assert.isTrue(preview.entries[0]!.eligible);
+          assert.strictEqual(worktreeLists, 1);
+        }),
+      ),
+    );
+    it.effect("starts the retention clock when the checkout was last created", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          const day = 86_400_000;
+          f.setSnapshot((s) => ({
+            ...s,
+            threads: s.threads.map((thread) => ({
+              ...thread,
+              archivedAt: new Date(Date.now() - 40 * day).toISOString(),
+            })),
+          }));
+          f.setSettings({
+            ...DEFAULT_SERVER_SETTINGS,
+            storageRetention: {
+              automatic: true,
+              completedWorktreeDays: 30,
+              temporaryDataDays: null,
+            },
+          });
+          // Restore recreates the checkout; recording the creation again restarts the clock.
+          yield* recordCreatedWorktree(f.sql, f.repo, f.checkout);
+          yield* f.service.runRetention;
+          const state = f.sql<{ state: string }>`SELECT state FROM storage_owned_entries`;
+          assert.strictEqual((yield* state)[0]!.state, "owned");
+          assert.isTrue(yield* io(() => fs.lstat(f.checkout).then(() => true)));
+          yield* f.sql`UPDATE storage_owned_entries SET created_at = ${new Date(Date.now() - 31 * day).toISOString()}`;
+          yield* f.service.runRetention;
+          assert.strictEqual((yield* state)[0]!.state, "removed");
+        }),
+      ),
+    );
+    it.effect("bounds each retention pass and continues past candidates that stay protected", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          yield* f.sql`UPDATE storage_owned_entries SET id = 'zz-checkout'`;
+          // 70 due staging records changed after completion, then one that did not change:
+          // more refusals than one pass verifies, ahead of the removable record.
+          for (let index = 0; index <= 70; index++) {
+            const staging = yield* f.service.createTemporaryDirectory(projectId);
+            yield* io(() => fs.writeFile(path.join(staging.path, "owned.txt"), "completed"));
+            yield* f.service.completeTemporaryDirectory(staging.id);
+            if (index < 70)
+              yield* io(() => fs.writeFile(path.join(staging.path, "late.txt"), "external"));
+            yield* f.sql`UPDATE storage_owned_entries SET id = ${String(index).padStart(3, "0")}, created_at = ${old}, completed_at = ${old} WHERE id = ${staging.id}`;
+          }
+          f.setSettings({
+            ...DEFAULT_SERVER_SETTINGS,
+            storageRetention: {
+              automatic: true,
+              completedWorktreeDays: null,
+              temporaryDataDays: 7,
+            },
+          });
+          const stateOf = (id: string) =>
+            f.sql<{ state: string }>`SELECT state FROM storage_owned_entries WHERE id = ${id}`;
+          yield* f.service.runRetention;
+          assert.strictEqual((yield* stateOf("070"))[0]!.state, "owned");
+          // The next pass continues after the last record the first one checked.
+          yield* f.service.runRetention;
+          assert.strictEqual((yield* stateOf("070"))[0]!.state, "removed");
+          const kept = yield* f.sql<{
+            state: string;
+          }>`SELECT state FROM storage_owned_entries WHERE category = 'temporary' AND id < '070'`;
+          assert.isTrue(kept.length === 70 && kept.every((row) => row.state === "owned"));
+        }),
+      ),
+    );
+    it.effect(
+      "removes a checkout whose only ignored content is dependency folders, then deletes them in the background",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const f = yield* fixture;
+            // A tracked link, like Ryco's own CLAUDE.md: removed as a link, never followed.
+            yield* io(async () => {
+              await fs.writeFile(path.join(f.checkout, "AGENTS.md"), "agents\n");
+              await fs.symlink("AGENTS.md", path.join(f.checkout, "CLAUDE.md"));
+            });
+            yield* f.git(f.checkout, ["add", "AGENTS.md", "CLAUDE.md"]);
+            yield* ignoreAndMerge(f, "node_modules/\n.turbo/\n");
+            yield* installDependencies(f.checkout);
+            // A link inside a dependency folder that points out of the checkout.
+            const outside = path.join(f.root, "outside");
+            yield* io(async () => {
+              await fs.mkdir(outside);
+              await fs.writeFile(path.join(outside, "sentinel.txt"), "keep");
+              await fs.symlink(outside, path.join(f.checkout, "node_modules", "outside"));
+            });
+            const entry = (yield* f.service.scan()).entries.find((item) => item.id === f.entry.id)!;
+            assert.isTrue(entry.eligible, entry.reason);
+            assert.include(
+              entry.reason,
+              "Its cache folders (.turbo/, apps/web/node_modules/, node_modules/) go with it.",
+            );
+            // The scan counts the cache folders' bytes too.
+            assert.strictEqual(entry.sizeStatus, "complete");
+            assert.isAtLeast(
+              entry.bytes!,
+              "module.exports = 1;\n".length + "fixture certificate".length,
+            );
+
+            const preview = yield* f.service.preview("owner", [f.entry.id]);
+            assert.isTrue(preview.entries[0]!.eligible);
+            const result = yield* f.service.execute("owner", preview.token);
+            assert.strictEqual(result.results[0]?.status, "removed", result.results[0]?.detail);
+            assert.include(result.results[0]!.detail, "deleted in the background");
+            assert.isFalse(yield* exists(f.checkout));
+            // The checkout is gone; its cache folders wait beside it, fenced, for the purge.
+            const moved = yield* cleanupSiblings(f);
+            assert.strictEqual(moved.length, 3, moved.join(", "));
+            const row = f.sql<{
+              state: string;
+              identity_json: string;
+            }>`SELECT state, identity_json FROM storage_owned_entries`;
+            assert.strictEqual((yield* row)[0]!.state, "removing");
+            assert.strictEqual(JSON.parse((yield* row)[0]!.identity_json).purge, "caches-only");
+            assert.isTrue(yield* isStoragePathBlocked(f.sql, path.join(f.root, moved[0]!, "pkg")));
+            assert.include(
+              (yield* f.service.scan()).entries.find((item) => item.id === f.entry.id)!.reason,
+              "Removed; deleting its cache folders in the background.",
+            );
+
+            yield* f.service.purgePending;
+            assert.deepEqual(yield* cleanupSiblings(f), []);
+            assert.strictEqual((yield* row)[0]!.state, "removed");
+            assert.notProperty(JSON.parse((yield* row)[0]!.identity_json), "caches");
+            assert.isFalse(yield* isStoragePathBlocked(f.sql, path.join(f.root, moved[0]!)));
+            assert.strictEqual(
+              yield* io(() => fs.readFile(path.join(outside, "sentinel.txt"), "utf8")),
+              "keep",
+            );
+            assert.isNotEmpty(
+              (yield* f.git(f.repo, ["rev-parse", "refs/heads/fixture-branch"])).stdout,
+            );
+          }),
+        ),
+    );
+    it.effect(
+      "refuses a removal whose cache folder was replaced after its contents were checked",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const f = yield* fixture;
+            yield* ignoreAndMerge(f, "node_modules/\n.turbo/\n");
+            yield* installDependencies(f.checkout);
+            const preview = yield* f.service.preview("owner", [f.entry.id]);
+            // The removal checks the contents before its claim and revalidates the claimed
+            // checkout by identity only: a folder swapped in between was never checked.
+            const original = path.join(f.root, "original_modules");
+            let swapped = false;
+            f.duringListWorktrees(() =>
+              Effect.gen(function* () {
+                const rows = yield* f.sql<{
+                  state: string;
+                }>`SELECT state FROM storage_owned_entries WHERE id = ${f.entry.id}`;
+                if (rows[0]?.state !== "removing" || swapped) return;
+                swapped = true;
+                yield* io(async () => {
+                  await fs.rename(path.join(f.checkout, "node_modules"), original);
+                  await fs.mkdir(path.join(f.checkout, "node_modules"));
+                  await fs.writeFile(path.join(f.checkout, "node_modules", ".env"), "TOKEN=1");
+                });
+              }).pipe(Effect.orDie),
+            );
+            const result = yield* f.service.execute("owner", preview.token);
+            assert.isTrue(swapped);
+            assert.strictEqual(result.results[0]?.status, "protected", result.results[0]?.detail);
+            assert.include(
+              result.results[0]!.detail,
+              "Cache folders changed after their contents were checked.",
+            );
+            // Nothing moved or deleted, and the record is owned again.
+            assert.strictEqual(
+              yield* io(() => fs.readFile(path.join(f.checkout, "node_modules", ".env"), "utf8")),
+              "TOKEN=1",
+            );
+            assert.deepEqual(yield* cleanupSiblings(f), []);
+            const rows = yield* f.sql<{ state: string }>`SELECT state FROM storage_owned_entries`;
+            assert.deepEqual(rows, [{ state: "owned" }]);
+          }),
+        ),
+    );
+    it.effect("a manual batch starts the cache folder purge once it has answered", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          yield* ignoreAndMerge(f, "node_modules/\n.turbo/\n");
+          yield* installDependencies(f.checkout);
+          const background: Effect.Effect<void, StorageError>[] = [];
+          const service = f.withDeps({
+            runInBackground: (work) => Effect.sync(() => void background.push(work)),
+          });
+          const preview = yield* service.preview("owner", [f.entry.id]);
+          const result = yield* service.execute("owner", preview.token);
+          assert.strictEqual(result.results[0]?.status, "removed", result.results[0]?.detail);
+          // The batch answered with the cache folders still beside the removed checkout.
+          assert.strictEqual(background.length, 1);
+          assert.strictEqual((yield* cleanupSiblings(f)).length, 3);
+          yield* background[0]!;
+          assert.deepEqual(yield* cleanupSiblings(f), []);
+          const rows = yield* f.sql<{ state: string }>`SELECT state FROM storage_owned_entries`;
+          assert.deepEqual(rows, [{ state: "removed" }]);
+        }),
+      ),
+    );
+    it.effect("retention removes a checkout with dependency folders and deletes them", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          yield* ignoreAndMerge(f, "node_modules/\n.turbo/\n");
+          yield* installDependencies(f.checkout);
+          yield* f.sql`UPDATE storage_owned_entries SET created_at = ${old}`;
+          f.setSettings({
+            ...DEFAULT_SERVER_SETTINGS,
+            storageRetention: {
+              automatic: true,
+              completedWorktreeDays: 30,
+              temporaryDataDays: null,
+            },
+          });
+          yield* f.service.runRetention;
+          const rows = yield* f.sql<{ state: string }>`SELECT state FROM storage_owned_entries`;
+          assert.deepEqual(rows, [{ state: "removed" }]);
+          assert.isFalse(yield* exists(f.checkout));
+          assert.deepEqual(yield* cleanupSiblings(f), []);
+        }),
+      ),
+    );
+    /** Marks the fixture's row as a removal whose cache folders wait at `destinations`. */
+    const seedPurge = (
+      f: Fixture,
+      purge: "planned" | "caches-only",
+      folders: readonly { relativePath: string; files: Record<string, string>; inode?: number }[],
+    ) =>
+      Effect.gen(function* () {
+        const quarantine = path.join(f.root, `.cleanup-${f.entry.id}-fixture`);
+        const caches = [];
+        for (const [index, folder] of folders.entries()) {
+          const destination = `${quarantine}-cache-${index}`;
+          const stat = yield* io(async () => {
+            for (const [file, content] of Object.entries(folder.files)) {
+              await fs.mkdir(path.dirname(path.join(destination, file)), { recursive: true });
+              await fs.writeFile(path.join(destination, file), content);
+            }
+            return fs.lstat(destination);
+          });
+          caches.push({
+            relativePath: folder.relativePath,
+            destination,
+            device: stat.dev,
+            inode: folder.inode ?? stat.ino,
+          });
+        }
+        const [current] = yield* f.sql<{
+          identity_json: string;
+        }>`SELECT identity_json FROM storage_owned_entries`;
+        yield* f.sql`UPDATE storage_owned_entries SET state = 'removing', identity_json = ${JSON.stringify({ ...JSON.parse(current!.identity_json), quarantinePath: quarantine, caches, purge })}`;
+        return caches.map((cache) => cache.destination);
+      });
+    it.effect("a resumed purge deletes recorded folders and keeps one that changed", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          const [recorded, replaced] = yield* seedPurge(f, "caches-only", [
+            { relativePath: "node_modules", files: { "pkg/index.js": "x" } },
+            // Its inode differs from the recorded one: not the folder the removal moved out.
+            {
+              relativePath: "apps/web/node_modules",
+              files: { "other/keep.txt": "keep" },
+              inode: 1,
+            },
+          ]);
+          yield* f.service.purgePending;
+          assert.isFalse(yield* exists(recorded!));
+          assert.strictEqual(
+            yield* io(() => fs.readFile(path.join(replaced!, "other", "keep.txt"), "utf8")),
+            "keep",
+          );
+          const [row] = yield* f.sql<{
+            state: string;
+            last_error: string;
+            identity_json: string;
+          }>`SELECT state, last_error, identity_json FROM storage_owned_entries`;
+          assert.strictEqual(row!.state, "removing");
+          assert.strictEqual(JSON.parse(row!.identity_json).purge, "preserved");
+          assert.include(
+            row!.last_error,
+            "apps/web/node_modules/ changed after the checkout was removed",
+          );
+          // Kept folders stay fenced and the row shows why, for manual recovery.
+          assert.isTrue(yield* isStoragePathBlocked(f.sql, replaced!));
+          assert.include(
+            (yield* f.service.scan()).entries.find((item) => item.id === f.entry.id)!.reason,
+            "changed after the checkout was removed",
+          );
+        }),
+      ),
+    );
+    it.effect("a purge keeps a cache folder whole when something in it is not a cache", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          const [folder] = yield* seedPurge(f, "caches-only", [
+            { relativePath: "node_modules", files: { "pkg/index.js": "x", "pkg/.env": "TOKEN=1" } },
+          ]);
+          yield* f.service.purgePending;
+          // The read-only pass runs first: nothing in the folder was deleted.
+          assert.isTrue(yield* exists(path.join(folder!, "pkg", "index.js")));
+          assert.isTrue(yield* exists(path.join(folder!, "pkg", ".env")));
+          const [row] = yield* f.sql<{
+            state: string;
+            last_error: string;
+          }>`SELECT state, last_error FROM storage_owned_entries`;
+          assert.strictEqual(row!.state, "removing");
+          assert.include(row!.last_error, "holds node_modules/pkg/.env, which is not a cache.");
+        }),
+      ),
+    );
+    it.effect.skipIf(!permissionsApply)(
+      "keeps a checkout whose cache folder holds a folder it cannot delete",
+      () =>
+        Effect.gen(function* () {
+          for (const locked of ["node_modules", "node_modules/.cache/babel"])
+            yield* Effect.scoped(
+              Effect.gen(function* () {
+                const f = yield* fixture;
+                yield* ignoreAndMerge(f, "node_modules/\n.turbo/\n");
+                yield* installDependencies(f.checkout);
+                const preview = yield* f.service.preview("owner", [f.entry.id]);
+                assert.isTrue(preview.entries[0]!.eligible, locked);
+                // Read-only after the review: moving or emptying it would fail once the
+                // checkout was quarantined.
+                yield* lockFolder(f, path.join(f.checkout, locked));
+                const result = yield* f.service.execute("owner", preview.token);
+                assert.strictEqual(result.results[0]?.status, "protected", locked);
+                assert.include(result.results[0]!.detail, "Ryco cannot delete", locked);
+                assert.isTrue(yield* exists(path.join(f.checkout, locked, "entry.json")));
+                assert.deepEqual(yield* cleanupSiblings(f), []);
+                const rows = yield* f.sql<{
+                  state: string;
+                }>`SELECT state FROM storage_owned_entries`;
+                assert.deepEqual(rows, [{ state: "owned" }]);
+                const entry = (yield* f.service.scan()).entries.find(
+                  (item) => item.id === f.entry.id,
+                )!;
+                assert.isFalse(entry.eligible);
+                assert.include(entry.reason, "Ryco cannot delete");
+              }),
+            );
+        }),
+    );
+    it.effect.skipIf(!permissionsApply)(
+      "retention keeps a checkout whose cache folder it cannot delete",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const f = yield* fixture;
+            yield* ignoreAndMerge(f, "__pycache__/\n");
+            const cache = path.join(f.checkout, "src", "pkg", "__pycache__");
+            yield* lockFolder(f, cache);
+            yield* f.sql`UPDATE storage_owned_entries SET created_at = ${old}`;
+            f.setSettings({
+              ...DEFAULT_SERVER_SETTINGS,
+              storageRetention: {
+                automatic: true,
+                completedWorktreeDays: 30,
+                temporaryDataDays: null,
+              },
+            });
+            yield* f.service.runRetention;
+            const rows = yield* f.sql<{ state: string }>`SELECT state FROM storage_owned_entries`;
+            assert.deepEqual(rows, [{ state: "owned" }]);
+            assert.isTrue(yield* exists(path.join(cache, "entry.json")));
+            assert.deepEqual(yield* cleanupSiblings(f), []);
+          }),
+        ),
+    );
+    it.effect.skipIf(!permissionsApply)(
+      "a purge keeps a cache folder whole when it holds a folder it cannot delete",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const f = yield* fixture;
+            const [folder] = yield* seedPurge(f, "caches-only", [
+              { relativePath: "node_modules", files: { "pkg/index.js": "x" } },
+            ]);
+            yield* lockFolder(f, path.join(folder!, ".cache", "babel"));
+            const row = f.sql<{
+              state: string;
+              last_error: string;
+              identity_json: string;
+            }>`SELECT state, last_error, identity_json FROM storage_owned_entries`;
+            yield* f.service.purgePending;
+            const [kept] = yield* row;
+            assert.strictEqual(kept!.state, "removing");
+            assert.strictEqual(JSON.parse(kept!.identity_json).purge, "preserved");
+            assert.include(
+              kept!.last_error,
+              "holds a folder Ryco cannot delete (node_modules/.cache/babel)",
+            );
+            assert.isTrue(yield* exists(path.join(folder!, "pkg", "index.js")));
+            // Kept for a person to look at: later passes leave it alone.
+            yield* f.service.purgePending;
+            assert.deepEqual(yield* row, [kept!]);
+          }),
+        ),
+    );
+    it.effect("a purge that keeps failing stops retrying and keeps what is left", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          const [folder] = yield* seedPurge(f, "caches-only", [
+            { relativePath: "node_modules", files: { "pkg/index.js": "x" } },
+          ]);
+          const unlink = vi
+            .spyOn(fs, "unlink")
+            .mockRejectedValue(Object.assign(new Error("EIO: i/o error"), { code: "EIO" }));
+          yield* Effect.addFinalizer(() => Effect.sync(() => unlink.mockRestore()));
+          const row = f.sql<{
+            last_error: string;
+            identity_json: string;
+          }>`SELECT last_error, identity_json FROM storage_owned_entries`;
+          for (const pass of [1, 2]) {
+            yield* f.service.purgePending;
+            const [current] = yield* row;
+            assert.strictEqual(JSON.parse(current!.identity_json).purge, "caches-only");
+            assert.include(current!.last_error, "failed; retrying later.", `pass ${pass}`);
+          }
+          yield* f.service.purgePending;
+          unlink.mockRestore();
+          const [current] = yield* row;
+          assert.strictEqual(JSON.parse(current!.identity_json).purge, "preserved");
+          assert.include(
+            current!.last_error,
+            `Deleting the cache folder node_modules/ failed 3 times; what is left is kept at ${folder}.`,
+          );
+          assert.isTrue(yield* exists(path.join(folder!, "pkg", "index.js")));
+        }),
+      ),
+    );
+    it.effect("never purges a removal that was interrupted before its checkout was gone", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          const [folder] = yield* seedPurge(f, "planned", [
+            { relativePath: "node_modules", files: { "pkg/index.js": "x" } },
+          ]);
+          yield* f.service.purgePending;
+          assert.isTrue(yield* exists(path.join(folder!, "pkg", "index.js")));
+          assert.include(
+            (yield* f.service.scan()).entries.find((item) => item.id === f.entry.id)!.reason,
+            "Interrupted cleanup or removed checkout",
+          );
+        }),
+      ),
+    );
+    it.effect("never purges a folder its removal did not move there", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          // A Ryco-named folder with the recorded identity, but not this removal's destination.
+          const elsewhere = path.join(f.root, ".cleanup-other-row-cache-0");
+          const stat = yield* io(async () => {
+            await fs.mkdir(path.join(elsewhere, "pkg"), { recursive: true });
+            await fs.writeFile(path.join(elsewhere, "pkg", "index.js"), "x");
+            return fs.lstat(elsewhere);
+          });
+          const [current] = yield* f.sql<{
+            identity_json: string;
+          }>`SELECT identity_json FROM storage_owned_entries`;
+          yield* f.sql`UPDATE storage_owned_entries SET state = 'removing', identity_json = ${JSON.stringify(
+            {
+              ...JSON.parse(current!.identity_json),
+              quarantinePath: path.join(f.root, `.cleanup-${f.entry.id}-fixture`),
+              caches: [
+                {
+                  relativePath: "node_modules",
+                  destination: elsewhere,
+                  device: stat.dev,
+                  inode: stat.ino,
+                },
+              ],
+              purge: "caches-only",
+            },
+          )}`;
+          yield* f.service.purgePending;
+          assert.isTrue(yield* exists(path.join(elsewhere, "pkg", "index.js")));
+          const [row] = yield* f.sql<{
+            state: string;
+            last_error: string;
+            identity_json: string;
+          }>`SELECT state, last_error, identity_json FROM storage_owned_entries`;
+          assert.strictEqual(row!.state, "removing");
+          assert.strictEqual(JSON.parse(row!.identity_json).purge, "preserved");
+          assert.include(row!.last_error, "nothing was deleted");
+        }),
+      ),
+    );
+    it.effect(
+      "removes a squash-merged checkout when its linked pull request merged at the same head",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const f = yield* fixture;
+            const { head, calls, service } = yield* squashMerged(f);
+            // Without a merge proof, commits the project HEAD lacks keep the checkout.
+            const plain = (yield* f.service.scan()).entries.find((e) => e.id === f.entry.id)!;
+            assert.isFalse(plain.eligible);
+            assert.include(
+              plain.reason,
+              "The branch has commits the project HEAD does not contain, and no merged pull request or default branch contains them.",
+            );
+            const entry = (yield* service.scan()).entries.find((e) => e.id === f.entry.id)!;
+            assert.isTrue(entry.eligible);
+            assert.include(entry.reason, "Its branch is merged through pull request #7.");
+            assert.deepEqual(calls[0]?.pullRequest, { number: 7, state: "merged" });
+            // A scan page shares a few forge reads.
+            assert.isAtMost(calls[0]!.reads!.remaining, 3);
+            const preview = yield* service.preview("owner", [entry.id]);
+            assert.isTrue(preview.entries[0]!.eligible);
+            calls.length = 0;
+            const result = yield* service.execute("owner", preview.token);
+            assert.strictEqual(result.results[0]?.status, "removed");
+            // Proved once before the claim; the revalidation under the settings lease asks nothing.
+            assert.strictEqual(calls.length, 1);
+            assert.isFalse(yield* exists(f.checkout));
+            assert.strictEqual(
+              (yield* f.git(f.repo, ["rev-parse", "refs/heads/fixture-branch"])).stdout.trim(),
+              head,
+            );
+            const [row] = yield* f.sql<{
+              state: string;
+              identity_json: string;
+            }>`SELECT state, identity_json FROM storage_owned_entries WHERE id = ${entry.id}`;
+            assert.strictEqual(row!.state, "removed");
+            // The ledger records the commit the proof covered.
+            assert.strictEqual(JSON.parse(row!.identity_json).mergedHead, head);
+          }),
+        ),
+    );
+    it.effect("refuses a squash-merged checkout whose HEAD moved after the proof", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          const { service } = yield* squashMerged(f);
+          const moveHead = (message: string) =>
+            Effect.gen(function* () {
+              yield* io(() => fs.writeFile(path.join(f.checkout, "tracked.txt"), `${message}\n`));
+              yield* f.git(f.checkout, ["commit", "-am", message]);
+            }).pipe(Effect.orDie);
+
+          // A commit after the review is not covered by the merged pull request.
+          const reviewed = yield* service.preview("owner", [f.entry.id]);
+          yield* moveHead("after review");
+          const afterReview = yield* service.execute("owner", reviewed.token);
+          assert.strictEqual(afterReview.results[0]?.status, "protected");
+          assert.include(afterReview.results[0]!.detail, "no merged pull request");
+          yield* f.git(f.checkout, ["reset", "--hard", "HEAD~1"]);
+
+          // A commit between the proof and the revalidation under the settings lease: that
+          // revalidation only accepts the proven commit and does not ask again.
+          const second = yield* service.preview("owner", [f.entry.id]);
+          let listings = 0;
+          f.duringListWorktrees(() =>
+            ++listings === 2 ? moveHead("during removal") : Effect.void,
+          );
+          const duringRemoval = yield* service.execute("owner", second.token);
+          assert.strictEqual(duringRemoval.results[0]?.status, "protected");
+          assert.include(
+            duringRemoval.results[0]!.detail,
+            "The branch moved after its merge was verified",
+          );
+          assert.deepEqual(
+            yield* f.sql<{ state: string }>`SELECT state FROM storage_owned_entries`,
+            [{ state: "owned" }],
+          );
+          f.duringListWorktrees(() => Effect.void);
+          yield* f.git(f.checkout, ["reset", "--hard", "HEAD~1"]);
+
+          // A commit at the removal boundary itself: the claimed commit no longer matches.
+          const third = yield* service.preview("owner", [f.entry.id]);
+          f.beforeRemove(() => moveHead("at the boundary"));
+          const atBoundary = yield* service.execute("owner", third.token);
+          assert.strictEqual(atBoundary.results[0]?.status, "failed");
+          assert.include(atBoundary.results[0]!.detail, "moved after its merge was verified");
+          assert.strictEqual(
+            yield* io(() => fs.readFile(path.join(f.checkout, "tracked.txt"), "utf8")),
+            "at the boundary\n",
+          );
+          assert.deepEqual(yield* cleanupSiblings(f), []);
+        }),
+      ),
+    );
+    it.effect("retention removes a squash-merged checkout once it is due", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          const { calls, service } = yield* squashMerged(f);
+          yield* f.sql`UPDATE storage_owned_entries SET created_at = ${old}`;
+          f.setSettings({
+            ...DEFAULT_SERVER_SETTINGS,
+            storageRetention: {
+              automatic: true,
+              completedWorktreeDays: 30,
+              temporaryDataDays: null,
+            },
+          });
+          yield* f.service.runRetention;
+          assert.isTrue(yield* exists(f.checkout));
+          yield* service.runRetention;
+          assert.isFalse(yield* exists(f.checkout));
+          // The pass shares its forge reads between candidates.
+          assert.isAtMost(calls[0]!.reads!.remaining, 8);
+        }),
+      ),
+    );
+    it.effect("a slow forge read for a merge proof does not use up the measurement budget", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          const { head } = yield* squashMerged(f);
+          // Each proof waits 4 seconds on the forge, longer than the 3-second budget that
+          // bounds measuring the checkout: the clock moves on while it waits.
+          const realNow = Date.now.bind(Date);
+          let skew = 0;
+          const clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() + skew);
+          yield* Effect.addFinalizer(() => Effect.sync(() => clock.mockRestore()));
+          const service = f.withDeps({
+            mergeProof: {
+              prove: (input) =>
+                Effect.sync(() => {
+                  skew += 4_000;
+                  return input.head === head
+                    ? { kind: "pull-request" as const, head, number: 7, baseRefName: "main" }
+                    : null;
+                }),
+              remoteDefaultBranches: () => Effect.succeed(null),
+            },
+          });
+          const entry = (yield* service.scan()).entries.find((e) => e.id === f.entry.id)!;
+          assert.isTrue(entry.eligible, entry.reason);
+          const preview = yield* service.preview("owner", [entry.id]);
+          assert.isTrue(preview.entries[0]!.eligible, preview.entries[0]!.reason);
+          const result = yield* service.execute("owner", preview.token);
+          assert.strictEqual(result.results[0]?.status, "removed");
+          assert.isFalse(yield* exists(f.checkout));
+        }),
+      ),
+    );
+    it.effect(
+      "accepts a branch the remote default branch contains while the local main is behind",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const f = yield* fixture;
+            yield* io(() => fs.writeFile(path.join(f.checkout, "tracked.txt"), "landed\n"));
+            yield* f.git(f.checkout, ["commit", "-am", "landed upstream"]);
+            const head = (yield* f.git(f.checkout, ["rev-parse", "HEAD"])).stdout.trim();
+            // Fetched earlier: origin/main has the commit, the local main does not. Never fetched here.
+            yield* f.git(f.repo, [
+              "remote",
+              "add",
+              "origin",
+              "https://example.invalid/fixture.git",
+            ]);
+            yield* f.git(f.repo, ["update-ref", "refs/remotes/origin/main", head]);
+            yield* f.git(f.repo, [
+              "symbolic-ref",
+              "refs/remotes/origin/HEAD",
+              "refs/remotes/origin/main",
+            ]);
+            const driver = yield* makeGitVcsDriverCore().pipe(
+              Effect.provide(ServerConfig.layerTest(f.repo, path.join(f.root, "server"))),
+            );
+            const service = f.withDeps({
+              mergeProof: makeCheckoutMergeProver({
+                git: driver,
+                providers: { resolve: () => Effect.die(new Error("no forge read expected")) },
+              }),
+            });
+            const entry = (yield* service.scan()).entries.find((e) => e.id === f.entry.id)!;
+            assert.isTrue(entry.eligible);
+            assert.include(entry.reason, "Its branch is contained in origin/main.");
+            const preview = yield* service.preview("owner", [entry.id]);
+            const result = yield* service.execute("owner", preview.token);
+            assert.strictEqual(result.results[0]?.status, "removed");
+            assert.isFalse(yield* exists(f.checkout));
           }),
         ),
     );

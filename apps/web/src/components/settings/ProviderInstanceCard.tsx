@@ -1,6 +1,11 @@
 "use client";
 
-import { isRateLimitSnapshotAvailable } from "@ryco/client-runtime/usage";
+import {
+  isRateLimitSnapshotAvailable,
+  rateLimitsObservedAt,
+  rateLimitWindowList,
+  staleRateLimitsReason,
+} from "@ryco/client-runtime/usage";
 import { ProviderLimitWindow } from "../usage/ProviderLimitWindow";
 import { SETTINGS_CONTROL_WIDTH, SettingsRow, useRelativeTimeTick } from "./settingsLayout";
 
@@ -21,7 +26,6 @@ import {
   type ServerProvider,
   type ServerProviderModel,
   type ServerProviderRateLimits,
-  type ServerProviderRateLimitWindow,
 } from "@ryco/contracts";
 
 import { ColorSwatchPicker } from "./ColorSwatchPicker";
@@ -40,6 +44,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { DriverOption } from "./providerDriverMeta";
 import { AcpRegistryAuthentication } from "./AcpRegistryAuthentication";
 import { AcpRegistrySettings } from "./AcpRegistrySettings";
+import { readAcpAgentConfig } from "./acpAgentConfig.logic";
 import { ProviderSettingsForm } from "./ProviderSettingsForm";
 import { ProviderModelsSection } from "./ProviderModelsSection";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
@@ -51,7 +56,7 @@ import {
   getProviderVersionLabel,
 } from "./providerStatus";
 import { deriveProviderInstancePresentation } from "./providerInstancePresentation";
-import { describeRateLimitWindow } from "./codexUsageLimits";
+import { formatRelativeTimeLabel } from "../../timestampFormat";
 import {
   blankEnvironmentDraftRow,
   environmentDraftRowFromVariable,
@@ -145,61 +150,38 @@ function ProviderAccentColorPicker(props: {
   );
 }
 
-function ProviderUsageLimitWindowRow(props: {
-  readonly window: ServerProviderRateLimitWindow;
-  readonly fallbackLabel: string;
-  readonly checkedAt: string;
-  readonly available: boolean;
-  readonly now: number;
-}) {
-  const descriptor = describeRateLimitWindow(props.window);
-  const label =
-    props.window.windowDurationMins === undefined ? props.fallbackLabel : descriptor.label;
-  return <ProviderLimitWindow {...props} label={label} />;
-}
-
 function ProviderUsageLimitsSection(props: {
   readonly rateLimits: ServerProviderRateLimits;
-  readonly checkedAt: string;
+  /** When the provider read these limits (`rateLimitsObservedAt`). */
+  readonly observedAt: string;
   readonly available: boolean;
 }) {
   const now = useRelativeTimeTick();
-  const { primary, secondary, tertiary } = props.rateLimits;
-  if (!primary && !secondary && !tertiary) return null;
+  const windows = rateLimitWindowList(props.rateLimits);
+  if (windows.length === 0) return null;
+  const staleReason = staleRateLimitsReason(props.rateLimits);
 
   return (
     <div className="border-t border-border/60 px-4 py-3 sm:px-5">
       <div className="grid gap-2.5">
         <span className="text-xs font-medium text-foreground">Usage limits</span>
         <div className="grid gap-3">
-          {primary ? (
-            <ProviderUsageLimitWindowRow
-              checkedAt={props.checkedAt}
+          {windows.map(({ label, window }) => (
+            <ProviderLimitWindow
+              key={label}
+              window={window}
+              label={label}
+              checkedAt={props.observedAt}
               available={props.available}
               now={now}
-              window={primary}
-              fallbackLabel="Short window"
             />
-          ) : null}
-          {secondary ? (
-            <ProviderUsageLimitWindowRow
-              checkedAt={props.checkedAt}
-              available={props.available}
-              now={now}
-              window={secondary}
-              fallbackLabel="Weekly"
-            />
-          ) : null}
-          {tertiary ? (
-            <ProviderUsageLimitWindowRow
-              checkedAt={props.checkedAt}
-              available={props.available}
-              now={now}
-              window={tertiary}
-              fallbackLabel="Monthly"
-            />
-          ) : null}
+          ))}
         </div>
+        {staleReason ? (
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            Usage from {formatRelativeTimeLabel(props.observedAt, now)}; {staleReason}.
+          </p>
+        ) : null}
       </div>
     </div>
   );
@@ -391,6 +373,8 @@ interface ProviderInstanceCardProps {
   readonly liveProvider: ServerProvider | undefined;
   readonly isDefault: boolean;
   readonly usageAvailable?: boolean;
+  /** Signs the instance in on its node; renders nothing while it needs none. */
+  readonly signInNode?: ReactNode;
   readonly resetCreditsNode?: ReactNode;
   readonly onUpdate: (nextInstance: ProviderInstanceConfig) => void;
   /**
@@ -447,6 +431,7 @@ export function ProviderInstanceCard({
   liveProvider,
   isDefault,
   usageAvailable = false,
+  signInNode,
   resetCreditsNode,
   onUpdate,
   onDelete,
@@ -768,11 +753,12 @@ export function ProviderInstanceCard({
       </div>
 
       <div className="space-y-0">
+        {signInNode}
         {resetCreditsNode}
         {liveProvider?.rateLimits ? (
           <ProviderUsageLimitsSection
             rateLimits={liveProvider.rateLimits}
-            checkedAt={liveProvider.checkedAt}
+            observedAt={rateLimitsObservedAt(liveProvider)}
             available={isRateLimitSnapshotAvailable(liveProvider, usageAvailable)}
           />
         ) : null}
@@ -816,11 +802,13 @@ export function ProviderInstanceCard({
 
         {instance.driver === "acpRegistry" ? (
           <div className="border-t border-border/60 px-4 py-3 sm:px-5">
-            <AcpRegistrySettings value={instance.config} onChange={updateConfig} />
+            {/* The source is fixed once added: sessions and sign-in belong to that agent. */}
+            <AcpRegistrySettings value={instance.config} onChange={updateConfig} variant="card" />
             <div className="mt-4 border-t border-border/60 pt-3">
               <AcpRegistryAuthentication
                 instanceId={instanceId}
                 installationKey={JSON.stringify(instance.config)}
+                source={readAcpAgentConfig(instance.config).source}
               />
             </div>
           </div>

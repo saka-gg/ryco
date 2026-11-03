@@ -16,10 +16,16 @@ import { readWorktreeLaunchRetry } from "../components/chat/worktreeLaunch/workt
 
 import { DraftId } from "../composerDraftStore";
 import {
+  __resetClientSettingsPersistenceForTests,
+  getClientSettingsSnapshot,
+  replaceClientSettingsSnapshot,
+} from "./clientSettingsStore";
+import {
   readAndRememberProjectPreferences,
   resetNewDraftDefaultsCacheForTests,
 } from "./newDraftDefaults";
 import { claudeCacheReviewPresentation } from "../components/chat/ClaudeCacheReview";
+import { confirmStopBackgroundWorkDialog } from "../components/chat/StopBackgroundWorkDialog";
 import { toastManager } from "../components/ui/toast";
 import type { ChatMessage } from "../types";
 import {
@@ -154,6 +160,7 @@ describe("rollbackSendTurn", () => {
       promptRef: { current: "" },
       composerImagesRef: { current: [] as unknown[] },
       composerTerminalContextsRef: { current: [] as unknown[] },
+      composerFileReferencesRef: { current: [] as unknown[] },
       sendInFlightRef: { current: false },
     };
   }
@@ -168,6 +175,7 @@ describe("rollbackSendTurn", () => {
       addComposerDraftImages: vi.fn(),
       removeComposerDraftImage: vi.fn(),
       setComposerDraftTerminalContexts: vi.fn(),
+      setComposerDraftFileReferences: vi.fn(),
       setDraftThreadContext: vi.fn(),
       readComposerDraftContent: vi.fn(() => null),
     };
@@ -215,6 +223,7 @@ describe("rollbackSendTurn", () => {
       promptSnapshot,
       imagesSnapshot,
       terminalContextsSnapshot,
+      fileReferencesSnapshot: [],
     });
 
     expect(refs.promptRef.current).toBe("Fix the bug");
@@ -250,6 +259,7 @@ describe("rollbackSendTurn", () => {
       promptSnapshot: "Old prompt",
       imagesSnapshot: [],
       terminalContextsSnapshot: [],
+      fileReferencesSnapshot: [],
     });
 
     expect(setOptimisticUserMessages).not.toHaveBeenCalled();
@@ -275,6 +285,7 @@ describe("rollbackSendTurn", () => {
       promptSnapshot: "Fix the bug",
       imagesSnapshot: [],
       terminalContextsSnapshot: [],
+      fileReferencesSnapshot: [],
     });
 
     expect(draft.setComposerDraftPrompt).toHaveBeenCalledWith(
@@ -300,6 +311,7 @@ describe("rollbackSendTurn", () => {
       promptSnapshot: "Fix the bug",
       imagesSnapshot: [],
       terminalContextsSnapshot: [],
+      fileReferencesSnapshot: [],
     });
 
     expect(draft.setComposerDraftPrompt).toHaveBeenCalledWith(
@@ -317,6 +329,7 @@ describe("rollbackSendTurn", () => {
         prompt: "written since",
         images: [],
         terminalContexts: [],
+        fileReferences: [],
       })),
     };
 
@@ -329,6 +342,7 @@ describe("rollbackSendTurn", () => {
       promptSnapshot: "Fix the bug",
       imagesSnapshot: [],
       terminalContextsSnapshot: [],
+      fileReferencesSnapshot: [],
     });
 
     expect(draft.setComposerDraftPrompt).not.toHaveBeenCalled();
@@ -369,6 +383,7 @@ describe("rollbackSendTurn", () => {
       promptSnapshot: "Hello",
       imagesSnapshot: [],
       terminalContextsSnapshot: [],
+      fileReferencesSnapshot: [],
     });
 
     expect(captured).toEqual([
@@ -545,6 +560,7 @@ describe("executeChatSendTurn", () => {
         addComposerDraftImages: vi.fn(),
         removeComposerDraftImage: vi.fn(),
         setComposerDraftTerminalContexts: vi.fn(),
+        setComposerDraftFileReferences: vi.fn(),
         setDraftThreadContext: vi.fn(),
         readComposerDraftContent: vi.fn(() => null),
       },
@@ -559,6 +575,7 @@ describe("executeChatSendTurn", () => {
         promptRef: { current: "" },
         composerImagesRef: { current: [] },
         composerTerminalContextsRef: { current: [] },
+        composerFileReferencesRef: { current: [] },
         sendInFlightRef: { current: false },
       } as never,
       sourceControl: { fetcher: vi.fn(async (ctx) => ctx) },
@@ -651,6 +668,145 @@ describe("executeChatSendTurn", () => {
     expect(input.dispatch.resetLocalDispatch).toHaveBeenCalledOnce();
   });
 
+  it("sends file references as a block before terminal contexts and restores them on failure", async () => {
+    const { input, dispatchCommand } = makeSendInput();
+    input.claudeCacheReview = null;
+    const reference = {
+      id: "reference-1",
+      createdAt: "2026-10-22T00:00:00.000Z",
+      path: "src/app.ts",
+      lineStart: 4,
+      lineEnd: 4,
+      snippet: "run(item);",
+      truncated: false,
+      comment: "Twice?",
+    };
+    input.composer.fileReferences = [reference];
+    input.composer.sendableTerminalContexts = [
+      {
+        id: "context-1",
+        threadId: ThreadId.make("thread-handoff"),
+        createdAt: "2026-10-22T00:00:00.000Z",
+        terminalId: "t1",
+        terminalLabel: "Terminal 1",
+        lineStart: 1,
+        lineEnd: 1,
+        text: "error",
+      },
+    ];
+    input.refs.promptRef.current = input.composer.prompt;
+    input.refs.composerFileReferencesRef.current = [reference];
+    dispatchCommand.mockImplementation(async (command) => {
+      if ((command as { type: string }).type === "thread.turn.start") {
+        throw new Error("The node went away.");
+      }
+      return { sequence: 1 };
+    });
+
+    expect(await executeChatSendTurn(input)).toBe(false);
+
+    const turnStart = dispatchCommand.mock.calls
+      .map(([command]) => command as { type: string; message?: { text: string } })
+      .find((command) => command.type === "thread.turn.start");
+    expect(turnStart?.message?.text).toBe(
+      [
+        "Continue with Claude",
+        "",
+        "<file_context>",
+        "- src/app.ts line 4:",
+        "  comment: Twice?",
+        "  4 | run(item);",
+        "</file_context>",
+        "",
+        "<terminal_context>",
+        "- Terminal 1 line 1:",
+        "  1 | error",
+        "</terminal_context>",
+      ].join("\n"),
+    );
+    // The send cleared the composer; the failure puts the chips back.
+    expect(input.draft.clearComposerDraftContent).toHaveBeenCalled();
+    expect(input.draft.setComposerDraftFileReferences).toHaveBeenLastCalledWith(
+      input.draft.composerDraftTarget,
+      [reference],
+    );
+    expect(input.refs.composerFileReferencesRef.current).toEqual([reference]);
+  });
+
+  it("restores an attachment and a file reference when the send fails before the composer re-renders", async () => {
+    const { input, dispatchCommand } = makeSendInput();
+    input.claudeCacheReview = null;
+    const attachment = {
+      id: "sent-upload",
+      type: "file" as const,
+      name: "notes.txt",
+      mimeType: "text/plain",
+      sizeBytes: 4,
+      file: null,
+      previewUrl: "",
+      uploadToken: "upload-1",
+      expiresAt: "2099-01-01T00:00:00Z",
+    };
+    const reference = {
+      id: "reference-1",
+      createdAt: "2026-10-22T00:00:00.000Z",
+      path: "src/app.ts",
+      lineStart: 4,
+      lineEnd: 4,
+      snippet: "run(item);",
+      truncated: false,
+    };
+    input.composer.images = [attachment];
+    input.composer.fileReferences = [reference];
+    // The live refs still hold what was sent: nothing re-rendered the composer in between.
+    input.refs.promptRef.current = input.composer.prompt;
+    input.refs.composerImagesRef.current = [attachment];
+    input.refs.composerFileReferencesRef.current = [reference];
+    dispatchCommand.mockImplementation(async (command) => {
+      if ((command as { type: string }).type === "thread.turn.start") {
+        throw new Error("The node went away.");
+      }
+      return { sequence: 1 };
+    });
+
+    expect(await executeChatSendTurn(input)).toBe(false);
+
+    expect(input.draft.clearComposerDraftContent).toHaveBeenCalled();
+    expect(input.draft.addComposerDraftImages).toHaveBeenLastCalledWith(
+      input.draft.composerDraftTarget,
+      [attachment],
+    );
+    expect(input.draft.setComposerDraftFileReferences).toHaveBeenLastCalledWith(
+      input.draft.composerDraftTarget,
+      [reference],
+    );
+    expect(input.refs.composerImagesRef.current).toEqual([attachment]);
+    expect(input.refs.composerFileReferencesRef.current).toEqual([reference]);
+    expect(input.refs.promptRef.current).toBe(input.composer.prompt);
+  });
+
+  it("keeps the draft when a file reference was added while the send prepared", async () => {
+    const { input } = makeSendInput();
+    input.claudeCacheReview = null;
+    input.refs.promptRef.current = input.composer.prompt;
+    input.scroll.armEndFollowBeforeOptimistic = vi.fn(() => {
+      input.refs.composerFileReferencesRef.current = [
+        {
+          id: "late",
+          createdAt: "2026-10-22T00:00:00.000Z",
+          path: "src/app.ts",
+          lineStart: 1,
+          lineEnd: 1,
+          snippet: "x",
+          truncated: false,
+        },
+      ];
+    });
+
+    expect(await executeChatSendTurn(input)).toBe(true);
+    expect(input.draft.clearComposerDraftContent).not.toHaveBeenCalled();
+  });
+
   it.each([
     { name: "staged target", restorePrompt: undefined },
     { name: "goal command", restorePrompt: "/goal Continue with Claude" },
@@ -668,6 +824,7 @@ describe("executeChatSendTurn", () => {
       promptRef: { current: "Continue with Claude" },
       composerImagesRef: { current: [] },
       composerTerminalContextsRef: { current: [] },
+      composerFileReferencesRef: { current: [] },
       sendInFlightRef: { current: false },
     };
     const persistThreadSettingsForNextTurn = vi.fn(async (_settings: unknown) => {});
@@ -726,6 +883,7 @@ describe("executeChatSendTurn", () => {
         addComposerDraftImages: vi.fn(),
         removeComposerDraftImage: vi.fn(),
         setComposerDraftTerminalContexts: vi.fn(),
+        setComposerDraftFileReferences: vi.fn(),
         setDraftThreadContext: vi.fn(),
         readComposerDraftContent: vi.fn(() => null),
       },
@@ -786,6 +944,7 @@ function makeSendInput() {
     promptRef: { current: "My next draft" },
     composerImagesRef: { current: [] },
     composerTerminalContextsRef: { current: [] },
+    composerFileReferencesRef: { current: [] },
     sendInFlightRef: { current: false },
   };
   const input: Parameters<typeof executeChatSendTurn>[0] = {
@@ -841,6 +1000,7 @@ function makeSendInput() {
       addComposerDraftImages: vi.fn(),
       removeComposerDraftImage: vi.fn(),
       setComposerDraftTerminalContexts: vi.fn(),
+      setComposerDraftFileReferences: vi.fn(),
       setDraftThreadContext: vi.fn(),
       readComposerDraftContent: vi.fn(() => null),
     },
@@ -908,6 +1068,7 @@ describe("a send whose view moved on to another thread", () => {
       prompt: "My next draft",
       images: [],
       terminalContexts: [],
+      fileReferences: [],
     });
     input.scroll.armEndFollowBeforeOptimistic = vi.fn(() => {
       switchThread("typed in the other thread");
@@ -929,6 +1090,7 @@ describe("a send whose view moved on to another thread", () => {
       prompt: "My next draft",
       images: [],
       terminalContexts: [],
+      fileReferences: [],
     });
     // Moved on while the caller was still preparing (a device screenshot, say).
     switchThread("typed in the other thread");
@@ -1023,6 +1185,83 @@ describe("chat first send with a retired project id", () => {
     expect(await executeChatSendTurn(input)).toBe(false);
     expect(renewChatProjectId).not.toHaveBeenCalled();
     expect(turnStarts()).toHaveLength(1);
+  });
+});
+
+describe("a model switch held back by background tasks", () => {
+  const blocked = () =>
+    new OrchestrationDispatchCommandError({
+      message: "This thread still has background tasks running.",
+      modelSwitchBlockedByBackgroundWork: { taskIds: ["task-agent"] },
+    });
+
+  function makeBlockedSendInput(stop: boolean) {
+    const sent = makeSendInput();
+    const stopBackgroundTask = vi.fn(async (_input: unknown) => ({}));
+    const confirmStopBackgroundWork = vi.fn(async () => stop);
+    sent.input.claudeCacheReview = null;
+    sent.input.confirmStopBackgroundWork = confirmStopBackgroundWork;
+    sent.input.dispatch.api = {
+      orchestration: { dispatchCommand: sent.dispatchCommand, stopBackgroundTask },
+    } as never;
+    sent.dispatchCommand.mockRejectedValueOnce(blocked());
+    const turnStarts = () =>
+      sent.dispatchCommand.mock.calls
+        .map(([command]) => command as { type: string; [key: string]: unknown })
+        .filter((command) => command.type === "thread.turn.start");
+    return { ...sent, stopBackgroundTask, confirmStopBackgroundWork, turnStarts };
+  }
+
+  it("asks with the dialog by default and never for a background send", async () => {
+    const calls = () => commitSendTurnDispatchSpy.current!.mock.calls;
+    const { input } = makeSendInput();
+    expect(await executeChatSendTurn(input)).toBe(true);
+    expect(calls().at(-1)?.[0].confirmStopBackgroundWork).toBe(confirmStopBackgroundWorkDialog);
+
+    const background = makeSendInput();
+    background.input.confirmStopBackgroundWork = null;
+    expect(await executeChatSendTurn(background.input)).toBe(true);
+    expect(calls().at(-1)?.[0]).not.toHaveProperty("confirmStopBackgroundWork");
+  });
+
+  it("stops and sends nothing more when the choice outlived the send's connection", async () => {
+    // No connection stands in here, so the send's readiness capture fails after the choice.
+    const { input, stopBackgroundTask, turnStarts } = makeBlockedSendInput(true);
+
+    expect(await executeChatSendTurn(input)).toBe(false);
+    expect(stopBackgroundTask).not.toHaveBeenCalled();
+    expect(turnStarts()).toHaveLength(1);
+    expect(input.draft.setComposerDraftPrompt).toHaveBeenLastCalledWith(
+      input.draft.composerDraftTarget,
+      "Continue with Claude",
+    );
+    expect(input.dispatch.setThreadError).toHaveBeenLastCalledWith(
+      input.thread.threadId,
+      expect.stringContaining("Nothing was stopped or sent"),
+    );
+  });
+
+  it("keeps the message and the staged target on cancel", async () => {
+    const { input, dispatchCommand, stopBackgroundTask, turnStarts } = makeBlockedSendInput(false);
+
+    expect(await executeChatSendTurn(input)).toBe(false);
+    expect(stopBackgroundTask).not.toHaveBeenCalled();
+    expect(turnStarts()).toHaveLength(1);
+    // The composed text returns to the draft, and the send never wrote the target
+    // anywhere but the refused turn start, so the composer still stages it.
+    expect(input.draft.setComposerDraftPrompt).toHaveBeenLastCalledWith(
+      input.draft.composerDraftTarget,
+      "Continue with Claude",
+    );
+    expect(
+      dispatchCommand.mock.calls.filter(
+        ([command]) => (command as { type: string }).type !== "thread.turn.start",
+      ),
+    ).toEqual([]);
+    expect(input.dispatch.setThreadError).toHaveBeenLastCalledWith(
+      input.thread.threadId,
+      expect.stringContaining("Your message and the selected model are kept"),
+    );
   });
 });
 
@@ -1509,6 +1748,20 @@ describe("background send options", () => {
     background.input.claudeCacheReview = null;
     expect(await executeChatSendTurn(background.input)).toBe(true);
     expect(lastCommitInput()).not.toHaveProperty("claudeCacheReview");
+  });
+
+  it("reads this device's Claude resume review choice at send time, background sends included", async () => {
+    const background = makeSendInput();
+    background.input.claudeCacheReview = null;
+    expect(await executeChatSendTurn(background.input)).toBe(true);
+    const skip = lastCommitInput().skipClaudeResumeReview as () => boolean;
+    try {
+      expect(skip()).toBe(false);
+      replaceClientSettingsSnapshot({ ...getClientSettingsSnapshot(), claudeResumeReview: false });
+      expect(skip()).toBe(true);
+    } finally {
+      __resetClientSettingsPersistenceForTests();
+    }
   });
 
   it("forwards onBeforeTurnStart to run right before turn.start", async () => {

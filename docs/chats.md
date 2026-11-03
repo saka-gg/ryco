@@ -16,8 +16,8 @@ These entry points start a chat on the node you are working with:
 - The **+** button of the sidebar's **Chats** section, which appears once there is a chat. When
   the node has no projects, the sidebar's new-thread button also starts a chat.
 - **New chat without a project** and **No project** in the command palette.
-- The `chat.newWithoutProject` shortcut. It has no default key; bind one in your keybindings, for
-  example `mod+alt+n` (⌘⌥N on macOS, Ctrl+Alt+N elsewhere). See [KEYBINDINGS.md](../KEYBINDINGS.md).
+- The `chat.newWithoutProject` shortcut, ⌘⌥N on macOS and Ctrl+Alt+N elsewhere (`mod+alt+n`).
+  Older apps have no default key for it; bind one there. See [KEYBINDINGS.md](../KEYBINDINGS.md).
 
 Ryco's apps keep one thread per chat. While a chat is open, **New thread** (`chat.new`,
 `chat.newLocal`) starts another chat instead of a second thread in the same folder, and no picker
@@ -342,4 +342,5 @@ running session. See
 - Only the first send, a fork of a chat and **Turn into project…** can create a chat, and only
   **Turn into project…** can move its folder or change its kind. Clients cannot do this through
   ordinary project updates.
-- Usage statistics and daily recaps list a chat under its title, like a project.
+- Usage statistics and daily recaps list a chat under its title, like a project. A daily recap's
+  busiest projects leave chats out, though their agent time still counts.

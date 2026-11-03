@@ -1,10 +1,16 @@
-import { DEFAULT_UNIFIED_SETTINGS, type FollowUpBehavior } from "@ryco/contracts/settings";
+import {
+  DEFAULT_UNIFIED_SETTINGS,
+  type FollowUpBehavior,
+  type SendShortcut,
+} from "@ryco/contracts/settings";
 
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import { useUiStateStore } from "../../uiStateStore";
+import { followUpInvertShortcutLabel, modEnterShortcutLabel } from "../chat/composerFollowUp";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { SettingsSection, SettingsRow, SettingResetButton } from "./settingsLayout";
+import { SettingsSelect, type SettingsSelectOption } from "./SettingsSelect";
 
 const FOLLOW_UP_BEHAVIOR_LABELS = {
   queue: "Queue",
@@ -20,6 +26,15 @@ function parseFollowUpBehavior(value: string | null): FollowUpBehavior | null {
   return value === "queue" || value === "steer" ? value : null;
 }
 
+function sendShortcutOptions(): ReadonlyArray<SettingsSelectOption<SendShortcut>> {
+  const modEnter = modEnterShortcutLabel();
+  return [
+    { value: "enter", label: "Enter" },
+    { value: "mod-enter-multiline", label: `${modEnter} for multiline prompts` },
+    { value: "mod-enter", label: `Always ${modEnter}` },
+  ];
+}
+
 export function ComposerSettings() {
   const wideComposerControlsAutoCollapse = useUiStateStore(
     (state) => state.wideComposerControlsAutoCollapse,
@@ -30,12 +45,37 @@ export function ComposerSettings() {
   const alwaysUseBuildMode = useUiStateStore((state) => state.alwaysUseBuildMode);
   const setAlwaysUseBuildMode = useUiStateStore((state) => state.setAlwaysUseBuildMode);
   const followUpBehavior = useSettings((settings) => settings.followUpBehavior);
+  const sendShortcut = useSettings((settings) => settings.sendShortcut);
+  const claudeResumeReview = useSettings((settings) => settings.claudeResumeReview);
   const { updateSettings } = useUpdateSettings();
   return (
     <SettingsSection title="Composer controls">
       <SettingsRow
+        title="Send shortcut"
+        description="When Enter sends a message and when it adds a new line. Shift+Enter always adds a new line."
+        resetAction={
+          sendShortcut !== DEFAULT_UNIFIED_SETTINGS.sendShortcut ? (
+            <SettingResetButton
+              label="send shortcut"
+              onClick={() =>
+                updateSettings({ sendShortcut: DEFAULT_UNIFIED_SETTINGS.sendShortcut })
+              }
+            />
+          ) : null
+        }
+        control={
+          <SettingsSelect
+            value={sendShortcut}
+            onValueChange={(value) => updateSettings({ sendShortcut: value })}
+            options={sendShortcutOptions()}
+            ariaLabel="Send shortcut"
+            width="lg"
+          />
+        }
+      />
+      <SettingsRow
         title="Messages sent while a turn runs"
-        description="Queue waits for the turn to finish. Steer adds the message to the running turn when the provider supports it. ⌘↵ / Ctrl+Enter does the opposite."
+        description={`Queue waits for the turn to finish. Steer adds the message to the running turn when the provider supports it. ${followUpInvertShortcutLabel(sendShortcut)} does the opposite.`}
         resetAction={
           followUpBehavior !== DEFAULT_UNIFIED_SETTINGS.followUpBehavior ? (
             <SettingResetButton
@@ -54,7 +94,11 @@ export function ComposerSettings() {
               if (behavior !== null) updateSettings({ followUpBehavior: behavior });
             }}
           >
-            <SelectTrigger className="w-full sm:w-40" aria-label="Messages sent while a turn runs">
+            <SelectTrigger
+              size="sm"
+              className="w-full sm:w-40"
+              aria-label="Messages sent while a turn runs"
+            >
               <SelectValue>{FOLLOW_UP_BEHAVIOR_LABELS[followUpBehavior]}</SelectValue>
             </SelectTrigger>
             <SelectPopup align="end" alignItemWithTrigger={false}>
@@ -65,6 +109,29 @@ export function ComposerSettings() {
               ))}
             </SelectPopup>
           </Select>
+        }
+      />
+      <SettingsRow
+        title="Review large Claude resumes"
+        description="Before a send resumes a large Claude conversation that sat idle, ask whether to continue with full context or compact it first. Applies to this device."
+        resetAction={
+          claudeResumeReview !== DEFAULT_UNIFIED_SETTINGS.claudeResumeReview ? (
+            <SettingResetButton
+              label="Claude resume review"
+              onClick={() =>
+                updateSettings({
+                  claudeResumeReview: DEFAULT_UNIFIED_SETTINGS.claudeResumeReview,
+                })
+              }
+            />
+          ) : null
+        }
+        control={
+          <Switch
+            checked={claudeResumeReview}
+            onCheckedChange={(checked) => updateSettings({ claudeResumeReview: Boolean(checked) })}
+            aria-label="Review large Claude resumes"
+          />
         }
       />
       <SettingsRow

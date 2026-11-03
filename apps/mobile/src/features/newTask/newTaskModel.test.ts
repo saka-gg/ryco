@@ -4,12 +4,16 @@ import type { Project, SidebarWorktreeSummary } from "@ryco/client-runtime/state
 import {
   DEFAULT_MODEL,
   EnvironmentId,
+  MessageId,
   ProjectId,
   ProviderInstanceId,
+  ThreadId,
   WorktreeId,
 } from "@ryco/contracts";
+import { createQuoteCitation, serializeQuoteCitation } from "@ryco/shared/quoteCitations";
 
 import {
+  canQueueNewTaskFor,
   deriveNewTaskDefaults,
   inferTaskTitle,
   newTaskContextLabel,
@@ -42,6 +46,49 @@ const worktree = {
   branch: "feat/mobile",
   archivedAt: null,
 } as SidebarWorktreeSummary;
+
+describe("queueing a New Task for an away machine", () => {
+  const offline = {
+    environmentId: EnvironmentId.make("offline"),
+    label: "Laptop",
+    connectionState: "offline" as const,
+  };
+
+  it("waits only for a machine that is away and that this device may write to", () => {
+    expect(canQueueNewTaskFor(offline)).toBe(true);
+    expect(canQueueNewTaskFor({ ...offline, connectionState: "reconnecting" })).toBe(true);
+    expect(canQueueNewTaskFor({ ...offline, role: "viewer" })).toBe(false);
+    expect(canQueueNewTaskFor(readyEnvironment)).toBe(false);
+    expect(canQueueNewTaskFor(readOnlyEnvironment)).toBe(false);
+  });
+
+  it("prefers a live machine and falls back to the away one it was opened for", () => {
+    const awayProject = { ...project, environmentId: offline.environmentId } as Project;
+    expect(
+      deriveNewTaskDefaults({
+        launch: { environmentId: offline.environmentId },
+        environments: [offline, readyEnvironment],
+        projects: [project, awayProject],
+        worktrees: [],
+      }).environment?.environmentId,
+    ).toBe(readyEnvironment.environmentId);
+    const defaults = deriveNewTaskDefaults({
+      launch: { environmentId: offline.environmentId },
+      environments: [readOnlyEnvironment, offline],
+      projects: [awayProject],
+      worktrees: [],
+    });
+    expect(defaults.environment?.environmentId).toBe(offline.environmentId);
+    expect(defaults.project?.environmentId).toBe(offline.environmentId);
+    expect(
+      resolveNewTaskProjectChoice({
+        target: { environmentId: offline.environmentId, projectId: project.id },
+        projects: [awayProject],
+        environments: [offline],
+      })?.environmentId,
+    ).toBe(offline.environmentId);
+  });
+});
 
 describe("New Task defaults", () => {
   it("falls back from a read-only launch node to the first mutation-ready node", () => {
@@ -115,6 +162,14 @@ describe("New Task defaults", () => {
     ).toBe("Studio · Ryco · Mobile");
     expect(inferTaskTitle(`  ${"a".repeat(90)}\nsecond line`)).toHaveLength(70);
     expect(inferTaskTitle("")).toBe("New task");
+    const token = serializeQuoteCitation(
+      createQuoteCitation({
+        source: { environmentId: EnvironmentId.make("ready"), threadId: ThreadId.make("thread") },
+        messageId: MessageId.make("message"),
+        selector: { exact: "The passage.", prefix: "", suffix: "", start: 0, end: 12 },
+      }),
+    );
+    expect(inferTaskTitle(`Explain ${token}`)).toBe("Explain “The passage.”");
   });
 });
 

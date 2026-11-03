@@ -144,6 +144,22 @@ rl.on("line", (line) => {
     }
     return;
   }
+  if (method === "thread/compact/start") {
+    // Codex answers `{}` and reports the compaction's turn on its own, before or after the answer.
+    NodeFS.appendFileSync(
+      `${process.env.RYCO_CODEX_COLLAB_SCRIPT}.compactions`,
+      `${JSON.stringify(message.params)}\n`,
+    );
+    const notifications = (script.compactNotifications ?? []).map((notification) => ({
+      jsonrpc: "2.0",
+      method: notification.method,
+      params: notification.params,
+    }));
+    if (script.compactNotifiesFirst === true) notifications.forEach(write);
+    write({ id, result: {} });
+    if (script.compactNotifiesFirst !== true) notifications.forEach(write);
+    return;
+  }
   if (method === "turn/steer") {
     NodeFS.appendFileSync(
       `${process.env.RYCO_CODEX_COLLAB_SCRIPT}.steers`,

@@ -331,6 +331,7 @@ describe("bundle budgets", () => {
         "apps/web/src/components/chat/MessageActionsSheet.tsx",
         "node_modules/@pierre/diffs/dist/index.js",
         "node_modules/shiki/dist/index.mjs",
+        "node_modules/@pierre/highlights/dist/default.js",
         "node_modules/parse5/dist/index.js",
         "packages/contracts/src/agentControlMcp.ts",
       ]) {
@@ -347,6 +348,88 @@ describe("bundle budgets", () => {
       ]) {
         assert.isFalse(forbidden(source), `${name}: ${source}`);
       }
+    }
+  });
+
+  it("forbids the Automations dialog's schedule vocabulary in the app shell", () => {
+    const closure = DEFAULT_BUNDLE_BUDGET_POLICY.closures.find(
+      (entry) => entry.name === "RootAppShell",
+    )!;
+    const forbidden = (source: string) =>
+      closure.forbiddenSources.some((rule) => rule.pattern.test(source));
+    for (const source of [
+      "packages/shared/src/automationSchedule.ts",
+      "packages/client-runtime/src/state/agentControl/automationSchedules.ts",
+      "apps/web/src/components/automations/dialog/dialogWords.ts",
+      "apps/web/src/components/automations/missedRunsNotice.logic.ts",
+    ]) {
+      assert.isTrue(forbidden(source), source);
+    }
+    for (const source of [
+      // The badge, the notice and the dialog's open state stay in the shell.
+      "packages/client-runtime/src/state/agentControl/logic.ts",
+      "packages/client-runtime/src/state/agentControl/missedAutomationRuns.ts",
+      "apps/web/src/components/automations/MissedAutomationRunsNotice.tsx",
+      "apps/web/src/components/automations/automationsDialogStore.ts",
+    ]) {
+      assert.isFalse(forbidden(source), source);
+    }
+  });
+
+  it("keeps the pairing form, the relay's wire schemas and the quote citation parser out of boot", () => {
+    const forbiddenIn = (name: string) => {
+      const closure = DEFAULT_BUNDLE_BUDGET_POLICY.closures.find((entry) => entry.name === name)!;
+      return (source: string) => closure.forbiddenSources.some((rule) => rule.pattern.test(source));
+    };
+    const boot = forbiddenIn("boot");
+    for (const source of [
+      "apps/web/src/components/auth/PairingRouteSurface.tsx",
+      "apps/web/src/components/routeViews/PairRouteView.tsx",
+      "packages/contracts/src/relay.ts",
+      "packages/shared/src/quoteCitations.ts",
+    ]) {
+      assert.isTrue(boot(source), source);
+    }
+    for (const source of [
+      // What boot keeps: the pairing pending surface, the relay's numbers, the
+      // node identity schema and the queue's ordering logic.
+      "apps/web/src/components/auth/PairingSurface.tsx",
+      "packages/contracts/src/relayConstants.ts",
+      "packages/contracts/src/relayNodeId.ts",
+      "packages/client-runtime/src/state/message-queue/logic.ts",
+    ]) {
+      assert.isFalse(boot(source), source);
+    }
+    // A paired launch's shell and thread routes never load the pairing form or
+    // decode relay frames; the queued message summary's parser is theirs.
+    for (const name of ["RootAppShell", "ChatThreadRouteView", "DraftChatThreadRouteView"]) {
+      const forbidden = forbiddenIn(name);
+      assert.isTrue(forbidden("apps/web/src/components/auth/PairingRouteSurface.tsx"), name);
+      assert.isTrue(forbidden("packages/contracts/src/relay.ts"), name);
+      assert.isFalse(forbidden("packages/shared/src/quoteCitations.ts"), name);
+    }
+  });
+
+  it("keeps the desktop account prompt and alert dialogs out of boot", () => {
+    const boot = DEFAULT_BUNDLE_BUDGET_POLICY.closures.find((entry) => entry.name === "boot")!;
+    const forbidden = (source: string) =>
+      boot.forbiddenSources.some((rule) => rule.pattern.test(source));
+    for (const source of [
+      "apps/web/src/components/DesktopAccountConnect.tsx",
+      "apps/web/src/components/settings/useDesktopRelaunchGuard.tsx",
+      "apps/web/src/components/ui/alert-dialog.tsx",
+      "node_modules/@base-ui/react/alert-dialog/handle.mjs",
+    ]) {
+      assert.isTrue(forbidden(source), source);
+    }
+    for (const source of [
+      // What boot keeps: the empty thread view that loads the prompt, and the
+      // mobile sidebar's sheet, a dialog that is not an alert dialog.
+      "apps/web/src/components/NoActiveThreadState.tsx",
+      "apps/web/src/components/ui/sheet.tsx",
+      "node_modules/@base-ui/react/dialog/popup/DialogPopup.mjs",
+    ]) {
+      assert.isFalse(forbidden(source), source);
     }
   });
 

@@ -76,6 +76,8 @@ describe("ComputerProgressGuard", () => {
     "computer_setup_required",
     "browser_requires_setup",
     "approval_denied",
+    "approval_expired",
+    "approval_pending",
     "approval_unavailable",
     "approval_queue_full",
     "target_not_on_active_space",
@@ -92,6 +94,23 @@ describe("ComputerProgressGuard", () => {
     guard.record(enter, uncertain);
     expect(guard.check(enter)).toBeUndefined();
   });
+
+  it.each(["approval_expired", "approval_pending"])(
+    "keeps earlier uncertainty across %s refusals",
+    (code) => {
+      const guard = new ComputerProgressGuard();
+      const enter = action("press-key:enter");
+      guard.record(enter, uncertain);
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        guard.record(enter, { effect: "not-dispatched", code });
+        expect(guard.check(enter)).toBeUndefined();
+      }
+      // The refusals neither armed the guard nor cleared the uncertain send:
+      // one more uncertain delivery of the same input is the repeated one.
+      guard.record(enter, uncertain);
+      expect(guard.check(enter)?.code).toBe("repeated_unverified_action");
+    },
+  );
 
   it("does not erase uncertainty or trust a transient-looking code after dispatch", () => {
     const guard = new ComputerProgressGuard();

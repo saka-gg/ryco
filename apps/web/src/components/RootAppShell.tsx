@@ -1,11 +1,13 @@
 import { type ServerLifecycleWelcomePayload, WS_METHODS } from "@ryco/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@ryco/client-runtime/scoped";
+import { isSavedEnvironmentSwitchedOff } from "@ryco/client-runtime/connection";
 import { Outlet, useLocation, useNavigate } from "@tanstack/react-router";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 
 import { OnboardingCoordinator } from "./onboarding/OnboardingCoordinator";
 import { AppSidebarLayout } from "./AppSidebarLayout";
 import { CommandPalette, preloadCommandPaletteDialog } from "./CommandPalette";
+import { NewChatShortcuts } from "./NewChatShortcuts";
 import {
   expectsPrimaryShellPaint,
   resolveCanonicalPrimaryEnvironmentId,
@@ -15,6 +17,7 @@ import { ContextMenuActionSheetHost } from "./shell/phone/ContextMenuActionSheet
 import { SshPasswordPromptDialog } from "./desktop/SshPasswordPromptDialog";
 import { WorkspaceReviewDialog } from "./worktrees/WorkspaceReviewDialog";
 import { useAutomationsDialogStore } from "./automations/automationsDialogStore";
+import { useProjectImportDialogStore } from "./projectImport/projectImportDialogStore";
 import { usePromoteChatDialogStore } from "./chat/promoteChatDialogStore";
 import { useForkThreadDialogStore } from "./chat/forkThreadDialogStore";
 import {
@@ -29,7 +32,11 @@ import {
 } from "./WebSocketConnectionSurface";
 import { AnchoredToastProvider, ToastProvider } from "./ui/toast";
 import { getPresentationTier } from "../lib/presentationTier";
-import { preloadableLazy, useLazyComponentReady } from "../lib/preloadableLazy";
+import {
+  preloadableLazy,
+  type PreloadableModule,
+  useLazyComponentReady,
+} from "../lib/preloadableLazy";
 import { pathnameMatchesRoute, preloadRouteChunk } from "../lib/routeChunkPreload";
 import {
   scheduleShellIdlePreloads,
@@ -68,9 +75,12 @@ import {
   usePrimaryEnvironmentId,
 } from "../environments/primary";
 import { ServerStateBootstrap } from "./ServerStateBootstrap";
-import { ThreadPriorityRefreshBridge } from "./ThreadPriorityRefreshBridge";
 import { MessageQueueDrainBridge } from "./MessageQueueDrainBridge";
+import { ThreadAlertsBootstrap } from "../notifications/ThreadAlertsBootstrap";
 import { getRoutedHostedNode } from "../hostedHub/nodeRoutes";
+
+// The hosted root mounts thread alerts itself, from this chunk (`hostedRootAppShell`).
+export { ThreadAlertsBootstrap };
 
 export interface RootAppShellProps {
   readonly authGateState: {
@@ -117,6 +127,11 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
   // Every state with chat routes can queue, including hosted-static, which sends
   // to saved environments; readiness is per environment.
   const chatAvailable = primaryEnvironmentAuthenticated || authGateState.status === "hosted-static";
+  // Only where this shell is the root. The hosted root, which renders it as
+  // hosted-hub or hosted-cached, mounts thread alerts above its choice of
+  // surface, so its Hub pages and node switch surfaces do not stop them.
+  const ownsThreadAlerts =
+    authGateState.status === "authenticated" || authGateState.status === "hosted-static";
   const localTracingAllowed = authGateState.status === "authenticated";
   // Project copies: Agent Control's node directory and the copies a previous
   // session left unfinished. Both load their code on demand.
@@ -127,6 +142,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
   // flip must not remount the workspace); only the sidebar chrome forks.
   const appShell = (
     <CommandPalette>
+      <NewChatShortcuts />
       <AppSidebarLayout>
         <Outlet />
       </AppSidebarLayout>
@@ -143,10 +159,10 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
           <ServerStateBootstrap />
         ) : null}
         <EnvironmentConnectionManagerBootstrap />
-        {primaryEnvironmentAuthenticated ? <ThreadPriorityRefreshBridge /> : null}
         {chatAvailable || hostedCachedRunsOwner(authGateState.status, "messageQueueDrain") ? (
           <MessageQueueDrainBridge />
         ) : null}
+        <ChatWidthDocumentSync />
         <ContextMenuActionSheetHost />
         <SshPasswordPromptDialog />
         <WorkspaceReviewDialog />
@@ -154,13 +170,16 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
         {chatAvailable ? <PromoteChatDialogMount /> : null}
         {chatAvailable ? <ForkThreadDialogMount /> : null}
         {chatAvailable ? <ProjectNodesDialogsMount /> : null}
+        {chatAvailable ? <ProjectImportDialogMount /> : null}
         {chatAvailable ? <MissedAutomationRunsNotice /> : null}
+        {ownsThreadAlerts ? <ThreadAlertsBootstrap /> : null}
         {authGateState.status === "hosted-static" ? <HostedStaticEnvironmentBootstrap /> : null}
         {primaryEnvironmentAuthenticated ? (
           <EventRouter hosted={authGateState.status === "hosted-hub"} />
         ) : null}
         {primaryEnvironmentAuthenticated ? <RoleAwareProviderUpdateLaunchNotification /> : null}
-        {isElectron ? <DeferredRemoteInstallCountdown /> : null}
+        {isElectron ? <DeferredDesktopUpdateNotices /> : null}
+        {isElectron && primaryEnvironmentAuthenticated ? <DeferredRunningThreadKeepAlive /> : null}
         {recoveryOwner ? <WebSocketConnectionCoordinator recoveryOwner={recoveryOwner} /> : null}
         <ShellIdlePreloads authGateStatus={authGateState.status} />
         {appShell}
@@ -169,21 +188,39 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
   );
 }
 
+/**
+ * Writes the Chat width setting to the root, where `index.css` maps it to the chat column
+ * widths. Its own component, so a change re-renders nothing else.
+ */
+function ChatWidthDocumentSync() {
+  const chatWidth = useSettings((settings) => settings.chatWidth);
+  useEffect(() => {
+    document.documentElement.dataset.chatWidth = chatWidth;
+  }, [chatWidth]);
+  return null;
+}
+
+/**
+ * Whether an on-demand surface mounts: from the first time `wanted` turns true,
+ * once its chunk has loaded, and then for good. It mounts once the chunk
+ * resolved, so the first open never commits a Suspense fallback (and never
+ * waits on React's fallback-reveal throttle).
+ */
+function useMountedOnceWanted(component: PreloadableModule, wanted: boolean): boolean {
+  const [hasBeenWanted, setHasBeenWanted] = useState(wanted);
+  if (wanted && !hasBeenWanted) setHasBeenWanted(true);
+  const ready = useLazyComponentReady(component, hasBeenWanted);
+  return hasBeenWanted && ready;
+}
+
 const AutomationsDialog = preloadableLazy(() =>
   import("./automations/dialog/AutomationsDialog").then((module) => module.AutomationsDialog),
 );
 
-/**
- * The Automations dialog loads the first time something opens it, then stays
- * mounted. It mounts once its chunk resolved, so the open never commits a
- * Suspense fallback (and never waits on React's fallback-reveal throttle).
- */
+/** The Automations dialog loads the first time something opens it, then stays mounted. */
 function AutomationsDialogMount() {
   const open = useAutomationsDialogStore((state) => state.open);
-  const [hasOpened, setHasOpened] = useState(open);
-  if (open && !hasOpened) setHasOpened(true);
-  const ready = useLazyComponentReady(AutomationsDialog, hasOpened);
-  if (!hasOpened || !ready) return null;
+  if (!useMountedOnceWanted(AutomationsDialog, open)) return null;
   return <AutomationsDialog />;
 }
 
@@ -194,10 +231,7 @@ const PromoteChatDialog = preloadableLazy(() =>
 /** "Turn into project…" loads the first time a chat asks for it, then stays mounted. */
 function PromoteChatDialogMount() {
   const open = usePromoteChatDialogStore((state) => state.open);
-  const [hasOpened, setHasOpened] = useState(open);
-  if (open && !hasOpened) setHasOpened(true);
-  const ready = useLazyComponentReady(PromoteChatDialog, hasOpened);
-  if (!hasOpened || !ready) return null;
+  if (!useMountedOnceWanted(PromoteChatDialog, open)) return null;
   return <PromoteChatDialog />;
 }
 
@@ -208,10 +242,7 @@ const ForkThreadDialog = preloadableLazy(() =>
 /** "Fork from here" loads the first time a reply asks for it, then stays mounted. */
 function ForkThreadDialogMount() {
   const open = useForkThreadDialogStore((state) => state.open);
-  const [hasOpened, setHasOpened] = useState(open);
-  if (open && !hasOpened) setHasOpened(true);
-  const ready = useLazyComponentReady(ForkThreadDialog, hasOpened);
-  if (!hasOpened || !ready) return null;
+  if (!useMountedOnceWanted(ForkThreadDialog, open)) return null;
   return <ForkThreadDialog />;
 }
 
@@ -228,10 +259,7 @@ function ProjectNodesDialogsMount() {
   const wanted = useProjectNodesDialogStore(
     (state) => state.addProject.open || state.copyProject.open || state.copiesActive,
   );
-  const [hasOpened, setHasOpened] = useState(wanted);
-  if (wanted && !hasOpened) setHasOpened(true);
-  const ready = useLazyComponentReady(ProjectNodesDialogs, hasOpened);
-  if (!hasOpened || !ready) return null;
+  if (!useMountedOnceWanted(ProjectNodesDialogs, wanted)) return null;
   return <ProjectNodesDialogs />;
 }
 
@@ -252,6 +280,17 @@ function useResumeProjectCopies(enabled: boolean): void {
 }
 
 const PROJECT_COPY_RESUME_IDLE_TIMEOUT_MS = 5_000;
+
+const ProjectImportDialog = preloadableLazy(() =>
+  import("./projectImport/ProjectImportDialog").then((module) => module.ProjectImportDialog),
+);
+
+/** "Import from Codex or Claude Code" loads the first time something opens it, then stays mounted. */
+function ProjectImportDialogMount() {
+  const open = useProjectImportDialogStore((state) => state.open);
+  if (!useMountedOnceWanted(ProjectImportDialog, open)) return null;
+  return <ProjectImportDialog />;
+}
 
 const THREAD_ROUTE_ID = "/_chat/$environmentId/$threadId";
 const DRAFT_ROUTE_ID = "/_chat/draft/$draftId";
@@ -320,8 +359,12 @@ function RoleAwareProviderUpdateLaunchNotification() {
 }
 
 function HostedStaticEnvironmentBootstrap() {
-  const savedEnvironmentCount = useSavedEnvironmentRegistryStore(
-    (state) => Object.keys(state.byId).length,
+  // The machines switched on: switching one off or on changes it too.
+  const switchedOnEnvironmentKey = useSavedEnvironmentRegistryStore((state) =>
+    Object.values(state.byId)
+      .filter((record) => !isSavedEnvironmentSwitchedOff(record))
+      .map((record) => record.environmentId)
+      .join("\n"),
   );
 
   useEffect(() => {
@@ -334,13 +377,15 @@ function HostedStaticEnvironmentBootstrap() {
       return;
     }
 
-    const firstSavedEnvironment = listSavedEnvironmentRecords()[0];
+    const firstSavedEnvironment = listSavedEnvironmentRecords().find(
+      (record) => !isSavedEnvironmentSwitchedOff(record),
+    );
     if (!firstSavedEnvironment) {
       return;
     }
 
     useStore.getState().setActiveEnvironmentId(firstSavedEnvironment.environmentId);
-  }, [savedEnvironmentCount]);
+  }, [switchedOnEnvironmentKey]);
 
   return null;
 }
@@ -358,16 +403,29 @@ function AuthenticatedTracingBootstrap() {
   return null;
 }
 
-// Only desktop apps get update requests from other devices; the web build never loads it.
-const LazyRemoteInstallCountdown = preloadableLazy(() =>
-  import("../updates/RemoteInstallCountdown").then((module) => module.RemoteInstallCountdown),
+// Only desktop apps update themselves or get update requests from other devices; the web build
+// never loads these.
+const LazyDesktopUpdateNotices = preloadableLazy(() =>
+  import("../updates/DesktopUpdateNotices").then((module) => module.DesktopUpdateNotices),
 );
 
-function DeferredRemoteInstallCountdown() {
-  const ready = useLazyComponentReady(LazyRemoteInstallCountdown, true, {
-    onLoadError: (error) => console.warn("Remote install countdown failed to load.", error),
+const LazyRunningThreadKeepAlive = preloadableLazy(() =>
+  import("./desktop/RunningThreadKeepAlive").then((module) => module.RunningThreadKeepAlive),
+);
+
+/** Desktop: running threads' detail streams stay subscribed; loaded off the first paint. */
+function DeferredRunningThreadKeepAlive() {
+  const ready = useLazyComponentReady(LazyRunningThreadKeepAlive, true, {
+    onLoadError: (error) => console.warn("Running thread keep-alive failed to load.", error),
   });
-  return ready ? <LazyRemoteInstallCountdown /> : null;
+  return ready ? <LazyRunningThreadKeepAlive /> : null;
+}
+
+function DeferredDesktopUpdateNotices() {
+  const ready = useLazyComponentReady(LazyDesktopUpdateNotices, true, {
+    onLoadError: (error) => console.warn("Desktop update notices failed to load.", error),
+  });
+  return ready ? <LazyDesktopUpdateNotices /> : null;
 }
 
 function EnvironmentConnectionManagerBootstrap() {
@@ -378,14 +436,22 @@ function EnvironmentConnectionManagerBootstrap() {
     // off the shell's critical path, like the update pill that shows it.
     let disposed = false;
     let stopNodeUpdates: (() => void) | null = null;
+    let stopInteractionReports: (() => void) | null = null;
     void import("../updates/nodeUpdateStore")
       .then(({ startNodeUpdateWiring }) => {
         if (!disposed) stopNodeUpdates = startNodeUpdateWiring();
       })
       .catch((error: unknown) => console.warn("Node update following failed to load.", error));
+    // Nodes that update themselves unattended wait while someone uses this app.
+    void import("../updates/clientInteractionReporting")
+      .then(({ startClientInteractionReporting }) => {
+        if (!disposed) stopInteractionReports = startClientInteractionReporting();
+      })
+      .catch((error: unknown) => console.warn("Interaction reports failed to load.", error));
     return () => {
       disposed = true;
       stopNodeUpdates?.();
+      stopInteractionReports?.();
       stopDesktopWorkspace();
       stopEnvironmentConnections();
     };

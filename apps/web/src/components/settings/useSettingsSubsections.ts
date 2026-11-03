@@ -1,6 +1,18 @@
 import { useEffect, useState } from "react";
 
-export function useSettingsSubsections(section: string, searching: boolean, target: string | null) {
+import { flashSettingsTarget } from "./settingsLayout";
+import type { SettingsSearchTarget } from "./settingsSearchReveal";
+
+/**
+ * The titled sections of a settings panel, the one in view, and the reveal of
+ * a search target. Each new `target` object reveals its row again, so picking
+ * the same result twice scrolls back to it.
+ */
+export function useSettingsSubsections(
+  section: string,
+  searching: boolean,
+  target: SettingsSearchTarget | null,
+) {
   const [root, contentRef] = useState<HTMLDivElement | null>(null);
   const [sections, setSections] = useState<
     readonly { id: string; title: string; element: HTMLElement }[]
@@ -44,15 +56,16 @@ export function useSettingsSubsections(section: string, searching: boolean, targ
           root.querySelectorAll<HTMLElement>("h2, h3, [id], [data-settings-section]"),
         ).find(
           (element) =>
-            element.id === target ||
-            element.dataset.settingsSection === target ||
-            element.textContent?.trim() === target,
+            element.id === target.targetId ||
+            element.dataset.settingsSection === target.targetId ||
+            element.textContent?.trim() === target.targetId,
         );
         if (match) {
           revealed = true;
           match.scrollIntoView({ block: "center" });
           match.tabIndex = -1;
           match.focus({ preventScroll: true });
+          flashSettingsTarget(match);
         }
       }
       track();

@@ -18,13 +18,17 @@ export function flattenInboxSections(input: {
   readonly sections: ReadonlyArray<InboxSection>;
   readonly settledOpen: boolean;
   readonly snoozedOpen?: boolean;
+  /** The Hidden shelf starts collapsed, like Snoozed. */
+  readonly hiddenOpen?: boolean;
   readonly settledVisibleCount: number;
 }): ReadonlyArray<InboxListItem> {
   return input.sections.flatMap((section): ReadonlyArray<InboxListItem> => {
     const expanded =
       section.key === "snoozed"
         ? input.snoozedOpen === true
-        : section.key !== "settled" || input.settledOpen;
+        : section.key === "hidden"
+          ? input.hiddenOpen === true
+          : section.key !== "settled" || input.settledOpen;
     const visibleRows =
       section.key === "settled" ? section.rows.slice(0, input.settledVisibleCount) : section.rows;
     return [
@@ -50,4 +54,24 @@ export function flattenInboxSections(input: {
         : []),
     ];
   });
+}
+
+/**
+ * The thread row at a zero-based position among the rows the list shows, or
+ * null. Command-1 through Command-9 open these, so they follow what the user
+ * sees: the current search and machine filter, section order, collapsed
+ * sections (skipped) and the settled rows loaded so far.
+ */
+export function inboxThreadAtPosition(
+  items: ReadonlyArray<InboxListItem>,
+  position: number,
+): InboxThreadRow | null {
+  if (position < 0) return null;
+  let remaining = position;
+  for (const item of items) {
+    if (item.kind !== "thread") continue;
+    if (remaining === 0) return item.row;
+    remaining -= 1;
+  }
+  return null;
 }

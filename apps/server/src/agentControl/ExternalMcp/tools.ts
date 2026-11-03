@@ -11,6 +11,7 @@ import {
   AGENT_CONTROL_EXTERNAL_MCP_TOOLS,
   AGENT_CONTROL_MCP_MODELS_PER_INSTANCE_MAX,
   AGENT_CONTROL_MCP_AUTOMATION_LIST_PROMPT_MAX_CHARS,
+  AGENT_CONTROL_MCP_USAGE_LIMITS_MAX,
   AgentControlExternalCapabilitiesResult,
   AgentControlExternalCreateTaskInput,
   AgentControlExternalOverviewResult,
@@ -22,6 +23,8 @@ import {
   AgentControlAutomationId,
   AgentControlMcpDiagnosticsSummaryInput,
   AgentControlMcpDiagnosticsSummaryResult,
+  AgentControlMcpUsageLimitsInput,
+  AgentControlMcpUsageLimitsResult,
   AgentControlMcpListAutomationsInput,
   AgentControlMcpListAutomationsResult,
   AgentControlMcpListAutomationRunsInput,
@@ -61,11 +64,14 @@ import {
   type AgentControlProposal,
   type ProjectId,
   type ServerProvider,
+  type CliProxyHubError,
 } from "@ryco/contracts";
 import { projectKindOf } from "@ryco/shared/projectKind";
-import { Effect, Option, Schema } from "effect";
+import { Clock, Effect, Option, Schema } from "effect";
 
 import type { CheckpointDiffQueryShape } from "../../checkpointing/Services/CheckpointDiffQuery.ts";
+import type { CliProxyCachedHub } from "../../cliProxy/CliProxyService.ts";
+import type { OrchestrationEngineShape } from "../../orchestration/Services/OrchestrationEngine.ts";
 import {
   type ProjectionSnapshotQueryShape,
   readProjectShells,
@@ -79,6 +85,7 @@ import {
   updateThreadPlan,
 } from "../Mcp/controlPlans.ts";
 import { INSPECTION_TOOL_DESCRIPTORS } from "../Mcp/inspectionTools.ts";
+import { wakeOnSubscription } from "../eventDrivenWait.ts";
 import { computeAgentControlPlanDigest } from "../planDigest.ts";
 import {
   agentControlPromptSummaryForPlan,
@@ -99,6 +106,7 @@ import {
   type ThreadVisibility,
 } from "../Mcp/threadReads.ts";
 import { AGENT_CONTROL_MCP_TOOL_DESCRIPTORS } from "../Mcp/tools.ts";
+import { agentControlUsageLimits } from "../Mcp/usageLimits.ts";
 import type { AgentControlProposalEventsShape } from "../Services/AgentControlProposalEvents.ts";
 import type { AgentControlWorkspaces } from "../workspaceLifecycle.ts";
 import { agentControlSupportForDriver } from "../ProviderInjection.ts";
@@ -109,6 +117,10 @@ import type { AgentControlAutomationShape } from "../Services/AgentControlAutoma
 import type { AgentControlDiagnosticsShape } from "../Services/AgentControlDiagnostics.ts";
 import type { AgentControlProposalServiceShape } from "../Services/AgentControlProposalService.ts";
 import { toAgentControlProposalReceipt } from "../Services/AgentControlProposalService.ts";
+import {
+  automationDefinitionAfterUpdateInput,
+  automationDefinitionFromCreateInput,
+} from "../automationToolInput.ts";
 
 export interface ExternalMcpToolDescriptor {
   readonly name: string;
@@ -259,7 +271,7 @@ const descriptors: ReadonlyArray<ExternalMcpToolDescriptor> = [
     [
       [
         AGENT_CONTROL_EXTERNAL_MCP_TOOLS.proposeAutomationCreate,
-        "Request approval for a bounded schedule definition; every due run needs fresh approval.",
+        "Request approval for a bounded schedule definition; every due run needs fresh approval. Each run starts a new thread, or with targetThreadId queues its prompt in that existing thread of the same project.",
         [
           "requestId",
           "projectId",
@@ -303,6 +315,7 @@ const descriptors: ReadonlyArray<ExternalMcpToolDescriptor> = [
         tokenMode: { type: "string", enum: ["off", "balanced", "aggressive"] },
         envMode: { type: "string", enum: ["local", "worktree"] },
         baseRef: { anyOf: [{ type: "string", maxLength: 256 }, { type: "null" }] },
+        targetThreadId: { anyOf: [{ type: "string", maxLength: 256 }, { type: "null" }] },
         schedule: { type: "object" },
         enabled: { type: "boolean" },
       },
@@ -318,6 +331,17 @@ const internalInputSchema = (name: string): Readonly<Record<string, unknown>> =>
   );
   if (descriptor === undefined) throw new Error(`Missing Agent Control descriptor: ${name}`);
   return descriptor.inputSchema;
+};
+
+/**
+ * The internal schema, without what only a provider session may send: `goalStatus` reports on the
+ * caller's own thread's goal, and an external integration has no thread of its own.
+ */
+const externalInputSchema = (name: string): Readonly<Record<string, unknown>> => {
+  const schema = internalInputSchema(name);
+  if (name !== AGENT_CONTROL_EXTERNAL_MCP_TOOLS.updateThread) return schema;
+  const { goalStatus: _goalStatus, ...properties } = schema.properties as Record<string, unknown>;
+  return { ...schema, properties };
 };
 
 /** Standalone inspection omits terminal output, the likeliest carrier of secrets. */
@@ -339,7 +363,7 @@ const readDescriptors: ReadonlyArray<ExternalMcpToolDescriptor> = (
     ],
     [
       AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readThread,
-      "Read one thread's status header and a bounded, newest-first page of its messages. Threads outside allowed projects read as not found.",
+      "Read one thread's status header and a bounded, newest-first page of its messages. Threads outside allowed projects read as not found. A message cut short carries version and nextOffsetChars: pass them with its messageId as message to read the rest.",
     ],
     [
       AGENT_CONTROL_EXTERNAL_MCP_TOOLS.searchThreads,
@@ -372,6 +396,10 @@ const readDescriptors: ReadonlyArray<ExternalMcpToolDescriptor> = (
     [
       AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readWorkspace,
       "Inspect one workspace in an allowed project: sessions, protection, and Git lifecycle status. Read-only.",
+    ],
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.usageLimits,
+      "Read the usage limits Ryco last read for each enabled provider instance and each CLIProxyAPI hub's accounts: per window the percent used, the reset time and the pace. Never asks a provider or a hub.",
     ],
   ] as const
 ).map(([name, description]) => {
@@ -417,7 +445,7 @@ const controlDescriptors: ReadonlyArray<ExternalMcpToolDescriptor> = (
       "Request approval for the exact plan returned by ryco_plan_workspace_lifecycle. Conversations are never deleted without an explicit sessions: delete plan. Reuse requestId for retries.",
     ],
   ] as const
-).map(([name, description]) => ({ name, description, inputSchema: internalInputSchema(name) }));
+).map(([name, description]) => ({ name, description, inputSchema: externalInputSchema(name) }));
 
 const toolCapability = (name: string): AgentControlCapability | null => {
   switch (name) {
@@ -441,6 +469,7 @@ const toolCapability = (name: string): AgentControlCapability | null => {
     case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.providerRuntimeEvents:
       return AGENT_CONTROL_CAPABILITIES.externalReadActivity;
     case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.diagnosticsSummary:
+    case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.usageLimits:
       return AGENT_CONTROL_CAPABILITIES.externalReadDiagnostics;
     case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.listThreads:
     case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readThread:
@@ -508,7 +537,11 @@ export const makeExternalMcpTools = (deps: {
   readonly integrations: AgentControlExternalIntegrationServiceShape;
   readonly tasks: AgentControlExternalTaskServiceShape;
   readonly projections: ProjectionSnapshotQueryShape;
+  /** Wakes `ryco_wait_threads` when a waited thread settles. */
+  readonly domainEvents: Pick<OrchestrationEngineShape, "subscribeDomainEvents">;
   readonly getProviders: Effect.Effect<ReadonlyArray<ServerProvider>>;
+  /** Enabled CLIProxyAPI hubs as earlier reads cached them (`CliProxyService.cachedQuotas`). */
+  readonly getCliProxyHubs?: Effect.Effect<ReadonlyArray<CliProxyCachedHub>, CliProxyHubError>;
   readonly validator?: AgentControlActionValidatorShape;
   readonly proposals?: Pick<AgentControlProposalServiceShape, "submit"> &
     Partial<Pick<AgentControlProposalServiceShape, "getProposal" | "findByRequest">>;
@@ -650,8 +683,9 @@ export const makeExternalMcpTools = (deps: {
         }
         case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.waitThreads: {
           const input = yield* decode(AgentControlWaitThreadsInput, args);
-          // Re-check the integration on every poll: revocation, expiry, a
-          // disabled policy, or a narrowed scope ends visibility immediately.
+          // Re-check the integration before every check. Revocation, rotation and a
+          // narrowed scope publish an integration change, which wakes the wait at
+          // once; expiry and a disabled policy end it at the next 5 s re-check.
           const access = Effect.suspend(() => deps.integrations.revalidate(integrationId)).pipe(
             Effect.flatMap((current) =>
               current.capabilities.includes(AGENT_CONTROL_CAPABILITIES.externalReadThreads)
@@ -659,7 +693,17 @@ export const makeExternalMcpTools = (deps: {
                 : failTool("Thread access was revoked."),
             ),
           );
-          return sanitizeInspection(yield* waitThreads(deps.projections, input, access));
+          return sanitizeInspection(
+            yield* waitThreads(deps.projections, input, access, {
+              domainEvents: deps.domainEvents,
+              extra: [
+                wakeOnSubscription(
+                  deps.integrations.subscribeChanges,
+                  (changed) => changed === integrationId,
+                ),
+              ],
+            }),
+          );
         }
         case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.inspectThread: {
           const input = yield* decode(AgentControlInspectThreadInput, args);
@@ -997,24 +1041,7 @@ export const makeExternalMcpTools = (deps: {
           return yield* submitExternal(integration, input.requestId, {
             kind: "createAutomation",
             automationId,
-            definition: {
-              execution: {
-                projectId: input.projectId,
-                title: input.title,
-                prompt: input.prompt,
-                modelSelection: {
-                  instanceId: input.providerInstanceId,
-                  model: input.model,
-                  options: input.options,
-                },
-                runtimeMode: input.runtimeMode,
-                ...(input.tokenMode === undefined ? {} : { tokenMode: input.tokenMode }),
-                envMode: input.envMode,
-                ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
-              },
-              schedule: input.schedule,
-              enabled: input.enabled ?? true,
-            },
+            definition: automationDefinitionFromCreateInput(input),
           });
         }
         case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.proposeAutomationUpdate: {
@@ -1031,10 +1058,6 @@ export const makeExternalMcpTools = (deps: {
           if (current.revision !== input.expectedRevision) {
             return yield* Effect.fail(new Error("Revision changed"));
           }
-          const execution = current.definition.execution;
-          const nextOptions = input.options ?? execution.modelSelection.options;
-          const nextBaseRef =
-            input.baseRef === null ? undefined : (input.baseRef ?? execution.baseRef);
           return yield* submitExternal(integration, input.requestId, {
             kind: "updateAutomation",
             automationId: current.automationId,
@@ -1044,28 +1067,7 @@ export const makeExternalMcpTools = (deps: {
               cancelled: current.cancelled,
               updatedAt: current.updatedAt,
             },
-            after: {
-              execution: {
-                projectId: execution.projectId,
-                title: input.title ?? execution.title,
-                prompt: input.prompt ?? execution.prompt,
-                modelSelection: {
-                  instanceId: input.providerInstanceId ?? execution.modelSelection.instanceId,
-                  model: input.model ?? execution.modelSelection.model,
-                  ...(nextOptions === undefined ? {} : { options: nextOptions }),
-                },
-                runtimeMode: input.runtimeMode ?? execution.runtimeMode,
-                ...(input.tokenMode !== undefined
-                  ? { tokenMode: input.tokenMode }
-                  : execution.tokenMode !== undefined
-                    ? { tokenMode: execution.tokenMode }
-                    : {}),
-                envMode: input.envMode ?? execution.envMode,
-                ...(nextBaseRef === undefined ? {} : { baseRef: nextBaseRef }),
-              },
-              schedule: input.schedule ?? current.definition.schedule,
-              enabled: input.enabled ?? current.definition.enabled,
-            },
+            after: automationDefinitionAfterUpdateInput(current, input),
           });
         }
         case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.proposeAutomationCancel: {
@@ -1138,6 +1140,24 @@ export const makeExternalMcpTools = (deps: {
             yield* deps.diagnostics.summary({
               projectId: input.projectId,
               providerInstanceId: input.providerInstanceId,
+            }),
+          );
+        }
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.usageLimits: {
+          const input = yield* decode(AgentControlMcpUsageLimitsInput, args);
+          // Node-wide like the provider list of `ryco_capabilities`: limits belong to no project.
+          yield* deps.integrations.authorizeTool({
+            integrationId,
+            tool: name,
+            requiredCapability: AGENT_CONTROL_CAPABILITIES.externalReadDiagnostics,
+          });
+          return Schema.encodeSync(AgentControlMcpUsageLimitsResult)(
+            agentControlUsageLimits({
+              providers: yield* deps.getProviders,
+              hubs: yield* deps.getCliProxyHubs ?? Effect.succeed([]),
+              instanceId: input.instanceId,
+              nowMs: yield* Clock.currentTimeMillis,
+              max: AGENT_CONTROL_MCP_USAGE_LIMITS_MAX,
             }),
           );
         }

@@ -1,5 +1,19 @@
 import type { ChangeRequest } from "@ryco/contracts";
-import { summarizeChangeRequestChecks } from "@ryco/client-runtime/state/pull-request-review";
+import {
+  derivePullRequestsCapabilities,
+  derivePullRequestSelectionChecks,
+  derivePullRequestSelectionNextAction,
+  derivePullRequestSelectionThreads,
+  derivePullRequestsList,
+  describePullRequestsListError,
+  findSourceControlPause,
+  involvementReadsUsable,
+  PULL_REQUESTS_LIST_LIMIT,
+  pullRequestSelectionRefreshPhase,
+  resolvePullRequestsStateFilter,
+  shouldReadInvolvementLists,
+  summarizeChangeRequestChecks,
+} from "@ryco/client-runtime/state/pull-request-review";
 import { useMemo } from "react";
 
 import { useSettings } from "../../hooks/useSettings";
@@ -11,23 +25,15 @@ import {
   useSourceControlChangeRequestList,
 } from "../../rpc/useSourceControl";
 import type { ProjectCheckoutOption } from "../../projectCheckouts.logic";
+import { formatSourceControlPauseText } from "../../sourceControlPause";
 import { usePullRequestsLayoutStore } from "./pullRequestsLayoutStore";
 import {
   assemblePullRequestSelection,
-  derivePullRequestsCapabilities,
-  shouldReadInvolvementLists,
-  describePullRequestsListError,
-  derivePullRequestSelectionChecks,
-  derivePullRequestSelectionNextAction,
-  derivePullRequestSelectionThreads,
-  derivePullRequestsList,
-  PULL_REQUESTS_LIST_LIMIT,
-  pullRequestSelectionRefreshPhase,
   type PullRequestsListModel,
   type PullRequestsModel,
   type PullRequestSelectionModel,
 } from "./pullRequestsModel.logic";
-import { resolvePullRequestsStateFilter, type PullRequestsSearch } from "./pullRequestsSearch";
+import type { PullRequestsSearch } from "./pullRequestsSearch";
 
 export type { PullRequestsListModel, PullRequestsModel, PullRequestSelectionModel };
 
@@ -70,12 +76,18 @@ export function usePullRequestsModel(input: {
    * (the workspace panel) skips them; the selection reads its own detail.
    */
   readonly includeList?: boolean | undefined;
+  /**
+   * The selected change request's row from another list (All repositories), painted
+   * before its detail loads. Absent: the row from this repository's list.
+   */
+  readonly summary?: ChangeRequest | null | undefined;
 }): PullRequestsModel {
   const { repository, search } = input;
   const listEnabled = repository !== null && (input.includeList ?? true);
   const environmentId = repository?.environmentId ?? null;
   const cwd = repository?.cwd ?? null;
   const refreshMode = useSettings((settings) => settings.sourceControlRefreshMode);
+  const timestampFormat = useSettings((settings) => settings.timestampFormat);
   // Only the hosting provider is read here: the summary view (no git status or fetch).
   const gitStatus = useGitStatus({ environmentId, cwd }, { view: "summary" });
   // Every git status push is a new object; keep the provider's identity while
@@ -115,10 +127,10 @@ export function usePullRequestsModel(input: {
   // param changes — not on every fetch start/finish or unrelated URL change —
   // so groups, `ordered` and `byNumber` keep their identity (memoized rows
   // stay put).
-  const involvementSupported =
-    capabilities.involvementFilters &&
-    authoredList.error === null &&
-    reviewRequestedList.error === null;
+  const involvementSupported = involvementReadsUsable(capabilities.involvementFilters, [
+    authoredList,
+    reviewRequestedList,
+  ]);
   const labelKey = (search.label ?? []).join("\u0000");
   const listSearch = useMemo<PullRequestsSearch>(
     () => ({
@@ -152,16 +164,31 @@ export function usePullRequestsModel(input: {
   const isFetching =
     stateList.isFetching || authoredList.isFetching || reviewRequestedList.isFetching;
   const listError = errorMessage(stateList.error);
+  const listPause = useMemo(() => {
+    const pause = findSourceControlPause([
+      stateList.error,
+      authoredList.error,
+      reviewRequestedList.error,
+    ]);
+    return pause === null ? null : formatSourceControlPauseText(pause, timestampFormat);
+  }, [authoredList.error, reviewRequestedList.error, stateList.error, timestampFormat]);
   const list = useMemo<PullRequestsListModel>(
-    () => ({ ...derived, isLoading, isFetching, error: listError }),
-    [derived, isFetching, isLoading, listError],
+    () => ({ ...derived, isLoading, isFetching, error: listError, pause: listPause }),
+    [derived, isFetching, isLoading, listError, listPause],
   );
 
   // A selection only exists inside a resolved repository: an unresolved one
   // (waiting / unavailable) must never read `#N` through some other checkout.
   const selectedNumber = repository === null ? null : (search.pr ?? null);
   const reference = selectedNumber === null ? null : String(selectedNumber);
-  const summary = selectedNumber === null ? null : (list.byNumber.get(selectedNumber) ?? null);
+  const summary =
+    selectedNumber === null
+      ? null
+      : input.summary !== undefined
+        ? input.summary?.number === selectedNumber
+          ? input.summary
+          : null
+        : (list.byNumber.get(selectedNumber) ?? null);
   const detail = useSourceControlChangeRequestDetail(
     {
       environmentId,

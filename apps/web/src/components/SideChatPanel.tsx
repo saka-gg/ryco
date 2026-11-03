@@ -15,10 +15,11 @@ import {
   type ServerProvider,
 } from "@ryco/contracts";
 import { scopedThreadKey } from "@ryco/client-runtime/scoped";
-import type { SideChat } from "@ryco/client-runtime/state/side-chat";
+import { SIDE_CHAT_CONTINUE_COPY, type SideChat } from "@ryco/client-runtime/state/side-chat";
 import {
   BrainIcon,
   ChevronDownIcon,
+  GitForkIcon,
   MessageSquarePlusIcon,
   MinusIcon,
   SquareIcon,
@@ -34,7 +35,10 @@ import { readMotionDurationMs } from "../lib/perf/motion";
 import { cn, randomUUID } from "../lib/utils";
 import { getCustomModelOptionsByInstance } from "../modelSelection";
 import { deriveProviderInstanceEntries, sortProviderInstanceEntries } from "../providerInstances";
+import { resolveComposerEnter } from "./chat/composerFollowUp";
 import { ProviderModelPicker } from "./chat/ProviderModelPicker";
+import { SendGlyph } from "./chat/SendGlyph";
+import { useSendShortcut } from "./chat/useSendShortcut";
 import { InboxStatusGlyph } from "./inboxSidebar/InboxStatusGlyph";
 import { Button } from "./ui/button";
 import { Menu, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuTrigger } from "./ui/menu";
@@ -52,10 +56,16 @@ export function SideChatPanel({
   threadRef,
   providers,
   connected,
+  onContinueAsThread,
 }: {
   threadRef: ScopedThreadRef;
   providers: readonly ServerProvider[];
   connected: boolean;
+  /**
+   * Forks the thread with this side chat as the fork's draft. Present only where the thread can
+   * be forked; offered once the side chat has an answer.
+   */
+  onContinueAsThread?: ((trigger: HTMLElement) => void) | undefined;
 }) {
   const key = scopedThreadKey(threadRef);
   const chat = useSideChatStore((state) => state.chatsByThreadKey[key]);
@@ -121,6 +131,7 @@ export function SideChatPanel({
           providers={providers}
           ready={ready}
           open={open}
+          onContinueAsThread={onContinueAsThread}
         />
       ) : null}
     </>
@@ -135,6 +146,7 @@ function SideChatSurface({
   providers,
   ready,
   open,
+  onContinueAsThread,
 }: {
   ref: Ref<HTMLElement>;
   chat: SideChat;
@@ -143,8 +155,10 @@ function SideChatSurface({
   providers: readonly ServerProvider[];
   ready: boolean;
   open: boolean;
+  onContinueAsThread: ((trigger: HTMLElement) => void) | undefined;
 }) {
   const actions = sideChatStore.getState();
+  const sendShortcut = useSendShortcut();
   const logRef = useRef<HTMLDivElement>(null);
   // Entries present when the panel opened appear in place; later ones rise in.
   const [settledCount] = useState(() => chat.exchanges.length + (chat.pending ? 1 : 0));
@@ -198,6 +212,16 @@ function SideChatSurface({
         <h2 className="text-sm font-medium">Side chat</h2>
         <span className="text-xs text-muted-foreground">Temporary</span>
         <span className="flex-1" />
+        {onContinueAsThread && chat.exchanges.length > 0 ? (
+          <HeaderAction
+            label={SIDE_CHAT_CONTINUE_COPY.action}
+            // The fork takes the answered exchanges; one still on its way would be left out.
+            disabled={!!chat.pending}
+            onClick={onContinueAsThread}
+          >
+            <GitForkIcon aria-hidden className="size-3.5" />
+          </HeaderAction>
+        ) : null}
         <HeaderAction label="New chat" disabled={!!chat.pending} onClick={() => actions.clear(key)}>
           <SquarePenIcon aria-hidden className="size-3.5" />
         </HeaderAction>
@@ -285,10 +309,12 @@ function SideChatSurface({
             value={chat.draft}
             onChange={(event) => actions.setDraft(key, event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-                event.preventDefault();
-                ask();
-              }
+              if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+              // The Send shortcut setting decides whether Enter asks or adds a line.
+              const prompt = event.currentTarget.value;
+              if (!resolveComposerEnter({ event, sendShortcut, prompt })) return;
+              event.preventDefault();
+              ask();
             }}
           />
           <div className="flex items-center gap-0.5 px-1.5 pb-1.5">
@@ -317,15 +343,7 @@ function SideChatSurface({
                 disabled={!canAsk}
                 className="flex size-8 items-center justify-center rounded-lg bg-primary/90 text-primary-foreground transition-all duration-150 enabled:cursor-pointer hover:scale-105 hover:bg-primary disabled:pointer-events-none disabled:opacity-30 sm:size-7"
               >
-                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-                  <path
-                    d="M7 11.5V2.5M7 2.5L3 6.5M7 2.5L11 6.5"
-                    stroke="currentColor"
-                    strokeWidth="1.8"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
+                <SendGlyph />
               </button>
             )}
           </div>
@@ -345,7 +363,7 @@ function HeaderAction(props: {
   label: string;
   hint?: string;
   disabled?: boolean;
-  onClick: () => void;
+  onClick: (trigger: HTMLElement) => void;
   children: ReactNode;
 }) {
   return (
@@ -358,7 +376,7 @@ function HeaderAction(props: {
             size="icon-xs"
             aria-label={props.label}
             disabled={props.disabled}
-            onClick={props.onClick}
+            onClick={(event) => props.onClick(event.currentTarget)}
           />
         }
       >

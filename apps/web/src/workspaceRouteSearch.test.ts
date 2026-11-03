@@ -19,12 +19,14 @@ import {
   buildOpenAgentsWorkflowSearch,
   buildOpenPullRequestSearch,
   buildOpenRenderSearch,
+  buildOpenFilesSearch,
   buildOpenReviewSearch,
   carryWorkspaceSearchToThread,
   formatWorkspacePullRequestReveal,
   formatWorkspaceRenderKey,
   parseWorkspacePullRequestReveal,
   parseWorkspaceRenderKey,
+  parseWorkspaceFileReveal,
   parseWorkspaceRouteSearch,
   stripThreadScopedWorkspaceSearch,
   stripWorkspacePanelSearchParams,
@@ -237,6 +239,47 @@ describe("one-shot reveal search", () => {
     ).toBeUndefined();
     expect(buildOpenAgentsSearch(search).workspaceAgentsWorkflow).toBeUndefined();
     expect(buildOpenPullRequestSearch(search).workspaceAgentsWorkflow).toBeUndefined();
+  });
+
+  it("opens one file on the Files tab once and clears it from every other builder", () => {
+    const search = buildOpenFilesSearch({ other: "kept" }, { path: "./src\\app.ts", line: 12 });
+    expect(search).toMatchObject({
+      other: "kept",
+      workspaceOpen: "1",
+      workspaceTab: "files",
+      preview: "1",
+      workspaceFile: "src/app.ts",
+      workspaceFileLine: 12,
+    });
+    expect(buildOpenFilesSearch({}, { path: "../escape.ts", line: 3 })).toMatchObject({
+      workspaceFile: undefined,
+      workspaceFileLine: undefined,
+    });
+    expect(buildOpenFilesSearch({}, { path: "a.ts", line: 0 }).workspaceFileLine).toBeUndefined();
+    expect(buildOpenFilesSearch(search).workspaceFile).toBeUndefined();
+    expect(buildOpenReviewSearch(search).workspaceFile).toBeUndefined();
+    expect(stripWorkspaceRevealSearch(search)).toMatchObject({
+      workspaceTab: "files",
+      workspaceFile: undefined,
+      workspaceFileLine: undefined,
+    });
+    expect(
+      parseWorkspaceRouteSearch({
+        workspaceTab: "files",
+        workspaceFile: "a.ts",
+        workspaceFileLine: "4",
+      }),
+    ).toEqual({
+      workspaceOpen: "1",
+      workspaceTab: "files",
+      workspaceFile: "a.ts",
+      workspaceFileLine: 4,
+    });
+    expect(parseWorkspaceRouteSearch({ workspaceTab: "review", workspaceFile: "a.ts" })).toEqual({
+      workspaceOpen: "1",
+      workspaceTab: "review",
+    });
+    expect(parseWorkspaceFileReveal({ workspaceFile: "/etc/passwd" })).toBeNull();
   });
 
   it("strips only the reveal keys once consumed", () => {

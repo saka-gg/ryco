@@ -1,4 +1,5 @@
 import { useAppKeybindings } from "../appKeybindings";
+import { isSavedEnvironmentSwitchedOff } from "@ryco/client-runtime/connection";
 import { useDeviceName } from "../deviceName";
 import { useServerConfigSelector } from "~/rpc/serverState";
 import { autoAnimate, type AnimationController } from "@formkit/auto-animate";
@@ -7,6 +8,7 @@ import React, {
   type ReactNode,
   useCallback,
   useEffect,
+  useEffectEvent,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -27,6 +29,7 @@ import {
 } from "@dnd-kit/core";
 import {
   type EnvironmentId,
+  type KeybindingCommand,
   ProjectId,
   type ScopedThreadRef,
   type ServerConfig,
@@ -76,6 +79,7 @@ import {
   resolveShortcutCommand,
   hasOpenDialogShortcutTarget,
   shouldIgnoreGlobalNavigationShortcut,
+  shouldIgnoreSplitViewShortcut,
   shortcutLabelForCommand,
   shouldShowThreadJumpHintsForModifiers,
   threadJumpCommandForIndex,
@@ -92,6 +96,7 @@ import { useThreadActions } from "../hooks/useThreadActions";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { usePerfMark } from "../perf/tabSwitchInstrumentation";
 import { SidebarSeparator, useSidebar } from "./ui/sidebar";
+import { toastManager } from "./ui/toast";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import {
@@ -116,8 +121,10 @@ import { useChatsAvailability } from "../hooks/useChatsAvailability";
 import { SidebarProjectDialogProvider } from "./sidebar/SidebarProjectDialogOwner";
 import { SidebarChromeHeader, SidebarChromeFooter } from "./sidebar/SidebarChrome";
 import { SidebarPrimaryActions } from "./sidebar/SidebarPrimaryActions";
+import { ThreadLifecycleShortcuts } from "./sidebar/ThreadLifecycleShortcuts";
 import { resolveNewThreadProjectKey } from "./sidebar/sidebarNewThreadTarget";
 import { ConnectedInboxSidebar } from "./inboxSidebar/ConnectedInboxSidebar";
+import type { InboxAttentionInput, InboxAttentionPress } from "./inboxSidebar/inboxAttention";
 import {
   buildInboxSidebarEnvironments,
   sameInboxProviderCatalogs,
@@ -237,7 +244,6 @@ function revealMovedSidebarRows(
 const selectSidebarThreadSortOrder = (settings: UnifiedSettings) => settings.sidebarThreadSortOrder;
 const selectSidebarProjectSortOrder = (settings: UnifiedSettings) =>
   settings.sidebarProjectSortOrder;
-const selectAiFocusEnabled = (settings: UnifiedSettings) => settings.aiFocusEnabled;
 const selectSidebarAutoSettleAfterDays = (settings: UnifiedSettings) =>
   settings.sidebarAutoSettleAfterDays;
 const selectServerProviders = (config: ServerConfig | null) => config?.providers ?? null;
@@ -256,6 +262,36 @@ function readRouteTerminalOpen(routeThreadRef: ScopedThreadRef | null): boolean 
 
 function hasSelectedThreads(): boolean {
   return useThreadSelectionStore.getState().selectedThreadKeys.size > 0;
+}
+
+function threadAttentionDirectionFromCommand(
+  command: KeybindingCommand | null,
+): "previous" | "next" | null {
+  if (command === "thread.attention.previous") return "previous";
+  if (command === "thread.attention.next") return "next";
+  return null;
+}
+
+type InboxAttention = typeof import("./inboxSidebar/inboxAttention");
+let inboxAttention: InboxAttention | null = null;
+
+/**
+ * Runs `step` with the "next thread that needs you" walk. It loads on the
+ * first press, outside the shell's bundle; later presses step at once. Outside
+ * the component: the React Compiler cannot lower `import()`.
+ */
+function withInboxAttention(step: (attention: InboxAttention) => void): void {
+  if (inboxAttention !== null) {
+    step(inboxAttention);
+    return;
+  }
+  void import("./inboxSidebar/inboxAttention").then(
+    (loaded) => {
+      inboxAttention = loaded;
+      step(loaded);
+    },
+    () => undefined,
+  );
 }
 
 /**
@@ -441,15 +477,19 @@ export default function Sidebar() {
   const navigate = useNavigate();
   const sidebarThreadSortOrder = useSettings(selectSidebarThreadSortOrder);
   const sidebarProjectSortOrder = useSettings(selectSidebarProjectSortOrder);
-  const aiFocusEnabled = useSettings(selectAiFocusEnabled);
   const sidebarAutoSettleAfterDays = useSettings(selectSidebarAutoSettleAfterDays);
   // Stable while the grouping settings are: it feeds the whole project-tree
   // derivation chain.
   const projectGroupingSettings = useProjectGroupingSettings();
   const { updateSettings } = useUpdateSettings();
   const { handleNewThread, handleNewChat } = useNewThreadHandler();
-  const { archiveThread, deleteThread, stopThreadSession, interruptThreadTurn } =
-    useThreadActions();
+  const {
+    archiveThread,
+    deleteThread,
+    confirmAndDeleteThreads,
+    stopThreadSession,
+    interruptThreadTurn,
+  } = useThreadActions();
   const { isMobile, open, openMobile, setOpen, setOpenMobile } = useSidebar();
   const pinnedThreadKeys = useMemo(
     () =>
@@ -551,8 +591,9 @@ export default function Sidebar() {
     const knownEnvironmentIds = new Set<EnvironmentId>();
     for (const project of projects) knownEnvironmentIds.add(project.environmentId);
     for (const thread of sidebarThreads) knownEnvironmentIds.add(thread.environmentId);
-    for (const environmentId of Object.keys(savedEnvironmentRegistry) as EnvironmentId[]) {
-      knownEnvironmentIds.add(environmentId);
+    for (const record of Object.values(savedEnvironmentRegistry)) {
+      // A machine switched off is left out until it is on again.
+      if (!isSavedEnvironmentSwitchedOff(record)) knownEnvironmentIds.add(record.environmentId);
     }
     return buildInboxSidebarEnvironments({
       knownEnvironmentIds,
@@ -836,6 +877,20 @@ export default function Sidebar() {
         to: "/$environmentId/$threadId",
         params: buildThreadRouteParams(threadRef),
       });
+    },
+    [clearSelection, isMobile, navigate, setOpenMobile, setSelectionAnchor],
+  );
+  // Inbox draft rows: a new thread not sent yet opens its draft, as in the project tree.
+  const navigateToDraft = useCallback(
+    (draftId: DraftId, threadRef: ScopedThreadRef) => {
+      if (hasSelectedThreads()) {
+        clearSelection();
+      }
+      setSelectionAnchor(scopedThreadKey(threadRef));
+      if (isMobile) {
+        setOpenMobile(false);
+      }
+      void navigate({ to: "/draft/$draftId", params: { draftId } });
     },
     [clearSelection, isMobile, navigate, setOpenMobile, setSelectionAnchor],
   );
@@ -1201,6 +1256,49 @@ export default function Sidebar() {
     routeThreadKey,
   );
 
+  // The last "next thread that needs you" press: the next one walks on from it.
+  const attentionPressRef = useRef<InboxAttentionPress | null>(null);
+  useEffect(() => {
+    const press = attentionPressRef.current;
+    if (press?.navigating) attentionPressRef.current = { ...press, navigating: false };
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- a new route means the press's navigation landed or was replaced
+  }, [routeThreadKey]);
+  // Reads the inbox's live inputs at the press, so the window listener does
+  // not rebind on every thread update.
+  const openThreadNeedingAttention = useEffectEvent((direction: "previous" | "next") => {
+    const inbox: InboxAttentionInput = {
+      projects,
+      worktrees: sidebarWorktrees,
+      threads: sidebarThreads,
+      environments: inboxEnvironments,
+      deliveryUnknownThreadKeys,
+      localQueuedThreadKeys,
+      pinnedThreadKeys,
+      autoSettleAfterDays: sidebarAutoSettleAfterDays,
+      lastVisitedAtByKey: threadLastVisitedAtById,
+    };
+    withInboxAttention((attention) => {
+      const walk = attention.stepInboxAttention(inbox, {
+        routeThreadKey,
+        direction,
+        previous: attentionPressRef.current,
+      });
+      if (walk === null) {
+        // Repeated presses replace the note instead of stacking copies.
+        toastManager.add({
+          id: "thread-attention-none",
+          type: "info",
+          title: "No other thread needs you right now",
+        });
+        return;
+      }
+      const targetRef = parseScopedThreadKey(walk.targetKey);
+      if (!targetRef) return;
+      attentionPressRef.current = { walk, navigating: true };
+      navigateToThread(targetRef);
+    });
+  });
+
   useEffect(() => {
     const onWindowKeyDown = (event: globalThis.KeyboardEvent) => {
       const shortcutContext = getCurrentSidebarShortcutContext();
@@ -1208,7 +1306,9 @@ export default function Sidebar() {
       if (event.defaultPrevented || event.repeat) {
         return;
       }
-      if (shouldIgnoreGlobalNavigationShortcut(event)) {
+      // Like the split-view chords, the attention walk also runs while typing.
+      const ignoreNavigation = shouldIgnoreGlobalNavigationShortcut(event);
+      if (ignoreNavigation && shouldIgnoreSplitViewShortcut(event)) {
         return;
       }
 
@@ -1216,6 +1316,16 @@ export default function Sidebar() {
         platform,
         context: shortcutContext,
       });
+      const attentionDirection = threadAttentionDirectionFromCommand(command);
+      if (attentionDirection !== null) {
+        event.preventDefault();
+        event.stopPropagation();
+        openThreadNeedingAttention(attentionDirection);
+        return;
+      }
+      if (ignoreNavigation) {
+        return;
+      }
       if (command === "sidebar.showInbox" || command === "sidebar.showProjects") {
         event.preventDefault();
         event.stopPropagation();
@@ -1281,8 +1391,7 @@ export default function Sidebar() {
   useEffect(() => {
     const onMouseDown = (event: globalThis.MouseEvent) => {
       if (selectedThreadCount === 0) return;
-      const target = event.target instanceof HTMLElement ? event.target : null;
-      if (!shouldClearThreadSelectionOnMouseDown(target)) return;
+      if (!shouldClearThreadSelectionOnMouseDown(event.target)) return;
       clearSelection();
     };
 
@@ -1291,21 +1400,6 @@ export default function Sidebar() {
       window.removeEventListener("mousedown", onMouseDown);
     };
   }, [clearSelection, selectedThreadCount]);
-
-  // Clicking a turn-complete desktop notification focuses the window (handled in
-  // the main process) and navigates to the thread whose turn finished.
-  useEffect(() => {
-    const bridge = typeof window !== "undefined" ? window.desktopBridge : undefined;
-    if (!bridge?.onTurnCompleteNotificationActivated) {
-      return;
-    }
-    return bridge.onTurnCompleteNotificationActivated((notification) => {
-      if (!notification.environmentId) {
-        return;
-      }
-      navigateToThread(scopeThreadRef(notification.environmentId, notification.threadId));
-    });
-  }, [navigateToThread]);
 
   const commandPaletteShortcutLabel = shortcutLabelForCommand(
     keybindings,
@@ -1406,7 +1500,6 @@ export default function Sidebar() {
         <SidebarProjectDialogProvider
           projectGroupingSettings={projectGroupingSettings}
           updateSettings={updateSettings}
-          navigateToThread={navigateToThread}
         >
           {mountedSidebarModes.has("projects") ? (
             <Activity mode={projectsPaneVisible ? "visible" : "hidden"} name="sidebar-projects">
@@ -1453,7 +1546,6 @@ export default function Sidebar() {
                   stopThreadSession={stopThreadSession}
                   interruptThreadTurn={interruptThreadTurn}
                   activeThreadKey={activeRouteThreadKey}
-                  aiFocusEnabled={aiFocusEnabled}
                   autoSettleAfterDays={sidebarAutoSettleAfterDays}
                   deliveryUnknownThreadKeys={deliveryUnknownThreadKeys}
                   environments={inboxEnvironments}
@@ -1462,6 +1554,8 @@ export default function Sidebar() {
                   pinnedThreadKeys={pinnedThreadKeys}
                   primaryEnvironmentId={primaryEnvironmentId}
                   onOpenThread={navigateToThread}
+                  onOpenDraft={navigateToDraft}
+                  onDeleteThreads={confirmAndDeleteThreads}
                   projects={projects}
                   threads={sidebarThreads}
                   worktrees={sidebarWorktrees}
@@ -1480,6 +1574,20 @@ export default function Sidebar() {
           onVisibilityChange={updateThreadJumpHintsVisibility}
         />
       ) : null}
+      <ThreadLifecycleShortcuts
+        routeThreadRef={routeThreadRef}
+        threadByKey={sidebarThreadByKey}
+        projects={projects}
+        worktrees={sidebarWorktrees}
+        environments={inboxEnvironments}
+        localQueuedThreadKeys={localQueuedThreadKeys}
+        deliveryUnknownThreadKeys={deliveryUnknownThreadKeys}
+        pinnedThreadKeys={pinnedThreadKeys}
+        autoSettleAfterDays={sidebarAutoSettleAfterDays}
+        archiveThread={archiveThread}
+        keybindings={keybindings}
+        readShortcutContext={getCurrentSidebarShortcutContext}
+      />
       <SidebarSeparator />
       <SidebarChromeFooter />
     </>

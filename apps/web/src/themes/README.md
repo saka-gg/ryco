@@ -28,8 +28,8 @@ apps/web/src/
 **Data flow:**
 
 1. `useTheme` reads `ryco:theme` (light/dark/system) → toggles `.dark` class on `<html>`
-2. `useTheme` reads `ryco:active-theme` → looks up theme in registry → calls `applyThemeToDocument`
-3. `applyThemeToDocument` writes a `<style id="ryco-active-theme">` tag containing `:root { --x: ... } :root.dark { --y: ... }`
+2. `useTheme` reads `ryco:active-theme` (and `ryco:active-theme-dark`, dark mode's own palette when the user picked one; absent means the same theme) → looks up the pair in the registry → calls `applyThemeToDocument(light, dark)`
+3. `applyThemeToDocument` writes a `<style id="ryco-active-theme">` tag containing `:root { --x: ... } :root.dark { --y: ... }`: `:root` from the light theme's light tokens, `:root.dark` from the dark pick's dark tokens
 4. `applyAppearancePreferencesToDocument` writes `<style id="ryco-appearance-preferences">` for global controls like `--font-family-sans`, `--font-family-mono`, `--font-size-base`, `--radius`, optional `--primary`/`--ring`, the `--app-*` surface transparency variables, the phone material tiers (`--app-glass-{sheet,chip}-*`) and the motion tokens (`--app-motion-*`)
 5. Because these style tags are appended after `index.css`, their variables win — but only ones the theme or preference layer defines, so partial themes work.
 
@@ -48,7 +48,7 @@ What shipped:
 - **Tokenized remaining hard-coded colors** in `index.css`: scrollbar thumbs (regular + thin variants) use CSS variables (`--scrollbar-thumb*`). The historical `--noise-opacity` token remains import-compatible with older custom themes, but the continuously composited noise overlay is no longer rendered or editable.
 - **Theme schema** (`types.ts`): `ThemeDefinition` with `id`, `name`, `description`, `builtIn`, `light`, `dark`. Token names are an allow-list (`THEME_TOKEN_NAMES`) for type safety + future validation.
 - **Default theme as data** (`builtin.ts`): mirrors current `index.css` values — so when the active theme is `default`, no overrides are injected and the CSS file does all the work.
-- **Theme registry** (`registry.ts`): `getAllThemes()`, `findTheme()`, `getActiveThemeId()`, `setActiveThemeId()`, `getCustomThemes()`, `setCustomThemes()`, `applyThemeToDocument()`. Storage keys `ryco:active-theme` and `ryco:custom-themes`.
+- **Theme registry** (`registry.ts`): `getAllThemes()`, `findTheme()`, `getActiveThemeId()`, `setActiveThemeId()`, `getCustomThemes()`, `setCustomThemes()`, `applyThemeToDocument()`. Storage keys `ryco:active-theme`, `ryco:active-theme-dark` (`getActiveDarkThemeId()`, `setActiveDarkThemeId()`, `getActiveThemePair()`) and `ryco:custom-themes`.
 - **`useTheme` integration**: applies the active theme alongside the existing light/dark toggle. New API surface: `activeThemeId`, `setActiveTheme(id)`. Cross-tab sync works via the `storage` event listener.
 - **Defensive guards**: `applyThemeToDocument` no-ops when DOM isn't available (Node test envs).
 

@@ -1,15 +1,23 @@
+import type {
+  PullRequestListFilters,
+  PullRequestsOnlyFilter,
+  PullRequestsSort,
+  PullRequestsStateFilter,
+} from "@ryco/client-runtime/state/pull-request-review";
+
+export type { PullRequestsOnlyFilter, PullRequestsSort, PullRequestsStateFilter };
+
 /**
  * URL state for the `/pull-requests` page. Everything a reader would want to
  * link to — the repository, the selected change request, the tab, a commit
  * scope, a file, or a review thread — lives here; transient UI state (scroll,
- * expanded rows, draft text) does not.
+ * expanded rows, draft text) does not. The list filters are the shared
+ * `PullRequestListFilters`.
  */
 export type PullRequestsTab = "conversation" | "files" | "checks" | "commits";
-export type PullRequestsStateFilter = "open" | "closed" | "merged" | "all";
-/** Quick narrowing of the list: review requested from you, failing checks, or authored by you. */
-export type PullRequestsOnlyFilter = "review" | "failing" | "mine";
-export type PullRequestsSort = "readiness" | "updated";
 export type PullRequestsDiffSide = "left" | "right";
+/** `all`: the pull requests that need you across every repository and node. */
+export type PullRequestsScope = "all";
 
 export const PULL_REQUESTS_TABS: readonly PullRequestsTab[] = [
   "conversation",
@@ -18,7 +26,12 @@ export const PULL_REQUESTS_TABS: readonly PullRequestsTab[] = [
   "commits",
 ];
 
-export interface PullRequestsSearch {
+export interface PullRequestsSearch extends PullRequestListFilters {
+  /**
+   * `all`: the list spans every repository and node; `env`/`project` then name the
+   * checkout the selected row opens through. Absent: one repository's list.
+   */
+  readonly scope?: PullRequestsScope | undefined;
   /** Environment that owns the selected repository checkout. */
   readonly env?: string | undefined;
   /** Project id within `env`; its checkout is the repository context. */
@@ -26,11 +39,6 @@ export interface PullRequestsSearch {
   /** Selected change request number. */
   readonly pr?: number | undefined;
   readonly tab?: PullRequestsTab | undefined;
-  readonly state?: PullRequestsStateFilter | undefined;
-  readonly q?: string | undefined;
-  readonly only?: PullRequestsOnlyFilter | undefined;
-  readonly label?: readonly string[] | undefined;
-  readonly sort?: PullRequestsSort | undefined;
   /** Files tab scoped to a single commit of the change request. */
   readonly commit?: string | undefined;
   /** Files tab: file path to reveal. */
@@ -49,6 +57,7 @@ const STATES = new Set<string>(["open", "closed", "merged", "all"]);
 const ONLY = new Set<string>(["review", "failing", "mine"]);
 const SORTS = new Set<string>(["readiness", "updated"]);
 const SIDES = new Set<string>(["left", "right"]);
+const SCOPES = new Set<string>(["all"]);
 
 function optionalString(value: unknown, maxLength = 512): string | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
@@ -81,6 +90,7 @@ function optionalSha(value: unknown): string | undefined {
 }
 
 export function parsePullRequestsSearch(raw: Record<string, unknown>): PullRequestsSearch {
+  const scope = oneOf<PullRequestsScope>(raw["scope"], SCOPES);
   const env = optionalString(raw["env"]);
   const project = optionalString(raw["project"]);
   const pr = optionalPositiveInt(raw["pr"]);
@@ -97,6 +107,7 @@ export function parsePullRequestsSearch(raw: Record<string, unknown>): PullReque
   const thread = pr === undefined ? undefined : optionalString(raw["thread"], 256);
   const job = pr === undefined ? undefined : optionalString(raw["job"], 128);
   return {
+    ...(scope === undefined ? {} : { scope }),
     ...(env === undefined ? {} : { env }),
     ...(project === undefined ? {} : { project }),
     ...(pr === undefined ? {} : { pr }),
@@ -118,16 +129,6 @@ export function parsePullRequestsSearch(raw: Record<string, unknown>): PullReque
 
 export function resolvePullRequestsTab(search: PullRequestsSearch): PullRequestsTab {
   return search.tab ?? "conversation";
-}
-
-export function resolvePullRequestsStateFilter(
-  search: PullRequestsSearch,
-): PullRequestsStateFilter {
-  return search.state ?? "open";
-}
-
-export function resolvePullRequestsSort(search: PullRequestsSearch): PullRequestsSort {
-  return search.sort ?? "readiness";
 }
 
 /** List-level params survive a PR switch; everything scoped to one PR does not. */

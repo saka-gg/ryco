@@ -18,7 +18,6 @@ const TEST_ENVIRONMENT_DESCRIPTOR: ExecutionEnvironmentDescriptor = {
   capabilities: {
     repositoryIdentity: true,
     threadSettlement: false,
-    threadPriorityRanking: false,
   },
 };
 
@@ -31,6 +30,8 @@ export function createAuthenticatedSessionHandlers(getAuthDescriptor: () => Serv
       HttpResponse.json({
         authenticated: true,
         auth: getAuthDescriptor(),
+        // As the node reports a paired browser's own session.
+        role: "owner",
         sessionMethod: "browser-session-cookie",
         expiresAt: TEST_SESSION_EXPIRES_AT,
       }),

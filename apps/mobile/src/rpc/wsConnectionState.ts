@@ -1,11 +1,11 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
-  getWsConnectionStatus,
   getWsConnectionUiState,
   seedWsConnectionOnlineStatus,
   wsConnectionOpenedCountAtom,
   wsConnectionStatusAtom,
   wsConnectionStatusForEnvironmentAtom,
+  wsConnectionStatusesForEnvironmentsAtom,
   type WsConnectionStatus,
   type WsConnectionUiState,
 } from "@ryco/client-runtime/rpc";
@@ -32,6 +32,18 @@ export function useWsConnectionStatusForEnvironment(
   return useAtomValue(wsConnectionStatusForEnvironmentAtom(environmentId));
 }
 
+/**
+ * Each listed environment's own socket status, re-rendering when any of them
+ * changes. Per-node rows read their status from here: a
+ * `getWsConnectionStatusForEnvironment` call in render is cached by React
+ * Compiler on the row inputs and never sees the node drop.
+ */
+export function useWsConnectionStatusesForEnvironments(
+  environmentIds: ReadonlyArray<EnvironmentId>,
+): ReadonlyMap<EnvironmentId, WsConnectionStatus> {
+  return useAtomValue(wsConnectionStatusesForEnvironmentsAtom(environmentIds));
+}
+
 export function useWsConnectionOpenedCount(): number {
   return useAtomValue(wsConnectionOpenedCountAtom);
 }
@@ -42,12 +54,14 @@ export function useWsConnectionOpenedCount(): number {
  * unless that socket also recorded a disconnect, so an environment that never
  * attempted a connection (or whose slot was cleared on dispose) would read
  * "connecting" in airplane mode. Device-level connectivity outranks per-socket
- * phase for everything except a live socket. Reading the global imperatively is
- * safe for reactivity: every caller already re-renders on status writes, and
- * setBrowserOnlineStatus writes every known keyed slot too.
+ * phase for everything except a live socket. The slot's own `online` is the
+ * device-level flag: a slot is seeded from the global and
+ * setBrowserOnlineStatus writes every slot. Reading it from the slot keeps this
+ * a pure function of its argument, so a compiled caller that caches it on the
+ * subscribed status still sees the device go offline.
  */
 export function wsUiStateForEnvironment(status: WsConnectionStatus): WsConnectionUiState {
   const uiState = getWsConnectionUiState(status);
   if (uiState === "connected") return uiState;
-  return getWsConnectionStatus().online ? uiState : "offline";
+  return status.online ? uiState : "offline";
 }

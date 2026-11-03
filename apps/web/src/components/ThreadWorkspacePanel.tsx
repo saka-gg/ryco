@@ -1,10 +1,13 @@
 import { useAppKeybindings } from "../appKeybindings";
-import { terminalSnippetBroker } from "../terminalSnippetInsertion";
+import { closeThreadTerminal } from "../terminalClose";
 import { useSideChatStore } from "../sideChatStore";
 import { LazyBrowserPanel } from "../browser/LazyBrowserPanel";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { scopedThreadKey, scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
-import type { ThreadPageArtifact } from "@ryco/client-runtime/state/session";
+import {
+  canHtmlRenderSendFromMessage,
+  type ThreadPageArtifact,
+} from "@ryco/client-runtime/state/session";
 import { type MessageId, type ScopedThreadRef, type ThreadId } from "@ryco/contracts";
 import { projectScriptCwd } from "@ryco/shared/projectScripts";
 import {
@@ -39,6 +42,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentProps,
   type KeyboardEvent,
   type ReactNode,
 } from "react";
@@ -65,17 +69,20 @@ import {
   parseWorkspaceRenderKey,
   stripWorkspaceRevealSearch,
   workspaceAgentKeyForRuntimeAgent,
+  type WorkspaceFileReveal,
 } from "../workspaceRouteSearch";
 import { buildOpenRightPanelTabSearch, isRightPanelTabMode } from "../rightPanelTabs.logic";
 import {
-  derivePhase,
   deriveThreadAgentPanelModel,
   deriveThreadSubagents,
   findThreadSubagent,
+  isThreadAgentSessionLive,
   type ThreadSubagentStatus,
   type ThreadSubagentView,
 } from "../threadWorkspaceViewModel";
 import { AgentsPanel } from "./AgentsPanel";
+import { useSubagentStopAction } from "./agents/useSubagentStopAction";
+import { useSubagentMessageAction } from "./agents/useSubagentMessageAction";
 import { ArtifactsPanel } from "./artifacts/ArtifactsPanel";
 import { HtmlRenderPanel } from "./chat/HtmlRenderPanel";
 import { usePaneFocus } from "./chat/PaneFocus";
@@ -83,10 +90,9 @@ import { useWorkspaceHtmlRender } from "./chat/useWorkspaceHtmlRender";
 import { useThreadChangeRequest } from "./chat/useThreadChangeRequest";
 import { KeyHint } from "./pullRequests/primitives";
 import { useWorkspacePullRequestEditing } from "./worktrees/useWorkspacePullRequestEditing";
-import {
-  WorkspacePullRequestsPopover,
-  type WorkspacePullRequestsView,
-} from "./worktrees/WorkspacePullRequestsPopover";
+import type { WorkspacePullRequestsView } from "./worktrees/WorkspacePullRequestsPopover";
+import { WorkspacePullRequestsPopoverOnDemand } from "./worktrees/WorkspacePullRequestsPopoverOnDemand";
+import { preloadWorkspacePullRequestsPopover } from "./worktrees/lazyWorktreeDialogs";
 import { formatLiveAgentCount, LiveAgentCountBadge } from "./LiveAgentCountBadge";
 import { buildTabs, type WorkspaceTab } from "../threadWorkspaceTabs";
 import { readEnvironmentApi } from "../environmentApi";
@@ -96,7 +102,7 @@ import { useStore } from "../store";
 import { useTimelineRevealStore } from "../timelineRevealStore";
 import {
   createProjectSelectorByRef,
-  createThreadSelectorByRef,
+  createThreadStructureSelectorByRef,
   createWorktreeSelector,
 } from "../storeSelectors";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
@@ -390,7 +396,9 @@ function useWorkspaceProjectContext() {
     }
     return scopeThreadRef(draftSession.environmentId, draftSession.threadId);
   }, [draftSession, routeThreadRef]);
-  const serverThread = useStore(useMemo(() => createThreadSelectorByRef(threadRef), [threadRef]));
+  const serverThread = useStore(
+    useMemo(() => createThreadStructureSelectorByRef(threadRef), [threadRef]),
+  );
   const draftThread = useComposerDraftStore((store) =>
     threadRef ? store.getDraftThreadByRef(threadRef) : null,
   );
@@ -459,6 +467,30 @@ function WorkspaceBrowserPanel() {
     <LazyBrowserPanel
       environmentId={threadRef?.environmentId ?? null}
       cwd={serverThread?.worktreePath ?? draftThread?.worktreePath ?? project?.cwd ?? null}
+      thread={threadRef}
+    />
+  );
+}
+
+/**
+ * The Agents tab for one thread. Stop is gated here, so its connection and
+ * capability reads only run while the tab is shown.
+ */
+function WorkspaceAgentsPanel({
+  threadRef,
+  ...props
+}: Omit<ComponentProps<typeof AgentsPanel>, "environmentId" | "threadId" | "stopAgent"> & {
+  threadRef: ScopedThreadRef | null;
+}) {
+  const stopAgent = useSubagentStopAction(threadRef);
+  const messageAgent = useSubagentMessageAction(threadRef);
+  return (
+    <AgentsPanel
+      {...props}
+      environmentId={threadRef?.environmentId ?? null}
+      threadId={threadRef?.threadId ?? null}
+      stopAgent={stopAgent}
+      messageAgent={messageAgent}
     />
   );
 }
@@ -584,16 +616,16 @@ function WorkspaceTerminalPanel() {
   const closeTerminal = useCallback(
     (terminalId: string) => {
       if (!threadRef) return;
-      const api = readEnvironmentApi(threadRef.environmentId);
-      if (!api) return;
-      const isFinalTerminal = terminalState.terminalIds.length <= 1;
-      void terminalSnippetBroker
-        .close({ threadRef, terminalId }, api.terminal, isFinalTerminal)
-        .catch(() => undefined);
-
-      storeCloseTerminal(threadRef, terminalId);
-      storeSetTerminalOpen(threadRef, false);
-      bumpFocusRequestId();
+      closeThreadTerminal({
+        threadRef,
+        terminalId,
+        isFinalTerminal: terminalState.terminalIds.length <= 1,
+        onClosed: () => {
+          storeCloseTerminal(threadRef, terminalId);
+          storeSetTerminalOpen(threadRef, false);
+          bumpFocusRequestId();
+        },
+      });
     },
     [
       bumpFocusRequestId,
@@ -779,6 +811,10 @@ function WorkspaceLauncher(props: {
     () => shortcutLabelForCommand(keybindings, "workspace.simulator"),
     [keybindings],
   );
+  const sideChatShortcutLabel = useMemo(
+    () => shortcutLabelForCommand(keybindings, "sideChat.toggle"),
+    [keybindings],
+  );
   const agentTabs = props.tabs.filter((tab) => tab.mode === "agent");
   const compact = !props.isPhoneSurface;
 
@@ -797,6 +833,7 @@ function WorkspaceLauncher(props: {
         label="Side chat"
         description="Start a side conversation"
         icon={MessageSquarePlusIcon}
+        shortcutLabel={props.isPhoneSurface ? null : sideChatShortcutLabel}
         compact={compact}
         disabled={props.isPhoneSurface || !props.activeThread}
         onClick={props.onOpenSideChat}
@@ -987,13 +1024,9 @@ export default function ThreadWorkspacePanel(props: {
     [routeThreadRef, workspaceDraftSession],
   );
   const activeThread = useStore(
-    useMemo(() => createThreadSelectorByRef(workspaceThreadRef), [workspaceThreadRef]),
+    useMemo(() => createThreadStructureSelectorByRef(workspaceThreadRef), [workspaceThreadRef]),
   );
-  const agentSessionLive =
-    derivePhase(activeThread?.session ?? null) !== "disconnected" &&
-    activeThread?.session?.orchestrationStatus !== "stopped" &&
-    activeThread?.session?.orchestrationStatus !== "interrupted" &&
-    activeThread?.session?.orchestrationStatus !== "error";
+  const agentSessionLive = isThreadAgentSessionLive(activeThread?.session);
   const subagents = useMemo(
     () =>
       deriveThreadSubagents(activeThread?.activities ?? [], {
@@ -1064,6 +1097,13 @@ export default function ThreadWorkspacePanel(props: {
   );
   const agentsFocusWorkflowId =
     search.workspaceTab === "agents" ? (search.workspaceAgentsWorkflow ?? null) : null;
+  const fileReveal = useMemo<WorkspaceFileReveal | null>(
+    () =>
+      search.workspaceTab === "files" && search.workspaceFile
+        ? { path: search.workspaceFile, line: search.workspaceFileLine }
+        : null,
+    [search.workspaceFile, search.workspaceFileLine, search.workspaceTab],
+  );
   // One page tab: the render the route shows, else the one it showed last.
   const renderKey =
     search.workspaceTab === "render" && search.workspaceRender
@@ -1077,6 +1117,22 @@ export default function ThreadWorkspacePanel(props: {
     renderKey,
     lookUp: activeMode === "render" && !isPhoneSurface,
   });
+  // Only a page the thread's own agent published, on a message the thread has
+  // loaded, may send the reader's answers.
+  const renderMessageId = renderKey ? parseWorkspaceRenderKey(renderKey)?.messageId : undefined;
+  const threadMessages = activeThread?.messages;
+  const renderAttachment =
+    workspaceRender.status === "found" ? workspaceRender.render.attachment : undefined;
+  const renderCanSendMessages = useMemo(() => {
+    const message = renderMessageId
+      ? threadMessages?.find((candidate) => candidate.id === renderMessageId)
+      : undefined;
+    return (
+      message !== undefined &&
+      renderAttachment !== undefined &&
+      canHtmlRenderSendFromMessage(message, renderAttachment)
+    );
+  }, [renderMessageId, threadMessages, renderAttachment]);
   const renderTitle =
     renderKey && parseWorkspaceRenderKey(renderKey)
       ? workspaceRender.status === "found"
@@ -1412,6 +1468,8 @@ export default function ThreadWorkspacePanel(props: {
                           data-popup-open={pullRequestsOpen ? "" : undefined}
                           className="flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground/60 transition-colors hover:bg-background/60 hover:text-foreground data-popup-open:bg-background/60 data-popup-open:text-foreground"
                           onClick={togglePullRequestSwitcher}
+                          onPointerEnter={preloadWorkspacePullRequestsPopover}
+                          onFocus={preloadWorkspacePullRequestsPopover}
                         />
                       }
                     >
@@ -1449,7 +1507,8 @@ export default function ThreadWorkspacePanel(props: {
           })}
           {/* Portaled: renders nothing in the tab list itself. */}
           {!isPhoneSurface && threadChangeRequest.worktree !== null ? (
-            <WorkspacePullRequestsPopover
+            <WorkspacePullRequestsPopoverOnDemand
+              threadRef={workspaceThreadRef}
               environmentId={threadChangeRequest.environmentId}
               worktreeId={pullRequestEditing.supported ? threadChangeRequest.worktree.id : null}
               cwd={threadChangeRequest.cwd}
@@ -1553,6 +1612,7 @@ export default function ThreadWorkspacePanel(props: {
       </div>
       <div
         className="flex min-h-0 flex-1 flex-col overflow-hidden"
+        data-slot="workspace-tabpanel"
         id={workspaceTabPanelId(activeTabKey)}
         role="tabpanel"
         aria-labelledby={activeTabKey ? workspaceTabId(activeTabKey) : undefined}
@@ -1568,7 +1628,7 @@ export default function ThreadWorkspacePanel(props: {
             </WorkspaceSurfaceGate>
           ) : activeMode === "files" ? (
             <WorkspaceSurfaceGate key="files" chunk={PreviewPanel} mode="files">
-              <PreviewPanel mode={props.mode} />
+              <PreviewPanel mode={props.mode} reveal={fileReveal} onRevealHandled={clearReveal} />
             </WorkspaceSurfaceGate>
           ) : activeMode === "terminal" ? (
             <WorkspaceTerminalPanel />
@@ -1583,6 +1643,7 @@ export default function ThreadWorkspacePanel(props: {
               <WorkspacePullRequestPanel
                 environmentId={threadChangeRequest.environmentId}
                 project={threadChangeRequest.project}
+                threadRef={workspaceThreadRef}
                 number={pullRequestNumber}
                 resolving={threadChangeRequest.resolving}
                 onSelectNumber={(number) =>
@@ -1610,10 +1671,9 @@ export default function ThreadWorkspacePanel(props: {
           ) : activeMode === "agents" && !isPhoneSurface ? (
             // The Agents workspace stays off the frozen phone tier; a phone
             // route that lands here falls back to the launcher.
-            <AgentsPanel
+            <WorkspaceAgentsPanel
+              threadRef={workspaceThreadRef}
               model={agentPanelModel}
-              environmentId={workspaceThreadRef?.environmentId ?? null}
-              threadId={workspaceThreadRef ? (workspaceThreadRef.threadId as ThreadId) : null}
               onOpenAgent={openRuntimeAgent}
               subagents={subagents}
               selectedAgentId={agentKey}
@@ -1637,6 +1697,7 @@ export default function ThreadWorkspacePanel(props: {
               threadId={workspaceThreadRef ? (workspaceThreadRef.threadId as ThreadId) : null}
               renderKey={renderKey}
               resolution={workspaceRender}
+              canSendMessages={renderCanSendMessages}
             />
           ) : activeMode === "agent" ? (
             <AgentThreadPanel subagent={activeAgent} agentKey={agentKey} />

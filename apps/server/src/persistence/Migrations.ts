@@ -41,9 +41,11 @@ import Migration0056 from "./Migrations/056_UserInputResponseClaims.ts";
  * before the application starts.
  */
 
+import { createHash } from "node:crypto";
+
+import * as Effect from "effect/Effect";
 import * as Migrator from "effect/sql/Migrator";
 import * as SqlClient from "effect/sql/SqlClient";
-import * as Effect from "effect/Effect";
 
 import { trackStartupPhase } from "../startupStallMonitor.ts";
 import Migration0057 from "./Migrations/057_AutomationCentre.ts";
@@ -140,7 +142,21 @@ import Migration0092, {
 import Migration0093, {
   dropUnusedOrchestrationIndexes,
 } from "./Migrations/093_DropUnusedOrchestrationIndexes.ts";
-import Migration0094, { ensureProjectImportsTable } from "./Migrations/094_ProjectImports.ts";
+import { dropThreadPriorityTables } from "./Migrations/DropThreadPriorityTables.ts";
+import Migration0094, {
+  ensurePullRequestWatchesTable,
+} from "./Migrations/094_PullRequestWatches.ts";
+import Migration0095, {
+  ensureThreadFollowUpQueueTables,
+} from "./Migrations/095_ThreadFollowUpQueue.ts";
+import Migration0096 from "./Migrations/096_AuthAccessLinkAccount.ts";
+import Migration0097 from "./Migrations/097_CommandWatches.ts";
+import Migration0098 from "./Migrations/098_ThreadForkOrigin.ts";
+import Migration0099, {
+  ensureProjectionThreadTriageColumns,
+} from "./Migrations/099_ProjectionThreadTriage.ts";
+import Migration0100 from "./Migrations/100_EventRetention.ts";
+import Migration0101, { ensureProjectImportsTable } from "./Migrations/101_ProjectImports.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -245,7 +261,14 @@ export const migrationEntries = [
   [91, "GuardedLatestCompletedTurnTrigger", Migration0091],
   [92, "LocalTaskDelegations", Migration0092],
   [93, "DropUnusedOrchestrationIndexes", Migration0093],
-  [94, "ProjectImports", Migration0094],
+  [94, "PullRequestWatches", Migration0094],
+  [95, "ThreadFollowUpQueue", Migration0095],
+  [96, "AuthAccessLinkAccount", Migration0096],
+  [97, "CommandWatches", Migration0097],
+  [98, "ThreadForkOrigin", Migration0098],
+  [99, "ProjectionThreadTriage", Migration0099],
+  [100, "EventRetention", Migration0100],
+  [101, "ProjectImports", Migration0101],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -265,7 +288,12 @@ const run = Migrator.make({});
 
 export interface RunMigrationsOptions {
   readonly toMigrationInclusive?: number | undefined;
+  /** Where pre-upgrade backups of this database live, named in the schema-too-new error. */
+  readonly backupsDir?: string | undefined;
 }
+
+/** The highest migration id this binary knows. */
+export const SUPPORTED_MIGRATION_ID = Math.max(...migrationEntries.map(([id]) => id));
 
 export const repairProjectionWorktreeTitleColumn = Effect.fn("repairProjectionWorktreeTitleColumn")(
   function* () {
@@ -485,6 +513,14 @@ export const repairAuthAccessLinkColumns = Effect.fn("repairAuthAccessLinkColumn
   yield* Migration0090;
 });
 
+// The linked device's Hub account: run 096 again as a repair when another branch's 096 (or a
+// later id) was recorded first.
+export const repairAuthAccessLinkAccountColumn = Effect.fn("repairAuthAccessLinkAccountColumn")(
+  function* () {
+    yield* Migration0096;
+  },
+);
+
 // Project kinds and the chat relocation journal: run 080 again as a repair when another
 // branch's 080 (or a later id) was recorded first.
 export const repairProjectKindAndRelocations = Effect.fn("repairProjectKindAndRelocations")(
@@ -605,8 +641,47 @@ export const repairUnusedOrchestrationIndexes = Effect.fn("repairUnusedOrchestra
   },
 );
 
-// Cross-node project import jobs: run 094 again as a repair when a later id was recorded first
-// (parallel branches claim the same next id). One catalog lookup per boot once it exists.
+// The removed inbox ranking's tables (053). An unnumbered repair: dropping them needs no id
+// against the ones parallel branches claim. One catalog lookup per boot once they are gone.
+export const repairThreadPriorityTables = Effect.fn("repairThreadPriorityTables")(function* () {
+  if (yield* dropThreadPriorityTables) {
+    yield* Effect.log("Dropped thread priority ranking tables");
+  }
+});
+
+// Pull request watches: run 094 again as a repair when a later id was recorded first (parallel
+// branches claim the same next id; the cross-node project copy branch records 94_ProjectImports).
+export const repairPullRequestWatchesTable = Effect.fn("repairPullRequestWatchesTable")(
+  function* () {
+    if (yield* ensurePullRequestWatchesTable) {
+      yield* Effect.log("Repaired pull request watches table");
+    }
+  },
+);
+
+// Follow-up queues: run 095 again as a repair when a later id was recorded first (parallel
+// branches claim the same next id).
+export const repairThreadFollowUpQueueTables = Effect.fn("repairThreadFollowUpQueueTables")(
+  function* () {
+    if (yield* ensureThreadFollowUpQueueTables) {
+      yield* Effect.log("Repaired follow-up queue tables");
+    }
+  },
+);
+
+// The Hidden shelf and settle-when-idle columns: run 097 again as a repair when a later id was
+// recorded first (parallel branches claim the same next id).
+export const repairProjectionThreadTriageColumns = Effect.fn("repairProjectionThreadTriageColumns")(
+  function* () {
+    if (yield* ensureProjectionThreadTriageColumns) {
+      yield* Effect.log("Repaired projection_threads triage columns");
+    }
+  },
+);
+
+// Cross-node project import jobs: run 101 again as a repair when a later id was recorded first
+// (parallel branches claim the same next id). Development databases that recorded the branch's
+// earlier 94_ProjectImports already have the table: creating it is idempotent.
 export const repairProjectImportsTable = Effect.fn("repairProjectImportsTable")(function* () {
   if (yield* ensureProjectImportsTable) {
     yield* Effect.log("Repaired project imports table");
@@ -678,6 +753,367 @@ export const repairProjectionThreadReadModelMigrations = Effect.fn(
 });
 
 /**
+ * Idempotent repairs that run after every ledger pass, in this order, each once migrations
+ * through `since` are applied. Repairs ship the schema changes the numbered ledger cannot
+ * deliver reliably (see `repairProjectionWorktreePrTerminalAtColumn`), so a new repair is an
+ * upgrade like a new migration: {@link inspectMigrationLedger} reports the ones this database
+ * has never completed, a pre-upgrade backup is taken for them too, and a process that does not
+ * own the database refuses to run them under a live server (migrationOwnershipPolicy.ts).
+ *
+ * `key` is recorded in `ryco_compatibility_repairs` once the repair has run, and is part of
+ * {@link migrationSchemaDigest}. Never rename one: a renamed key counts as a new repair (one
+ * extra backup, and CLIs refuse to migrate next to a server without it until that server is
+ * updated). Changing what a repair writes needs a new key: outside the owner's own migration
+ * pass, which re-runs every repair, a recorded key is never checked again. A repair that covers
+ * several migrations names the last in `through`: a pass bounded below it runs part of the
+ * repair and records nothing.
+ *
+ * Every repair also has a read-only check in compatibilityRepairChecks.ts (keyed by `key`): true
+ * exactly when running it would write nothing. Releases before the records ran every repair and
+ * recorded none, so on a database without any record those checks decide what is pending.
+ */
+const compatibilityRepairs = [
+  { key: "projection-worktree-title", since: 31, run: () => repairProjectionWorktreeTitleColumn() },
+  {
+    key: "projection-project-avatar",
+    since: 34,
+    run: () => repairProjectionProjectAvatarColumns(),
+  },
+  { key: "projection-token-mode", since: 35, run: () => repairProjectionTokenModeColumns() },
+  // 037 introduced pr_state, which the backfill reads. The column is not a numbered migration, so
+  // this repair does not redo 037.
+  {
+    key: "projection-worktree-pr-terminal-at",
+    since: 37,
+    unnumbered: true,
+    run: () => repairProjectionWorktreePrTerminalAtColumn(),
+  },
+  {
+    key: "projection-thread-subagent-nesting",
+    since: 41,
+    run: () => repairProjectionThreadSubagentNestingColumns(),
+  },
+  {
+    key: "context-handoff-runtime-sessions",
+    since: 42,
+    run: () => repairContextHandoffRuntimeSessions(),
+  },
+  {
+    key: "projection-thread-read-model",
+    since: 44,
+    through: 47,
+    run: (toMigrationInclusive: number | undefined) =>
+      repairProjectionThreadReadModelMigrations(toMigrationInclusive ?? 47),
+  },
+  // 072-074 are skipped by the migrator when a later number was recorded first.
+  { key: "projection-thread-lineage", since: 72, run: () => ensureProjectionThreadLineageColumns },
+  { key: "provider-effect-intents", since: 73, run: () => ensureProviderEffectIntentsTable },
+  { key: "restart-continuations", since: 74, run: () => ensureRestartContinuationTables },
+  {
+    key: "projection-thread-usage-limit",
+    since: 75,
+    run: () => repairProjectionThreadUsageLimitColumn(),
+  },
+  { key: "auth-session-rotation", since: 76, run: () => repairAuthSessionRotationColumns() },
+  {
+    key: "thread-workspace-lifecycle",
+    since: 77,
+    run: () => repairThreadWorkspaceLifecycleColumns(),
+  },
+  { key: "managed-worktree-naming", since: 78, run: () => ensureManagedWorktreeNaming },
+  // 079 is skipped by the migrator when a later number was recorded first, including development
+  // databases that recorded projectless chats' schema as 079 before it moved to 080.
+  { key: "worktree-notes", since: 79, run: () => ensureWorktreeNotesTable },
+  {
+    key: "project-kind-and-relocations",
+    since: 80,
+    run: () => repairProjectKindAndRelocations(),
+  },
+  { key: "notes-documents", since: 81, run: () => ensureNotesDocumentsTable },
+  {
+    key: "worktree-pull-request-links",
+    since: 82,
+    run: () => repairWorktreePullRequestLinksColumn(),
+  },
+  {
+    key: "projection-thread-lineage-fork",
+    since: 83,
+    run: () => repairProjectionThreadLineageForkColumns(),
+  },
+  // 084 is skipped by the migrator when a later number was recorded first.
+  { key: "thread-forks", since: 84, run: () => ensureThreadForksTable },
+  {
+    key: "projection-thread-activity-kind-index",
+    since: 85,
+    run: () => repairProjectionThreadActivityKindIndex(),
+  },
+  {
+    key: "projection-project-repository-identity",
+    since: 86,
+    run: () => repairProjectionProjectRepositoryIdentityColumns(),
+  },
+  {
+    key: "projection-thread-anchors-and-statistics",
+    since: 87,
+    run: () => repairProjectionThreadAnchorsAndStatisticsPartials(),
+  },
+  { key: "legacy-activity-payloads", since: 88, run: () => repairLegacyActivityPayloads() },
+  { key: "lifecycle-markers", since: 89, run: () => repairLifecycleMarkersTable() },
+  { key: "auth-access-links", since: 90, run: () => repairAuthAccessLinkColumns() },
+  {
+    key: "guarded-latest-completed-turn-trigger",
+    since: 91,
+    run: () => repairGuardedLatestCompletedTurnTrigger(),
+  },
+  { key: "local-task-delegations", since: 92, run: () => repairLocalTaskDelegationsTable() },
+  { key: "unused-orchestration-indexes", since: 93, run: () => repairUnusedOrchestrationIndexes() },
+  // Applies on top of 093; the tables come from 053.
+  {
+    key: "drop-thread-priority-tables",
+    since: 93,
+    unnumbered: true,
+    run: () => repairThreadPriorityTables(),
+  },
+  { key: "pull-request-watches", since: 94, run: () => repairPullRequestWatchesTable() },
+  { key: "follow-up-queue", since: 95, run: () => repairThreadFollowUpQueueTables() },
+  { key: "auth-access-link-account", since: 96, run: () => repairAuthAccessLinkAccountColumn() },
+  // 097 again when another branch recorded 097 (or a later id) first; it is idempotent.
+  { key: "command-watches", since: 97, run: () => Migration0097 },
+  // 098 again when another branch recorded 098 (or a later id) first; it is idempotent.
+  { key: "thread-fork-origin", since: 98, run: () => Migration0098 },
+  {
+    key: "projection-thread-triage",
+    since: 99,
+    run: () => repairProjectionThreadTriageColumns(),
+  },
+  // 100 again when another branch recorded 100 (or a later id) first; it is idempotent.
+  { key: "event-retention", since: 100, run: () => Migration0100 },
+  { key: "project-imports", since: 101, run: () => repairProjectImportsTable() },
+] as const;
+
+export type CompatibilityRepairKey = (typeof compatibilityRepairs)[number]["key"];
+
+/** The repairs a pass through `toMigrationInclusive` (all when undefined) runs, in order. */
+const repairsThrough = (toMigrationInclusive: number | undefined) =>
+  compatibilityRepairs.filter(
+    (repair) => toMigrationInclusive === undefined || toMigrationInclusive >= repair.since,
+  );
+
+/**
+ * The migrations a compatibility repair applies again (`since` through `through`). When another
+ * branch recorded its own migration under one of these ids, the migrator skips this build's, and
+ * the repair still gives the database this build's schema there.
+ */
+export const repairedMigrationIds: ReadonlySet<number> = new Set(
+  compatibilityRepairs.flatMap((repair) => {
+    if ("unnumbered" in repair) return [];
+    const last = "through" in repair ? repair.through : repair.since;
+    return Array.from({ length: last - repair.since + 1 }, (_, index) => repair.since + index);
+  }),
+);
+
+/** `ryco_compatibility_repairs` key recording that a compatibility repair has run. */
+export const compatibilityRepairMarker = (key: string) => `schema-repair:${key}`;
+
+/** What the next {@link runMigrations} would do to this database, read without changing it. */
+export interface MigrationLedgerInspection {
+  /** The `effect_sql_migrations` ledger table exists. */
+  readonly hasLedger: boolean;
+  /** Any table besides the ledger and SQLite's own exists. */
+  readonly hasUserTables: boolean;
+  /** Highest recorded migration id, 0 when none. */
+  readonly latestApplied: number;
+  /** Highest migration id this binary knows. */
+  readonly supported: number;
+  /** Migration ids the ledger pass would apply. */
+  readonly pending: ReadonlyArray<number>;
+  /**
+   * Keys of compatibility repairs this binary runs that never completed on this database, except
+   * the ones in `repairsRecognised`.
+   */
+  readonly repairsPending: ReadonlyArray<string>;
+  /**
+   * Keys of repairs never recorded here whose effect the database already has: not pending, and
+   * recorded by the next pass. Only a database without any repair record (last run by a release
+   * from before them) with no migration pending is checked; otherwise the records are the rule.
+   */
+  readonly repairsRecognised: ReadonlyArray<string>;
+  /** An empty database: nothing to upgrade or back up. */
+  readonly fresh: boolean;
+  /** The recorded schema is newer than this binary supports; migrating is refused. */
+  readonly tooNew: boolean;
+}
+
+/**
+ * The repair checks (compatibilityRepairChecks.ts) are needed once per database, so they stay off
+ * the boot path. Without them (an install missing the chunk) every unrecorded repair stays pending.
+ */
+const findAppliedRepairs = (
+  keys: ReadonlyArray<CompatibilityRepairKey>,
+  records: ReadonlySet<string>,
+) =>
+  Effect.tryPromise(() => import("./compatibilityRepairChecks.ts")).pipe(
+    Effect.matchEffect({
+      onFailure: () => Effect.succeed<ReadonlyArray<string>>([]),
+      onSuccess: (checks) => checks.findAppliedRepairs(keys, records),
+    }),
+  );
+
+export const inspectMigrationLedger = Effect.fn("inspectMigrationLedger")(function* ({
+  toMigrationInclusive,
+}: Pick<RunMigrationsOptions, "toMigrationInclusive"> = {}) {
+  const sql = yield* SqlClient.SqlClient;
+  const tables = new Set(
+    (yield* sql<{ readonly name: string }>`
+      SELECT name FROM sqlite_master WHERE type = 'table' AND substr(name, 1, 7) != 'sqlite_'
+    `).map((row) => row.name),
+  );
+  const hasLedger = tables.has("effect_sql_migrations");
+  const hasUserTables = [...tables].some((name) => name !== "effect_sql_migrations");
+  const latestApplied = hasLedger
+    ? ((yield* sql<{
+        readonly id: number | null;
+      }>`SELECT max(migration_id) AS id FROM effect_sql_migrations`)[0]?.id ?? 0)
+    : 0;
+  // Repairs' own completion markers too, which the repair checks read.
+  const records = new Set(
+    tables.has("ryco_compatibility_repairs")
+      ? (yield* sql<{ readonly repair_key: string }>`
+          SELECT repair_key FROM ryco_compatibility_repairs
+        `).map((row) => row.repair_key)
+      : [],
+  );
+  const pending = migrationEntries
+    .map(([id]) => id)
+    .filter(
+      (id) =>
+        id > latestApplied && (toMigrationInclusive === undefined || id <= toMigrationInclusive),
+    );
+  const unrecorded = repairsThrough(toMigrationInclusive)
+    .map((repair) => repair.key)
+    .filter((key) => !records.has(compatibilityRepairMarker(key)));
+  // Releases before the records ran every repair at each start and recorded none. On such a
+  // database, a repair whose effect is there would write nothing but its record. A database with
+  // any record keeps the records as the rule.
+  const recognised: ReadonlyArray<string> =
+    pending.length === 0 &&
+    hasUserTables &&
+    unrecorded.length > 0 &&
+    ![...records].some((key) => key.startsWith(compatibilityRepairMarker("")))
+      ? yield* findAppliedRepairs(unrecorded, records)
+      : [];
+  return {
+    hasLedger,
+    hasUserTables,
+    latestApplied,
+    supported: SUPPORTED_MIGRATION_ID,
+    pending,
+    repairsPending: unrecorded.filter((key) => !recognised.includes(key)),
+    repairsRecognised: recognised,
+    fresh: !hasUserTables && latestApplied === 0,
+    tooNew: latestApplied > SUPPORTED_MIGRATION_ID,
+  } satisfies MigrationLedgerInspection;
+});
+
+/** Records that `keys` have run, in one write, and only when one is new. */
+const recordCompatibilityRepairs = Effect.fn("recordCompatibilityRepairs")(function* (
+  keys: ReadonlyArray<string>,
+) {
+  if (keys.length === 0) return;
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`
+    CREATE TABLE IF NOT EXISTS ryco_compatibility_repairs (
+      repair_key TEXT PRIMARY KEY
+    )
+  `;
+  const markers = keys.map(compatibilityRepairMarker);
+  const recorded = new Set(
+    (yield* sql<{ readonly repair_key: string }>`
+      SELECT repair_key FROM ryco_compatibility_repairs WHERE ${sql.in("repair_key", markers)}
+    `).map((row) => row.repair_key),
+  );
+  const missing = markers.filter((marker) => !recorded.has(marker));
+  if (missing.length === 0) return;
+  yield* sql`INSERT OR IGNORE INTO ryco_compatibility_repairs ${sql.insert(
+    missing.map((repair_key) => ({ repair_key })),
+  )}`;
+});
+
+/** The refusal for a database whose schema is newer than this binary supports. */
+export const describeSchemaTooNew = (input: {
+  readonly latest: number;
+  readonly supported: number;
+  readonly backupsDir?: string | undefined;
+}) =>
+  `Database schema ${input.latest} is newer than this binary supports (${input.supported}). ` +
+  `Use a Ryco build that supports schema ${input.latest}. To keep using this build, restore a ` +
+  `backup taken before the upgrade into a separate data directory` +
+  (input.backupsDir
+    ? `; backups are in ${input.backupsDir}. \`ryco db list\` shows them`
+    : `. \`ryco db list\` shows the backups`) +
+  // Without them, the command looks in the default data directory, not this server's.
+  ` (pass the server's \`--base-dir\` or \`--dev-url\`, if it uses one), and ` +
+  `\`ryco db restore <file> --into <new directory>\` restores one without touching this database.`;
+
+/**
+ * Whether the next {@link runMigrations} would upgrade this database: a numbered migration is
+ * pending, or a compatibility repair this binary runs was never recorded here and is not
+ * recognised as applied (`repairsRecognised`). Recording an applied repair is not an upgrade: it
+ * needs no backup, and it waits for the next process that migrates anyway. The one answer to "is
+ * there an upgrade to do?", for the pre-upgrade backup and for the ownership policy, read
+ * from the ledger, the repair records and (on a database without records) the schema, without
+ * running anything.
+ */
+export const isUpgradePending = (
+  ledger: Pick<MigrationLedgerInspection, "pending" | "repairsPending">,
+): boolean => ledger.pending.length > 0 || ledger.repairsPending.length > 0;
+
+/** At most three repair keys, then how many more. */
+export const describeRepairKeys = (keys: ReadonlyArray<string>): string =>
+  keys.length <= 3 ? keys.join(", ") : `${keys.slice(0, 3).join(", ")} and ${keys.length - 3} more`;
+
+/**
+ * Future binaries can fail closed on downgrade. This cannot retrofit a check into already
+ * shipped binaries that ignore newer migration records. `backupsDir` is named in the message.
+ */
+export const failIfSchemaTooNew = (ledger: MigrationLedgerInspection, backupsDir?: string) =>
+  ledger.tooNew
+    ? Effect.fail(
+        new Migrator.MigrationError({
+          kind: "BadState",
+          message: describeSchemaTooNew({
+            latest: ledger.latestApplied,
+            supported: ledger.supported,
+            backupsDir,
+          }),
+        }),
+      )
+    : Effect.void;
+
+/**
+ * Identifies schema code by its numbered migrations and the keys of its compatibility repairs,
+ * the identities recorded in a database. Two binaries with the same digest upgrade a database
+ * the same way, whatever their package versions (development branches share a version but not
+ * their migrations).
+ */
+export const schemaDigestOf = (input: {
+  readonly migrations: ReadonlyArray<readonly [number, string, ...Array<unknown>]>;
+  readonly repairKeys: ReadonlyArray<string>;
+}): string =>
+  createHash("sha256")
+    .update(
+      JSON.stringify([input.migrations.map(([id, name]) => `${id}_${name}`), input.repairKeys]),
+    )
+    .digest("hex")
+    .slice(0, 16);
+
+/** This binary's {@link schemaDigestOf}, recorded in the database owner lock. */
+export const migrationSchemaDigest: string = schemaDigestOf({
+  migrations: migrationEntries,
+  repairKeys: compatibilityRepairs.map((repair) => repair.key),
+});
+
+/**
  * Run all pending migrations.
  *
  * Creates the migrations tracking table (effect_sql_migrations) if it doesn't exist,
@@ -689,31 +1125,14 @@ export const repairProjectionThreadReadModelMigrations = Effect.fn(
  */
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
+  backupsDir,
 }: RunMigrationsOptions = {}) {
   yield* Effect.log(
     toMigrationInclusive === undefined
       ? "Running all migrations..."
       : `Running migrations 1 through ${toMigrationInclusive}...`,
   );
-  // Future binaries can fail closed on downgrade. This cannot retrofit a check
-  // into already shipped binaries that ignore newer migration records.
-  const sql = yield* SqlClient.SqlClient;
-  const tracking =
-    yield* sql`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'`;
-  if (tracking.length > 0) {
-    const latest = yield* sql<{
-      id: number | null;
-    }>`SELECT max(migration_id) AS id FROM effect_sql_migrations`;
-    const supported = Math.max(...migrationEntries.map(([id]) => id));
-    if (latest[0]?.id !== null && latest[0]?.id !== undefined && latest[0].id > supported) {
-      return yield* Effect.fail(
-        new Migrator.MigrationError({
-          kind: "BadState",
-          message: `Database schema ${latest[0].id} is newer than this binary supports (${supported}). Use the newer binary or restore a pre-upgrade backup into a separate data directory.`,
-        }),
-      );
-    }
-  }
+  yield* failIfSchemaTooNew(yield* inspectMigrationLedger({ toMigrationInclusive }), backupsDir);
   // Named separately for the startup stall monitor: the ledger pass and the post-ledger repairs
   // (some backfill whole tables once) are the two places a slow boot stalls in here.
   const executedMigrations = yield* trackStartupPhase(
@@ -723,103 +1142,20 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   yield* trackStartupPhase(
     "persistence.migrations.repairs",
     Effect.gen(function* () {
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 31) {
-        yield* repairProjectionWorktreeTitleColumn();
+      const repairs = repairsThrough(toMigrationInclusive);
+      for (const repair of repairs) {
+        yield* repair.run(toMigrationInclusive);
       }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 34) {
-        yield* repairProjectionProjectAvatarColumns();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 35) {
-        yield* repairProjectionTokenModeColumns();
-      }
-      // 037 introduced pr_state, which the backfill reads.
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 37) {
-        yield* repairProjectionWorktreePrTerminalAtColumn();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 41) {
-        yield* repairProjectionThreadSubagentNestingColumns();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 42) {
-        yield* repairContextHandoffRuntimeSessions();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 44) {
-        yield* repairProjectionThreadReadModelMigrations(toMigrationInclusive ?? 47);
-      }
-      // Repair: 072 is skipped by the migrator when a later number was recorded first.
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 72) {
-        yield* ensureProjectionThreadLineageColumns;
-      }
-      // Repair: 073 is skipped by the migrator when a later number was recorded first.
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 73) {
-        yield* ensureProviderEffectIntentsTable;
-      }
-      // Repair: 074 is skipped by the migrator when a later number was recorded first.
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 74) {
-        yield* ensureRestartContinuationTables;
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 75) {
-        yield* repairProjectionThreadUsageLimitColumn();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 76) {
-        yield* repairAuthSessionRotationColumns();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 77) {
-        yield* repairThreadWorkspaceLifecycleColumns();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 78) {
-        yield* ensureManagedWorktreeNaming;
-      }
-      // Repair: 079 is skipped by the migrator when a later number was recorded first, including
-      // development databases that recorded projectless chats' schema as 079 before it moved to 080.
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 79) {
-        yield* ensureWorktreeNotesTable;
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 80) {
-        yield* repairProjectKindAndRelocations();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 81) {
-        yield* ensureNotesDocumentsTable;
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 82) {
-        yield* repairWorktreePullRequestLinksColumn();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 83) {
-        yield* repairProjectionThreadLineageForkColumns();
-      }
-      // Repair: 084 is skipped by the migrator when a later number was recorded first.
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 84) {
-        yield* ensureThreadForksTable;
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 85) {
-        yield* repairProjectionThreadActivityKindIndex();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 86) {
-        yield* repairProjectionProjectRepositoryIdentityColumns();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 87) {
-        yield* repairProjectionThreadAnchorsAndStatisticsPartials();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 88) {
-        yield* repairLegacyActivityPayloads();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 89) {
-        yield* repairLifecycleMarkersTable();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 90) {
-        yield* repairAuthAccessLinkColumns();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 91) {
-        yield* repairGuardedLatestCompletedTurnTrigger();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 92) {
-        yield* repairLocalTaskDelegationsTable();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 93) {
-        yield* repairUnusedOrchestrationIndexes();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 94) {
-        yield* repairProjectImportsTable();
-      }
+      yield* recordCompatibilityRepairs(
+        repairs
+          .filter(
+            (repair) =>
+              toMigrationInclusive === undefined ||
+              !("through" in repair) ||
+              toMigrationInclusive >= repair.through,
+          )
+          .map((repair) => repair.key),
+      );
     }),
   );
   yield* Effect.log("Migrations ran successfully").pipe(

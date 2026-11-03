@@ -100,6 +100,10 @@ export class PlatformDeviceBackend implements DeviceBackend {
     return this.target(args[0].udid).testing(...args);
   }
 
+  readLogs(...args: Parameters<DeviceBackend["readLogs"]>): ReturnType<DeviceBackend["readLogs"]> {
+    return this.target(args[0]).readLogs(...args);
+  }
+
   suspendTesting(udid?: string): () => void {
     if (udid !== undefined) return this.target(udid).suspendTesting(udid);
     // Fence both adapters synchronously before manager disposal can await.

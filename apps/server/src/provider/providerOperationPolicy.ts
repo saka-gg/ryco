@@ -6,6 +6,11 @@
  * positive safe integers; anything else is ignored and reported so the caller
  * can log one warning.
  *
+ * The session-start, turn-acceptance and control deadlines count only time the
+ * server's event loop was free to run (`runDetachedWithDeadline`), so a server
+ * stall or machine sleep costs at most one second of them.
+ * `unresponsiveAfterMs` is not a deadline: the turn-liveness sweep measures it.
+ *
  * Pure module: no services, no I/O.
  *
  * @module providerOperationPolicy
@@ -22,7 +27,10 @@ export interface ProviderOperationTimeouts {
 }
 
 export const DEFAULT_SESSION_START_TIMEOUT_MS = 120_000;
-/** The ACP registry driver may download its agent on first run. */
+/**
+ * The ACP registry driver never installs at session start, but it re-hashes every file of the
+ * installed agent before each spawn.
+ */
 export const DEFAULT_REGISTRY_SESSION_START_TIMEOUT_MS = 300_000;
 export const DEFAULT_TURN_ACCEPTANCE_TIMEOUT_MS = 90_000;
 export const DEFAULT_CONTROL_REQUEST_TIMEOUT_MS = 30_000;

@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { classifyTaskAgentKind } from "./taskClassification.ts";
+import { classifyTaskAgentKind, endsTaskLiveness } from "./taskClassification.ts";
+
+describe("endsTaskLiveness", () => {
+  it("ends liveness on idle and every terminal status only", () => {
+    for (const status of ["idle", "completed", "failed", "stopped", "cancelled", "interrupted"]) {
+      expect(endsTaskLiveness(status)).toBe(true);
+    }
+    for (const status of [undefined, "pending", "starting", "running", "waiting"]) {
+      expect(endsTaskLiveness(status)).toBe(false);
+    }
+  });
+});
 
 describe("classifyTaskAgentKind", () => {
   it("classifies agent-flavored, watch-loop, and inert types", () => {

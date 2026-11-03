@@ -3,7 +3,7 @@ import "../../index.css";
 import { Schema } from "effect";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
-import { ServerProvider } from "@ryco/contracts";
+import { ServerProvider, SourceControlProviderError } from "@ryco/contracts";
 import type { EnvironmentApi } from "@ryco/contracts";
 import {
   EnvironmentId,
@@ -18,13 +18,21 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 
+import { parkPointer } from "../../../test/browserPointer";
 import {
   __resetEnvironmentApiOverridesForTests,
   __setEnvironmentApiOverrideForTests,
 } from "../../environmentApi";
 import { PANE_DRAG_TYPE } from "../../chatPanes.logic";
+import { DraftId } from "../../composerDraftStore";
 import { readPaneDragSource } from "../../chatPanesStore";
+import {
+  noteSourceControlReadOutcome,
+  resetSourceControlPausesForTests,
+} from "../../sourceControlPause";
 import { useTerminalStateStore } from "../../terminalStateStore";
+import { useUiStateStore } from "../../uiStateStore";
+import { useInboxFilterStore } from "./inboxFilterStore";
 import { InboxSidebar, type InboxSidebarProps } from "./InboxSidebar";
 
 vi.mock("../../sidebarUndo", () => ({
@@ -34,6 +42,9 @@ vi.mock("../../sidebarUndo", () => ({
         readEnvironmentApi(target.environmentId)!.orchestration.dispatchCommand(command as never),
       ),
   },
+  presentSidebarUndoNotices: vi.fn(),
+  readSidebarUndoLocalContext: () => null,
+  readSidebarUndoContext: () => null,
 }));
 
 const ENVIRONMENT_ID = EnvironmentId.make("environment-hover-card");
@@ -41,7 +52,9 @@ const PROJECT_ID = ProjectId.make("project-hover-card");
 const THREAD_ID = ThreadId.make("thread-hover-card");
 
 describe("Inbox sidebar rendering and settlement", () => {
-  afterEach(() => {
+  afterEach(async () => {
+    // The list holds its order under the real pointer: keep it off the next test.
+    await parkPointer(0, 0);
     __resetEnvironmentApiOverridesForTests();
     document.body.innerHTML = "";
   });
@@ -71,7 +84,6 @@ describe("Inbox sidebar rendering and settlement", () => {
       deliveryUnknownThreadKeys: new Set(),
       localQueuedThreadKeys: new Set(),
       activeThreadKey: null,
-      aiFocusEnabled: false,
       autoSettleAfterDays: null,
       pinnedThreadKeys: new Set([`${ENVIRONMENT_ID}:Pinned task`]),
       onOpenThread: vi.fn(),
@@ -129,7 +141,6 @@ describe("Inbox sidebar rendering and settlement", () => {
       deliveryUnknownThreadKeys: new Set(),
       localQueuedThreadKeys: new Set(),
       activeThreadKey: null,
-      aiFocusEnabled: false,
       autoSettleAfterDays: null,
       pinnedThreadKeys: new Set(),
       onOpenThread: vi.fn(),
@@ -158,6 +169,88 @@ describe("Inbox sidebar rendering and settlement", () => {
     }
   });
 
+  it("marks queued and held follow-ups as the project sidebar does, but not on the phone", async () => {
+    const queues: Record<string, SidebarThreadSummary["followUpQueueSummary"]> = {
+      "No queue": undefined,
+      "Two queued": { count: 2, hold: null, headStatus: "queued", headPreview: "Next" },
+      "One held": {
+        count: 1,
+        hold: {
+          reason: "error",
+          detail: "Provider died.",
+          causeKeys: ["error:turn-1:Provider died."],
+          heldAt: "2026-09-01T00:00:00.000Z",
+        },
+        headStatus: "queued",
+        headPreview: "Next",
+      },
+    };
+    const props: InboxSidebarProps = {
+      projects: [],
+      worktrees: [],
+      environments: [],
+      threads: Object.entries(queues).map(([title, followUpQueueSummary], index) => {
+        const thread: SidebarThreadSummary = {
+          id: ThreadId.make(title),
+          environmentId: ENVIRONMENT_ID,
+          projectId: PROJECT_ID,
+          title,
+          interactionMode: "default",
+          session: null,
+          createdAt: `2026-09-01T00:0${index}:00.000Z`,
+          archivedAt: null,
+          latestTurn: null,
+          branch: null,
+          worktreePath: null,
+          latestUserMessageAt: null,
+          hasPendingApprovals: false,
+          hasPendingUserInput: false,
+          hasActionableProposedPlan: false,
+        };
+        if (followUpQueueSummary) thread.followUpQueueSummary = followUpQueueSummary;
+        return thread;
+      }),
+      deliveryUnknownThreadKeys: new Set(),
+      localQueuedThreadKeys: new Set(),
+      activeThreadKey: null,
+      autoSettleAfterDays: null,
+      pinnedThreadKeys: new Set(),
+      onOpenThread: vi.fn(),
+    };
+    await page.viewport(1280, 800);
+    const mounted = await render(<InboxSidebar {...props} />);
+    try {
+      const markOf = (title: string) =>
+        [...document.querySelectorAll('[data-testid="inbox-thread-row"]')]
+          .find((element) => element.textContent?.includes(title))
+          ?.querySelector("[data-follow-up-queue-badge]");
+      await expect.poll(() => markOf("Two queued")).not.toBeFalsy();
+      expect(markOf("No queue")).toBeFalsy();
+      // What it shows, and the reason a screen reader reads instead: words, not color alone.
+      const shown = (mark: Element | null | undefined) =>
+        mark?.querySelector('[aria-hidden="true"]')?.textContent;
+      const spoken = (mark: Element | null | undefined) =>
+        mark?.querySelector(".sr-only")?.textContent;
+      expect(shown(markOf("Two queued"))).toBe("2 queued");
+      expect(spoken(markOf("Two queued"))).toBe("2 queued follow-ups");
+      expect(markOf("Two queued")?.getAttribute("data-follow-up-queue-badge")).toBe("queued");
+      expect(shown(markOf("One held"))).toBe("1 held");
+      expect(spoken(markOf("One held"))).toBe("1 queued follow-up: Paused after an error");
+      expect(markOf("One held")?.getAttribute("data-follow-up-queue-badge")).toBe("held");
+      expect(markOf("One held")?.getAttribute("title")).toBe(
+        "1 queued follow-up: Paused after an error",
+      );
+
+      // The frozen phone tier gets no new UI.
+      await page.viewport(390, 844);
+      await expect.poll(() => document.querySelector("[data-follow-up-queue-badge]")).toBeNull();
+      expect(document.body.textContent).toContain("One held");
+    } finally {
+      await mounted.unmount();
+      await page.viewport(1280, 800);
+    }
+  });
+
   it("offers Add project from the empty state only while no project exists", async () => {
     const onAddProject = vi.fn();
     const props: InboxSidebarProps = {
@@ -168,7 +261,6 @@ describe("Inbox sidebar rendering and settlement", () => {
       deliveryUnknownThreadKeys: new Set(),
       localQueuedThreadKeys: new Set(),
       activeThreadKey: null,
-      aiFocusEnabled: false,
       autoSettleAfterDays: null,
       pinnedThreadKeys: new Set(),
       onOpenThread: vi.fn(),
@@ -206,6 +298,48 @@ describe("Inbox sidebar rendering and settlement", () => {
     }
   });
 
+  it("says once above the list while a forge host pauses requests", async () => {
+    const props: InboxSidebarProps = {
+      projects: [],
+      worktrees: [],
+      environments: [],
+      threads: [],
+      deliveryUnknownThreadKeys: new Set(),
+      localQueuedThreadKeys: new Set(),
+      activeThreadKey: null,
+      autoSettleAfterDays: null,
+      pinnedThreadKeys: new Set(),
+      onOpenThread: vi.fn(),
+    };
+    // Desktop only: the frozen phone tier gets no new UI.
+    await page.viewport(1280, 800);
+    const mounted = await render(<InboxSidebar {...props} />);
+    const paused = new SourceControlProviderError({
+      provider: "github",
+      operation: "getChangeRequestDetail",
+      detail: "GitHub requests are paused after a rate limit.",
+      reason: "rate-limited",
+      retryAt: Date.now() + 10 * 60_000,
+    });
+    try {
+      expect(document.querySelector('[data-testid="inbox-sidebar"] [role="status"]')).toBeNull();
+      noteSourceControlReadOutcome("detail-a", paused, Date.now());
+      noteSourceControlReadOutcome("detail-b", paused, Date.now());
+      await expect.element(page.getByText(/^GitHub requests paused until /u)).toBeInTheDocument();
+      expect(
+        document.querySelectorAll('[data-testid="inbox-sidebar"] [role="status"]'),
+      ).toHaveLength(1);
+      // Both reads answered again: the line goes.
+      noteSourceControlReadOutcome("detail-a", null, Date.now());
+      noteSourceControlReadOutcome("detail-b", null, Date.now());
+      await expect.element(page.getByText(/^GitHub requests paused/u)).not.toBeInTheDocument();
+    } finally {
+      // The store is module state: a failed assertion must not leave the line for later tests.
+      resetSourceControlPausesForTests();
+      await mounted.unmount();
+    }
+  });
+
   it("drags a row into a split pane as its thread", async () => {
     const props: InboxSidebarProps = {
       projects: [],
@@ -233,7 +367,6 @@ describe("Inbox sidebar rendering and settlement", () => {
       deliveryUnknownThreadKeys: new Set(),
       localQueuedThreadKeys: new Set(),
       activeThreadKey: null,
-      aiFocusEnabled: false,
       autoSettleAfterDays: null,
       pinnedThreadKeys: new Set(),
       onOpenThread: vi.fn(),
@@ -255,6 +388,60 @@ describe("Inbox sidebar rendering and settlement", () => {
       expect(readPaneDragSource()).toEqual({ environmentId: ENVIRONMENT_ID, threadId: THREAD_ID });
       row.dispatchEvent(new DragEvent("dragend", { bubbles: true }));
       expect(readPaneDragSource()).toBeNull();
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("lists a draft with content as a Draft row that opens its draft and is not dragged", async () => {
+    const onOpenThread = vi.fn();
+    const onOpenDraft = vi.fn();
+    const draftThreadId = ThreadId.make("thread-draft");
+    const props: InboxSidebarProps = {
+      projects: [],
+      worktrees: [],
+      environments: [],
+      threads: [],
+      drafts: [
+        {
+          draftId: DraftId.make("draft-1"),
+          environmentId: ENVIRONMENT_ID,
+          threadId: draftThreadId,
+          projectId: PROJECT_ID,
+          title: "Fix the login flow",
+          createdAt: "2026-09-01T00:00:00.000Z",
+          branch: null,
+          worktreePath: null,
+          isChat: false,
+        },
+      ],
+      deliveryUnknownThreadKeys: new Set(),
+      localQueuedThreadKeys: new Set(),
+      activeThreadKey: null,
+      autoSettleAfterDays: null,
+      pinnedThreadKeys: new Set(),
+      onOpenThread,
+      onOpenDraft,
+    };
+    await page.viewport(1280, 800);
+    const mounted = await render(<InboxSidebar {...props} />);
+    try {
+      const row = document.querySelector<HTMLElement>('[data-testid="inbox-thread-row"]')!;
+      expect(row.textContent).toContain("Fix the login flow");
+      expect(row.textContent).toContain("Draft");
+      expect(row.querySelector('[data-inbox-glyph="draft"]')).not.toBeNull();
+      // Only the actions menu: a draft has nothing to settle.
+      expect(document.querySelector(".inbox-settle-action")).toBeNull();
+      await expect.poll(() => row.draggable).toBe(false);
+      row.click();
+      expect(onOpenDraft).toHaveBeenCalledWith(
+        "draft-1",
+        scopeThreadRef(ENVIRONMENT_ID, draftThreadId),
+      );
+      expect(onOpenThread).not.toHaveBeenCalled();
+      // Without a way to open drafts, none is listed.
+      await mounted.rerender(<InboxSidebar {...props} onOpenDraft={undefined} />);
+      expect(document.querySelectorAll('[data-testid="inbox-thread-row"]')).toHaveLength(0);
     } finally {
       await mounted.unmount();
     }
@@ -307,7 +494,6 @@ describe("Inbox sidebar rendering and settlement", () => {
       deliveryUnknownThreadKeys: new Set(),
       localQueuedThreadKeys: new Set(),
       activeThreadKey: null,
-      aiFocusEnabled: false,
       autoSettleAfterDays: null,
       pinnedThreadKeys: new Set(),
       onOpenThread: vi.fn(),
@@ -337,6 +523,146 @@ describe("Inbox sidebar rendering and settlement", () => {
       expect(glyph().getAttribute("aria-label")).toBe("Completed");
       expect(glyph().getAnimations().length).toBeGreaterThan(0);
       expect(busyShell().getAnimations().length).toBeGreaterThan(0);
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("says Woke on a thread whose snooze ran out until it is visited", async () => {
+    const snoozedUntil = new Date(Date.now() - 60_000).toISOString();
+    const thread = {
+      environmentId: ENVIRONMENT_ID,
+      projectId: PROJECT_ID,
+      id: ThreadId.make("woke"),
+      title: "Nap task",
+      interactionMode: "default" as const,
+      session: null,
+      createdAt: "2026-09-01T00:00:00.000Z",
+      archivedAt: null,
+      latestTurn: null,
+      branch: "main",
+      worktreePath: null,
+      latestUserMessageAt: null,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+      snoozedAt: new Date(Date.now() - 3_600_000).toISOString(),
+      snoozedUntil,
+    };
+    const props: InboxSidebarProps = {
+      projects: [],
+      worktrees: [],
+      environments: [],
+      threads: [thread],
+      deliveryUnknownThreadKeys: new Set(),
+      localQueuedThreadKeys: new Set(),
+      activeThreadKey: null,
+      autoSettleAfterDays: null,
+      pinnedThreadKeys: new Set(),
+      onOpenThread: vi.fn(),
+    };
+    const key = `${ENVIRONMENT_ID}:woke`;
+    const mounted = await render(<InboxSidebar {...props} />);
+    try {
+      const row = () =>
+        document.querySelector<HTMLElement>(
+          `[data-inbox-row-key="${key}"] [data-testid="inbox-thread-row"]`,
+        )!;
+      expect(row().closest("section")?.querySelector("h2")?.textContent).toBe("Recent");
+      expect(row().querySelector("[data-inbox-glyph]")?.getAttribute("aria-label")).toBe("Woke");
+      expect(row().textContent).toContain("Woke");
+
+      useUiStateStore.getState().markThreadVisited(key, snoozedUntil);
+      await vi.waitFor(() =>
+        expect(row().querySelector("[data-inbox-glyph]")?.getAttribute("aria-label")).toBe("Idle"),
+      );
+      expect(row().textContent).not.toContain("Woke");
+    } finally {
+      useUiStateStore.getState().clearThreadUi(key);
+      await mounted.unmount();
+    }
+  });
+
+  it("keeps hidden threads in a collapsed Hidden section and hides a thread from its menu", async () => {
+    // Desktop: the frozen phone tier offers no Hide.
+    await page.viewport(1_280, 800);
+    const dispatchCommand = vi.fn(async (_command: unknown) => undefined);
+    __setEnvironmentApiOverrideForTests(ENVIRONMENT_ID, {
+      orchestration: { dispatchCommand },
+    } as unknown as EnvironmentApi);
+    const base = {
+      environmentId: ENVIRONMENT_ID,
+      projectId: PROJECT_ID,
+      interactionMode: "default" as const,
+      session: null,
+      createdAt: "2026-09-01T00:00:00.000Z",
+      archivedAt: null,
+      latestTurn: null,
+      branch: "main",
+      worktreePath: null,
+      latestUserMessageAt: null,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+    };
+    const props: InboxSidebarProps = {
+      projects: [],
+      worktrees: [],
+      environments: [
+        {
+          environmentId: ENVIRONMENT_ID,
+          label: "This device",
+          connectionState: "connected",
+          stale: false,
+          role: "owner",
+          trust: "not-required",
+          deliveryUnknown: false,
+          threadSettlementSupported: true,
+          threadSnoozeSupported: true,
+          threadTriageSupported: true,
+          mutationReady: true,
+          shellCurrent: true,
+        },
+      ],
+      threads: [
+        {
+          ...base,
+          id: ThreadId.make("nightly"),
+          title: "Nightly run",
+          hiddenAt: "2026-09-01T01:00:00.000Z",
+        },
+        { ...base, id: ThreadId.make("visible"), title: "Visible task" },
+      ],
+      deliveryUnknownThreadKeys: new Set(),
+      localQueuedThreadKeys: new Set(),
+      activeThreadKey: null,
+      autoSettleAfterDays: null,
+      pinnedThreadKeys: new Set(),
+      onOpenThread: vi.fn(),
+    };
+    const mounted = await render(<InboxSidebar {...props} />);
+    try {
+      const hiddenHeader = page.getByRole("button", { name: /Hidden/ });
+      await expect.element(hiddenHeader).toHaveAttribute("aria-expanded", "false");
+      expect(document.body.textContent).not.toContain("Nightly run");
+      await hiddenHeader.click();
+      await expect.element(page.getByText("Nightly run")).toBeVisible();
+
+      await page.getByRole("button", { name: "Thread actions for Visible task" }).click();
+      await page.getByRole("menuitem", { name: "Hide until needed" }).click();
+      await vi.waitFor(() => expect(dispatchCommand).toHaveBeenCalledTimes(1));
+      expect(dispatchCommand.mock.calls[0]![0]).toMatchObject({
+        type: "thread.hide",
+        threadId: ThreadId.make("visible"),
+      });
+
+      await page.getByRole("button", { name: "Thread actions for Nightly run" }).click();
+      await page.getByRole("menuitem", { name: "Show in Inbox" }).click();
+      await vi.waitFor(() => expect(dispatchCommand).toHaveBeenCalledTimes(2));
+      expect(dispatchCommand.mock.calls[1]![0]).toMatchObject({
+        type: "thread.unhide",
+        threadId: ThreadId.make("nightly"),
+      });
     } finally {
       await mounted.unmount();
     }
@@ -402,7 +728,6 @@ describe("Inbox sidebar rendering and settlement", () => {
       deliveryUnknownThreadKeys: new Set(),
       localQueuedThreadKeys: new Set(),
       activeThreadKey: null,
-      aiFocusEnabled: false,
       autoSettleAfterDays: null,
       pinnedThreadKeys: new Set(),
       onOpenThread: vi.fn(),
@@ -441,7 +766,6 @@ describe("Inbox sidebar rendering and settlement", () => {
     "preserves inbox detail and settlement (worktree: %s)",
     async (isWorktree) => {
       await page.viewport(1_280, 800);
-      const now = Date.now();
       const performThreadMenuAction = vi.fn(async () => undefined);
       const onOpenThread = vi.fn();
       const dispatchCommand = vi.fn(async (_command: unknown) => undefined);
@@ -559,19 +883,6 @@ describe("Inbox sidebar rendering and settlement", () => {
               hasPendingApprovals: false,
               hasPendingUserInput: false,
               hasActionableProposedPlan: false,
-              priority: {
-                tier: "now",
-                confidence: "high",
-                reason: "A release decision is waiting on this task.",
-                inputFingerprint: "fingerprint" as never,
-                batchId: "batch" as never,
-                modelSelection: {
-                  instanceId: ProviderInstanceId.make("codex"),
-                  model: "gpt-5.4",
-                },
-                rankedAt: new Date(now - 60_000).toISOString(),
-                usableUntil: new Date(now + 10 * 60_000).toISOString(),
-              },
             },
           ]}
           environments={[
@@ -607,7 +918,6 @@ describe("Inbox sidebar rendering and settlement", () => {
           deliveryUnknownThreadKeys={new Set()}
           localQueuedThreadKeys={new Set()}
           activeThreadKey={null}
-          aiFocusEnabled
           autoSettleAfterDays={null}
           pinnedThreadKeys={new Set()}
           onOpenThread={onOpenThread}
@@ -625,7 +935,6 @@ describe("Inbox sidebar rendering and settlement", () => {
 
       try {
         const row = page.getByTestId("inbox-thread-row");
-        expect(document.body.textContent).toContain("Focus");
         expect(getThreadWindow).not.toHaveBeenCalled();
         await row.hover();
         await vi.waitFor(() => {
@@ -705,9 +1014,7 @@ describe("Inbox sidebar rendering and settlement", () => {
         expect(popup.textContent).toContain("GPT-5.4");
         expect(popup.textContent).not.toContain("Codex ·");
         expect(popup.querySelector('[aria-label="Codex"]')).not.toBeNull();
-        expect(popup.textContent).toContain("Why focused? Now.");
-        expect(popup.textContent).toContain("A release decision is waiting on this task.");
-        expect(popup.textContent).toContain("GPT-5.4 · ranked");
+        expect(popup.textContent).not.toContain("Why focused?");
         expect(getComputedStyle(popup).width).toBe("320px");
         expect(popup.getBoundingClientRect().left).toBeGreaterThanOrEqual(
           rowElement.getBoundingClientRect().right,
@@ -797,7 +1104,6 @@ describe("Inbox sidebar delegated threads", () => {
     deliveryUnknownThreadKeys: new Set(),
     localQueuedThreadKeys: new Set(),
     activeThreadKey,
-    aiFocusEnabled: false,
     autoSettleAfterDays: null,
     pinnedThreadKeys: new Set(),
     onOpenThread: vi.fn(),
@@ -898,6 +1204,102 @@ describe("Inbox sidebar delegated threads", () => {
         .toHaveAttribute("aria-expanded", "true");
       await expect.element(page.getByRole("heading", { name: "Needs input" })).toBeInTheDocument();
       expect(rowTitles()).toEqual(["Coordinator task", "Worker task"]);
+    } finally {
+      await mounted.unmount();
+    }
+  });
+});
+
+describe("Inbox row filters", () => {
+  afterEach(() => {
+    useInboxFilterStore.setState({ environmentId: null, project: null });
+    document.body.innerHTML = "";
+  });
+
+  it("narrows the Inbox to a row's project on every machine, and back", async () => {
+    const otherEnvironmentId = EnvironmentId.make("environment-filter-other");
+    const hubProjectId = ProjectId.make("project-filter-hub");
+    const repositoryIdentity = {
+      canonicalKey: "github.com/example/ryco",
+      locator: {
+        source: "git-remote",
+        remoteName: "origin",
+        remoteUrl: "https://github.com/example/ryco.git",
+      },
+    } as const;
+    const project = (environmentId: EnvironmentId, id: ProjectId, name: string) => ({
+      id,
+      environmentId,
+      name,
+      cwd: `/repo/${name.toLowerCase()}`,
+      defaultModelSelection: null,
+      scripts: [],
+      ...(name === "Ryco" ? { repositoryIdentity } : {}),
+    });
+    const filterThread = (
+      title: string,
+      environmentId: EnvironmentId,
+      projectId: ProjectId,
+    ): SidebarThreadSummary => ({
+      id: ThreadId.make(title),
+      environmentId,
+      projectId,
+      title,
+      interactionMode: "default",
+      session: null,
+      createdAt: "2026-09-01T00:00:00.000Z",
+      archivedAt: null,
+      latestTurn: null,
+      branch: null,
+      worktreePath: null,
+      latestUserMessageAt: null,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+    });
+    const mounted = await render(
+      <InboxSidebar
+        projects={[
+          project(ENVIRONMENT_ID, PROJECT_ID, "Ryco"),
+          project(otherEnvironmentId, PROJECT_ID, "Ryco"),
+          project(ENVIRONMENT_ID, hubProjectId, "Hub"),
+        ]}
+        worktrees={[]}
+        environments={[]}
+        threads={[
+          filterThread("Ryco here", ENVIRONMENT_ID, PROJECT_ID),
+          filterThread("Ryco there", otherEnvironmentId, PROJECT_ID),
+          filterThread("Hub task", ENVIRONMENT_ID, hubProjectId),
+        ]}
+        deliveryUnknownThreadKeys={new Set()}
+        localQueuedThreadKeys={new Set()}
+        activeThreadKey={null}
+        autoSettleAfterDays={null}
+        pinnedThreadKeys={new Set()}
+        onOpenThread={vi.fn()}
+      />,
+    );
+    try {
+      const rowTitles = () =>
+        [...document.querySelectorAll('[data-testid="inbox-thread-row"] .inbox-row-title')]
+          .map((title) => title.textContent?.trim())
+          .toSorted();
+      expect(rowTitles()).toEqual(["Hub task", "Ryco here", "Ryco there"]);
+
+      await page.getByRole("button", { name: "Thread actions for Ryco here" }).click();
+      await page.getByRole("menuitem", { name: "Filter by Ryco", exact: true }).click();
+      await vi.waitFor(() => expect(rowTitles()).toEqual(["Ryco here", "Ryco there"]));
+      expect(useInboxFilterStore.getState().project?.label).toBe("Ryco");
+
+      // The other machine's member of the project reads as the same filter.
+      await page.getByRole("button", { name: "Thread actions for Ryco there" }).click();
+      // The first row's menu may still be closing.
+      await page
+        .getByRole("menu", { name: "Thread actions for Ryco there" })
+        .getByRole("menuitem", { name: "Show all projects", exact: true })
+        .click();
+      await vi.waitFor(() => expect(rowTitles()).toEqual(["Hub task", "Ryco here", "Ryco there"]));
+      expect(useInboxFilterStore.getState().project).toBeNull();
     } finally {
       await mounted.unmount();
     }

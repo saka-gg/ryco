@@ -1,4 +1,5 @@
 import { spawn as spawnChild } from "node:child_process";
+import { realpathSync } from "node:fs";
 import NodePath from "node:path";
 
 import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
@@ -16,13 +17,16 @@ import {
   NodeE2eeAdmissionPolicy,
   OrchestrationReadModel,
   ProjectId,
+  RuntimeMode as ThreadRuntimeMode,
   type ClientOrchestrationCommand,
 } from "@ryco/contracts";
 import {
+  Clock,
   Config,
   Console,
   type Context,
   Data,
+  DateTime,
   Duration,
   Effect,
   Exit,
@@ -44,6 +48,7 @@ import type * as Terminal from "effect/Terminal";
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import {
+  DEFAULT_KEEP_AWAKE_WHILE_WORKING,
   DEFAULT_PORT,
   resolveHubConnectorConfig,
   resolveNodeE2eePolicyConfig,
@@ -75,8 +80,9 @@ import {
   E2eeSessionListView,
 } from "./hubConnector/e2eeOperatorContract.ts";
 import { expandHomePath, resolveBaseDir } from "./os-jank.ts";
+import { runRequestedFlavorImport } from "./flavorImportStartup.ts";
 import { runServer } from "./server.ts";
-import { renderTerminalQrCode } from "./startupAccess.ts";
+import { loadTerminalQrCode } from "./startupAccess.ts";
 import {
   EMPTY_NODE_CONFIG,
   nodeConfigAsServeArgs,
@@ -85,6 +91,7 @@ import {
   writeNodeConfig,
 } from "./cliSetup/nodeConfig.ts";
 import { applyNodeSettings, installServiceForNode } from "./cliSetup/nodeSetup.ts";
+import { makeDoctorCommand } from "./doctor/doctorCommand.ts";
 import {
   formatNodeConfig,
   lookupConfigKey,
@@ -97,18 +104,27 @@ import {
   readCliPreferences,
   writeCliPreferences,
 } from "./cliSetup/preferences.ts";
+import { SetupError } from "./cliSetup/setupError.ts";
+import type { SetupContext, SetupOperations } from "./cliSetup/setupFlow.ts";
 import {
-  editNodeConfigFile,
-  runFirstTimeSetup,
-  runNodeManager,
-  runSetup,
-  SetupError,
-  type SetupContext,
-  type SetupOperations,
-} from "./cliSetup/setupFlow.ts";
+  discoverPairingLinks,
+  formatPairingQrBlock,
+  pairingLinksForBaseUrl,
+} from "./cliSetup/pairingQr.ts";
 import { cliCommandPrefix, dim, isInteractiveTerminal } from "./cliSetup/ui.ts";
+import { makeDbCommand } from "./cliDb/dbCommand.ts";
+import {
+  makeTraceCommand,
+  type TraceLocation,
+  type TraceLocationFlags,
+} from "./cliTrace/traceCommand.ts";
+import {
+  OtelEnvironmentConfig,
+  resolveServerOtlpExports,
+} from "./observability/OtelEnvironment.ts";
 import packageJson from "../package.json" with { type: "json" };
 import type { CliRemoteError } from "./cliRemote/remotes.ts";
+import type { ThreadCliCommand } from "./cliThread/threadCommands.ts";
 import { resolveStandbyHubConnectorConfig } from "./hubConnector/HubConnectorStandby.ts";
 import {
   nodeServiceLabel,
@@ -131,21 +147,25 @@ import {
   OWNER_BOOTSTRAP_PAIRING_SUBJECT,
   OWNER_PAIRING_LINK_MAX_TTL,
 } from "./auth/Services/AuthControlPlane.ts";
+import { readThreadMessageLimit, toReadThreadResult } from "./agentControl/Mcp/threadTranscript.ts";
 import type { AuthControlPlaneShape } from "./auth/Services/AuthControlPlane.ts";
 import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
-import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
+import { layerConfigCli as SqlitePersistenceCliLayerLive } from "./persistence/Layers/Sqlite.ts";
 import { ProjectAvatarStoreLive } from "./project/Layers/ProjectAvatarStore.ts";
 import { RepositoryIdentityResolverLive } from "./project/Layers/RepositoryIdentityResolver.ts";
 import {
-  clearPersistedServerRuntimeState,
+  clearPersistedServerRuntimeStateIfStale,
+  isPersistedServerRunning,
+  type PersistedServerRuntimeState,
   readPersistedServerRuntimeState,
 } from "./serverRuntimeState.ts";
 import { WorkspacePaths } from "./workspace/Services/WorkspacePaths.ts";
 import { WorkspaceAccessPolicyLive } from "./workspace/Layers/WorkspaceAccessPolicy.ts";
 import { WorkspacePathsLive } from "./workspace/Layers/WorkspacePaths.ts";
 
+import { withDesktopParentLifetime } from "./desktopParentLifetime.ts";
 import { initializeDesktopResourceTelemetry } from "./diagnostics/DesktopResourceTelemetry.ts";
 
 const PortSchema = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 }));
@@ -193,6 +213,14 @@ const BootstrapEnvelopeSchema = Schema.Struct({
    * `process.env` before any layer is built; unknown names are ignored.
    */
   shellEnvironment: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  /**
+   * Ryco Nightly only: the one Ryco data home this backend may copy from when Ryco left a copy
+   * request in its home (flavorImportStartup.ts), and the token of the launch Ryco opened it
+   * with (only that launch's request is taken). Honoured only in desktop mode.
+   */
+  flavorImport: Schema.optional(
+    Schema.Struct({ allowedSourceHome: Schema.String, requestToken: Schema.String }),
+  ),
 });
 
 const modeFlag = Flag.Literals("mode", RuntimeMode.literals).pipe(
@@ -292,6 +320,12 @@ const preventSleepFlag = Flag.Boolean("prevent-sleep").pipe(
   ),
   Flag.optional,
 );
+const keepAwakeWhileWorkingFlag = Flag.Boolean("keep-awake-while-working").pipe(
+  Flag.withDescription(
+    "Keep the machine from idle-sleeping while agents work and for 2 minutes after, on AC power only (default on; --no-keep-awake-while-working turns it off; equivalent to RYCO_KEEP_AWAKE_WHILE_WORKING). --prevent-sleep holds it for the whole run instead.",
+  ),
+  Flag.optional,
+);
 const tailscaleServeFlag = Flag.Boolean("tailscale-serve").pipe(
   Flag.withDescription(
     "Configure Tailscale Serve to expose this backend over HTTPS on the Tailnet.",
@@ -304,16 +338,23 @@ const tailscaleServePortFlag = Flag.Int("tailscale-serve-port").pipe(
   Flag.optional,
 );
 
-const EnvServerConfig = Config.all({
-  logLevel: Config.LogLevel("RYCO_LOG_LEVEL").pipe(Config.withDefault("Info")),
-  traceMinLevel: Config.LogLevel("RYCO_TRACE_MIN_LEVEL").pipe(Config.withDefault("Info")),
-  traceTimingEnabled: Config.Boolean("RYCO_TRACE_TIMING_ENABLED").pipe(Config.withDefault(true)),
+/** Where the data directory and the trace file are; `ryco trace` reads only these variables. */
+const traceLocationEnvFields = {
+  rycoHome: Config.String("RYCO_HOME").pipe(Config.option, Config.map(Option.getOrUndefined)),
+  devUrl: Config.URL("VITE_DEV_SERVER_URL").pipe(Config.option, Config.map(Option.getOrUndefined)),
   traceFile: Config.String("RYCO_TRACE_FILE").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
-  traceMaxBytes: Config.Int("RYCO_TRACE_MAX_BYTES").pipe(Config.withDefault(10 * 1024 * 1024)),
   traceMaxFiles: Config.Int("RYCO_TRACE_MAX_FILES").pipe(Config.withDefault(10)),
+};
+
+const EnvServerConfig = Config.all({
+  ...traceLocationEnvFields,
+  logLevel: Config.LogLevel("RYCO_LOG_LEVEL").pipe(Config.withDefault("Info")),
+  traceMinLevel: Config.LogLevel("RYCO_TRACE_MIN_LEVEL").pipe(Config.withDefault("Info")),
+  traceTimingEnabled: Config.Boolean("RYCO_TRACE_TIMING_ENABLED").pipe(Config.withDefault(true)),
+  traceMaxBytes: Config.Int("RYCO_TRACE_MAX_BYTES").pipe(Config.withDefault(10 * 1024 * 1024)),
   traceBatchWindowMs: Config.Int("RYCO_TRACE_BATCH_WINDOW_MS").pipe(Config.withDefault(200)),
   otlpTracesUrl: Config.String("RYCO_OTLP_TRACES_URL").pipe(
     Config.option,
@@ -323,6 +364,11 @@ const EnvServerConfig = Config.all({
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
+  otlpLogsUrl: Config.String("RYCO_OTLP_LOGS_URL").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
+  otel: OtelEnvironmentConfig,
   otlpExportIntervalMs: Config.Int("RYCO_OTLP_EXPORT_INTERVAL_MS").pipe(Config.withDefault(10_000)),
   browserTracesEnabled: Config.Boolean("RYCO_BROWSER_TRACES").pipe(Config.withDefault(false)),
   otlpServiceName: Config.String("RYCO_OTLP_SERVICE_NAME").pipe(Config.withDefault("ryco-server")),
@@ -332,8 +378,6 @@ const EnvServerConfig = Config.all({
   ),
   port: Config.Port("RYCO_PORT").pipe(Config.option, Config.map(Option.getOrUndefined)),
   host: Config.String("RYCO_HOST").pipe(Config.option, Config.map(Option.getOrUndefined)),
-  rycoHome: Config.String("RYCO_HOME").pipe(Config.option, Config.map(Option.getOrUndefined)),
-  devUrl: Config.URL("VITE_DEV_SERVER_URL").pipe(Config.option, Config.map(Option.getOrUndefined)),
   noBrowser: Config.Boolean("RYCO_NO_BROWSER").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
@@ -351,6 +395,10 @@ const EnvServerConfig = Config.all({
     Config.map(Option.getOrUndefined),
   ),
   preventSleep: Config.Boolean("RYCO_PREVENT_SLEEP").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
+  keepAwakeWhileWorking: Config.Boolean("RYCO_KEEP_AWAKE_WHILE_WORKING").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
@@ -432,6 +480,7 @@ interface CliServerFlags {
   readonly hubRequireApprovedClientE2EE?: Option.Option<boolean>;
   readonly hubE2eePolicy?: Option.Option<string>;
   readonly preventSleep?: Option.Option<boolean>;
+  readonly keepAwakeWhileWorking?: Option.Option<boolean>;
   readonly tailscaleServeEnabled: Option.Option<boolean>;
   readonly tailscaleServePort: Option.Option<number>;
 }
@@ -461,7 +510,7 @@ export const resolveServerConfig = (
   cliLogLevel: Option.Option<LogLevel.LogLevel>,
   options?: {
     readonly startupPresentation?: StartupPresentation;
-    readonly forceAutoBootstrapProjectFromCwd?: boolean;
+    readonly defaultAutoBootstrapProjectFromCwd?: boolean;
     /**
      * Read `<state dir>/node.json` as the layer between environment variables
      * and defaults. Server commands only; never for a Desktop-spawned backend.
@@ -495,6 +544,7 @@ export const resolveServerConfig = (
       hubRequireApprovedClientE2EE: flags.hubRequireApprovedClientE2EE ?? Option.none(),
       hubE2eePolicy: flags.hubE2eePolicy ?? Option.none(),
       preventSleep: flags.preventSleep ?? Option.none(),
+      keepAwakeWhileWorking: flags.keepAwakeWhileWorking ?? Option.none(),
       tailscaleServeEnabled: flags.tailscaleServeEnabled ?? Option.none(),
       tailscaleServePort: flags.tailscaleServePort ?? Option.none(),
     } satisfies CliServerFlags;
@@ -640,11 +690,13 @@ export const resolveServerConfig = (
     );
     const desktopBootstrapToken = bootstrap?.desktopBootstrapToken;
     const desktopControlToken = bootstrap?.desktopControlToken;
+    // An explicit flag wins; otherwise `serve`/`setup` and headless startups never register the
+    // directory they happen to run in, whatever the environment says.
     const autoBootstrapProjectFromCwd = Option.getOrElse(
       resolveOptionPrecedence(
-        Option.fromUndefinedOr(options?.forceAutoBootstrapProjectFromCwd),
-        isHeadlessStartup ? Option.some(false) : Option.none(),
         normalizedFlags.autoBootstrapProjectFromCwd,
+        Option.fromUndefinedOr(options?.defaultAutoBootstrapProjectFromCwd),
+        isHeadlessStartup ? Option.some(false) : Option.none(),
         Option.fromUndefinedOr(env.autoBootstrapProjectFromCwd),
         Option.fromUndefinedOr(bootstrap?.autoBootstrapProjectFromCwd),
       ),
@@ -780,6 +832,20 @@ export const resolveServerConfig = (
       ),
     });
 
+    const otlp = yield* resolveServerOtlpExports(env.otel, {
+      traces: {
+        rycoEnvUrl: env.otlpTracesUrl,
+        bootstrapUrl: bootstrap?.otlpTracesUrl,
+        settingsUrl: persistedObservabilitySettings.otlpTracesUrl,
+      },
+      metrics: {
+        rycoEnvUrl: env.otlpMetricsUrl,
+        bootstrapUrl: bootstrap?.otlpMetricsUrl,
+        settingsUrl: persistedObservabilitySettings.otlpMetricsUrl,
+      },
+      logs: { rycoEnvUrl: env.otlpLogsUrl },
+    });
+
     const config: ServerConfigShape = {
       logLevel,
       traceMinLevel: env.traceMinLevel,
@@ -787,14 +853,14 @@ export const resolveServerConfig = (
       traceBatchWindowMs: env.traceBatchWindowMs,
       traceMaxBytes: env.traceMaxBytes,
       traceMaxFiles: env.traceMaxFiles,
-      otlpTracesUrl:
-        env.otlpTracesUrl ??
-        bootstrap?.otlpTracesUrl ??
-        persistedObservabilitySettings.otlpTracesUrl,
-      otlpMetricsUrl:
-        env.otlpMetricsUrl ??
-        bootstrap?.otlpMetricsUrl ??
-        persistedObservabilitySettings.otlpMetricsUrl,
+      otlpTracesUrl: otlp.traces.url,
+      otlpMetricsUrl: otlp.metrics.url,
+      ...(otlp.logs.url !== undefined ? { otlpLogsUrl: otlp.logs.url } : {}),
+      ...(otlp.exports !== undefined ? { otlpExports: otlp.exports } : {}),
+      ...(otlp.resourceAttributes !== undefined
+        ? { otlpResourceAttributes: otlp.resourceAttributes }
+        : {}),
+      ...(otlp.warnings.length > 0 ? { observabilityWarnings: otlp.warnings } : {}),
       otlpExportIntervalMs: env.otlpExportIntervalMs,
       ...(env.browserTracesEnabled ? { browserTracesEnabled: true } : {}),
       otlpServiceName: env.otlpServiceName,
@@ -815,6 +881,9 @@ export const resolveServerConfig = (
       ...(mode === "desktop" && bootstrap?.computerUseBridge
         ? { computerUseBridge: bootstrap.computerUseBridge }
         : {}),
+      ...(mode === "desktop" && bootstrap?.flavorImport
+        ? { flavorImport: bootstrap.flavorImport }
+        : {}),
       autoBootstrapProjectFromCwd,
       logWebSocketEvents,
       tailscaleServeEnabled,
@@ -824,6 +893,16 @@ export const resolveServerConfig = (
         env.preventSleep ??
         nodeConfig?.preventSleep ??
         false,
+      // Desktop main holds the machine awake for a desktop backend, so it stays unset there.
+      ...(mode === "desktop"
+        ? {}
+        : {
+            keepAwakeWhileWorking:
+              Option.getOrUndefined(normalizedFlags.keepAwakeWhileWorking) ??
+              env.keepAwakeWhileWorking ??
+              nodeConfig?.keepAwakeWhileWorking ??
+              DEFAULT_KEEP_AWAKE_WHILE_WORKING,
+          }),
       hubConnector,
       hubE2eePolicy,
     };
@@ -854,6 +933,45 @@ class NodeConfigLoadError extends Data.TaggedError("NodeConfigLoadError")<{
   readonly cause?: unknown;
 }> {}
 
+/**
+ * Set by Ryco Desktop's `ryco` command launcher to the home of the app's own
+ * node (apps/desktop/src/desktopCliCommand.ts).
+ */
+const DESKTOP_CLI_HOME_ENV = "RYCO_DESKTOP_CLI";
+
+class DesktopOwnedNodeError extends Data.TaggedError("DesktopOwnedNodeError")<{
+  readonly message: string;
+}> {}
+
+/**
+ * The desktop's command runs admin commands against the app's node; starting a
+ * second node, or a service, for that home would fight the app over its data.
+ * Returns the refusal, or `null` when `baseDir` is not the desktop app's home.
+ */
+/** The folder's real path, so another spelling of it (a link, letter case on APFS) is the same. */
+const canonicalPath = (path: string) => {
+  const resolved = NodePath.resolve(path);
+  try {
+    return realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+};
+
+export const desktopOwnedNodeRefusal = (
+  env: Readonly<Record<string, string | undefined>>,
+  baseDir: string,
+): string | null => {
+  const desktopHome = env[DESKTOP_CLI_HOME_ENV]?.trim();
+  if (!desktopHome || canonicalPath(desktopHome) !== canonicalPath(baseDir)) return null;
+  return `Ryco Desktop runs the node for ${baseDir}. Open Ryco to start it; \`ryco --help\` lists the commands that work with it.`;
+};
+
+const refuseDesktopOwnedNode = (baseDir: string) => {
+  const message = desktopOwnedNodeRefusal(process.env, baseDir);
+  return message === null ? Effect.void : Effect.fail(new DesktopOwnedNodeError({ message }));
+};
+
 const resolveCliAuthConfig = (
   flags: CliAuthLocationFlags,
   cliLogLevel: Option.Option<LogLevel.LogLevel>,
@@ -876,6 +994,31 @@ const resolveCliAuthConfig = (
     },
     cliLogLevel,
   );
+
+/**
+ * The trace file the server writes, found the way `resolveServerConfig` finds it, but without
+ * creating the data directory's folders: `ryco trace` only reads.
+ */
+const resolveTraceLocation = (flags: TraceLocationFlags) =>
+  Effect.gen(function* () {
+    const env = yield* Config.all(traceLocationEnvFields);
+    const devUrl = Option.getOrUndefined(
+      resolveOptionPrecedence(flags.devUrl, Option.fromUndefinedOr(env.devUrl)),
+    );
+    const baseDir = yield* resolveBaseDir(
+      Option.getOrUndefined(
+        resolveOptionPrecedence(flags.baseDir, Option.fromUndefinedOr(env.rycoHome)),
+      ),
+    );
+    const { stateDir, serverTracePath } = yield* deriveServerPaths(baseDir, devUrl);
+    return {
+      baseDir,
+      stateDir,
+      traceFilePath: env.traceFile ?? serverTracePath,
+      traceFileFromEnv: env.traceFile !== undefined,
+      maxBackups: env.traceMaxFiles,
+    } satisfies TraceLocation;
+  });
 
 const DurationShorthandPattern = /^(?<value>\d+)(?<unit>ms|s|m|h|d|w)$/i;
 
@@ -966,9 +1109,12 @@ const quietly = <A, E, R>(
 ): Effect.Effect<A, E, R> =>
   quiet ? Effect.provideService(effect, References.MinimumLogLevel, "Error") : effect;
 
-const runWithAuthControlPlane = <A, E>(
+const runWithAuthControlPlane = <A, E, R = never>(
   flags: CliAuthLocationFlags,
-  run: (authControlPlane: AuthControlPlaneShape) => Effect.Effect<A, E>,
+  run: (
+    authControlPlane: AuthControlPlaneShape,
+    config: ServerConfigShape,
+  ) => Effect.Effect<A, E, R>,
   options?: {
     readonly quietLogs?: boolean;
   },
@@ -982,7 +1128,7 @@ const runWithAuthControlPlane = <A, E>(
       const minimumLogLevel = quiet ? "Error" : adminCommandLogLevel(logLevel, config.logLevel);
       return yield* Effect.gen(function* () {
         const authControlPlane = yield* AuthControlPlane;
-        return yield* run(authControlPlane);
+        return yield* run(authControlPlane, config);
       }).pipe(
         Effect.provide(
           Layer.mergeAll(AuthControlPlaneRuntimeLive).pipe(
@@ -1020,7 +1166,7 @@ const ProjectCliRuntimeLive = Layer.mergeAll(
   OrchestrationLayerLive.pipe(
     Layer.provideMerge(RepositoryIdentityResolverLive),
     Layer.provideMerge(ProjectAvatarStoreFromConfigLayer),
-    Layer.provideMerge(SqlitePersistenceLayerLive),
+    Layer.provideMerge(SqlitePersistenceCliLayerLive),
   ),
 );
 
@@ -1199,7 +1345,10 @@ const tryResolveLiveProjectExecutionMode = Effect.fn("tryResolveLiveProjectExecu
       return Option.some(attempted.value);
     }
 
-    yield* clearPersistedServerRuntimeState(config.serverRuntimeStatePath);
+    yield* clearPersistedServerRuntimeStateIfStale(
+      config.serverRuntimeStatePath,
+      runtimeState.value,
+    );
     return Option.none<{ readonly origin: string }>();
   },
 );
@@ -1477,6 +1626,7 @@ const sharedServerCommandFlags = {
   hubRequireApprovedClientE2EE: hubRequireApprovedClientE2EEFlag,
   hubE2eePolicy: hubE2eePolicyFlag,
   preventSleep: preventSleepFlag,
+  keepAwakeWhileWorking: keepAwakeWhileWorkingFlag,
   tailscaleServeEnabled: tailscaleServeFlag,
   tailscaleServePort: tailscaleServePortFlag,
 } as const;
@@ -1556,6 +1706,15 @@ const tokenOnlyFlag = Flag.Boolean("token-only").pipe(
   Flag.withDefault(false),
 );
 
+const qrFlag = Flag.Boolean("qr").pipe(
+  Flag.withDescription(
+    "Print the pairing link as a QR code (default when the output is a terminal, never with --json; `--no-qr` turns it off).",
+  ),
+  Flag.optional,
+);
+
+const PAIRING_QR_NO_NODE_NOTE = "No running node found; pass --base-url to print a QR code.";
+
 const pairingCreateCommand = Command.make("create", {
   ...authLocationFlags,
   role: pairingRoleFlag,
@@ -1563,12 +1722,13 @@ const pairingCreateCommand = Command.make("create", {
   label: labelFlag,
   baseUrl: baseUrlFlag,
   json: jsonFlag,
+  qr: qrFlag,
 }).pipe(
   Command.withDescription("Issue a new one-time pairing token (client unless --role owner)."),
   Command.withHandler((flags) =>
     runWithAuthControlPlane(
       flags,
-      (authControlPlane) =>
+      (authControlPlane, config) =>
         Effect.gen(function* () {
           const issued = yield* authControlPlane.createPairingLink({
             role: flags.role,
@@ -1576,11 +1736,74 @@ const pairingCreateCommand = Command.make("create", {
             ...(Option.isSome(flags.ttl) ? { ttl: flags.ttl.value } : {}),
             ...(Option.isSome(flags.label) ? { label: flags.label.value } : {}),
           });
-          const output = formatIssuedPairingCredential(issued, {
-            json: flags.json,
-            ...(Option.isSome(flags.baseUrl) ? { baseUrl: flags.baseUrl.value } : {}),
+          // `--json` never draws a QR and never looks for the node: with `--base-url` it reports
+          // the link a QR would hold, as before plus `qrUrl`.
+          const wantsQr = !flags.json && Option.getOrElse(flags.qr, () => isInteractiveTerminal());
+          if (!wantsQr) {
+            yield* Console.log(
+              formatIssuedPairingCredential(issued, {
+                json: flags.json,
+                ...(Option.isSome(flags.baseUrl)
+                  ? (() => {
+                      const links = pairingLinksForBaseUrl(issued.credential, flags.baseUrl.value);
+                      return { pairUrl: links.pairingUrl, qrUrl: links.qrUrl };
+                    })()
+                  : {}),
+              }),
+            );
+            return;
+          }
+          const runtime = Option.isSome(flags.baseUrl)
+            ? null
+            : yield* probeLocalServerRuntime(config.serverRuntimeStatePath);
+          // The node's own bind host (its runtime file) and its saved Tailscale Serve settings:
+          // the QR must hold an address that node really listens on.
+          const savedNode =
+            runtime === null
+              ? null
+              : yield* Effect.promise(() => readNodeConfig(nodeConfigPath(config.stateDir)));
+          const links = Option.isSome(flags.baseUrl)
+            ? pairingLinksForBaseUrl(issued.credential, flags.baseUrl.value)
+            : runtime === null
+              ? null
+              : yield* Effect.promise(() =>
+                  discoverPairingLinks({
+                    credential: issued.credential,
+                    origin: runtime.origin,
+                    host: runtime.host,
+                    tailscaleServeEnabled:
+                      config.tailscaleServeEnabled || savedNode?.tailscaleServe === true,
+                    tailscaleServePort: savedNode?.tailscaleServePort ?? config.tailscaleServePort,
+                  }),
+                ).pipe(Effect.orElseSucceed(() => null));
+          const summary = formatIssuedPairingCredential(issued, {
+            ...(links === null ? {} : { pairUrl: links.pairingUrl }),
           });
-          yield* Console.log(output);
+          if (links === null) {
+            yield* Console.log(`${summary}${PAIRING_QR_NO_NODE_NOTE}\n`);
+            return;
+          }
+          const minutes = Math.max(
+            1,
+            Math.round(
+              (DateTime.toEpochMillis(issued.expiresAt) - (yield* Clock.currentTimeMillis)) /
+                60_000,
+            ),
+          );
+          const renderQrCode = yield* loadTerminalQrCode;
+          yield* Console.log(
+            `${summary}${formatPairingQrBlock({
+              links,
+              renderQrCode,
+              // An owner link is capped at OWNER_PAIRING_LINK_MAX_TTL by `createPairingLink`.
+              footer: [
+                `One-time ${issued.role} link, valid for ${minutes} minute${minutes === 1 ? "" : "s"}.`,
+              ],
+              // The summary above already printed it as "Pair URL".
+              showPairingUrl: false,
+              dim,
+            })}`,
+          );
         }),
       {
         quietLogs: flags.json,
@@ -2617,15 +2840,17 @@ const e2eeClientApprovalQrCommand = Command.make("approval-qr", {
       { quietLogs: flags.json },
     ).pipe(
       Effect.flatMap((approval) =>
-        Console.log(
-          flags.json
-            ? emitJson(approval)
-            : [
-                "Scan this code in Ryco on the approved phone. It expires after five minutes.",
-                renderTerminalQrCode(approval.payload),
-                "The code grants no access by itself; the phone still reconnects with a fresh ticket, channel, and IK handshake.",
-              ].join("\n"),
-        ),
+        flags.json
+          ? Console.log(emitJson(approval))
+          : Effect.flatMap(loadTerminalQrCode, (renderQrCode) =>
+              Console.log(
+                [
+                  "Scan this code in Ryco on the approved phone. It expires after five minutes.",
+                  renderQrCode(approval.payload),
+                  "The code grants no access by itself; the phone still reconnects with a fresh ticket, channel, and IK handshake.",
+                ].join("\n"),
+              ),
+            ),
       ),
     ),
   ),
@@ -3322,13 +3547,21 @@ const runServerCommand = (
   flags: CliServerFlags,
   options?: {
     readonly startupPresentation?: StartupPresentation;
-    readonly forceAutoBootstrapProjectFromCwd?: boolean;
+    readonly defaultAutoBootstrapProjectFromCwd?: boolean;
   },
 ) =>
   Effect.gen(function* () {
     const logLevel = yield* GlobalFlag.LogLevel;
     const config = yield* resolveServerConfig(flags, logLevel, { ...options, useNodeConfig: true });
-    return yield* runServer.pipe(Effect.provideService(ServerConfig, config));
+    yield* refuseDesktopOwnedNode(config.baseDir);
+    // resolveServerConfig has started the desktop pipe watch this race reads
+    // (initializeDesktopResourceTelemetry), so it must stay ahead of it. A copy of Ryco's data
+    // that Ryco Nightly was asked for replaces its database before the server opens it.
+    return yield* runRequestedFlavorImport(config).pipe(
+      Effect.andThen(runServer),
+      Effect.provideService(ServerConfig, config),
+      withDesktopParentLifetime,
+    );
   });
 
 // ─── ryco service ─────────────────────────────────────────────────────────────
@@ -3385,6 +3618,7 @@ const serviceInstallCommand = Command.make("install", {
   tailscaleServePort: tailscaleServePortFlag,
   restrictToCwd: restrictToCwdFlag,
   preventSleep: preventSleepFlag,
+  keepAwakeWhileWorking: keepAwakeWhileWorkingFlag,
   cwd: Argument.String("cwd").pipe(
     Argument.withDescription(
       "Working directory for provider sessions (defaults to the current directory).",
@@ -3398,6 +3632,7 @@ const serviceInstallCommand = Command.make("install", {
   Command.withHandler((flags) =>
     Effect.gen(function* () {
       const { platform, config, label, logPath } = yield* resolveServiceContext(flags.baseDir);
+      yield* refuseDesktopOwnedNode(config.baseDir);
       const configPath = nodeConfigPath(config.stateDir);
       const saved = yield* serviceProcess(() => readNodeConfig(configPath));
       const settings = applyNodeSettings(saved ?? EMPTY_NODE_CONFIG, {
@@ -3416,6 +3651,7 @@ const serviceInstallCommand = Command.make("install", {
         restrictToWorkspace: Option.getOrUndefined(flags.restrictToCwd),
         // A node installed to stay reachable should not idle-sleep; opt out explicitly.
         preventSleep: Option.getOrUndefined(flags.preventSleep) ?? saved?.preventSleep ?? true,
+        keepAwakeWhileWorking: Option.getOrUndefined(flags.keepAwakeWhileWorking),
       });
       yield* serviceProcess(() => writeNodeConfig(configPath, settings));
       const { definitionPath } = yield* serviceProcess(() =>
@@ -3502,13 +3738,65 @@ const serviceRestartCommand = Command.make("restart", { ...serviceLocationFlags 
   ),
 );
 
+/**
+ * `ryco service status --ready`: probe the node this home runs (as a service or
+ * a foreground `ryco serve`) instead of the service manager, and fail (exit 1)
+ * unless it answers as this home's node. For scripts and health checks.
+ */
+const probeServiceReadiness = Effect.fn("probeServiceReadiness")(function* (flags: {
+  readonly baseDir: Option.Option<string>;
+  readonly json: boolean;
+}) {
+  const logLevel = yield* GlobalFlag.LogLevel;
+  const config = yield* resolveCliAuthConfig({ baseDir: flags.baseDir }, logLevel);
+  const fileSystem = yield* FileSystem.FileSystem;
+  const runtime = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath).pipe(
+    Effect.map(Option.getOrUndefined),
+    Effect.orElseSucceed(() => undefined),
+  );
+  const environmentId = yield* fileSystem
+    .readFileString(config.environmentIdPath)
+    .pipe(Effect.orElseSucceed(() => undefined));
+  const { describeServerReadiness, probeServerReadiness } = yield* Effect.promise(
+    () => import("./cliStatus/readiness.ts"),
+  );
+  const readiness = yield* Effect.promise(() =>
+    probeServerReadiness({
+      runtime,
+      environmentId,
+      isRunning: (state) => isPersistedServerRunning(state),
+    }),
+  );
+  const description = describeServerReadiness(readiness);
+  yield* Console.log(
+    flags.json
+      ? JSON.stringify({
+          ready: readiness.ready,
+          reason: readiness.reason,
+          origin: readiness.origin,
+        })
+      : readiness.ready
+        ? `Ready:      ${readiness.origin}`
+        : `Ready:      no (${description.replace(/^not ready: /u, "")})`,
+  );
+  if (!readiness.ready) {
+    return yield* Effect.fail(new Error(description));
+  }
+});
+
 const serviceStatusCommand = Command.make("status", {
   ...serviceLocationFlags,
   json: jsonFlag,
+  ready: Flag.Boolean("ready").pipe(
+    Flag.withDescription(
+      "Only check that this home's node answers as itself within 3 seconds; exit 1 when it does not.",
+    ),
+  ),
 }).pipe(
   Command.withDescription("Show whether the background service is installed and running."),
   Command.withHandler((flags) =>
     Effect.gen(function* () {
+      if (flags.ready) return yield* probeServiceReadiness(flags);
       const { platform, config, label, logPath } = yield* resolveServiceContext(flags.baseDir);
       const status = yield* serviceProcess(() => readNodeServiceStatus(platform, label));
       const runtime = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath).pipe(
@@ -3765,6 +4053,251 @@ const remoteThreadsCommand = Command.make("threads", {
   ),
 );
 
+// ─── ryco thread ──────────────────────────────────────────────────────────────
+
+// Loads only for `ryco thread` and `ryco remote send`, never on the `serve` path.
+const loadThreadCli = Effect.promise(() => import("./cliThread/threadCommands.ts"));
+
+/**
+ * What reaching this machine's node takes (`ThreadCliLocal`): its address from the runtime file
+ * and its auth control plane, which issues the short-lived owner session.
+ */
+const localNodeAccess = (
+  flags: { readonly baseDir: Option.Option<string>; readonly json: boolean },
+  logLevel: Option.Option<LogLevel.LogLevel>,
+  fileSystem: FileSystem.FileSystem,
+) =>
+  Effect.map(resolveCliAuthConfig(flags, logLevel), (config) => ({
+    readOrigin: readPersistedServerRuntimeState(config.serverRuntimeStatePath).pipe(
+      Effect.map((state) => (Option.isSome(state) ? state.value.origin : null)),
+      Effect.orElseSucceed(() => null),
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+    ),
+    authControlPlane: AuthControlPlaneRuntimeLive.pipe(
+      Layer.provide(Layer.succeed(ServerConfig, config)),
+      Layer.provide(
+        Layer.succeed(
+          References.MinimumLogLevel,
+          flags.json ? "Error" : adminCommandLogLevel(logLevel, config.logLevel),
+        ),
+      ),
+    ),
+  }));
+
+const runThreadCli = (
+  flags: {
+    readonly baseDir: Option.Option<string>;
+    readonly remote: Option.Option<string>;
+    readonly json: boolean;
+  },
+  command: ThreadCliCommand,
+) =>
+  quietly(
+    flags.json,
+    Effect.gen(function* () {
+      const logLevel = yield* GlobalFlag.LogLevel;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const threadCli = yield* loadThreadCli;
+      yield* threadCli.runThreadCli(command, {
+        json: flags.json,
+        remote: flags.remote,
+        loadRemote: (name) => loadRemote(flags.baseDir, name),
+        local: localNodeAccess(flags, logLevel, fileSystem),
+        transcript: { toReadThreadResult, readThreadMessageLimit },
+      });
+    }),
+  );
+
+const threadLocationFlags = {
+  baseDir: baseDirFlag,
+  remote: Flag.String("remote").pipe(
+    Flag.withDescription("Run on a paired remote (`ryco remote add`) instead of this node."),
+    Flag.optional,
+  ),
+  json: jsonFlag,
+} as const;
+
+const threadIdArgument = Argument.String("thread-id").pipe(
+  Argument.withDescription("The thread's id."),
+);
+
+const threadPromptArgument = Argument.String("prompt").pipe(
+  Argument.withDescription("The message, or - to read it from stdin."),
+);
+
+const threadWaitFlag = Flag.Boolean("wait").pipe(
+  Flag.withDescription(
+    "Wait for the turn to end and print its reply. Exit 1 failed or stopped, 2 needs an approval or answer (or, for send, the thread's follow-up queue is held or waits for a Retry), 3 cut off by a node restart, 5 outcome unknown.",
+  ),
+  Flag.withDefault(false),
+);
+
+const threadTimeoutFlag = Flag.String("timeout").pipe(
+  Flag.withSchema(DurationFromString),
+  Flag.withDescription("Stop waiting after this long and exit 4, for example `30m`."),
+  Flag.optional,
+);
+
+const threadStartCommand = Command.make("start", {
+  ...threadLocationFlags,
+  project: Flag.String("project").pipe(
+    Flag.withDescription("Project id, or a path inside the project such as `.`."),
+  ),
+  title: Flag.String("title").pipe(
+    Flag.withDescription("Thread title. Defaults to the message's first line."),
+    Flag.optional,
+  ),
+  model: Flag.String("model").pipe(
+    Flag.withDescription("instance/model, for example `codex/gpt-5.5`. Defaults to the project's."),
+    Flag.optional,
+  ),
+  runtimeMode: Flag.Literals("runtime-mode", ThreadRuntimeMode.literals).pipe(
+    Flag.withDescription("Defaults to the project's, and may not be above it."),
+    Flag.optional,
+  ),
+  wait: threadWaitFlag,
+  timeout: threadTimeoutFlag,
+  prompt: threadPromptArgument,
+}).pipe(
+  Command.withDescription("Start a thread in a project and print its id."),
+  Command.withHandler((flags) => runThreadCli(flags, { kind: "start", ...flags })),
+);
+
+const threadSendCommand = Command.make("send", {
+  ...threadLocationFlags,
+  wait: threadWaitFlag,
+  timeout: threadTimeoutFlag,
+  threadId: threadIdArgument,
+  prompt: threadPromptArgument,
+}).pipe(
+  Command.withDescription(
+    "Queue a message: it starts as a later turn once the running one ends, after the follow-ups queued before it. Prints the turn's id. Exits 2 while the thread's follow-up queue is held (after a Stop, a failure, a usage limit or Pause) or waits for a Retry; the message stays queued.",
+  ),
+  Command.withHandler((flags) => runThreadCli(flags, { kind: "send", ...flags })),
+);
+
+const threadWaitCommand = Command.make("wait", {
+  ...threadLocationFlags,
+  turn: Flag.String("turn").pipe(
+    Flag.withDescription("The turn to wait for (`send` prints it). Defaults to the latest."),
+    Flag.optional,
+  ),
+  timeout: threadTimeoutFlag,
+  threadId: threadIdArgument,
+}).pipe(
+  Command.withDescription(
+    "Wait for a turn to end and print its reply, with the exit codes of --wait.",
+  ),
+  Command.withHandler((flags) =>
+    runThreadCli(flags, { kind: "wait", turnId: flags.turn, ...flags }),
+  ),
+);
+
+const threadReadCommand = Command.make("read", {
+  ...threadLocationFlags,
+  limit: Flag.Int("limit").pipe(
+    Flag.withDescription("How many of the latest messages to print (at most 50)."),
+    Flag.optional,
+  ),
+  full: Flag.Boolean("full").pipe(
+    Flag.withDescription(
+      "With --json, print every message whole instead of cutting long ones as ryco_read_thread does. The text output always prints them whole.",
+    ),
+    Flag.withDefault(false),
+  ),
+  threadId: threadIdArgument,
+}).pipe(
+  Command.withDescription("Print a thread's latest messages and its queued follow-ups."),
+  Command.withHandler((flags) => runThreadCli(flags, { kind: "read", ...flags })),
+);
+
+const loadNodeUpdateCli = Effect.promise(() => import("./cliNodeUpdate/updateCommand.ts"));
+
+const updateCommand = Command.make("update", {
+  baseDir: baseDirFlag,
+  remote: Flag.String("remote").pipe(
+    Flag.withDescription("Update a paired remote (`ryco remote add`) instead of this node."),
+    Flag.optional,
+  ),
+  channel: Flag.Literals("channel", ["latest", "nightly"]).pipe(
+    Flag.withDescription(
+      "Move the node to this release channel. It never installs an older release than it runs.",
+    ),
+    Flag.optional,
+  ),
+  check: Flag.Boolean("check").pipe(
+    Flag.withDescription("Only show the node's version, the newest release and the last update."),
+    Flag.withDefault(false),
+  ),
+  yes: Flag.Boolean("yes").pipe(
+    Flag.withAlias("y"),
+    Flag.withDescription("Update without asking (needed when the output is not a terminal)."),
+    Flag.withDefault(false),
+  ),
+  json: jsonFlag,
+}).pipe(
+  Command.withDescription(
+    "Update this node, or a paired remote, through its own one-click update: checked against a copy of its database, restarted, and rolled back if the new release fails to start.",
+  ),
+  Command.withHandler((flags) =>
+    quietly(
+      flags.json,
+      Effect.scoped(
+        Effect.gen(function* () {
+          const logLevel = yield* GlobalFlag.LogLevel;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const threadCli = yield* loadThreadCli;
+          const updateCli = yield* loadNodeUpdateCli;
+          const target = Option.isSome(flags.remote)
+            ? threadCli.remoteThreadTarget(yield* loadRemote(flags.baseDir, flags.remote.value))
+            : yield* threadCli.localThreadTarget({
+                local: yield* localNodeAccess(flags, logLevel, fileSystem),
+                timeout: null,
+                // The follow ends within 10 minutes; a session this older CLI cannot revoke
+                // after the node migrated its database expires soon after.
+                sessionTtl: Duration.minutes(30),
+                sessionLabel: "ryco update",
+              });
+          const nodeLabel = Option.isSome(flags.remote) ? `"${flags.remote.value}"` : "this node";
+          if (flags.check) {
+            return yield* updateCli.runUpdateCheck({
+              target,
+              nodeLabel,
+              json: flags.json,
+              channel: Option.getOrNull(flags.channel),
+              fetchLatestOnChannel: updateCli.fetchLatestRycoRelease,
+            });
+          }
+          yield* updateCli.runUpdateCli({
+            target,
+            nodeLabel,
+            channel: Option.getOrNull(flags.channel),
+            yes: flags.yes,
+            json: flags.json,
+            interactive: isInteractiveTerminal(),
+            confirm: (message) =>
+              Prompt.run(Prompt.Confirm({ message, initial: false })).pipe(
+                Effect.catch(() => Effect.succeed(false)),
+              ),
+            fetchLatestOnChannel: updateCli.fetchLatestRycoRelease,
+            requestId: `cli-${crypto.randomUUID()}`,
+          });
+        }),
+      ),
+    ),
+  ),
+);
+
+const threadCommand = Command.make("thread").pipe(
+  Command.withDescription("Start, message, wait for and read threads, here or on a paired remote."),
+  Command.withSubcommands([
+    threadStartCommand,
+    threadSendCommand,
+    threadWaitCommand,
+    threadReadCommand,
+  ]),
+);
+
 const remoteSendCommand = Command.make("send", {
   ...remoteLocationFlags,
   name: remoteNameArgument,
@@ -3777,34 +4310,23 @@ const remoteSendCommand = Command.make("send", {
   ),
   wait: Flag.Boolean("wait").pipe(
     Flag.withDescription(
-      "Print the assistant's reply as it streams until the turn ends (default; --no-wait returns at once).",
+      "Print the reply once the turn ends (default; --no-wait returns once it starts).",
     ),
     Flag.optional,
   ),
 }).pipe(
-  Command.withDescription("Send a message to a thread on a remote, with the thread's own model."),
+  Command.withDescription("Send a message to a thread on a remote: `ryco thread send --remote`."),
   Command.withHandler((flags) =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const remote = yield* loadRemote(flags.baseDir, flags.name);
-        const remoteModule = yield* loadCliRemote;
-        const { connectCliRemote, sendToRemoteThread } = remoteModule;
-        const client = yield* connectCliRemote(remote);
-        const wait = Option.getOrElse(flags.wait, () => true);
-        const text = flags.message.join(" ");
-        const error = yield* sendToRemoteThread(client, {
-          threadId: flags.threadId,
-          text,
-          ...(wait ? { onAssistantText: (chunk: string) => process.stdout.write(chunk) } : {}),
-        });
-        if (wait) process.stdout.write("\n");
-        if (error) {
-          return yield* new remoteModule.CliRemoteError({
-            message: `The turn ended with an error: ${error}`,
-          });
-        }
-        if (!wait) yield* Console.log("Sent.\n");
-      }),
+    runThreadCli(
+      { baseDir: flags.baseDir, remote: Option.some(flags.name), json: false },
+      {
+        kind: "send",
+        threadId: flags.threadId,
+        prompt: flags.message.join(" "),
+        literalPrompt: true,
+        wait: Option.getOrElse(flags.wait, () => true),
+        timeout: Option.none(),
+      },
     ),
   ),
 );
@@ -3824,6 +4346,9 @@ const remoteCommand = Command.make("remote").pipe(
 
 // ─── ryco setup / ryco config ─────────────────────────────────────────────────
 
+// The setup guide and the node manager load when a command opens them, never on the `serve` path.
+const loadSetupFlow = Effect.promise(() => import("./cliSetup/setupFlow.ts"));
+
 const resolveSetupContext = (baseDir: Option.Option<string>) =>
   Effect.gen(function* () {
     const logLevel = yield* GlobalFlag.LogLevel;
@@ -3842,20 +4367,26 @@ const resolveSetupContext = (baseDir: Option.Option<string>) =>
   });
 
 /** The running node's origin, when a server recorded one and actually answers there. */
-const probeLocalServer = (serverRuntimeStatePath: string) =>
+/** The runtime file of this home's node, when that node answers. */
+const probeLocalServerRuntime = (serverRuntimeStatePath: string) =>
   readPersistedServerRuntimeState(serverRuntimeStatePath).pipe(
     Effect.flatMap((state) =>
       Option.isNone(state)
-        ? Effect.succeed<string | null>(null)
+        ? Effect.succeed<PersistedServerRuntimeState | null>(null)
         : Effect.tryPromise(async () => {
             const response = await fetch(
               new URL("/.well-known/ryco/environment", state.value.origin),
               { signal: AbortSignal.timeout(1_500) },
             );
-            return response.ok ? state.value.origin : null;
+            return response.ok ? state.value : null;
           }),
     ),
     Effect.orElseSucceed(() => null),
+  );
+
+const probeLocalServer = (serverRuntimeStatePath: string) =>
+  probeLocalServerRuntime(serverRuntimeStatePath).pipe(
+    Effect.map((state) => state?.origin ?? null),
   );
 
 const emptyServerFlags = (baseDir: Option.Option<string>): CliServerFlags => ({
@@ -3945,7 +4476,7 @@ const bindSetupOperations = (
   runInForeground: bind(
     runServerCommand(emptyServerFlags(flags.baseDir), {
       startupPresentation: "headless",
-      forceAutoBootstrapProjectFromCwd: false,
+      defaultAutoBootstrapProjectFromCwd: false,
     }),
   ).pipe(Effect.asVoid, Effect.mapError(asError)),
 });
@@ -3975,8 +4506,11 @@ const setupCommand = Command.make("setup", { baseDir: baseDirFlag }).pipe(
         });
       }
       const { config, context } = yield* resolveSetupContext(flags.baseDir);
+      yield* refuseDesktopOwnedNode(config.baseDir);
       const operations = yield* makeSetupOperations(flags, config.serverRuntimeStatePath);
-      yield* setupClosed(runSetup(context, operations));
+      yield* setupClosed(
+        Effect.flatMap(loadSetupFlow, (flow) => flow.runSetup(context, operations)),
+      );
     }),
   ),
 );
@@ -4101,7 +4635,9 @@ const configEditCommand = Command.make("edit", { ...configLocationFlags }).pipe(
         });
       }
       const { context } = yield* resolveSetupContext(flags.baseDir);
-      const changed = yield* editNodeConfigFile(context).pipe(
+      const changed = yield* Effect.flatMap(loadSetupFlow, (flow) =>
+        flow.editNodeConfigFile(context),
+      ).pipe(
         Effect.catchIf(
           (error) => error._tag === "QuitError",
           () => Effect.succeed(false),
@@ -4162,6 +4698,7 @@ const runBareCommand = (flags: CliServerFlags) =>
     if (!offerSetup) return yield* runServerCommand(flags);
 
     const { config, context } = yield* resolveSetupContext(Option.none());
+    yield* refuseDesktopOwnedNode(config.baseDir);
     const operations = yield* makeSetupOperations(
       { baseDir: Option.none() },
       config.serverRuntimeStatePath,
@@ -4178,7 +4715,9 @@ const runBareCommand = (flags: CliServerFlags) =>
               readNodeServiceStatus(context.platform!, context.serviceLabel),
             ).pipe(Effect.orElseSucceed(() => null));
       if (running || service?.installed) {
-        return yield* setupClosed(runNodeManager(context, operations));
+        return yield* setupClosed(
+          Effect.flatMap(loadSetupFlow, (flow) => flow.runNodeManager(context, operations)),
+        );
       }
       return yield* runServerCommand(flags);
     }
@@ -4207,7 +4746,9 @@ const runBareCommand = (flags: CliServerFlags) =>
     ).pipe(Effect.catchTag("QuitError", () => Effect.succeed("quit" as const)));
     if (choice === "quit") return;
     if (choice === "setup") {
-      return yield* setupClosed(runFirstTimeSetup(context, operations));
+      return yield* setupClosed(
+        Effect.flatMap(loadSetupFlow, (flow) => flow.runFirstTimeSetup(context, operations)),
+      );
     }
     if (choice === "always-open") {
       yield* Effect.promise(() =>
@@ -4229,7 +4770,7 @@ const serveCommand = Command.make("serve", { ...sharedServerCommandFlags }).pipe
   Command.withHandler((flags) =>
     runServerCommand(flags, {
       startupPresentation: "headless",
-      forceAutoBootstrapProjectFromCwd: false,
+      defaultAutoBootstrapProjectFromCwd: false,
     }),
   ),
 );
@@ -4250,5 +4791,31 @@ export const cli = Command.make("ryco", { ...sharedServerCommandFlags }).pipe(
     configCommand,
     serviceCommand,
     remoteCommand,
+    threadCommand,
+    updateCommand,
+    makeDbCommand({
+      locationFlags: sharedServerLocationFlags,
+      jsonFlag,
+      emitJson,
+      resolveConfig: resolveCliAuthConfig,
+      quietly,
+      adminCommandLogLevel,
+    }),
+    makeDoctorCommand({
+      locationFlags: sharedServerLocationFlags,
+      jsonFlag,
+      emitJson,
+      resolveConfig: resolveCliAuthConfig,
+      quietly,
+      adminCommandLogLevel,
+    }),
+    makeTraceCommand({
+      locationFlags: sharedServerLocationFlags,
+      jsonFlag,
+      emitJson,
+      durationSchema: DurationFromString,
+      resolveTraceLocation,
+      quietly,
+    }),
   ]),
 );

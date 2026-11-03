@@ -1,5 +1,4 @@
-import { EnvironmentId } from "@ryco/contracts";
-import { useParams, useRouter } from "@tanstack/react-router";
+import { useRouter } from "@tanstack/react-router";
 import {
   ActivityIcon,
   AppWindowIcon,
@@ -42,31 +41,16 @@ import {
 } from "../../appChrome";
 import { useAppPreferencesLabel, useDeviceName } from "../../deviceName";
 import { isElectron, isHostedHubMode } from "../../env";
-import { usePrimaryEnvironmentDescriptor } from "../../environments/primary";
-import { useSavedEnvironmentRegistryStore } from "../../environments/runtime";
 import { useAppSidebarCollapsed } from "../../hooks/useAppSidebarCollapsed";
-import { useEnvironmentSettingsTarget } from "../../hooks/useEnvironmentSettingsTarget";
+import { useSettingsPageTarget } from "../../hooks/useSettingsPageTarget";
 import { navigateHub } from "../../hostedHub/hubRoutes";
-import { useHostedHubStore } from "../../hostedHub/state";
 import { useHostedNodePageDemand } from "../../hostedHub/useHostedNodePageDemand";
 import { preloadableLazy, type PreloadableModule } from "../../lib/preloadableLazy";
 import { cn } from "../../lib/utils";
-import {
-  retainDesktopWorkspaceInteractiveScope,
-  useDesktopWorkspaceState,
-} from "../../platform/desktopWorkspace";
+import { retainDesktopWorkspaceInteractiveScope } from "../../platform/desktopWorkspace";
 import { type SettingsSectionId, useSettingsDialogStore } from "../../settingsDialogStore";
-import {
-  resolveSettingsTargetEnvironmentId,
-  SettingsEditingScopeProvider,
-  SettingsTargetProvider,
-} from "../../settingsTarget";
-import { useStore } from "../../store";
-import { resolveThreadRouteRef } from "../../threadRoutes";
+import { SettingsEditingScopeProvider, SettingsTargetProvider } from "../../settingsTarget";
 import { DeviceIcon } from "../DeviceIcon";
-import { useHostedConnectionActions } from "../hostedHub/HostedConnectionControls";
-import { nodeSelectionBlocked, selectableNodes } from "../hostedHub/HostedNodeDisplay.logic";
-import { isLocalOnboardingClient } from "../onboarding/localOnboarding";
 import { parseStatisticsSearch } from "../statistics/statisticsSearch";
 import { Button } from "../ui/button";
 import { Kbd } from "../ui/kbd";
@@ -75,17 +59,36 @@ import { SidebarInset } from "../ui/sidebar";
 import { Skeleton } from "../ui/skeleton";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ArchivedThreadsPanel, GeneralSettingsPanel, useSettingsRestore } from "./SettingsPanels";
-import { SETTINGS_SEARCH_INDEX, type SettingsSearchEntry } from "./settingsSearchIndex";
-import { settingsSectionInDestination, settingsSectionReachable } from "./settingsSections.logic";
+import { KEYBINDING_SEARCH_ENTRIES } from "./keybindingSearchEntries";
+import {
+  filterSettingsSearchEntries,
+  readSettingsSearchScope,
+  SETTINGS_LINK_SECTIONS,
+  SETTINGS_SEARCH_INDEX,
+  SETTINGS_SECTION_TITLES,
+  settingsSectionListed,
+  type SettingsDestination,
+  type SettingsSearchEntry,
+} from "./settingsSearchIndex";
+import {
+  takeSettingsReveal,
+  useSettingsSearchRevealStore,
+  type SettingsSearchTarget,
+} from "./settingsSearchReveal";
 import { SettingsCard, SettingsEmpty } from "./settingsLayout";
+import { useApplyToAllNodesShown } from "./ApplyToAllNodes";
+import { SettingsNodeMenu, useSettingsNodeMenu } from "./SettingsNodeMenu";
+import { SettingsScopeSentence } from "./SettingsScopeSentence";
+import {
+  settingsScopeSentenceShown,
+  settingsSectionHasNodeFanOut,
+} from "./SettingsScopeSentence.logic";
 import { useSettingsSubsections } from "./useSettingsSubsections";
+import { preloadWindowCaptureSettings } from "./WindowCaptureSettings";
 import { useActiveIndicator } from "../ui/useActiveIndicator";
-
-type SettingsDestination = "client" | "node";
 
 interface NavItem {
   readonly id: SettingsSectionId;
-  readonly label: string;
   readonly icon: ComponentType<{ className?: string }>;
   /** One line under the page title. A pair when the two destinations differ. */
   readonly description: string | { readonly client: string; readonly node: string };
@@ -94,13 +97,11 @@ interface NavItem {
 const NAV_ITEMS: ReadonlyArray<NavItem> = [
   {
     id: "account",
-    label: "Account",
     icon: UserRoundIcon,
     description: "Your Hub identity, sign-in methods, and recovery.",
   },
   {
     id: "general",
-    label: "General",
     icon: Settings2Icon,
     description: {
       client: "Behavior, notifications, and defaults for this app.",
@@ -109,37 +110,31 @@ const NAV_ITEMS: ReadonlyArray<NavItem> = [
   },
   {
     id: "inbox",
-    label: "Inbox",
     icon: SparklesIcon,
-    description: "What the inbox surfaces and the models that summarize it.",
+    description: "How the inbox settles inactive tasks.",
   },
   {
     id: "appearance",
-    label: "Appearance",
     icon: PaletteIcon,
     description: "Theme, typography, and interface details for this app.",
   },
   {
     id: "providers",
-    label: "Providers",
     icon: BlocksIcon,
     description: "Coding agents on this device and the models they offer.",
   },
   {
     id: "opinionated-plugins",
-    label: "Plugins",
     icon: PuzzleIcon,
     description: "Ryco plugins installed into each agent on this device.",
   },
   {
     id: "mcp-servers",
-    label: "MCP",
     icon: ServerIcon,
     description: "Model Context Protocol servers each agent can reach.",
   },
   {
     id: "integrations",
-    label: "Integrations",
     icon: PlugIcon,
     description: {
       client: "Desktop permissions, computer use, and the browser bridge.",
@@ -148,13 +143,11 @@ const NAV_ITEMS: ReadonlyArray<NavItem> = [
   },
   {
     id: "keybindings",
-    label: "Keybindings",
     icon: KeyboardIcon,
     description: "Keyboard shortcuts saved in this app or browser profile.",
   },
   {
     id: "source-control",
-    label: "Source control",
     icon: GitBranchIcon,
     description: {
       client: "How this app presents commits, branches, and pull requests.",
@@ -163,25 +156,21 @@ const NAV_ITEMS: ReadonlyArray<NavItem> = [
   },
   {
     id: "connections",
-    label: "Connections",
     icon: Link2Icon,
     description: "The devices this app can reach and how it reaches them.",
   },
   {
     id: "updates",
-    label: "Updates",
     icon: ArrowUpCircleIcon,
     description: "Ryco and its providers on every device this app reaches, in one click.",
   },
   {
     id: "security",
-    label: "Security",
     icon: ShieldIcon,
     description: "Who can reach this device, live sessions, and pairing policy.",
   },
   {
     id: "diagnostics",
-    label: "Diagnostics",
     icon: ActivityIcon,
     description: {
       client: "Performance and presentation checks for this app.",
@@ -190,20 +179,15 @@ const NAV_ITEMS: ReadonlyArray<NavItem> = [
   },
   {
     id: "statistics",
-    label: "Statistics",
     icon: BarChart3Icon,
     description: "Usage and activity for this device.",
   },
   {
     id: "archived",
-    label: "Archive",
     icon: ArchiveIcon,
     description: "Archived threads on this device. Unarchive or delete them.",
   },
 ];
-
-/** Sections that open another page instead of rendering a panel here. */
-const LINK_SECTIONS: ReadonlySet<SettingsSectionId> = new Set(["statistics"]);
 
 /**
  * Every section the settings page can navigate to.
@@ -226,7 +210,7 @@ export const SETTINGS_SECTION_IDS: ReadonlyArray<SettingsSectionId> = NAV_ITEMS.
  * that pointer if the section is ever renamed underneath it.
  */
 export const SETTINGS_SECTION_LABELS: ReadonlyMap<SettingsSectionId, string> = new Map(
-  NAV_ITEMS.map((item) => [item.id, item.label] as const),
+  NAV_ITEMS.map((item) => [item.id, SETTINGS_SECTION_TITLES[item.id]] as const),
 );
 
 // The gates themselves live in `settingsSections.logic.ts`, because
@@ -254,8 +238,8 @@ const LazyAccountSettingsPanel = preloadableLazy(() =>
 const LazyProvidersSettingsPanel = preloadableLazy(() =>
   import("./ProvidersSettingsPanel").then((module) => module.ProvidersSettingsPanel),
 );
-const LazyAiFocusSettings = preloadableLazy(() =>
-  import("./AiFocusSettings").then((module) => module.AiFocusSettings),
+const LazyInboxSettings = preloadableLazy(() =>
+  import("./InboxSettings").then((module) => module.InboxSettings),
 );
 const LazyOpinionatedPluginsSettingsPanel = preloadableLazy(() =>
   import("./OpinionatedPluginsSettings").then((module) => module.OpinionatedPluginsSettingsPanel),
@@ -292,7 +276,7 @@ const LazyDiagnosticsSettings = preloadableLazy(() =>
 
 const LAZY_SECTION_PANELS: Partial<Record<SettingsSectionId, PreloadableModule>> = {
   account: LazyAccountSettingsPanel,
-  inbox: LazyAiFocusSettings,
+  inbox: LazyInboxSettings,
   providers: LazyProvidersSettingsPanel,
   "opinionated-plugins": LazyOpinionatedPluginsSettingsPanel,
   "mcp-servers": LazyMcpServersSettings,
@@ -308,6 +292,9 @@ const LAZY_SECTION_PANELS: Partial<Record<SettingsSectionId, PreloadableModule>>
 
 /** Starts (or joins) the chunk load of a section's body. Never rejects. */
 export function preloadSettingsSection(section: SettingsSectionId): Promise<void> {
+  // General renders with the page; only its Window capture subsection loads a
+  // chunk of its own, on desktops that offer window capture.
+  if (section === "general") return preloadWindowCaptureSettings();
   return LAZY_SECTION_PANELS[section]?.preload() ?? Promise.resolve();
 }
 
@@ -315,20 +302,14 @@ function navDescription(item: NavItem, destination: SettingsDestination): string
   return typeof item.description === "string" ? item.description : item.description[destination];
 }
 
-function SectionPanel({
-  section,
-  searchTargetId,
-}: {
-  section: SettingsSectionId;
-  searchTargetId: string | null;
-}) {
+function SectionPanel({ section }: { section: SettingsSectionId }) {
   switch (section) {
     case "account":
       return <LazyAccountSettingsPanel />;
     case "general":
-      return <GeneralSettingsPanel searchTargetId={searchTargetId} />;
+      return <GeneralSettingsPanel />;
     case "inbox":
-      return <LazyAiFocusSettings />;
+      return <LazyInboxSettings />;
     case "providers":
       return <LazyProvidersSettingsPanel />;
     case "opinionated-plugins":
@@ -383,6 +364,11 @@ function PanelFallback() {
     </div>
   );
 }
+
+// Export and Import of this app's preferences load with the first general page that shows them.
+const LazyClientSettingsFileActions = preloadableLazy(() =>
+  import("./ClientSettingsFileActions").then((module) => module.ClientSettingsFileActions),
+);
 
 function RestoreDefaultsButton({ onRestored }: { onRestored: () => void }) {
   const { changedSettingLabels, restoreDefaults } = useSettingsRestore(onRestored);
@@ -470,7 +456,7 @@ function SettingsNav({
         <span
           aria-hidden
           className={cn(
-            "pointer-events-none absolute inset-x-0 -z-10 rounded-[min(var(--radius-md),0.5rem)] bg-accent",
+            "pointer-events-none absolute inset-x-0 -z-10 rounded-lg bg-accent",
             animate &&
               "transition-[transform,height,opacity] duration-(--app-motion-duration-stack) ease-(--app-motion-ease)",
             rect ? "opacity-100" : "opacity-0",
@@ -503,7 +489,7 @@ function SettingsNav({
               const key = `${group.destination}:${item.id}`;
               const active = key === activeKey;
               const Icon = item.icon;
-              const isLink = LINK_SECTIONS.has(item.id);
+              const isLink = SETTINGS_LINK_SECTIONS.has(item.id);
               return (
                 <div key={key} className="flex flex-col">
                   <button
@@ -514,7 +500,7 @@ function SettingsNav({
                     onFocus={() => void preloadSettingsSection(item.id)}
                     aria-current={active ? "page" : undefined}
                     className={cn(
-                      "group/nav flex h-8 w-full items-center gap-2.5 rounded-[min(var(--radius-md),0.5rem)] px-2.5 text-left text-[13px] outline-hidden transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring",
+                      "group/nav flex h-8 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] outline-hidden transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring",
                       active
                         ? "font-medium text-foreground"
                         : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
@@ -526,7 +512,9 @@ function SettingsNav({
                         active ? "text-foreground" : "text-muted-foreground/70",
                       )}
                     />
-                    <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                    <span className="min-w-0 flex-1 truncate">
+                      {SETTINGS_SECTION_TITLES[item.id]}
+                    </span>
                     {isLink ? (
                       <ArrowUpRightIcon className="size-3.5 shrink-0 opacity-0 transition-opacity group-hover/nav:opacity-60" />
                     ) : null}
@@ -597,7 +585,9 @@ function CompactSectionPicker({
       <MenuTrigger
         render={
           <Button variant="outline" size="sm" className="mb-6 w-full justify-between md:hidden">
-            <span className="truncate">{active?.label ?? "Sections"}</span>
+            <span className="truncate">
+              {active ? SETTINGS_SECTION_TITLES[active.id] : "Sections"}
+            </span>
             <ChevronsUpDownIcon className="size-3.5 opacity-60" />
           </Button>
         }
@@ -619,7 +609,7 @@ function CompactSectionPicker({
                 onPointerEnter={() => void preloadSettingsSection(item.id)}
                 onFocus={() => void preloadSettingsSection(item.id)}
               >
-                {item.label}
+                {SETTINGS_SECTION_TITLES[item.id]}
               </MenuRadioItem>
             ))}
           </MenuRadioGroup>
@@ -629,16 +619,17 @@ function CompactSectionPicker({
   );
 }
 
+// Shortcuts list after the settings themselves, so a word like "new" shows settings first.
+const SEARCH_ENTRIES = [...SETTINGS_SEARCH_INDEX, ...KEYBINDING_SEARCH_ENTRIES];
+
 function SearchResults({
   query,
   results,
-  sectionLabel,
   destinationLabel,
   onPick,
 }: {
   query: string;
   results: ReadonlyArray<SettingsSearchEntry>;
-  sectionLabel: (entry: SettingsSearchEntry) => string | undefined;
   destinationLabel: (destination: SettingsDestination) => string;
   onPick: (entry: SettingsSearchEntry) => void;
 }) {
@@ -665,7 +656,7 @@ function SearchResults({
           onPointerEnter={() => void preloadSettingsSection(entry.section)}
           onFocus={() => void preloadSettingsSection(entry.section)}
           style={{ "--i": Math.min(index, 12) } as CSSProperties}
-          className="settings-search-result group/result flex min-w-0 items-start gap-4 rounded-[min(var(--radius-lg),0.625rem)] px-3 py-2.5 text-left outline-hidden ring-ring transition-colors hover:bg-accent/60 focus-visible:ring-2"
+          className="settings-search-result group/result flex min-w-0 items-start gap-4 rounded-lg px-3 py-2.5 text-left outline-hidden ring-ring transition-colors hover:bg-accent/60 focus-visible:ring-2"
         >
           <span className="min-w-0 flex-1">
             <span className="block text-[13px] font-medium text-foreground">{entry.title}</span>
@@ -674,8 +665,7 @@ function SearchResults({
             </span>
           </span>
           <span className="mt-0.5 shrink-0 text-[11px] text-muted-foreground/80">
-            {destinationLabel(entry.owner)}
-            {sectionLabel(entry) ? ` · ${sectionLabel(entry)}` : ""}
+            {destinationLabel(entry.owner)} · {SETTINGS_SECTION_TITLES[entry.section]}
           </span>
         </button>
       ))}
@@ -684,44 +674,22 @@ function SearchResults({
 }
 
 export function SettingsPage() {
-  const routedEnvironmentId = useParams({
-    strict: false,
-    select: (params) => resolveThreadRouteRef(params)?.environmentId ?? null,
-  });
   const leaveSettings = useLeaveSettings();
   const router = useRouter();
   const appSidebarCollapsed = useAppSidebarCollapsed();
-  const primaryEnvironment = usePrimaryEnvironmentDescriptor();
-  const activeEnvironmentId = useStore((state) => state.activeEnvironmentId);
-  const desktopWorkspace = useDesktopWorkspaceState();
   const section = useSettingsDialogStore((s) => s.section);
   const editingScope = useSettingsDialogStore((s) => s.editingScope);
   const showSection = useSettingsDialogStore((s) => s.showSection);
-  const setTargetEnvironmentId = useSettingsDialogStore((s) => s.setTargetEnvironmentId);
   const closeSettings = useSettingsDialogStore((s) => s.closeSettings);
-  const requestedEnvironmentId = useSettingsDialogStore((s) => s.targetEnvironmentId);
-  const allSavedEnvironments = useSavedEnvironmentRegistryStore((state) => state.byId);
-  const hostedNodes = useHostedHubStore((state) => state.nodes);
-  const hostedDirectoryStatus = useHostedHubStore((state) => state.directoryStatus);
-  const hostedBrowserStatus = useHostedHubStore((state) => state.browserStatus);
-  const { switchNodeInPlace } = useHostedConnectionActions();
   const hosted = isHostedHubMode();
-  const targetEnvironmentId = hosted
-    ? (primaryEnvironment?.environmentId ?? null)
-    : resolveSettingsTargetEnvironmentId({
-        requestedEnvironmentId,
-        routedEnvironmentId,
-        activeEnvironmentId,
-        primaryEnvironmentId: primaryEnvironment?.environmentId ?? null,
-        desktopLocalEnvironmentId: isElectron ? desktopWorkspace.localEnvironmentId : null,
-      });
+  const pageTarget = useSettingsPageTarget();
   const {
+    environmentId: targetEnvironmentId,
     target: authorizedTarget,
     isPrimary: targetIsPrimary,
-    nodeRole,
     roleFresh,
     desktopWorkspaceMachine,
-  } = useEnvironmentSettingsTarget(targetEnvironmentId);
+  } = pageTarget;
   const settingsTarget = authorizedTarget;
   const primaryDeviceName = useDeviceName();
   const appPreferencesLabel = useAppPreferencesLabel();
@@ -735,66 +703,25 @@ export function SettingsPage() {
   // settings.
   useHostedNodePageDemand(editingScope === "node" ? targetEnvironmentId : null);
 
-  const nodeChoices = new Map<EnvironmentId, string>();
-  if (primaryEnvironment) nodeChoices.set(primaryEnvironment.environmentId, primaryDeviceName);
-  if (hosted) {
-    // Hosted settings edit the selected node, so a hosted choice moves the
-    // selection cursor (below). Every node this browser may open is a choice,
-    // also before the cursor is on any node, as in a tab opened on settings.
-    for (const node of selectableNodes(hostedNodes)) {
-      nodeChoices.set(node.environmentId, node.label);
-    }
-  } else {
-    for (const entry of Object.values(allSavedEnvironments)) {
-      if (primaryEnvironment && entry.environmentId === desktopWorkspace.localEnvironmentId)
-        continue;
-      nodeChoices.set(entry.environmentId, entry.label);
-    }
-    for (const machine of desktopWorkspace.machines) {
-      if (primaryEnvironment && machine.environmentId === desktopWorkspace.localEnvironmentId)
-        continue;
-      nodeChoices.set(machine.environmentId, machine.label);
-    }
-  }
-  if (targetEnvironmentId) nodeChoices.set(targetEnvironmentId, targetNodeLabel);
+  const [searchQuery, setSearchQuery] = useState("");
+  // One list of devices for the nav header's menu and the scope sentence.
+  const nodeMenu = useSettingsNodeMenu({
+    targetEnvironmentId,
+    targetLabel: targetNodeLabel,
+    targetConnected: authorizedTarget?.connected === true,
+    targetMachine: desktopWorkspaceMachine,
+    onSelect: () => setSearchQuery(""),
+  });
   // Hosted with no node under the cursor yet, the node group still shows, as
   // the device switcher and nothing else, so a node can be chosen here.
-  const showNodeGroup = settingsTarget !== null || (hosted && nodeChoices.size > 0);
-  // The directory's own rule for opening a node: a hosted choice waits for a
-  // current directory and a revalidated browser, as the directory's rows do.
-  const hostedChoiceBlocked = (environmentId: EnvironmentId): boolean => {
-    if (!hosted || environmentId === targetEnvironmentId) return false;
-    const node = hostedNodes.find((candidate) => candidate.environmentId === environmentId);
-    return (
-      !node ||
-      nodeSelectionBlocked({
-        directoryStatus: hostedDirectoryStatus,
-        browserStatus: hostedBrowserStatus,
-        node,
-      })
-    );
-  };
+  const showNodeGroup = settingsTarget !== null || (hosted && nodeMenu.choices.length > 0);
+  const fanOutShown = useApplyToAllNodesShown();
 
-  const desktopComputerUse = isElectron && Boolean(window.desktopBridge?.computerUse);
-  const clientItems = NAV_ITEMS.filter(
-    (item) =>
-      settingsSectionInDestination(item.id, "client", desktopComputerUse) &&
-      (item.id !== "connections" || !hosted),
+  const searchScope = readSettingsSearchScope(pageTarget);
+  const clientItems = NAV_ITEMS.filter((item) =>
+    settingsSectionListed(searchScope, "client", item.id),
   );
-  // The device's own connection settings live under Security; "Connections"
-  // belongs to the app, which is what reaches devices.
-  const nodeItems = settingsTarget
-    ? NAV_ITEMS.filter(
-        (item) =>
-          item.id !== "connections" &&
-          settingsSectionInDestination(item.id, "node", desktopComputerUse) &&
-          settingsSectionReachable(item.id, {
-            hosted: hosted || !targetIsPrimary,
-            role: settingsTarget.connected ? nodeRole : null,
-            desktop: false,
-          }),
-      )
-    : [];
+  const nodeItems = NAV_ITEMS.filter((item) => settingsSectionListed(searchScope, "node", item.id));
   const groups: NavGroup[] = [{ destination: "client", items: clientItems }];
   if (showNodeGroup) groups.push({ destination: "node", items: nodeItems });
 
@@ -808,10 +735,10 @@ export function SettingsPage() {
         ? "security"
         : section;
   const effectiveSection = visibleItems.some(
-    (item) => item.id === requestedSection && !LINK_SECTIONS.has(item.id),
+    (item) => item.id === requestedSection && !SETTINGS_LINK_SECTIONS.has(item.id),
   )
     ? requestedSection
-    : (visibleItems.find((item) => !LINK_SECTIONS.has(item.id))?.id ?? "appearance");
+    : (visibleItems.find((item) => !SETTINGS_LINK_SECTIONS.has(item.id))?.id ?? "appearance");
   const activeItem = NAV_ITEMS.find((item) => item.id === effectiveSection);
 
   useEffect(() => {
@@ -821,32 +748,26 @@ export function SettingsPage() {
     }
   }, [destination, editingScope, effectiveSection, hosted, roleFresh, section, showSection]);
 
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchTargetId, setSearchTargetId] = useState<string | null>(null);
+  // The command palette can ask for a row before this page mounts; a request
+  // that arrives while it shows replaces any search in progress.
+  const revealRequest = useSettingsSearchRevealStore((state) => state.request);
+  const [searchTarget, setSearchTarget] = useState<SettingsSearchTarget | null>(revealRequest);
+  if (revealRequest !== null && revealRequest !== searchTarget) {
+    setSearchTarget(revealRequest);
+    setSearchQuery("");
+  }
+  useEffect(() => {
+    if (revealRequest) takeSettingsReveal(revealRequest);
+  }, [revealRequest]);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const normalizedQuery = searchQuery.trim().toLowerCase();
-  const reachable = new Set(
-    groups.flatMap((group) => group.items.map((item) => `${group.destination}:${item.id}`)),
-  );
-  const searchResults =
-    normalizedQuery.length === 0
-      ? []
-      : SETTINGS_SEARCH_INDEX.filter(
-          (entry) =>
-            reachable.has(`${entry.owner}:${entry.section}`) &&
-            (!entry.localOnboardingOnly || isLocalOnboardingClient()) &&
-            (!entry.desktopCapability ||
-              Boolean(window.desktopBridge?.[entry.desktopCapability])) &&
-            `${entry.title} ${entry.description} ${entry.keywords ?? ""}`
-              .toLowerCase()
-              .includes(normalizedQuery),
-        );
+  const searchResults = filterSettingsSearchEntries(searchQuery, searchScope, SEARCH_ENTRIES);
 
   const [restoreSignal, setRestoreSignal] = useState(0);
   const handleRestored = useCallback(() => setRestoreSignal((value) => value + 1), []);
 
   const panelKey = `${destination}:${effectiveSection}:${targetEnvironmentId ?? ""}`;
-  const subsections = useSettingsSubsections(panelKey, normalizedQuery.length > 0, searchTargetId);
+  const subsections = useSettingsSubsections(panelKey, normalizedQuery.length > 0, searchTarget);
   const { contentRef: setSubsectionRoot } = subsections;
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const setScrollRef = useCallback(
@@ -861,12 +782,12 @@ export function SettingsPage() {
   useLayoutEffect(() => {
     if (scrolledPanelKey.current === panelKey) return;
     scrolledPanelKey.current = panelKey;
-    if (!searchTargetId) scrollRef.current?.scrollTo({ top: 0 });
-  }, [panelKey, searchTargetId]);
+    if (!searchTarget) scrollRef.current?.scrollTo({ top: 0 });
+  }, [panelKey, searchTarget]);
 
   const selectSection = useCallback(
     (nextDestination: SettingsDestination, item: NavItem) => {
-      if (LINK_SECTIONS.has(item.id)) {
+      if (SETTINGS_LINK_SECTIONS.has(item.id)) {
         closeSettings();
         void router.navigate({
           to: "/statistics",
@@ -878,7 +799,7 @@ export function SettingsPage() {
         });
         return;
       }
-      setSearchTargetId(null);
+      setSearchTarget(null);
       setSearchQuery("");
       showSection(nextDestination, item.id);
     },
@@ -930,55 +851,22 @@ export function SettingsPage() {
       <span className="min-w-0 flex-1 truncate" title={nodeHeaderLabel}>
         {nodeHeaderLabel}
       </span>
-      {nodeChoices.size > (settingsTarget ? 1 : 0) ? (
-        <Menu>
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <MenuTrigger
-                  render={
-                    <Button
-                      size="icon-xs"
-                      variant="ghost"
-                      aria-label="Settings device"
-                      className="size-6 text-muted-foreground hover:text-foreground sm:size-6"
-                    >
-                      <ChevronsUpDownIcon className="size-3.5" />
-                    </Button>
-                  }
-                />
-              }
-            />
-            <TooltipPopup side="right">Switch device</TooltipPopup>
-          </Tooltip>
-          <MenuPopup align="start" className="min-w-52">
-            <MenuRadioGroup
-              value={targetEnvironmentId ?? ""}
-              onValueChange={(value) => {
-                setSearchQuery("");
-                const environmentId = EnvironmentId.make(String(value));
-                setTargetEnvironmentId(environmentId);
-                if (!hosted) return;
-                // Through the same selection cursor the rest of the hosted app
-                // uses, staying on this page, whose address names no node: the
-                // node header follows once the selection has moved.
-                const node = hostedNodes.find(
-                  (candidate) => candidate.environmentId === environmentId,
-                );
-                if (node) void switchNodeInPlace(node);
-              }}
+      {nodeMenu.choices.length > (settingsTarget ? 1 : 0) ? (
+        <SettingsNodeMenu
+          model={nodeMenu}
+          tooltip="Switch device"
+          tooltipSide="right"
+          trigger={
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              aria-label="Settings device"
+              className="size-6 text-muted-foreground hover:text-foreground sm:size-6"
             >
-              {[...nodeChoices].map(([id, label]) => (
-                <MenuRadioItem key={id} value={id} disabled={hostedChoiceBlocked(id)}>
-                  <span className="flex min-w-0 items-center gap-2">
-                    <DeviceIcon environmentId={id} label={label} className="size-3.5 shrink-0" />
-                    <span className="truncate">{label}</span>
-                  </span>
-                </MenuRadioItem>
-              ))}
-            </MenuRadioGroup>
-          </MenuPopup>
-        </Menu>
+              <ChevronsUpDownIcon className="size-3.5" />
+            </Button>
+          }
+        />
       ) : null}
     </div>
   ) : null;
@@ -990,7 +878,7 @@ export function SettingsPage() {
         closeSettings();
         navigateHub({ kind: "account", section: "overview" });
       }}
-      className="group/nav flex h-8 w-full items-center gap-2.5 rounded-[min(var(--radius-md),0.5rem)] px-2.5 text-left text-[13px] text-muted-foreground outline-hidden transition-colors hover:bg-accent/50 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+      className="group/nav flex h-8 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] text-muted-foreground outline-hidden transition-colors hover:bg-accent/50 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
     >
       <UserRoundIcon className="size-4 shrink-0 text-muted-foreground/70" />
       <span className="min-w-0 flex-1 truncate">Hub account</span>
@@ -1032,12 +920,12 @@ export function SettingsPage() {
                   type="search"
                   value={searchQuery}
                   onChange={(event) => {
-                    setSearchTargetId(null);
+                    setSearchTarget(null);
                     setSearchQuery(event.target.value);
                   }}
                   placeholder="Search settings"
                   aria-label="Search settings"
-                  className="h-8 w-full rounded-[min(var(--radius-lg),0.625rem)] border border-transparent bg-muted/60 pr-9 pl-8 text-[13px] outline-hidden transition-[background-color,border-color,box-shadow] placeholder:text-muted-foreground/70 hover:bg-muted focus-visible:border-ring focus-visible:bg-background focus-visible:ring-[3px] focus-visible:ring-ring/20 [&::-webkit-search-cancel-button]:appearance-none"
+                  className="h-8 w-full rounded-lg border border-transparent bg-muted/60 pr-9 pl-8 text-[13px] outline-hidden transition-[background-color,border-color,box-shadow] placeholder:text-muted-foreground/70 hover:bg-muted focus-visible:border-ring focus-visible:bg-background focus-visible:ring-[3px] focus-visible:ring-ring/20 [&::-webkit-search-cancel-button]:appearance-none"
                 />
                 {searchQuery ? (
                   <button
@@ -1107,10 +995,9 @@ export function SettingsPage() {
                     <SearchResults
                       query={searchQuery.trim()}
                       results={searchResults}
-                      sectionLabel={(entry) => SETTINGS_SECTION_LABELS.get(entry.section)}
                       destinationLabel={destinationLabel}
                       onPick={(entry) => {
-                        setSearchTargetId(entry.targetId ?? entry.title);
+                        setSearchTarget({ targetId: entry.targetId ?? entry.title });
                         showSection(entry.owner, entry.section);
                         setSearchQuery("");
                       }}
@@ -1119,22 +1006,38 @@ export function SettingsPage() {
                     <div key={`${panelKey}:${restoreSignal}`} className="settings-panel-enter">
                       <header className="mb-8 flex items-start justify-between gap-4">
                         <div className="min-w-0">
-                          <p className="mb-1.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-                            {destination === "node" ? (
-                              <DeviceIcon
-                                environmentId={targetEnvironmentId}
-                                label={targetNodeLabel}
-                                className="size-3.5 shrink-0"
-                              />
-                            ) : (
-                              <AppWindowIcon className="size-3.5 shrink-0" />
-                            )}
-                            <span className="truncate" data-testid="settings-scope-label">
-                              {destination === "node" ? targetNodeLabel : appPreferencesLabel}
-                            </span>
-                          </p>
+                          {settingsScopeSentenceShown(destination, effectiveSection) ? (
+                            <SettingsScopeSentence
+                              model={nodeMenu}
+                              environmentId={targetEnvironmentId}
+                              label={targetNodeLabel}
+                              status={
+                                nodeMenu.choices.find(
+                                  (choice) => choice.environmentId === targetEnvironmentId,
+                                )?.status ?? null
+                              }
+                              mixedClause={
+                                fanOutShown && settingsSectionHasNodeFanOut(effectiveSection)
+                              }
+                            />
+                          ) : (
+                            <p className="mb-1.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+                              {destination === "node" ? (
+                                <DeviceIcon
+                                  environmentId={targetEnvironmentId}
+                                  label={targetNodeLabel}
+                                  className="size-3.5 shrink-0"
+                                />
+                              ) : (
+                                <AppWindowIcon className="size-3.5 shrink-0" />
+                              )}
+                              <span className="truncate" data-testid="settings-scope-label">
+                                {destination === "node" ? targetNodeLabel : appPreferencesLabel}
+                              </span>
+                            </p>
+                          )}
                           <h2 className="text-xl font-semibold tracking-[-0.015em] text-foreground">
-                            {activeItem?.label ?? "Settings"}
+                            {activeItem ? SETTINGS_SECTION_TITLES[activeItem.id] : "Settings"}
                           </h2>
                           {activeItem ? (
                             <p
@@ -1146,7 +1049,12 @@ export function SettingsPage() {
                           ) : null}
                         </div>
                         {showRestore ? (
-                          <div className="shrink-0 pt-6">
+                          <div className="flex shrink-0 items-start gap-2 pt-6">
+                            {destination === "client" ? (
+                              <Suspense fallback={null}>
+                                <LazyClientSettingsFileActions />
+                              </Suspense>
+                            ) : null}
                             <RestoreDefaultsButton onRestored={handleRestored} />
                           </div>
                         ) : null}
@@ -1182,10 +1090,7 @@ export function SettingsPage() {
                         />
                       ) : (
                         <Suspense fallback={<PanelFallback />}>
-                          <SectionPanel
-                            section={effectiveSection}
-                            searchTargetId={searchTargetId}
-                          />
+                          <SectionPanel section={effectiveSection} />
                         </Suspense>
                       )}
                     </div>

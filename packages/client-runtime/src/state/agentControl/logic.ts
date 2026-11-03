@@ -211,6 +211,34 @@ export function selectRecentAgentControlProposals(
 }
 
 /**
+ * A run waiting for the user, as a device's Agent Control queue holds it: an
+ * automation run whose approval is still pending. It is the same run a
+ * checkout's snapshot says is "pending-approval" (`dueScheduleRuns`); the
+ * queue is what every project on the device shares, so counts across
+ * projects (the sidebar's badge) read it from here. It lives with the queue
+ * logic, not in `automationCentre.ts`: that module imports the schedule rows
+ * (`automationSchedules.ts`), which the web shell loads only with the
+ * Automations dialog.
+ */
+export function isWaitingAutomationRun(proposal: AgentControlProposalView): boolean {
+  return proposal.status === "pending-user-approval" && proposal.plan.kind === "automationRun";
+}
+
+/** Runs waiting for approval in the given environments' queues. */
+export function waitingAutomationRunCount(
+  queues: Readonly<
+    Record<string, { readonly proposalsById: Readonly<Record<string, AgentControlProposalView>> }>
+  >,
+  environmentIds: readonly string[],
+): number {
+  let count = 0;
+  for (const environmentId of environmentIds)
+    for (const proposal of Object.values(queues[environmentId]?.proposalsById ?? {}))
+      if (isWaitingAutomationRun(proposal)) count += 1;
+  return count;
+}
+
+/**
  * Live proposals raised from inside `threadId` — the thread-local card
  * shows the caller thread its own outstanding requests.
  */
@@ -282,7 +310,9 @@ export function selectAgentControlThreadActivity(
       proposal.principal.kind === "provider-session" && proposal.principal.threadId === threadId,
   );
   // Infer the last known manager only from accepted thread-management work.
-  // Device/project operations and unaccepted requests do not establish a manager.
+  // Device/project operations and unaccepted requests do not establish a manager,
+  // and neither does a message: a delegated task reporting back to its parent, or
+  // any chat writing to another, directs nothing (the target shows the sender).
   // Child-return progress updates updatedAt long after the management action.
   // Order accepted work by its stable decision time, not that independent lifecycle.
   const managers = proposals
@@ -301,9 +331,9 @@ export function selectAgentControlThreadActivity(
               proposal.result.createdThreadIds?.includes(threadId)) ||
             proposal.result?.execution?.affectedThreadIds.includes(threadId)
           );
-        case "sendMessage":
         case "interruptThread":
         case "updateThread":
+        case "pullRequestWatch":
           return proposal.plan.threadId === threadId;
         default:
           return false;

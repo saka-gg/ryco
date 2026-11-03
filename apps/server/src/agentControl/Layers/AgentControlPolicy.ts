@@ -2,6 +2,10 @@ import { AGENT_CONTROL_ACTION_CAPABILITIES } from "@ryco/contracts";
 import { Effect, Layer } from "effect";
 
 import { ServerSettingsService } from "../../serverSettings.ts";
+import {
+  NO_DELEGATION_LIMITS,
+  type DelegationLimits,
+} from "../../orchestration/delegationLimits.ts";
 import { AgentControlCapabilityDeniedError, AgentControlDisabledError } from "../Errors.ts";
 import {
   AgentControlPolicy,
@@ -17,6 +21,12 @@ const makeAgentControlPolicy = Effect.gen(function* () {
     Effect.map((settings) => settings.agentControl.enabled),
     Effect.catch(() => Effect.succeed(false)),
   );
+
+  const delegationLimits: AgentControlPolicyShape["delegationLimits"] =
+    serverSettings.getSettings.pipe(
+      Effect.map((settings): DelegationLimits => settings.agentControl.delegation),
+      Effect.catch(() => Effect.succeed(NO_DELEGATION_LIMITS)),
+    );
 
   const requireEnabled: AgentControlPolicyShape["requireEnabled"] = (operation) =>
     isEnabled.pipe(
@@ -45,6 +55,7 @@ const makeAgentControlPolicy = Effect.gen(function* () {
 
   return {
     isEnabled,
+    delegationLimits,
     requireEnabled,
     requiredCapabilityForAction,
     authorize,

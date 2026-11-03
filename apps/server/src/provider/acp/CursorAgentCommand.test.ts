@@ -8,11 +8,8 @@ import { Effect, Sink, Stream } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 import { vi } from "vitest";
 
-import {
-  cursorAgentCommandCandidates,
-  resolveCursorAgentCommand,
-  resolveCursorMaintenanceCapabilities,
-} from "./CursorAgentCommand.ts";
+import { cursorAgentCommandCandidates, resolveCursorAgentCommand } from "./CursorAgentCommand.ts";
+import { resolveCursorMaintenanceCapabilities } from "./CursorAgentMaintenance.ts";
 
 // Probes and session spawns must not search PATH synchronously: a stalled mount on PATH would
 // block the event loop.

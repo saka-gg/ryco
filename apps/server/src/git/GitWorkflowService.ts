@@ -1,10 +1,12 @@
 import { readGitLocalChanges, applyGitIndexPatch } from "../vcs/GitIndexReview.ts";
-import { authorizeGitReadCwd } from "../vcs/GitReadWorkspace.ts";
+import { authorizeGitReadCwd, authorizeGitReadWorkspace } from "../vcs/GitReadWorkspace.ts";
 import type { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import { readGitLineBlame } from "../vcs/GitLineBlame.ts";
 import { readGitImageBlob } from "../vcs/GitImageBlob.ts";
 import { readGitComparison } from "../vcs/GitComparison.ts";
 import type {
+  ChangeRequestTemplateListInput,
+  ChangeRequestTemplateListResult,
   GitReadLineBlameInput,
   GitReadLineBlameResult,
   GitReadImageBlobInput,
@@ -56,6 +58,7 @@ import {
   type GitWorktreeCreationContext,
   type GitVcsDriverShape,
 } from "../vcs/GitVcsDriver.ts";
+import { RestartSensitiveWork } from "../updates/restartSensitiveWork.ts";
 import { VcsDriverRegistry } from "../vcs/VcsDriverRegistry.ts";
 
 export interface GitWorkflowServiceShape {
@@ -74,6 +77,10 @@ export interface GitWorkflowServiceShape {
   readonly readComparison: (
     input: GitReadComparisonInput,
   ) => Effect.Effect<GitReadComparisonResult, GitCommandError, WorkspaceAccessPolicy>;
+  /** The base branch's change request templates, read from an authorized Git checkout. */
+  readonly listChangeRequestTemplates: (
+    input: ChangeRequestTemplateListInput,
+  ) => Effect.Effect<ChangeRequestTemplateListResult, GitCommandError, WorkspaceAccessPolicy>;
   readonly status: (
     input: VcsStatusInput,
   ) => Effect.Effect<VcsStatusResult, GitManagerServiceError>;
@@ -89,10 +96,11 @@ export interface GitWorkflowServiceShape {
   readonly indexedPullRequestStates: GitManagerShape["indexedPullRequestStates"];
   readonly indexedChangeRequests: GitManagerShape["indexedChangeRequests"];
   readonly cachedRepositoryList: GitManagerShape["cachedRepositoryList"];
+  readonly cachedInvolvedList: GitManagerShape["cachedInvolvedList"];
   readonly invalidateRepositoryLists: GitManagerShape["invalidateRepositoryLists"];
   readonly refreshRemoteTrackingRefs: GitManagerShape["refreshRemoteTrackingRefs"];
   readonly invalidateLocalStatus: (cwd: string) => Effect.Effect<void, never>;
-  readonly invalidateRemoteStatus: (cwd: string) => Effect.Effect<void, never>;
+  readonly invalidateRemoteStatus: GitManagerShape["invalidateRemoteStatus"];
   readonly invalidateStatus: (cwd: string) => Effect.Effect<void, never>;
   readonly pullCurrentBranch: (cwd: string) => Effect.Effect<VcsPullResult, GitCommandError>;
   readonly runStackedAction: (
@@ -114,8 +122,8 @@ export interface GitWorkflowServiceShape {
     input: VcsCreateWorktreeInput & GitWorktreeCreationContext,
   ) => Effect.Effect<VcsCreateWorktreeResult, GitCommandError>;
   readonly prefetchWorktreeBase: GitVcsDriverShape["prefetchWorktreeBase"];
+  readonly isAncestorCommit: GitVcsDriverShape["isAncestorCommit"];
   readonly removeWorktree: GitVcsDriverShape["removeWorktree"];
-  readonly pruneWorktrees: (cwd: string) => Effect.Effect<void, GitCommandError>;
   readonly listWorktreePaths: (cwd: string) => Effect.Effect<readonly string[], GitCommandError>;
   readonly listLocalBranchNames: (cwd: string) => Effect.Effect<readonly string[], GitCommandError>;
   readonly createRef: (
@@ -205,6 +213,8 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
   const registry = yield* VcsDriverRegistry;
   const git = yield* GitVcsDriver;
   const gitManager = yield* GitManager;
+  // A restart in the middle would leave a half-made or half-removed checkout behind.
+  const restartWork = yield* RestartSensitiveWork;
 
   const ensureGit = Effect.fn("GitWorkflowService.ensureGit")(function* (
     operation: string,
@@ -253,6 +263,20 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
       );
     }
   });
+
+  // Authorize before repository-kind discovery; readers also validate Git's resolved root.
+  const authorizedGitRead = <Input extends { readonly cwd: string }, A, E, R>(
+    operation: string,
+    input: Input,
+    read: (authorized: Input) => Effect.Effect<A, E, R>,
+  ) =>
+    authorizeGitReadCwd(input.cwd, operation).pipe(
+      Effect.flatMap((cwd) =>
+        ensureGitCommand(`GitWorkflowService.${operation}`, cwd).pipe(
+          Effect.andThen(() => read({ ...input, cwd })),
+        ),
+      ),
+    );
 
   const detectGitRepositoryForStatus = Effect.fn("GitWorkflowService.detectGitRepositoryForStatus")(
     function* (operation: string, cwd: string) {
@@ -368,6 +392,7 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
     indexedPullRequestStates: gitManager.indexedPullRequestStates,
     indexedChangeRequests: gitManager.indexedChangeRequests,
     cachedRepositoryList: gitManager.cachedRepositoryList,
+    cachedInvolvedList: gitManager.cachedInvolvedList,
     invalidateRepositoryLists: gitManager.invalidateRepositoryLists,
     // Gated like the status reads: a folder that is not a Git repository
     // (cached detection) refreshes nothing and spawns no git.
@@ -397,32 +422,26 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
       ensureGit("GitWorkflowService.preparePullRequestThread", input.cwd).pipe(
         Effect.andThen(gitManager.preparePullRequestThread(input, options)),
       ),
-    // Authorize before repository-kind discovery; readers also validate Git's resolved root.
     readLineBlame: (input) =>
-      authorizeGitReadCwd(input.cwd, "readLineBlame").pipe(
-        Effect.flatMap((cwd) =>
-          ensureGitCommand("GitWorkflowService.readLineBlame", cwd).pipe(
-            Effect.andThen(readGitLineBlame(git.execute, { ...input, cwd })),
-          ),
-        ),
+      authorizedGitRead("readLineBlame", input, (authorized) =>
+        readGitLineBlame(git.execute, authorized),
       ),
     readImageBlob: (input) =>
-      authorizeGitReadCwd(input.cwd, "readImageBlob").pipe(
-        Effect.flatMap((cwd) =>
-          ensureGitCommand("GitWorkflowService.readImageBlob", cwd).pipe(
-            Effect.andThen(readGitImageBlob(git.execute, { ...input, cwd })),
-          ),
+      authorizedGitRead("readImageBlob", input, (authorized) =>
+        readGitImageBlob(git.execute, authorized),
+      ),
+    listChangeRequestTemplates: (input) =>
+      authorizedGitRead("listChangeRequestTemplates", input, (authorized) =>
+        // The workspace policy applies to Git's own worktree root too.
+        authorizeGitReadWorkspace(git.execute, authorized.cwd, "listChangeRequestTemplates").pipe(
+          Effect.flatMap((cwd) => gitManager.listChangeRequestTemplates({ ...authorized, cwd })),
         ),
       ),
     readLocalChanges: (input) => readGitLocalChanges(git.execute, input),
     applyIndexPatch: (input) => applyGitIndexPatch(git.execute, input),
     readComparison: (input) =>
-      authorizeGitReadCwd(input.cwd, "readComparison").pipe(
-        Effect.flatMap((cwd) =>
-          ensureGitCommand("GitWorkflowService.readComparison", cwd).pipe(
-            Effect.andThen(readGitComparison(git.execute, { ...input, cwd })),
-          ),
-        ),
+      authorizedGitRead("readComparison", input, (authorized) =>
+        readGitComparison(git.execute, authorized),
       ),
     listRefs: (input) =>
       detectGitRepositoryForCommand("GitWorkflowService.listRefs", input.cwd).pipe(
@@ -438,18 +457,21 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
     createWorktree: (input) =>
       ensureGitCommand("GitWorkflowService.createWorktree", input.cwd).pipe(
         Effect.andThen(git.createWorktree(input)),
+        restartWork.track,
       ),
     prefetchWorktreeBase: (input) =>
       ensureGitCommand("GitWorkflowService.prefetchWorktreeBase", input.cwd).pipe(
         Effect.andThen(git.prefetchWorktreeBase(input)),
+        restartWork.track,
+      ),
+    isAncestorCommit: (input) =>
+      ensureGitCommand("GitWorkflowService.isAncestorCommit", input.cwd).pipe(
+        Effect.andThen(git.isAncestorCommit(input)),
       ),
     removeWorktree: (input) =>
       ensureGitCommand("GitWorkflowService.removeWorktree", input.cwd).pipe(
         Effect.andThen(git.removeWorktree(input)),
-      ),
-    pruneWorktrees: (cwd) =>
-      ensureGitCommand("GitWorkflowService.pruneWorktrees", cwd).pipe(
-        Effect.andThen(git.pruneWorktrees(cwd)),
+        restartWork.track,
       ),
     listWorktreePaths: (cwd) => {
       const empty: readonly string[] = [];

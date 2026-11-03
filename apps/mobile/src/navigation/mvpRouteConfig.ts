@@ -79,6 +79,36 @@ export const MVP_ROOT_ROUTES = {
     ios: { presentation: "card" },
     android: { presentation: "card" },
   },
+  /** One repository's pull requests: the list a project's checkout reads through. */
+  ProjectPullRequests: {
+    linking: `${PROJECT}/pull-requests`,
+    overlay: false,
+    headerPreset: "glass",
+    headerAction: "back",
+    ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
+  /** One pull request: summary, conversation, checks and files. */
+  ProjectPullRequest: {
+    linking: `${PROJECT}/pull-requests/:number`,
+    overlay: false,
+    headerPreset: "glass",
+    headerAction: "back",
+    ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
+  /**
+   * One file's diff in a pull request. `:path*` is a segment wildcard like
+   * ThreadFile's; a solid header, because the diff scrolls horizontally too.
+   */
+  ProjectPullRequestFile: {
+    linking: `${PROJECT}/pull-requests/:number/files/:path*`,
+    overlay: false,
+    headerPreset: "solid",
+    headerAction: "back",
+    ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
   NewTask: {
     linking: "tasks/new",
     overlay: true,
@@ -148,6 +178,32 @@ export const MVP_ROOT_ROUTES = {
     headerAction: "back",
     ios: { presentation: "card" },
     android: { presentation: "card" },
+  },
+  /**
+   * A thread's terminal. A card with a solid header on both platforms: the
+   * terminal owns the viewport below it, and output must never slide under a
+   * translucent header. Regular-width windows show it in the workspace
+   * inspector instead (see ThreadWorkspaceLayout).
+   */
+  ThreadTerminal: {
+    linking: `${THREAD}/terminal`,
+    overlay: false,
+    headerPreset: "solid",
+    headerAction: "back",
+    ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
+  /**
+   * The simulator or emulator the thread's agent uses, full screen with no header: the device
+   * screen owns the viewport, and its own controls bar closes it.
+   */
+  ThreadDevice: {
+    linking: `${THREAD}/device`,
+    overlay: true,
+    headerPreset: "none",
+    headerAction: "none",
+    ios: { presentation: "fullScreenModal" },
+    android: { presentation: "fullScreenModal", headerShown: false },
   },
   Connections: {
     linking: "connections",
@@ -229,6 +285,12 @@ export const MVP_SETTINGS_SHEET_ROUTES = {
   SettingsHub: { linking: "hub", headerAction: "back", ...SETTINGS_PUSH },
   SettingsWorkspace: { linking: "workspace", headerAction: "back", ...SETTINGS_PUSH },
   SettingsStatistics: { linking: "statistics", headerAction: "back", ...SETTINGS_PUSH },
+  /** Each connected machine's provider instances; a sign-in opens a sheet of its own. */
+  SettingsProviderAccounts: {
+    linking: "provider-accounts",
+    headerAction: "back",
+    ...SETTINGS_PUSH,
+  },
   SettingsInbox: { linking: "inbox", headerAction: "back", ...SETTINGS_PUSH },
   // Hosted Hub account. Account management stays nested; voluntary sign-in
   // opens the full-screen root Access route rather than a dismissible sheet.
@@ -267,6 +329,7 @@ export const MVP_SETTINGS_SHEET_ROUTES = {
     ...SETTINGS_PUSH,
   },
   SettingsAbout: { linking: "about", headerAction: "back", ...SETTINGS_PUSH },
+  SettingsDiagnostics: { linking: "diagnostics", headerAction: "back", ...SETTINGS_PUSH },
 } as const satisfies Record<string, MvpSettingsRouteDescriptor>;
 
 export type MvpSettingsRouteName = keyof typeof MVP_SETTINGS_SHEET_ROUTES;

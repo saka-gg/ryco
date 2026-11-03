@@ -37,14 +37,11 @@ import {
 } from "../threadMenuInventory";
 import type { useRouter } from "@tanstack/react-router";
 import { deleteConfirmationMessage, type useThreadActions } from "../../../hooks/useThreadActions";
-import {
-  canArchiveSidebarThread,
-  shouldConfirmSidebarThreadArchive,
-  shouldConfirmSidebarThreadDelete,
-} from "../../Sidebar.logic";
+import { shouldConfirmSidebarThreadDelete } from "../../Sidebar.logic";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
 import type { SidebarThreadSummary } from "../../../types";
 import type { SidebarProjectGroupMember } from "../../../sidebarProjectGrouping";
+import { attemptThreadArchive, requestThreadArchive } from "../../../threadLifecycleCommands";
 import { requestThreadPinChange } from "../../../threadPinning";
 
 export type { ThreadMenuActionId, ThreadMenuActionItem };
@@ -173,29 +170,12 @@ export function useThreadMenuActions(params: {
   }, []);
 
   const attemptArchiveThread = useCallback(
-    async (threadRef: ScopedThreadRef) => {
-      // Looked up outside the try: the React Compiler cannot lower value
-      // blocks inside try/catch and would skip this hook.
-      const thread = sidebarThreadByKeyRef.current.get(scopedThreadKey(threadRef));
-      if (thread !== undefined && !canArchiveSidebarThread(thread)) {
-        toastManager.add({
-          type: "warning",
-          title: "Send a message before archiving",
-        });
-        return;
-      }
-      try {
-        await archiveThread(threadRef);
-      } catch (error) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Failed to archive thread",
-            description: error instanceof Error ? error.message : "An error occurred.",
-          }),
-        );
-      }
-    },
+    (threadRef: ScopedThreadRef) =>
+      attemptThreadArchive({
+        target: threadRef,
+        thread: sidebarThreadByKeyRef.current.get(scopedThreadKey(threadRef)),
+        archiveThread,
+      }),
     [archiveThread, sidebarThreadByKeyRef],
   );
 
@@ -350,7 +330,6 @@ export function useThreadMenuActions(params: {
       const thread = sidebarThreadByKeyRef.current.get(threadKey) ?? null;
       if (!thread) return;
       const draftId = (thread as SidebarThreadSummary & { draftId?: DraftId | undefined }).draftId;
-      const archiveAvailable = !draftId && canArchiveSidebarThread(thread);
       const threadProject = memberProjectByScopedKey.get(
         scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId)),
       );
@@ -462,30 +441,20 @@ export function useThreadMenuActions(params: {
         return;
       }
       if (actionId === "archive") {
-        if (
-          shouldConfirmSidebarThreadArchive({
-            archiveAvailable,
-            confirmThreadArchive: appSettingsConfirmThreadArchive,
-          })
-        ) {
-          const message = [
-            `Archive thread "${thread.title}"?`,
-            "Its session stops and its history is kept indefinitely. Unarchive it from Settings › Archive.",
-          ].join("\n");
-          const localApi = readLocalApi();
-          const confirmed = localApi
-            ? await localApi.dialogs.confirm(message)
-            : window.confirm(message);
-          if (!confirmed) return;
-        }
-        await attemptArchiveThread(threadRef);
+        await requestThreadArchive({
+          target: threadRef,
+          thread,
+          isDraft: Boolean(draftId),
+          confirmThreadArchive: appSettingsConfirmThreadArchive,
+          archiveThread,
+        });
         return;
       }
       if (actionId !== "delete" && actionId !== "discard-draft") return;
       await requestDeleteThread(thread);
     },
     [
-      attemptArchiveThread,
+      archiveThread,
       appSettingsConfirmThreadArchive,
       appSettingsConfirmThreadUnpin,
       requestDeleteThread,

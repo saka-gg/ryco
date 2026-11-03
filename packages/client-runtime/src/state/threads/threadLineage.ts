@@ -76,8 +76,14 @@ export function selectDelegatedChildThreads<T extends DelegatedChildCandidate>(
     );
 }
 
-/** State-derived attention bucket, ignoring pin/focus placement. */
-export type DelegatedNestingUrgency = "needs-input" | "active" | "recent" | "snoozed" | "settled";
+/** State-derived attention bucket, ignoring pin placement. */
+export type DelegatedNestingUrgency =
+  | "needs-input"
+  | "active"
+  | "recent"
+  | "snoozed"
+  | "settled"
+  | "hidden";
 
 export interface DelegatedNestingItem {
   /** `scopedThreadKey(scopeThreadRef(environmentId, threadId))` */
@@ -86,8 +92,7 @@ export interface DelegatedNestingItem {
   readonly threadId: ThreadId;
   readonly lineage: ThreadLineage | null | undefined;
   readonly pinned: boolean;
-  readonly focused: boolean;
-  /** State-derived section, ignoring pin/focus placement. */
+  /** State-derived section, ignoring pin placement. */
   readonly urgency: DelegatedNestingUrgency;
 }
 
@@ -104,15 +109,16 @@ const URGENCY_RANK: Record<DelegatedNestingUrgency, number> = {
   recent: 2,
   snoozed: 3,
   settled: 4,
+  hidden: 5,
 };
 
-/** Every delegated child folds, whatever its state, unless the user pinned it or Focus placed it. */
+/** Every delegated child folds, whatever its state, unless the user pinned it. */
 function canNest(item: DelegatedNestingItem): boolean {
-  return isDelegatedThreadLineage(item.lineage) && !item.pinned && !item.focused;
+  return isDelegatedThreadLineage(item.lineage) && !item.pinned;
 }
 
 /**
- * Snoozed and Settled hosts sit out of sight, so only a child at least as quiet
+ * Snoozed, Settled and Hidden hosts sit out of sight, so only a child at least as quiet
  * folds under one. Any other host carries its children's state (adapter-owned).
  */
 function canHost(host: DelegatedNestingItem, child: DelegatedNestingItem): boolean {
@@ -150,7 +156,7 @@ function nearestVisibleAncestorKey(
  * Plans which delegated children fold under a top-level host (spec D7-D9).
  *
  * A delegated child folds under its nearest visible ancestor whatever its
- * state, unless it is pinned or focused, or that ancestor is snoozed or settled
+ * state, unless it is pinned, or that ancestor is snoozed or settled
  * and the child is more urgent. Nested descendants flatten to the topmost
  * visible host, which therefore never hides work under Snoozed or Settled.
  * Invisible intermediates are walked through `lineageByKey`.

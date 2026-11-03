@@ -34,6 +34,10 @@ import {
   DEFAULT_RUNTIME_MODE,
 } from "../threads/types.ts";
 import { ensureInlineTerminalContextPlaceholders } from "./terminalContext.ts";
+import {
+  decodeComposerReferenceDraft,
+  normalizeComposerReferenceDrafts,
+} from "./composerReference.ts";
 import { chatDraftLogicalProjectKey, isChatDraftLogicalProjectKey } from "./chatDrafts.ts";
 import type {
   ComposerDraftImage,
@@ -98,10 +102,61 @@ const PersistedTerminalContextDraft = Schema.Struct({
 });
 type PersistedTerminalContextDraft = typeof PersistedTerminalContextDraft.Type;
 
+/**
+ * A file reference as a draft keeps it: unlike a terminal context it carries
+ * its excerpt, which is bounded, so it survives a reload. Read back through
+ * `decodeComposerReferenceDraft`, which checks it like a fresh one.
+ */
+const PersistedFileReferenceDraft = Schema.Struct({
+  id: Schema.String,
+  createdAt: Schema.String,
+  path: Schema.String,
+  lineStart: Schema.Number,
+  lineEnd: Schema.Number,
+  side: Schema.optionalKey(Schema.Literals(["old", "new"])),
+  snippet: Schema.String,
+  truncated: Schema.Boolean,
+  comment: Schema.optionalKey(Schema.String),
+});
+
+/**
+ * A page element picked in the project browser as a draft keeps it: bounded,
+ * redacted page data and the note. Read back through
+ * `decodeComposerReferenceDraft`, which normalizes it like a fresh pick.
+ */
+const PersistedBrowserElementDraft = Schema.Struct({
+  id: Schema.String,
+  createdAt: Schema.String,
+  kind: Schema.Literal("browser-element"),
+  url: Schema.String,
+  pageTitle: Schema.String,
+  selector: Schema.String,
+  tagName: Schema.String,
+  role: Schema.NullOr(Schema.String),
+  name: Schema.NullOr(Schema.String),
+  text: Schema.NullOr(Schema.String),
+  box: Schema.NullOr(
+    Schema.Struct({
+      x: Schema.Number,
+      y: Schema.Number,
+      width: Schema.Number,
+      height: Schema.Number,
+    }),
+  ),
+  comment: Schema.optionalKey(Schema.String),
+});
+
 const PersistedComposerThreadDraftState = Schema.Struct({
   prompt: Schema.String,
   attachments: Schema.Array(PersistedComposerImageAttachment),
   terminalContexts: Schema.optionalKey(Schema.Array(PersistedTerminalContextDraft)),
+  // Optional, so drafts written before references existed decode unchanged;
+  // an older client reading a newer draft keeps its text and drops the chips
+  // it cannot read (each entry is decoded on its own: a page element has no
+  // `path`, so a client from before page elements drops just those).
+  fileReferences: Schema.optionalKey(
+    Schema.Array(Schema.Union([PersistedFileReferenceDraft, PersistedBrowserElementDraft])),
+  ),
   // Keyed by `ProviderInstanceId` (open branded slug) so custom provider
   // instances (e.g. `codex_personal`) round-trip alongside the built-in
   // `codex` / `claudeAgent` / ... entries. Every prior `ProviderDriverKind`
@@ -948,6 +1003,14 @@ function normalizePersistedDraftsByThreadId(
           return normalized ? [normalized] : [];
         })
       : [];
+    const fileReferences = Array.isArray(draftCandidate.fileReferences)
+      ? normalizeComposerReferenceDrafts(
+          draftCandidate.fileReferences.flatMap((entry: unknown) => {
+            const decoded = decodeComposerReferenceDraft(entry);
+            return decoded ? [decoded] : [];
+          }),
+        )
+      : [];
     const runtimeMode = isRuntimeMode(draftCandidate.runtimeMode)
       ? draftCandidate.runtimeMode
       : null;
@@ -1011,6 +1074,7 @@ function normalizePersistedDraftsByThreadId(
       promptCandidate.length === 0 &&
       attachments.length === 0 &&
       terminalContexts.length === 0 &&
+      fileReferences.length === 0 &&
       !hasModelData &&
       !runtimeMode &&
       !interactionMode &&
@@ -1034,6 +1098,7 @@ function normalizePersistedDraftsByThreadId(
       prompt,
       attachments,
       ...(terminalContexts.length > 0 ? { terminalContexts } : {}),
+      ...(fileReferences.length > 0 ? { fileReferences } : {}),
       ...(hasModelData
         ? {
             modelSelectionByProvider: compactModelSelectionByProvider(modelSelectionByProvider),
@@ -1111,6 +1176,7 @@ export function partializeComposerThreadDraftState<TImage extends ComposerDraftI
     draft.prompt.length === 0 &&
     draft.persistedAttachments.length === 0 &&
     draft.terminalContexts.length === 0 &&
+    draft.fileReferences.length === 0 &&
     !hasModelData &&
     draft.runtimeMode === null &&
     draft.interactionMode === null &&
@@ -1134,6 +1200,7 @@ export function partializeComposerThreadDraftState<TImage extends ComposerDraftI
           })),
         }
       : {}),
+    ...(draft.fileReferences.length > 0 ? { fileReferences: draft.fileReferences } : {}),
     ...(hasModelData
       ? {
           modelSelectionByProvider: compactModelSelectionByProvider(draft.modelSelectionByProvider),
@@ -1267,6 +1334,7 @@ export function toHydratedThreadDraft<TImage extends ComposerDraftImage>(
         ...context,
         text: "",
       })) ?? [],
+    fileReferences: [...(persistedDraft.fileReferences ?? [])],
     sourceControlContexts: [],
     modelSelectionByProvider,
     activeProvider,

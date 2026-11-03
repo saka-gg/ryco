@@ -7,8 +7,8 @@ import {
   sourceControlDiscoveryStateAtom,
 } from "@ryco/client-runtime/sourceControlDiscoveryState";
 import { EnvironmentId, type SourceControlDiscoveryResult } from "@ryco/contracts";
-import { Effect } from "effect";
-import { Atom } from "effect/reactivity";
+import * as Effect from "effect/Effect";
+import * as Atom from "effect/reactivity/Atom";
 
 import { readPrimaryEnvironmentDescriptor } from "../environments/primary";
 import { readEnvironmentConnection } from "../environments/runtime";

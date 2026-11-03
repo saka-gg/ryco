@@ -4,9 +4,13 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   flattenQueuedThreadMessages,
   groupQueuedThreadMessages,
+  isQueuedThreadMessageHeld,
+  isQueuedThreadMessageMovable,
   modelSelectionsEqual,
   normalizePersistedQueuedThreadMessageAttachments,
+  queuedThreadMessageFollowUpFailure,
   resolveThreadOutboxFailureAction,
+  summarizeQueuedThreadMessage,
   threadOutboxRetryDelayMs,
   type QueuedThreadMessage,
 } from "./threadOutboxModel";
@@ -187,6 +191,50 @@ describe("threadOutboxModel", () => {
           { id: "file-3", name: "b", mimeType: "video/mp4", sizeBytes: -5 },
         ]),
       ).toEqual([]);
+    });
+  });
+
+  describe("moving to the node's follow-up queue", () => {
+    const base = { messageId: "m1" as MessageId, threadId: "t1" as ThreadId, createdAt: "x" };
+
+    it("moves a held message as failed with the reason it waits for", () => {
+      const steer = queued({ ...base, uncertainSteerError: "The steer was cut off." });
+      expect(isQueuedThreadMessageHeld(steer)).toBe(true);
+      expect(queuedThreadMessageFollowUpFailure(steer)).toEqual({
+        reason: "steer-uncertain",
+        detail: "The steer was cut off.",
+      });
+      const review = queued({ ...base, resumeReviewError: "Review the resume first." });
+      expect(queuedThreadMessageFollowUpFailure(review)).toEqual({
+        reason: "start-failed",
+        detail: "Review the resume first.",
+      });
+      // A long provider error is cut to the contract's limit.
+      expect(
+        queuedThreadMessageFollowUpFailure(
+          queued({ ...base, uncertainSteerError: "e".repeat(2_000) }),
+        )?.detail,
+      ).toHaveLength(1_000);
+      const plain = queued(base);
+      expect(isQueuedThreadMessageHeld(plain)).toBe(false);
+      expect(queuedThreadMessageFollowUpFailure(plain)).toBeUndefined();
+    });
+
+    it("keeps a saved request with the retired project memory on the device", () => {
+      const retired = { ...queued(base), projectMemory: { enabled: true } } as QueuedThreadMessage;
+      expect(isQueuedThreadMessageMovable(retired)).toBe(false);
+      expect(isQueuedThreadMessageHeld(retired)).toBe(true);
+      expect(isQueuedThreadMessageMovable(queued(base))).toBe(true);
+    });
+
+    it("labels a queued message by its text, else its attachments", () => {
+      expect(summarizeQueuedThreadMessage({ text: "  Run the tests  ", attachments: [] })).toBe(
+        "Run the tests",
+      );
+      expect(summarizeQueuedThreadMessage({ text: "x".repeat(120), attachments: [] })).toBe(
+        `${"x".repeat(89)}…`,
+      );
+      expect(summarizeQueuedThreadMessage({ text: "", attachments: [] })).toBe("Queued message");
     });
   });
 });

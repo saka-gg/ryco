@@ -4,6 +4,7 @@ import {
   receiveDesktopAppUpdateSnapshot,
 } from "../desktopAppUpdateBridge.ts";
 import { attachDesktopLifecycleChannel } from "../desktopLifecycle.ts";
+import { watchDesktopParentPipe } from "../desktopParentLifetime.ts";
 import { nativeResourceMonitor } from "./NativeResourceMonitor.ts";
 import { Socket } from "node:net";
 import type { Duplex } from "node:stream";
@@ -59,7 +60,10 @@ export function makeDesktopResourceTelemetry(connection: Duplex) {
           latest = latest ? { ...latest, power: snapshot.power } : snapshot;
         }
       },
-      () => connection.destroy(),
+      // A malformed line is dropped. Closing the pipe over it would cut this
+      // backend's tie to the app: it shuts down when the pipe closes
+      // (desktopParentLifetime.ts), so it must stay open while the app runs.
+      () => undefined,
     ),
   );
   connection.on("error", () => connection.destroy());
@@ -103,6 +107,7 @@ export function initializeDesktopResourceTelemetry(fd: number): void {
     receiver = makeDesktopResourceTelemetry(connection);
     attachDesktopLifecycleChannel(connection);
     attachDesktopAppUpdateChannel(connection);
+    watchDesktopParentPipe(connection);
   } catch {
     // Optional diagnostics must never prevent backend startup.
   }

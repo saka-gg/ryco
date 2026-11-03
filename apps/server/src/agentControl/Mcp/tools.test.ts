@@ -1,4 +1,5 @@
 import { workspacePlan } from "../workspaceLifecycle.testSupport.ts";
+import { NO_DELEGATION_LIMITS } from "../../orchestration/delegationLimits.ts";
 import { computeAgentControlPlanDigest } from "../planDigest.ts";
 import {
   AGENT_CONTROL_CAPABILITIES,
@@ -18,6 +19,7 @@ import {
   ProviderInstanceId,
   RuntimeSessionId,
   ServerProvider,
+  CliProxyHubError,
   ThreadId,
   TurnId,
   type AgentControlProposal,
@@ -26,10 +28,13 @@ import {
 } from "@ryco/contracts";
 import { assert, it } from "@effect/vitest";
 import { Effect, Fiber, Option, PubSub, Schema } from "effect";
+import sharp from "sharp";
+import { TestClock } from "effect/testing";
 
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { DeviceManager } from "../../device/DeviceManager.ts";
 import { FakeDeviceBackend } from "../../device/FakeDeviceBackend.ts";
+import type { DeviceDescribeUiResult } from "@ryco/contracts";
 import {
   AgentControlCapabilityDeniedError,
   AgentControlDisabledError,
@@ -38,7 +43,12 @@ import {
 import type { AgentControlPolicyShape } from "../Services/AgentControlPolicy.ts";
 import type { AgentControlAutomationShape } from "../Services/AgentControlAutomation.ts";
 import type { AgentControlSessionRecord } from "../Services/AgentControlSessionRegistry.ts";
-import { makeAgentControlMcpTools, type AgentControlMcpToolDeps } from "./tools.ts";
+import {
+  AGENT_CONTROL_DEVICE_IMAGE_MAX_BASE64_CHARS,
+  makeAgentControlMcpTools,
+  type AgentControlMcpToolDeps,
+} from "./tools.ts";
+import { AGENT_CONTROL_MCP_MAX_RESPONSE_BYTES } from "./transportGuard.ts";
 
 // ── Fixtures ──────────────────────────────────────────────────────────
 
@@ -281,6 +291,7 @@ const activeAuthority = {
 
 const allowPolicy: AgentControlPolicyShape = {
   isEnabled: Effect.succeed(true),
+  delegationLimits: Effect.succeed(NO_DELEGATION_LIMITS),
   requireEnabled: () => Effect.void,
   requiredCapabilityForAction: (kind) => AGENT_CONTROL_ACTION_CAPABILITIES[kind],
   authorize: (input) =>
@@ -382,7 +393,7 @@ it.effect("advertises capability-scoped reads and all proposal-only writes with 
     );
     assert.strictEqual(
       writeDescriptors.filter((tool) => writeTools.isWriteTool(tool.name)).length,
-      21,
+      23,
     );
     assert.isTrue(tools.hasTool("ryco_create_threads"));
   }),
@@ -512,6 +523,136 @@ it.effect(
       assert.strictEqual(backend.calls.filter((entry) => entry.kind === "screenshot").length, 1);
       yield* Effect.promise(() => manager.dispose());
     }),
+);
+
+/** A fake whose accessibility tree carries one very long value. */
+class LongTreeBackend extends FakeDeviceBackend {
+  value: string;
+  constructor(value: string) {
+    super();
+    this.value = value;
+  }
+  override async describeUi(udid: string): Promise<DeviceDescribeUiResult> {
+    const tree = await super.describeUi(udid);
+    return { ...tree, root: { ...tree.root, value: this.value } };
+  }
+}
+
+it.effect("device content fits the Agent Control response cap or is refused in words", () =>
+  Effect.gen(function* () {
+    const backend = new LongTreeBackend("v".repeat(400_000));
+    backend.bootExternally("FAKE-0001");
+    const manager = new DeviceManager({ backend });
+    yield* Effect.promise(() => manager.attach(callerThreadId, "FAKE-0001"));
+    const contentSession = {
+      ...writeSession,
+      grantedCapabilities: [AGENT_CONTROL_CAPABILITIES.readDeviceContent],
+    };
+    const deps = makeDeps({ deviceService: { supported: true, manager } });
+
+    // A full-resolution capture: well past the cap as a raw PNG.
+    const png = yield* Effect.promise(() =>
+      sharp({
+        create: {
+          width: 1_000,
+          height: 1_000,
+          channels: 3,
+          background: "#202020",
+          noise: { type: "gaussian", mean: 128, sigma: 60 },
+        },
+      })
+        .png()
+        .toBuffer(),
+    );
+    assert.isAbove(png.toString("base64").length, AGENT_CONTROL_MCP_MAX_RESPONSE_BYTES);
+    backend.setScreenshotPng(png.toString("base64"));
+    const screenshot = yield* call(
+      deps,
+      AGENT_CONTROL_MCP_TOOLS.readDeviceScreenshot,
+      { udid: "FAKE-0001" },
+      contentSession,
+    );
+    assert.isUndefined(screenshot.isError);
+    assert.deepStrictEqual(
+      screenshot.content.map((block) => block.type),
+      ["text", "image"],
+    );
+    const image = screenshot.content[1];
+    if (image?.type === "image") {
+      assert.strictEqual(image.mimeType, "image/jpeg");
+      assert.isAtMost(image.data.length, AGENT_CONTROL_DEVICE_IMAGE_MAX_BASE64_CHARS);
+    }
+    // The capture's own size beside the fitted one: a position read from a scaled
+    // image maps back to capture pixels (Android input coordinates).
+    const sizes = JSON.parse(screenshot.content[0]?.text ?? "{}") as {
+      width: number;
+      height: number;
+      scaledToFitTransport: { mimeType: string; width: number; height: number };
+    };
+    assert.strictEqual(sizes.width, 1_000);
+    assert.strictEqual(sizes.height, 1_000);
+    assert.strictEqual(sizes.scaledToFitTransport.mimeType, "image/jpeg");
+    const fittedSize = yield* Effect.promise(() =>
+      sharp(Buffer.from(image?.type === "image" ? image.data : "", "base64")).metadata(),
+    );
+    assert.strictEqual(sizes.scaledToFitTransport.width, fittedSize.width);
+    assert.strictEqual(sizes.scaledToFitTransport.height, fittedSize.height);
+    const envelope = JSON.stringify({ jsonrpc: "2.0", id: 1, result: screenshot });
+    assert.isBelow(Buffer.byteLength(envelope, "utf8"), AGENT_CONTROL_MCP_MAX_RESPONSE_BYTES);
+
+    // A small capture stays the PNG as captured.
+    backend.setScreenshotPng(
+      (yield* Effect.promise(() =>
+        sharp({ create: { width: 4, height: 4, channels: 3, background: "#fff" } })
+          .png()
+          .toBuffer(),
+      )).toString("base64"),
+    );
+    const small = yield* call(
+      deps,
+      AGENT_CONTROL_MCP_TOOLS.readDeviceScreenshot,
+      { udid: "FAKE-0001" },
+      contentSession,
+    );
+    assert.strictEqual(small.content.length, 1);
+    assert.strictEqual(
+      small.content[0]?.type === "image" ? small.content[0].mimeType : null,
+      "image/png",
+    );
+
+    // A tree whose JSON passes 400,000 characters would not fit beside the envelope.
+    const tree = yield* call(
+      deps,
+      AGENT_CONTROL_MCP_TOOLS.describeDeviceUi,
+      { udid: "FAKE-0001" },
+      contentSession,
+    );
+    assert.isTrue(tree.isError);
+    assert.strictEqual(tree.content[0]?.text, "Device UI content exceeds the internal read limit.");
+    // Measured on the wire: fewer characters than the cap, three UTF-8 bytes each.
+    backend.value = "設".repeat(140_000);
+    const wide = yield* call(
+      deps,
+      AGENT_CONTROL_MCP_TOOLS.describeDeviceUi,
+      { udid: "FAKE-0001" },
+      contentSession,
+    );
+    assert.isTrue(wide.isError);
+    // Half as many still fits, inside the response cap.
+    backend.value = "設".repeat(70_000);
+    const fits = yield* call(
+      deps,
+      AGENT_CONTROL_MCP_TOOLS.describeDeviceUi,
+      { udid: "FAKE-0001" },
+      contentSession,
+    );
+    assert.isUndefined(fits.isError);
+    assert.isBelow(
+      Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id: 1, result: fits }), "utf8"),
+      AGENT_CONTROL_MCP_MAX_RESPONSE_BYTES,
+    );
+    yield* Effect.promise(() => manager.dispose());
+  }),
 );
 
 it.effect("automation create, update, and cancel remain inert exact proposals until accepted", () =>
@@ -728,6 +869,136 @@ it.effect("diagnostic reads stay exact-scope and serialize only the redacted con
       writeSession,
     );
     assert.isTrue(denied.isError);
+  }),
+);
+
+it.effect("ryco_usage_limits reads cached limits under the diagnostics grant, without a turn", () =>
+  Effect.gen(function* () {
+    const rateLimits = {
+      limitId: "limit-account-123",
+      planType: "pro",
+      observedAt: T1,
+      windows: [{ id: "primary", usedPercent: 25, windowDurationMins: 300 }],
+    };
+    const limited = decodeProvider({ ...codexProvider, rateLimits });
+    const routed = decodeProvider({
+      ...codexProvider,
+      instanceId: "claude-hub",
+      driver: "claudeAgent",
+      displayName: "Claude via hub",
+      rateLimits,
+    });
+    let hubReads = 0;
+    const deps = makeDeps({
+      getProviders: Effect.succeed([limited, routed]),
+      getCliProxyHubs: Effect.sync(() => {
+        hubReads += 1;
+        return [
+          {
+            label: "Home hub",
+            routedInstanceIds: [ProviderInstanceId.make("claude-hub")],
+            failed: false,
+            listed: {
+              fetchedAtMs: Date.parse(T2),
+              accounts: [
+                {
+                  provider: "claude",
+                  disabled: false,
+                  quota: {
+                    status: "ok" as const,
+                    checkedAt: T2,
+                    windows: [{ id: "five_hour", usedPercent: 80, windowDurationMins: 300 }],
+                  },
+                },
+              ],
+            },
+          },
+        ];
+      }),
+    });
+    const reader = {
+      ...session,
+      grantedCapabilities: [AGENT_CONTROL_CAPABILITIES.readDiagnostics],
+    };
+    const tools = makeAgentControlMcpTools(deps);
+    const name = AGENT_CONTROL_MCP_TOOLS.usageLimits;
+    assert.include(
+      (yield* tools.descriptorsFor(reader)).map((tool) => tool.name),
+      name,
+    );
+    assert.notInclude(
+      (yield* tools.descriptorsFor(session)).map((tool) => tool.name),
+      name,
+    );
+    assert.isFalse(tools.isWriteTool(name));
+
+    // No turn authority is stubbed: a routine read needs none.
+    const result = yield* call(deps, name, {}, reader);
+    assert.isUndefined(result.isError);
+    assert.deepStrictEqual(structured(result), {
+      checkedAt: new Date(0).toISOString(),
+      instances: [
+        {
+          instanceId: "codex",
+          driver: "codex",
+          displayName: "Codex personal",
+          windows: [{ label: "5h", usedPercent: 25, resetsAt: null, pace: "Pace unavailable" }],
+          observedAt: T1,
+        },
+        {
+          instanceId: "claude-hub",
+          driver: "claudeAgent",
+          displayName: "Claude via hub",
+          windows: [],
+          observedAt: null,
+          note: 'Served by the CLIProxyAPI hub "Home hub": its own limits describe no account the hub uses. See that hub\'s accounts under hubs.',
+        },
+      ],
+      hubs: [
+        {
+          hubLabel: "Home hub",
+          routedInstanceIds: ["claude-hub"],
+          observedAt: T2,
+          accounts: [
+            {
+              label: "Account 1",
+              provider: "claude",
+              windows: [{ label: "5h", usedPercent: 80, resetsAt: null, pace: "Pace unavailable" }],
+              observedAt: T2,
+            },
+          ],
+        },
+      ],
+    });
+    const serialized = JSON.stringify(result);
+    for (const forbidden of ["user@example.com", "limit-account-123", '"pro"']) {
+      assert.notInclude(serialized, forbidden);
+    }
+    assert.strictEqual(hubReads, 1);
+
+    const filtered = yield* call(deps, name, { instanceId: "claude-hub" }, reader);
+    assert.deepStrictEqual(
+      (structured(filtered) as { instances: Array<{ instanceId: string }> }).instances.map(
+        (instance) => instance.instanceId,
+      ),
+      ["claude-hub"],
+    );
+
+    const denied = yield* call(deps, name, {}, session);
+    assert.strictEqual(denied.content[0]?.text, "Capability denied.");
+    const invalid = yield* call(deps, name, { instanceId: "codex", refresh: true }, reader);
+    assert.strictEqual(invalid.content[0]?.text, "Invalid tool arguments.");
+    const unreadable = yield* call(
+      makeDeps({
+        getCliProxyHubs: Effect.fail(
+          new CliProxyHubError({ message: "Couldn't read the hub settings." }),
+        ),
+      }),
+      name,
+      {},
+      reader,
+    );
+    assert.strictEqual(unreadable.content[0]?.text, "Usage limits read failed.");
   }),
 );
 
@@ -949,6 +1220,56 @@ it.effect("creates an immutable proposal without mutating the target", () =>
       createPlan?.kind === "createThreads" ? createPlan.entries[0]?.tokenMode : undefined,
       "balanced",
     );
+    // No cap asked for: the plan carries none, as before.
+    assert.notProperty(createPlan, "maxConcurrent");
+    const capped = yield* call(
+      deps,
+      AGENT_CONTROL_MCP_TOOLS.createThreads,
+      {
+        requestId: "request-create-capped",
+        maxConcurrent: 2,
+        entries: [1, 2, 3].map((index) => ({
+          projectId: "project-1",
+          title: `Worker ${index}`,
+          prompt: "Complete the bounded task.",
+          modelSelection,
+          runtimeMode: "auto",
+          envMode: "worktree",
+        })),
+      },
+      writeSession,
+    );
+    assert.isUndefined(capped.isError);
+    const cappedPlan = submitted[2]?.plan;
+    assert.strictEqual(
+      cappedPlan?.kind === "createThreads" ? cappedPlan.maxConcurrent : undefined,
+      2,
+    );
+    assert.strictEqual(
+      (submitted[2] as { readonly promptSummary?: string } | undefined)?.promptSummary,
+      "Create 3 threads. At most 2 run at once",
+    );
+    const outOfRange = yield* call(
+      deps,
+      AGENT_CONTROL_MCP_TOOLS.createThreads,
+      {
+        requestId: "request-create-too-many",
+        maxConcurrent: 9,
+        entries: [
+          {
+            projectId: "project-1",
+            title: "Worker",
+            prompt: "Complete the bounded task.",
+            modelSelection,
+            runtimeMode: "auto",
+            envMode: "worktree",
+          },
+        ],
+      },
+      writeSession,
+    );
+    assert.isTrue(outOfRange.isError);
+    assert.strictEqual(submitted.length, 3);
     assert.strictEqual(shellSnapshot.threads, before);
     assert.strictEqual((structured(result) as { replayed: boolean }).replayed, false);
   }),
@@ -1020,7 +1341,7 @@ it.effect("ryco_settings_summary is separately capability-gated and never expose
   Effect.gen(function* () {
     const settings = {
       ...DEFAULT_SERVER_SETTINGS,
-      enableLegacyTokenStreaming: true,
+      responseStreamingMode: "token",
       providers: {
         ...DEFAULT_SERVER_SETTINGS.providers,
         opencode: {
@@ -1727,4 +2048,221 @@ it.effect(
       )!.inputSchema;
       assert.notInclude(JSON.stringify(schema), '"$ref"');
     }),
+);
+
+// ── ryco_watch_pull_request / ryco_unwatch_pull_request ───────────────
+
+/** Submits like Ryco does for a routine request, which the executor then settles. */
+const makeWatchDeps = (settle: (proposal: AgentControlProposal) => AgentControlProposal | null) =>
+  Effect.gen(function* () {
+    const pubsub = yield* PubSub.unbounded<AgentControlProposalStreamProposalEvent>();
+    const submitted: Array<AgentControlProposal["plan"]> = [];
+    let stored: AgentControlProposal | null = null;
+    const deps = makeDeps({
+      getTurnAuthority: () => Effect.succeed(Option.some(activeAuthority)),
+      validator: {
+        validateOwnerAutomation: () => Effect.void,
+        validateSubmission: () =>
+          Effect.succeed({
+            kind: "provider-session",
+            threadId: callerThreadId,
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+            turnId: TurnId.make("turn-active"),
+          }),
+        validateExternalSubmission: () => Effect.die("unused"),
+        revalidateExecution: () => Effect.void,
+      },
+      proposals: {
+        getProposal: (proposalId) =>
+          Effect.sync(() =>
+            stored !== null && stored.proposalId === proposalId
+              ? Option.some(stored)
+              : Option.none(),
+          ),
+        submit: (input) =>
+          Effect.gen(function* () {
+            submitted.push(input.plan);
+            const approved: AgentControlProposal = {
+              proposalId: AgentControlProposalId.make(`proposal-${submitted.length}`),
+              requestId: input.requestId,
+              principal: input.principal,
+              planVersion: 1,
+              plan: input.plan,
+              planDigest: "c".repeat(64),
+              riskTags: input.riskTags,
+              promptSummary: input.promptSummary,
+              status: "approved",
+              createdAt: input.now,
+              updatedAt: input.now,
+              expiresAt: input.expiresAt,
+              decidedAt: input.now,
+              result: null,
+            };
+            stored = approved;
+            const settled = settle(approved);
+            if (settled !== null) {
+              // The executor settles it a moment later, as a routine request.
+              yield* Effect.forkDetach(
+                Effect.sleep("20 millis").pipe(
+                  Effect.andThen(
+                    Effect.suspend(() => {
+                      stored = settled;
+                      return PubSub.publish(pubsub, {
+                        version: 1 as const,
+                        type: "proposal" as const,
+                        revision: 2,
+                        proposal: settled,
+                      });
+                    }),
+                  ),
+                ),
+              );
+            }
+            return { replayed: false, proposal: approved };
+          }),
+      },
+      proposalEvents: { subscribe: PubSub.subscribe(pubsub) },
+    });
+    return { deps, submitted };
+  });
+
+it.live(
+  "watches the caller's pull request by default and answers with how it stands once it ran",
+  () =>
+    Effect.gen(function* () {
+      const { deps, submitted } = yield* makeWatchDeps((proposal) => ({
+        ...proposal,
+        status: "completed",
+        result: {
+          outcome: "completed",
+          detail: "Watching #34 (https://github.com/o/r/pull/34). Now: 1 check failing: lint.",
+          completedAt: T2,
+        },
+      }));
+      const result = yield* call(
+        deps,
+        AGENT_CONTROL_MCP_TOOLS.watchPullRequest,
+        { requestId: "request-watch", number: 34 },
+        writeSession,
+      );
+      assert.isUndefined(result.isError);
+      assert.deepStrictEqual(submitted, [
+        { kind: "pullRequestWatch", threadId: callerThreadId, number: 34, watching: true },
+      ]);
+      const payload = structured(result) as {
+        readonly receipt: {
+          readonly status: string;
+          readonly riskTags: ReadonlyArray<string>;
+          readonly result: { readonly detail: string };
+        };
+        readonly replayed: boolean;
+        readonly timedOut: boolean;
+      };
+      assert.strictEqual(payload.receipt.status, "completed");
+      assert.include(payload.receipt.result.detail, "1 check failing: lint");
+      assert.deepStrictEqual(payload.receipt.riskTags, []);
+      assert.isFalse(payload.timedOut);
+      assert.isFalse(payload.replayed);
+    }),
+);
+
+it.live("stops watching another chat's pull request named by its URL", () =>
+  Effect.gen(function* () {
+    const { deps, submitted } = yield* makeWatchDeps((proposal) => ({
+      ...proposal,
+      status: "failed",
+      result: {
+        outcome: "failed",
+        error: {
+          code: "execution-failed" as never,
+          message: "Not watching #34.",
+          retryable: false,
+        },
+        failedAt: T2,
+      },
+    }));
+    const result = yield* call(
+      deps,
+      AGENT_CONTROL_MCP_TOOLS.unwatchPullRequest,
+      {
+        requestId: "request-unwatch",
+        threadId: "thread-other",
+        url: "https://github.com/o/r/pull/34",
+      },
+      writeSession,
+    );
+    assert.isUndefined(result.isError);
+    assert.deepStrictEqual(submitted, [
+      {
+        kind: "pullRequestWatch",
+        threadId: ThreadId.make("thread-other"),
+        url: "https://github.com/o/r/pull/34",
+        watching: false,
+      },
+    ]);
+    const payload = structured(result) as {
+      readonly receipt: {
+        readonly status: string;
+        readonly result: { readonly error: { readonly message: string } };
+      };
+    };
+    assert.strictEqual(payload.receipt.status, "failed");
+    assert.strictEqual(payload.receipt.result.error.message, "Not watching #34.");
+  }),
+);
+
+it.effect("answers with the receipt as it stands when the outcome takes longer than the wait", () =>
+  Effect.gen(function* () {
+    const { deps } = yield* makeWatchDeps(() => null);
+    const fiber = yield* Effect.forkChild(
+      call(
+        deps,
+        AGENT_CONTROL_MCP_TOOLS.watchPullRequest,
+        { requestId: "request-slow" },
+        writeSession,
+      ),
+    );
+    for (let turn = 0; turn < 50; turn += 1) yield* Effect.yieldNow;
+    assert.isUndefined(fiber.pollUnsafe());
+    yield* TestClock.adjust("25 seconds");
+    const result = yield* Fiber.join(fiber);
+    const payload = structured(result) as {
+      readonly receipt: { readonly status: string };
+      readonly timedOut: boolean;
+    };
+    assert.strictEqual(payload.receipt.status, "approved");
+    assert.isTrue(payload.timedOut);
+  }),
+);
+
+it.effect("lists the watch tools only with their grant, and refuses calls without it", () =>
+  Effect.gen(function* () {
+    const withoutGrant: AgentControlSessionRecord = {
+      ...writeSession,
+      grantedCapabilities: writeSession.grantedCapabilities.filter(
+        (capability) => capability !== AGENT_CONTROL_CAPABILITIES.watchPullRequests,
+      ),
+    };
+    const tools = makeAgentControlMcpTools(
+      makeDeps({ getTurnAuthority: () => Effect.succeed(Option.some(activeAuthority)) }),
+    );
+    const names = (yield* tools.descriptorsFor(withoutGrant)).map((tool) => tool.name);
+    assert.notInclude(names, AGENT_CONTROL_MCP_TOOLS.watchPullRequest);
+    assert.notInclude(names, AGENT_CONTROL_MCP_TOOLS.unwatchPullRequest);
+    const granted = (yield* tools.descriptorsFor(writeSession)).map((tool) => tool.name);
+    assert.include(granted, AGENT_CONTROL_MCP_TOOLS.watchPullRequest);
+    const denied = yield* tools.callTool(withoutGrant, AGENT_CONTROL_MCP_TOOLS.watchPullRequest, {
+      requestId: "request-denied",
+    });
+    assert.isTrue(denied.isError);
+    assert.strictEqual(denied.content[0]?.text, "Capability denied.");
+    // Auto-fix CI is the user's switch: the tools take no such argument.
+    const autoFix = yield* tools.callTool(writeSession, AGENT_CONTROL_MCP_TOOLS.watchPullRequest, {
+      requestId: "request-auto-fix",
+      autoFix: true,
+    });
+    assert.isTrue(autoFix.isError);
+    assert.strictEqual(autoFix.content[0]?.text, "Invalid tool arguments.");
+  }),
 );

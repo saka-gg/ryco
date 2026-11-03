@@ -25,11 +25,15 @@ import path from "node:path";
 import {
   CONTEXT_HANDOFF_ACTIVITY_KIND,
   ContextHandoffActivityPayload,
+  GitCommandError,
   ModelSelection,
+  type OrchestrationSession,
+  type OrchestrationTurnOutcome,
   ProviderRuntimeEvent,
   ProviderSession,
   ProviderDriverKind,
   ProviderInstanceId,
+  type ServerProvider,
 } from "@ryco/contracts";
 import { createModelSelection } from "@ryco/shared/model";
 import {
@@ -49,6 +53,7 @@ import {
 import {
   Deferred,
   Effect,
+  Equal,
   Exit,
   Layer,
   ManagedRuntime,
@@ -73,6 +78,7 @@ import {
   type ProviderServiceError,
 } from "../../provider/Errors.ts";
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
+import { OrchestrationCommandInvariantError } from "../Errors.ts";
 import { STORAGE_FAILURE_DETAIL } from "../userFacingErrors.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
@@ -95,18 +101,29 @@ import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { ContextHandoffRepositoryLive } from "../../persistence/Layers/ContextHandoffs.ts";
 import { ContextHandoffServiceLive } from "../contextHandoff/ContextHandoffService.ts";
 import {
-  CWD_RELOCATION_HANDOFF_ID_PREFIX,
-  cwdRelocationHandoffReference,
-} from "../contextHandoff/ContextHandoffRelocation.ts";
+  RESUME_FALLBACK_HANDOFF_ID_PREFIX,
+  resumeFallbackHandoffReference,
+} from "../contextHandoff/ContextHandoffResumeFallback.ts";
 import { ContextHandoffCoordinatorLive } from "./ContextHandoffCoordinator.ts";
 import { CheckpointReactor, type CheckpointReactorShape } from "../Services/CheckpointReactor.ts";
 import { TextGeneration, type TextGenerationShape } from "../../textGeneration/TextGeneration.ts";
 import { ProjectAvatarStore } from "../../project/Services/ProjectAvatarStore.ts";
 import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
-import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
+import {
+  ORCHESTRATION_DOMAIN_EVENT_BUS_CAPACITY,
+  OrchestrationEngineLive,
+} from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
+import { buildThreadContinuationTurnStart } from "../threadContinuation.ts";
+import { buildDelegationReturnCommand } from "../../agentControl/completionReturnMessages.ts";
+import { runtimeModePrivilegeRank, serverWakeGuard } from "../serverWake.ts";
+import { queueDispatchCommand, queueDispatchModes } from "../serverQueueDrainRuntime.ts";
+import {
+  make as makeThreadSessionModelSelections,
+  ThreadSessionModelSelectionsService,
+} from "../ThreadSessionModelSelections.ts";
 import {
   makeProviderCommandReactorLayer,
   makeProviderCommandReactorLive,
@@ -132,6 +149,21 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService, type GitWorkflowServiceShape } from "../../git/GitWorkflowService.ts";
+
+/** Checkouts whose HEAD was read: the idle branch rename decides right after its read. */
+const checkoutHeadReads = vi.hoisted(() => [] as string[]);
+
+vi.mock("../../vcs/gitCheckoutHead.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../vcs/gitCheckoutHead.ts")>();
+  const { Effect } = await import("effect");
+  return {
+    ...actual,
+    readCheckoutHead: (checkoutRoot: string) =>
+      actual
+        .readCheckoutHead(checkoutRoot)
+        .pipe(Effect.tap(() => Effect.sync(() => checkoutHeadReads.push(checkoutRoot)))),
+  };
+});
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asApprovalRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
@@ -167,6 +199,7 @@ describe("ProviderCommandReactor", () => {
     | ProjectionSnapshotQuery
     | ProjectionThreadUserInputRequestRepository
     | ProjectionPendingApprovalRepository
+    | ContextHandoffCoordinator
     | SqlClient.SqlClient,
     unknown
   > | null = null;
@@ -230,6 +263,7 @@ describe("ProviderCommandReactor", () => {
     readonly worktreeBranchPrefix?: string;
     readonly worktreeBranchChangeTypes?: boolean;
     readonly projectWorktreeBranchPrefix?: string;
+    readonly projectWorktreeBranchChangeTypes?: boolean;
     readonly setThreadGoal?: NonNullable<ProviderServiceShape["setThreadGoal"]>;
     readonly getThreadGoal?: NonNullable<ProviderServiceShape["getThreadGoal"]>;
     readonly clearThreadGoal?: NonNullable<ProviderServiceShape["clearThreadGoal"]>;
@@ -278,6 +312,8 @@ describe("ProviderCommandReactor", () => {
     ) => ProviderEffectIntentRepositoryShape;
     /** Runs the real session prewarm service with these options. */
     readonly prewarm?: ProviderSessionPrewarmOptions;
+    /** The provider status snapshots the node last probed; omitted, none are known. */
+    readonly providerSnapshots?: ReadonlyArray<ServerProvider>;
     /** Provider history recovery as the reactor sees it; omitted, there is none. */
     readonly reconcileThread?: ProviderRuntimeIngestionShape["reconcileThread"];
   }) {
@@ -445,7 +481,6 @@ describe("ProviderCommandReactor", () => {
     const listLocalBranchNames = vi.fn<GitWorkflowServiceShape["listLocalBranchNames"]>(() =>
       Effect.succeed(["ryco/1234abcd", "feature/workspace", "feature/recovered"]),
     );
-    const pruneWorktrees = vi.fn<GitWorkflowServiceShape["pruneWorktrees"]>(() => Effect.void);
     const createWorktree = vi.fn<GitWorkflowServiceShape["createWorktree"]>(
       (input: Parameters<GitWorkflowServiceShape["createWorktree"]>[0]) =>
         Effect.succeed({
@@ -530,6 +565,8 @@ describe("ProviderCommandReactor", () => {
       steerTurn: input?.steerTurn ?? (() => unsupported()),
       interruptTurn: interruptTurn as ProviderServiceShape["interruptTurn"],
       stopBackgroundTask: () => Effect.die(new Error("Unsupported provider call in test")) as never,
+      messageBackgroundTask: () =>
+        Effect.die(new Error("Unsupported provider call in test")) as never,
       respondToRequest: respondToRequest as ProviderServiceShape["respondToRequest"],
       respondToUserInput: respondToUserInput as ProviderServiceShape["respondToUserInput"],
       stopSession: stopSession as ProviderServiceShape["stopSession"],
@@ -669,8 +706,16 @@ describe("ProviderCommandReactor", () => {
           drain: Effect.void,
         })
       : Layer.empty;
+    const providerRegistryLayer = input?.providerSnapshots
+      ? Layer.mock(ProviderRegistry)({
+          getProviders: Effect.succeed(input.providerSnapshots),
+          streamChanges: Stream.empty,
+        })
+      : Layer.empty;
+    const sessionModelSelections = makeThreadSessionModelSelections();
     const layer = reactorLayer.pipe(
       Layer.provideMerge(prewarmLayer),
+      Layer.provideMerge(providerRegistryLayer),
       Layer.provideMerge(runtimeIngestionLayer),
       Layer.provideMerge(checkpointLayer),
       Layer.provideMerge(contextHandoffLayer),
@@ -689,7 +734,6 @@ describe("ProviderCommandReactor", () => {
           invalidateStatus,
           listLocalBranchNames,
           listWorktreePaths,
-          pruneWorktrees,
           renameBranch,
         } satisfies Partial<GitWorkflowServiceShape>),
       ),
@@ -714,10 +758,18 @@ describe("ProviderCommandReactor", () => {
           ...(input?.worktreeBranchChangeTypes !== undefined
             ? { worktreeBranchChangeTypes: input.worktreeBranchChangeTypes }
             : {}),
-          ...(input?.projectWorktreeBranchPrefix !== undefined
+          ...(input?.projectWorktreeBranchPrefix !== undefined ||
+          input?.projectWorktreeBranchChangeTypes !== undefined
             ? {
                 projectPreferences: {
-                  "project-1": { worktreeBranchPrefix: input.projectWorktreeBranchPrefix },
+                  "project-1": {
+                    ...(input.projectWorktreeBranchPrefix !== undefined
+                      ? { worktreeBranchPrefix: input.projectWorktreeBranchPrefix }
+                      : {}),
+                    ...(input.projectWorktreeBranchChangeTypes !== undefined
+                      ? { worktreeBranchChangeTypes: input.projectWorktreeBranchChangeTypes }
+                      : {}),
+                  },
                 },
               }
             : {}),
@@ -725,6 +777,10 @@ describe("ProviderCommandReactor", () => {
       ),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
       Layer.provideMerge(NodeServices.layer),
+      // One record of what each session runs, shared by the reactor and the engine.
+      Layer.provideMerge(
+        Layer.succeed(ThreadSessionModelSelectionsService, sessionModelSelections),
+      ),
     );
     runtime = ManagedRuntime.make(layer);
 
@@ -798,6 +854,13 @@ describe("ProviderCommandReactor", () => {
       engine,
       sql: await runtime.runPromise(Effect.service(SqlClient.SqlClient)),
       run: <A, E>(effect: Effect.Effect<A, E>) => runtime!.runPromise(effect),
+      /** What a boot runs before provider intents recover (OrchestrationReactor). */
+      recoverContextHandoffs: () =>
+        runtime!.runPromise(
+          Effect.flatMap(Effect.service(ContextHandoffCoordinator), (coordinator) =>
+            coordinator.recover(),
+          ),
+        ),
       startReactor,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       readShell: () => Effect.runPromise(snapshotQuery.getShellSnapshot()),
@@ -830,7 +893,6 @@ describe("ProviderCommandReactor", () => {
       invalidateStatus,
       listLocalBranchNames,
       listWorktreePaths,
-      pruneWorktrees,
       renameBranch,
       refreshStatus,
       generateBranchName,
@@ -843,6 +905,7 @@ describe("ProviderCommandReactor", () => {
       reactor,
       stopSessionBinding,
       retireSessionBinding,
+      sessionModelSelections,
       prewarm: Option.getOrUndefined(
         await runtime.runPromise(Effect.serviceOption(ProviderSessionPrewarm)),
       ),
@@ -1058,6 +1121,29 @@ describe("ProviderCommandReactor", () => {
           messageId: MessageId.make("native-compact-message"),
           role: "user",
           text: "/compact",
+          attachments: [],
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({ input: "/compact" });
+  });
+
+  it("sends a Codex thread's native compaction as the exact command", async () => {
+    const harness = await createHarness();
+    const now = new Date().toISOString();
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("codex-native-compact"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: MessageId.make("codex-native-compact-message"),
+          role: "user",
+          text: " /compact\n",
           attachments: [],
         },
         runtimeMode: "full-access",
@@ -1353,6 +1439,40 @@ describe("ProviderCommandReactor", () => {
     );
   });
 
+  it("tells the agent a relayed turn comes from another device, in the input only", async () => {
+    const harness = await createHarness();
+    const now = new Date().toISOString();
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-relayed"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-relayed"),
+          role: "user",
+          text: "Open the preview",
+          attachments: [],
+        },
+        origin: { connection: "relay" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    const input =
+      (harness.sendTurn.mock.calls[0]?.[0] as { readonly input?: string } | undefined)?.input ?? "";
+    expect(input.startsWith("<ryco_sent_from>")).toBe(true);
+    expect(input).toContain("localhost or 127.0.0.1");
+    expect(input.endsWith("</ryco_sent_from>\n\nOpen the preview")).toBe(true);
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.messages.find((entry) => entry.role === "user")?.text).toBe("Open the preview");
+  });
+
   it("refuses delayed goal recovery after cleanup claims or removes a checkout", async () => {
     const harness = await createHarness({ startReactor: false });
     const checkout = await canonicalStoragePath(path.join(harness.stateDir, "missing-checkout"));
@@ -1438,21 +1558,162 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
     expect(harness.listLocalBranchNames).toHaveBeenCalledWith("/tmp/provider-project");
-    expect(harness.pruneWorktrees).toHaveBeenCalledWith("/tmp/provider-project");
     expect(harness.createWorktree).toHaveBeenCalledWith({
       projectId: ProjectId.make("project-1"),
       cwd: "/tmp/provider-project",
       path: worktreePath,
       refName: "feature/recovered",
       dependencyHydration: "none",
+      replaceMissingRegistration: true,
     });
     expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({ cwd: worktreePath });
     expect(
-      harness.pruneWorktrees.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
-    ).toBeLessThan(harness.createWorktree.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER);
-    expect(
       harness.createWorktree.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
     ).toBeLessThan(harness.startSession.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER);
+  });
+
+  it("uses the checkout a concurrent recreation finished first instead of failing the turn", async () => {
+    const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-worktree-recovery-race-"));
+    const harness = await createHarness({ baseDir });
+    const worktreePath = path.join(baseDir, "worktrees", "feature-recovered");
+    // Recreate checkout on the Projects page wins the destination; the driver then refuses
+    // this attempt because the checkout already exists.
+    harness.createWorktree.mockImplementation((input) =>
+      Effect.sync(() => fs.mkdirSync(worktreePath, { recursive: true })).pipe(
+        Effect.andThen(
+          Effect.fail(
+            new GitCommandError({
+              operation: "GitVcsDriver.createWorktree",
+              command: "git worktree add",
+              cwd: input.cwd,
+              detail: "Worktree destination already exists. Choose a different branch or root.",
+            }),
+          ),
+        ),
+      ),
+    );
+    harness.listWorktreePaths.mockImplementation(() =>
+      Effect.sync(() => (fs.existsSync(worktreePath) ? [worktreePath] : [])),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-record-raced-worktree"),
+        threadId: ThreadId.make("thread-1"),
+        branch: "feature/recovered",
+        worktreePath,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-raced-worktree"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-raced-worktree"),
+          role: "user",
+          text: "continue in the recreated worktree",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: new Date().toISOString(),
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.createWorktree).toHaveBeenCalledTimes(1);
+    expect(harness.assertWorktreeSetupComplete).toHaveBeenCalledWith(worktreePath);
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({ cwd: worktreePath });
+  });
+
+  it("recreates a missing worktree over its own stale registration and prunes no other", async () => {
+    const baseDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "ryco-worktree-targeted-recovery-")),
+    );
+    const repo = path.join(baseDir, "repo");
+    fs.mkdirSync(repo);
+    const localGit = (cwd: string, ...args: string[]) =>
+      execFileSync("git", args, {
+        cwd,
+        encoding: "utf8",
+        stdio: ["pipe", "pipe", "pipe"],
+        env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+      });
+    localGit(repo, "init", "-b", "main");
+    localGit(
+      repo,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "base",
+    );
+    const worktreePath = path.join(baseDir, "worktrees", "recovered");
+    const interrupted = path.join(baseDir, "worktrees", "interrupted");
+    localGit(repo, "worktree", "add", "-b", "feature/recovered", worktreePath);
+    localGit(repo, "worktree", "add", "-b", "feature/interrupted", interrupted);
+    // The thread's checkout was deleted outside Ryco, which leaves Git's registration (a checkout
+    // storage cleanup removed is refused by the path lease until it is restored), and another
+    // checkout's cleanup stopped half-way: its quarantine still needs its own registration.
+    fs.rmSync(worktreePath, { recursive: true, force: true });
+    const quarantine = path.join(baseDir, "worktrees", ".cleanup-interrupted");
+    fs.renameSync(interrupted, quarantine);
+    const h = await createHarness({ baseDir, workspaceRoot: repo });
+    const gitRuntime = ManagedRuntime.make(
+      GitVcsDriver.layer.pipe(
+        Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
+        Layer.provideMerge(NodeServices.layer),
+      ),
+    );
+    try {
+      const driver = await gitRuntime.runPromise(Effect.service(GitVcsDriver.GitVcsDriver));
+      h.createWorktree.mockImplementation(driver.createWorktree);
+      h.listWorktreePaths.mockImplementation(() => driver.listWorktreePaths(repo));
+      h.listLocalBranchNames.mockImplementation(() => driver.listLocalBranchNames(repo));
+      h.assertWorktreeSetupComplete.mockImplementation(driver.assertWorktreeSetupComplete);
+      await Effect.runPromise(
+        h.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("record-cleaned-worktree"),
+          threadId: ThreadId.make("thread-1"),
+          branch: "feature/recovered",
+          worktreePath,
+        }),
+      );
+      await Effect.runPromise(
+        h.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("turn-after-cleanup"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("message-after-cleanup"),
+            role: "user",
+            text: "continue",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      await waitFor(() => h.sendTurn.mock.calls.length === 1);
+      expect(h.startSession.mock.calls[0]?.[1]).toMatchObject({ cwd: worktreePath });
+      expect(localGit(worktreePath, "symbolic-ref", "--short", "HEAD").trim()).toBe(
+        "feature/recovered",
+      );
+      expect(localGit(repo, "worktree", "list", "--porcelain")).toContain(
+        `worktree ${interrupted}\n`,
+      );
+      expect(localGit(quarantine, "symbolic-ref", "--short", "HEAD").trim()).toBe(
+        "feature/interrupted",
+      );
+    } finally {
+      await gitRuntime.dispose();
+    }
   });
 
   it("refuses a retained incomplete worktree checkout on the second provider turn, including after driver restart", async () => {
@@ -1493,7 +1754,6 @@ describe("ProviderCommandReactor", () => {
       h.createWorktree.mockImplementation(driver.createWorktree);
       h.listWorktreePaths.mockImplementation(() => driver.listWorktreePaths(repo));
       h.listLocalBranchNames.mockImplementation(() => driver.listLocalBranchNames(repo));
-      h.pruneWorktrees.mockImplementation(() => driver.pruneWorktrees(repo));
       h.assertWorktreeSetupComplete.mockImplementation(driver.assertWorktreeSetupComplete);
       await Effect.runPromise(
         h.engine.dispatch({
@@ -1661,7 +1921,6 @@ describe("ProviderCommandReactor", () => {
         ) ?? false
       );
     });
-    expect(harness.pruneWorktrees).not.toHaveBeenCalled();
     expect(harness.createWorktree).not.toHaveBeenCalled();
     expect(harness.startSession).not.toHaveBeenCalled();
     expect(harness.sendTurn).not.toHaveBeenCalled();
@@ -1709,7 +1968,6 @@ describe("ProviderCommandReactor", () => {
         ) ?? false
       );
     });
-    expect(harness.pruneWorktrees).not.toHaveBeenCalled();
     expect(harness.createWorktree).not.toHaveBeenCalled();
     expect(harness.startSession).not.toHaveBeenCalled();
     expect(harness.sendTurn).not.toHaveBeenCalled();
@@ -1777,6 +2035,112 @@ describe("ProviderCommandReactor", () => {
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
     expect(thread?.title).toBe("Generated title");
     expect(attempts).toBe(2);
+  });
+
+  describe("first-turn generation on a provider that cannot run", () => {
+    const snapshot = (
+      instanceId: string,
+      driver: string,
+      state: Partial<ServerProvider> = {},
+    ): ServerProvider => ({
+      instanceId: ProviderInstanceId.make(instanceId),
+      driver: ProviderDriverKind.make(driver),
+      enabled: true,
+      installed: true,
+      version: "1.0.0",
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: new Date().toISOString(),
+      models: [],
+      slashCommands: [],
+      skills: [],
+      ...state,
+    });
+    const signedOutCodex = snapshot("codex", "codex", {
+      status: "error",
+      auth: { status: "unauthenticated" },
+    });
+    const startFirstTurn = async (harness: Awaited<ReturnType<typeof createHarness>>) => {
+      const titleSeed = "Fix the flaky reconnect test.";
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-thread-title-seed-signed-out"),
+          threadId: ThreadId.make("thread-1"),
+          title: titleSeed,
+        }),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-signed-out"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("user-message-signed-out"),
+            role: "user",
+            text: titleSeed,
+            attachments: [],
+          },
+          titleSeed,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: new Date().toISOString(),
+        }),
+      );
+    };
+
+    it("titles the thread with a ready provider when the configured one is signed out", async () => {
+      const harness = await createHarness({
+        providerSnapshots: [signedOutCodex, snapshot("cursor", "cursor")],
+      });
+      await startFirstTurn(harness);
+      await waitFor(() => harness.generateThreadTitle.mock.calls.length === 1);
+      expect(harness.generateThreadTitle.mock.calls[0]?.[0].modelSelection).toEqual({
+        instanceId: ProviderInstanceId.make("cursor"),
+        model: "composer-2",
+      });
+    });
+
+    it("skips title generation when no provider is ready", async () => {
+      const harness = await createHarness({ providerSnapshots: [signedOutCodex] });
+      await startFirstTurn(harness);
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await harness.drain();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(harness.generateThreadTitle).not.toHaveBeenCalled();
+    });
+
+    it("keeps the configured provider while its status is not known yet", async () => {
+      const harness = await createHarness({
+        providerSnapshots: [
+          snapshot("codex", "codex", {
+            status: "warning",
+            installed: false,
+            auth: { status: "unknown" },
+          }),
+          snapshot("cursor", "cursor"),
+        ],
+      });
+      await startFirstTurn(harness);
+      await waitFor(() => harness.generateThreadTitle.mock.calls.length >= 1);
+      expect(harness.generateThreadTitle.mock.calls[0]?.[0].modelSelection.instanceId).toBe(
+        ProviderInstanceId.make("codex"),
+      );
+    });
+
+    it("does not prewarm a session for a signed-out provider", async () => {
+      const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-prewarm-"));
+      const harness = await createHarness({
+        baseDir,
+        workspaceRoot: baseDir,
+        prewarm: {},
+        providerSnapshots: [signedOutCodex, snapshot("cursor", "cursor")],
+      });
+      expect(
+        await harness.run(harness.prewarm!.prewarm({ threadId: ThreadId.make("thread-1") })),
+      ).toEqual({ status: "skipped", reason: "provider not ready" });
+      expect(harness.startSession).not.toHaveBeenCalled();
+    });
   });
 
   it("does not overwrite an existing custom thread title on the first turn", async () => {
@@ -1952,6 +2316,8 @@ describe("ProviderCommandReactor", () => {
       );
 
       await waitFor(() => harness.generateBranchName.mock.calls.length === 1);
+      // The rename reads the checkout's HEAD first, so it lands a moment after the name.
+      await waitFor(() => harness.renameBranch.mock.calls.length === 1);
       await waitFor(() => harness.refreshStatus.mock.calls.length >= 1);
       expect(harness.generateBranchName.mock.calls[0]?.[0]).toMatchObject({
         message: "Add a safer reconnect backoff.",
@@ -1994,7 +2360,25 @@ describe("ProviderCommandReactor", () => {
       generated: "reconnect backoff",
       expected: "team/reconnect-backoff",
     },
+    {
+      name: "keeps the prefix for a project that turns change types off",
+      harnessInput: { worktreeBranchChangeTypes: true, projectWorktreeBranchChangeTypes: false },
+      temporaryBranch: "ryco/1234abcd",
+      generated: "reconnect backoff",
+      expected: "ryco/reconnect-backoff",
+    },
+    {
+      name: "names by change type for a project that turns them on",
+      harnessInput: { worktreeBranchChangeTypes: false, projectWorktreeBranchChangeTypes: true },
+      temporaryBranch: "ryco/1234abcd",
+      generated: "fix/Reconnect Backoff",
+      expected: "fix/reconnect-backoff",
+    },
   ])("$name", async ({ harnessInput, temporaryBranch, generated, expected }) => {
+    const byChangeType =
+      "projectWorktreeBranchChangeTypes" in harnessInput
+        ? harnessInput.projectWorktreeBranchChangeTypes
+        : harnessInput.worktreeBranchChangeTypes;
     const harness = await createHarness(harnessInput);
     harness.listLocalBranchNames.mockReturnValue(Effect.succeed([temporaryBranch]));
     const now = new Date().toISOString();
@@ -2028,9 +2412,9 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(() => harness.renameBranch.mock.calls.length === 1);
     expect(harness.generateBranchName.mock.calls[0]?.[0]).toMatchObject(
-      harnessInput.worktreeBranchChangeTypes ? { branchChangeTypes: true } : {},
+      byChangeType ? { branchChangeTypes: true } : {},
     );
-    if (!harnessInput.worktreeBranchChangeTypes) {
+    if (!byChangeType) {
       expect(harness.generateBranchName.mock.calls[0]?.[0]).not.toHaveProperty("branchChangeTypes");
     }
     expect(harness.renameBranch.mock.calls[0]?.[0]).toMatchObject({
@@ -2569,7 +2953,12 @@ describe("ProviderCommandReactor", () => {
     const MOVED_WORKTREE = "/tmp/provider-project-worktree";
     type Harness = Awaited<ReturnType<typeof createHarness>>;
 
-    const sendMessage = (harness: Harness, messageId: string, text = messageId) =>
+    const sendMessage = (
+      harness: Harness,
+      messageId: string,
+      text = messageId,
+      createdAt = new Date().toISOString(),
+    ) =>
       Effect.runPromise(
         harness.engine.dispatch({
           type: "thread.turn.start",
@@ -2578,7 +2967,7 @@ describe("ProviderCommandReactor", () => {
           message: { messageId: asMessageId(messageId), role: "user", text, attachments: [] },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           runtimeMode: "approval-required",
-          createdAt: new Date().toISOString(),
+          createdAt,
         }),
       );
     // A relocated worktree.
@@ -2605,13 +2994,27 @@ describe("ProviderCommandReactor", () => {
     // Promotion stops the sessions; the binding keeps its cursor and cwd.
     const stopRuntime = async (
       harness: Harness,
-      options?: { readonly completedTurn?: boolean },
+      options?: {
+        readonly completedTurn?: boolean;
+        /** A turn that reached the provider and was stopped before it completed. */
+        readonly interruptedTurn?: boolean;
+        readonly selection?: ModelSelection;
+      },
     ) => {
       harness.runtimeSessions.splice(0);
       const now = new Date().toISOString();
-      // The mock sendTurn projects no turn: a completed one needs a running session that
+      const selection = options?.selection ?? CLAUDE;
+      const providerName = String(selection.instanceId).startsWith("codex")
+        ? "codex"
+        : "claudeAgent";
+      const turnState = options?.completedTurn
+        ? ("completed" as const)
+        : options?.interruptedTurn
+          ? ("interrupted" as const)
+          : undefined;
+      // The mock sendTurn projects no turn: a settled one needs a running session that
       // names it, released below by the stop (see the delegation fixture).
-      if (options?.completedTurn) {
+      if (turnState !== undefined) {
         await Effect.runPromise(
           harness.engine.dispatch({
             type: "thread.session.set",
@@ -2620,8 +3023,8 @@ describe("ProviderCommandReactor", () => {
             session: {
               threadId: T,
               status: "running",
-              providerName: "claudeAgent",
-              providerInstanceId: CLAUDE.instanceId,
+              providerName,
+              providerInstanceId: selection.instanceId,
               runtimeSessionId: RuntimeSessionId.make("runtime-1"),
               runtimeMode: "approval-required",
               activeTurnId: asTurnId("turn-1"),
@@ -2640,20 +3043,23 @@ describe("ProviderCommandReactor", () => {
           session: {
             threadId: T,
             status: "stopped",
-            providerName: "claudeAgent",
-            providerInstanceId: CLAUDE.instanceId,
+            providerName,
+            providerInstanceId: selection.instanceId,
             runtimeSessionId: RuntimeSessionId.make("runtime-1"),
             runtimeMode: "approval-required",
             activeTurnId: null,
             lastError: null,
             updatedAt: now,
           },
-          ...(options?.completedTurn
+          ...(turnState !== undefined
             ? {
                 turnOutcome: {
                   turnId: asTurnId("turn-1"),
-                  state: "completed" as const,
-                  reason: "provider-turn-completed" as const,
+                  state: turnState,
+                  reason:
+                    turnState === "completed"
+                      ? ("provider-turn-completed" as const)
+                      : ("provider-turn-aborted" as const),
                   completedAt: now,
                 },
               }
@@ -2664,6 +3070,42 @@ describe("ProviderCommandReactor", () => {
     };
     const threadOf = async (harness: Harness) =>
       (await harness.readModel()).threads.find((entry) => entry.id === T);
+    // The mock sendTurn projects no turn: the provider ran one to completion, and its session
+    // stays live with the same runtime and modes.
+    const completeTurnOnLiveSession = async (harness: Harness) => {
+      const session = (await threadOf(harness))?.session;
+      if (!session) throw new Error("The thread has no session to complete a turn on.");
+      const now = new Date().toISOString();
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`cmd-session-running-${crypto.randomUUID()}`),
+          threadId: T,
+          session: {
+            ...session,
+            status: "running",
+            activeTurnId: asTurnId("turn-1"),
+            updatedAt: now,
+          },
+          createdAt: now,
+        }),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`cmd-session-ready-${crypto.randomUUID()}`),
+          threadId: T,
+          session: { ...session, status: "ready", activeTurnId: null, updatedAt: now },
+          turnOutcome: {
+            turnId: asTurnId("turn-1"),
+            state: "completed",
+            reason: "provider-turn-completed",
+            completedAt: now,
+          },
+          createdAt: now,
+        }),
+      );
+    };
     const handoffActivities = async (harness: Harness) =>
       ((await threadOf(harness))?.activities ?? [])
         .filter((activity) => activity.kind === CONTEXT_HANDOFF_ACTIVITY_KIND)
@@ -2692,9 +3134,9 @@ describe("ProviderCommandReactor", () => {
       expect(harness.startSession).toHaveBeenCalledTimes(1);
       expect(harness.sendTurn).toHaveBeenCalledTimes(1);
       const [event] = harness.processContextHandoff.mock.calls[0]!;
-      const reference = cwdRelocationHandoffReference(event);
+      const reference = resumeFallbackHandoffReference(event);
       expect(event.payload.contextHandoff).toEqual(reference);
-      expect(reference.handoffId.startsWith(CWD_RELOCATION_HANDOFF_ID_PREFIX)).toBe(true);
+      expect(reference.handoffId.startsWith(RESUME_FALLBACK_HANDOFF_ID_PREFIX)).toBe(true);
       expect(reference.targetMessageId).toBe("after-move");
 
       const handoffs = await handoffActivities(harness);
@@ -2782,6 +3224,8 @@ describe("ProviderCommandReactor", () => {
       });
       await sendMessage(harness, "before-move");
       await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      // History to carry: without it, a missing conversation just restarts fresh.
+      await completeTurnOnLiveSession(harness);
 
       await moveWorktree(harness);
       await sendMessage(harness, "after-move");
@@ -2797,7 +3241,7 @@ describe("ProviderCommandReactor", () => {
       expect(harness.sendTurn).toHaveBeenCalledTimes(1);
       expect(
         harness.processContextHandoff.mock.calls[0]?.[0].payload.contextHandoff?.handoffId,
-      ).toMatch(CWD_RELOCATION_HANDOFF_ID_PREFIX);
+      ).toMatch(RESUME_FALLBACK_HANDOFF_ID_PREFIX);
       expect(await failuresOf(harness)).toEqual([]);
     });
 
@@ -2858,34 +3302,354 @@ describe("ProviderCommandReactor", () => {
       expect(await failuresOf(harness)).toEqual([]);
     });
 
-    it("keeps failing when a thread with a completed turn resumes a missing conversation", async () => {
+    // A queued or Agent Control message can be recorded while an earlier message's start is still
+    // resolving. It never reached the provider, so it is no history that start could lose.
+    it("starts fresh when a later message is recorded while the first one's start resolves", async () => {
+      const gate = Effect.runSync(Deferred.make<void>());
       const harness = await createHarness({
-        threadModelSelection: CLAUDE,
         startSessionEffect: ({ call }) =>
-          call === 2
-            ? Effect.fail(
-                new ProviderAdapterProcessError({
-                  provider: "codex",
-                  threadId: "thread-1",
-                  detail: "Codex App Server failed to resume the thread.",
-                  cause: new Error(
-                    "no rollout found for thread id 019a0000-0000-7000-8000-000000000002",
+          call === 1
+            ? Deferred.await(gate).pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new ProviderAdapterProcessError({
+                      provider: "codex",
+                      threadId: "thread-1",
+                      detail: "Codex App Server failed to resume the thread.",
+                      cause: new Error(
+                        "no rollout found for thread id 019a0000-0000-7000-8000-000000000003",
+                      ),
+                    }),
                   ),
-                }),
+                ),
               )
             : undefined,
       });
-      await sendMessage(harness, "first");
-      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
-      await stopRuntime(harness, { completedTurn: true });
-
-      await sendMessage(harness, "second");
-      await waitFor(async () => (await failuresOf(harness)).length === 1);
+      const sentAt = Date.now();
+      await sendMessage(harness, "first", "first", new Date(sentAt).toISOString());
+      await waitFor(() => harness.startSession.mock.calls.length === 1);
+      await sendMessage(harness, "second", "second", new Date(sentAt + 1_000).toISOString());
+      Effect.runSync(Deferred.succeed(gate, undefined));
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
       await harness.drain();
 
       expect(harness.startSession).toHaveBeenCalledTimes(2);
-      expect(harness.startSession.mock.calls[1]?.[1]).not.toHaveProperty("resumePolicy", "fresh");
-      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({ resumePolicy: "fresh" });
+      expect(harness.processContextHandoff).not.toHaveBeenCalled();
+      expect(await failuresOf(harness)).toEqual([]);
+    });
+
+    describe("when the provider no longer has the conversation", () => {
+      const CODEX: ModelSelection = {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5-codex",
+      };
+      const missingConversations = [
+        {
+          name: "Codex lost the rollout",
+          selection: CODEX,
+          // Codex app-server's actual reply for a thread without a rollout.
+          error: () =>
+            new ProviderAdapterProcessError({
+              provider: "codex",
+              threadId: "thread-1",
+              detail: "Codex App Server failed to resume the thread.",
+              cause: new Error(
+                "no rollout found for thread id 019a0000-0000-7000-8000-000000000002",
+              ),
+            }),
+        },
+        {
+          name: "Claude deleted the transcript",
+          selection: CLAUDE,
+          // What the Claude adapter's transcript check fails the start with.
+          error: () =>
+            new ProviderAdapterRequestError({
+              provider: "claudeAgent",
+              method: "session/resume",
+              detail:
+                "No conversation found with session ID 33333333-3333-4333-8333-333333333333: Claude no longer keeps its transcript.",
+            }),
+        },
+      ] as const;
+
+      for (const missing of missingConversations) {
+        it(`continues a thread with history by handoff when ${missing.name}`, async () => {
+          const harness = await createHarness({
+            threadModelSelection: missing.selection,
+            realContextHandoff: true,
+            startSessionEffect: ({ call }) =>
+              call === 2 ? Effect.fail(missing.error()) : undefined,
+          });
+          await sendMessage(harness, "first", "Summarize the notes in this folder.");
+          await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+          await stopRuntime(harness, { completedTurn: true, selection: missing.selection });
+
+          await sendMessage(harness, "second", "Now write them up as a README.");
+          await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+          await waitFor(async () =>
+            (await handoffActivities(harness)).some(
+              (entry) => entry.payload?.status === "consumed",
+            ),
+          );
+          await harness.drain();
+
+          // The resume was tried once, then a fresh session on the same instance got the context.
+          expect(harness.startSession).toHaveBeenCalledTimes(2);
+          expect(harness.startSession.mock.calls[1]?.[1]).not.toHaveProperty(
+            "resumePolicy",
+            "fresh",
+          );
+          expect(harness.startFreshSession).toHaveBeenCalledTimes(1);
+          expect(harness.startFreshSession.mock.calls[0]?.[1]).toMatchObject({
+            providerInstanceId: missing.selection.instanceId,
+            modelSelection: missing.selection,
+          });
+          const input = (harness.sendTurn.mock.calls[1]?.[0] as { readonly input?: string })?.input;
+          expect(input).toContain("Summarize the notes in this folder.");
+          expect(
+            input?.endsWith(
+              "<current_user_message>\nNow write them up as a README.\n</current_user_message>",
+            ),
+          ).toBe(true);
+
+          // Exactly one divider, which says why.
+          const handoffs = await handoffActivities(harness);
+          expect(handoffs).toHaveLength(1);
+          expect(handoffs[0]?.payload).toMatchObject({
+            status: "consumed",
+            reason: "native-history-unavailable",
+            targetMessageId: "second",
+            sourceSelection: missing.selection,
+            targetSelection: missing.selection,
+          });
+          expect(
+            handoffs[0]?.payload?.handoffId.startsWith(RESUME_FALLBACK_HANDOFF_ID_PREFIX),
+          ).toBe(true);
+          expect(await failuresOf(harness)).toEqual([]);
+          expect((await threadOf(harness))?.modelSelection).toEqual(missing.selection);
+        });
+      }
+
+      it("keeps the failure of a restart, which has no message to carry the conversation", async () => {
+        const harness = await createHarness({
+          threadModelSelection: CLAUDE,
+          // The restart's resume, after the starts of both turns.
+          startSessionEffect: ({ call }) =>
+            call === 3 ? Effect.fail(missingConversations[1].error()) : undefined,
+        });
+        await sendMessage(harness, "first");
+        await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+        await stopRuntime(harness, { completedTurn: true });
+        // A live session again, so a mode change restarts it.
+        await sendMessage(harness, "second");
+        await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.runtime-mode.set",
+            commandId: CommandId.make("cmd-runtime-mode-missing-conversation"),
+            threadId: T,
+            runtimeMode: "full-access",
+            createdAt: new Date().toISOString(),
+          }),
+        );
+        await waitFor(async () =>
+          ((await threadOf(harness))?.activities ?? []).some(
+            (activity) => activity.kind === "provider.session.restart.failed",
+          ),
+        );
+        await harness.drain();
+
+        expect(harness.processContextHandoff).not.toHaveBeenCalled();
+        expect(harness.startFreshSession).not.toHaveBeenCalled();
+        expect(await handoffActivities(harness)).toEqual([]);
+      });
+
+      // Claude keeps a transcript from the first prompt, so a turn the user stopped is history
+      // a silent fresh start would lose, though no turn ever completed.
+      it("continues a thread whose only turn was stopped by handoff, not by a silent fresh start", async () => {
+        const harness = await createHarness({
+          threadModelSelection: CLAUDE,
+          realContextHandoff: true,
+          startSessionEffect: ({ call }) =>
+            call === 2 ? Effect.fail(missingConversations[1].error()) : undefined,
+        });
+        await sendMessage(harness, "first", "Refactor the settings parser.");
+        await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+        await stopRuntime(harness, { interruptedTurn: true });
+        const shell = (await harness.readShell()).threads.find((entry) => entry.id === T);
+        expect(shell?.latestCompletedTurnAt ?? null).toBeNull();
+        expect(shell?.latestTurn?.state).toBe("interrupted");
+
+        await sendMessage(harness, "second", "Continue where you stopped.");
+        await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+        await waitFor(async () =>
+          (await handoffActivities(harness)).some((entry) => entry.payload?.status === "consumed"),
+        );
+        await harness.drain();
+
+        expect(harness.startSession).toHaveBeenCalledTimes(2);
+        expect(harness.startSession.mock.calls[1]?.[1]).not.toHaveProperty("resumePolicy", "fresh");
+        expect(harness.startFreshSession).toHaveBeenCalledTimes(1);
+        const input = (harness.sendTurn.mock.calls[1]?.[0] as { readonly input?: string })?.input;
+        expect(input).toContain("Refactor the settings parser.");
+        const handoffs = await handoffActivities(harness);
+        expect(handoffs).toHaveLength(1);
+        expect(handoffs[0]?.payload).toMatchObject({
+          status: "consumed",
+          reason: "native-history-unavailable",
+          targetMessageId: "second",
+        });
+        expect(await failuresOf(harness)).toEqual([]);
+      });
+
+      // The first prompt reached the provider, but the session stopped before its turn.started
+      // was projected: only the sent message shows it.
+      it("continues by handoff when an earlier prompt shows no turn", async () => {
+        const harness = await createHarness({
+          threadModelSelection: CLAUDE,
+          realContextHandoff: true,
+          startSessionEffect: ({ call }) =>
+            call === 2 ? Effect.fail(missingConversations[1].error()) : undefined,
+        });
+        await sendMessage(harness, "first", "Rename the settings module.");
+        await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+        await stopRuntime(harness);
+        const shell = (await harness.readShell()).threads.find((entry) => entry.id === T);
+        expect(shell?.latestTurn ?? null).toBeNull();
+
+        await sendMessage(harness, "second", "Continue.");
+        await waitFor(async () =>
+          (await handoffActivities(harness)).some((entry) => entry.payload?.status === "consumed"),
+        );
+        await harness.drain();
+
+        expect(harness.startFreshSession).toHaveBeenCalledTimes(1);
+        const input = (harness.sendTurn.mock.calls[1]?.[0] as { readonly input?: string })?.input;
+        expect(input).toContain("Rename the settings module.");
+        expect((await handoffActivities(harness))[0]?.payload).toMatchObject({
+          status: "consumed",
+          reason: "native-history-unavailable",
+          targetMessageId: "second",
+        });
+        expect(await failuresOf(harness)).toEqual([]);
+      });
+
+      // The prompt was handed to the provider (sendTurn returned), but its turn.started is not
+      // projected yet: Claude may not have written the transcript, so the restart's resume finds
+      // none. A fresh session would silently drop that prompt, so the restart keeps the failure
+      // and the next turn hands the conversation off.
+      it("keeps a restart's failure after a prompt was sent but before its turn started", async () => {
+        const harness = await createHarness({
+          threadModelSelection: CLAUDE,
+          // The restart's resume, after the first turn's start.
+          startSessionEffect: ({ call }) =>
+            call === 2 ? Effect.fail(missingConversations[1].error()) : undefined,
+        });
+        // The mock projects no provider turn: only the sent message shows the prompt.
+        await sendMessage(harness, "first");
+        await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+        const shell = (await harness.readShell()).threads.find((entry) => entry.id === T);
+        expect(shell?.latestTurn ?? null).toBeNull();
+
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.runtime-mode.set",
+            commandId: CommandId.make("cmd-runtime-mode-unstarted-turn"),
+            threadId: T,
+            runtimeMode: "full-access",
+            createdAt: new Date().toISOString(),
+          }),
+        );
+        await waitFor(async () =>
+          ((await threadOf(harness))?.activities ?? []).some(
+            (activity) => activity.kind === "provider.session.restart.failed",
+          ),
+        );
+        await harness.drain();
+
+        expect(harness.startSession).toHaveBeenCalledTimes(2);
+        expect(harness.startSession.mock.calls[1]?.[1]).not.toHaveProperty("resumePolicy", "fresh");
+        expect(harness.processContextHandoff).not.toHaveBeenCalled();
+        expect(harness.startFreshSession).not.toHaveBeenCalled();
+        expect(await handoffActivities(harness)).toEqual([]);
+      });
+
+      // A cursor whose conversation never got a prompt (a Claude session is named before its
+      // first prompt) names nothing a thread without any message could lose.
+      it("starts a session fresh on a thread no message was ever sent to", async () => {
+        const harness = await createHarness({
+          threadModelSelection: CLAUDE,
+          startSessionEffect: ({ call }) =>
+            call === 1 ? Effect.fail(missingConversations[1].error()) : undefined,
+        });
+        // A goal starts the session before any message.
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.goal.set",
+            commandId: CommandId.make("cmd-goal-unprompted-thread"),
+            threadId: T,
+            objective: "Keep the notes tidy",
+            createdAt: new Date().toISOString(),
+          }),
+        );
+        await waitFor(() => harness.startSession.mock.calls.length === 2);
+        await harness.drain();
+
+        expect(harness.startSession.mock.calls[0]?.[1]).not.toHaveProperty("resumePolicy", "fresh");
+        expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({ resumePolicy: "fresh" });
+        expect(harness.processContextHandoff).not.toHaveBeenCalled();
+        expect(await handoffActivities(harness)).toEqual([]);
+      });
+
+      it("never resends a handoff whose delivery a restart left unconfirmed", async () => {
+        const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-native-history-"));
+        createdBaseDirs.add(dbDir);
+        const dbPath = path.join(dbDir, "state.sqlite");
+        const first = await createHarness({
+          dbPath,
+          threadModelSelection: CLAUDE,
+          realContextHandoff: true,
+          startSessionEffect: ({ call }) =>
+            call === 2 ? Effect.fail(missingConversations[1].error()) : undefined,
+        });
+        await sendMessage(first, "first");
+        await waitFor(() => first.sendTurn.mock.calls.length === 1);
+        await stopRuntime(first, { completedTurn: true });
+        // The handoff's delivery never settles before the process exits.
+        first.sendTurn.mockImplementation(() => Effect.never);
+        await sendMessage(first, "second");
+        await waitFor(() => first.sendTurn.mock.calls.length === 2);
+        const statuses = (harness: Harness) =>
+          Effect.runPromise(
+            harness.sql<{ readonly status: string }>`
+              SELECT status FROM provider_context_handoffs
+            `,
+          ).then((rows) => rows.map((row) => row.status));
+        expect(await statuses(first)).toEqual(["dispatching"]);
+        await disposeHarness();
+
+        const second = await createHarness({
+          dbPath,
+          threadModelSelection: CLAUDE,
+          realContextHandoff: true,
+        });
+        await second.recoverContextHandoffs();
+        await Effect.runPromise(second.reactor.recoverIntents());
+        await second.drain();
+
+        expect(second.sendTurn).not.toHaveBeenCalled();
+        expect(second.startFreshSession).not.toHaveBeenCalled();
+        expect(await statuses(second)).toEqual(["delivery-uncertain"]);
+        const handoffs = (await handoffActivities(second)).map((entry) => entry.payload);
+        expect(handoffs).toHaveLength(1);
+        expect(handoffs[0]).toMatchObject({
+          status: "delivery-uncertain",
+          reason: "native-history-unavailable",
+          targetMessageId: "second",
+        });
+      });
     });
 
     it("defers a mode restart to the next turn instead of resuming a moved conversation", async () => {
@@ -3013,7 +3777,7 @@ describe("ProviderCommandReactor", () => {
       const consumed = (await handoffActivities(harness)).find(
         (entry) => entry.payload?.status === "consumed",
       );
-      expect(consumed?.payload?.handoffId.startsWith(CWD_RELOCATION_HANDOFF_ID_PREFIX)).toBe(true);
+      expect(consumed?.payload?.handoffId.startsWith(RESUME_FALLBACK_HANDOFF_ID_PREFIX)).toBe(true);
       expect(consumed?.payload).toMatchObject({ sourceSelection: CLAUDE, targetSelection: CLAUDE });
 
       const records = await Effect.runPromise(
@@ -3095,6 +3859,57 @@ describe("ProviderCommandReactor", () => {
         ProviderInstanceId.make("claudeAgent"),
         "claude-sonnet-4-6",
         [{ id: "effort", value: "max" }],
+      ),
+    });
+  });
+
+  it("keeps the claude session when only fast mode changes", async () => {
+    const harness = await createHarness({
+      threadModelSelection: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-opus-4-6",
+      },
+    });
+    const now = new Date().toISOString();
+    const turn = (id: string, fastMode: boolean) =>
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make(`cmd-turn-start-claude-fast-${id}`),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId(`user-message-claude-fast-${id}`),
+          role: "user",
+          text: `claude turn ${id}`,
+          attachments: [],
+        },
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          "claude-opus-4-6",
+          [
+            { id: "effort", value: "high" },
+            { id: "fastMode", value: fastMode },
+          ],
+        ),
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      });
+
+    await Effect.runPromise(turn("1", true));
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await Effect.runPromise(turn("2", false));
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+
+    // The adapter applies the new speed to the live session at this turn.
+    expect(harness.startSession.mock.calls).toHaveLength(1);
+    expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
+      modelSelection: createModelSelection(
+        ProviderInstanceId.make("claudeAgent"),
+        "claude-opus-4-6",
+        [
+          { id: "effort", value: "high" },
+          { id: "fastMode", value: false },
+        ],
       ),
     });
   });
@@ -3854,10 +4669,10 @@ describe("ProviderCommandReactor", () => {
         (live.getThreadMessageById
           ? live.getThreadMessageById(messageInput)
           : Effect.die("getThreadMessageById is not implemented")),
-      countThreadUserMessages: (threadId) =>
+      countThreadUserMessages: (threadId, bound) =>
         take("userMessageCount") ??
         (live.countThreadUserMessages
-          ? live.countThreadUserMessages(threadId)
+          ? live.countThreadUserMessages(threadId, bound)
           : Effect.die("countThreadUserMessages is not implemented")),
       getProjectShellById: (projectId) =>
         take("projectShell") ?? live.getProjectShellById(projectId),
@@ -3923,6 +4738,401 @@ describe("ProviderCommandReactor", () => {
     expect(harness.startSession).toHaveBeenCalledTimes(1);
     expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
       modelSelection: { model: "gpt-5.1-codex" },
+    });
+  });
+
+  describe("a model pick stored on the thread", () => {
+    const threadId = ThreadId.make("thread-1");
+    const setSession = (
+      harness: ReactorHarness,
+      id: string,
+      session: OrchestrationSession,
+      turnOutcome?: OrchestrationTurnOutcome,
+    ) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(id),
+          threadId,
+          session,
+          ...(turnOutcome ? { turnOutcome } : {}),
+          createdAt: new Date().toISOString(),
+        }),
+      );
+    const sentModel = (harness: ReactorHarness, call: number) =>
+      (harness.sendTurn.mock.calls[call]?.[0] as { readonly modelSelection?: ModelSelection })
+        ?.modelSelection?.model;
+    /** Ends the thread's turn, as the provider runtime reports it. */
+    const settleTurn = async (harness: ReactorHarness, id: string) => {
+      const bound = (await readThread(harness))?.session;
+      if (!bound) throw new Error("expected a bound session");
+      const turnId = asTurnId(`turn-${id}`);
+      await setSession(harness, `${id}-running`, {
+        ...bound,
+        status: "running",
+        activeTurnId: turnId,
+      });
+      await setSession(
+        harness,
+        `${id}-ready`,
+        { ...bound, status: "ready", activeTurnId: null },
+        {
+          turnId,
+          state: "completed",
+          reason: "provider-turn-completed",
+          completedAt: new Date().toISOString(),
+        },
+      );
+    };
+    /** The entry the node recorded for the last follow-up queued (with its server-only fields). */
+    const lastQueuedEntry = async (harness: ReactorHarness) => {
+      const { events } = await Effect.runPromise(harness.engine.readEventsPage(0, 10_000));
+      const added = events.filter((event) => event.type === "thread.queue-entry-added").at(-1);
+      if (added?.type !== "thread.queue-entry-added") throw new Error("expected a queued entry");
+      return added.payload.entry;
+    };
+    const readShellThread = async (harness: ReactorHarness) => {
+      const shell = (await harness.readShell()).threads.find((entry) => entry.id === threadId);
+      if (!shell) throw new Error("expected the thread's shell");
+      return shell;
+    };
+    /** A goal continuation, as the server builds it. */
+    const dispatchGoalContinuation = async (
+      harness: ReactorHarness,
+      id: string,
+      latestUserMessageId: string,
+    ) => {
+      const shell = await readShellThread(harness);
+      await Effect.runPromise(
+        harness.engine.dispatch(
+          buildThreadContinuationTurnStart(shell, {
+            commandId: CommandId.make(`cmd-${id}`),
+            messageId: asMessageId(id),
+            text: "Continue toward the goal.",
+            createdAt: new Date().toISOString(),
+            guards: {
+              delegationReturnGuard: serverWakeGuard(
+                shell,
+                asMessageId(latestUserMessageId),
+                "goal-continuation",
+              ),
+            },
+          }),
+        ),
+      );
+    };
+    const storePick = async (harness: ReactorHarness, modelSelection: ModelSelection) => {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make(`pick-${modelSelection.model}`),
+          threadId,
+          modelSelection,
+        }),
+      );
+      await waitFor(async () =>
+        Equal.equals((await readThread(harness))?.modelSelection, modelSelection),
+      );
+    };
+
+    it("neither restarts nor interrupts a running Claude turn, and the next turn applies it", async () => {
+      const claude = ProviderInstanceId.make("claudeAgent");
+      const first = createModelSelection(claude, "claude-sonnet-4-6", [
+        { id: "effort", value: "medium" },
+      ]);
+      const picked = createModelSelection(claude, "claude-sonnet-4-6", [
+        { id: "effort", value: "max" },
+      ]);
+      const harness = await createHarness({ threadModelSelection: first });
+      await dispatchTurnStart(harness, "stored-pick-1", first);
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      const bound = (await readThread(harness))?.session;
+      if (!bound) throw new Error("expected the first turn to bind a session");
+      const turnId = asTurnId("turn-stored-pick-1");
+      await setSession(harness, "stored-pick-running", {
+        ...bound,
+        status: "running",
+        activeTurnId: turnId,
+      });
+
+      // Another client stores the user's pick while the turn runs.
+      await storePick(harness, picked);
+      await harness.drain();
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      expect(harness.interruptTurn).not.toHaveBeenCalled();
+      expect((await readThread(harness))?.session).toMatchObject({
+        status: "running",
+        activeTurnId: turnId,
+        runtimeSessionId: bound.runtimeSessionId,
+      });
+
+      // The turn ends; the server's goal continuation runs on the pick.
+      await setSession(
+        harness,
+        "stored-pick-ready",
+        { ...bound, status: "ready", activeTurnId: null },
+        {
+          turnId,
+          state: "completed",
+          reason: "provider-turn-completed",
+          completedAt: new Date().toISOString(),
+        },
+      );
+      await dispatchGoalContinuation(harness, "stored-pick-2", "stored-pick-1");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+      expect(harness.startSession).toHaveBeenCalledTimes(2);
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+        resumeCursor: { opaque: "resume-1" },
+        modelSelection: picked,
+      });
+      expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({ modelSelection: picked });
+    });
+
+    it("switches an in-session provider at a delegated result's turn", async () => {
+      const harness = await createHarness();
+      await dispatchTurnStart(harness, "stored-codex-1");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await settleTurn(harness, "stored-codex-1");
+      const picked = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.1-codex" };
+      await storePick(harness, picked);
+      // A delegated result, as the server builds it.
+      const command = buildDelegationReturnCommand({
+        parent: await readShellThread(harness),
+        latestUserMessageId: asMessageId("stored-codex-1"),
+        sections: ["The child finished."],
+        anchorChildThreadId: ThreadId.make("thread-child"),
+        attempt: 1,
+        now: new Date().toISOString(),
+      });
+      expect(command).not.toHaveProperty("modelSelection");
+      await Effect.runPromise(harness.engine.dispatch(command));
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({ modelSelection: picked });
+    });
+
+    it("keeps the session's model when a goal continuation meets a session that cannot switch models", async () => {
+      const harness = await createHarness({ sessionModelSwitch: "unsupported" });
+      await dispatchTurnStart(harness, "acp-1");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await settleTurn(harness, "acp-1");
+      const running = sentModel(harness, 0);
+      // The pick waits for the next send; it does not fail the server's own turn.
+      await storePick(harness, {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5.1-codex",
+      });
+      await dispatchGoalContinuation(harness, "acp-2", "acp-1");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+      await harness.drain();
+      expect(await turnStartFailures(harness)).toHaveLength(0);
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(sentModel(harness, 1)).toBe(running);
+    });
+
+    it("keeps the session's model when an agent's queued follow-up meets a session that cannot switch models", async () => {
+      const harness = await createHarness({ sessionModelSwitch: "unsupported" });
+      await dispatchTurnStart(harness, "acp-queue-1");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await settleTurn(harness, "acp-queue-1");
+      const running = sentModel(harness, 0);
+      await storePick(harness, {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5.1-codex",
+      });
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.queue.add",
+          commandId: CommandId.make("queue-add-agent"),
+          threadId,
+          author: "agent",
+          queuedBy: ThreadId.make("thread-agent"),
+          entry: {
+            messageId: asMessageId("agent-follow-up"),
+            text: "agent follow-up",
+            attachments: [],
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5.1-codex",
+            },
+            runtimeMode: "approval-required",
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          },
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      // The drain's own dispatch of the head.
+      const head = await lastQueuedEntry(harness);
+      const shell = await readShellThread(harness);
+      const command = queueDispatchCommand({
+        threadId,
+        head,
+        modes: queueDispatchModes(head, shell, runtimeModePrivilegeRank),
+        guard: serverWakeGuard(shell, asMessageId("acp-queue-1"), "follow-up-queue"),
+        attemptId: "attempt-1",
+        createdAt: new Date().toISOString(),
+      });
+      expect(command).not.toHaveProperty("modelSelection");
+      await Effect.runPromise(harness.engine.dispatch(command));
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+      await harness.drain();
+      expect(await turnStartFailures(harness)).toHaveLength(0);
+      expect(sentModel(harness, 1)).toBe(running);
+    });
+
+    it("forgets what a stopped session ran", async () => {
+      const harness = await createHarness();
+      await dispatchTurnStart(harness, "forget-1");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await harness.drain();
+      expect(harness.sessionModelSelections.get(threadId)).toBeDefined();
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.make("cmd-forget-stop"),
+          threadId,
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      await waitFor(() => harness.stopSession.mock.calls.length === 1);
+      await harness.drain();
+      expect(harness.sessionModelSelections.get(threadId)).toBeUndefined();
+    });
+
+    it("keeps a pick stored while a sent turn started over the turn's own selection", async () => {
+      // Once the provider accepted the turn, the reactor either records the turn's selection
+      // (a dispatch) or first reads the thread and finds a newer pick: either settles the test.
+      let accepted = false;
+      let commitSettled = false;
+      const harness = await createHarness({
+        decorateDispatch:
+          (dispatch) =>
+          (command, ...rest) => {
+            if (command.commandId.startsWith("server:accepted-model-selection:")) {
+              return dispatch(command, ...rest).pipe(
+                Effect.ensuring(Effect.sync(() => void (commitSettled = true))),
+              );
+            }
+            return dispatch(command, ...rest);
+          },
+        decorateSnapshotQuery: (live) => ({
+          ...live,
+          getThreadShellById: (id) =>
+            live
+              .getThreadShellById(id)
+              .pipe(Effect.ensuring(Effect.sync(() => void (commitSettled ||= accepted)))),
+        }),
+      });
+      const codex = ProviderInstanceId.make("codex");
+      const gate = Effect.runSync(Deferred.make<void>());
+      harness.sendTurn.mockImplementationOnce(() =>
+        Deferred.await(gate).pipe(
+          Effect.andThen(Effect.sync(() => void (accepted = true))),
+          Effect.as({ threadId: ThreadId.make("thread-1"), turnId: asTurnId("turn-1") }),
+        ),
+      );
+      const sent = { instanceId: codex, model: "gpt-5.1-codex" };
+      await dispatchTurnStart(harness, "pick-while-starting", sent);
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      // The user picks again on another device before the provider accepted the turn.
+      const picked = { instanceId: codex, model: "gpt-5.2-codex" };
+      await storePick(harness, picked);
+      Effect.runSync(Deferred.succeed(gate, undefined));
+      await waitFor(() => commitSettled);
+      await harness.drain();
+      expect((await readThread(harness))?.modelSelection).toEqual(picked);
+    });
+
+    it("still records a send's own selection when no pick was stored meanwhile", async () => {
+      const harness = await createHarness();
+      const sent = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.1-codex" };
+      await dispatchTurnStart(harness, "older-client-send", sent);
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await harness.drain();
+      // An older client stores a pick only by sending it.
+      await waitFor(async () => Equal.equals((await readThread(harness))?.modelSelection, sent));
+    });
+
+    /** A person's queued follow-up, then the drain's dispatch of it. */
+    const queueAndRunFollowUp = async (
+      harness: ReactorHarness,
+      queuedWith: ModelSelection,
+      beforeDispatch: () => Promise<void> = async () => {},
+    ) => {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.queue.add",
+          commandId: CommandId.make("queue-add-follow-up"),
+          threadId,
+          entry: {
+            messageId: asMessageId("queued-follow-up"),
+            text: "queued follow-up",
+            attachments: [],
+            modelSelection: queuedWith,
+            runtimeMode: "approval-required",
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          },
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      await beforeDispatch();
+      const head = await lastQueuedEntry(harness);
+      const shell = await readShellThread(harness);
+      await Effect.runPromise(
+        harness.engine.dispatch(
+          queueDispatchCommand({
+            threadId,
+            head,
+            modes: queueDispatchModes(head, shell, runtimeModePrivilegeRank),
+            guard: serverWakeGuard(shell, asMessageId("before-queue"), "follow-up-queue"),
+            attemptId: "attempt-1",
+            createdAt: new Date().toISOString(),
+          }),
+        ),
+      );
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+      await harness.drain();
+      expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({ modelSelection: queuedWith });
+    };
+
+    it("makes a queued follow-up's model the chat's when no pick was stored since it was queued", async () => {
+      // An older client keeps a pick in its composer and stores it only by sending or queueing.
+      const harness = await createHarness();
+      await dispatchTurnStart(harness, "before-queue");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await settleTurn(harness, "before-queue");
+      const queuedWith = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.1-codex" };
+      await queueAndRunFollowUp(harness, queuedWith);
+      await waitFor(async () =>
+        Equal.equals((await readThread(harness))?.modelSelection, queuedWith),
+      );
+    });
+
+    it("keeps a pick stored after the follow-up was queued", async () => {
+      const harness = await createHarness();
+      await dispatchTurnStart(harness, "before-queue");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await settleTurn(harness, "before-queue");
+      const codex = ProviderInstanceId.make("codex");
+      const queuedWith = { instanceId: codex, model: "gpt-5.1-codex" };
+      const pickedSince = { instanceId: codex, model: "gpt-5.2-codex" };
+      await queueAndRunFollowUp(harness, queuedWith, () => storePick(harness, pickedSince));
+      expect((await readThread(harness))?.modelSelection).toEqual(pickedSince);
+    });
+
+    it("keeps the session's model for a pick of another instance, which only a send hands off", async () => {
+      const harness = await createHarness();
+      await dispatchTurnStart(harness, "stored-other-1");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await storePick(harness, {
+        instanceId: ProviderInstanceId.make("codex_personal"),
+        model: "gpt-5.1-codex",
+      });
+      await dispatchTurnStart(harness, "stored-other-2");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.sendTurn.mock.calls[1]?.[0]).not.toHaveProperty("modelSelection");
     });
   });
 
@@ -4258,16 +5468,25 @@ describe("ProviderCommandReactor", () => {
     expect(harness.sendTurn).not.toHaveBeenCalled();
   });
 
+  const FIRST_TURN_WORKTREE_ID = WorktreeId.make("worktree-first-turn-generation");
+  const FIRST_TURN_WORKTREE_PATH = "/tmp/provider-project-first-turn-worktree";
+
   /**
    * Gives thread-1 the default title and a temporary worktree branch, so a
    * first turn generates both a title and a branch.
    */
-  async function enableFirstTurnGeneration(harness: ReactorHarness) {
+  async function enableFirstTurnGeneration(
+    harness: ReactorHarness,
+    options?: {
+      /** A real checkout to record; omitted, the recorded path does not exist. */
+      readonly worktreePath?: string;
+    },
+  ) {
     const now = new Date().toISOString();
     const threadId = ThreadId.make("thread-1");
-    const worktreeId = WorktreeId.make("worktree-first-turn-generation");
+    const worktreeId = FIRST_TURN_WORKTREE_ID;
     const temporaryBranch = "ryco/1234abcd";
-    const worktreePath = "/tmp/provider-project-first-turn-worktree";
+    const worktreePath = options?.worktreePath ?? FIRST_TURN_WORKTREE_PATH;
     harness.listLocalBranchNames.mockReturnValue(Effect.succeed([temporaryBranch]));
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -4475,6 +5694,237 @@ describe("ProviderCommandReactor", () => {
     expect(harness.generateBranchName).not.toHaveBeenCalled();
   });
 
+  describe("idle worktree branch rename against newer branches", () => {
+    const threadId = ThreadId.make("thread-1");
+
+    const readBranches = async (harness: ReactorHarness) => {
+      const readModel = await harness.readModel();
+      return {
+        thread: readModel.threads.find((thread) => thread.id === threadId)?.branch,
+        workspace: readModel.worktrees?.find(
+          (worktree) => worktree.worktreeId === FIRST_TURN_WORKTREE_ID,
+        )?.branch,
+      };
+    };
+
+    /** A first turn whose generated name is `ryco/reconnect-backoff`; git's rename waits for `release`. */
+    async function startHeldRename(harness: ReactorHarness, messageId: string) {
+      await enableFirstTurnGeneration(harness);
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      harness.renameBranch.mockImplementation((input: unknown) =>
+        Effect.promise(() => held).pipe(
+          Effect.as({ branch: (input as { readonly newBranch: string }).newBranch }),
+        ),
+      );
+      harness.generateThreadTitle.mockReturnValue(
+        Effect.succeed({ title: "Reconnect backoff", branch: "reconnect-backoff" }),
+      );
+      await dispatchTurnStart(harness, messageId);
+      await waitFor(() => harness.renameBranch.mock.calls.length === 1, 8_000);
+      expect(harness.renameBranch.mock.calls[0]?.[0]).toMatchObject({
+        oldBranch: "ryco/1234abcd",
+        newBranch: "ryco/reconnect-backoff",
+      });
+      // Worktree recovery refreshed the (missing) checkout before the turn; count past it.
+      const refreshesBefore = harness.refreshStatus.mock.calls.length;
+      return {
+        release,
+        /** Resolves once the rename refreshed the checkout's status, its last step. */
+        finished: () =>
+          waitFor(
+            () =>
+              harness.refreshStatus.mock.calls
+                .slice(refreshesBefore)
+                .some(([cwd]) => cwd === FIRST_TURN_WORKTREE_PATH),
+            8_000,
+          ),
+      };
+    }
+
+    /** What a web client writes when it follows the checkout's live branch: no guard. */
+    const recordUnguarded = (
+      harness: ReactorHarness,
+      branch: string,
+      records: { readonly workspace: boolean; readonly thread: boolean },
+    ) =>
+      Effect.runPromise(
+        Effect.gen(function* () {
+          if (records.workspace) {
+            yield* harness.engine.dispatch({
+              type: "worktree.meta.update",
+              commandId: CommandId.make(`cmd-live-branch-meta-${branch}`),
+              worktreeId: FIRST_TURN_WORKTREE_ID,
+              branch,
+              changedAt: new Date().toISOString(),
+            });
+          }
+          if (records.thread) {
+            yield* harness.engine.dispatch({
+              type: "thread.meta.update",
+              commandId: CommandId.make(`cmd-live-branch-${branch}`),
+              threadId,
+              branch,
+            });
+          }
+        }),
+      );
+
+    it("keeps a branch both records adopted while git renamed the temporary one", async () => {
+      const harness = await createHarness({ worktreeBranchPrefix: "ryco" });
+      const rename = await startHeldRename(harness, "rename-race-both");
+
+      await recordUnguarded(harness, "feat/agent", { workspace: true, thread: true });
+      rename.release();
+      await rename.finished();
+
+      expect(await readBranches(harness)).toEqual({
+        thread: "feat/agent",
+        workspace: "feat/agent",
+      });
+    });
+
+    it("still moves the thread off the renamed branch when only the workspace record kept a newer one", async () => {
+      const harness = await createHarness({ worktreeBranchPrefix: "ryco" });
+      const rename = await startHeldRename(harness, "rename-race-workspace");
+
+      await recordUnguarded(harness, "feat/third", { workspace: true, thread: false });
+      rename.release();
+      await rename.finished();
+
+      // The old name no longer exists in git, so the thread must not keep it.
+      expect(await readBranches(harness)).toEqual({
+        thread: "ryco/reconnect-backoff",
+        workspace: "feat/third",
+      });
+    });
+
+    it("records only the branch, so a path the thread moved to meanwhile stays", async () => {
+      const harness = await createHarness({ worktreeBranchPrefix: "ryco" });
+      const rename = await startHeldRename(harness, "rename-race-path");
+      const movedPath = `${FIRST_TURN_WORKTREE_PATH}-moved`;
+
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-thread-path-moved"),
+          threadId,
+          worktreePath: movedPath,
+        }),
+      );
+      rename.release();
+      await rename.finished();
+
+      const thread = await readThread(harness);
+      expect(thread?.branch).toBe("ryco/reconnect-backoff");
+      expect(thread?.worktreePath).toBe(movedPath);
+    });
+
+    it("records the renamed branch on the thread when the workspace write fails for another reason", async () => {
+      const harness = await createHarness({
+        worktreeBranchPrefix: "ryco",
+        decorateDispatch: (dispatch) => (command, options) =>
+          command.type === "worktree.meta.update" &&
+          String(command.commandId).includes("worktree-branch-rename-meta")
+            ? Effect.fail(
+                // What storage admission raises while a checkout relocation is pending.
+                new OrchestrationCommandInvariantError({
+                  commandType: command.type,
+                  detail:
+                    "Checkout relocation is pending. Reload the workspace before changing its metadata.",
+                }),
+              )
+            : dispatch(command, options),
+      });
+      const rename = await startHeldRename(harness, "rename-workspace-blocked");
+
+      rename.release();
+      await rename.finished();
+
+      expect(await readBranches(harness)).toEqual({
+        thread: "ryco/reconnect-backoff",
+        workspace: "ryco/1234abcd",
+      });
+    });
+
+    it.each([
+      {
+        name: "renames while the checkout is still on its temporary branch",
+        checkout: "temporary",
+      },
+      // Not checked out, so git renames it safely (it refuses mid-rebase or bisect itself).
+      { name: "renames while HEAD is detached", checkout: "detached" },
+      { name: "leaves the agent's own branch alone", checkout: "feat/own" },
+    ] as const)("$name", async ({ checkout }) => {
+      const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-rename-head-"));
+      const repo = path.join(baseDir, "repo");
+      const worktreePath = path.join(baseDir, "worktrees", "first-turn");
+      fs.mkdirSync(repo);
+      const git = (cwd: string, ...args: string[]) =>
+        execFileSync("git", args, {
+          cwd,
+          stdio: "pipe",
+          env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+        });
+      git(repo, "init");
+      git(
+        repo,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "init",
+      );
+      git(repo, "worktree", "add", "-b", "ryco/1234abcd", worktreePath);
+      if (checkout === "detached") git(worktreePath, "checkout", "--detach");
+      if (checkout === "feat/own") git(worktreePath, "checkout", "-b", checkout);
+
+      const harness = await createHarness({
+        baseDir,
+        workspaceRoot: repo,
+        worktreeBranchPrefix: "ryco",
+      });
+      await enableFirstTurnGeneration(harness, { worktreePath });
+      harness.listWorktreePaths.mockReturnValue(Effect.succeed([worktreePath]));
+      harness.generateThreadTitle.mockReturnValue(
+        Effect.succeed({ title: "Reconnect backoff", branch: "reconnect-backoff" }),
+      );
+
+      await dispatchTurnStart(harness, `rename-head-${checkout}`);
+      if (checkout !== "feat/own") {
+        await waitFor(() => harness.renameBranch.mock.calls.length === 1, 8_000);
+        expect(harness.renameBranch.mock.calls[0]?.[0]).toMatchObject({
+          cwd: worktreePath,
+          oldBranch: "ryco/1234abcd",
+          newBranch: "ryco/reconnect-backoff",
+        });
+        await waitFor(
+          async () => (await readBranches(harness)).thread === "ryco/reconnect-backoff",
+          8_000,
+        );
+        expect(await readBranches(harness)).toEqual({
+          thread: "ryco/reconnect-backoff",
+          workspace: "ryco/reconnect-backoff",
+        });
+        return;
+      }
+      // Only the rename reads this checkout's HEAD, and it decides right after the
+      // read with no I/O in between: a short settle is enough to see no git call.
+      await waitFor(() => checkoutHeadReads.includes(worktreePath), 8_000);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(harness.renameBranch).not.toHaveBeenCalled();
+      expect(await readBranches(harness)).toEqual({
+        thread: "ryco/1234abcd",
+        workspace: "ryco/1234abcd",
+      });
+    });
+  });
+
   it("surfaces a project read failure on the context-handoff branch", async () => {
     const hooks = makeReadFailureHooks();
     const harness = await createHarness({ decorateSnapshotQuery: hooks.decorateSnapshotQuery });
@@ -4588,7 +6038,7 @@ describe("ProviderCommandReactor", () => {
     return { ...harness, respond, activity, identity };
   }
 
-  async function prepareQuestion() {
+  async function prepareQuestion(options: { readonly nonBlocking?: boolean } = {}) {
     const harness = await createHarness();
     const createdAt = new Date().toISOString();
     const threadId = ThreadId.make("thread-1");
@@ -4624,6 +6074,7 @@ describe("ProviderCommandReactor", () => {
             requestId: "question-safety",
             requestKind: "command",
             runtimeSessionId: "question-runtime-1",
+            ...(options.nonBlocking ? { nonBlocking: true } : {}),
           },
           turnId: null,
           createdAt,
@@ -4635,7 +6086,11 @@ describe("ProviderCommandReactor", () => {
       requestEventId: EventId.make("question-safety-request"),
       runtimeSessionId: RuntimeSessionId.make("question-runtime-1"),
     };
-    const respond = (id: string, answer = "Yes", userInputIdentity = identity) =>
+    const respondWith = (
+      id: string,
+      answers: Record<string, unknown>,
+      userInputIdentity = identity,
+    ) =>
       Effect.runPromise(
         harness.engine.dispatch({
           type: "thread.user-input.respond",
@@ -4643,10 +6098,12 @@ describe("ProviderCommandReactor", () => {
           threadId,
           requestId: asApprovalRequestId("question-safety"),
           userInputIdentity,
-          answers: { answer },
+          answers,
           createdAt,
         }),
       );
+    const respond = (id: string, answer = "Yes", userInputIdentity = identity) =>
+      respondWith(id, { answer }, userInputIdentity);
     const activity = (id: string, kind: string, payload: Record<string, unknown>) =>
       Effect.runPromise(
         harness.engine.dispatch({
@@ -4669,8 +6126,61 @@ describe("ProviderCommandReactor", () => {
           createdAt: new Date().toISOString(),
         }),
       );
-    return { ...harness, respond, activity, identity };
+    return { ...harness, respond, respondWith, activity, identity, threadId };
   }
+
+  it("optional question: a dismissal is settled by the node, never sent, even once the session stopped", async () => {
+    const harness = await prepareQuestion({ nonBlocking: true });
+    const createdAt = new Date().toISOString();
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("question-safety-session-stopped"),
+        threadId: harness.threadId,
+        session: {
+          threadId: harness.threadId,
+          status: "stopped",
+          providerName: "codex",
+          runtimeSessionId: RuntimeSessionId.make("question-runtime-1"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      }),
+    );
+    await harness.respondWith("optional-dismiss", {});
+    await harness.drain();
+    expect(harness.respondToUserInput).not.toHaveBeenCalled();
+    expect(Option.getOrUndefined(await harness.readQuestion("question-safety"))).toMatchObject({
+      isPending: false,
+      responseState: "settled",
+    });
+  });
+
+  it("optional question: a steer that found its turn over leaves it open, to be sent as a message", async () => {
+    const harness = await prepareQuestion({ nonBlocking: true });
+    harness.respondToUserInput.mockImplementationOnce(() =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: ProviderDriverKind.make("codex"),
+          method: "respondToUserInput",
+          detail: "Unknown pending user-input request: question-safety",
+        }),
+      ),
+    );
+    await harness.respondWith("optional-late-steer", { "0": "Engineers" });
+    await harness.drain();
+    expect(Option.getOrUndefined(await harness.readQuestion("question-safety"))).toMatchObject({
+      isPending: true,
+      responseState: "retryable",
+    });
+    const failure = (await harness.readModel()).threads[0]?.activities.find(
+      (activity) => activity.kind === "provider.user-input.respond.failed",
+    );
+    expect((failure?.payload as { detail?: string }).detail).toContain("turn ended");
+  });
 
   it("question safety: proven validation failure permits correction before delivery", async () => {
     const harness = await prepareQuestion();
@@ -6145,6 +7655,82 @@ describe("ProviderCommandReactor", () => {
       await Effect.runPromise(Deferred.succeed(gate, undefined));
     });
 
+    it("a Stop committed while the lanes are full and the bus overflows still cancels the queued start", async () => {
+      const releaseFirst = Effect.runSync(Deferred.make<void>());
+      const secondInterrupted = Effect.runSync(Deferred.make<void>());
+      const harness = await createHarness({
+        reactorOptions: { lifecycleCapacity: 1 },
+        startSessionEffect: ({ call }) =>
+          call === 1
+            ? Deferred.await(releaseFirst).pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new ProviderAdapterProcessError({
+                      provider: "codex",
+                      threadId: "thread-1",
+                      detail: "first start failed",
+                    }),
+                  ),
+                ),
+              )
+            : call === 2
+              ? Effect.never.pipe(
+                  Effect.onInterrupt(() => Deferred.succeed(secondInterrupted, undefined)),
+                )
+              : undefined,
+      });
+      // The first start holds the only lifecycle slot; the second waits for it in enqueue.
+      await startTurn(harness, { messageId: "full-lanes-1" });
+      await waitFor(() => harness.startSession.mock.calls.length === 1);
+      await startTurn(harness, { messageId: "full-lanes-2" });
+
+      // More commits than the bus holds while the reactor's consumer cannot read: the old bus
+      // stopped the command worker here.
+      const flood = await Effect.runPromise(
+        Effect.forEach(
+          Array.from(
+            { length: ORCHESTRATION_DOMAIN_EVENT_BUS_CAPACITY + 510 },
+            (_, index) => index,
+          ),
+          (index) =>
+            harness.engine.dispatch({
+              type: "project.meta.update",
+              commandId: CommandId.make(`cmd-full-lanes-flood-${index}`),
+              projectId: asProjectId("project-1"),
+              title: `Flood ${index}`,
+            }),
+          { discard: true },
+        ).pipe(Effect.timeoutOption("15 seconds")),
+      );
+      expect(Option.isSome(flood)).toBe(true);
+
+      // Committed, but the consumer notes it only after replaying the flood from the store.
+      await stopSession(harness, "full-lanes");
+      await Effect.runPromise(Deferred.succeed(releaseFirst, undefined));
+      await waitFor(
+        async () => (await activitiesOf(harness, "provider.turn.start.cancelled")).length === 1,
+        10_000,
+      );
+      await harness.drain();
+
+      const [cancelled] = await activitiesOf(harness, "provider.turn.start.cancelled");
+      expect(cancelled?.payload).toMatchObject({
+        messageId: "full-lanes-2",
+        reason: "stopped-before-start",
+      });
+      // Either the second start never began, or it began and was interrupted by the Stop.
+      const startCalls = harness.startSession.mock.calls.length;
+      expect([1, 2]).toContain(startCalls);
+      if (startCalls === 2) {
+        expect(Effect.runSync(Deferred.isDone(secondInterrupted))).toBe(true);
+      }
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect((await readThread(harness))?.session).toMatchObject({
+        status: "stopped",
+        activeTurnId: null,
+      });
+    });
+
     it("Stop cancels an in-flight first session start and acknowledges the dispatch", async () => {
       const interrupted = Effect.runSync(Deferred.make<void>());
       const harness = await createHarness({
@@ -7014,7 +8600,11 @@ describe("ProviderCommandReactor", () => {
     const startTurn = (
       harness: Harness,
       messageId: string,
-      extra: { readonly modelSelection?: ModelSelection; readonly delegated?: true } = {},
+      extra: {
+        readonly modelSelection?: ModelSelection;
+        /** A server wake: a delegated result (`true`) or a pull request update. */
+        readonly delegated?: true | "pull-request-watch";
+      } = {},
     ) =>
       Effect.runPromise(
         harness.engine.dispatch({
@@ -7035,6 +8625,9 @@ describe("ProviderCommandReactor", () => {
                   projectId: asProjectId("project-1"),
                   runtimeMode: "approval-required" as const,
                   worktreePath: null,
+                  ...(extra.delegated === "pull-request-watch"
+                    ? { source: "pull-request-watch" as const }
+                    : {}),
                 },
               }
             : {}),
@@ -7210,6 +8803,30 @@ describe("ProviderCommandReactor", () => {
           deliveryState: "not-sent",
           detail:
             "Ryco restarted before this delegated result reached the provider. Inspect the result before sending it manually.",
+        },
+      });
+      expect(second.sendTurn).not.toHaveBeenCalled();
+      expect(second.startSession).not.toHaveBeenCalled();
+    });
+
+    it("cancels a pull request update start with the pull request wording", async () => {
+      const dbPath = makeDbPath();
+      const first = await createHarness({ dbPath, startReactor: false });
+      await startTurn(first, "pull-request-watch:lost", { delegated: "pull-request-watch" });
+      await disposeHarness();
+
+      const second = await createHarness({ dbPath });
+      await recover(second);
+      await second.drain();
+      const failures = await activitiesOf(second, "provider.turn.start.failed");
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toMatchObject({
+        summary: "Pull request update was not sent",
+        payload: {
+          messageId: "pull-request-watch:lost",
+          deliveryState: "not-sent",
+          detail:
+            "Ryco restarted before this pull request update reached the agent. Nothing was sent. Ryco checks the pull request again and reports what is still new.",
         },
       });
       expect(second.sendTurn).not.toHaveBeenCalled();
@@ -7435,7 +9052,7 @@ describe("ProviderCommandReactor", () => {
         await second.drain();
         expect(second.abandonUnstartedTurnStart).toHaveBeenCalledTimes(1);
         const [event] = second.abandonUnstartedTurnStart.mock.calls[0]!;
-        expect(event.payload.contextHandoff).toEqual(cwdRelocationHandoffReference(event));
+        expect(event.payload.contextHandoff).toEqual(resumeFallbackHandoffReference(event));
         expect(event.payload.contextHandoff?.targetMessageId).toBe("relocation-lost");
         const failures = await activitiesOf(second, "provider.turn.start.failed");
         if (result === "unrecognized") {

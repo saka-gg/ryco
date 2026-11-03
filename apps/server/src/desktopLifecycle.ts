@@ -5,14 +5,18 @@
  * Electron main process. Besides resource telemetry, the backend writes
  * newline-delimited lifecycle frames on it (`http-bound`, `http-serving`,
  * `startup-ready`, `startup-phase`, `fatal`) so desktop readiness does not
- * depend on parsing log text. Outside desktop mode no channel is attached and
- * every write is a no-op.
+ * depend on parsing log text, and `agent-work` frames so the desktop can hold
+ * the machine awake while agents work. Outside desktop mode no channel is
+ * attached and every write is a no-op.
  *
  * @module desktopLifecycle
  */
 import type { Writable } from "node:stream";
 
-import type { DesktopBackendLifecycleFrame } from "@ryco/shared/desktopResourceTelemetry";
+import type {
+  DesktopAgentWorkFrame,
+  DesktopBackendLifecycleFrame,
+} from "@ryco/shared/desktopResourceTelemetry";
 
 let channel: Writable | null = null;
 
@@ -53,8 +57,8 @@ export function detachDesktopLifecycleChannelForTests(): void {
   providersReadyAtMs = null;
 }
 
-/** Best effort: lifecycle frames must never affect the backend itself. */
-export function writeDesktopLifecycleFrame(frame: DesktopBackendLifecycleFrame): void {
+/** Best effort: frames must never affect the backend itself. */
+function writeFrame(frame: DesktopBackendLifecycleFrame | DesktopAgentWorkFrame): void {
   const target = channel;
   if (target === null || target.destroyed || !target.writable) return;
   try {
@@ -62,6 +66,14 @@ export function writeDesktopLifecycleFrame(frame: DesktopBackendLifecycleFrame):
   } catch {
     // The desktop may already have closed its end.
   }
+}
+
+export function writeDesktopLifecycleFrame(frame: DesktopBackendLifecycleFrame): void {
+  writeFrame(frame);
+}
+
+export function writeDesktopAgentWorkFrame(frame: DesktopAgentWorkFrame): void {
+  writeFrame(frame);
 }
 
 /** Reports a coarse startup milestone as milliseconds since process start. */

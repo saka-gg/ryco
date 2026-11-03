@@ -7,12 +7,6 @@ import {
   type ProviderInstanceRegistryShape,
 } from "../provider/Services/ProviderInstanceRegistry.ts";
 import type { ProviderInstance } from "../provider/ProviderDriver.ts";
-import {
-  ThreadPriorityPolicyError,
-  validateThreadPriorityRankings,
-  type ThreadPriorityPromptChunk,
-  type ValidatedThreadPriorityRanking,
-} from "../threadPriority/threadPriorityPolicy.ts";
 import type { TextGenerationPolicy } from "./TextGenerationPolicy.ts";
 
 export type TextGenerationProvider = "codex" | "claudeAgent" | "cursor" | "grok" | "opencode";
@@ -141,34 +135,6 @@ export interface WorkspaceChangesSummaryGenerationResult {
   summary: string;
 }
 
-export interface RankInboxThreadsInput {
-  cwd: string;
-  chunk: ThreadPriorityPromptChunk;
-  modelSelection: ModelSelection;
-}
-
-export interface RankInboxThreadsResult {
-  rankings: ReadonlyArray<ValidatedThreadPriorityRanking>;
-}
-
-export function validateRankInboxThreadsResult(
-  input: RankInboxThreadsInput,
-  rankings: unknown,
-): Effect.Effect<RankInboxThreadsResult, TextGenerationError> {
-  return Effect.try({
-    try: () => ({ rankings: validateThreadPriorityRankings(rankings, input.chunk) }),
-    catch: (cause) =>
-      new TextGenerationError({
-        operation: "rankInboxThreads",
-        detail:
-          cause instanceof ThreadPriorityPolicyError
-            ? `Invalid inbox ranking output (${cause.kind}).`
-            : "Invalid inbox ranking output.",
-        cause,
-      }),
-  });
-}
-
 export interface TextGenerationService {
   generateCommitMessage(
     input: CommitMessageGenerationInput,
@@ -177,7 +143,6 @@ export interface TextGenerationService {
   generateBranchName(input: BranchNameGenerationInput): Promise<BranchNameGenerationResult>;
   generateThreadTitle(input: ThreadTitleGenerationInput): Promise<ThreadTitleGenerationResult>;
   generateIssueContent(input: IssueContentGenerationInput): Promise<IssueContentGenerationResult>;
-  rankInboxThreads(input: RankInboxThreadsInput): Promise<RankInboxThreadsResult>;
   answerSideQuestion(input: SideQuestionInput): Promise<SideQuestionResult>;
 }
 
@@ -185,6 +150,14 @@ export interface TextGenerationService {
  * TextGenerationShape - Service API for commit/PR text generation.
  */
 export interface TextGenerationShape {
+  /**
+   * Commit messages and pull request text run without tools here, so their policy may carry
+   * text from the repository and its forge (`TextGenerationPolicy.repositoryExamples` and
+   * `changeRequestTemplate`). Absent means they may have tools: the router then drops that text
+   * before calling.
+   */
+  readonly gitWritingToolFree?: boolean | undefined;
+
   /** Answer from a frozen completed-context snapshot in an isolated, tool-free request. */
   readonly answerSideQuestion: (
     input: SideQuestionInput,
@@ -225,11 +198,6 @@ export interface TextGenerationShape {
     input: IssueContentGenerationInput,
   ) => Effect.Effect<IssueContentGenerationResult, TextGenerationError>;
 
-  /** Rank one bounded, environment-local chunk without tools or mutations. */
-  readonly rankInboxThreads: (
-    input: RankInboxThreadsInput,
-  ) => Effect.Effect<RankInboxThreadsResult, TextGenerationError>;
-
   /**
    * Describe, in at most two sentences, the work a checkout holds that deleting
    * it would lose. Tool-free; the change data is quoted, never followed.
@@ -252,9 +220,15 @@ type TextGenerationOp =
   | "generateBranchName"
   | "generateThreadTitle"
   | "generateIssueContent"
-  | "rankInboxThreads"
   | "answerSideQuestion"
   | "summarizeWorkspaceChanges";
+
+const MISSING_INSTANCE = "No provider instance registered for id";
+const DISABLED_INSTANCE = "is disabled in Ryco settings.";
+
+/** Whether an error detail is the router refusing a missing or disabled instance. */
+export const isTextGenerationInstanceUnavailable = (detail: string) =>
+  detail.startsWith(MISSING_INSTANCE) || detail.endsWith(DISABLED_INSTANCE);
 
 const resolveInstance = (
   registry: ProviderInstanceRegistryShape,
@@ -263,16 +237,40 @@ const resolveInstance = (
 ): Effect.Effect<ProviderInstance["textGeneration"], TextGenerationError> =>
   registry.getInstance(instanceId).pipe(
     Effect.flatMap((instance) =>
-      instance
+      instance?.enabled
         ? Effect.succeed(instance.textGeneration)
         : Effect.fail(
             new TextGenerationError({
               operation,
-              detail: `No provider instance registered for id '${instanceId}'.`,
+              detail: instance
+                ? `Provider instance '${instanceId}' ${DISABLED_INSTANCE}`
+                : `${MISSING_INSTANCE} '${instanceId}'.`,
             }),
           ),
     ),
   );
+
+/**
+ * Repository and forge text in a Git writing policy (examples, the pull request template)
+ * reaches only instances that write commit messages and pull request text without tools; any
+ * other instance gets the style without it.
+ */
+export const gitWritingPolicyForInstance = (
+  textGeneration: Pick<TextGenerationShape, "gitWritingToolFree">,
+  policy: TextGenerationPolicy | undefined,
+): TextGenerationPolicy | undefined => {
+  if (
+    textGeneration.gitWritingToolFree === true ||
+    (policy?.repositoryExamples === undefined && policy?.changeRequestTemplate === undefined)
+  )
+    return policy;
+  const {
+    repositoryExamples: _untrustedExamples,
+    changeRequestTemplate: _untrustedTemplate,
+    ...withoutRepositoryText
+  } = policy;
+  return withoutRepositoryText;
+};
 
 export const makeTextGenerationFromRegistry = (
   registry: ProviderInstanceRegistryShape,
@@ -283,11 +281,21 @@ export const makeTextGenerationFromRegistry = (
     ),
   generateCommitMessage: (input) =>
     resolveInstance(registry, "generateCommitMessage", input.modelSelection.instanceId).pipe(
-      Effect.flatMap((textGeneration) => textGeneration.generateCommitMessage(input)),
+      Effect.flatMap((textGeneration) =>
+        textGeneration.generateCommitMessage({
+          ...input,
+          policy: gitWritingPolicyForInstance(textGeneration, input.policy),
+        }),
+      ),
     ),
   generatePrContent: (input) =>
     resolveInstance(registry, "generatePrContent", input.modelSelection.instanceId).pipe(
-      Effect.flatMap((textGeneration) => textGeneration.generatePrContent(input)),
+      Effect.flatMap((textGeneration) =>
+        textGeneration.generatePrContent({
+          ...input,
+          policy: gitWritingPolicyForInstance(textGeneration, input.policy),
+        }),
+      ),
     ),
   generateBranchName: (input) =>
     resolveInstance(registry, "generateBranchName", input.modelSelection.instanceId).pipe(
@@ -300,10 +308,6 @@ export const makeTextGenerationFromRegistry = (
   generateIssueContent: (input) =>
     resolveInstance(registry, "generateIssueContent", input.modelSelection.instanceId).pipe(
       Effect.flatMap((textGeneration) => textGeneration.generateIssueContent(input)),
-    ),
-  rankInboxThreads: (input) =>
-    resolveInstance(registry, "rankInboxThreads", input.modelSelection.instanceId).pipe(
-      Effect.flatMap((textGeneration) => textGeneration.rankInboxThreads(input)),
     ),
   summarizeWorkspaceChanges: (input) =>
     resolveInstance(registry, "summarizeWorkspaceChanges", input.modelSelection.instanceId).pipe(

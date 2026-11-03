@@ -11,6 +11,8 @@ import {
 import { CHAT_PROJECT_TITLE_MAX_CHARS } from "./orchestration.ts";
 
 const PROJECT_SEARCH_ENTRIES_MAX_LIMIT = 200;
+const PROJECT_SEARCH_CONTENT_QUERY_MAX_LENGTH = 256;
+const PROJECT_SEARCH_CONTENT_MAX_LIMIT = 500;
 const PROJECT_WRITE_FILE_PATH_MAX_LENGTH = 512;
 export const PROJECT_STAGE_FILE_MAX_BYTES = 10 * 1024 * 1024;
 const PROJECT_STAGE_FILE_MAX_BASE64_CHARS = Math.ceil((PROJECT_STAGE_FILE_MAX_BYTES * 4) / 3) + 4;
@@ -79,6 +81,74 @@ export class ProjectSearchEntriesError extends Schema.TaggedError<ProjectSearchE
   },
 ) {}
 
+/**
+ * A literal text search of the workspace's file contents. A new option (regex, globs) needs its
+ * own capability: older nodes drop unknown keys and would answer a literal search.
+ */
+export const ProjectSearchContentInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  /** Not trimmed: whitespace is part of what is searched. One line, no NUL. */
+  query: Schema.String.check(
+    Schema.isNonEmpty(),
+    Schema.isMaxLength(PROJECT_SEARCH_CONTENT_QUERY_MAX_LENGTH),
+    Schema.isPattern(/^[^\r\n\0]*$/),
+  ),
+  /** Matching lines per page. */
+  limit: PositiveInt.check(Schema.isLessThanOrEqualTo(PROJECT_SEARCH_CONTENT_MAX_LIMIT)),
+  /** Absent means false. */
+  caseSensitive: Schema.optional(Schema.Boolean),
+  /** Absent means false. */
+  wholeWord: Schema.optional(Schema.Boolean),
+  /** The previous page's `nextCursor`; opaque and node-issued. */
+  cursor: Schema.optional(Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(1024))),
+});
+export type ProjectSearchContentInput = typeof ProjectSearchContentInput.Type;
+
+/** UTF-16 offsets into a match's `preview`. */
+export const ProjectContentMatchRange = Schema.Struct({
+  start: NonNegativeInt,
+  end: NonNegativeInt,
+});
+export type ProjectContentMatchRange = typeof ProjectContentMatchRange.Type;
+
+// Result fields carry no length checks, so a node can raise its caps without breaking older clients.
+export const ProjectContentMatch = Schema.Struct({
+  path: TrimmedNonEmptyString,
+  lineNumber: PositiveInt,
+  /** The matching line, or a window of a long one with `…` at each cut edge. */
+  preview: Schema.String,
+  ranges: Schema.Array(ProjectContentMatchRange),
+});
+export type ProjectContentMatch = typeof ProjectContentMatch.Type;
+
+export const ProjectSearchContentResult = Schema.Struct({
+  /** Whole files in path order: a page never splits one file's matches. */
+  matches: Schema.Array(ProjectContentMatch),
+  /** Present when more matches may follow; pass it back to continue. */
+  nextCursor: Schema.optional(Schema.String),
+  /** The page used up its time budget before it filled; `nextCursor` continues after it. */
+  timedOut: Schema.optional(Schema.Boolean),
+  /**
+   * Only part of the workspace was searched: its file index hit a size cap or
+   * lists tracked files only.
+   */
+  partial: Schema.optional(Schema.Boolean),
+});
+export type ProjectSearchContentResult = typeof ProjectSearchContentResult.Type;
+
+/** `cursor`: the cursor is not one this node can continue; search again from the start. */
+export const ProjectSearchContentFailureReason = Schema.Literals(["cursor", "failed"]);
+export type ProjectSearchContentFailureReason = typeof ProjectSearchContentFailureReason.Type;
+
+export class ProjectSearchContentError extends Schema.TaggedError<ProjectSearchContentError>()(
+  "ProjectSearchContentError",
+  {
+    message: TrimmedNonEmptyString,
+    reason: Schema.optional(ProjectSearchContentFailureReason),
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
 export const ProjectReadFileInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   relativePath: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_WRITE_FILE_PATH_MAX_LENGTH)),
@@ -99,6 +169,51 @@ export class ProjectReadFileError extends Schema.TaggedError<ProjectReadFileErro
   {
     message: TrimmedNonEmptyString,
     cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
+/** The file `projects.subscribeFileChanges` watches: the same path a `projects.readFile` names. */
+export const ProjectWatchFileInput = ProjectReadFileInput;
+export type ProjectWatchFileInput = typeof ProjectWatchFileInput.Type;
+
+/**
+ * What `projects.subscribeFileChanges` reports about one workspace file. It never carries the
+ * file's content: a client that sees a version it does not hold reads the file again through
+ * `projects.readFile`, with that read's limits and authorization.
+ *
+ * - `current` comes first on every (re)subscription, once the watch is in place, so a read
+ *   made before the watch cannot miss a change. A missing file reports `deleted` instead.
+ * - `changed` follows only when the version, or whether the file exists, changed since.
+ * - `version` is the `version` a `projects.readFile` of these bytes returns (so a client's own
+ *   save reports the version it already holds); null for a file over the preview limit or not
+ *   a regular file.
+ */
+export const ProjectFileChangeEvent = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literals(["current", "changed"]),
+    version: Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(128))),
+  }),
+  Schema.Struct({ type: Schema.Literal("deleted") }),
+]);
+export type ProjectFileChangeEvent = typeof ProjectFileChangeEvent.Type;
+
+/**
+ * `outside-root`: the path leaves the project root. `unavailable`: the file's folder cannot be
+ * watched now (it is missing, or its watch stopped), and a later try may work. `limit`: the
+ * connection or the node already watches as many files as it may.
+ */
+export const ProjectWatchFileFailureReason = Schema.Literals([
+  "outside-root",
+  "unavailable",
+  "limit",
+]);
+export type ProjectWatchFileFailureReason = typeof ProjectWatchFileFailureReason.Type;
+
+export class ProjectWatchFileError extends Schema.TaggedError<ProjectWatchFileError>()(
+  "ProjectWatchFileError",
+  {
+    message: TrimmedNonEmptyString,
+    reason: ProjectWatchFileFailureReason,
   },
 ) {}
 
@@ -123,6 +238,55 @@ export type ProjectReadFileBinaryResult = typeof ProjectReadFileBinaryResult.Typ
 
 export class ProjectReadFileBinaryError extends Schema.TaggedError<ProjectReadFileBinaryError>()(
   "ProjectReadFileBinaryError",
+  {
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
+/**
+ * Previews too large for one relay message (one RPC message is at most 4 MiB on the
+ * hosted relay, `RELAY_MAX_RPC_MESSAGE_BYTES`) travel in bounded chunks. Same chunk size as
+ * chat attachments (`CHAT_ATTACHMENT_READ_CHUNK_BYTES`).
+ */
+export const PROJECT_READ_FILE_CHUNK_BYTES = 256 * 1024;
+export const PROJECT_READ_FILE_CHUNKED_MAX_BYTES = 32 * 1024 * 1024;
+const PROJECT_READ_FILE_FINGERPRINT_MAX_LENGTH = 128;
+
+export const ProjectReadFileChunkInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  relativePath: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_WRITE_FILE_PATH_MAX_LENGTH)),
+  // An integer below the cap. `isLessThanOrEqualTo` because the server's boot code already
+  // ships it, and `isLessThan` would add about 0.9 KB there.
+  offset: NonNegativeInt.check(Schema.isLessThanOrEqualTo(PROJECT_READ_FILE_CHUNKED_MAX_BYTES - 1)),
+  /** The first chunk's `fingerprint`; a later chunk fails when the file changed since. */
+  expectedFingerprint: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_READ_FILE_FINGERPRINT_MAX_LENGTH)),
+  ),
+});
+export type ProjectReadFileChunkInput = typeof ProjectReadFileChunkInput.Type;
+
+/**
+ * One bounded slice of a PDF or raster image. `mimeType` is sniffed from the
+ * file's first bytes on every chunk, never from its name.
+ */
+export const ProjectReadFileChunkResult = Schema.Struct({
+  relativePath: TrimmedNonEmptyString,
+  offset: NonNegativeInt,
+  totalBytes: PositiveInt.check(Schema.isLessThanOrEqualTo(PROJECT_READ_FILE_CHUNKED_MAX_BYTES)),
+  dataBase64: Schema.String.check(
+    Schema.isMaxLength(4 * Math.ceil(PROJECT_READ_FILE_CHUNK_BYTES / 3)),
+  ),
+  mimeType: TrimmedNonEmptyString,
+  /** Opaque identity of the file's state while it is read. */
+  fingerprint: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(PROJECT_READ_FILE_FINGERPRINT_MAX_LENGTH),
+  ),
+});
+export type ProjectReadFileChunkResult = typeof ProjectReadFileChunkResult.Type;
+
+export class ProjectReadFileChunkError extends Schema.TaggedError<ProjectReadFileChunkError>()(
+  "ProjectReadFileChunkError",
   {
     message: TrimmedNonEmptyString,
     cause: Schema.optional(Schema.Defect()),

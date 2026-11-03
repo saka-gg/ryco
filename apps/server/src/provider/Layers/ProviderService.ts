@@ -30,6 +30,7 @@ import {
   ProviderSessionStartInput,
   ProviderSteerTurnInput,
   ProviderStopBackgroundTaskInput,
+  ProviderMessageBackgroundTaskInput,
   ProviderStopSessionInput,
   RuntimeMode,
   RuntimeSessionId,
@@ -84,11 +85,13 @@ import {
   ProviderOperationTimeoutError,
   ProviderOperationUnsupportedError,
   ProviderSessionNotFoundError,
+  ProviderTaskEndedError,
   ProviderTurnNotSteerableError,
   ProviderUnsupportedError,
   ProviderValidationError,
 } from "../Errors.ts";
 import { runDetachedWithDeadline, runDetachedWithDeadlineOption } from "../detachedDeadline.ts";
+import { timeoutWhileResponsiveOption } from "@ryco/shared/responsiveDeadline";
 import {
   providerOperationTimeoutDetail,
   resolveProviderOperationTimeouts,
@@ -100,7 +103,11 @@ import type {
   ProviderAdapterCapabilities,
   ProviderAdapterShape,
 } from "../Services/ProviderAdapter.ts";
-import { ProviderAdapterRegistry } from "../Services/ProviderAdapterRegistry.ts";
+import {
+  ProviderAdapterRegistry,
+  type ProviderInstanceRoutingInfo,
+} from "../Services/ProviderAdapterRegistry.ts";
+import { ProviderInstallLock } from "../Services/ProviderInstallLock.ts";
 import {
   ProviderService,
   type ProviderFreshSessionStartInput,
@@ -215,6 +222,17 @@ function toValidationError(
     ...(cause !== undefined ? { cause } : {}),
   });
 }
+
+/** Starting or resuming a runtime needs an enabled instance; adopting a live one does not. */
+const requireEnabledInstance = (operation: string, info: ProviderInstanceRoutingInfo) =>
+  info.enabled
+    ? Effect.void
+    : Effect.fail(
+        toValidationError(
+          operation,
+          `Provider instance '${info.instanceId}' is disabled in Ryco settings.`,
+        ),
+      );
 
 const decodeInputOrValidationError = <S extends Schema.Top>(input: {
   readonly operation: string;
@@ -383,6 +401,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
   const registry = yield* ProviderAdapterRegistry;
   const directory = yield* ProviderSessionDirectory;
+  // The host-wide provider install lock; harnesses without one start sessions without waiting.
+  const installLock = Option.getOrUndefined(yield* Effect.serviceOption(ProviderInstallLock));
   const runtimeEventPubSub = yield* PubSub.bounded<ProviderRuntimeEvent>(4_096);
   const recentRuntimeEvents = yield* Ref.make<ReadonlyArray<ProviderRuntimeEventSummary>>([]);
   const staleSessionBindings = yield* Ref.make(new Map<string, ProviderRuntimeBinding>());
@@ -427,6 +447,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     Effect.flatMap(getSessionStartLock(threadId), (semaphore) => semaphore.withPermit(effect));
 
   const serviceScope = yield* Effect.scope;
+
+  /**
+   * Holds a provider process launch while a Ryco process on this host installs that instance's
+   * CLI. Runs before the start deadline: an install takes minutes.
+   */
+  const awaitProviderInstall = (instanceId: ProviderInstanceId, provider: ProviderDriverKind) =>
+    installLock ? installLock.beforeLaunch(instanceId, provider) : Effect.void;
 
   // Every provider call below is bounded through runDetachedWithDeadline, which
   // forks the call into this layer scope so a deadline holds even when the
@@ -1085,6 +1112,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           `Cannot recover thread '${input.binding.threadId}' because no provider resume state is persisted.`,
         );
       }
+      yield* requireEnabledInstance(
+        input.operation,
+        yield* registry.getInstanceInfo(bindingInstanceId),
+      );
 
       const resumeCwd = reachableConversationCwd({
         capabilities: adapter.capabilities,
@@ -1223,8 +1254,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             return yield* resolveRoutableSessionUnlocked(input);
           }
           const instanceId = binding.providerInstanceId;
+          // A live session launches nothing, so a turn to it never waits for an install, even one
+          // of another CLI that shares its installer.
+          const live = yield* resolveRoutableSessionUnlocked({ ...input, allowRecovery: false });
+          if (live.isActive) return live;
           const label = yield* operationLabel(instanceId);
           const timeoutMs = timeouts.sessionStartMs(binding.provider);
+          // A recovery launches the provider again.
+          yield* awaitProviderInstall(instanceId, binding.provider);
           return yield* runDetachedWithDeadline(
             withSessionStartLock(input.threadId, resolveRoutableSessionUnlocked(input)),
             {
@@ -1359,7 +1396,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   // list with an empty one.
   const projectCommands = makeStaleWhileRevalidateCache<
     ProviderProjectCommands,
-    ProviderAdapterError | ProviderUnsupportedError | Cause.TimeoutError
+    ProviderAdapterError | Cause.TimeoutError
   >({
     freshMs: PROJECT_COMMANDS_FRESH_MS,
     capacity: 128,
@@ -1369,28 +1406,34 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     instanceId,
     cwd,
   ) =>
-    projectCommands
-      .get(
-        `${instanceId}\u0000${cwd}`,
-        registry.getByInstance(instanceId).pipe(
-          Effect.flatMap((adapter) =>
-            adapter.readProjectCommands
-              ? adapter.readProjectCommands(cwd)
-              : Effect.succeed(EMPTY_PROJECT_COMMANDS),
-          ),
-          Effect.timeout(Duration.millis(PROJECT_COMMANDS_TIMEOUT_MS)),
-          Effect.tapCause((cause) =>
-            Effect.logDebug("provider.project-commands.read-failed", {
-              instanceId,
-              cause: Cause.pretty(cause),
-            }),
+    registry.getByInstance(instanceId).pipe(
+      Effect.flatMap((adapter) =>
+        (adapter.readLiveProjectCommands?.(cwd) ?? Effect.succeed(undefined)).pipe(
+          Effect.flatMap((live) =>
+            // A running session's own push is the freshest list: never cached, never re-read.
+            live !== undefined
+              ? Effect.succeed(live)
+              : projectCommands.get(
+                  `${instanceId}\u0000${cwd}`,
+                  (adapter.readProjectCommands
+                    ? adapter.readProjectCommands(cwd)
+                    : Effect.succeed(EMPTY_PROJECT_COMMANDS)
+                  ).pipe(
+                    Effect.timeout(Duration.millis(PROJECT_COMMANDS_TIMEOUT_MS)),
+                    Effect.tapCause((cause) =>
+                      Effect.logDebug("provider.project-commands.read-failed", {
+                        instanceId,
+                        cause: Cause.pretty(cause),
+                      }),
+                    ),
+                  ),
+                ),
           ),
         ),
-      )
-      .pipe(
-        // Only a first read can fail here (a stale entry keeps its value): nothing to show yet.
-        Effect.catchCause(() => Effect.succeed(EMPTY_PROJECT_COMMANDS)),
-      );
+      ),
+      // Only a first read can fail here (a stale entry keeps its value): nothing to show yet.
+      Effect.catchCause(() => Effect.succeed(EMPTY_PROJECT_COMMANDS)),
+    );
 
   const startSession: ProviderServiceShape["startSession"] = Effect.fn("startSession")(
     function* (threadId, rawInput, options) {
@@ -1441,12 +1484,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           provider: resolvedProvider,
           runtimeSessionId,
         };
-        if (!instanceInfo.enabled) {
-          return yield* toValidationError(
-            "ProviderService.startSession",
-            `Provider instance '${resolvedInstanceId}' is disabled in Ryco settings.`,
-          );
-        }
+        yield* requireEnabledInstance("ProviderService.startSession", instanceInfo);
         const persistedBinding = Option.getOrUndefined(yield* directory.getBinding(threadId));
         const replacesPersistedRuntime =
           persistedBinding?.providerInstanceId === resolvedInstanceId &&
@@ -1609,6 +1647,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         }),
       );
       const label = instanceInfo.displayName ?? String(resolvedInstanceId);
+      yield* awaitProviderInstall(resolvedInstanceId, instanceInfo.driverKind);
       // The lock wait, admission and adapter start share one deadline. The lock and
       // the admission permit are taken inside the detached fiber and released only
       // when it exits, so "one adapter start per thread at a time" still holds.
@@ -1717,7 +1756,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
                 Effect.raceFirst(
                   Deferred.await(accepted).pipe(Effect.as("accepted" as const)),
                   Fiber.await(fiber).pipe(Effect.as("exited" as const)),
-                ).pipe(Effect.timeoutOption(Duration.millis(timeoutMs))),
+                ).pipe(timeoutWhileResponsiveOption(timeoutMs)),
               ).pipe(Effect.onInterrupt(() => abandon));
               if (Option.isNone(first)) {
                 yield* abandon;
@@ -1915,6 +1954,25 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "The turn finished before this message could be steered. It stays queued and is sent next.",
       });
     }
+    if (routed.adapter.capabilities.turnSteering === "interrupt-restart") {
+      // No native steering: stop the turn and defer, so the message goes as the next turn from
+      // the follow-up queue. A server stop holds no queue (only a person's Stop does).
+      const stopped = yield* interruptTurn({
+        threadId: input.threadId,
+        turnId: input.expectedTurnId,
+      }).pipe(Effect.exit);
+      const displayName =
+        PROVIDER_DISPLAY_NAMES[routed.adapter.provider] ?? routed.adapter.provider;
+      return yield* new ProviderTurnNotSteerableError({
+        provider: routed.adapter.provider,
+        threadId: input.threadId,
+        turnId: input.expectedTurnId,
+        reason: "restarting",
+        detail: Exit.isSuccess(stopped)
+          ? `${displayName} can't take a message mid-turn, so Ryco stopped the turn. Your message is sent next.`
+          : `${displayName} can't take a message mid-turn and the turn could not be stopped. The message stays queued.`,
+      });
+    }
     const steer = routed.adapter.steerTurn;
     if (routed.adapter.capabilities.turnSteering !== "native" || steer === undefined) {
       const displayName =
@@ -2052,6 +2110,46 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     }
     yield* stop(routed.threadId, input.taskId, input.expected);
     yield* analytics.record("provider.background_task.stopped", {
+      provider: routed.adapter.provider,
+    });
+  });
+
+  const messageBackgroundTask: ProviderServiceShape["messageBackgroundTask"] = Effect.fn(
+    "messageBackgroundTask",
+  )(function* (rawInput) {
+    const input = yield* decodeInputOrValidationError({
+      operation: "ProviderService.messageBackgroundTask",
+      schema: ProviderMessageBackgroundTaskInput,
+      payload: rawInput,
+    });
+    // No recovery, as for a stop: a running agent lives only in its live session.
+    const routed = yield* resolveRoutableSession({
+      threadId: input.threadId,
+      operation: "ProviderService.messageBackgroundTask",
+      allowRecovery: false,
+    });
+    yield* Effect.annotateCurrentSpan({
+      "provider.operation": "message-background-task",
+      "provider.kind": routed.adapter.provider,
+      "provider.thread_id": input.threadId,
+      "provider.task_id": input.taskId,
+    });
+    if (!routed.isActive) {
+      return yield* new ProviderSessionNotFoundError({ threadId: input.threadId });
+    }
+    if (input.expected.runtimeSessionId !== routed.session?.runtimeSessionId) {
+      return yield* new ProviderTaskEndedError({
+        provider: routed.adapter.provider,
+        threadId: input.threadId,
+        taskId: input.taskId,
+      });
+    }
+    const message = routed.adapter.messageBackgroundTask;
+    if (message === undefined) {
+      return yield* new ProviderUnsupportedError({ provider: routed.adapter.provider });
+    }
+    yield* message(routed.threadId, input.taskId, input.text, input.expected);
+    yield* analytics.record("provider.background_task.messaged", {
       provider: routed.adapter.provider,
     });
   });
@@ -2461,6 +2559,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           turns: input.numTurns,
         });
       });
+      // The rollback may recover the session, which launches the provider again.
+      yield* awaitProviderInstall(instanceId, binding.provider);
       yield* runDetachedWithDeadline(withSessionStartLock(input.threadId, rollbackLocked), {
         scope: serviceScope,
         timeoutMs,
@@ -2484,7 +2584,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   });
 
   const runStopAll = Effect.fn("runStopAll")(function* () {
-    const threadIds = yield* directory.listThreadIds();
     const currentAdapters = yield* getAdapterEntries;
     const activeSessions = yield* Effect.forEach(currentAdapters, ([instanceId, adapter]) =>
       adapter.listSessions().pipe(
@@ -2508,7 +2607,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       discard: true,
     });
     yield* Effect.sync(() => runtimeActivity.clear());
-    const bindings = yield* directory.listBindings().pipe(Effect.orElseSucceed(() => []));
+    // Only bindings that are not stopped yet: rewriting every stopped one made shutdown grow
+    // with the node's history and replaced their last runtime event with this one.
+    const bindings = yield* directory.listActiveBindings().pipe(Effect.orElseSucceed(() => []));
     yield* Effect.forEach(bindings, (binding) => {
       const providerInstanceId = dieOnMissingBindingInstanceId("ProviderService.stopAll", binding);
       return directory.upsert({
@@ -2528,7 +2629,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     // flushes within ANALYTICS_SHUTDOWN_FLUSH_TIMEOUT, so a slow network cannot
     // hold up provider shutdown.
     yield* analytics.record("provider.sessions.stopped_all", {
-      sessionCount: threadIds.length,
+      sessionCount: bindings.length,
     });
   });
 
@@ -2591,6 +2692,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     steerTurn,
     interruptTurn,
     stopBackgroundTask,
+    messageBackgroundTask,
     respondToRequest,
     respondToUserInput,
     stopSession,

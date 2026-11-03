@@ -51,6 +51,14 @@ import {
 } from "@ryco/contracts/native-e2ee";
 import * as HostedIdentity from "@ryco/contracts/hosted-identity";
 import {
+  NATIVE_PUSH_CAPABILITY_PATH,
+  NATIVE_PUSH_REGISTRATION_PATH,
+  NativePushCapability,
+  NativePushRegistrationInput,
+  type NativePushCapability as NativePushCapabilityType,
+  type NativePushRegistrationInput as NativePushRegistrationInputType,
+} from "@ryco/contracts/push-hub";
+import {
   ThreadReadCacheShellResponse,
   ThreadReadCacheThreadResponse,
 } from "@ryco/contracts/thread-read-cache";
@@ -232,7 +240,8 @@ export type HostedAccountIntent =
   | "add-passkey"
   | "regenerate-recovery-codes"
   | "connect-external-identity"
-  | "disconnect-external-identity";
+  | "disconnect-external-identity"
+  | "delete-account";
 
 /**
  * The operations where a `403` is *most likely* the fallback-session step-up
@@ -255,6 +264,7 @@ const STEP_UP_INTENTS: ReadonlySet<HostedAccountIntent> = new Set([
   "regenerate-recovery-codes",
   "connect-external-identity",
   "disconnect-external-identity",
+  "delete-account",
 ]);
 
 /** The operations where a `403` is most likely "this needs a passkey session". */
@@ -2433,6 +2443,30 @@ export class HostedHubApi {
     return { passkey, confirmed: passkey !== null };
   }
 
+  /**
+   * Delete the signed-in account ({@link HostedIdentity.ACCOUNT_DELETION_PATH}).
+   * `identifier` is what the user typed to confirm: the account's email, or its
+   * username. On success this device's session material is gone too; the Hub
+   * has already ended every session.
+   */
+  async deleteAccount(
+    input: { readonly identifier: string } & HostedAccountStepUp,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const identifier = input.identifier.trim();
+    if (identifier.length === 0 || identifier.length > 320) {
+      throw new HostedHubApiError("invalid_request", 400, undefined, "delete-account");
+    }
+    await this.#request(HostedIdentity.ACCOUNT_DELETION_PATH, {
+      method: "POST",
+      body: { confirmation: "delete", identifier, ...stepUpBody(input) },
+      csrf: true,
+      intent: "delete-account",
+      ...(signal ? { signal } : {}),
+    });
+    this.clearSessionMaterial();
+  }
+
   async signOut(signal?: AbortSignal): Promise<void> {
     await this.#request("/api/auth/logout", {
       method: "POST",
@@ -2844,6 +2878,56 @@ export class HostedHubApi {
   }
 
   /**
+   * Whether this Hub sends background push alerts, and to which app builds
+   * (`docs/push-alerts.md`). `null` when it does not: a Hub without push, or an
+   * older one without the route, answers 404. Public, so it needs no session.
+   */
+  async getNativePushCapability(signal?: AbortSignal): Promise<NativePushCapabilityType | null> {
+    let body: Record<string, unknown>;
+    try {
+      body = await this.#request(NATIVE_PUSH_CAPABILITY_PATH, {
+        dpop: "mint",
+        ...(signal ? { signal } : {}),
+      });
+    } catch (error) {
+      if (error instanceof HostedHubApiError && error.status === 404) return null;
+      throw error;
+    }
+    // A newer Hub may describe more than this client reads; extra fields are ignored.
+    try {
+      return Schema.decodeUnknownSync(NativePushCapability)(body);
+    } catch {
+      throw new HostedHubApiError("invalid_response", 502);
+    }
+  }
+
+  /**
+   * Registers this device's APNs token for push, under the native session's
+   * own E2EE enrollment. The latest token wins.
+   */
+  async registerNativePush(
+    input: NativePushRegistrationInputType,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    this.#requireBearerTransport();
+    const body = decodeContract(NativePushRegistrationInput, input, "invalid_request");
+    await this.#request(NATIVE_PUSH_REGISTRATION_PATH, {
+      method: "PUT",
+      body,
+      ...(signal ? { signal } : {}),
+    });
+  }
+
+  /** Removes this device's push registration; removing none is not an error. */
+  async unregisterNativePush(signal?: AbortSignal): Promise<void> {
+    this.#requireBearerTransport();
+    await this.#request(NATIVE_PUSH_REGISTRATION_PATH, {
+      method: "DELETE",
+      ...(signal ? { signal } : {}),
+    });
+  }
+
+  /**
    * Validate the account/session (and optional recovery codes) common to both
    * transports. Returns a bounded {@link HostedHubSessionResponse} with no
    * transport material attached.
@@ -2929,7 +3013,7 @@ export class HostedHubApi {
   async #request(
     pathname: string,
     options: {
-      readonly method?: "GET" | "POST";
+      readonly method?: "GET" | "POST" | "PUT" | "DELETE";
       readonly body?: unknown;
       readonly csrf?: boolean;
       /** Bearer mode only: `"mint"` = login/public (no token, proof without `ath`). */

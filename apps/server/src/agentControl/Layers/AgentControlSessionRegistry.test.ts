@@ -8,6 +8,9 @@ import {
 import { assert, it, vi } from "@effect/vitest";
 import { Context, Effect, Exit, Layer, Option, Redacted, Scope } from "effect";
 
+import * as SqlClient from "effect/sql/SqlClient";
+
+import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { AgentControlPolicyLive } from "./AgentControlPolicy.ts";
 import { AgentControlSessionRegistryLive } from "./AgentControlSessionRegistry.ts";
@@ -368,3 +371,64 @@ it.effect("server shutdown (layer scope close) revokes every credential", () =>
     assert.strictEqual(yield* registry.activeSessionCount, 0);
   }),
 );
+
+const depthLimitedLayer = it.layer(
+  AgentControlSessionRegistryLive.pipe(
+    Layer.provideMerge(AgentControlPolicyLive),
+    Layer.provideMerge(
+      ServerSettingsService.layerTest({
+        agentControl: { enabled: true, delegation: { maxDepth: 1 } },
+      }),
+    ),
+    Layer.provideMerge(SqlitePersistenceMemory),
+  ),
+);
+
+depthLimitedLayer("AgentControlSessionRegistry (delegation depth limit)", (it) => {
+  const AT = "2026-10-31T00:00:00.000Z";
+  const insertThread = (threadId: string, parent: string | null) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO projection_threads (thread_id, project_id, title, model_selection_json,
+          runtime_mode, interaction_mode, created_at, updated_at,
+          lineage_parent_thread_id, lineage_root_thread_id, lineage_relationship)
+        VALUES (${threadId}, 'project', ${threadId}, '{}', 'full-access', 'default', ${AT}, ${AT},
+          ${parent}, ${parent}, ${parent === null ? null : "delegated"})`;
+    });
+  const grantedFor = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const registry = yield* AgentControlSessionRegistry;
+      yield* registry.publishEndpoint(ENDPOINT);
+      const lease = yield* registry.issueLease({
+        threadId,
+        providerInstanceId: codexInstance,
+        runtimeSessionId: runtime1,
+        capabilities: [AGENT_CONTROL_CAPABILITIES.read, AGENT_CONTROL_CAPABILITIES.createThreads],
+        injectionMode: "codex-http",
+      });
+      assert.isTrue(Option.isSome(lease));
+      const session = yield* registry.authenticate(
+        bearer((lease as Option.Some<AgentControlIssuedLease>).value),
+      );
+      return session.grantedCapabilities;
+    });
+
+  it.effect("keeps delegation for a chat but withholds it from a task at the last level", () =>
+    Effect.gen(function* () {
+      yield* insertThread("chat", null);
+      yield* insertThread("task", "chat");
+      assert.include(
+        yield* grantedFor(ThreadId.make("chat")),
+        AGENT_CONTROL_CAPABILITIES.createThreads,
+      );
+      const task = yield* grantedFor(ThreadId.make("task"));
+      assert.notInclude(task, AGENT_CONTROL_CAPABILITIES.createThreads);
+      assert.include(task, AGENT_CONTROL_CAPABILITIES.read);
+      // Fails closed: a thread whose lineage cannot be read gets no delegation tools either.
+      assert.notInclude(
+        yield* grantedFor(ThreadId.make("unprojected")),
+        AGENT_CONTROL_CAPABILITIES.createThreads,
+      );
+    }),
+  );
+});

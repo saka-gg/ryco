@@ -18,7 +18,9 @@ import {
   hasOneClickUpdateProviderCandidate,
   isProviderUpdateCandidate,
   isProviderUpdateOffered,
+  providerUpdateDismissalKeys,
   providerUpdateNotificationKey,
+  undismissedProviderUpdateCandidates,
   withProviderUpdateOrigin,
   type ProviderUpdateCandidate,
 } from "./ProviderUpdateLaunchNotification.logic";
@@ -198,6 +200,49 @@ describe("provider update launch notification logic", () => {
       "unknown-environment|codex:codex:1.1.0|cursor:cursor:0.3.0",
     );
     expect(providerUpdateNotificationKey([])).toBeNull();
+  });
+
+  it("does not offer an update again once dismissed, when the other offered updates change", () => {
+    const origin = { environmentId: EnvironmentId.make("env_first") };
+    const claude = updateCandidate({ driver: driver("claudeAgent"), latestVersion: "2.1.312" });
+    const codex = updateCandidate({ driver: driver("codex"), latestVersion: "0.165.0" });
+    // Dismissing the toast that offered both.
+    const dismissed = new Set(providerUpdateDismissalKeys([claude, codex], origin));
+    // Codex's update goes away (or another one appears): Claude's stays dismissed.
+    expect(undismissedProviderUpdateCandidates([claude], dismissed, origin)).toEqual([]);
+    const cursor = updateCandidate({ driver: driver("cursor"), latestVersion: "0.3.0" });
+    expect(undismissedProviderUpdateCandidates([claude, cursor], dismissed, origin)).toEqual([
+      cursor,
+    ]);
+    // A newer version is offered again.
+    const newerClaude = updateCandidate({
+      driver: driver("claudeAgent"),
+      latestVersion: "2.1.313",
+    });
+    expect(undismissedProviderUpdateCandidates([newerClaude], dismissed, origin)).toEqual([
+      newerClaude,
+    ]);
+  });
+
+  it("keeps an update dismissed when another instance of its provider represents it", () => {
+    const origin = { environmentId: EnvironmentId.make("env_first") };
+    // Two custom Claude instances, the default one not offered: the latest-checked one represents
+    // the driver, which can change between refreshes.
+    const hubA = updateCandidate({
+      driver: driver("claudeAgent"),
+      instanceId: instanceId("claude_a"),
+      latestVersion: "2.1.312",
+    });
+    const hubB = updateCandidate({
+      driver: driver("claudeAgent"),
+      instanceId: instanceId("claude_b"),
+      latestVersion: "2.1.312",
+    });
+    const dismissed = new Set(providerUpdateDismissalKeys([hubA], origin));
+    expect(undismissedProviderUpdateCandidates([hubB], dismissed, origin)).toEqual([]);
+    // Another provider at the same version string is still its own update.
+    const codex = updateCandidate({ driver: driver("codex"), latestVersion: "2.1.312" });
+    expect(undismissedProviderUpdateCandidates([codex], dismissed, origin)).toEqual([codex]);
   });
 
   it("keeps dedupe and copy distinct across nodes", () => {

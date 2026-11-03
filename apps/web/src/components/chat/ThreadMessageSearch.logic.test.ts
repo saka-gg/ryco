@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
-import { MessageId } from "@ryco/contracts";
+import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts";
+import {
+  createQuoteCitation,
+  expandQuoteCitations,
+  serializeQuoteCitation,
+} from "@ryco/shared/quoteCitations";
 import type { TimelineEntry } from "../../session-logic";
 import {
   buildThreadMessageSearchOccurrences,
@@ -99,6 +104,55 @@ describe("buildThreadMessageSearchOccurrences", () => {
     });
 
     expect(occurrences).toEqual([]);
+  });
+
+  describe("quotes in a user message", () => {
+    const quote = (exact: string) =>
+      serializeQuoteCitation(
+        createQuoteCitation({
+          source: { environmentId: EnvironmentId.make("env-1"), threadId: ThreadId.make("t-1") },
+          messageId: MessageId.make("assistant-1"),
+          selector: { exact, prefix: "", suffix: "", start: 0, end: exact.length },
+        }),
+      );
+    // One sent marker and one draft token left in the text, both shown as chips.
+    const sent = expandQuoteCitations(`Explain ${quote("Quote one.")}, quote the docs`).replace(
+      "quote the docs",
+      `quote the docs ${quote("Another quote")}`,
+    );
+    const entries = [messageEntry({ id: "message-1", role: "user", text: sent })];
+
+    it("matches only the text a chip does not stand for", () => {
+      const occurrences = buildThreadMessageSearchOccurrences({
+        query: "quote",
+        timelineEntries: entries,
+        presentationTier: "desktop",
+      });
+      expect(occurrences.map((occurrence) => occurrence.text)).toEqual(["quote"]);
+      expect(
+        buildThreadMessageSearchOccurrences({
+          query: "1",
+          timelineEntries: entries,
+          presentationTier: "desktop",
+        }),
+      ).toEqual([]);
+      expect(
+        buildThreadMessageSearchOccurrences({
+          query: "explain quote",
+          timelineEntries: entries,
+          presentationTier: "desktop",
+        }),
+      ).toEqual([]);
+    });
+
+    it("searches the frozen phone tier's text as sent", () => {
+      const occurrences = buildThreadMessageSearchOccurrences({
+        query: "Quote one.",
+        timelineEntries: entries,
+        presentationTier: "phone",
+      });
+      expect(occurrences).toHaveLength(1);
+    });
   });
 
   it("returns no matches for empty queries", () => {

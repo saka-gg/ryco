@@ -334,7 +334,7 @@ export function OpinionatedPluginsSettingsPanel() {
                 })
               }
             >
-              <SelectTrigger className="w-full sm:w-52" aria-label="Default token mode">
+              <SelectTrigger size="sm" className="w-full sm:w-52" aria-label="Default token mode">
                 <span className="inline-flex min-w-0 items-center gap-2">
                   <SelectedTokenModeIcon className="size-4 shrink-0 text-muted-foreground" />
                   <SelectValue>{selectedTokenModeOption.triggerLabel}</SelectValue>

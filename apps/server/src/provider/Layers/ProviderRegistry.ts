@@ -119,12 +119,23 @@ const makeManualProviderMaintenanceCapabilities = (provider: ProviderDriverKind)
 const hasModelCapabilities = (model: ServerProvider["models"][number]): boolean =>
   (model.capabilities?.optionDescriptors?.length ?? 0) > 0;
 
+/**
+ * Keeps models a probe left out (Cursor and OpenCode discover them partially), except ones the
+ * CLI cannot run: an ungated earlier snapshot, such as the boot placeholder, must not bring them
+ * back. Those are the update-required ones and absent legacy ones: `isLegacy` comes only from the
+ * model manifest, whose probes list every legacy model the CLI runs.
+ */
 const mergeProviderModels = (
   previousModels: ReadonlyArray<ServerProvider["models"][number]>,
   nextModels: ReadonlyArray<ServerProvider["models"][number]>,
+  updateRequiredModels: ServerProvider["updateRequiredModels"],
 ): ReadonlyArray<ServerProvider["models"][number]> => {
-  if (nextModels.length === 0 && previousModels.length > 0) {
-    return previousModels;
+  const updateRequiredSlugs = new Set(updateRequiredModels?.map((model) => model.slug));
+  const retainableModels = previousModels.filter(
+    (model) => !model.isLegacy && !updateRequiredSlugs.has(model.slug),
+  );
+  if (nextModels.length === 0 && retainableModels.length > 0) {
+    return retainableModels;
   }
 
   const previousBySlug = new Map(previousModels.map((model) => [model.slug, model] as const));
@@ -139,7 +150,7 @@ const mergeProviderModels = (
     };
   });
   const nextSlugs = new Set(nextModels.map((model) => model.slug));
-  return [...mergedModels, ...previousModels.filter((model) => !nextSlugs.has(model.slug))];
+  return [...mergedModels, ...retainableModels.filter((model) => !nextSlugs.has(model.slug))];
 };
 
 export const mergeProviderSnapshot = (
@@ -150,7 +161,11 @@ export const mergeProviderSnapshot = (
     ? nextProvider
     : {
         ...nextProvider,
-        models: mergeProviderModels(previousProvider.models, nextProvider.models),
+        models: mergeProviderModels(
+          previousProvider.models,
+          nextProvider.models,
+          nextProvider.updateRequiredModels,
+        ),
       };
 
 export const mergeProviderSnapshots = (

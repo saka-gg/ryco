@@ -270,4 +270,142 @@ describe("desktop transport frame buffers", () => {
 
     expect(message.mock.calls[0]?.[0].data).toBe(frame);
   });
+
+  describe("routes", () => {
+    function relayBridge() {
+      return {
+        prepareDesktopWorkspaceTransport: vi.fn(async () => ({ transportId: "R".repeat(32) })),
+        activateDesktopWorkspaceTransport: vi.fn(async () => ({ ok: true }) as const),
+        sendDesktopWorkspaceTransport: vi.fn(),
+        closeDesktopWorkspaceTransport: vi.fn(),
+        onDesktopWorkspaceTransportEvent: vi.fn(() => () => undefined),
+      };
+    }
+
+    class FakeWebSocket {
+      static created: FakeWebSocket[] = [];
+      binaryType = "blob";
+      constructor(readonly url: string) {
+        FakeWebSocket.created.push(this);
+      }
+    }
+
+    it("takes a linked direct route that answered, and never asks main for a relay handle", async () => {
+      vi.stubGlobal("WebSocket", FakeWebSocket);
+      FakeWebSocket.created = [];
+      const bridge = relayBridge();
+      const factory = new DesktopWorkspaceIpcSocketFactory(EnvironmentId.make("env_hub"), bridge, {
+        resolve: async () => ({
+          routeKey: "http://192.168.1.20:3773",
+          url: "ws://192.168.1.20:3773/ws?wsToken=t",
+        }),
+      });
+
+      const url = await factory.nextUrl();
+      const socket = factory.createSocket(url) as unknown as FakeWebSocket;
+
+      expect(url).toBe("ws://192.168.1.20:3773/ws?wsToken=t");
+      expect(socket).toBe(FakeWebSocket.created[0]);
+      expect(socket.binaryType).toBe("arraybuffer");
+      expect(factory.activeRoute).toBe("http://192.168.1.20:3773");
+      expect(bridge.prepareDesktopWorkspaceTransport).not.toHaveBeenCalled();
+      expect(factory.lifecycleHandlers.isSocketCurrent?.(socket as never)).toBe(true);
+      vi.unstubAllGlobals();
+    });
+
+    it("falls back to the relay when no direct route answers", async () => {
+      const bridge = relayBridge();
+      const resolve = vi.fn(async () => null);
+      const factory = new DesktopWorkspaceIpcSocketFactory(EnvironmentId.make("env_hub"), bridge, {
+        resolve,
+      });
+
+      const url = await factory.nextUrl();
+      factory.createSocket(url);
+
+      expect(resolve).toHaveBeenCalledOnce();
+      expect(url).toBe(`ws://desktop-workspace.invalid/${"R".repeat(32)}`);
+      expect(factory.activeRoute).toBe("relay");
+    });
+
+    it("abandons a route walk that a new session overtook", async () => {
+      const bridge = relayBridge();
+      let answer!: (value: { routeKey: string; url: string } | null) => void;
+      let seen: AbortSignal | undefined;
+      const factory = new DesktopWorkspaceIpcSocketFactory(EnvironmentId.make("env_hub"), bridge, {
+        resolve: (signal) => {
+          seen = signal;
+          return new Promise((resolve) => {
+            answer = resolve;
+          });
+        },
+      });
+
+      const pending = factory.nextUrl();
+      factory.lifecycleHandlers.onSessionStart?.();
+      expect(seen?.aborted).toBe(true);
+      answer({ routeKey: "http://192.168.1.20:3773", url: "ws://192.168.1.20:3773/ws" });
+
+      await expect(pending).rejects.toThrow("cancelled");
+      expect(() => factory.createSocket("ws://192.168.1.20:3773/ws")).toThrow();
+    });
+
+    it("refuses a socket for any URL but the one its walk chose", async () => {
+      const factory = new DesktopWorkspaceIpcSocketFactory(
+        EnvironmentId.make("env_hub"),
+        relayBridge(),
+        { resolve: async () => ({ routeKey: "k", url: "ws://192.168.1.20:3773/ws?wsToken=t" }) },
+      );
+      await factory.nextUrl();
+      expect(() => factory.createSocket("ws://evil.example/ws")).toThrow("route changed");
+    });
+
+    it("takes no direct route around the relay's refusal until the relay accepts the machine again", async () => {
+      let listener: ((event: DesktopWorkspaceTransportEvent) => void) | undefined;
+      let sequence = 0;
+      const bridge = {
+        ...relayBridge(),
+        prepareDesktopWorkspaceTransport: vi.fn(async () => ({
+          transportId: String(++sequence).padStart(32, "R"),
+        })),
+        onDesktopWorkspaceTransportEvent: vi.fn((next) => {
+          listener = next;
+          return () => undefined;
+        }),
+      };
+      const resolve = vi.fn(async (): Promise<{ routeKey: string; url: string } | null> => ({
+        routeKey: "http://100.64.1.20:3773",
+        url: "ws://100.64.1.20:3773/ws?wsToken=t",
+      }));
+      const factory = new DesktopWorkspaceIpcSocketFactory(EnvironmentId.make("env_hub"), bridge, {
+        resolve,
+      });
+      // The first attempt fell back to the relay, which then ended the machine for good.
+      resolve.mockResolvedValueOnce(null);
+      const relayUrl = await factory.nextUrl();
+      factory.createSocket(relayUrl);
+      await Promise.resolve();
+      listener?.({
+        type: "close",
+        transportId: "1".padStart(32, "R"),
+        code: 4403,
+        reason: "authorization withdrawn",
+        retryable: false,
+      } as DesktopWorkspaceTransportEvent);
+      expect(factory.mayUpgrade).toBe(false);
+
+      // An explicit new session (the user's Reconnect) still goes to the relay first.
+      factory.lifecycleHandlers.onSessionStart?.();
+      expect(factory.mayUpgrade).toBe(false);
+      const next = await factory.nextUrl();
+      expect(next).toBe(`ws://desktop-workspace.invalid/${"2".padStart(32, "R")}`);
+      expect(resolve).toHaveBeenCalledTimes(1);
+
+      // Once the relay takes the machine again, direct routes are back.
+      factory.createSocket(next);
+      factory.lifecycleHandlers.onOpen?.();
+      expect(factory.mayUpgrade).toBe(true);
+      expect(await factory.nextUrl()).toBe("ws://100.64.1.20:3773/ws?wsToken=t");
+    });
+  });
 });

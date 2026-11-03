@@ -30,7 +30,8 @@ import type {
   ThreadGoal,
   ThreadLineage,
   ThreadUsageLimit,
-  ThreadPriorityProjectedRanking,
+  ThreadPullRequestWatchShell,
+  ThreadFollowUpQueueShell,
 } from "@ryco/contracts";
 import { DEFAULT_AGENT_TOKEN_MODE as CONTRACT_DEFAULT_AGENT_TOKEN_MODE } from "@ryco/contracts/orchestration";
 
@@ -181,6 +182,10 @@ export interface Thread {
   settledAt?: string | null | undefined;
   snoozedUntil?: string | null | undefined;
   snoozedAt?: string | null | undefined;
+  /** On the Hidden shelf since; absent from older servers. */
+  hiddenAt?: string | null | undefined;
+  /** Settled while working: the node settles it when the work ends. Absent from older servers. */
+  settleWhenIdleAt?: string | null | undefined;
   /** Provider usage limit that stopped the thread; absent on older servers. */
   usageLimit?: ThreadUsageLimit | null | undefined;
   updatedAt?: string | undefined;
@@ -217,6 +222,10 @@ export interface ThreadShell {
   settledAt?: string | null | undefined;
   snoozedUntil?: string | null | undefined;
   snoozedAt?: string | null | undefined;
+  /** On the Hidden shelf since; absent from older servers. */
+  hiddenAt?: string | null | undefined;
+  /** Settled while working: the node settles it when the work ends. Absent from older servers. */
+  settleWhenIdleAt?: string | null | undefined;
   /** Provider usage limit that stopped the thread; absent on older servers. */
   usageLimit?: ThreadUsageLimit | null | undefined;
   updatedAt?: string | undefined;
@@ -321,6 +330,10 @@ export interface SidebarThreadSummary {
   settledAt?: string | null | undefined;
   snoozedUntil?: string | null | undefined;
   snoozedAt?: string | null | undefined;
+  /** On the Hidden shelf since; absent from older servers. */
+  hiddenAt?: string | null | undefined;
+  /** Settled while working: the node settles it when the work ends. Absent from older servers. */
+  settleWhenIdleAt?: string | null | undefined;
   /** Provider usage limit that stopped the thread; absent on older servers. */
   usageLimit?: ThreadUsageLimit | null | undefined;
   updatedAt?: string | undefined;
@@ -342,10 +355,20 @@ export interface SidebarThreadSummary {
   backgroundLiveness?: "working" | "monitoring" | null | undefined;
   hasPendingUserInput: boolean;
   hasActionableProposedPlan: boolean;
-  /** Optional environment-local derived ranking projected by supporting servers. */
-  priority?: ThreadPriorityProjectedRanking | undefined;
   /** Server-owned provenance; absent/null on root threads and from older servers. */
   lineage?: ThreadLineage | null | undefined;
+  /**
+   * The node's pull request watches for this thread (active, and ended within a day). Absent
+   * when it has none, and from older servers.
+   */
+  pullRequestWatches?: ThreadPullRequestWatchShell;
+  /** How many command watches the node runs for this thread; absent while none, and from older servers. */
+  commandWatchCount?: number;
+  /**
+   * The node's follow-up queue for this thread (count, hold, head preview) while it holds an
+   * entry. Absent when empty, and from older servers.
+   */
+  followUpQueueSummary?: ThreadFollowUpQueueShell;
 }
 
 export interface SidebarWorktreeSummary {

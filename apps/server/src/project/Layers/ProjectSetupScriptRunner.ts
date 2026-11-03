@@ -57,10 +57,13 @@ const makeProjectSetupScriptRunner = Effect.gen(function* () {
         worktreePath: input.worktreePath,
         env,
       });
+      // The setup terminal's id is fixed per thread and script, so the open above may have
+      // reattached a shell that is still running an earlier setup or something typed into it.
       yield* terminalManager.write({
         threadId: input.threadId,
         terminalId,
         data: `${script.command}\r`,
+        requireIdle: true,
       });
 
       return {

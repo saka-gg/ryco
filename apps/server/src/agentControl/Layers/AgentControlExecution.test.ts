@@ -5,6 +5,7 @@ import {
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { workspacePlan } from "../workspaceLifecycle.testSupport.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
 import {
   AgentControlAutomationId,
   AgentControlAutomationRunId,
@@ -15,9 +16,14 @@ import {
   LocalTaskError,
   OrchestrationThreadShell,
   ProjectId,
+  CommandId,
   ProviderInstanceId,
+  PullRequestWatchError,
+  ServerProvider,
   RuntimeSessionId,
+  TerminalCwdError,
   ThreadId,
+  type ThreadQueueAddCommand,
   TurnId,
   WorktreeId,
   type AgentControlOperation,
@@ -27,11 +33,27 @@ import {
   type ChatFileAttachment,
   type ClientOrchestrationCommand,
   type MessageId,
+  type OrchestrationEvent,
+  type OrchestrationEventType,
   type ThreadDelegatedCreateCommand,
 } from "@ryco/contracts";
+import { agentSentMessageSenderThreadId } from "@ryco/shared/interThreadMessage";
 import { assert, it, vi } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { Effect, FileSystem, Layer, Option, PubSub, Ref, Schema } from "effect";
+import {
+  Clock,
+  Deferred,
+  Effect,
+  Fiber,
+  FileSystem,
+  Layer,
+  Option,
+  PubSub,
+  Ref,
+  Schema,
+  Stream,
+} from "effect";
+import { TestClock } from "effect/testing";
 
 import fs from "node:fs";
 import os from "node:os";
@@ -47,11 +69,17 @@ import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import { OrchestrationCommandApplication } from "../../orchestration/Services/OrchestrationCommandApplication.ts";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { DeviceManager } from "../../device/DeviceManager.ts";
+import { DEVICE_IDLE_SHUTDOWN_MS, DeviceManager } from "../../device/DeviceManager.ts";
 import { FakeDeviceBackend } from "../../device/FakeDeviceBackend.ts";
 import { DeviceService } from "../../device/Services/DeviceService.ts";
 import { ServerRuntimeStartup } from "../../serverRuntimeStartup.ts";
+import { PullRequestWatchService } from "../../sourceControl/PullRequestWatchService.ts";
+import {
+  addPullRequest,
+  createPullRequestWatchHarness,
+} from "../../sourceControl/pullRequestWatch.fixtures.ts";
 import { LocalTaskService } from "../../tasks/LocalTaskService.ts";
+import { ProjectSetupScriptRunner } from "../../project/Services/ProjectSetupScriptRunner.ts";
 import { WorkspaceAccessPolicy } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import {
   WorkspaceLifecycle,
@@ -63,7 +91,9 @@ import { AgentControlActionValidator } from "../Services/AgentControlActionValid
 import { AgentControlOperationStore } from "../Services/AgentControlOperationStore.ts";
 import { AgentControlProposalEvents } from "../Services/AgentControlProposalEvents.ts";
 import { AgentControlProposalStore } from "../Services/AgentControlProposalStore.ts";
+import { makeAgentControlActionValidatorFromDeps } from "./AgentControlActionValidator.ts";
 import {
+  AgentControlExecutionLive,
   makeAgentControlExecution,
   preflightAgentControlWorktreeCheckout,
 } from "./AgentControlExecution.ts";
@@ -162,6 +192,7 @@ const makeTestExecution = (input: {
   readonly workspaceAccess?: unknown;
   readonly validator?: unknown;
   readonly deviceService?: unknown;
+  readonly pullRequestWatches?: unknown;
   /** The server's base directory; a fresh temporary one when absent. */
   readonly baseDir?: string;
 }) =>
@@ -181,7 +212,13 @@ const makeTestExecution = (input: {
       OrchestrationCommandApplication,
       withApplyInternal(input.commandApplication) as never,
     ),
-    Effect.provideService(OrchestrationEngineService, (input.engine ?? {}) as never),
+    // Waits subscribe to domain events; doubles without a feed get one that never publishes.
+    Effect.provideService(OrchestrationEngineService, {
+      subscribeDomainEvents: Effect.flatMap(PubSub.unbounded<OrchestrationEvent>(), (pubsub) =>
+        Effect.map(PubSub.subscribe(pubsub), Stream.fromSubscription),
+      ),
+      ...(input.engine as object | undefined),
+    } as never),
     Effect.provideService(ProjectionSnapshotQuery, input.projections as never),
     Effect.provideService(GitWorkflowService, (input.git ?? {}) as never),
     Effect.provideService(WorkspaceAccessPolicy, (input.workspaceAccess ?? {}) as never),
@@ -190,6 +227,7 @@ const makeTestExecution = (input: {
       (input.deviceService ?? { supported: false, manager: {} }) as never,
     ),
     Effect.provideService(ServerRuntimeStartup, {} as never),
+    Effect.provideService(PullRequestWatchService, (input.pullRequestWatches ?? {}) as never),
     Effect.provide(
       ServerConfig.layerTest(
         process.cwd(),
@@ -424,6 +462,236 @@ it.effect("only the accepted-proposal executor invokes a governed device action"
   }),
 );
 
+/** A device manager on captured timers, and an executor for approved device plans on it. */
+function makeDeviceIdleHarness() {
+  const backend = new FakeDeviceBackend();
+  const timers = new Map<number, { readonly ms: number }>();
+  let nextTimer = 0;
+  const manager = new DeviceManager({
+    backend,
+    attachDeadlineMs: 0,
+    setTimeout: (_handler, ms) => {
+      nextTimer += 1;
+      timers.set(nextTimer, { ms });
+      return nextTimer as unknown as NodeJS.Timeout;
+    },
+    clearTimeout: (handle) => {
+      timers.delete(handle as unknown as number);
+    },
+  });
+  const idleTimers = () =>
+    [...timers.values()].filter((timer) => timer.ms === DEVICE_IDLE_SHUTDOWN_MS);
+  const target = {
+    threadId: ThreadId.make("thread-origin"),
+    projectId,
+    expectedProjectUpdatedAt: now,
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    udid: "FAKE-0001" as never,
+    expectedThreadDeviceVersion: 0,
+    expectedAttachedDeviceUdid: null,
+    expectedDeviceState: "shutdown" as const,
+    expectedDeviceBootSource: "user" as const,
+    expectedRecording: false,
+    riskClass: "device-lifecycle" as const,
+  };
+  const execute = (plan: AgentControlProposal["plan"]) =>
+    Effect.gen(function* () {
+      const proposal: AgentControlProposal = {
+        ...approvedProposal,
+        proposalId: AgentControlProposalId.make(`proposal-${plan.kind}`),
+        requestId: AgentControlRequestId.make(`request-${plan.kind}`),
+        plan,
+        planDigest: computeAgentControlPlanDigest(plan),
+      };
+      const stores = yield* makeExecutionStores(proposal);
+      const execution = yield* makeTestExecution({
+        proposalStore: stores.proposalStore,
+        operationStore: stores.operationStore,
+        commandApplication: {},
+        projections: {},
+        deviceService: { supported: true, manager },
+      });
+      yield* execution.executeApproved(proposal.proposalId);
+      assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, "completed");
+    });
+  return { backend, manager, idleTimers, target, execute };
+}
+
+it.effect("holds an approved boot and attach for the running turn, not past it", () =>
+  Effect.gen(function* () {
+    const { manager, idleTimers, target, execute } = makeDeviceIdleHarness();
+    manager.observeThreadTurn("thread-origin", "turn-1");
+
+    yield* execute({
+      kind: "deviceBoot",
+      ...target,
+      executionSummary: "Boot iOS Simulator FAKE-0001",
+    });
+    // A pane tap ends with the grace unless something still holds the device.
+    yield* Effect.promise(() => manager.tap("FAKE-0001", 1, 1));
+    assert.lengthOf(idleTimers(), 0);
+    yield* execute({
+      kind: "deviceAttach",
+      ...target,
+      expectedDeviceState: "booted",
+      expectedDeviceBootSource: "ryco",
+      executionSummary: "Attach iOS Simulator FAKE-0001",
+    });
+    const state = yield* Effect.promise(() => manager.getThreadState("thread-origin"));
+    assert.strictEqual(state.attachedDeviceUdid, "FAKE-0001");
+    assert.lengthOf(idleTimers(), 0);
+
+    // The agent's attachment is metadata: once the turn ends, the grace starts.
+    manager.observeThreadTurn("thread-origin", null);
+    assert.lengthOf(idleTimers(), 1);
+    yield* Effect.promise(() => manager.dispose());
+  }),
+);
+
+it.effect("an accepted device consent completes without touching the device", () =>
+  Effect.gen(function* () {
+    const backend = new FakeDeviceBackend();
+    backend.bootExternally("FAKE-0001");
+    const manager = new DeviceManager({ backend });
+    yield* Effect.promise(() => manager.attach(ThreadId.make("thread-origin"), "FAKE-0001"));
+    const callsBefore = backend.calls.length;
+    const consentPlan = {
+      kind: "deviceControlConsent" as const,
+      threadId: ThreadId.make("thread-origin"),
+      projectId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      udid: "FAKE-0001" as never,
+    };
+    const proposal: AgentControlProposal = {
+      ...approvedProposal,
+      proposalId: AgentControlProposalId.make("proposal-device-consent"),
+      requestId: AgentControlRequestId.make("request-device-consent"),
+      plan: consentPlan,
+      planDigest: computeAgentControlPlanDigest(consentPlan),
+    };
+    const stores = yield* makeExecutionStores(proposal);
+    let revalidations = 0;
+    const execution = yield* makeTestExecution({
+      proposalStore: stores.proposalStore,
+      operationStore: stores.operationStore,
+      commandApplication: {},
+      projections: {},
+      deviceService: { supported: true, manager },
+      validator: {
+        validateSubmission: () => Effect.die("unused"),
+        validateExternalSubmission: () => Effect.die("unused"),
+        revalidateExecution: () => Effect.sync(() => void (revalidations += 1)),
+      },
+    });
+
+    yield* execution.executeApproved(proposal.proposalId);
+    yield* execution.executeApproved(proposal.proposalId);
+
+    // The consent itself changes nothing on the device.
+    assert.deepStrictEqual(backend.calls.slice(callsBefore), []);
+    assert.isAtLeast(revalidations, 2);
+    const settled = yield* Ref.get(stores.proposalRef);
+    assert.strictEqual(settled.status, "completed");
+    if (settled.result?.outcome === "completed") {
+      assert.deepStrictEqual(settled.result.execution?.device, {
+        actionKind: "deviceControlConsent",
+        threadId: "thread-origin",
+        projectId: "project-1",
+        providerInstanceId: "codex",
+        udid: "FAKE-0001",
+      });
+    } else assert.fail("expected a completed consent");
+    const operation = yield* Ref.get(stores.operationRef);
+    assert.include(Option.getOrThrow(operation).state.completedSteps, "device-consent-granted");
+    yield* Effect.promise(() => manager.dispose());
+  }),
+);
+
+it.effect("does not hold an approved action for a turn that starts while it runs", () =>
+  Effect.gen(function* () {
+    // Approvals wait for a person, so the proposing turn may be over; a turn
+    // the user starts meanwhile has nothing to do with the approved action.
+    const { backend, manager, idleTimers, target, execute } = makeDeviceIdleHarness();
+    const boot = backend.boot.bind(backend);
+    backend.boot = async (udid) => {
+      const device = await boot(udid);
+      manager.observeThreadTurn("thread-origin", "turn-2");
+      return device;
+    };
+    yield* execute({
+      kind: "deviceBoot",
+      ...target,
+      executionSummary: "Boot iOS Simulator FAKE-0001",
+    });
+    assert.lengthOf(idleTimers(), 1);
+
+    manager.observeThreadTurn("thread-origin", null);
+    const tap = backend.tap.bind(backend);
+    backend.tap = async (udid, x, y) => {
+      await tap(udid, x, y);
+      manager.observeThreadTurn("thread-origin", "turn-3");
+    };
+    yield* execute({
+      kind: "deviceTap",
+      ...target,
+      expectedDeviceState: "booted",
+      expectedDeviceBootSource: "ryco",
+      riskClass: "device-control",
+      x: 10,
+      y: 10,
+      executionSummary: "Tap iOS Simulator FAKE-0001",
+    });
+    assert.lengthOf(idleTimers(), 1);
+    yield* Effect.promise(() => manager.dispose());
+  }),
+);
+
+it.effect("a device consent approved after its task ended fails with the reason", () =>
+  Effect.gen(function* () {
+    const consentPlan = {
+      kind: "deviceControlConsent" as const,
+      threadId: ThreadId.make("thread-origin"),
+      projectId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      udid: "FAKE-0001" as never,
+    };
+    const proposal: AgentControlProposal = {
+      ...approvedProposal,
+      proposalId: AgentControlProposalId.make("proposal-stale-consent"),
+      requestId: AgentControlRequestId.make("request-stale-consent"),
+      plan: consentPlan,
+      planDigest: computeAgentControlPlanDigest(consentPlan),
+    };
+    const stores = yield* makeExecutionStores(proposal);
+    const execution = yield* makeTestExecution({
+      proposalStore: stores.proposalStore,
+      operationStore: stores.operationStore,
+      commandApplication: {},
+      projections: {},
+      deviceService: { supported: true, manager: {} },
+      validator: {
+        validateSubmission: () => Effect.die("unused"),
+        validateExternalSubmission: () => Effect.die("unused"),
+        revalidateExecution: () =>
+          Effect.fail(
+            new AgentControlPlanValidationError({
+              reason: "caller-stale",
+              detail: "The task that asked has ended.",
+            }),
+          ),
+      },
+    });
+
+    yield* execution.executeApproved(proposal.proposalId);
+    const settled = yield* Ref.get(stores.proposalRef);
+    assert.strictEqual(settled.status, "failed");
+    if (settled.result?.outcome === "failed") {
+      assert.strictEqual(settled.result.error.code, "device.stale-state");
+      assert.include(settled.result.error.message, "The task that asked has ended.");
+    } else assert.fail("expected a failed consent");
+  }),
+);
+
 it.effect("executes one accepted proposal exactly once under concurrent retries", () =>
   Effect.gen(function* () {
     const proposalRef = yield* Ref.make(approvedProposal);
@@ -564,7 +832,7 @@ it.effect("executes one accepted proposal exactly once under concurrent retries"
     assert.strictEqual(settled.result.execution?.commands.length, 1);
     assert.deepStrictEqual(settled.result.execution?.affectedThreadIds, [threadId]);
     assert.strictEqual(settled.result.execution?.delivery, "queued");
-    assert.strictEqual(settled.result.execution?.commands[0]?.commandType, "thread.turn.start");
+    assert.strictEqual(settled.result.execution?.commands[0]?.commandType, "thread.queue.add");
   }),
 );
 
@@ -760,7 +1028,9 @@ for (const reason of [undefined, "deferred"] as const) {
           const execution = yield* makeTestExecution({
             proposalStore: stores.proposalStore,
             operationStore: stores.operationStore,
-            engine: { subscribeDomainEvents: PubSub.subscribe(events) },
+            engine: {
+              subscribeDomainEvents: Effect.map(PubSub.subscribe(events), Stream.fromSubscription),
+            },
             commandApplication: {
               apply: (command: ClientOrchestrationCommand) =>
                 Effect.gen(function* () {
@@ -792,7 +1062,7 @@ for (const reason of [undefined, "deferred"] as const) {
 
           assert.deepStrictEqual(
             (yield* Ref.get(commands)).map((command) => command.type),
-            ["thread.turn.steer", "thread.turn.start"],
+            ["thread.turn.steer", "thread.queue.add"],
           );
           const settled = yield* Ref.get(stores.proposalRef);
           assert.strictEqual(settled.result?.outcome, "completed");
@@ -867,6 +1137,206 @@ it.effect("records the requested turn and observed settled state for interrupts"
   }),
 );
 
+/** Lets forked fibers run without advancing the test clock; true once `fiber` has ended. */
+const awaitDone = (fiber: Fiber.Fiber<unknown, unknown>) =>
+  Effect.gen(function* () {
+    for (let turn = 0; turn < 50 && fiber.pollUnsafe() === undefined; turn += 1) {
+      yield* Effect.yieldNow;
+    }
+    return fiber.pollUnsafe() !== undefined;
+  });
+
+const targetEvent = (type: OrchestrationEventType) =>
+  ({
+    sequence: 1,
+    eventId: `event-${type}`,
+    aggregateKind: "thread",
+    aggregateId: threadId,
+    occurredAt: now,
+    commandId: null,
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    type,
+    payload: { threadId },
+  }) as unknown as OrchestrationEvent;
+
+/**
+ * An executor whose target thread the test flips, with a domain event feed the test publishes
+ * to. `reads` counts target shell reads.
+ */
+const makeTargetWaitHarness = (proposal: AgentControlProposal) =>
+  Effect.gen(function* () {
+    const targetTurnId = TurnId.make("turn-target");
+    const runningTarget = {
+      ...target,
+      session: {
+        threadId,
+        status: "running" as const,
+        providerName: "codex",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        runtimeSessionId: RuntimeSessionId.make("runtime-target"),
+        runtimeMode: "auto" as const,
+        activeTurnId: targetTurnId,
+        lastError: null,
+        updatedAt: now,
+      },
+    };
+    const stores = yield* makeExecutionStores(proposal);
+    const events = yield* PubSub.unbounded<OrchestrationEvent>();
+    const commands = yield* Ref.make<ReadonlyArray<ClientOrchestrationCommand>>([]);
+    let current: typeof target = runningTarget;
+    let reads = 0;
+    const execution = yield* makeTestExecution({
+      proposalStore: stores.proposalStore,
+      operationStore: stores.operationStore,
+      engine: {
+        subscribeDomainEvents: Effect.map(PubSub.subscribe(events), Stream.fromSubscription),
+      },
+      commandApplication: {
+        apply: (command: ClientOrchestrationCommand) =>
+          Ref.updateAndGet(commands, (all) => [...all, command]).pipe(
+            Effect.map((all) => ({ sequence: all.length })),
+          ),
+        applyWithDispatcher: () => Effect.die("unused"),
+      },
+      projections: {
+        getThreadShellById: () =>
+          Effect.sync(() => {
+            reads += 1;
+            return Option.some(current);
+          }),
+      },
+    });
+    return {
+      execution,
+      stores,
+      commands,
+      targetTurnId,
+      reads: () => reads,
+      running: () => runningTarget,
+      setTarget: (next: typeof target) => {
+        current = next;
+      },
+      publish: (type: OrchestrationEventType) => PubSub.publish(events, targetEvent(type)),
+    };
+  });
+
+const interruptProposal = (() => {
+  const interruptPlan = {
+    kind: "interruptThread" as const,
+    threadId,
+    turnId: TurnId.make("turn-target"),
+  };
+  return {
+    ...approvedProposal,
+    proposalId: AgentControlProposalId.make("proposal-interrupt-event"),
+    requestId: AgentControlRequestId.make("request-interrupt-event"),
+    plan: interruptPlan,
+    planDigest: computeAgentControlPlanDigest(interruptPlan),
+  } satisfies AgentControlProposal;
+})();
+
+it.effect("settles an interrupt from the session event, not a poll", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeTargetWaitHarness(interruptProposal);
+    const fiber = yield* Effect.forkChild(
+      harness.execution.executeApproved(interruptProposal.proposalId),
+    );
+    // Fails on the 100 ms poll: virtual time never advances here.
+    assert.isFalse(yield* awaitDone(fiber));
+    // The target check, then the first settlement check.
+    assert.strictEqual(harness.reads(), 2);
+
+    harness.setTarget(target);
+    yield* harness.publish("thread.session-set");
+    assert.isTrue(yield* awaitDone(fiber));
+    assert.strictEqual(harness.reads(), 3);
+    assert.strictEqual(yield* Clock.currentTimeMillis, 0);
+    const settled = yield* Ref.get(harness.stores.proposalRef);
+    assert.strictEqual(settled.result?.outcome, "completed");
+    if (settled.result?.outcome !== "completed") return;
+    assert.deepStrictEqual(settled.result.execution?.interrupt, {
+      requestedTurnId: harness.targetTurnId,
+      settledStatus: "idle",
+      settledActiveTurnId: null,
+    });
+  }),
+);
+
+it.effect("re-checks a second session event within 100 ms, as the poll did", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeTargetWaitHarness(interruptProposal);
+    const fiber = yield* Effect.forkChild(
+      harness.execution.executeApproved(interruptProposal.proposalId),
+    );
+    assert.isFalse(yield* awaitDone(fiber));
+    // A session update that does not settle the interrupt: checked at once.
+    yield* harness.publish("thread.session-set");
+    assert.isFalse(yield* awaitDone(fiber));
+    assert.strictEqual(harness.reads(), 3);
+    // The settling update right behind it waits for the trailing check, at most one old poll
+    // interval later.
+    harness.setTarget(target);
+    yield* harness.publish("thread.session-set");
+    assert.isFalse(yield* awaitDone(fiber));
+    yield* TestClock.adjust(99);
+    assert.isFalse(yield* awaitDone(fiber));
+    yield* TestClock.adjust(1);
+    assert.isTrue(yield* awaitDone(fiber));
+    assert.strictEqual(harness.reads(), 4);
+    const settled = yield* Ref.get(harness.stores.proposalRef);
+    assert.strictEqual(settled.result?.outcome, "completed");
+  }),
+);
+
+it.effect("does not re-read an interrupt target for its activity or messages", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeTargetWaitHarness(interruptProposal);
+    const fiber = yield* Effect.forkChild(
+      harness.execution.executeApproved(interruptProposal.proposalId),
+    );
+    assert.isFalse(yield* awaitDone(fiber));
+    for (const type of [
+      "thread.activity-appended",
+      "thread.message-sent",
+      "thread.turn-diff-completed",
+    ] as const) {
+      yield* harness.publish(type);
+    }
+    assert.isFalse(yield* awaitDone(fiber));
+    assert.strictEqual(harness.reads(), 2);
+    yield* Fiber.interrupt(fiber);
+  }),
+);
+
+it.effect("queues a message to a busy thread's follow-up queue at once, as the agent's", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeTargetWaitHarness(approvedProposal);
+    const fiber = yield* Effect.forkChild(
+      harness.execution.executeApproved(approvedProposal.proposalId),
+    );
+    // No wait for the thread to go idle: the node's drain sends it then.
+    assert.isTrue(yield* awaitDone(fiber));
+    const [queued] = yield* Ref.get(harness.commands);
+    assert.ok(queued?.type === "thread.queue.add");
+    const add = queued as unknown as ThreadQueueAddCommand;
+    assert.strictEqual(add.author, "agent");
+    // The chat whose agent queued it may change it later (`ryco_queue_*`).
+    assert.strictEqual(add.queuedBy, "thread-origin");
+    assert.strictEqual(add.threadId, threadId);
+    assert.match(add.entry.messageId, /^message-agent-control-/);
+    // The message names its sender, so the target shows which chat wrote it.
+    assert.strictEqual(agentSentMessageSenderThreadId(add.entry.messageId), "thread-origin");
+    assert.strictEqual(add.entry.text, plan.text);
+    assert.deepStrictEqual(add.entry.modelSelection, harness.running().modelSelection);
+    assert.strictEqual(add.entry.runtimeMode, harness.running().runtimeMode);
+    const settled = yield* Ref.get(harness.stores.proposalRef);
+    assert.strictEqual(settled.result?.outcome, "completed");
+    if (settled.result?.outcome !== "completed") return;
+    assert.strictEqual(settled.result.execution?.delivery, "queued");
+  }),
+);
 it.effect(
   "restart recovery compensates only durably owned resources and settles terminal failure",
   () =>
@@ -1157,6 +1627,36 @@ it.effect("executes model and interaction preferences through orchestration exac
   }),
 );
 
+it.effect("reports on the thread's goal through the same goal update a person makes", () =>
+  Effect.gen(function* () {
+    const nextPlan = { kind: "updateThread" as const, threadId, goalStatus: "complete" as const };
+    const proposal = {
+      ...approvedProposal,
+      plan: nextPlan,
+      planDigest: computeAgentControlPlanDigest(nextPlan),
+    };
+    const stores = yield* makeExecutionStores(proposal);
+    const commands: Array<{ type: string; status?: string }> = [];
+    const executor = yield* makeTestExecution({
+      ...stores,
+      projections: { getThreadShellById: () => Effect.succeed(Option.some(target)) },
+      commandApplication: {
+        apply: (command: { type: string; status?: string }) => {
+          commands.push(command);
+          return Effect.succeed({ sequence: commands.length });
+        },
+      },
+    });
+    yield* executor.executeApproved(proposal.proposalId);
+    yield* executor.executeApproved(proposal.proposalId);
+    assert.deepStrictEqual(
+      commands.map((command) => [command.type, command.status]),
+      [["thread.goal.set", "complete"]],
+    );
+    assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, "completed");
+  }),
+);
+
 it.effect("executes only the captured non-secret setting and rejects stale before values", () =>
   Effect.gen(function* () {
     const settings = yield* ServerSettingsService;
@@ -1182,8 +1682,37 @@ it.effect("executes only the captured non-secret setting and rejects stale befor
       yield* execution.executeApproved(proposal.proposalId);
       assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, expected);
     }
-    assert.isTrue((yield* settings.getSettings).enableLegacyTokenStreaming);
-  }).pipe(Effect.provide(ServerSettingsService.layerTest({ enableLegacyTokenStreaming: false }))),
+    assert.strictEqual((yield* settings.getSettings).responseStreamingMode, "token");
+  }).pipe(Effect.provide(ServerSettingsService.layerTest({ responseStreamingMode: "paragraph" }))),
+);
+
+it.effect("maps the legacy token switch onto the response streaming mode", () =>
+  Effect.gen(function* () {
+    const settings = yield* ServerSettingsService;
+    for (const [before, after, mode] of [
+      [false, true, "token"],
+      [true, false, "paragraph"],
+    ] as const) {
+      const nextPlan = {
+        kind: "changeSettings" as const,
+        change: { kind: "legacyTokenStreaming" as const, before, after },
+      };
+      const proposal = {
+        ...approvedProposal,
+        plan: nextPlan,
+        planDigest: computeAgentControlPlanDigest(nextPlan),
+      };
+      const stores = yield* makeExecutionStores(proposal);
+      const execution = yield* makeTestExecution({
+        ...stores,
+        projections: {},
+        commandApplication: {},
+      });
+      yield* execution.executeApproved(proposal.proposalId);
+      assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, "completed");
+      assert.strictEqual((yield* settings.getSettings).responseStreamingMode, mode);
+    }
+  }).pipe(Effect.provide(ServerSettingsService.layerTest({ responseStreamingMode: "turn" }))),
 );
 
 it.effect(
@@ -1450,6 +1979,183 @@ it.effect("keeps automation runs as plain thread creates even for provider-sessi
     const created = viaApply.find((command) => command.type === "thread.create");
     assert.isDefined(created);
     assert.notProperty(created, "parentThreadId");
+  }),
+);
+
+const heartbeatProposal = (): AgentControlProposal => {
+  const heartbeatPlan = {
+    kind: "automationRun" as const,
+    automationId: AgentControlAutomationId.make("automation-heartbeat"),
+    runId: AgentControlAutomationRunId.make("automation-heartbeat-run"),
+    automationRevision: 1,
+    scheduledFor: now,
+    coalescedOccurrences: 0,
+    execution: {
+      projectId,
+      title: "Check CI",
+      prompt: "Check CI and continue.",
+      modelSelection: { instanceId: ProviderInstanceId.make("claude"), model: "sonnet" },
+      runtimeMode: "approval-required" as const,
+      envMode: "local" as const,
+      target: { kind: "thread" as const, threadId },
+    },
+  };
+  return {
+    ...approvedProposal,
+    plan: heartbeatPlan,
+    planDigest: computeAgentControlPlanDigest(heartbeatPlan),
+  };
+};
+
+const runHeartbeat = (
+  shell: OrchestrationThreadShell,
+  queued: ReadonlyArray<{ readonly messageId: string; readonly author: string }> = [],
+) =>
+  Effect.gen(function* () {
+    const proposal = heartbeatProposal();
+    const stores = yield* makeExecutionStores(proposal);
+    const commands: DispatchedCommand[] = [];
+    const executor = yield* makeTestExecution({
+      ...stores,
+      engine: {
+        getReadModel: () =>
+          Effect.succeed({
+            threads: [{ id: threadId, followUpQueue: { entries: queued, hold: null } }],
+          }),
+      },
+      projections: {
+        getShellSnapshot: () =>
+          Effect.succeed({ projects: [{ id: projectId, workspaceRoot: "/workspace/project" }] }),
+        getThreadShellById: (id: ThreadId) =>
+          Effect.succeed(id === threadId ? Option.some(shell) : Option.none()),
+      },
+      commandApplication: {
+        apply: (command: DispatchedCommand) =>
+          Effect.sync(() => {
+            commands.push(command);
+            return { sequence: commands.length };
+          }),
+        applyInternal: (command: DispatchedCommand) =>
+          Effect.sync(() => {
+            commands.push(command);
+            return { sequence: commands.length };
+          }),
+      },
+    });
+    yield* executor.executeApproved(proposal.proposalId);
+    return { commands, proposal: yield* Ref.get(stores.proposalRef), stores };
+  });
+
+it.effect("queues a heartbeat run's prompt in its chat as the automation's, creating nothing", () =>
+  Effect.gen(function* () {
+    const { commands, proposal, stores } = yield* runHeartbeat(target);
+    assert.strictEqual(proposal.status, "completed");
+    assert.deepStrictEqual(
+      commands.map((command) => command.type),
+      ["thread.queue.add"],
+    );
+    const add = commands[0] as unknown as ThreadQueueAddCommand;
+    assert.strictEqual(add.author, "automation");
+    assert.strictEqual(add.threadId, threadId);
+    assert.match(
+      add.entry.messageId,
+      /^message-agent-control-.*-automation-run-of-automation-heartbeat$/,
+    );
+    assert.strictEqual(add.entry.text, "Check CI and continue.");
+    // The chat's model and modes; the run's runtime mode caps what the drain sends it with.
+    assert.deepStrictEqual(add.entry.modelSelection, target.modelSelection);
+    assert.strictEqual(add.entry.interactionMode, target.interactionMode);
+    assert.strictEqual(add.entry.runtimeMode, "approval-required");
+    // The chat is not the run's: nothing would undo or archive it.
+    const operation = Option.getOrThrow(yield* Ref.get(stores.operationRef));
+    assert.deepStrictEqual(operation.state.resources.threadIds, []);
+    assert.strictEqual(operation.state.resources.automationRunId, "automation-heartbeat-run");
+  }),
+);
+
+it.effect("adds no second entry while the schedule's last one still waits in the chat", () =>
+  Effect.gen(function* () {
+    const first = yield* runHeartbeat(target);
+    const add = first.commands[0] as unknown as ThreadQueueAddCommand;
+    assert.match(add.entry.messageId, /-of-automation-heartbeat$/);
+    // That entry is still queued (held, say) when the next run comes: it coalesces.
+    const second = yield* runHeartbeat(target, [
+      { messageId: add.entry.messageId, author: "automation" },
+    ]);
+    assert.strictEqual(second.proposal.status, "completed");
+    assert.deepStrictEqual(second.commands, []);
+    // Another schedule's entry or a person's does not count.
+    const third = yield* runHeartbeat(target, [
+      {
+        messageId: "message-agent-control-op-automation-run-of-automation-other",
+        author: "automation",
+      },
+      { messageId: "person-1", author: "user" },
+    ]);
+    assert.lengthOf(third.commands, 1);
+  }),
+);
+
+it.effect("completes a heartbeat run after a restart when its message reached the chat", () =>
+  Effect.gen(function* () {
+    // The queue add committed, then the restart lost the run's checkpoint.
+    const recover = (sent: boolean) =>
+      Effect.gen(function* () {
+        const proposal = { ...heartbeatProposal(), status: "executing" as const };
+        const stores = yield* makeExecutionStores(proposal);
+        const inserted = yield* stores.operationStore.createForProposal();
+        yield* stores.operationStore.transition({
+          expectedStatus: "pending",
+          nextStatus: "running",
+          attempt: 1,
+          state: inserted.operation.state,
+          result: null,
+        });
+        const asked: string[] = [];
+        const execution = yield* makeTestExecution({
+          proposalStore: stores.proposalStore,
+          operationStore: {
+            ...stores.operationStore,
+            listRecoverable: () =>
+              Ref.get(stores.operationRef).pipe(
+                Effect.map((o) =>
+                  Option.isSome(o) && o.value.status === "running" ? [o.value] : [],
+                ),
+              ),
+          },
+          engine: {
+            getReadModel: () =>
+              Effect.succeed({
+                threads: [{ id: threadId, followUpQueue: { entries: [], hold: null } }],
+              }),
+          },
+          projections: {
+            // The drain already sent it: it is a message of the chat now.
+            getThreadMessageById: (input: { threadId: ThreadId; messageId: MessageId }) =>
+              Effect.sync(() => {
+                asked.push(input.messageId);
+                return sent ? Option.some({ id: input.messageId }) : Option.none();
+              }),
+          },
+          commandApplication: { apply: () => Effect.die("must not queue again") },
+        });
+        yield* execution.recoverIncomplete;
+        return { settled: yield* Ref.get(stores.proposalRef), asked };
+      });
+    const sent = yield* recover(true);
+    assert.strictEqual(sent.settled.status, "completed");
+    assert.match(sent.asked[0] ?? "", /-automation-run-of-automation-heartbeat$/);
+    // Nothing reached the chat: the run failed, as any run a restart cut off.
+    const lost = yield* recover(false);
+    assert.strictEqual(lost.settled.status, "failed");
+  }),
+);
+
+it.effect("fails a heartbeat run whose chat was archived, queueing nothing", () =>
+  Effect.gen(function* () {
+    const { commands, proposal } = yield* runHeartbeat({ ...target, archivedAt: now });
+    assert.strictEqual(proposal.status, "failed");
+    assert.deepStrictEqual(commands, []);
   }),
 );
 
@@ -2078,4 +2784,1641 @@ it.effect("starts an agent's task chat as the task's, with copies of the task's 
       toSafeThreadAttachmentSegment(turnStart!.threadId),
     );
   }).pipe(Effect.scoped),
+);
+
+// ── Pull request watches ──────────────────────────────────────────────
+
+const watchPlan = {
+  kind: "pullRequestWatch" as const,
+  threadId,
+  number: 34,
+  watching: true,
+};
+const watchProposal: AgentControlProposal = {
+  ...approvedProposal,
+  plan: watchPlan,
+  planDigest: computeAgentControlPlanDigest(watchPlan),
+};
+
+it("needs the pull request watch provided beneath it, so server.ts cannot misplace it", () => {
+  // A requirement, not `serviceOption`: were the watch a sibling of execution in the runtime
+  // services' `Layer.mergeAll`, `runServer`'s `satisfies` in server.ts would stop compiling
+  // instead of every agent watch failing with "unavailable".
+  type Needs =
+    typeof AgentControlExecutionLive extends Layer.Layer<infer _Out, infer _Error, infer In>
+      ? In
+      : never;
+  const needsWatch: PullRequestWatchService extends Needs ? true : false = true;
+  assert.isTrue(needsWatch);
+});
+
+it.effect("watches a pull request once and answers with how it stands now", () =>
+  Effect.gen(function* () {
+    const stores = yield* makeExecutionStores(watchProposal);
+    const calls: unknown[] = [];
+    const executor = yield* makeTestExecution({
+      ...stores,
+      projections: {},
+      commandApplication: {},
+      pullRequestWatches: {
+        setWatch: (input: unknown) =>
+          Effect.sync(() => {
+            calls.push(input);
+            return {
+              watch: { number: 34, url: "https://github.com/o/r/pull/34", news: true },
+              now: "1 check failing: lint. 2 running.",
+            };
+          }),
+      },
+    });
+    yield* executor.executeApproved(watchProposal.proposalId);
+    yield* executor.executeApproved(watchProposal.proposalId);
+    assert.deepEqual(calls, [
+      { threadId, number: 34, url: undefined, news: true, origin: "agent" },
+    ]);
+    const settled = yield* Ref.get(stores.proposalRef);
+    assert.strictEqual(settled.status, "completed");
+    assert.strictEqual(
+      settled.result?.outcome === "completed" ? settled.result.detail : null,
+      // The plan wakes another chat than the caller's: the answer names it.
+      "Watching #34 (https://github.com/o/r/pull/34). Now: 1 check failing: lint. 2 running. Ryco wakes chat thread-target on the next change.",
+    );
+    const operation = Option.getOrThrow(yield* Ref.get(stores.operationRef));
+    assert.include(operation.state.completedSteps, "pull-request-watch-set");
+    assert.deepEqual(operation.state.resources.threadIds, [threadId]);
+  }),
+);
+
+it.effect("tells the agent why a pull request cannot be watched, in the watch's words", () =>
+  Effect.gen(function* () {
+    const stores = yield* makeExecutionStores(watchProposal);
+    const executor = yield* makeTestExecution({
+      ...stores,
+      projections: {},
+      commandApplication: {},
+      pullRequestWatches: {
+        setWatch: () =>
+          Effect.fail(
+            new PullRequestWatchError({
+              reason: "no-pull-request",
+              detail: "No pull request is linked to this chat's workspace yet.",
+            }),
+          ),
+      },
+    });
+    yield* executor.executeApproved(watchProposal.proposalId);
+    const settled = yield* Ref.get(stores.proposalRef);
+    assert.strictEqual(settled.status, "failed");
+    assert.strictEqual(
+      settled.result?.outcome === "failed" ? settled.result.error.message : null,
+      "No pull request is linked to this chat's workspace yet.",
+    );
+  }),
+);
+
+const cappedPlan = (maxConcurrent?: number) => ({
+  kind: "createThreads" as const,
+  entries: [0, 1, 2, 3].map((index) => ({
+    projectId,
+    title: `Worker ${index}`,
+    prompt: `Task ${index}`,
+    envMode: "local" as const,
+    runtimeMode: "auto-accept-edits" as const,
+    modelSelection: target.modelSelection,
+  })),
+  ...(maxConcurrent === undefined ? {} : { maxConcurrent }),
+});
+
+const proposalFor = (plan: ReturnType<typeof cappedPlan>): AgentControlProposal => ({
+  ...approvedProposal,
+  plan,
+  planDigest: computeAgentControlPlanDigest(plan),
+});
+
+it.effect("with maxConcurrent, later entries wait in their own queue, held for a slot", () =>
+  Effect.gen(function* () {
+    const proposal = proposalFor(cappedPlan(2));
+    const { viaApply, viaApplyInternal, operation } =
+      yield* runCreateThreadsWithPrincipal(proposal);
+    const slug = operation.operationId.replaceAll(/[^a-zA-Z0-9-]/g, "-").slice(0, 24);
+    const threadOf = (index: number) => `thread-agent-control-${slug}-${index + 1}`;
+    const starts = viaApply.filter((command) => command.type === "thread.turn.start");
+    assert.deepEqual(
+      starts.map((command) => command.threadId),
+      [threadOf(0), threadOf(1)],
+    );
+    const adds = (viaApplyInternal as ReadonlyArray<{ readonly type: string }>).filter(
+      (command): command is ThreadQueueAddCommand => command.type === "thread.queue.add",
+    );
+    assert.deepEqual(
+      adds.map((add) => add.threadId),
+      [threadOf(2), threadOf(3)],
+    );
+    for (const [position, add] of adds.entries()) {
+      const index = position + 2;
+      // The turn start's ids: the completion return and a task's start ledger bind to them.
+      assert.strictEqual(
+        add.commandId,
+        `agent-control:${operation.operationId}:turn-start-${index}`,
+      );
+      assert.strictEqual(add.entry.messageId, `message-agent-control-${slug}-create-${index}`);
+      assert.strictEqual(add.author, "agent");
+      assert.strictEqual(add.entry.text, `Task ${index}`);
+      assert.deepEqual(add.entry.attachments, []);
+      // The child's own model and modes, never more.
+      assert.deepEqual(add.entry.modelSelection, target.modelSelection);
+      assert.strictEqual(add.entry.runtimeMode, "auto-accept-edits");
+      assert.strictEqual(add.entry.interactionMode, "default");
+      assert.deepEqual(add.hold, {
+        reason: "paused",
+        detail: "Waiting for a free slot: this request runs at most 2 tasks at once.",
+        causeKeys: [`delegation-slot:${proposal.proposalId}`],
+      });
+    }
+    // The turn starts use the same message ids for the first entries.
+    assert.deepEqual(
+      starts.map((command) =>
+        command.type === "thread.turn.start" ? String(command.message.messageId) : null,
+      ),
+      [`message-agent-control-${slug}-create-0`, `message-agent-control-${slug}-create-1`],
+    );
+    // In entry order: each child is created, then started or queued.
+    assert.deepEqual(
+      operation.state.commandReceipts.map((receipt) => receipt.commandType),
+      [
+        "thread.delegated.create",
+        "thread.turn.start",
+        "thread.delegated.create",
+        "thread.turn.start",
+        "thread.delegated.create",
+        "thread.queue.add",
+        "thread.delegated.create",
+        "thread.queue.add",
+      ],
+    );
+    assert.includeMembers(
+      [...operation.state.completedSteps],
+      ["turn-started:0", "turn-started:1", "turn-queued:2", "turn-queued:3"],
+    );
+    assert.notInclude(operation.state.completedSteps, "turn-started:2");
+  }),
+);
+
+it.effect("without maxConcurrent, or a cap above the batch, every entry starts at once", () =>
+  Effect.gen(function* () {
+    for (const cap of [undefined, 4, 8]) {
+      const { viaApply, viaApplyInternal } = yield* runCreateThreadsWithPrincipal(
+        proposalFor(cappedPlan(cap)),
+      );
+      assert.lengthOf(
+        viaApply.filter((command) => command.type === "thread.turn.start"),
+        4,
+      );
+      assert.isFalse(
+        (viaApplyInternal as ReadonlyArray<{ readonly type: string }>).some(
+          (command) => command.type === "thread.queue.add",
+        ),
+      );
+    }
+  }),
+);
+
+it.effect("a capped request retried concurrently queues and starts each task once", () =>
+  Effect.gen(function* () {
+    const proposal = proposalFor(cappedPlan(1));
+    const stores = yield* makeExecutionStores(proposal);
+    const dispatched: Array<{ readonly type: string; readonly commandId: string }> = [];
+    const record = (command: { readonly type: string; readonly commandId: string }) =>
+      Effect.sync(() => {
+        dispatched.push(command);
+        return { sequence: dispatched.length };
+      });
+    const executor = yield* makeTestExecution({
+      ...stores,
+      projections: {
+        getShellSnapshot: () =>
+          Effect.succeed({ projects: [{ id: projectId, workspaceRoot: "/workspace/project" }] }),
+        getThreadShellById: () => Effect.succeed(Option.none()),
+      },
+      commandApplication: { apply: record, applyInternal: record },
+    });
+    yield* Effect.all(
+      Array.from({ length: 12 }, () => executor.executeApproved(proposal.proposalId)),
+      { concurrency: "unbounded", discard: true },
+    );
+    assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, "completed");
+    const ofType = (type: string) => dispatched.filter((command) => command.type === type);
+    assert.lengthOf(ofType("thread.turn.start"), 1);
+    assert.lengthOf(ofType("thread.queue.add"), 3);
+    assert.strictEqual(
+      new Set(dispatched.map((command) => command.commandId)).size,
+      dispatched.length,
+    );
+  }),
+);
+
+/** Recovers one interrupted watch stop whose operation state is `state`. */
+const recoverWatchStop = (state: AgentControlOperation["state"]) =>
+  Effect.gen(function* () {
+    const stopPlan = { ...watchPlan, watching: false };
+    const executing: AgentControlProposal = {
+      ...approvedProposal,
+      plan: stopPlan,
+      planDigest: computeAgentControlPlanDigest(stopPlan),
+      status: "executing",
+    };
+    const running: AgentControlOperation = {
+      operationId: AgentControlOperationId.make("operation-watch-interrupted"),
+      proposalId: executing.proposalId,
+      actionKind: "pullRequestWatch",
+      status: "running",
+      attempt: 1,
+      state,
+      result: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const proposalRef = yield* Ref.make(executing);
+    const operationRef = yield* Ref.make(running);
+    const calls: unknown[] = [];
+    const execution = yield* makeTestExecution({
+      proposalStore: {
+        getById: () => Ref.get(proposalRef).pipe(Effect.map(Option.some)),
+        listActive: () => Effect.succeed([]),
+        settleExecution: (input: { readonly result: AgentControlResultEnvelope }) =>
+          Ref.modify(proposalRef, (current) => {
+            const next: AgentControlProposal = {
+              ...current,
+              status: input.result.outcome === "completed" ? "completed" : "failed",
+              result: input.result,
+            };
+            return [next, next];
+          }),
+      },
+      operationStore: {
+        listRecoverable: () => Ref.get(operationRef).pipe(Effect.map((operation) => [operation])),
+        getByProposalId: () => Ref.get(operationRef).pipe(Effect.map(Option.some)),
+        transition: (input: {
+          readonly nextStatus: AgentControlOperation["status"];
+          readonly state: AgentControlOperation["state"];
+          readonly result: AgentControlOperation["result"];
+        }) =>
+          Ref.updateAndGet(operationRef, (current) => ({
+            ...current,
+            status: input.nextStatus,
+            state: input.state,
+            result: input.result,
+          })),
+      },
+      projections: {},
+      commandApplication: {},
+      pullRequestWatches: {
+        // Already stopped before the restart: the same change answers as it is.
+        setWatch: (input: unknown) =>
+          Effect.sync(() => {
+            calls.push(input);
+            return { watch: null, now: "Not watching #34." };
+          }),
+      },
+    });
+    yield* execution.recoverIncomplete;
+    const settled = yield* Ref.get(proposalRef);
+    return {
+      calls,
+      status: settled.status,
+      detail: settled.result?.outcome === "completed" ? settled.result.detail : null,
+      completedSteps: (yield* Ref.get(operationRef)).state.completedSteps,
+    };
+  });
+
+const emptyWatchState: AgentControlOperation["state"] = {
+  completedSteps: [],
+  resources: { threadIds: [], ownedThreadIds: [], worktreeIds: [], ownedWorktrees: [] },
+  commandReceipts: [],
+};
+
+it.effect("applies a watch change a restart cut off again, and completes it", () =>
+  Effect.gen(function* () {
+    // The watch changed, but the server stopped before the checkpoint said so.
+    const recovered = yield* recoverWatchStop(emptyWatchState);
+    assert.lengthOf(recovered.calls, 1);
+    assert.strictEqual(recovered.status, "completed");
+    assert.strictEqual(recovered.detail, "Not watching #34.");
+    assert.include(recovered.completedSteps, "pull-request-watch-set");
+  }),
+);
+
+it.effect("completes a recorded watch change a restart cut off, with its answer", () =>
+  Effect.gen(function* () {
+    // The checkpoint recorded the change; only the completion was lost.
+    const recovered = yield* recoverWatchStop({
+      ...emptyWatchState,
+      completedSteps: ["pull-request-watch-set"],
+      resources: { ...emptyWatchState.resources, threadIds: [threadId] },
+      note: "Stopped watching #34.",
+    });
+    assert.lengthOf(recovered.calls, 0);
+    assert.strictEqual(recovered.status, "completed");
+    assert.strictEqual(recovered.detail, "Stopped watching #34.");
+  }),
+);
+
+it("lets the delegating chat watch the pull request its delegated chat reported, and wakes it", async () => {
+  const h = await createPullRequestWatchHarness();
+  try {
+    // The delegated chat opened #34 in its own worktree; the delegating chat works elsewhere.
+    const pr = addPullRequest(h.forge, 34, { checks: [{ name: "lint", conclusion: "SUCCESS" }] });
+    const { projectId: watchProjectId } = await h.seedProject("delegation");
+    const parentWorkspace = await h.seedWorkspace({ key: "parent", projectId: watchProjectId });
+    const childWorkspace = await h.seedWorkspace({
+      key: "child",
+      projectId: watchProjectId,
+      link: pr,
+    });
+    const parent = await h.seedThread({
+      key: "parent",
+      projectId: watchProjectId,
+      worktreePath: parentWorkspace.worktreePath,
+    });
+    const child = await h.seedThread({
+      key: "child",
+      projectId: watchProjectId,
+      worktreePath: childWorkspace.worktreePath,
+    });
+    // Both run a turn: the one calling the tool.
+    const running = (id: ThreadId) =>
+      h.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make(`provider:session:${id}`),
+        threadId: id,
+        session: {
+          threadId: id,
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeSessionId: RuntimeSessionId.make(`runtime-${id}`),
+          runtimeMode: "full-access",
+          activeTurnId: TurnId.make(`turn-${id}`),
+          lastError: null,
+          updatedAt: new Date(h.clock.now()).toISOString(),
+        },
+        createdAt: new Date(h.clock.now()).toISOString(),
+      });
+    await running(parent);
+    await running(child);
+
+    const projections = await h.run(
+      Effect.gen(function* () {
+        return yield* ProjectionSnapshotQuery;
+      }),
+    );
+    const validator = makeAgentControlActionValidatorFromDeps({
+      projections,
+      getProviders: Effect.succeed([
+        Schema.decodeUnknownSync(ServerProvider)({
+          instanceId: "codex",
+          driver: "codex",
+          enabled: true,
+          installed: true,
+          version: "1",
+          status: "ready",
+          auth: { status: "authenticated" },
+          checkedAt: now,
+          models: [{ slug: "gpt-5.4", name: "GPT-5.4", isCustom: false, capabilities: null }],
+          slashCommands: [],
+          skills: [],
+        }),
+      ]),
+      listRefs: () => Effect.die("unused"),
+      // The child's result is still awaited by the parent.
+      delegatedReturnPending: (id) => Effect.succeed(id === child),
+    });
+    const submit = (caller: ThreadId) =>
+      validator.validateSubmission({
+        session: {
+          sessionId: `session-${caller}`,
+          threadId: caller,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeSessionId: RuntimeSessionId.make(`runtime-${caller}`),
+          grantedCapabilities: [],
+          issuedAt: now,
+          injectionMode: "codex-http",
+        },
+        authority: {
+          sessionId: `session-${caller}`,
+          threadId: caller,
+          turnId: TurnId.make(`turn-${caller}`),
+          boundAt: now,
+        },
+        plan: { kind: "pullRequestWatch", threadId: caller, number: 34, watching: true },
+      });
+
+    // The child reports the pull request instead of watching it.
+    const refused = await h.run(Effect.flip(submit(child)));
+    assert.strictEqual(refused.reason, "delegated-return-pending");
+
+    // The parent watches the number the child reported, through the routine execution.
+    const plan = {
+      kind: "pullRequestWatch" as const,
+      threadId: parent,
+      number: 34,
+      watching: true,
+    };
+    const proposal: AgentControlProposal = {
+      ...approvedProposal,
+      principal: await h.run(submit(parent)),
+      plan,
+      planDigest: computeAgentControlPlanDigest(plan),
+    };
+    const settled = await h.run(
+      Effect.gen(function* () {
+        const stores = yield* makeExecutionStores(proposal);
+        const executor = yield* makeTestExecution({
+          ...stores,
+          projections,
+          commandApplication: {},
+          validator,
+          pullRequestWatches: { setWatch: h.watch.setWatch, sweep: h.watch.sweep },
+        });
+        yield* executor.executeApproved(proposal.proposalId);
+        return yield* Ref.get(stores.proposalRef);
+      }).pipe(Effect.scoped),
+    );
+    assert.strictEqual(settled.status, "completed");
+    const detail = settled.result?.outcome === "completed" ? settled.result.detail : "";
+    assert.include(detail, "Watching #34");
+    assert.include(detail, "Ryco wakes this chat on the next change, so end your turn");
+    const [watch] = (await h.watches(parent)).active;
+    assert.strictEqual(watch?.startedBy, "agent");
+    assert.strictEqual(watch?.worktreeId, childWorkspace.worktreeId);
+
+    // The parent's turn ends; a check fails; the parent is woken, the child is not.
+    await h.setSession(parent, "ready");
+    await h.run(h.watch.sweep);
+    pr.checks = [{ name: "lint", conclusion: "FAILURE" }];
+    h.clock.advance(2 * 60_000);
+    await h.run(h.watch.sweep);
+    assert.lengthOf(await h.wakes(parent), 1);
+    assert.lengthOf(await h.wakes(child), 0);
+  } finally {
+    await h.dispose();
+  }
+});
+
+it.effect("a task waiting for a slot keeps the parent's handed-over copies on its message", () =>
+  Effect.gen(function* () {
+    const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-control-capped-handoff-"));
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => fs.rmSync(baseDir, { recursive: true, force: true })),
+    );
+    const attachmentsDir = path.join(baseDir, "userdata", "attachments");
+    fs.mkdirSync(attachmentsDir, { recursive: true });
+    const parentThreadId = ThreadId.make("thread-origin");
+    const page: ChatFileAttachment = {
+      type: "file",
+      id: createFileAttachmentId(parentThreadId, "notes.md")!,
+      name: "notes.md",
+      mimeType: "text/markdown",
+      sizeBytes: 6,
+    };
+    fs.writeFileSync(resolveAttachmentPath({ attachmentsDir, attachment: page })!, "# note");
+    const base = cappedPlan(1);
+    const plan = {
+      ...base,
+      entries: [base.entries[0]!, { ...base.entries[1]!, artifacts: [`render-1:${page.id}`] }],
+    };
+    const proposal: AgentControlProposal = {
+      ...approvedProposal,
+      plan,
+      planDigest: computeAgentControlPlanDigest(plan),
+    };
+    const stores = yield* makeExecutionStores(proposal);
+    const internal: Array<{ readonly type: string }> = [];
+    const executor = yield* makeTestExecution({
+      ...stores,
+      baseDir,
+      projections: {
+        getShellSnapshot: () =>
+          Effect.succeed({ projects: [{ id: projectId, workspaceRoot: "/workspace/project" }] }),
+        getThreadShellById: () => Effect.succeed(Option.none()),
+        getThreadMessageById: (input: { threadId: ThreadId; messageId: MessageId }) =>
+          Effect.succeed(
+            input.threadId === parentThreadId && input.messageId === "render-1"
+              ? Option.some({
+                  id: input.messageId,
+                  role: "assistant",
+                  text: " ",
+                  attachments: [page],
+                  turnId: null,
+                  streaming: false,
+                  createdAt: now,
+                  updatedAt: now,
+                })
+              : Option.none(),
+          ),
+      },
+      commandApplication: {
+        apply: () => Effect.succeed({ sequence: 1 }),
+        applyInternal: (command: { readonly type: string }) =>
+          Effect.sync(() => {
+            internal.push(command);
+            return { sequence: internal.length };
+          }),
+      },
+    });
+    yield* executor.executeApproved(proposal.proposalId);
+    assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, "completed");
+    const add = internal.find(
+      (command): command is ThreadQueueAddCommand => command.type === "thread.queue.add",
+    );
+    assert.isDefined(add);
+    const [copy] = add!.entry.attachments;
+    assert.deepInclude(copy, {
+      name: "notes.md",
+      sizeBytes: 6,
+      handoff: { threadId: parentThreadId, messageId: "render-1" as MessageId },
+    });
+    // The copy is the child's own, as a started child's would be.
+    assert.strictEqual(
+      parseThreadSegmentFromAttachmentId(copy!.id!),
+      toSafeThreadAttachmentSegment(add!.threadId),
+    );
+    assert.strictEqual(
+      fs.readFileSync(resolveAttachmentPath({ attachmentsDir, attachment: copy! })!, "utf8"),
+      "# note",
+    );
+  }).pipe(Effect.scoped),
+);
+
+it.effect("a waiting task's completion return binds to its queued first message", () =>
+  Effect.gen(function* () {
+    const returns = yield* CompletionReturnRepository;
+    const base = cappedPlan(1);
+    const plan = {
+      ...base,
+      entries: [
+        { ...base.entries[0]!, returnToOrigin: true },
+        { ...base.entries[1]!, returnToOrigin: true },
+      ],
+    };
+    const proposal: AgentControlProposal = {
+      ...approvedProposal,
+      principal: { ...approvedProposal.principal, turnId: TurnId.make("origin-turn") },
+      plan,
+      planDigest: computeAgentControlPlanDigest(plan),
+    } as AgentControlProposal;
+    const stores = yield* makeExecutionStores(proposal);
+    const queued: ThreadQueueAddCommand[] = [];
+    const executor = yield* makeTestExecution({
+      ...stores,
+      projections: {
+        getShellSnapshot: () =>
+          Effect.succeed({ projects: [{ id: projectId, workspaceRoot: "/workspace/project" }] }),
+        getThreadShellById: (id: ThreadId) =>
+          Effect.succeed(id === "thread-origin" ? Option.some({ ...target, id }) : Option.none()),
+      },
+      commandApplication: {
+        apply: (command: { readonly type: string }) =>
+          Effect.sync(() => {
+            if (command.type === "thread.queue.add") queued.push(command as ThreadQueueAddCommand);
+            return { sequence: 1 };
+          }),
+      },
+    });
+    yield* executor.executeApproved(proposal.proposalId);
+    assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, "completed");
+    assert.lengthOf(queued, 1);
+    const saved = yield* returns.get(queued[0]!.threadId);
+    assert.strictEqual(saved?.initialMessageId, queued[0]!.entry.messageId);
+    assert.strictEqual(saved?.status, "waiting");
+  }).pipe(
+    Effect.provide(
+      CompletionReturnRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+    ),
+  ),
+);
+
+// ── Worktree handoff: an agent moves its own chat into a new worktree ──
+
+const callerThreadId = ThreadId.make("thread-origin");
+const askingTurnId = TurnId.make("turn-asking");
+const turnShell = (
+  state: "running" | "interrupted" | "completed",
+  turnId: TurnId = askingTurnId,
+): OrchestrationThreadShell["latestTurn"] => ({
+  turnId,
+  state,
+  requestedAt: now,
+  startedAt: now,
+  completedAt: state === "running" ? null : now,
+  assistantMessageId: null,
+});
+const handoffPlan = {
+  kind: "worktreeHandoff" as const,
+  threadId: callerThreadId,
+  branch: "feature/handoff",
+  startFromOrigin: false,
+  runSetupScript: true,
+  continuationPrompt: "Run the tests in the worktree",
+};
+const handoffProposal = (
+  id: string,
+  overrides: Partial<typeof handoffPlan> = {},
+): AgentControlProposal => {
+  const nextPlan = { ...handoffPlan, ...overrides };
+  return {
+    ...approvedProposal,
+    proposalId: AgentControlProposalId.make(`proposal-${id}`),
+    requestId: AgentControlRequestId.make(`request-${id}`),
+    // The turn that asked: a Stop of it before the move rolls the handoff back.
+    principal: { ...approvedProposal.principal, turnId: askingTurnId } as never,
+    plan: nextPlan,
+    planDigest: computeAgentControlPlanDigest(nextPlan),
+  };
+};
+
+const handoffProject = {
+  id: projectId,
+  title: "Project",
+  workspaceRoot: "/workspace/project",
+  projectMetadataDir: null,
+  scripts: [
+    {
+      id: "setup",
+      name: "Install",
+      command: "bun install",
+      icon: "configure",
+      runOnWorktreeCreate: true,
+    },
+  ],
+};
+
+const handoffThread = (overrides: Partial<OrchestrationThreadShell>) =>
+  ({
+    ...target,
+    id: callerThreadId,
+    branch: "main",
+    worktreePath: null,
+    settledAt: null,
+    latestTurn: turnShell("running"),
+    ...overrides,
+  }) as OrchestrationThreadShell;
+
+const makeHandoffHarness = (input: {
+  readonly proposal: AgentControlProposal;
+  /** The chat as each successive read sees it (the last one repeats). */
+  readonly threadReads?: ReadonlyArray<Partial<OrchestrationThreadShell>>;
+  readonly localBranches?: ReadonlyArray<string>;
+  readonly isRepo?: boolean;
+  /** Holds the worktree creation until it completes. */
+  readonly createGate?: Effect.Effect<void>;
+  /** The node's settings (its defaults when absent). */
+  readonly settings?: Parameters<typeof ServerSettingsService.layerTest>[0];
+  /** How the move answers: refused by its branch fence, or applied with its answer lost. */
+  readonly move?: "refused" | "lost";
+  /** The link to the worktree's record fails. */
+  readonly attachFails?: boolean;
+  /** The setup script fails to start with this error. */
+  readonly setupError?: Error;
+  /**
+   * The turn that asked is stopped after the runner's last read and before its continuation is
+   * added: the queue holds it only when the add asks for that (as the decider does).
+   */
+  readonly stopBeforeAdd?: boolean;
+  /** The Git driver's remotes, its refs, and the names it resolves. */
+  readonly gitDriver?: {
+    readonly remoteNames: ReadonlyArray<string>;
+    readonly refs?: ReadonlyArray<string>;
+    readonly resolves: ReadonlyArray<string>;
+    /** `git for-each-ref` fails. */
+    readonly listFails?: boolean;
+  };
+}) =>
+  Effect.gen(function* () {
+    const stores = yield* makeExecutionStores(input.proposal);
+    const commands: Array<{ readonly type: string } & Record<string, unknown>> = [];
+    const created: Array<Record<string, unknown>> = [];
+    const removed: string[] = [];
+    const deletedBranches: string[] = [];
+    const setups: Array<Record<string, unknown>> = [];
+    const listedRefs: string[] = [];
+    const resolvedNames: string[] = [];
+    const forEachRefArgs: Array<ReadonlyArray<string>> = [];
+    let queueHold: Record<string, unknown> | null = null;
+    let reads = 0;
+    let movedTo: string | null = null;
+    /** Changes the chat from the next read on (a Stop while the worktree is made). */
+    let live: Partial<OrchestrationThreadShell> = {};
+    const threadRead = () => {
+      const scripted = input.threadReads ?? [{}];
+      const overrides = scripted[Math.min(reads, scripted.length - 1)]!;
+      reads += 1;
+      return handoffThread({ worktreePath: movedTo, ...overrides, ...live });
+    };
+    const make = makeTestExecution({
+      ...stores,
+      // The node's read model, where the queue's hold is decided.
+      engine: {
+        getReadModel: () =>
+          Effect.sync(() => ({
+            threads: [
+              {
+                id: callerThreadId,
+                ...(queueHold === null ? {} : { followUpQueue: { entries: [], hold: queueHold } }),
+              },
+            ],
+          })),
+      },
+      projections: {
+        getShellSnapshot: () => Effect.succeed({ projects: [handoffProject] }),
+        getThreadShellById: () => Effect.sync(() => Option.some(threadRead())),
+        getProjectShellById: () => Effect.succeed(Option.some(handoffProject)),
+        getWorktreeShellById: (worktreeId: WorktreeId) =>
+          Effect.succeed(
+            created.length === 0
+              ? Option.none()
+              : Option.some({
+                  worktreeId,
+                  projectId,
+                  branch: created[0]!.newRefName,
+                  worktreePath: created[0]!.path,
+                }),
+          ),
+      },
+      workspaceAccess: {
+        assertPath: ({ path }: { path: string }) => Effect.succeed(path),
+        assertExistingPath: ({ path }: { path: string }) => Effect.succeed(path),
+      },
+      git: {
+        localStatus: () => Effect.succeed({ isRepo: input.isRepo ?? true, refName: "main" }),
+        listLocalBranchNames: () => Effect.succeed(input.localBranches ?? ["main"]),
+        listRefs: (request: { readonly query: string }) =>
+          Effect.sync(() => {
+            listedRefs.push(request.query);
+            return { refs: [{ name: "main" }] };
+          }),
+        createWorktree: (request: { path: string; newRefName: string }) =>
+          (input.createGate ?? Effect.void).pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                created.push(request);
+                return { worktree: { path: request.path, refName: request.newRefName } };
+              }),
+            ),
+          ),
+        listWorktreePaths: () =>
+          Effect.sync(() => created.map((request) => request.path as string)),
+        removeWorktree: (request: { readonly path: string }) =>
+          Effect.sync(() => void removed.push(request.path)),
+        deleteBranch: (request: { readonly refName: string }) =>
+          Effect.sync(() => void deletedBranches.push(request.refName)),
+      },
+      commandApplication: {
+        apply: (command: { readonly type: string } & Record<string, unknown>) =>
+          Effect.suspend(() => {
+            commands.push(command);
+            if (command.type === "thread.meta.update") {
+              if (input.move === "refused") {
+                return Effect.fail(new Error("The chat's branch changed since the check."));
+              }
+              movedTo = command.worktreePath as string;
+              if (input.move === "lost") return Effect.fail(new Error("The answer was lost."));
+            }
+            if (command.type === "thread.attach-to-worktree" && input.attachFails === true) {
+              return Effect.fail(new Error("The worktree record is unavailable."));
+            }
+            if (
+              command.type === "thread.queue.add" &&
+              input.stopBeforeAdd === true &&
+              command.holdIfTurnInterrupted === askingTurnId
+            ) {
+              queueHold = {
+                reason: "interrupted",
+                detail: null,
+                causeKeys: [`interrupt:${askingTurnId}`],
+                heldAt: now,
+              };
+            }
+            return Effect.succeed({ sequence: commands.length });
+          }),
+      },
+    }).pipe(
+      Effect.provideService(ProjectSetupScriptRunner, {
+        runForThread: (request) =>
+          Effect.suspend(() => {
+            setups.push({ ...request });
+            if (input.setupError !== undefined) return Effect.fail(input.setupError);
+            return Effect.succeed({
+              status: "started" as const,
+              scriptId: "setup",
+              scriptName: "Install",
+              terminalId: "terminal-1",
+              cwd: request.worktreePath,
+            });
+          }),
+      }),
+    );
+    const withDriver =
+      input.gitDriver === undefined
+        ? make
+        : make.pipe(
+            Effect.provideService(GitVcsDriver, {
+              readConfigSnapshot: () =>
+                Effect.succeed({ get: () => null, remoteNames: input.gitDriver!.remoteNames }),
+              execute: (request: { readonly args: ReadonlyArray<string> }) =>
+                Effect.sync(() => {
+                  const driver = input.gitDriver!;
+                  if (request.args[0] === "for-each-ref") {
+                    forEachRefArgs.push(request.args);
+                    if (driver.listFails === true) return { exitCode: 129, stdout: "", stderr: "" };
+                    // As Git filters with --ignore-case: a pattern matches a ref completely, or
+                    // from its start up to a slash.
+                    const patterns = request.args
+                      .filter((arg) => arg.startsWith("refs/"))
+                      .map((pattern) => pattern.toLowerCase());
+                    const matching = (driver.refs ?? []).filter((ref) =>
+                      patterns.some(
+                        (pattern) =>
+                          ref.toLowerCase() === pattern ||
+                          ref.toLowerCase().startsWith(`${pattern}/`),
+                      ),
+                    );
+                    return {
+                      exitCode: 0,
+                      stdout: matching.map((ref) => `${ref}\n`).join(""),
+                      stderr: "",
+                    };
+                  }
+                  const name = request.args.at(-1)!;
+                  resolvedNames.push(name);
+                  return {
+                    exitCode: driver.resolves.includes(name) ? 0 : 1,
+                    stdout: "",
+                    stderr: "",
+                  };
+                }),
+            } as never),
+          );
+    const executor = yield* input.settings === undefined
+      ? withDriver
+      : withDriver.pipe(Effect.provide(ServerSettingsService.layerTest(input.settings)));
+    return {
+      stores,
+      executor,
+      commands,
+      created,
+      removed,
+      deletedBranches,
+      setups,
+      listedRefs,
+      resolvedNames,
+      forEachRefArgs,
+      setThread: (overrides: Partial<OrchestrationThreadShell>) =>
+        Effect.sync(() => {
+          live = overrides;
+        }),
+    };
+  });
+
+const handoffOutcome = (proposal: AgentControlProposal) => {
+  if (proposal.result?.outcome !== "completed") return assert.fail("expected completion");
+  return proposal.result;
+};
+const handoffFailure = (proposal: AgentControlProposal) => {
+  if (proposal.result?.outcome !== "failed") return assert.fail("expected a failure");
+  return proposal.result.error.message;
+};
+
+it.effect("moves the caller's chat into a new worktree and queues its continuation", () =>
+  Effect.gen(function* () {
+    const proposal = handoffProposal("handoff");
+    const h = yield* makeHandoffHarness({ proposal });
+    yield* h.executor.executeApproved(proposal.proposalId);
+
+    const settled = yield* Ref.get(h.stores.proposalRef);
+    assert.strictEqual(settled.status, "completed");
+    assert.lengthOf(h.created, 1);
+    assert.deepInclude(h.created[0], {
+      cwd: "/workspace/project",
+      refName: "main",
+      newRefName: "feature/handoff",
+    });
+    assert.notProperty(h.created[0], "fetchOrigin");
+    // The base was checked before anything was made.
+    assert.deepStrictEqual(h.listedRefs, ["main"]);
+    const checkoutPath = h.created[0]!.path as string;
+    assert.deepStrictEqual(
+      h.commands.map((command) => command.type),
+      ["worktree.create", "thread.meta.update", "thread.attach-to-worktree", "thread.queue.add"],
+    );
+    // Re-pointed with the existing commands, fenced on the branch the chat had.
+    assert.deepInclude(h.commands[1], {
+      threadId: callerThreadId,
+      branch: "feature/handoff",
+      expectedBranch: "main",
+      worktreePath: checkoutPath,
+    });
+    assert.deepInclude(h.commands[2], {
+      threadId: callerThreadId,
+      worktreeId: h.commands[0]!.worktreeId,
+    });
+    // The continuation waits in the chat's own queue, as its agent's, until the chat is idle.
+    const queued = h.commands[3] as unknown as ThreadQueueAddCommand;
+    assert.strictEqual(queued.threadId, callerThreadId);
+    assert.strictEqual(queued.author, "agent");
+    assert.strictEqual(queued.queuedBy, callerThreadId);
+    assert.strictEqual(queued.entry.text, "Run the tests in the worktree");
+    assert.isUndefined(queued.hold);
+    assert.deepStrictEqual(h.setups, [
+      {
+        threadId: callerThreadId,
+        projectId,
+        projectCwd: "/workspace/project",
+        worktreePath: checkoutPath,
+      },
+    ]);
+
+    const result = handoffOutcome(settled);
+    assert.deepStrictEqual(result.execution?.worktreeHandoff, {
+      branch: "feature/handoff",
+      baseRef: "main",
+      startedFromOrigin: false,
+      setupScript: "started",
+      continuation: "queued",
+      worktreeAttached: true,
+    });
+    // The stored note names the branch, never the checkout path (the answer carries it).
+    assert.include(result.detail, "on branch feature/handoff");
+    assert.notInclude(result.detail, checkoutPath);
+    assert.include(result.detail, "End your turn now");
+    // The chat holds the worktree now: nothing would roll it back.
+    const operation = Option.getOrThrow(yield* Ref.get(h.stores.operationRef));
+    assert.deepStrictEqual(operation.state.resources.ownedWorktrees, []);
+    assert.deepInclude(operation.state.handoffWorktree, {
+      branch: "feature/handoff",
+      checkoutPath,
+    });
+    assert.include(operation.state.resources.threadIds, callerThreadId);
+  }),
+);
+
+it.effect("rolls the worktree back when the chat was archived while it was made", () =>
+  Effect.gen(function* () {
+    const proposal = handoffProposal("handoff-archived");
+    const h = yield* makeHandoffHarness({
+      proposal,
+      // Open at the start, archived once the worktree exists.
+      threadReads: [{}, { archivedAt: now }],
+    });
+    yield* h.executor.executeApproved(proposal.proposalId);
+
+    const settled = yield* Ref.get(h.stores.proposalRef);
+    assert.strictEqual(settled.status, "failed");
+    assert.match(handoffFailure(settled), /archived or settled.*rolled back/);
+    const checkoutPath = h.created[0]!.path as string;
+    assert.deepStrictEqual(h.removed, [checkoutPath]);
+    assert.deepStrictEqual(h.deletedBranches, ["feature/handoff"]);
+    assert.deepStrictEqual(
+      h.commands.map((command) => command.type),
+      ["worktree.create", "worktree.delete"],
+    );
+    assert.lengthOf(h.setups, 0);
+  }),
+);
+
+it.effect("a Stop while the worktree is made rolls the handoff back and queues nothing", () =>
+  Effect.gen(function* () {
+    for (const [id, during] of [
+      // The person pressed Stop on the turn that asked.
+      ["handoff-stopped", { latestTurn: turnShell("interrupted") }],
+      // The turn that asked ended and a newer one started.
+      ["handoff-superseded", { latestTurn: turnShell("running", TurnId.make("turn-newer")) }],
+    ] as const) {
+      const entered = yield* Deferred.make<void>();
+      const gate = yield* Deferred.make<void>();
+      const proposal = handoffProposal(id);
+      const h = yield* makeHandoffHarness({
+        proposal,
+        createGate: Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(gate))),
+      });
+      const running = yield* Effect.forkChild(h.executor.executeApproved(proposal.proposalId));
+      // `git worktree add` is running.
+      yield* Deferred.await(entered);
+      yield* h.setThread(during);
+      yield* Deferred.succeed(gate, undefined);
+      yield* Fiber.join(running);
+
+      const settled = yield* Ref.get(h.stores.proposalRef);
+      assert.strictEqual(settled.status, "failed", id);
+      assert.match(handoffFailure(settled), /stays in the shared checkout.*rolled back/);
+      const checkoutPath = h.created[0]!.path as string;
+      // No move, no continuation, no setup: the worktree and its branch are gone again.
+      assert.deepStrictEqual(
+        h.commands.map((command) => command.type),
+        ["worktree.create", "worktree.delete"],
+        id,
+      );
+      assert.deepStrictEqual(h.removed, [checkoutPath]);
+      assert.deepStrictEqual(h.deletedBranches, ["feature/handoff"]);
+      assert.lengthOf(h.setups, 0);
+    }
+  }),
+);
+
+it.effect("a Stop right after the move queues the continuation held", () =>
+  Effect.gen(function* () {
+    const proposal = handoffProposal("handoff-stopped-after-move");
+    const h = yield* makeHandoffHarness({
+      proposal,
+      // Running at both checks, stopped when the continuation is queued.
+      threadReads: [{}, {}, { latestTurn: turnShell("interrupted") }],
+    });
+    yield* h.executor.executeApproved(proposal.proposalId);
+
+    const settled = yield* Ref.get(h.stores.proposalRef);
+    assert.strictEqual(settled.status, "completed");
+    const queued = h.commands.find(
+      (command) => command.type === "thread.queue.add",
+    ) as unknown as ThreadQueueAddCommand;
+    // The hold of a Stop of that turn: nothing starts until the person resumes the queue.
+    assert.deepStrictEqual(queued.hold, {
+      reason: "interrupted",
+      detail: null,
+      causeKeys: ["interrupt:turn-asking"],
+    });
+    const result = handoffOutcome(settled);
+    assert.strictEqual(result.execution?.worktreeHandoff?.continuation, "held");
+    assert.include(result.detail, "held until the person resumes it");
+  }),
+);
+
+it.effect("a Stop after the runner's last read still holds the continuation it queues", () =>
+  Effect.gen(function* () {
+    // The turn that asked runs at every read, and is stopped just before the add: the add asks
+    // the queue to hold for a Stop of that turn, which the queue decides with the add.
+    const proposal = handoffProposal("handoff-stopped-before-add");
+    const h = yield* makeHandoffHarness({ proposal, stopBeforeAdd: true });
+    yield* h.executor.executeApproved(proposal.proposalId);
+
+    const settled = yield* Ref.get(h.stores.proposalRef);
+    assert.strictEqual(settled.status, "completed");
+    const queued = h.commands.find(
+      (command) => command.type === "thread.queue.add",
+    ) as unknown as ThreadQueueAddCommand;
+    assert.isUndefined(queued.hold);
+    assert.strictEqual(queued.holdIfTurnInterrupted, askingTurnId);
+    const result = handoffOutcome(settled);
+    assert.strictEqual(result.execution?.worktreeHandoff?.continuation, "held");
+    assert.include(result.detail, "held until the person resumes it");
+  }),
+);
+
+it.effect("a turn that asked and ended normally keeps the handoff", () =>
+  Effect.gen(function* () {
+    // The tool's wait timed out, so the agent ended its turn while the worktree was made.
+    const proposal = handoffProposal("handoff-turn-completed");
+    const h = yield* makeHandoffHarness({
+      proposal,
+      threadReads: [{}, { latestTurn: turnShell("completed") }],
+    });
+    yield* h.executor.executeApproved(proposal.proposalId);
+
+    const settled = yield* Ref.get(h.stores.proposalRef);
+    assert.strictEqual(settled.status, "completed");
+    assert.deepStrictEqual(
+      h.commands.map((command) => command.type),
+      ["worktree.create", "thread.meta.update", "thread.attach-to-worktree", "thread.queue.add"],
+    );
+    assert.deepStrictEqual(h.removed, []);
+    // Sent as usual: the chat is idle, so the queue starts the next turn in the worktree.
+    const queued = h.commands[3] as unknown as ThreadQueueAddCommand;
+    assert.isUndefined(queued.hold);
+    assert.strictEqual(handoffOutcome(settled).execution?.worktreeHandoff?.continuation, "queued");
+  }),
+);
+
+it.effect("a newer turn after the move pauses the queue for the continuation", () =>
+  Effect.gen(function* () {
+    const proposal = handoffProposal("handoff-superseded-after-move");
+    const h = yield* makeHandoffHarness({
+      proposal,
+      // Running at both checks; a newer turn is the chat's when the continuation is queued.
+      threadReads: [{}, {}, { latestTurn: turnShell("running", TurnId.make("turn-newer")) }],
+    });
+    yield* h.executor.executeApproved(proposal.proposalId);
+
+    const settled = yield* Ref.get(h.stores.proposalRef);
+    assert.strictEqual(settled.status, "completed");
+    const operation = Option.getOrThrow(yield* Ref.get(h.stores.operationRef));
+    const queued = h.commands.find(
+      (command) => command.type === "thread.queue.add",
+    ) as unknown as ThreadQueueAddCommand;
+    assert.deepInclude(queued.hold, {
+      reason: "paused",
+      causeKeys: [`paused:handoff:${operation.operationId}`],
+    });
+    assert.deepStrictEqual(h.removed, []);
+    assert.strictEqual(handoffOutcome(settled).execution?.worktreeHandoff?.continuation, "held");
+  }),
+);
+
+it.effect("a link to the worktree's record that fails is reported, and the move stands", () =>
+  Effect.gen(function* () {
+    const proposal = handoffProposal("handoff-attach-fails");
+    const h = yield* makeHandoffHarness({ proposal, attachFails: true });
+    yield* h.executor.executeApproved(proposal.proposalId);
+
+    const settled = yield* Ref.get(h.stores.proposalRef);
+    assert.strictEqual(settled.status, "completed");
+    // The continuation and the setup script still follow; nothing is removed.
+    assert.deepStrictEqual(
+      h.commands.map((command) => command.type),
+      ["worktree.create", "thread.meta.update", "thread.attach-to-worktree", "thread.queue.add"],
+    );
+    assert.lengthOf(h.setups, 1);
+    assert.deepStrictEqual(h.removed, []);
+    const result = handoffOutcome(settled);
+    assert.deepInclude(result.execution?.worktreeHandoff, {
+      worktreeAttached: false,
+      continuation: "queued",
+      setupScript: "started",
+    });
+    assert.include(result.detail, "could not link the chat to the worktree's record");
+    const operation = Option.getOrThrow(yield* Ref.get(h.stores.operationRef));
+    assert.notInclude(operation.state.completedSteps, "handoff-attached");
+  }),
+);
+
+it.effect("a setup script that fails to start is reported in fixed words, without its path", () =>
+  Effect.gen(function* () {
+    const proposal = handoffProposal("handoff-setup-fails");
+    const missing = "/workspace/worktrees/project/feature-handoff";
+    const h = yield* makeHandoffHarness({
+      proposal,
+      setupError: new TerminalCwdError({ cwd: missing, reason: "notFound" }),
+    });
+    yield* h.executor.executeApproved(proposal.proposalId);
+
+    const settled = yield* Ref.get(h.stores.proposalRef);
+    assert.strictEqual(settled.status, "completed");
+    const result = handoffOutcome(settled);
+    assert.strictEqual(result.execution?.worktreeHandoff?.setupScript, "failed");
+    assert.include(
+      result.detail,
+      "The setup script failed to start (the worktree folder was not found).",
+    );
+    const operation = Option.getOrThrow(yield* Ref.get(h.stores.operationRef));
+    for (const stored of [result.detail, operation.state.note ?? ""]) {
+      assert.notInclude(stored, missing);
+      assert.notInclude(stored, h.created[0]!.path as string);
+    }
+  }),
+);
+
+it.effect("never runs the setup script the user turned off, for the node or the project", () =>
+  Effect.gen(function* () {
+    for (const [id, settings] of [
+      ["handoff-setup-off-node", { runSetupScript: false }],
+      [
+        "handoff-setup-off-project",
+        { projectPreferences: { [projectId]: { runSetupScript: false } } },
+      ],
+    ] as const) {
+      // The agent asked for it (the default).
+      const proposal = handoffProposal(id, { runSetupScript: true });
+      const h = yield* makeHandoffHarness({ proposal, settings });
+      yield* h.executor.executeApproved(proposal.proposalId);
+
+      const settled = yield* Ref.get(h.stores.proposalRef);
+      assert.strictEqual(settled.status, "completed", id);
+      assert.lengthOf(h.setups, 0, id);
+      const result = handoffOutcome(settled);
+      assert.strictEqual(result.execution?.worktreeHandoff?.setupScript, "skipped", id);
+      assert.include(result.detail, "The setup script was skipped.");
+      const operation = Option.getOrThrow(yield* Ref.get(h.stores.operationRef));
+      assert.notInclude(operation.state.completedSteps, "setup-launched:0");
+    }
+  }),
+);
+
+it.effect("starts from origin: the fetch checks the base, which the outcome names", () =>
+  Effect.gen(function* () {
+    const proposal = handoffProposal("handoff-origin", { startFromOrigin: true });
+    const h = yield* makeHandoffHarness({ proposal });
+    yield* h.executor.executeApproved(proposal.proposalId);
+
+    const settled = yield* Ref.get(h.stores.proposalRef);
+    assert.strictEqual(settled.status, "completed");
+    // Preflight with HEAD: no local ref lookup for a base that is fetched.
+    assert.deepStrictEqual(h.listedRefs, []);
+    assert.deepInclude(h.created[0], {
+      refName: "main",
+      newRefName: "feature/handoff",
+      fetchOrigin: true,
+    });
+    const result = handoffOutcome(settled);
+    assert.deepInclude(result.execution?.worktreeHandoff, {
+      baseRef: "origin/main",
+      startedFromOrigin: true,
+    });
+    assert.include(result.detail, "from origin/main");
+  }),
+);
+
+it.effect("a move its branch fence refuses takes the worktree back and removes it", () =>
+  Effect.gen(function* () {
+    const proposal = handoffProposal("handoff-fence");
+    const h = yield* makeHandoffHarness({ proposal, move: "refused" });
+    yield* h.executor.executeApproved(proposal.proposalId);
+
+    const settled = yield* Ref.get(h.stores.proposalRef);
+    assert.strictEqual(settled.status, "failed");
+    assert.match(handoffFailure(settled), /branch changed/);
+    const checkoutPath = h.created[0]!.path as string;
+    // Not moved: the worktree was the operation's again, so its compensation removed it.
+    assert.deepStrictEqual(
+      h.commands.map((command) => command.type),
+      ["worktree.create", "thread.meta.update", "worktree.delete"],
+    );
+    assert.deepStrictEqual(h.removed, [checkoutPath]);
+    assert.deepStrictEqual(h.deletedBranches, ["feature/handoff"]);
+    assert.lengthOf(h.setups, 0);
+    const operation = Option.getOrThrow(yield* Ref.get(h.stores.operationRef));
+    assert.isUndefined(operation.state.handoffWorktree);
+    assert.notInclude(operation.state.completedSteps, "handoff-thread-moved");
+  }),
+);
+
+it.effect("a move that applied although its answer was lost completes the handoff", () =>
+  Effect.gen(function* () {
+    const proposal = handoffProposal("handoff-lost-answer");
+    const h = yield* makeHandoffHarness({ proposal, move: "lost" });
+    yield* h.executor.executeApproved(proposal.proposalId);
+
+    const settled = yield* Ref.get(h.stores.proposalRef);
+    assert.strictEqual(settled.status, "completed");
+    assert.deepStrictEqual(
+      h.commands.map((command) => command.type),
+      ["worktree.create", "thread.meta.update", "thread.attach-to-worktree", "thread.queue.add"],
+    );
+    assert.deepStrictEqual(h.removed, []);
+    assert.lengthOf(h.setups, 1);
+    const operation = Option.getOrThrow(yield* Ref.get(h.stores.operationRef));
+    assert.include(operation.state.completedSteps, "handoff-thread-moved");
+    assert.strictEqual(handoffOutcome(settled).execution?.worktreeHandoff?.continuation, "queued");
+  }),
+);
+
+it.effect("refuses an existing branch or a project without Git, creating nothing", () =>
+  Effect.gen(function* () {
+    const existing = handoffProposal("handoff-existing");
+    const branchTaken = yield* makeHandoffHarness({
+      proposal: existing,
+      localBranches: ["main", "feature/handoff"],
+    });
+    yield* branchTaken.executor.executeApproved(existing.proposalId);
+    const taken = yield* Ref.get(branchTaken.stores.proposalRef);
+    assert.strictEqual(taken.status, "failed");
+    assert.match(handoffFailure(taken), /feature\/handoff already exists/);
+
+    const noGit = handoffProposal("handoff-no-git");
+    const plain = yield* makeHandoffHarness({ proposal: noGit, isRepo: false });
+    yield* plain.executor.executeApproved(noGit.proposalId);
+    assert.match(handoffFailure(yield* Ref.get(plain.stores.proposalRef)), /not a Git repository/);
+
+    const moved = handoffProposal("handoff-moved");
+    const inWorktree = yield* makeHandoffHarness({
+      proposal: moved,
+      threadReads: [{ worktreePath: "/workspace/worktrees/other" }],
+    });
+    yield* inWorktree.executor.executeApproved(moved.proposalId);
+    assert.match(
+      handoffFailure(yield* Ref.get(inWorktree.stores.proposalRef)),
+      /already works in its own worktree/,
+    );
+
+    const stopped = handoffProposal("handoff-already-stopped");
+    const afterStop = yield* makeHandoffHarness({
+      proposal: stopped,
+      threadReads: [{ latestTurn: turnShell("interrupted") }],
+    });
+    yield* afterStop.executor.executeApproved(stopped.proposalId);
+    assert.match(handoffFailure(yield* Ref.get(afterStop.stores.proposalRef)), /was stopped/);
+
+    for (const run of [branchTaken, plain, inWorktree, afterStop]) {
+      assert.lengthOf(run.created, 0);
+      assert.lengthOf(run.commands, 0);
+    }
+  }),
+);
+
+it.effect("refuses branch names that would shadow other refs, before Git makes anything", () =>
+  Effect.gen(function* () {
+    const gitDriver = {
+      remoteNames: ["origin", "upstream"],
+      // `main` and `feature/x` packed: Git's own lookup misses their case variants.
+      refs: [
+        "refs/heads/main",
+        "refs/heads/feature/x",
+        "refs/remotes/origin/main",
+        "refs/tags/v1.0",
+      ],
+      resolves: ["stash"],
+    };
+    for (const [branch, problem] of [
+      ["origin/main", /shadow the branches of the remote origin/],
+      ["upstream/fix", /shadow the branches of the remote upstream/],
+      // Remote names and existing refs in any letter case: macOS and Windows checkouts keep
+      // their refs in a file system that ignores case.
+      ["ORIGIN/main", /shadow the branches of the remote origin/],
+      ["Upstream/fix", /shadow the branches of the remote upstream/],
+      ["MAIN", /Branch main already exists.*differ only in letter case/],
+      ["Feature/x", /names the existing Git ref refs\/heads\/feature\/x/],
+      ["V1.0", /names the existing Git ref refs\/tags\/v1\.0/],
+      ["v1.0", /names the existing Git ref refs\/tags\/v1\.0/],
+      ["stash", /already names a Git ref or commit/],
+      ["refs/heads/x", /would shadow another Git ref/],
+      ["heads/x", /would shadow another Git ref/],
+      ["tags/v2", /would shadow another Git ref/],
+      ["remotes/origin/main", /would shadow another Git ref/],
+      ["Refs/Heads/x", /would shadow another Git ref/],
+      ["FETCH_HEAD", /a name Git keeps for itself/],
+      ["auto_merge", /a name Git keeps for itself/],
+      ["0123456789abcdef0123456789abcdef01234567", /reads as a commit id/],
+      ["cafe", /reads as a commit id/],
+      ["feature/‮evil", /only plain ASCII/],
+      ["fix⁦x", /only plain ASCII/],
+      ["zero\u200Bwidth", /only plain ASCII/],
+    ] as const) {
+      const proposal = handoffProposal(`handoff-shadow-${branch.length}-${branch.charCodeAt(0)}`, {
+        branch,
+      });
+      const h = yield* makeHandoffHarness({ proposal, gitDriver });
+      yield* h.executor.executeApproved(proposal.proposalId);
+      assert.match(handoffFailure(yield* Ref.get(h.stores.proposalRef)), problem, branch);
+      assert.lengthOf(h.created, 0, branch);
+      assert.lengthOf(h.commands, 0, branch);
+    }
+    // A plain new name passes, after Git listed no ref of that name in any letter case and
+    // confirmed it resolves to nothing yet.
+    const plain = handoffProposal("handoff-plain-name", { branch: "feature/new" });
+    const ok = yield* makeHandoffHarness({ proposal: plain, gitDriver });
+    yield* ok.executor.executeApproved(plain.proposalId);
+    assert.strictEqual((yield* Ref.get(ok.stores.proposalRef)).status, "completed");
+    assert.deepStrictEqual(ok.forEachRefArgs, [
+      [
+        "for-each-ref",
+        "--ignore-case",
+        "--format=%(refname)",
+        "refs/heads/feature/new",
+        "refs/tags/feature/new",
+        "refs/remotes/feature/new",
+      ],
+    ]);
+    assert.deepStrictEqual(ok.resolvedNames, ["feature/new"]);
+
+    // Refs that cannot be listed refuse the name rather than let it through.
+    const unlisted = handoffProposal("handoff-refs-unlisted", { branch: "feature/new" });
+    const blind = yield* makeHandoffHarness({
+      proposal: unlisted,
+      gitDriver: { ...gitDriver, listFails: true },
+    });
+    yield* blind.executor.executeApproved(unlisted.proposalId);
+    assert.match(
+      handoffFailure(yield* Ref.get(blind.stores.proposalRef)),
+      /could not read this project's Git refs/,
+    );
+    assert.lengthOf(blind.created, 0);
+  }),
+);
+
+it.effect("refuses a second handoff of the same chat while the first one runs", () =>
+  Effect.gen(function* () {
+    const gate = yield* Deferred.make<void>();
+    const first = handoffProposal("handoff-first");
+    const firstRun = yield* makeHandoffHarness({
+      proposal: first,
+      createGate: Deferred.await(gate),
+    });
+    const second = handoffProposal("handoff-second", { branch: "feature/other" });
+    const secondRun = yield* makeHandoffHarness({ proposal: second });
+
+    const running = yield* Effect.forkChild(firstRun.executor.executeApproved(first.proposalId));
+    while ((yield* Ref.get(firstRun.stores.operationRef)).pipe(Option.isNone)) {
+      yield* Effect.yieldNow;
+    }
+    yield* secondRun.executor.executeApproved(second.proposalId);
+    const refused = yield* Ref.get(secondRun.stores.proposalRef);
+    assert.match(handoffFailure(refused), /already in progress/);
+    assert.lengthOf(secondRun.created, 0);
+
+    yield* Deferred.succeed(gate, undefined);
+    yield* Fiber.join(running);
+    assert.strictEqual((yield* Ref.get(firstRun.stores.proposalRef)).status, "completed");
+  }),
+);
+
+const handoffCheckout = "/workspace/worktrees/project/feature-handoff";
+const handoffWorktreeId = WorktreeId.make("worktree-handoff-restart");
+
+/** Recovers a handoff a restart cut off after the operation gave its worktree up. */
+const recoverHandoff = (input: {
+  readonly completedSteps: ReadonlyArray<string>;
+  /** Whether the chat already points at the worktree ("unreadable": its read fails). */
+  readonly chatMoved: boolean | "unreadable";
+}) =>
+  Effect.gen(function* () {
+    const proposal = { ...handoffProposal("handoff-restart"), status: "executing" as const };
+    const proposalRef = yield* Ref.make<AgentControlProposal>(proposal);
+    const commands: Array<{ readonly type: string } & Record<string, unknown>> = [];
+    const removed: string[] = [];
+    const deletedBranches: string[] = [];
+    const operationRef = yield* Ref.make<AgentControlOperation>({
+      operationId: AgentControlOperationId.make("operation-handoff-restart"),
+      proposalId: proposal.proposalId,
+      actionKind: "worktreeHandoff",
+      status: "running",
+      attempt: 1,
+      state: {
+        completedSteps: [...input.completedSteps],
+        resources: {
+          threadIds: [callerThreadId],
+          ownedThreadIds: [],
+          worktreeIds: [handoffWorktreeId],
+          // Given up just before the move.
+          ownedWorktrees: [],
+        },
+        commandReceipts: [],
+        handoffWorktree: {
+          worktreeId: handoffWorktreeId,
+          projectId,
+          branch: "feature/handoff",
+          checkoutPath: handoffCheckout,
+          baseRef: "main",
+        },
+      },
+      result: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const execution = yield* makeTestExecution({
+      proposalStore: {
+        getById: () => Ref.get(proposalRef).pipe(Effect.map(Option.some)),
+        listActive: () => Effect.succeed([]),
+        settleExecution: (settled: { readonly result: AgentControlResultEnvelope }) =>
+          Ref.update(proposalRef, (current): AgentControlProposal => ({
+            ...current,
+            status: settled.result.outcome === "completed" ? "completed" : "failed",
+            result: settled.result,
+          })),
+      },
+      operationStore: {
+        listRecoverable: () => Ref.get(operationRef).pipe(Effect.map((operation) => [operation])),
+        getByProposalId: () => Ref.get(operationRef).pipe(Effect.map(Option.some)),
+        transition: (next: {
+          readonly nextStatus: AgentControlOperation["status"];
+          readonly state: AgentControlOperation["state"];
+          readonly result: AgentControlOperation["result"];
+        }) =>
+          Ref.updateAndGet(operationRef, (current) => ({
+            ...current,
+            status: next.nextStatus,
+            state: next.state,
+            result: next.result,
+          })),
+        checkpoint: (next: { readonly state: AgentControlOperation["state"] }) =>
+          Ref.updateAndGet(operationRef, (current) => ({ ...current, state: next.state })),
+      },
+      commandApplication: {
+        apply: (command: { readonly type: string } & Record<string, unknown>) =>
+          Effect.sync(() => {
+            commands.push(command);
+            return { sequence: commands.length };
+          }),
+      },
+      projections: {
+        getShellSnapshot: () => Effect.succeed({ projects: [handoffProject] }),
+        getProjectShellById: () => Effect.succeed(Option.some(handoffProject)),
+        getThreadShellById: () =>
+          Effect.succeed(
+            input.chatMoved === "unreadable"
+              ? Option.none()
+              : Option.some(
+                  handoffThread({
+                    branch: input.chatMoved ? "feature/handoff" : "main",
+                    worktreePath: input.chatMoved ? handoffCheckout : null,
+                    // A restart releases the turn that asked.
+                    latestTurn: turnShell("interrupted"),
+                  }),
+                ),
+          ),
+        getWorktreeShellById: () =>
+          Effect.succeed(
+            Option.some({
+              worktreeId: handoffWorktreeId,
+              projectId,
+              branch: "feature/handoff",
+              worktreePath: handoffCheckout,
+            }),
+          ),
+      },
+      workspaceAccess: {
+        assertExistingPath: ({ path }: { path: string }) => Effect.succeed(path),
+      },
+      git: {
+        listWorktreePaths: () => Effect.succeed([handoffCheckout]),
+        removeWorktree: (request: { readonly path: string }) =>
+          Effect.sync(() => void removed.push(request.path)),
+        deleteBranch: (request: { readonly refName: string }) =>
+          Effect.sync(() => void deletedBranches.push(request.refName)),
+      },
+    });
+    yield* execution.recoverIncomplete;
+    return {
+      proposal: yield* Ref.get(proposalRef),
+      operation: yield* Ref.get(operationRef),
+      commands,
+      removed,
+      deletedBranches,
+    };
+  });
+
+it.effect("a restart after the move finishes the handoff and keeps the worktree", () =>
+  Effect.gen(function* () {
+    // The move applied, but the restart lost its checkpoint (and everything after it).
+    const lost = yield* recoverHandoff({
+      completedSteps: ["worktree-owned:0", "worktree-created:0", "handoff-bind-started"],
+      chatMoved: true,
+    });
+    assert.strictEqual(lost.proposal.status, "completed");
+    // Linked to the worktree's record, and the continuation queued, held as a restart holds
+    // every queue. The move itself is not repeated, and nothing is removed.
+    assert.deepStrictEqual(
+      lost.commands.map((command) => command.type),
+      ["thread.attach-to-worktree", "thread.queue.add"],
+    );
+    assert.deepInclude(lost.commands[0], {
+      threadId: callerThreadId,
+      worktreeId: handoffWorktreeId,
+    });
+    const queued = lost.commands[1] as unknown as ThreadQueueAddCommand;
+    assert.strictEqual(queued.entry.text, "Run the tests in the worktree");
+    assert.deepInclude(queued.hold, { reason: "restart" });
+    assert.deepStrictEqual(lost.removed, []);
+    assert.include(lost.operation.state.completedSteps, "handoff-thread-moved");
+    const result = handoffOutcome(lost.proposal);
+    assert.strictEqual(result.execution?.worktreeHandoff?.continuation, "held");
+    assert.include(result.detail, "Ryco restarted during the move and finished it");
+
+    // Moved and linked before the restart: only what is left is done, with the same ids.
+    const linked = yield* recoverHandoff({
+      completedSteps: [
+        "worktree-owned:0",
+        "worktree-created:0",
+        "handoff-bind-started",
+        "handoff-thread-moved",
+        "handoff-attached",
+      ],
+      chatMoved: true,
+    });
+    assert.strictEqual(linked.proposal.status, "completed");
+    assert.deepStrictEqual(
+      linked.commands.map((command) => command.type),
+      ["thread.queue.add"],
+    );
+    assert.strictEqual(
+      (linked.commands[0] as unknown as ThreadQueueAddCommand).entry.messageId,
+      queued.entry.messageId,
+    );
+    assert.deepStrictEqual(linked.removed, []);
+  }),
+);
+
+it.effect("a restart before the move takes the worktree back and removes it", () =>
+  Effect.gen(function* () {
+    const cut = yield* recoverHandoff({
+      completedSteps: ["worktree-owned:0", "worktree-created:0", "handoff-bind-started"],
+      chatMoved: false,
+    });
+    assert.strictEqual(cut.proposal.status, "failed");
+    assert.match(handoffFailure(cut.proposal), /interrupted by server restart/);
+    // The chat never pointed at it: no attach, no continuation, and the worktree is gone.
+    assert.deepStrictEqual(
+      cut.commands.map((command) => command.type),
+      ["worktree.delete"],
+    );
+    assert.deepStrictEqual(cut.removed, [handoffCheckout]);
+    assert.deepStrictEqual(cut.deletedBranches, ["feature/handoff"]);
+    assert.isUndefined(cut.operation.state.handoffWorktree);
+
+    // A chat that cannot be read may already work there: the worktree stays.
+    const unknown = yield* recoverHandoff({
+      completedSteps: ["worktree-owned:0", "worktree-created:0", "handoff-bind-started"],
+      chatMoved: "unreadable",
+    });
+    assert.strictEqual(unknown.proposal.status, "failed");
+    assert.deepStrictEqual(unknown.commands, []);
+    assert.deepStrictEqual(unknown.removed, []);
+    assert.deepStrictEqual(unknown.operation.state.resources.ownedWorktrees, []);
+  }),
 );

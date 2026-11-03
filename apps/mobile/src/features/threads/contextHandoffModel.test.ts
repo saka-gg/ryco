@@ -131,6 +131,13 @@ describe("mobile context handoff presentation", () => {
     ).toBe(
       "Fresh session in the new folder. Failed: Provider exited. Send your message again to retry",
     );
+    expect(
+      contextHandoffMarkerAccessibilityLabel({
+        ...relocation,
+        reason: "native-history-unavailable",
+        status: "consumed",
+      }),
+    ).toBe("Continued in a fresh session");
   });
 
   it("names the model a fork's handoff switched from when it also changed provider", () => {

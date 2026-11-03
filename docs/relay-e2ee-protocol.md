@@ -1258,8 +1258,7 @@ A response is compressed only when all of the following hold:
 1. the channel's client advertised a frame version the node writes (§4.6.2);
 2. the response belongs to an allowlisted method, and **every** value it carries is an
    allowlisted kind, except for the split described below;
-3. the encoded message is at least 16 KiB (the permessage-deflate threshold of the direct
-   WebSocket), and the message and its compressed frame **together** fit the channel's
+3. the encoded message is at least 16 KiB, and the message and its compressed frame **together** fit the channel's
    `plaintextCeiling` (§4.5). The client holds both while it inflates and charges both to its
    inbound queue, so this keeps a compressed message within what one message may occupy;
 4. raw DEFLATE at level 1, with a **fresh compression context for this message alone**, plus the
@@ -1378,8 +1377,7 @@ and timing, and it can close channels at will.
   messages containing both the secret and fresh attacker content get delivered.
 - **What the Hub can force.** Closing a channel makes the client reconnect and re-subscribe. A
   reconnect within the server's replay window resumes instead of re-sending the snapshot; a Hub
-  that stalls reconnects past that window forces a full snapshot each time. Clients that do not
-  take thread-priority deltas also receive a full snapshot on every priority change. Re-delivering
+  that stalls reconnects past that window forces a full snapshot each time. Re-delivering
   unchanged content repeats the same length and teaches nothing, so each new guess still needs new
   attacker-controlled content inside the same message, for shell pages through thread titles or
   goals an attacker can steer.

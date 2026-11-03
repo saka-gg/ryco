@@ -23,7 +23,7 @@ import {
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { type EnvironmentId, type ServerProviderSkill } from "@ryco/contracts";
 
-import { type WorkLogEntry } from "../../session-logic";
+import { isReasoningWorkEntry, reasoningEntryText, type WorkLogEntry } from "../../session-logic";
 import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
 import { visibleSecondTicker } from "../../lib/perf/ticker";
@@ -31,6 +31,7 @@ import { DisclosureRegion } from "../ui/DisclosureRegion";
 import { DISCLOSURE_CLEANUP_BUFFER_MS, DISCLOSURE_TRANSITION_MS } from "../../lib/disclosureMotion";
 import ChatMarkdown from "../ChatMarkdown";
 import type { SkillInlineTextSearchHighlight } from "./SkillInlineText";
+import { StreamedMessageMarkdown, useStreamedMessageText } from "./StreamedMessageMarkdown";
 import {
   chapterExpansionKey,
   chapterStepsExpansionKey,
@@ -45,8 +46,6 @@ import {
   deriveChapterTallies,
   describeTally,
   formatChapterDuration,
-  isReasoningWorkEntry,
-  reasoningEntryText,
   selectTickerEntries,
   type ChapterStepDisplay,
   type ChapterTallies,
@@ -63,6 +62,8 @@ export interface WorkChapterRowProps {
   environmentId: EnvironmentId;
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   searchHighlight: Omit<SkillInlineTextSearchHighlight, "cursor" | "keyPrefix"> | undefined;
+  /** Reveal the chapter's streaming message gradually; see `ChatMarkdown`'s `smoothStreaming`. */
+  smoothStreaming: boolean;
   /** The timeline's Activity + transcript panel for one tool entry. */
   renderEntryPanel: (entry: WorkLogEntry, panelId: string) => ReactNode;
 }
@@ -121,7 +122,7 @@ export const WorkChapterRow = memo(function WorkChapterRow(props: WorkChapterRow
             onClick={() => toggle(true)}
             className="group/chapter -mx-2 flex min-h-[30px] w-[calc(100%+1rem)] cursor-pointer items-center gap-3 rounded-lg px-2 text-left transition-colors duration-200 hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
           >
-            <ChapterTitle row={row} tallies={tallies} />
+            <ChapterTitle row={row} tallies={tallies} routeThreadKey={routeThreadKey} />
             <ChapterTallyChips tallies={tallies} />
             <span className="w-12 shrink-0 text-right text-[12px] tabular-nums text-muted-foreground/55">
               {duration}
@@ -148,9 +149,17 @@ export const WorkChapterRow = memo(function WorkChapterRow(props: WorkChapterRow
   );
 });
 
-function ChapterTitle(props: { row: ChapterRow; tallies: ChapterTallies }) {
-  const text = props.row.message
-    ? chapterTitleFromMessage(props.row.message.text)
+function ChapterTitle(props: { row: ChapterRow; tallies: ChapterTallies; routeThreadKey: string }) {
+  const message = props.row.message;
+  // A chapter folds once a newer paragraph follows it; if its own paragraph
+  // still streams then, the row holds the text of the last structural change.
+  const messageText = useStreamedMessageText(
+    props.routeThreadKey,
+    message?.streaming ? message.id : null,
+    message?.text ?? "",
+  );
+  const text = message
+    ? chapterTitleFromMessage(messageText)
     : chapterFallbackTitle(props.row.entries, props.tallies);
   // Inline code keeps its mono face in the folded line; everything else is prose.
   const parts = text.split(/(`[^`]+`)/);
@@ -206,11 +215,14 @@ function ChapterBody(
     <div className="pb-0.5">
       {row.message ? (
         <div className="min-w-0 py-0.5 pr-1">
-          <ChatMarkdown
+          <StreamedMessageMarkdown
+            routeThreadKey={props.routeThreadKey}
+            streamingMessageId={row.message.streaming ? row.message.id : null}
             text={row.message.text}
             cwd={props.markdownCwd}
             environmentId={props.environmentId}
             isStreaming={row.message.streaming}
+            smoothStreaming={props.smoothStreaming}
             skills={props.skills}
             searchHighlight={props.searchHighlight}
           />

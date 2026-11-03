@@ -25,8 +25,8 @@ import type { Effect } from "effect";
 import type { ProjectCopyCallerChannel } from "../callerChannel.ts";
 
 /**
- * Started over `relay-plaintext`, an export never carries opted-in ignored files such as `.env`
- * (`skipped: insecure-channel`).
+ * Started over an `unencrypted` channel, an export never carries opted-in ignored files such as
+ * `.env` (`skipped: insecure-channel`).
  */
 
 export interface ProjectExportStartRequest {
@@ -54,7 +54,7 @@ export interface ProjectExportShape {
   /**
    * One chunk of an artifact; slides the export's TTL (30 min from the last read). With the
    * caller's `channel`, an artifact that carries opted-in ignored files is refused on
-   * `relay-plaintext` (`access-denied`), like `start` leaves them out there.
+   * an `unencrypted` channel (`access-denied`), like `start` leaves them out there.
    */
   readonly readChunk: (
     input: ProjectExportReadChunkInput,

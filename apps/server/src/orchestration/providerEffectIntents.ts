@@ -25,9 +25,12 @@ import {
   MessageId,
   type OrchestrationEvent,
   type OrchestrationThreadActivity,
+  type ServerWakeSource,
   type ThreadId,
 } from "@ryco/contracts";
+import { TURN_START_ENDED_ACTIVITY_KINDS, turnStartEndedMessageId } from "@ryco/shared/turnStart";
 import { Option, Schema } from "effect";
+import { SERVER_WAKE_COPY } from "./serverWake.ts";
 
 export const PROVIDER_EFFECT_INTENT_KINDS = ["turn-start", "turn-steer", "session-stop"] as const;
 export type ProviderEffectIntentKind = (typeof PROVIDER_EFFECT_INTENT_KINDS)[number];
@@ -102,30 +105,10 @@ export const providerIntentKindOf = (
       : "session-stop";
 
 /**
- * Activity kinds that end a turn start without a turn: the reactor's (or the
- * handoff coordinator's) visible failure, and a Stop's cancel notice.
+ * Shared by the planner and `ProjectionPipeline` (pending-row cleanup), and by
+ * `ryco thread`, so all read the outcome key identically.
  */
-export const TURN_START_ENDED_ACTIVITY_KINDS: ReadonlySet<string> = new Set([
-  "provider.turn.start.failed",
-  "provider.turn.start.cancelled",
-]);
-
-/**
- * The user message whose turn start this activity ended, or null. Shared by the
- * planner and `ProjectionPipeline` (pending-row cleanup), so both read the
- * outcome key identically.
- */
-export const turnStartEndedMessageId = (
-  activity: OrchestrationThreadActivity,
-): MessageId | null => {
-  if (!TURN_START_ENDED_ACTIVITY_KINDS.has(activity.kind)) return null;
-  const payload = activity.payload;
-  if (typeof payload !== "object" || payload === null || !("messageId" in payload)) return null;
-  const messageId = payload.messageId;
-  return typeof messageId === "string" && messageId.trim().length > 0
-    ? MessageId.make(messageId)
-    : null;
-};
+export { TURN_START_ENDED_ACTIVITY_KINDS, turnStartEndedMessageId };
 
 const decodeHandoffActivityPayload = Schema.decodeUnknownOption(ContextHandoffActivityPayload);
 
@@ -240,7 +223,8 @@ export const deliveryStateOf = (dispatchedAt: string | null): IntentDeliveryStat
 export const recoveryCopy = (input: {
   readonly kind: "turn-start" | "turn-steer";
   readonly deliveryState: IntentDeliveryState;
-  readonly delegatedReturn: boolean;
+  /** The server wake a turn start delivered (`serverWakeSource`), or null for a person's. */
+  readonly serverWake: ServerWakeSource | null;
 }): { readonly summary: string; readonly detail: string } => {
   const notSent = input.deliveryState === "not-sent";
   if (input.kind === "turn-steer") {
@@ -252,18 +236,9 @@ export const recoveryCopy = (input: {
         : "Ryco restarted while delivering this steer message. It may have reached the provider. Check the turn before sending it again.",
     };
   }
-  if (input.delegatedReturn) {
-    return notSent
-      ? {
-          summary: "Delegated return was not submitted",
-          detail:
-            "Ryco restarted before this delegated result reached the provider. Inspect the result before sending it manually.",
-        }
-      : {
-          summary: "Delegated return delivery unconfirmed",
-          detail:
-            "Ryco restarted while submitting this delegated result. It may have reached the provider. Inspect the parent thread before sending it manually.",
-        };
+  if (input.serverWake !== null) {
+    const copy = SERVER_WAKE_COPY[input.serverWake];
+    return notSent ? copy.notSent : copy.uncertain;
   }
   return notSent
     ? {

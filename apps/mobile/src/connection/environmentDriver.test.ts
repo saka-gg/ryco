@@ -79,10 +79,11 @@ vi.mock("../rpc/wsRpcClient", async (importOriginal) => ({
 }));
 
 import { installHostedPrimaryConnectionFactory } from "../hostedHub/primaryConnectionFactory";
-import type { HostedPrimaryConnectionDeps } from "../hostedHub/primaryConnection";
 import { useComposerDraftStore } from "../state/composerDraftStore";
 import { useMessageQueueStore } from "../state/messageQueueStore";
 import { subscribeAppStateResume } from "./appStateResume";
+import { switchSavedEnvironment } from "@ryco/client-runtime/connection/savedEnvironmentSwitch";
+import { createMobileSavedEnvironmentCatalog } from "./catalog";
 import { createMobileEnvironmentDriver, type MobileCatalogLike } from "./environmentDriver";
 import { createMobileEnvironmentStateSink } from "./environmentStateSink";
 import { createSavedSessionHints, type SavedSessionHints } from "./savedSessionHints";
@@ -450,6 +451,82 @@ describe("mobile environment driver with session hints", () => {
     expect(fake.runtime(ENV_ID)?.authState).toBe("requires-auth");
     expect(await sessionHints.read(ENV_ID)).toBeNull();
     await vi.waitFor(() => expect(driver.supervisor.read(ENV_ID)).toBeNull());
+  });
+});
+
+describe("mobile environment driver with a node switched off", () => {
+  /** The app's own catalog over in-memory storage: the shared switch, unchanged. */
+  function realCatalog(stored: ReadonlyArray<SavedEnvironmentRecord>) {
+    const values = new Map([["ryco.savedEnvironments.registry", JSON.stringify(stored)]]);
+    const secrets = new Map<string, string>([[ENV_ID, "bearer-token"]]);
+    const catalog = createMobileSavedEnvironmentCatalog({
+      kv: {
+        getItem: async (key) => values.get(key) ?? null,
+        setItem: async (key, value) => {
+          values.set(key, value);
+        },
+      },
+      secretKV: {
+        get: async (key) => secrets.get(key) ?? null,
+        set: async (key, value) => {
+          secrets.set(key, value);
+          return true;
+        },
+        remove: async (key) => {
+          secrets.delete(key);
+        },
+      },
+    });
+    return {
+      catalog,
+      stored: () =>
+        JSON.parse(
+          values.get("ryco.savedEnvironments.registry") ?? "[]",
+        ) as Array<SavedEnvironmentRecord>,
+    };
+  }
+
+  it("leaves it off across launch, resume and sync, and connects it once switched on", async () => {
+    const otherId = "env-2" as EnvironmentId;
+    const { catalog, stored } = realCatalog([
+      { ...record(), disabledAt: "2026-10-31T09:00:00.000Z" },
+      record(otherId),
+    ]);
+    let resume: (reason: string) => void = () => undefined;
+    const driver: ReturnType<typeof createMobileEnvironmentDriver> = createMobileEnvironmentDriver({
+      catalog,
+      remoteApi: noopRemoteApi,
+      subscribeResume: (listener) => {
+        resume = listener;
+        return () => {};
+      },
+      subscribeNetworkChange: () => () => {},
+      connectSavedEnvironment: async (rec) =>
+        driver.supervisor.register(fakeConnection(rec.environmentId)),
+    });
+    await catalog.waitForHydration();
+    const stop = driver.start();
+
+    await vi.waitFor(() => expect(driver.supervisor.read(otherId)).not.toBeNull());
+    resume("appstate-active");
+    catalog.registryStore.getState().rename(ENV_ID, "Renamed");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(driver.supervisor.read(ENV_ID)).toBeNull();
+
+    switchSavedEnvironment(catalog.registryStore, ENV_ID, true);
+    await vi.waitFor(() => expect(driver.supervisor.read(ENV_ID)).not.toBeNull());
+    expect(stored().find((entry) => entry.environmentId === ENV_ID)).not.toHaveProperty(
+      "disabledAt",
+    );
+
+    // Off again: the sync drops the live connection; the pairing stays.
+    switchSavedEnvironment(catalog.registryStore, ENV_ID, false);
+    await vi.waitFor(() => expect(driver.supervisor.read(ENV_ID)).toBeNull());
+    expect(stored().find((entry) => entry.environmentId === ENV_ID)?.disabledAt).toEqual(
+      expect.any(String),
+    );
+    await expect(catalog.readBearerToken(ENV_ID)).resolves.toBe("bearer-token");
+    stop();
   });
 });
 
@@ -982,18 +1059,6 @@ describe("mobile environment driver", () => {
       driver.releaseDeferredPrimaryConnection();
       expect(factory).toHaveBeenCalledOnce();
 
-      // The hosted connection receives a priority handler, so it opts into
-      // thread-priority deltas, and the handler reaches the supervisor.
-      const [primaryDeps] = factory.mock.calls[0] as unknown as [HostedPrimaryConnectionDeps];
-      const applyPriorities = vi
-        .spyOn(driver.supervisor, "applyThreadPriorities")
-        .mockImplementation(() => undefined);
-      const item = { kind: "thread-priorities" } as unknown as Parameters<
-        HostedPrimaryConnectionDeps["applyThreadPriorities"]
-      >[0];
-      primaryDeps.applyThreadPriorities(item, primaryId);
-      expect(applyPriorities).toHaveBeenCalledExactlyOnceWith(item, primaryId);
-      applyPriorities.mockRestore();
       stop();
       await driver.supervisor.remove(primaryId);
     } finally {

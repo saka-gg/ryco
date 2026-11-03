@@ -1,6 +1,10 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import {
   CommandId,
   OrchestrationDispatchCommandError,
@@ -25,7 +29,11 @@ import {
 import { deriveServerPaths, ServerConfig } from "../config.ts";
 import { WorkspaceAccessPolicyLayer } from "../workspace/Layers/WorkspaceAccessPolicy.ts";
 import { WorkspacePathsLive } from "../workspace/Layers/WorkspacePaths.ts";
-import { normalizeDispatchCommand, withChatAttachmentAdoption } from "./Normalizer.ts";
+import {
+  normalizeDispatchCommand,
+  refuseServerMintedMessageId,
+  withChatAttachmentAdoption,
+} from "./Normalizer.ts";
 import {
   ProjectionSnapshotQuery,
   type ProjectionSnapshotQueryShape,
@@ -335,6 +343,8 @@ it.effect("persists a validated general file under an opaque path", () =>
 const imageTurnCommand = (input: {
   readonly dataUrl: string;
   readonly sizeBytes: number;
+  readonly name?: string;
+  readonly mimeType?: string;
 }): ClientOrchestrationCommand => ({
   type: "thread.turn.start",
   commandId: CommandId.make("image-attachment-command"),
@@ -346,8 +356,8 @@ const imageTurnCommand = (input: {
     attachments: [
       {
         type: "image" as const,
-        name: "tiny.png",
-        mimeType: "image/png",
+        name: input.name ?? "tiny.png",
+        mimeType: input.mimeType ?? "image/png",
         sizeBytes: input.sizeBytes,
         dataUrl: input.dataUrl,
       },
@@ -434,6 +444,100 @@ it.effect("persists an unparseable image without dimensions", () =>
       expect(persistedNames).toContain(`${attachment.id}.png`);
     }).pipe(Effect.provide(NodeServices.layer)),
   ),
+);
+
+const hasSips = process.platform === "darwin" && existsSync("/usr/bin/sips");
+
+/** A real HEIC photo where sips can make one; elsewhere only its header, which nothing decodes. */
+const heicFixture = async (): Promise<Buffer> => {
+  if (!hasSips) {
+    return Buffer.from("\0\0\0\x18ftypheic\0\0\0\0mif1heic", "latin1");
+  }
+  const directory = await mkdtemp(path.join(tmpdir(), "ryco-normalizer-heic-"));
+  try {
+    const png = path.join(directory, "photo.png");
+    await writeFile(png, Buffer.from(TINY_PNG_BASE64, "base64"));
+    await promisify(execFile)("/usr/bin/sips", [
+      "-s",
+      "format",
+      "heic",
+      png,
+      "--out",
+      `${png}.heic`,
+    ]);
+    return await readFile(`${png}.heic`);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+};
+
+it.effect(
+  "stores a HEIC photo as the JPEG a Mac node converts it to, or refuses it elsewhere",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const workspaceAccessRoot = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "ryco-normalizer-heic-",
+        });
+        const layer = makeNormalizerLayer(workspaceAccessRoot);
+        const heic = yield* Effect.promise(heicFixture);
+
+        const outcome = yield* Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const config = yield* ServerConfig;
+          const normalized = yield* normalizeDispatchCommand(
+            imageTurnCommand({
+              name: "IMG_0001.HEIC",
+              mimeType: "image/heic",
+              dataUrl: `data:image/heic;base64,${heic.toString("base64")}`,
+              sizeBytes: heic.byteLength,
+            }),
+          );
+          return {
+            normalized,
+            persisted: yield* fileSystem
+              .readDirectory(config.attachmentsDir)
+              .pipe(
+                Effect.flatMap((names) =>
+                  Effect.forEach(names, (name) =>
+                    fileSystem
+                      .readFile(path.join(config.attachmentsDir, name))
+                      .pipe(Effect.map((bytes) => ({ name, bytes }))),
+                  ),
+                ),
+              ),
+          };
+        }).pipe(Effect.provide(layer), Effect.result);
+
+        if (!hasSips) {
+          expect(outcome._tag).toBe("Failure");
+          if (outcome._tag !== "Failure") return;
+          expect(outcome.failure).toBeInstanceOf(OrchestrationDispatchCommandError);
+          expect(outcome.failure.message).toBe(
+            "HEIC photos can be converted only on a Mac node. Convert 'IMG_0001.HEIC' to JPEG first.",
+          );
+          return;
+        }
+        if (outcome._tag !== "Success") throw new Error("Expected the HEIC photo to convert");
+        const { normalized, persisted } = outcome.success;
+        if (normalized.type !== "thread.turn.start") {
+          throw new Error(`Unexpected normalized command: ${normalized.type}`);
+        }
+        const attachment = normalized.message.attachments[0] as ChatImageAttachment | undefined;
+        expect(attachment).toMatchObject({
+          type: "image",
+          name: "IMG_0001.jpg",
+          mimeType: "image/jpeg",
+          width: 1,
+          height: 1,
+        });
+        expect(persisted.map(({ name }) => name)).toEqual([`${attachment?.id}.jpg`]);
+        const stored = persisted[0]!.bytes;
+        expect(attachment?.sizeBytes).toBe(stored.byteLength);
+        expect([...stored.subarray(0, 3)]).toEqual([0xff, 0xd8, 0xff]);
+      }).pipe(Effect.provide(NodeServices.layer)),
+    ),
 );
 
 it.effect("rejects mismatched file MIME and size metadata before persistence", () =>
@@ -768,5 +872,127 @@ it.effect("keeps a committed overlapping replay when the first attempt later fai
       );
       expect(result._tag).toBe("Failure");
     }),
+  ),
+);
+
+it.effect("refuses a client's turn start or steer that uses an id the server mints", () =>
+  Effect.gen(function* () {
+    const start = (messageId: string) =>
+      ({
+        type: "thread.turn.start",
+        commandId: "cmd-1",
+        threadId: "thread-1",
+        message: { messageId, role: "user", text: "Hi", attachments: [] },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        createdAt: "2026-10-29T00:00:00.000Z",
+      }) as unknown as Parameters<typeof refuseServerMintedMessageId>[0];
+    for (const id of [
+      "delegation-result:child",
+      "message-agent-control-op-send-message",
+      "goal-continuation:thread-1:turn-1",
+      "pull-request-watch:thread-1:uuid-1",
+    ]) {
+      const refused = yield* Effect.flip(refuseServerMintedMessageId(start(id)));
+      expect(refused.message).toBe("This message id is reserved for messages Ryco sends.");
+    }
+    yield* refuseServerMintedMessageId(start("a1b2c3"));
+    // A queued follow-up is sent under its own id, so it may not borrow one either.
+    const queued = (messageId: string) =>
+      ({
+        type: "thread.queue.add",
+        commandId: "cmd-3",
+        threadId: "thread-1",
+        entry: { messageId, text: "Later", attachments: [] },
+        createdAt: "2026-10-29T00:00:00.000Z",
+      }) as unknown as Parameters<typeof refuseServerMintedMessageId>[0];
+    const refusedQueued = yield* Effect.flip(
+      refuseServerMintedMessageId(queued("delegation-result:x")),
+    );
+    expect(refusedQueued.message).toBe("This message id is reserved for messages Ryco sends.");
+    yield* refuseServerMintedMessageId(queued("queued-1"));
+    yield* refuseServerMintedMessageId({
+      type: "thread.archive",
+      commandId: "cmd-2",
+      threadId: "thread-1",
+    } as unknown as Parameters<typeof refuseServerMintedMessageId>[0]);
+  }),
+);
+
+const queueAddCommand = (messageId: string): ClientOrchestrationCommand => {
+  const turn = fileTurnCommand();
+  if (turn.type !== "thread.turn.start") throw new Error("Expected a turn start fixture");
+  return {
+    type: "thread.queue.add",
+    commandId: CommandId.make(`queue-add-${messageId}`),
+    threadId: turn.threadId,
+    entry: {
+      messageId: MessageId.make(messageId),
+      text: "Queued with a file",
+      attachments: turn.message.attachments,
+      modelSelection: { instanceId: "codex", model: "gpt-5.4" } as never,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+    },
+    createdAt: "2026-01-01T00:00:00.000Z",
+  };
+};
+
+it.effect("stores a queued follow-up's attachments like a sent message's", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const workspaceAccessRoot = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "ryco-normalizer-queue-",
+      });
+      const normalized = yield* normalizeDispatchCommand(queueAddCommand("queued-1")).pipe(
+        Effect.provide(makeNormalizerLayer(workspaceAccessRoot)),
+      );
+      if (normalized.type !== "thread.queue.add") {
+        throw new Error(`Unexpected normalized command: ${normalized.type}`);
+      }
+      const [attachment] = normalized.entry.attachments;
+      expect(attachment?.type).toBe("file");
+      expect(attachment && "id" in attachment ? attachment.id : undefined).toBeTypeOf("string");
+      expect(attachment && "dataUrl" in attachment).toBe(false);
+      expect(normalized.alreadySent).toBeUndefined();
+    }).pipe(Effect.provide(NodeServices.layer)),
+  ),
+);
+
+it.effect("marks a queued follow-up that is already a message as sent, storing nothing", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const workspaceAccessRoot = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "ryco-normalizer-queue-sent-",
+      });
+      const layer = Layer.mergeAll(
+        WorkspaceAccessPolicyLayer(workspaceAccessRoot),
+        WorkspacePathsLive,
+        ServerConfig.layerTest(workspaceAccessRoot, { prefix: "ryco-normalizer-test-" }),
+        Layer.succeed(ProjectionSnapshotQuery, {
+          getThreadMessageById: ({ messageId }) =>
+            Effect.succeed(
+              messageId === "sent-1" ? Option.some({ id: messageId } as never) : Option.none(),
+            ),
+        } as Partial<ProjectionSnapshotQueryShape> as ProjectionSnapshotQueryShape),
+      ).pipe(Layer.provideMerge(NodeServices.layer));
+      const { normalized, stored } = yield* Effect.gen(function* () {
+        const config = yield* ServerConfig;
+        const normalized = yield* normalizeDispatchCommand(queueAddCommand("sent-1"));
+        const fs = yield* FileSystem.FileSystem;
+        const stored = (yield* fs.exists(config.attachmentsDir))
+          ? yield* fs.readDirectory(config.attachmentsDir)
+          : [];
+        return { normalized, stored };
+      }).pipe(Effect.provide(layer));
+      if (normalized.type !== "thread.queue.add") {
+        throw new Error(`Unexpected normalized command: ${normalized.type}`);
+      }
+      expect(normalized.alreadySent).toBe(true);
+      expect(normalized.entry.attachments).toEqual([]);
+      expect(stored).toEqual([]);
+    }).pipe(Effect.provide(NodeServices.layer)),
   ),
 );

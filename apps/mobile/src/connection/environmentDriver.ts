@@ -21,7 +21,7 @@ import { createKnownEnvironment } from "@ryco/client-runtime/knownEnvironment";
 import { WS_URL_PROVIDER_TIMEOUT_MS } from "@ryco/client-runtime/rpc";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 
-import { createWsRpcClient, type WsRpcClient } from "../rpc/wsRpcClient";
+import { createDeviceRpcClient, createWsRpcClient, type WsRpcClient } from "../rpc/wsRpcClient";
 import { WsTransport } from "../rpc/wsTransport";
 import {
   hasUnsentThreadWork,
@@ -36,9 +36,11 @@ import { invalidateProjectFilesState } from "../rpc/projectFilesAtoms";
 import { markEnvironmentSnapshotDirty } from "../persistence/environmentSnapshotPersistence";
 import { createHostedPrimaryConnectionIfLoaded } from "../hostedHub/primaryConnectionFactory";
 import { subscribeAppStateResume } from "./appStateResume";
+import { subscribeNetworkPathChange } from "./networkPathChange";
 import { createMobileEnvironmentStateSink } from "./environmentStateSink";
 import type { MobileRemoteEnvironmentApi } from "./remoteApi";
 import { usableSavedSessionHint, type SavedSessionHints } from "./savedSessionHints";
+import { applyMobileTerminalEvent } from "./terminalEventSink";
 import {
   createThreadDetailEventApplier,
   type ThreadDetailEventApplier,
@@ -120,6 +122,7 @@ export interface MobileEnvironmentDriverDeps {
   >;
   readonly stateSink?: EnvironmentStateSink;
   readonly subscribeResume?: (listener: (reason: string) => void) => () => void;
+  readonly subscribeNetworkChange?: (listener: () => void) => () => void;
   /**
    * The node's last session answer per environment. With it, a connect whose
    * session is not due for renewal skips the pre-socket session check and
@@ -175,6 +178,7 @@ export function createMobileEnvironmentDriver(
   deps: MobileEnvironmentDriverDeps,
 ): MobileEnvironmentDriver {
   const subscribeResume = deps.subscribeResume ?? subscribeAppStateResume;
+  const subscribeNetworkChange = deps.subscribeNetworkChange ?? subscribeNetworkPathChange;
   const { catalog, remoteApi, sessionHints } = deps;
 
   // Assigned immediately below; the input closures only read it once the
@@ -292,50 +296,53 @@ export function createMobileEnvironmentDriver(
     },
   ): WsRpcClient {
     catalog.runtimeStore.getState().ensure(environmentId);
+    const transport = new WsTransport(
+      async (signal) => {
+        const record = catalog.get(environmentId);
+        if (!record) throw new Error(`Saved environment ${environmentId} not found.`);
+        // The bearer is re-read on every attempt, never carried over from the
+        // pre-connect session check: a concurrent renewal may have superseded
+        // it, and the node revokes the whole pairing when it is shown a
+        // superseded bearer.
+        return remoteApi.resolveRemoteWebSocketConnectionUrl({
+          wsBaseUrl: record.wsBaseUrl,
+          httpBaseUrl: record.httpBaseUrl,
+          bearerToken: await savedSessionRenewal.readBearerToken(environmentId),
+          ...(signal === undefined ? {} : { signal }),
+        });
+      },
+      {
+        getConnectionLabel: () => catalog.get(environmentId)?.label ?? null,
+        getEnvironmentId: () => environmentId,
+        persistentReconnect: true,
+        // A token request that never answers would otherwise hold this
+        // attempt until a resume or online event; the deadline aborts it and
+        // lets the reconnect schedule try again. Direct connections only —
+        // the hosted relay owns its own attempt lifecycle.
+        urlProviderTimeoutMs: WS_URL_PROVIDER_TIMEOUT_MS,
+        // A rejected bearer is not an outage the backoff can wait out.
+        isTerminalUrlError: isSavedEnvironmentCredentialRejection,
+        onTerminalUrlError: owner.onCredentialRejected,
+        onAttempt: () => {
+          if (owner.speaksForEnvironment()) setRuntimeConnecting(environmentId);
+        },
+        onOpen: () => {
+          if (owner.speaksForEnvironment()) setRuntimeConnected(environmentId);
+        },
+        onError: (message) => {
+          if (owner.speaksForEnvironment()) setRuntimeError(environmentId, new Error(message));
+        },
+        onClose: (details, context) => {
+          if (!context.intentional && owner.speaksForEnvironment()) {
+            setRuntimeDisconnected(environmentId, details.reason);
+          }
+        },
+      },
+    );
+    // Device previews and input share the application socket, as on the hosted relay.
     return createWsRpcClient(
-      new WsTransport(
-        async (signal) => {
-          const record = catalog.get(environmentId);
-          if (!record) throw new Error(`Saved environment ${environmentId} not found.`);
-          // The bearer is re-read on every attempt, never carried over from the
-          // pre-connect session check: a concurrent renewal may have superseded
-          // it, and the node revokes the whole pairing when it is shown a
-          // superseded bearer.
-          return remoteApi.resolveRemoteWebSocketConnectionUrl({
-            wsBaseUrl: record.wsBaseUrl,
-            httpBaseUrl: record.httpBaseUrl,
-            bearerToken: await savedSessionRenewal.readBearerToken(environmentId),
-            ...(signal === undefined ? {} : { signal }),
-          });
-        },
-        {
-          getConnectionLabel: () => catalog.get(environmentId)?.label ?? null,
-          getEnvironmentId: () => environmentId,
-          persistentReconnect: true,
-          // A token request that never answers would otherwise hold this
-          // attempt until a resume or online event; the deadline aborts it and
-          // lets the reconnect schedule try again. Direct connections only —
-          // the hosted relay owns its own attempt lifecycle.
-          urlProviderTimeoutMs: WS_URL_PROVIDER_TIMEOUT_MS,
-          // A rejected bearer is not an outage the backoff can wait out.
-          isTerminalUrlError: isSavedEnvironmentCredentialRejection,
-          onTerminalUrlError: owner.onCredentialRejected,
-          onAttempt: () => {
-            if (owner.speaksForEnvironment()) setRuntimeConnecting(environmentId);
-          },
-          onOpen: () => {
-            if (owner.speaksForEnvironment()) setRuntimeConnected(environmentId);
-          },
-          onError: (message) => {
-            if (owner.speaksForEnvironment()) setRuntimeError(environmentId, new Error(message));
-          },
-          onClose: (details, context) => {
-            if (!context.intentional && owner.speaksForEnvironment()) {
-              setRuntimeDisconnected(environmentId, details.reason);
-            }
-          },
-        },
-      ),
+      transport,
+      createDeviceRpcClient(transport, { manageTransport: false }),
     );
   }
 
@@ -471,14 +478,13 @@ export function createMobileEnvironmentDriver(
       // primary below always takes a fresh snapshot.
       readShellResumeSequence: (environmentId) =>
         getSupervisor().readShellProjectionSequence(environmentId),
+      skipShellEvent: (sequence, environmentId) =>
+        getSupervisor().skipShellEvent(sequence, environmentId),
       applyShellEvent: (event, environmentId) =>
         getSupervisor().applyShellEvent(event, environmentId),
-      applyThreadPriorities: (item, environmentId) =>
-        getSupervisor().applyThreadPriorities(item, environmentId),
       syncShellSnapshot: (snapshot, environmentId) =>
         getSupervisor().syncShellSnapshot(snapshot, environmentId),
-      // Terminal streaming is deferred to v1.1.
-      applyTerminalEvent: () => undefined,
+      applyTerminalEvent: (event, environmentId) => applyMobileTerminalEvent(event, environmentId),
       onDispose: () => stopRenewal(),
     });
 
@@ -576,8 +582,8 @@ export function createMobileEnvironmentDriver(
           getSupervisor().resetShellProjection(environmentId),
         applyShellEvent: (event, environmentId) =>
           getSupervisor().applyShellEvent(event, environmentId),
-        applyThreadPriorities: (item, environmentId) =>
-          getSupervisor().applyThreadPriorities(item, environmentId),
+        applyTerminalEvent: (event, environmentId) =>
+          applyMobileTerminalEvent(event, environmentId),
         syncShellSnapshot: (snapshot, environmentId, callbacks) =>
           getSupervisor().syncShellSnapshot(snapshot, environmentId, callbacks),
       });
@@ -595,6 +601,7 @@ export function createMobileEnvironmentDriver(
     },
     waitForPrimaryShellSnapshotApplied: () => Promise.resolve(),
     subscribeBrowserResume: (listener) => subscribeResume(listener),
+    subscribeNetworkChange: (listener) => subscribeNetworkChange(listener),
     isThreadDetailSubscriptionNonIdle: (environmentId, threadId) =>
       isThreadNonIdle(useStore.getState(), scopeThreadRef(environmentId, threadId)),
     listThreadBodies: () => selectThreadBodyUsage(useStore.getState()),

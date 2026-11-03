@@ -120,7 +120,10 @@ export interface ProjectExportLiveOptions {
 }
 
 interface ExportArtifactFile {
-  /** `carriesIgnoredFiles` when it holds opted-in ignored files, never read over a plaintext relay. */
+  /**
+   * `carriesIgnoredFiles` when it holds opted-in ignored files, never read over an unencrypted
+   * connection.
+   */
   readonly artifact: ProjectExportArtifact;
   readonly filePath: string;
 }
@@ -469,7 +472,7 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
         );
       }
       const skipped: ProjectExportSkippedArtifact[] = [];
-      // The Hub could read them on a plaintext relay channel (amendment 33).
+      // The Hub or the network could read them on an unencrypted connection (amendment 33).
       const ignoredPaths = mayCarryIgnoredFiles(channel) ? requestedIgnored : [];
       if (ignoredPaths.length < requestedIgnored.length) {
         skipped.push(skippedOf("changes-patch", PROJECT_EXPORT_SKIP_REASON.insecureChannel));

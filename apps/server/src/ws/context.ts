@@ -1,8 +1,14 @@
 import { makeClientWorkspaceUse } from "../workspace/clientWorkspaceUse.ts";
 import { isRemovedChatFolder, restoreChatFolder } from "../project/chatFolderRestore.ts";
+import { readNoticeableStall } from "../observability/NoticeableStall.ts";
 import { LocalTaskService } from "../tasks/LocalTaskService.ts";
+import { PullRequestWatchService } from "../sourceControl/PullRequestWatchService.ts";
 import { WorktreeNotesService } from "../notes/WorktreeNotesService.ts";
 import { NodeUpdateService } from "../nodeUpdate/NodeUpdateService.ts";
+import { ClientInteraction } from "../updates/ClientInteraction.ts";
+import { ProviderSignIn } from "../provider/signIn/ProviderSignIn.ts";
+import { NodeBrowser } from "../nodeBrowser/NodeBrowser.ts";
+import { NodePushRegistry } from "../push/NodePushRegistry.ts";
 import { DailyRecapQuery } from "../statistics/DailyRecapQuery.ts";
 import { ProviderSessionPrewarm } from "../orchestration/Services/ProviderSessionPrewarm.ts";
 import { StorageService } from "../storage/StorageService.ts";
@@ -73,10 +79,12 @@ import { makeProviderMcpRegistry } from "../mcp/ProviderMcpRegistry.ts";
 import { Open, resolveAvailableEditors } from "../open.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ThreadDeletionReactor } from "../orchestration/Services/ThreadDeletionReactor.ts";
+import { OrchestrationModelSwitchBlockedError } from "../orchestration/Errors.ts";
+import { refuseServerMintedMessageId } from "../orchestration/Normalizer.ts";
 import { ContextHandoffInspection } from "../orchestration/Services/ContextHandoffInspection.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { StatisticsQuery } from "../statistics/StatisticsQuery.ts";
-import { UsageService, UsageServiceTest } from "../usage/UsageService.ts";
+import { UsageService, UsageServiceTest } from "../usage/UsageServiceTag.ts";
 import { CliProxyService, CliProxyServiceUnavailable } from "../cliProxy/CliProxyService.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { ModelManifest } from "../provider/ModelManifest.ts";
@@ -90,6 +98,7 @@ import { redactServerSettingsForClient, ServerSettingsService } from "../serverS
 import { redactUrlCredentials } from "@ryco/shared/settingsSecrets";
 import { TerminalManager } from "../terminal/Services/Manager.ts";
 import { TextGeneration } from "../textGeneration/TextGeneration.ts";
+import { WorkspaceContentSearch } from "../workspace/Services/WorkspaceContentSearch.ts";
 import { WorkspaceEntries } from "../workspace/Services/WorkspaceEntries.ts";
 import { WorkspaceFileSystem } from "../workspace/Services/WorkspaceFileSystem.ts";
 import { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
@@ -103,6 +112,7 @@ import { RepositoryIdentityResolver } from "../project/Services/RepositoryIdenti
 import { resolveConfiguredWorktreeRoot } from "../project/worktreeRoot.ts";
 import { ChatFolders, sameChatsCapability } from "../project/chatFolders.ts";
 import { resolveWorktreeCheckoutPath } from "../project/worktreeCheckoutPaths.ts";
+import { resolveCheckoutProject } from "../project/checkoutProject.ts";
 import { resolveBootstrapPreferences } from "./context/bootstrapPreferences.ts";
 import {
   type ChatBootstrapDependencies,
@@ -140,13 +150,17 @@ import * as SourceControlProviderRegistry from "../sourceControl/SourceControlPr
 import { BootstrapCredentialService } from "../auth/Services/BootstrapCredentialService.ts";
 import { SessionCredentialService } from "../auth/Services/SessionCredentialService.ts";
 import { authorizeRpcPrincipal, type WsRpcAccess } from "../auth/wsAuthorization.ts";
-import type { RpcPrincipal } from "./RpcPrincipal.ts";
+import {
+  type RelayChannelAuthority,
+  type RpcPrincipal,
+  rpcPrincipalOwnerKey,
+  turnOriginOfPrincipal,
+} from "./RpcPrincipal.ts";
 import { AtlassianConnectionService } from "../atlassian/AtlassianConnectionService.ts";
 import { JiraWorkItemService } from "../atlassian/JiraWorkItemService.ts";
 import { AdvertisedEndpointRegistry } from "../remote/Services/AdvertisedEndpointRegistry.ts";
 import { LocalDiagnosticsMetrics } from "../observability/Services/LocalDiagnosticsMetrics.ts";
 import { rpcAccessFor } from "./RpcAccessPolicy.ts";
-import { ThreadPriorityCoordinator } from "../threadPriority/ThreadPriorityCoordinator.ts";
 
 import { SOURCE_CONTROL_LINKED_REFRESH_DEBOUNCE_MS } from "./context/constants.ts";
 import { toGitManagerError } from "./context/gitErrors.ts";
@@ -160,6 +174,7 @@ import {
 import { WorktreeSetupTracker } from "../project/Services/WorktreeSetupTracker.ts";
 import { setupProjectScript } from "@ryco/shared/projectScripts";
 import { makeWorktreeSetupTracker } from "../project/Layers/WorktreeSetupTracker.ts";
+import { GitActionRunner } from "../git/GitActionRunner.ts";
 
 export { isThreadDetailEvent } from "./context/orchestrationEvents.ts";
 export { isListedAuthAccessChange, toAuthAccessStreamEvent } from "./context/authEvents.ts";
@@ -214,7 +229,6 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     // the RPC under test. Keep this additive capability optional at context
     // construction; production provides it in `makeServerWsRpcLayer`.
     const contextHandoffInspection = yield* Effect.serviceOption(ContextHandoffInspection);
-    const threadPriorityCoordinator = yield* Effect.serviceOption(ThreadPriorityCoordinator);
     const orchestrationEventStore = yield* Effect.serviceOption(OrchestrationEventStore);
     // Optional for the same route-test reason; production provides it in the
     // runtime layer and `makeServerWsRpcLayer`.
@@ -263,6 +277,10 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const worktreeSetupTracker = Option.isSome(worktreeSetupTrackerOption)
       ? worktreeSetupTrackerOption.value
       : yield* makeWorktreeSetupTracker;
+    // The node's one runner, so an action survives the connection that started it. Route tests
+    // without it get no recoverable actions (git.runStackedAction stays request-owned), never a
+    // runner private to this connection, which would lose every action when it closes.
+    const gitActionRunner = Option.getOrUndefined(yield* Effect.serviceOption(GitActionRunner));
     const providerRegistry = yield* ProviderRegistry;
     const modelManifest = yield* Effect.serviceOption(ModelManifest);
     // Optional for the same reason as ContextHandoffInspection: route tests
@@ -281,9 +299,15 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const workspaceLifecycle = yield* Effect.serviceOption(WorkspaceLifecycle);
     const workspaceChangeSummary = yield* Effect.serviceOption(WorkspaceChangeSummary);
     const localTaskService = yield* Effect.serviceOption(LocalTaskService);
+    // Optional for the route-test reason above; without it the node offers no pull request watch.
+    const pullRequestWatch = yield* Effect.serviceOption(PullRequestWatchService);
     const worktreeNotesService = yield* Effect.serviceOption(WorktreeNotesService);
     // Optional for the route-test reason above; production provides it with the runtime.
     const nodeUpdate = yield* Effect.serviceOption(NodeUpdateService);
+    const clientInteraction = yield* Effect.serviceOption(ClientInteraction);
+    const providerSignIn = yield* Effect.serviceOption(ProviderSignIn);
+    const nodeBrowser = yield* Effect.serviceOption(NodeBrowser);
+    const nodePushRegistry = yield* Effect.serviceOption(NodePushRegistry);
     const dailyRecapQuery = yield* Effect.serviceOption(DailyRecapQuery);
     // Optional: route tests without the orchestration runtime answer "skipped".
     const sessionPrewarm = yield* Effect.serviceOption(ProviderSessionPrewarm);
@@ -327,6 +351,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const projectFaviconResolver = yield* Effect.serviceOption(ProjectFaviconResolver);
     const projectAvatarStore = yield* Effect.serviceOption(ProjectAvatarStore);
     const workspaceEntries = yield* WorkspaceEntries;
+    const workspaceContentSearch = yield* WorkspaceContentSearch;
     const workspaceFileSystem = yield* WorkspaceFileSystem;
     const fileSystem = yield* FileSystem.FileSystem;
     const workspaceAccessPolicy = yield* WorkspaceAccessPolicy;
@@ -388,29 +413,24 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     /**
      * Finds the pull request a checkout's branch has now: from its ref summary
      * (HEAD, config and the repository's change request index, cached), not a
-     * full git status per swept workspace.
+     * full git status per swept workspace. Nothing while the forge is rate
+     * limiting and the summary came from its last good listing: stale rows
+     * must not create links.
      */
     const discoverPullRequest = (cwd: string) =>
-      gitWorkflow.refSummary(cwd).pipe(Effect.map((summary) => summary.pr));
+      gitWorkflow
+        .refSummary(cwd)
+        .pipe(Effect.map((summary) => (summary.prServedWhilePaused ? null : summary.pr)));
 
     /**
      * Which workspaces a source-control call's `cwd` speaks for: every one of a
      * project when it is the project root, or exactly the one checked out there.
      */
     const resolveSourceControlRefreshScope = (cwd: string) =>
-      Effect.gen(function* () {
-        const projectOpt = yield* projectionSnapshotQuery
-          .getActiveProjectByWorkspaceRoot(cwd)
-          .pipe(Effect.catch(() => Effect.succeed(Option.none())));
-        if (Option.isSome(projectOpt)) {
-          return { projectId: projectOpt.value.id, checkout: null } as const;
-        }
-        const checkoutOpt = yield* projectionWorktrees
-          .findActiveByWorktreePath({ worktreePath: cwd })
-          .pipe(Effect.catch(() => Effect.succeed(Option.none())));
-        return Option.isSome(checkoutOpt)
-          ? ({ projectId: checkoutOpt.value.projectId, checkout: checkoutOpt.value } as const)
-          : null;
+      resolveCheckoutProject({
+        cwd,
+        projects: projectionSnapshotQuery,
+        worktrees: projectionWorktrees,
       });
 
     /**
@@ -642,23 +662,36 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
 
     const appendSetupScriptActivity = makeAppendSetupScriptActivity(orchestrationEngine.dispatch);
 
+    // A model switch refused by live background work carries its tasks over the wire, so the
+    // client can offer to stop them and send the same command again.
+    const isModelSwitchBlocked = Schema.is(OrchestrationModelSwitchBlockedError);
+    const modelSwitchBlockedDispatchError = (error: OrchestrationModelSwitchBlockedError) =>
+      new OrchestrationDispatchCommandError({
+        message: error.message,
+        modelSwitchBlockedByBackgroundWork: { taskIds: error.taskIds },
+      });
+
     const toDispatchCommandError = (cause: unknown, fallbackMessage: string) =>
       Schema.is(OrchestrationDispatchCommandError)(cause)
         ? cause
-        : new OrchestrationDispatchCommandError({
-            message: cause instanceof Error ? cause.message : fallbackMessage,
-            cause,
-          });
+        : isModelSwitchBlocked(cause)
+          ? modelSwitchBlockedDispatchError(cause)
+          : new OrchestrationDispatchCommandError({
+              message: cause instanceof Error ? cause.message : fallbackMessage,
+              cause,
+            });
 
     const toBootstrapDispatchCommandCauseError = (cause: Cause.Cause<unknown>) => {
       const error = Cause.squash(cause);
       return Schema.is(OrchestrationDispatchCommandError)(error)
         ? error
-        : new OrchestrationDispatchCommandError({
-            message:
-              error instanceof Error ? error.message : "Failed to bootstrap thread turn start.",
-            cause,
-          });
+        : isModelSwitchBlocked(error)
+          ? modelSwitchBlockedDispatchError(error)
+          : new OrchestrationDispatchCommandError({
+              message:
+                error instanceof Error ? error.message : "Failed to bootstrap thread turn start.",
+              cause,
+            });
     };
 
     const dispatchBootstrapTurnStart = (
@@ -1147,6 +1180,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const dispatchNormalizedCommand = (
       normalizedCommand: OrchestrationCommand,
     ): Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError> => {
+      // Every caller of this dispatcher carries a client's command.
+      const refused = refuseServerMintedMessageId(normalizedCommand);
       const dispatchEffect =
         normalizedCommand.type === "thread.turn.start" && normalizedCommand.bootstrap
           ? dispatchBootstrapTurnStart(normalizedCommand)
@@ -1161,13 +1196,17 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
               ),
             );
 
-      return startup
-        .enqueueCommand(dispatchEffect)
-        .pipe(
-          Effect.mapError((cause) =>
-            toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
-          ),
-        );
+      return refused.pipe(
+        Effect.andThen(
+          startup
+            .enqueueCommand(dispatchEffect)
+            .pipe(
+              Effect.mapError((cause) =>
+                toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
+              ),
+            ),
+        ),
+      );
     };
 
     /** Runs a mutation once startup admits commands, exactly as `dispatchNormalizedCommand`. */
@@ -1222,14 +1261,18 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       const localMetrics = yield* loadDiagnosticsMetrics;
       const chats = Option.isSome(chatFolders) ? yield* chatFolders.value.capability : undefined;
 
+      const lastEventLoopStall = readNoticeableStall(Date.now());
       return {
         environment,
         auth,
+        ...(lastEventLoopStall !== undefined ? { lastEventLoopStall } : {}),
         cwd: config.cwd,
         ...(config.workspaceAccessRoot !== undefined
           ? { workspaceAccessRoot: config.workspaceAccessRoot }
           : {}),
         ...(chats !== undefined ? { chats } : {}),
+        ...(Option.isSome(pullRequestWatch) ? { pullRequestWatch: { available: true } } : {}),
+        ...(Option.isSome(nodeBrowser) ? { nodeBrowser: yield* nodeBrowser.value.capability } : {}),
         usageContractVersion: USAGE_CONTRACT_VERSION,
         keybindingsConfigPath: config.keybindingsConfigPath,
         keybindings: keybindingsConfig.keybindings,
@@ -1307,19 +1350,24 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
         .refreshStatus(cwd)
         .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid);
 
+    // The whole log's retention floor (`EventLogRetention`); 0 without an event store.
+    const readLogReplayFloor = Option.match(orchestrationEventStore, {
+      onNone: () => Effect.succeed(0),
+      onSome: (eventStore) =>
+        eventStore.readReplayFloor === undefined
+          ? Effect.succeed(0)
+          : eventStore.readReplayFloor({ aggregateKind: "log", streamId: "" }),
+    });
     const { enrichOrchestrationEvents, makeReplayableShellStream, makeReplayableThreadStream } =
       makeOrchestrationStreamHelpers({
         orchestrationEngine,
         projectionSnapshotQuery,
         repositoryIdentityResolver,
-        threadPriorityChanges: Option.match(threadPriorityCoordinator, {
-          onNone: () => Stream.empty,
-          onSome: (coordinator) => coordinator.changes,
-        }),
         ...Option.match(orchestrationEventStore, {
           onNone: () => ({}),
           onSome: (eventStore) => ({
             ...(eventStore.probeResume ? { probeResume: eventStore.probeResume } : {}),
+            ...(eventStore.readReplayFloor ? { readReplayFloor: eventStore.readReplayFloor } : {}),
             readStreamEventsPage: eventStore.readStreamEventsPage,
           }),
         }),
@@ -1395,6 +1443,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       workspaceLifecycle,
       workspaceChangeSummary,
       storagePrincipalKey: `${principal.transport}:${principal.scopeId}:${crypto.randomUUID()}`,
+      turnOrigin: turnOriginOfPrincipal(principal),
       currentSessionId,
       projectionSnapshotQuery,
       statisticsQuery,
@@ -1402,7 +1451,6 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       cliProxyService,
       orchestrationEngine,
       contextHandoffInspection,
-      threadPriorityCoordinator,
       chatAttachmentUploads,
       sessionImport,
       threadFork,
@@ -1421,6 +1469,9 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       vcsStatusBroadcaster,
       terminalManager,
       worktreeSetupTracker,
+      gitActionRunner,
+      // Read per request: a relay channel's device is known only after its handshake.
+      gitActionOwner: () => rpcPrincipalOwnerKey(principal),
       providerRegistry,
       modelManifest,
       providerService,
@@ -1430,8 +1481,18 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       dailyRecapQuery,
       sessionPrewarm,
       localTaskService,
+      pullRequestWatch,
       worktreeNotesService,
       nodeUpdate,
+      clientInteraction,
+      providerSignIn,
+      nodeBrowser,
+      nodePushRegistry,
+      /** How this connection's requests reach the node (`RpcPrincipal.connection`). */
+      connection: principal.connection,
+      /** Who this relay channel's handshake authenticated; `none` off the relay. */
+      relayAuthority: (): RelayChannelAuthority =>
+        principal.relayAuthority?.() ?? { trustSource: "none" },
       config,
       lifecycleEvents,
       serverSettings,
@@ -1446,6 +1507,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       projectFaviconResolver,
       projectAvatarStore,
       workspaceEntries,
+      workspaceContentSearch,
       workspaceFileSystem,
       clientWorkspaceUse,
       fileSystem,
@@ -1475,9 +1537,12 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       enrichOrchestrationEvents,
       makeReplayableShellStream,
       makeReplayableThreadStream,
+      readLogReplayFloor,
       loadServerConfig,
       streamChatsConfigSnapshots,
       loadAdvertisedEndpoints,
+      /** This machine's own Tailscale addresses (`tailscale status`), for the secret answer. */
+      readNodeTailscaleAddresses: advertisedEndpointRegistry.tailscaleAddresses,
       issueLinkedDirectAccessForChannel,
       loadDiagnosticsMetrics,
       loadDiagnosticsSnapshot,

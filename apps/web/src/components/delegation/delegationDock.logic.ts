@@ -3,7 +3,11 @@ import {
   completionReturnPresentation,
   type AgentControlStatusTone,
 } from "@ryco/client-runtime/state/agentControl";
-import type { SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
+import {
+  resolveDelegatedTaskStatus,
+  type DelegatedTaskTone,
+  type SidebarThreadSummary,
+} from "@ryco/client-runtime/state/threads";
 import type { ThreadId } from "@ryco/contracts";
 import type {
   AgentControlCompletionReturn,
@@ -14,12 +18,11 @@ import { formatRelativeTime } from "../../timestampFormat";
 import { inboxGlyphLabel } from "../inboxSidebar/inboxRowPresentation";
 import {
   resolveInboxThreadStatus,
-  resolveRunningSince,
   type InboxSidebarThreadState,
 } from "../inboxSidebar/inboxSidebarModel";
 
 /** A child's colour in the dock: its bar segment and its state text. */
-export type DelegationDockTone = "working" | "attention" | "done" | "danger" | "muted";
+export type DelegationDockTone = DelegatedTaskTone;
 
 export interface DelegationDockResult {
   readonly label: string;
@@ -41,6 +44,8 @@ export interface DelegationDockChild {
   readonly finishedAt: string | null;
   /** Null when the child was created without a result return. */
   readonly result: DelegationDockResult | null;
+  /** In error, or its result return is blocked, failed or uncertain (the shared rule). */
+  readonly failed: boolean;
 }
 
 export interface DelegationDockSummary {
@@ -63,34 +68,6 @@ export interface DelegationDockLogRow {
   readonly at: string;
 }
 
-function toneOf(state: InboxSidebarThreadState): DelegationDockTone {
-  switch (state) {
-    case "working":
-      return "working";
-    case "needs-input":
-    case "limited":
-      return "attention";
-    case "error":
-    case "delivery-unknown":
-      return "danger";
-    case "idle":
-      return "done";
-    case "connecting":
-    case "reconnecting":
-    case "offline":
-      return "muted";
-  }
-}
-
-function labelOf(
-  status: ReturnType<typeof resolveInboxThreadStatus>,
-  finishedAt: string | null,
-): string {
-  if (status.state === "working") return "Working";
-  if (status.state === "idle") return finishedAt ? "Done" : "Idle";
-  return inboxGlyphLabel(status, false);
-}
-
 function resultOf(result: AgentControlCompletionReturn | undefined): DelegationDockResult | null {
   if (result === undefined) return null;
   const presentation = completionReturnPresentation(result.status);
@@ -108,15 +85,17 @@ export function buildDelegationDockChildren(
 ): DelegationDockChild[] {
   return children.map((thread) => {
     const status = resolveInboxThreadStatus(thread);
-    const finishedAt = thread.latestCompletedTurnAt ?? thread.latestTurn?.completedAt ?? null;
+    const completionReturn = returnsByChild.get(thread.id);
+    const task = resolveDelegatedTaskStatus({ thread, state: status.state, completionReturn });
     return {
       thread,
       state: status.state,
-      tone: status.state === "idle" && !finishedAt ? "muted" : toneOf(status.state),
-      label: labelOf(status, finishedAt),
-      runningSince: status.state === "working" ? resolveRunningSince(thread) : null,
-      finishedAt,
-      result: resultOf(returnsByChild.get(thread.id)),
+      tone: task.tone,
+      label: task.label ?? inboxGlyphLabel(status, false),
+      runningSince: task.runningSince,
+      finishedAt: task.finishedAt,
+      result: resultOf(completionReturn),
+      failed: task.failed,
     };
   });
 }
@@ -132,7 +111,7 @@ export function summarizeDelegationDock(
   for (const child of children) {
     if (child.state === "working") working += 1;
     if (child.state === "needs-input") needsYou += 1;
-    if (child.tone === "danger" || child.result?.tone === "danger") failed += 1;
+    if (child.failed) failed += 1;
     if (child.result !== null) returning += 1;
     if (child.result?.delivered) returned += 1;
   }

@@ -1,6 +1,8 @@
 import { isChatProject } from "@ryco/shared/projectKind";
+import { threadHasConversation } from "@ryco/shared/threadFork";
 import { canSnoozeThread, isThreadSnoozed } from "@ryco/shared/threadSnooze";
 import { deriveThreadActivityStatus } from "./threadActivityStatus.ts";
+import { isThreadFailed } from "./threadFailure.ts";
 import type {
   EnvironmentId,
   ProjectId,
@@ -11,6 +13,7 @@ import type {
 } from "@ryco/contracts";
 import {
   resolveAutoSettleAfterDays,
+  canFileThreadForSettlement,
   canSettleThread,
   classifyThreadSettlement,
   compareActiveInboxEntries,
@@ -26,17 +29,15 @@ import {
   type ThreadSettlementInput,
 } from "@ryco/shared/threadSettlement";
 import {
+  pullRequestLinkSearchTerms,
   resolveThreadPullRequestLink,
   type WorktreePullRequestLink,
 } from "@ryco/shared/worktreePullRequests";
-import {
-  partitionThreadPriorities,
-  type ThreadPriorityFocusMetadata,
-} from "@ryco/shared/threadPriority";
 
 import type { ThreadCapabilitySupport } from "../../rpc/environmentServerConfigs.ts";
 import { scopeThreadRef, scopedProjectKey, scopedThreadKey } from "../../scoped.ts";
 import { CHAT_PROJECT_LABEL } from "../composer/chatDrafts.ts";
+import { isThreadArchiveBlockedByTurn } from "../lifecycle/index.ts";
 import {
   isArchivedThreadStub,
   type Project,
@@ -56,6 +57,8 @@ export interface ThreadInboxEnvironment {
    */
   readonly threadSettlementSupported: ThreadCapabilitySupport;
   readonly threadSnoozeSupported?: ThreadCapabilitySupport | undefined;
+  /** The Hidden shelf and settling a working thread (`threadTriage`). */
+  readonly threadTriageSupported?: ThreadCapabilitySupport | undefined;
   /**
    * The node's own automatic settlement rule, so every client lists its threads
    * alike. Undefined for a node that leaves the rule to clients (an older one)
@@ -94,11 +97,29 @@ export type ThreadInboxMutationBlocker =
   | "read-only"
   | "shell-stale";
 
+/** The owning node cannot take a change from this client right now. */
+export type ThreadInboxConnectionBlocker = Extract<
+  ThreadInboxMutationBlocker,
+  "disconnected" | "shell-stale" | "read-only"
+>;
+
 export interface ThreadInboxLifecycle {
-  readonly classification: Exclude<ThreadSettlementClassification, "excluded"> | "snoozed";
+  readonly classification:
+    | Exclude<ThreadSettlementClassification, "excluded">
+    | "snoozed"
+    | "hidden";
+  /**
+   * Settled while it worked: it lists as settled, and the node settles it when the work ends
+   * (`settleWhenIdleAt`).
+   */
+  readonly filed?: boolean | undefined;
+  /** Settle would file the thread now: it is working and its node supports filing. */
+  readonly settleFiles?: boolean | undefined;
   readonly eligibility: CanSettleThreadResult;
   readonly effectiveSettlementTimestamp: string | null;
   readonly settlementBlocker: ThreadSettlementBlocker | null;
+  /** Why the thread cannot be snoozed, by `canSnoozeThread`'s rule. */
+  readonly snoozeBlocker: ThreadSettlementBlocker | null;
   /** Why automatic settlement is held back; manual settle is unaffected. */
   readonly autoSettlementBlocker: ThreadAutoSettlementBlocker | null;
 }
@@ -120,8 +141,42 @@ export interface ThreadInboxEntry {
   readonly current: boolean;
   readonly isDraft: boolean;
   readonly canSnooze: boolean;
-  readonly focus: ThreadPriorityFocusMetadata | null;
 }
+
+/** Why settling a thread, or moving it back to Active, cannot run. */
+export type ThreadSettleBlocker = ThreadInboxMutationBlocker | ThreadSettlementBlocker;
+/** Why snoozing a thread, or waking it, cannot run. */
+export type ThreadSnoozeBlocker = ThreadInboxMutationBlocker | ThreadSettlementBlocker;
+export type ThreadArchiveBlocker =
+  | ThreadInboxConnectionBlocker
+  | "no-conversation"
+  | "turn-running";
+export type ThreadMarkUnreadBlocker = "no-completed-turn";
+
+export interface ThreadLifecycleActionAvailability<Blocker extends string> {
+  readonly enabled: boolean;
+  /** Why the action cannot run; null while it can. Clients word it themselves. */
+  readonly blocker: Blocker | null;
+}
+
+/**
+ * What can be done to one inbox thread now, for every surface that offers it:
+ * Inbox rows, the command palette and the keyboard shortcuts. Settle and
+ * snooze describe what their toggle runs: Move to Active on a settled thread,
+ * Unsnooze on a snoozed one.
+ */
+export interface ThreadLifecycleAvailability {
+  readonly settle: ThreadLifecycleActionAvailability<ThreadSettleBlocker> & {
+    readonly settled: boolean;
+  };
+  readonly snooze: ThreadLifecycleActionAvailability<ThreadSnoozeBlocker> & {
+    readonly snoozedUntil: string | null;
+  };
+  readonly archive: ThreadLifecycleActionAvailability<ThreadArchiveBlocker>;
+  readonly markUnread: ThreadLifecycleActionAvailability<ThreadMarkUnreadBlocker>;
+}
+
+export type ThreadLifecycleAction = keyof ThreadLifecycleAvailability;
 
 export interface BuildThreadInboxInput {
   readonly projects: ReadonlyArray<Project>;
@@ -135,19 +190,61 @@ export interface BuildThreadInboxInput {
   readonly drafts?: ReadonlyArray<ThreadInboxDraftSummary> | undefined;
   readonly filters?: ThreadInboxFilters | undefined;
   readonly currentThreadKey?: string | null | undefined;
-  readonly aiFocusEnabled?: boolean | undefined;
   /** This client's rule, for environments whose node states none of its own. */
   readonly autoSettleAfterDays?: SidebarAutoSettleAfterDays | undefined;
   readonly nowMs: number;
 }
 
 export interface ThreadInboxModel {
-  readonly focus: ThreadInboxEntry[];
   readonly active: ThreadInboxEntry[];
   readonly settled: ThreadInboxEntry[];
   readonly snoozed: ThreadInboxEntry[];
+  /** The Hidden shelf, newest first. */
+  readonly hidden: ThreadInboxEntry[];
   readonly excludedCount: number;
   readonly nextSettlementEvaluationAtMs: number | null;
+}
+
+export type ThreadHiddenShelfInput = Pick<
+  SidebarThreadSummary,
+  | "hiddenAt"
+  | "session"
+  | "latestTurn"
+  | "interactionMode"
+  | "hasPendingApprovals"
+  | "hasPendingUserInput"
+  | "hasActionableProposedPlan"
+  | "backgroundLiveness"
+>;
+
+/**
+ * Whether a thread needs the person: an approval, an answer or a plan to review, or a failure
+ * since it was put on the Hidden shelf (`since`). Hiding it again after the failure puts it back.
+ */
+export function threadNeedsAttention(
+  thread: ThreadHiddenShelfInput,
+  since: string | null,
+): boolean {
+  const activity = deriveThreadActivityStatus(thread);
+  if (activity === "approval" || activity === "input" || activity === "plan-ready") return true;
+  if (!isThreadFailed(thread)) return false;
+  const failedAt = Date.parse(
+    (thread.latestTurn?.state === "error" ? thread.latestTurn.completedAt : null) ??
+      thread.session?.updatedAt ??
+      "",
+  );
+  const sinceMs = Date.parse(since ?? "");
+  // A failure of unknown time counts as new.
+  return !Number.isFinite(failedAt) || !Number.isFinite(sinceMs) || failedAt >= sinceMs;
+}
+
+/**
+ * The Hidden shelf (T3 Code #21105): a hidden thread stays out of the Inbox while it works and
+ * after it finishes, and comes back on its own only while it needs the person.
+ */
+export function isThreadOnHiddenShelf(thread: ThreadHiddenShelfInput): boolean {
+  if (thread.hiddenAt == null) return false;
+  return !threadNeedsAttention(thread, thread.hiddenAt);
 }
 
 export function scopedInboxWorktreeKey(
@@ -204,18 +301,82 @@ function resolveWorktree(input: {
   );
 }
 
+function indexWorktrees(worktrees: ReadonlyArray<SidebarWorktreeSummary>) {
+  const worktreeByKey = new Map(
+    worktrees.map(
+      (worktree) =>
+        [scopedInboxWorktreeKey(worktree.environmentId, worktree.id), worktree] as const,
+    ),
+  );
+  const worktreesByProjectKey = new Map<string, SidebarWorktreeSummary[]>();
+  for (const worktree of worktrees) {
+    const key = scopedProjectKey({
+      environmentId: worktree.environmentId,
+      projectId: worktree.projectId,
+    });
+    const projectWorktrees = worktreesByProjectKey.get(key);
+    if (projectWorktrees) projectWorktrees.push(worktree);
+    else worktreesByProjectKey.set(key, [worktree]);
+  }
+  return { worktreeByKey, worktreesByProjectKey };
+}
+
+/**
+ * The workspace each thread belongs to, by the inbox's rule (its workspace id, else its
+ * checkout path): for surfaces that list threads outside the inbox, such as the palette.
+ */
+export function createThreadWorktreeResolver(
+  worktrees: ReadonlyArray<SidebarWorktreeSummary>,
+): (
+  thread: Pick<SidebarThreadSummary, "environmentId" | "projectId" | "worktreeId" | "worktreePath">,
+) => SidebarWorktreeSummary | null {
+  const index = indexWorktrees(worktrees);
+  return (thread) => resolveWorktree({ thread, ...index });
+}
+
+function connectionBlocker(
+  environment: ThreadInboxEnvironment,
+): ThreadInboxConnectionBlocker | null {
+  if (!environment.connected) return "disconnected";
+  if (!environment.shellCurrent) return "shell-stale";
+  if (!environment.mutationReady) return "read-only";
+  return null;
+}
+
+/** A change that needs `support`, the node's own answer for the capability. */
+function capabilityBlocker(
+  environment: ThreadInboxEnvironment,
+  support: ThreadCapabilitySupport | undefined,
+): ThreadInboxMutationBlocker | null {
+  if (support === false) return "unsupported";
+  const blocker = connectionBlocker(environment);
+  if (blocker !== null) return blocker;
+  // Connected, but the node's own capabilities have not arrived yet.
+  if (support !== true) return "shell-stale";
+  return null;
+}
+
 function mutationBlocker(
   environment: ThreadInboxEnvironment,
   isDraft: boolean,
 ): ThreadInboxMutationBlocker | null {
   if (isDraft) return "client-draft";
-  if (environment.threadSettlementSupported === false) return "unsupported";
-  if (!environment.connected) return "disconnected";
-  if (!environment.shellCurrent) return "shell-stale";
-  if (!environment.mutationReady) return "read-only";
-  // Connected, but the node's own capabilities have not arrived yet.
-  if (environment.threadSettlementSupported === "unknown") return "shell-stale";
-  return null;
+  return capabilityBlocker(environment, environment.threadSettlementSupported);
+}
+
+/**
+ * Why an awake thread cannot be snoozed: the node must take settlement and
+ * Snooze, then the thread must be snoozable by `canSnoozeThread`'s rule. One
+ * rule for the entry's `canSnooze` and its lifecycle availability.
+ */
+function awakeSnoozeBlocker(
+  environment: ThreadInboxEnvironment,
+  mutation: ThreadInboxMutationBlocker | null,
+  eligibility: ThreadSettlementBlocker | null,
+): ThreadSnoozeBlocker | null {
+  return (
+    mutation ?? capabilityBlocker(environment, environment.threadSnoozeSupported) ?? eligibility
+  );
 }
 
 /**
@@ -276,6 +437,26 @@ export function resolveThreadWorkspacePullRequestLink(
   );
 }
 
+/** What copying a thread's reference puts on the clipboard. */
+export interface ThreadReferenceCopyTarget {
+  readonly kind: "pull-request" | "thread";
+  readonly value: string;
+}
+
+/**
+ * A thread's pull request link when it is known (the URL of the link
+ * `resolveThreadWorkspacePullRequestLink` picks, which is never a dismissed
+ * one), else its ID.
+ */
+export function resolveThreadReferenceCopyTarget(input: {
+  readonly threadId: ThreadId;
+  readonly pullRequestUrl: string | null | undefined;
+}): ThreadReferenceCopyTarget {
+  return input.pullRequestUrl
+    ? { kind: "pull-request", value: input.pullRequestUrl }
+    : { kind: "thread", value: input.threadId };
+}
+
 function settlementInput(input: {
   readonly thread: SidebarThreadSummary;
   readonly worktree: SidebarWorktreeSummary | null;
@@ -308,6 +489,8 @@ function settlementInput(input: {
     deliveryUnknown: input.deliveryUnknown,
     pinned: input.pinned,
     backgroundLiveness: input.thread.backgroundLiveness ?? null,
+    pullRequestWatched: (input.thread.pullRequestWatches?.active.length ?? 0) > 0,
+    commandWatched: input.thread.commandWatchCount !== undefined,
     ...threadPullRequestSettlementFields(input.thread, input.worktree),
     worktreeUpdatedAt: input.worktree?.updatedAt ?? null,
     updatedAt: input.thread.updatedAt ?? null,
@@ -393,12 +576,17 @@ function filterEntry(entry: ThreadInboxEntry, filters: ThreadInboxFilters | unde
     entry.worktree?.issueTitle,
     entry.worktree?.workItemKey,
     entry.worktree?.workItemTitle,
-    // Every pull request the workspace carried, so "#675" finds its thread.
-    ...(entry.worktree?.pullRequests ?? []).flatMap((link) => [link.title, `#${link.number}`]),
+    // Every pull request the workspace carried, so "#675", "owner/repo#675" or its URL finds
+    // its thread.
+    ...pullRequestLinkSearchTerms(entry.worktree?.pullRequests ?? []),
   ].some((value) => value?.toLocaleLowerCase().includes(text) === true);
 }
 
-function createDraftThreadSummary(draft: ThreadInboxDraftSummary): SidebarThreadSummary {
+/**
+ * A local draft as a thread summary with nothing sent: what an inbox row shows
+ * for a draft entry, whose `thread` stays null.
+ */
+export function inboxDraftThreadSummary(draft: ThreadInboxDraftSummary): SidebarThreadSummary {
   return {
     id: draft.threadId,
     environmentId: draft.environmentId,
@@ -439,22 +627,7 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
         ] as const,
     ),
   );
-  const worktreeByKey = new Map(
-    input.worktrees.map(
-      (worktree) =>
-        [scopedInboxWorktreeKey(worktree.environmentId, worktree.id), worktree] as const,
-    ),
-  );
-  const worktreesByProjectKey = new Map<string, SidebarWorktreeSummary[]>();
-  for (const worktree of input.worktrees) {
-    const key = scopedProjectKey({
-      environmentId: worktree.environmentId,
-      projectId: worktree.projectId,
-    });
-    const projectWorktrees = worktreesByProjectKey.get(key);
-    if (projectWorktrees) projectWorktrees.push(worktree);
-    else worktreesByProjectKey.set(key, [worktree]);
-  }
+  const { worktreeByKey, worktreesByProjectKey } = indexWorktrees(input.worktrees);
   const serverThreadKeys = new Set(
     input.threads.map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
   );
@@ -487,7 +660,8 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
       worktree,
       environment,
       pinned,
-      hasLocalQueuedMessage: localQueueKeys.has(key),
+      // The node's own follow-up queue counts like this device's.
+      hasLocalQueuedMessage: localQueueKeys.has(key) || thread.followUpQueueSummary !== undefined,
       deliveryUnknown: deliveryUnknownKeys.has(key),
       // Each node's threads by its own rule; time boundaries use this client's clock.
       autoSettleAfterDays:
@@ -516,7 +690,15 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
       const wake = Date.parse(thread.snoozedUntil!);
       nextSettlementEvaluationAtMs = Math.min(nextSettlementEvaluationAtMs ?? wake, wake);
     }
+    const hidden = isThreadOnHiddenShelf(thread);
+    // Settled while it worked: listed as settled until the node settles it, unless it needs
+    // the person meanwhile.
+    const filed =
+      thread.settleWhenIdleAt != null &&
+      classification === "active" &&
+      !threadNeedsAttention(thread, thread.settleWhenIdleAt);
     const eligibility = canSettleThread(policyInput);
+    const snoozeEligibility = canSnoozeThread(policyInput);
     const blocker = mutationBlocker(environment, false);
     entries.push({
       key,
@@ -529,10 +711,23 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
       worktree,
       environment,
       lifecycle: {
-        classification: snoozed ? "snoozed" : classification,
+        classification: hidden
+          ? "hidden"
+          : snoozed
+            ? "snoozed"
+            : filed
+              ? "settled"
+              : classification,
+        ...(filed ? { filed } : {}),
+        ...(environment.threadTriageSupported === true && canFileThreadForSettlement(policyInput)
+          ? { settleFiles: true }
+          : {}),
         eligibility,
-        effectiveSettlementTimestamp: getEffectiveSettlementTimestamp(policyInput),
+        effectiveSettlementTimestamp: filed
+          ? thread.settleWhenIdleAt!
+          : getEffectiveSettlementTimestamp(policyInput),
         settlementBlocker: eligibility.blocker,
+        snoozeBlocker: snoozeEligibility.blocker,
         autoSettlementBlocker: getThreadAutoSettlementBlocker(policyInput),
       },
       mutationEnabled: blocker === null,
@@ -540,11 +735,7 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
       pinned,
       current: input.currentThreadKey === key,
       isDraft: false,
-      canSnooze:
-        blocker === null &&
-        environment.threadSnoozeSupported === true &&
-        canSnoozeThread(policyInput).canSnooze,
-      focus: null,
+      canSnooze: awakeSnoozeBlocker(environment, blocker, snoozeEligibility.blocker) === null,
     });
   }
 
@@ -560,7 +751,7 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
     }
     const environment =
       environmentById.get(draft.environmentId) ?? fallbackEnvironment(draft.environmentId);
-    const thread = createDraftThreadSummary(draft);
+    const thread = inboxDraftThreadSummary(draft);
     const project =
       projectByKey.get(
         scopedProjectKey({
@@ -584,6 +775,7 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
         eligibility: { canSettle: false, blocker: "unsupported" },
         effectiveSettlementTimestamp: null,
         settlementBlocker: "unsupported",
+        snoozeBlocker: "unsupported",
         autoSettlementBlocker: null,
       },
       mutationEnabled: false,
@@ -592,7 +784,6 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
       current: input.currentThreadKey === key,
       isDraft: true,
       canSnooze: false,
-      focus: null,
     });
   }
 
@@ -607,30 +798,19 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
         { scopedKey: right.key, pinned: right.pinned, createdAt: right.createdAt },
       ),
     );
-  const priorityPartition = partitionThreadPriorities({
-    active,
-    enabled: input.aiFocusEnabled ?? false,
-    nowMs: input.nowMs,
-    toCandidate: (entry) => ({
-      scopedKey: entry.key,
-      pinned: entry.pinned,
-      serverOwned: !entry.isDraft,
-      hasPendingApprovals: entry.thread?.hasPendingApprovals ?? false,
-      hasPendingUserInput: entry.thread?.hasPendingUserInput ?? false,
-      latestTurn: entry.thread?.latestTurn ?? null,
-      latestUserMessageAt: entry.thread?.latestUserMessageAt ?? null,
-      priority: entry.thread?.priority,
-    }),
-  });
 
   return {
+    hidden: visibleEntries
+      .filter((entry) => entry.lifecycle.classification === "hidden")
+      .toSorted((left, right) =>
+        (right.thread?.hiddenAt ?? "").localeCompare(left.thread?.hiddenAt ?? ""),
+      ),
     snoozed: visibleEntries
       .filter((entry) => entry.lifecycle.classification === "snoozed")
       .toSorted((left, right) =>
         (left.thread?.snoozedUntil ?? "").localeCompare(right.thread?.snoozedUntil ?? ""),
       ),
-    focus: priorityPartition.focus.map(({ value, focus }) => ({ ...value, focus })),
-    active: [...priorityPartition.active],
+    active,
     settled: visibleEntries
       .filter((entry) => entry.lifecycle.classification === "settled")
       .toSorted((left, right) =>
@@ -650,4 +830,69 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
     excludedCount,
     nextSettlementEvaluationAtMs,
   };
+}
+
+function availability<Blocker extends string>(
+  blocker: Blocker | null,
+): ThreadLifecycleActionAvailability<Blocker> {
+  return { enabled: blocker === null, blocker };
+}
+
+/** Archiving needs a connected node, not settlement: it works on nodes that predate it. */
+function archiveBlocker(entry: ThreadInboxEntry): ThreadArchiveBlocker | null {
+  // A draft has sent nothing yet.
+  if (entry.thread === null) return "no-conversation";
+  const blocker = connectionBlocker(entry.environment);
+  if (blocker !== null) return blocker;
+  if (!threadHasConversation(entry.thread)) return "no-conversation";
+  if (isThreadArchiveBlockedByTurn(entry.thread)) return "turn-running";
+  return null;
+}
+
+export function resolveThreadLifecycleAvailability(
+  entry: ThreadInboxEntry,
+): ThreadLifecycleAvailability {
+  const { environment, lifecycle, thread } = entry;
+  const settled = lifecycle.classification === "settled";
+  const snoozedUntil =
+    lifecycle.classification === "snoozed" ? (thread?.snoozedUntil ?? null) : null;
+  return {
+    settle: {
+      // Moving a settled thread back to Active needs only the node; a working thread files.
+      ...availability(
+        entry.mutationBlocker ??
+          (settled || lifecycle.settleFiles === true ? null : lifecycle.settlementBlocker),
+      ),
+      settled,
+    },
+    snooze: {
+      // Waking needs only Snooze on the node; snoozing also needs settlement.
+      ...availability(
+        snoozedUntil !== null
+          ? capabilityBlocker(environment, environment.threadSnoozeSupported)
+          : awakeSnoozeBlocker(environment, entry.mutationBlocker, lifecycle.snoozeBlocker),
+      ),
+      snoozedUntil,
+    },
+    archive: availability(archiveBlocker(entry)),
+    // Local to this client: only a completed turn has anything to mark.
+    markUnread: availability(thread?.latestTurn?.completedAt ? null : "no-completed-turn"),
+  };
+}
+
+/** Why hiding a thread, or showing a hidden one again, cannot run. */
+export type ThreadHideBlocker = ThreadInboxMutationBlocker;
+
+/**
+ * Hide and Unhide for one Inbox thread. `hidden` says what the toggle runs: Unhide for a thread
+ * the person hid, whether it is on the shelf or came back because it needs them.
+ */
+export function resolveThreadHideAvailability(
+  entry: ThreadInboxEntry,
+): ThreadLifecycleActionAvailability<ThreadHideBlocker> & { readonly hidden: boolean } {
+  const blocker =
+    entry.thread === null
+      ? "client-draft"
+      : capabilityBlocker(entry.environment, entry.environment.threadTriageSupported);
+  return { ...availability(blocker), hidden: entry.thread?.hiddenAt != null };
 }

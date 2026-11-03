@@ -222,7 +222,6 @@ function serveProjectIcon(sample: ArtworkSample) {
     capabilities: {
       repositoryIdentity: true,
       threadSettlement: true,
-      threadPriorityRanking: false,
       projectIcons: true,
     },
   };
@@ -383,6 +382,30 @@ describe("CrownOverview", () => {
     await expect.poll(() => document.activeElement).toBe(crown.railButton("checks"));
   });
 
+  it("leaves Escape to a popup opened from the card before it takes focus", async () => {
+    // Base UI focuses a popup's input one frame after it opens; an Escape in
+    // that frame still lands in the card and must close only the popup.
+    const branchPicker = (expanded: boolean) => (
+      <button type="button" aria-haspopup="dialog" aria-expanded={expanded}>
+        Branch picker
+      </button>
+    );
+    const crown = await mountCrown(crownProps({ branchControl: branchPicker(true) }));
+    await page.getByRole("button", { name: "Ship", exact: true }).click();
+    await expect.poll(() => crown.island().dataset.mode).toBe("card");
+
+    for (const name of ["Branch picker", "Collapse overview"]) {
+      page.getByRole("button", { name }).element().focus();
+      await userEvent.keyboard("{Escape}");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(crown.island().dataset.mode).toBe("card");
+    }
+
+    await crown.update({ branchControl: branchPicker(false) });
+    await userEvent.keyboard("{Escape}");
+    await expect.poll(() => crown.island().dataset.mode).toBe("dot");
+  });
+
   it("ignores Escape in a split pane that does not have focus", async () => {
     const crown = await mountCrown(crownProps(), { paneFocused: false });
     await page.getByRole("button", { name: "Changes", exact: true }).click();
@@ -468,6 +491,44 @@ describe("CrownOverview", () => {
     expect(createPr).toHaveBeenCalledTimes(1);
     // The follow-up runs in place of opening the card.
     await expect.poll(() => crown.island().dataset.mode).toBe("dot");
+  });
+
+  it("stops a running git action in place, keeping its live alert until the result", async () => {
+    const crown = await mountCrown();
+    const stop = vi.fn();
+    const running = {
+      id: "push-2",
+      kind: "push",
+      status: "running",
+      title: "Pushing...",
+      description: "Running for 4s",
+      action: { label: "Stop", onClick: stop },
+    } as const;
+    await crown.update({ userGitActionActive: true, gitNotice: running });
+    await expect.poll(() => crown.island().dataset.mode).toBe("alert");
+    const alert = () => crown.host.querySelector<HTMLElement>('[data-slot="crown-alert"]')!;
+
+    await page.getByRole("button", { name: "Stop", exact: true }).click();
+    expect(stop).toHaveBeenCalledTimes(1);
+    await crown.update({
+      userGitActionActive: true,
+      gitNotice: { ...running, description: "Stopping...", action: undefined },
+    });
+    await expect.poll(() => alert().textContent).toContain("Stopping...");
+    expect(crown.island().dataset.mode).toBe("alert");
+    expect(alert().querySelector(".animate-spin")).not.toBeNull();
+
+    await crown.update({
+      userGitActionActive: false,
+      gitNotice: {
+        ...running,
+        status: "cancelled",
+        title: "Stopped",
+        description: "Steps that already finished stay done.",
+        action: undefined,
+      },
+    });
+    await expect.poll(() => alert().textContent).toContain("Stopped");
   });
 
   it("collapses the card on Escape, the close button and an outside press", async () => {

@@ -1,8 +1,14 @@
 import { usePaneEffect } from "./PaneFocus";
+import type { ThreadReferenceCopyTarget } from "@ryco/client-runtime/state/threads";
 import type { ProjectScript, ResolvedKeybindingsConfig, ThreadId } from "@ryco/contracts";
 import { useCommandPaletteStore } from "../../commandPaletteStore";
+import { isComposerFocused } from "../../lib/composerFocus";
 import { isTerminalFocused } from "../../lib/terminalFocus";
-import { resolveShortcutCommand, shouldIgnoreGlobalNavigationShortcut } from "../../keybindings";
+import {
+  resolveShortcutCommand,
+  shouldIgnoreGlobalNavigationShortcut,
+  shouldIgnoreSplitViewShortcut,
+} from "../../keybindings";
 import { projectScriptIdFromCommand } from "~/projectScripts";
 import { preloadWorkspacePanel } from "../../workspacePanelPreload";
 import type { ChatComposerHandle } from "./ChatComposer";
@@ -27,6 +33,16 @@ export interface UseChatGlobalShortcutsInput {
   onOpenTerminalPanel: () => void;
   onOpenSimulatorPanel: () => void;
   runProjectScript: (script: ProjectScript) => void | Promise<void>;
+  /** Whether the composer offers Stop; `thread.interrupt` acts only then. */
+  interruptAvailable: boolean;
+  onInterruptTurn: () => void | Promise<void>;
+  /** Null where there is nothing to copy (a draft); `thread.copyReference` acts only otherwise. */
+  copyReferenceTarget: ThreadReferenceCopyTarget | null;
+  onCopyReference: (target: ThreadReferenceCopyTarget) => void;
+  /** Whether the thread offers a side chat; `sideChat.toggle` acts only then. */
+  sideChatAvailable: boolean;
+  /** Opens the thread's side chat, or minimizes it when it is open. */
+  onToggleSideChat: () => void;
 }
 
 /**
@@ -34,7 +50,9 @@ export interface UseChatGlobalShortcutsInput {
  * to terminal, workspace-panel, model-picker, and project-script actions for
  * the active thread. A workspace-panel shortcut starts the panel's chunks
  * before it navigates, so they load during the route commit rather than after
- * the panel mounts.
+ * the panel mounts. Stopping the turn, copying the thread's reference and
+ * opening or minimizing the side chat also run while typing, since none edits
+ * text.
  */
 export function useChatGlobalShortcuts(input: UseChatGlobalShortcutsInput): void {
   const {
@@ -56,6 +74,12 @@ export function useChatGlobalShortcuts(input: UseChatGlobalShortcutsInput): void
     onOpenTerminalPanel,
     onOpenSimulatorPanel,
     runProjectScript,
+    interruptAvailable,
+    onInterruptTurn,
+    copyReferenceTarget,
+    onCopyReference,
+    sideChatAvailable,
+    onToggleSideChat,
   } = input;
 
   usePaneEffect(() => {
@@ -68,11 +92,39 @@ export function useChatGlobalShortcuts(input: UseChatGlobalShortcutsInput): void
         terminalFocus: isTerminalFocused(),
         terminalOpen: Boolean(terminalOpen),
         modelPickerOpen,
+        composerFocus: isComposerFocused(),
       };
 
       const command = resolveShortcutCommand(event, keybindings, {
         context: shortcutContext,
       });
+      // With nothing to stop or copy, the key is left to the browser. A held
+      // key acts once.
+      if (command === "thread.interrupt") {
+        if (shouldIgnoreSplitViewShortcut(event) || !interruptAvailable) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.repeat) void onInterruptTurn();
+        return;
+      }
+
+      if (command === "thread.copyReference") {
+        if (shouldIgnoreSplitViewShortcut(event) || !copyReferenceTarget) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.repeat) onCopyReference(copyReferenceTarget);
+        return;
+      }
+
+      // Also from the side question field, so the key that opened the side chat minimizes it.
+      if (command === "sideChat.toggle") {
+        if (shouldIgnoreSplitViewShortcut(event) || !sideChatAvailable) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.repeat) onToggleSideChat();
+        return;
+      }
+
       if (
         shouldIgnoreGlobalNavigationShortcut(event) &&
         (command !== "modelPicker.toggle" || !modelPickerOpen)
@@ -192,5 +244,11 @@ export function useChatGlobalShortcuts(input: UseChatGlobalShortcutsInput): void
     onOpenSimulatorPanel,
     readComposer,
     toggleTerminalVisibility,
+    interruptAvailable,
+    onInterruptTurn,
+    copyReferenceTarget,
+    onCopyReference,
+    sideChatAvailable,
+    onToggleSideChat,
   ]);
 }

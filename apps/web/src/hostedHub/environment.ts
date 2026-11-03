@@ -5,6 +5,7 @@ import {
   suspendHostedNode,
 } from "@ryco/client-runtime/authorization";
 import { clearAllProjectIconCaches } from "@ryco/client-runtime/connection";
+import { dailyRecapCache } from "@ryco/client-runtime/state/dailyRecap";
 import { statisticsSnapshotCache } from "@ryco/client-runtime/usage";
 import type { EnvironmentId } from "@ryco/contracts";
 
@@ -17,6 +18,7 @@ import {
 import { readPrimaryEnvironmentDescriptor } from "../environments/primary";
 import { forgetRememberedProjectPreferences } from "../hooks/newDraftDefaults";
 import { useMessageQueueStore } from "../messageQueueStore";
+import { threadReadingPositions } from "../persistence/threadReadingPositions";
 import { setModelPickerOpen } from "../modelPickerOpenState";
 import { clearKeyedQueriesForEnvironment } from "../rpc/keyedQuery";
 import { clearProjectAtomState, clearProjectAtomStateForEnvironment } from "../rpc/projectAtoms";
@@ -73,6 +75,7 @@ export function clearWebHostedNodeScopedState(environmentId: EnvironmentId): voi
   useStore.getState().demoteEnvironmentStateToCachedSnapshot(environmentId, Date.now());
   // Owner-only analytics are not list-safe: never repaint them after leaving the node.
   statisticsSnapshotCache.forget(environmentId);
+  dailyRecapCache.forget(environmentId);
   // Only the left environment's config goes; another environment's entry
   // survives the switch. The global config atoms follow the active entry while
   // the shell's projection is mounted, but a switch can render without it, so
@@ -126,11 +129,13 @@ export function clearWebHostedAccountScopedState(): void {
     threadWorkEntryExpandedById: {},
     defaultAdvertisedEndpointKey: null,
   });
+  threadReadingPositions.clear();
   defaultQueryClient.clear();
   clearProjectAtomState();
   clearGitAtomState();
   clearCheckpointDiffState();
   statisticsSnapshotCache.clear();
+  dailyRecapCache.clear();
   clearEnvironmentServerConfigs();
   clearServerState();
   // Project artwork outlives a connection (it is keyed by node), not an account.

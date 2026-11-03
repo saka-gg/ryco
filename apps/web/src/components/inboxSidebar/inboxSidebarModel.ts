@@ -1,16 +1,28 @@
 import { isLocalHubAlias } from "../../deviceName.logic";
 import { inboxModelName } from "./inboxContextHandoff";
+import type { InboxSidebarDraft } from "./inboxDrafts";
+import type { DraftId } from "../../composerDraftStore";
 import { getModelDisplayName } from "@ryco/shared/model";
 import {
   deriveThreadActivityStatus,
   deriveUsageLimitStatus,
   isThreadFailed,
+  resolveRunningSince,
   sessionFailureDetail,
   type UsageLimitStatus,
 } from "@ryco/client-runtime/state/threads";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { CHAT_WORKSPACE_LABEL, projectDisplayLabel } from "@ryco/client-runtime/state/composer";
+import {
+  followUpQueueBadgeOf,
+  type FollowUpQueueBadge,
+} from "@ryco/client-runtime/state/message-queue/queueBadge";
+import {
+  CHAT_PROJECT_LABEL,
+  CHAT_WORKSPACE_LABEL,
+  projectDisplayLabel,
+} from "@ryco/client-runtime/state/composer";
 import { isChatProject } from "@ryco/shared/projectKind";
+import { threadSnoozeWokeAt } from "@ryco/shared/threadSnooze";
 import type { SavedEnvironmentRuntimeState } from "@ryco/client-runtime/connection";
 import {
   resolveEnvironmentThreadCapabilities,
@@ -29,20 +41,24 @@ import type {
 } from "@ryco/client-runtime/state/threads";
 import {
   buildThreadInbox,
+  inboxDraftThreadSummary,
   planDelegatedNesting,
+  resolveThreadHideAvailability,
+  resolveThreadLifecycleAvailability,
   resolveThreadWorkspacePullRequestLink,
   type DelegatedNestingItem,
-  type ThreadInboxEntry,
+  type ThreadArchiveBlocker,
+  type ThreadInboxEnvironment,
+  type ThreadLifecycleAction,
+  type ThreadLifecycleAvailability,
+  type ThreadSettleBlocker,
+  type ThreadSnoozeBlocker,
 } from "@ryco/client-runtime/state/threads";
 import {
   visiblePullRequestLinks,
   workspaceDiscoversPullRequests,
   type WorktreePullRequestLink,
 } from "@ryco/shared/worktreePullRequests";
-import {
-  describeThreadPriorityFocus,
-  type ThreadPriorityFocusMetadata,
-} from "@ryco/shared/threadPriority";
 import {
   defaultInstanceIdForDriver,
   type DesktopWorkspaceMachineProjection,
@@ -52,6 +68,7 @@ import {
   type ServerProvider,
   type ServerConfig,
   type ProviderDriverKind,
+  type ScopedThreadRef,
   type SidebarAutoSettleAfterDays,
   type ThreadId,
   type ThreadLineage,
@@ -73,12 +90,12 @@ export type InboxSidebarAttention = "approval" | "input" | "plan";
 
 export type InboxSidebarSectionKey =
   | "pinned"
-  | "focus"
   | "active"
   | "needs-input"
   | "recent"
   | "settled"
-  | "snoozed";
+  | "snoozed"
+  | "hidden";
 export type InboxSidebarStatusFilter = "all" | InboxSidebarSectionKey;
 
 export interface InboxSidebarEnvironment {
@@ -102,6 +119,8 @@ export interface InboxSidebarEnvironment {
   /** The environment's own answer; see `resolveEnvironmentThreadCapabilities`. */
   readonly threadSettlementSupported: ThreadCapabilitySupport;
   readonly threadSnoozeSupported?: ThreadCapabilitySupport | undefined;
+  /** The Hidden shelf and settling a working thread (`threadTriage`). */
+  readonly threadTriageSupported?: ThreadCapabilitySupport | undefined;
   /** The node's own auto-settle rule; undefined lists its threads by this client's rule. */
   readonly autoSettleAfterDays?: SidebarAutoSettleAfterDays | undefined;
   readonly mutationReady: boolean;
@@ -173,6 +192,11 @@ export interface InboxSidebarRow {
   readonly key: string;
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
+  /**
+   * Set on a new thread not sent yet (its composer holds content): the row opens
+   * the draft and offers only discarding it. Absent on server threads.
+   */
+  readonly draftId?: DraftId | undefined;
   readonly title: string;
   readonly pinned: boolean;
   readonly gitCwd: string | null;
@@ -200,7 +224,6 @@ export interface InboxSidebarRow {
   /** The thread is a "No project" chat (its project is a chat folder). */
   readonly isChat: boolean;
   readonly isWorktree: boolean;
-  readonly rankingModelLabel: string | null;
   readonly workspaceLabel: string;
   readonly contextLabel: string;
   readonly state: InboxSidebarThreadState;
@@ -224,6 +247,8 @@ export interface InboxSidebarRow {
   readonly latestTurnCompletedAt: string | null;
   /** The machine is implicit when every thread lives on the primary environment. */
   readonly showMachine: boolean;
+  /** The inbox's threads live on more than one machine, so a machine can narrow it. */
+  readonly spansMachines: boolean;
   /** Project icons fall back to a folder, so the name is shown once projects differ. */
   readonly showProject: boolean;
   readonly updatedAt: string;
@@ -236,14 +261,33 @@ export interface InboxSidebarRow {
   readonly changeRequestStateLabel: string | null;
   readonly trustLabel: "Not verified" | "Encrypted · Account trusted" | "Identity conflict" | null;
   readonly roleLabel: "Viewer" | null;
+  /**
+   * The node's follow-up queue for this thread, as the project sidebar marks it: "2 queued", or
+   * "2 held" when nothing goes out without the person. Null while it holds none.
+   */
+  readonly followUpQueue: FollowUpQueueBadge | null;
   readonly settled: boolean;
+  /** Settled while it works: the node settles it when the work ends. */
+  readonly filed: boolean;
+  /** Settle would file the working thread now ("Settle when done"). */
+  readonly settleWhenDone: boolean;
+  /** On the Hidden shelf: it needs nothing from the person now. */
+  readonly hidden: boolean;
+  /** The person hid it: its toggle shows it in the Inbox again, else it hides it. */
+  readonly hiddenByUser: boolean;
+  /** Whether Hide (or Show in Inbox) can run now; false on a node without the Hidden shelf. */
+  readonly hideActionEnabled: boolean;
   readonly snoozedUntil: string | null;
+  /**
+   * When an awake, unsettled thread woke from its snooze by the timer; the row
+   * shows "Woke" until the user visits it after that.
+   */
+  readonly wokeAt: string | null;
   readonly canSnooze: boolean;
   readonly canUnsnooze: boolean;
   readonly settlementActionEnabled: boolean;
   readonly settlementDisabledReason: string | null;
   readonly effectiveSettlementTimestamp: string | null;
-  readonly focus: ThreadPriorityFocusMetadata | null;
   /** Server-owned provenance; null on root threads. */
   readonly lineage: ThreadLineage | null;
   /** Delegated descendants folded under this host row; empty unless it is a host. */
@@ -256,18 +300,20 @@ export interface InboxSidebarSection {
   readonly key: InboxSidebarSectionKey;
   readonly title:
     | "Pinned"
-    | "Focus"
     | "Active now"
     | "Needs input"
     | "Recent"
     | "Settled"
-    | "Snoozed";
+    | "Snoozed"
+    | "Hidden";
   readonly rows: ReadonlyArray<InboxSidebarRow>;
 }
 
 export interface InboxSidebarFilters {
   readonly query: string;
   readonly environmentId: EnvironmentId | null;
+  /** Scoped keys of the projects to keep; absent or null keeps every project. */
+  readonly projectKeys?: ReadonlyArray<string> | null;
   readonly status: InboxSidebarStatusFilter;
 }
 
@@ -281,7 +327,6 @@ export interface BuildInboxSidebarInput {
   readonly deliveryUnknownThreadKeys?: ReadonlySet<string>;
   readonly localQueuedThreadKeys?: ReadonlySet<string>;
   readonly activeThreadKey?: string | null;
-  readonly aiFocusEnabled?: boolean;
   /** This client's rule, for environments whose node states none. */
   readonly autoSettleAfterDays?: SidebarAutoSettleAfterDays;
   readonly pinnedThreadKeys?: ReadonlySet<string>;
@@ -289,6 +334,8 @@ export interface BuildInboxSidebarInput {
   readonly primaryEnvironmentId?: EnvironmentId | null;
   /** Fold delegated children under their host (default true; off on the phone tier). */
   readonly nestDelegated?: boolean;
+  /** New threads not sent yet whose composer holds content. */
+  readonly drafts?: ReadonlyArray<InboxSidebarDraft>;
   readonly nowMs?: number;
 }
 
@@ -297,25 +344,19 @@ export interface InboxSidebarModel {
   readonly nextSettlementEvaluationAtMs: number | null;
 }
 
-export interface InboxFocusExplanation {
-  readonly title: string;
-  readonly detail: string;
-  readonly aiGenerated: boolean;
-}
-
-export function describeInboxFocus(focus: ThreadPriorityFocusMetadata): InboxFocusExplanation {
-  return describeThreadPriorityFocus(focus);
-}
-
 function capabilityFields(
   capabilities: EnvironmentThreadCapabilities,
 ): Pick<
   InboxSidebarEnvironment,
-  "threadSettlementSupported" | "threadSnoozeSupported" | "autoSettleAfterDays"
+  | "threadSettlementSupported"
+  | "threadSnoozeSupported"
+  | "threadTriageSupported"
+  | "autoSettleAfterDays"
 > {
   return {
     threadSettlementSupported: capabilities.threadSettlement,
     threadSnoozeSupported: capabilities.threadSnooze,
+    threadTriageSupported: capabilities.threadTriage,
     ...(capabilities.autoSettleAfterDays === undefined
       ? {}
       : { autoSettleAfterDays: capabilities.autoSettleAfterDays }),
@@ -690,15 +731,6 @@ function resolveAttention(thread: SidebarThreadSummary): InboxSidebarAttention {
   return "input";
 }
 
-/** Start of the running turn; background work has no turn clock. */
-export function resolveRunningSince(
-  thread: Pick<SidebarThreadSummary, "latestTurn">,
-): string | null {
-  const turn = thread.latestTurn;
-  // Background liveness has no turn clock; the row falls back to recency.
-  return turn?.state === "running" ? (turn.startedAt ?? turn.requestedAt) : null;
-}
-
 function statusLabel(
   state: InboxSidebarThreadState,
   environment: InboxSidebarEnvironment | undefined,
@@ -773,7 +805,11 @@ function sectionKey(
 }
 
 const NO_DELEGATED_CHILDREN: ReadonlyArray<InboxSidebarRow> = [];
+const NO_DRAFTS: ReadonlyArray<InboxSidebarDraft> = [];
+/** What a draft row's state reads: it waits for the person to send it. */
+const INBOX_DRAFT_STATUS_LABEL = "Draft";
 const UNKNOWN_PROJECT_LABEL = "Unknown project";
+const UNTITLED_THREAD_TITLE = "Untitled task";
 
 /**
  * A host carries what its folded children are doing: it is working while one of
@@ -827,12 +863,13 @@ function nestDelegatedRows(
     threadId: row.threadId,
     lineage: row.lineage,
     pinned: row.pinned,
-    focused: row.focus !== null,
-    urgency: row.snoozedUntil
-      ? "snoozed"
-      : row.settled
-        ? "settled"
-        : sectionKey(row.placementState),
+    urgency: row.hidden
+      ? "hidden"
+      : row.snoozedUntil
+        ? "snoozed"
+        : row.settled
+          ? "settled"
+          : sectionKey(row.placementState),
   }));
   const plan = planDelegatedNesting(items, { lineageByKey });
   if (plan.hostByChildKey.size === 0) return [...rows];
@@ -881,8 +918,8 @@ function compareActive(left: InboxSidebarRow, right: InboxSidebarRow): number {
   return leftPriority - rightPriority || compareRecent(left, right);
 }
 
-function settlementDisabledReason(entry: ThreadInboxEntry): string | null {
-  switch (entry.mutationBlocker) {
+function settleBlockerReason(blocker: ThreadSettleBlocker): string {
+  switch (blocker) {
     case "client-draft":
       return "Drafts cannot be settled yet.";
     case "unsupported":
@@ -893,11 +930,6 @@ function settlementDisabledReason(entry: ThreadInboxEntry): string | null {
       return "Your role cannot change this thread.";
     case "shell-stale":
       return "Wait for current thread data before changing settlement.";
-    case null:
-      break;
-  }
-
-  switch (entry.lifecycle.settlementBlocker) {
     case "pending-approval":
       return "Resolve the pending approval first.";
     case "pending-user-input":
@@ -914,13 +946,60 @@ function settlementDisabledReason(entry: ThreadInboxEntry): string | null {
     case "thread-deleted":
     case "worktree-archived":
       return "Archived work cannot be settled.";
-    case "unsupported":
-      return "Update this machine to use Settle.";
-    case null:
-      return null;
   }
+}
 
-  return null;
+/** Snoozing shares settling's reasons, except those that name the action. */
+function snoozeBlockerReason(blocker: ThreadSnoozeBlocker): string {
+  switch (blocker) {
+    case "client-draft":
+      return "Drafts cannot be snoozed yet.";
+    case "unsupported":
+      return "Update this machine to use Snooze.";
+    case "disconnected":
+      return "Reconnect this machine to snooze threads.";
+    case "shell-stale":
+      return "Wait for current thread data before snoozing.";
+    case "delivery-unknown":
+      return "Confirm message delivery before snoozing.";
+    default:
+      return settleBlockerReason(blocker);
+  }
+}
+
+function archiveBlockerReason(blocker: ThreadArchiveBlocker): string {
+  switch (blocker) {
+    case "disconnected":
+      return "Reconnect this machine to archive threads.";
+    case "shell-stale":
+      return "Wait for current thread data before archiving.";
+    case "read-only":
+      return "Your role cannot change this thread.";
+    case "no-conversation":
+      return "Send a message before archiving.";
+    case "turn-running":
+      return "Wait for the running work to finish.";
+  }
+}
+
+/**
+ * Why an action cannot run on the thread now, worded alike by the inbox, the
+ * command palette and the shortcuts. Null while it can.
+ */
+export function threadLifecycleDisabledReason(
+  availability: ThreadLifecycleAvailability,
+  action: ThreadLifecycleAction,
+): string | null {
+  switch (action) {
+    case "settle":
+      return availability.settle.blocker && settleBlockerReason(availability.settle.blocker);
+    case "snooze":
+      return availability.snooze.blocker && snoozeBlockerReason(availability.snooze.blocker);
+    case "archive":
+      return availability.archive.blocker && archiveBlockerReason(availability.archive.blocker);
+    case "markUnread":
+      return availability.markUnread.blocker && "Nothing to mark unread yet.";
+  }
 }
 
 /** A model's short display name from its provider's catalog; null when the catalog lacks it. */
@@ -936,6 +1015,69 @@ export function modelDisplayName(
   return model ? inboxModelName(getModelDisplayName(model), provider!.driver) : null;
 }
 
+function toThreadInboxEnvironment(environment: InboxSidebarEnvironment): ThreadInboxEnvironment {
+  return {
+    environmentId: environment.environmentId,
+    label: environment.label,
+    threadSettlementSupported: environment.threadSettlementSupported,
+    threadSnoozeSupported: environment.threadSnoozeSupported,
+    threadTriageSupported: environment.threadTriageSupported,
+    autoSettleAfterDays: environment.autoSettleAfterDays,
+    connected: environment.connectionState === "connected",
+    mutationReady: environment.mutationReady,
+    shellCurrent: environment.shellCurrent,
+  };
+}
+
+export interface InboxThreadLifecycle {
+  readonly target: ScopedThreadRef;
+  readonly title: string;
+  readonly availability: ThreadLifecycleAvailability;
+}
+
+/**
+ * One thread's lifecycle state, decided exactly as its inbox row decides it,
+ * for surfaces that act on the open thread. Null for a thread the inbox does
+ * not list, such as an archived one.
+ */
+export function resolveCurrentThreadLifecycle(
+  input: Pick<
+    BuildInboxSidebarInput,
+    | "projects"
+    | "worktrees"
+    | "environments"
+    | "deliveryUnknownThreadKeys"
+    | "localQueuedThreadKeys"
+    | "pinnedThreadKeys"
+    | "autoSettleAfterDays"
+  > & {
+    readonly thread: SidebarThreadOrStub;
+    readonly nowMs: number;
+  },
+): InboxThreadLifecycle | null {
+  const environment = input.environments.find(
+    (candidate) => candidate.environmentId === input.thread.environmentId,
+  );
+  const inbox = buildThreadInbox({
+    projects: input.projects,
+    worktrees: input.worktrees,
+    threads: [input.thread],
+    environments: environment ? [toThreadInboxEnvironment(environment)] : [],
+    localQueuedThreadKeys: input.localQueuedThreadKeys,
+    deliveryUnknownThreadKeys: input.deliveryUnknownThreadKeys,
+    pinnedThreadKeys: input.pinnedThreadKeys,
+    autoSettleAfterDays: input.autoSettleAfterDays,
+    nowMs: input.nowMs,
+  });
+  const entry = inbox.active[0] ?? inbox.settled[0] ?? inbox.snoozed[0] ?? inbox.hidden[0];
+  if (entry === undefined) return null;
+  return {
+    target: entry.ref,
+    title: entry.title || UNTITLED_THREAD_TITLE,
+    availability: resolveThreadLifecycleAvailability(entry),
+  };
+}
+
 export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSidebarModel {
   const nowMs = input.nowMs ?? Date.now();
   const environmentById = new Map(
@@ -946,30 +1088,31 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
     projects: input.projects,
     worktrees: input.worktrees,
     threads: input.threads,
-    environments: input.environments.map((environment) => ({
-      environmentId: environment.environmentId,
-      label: environment.label,
-      threadSettlementSupported: environment.threadSettlementSupported,
-      threadSnoozeSupported: environment.threadSnoozeSupported,
-      autoSettleAfterDays: environment.autoSettleAfterDays,
-      connected: environment.connectionState === "connected",
-      mutationReady: environment.mutationReady,
-      shellCurrent: environment.shellCurrent,
-    })),
+    environments: input.environments.map(toThreadInboxEnvironment),
     localQueuedThreadKeys: input.localQueuedThreadKeys,
     deliveryUnknownThreadKeys,
     pinnedThreadKeys: input.pinnedThreadKeys,
+    drafts: input.drafts,
     filters: {
       ...(input.filters.environmentId ? { environmentIds: [input.filters.environmentId] } : {}),
+      ...(input.filters.projectKeys ? { projectKeys: input.filters.projectKeys } : {}),
       text: input.filters.query,
     },
     currentThreadKey: input.activeThreadKey,
-    aiFocusEnabled: input.aiFocusEnabled,
     autoSettleAfterDays: input.autoSettleAfterDays,
     nowMs,
   });
 
-  const threadEnvironmentIds = new Set(input.threads.map((thread) => thread.environmentId));
+  const drafts = input.drafts ?? NO_DRAFTS;
+  const draftByKey = new Map(
+    drafts.map((draft) => [
+      scopedThreadKey(scopeThreadRef(draft.environmentId, draft.threadId)),
+      draft,
+    ]),
+  );
+  const threadEnvironmentIds = new Set(
+    [...input.threads, ...drafts].map((thread) => thread.environmentId),
+  );
   const singleEnvironment = threadEnvironmentIds.size <= 1;
   const projectNameByKey = new Map(
     input.projects.map((project) => [
@@ -978,48 +1121,70 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
     ]),
   );
   const threadProjectNames = new Set(
-    input.threads.map(
-      (thread) => projectNameByKey.get(`${thread.environmentId}:${thread.projectId}`) ?? null,
+    [...input.threads, ...drafts].map((thread) =>
+      "isChat" in thread && thread.isChat
+        ? CHAT_PROJECT_LABEL
+        : (projectNameByKey.get(`${thread.environmentId}:${thread.projectId}`) ?? null),
     ),
   );
   const singleProject = threadProjectNames.size <= 1;
   const rows: InboxSidebarRow[] = [];
-  for (const entry of [...inbox.focus, ...inbox.active, ...inbox.settled, ...inbox.snoozed]) {
-    const thread = entry.thread;
+  for (const entry of [...inbox.active, ...inbox.settled, ...inbox.snoozed, ...inbox.hidden]) {
+    // A draft has sent nothing: its row reads a summary of the draft, with no session.
+    const draft = entry.draft ? (draftByKey.get(entry.key) ?? null) : null;
+    const thread = entry.thread ?? (draft ? inboxDraftThreadSummary(draft) : null);
     if (!thread) continue;
     const environment = environmentById.get(thread.environmentId);
     const project = entry.project;
     const worktree = entry.worktree;
     const machineLabel = environment?.label ?? "Unknown machine";
-    const isChat = isChatProject(project);
+    // A chat draft's project does not exist until its first send.
+    const isChat = isChatProject(project) || draft?.isChat === true;
     // A chat's project is its folder, not something to name: chats read "No project".
-    const projectLabel = projectDisplayLabel(project, UNKNOWN_PROJECT_LABEL);
+    const projectLabel =
+      draft?.isChat === true
+        ? CHAT_PROJECT_LABEL
+        : projectDisplayLabel(project, UNKNOWN_PROJECT_LABEL);
     const workspaceLabel = isChat
       ? CHAT_WORKSPACE_LABEL
       : (worktree?.title ?? worktree?.branch ?? thread.branch ?? "Local workspace");
     const contextLabel = `${machineLabel} · ${projectLabel} · ${workspaceLabel}`;
-    const state = resolveThreadState(thread, environment, deliveryUnknownThreadKeys, nowMs);
-    const placementState = isMachineConnecting(environment)
-      ? resolvePlacementState(thread, environment, deliveryUnknownThreadKeys, nowMs)
-      : state;
+    // A draft lives in this client: its machine's connection says nothing about it.
+    const state = draft
+      ? "idle"
+      : resolveThreadState(thread, environment, deliveryUnknownThreadKeys, nowMs);
+    const placementState =
+      !draft && isMachineConnecting(environment)
+        ? resolvePlacementState(thread, environment, deliveryUnknownThreadKeys, nowMs)
+        : state;
     const usageLimit = state === "limited" ? deriveUsageLimitStatus(thread, nowMs) : null;
     const settled = entry.lifecycle.classification === "settled";
     const snoozed = entry.lifecycle.classification === "snoozed";
+    const hidden = entry.lifecycle.classification === "hidden";
+    const availability = resolveThreadLifecycleAvailability(entry);
+    const hideAvailability = resolveThreadHideAvailability(entry);
     const providerDriver = resolveProviderDriver(thread);
     const rowPullRequests = resolveRowPullRequests(thread, worktree);
     rows.push({
       key: scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
       environmentId: thread.environmentId,
       threadId: thread.id,
-      title: thread.title || "Untitled task",
+      ...(draft ? { draftId: draft.draftId } : {}),
+      title: thread.title || UNTITLED_THREAD_TITLE,
       pinned: entry.pinned,
-      gitCwd: thread.worktreePath ?? worktree?.worktreePath ?? project?.cwd ?? null,
+      // A draft has no pull request or change counts of its own to read yet.
+      gitCwd: draft
+        ? null
+        : (thread.worktreePath ?? worktree?.worktreePath ?? project?.cwd ?? null),
       sourceControlEnabled: Boolean(
+        !draft &&
         environment?.connectionState === "connected" &&
         environment.shellCurrent &&
         !environment.stale,
       ),
+      // Discarding a draft is local; nothing on its machine can change it yet.
       mutationEnabled: Boolean(
+        !draft &&
         environment?.mutationReady &&
         environment.shellCurrent &&
         environment.connectionState === "connected",
@@ -1030,14 +1195,10 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       project: project ?? null,
       isChat,
       isWorktree: Boolean(worktree?.worktreePath ?? thread.worktreePath),
-      rankingModelLabel: modelDisplayName(
-        entry.focus?.ranking?.modelSelection,
-        environment?.providers,
-      ),
       workspaceLabel,
       contextLabel,
       state,
-      statusLabel: statusLabel(state, environment, usageLimit),
+      statusLabel: draft ? INBOX_DRAFT_STATUS_LABEL : statusLabel(state, environment, usageLimit),
       placementState,
       attention: state === "needs-input" ? resolveAttention(thread) : null,
       errorDetail: state === "error" ? sessionFailureDetail(thread.session)?.trim() || null : null,
@@ -1048,6 +1209,7 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       showMachine:
         !singleEnvironment &&
         (input.primaryEnvironmentId == null || thread.environmentId !== input.primaryEnvironmentId),
+      spansMachines: !singleEnvironment,
       updatedAt: timestamp(thread),
       providerDriver,
       providerLabel:
@@ -1078,19 +1240,21 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
               ? "Identity conflict"
               : null,
       roleLabel: environment?.role === "viewer" ? "Viewer" : null,
+      followUpQueue: followUpQueueBadgeOf(thread.followUpQueueSummary),
       settled,
+      filed: entry.lifecycle.filed === true,
+      settleWhenDone: !settled && entry.lifecycle.settleFiles === true,
+      hidden,
+      hiddenByUser: hideAvailability.hidden,
+      hideActionEnabled: hideAvailability.enabled,
       snoozedUntil: snoozed ? (thread.snoozedUntil ?? null) : null,
-      canSnooze: entry.canSnooze,
-      canUnsnooze:
-        environment?.threadSnoozeSupported === true &&
-        environment.mutationReady &&
-        environment.shellCurrent &&
-        environment.connectionState === "connected",
-      settlementActionEnabled:
-        entry.mutationEnabled && (settled || entry.lifecycle.eligibility.canSettle),
-      settlementDisabledReason: settlementDisabledReason(entry),
+      wokeAt: snoozed || settled || hidden ? null : threadSnoozeWokeAt(thread, nowMs),
+      // The snooze toggle: Snooze on an awake row, Unsnooze on a snoozed one.
+      canSnooze: !snoozed && availability.snooze.enabled,
+      canUnsnooze: snoozed && availability.snooze.enabled,
+      settlementActionEnabled: availability.settle.enabled,
+      settlementDisabledReason: threadLifecycleDisabledReason(availability, "settle"),
       effectiveSettlementTimestamp: entry.lifecycle.effectiveSettlementTimestamp,
-      focus: entry.focus,
       lineage: thread.lineage ?? null,
       delegatedChildren: NO_DELEGATED_CHILDREN,
       delegatedState: false,
@@ -1103,21 +1267,20 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
     input.nestDelegated !== false && input.filters.query.trim() === ""
       ? nestDelegatedRows(rows, input.threads)
       : rows;
-  const pinned = topLevelRows.filter((row) => row.pinned).toSorted(compareRecent);
-  const unpinnedRows = topLevelRows.filter((row) => !row.pinned);
+  // The Hidden shelf holds its rows whatever their pin: they need nothing now.
+  const hiddenRows = topLevelRows.filter((row) => row.hidden);
+  const listedRows = topLevelRows.filter((row) => !row.hidden);
+  const pinned = listedRows.filter((row) => row.pinned).toSorted(compareRecent);
+  const unpinnedRows = listedRows.filter((row) => !row.pinned);
   const unsettledRows = unpinnedRows.filter((row) => !row.settled && !row.snoozedUntil);
-  const focus = unsettledRows.filter((row) => row.focus !== null);
   const active = unsettledRows
-    .filter((row) => row.focus === null && sectionKey(row.placementState) === "active")
+    .filter((row) => sectionKey(row.placementState) === "active")
     .toSorted(compareActive);
   const needsInput = unsettledRows
-    .filter(
-      (row) =>
-        row.focus === null && !row.settled && sectionKey(row.placementState) === "needs-input",
-    )
+    .filter((row) => !row.settled && sectionKey(row.placementState) === "needs-input")
     .toSorted(compareRecent);
   const recent = unsettledRows
-    .filter((row) => row.focus === null && sectionKey(row.placementState) === "recent")
+    .filter((row) => sectionKey(row.placementState) === "recent")
     .toSorted(compareRecent);
   const settled = unpinnedRows
     .filter((row) => row.settled)
@@ -1129,7 +1292,6 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
 
   const sections: InboxSidebarSection[] = [
     ...(pinned.length > 0 ? [{ key: "pinned", title: "Pinned", rows: pinned } as const] : []),
-    ...(focus.length > 0 ? [{ key: "focus", title: "Focus", rows: focus } as const] : []),
     ...(active.length > 0 ? [{ key: "active", title: "Active now", rows: active } as const] : []),
     ...(needsInput.length > 0
       ? [{ key: "needs-input", title: "Needs input", rows: needsInput } as const]
@@ -1145,6 +1307,9 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
         ]
       : []),
     ...(settled.length > 0 ? [{ key: "settled", title: "Settled", rows: settled } as const] : []),
+    ...(hiddenRows.length > 0
+      ? [{ key: "hidden", title: "Hidden", rows: hiddenRows.toSorted(compareRecent) } as const]
+      : []),
   ];
 
   const status = input.filters.status;

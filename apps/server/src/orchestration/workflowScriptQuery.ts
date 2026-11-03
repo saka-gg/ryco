@@ -18,6 +18,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { OrchestrationGetWorkflowScriptError, type ServerSettings } from "@ryco/contracts";
+import { NotRegularFileError, openRegularFile } from "@ryco/shared/regularFile";
 import { Effect } from "effect";
 
 import { expandHomePath } from "../pathExpansion.ts";
@@ -132,12 +133,19 @@ export const readWorkflowScript = Effect.fn("orchestration.readWorkflowScript")(
   // read-failed); "read-failed" is reserved for genuine platform failures
   // with the real cause attached.
   const read = yield* Effect.tryPromise(async () => {
-    const handle = await NodeFSP.open(resolved, "r");
+    // Non-blocking, so a FIFO here fails the regular-file check instead of
+    // waiting for a writer.
+    const opened = await openRegularFile(resolved, { followSymlinks: true }).catch(
+      (cause: unknown) => {
+        if (cause instanceof NotRegularFileError) return null;
+        throw cause;
+      },
+    );
+    if (opened === null) {
+      return { failure: "not-regular-file" as const };
+    }
+    const { handle, stat } = opened;
     try {
-      const stat = await handle.stat();
-      if (!stat.isFile()) {
-        return { failure: "not-regular-file" as const };
-      }
       // The opened inode must be the same one realpath resolved to: a
       // process swapping the path between realpath and open changes the
       // inode, which this comparison catches.

@@ -8,7 +8,6 @@ import type {
   ServerProviderUpdatedPayload,
 } from "@ryco/contracts";
 import { DEFAULT_SERVER_SETTINGS, type ServerSettings } from "@ryco/contracts/settings";
-import { DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/shared/keybindings";
 import * as Atom from "effect/reactivity/Atom";
 
 import type { WsRpcClient } from "./wsRpcClient.ts";
@@ -46,10 +45,6 @@ export const EMPTY_SERVER_PROVIDERS: ReadonlyArray<ServerProvider> = [];
 
 export const selectAvailableEditors = (config: ServerConfig | null): ReadonlyArray<EditorId> =>
   config?.availableEditors ?? EMPTY_AVAILABLE_EDITORS;
-export const selectKeybindings = (config: ServerConfig | null) =>
-  config?.keybindings ?? DEFAULT_RESOLVED_KEYBINDINGS;
-export const selectKeybindingsConfigPath = (config: ServerConfig | null) =>
-  config?.keybindingsConfigPath ?? null;
 export const selectObservability = (config: ServerConfig | null) => config?.observability ?? null;
 export const selectProviders = (config: ServerConfig | null) =>
   config?.providers ?? EMPTY_SERVER_PROVIDERS;
@@ -72,10 +67,6 @@ export const providersUpdatedAtom = makeStateAtom<ServerProviderUpdatedPayload |
 
 export function getServerConfig(): ServerConfig | null {
   return appAtomRegistry.get(serverConfigAtom);
-}
-
-export function getLegacyServerKeybindings(): ServerConfig["keybindings"] {
-  return selectKeybindings(getServerConfig());
 }
 
 export function getServerConfigUpdatedNotification(): ServerConfigUpdatedNotification | null {

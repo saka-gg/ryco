@@ -328,6 +328,10 @@ function CliProxyHubDialog(props: {
   readonly onSave: (hubId: CliProxyHubId, entry: CliProxyHubConfig) => Promise<void>;
   readonly onLateSaveError: (message: string) => void;
 }) {
+  // Uncompiled on purpose: Babel's React Compiler never compiled this function
+  // (it bails on value blocks inside try/catch). Oxc can, but its render reads
+  // have not been audited for purity yet. Remove after that audit.
+  "use no memo";
   const { open, existing } = props;
   const [draft, setDraft] = useState<CliProxyHubDraft>({ url: "", label: "", managementKey: "" });
   const hasSavedKey = savedKeyApplies(draft.url, existing);

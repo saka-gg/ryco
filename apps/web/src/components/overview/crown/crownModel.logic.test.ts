@@ -328,13 +328,14 @@ describe("crownRailItemDescription", () => {
         ]),
         subagents: [makeSubagent("x", "running"), makeSubagent("y", "finished")],
       }),
-      { isGitRepo: true, notesFilled: true },
+      { isGitRepo: true, notesFilled: true, serverCount: 2 },
     );
     assert.deepEqual(describeAll(summary), {
       changes: "1 file changed",
       checks: "2 checks failing",
       plan: "1 of 2 steps done",
       agents: "2 subagents, 1 active",
+      servers: "2 servers running",
       pr: "open, has conflicts",
       notes: "Has notes",
       project: null,
@@ -363,6 +364,7 @@ describe("crownRailItemDescription", () => {
       checks: "No checks",
       plan: "No plan",
       agents: "No subagents",
+      servers: "No servers",
       pr: "No pull request",
       notes: null,
       project: null,
@@ -545,6 +547,17 @@ describe("visibleCrownRailItems", () => {
       "ship",
     ]);
     assert.include(keys({ isGitRepo: true, notesAvailable: false, hasPlan: true }), "plan");
+  });
+
+  it("shows Servers only while the thread has some running, after Subagents", () => {
+    assert.notInclude(
+      keys({ isGitRepo: true, notesAvailable: false, hasServers: false }),
+      "servers",
+    );
+    assert.deepEqual(keys({ isGitRepo: false, notesAvailable: false, hasServers: true }), [
+      "agents",
+      "servers",
+    ]);
   });
 
   it("offers Turn into project only for a chat the client can promote", () => {

@@ -16,6 +16,8 @@ const hoisted = vi.hoisted(() => ({
   /** The one `useMemo` slot ThreadMessage has, kept across renders like React keeps it. */
   memo: null as null | { deps: ReadonlyArray<unknown>; value: unknown },
   share: vi.fn(async (_input: unknown) => undefined),
+  openURL: vi.fn(async (_url: string) => true),
+  nativeMarkdown: false,
   player: {
     replace: vi.fn(),
     play: vi.fn(),
@@ -30,6 +32,9 @@ vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react")>();
   return {
     ...actual,
+    // No renderer here: state is its initial value (agent folds start closed).
+    useState: <T,>(initial: T | (() => T)) =>
+      [typeof initial === "function" ? (initial as () => T)() : initial, () => {}] as const,
     useMemo: <T,>(factory: () => T, deps: ReadonlyArray<unknown>): T => {
       const kept = hoisted.memo;
       if (
@@ -57,7 +62,7 @@ vi.mock("react-native", () => ({
   View: "View",
 }));
 vi.mock("expo", () => ({ useEvent: () => null }));
-vi.mock("expo-linking", () => ({ openURL: async () => undefined }));
+vi.mock("expo-linking", () => ({ openURL: hoisted.openURL }));
 vi.mock("expo-video", () => ({
   useVideoPlayer: () => hoisted.player,
   VideoView: "VideoView",
@@ -78,20 +83,31 @@ vi.mock("../settings/appearance/useScaledTextRole", () => ({
   useScaledTextRole: () => ({ fontSize: 16 }),
 }));
 vi.mock("../../native/SelectableMarkdownText", () => ({
-  hasNativeSelectableMarkdownText: () => false,
+  hasNativeSelectableMarkdownText: () => hoisted.nativeMarkdown,
   SelectableMarkdownText: "SelectableMarkdownText",
 }));
 vi.mock("./ThreadHtmlRender", () => ({ ThreadHtmlRender: "ThreadHtmlRender" }));
 vi.mock("./HtmlRenderCards", () => ({ HtmlRenderCards: "HtmlRenderCards" }));
 
 import { ThreadMessage } from "./ThreadMessage";
+import { EDIT_FROM_HERE_COPY, UNDO_FILE_CHANGES_COPY } from "@ryco/client-runtime/state/session";
 import {
   THREAD_FORK_COPY,
   type ChatAttachment,
   type ChatMessage,
 } from "@ryco/client-runtime/state/threads";
+import {
+  appendTerminalContextsToPrompt,
+  composeOutgoingPrompt,
+  createBrowserElementReference,
+} from "@ryco/client-runtime/state/composer";
 import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts";
 import { htmlRenderOfAttachment } from "@ryco/shared/htmlRender";
+import {
+  createQuoteCitation,
+  expandQuoteCitations,
+  serializeQuoteCitation,
+} from "@ryco/shared/quoteCitations";
 import type { TurnHtmlRender } from "./threadActivityFold";
 
 const environmentId = EnvironmentId.make("env-1");
@@ -110,6 +126,11 @@ function isElement(value: unknown): value is ReactElement {
 const MAX_WALK_DEPTH = 24;
 
 function walkTree(node: unknown, visit: (element: ReactElement) => void, depth = 0): void {
+  // A mapped list is an array among the children.
+  if (Array.isArray(node)) {
+    for (const child of node) walkTree(child, visit, depth + 1);
+    return;
+  }
   if (!isElement(node) || depth > MAX_WALK_DEPTH) return;
   visit(node);
   if (typeof node.type === "function") {
@@ -164,7 +185,73 @@ function renderMessage(
 
 beforeEach(() => {
   hoisted.memo = null;
+  hoisted.nativeMarkdown = false;
+  hoisted.openURL.mockClear();
   vi.mocked(htmlRenderOfAttachment).mockClear();
+});
+
+describe("ThreadMessage links", () => {
+  it("opens only web links from an agent's message, like the pull request screens", () => {
+    hoisted.nativeMarkdown = true;
+    const tree = renderMessage([], {
+      role: "assistant",
+      text: "See [docs](https://example.test).",
+    });
+    const markdown = collectElements(tree, (element) => element.type === "SelectableMarkdownText");
+    const onLinkPress = (markdown[0]?.props as { onLinkPress?: (href: string) => void })
+      .onLinkPress;
+    expect(onLinkPress).toBeDefined();
+    // One tap on any of these would act for the reader: call, text, another
+    // app's deep link, one of Ryco's own routes, a script.
+    for (const href of [
+      "tel:+15550100",
+      "sms:+15550100",
+      "ryco://pair?code=ABC",
+      "otherapp://do-something",
+      "javascript:alert(1)",
+      "file:///etc/hosts",
+      "relative/path.md",
+    ]) {
+      onLinkPress?.(href);
+    }
+    expect(hoisted.openURL).not.toHaveBeenCalled();
+    onLinkPress?.("https://example.test/docs");
+    expect(hoisted.openURL).toHaveBeenCalledWith("https://example.test/docs");
+  });
+});
+
+describe("ThreadMessage agent folds", () => {
+  it("folds another agent's message and a delegated result into one line", () => {
+    const agent = ThreadMessage({
+      environmentId,
+      threadId,
+      message: {
+        id: "message-agent-control-op-1-send-message",
+        role: "user",
+        text: "Please rebase onto main.\nThen run the tests.",
+        createdAt: "2026-09-12T15:00:00.000Z",
+        streaming: false,
+      } as unknown as ChatMessage,
+    });
+    const [fold] = findPressables(agent);
+    expect(pressableLabel(fold!)).toBe("Message from another agent: Please rebase onto main.");
+    expect(collectElements(agent, (element) => element.type === "CopyTextButton")).toHaveLength(0);
+
+    const result = ThreadMessage({
+      environmentId,
+      threadId,
+      message: {
+        id: "delegation-result:child-1",
+        role: "user",
+        text: "Ryco delegation update (automatic message, not written by the user and not an approval).\n2 task(s) you delegated with ryco_create_threads (returnToOrigin) reached a terminal state.\n\n[1/2]\nDelegated initial-run result (completed).\n\n[2/2]\nDelegated task notice (interrupted).",
+        createdAt: "2026-09-12T15:00:00.000Z",
+        streaming: false,
+      } as unknown as ChatMessage,
+    });
+    expect(pressableLabel(findPressables(result)[0]!)).toBe(
+      "Results from 2 delegated tasks: 1 completed, 1 interrupted",
+    );
+  });
 });
 
 describe("ThreadMessage attachment rows", () => {
@@ -196,6 +283,54 @@ describe("ThreadMessage attachment rows", () => {
           `Sent ${sentLabel}`,
       ),
     ).toHaveLength(1);
+  });
+
+  it("shows a sent message's quotes as readable quoted lines and copies the text as sent", () => {
+    const citation = createQuoteCitation({
+      source: { environmentId, threadId },
+      messageId: MessageId.make("assistant-1"),
+      selector: { exact: "The passage.", prefix: "", suffix: "", start: 0, end: 12 },
+      comment: "Explain this",
+    });
+    const text = expandQuoteCitations(`Why ${serializeQuoteCitation(citation)}?`);
+    const tree = renderMessage([], { text });
+
+    const body = collectElements(
+      tree,
+      (element) =>
+        element.type === "AppText" &&
+        (element.props as { selectable?: boolean }).selectable === true,
+    );
+    expect(body.map((element) => (element.props as { children?: unknown }).children)).toEqual([
+      "Why [Quote 1]?\n\n[Quote 1]\n> The passage.\nComment:\n  Explain this",
+    ]);
+    const copy = collectElements(tree, (element) => element.type === "CopyTextButton");
+    expect(copy[0]?.props).toMatchObject({ text });
+  });
+
+  it("reads a sent message's quotes when terminal context follows them", () => {
+    const citation = createQuoteCitation({
+      source: { environmentId, threadId },
+      messageId: MessageId.make("assistant-1"),
+      selector: { exact: "The passage.", prefix: "", suffix: "", start: 0, end: 12 },
+    });
+    // The send order: quotes expand first, terminal context is appended after.
+    const text = appendTerminalContextsToPrompt(
+      expandQuoteCitations(`Explain ${serializeQuoteCitation(citation)}`),
+      [{ terminalId: "t-1", terminalLabel: "Terminal 1", lineStart: 1, lineEnd: 1, text: "ok" }],
+    );
+    const tree = renderMessage([], { text });
+
+    const [body] = collectElements(
+      tree,
+      (element) =>
+        element.type === "AppText" &&
+        (element.props as { selectable?: boolean }).selectable === true,
+    ).map((element) => String((element.props as { children?: unknown }).children));
+    // The terminal context shows as a chip of its own, not in the body.
+    expect(body).toBe("Explain [Quote 1]\n\n[Quote 1]\n> The passage.");
+    expect(body).not.toContain("assistant_quotes");
+    expect(body).not.toContain("ryco-quote:");
   });
 
   it("does not add user-message controls to assistant messages", () => {
@@ -434,6 +569,98 @@ describe("ThreadMessage attachment rows", () => {
   });
 });
 
+describe("ThreadMessage sent contexts", () => {
+  function textOf(tree: ReactElement): string[] {
+    return collectElements(tree, (element) => element.type === "AppText").flatMap((element) => {
+      const children = (element.props as { children?: unknown }).children;
+      return typeof children === "string" ? [children] : [];
+    });
+  }
+
+  const sent = [
+    "Why does this run twice?",
+    "",
+    "<file_context>",
+    "- src/app.ts lines 12-13 (new version):",
+    "  comment: Looks wrong",
+    "  12 | for (const item of items) {",
+    "  13 |   run(item);",
+    "</file_context>",
+    "",
+    "<terminal_context>",
+    "- Terminal 1 line 4:",
+    "  4 | error: boom",
+    "</terminal_context>",
+  ].join("\n");
+
+  it("shows the typed text, with the file references and terminal output as chips", () => {
+    const tree = renderMessage([], { text: sent });
+    const texts = textOf(tree);
+    expect(texts).toContain("Why does this run twice?");
+    expect(texts).toContain("app.ts:12-13");
+    expect(texts).toContain("Looks wrong");
+    expect(texts).toContain("Terminal 1 line 4");
+    expect(texts.some((text) => text.includes("<file_context>"))).toBe(false);
+    expect(
+      collectElements(
+        tree,
+        (element) =>
+          (element.props as { accessibilityLabel?: string }).accessibilityLabel ===
+          "src/app.ts lines 12-13 (new version): Looks wrong",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("still copies the message exactly as sent", () => {
+    const tree = renderMessage([], { text: sent });
+    const copy = collectElements(tree, (element) => element.type === "CopyTextButton");
+    expect(copy[0]?.props).toMatchObject({ text: sent });
+  });
+
+  it("shows a picked page element as a chip with its note", () => {
+    const element = createBrowserElementReference({
+      url: "http://localhost:3000/settings",
+      pageTitle: "Settings",
+      selector: "#save",
+      tagName: "button",
+      role: "button",
+      name: "Save changes",
+      text: "Save changes",
+      box: { x: 1, y: 2, width: 3, height: 4 },
+      comment: "Make it primary",
+    })!;
+    const text = composeOutgoingPrompt({ prompt: "Restyle this", fileReferences: [element] });
+    const tree = renderMessage([], { text });
+    const texts = textOf(tree);
+    expect(texts).toContain("Restyle this");
+    expect(texts).toContain('button "Save changes"');
+    expect(texts).toContain("Make it primary");
+    expect(texts.some((entry) => entry.includes("<browser_context>"))).toBe(false);
+    expect(
+      collectElements(
+        tree,
+        (element) =>
+          (element.props as { accessibilityLabel?: string }).accessibilityLabel ===
+          'button "Save changes" on localhost:3000/settings: Make it primary',
+      ),
+    ).toHaveLength(1);
+    expect(
+      collectElements(
+        tree,
+        (element) =>
+          element.type === "SymbolView" && (element.props as { name?: string }).name === "globe",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("leaves a block that does not parse as text, and an assistant's reply untouched", () => {
+    const typed = "See\n\n<file_context>\nnot a reference\n</file_context>";
+    expect(textOf(renderMessage([], { text: typed }))).toContain(typed);
+    const reply = renderMessage([], { role: "assistant", text: sent });
+    expect(textOf(reply)).not.toContain("app.ts:12-13");
+  });
+});
+
 describe("ThreadMessage HTML renders", () => {
   const render: ChatAttachment = {
     type: "file",
@@ -665,5 +892,89 @@ describe("ThreadMessage fork affordance", () => {
     });
     expect(forkButtons(tree)).toHaveLength(0);
     expect(collectElements(tree, (element) => element.type === "CopyTextButton")).toHaveLength(1);
+  });
+});
+
+describe("ThreadMessage Edit from here", () => {
+  const sent = {
+    id: "m-1",
+    role: "user",
+    text: "Split the parser",
+    streaming: false,
+    createdAt: "2026-10-22T10:00:00.000Z",
+  } as unknown as ChatMessage;
+
+  function editButtons(tree: ReactElement): ReactElement[] {
+    return findPressables(tree).filter(
+      (pressable) => pressableLabel(pressable) === EDIT_FROM_HERE_COPY.action,
+    );
+  }
+
+  it("shows the button under a sent message the screen marked editable", () => {
+    const onEditFromHere = vi.fn();
+    const buttons = editButtons(
+      ThreadMessage({ environmentId, threadId, message: sent, onEditFromHere }),
+    );
+    expect(buttons).toHaveLength(1);
+    (buttons[0]!.props as { onPress: () => void }).onPress();
+    expect(onEditFromHere).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows nothing otherwise, and never under a reply", () => {
+    expect(editButtons(ThreadMessage({ environmentId, threadId, message: sent }))).toHaveLength(0);
+    expect(
+      editButtons(
+        ThreadMessage({
+          environmentId,
+          threadId,
+          message: { ...sent, role: "assistant" } as ChatMessage,
+          onEditFromHere: vi.fn(),
+        }),
+      ),
+    ).toHaveLength(0);
+  });
+});
+
+describe("ThreadMessage Undo file changes", () => {
+  const reply = {
+    id: "m-1",
+    role: "assistant",
+    text: "Done: the parser is split.",
+    streaming: false,
+    turnId: "turn-1",
+  } as unknown as ChatMessage;
+
+  function undoButtons(tree: ReactElement): ReactElement[] {
+    return findPressables(tree).filter(
+      (pressable) => pressableLabel(pressable) === UNDO_FILE_CHANGES_COPY.action,
+    );
+  }
+
+  it("shows the button under a reply the screen marked undoable, without a fork button", () => {
+    const onUndoFileChanges = vi.fn();
+    const tree = ThreadMessage({ environmentId, threadId, message: reply, onUndoFileChanges });
+    const buttons = undoButtons(tree);
+    expect(buttons).toHaveLength(1);
+    expect(
+      findPressables(tree).filter(
+        (pressable) => pressableLabel(pressable) === THREAD_FORK_COPY.action,
+      ),
+    ).toHaveLength(0);
+    (buttons[0]!.props as { onPress: () => void }).onPress();
+    expect(onUndoFileChanges).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows nothing otherwise, and never under a sent message", () => {
+    expect(undoButtons(ThreadMessage({ environmentId, threadId, message: reply }))).toHaveLength(0);
+    expect(
+      undoButtons(
+        ThreadMessage({
+          environmentId,
+          threadId,
+          message: { ...reply, role: "user", createdAt: "2026-10-22T10:00:00.000Z" } as ChatMessage,
+          onUndoFileChanges: vi.fn(),
+        }),
+      ),
+    ).toHaveLength(0);
   });
 });

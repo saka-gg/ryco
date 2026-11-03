@@ -6,6 +6,10 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import { BootstrapEnvelopeUnavailableError } from "./bootstrap.ts";
 import {
+  DatabaseOwnedError,
+  DatabaseUpgradeBlockedError,
+} from "./persistence/databaseOwnerLock.ts";
+import {
   attachDesktopLifecycleChannel,
   detachDesktopLifecycleChannelForTests,
 } from "./desktopLifecycle.ts";
@@ -40,6 +44,58 @@ describe("fatal startup failures", () => {
   it("treats a missing bootstrap envelope as fatal", () => {
     const error = new BootstrapEnvelopeUnavailableError({ fd: 3, message: "pipe closed" });
     expect(classifyFatalStartupError(error)).toBe("bootstrap-envelope-missing");
+  });
+
+  it("treats a database another server owns as fatal, and reports who owns it", () => {
+    const channel = new PassThrough();
+    let written = "";
+    channel.on("data", (chunk: Buffer) => (written += chunk.toString("utf8")));
+    attachDesktopLifecycleChannel(channel);
+    const error = new DatabaseOwnedError({
+      dbPath: "/data/userdata/state.sqlite",
+      lockPath: "/data/userdata/state.sqlite.owner",
+      owner: null,
+      reason: "held",
+      message: "Another Ryco server is using this data directory: `ryco serve` (pid 4242).",
+    });
+
+    expect(classifyFatalStartupError(error)).toBe("database-in-use");
+    expect(reportFatalStartupFailure("database-in-use", error)).toBe(78);
+    expect(JSON.parse(written.trim())).toEqual({
+      type: "fatal",
+      code: "database-in-use",
+      message: "Another Ryco server is using this data directory: `ryco serve` (pid 4242).",
+    });
+  });
+
+  it("keeps a lock that is still being written retryable", () => {
+    const fields = {
+      dbPath: "/data/userdata/state.sqlite",
+      lockPath: "/data/userdata/state.sqlite.owner",
+      owner: null,
+      message: "Ryco cannot use its owner lock.",
+    };
+    expect(
+      classifyFatalStartupError(new DatabaseOwnedError({ ...fields, reason: "being-written" })),
+    ).toBeNull();
+    for (const reason of ["unreadable", "foreign-file", "io-error"] as const) {
+      expect(classifyFatalStartupError(new DatabaseOwnedError({ ...fields, reason }))).toBe(
+        "database-in-use",
+      );
+    }
+  });
+
+  it("keeps a CLI's refused upgrade an ordinary failure", () => {
+    const error = new DatabaseUpgradeBlockedError({
+      owner: null,
+      from: 92,
+      to: 93,
+      repairs: [],
+      message: "This ryco needs to upgrade the database",
+    });
+    expect(classifyFatalStartupError(error)).toBeNull();
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toBe("This ryco needs to upgrade the database");
   });
 
   it("keeps other failures retryable", () => {

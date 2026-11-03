@@ -12,11 +12,20 @@ import {
 
 import { newCommandId } from "../lib/utils";
 
-export async function interruptThreadTurn(api: EnvironmentApi, threadId: ThreadId): Promise<void> {
+// The checkpoint revert, from its guards to the node's verdict, is shared with mobile:
+// `runCheckpointRevert` in `@ryco/client-runtime/state/session`.
+
+export async function interruptThreadTurn(
+  api: EnvironmentApi,
+  threadId: ThreadId,
+  options?: { readonly holdQueue?: boolean },
+): Promise<void> {
   await api.orchestration.dispatchCommand({
     type: "thread.turn.interrupt",
     commandId: newCommandId(),
     threadId,
+    // A person's Stop also holds the node's follow-up queue, in the same batch.
+    ...(options?.holdQueue ? { holdQueue: true as const } : {}),
     createdAt: new Date().toISOString(),
   });
 }
@@ -63,73 +72,4 @@ export async function respondToThreadUserInput(input: {
         createdAt: new Date().toISOString(),
       }),
   });
-}
-
-export async function revertThreadToTurnCount(input: {
-  api: EnvironmentApi;
-  threadId: ThreadId;
-  turnCount: number;
-}): Promise<void> {
-  await input.api.orchestration.dispatchCommand({
-    type: "thread.checkpoint.revert",
-    commandId: newCommandId(),
-    threadId: input.threadId,
-    turnCount: input.turnCount,
-    createdAt: new Date().toISOString(),
-  });
-}
-
-export type RevertThreadCheckpointGuardFailure =
-  | { type: "missing-api" }
-  | { type: "missing-thread" }
-  | { type: "environment-unavailable"; label: string }
-  | { type: "turn-in-progress" }
-  | { type: "provider-unsupported"; message: string }
-  | { type: "user-cancelled" };
-
-export type RevertThreadCheckpointResult =
-  | { ok: true }
-  | { ok: false; reason: RevertThreadCheckpointGuardFailure };
-
-export async function revertThreadCheckpointWithGuards(input: {
-  api: EnvironmentApi | null;
-  localApi: { dialogs: { confirm: (message: string) => Promise<boolean> } } | null;
-  thread: { id: ThreadId } | null;
-  turnCount: number;
-  environmentUnavailable: boolean;
-  environmentUnavailableLabel: string | null;
-  turnInProgress: boolean;
-  /** Why the thread's provider cannot forget turns (`checkpointRevertUnsupportedMessage`). */
-  providerRefusal: string | null;
-  confirmMessage: string;
-}): Promise<RevertThreadCheckpointResult> {
-  if (!input.api || !input.localApi || !input.thread) {
-    return { ok: false, reason: { type: "missing-api" } };
-  }
-  if (input.environmentUnavailable) {
-    return {
-      ok: false,
-      reason: {
-        type: "environment-unavailable",
-        label: input.environmentUnavailableLabel ?? "environment",
-      },
-    };
-  }
-  if (input.turnInProgress) {
-    return { ok: false, reason: { type: "turn-in-progress" } };
-  }
-  // Refuse before the user confirms anything the provider cannot do.
-  if (input.providerRefusal !== null) {
-    return { ok: false, reason: { type: "provider-unsupported", message: input.providerRefusal } };
-  }
-  const confirmed = await input.localApi.dialogs.confirm(input.confirmMessage);
-  if (!confirmed) {
-    return { ok: false, reason: { type: "user-cancelled" } };
-  }
-  await revertThreadToTurnCount({
-    api: input.api,
-    threadId: input.thread.id,
-    turnCount: input.turnCount,
-  });
-  return { ok: true };
 }

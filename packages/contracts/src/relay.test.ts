@@ -98,6 +98,7 @@ const validFrames = [
     accountAuthEpoch: 2,
     deviceAuthEpoch: 3,
   },
+  { type: "node.linked-access.changed", ...version3 },
 ] as const;
 
 describe("relay schemas", () => {
@@ -106,7 +107,7 @@ describe("relay schemas", () => {
   it("decodes both authentication handshakes and every frame class", () => {
     const decoded = validFrames.map((frame) => decodeFrame(frame));
 
-    expect(decoded).toHaveLength(17);
+    expect(decoded).toHaveLength(18);
     expect(new Set(decoded.map((frame) => frame.type))).toEqual(new Set(RELAY_FRAME_TYPES));
   });
 
@@ -164,6 +165,25 @@ describe("relay schemas", () => {
     for (const clientVersion of ["", " 0.1.33", "x".repeat(65), 33]) {
       expect(() => decodeFrame({ ...nodeAuth, clientVersion })).toThrow();
     }
+  });
+
+  it("carries the node's open, bounded feature list on the node handshake", () => {
+    const nodeAuth = validFrames[0]!;
+    expect(
+      decodeFrame({ ...nodeAuth, features: ["linked-access-check", "a-future-feature"] }),
+    ).toMatchObject({ peer: "node", features: ["linked-access-check", "a-future-feature"] });
+    expect("features" in decodeFrame(nodeAuth)).toBe(false);
+    for (const features of [[""], [" padded"], ["x".repeat(65)], Array(17).fill("f"), "f"]) {
+      expect(() => decodeFrame({ ...nodeAuth, features })).toThrow();
+    }
+  });
+
+  it("names nothing in a linked-access nudge and needs protocol minor 3", () => {
+    expect(decodeFrame({ type: "node.linked-access.changed", ...version3 })).toEqual({
+      type: "node.linked-access.changed",
+      ...version3,
+    });
+    expect(() => decodeFrame({ type: "node.linked-access.changed", ...version })).toThrow();
   });
 
   it("rejects missing and unknown discriminants", () => {

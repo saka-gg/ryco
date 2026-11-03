@@ -1,7 +1,7 @@
 import { EnvironmentId, ProjectId } from "@ryco/contracts";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { openAddProjectWith, useCommandPaletteStore } from "../../commandPaletteStore";
+import { useCommandPaletteStore } from "../../commandPaletteStore";
 import {
   ADD_PROJECT_DIALOG_ENABLED,
   addProjectDialogAvailable,
@@ -70,7 +70,7 @@ describe("projectNodesDialogStore", () => {
     expect(useProjectNodesDialogStore.getState().addProject.open).toBe(true);
     expect(useCommandPaletteStore.getState()).toMatchObject({ open: false, openIntent: null });
 
-    openAddProjectWith({ environmentId: MINI });
+    useCommandPaletteStore.getState().openAddProject({ environmentId: MINI });
     expect(useProjectNodesDialogStore.getState().addProject).toMatchObject({
       open: true,
       token: 2,

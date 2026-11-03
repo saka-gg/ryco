@@ -1,10 +1,9 @@
 import { ProjectId, ServerSettingsError, KeybindingsConfigError } from "@ryco/contracts";
 import { resolveProjectPreferences } from "../project/projectPreferences.ts";
-import { CodexSettings, CodexResetCreditError } from "@ryco/contracts";
-import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
+import { CodexResetCreditError } from "@ryco/contracts";
+import { codexProcessEnvironment } from "../provider/Drivers/CodexHomeLayout.ts";
 import * as NodePath from "node:path";
 import { AcpRegistryOperationError, AcpRegistrySettings } from "@ryco/contracts";
-import { makeAcpRegistryCatalog } from "../provider/acp/AcpRegistryCatalog.ts";
 import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
 import {
   readResourceTelemetryHistory,
@@ -45,9 +44,47 @@ import {
 const loadCodexResetCredits = Effect.promise(
   () => import("../provider/Layers/CodexResetCredits.ts"),
 );
+const loadCodexInstanceRuntime = Effect.promise(
+  () => import("../provider/codexInstanceRuntime.ts"),
+);
 const loadAcpRegistrySupport = Effect.promise(
   () => import("../provider/acp/AcpRegistrySupport.ts"),
 );
+
+type AcpRegistryCatalog = ReturnType<
+  typeof import("../provider/acp/AcpRegistryCatalog.ts").makeAcpRegistryCatalog
+>;
+// One registry catalog per installation root for the whole server, not one per
+// connection: it caches the registry index and coalesces concurrent installs of
+// the same version. It loads with the first registry search or install.
+const acpRegistryCatalogs = new Map<string, Promise<AcpRegistryCatalog>>();
+const acpRegistryCatalog = (installationRoot: string) => {
+  const existing = acpRegistryCatalogs.get(installationRoot);
+  if (existing) return existing;
+  const catalog = import("../provider/acp/AcpRegistryCatalog.ts").then((module) =>
+    module.makeAcpRegistryCatalog({ installationRoot }),
+  );
+  acpRegistryCatalogs.set(installationRoot, catalog);
+  // The next search or install retries a failed load.
+  catalog.catch(() => {
+    if (acpRegistryCatalogs.get(installationRoot) === catalog)
+      acpRegistryCatalogs.delete(installationRoot);
+  });
+  return catalog;
+};
+
+/**
+ * The detail of an `AcpLocalCommandUnavailable`, directly or as the cause of the transport error
+ * wrapping it. Checked by tag so the lazy ACP module stays off the boot path; its details name only
+ * the configured command, never environment values or resolved paths.
+ */
+function localCommandUnavailableDetail(cause: unknown): string | undefined {
+  type Tagged = { readonly _tag?: unknown; readonly detail?: unknown; readonly cause?: unknown };
+  for (const candidate of [cause, (cause as Tagged | null)?.cause] as Array<Tagged | null>)
+    if (candidate?._tag === "AcpLocalCommandUnavailable" && typeof candidate.detail === "string")
+      return candidate.detail;
+  return undefined;
+}
 
 export const makeProviderHandlers = (ctx: WsRpcContext) => {
   const {
@@ -79,16 +116,15 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
     currentSessionId,
   } = ctx;
 
-  const registry = makeAcpRegistryCatalog({
-    installationRoot: NodePath.join(config.stateDir, "acp-registry"),
-  });
+  const registryRoot = NodePath.join(config.stateDir, "acp-registry");
   const registryError = (cause: unknown) =>
     new AcpRegistryOperationError({
       // Do not expose environment variables, filesystem paths, or agent auth payloads.
       message:
-        cause instanceof Error && !("code" in cause) && cause.message.startsWith("Registry ")
+        localCommandUnavailableDetail(cause) ??
+        (cause instanceof Error && !("code" in cause) && cause.message.startsWith("Registry ")
           ? cause.message
-          : "ACP Registry operation failed. Check the selected version, installation, and provider authentication.",
+          : "ACP Registry operation failed. Check the selected version, installation, and provider authentication."),
     });
   const registryInstance = (instanceId: import("@ryco/contracts").ProviderInstanceId) =>
     Effect.gen(function* () {
@@ -111,22 +147,16 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
     });
 
   const resetRuntime = (instanceId: import("@ryco/contracts").ProviderInstanceId) =>
-    Effect.gen(function* () {
-      const settings = yield* serverSettings.getSettings;
-      const instance = settings.providerInstances[instanceId];
-      if (!instance || instance.driver !== "codex" || !instance.enabled)
-        return yield* Effect.fail(
-          new CodexResetCreditError({ message: "Select an enabled Codex provider." }),
-        );
-      const codex = yield* Schema.decodeUnknownEffect(CodexSettings)(instance.config ?? {});
-      const layout = yield* resolveCodexHomeLayout(codex);
-      return {
+    Effect.all([loadCodexInstanceRuntime, serverSettings.getSettings]).pipe(
+      Effect.flatMap(([{ resolveCodexInstanceRuntime }, settings]) =>
+        resolveCodexInstanceRuntime(settings, instanceId),
+      ),
+      Effect.map(({ binaryPath, layout, environment }) => ({
         instanceId,
-        binaryPath: codex.binaryPath,
+        binaryPath,
         homePath: layout.effectiveHomePath ?? "",
-        environment: mergeProviderInstanceEnvironment(instance.environment),
-      };
-    }).pipe(
+        environment: codexProcessEnvironment(layout, environment),
+      })),
       Effect.mapError(
         () => new CodexResetCreditError({ message: "The selected Codex provider is unavailable." }),
       ),
@@ -162,14 +192,19 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
       ctx.withAccess(
         "viewer",
         WS_METHODS.serverSearchAcpRegistry,
-        Effect.tryPromise({ try: () => registry.search(input.query), catch: registryError }).pipe(
-          Effect.map((agents) => ({ agents })),
-        ),
+        Effect.tryPromise({
+          try: () =>
+            acpRegistryCatalog(registryRoot).then((registry) => registry.search(input.query)),
+          catch: registryError,
+        }).pipe(Effect.map((agents) => ({ agents }))),
       ),
     [WS_METHODS.serverInstallAcpRegistry]: (input) =>
       ownerEffect(
         WS_METHODS.serverInstallAcpRegistry,
-        Effect.tryPromise({ try: () => registry.install(input), catch: registryError }),
+        Effect.tryPromise({
+          try: () => acpRegistryCatalog(registryRoot).then((registry) => registry.install(input)),
+          catch: registryError,
+        }),
       ),
     [WS_METHODS.serverGetAcpRegistryAuthMethods]: (input) =>
       ownerEffect(

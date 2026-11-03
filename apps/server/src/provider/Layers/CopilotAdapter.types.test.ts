@@ -2,13 +2,20 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { RuntimeConnection } from "@github/copilot-sdk";
+import { Effect } from "effect";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import {
+  type AgentProcessPriorityShape,
+  makeAgentProcessPriority,
+} from "../agentProcessPriority.ts";
 import {
   DEFAULT_BINARY_PATH,
   makeCopilotClientOptions,
   normalizeUsage,
   resolveCopilotCliPath,
+  withCopilotAgentPriority,
 } from "./CopilotAdapter.types.ts";
 
 // Probes, session starts and text generation must not search PATH synchronously: a stalled mount
@@ -92,5 +99,52 @@ describe("normalizeUsage", () => {
       lastOutputTokens: 10,
       lastReasoningOutputTokens: 5,
     });
+  });
+});
+
+describe("withCopilotAgentPriority", () => {
+  const facts = (platform: NodeJS.Platform) =>
+    makeAgentProcessPriority({
+      enabled: Effect.succeed(true),
+      platform,
+      niceExecutable: () => "/usr/bin/nice",
+      commandResolves: async () => true,
+      lowerChild: () => "lowered",
+    });
+  const stdioOptions = (connection: Parameters<typeof RuntimeConnection.forStdio>[0]) => ({
+    connection: RuntimeConnection.forStdio(connection),
+    workingDirectory: "/tmp",
+    env: { PATH: "/opt/bin" },
+    logLevel: "error" as const,
+  });
+  const apply = (
+    priority: AgentProcessPriorityShape | undefined,
+    options: ReturnType<typeof stdioOptions> | { readonly connection: RuntimeConnection },
+  ) => Effect.runPromise(withCopilotAgentPriority(priority, options));
+
+  it("runs a native Copilot CLI through nice, ahead of the SDK's own arguments", async () => {
+    const options = stdioOptions({ path: "/opt/bin/copilot" });
+    const lowered = await apply(facts("linux"), options);
+    expect(lowered.connection).toMatchObject({
+      kind: "stdio",
+      path: "/usr/bin/nice",
+      args: ["-n", "5", "/opt/bin/copilot"],
+    });
+    expect(lowered.workingDirectory).toBe("/tmp");
+    expect(lowered.env).toBe(options.env);
+  });
+
+  it("leaves every case it cannot lower unchanged", async () => {
+    const native = stdioOptions({ path: "/opt/bin/copilot" });
+    expect(await apply(undefined, native)).toBe(native);
+    expect(await apply(facts("win32"), native)).toBe(native);
+    const js = stdioOptions({ path: "/opt/copilot/index.js" });
+    expect(await apply(facts("linux"), js)).toBe(js);
+    const withArgs = stdioOptions({ path: "/opt/bin/copilot", args: ["--verbose"] });
+    expect(await apply(facts("linux"), withArgs)).toBe(withArgs);
+    const bundled = stdioOptions({});
+    expect(await apply(facts("linux"), bundled)).toBe(bundled);
+    const tcp = { connection: RuntimeConnection.forTcp({ path: "/opt/bin/copilot" }) };
+    expect(await apply(facts("linux"), tcp)).toBe(tcp);
   });
 });

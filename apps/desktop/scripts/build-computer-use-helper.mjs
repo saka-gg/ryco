@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, copyFileSync, cpSync } from "node:fs";
+import { mkdirSync, copyFileSync, cpSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
@@ -36,8 +36,15 @@ export function buildComputerUseHelper(desktopDirectory = desktop, { development
   const targetDirectory = process.env.CARGO_TARGET_DIR
     ? resolve(source, process.env.CARGO_TARGET_DIR)
     : join(nativeBuildCacheDirectory(), "cargo", "computer-use-1.98.1", cacheKey);
-  const bin = join(homedir(), ".cargo", "bin");
-  const cargo = join(bin, process.platform === "win32" ? "cargo.exe" : "cargo");
+  // A rustup.rs install puts the rustup proxies in CARGO_HOME/bin; a package-manager rustup
+  // (Homebrew on GitHub's macOS images) puts them on PATH instead.
+  const cargoBin = join(process.env.CARGO_HOME || join(homedir(), ".cargo"), "bin");
+  const rustTool = (name) => {
+    const installed = join(cargoBin, process.platform === "win32" ? `${name}.exe` : name);
+    return existsSync(installed) ? installed : name;
+  };
+  const cargo = rustTool("cargo");
+  const rustup = rustTool("rustup");
   function run(command, args) {
     const built = spawnSync(command, args, { cwd: source, stdio: "inherit" });
     if (built.error || built.status !== 0)
@@ -75,7 +82,7 @@ export function buildComputerUseHelper(desktopDirectory = desktop, { development
     build(binary) {
       if (process.platform === "darwin") {
         const target = "aarch64-apple-darwin";
-        run(join(bin, "rustup"), ["target", "add", "--toolchain", "1.98.1", target]);
+        run(rustup, ["target", "add", "--toolchain", "1.98.1", target]);
         run(cargo, [...buildArguments, "--target", target]);
         copyFileSync(join(targetDirectory, target, "release/ryco-computer-use"), binary);
       } else {

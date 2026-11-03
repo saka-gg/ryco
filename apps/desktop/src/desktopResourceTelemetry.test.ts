@@ -17,6 +17,7 @@ vi.mock("electron", async () => {
 });
 import type { DesktopUpdateState } from "@ryco/contracts";
 import {
+  type DesktopAgentWorkFrame,
   type DesktopAppUpdateRequestFrame,
   type DesktopBackendLifecycleFrame,
   parseDesktopAppUpdateStateFrame,
@@ -129,6 +130,21 @@ describe("desktop resource telemetry", () => {
     pipe.destroy();
   });
 
+  it("keeps the pipe open over malformed input: the backend takes its close for the app's exit", () => {
+    const { pipe } = backendPipe();
+    const frames: DesktopBackendLifecycleFrame[] = [];
+    const stop = attachDesktopResourceTelemetry(pipe, {
+      onLifecycleFrame: (frame) => frames.push(frame),
+    });
+    pipe.emit("data", 'not json\n{"type":"http-serving","port":7926}\n');
+    expect(pipe.destroyed).toBe(false);
+    expect(frames).toEqual([{ type: "http-serving", port: 7926 }]);
+    pipe.emit("data", "x".repeat(300 * 1024));
+    expect(pipe.destroyed).toBe(false);
+    stop.close();
+    pipe.destroy();
+  });
+
   it("hands valid app update requests to the owner, even after a handler throws", () => {
     const { pipe } = backendPipe();
     const requests: DesktopAppUpdateRequestFrame[] = [];
@@ -147,6 +163,9 @@ describe("desktop resource telemetry", () => {
         '{"type":"app-update-install","requestId":"req-1","targetVersion":"1.1.0"}',
         '{"type":"app-update-install","requestId":"","targetVersion":"1.1.0"}',
         '{"type":"app-update-install","targetVersion":"1.1.0"}',
+        '{"type":"app-update-policy","automatic":true}',
+        '{"type":"app-update-policy","automatic":"yes"}',
+        '{"type":"app-update-policy","automatic":false}',
         '{"type":"startup-ready"}',
         "",
       ].join("\n"),
@@ -154,9 +173,43 @@ describe("desktop resource telemetry", () => {
     expect(requests).toEqual([
       { type: "app-update-check" },
       { type: "app-update-install", requestId: "req-1", targetVersion: "1.1.0" },
+      { type: "app-update-policy", automatic: true },
+      { type: "app-update-policy", automatic: false },
     ]);
     expect(lifecycle).toEqual([{ type: "startup-ready" }]);
     expect(pipe.destroyed).toBe(false);
+    stop.close();
+    pipe.destroy();
+  });
+
+  it("hands agent-work frames to their owner, drops malformed ones and survives a throw", () => {
+    const { pipe } = backendPipe();
+    const work: DesktopAgentWorkFrame[] = [];
+    const lifecycle: DesktopBackendLifecycleFrame[] = [];
+    const stop = attachDesktopResourceTelemetry(pipe, {
+      onLifecycleFrame: (frame) => lifecycle.push(frame),
+      onAgentWork: (frame) => {
+        work.push(frame);
+        if (work.length === 1) throw new Error("keep-awake exploded");
+      },
+    });
+    pipe.emit(
+      "data",
+      [
+        '{"type":"agent-work","working":true,"keepAwake":true}',
+        '{"type":"agent-work","working":"yes","keepAwake":true}',
+        '{"type":"agent-work","working":false,"keepAwake":true,"extra":1}',
+        '{"type":"startup-ready"}',
+        "",
+      ].join("\n"),
+    );
+    expect(work).toEqual([
+      { type: "agent-work", working: true, keepAwake: true },
+      { type: "agent-work", working: false, keepAwake: true },
+    ]);
+    expect(lifecycle).toEqual([{ type: "startup-ready" }]);
+    expect(pipe.destroyed).toBe(false);
+    expect(electron.getAppMetrics).not.toHaveBeenCalled();
     stop.close();
     pipe.destroy();
   });

@@ -4,7 +4,7 @@ Ryco has one server-side observability model:
 
 - pretty logs go to stdout for humans
 - completed spans go to a local NDJSON trace file
-- traces and metrics can also be exported over OTLP to a real backend like Grafana LGTM
+- traces, metrics and logs can also be exported over OTLP to a real backend like Grafana LGTM
 
 The local trace file is the persisted source of truth. Only desktop mode also keeps a server log file (`logs/server.log`).
 
@@ -84,6 +84,11 @@ pair of files per thread: `<threadId>.native.log` (provider protocol messages) a
 - retention: each file rotates at 10 MiB with 3 gzipped backups (`.1.gz` …); files untouched for 30
   days are removed and the directory is kept under 512 MiB (oldest first), at boot and hourly.
   Terminal histories in `logs/terminals/` get the same sweep (90 days, 256 MiB).
+
+The event-loop stall history, `event-loop-stalls.ndjson`, sits next to the trace file (so
+`RYCO_TRACE_FILE` moves it too), with one backup `.1`; both rotate at 512 KiB. Heap snapshots taken
+with `kill -USR2` are written to `logs/` as `server-<pid>-<time>.heapsnapshot`. See
+[Event-Loop Stalls](#event-loop-stalls) and [Heap Snapshots](#heap-snapshots).
 
 The Diagnostics panel reads provider failures (`runtime.error`, failed turns, errored session exits)
 from the canonical logs of the most recently active threads, and server failures from
@@ -204,6 +209,32 @@ The backend reads observability config at process start. If you change OTLP env 
 ### Start With The Local Trace File
 
 The trace file is the fastest way to inspect raw span data.
+
+#### Summarize traces from the CLI
+
+`ryco trace summary` reads the trace file and its rotated backups and prints, per span name, how
+many spans ended, how many per minute, p50/p90/max duration, and how many were interrupted or
+failed. It loads no server, database or persistence layer, so it answers while the server is
+stalled or stopped.
+
+```bash
+ryco trace summary                      # every retained span, busiest names first
+ryco trace summary --since 30m          # only spans that ended in the last 30 minutes
+ryco trace summary --limit 50           # show more span names (default 25)
+ryco trace summary --base-dir ~/other-ryco-home
+ryco trace summary --file ./server.trace.ndjson   # a copied file; its .1, .2, ... are read too
+ryco trace summary --since 2h --json    # one JSON document (adds p99), for scripts and agents
+```
+
+It finds the file the way the server does (`RYCO_HOME` or `--base-dir`, `RYCO_TRACE_FILE`,
+`RYCO_TRACE_MAX_FILES`, `--dev-url` for a dev home). With `--since`, rotated files last written
+before the window are not read. Lines that are not spans are counted and reported, not fatal, and
+so is a file that exists but cannot be read (no permission, a link or FIFO in its place).
+Counts and percentiles cover the spans the file keeps: fast successful child spans are left out
+(see [Traces](#traces)), so treat the numbers for short child spans as a lower bound. The
+command only reads: a data directory without its `userdata` (or `dev`) folder is refused, and
+nothing is created. Span names are shown with control characters escaped and cut at 120
+characters; `--json` keeps them whole.
 
 Tail it:
 
@@ -338,6 +369,11 @@ Counters tell you volume and failure rate:
 - `ryco_provider_turns_total`
 - `ryco_git_commands_total`
 - `ryco_db_queries_total`
+- `ryco_forge_rate_limit_pauses_total` (pauses of background forge reads after a rate limit, by
+  provider and by whether the forge named the end, `source="forge"`, or Ryco guessed it,
+  `source="fallback"`)
+- `ryco_forge_rate_limit_refused_total` (background forge reads refused during such a pause
+  without contacting the forge, by provider)
 
 Use metrics when the question is:
 
@@ -365,6 +401,113 @@ That is a server-side acknowledgment metric. It does not measure:
 - React render time
 
 If you need those later, add client-side instrumentation or a dedicated server fanout metric.
+
+### Domain-Event Subscribers That Fall Behind
+
+Publishing a committed event never waits for its subscribers (the reactors and live feeds). The
+bus keeps the latest 4,096 events. A subscriber that falls further behind reads the events it
+missed from the event store before it continues. The runtime queue counters with
+`queue="orchestration.domain-events"` show this:
+
+- `ryco_runtime_queue_overflows_total`: missed ranges read from the store
+- `ryco_runtime_queue_recoveries_total`: events read that way
+
+They stay at zero while every subscriber keeps up. A steady rise means a subscriber is slow,
+usually a reactor waiting on git or a provider. They also rise once per subscriber when events
+reach the database without this server publishing them: events another process appended to the
+same database (an offline `ryco project` command), or a command whose post-commit step and its
+recovery both failed. A failed read is retried, at most 5 s apart, from the last event already
+delivered, with a warning log `domain event subscriber could not read missed events; retrying`. A
+missed event this server cannot decode ends that subscriber, with the error log
+`domain event subscriber cannot decode missed events`. Restarting the server starts every
+subscriber again at the newest event.
+
+## Event-Loop Stalls
+
+The server watches its own event loop for as long as it runs
+(`apps/server/src/observability/EventLoopMonitor.ts`). A 1 s timer measures the gap between its own
+callbacks. When a gap is 2 s or longer, the time the loop was busy inside it (event-loop
+utilization: JavaScript, garbage collection or synchronous I/O) tells a stall from a pause:
+
+- busy for 2 s or more: a **stall**, recorded with its busy time as the duration;
+- otherwise mostly idle: the machine slept, the process was stopped (`SIGSTOP`) or a VM paused. That
+  is never a stall; the window logs one Debug line, `event loop gap while idle`.
+
+A libuv threadpool canary (one `fs.stat` at most every 5 s, one in flight at a time) runs
+alongside. A canary that takes 2 s or more while the loop was free is a `threadpool` record; one
+still unanswered after 2 s of free loop time is a `threadpool-pending` record instead, written once
+and not again when the canary finally completes. A canary that overlapped any loop gap of 2 s or
+more is not counted, since the loop, not the threadpool, may have held its callback. Saturations of
+8 s or more are always caught; shorter ones only when a canary lands in them.
+
+Each record carries the evidence to tell stalls apart: CPU time (user and system), major and minor
+page faults, involuntary context switches, RSS and heap used at the stall, the 1-minute load average
+and core count, the tracked startup phases (`trackStartupPhase`) that overlapped it, the pid and the
+process uptime. Records from the first minute are shown as "during startup". Evidence that cannot be
+read at the stall is left out of its record (on Linux, RSS and heap used once the server has run
+out of file descriptors).
+
+Records are bounded per 30 s window. The first stall of each kind is written at once, so a crash or
+restart right after it still leaves it on disk. Later stalls of that kind in the same window are
+folded into one record (`count`, `totalMs`, and the evidence of the longest) written when the window
+closes or the server shuts down. Each record also becomes:
+
+- a root span `server.eventLoop.stall` or `server.threadpool.stall` at level Warn, so it survives
+  `RYCO_TRACE_MIN_LEVEL=Warn` and the short-span filter, carrying the warning log (`event loop stalled
+  for 3000 ms`) that also shows in Diagnostics' latest warnings;
+- an increment of `ryco_server_event_loop_stalls_total` (label `kind`) by its `count`.
+
+Settings > Diagnostics > Event-loop stalls shows the last 24 h, the newest records and a hint read
+from the evidence (CPU-bound, memory pressure, kernel time, or waiting on disk or a lock). Offline,
+read the file directly:
+
+```bash
+jq -c '{time, kind, durationMs, count, cpuUserMs, majorPageFaults, phases}' \
+  ~/.ryco/userdata/logs/event-loop-stalls.ndjson
+```
+
+Platform notes:
+
+- macOS and Windows keep the monotonic clock running across machine sleep, so sleep shows up as an
+  idle gap and is filtered out. Linux stops the clock during suspend, so sleep is invisible there.
+- A process stopped while it was running JavaScript counts the stop as busy time; machine sleep almost
+  always catches an idle loop.
+- Bun (the desktop app's development backend) reports no event-loop utilization. There the process
+  CPU time inside the gap stands in for it (records say `busySource: "cpu"`), so stalls spent waiting
+  in synchronous I/O are undercounted.
+- Page-fault counts are 0 on Windows and the load average is left out there.
+- Two servers sharing one `RYCO_HOME` append to the same file; `pid` tells them apart. Each rotates
+  it on its own size count, so a rotation can drop the other's newest records, as with the trace
+  file.
+- If the runtime cannot take readings at all, the monitor logs one warning and stays off; the
+  server starts regardless.
+
+## Heap Snapshots
+
+On macOS and Linux, `SIGUSR2` makes a running server write a V8 heap snapshot into its logs
+directory:
+
+```bash
+kill -USR2 "$(jq -r .pid ~/.ryco/userdata/server-runtime.json)"
+```
+
+- The file is `logs/server-<pid>-<ISO time>.heapsnapshot`, readable only by its owner (mode 0600):
+  it holds tokens and thread content, so treat it like a credential and delete it after use. Open it in
+  Chrome DevTools > Memory.
+- Writing it blocks the server for seconds to a minute and needs about the heap's size in free
+  memory. Until stall-aware deadlines land, that pause can also expire in-flight provider and git
+  timeouts; take snapshots when no turn is running if you can.
+- At most 3 snapshots are kept in the logs directory, whichever process wrote them (the pid changes
+  on every restart); older ones are removed just before a new one is written, together with
+  unfinished `.partial` files from writes that died. Move a snapshot elsewhere to keep it.
+- It refuses, with a warning, when free disk space plus what the cleanup would free is below twice
+  the heap's size plus 1 GiB. A second request within 10 s of a written snapshot is ignored.
+- The write appears in the server log (`Writing heap snapshot`, then `Wrote heap snapshot` with path,
+  size and duration), as a `server.heapSnapshot` span, and as the tracked phase
+  `server.heap-snapshot`, so the stall it causes names it.
+- Windows has no `SIGUSR2`, so there is no trigger there yet. Only the server installs the handler;
+  `ryco` CLI commands do not. The snapshot writer itself loads with the first signal, so it adds
+  nothing to server startup.
 
 ## Common Workflows
 
@@ -399,6 +542,8 @@ If you need those later, add client-side instrumentation or a dedicated server f
 Usually one of these is true:
 
 - `RYCO_OTLP_TRACES_URL` was not set
+- `OTEL_SDK_DISABLED=true` or `OTEL_TRACES_EXPORTER=none` is set in the environment (the startup log
+  says which export it turned off)
 - the app was launched from a different environment than the one where you exported the vars
 - the app was not fully restarted after changing env
 - Grafana is looking at the wrong time range or service name
@@ -516,7 +661,14 @@ It provides:
 - local NDJSON tracer
 - optional OTLP trace exporter
 - optional OTLP metrics exporter
+- optional OTLP log exporter (`apps/server/src/serverLogger.ts`)
 - Effect trace-level and timing refs
+
+How each signal is exported is resolved once at startup in
+`apps/server/src/observability/OtelEnvironmentResolver.ts`, and the exporters are built in
+`apps/server/src/observability/OtlpExporters.ts`. Both load only when something is configured
+(an OTEL variable, or a Ryco OTLP URL for the resolver; an exported signal for the exporters), so
+a server that exports nothing does not load Effect's OTLP exporters at startup.
 
 ### Env Vars
 
@@ -541,10 +693,77 @@ OTLP export:
 
 - `RYCO_OTLP_TRACES_URL`: OTLP trace endpoint
 - `RYCO_OTLP_METRICS_URL`: OTLP metric endpoint
+- `RYCO_OTLP_LOGS_URL`: OTLP log endpoint. Logs have no Settings field; set this or the OTEL
+  variables below
 - `RYCO_OTLP_EXPORT_INTERVAL_MS`: export interval, default `10000`
 - `RYCO_OTLP_SERVICE_NAME`: service name, default `ryco-server`
 
+`RYCO_OTLP_*` URLs and the Settings URLs are sent as OTLP/HTTP JSON with no extra headers.
+
 If the OTLP URLs are unset, local tracing still works and metrics stay in-process only.
+
+With logs exported, a message logged inside a span reaches the collector twice: as a span event
+(the local trace file and Diagnostics need it) and as a log record.
+
+Standard OpenTelemetry variables (fallbacks):
+
+| Variable                                                                           | Effect                                                                                                                                                                                                                                                |
+| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OTEL_SDK_DISABLED`                                                                | `true` (any case) turns every OTLP export off, including `RYCO_OTLP_*` and Settings URLs. `false` leaves them on. Any other value is read as false, with a warning                                                                                    |
+| `OTEL_TRACES_EXPORTER`, `OTEL_METRICS_EXPORTER`, `OTEL_LOGS_EXPORTER`              | `none` turns that signal off, including `RYCO_OTLP_*` and Settings URLs. `otlp` or unset: the OTEL endpoint may be used. A list without `otlp` (`console`, `prometheus`, ...) keeps the OTEL endpoint from being used for that signal, with a warning |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`                                                      | Base URL; Ryco appends `/v1/traces`, `/v1/metrics` or `/v1/logs` to its path (the query is kept)                                                                                                                                                      |
+| `OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_ENDPOINT`                                | That signal's full URL, used as is. When set, it replaces the base URL for that signal even if it is invalid                                                                                                                                          |
+| `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_PROTOCOL` | `http/protobuf` (default) or `http/json`. `grpc` is not supported: that signal is not sent to the OTEL endpoint, with a warning                                                                                                                       |
+| `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_HEADERS`   | `name=value` pairs, comma-separated, values percent-encoded. Sent only to the OTEL endpoint they belong to. Malformed: that signal is not sent to the OTEL endpoint, with a warning                                                                   |
+| `OTEL_RESOURCE_ATTRIBUTES`                                                         | Extra resource attributes (`key=value`, percent-encoded). A malformed value is ignored with a warning instead of stopping startup. `service.name` and `service.version` in it are ignored                                                             |
+
+Per signal, the first match wins:
+
+1. `OTEL_SDK_DISABLED=true`: not exported.
+2. `OTEL_<SIGNAL>_EXPORTER=none`: not exported.
+3. `RYCO_OTLP_<SIGNAL>_URL`.
+4. The desktop app's observability settings (traces and metrics).
+5. The server's Settings (traces and metrics).
+6. The OTEL endpoint, with its protocol and headers.
+
+So OTEL endpoints never override or turn off an export set up in Ryco; an OTEL value Ryco cannot
+use only produces a warning. At startup the server logs one line per exported signal with its
+redacted URL (and, for an OTEL endpoint, the variable and protocol), then one warning per ignored
+or disabling OTEL setting. Diagnostics and Settings show the resolved traces and metrics URLs;
+the logs export appears only in that startup line.
+
+Watch out: `ryco serve` and a desktop app launched from a terminal inherit that shell's
+environment. If it exports `OTEL_EXPORTER_OTLP_ENDPOINT` for another tool (Claude Code's telemetry
+setup does), Ryco exports there too for every signal Ryco itself does not configure, logs included.
+Unset it, or set `OTEL_<SIGNAL>_EXPORTER=none`, to keep Ryco's data out of that collector. The
+monorepo `bun run dev*` scripts are not affected: Turbo passes only the variables listed in
+`turbo.json`, which include `RYCO_OTLP_*` but no `OTEL_*`.
+
+Not supported: `OTEL_SERVICE_NAME` and `OTEL_SERVICE_VERSION` (provider CLIs that Ryco starts
+inherit them; use `RYCO_OTLP_SERVICE_NAME`), `OTEL_EXPORTER_OTLP_*_COMPRESSION`,
+`OTEL_EXPORTER_OTLP_*_TIMEOUT`, `OTEL_EXPORTER_OTLP_*_CERTIFICATE` and client-key variables,
+`OTEL_BSP_*`, `OTEL_BLRP_*`, `OTEL_METRIC_EXPORT_INTERVAL` (use `RYCO_OTLP_EXPORT_INTERVAL_MS`) and
+`OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE`.
+
+Browser spans forwarded through the server's trace proxy go out in the traces endpoint's protocol:
+protobuf for an OTEL endpoint on `http/protobuf` (some collectors reject JSON), JSON for
+`http/json` and for Ryco-configured URLs.
+
+Product analytics (off by default):
+
+Ryco ships no analytics key and sends no product analytics. The server keeps an inherited PostHog
+sender (`apps/server/src/telemetry`) that does nothing unless both of these are set:
+
+- `RYCO_TELEMETRY_ENABLED=true`
+- `RYCO_POSTHOG_KEY`: the PostHog project key to send to (`RYCO_POSTHOG_HOST` defaults to
+  `https://us.i.posthog.com`)
+
+When both are set, the server sends `server.boot.heartbeat` and `provider.*` session and turn
+events. They are identified by a hash of a random install id (`<state dir>/anonymous-id`) and the
+project key, never by provider accounts. Until then the server writes no install id and makes no
+analytics requests. If a telemetry variable cannot be parsed (for example
+`RYCO_TELEMETRY_ENABLED=sometimes`, or a non-numeric `RYCO_TELEMETRY_FLUSH_BATCH_SIZE`), the server
+logs a warning and telemetry stays off.
 
 ### What Is Instrumented Today
 
@@ -559,6 +778,17 @@ Current high-value span and metric boundaries include:
 - git command execution and git hook events
 - terminal session lifecycle
 - sqlite query execution
+- event-loop and threadpool stalls for the server's whole life (`server.eventLoop.stall`,
+  `server.threadpool.stall`; `ryco_server_event_loop_stalls_total`,
+  `ryco_server_event_loop_stall_max_ms` and `ryco_server_event_loop_utilization`, the last two per
+  30 s window)
+- heap snapshots (`server.heapSnapshot`)
+- the process governor (`ryco_process_governor_in_flight`, `_queued` and `_queue_wait_duration`, by
+  `pool`: `git`, `forge` for CLI children, `github-api` for direct GitHub API requests)
+- direct GitHub API reads (`GitHubApi.request` spans carry the host, operation, status and
+  `x-ratelimit-*` values, never the URL path or a token; metrics
+  `ryco_github_api_requests_total{kind,lane,outcome}`, `ryco_github_api_request_duration{kind}`,
+  `ryco_github_api_fallbacks_total{reason}` and `ryco_github_api_rate_limit_remaining{host,resource}`)
 
 ### Client perf profiling
 
@@ -574,6 +804,7 @@ Soft budgets live in `apps/web/src/perf/budgets.ts`. See `apps/web/src/perf/READ
 
 ### Current Constraints
 
-- logs outside spans are not persisted, except in desktop mode (`logs/server.log`)
+- logs outside spans are not persisted, except in desktop mode (`logs/server.log`) or when exported
+  over OTLP
 - metrics are not snapshotted locally to disk; use the Diagnostics panel or OTLP export for inspection
 - `serverLogPath` is only written in desktop mode; the trace file is the persisted artifact that matters

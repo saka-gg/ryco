@@ -22,7 +22,7 @@ import {
   resetPrimaryEnvironmentDescriptorForTests,
   writePrimaryEnvironmentDescriptor,
 } from "./primary";
-import { resetPrimarySessionRoleForTests } from "./primarySessionRole";
+import { resetPrimarySessionRoleForTests } from "./nodeRole";
 import {
   resetSavedEnvironmentRegistryStoreForTests,
   resetSavedEnvironmentRuntimeStoreForTests,
@@ -46,7 +46,6 @@ function descriptor(
     capabilities: {
       repositoryIdentity: true,
       threadSettlement: true,
-      threadPriorityRanking: true,
       ...capabilities,
     },
   };
@@ -128,6 +127,19 @@ describe("node catalog store", () => {
     });
     expect(readNodeCatalogSnapshot().ownerEnvironmentIds.has(MINI)).toBe(true);
     unsubscribe();
+  });
+
+  it("leaves a switched-off machine out, as the sidebar does", () => {
+    useSavedEnvironmentRegistryStore.getState().upsert({
+      environmentId: MINI,
+      label: "mini.local",
+      httpBaseUrl: "https://mini.example.com/",
+      wsBaseUrl: "wss://mini.example.com/",
+      createdAt: "2026-10-22T00:00:00.000Z",
+      lastConnectedAt: null,
+      disabledAt: "2026-10-23T00:00:00.000Z",
+    });
+    expect(readNodeCatalog().some((node) => node.environmentId === MINI)).toBe(false);
   });
 
   it("holds a browser's primary as owner once its own session is the owner's, and publishes to it", async () => {

@@ -4,13 +4,16 @@ import {
   AGENT_CONTROL_DELEGATION_MCP_TOOLS,
   AGENT_CONTROL_EXTERNAL_MCP_TOOL_NAMES,
   AGENT_CONTROL_MCP_TOOLS,
+  AGENT_CONTROL_TASK_RESULT_MAX_CHARS,
   AgentControlProposal,
+  MessageId,
   OrchestrationThreadShell,
   ProviderInstanceId,
   RuntimeSessionId,
   ThreadId,
   TurnId,
   type AgentControlCapability,
+  type OrchestrationCommand,
 } from "@ryco/contracts";
 import { Effect, Layer, Option, Schema } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -34,6 +37,7 @@ import { AgentControlProposalEvents } from "../Services/AgentControlProposalEven
 import type { AgentControlSessionRecord } from "../Services/AgentControlSessionRegistry.ts";
 import { AgentControlProposalEventsLive } from "../Layers/AgentControlProposalEvents.ts";
 import { makeCompletionReturnDelivery } from "../Layers/CompletionReturnDelivery.ts";
+import { ServerWakeFenceLive } from "../../orchestration/Layers/ServerWakeFence.ts";
 import { renderCompletionNotice } from "../completionReturnMessages.ts";
 import { completionFixture, completionFixtureTime as now } from "../completionReturnTestSupport.ts";
 import { makeDelegatedTaskControl } from "../delegatedTaskControl.ts";
@@ -171,6 +175,26 @@ const setupWith = (options: { readonly cancelRaces?: number } = {}) =>
     let authorityThread: string | null = "parent";
     const baseCalls: Array<{ name: string; args: unknown; returnStatus: string | undefined }> = [];
     const projections = {
+      getThreadMessageById: (input: { readonly threadId: ThreadId; readonly messageId: string }) =>
+        sql<{ text: string; createdAt: string; updatedAt: string; streaming: number }>`
+          SELECT text, created_at AS "createdAt", updated_at AS "updatedAt", is_streaming AS streaming
+          FROM projection_thread_messages
+          WHERE thread_id = ${input.threadId} AND message_id = ${input.messageId}`.pipe(
+          Effect.orDie,
+          Effect.map(([row]) =>
+            row === undefined
+              ? Option.none()
+              : Option.some({
+                  id: MessageId.make(input.messageId),
+                  role: "assistant" as const,
+                  text: row.text,
+                  turnId: TurnId.make("child-turn"),
+                  streaming: row.streaming !== 0,
+                  createdAt: row.createdAt,
+                  updatedAt: row.updatedAt,
+                }),
+          ),
+        ),
       getThreadShellById: (id: ThreadId) =>
         Effect.succeed(
           id === "child"
@@ -207,6 +231,41 @@ const setupWith = (options: { readonly cancelRaces?: number } = {}) =>
           ? Effect.void
           : (Effect.fail(new Error("denied")) as never),
     };
+    const engineCommands: OrchestrationCommand[] = [];
+    /** The child as the engine's model holds it: its queue and whether a user message was sent. */
+    const engineChild = {
+      entries: [] as Array<{ messageId: string; author: "user" | "agent" }>,
+      sent: true,
+      /** Runs just before a removal applies (the drain racing the cancel). */
+      beforeRemoval: null as (() => void) | null,
+    };
+    const engine = {
+      dispatch: (command: OrchestrationCommand) =>
+        Effect.sync(() => {
+          engineCommands.push(command);
+          if (command.type === "thread.queue.remove") {
+            engineChild.beforeRemoval?.();
+            engineChild.entries = engineChild.entries.filter(
+              (entry) => !command.messageIds.includes(entry.messageId as never),
+            );
+          }
+          return { sequence: engineCommands.length };
+        }),
+      getReadModel: () =>
+        Effect.sync(
+          () =>
+            ({
+              threads: [
+                {
+                  id: "child",
+                  messages: engineChild.sent ? [{ id: "child-initial", role: "user" }] : [],
+                  followUpQueue:
+                    engineChild.entries.length === 0 ? undefined : { entries: engineChild.entries },
+                },
+              ],
+            }) as never,
+        ),
+    };
     let reads = 0;
     const racingCancel = cancelOwnedCompletionReturn({
       get: (childThreadId: ThreadId) =>
@@ -241,6 +300,7 @@ const setupWith = (options: { readonly cancelRaces?: number } = {}) =>
         events,
         projections,
         sql,
+        engine,
       }),
     });
     const call = (name: string, args: unknown, caller = session()) =>
@@ -273,6 +333,8 @@ const setupWith = (options: { readonly cancelRaces?: number } = {}) =>
       ack,
       toReady,
       baseCalls,
+      engineCommands,
+      engineChild,
       setChild: (value: OrchestrationThreadShell) => {
         child = value;
       },
@@ -365,6 +427,68 @@ it.effect("returns redacted untrusted results and only a pending-question flag",
   }).pipe(Effect.provide(layer)),
 );
 
+it.effect("pages a long result read by id, redacted whole so no page shows part of a secret", () =>
+  Effect.gen(function* () {
+    const h = yield* setup;
+    yield* h.ack();
+    // The token straddles the first page boundary of the raw text.
+    const raw = `${"a".repeat(AGENT_CONTROL_TASK_RESULT_MAX_CHARS - 20)} ${TOKEN} ${"b".repeat(15_000)}`;
+    yield* h.sql`UPDATE projection_thread_messages SET text = ${raw} WHERE message_id = 'answer'`;
+    type Page = {
+      readonly text: string;
+      readonly truncated: boolean;
+      readonly version?: string;
+      readonly offsetChars?: number;
+      readonly totalChars?: number;
+      readonly nextOffsetChars?: number | null;
+    };
+    const readPage = (args: unknown) =>
+      h
+        .call(AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskStatus, args)
+        .pipe(
+          Effect.map(
+            (result) => (structured(result).tasks[0] as unknown as { result: Page }).result,
+          ),
+        );
+
+    const first = yield* readPage({ taskId: "child" });
+    assert.isTrue(first.truncated);
+    assert.equal(first.offsetChars, 0);
+    let text = first.text;
+    let next = first.nextOffsetChars ?? null;
+    while (next !== null) {
+      const page = yield* readPage({
+        taskId: "child",
+        result: { version: first.version, offsetChars: next },
+      });
+      assert.equal(page.offsetChars, next);
+      text += page.text;
+      next = page.nextOffsetChars ?? null;
+    }
+    assert.equal(text.length, first.totalChars);
+    assert.include(text, "[REDACTED]");
+    assert.notInclude(text, "rycoac_");
+    assert.isTrue(text.endsWith("b".repeat(100)));
+
+    // A list shows the start only, without a continuation.
+    const [listed] = structured(yield* h.call(AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskStatus, {}))
+      .tasks as unknown as ReadonlyArray<{ result: Page }>;
+    assert.isTrue(listed!.result.truncated);
+    assert.isUndefined(listed!.result.version);
+
+    // A changed result or a continuation without a task id is refused.
+    yield* h.sql`UPDATE projection_thread_messages SET text = ${`${raw}!`} WHERE message_id = 'answer'`;
+    for (const args of [
+      { taskId: "child", result: { version: first.version, offsetChars: 10 } },
+      { result: { version: first.version, offsetChars: 10 } },
+    ]) {
+      const refused = yield* h.call(AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskStatus, args);
+      assert.isTrue(refused.isError);
+      assert.include(refused.content[0]?.text ?? "", "That result page is unavailable");
+    }
+  }).pipe(Effect.provide(layer)),
+);
+
 it.effect("reports a child whose initial start failed as failed", () =>
   Effect.gen(function* () {
     const h = yield* setup;
@@ -392,6 +516,7 @@ it.effect("acknowledges a ready task read during the exact turn, so no wake is s
     assert.equal((yield* h.read()).status, "delivered");
     const sent: unknown[] = [];
     const worker = yield* makeCompletionReturnDelivery.pipe(
+      Effect.provide(ServerWakeFenceLive),
       Effect.provideService(ProviderService, {
         getSession: () => Effect.succeed(Option.none()),
       } as never),
@@ -561,5 +686,205 @@ it.effect("cancels an idle task without an interrupt", () =>
       reason: "not running",
     });
     assert.deepStrictEqual(h.baseCalls, []);
+  }).pipe(Effect.provide(layer)),
+);
+
+/** A capped request's task still waiting for a free slot: its first message is queued, held. */
+const waitingChild = () =>
+  childShell({
+    latestTurn: null,
+    session: null,
+    latestUserMessageAt: null,
+    hasPendingUserInput: false,
+    followUpQueueSummary: {
+      count: 1,
+      hold: {
+        reason: "paused",
+        detail: "Waiting for a free slot: this request runs at most 2 tasks at once.",
+        causeKeys: ["delegation-slot:delegation-proposal"],
+        heldAt: now,
+      },
+      headStatus: "queued",
+      headPreview: "Fixture task",
+    },
+  });
+
+type RunEntry = { readonly run: { readonly state: string; readonly detail?: string } };
+
+it.effect("reports a task waiting for a free slot as waiting, with why", () =>
+  Effect.gen(function* () {
+    const h = yield* setup;
+    // Its first message was never sent: no turn exists for it.
+    yield* h.sql`DELETE FROM projection_turns WHERE thread_id = 'child'`;
+    h.setChild(waitingChild());
+    const [task] = structured(
+      yield* h.call(AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskStatus, { taskId: "child" }),
+    ).tasks as unknown as ReadonlyArray<RunEntry>;
+    assert.equal(task?.run.state, "waiting");
+    assert.include(task?.run.detail ?? "", "free slot");
+    // Released and about to be sent: starting, as before.
+    h.setChild({
+      ...waitingChild(),
+      followUpQueueSummary: { ...waitingChild().followUpQueueSummary!, hold: null },
+    });
+    const [released] = structured(
+      yield* h.call(AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskStatus, { taskId: "child" }),
+    ).tasks as unknown as ReadonlyArray<RunEntry>;
+    assert.equal(released?.run.state, "starting");
+    assert.notProperty(released?.run, "detail");
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("reports a waiting task whose chat stopped waiting for it as never started", () =>
+  Effect.gen(function* () {
+    const h = yield* setup;
+    yield* h.sql`DELETE FROM projection_turns WHERE thread_id = 'child'`;
+    h.setChild(waitingChild());
+    // The person stopped the delegating chat while the task waited for its slot.
+    const record = (yield* h.repo.get(ThreadId.make("child")))!;
+    yield* h.repo.save(record, {
+      ...record,
+      status: "cancelled",
+      detail:
+        "You stopped the delegating chat before this task's turn came: it stays paused and starts only if you resume it, and its result does not return automatically.",
+    });
+    const [task] = structured(
+      yield* h.call(AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskStatus, { taskId: "child" }),
+    ).tasks as unknown as ReadonlyArray<RunEntry>;
+    assert.equal(task?.run.state, "interrupted");
+    assert.notProperty(task?.run, "detail");
+  }).pipe(Effect.provide(layer)),
+);
+
+/** The engine's model of a waiting task: first message, an agent follow-up and a person's entry. */
+const waitingInEngine = (h: { readonly engineChild: { entries: unknown; sent: boolean } }) => {
+  h.engineChild.sent = false;
+  h.engineChild.entries = [
+    { messageId: "child-initial", author: "agent" },
+    { messageId: "agent-follow-up", author: "agent" },
+    { messageId: "person-entry", author: "user" },
+  ];
+};
+
+it.effect("cancelling a task that waits for a slot takes its first message out of its queue", () =>
+  Effect.gen(function* () {
+    const h = yield* setup;
+    yield* h.sql`DELETE FROM projection_turns WHERE thread_id = 'child'`;
+    h.setChild(waitingChild());
+    waitingInEngine(h);
+    const cancel = () =>
+      h.call(AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskCancel, {
+        requestId: "cancel-1",
+        taskId: "child",
+      });
+    const result = yield* cancel();
+    assert.isUndefined(result.isError);
+    assert.equal((yield* h.read()).status, "cancelled");
+    assert.deepStrictEqual(h.engineCommands, [
+      {
+        type: "thread.queue.remove",
+        commandId: "delegation-slot-cancel:delegation-proposal:child",
+        threadId: "child",
+        // The first message and the agent's own follow-up; the person's entry stays.
+        messageIds: ["child-initial", "agent-follow-up"],
+        createdAt: (h.engineCommands[0] as { readonly createdAt: string }).createdAt,
+      },
+    ] as unknown as OrchestrationCommand[]);
+    assert.deepStrictEqual((result.structuredContent as { interrupt: unknown }).interrupt, {
+      requested: false,
+      reason: "not started; it will not start",
+    });
+    assert.deepStrictEqual(h.baseCalls, []);
+    assert.deepStrictEqual(
+      h.engineChild.entries.map((entry) => entry.messageId),
+      ["person-entry"],
+    );
+    // A retry finds nothing left to remove.
+    yield* cancel();
+    assert.lengthOf(h.engineCommands, 1);
+    // Out of the queue, it reads as stopped before it started, never as starting.
+    const { followUpQueueSummary: _emptied, ...emptied } = waitingChild();
+    h.setChild(emptied);
+    const [task] = structured(
+      yield* h.call(AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskStatus, { taskId: "child" }),
+    ).tasks as unknown as ReadonlyArray<RunEntry>;
+    assert.equal(task?.run.state, "interrupted");
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("a cancel that loses the race with the drain answers like one of a starting task", () =>
+  Effect.gen(function* () {
+    const h = yield* setup;
+    yield* h.sql`DELETE FROM projection_turns WHERE thread_id = 'child'`;
+    h.setChild(waitingChild());
+    waitingInEngine(h);
+    // The drain sends the released first message between the cancel's read and its removal.
+    h.engineChild.beforeRemoval = () => {
+      h.engineChild.entries = h.engineChild.entries.filter(
+        (entry) => entry.messageId !== "child-initial",
+      );
+      h.engineChild.sent = true;
+      h.setChild(runningChild());
+    };
+    const result = yield* h.call(AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskCancel, {
+      requestId: "cancel-1",
+      taskId: "child",
+    });
+    assert.equal((yield* h.read()).status, "cancelled");
+    assert.lengthOf(h.engineCommands, 1);
+    // Not "it will not start": it started, so its running turn is interrupted as before.
+    assert.deepStrictEqual(h.baseCalls, [
+      {
+        name: AGENT_CONTROL_MCP_TOOLS.interruptThread,
+        args: { requestId: "cancel-1", threadId: "child", turnId: "child-turn" },
+        returnStatus: "cancelled",
+      },
+    ]);
+    assert.deepStrictEqual((result.structuredContent as { interrupt: unknown }).interrupt, {
+      proposalId: "interrupt-proposal",
+      status: "executing",
+    });
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("a cancel removes nothing from a task that already sent its first message", () =>
+  Effect.gen(function* () {
+    const h = yield* setup;
+    // Started long ago; the parent queued another message to it since.
+    h.setChild({ ...childShell(), followUpQueueSummary: waitingChild().followUpQueueSummary! });
+    h.engineChild.entries = [{ messageId: "agent-follow-up", author: "agent" }];
+    yield* h.call(AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskCancel, {
+      requestId: "cancel-1",
+      taskId: "child",
+    });
+    assert.equal((yield* h.read()).status, "cancelled");
+    assert.deepStrictEqual(h.engineCommands, []);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("reports a still-running task's current stall, and nothing once it moved on", () =>
+  Effect.gen(function* () {
+    const h = yield* setup;
+    const record = (yield* h.repo.get(ThreadId.make("child")))!;
+    const stalled = {
+      ...record,
+      stallNotice: {
+        count: 1,
+        current: { kind: "waiting-on-you" as const, since: now, state: "sent" as const },
+      },
+    };
+    yield* h.repo.save(record, stalled);
+    const [task] = structured(
+      yield* h.call(AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskStatus, { taskId: "child" }),
+    ).tasks as unknown as ReadonlyArray<{
+      readonly run: { readonly stalled?: { readonly kind: string; readonly since: string } };
+    }>;
+    assert.deepStrictEqual(task?.run.stalled, { kind: "waiting-on-you", since: now });
+    const current = (yield* h.repo.get(ThreadId.make("child")))!;
+    yield* h.repo.save(current, { ...current, stallNotice: { count: 1, current: null } });
+    const [moved] = structured(
+      yield* h.call(AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskStatus, { taskId: "child" }),
+    ).tasks as unknown as ReadonlyArray<{ readonly run: object }>;
+    assert.notProperty(moved?.run, "stalled");
   }).pipe(Effect.provide(layer)),
 );

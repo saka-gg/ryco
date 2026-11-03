@@ -3,7 +3,7 @@ import * as Atom from "effect/reactivity/Atom";
 import { wsConnectionStatusForEnvironmentAtom } from "@ryco/client-runtime/rpc";
 import { useEffect, useState } from "react";
 import type { EnvironmentId, VcsStatusResult } from "@ryco/contracts";
-import { readEnvironmentApi } from "../../connection/environmentApi";
+import { useEnvironmentApi } from "../../connection/useEnvironmentApi";
 import {
   readRepositoryStatus,
   recordRepositoryFailure,
@@ -26,8 +26,11 @@ export function useRepositoryStatus(
   const connection = useAtomValue(
     environmentId ? wsConnectionStatusForEnvironmentAtom(environmentId) : noEnvironmentAtom,
   );
-  const api =
-    environmentId && connection?.phase === "connected" ? readEnvironmentApi(environmentId) : null;
+  // Subscribed, not read in render: React Compiler caches a render-time read on
+  // its inputs, so an api that registers after the socket opened would never
+  // reach this hook.
+  const liveApi = useEnvironmentApi(environmentId);
+  const api = environmentId && connection?.phase === "connected" ? (liveApi ?? null) : null;
   const [snapshot, setSnapshot] = useState<RepositoryStatusSnapshot<{
     api: typeof api;
     connection: typeof connection;

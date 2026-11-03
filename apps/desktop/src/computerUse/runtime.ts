@@ -1,4 +1,5 @@
 import { DesktopComputerBeta } from "./beta.ts";
+import { macPrivacySettingsUrl } from "../macAppBundle.ts";
 import { createServer, type Server } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -22,6 +23,7 @@ import { ComputerPermissionMonitor } from "./permissions.ts";
 import { createMacPermissionDiagnostic } from "./macPermissionDiagnostic.ts";
 import { NativeComputerDriver, record } from "./native.ts";
 import { BrowserComputerDriver, type BrowserTransport } from "./browser.ts";
+import { BrowserUploadStore, settleBrowserUpload } from "./browserUploads.ts";
 import { EmbeddedComputerBrowser } from "./embeddedBrowser.ts";
 import { ExternalComputerBrowser } from "./externalBrowser.ts";
 import { ComputerUseOverlay } from "./overlay.ts";
@@ -45,7 +47,11 @@ export class DesktopComputerUseRuntime {
   private readonly transports = new Map<ComputerBrowser, BrowserTransport>();
   readonly beta: DesktopComputerBeta;
   readonly embedded = new EmbeddedComputerBrowser();
-  private readonly browser = new BrowserComputerDriver(this.transports);
+  /** Private directory for browser uploads; null until start() (or when it could not be made). */
+  private uploads: BrowserUploadStore | null = null;
+  private readonly browser = new BrowserComputerDriver(this.transports, {
+    uploads: () => this.uploads,
+  });
   private readonly native: NativeComputerDriver;
   private readonly overlay: ComputerUseOverlay;
   private readonly policyController: ComputerPolicyController;
@@ -115,6 +121,8 @@ export class DesktopComputerUseRuntime {
     this.permissionAppName =
       marker >= 0 ? basename(exe.slice(0, marker + 4), ".app") : app.getName();
     this.transports.set("ryco", this.embedded);
+    // A page that navigated or went away holds no uploaded files any more.
+    this.embedded.onTabReset((tab) => void this.uploads?.releaseTab(tab));
     this.overlay = new ComputerUseOverlay(
       () => this.stop(),
       () => {
@@ -215,6 +223,7 @@ export class DesktopComputerUseRuntime {
         const input = Schema.decodeUnknownSync(ComputerUseRequest)(
           JSON.parse(Buffer.concat(chunks).toString("utf8")),
         );
+        // From here on the desktop owns any copies the backend staged for this request.
         const controller = new AbortController();
         const disconnected = () => {
           if (!response.writableEnded) controller.abort();
@@ -268,6 +277,8 @@ export class DesktopComputerUseRuntime {
         } finally {
           clearTimeout(timer);
           response.off("close", disconnected);
+          // execute() has settled: no driver work on this request's upload is still running.
+          settleBrowserUpload(input, this.uploads);
         }
       })().catch(() => {
         if (!response.headersSent) response.writeHead(400);
@@ -326,6 +337,19 @@ export class DesktopComputerUseRuntime {
 
   async start(): Promise<void> {
     await this.beta.start();
+    // On the backend's boot path: create() renames old uploads aside and deletes them in the
+    // background. Without the directory Computer use still runs; upload reports it unavailable,
+    // and the log says why.
+    if (!this.uploads) {
+      const uploads = await BrowserUploadStore.create(this.options.stateDir).catch(
+        (error: unknown) => {
+          console.warn("[desktop-computer-use] browser upload directory unavailable", error);
+          return null;
+        },
+      );
+      if (this.closed) uploads?.dispose();
+      else this.uploads = uploads;
+    }
     await new Promise<void>((resolve, reject) => {
       this.server.once("error", reject);
       this.server.listen(0, "127.0.0.1", () => {
@@ -346,6 +370,7 @@ export class DesktopComputerUseRuntime {
       url: `http://127.0.0.1:${this.port}/control`,
       token: this.token,
       ...(native ? { native } : {}),
+      ...(this.uploads ? { uploadDir: this.uploads.root } : {}),
     };
   }
   state(): ComputerUseState {
@@ -404,9 +429,7 @@ export class DesktopComputerUseRuntime {
     if (process.platform !== "darwin") return;
     if (kind === "accessibility") systemPreferences.isTrustedAccessibilityClient(true);
     await shell.openExternal(
-      kind === "accessibility"
-        ? "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-        : "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+      macPrivacySettingsUrl(kind === "accessibility" ? "accessibility" : "screen-recording"),
     );
   }
   pair(browser: ComputerBrowser): ComputerUsePairing {
@@ -440,6 +463,7 @@ export class DesktopComputerUseRuntime {
     void this.beta.dispose();
     this.overlay.dispose();
     this.embedded.dispose();
+    this.uploads?.dispose();
     this.sockets.close();
     this.server.closeAllConnections();
     this.server.close();

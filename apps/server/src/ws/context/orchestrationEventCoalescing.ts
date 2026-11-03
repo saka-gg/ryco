@@ -1,5 +1,6 @@
 import { Effect, Semaphore } from "effect";
 import { type OrchestrationEvent, OrchestrationGetSnapshotError } from "@ryco/contracts";
+import { liveCoalescingActivityKey } from "@ryco/shared/latestStateActivities";
 
 import { orchestrationEventBytes } from "./orchestrationStreamBatching.ts";
 
@@ -17,6 +18,10 @@ import { orchestrationEventBytes } from "./orchestrationStreamBatching.ts";
  *   retains distinct activity ids even when the projection prunes old gauges.
  * - `thread.proposed-plan-upserted`: plans are upserts keyed by plan id.
  *
+ * Which activity kinds coalesce is the shared latest-state table
+ * (`@ryco/shared/latestStateActivities`), which also drives ingestion pacing
+ * and event-log compaction.
+ *
  * Everything else — turn lifecycle, session state, diffs, reverts, user
  * messages (whose streaming deltas append text), approvals, project and
  * worktree events — returns null and is never coalesced, delayed, or dropped.
@@ -26,23 +31,10 @@ export const orchestrationProgressFrameKey = (event: OrchestrationEvent): string
     return null;
   }
   if (event.type === "thread.activity-appended") {
-    const activity = event.payload.activity;
-    if (activity.kind === "task.progress" || activity.kind === "tool.progress") {
-      return JSON.stringify(["activity", event.aggregateId, activity.id]);
-    }
-    if (activity.kind === "agent.message") {
-      const streaming = (activity.payload as { streaming?: unknown } | null)?.streaming;
-      // Streaming agent-message upserts carry the full text so far; the final
-      // (non-streaming) frame shares the id and replaces the pending state.
-      if (streaming === true) {
-        return JSON.stringify(["activity", event.aggregateId, activity.id]);
-      }
-      return null;
-    }
-    if (activity.kind === "context-window.updated") {
-      return JSON.stringify(["activity", event.aggregateId, activity.id]);
-    }
-    return null;
+    const activityKey = liveCoalescingActivityKey(event.payload.activity);
+    return activityKey === null
+      ? null
+      : JSON.stringify(["activity", event.aggregateId, activityKey]);
   }
   if (event.type === "thread.proposed-plan-upserted") {
     return JSON.stringify(["plan", event.aggregateId, event.payload.proposedPlan.id]);

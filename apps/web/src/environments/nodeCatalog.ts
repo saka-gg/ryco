@@ -6,6 +6,7 @@ import {
   wsConnectionStatusForEnvironmentAtom,
   type WsConnectionStatus,
 } from "@ryco/client-runtime/rpc";
+import { isSavedEnvironmentSwitchedOff } from "@ryco/client-runtime/connection";
 import {
   buildNodeCatalog,
   sameNodeCatalog,
@@ -35,10 +36,10 @@ import {
 } from "../platform/desktopWorkspace";
 import { readPrimaryEnvironmentDescriptor, subscribePrimaryEnvironmentDescriptor } from "./primary";
 import {
-  readPrimarySessionRole,
+  peekPrimarySessionRole,
   requestPrimarySessionRole,
   subscribePrimarySessionRole,
-} from "./primarySessionRole";
+} from "./nodeRole";
 import { useSavedEnvironmentRegistryStore, useSavedEnvironmentRuntimeStore } from "./runtime";
 
 /**
@@ -105,7 +106,7 @@ function readSources(): CatalogSources {
         ? null
         : getWsConnectionStatusForEnvironment(primaryDescriptor.environmentId),
     primaryRole:
-      hosted || !primaryDescriptor ? null : readPrimarySessionRole(primaryDescriptor.environmentId),
+      hosted || !primaryDescriptor ? null : peekPrimarySessionRole(primaryDescriptor.environmentId),
     registry: useSavedEnvironmentRegistryStore.getState().byId,
     runtime: useSavedEnvironmentRuntimeStore.getState().byId,
     desktop: isElectron && !hosted ? readDesktopWorkspaceState() : null,
@@ -132,7 +133,10 @@ function buildFrom(sources: CatalogSources): NodeCatalogSnapshot {
         : null);
     return descriptor ? liveFactsFrom(descriptor, config) : null;
   };
-  const saved: NodeCatalogSavedSource[] = Object.values(sources.registry).map((record) => {
+  // A switched-off machine is left out, as in the sidebar: it never connects,
+  // so no picker, dialog or Agent Control directory may offer it.
+  const saved: NodeCatalogSavedSource[] = Object.values(sources.registry).flatMap((record) => {
+    if (isSavedEnvironmentSwitchedOff(record)) return [];
     const state = runtime[record.environmentId];
     return {
       environmentId: record.environmentId,

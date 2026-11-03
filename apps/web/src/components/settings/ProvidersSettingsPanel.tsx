@@ -37,7 +37,6 @@ import { useSavedEnvironmentRuntimeStore } from "../../environments/runtime";
 import { useSettingsTarget } from "../../settingsTarget";
 import { formatRelativeTime } from "../../timestampFormat";
 import { Button } from "../ui/button";
-import { DraftTextarea } from "../ui/draft-textarea";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
@@ -59,6 +58,8 @@ import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
 import { CliProxyHubSettings } from "./CliProxyHubSettings";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
 import { ProviderInstanceListItem } from "./ProviderInstanceListItem";
+import { instanceOffersSignIn } from "./ProviderSignInOffer.logic";
+import { ProviderSignInSection } from "./ProviderSignInSection";
 import { getDriverOption } from "./providerDriverMeta";
 import {
   deriveProviderSettingsInstanceRows,
@@ -77,26 +78,6 @@ import {
 import { useServerProviders } from "../../rpc/serverState";
 
 const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
-
-const GIT_WRITING_INSTRUCTION_ROWS = [
-  {
-    key: "commitMessageInstructions",
-    title: "Commit message instructions",
-    description:
-      "Added to the prompt whenever a commit message is generated. Leave empty for the default style.",
-    placeholder: "e.g. Use Conventional Commits and describe what changed, not file by file.",
-  },
-  {
-    key: "pullRequestInstructions",
-    title: "Pull request instructions",
-    description:
-      "Added to the prompt for generated pull request titles and descriptions. Leave empty for the default style.",
-    placeholder:
-      "e.g. Use plain, human-readable language and focus on what really changed. If the UI changed, add a Before / After section.",
-  },
-] as const;
-
-const GIT_WRITING_INSTRUCTIONS_MAX_LENGTH = 4_000;
 
 type PendingProviderDestructiveAction =
   | {
@@ -471,7 +452,7 @@ export function ProvidersSettingsPanel() {
       <SettingsSection title="Text generation">
         <SettingsRow
           title="Text generation model"
-          description="Configure the model used for generated commit messages, PR titles, and similar Git text."
+          description="The model for generated commit messages, pull requests and similar Git text. Style and instructions are under Source Control."
           resetAction={
             isGitWritingModelDirty ? (
               <SettingResetButton
@@ -551,30 +532,6 @@ export function ProvidersSettingsPanel() {
             </div>
           }
         />
-        {GIT_WRITING_INSTRUCTION_ROWS.map((row) => (
-          <SettingsRow
-            key={row.key}
-            title={row.title}
-            description={row.description}
-            resetAction={
-              settings[row.key] !== DEFAULT_UNIFIED_SETTINGS[row.key] ? (
-                <SettingResetButton
-                  label={row.title.toLowerCase()}
-                  onClick={() => updateSettings({ [row.key]: DEFAULT_UNIFIED_SETTINGS[row.key] })}
-                />
-              ) : null
-            }
-          >
-            <DraftTextarea
-              value={settings[row.key]}
-              onCommit={(next) => updateSettings({ [row.key]: next.trim() })}
-              placeholder={row.placeholder}
-              maxLength={GIT_WRITING_INSTRUCTIONS_MAX_LENGTH}
-              disabled={settingsBlocked}
-              aria-label={row.title}
-            />
-          </SettingsRow>
-        ))}
       </SettingsSection>
 
       <SettingsSection
@@ -649,6 +606,22 @@ export function ProvidersSettingsPanel() {
             {selectedRow ? (
               <ProviderInstanceCard
                 usageAvailable={settingsTarget?.connected === true}
+                signInNode={
+                  instanceOffersSignIn(selectedRow.instance.driver, selectedRow.instance) ? (
+                    <ProviderSignInSection
+                      environmentId={settingsTarget?.environmentId ?? null}
+                      nodeLabel={settingsTarget?.nodeLabel ?? "this computer"}
+                      connected={settingsTarget ? settingsTarget.connected : true}
+                      canManage={
+                        settingsTarget?.canManage !== false && settingsTarget?.canMutate !== false
+                      }
+                      instanceId={selectedRow.instanceId}
+                      instanceEnabled={selectedRow.instance.enabled !== false}
+                      displayName={selectedDisplayName ?? String(selectedRow.instanceId)}
+                      provider={selectedLiveProvider}
+                    />
+                  ) : null
+                }
                 resetCreditsNode={
                   selectedRow.instance.driver === "codex" ? (
                     <CodexResetCredits

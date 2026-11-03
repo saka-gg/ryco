@@ -22,6 +22,11 @@ const PersistedLayout = Schema.Struct({
   treeHidden: Schema.Boolean,
   foldedGroups: Schema.Array(Schema.String),
   lastRepositoryKey: Schema.NullOr(Schema.String),
+  /**
+   * `all` when the user last chose All repositories: the page opens there again when the
+   * URL names no repository. Optional, so layouts saved before it keep their fields.
+   */
+  lastScope: Schema.optionalKey(Schema.Literal("all")),
 });
 type PersistedLayout = typeof PersistedLayout.Type;
 
@@ -32,18 +37,27 @@ export function clampPullRequestsListWidth(width: number): number {
   );
 }
 
-function restoreLayout(): PersistedLayout {
-  const fallback: PersistedLayout = {
+interface RestoredLayout extends Omit<PersistedLayout, "lastScope"> {
+  readonly lastScope: "all" | null;
+}
+
+export function restorePullRequestsLayout(): RestoredLayout {
+  const fallback: RestoredLayout = {
     listWidth: PULL_REQUESTS_LIST_DEFAULT_WIDTH,
     listHidden: false,
     treeHidden: false,
     foldedGroups: [],
     lastRepositoryKey: null,
+    lastScope: null,
   };
   try {
     const stored = getLocalStorageItem(PULL_REQUESTS_LAYOUT_STORAGE_KEY, PersistedLayout);
     return stored
-      ? { ...stored, listWidth: clampPullRequestsListWidth(stored.listWidth) }
+      ? {
+          ...stored,
+          listWidth: clampPullRequestsListWidth(stored.listWidth),
+          lastScope: stored.lastScope ?? null,
+        }
       : fallback;
   } catch {
     return fallback;
@@ -53,7 +67,7 @@ function restoreLayout(): PersistedLayout {
 /** List width writes coalesce (keyboard steps); every other preference persists at once. */
 const LIST_WIDTH_PERSIST_DELAY_MS = 250;
 
-interface PullRequestsLayoutState extends PersistedLayout {
+interface PullRequestsLayoutState extends RestoredLayout {
   /** Drawer state below the docking breakpoint; never persisted. */
   readonly drawerOpen: boolean;
   /**
@@ -75,6 +89,8 @@ interface PullRequestsLayoutState extends PersistedLayout {
   toggleTreeHidden: () => void;
   toggleGroupFolded: (groupKey: string) => void;
   setLastRepositoryKey: (key: string | null) => void;
+  /** Remember All repositories (`all`) or one repository (`null`) as the page's last choice. */
+  setLastScope: (scope: "all" | null) => void;
   setDrawerOpen: (open: boolean) => void;
   setShortcutsOpen: (open: boolean) => void;
   requestSearchFocus: () => void;
@@ -89,11 +105,18 @@ export const usePullRequestsLayoutStore = create<PullRequestsLayoutState>()((set
       clearTimeout(persistTimer);
       persistTimer = null;
     }
-    const { listWidth, listHidden, treeHidden, foldedGroups, lastRepositoryKey } = get();
+    const { listWidth, listHidden, treeHidden, foldedGroups, lastRepositoryKey, lastScope } = get();
     try {
       setLocalStorageItem(
         PULL_REQUESTS_LAYOUT_STORAGE_KEY,
-        { listWidth, listHidden, treeHidden, foldedGroups, lastRepositoryKey },
+        {
+          listWidth,
+          listHidden,
+          treeHidden,
+          foldedGroups,
+          lastRepositoryKey,
+          ...(lastScope === null ? {} : { lastScope }),
+        },
         PersistedLayout,
       );
     } catch {
@@ -105,7 +128,7 @@ export const usePullRequestsLayoutStore = create<PullRequestsLayoutState>()((set
     persist();
   };
   return {
-    ...restoreLayout(),
+    ...restorePullRequestsLayout(),
     drawerOpen: false,
     drawerOpener: null,
     shortcutsOpen: false,
@@ -130,6 +153,10 @@ export const usePullRequestsLayoutStore = create<PullRequestsLayoutState>()((set
     setLastRepositoryKey: (lastRepositoryKey) => {
       if (get().lastRepositoryKey === lastRepositoryKey) return;
       update({ lastRepositoryKey });
+    },
+    setLastScope: (lastScope) => {
+      if (get().lastScope === lastScope) return;
+      update({ lastScope });
     },
     setDrawerOpen: (drawerOpen) => {
       if (get().drawerOpen === drawerOpen) return;

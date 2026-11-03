@@ -4,9 +4,11 @@ import { Schema } from "effect";
 import {
   AGENT_CONTROL_CAPABILITIES,
   AGENT_CONTROL_ACTION_CAPABILITIES,
+  AGENT_CONTROL_DEVICE_ACTION_KINDS,
   AGENT_CONTROL_PLAN_VERSION,
   AgentControlActionPlan,
   AgentControlCapability,
+  AgentControlExecutionReceipt,
   AgentControlOperation,
   AgentControlOperationState,
   AgentControlPlanDigest,
@@ -227,6 +229,30 @@ describe("AgentControlActionPlan", () => {
     expect(() => decodePlan({ kind: "device.call", method: "tap", payload: {} })).toThrow();
   });
 
+  it("carries only the scope of a device-control consent, never what the agent does", () => {
+    const consent = {
+      kind: "deviceControlConsent",
+      threadId: "thread-1",
+      projectId: "project-1",
+      providerInstanceId: "codex",
+      udid: "FAKE-0001",
+    };
+    expect(decodePlan(consent)).toEqual(consent);
+    // Typed text, labels, coordinates and bundle ids run directly and are never persisted.
+    for (const content of [
+      { text: "hunter2" },
+      { label: "Pay" },
+      { x: 10, y: 20 },
+      { bundleId: "com.apple.Preferences" },
+    ]) {
+      expect(() => decodePlan({ ...consent, ...content })).toThrow();
+    }
+    expect(() => decodePlan({ ...consent, udid: "bad udid" })).toThrow();
+    expect(AGENT_CONTROL_ACTION_CAPABILITIES.deviceControlConsent).toBe("devices.control");
+    // Not a device action: it has no expected-version target and runs no device executor.
+    expect(AGENT_CONTROL_DEVICE_ACTION_KINDS).not.toContain("deviceControlConsent");
+  });
+
   it("rejects unknown action kinds", () => {
     expect(() => decodePlan({ kind: "runShellCommand", command: "rm -rf /" })).toThrow();
   });
@@ -237,6 +263,24 @@ describe("AgentControlActionPlan", () => {
     expect(() =>
       decodePlan({ kind: "createThreads", entries: Array.from({ length: 11 }, () => entry) }),
     ).toThrow();
+  });
+
+  it("takes an optional maxConcurrent of 1 to 8 on createThreads", () => {
+    const entry = createThreadsPlan.entries[0];
+    const decoded = decodePlan({ kind: "createThreads", entries: [entry], maxConcurrent: 2 });
+    expect(decoded.kind === "createThreads" ? decoded.maxConcurrent : null).toBe(2);
+    const plain = decodePlan(createThreadsPlan);
+    expect(plain.kind === "createThreads" && "maxConcurrent" in plain).toBe(false);
+    for (const maxConcurrent of [1, 8]) {
+      expect(() =>
+        decodePlan({ kind: "createThreads", entries: [entry], maxConcurrent }),
+      ).not.toThrow();
+    }
+    for (const maxConcurrent of [0, 9, 1.5, "2"]) {
+      expect(() =>
+        decodePlan({ kind: "createThreads", entries: [entry], maxConcurrent }),
+      ).toThrow();
+    }
   });
 
   it("targets provider instances via ModelSelection, absorbing the legacy provider key", () => {
@@ -345,6 +389,13 @@ describe("forward compatibility (additive extension)", () => {
     expect(AGENT_CONTROL_ACTION_CAPABILITIES.deleteLocalTask).toBe(
       AGENT_CONTROL_CAPABILITIES.manageLocalTasks,
     );
+    expect(AGENT_CONTROL_ACTION_CAPABILITIES.pullRequestWatch).toBe(
+      AGENT_CONTROL_CAPABILITIES.watchPullRequests,
+    );
+    // Moving one's own chat into a worktree is workspace management.
+    expect(AGENT_CONTROL_ACTION_CAPABILITIES.worktreeHandoff).toBe(
+      AGENT_CONTROL_CAPABILITIES.manageWorkspaces,
+    );
     expect(Object.keys(AGENT_CONTROL_ACTION_CAPABILITIES).toSorted()).toEqual([
       "automationRun",
       "cancelAutomation",
@@ -356,6 +407,7 @@ describe("forward compatibility (additive extension)", () => {
       "deleteLocalTask",
       "deviceAttach",
       "deviceBoot",
+      "deviceControlConsent",
       "deviceDetach",
       "deviceInstall",
       "deviceLaunch",
@@ -368,12 +420,14 @@ describe("forward compatibility (additive extension)", () => {
       "deviceTap",
       "importProject",
       "interruptThread",
+      "pullRequestWatch",
       "removeProject",
       "sendMessage",
       "updateAutomation",
       "updateProject",
       "updateThread",
       "workspaceLifecycle",
+      "worktreeHandoff",
     ]);
   });
 });
@@ -431,6 +485,7 @@ describe("Agent Control MCP contracts", () => {
         "ryco_wait_for_control_request",
         "ryco_create_threads",
         "ryco_diagnostics_summary",
+        "ryco_usage_limits",
         "ryco_send_message",
         "ryco_interrupt_thread",
         "ryco_update_thread",
@@ -461,12 +516,107 @@ describe("Agent Control MCP contracts", () => {
         "ryco_propose_device_input",
         "ryco_propose_device_recording",
         "ryco_propose_device_shutdown",
+        "ryco_watch_pull_request",
+        "ryco_unwatch_pull_request",
       ].toSorted(),
     );
-    expect(Object.values(AGENT_CONTROL_MCP_TOOLS)).toHaveLength(43);
+    expect(Object.values(AGENT_CONTROL_MCP_TOOLS)).toHaveLength(46);
     for (const name of AGENT_CONTROL_MCP_TOOL_NAMES) {
       expect(name.startsWith("ryco_")).toBe(true);
     }
+  });
+
+  it("decodes usage limit reads and bounds their results", async () => {
+    const {
+      AGENT_CONTROL_MCP_USAGE_LIMITS_MAX,
+      AgentControlMcpUsageLimitsInput,
+      AgentControlMcpUsageLimitsResult,
+    } = await import("./agentControlMcp.ts");
+    const decodeInput = Schema.decodeUnknownSync(AgentControlMcpUsageLimitsInput);
+    expect(decodeInput({})).toEqual({});
+    expect(decodeInput({ instanceId: "codex-main" }).instanceId).toBe("codex-main");
+    expect(() => decodeInput({ instanceId: "" })).toThrow();
+    expect(() => decodeInput({ instanceId: "codex-main", refresh: true })).toThrow();
+
+    const decodeResult = Schema.decodeUnknownSync(AgentControlMcpUsageLimitsResult);
+    const window = { label: "5h", usedPercent: 40, resetsAt: null };
+    const instance = {
+      instanceId: "codex-main",
+      driver: "codex",
+      displayName: null,
+      windows: [{ ...window, pace: "Pace unavailable" }],
+      observedAt: "2026-10-29T00:00:00.000Z",
+      stale: true,
+      staleReason: "the latest usage read failed",
+    };
+    const hub = {
+      hubLabel: "Home hub",
+      routedInstanceIds: ["claude-hub"],
+      accounts: [
+        { label: "Account 1", provider: "claude", windows: [window], observedAt: null },
+        {
+          label: "Account 2",
+          provider: "kimi",
+          windows: [],
+          observedAt: null,
+          note: "Ryco reads no quota for this provider.",
+        },
+      ],
+      observedAt: "2026-10-29T00:00:30.000Z",
+      stale: true,
+      staleReason: "the latest hub read failed",
+    };
+    const result = {
+      checkedAt: "2026-10-29T00:01:00.000Z",
+      instances: [instance],
+      hubs: [hub],
+    };
+    expect(decodeResult(result)).toEqual(result);
+    expect(() => decodeResult({ ...result, instances: [{ ...instance, stale: false }] })).toThrow();
+    expect(() =>
+      decodeResult({
+        ...result,
+        instances: [
+          {
+            ...instance,
+            windows: Array.from(
+              { length: AGENT_CONTROL_MCP_USAGE_LIMITS_MAX.windows + 1 },
+              () => window,
+            ),
+          },
+        ],
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeResult({
+        ...result,
+        instances: Array.from(
+          { length: AGENT_CONTROL_MCP_USAGE_LIMITS_MAX.instances + 1 },
+          () => instance,
+        ),
+      }),
+    ).toThrow();
+    expect(() => decodeResult({ ...result, hubs: undefined })).toThrow();
+    expect(() =>
+      decodeResult({
+        ...result,
+        hubs: Array.from({ length: AGENT_CONTROL_MCP_USAGE_LIMITS_MAX.hubs + 1 }, () => hub),
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeResult({
+        ...result,
+        hubs: [
+          {
+            ...hub,
+            accounts: Array.from(
+              { length: AGENT_CONTROL_MCP_USAGE_LIMITS_MAX.hubAccounts + 1 },
+              () => hub.accounts[0],
+            ),
+          },
+        ],
+      }),
+    ).toThrow();
   });
 
   it("decodes only exact typed mutation payloads and rejects sensitive settings categories", async () => {
@@ -487,6 +637,20 @@ describe("Agent Control MCP contracts", () => {
         entries: [createThreadsPlan.entries[0]],
       }).entries,
     ).toHaveLength(1);
+    expect(
+      Schema.decodeUnknownSync(AgentControlMcpCreateThreadsInput)({
+        requestId: "request-create",
+        entries: [createThreadsPlan.entries[0]],
+        maxConcurrent: 3,
+      }).maxConcurrent,
+    ).toBe(3);
+    expect(() =>
+      Schema.decodeUnknownSync(AgentControlMcpCreateThreadsInput)({
+        requestId: "request-create",
+        entries: [createThreadsPlan.entries[0]],
+        maxConcurrent: 0,
+      }),
+    ).toThrow();
     expect(
       Schema.decodeUnknownSync(AgentControlMcpSendMessageInput)({
         requestId: "request-send",
@@ -709,6 +873,7 @@ describe("AgentControl external MCP", () => {
       "ryco_orchestration_events",
       "ryco_provider_runtime_events",
       "ryco_diagnostics_summary",
+      "ryco_usage_limits",
       "ryco_read_control_request",
       "ryco_wait_for_control_request",
       "ryco_list_threads",
@@ -794,4 +959,50 @@ it("keeps completion return explicitly opt-in and rejects a caller-selected retu
   expect(() =>
     decodePlan({ ...optedIn, entries: [{ ...optedIn.entries[0], returnThreadId: "other" }] }),
   ).toThrow();
+});
+
+describe("AgentControlWorktreeHandoffPlan", () => {
+  const plan = {
+    kind: "worktreeHandoff",
+    threadId: "thread-caller",
+    branch: "feature/handoff",
+    startFromOrigin: false,
+    runSetupScript: true,
+    continuationPrompt: "Run the tests",
+  };
+
+  it("decodes the caller's handoff with its resolved defaults", () => {
+    expect(decodePlan(plan)).toEqual(plan);
+  });
+
+  it("carries no path and no unresolved defaults", () => {
+    // The node chooses the checkout; the agent only names the branch.
+    expect(() => decodePlan({ ...plan, worktreePath: "/elsewhere" })).toThrow();
+    const { runSetupScript: _runSetupScript, ...withoutSetup } = plan;
+    expect(() => decodePlan(withoutSetup)).toThrow();
+    expect(() => decodePlan({ ...plan, continuationPrompt: "x".repeat(120_001) })).toThrow();
+  });
+
+  it("keeps the handed-off worktree in the operation state, never in the receipt", () => {
+    const handoffWorktree = {
+      worktreeId: "worktree-1",
+      projectId: "project-1",
+      branch: "feature/handoff",
+      checkoutPath: "/worktrees/project/feature-handoff",
+      baseRef: "origin/main",
+    };
+    const state = Schema.decodeUnknownSync(AgentControlOperationState)({
+      handoffWorktree,
+      worktreeHandoff: {
+        branch: "feature/handoff",
+        baseRef: "origin/main",
+        startedFromOrigin: true,
+        setupScript: "skipped",
+        continuation: "held",
+      },
+    });
+    expect(state.handoffWorktree).toEqual(handoffWorktree);
+    expect(state.worktreeHandoff?.continuation).toBe("held");
+    expect(Object.keys(AgentControlExecutionReceipt.fields)).not.toContain("handoffWorktree");
+  });
 });

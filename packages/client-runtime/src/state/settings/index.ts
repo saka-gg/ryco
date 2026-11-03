@@ -3,5 +3,8 @@ export * from "./externalIntegrations.ts";
 export * from "./mcpInstallations.ts";
 export * from "./projectPreferences.ts";
 export * from "./nodeAutoSettlement.ts";
+export * from "./threadNotificationPreferences.ts";
 
+export * from "./appKeybindingDefaults.ts";
 export * from "./appKeybindings.ts";
+export * from "./appKeybindingsEditing.ts";

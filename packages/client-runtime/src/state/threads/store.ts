@@ -13,7 +13,6 @@ import type {
   OrchestrationShellSnapshot,
   OrchestrationShellStreamEvent,
   OrchestrationStubbedShellSnapshot,
-  OrchestrationShellThreadPrioritiesItem,
   OrchestrationSession,
   OrchestrationSessionStatus,
   OrchestrationThread,
@@ -27,6 +26,7 @@ import type {
   ProjectId,
   ScopedProjectRef,
   ScopedThreadRef,
+  ThreadFollowUpQueue,
   WorktreeId,
 } from "@ryco/contracts";
 import { isProviderDriverKind, ProviderDriverKind } from "@ryco/contracts/provider-instance";
@@ -67,6 +67,7 @@ import {
 import { sanitizeThreadErrorMessage } from "../../errors/transportError.ts";
 import { getThreadFromEnvironmentState } from "./threadDerivation.ts";
 import { sessionFailureDetail } from "./threadFailure.ts";
+import { applyFollowUpQueueEvent, isFollowUpQueueEvent } from "./followUpQueue.ts";
 import {
   forgetCollectedRows,
   forgetDerivedThread,
@@ -79,6 +80,7 @@ import {
   MAX_THREAD_PROPOSED_PLANS,
 } from "./limits.ts";
 import { getThreadsRuntimeConfiguration, type CheckoutRelocation } from "./runtime.ts";
+import { scopeThreadRef } from "../../scoped.ts";
 import { selectDelegatedChildThreads, threadLineagesEqual } from "./threadLineage.ts";
 
 export interface EnvironmentState {
@@ -132,6 +134,11 @@ export interface EnvironmentState {
         Partial<Record<OrchestrationThreadHistoryCollection, ThreadHistoryLoadState>>
       >
     | undefined;
+  /**
+   * The server-owned follow-up queue of each thread whose detail is loaded (absent while
+   * empty and from older servers). Not thread activity: its events never touch the shell.
+   */
+  followUpQueueByThreadId?: Record<ThreadId, ThreadFollowUpQueue> | undefined;
 
   // ---------------------------------------------------------------------------
   // Sidebar summary — written ONLY by the shell stream
@@ -235,6 +242,39 @@ function plainDataEqual(left: unknown, right: unknown): boolean {
   return leftKeys.every(
     (key) => Object.hasOwn(rightRecord, key) && plainDataEqual(leftRecord[key], rightRecord[key]),
   );
+}
+
+/**
+ * `next`, with each object field that holds the same plain data as `previous`'s
+ * taking `previous`'s object. The shell stream re-reads a thread's row after
+ * every event of the thread, streamed text included, and maps it into new
+ * nested objects (model selection, session, latest turn, ...). Kept identities
+ * make such an upsert, which usually moves only `updatedAt`, change nothing a
+ * selector compares by reference (`createThreadStructureSelectorByRef`,
+ * `createThreadSummaryStructureSelectorByRef`).
+ */
+function reuseUnchangedObjectFields<T extends object>(
+  previous: T | ArchivedThreadStub | undefined,
+  next: T,
+): T {
+  if (previous === undefined || isArchivedThreadStub(previous)) return next;
+  const previousRecord = previous as Record<string, unknown>;
+  const nextRecord = next as Record<string, unknown>;
+  let result: Record<string, unknown> | undefined;
+  for (const key of Object.keys(nextRecord)) {
+    const value = nextRecord[key];
+    const previousValue = previousRecord[key];
+    if (
+      value !== previousValue &&
+      typeof value === "object" &&
+      value !== null &&
+      plainDataEqual(previousValue, value)
+    ) {
+      result ??= { ...nextRecord };
+      result[key] = previousValue;
+    }
+  }
+  return (result as T | undefined) ?? next;
 }
 
 function modelSelectionsEqual(
@@ -429,6 +469,8 @@ function mapThread(thread: OrchestrationThread, environmentId: EnvironmentId): T
     settledAt: thread.settledAt,
     snoozedUntil: thread.snoozedUntil ?? null,
     snoozedAt: thread.snoozedAt ?? null,
+    hiddenAt: thread.hiddenAt ?? null,
+    settleWhenIdleAt: thread.settleWhenIdleAt ?? null,
     usageLimit: thread.usageLimit ?? null,
     updatedAt: thread.updatedAt,
     latestTurn: thread.latestTurn,
@@ -471,6 +513,8 @@ function mapThreadShell(
     settledAt: thread.settledAt,
     snoozedUntil: thread.snoozedUntil ?? null,
     snoozedAt: thread.snoozedAt ?? null,
+    hiddenAt: thread.hiddenAt ?? null,
+    settleWhenIdleAt: thread.settleWhenIdleAt ?? null,
     usageLimit: thread.usageLimit ?? null,
     updatedAt: thread.updatedAt,
     branch: thread.branch,
@@ -486,7 +530,21 @@ function mapThreadShell(
     latestTurn: thread.latestTurn,
     pendingSourceProposedPlan: thread.latestTurn?.sourceProposedPlan,
   };
-  const summary: SidebarThreadSummary = {
+  const summary = mapThreadSummary(thread, environmentId, session);
+  return {
+    shell,
+    session,
+    turnState,
+    summary,
+  };
+}
+
+function mapThreadSummary(
+  thread: OrchestrationThreadShell,
+  environmentId: EnvironmentId,
+  session: ThreadSession | null,
+): SidebarThreadSummary {
+  return {
     id: thread.id,
     environmentId,
     projectId: thread.projectId,
@@ -502,6 +560,8 @@ function mapThreadShell(
     settledAt: thread.settledAt,
     snoozedUntil: thread.snoozedUntil ?? null,
     snoozedAt: thread.snoozedAt ?? null,
+    hiddenAt: thread.hiddenAt ?? null,
+    settleWhenIdleAt: thread.settleWhenIdleAt ?? null,
     usageLimit: thread.usageLimit ?? null,
     updatedAt: thread.updatedAt,
     latestTurn: thread.latestTurn,
@@ -516,15 +576,32 @@ function mapThreadShell(
     hasPendingUserInput: thread.hasPendingUserInput,
     hasActionableProposedPlan: thread.hasActionableProposedPlan,
     backgroundLiveness: thread.backgroundLiveness ?? null,
-    priority: thread.priority,
     lineage: thread.lineage ?? null,
+    ...(thread.pullRequestWatches === undefined
+      ? {}
+      : { pullRequestWatches: thread.pullRequestWatches }),
+    ...(thread.commandWatchCount === undefined
+      ? {}
+      : { commandWatchCount: thread.commandWatchCount }),
+    ...(thread.followUpQueueSummary === undefined
+      ? {}
+      : { followUpQueueSummary: thread.followUpQueueSummary }),
   };
-  return {
-    shell,
-    session,
-    turnState,
-    summary,
-  };
+}
+
+/**
+ * The summary a `thread-upserted` event writes for `thread` (a relocated
+ * checkout's path aside), for consumers that follow shell events one by one.
+ */
+export function mapThreadShellSummary(
+  thread: OrchestrationThreadShell,
+  environmentId: EnvironmentId,
+): SidebarThreadSummary {
+  return mapThreadSummary(
+    thread,
+    environmentId,
+    thread.session ? mapSession(thread.session) : null,
+  );
 }
 
 function mapArchivedThreadStub(
@@ -619,6 +696,8 @@ function toThreadShell(thread: Thread): ThreadShell {
     settledAt: thread.settledAt,
     snoozedUntil: thread.snoozedUntil ?? null,
     snoozedAt: thread.snoozedAt ?? null,
+    hiddenAt: thread.hiddenAt ?? null,
+    settleWhenIdleAt: thread.settleWhenIdleAt ?? null,
     usageLimit: thread.usageLimit ?? null,
     updatedAt: thread.updatedAt,
     branch: thread.branch,
@@ -735,6 +814,8 @@ function sidebarThreadSummariesEqual(
     left.settledAt === right.settledAt &&
     left.snoozedUntil === right.snoozedUntil &&
     left.snoozedAt === right.snoozedAt &&
+    (left.hiddenAt ?? null) === (right.hiddenAt ?? null) &&
+    (left.settleWhenIdleAt ?? null) === (right.settleWhenIdleAt ?? null) &&
     threadUsageLimitsEqual(left.usageLimit, right.usageLimit) &&
     left.updatedAt === right.updatedAt &&
     latestTurnsEqual(left.latestTurn, right.latestTurn) &&
@@ -749,8 +830,14 @@ function sidebarThreadSummariesEqual(
     left.hasPendingUserInput === right.hasPendingUserInput &&
     left.hasActionableProposedPlan === right.hasActionableProposedPlan &&
     (left.backgroundLiveness ?? null) === (right.backgroundLiveness ?? null) &&
-    threadPrioritiesEqual(left.priority, right.priority) &&
-    threadLineagesEqual(left.lineage, right.lineage)
+    threadLineagesEqual(left.lineage, right.lineage) &&
+    // Watch progress does not move the thread's `updatedAt` (it is not thread activity), so a
+    // shell whose only change is its watches must still compare unequal here. Plain wire data,
+    // compared whole so a field the summary gains later can never be missed.
+    plainDataEqual(left.pullRequestWatches, right.pullRequestWatches) &&
+    left.commandWatchCount === right.commandWatchCount &&
+    // Queue events do not move `updatedAt` either.
+    plainDataEqual(left.followUpQueueSummary, right.followUpQueueSummary)
   );
 }
 
@@ -776,25 +863,6 @@ function threadUsageLimitsEqual(
   );
 }
 
-function threadPrioritiesEqual(
-  left: SidebarThreadSummary["priority"],
-  right: SidebarThreadSummary["priority"],
-): boolean {
-  if (left === right) return true;
-  return (
-    left !== undefined &&
-    right !== undefined &&
-    left.tier === right.tier &&
-    left.confidence === right.confidence &&
-    left.reason === right.reason &&
-    left.inputFingerprint === right.inputFingerprint &&
-    left.batchId === right.batchId &&
-    modelSelectionsEqual(left.modelSelection, right.modelSelection) &&
-    left.rankedAt === right.rankedAt &&
-    left.usableUntil === right.usableUntil
-  );
-}
-
 function threadShellsEqual(left: ThreadShellOrStub | undefined, right: ThreadShell): boolean {
   return (
     left !== undefined &&
@@ -815,6 +883,8 @@ function threadShellsEqual(left: ThreadShellOrStub | undefined, right: ThreadShe
     left.settledAt === right.settledAt &&
     left.snoozedUntil === right.snoozedUntil &&
     left.snoozedAt === right.snoozedAt &&
+    (left.hiddenAt ?? null) === (right.hiddenAt ?? null) &&
+    (left.settleWhenIdleAt ?? null) === (right.settleWhenIdleAt ?? null) &&
     threadUsageLimitsEqual(left.usageLimit, right.usageLimit) &&
     left.updatedAt === right.updatedAt &&
     left.branch === right.branch &&
@@ -1346,13 +1416,14 @@ function writeThreadShellState(
   );
 
   if (!threadShellsEqual(previousShell, nextThread.shell)) {
-    retireDerivedThread(previousShell, nextThread.shell);
+    const storedShell = reuseUnchangedObjectFields(previousShell, nextThread.shell);
+    retireDerivedThread(previousShell, storedShell);
     nextState = {
       ...nextState,
       threadShellById: writeRecordEntry(
         nextState.threadShellById,
-        nextThread.shell.id,
-        nextThread.shell,
+        storedShell.id,
+        storedShell,
         owned,
       ),
     };
@@ -1386,18 +1457,14 @@ function writeThreadShellState(
     };
   }
 
-  if (
-    !sidebarThreadSummariesEqual(
-      state.sidebarThreadSummaryById[nextThread.shell.id],
-      nextThread.summary,
-    )
-  ) {
+  const previousSummary = state.sidebarThreadSummaryById[nextThread.shell.id];
+  if (!sidebarThreadSummariesEqual(previousSummary, nextThread.summary)) {
     nextState = {
       ...nextState,
       sidebarThreadSummaryById: writeRecordEntry(
         nextState.sidebarThreadSummaryById,
         nextThread.shell.id,
-        nextThread.summary,
+        reuseUnchangedObjectFields(previousSummary, nextThread.summary),
         owned,
       ),
     };
@@ -1472,6 +1539,10 @@ function removeThreadState(state: EnvironmentState, threadId: ThreadId): Environ
     state.threadHistoryLoadByThreadId ?? {};
   const { [threadId]: _removedSidebarSummary, ...sidebarThreadSummaryById } =
     state.sidebarThreadSummaryById;
+  const followUpQueueByThreadId = withoutThreadEntries(
+    state.followUpQueueByThreadId,
+    new Set([threadId]),
+  );
 
   return {
     ...state,
@@ -1493,6 +1564,7 @@ function removeThreadState(state: EnvironmentState, threadId: ThreadId): Environ
     threadHistoryByThreadId,
     threadHistoryLoadByThreadId,
     sidebarThreadSummaryById,
+    ...(followUpQueueByThreadId === undefined ? {} : { followUpQueueByThreadId }),
   };
 }
 
@@ -1541,6 +1613,7 @@ function evictThreadBodiesFromEnvironment(
     threadHistoryByThreadId: withoutThreadEntries(state.threadHistoryByThreadId, threadIds),
     threadHistoryLoadByThreadId: withoutThreadEntries(state.threadHistoryLoadByThreadId, threadIds),
     cachedMessageThreadIds: withoutThreadEntries(state.cachedMessageThreadIds, threadIds),
+    followUpQueueByThreadId: withoutThreadEntries(state.followUpQueueByThreadId, threadIds),
   };
   return (Object.keys(next) as Array<keyof EnvironmentState>).every(
     (key) => next[key] === state[key],
@@ -1795,12 +1868,20 @@ function updateThreadShellTimestamp(
   };
 }
 
+type ThreadSidebarStatePatch = Partial<
+  Pick<
+    ThreadShell,
+    "settledOverride" | "settledAt" | "snoozedUntil" | "snoozedAt" | "hiddenAt" | "settleWhenIdleAt"
+  >
+> & {
+  readonly updatedAt: string;
+};
+
+/** Patches the Inbox fields of a shell and its summary; an absent field stays as it is. */
 function updateThreadSettlementState(
   state: EnvironmentState,
   threadId: ThreadId,
-  patch: Pick<ThreadShell, "settledOverride" | "settledAt" | "snoozedUntil" | "snoozedAt"> & {
-    readonly updatedAt: string;
-  },
+  input: ThreadSidebarStatePatch,
 ): EnvironmentState {
   // A stub has no settlement fields to patch; the full upsert that follows replaces it.
   const storedShell = state.threadShellById[threadId];
@@ -1810,21 +1891,15 @@ function updateThreadSettlementState(
   if (!shell && !summary) {
     return state;
   }
-
-  const shellUnchanged =
-    !shell ||
-    (shell.settledOverride === patch.settledOverride &&
-      shell.settledAt === patch.settledAt &&
-      (patch.snoozedUntil === undefined || shell.snoozedUntil === patch.snoozedUntil) &&
-      (patch.snoozedAt === undefined || shell.snoozedAt === patch.snoozedAt) &&
-      shell.updatedAt === patch.updatedAt);
-  const summaryUnchanged =
-    !summary ||
-    (summary.settledOverride === patch.settledOverride &&
-      summary.settledAt === patch.settledAt &&
-      (patch.snoozedUntil === undefined || summary.snoozedUntil === patch.snoozedUntil) &&
-      (patch.snoozedAt === undefined || summary.snoozedAt === patch.snoozedAt) &&
-      summary.updatedAt === patch.updatedAt);
+  const patch = Object.fromEntries(
+    Object.entries(input).filter(([, value]) => value !== undefined),
+  ) as ThreadSidebarStatePatch;
+  const unchanged = (current: Partial<Record<keyof ThreadSidebarStatePatch, unknown>>) =>
+    (Object.keys(patch) as Array<keyof ThreadSidebarStatePatch>).every(
+      (key) => (current[key] ?? null) === (patch[key] ?? null),
+    );
+  const shellUnchanged = !shell || unchanged(shell);
+  const summaryUnchanged = !summary || unchanged(summary);
   if (shellUnchanged && summaryUnchanged) {
     return state;
   }
@@ -2257,7 +2332,7 @@ function syncEnvironmentShellSnapshot(
   environmentId: EnvironmentId,
 ): EnvironmentState {
   // Structural sharing: a re-applied snapshot (reconnect, Hub node switch,
-  // cache-hydrated -> live, priority push) usually leaves most rows unchanged.
+  // cache-hydrated -> live) usually leaves most rows unchanged.
   // Reusing the previous objects keeps every row selector and memo stable.
   const nextProjects = snapshot.projects.map((project) => {
     const mapped = mapProject(project, environmentId);
@@ -2489,6 +2564,30 @@ export function applyLoadedThreadShells(
   return commitEnvironmentState(state, environmentId, environmentState);
 }
 
+/** Writes one thread's follow-up queue; an equal queue keeps its identity. */
+function writeFollowUpQueue(
+  state: EnvironmentState,
+  threadId: ThreadId,
+  queue: ThreadFollowUpQueue | undefined,
+): EnvironmentState {
+  const current = state.followUpQueueByThreadId?.[threadId];
+  if (queue === undefined) {
+    if (current === undefined) return state;
+    return {
+      ...state,
+      followUpQueueByThreadId: withoutThreadEntries(
+        state.followUpQueueByThreadId,
+        new Set([threadId]),
+      ),
+    };
+  }
+  if (current !== undefined && plainDataEqual(current, queue)) return state;
+  return {
+    ...state,
+    followUpQueueByThreadId: { ...state.followUpQueueByThreadId, [threadId]: queue },
+  };
+}
+
 export function syncServerThreadDetail(
   state: AppState,
   thread: OrchestrationThread,
@@ -2499,7 +2598,11 @@ export function syncServerThreadDetail(
   return commitEnvironmentState(
     state,
     environmentId,
-    writeThreadState(environmentState, mapThread(thread, environmentId), previousThread),
+    writeFollowUpQueue(
+      writeThreadState(environmentState, mapThread(thread, environmentId), previousThread),
+      thread.id,
+      thread.followUpQueue,
+    ),
   );
 }
 
@@ -2712,6 +2815,15 @@ function applyEnvironmentOrchestrationEvent(
   event: OrchestrationEvent,
   environmentId: EnvironmentId,
 ): EnvironmentState {
+  if (isFollowUpQueueEvent(event)) {
+    // The queue is not thread activity: the shell and its `updatedAt` stay.
+    const threadId = event.payload.threadId;
+    return writeFollowUpQueue(
+      state,
+      threadId,
+      applyFollowUpQueueEvent(state.followUpQueueByThreadId?.[threadId], event),
+    );
+  }
   switch (event.type) {
     case "project.created": {
       const nextProject = mapProject(
@@ -2883,6 +2995,7 @@ function applyEnvironmentOrchestrationEvent(
       return updateThreadState(state, event.payload.threadId, (thread) => ({
         ...thread,
         archivedAt: event.payload.archivedAt,
+        settleWhenIdleAt: null,
         updatedAt: event.payload.updatedAt,
       }));
 
@@ -2899,6 +3012,7 @@ function applyEnvironmentOrchestrationEvent(
         settledAt: null,
         snoozedUntil: event.payload.snoozedUntil,
         snoozedAt: event.payload.snoozedAt,
+        settleWhenIdleAt: null,
         updatedAt: event.payload.updatedAt,
       });
     case "thread.unsnoozed":
@@ -2915,6 +3029,7 @@ function applyEnvironmentOrchestrationEvent(
         settledOverride: "settled",
         snoozedUntil: null,
         snoozedAt: null,
+        settleWhenIdleAt: null,
         settledAt: event.payload.settledAt,
         updatedAt: event.payload.updatedAt,
       });
@@ -2923,8 +3038,24 @@ function applyEnvironmentOrchestrationEvent(
       return updateThreadSettlementState(state, event.payload.threadId, {
         settledOverride: event.payload.reason === "user" ? "active" : null,
         settledAt: null,
+        settleWhenIdleAt: null,
         updatedAt: event.payload.updatedAt,
         ...event.payload.restoredSidebarState,
+      });
+
+    case "thread.settle-deferred":
+      return updateThreadSettlementState(state, event.payload.threadId, {
+        settleWhenIdleAt: event.payload.settleWhenIdleAt,
+        snoozedUntil: null,
+        snoozedAt: null,
+        updatedAt: event.payload.updatedAt,
+      });
+
+    case "thread.hidden":
+    case "thread.unhidden":
+      return updateThreadSettlementState(state, event.payload.threadId, {
+        hiddenAt: event.type === "thread.hidden" ? event.payload.hiddenAt : null,
+        updatedAt: event.payload.updatedAt,
       });
 
     case "thread.meta-updated":
@@ -3821,6 +3952,49 @@ export function selectDelegatedChildThreadsForThreadRef(
   return rows;
 }
 
+/** How deep and how many delegated descendants a Stop looks through. */
+const DELEGATED_DESCENDANTS_MAX_DEPTH = 8;
+const DELEGATED_DESCENDANTS_MAX = 64;
+
+/**
+ * The delegated descendants of a thread that are still working (a running or starting
+ * turn, or working background agents), deepest first: stopping a child before its own
+ * children would let them report into a chat that no longer waits for them.
+ */
+export function selectWorkingDelegatedDescendants(
+  state: AppState,
+  ref: ScopedThreadRef,
+): ScopedThreadRef[] {
+  const levels: SidebarThreadOrStub[][] = [];
+  let frontier: ScopedThreadRef[] = [ref];
+  let seen = 0;
+  for (let depth = 0; depth < DELEGATED_DESCENDANTS_MAX_DEPTH && frontier.length > 0; depth += 1) {
+    const level = frontier.flatMap((parent) =>
+      selectDelegatedChildThreadsForThreadRef(state, parent),
+    );
+    seen += level.length;
+    if (level.length === 0 || seen > DELEGATED_DESCENDANTS_MAX) break;
+    levels.push(level);
+    frontier = level.map((child) => scopeThreadRef(child.environmentId, child.id));
+  }
+  return levels
+    .toReversed()
+    .flat()
+    .filter(isDelegatedTaskWorking)
+    .map((child) => scopeThreadRef(child.environmentId, child.id));
+}
+
+function isDelegatedTaskWorking(thread: SidebarThreadOrStub): boolean {
+  if (!("session" in thread)) return false;
+  const status = thread.session?.orchestrationStatus;
+  return (
+    status === "running" ||
+    status === "starting" ||
+    thread.latestTurn?.state === "running" ||
+    thread.backgroundLiveness === "working"
+  );
+}
+
 export const selectSidebarThreadsForProjectRefs: (
   state: AppState,
   refs: readonly ScopedProjectRef[],
@@ -3985,44 +4159,6 @@ function applyShellEventInBatch(
 }
 
 /**
- * A `thread-priorities` item: every listed thread takes its ranking and every
- * other thread loses the one it had. Summaries whose ranking did not change
- * keep their identity, so an unchanged sidebar row does not re-render.
- */
-export function applyThreadPriorities(
-  state: AppState,
-  item: OrchestrationShellThreadPrioritiesItem,
-  environmentId: EnvironmentId,
-): AppState {
-  const environmentState = getStoredEnvironmentState(state, environmentId);
-  const priorityByThread = new Map(
-    item.priorities.map((entry) => [entry.threadId, entry.priority]),
-  );
-  let sidebarThreadSummaryById: EnvironmentState["sidebarThreadSummaryById"] | null = null;
-  for (const threadId of environmentState.threadIds) {
-    const summary = ownValue(environmentState.sidebarThreadSummaryById, threadId);
-    // A stub carries no ranking; archived threads are never ranked.
-    if (summary === undefined || isArchivedThreadStub(summary)) continue;
-    const priority = priorityByThread.get(threadId);
-    if (threadPrioritiesEqual(summary.priority, priority)) continue;
-    sidebarThreadSummaryById ??= { ...environmentState.sidebarThreadSummaryById };
-    const { priority: _previous, ...withoutPriority } = summary;
-    sidebarThreadSummaryById[threadId] =
-      priority === undefined ? withoutPriority : { ...withoutPriority, priority };
-  }
-  if (sidebarThreadSummaryById === null) return state;
-  return commitEnvironmentState(state, environmentId, {
-    ...environmentState,
-    sidebarThreadSummaryById,
-  });
-}
-
-/** What the shell stream changes in the store: a sequenced event or a priority ranking. */
-export type ShellStoreUpdate =
-  | OrchestrationShellStreamEvent
-  | OrchestrationShellThreadPrioritiesItem;
-
-/**
  * Folds a run of shell updates into `state`. Consecutive thread upserts share
  * the records the run already copied, so a frame of upserts for different
  * threads copies each record keyed by every thread once, not once per upsert.
@@ -4033,11 +4169,11 @@ export type ShellStoreUpdate =
  * `prepare` must read what it needs synchronously and keep neither the state
  * nor any record reached through it.
  */
-function applyShellStoreUpdates<Item>(
+function applyOrchestrationShellStreamEvents<Item>(
   state: AppState,
   items: ReadonlyArray<Item>,
   read: (item: Item) => {
-    readonly update: ShellStoreUpdate;
+    readonly update: OrchestrationShellStreamEvent;
     readonly environmentId: EnvironmentId;
   },
   beforeEach?: (state: AppState, item: Item) => void,
@@ -4052,10 +4188,7 @@ function applyShellStoreUpdates<Item>(
       continue;
     }
     owned = new WeakSet<object>();
-    nextState =
-      update.kind === "thread-priorities"
-        ? applyThreadPriorities(nextState, update, environmentId)
-        : applyShellEvent(nextState, update, environmentId);
+    nextState = applyShellEvent(nextState, update, environmentId);
   }
   return nextState;
 }
@@ -4453,7 +4586,7 @@ interface ShellEventCoalescerDeps {
 }
 
 export interface ShellEventCoalescer {
-  readonly enqueue: (event: ShellStoreUpdate, environmentId: EnvironmentId) => void;
+  readonly enqueue: (event: OrchestrationShellStreamEvent, environmentId: EnvironmentId) => void;
   readonly flush: () => void;
   readonly hasPending: () => boolean;
 }
@@ -4468,7 +4601,7 @@ export function createShellEventCoalescer(deps: ShellEventCoalescerDeps): ShellE
     ((callback: () => void, delayMs: number) => void setTimeout(callback, delayMs));
 
   let queue: Array<{
-    event: ShellStoreUpdate;
+    event: OrchestrationShellStreamEvent;
     environmentId: EnvironmentId;
   }> = [];
   let scheduledGeneration = 0;
@@ -4483,14 +4616,14 @@ export function createShellEventCoalescer(deps: ShellEventCoalescerDeps): ShellE
     const pending = queue;
     queue = [];
     deps.commitState(
-      applyShellStoreUpdates(deps.getState(), pending, (item) => ({
+      applyOrchestrationShellStreamEvents(deps.getState(), pending, (item) => ({
         update: item.event,
         environmentId: item.environmentId,
       })),
     );
   }
 
-  function enqueue(event: ShellStoreUpdate, environmentId: EnvironmentId): void {
+  function enqueue(event: OrchestrationShellStreamEvent, environmentId: EnvironmentId): void {
     queue.push({ event, environmentId });
     if (scheduled) return;
     scheduled = true;
@@ -4582,7 +4715,7 @@ interface AppStore extends AppState {
     environmentId: EnvironmentId,
   ) => void;
   /** Joins the next frame's shell commit. */
-  applyShellEvent: (event: ShellStoreUpdate, environmentId: EnvironmentId) => void;
+  applyShellEvent: (event: OrchestrationShellStreamEvent, environmentId: EnvironmentId) => void;
   /**
    * Applies one environment's shell updates in order as a single commit, now.
    * `prepare` sees the state each update applies to (after the ones before it)
@@ -4591,9 +4724,9 @@ interface AppStore extends AppState {
    * synchronously and keep neither it nor any record reached through it.
    */
   applyShellEvents: <Context>(
-    events: ReadonlyArray<ShellStoreUpdate>,
+    events: ReadonlyArray<OrchestrationShellStreamEvent>,
     environmentId: EnvironmentId,
-    prepare?: (state: AppState, event: ShellStoreUpdate) => Context,
+    prepare?: (state: AppState, event: OrchestrationShellStreamEvent) => Context,
   ) => ReadonlyArray<Context>;
   removeThread: (threadRef: ScopedThreadRef) => void;
   setThreadError: (threadRef: ScopedThreadRef, error: string | null) => void;
@@ -4641,7 +4774,7 @@ export const useStore = create<AppStore>((set, get) => {
       runStoreMutationBarriers();
       coalescer.flush();
     },
-    enqueue: (event: ShellStoreUpdate, environmentId: EnvironmentId) => {
+    enqueue: (event: OrchestrationShellStreamEvent, environmentId: EnvironmentId) => {
       runStoreMutationBarriers();
       coalescer.enqueue(event, environmentId);
     },
@@ -4710,13 +4843,13 @@ export const useStore = create<AppStore>((set, get) => {
     },
     applyShellEvent: (event, environmentId) => shellCoalescer.enqueue(event, environmentId),
     applyShellEvents: <Context>(
-      events: ReadonlyArray<ShellStoreUpdate>,
+      events: ReadonlyArray<OrchestrationShellStreamEvent>,
       environmentId: EnvironmentId,
-      prepare?: (state: AppState, event: ShellStoreUpdate) => Context,
+      prepare?: (state: AppState, event: OrchestrationShellStreamEvent) => Context,
     ): ReadonlyArray<Context> => {
       shellCoalescer.flush();
       const contexts: Context[] = [];
-      const nextState = applyShellStoreUpdates(
+      const nextState = applyOrchestrationShellStreamEvents(
         get(),
         events,
         (event) => ({ update: event, environmentId }),

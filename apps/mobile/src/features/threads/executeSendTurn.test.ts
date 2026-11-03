@@ -1,4 +1,11 @@
 import type { EnvironmentApi, ModelSelection, ProjectId, ThreadId } from "@ryco/contracts";
+import { OrchestrationDispatchCommandError } from "@ryco/contracts";
+import { EnvironmentId, MessageId } from "@ryco/contracts/base-schemas";
+import {
+  createQuoteCitation,
+  expandQuoteCitations,
+  serializeQuoteCitation,
+} from "@ryco/shared/quoteCitations";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 vi.mock("expo-crypto", () => ({ randomUUID: () => `id-${Math.random().toString(16).slice(2)}` }));
@@ -72,6 +79,27 @@ describe("executeSendTurn", () => {
       (c) => (c[0] as { type: string }).type === "thread.turn.start",
     )![0] as { threadId: ThreadId };
     expect(start.threadId).toBe(THREAD_ID);
+  });
+
+  it("sends a pasted quote token expanded, as web does", async () => {
+    const prompt = `Explain ${serializeQuoteCitation(
+      createQuoteCitation({
+        source: { environmentId: EnvironmentId.make("env-1"), threadId: THREAD_ID },
+        messageId: MessageId.make("assistant-1"),
+        selector: { exact: "The passage.", prefix: "", suffix: "", start: 0, end: 12 },
+      }),
+    )}  `;
+    const { input, dispatchCommand } = baseInput({
+      composer: { ...baseInput().input.composer, prompt },
+    });
+
+    await executeSendTurn(input);
+
+    const start = dispatchCommand.mock.calls.find(
+      (call) => (call[0] as { type: string }).type === "thread.turn.start",
+    )![0] as { message: { text: string } };
+    expect(start.message.text).toBe(expandQuoteCitations(prompt.trim()));
+    expect(start.message.text).toContain("<assistant_quotes>");
   });
 
   it("skips the title update for a non-first message", async () => {
@@ -196,6 +224,64 @@ describe("executeSendTurn", () => {
       const { input, getThreadWindow } = claudeInput(() => undefined);
       expect(await executeSendTurn(input)).toBe(true);
       expect(getThreadWindow).toHaveBeenCalledOnce();
+    });
+
+    it("forwards this device's choice to skip the review", async () => {
+      const skipClaudeResumeReview = vi.fn(() => true);
+      const { input, dispatchCommand, getThreadWindow } = claudeInput(() => undefined);
+      expect(await executeSendTurn({ ...input, skipClaudeResumeReview })).toBe(true);
+      expect(skipClaudeResumeReview).toHaveBeenCalledOnce();
+      expect(getThreadWindow).not.toHaveBeenCalled();
+      const start = dispatchCommand.mock.calls.find(
+        (call) => (call[0] as { type: string }).type === "thread.turn.start",
+      )![0];
+      expect(start).not.toHaveProperty("claudeResumeGuard");
+    });
+  });
+
+  describe("a model switch held back by background tasks", () => {
+    const refusal = () =>
+      new OrchestrationDispatchCommandError({
+        message: "This thread still has background tasks running.",
+        modelSwitchBlockedByBackgroundWork: { taskIds: ["task-shell"] },
+      });
+
+    it("asks, then sends the same message again marked to stop background work", async () => {
+      const confirmStopBackgroundWork = vi.fn(async () => true);
+      const { input, dispatchCommand, restoreDraft } = baseInput({ confirmStopBackgroundWork });
+      dispatchCommand.mockImplementation(async (command: unknown) => {
+        const turnStart = command as { type: string; stopBackgroundWork?: true };
+        if (turnStart.type === "thread.turn.start" && !turnStart.stopBackgroundWork) {
+          throw refusal();
+        }
+        return undefined;
+      });
+
+      expect(await executeSendTurn(input)).toBe(true);
+      expect(confirmStopBackgroundWork).toHaveBeenCalledWith({ taskIds: ["task-shell"] });
+      const turnStarts = dispatchCommand.mock.calls
+        .map((call) => call[0] as { type: string; commandId: string; stopBackgroundWork?: true })
+        .filter((command) => command.type === "thread.turn.start");
+      expect(turnStarts.map((command) => command.stopBackgroundWork)).toEqual([undefined, true]);
+      expect(turnStarts[1]?.commandId).toBe(turnStarts[0]?.commandId);
+      expect(restoreDraft).not.toHaveBeenCalled();
+    });
+
+    it("restores the draft when the user keeps the tasks running", async () => {
+      const { input, dispatchCommand, restoreDraft, setThreadError } = baseInput({
+        confirmStopBackgroundWork: async () => false,
+      });
+      dispatchCommand.mockImplementation(async (command: unknown) => {
+        if ((command as { type: string }).type === "thread.turn.start") throw refusal();
+        return undefined;
+      });
+
+      expect(await executeSendTurn(input)).toBe(false);
+      expect(restoreDraft).toHaveBeenCalledWith({ prompt: "hello world", images: [] });
+      expect(setThreadError).toHaveBeenLastCalledWith(
+        THREAD_ID,
+        expect.stringContaining("background tasks keep running"),
+      );
     });
   });
 });

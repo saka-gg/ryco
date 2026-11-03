@@ -19,7 +19,7 @@ import { getPresentationTier, syncDocumentPresentationTier } from "../lib/presen
 import { RIGHT_PANEL_SHEET_CLASS_NAME } from "../rightPanelLayout";
 import { useTierOverrideStore } from "../tierOverrideStore";
 import { resetPointerEmulation, setCoarsePointerEmulation } from "../../test/browserPointer";
-import { PairingPendingSurface } from "./auth/PairingRouteSurface";
+import { PairingPendingSurface } from "./auth/PairingSurface";
 import { HostedHubRoot } from "./hostedHub/HostedHubRoot";
 import { DiagnosticsSettings } from "./settings/DiagnosticsSettings";
 import {

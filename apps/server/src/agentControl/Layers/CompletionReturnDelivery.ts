@@ -19,13 +19,9 @@ import {
   type ThreadId,
   type TurnId,
 } from "@ryco/contracts";
-import {
-  QUEUED_TURN_START_GRACE_MS,
-  queuedTurnIdleBlocker,
-  type QueuedTurnIdleInput,
-} from "@ryco/shared/threadSettlement";
+import { QUEUED_TURN_START_GRACE_MS } from "@ryco/shared/threadSettlement";
 import { applicableUsageLimit } from "@ryco/shared/usageLimit";
-import { Clock, Context, Effect, Layer, Option, Semaphore } from "effect";
+import { Clock, Context, Effect, Exit, Layer, Option, Semaphore } from "effect";
 import { isPersistableChatAttachment } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import {
@@ -37,24 +33,30 @@ import {
   type CompletionReturnCapture,
   type CompletionReturnOutcome,
   type CompletionReturnRecord,
+  type CompletionReturnStallKind,
+  type CompletionReturnStallNotice,
 } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { AgentControlProposalRepository } from "../../persistence/Services/AgentControlProposals.ts";
 import { OrchestrationCommandReceiptRepository } from "../../persistence/Services/OrchestrationCommandReceipts.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { isCheckpointRevertEntryPending } from "../../orchestration/checkpointRevertPolicy.ts";
 import { OrchestrationCommandApplication } from "../../orchestration/Services/OrchestrationCommandApplication.ts";
+import { ServerWakeFence } from "../../orchestration/Services/ServerWakeFence.ts";
+import { serverWakeInScope } from "../../orchestration/serverWake.ts";
 import { ServerRuntimeStartup } from "../../serverRuntimeStartup.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { AgentControlPolicy } from "../Services/AgentControlPolicy.ts";
 import { AgentControlProposalEvents } from "../Services/AgentControlProposalEvents.ts";
 import {
   CAPTURE_EXPIRY_MS,
-  COLD_WAKE_GRACE_MS,
-  MAX_COLD_WAKES_IN_FLIGHT,
+  WAITING_EXPIRY_MS,
   MAX_DELIVERY_ATTEMPTS,
   MAX_REPLAYS,
+  MAX_STALL_NOTICES,
+  STALL_NEVER_STARTED_MS,
+  STALL_WAITING_ON_YOU_MS,
   buildDelegationReturnCommand,
   compareCodeUnits,
+  delegationWakeIds,
   deliveryExpiresAtMs,
   isStoredAttachmentWake,
   type DelegationWakeCommand,
@@ -62,11 +64,11 @@ import {
   renderCompletionNotice,
   renderCompletionReturn,
   selectWakeBatch,
+  waitingReturnExpired,
   type CompletionReturnNoticeOutcome,
 } from "../completionReturnMessages.ts";
 import { publishCompletionReturns } from "../completionReturnPublish.ts";
 import { copyArtifactsToThread } from "../artifactHandoff.ts";
-import { agentControlRuntimeRank } from "./AgentControlActionValidator.ts";
 
 export { renderCompletionReturn } from "../completionReturnMessages.ts";
 
@@ -99,6 +101,8 @@ const DETAIL = {
     "The originating chat was reverted to before this task was delegated; this result was not returned automatically. Open the child and send its result manually.",
   userStopped:
     "You stopped the delegating chat; this result was not returned automatically. Open the child.",
+  userStoppedBeforeStart:
+    "You stopped the delegating chat before this task's turn came: it stays paused and starts only if you resume it, and its result does not return automatically.",
   cold: "Waiting for another chat's session to start.",
   deliveryExpired:
     "Not delivered within 24 hours of its capture or of the originating chat's usage-limit reset (the chat stayed busy, usage-limited or out of scope, or Agent Control was disabled). Open the child.",
@@ -124,21 +128,6 @@ const deliveredDetail = (record: CompletionReturnRecord, others: number) =>
 type CapturedRecord = CompletionReturnRecord & { readonly capture: CompletionReturnCapture };
 const isCaptured = (record: CompletionReturnRecord): record is CapturedRecord =>
   record.capture !== undefined && record.capture !== null;
-
-export const queuedTurnIdleInputFromShell = (
-  shell: OrchestrationThreadShell,
-  nowMs: number,
-): QueuedTurnIdleInput => ({
-  archivedAt: shell.archivedAt,
-  sessionStatus: shell.session?.status ?? null,
-  latestTurnState: shell.latestTurn?.state ?? null,
-  latestTurnRequestedAt: shell.latestTurn?.requestedAt ?? null,
-  latestUserMessageAt: shell.latestUserMessageAt,
-  hasPendingApprovals: shell.hasPendingApprovals,
-  hasPendingUserInput: shell.hasPendingUserInput,
-  backgroundLiveness: shell.backgroundLiveness ?? null,
-  nowMs,
-});
 
 /**
  * Upgrade pre-batching rows in memory. A legacy frozen command's text is exactly one rendered
@@ -179,6 +168,22 @@ export function normalizeLegacyCompletionReturn(
   return next;
 }
 
+/** Per-pass memo of the Stop checks: delegating messages, and which requests are capped. */
+interface StopCache {
+  readonly messages: Map<TurnId, MessageId | null>;
+  readonly capped: Map<AgentControlProposalId, boolean>;
+}
+const stopCache = (): StopCache => ({ messages: new Map(), capped: new Map() });
+const isCappedRequest = (proposal: Option.Option<AgentControlProposal>) =>
+  Option.isSome(proposal) &&
+  proposal.value.plan.kind === "createThreads" &&
+  proposal.value.plan.maxConcurrent !== undefined;
+/**
+ * A remembered Stop check left this long unused belongs to a row that stopped waiting elsewhere
+ * (`ryco_task_cancel`): a waiting row is checked every scan, at least once a minute.
+ */
+const STOP_CHECK_FORGET_MS = 10 * 60 * 1000;
+
 interface ScanContext {
   readonly now: string;
   readonly nowMs: number;
@@ -197,19 +202,42 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
   const config = yield* Effect.serviceOption(ServerConfig);
   const policy = yield* AgentControlPolicy;
   const providers = yield* ProviderService;
+  // Idle, usage limit, revert and the cold-start budget: shared with every other server wake.
+  const fence = yield* ServerWakeFence;
   const lock = yield* Semaphore.make(1);
   // All mutated only under `lock`.
-  const pendingStartSeen = new Map<ThreadId, { messageId: string; firstSeenMs: number }>();
-  const coldInFlight = new Map<ThreadId, { messageId: MessageId; sinceMs: number }>();
   /** Child → its own unbound delegation wake, first seen by this process (nested hold). */
   const ownWakeSeen = new Map<ThreadId, { messageId: MessageId; firstSeenMs: number }>();
   /**
    * Wake message ids this process applied → scan time of the apply. The reactor only acts on
    * live events, so this process's reactor owns those starts; a wake an earlier process
-   * applied and never started died with it. Pruned after CAPTURE_EXPIRY_MS: no waiting row
-   * is older than that, and a row only looks at wakes delivered after it was created.
+   * applied and never started died with it. Pruned after WAITING_EXPIRY_MS plus a day: no
+   * waiting row is older than that, and a row only looks at wakes delivered after it was created.
    */
   const wakesAppliedHere = new Map<MessageId, number>();
+  /**
+   * Waiting rows of unstarted tasks → the parent event sequence their Stop check read through, so
+   * the next check reads only newer events, and when. Lost on restart (the next check reads it
+   * all once). Dropped when the row's next status is not `waiting`, and after
+   * `STOP_CHECK_FORGET_MS` without a check (a row `ryco_task_cancel` ended).
+   */
+  const waitingStopCheckedThrough = new Map<
+    ThreadId,
+    { readonly sequence: number; readonly checkedMs: number }
+  >();
+  /**
+   * Child → when this process first saw its initial turn waiting on the person (an approval or a
+   * question). Lost on restart, so a wait is timed again from the next scan; the notice itself is
+   * recorded on the row and never sent twice.
+   */
+  const waitingOnYouSince = new Map<
+    ThreadId,
+    { readonly sinceMs: number; readonly checkedMs: number }
+  >();
+  /** Stall notices' texts and commands, loaded with the first notice this node sends. */
+  const stallMessages = yield* Effect.cached(
+    Effect.promise(() => import("../completionReturnStallMessages.ts")),
+  );
 
   const publish = (proposalIds: Iterable<AgentControlProposalId>) =>
     Effect.forEach(
@@ -236,6 +264,10 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
   ) =>
     Effect.gen(function* () {
       const next = patch(record, fields, now);
+      if (next.status !== "waiting") {
+        waitingStopCheckedThrough.delete(next.childThreadId);
+        waitingOnYouSince.delete(next.childThreadId);
+      }
       if (!(yield* repository.save(record, next))) return false;
       if (visibleChange(record, next)) yield* publish([next.proposalId]);
       return true;
@@ -365,31 +397,29 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
       Effect.map(Option.isSome),
       Effect.catch(() => Effect.succeed(true)),
     );
-  /** §3.4: a wake is cold when the parent has no live session; a failed read counts as cold. */
-  const parentCold = (threadId: ThreadId) =>
-    providers.getSession(threadId).pipe(
-      Effect.map(Option.isNone),
-      Effect.catch(() => Effect.succeed(true)),
-    );
-  const coldBudgetFull = () => coldInFlight.size >= MAX_COLD_WAKES_IN_FLIGHT;
   const inScope = (record: CompletionReturnRecord, parent: OrchestrationThreadShell) =>
-    // An unattended, untrusted-content-triggered turn never runs with more privilege or in a
-    // different checkout than the delegation had. Lowering privilege is fine.
-    agentControlRuntimeRank[parent.runtimeMode] <=
-      agentControlRuntimeRank[record.parentRuntimeMode] &&
-    parent.worktreePath === record.parentWorktreePath;
+    serverWakeInScope(
+      { runtimeMode: record.parentRuntimeMode, worktreePath: record.parentWorktreePath },
+      parent,
+    );
 
   /** The delegating message of a row's parent turn, cached per delivery pass. */
-  const delegatingMessage = (
-    cache: Map<TurnId, MessageId | null>,
-    record: CompletionReturnRecord,
-  ) =>
+  const delegatingMessage = (cache: StopCache, record: CompletionReturnRecord) =>
     Effect.gen(function* () {
-      const known = cache.get(record.parentTurnId);
+      const known = cache.messages.get(record.parentTurnId);
       if (known !== undefined) return known;
       const messageId = yield* repository.turnMessageId(record.parentThreadId, record.parentTurnId);
-      cache.set(record.parentTurnId, messageId);
+      cache.messages.set(record.parentTurnId, messageId);
       return messageId;
+    });
+  /** Whether a row's request is capped (`maxConcurrent`), cached per delivery pass. */
+  const cappedRequest = (cache: StopCache, proposalId: AgentControlProposalId) =>
+    Effect.gen(function* () {
+      const known = cache.capped.get(proposalId);
+      if (known !== undefined) return known;
+      const capped = isCappedRequest(yield* proposals.getById({ proposalId }));
+      cache.capped.set(proposalId, capped);
+      return capped;
     });
   /**
    * Fill `sinceSequence` lazily with the delegating turn's own start, so a Stop pressed before
@@ -397,10 +427,7 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
    * only wakes after the row's creation can be cohort turns, so the child's first event bounds
    * the scan just as well. Persisted with the row's next save.
    */
-  const withStopBound = <R extends CompletionReturnRecord>(
-    record: R,
-    cache: Map<TurnId, MessageId | null>,
-  ) =>
+  const withStopBound = <R extends CompletionReturnRecord>(record: R, cache: StopCache) =>
     Effect.gen(function* () {
       if (record.sinceSequence !== undefined && record.sinceSequence !== null) return record;
       const delegating = yield* delegatingMessage(cache, record);
@@ -412,67 +439,50 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         start ?? (yield* repository.firstEventSequence(record.childThreadId)) ?? 0;
       return { ...record, sinceSequence };
     });
-  /** §3.1 user stop, decided per row in SQL (no shared limit can hide a matching stop). */
-  const userStoppedRows = (
-    parentThreadId: ThreadId,
-    rows: ReadonlyArray<CompletionReturnRecord>,
-    cache: Map<TurnId, MessageId | null>,
-  ) =>
+  /**
+   * §3.1 user stop of one row after `afterSequence`, decided in SQL (no shared limit can hide a
+   * matching stop). A capped request's waiting tasks start after a Stop pressed before its
+   * approval, so for its rows only later Stops count (`userStoppedAfterApproval`), whether the
+   * task still waits for its slot or its result is due.
+   */
+  const userStopped = (row: CompletionReturnRecord, afterSequence: number, cache: StopCache) =>
+    Effect.gen(function* () {
+      if (yield* cappedRequest(cache, row.proposalId))
+        return yield* repository.userStoppedAfterApproval(row, afterSequence);
+      return yield* repository.cohortUserStop({
+        threadId: row.parentThreadId,
+        sinceSequence: afterSequence,
+        delegatingMessageId: yield* delegatingMessage(cache, row),
+        wakesSince: row.createdAt,
+      });
+    });
+  const userStoppedRows = (rows: ReadonlyArray<CompletionReturnRecord>, cache: StopCache) =>
     Effect.gen(function* () {
       const stopped = new Set<ThreadId>();
-      for (const row of rows) {
-        const delegatingMessageId = yield* delegatingMessage(cache, row);
-        if (
-          yield* repository.cohortUserStop({
-            threadId: parentThreadId,
-            sinceSequence: row.sinceSequence ?? 0,
-            delegatingMessageId,
-            wakesSince: row.createdAt,
-          })
-        )
-          stopped.add(row.childThreadId);
-      }
+      for (const row of rows)
+        if (yield* userStopped(row, row.sinceSequence ?? 0, cache)) stopped.add(row.childThreadId);
       return stopped;
     });
 
   /**
-   * §3.1 parent idle: the shared queued-turn predicate plus no observed pending start. A
-   * pending start blocks for at most QUEUED_TURN_START_GRACE_MS of this process's scan time,
-   * so stale rows left by a restart stop blocking and client clock skew cannot open it early.
-   */
-  const parentIdle = (parent: OrchestrationThreadShell, nowMs: number) =>
-    Effect.gen(function* () {
-      const pending = yield* repository.pendingTurnStart(parent.id);
-      let pendingBlocks = false;
-      if (pending && !pending.startFailed) {
-        const seen = pendingStartSeen.get(parent.id);
-        let firstSeenMs = nowMs;
-        if (seen?.messageId === pending.messageId) firstSeenMs = seen.firstSeenMs;
-        else pendingStartSeen.set(parent.id, { messageId: pending.messageId, firstSeenMs });
-        pendingBlocks = nowMs - firstSeenMs < QUEUED_TURN_START_GRACE_MS;
-      } else {
-        pendingStartSeen.delete(parent.id);
-      }
-      if (pendingBlocks) return false;
-      return queuedTurnIdleBlocker(queuedTurnIdleInputFromShell(parent, nowMs)) === null;
-    });
-
-  /**
-   * Why the parent cannot take a wake now, or null. Every reason is a wait (save and retry),
-   * never a cancel and never a delivery attempt: the decider would reject the wake for the
-   * same reason, and the reason ends on its own.
+   * Why the parent cannot take a wake now, or null (`ServerWakeFence.holdReason`). Every
+   * reason is a wait (save and retry), never a cancel and never a delivery attempt: the
+   * decider would reject the wake for the same reason, and the reason ends on its own.
    * - A usage limit (usage-limits §5.2): an accepted turn start clears the limit, which only
    *   the user's resume or the auto-resume after the reset may do. The decider fences it too.
-   * - Busy: the shared queued-turn idle predicate.
+   * - Busy: the shared queued-turn idle predicate plus a pending start this process saw less
+   *   than QUEUED_TURN_START_GRACE_MS ago (§3.1 parent idle).
    * A pending checkpoint revert is the third such wait, checked by `parentReverting` last,
    * right before a claim, because it reads the journal.
    */
   const parentHoldDetail = (parent: OrchestrationThreadShell, ctx: ScanContext) =>
-    Effect.gen(function* () {
-      if (applicableUsageLimit(parent) !== null) return DETAIL.usageLimited;
-      if (!(yield* parentIdle(parent, ctx.nowMs))) return DETAIL.busy;
-      return null;
-    });
+    fence
+      .holdReason(parent, ctx.nowMs)
+      .pipe(
+        Effect.map((hold) =>
+          hold === "usage-limited" ? DETAIL.usageLimited : hold === "busy" ? DETAIL.busy : null,
+        ),
+      );
 
   /**
    * usage-limits §5.2: the newest known reset of a limit holding the parent, remembered on the
@@ -493,11 +503,28 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
    * pending rule: the decider rejects every turn start until the revert ends.
    */
   const parentReverting = (parentThreadId: ThreadId, ctx: ScanContext) =>
-    Effect.gen(function* () {
-      if (!projections.getLatestCheckpointRevert) return false;
-      const latest = yield* projections.getLatestCheckpointRevert(parentThreadId);
-      return latest !== null && isCheckpointRevertEntryPending(latest, ctx.nowMs);
-    });
+    fence.reverting(parentThreadId, ctx.nowMs);
+
+  /**
+   * §3.4: takes the cold slot of a wake that will start its parent's session, and hands it to
+   * `onTaken` in the same uninterruptible step, so the caller's finalizer gives back every
+   * slot it took. False when the shared budget is full.
+   */
+  const reserveColdSlot = (
+    parentThreadId: ThreadId,
+    messageId: MessageId,
+    ctx: ScanContext,
+    onTaken: () => void,
+  ) =>
+    Effect.uninterruptible(
+      fence.reserveColdSlot(parentThreadId, messageId, ctx.nowMs).pipe(
+        Effect.tap((taken) =>
+          Effect.sync(() => {
+            if (taken) onTaken();
+          }),
+        ),
+      ),
+    );
 
   /**
    * rollback-correctness §6.3: a revert that dropped the delegating turn rolled the request
@@ -571,8 +598,10 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
       readonly applied: boolean;
       readonly trigger?: CompletionReturnRecord;
     },
-  ) =>
-    Effect.gen(function* () {
+  ) => {
+    // The cold slot a replay of this call reserved; given back unless its wake was accepted.
+    let reserved: { readonly threadId: ThreadId; readonly messageId: MessageId } | null = null;
+    return Effect.gen(function* () {
       const now = ctx.now;
       let replay = options.replay;
       let applied = options.applied;
@@ -613,10 +642,11 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
             // The cold slot's grace runs from the apply that started the wake: a replay or
             // a late settle must not inherit the original claim time.
             if (saved && batch.cold)
-              coldInFlight.set(rows[0]!.parentThreadId, {
-                messageId: batch.messageId,
-                sinceMs: applied ? ctx.nowMs : Date.parse(batch.dispatchedAt),
-              });
+              yield* fence.noteColdWake(
+                rows[0]!.parentThreadId,
+                batch.messageId,
+                applied ? ctx.nowMs : Date.parse(batch.dispatchedAt),
+              );
             return;
           }
           // Every member moves past the batch attempt, so any later batch with this anchor has
@@ -703,10 +733,10 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         // A replay re-joins the wake, so it passes the same user-stop and scope checks as a
         // new batch. The frozen command was never applied (no receipt), so releasing the
         // rows to `ready` cannot duplicate it: user-stopped rows end, the rest re-batch.
-        const cache = new Map<TurnId, MessageId | null>();
+        const cache = stopCache();
         const bounded: CompletionReturnRecord[] = [];
         for (const row of rows) bounded.push(yield* withStopBound(row, cache));
-        const stopped = yield* userStoppedRows(parent.value.id, bounded, cache);
+        const stopped = yield* userStoppedRows(bounded, cache);
         if (stopped.size > 0 || bounded.some((row) => !inScope(row, parent.value))) {
           yield* saveAll(
             bounded.map(
@@ -730,10 +760,20 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
           return;
         }
         // §3.4: a replay that cold-starts the parent counts against the same budget.
-        const cold = yield* parentCold(parent.value.id);
-        if (cold && coldBudgetFull()) return yield* holdAll(bounded, now, DETAIL.cold);
+        const { cold, budgetFull } = yield* fence.coldStart(parent.value.id, ctx.nowMs);
+        if (cold && budgetFull) return yield* holdAll(bounded, now, DETAIL.cold);
         if (yield* parentReverting(parent.value.id, ctx))
           return yield* releaseToReady(bounded, DETAIL.reverting);
+        // Taken before the apply: another server wake may take the last slot meanwhile.
+        const parentId = parent.value.id;
+        const messageId = frozen.message.messageId;
+        if (
+          cold &&
+          !(yield* reserveColdSlot(parentId, messageId, ctx, () => {
+            reserved = { threadId: parentId, messageId };
+          }))
+        )
+          return yield* holdAll(bounded, now, DETAIL.cold);
         const replayed: CompletionReturnBatch = { ...batch, replays: batch.replays + 1, cold };
         if (
           !(yield* saveAll(
@@ -747,7 +787,16 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         applied = true;
         trigger = undefined;
       }
-    });
+    }).pipe(
+      Effect.ensuring(
+        Effect.suspend(() =>
+          reserved === null
+            ? Effect.void
+            : fence.releaseColdSlot(reserved.threadId, reserved.messageId),
+        ),
+      ),
+    );
+  };
 
   // ── capture ────────────────────────────────────────────────────────────
   const integrityMatches = (proposal: AgentControlProposal, record: CompletionReturnRecord) => {
@@ -791,9 +840,170 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         if (sessionEnded || initialState === "interrupted" || initialState === "error")
           return yield* notice(record, "stopped", ctx);
       }
-      // Never infer completion from a message/checkpoint; wait for ingestion's ack.
-      return yield* hold(record, ctx.now);
+      // Never infer completion from a message/checkpoint; wait for ingestion's ack. A task that
+      // stalls meanwhile tells its delegating chat once (`watchStall`).
+      return yield* watchStall(record, yield* currentStall(record, child, initial, ctx), ctx);
     });
+
+  /**
+   * Why a task's initial run needs attention now, or null (Synara's worker health, adapted):
+   * its first message went out and no turn took it, its turn waits on the person, or its
+   * provider went quiet on it. Ryco never nudges, re-sends, interrupts or answers for it.
+   */
+  const currentStall = (
+    record: CompletionReturnRecord,
+    child: OrchestrationThreadShell,
+    initial: TurnId | null,
+    ctx: ScanContext,
+  ) =>
+    Effect.gen(function* () {
+      const stall = (kind: CompletionReturnStallKind, sinceMs: number) => ({
+        kind,
+        since: new Date(sinceMs).toISOString(),
+        forMs: ctx.nowMs - sinceMs,
+      });
+      if (initial === null) {
+        waitingOnYouSince.delete(child.id);
+        const sentMs = record.startedAt ? Date.parse(record.startedAt) : Number.NaN;
+        return Number.isFinite(sentMs) && ctx.nowMs - sentMs >= STALL_NEVER_STARTED_MS
+          ? stall("never-started", sentMs)
+          : null;
+      }
+      if (child.session?.activeTurnId !== initial) {
+        waitingOnYouSince.delete(child.id);
+        return null;
+      }
+      if (child.hasPendingApprovals || child.hasPendingUserInput) {
+        const sinceMs = waitingOnYouSince.get(child.id)?.sinceMs ?? ctx.nowMs;
+        waitingOnYouSince.set(child.id, { sinceMs, checkedMs: ctx.nowMs });
+        return ctx.nowMs - sinceMs >= STALL_WAITING_ON_YOU_MS
+          ? stall("waiting-on-you", sinceMs)
+          : null;
+      }
+      waitingOnYouSince.delete(child.id);
+      const quietSince = yield* repository.silentTurnSince(child.id, initial);
+      const quietMs = quietSince === null ? Number.NaN : Date.parse(quietSince);
+      return Number.isFinite(quietMs) ? stall("silent", quietMs) : null;
+    });
+
+  /**
+   * Records a stall episode on the row (at most `MAX_STALL_NOTICES` per task, one per episode),
+   * offers its notice to the delegating chat, and clears the episode once the task moves again.
+   * The row stays `waiting` throughout: a notice is never the task's result.
+   */
+  const watchStall = (
+    record: CompletionReturnRecord,
+    stall: {
+      readonly kind: CompletionReturnStallKind;
+      readonly since: string;
+      readonly forMs: number;
+    } | null,
+    ctx: ScanContext,
+  ) =>
+    Effect.gen(function* () {
+      const previous: CompletionReturnStallNotice = record.stallNotice ?? {
+        count: 0,
+        current: null,
+      };
+      let next = previous;
+      if (stall === null) {
+        if (previous.current !== null) next = { ...previous, current: null };
+      } else if (previous.current?.kind !== stall.kind) {
+        next =
+          previous.count >= MAX_STALL_NOTICES
+            ? { ...previous, current: { kind: stall.kind, since: stall.since, state: "dropped" } }
+            : {
+                count: previous.count + 1,
+                current: { kind: stall.kind, since: stall.since, state: "pending" },
+              };
+      }
+      if (stall !== null && next.current?.state === "pending") {
+        const outcome = yield* sendStallNotice(record, next.count, stall, ctx);
+        if (outcome !== "held") next = { ...next, current: { ...next.current, state: outcome } };
+      }
+      return yield* next === previous
+        ? hold(record, ctx.now)
+        : save(record, { stallNotice: next }, ctx.now).pipe(Effect.asVoid);
+    });
+
+  /**
+   * One stall notice as its own wake, behind the same fence as results: the delegating chat must
+   * be idle, in scope and not reverting, the delegating turn must not have been reverted away,
+   * and its person must not have stopped it. A chat whose session ended takes a cold slot from the
+   * shared budget, as a result does (a delegating chat is usually reaped long before a task has
+   * waited on the person for five minutes). `held` retries on the next scan; `dropped` never
+   * sends. Its ids are fixed per notice, so a retry after a restart or a lost receipt cannot send
+   * it twice.
+   */
+  const sendStallNotice = (
+    record: CompletionReturnRecord,
+    notice: number,
+    stall: { readonly kind: CompletionReturnStallKind; readonly forMs: number },
+    ctx: ScanContext,
+  ) => {
+    let reserved: MessageId | null = null;
+    return Effect.gen(function* () {
+      const parent = yield* readShell(record.parentThreadId);
+      if (Option.isNone(parent)) return "dropped" as const;
+      if (!(yield* policy.isEnabled)) return "held" as const;
+      if (!inScope(record, parent.value)) return "dropped" as const;
+      if ((yield* parentHoldDetail(parent.value, ctx)) !== null) return "held" as const;
+      const { cold, budgetFull } = yield* fence.coldStart(record.parentThreadId, ctx.nowMs);
+      if (cold && budgetFull) return "held" as const;
+      const cache = stopCache();
+      const bounded = yield* withStopBound(record, cache);
+      if (yield* userStopped(bounded, bounded.sinceSequence ?? 0, cache)) return "dropped" as const;
+      if (
+        yield* repository.turnDroppedByRevert({
+          threadId: record.parentThreadId,
+          turnId: record.parentTurnId,
+          sinceSequence: bounded.sinceSequence ?? 0,
+        })
+      )
+        return "dropped" as const;
+      if (yield* parentReverting(record.parentThreadId, ctx)) return "held" as const;
+      const { buildStallNoticeCommand, renderStallNotice } = yield* stallMessages;
+      const command = buildStallNoticeCommand({
+        parent: parent.value,
+        latestUserMessageId: yield* fence.latestUserMessageId(record.parentThreadId),
+        childThreadId: record.childThreadId,
+        notice,
+        section: renderStallNotice(record, stall.kind, stall.forMs),
+        now: ctx.now,
+      });
+      const messageId = command.message.messageId;
+      if (
+        cold &&
+        !(yield* reserveColdSlot(record.parentThreadId, messageId, ctx, () => {
+          reserved = messageId;
+        }))
+      )
+        return "held" as const;
+      wakesAppliedHere.set(messageId, ctx.nowMs);
+      const applied = yield* Effect.exit(commands.apply(command));
+      if (Exit.isSuccess(applied)) {
+        if (cold) yield* fence.noteColdWake(record.parentThreadId, messageId, ctx.nowMs);
+        return "sent" as const;
+      }
+      // A rejection is final; a failure that left no receipt (a storage error) is retried with
+      // the same ids on the next scan.
+      const receipt = yield* receipts
+        .getByCommandId({ commandId: command.commandId })
+        .pipe(Effect.catch(() => Effect.succeed(Option.none())));
+      if (Option.isSome(receipt) && receipt.value.status === "accepted") {
+        if (cold) yield* fence.noteColdWake(record.parentThreadId, messageId, ctx.nowMs);
+        return "sent" as const;
+      }
+      return Option.isSome(receipt) ? ("dropped" as const) : ("held" as const);
+    }).pipe(
+      // An accepted wake's slot was noted; any other outcome gives it back.
+      Effect.ensuring(
+        Effect.suspend(() =>
+          reserved === null ? Effect.void : fence.releaseColdSlot(record.parentThreadId, reserved),
+        ),
+      ),
+    );
+  };
 
   /**
    * The child's own newest delegation wake (delivered after `record` began), when `settled`
@@ -898,20 +1108,46 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
       );
     });
 
-  const advanceWaiting = (record: CompletionReturnRecord, ctx: ScanContext) =>
+  const advanceWaiting = (waiting: CompletionReturnRecord, ctx: ScanContext) =>
     Effect.gen(function* () {
       const now = ctx.now;
-      const cancel = yield* parentCancelDetail(yield* readShell(record.parentThreadId));
-      if (cancel) return yield* finish(record, "cancelled", cancel, now);
-      const proposal = yield* proposals.getById({ proposalId: record.proposalId });
+      const cancel = yield* parentCancelDetail(yield* readShell(waiting.parentThreadId));
+      if (cancel) return yield* finish(waiting, "cancelled", cancel, now);
+      const proposal = yield* proposals.getById({ proposalId: waiting.proposalId });
       // Integrity first: never wake a chat a mismatched row merely claims to belong to.
-      if (Option.isSome(proposal) && !integrityMatches(proposal.value, record))
-        return yield* finish(record, "blocked", DETAIL.integrity, now);
-      if (ctx.nowMs - Date.parse(record.createdAt) > CAPTURE_EXPIRY_MS)
+      if (Option.isSome(proposal) && !integrityMatches(proposal.value, waiting))
+        return yield* finish(waiting, "blocked", DETAIL.integrity, now);
+      // The time limit runs from the task's first message, sent at once or when a capped
+      // request's slot freed; remembered with the row's next save.
+      const startedAt = waiting.startedAt ?? (yield* repository.initialMessageSentAt(waiting));
+      let record =
+        startedAt !== null && waiting.startedAt === undefined ? { ...waiting, startedAt } : waiting;
+      if (waitingReturnExpired({ createdAt: record.createdAt, startedAt, nowMs: ctx.nowMs }))
         return yield* notice(record, "expired", ctx);
       if (Option.isNone(proposal) || FAILED_PROPOSAL_STATUSES.has(proposal.value.status))
         return yield* notice(record, "request-failed", ctx);
       if (proposal.value.status !== "completed") return yield* hold(record, now);
+      // A task still waiting for its slot never starts once the person stopped the delegating
+      // chat after approving the request (`userStopped`, as for its result). Each check reads
+      // only the parent's events since the last one: waiting rows are looked at every few
+      // seconds, a parent's history is long.
+      if (startedAt === null) {
+        const cache = stopCache();
+        cache.capped.set(record.proposalId, isCappedRequest(proposal));
+        record = yield* withStopBound(record, cache);
+        const checked = waitingStopCheckedThrough.get(record.childThreadId);
+        const latest = yield* repository.lastEventSequence(record.parentThreadId);
+        const afterSequence = Math.max(record.sinceSequence ?? 0, checked?.sequence ?? 0);
+        if (yield* userStopped(record, afterSequence, cache))
+          return yield* finish(record, "cancelled", DETAIL.userStoppedBeforeStart, now);
+        if (latest !== null)
+          waitingStopCheckedThrough.set(record.childThreadId, {
+            sequence: latest,
+            checkedMs: ctx.nowMs,
+          });
+      } else {
+        waitingStopCheckedThrough.delete(record.childThreadId);
+      }
       const child = yield* readShell(record.childThreadId);
       if (Option.isNone(child) || child.value.archivedAt !== null)
         return yield* notice(record, "archived", ctx);
@@ -958,8 +1194,10 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
     });
 
   // ── delivery ───────────────────────────────────────────────────────────
-  const deliverParent = (parentThreadId: ThreadId, ctx: ScanContext) =>
-    Effect.gen(function* () {
+  const deliverParent = (parentThreadId: ThreadId, ctx: ScanContext) => {
+    // The cold slot this delivery reserved; given back unless its wake was accepted.
+    let reserved: MessageId | null = null;
+    return Effect.gen(function* () {
       const now = ctx.now;
       const rows = (yield* repository.listReadyForParent(parentThreadId))
         .map(normalizeLegacyCompletionReturn)
@@ -990,18 +1228,18 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
 
       // The user-stop decision is persisted as a terminal status, so later event retention
       // cannot undo it. sinceSequence only bounds the scan and is persisted lazily.
-      const cache = new Map<TurnId, MessageId | null>();
+      const cache = stopCache();
       const bounded: CapturedRecord[] = [];
       for (const row of scoped) bounded.push(yield* withStopBound(row, cache));
-      const stopped = yield* userStoppedRows(parentThreadId, bounded, cache);
+      const stopped = yield* userStoppedRows(bounded, cache);
       for (const row of bounded)
         if (stopped.has(row.childThreadId))
           yield* finish(row, "cancelled", DETAIL.userStopped, now);
       const remaining = bounded.filter((row) => !stopped.has(row.childThreadId));
       if (remaining.length === 0) return;
 
-      const cold = yield* parentCold(parentThreadId);
-      if (cold && coldBudgetFull()) return yield* holdAll(remaining, now, DETAIL.cold);
+      const { cold, budgetFull } = yield* fence.coldStart(parentThreadId, ctx.nowMs);
+      if (cold && budgetFull) return yield* holdAll(remaining, now, DETAIL.cold);
       // Last before the claim: a journal read per wake, never per held scan.
       if (yield* parentReverting(parentThreadId, ctx))
         return yield* holdAll(remaining, now, DETAIL.reverting);
@@ -1013,11 +1251,20 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         .map((row) => row.childThreadId)
         .reduce((min, id) => (compareCodeUnits(id, min) < 0 ? id : min));
       const attempt = Math.max(...members.map((row) => row.deliveryAttempts ?? 0));
+      const wakeMessageId = delegationWakeIds(anchor, attempt).messageId;
+      // Taken before the claim: another server wake may take the last slot meanwhile.
+      if (
+        cold &&
+        !(yield* reserveColdSlot(parentThreadId, wakeMessageId, ctx, () => {
+          reserved = wakeMessageId;
+        }))
+      )
+        return yield* holdAll(kept, now, DETAIL.cold);
       // Copied under the parent's own ids before the claim; a retry links the same copies.
       const returned = yield* copyReturnedArtifacts(parentThreadId, members);
       const command = buildDelegationReturnCommand({
         parent: parent.value,
-        latestUserMessageId: yield* repository.latestUserMessageId(parentThreadId),
+        latestUserMessageId: yield* fence.latestUserMessageId(parentThreadId),
         sections: members.map((row) => row.capture.section),
         anchorChildThreadId: anchor,
         attempt,
@@ -1059,22 +1306,15 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
       wakesAppliedHere.set(command.message.messageId, ctx.nowMs);
       yield* applyWake(command).pipe(Effect.catch(() => Effect.void));
       yield* settleBatch(command.commandId, ctx, { replay: false, applied: true });
-    });
-
-  const releaseColdSlots = (nowMs: number) =>
-    Effect.forEach(
-      [...coldInFlight],
-      ([parentThreadId, entry]) =>
-        Effect.gen(function* () {
-          if (nowMs - entry.sinceMs >= COLD_WAKE_GRACE_MS) {
-            coldInFlight.delete(parentThreadId);
-            return;
-          }
-          const state = yield* repository.wakeStartState(parentThreadId, entry.messageId);
-          if (state === "bound" || state === "failed") coldInFlight.delete(parentThreadId);
-        }),
-      { discard: true },
+    }).pipe(
+      // An accepted wake's slot was noted while settling; any other outcome gives it back.
+      Effect.ensuring(
+        Effect.suspend(() =>
+          reserved === null ? Effect.void : fence.releaseColdSlot(parentThreadId, reserved),
+        ),
+      ),
     );
+  };
 
   const scan = (now = new Date().toISOString()) =>
     lock.withPermit(
@@ -1085,9 +1325,17 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
           settledCommands: new Set(),
           candidates: new Map(),
         };
-        yield* releaseColdSlots(ctx.nowMs);
+        yield* fence.releaseColdSlots(ctx.nowMs);
         for (const [messageId, appliedMs] of wakesAppliedHere)
-          if (ctx.nowMs - appliedMs > CAPTURE_EXPIRY_MS) wakesAppliedHere.delete(messageId);
+          if (ctx.nowMs - appliedMs > WAITING_EXPIRY_MS + CAPTURE_EXPIRY_MS)
+            wakesAppliedHere.delete(messageId);
+        for (const [childThreadId, checked] of waitingStopCheckedThrough)
+          if (ctx.nowMs - checked.checkedMs > STOP_CHECK_FORGET_MS)
+            waitingStopCheckedThrough.delete(childThreadId);
+        // A row that ended elsewhere (`ryco_task_cancel`) while its task waited on the person.
+        for (const [childThreadId, waiting] of waitingOnYouSince)
+          if (ctx.nowMs - waiting.checkedMs > STOP_CHECK_FORGET_MS)
+            waitingOnYouSince.delete(childThreadId);
         for (const record of yield* repository.listDue(now)) {
           yield* processDue(record, ctx).pipe(
             Effect.catch(() =>
@@ -1117,7 +1365,11 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         }
       }),
     );
-  return { scan };
+  return {
+    scan,
+    /** For tests: the unstarted rows whose Stop check is remembered. */
+    stopChecksRemembered: () => waitingStopCheckedThrough.size,
+  };
 });
 /** The shortest pause between scans, and the scan cadence while a pending row is held. */
 const SCAN_MIN_DELAY_MS = 2_000;

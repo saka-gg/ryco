@@ -1,5 +1,5 @@
 import { lstatSync, type Stats } from "node:fs";
-import { lstat, readdir, readFile, stat as statAsync } from "node:fs/promises";
+import { lstat, readFile, stat as statAsync } from "node:fs/promises";
 import path from "node:path";
 
 import { Data, Duration, Effect, Exit } from "effect";
@@ -8,11 +8,19 @@ import type {
   OrchestrationThreadShell,
   OrchestrationWorktreeShell,
   ProjectId,
+  PullRequestState,
   WorktreeId,
 } from "@ryco/contracts";
-import { parseWorktreeStatus, type ParsedWorktreeStatus } from "@ryco/shared/workspaceLifecycle";
+import { parseWorktreeStatus } from "@ryco/shared/workspaceLifecycle";
 
+import type {
+  CheckoutMergeProof,
+  CheckoutMergeProverShape,
+  MergeProofReads,
+  RemoteDefaultBranches,
+} from "../sourceControl/checkoutMergeProof.ts";
 import type { GitVcsDriverShape } from "../vcs/GitVcsDriver.ts";
+import { type CheckoutStatus, withoutEmptyIgnoredDirectories } from "./checkoutStatus.ts";
 import type { WorkspaceAccessPolicyShape } from "./Services/WorkspaceAccessPolicy.ts";
 
 /** A checkout could not be inspected safely. The detail is user-facing. */
@@ -32,24 +40,40 @@ export const samePath = (a: string, b: string) => normalized(a) === normalized(b
 export const containsPath = (a: string, b: string) =>
   samePath(a, b) || normalized(b).startsWith(normalized(a) + path.sep);
 
-export interface CheckoutStatus extends ParsedWorktreeStatus {
-  /** Output exceeded its bound: treated as blocking, never as clean. */
-  readonly truncated: boolean;
-}
-
 export interface CheckoutFacts {
   readonly rootIdentity: string;
   readonly checkoutIdentity: string | null;
   readonly checkout: "present" | "missing";
   readonly gitRegistered: boolean;
+  /**
+   * Why recreating the missing checkout may not replace the registration Git keeps for it (the
+   * driver's rule, `staleRegistrationRefusal`); null when there is none to replace or it may.
+   */
+  readonly registrationRefusal: string | null;
   readonly repository: string;
   readonly repositoryIdentity: string;
   readonly baseHead: string;
   readonly branchHead: string | null;
   readonly head: string | null;
   readonly status: CheckoutStatus | null;
+  /** Git's answer: the branch has commits `baseHead` does not contain. */
   readonly unmerged: boolean | null;
+  /**
+   * What proves those commits merged anyway (the remote default branch contains them, or the
+   * workspace's pull request merged at exactly this commit); null when `unmerged` is not true or
+   * nothing does.
+   */
+  readonly mergedBy: CheckoutMergeProof | null;
 }
+
+/**
+ * Whether the branch holds commits that exist nowhere else: Git's answer against the project
+ * HEAD (`unmerged`), unless a merge proof covers them (`mergedBy`). Every lifecycle rule
+ * (removal, branch deletion, the Delete review and its description, Agent Control) uses it.
+ */
+export const effectiveUnmerged = (
+  facts: Pick<CheckoutFacts, "unmerged" | "mergedBy"> | null | undefined,
+): boolean | null => (facts?.mergedBy ? false : (facts?.unmerged ?? null));
 
 /**
  * Git facts about a project's repository that every checkout's inspection
@@ -70,70 +94,12 @@ export interface ProjectGitFacts {
    * (see `withUnmergedBranches`); absent when each inspection counts its own branch.
    */
   readonly unmergedBranches?: ReadonlySet<string> | undefined;
+  /**
+   * The remote default branch and the local branches it does not contain, read with
+   * `unmergedBranches` when some branch is unmerged; absent means each proof reads it.
+   */
+  readonly remoteDefault?: RemoteDefaultBranches | null | undefined;
 }
-
-/** Bound on directory entries visited while deciding ignored directories are empty. */
-const IGNORED_DIRECTORY_SCAN_LIMIT = 4_096;
-
-/**
- * Whether `directory` holds anything but (nested) empty directories. Files,
- * symlinks and unreadable directories count as content; null when the bound
- * runs out first (callers keep the entry protected).
- */
-async function directoryHoldsContent(
-  directory: string,
-  budget: { remaining: number },
-): Promise<boolean | null> {
-  const pending = [directory];
-  while (pending.length > 0) {
-    const current = pending.pop()!;
-    let entries;
-    try {
-      entries = await readdir(current, { withFileTypes: true });
-    } catch {
-      return true;
-    }
-    for (const entry of entries) {
-      budget.remaining -= 1;
-      if (budget.remaining < 0) return null;
-      if (!entry.isDirectory()) return true;
-      pending.push(path.join(current, entry.name));
-    }
-  }
-  return false;
-}
-
-/**
- * `--ignored=matching` lists an ignored directory even when it holds only
- * empty directories, which traditional mode never reported: nothing there can
- * be lost, so such entries are not protected content.
- */
-export const dropEmptyIgnoredDirectories = (
-  checkout: string,
-  status: ParsedWorktreeStatus,
-): Effect.Effect<ParsedWorktreeStatus> =>
-  Effect.promise(async () => {
-    if (!status.protectedIgnored.some((entry) => entry.endsWith("/"))) return status;
-    const budget = { remaining: IGNORED_DIRECTORY_SCAN_LIMIT };
-    const protectedIgnored: string[] = [];
-    for (const entry of status.protectedIgnored) {
-      if (
-        entry.endsWith("/") &&
-        (await directoryHoldsContent(path.join(checkout, entry), budget)) === false
-      ) {
-        continue;
-      }
-      protectedIgnored.push(entry);
-    }
-    return { ...status, protectedIgnored };
-  });
-
-/** Anything Git would refuse to discard, or ignored content that is not a known cache. */
-export const checkoutHasBlockingChanges = (status: CheckoutStatus): boolean =>
-  status.truncated ||
-  status.modified > 0 ||
-  status.untracked > 0 ||
-  status.protectedIgnored.length > 0;
 
 /**
  * Reuses a checkout's Git reads across listings. Each read has one slot
@@ -278,6 +244,8 @@ export const checkoutReadFingerprint = (
 type InspectionDeps = {
   readonly policy: WorkspaceAccessPolicyShape;
   readonly git: GitVcsDriverShape;
+  /** Proves unmerged branches merged by other means; absent: only the project HEAD counts. */
+  readonly mergeProof?: CheckoutMergeProverShape | undefined;
 };
 
 const lstatFor = (candidate: string, detail: string) =>
@@ -397,6 +365,11 @@ export const inspectProjectGitFacts = (
             ),
         )
       : undefined;
+    // Branches the project HEAD lacks may still be in the remote default branch: one pass too.
+    const remoteDefault =
+      unmergedBranches && unmergedBranches.size > 0 && deps.mergeProof
+        ? yield* deps.mergeProof.remoteDefaultBranches(root)
+        : undefined;
     return {
       projectId: project.id,
       rootIdentity: `${rootStat.dev}:${rootStat.ino}`,
@@ -406,6 +379,7 @@ export const inspectProjectGitFacts = (
       worktreeEntries: listing.split("\0\0").map((entry) => entry.split("\0")),
       branchHeads,
       ...(unmergedBranches ? { unmergedBranches } : {}),
+      ...(remoteDefault !== undefined ? { remoteDefault } : {}),
     } satisfies ProjectGitFacts;
   });
 
@@ -437,6 +411,13 @@ export const inspectCheckout = (
     readonly projectFacts?: ProjectGitFacts | undefined;
     /** Read-only listings reuse recent Git reads; absent means every read runs. */
     readonly caches?: CheckoutInspectionCaches | undefined;
+    /** The workspace's current pull request link, for a merge proof of an unmerged branch. */
+    readonly pullRequest?:
+      | { readonly number: number; readonly state: PullRequestState | null }
+      | null
+      | undefined;
+    /** Forge reads the merge proof may spend (a listing shares one); absent: none. */
+    readonly mergeProofReads?: MergeProofReads | null | undefined;
   },
 ): Effect.Effect<CheckoutFacts, CheckoutInspectionError> =>
   Effect.gen(function* () {
@@ -502,6 +483,13 @@ export const inspectCheckout = (
     const registered = checkoutEntry !== undefined;
     if (checkoutEntry?.some((f) => f.startsWith("locked")))
       return yield* fail("The worktree is locked in Git.");
+    // Loaded only for a missing checkout Git still registers, as the driver loads it.
+    const registrationRefusal =
+      !stat && checkoutEntry
+        ? (yield* Effect.promise(
+            () => import("../vcs/worktreeRegistrationReplacement.ts"),
+          )).staleRegistrationRefusal(checkoutEntry, directory)
+        : null;
     const branchHead =
       input.branch === null ? null : (projectFacts.branchHeads.get(input.branch) ?? null);
     const fingerprint =
@@ -552,7 +540,9 @@ export const inspectCheckout = (
                     new CheckoutInspectionError({ detail: `Git status failed: ${cause.message}` }),
                 ),
                 Effect.flatMap((result) =>
-                  dropEmptyIgnoredDirectories(directory, parseWorktreeStatus(result.stdout)).pipe(
+                  Effect.promise(() =>
+                    withoutEmptyIgnoredDirectories(directory, parseWorktreeStatus(result.stdout)),
+                  ).pipe(
                     Effect.map((parsed): CheckoutStatus =>
                       Object.assign(parsed, {
                         truncated: result.stdoutTruncated || result.stderrTruncated,
@@ -602,11 +592,24 @@ export const inspectCheckout = (
       )
     )
       return yield* fail("Branch is checked out in another workspace.");
+    // Last, so an inspection that fails never asks the forge.
+    const mergedBy =
+      unmerged === true && branchHead !== null && deps.mergeProof
+        ? yield* deps.mergeProof.prove({
+            projectRoot: project.workspaceRoot,
+            head: branchHead,
+            branch: input.branch,
+            pullRequest: input.pullRequest ?? null,
+            reads: input.mergeProofReads ?? null,
+            remoteDefault: projectFacts.remoteDefault,
+          })
+        : null;
     return {
       rootIdentity: projectFacts.rootIdentity,
       checkoutIdentity: stat ? `${stat.dev}:${stat.ino}` : null,
       checkout: stat ? ("present" as const) : ("missing" as const),
       gitRegistered: registered,
+      registrationRefusal,
       repository,
       repositoryIdentity: projectFacts.repositoryIdentity,
       baseHead,
@@ -614,5 +617,6 @@ export const inspectCheckout = (
       head,
       status,
       unmerged,
+      mergedBy,
     };
   });

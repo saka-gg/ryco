@@ -11,6 +11,7 @@ import {
   resolveInboxStateLine,
 } from "./inboxRowPresentation";
 import type { InboxSidebarRow } from "./inboxSidebarModel";
+import { DraftId } from "../../composerDraftStore";
 
 type Row = Pick<InboxSidebarRow, "state" | "attention" | "errorDetail" | "statusLabel">;
 const row = (overrides: Partial<Row>): Row => ({
@@ -32,6 +33,25 @@ describe("resolveInboxGlyph", () => {
     expect(resolveInboxGlyph(row({ state: "offline" }), true)).toBe("offline");
     expect(resolveInboxGlyph(row({ state: "idle" }), false)).toBe("idle");
     expect(resolveInboxGlyph(row({ state: "idle" }), true)).toBe("completed");
+  });
+});
+
+describe("draft rows", () => {
+  const draftRow = {
+    ...row({ statusLabel: "Draft" }),
+    draftId: DraftId.make("draft-1"),
+    runningSince: null,
+    latestTurnCompletedAt: null,
+    settled: false,
+    snoozedUntil: null,
+  };
+
+  it("mark a draft as a draft whatever else the row says", () => {
+    expect(resolveInboxGlyph(draftRow, true, true)).toBe("draft");
+    expect(inboxGlyphLabel(draftRow, true)).toBe("Draft");
+    expect(inboxGlyphHint(draftRow, false)).toBe("Draft · not sent yet");
+    expect(resolveInboxStateLine(draftRow)).toEqual({ kind: "status", text: "Draft" });
+    expect(inboxTimeHint(draftRow, "2026-08-23T10:00:00.000Z")).toMatch(/^Started /);
   });
 });
 
@@ -216,6 +236,10 @@ describe("row hints", () => {
       inboxGlyphHint({ ...hintRow, latestTurnCompletedAt: "2026-10-02T14:26:00.000Z" }, true),
     ).toBe("Completed 6m ago · not opened yet");
     expect(inboxGlyphHint(hintRow, false)).toBe("Idle · nothing running");
+    const wokeAt = "2026-10-02T14:00:00.000Z";
+    expect(inboxGlyphHint({ ...hintRow, wokeAt }, true, true)).toBe(
+      `Woke from snooze ${formatInboxDayTime(wokeAt)} · not opened yet`,
+    );
     const started = "2026-10-02T14:28:00.000Z";
     expect(
       inboxGlyphHint(
@@ -304,5 +328,23 @@ describe("usage-limited rows", () => {
       latestTurnCompletedAt: null,
     };
     expect(inboxGlyphHint(hintRow, false)).toBe(`Limited · Resets ${resetLabel}`);
+  });
+});
+
+describe("a row that woke from its snooze", () => {
+  it("says Woke instead of Completed or the workspace while idle", () => {
+    expect(resolveInboxGlyph(row({ state: "idle" }), true, true)).toBe("woke");
+    expect(inboxGlyphLabel(row({ state: "idle" }), true, true)).toBe("Woke");
+    expect(resolveInboxStateLine(row({ state: "idle" }), true)).toEqual({
+      kind: "woke",
+      text: "Woke",
+    });
+  });
+
+  it("leaves a request, a failure or running work as they are", () => {
+    for (const state of ["needs-input", "error", "working"] as const) {
+      expect(resolveInboxGlyph(row({ state }), false, true)).not.toBe("woke");
+      expect(resolveInboxStateLine(row({ state }), true).kind).not.toBe("woke");
+    }
   });
 });

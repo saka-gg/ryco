@@ -33,10 +33,77 @@ current native state so delayed notifications cannot undo newer changes.
 
 A Codex version supporting the goal APIs is required for native pursuit. Providers without
 native goal integration show a **Goal reminder**: the objective accompanies subsequent
-messages, with no automatic continuation or goal usage tracking.
+messages, with no goal usage tracking.
+
+On those providers Ryco continues the goal itself when Agent Control is on and the provider gets
+its tools (Claude, Copilot, Cursor). About five seconds after a turn ends cleanly and the chat is
+idle, Ryco starts the next turn toward the goal. A message you queued goes first, and pending
+approvals, questions, plans and usage limits hold it, like delegated results. The agent ends the
+loop by calling `ryco_update_thread` with `goalStatus` `complete` or `blocked`. A Stop, a failed
+turn, or 25 automatic turns in a row pause the goal; resume it from the goal header. After a Ryco
+restart, the goal waits for your next message. Delegated tasks, Plan mode and chats on OpenCode or
+Grok never continue on their own.
 
 See the [Codex goal workflow](https://learn.chatgpt.com/use-cases/follow-goals) and
 [app-server goal API](https://learn.chatgpt.com/docs/app-server#manage-a-thread-goal).
+
+## Sign In From Settings
+
+A Codex instance that is not signed in shows **Account sign-in** in its provider settings. Click
+**Sign in** and Ryco runs Codex's device-code login on the machine the instance runs on, which can
+be this computer or a remote node:
+
+1. Ryco shows a short code and the address of the sign-in page.
+2. Click **Open sign-in page** (or open the address on any device), sign in to ChatGPT, and enter
+   the code. **Copy** puts the code on the clipboard.
+3. The node notices the login finished, checks the instance again, and every connected app shows
+   it as signed in.
+
+The code is valid for 15 minutes. The sign-in runs on the node, so closing Settings, switching to
+the browser on your phone, or losing the connection for a while does not stop it; come back to
+Settings to see how it went. **Cancel** stops it. A sign-in that was running when the node
+restarted has to be started again.
+
+The mobile app has the same sign-in under **Settings › Provider accounts**, which lists each
+connected node's provider instances with their accounts. Tap an instance that is not signed in to
+open its sign-in: **Open sign-in page** opens the page in the phone's browser, and the sheet shows
+the outcome when you come back. Closing the sheet does not stop the sign-in either.
+
+Things to know:
+
+- Only owners of a node can sign its providers in. Shared and read-only connections show why the
+  button is unavailable.
+- The sign-in writes the login of the instance's own Codex home: its shadow home when it has one,
+  otherwise its `CODEX_HOME path`. Two instances that write the same login cannot sign in at the
+  same time.
+- A node on an older Ryco shows "Update Ryco on <node> to sign in from here."
+- An instance that uses a custom model provider instead of a ChatGPT login works without this
+  sign-in, so its settings do not offer it.
+- If the node's Codex is too old for device-code login, or device code is turned off for your
+  account, run `codex login --device-auth` on the node instead.
+
+## Compacting the conversation
+
+Send `/compact` on its own (no other text, no attachments) in a Codex thread, or use **Compact now**
+in the context meter popover, to have Codex summarize older context and free room in its window.
+The mobile app offers it as **Compact conversation** in the thread's Task details sheet, and in a
+project the composer's `/` menu lists `/compact`. Ryco runs it through Codex's own compaction request
+(`thread/compact/start`) instead of sending the text to the model. It runs as a turn: the
+transcript shows it with **Context compacted**, and the meter updates from Codex's next usage
+report. Codex still compacts on its own when the window fills up.
+
+It needs a ready, idle session. While a turn runs or waits on an approval or answer, or while the
+session is stopped, **Compact now** is disabled and says why. The node checks this too: a
+compaction that reaches it while a turn runs or is starting fails with "a turn is running", and a
+message sent while a compaction is starting waits until the compaction's turn has started. If
+Codex refuses the request (an older Codex, for example) or does not start the compaction turn
+within 30 seconds, the turn fails with "Codex did not start compaction" and Ryco does not send it
+again, since Codex may still have taken it: check the thread before compacting again. The summary
+request itself uses tokens.
+
+**Compact now** appears once the thread has reported context usage from a node that runs Codex's
+compaction: an older node sends `/compact` to the model as a prompt, so the action stays hidden on
+Codex threads it serves.
 
 ## I Only Use One Codex Account
 
@@ -50,7 +117,7 @@ CODEX_HOME path: ~/.codex
 Shadow home path: empty
 ```
 
-Log in with Codex normally:
+Sign in from Settings, or log in with Codex normally:
 
 ```bash
 codex login
@@ -172,28 +239,50 @@ should use the shared-home plus shadow-home setup instead.
 
 When Codex emits a native asynchronous question, Ryco displays an **Optional question** card
 on desktop, web, and the native mobile app. The composer remains available. Open the card,
-choose an option or write an answer, then explicitly submit. Closing the web card preserves
-its draft; suggested options are never submitted automatically. **Dismiss** closes the card
-without sending an answer or granting permission.
+choose an option or write an answer, then explicitly submit. Suggested options are never
+submitted automatically. **Dismiss** closes the card without sending an answer or granting
+permission, during the turn or after it.
 
-Cards are available only while their originating turn is live. Completion, interruption,
-superseding turns, or replacement of the provider process invalidate unanswered cards.
-Late answers never start a new turn. A disconnected client cannot submit; reconnect restores
-the persisted question and delivery state. Draft text is local to the mounted form.
+While the question's turn runs, your answer reaches that turn. After the turn ends, the card
+stays: your answer is sent as a new message and starts the next turn, resuming the session if
+it stopped. Once answered, the card leaves every client, and a second answer (from another
+device, or a second press) is refused. While a later turn runs, the card waits: you can answer
+once that turn ends, or dismiss it. Open questions stay available after a reconnect or a node
+restart, however much the agent did since.
+
+An answer sent after the turn can carry files and images, on web and desktop. They use the same
+upload as files attached to a message, and the agent gets them as attached files with their
+saved paths. Send stays disabled while a file is uploading or failed to upload. An answer that
+reaches a running turn cannot carry files, so the card offers files only once the turn ended.
+
+Drafts belong to the question, not to the card: switching threads, collapsing the card or a
+reconnect keeps what you wrote, on web and in the native app. They are kept in memory, so
+reloading the page or quitting the app clears them.
 
 Ryco admits one answer per question generation. Validation failures before dispatch permit
 correction; an unconfirmed delivery remains claimed and is never automatically retried.
-The card explains this state. Starting a new turn does not resend the old answer.
+The card explains this state, and such a question is cleared once a later turn starts. An
+answer that could not reach the turn because it had just ended can be sent again; it then
+starts a new turn.
 
 ### Protocol and capability boundary
 
 Native `request_user_input_async` emits an `agentMessage` item with `delivery: "async"` and
 structured `questions`, then returns immediately. It does not create a pending JSON-RPC
-answer request. Ryco replies as ordinary user input through `turn/steer`, supplying the
-original provider thread and `expectedTurnId`; the reply text identifies the question item.
-The runtime validates these identities again at dispatch. The existing durable question
-ledger owns client claims and settlement; process-local authority is never restored after
-restart. Only `turn/completed` settles the provider turn.
+answer request. While the turn runs, Ryco replies as ordinary user input through
+`turn/steer`, supplying the original provider thread and `expectedTurnId`; the reply text
+identifies the question item. The runtime validates these identities again at dispatch. The
+existing durable question ledger owns client claims and settlement; process-local authority
+is never restored after restart. Only `turn/completed` settles the provider turn.
+
+After the turn, a client sends the same reply text as the message of an ordinary
+`thread.turn.start`, through the shared send engine, with an `optionalAnswer` that names the
+question. The node claims the question in that command's transaction and records it answered
+in the same commit, so the message and the settlement land together or not at all. Turn ends,
+superseding turns, session exits and restarts leave an optional question open unless an answer
+to it may already have reached the agent. A dismissal is settled by the node itself and never
+reaches the provider. Thread windows and the activity cap keep open optional questions however
+much activity follows them.
 
 Support is gated by the explicit native payload, not a model name, version guess, feature
 flag, timeout, or question text. Older versions and other providers retain their blocking

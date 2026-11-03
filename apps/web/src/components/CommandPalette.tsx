@@ -1,7 +1,7 @@
 "use client";
 
 import { WS_METHODS } from "@ryco/contracts";
-import { useNavigate, useParams } from "@tanstack/react-router";
+import { useNavigate, useParams, useRouter } from "@tanstack/react-router";
 
 import { useAppKeybindings } from "../appKeybindings";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -9,7 +9,15 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import { ComposerHandleContext } from "../composerHandleContext";
 import { useHostedRpcCapability } from "../hostedHub/capabilities";
-import { resolveShortcutCommand, shouldIgnoreGlobalNavigationShortcut } from "../keybindings";
+import {
+  hasOpenDialogShortcutTarget,
+  isDialogShortcutTarget,
+  resolveShortcutCommand,
+  shouldIgnoreGlobalNavigationShortcut,
+  shouldIgnoreSplitViewShortcut,
+} from "../keybindings";
+import { isComposerFocused } from "../lib/composerFocus";
+import { stepNavigationHistory } from "../lib/navigationHistory";
 import { getPresentationTier } from "../lib/presentationTier";
 import { preloadableLazy, useLazyComponentReady } from "../lib/preloadableLazy";
 import { isTerminalFocused } from "../lib/terminalFocus";
@@ -30,6 +38,18 @@ const CommandPaletteDialog = preloadableLazy(() =>
  */
 export function preloadCommandPaletteDialog(): Promise<void> {
   return CommandPaletteDialog.preload();
+}
+
+/**
+ * Quick open and find in files follow the global navigation rules, except that
+ * they also open while typing in the chat composer, as thread search does.
+ */
+function shouldIgnoreWorkspaceSearchShortcut(event: globalThis.KeyboardEvent): boolean {
+  const fromComposer =
+    event.target instanceof Element &&
+    event.target.closest('[data-chat-composer-form="true"]') !== null;
+  if (!fromComposer) return shouldIgnoreGlobalNavigationShortcut(event);
+  return isDialogShortcutTarget(event.target) || hasOpenDialogShortcutTarget();
 }
 
 function LazyCommandPaletteDialogMount() {
@@ -60,6 +80,7 @@ export function CommandPalette({ children }: { children: ReactNode }) {
   });
   const routeThreadRef = routeTarget?.kind === "server" ? routeTarget.threadRef : null;
   const navigate = useNavigate();
+  const router = useRouter();
   // `pullRequests.open` and `projects.open` (no default keys) open their pages
   // wherever the user is.
   // hosted-capability: routed node
@@ -81,13 +102,31 @@ export function CommandPalette({ children }: { children: ReactNode }) {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.defaultPrevented) return;
       const commandPaletteOpen = useCommandPaletteStore.getState().open;
-      if (!commandPaletteOpen && shouldIgnoreGlobalNavigationShortcut(event)) return;
+      const ignoreNavigation = !commandPaletteOpen && shouldIgnoreGlobalNavigationShortcut(event);
+      const composerFocus = isComposerFocused();
+      // Back and forward also run while typing in the composer, whose draft
+      // outlives the page. Other text fields would lose theirs, so they keep
+      // the key.
+      if (ignoreNavigation && !composerFocus) return;
       const command = resolveShortcutCommand(event, keybindings, {
         context: {
           terminalFocus: isTerminalFocused(),
           terminalOpen,
+          composerFocus,
         },
       });
+      if (command === "navigation.back" || command === "navigation.forward") {
+        if (commandPaletteOpen || shouldIgnoreSplitViewShortcut(event)) return;
+        if (getPresentationTier() === "phone") return;
+        // Consumed even with nowhere to go, so the browser's own Back never
+        // leaves the app; a held key moves one page only.
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.repeat) return;
+        stepNavigationHistory(router.history, command === "navigation.back" ? "back" : "forward");
+        return;
+      }
+      if (ignoreNavigation) return;
       if (command === "pullRequests.open" || command === "projects.open") {
         const page = command === "projects.open" ? "projects" : "pullRequests";
         if (!pageAllowedRef.current[page] || getPresentationTier() === "phone") return;
@@ -108,7 +147,44 @@ export function CommandPalette({ children }: { children: ReactNode }) {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [keybindings, navigate, setOpen, terminalOpen, toggleOpen]);
+  }, [keybindings, navigate, router, setOpen, terminalOpen, toggleOpen]);
+
+  // Capture phase: the open palette stops its keys from bubbling, and these
+  // keys also switch what it shows.
+  useEffect(() => {
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing) return;
+      const store = useCommandPaletteStore.getState();
+      const command = resolveShortcutCommand(event, keybindings, {
+        context: {
+          terminalFocus: isTerminalFocused(),
+          terminalOpen,
+        },
+      });
+      if (command === "commandPalette.toggle") {
+        // From a workspace search back to the command list; every other
+        // toggle is left to the listener above.
+        if (!store.open || store.workspaceSearchMode === null) return;
+        event.preventDefault();
+        event.stopPropagation();
+        store.toggleOpen();
+        return;
+      }
+      const mode =
+        command === "workspace.quickOpen"
+          ? "files"
+          : command === "workspace.findInFiles"
+            ? "content"
+            : null;
+      if (mode === null || getPresentationTier() === "phone") return;
+      if (!store.open && shouldIgnoreWorkspaceSearchShortcut(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      store.openWorkspaceSearch(mode);
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [keybindings, terminalOpen]);
 
   useEffect(() => {
     return () => {

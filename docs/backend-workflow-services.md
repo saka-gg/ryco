@@ -177,6 +177,13 @@ falls within that interval. Deleted threads/projects are excluded. Completed and
 sections list distinct threads independently, so one thread may occur in both. The limit
 is per section (default 20, maximum 50); `totalThreads` and `truncated` describe omitted rows.
 
+`activity` says where those counted turns went. `agentMs` is their run time inside the
+day: a turn that started before midnight counts from midnight, a turn without a recorded
+start adds none, and chats that ran in parallel add up, so it can exceed the elapsed time.
+Running turns are left out until they finish. `projects` lists up to five real projects
+(never chats) by turns, then agent time. Nodes that predate the field omit it, so clients
+must tell a missing `activity` apart from an idle day.
+
 `needsAttention` represents current outstanding approvals, input, plans, and session
 errors across all dates, excluding archived threads. It is intentionally not a historical
 snapshot of attention on the selected day. This is a deterministic read of Ryco state,

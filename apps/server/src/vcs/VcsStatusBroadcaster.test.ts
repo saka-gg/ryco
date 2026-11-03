@@ -1,6 +1,8 @@
 import { assert, it, describe } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  Cause,
+  Clock,
   Deferred,
   Duration,
   Effect,
@@ -14,11 +16,12 @@ import {
   Stream,
 } from "effect";
 import { TestClock } from "effect/testing";
-import type {
-  VcsStatusLocalResult,
-  VcsStatusRemoteResult,
-  VcsStatusResult,
-  VcsStatusStreamEvent,
+import {
+  SourceControlProviderError,
+  type VcsStatusLocalResult,
+  type VcsStatusRemoteResult,
+  type VcsStatusResult,
+  type VcsStatusStreamEvent,
 } from "@ryco/contracts";
 
 import { type LogOnceEveryDecision, LogOnceEveryLimiter } from "@ryco/shared/logOnceEvery";
@@ -133,6 +136,175 @@ describe("VcsStatusBroadcaster", () => {
       decisions.filter((kind) => kind === "summary").length,
       Math.ceil(nowMs / Duration.toMillis(Duration.hours(1))),
     );
+  });
+
+  it("waits out a forge's rate-limit pause before the next remote refresh", () => {
+    const nowMs = 1_000_000;
+    const rateLimited = (retryAt?: number) =>
+      Cause.fail(
+        new SourceControlProviderError({
+          provider: "github",
+          operation: "listChangeRequests",
+          detail: "GitHub API rate limit exceeded.",
+          reason: "rate-limited",
+          ...(retryAt !== undefined ? { retryAt } : {}),
+        }),
+      );
+    const delayMs = (cause: Cause.Cause<unknown>) =>
+      Duration.toMillis(VcsStatusBroadcaster.remoteRefreshPauseDelay(cause, nowMs));
+    assert.equal(delayMs(rateLimited(nowMs + 120_000)), 120_000);
+    // Capped like the failure backoff; nothing for a past time, none, or another failure.
+    assert.equal(delayMs(rateLimited(nowMs + 3_600_000)), Duration.toMillis(Duration.minutes(15)));
+    assert.equal(delayMs(rateLimited(nowMs - 1)), 0);
+    assert.equal(delayMs(rateLimited()), 0);
+    assert.equal(delayMs(Cause.fail(new Error("offline"))), 0);
+  });
+
+  it.effect("asks a rate-limited forge once per pause while polling", () => {
+    const pauseEnd = 5 * 60_000;
+    const polls: Array<number> = [];
+    const testLayer = VcsStatusBroadcaster.layer.pipe(
+      Layer.provide(
+        Layer.mock(GitWorkflowService.GitWorkflowService)({
+          localStatus: () => Effect.succeed(baseLocalStatus),
+          // The forge answers "rate limited until five minutes from now" until then.
+          remoteStatus: () =>
+            Effect.flatMap(Clock.currentTimeMillis, (now) =>
+              now < pauseEnd
+                ? Effect.fail(
+                    new SourceControlProviderError({
+                      provider: "github",
+                      operation: "listChangeRequests",
+                      detail: "GitHub API rate limit exceeded.",
+                      reason: "rate-limited",
+                      retryAt: pauseEnd,
+                    }),
+                  )
+                : Effect.succeed(baseRemoteStatus),
+            ),
+          refreshRemoteTrackingRefs: () => Effect.succeed(false),
+          invalidateLocalStatus: () => Effect.void,
+          // Only the poll invalidates before it reads.
+          invalidateRemoteStatus: () =>
+            Effect.flatMap(Clock.currentTimeMillis, (now) => Effect.sync(() => polls.push(now))),
+        }),
+      ),
+    );
+    const settle = Effect.forEach(Array.from({ length: 20 }), () => Effect.yieldNow, {
+      discard: true,
+    });
+    return Effect.gen(function* () {
+      const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      yield* broadcaster
+        .streamStatus(
+          { cwd: "/repo" },
+          { automaticRemoteRefreshInterval: Effect.succeed(Duration.seconds(30)) },
+        )
+        .pipe(Stream.runDrain, Effect.forkScoped);
+      yield* settle;
+      for (let step = 0; step < 10; step += 1) {
+        yield* TestClock.adjust(Duration.seconds(30));
+        yield* settle;
+      }
+      assert.deepStrictEqual(polls, [0, pauseEnd]);
+    }).pipe(Effect.provide(testLayer));
+  });
+
+  it.effect("tells the workflow when a poll's fetch moved the remote refs", () => {
+    let moved = false;
+    const invalidations: Array<boolean | undefined> = [];
+    const testLayer = VcsStatusBroadcaster.layer.pipe(
+      Layer.provide(
+        Layer.mock(GitWorkflowService.GitWorkflowService)({
+          localStatus: () => Effect.succeed(baseLocalStatus),
+          remoteStatus: () => Effect.succeed(baseRemoteStatus),
+          refreshRemoteTrackingRefs: () => Effect.sync(() => moved),
+          invalidateLocalStatus: () => Effect.void,
+          invalidateRemoteStatus: (_cwd, options) =>
+            Effect.sync(() => invalidations.push(options?.periodic)),
+        }),
+      ),
+    );
+    const settle = Effect.forEach(Array.from({ length: 20 }), () => Effect.yieldNow, {
+      discard: true,
+    });
+    return Effect.gen(function* () {
+      const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      yield* broadcaster
+        .streamStatus(
+          { cwd: "/repo" },
+          { automaticRemoteRefreshInterval: Effect.succeed(Duration.seconds(30)) },
+        )
+        .pipe(Stream.runDrain, Effect.forkScoped);
+      yield* settle;
+      // A poll whose fetch found nothing new says so: cached row details may stand.
+      assert.deepStrictEqual(invalidations, [true]);
+
+      // A push from elsewhere: the next poll's fetch moves the refs, so rows must see newer
+      // details.
+      moved = true;
+      yield* TestClock.adjust(Duration.seconds(30));
+      yield* settle;
+      assert.deepStrictEqual(invalidations, [true, false]);
+
+      // An explicit refresh always asks for newer details.
+      moved = false;
+      yield* broadcaster.refreshStatus("/repo");
+      assert.deepStrictEqual(invalidations, [true, false, false]);
+    }).pipe(Effect.provide(testLayer));
+  });
+
+  it.effect("keeps an explicit refresh's rule when it shares a poll's refresh", () => {
+    const invalidations: Array<boolean | undefined> = [];
+    let blocked: Deferred.Deferred<void> | null = null;
+    const testLayer = VcsStatusBroadcaster.layer.pipe(
+      Layer.provide(
+        Layer.mock(GitWorkflowService.GitWorkflowService)({
+          localStatus: () => Effect.succeed(baseLocalStatus),
+          remoteStatus: () =>
+            Effect.suspend(() => {
+              const gate = blocked;
+              blocked = null;
+              return gate === null ? Effect.void : Deferred.await(gate);
+            }).pipe(Effect.as(baseRemoteStatus)),
+          refreshRemoteTrackingRefs: () => Effect.succeed(false),
+          invalidateLocalStatus: () => Effect.void,
+          invalidateRemoteStatus: (_cwd, options) =>
+            Effect.sync(() => invalidations.push(options?.periodic)),
+        }),
+      ),
+    );
+    const settle = Effect.forEach(Array.from({ length: 20 }), () => Effect.yieldNow, {
+      discard: true,
+    });
+    return Effect.gen(function* () {
+      const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      yield* broadcaster
+        .streamStatus(
+          { cwd: "/repo" },
+          { automaticRemoteRefreshInterval: Effect.succeed(Duration.seconds(30)) },
+        )
+        .pipe(Stream.runDrain, Effect.forkScoped);
+      yield* settle;
+      assert.deepStrictEqual(invalidations, [true]);
+
+      // A refresh is reading the forge when a poll and then an explicit refresh come in: both
+      // wait for it, and the poll's trailing refresh, first in line, serves both.
+      const gate = yield* Deferred.make<void>();
+      blocked = gate;
+      const first = yield* broadcaster.refreshStatus("/repo").pipe(Effect.forkScoped);
+      yield* settle;
+      yield* TestClock.adjust(Duration.seconds(30));
+      yield* settle;
+      const second = yield* broadcaster.refreshStatus("/repo").pipe(Effect.forkScoped);
+      yield* settle;
+      yield* Deferred.succeed(gate, undefined);
+      yield* Fiber.join(first);
+      yield* Fiber.join(second);
+
+      // The shared refresh still asks for newer details, as the explicit one did.
+      assert.deepStrictEqual(invalidations, [true, false, false]);
+    }).pipe(Effect.provide(testLayer));
   });
 
   it.effect("reuses the cached VCS status across repeated reads", () => {

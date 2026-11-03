@@ -14,6 +14,12 @@ import { WorktreeSubmodules } from "./settings.ts";
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
 const GIT_LIST_BRANCHES_MAX_LIMIT = 200;
 
+/** A full Git commit id: 40 hex characters (SHA-1) or 64 (SHA-256), lowercase. */
+export const GitCommitOid = Schema.String.check(
+  Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+);
+export type GitCommitOid = typeof GitCommitOid.Type;
+
 // Domain Types
 
 export const GitStackedAction = Schema.Literals([
@@ -129,8 +135,26 @@ export const VcsPullInput = Schema.Struct({
 });
 export type VcsPullInput = typeof VcsPullInput.Type;
 
+/**
+ * Commit exactly the index as it stands, without resetting or adding files,
+ * and only while it is still the one `expectedRevision` (the `stagedRevision`
+ * of a `vcs.readLocalChanges` read) was taken from. Servers without
+ * `capabilities.stagedOnlyCommit` drop this key and commit every change.
+ */
+export const GitStagedOnlyCommit = Schema.Struct({
+  expectedRevision: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
+});
+export type GitStagedOnlyCommit = typeof GitStagedOnlyCommit.Type;
+
 export const GitRunStackedActionInput = Schema.Struct({
   actionId: TrimmedNonEmptyStringSchema,
+  /**
+   * The action keeps running on the node when this request's stream closes: the client
+   * attaches again with `git.resumeStackedAction` and stops it with `git.cancelStackedAction`.
+   * Only clients that can attach again send it, with a random UUID `actionId`. Servers without
+   * `capabilities.recoverableGitActions` drop this key and stop the action with its request.
+   */
+  recoverable: Schema.optional(Schema.Boolean),
   cwd: TrimmedNonEmptyStringSchema,
   action: GitStackedAction,
   worktreeId: Schema.optional(WorktreeId),
@@ -140,8 +164,49 @@ export const GitRunStackedActionInput = Schema.Struct({
   filePaths: Schema.optional(
     Schema.Array(TrimmedNonEmptyStringSchema).check(Schema.isMinLength(1)),
   ),
-});
+  stagedOnly: Schema.optional(GitStagedOnlyCommit),
+  /**
+   * Pull request text for `create_pr` / `commit_push_pr`; a missing one is generated. Servers
+   * without `capabilities.pullRequestOptions` drop these keys and generate both.
+   */
+  prTitle: Schema.optional(TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(300))),
+  prBody: Schema.optional(TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(60_000))),
+  /** Open the pull request as a draft; a host that has no drafts fails instead. */
+  prDraft: Schema.optional(Schema.Boolean),
+  /**
+   * `create_pr` with uncommitted changes the user chose to leave out: the pull request takes
+   * the committed work only, instead of failing "Commit local changes before creating a PR."
+   */
+  allowDirtyWorkingTree: Schema.optional(Schema.Boolean),
+}).check(
+  Schema.makeFilter((input) =>
+    input.stagedOnly === undefined || input.filePaths === undefined
+      ? undefined
+      : {
+          path: ["stagedOnly"],
+          issue: "a staged-only commit takes the index as it is; provide stagedOnly or filePaths",
+        },
+  ),
+);
 export type GitRunStackedActionInput = typeof GitRunStackedActionInput.Type;
+
+/**
+ * Attaches to a recoverable action again: the exact input it was started with. It replays the
+ * action's current progress, then follows it to its end. It never starts an action.
+ */
+export const GitResumeStackedActionInput = GitRunStackedActionInput;
+export type GitResumeStackedActionInput = typeof GitResumeStackedActionInput.Type;
+
+export const GitCancelStackedActionInput = Schema.Struct({
+  actionId: TrimmedNonEmptyStringSchema,
+});
+export type GitCancelStackedActionInput = typeof GitCancelStackedActionInput.Type;
+
+/** `cancelled: false` when no running action of this client has the id. */
+export const GitCancelStackedActionResult = Schema.Struct({
+  cancelled: Schema.Boolean,
+});
+export type GitCancelStackedActionResult = typeof GitCancelStackedActionResult.Type;
 
 export const VcsListRefsInput = Schema.Struct({
   fetchOrigin: Schema.optional(Schema.Boolean),
@@ -272,6 +337,16 @@ const VcsStatusLocalShape = {
 
 const VcsStatusRemoteShape = {
   hasUpstream: Schema.Boolean,
+  /**
+   * The branch's upstream as Git names it (`origin/main`), null without one. Optional: older
+   * nodes do not send it, and a client that needs it treats it as unknown.
+   */
+  upstreamRef: Schema.optional(Schema.NullOr(TrimmedNonEmptyStringSchema)),
+  /**
+   * The commit HEAD was at when `aheadCount` and `behindCount` were counted (so with no commit
+   * ahead it is on the upstream). Absent on an unborn branch and from older nodes.
+   */
+  headCommit: Schema.optional(GitCommitOid),
   aheadCount: NonNegativeInt,
   behindCount: NonNegativeInt,
   aheadOfDefaultCount: Schema.optional(NonNegativeInt),
@@ -417,9 +492,67 @@ export class GitManagerError extends Schema.TaggedError<GitManagerError>()("GitM
   }
 }
 
+/** A staged-only commit found HEAD, the branch or the staged changes moved since its review. */
+export class GitStagedIndexChangedError extends Schema.TaggedError<GitStagedIndexChangedError>()(
+  "GitStagedIndexChangedError",
+  {
+    cwd: Schema.String,
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
+/**
+ * Why a recoverable action ended without an outcome to report. `missing`: the node holds no
+ * record of it (it restarted, dropped an old record, or the start never arrived). The client
+ * reasons: `unsupported` (the node cannot attach again), `expired` (no usable connection in
+ * time) and `ended` (the account session ended).
+ */
+export const GitActionResultUnavailableReason = Schema.Literals([
+  "missing",
+  "unsupported",
+  "expired",
+  "ended",
+]);
+export type GitActionResultUnavailableReason = typeof GitActionResultUnavailableReason.Type;
+
+/** A recoverable action's outcome is unknown to this client. Nothing was run again. */
+export class GitActionResultUnavailableError extends Schema.TaggedError<GitActionResultUnavailableError>()(
+  "GitActionResultUnavailableError",
+  {
+    actionId: Schema.String,
+    reason: GitActionResultUnavailableReason,
+  },
+) {
+  override get message(): string {
+    return "Ryco couldn't get the result of this Git action. Check the repository status before trying again.";
+  }
+}
+
+/**
+ * A running recoverable action was stopped: by its client (`requested`), or because the
+ * pairing it ran under was revoked (`access-revoked`). Steps that finished stay done.
+ */
+export class GitActionStoppedError extends Schema.TaggedError<GitActionStoppedError>()(
+  "GitActionStoppedError",
+  {
+    actionId: Schema.String,
+    phase: Schema.NullOr(GitActionProgressPhase),
+    reason: Schema.Literals(["requested", "access-revoked"]),
+  },
+) {
+  override get message(): string {
+    return "The Git action was stopped. Steps that already finished stay done; check the repository status.";
+  }
+}
+
 export const GitManagerServiceError = Schema.Union([
   GitManagerError,
   GitCommandError,
+  GitStagedIndexChangedError,
   SourceControlProviderError,
   TextGenerationError,
 ]);
@@ -490,9 +623,16 @@ export const GitComparisonRef = TrimmedNonEmptyStringSchema.check(
   Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/),
   Schema.isPattern(/^(?!.*\.\.).*$/),
 );
+/**
+ * `mode` picks the left endpoint (the merge-base of `ref` and HEAD, or `ref` itself). The right
+ * endpoint is HEAD, or with `target: "workingTree"` the working files, including staged, unstaged
+ * and untracked changes. Only nodes that advertise `capabilities.workingTreeComparison` honour
+ * `target`; older ones drop the key and echo the selection without it.
+ */
 export const GitComparisonSelection = Schema.Struct({
   ref: GitComparisonRef,
   mode: Schema.Literals(["mergeBase", "direct"]),
+  target: Schema.optionalKey(Schema.Literal("workingTree")),
 });
 export type GitComparisonSelection = typeof GitComparisonSelection.Type;
 export const GitReadComparisonInput = Schema.Struct({
@@ -506,8 +646,11 @@ export const GitComparisonSource = Schema.Struct({
   repositoryPath: TrimmedNonEmptyStringSchema,
   worktreePath: TrimmedNonEmptyStringSchema,
   refOid: TrimmedNonEmptyStringSchema,
+  /** HEAD when the comparison was read; with a working-tree target not the patch's right side. */
   headOid: TrimmedNonEmptyStringSchema,
   baseOid: TrimmedNonEmptyStringSchema,
+  /** Present when the right side is the working files rather than `headOid`. */
+  target: Schema.optionalKey(Schema.Literal("workingTree")),
   revision: TrimmedNonEmptyStringSchema,
 });
 export type GitComparisonSource = typeof GitComparisonSource.Type;
@@ -521,7 +664,7 @@ export type GitReadComparisonResult = typeof GitReadComparisonResult.Type;
 /** One immutable committed-file line. No symbolic refs or working-tree fallback. */
 export const GitReadLineBlameInput = Schema.Struct({
   cwd: TrimmedNonEmptyStringSchema,
-  oid: Schema.String.check(Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/)),
+  oid: GitCommitOid,
   filePath: Schema.String.check(
     Schema.isMinLength(1),
     Schema.isMaxLength(4096),
@@ -588,6 +731,12 @@ export const GitLocalChangesResult = Schema.Struct({
   branch: Schema.NullOr(Schema.String),
   indexIdentity: Schema.String,
   revision: Schema.String,
+  /**
+   * Binds the worktree, branch, HEAD and the staged index content, but not the
+   * unstaged side: the `expectedRevision` of a staged-only commit. Absent on
+   * older servers.
+   */
+  stagedRevision: Schema.optional(Schema.String),
   staged: GitLocalPatch,
   unstaged: GitLocalPatch,
 });

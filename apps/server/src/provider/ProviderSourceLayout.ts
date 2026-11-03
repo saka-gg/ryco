@@ -9,7 +9,7 @@ import {
   mergeProviderInstanceEnvironment,
   normalizeProviderHomeEnvironment,
 } from "./ProviderInstanceEnvironment.ts";
-import { resolveCodexHomeLayout } from "./Drivers/CodexHomeLayout.ts";
+import { resolveCodexInstanceLayout } from "./Drivers/CodexHomeLayout.ts";
 import { makeClaudeEnvironment, resolveClaudeSourceRoot } from "./Drivers/ClaudeHome.ts";
 
 // Runtime and archive discovery must resolve the same configured store. In
@@ -18,12 +18,12 @@ export const resolveProviderSourceLayout = Effect.fn("resolveProviderSourceLayou
   source: SessionImportSource,
   instance?: ProviderInstanceConfig,
 ) {
-  const environment = normalizeProviderHomeEnvironment(
-    mergeProviderInstanceEnvironment(instance?.environment),
-  );
   if (source === "codex") {
     const config = yield* Schema.decodeUnknownEffect(CodexSettings)(instance?.config ?? {});
-    const codex = yield* resolveCodexHomeLayout(config, environment);
+    const { environment, layout: codex } = yield* resolveCodexInstanceLayout(
+      config,
+      instance?.environment,
+    );
     return {
       root: codex.sharedHomePath,
       environment,
@@ -32,6 +32,9 @@ export const resolveProviderSourceLayout = Effect.fn("resolveProviderSourceLayou
       enabled: instance?.enabled ?? config.enabled,
     };
   }
+  const environment = normalizeProviderHomeEnvironment(
+    mergeProviderInstanceEnvironment(instance?.environment),
+  );
   const config = yield* Schema.decodeUnknownEffect(ClaudeSettings)(instance?.config ?? {});
   return {
     root: yield* resolveClaudeSourceRoot(config, environment),

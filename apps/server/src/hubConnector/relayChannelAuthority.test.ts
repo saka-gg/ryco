@@ -2,10 +2,12 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { authorizeRpcPrincipal } from "../auth/wsAuthorization.ts";
 import { relayRpcPrincipal } from "../ws/RpcPrincipal.ts";
-import { relayChannelAuthority } from "./relayChannelAuthority.ts";
+import type { NodeE2eeChannelMode } from "./NodeE2eeChannelSession.ts";
+import { relayChannelAuthority, relayChannelPrincipal } from "./relayChannelAuthority.ts";
 import { Effect, Exit } from "effect";
 
 const FINGERPRINT = Uint8Array.from([7, 7, 7]);
+const NODE_KEY = Uint8Array.from([5, 5, 5]);
 
 const grant = (maximumRole: string) => ({
   trustSource: "account-enrolled" as const,
@@ -36,12 +38,15 @@ describe("relayChannelAuthority", () => {
         trustSource: "account-enrolled",
         admittedAuthority: undefined,
         accountGrantAuthority: grant("operator"),
+        nodeIdentityPublicKey: NODE_KEY,
       }),
     ).toEqual({
       trustSource: "account-enrolled",
       enrollmentId: "enr_1",
+      accountId: "acct",
       clientIdentityFingerprint: FINGERPRINT,
       role: "operator",
+      nodeIdentityPublicKey: NODE_KEY,
     });
   });
 
@@ -51,17 +56,20 @@ describe("relayChannelAuthority", () => {
         trustSource: "locally-verified",
         admittedAuthority: local("owner"),
         accountGrantAuthority: undefined,
+        nodeIdentityPublicKey: NODE_KEY,
       }),
     ).toEqual({
       trustSource: "locally-verified",
       clientIdentityFingerprint: FINGERPRINT,
       role: "operator",
+      nodeIdentityPublicKey: NODE_KEY,
     });
     expect(
       relayChannelAuthority("owner", {
         trustSource: "locally-verified",
         admittedAuthority: local("owner", "pending"),
         accountGrantAuthority: undefined,
+        nodeIdentityPublicKey: NODE_KEY,
       }),
     ).toEqual({ trustSource: "none" });
   });
@@ -72,6 +80,7 @@ describe("relayChannelAuthority", () => {
         trustSource: "web-unsigned",
         admittedAuthority: undefined,
         accountGrantAuthority: undefined,
+        nodeIdentityPublicKey: NODE_KEY,
       }),
     ).toEqual({ trustSource: "none" });
     expect(
@@ -79,6 +88,7 @@ describe("relayChannelAuthority", () => {
         trustSource: "account-enrolled",
         admittedAuthority: undefined,
         accountGrantAuthority: grant("superuser"),
+        nodeIdentityPublicKey: NODE_KEY,
       }),
     ).toEqual({ trustSource: "none" });
   });
@@ -114,5 +124,36 @@ describe("relay_native access", () => {
         }),
       }),
     ).toBe(false);
+  });
+});
+
+describe("relayChannelPrincipal", () => {
+  it("reads the device and the encryption from the channel's E2EE mode per request", () => {
+    let mode: NodeE2eeChannelMode = "negotiating";
+    const principal = relayChannelPrincipal("owner", "chn_1", { mode: () => mode }, () => ({
+      trustSource: "locally-verified",
+      clientIdentityFingerprint: FINGERPRINT,
+      role: "owner",
+    }));
+    const encrypted = () =>
+      principal.connection?.kind === "relay" && principal.connection.endToEndEncrypted();
+    for (const plain of ["negotiating", "legacy", "closed"] as const) {
+      mode = plain;
+      expect(encrypted(), plain).toBe(false);
+      expect(principal.relayAuthority?.().trustSource, plain).toBe("none");
+    }
+    mode = "e2ee";
+    expect(encrypted()).toBe(true);
+    expect(principal.relayAuthority?.().trustSource).toBe("locally-verified");
+  });
+
+  it("counts a web NX channel, which identifies no device, as encrypted", () => {
+    const principal = relayChannelPrincipal("owner", "chn_web", { mode: () => "e2ee" }, () => ({
+      trustSource: "none",
+    }));
+    expect(principal.connection?.kind === "relay" && principal.connection.endToEndEncrypted()).toBe(
+      true,
+    );
+    expect(principal.relayAuthority?.()).toEqual({ trustSource: "none" });
   });
 });

@@ -3,6 +3,7 @@ import type {
   InternalOrchestrationCommand,
   OrchestrationCommand,
   OrchestrationDispatchCommandError,
+  ThreadQueueAddCommand,
   ThreadTurnStartCommand,
 } from "@ryco/contracts";
 import { Context } from "effect";
@@ -37,7 +38,7 @@ export interface OrchestrationCommandApplicationShape {
    * input here.
    */
   readonly applyInternal: (
-    command: InternalOrchestrationCommand | ThreadTurnStartCommand,
+    command: InternalOrchestrationCommand | ThreadTurnStartCommand | ThreadQueueAddCommand,
   ) => Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError>;
 }
 

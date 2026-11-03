@@ -93,6 +93,7 @@ describe("hosted session admission", () => {
     const ready = { sessionStatus: "ready", sessionRecoveredAfterUnknown: false } as const;
     expect(hostedSessionAdmits(ready, WS_METHODS.terminalWrite)).toBe(true);
     expect(hostedSessionAdmits(ready, WS_METHODS.projectsReadFile)).toBe(true);
+    expect(hostedSessionAdmits(ready, WS_METHODS.projectsReadFileChunk)).toBe(true);
   });
 
   it("admits only reads after recovering with unconfirmed delivery", () => {
@@ -101,6 +102,7 @@ describe("hosted session admission", () => {
       sessionRecoveredAfterUnknown: true,
     } as const;
     expect(hostedSessionAdmits(recovered, WS_METHODS.projectsReadFile)).toBe(true);
+    expect(hostedSessionAdmits(recovered, WS_METHODS.projectsReadFileChunk)).toBe(true);
     expect(hostedSessionAdmits(recovered, WS_METHODS.vcsReadLocalChanges)).toBe(true);
     expect(hostedSessionAdmits(recovered, ORCHESTRATION_WS_METHODS.getThreadWindow)).toBe(true);
     expect(hostedSessionAdmits(recovered, WS_METHODS.terminalWrite)).toBe(false);
@@ -131,8 +133,8 @@ const READS_THAT_REACH_OUT = [
   WS_METHODS.vcsListRefs,
   WS_METHODS.serverRefreshProviders,
   WS_METHODS.serverTestCliProxyHub,
+  WS_METHODS.serverNoteClientInteraction,
   ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery,
-  WS_METHODS.threadPriorityEnsureCurrent,
 ] as const;
 
 describe("hosted reads before the snapshot", () => {
@@ -151,6 +153,7 @@ describe("hosted reads before the snapshot", () => {
         WS_METHODS.projectsList,
         WS_METHODS.projectsListEntries,
         WS_METHODS.projectsSearchEntries,
+        WS_METHODS.projectsSearchContent,
         WS_METHODS.projectsReadFile,
         WS_METHODS.projectsReadIcon,
         WS_METHODS.vcsReadLocalChanges,
@@ -186,6 +189,17 @@ describe("hosted reads before the snapshot", () => {
         }
       }
     }
+  });
+
+  it("keeps chunked previews out of early reads, like binary reads", () => {
+    // A PDF opened during a reconnect waits for the shell snapshot.
+    expect(hostedAdmitsReadBeforeSnapshot(catchingUp, WS_METHODS.projectsReadFile)).toBe(true);
+    expect(hostedAdmitsReadBeforeSnapshot(catchingUp, WS_METHODS.projectsReadFileChunk)).toBe(
+      false,
+    );
+    expect(hostedAdmitsReadBeforeSnapshot(catchingUp, WS_METHODS.projectsReadFileBinary)).toBe(
+      false,
+    );
   });
 
   it("never admits a read that changes or reaches out, though it is classified as a read", () => {

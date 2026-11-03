@@ -5,6 +5,7 @@ import type {
   SidebarThreadSummary,
   SidebarWorktreeSummary,
 } from "@ryco/client-runtime/state/threads";
+import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { EnvironmentId } from "@ryco/contracts";
 import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuation";
 
@@ -87,29 +88,6 @@ function thread(
 }
 
 describe("Inbox model", () => {
-  it("puts Focus above Active without duplicating promoted threads", () => {
-    const sections = buildInboxSections({
-      projects: [project(NODE_A, "project-a", "Ryco")],
-      worktrees: [],
-      environments: [{ environmentId: NODE_A, label: "Mac Studio", connectionState: "connected" }],
-      threads: [
-        thread(NODE_A, "approval", "project-a", { hasPendingApprovals: true }),
-        thread(NODE_A, "ordinary", "project-a"),
-      ],
-      aiFocusEnabled: true,
-      nowMs: Date.parse("2026-08-25T12:00:00.000Z"),
-    });
-
-    expect(sections.map((section) => section.title)).toEqual(["Focus", "Active"]);
-    expect(sections[0]?.rows[0]).toMatchObject({
-      threadId: "approval",
-      focusTitle: "Approval required",
-      focusAiGenerated: false,
-    });
-    expect(sections[1]?.rows.map((row) => row.threadId)).toEqual(["ordinary"]);
-    expect(new Set(sections.flatMap((section) => section.rows.map((row) => row.key))).size).toBe(2);
-  });
-
   it("keeps idle work and attention blockers together in the Active queue", () => {
     const projects = [project(NODE_A, "project-a", "Ryco"), project(NODE_B, "project-b", "Hub")];
     const sections = buildInboxSections({
@@ -600,9 +578,8 @@ describe("mobile settlement and attention policy", () => {
     expect(sections.map((section) => section.key)).toEqual(["active"]);
     expect(sections[0]?.rows).toHaveLength(4);
   });
-  it("puts pending input in Focus when enabled without duplicating it in Active", () => {
+  it("keeps pending input Active while idle work settles", () => {
     const sections = build({
-      aiFocusEnabled: true,
       threads: [
         thread(NODE_A, "input", "p", {
           latestUserMessageAt: activityAt,
@@ -611,7 +588,7 @@ describe("mobile settlement and attention policy", () => {
         thread(NODE_A, "old", "p", { latestUserMessageAt: activityAt }),
       ],
     });
-    expect(sections.map((section) => section.key)).toEqual(["focus", "settled"]);
+    expect(sections.map((section) => section.key)).toEqual(["active", "settled"]);
     expect(sections[0]?.rows[0]).toMatchObject({ state: "needs-input", canSettle: false });
     expect(new Set(sections.flatMap((section) => section.rows.map((row) => row.key))).size).toBe(2);
   });
@@ -651,6 +628,55 @@ describe("mobile settlement and attention policy", () => {
       project: p,
       isWorktree: true,
       worktreeLabel: "feat/inbox",
+    });
+  });
+});
+
+describe("inbox follow-up queue mark", () => {
+  const stopped = {
+    reason: "interrupted" as const,
+    detail: null,
+    causeKeys: ["interrupt:turn-1"],
+    heldAt: "2026-07-26T08:00:00.000Z",
+  };
+
+  it("marks queued and held follow-ups as web's sidebar does, and nothing without a queue", () => {
+    const rows = buildInboxSections({
+      projects: [project(NODE_A, "project-a", "Ryco")],
+      worktrees: [],
+      threads: [
+        thread(NODE_A, "queued", "project-a", {
+          followUpQueueSummary: { count: 2, hold: null, headStatus: "queued", headPreview: "a" },
+        }),
+        thread(NODE_A, "held", "project-a", {
+          followUpQueueSummary: { count: 1, hold: stopped, headStatus: "queued", headPreview: "b" },
+        }),
+        thread(NODE_A, "retry", "project-a", {
+          followUpQueueSummary: { count: 3, hold: null, headStatus: "failed", headPreview: "c" },
+        }),
+        thread(NODE_A, "plain", "project-a"),
+      ],
+      environments: [{ environmentId: NODE_A, label: "Studio", connectionState: "connected" }],
+    }).flatMap((section) => section.rows);
+    const [queued, held, retry, plain] = ["queued", "held", "retry", "plain"].map((id) =>
+      rows.find((row) => row.threadId === id),
+    );
+    expect(plain?.followUpQueue).toBeNull();
+    expect(queued?.followUpQueue).toEqual({
+      label: "2 queued",
+      title: "2 queued follow-ups",
+      held: false,
+    });
+    // Held reads as words, not only as a color.
+    expect(held?.followUpQueue).toEqual({
+      label: "1 held",
+      title: "1 queued follow-up: Paused after Stop",
+      held: true,
+    });
+    expect(retry?.followUpQueue).toEqual({
+      label: "3 held",
+      title: "3 queued follow-ups: The next one waits for Retry",
+      held: true,
     });
   });
 });
@@ -747,6 +773,147 @@ describe("inbox errors", () => {
     expect(rowFor("Provider exited (code 1)")).toMatchObject({
       state: "error",
       statusLabel: "Error",
+    });
+  });
+});
+
+describe("inbox Woke mark", () => {
+  const snoozedAt = "2026-09-12T08:00:00.000Z";
+  const snoozedUntil = "2026-09-12T11:00:00.000Z";
+  const nowMs = Date.parse("2026-09-12T12:00:00.000Z");
+  const environment: InboxEnvironment = {
+    environmentId: NODE_A,
+    label: "Mac",
+    connectionState: "connected",
+    threadSettlementSupported: true,
+    threadSnoozeSupported: true,
+    mutationReady: true,
+    shellCurrent: true,
+  };
+  function row(
+    overrides: Partial<SidebarThreadSummary> = {},
+    input: Partial<Parameters<typeof buildInboxSections>[0]> = {},
+  ) {
+    return buildInboxSections({
+      projects: [project(NODE_A, "p", "Ryco")],
+      worktrees: [],
+      environments: [environment],
+      threads: [
+        thread(NODE_A, "t", "p", {
+          updatedAt: "2026-09-12T08:00:00.000Z",
+          snoozedAt,
+          snoozedUntil,
+          ...overrides,
+        }),
+      ],
+      nowMs,
+      ...input,
+    }).flatMap((section) => section.rows)[0];
+  }
+
+  it("marks an idle thread whose snooze ran out until this device sees it", () => {
+    expect(row()).toMatchObject({ attentionState: "active", wokeAt: snoozedUntil, woke: true });
+    expect(
+      row(
+        {},
+        {
+          wokeSeenAtByThreadKey: {
+            [scopedThreadKey(scopeThreadRef(NODE_A, "t" as never))]: snoozedUntil,
+          },
+        },
+      ),
+    ).toMatchObject({ wokeAt: snoozedUntil, woke: false });
+  });
+
+  it("does not mark a thread still snoozed, one that needs the user, or one never snoozed", () => {
+    expect(row({}, { nowMs: Date.parse(snoozedUntil) - 1 })).toMatchObject({
+      attentionState: "snoozed",
+      wokeAt: null,
+      woke: false,
+    });
+    expect(row({ hasPendingApprovals: true })).toMatchObject({ state: "needs-input", woke: false });
+    expect(row({ snoozedAt: null, snoozedUntil: null })).toMatchObject({
+      wokeAt: null,
+      woke: false,
+    });
+  });
+});
+
+describe("inbox Hidden shelf and settling a working task", () => {
+  const environment: InboxEnvironment = {
+    environmentId: NODE_A,
+    label: "Mac",
+    connectionState: "connected",
+    threadSettlementSupported: true,
+    threadSnoozeSupported: true,
+    threadTriageSupported: true,
+    mutationReady: true,
+    shellCurrent: true,
+  };
+  const running = {
+    session: {
+      provider: "codex",
+      status: "running",
+      orchestrationStatus: "running",
+      activeTurnId: "turn-1",
+      createdAt: "2026-07-26T08:00:00.000Z",
+      updatedAt: "2026-07-26T08:00:00.000Z",
+    },
+    latestTurn: {
+      turnId: "turn-1",
+      state: "running",
+      requestedAt: "2026-07-26T08:00:00.000Z",
+      startedAt: "2026-07-26T08:00:00.000Z",
+      completedAt: null,
+      assistantMessageId: null,
+    },
+  } as unknown as Partial<SidebarThreadSummary>;
+  const build = (threads: ReadonlyArray<SidebarThreadSummary>) =>
+    buildInboxSections({
+      projects: [project(NODE_A, "p", "Ryco")],
+      worktrees: [],
+      environments: [environment],
+      threads,
+      nowMs: Date.parse("2026-07-26T12:00:00.000Z"),
+    });
+
+  it("lists hidden tasks last in their own Hidden section", () => {
+    const sections = build([
+      thread(NODE_A, "nightly", "p", { hiddenAt: "2026-07-26T09:00:00.000Z" }),
+      thread(NODE_A, "visible", "p"),
+    ]);
+    expect(sections.map((section) => section.key)).toEqual(["active", "hidden"]);
+    expect(sections[1]?.rows[0]).toMatchObject({
+      attentionState: "hidden",
+      hiddenByUser: true,
+      hideActionEnabled: true,
+    });
+    expect(sections[0]?.rows[0]).toMatchObject({ hiddenByUser: false, hideActionEnabled: true });
+  });
+
+  it("brings a hidden task that needs an answer back to Active", () => {
+    const sections = build([
+      thread(NODE_A, "asking", "p", {
+        hiddenAt: "2026-07-26T09:00:00.000Z",
+        hasPendingUserInput: true,
+      }),
+    ]);
+    expect(sections.map((section) => section.key)).toEqual(["active"]);
+  });
+
+  it("lets a working task settle, and lists a filed one as settled while it works", () => {
+    const [active] = build([thread(NODE_A, "working", "p", running)]);
+    expect(active?.rows[0]).toMatchObject({ canSettle: true, state: "working" });
+
+    const sections = build([
+      thread(NODE_A, "filed", "p", { ...running, settleWhenIdleAt: "2026-07-26T09:00:00.000Z" }),
+    ]);
+    expect(sections.map((section) => section.key)).toEqual(["settled"]);
+    expect(sections[0]?.rows[0]).toMatchObject({
+      attentionState: "settled",
+      filed: true,
+      state: "working",
+      statusLabel: "Settles when done",
     });
   });
 });

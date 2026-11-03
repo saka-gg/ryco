@@ -1,11 +1,14 @@
-import { getAppKeybindings, replaceAppKeybindings, resetAppKeybindings } from "../appKeybindings";
+import { getAppKeybindings, resetAppKeybindings } from "../appKeybindings";
+import { replaceAppKeybindings } from "../appKeybindingsEditing";
 import { serializeShortcut } from "../lib/shortcutCapture";
 import { serializeWhenAst } from "../lib/keybindingWhenPresets";
 import { useChatPanesStore } from "../chatPanesStore";
+import { useOpenChatTabsStore } from "../openChatTabsStore";
 
 import { resetPreviewFileSessionsForTests } from "./previewFileSessions";
 import { useInboxFilterStore } from "./inboxSidebar/inboxFilterStore";
 import { useSidebarFoldStore } from "./sidebar/sidebarFold";
+import { useSettingsSearchRevealStore } from "./settings/settingsSearchReveal";
 
 // Production CSS is part of the behavior under test because row height depends on it.
 import "../index.css";
@@ -37,6 +40,7 @@ import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import { Option } from "effect";
 import { HttpResponse, http, ws } from "msw";
 import { setupWorker } from "msw/browser";
+import { StrictMode } from "react";
 import { page, userEvent } from "vite-plus/test/browser";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, vi } from "vite-plus/test";
 import { useMessageQueueStore } from "../messageQueueStore";
@@ -74,9 +78,11 @@ import { getServerConfig } from "../rpc/serverState";
 import { getRouter } from "../router";
 import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
 import { clearRightPanelSessionSearch } from "../rightPanelSessionState";
+import { sidebarUndo } from "../sidebarUndo";
 import { selectBootstrapCompleteForActiveEnvironment, useStore } from "../store";
 import { useTerminalStateStore } from "../terminalStateStore";
 import { useUiStateStore } from "../uiStateStore";
+import { threadReadingPositions } from "../persistence/threadReadingPositions";
 import { createAuthenticatedSessionHandlers } from "../../test/authHttpHandlers";
 import { browserWaitFor } from "../../test/browserWait";
 import {
@@ -85,7 +91,11 @@ import {
   setCoarsePointerEmulation,
 } from "../../test/browserPointer";
 
-import { BrowserWsRpcHarness, type NormalizedWsRpcRequestBody } from "../../test/wsRpcHarness";
+import {
+  BrowserWsRpcHarness,
+  type NormalizedWsRpcRequestBody,
+  WsRpcUnservedStream,
+} from "../../test/wsRpcHarness";
 
 import { DEFAULT_CLIENT_SETTINGS } from "@ryco/contracts/settings";
 
@@ -205,6 +215,8 @@ interface TestFixture {
    * and send archived threads as full shells.
    */
   serverIgnoresArchivedStubs?: boolean;
+  /** Streams the node does not serve, as a node from before them: subscribing fails alone. */
+  unservedStreams?: ReadonlySet<string>;
 }
 
 let fixture: TestFixture;
@@ -309,7 +321,6 @@ function createBaseServerConfig(): ServerConfig {
       capabilities: {
         repositoryIdentity: true,
         threadSettlement: false,
-        threadPriorityRanking: false,
       },
     },
     auth: {
@@ -616,7 +627,6 @@ function buildFixture(snapshot: OrchestrationReadModel): TestFixture {
         capabilities: {
           repositoryIdentity: true,
           threadSettlement: false,
-          threadPriorityRanking: false,
         },
       },
       cwd: "/repo/project",
@@ -673,6 +683,97 @@ function addThreadToSnapshot(
   };
 }
 
+// Recent, so the thread is not settled automatically by age.
+const LIFECYCLE_TURN_REQUESTED_AT = new Date(Date.now() - 120_000).toISOString();
+const LIFECYCLE_TURN_COMPLETED_AT = new Date(Date.now() - 60_000).toISOString();
+
+/** The bootstrap thread after a turn that finished, or one still running. */
+function createLifecycleSnapshot(options: { running?: boolean } = {}): OrchestrationReadModel {
+  const snapshot = createSnapshotForTargetUser({
+    targetMessageId: "msg-user-lifecycle-shortcuts" as MessageId,
+    targetText: "lifecycle shortcuts",
+  });
+  const thread = snapshot.threads[0]!;
+  const turnId = "turn-lifecycle-shortcuts" as TurnId;
+  const requestedAt = LIFECYCLE_TURN_REQUESTED_AT;
+  return {
+    ...snapshot,
+    threads: [
+      {
+        ...thread,
+        latestTurn: options.running
+          ? {
+              turnId,
+              state: "running",
+              requestedAt,
+              startedAt: requestedAt,
+              completedAt: null,
+              assistantMessageId: null,
+            }
+          : {
+              turnId,
+              state: "completed",
+              requestedAt,
+              startedAt: requestedAt,
+              completedAt: LIFECYCLE_TURN_COMPLETED_AT,
+              assistantMessageId: null,
+            },
+        session: {
+          ...thread.session!,
+          status: options.running ? "running" : "ready",
+          activeTurnId: options.running ? turnId : null,
+        },
+      },
+    ],
+  };
+}
+
+/** A `configureFixture` for a node that can settle, snooze and undo thread actions. */
+function enableThreadLifecycle(nextFixture: TestFixture): void {
+  const capabilities = {
+    repositoryIdentity: true,
+    threadSettlement: true,
+    threadSnooze: true,
+    threadSidebarUndo: true,
+  };
+  nextFixture.serverConfig = {
+    ...nextFixture.serverConfig,
+    environment: { ...nextFixture.serverConfig.environment, capabilities },
+  };
+  nextFixture.welcome = {
+    ...nextFixture.welcome,
+    environment: { ...nextFixture.welcome.environment, capabilities },
+  };
+}
+
+/** A `configureFixture` for a node that stores composer picks on the thread when they are made. */
+function enableLiveThreadModelSelection(nextFixture: TestFixture): void {
+  for (const key of ["serverConfig", "welcome"] as const) {
+    const environment = nextFixture[key].environment;
+    Object.assign(nextFixture[key], {
+      environment: {
+        ...environment,
+        capabilities: { ...environment.capabilities, liveThreadModelSelection: true },
+      },
+    });
+  }
+}
+
+/** The node pushes the thread with a model selection a client stored on it. */
+function pushThreadModelSelection(
+  threadId: ThreadId,
+  modelSelection: OrchestrationReadModel["threads"][number]["modelSelection"],
+): void {
+  fixture.snapshot = {
+    ...fixture.snapshot,
+    snapshotSequence: fixture.snapshot.snapshotSequence + 1,
+    threads: fixture.snapshot.threads.map((thread) =>
+      thread.id === threadId ? { ...thread, modelSelection } : thread,
+    ),
+  };
+  sendShellThreadUpsert(threadId);
+}
+
 function toShellThread(thread: OrchestrationReadModel["threads"][number]) {
   return {
     id: thread.id,
@@ -689,7 +790,11 @@ function toShellThread(thread: OrchestrationReadModel["threads"][number]) {
     archivedAt: thread.archivedAt,
     settledOverride: thread.settledOverride,
     settledAt: thread.settledAt,
+    ...(thread.snoozedUntil != null
+      ? { snoozedUntil: thread.snoozedUntil, snoozedAt: thread.snoozedAt ?? null }
+      : {}),
     session: thread.session,
+    ...(thread.lineage ? { lineage: thread.lineage } : {}),
     latestUserMessageAt:
       thread.messages.findLast((message) => message.role === "user")?.createdAt ?? null,
     hasPendingApprovals: false,
@@ -1977,6 +2082,13 @@ async function waitForServerConfigToApply(): Promise<void> {
   await waitForLayout();
 }
 
+/** The sidebar loads the thread lifecycle shortcuts after it mounts: waits until they listen. */
+async function waitForThreadLifecycleShortcuts(): Promise<void> {
+  await browserWaitFor(() => {
+    expect(useCommandPaletteStore.getState().readCurrentThreadLifecycle).not.toBeNull();
+  });
+}
+
 async function waitForComposerStashBinding(key: string): Promise<void> {
   await browserWaitFor(() => {
     expect(
@@ -2049,6 +2161,30 @@ function dispatchThreadPinToggleShortcut(): void {
       cancelable: true,
     }),
   );
+}
+
+/** ⌥⇧⌘ (Ctrl+Alt+Shift off macOS) plus `letter`, from the focused element. */
+function pressLifecycleChord(letter: "A" | "D" | "S" | "U"): KeyboardEvent {
+  const useMetaForMod = isMacPlatform(navigator.platform);
+  const event = new KeyboardEvent("keydown", {
+    key: letter,
+    code: `Key${letter}`,
+    altKey: true,
+    shiftKey: true,
+    metaKey: useMetaForMod,
+    ctrlKey: !useMetaForMod,
+    bubbles: true,
+    cancelable: true,
+  });
+  (document.activeElement ?? window).dispatchEvent(event);
+  return event;
+}
+
+/** The type of every orchestration command sent so far. */
+function dispatchedCommandTypes(): unknown[] {
+  return wsRequests
+    .filter((request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand)
+    .map((request) => (request as { type?: unknown }).type);
 }
 
 function releaseModShortcut(key?: string): void {
@@ -2183,7 +2319,7 @@ async function openCommandPaletteFromTrigger(): Promise<void> {
   );
 }
 
-async function openNewWorkspaceDialog(): Promise<void> {
+async function openNewWorkspaceDraft(): Promise<void> {
   const newThreadButton = page.getByTestId("new-thread-button");
   await expect.element(newThreadButton).toBeInTheDocument();
   // The action only takes pointer events while its project header is hovered,
@@ -2191,41 +2327,6 @@ async function openNewWorkspaceDialog(): Promise<void> {
   const projectHeader = newThreadButton.element().closest<HTMLElement>(".group\\/project-header");
   await page.elementLocator(projectHeader!).hover();
   await newThreadButton.click();
-  await expect.element(page.getByText("New worktree", { exact: true })).toBeInTheDocument();
-}
-
-async function expectVisibleComboboxPopupToBeOpaqueAndClipped(): Promise<void> {
-  const popup = await waitForElement(
-    () =>
-      Array.from(document.querySelectorAll<HTMLElement>('[data-slot="combobox-popup"]')).find(
-        (element) => element.getBoundingClientRect().width > 0,
-      ) ?? null,
-    "Unable to find the visible combobox popup.",
-  );
-  const popupShell = popup.parentElement as HTMLElement | null;
-
-  expect(popupShell).toBeTruthy();
-  if (!popupShell) {
-    throw new Error("Unable to find the combobox popup shell.");
-  }
-
-  const popupShellStyles = window.getComputedStyle(popupShell);
-  const popupStyles = window.getComputedStyle(popup);
-
-  // Opacity is the shell's job alone. `combobox.tsx` deliberately leaves the
-  // inner popup transparent so the two do not both paint a glass layer (see
-  // "kill glass-on-glass"), so asserting a background on the popup would pin
-  // the exact bug that change removed. What the user can observe — that the
-  // list is not see-through — is the shell's background plus its clipping.
-  expect(popupShellStyles.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
-  expect(popupShellStyles.overflow).toBe("hidden");
-  expect(popupStyles.backgroundColor).toBe("rgba(0, 0, 0, 0)");
-
-  const popupShellRect = popupShell.getBoundingClientRect();
-  const popupRect = popup.getBoundingClientRect();
-
-  expect(popupRect.left).toBeGreaterThanOrEqual(popupShellRect.left - 1);
-  expect(popupRect.right).toBeLessThanOrEqual(popupShellRect.right + 1);
 }
 
 async function createDraftFromChatNewLocalShortcut(
@@ -2307,6 +2408,8 @@ async function mountChatView(options: {
   configureFixture?: (fixture: TestFixture) => void;
   resolveRpc?: (body: NormalizedWsRpcRequestBody) => unknown | undefined;
   initialPath?: string;
+  /** Renders under StrictMode, as the dev app does, so effects run twice on mount. */
+  strictMode?: boolean;
 }): Promise<MountedChatView> {
   fixture = buildFixture(options.snapshot);
   options.configureFixture?.(fixture);
@@ -2342,14 +2445,14 @@ async function mountChatView(options: {
     }),
   );
 
-  const screen = await render(
+  const app = (
     <AppAtomRegistryProvider>
       <RouterProvider router={router} />
-    </AppAtomRegistryProvider>,
-    {
-      container: host,
-    },
+    </AppAtomRegistryProvider>
   );
+  const screen = await render(options.strictMode ? <StrictMode>{app}</StrictMode> : app, {
+    container: host,
+  });
 
   await waitForWsClient();
   await waitForAppBootstrap();
@@ -2381,6 +2484,29 @@ async function mountChatView(options: {
     },
     router,
   };
+}
+
+/**
+ * The open lifecycle thread on a node that accepts every command, so actions
+ * leave an Undo notice. Resolves once its shortcuts listen.
+ */
+async function mountLifecycleThread(options: { running?: boolean } = {}): Promise<MountedChatView> {
+  const mounted = await mountChatView({
+    viewport: DEFAULT_VIEWPORT,
+    snapshot: createLifecycleSnapshot(options),
+    configureFixture: enableThreadLifecycle,
+    resolveRpc: (body) =>
+      body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+        ? { sequence: fixture.snapshot.snapshotSequence + 1 }
+        : undefined,
+  });
+  try {
+    await waitForThreadLifecycleShortcuts();
+  } catch (error) {
+    await mounted.cleanup();
+    throw error;
+  }
+  return mounted;
 }
 
 // --- Phone work-surface fixtures (delivery step 8) ---
@@ -2635,6 +2761,9 @@ export function setupChatViewBrowserSuite() {
     await rpcHarness.reset({
       resolveUnary: resolveWsRpc,
       getInitialStreamValues: (request) => {
+        if (fixture.unservedStreams?.has(request._tag) === true) {
+          return new WsRpcUnservedStream();
+        }
         if (request._tag === WS_METHODS.subscribeServerLifecycle) {
           return [
             {
@@ -2700,6 +2829,7 @@ export function setupChatViewBrowserSuite() {
     await setViewport(DEFAULT_VIEWPORT);
     localStorage.clear();
     useChatPanesStore.setState({ root: null, activeRef: null });
+    useOpenChatTabsStore.setState({ refs: [] });
     usePromptStashStore.setState({ entries: [] });
     document.body.innerHTML = "";
     wsRequests.length = 0;
@@ -2718,6 +2848,9 @@ export function setupChatViewBrowserSuite() {
     resetSavedEnvironmentRegistryStoreForTests();
     resetSavedEnvironmentRuntimeStoreForTests();
     clearRightPanelSessionSearch();
+    // Every test opens the same thread; one left mid-transcript by an earlier
+    // test would reopen there.
+    threadReadingPositions.clear();
     Reflect.deleteProperty(window, "desktopBridge");
     useComposerDraftStore.setState({
       draftsByThreadKey: {},
@@ -2729,9 +2862,15 @@ export function setupChatViewBrowserSuite() {
     useCommandPaletteStore.setState({
       open: false,
       openIntent: null,
+      workspaceSearchMode: null,
     });
     resetProjectNodesDialogStoreForTests();
-    useInboxFilterStore.setState({ draft: "", environmentId: null, status: "all" });
+    useInboxFilterStore.setState({ draft: "", environmentId: null, project: null, status: "all" });
+    // A notice left by an earlier test would take this test's Undo key.
+    sidebarUndo.dispose();
+    // A reveal the palette asked for, left untaken by an earlier test, would
+    // scroll the next settings page.
+    useSettingsSearchRevealStore.setState({ request: null });
     useSidebarFoldStore.getState().reset();
     useStore.setState({
       activeEnvironmentId: null,
@@ -2806,6 +2945,9 @@ export {
   createPromptStashEntry,
   createSnapshotForTargetUser,
   addThreadToSnapshot,
+  createLifecycleSnapshot,
+  enableThreadLifecycle,
+  LIFECYCLE_TURN_COMPLETED_AT,
   toThreadWindowSnapshot,
   threadRefFor,
   threadKeyFor,
@@ -2857,10 +2999,13 @@ export {
   expectComposerActionsContained,
   waitForInteractionModeButton,
   waitForServerConfigToApply,
+  waitForThreadLifecycleShortcuts,
   waitForComposerStashBinding,
   dispatchChatNewShortcut,
   dispatchComposerStashShortcut,
   dispatchThreadPinToggleShortcut,
+  pressLifecycleChord,
+  dispatchedCommandTypes,
   releaseModShortcut,
   triggerChatNewShortcutUntilPath,
   triggerChatNewLocalShortcutUntilPath,
@@ -2868,9 +3013,10 @@ export {
   enableChatNewLocalShortcut,
   enableComposerStashShortcut,
   configureContextHandoffProviders,
+  enableLiveThreadModelSelection,
+  pushThreadModelSelection,
   openCommandPaletteFromTrigger,
-  openNewWorkspaceDialog,
-  expectVisibleComboboxPopupToBeOpaqueAndClipped,
+  openNewWorkspaceDraft,
   createDraftFromChatNewLocalShortcut,
   createDraftFromChatNewShortcut,
   waitForCommandPaletteShortcutLabel,
@@ -2878,6 +3024,7 @@ export {
   getCommandPaletteLegendEntries,
   dispatchInputKey,
   mountChatView,
+  mountLifecycleThread,
   createSnapshotWithWorkSurfaceCheckpoint,
   resolveWorkSurfaceRpc,
   queryPhoneSurfacePopup,

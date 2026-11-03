@@ -5,6 +5,7 @@ import {
   checkpointDiffCacheBytes,
   clearCheckpointDiffCacheForEnvironment,
 } from "../rpc/checkpointDiffAtoms";
+import { clearPullRequestCache, pullRequestCacheBytes } from "../rpc/pullRequestAtoms";
 import {
   clearEnvironmentSnapshotCache,
   listEnvironmentCacheStorage,
@@ -33,7 +34,10 @@ export async function readDeviceCacheUsage(
       const snapshot = snapshots.find((item) => item.environmentId === environmentId);
       const previews = projectFilesCacheStats(environmentId);
       const imageBytes = previews.images + projectIconCacheBytes(environmentId);
-      const fileBytes = previews.files + checkpointDiffCacheBytes(environmentId);
+      const fileBytes =
+        previews.files +
+        checkpointDiffCacheBytes(environmentId) +
+        pullRequestCacheBytes(environmentId);
       const snapshotBytes = snapshot?.payloadBytes ?? 0;
       return {
         environmentId,
@@ -53,5 +57,6 @@ export async function clearDeviceCache(environmentId: EnvironmentId): Promise<vo
   await clearEnvironmentSnapshotCache(environmentId);
   clearProjectFileCache(environmentId);
   clearCheckpointDiffCacheForEnvironment(environmentId);
+  clearPullRequestCache(environmentId);
   clearProjectIconCache(environmentId);
 }

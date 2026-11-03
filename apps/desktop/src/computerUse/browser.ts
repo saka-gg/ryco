@@ -2,12 +2,132 @@ import type { ComputerBrowser, ComputerUseResult } from "@ryco/contracts";
 import { numberArg, record, result, textArg } from "./native.ts";
 import type { ComputerOperationContext } from "./policy.ts";
 import { COMPUTER_CURSOR_HTML } from "./cursor.ts";
+import { MAX_DIALOGS_PER_COMMAND, beginPageDialogScope } from "./browserDialogs.ts";
+import {
+  DIAGNOSTICS_DEFAULT_LIMIT,
+  DIAGNOSTICS_MAX_LIMIT,
+  type BrowserDiagnosticsRead,
+} from "./browserDiagnostics.ts";
 
 export interface BrowserTab {
   id: string;
   title: string;
   url: string;
+  /** The Ryco browser unloaded the page to save memory; using the tab reloads it. */
+  suspended?: boolean;
+  /** Ryco only: shown to the user in the panel or a pop-out window. */
+  presented?: boolean;
+  /** Ryco only: the user is working in this tab right now; the agent should open its own. */
+  userActive?: boolean;
+  /** Ryco only: the agent opened this tab (it belongs to no project). */
+  agentTab?: boolean;
 }
+
+export type BrowserDialogDecision = "accept" | "dismiss";
+/** How the action's page dialogs are answered. Default: alerts accepted, everything else dismissed. */
+export interface BrowserDialogPolicy {
+  dialog?: BrowserDialogDecision;
+  promptText?: string;
+}
+export interface BrowserHandledDialog {
+  kind: "alert" | "confirm" | "prompt" | "beforeunload";
+  message: string;
+  defaultPrompt?: string;
+  action: "accepted" | "dismissed";
+  openedAt: string;
+  /** "command": opened by the action; "background": opened in the agent's own tab between actions. */
+  during: "command" | "background";
+}
+export type BrowserPendingDialog = Omit<BrowserHandledDialog, "action" | "during">;
+export type BrowserFileChooserMode = "selectSingle" | "selectMultiple";
+/** A file chooser the page opened in a hidden tab (intercepted); an upload without ref answers it. */
+export interface BrowserFileChooser {
+  backendNodeId: number;
+  mode: BrowserFileChooserMode;
+}
+/** Input the agent is about to dispatch, so the tab does not count it as the user's. */
+export type ExpectedAgentInput =
+  | { kind: "key"; key: string; alt: boolean; control: boolean; meta: boolean; shift: boolean }
+  | {
+      kind: "mouse";
+      type: "mouseDown" | "mouseWheel" | "contextMenu";
+      x: number;
+      y: number;
+      button?: "left" | "middle" | "right";
+    };
+/** One action's dialog handling; `end` restores the page and reports the dialogs it answered. */
+export interface BrowserCommandScope {
+  end(input?: { failed?: boolean }): Promise<{ dialogs: BrowserHandledDialog[] }>;
+}
+/** Per-tab automation the Ryco browser offers the driver (EmbeddedTabAutomation). */
+export interface BrowserTabAutomation {
+  /** Bumped by every user input in the tab; refs observed under an older epoch are stale. */
+  readonly humanEpoch: number;
+  /** > 0 while the user works in this shown, focused tab. */
+  humanHoldMs(): number;
+  /** A dialog in the user's own tab blocks the page until they answer it. */
+  pendingDialog(): BrowserPendingDialog | null;
+  /** One action's dialog scope; its shim answers dialogs for at most `maxMs`. */
+  begin(
+    policy: BrowserDialogPolicy,
+    signal: AbortSignal,
+    maxMs: number,
+  ): Promise<BrowserCommandScope>;
+  /** Dialogs answered between actions; returned once. */
+  takeBacklog(): BrowserHandledDialog[];
+  /** Returns the release function; call it once the input was dispatched. */
+  expectInput(input: ExpectedAgentInput): () => void;
+  /** The tab's page zoom: CSS pixels per device-independent pixel. */
+  zoomFactor(): number;
+  networkIdle(): { idle: boolean; inFlight: number; quietMs: number };
+  diagnostics(
+    kind: "console" | "network",
+    limit: number,
+    signal: AbortSignal,
+  ): Promise<BrowserDiagnosticsRead>;
+  recordEmulation(change: {
+    viewport?: { width: number; height: number } | null;
+    colorScheme?: "dark" | "light" | null;
+  }): void;
+  /** The agent's overrides as recorded. */
+  emulation(): { viewport?: { width: number; height: number }; colorScheme?: "dark" | "light" };
+  /** The file chooser waiting for an upload without ref (at most 60 s old). */
+  peekFileChooser(): BrowserFileChooser | null;
+  /** Returns the waiting file chooser and forgets it. */
+  takeFileChooser(): BrowserFileChooser | null;
+  /**
+   * A waiting file chooser no result has mentioned yet; each is returned once. `answerable: false`:
+   * a picker without an input element, which no upload can answer.
+   */
+  noteFileChooser(): { mode: BrowserFileChooserMode; answerable?: false } | null;
+}
+/** A server-staged browser upload the desktop validated for one tab (BrowserUploadStore). */
+export interface ResolvedBrowserUpload {
+  readonly tab: string;
+  /** `<upload root>/<uploadId>`. */
+  readonly dir: string;
+  /** Absolute paths of the copies, in request order. */
+  readonly files: string[];
+  /** The workspace files' own names. */
+  readonly names: string[];
+  readonly bytes: number;
+}
+/** The desktop's private upload directory, as the driver uses it. */
+export interface BrowserUploads {
+  /** Validates the copies a request carries; a refusal removes them. */
+  resolve(tab: string, uploadId: unknown, files: unknown): Promise<ResolvedBrowserUpload>;
+  /** The page has (or may have) the files: keep them until it navigates or closes. */
+  retain(upload: ResolvedBrowserUpload): void;
+  /** No page got them: remove them now. */
+  discard(dir: string): Promise<void>;
+}
+/**
+ * A tab's reload since the agent's last command (BrowserTransport.wake). "now": this wake revived
+ * the suspended tab or waited for its reload, so the page was just loaded from its address and has
+ * no history. "earlier": the user or the thumbnail preview revived it and that load had finished;
+ * the page may have moved on since. null: the page the agent last used is still there.
+ */
+export type BrowserTabRevival = "now" | "earlier" | null;
 export interface BrowserTransport {
   tabs(signal: AbortSignal): Promise<BrowserTab[]>;
   open(url: string, visible: boolean, signal: AbortSignal): Promise<BrowserTab>;
@@ -20,6 +140,179 @@ export interface BrowserTransport {
     signal: AbortSignal,
   ): Promise<unknown>;
   stop(): void;
+  /**
+   * Called after claim and activity and before the first command of a BROWSER_MUTATING_ACTIONS action
+   * on `tab`; the returned function runs when the action settles (success or failure). The Ryco
+   * browser ends a user's element pick here and refuses new picks until it runs (browser-picker).
+   * The returned function must tolerate a tab that is gone by then (it also runs after a `close`);
+   * the driver ignores its errors, so they never replace the action's result or error.
+   */
+  beginAgentMutation?(tab: string, signal: AbortSignal): Promise<() => void>;
+  /**
+   * Makes a suspended tab live before CDP use. Reports each suspension once (BrowserTabRevival):
+   * the page state the agent saw, its observations included, is gone.
+   */
+  wake?(tab: string, signal: AbortSignal): Promise<BrowserTabRevival>;
+  /** The tab's dialogs, diagnostics, human-input guard and emulation. Only the Ryco browser has it. */
+  automation?(tab: string): BrowserTabAutomation | undefined;
+}
+
+/**
+ * Actions that change the page or its tab: input, navigation, reload, close, viewport and color
+ * scheme, and file uploads (their change handlers run page code). The driver brackets each with
+ * BrowserTransport.beginAgentMutation, refuses them while the user works in the tab, and answers
+ * the dialogs they open. Reads (tabs, observe, screenshot, wait, console, network) are never in it.
+ */
+export const BROWSER_MUTATING_ACTIONS: ReadonlySet<string> = new Set([
+  "navigate",
+  "reload",
+  "back",
+  "forward",
+  "click",
+  "hover",
+  "fill",
+  "select",
+  "scroll",
+  "type",
+  "key",
+  "close",
+  "resize",
+  "appearance",
+  "upload",
+]);
+
+/** Actions that act on an observed element or the focused one: a reloaded page needs a new observation first. */
+const BROWSER_INTERACTIONS: ReadonlySet<string> = new Set([
+  "click",
+  "fill",
+  "select",
+  "hover",
+  "scroll",
+  "type",
+  "key",
+  "upload",
+]);
+export const REVIVED_TAB_NOTE =
+  "This Ryco tab had been suspended to save memory and was reloaded from its address. Page state such as form input and history was reset, and so were your viewport and color-scheme overrides and the tab's console and network history.";
+export const REVIVED_TAB_ERROR = `${REVIVED_TAB_NOTE} Observe it again before interacting.`;
+const withRevivedNote = (output: ComputerUseResult): ComputerUseResult => ({
+  ...output,
+  content: [...output.content, { type: "text", text: REVIVED_TAB_NOTE }],
+});
+/**
+ * Actions only the Ryco browser offers: they need CDP events, Emulation or file inputs, which the
+ * extension lacks (and the user's real profile is no place for workspace files).
+ */
+const RYCO_ONLY: ReadonlySet<string> = new Set([
+  "console",
+  "network",
+  "resize",
+  "appearance",
+  "upload",
+]);
+/** Actions that can run page code, so a page dialog can open while they run. */
+const DIALOG_SCOPED: ReadonlySet<string> = new Set(
+  [...BROWSER_MUTATING_ACTIONS, "wait"].filter((action) => action !== "close"),
+);
+export const BROWSER_WAIT_DEFAULT_MS = 10_000;
+export const BROWSER_WAIT_MIN_MS = 100;
+export const BROWSER_WAIT_MAX_MS = 30_000;
+export const BROWSER_WAIT_POLL_MS = 100;
+/**
+ * How much longer than its own budget an action's dialog shim may answer dialogs (one CDP command's
+ * guard). Input and emulation actions have no budget of their own; a wait has its timeout.
+ */
+export const BROWSER_DIALOG_SCOPE_SLACK_MS = 15_000;
+const EMULATION_NOTE =
+  "Lasts until the user shows or resizes this tab, you reset it, control stops, or the tab is suspended to save memory.";
+const HUMAN_CHANGED =
+  "The user used this tab after your last observe. Observe it again before interacting.";
+/** The refusal while a page dialog blocks the user's own tab until they answer it. */
+export const BROWSER_PENDING_DIALOG_MESSAGE =
+  "A page dialog in this tab is waiting for the user. Use another tab, or ask the user to answer it.";
+const VIEWPORT_SCRIPT = "({ width: innerWidth, height: innerHeight, devicePixelRatio })";
+const OBSERVE_FIRST = "Observe this document in the current turn before interacting.";
+const NO_FILE_CHOOSER =
+  "Pass the file input's ref, or click its upload button first (a file picker in a tab the user is viewing belongs to the user).";
+const SINGLE_FILE_CHOOSER = "This file chooser accepts one file.";
+
+function integerArg(args: Record<string, unknown>, name: string, min: number, max: number): number {
+  const value = numberArg(args, name, min, max);
+  if (!Number.isInteger(value)) throw new Error(`Invalid ${name}.`);
+  return value;
+}
+function booleanArg(args: Record<string, unknown>, name: string): boolean {
+  const value = args[name];
+  if (value !== undefined && typeof value !== "boolean") throw new Error(`Invalid ${name}.`);
+  return value === true;
+}
+function enumArg<T extends string>(
+  args: Record<string, unknown>,
+  name: string,
+  values: readonly T[],
+): T | undefined {
+  const value = args[name];
+  if (value === undefined) return undefined;
+  if (!values.includes(value as T)) throw new Error(`Invalid ${name}.`);
+  return value as T;
+}
+function dialogPolicy(args: Record<string, unknown>): BrowserDialogPolicy {
+  const dialog = enumArg(args, "dialog", ["accept", "dismiss"] as const);
+  return {
+    ...(dialog === undefined ? {} : { dialog }),
+    ...(args.promptText === undefined ? {} : { promptText: textArg(args, "promptText", 4096) }),
+  };
+}
+function waitTimeout(args: Record<string, unknown>): number {
+  return args.timeout === undefined
+    ? BROWSER_WAIT_DEFAULT_MS
+    : integerArg(args, "timeout", BROWSER_WAIT_MIN_MS, BROWSER_WAIT_MAX_MS);
+}
+/** Refuses agent input, navigation and emulation while the user works in this tab. */
+function refuseWhileUserWorks(automation: BrowserTabAutomation, action: string): void {
+  if (!BROWSER_MUTATING_ACTIONS.has(action)) return;
+  const hold = automation.humanHoldMs();
+  if (hold > 0)
+    throw new Error(
+      `The user is working in this tab. Open your own background tab with action "open" (same URL), or wait ${Math.ceil(hold / 1000)} s and observe again.`,
+    );
+}
+/** Resolves after `ms`, or at once when the operation is cancelled (its next check throws). */
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+function withDialogs(
+  value: ComputerUseResult,
+  dialogs: readonly BrowserHandledDialog[],
+): ComputerUseResult {
+  if (dialogs.length === 0) return value;
+  return {
+    ...value,
+    content: [...value.content, { type: "text", text: JSON.stringify({ dialogs }) }],
+  };
+}
+function withFileChooser(
+  value: ComputerUseResult,
+  fileChooser: { mode: BrowserFileChooserMode; answerable?: false } | null | undefined,
+): ComputerUseResult {
+  if (!fileChooser) return value;
+  const text = JSON.stringify({
+    fileChooser,
+    next:
+      fileChooser.answerable === false
+        ? "This picker has no file input, so upload cannot answer it. Upload into an <input type=file> from observe by ref, or tell the user this site's picker is not supported."
+        : "Call upload with paths and no ref to answer it.",
+  });
+  return { ...value, content: [...value.content, { type: "text", text }] };
 }
 
 export function browserUrl(value: string): string {
@@ -29,23 +322,40 @@ export function browserUrl(value: string): string {
   return url.href;
 }
 
-// Runs in a CDP isolated world. Neither the model nor page scripts choose this code.
-export const BROWSER_SNAPSHOT_SCRIPT = `(() => {
+/**
+ * The observe snapshot. Runs in a CDP isolated world; neither the model nor page scripts choose this
+ * code. With `hiddenFileInputs` (the Ryco browser, the only one that can upload) it also lists
+ * `<input type=file>` elements that are not visible, since most sites hide them behind a styled
+ * button, and marks file inputs with `type`, `multiple`, `accept` and `hidden`.
+ */
+export function browserSnapshotScript(options: { hiddenFileInputs: boolean }): string {
+  const files = options.hiddenFileInputs;
+  return `(() => {
   const refs = new Map(); let next = 0; const rows = [];
   const visible = el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
   const walk = root => { for (const el of root.querySelectorAll('*')) {
     if (next >= 500) break;
-    if (el.shadowRoot) walk(el.shadowRoot);
-    if (!visible(el) || el.id === '__ryco_agent_cursor') continue;
+    if (el.shadowRoot) walk(el.shadowRoot);${
+      files
+        ? `
+    const file = el instanceof HTMLInputElement && el.type === 'file';`
+        : ""
+    }
+    if (${files ? "(!visible(el) && !file)" : "!visible(el)"} || el.id === '__ryco_agent_cursor') continue;
     if (!el.matches('a,button,input,textarea,select,summary,[role],[contenteditable="true"]')) continue;
     const ref = 'e' + (++next); refs.set(ref, el);
     const role = el.getAttribute('role') || el.tagName.toLowerCase();
-    const name = (el.getAttribute('aria-label') || el.labels?.[0]?.innerText || el.innerText || el.getAttribute('placeholder') || '').trim().slice(0, 160);
-    rows.push({ref, role, name, disabled: !!el.disabled, ...(el.tagName === 'SELECT' ? {options: Array.from(el.options).slice(0,50).map(o => ({label:o.label,value:o.value}))} : {})});
+    const name = (el.getAttribute('aria-label') || el.labels?.[0]?.innerText || el.innerText || el.getAttribute('placeholder') || ${files ? "(file && el.getAttribute('name')) || " : ""}'').trim().slice(0, 160);
+    rows.push({ref, role, name, disabled: !!el.disabled, ...(el.tagName === 'SELECT' ? {options: Array.from(el.options).slice(0,50).map(o => ({label:o.label,value:o.value}))} : {})${files ? ", ...(file ? {type: 'file', multiple: el.multiple, accept: (el.accept || '').slice(0, 160), hidden: !visible(el)} : {})" : ""}});
   }};
   walk(document); globalThis.__rycoRefs = refs;
   return { title: document.title, url: location.href, text: (document.body?.innerText || '').slice(0,24000), elements: rows, truncated: next >= 500 };
 })()`;
+}
+/** Paired Chrome/Brave/Edge: visible elements only. */
+export const BROWSER_SNAPSHOT_SCRIPT = browserSnapshotScript({ hiddenFileInputs: false });
+/** The Ryco browser: hidden file inputs too, so upload can target them. */
+export const RYCO_BROWSER_SNAPSHOT_SCRIPT = browserSnapshotScript({ hiddenFileInputs: true });
 
 export function browserCursorScript(x: number, y: number): string {
   return `(() => {
@@ -60,6 +370,39 @@ export function browserCursorScript(x: number, y: number): string {
     cursor.style.visibility='visible'; cursor.style.transform='translate(${x}px,${y}px)';
     cursor.animate([{filter:'drop-shadow(0 0 0px #b1a4ff)'},{filter:'drop-shadow(0 0 9px #b1a4ff)'},{filter:'drop-shadow(0 0 0px #b1a4ff)'}],{duration:350});
     return new Promise(resolve => setTimeout(() => resolve(true), document.hidden ? 0 : 160));
+  })()`;
+}
+
+/**
+ * One `wait` poll in the isolated world. The model's selector and text arrive only as JSON data;
+ * an invalid selector is reported instead of thrown.
+ */
+export function browserWaitScript(input: { selector?: string; text?: string }): string {
+  return `(() => {
+    const input = ${JSON.stringify(input)};
+    const visible = el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
+    let selector = null;
+    if (input.selector !== undefined) {
+      let all; try { all = document.querySelectorAll(input.selector); } catch { return { invalidSelector: true }; }
+      selector = false; for (let i = 0; i < Math.min(all.length, 200); i++) if (visible(all[i])) { selector = true; break; }
+    }
+    const text = input.text === undefined ? null : (document.body?.innerText || '').includes(input.text);
+    return { selector, text, url: location.href, title: document.title, readyState: document.readyState };
+  })()`;
+}
+
+/**
+ * The observed element for an upload, as a remote object for DOM.setFileInputFiles: a connected,
+ * enabled file input that takes `count` files. Hidden inputs are fine (sites hide them).
+ */
+function uploadTargetScript(ref: string, count: number): string {
+  return `(() => {
+    const el = globalThis.__rycoRefs?.get(${JSON.stringify(ref)});
+    if (!el?.isConnected) throw Error('stale');
+    if (!(el instanceof HTMLInputElement) || el.type !== 'file') throw Error('not a file input');
+    if (el.matches(':disabled') || el.closest('[inert]')) throw Error('disabled');
+    if (!el.multiple && ${count} > 1) throw Error('single file');
+    return el;
   })()`;
 }
 
@@ -98,15 +441,32 @@ interface Observation {
   transport: BrowserTransport;
   contextId: number;
   document: string;
+  /** The main frame's loader when the isolated world was made; a new document has a new one. */
+  loaderId: string;
   observed: boolean;
   scope: string;
+  /** The tab's human epoch when it was observed (Ryco browser; 0 elsewhere). */
+  humanEpoch: number;
+}
+
+interface MainFrame {
+  id: unknown;
+  loaderId: string;
 }
 
 export class BrowserComputerDriver {
   private readonly observations = new Map<string, Observation>();
   private readonly transports: Map<ComputerBrowser, BrowserTransport>;
-  constructor(transports: Map<ComputerBrowser, BrowserTransport>) {
+  /** The desktop's upload directory; null while it is unavailable. */
+  private readonly uploads: () => BrowserUploads | null;
+  /** Dialogs that failed actions in a paired browser's tab answered, for that tab's next result. */
+  private readonly pageDialogs = new Map<string, BrowserHandledDialog[]>();
+  constructor(
+    transports: Map<ComputerBrowser, BrowserTransport>,
+    options: { uploads?: () => BrowserUploads | null } = {},
+  ) {
     this.transports = transports;
+    this.uploads = options.uploads ?? (() => null);
   }
 
   private async evaluate(
@@ -160,9 +520,26 @@ export class BrowserComputerDriver {
     }
     const tab = textArg(args, "tab");
     const tabs = await transport.tabs(context.signal);
+    this.forgetClosedTabDialogs(browser, tabs);
     const target = tabs.find((item) => item.id === tab);
     if (!target) throw new Error("Tab is no longer available. List tabs again.");
     if (target.url !== "about:blank") browserUrl(target.url);
+    // Refusals that need no claim: the target stays free for the user and other turns.
+    // The capability belongs to the transport, not to the page: a tab whose page is not live yet
+    // (suspended) still offers it once the page is back.
+    const automates = transport.automation !== undefined;
+    if (!automates) {
+      if (RYCO_ONLY.has(action)) throw new Error(`${action} is available only for browser "ryco".`);
+      if (action === "wait" && args.idle === "network")
+        throw new Error('wait idle:"network" is available only for browser "ryco".');
+    }
+    const early = transport.automation?.(tab);
+    if (early?.pendingDialog() && action !== "close")
+      throw new Error(BROWSER_PENDING_DIALOG_MESSAGE);
+    if (early) refuseWhileUserWorks(early, action);
+    const policy = DIALOG_SCOPED.has(action) ? dialogPolicy(args) : undefined;
+    // A wait's shim answers dialogs for as long as the wait may run.
+    const scopeMs = (action === "wait" ? waitTimeout(args) : 0) + BROWSER_DIALOG_SCOPE_SLACK_MS;
     context.claim(`browser:${browser}:${tab}`);
     context.check();
     await context.activity({
@@ -170,17 +547,174 @@ export class BrowserComputerDriver {
       mode: visible ? "foreground" : "background",
       action: action === "observe" ? "find_elements" : action,
     });
-    if (action === "show") {
-      await transport.show(tab, context.signal);
-      return result(
-        browser === "ryco" ? { shown: false, presentation: "workspace" } : { shown: true },
+    const endMutation = BROWSER_MUTATING_ACTIONS.has(action)
+      ? await transport.beginAgentMutation?.(tab, context.signal)
+      : undefined;
+    try {
+      if (endMutation) context.check(); // The bracket may have waited.
+      if (action === "show") {
+        await transport.show(tab, context.signal);
+        return result(
+          browser === "ryco" ? { shown: false, presentation: "workspace" } : { shown: true },
+        );
+      }
+      if (action === "close") {
+        await transport.close(tab, context.signal);
+        this.observations.delete(`${browser}:${tab}`);
+        this.pageDialogs.delete(`${browser}:${tab}`);
+        return result({ closed: true });
+      }
+      // A tab the Ryco browser suspended reloads first; the page state the agent saw is gone.
+      const revival = transport.wake ? await transport.wake(tab, context.signal) : null;
+      if (transport.wake) context.check(); // The reload may have waited.
+      if (revival) {
+        this.observations.delete(`${browser}:${tab}`);
+        // Only a page loaded just now makes a reload redundant and has no history to go to; one
+        // the user revived earlier may have reloaded stale content or built new history since.
+        if (revival === "now") {
+          if (action === "reload") return withRevivedNote(result({ reloaded: true }));
+          if (action === "back" || action === "forward") throw new Error(REVIVED_TAB_ERROR);
+        }
+        if (BROWSER_INTERACTIONS.has(action)) throw new Error(REVIVED_TAB_ERROR);
+      }
+      // The page as it is now (browser-tab-budget's wake revives a suspended one right above this):
+      // its guards apply again, since the checks before the claim may have seen no page or an
+      // older one.
+      const automation = transport.automation?.(tab);
+      if (
+        automates &&
+        !automation &&
+        (RYCO_ONLY.has(action) || (action === "wait" && args.idle === "network"))
+      )
+        throw new Error("Browser tab closed.");
+      if (automation?.pendingDialog()) throw new Error(BROWSER_PENDING_DIALOG_MESSAGE);
+      if (automation) refuseWhileUserWorks(automation, action);
+      // Dialogs the action's page code opens are answered while it runs: the Ryco browser's tab
+      // automation, or a main-world shim over a paired browser's Runtime.evaluate.
+      const scope = !policy
+        ? undefined
+        : automation
+          ? await automation.begin(policy, context.signal, scopeMs)
+          : automates
+            ? undefined
+            : await beginPageDialogScope(
+                (params, signal) => transport.send(tab, "Runtime.evaluate", params, signal),
+                policy,
+                scopeMs,
+                context.signal,
+              );
+      let value: ComputerUseResult;
+      try {
+        value = await this.act(context, browser, transport, tab, target, action, automation);
+      } catch (error) {
+        const ended = await scope?.end({ failed: true });
+        // The Ryco browser keeps a failed action's dialogs itself (and returns none here).
+        if (ended?.dialogs.length) this.keepPageDialogs(`${browser}:${tab}`, ended.dialogs);
+        throw error;
+      }
+      const answered = scope ? (await scope.end()).dialogs : (automation?.takeBacklog() ?? []);
+      const dialogs = automates ? answered : this.takePageDialogs(`${browser}:${tab}`, answered);
+      // A file chooser the page opened in this hidden tab, also one an earlier click opened late.
+      const output = withFileChooser(withDialogs(value, dialogs), automation?.noteFileChooser());
+      return revival ? withRevivedNote(output) : output;
+    } finally {
+      try {
+        endMutation?.();
+      } catch {
+        // The bracket's end only lifts the transport's own restrictions; the action's outcome stands.
+      }
+    }
+  }
+
+  /** Kept records of tabs the browser no longer lists (the user closed them, a session ended). */
+  private forgetClosedTabDialogs(browser: ComputerBrowser, tabs: readonly BrowserTab[]): void {
+    if (this.pageDialogs.size === 0) return;
+    const open = new Set(tabs.map((item) => `${browser}:${item.id}`));
+    for (const key of this.pageDialogs.keys()) {
+      if (key.startsWith(`${browser}:`) && !open.has(key)) this.pageDialogs.delete(key);
+    }
+  }
+
+  private keepPageDialogs(key: string, dialogs: readonly BrowserHandledDialog[]): void {
+    const kept = [...(this.pageDialogs.get(key) ?? []), ...dialogs];
+    this.pageDialogs.set(key, kept.slice(-MAX_DIALOGS_PER_COMMAND));
+  }
+
+  private takePageDialogs(
+    key: string,
+    dialogs: readonly BrowserHandledDialog[],
+  ): BrowserHandledDialog[] {
+    const kept = this.pageDialogs.get(key);
+    if (!kept) return [...dialogs];
+    this.pageDialogs.delete(key);
+    return [...kept, ...dialogs].slice(-MAX_DIALOGS_PER_COMMAND);
+  }
+
+  private async mainFrame(
+    transport: BrowserTransport,
+    tab: string,
+    signal: AbortSignal,
+  ): Promise<MainFrame> {
+    const frameTree = record(await transport.send(tab, "Page.getFrameTree", {}, signal));
+    const frame = record(record(frameTree.frameTree).frame);
+    return { id: frame.id, loaderId: String(frame.loaderId) };
+  }
+
+  /** The isolated world for the tab's current document, kept while document and turn stay. */
+  private async world(
+    context: ComputerOperationContext,
+    browser: ComputerBrowser,
+    transport: BrowserTransport,
+    tab: string,
+    documentUrl: string,
+    known?: MainFrame,
+  ): Promise<Observation> {
+    const frame = known ?? (await this.mainFrame(transport, tab, context.signal));
+    const document = `${frame.id}:${frame.loaderId}:${documentUrl}`;
+    const key = `${browser}:${tab}`;
+    const scope = JSON.stringify([context.request.sessionId, context.request.turnId]);
+    let observation = this.observations.get(key);
+    if (
+      !observation ||
+      observation.transport !== transport ||
+      observation.document !== document ||
+      observation.scope !== scope
+    ) {
+      const world = record(
+        await transport.send(
+          tab,
+          "Page.createIsolatedWorld",
+          { frameId: frame.id, worldName: "ryco-computer-use" },
+          context.signal,
+        ),
       );
+      observation = {
+        transport,
+        contextId: numberArg(world, "executionContextId", 0, Number.MAX_SAFE_INTEGER),
+        document,
+        loaderId: frame.loaderId,
+        observed: false,
+        scope,
+        humanEpoch: 0,
+      };
+      this.observations.set(key, observation);
+      while (this.observations.size > 2_000)
+        this.observations.delete(this.observations.keys().next().value!);
     }
-    if (action === "close") {
-      await transport.close(tab, context.signal);
-      this.observations.delete(`${browser}:${tab}`);
-      return result({ closed: true });
-    }
+    return observation;
+  }
+
+  /** Everything after show/close: history, navigation, observe, screenshot and the interactions. */
+  private async act(
+    context: ComputerOperationContext,
+    browser: ComputerBrowser,
+    transport: BrowserTransport,
+    tab: string,
+    target: BrowserTab,
+    action: string,
+    automation: BrowserTabAutomation | undefined,
+  ): Promise<ComputerUseResult> {
+    const args = context.request.args;
     if (action === "reload" || action === "back" || action === "forward") {
       this.observations.delete(`${browser}:${tab}`);
       if (action === "reload")
@@ -214,44 +748,28 @@ export class BrowserComputerDriver {
         ),
       );
     }
-    const frameTree = record(await transport.send(tab, "Page.getFrameTree", {}, context.signal));
-    const frame = record(record(frameTree.frameTree).frame);
-    const document = `${frame.id}:${frame.loaderId}:${target.url}`;
-    const key = `${browser}:${tab}`;
-    const scope = JSON.stringify([context.request.sessionId, context.request.turnId]);
-    let observation = this.observations.get(key);
-    if (
-      !observation ||
-      observation.transport !== transport ||
-      observation.document !== document ||
-      observation.scope !== scope
-    ) {
-      const world = record(
-        await transport.send(
-          tab,
-          "Page.createIsolatedWorld",
-          { frameId: frame.id, worldName: "ryco-computer-use" },
-          context.signal,
-        ),
-      );
-      observation = {
-        transport,
-        contextId: numberArg(world, "executionContextId", 0, Number.MAX_SAFE_INTEGER),
-        document,
-        observed: false,
-        scope,
-      };
-      this.observations.set(key, observation);
-      while (this.observations.size > 2_000)
-        this.observations.delete(this.observations.keys().next().value!);
+    if ((action === "console" || action === "network") && automation) {
+      const limit =
+        args.limit === undefined
+          ? DIAGNOSTICS_DEFAULT_LIMIT
+          : integerArg(args, "limit", 1, DIAGNOSTICS_MAX_LIMIT);
+      return result(await automation.diagnostics(action, limit, context.signal));
     }
+    if (action === "upload" && automation)
+      return this.upload(context, browser, transport, tab, target, automation);
+    const observation = await this.world(context, browser, transport, tab, target.url);
     const evaluate = (expression: string) => {
       context.check();
       return this.evaluate(transport, tab, expression, observation.contextId, context.signal);
     };
     if (action === "observe") {
-      const state = await evaluate(BROWSER_SNAPSHOT_SCRIPT);
+      // Input during the snapshot already makes its refs stale.
+      const humanEpoch = automation?.humanEpoch ?? 0;
+      const state = await evaluate(
+        browser === "ryco" ? RYCO_BROWSER_SNAPSHOT_SCRIPT : BROWSER_SNAPSHOT_SCRIPT,
+      );
       observation.observed = true;
+      observation.humanEpoch = humanEpoch;
       return result(state);
     }
     if (action === "screenshot") {
@@ -278,8 +796,90 @@ export class BrowserComputerDriver {
         ).catch(() => undefined);
       }
     }
-    if (!observation.observed)
-      throw new Error("Observe this document in the current turn before interacting.");
+    if (action === "wait")
+      return this.wait(context, browser, transport, tab, observation, automation);
+    if (action === "resize" && automation) {
+      const reset = booleanArg(args, "reset");
+      const width = reset ? 0 : integerArg(args, "width", 320, 3840);
+      const height = reset ? 0 : integerArg(args, "height", 240, 2160);
+      context.check();
+      const previous = reset ? automation.emulation().viewport : undefined;
+      if (reset) {
+        await transport.send(tab, "Emulation.clearDeviceMetricsOverride", {}, context.signal);
+        automation.recordEmulation({ viewport: null });
+      } else {
+        // Recorded first: an override that lands just before an abort is still cleared later.
+        automation.recordEmulation({ viewport: { width, height } });
+        await transport.send(
+          tab,
+          "Emulation.setDeviceMetricsOverride",
+          // deviceScaleFactor 0 keeps the screen's own ratio.
+          {
+            width,
+            height,
+            deviceScaleFactor: 0,
+            mobile: false,
+            screenWidth: width,
+            screenHeight: height,
+          },
+          context.signal,
+        );
+      }
+      // The renderer applies the new metrics (and a reset) asynchronously; report them once the
+      // page sees them. The override is in device-independent pixels; the page measures CSS pixels
+      // at its zoom.
+      const zoom = automation.zoomFactor();
+      const near = (value: unknown, pixels: number) => Math.abs(Number(value) - pixels / zoom) <= 1;
+      let viewport = record(await evaluate(VIEWPORT_SCRIPT));
+      const settled = () =>
+        reset
+          ? previous === undefined ||
+            !(near(viewport.width, previous.width) && near(viewport.height, previous.height))
+          : viewport.width === width || near(viewport.width, width);
+      for (let attempt = 0; !settled() && attempt < 10; attempt += 1) {
+        await pause(50, context.signal);
+        viewport = record(await evaluate(VIEWPORT_SCRIPT));
+      }
+      return result(
+        reset
+          ? { viewport, note: "The viewport follows the tab's size again." }
+          : { viewport, note: EMULATION_NOTE },
+      );
+    }
+    if (action === "appearance" && automation) {
+      const scheme = enumArg(args, "scheme", ["dark", "light", "system"] as const);
+      if (scheme === undefined) throw new Error("Invalid scheme.");
+      context.check();
+      // A forced scheme is recorded first (see resize); going back to the system's only once sent.
+      if (scheme !== "system") automation.recordEmulation({ colorScheme: scheme });
+      await transport.send(
+        tab,
+        "Emulation.setEmulatedMedia",
+        { features: [{ name: "prefers-color-scheme", value: scheme === "system" ? "" : scheme }] },
+        context.signal,
+      );
+      if (scheme === "system") automation.recordEmulation({ colorScheme: null });
+      const prefersDark = await evaluate("matchMedia('(prefers-color-scheme: dark)').matches");
+      return result({
+        scheme,
+        prefersDark,
+        ...(scheme === "system" ? {} : { note: EMULATION_NOTE }),
+      });
+    }
+    if (!observation.observed) throw new Error(OBSERVE_FIRST);
+    if (automation && observation.humanEpoch !== automation.humanEpoch) {
+      observation.observed = false;
+      throw new Error(HUMAN_CHANGED);
+    }
+    // The user can start working in the tab while the action validates its target; check again
+    // right before each input-dispatching command. Input that lands after it fails the next one.
+    const assertHumanUnchanged = () => {
+      if (!automation) return;
+      if (automation.humanEpoch !== observation.humanEpoch || automation.humanHoldMs() > 0) {
+        observation.observed = false;
+        throw new Error(HUMAN_CHANGED);
+      }
+    };
     if (action === "click" || action === "fill" || action === "select" || action === "hover") {
       const value =
         action === "fill" || action === "select"
@@ -303,6 +903,7 @@ export class BrowserComputerDriver {
       const validate = `const {el,x,y}=${elementActionScript(ref, action, value)};
         if(Math.abs(x-${x})>1 || Math.abs(y-${y})>1) throw Error('target moved');`;
       if (action === "fill" || action === "select") {
+        assertHumanUnchanged();
         // Do not click a select first: its native popup can intercept later input.
         await evaluate(`(() => { ${validate}
           el.focus({preventScroll:true});
@@ -314,18 +915,30 @@ export class BrowserComputerDriver {
       } else {
         await evaluate(`(() => { ${validate} return true; })()`);
         if (action === "hover") return result({ delivered: "background" });
-        await transport.send(
-          tab,
-          "Input.dispatchMouseEvent",
-          { type: "mousePressed", x, y, button: "left", clickCount: 1 },
-          context.signal,
-        );
-        await transport.send(
-          tab,
-          "Input.dispatchMouseEvent",
-          { type: "mouseReleased", x, y, button: "left", clickCount: 1 },
-          context.signal,
-        );
+        assertHumanUnchanged();
+        const release = automation?.expectInput({
+          kind: "mouse",
+          type: "mouseDown",
+          x,
+          y,
+          button: "left",
+        });
+        try {
+          await transport.send(
+            tab,
+            "Input.dispatchMouseEvent",
+            { type: "mousePressed", x, y, button: "left", clickCount: 1 },
+            context.signal,
+          );
+          await transport.send(
+            tab,
+            "Input.dispatchMouseEvent",
+            { type: "mouseReleased", x, y, button: "left", clickCount: 1 },
+            context.signal,
+          );
+        } finally {
+          release?.();
+        }
       }
       return result({ delivered: "background", verify: "Observe the page to verify the result." });
     }
@@ -333,30 +946,32 @@ export class BrowserComputerDriver {
       const x = args.x === undefined ? 400 : numberArg(args, "x");
       const y = args.y === undefined ? 300 : numberArg(args, "y");
       await evaluate(browserCursorScript(x, y));
-      return result(
-        await transport.send(
-          tab,
-          "Input.dispatchMouseEvent",
-          {
-            type: "mouseWheel",
-            x,
-            y,
-            deltaX: args.scrollX === undefined ? 0 : numberArg(args, "scrollX", -5000, 5000),
-            deltaY: numberArg(args, "scrollY", -5000, 5000),
-          },
-          context.signal,
-        ),
-      );
+      assertHumanUnchanged();
+      const release = automation?.expectInput({ kind: "mouse", type: "mouseWheel", x, y });
+      try {
+        return result(
+          await transport.send(
+            tab,
+            "Input.dispatchMouseEvent",
+            {
+              type: "mouseWheel",
+              x,
+              y,
+              deltaX: args.scrollX === undefined ? 0 : numberArg(args, "scrollX", -5000, 5000),
+              deltaY: numberArg(args, "scrollY", -5000, 5000),
+            },
+            context.signal,
+          ),
+        );
+      } finally {
+        release?.();
+      }
     }
-    if (action === "type")
-      return result(
-        await transport.send(
-          tab,
-          "Input.insertText",
-          { text: textArg(args, "text", 20_000) },
-          context.signal,
-        ),
-      );
+    if (action === "type") {
+      const text = textArg(args, "text", 20_000);
+      assertHumanUnchanged();
+      return result(await transport.send(tab, "Input.insertText", { text }, context.signal));
+    }
     if (action === "key") {
       const keys: Record<string, number> = {
         Enter: 13,
@@ -379,21 +994,232 @@ export class BrowserComputerDriver {
         throw new Error(
           "Unsupported browser key. Use Enter, Tab, Escape, Backspace, Delete, arrows, Home, End, PageUp or PageDown.",
         );
-      await transport.send(
-        tab,
-        "Input.dispatchKeyEvent",
-        { type: "keyDown", key: keyName, windowsVirtualKeyCode: code },
-        context.signal,
-      );
-      await transport.send(
-        tab,
-        "Input.dispatchKeyEvent",
-        { type: "keyUp", key: keyName, windowsVirtualKeyCode: code },
-        context.signal,
-      );
+      assertHumanUnchanged();
+      const release = automation?.expectInput({
+        kind: "key",
+        key: keyName,
+        alt: false,
+        control: false,
+        meta: false,
+        shift: false,
+      });
+      try {
+        await transport.send(
+          tab,
+          "Input.dispatchKeyEvent",
+          { type: "keyDown", key: keyName, windowsVirtualKeyCode: code },
+          context.signal,
+        );
+        await transport.send(
+          tab,
+          "Input.dispatchKeyEvent",
+          { type: "keyUp", key: keyName, windowsVirtualKeyCode: code },
+          context.signal,
+        );
+      } finally {
+        release?.();
+      }
       return result({ delivered: "background" });
     }
     throw new Error("Unknown browser action.");
+  }
+
+  /**
+   * Puts server-staged copies of workspace files into an observed `<input type=file>` (ref) or the
+   * file chooser the page opened in this hidden tab (no ref). Chromium only ever gets paths the
+   * upload store validated inside its private directory. Copies a page may have stay with it until
+   * it navigates or closes; refusals before dispatch remove them at once (and refusals before the
+   * store saw them are removed when the desktop request ends).
+   */
+  private async upload(
+    context: ComputerOperationContext,
+    browser: ComputerBrowser,
+    transport: BrowserTransport,
+    tab: string,
+    target: BrowserTab,
+    automation: BrowserTabAutomation,
+  ): Promise<ComputerUseResult> {
+    const store = this.uploads();
+    if (!store) throw new Error("Browser upload is unavailable in this desktop session.");
+    const args = context.request.args;
+    let input: { observation: Observation; ref: string } | undefined;
+    if (args.ref !== undefined) {
+      const ref = textArg(args, "ref", 16);
+      const observation = await this.world(context, browser, transport, tab, target.url);
+      if (!observation.observed) throw new Error(OBSERVE_FIRST);
+      if (observation.humanEpoch !== automation.humanEpoch) {
+        observation.observed = false;
+        throw new Error(HUMAN_CHANGED);
+      }
+      input = { observation, ref };
+    } else {
+      // Refused before the copies are validated: nothing could take them.
+      const chooser = automation.peekFileChooser();
+      if (!chooser) throw new Error(NO_FILE_CHOOSER);
+      if (chooser.mode === "selectSingle" && Array.isArray(args.files) && args.files.length > 1)
+        throw new Error(SINGLE_FILE_CHOOSER);
+    }
+    context.check();
+    const staged = await store.resolve(tab, args.uploadId, args.files);
+    let dispatched = false;
+    try {
+      if (input) {
+        const { observation, ref } = input;
+        context.check();
+        const response = record(
+          await transport.send(
+            tab,
+            "Runtime.evaluate",
+            {
+              expression: uploadTargetScript(ref, staged.files.length),
+              contextId: observation.contextId,
+              returnByValue: false,
+            },
+            context.signal,
+          ),
+        );
+        if (response.exceptionDetails)
+          throw new Error(
+            "That element is not an enabled file input for these files. Observe again.",
+          );
+        const objectId = textArg(record(response.result), "objectId", 1024);
+        try {
+          // The user can start working in the tab while the target is checked.
+          if (automation.humanEpoch !== observation.humanEpoch || automation.humanHoldMs() > 0) {
+            observation.observed = false;
+            throw new Error(HUMAN_CHANGED);
+          }
+          context.check();
+          dispatched = true;
+          await transport.send(
+            tab,
+            "DOM.setFileInputFiles",
+            { files: staged.files, objectId },
+            context.signal,
+          );
+        } finally {
+          await transport
+            .send(tab, "Runtime.releaseObject", { objectId }, context.signal)
+            .catch(() => undefined);
+        }
+      } else {
+        const chooser = automation.peekFileChooser();
+        if (!chooser) throw new Error(NO_FILE_CHOOSER);
+        if (chooser.mode === "selectSingle" && staged.files.length > 1)
+          throw new Error(SINGLE_FILE_CHOOSER);
+        context.check();
+        automation.takeFileChooser();
+        dispatched = true;
+        await transport.send(
+          tab,
+          "DOM.setFileInputFiles",
+          { files: staged.files, backendNodeId: chooser.backendNodeId },
+          context.signal,
+        );
+      }
+      store.retain(staged);
+      return result({
+        uploaded: staged.names,
+        verify: "Observe the page to verify the selection.",
+      });
+    } catch (error) {
+      // A CDP call that failed may still have reached the page: its copies stay with the page.
+      if (dispatched) store.retain(staged);
+      else await store.discard(staged.dir);
+      throw error;
+    }
+  }
+
+  /** Polls until every given condition holds, or throws when the timeout passes. */
+  private async wait(
+    context: ComputerOperationContext,
+    browser: ComputerBrowser,
+    transport: BrowserTransport,
+    tab: string,
+    initial: Observation,
+    automation: BrowserTabAutomation | undefined,
+  ): Promise<ComputerUseResult> {
+    const args = context.request.args;
+    const selector = args.selector === undefined ? undefined : textArg(args, "selector", 1024);
+    const text = args.text === undefined ? undefined : textArg(args, "text", 1024);
+    const urlIncludes =
+      args.urlIncludes === undefined ? undefined : textArg(args, "urlIncludes", 2048);
+    const idle = enumArg(args, "idle", ["network", "load"] as const);
+    const gone = booleanArg(args, "gone");
+    const timeout = waitTimeout(args);
+    if (selector === undefined && text === undefined && urlIncludes === undefined && !idle)
+      throw new Error("Give wait a selector, text, urlIncludes or idle condition.");
+    if (gone && selector === undefined && text === undefined)
+      throw new Error("gone applies to selector or text.");
+    const script = browserWaitScript({
+      ...(selector === undefined ? {} : { selector }),
+      ...(text === undefined ? {} : { text }),
+    });
+    const started = Date.now();
+    const deadline = started + timeout;
+    let observation = initial;
+    let documentChanged = false;
+    for (;;) {
+      context.check();
+      // The page is blocked until the user answers; its next command would only time out.
+      if (automation?.pendingDialog()) throw new Error(BROWSER_PENDING_DIALOG_MESSAGE);
+      const frame = await this.mainFrame(transport, tab, context.signal);
+      if (frame.loaderId !== observation.loaderId) {
+        // A new document: refresh the tab's URL the way execute() does, then a fresh world.
+        const fresh = (await transport.tabs(context.signal)).find((item) => item.id === tab);
+        if (!fresh) throw new Error("Tab is no longer available. List tabs again.");
+        if (fresh.url !== "about:blank") browserUrl(fresh.url);
+        observation = await this.world(context, browser, transport, tab, fresh.url, frame);
+        documentChanged = true;
+      }
+      let state: Record<string, unknown> | undefined;
+      try {
+        context.check();
+        state = record(
+          await this.evaluate(transport, tab, script, observation.contextId, context.signal),
+        );
+      } catch (error) {
+        // A navigation can replace the document between the frame check and the evaluate.
+        context.check();
+        if (
+          (await this.mainFrame(transport, tab, context.signal)).loaderId === observation.loaderId
+        )
+          throw error;
+      }
+      if (state?.invalidSelector === true) throw new Error("Invalid CSS selector.");
+      const unmet: string[] = [];
+      if (state) {
+        if (selector !== undefined && state.selector !== !gone)
+          unmet.push(gone ? "the selector to disappear" : "the selector to appear");
+        if (text !== undefined && state.text !== !gone)
+          unmet.push(gone ? "the text to disappear" : "the text to appear");
+        if (urlIncludes !== undefined && !String(state.url ?? "").includes(urlIncludes))
+          unmet.push("the URL to match urlIncludes");
+        if (idle === "load" && state.readyState !== "complete") unmet.push("the page to load");
+      } else unmet.push("the new document");
+      if (idle === "network") {
+        const network = automation?.networkIdle();
+        if (!network?.idle)
+          unmet.push(`network idle (${network?.inFlight ?? 0} requests in flight)`);
+      }
+      if (unmet.length === 0 && state)
+        return result({
+          matched: true,
+          elapsedMs: Date.now() - started,
+          url: state.url,
+          title: state.title,
+          documentChanged,
+          ...(documentChanged
+            ? { verify: "The document changed; observe again before interacting." }
+            : {}),
+        });
+      const remaining = deadline - Date.now();
+      if (remaining <= 0)
+        throw new Error(
+          `Wait timed out after ${timeout} ms; still waiting for ${unmet.join(", ")}.`,
+        );
+      await pause(Math.min(BROWSER_WAIT_POLL_MS, remaining), context.signal);
+    }
   }
 
   stop(): void {

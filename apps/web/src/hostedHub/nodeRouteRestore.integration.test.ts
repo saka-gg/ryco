@@ -109,7 +109,6 @@ function serverConfig() {
       capabilities: {
         repositoryIdentity: false,
         threadSettlement: false,
-        threadPriorityRanking: false,
       },
     },
   };

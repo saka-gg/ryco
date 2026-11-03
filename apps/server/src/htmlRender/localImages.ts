@@ -11,11 +11,11 @@
  *
  * @module localImages
  */
-import { constants } from "node:fs";
 import * as NodeFs from "node:fs/promises";
 import * as NodePath from "node:path";
 
 import { HTML_RENDER_MAX_IMAGE_BYTES, HTML_RENDER_MAX_PAGE_BYTES } from "@ryco/shared/htmlRender";
+import { REGULAR_FILE_READ_FLAGS } from "@ryco/shared/regularFile";
 import { Effect } from "effect";
 
 import {
@@ -212,10 +212,7 @@ const readImage = async (
 ): Promise<{ readonly bytes: Buffer } | { readonly tooLarge: number } | "missing"> => {
   let handle: NodeFs.FileHandle;
   try {
-    handle = await NodeFs.open(
-      file.real,
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-    );
+    handle = await NodeFs.open(file.real, REGULAR_FILE_READ_FLAGS);
   } catch {
     return "missing";
   }

@@ -28,12 +28,12 @@ import {
   applyOrchestrationEvent,
   applyOrchestrationEvents,
   applyShellEvent,
-  applyThreadPriorities,
   createShellEventCoalescer,
   demoteEnvironmentStateToCachedSnapshot,
   evictThreadBodies,
   hydrateEnvironmentStateFromCache,
   selectDelegatedChildThreadsForThreadRef,
+  selectWorkingDelegatedDescendants,
   removeEnvironmentState,
   selectEnvironmentState,
   selectProjectsAcrossEnvironments,
@@ -53,6 +53,12 @@ import {
   useStore,
 } from "./store.ts";
 import { selectThreadDetailLoaded } from "./storeSelectors.ts";
+import {
+  localEnvironmentId,
+  makeState,
+  makeThread,
+  withActiveEnvironmentState,
+} from "./store.testSupport.ts";
 import { deriveThreadActivityStatus } from "./threadActivityStatus.ts";
 import { getThreadFromEnvironmentState } from "./threadDerivation.ts";
 import { collectedByIdsCache, threadCache } from "./threadDerivationMemo.ts";
@@ -66,163 +72,7 @@ import {
   type ThreadShellOrStub,
 } from "./types.ts";
 
-const localEnvironmentId = EnvironmentId.make("environment-local");
 const remoteEnvironmentId = EnvironmentId.make("environment-remote");
-
-function withActiveEnvironmentState(
-  environmentState: EnvironmentState,
-  overrides: Partial<AppState & EnvironmentState> = {},
-): AppState {
-  const {
-    activeEnvironmentId: overrideActiveEnvironmentId,
-    environmentStateById: overrideEnvironmentStateById,
-    ...environmentOverrides
-  } = overrides;
-  const activeEnvironmentId = overrideActiveEnvironmentId ?? localEnvironmentId;
-  const mergedEnvironmentState = {
-    ...environmentState,
-    ...environmentOverrides,
-  };
-  const environmentStateById =
-    overrideEnvironmentStateById ??
-    (activeEnvironmentId
-      ? {
-          [activeEnvironmentId]: mergedEnvironmentState,
-        }
-      : {});
-
-  return {
-    activeEnvironmentId,
-    environmentStateById,
-  };
-}
-
-function makeThread(overrides: Partial<Thread> = {}): Thread {
-  return {
-    id: ThreadId.make("thread-1"),
-    environmentId: localEnvironmentId,
-    codexThreadId: null,
-    projectId: ProjectId.make("project-1"),
-    title: "Thread",
-    modelSelection: {
-      instanceId: ProviderInstanceId.make("codex"),
-      model: "gpt-5-codex",
-    },
-    runtimeMode: DEFAULT_RUNTIME_MODE,
-    interactionMode: DEFAULT_INTERACTION_MODE,
-    session: null,
-    messages: [],
-    turnDiffSummaries: [],
-    activities: [],
-    proposedPlans: [],
-    error: null,
-    createdAt: "2026-02-13T00:00:00.000Z",
-    archivedAt: null,
-    settledOverride: null,
-    settledAt: null,
-    latestTurn: null,
-    branch: null,
-    worktreePath: null,
-    ...overrides,
-  };
-}
-
-function makeState(thread: Thread): AppState {
-  const projectId = ProjectId.make("project-1");
-  const project = {
-    id: projectId,
-    environmentId: thread.environmentId,
-    name: "Project",
-    cwd: "/tmp/project",
-    defaultModelSelection: {
-      instanceId: ProviderInstanceId.make("codex"),
-      model: "gpt-5-codex",
-    },
-    createdAt: "2026-02-13T00:00:00.000Z",
-    updatedAt: "2026-02-13T00:00:00.000Z",
-    scripts: [],
-  };
-  const threadIdsByProjectId: EnvironmentState["threadIdsByProjectId"] = {
-    [thread.projectId]: [thread.id],
-  };
-  const environmentState = {
-    projectIds: [projectId],
-    projectById: {
-      [projectId]: project,
-    },
-    threadIds: [thread.id],
-    threadIdsByProjectId,
-    threadShellById: {
-      [thread.id]: {
-        id: thread.id,
-        environmentId: thread.environmentId,
-        codexThreadId: thread.codexThreadId,
-        projectId: thread.projectId,
-        title: thread.title,
-        modelSelection: thread.modelSelection,
-        runtimeMode: thread.runtimeMode,
-        interactionMode: thread.interactionMode,
-        error: thread.error,
-        createdAt: thread.createdAt,
-        archivedAt: thread.archivedAt,
-        settledOverride: thread.settledOverride,
-        settledAt: thread.settledAt,
-        updatedAt: thread.updatedAt,
-        branch: thread.branch,
-        worktreePath: thread.worktreePath,
-      },
-    },
-    threadSessionById: {
-      [thread.id]: thread.session,
-    },
-    threadTurnStateById: {
-      [thread.id]: {
-        latestTurn: thread.latestTurn,
-        ...(thread.pendingSourceProposedPlan
-          ? { pendingSourceProposedPlan: thread.pendingSourceProposedPlan }
-          : {}),
-      },
-    },
-    messageIdsByThreadId: {
-      [thread.id]: thread.messages.map((message) => message.id),
-    },
-    messageByThreadId: {
-      [thread.id]: Object.fromEntries(
-        thread.messages.map((message) => [message.id, message] as const),
-      ) as EnvironmentState["messageByThreadId"][ThreadId],
-    },
-    pendingMessagesByThreadId: {},
-    activityIdsByThreadId: {
-      [thread.id]: thread.activities.map((activity) => activity.id),
-    },
-    activityByThreadId: {
-      [thread.id]: Object.fromEntries(
-        thread.activities.map((activity) => [activity.id, activity] as const),
-      ) as EnvironmentState["activityByThreadId"][ThreadId],
-    },
-    proposedPlanIdsByThreadId: {
-      [thread.id]: thread.proposedPlans.map((plan) => plan.id),
-    },
-    proposedPlanByThreadId: {
-      [thread.id]: Object.fromEntries(
-        thread.proposedPlans.map((plan) => [plan.id, plan] as const),
-      ) as EnvironmentState["proposedPlanByThreadId"][ThreadId],
-    },
-    turnDiffIdsByThreadId: {
-      [thread.id]: thread.turnDiffSummaries.map((summary) => summary.turnId),
-    },
-    turnDiffSummaryByThreadId: {
-      [thread.id]: Object.fromEntries(
-        thread.turnDiffSummaries.map((summary) => [summary.turnId, summary] as const),
-      ) as EnvironmentState["turnDiffSummaryByThreadId"][ThreadId],
-    },
-    sidebarThreadSummaryById: {},
-    bootstrapComplete: true,
-  };
-  return withActiveEnvironmentState(environmentState, {
-    activeEnvironmentId: thread.environmentId,
-  });
-}
 
 function makeEmptyState(overrides: Partial<AppState & EnvironmentState> = {}): AppState {
   const environmentState: EnvironmentState = {
@@ -2922,85 +2772,6 @@ describe("shell push coalescing", () => {
     );
   });
 
-  it("applies a thread-priorities item as a replacement, keeping unchanged rows", () => {
-    const threadA = ThreadId.make("thread-a");
-    const threadB = ThreadId.make("thread-b");
-    const ranking = (tier: "now" | "later", batchId: string) => ({
-      tier,
-      confidence: "high" as const,
-      reason: "Needs a reply",
-      inputFingerprint: "fp" as never,
-      batchId: batchId as never,
-      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
-      rankedAt: "2026-10-12T00:00:00.000Z",
-      usableUntil: "2026-10-12T01:00:00.000Z",
-    });
-    const base = foldShellEvents(makeEmptyState(), [
-      makeThreadShellUpsertEvent({
-        threadId: threadA,
-        sequence: 1,
-        title: "A",
-        updatedAt: "2026-10-12T00:00:00.000Z",
-        turnState: "completed",
-      }),
-      makeThreadShellUpsertEvent({
-        threadId: threadB,
-        sequence: 2,
-        title: "B",
-        updatedAt: "2026-10-12T00:00:00.000Z",
-        turnState: "completed",
-      }),
-    ]);
-    const ranked = applyThreadPriorities(
-      base,
-      {
-        kind: "thread-priorities",
-        priorities: [
-          { threadId: threadA, priority: ranking("now", "batch-1") },
-          { threadId: threadB, priority: ranking("later", "batch-1") },
-        ],
-      },
-      localEnvironmentId,
-    );
-    const rankedEnv = selectEnvironmentState(ranked, localEnvironmentId);
-    expect(fullThreadEntry(rankedEnv.sidebarThreadSummaryById[threadA])?.priority?.tier).toBe(
-      "now",
-    );
-    expect(fullThreadEntry(rankedEnv.sidebarThreadSummaryById[threadB])?.priority?.tier).toBe(
-      "later",
-    );
-
-    // A later ranking that leaves thread A out clears its priority; thread B's
-    // unchanged row keeps its identity.
-    const reranked = applyThreadPriorities(
-      ranked,
-      {
-        kind: "thread-priorities",
-        priorities: [{ threadId: threadB, priority: ranking("later", "batch-1") }],
-      },
-      localEnvironmentId,
-    );
-    const rerankedEnv = selectEnvironmentState(reranked, localEnvironmentId);
-    expect(
-      fullThreadEntry(rerankedEnv.sidebarThreadSummaryById[threadA])?.priority,
-    ).toBeUndefined();
-    expect(rerankedEnv.sidebarThreadSummaryById[threadB]).toBe(
-      rankedEnv.sidebarThreadSummaryById[threadB],
-    );
-
-    // Nothing changed: the state itself is returned.
-    expect(
-      applyThreadPriorities(
-        reranked,
-        {
-          kind: "thread-priorities",
-          priorities: [{ threadId: threadB, priority: ranking("later", "batch-1") }],
-        },
-        localEnvironmentId,
-      ),
-    ).toBe(reranked);
-  });
-
   it("commits a batch of shell updates at once, preparing each against the state before it", () => {
     const events = recordedShellEventSequence().slice(0, 3);
     useStore.setState(makeEmptyState());
@@ -3397,6 +3168,48 @@ describe("thread lineage", () => {
         scopeThreadRef(localEnvironmentId, parentId),
       ).map((child) => child.id),
     ).toEqual([childId, laterChildId]);
+  });
+
+  it("lists working delegated descendants for a Stop, deepest first", () => {
+    const idleChildId = ThreadId.make("thread-lineage-idle-child");
+    const grandchildId = ThreadId.make("thread-lineage-grandchild");
+    const busyBackgroundId = ThreadId.make("thread-lineage-background");
+    const running: NonNullable<OrchestrationThreadShell["session"]> = {
+      threadId: childId,
+      status: "running",
+      providerName: "codex",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      runtimeMode: "full-access",
+      activeTurnId: TurnId.make("turn-running"),
+      lastError: null,
+      updatedAt: "2026-10-01T00:00:00.000Z",
+    };
+    const threads = [
+      shellThread(parentId),
+      shellThread(childId, { lineage, session: running }),
+      shellThread(idleChildId, { lineage, createdAt: "2026-10-01T00:00:03.000Z" }),
+      shellThread(grandchildId, {
+        lineage: { parentThreadId: childId, rootThreadId: parentId, relationship: "delegated" },
+        session: { ...running, threadId: grandchildId },
+      }),
+      shellThread(busyBackgroundId, {
+        lineage: { parentThreadId: idleChildId, rootThreadId: parentId, relationship: "delegated" },
+        backgroundLiveness: "working",
+      }),
+    ];
+    let state = makeEmptyState();
+    threads.forEach((thread, index) => {
+      state = applyShellEvent(state, upsert(index + 1, thread), localEnvironmentId);
+    });
+
+    expect(
+      selectWorkingDelegatedDescendants(state, scopeThreadRef(localEnvironmentId, parentId)).map(
+        (ref) => ref.threadId,
+      ),
+    ).toEqual([grandchildId, busyBackgroundId, childId]);
+    expect(
+      selectWorkingDelegatedDescendants(state, scopeThreadRef(localEnvironmentId, idleChildId)),
+    ).toEqual([scopeThreadRef(localEnvironmentId, busyBackgroundId)]);
   });
 });
 
@@ -4015,5 +3828,125 @@ describe("thread errors", () => {
         ),
       )[0]?.error,
     ).toBe("Provider exited (code 1)");
+  });
+});
+
+describe("pull request watch summaries", () => {
+  const threadId = ThreadId.make("thread-watch");
+  const shell = (
+    pullRequestWatches?: OrchestrationThreadShell["pullRequestWatches"],
+  ): OrchestrationThreadShell => ({
+    id: threadId,
+    projectId: ProjectId.make("project-watch"),
+    title: "Watch",
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    latestTurn: null,
+    goal: null,
+    createdAt: "2026-10-01T00:00:00.000Z",
+    // Watch progress never moves the thread's own time.
+    updatedAt: "2026-10-01T00:00:00.000Z",
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    session: null,
+    latestUserMessageAt: null,
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    hasActionableProposedPlan: false,
+    ...(pullRequestWatches === undefined ? {} : { pullRequestWatches }),
+  });
+  const watching = (
+    autoFix: NonNullable<
+      OrchestrationThreadShell["pullRequestWatches"]
+    >["active"][number]["autoFix"],
+  ): NonNullable<OrchestrationThreadShell["pullRequestWatches"]> => ({
+    active: [
+      {
+        watchId: "github.com/o/r#12",
+        number: 12,
+        url: "https://github.com/o/r/pull/12",
+        worktreeId: WorktreeId.make("worktree-watch"),
+        startedAt: "2026-10-01T00:05:00.000Z",
+        startedBy: "user",
+        news: false,
+        autoFix,
+        headSha: "abc1234",
+        failingChecks: 1,
+        passed: false,
+        conflicting: false,
+        delivering: false,
+        lastChangeAt: null,
+      },
+    ],
+    ended: [],
+  });
+  const upsert = (sequence: number, thread: OrchestrationThreadShell) =>
+    ({ kind: "thread-upserted", sequence, thread }) as const;
+  const summaryOf = (state: AppState) =>
+    fullThreadEntry(localEnvironmentStateOf(state).sidebarThreadSummaryById[threadId]);
+
+  it("updates the summary when a thread-upserted changes only its watches", () => {
+    const unwatched = applyShellEvent(makeEmptyState(), upsert(1, shell()), localEnvironmentId);
+    expect(summaryOf(unwatched)?.pullRequestWatches).toBeUndefined();
+
+    const fixing = applyShellEvent(
+      unwatched,
+      upsert(
+        2,
+        shell(watching({ status: "fixing", pauseReason: null, attempts: 1, maxAttempts: 3 })),
+      ),
+      localEnvironmentId,
+    );
+    expect(summaryOf(fixing)?.pullRequestWatches?.active[0]?.autoFix?.status).toBe("fixing");
+
+    const paused = applyShellEvent(
+      fixing,
+      upsert(
+        3,
+        shell(watching({ status: "paused", pauseReason: "no-push", attempts: 1, maxAttempts: 3 })),
+      ),
+      localEnvironmentId,
+    );
+    expect(summaryOf(paused)?.pullRequestWatches?.active[0]?.autoFix).toEqual({
+      status: "paused",
+      pauseReason: "no-push",
+      attempts: 1,
+      maxAttempts: 3,
+    });
+
+    const ended = applyShellEvent(
+      paused,
+      upsert(
+        4,
+        shell({
+          active: [],
+          ended: [
+            {
+              watchId: "github.com/o/r#12",
+              number: 12,
+              reason: "stopped",
+              endedAt: "2026-10-01T01:00:00.000Z",
+            },
+          ],
+        }),
+      ),
+      localEnvironmentId,
+    );
+    expect(summaryOf(ended)?.pullRequestWatches?.ended[0]?.reason).toBe("stopped");
+  });
+
+  it("keeps the same summary object when the watches did not change", () => {
+    const watches = watching(null);
+    const first = applyShellEvent(makeEmptyState(), upsert(1, shell(watches)), localEnvironmentId);
+    const again = applyShellEvent(
+      first,
+      upsert(2, shell(structuredClone(watches))),
+      localEnvironmentId,
+    );
+    expect(summaryOf(again)).toBe(summaryOf(first));
   });
 });

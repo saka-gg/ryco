@@ -1,4 +1,3 @@
-import { createRoot } from "react-dom/client";
 import type { ClaudeCacheObservation } from "@ryco/contracts";
 import type {
   ClaudeCacheReviewPresentation,
@@ -6,6 +5,8 @@ import type {
 } from "@ryco/client-runtime/state/composer";
 import { Dialog, DialogPopup, DialogTitle, DialogDescription } from "../ui/dialog";
 import { Button } from "../ui/button";
+import { updateClientClaudeResumeReview } from "../../hooks/useSettings";
+import { mountDialog } from "./mountDialog";
 
 export function ClaudeCacheEvidence({ observation }: { observation: ClaudeCacheObservation }) {
   return (
@@ -42,23 +43,6 @@ export function ClaudeCacheEvidence({ observation }: { observation: ClaudeCacheO
   );
 }
 
-function mountDialog(render: (close: () => void) => React.ReactNode) {
-  const container = document.createElement("div");
-  document.body.append(container);
-  const root = createRoot(container);
-  let closed = false;
-  const close = () => {
-    if (closed) return;
-    closed = true;
-    queueMicrotask(() => {
-      root.unmount();
-      container.remove();
-    });
-  };
-  root.render(render(close));
-  return close;
-}
-
 export const claudeCacheReviewPresentation: ClaudeCacheReviewPresentation = {
   review: (review) =>
     new Promise((resolve) => {
@@ -93,10 +77,25 @@ export const claudeCacheReviewPresentation: ClaudeCacheReviewPresentation = {
                       Compact then send
                     </Button>
                   )}
+                  {/* Not on the frozen phone tier, whose settings cannot turn it back on. */}
+                  <Button
+                    variant="ghost"
+                    className="phone:hidden"
+                    onClick={() => {
+                      updateClientClaudeResumeReview(false);
+                      choose("continue");
+                    }}
+                  >
+                    Don't ask again
+                  </Button>
                   <Button variant="ghost" onClick={() => choose("cancel")}>
                     Cancel
                   </Button>
                 </div>
+                <p className="text-xs text-muted-foreground phone:hidden">
+                  Don't ask again continues with full context now and stops asking on this device.
+                  Turn the review back on in Settings → General.
+                </p>
               </div>
             </DialogPopup>
           </Dialog>

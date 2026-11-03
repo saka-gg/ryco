@@ -1497,6 +1497,126 @@ describe("ComputerManager and FakeComputerBackend", () => {
     await withoutClipboard.dispose();
   });
 
+  it("refuses paste before replacing clipboard contents it cannot preserve", async () => {
+    const backend = new FakeComputerBackend();
+    const manager = new ComputerManager({ backend, actionSettleMs: 0 });
+    vi.spyOn(backend, "readClipboard").mockRejectedValue(new Error("clipboard contains an image"));
+    try {
+      await expect(manager.paste("thread-1", "replacement")).rejects.toThrow(/preserve/);
+      expect(backend.callsFor("writeClipboard")).toHaveLength(0);
+      expect(backend.callsFor("hotkey")).toHaveLength(0);
+    } finally {
+      await manager.dispose();
+    }
+  });
+
+  it("keeps a newer human copy instead of restoring over it", async () => {
+    const backend = new FakeComputerBackend();
+    const manager = new ComputerManager({ backend, actionSettleMs: 0 });
+    await backend.writeClipboard("the user's copy");
+    const hotkey = backend.hotkey.bind(backend);
+    // The human copies something while the paste shortcut is in flight.
+    vi.spyOn(backend, "hotkey").mockImplementation(async (keys) => {
+      const result = await hotkey(keys);
+      await backend.writeClipboard("a newer human copy");
+      return result;
+    });
+    try {
+      await expect(manager.paste("thread-1", "agent text")).resolves.toMatchObject({
+        clipboardRestored: false,
+      });
+      await expect(backend.readClipboard()).resolves.toBe("a newer human copy");
+    } finally {
+      await manager.dispose();
+    }
+  });
+
+  it.each([false, true])(
+    "restores native clipboard content after paste failure=%s without replay",
+    async (fails) => {
+      const restore = vi.fn(async () => true);
+      const prepare = vi.fn(async () => restore);
+      const backend = Object.assign(new FakeComputerBackend(), { prepareClipboardPaste: prepare });
+      const manager = new ComputerManager({ backend, actionSettleMs: 0 });
+      const failure = new Error("keyboard outcome unknown");
+      if (fails) backend.failNext("hotkey", failure);
+      try {
+        const result = manager.paste("thread-1", { imagePath: "/workspace/image.png" });
+        if (fails) await expect(result).rejects.toBe(failure);
+        else await expect(result).resolves.toMatchObject({ clipboardRestored: true });
+        expect(prepare).toHaveBeenCalledWith({ imagePath: "/workspace/image.png" });
+        expect(restore).toHaveBeenCalledTimes(1);
+        expect(backend.callsFor("hotkey")).toHaveLength(1);
+        expect(backend.callsFor("readClipboard")).toHaveLength(0);
+        expect(backend.callsFor("writeClipboard")).toHaveLength(0);
+      } finally {
+        await manager.dispose();
+      }
+    },
+  );
+
+  it("checks the keyboard target before the clipboard is touched", async () => {
+    const prepare = vi.fn(async () => async () => true);
+    const backend = Object.assign(new FakeComputerBackend(), { prepareClipboardPaste: prepare });
+    const manager = new ComputerManager({ backend, actionSettleMs: 0 });
+    try {
+      await expect(manager.paste("thread-1", "agent text", "no-such-window")).rejects.toThrow(
+        /No desktop window has id "no-such-window"/,
+      );
+      expect(prepare).not.toHaveBeenCalled();
+      expect(backend.callsFor("readClipboard")).toHaveLength(0);
+      expect(backend.callsFor("writeClipboard")).toHaveLength(0);
+      expect(backend.callsFor("hotkey")).toHaveLength(0);
+    } finally {
+      await manager.dispose();
+    }
+  });
+
+  it("lists a background paste target once, before the clipboard is touched", async () => {
+    const backend = backgroundTargetBackend();
+    const prepare = vi.fn(async () => {
+      backend.calls.push({ method: "prepareClipboardPaste", args: [] });
+      return async () => true;
+    });
+    Object.assign(backend, { prepareClipboardPaste: prepare });
+    const manager = new ComputerManager({ backend, actionSettleMs: 0 });
+    try {
+      await expect(
+        manager.paste("a", { imagePath: "/workspace/image.png" }, "editor-a"),
+      ).resolves.toMatchObject({ clipboardRestored: true });
+      const methods = backend.calls.map((call) => call.method);
+      const prepared = methods.indexOf("prepareClipboardPaste");
+      const hotkey = methods.indexOf("hotkey");
+      // The shortcut goes to the window validated before the clipboard write.
+      expect(methods.slice(0, prepared)).toContain("listWindows");
+      expect(prepared).toBeLessThan(hotkey);
+      expect(methods.slice(prepared, hotkey)).toEqual(["prepareClipboardPaste"]);
+    } finally {
+      await manager.dispose();
+    }
+  });
+
+  it("re-aims foreground focus after the clipboard write, right before the shortcut", async () => {
+    const backend = new FakeComputerBackend();
+    const prepare = vi.fn(async () => {
+      backend.calls.push({ method: "prepareClipboardPaste", args: [] });
+      return async () => true;
+    });
+    Object.assign(backend, { prepareClipboardPaste: prepare });
+    const manager = new ComputerManager({ backend, actionSettleMs: 0 });
+    try {
+      const [window] = await backend.listWindows();
+      await manager.paste("thread-1", "agent text", window!.id);
+      const methods = backend.calls.map((call) => call.method);
+      const prepared = methods.indexOf("prepareClipboardPaste");
+      const hotkey = methods.indexOf("hotkey");
+      expect(methods.slice(0, prepared)).toContain("focusWindow");
+      expect(methods.slice(prepared, hotkey)).toContain("focusWindow");
+    } finally {
+      await manager.dispose();
+    }
+  });
+
   it("tells the backend which thread is driving, so the agent cursor can name it", async () => {
     const backend = new FakeComputerBackend();
     const names: Array<string | null> = [];

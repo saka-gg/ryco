@@ -14,6 +14,14 @@ export const PASSWORD_LOGIN_START_PATH = "/api/auth/password/start" as const;
 export const PASSWORD_LOGIN_FINISH_PATH = "/api/auth/password/finish" as const;
 export const PASSWORD_RESET_REQUEST_PATH = "/api/auth/password-reset/request" as const;
 export const PASSWORD_RESET_VERIFY_PATH = "/api/auth/password-reset/verify" as const;
+/**
+ * Deletes the signed-in account: `POST` with `{ confirmation: "delete",
+ * identifier }` (the account's email, or its username without one) and the
+ * usual step-up. The Hub answers `202` once the deletion is recorded; sessions,
+ * devices and node access end at once and the rest is erased in the
+ * background. A Hub without it answers `404`.
+ */
+export const ACCOUNT_DELETION_PATH = "/api/account/delete" as const;
 export const PASSWORD_RESET_FINISH_PATH = "/api/auth/password-reset/finish" as const;
 export const ACTIVE_SPACE_SWITCH_PATH = "/api/auth/spaces/active" as const;
 export const NATIVE_NODE_CLAIM_START_PATH = "/api/native/node-claims/start" as const;

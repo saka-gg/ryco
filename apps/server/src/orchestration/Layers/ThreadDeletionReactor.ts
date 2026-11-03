@@ -12,6 +12,7 @@ import {
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { TerminalManager } from "../../terminal/Services/Manager.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
+import { ThreadSessionModelSelectionsService } from "../ThreadSessionModelSelections.ts";
 import {
   ThreadDeletionReactor,
   type ThreadDeletionReactorShape,
@@ -50,6 +51,7 @@ const make = Effect.gen(function* () {
   const terminalManager = yield* TerminalManager;
   const projectionThreads = yield* ProjectionThreadRepository;
   const projectionProjects = yield* ProjectionProjectRepository;
+  const sessionModelSelections = yield* ThreadSessionModelSelectionsService;
 
   const stopProviderSession = (threadId: ThreadDeletedEvent["payload"]["threadId"]) =>
     logCleanupCauseUnlessInterrupted({
@@ -104,6 +106,8 @@ const make = Effect.gen(function* () {
   ) {
     const { threadId } = event.payload;
     yield* stopProviderSession(threadId);
+    // Its session is gone, and a deleted thread never runs one again.
+    sessionModelSelections.forget(threadId);
     yield* closeThreadTerminals(threadId, event.type === "thread.deleted");
     if (event.type === "thread.deleted") {
       yield* logCleanupCauseUnlessInterrupted({
@@ -146,9 +150,9 @@ const make = Effect.gen(function* () {
   const start: ThreadDeletionReactorShape["start"] = Effect.fn("start")(function* () {
     // Acquire synchronously so a create dispatched immediately after start
     // cannot be published before this reactor owns its subscription.
-    const subscription = yield* orchestrationEngine.subscribeDomainEvents;
+    const events = yield* orchestrationEngine.subscribeDomainEvents;
     yield* Effect.forkScoped(
-      Stream.runForEach(Stream.fromSubscription(subscription), (event) =>
+      Stream.runForEach(events, (event) =>
         (event.type === "thread.deleted" || event.type === "thread.trashed"
           ? worker.enqueue(event)
           : Effect.void

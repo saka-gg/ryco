@@ -1,17 +1,7 @@
-import { Effect, FileSystem, Path, Schema } from "effect";
+import { Effect, FileSystem, Schema } from "effect";
 import * as Crypto from "node:crypto";
-import { homedir } from "node:os";
+import { writeFileStringAtomically } from "../atomicWrite.ts";
 import { ServerConfig } from "../config.ts";
-
-const CodexAuthJsonSchema = Schema.Struct({
-  tokens: Schema.Struct({
-    account_id: Schema.String,
-  }),
-});
-
-const ClaudeJsonSchema = Schema.Struct({
-  userID: Schema.String,
-});
 
 class IdentifyUserError extends Schema.TaggedError<IdentifyUserError>()("IdentifyUserError", {
   message: Schema.String,
@@ -28,73 +18,37 @@ const hash = (value: string) =>
       }),
   });
 
-const getCodexAccountId = Effect.gen(function* () {
-  const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-
-  const authJsonPath = path.join(homedir(), ".codex", "auth.json");
-  const authJson = yield* Effect.flatMap(
-    fileSystem.readFileString(authJsonPath),
-    Schema.decodeEffect(Schema.fromJsonString(CodexAuthJsonSchema)),
-  );
-
-  return authJson.tokens.account_id;
-});
-
-const getClaudeUserId = Effect.gen(function* () {
-  const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-
-  const claudeJsonPath = path.join(homedir(), ".claude.json");
-  const claudeJson = yield* Effect.flatMap(
-    fileSystem.readFileString(claudeJsonPath),
-    Schema.decodeEffect(Schema.fromJsonString(ClaudeJsonSchema)),
-  );
-
-  return claudeJson.userID;
-});
-
 const upsertAnonymousId = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const { anonymousIdPath } = yield* ServerConfig;
 
-  const anonymousId = yield* fileSystem.readFileString(anonymousIdPath).pipe(
-    Effect.catch(() =>
-      Effect.gen(function* () {
-        const randomId = yield* Effect.sync(() => crypto.randomUUID());
-        yield* fileSystem.writeFileString(anonymousIdPath, randomId);
-        return randomId;
-      }),
+  // Only a missing file starts a new id: any other read failure fails here
+  // rather than replacing the stored id.
+  const storedId = yield* fileSystem.readFileString(anonymousIdPath).pipe(
+    Effect.map((value) => value.trim()),
+    Effect.catchIf(
+      (error) => error.reason._tag === "NotFound",
+      () => Effect.succeed(""),
     ),
   );
+  if (storedId.length > 0) {
+    return storedId;
+  }
 
-  return anonymousId;
+  const randomId = yield* Effect.sync(() => Crypto.randomUUID());
+  yield* writeFileStringAtomically({ filePath: anonymousIdPath, contents: randomId });
+  return randomId;
 });
 
 /**
- * getTelemetryIdentifier - Users are "identified" by finding the first match of the following, then hashing the value.
- * 1. ~/.codex/auth.json tokens.account_id
- * 2. ~/.claude.json userID
- * 3. ~/.ryco/telemetry/anonymous-id
+ * getTelemetryIdentifier - A hash of this installation's random id (the state
+ * dir's `anonymous-id`) scoped to the analytics project key it is sent with. It
+ * is never derived from provider accounts or other files outside Ryco's state,
+ * and the ids sent to two projects cannot be matched to each other.
  */
-export const getTelemetryIdentifier = Effect.gen(function* () {
-  const codexAccountId = yield* Effect.result(getCodexAccountId);
-  if (codexAccountId._tag === "Success") {
-    return yield* hash(codexAccountId.success);
-  }
-
-  const claudeUserId = yield* Effect.result(getClaudeUserId);
-  if (claudeUserId._tag === "Success") {
-    return yield* hash(claudeUserId.success);
-  }
-
-  const anonymousId = yield* Effect.result(upsertAnonymousId);
-  if (anonymousId._tag === "Success") {
-    return yield* hash(anonymousId.success);
-  }
-
-  return null;
-}).pipe(
-  Effect.tapError((error) => Effect.logWarning("Failed to get identifier", { cause: error })),
-  Effect.orElseSucceed(() => null),
-);
+export const getTelemetryIdentifier = (projectKey: string) =>
+  upsertAnonymousId.pipe(
+    Effect.flatMap((installId) => hash(`${projectKey}\n${installId}`)),
+    Effect.tapError((error) => Effect.logWarning("Failed to get identifier", { cause: error })),
+    Effect.orElseSucceed(() => null),
+  );

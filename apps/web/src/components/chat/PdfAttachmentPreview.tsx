@@ -6,8 +6,24 @@ import { Button } from "../ui/button";
 
 GlobalWorkerOptions.workerSrc = workerUrl;
 
+export type PdfPreviewSource =
+  | { readonly kind: "url"; readonly url: string }
+  /** Bytes already read over an authorized transport. Never mutated here: pdf.js gets a copy. */
+  | { readonly kind: "data"; readonly data: Uint8Array };
+
+const DEFAULT_UNAVAILABLE_HINT = "Download it to open it.";
+
 /** Lazy-loaded, one-page renderer. No document scripts, embedded frames, or external viewer. */
-export default function PdfAttachmentPreview({ src, name }: { src: string; name: string }) {
+export default function PdfAttachmentPreview({
+  source,
+  name,
+  unavailableHint = DEFAULT_UNAVAILABLE_HINT,
+}: {
+  source: PdfPreviewSource;
+  name: string;
+  /** Appended to load failures; attachments offer a download. */
+  unavailableHint?: string | undefined;
+}) {
   const [document, setDocument] = useState<PDFDocumentProxy>();
   const [pageNumber, setPageNumber] = useState(1);
   const [zoom, setZoom] = useState(1);
@@ -16,10 +32,14 @@ export default function PdfAttachmentPreview({ src, name }: { src: string; name:
   const container = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(600);
+  const sourceInput = source.kind === "url" ? source.url : source.data;
   useEffect(() => {
     const task = getDocument({
-      url: src,
-      withCredentials: true,
+      // pdf.js transfers (detaches) a typed array it is given, so it gets a copy:
+      // a re-run of this effect must still find the caller's bytes intact.
+      ...(typeof sourceInput === "string"
+        ? { url: sourceInput, withCredentials: true }
+        : { data: sourceInput.slice() }),
       enableXfa: false,
       useWorkerFetch: false,
       BinaryDataFactory: PdfAttachmentBinaryDataFactory,
@@ -33,15 +53,15 @@ export default function PdfAttachmentPreview({ src, name }: { src: string; name:
         if (active)
           setError(
             cause instanceof Error && cause.name === "PasswordException"
-              ? "This PDF is password protected. Download it to open it."
-              : "Could not preview this PDF. Download it to open it.",
+              ? `This PDF is password protected. ${unavailableHint}`
+              : `Could not preview this PDF. ${unavailableHint}`,
           );
       });
     return () => {
       active = false;
       void task.destroy();
     };
-  }, [src]);
+  }, [sourceInput, unavailableHint]);
   useEffect(() => {
     const element = container.current;
     if (!element) return;
@@ -91,13 +111,13 @@ export default function PdfAttachmentPreview({ src, name }: { src: string; name:
         setRendering(false);
       }
     })().catch(() => {
-      if (active) setError("Could not render this page. Download the PDF to open it.");
+      if (active) setError(`Could not render this page. ${unavailableHint}`);
     });
     return () => {
       active = false;
       cancel?.();
     };
-  }, [document, pageNumber, width, zoom, name]);
+  }, [document, pageNumber, width, zoom, name, unavailableHint]);
   return (
     <>
       <div

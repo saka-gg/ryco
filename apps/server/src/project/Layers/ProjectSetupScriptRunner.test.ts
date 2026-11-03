@@ -156,6 +156,7 @@ describe("ProjectSetupScriptRunner", () => {
       threadId: "thread-1",
       terminalId: "setup-setup",
       data: "bun install\r",
+      requireIdle: true,
     });
   });
 });

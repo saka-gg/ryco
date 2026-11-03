@@ -29,6 +29,14 @@ function useBoundedForegroundGate(ready: boolean, foregroundKey: string | null):
   return ready || (elapsedKey !== null && elapsedKey.key === foregroundKey);
 }
 
+export interface ThreadPrewarmOptions {
+  /**
+   * Hand a released subscription to the idle cache instead of disposing it at once (the
+   * default), so its stream keeps delivering until the cache evicts it.
+   */
+  readonly keepAfterRelease?: boolean;
+}
+
 /**
  * Keeps the detail subscriptions of `threadRefs` warm while `enabled`.
  *
@@ -44,7 +52,9 @@ export function useSidebarThreadPrewarm(
   threadRefs: ReadonlyArray<ScopedThreadRef>,
   foregroundLiveDetailLoaded = true,
   foregroundKey: string | null = null,
+  options: ThreadPrewarmOptions = {},
 ): void {
+  const keepAfterRelease = options.keepAfterRelease === true;
   const foregroundReady = useBoundedForegroundGate(foregroundLiveDetailLoaded, foregroundKey);
   const readThreadRefs = useEffectEvent(() => threadRefs);
   const retained = useRef(new Map<string, ReturnType<typeof retainThreadDetailSubscription>>());
@@ -53,17 +63,19 @@ export function useSidebarThreadPrewarm(
   useEffect(() => {
     const releases = retained.current;
     return () => {
-      for (const release of releases.values()) release({ immediately: true });
+      for (const release of releases.values()) {
+        release(keepAfterRelease ? undefined : { immediately: true });
+      }
       releases.clear();
     };
-  }, []);
+  }, [keepAfterRelease]);
 
   useEffect(() => {
     const wanted = new Map(enabled ? readThreadRefs().map((ref) => [refKey(ref), ref]) : []);
     const releases = retained.current;
     for (const [key, release] of releases) {
       if (!wanted.has(key)) {
-        release({ immediately: true });
+        release(keepAfterRelease ? undefined : { immediately: true });
         releases.delete(key);
       }
     }
@@ -82,5 +94,5 @@ export function useSidebarThreadPrewarm(
     });
     // React to the canonical set, not array identity or ordering.
     // oxlint-disable-next-line react/exhaustive-effect-dependencies
-  }, [enabled, foregroundReady, threadRefKey]);
+  }, [enabled, foregroundReady, threadRefKey, keepAfterRelease]);
 }

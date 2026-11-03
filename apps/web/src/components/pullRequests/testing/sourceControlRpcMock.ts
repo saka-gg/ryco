@@ -256,6 +256,10 @@ function useMockMutation<TArgs, TResult>(
   target: unknown,
   run: (args: TArgs) => TResult | Promise<TResult>,
 ) {
+  // Uncompiled on purpose: Babel's React Compiler never compiled this function
+  // (it bails on value blocks inside try/catch). Oxc can, but its render reads
+  // have not been audited for purity yet. Remove after that audit.
+  "use no memo";
   const [isPending, setIsPending] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const runRef = useRef(run);
@@ -525,7 +529,7 @@ export function createSourceControlRpcMock(original?: object): Record<string, un
           for (const runId of input.runIds) jobsByRunId.set(runId, runJobs(runId).jobs);
         }
         return { jobsByRunId, isLoading: false };
-        // oxlint-disable-next-line react-hooks/exhaustive-deps
+        // oxlint-disable-next-line react-hooks/exhaustive-deps -- signature stands in for input.runIds, so an equal new array keeps the memo
       }, [signature, input.enabled]);
     },
     useSourceControlWorkflowJobLog: (input: SourceControlWorkflowJobLogInput) =>
@@ -765,7 +769,7 @@ export function createPullRequestFilesViewedMock(original?: object): Record<stri
             }));
           },
         };
-        // oxlint-disable-next-line react-hooks/exhaustive-deps
+        // oxlint-disable-next-line react-hooks/exhaustive-deps -- version counts store updates, so filesViewed is read again after one
       }, [input.active, input.headSha, input.reference, number, version]);
     },
   };

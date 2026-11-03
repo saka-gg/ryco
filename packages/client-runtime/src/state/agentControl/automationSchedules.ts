@@ -29,6 +29,7 @@ import {
   type AgentControlAutomationId,
   type AgentControlAutomationRunStatus,
   type AgentControlAutomationSchedule,
+  type AgentControlAutomationTarget,
   type AgentControlProposal,
   type AgentControlProposalId,
   type AgentControlProposalStatus,
@@ -46,6 +47,7 @@ import {
   floorMinute,
   formatDate,
   isoFromMs,
+  localTimeZone,
   nextRun,
   rollForward,
   scheduleLabel,
@@ -58,6 +60,7 @@ import {
   type ScheduleErrors,
   type ScheduleMs,
 } from "@ryco/shared/automationSchedule";
+import { localDateTime } from "@ryco/shared/automationCalendar";
 import { getModelDisplayName, sameModelSelection } from "@ryco/shared/model";
 
 import { isSupportedAgentControlProposal } from "./proposalView.ts";
@@ -236,6 +239,7 @@ const sameExecution = (
   a.runtimeMode === b.runtimeMode &&
   a.envMode === b.envMode &&
   (a.baseRef ?? null) === (b.baseRef ?? null) &&
+  (a.target?.threadId ?? null) === (b.target?.threadId ?? null) &&
   (a.tokenMode ?? null) === (b.tokenMode ?? null) &&
   sameModelSelection(a.modelSelection, b.modelSelection);
 
@@ -246,6 +250,15 @@ const samePhase = (a: AgentControlAutomationSchedule, b: AgentControlAutomationS
   const y = scheduleToMs(b);
   if (x.kind === "once" || y.kind === "once")
     return x.kind === y.kind && firstRun(x) === firstRun(y);
+  if (x.kind === "calendar" || y.kind === "calendar")
+    return (
+      x.kind === "calendar" &&
+      y.kind === "calendar" &&
+      x.timeZone === y.timeZone &&
+      x.minutes === y.minutes &&
+      x.weekdays.join() === y.weekdays.join() &&
+      x.endsAt === y.endsAt
+    );
   return (
     x.intervalMs === y.intervalMs &&
     x.endsAt === y.endsAt &&
@@ -788,6 +801,16 @@ export function envWords(mode: ThreadEnvMode): string {
   return mode === "local" ? "the main checkout" : "a new worktree";
 }
 
+/** Where a heartbeat's runs go (`execution.target`): one chat, not a new one each time. */
+export const EXISTING_CHAT_WORDS = "an existing chat";
+
+/** Where each run goes: "an existing chat" (a heartbeat), else its new chat's checkout. */
+export function runsInWords(
+  execution: Pick<AgentControlAutomationExecutionTemplate, "envMode" | "target">,
+): string {
+  return execution.target === undefined ? envWords(execution.envMode) : EXISTING_CHAT_WORDS;
+}
+
 const EFFORT_OPTION_IDS = ["effort", "reasoningEffort"] as const;
 
 /** "Sonnet 5.5", or with `{ effort: true }` "Sonnet 5.5 · High". */
@@ -902,9 +925,15 @@ export function diffScheduleDefinitions(
       options.runtimeModeLabel(be.runtimeMode),
       options.runtimeModeLabel(ae.runtimeMode),
     );
-  if (be.envMode !== ae.envMode)
-    push("runsIn", "Runs in", envWords(be.envMode), envWords(ae.envMode));
-  else if (ae.envMode === "worktree" && (be.baseRef ?? "") !== (ae.baseRef ?? ""))
+  if (runsInWords(be) !== runsInWords(ae))
+    push("runsIn", "Runs in", runsInWords(be), runsInWords(ae));
+  else if (be.target?.threadId !== ae.target?.threadId)
+    push("runsIn", "Runs in", "an existing chat", "another existing chat");
+  else if (
+    ae.target === undefined &&
+    ae.envMode === "worktree" &&
+    (be.baseRef ?? "") !== (ae.baseRef ?? "")
+  )
     push("branch", "Branch", be.baseRef ?? "—", ae.baseRef ?? "—");
   return out;
 }
@@ -929,12 +958,23 @@ export interface ScheduleDraft {
   readonly baseRef: string;
   /** Carried through unchanged; the editor does not offer it. */
   readonly tokenMode: AgentTokenMode | null;
-  readonly kind: "once" | "fixed-interval";
-  /** The run (once) or the first run (repeats). */
+  /** The chat each run queues in (a heartbeat); carried through unchanged, like `tokenMode`. */
+  readonly target: AgentControlAutomationTarget | null;
+  readonly kind: "once" | "fixed-interval" | "calendar";
+  /** The run (once) or the first run (repeats). A calendar schedule runs at its time of day. */
   readonly start: number;
   readonly intervalMs: number;
+  /** Calendar schedules: the weekdays it runs on (0 = Sunday). */
+  readonly weekdays: ReadonlyArray<number>;
+  /** Calendar schedules: the zone its time of day is read in (the reader's own for a new one). */
+  readonly timeZone: string;
   readonly endsAt: number;
   readonly enabled: boolean;
+  /**
+   * Each run starts without asking (the owner's standing approval). Only the owner's
+   * editor offers it, and only on a node that supports it.
+   */
+  readonly runWithoutAsking: boolean;
 }
 
 /**
@@ -948,7 +988,7 @@ export function draftFromDefinition(
 ): ScheduleDraft {
   const ex = definition.execution;
   const s = scheduleToMs(definition.schedule);
-  const start = s.kind === "once" ? s.runAt : s.startsAt;
+  const start = firstRun(s);
   return {
     id: options.id ?? null,
     projectId: ex.projectId,
@@ -959,24 +999,39 @@ export function draftFromDefinition(
     envMode: ex.envMode,
     baseRef: ex.envMode === "worktree" ? (ex.baseRef ?? "") : (options.defaultBaseRef ?? "main"),
     tokenMode: ex.tokenMode ?? null,
+    target: ex.target ?? null,
     kind: s.kind,
     start,
-    intervalMs: s.kind === "once" ? DAY_MS : s.intervalMs,
+    intervalMs: s.kind === "fixed-interval" ? s.intervalMs : DAY_MS,
+    weekdays: s.kind === "calendar" ? s.weekdays : [],
+    timeZone: s.kind === "calendar" ? s.timeZone : localTimeZone(),
     endsAt: s.kind === "once" ? addDays(start, 7) : s.endsAt,
     enabled: definition.enabled,
+    runWithoutAsking: definition.runPolicy === "run-without-asking",
   };
 }
 
-/** The draft's schedule in milliseconds. */
+/** The draft's schedule in milliseconds. A calendar schedule runs at its first run's time of day. */
 export function draftSchedule(draft: ScheduleDraft): ScheduleMs {
-  return draft.kind === "once"
-    ? { kind: "once", runAt: draft.start }
-    : {
-        kind: "fixed-interval",
-        startsAt: draft.start,
-        intervalMs: draft.intervalMs,
-        endsAt: draft.endsAt,
-      };
+  if (draft.kind === "once") return { kind: "once", runAt: draft.start };
+  if (draft.kind === "calendar") {
+    return {
+      kind: "calendar",
+      startsAt: draft.start,
+      endsAt: draft.endsAt,
+      timeZone: draft.timeZone,
+      minutes: Number.isFinite(draft.start)
+        ? localDateTime(draft.start, draft.timeZone).minutes
+        : Number.NaN,
+      weekdays: draft.weekdays,
+    };
+  }
+  return {
+    kind: "fixed-interval",
+    startsAt: draft.start,
+    intervalMs: draft.intervalMs,
+    endsAt: draft.endsAt,
+  };
 }
 
 /** The contract definition a draft saves as (title and prompt trimmed). */
@@ -990,12 +1045,17 @@ export function definitionFromDraft(draft: ScheduleDraft): AgentControlAutomatio
     runtimeMode: draft.runtimeMode,
     ...(draft.tokenMode ? { tokenMode: draft.tokenMode } : {}),
     envMode: draft.envMode,
-    ...(draft.envMode === "worktree" && baseRef ? { baseRef } : {}),
+    // A heartbeat runs in its chat: a branch would only be checked on every run, hidden from
+    // the editor, and fail them all once it is gone.
+    ...(draft.envMode === "worktree" && baseRef && draft.target === null ? { baseRef } : {}),
+    ...(draft.target === null ? {} : { target: draft.target }),
   };
   return {
     execution,
     schedule: scheduleToContract(draftSchedule(draft)),
     enabled: draft.enabled,
+    // Written only when set, so a schedule that asks keeps its stored shape.
+    ...(draft.runWithoutAsking ? { runPolicy: "run-without-asking" as const } : {}),
   };
 }
 
@@ -1028,11 +1088,15 @@ export function blankScheduleDraft(input: {
     envMode: "worktree",
     baseRef: input.baseRef ?? "main",
     tokenMode: null,
+    target: null,
     kind: "fixed-interval",
     start,
     intervalMs: DAY_MS,
+    weekdays: [],
+    timeZone: localTimeZone(),
     endsAt: start + 30 * DAY_MS,
     enabled: true,
+    runWithoutAsking: false,
   };
 }
 

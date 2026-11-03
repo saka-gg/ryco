@@ -27,10 +27,18 @@ import type {
   MessageId,
 } from "@ryco/contracts";
 import type { Effect } from "effect";
+import type { ProviderTaskEndedError, ProviderUnsupportedError } from "../Errors.ts";
 import type { Stream } from "effect";
 
 export type ProviderSessionModelSwitchMode = "in-session" | "unsupported";
-export type ProviderTurnSteeringMode = "native" | "unsupported";
+/**
+ * - `native`: the adapter adds a message to the running turn (`steerTurn`).
+ * - `interrupt-restart`: no native steering, but the turn can be stopped and the message sent as
+ *   the next turn. ProviderService stops the turn and defers the steer, so the message goes
+ *   next from the follow-up queue (T3's steering degradation for providers without it).
+ * - `unsupported`: the message stays queued until the turn ends on its own.
+ */
+export type ProviderTurnSteeringMode = "native" | "interrupt-restart" | "unsupported";
 export type ProviderConversationRollbackMode = "native" | "unsupported";
 
 export interface ProviderAdapterCapabilities {
@@ -43,7 +51,7 @@ export interface ProviderAdapterCapabilities {
    *   session to change model.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
-  /** Native in-flight turn steering support. Missing is treated as unsupported. */
+  /** How a running turn takes a steer (`ProviderTurnSteeringMode`). Missing is treated as unsupported. */
   readonly turnSteering?: ProviderTurnSteeringMode;
   /**
    * Whether the provider can make its conversation forget turns. Missing is
@@ -93,6 +101,18 @@ export interface ProviderRollbackInput {
   readonly droppedTurnIds: ReadonlyArray<TurnId>;
 }
 
+/**
+ * One turn of a provider thread snapshot. Codex and OpenCode read `items` from the provider's own
+ * store on demand. Claude, Copilot, Cursor and ACP have no store to read, so they report only turn
+ * ids, with empty `items` (`providerThreadSnapshotFromTurnIds`): completed turns for Claude, Cursor
+ * and ACP; one id per started assistant round for Copilot.
+ *
+ * An adapter session may keep ids, counters and working state that is bounded per item (or per
+ * segment, for streamed text), but never an append-only list of message bodies, tool input or
+ * output, prompts or stream deltas: nothing in production reads snapshot items, and such a list
+ * grows with every event for as long as the session lives. Each adapter's `retention:` test cases
+ * check this with `testUtils/adapterRetention.ts`.
+ */
 export interface ProviderThreadTurnSnapshot {
   readonly id: TurnId;
   readonly items: ReadonlyArray<unknown>;
@@ -162,6 +182,18 @@ export interface ProviderAdapterShape<TError> {
   ) => Effect.Effect<void, TError>;
 
   /**
+   * Queue a person's message for one running agent, which reads it at its next step without
+   * the agent or the turn being interrupted. Optional: only providers with a channel into a
+   * running agent implement it. Fails with ProviderTaskEndedError once the task settled.
+   */
+  readonly messageBackgroundTask?: (
+    threadId: ThreadId,
+    taskId: string,
+    text: string,
+    expected: BackgroundTaskStopIdentity,
+  ) => Effect.Effect<void, TError | ProviderTaskEndedError | ProviderUnsupportedError>;
+
+  /**
    * Respond to an interactive approval request.
    */
   readonly respondToRequest: (
@@ -204,6 +236,16 @@ export interface ProviderAdapterShape<TError> {
    * lists only what it probed outside any project.
    */
   readonly readProjectCommands?: (cwd: string) => Effect.Effect<ProviderProjectCommands, TError>;
+  /**
+   * The full command list a running session in `cwd` last pushed (Claude's
+   * `commands_changed`, ACP's `available_commands_update`), or undefined when none did. While
+   * present it supersedes the cached `readProjectCommands` read: it is the live CLI's own list,
+   * fresher than any probe. ACP adapters (Cursor, Grok, ACP Registry) keep serving the newest
+   * list per directory after its session ends, because ACP lists commands only inside a session.
+   */
+  readonly readLiveProjectCommands?: (
+    cwd: string,
+  ) => Effect.Effect<ProviderProjectCommands | undefined>;
 
   /** Read stored history without resuming, acquiring a writer, or starting a turn. */
   readonly readThreadHistory?: (input: {

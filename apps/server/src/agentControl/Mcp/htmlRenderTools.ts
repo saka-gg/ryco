@@ -28,6 +28,7 @@ import {
   HTML_PREVIEW_TOOL_NAME,
   HTML_RENDER_COLUMN_WIDTH,
   HTML_RENDER_LAYOUT_GUIDE,
+  HTML_RENDER_MESSAGE_GUIDE,
   HTML_RENDER_MAX_HEIGHT,
   HTML_RENDER_MAX_HTML_CHARS,
   HTML_RENDER_MAX_PAGE_BYTES,
@@ -41,7 +42,7 @@ import {
 } from "@ryco/shared/htmlRender";
 import { Data, Effect, Exit, Option, Schema } from "effect";
 import { formatThreadArtifactId } from "@ryco/shared/threadArtifacts";
-import { loadSharp } from "../../loadSharp.ts";
+import { fitScreenshotToBase64Budget, type FittedScreenshot } from "../../screenshotFit.ts";
 
 import {
   persistGeneratedAssistantAttachment,
@@ -111,7 +112,7 @@ const PREVIEW_DESCRIPTOR: AgentControlMcpToolDescriptor = {
 
 const RENDER_DESCRIPTOR: AgentControlMcpToolDescriptor = {
   name: HTML_RENDER_TOOL_NAME,
-  description: `Show a finished HTML page (chart, table, diagram, collage, mockup) inline in this thread, above your final text reply; call it before writing that reply. The reader already sees the page, so the reply should not announce it, say where it is, or restate it: add only what the page doesn't say. Preview with ${HTML_PREVIEW_TOOL_NAME} first. Ryco fits the frame to the page's height at each reader's width when it could measure the page. A height below the page's contentHeight caps the frame there, and the rest scrolls inside it. Each page counts toward this turn's attachment budget (8 attachments, 50 MiB). ${HTML_RENDER_PAGE_RULES} ${HTML_RENDER_LAYOUT_GUIDE} ${HTML_RENDER_THEME_GUIDE}`,
+  description: `Show a finished HTML page (chart, table, diagram, collage, mockup) inline in this thread, above your final text reply; call it before writing that reply. The reader already sees the page, so the reply should not announce it, say where it is, or restate it: add only what the page doesn't say. Preview with ${HTML_PREVIEW_TOOL_NAME} first. Ryco fits the frame to the page's height at each reader's width when it could measure the page. A height below the page's contentHeight caps the frame there, and the rest scrolls inside it. Each page counts toward this turn's attachment budget (8 attachments, 50 MiB). ${HTML_RENDER_PAGE_RULES} ${HTML_RENDER_LAYOUT_GUIDE} ${HTML_RENDER_THEME_GUIDE} ${HTML_RENDER_MESSAGE_GUIDE}`,
   inputSchema: {
     type: "object",
     additionalProperties: false,
@@ -244,54 +245,9 @@ const errorResult = (text: string): AgentControlMcpToolResult => ({
 /** Base64 characters a preview screenshot may use, leaving the rest of the response cap for its summary. */
 export const HTML_PREVIEW_SCREENSHOT_MAX_BASE64_CHARS = 360_000;
 
-export interface HtmlPreviewScreenshot {
-  readonly data: string;
-  readonly mimeType: "image/png" | "image/jpeg";
-  readonly width: number;
-  readonly height: number;
-}
-
-// Full resolution matters more to an agent checking a layout than JPEG detail,
-// so quality drops once before the screenshot is scaled down.
-const JPEG_QUALITIES = [80, 60] as const;
-const MAX_FIT_ATTEMPTS = 6;
-
-/**
- * Fits a preview screenshot into `maxBase64Chars`: the PNG as captured when it
- * fits, else a JPEG at full size, else a JPEG scaled down until it does.
- */
-export async function fitHtmlPreviewScreenshot(
-  pngBase64: string,
-  maxBase64Chars: number,
-): Promise<HtmlPreviewScreenshot> {
-  const sharp = await loadSharp();
-  const png = Buffer.from(pngBase64, "base64");
-  const { width = 0, height = 0 } = await sharp(png).metadata();
-  if (pngBase64.length <= maxBase64Chars) {
-    return { data: pngBase64, mimeType: "image/png", width, height };
-  }
-  const maxBytes = Math.floor(maxBase64Chars / 4) * 3;
-  let targetWidth = width;
-  for (let attempt = 0; attempt < MAX_FIT_ATTEMPTS && targetWidth >= 1; attempt += 1) {
-    const quality = JPEG_QUALITIES[Math.min(attempt, JPEG_QUALITIES.length - 1)];
-    const pipeline = sharp(png);
-    if (targetWidth < width) pipeline.resize({ width: targetWidth });
-    const jpeg = await pipeline.jpeg({ quality }).toBuffer({ resolveWithObject: true });
-    if (jpeg.data.byteLength <= maxBytes) {
-      return {
-        data: jpeg.data.toString("base64"),
-        mimeType: "image/jpeg",
-        width: jpeg.info.width,
-        height: jpeg.info.height,
-      };
-    }
-    if (attempt + 1 < JPEG_QUALITIES.length) continue;
-    // Encoded size tracks pixel count, so scale the width by the square root, with margin.
-    const scale = Math.min(0.9, Math.sqrt(maxBytes / jpeg.data.byteLength) * 0.95);
-    targetWidth = Math.floor(jpeg.info.width * scale);
-  }
-  throw new Error("The screenshot does not fit the response.");
-}
+/** The preview's screenshot fitter; shared with device evidence (`screenshotFit.ts`). */
+export type HtmlPreviewScreenshot = FittedScreenshot;
+export const fitHtmlPreviewScreenshot = fitScreenshotToBase64Budget;
 
 const MAX_REPORTED_MISSING_IMAGES = 20;
 const MAX_REPORTED_PATH_CHARS = 300;

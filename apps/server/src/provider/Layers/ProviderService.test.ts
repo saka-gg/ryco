@@ -4,6 +4,7 @@ import path from "node:path";
 
 import type {
   ProviderApprovalDecision,
+  ProviderProjectCommands,
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
   ProviderSession,
@@ -70,6 +71,7 @@ import {
   type ProviderAdapterRegistryShape,
 } from "../Services/ProviderAdapterRegistry.ts";
 import { ASSISTANT_ATTACHMENT_INSTRUCTIONS } from "../../assistantAttachments.ts";
+import { ProviderInstallLock } from "../Services/ProviderInstallLock.ts";
 import { ProviderService } from "../Services/ProviderService.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import { makeProviderServiceLive, type ProviderServiceLiveOptions } from "./ProviderService.ts";
@@ -123,7 +125,7 @@ function makeFakeCodexAdapter(
     /** "none" omits the capability, which ProviderService treats as unsupported. */
     readonly conversationRollback?: "native" | "none";
     /** Defaults to native for Codex only. */
-    readonly turnSteering?: "native" | "unsupported";
+    readonly turnSteering?: "native" | "interrupt-restart" | "unsupported";
     readonly turnSubmission?: "acceptance" | "completion";
     /** Defaults to true for Codex only, as the real adapters declare. */
     readonly resumeSurvivesCwdChange?: boolean;
@@ -467,6 +469,91 @@ it.effect("ProviderServiceLive catches stopAll failures during shutdown", () =>
   }),
 );
 
+it.effect("ProviderServiceLive stops only the active bindings at shutdown", () =>
+  Effect.gen(function* () {
+    const codex = makeFakeCodexAdapter();
+    const registry = makeAdapterRegistryMock({ [CODEX_DRIVER]: codex.adapter });
+    // The database outlives the service's scope, so shutdown's writes can be read back.
+    const outerScope = yield* Scope.make();
+    const sqlContext = yield* Layer.build(SqlitePersistenceMemory).pipe(Scope.provide(outerScope));
+    const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
+      Layer.provide(Layer.succeedContext(sqlContext)),
+    );
+    const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+    const providerLayer = Layer.mergeAll(
+      makeProviderServiceLive().pipe(
+        Layer.provide(Layer.succeed(ProviderAdapterRegistry, registry)),
+        Layer.provide(directoryLayer),
+        Layer.provide(defaultServerSettingsLayer),
+        Layer.provideMerge(AnalyticsService.layerTest),
+        Layer.provide(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+      ),
+      runtimeRepositoryLayer,
+      NodeServices.layer,
+    );
+    const scope = yield* Scope.make();
+    const runtimeServices = yield* Layer.build(providerLayer).pipe(Scope.provide(scope));
+    const repository = yield* ProviderSessionRuntimeRepository.pipe(
+      Effect.provide(runtimeServices),
+    );
+    const stoppedPayload = {
+      activeTurnId: null,
+      lastRuntimeEvent: "session.exited",
+      lastRuntimeEventAt: "2026-01-02T00:00:00.000Z",
+    };
+    yield* repository.upsert({
+      threadId: ThreadId.make("thread-stopped"),
+      providerName: "codex",
+      providerInstanceId: codexInstanceId,
+      adapterKey: "codex",
+      runtimeMode: "full-access",
+      status: "stopped",
+      lastSeenAt: "2026-01-02T00:00:00.000Z",
+      resumeCursor: { opaque: "resume-stopped" },
+      runtimePayload: stoppedPayload,
+    });
+    yield* repository.upsert({
+      threadId: ThreadId.make("thread-running"),
+      providerName: "codex",
+      providerInstanceId: codexInstanceId,
+      adapterKey: "codex",
+      runtimeMode: "full-access",
+      status: "running",
+      lastSeenAt: "2026-01-03T00:00:00.000Z",
+      resumeCursor: { opaque: "resume-running" },
+      runtimePayload: { activeTurnId: "turn-1" },
+    });
+
+    yield* Scope.close(scope, Exit.void);
+
+    const after = yield* ProviderSessionRuntimeRepository.pipe(
+      Effect.provide(runtimeRepositoryLayer),
+    );
+    const stopped = yield* after.getByThreadId({ threadId: ThreadId.make("thread-stopped") });
+    const running = yield* after.getByThreadId({ threadId: ThreadId.make("thread-running") });
+    yield* Scope.close(outerScope, Exit.void);
+
+    // An already-stopped binding keeps its own last event and last-seen time.
+    assert.deepStrictEqual(
+      Option.map(stopped, (row) => row.runtimePayload),
+      Option.some(stoppedPayload),
+    );
+    assert.deepStrictEqual(
+      Option.map(stopped, (row) => row.lastSeenAt),
+      Option.some("2026-01-02T00:00:00.000Z"),
+    );
+    // The active one is stopped, its turn cleared, and its resume cursor kept.
+    assert.equal(Option.getOrUndefined(running)?.status, "stopped");
+    assert.deepStrictEqual(Option.getOrUndefined(running)?.resumeCursor, {
+      opaque: "resume-running",
+    });
+    assert.include(Option.getOrUndefined(running)?.runtimePayload as Record<string, unknown>, {
+      activeTurnId: null,
+      lastRuntimeEvent: "provider.stopAll",
+    });
+  }),
+);
+
 it.live("ProviderServiceLive stops every provider in parallel during shutdown", () =>
   Effect.gen(function* () {
     const codex = makeFakeCodexAdapter();
@@ -569,6 +656,67 @@ it.effect("ProviderServiceLive rejects new sessions for disabled providers", () 
     assert.instanceOf(failure, ProviderValidationError);
     assert.include(failure.issue, "Provider instance 'claudeAgent' is disabled");
     assert.equal(claude.startSession.mock.calls.length, 0);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("ProviderServiceLive refuses to recover a session on a disabled provider", () =>
+  Effect.gen(function* () {
+    const codex = makeFakeCodexAdapter();
+    const registryBase = makeAdapterRegistryMock({ [CODEX_DRIVER]: codex.adapter });
+    let enabled = true;
+    const registry: ProviderAdapterRegistryShape = {
+      ...registryBase,
+      getInstanceInfo: (instanceId) =>
+        registryBase.getInstanceInfo(instanceId).pipe(Effect.map((info) => ({ ...info, enabled }))),
+    };
+    const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
+      Layer.provide(SqlitePersistenceMemory),
+    );
+    const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+    const providerLayer = makeProviderServiceLive().pipe(
+      Layer.provide(Layer.succeed(ProviderAdapterRegistry, registry)),
+      Layer.provide(directoryLayer),
+      Layer.provide(defaultServerSettingsLayer),
+      Layer.provide(AnalyticsService.layerTest),
+      Layer.provide(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+    );
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("thread-recover-disabled");
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      enabled = false;
+      // A runtime that is still live keeps serving; only starting one is refused.
+      yield* provider.sendTurn({ threadId, input: "still live", attachments: [] });
+      yield* codex.stopSession(threadId);
+      codex.sendTurn.mockClear();
+
+      const rollback = yield* Effect.flip(
+        provider.rollbackConversation({
+          threadId,
+          numTurns: 1,
+          targetTurnId: null,
+          droppedTurnIds: [asTurnId("turn-1")],
+        }),
+      );
+      const send = yield* Effect.flip(
+        provider.sendTurn({ threadId, input: "resume", attachments: [] }),
+      );
+
+      for (const failure of [rollback, send]) {
+        assert.instanceOf(failure, ProviderValidationError);
+        assert.include(failure.issue, "Provider instance 'codex' is disabled");
+      }
+      assert.equal(codex.startSession.mock.calls.length, 1);
+      assert.equal(codex.rollbackThread.mock.calls.length, 0);
+      assert.equal(codex.sendTurn.mock.calls.length, 0);
+    }).pipe(Effect.provide(providerLayer));
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
@@ -2642,6 +2790,45 @@ it.live("ProviderServiceLive reads and keeps an instance's project commands per 
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.live("ProviderServiceLive serves a running session's pushed commands over the cache", () =>
+  Effect.gen(function* () {
+    const fake = makeFakeCodexAdapter();
+    let reads = 0;
+    const readProjectCommands = () =>
+      Effect.sync(() => {
+        reads += 1;
+        return { skills: [], slashCommands: [{ name: "probed" }] };
+      });
+    let live: ProviderProjectCommands | undefined;
+    const readLiveProjectCommands = (cwd: string) =>
+      Effect.sync(() => (cwd === "/repo-a" ? live : undefined));
+    const providerLayer = makeStandaloneProviderServiceLayer([
+      {
+        ...fake,
+        adapter: { ...fake.adapter, readProjectCommands, readLiveProjectCommands },
+      },
+    ]);
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const read = (cwd: string) => provider.readProjectCommands!(codexInstanceId, cwd);
+      const names = (commands: ProviderProjectCommands) =>
+        commands.slashCommands.map((command) => command.name);
+      assert.deepEqual(names(yield* read("/repo-a")), ["probed"]);
+
+      // A push lands at once, although the probed list is still fresh.
+      live = { skills: [], slashCommands: [{ name: "pushed" }] };
+      assert.deepEqual(names(yield* read("/repo-a")), ["pushed"]);
+      assert.deepEqual(names(yield* read("/repo-b")), ["probed"]);
+      assert.equal(reads, 2);
+
+      // Once the session is gone, the cached probe answers again without a new read.
+      live = undefined;
+      assert.deepEqual(names(yield* read("/repo-a")), ["probed"]);
+      assert.equal(reads, 2);
+    }).pipe(Effect.provide(providerLayer));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
 it.live(
   "ProviderServiceLive answers a failed first project-commands read empty and backs off",
   () =>
@@ -2735,6 +2922,106 @@ it.live("ProviderServiceLive retains the caller's path lease instead of acquirin
     }).pipe(Effect.provide(providerLayer));
     fs.rmSync(root, { recursive: true, force: true });
   }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live("ProviderServiceLive holds a session start while this CLI is installed on the host", () =>
+  Effect.gen(function* () {
+    const codex = makeFakeCodexAdapter();
+    const registry = makeAdapterRegistryMock({ [CODEX_DRIVER]: codex.adapter });
+    const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
+      Layer.provide(SqlitePersistenceMemory),
+    );
+    const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+    const installDone = yield* Deferred.make<void>();
+    const waitedFor: Array<readonly [ProviderInstanceId, ProviderDriverKind]> = [];
+    // Another Ryco on this host is installing Codex.
+    const installLockLayer = Layer.mock(ProviderInstallLock)({
+      beforeLaunch: (instanceId, provider) =>
+        Effect.sync(() => waitedFor.push([instanceId, provider])).pipe(
+          Effect.andThen(Deferred.await(installDone)),
+        ),
+    });
+    const providerLayer = makeProviderServiceLive().pipe(
+      Layer.provide(Layer.succeed(ProviderAdapterRegistry, registry)),
+      Layer.provide(directoryLayer),
+      Layer.provide(defaultServerSettingsLayer),
+      Layer.provide(AnalyticsService.layerTest),
+      Layer.provide(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+      Layer.provide(installLockLayer),
+    );
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("thread-start-waits-for-install");
+      const start = yield* provider
+        .startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.forkScoped);
+      yield* sleep(100);
+      assert.deepStrictEqual(waitedFor, [[codexInstanceId, CODEX_DRIVER]]);
+      assert.equal(codex.startSession.mock.calls.length, 0);
+
+      yield* Deferred.succeed(installDone, undefined);
+      yield* Fiber.join(start);
+      assert.equal(codex.startSession.mock.calls.length, 1);
+    }).pipe(Effect.provide(providerLayer));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live(
+  "ProviderServiceLive sends a turn to a live session while its CLI's installer is busy",
+  () =>
+    Effect.gen(function* () {
+      const codex = makeFakeCodexAdapter();
+      const registry = makeAdapterRegistryMock({ [CODEX_DRIVER]: codex.adapter });
+      const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
+        Layer.provide(SqlitePersistenceMemory),
+      );
+      const directoryLayer = ProviderSessionDirectoryLive.pipe(
+        Layer.provide(runtimeRepositoryLayer),
+      );
+      const installDone = yield* Deferred.make<void>();
+      let installing = false;
+      let waits = 0;
+      // Another Ryco on this host starts installing a CLI that shares Codex's installer.
+      const installLockLayer = Layer.mock(ProviderInstallLock)({
+        beforeLaunch: () =>
+          installing
+            ? Effect.sync(() => (waits += 1)).pipe(Effect.andThen(Deferred.await(installDone)))
+            : Effect.void,
+      });
+      const providerLayer = makeProviderServiceLive().pipe(
+        Layer.provide(Layer.succeed(ProviderAdapterRegistry, registry)),
+        Layer.provide(directoryLayer),
+        Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+        Layer.provide(installLockLayer),
+      );
+
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const threadId = asThreadId("thread-turn-during-install");
+        yield* provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          runtimeMode: "full-access",
+        });
+        installing = true;
+        // A live session launches nothing: the turn goes through without waiting.
+        yield* provider
+          .sendTurn({ threadId, input: "still working", attachments: [] })
+          .pipe(Effect.timeout("5 seconds"));
+        assert.equal(codex.sendTurn.mock.calls.length, 1);
+        assert.equal(waits, 0);
+        yield* Deferred.succeed(installDone, undefined);
+      }).pipe(Effect.provide(providerLayer));
+    }).pipe(Effect.provide(NodeServices.layer)),
 );
 
 it.live("ProviderServiceLive fails a same-instance fresh replacement when stop times out", () =>
@@ -3182,6 +3469,70 @@ it.live("ProviderServiceLive routes steering to a Claude-shaped adapter and defe
         }),
       );
       assert.isTrue(Schema.is(ProviderSessionNotFoundError)(inactive));
+    }).pipe(Effect.provide(providerLayer));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live("ProviderServiceLive steers a provider without native steering by stopping the turn", () =>
+  Effect.gen(function* () {
+    const codex = makeFakeCodexAdapter();
+    const cursor = makeFakeCodexAdapter(CURSOR_DRIVER, { turnSteering: "interrupt-restart" });
+    const providerLayer = makeStandaloneProviderServiceLayer([codex, cursor]);
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const thread = asThreadId("thread-cursor-restart");
+      yield* provider.startSession(thread, {
+        provider: CURSOR_DRIVER,
+        providerInstanceId: ProviderInstanceId.make("cursor"),
+        threadId: thread,
+        runtimeMode: "full-access",
+      });
+      const turn = yield* provider.sendTurn({ threadId: thread, input: "work", attachments: [] });
+      const deferred = yield* Effect.flip(
+        provider.steerTurn({
+          threadId: thread,
+          expectedTurnId: turn.turnId,
+          messageId: MessageId.make("message-cursor-restart"),
+          input: "change course",
+          attachments: [],
+        }),
+      );
+      // The turn is stopped and the steer deferred: the queue sends the message next.
+      assert.deepEqual(cursor.interruptTurn.mock.calls.at(-1)?.slice(0, 2), [thread, turn.turnId]);
+      assert.isTrue(Schema.is(ProviderTurnNotSteerableError)(deferred));
+      if (Schema.is(ProviderTurnNotSteerableError)(deferred)) {
+        assert.equal(deferred.reason, "restarting");
+        assert.equal(
+          deferred.detail,
+          "Cursor can't take a message mid-turn, so Ryco stopped the turn. Your message is sent next.",
+        );
+      }
+      assert.equal(cursor.steerTurn.mock.calls.length, 0);
+
+      const stopsBefore = cursor.interruptTurn.mock.calls.length;
+      cursor.interruptTurn.mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: CURSOR_DRIVER,
+            method: "session/cancel",
+            detail: "cancel refused",
+          }),
+        ),
+      );
+      const stuck = yield* Effect.flip(
+        provider.steerTurn({
+          threadId: thread,
+          expectedTurnId: turn.turnId,
+          messageId: MessageId.make("message-cursor-stuck"),
+          input: "change course",
+          attachments: [],
+        }),
+      );
+      assert.equal(cursor.interruptTurn.mock.calls.length, stopsBefore + 1);
+      if (Schema.is(ProviderTurnNotSteerableError)(stuck)) {
+        assert.include(stuck.detail, "could not be stopped. The message stays queued.");
+      } else assert.fail("expected a deferred steer");
     }).pipe(Effect.provide(providerLayer));
   }).pipe(Effect.provide(NodeServices.layer)),
 );

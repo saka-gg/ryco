@@ -165,7 +165,7 @@ export interface CrownEvent {
   readonly notesView?: NotesPaneView;
   /** A git action still running: the alert holds until its result replaces it. */
   readonly live?: true;
-  /** Offered in place of View (a git result's "View PR", "Create PR"). */
+  /** Offered in place of View (a git result's "View PR", "Create PR", or a running action's Stop). */
   readonly action?: GitActionNoticeAction;
 }
 

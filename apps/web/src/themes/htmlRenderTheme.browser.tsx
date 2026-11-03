@@ -62,7 +62,7 @@ describe("readHtmlRenderTheme", () => {
         expect(Math.abs(a - ea), `${token} alpha`).toBeLessThanOrEqual(0.01);
       }
       // rem-based in the app; a page's rem is its own base, so it travels as px.
-      expect(theme.variables["--radius"]).toBe("10px");
+      expect(theme.variables["--radius"]).toBe("18px");
       expect(theme.variables["--font-sans"]).toContain("DM Sans");
       expect(theme.variables["--font-mono"]).toContain("SF Mono");
       // Ryco's brand color stands in for the render's accent.

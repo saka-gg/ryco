@@ -65,6 +65,10 @@ export function parseRightPanelRouteSearch(search: Record<string, unknown>): Rig
       workspaceOpen: "1",
       workspaceTab: "files",
       preview: "1",
+      ...(workspaceSearch.workspaceFile ? { workspaceFile: workspaceSearch.workspaceFile } : {}),
+      ...(workspaceSearch.workspaceFileLine !== undefined
+        ? { workspaceFileLine: workspaceSearch.workspaceFileLine }
+        : {}),
     };
   }
   if (workspaceSearch.workspaceTab === "terminal") {

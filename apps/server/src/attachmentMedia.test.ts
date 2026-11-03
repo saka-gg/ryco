@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -12,6 +13,7 @@ import {
   probeAttachmentMediaDimensionsFromBytes,
   probeAttachmentMediaForServing,
 } from "./attachmentMedia.ts";
+import { makeNamedPipe } from "./testing/namedPipe.ts";
 
 const buildMp4Box = (type: string, payload: Buffer): Buffer => {
   const header = Buffer.alloc(8);
@@ -241,6 +243,31 @@ describe("attachment media probing", () => {
       expect(yield* probeAttachmentMediaForServing(missingPath, ".png")).toBeNull();
 
       fs.rmSync(tempDir, { recursive: true, force: true });
+    }),
+  );
+
+  it.effect.skipIf(process.platform === "win32")("does not wait on a named pipe", () =>
+    Effect.gen(function* () {
+      const tempDir = makeTempDir();
+      const fifo = path.join(tempDir, "clip.mp4");
+      makeNamedPipe(fifo);
+      // The probe opens synchronously, so a blocked open would stall the event
+      // loop where no deadline can fire. A child opens the other end after five
+      // seconds instead: a regression shows up as a slow probe, not a hang.
+      yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          spawn("sh", ["-c", 'sleep 5; exec 3<>"$1"', "sh", fifo], { stdio: "ignore" }),
+        ),
+        (child) =>
+          Effect.sync(() => {
+            child.kill("SIGKILL");
+            fs.rmSync(tempDir, { recursive: true, force: true });
+          }),
+      );
+
+      const started = performance.now();
+      expect(yield* probeAttachmentMediaDimensions(fifo, "video/mp4")).toBeNull();
+      expect(performance.now() - started).toBeLessThan(2_500);
     }),
   );
 });

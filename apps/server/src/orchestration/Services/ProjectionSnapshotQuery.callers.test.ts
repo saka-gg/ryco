@@ -36,6 +36,10 @@ const ALLOWED_SHELL_SNAPSHOT_CALLERS: Readonly<Record<string, { count: number; w
     count: 1,
     why: "the cleanup inventory protects checkouts by every thread's state",
   },
+  "push/attentionPublisherLive.ts": {
+    count: 1,
+    why: "push alerts baseline every thread's state once, then re-read only threads events name",
+  },
 };
 
 const SHELL_SNAPSHOT_CALL = /\.getShellSnapshot\s*\(/g;

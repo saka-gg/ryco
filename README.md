@@ -9,7 +9,7 @@
 Codex · Claude · GitHub Copilot · OpenCode · Cursor (Early Access) · Grok (Early Access)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
-[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-blue.svg?style=flat-square)](https://github.com/sak0a/ryco/releases)
+[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-blue.svg?style=flat-square)](https://github.com/saka-gg/ryco/releases)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0-3178c6.svg?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Bun](https://img.shields.io/badge/Bun-1.3-fbf0df.svg?style=flat-square&logo=bun&logoColor=black)](https://bun.sh)
 [![Electron](https://img.shields.io/badge/Electron-40.9-47848f.svg?style=flat-square&logo=electron&logoColor=white)](https://www.electronjs.org/)
@@ -99,7 +99,7 @@ npx ryco-cli
 
 ### Desktop app
 
-Get the latest installer from [GitHub Releases](https://github.com/sak0a/ryco/releases) or use a package manager:
+Get the latest installer from [GitHub Releases](https://github.com/saka-gg/ryco/releases) or use a package manager:
 
 | Platform | Format                 | Install                                 |
 | -------- | ---------------------- | --------------------------------------- |
@@ -127,6 +127,10 @@ If you really want to dive into the code:
 ```bash
 # Optional: only needed if you use mise for dev tool management
 mise install
+
+# Needs the Bun version pinned in package.json, Node.js 24, rustup (the pinned Rust toolchain
+# installs itself) and, on Linux, a C/C++ toolchain and Python for node-pty
+# (Debian/Ubuntu: sudo apt install build-essential python3)
 
 bun install
 

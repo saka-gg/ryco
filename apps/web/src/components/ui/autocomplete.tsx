@@ -156,11 +156,25 @@ function AutocompleteGroup({ className, ...props }: AutocompletePrimitive.Group.
   );
 }
 
+const GROUP_LABEL_CLASS_NAME = "px-2 py-1.5 font-medium text-muted-foreground text-xs";
+
 function AutocompleteGroupLabel({ className, ...props }: AutocompletePrimitive.GroupLabel.Props) {
   return (
     <AutocompletePrimitive.GroupLabel
-      className={cn("px-2 py-1.5 font-medium text-muted-foreground text-xs", className)}
+      className={cn(GROUP_LABEL_CLASS_NAME, className)}
       data-slot="autocomplete-group-label"
+      {...props}
+    />
+  );
+}
+
+/** A group label for virtualized lists, whose flat rows cannot be wrapped in a group. */
+function AutocompleteListHeading({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      className={cn(GROUP_LABEL_CLASS_NAME, className)}
+      data-slot="autocomplete-group-label"
+      role="presentation"
       {...props}
     />
   );
@@ -189,15 +203,36 @@ function AutocompleteValue({ ...props }: AutocompletePrimitive.Value.Props) {
   return <AutocompletePrimitive.Value data-slot="autocomplete-value" {...props} />;
 }
 
-function AutocompleteList({ className, ...props }: AutocompletePrimitive.List.Props) {
+function AutocompleteList({
+  className,
+  scrollFade = true,
+  ...props
+}: AutocompletePrimitive.List.Props & {
+  /** Off for lists with sticky headers, which the fade would wash out. */
+  scrollFade?: boolean;
+}) {
   return (
-    <ScrollArea scrollbarGutter scrollFade>
+    <ScrollArea scrollbarGutter scrollFade={scrollFade}>
       <AutocompletePrimitive.List
         className={cn("not-empty:scroll-py-1 not-empty:p-1", className)}
         data-slot="autocomplete-list"
         {...props}
       />
     </ScrollArea>
+  );
+}
+
+/**
+ * A variant of `AutocompleteList` without `ScrollArea`, for use when an external
+ * virtualizer (e.g. LegendList) owns the scroll container.
+ */
+function AutocompleteListVirtualized({ className, ...props }: AutocompletePrimitive.List.Props) {
+  return (
+    <AutocompletePrimitive.List
+      className={cn("size-full min-w-0", className)}
+      data-slot="autocomplete-list"
+      {...props}
+    />
   );
 }
 
@@ -263,6 +298,8 @@ export {
   AutocompleteEmpty,
   AutocompleteValue,
   AutocompleteList,
+  AutocompleteListHeading,
+  AutocompleteListVirtualized,
   AutocompleteClear,
   AutocompleteStatus,
   AutocompleteRow,

@@ -1,7 +1,15 @@
-import { isClaudeNativeCompaction } from "../claudeNativeCompaction.ts";
+import { claudeApprovalPresentation } from "../claudeApprovalPresentation.ts";
+import { claudeInitAdvertisesNativeCompaction } from "../claudeNativeCompaction.ts";
 import { readClaudeResumeState } from "../claudeResumeCursor.ts";
+import { getActiveClaudeModelCatalog } from "../ClaudeModelCatalog.ts";
+import type { AgentProcessPriorityShape } from "../agentProcessPriority.ts";
+import { appendClaudeStderrTail, prepareClaudeCodeSpawn } from "../claudeCodeSpawn.ts";
 import { observeClaudeCache, readClaudeCacheCounts } from "../claudeCacheObservation.ts";
 import { claudePostCompactionUsage, selectClaudeResultUsageGauge } from "../claudeContextUsage.ts";
+import {
+  decideClaudeFastModePublish,
+  readClaudeFastModeFrame,
+} from "../claudeFastModeObservation.ts";
 import {
   CLAUDE_CLI_CAPABILITY_INTERRUPT_CANCEL_QUEUED,
   CLAUDE_CLI_CAPABILITY_INTERRUPT_RECEIPT,
@@ -41,12 +49,16 @@ import type { ClaudeCacheObservation, ModelSelection } from "@ryco/contracts";
  */
 import {
   type CanUseTool,
+  type HookCallback,
+  type HookJSONOutput,
   getSessionMessages,
   query,
   type Options as ClaudeQueryOptions,
   type PermissionMode,
   type PermissionResult,
   type PermissionUpdate,
+  type SDKAPIRetryMessage,
+  type SDKInformationalMessage,
   type SDKMessage,
   type SDKResultMessage,
   type SettingSource,
@@ -55,10 +67,10 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { parseCliArgs } from "@ryco/shared/cliArgs";
 import {
-  appendAttachmentPathLines,
-  formatAttachmentPathLines,
-  type AttachmentPathLineEntry,
-} from "@ryco/shared/attachmentPrompt";
+  parseClaudeAutoCompactWindow,
+  resolveClaudeAutoCompactMode,
+} from "@ryco/shared/claudeAutoCompact";
+import { appendAttachmentPathLines } from "@ryco/shared/attachmentPrompt";
 import {
   ApprovalRequestId,
   type AgentTokenMode,
@@ -78,9 +90,11 @@ import {
   type ProviderSendTurnInput,
   type ProviderSession,
   type ProviderSessionStartInput,
+  type ServerProviderSlashCommand,
   type ThreadTokenUsageSnapshot,
   type ProviderUserInputAnswers,
   type RuntimeContentStreamKind,
+  type RuntimePlanStep,
   DEFAULT_AGENT_TOKEN_MODE,
   RuntimeItemId,
   RuntimeRequestId,
@@ -95,6 +109,7 @@ import {
   ThreadId,
   TurnId,
   type UserInputQuestion,
+  type VcsStateChangedPayload,
 } from "@ryco/contracts";
 import {
   applyClaudePromptEffortPrefix,
@@ -104,7 +119,11 @@ import {
   resolvePromptInjectedEffort,
 } from "@ryco/shared/model";
 import { formatSourceControlContextsForAgent } from "@ryco/shared/sourceControlContextFormatter";
+import { findServerProviderModel } from "@ryco/shared/serverProviderModels";
 import { classifyTaskAgentKind } from "@ryco/shared/taskClassification";
+import { timeoutWhileResponsiveOption } from "@ryco/shared/responsiveDeadline";
+import { redactToolParameterCredentials } from "@ryco/shared/toolParameterRedaction";
+import { isNativeCompactionCommand, NATIVE_COMPACTION_COMMAND } from "@ryco/shared/threadActivity";
 import {
   resolveHtmlRenderToolKind,
   resolveHtmlRenderToolPresentation,
@@ -128,14 +147,22 @@ import {
   Stream,
 } from "effect";
 
-import { isPersistableChatAttachment, resolveAttachmentPath } from "../../attachmentStore.ts";
+import {
+  attachmentPathLines,
+  isPersistableChatAttachment,
+  resolveAttachmentPath,
+} from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import { logOnceEvery } from "../../logOnceEvery.ts";
 import { makeServerQueueMetrics } from "../../observability/QueueMetrics.ts";
 import {
+  concludeContextCompactionRequest,
   disableContextCompaction,
   initialContextCompactionPolicyState,
   markContextCompactionStarted,
+  nativeAutoCompactWindowBehindTrigger,
   observeContextCompaction,
+  recordContextCompactionRequest,
   settleContextCompaction,
   type ContextCompactionPolicyState,
 } from "../contextCompactionPolicy.ts";
@@ -144,11 +171,22 @@ import {
   type DeviceToolBinding,
 } from "../../providerTools/deviceToolGateway.ts";
 import { buildTokenReductionInstructions, checkRtkAvailability } from "../../tokenReduction.ts";
-import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import { makeClaudeEnvironment, resolveClaudeSourceRoot } from "../Drivers/ClaudeHome.ts";
 import {
   type ClaudeChainPositionBeforePrompt,
   claudeEntryBeforePrompt,
 } from "../claudeTranscriptCutoff.ts";
+import {
+  CLAUDE_PLAN_TOOL_NAMES,
+  ClaudePlanTaskTracker,
+  claudePlanToolDetail,
+  planTasksCursorField,
+  readClaudePlanTasksFromCursor,
+} from "../claudePlanTasks.ts";
+import {
+  type ClaudeTranscriptPresence,
+  readClaudeTranscriptPresence,
+} from "../claudeTranscriptPresence.ts";
 import { formatProjectCustomSystemPrompt } from "../ProjectCustomSystemPrompt.ts";
 import { ASSISTANT_ATTACHMENT_INSTRUCTIONS } from "../../assistantAttachments.ts";
 import { isSlashCommandInput } from "../attachmentInstructionDelivery.ts";
@@ -157,9 +195,11 @@ import {
   getClaudeModelCapabilities,
   isClaudeUltracodeEffort,
   normalizeClaudeCliEffort,
+  parseClaudeSlashCommands,
   probeClaudeCapabilities,
   resolveClaudeApiModelId,
   resolveClaudeEffort,
+  resolveClaudeFastMode,
 } from "./ClaudeProvider.ts";
 import {
   ProviderAdapterProcessError,
@@ -167,12 +207,24 @@ import {
   ProviderAdapterSessionClosedError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
+  ProviderTaskEndedError,
   ProviderTurnNotSteerableError,
+  ProviderUnsupportedError,
   type ProviderAdapterError,
 } from "../Errors.ts";
 import { type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
+import { TASK_MESSAGE_PENDING_LIMIT_METHOD } from "../Errors.ts";
+import {
+  CLAUDE_SUBAGENT_MESSAGE_UNDELIVERED,
+  CLAUDE_SUBAGENT_PENDING_MESSAGES_MAX,
+  claudeSubagentMessageContext,
+  isMessageableClaudeTask,
+  takeSubagentMessages,
+} from "../claudeSubagentMessages.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { requireRuntimeSessionId, stampRuntimeEvent } from "../runtimeSession.ts";
+import { withThreadAttribution } from "../../localServers/threadAttributionEnv.ts";
+import { providerThreadSnapshotFromTurnIds } from "../providerThreadSnapshot.ts";
 import {
   AGENT_CONTROL_INTERNAL_SERVER_NAME,
   agentControlHostContext,
@@ -197,6 +249,10 @@ const FOLDED_INTO_DISCARDED_STEER_REASON =
   "Claude Code merged this message into a cancelled steer's request, so no reply is shown. Send it again.";
 const STEER_TURN_ENDED_DETAIL =
   "The turn finished before this message could be steered. It stays queued and is sent next.";
+const STEER_TURN_COMPACTING_DETAIL =
+  "Claude is compacting the conversation. The message stays queued.";
+/** A compaction segment correlates by its own prompt uuid alone. */
+const NO_STEER_PROMPT_UUIDS: ReadonlySet<string> = new Set();
 type ClaudeTextStreamKind = Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
 type ClaudeToolResultStreamKind = Extract<
   RuntimeContentStreamKind,
@@ -223,6 +279,8 @@ export interface ClaudeTranscriptEntry {
 const CLAUDE_TURN_HEADS_CAP = 64;
 const CLAUDE_REWIND_PROBE_TIMEOUT = "30 seconds";
 const CLAUDE_REWIND_TRANSCRIPT_TIMEOUT = "10 seconds";
+/** A transcript check that takes longer (a hung network mount) reads as `unknown`. */
+const CLAUDE_TRANSCRIPT_CHECK_TIMEOUT = "2 seconds";
 const CLAUDE_REWIND_QUERY_EXIT_MS = 5_000;
 /**
  * How long the CLI may take to answer its initialize control request on a runtime's first turn.
@@ -243,7 +301,6 @@ interface ClaudeTurnState {
   readonly promptUuid?: string;
   readonly openedBy: ClaudeTurnOpener;
   readonly startedAt: string;
-  readonly items: Array<unknown>;
   readonly assistantTextBlocks: Map<number, AssistantTextBlockState>;
   readonly assistantTextBlockOrder: Array<AssistantTextBlockState>;
   readonly capturedProposedPlanKeys: Set<string>;
@@ -290,6 +347,11 @@ interface ClaudeTurnState {
   awaitingSteerContinuation:
     | { readonly since: string; readonly segmentStatus: ProviderRuntimeTurnStatus }
     | undefined;
+  /**
+   * The uuid of the `/compact` the compaction policy sent after this turn's own work completed.
+   * The turn stays open for that last segment and closes at its result.
+   */
+  compactionPromptUuid: string | undefined;
 }
 
 /** The only turn-state constructor: prompt and provider turns must share one shape. */
@@ -304,7 +366,6 @@ function makeClaudeTurnState(input: {
     ...(input.promptUuid !== undefined ? { promptUuid: input.promptUuid } : {}),
     openedBy: input.openedBy,
     startedAt: input.startedAt,
-    items: [],
     assistantTextBlocks: new Map(),
     assistantTextBlockOrder: [],
     capturedProposedPlanKeys: new Set(),
@@ -322,6 +383,7 @@ function makeClaudeTurnState(input: {
     interruptRequested: false,
     sealedSegmentCount: 0,
     awaitingSteerContinuation: undefined,
+    compactionPromptUuid: undefined,
   };
 }
 
@@ -338,6 +400,8 @@ interface PendingApproval {
   readonly requestType: CanonicalRequestType;
   readonly detail?: string;
   readonly suggestions?: ReadonlyArray<PermissionUpdate>;
+  /** The CLI refused a session-wide grant for this request. */
+  readonly acceptForSessionOffered?: false;
   readonly decision: Deferred.Deferred<ProviderApprovalDecision>;
 }
 
@@ -395,6 +459,11 @@ interface ClaudeSessionContext {
   readonly turnHeads: Array<{ readonly turnId: TurnId; readonly head: string }>;
   /** A rewind that later resumes must keep honoring until a turn completes. */
   pendingRewind: { readonly at: string } | undefined;
+  /**
+   * The Claude Code stderr tail when Ryco spawned the CLI itself (agent priority); the SDK
+   * appends it to its exit errors only for its own spawn.
+   */
+  readonly processStderrTail?: () => string;
   /** Reopen probe in progress: stream exits and error results feed `probeFailure`. */
   probing: boolean;
   probeFailure: Deferred.Deferred<string> | undefined;
@@ -410,7 +479,13 @@ interface ClaudeSessionContext {
   agentControlHostContextDelivered: boolean;
   streamFiber: Fiber.Fiber<void, Error> | undefined;
   readonly startedAt: string;
-  readonly basePermissionMode: PermissionMode | undefined;
+  /**
+   * The session's own permission mode, which a "default" interaction turn restores. Cleared when
+   * the CLI turns out to refuse Auto, so the turns never ask for it again.
+   */
+  basePermissionMode: PermissionMode | undefined;
+  /** The Auto-mode refusal warning was emitted; it is shown once per session. */
+  autoModeRefusedWarningEmitted: boolean;
   /**
    * The permission mode this process is known to be in: the start option, then each mode a
    * turn set. Undefined when unknown (no start option, or the CLI may have changed it), so the
@@ -422,13 +497,21 @@ interface ClaudeSessionContext {
    * effort override inherit this. */
   currentEffort: string | undefined;
   resumeSessionId: string | undefined;
+  /** The session whose transcript the config root was seen to hold (the cursor's `transcriptSeen`). */
+  transcriptSeenFor: string | undefined;
+  /** The session a completed turn already ran the transcript check for. */
+  transcriptCheckedFor: string | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
-  readonly turns: Array<{
-    id: TurnId;
-    items: Array<unknown>;
-  }>;
+  /** Completed turn ids only (resume `turnCount`, `readThread`); never message bodies. */
+  readonly completedTurnIds: Array<TurnId>;
   readonly inFlightTools: Map<number, ToolInFlight>;
+  /**
+   * The session's Task tool list (TaskCreate/TaskUpdate/TaskGet/TaskList), shown as the plan and
+   * carried in the resume cursor. Unlike `inFlightTools`, its pending calls outlive the turn: a
+   * background subagent's result can land after the turn settled.
+   */
+  readonly planTasks: ClaudePlanTaskTracker;
   /**
    * Block indexes of dropped subagent narration, keyed by parent_tool_use_id.
    * Block indexes are per-message, so a suppressed block's
@@ -479,6 +562,11 @@ interface ClaudeSessionContext {
   /** Task ids that have started and not yet reached a terminal state. */
   readonly liveTaskIds: Set<string>;
   /**
+   * A person's messages for running subagents, by task id, oldest first. The PreToolUse hook
+   * hands them to the agent at its next tool call (`claudeSubagentMessages.ts`).
+   */
+  readonly pendingSubagentMessages: Map<string, Array<string>>;
+  /**
    * Task ids positively observed as backgrounded (membership in a
    * background_tasks_changed set, or a task_updated is_backgrounded patch).
    * Only these are ever settled by set reconciliation: the set carries
@@ -502,7 +590,12 @@ interface ClaudeSessionContext {
   cumulativeUsageSpansCompaction: boolean;
   cacheModelSelection: ModelSelection | undefined;
   compactionPolicy: ContextCompactionPolicyState;
-  readonly supportsAutomaticCompaction: boolean;
+  /** The CLI's latest init frame lists `/compact`, which the compaction policy sends. */
+  supportsAutomaticCompaction: boolean;
+  /** Ryco asked this runtime for Fast mode, at start or by a later turn's selection. */
+  fastModeRequested: boolean;
+  /** `state:reason` of the Fast mode report last seen on this runtime; undefined before one. */
+  lastFastModeSignature: string | undefined;
   compactionUnavailableWarningEmitted: boolean;
   lastAssistantUuid: string | undefined;
   lastThreadStartedId: string | undefined;
@@ -518,6 +611,13 @@ interface ClaudeSessionContext {
   requestingStatusObserved: boolean;
   /** Protocol capabilities from the latest `system/init`; undefined before the first one. */
   cliCapabilities: ReadonlySet<string> | undefined;
+  /**
+   * The full slash-command list the CLI last pushed (`commands_changed`), with the adapter-wide
+   * order of that push; undefined before the first one.
+   */
+  slashCommands:
+    | { readonly commands: ReadonlyArray<ServerProviderSlashCommand>; readonly order: number }
+    | undefined;
   /**
    * Steer uuids that must never reply (Stop, or a failed segment) but that the CLI may still
    * run; their CLI turn is dropped. A uuid leaves the set once a CLI turn consumed it.
@@ -547,13 +647,8 @@ interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
   readonly setModel: (model?: string) => Promise<void>;
   readonly setPermissionMode: (mode: PermissionMode) => Promise<void>;
   readonly setMaxThinkingTokens: (maxThinkingTokens: number | null) => Promise<void>;
-  /** Added in newer SDKs; optional keeps older native runtimes fail-safe. */
-  readonly applyFlagSettings?: (
-    settings: Partial<{
-      readonly autoCompactEnabled: boolean | null;
-      readonly autoCompactWindow: number | null;
-    }>,
-  ) => Promise<void>;
+  /** SDK Query.applyFlagSettings; `null` clears the key from the flag layer. */
+  readonly applyFlagSettings: (settings: { readonly fastMode: true | null }) => Promise<void>;
   readonly close: () => void;
   readonly mcpServerStatus?: () => Promise<
     ReadonlyArray<{ readonly name: string; readonly status: string }>
@@ -574,14 +669,32 @@ export interface ClaudeAdapterLiveOptions {
   readonly nativeEventLogger?: EventNdjsonLogger;
   /** Test seam: a small capacity makes runtime-event backpressure deterministic. */
   readonly runtimeEventQueueCapacity?: number;
+  /** Runs each session's Claude Code through `nice`; undefined keeps the SDK's own spawn. */
+  readonly processPriority?: AgentProcessPriorityShape | undefined;
   /** Reads a session's main transcript chain. Defaults to the SDK's `getSessionMessages`. */
   readonly readSessionMessages?: (
     sessionId: string,
     options: { readonly dir?: string; readonly includeSystemMessages: boolean },
   ) => Promise<ReadonlyArray<ClaudeTranscriptEntry>>;
+  /**
+   * Whether Claude still keeps a session's transcript, read before a resume. Defaults to
+   * `readClaudeTranscriptPresence` in the instance's config root.
+   */
+  readonly readTranscriptPresence?: (sessionId: string) => Promise<ClaudeTranscriptPresence>;
+  /**
+   * Whether this instance's Claude Code says a model (slug or alias) can run Auto mode, from the
+   * instance's snapshot. Undefined is unknown: the session keeps Auto.
+   */
+  readonly resolveAutoModeSupport?: (model: string) => Effect.Effect<boolean | undefined>;
 }
 
 const CLAUDE_SUBAGENT_ATTRIBUTION_CACHE_CAP = 256;
+
+function claudeAutoModeRefusedMessage(model: string | undefined): string {
+  const catalogModels = getActiveClaudeModelCatalog().models.map((entry) => entry.model);
+  const name = findServerProviderModel(catalogModels, model)?.name ?? model ?? "the selected model";
+  return `Claude Code reports that ${name} can't run in Auto mode, so this session asks before commands and file changes.`;
+}
 
 function rememberClaudeSubagentAttribution<A>(
   cache: Map<string, A>,
@@ -628,6 +741,16 @@ function hasDurableClaudeSessionId(message: SDKMessage): boolean {
     message.subtype !== "hook_progress" &&
     message.subtype !== "hook_response"
   );
+}
+
+/** An SDK exit error with the stderr tail the SDK adds only for its own spawn (see claudeCodeSpawn). */
+function withClaudeProcessStderr<A>(
+  context: Pick<ClaudeSessionContext, "processStderrTail">,
+  cause: A,
+): A {
+  return context.processStderrTail
+    ? appendClaudeStderrTail(cause, context.processStderrTail())
+    : cause;
 }
 
 function toMessage(cause: unknown, fallback: string): string {
@@ -948,6 +1071,31 @@ function readClaudeToolUseResult(message: SDKMessage): Record<string, unknown> |
     : undefined;
 }
 
+/**
+ * Claude Code's own report that a shell command changed git or forge state; the pinned SDK
+ * typings carry neither subtype, so both are matched structurally. `vcs_state_changed` follows a
+ * commit, push, merge or rebase the CLI saw in a Bash command's output (scripts and aliases
+ * included); `code_change_published` follows a command that opened or touched a pull request.
+ * The CLI calls both a cue to re-read the repository: the thread git sync re-reads the checkout
+ * and trusts no field. A kind a newer CLI adds is kept; fields that are not strings are dropped.
+ * Null for a frame that reports no change: `started` names the pull request the session's branch
+ * already had when the session started or resumed. Undefined for any other frame.
+ */
+function readClaudeVcsSignal(message: SDKMessage): VcsStateChangedPayload | null | undefined {
+  if (message.type !== "system") return undefined;
+  const wire = message as unknown as Record<string, unknown>;
+  if (wire.subtype === "code_change_published") {
+    const action = trimmedClaudeString(wire.action);
+    if (action === "started") return null;
+    return { kind: "change-request", ...(action !== undefined ? { action } : {}) };
+  }
+  if (wire.subtype !== "vcs_state_changed") return undefined;
+  const kind = trimmedClaudeString(wire.kind);
+  if (kind === undefined) return undefined;
+  const cwd = trimmedClaudeString(wire.cwd);
+  return { kind, ...(cwd !== undefined ? { cwd } : {}) };
+}
+
 const WORKFLOW_PHASE_CAP = 64;
 /**
  * Members re-examined per progress tick. Bounds work on a hostile payload, not
@@ -1214,6 +1362,12 @@ function makeClaudeTaskSubagentRef(
 }
 
 function classifyToolItemType(toolName: string): CanonicalItemType {
+  // Planning tools before the substring rules: TaskCreate ("create") and TodoWrite ("write")
+  // would otherwise read as file changes and count as edits. Their rows stay in the work log,
+  // only relabelled; hiding them would be a client change.
+  if (CLAUDE_PLAN_TOOL_NAMES.has(toolName)) {
+    return "dynamic_tool_call";
+  }
   const normalized = toolName.toLowerCase();
   if (normalized.includes("agent")) {
     return "collab_agent_tool_call";
@@ -1285,12 +1439,7 @@ function isTodoTool(toolName: string): boolean {
   return toolName.toLowerCase().includes("todowrite");
 }
 
-type PlanStep = {
-  step: string;
-  status: "pending" | "inProgress" | "completed";
-};
-
-function extractPlanStepsFromTodoInput(input: Record<string, unknown>): PlanStep[] | null {
+function extractPlanStepsFromTodoInput(input: Record<string, unknown>): RuntimePlanStep[] | null {
   // TodoWrite format: { todos: [{ content, status, activeForm? }] }
   const todos = input.todos;
   if (!Array.isArray(todos) || todos.length === 0) {
@@ -1317,6 +1466,9 @@ function summarizeToolRequest(toolName: string, input: Record<string, unknown>):
   const htmlRender = resolveHtmlRenderToolPresentation({ toolName, input });
   if (htmlRender) return htmlRender.detail ? `${toolName}: ${htmlRender.detail}` : toolName;
 
+  const planDetail = claudePlanToolDetail(toolName, input);
+  if (planDetail) return planDetail;
+
   const commandValue = input.command ?? input.cmd;
   const command = typeof commandValue === "string" ? commandValue : undefined;
   if (command && command.trim().length > 0) {
@@ -1339,7 +1491,8 @@ function summarizeToolRequest(toolName: string, input: Record<string, unknown>):
     }
   }
 
-  const serialized = JSON.stringify(input);
+  // The summary is persisted with the approval and the tool activity: redact before truncating.
+  const serialized = JSON.stringify(redactToolParameterCredentials(input));
   if (serialized.length <= 400) {
     return `${toolName}: ${serialized}`;
   }
@@ -1403,7 +1556,7 @@ function buildPromptText(
   input: ProviderSendTurnInput,
   boundInstanceId: ProviderInstanceId,
 ): string {
-  if (isClaudeNativeCompaction(input)) return "/compact";
+  if (isNativeCompactionCommand(input)) return NATIVE_COMPACTION_COMMAND;
   const rawEffort =
     input.modelSelection?.instanceId === boundInstanceId
       ? getModelSelectionStringOptionValue(input.modelSelection, "effort")
@@ -1484,22 +1637,9 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
 ) {
   const promptText = buildPromptText(input, dependencies.boundInstanceId);
   const nativeBlocks: Array<Record<string, unknown>> = [];
-  const pathLineEntries: AttachmentPathLineEntry[] = [];
 
   for (const attachment of input.attachments ?? []) {
     if (!isPersistableChatAttachment(attachment) || !isClaudeNativeAttachment(attachment)) {
-      pathLineEntries.push({
-        attachment,
-        ...(attachment.id === undefined
-          ? {}
-          : {
-              resolvedPath:
-                resolveAttachmentPath({
-                  attachmentsDir: dependencies.attachmentsDir,
-                  attachment,
-                }) ?? undefined,
-            }),
-      });
       continue;
     }
 
@@ -1540,7 +1680,13 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
     );
   }
 
-  const text = appendAttachmentPathLines(promptText, formatAttachmentPathLines(pathLineEntries));
+  const text = appendAttachmentPathLines(
+    promptText,
+    attachmentPathLines({
+      attachmentsDir: dependencies.attachmentsDir,
+      attachments: input.attachments,
+    }),
+  );
   const sdkContent: Array<Record<string, unknown>> = [];
   if (text !== undefined && text.length > 0) {
     sdkContent.push({ type: "text", text });
@@ -1591,6 +1737,70 @@ function claudeTurnCloseErrorMessage(
     case "folded-into-discarded-cli-turn":
       return FOLDED_INTO_DISCARDED_STEER_REASON;
   }
+}
+
+const CLAUDE_API_RETRY_ERROR_LABELS: Partial<Record<SDKAPIRetryMessage["error"], string>> = {
+  overloaded: "API overloaded",
+  rate_limit: "Rate limited",
+  server_error: "API server error",
+};
+
+/** `api_retry` as a notice: "Retrying request (2/10) in 4s", detailed by why the attempt failed. */
+function claudeApiRetryNotice(message: SDKAPIRetryMessage): {
+  readonly message: string;
+  readonly detail: string;
+} {
+  const attempt = Math.trunc(message.attempt);
+  const maxRetries = Math.trunc(message.max_retries);
+  const delaySeconds = Math.ceil(message.retry_delay_ms / 1000);
+  const waitedSeconds = Math.round((message.no_response?.waited_ms ?? Number.NaN) / 1000);
+  const label = CLAUDE_API_RETRY_ERROR_LABELS[message.error];
+  const status =
+    typeof message.error_status === "number" ? `HTTP ${message.error_status}` : undefined;
+  return {
+    message: [
+      "Retrying request",
+      ...(attempt > 0 && maxRetries > 0 ? [`(${attempt}/${maxRetries})`] : []),
+      ...(delaySeconds > 0 ? [`in ${delaySeconds}s`] : []),
+    ].join(" "),
+    detail: Number.isFinite(waitedSeconds)
+      ? `No response after ${waitedSeconds}s`
+      : status === undefined
+        ? "Connection error"
+        : label === undefined
+          ? status
+          : `${label} (${status})`,
+  };
+}
+
+/** The row label of an `informational` banner; the CLI's own text is the row's body. */
+function claudeInformationalLabel(message: SDKInformationalMessage): string {
+  if (message.prevent_continuation === true) {
+    return "Claude stopped";
+  }
+  switch (message.level) {
+    case "warning":
+      return "Claude warning";
+    case "suggestion":
+      return "Claude suggestion";
+    default:
+      return "Claude notice";
+  }
+}
+
+const DEBUG_PREVIEW_MAX_CHARS = 400;
+
+/** A frame for a log line: JSON, cut to a few hundred characters. */
+function boundedJsonPreview(value: unknown): string {
+  let json: string;
+  try {
+    json = JSON.stringify(value) ?? String(value);
+  } catch {
+    json = String(value);
+  }
+  return json.length > DEBUG_PREVIEW_MAX_CHARS
+    ? `${json.slice(0, DEBUG_PREVIEW_MAX_CHARS)}…`
+    : json;
 }
 
 function streamKindFromDeltaType(deltaType: string): ClaudeTextStreamKind {
@@ -1868,6 +2078,20 @@ function toRequestError(threadId: ThreadId, method: string, cause: unknown): Pro
   });
 }
 
+/**
+ * {@link toRequestError} for an SDK call on a live session. When the CLI exits, the SDK rejects
+ * every pending call with its exit error; this restores the stderr tail on it first (see
+ * {@link withClaudeProcessStderr}), so the text and its classification match the SDK's own spawn.
+ */
+function toSessionRequestError(
+  context: Pick<ClaudeSessionContext, "processStderrTail">,
+  threadId: ThreadId,
+  method: string,
+  cause: unknown,
+): ProviderAdapterError {
+  return toRequestError(threadId, method, withClaudeProcessStderr(context, cause));
+}
+
 function sdkMessageType(value: unknown): string | undefined {
   if (!value || typeof value !== "object") {
     return undefined;
@@ -1944,6 +2168,31 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, options?.environment).pipe(
     Effect.provideService(Path.Path, path),
   );
+  // How this instance compacts. A value this node does not know falls back to the default, so a
+  // typo never makes the instance unavailable.
+  const autoCompactMode = resolveClaudeAutoCompactMode(claudeSettings.autoCompact);
+  const autoCompactWindow = parseClaudeAutoCompactWindow(claudeSettings.autoCompactWindow);
+  const ignoredAutoCompactSettings = {
+    ...(claudeSettings.autoCompact !== "" && claudeSettings.autoCompact !== autoCompactMode
+      ? { autoCompact: claudeSettings.autoCompact }
+      : {}),
+    ...(claudeSettings.autoCompactWindow !== "" && autoCompactWindow === undefined
+      ? { autoCompactWindow: claudeSettings.autoCompactWindow }
+      : {}),
+  };
+  if (Object.keys(ignoredAutoCompactSettings).length > 0) {
+    yield* Effect.logWarning("claude.compaction.settingsIgnored", {
+      instanceId: boundInstanceId,
+      ...ignoredAutoCompactSettings,
+    });
+  }
+  // The auto-compact window Claude Code starts with. Left to Claude Code it is the configured one.
+  // Under Ryco's policy Claude Code's own (mid-turn) compaction must not come before Ryco's
+  // between-turn 80% mark, so a small window is raised for Claude Code alone.
+  const nativeAutoCompactWindow =
+    autoCompactWindow === undefined || autoCompactMode === "claudeCode"
+      ? autoCompactWindow
+      : nativeAutoCompactWindowBehindTrigger(autoCompactWindow);
   const nativeEventLogger =
     options?.nativeEventLogger ??
     (options?.nativeEventLogPath !== undefined
@@ -1966,6 +2215,21 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(readOptions.dir !== undefined ? { dir: readOptions.dir } : {}),
         includeSystemMessages: readOptions.includeSystemMessages,
       }));
+  const readTranscriptPresence =
+    options?.readTranscriptPresence ??
+    (yield* resolveClaudeSourceRoot(claudeSettings, options?.environment).pipe(
+      Effect.provideService(Path.Path, path),
+      Effect.map(
+        (root) => (sessionId: string) => readClaudeTranscriptPresence({ root, sessionId }),
+      ),
+    ));
+  /** `readTranscriptPresence`; a failed or slow read is `unknown`. */
+  const checkTranscriptPresence = (sessionId: string) =>
+    Effect.tryPromise(() => readTranscriptPresence(sessionId)).pipe(
+      Effect.timeoutOption(CLAUDE_TRANSCRIPT_CHECK_TIMEOUT),
+      Effect.map(Option.getOrElse((): ClaudeTranscriptPresence => "unknown")),
+      Effect.catch(() => Effect.succeed<ClaudeTranscriptPresence>("unknown")),
+    );
   /** Threads whose session is being closed and reopened by a checkpoint revert. */
   const rewindingThreads = new Set<ThreadId>();
 
@@ -1982,6 +2246,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const sessions = new Map<ThreadId, ClaudeSessionContext>();
   let nextSessionGeneration = 0;
+  /** Orders `commands_changed` pushes across sessions, so the newest list of a directory wins. */
+  let nextSlashCommandsOrder = 0;
   // One SDK message fans out into several runtime events that all carry it as
   // `raw.payload` (and is logged natively first): redact it once, share it.
   const secretRedactor = makeSharedPayloadSecretRedactor();
@@ -2034,18 +2300,36 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ...(context.backgroundedTaskIds.has(event.payload.taskId)
             ? { isBackgrounded: true }
             : {}),
-          canStop: context.query.stopTask !== undefined,
+          // An emitter can deny stop for synthesized rows, never grant it.
+          canStop: event.payload.canStop !== false && context.query.stopTask !== undefined,
+          canMessage:
+            context.liveTaskIds.has(event.payload.taskId) &&
+            isMessageableClaudeTask(context.taskAgents.get(event.payload.taskId)),
         },
       } as ProviderRuntimeEvent;
     }
+    // A settled task never reads what still waits for it: say so instead of dropping it.
+    const undelivered =
+      (event.type === "task.updated" || event.type === "task.completed") &&
+      !context.liveTaskIds.has(event.payload.taskId)
+        ? takeSubagentMessages(context.pendingSubagentMessages, event.payload.taskId)
+        : null;
     const safeEvent = secretRedactor.event(event);
-    return Queue.offer(
+    const offered = Queue.offer(
       runtimeEventQueue,
       stampRuntimeEvent(safeEvent, {
         providerInstanceId: boundInstanceId,
         runtimeSessionId: context.session.runtimeSessionId,
       }),
     ).pipe(Effect.andThen(runtimeEventQueueMetrics.recordEnqueued()), Effect.asVoid);
+    return undelivered === null
+      ? offered
+      : // A notice is labelled by its message and shows the undelivered text (truncated).
+        offered.pipe(
+          Effect.andThen(
+            emitRuntimeNotice(context, CLAUDE_SUBAGENT_MESSAGE_UNDELIVERED, undelivered),
+          ),
+        );
   };
 
   const emitClaudeSubagentStarted = Effect.fn("emitClaudeSubagentStarted")(function* (
@@ -2205,14 +2489,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         issue: "Session thread id is not initialized yet.",
       });
     }
-    return {
-      threadId,
-      turns: context.turns.map((turn) => ({
-        id: turn.id,
-        items: [...turn.items],
-      })),
-    };
+    return providerThreadSnapshotFromTurnIds(threadId, context.completedTurnIds);
   });
+
+  /** The cursor's `transcriptSeen`, for the session it resumes. */
+  const transcriptSeenMarker = (context: ClaudeSessionContext) =>
+    context.resumeSessionId !== undefined && context.transcriptSeenFor === context.resumeSessionId
+      ? { transcriptSeen: true as const }
+      : {};
 
   const updateResumeCursor = Effect.fnUntraced(function* (context: ClaudeSessionContext) {
     if (!context.session.threadId) return;
@@ -2225,9 +2509,27 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ...(context.resumeSessionId ? { resume: context.resumeSessionId } : {}),
       ...(context.lastAssistantUuid ? { resumeSessionAt: context.lastAssistantUuid } : {}),
       ...(context.pendingRewind ? { rewind: { at: context.pendingRewind.at } } : {}),
-      turnCount: context.turns.length,
+      turnCount: context.completedTurnIds.length,
+      ...transcriptSeenMarker(context),
+      // A resumed session must still know the tasks an update names only by id.
+      ...planTasksCursorField(context.planTasks, context.resumeSessionId),
     };
     context.session = { ...context.session, resumeCursor, updatedAt };
+  });
+
+  /**
+   * Checks once per session, after a completed turn wrote its transcript, whether the instance's
+   * config root holds it. Only a session seen there may later read as deleted from it: a wrapper
+   * binary or a container can keep its transcripts in a store this root is not.
+   */
+  const noteTranscriptSeen = Effect.fn("noteTranscriptSeen")(function* (
+    context: ClaudeSessionContext,
+    sessionId: string,
+  ) {
+    context.transcriptCheckedFor = sessionId;
+    const presence = yield* checkTranscriptPresence(sessionId);
+    yield* Effect.annotateCurrentSpan({ "claude.transcript": presence });
+    if (presence === "present") context.transcriptSeenFor = sessionId;
   });
 
   const ensureAssistantTextBlock = Effect.fnUntraced(function* (
@@ -2475,6 +2777,25 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     });
   });
 
+  const emitRuntimeNotice = Effect.fn("emitRuntimeNotice")(function* (
+    context: ClaudeSessionContext,
+    message: string,
+    detail?: string,
+  ) {
+    const turnState = context.turnState;
+    const stamp = yield* makeEventStamp();
+    yield* offerRuntimeEventForContext(context, {
+      type: "runtime.notice",
+      eventId: stamp.eventId,
+      provider: PROVIDER,
+      createdAt: stamp.createdAt,
+      threadId: context.session.threadId,
+      ...(turnState ? { turnId: asCanonicalTurnId(turnState.turnId) } : {}),
+      payload: { message, ...(detail ? { detail } : {}) },
+      providerRefs: nativeProviderRefs(context),
+    });
+  });
+
   const emitRuntimeWarning = Effect.fn("emitRuntimeWarning")(function* (
     context: ClaudeSessionContext,
     message: string,
@@ -2544,10 +2865,47 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     });
   });
 
+  const emitAutoModeRefusedWarning = Effect.fn("emitAutoModeRefusedWarning")(function* (
+    context: ClaudeSessionContext,
+    model: string | undefined,
+  ) {
+    if (context.autoModeRefusedWarningEmitted) return;
+    context.autoModeRefusedWarningEmitted = true;
+    yield* emitRuntimeWarning(context, claudeAutoModeRefusedMessage(model));
+  });
+
+  /**
+   * The thread plan from TodoWrite input or the Task tool list. Stamped with the open turn, else
+   * the last completed one: a background subagent's update after its turn settled must not go
+   * out turnless, or clients would keep preferring that turn's older plan.
+   */
+  const emitPlanUpdated = Effect.fn("emitPlanUpdated")(function* (
+    context: ClaudeSessionContext,
+    plan: ReadonlyArray<RuntimePlanStep>,
+    raw?: { readonly method: string; readonly payload: unknown },
+  ) {
+    const turnId = context.turnState?.turnId ?? context.completedTurnIds.at(-1);
+    const stamp = yield* makeEventStamp();
+    yield* offerRuntimeEventForContext(context, {
+      type: "turn.plan.updated",
+      eventId: stamp.eventId,
+      provider: PROVIDER,
+      createdAt: stamp.createdAt,
+      threadId: context.session.threadId,
+      ...(turnId ? { turnId: asCanonicalTurnId(turnId) } : {}),
+      payload: { plan },
+      providerRefs: nativeProviderRefs(context),
+      ...(raw
+        ? { raw: { source: "claude.sdk.message", method: raw.method, payload: raw.payload } }
+        : {}),
+    });
+  });
+
   const emitCompactionUnavailableWarning = Effect.fn("emitCompactionUnavailableWarning")(function* (
     context: ClaudeSessionContext,
   ) {
-    if (context.compactionUnavailableWarningEmitted) return;
+    // It reports Ryco's own compaction, which an instance left to Claude Code does not run.
+    if (autoCompactMode === "claudeCode" || context.compactionUnavailableWarningEmitted) return;
     context.compactionUnavailableWarningEmitted = true;
     yield* emitRuntimeWarning(
       context,
@@ -2555,55 +2913,140 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     );
   });
 
-  const maybeEnableAutomaticCompaction = Effect.fn("maybeEnableAutomaticCompaction")(function* (
+  /** Applies a compaction request's conclusion; one that ended without compacting warns once. */
+  const concludeAutomaticCompaction = Effect.fn("concludeAutomaticCompaction")(function* (
     context: ClaudeSessionContext,
-    usage: ThreadTokenUsageSnapshot,
+    requestId: string,
+    aborted: boolean,
   ) {
-    if (context.stopped || sessions.get(context.session.threadId) !== context) return;
-
-    const decision = observeContextCompaction(context.compactionPolicy, {
+    const conclusion = concludeContextCompactionRequest(context.compactionPolicy, {
       generation: context.generation,
-      usage,
+      requestId,
+      aborted,
     });
-    context.compactionPolicy = decision.state;
-    const windowTokens = decision.windowTokens;
-    if (!decision.trigger || windowTokens === undefined) return;
+    context.compactionPolicy = conclusion.state;
+    if (conclusion.unavailable) yield* emitCompactionUnavailableWarning(context);
+  });
 
-    const applyFlagSettings = context.query.applyFlagSettings;
-    if (!context.supportsAutomaticCompaction || !applyFlagSettings) {
-      context.compactionPolicy = disableContextCompaction(
-        context.compactionPolicy,
-        context.generation,
-      );
-      yield* emitCompactionUnavailableWarning(context);
-      return;
+  /**
+   * Compacts at the policy threshold before a completed prompt turn closes: Claude Code's own
+   * `/compact` runs as the turn's last segment, and the turn closes at that prompt's result
+   * (`closeCompactedTurn`). Claude Code fixes its auto-compact window when it starts: a live
+   * `applyFlagSettings({ autoCompactWindow })` leaves the window it compacts at unchanged
+   * (claudeCompactionCliProbe.test.ts), so only the explicit command compacts here.
+   *
+   * Inside the turn, not as a turn of its own: the thread stays busy until compaction ends, so a
+   * queued message waits for it instead of racing it, and the turn the user started stays the
+   * thread's latest (a delegated task still returns its result). Returns `compacting` when the
+   * turn now waits for its compaction, `unavailable` when it crossed the threshold with no way to
+   * compact (the caller warns once the turn closed).
+   *
+   * An instance set to let Claude Code decide (`autoCompact: "claudeCode"`) never compacts here.
+   */
+  const maybeCompactBeforeClosing = Effect.fn("maybeCompactBeforeClosing")(function* (
+    context: ClaudeSessionContext,
+    turnState: ClaudeTurnState,
+    result: SDKResultMessage,
+    usage: ThreadTokenUsageSnapshot | undefined,
+  ): Effect.fn.Return<"compacting" | "unavailable" | "none"> {
+    if (
+      autoCompactMode === "claudeCode" ||
+      usage === undefined ||
+      context.stopped ||
+      sessions.get(context.session.threadId) !== context ||
+      context.turnState !== turnState ||
+      turnState.completion !== undefined ||
+      turnState.interruptRequested ||
+      turnState.compactionPromptUuid !== undefined ||
+      // A background ("wake") turn has no prompt to correlate; the next prompt turn observes.
+      turnState.promptUuid === undefined ||
+      // Claude Code runs a queued send next; that turn's completion observes the context again.
+      (result.queued_turn_count ?? 0) > 0
+    ) {
+      return "none";
     }
 
     const generation = context.generation;
-    const applied = yield* Effect.tryPromise({
-      try: () =>
-        applyFlagSettings.call(context.query, {
-          autoCompactEnabled: true,
-          autoCompactWindow: windowTokens,
-        }),
-      catch: () => undefined,
-    }).pipe(
-      Effect.as(true),
-      Effect.timeout("3 seconds"),
-      Effect.catch(() => Effect.succeed(false)),
-    );
+    const decision = observeContextCompaction(context.compactionPolicy, {
+      generation,
+      usage,
+      windowTokens: autoCompactWindow,
+    });
+    context.compactionPolicy = decision.state;
+    if (!decision.trigger) return "none";
 
-    if (
-      context.stopped ||
-      context.generation !== generation ||
-      sessions.get(context.session.threadId) !== context
-    ) {
-      return;
-    }
-    if (!applied) {
+    if (!context.supportsAutomaticCompaction) {
       context.compactionPolicy = disableContextCompaction(context.compactionPolicy, generation);
-      yield* emitCompactionUnavailableWarning(context);
+      return "unavailable";
     }
+
+    const requestId = yield* Effect.sync(() => crypto.randomUUID());
+    const offered = yield* Queue.offer(context.promptQueue, {
+      type: "message",
+      message: {
+        ...buildUserMessage({
+          sdkContent: [{ type: "text", text: NATIVE_COMPACTION_COMMAND }],
+        }),
+        uuid: requestId,
+      },
+    });
+    if (!offered) {
+      // The prompt queue is shut down: the session is ending, and nothing compacts.
+      context.compactionPolicy = disableContextCompaction(context.compactionPolicy, generation);
+      return "none";
+    }
+    turnState.compactionPromptUuid = requestId;
+    context.compactionPolicy = recordContextCompactionRequest(
+      context.compactionPolicy,
+      generation,
+      requestId,
+    );
+    // The turn's own work is over: seal it and publish its gauge, as between a steer's segments.
+    yield* sealTurnSegment(context, turnState, "completed", result);
+    yield* emitTokenUsageSnapshot(context, usage, turnState.turnId);
+    turnState.sealedSegmentCount += 1;
+    // Exact-turn Agent Control authority ends with the user's work, not with the compaction.
+    if (context.agentControl) yield* context.agentControl.retireTurn(turnState.turnId);
+    yield* Effect.logInfo("claude.compaction.requested", {
+      threadId: context.session.threadId,
+      turnId: turnState.turnId,
+      usedTokens: usage.usedTokens,
+      maxTokens: usage.maxTokens,
+      ...(autoCompactWindow !== undefined ? { windowTokens: autoCompactWindow } : {}),
+    });
+    return "compacting";
+  });
+
+  /**
+   * Closes a turn at the result of its compaction segment. The turn's own work already completed,
+   * so it closes as completed unless Stop was requested; how the compaction ended only decides
+   * the policy's request (no boundary before this result: unavailable, unless Stop aborted it).
+   */
+  const closeCompactedTurn = Effect.fn("closeCompactedTurn")(function* (
+    context: ClaudeSessionContext,
+    turnState: ClaudeTurnState,
+    compactionPromptUuid: string,
+    result: SDKResultMessage,
+  ) {
+    const kind = classifyClaudeResultKind(result);
+    if (kind === "failure") {
+      yield* Effect.logWarning("claude.compaction.failed", {
+        threadId: context.session.threadId,
+        turnId: turnState.turnId,
+        subtype: result.subtype,
+        ...(result.subtype === "success" ? {} : { errors: result.errors }),
+      });
+    }
+    // Claude Code answers a `/compact` that Stop aborted with a successful result.
+    const stopped = turnState.interruptRequested;
+    yield* concludeAutomaticCompaction(context, compactionPromptUuid, kind === "abort" || stopped);
+    yield* completeTurn(
+      context,
+      stopped ? "interrupted" : "completed",
+      stopped ? claudeTurnCloseErrorMessage("stopped", result) : undefined,
+      result,
+      { expectedTurnState: turnState },
+    );
   });
 
   /** The context gauge a result (or a local close without one) publishes. */
@@ -2816,16 +3259,21 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     status: ProviderRuntimeTurnStatus,
     errorMessage: string | undefined,
     result: SDKResultMessage | undefined,
-    options: { readonly abortReason?: string } | undefined,
+    options:
+      | {
+          readonly abortReason?: string;
+          readonly resolvedUsage?: { readonly snapshot: ThreadTokenUsageSnapshot | undefined };
+        }
+      | undefined,
   ) {
-    const usageSnapshot = yield* resolveResultUsageSnapshot(context, result);
+    const usageSnapshot =
+      options?.resolvedUsage !== undefined
+        ? options.resolvedUsage.snapshot
+        : yield* resolveResultUsageSnapshot(context, result);
 
     yield* sealTurnSegment(context, turnState, status, result);
 
-    context.turns.push({
-      id: turnState.turnId,
-      items: [...turnState.items],
-    });
+    context.completedTurnIds.push(turnState.turnId);
     if (turnState.lastChainUuid !== undefined) {
       context.turnHeads.push({ turnId: turnState.turnId, head: turnState.lastChainUuid });
       if (context.turnHeads.length > CLAUDE_TURN_HEADS_CAP) context.turnHeads.shift();
@@ -2835,6 +3283,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // before turn.completed goes out: ProviderService persists the live cursor
     // when it sees that event.
     if (status === "completed") context.pendingRewind = undefined;
+    const sessionId = context.resumeSessionId;
+    if (
+      status === "completed" &&
+      sessionId !== undefined &&
+      context.transcriptCheckedFor !== sessionId
+    ) {
+      yield* noteTranscriptSeen(context, sessionId);
+    }
     yield* updateResumeCursor(context);
 
     yield* emitTokenUsageSnapshot(context, usageSnapshot, turnState.turnId);
@@ -2888,8 +3344,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // Release waiters before the tail effects: the turn is detached.
     Deferred.doneUnsafe(completion, Effect.void);
     if (context.agentControl) yield* context.agentControl.retireTurn(turnState.turnId);
-    if (status === "completed" && usageSnapshot) {
-      yield* maybeEnableAutomaticCompaction(context, usageSnapshot);
+    // Closed before its compaction's result (Stop, a lost stream): the request settles quietly.
+    // After `closeCompactedTurn` it is already concluded, so this is a no-op.
+    if (turnState.compactionPromptUuid !== undefined) {
+      yield* concludeAutomaticCompaction(context, turnState.compactionPromptUuid, true);
     }
   });
 
@@ -2907,6 +3365,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       readonly abortReason?: string;
       /** Only close this exact turn; a different (or no) open turn is left alone. */
       readonly expectedTurnState?: ClaudeTurnState;
+      /** The result's gauge, when the caller already resolved it (resolving consumes state). */
+      readonly resolvedUsage?: { readonly snapshot: ThreadTokenUsageSnapshot | undefined };
     },
   ) {
     // Must stay the first statement: the claim is only atomic before any yield.
@@ -3094,6 +3554,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         if (nextTool.itemType === "collab_agent_tool_call" && parsedInput) {
           rememberClaudeSubagentLaunch(context, nextTool.itemId, parsedInput);
         }
+        if (parsedInput) {
+          context.planTasks.noteToolUse(nextTool.itemId, nextTool.toolName, parsedInput);
+        }
 
         if (
           !parsedInput ||
@@ -3144,27 +3607,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           },
         });
 
-        // Emit plan update when TodoWrite input is parsed
-        if (parsedInput && isTodoTool(nextTool.toolName)) {
+        // TodoWrite carries its whole list in its input. The CLI keeps one TodoWrite list per
+        // agent, so a subagent's list must not replace the root's plan.
+        if (parsedInput && isTodoTool(nextTool.toolName) && !nextTool.parentToolUseId) {
           const planSteps = extractPlanStepsFromTodoInput(parsedInput);
           if (planSteps && planSteps.length > 0) {
-            const planStamp = yield* makeEventStamp();
-            yield* offerRuntimeEventForContext(context, {
-              type: "turn.plan.updated",
-              eventId: planStamp.eventId,
-              provider: PROVIDER,
-              createdAt: planStamp.createdAt,
-              threadId: context.session.threadId,
-              ...(context.turnState
-                ? {
-                    turnId: asCanonicalTurnId(context.turnState.turnId),
-                  }
-                : {}),
-              payload: {
-                plan: planSteps,
-              },
-              providerRefs: nativeProviderRefs(context),
-            });
+            yield* emitPlanUpdated(context, planSteps);
           }
         }
       }
@@ -3247,6 +3695,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       if (itemType === "collab_agent_tool_call") {
         rememberClaudeSubagentLaunch(context, itemId, toolInput);
       }
+      context.planTasks.noteToolUse(itemId, toolName, toolInput);
 
       const stamp = yield* makeEventStamp();
       yield* offerRuntimeEventForContext(context, {
@@ -3329,11 +3778,24 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
-    if (context.turnState) {
-      context.turnState.items.push(message.message);
-    }
+    const toolResults = toolResultBlocksFromUserMessage(message);
+    for (const toolResult of toolResults) {
+      // Before the in-flight lookup: subagent calls seen only in snapshots are never in flight.
+      // A subagent's result updates the session's shared list too. Known gap: a discarded steer
+      // segment's frames never get here (routeSteerFrame), so its task changes show up only at the
+      // next TaskList.
+      const plan = context.planTasks.applyResult({
+        toolUseId: toolResult.toolUseId,
+        text: toolResult.text,
+        isError: toolResult.isError,
+        structured: toolResults.length === 1 ? readClaudeToolUseResult(message) : undefined,
+      });
+      if (plan) {
+        yield* emitPlanUpdated(context, plan, { method: "claude/user", payload: message });
+        // The live cursor is what a stop persists; a background result may be the last frame.
+        yield* updateResumeCursor(context);
+      }
 
-    for (const toolResult of toolResultBlocksFromUserMessage(message)) {
       const toolEntry = Array.from(context.inFlightTools.entries()).find(
         ([, tool]) => tool.itemId === toolResult.toolUseId,
       );
@@ -3591,14 +4053,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           block.id,
           assistantParentToolUseId,
         );
-        if (
-          classifyToolItemType(block.name) === "collab_agent_tool_call" &&
-          block.input !== null &&
-          typeof block.input === "object" &&
-          !Array.isArray(block.input)
-        ) {
-          rememberClaudeSubagentLaunch(context, block.id, block.input as Record<string, unknown>);
+        if (block.input === null || typeof block.input !== "object" || Array.isArray(block.input)) {
+          continue;
         }
+        const blockInput = block.input as Record<string, unknown>;
+        if (classifyToolItemType(block.name) === "collab_agent_tool_call") {
+          rememberClaudeSubagentLaunch(context, block.id, blockInput);
+        }
+        // Subagents write to the session's task list, so their Task calls feed the plan too.
+        context.planTasks.noteToolUse(block.id, block.name, blockInput);
       }
       context.lastAssistantUuid = message.uuid;
       yield* updateResumeCursor(context);
@@ -3665,7 +4128,24 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           name?: unknown;
           input?: unknown;
         };
-        if (toolUse.type !== "tool_use" || toolUse.name !== "ExitPlanMode") {
+        if (toolUse.type !== "tool_use") {
+          continue;
+        }
+        // The snapshot's input is final; it overrides what streaming noted.
+        if (
+          typeof toolUse.id === "string" &&
+          typeof toolUse.name === "string" &&
+          toolUse.input !== null &&
+          typeof toolUse.input === "object" &&
+          !Array.isArray(toolUse.input)
+        ) {
+          context.planTasks.noteToolUse(
+            toolUse.id,
+            toolUse.name,
+            toolUse.input as Record<string, unknown>,
+          );
+        }
+        if (toolUse.name !== "ExitPlanMode") {
           continue;
         }
         const planMarkdown = extractExitPlanModePlan(toolUse.input);
@@ -3683,7 +4163,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     if (context.turnState) {
-      context.turnState.items.push(message.message);
       yield* backfillAssistantTextBlocksFromSnapshot(context, message);
     }
 
@@ -3715,6 +4194,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     const turnState = context.turnState;
     const echoedPromptUuids = claudeEchoedPromptUuids(message);
+    // A turn waiting for its compaction segment closes only at that prompt's result.
+    const compactionPromptUuid = turnState?.compactionPromptUuid;
+    if (turnState !== undefined && compactionPromptUuid !== undefined) {
+      if (
+        claudeResultBelongsToTurn({
+          echoed: echoedPromptUuids,
+          origin: message.origin,
+          promptUuid: compactionPromptUuid,
+          steerPromptUuids: NO_STEER_PROMPT_UUIDS,
+        })
+      ) {
+        return yield* closeCompactedTurn(context, turnState, compactionPromptUuid, message);
+      }
+      yield* Effect.logInfo("claude.turn.result-during-compaction", {
+        threadId: context.session.threadId,
+        turnId: turnState.turnId,
+        origin: message.origin?.kind,
+      });
+      return;
+    }
     // Resuming can produce a result for a background notification before the
     // queued user prompt runs. Prefer explicit correlation; older CLIs omit it.
     // A steered turn's later segments echo only their steer uuids.
@@ -3737,6 +4236,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     const resultStatus = turnStatusFromResult(message);
     let close: ClaudeTurnClose = { status: resultStatus, cause: "result" };
+    let unsettledSteerCount = 0;
     if (turnState) {
       const decision = decideClaudeTurnResult({
         kind: classifyClaudeResultKind(message),
@@ -3750,6 +4250,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         turnState.settledSteerPromptUuids.add(uuid);
         context.discardedSteerPromptUuids.delete(uuid);
       }
+      unsettledSteerCount = decision.unsettled.length;
       if (decision.decision === "await-steer") {
         // The CLI promised another result: this segment ended (a "now" steer aborted it, or the
         // prompt finished first) and the steer runs next. Keep the Ryco turn open for it.
@@ -3841,6 +4342,27 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
     }
 
+    // A turn whose own work completed may compact before it closes.
+    if (
+      turnState !== undefined &&
+      close.status === "completed" &&
+      close.cause === "result" &&
+      unsettledSteerCount === 0
+    ) {
+      const usageSnapshot = yield* resolveResultUsageSnapshot(context, message);
+      const compaction = yield* maybeCompactBeforeClosing(
+        context,
+        turnState,
+        message,
+        usageSnapshot,
+      );
+      if (compaction === "compacting") return;
+      yield* completeTurn(context, close.status, errorMessage, message, {
+        resolvedUsage: { snapshot: usageSnapshot },
+      });
+      if (compaction === "unavailable") yield* emitCompactionUnavailableWarning(context);
+      return;
+    }
     yield* completeTurn(context, close.status, errorMessage, message);
   });
 
@@ -3920,6 +4442,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ...(entry.phaseIndex !== undefined ? { phaseIndex: entry.phaseIndex } : {}),
           ...(entry.phaseTitle ? { phaseTitle: entry.phaseTitle } : {}),
           ...(entry.attempt !== undefined ? { attempt: entry.attempt } : {}),
+          // A member slot is never a live SDK task, so stopTask on it is a no-op.
+          canStop: false,
           timelineBypass: true,
         },
       });
@@ -3945,6 +4469,23 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       message.subtype === "init" || message.subtype === "status"
         ? message.permissionMode
         : undefined;
+    // Defensive: a session launched in Auto whose first init reports the default mode was
+    // refused Auto by the CLI, so the turns stop asking for it. A plan or ask turn reports
+    // `plan`, which never counts.
+    if (
+      message.subtype === "init" &&
+      context.cliCapabilities === undefined &&
+      context.basePermissionMode === "auto" &&
+      context.currentPermissionMode === "auto" &&
+      reportedPermissionMode === "default"
+    ) {
+      context.basePermissionMode = undefined;
+      yield* Effect.logWarning("claude.auto-mode.refused-by-cli", {
+        threadId: context.session.threadId,
+        model: message.model,
+      });
+      yield* emitAutoModeRefusedWarning(context, context.session.model ?? message.model);
+    }
     if (
       reportedPermissionMode !== undefined &&
       reportedPermissionMode !== context.currentPermissionMode
@@ -3986,6 +4527,27 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         payload: message,
       },
     };
+    /**
+     * A low-key status line (a retry, a banner): never a "Runtime warning" row. `text` is the
+     * row's label, so it must stay short; anything longer belongs in `detail`, the row's body.
+     * Both read SDK fields, so a frame missing one emits nothing rather than failing the stream.
+     */
+    const emitNotice = (text: unknown, detail?: unknown) => {
+      const notice = typeof text === "string" ? text.trim() : "";
+      const body = typeof detail === "string" ? detail.trim() : "";
+      return notice.length === 0
+        ? Effect.void
+        : offerRuntimeEventForContext(context, {
+            ...base,
+            type: "runtime.notice",
+            payload: { message: notice, ...(body.length > 0 ? { detail: body } : {}) },
+          });
+    };
+    /** Provider prose of any length (a hook's reason, a refusal): a fixed label, the text as body. */
+    const emitBanner = (label: string, content: unknown) =>
+      typeof content === "string" && content.trim().length > 0
+        ? emitNotice(label, content)
+        : Effect.void;
 
     // Background-set reconciliation (CC ≥ 2.1.203; the pinned SDK typings
     // don't carry the subtype yet, hence the runtime check before the typed
@@ -4137,9 +4699,24 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
+    // Claude's git and pull request signals (untyped, like the background set above): the
+    // node's thread git sync refreshes the checkout's status on them, mid-turn.
+    const vcsSignal = readClaudeVcsSignal(message);
+    if (vcsSignal !== undefined) {
+      if (vcsSignal !== null) {
+        yield* offerRuntimeEventForContext(context, {
+          ...base,
+          type: "vcs.state.changed",
+          payload: vcsSignal,
+        });
+      }
+      return;
+    }
+
     switch (message.subtype) {
       case "init":
         context.cliCapabilities = parseClaudeCliCapabilities(message);
+        context.supportsAutomaticCompaction = claudeInitAdvertisesNativeCompaction(message);
         yield* offerRuntimeEventForContext(context, {
           ...base,
           type: "session.configured",
@@ -4155,11 +4732,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             context.generation,
           );
         } else if (message.compact_result === "failed") {
-          context.compactionPolicy = disableContextCompaction(
-            context.compactionPolicy,
-            context.generation,
-          );
-          yield* emitCompactionUnavailableWarning(context);
+          // The policy's own `/compact` concludes at its result, which knows whether Stop aborted
+          // it: Claude Code reports a stopped compaction as failed.
+          if (context.compactionPolicy.requestId === undefined) {
+            context.compactionPolicy = disableContextCompaction(
+              context.compactionPolicy,
+              context.generation,
+            );
+            yield* emitCompactionUnavailableWarning(context);
+          }
         } else if (message.compact_result === "success") {
           context.compactionPolicy = settleContextCompaction(
             context.compactionPolicy,
@@ -4617,13 +5198,93 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           message,
         );
         return;
-      default:
-        yield* emitRuntimeWarning(
-          context,
-          `Unhandled Claude system message subtype '${message.subtype}'.`,
-          message,
-        );
+      case "api_retry": {
+        const retry = claudeApiRetryNotice(message);
+        yield* emitNotice(retry.message, retry.detail);
         return;
+      }
+      case "commands_changed":
+        // The full list after a change (skills found as the agent works, MCP prompts): it
+        // replaces what the session reported before and is served for its directory while it
+        // runs (`readLiveProjectCommands`). Menu bookkeeping, not transcript content.
+        context.slashCommands = {
+          commands: parseClaudeSlashCommands(message.commands),
+          order: ++nextSlashCommandsOrder,
+        };
+        return;
+      case "informational":
+        // `info` lines show only in Claude Code's transcript mode. A tool-scoped line is that
+        // tool's live progress, which the CLI dedupes per tool use; the tool's own row already
+        // tracks it, so it is dropped. The rest are banners: hook feedback, a block reason.
+        if (message.level !== "info" && message.tool_use_id === undefined) {
+          yield* emitBanner(claudeInformationalLabel(message), message.content);
+        }
+        return;
+      case "notification":
+        // The REPL's transient toast queue; only what it would interrupt for earns a row.
+        if (message.priority === "high" || message.priority === "immediate") {
+          yield* emitBanner("Claude notification", message.text);
+        }
+        return;
+      case "local_command_output":
+        // A slash command's own output (/usage, /context): the answer the user asked for.
+        yield* emitBanner("Command output", message.content);
+        return;
+      case "memory_recall": {
+        const count = Array.isArray(message.memories) ? message.memories.length : 0;
+        if (count > 0) {
+          yield* emitNotice(`Recalled ${count} ${count === 1 ? "memory" : "memories"}`);
+        }
+        return;
+      }
+      case "model_refusal_fallback":
+        yield* emitBanner("Model switched after a refusal", message.content);
+        return;
+      case "model_refusal_no_fallback":
+        yield* emitBanner("Claude declined the request", message.content);
+        return;
+      case "plugin_install":
+        // Headless install progress; only a failure is actionable.
+        if (message.status === "failed") {
+          yield* emitNotice(
+            message.name
+              ? `Claude plugin install failed: ${message.name}`
+              : "Claude plugin install failed",
+            message.error,
+          );
+        }
+        return;
+      case "session_state_changed":
+        // Turn boundaries come from results and wake signals; a second idle/running source
+        // would race them over the session's status.
+        return;
+      case "control_request_progress":
+        // Progress of a control request this adapter already bounds with its own deadline.
+        return;
+      case "elicitation_complete":
+        // Confirms a URL-mode MCP elicitation, which this adapter never opens.
+        return;
+      case "worker_shutting_down":
+        // Remote Control bridge teardown; a local CLI's exit ends the stream itself.
+        return;
+      default: {
+        // A subtype newer than the pinned SDK: the conversation gets nothing it cannot explain,
+        // and the server log (kept at its default level, unlike the provider event log's
+        // lifecycle mode) gets the subtype with a redacted preview, once per subtype a window.
+        const rawSubtype = (message as { readonly subtype?: unknown }).subtype;
+        const subtype = typeof rawSubtype === "string" ? rawSubtype : String(rawSubtype);
+        yield* logOnceEvery({
+          key: `claude.system-message.unhandled:${subtype}`,
+          message: "claude.system-message.unhandled",
+          level: "Info",
+          fields: {
+            threadId: context.session.threadId,
+            subtype,
+            preview: boundedJsonPreview(secretRedactor.payload(message)),
+          },
+        });
+        return;
+      }
     }
   });
 
@@ -4727,7 +5388,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     Effect.tryPromise({
       // Invoke through the query object: SDK methods rely on `this`.
       try: () => context.query.interrupt(),
-      catch: (cause) => toRequestError(context.session.threadId, "turn/interrupt", cause),
+      catch: (cause) =>
+        toSessionRequestError(context, context.session.threadId, "turn/interrupt", cause),
     }).pipe(
       Effect.timeoutOption("5 seconds"),
       Effect.tap(() =>
@@ -4924,6 +5586,49 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     return true;
   });
 
+  /**
+   * Publishes Claude Code's Fast mode serving state as a turn-less `session.configured` whose
+   * camelCase `fastModeState` key never matches the raw init forwarded with snake_case fields.
+   */
+  const observeClaudeFastModeState = Effect.fnUntraced(function* (
+    context: ClaudeSessionContext,
+    message: SDKMessage,
+  ) {
+    const report = readClaudeFastModeFrame(message);
+    if (report === undefined) return;
+    const decision = decideClaudeFastModePublish({
+      previousSignature: context.lastFastModeSignature,
+      report,
+      isResult: message.type === "result",
+      fastRequested: context.fastModeRequested,
+    });
+    context.lastFastModeSignature = decision.signature;
+    if (!decision.publish) return;
+    const model = context.session.model;
+    const stamp = yield* makeEventStamp();
+    yield* offerRuntimeEventForContext(context, {
+      type: "session.configured",
+      eventId: stamp.eventId,
+      provider: PROVIDER,
+      createdAt: stamp.createdAt,
+      threadId: context.session.threadId,
+      payload: {
+        config: {
+          fastModeState: {
+            state: report.state,
+            ...(report.disabledReason !== undefined
+              ? { disabledReason: report.disabledReason }
+              : {}),
+            ...(model !== undefined ? { model } : {}),
+            // Lets a client tell Fast mode it no longer requests from Fast mode set elsewhere.
+            requested: context.fastModeRequested,
+          },
+        },
+      },
+      providerRefs: {},
+    });
+  });
+
   // Untraced, like the other helpers that run once per SDK message (every stream delta
   // included): a span each made them a large share of the server trace.
   const handleSdkMessage = Effect.fnUntraced(function* (
@@ -4932,6 +5637,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   ) {
     yield* logNativeSdkMessage(context, message);
     yield* ensureThreadId(context, message);
+    // Before steer routing: a dropped steer turn's result still reports the session's Fast mode.
+    if (
+      !context.probing &&
+      (message.type === "result" || (message.type === "system" && message.subtype === "init"))
+    ) {
+      yield* observeClaudeFastModeState(context, message);
+    }
     if (yield* routeSteerFrame(context, message)) return;
     // After steer routing (dropped steer frames never move it), before dispatch: completing the turn records this as the turn's transcript head.
     const chainUuid = claudeMainChainUuid(message);
@@ -4998,7 +5710,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const runSdkStream = (context: ClaudeSessionContext): Effect.Effect<void, Error> =>
     Stream.fromAsyncIterable(context.query, (cause) =>
-      toError(cause, "Claude runtime stream failed."),
+      toError(withClaudeProcessStderr(context, cause), "Claude runtime stream failed."),
     ).pipe(
       Stream.takeWhile(() => !context.stopped),
       Stream.runForEach((message) =>
@@ -5201,10 +5913,38 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           issue: `Thread '${input.threadId}' still has runtime '${existingContext.session.runtimeSessionId ?? "legacy"}'; stop it before starting '${runtimeSessionId}'.`,
         });
       }
+      yield* failIfTranscriptMissing(input);
       const context = yield* openSessionContext(input, {});
       return { ...context.session };
     },
   );
+
+  /**
+   * Claude starts a resume of a session whose transcript it deleted (its default cleanup, a
+   * moved config) and only fails it on the first prompt, with "No conversation found". The start
+   * fails with that error instead, before any turn reaches Claude, so the orchestrator can start
+   * fresh or carry the conversation over by context handoff. Only a session whose transcript this
+   * config root was seen to hold (`transcriptSeen`) and whose `projects` directory now lacks it
+   * counts. Any other cursor (a wrapper binary or a container whose store is elsewhere, a cursor
+   * from before the marker), an unreadable store, or a config root without `projects/` resumes as
+   * before and fails on the first prompt.
+   */
+  const failIfTranscriptMissing = Effect.fn("failIfTranscriptMissing")(function* (
+    input: ProviderSessionStartInput,
+  ) {
+    if (input.resumePolicy === "fresh") return;
+    const resumeState = readClaudeResumeState(input.resumeCursor);
+    const sessionId = resumeState?.resume;
+    if (sessionId === undefined || resumeState?.transcriptSeen !== true) return;
+    const presence = yield* checkTranscriptPresence(sessionId);
+    yield* Effect.annotateCurrentSpan({ "claude.resume.transcript": presence });
+    if (presence !== "missing") return;
+    return yield* new ProviderAdapterRequestError({
+      provider: PROVIDER,
+      method: "session/resume",
+      detail: `No conversation found with session ID ${sessionId}: Claude no longer keeps its transcript.`,
+    });
+  });
 
   /**
    * Opens a query for `input` and registers its context. With `probe`, the
@@ -5479,12 +6219,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const requestId = ApprovalRequestId.make(callbackOptions.requestId);
       const requestType = classifyRequestType(toolName);
       const detail = summarizeToolRequest(toolName, toolInput);
+      const presentation = claudeApprovalPresentation({ detail, options: callbackOptions });
       const decisionDeferred = yield* Deferred.make<ProviderApprovalDecision>();
       const pendingApproval: PendingApproval = {
         requestType,
         detail,
         decision: decisionDeferred,
         ...(callbackOptions.suggestions ? { suggestions: callbackOptions.suggestions } : {}),
+        ...(presentation.acceptForSessionOffered === false
+          ? { acceptForSessionOffered: false }
+          : {}),
       };
 
       const requestedStamp = yield* makeEventStamp();
@@ -5499,6 +6243,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         payload: {
           requestType,
           detail,
+          ...presentation,
           args: {
             toolName,
             input: toolInput,
@@ -5532,8 +6277,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         once: true,
       });
 
-      const decision = yield* Deferred.await(decisionDeferred);
+      const requestedDecision = yield* Deferred.await(decisionDeferred);
       pendingApprovals.delete(requestId);
+      // A request that refused a session-wide grant (a client that predates the flag can still
+      // offer it) is answered, and reported, as one approval.
+      const decision: ProviderApprovalDecision =
+        requestedDecision === "acceptForSession" &&
+        pendingApproval.acceptForSessionOffered === false
+          ? "accept"
+          : requestedDecision;
 
       const resolvedStamp = yield* makeEventStamp();
       yield* offerRuntimeEventForContext(context, {
@@ -5591,6 +6343,35 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const canUseTool: CanUseTool = (toolName, toolInput, callbackOptions) =>
       runPromise(canUseToolEffect(toolName, toolInput, callbackOptions));
 
+    const pendingSubagentMessages = new Map<string, Array<string>>();
+    // The only SDK channel into a running subagent: a PreToolUse hook's input carries the
+    // calling agent's `agent_id` (its task id), and its additionalContext reaches that agent.
+    // It runs on every tool call, so the path without a waiting message stays trivial.
+    const subagentMessageHook: HookCallback = async (hookInput) => {
+      const agentId = "agent_id" in hookInput ? hookInput.agent_id : undefined;
+      if (pendingSubagentMessages.size === 0 || typeof agentId !== "string") return {};
+      const message = takeSubagentMessages(pendingSubagentMessages, agentId);
+      if (message === null) return {};
+      await runPromise(
+        Effect.gen(function* () {
+          const context = yield* Ref.get(contextRef);
+          if (!context) return;
+          const agent = context.taskAgents.get(agentId);
+          yield* emitRuntimeNotice(
+            context,
+            `${agent?.description ?? "The agent"} read your message.`,
+            message,
+          );
+        }),
+      ).catch(() => undefined);
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          additionalContext: claudeSubagentMessageContext(message),
+        },
+      } satisfies HookJSONOutput;
+    };
+
     const claudeBinaryPath = claudeSettings.binaryPath;
     // Claude Code forces thinking display to "omitted" in SDK sessions unless
     // the display is set explicitly on the command line. Ryco renders the
@@ -5607,14 +6388,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const apiModelId = modelSelection ? resolveClaudeApiModelId(modelSelection) : undefined;
     const rawEffort = getModelSelectionStringOptionValue(modelSelection, "effort");
     const effort = resolveClaudeEffort(caps, rawEffort) ?? null;
-    const fastModeSupported = descriptors.some(
-      (descriptor) => descriptor.type === "boolean" && descriptor.id === "fastMode",
-    );
     const thinkingSupported = descriptors.some(
       (descriptor) => descriptor.type === "boolean" && descriptor.id === "thinking",
     );
-    const fastMode =
-      getModelSelectionBooleanOptionValue(modelSelection, "fastMode") === true && fastModeSupported;
+    const fastMode = resolveClaudeFastMode(modelSelection);
     const thinking = thinkingSupported
       ? getModelSelectionBooleanOptionValue(modelSelection, "thinking")
       : undefined;
@@ -5625,11 +6402,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       auto: "auto",
       "full-access": "bypassPermissions",
     };
-    const permissionMode = runtimeModeToPermission[input.runtimeMode];
+    // Fail closed when this instance's Claude Code says the model cannot run Auto: the session
+    // starts in the CLI's default mode and says so. Its runtime mode stays "auto", so the
+    // orchestrator never sees a mode change and restarts it. Unknown support keeps Auto.
+    const autoModeRefused =
+      input.runtimeMode === "auto" &&
+      modelSelection !== undefined &&
+      options?.resolveAutoModeSupport !== undefined &&
+      (yield* options.resolveAutoModeSupport(modelSelection.model)) === false;
+    const permissionMode = autoModeRefused ? undefined : runtimeModeToPermission[input.runtimeMode];
     const settings = {
       ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
       ...(fastMode ? { fastMode: true } : {}),
       ...(ultracode ? { ultracode: true } : {}),
+      // Claude Code reads its auto-compact window only at start-up. A configured window applies
+      // in both modes, so its own mid-turn compaction is bounded by it too; without one, the
+      // user's own `/autocompact` choice stands. `autoCompactEnabled` is left to the user's
+      // Claude config: the window applies without it (claudeCompactionCliProbe.test.ts).
+      ...(nativeAutoCompactWindow !== undefined
+        ? { autoCompactWindow: nativeAutoCompactWindow }
+        : {}),
     };
     const tokenMode = input.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE;
     const tokenReductionInstructions = yield* readTokenReductionInstructions(tokenMode);
@@ -5670,10 +6462,22 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           }
         : {}),
     };
+    // Claude Code and every job it starts carry the thread's id, so the servers it leaves running
+    // stay listed under this thread (`localServers/threadAttributionEnv.ts`).
+    const sessionEnvironment = withThreadAttribution(claudeEnvironment, threadId);
+    // Only when agent priority changes the argv; otherwise the SDK spawns Claude Code itself.
+    const claudeCodeSpawn = yield* prepareClaudeCodeSpawn(options?.processPriority, {
+      binaryPath: claudeBinaryPath,
+      env: sessionEnvironment,
+      cwd: input.cwd,
+    });
     const queryOptions: ClaudeQueryOptions = {
       ...(input.cwd ? { cwd: input.cwd } : {}),
       ...(apiModelId ? { model: apiModelId } : {}),
       pathToClaudeCodeExecutable: claudeBinaryPath,
+      ...(claudeCodeSpawn
+        ? { spawnClaudeCodeProcess: claudeCodeSpawn.spawnClaudeCodeProcess }
+        : {}),
       // The SDK only reads appended text from `systemPrompt.append`; a top-level
       // `appendSystemPrompt` query option is silently dropped.
       systemPrompt: appendSystemPrompt
@@ -5699,8 +6503,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ...(newSessionId ? { sessionId: newSessionId } : {}),
       includePartialMessages: true,
       canUseTool,
+      hooks: { PreToolUse: [{ hooks: [subagentMessageHook] }] },
       ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
-      env: claudeEnvironment,
+      env: sessionEnvironment,
       ...(input.cwd ? { additionalDirectories: [input.cwd] } : {}),
       ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
     };
@@ -5719,6 +6524,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       "claude.query.model": apiModelId ?? "",
       "claude.query.effort": effectiveEffort ?? "",
       "claude.query.permission_mode": permissionMode ?? "",
+      "claude.query.auto_mode_refused": autoModeRefused,
       "claude.query.system_prompt_append_bytes": Buffer.byteLength(appendSystemPrompt, "utf8"),
       "claude.query.allow_dangerously_skip_permissions": permissionMode === "bypassPermissions",
       "claude.query.resume": existingResumeSessionId ?? "",
@@ -5729,6 +6535,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       "claude.query.settings_json": JSON.stringify(settings),
       "claude.query.extra_args_json": JSON.stringify(extraArgs),
       "claude.query.path_to_executable": claudeBinaryPath,
+      "claude.query.process_priority": claudeCodeSpawn ? "exec-nice" : "sdk-default",
     });
 
     const queryRuntime = yield* Effect.try({
@@ -5780,6 +6587,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
     }
 
+    // A resumed session continues its task list; any other start (a fresh policy, a handoff, a
+    // native fork's new session id) begins empty. No plan event: the thread already shows the
+    // list's last plan, or, after a revert, gets it with the next task result. A fresh start
+    // replaces a session whose list the thread may still show, so its list starts unshown and its
+    // first task result is sent even when it finds no tasks.
+    const planTasks = new ClaudePlanTaskTracker(
+      input.resumePolicy === "fresh"
+        ? { tasks: [], shown: false }
+        : readClaudePlanTasksFromCursor(effectiveResumeCursor, existingResumeSessionId),
+    );
     const session: ProviderSession = {
       threadId,
       provider: PROVIDER,
@@ -5799,13 +6616,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ? { rewind: { at: resumeState.rewindAt } }
           : {}),
         turnCount: resumeState?.turnCount ?? 0,
+        ...(resumeState?.transcriptSeen ? { transcriptSeen: true } : {}),
+        ...planTasksCursorField(planTasks, sessionId),
       },
       createdAt: startedAt,
       updatedAt: startedAt,
     };
 
     const generation = ++nextSessionGeneration;
-    const supportsAutomaticCompaction = typeof queryRuntime.applyFlagSettings === "function";
     const { resumeCursor: _resumeCursor, resumePolicy: _resumePolicy, ...startInput } = input;
     const context: ClaudeSessionContext = {
       generation,
@@ -5814,6 +6632,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       turnHeads: [...(openOptions.turnHeads ?? [])],
       pendingRewind:
         existingResumeSessionId && resumeState?.rewindAt ? { at: resumeState.rewindAt } : undefined,
+      ...(claudeCodeSpawn ? { processStderrTail: claudeCodeSpawn.stderrTail } : {}),
       probing: openOptions.probe === true,
       probeFailure: openOptions.probe === true ? Deferred.makeUnsafe<string>() : undefined,
       promptQueue,
@@ -5828,14 +6647,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       streamFiber: undefined,
       startedAt,
       basePermissionMode: permissionMode,
+      autoModeRefusedWarningEmitted: false,
       currentPermissionMode: permissionMode,
       currentApiModelId: apiModelId,
       currentEffort: effectiveEffort ?? undefined,
       resumeSessionId: sessionId,
+      transcriptSeenFor: resumeState?.transcriptSeen ? existingResumeSessionId : undefined,
+      transcriptCheckedFor: resumeState?.transcriptSeen ? existingResumeSessionId : undefined,
       pendingApprovals,
       pendingUserInputs,
-      turns: [],
+      completedTurnIds: [],
       inFlightTools,
+      planTasks,
       suppressedSubagentBlocks: new Map(),
       taskAgents: new Map(),
       subagentLaunchInputByToolUseId: new Map(),
@@ -5846,6 +6669,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       rejectedRateLimitWindows: new Map(),
       workflowPhasesByTaskId: new Map(),
       liveTaskIds: new Set(),
+      pendingSubagentMessages,
       backgroundedTaskIds: new Set(),
       turnState: undefined,
       lastKnownContextWindow: undefined,
@@ -5855,7 +6679,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       cumulativeUsageSpansCompaction: false,
       cacheModelSelection: modelSelection,
       compactionPolicy: initialContextCompactionPolicyState(generation),
-      supportsAutomaticCompaction,
+      supportsAutomaticCompaction: false,
+      fastModeRequested: fastMode,
+      lastFastModeSignature: undefined,
       compactionUnavailableWarningEmitted: false,
       lastAssistantUuid: resumeState?.resumeSessionAt,
       lastThreadStartedId: undefined,
@@ -5867,6 +6693,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       turnInstallsInFlight: 0,
       requestingStatusObserved: false,
       cliCapabilities: undefined,
+      slashCommands: undefined,
       discardedSteerPromptUuids: new Set(),
       discardingCliTurn: undefined,
       wakeSignalDeferred: false,
@@ -5905,6 +6732,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       },
       providerRefs: {},
     });
+    if (autoModeRefused) yield* emitAutoModeRefusedWarning(context, modelSelection?.model);
 
     const readyStamp = yield* makeEventStamp();
     yield* offerRuntimeEventForContext(context, {
@@ -5956,7 +6784,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           queryRuntime.initializationResult?.() ??
           queryRuntime.mcpServerStatus?.() ??
           Promise.resolve(),
-        catch: (cause) => toMessage(cause, "Claude rejected the reopened conversation."),
+        catch: (cause) =>
+          toMessage(
+            withClaudeProcessStderr(context, cause),
+            "Claude rejected the reopened conversation.",
+          ),
       });
       const probe = yield* Effect.raceFirst(
         controlRequest.pipe(Effect.asVoid),
@@ -5999,8 +6831,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const initialized = yield* Effect.tryPromise({
       // Invoke through the query object: SDK methods rely on `this`.
       try: () => context.query.initializationResult!(),
-      catch: (cause) => toRequestError(threadId, "initialize", cause),
-    }).pipe(Effect.timeoutOption(Duration.millis(CLAUDE_STARTUP_INITIALIZE_TIMEOUT_MS)));
+      catch: (cause) => toSessionRequestError(context, threadId, "initialize", cause),
+    }).pipe(timeoutWhileResponsiveOption(CLAUDE_STARTUP_INITIALIZE_TIMEOUT_MS));
     if (Option.isSome(initialized)) {
       context.cliInitialized = true;
       return;
@@ -6033,7 +6865,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       if (context.currentApiModelId !== apiModelId) {
         yield* Effect.tryPromise({
           try: () => context.query.setModel(apiModelId),
-          catch: (cause) => toRequestError(input.threadId, "turn/setModel", cause),
+          catch: (cause) => toSessionRequestError(context, input.threadId, "turn/setModel", cause),
         });
         context.currentApiModelId = apiModelId;
         context.lastKnownContextWindow = undefined;
@@ -6050,6 +6882,21 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       );
       context.currentEffort =
         getEffectiveClaudeAgentEffort(turnEffort ?? null, modelSelection.model) ?? undefined;
+      // Fast mode changes in-session (`modelSelectionChangeRestartsSession`), so background work
+      // the runtime still runs keeps running. `null` clears the flag-layer key, as Claude Code's
+      // own toggle does, which leaves the speed to Claude Code's settings as a start without
+      // Fast mode does.
+      const fastMode = resolveClaudeFastMode(modelSelection);
+      if (fastMode !== context.fastModeRequested) {
+        yield* Effect.tryPromise({
+          try: () => context.query.applyFlagSettings({ fastMode: fastMode ? true : null }),
+          catch: (cause) =>
+            toSessionRequestError(context, input.threadId, "turn/applyFlagSettings", cause),
+        });
+        context.fastModeRequested = fastMode;
+        // The next report republishes with the new request, even if the state holds.
+        context.lastFastModeSignature = undefined;
+      }
     }
 
     // Apply interaction mode by switching the SDK's permission mode.
@@ -6071,7 +6918,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       context.currentPermissionMode = undefined;
       yield* Effect.tryPromise({
         try: () => context.query.setPermissionMode(targetPermissionMode),
-        catch: (cause) => toRequestError(input.threadId, "turn/setPermissionMode", cause),
+        catch: (cause) =>
+          toSessionRequestError(context, input.threadId, "turn/setPermissionMode", cause),
       });
       context.currentPermissionMode = targetPermissionMode;
     }
@@ -6203,6 +7051,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           "Claude is waiting for an approval or answer. The message stays queued.",
         );
       }
+      // A steer would stop the compaction the policy sent; the message runs after it instead.
+      if (turnState.compactionPromptUuid !== undefined) {
+        return yield* refuse("busy", STEER_TURN_COMPACTING_DETAIL);
+      }
       if (!context.cliCapabilities?.has(CLAUDE_CLI_CAPABILITY_INTERRUPT_RECEIPT)) {
         return yield* refuse(
           "unsupported",
@@ -6227,7 +7079,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         { fileSystem, attachmentsDir: serverConfig.attachmentsDir, boundInstanceId },
       );
       const steerUuid = yield* Effect.sync(() => crypto.randomUUID());
-      // Re-check identity after the attachment reads: the turn or the context may have changed.
+      // Re-check identity after the attachment reads: the turn or the context may have changed,
+      // and the turn's result may have started its compaction.
       const registered = yield* context.turnLock.withPermits(1)(
         Effect.gen(function* () {
           if (
@@ -6237,18 +7090,22 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             turnState.interruptRequested ||
             turnState.completion !== undefined
           ) {
-            return false;
+            return "turn-ended" as const;
           }
+          if (turnState.compactionPromptUuid !== undefined) return "compacting" as const;
           turnState.steerPromptUuids.add(steerUuid);
           const offered = yield* Queue.offer(context.promptQueue, {
             type: "message",
             message: { ...message, uuid: steerUuid, priority: "now" },
           });
           if (!offered) turnState.steerPromptUuids.delete(steerUuid);
-          return offered;
+          return offered ? ("registered" as const) : ("turn-ended" as const);
         }),
       );
-      if (!registered) {
+      if (registered === "compacting") {
+        return yield* refuse("busy", STEER_TURN_COMPACTING_DETAIL);
+      }
+      if (registered === "turn-ended") {
         return yield* refuse("turn-ended", STEER_TURN_ENDED_DETAIL);
       }
       yield* Effect.logInfo("claude.turn.steered", {
@@ -6333,7 +7190,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           cancelQueued
             ? context.query.interrupt({ cancelQueued: true })
             : context.query.interrupt(),
-        catch: (cause) => toRequestError(threadId, "turn/interrupt", cause),
+        catch: (cause) => toSessionRequestError(context, threadId, "turn/interrupt", cause),
       });
       if (target !== undefined && target.steerPromptUuids.size > 0) {
         const receipt = readClaudeInterruptReceipt(rawReceipt);
@@ -6381,11 +7238,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           }),
         );
       }
-      // The CLI may never report a result for a provider turn it was not asked to run. Give it
-      // a grace period, then finish the turn locally. Forked: Stop must never block the reactor.
+      // The CLI may never report a result for a provider turn it was not asked to run, or for a
+      // compaction segment it stopped. Give it a grace period, then finish the turn locally.
+      // Forked: Stop must never block the reactor.
+      const compacting = target?.compactionPromptUuid !== undefined;
       if (
         target !== undefined &&
-        target.openedBy !== "prompt" &&
+        (target.openedBy !== "prompt" || compacting) &&
         (turnId === undefined || target.turnId === turnId)
       ) {
         yield* Effect.sleep(Duration.millis(CLAUDE_PROVIDER_TURN_STOP_GRACE_MS)).pipe(
@@ -6403,8 +7262,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                 threadId: context.session.threadId,
                 turnId: target.turnId,
                 openedBy: target.openedBy,
+                compacting,
               }).pipe(
-                Effect.andThen(completeTurn(context, "interrupted", PROVIDER_TURN_STOP_REASON)),
+                Effect.andThen(
+                  completeTurn(
+                    context,
+                    "interrupted",
+                    compacting ? "Interrupted by user." : PROVIDER_TURN_STOP_REASON,
+                  ),
+                ),
               );
             }),
           ),
@@ -6453,7 +7319,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         if (!context.liveTaskIds.has(taskId)) return Promise.resolve();
         return context.query.stopTask!(taskId);
       },
-      catch: (cause) => toRequestError(threadId, "task/stop", cause),
+      catch: (cause) => toSessionRequestError(context, threadId, "task/stop", cause),
     }).pipe(Effect.timeoutOption("5 seconds"));
     if (Option.isNone(outcome)) {
       return yield* new ProviderAdapterRequestError({
@@ -6462,6 +7328,35 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         detail: `Timed out stopping task ${taskId}.`,
       });
     }
+  });
+
+  // Queues a person's message for one running subagent; the PreToolUse hook hands it over at
+  // the agent's next tool call, and a task that settles first reports it undelivered.
+  const messageBackgroundTask: NonNullable<ClaudeAdapterShape["messageBackgroundTask"]> = Effect.fn(
+    "messageBackgroundTask",
+  )(function* (threadId, taskId, text, expected) {
+    const context = yield* requireSession(threadId);
+    const agent = context.taskAgents.get(taskId);
+    if (
+      context.stopped ||
+      expected.runtimeSessionId !== context.session.runtimeSessionId ||
+      expected.attempt !== (agent?.backgroundAttempt ?? 0) ||
+      !context.liveTaskIds.has(taskId)
+    ) {
+      return yield* new ProviderTaskEndedError({ provider: PROVIDER, threadId, taskId });
+    }
+    if (!isMessageableClaudeTask(agent)) {
+      return yield* new ProviderUnsupportedError({ provider: PROVIDER });
+    }
+    const pending = context.pendingSubagentMessages.get(taskId) ?? [];
+    if (pending.length >= CLAUDE_SUBAGENT_PENDING_MESSAGES_MAX) {
+      return yield* new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method: TASK_MESSAGE_PENDING_LIMIT_METHOD,
+        detail: "Several messages already wait for this agent's next step.",
+      });
+    }
+    context.pendingSubagentMessages.set(taskId, [...pending, text]);
   });
 
   const readThread: ClaudeAdapterShape["readThread"] = Effect.fn("readThread")(
@@ -6575,7 +7470,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
 
         const previousTurnCount =
-          readClaudeResumeState(previousCursor)?.turnCount ?? context.turns.length;
+          readClaudeResumeState(previousCursor)?.turnCount ?? context.completedTurnIds.length;
+        // A revert does not rewind Claude's task store, so the rewound session keeps its list;
+        // the fresh branch is a new session whose list starts empty. The revert does drop the
+        // reverted turns' plans, so the thread may show an older list: marked unshown, the list
+        // goes out with the next task result even when that result changes nothing.
         const nextCursor =
           rewindPlan.kind === "fresh" || context.resumeSessionId === undefined
             ? { threadId }
@@ -6584,6 +7483,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                 resume: context.resumeSessionId,
                 rewind: { at: rewindPlan.at },
                 turnCount: Math.max(0, previousTurnCount - input.numTurns),
+                ...transcriptSeenMarker(context),
+                ...planTasksCursorField(context.planTasks, context.resumeSessionId, {
+                  shown: false,
+                }),
               };
         const reopenInput: ProviderSessionStartInput = {
           ...context.startInput,
@@ -6735,6 +7638,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     steerTurn,
     interruptTurn,
     stopBackgroundTask,
+    messageBackgroundTask,
     readThread,
     rollbackThread,
     respondToRequest,
@@ -6760,6 +7664,23 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ),
         Effect.provideService(Path.Path, path),
       ),
+    // The newest `commands_changed` list of a running session in the directory.
+    readLiveProjectCommands: (cwd) =>
+      Effect.sync(() => {
+        let latest: ClaudeSessionContext["slashCommands"];
+        for (const context of sessions.values()) {
+          const pushed = context.slashCommands;
+          if (
+            pushed !== undefined &&
+            !context.stopped &&
+            context.session.cwd === cwd &&
+            (latest === undefined || pushed.order > latest.order)
+          ) {
+            latest = pushed;
+          }
+        }
+        return latest === undefined ? undefined : { skills: [], slashCommands: latest.commands };
+      }),
     get streamEvents() {
       return Stream.fromQueue(runtimeEventQueue).pipe(
         Stream.tap(() => runtimeEventQueueMetrics.recordDequeued()),

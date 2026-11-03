@@ -1,7 +1,7 @@
 /** Compact background-only projection of normalized task activities. Agents keep
  * their existing projection; this module never creates agent identities. */
 import { EventId } from "@ryco/contracts/base-schemas";
-import { INERT_TASK_TYPES } from "./taskClassification.ts";
+import { INERT_TASK_TYPES, TERMINAL_TASK_STATUSES } from "./taskClassification.ts";
 
 export const BACKGROUND_WORK_LIMIT = 100;
 export const BACKGROUND_WORK_CHECKPOINT = "background-work.checkpoint";
@@ -39,7 +39,6 @@ interface Checkpoint extends BackgroundWork {
   readonly ended: boolean;
   readonly tombstones: readonly Tombstone[];
 }
-const terminal = new Set(["completed", "failed", "stopped", "cancelled", "interrupted"]);
 const statuses = new Set(["pending", "running", "waiting", "idle"]);
 function record(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
@@ -169,7 +168,7 @@ function fold(activities: readonly Activity[], expectedSession?: string): Checkp
       tasks.delete(identity);
       continue;
     }
-    if (activity.kind === "task.completed" || terminal.has(String(payload.status))) {
+    if (activity.kind === "task.completed" || TERMINAL_TASK_STATUSES.has(String(payload.status))) {
       tasks.delete(identity);
       if (previous || payload.agentKind === "background" || payload.isBackgrounded === true)
         rememberTerminal(identity, attempt);

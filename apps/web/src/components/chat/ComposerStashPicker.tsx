@@ -1,5 +1,6 @@
 import { usePaneEffect, usePaneFocus } from "./PaneFocus";
 import type { PromptStashEntry } from "@ryco/client-runtime/state/composer";
+import { quoteCitationsToInlineText } from "@ryco/shared/quoteCitations";
 import { BookmarkIcon, Trash2Icon } from "lucide-react";
 import { memo, useEffect, useRef, useState } from "react";
 
@@ -11,7 +12,7 @@ import { Button } from "../ui/button";
 const STASH_PREVIEW_MAX_CHARS = 100;
 
 function entryPreview(entry: PromptStashEntry): string {
-  const compact = entry.prompt.trim().replace(/\s+/g, " ");
+  const compact = quoteCitationsToInlineText(entry.prompt).trim().replace(/\s+/g, " ");
   if (compact.length > 0) {
     return compact.length > STASH_PREVIEW_MAX_CHARS
       ? `${compact.slice(0, STASH_PREVIEW_MAX_CHARS)}…`

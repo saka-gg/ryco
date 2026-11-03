@@ -6,6 +6,7 @@ export * from "./environment.ts";
 export * from "./hostedEnvironmentSessions.ts";
 export * from "./logging.ts";
 export * from "./nativeHandoff.ts";
+export * from "./nativePush.ts";
 export * from "./nodeMutationLease.ts";
 export * from "./runtime.ts";
 export * from "./state.ts";

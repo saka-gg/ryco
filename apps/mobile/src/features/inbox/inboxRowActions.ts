@@ -40,22 +40,50 @@ export function snoozeMenuPresetsFromKey(key: string): ReadonlyArray<InboxSnooze
   });
 }
 
-/** The long-press menu of one inbox row: settle/unsettle, then snooze or unsnooze. */
+/** Copies the task's ID (`resolveThreadReferenceCopyTarget`'s fallback, as web's Copy Thread ID). */
+export const COPY_TASK_ID_ACTION_ID = "copy-id";
+
+/** The menu action that asks for a date and time or a duration (`CustomSnoozeSheet`). */
+export const CUSTOM_SNOOZE_ACTION_ID = "snooze-custom";
+
+/**
+ * The long-press menu of one inbox row: settle/unsettle, then snooze (the
+ * presets and "Custom…") or unsnooze.
+ */
 export function buildInboxRowMenuActions(
   row: InboxThreadRow,
   presets: ReadonlyArray<InboxSnoozeMenuPreset>,
 ): InboxRowMenuAction[] {
   const actions: InboxRowMenuAction[] = row.snoozedUntil
     ? [{ id: "unsnooze", title: "Unsnooze", attributes: { disabled: !row.canUnsnooze } }]
-    : presets.map((preset) => ({
-        id: preset.id,
-        title: preset.label,
-        attributes: { disabled: !row.canSnooze },
-      }));
+    : [
+        ...presets.map((preset) => ({
+          id: preset.id,
+          title: preset.label,
+          attributes: { disabled: !row.canSnooze },
+        })),
+        {
+          id: CUSTOM_SNOOZE_ACTION_ID,
+          title: "Custom…",
+          attributes: { disabled: !row.canSnooze },
+        },
+      ];
   actions.unshift({
     id: row.attentionState === "settled" ? "unsettle" : "settle",
     title: row.attentionState === "settled" ? "Move to Active" : "Settle task",
     attributes: { disabled: !row.mutationEnabled || !row.canSettle },
+  });
+  // Hide keeps a task out of the Inbox until it needs the person.
+  actions.push(
+    row.hiddenByUser === true
+      ? { id: "unhide", title: "Show in Inbox", attributes: { disabled: !row.hideActionEnabled } }
+      : { id: "hide", title: "Hide task", attributes: { disabled: !row.hideActionEnabled } },
+  );
+  // Reads nothing from the node, so it works offline too.
+  actions.push({
+    id: COPY_TASK_ID_ACTION_ID,
+    title: "Copy task ID",
+    attributes: { disabled: false },
   });
   return actions;
 }

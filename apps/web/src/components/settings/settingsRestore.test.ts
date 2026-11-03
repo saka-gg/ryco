@@ -44,6 +44,68 @@ describe("settings reset ownership", () => {
       ).patch,
     ).toEqual({});
   });
+  it("restores the send shortcut and chat width as local preferences", () => {
+    const settings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      sendShortcut: "mod-enter" as const,
+      chatWidth: "wide" as const,
+    };
+    expect(settingsRestorePlan(settings, "system", "client")).toEqual({
+      labels: ["Send shortcut", "Chat width"],
+      resetTheme: false,
+      patch: { sendShortcut: "enter", chatWidth: "comfortable" },
+    });
+    expect(settingsRestorePlan(settings, "system", "node").patch).toEqual({});
+  });
+  it("turns the Claude resume review back on as a local preference", () => {
+    const settings = { ...DEFAULT_UNIFIED_SETTINGS, claudeResumeReview: false };
+    expect(settingsRestorePlan(settings, "system", "client")).toEqual({
+      labels: ["Claude resume review"],
+      resetTheme: false,
+      patch: { claudeResumeReview: true },
+    });
+    expect(settingsRestorePlan(settings, "system", "node").patch).toEqual({});
+  });
+  it("restores the thread alert switches as local preferences", () => {
+    const settings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      notifyOnTurnCompleteWhenUnfocused: false,
+      threadNotificationSound: true,
+      threadNotificationToasts: false,
+    };
+    expect(settingsRestorePlan(settings, "system", "client")).toEqual({
+      labels: ["Thread alerts", "Alert sound", "In-app alerts"],
+      resetTheme: false,
+      patch: {
+        notifyOnTurnCompleteWhenUnfocused: true,
+        threadNotificationSound: false,
+        threadNotificationToasts: true,
+      },
+    });
+    expect(settingsRestorePlan(settings, "system", "node").patch).toEqual({});
+  });
+  it("restores the writing style as a node setting and keeps project overrides", () => {
+    const settings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      gitWritingStyle: "conventional" as const,
+      projectGitWritingStyle: { p1: "default" as const },
+    };
+    expect(settingsRestorePlan(settings, "system", "node")).toEqual({
+      labels: ["Writing style"],
+      resetTheme: false,
+      patch: { gitWritingStyle: "repository" },
+    });
+    expect(settingsRestorePlan(settings, "system", "client").patch).toEqual({});
+  });
+  it("turns pull request templates back on as a node setting", () => {
+    const settings = { ...DEFAULT_UNIFIED_SETTINGS, pullRequestTemplates: false };
+    expect(settingsRestorePlan(settings, "system", "node")).toEqual({
+      labels: ["Pull request templates"],
+      resetTheme: false,
+      patch: { pullRequestTemplates: true },
+    });
+    expect(settingsRestorePlan(settings, "system", "client").patch).toEqual({});
+  });
   it("does not write defaults for unchanged settings", () => {
     expect(settingsRestorePlan(DEFAULT_UNIFIED_SETTINGS, "system", "node").patch).toEqual({});
   });
@@ -59,6 +121,15 @@ describe("settings reset ownership", () => {
       patch: { autoResumeLimitedThreads: false, snoozeLimitedThreads: false },
     });
   });
+  it("restores the lowered agent CPU priority to on, on the node only", () => {
+    const settings = { ...DEFAULT_UNIFIED_SETTINGS, lowerAgentProcessPriority: false };
+    expect(settingsRestorePlan(settings, "system", "node")).toEqual({
+      labels: ["Lower agent CPU priority"],
+      resetTheme: false,
+      patch: { lowerAgentProcessPriority: true },
+    });
+    expect(settingsRestorePlan(settings, "system", "client").patch).toEqual({});
+  });
   it("restores continue-after-restart to off on the node only", () => {
     const settings = { ...DEFAULT_UNIFIED_SETTINGS, continueThreadsAfterRestart: true };
     expect(settingsRestorePlan(settings, "system", "node")).toEqual({
@@ -67,5 +138,14 @@ describe("settings reset ownership", () => {
       patch: { continueThreadsAfterRestart: false },
     });
     expect(settingsRestorePlan(settings, "system", "client").patch).toEqual({});
+  });
+  it("restores where pull request links open as a local preference", () => {
+    const settings = { ...DEFAULT_UNIFIED_SETTINGS, changeRequestLinkTarget: "browser" as const };
+    expect(settingsRestorePlan(settings, "system", "client")).toEqual({
+      labels: ["Pull request links"],
+      resetTheme: false,
+      patch: { changeRequestLinkTarget: "ryco" },
+    });
+    expect(settingsRestorePlan(settings, "system", "node").patch).toEqual({});
   });
 });

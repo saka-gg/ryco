@@ -1,5 +1,5 @@
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { resolveSnoozePresets } from "@ryco/shared/threadSnooze";
+import { isThreadWokeUnseen, resolveSnoozePresets } from "@ryco/shared/threadSnooze";
 import {
   CheckIcon,
   ClockIcon,
@@ -14,25 +14,26 @@ import { useNavigate } from "@tanstack/react-router";
 import { memo, useCallback, useMemo, useRef, useState } from "react";
 
 import { endPaneDrag, startPaneDrag } from "../../chatPanesStore";
-import { readEnvironmentApi } from "../../environmentApi";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { useSettings } from "../../hooks/useSettings";
 import { useGitStatus } from "../../lib/gitStatusState";
 import { openExternalLink } from "../../lib/openExternalLink";
 import { buildPullRequestLocation } from "../../pullRequestsRoute";
-import { cn, newCommandId } from "../../lib/utils";
+import { cn } from "../../lib/utils";
 import { resolveSourceControlRefreshDelay } from "../../rpc/sourceControlRefreshPolicy";
 import { useSourceControlChangeRequestDetail } from "../../rpc/useSourceControl";
-import { sidebarUndo } from "../../sidebarUndo";
 import {
   getSourceControlPresentation,
   resolveChangeRequestPresentation,
 } from "../../sourceControlPresentation";
+import { dispatchThreadSettlement, dispatchThreadSnooze } from "../../threadLifecycleCommands";
+import { useThreadSelectionStore } from "../../threadSelectionStore";
 import { formatElapsedClockLabel } from "../../timestampFormat";
 import { useUiStateStore } from "../../uiStateStore";
 import { DeviceIcon } from "../DeviceIcon";
 import { isCompletionUnseen } from "../Sidebar.logic";
 import { ThreadTerminalIndicator, useThreadTerminalStatus } from "../ThreadTerminalStatus";
+import { FollowUpQueueMark } from "../sidebar/FollowUpQueueMark";
 import type { useThreadMenuActions } from "../sidebar/hooks/useThreadMenuActions";
 import {
   SOURCE_CONTROL_VISIBILITY_HYSTERESIS,
@@ -43,6 +44,7 @@ import {
   noteThreadHoverEnd,
   noteThreadHoverIntent,
   noteThreadPressIntent,
+  preloadDraftRoute,
 } from "../sidebar/threadNavigationIntent";
 import {
   ContextMenu,
@@ -52,7 +54,6 @@ import {
   MenuPopup,
   MenuTrigger,
 } from "../ui/menu";
-import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { InboxPullRequestBadges } from "./InboxPullRequestBadges";
 import {
@@ -75,8 +76,9 @@ import {
 } from "./inboxRowPresentation";
 import type { InboxSidebarRow } from "./inboxSidebarModel";
 import { InboxStatusGlyph } from "./InboxStatusGlyph";
-import { InboxThreadMenuItems } from "./InboxThreadMenu";
+import { InboxSelectionMenuItems, InboxThreadMenuItems } from "./InboxThreadMenu";
 import { useInboxRowPreviewIntent } from "./useInboxRowPreviewIntent";
+import type { InboxMenuSelection, InboxRowSelection } from "./useInboxRowSelection";
 import {
   INBOX_ROW_LEAVING_EVENT,
   readInboxMotionDurationMs,
@@ -91,6 +93,7 @@ export type InboxThreadActions = Pick<
 
 const LINE_TONE: Record<InboxStateLine["kind"], string> = {
   attention: "font-medium text-warning-foreground",
+  woke: "font-medium text-warning-foreground",
   error: "text-destructive-foreground",
   status: "text-muted-foreground",
   workspace: "text-muted-foreground",
@@ -129,26 +132,6 @@ function StateLine(props: { readonly line: InboxStateLine; readonly row: InboxSi
   );
 }
 
-/** Kept outside the row: the React Compiler cannot lower throw inside try. */
-async function dispatchThreadSnooze(
-  row: InboxSidebarRow,
-  snoozedUntil: string | null,
-): Promise<void> {
-  const api = readEnvironmentApi(row.environmentId);
-  if (!api) throw new Error("The owning machine is not connected.");
-  await sidebarUndo.dispatch(
-    { environmentId: row.environmentId, threadId: row.threadId },
-    snoozedUntil
-      ? {
-          type: "thread.snooze",
-          commandId: newCommandId(),
-          threadId: row.threadId,
-          snoozedUntil,
-        }
-      : { type: "thread.unsnooze", commandId: newCommandId(), threadId: row.threadId },
-  );
-}
-
 function RunningClock(props: { readonly since: string }) {
   const now = useInboxClock();
   return <>{formatElapsedClockLabel(props.since, now)}</>;
@@ -169,9 +152,12 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
   readonly motionEnabled: boolean;
   readonly previewHandle: InboxPreviewHandle;
   readonly onOpenRow: (row: InboxSidebarRow) => void;
-  readonly onSetSettlement: (row: InboxSidebarRow, settled: boolean) => Promise<boolean>;
+  /** Absent where rows cannot be selected (the frozen phone tier). */
+  readonly selection?: InboxRowSelection | undefined;
 }) {
   const { row } = props;
+  // A new thread not sent yet: it opens its draft and is never settled, snoozed or dragged.
+  const isDraft = row.draftId !== undefined;
   const isPhone = usePresentationTier() === "phone";
   const navigate = useNavigate();
   const rowProject = row.project;
@@ -193,6 +179,10 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
     [row.environmentId, row.threadId],
   );
   const [menuOpen, setMenuOpen] = useState(false);
+  const inSelection = useThreadSelectionStore((state) => state.selectedThreadKeys.has(row.key));
+  const selected = inSelection && props.selection !== undefined;
+  // Taken when a menu opens: clicks in the menu never read a selection that changed since.
+  const [menuSelection, setMenuSelection] = useState<InboxMenuSelection | null>(null);
   const [pending, setPending] = useState(false);
   const [settling, setSettling] = useState(false);
   const shellRef = useRef<HTMLDivElement>(null);
@@ -260,9 +250,14 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
     !resting &&
     !props.active &&
     isCompletionUnseen(row.latestTurnCompletedAt, lastVisitedAt);
-  const glyph = settling ? "completed" : resolveInboxGlyph(row, unseen);
-  const glyphLabel = inboxGlyphLabel(row, unseen);
-  const line = resolveInboxStateLine(row);
+  // The model sets `wokeAt` only on awake, unsettled rows.
+  const woke =
+    row.state === "idle" &&
+    !props.active &&
+    isThreadWokeUnseen({ wokeAt: row.wokeAt, lastVisitedAt });
+  const glyph = settling ? "completed" : resolveInboxGlyph(row, unseen, woke);
+  const glyphLabel = inboxGlyphLabel(row, unseen, woke);
+  const line = resolveInboxStateLine(row, woke);
   const terminalStatus = useThreadTerminalStatus(threadRef);
   const terminalIndicator = terminalStatus ? (
     <InboxHint className="flex shrink-0" label={terminalStatus.label}>
@@ -276,16 +271,30 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
     () => ({
       row,
       unseen,
+      woke,
       timestamp,
       pullRequests,
       changeRequestShortName,
       sourceControlName,
       changeStats,
     }),
-    [row, unseen, timestamp, pullRequests, changeRequestShortName, sourceControlName, changeStats],
+    [
+      row,
+      unseen,
+      woke,
+      timestamp,
+      pullRequests,
+      changeRequestShortName,
+      sourceControlName,
+      changeStats,
+    ],
   );
 
-  const actionLabel = row.settled ? "Move to Active" : "Settle";
+  const actionLabel = row.settled
+    ? "Move to Active"
+    : row.settleWhenDone
+      ? "Settle when done"
+      : "Settle";
   const actionEnabled = row.settlementActionEnabled && !pending;
   const actionTitle = actionEnabled
     ? actionLabel
@@ -324,7 +333,9 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
     };
     // Promise `.finally` instead of try/finally keeps the row compilable by
     // the React Compiler (it cannot lower try without catch).
-    const ok = await props.onSetSettlement(row, !row.settled).finally(() => setPending(false));
+    const ok = await dispatchThreadSettlement(threadRef, !row.settled).finally(() =>
+      setPending(false),
+    );
     if (!ok) restore();
     // A thread the server keeps in place must not stay collapsed.
     else if (collapse) window.setTimeout(() => shell?.isConnected && restore(), 5_000);
@@ -337,21 +348,22 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
   const handleSnooze = async (snoozedUntil: string | null) => {
     if (pending || !(snoozedUntil ? row.canSnooze : row.canUnsnooze)) return;
     setPending(true);
-    await dispatchThreadSnooze(row, snoozedUntil)
-      .catch((error: unknown) => {
-        toastManager.add({
-          type: "error",
-          title: "Could not update snooze",
-          description: error instanceof Error ? error.message : "The request failed.",
-        });
-      })
-      .finally(() => setPending(false));
+    await dispatchThreadSnooze(threadRef, snoozedUntil).finally(() => setPending(false));
   };
   const handleMenuOpenChange = (open: boolean) => {
     setMenuOpen(open);
-    if (open) props.previewHandle.close();
+    if (!open) return;
+    props.previewHandle.close();
+    setMenuSelection(props.selection?.menuSelection(row) ?? null);
   };
-  const menuItems = (
+  const menuLabel = menuSelection ? `${menuSelection.rows.length} selected threads` : undefined;
+  const menuItems = menuSelection ? (
+    <InboxSelectionMenuItems
+      selection={menuSelection}
+      snoozePresets={snoozePresets}
+      onRun={(request) => props.selection?.run(menuSelection, request)}
+    />
+  ) : (
     <InboxThreadMenuItems
       changeRequestShortName={changeRequestShortName}
       pending={pending}
@@ -360,6 +372,8 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
       row={row}
       settleEnabled={actionEnabled}
       settleLabel={actionLabel}
+      showFilters={!isPhone}
+      offerHide={!isPhone}
       snoozePresets={snoozePresets}
       threadActions={props.threadActions}
       onOpenPullRequest={(url) => openExternalLink(url, "Unable to open pull request link")}
@@ -374,30 +388,50 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
   );
 
   const trustWarning = row.trustLabel === "Not verified" || row.trustLabel === "Identity conflict";
+  // As in the project sidebar; the frozen phone tier gains nothing new.
+  const queueMark =
+    row.followUpQueue && !isPhone ? (
+      <FollowUpQueueMark badge={row.followUpQueue} className="shrink-0" />
+    ) : null;
   const navigationButton = (
     <button
       ref={setVisibilityNode}
       type="button"
       aria-current={props.active ? "page" : undefined}
+      aria-description={selected ? "Selected" : undefined}
       className={cn(
-        "relative grid w-full min-w-0 grid-cols-[1.375rem_minmax(0,1fr)_auto] rounded-lg px-2 text-left outline-hidden ring-ring focus-visible:ring-2 aria-[current=page]:bg-sidebar-accent",
+        "relative grid w-full min-w-0 grid-cols-[1.375rem_minmax(0,1fr)_auto] rounded-lg px-2 text-left outline-hidden ring-ring focus-visible:ring-2",
         resting ? "items-center py-1" : "py-1.5",
+        // Shift-click selects rows, not text (the phone tier selects no rows).
+        props.selection && "select-none",
+        // The project sidebar's selection tints, its open-and-selected one included.
+        selected
+          ? props.active
+            ? "bg-primary/22 dark:bg-primary/30"
+            : "bg-primary/15 dark:bg-primary/22"
+          : "aria-[current=page]:bg-sidebar-accent",
       )}
+      data-selected={selected ? "" : undefined}
       data-testid="inbox-thread-row"
-      draggable={!isPhone}
-      onClick={() => props.onOpenRow(row)}
+      draggable={!isPhone && !isDraft}
+      onClick={(event) => {
+        if (!props.selection?.click(row, event)) props.onOpenRow(row);
+      }}
       onPointerEnter={() => {
         workingTreeWanted.start();
         // The row navigates imperatively: warm the route and the thread's
         // detail on intent so the history request overlaps the navigation.
-        if (!props.active) noteThreadHoverIntent(threadRef);
+        // A draft has no history: only its route is warmed.
+        if (props.active) return;
+        if (isDraft) preloadDraftRoute();
+        else noteThreadHoverIntent(threadRef);
       }}
       onPointerLeave={() => {
         workingTreeWanted.end();
-        noteThreadHoverEnd(threadRef);
+        if (!isDraft) noteThreadHoverEnd(threadRef);
       }}
       onPointerDown={(event) => {
-        if (isNavigationPress(event) && !props.active) noteThreadPressIntent(threadRef);
+        if (isNavigationPress(event) && !props.active && !isDraft) noteThreadPressIntent(threadRef);
       }}
       onFocus={workingTreeWanted.start}
       onBlur={workingTreeWanted.end}
@@ -413,7 +447,7 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
             <InboxProjectIcon row={row} />
           </InboxHint>
         ) : (
-          <InboxHint className="flex" label={inboxGlyphHint(row, unseen)}>
+          <InboxHint className="flex" label={inboxGlyphHint(row, unseen, woke)}>
             <InboxStatusGlyph key={glyph} kind={glyph} label={glyphLabel} />
           </InboxHint>
         )}
@@ -424,9 +458,12 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
           // Size before leading: tailwind-merge drops a leading that precedes a size.
           resting
             ? "text-xs leading-[18px] text-muted-foreground group-hover/inbox-row:pr-3 group-focus-within/inbox-row:pr-3"
-            : "text-[13px] leading-[18px] group-hover/inbox-row:pr-11 group-focus-within/inbox-row:pr-11",
+            : isDraft
+              ? // Only the actions menu shows on a draft.
+                "text-[13px] leading-[18px] group-hover/inbox-row:pr-6 group-focus-within/inbox-row:pr-6"
+              : "text-[13px] leading-[18px] group-hover/inbox-row:pr-11 group-focus-within/inbox-row:pr-11",
           !resting &&
-            (unseen
+            (unseen || woke
               ? "font-semibold text-sidebar-foreground"
               : settling
                 ? "text-muted-foreground"
@@ -442,6 +479,7 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
           {row.showProject ? (
             <span className="max-w-20 truncate text-muted-foreground/60">{row.projectLabel}</span>
           ) : null}
+          {queueMark}
           {terminalIndicator}
           <InboxHint className="flex items-center gap-1" label={inboxTimeHint(row, timestamp)}>
             {row.snoozedUntil ? (
@@ -501,6 +539,7 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
               shortName={changeRequestShortName}
               variant="inline"
             />
+            {queueMark}
             {terminalIndicator}
             <InboxHint
               className="shrink-0 tabular-nums text-muted-foreground/70"
@@ -532,6 +571,8 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
             : "[contain-intrinsic-block-size:auto_3.25rem]",
         )}
         data-testid="inbox-thread-row-shell"
+        // Clicks here and in its menus keep the selection: the sidebar clears it on other clicks.
+        data-thread-selection-safe
         // INBOX_ROW_KEY_ATTRIBUTE: the list motion hook tracks rows by this key.
         data-inbox-row-key={row.key}
         data-settling={settling ? "" : undefined}
@@ -545,31 +586,33 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
           render={navigationButton}
         />
         <div className="absolute right-1.5 top-1 z-10 flex items-center">
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <button
-                  aria-disabled={!actionEnabled}
-                  aria-label={`${actionLabel} ${row.title}`}
-                  className={cn(
-                    "inbox-settle-action flex size-6 items-center justify-center rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-disabled:cursor-not-allowed aria-disabled:text-muted-foreground/40 aria-disabled:hover:bg-transparent",
-                    revealAction,
-                  )}
-                  onClick={() => void handleSettlement()}
-                  type="button"
-                />
-              }
-            >
-              {pending ? (
-                <LoaderCircleIcon aria-hidden className="size-3.5 animate-spin" />
-              ) : row.settled ? (
-                <Undo2Icon aria-hidden className="size-3.5" />
-              ) : (
-                <CheckIcon aria-hidden className="size-3.5" />
-              )}
-            </TooltipTrigger>
-            <TooltipPopup side="top">{actionTitle}</TooltipPopup>
-          </Tooltip>
+          {isDraft ? null : (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    aria-disabled={!actionEnabled}
+                    aria-label={`${actionLabel} ${row.title}`}
+                    className={cn(
+                      "inbox-settle-action flex size-6 items-center justify-center rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-disabled:cursor-not-allowed aria-disabled:text-muted-foreground/40 aria-disabled:hover:bg-transparent",
+                      revealAction,
+                    )}
+                    onClick={() => void handleSettlement()}
+                    type="button"
+                  />
+                }
+              >
+                {pending ? (
+                  <LoaderCircleIcon aria-hidden className="size-3.5 animate-spin" />
+                ) : row.settled ? (
+                  <Undo2Icon aria-hidden className="size-3.5" />
+                ) : (
+                  <CheckIcon aria-hidden className="size-3.5" />
+                )}
+              </TooltipTrigger>
+              <TooltipPopup side="top">{actionTitle}</TooltipPopup>
+            </Tooltip>
+          )}
           <Menu onOpenChange={handleMenuOpenChange}>
             <MenuTrigger
               aria-label={`Thread actions for ${row.title}`}
@@ -580,13 +623,22 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
             >
               <MoreHorizontalIcon className="size-3.5" />
             </MenuTrigger>
-            <MenuPopup align="end" className="min-w-56">
+            <MenuPopup
+              align="end"
+              aria-label={menuLabel}
+              // A selection menu is named by its count, not by this row's trigger.
+              {...(menuLabel ? { "aria-labelledby": undefined } : {})}
+              className="min-w-56"
+              data-thread-selection-safe
+            >
               {menuItems}
             </MenuPopup>
           </Menu>
         </div>
       </ContextMenuTrigger>
-      <ContextMenuPopup className="min-w-56">{menuItems}</ContextMenuPopup>
+      <ContextMenuPopup aria-label={menuLabel} className="min-w-56" data-thread-selection-safe>
+        {menuItems}
+      </ContextMenuPopup>
     </ContextMenu>
   );
 });

@@ -4,7 +4,7 @@ import {
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
 } from "@ryco/contracts";
-import { RELAY_MAX_RPC_MESSAGE_BYTES } from "@ryco/contracts/relay";
+import { RELAY_MAX_RPC_MESSAGE_BYTES } from "@ryco/contracts/relay-constants";
 
 /**
  * The pure half of adding files to a task: which files it can take, under

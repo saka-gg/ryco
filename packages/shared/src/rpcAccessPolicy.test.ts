@@ -7,6 +7,7 @@ import {
   ORCHESTRATION_WS_METHODS,
   WS_METHODS,
 } from "@ryco/contracts";
+import { NODE_BROWSER_WS_METHODS } from "@ryco/contracts/node-browser";
 import {
   hostedRoleAllows,
   RPC_ACCESS_POLICY,
@@ -16,6 +17,17 @@ import {
 } from "./rpcAccessPolicy.ts";
 
 describe("shared RPC access policy", () => {
+  it("keeps node browser tabs to operators, reads included, and never replays their input", () => {
+    for (const method of Object.values(NODE_BROWSER_WS_METHODS)) {
+      expect(rpcAccessFor(method)).toBe("operator");
+      expect(hostedRoleAllows("viewer", method)).toBe(false);
+      expect(hostedRoleAllows("operator", method)).toBe(true);
+      expect(hostedRoleAllows("owner", method)).toBe(true);
+    }
+    expect(rpcDeliveryEffectFor(NODE_BROWSER_WS_METHODS.input)).toBe("mutation");
+    expect(rpcDeliveryEffectFor(NODE_BROWSER_WS_METHODS.command)).toBe("mutation");
+    expect(rpcDeliveryEffectFor(NODE_BROWSER_WS_METHODS.read)).toBe("read");
+  });
   it("requires current owner authority to inspect and redeem reset credits", () => {
     for (const method of [
       WS_METHODS.serverReadCodexResetCredits,
@@ -27,6 +39,31 @@ describe("shared RPC access policy", () => {
       expect(hostedRoleAllows("owner", method)).toBe(true);
     }
   });
+  it("keeps provider sign-in owner-only, including following a flow", () => {
+    for (const method of [
+      WS_METHODS.providerSignInSubscribe,
+      WS_METHODS.providerSignInStart,
+      WS_METHODS.providerSignInRespond,
+    ]) {
+      expect(rpcAccessFor(method)).toBe("owner");
+      expect(hostedRoleAllows("viewer", method)).toBe(false);
+      expect(hostedRoleAllows("operator", method)).toBe(false);
+      expect(hostedRoleAllows("owner", method, false)).toBe(false);
+      expect(hostedRoleAllows("owner", method)).toBe(true);
+    }
+    expect(rpcDeliveryEffectFor(WS_METHODS.providerSignInSubscribe)).toBe("read");
+    expect(rpcDeliveryEffectFor(WS_METHODS.providerSignInStart)).toBe("mutation");
+    expect(rpcDeliveryEffectFor(WS_METHODS.providerSignInRespond)).toBe("mutation");
+  });
+  it("lets any role report client use, which only delays unattended updates", () => {
+    for (const role of ["viewer", "operator", "owner"] as const) {
+      expect(hostedRoleAllows(role, WS_METHODS.serverNoteClientInteraction)).toBe(true);
+    }
+    expect(hostedRoleAllows("owner", WS_METHODS.serverNoteClientInteraction, false)).toBe(false);
+    expect(rpcDeliveryEffectFor(WS_METHODS.serverNoteClientInteraction)).toBe("read");
+    // Whether a node updates unattended is a node setting only its owner may change.
+    expect(rpcAccessFor(WS_METHODS.serverUpdateSettings)).toBe("owner");
+  });
   it("classifies every current and legacy RPC method", () => {
     expect(new Set(Object.keys(RPC_ACCESS_POLICY))).toEqual(
       new Set([
@@ -34,6 +71,7 @@ describe("shared RPC access policy", () => {
         ...Object.values(ORCHESTRATION_WS_METHODS),
         ...Object.values(CONTEXT_HANDOFF_WS_METHODS),
         ...Object.values(DEVICE_WS_METHODS),
+        ...Object.values(NODE_BROWSER_WS_METHODS),
         ...Object.values(AGENT_CONTROL_WS_METHODS),
       ]),
     );
@@ -50,7 +88,14 @@ describe("shared RPC access policy", () => {
       false,
     );
     expect(rpcAccessFor(WS_METHODS.sourceControlMergeChangeRequest)).toBe("operator");
-    expect(rpcAccessFor(WS_METHODS.threadPriorityEnsureCurrent)).toBe("operator");
+  });
+
+  it("lets operators, not viewers, start or stop a pull request watch, as a mutation", () => {
+    const method = WS_METHODS.sourceControlSetPullRequestWatch;
+    expect(rpcAccessFor(method)).toBe("operator");
+    expect(rpcDeliveryEffectFor(method)).toBe("mutation");
+    expect(hostedRoleAllows("viewer", method)).toBe(false);
+    expect(hostedRoleAllows("operator", method)).toBe(true);
   });
 
   it("keeps chat-folder methods at the project-mutation tier", () => {
@@ -144,14 +189,37 @@ describe("shared RPC access policy", () => {
     // Operator-tier reads are still reads: the tier is not an effect.
     for (const method of [
       WS_METHODS.projectsReadFile,
+      WS_METHODS.projectsReadFileChunk,
+      WS_METHODS.projectsSubscribeFileChanges,
+      WS_METHODS.threadsSubscribeLocalServers,
       WS_METHODS.vcsReadLocalChanges,
+      // Attaching to a running Git action again observes it and never starts Git.
+      WS_METHODS.gitResumeStackedAction,
       WS_METHODS.vcsReadComparison,
       WS_METHODS.sourceControlListChangeRequests,
+      WS_METHODS.sourceControlListInvolvedChangeRequests,
       ORCHESTRATION_WS_METHODS.getTaskOutput,
     ]) {
       expect(rpcAccessFor(method)).toBe("operator");
       expect(rpcDeliveryEffectFor(method)).toBe("read");
     }
+    // Chunked previews read workspace bytes, which a viewer may not.
+    expect(hostedRoleAllows("viewer", WS_METHODS.projectsReadFileChunk)).toBe(false);
+    expect(hostedRoleAllows("operator", WS_METHODS.projectsReadFileChunk)).toBe(true);
+    // A file's change notices reveal what its read would: operators, not viewers.
+    expect(hostedRoleAllows("viewer", WS_METHODS.projectsSubscribeFileChanges)).toBe(false);
+    expect(hostedRoleAllows("operator", WS_METHODS.projectsSubscribeFileChanges)).toBe(true);
+    // A thread's servers and their stop: the same tier as its terminal, never a viewer.
+    expect(hostedRoleAllows("viewer", WS_METHODS.threadsSubscribeLocalServers)).toBe(false);
+    expect(hostedRoleAllows("operator", WS_METHODS.threadsSubscribeLocalServers)).toBe(true);
+    expect(hostedRoleAllows("viewer", WS_METHODS.threadsStopLocalServer)).toBe(false);
+    expect(hostedRoleAllows("operator", WS_METHODS.threadsStopLocalServer)).toBe(true);
+    expect(rpcDeliveryEffectFor(WS_METHODS.threadsStopLocalServer)).toBe("mutation");
+    // An agent's requested secret: only the owner types it in, and it is never replayed.
+    expect(hostedRoleAllows("operator", WS_METHODS.secretsAnswerRequest)).toBe(false);
+    expect(hostedRoleAllows("viewer", WS_METHODS.secretsAnswerRequest)).toBe(false);
+    expect(hostedRoleAllows("owner", WS_METHODS.secretsAnswerRequest)).toBe(true);
+    expect(rpcDeliveryEffectFor(WS_METHODS.secretsAnswerRequest)).toBe("mutation");
     // Long-lived read streams outside the session-sync set.
     expect(rpcDeliveryEffectFor(AGENT_CONTROL_WS_METHODS.subscribeProposals)).toBe("read");
     expect(rpcDeliveryEffectFor(DEVICE_WS_METHODS.subscribeEvents)).toBe("read");
@@ -161,6 +229,7 @@ describe("shared RPC access policy", () => {
       WS_METHODS.terminalWrite,
       WS_METHODS.projectsWriteFile,
       WS_METHODS.gitRunStackedAction,
+      WS_METHODS.gitCancelStackedAction,
       WS_METHODS.vcsPull,
       AGENT_CONTROL_WS_METHODS.acceptProposal,
     ]) {

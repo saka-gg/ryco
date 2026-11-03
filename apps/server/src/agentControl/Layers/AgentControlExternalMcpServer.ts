@@ -1,7 +1,9 @@
 import { Effect, Exit, Layer, Option, Scope, Stream } from "effect";
 import * as Semaphore from "effect/Semaphore";
 
+import { CliProxyService } from "../../cliProxy/CliProxyService.ts";
 import { ServerConfig } from "../../config.ts";
+import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -29,6 +31,8 @@ const makeAgentControlExternalMcpServer = Effect.gen(function* () {
   const integrations = yield* AgentControlExternalIntegrationService;
   const tasks = yield* AgentControlExternalTaskService;
   const projections = yield* ProjectionSnapshotQuery;
+  // Required: `ryco_wait_threads` wakes on its events (without them it would only re-check every 5 s).
+  const engine = yield* OrchestrationEngineService;
   const providers = yield* ProviderRegistry;
   const validator = yield* Effect.serviceOption(AgentControlActionValidator);
   const automations = yield* Effect.serviceOption(AgentControlAutomationService);
@@ -39,6 +43,7 @@ const makeAgentControlExternalMcpServer = Effect.gen(function* () {
   const diffs = yield* Effect.serviceOption(CheckpointDiffQuery);
   const files = yield* Effect.serviceOption(WorkspaceFileSystem);
   const workspaceAccess = yield* Effect.serviceOption(WorkspaceAccessPolicy);
+  const cliProxy = yield* Effect.serviceOption(CliProxyService);
   const topology = yield* AgentControlExternalTopologyService;
   // The tools and the listener load with the first start: most nodes never enable the external
   // integration, so their modules stay off the boot path.
@@ -49,7 +54,9 @@ const makeAgentControlExternalMcpServer = Effect.gen(function* () {
         integrations,
         tasks,
         projections,
+        domainEvents: engine,
         getProviders: providers.getProviders,
+        ...(Option.isSome(cliProxy) ? { getCliProxyHubs: cliProxy.value.cachedQuotas } : {}),
         ...(Option.isSome(validator) ? { validator: validator.value } : {}),
         ...(Option.isSome(automations) ? { automations: automations.value } : {}),
         ...(Option.isSome(diagnostics) ? { diagnostics: diagnostics.value } : {}),

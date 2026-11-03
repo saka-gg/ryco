@@ -1,3 +1,4 @@
+import { canHtmlRenderSendFromMessage } from "@ryco/client-runtime/state/session";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import {
   HTML_RENDER_THUMBNAIL_MAX_HEIGHT,
@@ -79,6 +80,12 @@ export const HtmlRenderCards = memo(function HtmlRenderCards(props: {
   readonly threadId: ThreadId | undefined;
   readonly renders: ReadonlyArray<TimelineTurnHtmlRender>;
   readonly appearance: ThemeAppearance;
+  /**
+   * The pages are on the thread's own agent's messages (a turn's pages), so
+   * each may send the reader's answers unless it was handed over
+   * (`canHtmlRenderSendFromMessage`).
+   */
+  readonly onAgentMessages?: boolean;
 }) {
   const { open, dialog } = useHtmlRenderOpener();
   if (props.renders.length === 0) return null;
@@ -93,6 +100,9 @@ export const HtmlRenderCards = memo(function HtmlRenderCards(props: {
             messageId: render.messageId,
             attachment: render.attachment,
             htmlRender: render.htmlRender,
+            canSendMessages:
+              props.onAgentMessages === true &&
+              canHtmlRenderSendFromMessage({ role: "assistant" }, render.attachment),
           }}
           appearance={props.appearance}
           onOpen={(target, origin) => open({ target, origin })}

@@ -17,9 +17,9 @@ import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
-import type { ReactNode } from "react";
+import { Suspense, type ReactNode } from "react";
 
-import { ProviderModelPicker } from "./ProviderModelPicker";
+import { LazyComposerModelTuning, ProviderModelPicker } from "./ProviderModelPicker";
 import { ModelTuningDial } from "./ModelTuningDial";
 import { resolveModelTuning, type ModelTuningSummary } from "./modelTuning.logic";
 import { getCustomModelOptionsByInstance } from "../../modelSelection";
@@ -280,6 +280,8 @@ async function mountPicker(props: {
   editingScope?: "all" | "node";
   open?: boolean;
   triggerVariant?: "ghost" | "outline";
+  /** Mounts the picker in a Suspense boundary with this fallback, as in the app. */
+  suspenseFallback?: ReactNode;
   savedModelOptionsByInstance?:
     | Readonly<Partial<Record<string, ReadonlyArray<ProviderOptionSelection>>>>
     | undefined;
@@ -295,34 +297,34 @@ async function mountPicker(props: {
   const providers = props.providers ?? TEST_PROVIDERS;
   const instanceEntries = sortProviderInstanceEntries(deriveProviderInstanceEntries(providers));
   const activeInstanceId = props.activeInstanceId ?? CODEX_INSTANCE_ID;
-  const modelOptionsByInstance = getCustomModelOptionsByInstance(
-    props.settings ?? DEFAULT_UNIFIED_SETTINGS,
-    providers,
-    activeInstanceId,
-    props.model,
-  );
-  const picker = (
-    <SettingsEditingScopeProvider value={props.editingScope ?? "all"}>
-      <ProviderModelPicker
-        activeInstanceId={activeInstanceId}
-        model={props.model}
-        modelOptions={props.modelOptions}
-        savedModelOptionsByInstance={props.savedModelOptionsByInstance}
-        lockedProvider={props.lockedProvider}
-        lockedContinuationGroupKey={props.lockedContinuationGroupKey ?? null}
-        instanceEntries={instanceEntries}
-        {...(props.keybindings ? { keybindings: props.keybindings } : {})}
-        modelOptionsByInstance={modelOptionsByInstance}
-        {...(props.open !== undefined ? { open: props.open } : {})}
-        triggerVariant={props.triggerVariant}
-        {...(props.tuning ? { tuning: props.tuning } : {})}
-        {...(props.triggerTraits ? { triggerTraits: props.triggerTraits } : {})}
-        onInstanceModelChange={onInstanceModelChange}
-      />
-    </SettingsEditingScopeProvider>
-  );
-  const screen = await render(
-    props.insideOpenDialog ? (
+  const renderPicker = (model: string) => {
+    const modelOptionsByInstance = getCustomModelOptionsByInstance(
+      props.settings ?? DEFAULT_UNIFIED_SETTINGS,
+      providers,
+      activeInstanceId,
+      model,
+    );
+    const picker = (
+      <SettingsEditingScopeProvider value={props.editingScope ?? "all"}>
+        <ProviderModelPicker
+          activeInstanceId={activeInstanceId}
+          model={model}
+          modelOptions={props.modelOptions}
+          savedModelOptionsByInstance={props.savedModelOptionsByInstance}
+          lockedProvider={props.lockedProvider}
+          lockedContinuationGroupKey={props.lockedContinuationGroupKey ?? null}
+          instanceEntries={instanceEntries}
+          {...(props.keybindings ? { keybindings: props.keybindings } : {})}
+          modelOptionsByInstance={modelOptionsByInstance}
+          {...(props.open !== undefined ? { open: props.open } : {})}
+          triggerVariant={props.triggerVariant}
+          {...(props.tuning ? { tuning: props.tuning } : {})}
+          {...(props.triggerTraits ? { triggerTraits: props.triggerTraits } : {})}
+          onInstanceModelChange={onInstanceModelChange}
+        />
+      </SettingsEditingScopeProvider>
+    );
+    const tree = props.insideOpenDialog ? (
       <Dialog open>
         <DialogPopup>
           <DialogTitle>Settings</DialogTitle>
@@ -331,12 +333,21 @@ async function mountPicker(props: {
       </Dialog>
     ) : (
       picker
-    ),
-    { container: host },
-  );
+    );
+    return props.suspenseFallback === undefined ? (
+      tree
+    ) : (
+      <Suspense fallback={props.suspenseFallback}>{tree}</Suspense>
+    );
+  };
+  const screen = await render(renderPicker(props.model), { container: host });
 
   return {
     onInstanceModelChange,
+    /** Hands the picker a new active model, as the composer does after a pick. */
+    rerenderModel: async (model: string) => {
+      await screen.rerender(renderPicker(model));
+    },
     // Back-compat alias used by callers that still assert on the old callback
     // name. Delegates to the instance-aware mock so existing expectations work.
     get onProviderModelChange() {
@@ -371,6 +382,40 @@ function getSidebarProviderOrder() {
   );
 }
 
+/** The composer's code-split dial for a model with a two-step effort. */
+function TestComposerModelTuning(props: { onModelOptionsChange: (nextOptions: unknown) => void }) {
+  return (
+    <LazyComposerModelTuning
+      provider={ProviderDriverKind.make("claudeAgent")}
+      model="tuning-model"
+      models={[
+        {
+          slug: "tuning-model",
+          name: "Tuning Model",
+          isCustom: false,
+          capabilities: createModelCapabilities({
+            optionDescriptors: [
+              {
+                id: "effort",
+                label: "Reasoning",
+                type: "select",
+                options: [
+                  { id: "low", label: "Low" },
+                  { id: "high", label: "High", isDefault: true },
+                ],
+              },
+            ],
+          }),
+        },
+      ]}
+      modelOptions={undefined}
+      prompt=""
+      onPromptChange={() => {}}
+      onModelOptionsChange={props.onModelOptionsChange}
+    />
+  );
+}
+
 describe("ProviderModelPicker", () => {
   beforeEach(async () => {
     // Reset test environment before each test
@@ -380,6 +425,54 @@ describe("ProviderModelPicker", () => {
   afterEach(async () => {
     document.body.innerHTML = "";
     await __resetLocalApiForTests();
+  });
+
+  // First in the file on purpose: neither the picker body nor the dial has
+  // loaded yet. The Suspense boundary stands in for the app's: without one, a
+  // dial that suspended would only hold React's commit and the list would still
+  // appear with its dial, so only the fallback shows the regression.
+  it("docks the composer's code-split dial without suspending on a cold open", async () => {
+    expect(LazyComposerModelTuning.isLoaded()).toBe(false);
+    const onModelOptionsChange = vi.fn();
+    let fallbackShown = false;
+    let dialWithFirstList: boolean | null = null;
+    // Mutation records, not the DOM: a fallback swapped out again before the
+    // callback runs still shows up in them.
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          if (node instanceof HTMLElement && node.dataset.testid === "picker-fallback") {
+            fallbackShown = true;
+          }
+        }
+      }
+      if (dialWithFirstList !== null || !document.querySelector(".model-picker-list")) return;
+      dialWithFirstList = document.querySelector('[data-slot="model-tuning-dial"]') !== null;
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    const mounted = await mountPicker({
+      activeInstanceId: CLAUDE_INSTANCE_ID,
+      model: "claude-opus-4-6",
+      lockedProvider: null,
+      suspenseFallback: <span data-testid="picker-fallback" />,
+      tuning: <TestComposerModelTuning onModelOptionsChange={onModelOptionsChange} />,
+    });
+
+    try {
+      await page.getByRole("button").first().click();
+      await vi.waitFor(() => expect(dialWithFirstList).not.toBeNull());
+      // The body's load settled only with the dial's, so the dial never
+      // suspended and the list never showed without its footer.
+      expect(dialWithFirstList).toBe(true);
+      expect(fallbackShown).toBe(false);
+      await expect.element(page.getByPlaceholder("Search models...")).toHaveFocus();
+      await userEvent.keyboard("{ArrowLeft}");
+      expect(onModelOptionsChange).toHaveBeenLastCalledWith([{ id: "effort", value: "low" }]);
+      expect(fallbackShown).toBe(false);
+    } finally {
+      observer.disconnect();
+      await mounted.cleanup();
+    }
   });
 
   it("persists client favorites when the picker is embedded in node settings", async () => {
@@ -1809,6 +1902,563 @@ describe("ProviderModelPicker", () => {
       }
       expect(button.className).toContain("border-input");
       expect(button.className).toContain("bg-popover");
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+});
+
+function claudeModel(
+  slug: string,
+  name: string,
+  extra: { isLegacy?: boolean; isCustom?: boolean } = {},
+): ServerProvider["models"][number] {
+  return {
+    slug,
+    name,
+    isCustom: extra.isCustom ?? false,
+    ...(extra.isLegacy ? { isLegacy: true } : {}),
+    capabilities: createModelCapabilities({ optionDescriptors: [] }),
+  };
+}
+
+// Two current Claude models with three legacy ones between and after them, as
+// the manifest's `status: "legacy"` reaches the client.
+const LEGACY_CLAUDE_MODELS: ServerProvider["models"] = [
+  claudeModel("claude-opus-5", "Claude Opus 5"),
+  claudeModel("claude-opus-4-6", "Claude Opus 4.6", { isLegacy: true }),
+  claudeModel("claude-sonnet-5", "Claude Sonnet 5"),
+  claudeModel("claude-sonnet-4-6", "Claude Sonnet 4.6", { isLegacy: true }),
+  claudeModel("claude-haiku-4-5", "Claude Haiku 4.5", { isLegacy: true }),
+];
+
+function buildClaudeProvider(
+  models: ServerProvider["models"],
+  extra: Partial<ServerProvider> = {},
+): ServerProvider {
+  return { ...TEST_PROVIDERS[1]!, models, ...extra };
+}
+
+function getLegacySection() {
+  return document.querySelector<HTMLElement>("[data-model-picker-legacy-section]");
+}
+
+function getUpdateNotices() {
+  return Array.from(
+    document.querySelectorAll<HTMLElement>("[data-model-picker-update-notice]"),
+    (element) => element.textContent ?? "",
+  );
+}
+
+function ctrlDigitJumpBinding(digit: 1 | 2 | 3): ResolvedKeybindingsConfig[number] {
+  return {
+    command: `modelPicker.jump.${digit}`,
+    shortcut: {
+      key: String(digit),
+      metaKey: false,
+      ctrlKey: true,
+      shiftKey: false,
+      altKey: false,
+      modKey: false,
+    },
+    whenAst: { type: "identifier", name: "modelPickerOpen" },
+  };
+}
+
+describe("ProviderModelPicker legacy models", () => {
+  beforeEach(async () => {
+    await __resetLocalApiForTests();
+  });
+
+  afterEach(async () => {
+    document.body.innerHTML = "";
+    localStorage.removeItem("ryco:client-settings:v1");
+    await __resetLocalApiForTests();
+  });
+
+  it("folds a provider tab's legacy models into a collapsed section", async () => {
+    const mounted = await mountPicker({
+      activeInstanceId: CLAUDE_INSTANCE_ID,
+      model: "claude-opus-5",
+      lockedProvider: null,
+      providers: [TEST_PROVIDERS[0]!, buildClaudeProvider(LEGACY_CLAUDE_MODELS)],
+    });
+
+    try {
+      await page.getByRole("button").click();
+
+      await vi.waitFor(() => {
+        expect(getVisibleModelNames()).toEqual(["Claude Opus 5", "Claude Sonnet 5"]);
+        const section = getLegacySection();
+        expect(section?.textContent).toContain("Legacy models");
+        expect(section?.textContent).toContain("3 models");
+        expect(section?.getAttribute("aria-expanded")).toBe("false");
+      });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("expands and collapses the section on click without picking or closing", async () => {
+    const mounted = await mountPicker({
+      activeInstanceId: CLAUDE_INSTANCE_ID,
+      model: "claude-opus-5",
+      lockedProvider: null,
+      providers: [TEST_PROVIDERS[0]!, buildClaudeProvider(LEGACY_CLAUDE_MODELS)],
+    });
+
+    try {
+      await page.getByRole("button").click();
+      await page.getByRole("option").filter({ hasText: "Legacy models" }).click();
+
+      await vi.waitFor(() => {
+        expect(getLegacySection()?.getAttribute("aria-expanded")).toBe("true");
+        expect(getVisibleModelNames()).toEqual([
+          "Claude Opus 5",
+          "Claude Sonnet 5",
+          "Claude Opus 4.6",
+          "Claude Sonnet 4.6",
+          "Claude Haiku 4.5",
+        ]);
+      });
+      expect(document.querySelector(".model-picker-list")).not.toBeNull();
+      expect(mounted.onInstanceModelChange).not.toHaveBeenCalled();
+
+      await page.getByRole("option").filter({ hasText: "Legacy models" }).click();
+
+      await vi.waitFor(() => {
+        expect(getLegacySection()?.getAttribute("aria-expanded")).toBe("false");
+        expect(getVisibleModelNames()).toEqual(["Claude Opus 5", "Claude Sonnet 5"]);
+      });
+      expect(mounted.onInstanceModelChange).not.toHaveBeenCalled();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("toggles the section with Enter once the arrow keys reach it", async () => {
+    const mounted = await mountPicker({
+      activeInstanceId: CLAUDE_INSTANCE_ID,
+      model: "claude-opus-5",
+      lockedProvider: ProviderDriverKind.make("claudeAgent"),
+      providers: [TEST_PROVIDERS[0]!, buildClaudeProvider(LEGACY_CLAUDE_MODELS)],
+    });
+
+    try {
+      await page.getByRole("button").click();
+      await userEvent.click(page.getByPlaceholder("Search models..."));
+      await userEvent.keyboard("{ArrowDown}{ArrowDown}{ArrowDown}");
+      await vi.waitFor(() => {
+        expect(document.querySelector('[data-slot="combobox-item"][data-highlighted]')).toBe(
+          getLegacySection(),
+        );
+      });
+
+      await userEvent.keyboard("{Enter}");
+
+      await vi.waitFor(() => {
+        expect(getLegacySection()?.getAttribute("aria-expanded")).toBe("true");
+        expect(getVisibleModelNames()).toContain("Claude Haiku 4.5");
+      });
+
+      // The highlight stays on the section row, so Enter folds it again.
+      await userEvent.keyboard("{Enter}");
+
+      await vi.waitFor(() => {
+        expect(getLegacySection()?.getAttribute("aria-expanded")).toBe("false");
+        expect(getVisibleModelNames()).not.toContain("Claude Haiku 4.5");
+      });
+      expect(mounted.onInstanceModelChange).not.toHaveBeenCalled();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("lists matching legacy models inline while searching", async () => {
+    const mounted = await mountPicker({
+      activeInstanceId: CLAUDE_INSTANCE_ID,
+      model: "claude-opus-5",
+      lockedProvider: null,
+      providers: [TEST_PROVIDERS[0]!, buildClaudeProvider(LEGACY_CLAUDE_MODELS)],
+    });
+
+    try {
+      await page.getByRole("button").click();
+      await page.getByPlaceholder("Search models...").fill("4.6");
+
+      await vi.waitFor(() => {
+        expect(getVisibleModelNames()).toEqual(
+          expect.arrayContaining(["Claude Opus 4.6", "Claude Sonnet 4.6"]),
+        );
+        expect(getLegacySection()).toBeNull();
+      });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("keeps a favorited legacy model in Favorites and among the current models", async () => {
+    localStorage.setItem(
+      "ryco:client-settings:v1",
+      JSON.stringify({
+        ...DEFAULT_CLIENT_SETTINGS,
+        favorites: [{ provider: "claudeAgent", model: "claude-haiku-4-5" }],
+      }),
+    );
+    const mounted = await mountPicker({
+      activeInstanceId: CLAUDE_INSTANCE_ID,
+      model: "claude-opus-5",
+      lockedProvider: null,
+      providers: [TEST_PROVIDERS[0]!, buildClaudeProvider(LEGACY_CLAUDE_MODELS)],
+    });
+
+    try {
+      await page.getByRole("button").click();
+      await page.getByRole("button", { name: "Favorites", exact: true }).click();
+
+      await vi.waitFor(() => {
+        expect(getVisibleModelNames()).toEqual(["Claude Haiku 4.5"]);
+        expect(getLegacySection()).toBeNull();
+      });
+
+      await page.getByRole("button", { name: "Claude", exact: true }).click();
+
+      await vi.waitFor(() => {
+        expect(getVisibleModelNames()).toEqual([
+          "Claude Haiku 4.5",
+          "Claude Opus 5",
+          "Claude Sonnet 5",
+        ]);
+        expect(getLegacySection()?.textContent).toContain("2 models");
+      });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("keeps the active legacy model visible and selected while the section is folded", async () => {
+    const mounted = await mountPicker({
+      activeInstanceId: CLAUDE_INSTANCE_ID,
+      model: "claude-sonnet-4-6",
+      lockedProvider: null,
+      providers: [TEST_PROVIDERS[0]!, buildClaudeProvider(LEGACY_CLAUDE_MODELS)],
+    });
+
+    try {
+      await page.getByRole("button").click();
+
+      await vi.waitFor(() => {
+        expect(getVisibleModelNames()).toEqual([
+          "Claude Opus 5",
+          "Claude Sonnet 5",
+          "Claude Sonnet 4.6",
+        ]);
+        expect(getLegacySection()?.getAttribute("aria-expanded")).toBe("false");
+        expect(getLegacySection()?.textContent).toContain("2 models");
+        expect(
+          getModelPickerListElement().querySelector('[data-slot="combobox-item"][data-selected]')
+            ?.textContent,
+        ).toContain("Claude Sonnet 4.6");
+      });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("keeps every row in place when a pick from the open section keeps the picker open", async () => {
+    const tuning = resolveModelTuning({
+      caps: createModelCapabilities({
+        optionDescriptors: [
+          {
+            id: "effort",
+            label: "Reasoning",
+            type: "select",
+            options: [
+              { id: "low", label: "Low" },
+              { id: "high", label: "High", isDefault: true },
+            ],
+          },
+        ],
+      }),
+      selections: undefined,
+      prompt: "",
+    })!;
+    const mounted = await mountPicker({
+      activeInstanceId: CLAUDE_INSTANCE_ID,
+      model: "claude-opus-5",
+      lockedProvider: null,
+      providers: [TEST_PROVIDERS[0]!, buildClaudeProvider(LEGACY_CLAUDE_MODELS)],
+      tuning: (
+        <ModelTuningDial
+          tuning={tuning}
+          onSelectEffort={() => {}}
+          onSetThinking={() => {}}
+          onSetSpeed={() => {}}
+          onSelectContextWindow={() => {}}
+          onReset={() => {}}
+        />
+      ),
+    });
+    const expandedOrder = [
+      "Claude Opus 5",
+      "Claude Sonnet 5",
+      "Claude Opus 4.6",
+      "Claude Sonnet 4.6",
+      "Claude Haiku 4.5",
+    ];
+    const selectedRowText = () =>
+      getModelPickerListElement().querySelector('[data-slot="combobox-item"][data-selected]')
+        ?.textContent;
+
+    try {
+      await page.getByRole("button").first().click();
+      await page.getByRole("option").filter({ hasText: "Legacy models" }).click();
+      await vi.waitFor(() => {
+        expect(getVisibleModelNames()).toEqual(expandedOrder);
+      });
+
+      await page.getByRole("option").filter({ hasText: "Claude Sonnet 4.6" }).click();
+      expect(mounted.onInstanceModelChange).toHaveBeenCalledWith(
+        CLAUDE_INSTANCE_ID,
+        "claude-sonnet-4-6",
+        undefined,
+        { keepOpen: true },
+      );
+      // The composer makes the pick the active model; the picker stays open.
+      await mounted.rerenderModel("claude-sonnet-4-6");
+
+      await vi.waitFor(() => {
+        expect(selectedRowText()).toContain("Claude Sonnet 4.6");
+      });
+      expect(getVisibleModelNames()).toEqual(expandedOrder);
+      expect(getLegacySection()?.textContent).toContain("3 models");
+      expect(getLegacySection()?.getAttribute("aria-expanded")).toBe("true");
+
+      // Folded again, the dial's link back to the active row reopens the section.
+      await page.getByRole("option").filter({ hasText: "Legacy models" }).click();
+      await vi.waitFor(() => {
+        expect(getVisibleModelNames()).toEqual(["Claude Opus 5", "Claude Sonnet 5"]);
+      });
+      await page.getByRole("button", { name: "Show Claude Sonnet 4.6 in the list" }).click();
+      await vi.waitFor(() => {
+        expect(getLegacySection()?.getAttribute("aria-expanded")).toBe("true");
+        expect(getVisibleModelNames()).toEqual(expandedOrder);
+        expect(selectedRowText()).toContain("Claude Sonnet 4.6");
+      });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("points the jump shortcuts at current models only", async () => {
+    const mounted = await mountPicker({
+      activeInstanceId: CLAUDE_INSTANCE_ID,
+      model: "claude-opus-5",
+      lockedProvider: null,
+      open: true,
+      providers: [TEST_PROVIDERS[0]!, buildClaudeProvider(LEGACY_CLAUDE_MODELS)],
+      keybindings: [ctrlDigitJumpBinding(1), ctrlDigitJumpBinding(2), ctrlDigitJumpBinding(3)],
+    });
+    const pressCtrl = (key: string) =>
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key, ctrlKey: true, bubbles: true, cancelable: true }),
+      );
+
+    try {
+      await vi.waitFor(() => {
+        expect(getLegacySection()).not.toBeNull();
+      });
+      expect(getLegacySection()?.querySelector('[data-slot="kbd"]')).toBeNull();
+
+      pressCtrl("3");
+      expect(mounted.onInstanceModelChange).not.toHaveBeenCalled();
+
+      pressCtrl("2");
+      await vi.waitFor(() => {
+        expect(mounted.onInstanceModelChange).toHaveBeenCalledWith(
+          CLAUDE_INSTANCE_ID,
+          "claude-sonnet-5",
+        );
+      });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("never folds a custom model", async () => {
+    const mounted = await mountPicker({
+      activeInstanceId: CLAUDE_INSTANCE_ID,
+      model: "claude-opus-5",
+      lockedProvider: null,
+      providers: [
+        TEST_PROVIDERS[0]!,
+        buildClaudeProvider([
+          ...LEGACY_CLAUDE_MODELS,
+          claudeModel("proxy/claude-opus-4-6", "Proxy Opus 4.6", {
+            isCustom: true,
+            isLegacy: true,
+          }),
+        ]),
+      ],
+    });
+
+    try {
+      await page.getByRole("button").click();
+
+      await vi.waitFor(() => {
+        expect(getVisibleModelNames()).toEqual([
+          "Claude Opus 5",
+          "Claude Sonnet 5",
+          "Proxy Opus 4.6",
+        ]);
+        expect(getLegacySection()?.textContent).toContain("3 models");
+      });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+});
+
+describe("ProviderModelPicker update-required notice", () => {
+  const FABLE_5_1 = { slug: "claude-fable-5-1", name: "Claude Fable 5.1", minVersion: "2.1.257" };
+  const NOTICE = "Update Claude Code to v2.1.257 or newer to use Claude Fable 5.1.";
+  const claudeNeedingUpdate = buildClaudeProvider(TEST_PROVIDERS[1]!.models, {
+    updateRequiredModels: [FABLE_5_1],
+  });
+
+  beforeEach(async () => {
+    await __resetLocalApiForTests();
+  });
+
+  afterEach(async () => {
+    document.body.innerHTML = "";
+    localStorage.removeItem("ryco:client-settings:v1");
+    await __resetLocalApiForTests();
+  });
+
+  it("names the update under the provider tab's models", async () => {
+    const mounted = await mountPicker({
+      activeInstanceId: CLAUDE_INSTANCE_ID,
+      model: "claude-opus-4-6",
+      lockedProvider: null,
+      providers: [TEST_PROVIDERS[0]!, claudeNeedingUpdate],
+    });
+
+    try {
+      await page.getByRole("button").click();
+      await vi.waitFor(() => {
+        expect(getUpdateNotices()).toEqual([NOTICE]);
+      });
+
+      await page.getByRole("button", { name: "Codex", exact: true }).click();
+      await vi.waitFor(() => {
+        expect(getVisibleModelNames()).toContain("GPT-5 Codex");
+        expect(getUpdateNotices()).toEqual([]);
+      });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("shows it while a search matches the gated model only", async () => {
+    const mounted = await mountPicker({
+      activeInstanceId: CLAUDE_INSTANCE_ID,
+      model: "claude-opus-4-6",
+      lockedProvider: null,
+      providers: [TEST_PROVIDERS[0]!, claudeNeedingUpdate],
+    });
+
+    try {
+      await page.getByRole("button").click();
+      const search = page.getByPlaceholder("Search models...");
+
+      await search.fill("fable");
+      await vi.waitFor(() => {
+        expect(getUpdateNotices()).toEqual([NOTICE]);
+      });
+
+      await search.fill("sonnet");
+      await vi.waitFor(() => {
+        expect(getVisibleModelNames()).toContain("Claude Sonnet 4.6");
+        expect(getUpdateNotices()).toEqual([]);
+      });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("shows none on the Favorites tab", async () => {
+    localStorage.setItem(
+      "ryco:client-settings:v1",
+      JSON.stringify({
+        ...DEFAULT_CLIENT_SETTINGS,
+        favorites: [{ provider: "claudeAgent", model: "claude-opus-4-6" }],
+      }),
+    );
+    const mounted = await mountPicker({
+      activeInstanceId: CLAUDE_INSTANCE_ID,
+      model: "claude-opus-4-6",
+      lockedProvider: null,
+      providers: [TEST_PROVIDERS[0]!, claudeNeedingUpdate],
+    });
+
+    try {
+      await page.getByRole("button").click();
+      await page.getByRole("button", { name: "Favorites", exact: true }).click();
+      await vi.waitFor(() => {
+        expect(getVisibleModelNames()).toEqual(["Claude Opus 4.6"]);
+      });
+      expect(getUpdateNotices()).toEqual([]);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("leaves out other drivers' notices when locked", async () => {
+    const mounted = await mountPicker({
+      model: "gpt-5-codex",
+      lockedProvider: ProviderDriverKind.make("codex"),
+      providers: [TEST_PROVIDERS[0]!, claudeNeedingUpdate],
+    });
+
+    try {
+      await page.getByRole("button").click();
+      await page.getByPlaceholder("Search models...").fill("fable");
+      await vi.waitFor(() => {
+        expect(getModelPickerListText()).not.toContain("Claude");
+        expect(document.body.textContent).toContain("No models found");
+      });
+      expect(getUpdateNotices()).toEqual([]);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("names the instance when a search spans two instances of one driver", async () => {
+    const mounted = await mountPicker({
+      activeInstanceId: CLAUDE_INSTANCE_ID,
+      model: "claude-opus-4-6",
+      lockedProvider: null,
+      providers: [
+        claudeNeedingUpdate,
+        buildClaudeProvider(TEST_PROVIDERS[1]!.models, {
+          instanceId: ProviderInstanceId.make("claude_hub"),
+          displayName: "Claude Hub",
+          updateRequiredModels: [FABLE_5_1],
+        }),
+      ],
+    });
+
+    try {
+      await page.getByRole("button").click();
+      await vi.waitFor(() => {
+        expect(getUpdateNotices()).toEqual([NOTICE]);
+      });
+
+      await page.getByPlaceholder("Search models...").fill("fable");
+      await vi.waitFor(() => {
+        expect(getUpdateNotices()).toEqual([`Claude: ${NOTICE}`, `Claude Hub: ${NOTICE}`]);
+      });
     } finally {
       await mounted.cleanup();
     }

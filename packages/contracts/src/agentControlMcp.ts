@@ -12,6 +12,7 @@
 import * as Schema from "effect/Schema";
 import {
   IsoDateTime,
+  MessageId,
   NonNegativeInt,
   PositiveInt,
   ProjectId,
@@ -23,6 +24,9 @@ import {
 } from "./baseSchemas.ts";
 import {
   AgentTokenMode,
+  FollowUpQueueEntryAuthor,
+  FollowUpQueueEntryStatus,
+  FollowUpQueueHoldReason,
   OrchestrationSessionStatus,
   OptionalProjectKind,
   RuntimeMode,
@@ -57,11 +61,13 @@ import {
   AgentControlExternalClientKind,
   AgentControlExternalProjectScope,
   AgentControlExternalTaskId,
+  AgentControlGoalStatusUpdate,
   AgentControlIntegrationId,
   AgentControlProjectPreferences,
   AgentControlPrompt,
   AgentControlProposalId,
   AgentControlProposalReceipt,
+  AgentControlPullRequestUrl,
   AgentControlRequestId,
   AgentControlSendMessageDelivery,
   AgentControlSendMessagePlan,
@@ -155,6 +161,7 @@ export const AGENT_CONTROL_MCP_TOOLS = {
   orchestrationEvents: "ryco_orchestration_events",
   providerRuntimeEvents: "ryco_provider_runtime_events",
   diagnosticsSummary: "ryco_diagnostics_summary",
+  usageLimits: "ryco_usage_limits",
   listDevices: "ryco_list_devices",
   readDeviceState: "ryco_read_device_state",
   readDeviceScreenshot: "ryco_read_device_screenshot",
@@ -168,6 +175,8 @@ export const AGENT_CONTROL_MCP_TOOLS = {
   proposeDeviceInput: "ryco_propose_device_input",
   proposeDeviceRecording: "ryco_propose_device_recording",
   proposeDeviceShutdown: "ryco_propose_device_shutdown",
+  watchPullRequest: "ryco_watch_pull_request",
+  unwatchPullRequest: "ryco_unwatch_pull_request",
 } as const;
 export type AgentControlMcpToolName =
   (typeof AGENT_CONTROL_MCP_TOOLS)[keyof typeof AGENT_CONTROL_MCP_TOOLS];
@@ -181,8 +190,15 @@ export const AGENT_CONTROL_MCP_LIST_LIMIT_MAX = 50;
 export const AGENT_CONTROL_MCP_LIST_LIMIT_DEFAULT = 20;
 export const AGENT_CONTROL_MCP_MESSAGE_LIMIT_MAX = 50;
 export const AGENT_CONTROL_MCP_MESSAGE_LIMIT_DEFAULT = 20;
-/** Per-message transcript text cap; longer text is truncated and flagged. */
+/**
+ * Per-message transcript text cap; longer text is truncated and flagged, and the
+ * message carries a continuation (`version`, `nextOffsetChars`) to read the rest.
+ */
 export const AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS = 8_000;
+/** Text of one message a continuation read returns at most. */
+export const AGENT_CONTROL_MCP_MESSAGE_PAGE_MAX_CHARS = 20_000;
+/** Opaque version of a message's text; a continuation must name the version it continues. */
+export const AGENT_CONTROL_MCP_MESSAGE_VERSION_MAX_CHARS = 64;
 /**
  * Aggregate transcript text budget per `ryco_read_thread` page. Newest
  * messages keep their text; older messages beyond the budget are
@@ -227,11 +243,31 @@ export const AgentControlMcpListThreadsInput = Schema.Struct({
 });
 export type AgentControlMcpListThreadsInput = typeof AgentControlMcpListThreadsInput.Type;
 
+export const AgentControlMcpMessageVersion = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(AGENT_CONTROL_MCP_MESSAGE_VERSION_MAX_CHARS),
+);
+
+/**
+ * Where to continue reading one long message: the `messageId`, `version` and
+ * `nextOffsetChars` a truncated message reported. Offsets count UTF-16 code units.
+ */
+export const AgentControlMcpMessageContinuation = Schema.Struct({
+  messageId: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+  version: AgentControlMcpMessageVersion,
+  offsetChars: NonNegativeInt,
+}).pipe(rejectExcessProperties);
+export type AgentControlMcpMessageContinuation = typeof AgentControlMcpMessageContinuation.Type;
+
 export const AgentControlMcpReadThreadInput = Schema.Struct({
   threadId: ThreadId,
   messageLimit: Schema.optional(PositiveInt),
   /** Page older history; minted by a previous `ryco_read_thread` call. */
   cursor: Schema.optional(AgentControlMcpCursor),
+  /**
+   * Read the rest of one truncated message instead of a history page. Not
+   * combinable with `cursor`; `messageLimit` does not apply.
+   */
+  message: Schema.optional(AgentControlMcpMessageContinuation),
 });
 export type AgentControlMcpReadThreadInput = typeof AgentControlMcpReadThreadInput.Type;
 
@@ -257,6 +293,7 @@ export type AgentControlMcpWaitForControlRequestInput =
 export const AgentControlMcpCreateThreadsInput = Schema.Struct({
   requestId: AgentControlRequestId,
   entries: AgentControlCreateThreadsPlan.fields.entries,
+  maxConcurrent: AgentControlCreateThreadsPlan.fields.maxConcurrent,
 }).pipe(rejectExcessProperties);
 export type AgentControlMcpCreateThreadsInput = typeof AgentControlMcpCreateThreadsInput.Type;
 
@@ -286,8 +323,18 @@ export const AgentControlMcpUpdateThreadInput = Schema.Struct({
       TrimmedNonEmptyString.check(Schema.isMaxLength(AGENT_CONTROL_PERSISTENT_GOAL_MAX_CHARS)),
     ),
   ),
+  goalStatus: Schema.optional(AgentControlGoalStatusUpdate),
 }).pipe(rejectExcessProperties);
 export type AgentControlMcpUpdateThreadInput = typeof AgentControlMcpUpdateThreadInput.Type;
+
+/** `ryco_watch_pull_request` and `ryco_unwatch_pull_request`: the chat defaults to the caller's. */
+export const AgentControlMcpPullRequestWatchInput = Schema.Struct({
+  requestId: AgentControlRequestId,
+  threadId: Schema.optional(ThreadId),
+  number: Schema.optional(PositiveInt),
+  url: Schema.optional(AgentControlPullRequestUrl),
+}).pipe(rejectExcessProperties);
+export type AgentControlMcpPullRequestWatchInput = typeof AgentControlMcpPullRequestWatchInput.Type;
 
 export const AgentControlMcpProposeProjectCreateInput = Schema.Struct({
   requestId: AgentControlRequestId,
@@ -368,6 +415,8 @@ export const AgentControlMcpProposeAutomationCreateInput = Schema.Struct({
   tokenMode: Schema.optional(AgentTokenMode),
   envMode: ThreadEnvMode,
   baseRef: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
+  /** Runs into this existing chat's follow-up queue instead of a new chat each time. */
+  targetThreadId: Schema.optional(ThreadId),
   schedule: AgentControlAutomationSchedule,
   enabled: Schema.optional(Schema.Boolean),
 }).pipe(rejectExcessProperties);
@@ -387,6 +436,8 @@ export const AgentControlMcpProposeAutomationUpdateInput = Schema.Struct({
   tokenMode: Schema.optional(AgentTokenMode),
   envMode: Schema.optional(ThreadEnvMode),
   baseRef: Schema.optional(Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(256)))),
+  /** An existing chat to run into, or null for a new chat each time. */
+  targetThreadId: Schema.optional(Schema.NullOr(ThreadId)),
   schedule: Schema.optional(AgentControlAutomationSchedule),
   enabled: Schema.optional(Schema.Boolean),
 }).pipe(rejectExcessProperties);
@@ -416,6 +467,12 @@ export const AgentControlMcpDiagnosticsSummaryInput = Schema.Struct({
 }).pipe(rejectExcessProperties);
 export type AgentControlMcpDiagnosticsSummaryInput =
   typeof AgentControlMcpDiagnosticsSummaryInput.Type;
+
+export const AgentControlMcpUsageLimitsInput = Schema.Struct({
+  /** Only this instance; absent lists every enabled instance. */
+  instanceId: Schema.optional(ProviderInstanceId),
+}).pipe(rejectExcessProperties);
+export type AgentControlMcpUsageLimitsInput = typeof AgentControlMcpUsageLimitsInput.Type;
 
 export const AgentControlMcpListDevicesInput = Schema.Struct({
   includeShutdown: Schema.optional(Schema.Boolean),
@@ -691,8 +748,38 @@ export const AgentControlMcpMessage = Schema.Struct({
   turnId: Schema.NullOr(TurnId),
   attachmentCount: NonNegativeInt,
   createdAt: IsoDateTime,
+  /**
+   * Set when `text` is a slice of a longer, settled message: pass `messageId`,
+   * `version` and `nextOffsetChars` back as `message` to read on. Absent while the
+   * message still streams (read it again once it settles).
+   */
+  version: Schema.optional(AgentControlMcpMessageVersion),
+  /** Where `text` starts in the whole message (UTF-16 code units). */
+  offsetChars: Schema.optional(NonNegativeInt),
+  /** Length of the whole message (UTF-16 code units). */
+  totalChars: Schema.optional(NonNegativeInt),
+  /** Where the next slice starts; null once `text` reaches the end. */
+  nextOffsetChars: Schema.optional(Schema.NullOr(NonNegativeInt)),
 });
 export type AgentControlMcpMessage = typeof AgentControlMcpMessage.Type;
+
+/** Characters of a queued follow-up's text `ryco_read_thread` shows. */
+export const AGENT_CONTROL_MCP_QUEUED_TEXT_MAX_CHARS = 500;
+
+/** One entry of a thread's follow-up queue as `ryco_read_thread` shows it. */
+export const AgentControlMcpQueuedFollowUp = Schema.Struct({
+  messageId: MessageId,
+  author: FollowUpQueueEntryAuthor,
+  /** `ryco_queue_list`: the revision `ryco_queue_edit` names, and whether the caller queued it. */
+  revision: Schema.optional(PositiveInt),
+  mine: Schema.optional(Schema.Boolean),
+  status: FollowUpQueueEntryStatus,
+  text: Schema.String,
+  textTruncated: Schema.optional(Schema.Literal(true)),
+  attachmentCount: NonNegativeInt,
+  createdAt: IsoDateTime,
+});
+export type AgentControlMcpQueuedFollowUp = typeof AgentControlMcpQueuedFollowUp.Type;
 
 export const AgentControlMcpReadThreadResult = Schema.Struct({
   thread: AgentControlMcpThreadSummary,
@@ -700,6 +787,22 @@ export const AgentControlMcpReadThreadResult = Schema.Struct({
   hasMoreBefore: Schema.Boolean,
   /** Cursor for the next-older page; `null` when history is exhausted. */
   nextCursor: Schema.NullOr(AgentControlMcpCursor),
+  /**
+   * The follow-ups queued to the thread, next first, and why the queue waits; on the first page
+   * only, absent while the queue is empty.
+   */
+  followUpQueue: Schema.optional(
+    Schema.Struct({
+      hold: Schema.NullOr(
+        Schema.Struct({
+          reason: FollowUpQueueHoldReason,
+          detail: Schema.NullOr(Schema.String),
+          heldAt: IsoDateTime,
+        }),
+      ),
+      entries: Schema.Array(AgentControlMcpQueuedFollowUp),
+    }),
+  ),
 });
 export type AgentControlMcpReadThreadResult = typeof AgentControlMcpReadThreadResult.Type;
 
@@ -872,6 +975,97 @@ export const AgentControlMcpDiagnosticsSummaryResult = Schema.Struct({
 export type AgentControlMcpDiagnosticsSummaryResult =
   typeof AgentControlMcpDiagnosticsSummaryResult.Type;
 
+/**
+ * Caps of a `ryco_usage_limits` answer: 1,152 windows at most, so even long labels sent twice
+ * (MCP text and structured content) stay well under the listeners' 512 KiB response cap.
+ */
+export const AGENT_CONTROL_MCP_USAGE_LIMITS_MAX = {
+  instances: 32,
+  /** Per instance or hub account. */
+  windows: 12,
+  hubs: 4,
+  /** Per hub. */
+  hubAccounts: 16,
+} as const;
+
+/** One usage window as the Limits page labels it (`5h`, `Weekly`, `Weekly · Opus`). */
+export const AgentControlMcpUsageLimitWindow = Schema.Struct({
+  label: TrimmedNonEmptyString,
+  /** 0..100. */
+  usedPercent: Schema.Number,
+  resetsAt: Schema.NullOr(IsoDateTime),
+  /** How use compared with an even spread over the window at the read; absent when even. */
+  pace: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type AgentControlMcpUsageLimitWindow = typeof AgentControlMcpUsageLimitWindow.Type;
+
+const UsageLimitWindows = Schema.Array(AgentControlMcpUsageLimitWindow).check(
+  Schema.isMaxLength(AGENT_CONTROL_MCP_USAGE_LIMITS_MAX.windows),
+);
+
+/**
+ * The usage limits the server last read for one enabled provider instance. Never carries the
+ * account's email, ids, plan or credentials.
+ */
+export const AgentControlMcpInstanceUsageLimits = Schema.Struct({
+  instanceId: ProviderInstanceId,
+  driver: ProviderDriverKind,
+  displayName: Schema.NullOr(TrimmedNonEmptyString),
+  windows: UsageLimitWindows,
+  /** When the windows were read from the provider; null without a reading. */
+  observedAt: Schema.NullOr(IsoDateTime),
+  /** The last read failed or was throttled: these are the last good numbers. */
+  stale: Schema.optionalKey(Schema.Literal(true)),
+  staleReason: Schema.optionalKey(TrimmedNonEmptyString),
+  note: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type AgentControlMcpInstanceUsageLimits = typeof AgentControlMcpInstanceUsageLimits.Type;
+
+/**
+ * One subscription account a CLIProxyAPI hub pools: `Account 1`, `Account 2`… in the order the
+ * hub lists them. Never carries the account's email, name, credential index or file.
+ */
+export const AgentControlMcpHubAccountUsageLimits = Schema.Struct({
+  label: TrimmedNonEmptyString,
+  /** The hub's provider slug (`claude`, `codex`, `antigravity`…). */
+  provider: TrimmedNonEmptyString,
+  windows: UsageLimitWindows,
+  observedAt: Schema.NullOr(IsoDateTime),
+  note: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type AgentControlMcpHubAccountUsageLimits = typeof AgentControlMcpHubAccountUsageLimits.Type;
+
+/** The accounts of one enabled CLIProxyAPI hub as Ryco last read them. */
+export const AgentControlMcpHubUsageLimits = Schema.Struct({
+  /** The hub's own label, else its host. */
+  hubLabel: TrimmedNonEmptyString,
+  /** The instances whose requests this hub serves. */
+  routedInstanceIds: Schema.Array(ProviderInstanceId).check(
+    Schema.isMaxLength(AGENT_CONTROL_MCP_USAGE_LIMITS_MAX.instances),
+  ),
+  accounts: Schema.Array(AgentControlMcpHubAccountUsageLimits).check(
+    Schema.isMaxLength(AGENT_CONTROL_MCP_USAGE_LIMITS_MAX.hubAccounts),
+  ),
+  /** When the account list was read; null without a reading. */
+  observedAt: Schema.NullOr(IsoDateTime),
+  /** The latest hub read failed: the accounts are from an earlier one. */
+  stale: Schema.optionalKey(Schema.Literal(true)),
+  staleReason: Schema.optionalKey(TrimmedNonEmptyString),
+  note: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type AgentControlMcpHubUsageLimits = typeof AgentControlMcpHubUsageLimits.Type;
+
+export const AgentControlMcpUsageLimitsResult = Schema.Struct({
+  checkedAt: IsoDateTime,
+  instances: Schema.Array(AgentControlMcpInstanceUsageLimits).check(
+    Schema.isMaxLength(AGENT_CONTROL_MCP_USAGE_LIMITS_MAX.instances),
+  ),
+  hubs: Schema.Array(AgentControlMcpHubUsageLimits).check(
+    Schema.isMaxLength(AGENT_CONTROL_MCP_USAGE_LIMITS_MAX.hubs),
+  ),
+});
+export type AgentControlMcpUsageLimitsResult = typeof AgentControlMcpUsageLimitsResult.Type;
+
 // ── External stdio MCP tool catalog ──────────────────────────────────
 
 export const AGENT_CONTROL_EXTERNAL_MCP_TOOLS = {
@@ -891,6 +1085,7 @@ export const AGENT_CONTROL_EXTERNAL_MCP_TOOLS = {
   orchestrationEvents: "ryco_orchestration_events",
   providerRuntimeEvents: "ryco_provider_runtime_events",
   diagnosticsSummary: "ryco_diagnostics_summary",
+  usageLimits: "ryco_usage_limits",
   readControlRequest: "ryco_read_control_request",
   waitForControlRequest: "ryco_wait_for_control_request",
   listThreads: "ryco_list_threads",

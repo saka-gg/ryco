@@ -428,6 +428,90 @@ export function computeStatisticsThreadPartial(
   };
 }
 
+const COUNTER_KEYS = Object.keys(emptyCounters()) as ReadonlyArray<keyof BucketCounters>;
+
+/**
+ * Several partials of one thread as one: a re-created thread's live rows plus the frozen
+ * contributions of its earlier incarnations (`statistics_usage_rollups`). Buckets with the same
+ * key add up.
+ */
+export function mergeStatisticsThreadPartials(
+  metaKey: string,
+  partials: ReadonlyArray<StatisticsThreadPartial>,
+): StatisticsThreadPartial {
+  const buckets = new Map<string, MutableBucket>();
+  let usedExactPerTurn = false;
+  let usedCumulativeFallback = false;
+  let earliest: string | undefined;
+  for (const partial of partials) {
+    if (partial.usedExactPerTurn) usedExactPerTurn = true;
+    if (partial.usedCumulativeFallback) usedCumulativeFallback = true;
+    if (partial.earliest !== undefined && (earliest === undefined || partial.earliest < earliest)) {
+      earliest = partial.earliest;
+    }
+    for (const source of partial.buckets) {
+      const key = bucketKey(source.date, source.projectId, source.model, source.provider);
+      let bucket = buckets.get(key);
+      if (bucket === undefined) {
+        bucket = {
+          date: source.date,
+          projectId: source.projectId,
+          model: source.model,
+          provider: source.provider,
+          ...emptyCounters(),
+        };
+        buckets.set(key, bucket);
+      }
+      for (const counter of COUNTER_KEYS) bucket[counter] += source[counter];
+    }
+  }
+  return {
+    metaKey,
+    buckets: [...buckets.values()],
+    usedExactPerTurn,
+    usedCumulativeFallback,
+    earliest,
+  };
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * A stored partial read back (`statistics_usage_rollups`): buckets without a date, project or
+ * model are dropped and counters that are not finite numbers count as 0, so a partial written by
+ * an older or newer build never turns a snapshot into NaN. Undefined when it is not a partial.
+ */
+export function normalizeStatisticsThreadPartial(
+  value: unknown,
+): StatisticsThreadPartial | undefined {
+  if (!isRecord(value) || !Array.isArray(value.buckets)) return undefined;
+  const buckets: Array<MutableBucket> = [];
+  for (const source of value.buckets) {
+    if (!isRecord(source)) continue;
+    const { date, projectId, model, provider } = source;
+    if (typeof date !== "string" || typeof projectId !== "string" || typeof model !== "string") {
+      continue;
+    }
+    const bucket: MutableBucket = {
+      date,
+      projectId: ProjectId.make(projectId),
+      model,
+      provider: typeof provider === "string" ? provider : undefined,
+      ...emptyCounters(),
+    };
+    for (const counter of COUNTER_KEYS) bucket[counter] = num(source[counter]);
+    buckets.push(bucket);
+  }
+  return {
+    metaKey: typeof value.metaKey === "string" ? value.metaKey : NO_THREAD_META,
+    buckets,
+    usedExactPerTurn: value.usedExactPerTurn === true,
+    usedCumulativeFallback: value.usedCumulativeFallback === true,
+    earliest: typeof value.earliest === "string" ? value.earliest : undefined,
+  };
+}
+
 /** Sum per-thread partials with the global (non-thread-scoped) rows into a snapshot. */
 export function assembleStatisticsSnapshot(input: {
   readonly threadMeta: ReadonlyMap<string, StatisticsThreadMeta>;

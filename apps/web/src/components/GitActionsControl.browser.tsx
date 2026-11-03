@@ -3,8 +3,13 @@ import "../index.css";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import {
   EnvironmentId,
+  GitActionResultUnavailableError,
+  GitActionStoppedError,
   ProjectId,
   ThreadId,
+  type EnvironmentApi,
+  type GitActionProgressEvent,
+  type GitActionRecoveryState,
   type ServerConfig,
   type VcsStatusResult,
 } from "@ryco/contracts";
@@ -46,6 +51,7 @@ const {
   serverThreadWorktreePathRef,
   refreshGitStatusSpy,
   runStackedActionMutateAsyncSpy,
+  runStackedActionMutationRef,
   setDraftThreadContextSpy,
   setThreadBranchSpy,
   toastAddSpy,
@@ -66,12 +72,19 @@ const {
   serverThreadWorktreePathRef: { current: null as string | null },
   refreshGitStatusSpy: vi.fn(() => Promise.resolve(null)),
   runStackedActionMutateAsyncSpy: vi.fn(() => activeRunStackedActionDeferredRef.current.promise),
+  /** The runner's stacked-action mutation, as handed to `useGitMutation`. */
+  runStackedActionMutationRef: { current: null as MockGitMutationOptions | null },
   setDraftThreadContextSpy: vi.fn(),
   setThreadBranchSpy: vi.fn(),
   toastAddSpy: vi.fn(() => "toast-1"),
   toastCloseSpy: vi.fn(),
   toastUpdateSpy: vi.fn(),
 }));
+
+interface MockGitMutationOptions {
+  readonly trackingKey?: string | null;
+  readonly mutationFn: (args: unknown) => Promise<unknown>;
+}
 
 vi.mock("~/rpc/serverState", async (importOriginal) => ({
   ...(await importOriginal<typeof import("~/rpc/serverState")>()),
@@ -89,6 +102,10 @@ vi.mock("~/components/ui/toast", () => ({
 
 vi.mock("~/editorPreferences", () => ({
   openInPreferredEditor: vi.fn(),
+  // Where a path opens (this machine, over SSH, or not at all) is `editorOpenRoute.test.ts`'s
+  // concern; here every path opens on this machine.
+  openPathInEditor: vi.fn(async () => "vscode"),
+  canOpenInEditor: () => true,
 }));
 
 vi.mock("~/rpc/useGit", () => ({
@@ -103,9 +120,10 @@ vi.mock("~/rpc/useGit", () => ({
   invalidateScopes: vi.fn(),
   useGitActionActivity: vi.fn(() => gitActionActivityRef.current),
   useIsGitMutating: vi.fn(() => false),
-  useGitMutation: vi.fn((options: { trackingKey?: string | null }) => {
+  useGitMutation: vi.fn((options: MockGitMutationOptions) => {
     const trackingKey = options.trackingKey ?? "";
     if (typeof trackingKey === "string" && trackingKey.includes("run-stacked-action")) {
+      runStackedActionMutationRef.current = options;
       return {
         mutate: vi.fn(),
         mutateAsync: runStackedActionMutateAsyncSpy,
@@ -291,10 +309,20 @@ import {
   useSavedEnvironmentRuntimeStore,
 } from "~/environments/runtime";
 
-function setEnvironmentConfig(environmentId: EnvironmentId, prefix: string | null) {
-  // Only the branch prefix is consumed by this component's configuration seam.
+function setEnvironmentConfig(
+  environmentId: EnvironmentId,
+  prefix: string | null,
+  capabilities: Partial<ServerConfig["environment"]["capabilities"]> = {},
+) {
+  // Only the branch prefix and the capabilities are consumed by this
+  // component's configuration seam.
   const serverConfig =
-    prefix === null ? null : ({ settings: { worktreeBranchPrefix: prefix } } as ServerConfig);
+    prefix === null
+      ? null
+      : ({
+          settings: { worktreeBranchPrefix: prefix },
+          environment: { capabilities },
+        } as unknown as ServerConfig);
   if (environmentId === ENVIRONMENT_A) {
     primaryServerConfigRef.current = serverConfig;
   } else {
@@ -305,7 +333,28 @@ function setEnvironmentConfig(environmentId: EnvironmentId, prefix: string | nul
 import GitActionsControl, { GitThreadSync } from "./GitActionsControl";
 import { CROWN_SHIP_GRACE_MS, useCrownShipBinding } from "./chat/useCrownShipBinding";
 import type { CrownShipBinding } from "./overview/crown/crownTypes";
-import { presentGitActionNotices, type GitActionNotice } from "~/gitActionNotices";
+import {
+  __resetEnvironmentApiOverridesForTests,
+  __setEnvironmentApiOverrideForTests,
+} from "~/environmentApi";
+import {
+  GIT_ACTION_RECONNECTING_DESCRIPTION,
+  presentGitActionNotices,
+  type GitActionNotice,
+} from "~/gitActionNotices";
+
+/**
+ * Ends the git action a test left running and hands the next test a fresh
+ * one. A run that never settles keeps ticking its elapsed time and would
+ * report into whatever presents the same checkout in a later test.
+ */
+async function settleRunningStackedAction() {
+  const running = activeRunStackedActionDeferredRef.current;
+  running.promise.catch(() => undefined);
+  running.reject(new Error("The test ended."));
+  activeRunStackedActionDeferredRef.current = createDeferredPromise<never>();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 function findButtonByText(text: string): HTMLButtonElement | null {
   return (Array.from(document.querySelectorAll("button")).find((button) =>
@@ -341,7 +390,6 @@ describe("GitActionsControl thread-scoped progress toast and GitThreadSync", () 
       capabilities: {
         repositoryIdentity: true,
         threadSettlement: false,
-        threadPriorityRanking: false,
       },
     });
     setEnvironmentConfig(ENVIRONMENT_A, "ryco");
@@ -349,16 +397,17 @@ describe("GitActionsControl thread-scoped progress toast and GitThreadSync", () 
     liveBranchRef.current = BRANCH_NAME;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.useRealTimers();
+    await settleRunningStackedAction();
     vi.clearAllMocks();
-    activeRunStackedActionDeferredRef.current = createDeferredPromise<never>();
     activeDraftThreadRef.current = null;
     hasServerThreadRef.current = true;
     serverThreadWorktreePathRef.current = null;
     primaryServerConfigRef.current = null;
     resetPrimaryEnvironmentDescriptorForTests();
     resetSavedEnvironmentRuntimeStoreForTests();
+    __resetEnvironmentApiOverridesForTests();
     liveBranchRef.current = "";
     document.body.innerHTML = "";
   });
@@ -605,6 +654,102 @@ describe("GitActionsControl thread-scoped progress toast and GitThreadSync", () 
     }
   });
 
+  describe.each([
+    { environment: "primary", environmentId: ENVIRONMENT_A },
+    { environment: "saved", environmentId: ENVIRONMENT_B },
+  ])("$environment environment started thread", ({ environmentId }) => {
+    function stubDispatch() {
+      const dispatchCommand = vi.fn((_command: unknown) => Promise.resolve({ sequence: 1 }));
+      __setEnvironmentApiOverrideForTests(environmentId, {
+        orchestration: { dispatchCommand },
+      } as unknown as EnvironmentApi);
+      return dispatchCommand;
+    }
+
+    it("leaves the branch to a node that records it", async () => {
+      const dispatchCommand = stubDispatch();
+      serverThreadWorktreePathRef.current = WORKTREE_CWD;
+      setEnvironmentConfig(environmentId, "ryco", { threadBranchAdoption: true });
+      liveBranchRef.current = "feat/agent-branch";
+      const threadRef = scopeThreadRef(environmentId, SHARED_THREAD_ID);
+      const screen = await render(
+        <GitThreadSync gitCwd={WORKTREE_CWD} activeThreadRef={threadRef} />,
+      );
+
+      try {
+        await Promise.resolve();
+        liveBranchRef.current = "feat/agent-other";
+        await screen.rerender(<GitThreadSync gitCwd={WORKTREE_CWD} activeThreadRef={threadRef} />);
+        await Promise.resolve();
+
+        expect(setThreadBranchSpy).not.toHaveBeenCalled();
+        expect(dispatchCommand).not.toHaveBeenCalled();
+      } finally {
+        await screen.unmount();
+      }
+    });
+
+    it("still records it for an older node", async () => {
+      const dispatchCommand = stubDispatch();
+      serverThreadWorktreePathRef.current = WORKTREE_CWD;
+      // An older node's config has no `threadBranchAdoption` key.
+      setEnvironmentConfig(environmentId, "ryco");
+      liveBranchRef.current = "feat/agent-branch";
+      const threadRef = scopeThreadRef(environmentId, SHARED_THREAD_ID);
+      const screen = await render(
+        <GitThreadSync gitCwd={WORKTREE_CWD} activeThreadRef={threadRef} />,
+      );
+
+      try {
+        await Promise.resolve();
+
+        expect(setThreadBranchSpy).toHaveBeenCalledExactlyOnceWith(
+          threadRef,
+          "feat/agent-branch",
+          WORKTREE_CWD,
+        );
+        expect(dispatchCommand).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            type: "thread.meta.update",
+            threadId: SHARED_THREAD_ID,
+            branch: "feat/agent-branch",
+            worktreePath: WORKTREE_CWD,
+          }),
+        );
+      } finally {
+        await screen.unmount();
+      }
+    });
+
+    it("keeps following the checkout into a draft on a node that records started threads", async () => {
+      const dispatchCommand = stubDispatch();
+      hasServerThreadRef.current = false;
+      activeDraftThreadRef.current = {
+        threadId: SHARED_THREAD_ID,
+        projectId: PROJECT_ID,
+        environmentId,
+        branch: null,
+        worktreePath: null,
+      };
+      setEnvironmentConfig(environmentId, "ryco", { threadBranchAdoption: true });
+      const threadRef = scopeThreadRef(environmentId, SHARED_THREAD_ID);
+      const screen = await render(<GitThreadSync gitCwd={GIT_CWD} activeThreadRef={threadRef} />);
+
+      try {
+        await Promise.resolve();
+
+        expect(setDraftThreadContextSpy).toHaveBeenCalledExactlyOnceWith(threadRef, {
+          branch: BRANCH_NAME,
+          worktreePath: null,
+        });
+        expect(setThreadBranchSpy).not.toHaveBeenCalled();
+        expect(dispatchCommand).not.toHaveBeenCalled();
+      } finally {
+        await screen.unmount();
+      }
+    });
+  });
+
   it("does not overwrite a selected base branch while a new worktree draft is being configured", async () => {
     hasServerThreadRef.current = false;
     activeDraftThreadRef.current = {
@@ -666,8 +811,8 @@ describe("useCrownShipBinding", () => {
       await mount.unmount();
       mount.host.remove();
     }
+    await settleRunningStackedAction();
     vi.clearAllMocks();
-    activeRunStackedActionDeferredRef.current = createDeferredPromise<never>();
     gitStatusOverridesRef.current = {};
     gitActionActivityRef.current = false;
     localApiRef.current = null;
@@ -894,5 +1039,399 @@ describe("useCrownShipBinding", () => {
     await mountShip(dirty);
     expect(shipRef.current?.steps).toEqual([]);
     expect(shipRef.current?.disabledReason).toBe("Git action in progress.");
+  });
+});
+
+describe("git actions that outlive their connection", () => {
+  interface RunArgs {
+    readonly actionId: string;
+    readonly onProgress: (event: GitActionProgressEvent) => void;
+    readonly onRecoveryState: (state: GitActionRecoveryState) => void;
+  }
+  interface ShownToast {
+    readonly type?: string;
+    readonly title?: string;
+    readonly description?: string;
+    readonly actionProps?: { readonly children: string; readonly onClick: () => void };
+  }
+
+  const mounted: Array<() => Promise<void>> = [];
+  const cancelStackedAction = vi.fn((_input: { actionId: string }) =>
+    Promise.resolve({ cancelled: true }),
+  );
+
+  beforeEach(() => {
+    writePrimaryEnvironmentDescriptor({
+      environmentId: ENVIRONMENT_A,
+      label: "Local environment",
+      platform: { os: "darwin", arch: "arm64" },
+      serverVersion: "0.0.0-test",
+      capabilities: {
+        repositoryIdentity: true,
+        threadSettlement: false,
+      },
+    });
+    setEnvironmentConfig(ENVIRONMENT_A, "ryco");
+    liveBranchRef.current = BRANCH_NAME;
+    __setEnvironmentApiOverrideForTests(ENVIRONMENT_A, {
+      git: { cancelStackedAction },
+    } as unknown as EnvironmentApi);
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    for (const unmount of mounted.splice(0)) await unmount();
+    await settleRunningStackedAction();
+    vi.clearAllMocks();
+    __resetEnvironmentApiOverridesForTests();
+    primaryServerConfigRef.current = null;
+    resetPrimaryEnvironmentDescriptorForTests();
+    liveBranchRef.current = "";
+    document.body.innerHTML = "";
+  });
+
+  /** Clicks the quick action ("Push & create PR") and returns what the runner sent. */
+  async function startQuickAction(): Promise<RunArgs> {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const screen = await render(<Harness />, { container: host });
+    mounted.push(async () => {
+      await screen.unmount();
+      host.remove();
+    });
+    findButtonByText("Push & create PR")?.click();
+    await vi.waitFor(() => expect(runStackedActionMutateAsyncSpy).toHaveBeenCalledTimes(1));
+    const [args] = runStackedActionMutateAsyncSpy.mock.calls[0] as unknown as [RunArgs];
+    return args;
+  }
+
+  function lastToast(): ShownToast {
+    const update = toastUpdateSpy.mock.calls.at(-1) as unknown as [string, ShownToast] | undefined;
+    if (update) return update[1];
+    const added = toastAddSpy.mock.calls.at(-1) as unknown as [ShownToast] | undefined;
+    return added?.[0] ?? {};
+  }
+
+  const progress = {
+    started: (actionId: string): GitActionProgressEvent => ({
+      kind: "action_started",
+      actionId,
+      cwd: GIT_CWD,
+      action: "create_pr",
+      phases: ["push", "pr"],
+    }),
+    pushing: (actionId: string): GitActionProgressEvent => ({
+      kind: "phase_started",
+      actionId,
+      cwd: GIT_CWD,
+      action: "create_pr",
+      phase: "push",
+      label: "Pushing...",
+    }),
+  };
+
+  it("asks the node to keep the action running when the connection drops", async () => {
+    const runStackedAction = vi.fn(() => new Promise<never>(() => undefined));
+    __setEnvironmentApiOverrideForTests(ENVIRONMENT_A, {
+      git: { runStackedAction, cancelStackedAction },
+    } as unknown as EnvironmentApi);
+    const screen = await render(
+      <GitActionsControl
+        gitCwd={GIT_CWD}
+        activeThreadRef={scopeThreadRef(ENVIRONMENT_A, SHARED_THREAD_ID)}
+      />,
+    );
+    mounted.push(() => screen.unmount());
+    const onProgress = vi.fn();
+    const onRecoveryState = vi.fn();
+    void runStackedActionMutationRef.current?.mutationFn({
+      actionId: "action-1",
+      action: "push",
+      onProgress,
+      onRecoveryState,
+    });
+    expect(runStackedAction).toHaveBeenCalledWith(
+      { action: "push", actionId: "action-1", cwd: GIT_CWD },
+      { recoverable: true, onProgress, onRecoveryState },
+    );
+  });
+
+  it("offers Stop on the running toast and stops the action through its own id", async () => {
+    const args = await startQuickAction();
+    args.onRecoveryState({ kind: "started", recoverable: true });
+    args.onProgress(progress.started(args.actionId));
+    await vi.waitFor(() =>
+      expect(lastToast()).toMatchObject({ type: "loading", actionProps: { children: "Stop" } }),
+    );
+
+    lastToast().actionProps?.onClick();
+    expect(cancelStackedAction).toHaveBeenCalledExactlyOnceWith({ actionId: args.actionId });
+    expect(lastToast()).toMatchObject({ description: "Stopping...", actionProps: undefined });
+
+    activeRunStackedActionDeferredRef.current.reject(
+      new GitActionStoppedError({ actionId: args.actionId, phase: "push", reason: "requested" }),
+    );
+    await vi.waitFor(() =>
+      expect(lastToast()).toMatchObject({
+        type: "info",
+        title: "Stopped",
+        description: "Steps that already finished stay done.",
+        actionProps: undefined,
+      }),
+    );
+    // Some steps may have run: the checkout is read again.
+    expect(refreshGitStatusSpy).toHaveBeenCalledWith({
+      environmentId: ENVIRONMENT_A,
+      cwd: GIT_CWD,
+    });
+  });
+
+  it("offers no Stop when the node keeps request-owned actions", async () => {
+    const args = await startQuickAction();
+    args.onRecoveryState({ kind: "started", recoverable: false });
+    args.onProgress(progress.started(args.actionId));
+    args.onProgress(progress.pushing(args.actionId));
+    await vi.waitFor(() => expect(lastToast()).toMatchObject({ title: "Pushing..." }));
+    expect(lastToast().actionProps).toBeUndefined();
+  });
+
+  it("says it is reconnecting, and keeps the step's clock when the node replays it", async () => {
+    vi.useFakeTimers();
+    const args = await startQuickAction();
+    args.onRecoveryState({ kind: "started", recoverable: true });
+    args.onProgress(progress.started(args.actionId));
+    args.onProgress(progress.pushing(args.actionId));
+    await vi.advanceTimersByTimeAsync(5_000);
+    const elapsedSeconds = () =>
+      Number(/^Running for (\d+)s$/.exec(lastToast().description ?? "")?.[1]);
+    const beforeDrop = elapsedSeconds();
+    expect(beforeDrop).toBeGreaterThanOrEqual(4);
+    expect(lastToast()).toMatchObject({ title: "Pushing..." });
+
+    args.onRecoveryState({ kind: "reconnecting" });
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(lastToast()).toMatchObject({
+      title: "Pushing...",
+      description: GIT_ACTION_RECONNECTING_DESCRIPTION,
+      actionProps: { children: "Stop" },
+    });
+
+    // Re-attached: the node replays the start and the current phase first.
+    args.onRecoveryState({ kind: "reattached" });
+    args.onProgress(progress.started(args.actionId));
+    args.onProgress(progress.pushing(args.actionId));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(lastToast()).toMatchObject({ title: "Pushing..." });
+    expect(elapsedSeconds()).toBe(beforeDrop + 4);
+  });
+
+  it("asks to check the repository when the result is unavailable", async () => {
+    const args = await startQuickAction();
+    args.onRecoveryState({ kind: "started", recoverable: true });
+    activeRunStackedActionDeferredRef.current.reject(
+      new GitActionResultUnavailableError({ actionId: args.actionId, reason: "missing" }),
+    );
+    await vi.waitFor(() =>
+      expect(lastToast()).toMatchObject({
+        type: "error",
+        title: "Couldn't confirm the Git action",
+        description: "Check the repository status before trying again.",
+      }),
+    );
+    expect(refreshGitStatusSpy).toHaveBeenCalledWith({
+      environmentId: ENVIRONMENT_A,
+      cwd: GIT_CWD,
+    });
+  });
+
+  it("keeps the crown's live notice and its Stop when a Stop fails", async () => {
+    const notices: GitActionNotice[] = [];
+    const release = presentGitActionNotices(ENVIRONMENT_A, GIT_CWD, (notice) =>
+      notices.push(notice),
+    );
+    mounted.push(() => Promise.resolve(release()));
+    cancelStackedAction.mockRejectedValueOnce(new Error("Request timed out."));
+    const args = await startQuickAction();
+    args.onRecoveryState({ kind: "started", recoverable: true });
+    args.onProgress(progress.started(args.actionId));
+    args.onProgress(progress.pushing(args.actionId));
+    await vi.waitFor(() => expect(notices.at(-1)?.action?.label).toBe("Stop"));
+
+    notices.at(-1)?.action?.onClick();
+    expect(cancelStackedAction).toHaveBeenCalledExactlyOnceWith({ actionId: args.actionId });
+    await vi.waitFor(() =>
+      expect(notices.at(-1)).toMatchObject({
+        id: args.actionId,
+        status: "running",
+        title: "Pushing...",
+        description: "Couldn't stop: Request timed out.",
+        action: { label: "Stop" },
+      }),
+    );
+    expect(toastAddSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("Create PR dialog", () => {
+  const mounted: Array<() => Promise<void>> = [];
+
+  beforeEach(() => {
+    writePrimaryEnvironmentDescriptor({
+      environmentId: ENVIRONMENT_A,
+      label: "Local environment",
+      platform: { os: "darwin", arch: "arm64" },
+      serverVersion: "0.0.0-test",
+      capabilities: { repositoryIdentity: true, threadSettlement: false },
+    });
+    liveBranchRef.current = BRANCH_NAME;
+  });
+
+  afterEach(async () => {
+    for (const unmount of mounted.splice(0)) await unmount();
+    await settleRunningStackedAction();
+    vi.clearAllMocks();
+    __resetEnvironmentApiOverridesForTests();
+    gitStatusOverridesRef.current = {};
+    primaryServerConfigRef.current = null;
+    resetPrimaryEnvironmentDescriptorForTests();
+    resetSavedEnvironmentRuntimeStoreForTests();
+    liveBranchRef.current = "";
+    document.body.innerHTML = "";
+  });
+
+  async function mountControl(input: {
+    pullRequestOptions: boolean;
+    status: Partial<VcsStatusResult>;
+  }) {
+    // A saved environment: the control reads its capabilities from the saved runtime store.
+    setEnvironmentConfig(ENVIRONMENT_B, "ryco", {
+      ...(input.pullRequestOptions ? { pullRequestOptions: true } : {}),
+    });
+    gitStatusOverridesRef.current = input.status;
+    const screen = await render(
+      <GitActionsControl
+        gitCwd={GIT_CWD}
+        activeThreadRef={scopeThreadRef(ENVIRONMENT_B, SHARED_THREAD_ID)}
+      />,
+    );
+    mounted.push(() => screen.unmount());
+    await page.getByRole("button", { name: "Git action options" }).click();
+  }
+
+  const dirtyTree: Partial<VcsStatusResult> = {
+    hasWorkingTreeChanges: true,
+    workingTree: {
+      files: [{ path: "src/app.ts", insertions: 12, deletions: 3 }],
+      insertions: 12,
+      deletions: 3,
+    },
+    aheadCount: 0,
+    aheadOfDefaultCount: 2,
+  };
+
+  it("commits, pushes and opens a draft with the title the user wrote", async () => {
+    await mountControl({ pullRequestOptions: true, status: dirtyTree });
+    await page.getByRole("menuitem", { name: "Create PR" }).click();
+    const dialog = page.getByRole("dialog");
+    await expect.element(dialog.getByText("Commit and push local changes")).toBeVisible();
+    await expect.element(dialog.getByText("+12")).toBeVisible();
+    await dialog.getByRole("textbox", { name: "PR title" }).fill("  Fix the flaky upload  ");
+    await dialog.getByRole("button", { name: "Create draft PR" }).click();
+
+    await vi.waitFor(() => expect(runStackedActionMutateAsyncSpy).toHaveBeenCalledTimes(1));
+    expect(runStackedActionMutateAsyncSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "commit_push_pr",
+        pullRequest: { title: "Fix the flaky upload", draft: true },
+      }),
+    );
+    await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("leaves local changes out when the toggle is off", async () => {
+    await mountControl({ pullRequestOptions: true, status: dirtyTree });
+    await page.getByRole("menuitem", { name: "Create PR" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("checkbox").click();
+    await dialog.getByRole("textbox", { name: "PR description" }).fill("Body text");
+    await userEvent.keyboard("{Meta>}{Enter}{/Meta}");
+
+    await vi.waitFor(() => expect(runStackedActionMutateAsyncSpy).toHaveBeenCalledTimes(1));
+    expect(runStackedActionMutateAsyncSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "create_pr",
+        pullRequest: { body: "Body text", allowDirtyWorkingTree: true },
+      }),
+    );
+  });
+
+  it("says why it cannot create a PR when nothing is committed and the toggle is off", async () => {
+    await mountControl({
+      pullRequestOptions: true,
+      status: { ...dirtyTree, aheadOfDefaultCount: 0 },
+    });
+    await page.getByRole("menuitem", { name: "Create PR" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("checkbox").click();
+    await expect.element(dialog.getByText("No branch changes to include in a PR.")).toBeVisible();
+    await expect.element(dialog.getByRole("button", { name: "Create PR" })).toBeDisabled();
+  });
+
+  it("keeps the one-click Create PR on a node that takes no pull request options", async () => {
+    await mountControl({ pullRequestOptions: false, status: dirtyTree });
+    await expect
+      .element(page.getByRole("menuitem", { name: "Create PR" }))
+      .toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("carries the dialog's choices through the default-ref confirmation", async () => {
+    await mountControl({
+      pullRequestOptions: true,
+      status: { ...dirtyTree, isDefaultRef: true },
+    });
+    await page.getByRole("menuitem", { name: "Create PR" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("textbox", { name: "PR title" }).fill("Ship it");
+    await dialog.getByRole("button", { name: "Create draft PR" }).click();
+    expect(runStackedActionMutateAsyncSpy).not.toHaveBeenCalled();
+    const confirm = page.getByRole("dialog", {
+      name: "Commit, push & create PR from default ref?",
+    });
+    await expect.element(confirm).toBeVisible();
+    await confirm.getByRole("button", { name: "Checkout feature branch & continue" }).click();
+
+    await vi.waitFor(() => expect(runStackedActionMutateAsyncSpy).toHaveBeenCalledTimes(1));
+    expect(runStackedActionMutateAsyncSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "commit_push_pr",
+        featureBranch: true,
+        pullRequest: { title: "Ship it", draft: true },
+      }),
+    );
+  });
+
+  it("sends the dialog's choices to the node", async () => {
+    const runStackedAction = vi.fn(() => new Promise<never>(() => undefined));
+    __setEnvironmentApiOverrideForTests(ENVIRONMENT_B, {
+      git: { runStackedAction },
+    } as unknown as EnvironmentApi);
+    await mountControl({ pullRequestOptions: true, status: {} });
+    void runStackedActionMutationRef.current?.mutationFn({
+      actionId: "action-1",
+      action: "create_pr",
+      pullRequest: { title: "Title", body: "Body", draft: true, allowDirtyWorkingTree: true },
+    });
+    expect(runStackedAction).toHaveBeenCalledWith(
+      {
+        action: "create_pr",
+        actionId: "action-1",
+        cwd: GIT_CWD,
+        prTitle: "Title",
+        prBody: "Body",
+        prDraft: true,
+        allowDirtyWorkingTree: true,
+      },
+      expect.objectContaining({ recoverable: true }),
+    );
   });
 });

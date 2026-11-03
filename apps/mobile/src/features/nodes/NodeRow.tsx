@@ -20,11 +20,17 @@ export interface NodeRowProps {
   readonly platformOs?: string | undefined;
   readonly label: string;
   readonly detail: string;
+  /** Which part of the way to the machine failed (`diagnoseNodeRoute`). */
+  readonly routeNotice?: string | null | undefined;
+  /** Why the machine just dropped, when the node reported it froze. */
+  readonly freezeNotice?: string | null | undefined;
   readonly transportLabel: string;
   readonly statusTone: StatusTone;
   readonly selected: boolean;
   readonly selectable?: boolean;
   readonly disabled?: boolean;
+  /** Shown faded but still actionable, like a machine that is switched off. */
+  readonly dimmed?: boolean;
   readonly showDivider?: boolean;
   readonly onPress?: () => void;
   readonly actions?: ReadonlyArray<NodeRowAction>;
@@ -32,7 +38,7 @@ export interface NodeRowProps {
 
 function NodeRowContent(props: NodeRowProps) {
   return (
-    <View className="flex-row items-start gap-3 px-4 py-4">
+    <View className={cn("flex-row items-start gap-3 px-4 py-4", props.dimmed && "opacity-45")}>
       {props.environmentId && (
         <DeviceIcon
           environmentId={props.environmentId}
@@ -57,6 +63,16 @@ function NodeRowContent(props: NodeRowProps) {
         <Text className="text-xs font-ryco-medium text-foreground-muted" numberOfLines={2}>
           {props.transportLabel} · {props.detail}
         </Text>
+        {props.routeNotice ? (
+          <Text className="text-xs font-ryco-medium text-warning" numberOfLines={2}>
+            {props.routeNotice}
+          </Text>
+        ) : null}
+        {props.freezeNotice ? (
+          <Text className="text-xs font-ryco-medium text-warning" numberOfLines={2}>
+            {props.freezeNotice}
+          </Text>
+        ) : null}
       </View>
       <StatusPill
         size="compact"
@@ -102,7 +118,7 @@ export function NodeRow(props: NodeRowProps) {
     props.showDivider && "border-t border-border-subtle",
     props.disabled && "opacity-45",
   );
-  const accessibilityLabel = `${props.label}, ${props.transportLabel}, ${props.detail}, ${props.statusTone.label}`;
+  const accessibilityLabel = `${props.label}, ${props.transportLabel}, ${props.detail}, ${props.statusTone.label}${props.routeNotice ? `, ${props.routeNotice}` : ""}${props.freezeNotice ? `, ${props.freezeNotice}` : ""}`;
 
   return (
     <View className={className}>

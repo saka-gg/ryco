@@ -90,6 +90,25 @@ describe("buildAgentControlProposalCardModel", () => {
     expect(model.detailSections[0]?.lines).toContain("Prompt: Prompt 1");
   });
 
+  it("says how many tasks of a capped createThreads batch run at once", () => {
+    const entries = [1, 2, 3].map((index) => ({
+      projectId: ProjectId.make("project-1"),
+      title: `Task ${index}`,
+      prompt: `Prompt ${index}`,
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.6" },
+      runtimeMode: "auto" as const,
+      envMode: "worktree" as const,
+    }));
+    const capped = buildAgentControlProposalCardModel(
+      makeProposal({ plan: { kind: "createThreads", entries, maxConcurrent: 2 } }),
+    );
+    expect(capped.runtimeLabel).toBe("auto · worktree · at most 2 run at once");
+    const uncapped = buildAgentControlProposalCardModel(
+      makeProposal({ plan: { kind: "createThreads", entries } }),
+    );
+    expect(uncapped.runtimeLabel).toBe("auto · worktree");
+  });
+
   it("labels sendMessage steering distinctly from queueing", () => {
     const queueModel = buildAgentControlProposalCardModel(makeProposal());
     expect(queueModel.actionLabel).toBe("Queue message");
@@ -138,6 +157,20 @@ describe("buildAgentControlProposalCardModel", () => {
       "Title: New title",
       "Archive thread",
       "Clear persistent goal",
+    ]);
+
+    const goalReport = buildAgentControlProposalCardModel(
+      makeProposal({
+        plan: {
+          kind: "updateThread",
+          threadId: ThreadId.make("thread-target-5678"),
+          goalStatus: "blocked",
+        },
+      }),
+    );
+    expect(goalReport.detailSections[0]?.lines).toEqual([
+      "Thread: thread-target-5678",
+      "Mark goal blocked",
     ]);
   });
 
@@ -216,6 +249,23 @@ describe("buildAgentControlProposalCardModel", () => {
       "Every due run creates a fresh exact proposal and waits for user approval.",
     );
     expect(definition.detailSections[0]?.lines).toContain("Token mode: aggressive");
+    expect(definition.detailSections[0]?.lines).toContain("Asks before each run.");
+
+    const unattended = buildAgentControlProposalCardModel(
+      makeProposal({
+        plan: {
+          kind: "createAutomation",
+          automationId: "automation-2" as never,
+          definition: { execution, schedule, enabled: true, runPolicy: "run-without-asking" },
+        },
+      }),
+    );
+    const lines = unattended.detailSections[0]?.lines ?? [];
+    expect(lines.some((line) => line.startsWith("Runs without asking:"))).toBe(true);
+    expect(lines).toContain("It pauses after 3 failed runs in a row.");
+    expect(lines).not.toContain(
+      "Every due run creates a fresh exact proposal and waits for user approval.",
+    );
 
     const run = buildAgentControlProposalCardModel(
       makeProposal({
@@ -432,6 +482,44 @@ it("asks before deleting a task, naming it and what stays", () => {
   expect(model.detailSections[0]?.lines.join("\n")).toContain("chats started from it are kept");
 });
 
+it("asks once per task for routine device input, saying what it opens up", () => {
+  const model = buildAgentControlProposalCardModel(
+    makeProposal({
+      plan: {
+        kind: "deviceControlConsent",
+        threadId: ThreadId.make("thread-caller-1234"),
+        projectId: ProjectId.make("project-1"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        udid: "FAKE-0001" as never,
+      },
+      riskTags: ["device-mutation" as never],
+      promptSummary: "Allow routine input on device FAKE-0001 for this task",
+    }),
+    () => "Coordinator",
+  );
+  expect(model.actionLabel).toBe("Allow Device for this task");
+  expect(model.targetLabel).toBe("device FAKE-0001");
+  expect(model.runtimeLabel).toBe("this task only");
+  expect(model.isPending).toBe(true);
+  expect(model.isDestructive).toBe(false);
+  expect(model.detailSections).toEqual([
+    {
+      heading: "Routine device actions until this response ends",
+      lines: [
+        "The agent may tap, swipe, type, press hardware buttons, scroll, launch installed apps and change simulator settings on this device.",
+        "It can type into any app on the device, including its web browser.",
+        "Installing apps, opening links directly, booting, attaching and shutting down still ask each time.",
+        "Use Stop in chat to end the task. Messages sent while the agent is working continue it; the next task asks again.",
+        "Device UDID: FAKE-0001",
+        "Thread: thread-caller-1234",
+        "Project: project-1",
+        "Provider instance: codex",
+        "Nothing the agent types or taps is stored with this request.",
+      ],
+    },
+  ]);
+});
+
 it("says which created thread starts a task's chat", () => {
   const model = buildAgentControlProposalCardModel(
     makeProposal({
@@ -636,4 +724,57 @@ describe("cross-node project cards", () => {
       offersUpdate: true,
     });
   });
+});
+
+it("names the pull request an agent watches, and the chat it wakes", () => {
+  const watch = buildAgentControlProposalCardModel(
+    makeProposal({
+      status: "completed",
+      plan: {
+        kind: "pullRequestWatch",
+        threadId: ThreadId.make("thread-target-5678"),
+        number: 34,
+        watching: true,
+      },
+      promptSummary: "Watch pull request #34 for thread thread-target-5678",
+    }),
+    (threadId) => (threadId === "thread-target-5678" ? "Fix the login loop" : undefined),
+  );
+  expect(watch.actionLabel).toBe("Watch pull request");
+  expect(watch.targetLabel).toBe("Fix the login loop");
+  expect(watch.isDestructive).toBe(false);
+  expect(watch.detailSections[0]?.lines).toContain("Pull request: #34");
+  const stop = buildAgentControlProposalCardModel(
+    makeProposal({
+      plan: {
+        kind: "pullRequestWatch",
+        threadId: ThreadId.make("thread-target-5678"),
+        watching: false,
+      },
+    }),
+  );
+  expect(stop.actionLabel).toBe("Stop watching pull request");
+  expect(stop.detailSections[0]?.lines).toContain("Pull request: the chat's own");
+});
+
+it("names the branch a chat moved to and the step it continues with", () => {
+  const moved = buildAgentControlProposalCardModel(
+    makeProposal({
+      status: "completed",
+      plan: {
+        kind: "worktreeHandoff",
+        threadId: ThreadId.make("thread-target-5678"),
+        branch: "feature/login",
+        startFromOrigin: false,
+        runSetupScript: true,
+        continuationPrompt: "Run the login tests",
+      },
+      promptSummary: "Move thread thread-target-5678 into a new worktree on branch feature/login",
+    }),
+    (threadId) => (threadId === "thread-target-5678" ? "Fix the login loop" : undefined),
+  );
+  expect(moved.actionLabel).toBe("Move chat into a worktree");
+  expect(moved.targetLabel).toBe("Fix the login loop");
+  expect(moved.isDestructive).toBe(false);
+  expect(moved.detailSections[0]?.lines).toEqual(["Branch: feature/login", "Run the login tests"]);
 });

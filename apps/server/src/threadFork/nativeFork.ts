@@ -30,7 +30,6 @@ import {
 import { claudeTurnCutoff, isClaudeCutoffInChain } from "../provider/claudeTranscriptCutoff.ts";
 import { withIsolatedCodexAppServer } from "../provider/codexIsolatedAppServer.ts";
 import { resolveProviderSourceLayout } from "../provider/ProviderSourceLayout.ts";
-import { canonicalJson, sha256Hex } from "../canonicalJson.ts";
 import {
   type ThreadForkClaudeCutoff,
   type ThreadForkNativeDriver,
@@ -157,10 +156,7 @@ export const resolveNativeForkStore = (
     };
   });
 
-/** Identifies an instance configuration; a fork accepted under another one hands off instead. */
-export function nativeForkConfigFingerprint(config: ProviderInstanceConfig): string {
-  return sha256Hex(canonicalJson(config));
-}
+export { nativeForkConfigFingerprint } from "./nativeForkFingerprint.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Codex

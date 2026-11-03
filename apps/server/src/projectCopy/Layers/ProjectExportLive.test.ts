@@ -350,7 +350,7 @@ describe("ProjectExportLive", () => {
           expect(estimate?.estimatedBytes).toBeGreaterThan(0);
 
           const input = startInput(project.id, { include: { commits: true } });
-          const result = yield* exporter.start({ input, channel: "direct" });
+          const result = yield* exporter.start({ input, channel: "encrypted" });
           expect(result.skipped).toEqual([]);
           // Small chunks exercise offsets and eof.
           const bytes = yield* readArtifact(
@@ -384,7 +384,7 @@ describe("ProjectExportLive", () => {
         const exporter = yield* ProjectExport;
 
         const input = startInput(project.id, { include: { commits: true } });
-        const result = yield* exporter.start({ input, channel: "direct" });
+        const result = yield* exporter.start({ input, channel: "encrypted" });
         expect(result.repository.branch).toBe("feature/local");
         expect(result.pushedState).toEqual({
           headOnRemote: false,
@@ -414,7 +414,7 @@ describe("ProjectExportLive", () => {
         const exporter = yield* ProjectExport;
 
         const input = startInput(project.id, { include: { commits: true } });
-        const result = yield* exporter.start({ input, channel: "direct" });
+        const result = yield* exporter.start({ input, channel: "encrypted" });
         expect(result.repository).toMatchObject({ branch: null, headOid: head, isDetached: true });
         expect(result.pushedState).toEqual({
           headOnRemote: false,
@@ -446,7 +446,7 @@ describe("ProjectExportLive", () => {
 
         const behind = yield* exporter.start({
           input: startInput(project.id, { include: { commits: true } }),
-          channel: "direct",
+          channel: "encrypted",
         });
         expect(behind.repository.headOid).toBe(base);
         expect(behind.pushedState.upstreamBranch).toBe("origin/main");
@@ -458,7 +458,7 @@ describe("ProjectExportLive", () => {
         // the destination ends on the source's commit, not the remote's newer tip.
         const local = commitFile(source, "local.txt", "local\n");
         const input = startInput(project.id, { include: { commits: true } });
-        const result = yield* exporter.start({ input, channel: "direct" });
+        const result = yield* exporter.start({ input, channel: "encrypted" });
         const bundleFile = path.join(root, "commits.bundle");
         fs.writeFileSync(
           bundleFile,
@@ -497,7 +497,7 @@ describe("ProjectExportLive", () => {
         const exporter = yield* ProjectExport;
 
         const input = startInput(project.id, { include: { commits: true } });
-        const result = yield* exporter.start({ input, channel: "direct" });
+        const result = yield* exporter.start({ input, channel: "encrypted" });
         // The identity (and the copy's grouping) still comes from upstream.
         expect(result.repository).toMatchObject({
           primaryRemoteName: "upstream",
@@ -533,7 +533,7 @@ describe("ProjectExportLive", () => {
 
         const preferred = harness.addProject(source, { preferredRemoteName: "upstream" });
         const input = startInput(preferred.id, { include: { commits: true } });
-        const result = yield* exporter.start({ input, channel: "direct" });
+        const result = yield* exporter.start({ input, channel: "encrypted" });
         expect(result.repository).toMatchObject({
           primaryRemoteName: "upstream",
           cloneRemoteName: "upstream",
@@ -638,7 +638,7 @@ describe("ProjectExportLive", () => {
         const exporter = yield* ProjectExport;
         const result = yield* exporter.start({
           input: startInput(project.id, { include: { commits: true } }),
-          channel: "direct",
+          channel: "encrypted",
         });
         expect(result.pushedState.headOnRemote).toBe(true);
         expect(result.artifacts).toEqual([]);
@@ -678,7 +678,7 @@ describe("ProjectExportLive", () => {
         });
 
         const input = startInput(project.id, { include: { workingTreeChanges: true } });
-        const result = yield* exporter.start({ input, channel: "direct" });
+        const result = yield* exporter.start({ input, channel: "encrypted" });
         expect(result.skipped).toEqual([]);
         const patchFile = path.join(root, "changes.patch");
         fs.writeFileSync(
@@ -733,7 +733,7 @@ describe("ProjectExportLive", () => {
               input: startInput(project.id, {
                 include: { workingTreeChanges: true, ignoredPaths: ["node_modules/pkg/.env"] },
               }),
-              channel: "direct",
+              channel: "encrypted",
             })
             .pipe(Effect.flip);
           expect(unknown.code).toBe("invalid");
@@ -741,7 +741,7 @@ describe("ProjectExportLive", () => {
           const input = startInput(project.id, {
             include: { workingTreeChanges: true, ignoredPaths: [".env"] },
           });
-          const result = yield* exporter.start({ input, channel: "direct" });
+          const result = yield* exporter.start({ input, channel: "encrypted" });
           const patch = artifactOf(result, "changes-patch");
           // The client declares it to the destination, which refuses it over a plaintext relay.
           expect(patch.carriesIgnoredFiles).toBe(true);
@@ -758,13 +758,11 @@ describe("ProjectExportLive", () => {
           const denied = yield* exporter
             .readChunk(
               { exportId: input.exportId, artifactId: patch.artifactId, offset: 0, length: 1024 },
-              "relay-plaintext",
+              "unencrypted",
             )
             .pipe(Effect.flip);
           expect(denied.code).toBe("access-denied");
-          const joined = yield* exporter
-            .start({ input, channel: "relay-plaintext" })
-            .pipe(Effect.flip);
+          const joined = yield* exporter.start({ input, channel: "unencrypted" }).pipe(Effect.flip);
           expect(joined.code).toBe("access-denied");
 
           // Started over a plaintext relay, the ignored file stays home.
@@ -773,7 +771,7 @@ describe("ProjectExportLive", () => {
           });
           const plaintext = yield* exporter.start({
             input: plaintextInput,
-            channel: "relay-plaintext",
+            channel: "unencrypted",
           });
           expect(plaintext.skipped).toContainEqual({
             kind: "changes-patch",
@@ -784,7 +782,7 @@ describe("ProjectExportLive", () => {
             plaintextInput.exportId,
             artifactOf(plaintext, "changes-patch"),
             160 * 1024,
-            "relay-plaintext",
+            "unencrypted",
           );
           expect(plainPatch.toString("utf8")).toContain("change.txt");
           expect(plainPatch.toString("utf8")).not.toContain("SECRET");
@@ -811,7 +809,7 @@ describe("ProjectExportLive", () => {
             include: { workingTreeChanges: true },
             patchLimitBytes: 1024,
           }),
-          channel: "direct",
+          channel: "encrypted",
         });
         expect(before.artifacts).toEqual([]);
         expect(before.skipped).toEqual([
@@ -827,7 +825,7 @@ describe("ProjectExportLive", () => {
             include: { workingTreeChanges: true },
             patchLimitBytes: 1024,
           }),
-          channel: "direct",
+          channel: "encrypted",
         });
         expect(after.artifacts).toEqual([]);
         expect(after.skipped).toEqual([
@@ -851,7 +849,7 @@ describe("ProjectExportLive", () => {
         const exporter = yield* ProjectExport;
         const result = yield* exporter.start({
           input: startInput(project.id, { include: { wholeRepository: true } }),
-          channel: "direct",
+          channel: "encrypted",
         });
         expect(result.repository.isShallow).toBe(true);
         expect(result.artifacts).toEqual([]);
@@ -877,7 +875,7 @@ describe("ProjectExportLive", () => {
         const exporter = yield* ProjectExport;
 
         const input = startInput(project.id, { include: { wholeRepository: true } });
-        const result = yield* exporter.start({ input, channel: "direct" });
+        const result = yield* exporter.start({ input, channel: "encrypted" });
         const bundleFile = path.join(root, "repository.bundle");
         fs.writeFileSync(
           bundleFile,
@@ -924,7 +922,7 @@ describe("ProjectExportLive", () => {
           input: startInput(project.id, {
             include: { commits: true, workingTreeChanges: true, wholeRepository: true },
           }),
-          channel: "direct",
+          channel: "encrypted",
         });
         expect(result.repository).toMatchObject({
           branch: "main",
@@ -957,7 +955,7 @@ describe("ProjectExportLive", () => {
         const exporter = yield* ProjectExport;
 
         const input = startInput(project.id, { include: { workingTreeChanges: true } });
-        const result = yield* exporter.start({ input, channel: "direct" });
+        const result = yield* exporter.start({ input, channel: "encrypted" });
         expect(result.repository.usesLfs).toBe(true);
         expect(result.skipped).toEqual([
           { kind: "changes-patch", reason: "nested repository: vendor/nested" },
@@ -1054,7 +1052,7 @@ describe("ProjectExportLive", () => {
         const input = startInput(project.id, {
           include: { commits: true, workingTreeChanges: true, avatar: true },
         });
-        const result = yield* exporter.start({ input, channel: "direct" });
+        const result = yield* exporter.start({ input, channel: "encrypted" });
         expect(result.repository).toMatchObject({ isGitRepository: false, rootPath: folder });
         expect(result.settings).toEqual({
           title: "Plain",
@@ -1089,15 +1087,15 @@ describe("ProjectExportLive", () => {
         const input = startInput(project.id, { include: { commits: true } });
         const [first, second] = yield* Effect.all(
           [
-            exporter.start({ input, channel: "direct" }),
-            exporter.start({ input, channel: "direct" }),
+            exporter.start({ input, channel: "encrypted" }),
+            exporter.start({ input, channel: "encrypted" }),
           ],
           { concurrency: "unbounded" },
         );
         expect(second.artifacts).toEqual(first.artifacts);
         expect(harness.network.lsRemoteCalls).toBe(1);
         const conflict = yield* exporter
-          .start({ input: { ...input, include: include({ avatar: true }) }, channel: "direct" })
+          .start({ input: { ...input, include: include({ avatar: true }) }, channel: "encrypted" })
           .pipe(Effect.flip);
         expect(conflict.code).toBe("conflict");
 
@@ -1142,7 +1140,7 @@ describe("ProjectExportLive", () => {
 
         // Dispose deletes at once; a leftover directory of an earlier process goes on sweep.
         const other = startInput(project.id, { include: { commits: true } });
-        yield* exporter.start({ input: other, channel: "direct" });
+        yield* exporter.start({ input: other, channel: "encrypted" });
         expect(fs.existsSync(path.join(exportsRoot, other.exportId))).toBe(true);
         yield* exporter.dispose({ exportId: other.exportId });
         yield* exporter.dispose({ exportId: other.exportId });
@@ -1169,10 +1167,12 @@ describe("ProjectExportLive", () => {
 
         // The caller disconnects mid-build; its retry joins the same build.
         const input = startInput(project.id, { include: { commits: true } });
-        const caller = yield* exporter.start({ input, channel: "direct" }).pipe(Effect.forkChild);
+        const caller = yield* exporter
+          .start({ input, channel: "encrypted" })
+          .pipe(Effect.forkChild);
         yield* waitFor(() => harness.network.lsRemoteCalls === 1);
         yield* Fiber.interrupt(caller);
-        const retry = yield* exporter.start({ input, channel: "direct" }).pipe(Effect.forkChild);
+        const retry = yield* exporter.start({ input, channel: "encrypted" }).pipe(Effect.forkChild);
         yield* Deferred.succeed(release, undefined);
         const result = yield* Fiber.join(retry);
         expect(artifactOf(result, "commits-bundle").byteLength).toBeGreaterThan(0);
@@ -1183,7 +1183,7 @@ describe("ProjectExportLive", () => {
         harness.network.hold = Deferred.await(held);
         const disposed = startInput(project.id, { include: { commits: true } });
         const waiter = yield* exporter
-          .start({ input: disposed, channel: "direct" })
+          .start({ input: disposed, channel: "encrypted" })
           .pipe(Effect.flip, Effect.forkChild);
         yield* waitFor(() => harness.network.lsRemoteCalls === 2);
         yield* exporter.dispose({ exportId: disposed.exportId });

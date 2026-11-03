@@ -1,3 +1,5 @@
+import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts";
+import { createQuoteCitation, serializeQuoteCitation } from "@ryco/shared/quoteCitations";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -72,6 +74,19 @@ describe("summarizeQueuedMessage", () => {
     );
   });
 
+  it("shows a quote chip as its quoted preview", () => {
+    const token = serializeQuoteCitation(
+      createQuoteCitation({
+        source: { environmentId: EnvironmentId.make("env"), threadId: ThreadId.make("thread") },
+        messageId: MessageId.make("message"),
+        selector: { exact: "The passage.", prefix: "", suffix: "", start: 0, end: 12 },
+      }),
+    );
+    expect(
+      summarizeQueuedMessage(makeMessage("a", { trimmedPrompt: `Explain ${token} please` })),
+    ).toBe("Explain “The passage.” please");
+  });
+
   it("truncates long prompts", () => {
     const long = "x".repeat(300);
     const summary = summarizeQueuedMessage(makeMessage("a", { trimmedPrompt: long }));
@@ -95,6 +110,36 @@ describe("summarizeQueuedMessage", () => {
         }),
       ),
     ).toBe("1 terminal context");
+  });
+
+  it("falls back to file reference count", () => {
+    expect(
+      summarizeQueuedMessage(
+        makeMessage("a", {
+          fileReferences: [{}, {}] as NonNullable<QueuedMessage["composer"]["fileReferences"]>,
+        }),
+      ),
+    ).toBe("2 file references");
+  });
+
+  it("counts picked page elements apart from file references", () => {
+    const element = { kind: "browser-element" };
+    expect(
+      summarizeQueuedMessage(
+        makeMessage("a", {
+          fileReferences: [element] as NonNullable<QueuedMessage["composer"]["fileReferences"]>,
+        }),
+      ),
+    ).toBe("1 page element");
+    expect(
+      summarizeQueuedMessage(
+        makeMessage("a", {
+          fileReferences: [element, {}, element] as NonNullable<
+            QueuedMessage["composer"]["fileReferences"]
+          >,
+        }),
+      ),
+    ).toBe("1 file reference");
   });
 
   it("falls back to a generic label", () => {

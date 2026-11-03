@@ -15,11 +15,11 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
  * Every settings panel composes these instead of drawing its own chrome, so a
  * page reads as one system: a quiet heading, one solid card per group, rows
  * divided by hairlines, and nothing nested more than that. Containers cap the
- * user's corner radius — a pill-shaped input is a preference, but a pill-shaped
- * card clips its own content.
+ * round corner ramp — a pill-shaped input reads as a control, but a
+ * pill-shaped card clips its own content.
  */
 
-/** Card corner radius, capped so a large global radius never clips content. */
+/** Card corner radius, capped so the round global radius never clips content. */
 export const SETTINGS_CARD_RADIUS_CLASS = "rounded-[min(var(--radius-xl),0.875rem)]";
 
 /** Inline padding every row and block inside a card shares. */
@@ -31,6 +31,14 @@ export const SETTINGS_CONTROL_WIDTH = {
   md: "w-full sm:w-48",
   lg: "w-full sm:w-64",
 } as const;
+
+/** Briefly highlights a row that styles `data-[flash=true]:`, such as a keybinding row. */
+export function flashSettingsTarget(element: HTMLElement) {
+  element.dataset.flash = "true";
+  window.setTimeout(() => {
+    delete element.dataset.flash;
+  }, 1100);
+}
 
 /** Re-render while visible; refresh once after returning from the background. */
 export function useRelativeTimeTick(intervalMs = 1_000) {
@@ -200,7 +208,10 @@ export function SettingsRow({
             </p>
           ) : null}
           {status ? (
-            <div className="mt-1.5 text-xs leading-relaxed text-muted-foreground">{status}</div>
+            // A status that renders nothing (a fan-out control with one node) leaves no gap.
+            <div className="mt-1.5 text-xs leading-relaxed text-muted-foreground empty:hidden">
+              {status}
+            </div>
           ) : null}
         </div>
         {control ? (

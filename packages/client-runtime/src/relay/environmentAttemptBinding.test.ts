@@ -885,3 +885,238 @@ describe("reconnect wakes on presence", () => {
     expect(woken).not.toHaveBeenCalled();
   });
 });
+
+/** A plain WebSocket stand-in: the factory only listens to its open and close. */
+class FakeDirectSocket {
+  readonly listeners = new Map<string, Array<(event: { readonly code?: number }) => void>>();
+  readonly url: string;
+  constructor(url: string) {
+    this.url = url;
+  }
+  addEventListener(type: string, listener: (event: { readonly code?: number }) => void) {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+  }
+  emit(type: "open" | "close", code?: number) {
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener(code === undefined ? {} : { code });
+    }
+  }
+}
+
+describe("direct routes on an environment's attempts", () => {
+  const DIRECT_URL = "wss://studio.tail1.ts.net/ws?wsToken=one-time";
+
+  function directPorts(input: {
+    readonly route?: () => Promise<{
+      routeKey: string;
+      url: string;
+      role: "owner" | "viewer";
+    } | null>;
+    readonly relay?: Array<{ readonly callbacks: Callbacks }>;
+  }) {
+    const direct: FakeDirectSocket[] = [];
+    const checks: AbortSignal[] = [];
+    const ports: HostedEnvironmentAttemptPorts = {
+      relayUrl: () => RELAY_URL,
+      issueRelayAttempt: async (attempt) => ({
+        ticket: encodeBase64Url(new Uint8Array(32).fill(5)),
+        expiresAt: Date.now() + 60_000,
+        preparedSocketContext: attempt.preparedSocketContext,
+      }),
+      createRelaySocket: (attempt) => {
+        input.relay?.push({ callbacks: attempt.callbacks as Callbacks });
+        return {};
+      },
+      resolveDirectRoute: async (signal) => {
+        checks.push(signal);
+        if (input.route !== undefined) return input.route();
+        return { routeKey: "https://studio.tail1.ts.net", url: DIRECT_URL, role: "owner" };
+      },
+      createDirectSocket: (url) => {
+        const socket = new FakeDirectSocket(url);
+        direct.push(socket);
+        return socket;
+      },
+    };
+    return { ports, direct, checks };
+  }
+
+  it("carries an attempt over a proven direct route with the same fences and readiness", async () => {
+    const { generation } = sessions.ensureRecord(hubNode(ENV_Y));
+    sessions.markConnectRequested(ENV_Y, generation);
+    const { ports, direct } = directPorts({});
+    const { factory } = bind(ENV_Y, { ports });
+
+    const url = await factory.nextUrl();
+    expect(url).toBe(DIRECT_URL);
+    factory.createSocket(url);
+    expect(record(ENV_Y).transportStatus).toBe("connecting");
+    expect(factory.activeRouteKey()).toBe("https://studio.tail1.ts.net");
+
+    direct[0]!.emit("open");
+    // Online and synchronizing, with the linked role: not ready until its own snapshot.
+    expect(record(ENV_Y)).toMatchObject({
+      transportStatus: "online",
+      sessionStatus: "synchronizing",
+      effectiveRole: "owner",
+    });
+    expect(factory.lifecycleHandlers().authorizeRequest?.(dispatchCommand)).toBe(
+      "awaiting-session",
+    );
+    sessions.markSessionReady(ENV_Y, generation);
+    expect(factory.lifecycleHandlers().authorizeRequest?.(dispatchCommand)).toBe("allowed");
+  });
+
+  it("publishes nothing from a direct socket whose generation was replaced", async () => {
+    const { generation } = sessions.ensureRecord(hubNode(ENV_Y));
+    sessions.markConnectRequested(ENV_Y, generation);
+    const { ports, direct } = directPorts({
+      route: async () => ({ routeKey: "k", url: DIRECT_URL, role: "viewer" }),
+    });
+    const { factory } = bind(ENV_Y, { ports });
+    factory.createSocket(await factory.nextUrl());
+
+    sessions.renew(ENV_Y);
+    const renewed = record(ENV_Y);
+    direct[0]!.emit("open");
+    expect(record(ENV_Y)).toEqual(renewed);
+    direct[0]!.emit("close", 1006);
+    expect(record(ENV_Y)).toEqual(renewed);
+  });
+
+  it("falls back to the relay when no route answers, and on every attempt asks again", async () => {
+    const { generation } = sessions.ensureRecord(hubNode(ENV_Y));
+    sessions.markConnectRequested(ENV_Y, generation);
+    const relay: Array<{ readonly callbacks: Callbacks }> = [];
+    let answer: { routeKey: string; url: string; role: "owner" } | null = null;
+    const { ports, direct, checks } = directPorts({ route: async () => answer, relay });
+    const { factory } = bind(ENV_Y, { ports });
+
+    factory.createSocket(await factory.nextUrl());
+    expect(relay).toHaveLength(1);
+    expect(direct).toHaveLength(0);
+    expect(factory.activeRouteKey()).toBe("relay");
+
+    answer = { routeKey: "https://studio.tail1.ts.net", url: DIRECT_URL, role: "owner" };
+    factory.createSocket(await factory.nextUrl());
+    expect(direct).toHaveLength(1);
+    expect(checks).toHaveLength(2);
+  });
+
+  it("lets no direct route go around a relay refusal until a relay socket opens again", async () => {
+    const { generation } = sessions.ensureRecord(hubNode(ENV_Y));
+    sessions.markConnectRequested(ENV_Y, generation);
+    const relay: Array<{ readonly callbacks: Callbacks }> = [];
+    let answer: { routeKey: string; url: string; role: "owner" } | null = null;
+    const { ports, direct, checks } = directPorts({ route: async () => answer, relay });
+    const { factory } = bind(ENV_Y, { ports });
+
+    factory.createSocket(await factory.nextUrl());
+    // The Hub says the machine is not verified for this device; retry policy aside,
+    // the next attempt must not try the linked bearer instead.
+    relay[0]!.callbacks.onFailure({ kind: "authentication", retryable: true });
+    answer = { routeKey: "https://studio.tail1.ts.net", url: DIRECT_URL, role: "owner" };
+    factory.createSocket(await factory.nextUrl());
+    expect(direct).toHaveLength(0);
+    expect(relay).toHaveLength(2);
+    expect(checks).toHaveLength(1);
+
+    relay[1]!.callbacks.onTransportStatus("online");
+    factory.createSocket(await factory.nextUrl());
+    expect(direct).toHaveLength(1);
+  });
+
+  it("keeps a relay refusal across generations when the hold lives outside the factory", async () => {
+    const first = sessions.ensureRecord(hubNode(ENV_Y)).generation;
+    sessions.markConnectRequested(ENV_Y, first);
+    const relay: Array<{ readonly callbacks: Callbacks }> = [];
+    let held = false;
+    const directRouteHold = {
+      held: () => held,
+      set: (next: boolean) => {
+        held = next;
+      },
+    };
+    const answer = {
+      routeKey: "https://studio.tail1.ts.net",
+      url: DIRECT_URL,
+      role: "owner" as const,
+    };
+    const firstPorts = directPorts({ route: async () => null, relay });
+    const { factory: firstFactory } = bind(ENV_Y, {
+      ports: { ...firstPorts.ports, directRouteHold },
+    });
+    firstFactory.createSocket(await firstFactory.nextUrl());
+    relay[0]!.callbacks.onFailure({ kind: "authorization-removed", retryable: false });
+
+    // Released and acquired again: a new generation, a new factory.
+    sessions.renew(ENV_Y);
+    const second = record(ENV_Y).generation;
+    sessions.markConnectRequested(ENV_Y, second);
+    const secondPorts = directPorts({ route: async () => answer, relay });
+    const { factory: secondFactory } = bind(ENV_Y, {
+      ports: { ...secondPorts.ports, directRouteHold },
+    });
+    secondFactory.createSocket(await secondFactory.nextUrl());
+    expect(secondPorts.checks).toHaveLength(0);
+    expect(relay).toHaveLength(2);
+    expect(secondFactory.mayTakeDirectRoutes()).toBe(false);
+
+    relay[1]!.callbacks.onTransportStatus("online");
+    expect(held).toBe(false);
+    expect(secondFactory.mayTakeDirectRoutes()).toBe(true);
+  });
+
+  it("reports a direct socket that dropped as a retryable failure, a clean close as closed", async () => {
+    const { generation } = sessions.ensureRecord(hubNode(ENV_Y));
+    sessions.markConnectRequested(ENV_Y, generation);
+    const { ports, direct } = directPorts({});
+    const onFailure = vi.fn();
+    const { factory } = bind(ENV_Y, { ports: { ...ports, onFailure } });
+
+    factory.createSocket(await factory.nextUrl());
+    direct[0]!.emit("close", 1006);
+    expect(onFailure).toHaveBeenCalledWith({ kind: "network", retryable: true });
+    expect(factory.lifecycleHandlers().isTerminalUrlError?.(new Error("x"))).toBe(false);
+
+    factory.createSocket(await factory.nextUrl());
+    direct[1]!.emit("open");
+    direct[1]!.emit("close", 1000);
+    expect(record(ENV_Y)).toMatchObject({ sessionStatus: "closed", effectiveRole: null });
+  });
+
+  it("abandons a route check its attempt no longer wants, and opens nothing", async () => {
+    const { generation } = sessions.ensureRecord(hubNode(ENV_Y));
+    sessions.markConnectRequested(ENV_Y, generation);
+    let release: (() => void) | undefined;
+    const { ports, direct, checks } = directPorts({
+      route: () =>
+        new Promise((resolve) => {
+          release = () => resolve({ routeKey: "k", url: DIRECT_URL, role: "owner" });
+        }),
+    });
+    const { factory } = bind(ENV_Y, { ports });
+    const pending = factory.nextUrl();
+    await flushMicrotasks();
+    factory.lifecycleHandlers().onDispose?.();
+    expect(checks[0]?.aborted).toBe(true);
+    release?.();
+    await expect(pending).rejects.toThrow("selection changed");
+    expect(() => factory.createSocket(DIRECT_URL)).toThrow();
+    expect(direct).toHaveLength(0);
+  });
+
+  it("never asks a binding without routes, as the hosted browser's", async () => {
+    const { generation } = sessions.ensureRecord(hubNode(ENV_Y));
+    sessions.markConnectRequested(ENV_Y, generation);
+    const relay: Array<{ readonly callbacks: Callbacks }> = [];
+    const { ports } = directPorts({ relay });
+    const { resolveDirectRoute: _routes, createDirectSocket: _socket, ...relayOnly } = ports;
+    const { factory } = bind(ENV_Y, { ports: relayOnly });
+    expect(await factory.nextUrl()).toBe(RELAY_URL);
+    factory.createSocket(RELAY_URL);
+    expect(relay).toHaveLength(1);
+  });
+});
+
+const flushMicrotasks = () => new Promise((resolve) => setTimeout(resolve, 0));

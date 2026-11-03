@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { memo, useEffect, useState } from "react";
 
+import { visibleSecondTicker } from "~/lib/perf/ticker";
 import { cn } from "~/lib/utils";
 
 const STATUS_LABEL: Record<ThreadGoalStatus, string> = {
@@ -89,9 +90,9 @@ export const ComposerGoalHeader = memo(function ComposerGoalHeader(props: {
   useEffect(() => {
     setRunningSince(Date.now());
     if (props.goal.status !== "active" || !props.isRunning) return;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
-    return () => window.clearInterval(timer);
+    // Emits immediately, pauses while the document is hidden and re-reads the wall
+    // clock on resume, so a hidden window stops re-rendering every second.
+    return visibleSecondTicker.subscribe(setNow);
   }, [props.goal.status, props.goal.updatedAt, props.isRunning]);
 
   const canResume =

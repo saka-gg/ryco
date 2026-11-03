@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { assert, it } from "@effect/vitest";
+import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Clock, Effect, Fiber, Layer, Logger, Option, Schema } from "effect";
 import { TestClock } from "effect/testing";
@@ -64,6 +64,14 @@ import {
 } from "./CompletionReturnDelivery.ts";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import {
+  ServerWakeFenceLive,
+  makeServerWakeFence,
+} from "../../orchestration/Layers/ServerWakeFence.ts";
+import {
+  ServerWakeFence,
+  type ServerWakeFenceShape,
+} from "../../orchestration/Services/ServerWakeFence.ts";
 
 const layer = Layer.mergeAll(
   CompletionReturnRepositoryLive,
@@ -128,7 +136,7 @@ const withSession = (
   session: Partial<NonNullable<OrchestrationThreadShell["session"]>>,
 ): OrchestrationThreadShell => ({ ...thread, session: { ...thread.session!, ...session } });
 
-const proposalFor = (proposalId: string, parentThreadId = "parent") =>
+const proposalFor = (proposalId: string, parentThreadId = "parent", maxConcurrent?: number) =>
   Schema.decodeUnknownSync(AgentControlProposal)({
     proposalId,
     requestId: `request-${proposalId}`,
@@ -153,6 +161,7 @@ const proposalFor = (proposalId: string, parentThreadId = "parent") =>
           returnToOrigin: true,
         },
       ],
+      ...(maxConcurrent === undefined ? {} : { maxConcurrent }),
     },
     planDigest: "a".repeat(64),
     riskTags: [],
@@ -172,6 +181,10 @@ const setup = (
   options: {
     /** A server base directory, so returned artifacts can be copied; none returns none. */
     readonly baseDir?: string;
+    /** A fence shared with other server wakes; by default each worker builds its own. */
+    readonly fence?: ServerWakeFenceShape;
+    /** The request's cap (`maxConcurrent`): its tasks past the cap wait for a slot. */
+    readonly maxConcurrent?: number;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -182,13 +195,16 @@ const setup = (
     const row = completionFixture(fixture);
     yield* repo.insert(row);
     yield* proposals.insert({
-      proposal: proposalFor(row.proposalId),
+      proposal: proposalFor(row.proposalId, "parent", options.maxConcurrent),
       principalScope: AgentControlPrincipalScope.make("fixture"),
     });
     yield* sql`INSERT INTO projection_turns (thread_id, turn_id, pending_message_id, state, requested_at, checkpoint_files_json)
       VALUES ('parent', 'parent-turn', 'parent-initial', 'completed', ${now}, '[]')`;
     yield* sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
       VALUES ('parent-initial', 'parent', NULL, 'user', 'Fixture parent', 0, ${now}, ${now})`;
+    // The task's first message, sent when it was created (a capped request's task sends it later).
+    yield* sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+      VALUES (${row.initialMessageId}, ${row.childThreadId}, NULL, 'user', 'Fixture task', 0, ${row.createdAt}, ${row.createdAt})`;
 
     const shells = new Map<string, OrchestrationThreadShell | null>();
     // Live provider sessions (ProviderService.getSession); absent = none.
@@ -237,6 +253,10 @@ const setup = (
     shells.set("parent", shell("parent", "parent-turn", "parent-runtime"));
 
     const makeWorker = makeCompletionReturnDelivery.pipe(
+      // A fresh fence per worker, built on the fakes below: a restarted worker forgets it.
+      options.fence === undefined
+        ? Effect.provide(ServerWakeFenceLive)
+        : Effect.provideService(ServerWakeFence, options.fence),
       Effect.provideService(ProviderService, {
         getSession: (threadId: ThreadId) =>
           Effect.sync(() => {
@@ -438,6 +458,10 @@ it.effect(
       const command = h.sent[0]!;
       assert.include(command.message.text, "Ryco delegation update (automatic message");
       assert.include(command.message.text, '"truncated":true');
+      assert.include(
+        command.message.text,
+        '"readMore":"ryco_task_status with taskId child returns the whole result in pages."',
+      );
       assert.include(command.message.text, "Untrusted child output");
       assert.include(command.message.text, "/ryco/thread/parent");
       assert.isBelow(command.message.text.length, 12000);
@@ -688,6 +712,53 @@ it.effect("T5 throttles cold wakes to four in flight; warm parents are not throt
   }).pipe(Effect.provide(layer)),
 );
 
+it.effect("T5 shares the cold-wake budget with the other server wakes of the process", () =>
+  Effect.gen(function* () {
+    // Pull request updates (another server wake) hold every cold slot of the one fence.
+    const fence = yield* makeServerWakeFence.pipe(
+      Effect.provideService(ProviderService, {
+        getSession: () => Effect.succeed(Option.none()),
+      } as never),
+      Effect.provideService(ProjectionSnapshotQuery, {} as never),
+    );
+    const watched = [0, 1, 2, 3].map((index) => ({
+      threadId: ThreadId.make(`watched-${index}`),
+      messageId: MessageId.make(`watch-wake-${index}`),
+    }));
+    for (const wake of watched)
+      assert.isTrue(yield* fence.reserveColdSlot(wake.threadId, wake.messageId, Date.parse(now)));
+    const h = yield* setup({}, { fence });
+    h.shells.set("p1", shell("p1", "p1-turn", null));
+    yield* h.repo.insert(
+      completionFixture({
+        childThreadId: ThreadId.make("p1-child"),
+        initialMessageId: MessageId.make("p1-child-initial"),
+        parentThreadId: ThreadId.make("p1"),
+        status: "ready",
+        capture: { kind: "result", outcome: "completed", capturedAt: now, section: "Section" },
+      }),
+    );
+    yield* h.tick(0);
+    assert.equal(h.sent.length, 0);
+    assert.include((yield* h.read("p1-child")).detail, "another chat's session");
+    // One pull request update's wake was not accepted: its slot comes back to the process.
+    yield* fence.releaseColdSlot(watched[0]!.threadId, watched[0]!.messageId);
+    yield* h.tick(3);
+    assert.deepStrictEqual(
+      h.sent.map((command) => command.threadId as string),
+      ["p1"],
+    );
+    // The delegated result's accepted wake now holds that slot.
+    assert.isFalse(
+      yield* fence.reserveColdSlot(
+        ThreadId.make("next"),
+        MessageId.make("next-wake"),
+        Date.parse(now),
+      ),
+    );
+  }).pipe(Effect.provide(layer)),
+);
+
 // ── user stop ────────────────────────────────────────────────────────────
 
 for (const stop of ["a", "b", "c", "d", "e", "f"] as const) {
@@ -810,6 +881,182 @@ for (const outcome of [
     }).pipe(Effect.provide(layer)),
   );
 }
+
+it.effect("counts a capped task's 24 hours from its first send, within 7 days of creation", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    // Its first message still waits in its queue for a slot.
+    yield* h.sql`DELETE FROM projection_thread_messages WHERE message_id = 'child-initial'`;
+    h.setChild({ ...shell("child", "child-turn", "child-runtime"), latestUserMessageAt: null });
+    yield* h.tick(DAY + 1);
+    assert.equal((yield* h.read()).status, "waiting");
+    // Its slot frees on day three, and it runs from then.
+    yield* h.sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+      VALUES ('child-initial', 'child', NULL, 'user', 'Fixture task', 0, ${at(2 * DAY)}, ${at(2 * DAY)})`;
+    yield* h.tick(3 * DAY - 10);
+    const started = yield* h.read();
+    assert.equal(started.status, "waiting");
+    assert.equal(started.startedAt, at(2 * DAY));
+    yield* h.tick(3 * DAY + 10);
+    assert.equal((yield* h.read()).status, "delivered");
+    assert.include(h.sent[0]!.message.text, "Delegated task notice (expired).");
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("stops waiting for a task that never started 7 days after its creation", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    yield* h.sql`DELETE FROM projection_thread_messages WHERE message_id = 'child-initial'`;
+    h.setChild({ ...shell("child", "child-turn", "child-runtime"), latestUserMessageAt: null });
+    yield* h.tick(7 * DAY - 10);
+    assert.equal((yield* h.read()).status, "waiting");
+    yield* h.tick(7 * DAY + 10);
+    assert.equal((yield* h.read()).status, "delivered");
+    assert.include(h.sent[0]!.message.text, "did not start within 7 days");
+  }).pipe(Effect.provide(layer)),
+);
+
+/** A capped request's task whose first message still waits in its queue for a slot. */
+const setupWaitingCappedTask = Effect.gen(function* () {
+  const h = yield* setup({}, { maxConcurrent: 1 });
+  yield* h.sql`DELETE FROM projection_thread_messages WHERE message_id = 'child-initial'`;
+  h.setChild({ ...shell("child", "child-turn", "child-runtime"), latestUserMessageAt: null });
+  // The delegating turn started; the person may stop it before the request is approved.
+  yield* h.appendEvent({
+    stream: "parent",
+    type: "thread.turn-start-requested",
+    commandId: "web:send",
+    payload: { messageId: "parent-initial" },
+  });
+  const stop = (occurredAt?: string) =>
+    h.appendEvent({
+      stream: "parent",
+      type: "thread.turn-interrupt-requested",
+      commandId: "web:stop",
+      ...(occurredAt === undefined ? {} : { occurredAt }),
+      payload: { turnId: "parent-turn" },
+    });
+  // Approved: the request creates its tasks.
+  const approve = h.appendEvent({
+    stream: "child",
+    type: "thread.created",
+    commandId: "agent-control:create",
+    actor: "server",
+  });
+  return { ...h, stop, approve };
+});
+
+it.effect("never starts a task still waiting for its slot once the person stopped the chat", () =>
+  Effect.gen(function* () {
+    const h = yield* setupWaitingCappedTask;
+    yield* h.approve;
+    yield* h.tick(3);
+    assert.equal((yield* h.read()).status, "waiting");
+    // The person stops the delegating turn while the task waits for a slot.
+    yield* h.stop();
+    yield* h.tick(6);
+    const record = yield* h.read();
+    assert.equal(record.status, "cancelled");
+    assert.equal(
+      record.detail,
+      "You stopped the delegating chat before this task's turn came: it stays paused and starts only if you resume it, and its result does not return automatically.",
+    );
+    assert.equal(h.sent.length, 0);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("gives a task that starts late its whole 24 hours", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    yield* h.sql`DELETE FROM projection_thread_messages WHERE message_id = 'child-initial'`;
+    // Its slot frees halfway through day six: past the 7 days, it still has its 24 hours.
+    const startedAt = at(6.5 * DAY);
+    yield* h.sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+      VALUES ('child-initial', 'child', NULL, 'user', 'Fixture task', 0, ${startedAt}, ${startedAt})`;
+    yield* h.tick(7 * DAY + 10);
+    assert.equal((yield* h.read()).status, "waiting");
+    yield* h.tick(7.5 * DAY - 10);
+    assert.equal((yield* h.read()).status, "waiting");
+    yield* h.tick(7.5 * DAY + 10);
+    assert.equal((yield* h.read()).status, "delivered");
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("does not count a Stop pressed before the request was approved", () =>
+  Effect.gen(function* () {
+    const h = yield* setupWaitingCappedTask;
+    // Stopped while the card waited, then approved: the batch still runs.
+    yield* h.stop();
+    yield* h.approve;
+    yield* h.tick(3);
+    assert.equal((yield* h.read()).status, "waiting");
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("orders a Stop and the approval by the server's events, not the client's clock", () =>
+  Effect.gen(function* () {
+    const h = yield* setupWaitingCappedTask;
+    yield* h.approve;
+    yield* h.tick(3);
+    // Stopped after the approval from a client whose clock runs an hour behind the node's.
+    yield* h.stop(at(-3600));
+    yield* h.tick(6);
+    assert.equal((yield* h.read()).status, "cancelled");
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("returns the result of a capped task that started after a Stop before approval", () =>
+  Effect.gen(function* () {
+    const h = yield* setupWaitingCappedTask;
+    yield* h.stop();
+    yield* h.approve;
+    yield* h.tick(3);
+    // Its slot frees, it runs and finishes: its result returns like its start went ahead.
+    yield* h.sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+      VALUES ('child-initial', 'child', NULL, 'user', 'Fixture task', 0, ${at(4)}, ${at(4)})`;
+    h.setChild(shell("child", "child-turn", "child-runtime"));
+    yield* h.ack("completed");
+    yield* h.tick(6);
+    yield* h.tick(9);
+    const record = yield* h.read();
+    assert.equal(record.status, "delivered");
+    assert.equal(h.sent.length, 1);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("forgets a waiting task's Stop check once its return no longer waits", () =>
+  Effect.gen(function* () {
+    const h = yield* setupWaitingCappedTask;
+    yield* h.approve;
+    const worker = yield* h.makeWorker;
+    yield* worker.scan(at(3));
+    assert.equal(worker.stopChecksRemembered(), 1);
+    // Seven days without a start: the return ends with its notice.
+    yield* worker.scan(at(7 * DAY + 10));
+    assert.notEqual((yield* h.read()).status, "waiting");
+    assert.equal(worker.stopChecksRemembered(), 0);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("forgets the Stop check of a waiting task ryco_task_cancel ended", () =>
+  Effect.gen(function* () {
+    const h = yield* setupWaitingCappedTask;
+    yield* h.approve;
+    const worker = yield* h.makeWorker;
+    yield* worker.scan(at(3));
+    assert.equal(worker.stopChecksRemembered(), 1);
+    yield* h.repo.cancelOwned({
+      childThreadId: ThreadId.make("child"),
+      parentThreadId: ThreadId.make("parent"),
+      detail: "Cancelled.",
+      now: at(4),
+    });
+    yield* worker.scan(at(5));
+    assert.equal(worker.stopChecksRemembered(), 1);
+    yield* worker.scan(at(11 * 60));
+    assert.equal(worker.stopChecksRemembered(), 0);
+  }).pipe(Effect.provide(layer)),
+);
 
 it.effect("keeps a failed initial run a result with the error flag", () =>
   Effect.gen(function* () {
@@ -1985,6 +2232,7 @@ it.effect(
         VALUES ('child-narration', 'child', 'child-turn', 'assistant', 'Revenue grew 40%.', 0, ${at(1)}, ${at(1)})`;
       assert.deepEqual(yield* h.repo.output(child, turn), {
         text: "Revenue grew 40%.",
+        messageId: MessageId.make("child-narration"),
         streaming: 0,
       });
       yield* h.ack();
@@ -2001,6 +2249,7 @@ it.effect(
         VALUES ('child-file', 'child', 'child-turn', 'assistant', ' ', ${file}, 0, ${at(3)}, ${at(3)})`;
       assert.deepEqual(yield* h.repo.output(child, turn), {
         text: "[Published HTML page: Revenue chart]\n[Attached file: data.csv]",
+        messageId: null,
         streaming: 0,
       });
     }).pipe(Effect.provide(layer)),
@@ -2241,4 +2490,163 @@ it.effect("logs a failed scan and retries after the short pause", () => {
     assert.deepStrictEqual(loop.scanTimes, [0, 2_000, 4_000, 64_000]);
     yield* loop.stop;
   }).pipe(Effect.provide(logs));
+});
+
+describe("stall notices", () => {
+  /** The child's initial turn is bound and running on its live session. */
+  const running = (overrides: Partial<OrchestrationThreadShell> = {}) =>
+    withSession(shell("child", "child-turn", "child-runtime", overrides), {
+      status: "running",
+      activeTurnId: TurnId.make("child-turn"),
+    });
+  const stallWakes = (sent: ReadonlyArray<DelegationWakeCommand>) =>
+    sent.filter((command) => command.commandId.includes(":stall:"));
+
+  it.effect("tells the delegating chat once that a task never started, and keeps waiting", () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      // Its first message went out, but no turn took it.
+      yield* h.sql`DELETE FROM projection_turns WHERE thread_id = 'child'`;
+      yield* h.tick(179);
+      assert.lengthOf(h.sent, 0);
+      yield* h.tick(181);
+      assert.lengthOf(h.sent, 1);
+      const wake = h.sent[0]!;
+      assert.equal(wake.commandId, "delegation-return:child:stall:1");
+      assert.equal(wake.message.messageId, "delegation-result:child:stall:1");
+      assert.include(wake.message.text, "need attention. It is still running");
+      assert.include(wake.message.text, "Delegated task notice (never-started).");
+      assert.include(wake.message.text, "has not started a turn 3 minutes after");
+      const row = yield* h.read();
+      assert.equal(row.status, "waiting");
+      assert.deepEqual(row.stallNotice, {
+        count: 1,
+        current: { kind: "never-started", since: at(0), state: "sent" },
+      });
+      // One notice per episode.
+      yield* h.tick(600);
+      assert.lengthOf(h.sent, 1);
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("waits for an idle chat, and notices each new wait on the person once", () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      yield* h.sql`UPDATE projection_turns SET state = 'running' WHERE thread_id = 'child'`;
+      h.setChild(running({ hasPendingApprovals: true }));
+      yield* h.tick(10);
+      yield* h.tick(309);
+      assert.lengthOf(h.sent, 0);
+      // Past five minutes, but the delegating chat is busy: the notice waits for it.
+      h.setParent(
+        withSession(shell("parent", "parent-turn", "parent-runtime"), {
+          status: "running",
+          activeTurnId: TurnId.make("parent-turn"),
+        }),
+      );
+      yield* h.tick(311);
+      assert.lengthOf(h.sent, 0);
+      assert.equal((yield* h.read()).stallNotice?.current?.state, "pending");
+      h.setParent(shell("parent", "parent-turn", "parent-runtime"));
+      yield* h.tick(320);
+      assert.lengthOf(stallWakes(h.sent), 1);
+      assert.include(h.sent[0]!.message.text, "Delegated task notice (waiting-on-you).");
+      assert.include(h.sent[0]!.message.text, "Ryco never answers for them");
+
+      // The person answered: the episode ends. A later wait is a new episode.
+      h.setChild(running());
+      yield* h.tick(330);
+      assert.deepEqual((yield* h.read()).stallNotice, { count: 1, current: null });
+      h.setChild(running({ hasPendingUserInput: true }));
+      yield* h.tick(400);
+      yield* h.tick(701);
+      assert.deepEqual(
+        stallWakes(h.sent).map((command) => command.commandId),
+        ["delegation-return:child:stall:1", "delegation-return:child:stall:2"],
+      );
+      assert.equal((yield* h.read()).status, "waiting");
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("notices a task whose provider went quiet, until it moves again", () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      yield* h.sql`UPDATE projection_turns SET state = 'running' WHERE thread_id = 'child'`;
+      h.setChild(running());
+      yield* h.tick(10);
+      assert.lengthOf(h.sent, 0);
+      yield* h.sql`INSERT INTO projection_thread_activities (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
+        VALUES ('quiet-1', 'child', 'child-turn', 'info', 'provider.turn.unresponsive', 'Provider is quiet',
+          ${JSON.stringify({ lastActivityAt: at(0) })}, 5, ${at(900)})`;
+      yield* h.tick(901);
+      assert.lengthOf(h.sent, 1);
+      assert.include(h.sent[0]!.message.text, "Delegated task notice (silent).");
+      assert.include(h.sent[0]!.message.text, "silent for 15 minutes");
+      yield* h.sql`INSERT INTO projection_thread_activities (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
+        VALUES ('tool-1', 'child', 'child-turn', 'info', 'tool.started', 'Tool', '{}', 6, ${at(950)})`;
+      yield* h.tick(951);
+      assert.deepEqual((yield* h.read()).stallNotice, { count: 1, current: null });
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("reaches a delegating chat whose session ended, through the cold-start budget", () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      yield* h.sql`DELETE FROM projection_turns WHERE thread_id = 'child'`;
+      // The person went away: the delegating chat's session was reaped.
+      h.live.delete("parent");
+      yield* h.tick(181);
+      assert.deepEqual(
+        stallWakes(h.sent).map((command) => command.commandId),
+        ["delegation-return:child:stall:1"],
+      );
+      assert.equal((yield* h.read()).stallNotice?.current?.state, "sent");
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("never wakes a chat whose delegating turn the person reverted away", () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      yield* h.appendEvent({
+        stream: "parent",
+        type: "thread.turn-start-requested",
+        commandId: "web:send",
+        payload: { messageId: "parent-initial" },
+      });
+      yield* h.appendEvent({
+        stream: "parent",
+        type: "thread.reverted",
+        commandId: "server:checkpoint-revert",
+        actor: "server",
+        payload: { turnCount: 0, droppedTurnIds: ["parent-turn"] },
+      });
+      yield* h.sql`DELETE FROM projection_turns WHERE thread_id = 'child'`;
+      yield* h.tick(181);
+      assert.lengthOf(stallWakes(h.sent), 0);
+      assert.equal((yield* h.read()).stallNotice?.current?.state, "dropped");
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("keeps the chat's other returns when the person stops a notice's turn", () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      yield* h.appendEvent({
+        stream: "parent",
+        type: "thread.turn-start-requested",
+        commandId: "delegation-return:child:stall:1",
+        occurredAt: at(200),
+        payload: { messageId: "delegation-result:child:stall:1" },
+      });
+      yield* h.appendEvent({
+        stream: "parent",
+        type: "thread.turn-interrupt-requested",
+        commandId: "web:stop",
+        occurredAt: at(201),
+      });
+      yield* h.ack();
+      yield* h.tick(210);
+      // The task's result still returns: the Stop ended the notice's turn only.
+      assert.equal((yield* h.read()).status, "delivered");
+    }).pipe(Effect.provide(layer)),
+  );
 });

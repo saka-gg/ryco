@@ -32,13 +32,13 @@ import { ChildProcessSpawner } from "effect/process";
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
 
-import {
-  appendAttachmentPathLines,
-  formatAttachmentPathLines,
-  type AttachmentPathLineEntry,
-} from "@ryco/shared/attachmentPrompt";
+import { appendAttachmentPathLines } from "@ryco/shared/attachmentPrompt";
 
-import { isPersistableChatAttachment, resolveAttachmentPath } from "../../attachmentStore.ts";
+import {
+  attachmentPathLines,
+  isPersistableChatAttachment,
+  resolveAttachmentPath,
+} from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { createProcessDeviceToolBinding } from "../../providerTools/deviceToolGateway.ts";
 import {
@@ -61,6 +61,12 @@ import {
 } from "../acp/AcpCoreRuntimeEvents.ts";
 import { parsePermissionRequest } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggers } from "../acp/AcpNativeLogging.ts";
+import { providerThreadSnapshotFromTurnIds } from "../providerThreadSnapshot.ts";
+import {
+  acpAvailableCommandsToSlashCommands,
+  makeRecentProjectCommands,
+  parseSlashCommandInput,
+} from "../providerSlashCommands.ts";
 import { requireRuntimeSessionId, stampRuntimeEvent } from "../runtimeSession.ts";
 import {
   applyAcpModelSelection,
@@ -76,6 +82,7 @@ import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import type { ProviderAdapterError } from "../Errors.ts";
 type AcpAdapterShape = ProviderAdapterShape<ProviderAdapterError>;
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import type { AgentProcessPriorityShape } from "../agentProcessPriority.ts";
 
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 
@@ -101,6 +108,10 @@ export interface AcpAdapterLiveOptions {
   readonly onCommands?: (
     commands: ReadonlyArray<EffectAcpSchema.AvailableCommand>,
   ) => Effect.Effect<void>;
+  /** Lower-case command names the composer menu must not offer. */
+  readonly hiddenCommands?: ReadonlySet<string>;
+  /** Lower-case command name -> why Ryco refuses to send it; the turn fails before it starts. */
+  readonly refusedCommands?: ReadonlyMap<string, string>;
   readonly onUsage?: () => Effect.Effect<void>;
   readonly onStarted?: (
     result: import("../acp/AcpSessionRuntime.ts").AcpSessionRuntimeStartResult,
@@ -109,6 +120,8 @@ export interface AcpAdapterLiveOptions {
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
   readonly instanceId?: ProviderInstanceId;
+  /** Lowers each session's agent process; undefined spawns it unchanged. */
+  readonly processPriority?: AgentProcessPriorityShape | undefined;
 }
 
 interface PendingApproval {
@@ -133,7 +146,8 @@ interface AcpSessionContext {
   notificationFiber: Fiber.Fiber<void, never> | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
-  turns: Array<{ id: TurnId; items: Array<unknown> }>;
+  /** Completed turn ids only; never prompts (base64 images) or results. */
+  readonly turnIds: Array<TurnId>;
   lastPlanFingerprint: string | undefined;
   activeTurnId: TurnId | undefined;
   currentModelId: string | undefined;
@@ -214,6 +228,10 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
     const sessions = new Map<ThreadId, AcpSessionContext>();
     const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
     const runtimeEventPubSub = yield* PubSub.bounded<ProviderRuntimeEvent>(2_048);
+    // The agent's own commands per directory (`readLiveProjectCommands`): ACP lists them only
+    // inside a session, so a stopped session's list keeps serving its directory.
+    const recentCommands = makeRecentProjectCommands();
+    const commandOptions = { hidden: options.hiddenCommands };
 
     const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
     const randomUUIDv4 = Effect.sync(() => crypto.randomUUID());
@@ -439,7 +457,9 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
 
           const acp = yield* options
             .makeRuntime({
+              threadId: input.threadId,
               ...(options?.environment ? { environment: options.environment } : {}),
+              ...(options.processPriority ? { processPriority: options.processPriority } : {}),
               childProcessSpawner,
               cwd,
               ...(resumeSessionId ? { resumeSessionId } : {}),
@@ -644,7 +664,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
             notificationFiber: undefined,
             pendingApprovals,
             pendingUserInputs,
-            turns: [],
+            turnIds: [],
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
             currentModelId: boundModelId,
@@ -653,11 +673,22 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
             stopped: false,
           };
 
+          // Fork into the session scope, not the calling fiber: ProviderService runs
+          // `startSession` in its own detached fiber that ends once the session has
+          // started, and Effect interrupts a fiber's `forkChild` children when it
+          // ends, which dropped every `session/update` (text, tools, plans).
           const nf = yield* Stream.runDrain(
             Stream.mapEffect(acp.getEvents(), (event) =>
               Effect.gen(function* () {
                 switch (event._tag) {
                   case "CommandsUpdated":
+                    // A late update after a close is dropped. Only the mapped copy is kept,
+                    // never the raw payload.
+                    if (ctx.stopped) return;
+                    recentCommands.record(
+                      cwd,
+                      acpAvailableCommandsToSlashCommands(event.commands, commandOptions),
+                    );
                     if (options.onCommands) yield* options.onCommands(event.commands);
                     return;
                   case "AssistantItemStarted":
@@ -761,7 +792,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
                 }
               }),
             ),
-          ).pipe(Effect.forkChild);
+          ).pipe(Effect.forkIn(sessionScope));
 
           ctx.notificationFiber = nf;
           sessions.set(input.threadId, ctx);
@@ -799,6 +830,18 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
           input.threadId,
           Effect.gen(function* () {
             const ctx = yield* requireSession(input.threadId);
+            const command = parseSlashCommandInput(input.input);
+            const refusal =
+              command === undefined
+                ? undefined
+                : options.refusedCommands?.get(command.name.toLowerCase());
+            if (refusal !== undefined) {
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/prompt",
+                detail: refusal,
+              });
+            }
             const turnId = TurnId.make(yield* randomUUIDv4);
             const turnModelSelection =
               input.modelSelection?.instanceId === boundInstanceId
@@ -815,7 +858,6 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
                 mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_model", cause),
             });
 
-            const pathLineEntries: AttachmentPathLineEntry[] = [];
             const imagePromptParts = yield* Effect.forEach(input.attachments ?? [], (attachment) =>
               Effect.gen(function* () {
                 if (
@@ -823,18 +865,6 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
                   attachment.type !== "image" ||
                   (options.respectPromptCapabilities && !ctx.promptImages)
                 ) {
-                  pathLineEntries.push({
-                    attachment,
-                    ...(attachment.id === undefined
-                      ? {}
-                      : {
-                          resolvedPath:
-                            resolveAttachmentPath({
-                              attachmentsDir: serverConfig.attachmentsDir,
-                              attachment,
-                            }) ?? undefined,
-                        }),
-                  });
                   return null;
                 }
                 const attachmentPath = resolveAttachmentPath({
@@ -868,7 +898,10 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
             );
             const promptText = appendAttachmentPathLines(
               input.input?.trim(),
-              formatAttachmentPathLines(pathLineEntries),
+              attachmentPathLines({
+                attachmentsDir: serverConfig.attachmentsDir,
+                attachments: input.attachments,
+              }),
             );
             const promptParts: Array<EffectAcpSchema.ContentBlock> = [
               ...(promptText && promptText.trim().length > 0
@@ -943,10 +976,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
                 });
               }
 
-              ctx.turns = [
-                ...ctx.turns,
-                { id: prepared.turnId, items: [{ prompt: prepared.promptParts, result }] },
-              ];
+              ctx.turnIds.push(prepared.turnId);
               ctx.session = {
                 ...ctx.session,
                 activeTurnId: prepared.turnId,
@@ -1044,7 +1074,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
     const readThread: AcpAdapterShape["readThread"] = (threadId) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(threadId);
-        return { threadId, turns: ctx.turns };
+        return providerThreadSnapshotFromTurnIds(threadId, ctx.turnIds);
       });
 
     // ACP sessions cannot forget turns; ProviderService refuses before reaching this.
@@ -1115,6 +1145,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
       listSessions,
       hasSession,
       stopAll,
+      readLiveProjectCommands: (cwd) => Effect.sync(() => recentCommands.read(path.resolve(cwd))),
       streamEvents,
     } satisfies AcpAdapterShape;
   });

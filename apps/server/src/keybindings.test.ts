@@ -1,17 +1,23 @@
-import { KeybindingCommand, KeybindingRule, KeybindingsConfig } from "@ryco/contracts";
+import {
+  KeybindingCommand,
+  KeybindingRule,
+  KeybindingsConfig,
+  STATIC_KEYBINDING_COMMANDS,
+} from "@ryco/contracts";
+import { NODE_DEFAULT_KEYBINDINGS } from "@ryco/shared/keybindings";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { assertFailure } from "@effect/vitest/utils";
-import { Cause, Effect, FileSystem, Layer, Logger, Path, Schema } from "effect";
+import { Cause, Effect, FileSystem, Layer, Path, Schema } from "effect";
 import { ServerConfig } from "./config.ts";
 
 import {
-  DEFAULT_KEYBINDINGS,
   Keybindings,
   KeybindingsLive,
   ResolvedKeybindingFromConfig,
   compileResolvedKeybindingRule,
   compileResolvedKeybindingsConfig,
+  isNodeServedKeybindingCommand,
   parseKeybindingShortcut,
 } from "./keybindings.ts";
 import { KeybindingsConfigError } from "@ryco/contracts";
@@ -166,26 +172,10 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
     }),
   );
 
-  it.effect("bootstraps default keybindings when config file is missing", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const { keybindingsConfigPath } = yield* ServerConfig;
-      assert.isFalse(yield* fs.exists(keybindingsConfigPath));
-
-      yield* Effect.gen(function* () {
-        const keybindings = yield* Keybindings;
-        yield* keybindings.syncDefaultKeybindingsOnStartup;
-      });
-
-      const persisted = yield* readKeybindingsConfig(keybindingsConfigPath);
-      assert.deepEqual(persisted, DEFAULT_KEYBINDINGS);
-    }).pipe(Effect.provide(makeKeybindingsLayer())),
-  );
-
   it.effect("ships configurable thread navigation defaults", () =>
     Effect.sync(() => {
       const defaultsByCommand = new Map(
-        DEFAULT_KEYBINDINGS.map((binding) => [binding.command, binding.key] as const),
+        NODE_DEFAULT_KEYBINDINGS.map((binding) => [binding.command, binding.key] as const),
       );
 
       assert.equal(defaultsByCommand.get("thread.previous"), "mod+shift+[");
@@ -197,6 +187,15 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
       assert.equal(defaultsByCommand.get("modelPicker.jump.9"), "mod+9");
       assert.equal(defaultsByCommand.get("sidebar.showInbox"), "mod+shift+i");
       assert.equal(defaultsByCommand.get("sidebar.showProjects"), "mod+shift+p");
+    }),
+  );
+
+  it.effect("keeps node defaults inside the commands nodes serve", () =>
+    Effect.sync(() => {
+      // App defaults for newer commands belong in client-runtime's appKeybindingDefaults.ts.
+      for (const rule of NODE_DEFAULT_KEYBINDINGS) {
+        assert.isTrue(isNodeServedKeybindingCommand(rule.command), rule.command);
+      }
     }),
   );
 
@@ -213,7 +212,7 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
 
       assert.deepEqual(
         configState.keybindings,
-        compileResolvedKeybindingsConfig(DEFAULT_KEYBINDINGS),
+        compileResolvedKeybindingsConfig(NODE_DEFAULT_KEYBINDINGS),
       );
       assert.deepEqual(configState.issues, [
         {
@@ -262,73 +261,44 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
     }).pipe(Effect.provide(makeKeybindingsLayer())),
   );
 
-  it.effect(
-    "upserts missing default keybindings on startup without overriding existing command rules",
-    () =>
-      Effect.gen(function* () {
-        const { keybindingsConfigPath } = yield* ServerConfig;
-        yield* writeKeybindingsConfig(keybindingsConfigPath, [
-          { key: "mod+shift+t", command: "terminal.toggle" },
-          { key: "mod+shift+r", command: "script.run-tests.run" },
-        ]);
-
-        yield* Effect.gen(function* () {
-          const keybindings = yield* Keybindings;
-          yield* keybindings.syncDefaultKeybindingsOnStartup;
-        });
-
-        const persisted = yield* readKeybindingsConfig(keybindingsConfigPath);
-        const byCommand = new Map(persisted.map((entry) => [entry.command, entry]));
-
-        const persistedToggle = byCommand.get("terminal.toggle");
-        assert.isNotNull(persistedToggle);
-        assert.equal(persistedToggle?.key, "mod+shift+t");
-        assert.isFalse(
-          persisted.some((entry) => entry.command === "terminal.toggle" && entry.key === "mod+j"),
-        );
-
-        for (const defaultRule of DEFAULT_KEYBINDINGS) {
-          assert.isTrue(byCommand.has(defaultRule.command), `expected ${defaultRule.command}`);
-        }
-        assert.isTrue(byCommand.has("script.run-tests.run"));
-      }).pipe(Effect.provide(makeKeybindingsLayer())),
-  );
-
-  it.effect("skips conflicting default keybindings on startup and logs a detailed warning", () => {
-    const messages: string[] = [];
-    const logger = Logger.make(({ message }) => {
-      messages.push(String(message));
-    });
-
-    return Effect.gen(function* () {
+  it.effect("never serves commands outside the frozen set, even from the legacy file", () =>
+    Effect.gen(function* () {
       const { keybindingsConfigPath } = yield* ServerConfig;
+      // Commands added to contracts after the node list was frozen, plus a client-owned script.
+      const unservedCommands: KeybindingCommand[] = [
+        ...STATIC_KEYBINDING_COMMANDS.filter((command) => !isNodeServedKeybindingCommand(command)),
+        "projectScript.a/b/test.run",
+      ];
       yield* writeKeybindingsConfig(keybindingsConfigPath, [
-        { key: "mod+j", command: "script.custom-action.run" },
+        { key: "mod+shift+x", command: "terminal.toggle" },
+        ...unservedCommands.map((command, index) => ({ key: `mod+alt+f${index + 1}`, command })),
       ]);
 
-      yield* Effect.gen(function* () {
+      const configState = yield* Effect.gen(function* () {
         const keybindings = yield* Keybindings;
-        yield* keybindings.syncDefaultKeybindingsOnStartup;
+        return yield* keybindings.loadConfigState;
       });
 
-      const persisted = yield* readKeybindingsConfig(keybindingsConfigPath);
-      assert.isFalse(persisted.some((entry) => entry.command === "terminal.toggle"));
-      assert.isTrue(persisted.some((entry) => entry.command === "script.custom-action.run"));
-
-      assert.isTrue(
-        messages.some((message) =>
-          message.includes("skipping default keybinding due to shortcut conflict"),
-        ),
+      const toggleKeys = configState.keybindings
+        .filter((entry) => entry.command === "terminal.toggle")
+        .map((entry) => entry.shortcut.key);
+      assert.deepEqual(toggleKeys, ["x"]);
+      for (const command of unservedCommands) {
+        assert.isFalse(
+          configState.keybindings.some((entry) => entry.command === command),
+          command,
+        );
+      }
+      assert.deepEqual(
+        configState.issues,
+        unservedCommands.map((_, index) => ({
+          kind: "keybindings.invalid-entry" as const,
+          index: index + 1,
+          message: "Set this shortcut in App preferences → Keybindings.",
+        })),
       );
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          makeKeybindingsLayer(),
-          Logger.layer([logger], { mergeWithExisting: false }),
-        ),
-      ),
-    );
-  });
+    }).pipe(Effect.provide(makeKeybindingsLayer())),
+  );
 
   it.effect("upserts custom keybindings to configured path", () =>
     Effect.gen(function* () {

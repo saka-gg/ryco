@@ -18,6 +18,7 @@ import {
   PRIMARY_COLOR_OPTIONS,
 } from "../../themes/appearancePreferences";
 import { getPresentationTier, syncDocumentPresentationTier } from "../../lib/presentationTier";
+import { useTierOverrideStore } from "../../tierOverrideStore";
 import { useUiStateStore } from "../../uiStateStore";
 import { AppearanceSettingsPanel } from "./AppearanceSettings";
 
@@ -136,6 +137,58 @@ describe("AppearanceSettingsPanel", () => {
     });
   });
 
+  it("picks dark mode's palette apart from the light one, or the same", async () => {
+    mounted = await render(<AppearanceSettingsPanel />);
+
+    await page.getByRole("combobox", { name: "Dark mode palette" }).click();
+    await page.getByRole("option", { name: "Dracula" }).click();
+    expect(localStorage.getItem("ryco:active-theme-dark")).toBe("dracula");
+    await vi.waitFor(() => {
+      // The default theme stays the light half; Dracula's dark colors fill dark mode.
+      expect(document.getElementById(THEME_STYLE_ELEMENT_ID)?.textContent).toContain("#282A36");
+    });
+
+    await page.getByRole("combobox", { name: "Dark mode palette" }).click();
+    await page.getByRole("option", { name: "Same as light" }).click();
+    expect(localStorage.getItem("ryco:active-theme-dark")).toBeNull();
+    await vi.waitFor(() => {
+      expect(document.getElementById(THEME_STYLE_ELEMENT_ID)).toBeNull();
+    });
+  });
+
+  it("in dark mode with a dark pick, picks and copies dark mode's palette, never light mode's", async () => {
+    localStorage.setItem("ryco:theme", "dark");
+    localStorage.setItem(ACTIVE_THEME_STORAGE_KEY, "nord");
+    localStorage.setItem("ryco:active-theme-dark", "dracula");
+    mounted = await render(<AppearanceSettingsPanel />);
+
+    // The grid marks what dark mode shows.
+    await expect
+      .element(page.getByRole("radio", { name: /Dracula/ }))
+      .toHaveAttribute("aria-checked", "true");
+    await page.getByRole("radio", { name: /One Dark Pro/ }).click();
+    expect(localStorage.getItem("ryco:active-theme-dark")).toBe("one-dark-pro");
+    expect(localStorage.getItem(ACTIVE_THEME_STORAGE_KEY)).toBe("nord");
+    await vi.waitFor(() => {
+      expect(document.getElementById(THEME_STYLE_ELEMENT_ID)?.textContent).toContain("#282c34");
+    });
+
+    // A copy of the dark pick takes its place; light mode keeps Nord.
+    await page.getByRole("button", { name: "Theme actions for One Dark Pro", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Duplicate", exact: true }).click();
+    await expect
+      .element(page.getByRole("radio", { name: /One Dark Pro \(Copy\)/ }))
+      .toBeInTheDocument();
+    expect(localStorage.getItem("ryco:active-theme-dark")).toMatch(/^custom-/u);
+    expect(localStorage.getItem(ACTIVE_THEME_STORAGE_KEY)).toBe("nord");
+
+    // Picking light mode's own theme leaves dark mode no pick of its own.
+    await page.getByRole("button", { name: "Cancel" }).click();
+    await page.getByRole("radio", { name: /^Nord/ }).click();
+    expect(localStorage.getItem("ryco:active-theme-dark")).toBeNull();
+    expect(localStorage.getItem(ACTIVE_THEME_STORAGE_KEY)).toBe("nord");
+  });
+
   it("adds, duplicates, and deletes custom themes", async () => {
     mounted = await render(<AppearanceSettingsPanel />);
 
@@ -177,7 +230,6 @@ describe("AppearanceSettingsPanel", () => {
     await page.getByRole("radio", { name: `Use ${interfaceFontLabel} for interface font` }).click();
     await page.getByRole("radio", { name: `Use ${codeFontLabel} for code font` }).click();
     await page.getByRole("button", { name: "Set text size to Large" }).click();
-    await page.getByRole("button", { name: "Set corner radius to Square" }).click();
     expect(
       JSON.parse(localStorage.getItem(APPEARANCE_PREFERENCES_STORAGE_KEY) ?? "{}").primaryColorMode,
     ).toBeUndefined();
@@ -193,7 +245,6 @@ describe("AppearanceSettingsPanel", () => {
           fontFamilySans: interfaceFontValue,
           fontFamilyMono: codeFontValue,
           fontSizeBase: "18px",
-          radius: "0rem",
           primaryColorMode: "custom",
           primaryColor: primaryColorValue,
         }),
@@ -204,7 +255,6 @@ describe("AppearanceSettingsPanel", () => {
     expect(style?.textContent).toContain('--font-family-sans: "Geist"');
     expect(style?.textContent).toContain('--font-family-mono: "Geist Mono"');
     expect(style?.textContent).toContain("--font-size-base: 18px");
-    expect(style?.textContent).toContain("--radius: 0rem");
     expect(style?.textContent).toContain(`--primary: ${primaryColorValue}`);
     // The desktop has no transparency step; its surfaces stay Solid.
     expect(style?.textContent).toContain("--app-surface-opacity: 100%");
@@ -220,9 +270,6 @@ describe("AppearanceSettingsPanel", () => {
       .toBeInTheDocument();
     await expect
       .element(page.getByRole("button", { name: "Reset text size to default" }))
-      .toBeInTheDocument();
-    await expect
-      .element(page.getByRole("button", { name: "Reset corner radius to default" }))
       .toBeInTheDocument();
     await expect
       .element(page.getByRole("button", { name: "Reset primary color to default" }))
@@ -246,6 +293,22 @@ describe("AppearanceSettingsPanel", () => {
     await page.getByRole("button", { name: "Reset wide composer labels to default" }).click();
     await expect.element(autoCollapseSwitch).toBeChecked();
     expect(useUiStateStore.getState().wideComposerControlsAutoCollapse).toBe(true);
+  });
+
+  it("offers Chat width only outside the frozen phone tier, which keeps the comfortable width", async () => {
+    try {
+      useTierOverrideStore.setState({ override: "desktop" });
+      mounted = await render(<AppearanceSettingsPanel />);
+      await expect.element(page.getByRole("combobox", { name: "Chat width" })).toBeVisible();
+
+      useTierOverrideStore.setState({ override: "phone" });
+      await expect
+        .element(page.getByRole("combobox", { name: "Chat width" }))
+        .not.toBeInTheDocument();
+      await expect.element(page.getByText("Primary color", { exact: true })).toBeVisible();
+    } finally {
+      useTierOverrideStore.setState({ override: null });
+    }
   });
 
   it("omits reasoning and token mode style controls", async () => {

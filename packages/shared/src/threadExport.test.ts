@@ -192,3 +192,154 @@ it("exports where a fork's inherited history came from before its messages", () 
   expect(output.indexOf("## Fork origin")).toBeLessThan(output.indexOf("## Messages"));
   expect(output).not.toContain("MUST-NOT-EXPORT");
 });
+
+it("exports an answered agent question between the messages around it", () => {
+  const activities = [
+    {
+      id: "ask",
+      createdAt: "2026-09-15T00:00:01Z",
+      kind: "user-input.requested",
+      summary: "User input requested",
+      payload: {
+        requestId: "req",
+        questions: [
+          {
+            id: "Which library?",
+            header: "Library",
+            question: "Which library?",
+            options: [
+              { label: "React", description: "MUST-NOT-EXPORT description" },
+              { label: "Vue", description: "Vue." },
+            ],
+          },
+        ],
+        token: "MUST-NOT-EXPORT",
+      },
+    },
+    {
+      id: "answer",
+      createdAt: "2026-09-15T00:00:02Z",
+      kind: "user-input.resolved",
+      summary: "User input submitted",
+      payload: { requestId: "req", answers: { "Which library?": "React" } },
+    },
+  ].map((activity) =>
+    projectThreadExportActivity(activity as unknown as OrchestrationThreadActivity),
+  );
+  const reply = {
+    ...thread.messages[0]!,
+    id: "reply",
+    role: "assistant",
+    text: "Using React.",
+    createdAt: "2026-09-15T00:00:03Z",
+  } as ThreadExportSource["messages"][number];
+  const output = serializeThreadMarkdown({
+    ...thread,
+    messages: [...thread.messages, reply],
+    activities,
+  });
+  expect(activities[0]).not.toHaveProperty("payload");
+  expect(output).toContain(
+    "### Agent question · 2026-09-15T00:00:02.000Z\n\n```text\nLibrary: Which library?\nOptions: React · Vue\nAnswer: React\n```",
+  );
+  expect(output.indexOf("### User")).toBeLessThan(output.indexOf("### Agent question"));
+  expect(output.indexOf("### Agent question")).toBeLessThan(output.indexOf("### Assistant"));
+  expect(output).not.toContain("MUST-NOT-EXPORT");
+});
+
+it("exports a cancelled agent question with its questions and no answers", () => {
+  const activities = [
+    {
+      id: "ask",
+      createdAt: "2026-09-15T00:00:01Z",
+      kind: "user-input.requested",
+      summary: "User input requested",
+      payload: {
+        requestId: "req",
+        questions: [
+          {
+            id: "scope",
+            header: "Scope",
+            question: "Which scope?",
+            options: [{ label: "Focused", description: "Focused." }],
+          },
+        ],
+      },
+    },
+    {
+      id: "cancel",
+      createdAt: "2026-09-15T00:00:02Z",
+      kind: "user-input.resolved",
+      summary: "Question cancelled",
+      payload: { requestId: "req", answers: {}, cancelled: true },
+    },
+  ].map((activity) =>
+    projectThreadExportActivity(activity as unknown as OrchestrationThreadActivity),
+  );
+  const output = serializeThreadMarkdown({ ...thread, activities });
+  expect(output).toContain(
+    "### Agent question · 2026-09-15T00:00:02.000Z · cancelled\n\n```text\nScope: Which scope?\nOptions: Focused\n```",
+  );
+  expect(output).not.toContain("Answer:");
+});
+
+it("pairs a question and its answer recorded in the same millisecond in transcript order", () => {
+  // The resolution's id sorts first, as a random id does about half the time.
+  const project = (sequences: { ask?: number; cancel?: number }) =>
+    [
+      {
+        id: "b-ask",
+        createdAt: "2026-09-15T00:00:01Z",
+        ...(sequences.ask !== undefined ? { sequence: sequences.ask } : {}),
+        kind: "user-input.requested",
+        summary: "User input requested",
+        payload: {
+          requestId: "req",
+          questions: [
+            {
+              id: "scope",
+              header: "Scope",
+              question: "Which scope?",
+              options: [{ label: "Focused", description: "Focused." }],
+            },
+          ],
+        },
+      },
+      {
+        id: "a-cancel",
+        createdAt: "2026-09-15T00:00:01Z",
+        ...(sequences.cancel !== undefined ? { sequence: sequences.cancel } : {}),
+        kind: "user-input.resolved",
+        summary: "Question cancelled",
+        payload: { requestId: "req", answers: {}, cancelled: true },
+      },
+    ].map((activity) =>
+      projectThreadExportActivity(activity as unknown as OrchestrationThreadActivity),
+    );
+  const heading = "### Agent question · 2026-09-15T00:00:01.000Z · cancelled";
+  const withSequence = project({ ask: 7, cancel: 8 });
+  expect(withSequence[0]).toMatchObject({ sequence: 7 });
+  expect(serializeThreadMarkdown({ ...thread, activities: withSequence })).toContain(heading);
+  // Without a sequence, a request still reads before the resolution recorded with it.
+  expect(serializeThreadMarkdown({ ...thread, activities: project({}) })).toContain(heading);
+});
+
+it("lists activities in the transcript's order: sequence, time, then lifecycle", () => {
+  const activities = [
+    { id: "a-done", createdAt: "2026-09-15T00:00:01Z", kind: "tool.completed", summary: "Read b" },
+    { id: "b-start", createdAt: "2026-09-15T00:00:01Z", kind: "tool.started", summary: "Read a" },
+    { id: "late", createdAt: "2026-09-15T00:00:09Z", sequence: 1, kind: "tool.started" },
+    { id: "early", createdAt: "2026-09-15T00:00:05Z", sequence: 2, kind: "tool.completed" },
+  ].map((activity) =>
+    projectThreadExportActivity({
+      summary: activity.id,
+      ...activity,
+    } as unknown as OrchestrationThreadActivity),
+  );
+  const output = serializeThreadMarkdown({ ...thread, activities });
+  // Recorded in the same instant, a start reads before its completion.
+  expect(output.indexOf("Read a")).toBeLessThan(output.indexOf("Read b"));
+  // The sequence decides before the time.
+  expect(output.indexOf("Read b")).toBeLessThan(output.indexOf("```text\nlate"));
+  expect(output.indexOf("```text\nlate")).toBeLessThan(output.indexOf("```text\nearly"));
+});

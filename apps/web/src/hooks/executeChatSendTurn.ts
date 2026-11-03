@@ -7,6 +7,8 @@ import {
 } from "./newDraftDefaults";
 import { readNodeConfig, resolveNodeConfigSource } from "./nodeConfigSource";
 import { claudeCacheReviewPresentation } from "../components/chat/ClaudeCacheReview";
+import { isClaudeResumeReviewSkipped } from "./useSettings";
+import { confirmStopBackgroundWorkDialog } from "../components/chat/StopBackgroundWorkDialog";
 import type { ComputerTurnIntent } from "@ryco/contracts";
 import type { ClaudeCacheReviewPresentation } from "@ryco/client-runtime/state/composer";
 import { rejectRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
@@ -29,6 +31,9 @@ import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
   buildSendTurnBootstrap,
+  composeOutgoingPrompt,
+  type ComposerReferenceDraft,
+  formatComposerReferenceTitle,
   buildSendTurnDispatchAttachment,
   buildSendTurnUploadTokenDispatchAttachment,
   CHAT_PROJECT_LABEL,
@@ -58,7 +63,7 @@ import type { ScopedThreadRef } from "@ryco/contracts";
 
 type ComposerThreadTarget = ScopedThreadRef | DraftId;
 
-import { appendTerminalContextsToPrompt, formatTerminalContextLabel } from "../lib/terminalContext";
+import { formatTerminalContextLabel } from "../lib/terminalContext";
 import { collapseExpandedComposerCursor } from "../composer-logic";
 import { newCommandId, newMessageId } from "../lib/utils";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
@@ -82,6 +87,8 @@ export interface SendTurnComposerSnapshot {
   trimmedPrompt: string;
   images: ComposerImageAttachment[];
   sendableTerminalContexts: TerminalContextDraft[];
+  /** Lines from the Review and Files panels; absent for sends composed without the composer. */
+  fileReferences?: ComposerReferenceDraft[];
   sourceControlContexts: ComposerSourceControlContext[];
   selectedProvider: ProviderDriverKind;
   selectedModel: string;
@@ -171,6 +178,10 @@ export interface SendTurnComposerDraftDeps {
     target: ComposerThreadTarget,
     contexts: TerminalContextDraft[],
   ) => void;
+  setComposerDraftFileReferences: (
+    target: ComposerThreadTarget,
+    references: ReadonlyArray<ComposerReferenceDraft>,
+  ) => void;
   setDraftThreadContext: (
     target: ComposerThreadTarget,
     context: { tokenMode: AgentTokenMode },
@@ -179,11 +190,12 @@ export interface SendTurnComposerDraftDeps {
   readComposerDraftContent: (target: ComposerThreadTarget) => ComposerDraftContent | null;
 }
 
-/** A composer's sendable content: its prompt, attachments and terminal contexts. */
+/** A composer's sendable content: its prompt, attachments, terminal contexts and file references. */
 export interface ComposerDraftContent {
   readonly prompt: string;
   readonly images: ReadonlyArray<ComposerImageAttachment>;
   readonly terminalContexts: ReadonlyArray<TerminalContextDraft>;
+  readonly fileReferences: ReadonlyArray<ComposerReferenceDraft>;
 }
 
 export interface SendTurnDispatchDeps {
@@ -198,6 +210,7 @@ export interface SendTurnRollbackRefs {
   promptRef: { current: string };
   composerImagesRef: { current: ComposerImageAttachment[] };
   composerTerminalContextsRef: { current: TerminalContextDraft[] };
+  composerFileReferencesRef: { current: ComposerReferenceDraft[] };
   sendInFlightRef: { current: boolean };
 }
 
@@ -232,6 +245,11 @@ export interface ExecuteChatSendTurnInput {
   preserveComposerDraft?: boolean;
   /** undefined = the dialog presentation (default); null = never review interactively. */
   claudeCacheReview?: ClaudeCacheReviewPresentation | null;
+  /**
+   * The "Stop tasks and switch" choice when background tasks hold back a model
+   * switch: undefined = the dialog (default); null = never ask (the refusal fails the send).
+   */
+  confirmStopBackgroundWork?: CommitSendTurnDispatchInput["confirmStopBackgroundWork"] | null;
   /** The live subscribed thread for the Claude resume review (see the send engine). */
   readSubscribedClaudeReviewState?: CommitSendTurnDispatchInput["readSubscribedClaudeReviewState"];
   /** Background sends never toast. */
@@ -296,7 +314,7 @@ export function removeOptimisticUserMessage(
 
 export type ComposerContentRefs = Pick<
   SendTurnRollbackRefs,
-  "promptRef" | "composerImagesRef" | "composerTerminalContextsRef"
+  "promptRef" | "composerImagesRef" | "composerTerminalContextsRef" | "composerFileReferencesRef"
 >;
 
 /** Whether a stored draft still holds exactly what a send took from it (by identity of each item). */
@@ -311,7 +329,8 @@ function composerDraftContentMatches(
   return (
     (content?.prompt ?? "") === sent.prompt &&
     sameIds(content?.images ?? [], sent.images) &&
-    sameIds(content?.terminalContexts ?? [], sent.terminalContexts)
+    sameIds(content?.terminalContexts ?? [], sent.terminalContexts) &&
+    sameIds(content?.fileReferences ?? [], sent.fileReferences)
   );
 }
 
@@ -320,7 +339,8 @@ function composerDraftContentHasContent(content: ComposerDraftContent | null): b
     content !== null &&
     (content.prompt.length !== 0 ||
       content.images.length !== 0 ||
-      content.terminalContexts.length !== 0)
+      content.terminalContexts.length !== 0 ||
+      content.fileReferences.length !== 0)
   );
 }
 
@@ -328,44 +348,77 @@ export function composerRefsHaveContent(refs: ComposerContentRefs): boolean {
   return (
     refs.promptRef.current.length !== 0 ||
     refs.composerImagesRef.current.length !== 0 ||
-    refs.composerTerminalContextsRef.current.length !== 0
+    refs.composerTerminalContextsRef.current.length !== 0 ||
+    refs.composerFileReferencesRef.current.length !== 0
   );
 }
 
 /**
- * Puts a prompt, its attachments and terminal contexts back into the composer
- * and parks the cursor at the end. Shared by the send rollback and by editing a
- * queued message. Callers check `composerRefsHaveContent` first: this replaces
- * the composer's content, so it must only run into an empty composer.
+ * Empties the live content refs as a send takes the draft. The composer
+ * mirrors them from the store only when it re-renders, and a failure before
+ * that must find them empty, or the rollback would leave the sent content out.
  */
-export function restoreComposerContent(input: {
-  refs: ComposerContentRefs;
-  composerHandle: SendTurnReadComposer;
-  draft: Pick<
-    SendTurnComposerDraftDeps,
-    | "composerDraftTarget"
-    | "setComposerDraftPrompt"
-    | "addComposerDraftImages"
-    | "setComposerDraftTerminalContexts"
-  >;
-  prompt: string;
-  images: ComposerImageAttachment[];
-  terminalContexts: TerminalContextDraft[];
-  /** False once the view shows another thread: only the draft store is written. */
-  live?: boolean;
-}): void {
-  const { refs, composerHandle, draft, prompt, images, terminalContexts } = input;
+export function clearComposerContentRefs(refs: ComposerContentRefs): void {
+  refs.promptRef.current = "";
+  refs.composerImagesRef.current = [];
+  refs.composerTerminalContextsRef.current = [];
+  refs.composerFileReferencesRef.current = [];
+}
+
+/**
+ * Puts a prompt, its attachments, terminal contexts and file references back
+ * into the composer and parks the cursor at the end. Shared by the send rollback and by editing a
+ * queued message. Callers check `composerRefsHaveContent` first: this replaces
+ * the composer's content, so it must only run into an empty composer. With
+ * `append`, the composer keeps its attachments and terminal contexts and gains
+ * `images`; `prompt` is then the whole new prompt, composed from its own
+ * ("Edit from here" returns a sent message below an unsent draft).
+ */
+export function restoreComposerContent(
+  input: {
+    refs: ComposerContentRefs;
+    composerHandle: SendTurnReadComposer;
+    draft: Pick<
+      SendTurnComposerDraftDeps,
+      | "composerDraftTarget"
+      | "setComposerDraftPrompt"
+      | "addComposerDraftImages"
+      | "setComposerDraftTerminalContexts"
+      | "setComposerDraftFileReferences"
+    >;
+    prompt: string;
+    images: ComposerImageAttachment[];
+    /** False once the view shows another thread: only the draft store is written. */
+    live?: boolean;
+  } & (
+    | {
+        append?: false;
+        terminalContexts: TerminalContextDraft[];
+        fileReferences: ComposerReferenceDraft[];
+      }
+    | { append: true; terminalContexts?: never; fileReferences?: never }
+  ),
+): void {
+  const { refs, composerHandle, draft, prompt, images } = input;
   const live = input.live ?? true;
 
   if (live) {
     refs.promptRef.current = prompt;
-    refs.composerImagesRef.current = images;
-    refs.composerTerminalContextsRef.current = terminalContexts;
+    refs.composerImagesRef.current = input.append
+      ? [...refs.composerImagesRef.current, ...images]
+      : images;
+    if (!input.append) {
+      refs.composerTerminalContextsRef.current = input.terminalContexts;
+      refs.composerFileReferencesRef.current = input.fileReferences;
+    }
   }
 
   draft.setComposerDraftPrompt(draft.composerDraftTarget, prompt);
   draft.addComposerDraftImages(draft.composerDraftTarget, images);
-  draft.setComposerDraftTerminalContexts(draft.composerDraftTarget, terminalContexts);
+  if (!input.append) {
+    draft.setComposerDraftTerminalContexts(draft.composerDraftTarget, input.terminalContexts);
+    draft.setComposerDraftFileReferences(draft.composerDraftTarget, input.fileReferences);
+  }
 
   if (!live) return;
   composerHandle.readComposer()?.resetCursorState({
@@ -384,41 +437,66 @@ export function rollbackSendTurn(input: {
   promptSnapshot: string;
   imagesSnapshot: ComposerImageAttachment[];
   terminalContextsSnapshot: TerminalContextDraft[];
+  fileReferencesSnapshot: ComposerReferenceDraft[];
 }): void {
-  const {
-    refs,
+  const { composerHandle, dispatch, messageId } = input;
+  const live = composerHandle.showsSendThread?.() ?? true;
+  const restored = restoreUnsentComposerContent({
+    refs: input.refs,
     composerHandle,
-    dispatch,
-    draft,
-    messageId,
-    promptSnapshot,
-    imagesSnapshot,
-    terminalContextsSnapshot,
-  } = input;
+    draft: input.draft,
+    prompt: input.promptSnapshot,
+    images: input.imagesSnapshot,
+    terminalContexts: input.terminalContextsSnapshot,
+    fileReferences: input.fileReferencesSnapshot,
+  });
+  if (restored && live) removeOptimisticUserMessage(dispatch.setOptimisticUserMessages, messageId);
+}
+
+/**
+ * Puts what a send took from the composer back once the send did not go out,
+ * unless the composer holds new content by then. False when it left it alone.
+ */
+export function restoreUnsentComposerContent(input: {
+  refs: ComposerContentRefs;
+  composerHandle: SendTurnReadComposer;
+  draft: Pick<
+    SendTurnComposerDraftDeps,
+    | "composerDraftTarget"
+    | "setComposerDraftPrompt"
+    | "addComposerDraftImages"
+    | "setComposerDraftTerminalContexts"
+    | "setComposerDraftFileReferences"
+    | "readComposerDraftContent"
+  >;
+  prompt: string;
+  images: ComposerImageAttachment[];
+  terminalContexts: TerminalContextDraft[];
+  fileReferences: ComposerReferenceDraft[];
+}): boolean {
+  const { refs, composerHandle, draft } = input;
   // The live refs belong to whichever thread the view shows: once that is
   // another one, this thread's draft is what decides, in the store.
   const live = composerHandle.showsSendThread?.() ?? true;
-
   if (
     live
       ? composerRefsHaveContent(refs)
       : composerDraftContentHasContent(draft.readComposerDraftContent(draft.composerDraftTarget))
   ) {
-    return;
+    return false;
   }
-
-  if (live) removeOptimisticUserMessage(dispatch.setOptimisticUserMessages, messageId);
-
   restoreComposerContent({
     refs,
     composerHandle,
     draft,
     live,
-    prompt: promptSnapshot,
-    // The send revoked the live previews; give the retry its own blob URLs.
-    images: imagesSnapshot.map(cloneComposerImageForRetry),
-    terminalContexts: terminalContextsSnapshot,
+    prompt: input.prompt,
+    // The send may have revoked the live previews; give the retry its own blob URLs.
+    images: input.images.map(cloneComposerImageForRetry),
+    terminalContexts: input.terminalContexts,
+    fileReferences: input.fileReferences,
   });
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -431,10 +509,12 @@ export function buildOutgoingMessageText(input: {
   readonly composer: SendTurnComposerSnapshot;
   readonly formatOutgoingPrompt: ExecuteChatSendTurnInput["formatOutgoingPrompt"];
 }): string {
-  const messageTextForSend = appendTerminalContextsToPrompt(
-    input.composer.prompt,
-    input.composer.sendableTerminalContexts,
-  );
+  // The same composition on every surface, so web, desktop and mobile send identical text.
+  const messageTextForSend = composeOutgoingPrompt({
+    prompt: input.composer.prompt,
+    fileReferences: input.composer.fileReferences,
+    terminalContexts: input.composer.sendableTerminalContexts,
+  });
   return input.formatOutgoingPrompt({
     provider: input.composer.selectedProvider,
     model: input.composer.selectedModel,
@@ -541,6 +621,7 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
 
   const imagesSnapshot = [...composer.images];
   const terminalContextsSnapshot = [...composer.sendableTerminalContexts];
+  const fileReferencesSnapshot = [...(composer.fileReferences ?? [])];
   const sourceControlSnapshot = [...composer.sourceControlContexts];
 
   // The live refs are this thread's only while the view shows it; once the view
@@ -551,11 +632,13 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
         prompt: refs.promptRef.current,
         images: refs.composerImagesRef.current,
         terminalContexts: refs.composerTerminalContextsRef.current,
+        fileReferences: refs.composerFileReferencesRef.current,
       }
     : (draft.readComposerDraftContent(draft.composerDraftTarget) ?? {
         prompt: "",
         images: [],
         terminalContexts: [],
+        fileReferences: [],
       });
 
   const messageCreatedAt = new Date().toISOString();
@@ -614,7 +697,8 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       (liveAtConsume
         ? refs.promptRef.current === draftAtStart.prompt &&
           refs.composerImagesRef.current === draftAtStart.images &&
-          refs.composerTerminalContextsRef.current === draftAtStart.terminalContexts
+          refs.composerTerminalContextsRef.current === draftAtStart.terminalContexts &&
+          refs.composerFileReferencesRef.current === draftAtStart.fileReferences
         : composerDraftContentMatches(
             draft.readComposerDraftContent(draft.composerDraftTarget),
             draftAtStart,
@@ -649,7 +733,7 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
     // Queued snapshots and edits made during preparation belong to the next draft.
     if (consumeDraft) {
       composerCleared = true;
-      if (liveAtConsume) refs.promptRef.current = "";
+      if (liveAtConsume) clearComposerContentRefs(refs);
       draft.clearComposerDraftContent(draft.composerDraftTarget);
       draft.setComposerDraftTokenMode(draft.composerDraftTarget, settings.tokenMode);
       if (liveAtConsume) composerHandle.readComposer()?.resetCursorState();
@@ -667,6 +751,10 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       firstTerminalContextLabel:
         terminalContextsSnapshot.length > 0
           ? formatTerminalContextLabel(terminalContextsSnapshot[0]!)
+          : null,
+      firstFileReferenceTitle:
+        fileReferencesSnapshot.length > 0
+          ? formatComposerReferenceTitle(fileReferencesSnapshot[0]!)
           : null,
     });
     const title = truncate(titleSeedText);
@@ -783,13 +871,20 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       input.claudeCacheReview === undefined
         ? claudeCacheReviewPresentation
         : (input.claudeCacheReview ?? undefined);
+    const confirmStopBackgroundWork =
+      input.confirmStopBackgroundWork === undefined
+        ? confirmStopBackgroundWorkDialog
+        : (input.confirmStopBackgroundWork ?? undefined);
     await commitSendTurnDispatch({
       ...(claudeCacheReview ? { claudeCacheReview } : {}),
+      ...(confirmStopBackgroundWork ? { confirmStopBackgroundWork } : {}),
       // A prepared thread is new: there is no subscribed state of it to review from.
       ...(input.readSubscribedClaudeReviewState && !prepared
         ? { readSubscribedClaudeReviewState: input.readSubscribedClaudeReviewState }
         : {}),
       ...(input.onBeforeTurnStart ? { onBeforeTurnStart: input.onBeforeTurnStart } : {}),
+      // "Don't ask again" on this device; background sends (no presentation) honour it too.
+      skipClaudeResumeReview: isClaudeResumeReviewSkipped,
       providerDriver: composer.selectedProvider,
       sourceProviderDriver: thread.sourceProviderDriver,
       assertMutationReady: captureReviewedSendReadiness(draft.environmentId, () =>
@@ -864,6 +959,7 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
           promptSnapshot: composer.promptForRestore ?? composer.prompt,
           imagesSnapshot,
           terminalContextsSnapshot,
+          fileReferencesSnapshot,
         });
       }
       // The rollback leaves a composer the user typed into meanwhile alone.

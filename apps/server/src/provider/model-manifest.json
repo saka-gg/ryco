@@ -14,7 +14,21 @@
   "compatibility": [
     {
       "driver": "opencode",
-      "rycoRange": ">=0.1.30",
+      "rycoRange": ">=0.1.36",
+      "ranges": [
+        { "range": ">=3.0.0", "status": "unsupported" },
+        {
+          "range": ">=2.0.0 <2.2.0",
+          "status": "unsupported",
+          "message": "Upgrade OpenCode 2 to v2.2.0 or newer."
+        },
+        { "range": ">=2.2.0 <3.0.0", "status": "supported" },
+        { "range": ">=1.14.19 <2.0.0", "status": "supported" }
+      ]
+    },
+    {
+      "driver": "opencode",
+      "rycoRange": ">=0.1.30 <0.1.36",
       "ranges": [
         {
           "range": ">=2.0.0",

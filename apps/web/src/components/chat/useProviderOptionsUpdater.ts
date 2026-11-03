@@ -7,6 +7,7 @@ import type {
 import { useCallback } from "react";
 
 import { useComposerDraftStore, type DraftId } from "../../composerDraftStore";
+import { noteComposerModelSelectionPicked } from "./liveThreadModelSelection";
 
 export type ProviderOptions = ReadonlyArray<ProviderOptionSelection>;
 
@@ -54,6 +55,8 @@ export function useProviderOptionsUpdater(
         model,
         persistSticky: true,
       });
+      // A started chat stores the user's effort or speed pick on its thread.
+      if (threadRef) noteComposerModelSelectionPicked(threadRef);
     },
     [
       disabled,

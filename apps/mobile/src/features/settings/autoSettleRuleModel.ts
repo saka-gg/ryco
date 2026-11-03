@@ -1,9 +1,7 @@
 import {
   autoSettleRuleScopeNote,
-  autoSettleRuleTargetBlocker,
   changeAutoSettleRule,
   readNodeAutoSettleRule,
-  type AutoSettleRuleTarget,
 } from "@ryco/client-runtime/state/settings";
 import type { EnvironmentId, ServerConfig } from "@ryco/contracts";
 import type { ServerSettingsPatch, SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
@@ -93,25 +91,4 @@ export function changeAutoSettleRuleModel(
     value,
     ...writers,
   });
-}
-
-/** Every node "Apply to all connected nodes" tries, writable now or with why not. */
-export function buildAutoSettleRuleTargets(input: {
-  readonly environmentIds: Iterable<EnvironmentId>;
-  readonly configs: ReadonlyMap<EnvironmentId, ServerConfig>;
-  readonly labelOf: (environmentId: EnvironmentId) => string;
-  readonly isOwner: (environmentId: EnvironmentId) => boolean;
-  readonly isConnected: (environmentId: EnvironmentId) => boolean;
-  readonly write: (environmentId: EnvironmentId, patch: ServerSettingsPatch) => Promise<unknown>;
-}): ReadonlyArray<AutoSettleRuleTarget> {
-  return [...new Set(input.environmentIds)].map((environmentId) => ({
-    environmentId,
-    label: input.labelOf(environmentId),
-    blocker: autoSettleRuleTargetBlocker({
-      connected: input.isConnected(environmentId),
-      config: input.configs.get(environmentId),
-      canWrite: input.isOwner(environmentId),
-    }),
-    write: (patch) => input.write(environmentId, patch),
-  }));
 }

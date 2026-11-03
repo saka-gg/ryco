@@ -30,6 +30,9 @@ const formatMib = (bytes: number) => `${(bytes / MIB).toFixed(1)} MiB`;
 export const HTML_RENDER_UNMEASURED_FRAME =
   "an unmeasured frame shrinks to the page but never grows past height";
 
+/** How long one preview capture may take, its load included. */
+export const HTML_RENDER_CAPTURE_TIMEOUT = "20 seconds";
+
 /** The closing advice of every message saying a preview is unavailable. */
 export const HTML_RENDER_WITHOUT_PREVIEW = `ryco_html_render still works without a preview; pass it height ${HTML_RENDER_MAX_HEIGHT}, since ${HTML_RENDER_UNMEASURED_FRAME}.`;
 

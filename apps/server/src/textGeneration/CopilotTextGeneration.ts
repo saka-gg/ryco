@@ -21,17 +21,15 @@ import { CopilotClient, type SessionConfig } from "@github/copilot-sdk";
 import { Effect, Option, Schema } from "effect";
 
 import { makeCopilotClientOptions } from "../provider/Layers/CopilotAdapter.ts";
+import { withCopilotAgentPriority } from "../provider/Layers/CopilotAdapter.types.ts";
+import type { AgentProcessPriorityShape } from "../provider/agentProcessPriority.ts";
 import {
   COPILOT_CLIENT_STOP_TIMEOUT_MS,
   stopCopilotClient,
 } from "../provider/Layers/CopilotAdapter.clientStop.ts";
 import { makeCodexTextGeneration } from "./CodexTextGeneration.ts";
-import { type TextGenerationShape, validateRankInboxThreadsResult } from "./TextGeneration.ts";
-import {
-  buildSideQuestionPrompt,
-  buildThreadPriorityPrompt,
-  buildThreadTitlePrompt,
-} from "./TextGenerationPrompts.ts";
+import type { TextGenerationShape } from "./TextGeneration.ts";
+import { buildSideQuestionPrompt, buildThreadTitlePrompt } from "./TextGenerationPrompts.ts";
 import { extractJsonObject, sanitizeThreadTitleResult } from "./TextGenerationUtils.ts";
 
 /**
@@ -40,7 +38,6 @@ import { extractJsonObject, sanitizeThreadTitleResult } from "./TextGenerationUt
  */
 const COPILOT_NAMING_TIMEOUT_MS = 30_000;
 const COPILOT_NAMING_TIMEOUT_DETAIL = "GitHub Copilot title generation timed out.";
-const COPILOT_INBOX_RANKING_TIMEOUT_MS = 60_000;
 const COPILOT_SIDE_QUESTION_TIMEOUT_MS = 180_000;
 const CODEX_DRIVER_KIND = ProviderDriverKind.make("codex");
 
@@ -128,21 +125,28 @@ function gitTextGenerationSelection(): ModelSelection {
 export const makeCopilotTextGeneration = Effect.fn("makeCopilotTextGeneration")(function* (
   copilotSettings: CopilotSettings,
   environment: NodeJS.ProcessEnv = process.env,
-  clientFactory: (cwd: string, sideQuestion?: boolean) => Effect.Effect<CopilotClient> = (
-    cwd,
-    sideQuestion,
-  ) =>
-    Effect.promise(() =>
-      makeCopilotClientOptions(
-        copilotSettings,
-        sideQuestion ? sideQuestionEnvironment(environment) : environment,
-        cwd,
-      ),
-    ).pipe(Effect.map((options) => new CopilotClient(options))),
+  /** Test seam; the default runs the configured CLI (through `nice` per `processPriority`). */
+  clientFactoryOverride?: (cwd: string, sideQuestion?: boolean) => Effect.Effect<CopilotClient>,
+  options?: { readonly processPriority?: AgentProcessPriorityShape | undefined },
 ) {
+  const processPriority = options?.processPriority;
+  const clientFactory =
+    clientFactoryOverride ??
+    ((cwd: string, sideQuestion?: boolean) =>
+      Effect.promise(() =>
+        makeCopilotClientOptions(
+          copilotSettings,
+          sideQuestion ? sideQuestionEnvironment(environment) : environment,
+          cwd,
+        ),
+      ).pipe(
+        Effect.flatMap((clientOptions) => withCopilotAgentPriority(processPriority, clientOptions)),
+        Effect.map((clientOptions) => new CopilotClient(clientOptions)),
+      ));
   const codexFallback = yield* makeCodexTextGeneration(
     Schema.decodeSync(CodexSettings)({}),
     environment,
+    { processPriority },
   );
 
   const withGitFallbackSelection = <T extends { readonly modelSelection: ModelSelection }>(
@@ -288,57 +292,9 @@ export const makeCopilotTextGeneration = Effect.fn("makeCopilotTextGeneration")(
       }),
     );
 
-  const rankInboxThreads: TextGenerationShape["rankInboxThreads"] = (input) =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const { prompt, outputSchema } = buildThreadPriorityPrompt({
-          serializedCandidates: input.chunk.serializedCandidates,
-        });
-        const client = yield* scopedClient(input.cwd);
-        const sessionConfig: SessionConfig = {
-          ...copilotModelConfig(input.modelSelection),
-          workingDirectory: input.cwd,
-          streaming: false,
-          availableTools: [],
-          onPermissionRequest: () => ({ kind: "reject" }),
-        };
-
-        const content = yield* Effect.tryPromise({
-          try: (signal) =>
-            promptCopilotSession({
-              client,
-              sessionConfig,
-              prompt,
-              timeoutMs: COPILOT_INBOX_RANKING_TIMEOUT_MS,
-              signal,
-            }),
-          catch: (cause) =>
-            new TextGenerationError({
-              operation: "rankInboxThreads",
-              detail:
-                cause instanceof Error
-                  ? `GitHub Copilot inbox ranking failed: ${cause.message}`
-                  : "GitHub Copilot inbox ranking failed.",
-              cause,
-            }),
-        });
-        const parsed = yield* Schema.decodeEffect(Schema.fromJsonString(outputSchema))(
-          extractJsonObject(content),
-        ).pipe(
-          Effect.mapError(
-            (cause) =>
-              new TextGenerationError({
-                operation: "rankInboxThreads",
-                detail: "GitHub Copilot returned invalid inbox ranking JSON.",
-                cause,
-              }),
-          ),
-        );
-        return yield* validateRankInboxThreadsResult(input, parsed.rankings);
-      }),
-    );
-
   return {
+    // Commit messages and pull request text run through the Codex fallback.
+    gitWritingToolFree: codexFallback.gitWritingToolFree,
     generateCommitMessage: (input) =>
       codexFallback.generateCommitMessage(withGitFallbackSelection(input)),
     generatePrContent: (input) => codexFallback.generatePrContent(withGitFallbackSelection(input)),
@@ -347,7 +303,6 @@ export const makeCopilotTextGeneration = Effect.fn("makeCopilotTextGeneration")(
     generateThreadTitle,
     generateIssueContent: (input) =>
       codexFallback.generateIssueContent(withGitFallbackSelection(input)),
-    rankInboxThreads,
     answerSideQuestion,
     summarizeWorkspaceChanges: (input) =>
       codexFallback.summarizeWorkspaceChanges(withGitFallbackSelection(input)),

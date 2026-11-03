@@ -2,13 +2,14 @@ import {
   DIAGNOSTIC_SECRET_KEY_PATTERN,
   redactDiagnosticText,
 } from "@ryco/shared/diagnosticRedaction";
-import { constants } from "node:fs";
+import { REGULAR_FILE_READ_FLAGS } from "@ryco/shared/regularFile";
 import { lstat, open, readdir, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import {
   type DiagnosticsDurationBucket,
+  type DiagnosticsEventLoopHistory,
   type DiagnosticsFailure,
   type DiagnosticsFailureSummary,
   type DiagnosticsResourceSample,
@@ -26,8 +27,13 @@ import {
   isCurrentCanonicalProviderEventLog,
   parseProviderEventLogLine,
 } from "../../provider/providerEventLogRecords.ts";
+import type { EventLoopHistoryReader } from "../../observability/EventLoopStallHistory.ts";
 import type { TraceSinkHealth } from "../../observability/TraceSink.ts";
-import type { TraceRecord } from "../../observability/TraceRecord.ts";
+import {
+  rotatedTraceFilePaths,
+  traceRecordStatus,
+  type TraceRecord,
+} from "../../observability/TraceRecord.ts";
 import { readResourceTelemetry, recordResourceAttribution } from "../ResourceTelemetry.ts";
 import { readProcessDiagnostics } from "../ProcessDiagnostics.ts";
 import { summarizeOperationalMetrics } from "../OperationalMetrics.ts";
@@ -196,14 +202,6 @@ function toIsoFromUnixNano(value: string): string {
   }
 }
 
-function normalizeOtlpSpanStatus(code: string | undefined): DiagnosticsSpan["status"] {
-  if (!code) return "success";
-  if (code === "2" || code === "STATUS_CODE_ERROR") return "error";
-  if (code === "1" || code === "STATUS_CODE_OK") return "success";
-  if (code === "0" || code === "STATUS_CODE_UNSET") return "unset";
-  return "success";
-}
-
 function normalizeSpanSource(record: TraceRecord): DiagnosticsSpan["source"] {
   if (record.type === "effect-span") {
     return "server";
@@ -218,16 +216,6 @@ function normalizeSpanSource(record: TraceRecord): DiagnosticsSpan["source"] {
     return "server";
   }
   return "unknown";
-}
-
-function normalizeSpanStatus(record: TraceRecord): DiagnosticsSpan["status"] {
-  if (record.type === "effect-span") {
-    const exit = record.exit;
-    if (!exit || exit._tag === "Success") return "success";
-    if (exit._tag === "Interrupted") return "interrupted";
-    return "failure";
-  }
-  return normalizeOtlpSpanStatus(record.status?.code);
 }
 
 function spanFailureMessage(record: TraceRecord): string | undefined {
@@ -257,7 +245,7 @@ function toDiagnosticsSpan(record: TraceRecord): DiagnosticsSpan {
     startTime: toIsoFromUnixNano(record.startTimeUnixNano),
     endTime: toIsoFromUnixNano(record.endTimeUnixNano),
     durationMs: Math.max(0, record.durationMs),
-    status: normalizeSpanStatus(record),
+    status: traceRecordStatus(record),
     ...(failureMessage ? { failureMessage } : {}),
     attributes: redactDiagnosticValue(record.attributes ?? {}) as Record<string, unknown>,
   };
@@ -602,10 +590,7 @@ async function readFileTail(filePath: string, maxBytes: number): Promise<string>
   // Also reject links/special files on platforms without O_NOFOLLOW/O_NONBLOCK.
   const before = await lstat(filePath);
   if (!before.isFile()) throw new Error("Diagnostics only reads regular files.");
-  const handle = await open(
-    filePath,
-    constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
-  );
+  const handle = await open(filePath, REGULAR_FILE_READ_FLAGS);
   try {
     const stat = await handle.stat();
     if (!stat.isFile() || stat.dev !== before.dev || stat.ino !== before.ino) {
@@ -790,6 +775,45 @@ async function readProviderEventFailures(input: {
     .slice(-LIST_LIMIT);
 }
 
+/**
+ * The event-loop stall history. Its reader loads with the first snapshot: only the Diagnostics
+ * page asks for it, so it stays off the boot path.
+ */
+function makeLazyEventLoopHistory(serverTracePath: string) {
+  let reader: EventLoopHistoryReader | undefined;
+  return {
+    async read(
+      nowMs: number,
+      warnings: DiagnosticsWarning[],
+    ): Promise<DiagnosticsEventLoopHistory | undefined> {
+      if (reader === undefined) {
+        try {
+          const { makeEventLoopHistoryReader } =
+            await import("../../observability/EventLoopStallHistory.ts");
+          reader ??= makeEventLoopHistoryReader({
+            serverTracePath,
+            readTail: (filePath) => readFileTail(filePath, FILE_TAIL_BYTES),
+            recentLimit: LIST_LIMIT,
+          });
+        } catch (error) {
+          warnings.push({
+            code: "diagnostics.event-loop-history-unavailable",
+            source: "event-loop-stalls",
+            message:
+              error instanceof Error && error.message.trim().length > 0
+                ? error.message
+                : "Unable to load the event-loop stall history reader.",
+          });
+          return undefined;
+        }
+      }
+      return reader.read(nowMs, warnings);
+    },
+    /** The last successful read, for the partial snapshot after a failure. */
+    last: () => reader?.last(),
+  };
+}
+
 function dedupeTraceRecords(records: ReadonlyArray<TraceRecord>): ReadonlyArray<TraceRecord> {
   const byId = new Map<string, TraceRecord>();
   for (const record of records) {
@@ -847,14 +871,11 @@ export const makeDiagnosticsService = Effect.fn("makeDiagnosticsService")(
       const serverStartedAt = new Date(serverStartedAtMs).toISOString();
       const traceRecords = makeRingBuffer<TraceRecord>(TRACE_RECORD_LIMIT);
       const resourceSampler = makeResourceSampler();
-      const scannedFilePaths = [
-        ...Array.from(
-          { length: Math.min(10, Math.max(0, Math.floor(config.traceMaxFiles))) },
-          (_, index) =>
-            `${config.serverTracePath}.${Math.min(10, Math.max(0, Math.floor(config.traceMaxFiles))) - index}`,
-        ),
+      const eventLoopHistory = makeLazyEventLoopHistory(config.serverTracePath);
+      const scannedFilePaths = rotatedTraceFilePaths(
         config.serverTracePath,
-      ];
+        Math.min(10, config.traceMaxFiles),
+      );
       let persistedDiagnosticsCache:
         | {
             readonly expiresAt: number;
@@ -922,8 +943,10 @@ export const makeDiagnosticsService = Effect.fn("makeDiagnosticsService")(
         getSnapshot(input) {
           const snapshotStartedAt = performance.now();
           return Effect.tryPromise(async () => {
-            const generatedAt = new Date().toISOString();
-            const [currentResource, processTree, telemetry] = await Promise.all([
+            const generatedAtMs = Date.now();
+            const generatedAt = new Date(generatedAtMs).toISOString();
+            const eventLoopWarnings: DiagnosticsWarning[] = [];
+            const [currentResource, processTree, telemetry, eventLoop] = await Promise.all([
               resourceSampler.sample(),
               readProcessDiagnostics(),
               readResourceTelemetry({
@@ -931,9 +954,10 @@ export const makeDiagnosticsService = Effect.fn("makeDiagnosticsService")(
                   terminal.pid !== null && terminal.status === "running" ? [terminal.pid] : [],
                 ),
               }),
+              eventLoopHistory.read(generatedAtMs, eventLoopWarnings),
             ]);
             const persistedDiagnostics = await readPersistedShared(generatedAt);
-            const warnings = [...persistedDiagnostics.warnings];
+            const warnings = [...persistedDiagnostics.warnings, ...eventLoopWarnings];
             const allTraceRecords = dedupeTraceRecords([
               ...persistedDiagnostics.traceRecords,
               ...traceRecords.values(),
@@ -1032,6 +1056,7 @@ export const makeDiagnosticsService = Effect.fn("makeDiagnosticsService")(
                 snapshotStartedAt,
                 traceSinkHealth: dependencies?.traceSinkHealth,
               }),
+              ...(eventLoop !== undefined ? { eventLoop } : {}),
               warnings,
             };
           }).pipe(
@@ -1039,6 +1064,7 @@ export const makeDiagnosticsService = Effect.fn("makeDiagnosticsService")(
               Effect.promise(async () => {
                 const generatedAt = new Date().toISOString();
                 const currentResource = await resourceSampler.sample();
+                const lastEventLoopHistory = eventLoopHistory.last();
                 return {
                   generatedAt,
                   serverStartedAt,
@@ -1099,6 +1125,9 @@ export const makeDiagnosticsService = Effect.fn("makeDiagnosticsService")(
                     snapshotStartedAt,
                     traceSinkHealth: dependencies?.traceSinkHealth,
                   }),
+                  ...(lastEventLoopHistory !== undefined
+                    ? { eventLoop: lastEventLoopHistory }
+                    : {}),
                   warnings: [
                     {
                       code: "diagnostics.snapshot-partial",

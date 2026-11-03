@@ -13,6 +13,7 @@ import { readRpcClient, updateEnvironmentServerSettings } from "../../connection
 import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
 import { SettingsRow } from "./components/SettingsRow";
 import { SettingsSection } from "./components/SettingsSection";
+import { canChangeNodeSettings } from "./nodeSettingsTargets";
 
 export function NodeStorageSettings() {
   const nodes = useHomeEnvironments();
@@ -23,11 +24,7 @@ export function NodeStorageSettings() {
           key={node.environmentId}
           environmentId={node.environmentId}
           label={node.label}
-          ready={
-            node.mutationReady === true &&
-            node.role === "owner" &&
-            node.connectionState === "connected"
-          }
+          ready={canChangeNodeSettings(node)}
         />
       ))}
     </>
@@ -92,7 +89,7 @@ function NodeStoragePanel({
     }
     Alert.alert(
       "Enable automatic cleanup?",
-      "This node will remove qualifying archived, stopped, clean, unshared Ryco-owned checkouts after the retention period. Messages, branches and usage history remain. Dirty/untracked/ignored work, submodules, archives and credentials stay protected.",
+      "This node will remove qualifying archived, stopped, unshared Ryco-owned checkouts, with their dependency folders such as node_modules, after the retention period. Messages, branches and usage history remain. Uncommitted and untracked work, .env and other ignored files, submodules, archives and credentials stay protected.",
       [
         { text: "Cancel", style: "cancel" },
         {

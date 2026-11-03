@@ -22,6 +22,8 @@ export interface IssuedSession {
 
 export interface VerifiedSession {
   readonly sessionId: AuthSessionId;
+  /** The pairing (rotation chain) the session belongs to: its first session's id. */
+  readonly chainId: AuthSessionId;
   readonly token: string;
   readonly method: ServerAuthSessionMethod;
   readonly client: AuthClientMetadata;
@@ -32,6 +34,22 @@ export interface VerifiedSession {
   readonly link: AuthAccessLink | null;
 }
 
+export type LinkedSessionSelector =
+  | { readonly enrollmentId: string }
+  /** Every Hub-linked session: the Hub revoked this node, so none of its links stand. */
+  | { readonly allLinks: true }
+  | {
+      readonly clientFingerprint: string;
+      /** Only links of this trust source. */
+      readonly trustSource?: AuthAccessLink["trustSource"];
+      /** Only links of this Hub enrollment; `null` for links that name none. */
+      readonly enrollmentId?: string | null;
+      /** Only links of this Hub account; `null` for links that name none. */
+      readonly accountId?: string | null;
+      /** Only sessions linked at one of these roles. */
+      readonly roles?: ReadonlyArray<AuthAccessLink["role"]>;
+    };
+
 export type SessionCredentialChange =
   | {
       readonly type: "clientUpserted";
@@ -40,6 +58,13 @@ export type SessionCredentialChange =
   | {
       readonly type: "clientRemoved";
       readonly sessionId: AuthSessionId;
+      /** The pairing (rotation chain) the session belonged to. */
+      readonly chainId: AuthSessionId;
+      /**
+       * `revoked`: the pairing ended. `superseded`: a renewal took over from this session and
+       * the pairing goes on under its successor.
+       */
+      readonly reason: "revoked" | "superseded";
     };
 
 export class SessionCredentialError extends Data.TaggedError("SessionCredentialError")<{
@@ -86,8 +111,9 @@ export interface SessionCredentialServiceShape {
     readonly role?: SessionRole;
     readonly client?: AuthClientMetadata;
     /**
-     * A Hub-linked session. It lives at most `LINKED_SESSION_MAX_AGE` from
-     * issue, and rotation never carries its chain past that.
+     * A Hub-linked session. It lives at most `linkedSessionMaxAge` from issue
+     * (four days, a locally verified device's 24 hours), and rotation never
+     * carries its chain past that.
      */
     readonly link?: AuthAccessLink;
   }) => Effect.Effect<IssuedSession, SessionCredentialError>;
@@ -133,17 +159,31 @@ export interface SessionCredentialServiceShape {
   readonly streamChanges: Stream.Stream<SessionCredentialChange>;
   readonly revoke: (sessionId: AuthSessionId) => Effect.Effect<boolean, SessionCredentialError>;
   /**
-   * Ends every Hub-linked session of one device: its Hub enrollment was
-   * revoked, or its local client authorization withdrawn. Returns how many
-   * pairings it revoked.
+   * Ends Hub-linked sessions of one device: its Hub enrollment was revoked, its
+   * local client authorization withdrawn, or its Hub access ended or narrowed
+   * (`accountId` and `roles` narrow the selection); or every one of them, when
+   * the Hub revoked this node. Sessions without a link are never selected.
+   * Returns how many pairings it revoked.
    */
   readonly revokeLinked: (
-    selector: { readonly enrollmentId: string } | { readonly clientFingerprint: string },
+    selector: LinkedSessionSelector,
   ) => Effect.Effect<number, SessionCredentialError>;
   /** Revokes every pairing but this session's own; returns how many pairings it revoked. */
   readonly revokeAllExcept: (
     sessionId: AuthSessionId,
   ) => Effect.Effect<number, SessionCredentialError>;
+  /**
+   * Completes when a session holding a socket stops authenticating: its pairing
+   * was revoked, or a Hub-linked session reached its end (other sessions end
+   * only when revoked). A direct socket closes with it, so revoking a client or
+   * a link takes effect on a live connection, not at its next connect. It also
+   * completes when the session's record cannot be read, so the client checks in
+   * again.
+   */
+  readonly awaitEnd: (session: {
+    readonly sessionId: AuthSessionId;
+    readonly chainId: AuthSessionId;
+  }) => Effect.Effect<void>;
   readonly markConnected: (sessionId: AuthSessionId) => Effect.Effect<void, never>;
   readonly markDisconnected: (sessionId: AuthSessionId) => Effect.Effect<void, never>;
 }

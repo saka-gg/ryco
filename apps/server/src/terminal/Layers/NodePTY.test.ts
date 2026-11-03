@@ -1,7 +1,7 @@
 import { FileSystem, Path, Effect } from "effect";
 import { assert, it } from "@effect/vitest";
 
-import { NodePtyProcess, ensureNodePtySpawnHelperExecutable } from "./NodePTY.ts";
+import { NodePtyProcess, ensureNodePtySpawnHelperExecutable, loadNodePty } from "./NodePTY.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 
 const fakePty = (readProcess: () => unknown) =>
@@ -91,3 +91,20 @@ it.layer(NodeServices.layer)("ensureNodePtySpawnHelperExecutable", (it) => {
     }),
   );
 });
+
+it.effect("leaves terminals unavailable, with the reason, when node-pty cannot load", () =>
+  Effect.gen(function* () {
+    const loaded = yield* loadNodePty(() =>
+      Promise.reject(
+        new Error("Failed to load native module: pty.node\nRequire stack:\n- lib/utils.js"),
+      ),
+    );
+    assert.isNull(loaded.nodePty);
+    const error = yield* Effect.flip(
+      loaded.unavailable!.spawn({ shell: "/bin/sh", cwd: "/", cols: 80, rows: 24, env: {} }),
+    );
+    assert.equal(error._tag, "PtySpawnError");
+    assert.include(error.message, "Terminals are unavailable");
+    assert.include(error.message, "(Failed to load native module: pty.node).");
+  }),
+);

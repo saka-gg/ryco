@@ -3,15 +3,18 @@ import {
   type ModelCapabilities,
   ProviderDriverKind,
   type ServerProvider,
+  type ServerProviderAuth,
   type ServerProviderModel,
+  type ServerProviderSlashCommand,
 } from "@ryco/contracts";
-import type * as EffectAcpSchema from "effect-acp/schema";
+import * as EffectAcpSchema from "effect-acp/schema";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import { HttpClient } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { createModelCapabilities } from "@ryco/shared/model";
@@ -23,13 +26,21 @@ import {
   providerModelsFromSettings,
   spawnAndCollect,
   type ServerProviderDraft,
+  withProviderRateLimits,
 } from "../providerSnapshot.ts";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
   type ProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
-import { makeGrokAcpRuntime, resolveGrokAcpBaseModelId } from "../acp/GrokAcpSupport.ts";
+import {
+  GROK_HIDDEN_SLASH_COMMANDS,
+  makeGrokAcpRuntime,
+  resolveGrokAcpBaseModelId,
+  usesGrokApiKey,
+} from "../acp/GrokAcpSupport.ts";
+import { acpAvailableCommandsToSlashCommands } from "../providerSlashCommands.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../../serverSettings.ts";
+import type { GrokAccount } from "./GrokUsage.ts";
 
 const GROK_PRESENTATION = {
   displayName: "Grok",
@@ -124,6 +135,25 @@ function buildGrokDiscoveredModelsFromSessionModelState(
     .filter((model): model is ServerProviderModel => model !== undefined);
 }
 
+const decodeAvailableCommand = Schema.decodeUnknownOption(EffectAcpSchema.AvailableCommand);
+
+/**
+ * The built-in commands Grok lists in its `initialize` response (`_meta.availableCommands`),
+ * without the hidden ones; entries that are not ACP commands are dropped. A directory's own
+ * commands come from its sessions (`readLiveProjectCommands`), never from this probe, which
+ * runs in the server's directory.
+ */
+export function grokSlashCommandsFromInitialize(
+  initializeResult: Pick<EffectAcpSchema.InitializeResponse, "_meta">,
+): ReadonlyArray<ServerProviderSlashCommand> {
+  const listed = initializeResult._meta?.["availableCommands"];
+  if (!Array.isArray(listed)) return [];
+  return acpAvailableCommandsToSlashCommands(
+    listed.flatMap((entry) => Option.toArray(decodeAvailableCommand(entry))),
+    { hidden: GROK_HIDDEN_SLASH_COMMANDS },
+  );
+}
+
 const discoverGrokModelsViaAcp = (
   grokSettings: GrokSettings,
   environment: NodeJS.ProcessEnv = process.env,
@@ -138,7 +168,10 @@ const discoverGrokModelsViaAcp = (
       clientInfo: { name: "ryco-provider-probe", version: "0.0.0" },
     });
     const started = yield* acp.start();
-    return buildGrokDiscoveredModelsFromSessionModelState(started.sessionSetupResult.models);
+    return {
+      models: buildGrokDiscoveredModelsFromSessionModelState(started.sessionSetupResult.models),
+      slashCommands: grokSlashCommandsFromInitialize(started.initializeResult),
+    };
   }).pipe(Effect.scoped);
 
 const runGrokVersionCommand = (
@@ -158,6 +191,8 @@ const runGrokVersionCommand = (
 export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(function* (
   grokSettings: GrokSettings,
   environment: NodeJS.ProcessEnv = process.env,
+  // The instance's account read (`GrokDriver` passes its gated one); used only once ready.
+  resolveAccount?: (environment: NodeJS.ProcessEnv) => Effect.Effect<GrokAccount>,
 ): Effect.fn.Return<ServerProviderDraft, never, ChildProcessSpawner.ChildProcessSpawner> {
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const fallbackModels = grokModelsFromSettings(grokSettings.customModels);
@@ -284,25 +319,63 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
       },
     });
   }
-  const discoveredModels = discoveryExit.value.value;
+  const { models: discoveredModels, slashCommands } = discoveryExit.value.value;
   const models =
     discoveredModels.length > 0
       ? grokModelsFromSettings(grokSettings.customModels, discoveredModels)
       : fallbackModels;
+  // ACP startup authenticated, and the CLI may have renewed its token meanwhile, so the login it
+  // keeps is now the one to read. Reading it never fails the probe.
+  const account = resolveAccount
+    ? yield* resolveAccount(environment).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Grok account read failed", { cause: Cause.pretty(cause) }).pipe(
+            Effect.as<GrokAccount>({}),
+          ),
+        ),
+      )
+    : {};
 
   return buildServerProvider({
     presentation: GROK_PRESENTATION,
     enabled: grokSettings.enabled,
     checkedAt,
     models,
+    slashCommands,
+    ...(account.rateLimits ? { rateLimits: account.rateLimits } : {}),
     probe: {
       installed: true,
       version,
       status: "ready",
-      auth: { status: "unknown" },
+      auth: grokAccountAuth(environment, account),
     },
   });
 });
+
+/**
+ * How a Grok instance that started an ACP session is signed in: with its xAI API key, or with the
+ * CLI login (named by its email when the login could be read).
+ */
+function grokAccountAuth(environment: NodeJS.ProcessEnv, account: GrokAccount): ServerProviderAuth {
+  return usesGrokApiKey(environment)
+    ? { status: "authenticated", type: "apiKey", label: "xAI API key" }
+    : { status: "authenticated", ...(account.email ? { email: account.email } : {}) };
+}
+
+/**
+ * A ready `snapshot` with a newer read of its account: its credit usage, and the email of the login
+ * those credits belong to. The ACP start that made it ready still vouches for the sign-in.
+ */
+export function withGrokAccount(
+  snapshot: ServerProvider,
+  environment: NodeJS.ProcessEnv,
+  account: GrokAccount,
+): ServerProvider {
+  return {
+    ...withProviderRateLimits(snapshot, account.rateLimits),
+    auth: grokAccountAuth(environment, account),
+  };
+}
 
 export const enrichGrokSnapshot = (input: {
   readonly snapshot: ServerProvider;

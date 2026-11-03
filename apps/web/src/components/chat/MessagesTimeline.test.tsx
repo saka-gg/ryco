@@ -39,6 +39,41 @@ vi.mock("@legendapp/list/react", async () => {
   return { LegendList };
 });
 
+// The row reads thread titles from the store (see below); its browser test renders it. Here it
+// only shows which messages the timeline hands it.
+vi.mock("./InterThreadMessageRow", () => ({
+  InterThreadMessageRow: (props: {
+    message: { text: string };
+    inter: { kind: string; senderThreadId?: string | null };
+  }) => (
+    <div
+      data-inter-thread-message={props.inter.kind}
+      data-sender={props.inter.senderThreadId ?? "none"}
+    >
+      {props.message.text}
+    </div>
+  ),
+}));
+
+// Node resolves client-runtime's zustand to a second React copy (the browser
+// build dedupes it), so the thread store's `useStore` cannot render under
+// `renderToStaticMarkup` here. The leaf only swaps in the store's live text for
+// a streaming message; these cases render the text they pass.
+vi.mock("./StreamedMessageMarkdown", async () => {
+  const { default: ChatMarkdown } = await import("../ChatMarkdown");
+  return {
+    useStreamedMessageText: (_routeThreadKey: string, _streamingMessageId: unknown, text: string) =>
+      text,
+    StreamedMessageMarkdown: ({
+      routeThreadKey: _routeThreadKey,
+      streamingMessageId: _streamingMessageId,
+      ...props
+    }: { routeThreadKey: string; streamingMessageId: unknown } & Parameters<
+      typeof ChatMarkdown
+    >[0]) => <ChatMarkdown {...props} />,
+  };
+});
+
 function matchMedia() {
   return {
     matches: false,
@@ -77,6 +112,10 @@ beforeAll(() => {
       classList,
       offsetHeight: 0,
     },
+    // The source-control query registry ChatMarkdown's link handling reads subscribes to
+    // page lifecycle events when it loads.
+    addEventListener: () => {},
+    removeEventListener: () => {},
   });
 });
 
@@ -214,6 +253,44 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("Terminal 1 lines 1-5");
     expect(markup).toContain("lucide-terminal");
     expect(markup).toContain("yoo what&#x27;s ");
+  }, 20_000);
+
+  it("sets another chat's message apart and keeps a typed message open", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const message = (id: string, text: string) => ({
+      id,
+      kind: "message" as const,
+      createdAt: "2026-03-17T19:12:28.000Z",
+      message: {
+        id: MessageId.make(id),
+        role: "user" as const,
+        text,
+        createdAt: "2026-03-17T19:12:28.000Z",
+        streaming: false,
+      },
+    });
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          message("message-agent-control-op-1-send-message", "Rebase onto main.\nThen test."),
+          message("message-agent-control-op-2-from:child-9b-send-message", "PR #1004 is green."),
+          message("delegation-result:child-9b", "Ryco delegation update."),
+          message("goal-continuation:1", "Keep going."),
+          message("message-typed", "Hello from a person"),
+        ]}
+      />,
+    );
+
+    expect(markup).toContain('data-inter-thread-message="agent-message" data-sender="none"');
+    expect(markup).toContain('data-sender="child-9b"');
+    expect(markup).toContain('data-inter-thread-message="delegation-result"');
+    expect(markup).toContain("Rebase onto main.\nThen test.");
+    expect(markup).not.toContain('data-agent-message-fold="agent-message"');
+    expect(markup).not.toContain('data-agent-message-fold="delegation-result"');
+    expect(markup).toContain("Hello from a person");
+    // Ryco's own wakes keep their one-line fold.
+    expect(markup).toContain('data-agent-message-fold="goal-continuation"');
   }, 20_000);
 
   it("renders context compaction entries as timeline markers", async () => {
@@ -365,6 +442,52 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain("lucide-arrow-left-right");
     expect(markup).not.toContain("Context handoff from");
     expect(markup).not.toContain("Fable 5");
+  });
+
+  it("says why a fresh session got the conversation when the provider lost its history", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const sameModel = makeContextHandoffMarker().target;
+    const consumed = makeContextHandoffMarker({
+      id: "context-handoff:history-gone",
+      handoffId: ContextHandoffId.make("handoff-history-gone"),
+      reason: "native-history-unavailable",
+      sources: [sameModel],
+      target: sameModel,
+    });
+    const uncertain = makeContextHandoffMarker({
+      id: "context-handoff:history-gone-uncertain",
+      handoffId: ContextHandoffId.make("handoff-history-gone-uncertain"),
+      reason: "native-history-unavailable",
+      status: "delivery-uncertain",
+      error: "Ryco restarted before the provider confirmed the message.",
+      sources: [sameModel],
+      target: sameModel,
+    });
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[consumed, uncertain].map((marker) => ({
+          id: marker.id,
+          kind: "context-handoff" as const,
+          createdAt: marker.createdAt,
+          marker,
+        }))}
+      />,
+    );
+
+    expect(markup.match(/data-context-handoff-reason="native-history-unavailable"/g)).toHaveLength(
+      2,
+    );
+    expect(markup).toContain("Continued in a fresh session");
+    expect(markup).toContain(
+      'aria-label="Fresh session. Delivery uncertain: Ryco restarted before the provider confirmed the message"',
+    );
+    expect(markup).toContain("lucide-history");
+    // An unconfirmed delivery is never sent again, so it offers no retry.
+    expect(markup).not.toContain("data-context-handoff-retry-hint");
+    expect(markup).not.toContain("lucide-folder-input");
+    expect(markup).not.toContain("lucide-arrow-right");
+    expect(markup).not.toContain("Context handoff from");
   });
 
   it("renders a fork's handoff as its inherited conversation reaching a fresh session", async () => {

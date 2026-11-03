@@ -1,8 +1,12 @@
 import { isQuitShortcutChord } from "./quitShortcut.ts";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
-import type { DesktopBridge } from "@ryco/contracts";
+import type { DesktopBridge, DesktopQuitGuardResponder } from "@ryco/contracts";
 import { DESKTOP_WORKSPACE_IPC } from "./desktopWorkspaceChannels.ts";
+import { PASTE_AS_TEXT_CHANNEL } from "./editMenu.ts";
+import { answerQuitGuardRequest, DESKTOP_QUIT_GUARD_IPC } from "./quitGuardChannels.ts";
 import { DESKTOP_STARTUP_MARKS_CHANNEL, observeRendererStartupMarks } from "./startupMarks.ts";
+import { THREAD_NOTIFICATION_IPC } from "./threadNotificationChannels.ts";
+import { WINDOW_CAPTURE_IPC } from "./windowCaptureChannels.ts";
 
 // Capture before app/terminal listeners, without suppressing Electron key releases.
 function suppressQuitShortcut(event: KeyboardEvent): void {
@@ -41,7 +45,6 @@ const MENU_ACTION_CHANNEL = "desktop:menu-action";
 const SYSTEM_RESUMED_CHANNEL = "desktop:system-resumed";
 const UPDATE_STATE_CHANNEL = "desktop:update-state";
 const UPDATE_GET_STATE_CHANNEL = "desktop:update-get-state";
-const UPDATE_SET_CHANNEL_CHANNEL = "desktop:update-set-channel";
 const UPDATE_CHECK_CHANNEL = "desktop:update-check";
 const UPDATE_DOWNLOAD_CHANNEL = "desktop:update-download";
 const UPDATE_INSTALL_CHANNEL = "desktop:update-install";
@@ -70,7 +73,7 @@ const SET_SERVER_EXPOSURE_MODE_CHANNEL = "desktop:set-server-exposure-mode";
 const SET_TAILSCALE_SERVE_ENABLED_CHANNEL = "desktop:set-tailscale-serve-enabled";
 const GET_HUB_LAUNCH_CONFIG_CHANNEL = "desktop:get-hub-launch-config";
 const GET_KEEP_AWAKE_STATE_CHANNEL = "desktop:get-keep-awake-state";
-const SET_KEEP_AWAKE_ENABLED_CHANNEL = "desktop:set-keep-awake-enabled";
+const SET_KEEP_AWAKE_MODE_CHANNEL = "desktop:set-keep-awake-mode";
 const SET_HUB_LAUNCH_CONFIG_CHANNEL = "desktop:set-hub-launch-config";
 const RESTART_APP_CHANNEL = "desktop:restart-app";
 const VALIDATE_HUB_ORIGIN_CHANNEL = "desktop:validate-hub-origin";
@@ -81,8 +84,6 @@ const CONNECT_HOSTED_GITHUB_CHANNEL = "desktop:connect-hosted-github";
 const DISCONNECT_HOSTED_GITHUB_CHANNEL = "desktop:disconnect-hosted-github";
 const CANCEL_HOSTED_GITHUB_CONNECTION_CHANNEL = "desktop:cancel-hosted-github-connection";
 const GET_ADVERTISED_ENDPOINTS_CHANNEL = "desktop:get-advertised-endpoints";
-const NOTIFY_TURN_COMPLETE_CHANNEL = "desktop:notify-turn-complete";
-const TURN_COMPLETE_NOTIFICATION_ACTIVATED_CHANNEL = "desktop:turn-complete-notification-activated";
 const SSH_PASSWORD_PROMPT_CANCELLED_RESULT = "ssh-password-prompt-cancelled";
 
 // Fixed for the lifetime of a page: main creates the backend URL and token once
@@ -99,6 +100,45 @@ observeRendererStartupMarks({
   performance,
   PerformanceObserver: typeof PerformanceObserver === "function" ? PerformanceObserver : undefined,
   report: (report) => ipcRenderer.send(DESKTOP_STARTUP_MARKS_CHANNEL, report),
+});
+
+function subscribe<T>(channel: string, listener: (payload: T) => void): () => void {
+  const wrapped = (_event: Electron.IpcRendererEvent, payload: T) => listener(payload);
+  ipcRenderer.on(channel, wrapped);
+  return () => ipcRenderer.removeListener(channel, wrapped);
+}
+
+// Window capture runs the macOS helper; elsewhere the bridge omits it, so the
+// composer shows no capture entry.
+const windowCaptureBridge: DesktopBridge["windowCapture"] =
+  process.platform === "darwin"
+    ? {
+        getState: () => ipcRenderer.invoke(WINDOW_CAPTURE_IPC.getState),
+        setup: (permissions) => ipcRenderer.invoke(WINDOW_CAPTURE_IPC.setup, permissions),
+        setShortcut: (shortcut) => ipcRenderer.invoke(WINDOW_CAPTURE_IPC.setShortcut, shortcut),
+        listWindows: () => ipcRenderer.invoke(WINDOW_CAPTURE_IPC.listWindows),
+        captureWindow: (windowId) => ipcRenderer.invoke(WINDOW_CAPTURE_IPC.captureWindow, windowId),
+        listPendingCaptures: () => ipcRenderer.invoke(WINDOW_CAPTURE_IPC.listPendingCaptures),
+        readPendingCapture: (captureId) =>
+          ipcRenderer.invoke(WINDOW_CAPTURE_IPC.readPendingCapture, captureId),
+        acknowledgeCapture: (captureId) =>
+          ipcRenderer.invoke(WINDOW_CAPTURE_IPC.acknowledgeCapture, captureId),
+        onState: (listener) => subscribe(WINDOW_CAPTURE_IPC.state, listener),
+        onCaptured: (listener) => subscribe(WINDOW_CAPTURE_IPC.captured, listener),
+        onError: (listener) => subscribe(WINDOW_CAPTURE_IPC.error, listener),
+      }
+    : undefined;
+
+// Main asks before a quit which chats quitting would stop. Answered here from the first
+// request on: without a responder (the app has not loaded it yet) the answer is "unavailable",
+// so main quits at once instead of waiting out its timeout.
+let quitGuardResponder: DesktopQuitGuardResponder | null = null;
+ipcRenderer.on(DESKTOP_QUIT_GUARD_IPC.request, (_event, raw: unknown) => {
+  void answerQuitGuardRequest(quitGuardResponder, raw)
+    .then((reply) => {
+      if (reply !== null) ipcRenderer.send(DESKTOP_QUIT_GUARD_IPC.reply, reply);
+    })
+    .catch(() => undefined);
 });
 
 function unwrapEnsureSshEnvironmentResult(result: unknown) {
@@ -125,6 +165,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     command: (input) => ipcRenderer.invoke("desktop:browser:command", input),
     surface: (input) => ipcRenderer.invoke("desktop:browser:surface", input),
     capture: (tab) => ipcRenderer.invoke("desktop:browser:capture", tab),
+    pick: (tab) => ipcRenderer.invoke("desktop:browser:pick", tab),
     discover: (cwd) => ipcRenderer.invoke("desktop:browser:discover", cwd),
     onFocusAddress: (listener) => {
       const wrapped = (_event: Electron.IpcRendererEvent, tab: string) => listener(tab);
@@ -174,6 +215,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       return () => ipcRenderer.removeListener("desktop:computer-use:changed", wrapped);
     },
   },
+  ...(windowCaptureBridge ? { windowCapture: windowCaptureBridge } : {}),
   getAppBranding: () => {
     if (cachedAppBranding !== null) return cachedAppBranding;
     const result = ipcRenderer.sendSync(GET_APP_BRANDING_CHANNEL);
@@ -196,6 +238,16 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     if (bootstrap?.httpBaseUrl) cachedLocalEnvironmentBootstrap = bootstrap;
     return bootstrap;
   },
+  cliCommand: {
+    getState: () => ipcRenderer.invoke("desktop:cli-command-state"),
+    install: () => ipcRenderer.invoke("desktop:cli-command-install"),
+    uninstall: () => ipcRenderer.invoke("desktop:cli-command-uninstall"),
+  },
+  nightly: {
+    getState: () => ipcRenderer.invoke("desktop:nightly-state"),
+    open: (input) => ipcRenderer.invoke("desktop:nightly-open", input),
+    switchBack: () => ipcRenderer.invoke("desktop:nightly-switch-back"),
+  },
   quitShortcut: {
     getMode: () => ipcRenderer.invoke("desktop:quit-shortcut-get"),
     setMode: (mode) => ipcRenderer.invoke("desktop:quit-shortcut-set", mode),
@@ -204,6 +256,14 @@ contextBridge.exposeInMainWorld("desktopBridge", {
         listener(state);
       ipcRenderer.on("desktop:quit-shortcut-feedback", handler);
       return () => ipcRenderer.removeListener("desktop:quit-shortcut-feedback", handler);
+    },
+  },
+  quitGuard: {
+    register: (responder) => {
+      quitGuardResponder = responder;
+      return () => {
+        if (quitGuardResponder === responder) quitGuardResponder = null;
+      };
     },
   },
   appKeybindings: {
@@ -263,7 +323,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     ipcRenderer.invoke(SET_TAILSCALE_SERVE_ENABLED_CHANNEL, input),
   getHubLaunchConfig: () => ipcRenderer.invoke(GET_HUB_LAUNCH_CONFIG_CHANNEL),
   getKeepAwakeState: () => ipcRenderer.invoke(GET_KEEP_AWAKE_STATE_CHANNEL),
-  setKeepAwakeEnabled: (enabled) => ipcRenderer.invoke(SET_KEEP_AWAKE_ENABLED_CHANNEL, enabled),
+  setKeepAwakeMode: (mode) => ipcRenderer.invoke(SET_KEEP_AWAKE_MODE_CHANNEL, mode),
   restartApp: () => ipcRenderer.invoke(RESTART_APP_CHANNEL),
   getHostedIdentityState: () => ipcRenderer.invoke(GET_HOSTED_IDENTITY_STATUS_CHANNEL),
   connectHostedIdentity: () => ipcRenderer.invoke(CONNECT_HOSTED_IDENTITY_CHANNEL),
@@ -358,6 +418,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       ipcRenderer.removeListener(MENU_ACTION_CHANNEL, wrappedListener);
     };
   },
+  pasteAsText: () => ipcRenderer.invoke(PASTE_AS_TEXT_CHANNEL),
   onSystemResume: (listener) => {
     const wrappedListener = () => {
       listener();
@@ -368,7 +429,6 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     };
   },
   getUpdateState: () => ipcRenderer.invoke(UPDATE_GET_STATE_CHANNEL),
-  setUpdateChannel: (channel) => ipcRenderer.invoke(UPDATE_SET_CHANNEL_CHANNEL, channel),
   checkForUpdate: () => ipcRenderer.invoke(UPDATE_CHECK_CHANNEL),
   downloadUpdate: () => ipcRenderer.invoke(UPDATE_DOWNLOAD_CHANNEL),
   installUpdate: () => ipcRenderer.invoke(UPDATE_INSTALL_CHANNEL),
@@ -385,19 +445,12 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       ipcRenderer.removeListener(UPDATE_STATE_CHANNEL, wrappedListener);
     };
   },
-  notifyTurnComplete: (notification) =>
-    ipcRenderer.invoke(NOTIFY_TURN_COMPLETE_CHANNEL, notification),
-  onTurnCompleteNotificationActivated: (listener) => {
-    const wrappedListener = (_event: Electron.IpcRendererEvent, notification: unknown) => {
-      if (typeof notification !== "object" || notification === null) return;
-      listener(notification as Parameters<typeof listener>[0]);
-    };
-
-    ipcRenderer.on(TURN_COMPLETE_NOTIFICATION_ACTIVATED_CHANNEL, wrappedListener);
-    return () => {
-      ipcRenderer.removeListener(TURN_COMPLETE_NOTIFICATION_ACTIVATED_CHANNEL, wrappedListener);
-    };
-  },
+  notifyThread: (notification) => ipcRenderer.invoke(THREAD_NOTIFICATION_IPC.notify, notification),
+  onThreadNotificationActivated: (listener) =>
+    subscribe(THREAD_NOTIFICATION_IPC.activated, listener),
+  setNotificationBadge: (badge) => ipcRenderer.invoke(THREAD_NOTIFICATION_IPC.setBadge, badge),
+  onNotificationBadgeCleared: (listener) =>
+    subscribe(THREAD_NOTIFICATION_IPC.badgeCleared, () => listener()),
 } satisfies DesktopBridge);
 
 if (startupTimingEnabled) {

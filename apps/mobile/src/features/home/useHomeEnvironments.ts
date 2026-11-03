@@ -8,7 +8,7 @@ import { useShallow } from "zustand/react/shallow";
 
 import { getCachedHubNodeRoster, subscribeCachedHubNodeRoster } from "../../hostedHub/nodeRoster";
 import { useMobileHostedConnectionsStore } from "../../hostedHub/state";
-import { readEnvironmentApi } from "../../connection/environmentApi";
+import { useEnvironmentsWithApi } from "../../connection/useEnvironmentApi";
 import { selectCacheHydratedEnvironmentIds, useStore } from "../../state/threadsRuntime";
 import { useSavedEnvironments } from "../connection/useConnectionController";
 import {
@@ -57,6 +57,10 @@ export function useHomeEnvironments(options?: {
   // snapshot is a stable reference between commits, so this does not re-derive
   // per render.
   const authoritativeTrustByEnvironmentId = useAuthoritativeNodeTrust(rosterNodes);
+  // Subscribed: a `readEnvironmentApi` call inside the memo below would be
+  // cached on its inputs, so a node whose client registered after them would
+  // keep reading as unavailable.
+  const environmentsWithApi = useEnvironmentsWithApi();
   const trustByEnvironmentId = useMemo(
     () => deriveNodeTrustByEnvironment({ authoritativeTrustByEnvironmentId }),
     [authoritativeTrustByEnvironmentId],
@@ -87,15 +91,18 @@ export function useHomeEnvironments(options?: {
       buildHomeEnvironments({
         reportedThreadCapabilities,
         shellSettlementRules,
-        direct: directRows.map((row) => ({
-          environmentId: row.record.environmentId,
-          label: row.record.label,
-          connectionState: row.runtime.connectionState,
-          role: row.runtime.role,
-          descriptorCapabilities: row.runtime.descriptor?.capabilities ?? null,
-          shellCurrent: shellCurrentByEnvironmentId[row.record.environmentId] === true,
-          apiAvailable: readEnvironmentApi(row.record.environmentId) !== undefined,
-        })),
+        // A node switched off takes no part in the workspace until it is on.
+        direct: directRows
+          .filter((row) => !row.switchedOff)
+          .map((row) => ({
+            environmentId: row.record.environmentId,
+            label: row.record.label,
+            connectionState: row.runtime.connectionState,
+            role: row.runtime.role,
+            descriptorCapabilities: row.runtime.descriptor?.capabilities ?? null,
+            shellCurrent: shellCurrentByEnvironmentId[row.record.environmentId] === true,
+            apiAvailable: environmentsWithApi.has(row.record.environmentId),
+          })),
         hosted: hosted.selectedNodes
           .filter((connection) => eligibleHostedEnvironmentIds.has(connection.environmentId))
           .map((connection) => ({
@@ -105,7 +112,7 @@ export function useHomeEnvironments(options?: {
             sessionStatus: connection.sessionStatus,
             role: connection.effectiveRole,
             shellCurrent: shellCurrentByEnvironmentId[connection.environmentId] === true,
-            apiAvailable: readEnvironmentApi(connection.environmentId) !== undefined,
+            apiAvailable: environmentsWithApi.has(connection.environmentId),
           })),
         cachedHubNodes: rosterNodes
           .filter((node) => eligibleHostedEnvironmentIds.has(node.environmentId))
@@ -127,6 +134,7 @@ export function useHomeEnvironments(options?: {
       cacheProvenanceEnvironmentIds,
       directRows,
       eligibleHostedEnvironmentIds,
+      environmentsWithApi,
       hosted,
       lastSeenNow,
       reportedThreadCapabilities,

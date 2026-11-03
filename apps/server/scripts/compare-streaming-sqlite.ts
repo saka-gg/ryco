@@ -29,7 +29,12 @@ const run = (version: keyof typeof refs, bytes: number, profile: string, sample:
       profile,
     ],
     {
-      env: { ...process.env, RYCO_SQLITE_FIXTURE_REF: refs[version] },
+      // Timed without the row-write counters, as the recorded samples were.
+      env: {
+        ...process.env,
+        RYCO_SQLITE_FIXTURE_REF: refs[version],
+        RYCO_SQLITE_FIXTURE_ROW_WRITES: "0",
+      },
       encoding: "utf8",
       maxBuffer: 8 * 1024 * 1024,
     },

@@ -1,0 +1,1348 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { NetService } from "@ryco/shared/Net";
+import { TurnId, type OrchestrationEvent } from "@ryco/contracts";
+import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuation";
+import { assert, describe, it } from "@effect/vitest";
+import { Cause, Effect, Exit, Fiber, Layer, Queue, References, Stream } from "effect";
+import { Command } from "effect/cli";
+import { TestClock, TestConsole } from "effect/testing";
+
+import {
+  readThreadMessageLimit,
+  toReadThreadResult,
+} from "../agentControl/Mcp/threadTranscript.ts";
+import { AuthControlPlaneRuntimeLive } from "../auth/Layers/AuthControlPlane.ts";
+import { AuthControlPlane } from "../auth/Services/AuthControlPlane.ts";
+import { cli } from "../cli.ts";
+import type { CliRemoteRpcClient } from "../cliRemote/remotes.ts";
+import { deriveServerPaths, ServerConfig, type ServerConfigShape } from "../config.ts";
+import {
+  localProjectPath,
+  localThreadTarget,
+  readPrompt,
+  readThread,
+  sendToThread,
+  startThread,
+  ThreadCliError,
+  waitForThread,
+  type ThreadCliTarget,
+} from "./threadCommands.ts";
+import { isThreadDetailEvent } from "../ws/context/orchestrationEvents.ts";
+import { formatTranscript, runExitCode, type RunResult } from "./threadRun.ts";
+
+const AT = "2026-10-28T10:00:00.000Z";
+const LATER = "2026-10-28T10:05:00.000Z";
+const THREAD = "thread-1";
+
+/** What a dropped socket fails the client's calls with. */
+class SocketClosed extends Error {
+  readonly _tag = "RpcClientError";
+}
+
+type Json = Record<string, unknown>;
+
+const session = (
+  status: string,
+  activeTurnId: string | null = null,
+  extra: { readonly lastError?: string; readonly updatedAt?: string } = {},
+) => ({
+  threadId: THREAD,
+  status,
+  providerName: "codex",
+  runtimeMode: "auto",
+  activeTurnId,
+  lastError: extra.lastError ?? null,
+  updatedAt: extra.updatedAt ?? AT,
+});
+
+const turn = (turnId: string, state: string, userMessageId?: string) => ({
+  turnId,
+  state,
+  requestedAt: AT,
+  startedAt: AT,
+  completedAt: state === "running" ? null : LATER,
+  assistantMessageId: null,
+  ...(userMessageId === undefined ? {} : { userMessageId }),
+});
+
+/** A follow-up a person queued on the thread. */
+const personEntry = {
+  messageId: "message-person",
+  text: "Fix the typo first",
+  attachments: [],
+  modelSelection: { instanceId: "codex", model: "gpt-5.5" },
+  runtimeMode: "auto",
+  interactionMode: "plan",
+  createdAt: AT,
+  updatedAt: AT,
+  revision: 1,
+  status: "queued",
+  author: "user",
+};
+
+const baseShell = (id: string, extra: Json = {}): Json => ({
+  id,
+  projectId: "project-1",
+  title: "Thread",
+  modelSelection: { instanceId: "codex", model: "gpt-5.5" },
+  runtimeMode: "auto",
+  interactionMode: "plan",
+  tokenMode: "off",
+  branch: null,
+  worktreePath: null,
+  latestTurn: null,
+  createdAt: AT,
+  updatedAt: AT,
+  archivedAt: null,
+  session: null,
+  latestUserMessageAt: null,
+  hasPendingApprovals: false,
+  hasPendingUserInput: false,
+  hasActionableProposedPlan: false,
+  ...extra,
+});
+
+/**
+ * One node serving one thread over the fake RPC client: its shell, its message history
+ * and its event log. Events published while the node is offline are only logged; a
+ * resubscribe that resumes after a sequence replays them.
+ */
+const makeNode = Effect.sync(() => {
+  const node = {
+    shell: null as Json | null,
+    messages: [] as Json[],
+    log: [] as Json[],
+    sequence: 100,
+    online: true,
+    subscribers: new Set<Queue.Queue<unknown, SocketClosed | Cause.Done>>(),
+    resumes: [] as Array<number | undefined>,
+    dispatched: [] as Json[],
+    connects: 0,
+    projects: [
+      { id: "project-1", title: "App", workspaceRoot: "/work/app", scripts: [] },
+    ] as Json[],
+    /** The environment's capabilities; `serverFollowUpQueue` makes `send` queue on the node. */
+    capabilities: {} as Json,
+    /** The thread's follow-up queue, as its window carries it. */
+    queue: null as { entries: Json[]; hold: Json | null } | null,
+    /** Whether a resubscribe replays the events it missed; false sends a fresh window. */
+    replays: true,
+    /** Answers a turn start; defaults to accepting it. */
+    onDispatch: (_command: Json): Error | null => null,
+  };
+  const publish = (type: string, payload: Json) => {
+    node.sequence += 1;
+    const event = {
+      sequence: node.sequence,
+      eventId: `event-${node.sequence}`,
+      aggregateKind: "thread",
+      aggregateId: THREAD,
+      occurredAt: AT,
+      commandId: null,
+      causationEventId: null,
+      correlationId: null,
+      metadata: {},
+      type,
+      payload,
+    };
+    node.log.push(event);
+    // As the node's thread subscription forwards them: thread detail and its queue only.
+    if (node.online && isThreadDetailEvent(event as unknown as OrchestrationEvent)) {
+      for (const queue of node.subscribers) Queue.offerUnsafe(queue, { kind: "event", event });
+    }
+  };
+  const drop = Effect.gen(function* () {
+    node.online = false;
+    for (const queue of node.subscribers) yield* Queue.fail(queue, new SocketClosed("closed"));
+    node.subscribers.clear();
+  });
+  /** A quick restart under a reconnecting socket: the feeds end, reads keep working. */
+  const endFeeds = Effect.gen(function* () {
+    for (const queue of node.subscribers) yield* Queue.end(queue);
+    node.subscribers.clear();
+  });
+  const offline = <A>(value: () => A) =>
+    Effect.suspend(() =>
+      node.online ? Effect.succeed(value()) : Effect.fail(new SocketClosed("closed")),
+    );
+  const client = {
+    "orchestration.getThreadShells": () =>
+      offline(() => ({
+        snapshotSequence: node.sequence,
+        threads: node.shell === null ? [] : [node.shell],
+        remainingThreadIds: [],
+      })),
+    "orchestration.subscribeThreadWindow": (input: { readonly resumeFromSequence?: number }) =>
+      Stream.unwrap(
+        Effect.gen(function* () {
+          if (!node.online) return Stream.fail(new SocketClosed("closed"));
+          const queue = yield* Queue.unbounded<unknown, SocketClosed | Cause.Done>();
+          node.resumes.push(input.resumeFromSequence);
+          if (input.resumeFromSequence === undefined || !node.replays) {
+            Queue.offerUnsafe(queue, {
+              kind: "snapshot",
+              snapshot: {
+                snapshotSequence: node.sequence,
+                thread: {
+                  ...node.shell,
+                  messages: [],
+                  activities: [],
+                  ...(node.queue === null ? {} : { followUpQueue: node.queue }),
+                },
+                history: {},
+              },
+            });
+          } else {
+            Queue.offerUnsafe(queue, { kind: "resumed", fromSequence: input.resumeFromSequence });
+            for (const event of node.log) {
+              if (
+                (event.sequence as number) > input.resumeFromSequence &&
+                isThreadDetailEvent(event as unknown as OrchestrationEvent)
+              ) {
+                Queue.offerUnsafe(queue, { kind: "event", event });
+              }
+            }
+          }
+          node.subscribers.add(queue);
+          return Stream.fromQueue(queue);
+        }),
+      ),
+    "orchestration.dispatchCommand": (command: Json) =>
+      Effect.suspend(() => {
+        if (!node.online) return Effect.fail(new SocketClosed("closed"));
+        node.dispatched.push(command);
+        const refusal = node.onDispatch(command);
+        if (refusal !== null) return Effect.fail(refusal);
+        if (command.type === "thread.queue.add") {
+          const entry = {
+            ...(command.entry as Json),
+            createdAt: AT,
+            updatedAt: AT,
+            revision: 1,
+            status: "queued",
+            author: "user",
+          };
+          node.queue = { entries: [...(node.queue?.entries ?? []), entry], hold: null };
+          publish("thread.queue-entry-added", { threadId: THREAD, entry, beforeMessageId: null });
+          return Effect.succeed({ sequence: node.sequence });
+        }
+        const message = command.message as Json;
+        publish("thread.turn-start-requested", {
+          threadId: command.threadId,
+          messageId: message.messageId,
+          createdAt: AT,
+        });
+        return Effect.succeed({ sequence: node.sequence });
+      }),
+    "orchestration.getThreadWindow": () =>
+      offline(() => ({
+        snapshotSequence: node.sequence,
+        thread: {
+          ...node.shell,
+          messages: node.messages,
+          activities: [],
+          ...(node.queue === null ? {} : { followUpQueue: node.queue }),
+        },
+        history: {
+          messages: { oldestCursor: null, newestCursor: null, hasMoreBefore: false },
+        },
+      })),
+    "orchestration.subscribeShell": () =>
+      Stream.make({
+        kind: "snapshot-begin",
+        snapshotSequence: node.sequence,
+        updatedAt: AT,
+        projects: node.projects,
+        threadCount: 0,
+        archivedThreadCount: 0,
+      }),
+    "server.getSettings": () => offline(() => ({ defaultAgentTokenMode: "balanced" })),
+    "server.getConfig": () => offline(() => ({ environment: { capabilities: node.capabilities } })),
+    "server.getProjectPreferences": () =>
+      offline(() => ({
+        initialModelSelection: {
+          value: { instanceId: "claudeAgent", model: "claude-opus", options: [] },
+          source: "project",
+        },
+        defaultThreadEnvMode: { value: "worktree", source: "project" },
+        worktreeBranchPrefix: { value: "ryco", source: "node" },
+        runSetupScript: { value: true, source: "node" },
+        worktreeRoot: { value: "", source: "builtin" },
+        overrides: {},
+      })),
+  } as unknown as CliRemoteRpcClient;
+  const target: ThreadCliTarget = {
+    connect: Effect.suspend(() => {
+      // A restarting node has no runtime state file yet: this machine's target says so.
+      if (!node.online) {
+        return Effect.fail(new ThreadCliError({ message: "The Ryco server is not running." }));
+      }
+      node.connects += 1;
+      return Effect.succeed(client);
+    }),
+    local: false,
+  };
+  /** The node's drain sends the queue's head: out of the queue and into a turn start. */
+  const sendQueueHead = (turnId: string) => {
+    const [head, ...rest] = node.queue!.entries as [Json, ...Json[]];
+    node.queue = rest.length === 0 ? null : { ...node.queue!, entries: rest };
+    publish("thread.queue-entries-removed", {
+      threadId: THREAD,
+      messageIds: [head.messageId],
+      reason: "dispatched",
+      updatedAt: AT,
+    });
+    publish("thread.turn-start-requested", {
+      threadId: THREAD,
+      messageId: head.messageId,
+      createdAt: AT,
+    });
+    node.shell = baseShell(THREAD, {
+      session: session("running", turnId),
+      latestTurn: turn(turnId, "running", head.messageId as string),
+    });
+    publish("thread.session-set", { threadId: THREAD, session: session("running", turnId) });
+  };
+  return { node, publish, drop, endFeeds, sendQueueHead, target };
+});
+
+/** Lets the command's fibers run, and its waits re-check, for `seconds` of test time. */
+const advance = (seconds = 3) =>
+  Effect.gen(function* () {
+    for (let second = 0; second < seconds * 4; second += 1) {
+      for (let turnIndex = 0; turnIndex < 20; turnIndex += 1) yield* Effect.yieldNow;
+      yield* TestClock.adjust("250 millis");
+    }
+  });
+
+const releasedSessionSet = (
+  status: string,
+  turnId: string,
+  state: "completed" | "error" | "interrupted",
+  lastError?: string,
+) => ({
+  threadId: THREAD,
+  session: session(status, null, {
+    updatedAt: LATER,
+    ...(lastError === undefined ? {} : { lastError }),
+  }),
+  releasedTurn: { turnId, state, completedAt: LATER, reason: "test" },
+});
+
+describe("ryco thread send", () => {
+  it.effect("queues behind the running turn and waits for its own turn's reply", () =>
+    Effect.gen(function* () {
+      const { node, publish, target } = yield* makeNode;
+      node.shell = baseShell(THREAD, {
+        session: session("running", "turn-earlier"),
+        latestTurn: turn("turn-earlier", "running"),
+      });
+      const fiber = yield* Effect.forkChild(
+        sendToThread(target, {
+          threadId: THREAD,
+          prompt: "Then run the tests",
+          wait: true,
+          deadlineMs: Number.POSITIVE_INFINITY,
+        }),
+      );
+      yield* advance();
+      assert.lengthOf(node.dispatched, 0, "nothing is sent while a turn runs");
+
+      node.shell = baseShell(THREAD, {
+        session: session("ready", null, { updatedAt: LATER }),
+        latestTurn: turn("turn-earlier", "completed"),
+      });
+      publish("thread.session-set", releasedSessionSet("ready", "turn-earlier", "completed"));
+      yield* advance();
+      assert.lengthOf(node.dispatched, 1);
+      const command = node.dispatched[0]!;
+      // A plain turn start with the thread's own model and modes: never a steer.
+      assert.deepInclude(command, {
+        type: "thread.turn.start",
+        threadId: THREAD,
+        runtimeMode: "auto",
+        interactionMode: "plan",
+        tokenMode: "off",
+        modelSelection: { instanceId: "codex", model: "gpt-5.5" },
+      });
+      assert.strictEqual((command.message as Json).text, "Then run the tests");
+      // The earlier turn's end did not end this wait.
+      assert.isUndefined(fiber.pollUnsafe());
+
+      const messageId = (command.message as Json).messageId as string;
+      node.shell = baseShell(THREAD, {
+        session: session("running", "turn-ours"),
+        latestTurn: turn("turn-ours", "running", messageId),
+      });
+      publish("thread.session-set", { threadId: THREAD, session: session("running", "turn-ours") });
+      yield* advance();
+      assert.isUndefined(fiber.pollUnsafe());
+
+      node.messages = [
+        {
+          id: "assistant-1",
+          role: "assistant",
+          text: "All tests pass.",
+          turnId: "turn-ours",
+          streaming: false,
+          createdAt: LATER,
+          updatedAt: LATER,
+        },
+      ];
+      node.shell = baseShell(THREAD, {
+        session: session("ready", null, { updatedAt: LATER }),
+        latestTurn: turn("turn-ours", "completed", messageId),
+      });
+      publish("thread.session-set", releasedSessionSet("ready", "turn-ours", "completed"));
+      yield* advance();
+      const result = yield* Fiber.join(fiber);
+      assert.deepEqual(result, {
+        threadId: THREAD,
+        turnId: "turn-ours",
+        state: "completed",
+        reply: "All tests pass.",
+        error: null,
+      } as RunResult);
+    }),
+  );
+
+  it.effect("queues again when another turn starts first", () =>
+    Effect.gen(function* () {
+      const { node, publish, target } = yield* makeNode;
+      node.shell = baseShell(THREAD, { session: session("ready"), latestTurn: null });
+      let refusals = 0;
+      node.onDispatch = () => {
+        if (refusals > 0) return null;
+        refusals += 1;
+        node.shell = baseShell(THREAD, {
+          session: session("running", "turn-theirs"),
+          latestTurn: turn("turn-theirs", "running"),
+        });
+        return new Error(
+          "Thread 'thread-1' already has active turn 'turn-theirs' and cannot start another turn until it finishes.",
+        );
+      };
+      const fiber = yield* Effect.forkChild(
+        sendToThread(target, {
+          threadId: THREAD,
+          prompt: "Next",
+          wait: false,
+          deadlineMs: Number.POSITIVE_INFINITY,
+        }),
+      );
+      yield* advance();
+      assert.lengthOf(node.dispatched, 1);
+
+      node.shell = baseShell(THREAD, {
+        session: session("ready", null, { updatedAt: LATER }),
+        latestTurn: turn("turn-theirs", "completed"),
+      });
+      publish("thread.session-set", releasedSessionSet("ready", "turn-theirs", "completed"));
+      yield* advance();
+      assert.lengthOf(node.dispatched, 2);
+      const [first, second] = node.dispatched as [Json, Json];
+      // A refused command id is not reused; the message keeps its id.
+      assert.notStrictEqual(first.commandId, second.commandId);
+      assert.deepEqual(first.message, second.message);
+
+      const messageId = (second.message as Json).messageId as string;
+      node.shell = baseShell(THREAD, {
+        session: session("running", "turn-ours"),
+        latestTurn: turn("turn-ours", "running", messageId),
+      });
+      publish("thread.session-set", { threadId: THREAD, session: session("running", "turn-ours") });
+      yield* advance();
+      const result = yield* Fiber.join(fiber);
+      // Without --wait the command returns once its turn has started, with that turn's id.
+      assert.deepInclude(result, { state: "started", turnId: TurnId.make("turn-ours") });
+    }),
+  );
+});
+
+describe("command input", () => {
+  it("reads --project as a path only when it is one", () => {
+    const options = { cwd: "/work/app", home: "/home/me", exists: () => false };
+    assert.isNull(localProjectPath("projet-typo", options));
+    assert.strictEqual(localProjectPath(".", options), "/work/app");
+    assert.strictEqual(localProjectPath("..", options), "/work");
+    assert.strictEqual(localProjectPath("./web", options), "/work/app/web");
+    assert.strictEqual(localProjectPath("../other", options), "/work/other");
+    assert.strictEqual(localProjectPath("/srv/site", options), "/srv/site");
+    assert.strictEqual(localProjectPath("~/code", options), "/home/me/code");
+    assert.strictEqual(
+      localProjectPath("web", { ...options, exists: (path) => path === "/work/app/web" }),
+      "/work/app/web",
+    );
+  });
+
+  it.effect("keeps `-` as the message itself for `ryco remote send`", () =>
+    Effect.gen(function* () {
+      assert.strictEqual(yield* readPrompt("-", false), "-");
+      assert.strictEqual(yield* readPrompt("  Run the tests \n"), "Run the tests");
+    }),
+  );
+});
+
+describe("ryco thread send binding", () => {
+  it.effect("binds to its own turn start, not one the queue wait saw from another client", () =>
+    Effect.gen(function* () {
+      const { node, publish, target } = yield* makeNode;
+      // An older node: its shell does not name a turn's user message.
+      node.shell = baseShell(THREAD, {
+        session: session("running", "turn-theirs"),
+        latestTurn: turn("turn-theirs", "running"),
+      });
+      const fiber = yield* Effect.forkChild(
+        sendToThread(target, {
+          threadId: THREAD,
+          prompt: "Mine",
+          wait: true,
+          deadlineMs: 60_000,
+        }),
+      );
+      yield* advance();
+      publish("thread.turn-start-requested", {
+        threadId: THREAD,
+        messageId: "message-theirs",
+        createdAt: AT,
+      });
+      node.shell = baseShell(THREAD, {
+        session: session("ready", null, { updatedAt: LATER }),
+        latestTurn: turn("turn-theirs", "completed"),
+      });
+      publish("thread.session-set", releasedSessionSet("ready", "turn-theirs", "completed"));
+      yield* advance();
+      assert.lengthOf(node.dispatched, 1);
+      node.shell = baseShell(THREAD, {
+        session: session("running", "turn-ours"),
+        latestTurn: turn("turn-ours", "running"),
+      });
+      publish("thread.session-set", { threadId: THREAD, session: session("running", "turn-ours") });
+      yield* advance();
+      node.shell = baseShell(THREAD, {
+        session: session("ready", null, { updatedAt: LATER }),
+        latestTurn: turn("turn-ours", "completed"),
+      });
+      publish("thread.session-set", releasedSessionSet("ready", "turn-ours", "completed"));
+      yield* advance();
+      const result = yield* Fiber.join(fiber);
+      assert.deepInclude(result, { state: "completed", turnId: TurnId.make("turn-ours") });
+    }),
+  );
+});
+
+describe("ryco thread send on a node that keeps follow-up queues", () => {
+  it.effect("queues behind a person's follow-ups instead of starting a turn when idle", () =>
+    Effect.gen(function* () {
+      const { node, publish, sendQueueHead, target } = yield* makeNode;
+      node.capabilities = { serverFollowUpQueue: true };
+      node.shell = baseShell(THREAD, {
+        session: session("running", "turn-earlier"),
+        latestTurn: turn("turn-earlier", "running"),
+      });
+      node.queue = { entries: [personEntry], hold: null };
+      const fiber = yield* Effect.forkChild(
+        sendToThread(target, {
+          threadId: THREAD,
+          prompt: "Then run the tests",
+          wait: true,
+          deadlineMs: Number.POSITIVE_INFINITY,
+        }),
+      );
+      yield* advance();
+      assert.lengthOf(node.dispatched, 1);
+      const command = node.dispatched[0]!;
+      // The end of the thread's queue, with the thread's own model and modes, as a person's
+      // busy send queues; the node, not the CLI, decides when it goes.
+      assert.strictEqual(command.type, "thread.queue.add");
+      assert.notProperty(command, "position");
+      assert.notProperty(command, "hold");
+      assert.deepInclude(command.entry as Json, {
+        text: "Then run the tests",
+        attachments: [],
+        modelSelection: { instanceId: "codex", model: "gpt-5.5" },
+        runtimeMode: "auto",
+        interactionMode: "plan",
+        tokenMode: "off",
+      });
+      const messageId = (command.entry as Json).messageId as string;
+      assert.deepEqual(
+        node.queue?.entries.map((entry) => entry.messageId),
+        ["message-person", messageId],
+      );
+
+      // The running turn ends: the CLI starts nothing itself (the person's follow-up goes first).
+      node.shell = baseShell(THREAD, {
+        session: session("ready", null, { updatedAt: LATER }),
+        latestTurn: turn("turn-earlier", "completed"),
+      });
+      publish("thread.session-set", releasedSessionSet("ready", "turn-earlier", "completed"));
+      yield* advance();
+      assert.lengthOf(node.dispatched, 1);
+      sendQueueHead("turn-person");
+      yield* advance();
+      node.shell = baseShell(THREAD, {
+        session: session("ready", null, { updatedAt: LATER }),
+        latestTurn: turn("turn-person", "completed", "message-person"),
+      });
+      publish("thread.session-set", releasedSessionSet("ready", "turn-person", "completed"));
+      yield* advance();
+      assert.isUndefined(fiber.pollUnsafe(), "the person's turn is not this run");
+
+      // Then the node sends this message, under its own id: that turn is the run.
+      sendQueueHead("turn-ours");
+      yield* advance();
+      assert.isUndefined(fiber.pollUnsafe());
+      node.messages = [
+        {
+          id: "assistant-1",
+          role: "assistant",
+          text: "All tests pass.",
+          turnId: "turn-ours",
+          streaming: false,
+          createdAt: LATER,
+          updatedAt: LATER,
+        },
+      ];
+      node.shell = baseShell(THREAD, {
+        session: session("ready", null, { updatedAt: LATER }),
+        latestTurn: turn("turn-ours", "completed", messageId),
+      });
+      publish("thread.session-set", releasedSessionSet("ready", "turn-ours", "completed"));
+      yield* advance();
+      assert.deepEqual(yield* Fiber.join(fiber), {
+        threadId: THREAD,
+        turnId: "turn-ours",
+        state: "completed",
+        reply: "All tests pass.",
+        error: null,
+      } as RunResult);
+      assert.lengthOf(node.dispatched, 1);
+    }),
+  );
+
+  it.effect("follows the running turn a person steers its queued message into", () =>
+    Effect.gen(function* () {
+      const { node, publish, target } = yield* makeNode;
+      node.capabilities = { serverFollowUpQueue: true };
+      node.shell = baseShell(THREAD, {
+        session: session("running", "turn-earlier"),
+        latestTurn: turn("turn-earlier", "running", "message-earlier"),
+      });
+      const fiber = yield* Effect.forkChild(
+        sendToThread(target, {
+          threadId: THREAD,
+          prompt: "Also check the docs",
+          wait: true,
+          deadlineMs: Number.POSITIVE_INFINITY,
+        }),
+      );
+      yield* advance();
+      const messageId = (node.dispatched[0]!.entry as Json).messageId as string;
+      // The steer, as the node records it: the message joins the running turn, the accepted
+      // event (which a thread subscription does not forward), and the queue's removal.
+      node.queue = null;
+      publish("thread.message-sent", {
+        threadId: THREAD,
+        messageId,
+        role: "user",
+        text: "Also check the docs",
+        dispatchMode: "steer",
+        turnId: "turn-earlier",
+        streaming: false,
+        createdAt: AT,
+        updatedAt: AT,
+      });
+      publish("thread.turn-steer-accepted", {
+        threadId: THREAD,
+        messageId,
+        expectedTurnId: "turn-earlier",
+        turnId: "turn-earlier",
+        resolvedAt: AT,
+      });
+      publish("thread.queue-entries-removed", {
+        threadId: THREAD,
+        messageIds: [messageId],
+        reason: "steered",
+        updatedAt: AT,
+      });
+      yield* advance();
+      assert.isUndefined(fiber.pollUnsafe());
+      node.messages = [
+        {
+          id: "assistant-1",
+          role: "assistant",
+          text: "The docs are fine too.",
+          turnId: "turn-earlier",
+          streaming: false,
+          createdAt: LATER,
+          updatedAt: LATER,
+        },
+      ];
+      node.shell = baseShell(THREAD, {
+        session: session("ready", null, { updatedAt: LATER }),
+        latestTurn: turn("turn-earlier", "completed", "message-earlier"),
+      });
+      publish("thread.session-set", releasedSessionSet("ready", "turn-earlier", "completed"));
+      yield* advance();
+      assert.deepEqual(yield* Fiber.join(fiber), {
+        threadId: THREAD,
+        turnId: "turn-earlier",
+        state: "completed",
+        reply: "The docs are fine too.",
+        error: null,
+      } as RunResult);
+    }),
+  );
+
+  it.effect("ends once a fresh window shows its queued message removed while away (1)", () =>
+    Effect.gen(function* () {
+      const { node, publish, drop, target } = yield* makeNode;
+      node.capabilities = { serverFollowUpQueue: true };
+      node.shell = baseShell(THREAD, {
+        session: session("running", "turn-earlier"),
+        latestTurn: turn("turn-earlier", "running"),
+      });
+      node.queue = { entries: [personEntry], hold: null };
+      const fiber = yield* Effect.forkChild(
+        sendToThread(target, {
+          threadId: THREAD,
+          prompt: "Then run the tests",
+          wait: true,
+          deadlineMs: Number.POSITIVE_INFINITY,
+        }),
+      );
+      yield* advance();
+      const messageId = (node.dispatched[0]!.entry as Json).messageId as string;
+      yield* drop;
+      // While the CLI is away a person removes the message, and the node cannot replay that.
+      node.queue = { entries: [personEntry], hold: null };
+      publish("thread.queue-entries-removed", {
+        threadId: THREAD,
+        messageIds: [messageId],
+        reason: "user",
+        updatedAt: AT,
+      });
+      node.replays = false;
+      node.online = true;
+      yield* advance(8);
+      const result = yield* Fiber.join(fiber);
+      assert.deepInclude(result, {
+        state: "stopped",
+        error: "The queued message was removed before it was sent.",
+      });
+      assert.strictEqual(runExitCode(result.state), 1);
+    }),
+  );
+
+  it.effect("exits 2 once the queue holding its message is held, and leaves it queued", () =>
+    Effect.gen(function* () {
+      const { node, publish, target } = yield* makeNode;
+      node.capabilities = { serverFollowUpQueue: true };
+      node.shell = baseShell(THREAD, {
+        session: session("running", "turn-earlier"),
+        latestTurn: turn("turn-earlier", "running"),
+      });
+      const fiber = yield* Effect.forkChild(
+        sendToThread(target, {
+          threadId: THREAD,
+          prompt: "Next",
+          wait: false,
+          deadlineMs: Number.POSITIVE_INFINITY,
+        }),
+      );
+      yield* advance();
+      assert.lengthOf(node.queue?.entries ?? [], 1);
+      const summary = (hold: Json) => ({
+        count: 1,
+        hold,
+        headStatus: "queued",
+        headPreview: "Next",
+      });
+
+      // A delegated task's wait for a free slot: the node lifts it itself.
+      const slot = {
+        reason: "paused",
+        detail: "Waiting for a free slot.",
+        causeKeys: ["delegation-slot:proposal-1"],
+        heldAt: LATER,
+      };
+      node.queue = { ...node.queue!, hold: slot };
+      node.shell = { ...node.shell, followUpQueueSummary: summary(slot) };
+      publish("thread.queue-held", { threadId: THREAD, hold: slot, updatedAt: LATER });
+      yield* advance();
+      assert.isUndefined(fiber.pollUnsafe());
+
+      // The running turn fails: the node holds the queue until a person resumes it.
+      const failed = {
+        reason: "error",
+        detail: "The provider crashed.",
+        causeKeys: ["error:turn-earlier:The provider crashed."],
+        heldAt: LATER,
+      };
+      node.queue = { ...node.queue!, hold: failed };
+      node.shell = baseShell(THREAD, {
+        session: session("error", null, { updatedAt: LATER, lastError: "The provider crashed." }),
+        latestTurn: turn("turn-earlier", "error"),
+        followUpQueueSummary: summary(failed),
+      });
+      publish(
+        "thread.session-set",
+        releasedSessionSet("error", "turn-earlier", "error", "The provider crashed."),
+      );
+      publish("thread.queue-held", { threadId: THREAD, hold: failed, updatedAt: LATER });
+      yield* advance();
+      const result = yield* Fiber.join(fiber);
+      assert.deepEqual(result, {
+        threadId: THREAD,
+        turnId: null,
+        state: "held",
+        reply: null,
+        error: "Paused after an error: The provider crashed.",
+      } as RunResult);
+      assert.strictEqual(runExitCode(result.state), 2);
+      assert.lengthOf(node.queue?.entries ?? [], 1, "the message stays queued");
+      assert.lengthOf(node.dispatched, 1);
+    }),
+  );
+});
+
+describe("ryco thread read", () => {
+  const transcript = { toReadThreadResult, readThreadMessageLimit };
+  const longReply = `${"a".repeat(8_500)}THE END`;
+
+  it.effect("prints the queue and every message whole; --json keeps ryco_read_thread's page", () =>
+    Effect.gen(function* () {
+      const { node, target } = yield* makeNode;
+      node.shell = baseShell(THREAD, { session: session("running", "turn-ours") });
+      node.messages = [
+        {
+          id: "user-1",
+          role: "user",
+          text: "Write it all down",
+          turnId: "turn-ours",
+          streaming: false,
+          createdAt: AT,
+          updatedAt: AT,
+        },
+        {
+          id: "assistant-1",
+          role: "assistant",
+          text: longReply,
+          turnId: "turn-ours",
+          streaming: false,
+          createdAt: LATER,
+          updatedAt: LATER,
+        },
+      ];
+      node.queue = {
+        entries: [{ ...personEntry, text: "Then run the tests" }],
+        hold: null,
+      };
+      const read = (wholeMessages: boolean) =>
+        readThread(target, { threadId: THREAD, limit: undefined, wholeMessages, transcript });
+
+      const text = formatTranscript(yield* read(true));
+      assert.include(text, longReply);
+      assert.notInclude(text, "[…]");
+      assert.isTrue(text.endsWith("[queued]\n1. (user) Then run the tests"), text);
+
+      const page = yield* read(false);
+      const cut = page.messages[1]!;
+      assert.deepInclude(cut, {
+        messageId: "assistant-1",
+        truncated: true,
+        offsetChars: 0,
+        totalChars: longReply.length,
+        nextOffsetChars: 8_000,
+      });
+      assert.lengthOf(cut.text, 8_000);
+      assert.deepEqual(
+        page.followUpQueue?.entries.map((entry) => [entry.author, entry.text]),
+        [["user", "Then run the tests"]],
+      );
+    }),
+  );
+});
+
+describe("ryco thread wait", () => {
+  it.effect("returns 2 when the turn needs an approval", () =>
+    Effect.gen(function* () {
+      const { node, publish, target } = yield* makeNode;
+      node.shell = baseShell(THREAD, {
+        session: session("running", "turn-ours"),
+        latestTurn: turn("turn-ours", "running"),
+      });
+      const fiber = yield* Effect.forkChild(
+        waitForThread(target, {
+          threadId: THREAD,
+          turnId: null,
+          deadlineMs: Number.POSITIVE_INFINITY,
+        }),
+      );
+      yield* advance();
+      assert.isUndefined(fiber.pollUnsafe());
+      node.shell = { ...node.shell, hasPendingApprovals: true };
+      publish("thread.activity-appended", {
+        threadId: THREAD,
+        activity: {
+          id: "activity-1",
+          kind: "approval.requested",
+          tone: "approval",
+          summary: "Run a command",
+          payload: {},
+          turnId: "turn-ours",
+          createdAt: AT,
+        },
+      });
+      yield* advance(1);
+      const result = yield* Fiber.join(fiber);
+      assert.deepInclude(result, { state: "needs-approval", turnId: TurnId.make("turn-ours") });
+      assert.strictEqual(runExitCode(result.state), 2);
+    }),
+  );
+
+  it.effect("reconnects after a node restart and reports the turn it cut off (3)", () =>
+    Effect.gen(function* () {
+      const { node, publish, drop, target } = yield* makeNode;
+      node.shell = baseShell(THREAD, {
+        session: session("running", "turn-ours"),
+        latestTurn: turn("turn-ours", "running"),
+      });
+      const fiber = yield* Effect.forkChild(
+        waitForThread(target, {
+          threadId: THREAD,
+          turnId: "turn-ours",
+          deadlineMs: Number.POSITIVE_INFINITY,
+        }),
+      );
+      yield* advance();
+      const seen = node.sequence;
+      yield* drop;
+      // While it is down the node releases the orphaned turn, then continues the thread.
+      publish(
+        "thread.session-set",
+        releasedSessionSet("error", "turn-ours", "interrupted", ORPHANED_PROVIDER_SESSION_ERROR),
+      );
+      node.shell = baseShell(THREAD, {
+        session: session("running", "turn-continuation"),
+        latestTurn: turn("turn-continuation", "running"),
+      });
+      yield* advance(4);
+      assert.isUndefined(fiber.pollUnsafe());
+      node.online = true;
+      yield* advance(8);
+      const result = yield* Fiber.join(fiber);
+      assert.deepInclude(result, { state: "restarted", turnId: TurnId.make("turn-ours") });
+      assert.strictEqual(runExitCode(result.state), 3);
+      assert.include(node.resumes, seen, "the resubscribe resumes after the last event seen");
+      assert.isAtLeast(node.connects, 2);
+    }),
+  );
+
+  it.effect("resubscribes when the feed ends although reads still work (a quick restart)", () =>
+    Effect.gen(function* () {
+      const { node, publish, endFeeds, target } = yield* makeNode;
+      node.shell = baseShell(THREAD, {
+        session: session("running", "turn-ours"),
+        latestTurn: turn("turn-ours", "running"),
+      });
+      const fiber = yield* Effect.forkChild(
+        waitForThread(target, {
+          threadId: THREAD,
+          turnId: "turn-ours",
+          deadlineMs: Number.POSITIVE_INFINITY,
+        }),
+      );
+      yield* advance();
+      const seen = node.sequence;
+      // The socket came back under the client; the subscription did not. The node released
+      // the orphaned turn on its way up and a continuation already runs.
+      yield* endFeeds;
+      publish(
+        "thread.session-set",
+        releasedSessionSet("error", "turn-ours", "interrupted", ORPHANED_PROVIDER_SESSION_ERROR),
+      );
+      node.shell = baseShell(THREAD, {
+        session: session("running", "turn-continuation"),
+        latestTurn: turn("turn-continuation", "running"),
+      });
+      yield* advance(8);
+      const result = yield* Fiber.join(fiber);
+      assert.deepInclude(result, { state: "restarted", turnId: TurnId.make("turn-ours") });
+      assert.include(node.resumes, seen);
+      assert.isAtLeast(node.connects, 2);
+    }),
+  );
+
+  it.effect("exits 5 for a turn a later turn replaced before its end was seen", () =>
+    Effect.gen(function* () {
+      const { node, target } = yield* makeNode;
+      node.shell = baseShell(THREAD, {
+        session: session("running", "turn-later"),
+        latestTurn: turn("turn-later", "running"),
+      });
+      const fiber = yield* Effect.forkChild(
+        waitForThread(target, {
+          threadId: THREAD,
+          turnId: "turn-earlier",
+          deadlineMs: Number.POSITIVE_INFINITY,
+        }),
+      );
+      yield* advance(8);
+      const result = yield* Fiber.join(fiber);
+      assert.deepInclude(result, { state: "unknown", turnId: TurnId.make("turn-earlier") });
+      assert.strictEqual(runExitCode(result.state), 5);
+    }),
+  );
+
+  it.effect("times out with 4 while the turn still runs", () =>
+    Effect.gen(function* () {
+      const { node, target } = yield* makeNode;
+      node.shell = baseShell(THREAD, {
+        session: session("running", "turn-ours"),
+        latestTurn: turn("turn-ours", "running"),
+      });
+      const fiber = yield* Effect.forkChild(
+        waitForThread(target, { threadId: THREAD, turnId: "turn-ours", deadlineMs: 10_000 }),
+      );
+      yield* advance(12);
+      const result = yield* Fiber.join(fiber);
+      assert.deepInclude(result, { state: "timed-out", turnId: TurnId.make("turn-ours") });
+      assert.strictEqual(runExitCode(result.state), 4);
+    }),
+  );
+});
+
+describe("ryco thread start", () => {
+  it.effect("starts a thread with the project's defaults and returns once its turn runs", () =>
+    Effect.gen(function* () {
+      const { node, publish, target } = yield* makeNode;
+      node.onDispatch = (command) => {
+        node.shell = baseShell(command.threadId as string, { session: session("starting") });
+        return null;
+      };
+      const fiber = yield* Effect.forkChild(
+        startThread(target, {
+          project: "project-1",
+          prompt: "Add a settings page\nwith tests",
+          title: null,
+          model: null,
+          runtimeMode: null,
+          wait: false,
+          deadlineMs: Number.POSITIVE_INFINITY,
+        }),
+      );
+      yield* advance();
+      assert.lengthOf(node.dispatched, 1);
+      const command = node.dispatched[0]!;
+      const bootstrap = command.bootstrap as Json;
+      const createThread = bootstrap.createThread as Json;
+      const prepareWorktree = bootstrap.prepareWorktree as Json;
+      const modelSelection = { instanceId: "claudeAgent", model: "claude-opus", options: [] };
+      assert.deepInclude(command, {
+        type: "thread.turn.start",
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        tokenMode: "balanced",
+        titleSeed: "Add a settings page",
+        modelSelection,
+      });
+      assert.deepInclude(createThread, {
+        projectId: "project-1",
+        title: "Add a settings page",
+        modelSelection,
+        runtimeMode: "full-access",
+      });
+      // The project's threads start in a new worktree off its current checkout.
+      assert.deepInclude(prepareWorktree, { projectCwd: "/work/app", baseBranch: "HEAD" });
+      assert.match(prepareWorktree.branch as string, /^ryco\//u);
+
+      const messageId = (command.message as Json).messageId as string;
+      node.shell = baseShell(command.threadId as string, {
+        session: session("running", "turn-first"),
+        latestTurn: turn("turn-first", "running", messageId),
+      });
+      publish("thread.session-set", {
+        threadId: command.threadId,
+        session: session("running", "turn-first"),
+      });
+      yield* advance();
+      const result = yield* Fiber.join(fiber);
+      assert.deepEqual(result, {
+        threadId: command.threadId as string,
+        turnId: "turn-first",
+        state: "started",
+        reply: null,
+        error: null,
+      } as RunResult);
+    }),
+  );
+
+  it.effect("never takes a mistyped id for the project around the current directory", () =>
+    Effect.gen(function* () {
+      const { node, target } = yield* makeNode;
+      node.projects = [
+        { id: "project-here", title: "Here", workspaceRoot: process.cwd(), scripts: [] },
+      ];
+      const start = (project: string) =>
+        startThread(
+          { ...target, local: true },
+          {
+            project,
+            prompt: "Hello",
+            title: null,
+            model: null,
+            runtimeMode: null,
+            wait: false,
+            deadlineMs: Number.POSITIVE_INFINITY,
+          },
+        );
+      const exit = yield* Effect.exit(start("projet-here"));
+      assert.isTrue(Exit.isFailure(exit));
+      assert.include(String(exit), "No project matches");
+      assert.lengthOf(node.dispatched, 0);
+      // Written as a path, the current directory is the project's.
+      node.onDispatch = (command) => {
+        node.shell = baseShell(command.threadId as string, {
+          session: session("running", "turn-first"),
+          latestTurn: turn("turn-first", "running", (command.message as Json).messageId as string),
+        });
+        return null;
+      };
+      const fiber = yield* Effect.forkChild(start("."));
+      yield* advance();
+      assert.deepInclude(yield* Fiber.join(fiber), { state: "started" });
+      assert.strictEqual(
+        ((node.dispatched[0]!.bootstrap as Json).createThread as Json).projectId,
+        "project-here",
+      );
+    }),
+  );
+
+  it.effect("reports nothing started when the connection drops before the first turn", () =>
+    Effect.gen(function* () {
+      const { node, target } = yield* makeNode;
+      // The bootstrap created the thread; the socket dropped before the turn start landed.
+      node.onDispatch = (command) => {
+        node.shell = baseShell(command.threadId as string, { session: session("idle") });
+        return new SocketClosed("closed");
+      };
+      const fiber = yield* Effect.forkChild(
+        Effect.exit(
+          startThread(target, {
+            project: "project-1",
+            prompt: "Hello",
+            title: null,
+            model: null,
+            runtimeMode: null,
+            wait: false,
+            deadlineMs: Number.POSITIVE_INFINITY,
+          }),
+        ),
+      );
+      yield* advance(4);
+      const exit = yield* Fiber.join(fiber);
+      assert.isTrue(Exit.isFailure(exit));
+      assert.include(String(exit), "Nothing was started");
+      assert.lengthOf(node.dispatched, 1, "a bootstrap is never sent twice");
+    }),
+  );
+
+  it.effect("goes on when the first turn landed before the connection dropped", () =>
+    Effect.gen(function* () {
+      const { node, publish, target } = yield* makeNode;
+      let threadId = "";
+      node.onDispatch = (command) => {
+        threadId = command.threadId as string;
+        const message = command.message as Json;
+        node.shell = baseShell(threadId, { session: session("starting") });
+        node.messages = [
+          {
+            id: message.messageId,
+            role: "user",
+            text: "Hello",
+            turnId: null,
+            streaming: false,
+            createdAt: AT,
+            updatedAt: AT,
+          },
+        ];
+        return new SocketClosed("closed");
+      };
+      const fiber = yield* Effect.forkChild(
+        startThread(target, {
+          project: "project-1",
+          prompt: "Hello",
+          title: null,
+          model: null,
+          runtimeMode: null,
+          wait: false,
+          deadlineMs: Number.POSITIVE_INFINITY,
+        }),
+      );
+      yield* advance(4);
+      node.shell = baseShell(threadId, { session: session("running", "turn-first") });
+      publish("thread.session-set", {
+        threadId,
+        session: session("running", "turn-first"),
+      });
+      yield* advance();
+      const result = yield* Fiber.join(fiber);
+      assert.deepInclude(result, { state: "started", turnId: TurnId.make("turn-first") });
+      assert.lengthOf(node.dispatched, 1);
+    }),
+  );
+
+  it.effect("refuses a project it cannot find", () =>
+    Effect.gen(function* () {
+      const { target } = yield* makeNode;
+      const exit = yield* Effect.exit(
+        startThread(target, {
+          project: "/elsewhere",
+          prompt: "Hello",
+          title: null,
+          model: null,
+          runtimeMode: null,
+          wait: false,
+          deadlineMs: Number.POSITIVE_INFINITY,
+        }),
+      );
+      assert.isTrue(Exit.isFailure(exit));
+      assert.include(String(exit), "No project matches");
+    }),
+  );
+});
+
+const makeServerConfig = (baseDir: string) =>
+  Effect.gen(function* () {
+    const derivedPaths = yield* deriveServerPaths(baseDir, undefined);
+    return {
+      logLevel: "Warn",
+      traceMinLevel: "Info",
+      traceTimingEnabled: true,
+      traceBatchWindowMs: 200,
+      traceMaxBytes: 10 * 1024 * 1024,
+      traceMaxFiles: 10,
+      otlpTracesUrl: undefined,
+      otlpMetricsUrl: undefined,
+      otlpExportIntervalMs: 10_000,
+      otlpServiceName: "ryco-server",
+      mode: "web",
+      port: 0,
+      host: "127.0.0.1",
+      cwd: process.cwd(),
+      baseDir,
+      ...derivedPaths,
+      staticDir: undefined,
+      devUrl: undefined,
+      noBrowser: true,
+      startupPresentation: "browser",
+      desktopBootstrapToken: undefined,
+      autoBootstrapProjectFromCwd: false,
+      logWebSocketEvents: false,
+      tailscaleServeEnabled: false,
+      tailscaleServePort: 443,
+    } satisfies ServerConfigShape;
+  });
+
+it.layer(NodeServices.layer)("this machine's node", (it) => {
+  it.effect("signs in as a short-lived owner session and revokes it when the command ends", () =>
+    Effect.gen(function* () {
+      const config = yield* makeServerConfig(mkdtempSync(join(tmpdir(), "ryco-thread-cli-")));
+      const authControlPlane = AuthControlPlaneRuntimeLive.pipe(
+        Layer.provide(Layer.succeed(ServerConfig, config)),
+        Layer.provide(Layer.succeed(References.MinimumLogLevel, "Error")),
+      );
+      const sessions = Effect.gen(function* () {
+        const auth = yield* AuthControlPlane;
+        return yield* auth.listSessions();
+      }).pipe(Effect.provide(authControlPlane));
+      const during = yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* localThreadTarget({
+            local: { readOrigin: Effect.succeed("http://127.0.0.1:1"), authControlPlane },
+            timeout: null,
+          });
+          return yield* sessions;
+        }),
+      );
+      const cliSessions = during.filter((entry) => entry.client.label === "ryco thread cli");
+      assert.lengthOf(cliSessions, 1);
+      assert.strictEqual(cliSessions[0]!.role, "owner");
+      const after = yield* sessions;
+      assert.lengthOf(
+        after.filter((entry) => entry.client.label === "ryco thread cli"),
+        0,
+      );
+    }),
+  );
+});
+
+const runCli = (args: ReadonlyArray<string>) =>
+  Command.runWith(cli, { version: "0.0.0" })(args).pipe(
+    Effect.provide(Layer.mergeAll(NodeServices.layer, NetService.layer)),
+  );
+
+const helpOf = (args: ReadonlyArray<string>) =>
+  Effect.gen(function* () {
+    yield* runCli([...args, "--help"]);
+    return (yield* TestConsole.logLines).join("\n");
+  }).pipe(Effect.provide(Layer.fresh(TestConsole.layer)));
+
+it.layer(NodeServices.layer)("ryco thread commands", (it) => {
+  it.effect("registers start, send, wait and read, each with --remote", () =>
+    Effect.gen(function* () {
+      const help = yield* helpOf(["thread"]);
+      for (const subcommand of ["start", "send", "wait", "read"]) {
+        assert.match(help, new RegExp(`^\\s+${subcommand}\\b`, "m"), help);
+        assert.include(yield* helpOf(["thread", subcommand]), "--remote");
+      }
+      const start = yield* helpOf(["thread", "start"]);
+      for (const flag of [
+        "--project",
+        "--runtime-mode",
+        "--model",
+        "--wait",
+        "--timeout",
+        "--json",
+      ]) {
+        assert.include(start, flag);
+      }
+      assert.include(yield* helpOf(["thread", "wait"]), "--turn");
+      const read = yield* helpOf(["thread", "read"]);
+      assert.include(read, "--limit");
+      assert.include(read, "--full");
+    }),
+  );
+
+  it.effect("fails in one line when this machine's node is not running", () =>
+    Effect.gen(function* () {
+      const baseDir = mkdtempSync(join(tmpdir(), "ryco-thread-cli-down-"));
+      const error = yield* runCli(["thread", "read", THREAD, "--base-dir", baseDir]).pipe(
+        Effect.flip,
+      );
+      assert.include(String((error as Error).message), "The Ryco server is not running.");
+    }),
+  );
+
+  it.effect("keeps `ryco remote send` and its flags as an alias of `thread send --remote`", () =>
+    Effect.gen(function* () {
+      assert.include(yield* helpOf(["remote", "send"]), "ryco thread send --remote");
+      const baseDir = mkdtempSync(join(tmpdir(), "ryco-thread-cli-remote-"));
+      for (const args of [
+        ["remote", "send", "mini", THREAD, "Run", "the", "tests"],
+        ["remote", "send", "mini", THREAD, "Run", "--no-wait"],
+        ["thread", "send", THREAD, "Run", "--remote", "mini"],
+      ]) {
+        const error = yield* runCli([...args, "--base-dir", baseDir]).pipe(Effect.flip);
+        // Both resolve the paired remote the same way before anything is sent.
+        assert.include(String((error as Error).message), 'No remote named "mini"', args.join(" "));
+      }
+    }),
+  );
+});

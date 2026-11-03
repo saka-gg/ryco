@@ -1,6 +1,7 @@
 import type { RelayEffectiveRole } from "@ryco/contracts";
 import { AGENT_CONTROL_WS_METHODS } from "@ryco/contracts/agent-control";
 import { DEVICE_WS_METHODS } from "@ryco/contracts/device";
+import { NODE_BROWSER_WS_METHODS } from "@ryco/contracts/node-browser";
 import {
   CONTEXT_HANDOFF_WS_METHODS,
   ORCHESTRATION_WS_METHODS,
@@ -12,6 +13,7 @@ export type RpcMethod =
   | (typeof ORCHESTRATION_WS_METHODS)[keyof typeof ORCHESTRATION_WS_METHODS]
   | (typeof CONTEXT_HANDOFF_WS_METHODS)[keyof typeof CONTEXT_HANDOFF_WS_METHODS]
   | (typeof DEVICE_WS_METHODS)[keyof typeof DEVICE_WS_METHODS]
+  | (typeof NODE_BROWSER_WS_METHODS)[keyof typeof NODE_BROWSER_WS_METHODS]
   | (typeof AGENT_CONTROL_WS_METHODS)[keyof typeof AGENT_CONTROL_WS_METHODS];
 
 /**
@@ -39,6 +41,12 @@ export const RPC_ACCESS_POLICY = {
   [DEVICE_WS_METHODS.input]: "owner",
   [DEVICE_WS_METHODS.app]: "owner",
   [DEVICE_WS_METHODS.recording]: "owner",
+  // A node browser page is as private as terminal output (its sessions, its logins), and
+  // driving it reaches what the node reaches: the terminal tier, reads included.
+  [NODE_BROWSER_WS_METHODS.read]: "operator",
+  [NODE_BROWSER_WS_METHODS.subscribe]: "operator",
+  [NODE_BROWSER_WS_METHODS.command]: "operator",
+  [NODE_BROWSER_WS_METHODS.input]: "operator",
   // Agent Control approval decisions authorize agent-requested mutations
   // and the queue exposes prompt summaries and target metadata, so the
   // whole surface is owner-only — including reads and the push stream.
@@ -87,6 +95,9 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.gitResolvePullRequest]: "operator",
   [WS_METHODS.gitRestoreWorktree]: "operator",
   [WS_METHODS.gitRunStackedAction]: "operator",
+  // Progress carries commit subjects and hook output, like the run itself.
+  [WS_METHODS.gitResumeStackedAction]: "operator",
+  [WS_METHODS.gitCancelStackedAction]: "operator",
   [WS_METHODS.keybindingsReplaceCustom]: "owner",
   [WS_METHODS.mcpListServers]: "owner",
   [WS_METHODS.mcpListWorkspaces]: "owner",
@@ -111,6 +122,7 @@ export const RPC_ACCESS_POLICY = {
   [ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery]: "viewer",
   [ORCHESTRATION_WS_METHODS.getWorkflowScript]: "operator",
   [ORCHESTRATION_WS_METHODS.stopBackgroundTask]: "operator",
+  [ORCHESTRATION_WS_METHODS.messageBackgroundTask]: "operator",
   [ORCHESTRATION_WS_METHODS.replayEvents]: "viewer",
   [ORCHESTRATION_WS_METHODS.replayEventsPage]: "viewer",
   [ORCHESTRATION_WS_METHODS.searchThreadMessages]: "viewer",
@@ -133,8 +145,13 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.projectsReadFile]: "operator",
   [WS_METHODS.projectsReadIcon]: "viewer",
   [WS_METHODS.projectsReadFileBinary]: "operator",
+  [WS_METHODS.projectsReadFileChunk]: "operator",
+  // Reports a file's existence and content hash wherever projectsReadFile reaches, never its
+  // content: the same tier as the read it revalidates.
+  [WS_METHODS.projectsSubscribeFileChanges]: "operator",
   [WS_METHODS.projectsRemove]: "operator",
   [WS_METHODS.projectsSearchEntries]: "operator",
+  [WS_METHODS.projectsSearchContent]: "operator",
   [WS_METHODS.projectsStageFileReference]: "operator",
   [WS_METHODS.projectsWriteFile]: "operator",
   // Cross-node project copy: node paths and folder search like filesystemBrowse, repository
@@ -193,7 +210,15 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.notesList]: "viewer",
   [WS_METHODS.notesCommand]: "operator",
   [WS_METHODS.serverRefreshProviders]: "owner",
+  // Sign-in runs a provider login on the node and shows its device code to every follower.
+  [WS_METHODS.providerSignInSubscribe]: "owner",
+  [WS_METHODS.providerSignInStart]: "owner",
+  [WS_METHODS.providerSignInRespond]: "owner",
   [WS_METHODS.serverUpdateProvider]: "owner",
+  // Anyone using a client of the node counts as someone an unattended update must not disturb.
+  // It only delays updates (a node-side timestamp, rate-limited per session); it never starts,
+  // allows or reads one.
+  [WS_METHODS.serverNoteClientInteraction]: "viewer",
   [WS_METHODS.serverSubscribeNodeUpdate]: "viewer",
   [WS_METHODS.serverCheckNodeUpdate]: "owner",
   [WS_METHODS.serverUpdateNode]: "owner",
@@ -214,6 +239,7 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.sourceControlGetWorkflowJobLog]: "operator",
   [WS_METHODS.sourceControlGetWorkflowRunJobs]: "operator",
   [WS_METHODS.sourceControlListChangeRequests]: "operator",
+  [WS_METHODS.sourceControlListInvolvedChangeRequests]: "operator",
   [WS_METHODS.sourceControlListIssueAssignees]: "operator",
   [WS_METHODS.sourceControlListIssueLabels]: "operator",
   [WS_METHODS.sourceControlListIssues]: "operator",
@@ -230,13 +256,20 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.sourceControlUpdateChangeRequestComment]: "operator",
   [WS_METHODS.sourceControlUpdateChangeRequest]: "operator",
   [WS_METHODS.sourceControlCreateChangeRequest]: "operator",
+  [WS_METHODS.sourceControlListChangeRequestTemplates]: "operator",
   [WS_METHODS.sourceControlLinkWorktreePullRequest]: "operator",
   [WS_METHODS.sourceControlDismissWorktreePullRequest]: "operator",
+  // Wakes the thread's agent later, with the thread's permissions: an operator mutation.
+  [WS_METHODS.sourceControlSetPullRequestWatch]: "operator",
   [WS_METHODS.sourceControlSearchChangeRequests]: "operator",
   [WS_METHODS.sourceControlSearchIssues]: "operator",
   [WS_METHODS.sourceControlSearchRepositories]: "operator",
   [WS_METHODS.subscribeAuthAccess]: "direct_owner",
   [WS_METHODS.authIssueLinkedDirectAccess]: "relay_native",
+  // A native device registers itself; the node reads which one from the channel.
+  [WS_METHODS.pushRegisterDevice]: "relay_native",
+  [WS_METHODS.pushUnregisterDevice]: "relay_native",
+  [WS_METHODS.pushSetPresence]: "relay_native",
   [WS_METHODS.subscribeServerConfig]: "viewer",
   [WS_METHODS.subscribeServerLifecycle]: "viewer",
   [WS_METHODS.subscribeTerminalEvents]: "operator",
@@ -251,12 +284,23 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.textGenerationCancelSideQuestion]: "operator",
   [WS_METHODS.textGenerationGenerateBranchName]: "operator",
   [WS_METHODS.textGenerationGenerateIssueContent]: "operator",
-  [WS_METHODS.threadPriorityEnsureCurrent]: "operator",
   [WS_METHODS.searchThreadMessages]: "owner",
   [WS_METHODS.threadsSetManualBucket]: "operator",
   [WS_METHODS.threadsSetManualPosition]: "operator",
   // Creates a thread (and possibly a worktree) without starting a turn, like dispatchCommand.
   [WS_METHODS.threadsFork]: "operator",
+  // The same tier as a fork on the node itself: the caller's own role on this node decides, never
+  // anything the carried conversation says about its source.
+  [WS_METHODS.threadsForkCarried]: "operator",
+  // The servers a thread's agents and terminals started: ports, pids, process names and page
+  // titles, which an operator who can open the thread's terminal sees there anyway.
+  [WS_METHODS.threadsSubscribeLocalServers]: "operator",
+  // Stops only a server the node attributes to that thread again at stop time, never the node,
+  // an agent CLI or a terminal shell: no more than closing the thread's terminal does.
+  [WS_METHODS.threadsStopLocalServer]: "operator",
+  // Carries a secret the owner types for an agent's request and writes it into the thread's
+  // checkout: owners only, like the account and integration tokens they save.
+  [WS_METHODS.secretsAnswerRequest]: "owner",
   // Starts the provider process a send by the same operator would start.
   [WS_METHODS.providerPrewarmSession]: "operator",
   // Starts the provider's CLI in the directory (project settings and hooks apply), as a send does.
@@ -331,6 +375,10 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [DEVICE_WS_METHODS.input]: "mutation",
   [DEVICE_WS_METHODS.app]: "mutation",
   [DEVICE_WS_METHODS.recording]: "mutation",
+  [NODE_BROWSER_WS_METHODS.read]: "read",
+  [NODE_BROWSER_WS_METHODS.subscribe]: "read",
+  [NODE_BROWSER_WS_METHODS.command]: "mutation",
+  [NODE_BROWSER_WS_METHODS.input]: "mutation",
   [AGENT_CONTROL_WS_METHODS.acceptProposal]: "mutation",
   [AGENT_CONTROL_WS_METHODS.getProposal]: "read",
   [AGENT_CONTROL_WS_METHODS.listProposals]: "read",
@@ -379,6 +427,9 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.gitResolvePullRequest]: "read",
   [WS_METHODS.gitRestoreWorktree]: "mutation",
   [WS_METHODS.gitRunStackedAction]: "mutation",
+  // Attaching again only observes: it never starts Git, so losing or repeating it is harmless.
+  [WS_METHODS.gitResumeStackedAction]: "read",
+  [WS_METHODS.gitCancelStackedAction]: "mutation",
   [WS_METHODS.keybindingsReplaceCustom]: "mutation",
   [WS_METHODS.mcpListServers]: "read",
   [WS_METHODS.mcpListWorkspaces]: "read",
@@ -401,6 +452,7 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery]: "read",
   [ORCHESTRATION_WS_METHODS.getWorkflowScript]: "read",
   [ORCHESTRATION_WS_METHODS.stopBackgroundTask]: "mutation",
+  [ORCHESTRATION_WS_METHODS.messageBackgroundTask]: "mutation",
   [ORCHESTRATION_WS_METHODS.replayEvents]: "read",
   [ORCHESTRATION_WS_METHODS.replayEventsPage]: "read",
   [ORCHESTRATION_WS_METHODS.searchThreadMessages]: "read",
@@ -421,8 +473,11 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.projectsReadFile]: "read",
   [WS_METHODS.projectsReadIcon]: "read",
   [WS_METHODS.projectsReadFileBinary]: "read",
+  [WS_METHODS.projectsReadFileChunk]: "read",
+  [WS_METHODS.projectsSubscribeFileChanges]: "read",
   [WS_METHODS.projectsRemove]: "mutation",
   [WS_METHODS.projectsSearchEntries]: "read",
+  [WS_METHODS.projectsSearchContent]: "read",
   [WS_METHODS.projectsStageFileReference]: "mutation",
   [WS_METHODS.projectsWriteFile]: "mutation",
   // Cross-node project copy. Never `receipted`: only orchestration.dispatchCommand is
@@ -454,6 +509,11 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.serverGetAdvertisedEndpoints]: "read",
   // Repeating it only issues another short-lived single-use code.
   [WS_METHODS.authIssueLinkedDirectAccess]: "read",
+  // The device's own alert preferences on this node (and an earlier installation's of the same
+  // Hub account, which `push.unregisterDevice` may retire by its key), not workspace state.
+  [WS_METHODS.pushRegisterDevice]: "read",
+  [WS_METHODS.pushUnregisterDevice]: "read",
+  [WS_METHODS.pushSetPresence]: "read",
   [WS_METHODS.serverGetConfig]: "read",
   [WS_METHODS.serverGetDiagnosticsMetrics]: "read",
   [WS_METHODS.serverGetDiagnosticsSnapshot]: "read",
@@ -489,7 +549,12 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.notesCommand]: "mutation",
   // Re-probes provider status; the result is derived state, not a setting.
   [WS_METHODS.serverRefreshProviders]: "read",
+  [WS_METHODS.providerSignInSubscribe]: "read",
+  [WS_METHODS.providerSignInStart]: "mutation",
+  [WS_METHODS.providerSignInRespond]: "mutation",
   [WS_METHODS.serverUpdateProvider]: "mutation",
+  // Sets the node's last-interaction time to now: losing or repeating one is harmless.
+  [WS_METHODS.serverNoteClientInteraction]: "read",
   [WS_METHODS.serverSubscribeNodeUpdate]: "read",
   // Asks the registry (or the desktop updater) again; it changes nothing on the node.
   [WS_METHODS.serverCheckNodeUpdate]: "read",
@@ -511,6 +576,7 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.sourceControlGetWorkflowJobLog]: "read",
   [WS_METHODS.sourceControlGetWorkflowRunJobs]: "read",
   [WS_METHODS.sourceControlListChangeRequests]: "read",
+  [WS_METHODS.sourceControlListInvolvedChangeRequests]: "read",
   [WS_METHODS.sourceControlListIssueAssignees]: "read",
   [WS_METHODS.sourceControlListIssueLabels]: "read",
   [WS_METHODS.sourceControlListIssues]: "read",
@@ -527,8 +593,10 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.sourceControlUpdateChangeRequestComment]: "mutation",
   [WS_METHODS.sourceControlUpdateChangeRequest]: "mutation",
   [WS_METHODS.sourceControlCreateChangeRequest]: "mutation",
+  [WS_METHODS.sourceControlListChangeRequestTemplates]: "read",
   [WS_METHODS.sourceControlLinkWorktreePullRequest]: "mutation",
   [WS_METHODS.sourceControlDismissWorktreePullRequest]: "mutation",
+  [WS_METHODS.sourceControlSetPullRequestWatch]: "mutation",
   [WS_METHODS.sourceControlSearchChangeRequests]: "read",
   [WS_METHODS.sourceControlSearchIssues]: "read",
   [WS_METHODS.sourceControlSearchRepositories]: "read",
@@ -547,13 +615,18 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.textGenerationCancelSideQuestion]: "mutation",
   [WS_METHODS.textGenerationGenerateBranchName]: "read",
   [WS_METHODS.textGenerationGenerateIssueContent]: "read",
-  // Recomputes the derived inbox ranking; nothing the user issued.
-  [WS_METHODS.threadPriorityEnsureCurrent]: "read",
   [WS_METHODS.searchThreadMessages]: "read",
   [WS_METHODS.threadsSetManualBucket]: "mutation",
   [WS_METHODS.threadsSetManualPosition]: "mutation",
   // Idempotent by forkKey: a dropped request is retried with the same key after acknowledgement.
   [WS_METHODS.threadsFork]: "mutation",
+  // Idempotent by forkKey and the carried conversation's digest, like `threads.fork`.
+  [WS_METHODS.threadsForkCarried]: "mutation",
+  [WS_METHODS.threadsSubscribeLocalServers]: "read",
+  // Signals a process group: never replayed (a repeat finds the server gone).
+  [WS_METHODS.threadsStopLocalServer]: "mutation",
+  // Writes a file and closes the request: never replayed (a repeat finds it answered).
+  [WS_METHODS.secretsAnswerRequest]: "mutation",
   // Idempotent per thread: a repeat finds the session it already started.
   [WS_METHODS.providerPrewarmSession]: "read",
   [WS_METHODS.providerReadProjectCommands]: "read",

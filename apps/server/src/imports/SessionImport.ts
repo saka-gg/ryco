@@ -737,6 +737,16 @@ export const makeSessionImport = (options: SessionImportTestOptions = {}) =>
           });
         }
         const next = input.offset + consumed;
+        const folders = yield* io(
+          () =>
+            import("./candidateFolders.ts").then((module) =>
+              module.canonicalCandidateFolders(items.map((item) => item.cwd)),
+            ),
+          "Could not resolve the conversations' folders.",
+        );
+        // The page's own fresh objects, so they are completed in place.
+        for (const item of items)
+          Object.assign(item, { canonicalCwd: folders.get(item.cwd) ?? null });
         return {
           items,
           nextOffset: next < catalog.files.length ? next : null,

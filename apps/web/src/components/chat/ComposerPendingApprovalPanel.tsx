@@ -1,9 +1,15 @@
-import { memo } from "react";
+import type { ApprovalRequestId } from "@ryco/contracts";
+import { APPROVAL_REASON_LABEL, pendingApprovalReason } from "@ryco/client-runtime/state/session";
+import { memo, useState } from "react";
 import { type PendingApproval } from "../../session-logic";
+import { DisclosureChevron } from "../ui/DisclosureChevron";
+import { DisclosureRegion } from "../ui/DisclosureRegion";
 
 interface ComposerPendingApprovalPanelProps {
   approval: PendingApproval;
   pendingCount: number;
+  /** Offer the provider's reason for asking as a disclosure (off on the frozen phone tier). */
+  showReason?: boolean;
 }
 
 /** Bounded approval summary, shared with the approval card's live region. */
@@ -18,8 +24,13 @@ export function pendingApprovalSummaryLabel(approval: PendingApproval): string {
 export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprovalPanel({
   approval,
   pendingCount,
+  showReason = false,
 }: ComposerPendingApprovalPanelProps) {
   const approvalSummary = pendingApprovalSummaryLabel(approval);
+  const reason = showReason ? pendingApprovalReason(approval) : null;
+  // Keyed by request so the next approval starts collapsed.
+  const [reasonOpenFor, setReasonOpenFor] = useState<ApprovalRequestId | null>(null);
+  const reasonOpen = reasonOpenFor === approval.requestId;
 
   return (
     <div className="px-4 py-3.5 sm:px-5 sm:py-4">
@@ -43,6 +54,24 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
           className="mt-2 max-h-[min(10rem,20dvh)] min-h-0 overflow-y-auto overscroll-contain whitespace-pre-wrap wrap-break-word text-sm text-muted-foreground select-text"
         >
           {approval.detail}
+        </div>
+      ) : null}
+      {reason ? (
+        <div className="mt-2">
+          <button
+            type="button"
+            className="inline-flex cursor-pointer items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+            aria-expanded={reasonOpen}
+            onClick={() => setReasonOpenFor(reasonOpen ? null : approval.requestId)}
+          >
+            <DisclosureChevron open={reasonOpen} className="size-3.5" />
+            {APPROVAL_REASON_LABEL}
+          </button>
+          <DisclosureRegion open={reasonOpen}>
+            <p className="pt-1 pl-4.5 whitespace-pre-wrap wrap-break-word text-sm text-muted-foreground select-text">
+              {reason}
+            </p>
+          </DisclosureRegion>
         </div>
       ) : null}
     </div>

@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Modal, Pressable, ScrollView, TextInput, View } from "react-native";
 
 import type { EnvironmentId } from "@ryco/contracts";
+import { describeHostFreeze } from "@ryco/client-runtime/connection";
 
 import { AppText as Text } from "../../components/AppText";
 import { showConfirmDialog } from "../../components/ConfirmDialogHost";
@@ -11,6 +12,8 @@ import { ErrorBanner } from "../../components/ErrorBanner";
 import { NavigationHeaderButton } from "../../components/NavigationHeaderButton";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { useStore } from "../../state/threadsRuntime";
+import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
+import { useHostFreezeNowMs } from "../../state/useHostFreezeNowMs";
 import {
   type ConnectionRow,
   useConnectionActions,
@@ -19,7 +22,12 @@ import {
 import { HOME_LIST_PADDING_BOTTOM } from "../home/homeChromeModel";
 import { HubNodeSection } from "../hostedHub/HubNodeSection";
 import { NodeRow, type NodeRowAction } from "./NodeRow";
-import { directConnectActionLabel, directRoleLabel, directTransportLabel } from "./nodesModel";
+import {
+  directConnectActionLabel,
+  directNodeActions,
+  directRoleLabel,
+  directTransportLabel,
+} from "./nodesModel";
 
 interface RenameTarget {
   readonly environmentId: EnvironmentId;
@@ -100,6 +108,10 @@ export function NodesScreen(props: {
 }) {
   const navigation = useNavigation();
   const { rows } = useSavedEnvironments();
+  const serverConfigs = useEnvironmentServerConfigs();
+  const freezeNowMs = useHostFreezeNowMs(
+    Array.from(serverConfigs.values(), (config) => config.lastEventLoopStall),
+  );
   const actions = useConnectionActions();
   const activeEnvironmentId = useStore((state) => state.activeEnvironmentId);
   const [busy, setBusy] = useState<EnvironmentId | null>(null);
@@ -130,68 +142,79 @@ export function NodesScreen(props: {
   const directActionsFor = (row: ConnectionRow): ReadonlyArray<NodeRowAction> => {
     const id = row.record.environmentId;
     const isConnected = row.runtime.connectionState === "connected";
-    const isConnecting = row.runtime.connectionState === "connecting";
-    const isSelected = activeEnvironmentId === id;
     const needsRepair = row.runtime.authState === "requires-auth";
     const disabled = busy !== null;
-    const rowActions: NodeRowAction[] = [];
-
-    if (needsRepair) {
-      // The machine no longer accepts the saved pairing: pairing it again from
-      // its saved address replaces the credential in place.
-      rowActions.push({
-        label: "Re-pair",
-        disabled,
-        onPress: () => navigation.navigate("ConnectionsNew", { repairEnvironmentId: id }),
-      });
-    }
-    if (!isSelected || !isConnected) {
-      rowActions.push({
-        label: directConnectActionLabel({
-          connectionState: row.runtime.connectionState,
-          needsRepair,
-        }),
-        disabled,
-        onPress: () =>
-          void withBusy(id, async () => {
-            useStore.getState().setActiveEnvironmentId(id);
-            if (!isConnected) await actions.reconnectSavedEnvironment(id);
-          }),
-      });
-    }
-    if (isConnected || isConnecting) {
-      rowActions.push({
-        label: "Disconnect",
-        disabled,
-        onPress: () => void withBusy(id, () => actions.disconnectSavedEnvironment(id)),
-      });
-    }
-    rowActions.push(
-      {
-        label: "Rename",
-        disabled,
-        onPress: () => {
-          setRenameTarget({ environmentId: id });
-          setRenameValue(row.record.label);
-        },
-      },
-      {
-        label: "Forget",
-        destructive: true,
-        disabled,
-        onPress: () =>
-          showConfirmDialog({
-            title: `Forget ${row.record.label}?`,
-            message:
-              "This removes the saved direct pairing and its local credential. You can pair the machine again later.",
-            confirmText: "Forget",
+    return directNodeActions({
+      connectionState: row.runtime.connectionState,
+      needsRepair,
+      selected: activeEnvironmentId === id,
+      switchedOff: row.switchedOff,
+    }).map((action): NodeRowAction => {
+      switch (action) {
+        case "re-pair":
+          // The machine no longer accepts the saved pairing: pairing it again
+          // from its saved address replaces the credential in place.
+          return {
+            label: "Re-pair",
+            disabled,
+            onPress: () => navigation.navigate("ConnectionsNew", { repairEnvironmentId: id }),
+          };
+        case "connect":
+          return {
+            label: directConnectActionLabel({
+              connectionState: row.runtime.connectionState,
+              needsRepair,
+            }),
+            disabled,
+            onPress: () =>
+              void withBusy(id, async () => {
+                useStore.getState().setActiveEnvironmentId(id);
+                if (!isConnected) await actions.reconnectSavedEnvironment(id);
+              }),
+          };
+        case "disconnect":
+          return {
+            label: "Disconnect",
+            disabled,
+            onPress: () => void withBusy(id, () => actions.disconnectSavedEnvironment(id)),
+          };
+        case "switch-off":
+        case "switch-on":
+          return {
+            label: action === "switch-on" ? "Switch on" : "Switch off",
+            disabled,
+            onPress: () =>
+              void withBusy(id, () =>
+                actions.setSavedEnvironmentEnabled(id, action === "switch-on"),
+              ),
+          };
+        case "rename":
+          return {
+            label: "Rename",
+            disabled,
+            onPress: () => {
+              setRenameTarget({ environmentId: id });
+              setRenameValue(row.record.label);
+            },
+          };
+        case "forget":
+          return {
+            label: "Forget",
             destructive: true,
-            onConfirm: () =>
-              void withBusy(id, () => actions.removeSavedEnvironment(row.record.environmentId)),
-          }),
-      },
-    );
-    return rowActions;
+            disabled,
+            onPress: () =>
+              showConfirmDialog({
+                title: `Forget ${row.record.label}?`,
+                message:
+                  "This removes the saved direct pairing and its local credential. You can pair the machine again later. Switch it off instead to keep the pairing.",
+                confirmText: "Forget",
+                destructive: true,
+                onConfirm: () =>
+                  void withBusy(id, () => actions.removeSavedEnvironment(row.record.environmentId)),
+              }),
+          };
+      }
+    });
   };
 
   const saveRename = () => {
@@ -262,9 +285,14 @@ export function NodesScreen(props: {
                 }
                 label={row.record.label}
                 detail={`${directRoleLabel(row.runtime.role)} · ${endpointLabel(row.record.httpBaseUrl)}`}
+                freezeNotice={describeHostFreeze(
+                  serverConfigs.get(row.record.environmentId)?.lastEventLoopStall,
+                  { nowMs: freezeNowMs },
+                )}
                 transportLabel={directTransportLabel(row.record.httpBaseUrl)}
                 statusTone={{ ...row.tone, label: row.statusLabel }}
                 selected={activeEnvironmentId === row.record.environmentId}
+                dimmed={row.switchedOff}
                 showDivider={index > 0}
                 actions={directActionsFor(row)}
               />

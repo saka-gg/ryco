@@ -24,6 +24,11 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
   useRouter: () => routerStub,
 }));
 
+// The saved-machine switch reaches the real runtime the mock below stands in for.
+vi.mock("../../../environments/runtime/savedEnvironmentSwitch", () => ({
+  setSavedEnvironmentEnabled: vi.fn(),
+}));
+
 vi.mock("../../../environments/runtime", () => {
   const primaryConnection = {
     kind: "primary" as const,
@@ -127,7 +132,6 @@ function createBaseServerConfig(): ServerConfig {
       capabilities: {
         repositoryIdentity: true,
         threadSettlement: false,
-        threadPriorityRanking: false,
       },
     },
     auth: {
@@ -253,7 +257,7 @@ describe("PhoneSettingsSurface", () => {
     // once so cold Vite transforms cannot exhaust a short interaction wait.
     await Promise.all([
       import("../../settings/ProvidersSettingsPanel"),
-      import("../../settings/AiFocusSettings"),
+      import("../../settings/InboxSettings"),
       import("../../settings/OpinionatedPluginsSettings"),
       import("../../settings/McpServersSettings"),
       import("../../settings/AppearanceSettings"),

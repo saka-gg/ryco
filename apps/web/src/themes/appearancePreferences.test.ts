@@ -13,6 +13,7 @@ vi.mock("../lib/presentationTier", () => ({
 }));
 
 import {
+  APPEARANCE_CONTRAST_OPTIONS,
   APPEARANCE_PREFERENCES_STORAGE_KEY,
   APPEARANCE_PREFERENCES_STYLE_ELEMENT_ID,
   DEFAULT_APPEARANCE_PREFERENCES,
@@ -22,11 +23,14 @@ import {
   SURFACE_TRANSPARENCY_OPTIONS,
   applyAppearancePreferencesToDocument,
   buildAppearancePreferencesCss,
+  buildContrastCssRule,
+  desktopBlurRadiusForStrength,
   getAppearancePreferences,
   getEffectiveSurfaceTransparency,
   getRequestedWindowTranslucencyScope,
   hasAppearancePreferenceOverride,
   isSurfaceTransparencyReducedBySystem,
+  isValidPreferenceValue,
   normalizePrimaryColor,
   resetAppearancePreference,
   setAppearancePreference,
@@ -141,15 +145,15 @@ describe("appearance preferences", () => {
   it("validates the translucent window scope, opacity and blur", () => {
     expect(getAppearancePreferences().windowTranslucency).toBe("off");
     expect(getAppearancePreferences().windowTranslucencyOpacity).toBe("80");
-    expect(getAppearancePreferences().windowTranslucencyBlur).toBe("64");
+    expect(getAppearancePreferences().windowTranslucencyBlurStrength).toBe("100");
 
     setAppearancePreference("windowTranslucency", "sidebar");
     setAppearancePreference("windowTranslucencyOpacity", "40");
-    setAppearancePreference("windowTranslucencyBlur", "12");
+    setAppearancePreference("windowTranslucencyBlurStrength", "12");
     expect(getAppearancePreferences()).toMatchObject({
       windowTranslucency: "sidebar",
       windowTranslucencyOpacity: "40",
-      windowTranslucencyBlur: "12",
+      windowTranslucencyBlurStrength: "12",
     });
 
     for (const [key, value] of [
@@ -157,17 +161,48 @@ describe("appearance preferences", () => {
       ["windowTranslucencyOpacity", "14"],
       ["windowTranslucencyOpacity", "101"],
       ["windowTranslucencyOpacity", "50.5"],
-      ["windowTranslucencyBlur", "0"],
-      ["windowTranslucencyBlur", "65"],
-      ["windowTranslucencyBlur", "-3"],
+      ["windowTranslucencyBlurStrength", "101"],
+      ["windowTranslucencyBlurStrength", "-3"],
+      ["windowTranslucencyBlurStrength", "12.5"],
     ] as const) {
       setAppearancePreference(key, value);
     }
     expect(getAppearancePreferences()).toMatchObject({
       windowTranslucency: "sidebar",
       windowTranslucencyOpacity: "40",
-      windowTranslucencyBlur: "12",
+      windowTranslucencyBlurStrength: "12",
     });
+
+    setAppearancePreference("windowTranslucencyBlurStrength", "0");
+    expect(getAppearancePreferences().windowTranslucencyBlurStrength).toBe("0");
+  });
+
+  it("spreads the blur strength over the radii the window server shows", () => {
+    expect(desktopBlurRadiusForStrength(0)).toBe(1);
+    expect(desktopBlurRadiusForStrength(50)).toBe(33);
+    expect(desktopBlurRadiusForStrength(100)).toBe(64);
+  });
+
+  it("carries a blur stored as a radius over to the same strength", () => {
+    localStorage.setItem(
+      APPEARANCE_PREFERENCES_STORAGE_KEY,
+      JSON.stringify({ windowTranslucency: "window", windowTranslucencyBlur: "33" }),
+    );
+    expect(getAppearancePreferences().windowTranslucencyBlurStrength).toBe("51");
+    expect(desktopBlurRadiusForStrength(51)).toBe(33);
+
+    // The next write stores the strength and drops the radius.
+    setAppearancePreference("windowTranslucencyOpacity", "40");
+    const stored = JSON.parse(localStorage.getItem(APPEARANCE_PREFERENCES_STORAGE_KEY) ?? "{}");
+    expect(stored.windowTranslucencyBlurStrength).toBe("51");
+    expect(stored.windowTranslucencyBlur).toBeUndefined();
+
+    // A stored strength wins over a leftover radius.
+    localStorage.setItem(
+      APPEARANCE_PREFERENCES_STORAGE_KEY,
+      JSON.stringify({ windowTranslucencyBlur: "80", windowTranslucencyBlurStrength: "20" }),
+    );
+    expect(getAppearancePreferences().windowTranslucencyBlurStrength).toBe("20");
   });
 
   it("resolves the translucent window scope, off while the OS reduces transparency", () => {
@@ -195,7 +230,6 @@ describe("appearance preferences", () => {
     expect(hasAppearancePreferenceOverride("fontFamilySans")).toBe(false);
     expect(hasAppearancePreferenceOverride("fontFamilyMono")).toBe(false);
     expect(hasAppearancePreferenceOverride("fontSizeBase")).toBe(false);
-    expect(hasAppearancePreferenceOverride("radius")).toBe(false);
     expect(hasAppearancePreferenceOverride("primaryColorMode")).toBe(false);
     expect(hasAppearancePreferenceOverride("primaryColor")).toBe(false);
     expect(hasAppearancePreferenceOverride("surfaceTransparency")).toBe(false);
@@ -230,14 +264,12 @@ describe("appearance preferences", () => {
     expect(getAppearancePreferences()).toEqual(DEFAULT_APPEARANCE_PREFERENCES);
 
     setAppearancePreference("fontFamilySans", "serif");
-    setAppearancePreference("radius", "999rem");
     setAppearancePreference("primaryColorMode", "always");
     setAppearancePreference("primaryColor", "not-a-color");
     setAppearancePreference("surfaceTransparency", "opaque");
     expect(getAppearancePreferences().fontFamilySans).toBe(
       DEFAULT_APPEARANCE_PREFERENCES.fontFamilySans,
     );
-    expect(getAppearancePreferences().radius).toBe(DEFAULT_APPEARANCE_PREFERENCES.radius);
     expect(getAppearancePreferences().primaryColorMode).toBe(
       DEFAULT_APPEARANCE_PREFERENCES.primaryColorMode,
     );
@@ -261,16 +293,14 @@ describe("appearance preferences", () => {
       '"Geist", "Geist Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
     );
     setAppearancePreference("fontSizeBase", "18px");
-    setAppearancePreference("radius", "0rem");
     setAppearancePreference("surfaceTransparency", "high");
 
-    resetAppearancePreference("radius");
+    resetAppearancePreference("fontSizeBase");
 
     expect(getAppearancePreferences()).toEqual({
       ...DEFAULT_APPEARANCE_PREFERENCES,
       fontFamilySans:
         '"Geist", "Geist Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-      fontSizeBase: "18px",
       surfaceTransparency: "high",
     });
   });
@@ -279,7 +309,6 @@ describe("appearance preferences", () => {
     const style = installStyleDocument();
 
     setAppearancePreference("fontSizeBase", "18px");
-    setAppearancePreference("radius", "0rem");
     setAppearancePreference("primaryColorMode", "custom");
     setAppearancePreference("primaryColor", "#0EA5E9");
     applyAppearancePreferencesToDocument();
@@ -291,9 +320,8 @@ describe("appearance preferences", () => {
     expect(css).toContain(
       '--font-family-mono: "SF Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;',
     );
-    expect(css).toContain("--radius: 0rem;");
-    expect(css).toContain("--radius-sm: 0px !important;");
-    expect(css).toContain("--radius-4xl: 0px !important;");
+    // The corner radius is fixed in CSS, not a preference.
+    expect(css).not.toContain("--radius");
     expect(css).toContain("--font-size-base: 18px;");
     expect(css).toContain(
       ":root, :root.dark { --primary: #0ea5e9; --ring: #0ea5e9; --primary-foreground: #ffffff; }",
@@ -702,5 +730,47 @@ describe("surface step regression", () => {
         expect(css, `step "${step}"`).toContain(declaration);
       }
     }
+  });
+});
+
+describe("contrast", () => {
+  it("writes nothing at the theme's own contrast", () => {
+    expect(buildContrastCssRule(100)).toBe("");
+  });
+
+  it("pushes text away from its surface above 100 % and toward it below", () => {
+    const stronger = buildContrastCssRule(150);
+    expect(stronger).toContain("--appearance-contrast-base: 100%;");
+    expect(stronger).toContain("--appearance-contrast-boost: 50%;");
+    expect(stronger).toContain("--appearance-contrast-border-boost: 12.5%;");
+    expect(stronger).toMatch(/--color-foreground: color-mix\(in oklab,/u);
+    expect(stronger).toMatch(
+      /--color-muted-foreground: color-mix\(in oklab, color-mix\(in oklab, var\(--muted-foreground\)/u,
+    );
+    expect(stronger).toContain(":root.dark { --appearance-contrast-target: white; }");
+    expect(buildContrastCssRule(60)).toContain("--appearance-contrast-base: 60%;");
+  });
+
+  it("covers the active sidebar row, and moves each border toward its own text", () => {
+    const rule = buildContrastCssRule(150);
+    expect(rule).toContain(
+      "--color-sidebar-accent-foreground: color-mix(in oklab, color-mix(in oklab, var(--sidebar-accent-foreground) var(--appearance-contrast-base), var(--sidebar)),",
+    );
+    expect(rule).toMatch(
+      /--color-border: [^;]*var\(--foreground\) var\(--appearance-contrast-border-boost\)\);/u,
+    );
+    expect(rule).toMatch(
+      /--color-sidebar-border: [^;]*var\(--sidebar-foreground\) var\(--appearance-contrast-border-boost\)\);/u,
+    );
+  });
+
+  it("accepts only the slider's stops, every 10 % from 50 to 200", () => {
+    expect(isValidPreferenceValue("contrast", "150")).toBe(true);
+    for (const value of ["40", "210", "1e2", "150.5", "", "55", "199"]) {
+      expect(isValidPreferenceValue("contrast", value), value).toBe(false);
+    }
+    expect(APPEARANCE_CONTRAST_OPTIONS.map((option) => option.value)).toEqual(
+      Array.from({ length: 16 }, (_, index) => String(50 + index * 10)),
+    );
   });
 });

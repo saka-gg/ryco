@@ -1,10 +1,24 @@
+import { isElectron, isHostedHubMode } from "../../env";
+import type { EnvironmentSettingsTargetState } from "../../hooks/useEnvironmentSettingsTarget";
 import type { SettingsSectionId } from "../../settingsDialogStore";
+import { isLocalOnboardingClient } from "../onboarding/localOnboarding";
+import { settingsSectionInDestination, settingsSectionReachable } from "./settingsSections.logic";
+
+export type SettingsDestination = "client" | "node";
+
+export type SettingsDesktopCapability =
+  | "cliCommand"
+  | "computerUse"
+  | "quitShortcut"
+  | "setKeepAwakeMode"
+  | "windowCapture"
+  | "windowTranslucencySupported";
 
 export interface SettingsSearchEntry {
   readonly section: SettingsSectionId;
-  readonly owner: "client" | "node";
+  readonly owner: SettingsDestination;
   readonly localOnboardingOnly?: boolean;
-  readonly desktopCapability?: "computerUse" | "quitShortcut" | "windowTranslucencySupported";
+  readonly desktopCapability?: SettingsDesktopCapability;
   readonly title: string;
   readonly description: string;
   /** Extra match terms not present in title/description. */
@@ -63,6 +77,22 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "general",
+    title: "Terminal command",
+    owner: "client",
+    description: "Install the ryco command to use this app's node from any terminal.",
+    keywords: "cli command line shell path install ryco nightly",
+    desktopCapability: "cliCommand",
+  },
+  {
+    section: "general",
+    title: "Window capture",
+    owner: "client",
+    description: "Capture shortcut and Mac permissions for attaching app windows to the composer.",
+    keywords: "screenshot snapshot appsnap screen recording input monitoring option keys hotkey",
+    desktopCapability: "windowCapture",
+  },
+  {
+    section: "general",
     title: "Device name",
     owner: "node",
     description: "Rename the selected device for everyone who can access it.",
@@ -89,17 +119,10 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "inbox",
-    title: "AI Focus",
+    title: "Auto-settle inactive tasks",
     owner: "client",
-    description: "Prioritize the Inbox with bounded, environment-local model ranking.",
-    keywords: "priority sort active threads model ranking focus refresh",
-  },
-  {
-    section: "inbox",
-    title: "AI Focus models",
-    owner: "node",
-    description: "Choose or inherit the ranking model for each connected environment.",
-    keywords: "provider node disclosure privacy data",
+    description: "Move inactive tasks to Settled after their last message or turn.",
+    keywords: "housekeeping settled archive inactive threads days",
   },
   {
     section: "general",
@@ -144,12 +167,21 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     keywords: "github actions checks ci polling refresh",
   },
   {
+    section: "source-control",
+    title: "Pull request links in chat",
+    owner: "client",
+    description: "Open pull request links on the Pull requests page or in the browser.",
+    keywords: "pr link url open browser github gitlab merge request",
+  },
+  {
     section: "general",
-    title: "Stream token by token (legacy)",
+    title: "Response streaming",
     owner: "node",
-    description: "Compatibility mode for token-by-token assistant output.",
-    keywords: "token streaming assistant output streaming tokens buffered",
-    targetId: "legacy-token-streaming",
+    description:
+      "Show replies a paragraph at a time, a whole message at a time, or token by token.",
+    keywords:
+      "stream streaming paragraph token turn whole message buffered output assistant legacy",
+    targetId: "response-streaming",
   },
   {
     section: "general",
@@ -157,6 +189,13 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     owner: "node",
     description: "Check installed provider CLIs for newer versions.",
     keywords: "upgrade cli",
+  },
+  {
+    section: "general",
+    title: "Lower agent CPU priority",
+    owner: "node",
+    description: "Run agents and their tests and builds at a lower CPU priority.",
+    keywords: "nice cpu priority responsive load performance below normal agent processes",
   },
   {
     section: "general",
@@ -218,6 +257,20 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "general",
+    title: "Thread alerts",
+    owner: "client",
+    description: "Notifications or a sound when a thread finishes, fails, or needs you.",
+    keywords: "notifications sound badge alerts toast chime approval",
+  },
+  {
+    section: "general",
+    title: "In-app alerts",
+    owner: "client",
+    description: "A toast with Open thread when another thread finishes or needs you.",
+    keywords: "notifications sound badge alerts toast",
+  },
+  {
+    section: "general",
     title: "Update track",
     owner: "client",
     description: "Which release channel the app follows.",
@@ -246,10 +299,10 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "appearance",
-    title: "Corner radius",
+    title: "Contrast",
     owner: "client",
-    description: "Rounding for panels, buttons, inputs, and menus.",
-    keywords: "round square",
+    description: "Make text and borders stronger, or softer, than the theme draws them.",
+    keywords: "accessibility readability legibility high contrast",
   },
   {
     section: "appearance",
@@ -275,11 +328,25 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "general",
+    title: "Send shortcut",
+    owner: "client",
+    description: "Send with Enter, or with Mod+Enter for multiline prompts or always.",
+    keywords: "enter return cmd command ctrl multiline new line submit composer",
+  },
+  {
+    section: "general",
     title: "Messages sent while a turn runs",
     owner: "client",
     description:
-      "Queue follow-ups or steer them into the running turn; Mod+Enter does the opposite.",
-    keywords: "steer queue follow-up enter",
+      "Queue follow-ups or steer them into the running turn, or do the opposite for one message.",
+    keywords: "steer queue follow-up enter mod",
+  },
+  {
+    section: "general",
+    title: "Review large Claude resumes",
+    owner: "client",
+    description: "Ask before a send resumes a large Claude conversation that sat idle.",
+    keywords: "claude cache prompt compact compaction resume idle tokens cost don't ask again",
   },
   {
     section: "general",
@@ -297,24 +364,53 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "appearance",
+    title: "Chat width",
+    owner: "client",
+    description: "How wide messages and the composer grow on large screens.",
+    keywords: "comfortable wide full width column layout timeline monitor",
+  },
+  {
+    section: "appearance",
+    title: "Open chat tabs",
+    owner: "client",
+    description: "Keep the chats you open as tabs in the chat header, like a browser.",
+    keywords: "tabs tab strip header browser open chats threads",
+  },
+  {
+    section: "appearance",
     title: "Color mode",
     owner: "client",
     description: "Light, dark, or follow the system preference.",
     keywords: "color mode dark light",
   },
   {
-    section: "providers",
+    section: "source-control",
+    title: "Writing style",
+    owner: "node",
+    description:
+      "Write commit messages and pull requests like the repository or as Conventional Commits.",
+    keywords: "git commit message pr title conventional commits repository style writing",
+  },
+  {
+    section: "source-control",
     title: "Commit message instructions",
     owner: "node",
     description: "Guide the style of generated commit messages.",
     keywords: "git writing prompt text generation conventional commits custom",
   },
   {
-    section: "providers",
+    section: "source-control",
     title: "Pull request instructions",
     owner: "node",
     description: "Guide generated pull request titles and descriptions.",
     keywords: "git writing prompt text generation pr body description before after custom",
+  },
+  {
+    section: "source-control",
+    title: "Pull request templates",
+    owner: "node",
+    description: "Fill pull request descriptions from the repository's template.",
+    keywords: "pr template description github gitlab merge request",
   },
   {
     section: "providers",
@@ -372,6 +468,8 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     owner: "client",
     description: "Scan to open this backend on another device.",
     keywords: "qr code phone mobile",
+    // PAIRING_LINK_TARGET_ID: no heading reads "Pairing link", so it jumps to the Network access row.
+    targetId: "pairing-link",
   },
   {
     section: "connections",
@@ -379,6 +477,17 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     owner: "client",
     description: "Serve over your tailnet with HTTPS.",
     keywords: "vpn remote",
+  },
+  {
+    section: "connections",
+    title: "Keep this computer awake",
+    owner: "client",
+    desktopCapability: "setKeepAwakeMode",
+    description:
+      "Stop idle sleep while other devices reach this computer or agents work, on AC power.",
+    keywords: "sleep caffeinate power battery plugged in awake agents",
+    // DESKTOP_KEEP_AWAKE_ROW_ID: the row's title names the device, so it cannot be the target.
+    targetId: "desktop-keep-awake",
   },
   {
     section: "connections",
@@ -447,6 +556,13 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     keywords: "heatmap usage tokens",
   },
   {
+    section: "general",
+    title: "Model prices",
+    owner: "node",
+    description: "Custom prices and model mappings for usage cost.",
+    keywords: "usage cost price pricing rates override map alias preview gateway unpriced",
+  },
+  {
     section: "archived",
     title: "Archive",
     owner: "node",
@@ -454,3 +570,104 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     keywords: "unarchive delete restore retention cleanup suggestions",
   },
 ];
+
+/**
+ * Section titles as the settings nav draws them. They live here, not in the
+ * settings page, so the command palette can name a section without loading it.
+ */
+export const SETTINGS_SECTION_TITLES: Readonly<Record<SettingsSectionId, string>> = {
+  account: "Account",
+  general: "General",
+  inbox: "Inbox",
+  appearance: "Appearance",
+  providers: "Providers",
+  "opinionated-plugins": "Plugins",
+  "mcp-servers": "MCP",
+  integrations: "Integrations",
+  "computer-use": "Computer use",
+  keybindings: "Keybindings",
+  "source-control": "Source control",
+  connections: "Connections",
+  updates: "Updates",
+  security: "Security",
+  diagnostics: "Diagnostics",
+  statistics: "Statistics",
+  archived: "Archive",
+};
+
+/** Sections that open another page instead of rendering a panel in settings. */
+export const SETTINGS_LINK_SECTIONS: ReadonlySet<SettingsSectionId> = new Set(["statistics"]);
+
+/**
+ * What the settings page can show: this client, and the device it edits.
+ * Built by {@link readSettingsSearchScope}.
+ */
+export interface SettingsSearchScope {
+  readonly hosted: boolean;
+  /** Desktop with computer use, where Integrations is also an app section. */
+  readonly desktopComputerUse: boolean;
+  readonly localOnboarding: boolean;
+  readonly hasDesktopCapability: (capability: SettingsDesktopCapability) => boolean;
+  /** The device whose settings the page shows. */
+  readonly node: Pick<EnvironmentSettingsTargetState, "target" | "isPrimary" | "nodeRole">;
+}
+
+export function readSettingsSearchScope(node: SettingsSearchScope["node"]): SettingsSearchScope {
+  return {
+    hosted: isHostedHubMode(),
+    desktopComputerUse: isElectron && Boolean(window.desktopBridge?.computerUse),
+    localOnboarding: isLocalOnboardingClient(),
+    hasDesktopCapability: (capability) => Boolean(window.desktopBridge?.[capability]),
+    node,
+  };
+}
+
+/**
+ * Whether the settings nav lists a section under a destination. The page
+ * builds its nav from this and the command palette its Settings results, so a
+ * result never names a section the page then refuses.
+ */
+export function settingsSectionListed(
+  scope: SettingsSearchScope,
+  destination: SettingsDestination,
+  section: SettingsSectionId,
+): boolean {
+  if (destination === "client") {
+    return (
+      settingsSectionInDestination(section, "client", scope.desktopComputerUse) &&
+      (section !== "connections" || !scope.hosted)
+    );
+  }
+  const target = scope.node.target;
+  // The device's own connection settings live under Security; "Connections"
+  // belongs to the app, which is what reaches devices.
+  return (
+    target !== null &&
+    section !== "connections" &&
+    settingsSectionInDestination(section, "node", scope.desktopComputerUse) &&
+    settingsSectionReachable(section, {
+      hosted: scope.hosted || !scope.node.isPrimary,
+      role: target.connected ? scope.node.nodeRole : null,
+      desktop: false,
+    })
+  );
+}
+
+/** The entries a settings search lists for `query`, in index order. */
+export function filterSettingsSearchEntries(
+  query: string,
+  scope: SettingsSearchScope,
+  entries: ReadonlyArray<SettingsSearchEntry> = SETTINGS_SEARCH_INDEX,
+): SettingsSearchEntry[] {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (normalizedQuery.length === 0) return [];
+  return entries.filter(
+    (entry) =>
+      settingsSectionListed(scope, entry.owner, entry.section) &&
+      (!entry.localOnboardingOnly || scope.localOnboarding) &&
+      (!entry.desktopCapability || scope.hasDesktopCapability(entry.desktopCapability)) &&
+      `${entry.title} ${entry.description} ${entry.keywords ?? ""}`
+        .toLowerCase()
+        .includes(normalizedQuery),
+  );
+}

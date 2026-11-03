@@ -3,7 +3,9 @@
 import { useAppKeybindings } from "../appKeybindings";
 
 import { usePresentationTier } from "../hooks/usePresentationTier";
+import { useSettingsPageTarget } from "../hooks/useSettingsPageTarget";
 import { useThreadExportAction } from "../hooks/useThreadExportAction";
+import { usePromptLinkPaletteItems } from "./promptLinks/usePromptLinkPaletteItems";
 
 import { DeviceIcon } from "./DeviceIcon";
 
@@ -29,20 +31,25 @@ import { prefetchFilesystemBrowse, useFilesystemBrowse } from "~/rpc/useProject"
 import { useServerConfig } from "~/rpc/serverState";
 import { useSourceControlRepositorySearch } from "~/rpc/useSourceControl";
 import {
+  ArchiveIcon,
   ArrowDownIcon,
   ArrowLeftIcon,
   ArrowUpIcon,
   BarChart3Icon,
   CalendarClockIcon,
+  CheckIcon,
   GitPullRequestCreateIcon,
   GitPullRequestIcon,
   CircleAlertIcon,
+  CircleDotIcon,
   Columns2Icon,
   CornerLeftUpIcon,
+  FileSearchIcon,
   FolderGit2Icon,
   FolderIcon,
   FolderTreeIcon,
   FoldersIcon,
+  FolderInputIcon,
   FolderPlusIcon,
   FolderSymlinkIcon,
   InboxIcon,
@@ -52,7 +59,9 @@ import {
   PinOffIcon,
   Settings2Icon,
   SettingsIcon,
+  SquareCheckBigIcon,
   SquarePenIcon,
+  TextSearchIcon,
 } from "lucide-react";
 import {
   useCallback,
@@ -60,9 +69,11 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type KeyboardEvent,
 } from "react";
+import type { LegendListRef } from "@legendapp/list/react";
 import { useShallow } from "zustand/react/shallow";
 import { availablePaneSplit, useChatPanesStore } from "../chatPanesStore";
 import { useCommandPaletteStore } from "../commandPaletteStore";
@@ -87,6 +98,8 @@ import {
 } from "../lib/chatThreadActions";
 import { CHAT_PROJECT_LABEL, projectPlaceLabel } from "../composerDraftStore";
 import { excludeChatProjects, isChatProject } from "@ryco/shared/projectKind";
+import { pullRequestLinkSearchTerms } from "@ryco/shared/worktreePullRequests";
+import { createThreadWorktreeResolver } from "@ryco/client-runtime/state/threads";
 import {
   appendBrowsePathSegment,
   canNavigateUp,
@@ -108,18 +121,25 @@ import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
 import {
   selectProjectsAcrossEnvironments,
   selectSidebarThreadsAcrossEnvironments,
+  selectSidebarWorktreesAcrossEnvironments,
   useStore,
 } from "../store";
-import { isUnarchivedThreadEntry } from "../types";
+import { requestCustomSnooze } from "../threadLifecycleCommands";
+import { isUnarchivedThreadEntry, type SidebarThreadSummary } from "../types";
 import { buildThreadRouteParams } from "../threadRoutes";
 import { useUiStateStore } from "../uiStateStore";
 import {
   ADDON_ICON_CLASS,
   buildBrowseGroups,
+  buildCommandPaletteRows,
+  buildCurrentThreadLifecycleActions,
   buildMessageSearchItems,
   buildProjectActionItems,
   buildRootGroups,
+  buildSettingsSearchItems,
   buildThreadActionItems,
+  COMMAND_PALETTE_VIRTUALIZE_AFTER_ITEMS,
+  findHighlightedCommandPaletteItem,
   type CommandPaletteMessageSearchResult,
   type CommandPaletteActionItem,
   type CommandPaletteSubmenuItem,
@@ -131,8 +151,21 @@ import {
   ITEM_ICON_CLASS,
   RECENT_THREAD_LIMIT,
 } from "./CommandPalette.logic";
-import { CommandPaletteResults } from "./CommandPaletteResults";
+import { useAppearancePaletteItems } from "./CommandPaletteAppearance";
+import {
+  CommandPaletteResults,
+  CommandPaletteVirtualizedResults,
+  scrollCommandPaletteRowIntoView,
+} from "./CommandPaletteResults";
+import { WorkspaceSearchDialog } from "./workspaceSearch/WorkspaceSearchDialog";
 import { ProjectFavicon } from "./ProjectFavicon";
+import {
+  filterSettingsSearchEntries,
+  readSettingsSearchScope,
+  SETTINGS_LINK_SECTIONS,
+  SETTINGS_SECTION_TITLES,
+} from "./settings/settingsSearchIndex";
+import { requestSettingsReveal } from "./settings/settingsSearchReveal";
 import {
   ADD_PROJECT_SETUP_REQUIRED_FALLBACK_HINT,
   ADD_PROJECT_SETUP_REQUIRED_LABEL,
@@ -184,6 +217,7 @@ import { useComposerHandleContext } from "../composerHandleContext";
 import { useHostedRpcCapability, type HostedRpcCapability } from "../hostedHub/capabilities";
 import { hostedCapabilityCopy, hostedSwitchTargetLabel } from "../hostedHub/switchTarget";
 import { openAutomationsDialog } from "./automations/automationsDialogStore";
+import { openProjectImportDialog } from "./projectImport/projectImportDialogStore";
 import { openPromoteChatDialog, useCanPromoteChat } from "./chat/promoteChatDialogStore";
 import { getPresentationTier } from "../lib/presentationTier";
 import { buildProjectsPageLocation } from "../projectsRoute";
@@ -236,7 +270,11 @@ function unavailableDescription(
 }
 
 export function CommandPaletteDialog() {
-  const open = useCommandPaletteStore((store) => store.open);
+  // A workspace search (quick open or find in files) takes the command list's
+  // place while the store names one.
+  const showsCommands = useCommandPaletteStore(
+    (store) => store.open && store.workspaceSearchMode === null,
+  );
   const setOpen = useCommandPaletteStore((store) => store.setOpen);
   const createPullRequestRequested = useCreatePullRequestDialogStore(
     (store) => store.request !== null,
@@ -266,7 +304,7 @@ export function CommandPaletteDialog() {
 
   return (
     <>
-      {open ? <OpenCommandPaletteDialog /> : null}
+      {showsCommands ? <OpenCommandPaletteDialog /> : <WorkspaceSearchDialog />}
       {createPullRequestRequested && createPullRequestHostReady ? (
         <LazyCreatePullRequestDialogHost />
       ) : null}
@@ -281,6 +319,8 @@ function OpenCommandPaletteDialog() {
   const addProjectCapability = useHostedRpcCapability(WS_METHODS.projectsAdd, null);
   // hosted-capability: routed node
   const statisticsCapability = useHostedRpcCapability(WS_METHODS.serverGetStatistics, null);
+  // hosted-capability: routed node
+  const sessionImportCapability = useHostedRpcCapability(WS_METHODS.sessionImportRun, null);
   // hosted-capability: routed node
   const pullRequestsCapability = useHostedRpcCapability(
     WS_METHODS.sourceControlListChangeRequests,
@@ -304,11 +344,19 @@ function OpenCommandPaletteDialog() {
   const setOpen = useCommandPaletteStore((store) => store.setOpen);
   const openIntent = useCommandPaletteStore((store) => store.openIntent);
   const clearOpenIntent = useCommandPaletteStore((store) => store.clearOpenIntent);
+  // Read once per open. Only the desktop sidebar registers the reader, so the
+  // frozen phone tier gets no lifecycle actions.
+  const [currentThreadLifecycle] = useState(
+    () => useCommandPaletteStore.getState().readCurrentThreadLifecycle?.() ?? null,
+  );
+  const tasksAvailable = useCommandPaletteStore((store) => store.tasksAvailable);
+  const openWorkspaceSearch = useCommandPaletteStore((store) => store.openWorkspaceSearch);
   const composerHandleRef = useComposerHandleContext();
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
   const isActionsOnly = deferredQuery.startsWith(">");
   const [highlightedItemValue, setHighlightedItemValue] = useState<string | null>(null);
+  const resultListRef = useRef<LegendListRef | null>(null);
   const settings = useSettings();
   const pinnedThreadKeys = useUiStateStore((state) => state.pinnedThreadKeys);
   const primaryServerConfig = useServerConfig();
@@ -328,6 +376,18 @@ function OpenCommandPaletteDialog() {
   // (title, project), while thread actions list only unarchived threads.
   const threads = useStore(useShallow(selectSidebarThreadsAcrossEnvironments));
   const unarchivedThreads = useMemo(() => threads.filter(isUnarchivedThreadEntry), [threads]);
+  const worktrees = useStore(useShallow(selectSidebarWorktreesAcrossEnvironments));
+  // A thread is found by its workspace's pull requests too (`#123`, `owner/repo#123`, the URL),
+  // as one search field so a workspace with many pull requests does not sink their rank.
+  const threadPullRequestSearchTerms = useMemo(() => {
+    const worktreeOf = createThreadWorktreeResolver(worktrees);
+    return (thread: SidebarThreadSummary): ReadonlyArray<string> => {
+      const pullRequests = worktreeOf(thread)?.pullRequests;
+      return pullRequests && pullRequests.length > 0
+        ? [pullRequestLinkSearchTerms(pullRequests).join(" ")]
+        : [];
+    };
+  }, [worktrees]);
   const keybindings = useAppKeybindings();
   const [viewStack, setViewStack] = useState<CommandPaletteView[]>([]);
   const currentView = viewStack.at(-1) ?? null;
@@ -837,6 +897,7 @@ function OpenCommandPaletteDialog() {
         icon: <MessageSquareIcon className={ITEM_ICON_CLASS} />,
         renderLeadingContent: (thread) => <ThreadRowLeadingStatus thread={thread} />,
         renderTrailingContent: (thread) => <ThreadRowTrailingStatus thread={thread} />,
+        extraSearchTerms: threadPullRequestSearchTerms,
         runThread: async (thread) => {
           await navigate({
             to: "/$environmentId/$threadId",
@@ -849,6 +910,7 @@ function OpenCommandPaletteDialog() {
       navigate,
       projectTitleById,
       settings.sidebarThreadSortOrder,
+      threadPullRequestSearchTerms,
       unarchivedThreads,
     ],
   );
@@ -948,6 +1010,8 @@ function OpenCommandPaletteDialog() {
   );
 
   const openSettings = useSettingsDialogStore((s) => s.openSettings);
+  const showSettingsSection = useSettingsDialogStore((s) => s.showSection);
+  const settingsPageTarget = useSettingsPageTarget();
   const openSourceControlSettings = useCallback(() => {
     setOpen(false);
     openSettings("source-control");
@@ -1104,19 +1168,23 @@ function OpenCommandPaletteDialog() {
     [addProjectEnvironmentItems],
   );
 
+  /** False, after saying why, when the routed node does not let this client add projects. */
+  const ensureAddProjectAllowed = useCallback(() => {
+    if (addProjectCapability.allowed) return true;
+    toastManager.add(
+      stackedThreadToast({
+        type: "error",
+        title: "Unable to add project",
+        description:
+          hostedCapabilityCopy(addProjectCapability, routedNodeLabel) ??
+          "This action is unavailable.",
+      }),
+    );
+    return false;
+  }, [addProjectCapability, routedNodeLabel]);
+
   const openAddProjectFlow = useCallback(() => {
-    if (!addProjectCapability.allowed) {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Unable to add project",
-          description:
-            hostedCapabilityCopy(addProjectCapability, routedNodeLabel) ??
-            "This action is unavailable.",
-        }),
-      );
-      return;
-    }
+    if (!ensureAddProjectAllowed()) return;
     if (addProjectEnvironmentOptions.length > 1) {
       pushPaletteView({
         addonIcon: <FolderPlusIcon className={ADDON_ICON_CLASS} />,
@@ -1139,16 +1207,16 @@ function OpenCommandPaletteDialog() {
 
     void startAddProjectSourceSelection(environmentId);
   }, [
-    addProjectCapability,
     addProjectEnvironmentGroups,
     addProjectEnvironmentOptions.length,
     defaultAddProjectEnvironmentId,
-    routedNodeLabel,
+    ensureAddProjectAllowed,
     startAddProjectSourceSelection,
   ]);
 
   useLayoutEffect(() => {
-    if (openIntent?.kind !== "add-project") {
+    // An intent with a path is added by the effect after `handleAddProject`.
+    if (openIntent?.kind !== "add-project" || openIntent.path !== undefined) {
       return;
     }
     clearOpenIntent();
@@ -1189,12 +1257,53 @@ function OpenCommandPaletteDialog() {
     // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [openIntent]);
 
+  // Built once per open, like the state it shows: the snooze times count from
+  // when the palette opened, in the submenu and the snooze shortcut's view alike.
+  const currentThreadActions = useMemo(
+    () =>
+      currentThreadLifecycle
+        ? buildCurrentThreadLifecycleActions({
+            lifecycle: currentThreadLifecycle,
+            // Checked against the bundle budget: some icons, such as the Inbox
+            // menu's ClockIcon, regroup the shell's icon chunks into one more file.
+            icons: {
+              settle: <CheckIcon className={ITEM_ICON_CLASS} />,
+              moveToActive: <InboxIcon className={ITEM_ICON_CLASS} />,
+              snooze: <CalendarClockIcon className={ITEM_ICON_CLASS} />,
+              snoozeAddon: <CalendarClockIcon className={ADDON_ICON_CLASS} />,
+              archive: <ArchiveIcon className={ITEM_ICON_CLASS} />,
+              markUnread: <CircleDotIcon className={ITEM_ICON_CLASS} />,
+            },
+            pickCustomSnooze: requestCustomSnooze,
+          })
+        : null,
+    [currentThreadLifecycle],
+  );
+  useLayoutEffect(() => {
+    if (openIntent?.kind !== "snooze-thread") {
+      return;
+    }
+    clearOpenIntent();
+    const reason = currentThreadLifecycle?.disabledReasons.snooze ?? null;
+    const snoozeUntil = currentThreadActions?.snoozeUntil ?? null;
+    if (snoozeUntil === null || reason !== null) {
+      setOpen(false);
+      if (reason !== null) toastManager.add(stackedThreadToast({ type: "info", title: reason }));
+      return;
+    }
+    pushPaletteView(snoozeUntil);
+    // Runs once per intent; the view captures the times from now.
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
+  }, [openIntent]);
+
   const exportAction = useThreadExportAction(
     activeThread ? scopeThreadRef(activeThread.environmentId, activeThread.id) : null,
   );
+  const appearanceItems = useAppearancePaletteItems();
+  const promptLinkItems = usePromptLinkPaletteItems();
   const presentationTier = usePresentationTier();
   const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> =
-    presentationTier === "phone" ? [] : [exportAction];
+    presentationTier === "phone" ? [] : [exportAction, ...promptLinkItems];
 
   actionItems.push(
     {
@@ -1224,6 +1333,33 @@ function OpenCommandPaletteDialog() {
       },
     },
   );
+
+  if (presentationTier !== "phone") {
+    actionItems.push({
+      kind: "action",
+      value: "action:quick-open",
+      searchTerms: ["go to file", "quick open", "open file", "find file", "files"],
+      title: "Go to file",
+      icon: <FileSearchIcon className={ITEM_ICON_CLASS} />,
+      shortcutCommand: "workspace.quickOpen",
+      keepOpen: true,
+      run: async () => {
+        openWorkspaceSearch("files");
+      },
+    });
+    actionItems.push({
+      kind: "action",
+      value: "action:find-in-files",
+      searchTerms: ["find in files", "search files", "search contents", "grep", "text"],
+      title: "Find in files",
+      icon: <TextSearchIcon className={ITEM_ICON_CLASS} />,
+      shortcutCommand: "workspace.findInFiles",
+      keepOpen: true,
+      run: async () => {
+        openWorkspaceSearch("content");
+      },
+    });
+  }
 
   if (presentationTier !== "phone" && splitThreadItems.length > 0) {
     actionItems.push({
@@ -1261,6 +1397,9 @@ function OpenCommandPaletteDialog() {
       });
     },
   });
+  if (currentThreadActions) {
+    actionItems.push(...currentThreadActions.items);
+  }
 
   if (chatTarget) {
     actionItems.push({
@@ -1383,6 +1522,29 @@ function OpenCommandPaletteDialog() {
   if (getPresentationTier() !== "phone") {
     actionItems.push({
       kind: "action",
+      value: "action:import-projects",
+      searchTerms: [
+        "import",
+        "codex",
+        "claude",
+        "claude code",
+        "conversations",
+        "history",
+        "sessions",
+        "projects",
+        "migrate",
+      ],
+      title: "Import from Codex or Claude Code…",
+      ...unavailableDescription(sessionImportCapability, routedNodeLabel),
+      disabled: !sessionImportCapability.allowed,
+      icon: <FolderInputIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        setOpen(false);
+        openProjectImportDialog({ environmentId: settingsPageTarget.environmentId });
+      },
+    });
+    actionItems.push({
+      kind: "action",
       value: "action:statistics",
       searchTerms: ["statistics", "usage", "activity", "tokens", "cost", "history"],
       title: "Open statistics",
@@ -1394,6 +1556,23 @@ function OpenCommandPaletteDialog() {
         await navigate({ to: "/statistics" });
       },
     });
+    if (tasksAvailable) {
+      actionItems.push({
+        kind: "action",
+        value: "action:tasks",
+        searchTerms: ["tasks", "to-do", "todo", "task list"],
+        title: "Open tasks",
+        // Not the sidebar's ListTodoIcon: imported here, it regroups the shell's
+        // icon chunks into one more file.
+        icon: <SquareCheckBigIcon className={ITEM_ICON_CLASS} />,
+        run: async () => {
+          setOpen(false);
+          // The page's path, not buildTasksPageLocation: that module would become
+          // a chunk of its own, shared with the sidebar.
+          await navigate({ to: "/tasks", search: {} });
+        },
+      });
+    }
     actionItems.push({
       kind: "action",
       value: "action:pull-requests",
@@ -1560,6 +1739,9 @@ function OpenCommandPaletteDialog() {
     }
   }
 
+  if (presentationTier !== "phone") {
+    actionItems.push(...appearanceItems);
+  }
   actionItems.push({
     kind: "action",
     value: "action:settings",
@@ -1575,12 +1757,35 @@ function OpenCommandPaletteDialog() {
   const rootGroups = buildRootGroups({ actionItems, recentThreadItems });
   const activeGroups = currentView ? currentView.groups : rootGroups;
 
+  // The rows the settings page would list for this query, for the device it
+  // would open. Statistics opens its own page, which the action above offers.
+  // The frozen phone tier keeps its own settings sheet.
+  const settingsSearchItems =
+    presentationTier === "phone"
+      ? []
+      : buildSettingsSearchItems({
+          entries: filterSettingsSearchEntries(
+            deferredQuery,
+            readSettingsSearchScope(settingsPageTarget),
+          ).filter((entry) => !SETTINGS_LINK_SECTIONS.has(entry.section)),
+          sectionTitles: SETTINGS_SECTION_TITLES,
+          icon: <SettingsIcon className={ITEM_ICON_CLASS} />,
+          runEntry: (entry) => {
+            setOpen(false);
+            // Open on the device the results were checked against.
+            openSettings(entry.section, settingsPageTarget.environmentId);
+            showSettingsSection(entry.owner, entry.section);
+            requestSettingsReveal(entry.targetId ?? entry.title);
+          },
+        });
+
   const filteredGroups = filterCommandPaletteGroups({
     activeGroups,
     query: deferredQuery,
     isInSubmenu: currentView !== null,
     projectSearchItems: projectSearchItems,
     threadSearchItems: allThreadItems,
+    settingsSearchItems,
     messageSearchItems,
   });
 
@@ -1589,7 +1794,8 @@ function OpenCommandPaletteDialog() {
       rawCwd: string,
       target?: {
         readonly environmentId: EnvironmentId;
-        readonly api: EnvironmentApi;
+        /** Read for `environmentId` when absent. */
+        readonly api?: EnvironmentApi;
       },
     ) => {
       const environmentId = target?.environmentId ?? browseEnvironmentId;
@@ -1672,6 +1878,27 @@ function OpenCommandPaletteDialog() {
       threads,
     ],
   );
+
+  // A folder handed over with its path, as first-run setup does for a dropped
+  // one, skips the source list. Declared after `handleAddProject`, which the
+  // effect above `handleAddProject` could not reference.
+  //
+  // Unlike the other intents this one changes the node, so it runs once per
+  // intent: StrictMode replays a fresh palette's mount effects with the same
+  // intent, which would add the folder twice. Keyed by the intent itself, not
+  // its `requestId`, which starts over at 1 once the intent is cleared.
+  const addedFolderIntentRef = useRef<typeof openIntent>(null);
+  useLayoutEffect(() => {
+    if (openIntent?.kind !== "add-project" || openIntent.path === undefined) {
+      return;
+    }
+    if (addedFolderIntentRef.current === openIntent) return;
+    addedFolderIntentRef.current = openIntent;
+    clearOpenIntent();
+    if (!ensureAddProjectAllowed()) return;
+    const { path, environmentId } = openIntent;
+    void handleAddProject(path, environmentId ? { environmentId } : undefined);
+  }, [clearOpenIntent, ensureAddProjectAllowed, handleAddProject, openIntent]);
 
   const getDefaultCloneParentPath = useCallback(
     (environmentId: EnvironmentId): string =>
@@ -2002,6 +2229,8 @@ function OpenCommandPaletteDialog() {
   } else if (isBrowsing) {
     displayedGroups = relativePathNeedsActiveProject ? [] : browseGroups;
   }
+  const resultRows = buildCommandPaletteRows(displayedGroups);
+  const virtualizeResults = resultRows.itemValues.length > COMMAND_PALETTE_VIRTUALIZE_AFTER_ITEMS;
 
   const inputPlaceholder =
     remoteProjectInputPlaceholder(addProjectCloneFlow) ??
@@ -2109,6 +2338,27 @@ function OpenCommandPaletteDialog() {
     if (event.key === "Backspace" && query === "" && isSubmenu) {
       event.preventDefault();
       popView();
+      return;
+    }
+
+    // Base UI clicks the highlighted row on Enter, which does nothing once the
+    // virtualized list has unmounted it, so run the tracked highlight directly.
+    if (
+      virtualizeResults &&
+      event.key === "Enter" &&
+      !event.nativeEvent.isComposing &&
+      event.keyCode !== 229
+    ) {
+      const highlightedItem = findHighlightedCommandPaletteItem(
+        displayedGroups,
+        highlightedItemValue,
+      );
+      if (highlightedItem) {
+        (event as typeof event & { preventBaseUIHandler?: () => void }).preventBaseUIHandler?.();
+        event.preventDefault();
+        event.stopPropagation();
+        executeItem(highlightedItem);
+      }
     }
   }
 
@@ -2188,8 +2438,14 @@ function OpenCommandPaletteDialog() {
         aria-label="Command palette"
         autoHighlight={isBrowsing || isRemoteProjectCloneFlow ? false : "always"}
         mode="none"
-        onItemHighlighted={(value) => {
+        items={resultRows.itemValues}
+        virtualized={virtualizeResults}
+        onItemHighlighted={(value, eventDetails) => {
           setHighlightedItemValue(typeof value === "string" ? value : null);
+          const rowIndex = resultRows.rowIndexByItemIndex[eventDetails.index];
+          if (virtualizeResults && eventDetails.reason === "keyboard" && rowIndex !== undefined) {
+            scrollCommandPaletteRowIntoView(resultListRef.current, rowIndex);
+          }
         }}
         onValueChange={handleQueryChange}
         value={query}
@@ -2306,31 +2562,42 @@ function OpenCommandPaletteDialog() {
               </div>
             </div>
           ) : null}
-          <CommandPaletteResults
-            groups={displayedGroups}
-            highlightedItemValue={highlightedItemValue}
-            isActionsOnly={isActionsOnly}
-            keybindings={keybindings}
-            onExecuteItem={executeItem}
-            {...(addProjectCloneFlow?.step === "repository"
-              ? {
-                  emptyStateMessage:
-                    addProjectCloneFlow.source === "url"
-                      ? "Enter a Git clone URL and press Enter to continue."
-                      : (remoteRepositoryEmptyStateMessage ??
-                        "Enter a repository path and press Enter to look it up."),
-                }
-              : addProjectCloneFlow?.step === "confirm"
-                ? { emptyStateMessage: "Choose a destination path and press Enter to clone." }
-                : relativePathNeedsActiveProject
-                  ? { emptyStateMessage: "Relative paths require an active project." }
-                  : willCreateProjectPath
-                    ? {
-                        emptyStateMessage:
-                          "Press Enter to create this folder and add it as a project.",
-                      }
-                    : {})}
-          />
+          {virtualizeResults ? (
+            <CommandPaletteVirtualizedResults
+              rows={resultRows.rows}
+              listRef={resultListRef}
+              scrollResetKey={deferredQuery}
+              highlightedItemValue={highlightedItemValue}
+              keybindings={keybindings}
+              onExecuteItem={executeItem}
+            />
+          ) : (
+            <CommandPaletteResults
+              groups={displayedGroups}
+              highlightedItemValue={highlightedItemValue}
+              isActionsOnly={isActionsOnly}
+              keybindings={keybindings}
+              onExecuteItem={executeItem}
+              {...(addProjectCloneFlow?.step === "repository"
+                ? {
+                    emptyStateMessage:
+                      addProjectCloneFlow.source === "url"
+                        ? "Enter a Git clone URL and press Enter to continue."
+                        : (remoteRepositoryEmptyStateMessage ??
+                          "Enter a repository path and press Enter to look it up."),
+                  }
+                : addProjectCloneFlow?.step === "confirm"
+                  ? { emptyStateMessage: "Choose a destination path and press Enter to clone." }
+                  : relativePathNeedsActiveProject
+                    ? { emptyStateMessage: "Relative paths require an active project." }
+                    : willCreateProjectPath
+                      ? {
+                          emptyStateMessage:
+                            "Press Enter to create this folder and add it as a project.",
+                        }
+                      : {})}
+            />
+          )}
         </CommandPanel>
         <CommandFooter className="gap-3 max-sm:flex-col max-sm:items-start">
           {/* Keyboard-navigation hints; hidden on coarse pointers where every

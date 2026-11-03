@@ -118,6 +118,7 @@ const CANONICAL_LIFECYCLE_TYPES: ReadonlySet<string> = new Set<ProviderRuntimeEv
   "config.warning",
   "deprecation.notice",
   "tool.denied",
+  "runtime.notice",
   "runtime.warning",
   "runtime.error",
 ]);

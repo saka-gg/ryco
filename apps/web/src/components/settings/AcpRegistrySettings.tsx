@@ -8,13 +8,77 @@ import { hostedCapabilityCopy } from "../../hostedHub/switchTarget";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Badge } from "../ui/badge";
+import { Toggle, ToggleGroup } from "../ui/toggle-group";
+import {
+  localCommandConfig,
+  readAcpAgentConfig,
+  registryAgentConfig,
+  type AcpAgentConfig,
+} from "./acpAgentConfig.logic";
+import { AcpLocalCommandSettings } from "./AcpLocalCommandSettings";
 
+/**
+ * An ACP agent instance's source: a pinned registry install or a local command. The source can
+ * only change in the add dialog; once added, its sessions and sign-in belong to that agent. Edits
+ * keep the config keys this editor does not own, such as the instance's custom models.
+ */
 export function AcpRegistrySettings({
   value,
   onChange,
+  variant,
 }: {
   readonly value: unknown;
   readonly onChange: (config: Record<string, unknown>) => void;
+  /** `dialog` edits a new instance's local draft; `card` saves each change to the node. */
+  readonly variant: "card" | "dialog";
+}) {
+  const config = readAcpAgentConfig(value);
+  return (
+    <div className="grid gap-3">
+      {variant === "dialog" ? (
+        <ToggleGroup
+          aria-label="Agent source"
+          value={[config.source]}
+          variant="outline"
+          size="sm"
+          onValueChange={(values) => {
+            const next = values[0];
+            if (next === config.source) return;
+            if (next === "local") onChange({ source: "local", command: "", args: [] });
+            if (next === "registry") onChange({});
+          }}
+        >
+          <Toggle value="registry" className="px-3 sm:px-3">
+            Registry agent
+          </Toggle>
+          <Toggle value="local" className="px-3 sm:px-3">
+            Local command
+          </Toggle>
+        </ToggleGroup>
+      ) : null}
+      {config.source === "local" ? (
+        <AcpLocalCommandSettings
+          config={config}
+          commitOnChange={variant === "dialog"}
+          onChange={(next) => onChange(localCommandConfig(value, next))}
+        />
+      ) : (
+        // Mounted only for registry agents, so editing a local command never fetches the index.
+        <AcpRegistryAgentPicker
+          config={config}
+          onSelect={(installation) => onChange(registryAgentConfig(value, installation))}
+        />
+      )}
+    </div>
+  );
+}
+
+function AcpRegistryAgentPicker({
+  config,
+  onSelect,
+}: {
+  readonly config: AcpAgentConfig;
+  readonly onSelect: (installation: { readonly agentId: string; readonly version: string }) => void;
 }) {
   const target = useSettingsTarget();
   const capability = useHostedRpcCapability(
@@ -33,9 +97,8 @@ export function AcpRegistrySettings({
   const [installing, setInstalling] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const generation = useRef(0);
-  const config = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
-  const selectedId = typeof config.agentId === "string" ? config.agentId : "";
-  const selectedVersion = typeof config.version === "string" ? config.version : "";
+  const selectedId = config.agentId;
+  const selectedVersion = config.version;
 
   useEffect(() => {
     const current = ++generation.current;
@@ -68,31 +131,32 @@ export function AcpRegistrySettings({
     };
   }, [server, query]);
 
-  const install = async (agent: AcpRegistryAgent) => {
+  // A promise chain rather than try/finally, which the React Compiler cannot compile.
+  const install = (agent: AcpRegistryAgent) => {
     if (!server?.installAcpRegistry || !canInstall || installing) return;
     const current = generation.current;
     setInstalling(agent.id);
     setError(null);
-    try {
-      const installation = await server.installAcpRegistry({
-        agentId: agent.id,
-        version: agent.version,
+    void server
+      .installAcpRegistry({ agentId: agent.id, version: agent.version })
+      .then((installation) => {
+        if (generation.current !== current) return;
+        onSelect({ agentId: installation.agentId, version: installation.version });
+        setAgents((existing) =>
+          existing.map((item) =>
+            item.id === agent.id && item.version === agent.version
+              ? { ...item, installed: true }
+              : item,
+          ),
+        );
+      })
+      .catch((cause: unknown) => {
+        if (generation.current === current)
+          setError(cause instanceof Error ? cause.message : "Installation failed.");
+      })
+      .finally(() => {
+        if (generation.current === current) setInstalling(null);
       });
-      if (generation.current !== current) return;
-      onChange({ agentId: installation.agentId, version: installation.version });
-      setAgents((existing) =>
-        existing.map((item) =>
-          item.id === agent.id && item.version === agent.version
-            ? { ...item, installed: true }
-            : item,
-        ),
-      );
-    } catch (cause) {
-      if (generation.current === current)
-        setError(cause instanceof Error ? cause.message : "Installation failed.");
-    } finally {
-      if (generation.current === current) setInstalling(null);
-    }
   };
 
   return (
@@ -169,7 +233,7 @@ export function AcpRegistrySettings({
                 installing !== null ||
                 (selectedId === agent.id && selectedVersion === agent.version)
               }
-              onClick={() => void install(agent)}
+              onClick={() => install(agent)}
             >
               {installing === agent.id
                 ? "Installing…"

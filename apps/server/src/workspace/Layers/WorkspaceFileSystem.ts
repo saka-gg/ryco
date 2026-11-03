@@ -4,7 +4,7 @@ import {
   storagePathBlocker,
   canonicalStoragePath,
 } from "../../storage/lifecycle.ts";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { constants as NodeFsConstants, type BigIntStats } from "node:fs";
 import * as NodeFs from "node:fs/promises";
 import * as NodePath from "node:path";
@@ -15,6 +15,7 @@ import {
   PROJECT_RELOCATION_PENDING_MESSAGE,
   PROJECT_STAGE_FILE_MAX_BYTES,
 } from "@ryco/contracts";
+import { openRegularFile } from "@ryco/shared/regularFile";
 
 import {
   WorkspaceFileConflictError,
@@ -27,19 +28,23 @@ import {
 import { WorkspaceEntries } from "../Services/WorkspaceEntries.ts";
 import { WorkspacePathOutsideRootError, WorkspacePaths } from "../Services/WorkspacePaths.ts";
 import { detectRasterImageMimeType } from "../../imageMime.ts";
+import {
+  FILE_CHANGED_WHILE_READING,
+  fileVersion,
+  openPreviewFile,
+  sameFileState,
+  tooLargeToPreview,
+  WORKSPACE_PREVIEW_MAX_BYTES,
+} from "../previewFile.ts";
 
-const WORKSPACE_PREVIEW_MAX_BYTES = 512 * 1024;
+export { WORKSPACE_PREVIEW_MAX_BYTES };
 const WORKSPACE_PREVIEW_TEXT_DECODER = new TextDecoder("utf-8", { fatal: true });
 const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
 const STAGED_FILE_ROOT = ".ryco/attachments";
 const UNSAFE_PATH_SEGMENT_CHARS = new Set(["<", ">", ":", '"', "/", "\\", "|", "?", "*"]);
 
-function isLikelyBinaryPreview(bytes: Uint8Array): boolean {
+export function isLikelyBinaryPreview(bytes: Uint8Array): boolean {
   return bytes.subarray(0, Math.min(bytes.length, 8_192)).includes(0);
-}
-
-function fileVersion(bytes: Uint8Array): string {
-  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
 function decodePreviewContents(bytes: Uint8Array): string | null {
@@ -79,16 +84,6 @@ function encodeWorkspaceText(
   return encoding === "utf8-bom" ? Buffer.concat([UTF8_BOM, encoded]) : encoded;
 }
 
-function sameFileState(left: BigIntStats, right: BigIntStats): boolean {
-  return (
-    left.dev === right.dev &&
-    left.ino === right.ino &&
-    left.size === right.size &&
-    left.mtimeNs === right.mtimeNs &&
-    left.ctimeNs === right.ctimeNs
-  );
-}
-
 function pathStaysWithinRoot(rootPath: string, targetPath: string): boolean {
   const relative = NodePath.relative(rootPath, targetPath);
   return (
@@ -104,6 +99,10 @@ function pathStaysWithinRoot(rootPath: string, targetPath: string): boolean {
  * `maxBytes` is a parameter because text and raster previews ride different
  * budgets; the stability checks and refusal wording stay identical so clients
  * keep mapping both limits with one set of strings.
+ *
+ * `filePath` is the real path containment already approved, so a final link is
+ * followed as before (a dangling one still reads as missing). The open never
+ * waits on a FIFO, and nothing but a regular file is read.
  */
 async function readStableFileBytes(
   filePath: string,
@@ -112,16 +111,10 @@ async function readStableFileBytes(
   readonly bytes: Buffer;
   readonly stat: BigIntStats;
 }> {
-  const handle = await NodeFs.open(filePath, "r");
+  const { handle, stat: beforeReadStat } = await openPreviewFile(filePath);
   try {
-    const beforeReadStat = await handle.stat({ bigint: true });
-    if (!beforeReadStat.isFile()) {
-      throw new Error("Only regular files can be previewed.");
-    }
     if (beforeReadStat.size > BigInt(maxBytes)) {
-      throw new Error(
-        `File is too large to preview (${beforeReadStat.size} bytes). Limit is ${maxBytes} bytes.`,
-      );
+      throw tooLargeToPreview(beforeReadStat.size, maxBytes);
     }
     const bytes = await handle.readFile();
     const afterReadStat = await handle.stat({ bigint: true });
@@ -131,9 +124,27 @@ async function readStableFileBytes(
       !sameFileState(beforeReadStat, afterReadStat) ||
       !sameFileState(afterReadStat, pathStat)
     ) {
-      throw new Error("File changed while it was being read. Try again.");
+      throw new Error(FILE_CHANGED_WHILE_READING);
     }
     return { bytes, stat: afterReadStat };
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * Without a reader, a plain open for writing waits on a FIFO indefinitely, so
+ * the target is opened non-blocking and only truncated once it is known to be
+ * a regular file. A final link is not followed: `filePath` is a real path, so
+ * a link there is one realpath could not resolve (a dangling link, whose target
+ * containment never checked) or one swapped in since. Guarded saves already
+ * replace the path itself through rename and never write through a link.
+ */
+async function writeRegularFile(filePath: string, bytes: Uint8Array): Promise<void> {
+  const { handle } = await openRegularFile(filePath, { write: true });
+  try {
+    await handle.truncate(0);
+    await handle.writeFile(bytes);
   } finally {
     await handle.close();
   }
@@ -436,17 +447,24 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
     return { realWorkspaceRoot, realTargetPath };
   });
 
+  const resolveTarget: WorkspaceFileSystemShape["resolveTarget"] = Effect.fn(
+    "WorkspaceFileSystem.resolveTarget",
+  )(function* (input) {
+    const target = yield* workspacePaths.resolveRelativePathWithinRoot({
+      workspaceRoot: input.cwd,
+      relativePath: input.relativePath,
+    });
+    const { realTargetPath } = yield* ensureResolvedPathStaysWithinWorkspace(
+      input,
+      target.absolutePath,
+    );
+    return { ...target, realPath: realTargetPath };
+  });
+
   const readFile: WorkspaceFileSystemShape["readFile"] = Effect.fn("WorkspaceFileSystem.readFile")(
     function* (input) {
-      const target = yield* workspacePaths.resolveRelativePathWithinRoot({
-        workspaceRoot: input.cwd,
-        relativePath: input.relativePath,
-      });
-
-      const { realTargetPath } = yield* ensureResolvedPathStaysWithinWorkspace(
-        input,
-        target.absolutePath,
-      );
+      const target = yield* resolveTarget(input);
+      const realTargetPath = target.realPath;
       const { bytes } = yield* Effect.tryPromise({
         try: () => readStableFileBytes(realTargetPath, WORKSPACE_PREVIEW_MAX_BYTES),
         catch: toWorkspaceFileSystemError(input, "workspaceFileSystem.readFile"),
@@ -485,15 +503,8 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
   const readFileBinary: WorkspaceFileSystemShape["readFileBinary"] = Effect.fn(
     "WorkspaceFileSystem.readFileBinary",
   )(function* (input) {
-    const target = yield* workspacePaths.resolveRelativePathWithinRoot({
-      workspaceRoot: input.cwd,
-      relativePath: input.relativePath,
-    });
-
-    const { realTargetPath } = yield* ensureResolvedPathStaysWithinWorkspace(
-      input,
-      target.absolutePath,
-    );
+    const target = yield* resolveTarget(input);
+    const realTargetPath = target.realPath;
     const { bytes } = yield* Effect.tryPromise({
       try: () => readStableFileBytes(realTargetPath, PROJECT_READ_FILE_BINARY_MAX_BYTES),
       catch: toWorkspaceFileSystemError(input, "workspaceFileSystem.readFileBinary"),
@@ -516,18 +527,35 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
     };
   });
 
+  const readFileChunk: WorkspaceFileSystemShape["readFileChunk"] = Effect.fn(
+    "WorkspaceFileSystem.readFileChunk",
+  )(function* (input) {
+    const target = yield* resolveTarget(input);
+    const realTargetPath = target.realPath;
+    const chunk = yield* Effect.tryPromise({
+      try: async () => {
+        // Loaded on the first chunked preview, outside the server's boot chunks.
+        const { readStableFileChunk } = await import("../previewFileChunk.ts");
+        return readStableFileChunk(realTargetPath, input.offset, input.expectedFingerprint);
+      },
+      catch: toWorkspaceFileSystemError(input, "workspaceFileSystem.readFileChunk"),
+    });
+
+    return {
+      relativePath: target.relativePath,
+      offset: input.offset,
+      totalBytes: chunk.totalBytes,
+      dataBase64: chunk.bytes.toString("base64"),
+      mimeType: chunk.mimeType,
+      fingerprint: chunk.fingerprint,
+    };
+  });
+
   const writeFile: WorkspaceFileSystemShape["writeFile"] = Effect.fn(
     "WorkspaceFileSystem.writeFile",
   )(function* (input) {
-    const target = yield* workspacePaths.resolveRelativePathWithinRoot({
-      workspaceRoot: input.cwd,
-      relativePath: input.relativePath,
-    });
-
-    const { realTargetPath } = yield* ensureResolvedPathStaysWithinWorkspace(
-      input,
-      target.absolutePath,
-    );
+    const target = yield* resolveTarget(input);
+    const realTargetPath = target.realPath;
     yield* assertStorageWritable(realTargetPath);
     const guarded = input.expectedVersion !== undefined;
     if (
@@ -585,9 +613,10 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
         .pipe(
           Effect.mapError(toWorkspaceFileSystemError(input, "workspaceFileSystem.makeDirectory")),
         );
-      yield* fileSystem
-        .writeFile(realTargetPath, bytes)
-        .pipe(Effect.mapError(toWorkspaceFileSystemError(input, "workspaceFileSystem.writeFile")));
+      yield* Effect.tryPromise({
+        try: () => writeRegularFile(realTargetPath, bytes),
+        catch: toWorkspaceFileSystemError(input, "workspaceFileSystem.writeFile"),
+      });
     }
     yield* workspaceEntries.recordFileWrite(input.cwd, target.relativePath);
     return { relativePath: target.relativePath, version: fileVersion(bytes) };
@@ -650,8 +679,10 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
   });
 
   return {
+    resolveTarget,
     readFile,
     readFileBinary,
+    readFileChunk,
     writeFile: (input) =>
       storageLifecycleLock.withPermit(
         assertStorageWritable(input.cwd).pipe(Effect.andThen(writeFile(input))),

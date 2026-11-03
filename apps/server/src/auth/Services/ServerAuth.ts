@@ -20,6 +20,8 @@ import type { SessionRole } from "./SessionCredentialService.ts";
 
 export interface AuthenticatedSession {
   readonly sessionId: AuthSessionId;
+  /** The pairing (rotation chain) the session belongs to: its first session's id. */
+  readonly chainId: AuthSessionId;
   readonly subject: string;
   readonly method: ServerAuthSessionMethod;
   readonly role: SessionRole;

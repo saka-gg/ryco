@@ -21,8 +21,8 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { TerminalOutputTail } from "../../project/worktreeSetupOutputTail.ts";
 import { utf8ByteLength } from "../../terminal/historyBuffer.ts";
+import { createTerminalSpawnEnv } from "../../terminal/terminalSpawnEnv.ts";
 import {
-  createTerminalSpawnEnv,
   defaultShellResolver,
   formatShellCandidate,
   nonInteractiveShellCommand,

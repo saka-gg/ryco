@@ -6,8 +6,10 @@ import type {
   ScopedThreadRef,
   ThreadId,
 } from "@ryco/contracts";
+import { UnknownUnionMember } from "@ryco/contracts/base-schemas";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { isEnvironmentNodeNewer, resetNewerNodeStateForTests } from "../rpc/newerNodeState.ts";
 import type { ResumableSubscriptionOptions } from "../rpc/wsRpcClient.ts";
 import type { SubscriptionFailureKind } from "../rpc/wsTransport.ts";
 import { scopedThreadKey, scopeThreadRef } from "../scoped.ts";
@@ -37,11 +39,20 @@ import {
   createEnvironmentConnectionSupervisor,
   type EnvironmentSupervisorInput,
   SAVED_ENVIRONMENT_CONNECT_TIMEOUT_MS,
+  SavedEnvironmentConnectionCancelledError,
   SavedEnvironmentCredentialError,
+  SavedEnvironmentSwitchedOffError,
   savedEnvironmentRetryDelayMs,
+  type ShellAcceptance,
+  VIEW_RESUME_HEARTBEAT_GRACE_MS,
+  VIEW_RESUME_SILENT_MS,
 } from "./supervision.ts";
 
-type Record = { readonly environmentId: EnvironmentId; readonly lastConnectedAt?: string };
+type Record = {
+  readonly environmentId: EnvironmentId;
+  readonly lastConnectedAt?: string;
+  readonly disabledAt?: string;
+};
 
 const remote = "env-remote" as EnvironmentId;
 
@@ -70,15 +81,17 @@ function makeSupervisor(
     readonly scheduleShellFrame?: (callback: () => void) => void;
     readonly threadWindowActivityPayloads?: "preview";
     readonly disconnectSavedEnvironment?: (environmentId: EnvironmentId) => Promise<void>;
+    readonly applyThreadDetailEvent?: (environmentId: EnvironmentId, event: unknown) => void;
   } = {},
 ) {
   let resume: ((reason: string) => void) | null = null;
+  let networkChange: (() => void) | null = null;
   let registryListener: (() => void) | null = null;
   const input = {
     isHostedMode: () => overrides.isHostedMode ?? false,
     syncThreadDetailSnapshot: () => undefined,
     syncThreadWindowSnapshot: overrides.syncThreadWindowSnapshot ?? (() => undefined),
-    applyThreadDetailEvent: () => undefined,
+    applyThreadDetailEvent: overrides.applyThreadDetailEvent ?? (() => undefined),
     isThreadDetailSubscriptionNonIdle: overrides.isThreadDetailSubscriptionNonIdle ?? (() => true),
     listThreadBodies: overrides.listThreadBodies,
     evictThreadBodies: overrides.evictThreadBodies,
@@ -109,6 +122,12 @@ function makeSupervisor(
         resume = null;
       };
     },
+    subscribeNetworkChange: (listener: () => void) => {
+      networkChange = listener;
+      return () => {
+        networkChange = null;
+      };
+    },
     stateSink: overrides.stateSink ?? {
       applyShellEvents: (_environmentId: EnvironmentId, events: ReadonlyArray<unknown>) =>
         events.map(() => undefined),
@@ -129,6 +148,8 @@ function makeSupervisor(
   return {
     supervisor,
     resume: (reason: string) => resume?.(reason),
+    networkChanged: () => networkChange?.(),
+    hasNetworkChangeListener: () => networkChange !== null,
     notifyRegistry: () => registryListener?.(),
   };
 }
@@ -269,6 +290,194 @@ describe("saved environment retry", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(attempts).toBe(3);
     stop();
+  });
+
+  describe("coming back into view", () => {
+    /** A connection whose server last answered a heartbeat at `pong.at` (0: never). */
+    const heartbeatConnection = (environmentId: string, reconnected: string[]) => {
+      const pong = { at: Date.now() - 60_000, reopenedAt: 0 };
+      const connection = {
+        environmentId: environmentId as EnvironmentId,
+        kind: "saved",
+        knownEnvironment: { source: "manual" },
+        client: {
+          isHeartbeatFresh: (maxAgeMs = 15_000) => pong.at > 0 && Date.now() - pong.at <= maxAgeMs,
+          hasReopenedSince: (sinceMs: number) => pong.reopenedAt > 0 && pong.reopenedAt >= sinceMs,
+        },
+        reconnect: async () => void reconnected.push(environmentId),
+        dispose: async () => undefined,
+      } as unknown as EnvironmentConnection;
+      return { connection, pong };
+    };
+
+    it("keeps a socket that answers a heartbeat after the page comes back", async () => {
+      const reconnected: string[] = [];
+      const { supervisor, resume } = makeSupervisor(async (record) => connectionFor(record), {
+        records: [],
+      });
+      const stop = supervisor.start();
+      // Hidden, the pinger ran about once a minute: the last pong is a minute old.
+      const lan = heartbeatConnection("env-lan", reconnected);
+      supervisor.register(lan.connection);
+
+      resume("visibilitychange");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reconnected).toEqual([]);
+      // The pinger's first visible tick gets its answer.
+      await vi.advanceTimersByTimeAsync(3_000);
+      lan.pong.at = Date.now();
+      await vi.advanceTimersByTimeAsync(VIEW_RESUME_HEARTBEAT_GRACE_MS);
+      expect(reconnected).toEqual([]);
+      stop();
+    });
+
+    it("reconnects a socket that answers nothing within the grace window", async () => {
+      const reconnected: string[] = [];
+      const { supervisor, resume } = makeSupervisor(async (record) => connectionFor(record), {
+        records: [],
+      });
+      const stop = supervisor.start();
+      const lan = heartbeatConnection("env-lan", reconnected);
+      supervisor.register(lan.connection);
+
+      resume("pageshow");
+      await vi.advanceTimersByTimeAsync(VIEW_RESUME_HEARTBEAT_GRACE_MS - 1);
+      expect(reconnected).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(reconnected).toEqual(["env-lan"]);
+      stop();
+    });
+
+    it("leaves a socket that reconnected by itself during the grace window", async () => {
+      const reconnected: string[] = [];
+      const { supervisor, resume } = makeSupervisor(async (record) => connectionFor(record), {
+        records: [],
+      });
+      const stop = supervisor.start();
+      const lan = heartbeatConnection("env-lan", reconnected);
+      supervisor.register(lan.connection);
+
+      resume("visibilitychange");
+      // Its own ping timed out and it opened a new socket, whose first ping is still to come.
+      await vi.advanceTimersByTimeAsync(8_000);
+      lan.pong.reopenedAt = Date.now();
+      await vi.advanceTimersByTimeAsync(VIEW_RESUME_HEARTBEAT_GRACE_MS);
+      expect(reconnected).toEqual([]);
+      stop();
+    });
+
+    it("reconnects at once a socket silent for minutes: the machine slept or the page froze", async () => {
+      const reconnected: string[] = [];
+      const { supervisor, resume } = makeSupervisor(async (record) => connectionFor(record), {
+        records: [],
+      });
+      const stop = supervisor.start();
+      const lan = heartbeatConnection("env-lan", reconnected);
+      lan.pong.at = Date.now() - VIEW_RESUME_SILENT_MS - 1;
+      supervisor.register(lan.connection);
+
+      resume("visibilitychange");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reconnected).toEqual(["env-lan"]);
+      stop();
+    });
+
+    it("still reconnects a stale socket at once after a wake from sleep or coming online", async () => {
+      for (const reason of ["system-resume", "online", "appstate-active", "pageshow-restored"]) {
+        const reconnected: string[] = [];
+        const { supervisor, resume } = makeSupervisor(async (record) => connectionFor(record), {
+          records: [],
+        });
+        const stop = supervisor.start();
+        supervisor.register(heartbeatConnection("env-lan", reconnected).connection);
+        resume(reason);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(reconnected, reason).toEqual(["env-lan"]);
+        stop();
+      }
+    });
+
+    it("does not reconnect a connection that is gone or replaced by the time it checks", async () => {
+      const reconnected: string[] = [];
+      const { supervisor, resume } = makeSupervisor(async (record) => connectionFor(record), {
+        records: [],
+      });
+      const stop = supervisor.start();
+      const first = heartbeatConnection("env-lan", reconnected);
+      supervisor.register(first.connection);
+      resume("visibilitychange");
+      // Replaced while the check waits; the new connection's pinger has not run yet.
+      await supervisor.remove("env-lan" as EnvironmentId);
+      const second = heartbeatConnection("env-lan", reconnected);
+      second.pong.at = 0;
+      supervisor.register(second.connection);
+      await vi.advanceTimersByTimeAsync(VIEW_RESUME_HEARTBEAT_GRACE_MS);
+      expect(reconnected).toEqual([]);
+      stop();
+    });
+  });
+
+  it("reconnects every direct connection when the network path changes, but not Hub relays", async () => {
+    const reconnected: string[] = [];
+    const { supervisor, networkChanged } = makeSupervisor(async (record) => connectionFor(record), {
+      records: [],
+    });
+    const stop = supervisor.start();
+    const fakeConnection = (environmentId: string, source: string) =>
+      ({
+        environmentId: environmentId as EnvironmentId,
+        kind: "saved",
+        knownEnvironment: { source },
+        // A heartbeat answered just before the move still reads as fresh.
+        client: { isHeartbeatFresh: () => true },
+        reconnect: async () => void reconnected.push(environmentId),
+      }) as unknown as EnvironmentConnection;
+    supervisor.register(fakeConnection("env-lan", "manual"));
+    supervisor.register(fakeConnection("env-hub-relay", "hub-hosted"));
+
+    networkChanged();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reconnected).toEqual(["env-lan"]);
+
+    // One move often arrives as several path updates.
+    networkChanged();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reconnected).toEqual(["env-lan"]);
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    networkChanged();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reconnected).toEqual(["env-lan", "env-lan"]);
+    stop();
+  });
+
+  it("retries an unreachable environment at once on a network path change", async () => {
+    let attempts = 0;
+    const { supervisor, networkChanged } = makeSupervisor(async () => {
+      attempts += 1;
+      throw new Error("offline");
+    });
+    const stop = supervisor.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts).toBe(1);
+
+    networkChanged();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts).toBe(2);
+    stop();
+  });
+
+  it("does not follow network path changes in hosted mode or after supervision stops", () => {
+    const hosted = makeSupervisor(async (record) => connectionFor(record), { isHostedMode: true });
+    const stopHosted = hosted.supervisor.start();
+    expect(hosted.hasNetworkChangeListener()).toBe(false);
+    stopHosted();
+
+    const direct = makeSupervisor(async (record) => connectionFor(record), { records: [] });
+    const stop = direct.supervisor.start();
+    expect(direct.hasNetworkChangeListener()).toBe(true);
+    stop();
+    expect(direct.hasNetworkChangeListener()).toBe(false);
   });
 
   it("does not let connects that never settle stall the other saved environments", async () => {
@@ -414,6 +623,181 @@ describe("saved environment retry", () => {
   });
 });
 
+describe("switched-off saved machines", () => {
+  const OFF_AT = "2026-10-31T09:00:00.000Z";
+  const other = "env-other" as EnvironmentId;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A saved connection as the platform registers it, which a sync can drop. */
+  const savedConnection = (environmentId: EnvironmentId) =>
+    ({
+      environmentId,
+      kind: "saved",
+      knownEnvironment: { source: "manual" },
+      client: { isHeartbeatFresh: () => false },
+      reconnect: vi.fn(async () => undefined),
+      dispose: vi.fn(async () => undefined),
+    }) as unknown as EnvironmentConnection;
+
+  it("never connects one on launch, a registry sync, a wake or a network change", async () => {
+    const attempts: EnvironmentId[] = [];
+    const { supervisor, notifyRegistry, resume, networkChanged } = makeSupervisor(
+      async (record) => {
+        attempts.push(record.environmentId);
+        throw new Error("connect ECONNREFUSED");
+      },
+      { records: [{ environmentId: remote, disabledAt: OFF_AT }, { environmentId: other }] },
+    );
+    const stop = supervisor.start();
+
+    await vi.advanceTimersByTimeAsync(0);
+    notifyRegistry();
+    await vi.advanceTimersByTimeAsync(5_000);
+    resume("online");
+    networkChanged();
+    await vi.advanceTimersByTimeAsync(120_000);
+
+    expect(attempts).not.toContain(remote);
+    expect(attempts.filter((environmentId) => environmentId === other).length).toBeGreaterThan(1);
+    stop();
+  });
+
+  it("refuses an explicit connect with a typed error, before any connect work", async () => {
+    const connect = vi.fn(async (record: Record) => connectionFor(record));
+    const { supervisor } = makeSupervisor(connect, {
+      records: [{ environmentId: remote, disabledAt: OFF_AT }],
+    });
+
+    const attempt = supervisor.ensureSavedEnvironmentConnection({ environmentId: remote }, () =>
+      connect({ environmentId: remote }),
+    );
+
+    await expect(attempt).rejects.toBeInstanceOf(SavedEnvironmentSwitchedOffError);
+    await expect(attempt).rejects.toBeInstanceOf(SavedEnvironmentConnectionCancelledError);
+    expect(connect).not.toHaveBeenCalled();
+  });
+
+  it("drops a connected one when it is switched off and reconnects it when switched on", async () => {
+    const records: Array<Record> = [{ environmentId: remote }];
+    const disconnected: EnvironmentId[] = [];
+    let attempts = 0;
+    const harness = makeSupervisor(
+      async (record) => {
+        attempts += 1;
+        return harness.supervisor.register(savedConnection(record.environmentId));
+      },
+      {
+        records,
+        disconnectSavedEnvironment: async (environmentId) => {
+          disconnected.push(environmentId);
+          await harness.supervisor.remove(environmentId);
+        },
+      },
+    );
+    const stop = harness.supervisor.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts).toBe(1);
+    expect(harness.supervisor.read(remote)).not.toBeNull();
+
+    records[0] = { environmentId: remote, disabledAt: OFF_AT };
+    harness.notifyRegistry();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(disconnected).toEqual([remote]);
+    expect(harness.supervisor.read(remote)).toBeNull();
+
+    // A wake reconnects live sockets and retries failures; there is neither.
+    harness.resume("online");
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(attempts).toBe(1);
+
+    records[0] = { environmentId: remote };
+    harness.notifyRegistry();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts).toBe(2);
+    expect(harness.supervisor.read(remote)).not.toBeNull();
+    stop();
+  });
+
+  it("stops the retry ladder of an unreachable one that is switched off", async () => {
+    const records: Array<Record> = [{ environmentId: remote }];
+    let attempts = 0;
+    const { supervisor, notifyRegistry } = makeSupervisor(
+      async () => {
+        attempts += 1;
+        throw new Error("connect ECONNREFUSED");
+      },
+      { records },
+    );
+    const stop = supervisor.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts).toBe(1);
+
+    records[0] = { environmentId: remote, disabledAt: OFF_AT };
+    notifyRegistry();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(attempts).toBe(1);
+    stop();
+  });
+
+  it("gives up an attempt under way and drops what it opened", async () => {
+    const records: Array<Record> = [{ environmentId: remote }];
+    let finish!: () => void;
+    const opened = savedConnection(remote);
+    const harness = makeSupervisor(
+      (record) =>
+        new Promise<EnvironmentConnection>((resolve) => {
+          finish = () => resolve(harness.supervisor.register(opened));
+          void record;
+        }),
+      { records },
+    );
+    const stop = harness.supervisor.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    records[0] = { environmentId: remote, disabledAt: OFF_AT };
+    harness.notifyRegistry();
+    await vi.advanceTimersByTimeAsync(0);
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(harness.supervisor.read(remote)).toBeNull();
+    expect(opened.dispose).toHaveBeenCalled();
+    stop();
+  });
+
+  it("tells a caller waiting on an attempt that its machine was switched off meanwhile", async () => {
+    const records: Array<Record> = [{ environmentId: remote }];
+    let fail!: (error: Error) => void;
+    const connect = (_record: Record, isCancelled: () => boolean) =>
+      new Promise<EnvironmentConnection>((_resolve, reject) => {
+        // The attempt notices its cancellation, as a platform's connect does.
+        fail = (error) =>
+          reject(isCancelled() ? new SavedEnvironmentConnectionCancelledError(remote) : error);
+      });
+    const { supervisor } = makeSupervisor(connect, { records });
+
+    const waiting = supervisor
+      .ensureSavedEnvironmentConnection({ environmentId: remote }, (isCancelled) =>
+        connect({ environmentId: remote }, isCancelled),
+      )
+      .catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    // The switch: the record goes off and the session teardown cancels.
+    records[0] = { environmentId: remote, disabledAt: OFF_AT };
+    supervisor.cancelPendingSavedEnvironmentConnection(remote);
+    fail(new Error("tunnel closed"));
+
+    expect(await waiting).toBeInstanceOf(SavedEnvironmentSwitchedOffError);
+  });
+});
+
 describe("thread subscription resume", () => {
   function threadConnection(source: string) {
     let listener: ((item: any) => void) | undefined;
@@ -461,6 +845,40 @@ describe("thread subscription resume", () => {
     expect(thread.resumeFrom()).toBe(7);
     thread.emit({ kind: "resumed", fromSequence: 7 });
     expect(thread.resumeFrom()).toBe(7);
+  });
+
+  it("skips what a newer node added but resumes after its events", () => {
+    resetNewerNodeStateForTests();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const applied: Array<unknown> = [];
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
+      applyThreadDetailEvent: (_environmentId, event) => applied.push(event),
+    });
+    const thread = threadConnection("manual");
+    supervisor.register(thread.connection);
+    supervisor.retainThreadDetailSubscription(remote, "thread-1" as ThreadId);
+    // What the codec decodes an event type and an item kind this build does not know to.
+    const unknownEvent = (sequence: number) =>
+      Object.assign(new UnknownUnionMember("type", "thread.teleported"), {
+        sequence,
+        aggregateKind: "thread",
+        aggregateId: "thread-1",
+      });
+
+    thread.emit(windowSnapshot(5));
+    expect(isEnvironmentNodeNewer(remote)).toBe(false);
+    thread.emit({ kind: "event", event: unknownEvent(6) });
+    expect(thread.resumeFrom()).toBe(6);
+    thread.emit({ kind: "event", event: { sequence: 7 } });
+    thread.emit({ kind: "event", event: unknownEvent(8) });
+    thread.emit(new UnknownUnionMember("kind", "snapshot-page"));
+
+    expect(applied).toEqual([{ sequence: 7 }]);
+    expect(thread.resumeFrom()).toBe(8);
+    expect(isEnvironmentNodeNewer(remote)).toBe(true);
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
+    resetNewerNodeStateForTests();
   });
 
   it("always takes a fresh snapshot over the Hub relay", () => {
@@ -2266,12 +2684,10 @@ describe("shell frame batching", () => {
     let applied = 0;
     const sink = {
       applyShellEvents: (_environmentId: EnvironmentId, events: ReadonlyArray<any>) => {
-        calls.push(
-          `commit:${events.map((event) => (event.kind === "thread-priorities" ? "priorities" : event.sequence)).join(",")}`,
-        );
+        calls.push(`commit:${events.map((event) => event.sequence).join(",")}`);
         return events.map((event) => {
           applied += 1;
-          return `context:${event.kind === "thread-priorities" ? "priorities" : event.sequence}`;
+          return `context:${event.sequence}`;
         });
       },
       afterShellEventApplied: (_environmentId: EnvironmentId, event: any, context: unknown) => {
@@ -2307,20 +2723,19 @@ describe("shell frame batching", () => {
 
     supervisor.applyShellEvent(upsert(1), remote);
     supervisor.applyShellEvent(upsert(2), remote);
-    supervisor.applyThreadPriorities({ kind: "thread-priorities", priorities: [] }, remote);
     supervisor.applyShellEvent(upsert(3), remote);
     expect(calls).toEqual([]);
 
     frames.splice(0).forEach((frame) => frame());
     expect(calls).toEqual([
-      "commit:1,2,priorities,3",
-      "after:1:context:1:applied=4",
-      "after:2:context:2:applied=4",
-      "after:3:context:3:applied=4",
+      "commit:1,2,3",
+      "after:1:context:1:applied=3",
+      "after:2:context:2:applied=3",
+      "after:3:context:3:applied=3",
     ]);
   });
 
-  it("drops events the projection already holds but always applies a ranking", () => {
+  it("drops events the projection already holds", () => {
     const { sink, calls } = recordingSink();
     const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
       stateSink: sink,
@@ -2330,11 +2745,33 @@ describe("shell frame batching", () => {
     calls.length = 0;
 
     supervisor.applyShellEvent(upsert(4), remote);
-    supervisor.applyThreadPriorities({ kind: "thread-priorities", priorities: [] }, remote);
     supervisor.applyShellEvent(upsert(6), remote);
     supervisor.flushShellEvents();
 
-    expect(calls).toEqual(["commit:priorities,6", "after:6:context:6:applied=2"]);
+    expect(calls).toEqual(["commit:6", "after:6:context:6:applied=1"]);
+  });
+
+  it("moves the shell's sequence past an event a newer node added, in order", () => {
+    const { sink, calls } = recordingSink();
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
+      stateSink: sink,
+      scheduleShellFrame: () => undefined,
+    });
+    supervisor.syncShellSnapshot(shellSnapshot(5), remote);
+    calls.length = 0;
+
+    // Buffered before the skip, so the skip must not make it look already applied.
+    supervisor.applyShellEvent(upsert(6), remote);
+    supervisor.skipShellEvent(7, remote);
+    supervisor.applyShellEvent(upsert(8), remote);
+    supervisor.skipShellEvent(9, remote);
+
+    expect(supervisor.readShellProjectionSequence(remote)).toBe(9);
+    expect(calls).toEqual([
+      "commit:6,8",
+      "after:6:context:6:applied=2",
+      "after:8:context:8:applied=2",
+    ]);
   });
 
   it("applies buffered items before a snapshot, a projection reset or a resume read", () => {
@@ -2356,6 +2793,113 @@ describe("shell frame batching", () => {
     supervisor.resetShellProjection(remote);
     expect(calls[0]).toBe("commit:4");
     expect(supervisor.readShellProjectionSequence(remote)).toBeNull();
+  });
+});
+
+describe("shell acceptance", () => {
+  const upsert = (sequence: number) =>
+    ({ kind: "thread-upserted", sequence, thread: { id: "thread-1" } }) as never;
+  const shellSnapshot = (snapshotSequence: number) =>
+    ({
+      snapshotSequence,
+      updatedAt: "2026-10-12T00:00:00.000Z",
+      projects: [],
+      worktrees: [],
+      threads: [{ id: "thread-1" }],
+    }) as never;
+
+  function observedSupervisor() {
+    const calls: string[] = [];
+    const sink = {
+      applyShellEvents: (_environmentId: EnvironmentId, events: ReadonlyArray<unknown>) => {
+        calls.push(`commit:${events.length}`);
+        return events.map(() => undefined);
+      },
+      afterShellEventApplied: (_environmentId: EnvironmentId, event: any) => {
+        calls.push(`after:${event.sequence}`);
+      },
+      syncServerShellSnapshot: (_environmentId: EnvironmentId, snapshot: any) => {
+        calls.push(`snapshot:${snapshot.snapshotSequence}`);
+      },
+      reconcileSnapshotDerivedState: () => {
+        calls.push("reconciled");
+      },
+    };
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
+      stateSink: sink,
+      scheduleShellFrame: () => undefined,
+    });
+    const record = (prefix: string) => (acceptance: ShellAcceptance) => {
+      calls.push(
+        acceptance.kind === "snapshot"
+          ? `${prefix}:snapshot`
+          : `${prefix}:${acceptance.events.map((event) => event.sequence).join(",")}`,
+      );
+    };
+    return { supervisor, calls, record };
+  }
+
+  it("reports a snapshot once it is applied, and none the projection already holds", () => {
+    const { supervisor, calls, record } = observedSupervisor();
+    supervisor.subscribeShellAcceptance(record("accepted"));
+
+    supervisor.syncShellSnapshot(shellSnapshot(5), remote);
+    expect(calls).toEqual(["snapshot:5", "reconciled", "accepted:snapshot"]);
+
+    calls.length = 0;
+    supervisor.syncShellSnapshot(shellSnapshot(5), remote);
+    supervisor.syncShellSnapshot(shellSnapshot(4), remote);
+    expect(calls).toEqual([]);
+  });
+
+  it("reports a batch's accepted events in order after their after-hooks", () => {
+    const { supervisor, calls, record } = observedSupervisor();
+    supervisor.syncShellSnapshot(shellSnapshot(5), remote);
+    supervisor.subscribeShellAcceptance(record("accepted"));
+    calls.length = 0;
+
+    supervisor.applyShellEvent(upsert(4), remote);
+    supervisor.applyShellEvent(upsert(6), remote);
+    supervisor.skipShellEvent(7, remote);
+    supervisor.applyShellEvent(
+      { kind: "thread-removed", sequence: 8, threadId: "thread-1" } as never,
+      remote,
+    );
+    supervisor.flushShellEvents();
+
+    expect(calls).toEqual(["commit:2", "after:6", "after:8", "accepted:6,8"]);
+  });
+
+  it("keeps applying the shell and telling other listeners when one throws", () => {
+    const { supervisor, calls, record } = observedSupervisor();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      supervisor.subscribeShellAcceptance(() => {
+        throw new Error("listener failed");
+      });
+      const unsubscribe = supervisor.subscribeShellAcceptance(record("accepted"));
+
+      supervisor.syncShellSnapshot(shellSnapshot(5), remote);
+      supervisor.applyShellEvent(upsert(6), remote);
+      supervisor.flushShellEvents();
+      unsubscribe();
+      supervisor.applyShellEvent(upsert(7), remote);
+      supervisor.flushShellEvents();
+
+      expect(calls).toEqual([
+        "snapshot:5",
+        "reconciled",
+        "accepted:snapshot",
+        "commit:1",
+        "after:6",
+        "accepted:6",
+        "commit:1",
+        "after:7",
+      ]);
+      expect(warn).toHaveBeenCalledTimes(3);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

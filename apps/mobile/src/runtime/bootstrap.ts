@@ -18,7 +18,10 @@ import {
 } from "../connection/hostedConnectionCoordinator";
 import { mobileHostedConnectionScopes } from "../connection/hostedConnectionScopes";
 import { hostedHubStore, type HostedAccountStatus } from "@ryco/client-runtime/authorization";
-import { clearAllProjectIconCaches } from "@ryco/client-runtime/connection";
+import {
+  clearAllProjectIconCaches,
+  isSavedEnvironmentSwitchedOff,
+} from "@ryco/client-runtime/connection";
 import { forgetEnvironmentsServerState } from "@ryco/client-runtime/rpc";
 import type { EnvironmentId } from "@ryco/contracts";
 import { mobileRuntimeStartupBarrier } from "./startupBarrier";
@@ -142,6 +145,8 @@ export function initializeMobileRuntime(): MobileConnectionRegistry {
         await initializeMobileSnapshotPersistence({
           kv: mobileKV,
           hasDirectEnvironment: (environmentId) => registry.catalog.get(environmentId) !== null,
+          isEnvironmentSwitchedOff: (environmentId) =>
+            isSavedEnvironmentSwitchedOff(registry.catalog.get(environmentId)),
           // Debounced snapshot captures are flushed before iOS may suspend us.
           subscribeBackground: (listener) =>
             mobileAppLifecycle.subscribe((event) => {
@@ -202,6 +207,20 @@ export function initializeMobileRuntime(): MobileConnectionRegistry {
           ),
         );
         accountEnvironmentIds.clear();
+        // Direct access was linked through this account's relay: its links and
+        // bearers go with it, read once the stored ones have loaded.
+        void registry.catalog
+          .waitForHydration()
+          .then(() =>
+            registry.catalog.listLinked().length === 0
+              ? undefined
+              : import("../hostedHub/linkedDirectAccessRuntime").then(
+                  ({ mobileLinkedDirectAccess }) => mobileLinkedDirectAccess().forget(),
+                ),
+          )
+          .catch((error: unknown) =>
+            console.warn("Linked direct access was not forgotten.", error),
+          );
       }
       for (const node of currentHostedState.nodes) accountEnvironmentIds.add(node.environmentId);
       if (currentAccountId !== null) artworkAccountId = currentAccountId;

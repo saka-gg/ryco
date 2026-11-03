@@ -51,11 +51,22 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   requiredWorktreeBootstrap: Schema.optional(Schema.Boolean),
   repositoryIdentity: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   projectIcons: Schema.optional(Schema.Boolean),
+  /**
+   * `sourceControl.listInvolvedChangeRequests` (pull requests involving you across the node's
+   * repositories); absent on older servers.
+   */
+  crossRepositoryChangeRequests: Schema.optionalKey(Schema.Boolean),
   storageManagement: Schema.optionalKey(Schema.Boolean),
   environmentIcon: Schema.optionalKey(Schema.Boolean),
   projectPreferences: Schema.optionalKey(Schema.Boolean),
   threadSidebarUndo: Schema.optional(Schema.Boolean),
   threadSnooze: Schema.optional(Schema.Boolean),
+  /**
+   * Thread triage: the Hidden shelf (`thread.hide`, `thread.unhide`) and settling a working
+   * thread, which the node settles once its work ends. Absent on older servers, which reject
+   * `thread.settle` while a turn runs.
+   */
+  threadTriage: Schema.optionalKey(Schema.Boolean),
   threadSettlement: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   /**
    * The node keeps the automatic settlement rule (`threadAutoSettleAfterDays`) and
@@ -63,10 +74,18 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    * each client's own rule and which drop the key from settings patches.
    */
   nodeAutoSettlement: Schema.optionalKey(Schema.Boolean),
-  threadPriorityRanking: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   worktreeSubmoduleSettings: Schema.optionalKey(Schema.Boolean),
+  /** `gitWritingStyle` and `projectGitWritingStyle`; absent on older servers, which drop the keys. */
+  gitWritingStyle: Schema.optionalKey(Schema.Boolean),
+  /** `sourceControl.listChangeRequestTemplates` and `pullRequestTemplates`; absent on older servers. */
+  changeRequestTemplates: Schema.optionalKey(Schema.Boolean),
   /** Usage-limit settings and the resume/snooze worker; absent on older servers. */
   usageLimitRecovery: Schema.optionalKey(Schema.Boolean),
+  /**
+   * The `responseStreamingMode` setting (turn, paragraph, token); absent on older servers,
+   * which drop the key from settings patches and only know the legacy token switch.
+   */
+  responseStreamingModes: Schema.optionalKey(Schema.Boolean),
   /** Server-owned worktree notes (`notes.list` / `notes.command`); absent on older servers. */
   worktreeNotes: Schema.optionalKey(Schema.Boolean),
   /**
@@ -77,10 +96,53 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** `threads.fork` (chat forking); absent on older servers. */
   threadFork: Schema.optionalKey(Schema.Boolean),
   /**
+   * `threads.forkCarried` (continue a thread from another node here); absent on older servers,
+   * which clients do not offer as a target.
+   */
+  threadForkCarried: Schema.optionalKey(Schema.Boolean),
+  /**
+   * `thread.conversation.revert` (rewind the conversation and keep the files); absent on
+   * older servers, which offer only the revert that restores files.
+   */
+  conversationRevert: Schema.optionalKey(Schema.Boolean),
+  /**
+   * The node records a checkout's branch changes into its threads and workspaces itself (at
+   * turn start and end, and after git and pull request commands); absent on older servers,
+   * whose clients write the branch they see.
+   */
+  threadBranchAdoption: Schema.optionalKey(Schema.Boolean),
+  /**
+   * `thread.files.revert` (restore a checkpoint's files and keep the conversation); absent
+   * on older servers, whose only file restore also rewinds the conversation.
+   */
+  filesRevert: Schema.optionalKey(Schema.Boolean),
+  /**
    * `projects.searchEntries` accepts an empty query (the shallowest entries,
    * which also warms the workspace index); absent on older servers.
    */
   projectSearchEmptyQuery: Schema.optionalKey(Schema.Boolean),
+  /** `projects.searchContent` (find in files); absent on older servers. */
+  projectContentSearch: Schema.optionalKey(Schema.Boolean),
+  /** `projects.readFileChunk` (PDF and image previews in bounded chunks); absent on older servers. */
+  projectReadFileChunk: Schema.optionalKey(Schema.Boolean),
+  /**
+   * `projects.subscribeFileChanges` (notices when an open file changes on disk, never its
+   * content); absent on older servers, whose clients reread an open file only after a turn that
+   * changed it.
+   */
+  projectFileWatch: Schema.optionalKey(Schema.Boolean),
+  /**
+   * `threads.subscribeLocalServers` (the listening servers a thread's agents and terminals
+   * started); absent on older servers and false on Windows.
+   */
+  threadLocalServers: Schema.optionalKey(Schema.Boolean),
+  /** `threads.stopLocalServer` for those servers; absent on older servers and false on Windows. */
+  threadLocalServerStop: Schema.optionalKey(Schema.Boolean),
+  /**
+   * `secrets.answerRequest`: the node writes an agent's requested secret into a dotenv file of the
+   * thread's checkout. Absent on older servers, whose agents cannot ask for one.
+   */
+  secretRequests: Schema.optionalKey(Schema.Boolean),
   /**
    * CLIProxyAPI hub settings and reads (`server.readCliProxyHubs` / `server.testCliProxyHub`);
    * absent on older servers, which drop `cliProxyHubs` from settings patches.
@@ -92,6 +154,12 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   providerSessionPrewarm: Schema.optionalKey(Schema.Boolean),
   /** `provider.readProjectCommands` (per-directory skills and slash commands); absent on older servers. */
   providerProjectCommands: Schema.optionalKey(Schema.Boolean),
+  /**
+   * `git.runStackedAction` honours `recoverable` (the action outlives its request), with
+   * `git.resumeStackedAction` and `git.cancelStackedAction`; absent on older servers, which
+   * drop the key and stop the action when its request closes.
+   */
+  recoverableGitActions: Schema.optionalKey(Schema.Boolean),
   /**
    * `server.subscribeNodeUpdate` / `server.checkNodeUpdate` / `server.updateNode`: the node
    * reports its Ryco release and installation and can update itself; absent on older servers.
@@ -110,6 +178,64 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    * not absent.
    */
   projectCopy: Schema.optionalKey(Schema.Boolean),
+  /**
+   * `git.runStackedAction` honours `stagedOnly` and `vcs.readLocalChanges` returns
+   * `stagedRevision`; absent on older servers, which drop `stagedOnly` and commit every change.
+   */
+  stagedOnlyCommit: Schema.optionalKey(Schema.Boolean),
+  /**
+   * `git.runStackedAction` honours `prTitle`, `prBody`, `prDraft` and `allowDirtyWorkingTree`;
+   * absent on older servers, which drop them, generate the text and open the pull request ready.
+   */
+  pullRequestOptions: Schema.optionalKey(Schema.Boolean),
+  /**
+   * `vcs.readComparison` honours `selection.target: "workingTree"` (a branch or commit compared
+   * with the working files); absent on older servers, which drop the key and compare with HEAD.
+   */
+  workingTreeComparison: Schema.optionalKey(Schema.Boolean),
+  /**
+   * `terminal.write` honours `requireIdle` (types only into a shell it verifies idle, else
+   * `TerminalBusyError`); absent on older servers, which drop the key and write unguarded.
+   */
+  terminalWriteRequireIdle: Schema.optionalKey(Schema.Boolean),
+  /**
+   * The node honours `lowerAgentProcessPriority` (agents run at a lower CPU priority); absent on
+   * older servers, which drop the key.
+   */
+  agentProcessPriority: Schema.optionalKey(Schema.Boolean),
+  /**
+   * The node honours `automaticUpdates` (unattended provider CLI updates in a quiet window, and an
+   * npm or pnpm CLI service node's own updates) and answers `server.noteClientInteraction`; absent
+   * on older servers, which drop the key.
+   */
+  automaticUpdates: Schema.optionalKey(Schema.Boolean),
+  /**
+   * The node is a desktop app's backend, and with `automaticUpdates` on the app also updates
+   * itself: it downloads its updates in the background and installs one when it quits
+   * (`install-on-quit`: Windows, a Linux AppImage named without a version) or when the person
+   * chooses Restart (`restart`: macOS, a Linux AppImage named with its version). Absent on other
+   * nodes, on development builds and on older servers.
+   */
+  desktopAppUpdates: Schema.optionalKey(Schema.Literals(["install-on-quit", "restart"])),
+  /**
+   * The node prices usage with `usagePriceOverrides` (custom model prices and model mappings);
+   * absent on older servers, which drop the key from settings patches.
+   */
+  usagePriceOverrides: Schema.optionalKey(Schema.Boolean),
+  /**
+   * The node keeps each thread's follow-up queue (`thread.queue.*` commands, `followUpQueue` on
+   * threads and shells) and sends it on its own; absent on older servers, whose clients keep
+   * their own queue.
+   */
+  serverFollowUpQueue: Schema.optionalKey(Schema.Literal(true)),
+  /**
+   * Clients store a chat's model, effort and speed picks on the thread when they are made
+   * (`thread.meta.update`): the session applies a stored pick at its next turn, a turn that names
+   * no selection runs on it, and the background-work check compares a turn's selection with the
+   * one the session runs. Absent on older servers, whose clients keep a pick in the composer
+   * until it is sent.
+   */
+  liveThreadModelSelection: Schema.optionalKey(Schema.Literal(true)),
   fileAttachments: Schema.optional(Schema.Struct({ maxUploadBytes: NonNegativeInt })),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;

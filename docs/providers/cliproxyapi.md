@@ -63,7 +63,11 @@ it once per node, labelled with the node's name.
 ## Statistics → Limits
 
 The **Limits** tab on the Statistics page lists every account of every enabled hub, grouped by
-provider.
+provider, next to the accounts provider instances sign in to directly (see
+[Usage limits and pace](./usage-limits.md)). When there are both, a source filter shows all of
+them, direct accounts only, or hub accounts only. A direct account that a hub also holds (same
+provider and email, and not a different plan when both name one) is marked **also in _hub_**; its
+hub card is unchanged.
 
 - **Claude**: the 5-hour window, the weekly window and any model-scoped weekly windows
   (for example Opus or Fable), plus the plan.
@@ -76,9 +80,10 @@ provider.
   traffic. The hub resets these counters when it restarts. Keys are shown as their last four
   characters only.
 
-With several accounts of one provider, a pooled row averages each window across the accounts that
-reported it. Accounts on bigger plans count the same as smaller ones, so treat the pooled value as
-a rough guide and read the per-account bars for decisions.
+With several hub accounts of one provider, a pooled row averages each window across the hub
+accounts that reported it. Direct accounts never enter the average; when they share the provider's
+panel, the row says **avg of N hub accounts**. Accounts on bigger plans count the same as smaller
+ones, so treat the pooled value as a rough guide and read the per-account bars for decisions.
 
 Pace markers work like the provider limits described in [Usage limits and pace](./usage-limits.md).
 
@@ -123,6 +128,8 @@ either.
 - Ryco only reads hubs while the Limits tab or the composer's usage popup is open. Account lists
   are cached for 20 seconds, quota for 5 minutes, and a forced refresh re-reads quota at most once
   a minute per account, because the provider usage endpoints rate-limit aggressively.
+- Agents see the accounts of the last read through `ryco_usage_limits`, numbered instead of named;
+  the tool never reads a hub itself (see [Usage limits](./usage-limits.md#agents)).
 - CLIProxyAPI bans a client IP (localhost included) for 30 minutes after five rejected management
   keys, and remembers rejections for up to three hours. Ryco stays below that ban:
   - After the hub rejects a key, Ryco does not send that key again for three hours: not when

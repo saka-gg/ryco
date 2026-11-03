@@ -7,7 +7,9 @@ writes nothing.
 
 The export contains all retained Ryco messages, timestamps, current provider/model,
 project/thread identifiers, branch/worktree metadata, recorded provider handoff boundaries,
-and condensed summaries of known tool lifecycle events. Message bodies are literal fenced
+and condensed summaries of known tool lifecycle events. Agent questions you answered appear
+between the messages, at the time you answered, with the offered options and your answers; a
+cancelled question keeps its questions and is marked cancelled. Message bodies are literal fenced
 text, preserving whitespace, Markdown delimiters and Unicode. Recognizable credentials are
 replaced with visible redaction markers. Arbitrary secret detection is not guaranteed.
 Tool payloads, raw protocol dumps, credentials from settings, attachment URLs and binary

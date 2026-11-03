@@ -60,6 +60,8 @@ interface WorkflowRunsSectionProps {
   environmentId: EnvironmentId | null;
   cwd: string | null;
   pullRequestNumber?: number | null;
+  /** The pull request's host URL: a watched pull request's checks notice comes from its watch. */
+  pullRequestUrl?: string | undefined;
   title?: string;
   description?: string;
   groupRunsBySource?: boolean;
@@ -294,6 +296,7 @@ export function WorkflowRunsSection(props: WorkflowRunsSectionProps) {
             provider: runsQuery.data.provider,
             number: props.pullRequestNumber,
             title: `PR #${props.pullRequestNumber}`,
+            url: props.pullRequestUrl,
             status,
           },
         ]

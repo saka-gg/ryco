@@ -136,11 +136,15 @@ function capabilityFields(
   capabilities: EnvironmentThreadCapabilities,
 ): Pick<
   InboxEnvironment,
-  "threadSettlementSupported" | "threadSnoozeSupported" | "autoSettleAfterDays"
+  | "threadSettlementSupported"
+  | "threadSnoozeSupported"
+  | "threadTriageSupported"
+  | "autoSettleAfterDays"
 > {
   return {
     threadSettlementSupported: capabilities.threadSettlement,
     threadSnoozeSupported: capabilities.threadSnooze,
+    threadTriageSupported: capabilities.threadTriage,
     ...(capabilities.autoSettleAfterDays === undefined
       ? {}
       : { autoSettleAfterDays: capabilities.autoSettleAfterDays }),

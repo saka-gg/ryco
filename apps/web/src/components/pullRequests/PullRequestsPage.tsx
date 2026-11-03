@@ -12,6 +12,7 @@ import { useElementWidth } from "../../hooks/useElementWidth";
 import { useEvent } from "../../hooks/useEvent";
 import { useLogicalProjectSnapshots } from "../../hooks/useLogicalProjectSnapshots";
 import { useStore } from "../../store";
+import { openExternalLink } from "../../lib/openExternalLink";
 import { readMotionDurationMs } from "../../lib/perf/motion";
 import { SidebarInset } from "../ui/sidebar";
 import {
@@ -23,7 +24,13 @@ import {
   type PullRequestsRepositoryStatus,
 } from "./PullRequestsPageContext";
 import { PullRequestsPageBody } from "./PullRequestsPageBody";
-import { buildProjectCheckoutOptions, resolveProjectCheckout } from "../../projectCheckouts.logic";
+import {
+  buildProjectCheckoutOptions,
+  resolveProjectCheckout,
+  type ProjectCheckoutResolution,
+} from "../../projectCheckouts.logic";
+import { recordCrossRepositoryDetail } from "./crossRepository/crossRepositoryOverlays";
+import { useCrossRepositoryPullRequests } from "./crossRepository/useCrossRepositoryPullRequests";
 import { pullRequestReaderKey, usePullRequestsLayoutStore } from "./pullRequestsLayoutStore";
 import {
   createPullRequestsNavigation,
@@ -63,19 +70,33 @@ export function PullRequestsPage({ search, onSearchChange }: PullRequestsPagePro
   const repositories = useMemo(() => buildProjectCheckoutOptions(snapshots), [snapshots]);
   const lastRepositoryKey = usePullRequestsLayoutStore((state) => state.lastRepositoryKey);
   const setLastRepositoryKey = usePullRequestsLayoutStore((state) => state.setLastRepositoryKey);
+  const lastScope = usePullRequestsLayoutStore((state) => state.lastScope);
+  // Opening the page without a repository returns to All repositories when that was the
+  // last choice (replacing the URL once, below); until then it already reads as that.
+  const reopenAllRepositories =
+    search.scope === undefined &&
+    search.env === undefined &&
+    search.project === undefined &&
+    lastScope === "all";
+  const allRepositories = search.scope === "all" || reopenAllRepositories;
   const selectRecentRepositoryKeys = useMemo(() => createRecentCheckoutKeysSelector(), []);
   const recentRepositoryKeys = useStore(selectRecentRepositoryKeys);
   const requestedEnvironment = useRequestedEnvironment(search.env);
-  const resolution = useMemo(
+  const resolution = useMemo<ProjectCheckoutResolution | null>(
     () =>
-      resolveProjectCheckout({
-        options: repositories,
-        requested: { env: search.env, project: search.project },
-        requestedEnvironmentSync: requestedEnvironment.sync,
-        lastKey: lastRepositoryKey,
-        recentKeys: recentRepositoryKeys,
-      }),
+      // All repositories with no row selected reads no repository at all (never a
+      // fallback checkout); a selected row names its checkout in the URL.
+      allRepositories && search.project === undefined
+        ? null
+        : resolveProjectCheckout({
+            options: repositories,
+            requested: { env: search.env, project: search.project },
+            requestedEnvironmentSync: requestedEnvironment.sync,
+            lastKey: allRepositories ? null : lastRepositoryKey,
+            recentKeys: allRepositories ? [] : recentRepositoryKeys,
+          }),
     [
+      allRepositories,
       lastRepositoryKey,
       recentRepositoryKeys,
       repositories,
@@ -84,18 +105,24 @@ export function PullRequestsPage({ search, onSearchChange }: PullRequestsPagePro
       search.project,
     ],
   );
-  const repository = resolution.kind === "resolved" ? resolution.option : null;
+  const repository = resolution?.kind === "resolved" ? resolution.option : null;
   // Only a repository the user chose (a link or the switcher, which writes the
-  // URL) becomes the default for next time — never a fallback.
+  // URL) becomes the default for next time — never a fallback, and never the
+  // checkout an All repositories row opens through.
   const chosenRepositoryKey =
-    resolution.kind === "resolved" && resolution.source === "url" ? resolution.option.key : null;
+    !allRepositories && resolution?.kind === "resolved" && resolution.source === "url"
+      ? resolution.option.key
+      : null;
   useEffect(() => {
     if (chosenRepositoryKey !== null) setLastRepositoryKey(chosenRepositoryKey);
   }, [chosenRepositoryKey, setLastRepositoryKey]);
-  const waitStalled = useHeldFor(resolution.kind === "waiting", CHECKOUT_WAIT_GRACE_MS);
+  const waitStalled = useHeldFor(resolution?.kind === "waiting", CHECKOUT_WAIT_GRACE_MS);
   const environmentLabel = requestedEnvironment.label;
+  const hasRepositories = repositories.length > 0;
   const repositoryStatus = useMemo<PullRequestsRepositoryStatus>(() => {
-    switch (resolution.kind) {
+    switch (resolution?.kind) {
+      case undefined:
+        return hasRepositories ? { kind: "ready" } : { kind: "empty" };
       case "resolved":
         return { kind: "ready" };
       case "empty":
@@ -115,10 +142,30 @@ export function PullRequestsPage({ search, onSearchChange }: PullRequestsPagePro
           reason: resolution.reason,
         };
     }
-  }, [environmentLabel, resolution, waitStalled]);
+  }, [environmentLabel, hasRepositories, resolution, waitStalled]);
 
-  const model = usePullRequestsModel({ repository, search });
+  const crossRepository = useCrossRepositoryPullRequests({
+    enabled: allRepositories,
+    repositories,
+    search,
+  });
+  const crossRow =
+    crossRepository?.selectedKey != null
+      ? (crossRepository.byKey.get(crossRepository.selectedKey) ?? null)
+      : null;
+  const model = usePullRequestsModel({
+    repository,
+    search,
+    // All repositories lists across nodes; the reader reads the selected row's checkout.
+    includeList: !allRepositories,
+    ...(allRepositories ? { summary: crossRow } : {}),
+  });
   const tab = resolvePullRequestsTab(search);
+  // A fresh detail (every mutation writes it) stands over the nodes' cached answers.
+  const selectedDetail = allRepositories ? (model.selection?.detail.data ?? null) : null;
+  useEffect(() => {
+    if (selectedDetail !== null) recordCrossRepositoryDetail(selectedDetail);
+  }, [selectedDetail]);
 
   // ── Layout ────────────────────────────────────────────────────────
   const rootRef = useRef<HTMLDivElement>(null);
@@ -149,6 +196,7 @@ export function PullRequestsPage({ search, onSearchChange }: PullRequestsPagePro
   const getRepositoryParams = useEvent(() =>
     repository ? { env: repository.environmentId, project: repository.projectId } : {},
   );
+  const getCrossRepositoryRows = useEvent(() => crossRepository);
   const commit = useEvent(
     (next: PullRequestsSearch, options: Parameters<PullRequestsNavigationDeps["commit"]>[1]) =>
       onSearchChange(withoutUndefined(next), {
@@ -170,9 +218,16 @@ export function PullRequestsPage({ search, onSearchChange }: PullRequestsPagePro
         canRunPushTransition: () =>
           supportsViewTransitions() && readMotionDurationMs("--app-motion-duration-pane", 360) > 0,
         onRevealJob: bumpJobRevealToken,
+        getCrossRepositoryRows,
+        rememberScope: (scope) => usePullRequestsLayoutStore.getState().setLastScope(scope),
+        openExternal: (url) => openExternalLink(url, "Unable to open pull request"),
       }),
-    [commit, getModel, getRepositoryParams, getSearch],
+    [commit, getCrossRepositoryRows, getModel, getRepositoryParams, getSearch],
   );
+  // The URL names nothing and All repositories was the last choice: say so in the URL.
+  useEffect(() => {
+    if (reopenAllRepositories) commit({ ...getSearch(), scope: "all" }, { push: false });
+  }, [commit, getSearch, reopenAllRepositories]);
   const nav = useMemo<PullRequestsNavigation>(
     () => ({ search, tab, ...actions }),
     [actions, search, tab],
@@ -195,8 +250,10 @@ export function PullRequestsPage({ search, onSearchChange }: PullRequestsPagePro
       selectionMotion,
       readerKey,
       jobRevealToken,
+      crossRepository,
     }),
     [
+      crossRepository,
       jobRevealToken,
       layout,
       model,

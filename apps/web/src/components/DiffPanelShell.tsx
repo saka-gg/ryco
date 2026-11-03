@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { isElectron } from "~/env";
 import { cn } from "~/lib/utils";
 
+import type { DiffFindSurfaceProps } from "./diffSearch/diffFindSurface";
 import { Skeleton } from "./ui/skeleton";
 
 /**
@@ -26,16 +27,20 @@ export function DiffPanelShell(props: {
   mode: DiffPanelMode;
   header: ReactNode;
   children: ReactNode;
+  /** The whole panel answers the find key while focus is inside it. */
+  surfaceProps?: DiffFindSurfaceProps;
 }) {
   const shouldUseDragRegion = isElectron && props.mode !== "sheet" && props.mode !== "phone";
 
   return (
     <div
+      {...props.surfaceProps}
       className={cn(
         "app-content-surface flex h-full min-w-0 flex-col bg-background",
         props.mode === "inline"
           ? "w-[42vw] min-w-[360px] max-w-[560px] shrink-0 border-l border-border"
           : "w-full",
+        props.surfaceProps?.tabIndex !== undefined && "outline-hidden",
       )}
     >
       {shouldUseDragRegion ? (

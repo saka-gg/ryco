@@ -18,6 +18,7 @@ import {
   ThreadId,
   TurnId,
   WorktreeId,
+  type ModelSelection,
   type OrchestrationCommand,
   type OrchestrationEvent,
   ProviderDriverKind,
@@ -37,7 +38,10 @@ import {
 import { describe, expect, it } from "vite-plus/test";
 
 import * as SqlClient from "effect/sql/SqlClient";
-import { OrchestrationCommandAdmissionError } from "../Errors.ts";
+import {
+  OrchestrationCommandAdmissionError,
+  OrchestrationModelSwitchBlockedError,
+} from "../Errors.ts";
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { makeCompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { buildDelegationReturnCommand } from "../../agentControl/completionReturnMessages.ts";
@@ -63,6 +67,7 @@ const MockProjectAvatarStoreLive = Layer.succeed(ProjectAvatarStore, {
 });
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
+import * as ThreadSessionModelSelections from "../ThreadSessionModelSelections.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import {
   OrchestrationProjectionPipeline,
@@ -93,7 +98,10 @@ async function createOrchestrationSystem(databasePath?: string) {
     ),
     OrchestrationProjectionSnapshotQueryLive,
   ).pipe(
-    Layer.provide(ThreadBackgroundLiveness.layer),
+    // The same registry the engine reads (layers are memoized), so tests can feed it.
+    Layer.provideMerge(ThreadBackgroundLiveness.layer),
+    // What each session runs, as the provider command reactor would record it.
+    Layer.provideMerge(ThreadSessionModelSelections.layer),
     Layer.provide(MockProjectAvatarStoreLive),
     Layer.provide(OrchestrationEventStoreLive),
     Layer.provide(OrchestrationCommandReceiptRepositoryLive),
@@ -109,9 +117,22 @@ async function createOrchestrationSystem(databasePath?: string) {
   const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
   return {
     engine,
+    liveness: await runtime.runPromise(
+      Effect.service(ThreadBackgroundLiveness.ThreadBackgroundLivenessService),
+    ),
+    sessionModelSelections: await runtime.runPromise(
+      Effect.service(ThreadSessionModelSelections.ThreadSessionModelSelectionsService),
+    ),
     sql: await runtime.runPromise(Effect.service(SqlClient.SqlClient)),
     readModel: () => runtime.runPromise(snapshotQuery.getSnapshot()),
     readShell: () => runtime.runPromise(snapshotQuery.getShellSnapshot()),
+    readWindow: (threadId: ThreadId, activities: number) =>
+      runtime.runPromise(
+        snapshotQuery.getThreadWindow!({
+          threadId,
+          limits: { messages: 10, proposedPlans: 10, activities, checkpoints: 10 },
+        }),
+      ),
     // Before any dispatch after a (re)start, this is exactly the engine's bootstrap model.
     commandReadModel: () => runtime.runPromise(snapshotQuery.getCommandReadModel()),
     run: <A, E>(effect: Effect.Effect<A, E>) => runtime.runPromise(effect),
@@ -895,6 +916,166 @@ describe("OrchestrationEngine", () => {
       }
     },
   );
+
+  it("answers an optional question after its turn with one new message and refuses a second answer", async () => {
+    const system = await createOrchestrationSystem();
+    const projectId = ProjectId.make("late-answer-project");
+    const threadId = ThreadId.make("late-answer-thread");
+    const runtimeSessionId = RuntimeSessionId.make("late-answer-runtime");
+    const createdAt = now();
+    const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" };
+    const question = (id: string, nonBlocking: boolean) => ({
+      type: "thread.activity.append" as const,
+      commandId: CommandId.make(`open:${id}`),
+      threadId,
+      activity: {
+        id: EventId.make(`asked:${id}`),
+        kind: "user-input.requested",
+        tone: "info" as const,
+        summary: "Optional question",
+        turnId: asTurnId("ended-turn"),
+        payload: {
+          requestId: id,
+          runtimeSessionId,
+          ...(nonBlocking ? { nonBlocking: true, itemId: "item-1" } : {}),
+          questions: [{ id: "0", header: "Audience", question: "Audience?", options: [] }],
+        },
+        createdAt,
+      },
+      createdAt,
+    });
+    const answer = (id: string, attempt: string) => ({
+      type: "thread.turn.start" as const,
+      commandId: CommandId.make(`answer:${attempt}`),
+      threadId,
+      message: {
+        messageId: asMessageId(`answer-message:${attempt}`),
+        role: "user" as const,
+        text: "Reply to your optional questions (item item-1, turn ended-turn):\n\nAudience?\nAnswer: Engineers",
+        attachments: [],
+      },
+      modelSelection,
+      runtimeMode: "full-access" as const,
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      optionalAnswer: {
+        requestId: ApprovalRequestId.make(id),
+        userInputIdentity: { requestEventId: EventId.make(`asked:${id}`), runtimeSessionId },
+        answers: { "0": "Engineers" },
+      },
+      createdAt,
+    });
+    try {
+      await system.run(
+        system.engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("late-answer-project-create"),
+          projectId,
+          title: "Late answer",
+          workspaceRoot: process.cwd(),
+          defaultModelSelection: modelSelection,
+          createdAt,
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("late-answer-thread-create"),
+          threadId,
+          projectId,
+          title: "Late answer",
+          modelSelection,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("late-answer-session"),
+          threadId,
+          session: {
+            threadId,
+            status: "ready",
+            providerName: "codex",
+            runtimeSessionId,
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: createdAt,
+          },
+          createdAt,
+        }),
+      );
+      await system.run(system.engine.dispatch(question("optional:late", true)));
+      await system.run(system.engine.dispatch(question("blocking", false)));
+      for (const index of [1, 2, 3]) {
+        await system.run(
+          system.engine.dispatch({
+            type: "thread.activity.append",
+            commandId: CommandId.make(`later-work:${index}`),
+            threadId,
+            activity: {
+              id: EventId.make(`later-work:${index}`),
+              kind: "tool.completed",
+              tone: "tool",
+              summary: "Ran a command",
+              turnId: asTurnId("ended-turn"),
+              payload: {},
+              // Provider-ordered, after the questions' orchestration sequence.
+              sequence: 1_000 + index,
+              createdAt,
+            },
+            createdAt,
+          }),
+        );
+      }
+      // However much the agent did since, every window brings the open optional question along.
+      const windowIds = (await system.readWindow(threadId, 2)).thread.activities.map(
+        (activity) => activity.id,
+      );
+      expect(windowIds).toEqual(["asked:optional:late", "later-work:2", "later-work:3"]);
+
+      await system.run(system.engine.dispatch(answer("optional:late", "first")));
+      const thread = (await system.readModel()).threads.find((entry) => entry.id === threadId)!;
+      expect(thread.messages.map((message) => message.id)).toEqual(["answer-message:first"]);
+      expect(
+        thread.activities.find(
+          (activity) =>
+            activity.kind === "user-input.resolved" &&
+            (activity.payload as { requestId?: string }).requestId === "optional:late",
+        )?.payload,
+      ).toMatchObject({ answers: { "0": "Engineers" }, runtimeSessionId });
+      const rows = await system.run(
+        system.sql<{ requestId: string; isPending: number; responseState: string | null }>`
+          SELECT request_id AS "requestId", is_pending AS "isPending", response_state AS "responseState"
+          FROM projection_thread_user_input_requests WHERE thread_id = ${threadId}
+          ORDER BY request_id`,
+      );
+      expect(rows).toEqual([
+        { requestId: "blocking", isPending: 1, responseState: null },
+        { requestId: "optional:late", isPending: 0, responseState: "settled" },
+      ]);
+
+      // Another client's answer, or the same one sent twice, finds it answered: nothing is sent.
+      await expect(
+        system.run(system.engine.dispatch(answer("optional:late", "second"))),
+      ).rejects.toThrow("already answered");
+      await expect(
+        system.run(system.engine.dispatch(answer("blocking", "blocking"))),
+      ).rejects.toThrow("Only an optional question");
+      const after = (await system.readModel()).threads.find((entry) => entry.id === threadId)!;
+      expect(after.messages.map((message) => message.id)).toEqual(["answer-message:first"]);
+      // Answered, it no longer rides along.
+      expect(
+        (await system.readWindow(threadId, 1)).thread.activities.map((activity) => activity.id),
+      ).toEqual(["later-work:3"]);
+    } finally {
+      await system.dispose();
+    }
+  });
 
   it("bootstraps command handling from persisted projections without reading the full snapshot", async () => {
     let nextSequence = 8;
@@ -2819,12 +3000,16 @@ type DelegationReturnCommand = Extract<OrchestrationCommand, { type: "thread.tur
 
 // Engine commands only (no provider reactors): a parent with two completed turns,
 // each bound to its own user message through projection_turns.pending_message_id.
-async function seedDelegationParent(databasePath?: string) {
+async function seedDelegationParent(
+  databasePath?: string,
+  options: { readonly driver?: "codex" | "claudeAgent" } = {},
+) {
+  const driver = options.driver ?? "codex";
   const system = await createOrchestrationSystem(databasePath);
   try {
     const projectId = ProjectId.make("delegation-project");
     const threadId = DELEGATION_PARENT_ID;
-    const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "fixture" };
+    const modelSelection = { instanceId: ProviderInstanceId.make(driver), model: "fixture" };
     await system.run(
       system.engine.dispatch({
         type: "project.create",
@@ -2857,8 +3042,8 @@ async function seedDelegationParent(databasePath?: string) {
       const session = {
         threadId,
         status: "running" as const,
-        providerName: "codex",
-        providerInstanceId: ProviderInstanceId.make("codex"),
+        providerName: driver,
+        providerInstanceId: ProviderInstanceId.make(driver),
         runtimeSessionId: RuntimeSessionId.make("runtime-1"),
         runtimeMode: "full-access" as const,
         activeTurnId: turnId,
@@ -3116,6 +3301,278 @@ describe("delegated return fence across restarts", () => {
       });
       expect(next.delegationReturnGuard?.latestUserMessageId).toBe("delegation-result:child-1");
       await expect(system.run(system.engine.dispatch(next))).resolves.toBeDefined();
+    } finally {
+      await system.dispose();
+    }
+  });
+});
+
+describe("model switches past native background work", () => {
+  // The delegation parent: two settled Codex turns on a ready runtime. Sent as the composer
+  // sends it: asking the node to refuse a switch that would end background tasks.
+  const handoffTo = (
+    overrides: Partial<Extract<OrchestrationCommand, { type: "thread.turn.start" }>> = {},
+  ): Extract<OrchestrationCommand, { type: "thread.turn.start" }> => ({
+    type: "thread.turn.start",
+    commandId: CommandId.make("composer-send:handoff"),
+    threadId: DELEGATION_PARENT_ID,
+    message: {
+      messageId: MessageId.make("handoff-message"),
+      role: "user",
+      text: "Continue with Claude",
+      attachments: [],
+    },
+    modelSelection: { instanceId: ProviderInstanceId.make("claudeAgent"), model: "fixture" },
+    runtimeMode: "full-access",
+    interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+    keepBackgroundWork: true,
+    createdAt: delegationAt(20),
+    ...overrides,
+  });
+  // As ingestion records it: tagged with the runtime that reported it (the seeded session's).
+  const startBackgroundTask = (
+    system: DelegationSystem,
+    taskId: string,
+    runtimeSessionId = "runtime-1",
+  ) =>
+    system.liveness.recordTaskLiveness({
+      threadId: DELEGATION_PARENT_ID,
+      taskId,
+      taskType: "local_agent",
+      status: "running",
+      kind: "started",
+      runtimeSessionId,
+    });
+  const handoffActivities = async (system: DelegationSystem) =>
+    (await system.readModel()).threads
+      .find((thread) => thread.id === DELEGATION_PARENT_ID)!
+      .activities.filter((activity) => activity.kind === "context-handoff");
+
+  it("refuses the handoff with the live tasks and keeps the same command retryable", async () => {
+    const system = await seedDelegationParent();
+    try {
+      startBackgroundTask(system, "task-agent");
+      startBackgroundTask(system, "task-watch");
+      const refused = await system.run(Effect.flip(system.engine.dispatch(handoffTo())));
+      expect(refused).toBeInstanceOf(OrchestrationModelSwitchBlockedError);
+      expect(refused).toMatchObject({
+        threadId: DELEGATION_PARENT_ID,
+        taskIds: ["task-agent", "task-watch"],
+      });
+      expect(await handoffActivities(system)).toEqual([]);
+
+      // No rejected receipt: once the tasks are gone the same command id hands off.
+      for (const taskId of ["task-agent", "task-watch"]) {
+        system.liveness.recordTaskLiveness({
+          threadId: DELEGATION_PARENT_ID,
+          taskId,
+          taskType: "local_agent",
+          status: "completed",
+          kind: "completed",
+          runtimeSessionId: "runtime-1",
+        });
+      }
+      await system.run(system.engine.dispatch(handoffTo()));
+      expect(await handoffActivities(system)).toHaveLength(1);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("hands off when the user chose to stop the tasks", async () => {
+    const system = await seedDelegationParent();
+    try {
+      startBackgroundTask(system, "task-agent");
+      await system.run(Effect.flip(system.engine.dispatch(handoffTo())));
+      await system.run(system.engine.dispatch(handoffTo({ stopBackgroundWork: true })));
+      expect(await handoffActivities(system)).toHaveLength(1);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("hands off as before for a sender that does not ask to keep the tasks", async () => {
+    const system = await seedDelegationParent();
+    try {
+      startBackgroundTask(system, "task-agent");
+      // An older client cannot handle the refusal (its outbox would drop the message), so its
+      // turn start switches as it always did.
+      await system.run(system.engine.dispatch(handoffTo({ keepBackgroundWork: undefined })));
+      expect(await handoffActivities(system)).toHaveLength(1);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("leaves turns without a handoff, and threads without a live runtime, alone", async () => {
+    const system = await seedDelegationParent();
+    try {
+      startBackgroundTask(system, "task-agent");
+      // Another model on the thread's own instance: Codex switches inside the running
+      // session, so the turn replaces no runtime and the tasks do not block it.
+      await system.run(
+        system.engine.dispatch(
+          handoffTo({
+            commandId: CommandId.make("composer-send:same-model"),
+            message: {
+              messageId: MessageId.make("same-model-message"),
+              role: "user",
+              text: "Keep going",
+              attachments: [],
+            },
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "fixture-2" },
+          }),
+        ),
+      );
+      expect(await handoffActivities(system)).toEqual([]);
+    } finally {
+      await system.dispose();
+    }
+
+    const stopped = await seedDelegationParent();
+    try {
+      startBackgroundTask(stopped, "task-agent");
+      // A stopped runtime has nothing left for the handoff to end.
+      await stopped.run(
+        stopped.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("session-stopped"),
+          threadId: DELEGATION_PARENT_ID,
+          session: {
+            threadId: DELEGATION_PARENT_ID,
+            status: "stopped",
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: delegationAt(15),
+          },
+          createdAt: delegationAt(15),
+        }),
+      );
+      await stopped.run(stopped.engine.dispatch(handoffTo()));
+      expect(await handoffActivities(stopped)).toHaveLength(1);
+    } finally {
+      await stopped.dispose();
+    }
+  });
+  it("refuses a model or option change that restarts a Claude session", async () => {
+    const system = await seedDelegationParent(undefined, { driver: "claudeAgent" });
+    try {
+      startBackgroundTask(system, "task-shell");
+      const claude = ProviderInstanceId.make("claudeAgent");
+      const turn = (id: string, modelSelection: ModelSelection, stopBackgroundWork?: true) =>
+        handoffTo({
+          commandId: CommandId.make(`composer-send:${id}`),
+          message: {
+            messageId: MessageId.make(`${id}-message`),
+            role: "user",
+            text: "Keep going",
+            attachments: [],
+          },
+          modelSelection,
+          ...(stopBackgroundWork ? { stopBackgroundWork } : {}),
+        });
+      // The Claude driver restarts its session for any other model or options, which ends
+      // the runtime's background work as surely as a handoff would.
+      for (const [id, modelSelection] of [
+        ["other-model", { instanceId: claude, model: "fixture-2" }],
+        [
+          "other-options",
+          { instanceId: claude, model: "fixture", options: [{ id: "effort", value: "low" }] },
+        ],
+      ] as const) {
+        const refused = await system.run(
+          Effect.flip(system.engine.dispatch(turn(id, modelSelection))),
+        );
+        expect(refused).toBeInstanceOf(OrchestrationModelSwitchBlockedError);
+        expect(refused).toMatchObject({ taskIds: ["task-shell"] });
+      }
+      expect(await handoffActivities(system)).toEqual([]);
+      // The thread's own selection restarts nothing.
+      await system.run(
+        system.engine.dispatch(turn("same", { instanceId: claude, model: "fixture" })),
+      );
+      // Nor does Fast mode, which the live session applies in-session, either way.
+      for (const [id, fastMode] of [
+        ["fast-on", true],
+        ["fast-off", false],
+      ] as const) {
+        await system.run(
+          system.engine.dispatch(
+            turn(id, {
+              instanceId: claude,
+              model: "fixture",
+              options: [{ id: "fastMode", value: fastMode }],
+            }),
+          ),
+        );
+      }
+      // The user chose to stop the tasks: the change goes through.
+      await system.run(
+        system.engine.dispatch(
+          turn("other-model", { instanceId: claude, model: "fixture-2" }, true),
+        ),
+      );
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("keeps asking when a pick stored on the thread differs from what the Claude session runs", async () => {
+    const system = await seedDelegationParent(undefined, { driver: "claudeAgent" });
+    try {
+      const claude = ProviderInstanceId.make("claudeAgent");
+      // The provider command reactor recorded what the live session applied.
+      system.sessionModelSelections.set(DELEGATION_PARENT_ID, {
+        instanceId: claude,
+        model: "fixture",
+      });
+      startBackgroundTask(system, "task-shell");
+      // A client stored the pick when it was made: the thread already names the new model,
+      // and the session takes it at the next turn.
+      const picked = { instanceId: claude, model: "fixture-2" };
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("composer-pick"),
+          threadId: DELEGATION_PARENT_ID,
+          modelSelection: picked,
+        }),
+      );
+      const send = handoffTo({
+        commandId: CommandId.make("composer-send:picked"),
+        message: {
+          messageId: MessageId.make("picked-message"),
+          role: "user",
+          text: "Keep going",
+          attachments: [],
+        },
+        modelSelection: picked,
+      });
+      // That turn still restarts the session, which would end its background work.
+      const refused = await system.run(Effect.flip(system.engine.dispatch(send)));
+      expect(refused).toBeInstanceOf(OrchestrationModelSwitchBlockedError);
+      expect(refused).toMatchObject({ taskIds: ["task-shell"] });
+
+      // Once the session runs the stored pick, the same turn restarts nothing.
+      system.sessionModelSelections.set(DELEGATION_PARENT_ID, picked);
+      await system.run(system.engine.dispatch(send));
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("does not count the tasks of a runtime the thread no longer runs", async () => {
+    const system = await seedDelegationParent();
+    try {
+      // Reported by a runtime the thread has since replaced: they died with it, even though
+      // its late terminal events are dropped as stale and never clear them.
+      startBackgroundTask(system, "task-agent", "runtime-replaced");
+      await system.run(system.engine.dispatch(handoffTo()));
+      expect(await handoffActivities(system)).toHaveLength(1);
     } finally {
       await system.dispose();
     }

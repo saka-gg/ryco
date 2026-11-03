@@ -1634,6 +1634,36 @@ describe("HostedHubApi account credential management", () => {
     expect(requests.map(({ input }) => String(input)).join(" ")).not.toContain("ada@example.test");
   });
 
+  it("deletes the account with a typed confirmation and drops this device's session", async () => {
+    const { api, requests, reply } = await authenticated();
+    reply({ status: "scheduled" }, 202);
+
+    await expect(
+      api.deleteAccount({ identifier: "  ada@example.test ", totpCode: "123456" }),
+    ).resolves.toBeUndefined();
+
+    const request = requests.at(-1)!;
+    expect(request.input).toBe("/api/account/delete");
+    expect(request.init).toMatchObject({ method: "POST", credentials: "same-origin" });
+    expect(headersOf(request.init).get("X-Ryco-CSRF")).toBe("csrf-canary");
+    expect(JSON.parse(String(request.init?.body))).toEqual({
+      confirmation: "delete",
+      identifier: "ada@example.test",
+      totpCode: "123456",
+    });
+    // The session is gone with the account: nothing is presented afterwards.
+    await expect(api.removePassword()).rejects.toBeInstanceOf(HostedHubApiError);
+  });
+
+  it("refuses an empty confirmation before any request", async () => {
+    const { api, requests } = await authenticated();
+    const before = requests.length;
+    await expect(api.deleteAccount({ identifier: "   " })).rejects.toMatchObject({
+      code: "invalid_request",
+    });
+    expect(requests.length).toBe(before);
+  });
+
   it("threads the fallback-session step-up code and omits it when there is none", async () => {
     const { api, requests } = await authenticated();
 

@@ -22,7 +22,7 @@ import { makeServerAuth, ServerAuthLive, toBootstrapExchangeAuthError } from "./
 import { ServerAuthPolicyLive } from "./ServerAuthPolicy.ts";
 import { ServerSecretStoreLive } from "./ServerSecretStore.ts";
 import { makeSessionCredentialService } from "./SessionCredentialService.ts";
-import { directRpcPrincipal } from "../../ws/RpcPrincipal.ts";
+import { directRpcPrincipal, rpcPrincipalOwnerKey } from "../../ws/RpcPrincipal.ts";
 
 const makeServerConfigLayer = (overrides?: Partial<ServerConfigShape>) =>
   Layer.effect(
@@ -194,6 +194,21 @@ it.layer(NodeServices.layer)("ServerAuthLive", (it) => {
         role: "operator",
         canManageLocalAccess: false,
       });
+      // The linked role, for a phone on a direct route where no relay reports one.
+      expect(
+        yield* serverAuth.getSessionState(makeBearerRequest(bearer.sessionToken)),
+      ).toMatchObject({ authenticated: true, role: "client", linkedRole: "operator" });
+      // Its sockets keep the link too: the role ceiling, and the end the socket closes at.
+      const websocket = yield* serverAuth.issueWebSocketToken(session);
+      const socketSession = yield* serverAuth.authenticateWebSocketUpgrade(
+        makeWebSocketRequest(websocket.token),
+      );
+      expect(socketSession.link).toEqual(link);
+      expect(directRpcPrincipal(socketSession)).toMatchObject({
+        transport: "direct",
+        role: "operator",
+        canManageLocalAccess: false,
+      });
 
       // A browser cookie is never made from one.
       const asCookie = yield* issueLinked();
@@ -268,6 +283,51 @@ it.layer(NodeServices.layer)("ServerAuthLive", (it) => {
       }
     }).pipe(Effect.provide(makeServerAuthLayer())),
   );
+
+  it.effect("keeps dev servers with separate homes signed in side by side in one browser", () => {
+    const devUrl = new URL("http://localhost:5750");
+    const cookieRequest = (cookies: Record<string, string>) =>
+      ({ cookies, headers: {} }) as unknown as Parameters<
+        ServerAuthShape["authenticateHttpRequest"]
+      >[0];
+    const pairInBrowser = Effect.gen(function* () {
+      const serverAuth = yield* ServerAuth;
+      const pairing = yield* serverAuth.issuePairingCredential();
+      const { sessionToken } = yield* serverAuth.exchangeBootstrapCredential(
+        pairing.credential,
+        requestMetadata,
+      );
+      const state = yield* serverAuth.getSessionState(cookieRequest({}));
+      return {
+        cookieName: state.auth.sessionCookieName,
+        sessionToken,
+        authenticate: (cookies: Record<string, string>) =>
+          serverAuth.authenticateHttpRequest(cookieRequest(cookies)),
+      };
+    });
+    // Fresh layers: two servers with their own homes, not one server's memoized services.
+    return Effect.gen(function* () {
+      const first = yield* pairInBrowser;
+      yield* Effect.gen(function* () {
+        const second = yield* pairInBrowser;
+        // Cookies are per host, not per port: one jar holds both, plus a server's that uses
+        // the shared name.
+        expect(second.cookieName).not.toBe(first.cookieName);
+        const jar = {
+          ryco_session: second.sessionToken,
+          [first.cookieName]: first.sessionToken,
+          [second.cookieName]: second.sessionToken,
+        };
+        expect((yield* first.authenticate(jar)).role).toBe("client");
+        expect((yield* second.authenticate(jar)).role).toBe("client");
+        // A worktree home never reads the shared name, which another key signed.
+        const foreignOnly = yield* Effect.flip(
+          first.authenticate({ ryco_session: second.sessionToken }),
+        );
+        expect(foreignOnly.status).toBe(401);
+      }).pipe(Effect.provide(Layer.fresh(makeServerAuthLayer({ devUrl, port: 14020 }))));
+    }).pipe(Effect.provide(Layer.fresh(makeServerAuthLayer({ devUrl, port: 13790 }))));
+  });
 
   it.effect("issues startup pairing URLs that bootstrap owner sessions", () =>
     Effect.gen(function* () {
@@ -460,6 +520,10 @@ it.layer(NodeServices.layer)("ServerAuthLive", (it) => {
         { ...requestMetadata, deviceType: "mobile" },
       );
 
+      const original = yield* serverAuth.authenticateHttpRequest(
+        makeBearerRequest(paired.sessionToken),
+      );
+
       // Renewed right after pairing: nothing to renew yet.
       const tooSoon = yield* Effect.flip(
         serverAuth.rotateBearerSession(makeBearerRequest(paired.sessionToken)),
@@ -478,6 +542,12 @@ it.layer(NodeServices.layer)("ServerAuthLive", (it) => {
         makeBearerRequest(renewed.sessionToken),
       );
       expect(verified.subject).toBe("one-time-token");
+      // A new session of the same pairing: work it started before the renewal keeps its owner.
+      expect(verified.sessionId).not.toBe(original.sessionId);
+      expect(verified.chainId).toBe(original.chainId);
+      expect(rpcPrincipalOwnerKey(directRpcPrincipal(verified))).toBe(
+        rpcPrincipalOwnerKey(directRpcPrincipal(original)),
+      );
 
       // A browser session cookie never renews into anything, as a cookie or
       // presented as a bearer.

@@ -265,9 +265,6 @@ function makeDesktopBridge(overrides: Partial<DesktopBridge> = {}): DesktopBridg
     getUpdateState: async () => {
       throw new Error("getUpdateState not implemented in test");
     },
-    setUpdateChannel: async () => {
-      throw new Error("setUpdateChannel not implemented in test");
-    },
     checkForUpdate: async () => {
       throw new Error("checkForUpdate not implemented in test");
     },
@@ -281,8 +278,6 @@ function makeDesktopBridge(overrides: Partial<DesktopBridge> = {}): DesktopBridg
     respondToRemoteInstall: async () => {
       throw new Error("respondToRemoteInstall not implemented in test");
     },
-    notifyTurnComplete: async () => undefined,
-    onTurnCompleteNotificationActivated: () => () => undefined,
     ...overrides,
   };
 }
@@ -314,7 +309,6 @@ const baseEnvironment = {
   capabilities: {
     repositoryIdentity: true,
     threadSettlement: false,
-    threadPriorityRanking: false,
   },
 };
 
@@ -630,18 +624,18 @@ describe("wsApi", () => {
   it("forwards server settings updates directly to the RPC client", async () => {
     const nextSettings = {
       ...DEFAULT_SERVER_SETTINGS,
-      enableLegacyTokenStreaming: true,
+      responseStreamingMode: "token",
     };
     rpcClientMock.server.updateSettings.mockResolvedValue(nextSettings);
     const { createLocalApi } = await import("./localApi");
 
     const api = createLocalApi(rpcClientMock as never);
 
-    await expect(api.server.updateSettings({ enableLegacyTokenStreaming: true })).resolves.toEqual(
+    await expect(api.server.updateSettings({ responseStreamingMode: "token" })).resolves.toEqual(
       nextSettings,
     );
     expect(rpcClientMock.server.updateSettings).toHaveBeenCalledWith({
-      enableLegacyTokenStreaming: true,
+      responseStreamingMode: "token",
     });
   });
 
@@ -695,15 +689,18 @@ describe("wsApi", () => {
 
   it("reads and writes persistence through the desktop bridge when available", async () => {
     const clientSettings = {
-      aiFocusEnabled: false,
-      aiFocusRefreshIntervalMs: 600_000 as const,
       confirmThreadArchive: true,
       confirmThreadDelete: false,
       confirmThreadUnpin: false,
       dismissedProviderUpdateNotificationKeys: [],
       diffIgnoreWhitespace: true,
       diffWordWrap: true,
+      changeRequestLinkTarget: "ryco" as const,
       followUpBehavior: "queue" as const,
+      sendShortcut: "enter" as const,
+      claudeResumeReview: false,
+      chatWidth: "comfortable" as const,
+      openChatTabs: true,
       favorites: [],
       providerModelPreferences: {},
       sidebarProjectGroupingMode: "repository_path" as const,
@@ -718,6 +715,8 @@ describe("wsApi", () => {
       gitStatusPollIntervalMs: 0 as const,
       sourceControlRefreshMode: "automatic" as const,
       notifyOnTurnCompleteWhenUnfocused: true,
+      threadNotificationSound: false,
+      threadNotificationToasts: true,
     };
     const getClientSettings = vi.fn().mockResolvedValue({
       ...clientSettings,
@@ -765,15 +764,18 @@ describe("wsApi", () => {
     const { createLocalApi } = await import("./localApi");
     const api = createLocalApi(rpcClientMock as never);
     const clientSettings = {
-      aiFocusEnabled: false,
-      aiFocusRefreshIntervalMs: 600_000 as const,
       confirmThreadArchive: true,
       confirmThreadDelete: false,
       confirmThreadUnpin: false,
       dismissedProviderUpdateNotificationKeys: [],
       diffIgnoreWhitespace: true,
       diffWordWrap: true,
+      changeRequestLinkTarget: "ryco" as const,
       followUpBehavior: "queue" as const,
+      sendShortcut: "enter" as const,
+      claudeResumeReview: false,
+      chatWidth: "comfortable" as const,
+      openChatTabs: true,
       favorites: [],
       providerModelPreferences: {},
       sidebarProjectGroupingMode: "repository_path" as const,
@@ -788,6 +790,8 @@ describe("wsApi", () => {
       gitStatusPollIntervalMs: 0 as const,
       sourceControlRefreshMode: "automatic" as const,
       notifyOnTurnCompleteWhenUnfocused: true,
+      threadNotificationSound: false,
+      threadNotificationToasts: true,
     };
 
     await api.persistence.setClientSettings(clientSettings);

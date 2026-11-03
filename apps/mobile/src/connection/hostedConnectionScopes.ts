@@ -11,6 +11,8 @@ import { UNIFIED_WORKSPACE_SCOPE_LEASE_TTL_MS } from "@ryco/client-runtime/state
  */
 export type MobileHostedConnectionScope =
   | { readonly type: "thread-detail"; readonly threadId: ThreadId }
+  /** A mounted thread terminal: thread work, demanded exactly like a mounted thread detail. */
+  | { readonly type: "terminal"; readonly threadId: ThreadId }
   | { readonly type: "vcs-status"; readonly cwd: string }
   | { readonly type: "provider-status"; readonly instanceId?: string }
   /** Exact-machine trust ceremony; never acquired by list rendering or prefetch. */
@@ -45,6 +47,7 @@ export interface MobileHostedScopeLeaseStore {
 function stableScopeKey(environmentId: EnvironmentId, scope: MobileHostedConnectionScope): string {
   switch (scope.type) {
     case "thread-detail":
+    case "terminal":
       return JSON.stringify([environmentId, scope.type, scope.threadId]);
     case "vcs-status":
       return JSON.stringify([environmentId, scope.type, scope.cwd]);

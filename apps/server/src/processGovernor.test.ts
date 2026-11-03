@@ -5,6 +5,7 @@ import {
   ProcessPool,
   governChildProcess,
   governChildProcessPromise,
+  governWithPool,
   inBackgroundProcessLane,
   processGovernorMetricNames,
   processGovernorStats,
@@ -185,6 +186,83 @@ describe("governChildProcess", () => {
           queued: 0,
         },
       );
+    }),
+  );
+});
+
+const queueWait = (snapshots: ReadonlyArray<Metric.Metric.Snapshot>, pool: string) => {
+  const snapshot = snapshots.find(
+    (item) =>
+      item.id === "ryco_process_governor_queue_wait_duration" &&
+      item.attributes?.pool === pool &&
+      item.attributes?.lane === "background",
+  );
+  const state = snapshot?.state as { readonly count?: unknown } | undefined;
+  return typeof state?.count === "number" ? state.count : 0;
+};
+
+describe("governWithPool", () => {
+  it.effect("keeps the governor's lane order on a pool of its own", () =>
+    Effect.gen(function* () {
+      const pool = new ProcessPool("github-api-test", 2);
+      const forgeBefore = processGovernorStats().find((stats) => stats.pool === "forge")!;
+      const order: string[] = [];
+      const release = yield* Deferred.make<void>();
+      const take = (label: string, background: boolean) => {
+        const work = governWithPool(
+          pool,
+          Effect.sync(() => order.push(label)).pipe(Effect.andThen(Deferred.await(release))),
+        );
+        return (background ? inBackgroundProcessLane(work) : work).pipe(Effect.forkChild);
+      };
+
+      const fibers = [
+        yield* take("bg-1", true),
+        yield* take("bg-2", true),
+        yield* take("bg-3", true),
+        yield* take("ui-1", false),
+      ];
+      yield* Effect.yieldNow;
+      // Interactive work never waits behind the background burst.
+      assert.deepStrictEqual(order, ["bg-1", "bg-2", "ui-1"]);
+      assert.include(pool.stats(), { pool: "github-api-test", inFlight: 3, queued: 1 });
+
+      yield* Deferred.succeed(release, undefined);
+      yield* Effect.forEach(fibers, Fiber.join);
+      assert.deepStrictEqual(order, ["bg-1", "bg-2", "ui-1", "bg-3"]);
+      const stats = pool.stats();
+      assert.include(stats, { inFlight: 0, queued: 0, admittedTotal: 4, queuedTotal: 1 });
+      assert.deepStrictEqual(stats.admittedByLane, { interactive: 1, background: 3 });
+
+      // The CLI pools are untouched by another pool's traffic.
+      const forgeAfter = processGovernorStats().find((stats) => stats.pool === "forge")!;
+      assert.strictEqual(forgeAfter.admittedTotal, forgeBefore.admittedTotal);
+    }),
+  );
+
+  it.effect("records a background queue wait under the pool's label", () =>
+    Effect.gen(function* () {
+      let nowMs = 0;
+      const pool = new ProcessPool("github-api-wait", 1, () => nowMs);
+      const before = queueWait(yield* Metric.snapshot, "github-api-wait");
+      const release = yield* Deferred.make<void>();
+      const holder = yield* governWithPool(pool, Deferred.await(release)).pipe(
+        inBackgroundProcessLane,
+        Effect.forkChild,
+      );
+      yield* Effect.yieldNow;
+      const queued = yield* governWithPool(pool, Effect.void).pipe(
+        inBackgroundProcessLane,
+        Effect.forkChild,
+      );
+      yield* Effect.yieldNow;
+      nowMs = 250;
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(holder);
+      yield* Fiber.join(queued);
+
+      assert.strictEqual(queueWait(yield* Metric.snapshot, "github-api-wait"), before + 1);
+      assert.strictEqual(pool.stats().maxQueueWaitMs, 250);
     }),
   );
 });

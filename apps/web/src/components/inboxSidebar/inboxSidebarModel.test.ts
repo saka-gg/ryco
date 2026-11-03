@@ -1,5 +1,6 @@
 import { Schema } from "effect";
 import type { SavedEnvironmentRuntimeState } from "@ryco/client-runtime/connection";
+import { scopedProjectKey } from "@ryco/client-runtime/scoped";
 import {
   forgetEnvironmentServerConfig,
   getReportedThreadCapabilitiesSnapshot,
@@ -15,6 +16,7 @@ import type {
   Project,
   SidebarThreadSummary,
   SidebarWorktreeSummary,
+  ThreadLifecycleAction,
 } from "@ryco/client-runtime/state/threads";
 import {
   EnvironmentId,
@@ -37,11 +39,14 @@ import {
   buildPrimaryInboxSidebarEnvironment,
   buildSavedInboxSidebarEnvironment,
   createInboxSidebarModelSharing,
-  describeInboxFocus,
+  resolveCurrentThreadLifecycle,
   sameInboxProviderCatalogs,
+  threadLifecycleDisabledReason,
   type InboxSidebarEnvironment,
   type InboxSidebarFilters,
 } from "./inboxSidebarModel";
+import type { InboxSidebarDraft } from "./inboxDrafts";
+import { DraftId } from "../../composerDraftStore";
 
 const ENV_A = EnvironmentId.make("machine-a");
 const ENV_B = EnvironmentId.make("machine-b");
@@ -99,7 +104,7 @@ function environment(
   };
 }
 
-const SUPPORTED = { threadSettlement: true, threadSnooze: true } as const;
+const SUPPORTED = { threadSettlement: true, threadSnooze: true, threadTriage: true } as const;
 
 const ALL_FILTERS: InboxSidebarFilters = {
   query: "",
@@ -127,6 +132,7 @@ describe("buildPrimaryInboxSidebarEnvironment", () => {
       deliveryUnknown: false,
       threadSettlementSupported: true,
       threadSnoozeSupported: true,
+      threadTriageSupported: true,
       mutationReady: true,
       shellCurrent: true,
     });
@@ -215,7 +221,6 @@ function build(input: {
   environments?: ReadonlyArray<InboxSidebarEnvironment>;
   filters?: InboxSidebarFilters;
   worktrees?: ReadonlyArray<SidebarWorktreeSummary>;
-  aiFocusEnabled?: boolean;
   autoSettleAfterDays?: SidebarAutoSettleAfterDays;
   pinnedThreadKeys?: ReadonlySet<string>;
   primaryEnvironmentId?: EnvironmentId | null;
@@ -228,7 +233,6 @@ function build(input: {
     threads: input.threads,
     environments: input.environments ?? [environment(ENV_A), environment(ENV_B)],
     filters: input.filters ?? ALL_FILTERS,
-    ...(input.aiFocusEnabled !== undefined ? { aiFocusEnabled: input.aiFocusEnabled } : {}),
     ...(input.autoSettleAfterDays !== undefined
       ? { autoSettleAfterDays: input.autoSettleAfterDays }
       : {}),
@@ -471,6 +475,48 @@ describe("buildInboxSidebarSections", () => {
     });
   });
 
+  it("marks queued and held follow-ups in the project sidebar's words", () => {
+    const stopped = {
+      reason: "interrupted" as const,
+      detail: null,
+      causeKeys: ["interrupt:turn-1"],
+      heldAt: "2026-08-23T10:00:00.000Z",
+    };
+    const rows = build({
+      threads: [
+        thread("queued", {
+          followUpQueueSummary: { count: 2, hold: null, headStatus: "queued", headPreview: "a" },
+        }),
+        thread("held", {
+          followUpQueueSummary: { count: 1, hold: stopped, headStatus: "queued", headPreview: "b" },
+        }),
+        thread("retry", {
+          followUpQueueSummary: { count: 3, hold: null, headStatus: "failed", headPreview: "c" },
+        }),
+        thread("plain"),
+      ],
+    }).flatMap((section) => section.rows);
+    const queueOf = (id: string) => rows.find((row) => row.threadId === id)?.followUpQueue;
+
+    expect(queueOf("plain")).toBeNull();
+    expect(queueOf("queued")).toEqual({
+      label: "2 queued",
+      title: "2 queued follow-ups",
+      held: false,
+    });
+    // Held reads as words, not only as a color; the title says why.
+    expect(queueOf("held")).toEqual({
+      label: "1 held",
+      title: "1 queued follow-up: Paused after Stop",
+      held: true,
+    });
+    expect(queueOf("retry")).toEqual({
+      label: "3 held",
+      title: "3 queued follow-ups: The next one waits for Retry",
+      held: true,
+    });
+  });
+
   it("applies search, machine, and status filters deterministically", () => {
     const rows = [
       thread("older match", { updatedAt: "2026-08-23T10:00:00.000Z" }),
@@ -500,6 +546,28 @@ describe("buildInboxSidebarSections", () => {
     expect(active.flatMap((section) => section.rows.map((row) => row.threadId))).toEqual([
       "working match",
     ]);
+  });
+
+  it("keeps only the filtered projects, on whichever machine they live", () => {
+    const other = ProjectId.make("project-other");
+    const titles = buildInboxSidebarSections({
+      projects: [project(ENV_A), project(ENV_B), { ...project(ENV_A), id: other, name: "Hub" }],
+      worktrees: [],
+      threads: [
+        thread("here"),
+        thread("there", { environmentId: ENV_B }),
+        thread("hub", { projectId: other }),
+      ],
+      environments: [environment(ENV_A), environment(ENV_B)],
+      filters: {
+        ...ALL_FILTERS,
+        projectKeys: [
+          scopedProjectKey({ environmentId: ENV_A, projectId: PROJECT_A }),
+          scopedProjectKey({ environmentId: ENV_B, projectId: PROJECT_A }),
+        ],
+      },
+    }).flatMap((section) => section.rows.map((row) => row.title));
+    expect(titles.toSorted()).toEqual(["here", "there"]);
   });
 
   it("orders Recent by creation or finished responses, ignoring live updates and prompts", () => {
@@ -669,78 +737,12 @@ describe("buildInboxSidebarSections", () => {
     });
   });
 
-  it("renders Focus above Active and removes every focused row from its old section", () => {
+  it("keeps a separate Pinned section", () => {
     const sections = build({
-      aiFocusEnabled: true,
-      pinnedThreadKeys: new Set(["machine-a:pinned"]),
-      nowMs: Date.parse("2026-08-25T10:00:00.000Z"),
-      threads: [
-        thread("pinned"),
-        thread("working", { backgroundLiveness: "working" }),
-        thread("ai-now", {
-          priority: {
-            tier: "now",
-            confidence: "high",
-            reason: "A release decision is waiting on this task.",
-            inputFingerprint: "fingerprint" as never,
-            batchId: "batch" as never,
-            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
-            rankedAt: "2026-08-25T09:59:00.000Z",
-            usableUntil: "2026-08-25T10:09:00.000Z",
-          },
-        }),
-      ],
-    });
-
-    expect(sections.map((section) => section.key)).toEqual(["pinned", "focus", "active"]);
-    expect(sections[0]?.rows.map((row) => row.threadId)).toEqual(["pinned"]);
-    expect(sections[1]?.rows.map((row) => row.threadId)).toEqual(["ai-now"]);
-    expect(sections[2]?.rows.map((row) => row.threadId)).toEqual(["working"]);
-    const allKeys = sections.flatMap((section) => section.rows.map((row) => row.key));
-    expect(new Set(allKeys).size).toBe(allKeys.length);
-  });
-
-  it("keeps a separate Pinned section when AI Focus is disabled", () => {
-    const sections = build({
-      aiFocusEnabled: false,
       pinnedThreadKeys: new Set(["machine-a:pinned"]),
       threads: [thread("pinned")],
     });
     expect(sections.map((section) => section.key)).toEqual(["pinned"]);
-    expect(sections[0]?.rows[0]?.focus).toBeNull();
-  });
-});
-
-describe("describeInboxFocus", () => {
-  it("never describes deterministic focus as AI-generated", () => {
-    expect(describeInboxFocus({ source: "pin", ranking: null })).toEqual({
-      title: "Pinned",
-      detail: "Pinned by you.",
-      aiGenerated: false,
-    });
-    expect(describeInboxFocus({ source: "approval", ranking: null }).aiGenerated).toBe(false);
-  });
-
-  it("uses the bounded projected tier and reason for AI focus", () => {
-    expect(
-      describeInboxFocus({
-        source: "ai",
-        ranking: {
-          tier: "soon",
-          confidence: "medium",
-          reason: "A review should happen next.",
-          inputFingerprint: "fingerprint" as never,
-          batchId: "batch" as never,
-          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
-          rankedAt: "2026-08-25T09:59:00.000Z",
-          usableUntil: "2026-08-25T10:09:00.000Z",
-        },
-      }),
-    ).toEqual({
-      title: "Soon",
-      detail: "A review should happen next.",
-      aiGenerated: true,
-    });
   });
 });
 
@@ -856,7 +858,6 @@ describe("hosted inbox capability resolution", () => {
           repositoryIdentity: true,
           threadSettlement: true,
           threadSnooze: true,
-          threadPriorityRanking: false,
         },
       },
       providers: [],
@@ -910,7 +911,6 @@ describe("hosted inbox capability resolution", () => {
           capabilities: {
             repositoryIdentity: false,
             threadSettlement: false,
-            threadPriorityRanking: false,
           },
         },
         serverConfig: null,
@@ -1276,6 +1276,14 @@ describe("glyph row facts", () => {
     expect(hosted.every((row) => row.showMachine)).toBe(true);
   });
 
+  it("lets every row narrow to its machine once threads span machines, the primary one too", () => {
+    const local = thread("local");
+    const remote = thread("remote", { environmentId: ENV_B });
+    expect(rows({ threads: [local] }).map((row) => row.spansMachines)).toEqual([false]);
+    const mixed = rows({ threads: [local, remote], primaryEnvironmentId: ENV_A });
+    expect(mixed.every((row) => row.spansMachines)).toBe(true);
+  });
+
   it("names the project only once the inbox spans projects", () => {
     expect(rows({ threads: [thread("one"), thread("two")] }).some((row) => row.showProject)).toBe(
       false,
@@ -1572,32 +1580,14 @@ describe("delegated thread folding", () => {
     expect(section(recentChild, "settled")?.rows[0]?.delegatedChildren).toEqual([]);
   });
 
-  it("keeps pinned and focused children in Pinned and Focus", () => {
+  it("keeps a pinned child in Pinned", () => {
     const sections = build({
-      aiFocusEnabled: true,
       pinnedThreadKeys: new Set(["machine-a:pinned-child"]),
       nowMs: Date.parse("2026-08-25T10:00:00.000Z"),
       autoSettleAfterDays: null,
-      threads: [
-        thread("parent"),
-        thread("pinned-child", { lineage: delegatedFrom("parent") }),
-        thread("focused-child", {
-          lineage: delegatedFrom("parent"),
-          priority: {
-            tier: "now",
-            confidence: "high",
-            reason: "A release decision is waiting on this task.",
-            inputFingerprint: "fingerprint" as never,
-            batchId: "batch" as never,
-            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
-            rankedAt: "2026-08-25T09:59:00.000Z",
-            usableUntil: "2026-08-25T10:09:00.000Z",
-          },
-        }),
-      ],
+      threads: [thread("parent"), thread("pinned-child", { lineage: delegatedFrom("parent") })],
     });
     expect(ids(section(sections, "pinned")?.rows)).toEqual(["pinned-child"]);
-    expect(ids(section(sections, "focus")?.rows)).toEqual(["focused-child"]);
     expect(section(sections, "recent")?.rows[0]?.delegatedChildren).toEqual([]);
   });
 
@@ -1628,6 +1618,19 @@ describe("delegated thread folding", () => {
     expect(section(flat, "recent")?.rows.every((row) => row.delegatedChildren.length === 0)).toBe(
       true,
     );
+  });
+
+  it("keeps folding under a project filter", () => {
+    const threads = [thread("parent"), thread("child", { lineage: delegatedFrom("parent") })];
+    const filtered = build({
+      threads,
+      filters: {
+        ...ALL_FILTERS,
+        projectKeys: [scopedProjectKey({ environmentId: ENV_A, projectId: PROJECT_A })],
+      },
+    });
+    expect(ids(section(filtered, "recent")?.rows)).toEqual(["parent"]);
+    expect(ids(section(filtered, "recent")?.rows[0]?.delegatedChildren)).toEqual(["child"]);
   });
 
   it("filters a status by the host's section, children included", () => {
@@ -2019,5 +2022,317 @@ describe("createInboxSidebarModelSharing", () => {
     const back = sharing.share(buildModel(threads()));
     expect(rowByTitle(back, "busy")).not.toBe(rowByTitle(first, "busy"));
     expect(rowByTitle(back, "busy")).toEqual(rowByTitle(first, "busy"));
+  });
+});
+
+describe("current thread lifecycle", () => {
+  const nowMs = Date.parse("2026-08-23T12:00:00.000Z");
+  const completedTurn = {
+    turnId: TurnId.make("turn-1"),
+    state: "completed" as const,
+    requestedAt: "2026-08-23T10:00:00.000Z",
+    startedAt: "2026-08-23T10:00:00.000Z",
+    completedAt: "2026-08-23T10:05:00.000Z",
+    assistantMessageId: null,
+  };
+  const used = (id: string, overrides: Partial<SidebarThreadSummary> = {}) =>
+    thread(id, {
+      latestUserMessageAt: "2026-08-23T10:00:00.000Z",
+      latestTurn: completedTurn,
+      ...overrides,
+    });
+  const idle = used("idle");
+  const running = used("running", {
+    session: {
+      provider: ProviderDriverKind.make("codex"),
+      status: "running",
+      orchestrationStatus: "running",
+      activeTurnId: TurnId.make("turn-2"),
+      createdAt: "2026-08-23T11:00:00.000Z",
+      updatedAt: "2026-08-23T11:00:00.000Z",
+    },
+    latestTurn: {
+      ...completedTurn,
+      turnId: TurnId.make("turn-2"),
+      state: "running",
+      completedAt: null,
+    },
+  });
+  const live = environment(ENV_A, { threadSnoozeSupported: true });
+  const current = (value: SidebarThreadSummary, environments = [live]) =>
+    resolveCurrentThreadLifecycle({
+      thread: value,
+      projects: [project(ENV_A)],
+      worktrees: [],
+      environments,
+      nowMs,
+    });
+  const reason = (
+    value: SidebarThreadSummary,
+    action: ThreadLifecycleAction,
+    environments = [live],
+  ) => threadLifecycleDisabledReason(current(value, environments)!.availability, action);
+
+  it("names the open thread and what can be done to it", () => {
+    expect(current(idle)).toEqual({
+      target: { environmentId: ENV_A, threadId: idle.id },
+      title: "idle",
+      availability: {
+        settle: { enabled: true, blocker: null, settled: false },
+        snooze: { enabled: true, blocker: null, snoozedUntil: null },
+        archive: { enabled: true, blocker: null },
+        markUnread: { enabled: true, blocker: null },
+      },
+    });
+    expect(current(used("untitled", { title: "" }))?.title).toBe("Untitled task");
+  });
+
+  it("has nothing for a thread the inbox does not list", () => {
+    expect(current({ ...idle, archivedAt: "2026-08-23T11:00:00.000Z" })).toBeNull();
+  });
+
+  it("carries when a snooze ran out on the awake row, and nothing while it lasts", () => {
+    const snooze = {
+      snoozedAt: "2026-08-23T11:00:00.000Z",
+      snoozedUntil: "2026-08-23T11:30:00.000Z",
+    };
+    const rowOf = (value: SidebarThreadSummary, at = nowMs) =>
+      build({ threads: [value], environments: [live], nowMs: at }).flatMap(
+        (section) => section.rows,
+      )[0];
+    expect(rowOf(used("woke", snooze))).toMatchObject({
+      snoozedUntil: null,
+      wokeAt: "2026-08-23T11:30:00.000Z",
+    });
+    expect(rowOf(used("dozing", snooze), Date.parse("2026-08-23T11:29:00.000Z"))).toMatchObject({
+      snoozedUntil: "2026-08-23T11:30:00.000Z",
+      wokeAt: null,
+    });
+    expect(rowOf(idle)).toMatchObject({ wokeAt: null });
+  });
+
+  it("decides each thread exactly as its inbox row does", () => {
+    const threads = [
+      idle,
+      running,
+      thread("fresh"),
+      used("asking", { hasPendingApprovals: true }),
+      used("settled", { settledOverride: "settled", settledAt: "2026-08-23T11:00:00.000Z" }),
+      used("snoozed", {
+        snoozedAt: "2026-08-23T11:00:00.000Z",
+        snoozedUntil: "2026-08-23T13:00:00.000Z",
+      }),
+    ];
+    for (const environments of [
+      [live],
+      [environment(ENV_A)],
+      [environment(ENV_A, { threadSnoozeSupported: true, mutationReady: false })],
+      [environment(ENV_A, { threadSettlementSupported: "unknown", threadSnoozeSupported: true })],
+    ]) {
+      const rows = build({ threads, environments, nowMs }).flatMap((section) => section.rows);
+      expect(rows).toHaveLength(threads.length);
+      for (const row of rows) {
+        const { availability } = current(
+          threads.find((candidate) => candidate.id === row.threadId)!,
+          environments,
+        )!;
+        expect({
+          settled: availability.settle.settled,
+          snoozedUntil: availability.snooze.snoozedUntil,
+          settlementActionEnabled: availability.settle.enabled,
+          settlementDisabledReason: threadLifecycleDisabledReason(availability, "settle"),
+          snoozeEnabled: availability.snooze.enabled,
+        }).toEqual({
+          settled: row.settled,
+          snoozedUntil: row.snoozedUntil,
+          settlementActionEnabled: row.settlementActionEnabled,
+          settlementDisabledReason: row.settlementDisabledReason,
+          snoozeEnabled: row.snoozedUntil ? row.canUnsnooze : row.canSnooze,
+        });
+      }
+    }
+  });
+
+  it("says why each action is blocked, in the action's own words", () => {
+    const offline = [
+      environment(ENV_A, { connectionState: "offline", threadSnoozeSupported: true }),
+    ];
+    const stale = [environment(ENV_A, { shellCurrent: false, threadSnoozeSupported: true })];
+    const viewer = [environment(ENV_A, { mutationReady: false, threadSnoozeSupported: true })];
+    expect(reason(running, "settle")).toBe("Wait for the running work to finish.");
+    expect(reason(running, "snooze")).toBe("Wait for the running work to finish.");
+    expect(reason(running, "archive")).toBe("Wait for the running work to finish.");
+    expect(reason(running, "markUnread")).toBe("Nothing to mark unread yet.");
+    expect(reason(used("asking", { hasPendingApprovals: true }), "snooze")).toBe(
+      "Resolve the pending approval first.",
+    );
+    expect(reason(thread("fresh"), "archive")).toBe("Send a message before archiving.");
+    expect(reason(idle, "settle", offline)).toBe("Reconnect this machine to change settlement.");
+    expect(reason(idle, "snooze", offline)).toBe("Reconnect this machine to snooze threads.");
+    expect(reason(idle, "archive", offline)).toBe("Reconnect this machine to archive threads.");
+    expect(reason(idle, "snooze", stale)).toBe("Wait for current thread data before snoozing.");
+    expect(reason(idle, "archive", stale)).toBe("Wait for current thread data before archiving.");
+    expect(reason(idle, "archive", viewer)).toBe("Your role cannot change this thread.");
+    expect(reason(idle, "snooze", [environment(ENV_A, { threadSnoozeSupported: false })])).toBe(
+      "Update this machine to use Snooze.",
+    );
+    // Mark unread is this client's own state: no machine blocks it.
+    expect(reason(idle, "markUnread", offline)).toBeNull();
+    expect(
+      threadLifecycleDisabledReason(
+        resolveCurrentThreadLifecycle({
+          thread: idle,
+          projects: [project(ENV_A)],
+          worktrees: [],
+          environments: [live],
+          deliveryUnknownThreadKeys: new Set([`${ENV_A}:${idle.id}`]),
+          nowMs,
+        })!.availability,
+        "snooze",
+      ),
+    ).toBe("Confirm message delivery before snoozing.");
+  });
+});
+
+describe("Hidden shelf and settling a working thread", () => {
+  const triage = environment(ENV_A, { threadSnoozeSupported: true, threadTriageSupported: true });
+  const runningSession = {
+    provider: "codex",
+    status: "running",
+    orchestrationStatus: "running",
+    activeTurnId: "turn-running",
+    createdAt: "2026-08-23T10:00:00.000Z",
+    updatedAt: "2026-08-23T10:00:00.000Z",
+  } as unknown as SidebarThreadSummary["session"];
+  const runningTurn = {
+    turnId: "turn-running",
+    state: "running",
+    requestedAt: "2026-08-23T10:00:00.000Z",
+    startedAt: "2026-08-23T10:00:00.000Z",
+    completedAt: null,
+    assistantMessageId: null,
+  } as unknown as SidebarThreadSummary["latestTurn"];
+
+  it("lists hidden threads last, in their own Hidden section, whatever their pin", () => {
+    const hidden = thread("hidden", { hiddenAt: "2026-08-23T11:00:00.000Z" });
+    const sections = build({
+      threads: [hidden, thread("shown")],
+      environments: [triage],
+      pinnedThreadKeys: new Set([`${ENV_A}:hidden`]),
+    });
+    expect(sections.map((section) => section.key)).toEqual(["recent", "hidden"]);
+    expect(sections.at(-1)).toMatchObject({ title: "Hidden" });
+    expect(sections.at(-1)?.rows[0]).toMatchObject({
+      key: `${ENV_A}:hidden`,
+      hidden: true,
+      hiddenByUser: true,
+      hideActionEnabled: true,
+    });
+    expect(sections[0]?.rows[0]).toMatchObject({ hiddenByUser: false, hideActionEnabled: true });
+  });
+
+  it("brings a hidden thread that asks for an approval back to Needs input", () => {
+    const sections = build({
+      threads: [
+        thread("asking", { hiddenAt: "2026-08-23T11:00:00.000Z", hasPendingApprovals: true }),
+      ],
+      environments: [triage],
+    });
+    expect(sections.map((section) => section.key)).toEqual(["needs-input"]);
+    expect(sections[0]?.rows[0]).toMatchObject({ hidden: false, hiddenByUser: true });
+  });
+
+  it("offers Settle when done on a working thread, and lists a filed one as settled", () => {
+    const working = thread("working", { session: runningSession, latestTurn: runningTurn });
+    const [active] = build({ threads: [working], environments: [triage] });
+    expect(active?.rows[0]).toMatchObject({
+      settleWhenDone: true,
+      settlementActionEnabled: true,
+      settled: false,
+    });
+
+    const filed = { ...working, settleWhenIdleAt: "2026-08-23T10:30:00.000Z" };
+    const sections = build({ threads: [filed], environments: [triage] });
+    expect(sections.map((section) => section.key)).toEqual(["settled"]);
+    expect(sections[0]?.rows[0]).toMatchObject({ filed: true, settled: true, state: "working" });
+  });
+});
+
+describe("draft rows", () => {
+  const draft = (overrides: Partial<InboxSidebarDraft> = {}): InboxSidebarDraft => ({
+    draftId: DraftId.make("draft-1"),
+    environmentId: ENV_A,
+    threadId: ThreadId.make("thread-draft"),
+    projectId: PROJECT_A,
+    title: "Fix the login flow",
+    createdAt: "2026-08-23T11:00:00.000Z",
+    branch: "main",
+    worktreePath: null,
+    isChat: false,
+    ...overrides,
+  });
+  const build = (input: { drafts: InboxSidebarDraft[]; threads?: SidebarThreadSummary[] }) =>
+    buildInboxSidebarSections({
+      projects: [project()],
+      worktrees: [],
+      threads: input.threads ?? [],
+      drafts: input.drafts,
+      environments: [environment(ENV_A)],
+      filters: ALL_FILTERS,
+      nowMs: Date.parse("2026-08-23T12:00:00.000Z"),
+    });
+
+  it("lists a draft under Recent, opening its draft and allowing no lifecycle action", () => {
+    const sections = build({ drafts: [draft()] });
+    expect(sections.map((section) => section.key)).toEqual(["recent"]);
+    expect(sections[0]?.rows[0]).toMatchObject({
+      key: "machine-a:thread-draft",
+      draftId: "draft-1",
+      title: "Fix the login flow",
+      state: "idle",
+      statusLabel: "Draft",
+      projectLabel: "Ryco",
+      gitCwd: null,
+      sourceControlEnabled: false,
+      mutationEnabled: false,
+      settlementActionEnabled: false,
+      settlementDisabledReason: "Drafts cannot be settled yet.",
+      canSnooze: false,
+      hideActionEnabled: false,
+      updatedAt: "2026-08-23T11:00:00.000Z",
+    });
+  });
+
+  it("reads a chat draft as No project, before its chat project exists", () => {
+    const row = build({
+      drafts: [draft({ projectId: ProjectId.make("chat-pending"), isChat: true })],
+    })[0]?.rows[0];
+    expect(row).toMatchObject({
+      isChat: true,
+      projectLabel: "No project",
+      workspaceLabel: "Chat folder",
+    });
+  });
+
+  it("lists the server thread once a draft's thread exists", () => {
+    const rows = build({ drafts: [draft()], threads: [thread("thread-draft")] }).flatMap(
+      (section) => section.rows,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.draftId).toBeUndefined();
+  });
+
+  it("matches a draft by its title in text search", () => {
+    const sections = buildInboxSidebarSections({
+      projects: [project()],
+      worktrees: [],
+      threads: [thread("other")],
+      drafts: [draft()],
+      environments: [environment(ENV_A)],
+      filters: { ...ALL_FILTERS, query: "login" },
+    });
+    expect(sections.flatMap((section) => section.rows.map((row) => row.key))).toEqual([
+      "machine-a:thread-draft",
+    ]);
   });
 });

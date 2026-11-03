@@ -11,6 +11,8 @@
 import { Cause, Effect, Option } from "effect";
 import type { FileSystem, Path } from "effect";
 
+import { SCRATCH_INDEX_CONFIG_ARGS } from "./GitDurableWrites.ts";
+
 /** `ls-files -v` of the seeded index; a larger listing falls back to `read-tree HEAD`. */
 const TEMPORARY_INDEX_LISTING_MAX_BYTES = 64 * 1024 * 1024;
 
@@ -45,6 +47,7 @@ export type TemporaryIndexGit<E> = (input: TemporaryIndexGitCommand) => Effect.E
  * HEAD version). Never fails.
  *
  * `env` must point `GIT_INDEX_FILE` at `tempIndexPath`; the real index is located without it.
+ * Commands on the copy never split it and never run the user's hooks (`SCRATCH_INDEX_CONFIG_ARGS`).
  */
 export const seedIndexFromCheckout = <E>(input: {
   readonly git: TemporaryIndexGit<E>;
@@ -88,7 +91,7 @@ export const seedIndexFromCheckout = <E>(input: {
     const listed = yield* input.git({
       operation: input.operation,
       cwd: input.cwd,
-      args: ["ls-files", "-v", "-z"],
+      args: [...SCRATCH_INDEX_CONFIG_ARGS, "ls-files", "-v", "-z"],
       env: input.env,
       maxOutputBytes: TEMPORARY_INDEX_LISTING_MAX_BYTES,
       truncateOutputAtMaxBytes: true,
@@ -112,7 +115,13 @@ export const seedIndexFromCheckout = <E>(input: {
       yield* input.git({
         operation: input.operation,
         cwd: input.cwd,
-        args: ["update-index", "--no-assume-unchanged", "-z", "--stdin"],
+        args: [
+          ...SCRATCH_INDEX_CONFIG_ARGS,
+          "update-index",
+          "--no-assume-unchanged",
+          "-z",
+          "--stdin",
+        ],
         stdin: `${assumeUnchanged.join("\0")}\0`,
         env: input.env,
       });

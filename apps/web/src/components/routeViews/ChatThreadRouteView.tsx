@@ -1,7 +1,10 @@
+import { useAppKeybindings } from "../../appKeybindings";
 import { useChatPanesStore } from "../../chatPanesStore";
 import { paneContains } from "../../chatPanes.logic";
+import type { ClosedViewOwner } from "../../closedViews";
 import { ChatPanes, PaneThreadAvailability } from "../chat/ChatPanes";
 import type { ScopedThreadRef } from "@ryco/contracts";
+import { isSavedEnvironmentSwitchedOff } from "@ryco/client-runtime/connection";
 import { useDeviceStateStore } from "@ryco/client-runtime/state/device";
 import { useDeviceRuntime } from "../device/useDeviceRuntime";
 import { getRouteApi, useNavigate } from "@tanstack/react-router";
@@ -23,6 +26,7 @@ import { useSettings } from "../../hooks/useSettings";
 import { releaseThreadDetailPrewarm } from "../../lib/threadDetailPrewarm";
 import { markStartupPhaseAfterPaint } from "../../perf/startupInstrumentation";
 import { usePerfMark } from "../../perf/tabSwitchInstrumentation";
+import { useSavedEnvironmentRegistryStore } from "../../environments/runtime";
 import { retainDesktopWorkspaceThreadScope } from "../../platform/desktopWorkspace";
 import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../../rightPanelLayout";
 import {
@@ -34,7 +38,7 @@ import {
 import { selectEnvironmentState, selectThreadExistsByRef, useStore } from "../../store";
 import {
   createEnvironmentFallbackThreadRefSelector,
-  createThreadSelectorByRef,
+  createThreadStructureSelectorByRef,
 } from "../../storeSelectors";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../../threadRoutes";
 import { buildOpenSimulatorSearch } from "../../workspaceRouteSearch";
@@ -45,6 +49,7 @@ import { LazyRightPanel, RightPanelInlineSidebar } from "../ChatRightPanel";
 import { RightPanelSheet } from "../RightPanelSheet";
 import { LazyPhoneWorkSurfaceSheet } from "../shell/phone/lazyPhoneThreadSurfaces";
 import { usePhoneThreadSurfaceReady } from "../shell/phone/usePhoneThreadSurfaceReady";
+import { useViewShortcuts } from "./useViewShortcuts";
 import { SidebarInset } from "~/components/ui/sidebar";
 import { cn } from "~/lib/utils";
 
@@ -87,21 +92,14 @@ export function ChatThreadRouteView({
   const bootstrapComplete = useStore(
     (store) => selectEnvironmentState(store, threadRef?.environmentId ?? null).bootstrapComplete,
   );
-  const serverThread = useStore(useMemo(() => createThreadSelectorByRef(threadRef), [threadRef]));
+  // Reads only whether the thread exists and has started, so streamed text
+  // does not re-render the route.
+  const serverThread = useStore(
+    useMemo(() => createThreadStructureSelectorByRef(threadRef), [threadRef]),
+  );
   const threadExists = useStore((store) => selectThreadExistsByRef(store, threadRef));
   const environmentHasServerThreads = useStore(
     (store) => selectEnvironmentState(store, threadRef?.environmentId ?? null).threadIds.length > 0,
-  );
-  const sidebarThreadSortOrder = useSettings((settings) => settings.sidebarThreadSortOrder);
-  const fallbackThreadRef = useStore(
-    useMemo(
-      () =>
-        createEnvironmentFallbackThreadRefSelector(
-          threadRef?.environmentId ?? null,
-          sidebarThreadSortOrder,
-        ),
-      [sidebarThreadSortOrder, threadRef?.environmentId],
-    ),
   );
   const draftThreadExists = useDraftThreadExistsByRef(threadRef);
   const draftThread = useDraftThreadByRef(threadRef);
@@ -110,6 +108,19 @@ export function ChatThreadRouteView({
   const routeInPanes =
     presentationTier !== "phone" && !!threadRef && !!paneRoot && paneContains(paneRoot, threadRef);
   const routeThreadExists = threadExists || draftThreadExists;
+  const sidebarThreadSortOrder = useSettings((settings) => settings.sidebarThreadSortOrder);
+  // The fallback is only needed once the route's thread is gone. While it
+  // exists the selector reads no environment: otherwise it re-sorts every
+  // thread on each commit that replaces the shell records (every streamed delta).
+  const fallbackEnvironmentId =
+    routeInPanes || routeThreadExists ? null : (threadRef?.environmentId ?? null);
+  const fallbackThreadRef = useStore(
+    useMemo(
+      () =>
+        createEnvironmentFallbackThreadRefSelector(fallbackEnvironmentId, sidebarThreadSortOrder),
+      [fallbackEnvironmentId, sidebarThreadSortOrder],
+    ),
+  );
   const serverThreadStarted = threadHasStarted(serverThread);
   const environmentHasAnyThreads = environmentHasServerThreads || environmentHasDraftThreads;
   // A hosted node switch deliberately demotes the environment to last-known
@@ -188,6 +199,16 @@ export function ChatThreadRouteView({
     },
     [navigate, threadRef],
   );
+  // Only while the thread and its panel are on screen, and not on the frozen
+  // phone tier: otherwise no view shortcuts, and no closed tabs remembered.
+  const closedViewOwner = useMemo<ClosedViewOwner | null>(
+    () =>
+      threadRef && canRenderRouteThread && presentationTier !== "phone"
+        ? { kind: "thread", ref: threadRef }
+        : null,
+    [canRenderRouteThread, presentationTier, threadRef],
+  );
+  const keybindings = useAppKeybindings();
   const {
     openedPanelModes,
     openedAgentKeys,
@@ -198,6 +219,9 @@ export function ChatThreadRouteView({
     closeRightPanel,
     toggleRightPanel,
     closePanelTab,
+    closeActiveView,
+    isPanelTargetOpen,
+    openPanelTarget,
     shouldRenderRightPanelContent,
     shouldRenderPhoneRightPanelContent,
   } = useRightPanelTabs({
@@ -208,6 +232,14 @@ export function ChatThreadRouteView({
     activeRenderKey,
     defaultLastMode: "review",
     navigateSearch: navigateThreadSearch,
+    closedViewOwner,
+  });
+  useViewShortcuts({
+    owner: closedViewOwner,
+    keybindings,
+    closeActiveView,
+    isPanelTargetOpen,
+    openPanelTarget,
   });
 
   useEffect(() => {
@@ -235,6 +267,17 @@ export function ChatThreadRouteView({
     routeInPanes,
     threadRef,
   ]);
+
+  // A machine switched off keeps no threads here, so its thread's page would
+  // stay blank waiting for a sync that never comes. A draft on it stays: its
+  // banner offers Switch on.
+  const routeEnvironmentSwitchedOff = useSavedEnvironmentRegistryStore((state) =>
+    routeEnvironmentId ? isSavedEnvironmentSwitchedOff(state.byId[routeEnvironmentId]) : false,
+  );
+  useEffect(() => {
+    if (!routeEnvironmentSwitchedOff || routeInPanes || draftThreadExists) return;
+    void navigate({ to: "/", replace: true });
+  }, [draftThreadExists, navigate, routeEnvironmentSwitchedOff, routeInPanes]);
 
   useEffect(() => {
     if (!threadRef || !serverThreadStarted || !draftThread?.promotedTo) {

@@ -106,6 +106,50 @@ describe("session policy model", () => {
     expect(model.access.segments.every((segment) => !segment.disabled)).toBe(true);
   });
 
+  it("disables only Auto when the model cannot run it, and says why", () => {
+    const reason = "Claude Opus 4.8 can't run in Auto mode on this provider.";
+    const model = build({ autoModeUnavailableReason: reason });
+    const auto = model.access.segments.find((segment) => segment.value === "auto");
+    expect(auto?.disabled).toBe(true);
+    expect(auto?.disabledReason).toBe(reason);
+    expect(
+      model.access.segments
+        .filter((segment) => segment.value !== "auto")
+        .every((segment) => !segment.disabled && segment.disabledReason === null),
+    ).toBe(true);
+    expect(model.readOnly).toBe(false);
+    // Already in Auto: the segment stays selected, disabled, and explained.
+    const selected = build({ runtimeMode: "auto", autoModeUnavailableReason: reason });
+    expect(selected.access.segments.find((segment) => segment.value === "auto")).toMatchObject({
+      selected: true,
+      disabled: true,
+      disabledReason: reason,
+    });
+  });
+
+  it("keeps Auto enabled without a reason", () => {
+    for (const model of [
+      build(),
+      build({ autoModeUnavailableReason: null }),
+      build({ autoModeUnavailableReason: "  " }),
+    ]) {
+      expect(model.access.segments.find((segment) => segment.value === "auto")).toMatchObject({
+        disabled: false,
+        disabledReason: null,
+      });
+    }
+  });
+
+  it("lets the blocked reason win over the narrower Auto reason", () => {
+    const model = build({
+      autoModeUnavailableReason: "No Auto.",
+      mutationBlockedReason: "Offline.",
+    });
+    expect(model.access.segments.find((segment) => segment.value === "auto")?.disabledReason).toBe(
+      "Offline.",
+    );
+  });
+
   it("disables every segment with the given reason when mutation is blocked", () => {
     const model = build({ mutationBlockedReason: "Reconnecting to the node." });
     expect(model.readOnly).toBe(true);
@@ -156,6 +200,9 @@ describe("resolveSessionPolicySelection", () => {
 
     const noAsk = build({ askModeSupported: false });
     expect(noAsk.mode && resolveSessionPolicySelection(noAsk.mode, "ask")).toBeNull();
+
+    const noAuto = build({ autoModeUnavailableReason: "No Auto." });
+    expect(resolveSessionPolicySelection(noAuto.access, "auto")).toBeNull();
   });
 
   it("ignores a value that is not in the group", () => {

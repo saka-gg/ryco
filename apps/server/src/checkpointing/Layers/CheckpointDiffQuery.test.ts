@@ -43,6 +43,7 @@ const unusedStoreMethods = {
   captureCheckpoint: () => Effect.void,
   hasCheckpointRef: () => Effect.die("CheckpointDiffQuery resolves refs in one batch"),
   restoreCheckpoint: () => Effect.succeed(true),
+  sameCheckpointTree: () => Effect.succeed(false),
   diffCheckpoints: () => Effect.die("CheckpointDiffQuery diffs resolved commits"),
   deleteCheckpointRefs: () => Effect.void,
   resolveCommit: () => Effect.succeed(null),

@@ -27,4 +27,23 @@ layer("NodeSqliteClient", (it) => {
       assert.equal(values[1]?.[1], "beta");
     }),
   );
+
+  it.effect("prepares a query again once its missing table exists", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const select = sql<{ readonly name: string }>`SELECT name FROM created_after_prepare_failure`;
+
+      const error = yield* Effect.flip(select);
+      assert.equal(error._tag, "SqlError");
+      assert.equal(error.reason.operation, "prepare");
+      const valuesError = yield* Effect.flip(select.values);
+      assert.equal(valuesError.reason.operation, "prepare");
+
+      yield* sql`CREATE TABLE created_after_prepare_failure(name TEXT NOT NULL)`;
+      yield* sql`INSERT INTO created_after_prepare_failure(name) VALUES (${"recovered"})`;
+
+      assert.deepEqual(yield* select, [{ name: "recovered" }]);
+      assert.deepEqual(yield* select.values, [["recovered"]]);
+    }),
+  );
 });

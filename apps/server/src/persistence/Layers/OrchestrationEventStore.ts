@@ -512,10 +512,25 @@ const makeEventStore = Effect.gen(function* () {
       const sequence = Math.max(0, Math.floor(input.sequence));
       const limit = Math.max(0, Math.floor(input.limit));
       // Both counts stop one row past their limit: an inner LIMIT over the
-      // sequence key (or the stream index) never reads a payload.
+      // sequence key (or the stream index) never reads a payload. The anchor is
+      // the log's range, not the row: compaction leaves holes where superseded
+      // progress events were, and a replay from inside a hole is equivalent.
+      // MIN and MAX are single seeks at either end of the sequence key.
+      // The floor of what the replay reads: the stream's own when one is named (a thread
+      // replays its own stream), the whole log's otherwise. Retention raises floors in the
+      // transaction that removes events below them.
+      const floorKind = input.stream?.aggregateKind ?? "log";
+      const floorStream = input.stream?.streamId ?? "";
       const [global] = yield* sql<{ readonly anchored: number; readonly eventsAfter: number }>`
         SELECT
-          EXISTS(SELECT 1 FROM orchestration_events WHERE sequence = ${sequence}) AS "anchored",
+          (
+            ${sequence} >= (SELECT MIN(sequence) FROM orchestration_events)
+            AND ${sequence} <= (SELECT MAX(sequence) FROM orchestration_events)
+            AND ${sequence} >= COALESCE((
+              SELECT floor_sequence FROM orchestration_stream_floors
+              WHERE aggregate_kind = ${floorKind} AND stream_id = ${floorStream}
+            ), 0)
+          ) AS "anchored",
           (
             SELECT count(*) FROM (
               SELECT 1 FROM orchestration_events WHERE sequence > ${sequence} LIMIT ${limit + 1}
@@ -542,6 +557,15 @@ const makeEventStore = Effect.gen(function* () {
         streamEventsAfter,
       };
     }).pipe(Effect.mapError(toPersistenceSqlError("OrchestrationEventStore.probeResume:query")));
+
+  const readReplayFloor: NonNullable<OrchestrationEventStoreShape["readReplayFloor"]> = (input) =>
+    sql<{ readonly floor: number | null }>`
+      SELECT floor_sequence AS floor FROM orchestration_stream_floors
+      WHERE aggregate_kind = ${input.aggregateKind} AND stream_id = ${input.streamId}
+    `.pipe(
+      Effect.map((rows) => Number(rows[0]?.floor ?? 0)),
+      Effect.mapError(toPersistenceSqlError("OrchestrationEventStore.readReplayFloor:query")),
+    );
 
   const readRecent: OrchestrationEventStoreShape["readRecent"] = (input) =>
     readRecentEventRows({
@@ -582,6 +606,7 @@ const makeEventStore = Effect.gen(function* () {
     readStreamEventsPage,
     readRecent,
     probeResume,
+    readReplayFloor,
     readFromSequence,
     readThroughSequence,
     latestSequence,

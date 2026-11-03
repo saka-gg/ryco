@@ -18,6 +18,22 @@ describe("ryco config keys", () => {
     });
   });
 
+  it("sets, reads and unsets keeping the machine awake while agents work", () => {
+    const off = setConfigKey(EMPTY_NODE_CONFIG, "keep-awake-while-working", "off");
+    expect(off).toEqual({ version: 1, keepAwakeWhileWorking: false });
+    const line = (config: typeof off) =>
+      formatNodeConfig(config)
+        .split("\n")
+        .find((entry) => entry.startsWith("keep-awake-while-working"));
+    expect(line(off)).toMatch(/false$/u);
+    expect(line(setConfigKey(off, "keep-awake-while-working", "true"))).toMatch(/true$/u);
+    expect(unsetConfigKey(off, "keep-awake-while-working")).toEqual({ version: 1 });
+    expect(line(EMPTY_NODE_CONFIG)).toMatch(/\(default\)$/u);
+    expect(() => setConfigKey(EMPTY_NODE_CONFIG, "keep-awake-while-working", "sometimes")).toThrow(
+      /true or false/u,
+    );
+  });
+
   it("rejects values the server would refuse", () => {
     expect(() => setConfigKey(EMPTY_NODE_CONFIG, "port", "70000")).toThrow(/between 1 and 65535/u);
     expect(() => setConfigKey(EMPTY_NODE_CONFIG, "hub", "maybe")).toThrow(/true or false/u);

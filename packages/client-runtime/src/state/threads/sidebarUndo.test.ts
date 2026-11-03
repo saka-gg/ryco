@@ -57,7 +57,7 @@ function setup() {
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 describe("sidebar undo history", () => {
-  it.each(["archive", "settle", "snooze"] as const)(
+  it.each(["archive", "settle", "snooze", "hide"] as const)(
     "offers immediate %s undo bound to its owning command and node",
     async (action) => {
       const s = setup();
@@ -201,6 +201,61 @@ describe("sidebar undo history", () => {
       threadId: target.threadId,
     });
     expect(s.dispatch).toHaveBeenCalledTimes(1);
+    expect(s.read()).toEqual([]);
+  });
+  it("finds the newest notice whose Undo can still run", async () => {
+    const s = setup();
+    expect(s.history.latest()).toBeNull();
+    const other = { ...target, threadId: ThreadId.make("thread-b") };
+    await s.history.dispatch(target, {
+      type: "thread.settle",
+      commandId: CommandId.make("first"),
+      threadId: target.threadId,
+    });
+    let acknowledge!: (value: { sequence: number }) => void;
+    s.dispatch.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          acknowledge = resolve;
+        }),
+    );
+    const archive = s.history.dispatch(other, {
+      type: "thread.archive",
+      commandId: CommandId.make("second"),
+      threadId: other.threadId,
+    });
+    // A notice still applying counts: its Undo waits for the acknowledgment.
+    expect(s.history.latest()).toMatchObject({ action: "archive", target: other, applying: true });
+    acknowledge({ sequence: 2 });
+    await archive;
+
+    let finish!: (value: { sequence: number }) => void;
+    s.dispatch.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const undo = s.history.undo(s.history.latest()!.id);
+    // An Undo in flight is skipped, so a second press undoes the notice before it.
+    expect(s.history.latest()).toMatchObject({ action: "settle", target, pending: false });
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    finish({ sequence: 3 });
+    await undo;
+    expect(s.history.latest()).toMatchObject({ action: "settle", target });
+    s.history.dispose();
+    expect(s.history.latest()).toBeNull();
+  });
+  it.each(["expiry", "generation"])("offers no keyboard Undo after %s", async (reason) => {
+    const s = setup();
+    await s.history.dispatch(target, {
+      type: "thread.settle",
+      commandId: CommandId.make("original"),
+      threadId: target.threadId,
+    });
+    if (reason === "expiry") vi.advanceTimersByTime(5_000);
+    else s.replace({ ...s.context()!, generation: {} });
+    expect(s.history.latest()).toBeNull();
     expect(s.read()).toEqual([]);
   });
   it("restores local unpin and refuses ABA pin changes", async () => {
@@ -473,6 +528,126 @@ it("finishes a submitted Undo and archive reopening even when acknowledgment cro
   await undo;
   expect(reopen).toHaveBeenCalledTimes(1);
   expect(s.read()).toEqual([]);
+});
+
+describe("bulk notices", () => {
+  const refs = ["a", "b", "c"].map((id) => ({
+    environmentId: target.environmentId,
+    threadId: ThreadId.make(`thread-${id}`),
+  }));
+  const [a, b, c] = refs as [typeof target, typeof target, typeof target];
+  const track = (
+    s: ReturnType<typeof setup>,
+    overrides: Partial<Parameters<typeof s.history.track>[0]> = {},
+  ) =>
+    s.history.track({
+      action: "settle",
+      members: refs,
+      ready: Promise.resolve(),
+      valid: () => true,
+      restore: async () => {},
+      ...overrides,
+    });
+
+  it("covers every thread in one notice with caller copy for its count", () => {
+    const s = setup();
+    const notice = track(s, {
+      describe: ({ count, applying }) => ({
+        title: applying ? `Settling ${count} threads…` : `${count} threads settled`,
+        undoLabel: `Undo settle for ${count} threads`,
+      }),
+    });
+    expect(s.read()).toMatchObject([
+      {
+        action: "settle",
+        target: a,
+        count: 3,
+        applying: true,
+        copy: { title: "Settling 3 threads…" },
+      },
+    ]);
+    notice.applied();
+    expect(s.read()).toMatchObject([
+      { count: 3, applying: false, copy: { undoLabel: "Undo settle for 3 threads" } },
+    ]);
+    s.history.dispose();
+  });
+
+  it("stays while applying and starts its five seconds once applied", async () => {
+    const s = setup();
+    const notice = track(s);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(s.read()).toMatchObject([{ applying: true }]);
+    notice.applied();
+    await vi.advanceTimersByTimeAsync(4_900);
+    expect(s.read()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(s.read()).toEqual([]);
+  });
+
+  it("closes a notice that never finishes applying", async () => {
+    const s = setup();
+    const notice = track(s);
+    await vi.advanceTimersByTimeAsync(25_100);
+    expect(s.read()).toEqual([]);
+    notice.applied();
+    expect(s.read()).toEqual([]);
+  });
+
+  it("loses only the threads a newer action or a failure takes out", async () => {
+    const s = setup();
+    const notice = track(s);
+    await s.history.dispatch(b, {
+      type: "thread.snooze",
+      commandId: CommandId.make("newer"),
+      threadId: b.threadId,
+      snoozedUntil: "2026-10-01T12:00:00.000Z",
+    });
+    expect(s.read()).toMatchObject([
+      { action: "settle", target: a, count: 2 },
+      { action: "snooze", target: b },
+    ]);
+    notice.drop(a);
+    expect(s.read()[0]).toMatchObject({ target: c, count: undefined });
+    // A failure on a thread a newer action took over leaves that newer notice alone.
+    notice.drop(b);
+    expect(s.read()).toHaveLength(2);
+    notice.drop(c);
+    expect(s.read()).toMatchObject([{ action: "snooze", target: b }]);
+    s.history.dispose();
+  });
+
+  it("counts once against the five-notice cap", async () => {
+    const s = setup();
+    track(s).applied();
+    for (let i = 0; i < 5; i++) {
+      const ref = { ...target, threadId: ThreadId.make(`single-${i}`) };
+      await s.history.dispatch(ref, {
+        type: "thread.settle",
+        commandId: CommandId.make(`single-${i}`),
+        threadId: ref.threadId,
+      });
+      expect(s.read()).toHaveLength(Math.min(i + 2, 5));
+      expect(s.read().some((notice) => notice.count === 3)).toBe(i < 4);
+    }
+    s.history.dispose();
+  });
+
+  it("restores only the threads that are still valid", async () => {
+    const s = setup();
+    const stale = new Set<string>();
+    const restore = vi.fn(async (_members: readonly (typeof target)[]) => {});
+    track(s, { valid: (member) => !stale.has(member.threadId), restore }).applied();
+    stale.add(b.threadId);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(s.read()).toMatchObject([{ target: a, count: 2 }]);
+    await s.history.undo(s.read()[0]!.id);
+    expect(restore).toHaveBeenCalledExactlyOnceWith([a, c]);
+    expect(s.read()).toEqual([]);
+    track(s, { valid: () => false }).applied();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(s.read()).toEqual([]);
+  });
 });
 
 it("local pin revisions tolerate response progress but detect ordering and lifecycle changes", async () => {

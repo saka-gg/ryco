@@ -232,6 +232,13 @@ export interface RelayRpcChannelSession {
    * exactly as any other open-time session failure does.
    */
   readonly onAccepted?: () => void | Promise<void>;
+  /**
+   * The Hub closed the channel with `reason` (a `channel.close` frame), called before the
+   * registry tears the channel down, so the session can still read what it authenticated. Must
+   * not block. A client can send its own channel's close with any reason through the Hub, so
+   * a reason only ever speaks for this channel's own peer.
+   */
+  readonly onPeerClose?: (reason: RelayCloseReason | undefined) => void;
 }
 
 export interface RelayChannelSessionFactory {
@@ -445,6 +452,11 @@ export class RelayChannelRegistry {
         this.#sendQueue.resume(frame.channelId);
         return;
       case "channel.close":
+        try {
+          this.#channels.get(frame.channelId as string)?.session.onPeerClose?.(frame.reason);
+        } catch {
+          // An observer; the close itself must happen whatever it did.
+        }
         // The peer already tore the channel down, so anything still queued for
         // it has nowhere to go: draining it would push data frames for a
         // channel the relay no longer knows.

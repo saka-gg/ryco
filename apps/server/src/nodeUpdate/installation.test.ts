@@ -4,12 +4,10 @@ import {
   type DetectedNodeInstallation,
   detectNodeInstallation,
   isNewerNodeRelease,
-  nodeInstallCommand,
   type NodeInstallationProbe,
   nodeReleaseChannel,
   nodeUpdateAvailability,
   nodeUpdateCapability,
-  nodeVerifyCommand,
   npmGlobalPrefix,
   sourceCheckoutRootCandidate,
 } from "./installation.ts";
@@ -20,7 +18,9 @@ const probe = (overrides: Partial<NodeInstallationProbe>): NodeInstallationProbe
   resolvedScriptPath: null,
   platform: "darwin",
   serviceLabel: undefined,
+  pid: 4300,
   parentPid: 4242,
+  systemdExecPid: undefined,
   temporaryDirectory: "/var/folders/xy/T",
   isRycoCheckout: () => false,
   ...overrides,
@@ -154,6 +154,15 @@ describe("node installation detection", () => {
       service: "systemd",
       serviceLabel: "space.ryco.node.1a2b3c4d",
     });
+    // systemd 248+ names the process it started; its children inherit that too.
+    const asSystemdUnit = {
+      platform: "linux",
+      serviceLabel: "space.ryco.node",
+      pid: 4300,
+    } as const;
+    const linuxNpm = "/usr/lib/node_modules/ryco-cli/dist/bin.mjs";
+    expect(at(linuxNpm, { ...asSystemdUnit, systemdExecPid: "4300" }).service).toBe("systemd");
+    expect(at(linuxNpm, { ...asSystemdUnit, systemdExecPid: "900" }).service).toBeNull();
     expect(
       at("C:\\npm\\node_modules\\ryco-cli\\dist\\bin.mjs", {
         platform: "win32",
@@ -267,32 +276,5 @@ describe("node release channel and versions", () => {
     expect(nodeUpdateAvailability("dev", "0.1.36")).toBe("unknown");
     expect(isNewerNodeRelease("0.1.36", "0.1.36")).toBe(false);
     expect(isNewerNodeRelease("0.1.36", "0.1.35")).toBe(true);
-  });
-});
-
-describe("node install commands", () => {
-  it("installs the exact release into the same installation", () => {
-    expect(nodeInstallCommand(installed({}), "0.1.36", "/opt/homebrew/bin/node")).toMatchObject({
-      command: "npm",
-      args: ["install", "-g", "--prefix", "/opt/homebrew", "ryco-cli@0.1.36"],
-    });
-    expect(
-      nodeInstallCommand(installed({ kind: "bun-global" }), "0.1.36", "/Users/me/.bun/bin/bun"),
-    ).toMatchObject({ command: "/Users/me/.bun/bin/bun", args: ["add", "-g", "ryco-cli@0.1.36"] });
-    expect(
-      nodeInstallCommand(installed({ kind: "bun-global" }), "0.1.36", "/opt/homebrew/bin/node"),
-    ).toMatchObject({ command: "bun" });
-    expect(nodeInstallCommand(installed({ kind: "pnpm-global" }), "0.1.36", "node")).toMatchObject({
-      command: "pnpm",
-      args: ["add", "-g", "ryco-cli@0.1.36"],
-    });
-    expect(nodeInstallCommand(installed({ kind: "source-checkout" }), "0.1.36", "node")).toBeNull();
-  });
-
-  it("checks the release with the runtime and entry script the service starts", () => {
-    expect(nodeVerifyCommand(installed({}), "/opt/homebrew/bin/node")).toMatchObject({
-      command: "/opt/homebrew/bin/node",
-      args: ["/opt/homebrew/lib/node_modules/ryco-cli/dist/bin.mjs", "--version"],
-    });
   });
 });

@@ -3,7 +3,9 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
 import { ServerAuthDescriptor } from "./auth.ts";
+import { CliProxyQuotaWindow } from "./cliProxy.ts";
 import {
+  ForwardCompatibleUnion,
   IsoDateTime,
   NonNegativeInt,
   PositiveInt,
@@ -14,6 +16,7 @@ import {
 import { KeybindingRule, KeybindingsConfig, ResolvedKeybindingsConfig } from "./keybindings.ts";
 import { EditorId } from "./editor.ts";
 import { ModelCapabilities } from "./model.ts";
+import { NodeBrowserCapability } from "./nodeBrowser.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ServerSettings } from "./settings.ts";
 
@@ -70,8 +73,19 @@ export const ServerProviderModel = Schema.Struct({
   isLegacy: Schema.optional(Schema.Boolean),
   isCustom: Schema.Boolean,
   capabilities: Schema.NullOr(ModelCapabilities),
+  // The provider CLI's own report; absent means unknown, false means the CLI says the model
+  // cannot run the `auto` runtime mode.
+  supportsAutoMode: Schema.optional(Schema.Boolean),
 });
 export type ServerProviderModel = typeof ServerProviderModel.Type;
+
+/** A current catalog model this instance's CLI is too old to run. It is never also listed in `models`. */
+export const ServerProviderUpdateRequiredModel = Schema.Struct({
+  slug: TrimmedNonEmptyString,
+  name: TrimmedNonEmptyString,
+  minVersion: TrimmedNonEmptyString,
+});
+export type ServerProviderUpdateRequiredModel = typeof ServerProviderUpdateRequiredModel.Type;
 
 export const ServerProviderSlashCommandInput = Schema.Struct({
   hint: TrimmedNonEmptyString,
@@ -154,9 +168,11 @@ export type ServerProviderRateLimitCredits = typeof ServerProviderRateLimitCredi
 
 /**
  * Account-scoped rate-limit snapshot attached to a provider. Populated by the
- * drivers that can surface usage limits (Codex, Claude, and OpenCode Go);
+ * drivers that can surface usage limits (Codex, Claude, OpenCode Go and Grok);
  * each instance yields one snapshot since accounts differ per instance.
- * Other drivers leave it absent.
+ * Other drivers leave it absent. The primary/secondary/tertiary slots hold
+ * the account-wide windows older clients render; `windows` lists every
+ * window, model-scoped ones included.
  */
 export const ServerProviderRateLimits = Schema.Struct({
   limitId: Schema.optional(TrimmedNonEmptyString),
@@ -169,6 +185,15 @@ export const ServerProviderRateLimits = Schema.Struct({
   credits: Schema.optional(ServerProviderRateLimitCredits),
   resetCredits: Schema.optional(CodexResetCredits),
   rateLimitReachedType: Schema.optional(TrimmedNonEmptyString),
+  // Every window the provider reported, the legacy slots included. When present, clients render
+  // this list instead of primary/secondary/tertiary; servers still fill the slots for older clients.
+  windows: Schema.optionalKey(Schema.Array(CliProxyQuotaWindow)),
+  // When these numbers were read from the provider. Absent: same as ServerProvider.checkedAt.
+  observedAt: Schema.optionalKey(IsoDateTime),
+  // The last read failed or was throttled; these are the last good numbers, as of observedAt.
+  stale: Schema.optionalKey(Schema.Boolean),
+  // Why, as free text ("rateLimited", "unreachable"). Free text keeps old clients decoding.
+  staleReason: Schema.optionalKey(TrimmedNonEmptyString),
 });
 export type ServerProviderRateLimits = typeof ServerProviderRateLimits.Type;
 
@@ -265,6 +290,12 @@ export const ServerProvider = Schema.Struct({
   // option disabled with an explanation.
   supportsAskMode: Schema.optional(Schema.Boolean),
   supportsTurnSteering: Schema.optional(Schema.Boolean),
+  /**
+   * How a steer reaches a running turn when `supportsTurnSteering` is not set. Known value:
+   * "interrupt-restart" (the node stops the turn and sends the message next). A plain string,
+   * so a value an older client does not know reads as no steering instead of failing the decode.
+   */
+  turnSteeringMode: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(32))),
   // Whether a checkpoint revert can make this provider forget turns. Stamped by
   // the server from the adapter capability; absent means an older server (unknown).
   supportsConversationRollback: Schema.optional(Schema.Boolean),
@@ -285,14 +316,18 @@ export const ServerProvider = Schema.Struct({
   // Surfaces in the UI alongside the missing-driver affordance.
   unavailableReason: Schema.optional(TrimmedNonEmptyString),
   models: Schema.Array(ServerProviderModel),
+  // Sorted by `minVersion` ascending, so the last entry names the update that unlocks them all.
+  // Absent when there are none; older clients drop the unknown key on decode.
+  updateRequiredModels: Schema.optionalKey(Schema.Array(ServerProviderUpdateRequiredModel)),
   slashCommands: Schema.Array(ServerProviderSlashCommand).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   skills: Schema.Array(ServerProviderSkill).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   // Optional and provider-driven. Populated only when the driver knows
-  // how to surface usage limits (Codex, Claude, OpenCode Go today).
+  // how to surface usage limits (Codex, Claude, OpenCode Go and Grok today).
   // Consumers must treat an absent value as "no live data", not "no
-  // limits configured".
+  // limits configured". Its `observedAt` may be newer than `checkedAt`:
+  // usage is re-read without a full probe.
   rateLimits: Schema.optional(ServerProviderRateLimits),
   versionAdvisory: Schema.optionalKey(ServerProviderVersionAdvisory),
   // Server-computed on every registry upsert; older clients drop the unknown key on decode.
@@ -365,13 +400,39 @@ export const ServerChatsCapability = Schema.Struct({
 });
 export type ServerChatsCapability = typeof ServerChatsCapability.Type;
 
+/**
+ * Absent from nodes without server-side pull request watches; clients then hide every watch
+ * control (the Auto-fix CI switch, the watch status line).
+ */
+export const ServerPullRequestWatchCapability = Schema.Struct({
+  available: Schema.Boolean,
+});
+export type ServerPullRequestWatchCapability = typeof ServerPullRequestWatchCapability.Type;
+
+/**
+ * The node's last event-loop stall of five seconds or more within the last five minutes: the
+ * likely reason its clients just lost it. Time it froze, for how long, and how loaded the machine
+ * was (`loadAverage1m` is absent on Windows). Absent when there was none, and on older nodes.
+ */
+export const ServerEventLoopStall = Schema.Struct({
+  startedAt: IsoDateTime,
+  durationMs: NonNegativeInt,
+  loadAverage1m: Schema.optionalKey(Schema.Number),
+  cpuCount: Schema.optionalKey(PositiveInt),
+});
+export type ServerEventLoopStall = typeof ServerEventLoopStall.Type;
+
 export const ServerConfig = Schema.Struct({
   usageContractVersion: Schema.optional(NonNegativeInt),
+  lastEventLoopStall: Schema.optionalKey(ServerEventLoopStall),
   environment: ExecutionEnvironmentDescriptor,
   auth: ServerAuthDescriptor,
   cwd: TrimmedNonEmptyString,
   workspaceAccessRoot: Schema.optional(TrimmedNonEmptyString),
   chats: Schema.optionalKey(ServerChatsCapability),
+  pullRequestWatch: Schema.optionalKey(ServerPullRequestWatchCapability),
+  /** Node browser tabs (`@ryco/contracts/node-browser`); absent on older nodes. */
+  nodeBrowser: Schema.optionalKey(NodeBrowserCapability),
   keybindingsConfigPath: TrimmedNonEmptyString,
   keybindings: ResolvedKeybindingsConfig,
   issues: ServerConfigIssues,
@@ -519,6 +580,17 @@ export const ServerConfigStreamEvent = Schema.Union([
   ServerConfigStreamProviderStatusesDeltaEvent,
 ]);
 export type ServerConfigStreamEvent = typeof ServerConfigStreamEvent.Type;
+
+/**
+ * A config stream event as a client decodes it: an event type a newer node
+ * adds decodes to an `UnknownUnionMember` the client skips, instead of ending
+ * the config stream.
+ */
+export const ServerConfigStreamWireEvent = ForwardCompatibleUnion(
+  ServerConfigStreamEvent.members,
+  "type",
+);
+export type ServerConfigStreamWireEvent = typeof ServerConfigStreamWireEvent.Type;
 
 export const ServerSubscribeConfigInput = Schema.Struct({
   /**

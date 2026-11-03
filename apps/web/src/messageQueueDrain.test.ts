@@ -9,6 +9,8 @@ import {
 } from "@ryco/client-runtime/rpc";
 import {
   EnvironmentId,
+  MessageId,
+  OrchestrationDispatchCommandError,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -25,6 +27,9 @@ const harness = vi.hoisted(() => ({
   retainDetail: vi.fn(),
   releaseDetail: vi.fn(),
   background: vi.fn(),
+  /** Environments whose node keeps follow-up queues itself. */
+  serverQueue: new Set<string>(),
+  dispatch: vi.fn(async (_command: unknown) => ({ sequence: 1 })),
 }));
 
 vi.mock("./env", async (importOriginal) => ({
@@ -33,7 +38,9 @@ vi.mock("./env", async (importOriginal) => ({
 }));
 vi.mock("./environmentApi", () => ({
   readEnvironmentApi: (environmentId: string) =>
-    harness.apis.has(environmentId) ? ({ orchestration: {} } as never) : undefined,
+    harness.apis.has(environmentId)
+      ? ({ orchestration: { dispatchCommand: harness.dispatch } } as never)
+      : undefined,
 }));
 vi.mock("./environments/runtime/service", () => ({
   retainThreadDetailSubscription: (environmentId: string, threadId: string) => {
@@ -52,6 +59,12 @@ vi.mock("./environments/runtime", async () => {
     })),
   };
 });
+vi.mock("./environments/nodeServerConfig", () => ({
+  readNodeServerConfig: (environmentId: string) =>
+    harness.serverQueue.has(environmentId)
+      ? { environment: { capabilities: { serverFollowUpQueue: true } } }
+      : null,
+}));
 vi.mock("./hooks/sendQueuedMessageInBackground", () => ({
   sendQueuedMessageInBackground: (...args: unknown[]) => harness.background(...args),
 }));
@@ -110,6 +123,8 @@ import {
   hasOutstandingQueuedDispatch,
   holdMessageQueueForInterrupt,
   inspectMessageQueueDrain,
+  isQueuedMessageMoving,
+  queueFollowUpOnServer,
   readWebQueueEnvironment,
   registerForegroundQueueSender,
   resolveWebQueueSender,
@@ -275,6 +290,9 @@ beforeEach(() => {
   harness.releaseDetail.mockClear();
   harness.background.mockReset();
   harness.background.mockResolvedValue({ kind: "accepted" });
+  harness.serverQueue.clear();
+  harness.dispatch.mockReset();
+  harness.dispatch.mockResolvedValue({ sequence: 1 });
   resetWsConnectionStateForTests();
   useStore.setState({ activeEnvironmentId: null, environmentStateById: {} });
   useStore.getState().syncServerShellSnapshot(shellSnapshot(true), ENV);
@@ -594,6 +612,146 @@ describe("web queue senders", () => {
     await flush();
     expect(harness.retainDetail).toHaveBeenCalledWith(ENV, THREAD);
     expect(hostedWebConnectionScopes.list()).toEqual([]);
+  });
+});
+
+describe("moving this tab's queue to a node that keeps follow-up queues", () => {
+  type AddCommand = {
+    readonly type: string;
+    readonly entry: { readonly messageId: string; readonly text: string };
+    readonly hold?: unknown;
+  };
+  const adds = () =>
+    harness.dispatch.mock.calls
+      .map(([command]) => command as AddCommand)
+      .filter((command) => command.type === "thread.queue.add");
+
+  it("reports the capability with readiness, only for a node that has it", () => {
+    recordWsConnectionOpened({ environmentId: ENV });
+    expect(readWebQueueEnvironment(ENV)).toEqual({ shellLive: true, mutationReady: true });
+    harness.serverQueue.add(ENV);
+    expect(readWebQueueEnvironment(ENV)).toEqual({
+      shellLive: true,
+      mutationReady: true,
+      serverQueue: true,
+    });
+  });
+
+  it("queues each entry on the node under its own id, in order, and sends none from here", async () => {
+    harness.serverQueue.add(ENV);
+    recordWsConnectionOpened({ environmentId: ENV });
+    releaseDrain = retainMessageQueueDrain();
+    useMessageQueueStore.getState().enqueue(KEY, queued("q-1"));
+    useMessageQueueStore.getState().enqueue(KEY, queued("q-2"));
+    await flush();
+    expect(adds().map((command) => [command.entry.messageId, command.entry.text])).toEqual([
+      ["q-1", "q-1"],
+      ["q-2", "q-2"],
+    ]);
+    expect(useMessageQueueStore.getState().queuesByThreadKey[KEY] ?? []).toEqual([]);
+    expect(harness.background).not.toHaveBeenCalled();
+  });
+
+  it("keeps an entry the node refused, held with the node's answer", async () => {
+    harness.serverQueue.add(ENV);
+    harness.dispatch.mockRejectedValue(new Error("The queue is full (20 follow-ups)."));
+    recordWsConnectionOpened({ environmentId: ENV });
+    releaseDrain = retainMessageQueueDrain();
+    useMessageQueueStore.getState().enqueue(KEY, queued("q-1"));
+    await flush();
+    expect(useMessageQueueStore.getState().queuesByThreadKey[KEY]).toHaveLength(1);
+    expect(useMessageQueueStore.getState().holdsByThreadKey[KEY]).toMatchObject({
+      reason: "error",
+      detail: "The queue is full (20 follow-ups).",
+    });
+    expect(harness.background).not.toHaveBeenCalled();
+  });
+
+  it("marks the entry whose add is on its way, so it cannot be edited or steered", async () => {
+    harness.serverQueue.add(ENV);
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    harness.dispatch.mockImplementationOnce(async () => {
+      await gate;
+      return { sequence: 1 };
+    });
+    recordWsConnectionOpened({ environmentId: ENV });
+    releaseDrain = retainMessageQueueDrain();
+    useMessageQueueStore.getState().enqueue(KEY, queued("q-1"));
+    useMessageQueueStore.getState().enqueue(KEY, queued("q-2"));
+    await flush();
+    expect(isQueuedMessageMoving(KEY, "q-1")).toBe(true);
+    expect(isQueuedMessageMoving(KEY, "q-2")).toBe(false);
+    open();
+    await flush();
+    expect(isQueuedMessageMoving(KEY, "q-1")).toBe(false);
+    expect(adds().map((command) => command.entry.messageId)).toEqual(["q-1", "q-2"]);
+    expect(useMessageQueueStore.getState().queuesByThreadKey[KEY] ?? []).toEqual([]);
+  });
+
+  it("keeps a busy send whose add got no answer in this tab, and moves it under the same id", async () => {
+    harness.serverQueue.add(ENV);
+    recordWsConnectionOpened({ environmentId: ENV });
+    // The reply is lost: the node may have committed the add.
+    harness.dispatch.mockRejectedValueOnce(new Error("The connection closed."));
+    const outcome = await queueFollowUpOnServer({
+      ref: { environmentId: ENV, threadId: THREAD },
+      messageId: MessageId.make("busy-1"),
+      content: {
+        text: "busy-1",
+        attachments: [],
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+      },
+      summary: "busy-1",
+      keepInTab: () => queued("busy-1"),
+    });
+    expect(outcome.kind).toBe("unknown");
+    expect(
+      useMessageQueueStore.getState().queuesByThreadKey[KEY]?.map((entry) => entry.id),
+    ).toEqual(["busy-1"]);
+    // The move re-adds it under its id; the node's no-op on a known id keeps one copy.
+    releaseDrain = retainMessageQueueDrain();
+    await flush();
+    expect(adds().map((command) => command.entry.messageId)).toEqual(["busy-1", "busy-1"]);
+    expect(useMessageQueueStore.getState().queuesByThreadKey[KEY] ?? []).toEqual([]);
+  });
+
+  it("gives a refused busy send back without keeping it in this tab", async () => {
+    harness.serverQueue.add(ENV);
+    recordWsConnectionOpened({ environmentId: ENV });
+    const refusal = new OrchestrationDispatchCommandError({
+      message: "The queue is full (20 follow-ups).",
+    });
+    harness.dispatch.mockRejectedValueOnce(refusal);
+    const outcome = await queueFollowUpOnServer({
+      ref: { environmentId: ENV, threadId: THREAD },
+      messageId: MessageId.make("busy-2"),
+      content: {
+        text: "busy-2",
+        attachments: [],
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+      },
+      summary: "busy-2",
+      keepInTab: () => queued("busy-2"),
+    });
+    expect(outcome).toEqual({ kind: "refused", error: refusal });
+    expect(useMessageQueueStore.getState().queuesByThreadKey[KEY] ?? []).toEqual([]);
+  });
+
+  it("moves a hosted node's queue only once its own session is ready", async () => {
+    harness.serverQueue.add(ENV);
+    useHostedSessions(OTHER_ENV);
+    releaseDrain = retainMessageQueueDrain();
+    useMessageQueueStore.getState().enqueue(KEY, queued("q-1"));
+    await flush();
+    expect(adds()).toEqual([]);
+    openHostedRecord(ENV, { ready: true });
+    await flush();
+    expect(adds().map((command) => command.entry.messageId)).toEqual(["q-1"]);
   });
 });
 

@@ -37,6 +37,10 @@ export interface ComposerEditorProps {
   readonly onPasteImages?: (uris: ReadonlyArray<string>) => void;
   readonly onFocus?: () => void;
   readonly onBlur?: () => void;
-  /** Invoked by the native editor when Command-Return is pressed on a hardware keyboard. */
+  /**
+   * Invoked by the native iOS editor when Return or Command-Return is pressed
+   * on a hardware keyboard; with it, Shift-Return inserts a new line. Without
+   * it Return inserts a new line, as on the software keyboard.
+   */
   readonly onSubmit?: () => void;
 }

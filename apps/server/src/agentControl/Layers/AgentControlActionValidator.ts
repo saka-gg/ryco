@@ -1,7 +1,9 @@
 import { AgentControlWorkspaces } from "../workspaceLifecycle.ts";
 import type {
   AgentControlActionPlan,
+  AgentControlAutomationExecutionTemplate,
   AgentControlDeviceActionPlan,
+  AgentControlDeviceControlConsentPlan,
   AgentControlProviderSessionPrincipal,
   AgentControlProposal,
   EnvironmentId,
@@ -35,12 +37,16 @@ import {
   readScopedShellSnapshot,
 } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { DeviceService, type DeviceServiceShape } from "../../device/Services/DeviceService.ts";
+import { runtimeModePrivilegeRank } from "../../orchestration/serverWake.ts";
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import type { GitWorkflowServiceShape } from "../../git/GitWorkflowService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { AgentControlPlanValidationError } from "../Errors.ts";
-import { AgentControlAutomationService } from "../Services/AgentControlAutomation.ts";
+import {
+  AgentControlAutomationService,
+  UNATTENDED_OWNER_ONLY,
+} from "../Services/AgentControlAutomation.ts";
 import type { AgentControlAutomationShape } from "../Services/AgentControlAutomation.ts";
 import { AgentControlProjectPlans } from "../Services/AgentControlProjectPlans.ts";
 import type { AgentControlProjectPlansShape } from "../Services/AgentControlProjectPlans.ts";
@@ -60,6 +66,13 @@ import {
 import { assertSafeAgentControlDeviceUrl, isAgentControlDevicePlan } from "../deviceControl.ts";
 import { resolveThreadArtifacts } from "../artifactHandoff.ts";
 import { LocalTaskService, type LocalTaskServiceShape } from "../../tasks/LocalTaskService.ts";
+import * as SqlClient from "effect/sql/SqlClient";
+import { ServerSettingsService } from "../../serverSettings.ts";
+import { hasDelegationLimits } from "../../orchestration/delegationLimits.ts";
+import {
+  CompletionReturnRepository,
+  isPendingCompletionReturn,
+} from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 
 const fail = (
   reason: ConstructorParameters<typeof AgentControlPlanValidationError>[0]["reason"],
@@ -71,14 +84,6 @@ const handsOverArtifacts = (plan: AgentControlActionPlan) =>
 
 const startsLocalTaskChats = (plan: AgentControlActionPlan) =>
   plan.kind === "createThreads" && plan.entries.some((entry) => entry.localTaskId !== undefined);
-
-/** Privilege order of runtime modes: lower is less privileged. */
-export const agentControlRuntimeRank: Record<RuntimeMode, number> = {
-  "approval-required": 0,
-  "auto-accept-edits": 1,
-  auto: 2,
-  "full-access": 3,
-};
 
 const providerForSelection = (
   providers: ReadonlyArray<ServerProvider>,
@@ -130,14 +135,93 @@ const targetThreadIds = (plan: AgentControlActionPlan): ReadonlyArray<string> =>
     case "sendMessage":
     case "interruptThread":
     case "updateThread":
+    case "deviceControlConsent":
+    case "pullRequestWatch":
+    case "worktreeHandoff":
       return [plan.threadId];
+    case "createAutomation":
+    case "updateAutomation":
+      // Only a chat the plan checks now (a deleted chat's heartbeat can still be disabled).
+      return lifecycleTargetChecked(plan, false)
+        ? automationTargetThreadIds(automationDefinitionForPlan(plan).execution)
+        : [];
+    case "automationRun":
+      return automationTargetThreadIds(automationDefinitionForPlan(plan).execution);
     default:
       return isAgentControlDevicePlan(plan) ? [plan.threadId] : [];
   }
 };
 
+/** The existing chat an automation's runs go to (a heartbeat), if any. */
+const automationTargetThreadIds = (
+  execution: AgentControlAutomationExecutionTemplate,
+): ReadonlyArray<string> => (execution.target === undefined ? [] : [execution.target.threadId]);
+
+/**
+ * Whether a lifecycle plan's heartbeat chat is checked now: on a create, on any update that
+ * changes the chat (also a disabled one), and on a proposer's update that leaves it enabled.
+ * Every run checks it again.
+ */
+function lifecycleTargetChecked(
+  plan: Extract<AgentControlActionPlan, { kind: "createAutomation" | "updateAutomation" }>,
+  owner: boolean,
+): boolean {
+  if (plan.kind === "createAutomation") return true;
+  const chatChanged =
+    plan.before.definition.execution.target?.threadId !== plan.after.execution.target?.threadId;
+  return chatChanged || (plan.after.enabled && !owner);
+}
+
+/** The stricter of two send ceilings: the lower runtime mode, a worktree over a shared checkout. */
+const lowerSendCeiling = (
+  a: { readonly runtimeMode: RuntimeMode; readonly envMode: "local" | "worktree" },
+  b: { readonly runtimeMode: RuntimeMode; readonly envMode: "local" | "worktree" },
+): { readonly runtimeMode: RuntimeMode; readonly envMode: "local" | "worktree" } => ({
+  runtimeMode:
+    runtimeModePrivilegeRank[a.runtimeMode] <= runtimeModePrivilegeRank[b.runtimeMode]
+      ? a.runtimeMode
+      : b.runtimeMode,
+  envMode: a.envMode === "worktree" || b.envMode === "worktree" ? "worktree" : "local",
+});
+
+/**
+ * A heartbeat's chat: an open chat of the automation's project, which a proposer's heartbeat
+ * (`asSender`) must also be allowed to message. The owner's own schedules need only the first.
+ */
+const validateAutomationTarget = (
+  execution: AgentControlAutomationExecutionTemplate,
+  snapshot: OrchestrationShellSnapshot,
+  asSender?: Omit<Parameters<typeof validatePlanAgainstSnapshot>[0], "plan" | "snapshot">,
+) =>
+  Effect.gen(function* () {
+    const target = execution.target;
+    if (target === undefined) return;
+    const thread = snapshot.threads.find((candidate) => candidate.id === target.threadId);
+    if (
+      thread === undefined ||
+      thread.archivedAt !== null ||
+      thread.projectId !== execution.projectId
+    ) {
+      return yield* fail(
+        "thread-unavailable",
+        "The automation's chat is archived, deleted or outside the automation's project.",
+      );
+    }
+    if (asSender === undefined) return;
+    yield* validatePlanAgainstSnapshot({
+      ...asSender,
+      plan: {
+        kind: "sendMessage",
+        threadId: target.threadId,
+        text: execution.prompt,
+        delivery: "queue",
+      },
+      snapshot,
+    });
+  });
+
 const validateDevicePlanScope = (
-  plan: AgentControlDeviceActionPlan,
+  plan: AgentControlDeviceActionPlan | AgentControlDeviceControlConsentPlan,
   input: {
     readonly originThreadId: string;
     readonly originProjectId: string;
@@ -307,8 +391,8 @@ const validateFollowUpThread = (
 ) => {
   if (followUpThread === null) return Effect.void;
   if (
-    agentControlRuntimeRank[followUpThread.runtimeMode] >
-    agentControlRuntimeRank[origin.runtimeMode]
+    runtimeModePrivilegeRank[followUpThread.runtimeMode] >
+    runtimeModePrivilegeRank[origin.runtimeMode]
   )
     return fail(
       "privilege-escalation",
@@ -321,6 +405,19 @@ const validateFollowUpThread = (
     );
   return Effect.void;
 };
+/** An agent's plan never lets a schedule run without asking: only its owner may. */
+const agentPlanRunsUnattended = (
+  plan: Extract<
+    AgentControlActionPlan,
+    { kind: "createAutomation" | "updateAutomation" | "cancelAutomation" }
+  >,
+): boolean =>
+  (plan.kind === "createAutomation"
+    ? plan.definition
+    : plan.kind === "updateAutomation"
+      ? plan.after
+      : null
+  )?.runPolicy === "run-without-asking";
 
 const requireThread = (snapshot: OrchestrationShellSnapshot, threadId: string) => {
   const thread = snapshot.threads.find((candidate) => candidate.id === threadId);
@@ -342,8 +439,22 @@ const validateBaseRef = (baseRef: string | undefined) => {
   return Effect.void;
 };
 
+/**
+ * A handoff moves the caller's own chat and never another one. Whether the chat can move (open,
+ * in the shared checkout) the executor decides right before it moves it.
+ */
+const validateWorktreeHandoff = (
+  plan: Extract<AgentControlActionPlan, { kind: "worktreeHandoff" }>,
+  callerThreadId: string,
+) =>
+  plan.threadId !== callerThreadId
+    ? fail("project-scope", "A chat can move only itself into a worktree.")
+    : validateBaseRef(plan.baseRef);
+
 const validatePlanAgainstSnapshot = (input: {
   readonly plan: AgentControlActionPlan;
+  /** The calling provider session's thread; absent for external integrations. */
+  readonly originThreadId?: string | undefined;
   readonly originProjectId: string;
   readonly originRuntimeMode: RuntimeMode;
   readonly originEnvMode: "local" | "worktree";
@@ -358,8 +469,8 @@ const validatePlanAgainstSnapshot = (input: {
     const assertPrivilege = (target: OrchestrationThreadShell) =>
       Effect.gen(function* () {
         if (
-          agentControlRuntimeRank[target.runtimeMode] >
-          agentControlRuntimeRank[input.originRuntimeMode]
+          runtimeModePrivilegeRank[target.runtimeMode] >
+          runtimeModePrivilegeRank[input.originRuntimeMode]
         ) {
           return yield* fail(
             "privilege-escalation",
@@ -389,8 +500,8 @@ const validatePlanAgainstSnapshot = (input: {
           return yield* fail("project-unavailable", "The requested project is unavailable.");
         }
         if (
-          agentControlRuntimeRank[entry.runtimeMode] >
-          agentControlRuntimeRank[input.originRuntimeMode]
+          runtimeModePrivilegeRank[entry.runtimeMode] >
+          runtimeModePrivilegeRank[input.originRuntimeMode]
         ) {
           return yield* fail(
             "privilege-escalation",
@@ -422,7 +533,8 @@ const validatePlanAgainstSnapshot = (input: {
     if (
       input.plan.kind !== "sendMessage" &&
       input.plan.kind !== "interruptThread" &&
-      input.plan.kind !== "updateThread"
+      input.plan.kind !== "updateThread" &&
+      input.plan.kind !== "pullRequestWatch"
     ) {
       return yield* fail("invalid-plan", "This action is not a thread control plan.");
     }
@@ -438,6 +550,7 @@ const validatePlanAgainstSnapshot = (input: {
         input.plan.title === undefined &&
         input.plan.archived === undefined &&
         input.plan.persistentGoal === undefined &&
+        input.plan.goalStatus === undefined &&
         input.plan.modelSelection === undefined &&
         input.plan.runtimeMode === undefined &&
         input.plan.interactionMode === undefined &&
@@ -445,12 +558,24 @@ const validatePlanAgainstSnapshot = (input: {
       ) {
         return yield* fail("invalid-plan", "At least one supported thread update is required.");
       }
+      if (input.plan.goalStatus !== undefined) {
+        // Only the agent working toward a goal reports on it, and only on a goal it has.
+        if (input.originThreadId === undefined || target.id !== input.originThreadId) {
+          return yield* fail("project-scope", "Only the calling thread can report on its goal.");
+        }
+        if (input.plan.persistentGoal !== undefined) {
+          return yield* fail("invalid-plan", "Set a goal or report on it, not both at once.");
+        }
+        if (target.goal == null) {
+          return yield* fail("invalid-plan", "This thread has no goal to report on.");
+        }
+      }
       if (input.plan.modelSelection !== undefined)
         yield* providerForSelection(input.providers, input.plan.modelSelection);
       if (
         input.plan.runtimeMode !== undefined &&
-        agentControlRuntimeRank[input.plan.runtimeMode] >
-          agentControlRuntimeRank[input.originRuntimeMode]
+        runtimeModePrivilegeRank[input.plan.runtimeMode] >
+          runtimeModePrivilegeRank[input.originRuntimeMode]
       ) {
         return yield* fail(
           "privilege-escalation",
@@ -462,6 +587,7 @@ const validatePlanAgainstSnapshot = (input: {
         input.plan.archived !== false &&
         (input.plan.title !== undefined ||
           input.plan.persistentGoal !== undefined ||
+          input.plan.goalStatus !== undefined ||
           input.plan.modelSelection !== undefined ||
           input.plan.runtimeMode !== undefined ||
           input.plan.interactionMode !== undefined ||
@@ -472,9 +598,15 @@ const validatePlanAgainstSnapshot = (input: {
       return;
     }
 
-    if (target.archivedAt !== null) {
+    // Stopping a watch is always allowed: the archive ended it already.
+    if (
+      target.archivedAt !== null &&
+      !(input.plan.kind === "pullRequestWatch" && !input.plan.watching)
+    ) {
       return yield* fail("thread-unavailable", "The target thread is archived.");
     }
+    // The pull request itself is resolved (and linked, or discovered) by the watch when it runs.
+    if (input.plan.kind === "pullRequestWatch") return;
 
     if (input.plan.kind === "interruptThread") {
       const activeTurnId = target.session?.activeTurnId ?? null;
@@ -515,6 +647,18 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
   /** `copyProjectToNode`: the other nodes owner clients published. */
   readonly nodeDirectory?: Pick<AgentControlNodeDirectoryShape, "list">;
   readonly thisEnvironmentId?: Effect.Effect<EnvironmentId>;
+  /** Whether a chat is a delegated one whose result its delegating chat still waits for. */
+  readonly delegatedReturnPending?: (
+    threadId: ThreadId,
+  ) => Effect.Effect<boolean, AgentControlPlanValidationError>;
+  /**
+   * Why the person's delegation limits refuse `newTasks` more tasks from this chat, or null.
+   * Absent: no limits apply.
+   */
+  readonly delegationLimitRefusal?: (input: {
+    readonly callerThreadId: ThreadId;
+    readonly newTasks: number;
+  }) => Effect.Effect<string | null, AgentControlPlanValidationError>;
 }): AgentControlActionValidatorShape => {
   const validateAutomation = <A, E>(effect: Effect.Effect<A, E>) =>
     effect.pipe(
@@ -819,6 +963,56 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
     plan.kind === "importProject"
       ? validateImportProject(plan, origin, snapshot, providers)
       : validateCopyProjectToNode(plan, origin, snapshot, phase);
+  /**
+   * A delegated chat whose result is still awaited never watches a pull request, and no chat
+   * makes it watch one: it reports the pull request in its result, and the delegating chat (the
+   * one Ryco then wakes) decides whether to watch it. Read from the completion-return ledger.
+   */
+  const refuseAwaitedDelegation = (plan: AgentControlActionPlan, callerThreadId: ThreadId) =>
+    (plan.kind !== "worktreeHandoff" && (plan.kind !== "pullRequestWatch" || !plan.watching)) ||
+    deps.delegatedReturnPending === undefined
+      ? Effect.void
+      : Effect.forEach(
+          [...new Set([callerThreadId, plan.threadId])],
+          (threadId) =>
+            deps.delegatedReturnPending!(threadId).pipe(
+              Effect.flatMap((pending) =>
+                !pending
+                  ? Effect.void
+                  : fail(
+                      "delegated-return-pending",
+                      // Its result returns with this turn, before the moved chat's next one.
+                      plan.kind === "worktreeHandoff"
+                        ? "This chat was delegated by another chat that waits for its result, so it cannot move into a worktree."
+                        : threadId === callerThreadId
+                          ? "This chat was delegated by another chat that waits for its result. Report the pull request in your result; the delegating chat decides whether to watch it."
+                          : "That chat was delegated by another chat that waits for its result: it reports its pull request, and the delegating chat watches it.",
+                    ),
+              ),
+            ),
+          { discard: true },
+        );
+
+  /**
+   * The opt-in delegation limits: a provider thread's createThreads plan creates delegated tasks.
+   * `newTasks` is the batch at submission. Revalidation runs before each create of an executing
+   * batch, whose earlier tasks already count, so it passes 0 (depth, and a tree already over its
+   * budget); the decider checks each create against the budget.
+   */
+  const refuseOverDelegationLimits = (
+    plan: AgentControlActionPlan,
+    callerThreadId: ThreadId,
+    newTasks: number,
+  ) =>
+    plan.kind !== "createThreads" || deps.delegationLimitRefusal === undefined
+      ? Effect.void
+      : deps
+          .delegationLimitRefusal({ callerThreadId, newTasks })
+          .pipe(
+            Effect.flatMap((refusal) =>
+              refusal === null ? Effect.void : fail("delegation-limit", refusal),
+            ),
+          );
 
   const validateSubmission: AgentControlActionValidatorShape["validateSubmission"] = (input) =>
     Effect.gen(function* () {
@@ -844,9 +1038,16 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
       if (input.plan.kind === "automationRun") {
         return yield* fail("invalid-plan", "Scheduled run proposals are server-owned.");
       }
-      if (isAgentControlDevicePlan(input.plan)) {
+      if (isAgentControlDevicePlan(input.plan) || input.plan.kind === "deviceControlConsent") {
         // Proposal submission validates immutable scope and bounded input only.
-        // Authoritative device state is deliberately read only after approval.
+        // Authoritative device state is deliberately read only after approval (a consent's
+        // attachment is also checked by ryco_device before it asks).
+        if (input.plan.kind === "deviceControlConsent" && deps.deviceService?.supported !== true) {
+          return yield* fail(
+            "invalid-plan",
+            "Simulator or emulator device control is unavailable.",
+          );
+        }
         yield* validateDevicePlanScope(input.plan, {
           originThreadId: caller.id,
           originProjectId: caller.projectId,
@@ -855,6 +1056,9 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
       } else if (isAutomationLifecyclePlan(input.plan)) {
         if (deps.automations === undefined) {
           return yield* fail("automation-unavailable", "Automation control is unavailable.");
+        }
+        if (agentPlanRunsUnattended(input.plan)) {
+          return yield* fail("privilege-escalation", UNATTENDED_OWNER_ONLY);
         }
         yield* validateAutomation(deps.automations.validateLifecyclePlan(input.plan));
         const automation =
@@ -888,6 +1092,19 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           providers,
           requireBaseRef,
         });
+        if (input.plan.kind !== "cancelAutomation" && lifecycleTargetChecked(input.plan, false)) {
+          yield* validateAutomationTarget(definition.execution, snapshot, {
+            originThreadId: caller.id,
+            originProjectId: caller.projectId,
+            originRuntimeMode: caller.runtimeMode,
+            originEnvMode,
+            providers,
+            requireBaseRef,
+          });
+        }
+      } else if (input.plan.kind === "worktreeHandoff") {
+        yield* validateWorktreeHandoff(input.plan, caller.id);
+        yield* refuseAwaitedDelegation(input.plan, caller.id);
       } else if (input.plan.kind === "changeSettings") {
         // Closed schema: only non-secret boolean preferences are supported.
       } else if (input.plan.kind === "deleteLocalTask") {
@@ -918,6 +1135,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
       } else {
         yield* validatePlanAgainstSnapshot({
           plan: input.plan,
+          originThreadId: caller.id,
           originProjectId: caller.projectId,
           originRuntimeMode: caller.runtimeMode,
           originEnvMode,
@@ -927,6 +1145,12 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         });
         yield* validateLocalTaskStarts(input.plan);
         yield* validateHandoffArtifacts(input.plan, caller.id);
+        yield* refuseAwaitedDelegation(input.plan, caller.id);
+        yield* refuseOverDelegationLimits(
+          input.plan,
+          caller.id,
+          input.plan.kind === "createThreads" ? input.plan.entries.length : 0,
+        );
       }
 
       const targetSnapshots: Array<
@@ -982,7 +1206,13 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
             "External integrations cannot manage the node's Tasks.",
           );
         }
-        if (isAgentControlDevicePlan(input.plan)) {
+        if (input.plan.kind === "pullRequestWatch" || input.plan.kind === "worktreeHandoff") {
+          return yield* fail(
+            "privilege-escalation",
+            "External integrations cannot watch pull requests or move chats.",
+          );
+        }
+        if (isAgentControlDevicePlan(input.plan) || input.plan.kind === "deviceControlConsent") {
           return yield* fail(
             "privilege-escalation",
             "External integrations cannot control devices.",
@@ -997,6 +1227,9 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
             !input.integration.capabilities.includes(AGENT_CONTROL_CAPABILITIES.externalCreateTask)
           ) {
             return yield* fail("privilege-escalation", "External automation authority is absent.");
+          }
+          if (agentPlanRunsUnattended(input.plan)) {
+            return yield* fail("privilege-escalation", UNATTENDED_OWNER_ONLY);
           }
           yield* validateAutomation(deps.automations.validateLifecyclePlan(input.plan));
           const definition =
@@ -1023,7 +1256,9 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           ) {
             return yield* fail("privilege-escalation", "Automation execution scope is denied.");
           }
-          const { snapshot, providers } = yield* loadState([]);
+          const { snapshot, providers } = yield* loadState(
+            automationTargetThreadIds(definition.execution),
+          );
           yield* validatePlanAgainstSnapshot({
             plan: { kind: "createThreads", entries: [definition.execution] },
             originProjectId: definition.execution.projectId,
@@ -1033,6 +1268,34 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
             providers,
             requireBaseRef,
           });
+          if (
+            input.plan.kind !== "cancelAutomation" &&
+            definition.execution.target !== undefined &&
+            lifecycleTargetChecked(input.plan, false)
+          ) {
+            // Thread control, within the integration's ceiling and the definition's own modes.
+            if (
+              !input.integration.capabilities.includes(
+                AGENT_CONTROL_CAPABILITIES.externalControlThreads,
+              )
+            ) {
+              return yield* fail(
+                "privilege-escalation",
+                "External thread control authority is absent.",
+              );
+            }
+            const ceiling = lowerSendCeiling(
+              agentControlExternalCeiling(input.integration),
+              definition.execution,
+            );
+            yield* validateAutomationTarget(definition.execution, snapshot, {
+              originProjectId: definition.execution.projectId,
+              originRuntimeMode: ceiling.runtimeMode,
+              originEnvMode: ceiling.envMode,
+              providers,
+              requireBaseRef,
+            });
+          }
           return {
             kind: "external-integration",
             integrationId: input.integration.integrationId,
@@ -1141,7 +1404,9 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
       yield* validateAutomation(deps.automations.validateLifecyclePlan(plan));
       if (plan.kind === "cancelAutomation") return;
       const definition = plan.kind === "createAutomation" ? plan.definition : plan.after;
-      const { snapshot, providers } = yield* loadState([]);
+      const { snapshot, providers } = yield* loadState(
+        automationTargetThreadIds(definition.execution),
+      );
       yield* validatePlanAgainstSnapshot({
         plan: { kind: "createThreads", entries: [definition.execution] },
         originProjectId: definition.execution.projectId,
@@ -1151,6 +1416,9 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         providers,
         requireBaseRef,
       });
+      if (lifecycleTargetChecked(plan, true)) {
+        yield* validateAutomationTarget(definition.execution, snapshot);
+      }
     });
 
   const revalidateExecution: AgentControlActionValidatorShape["revalidateExecution"] = (
@@ -1204,6 +1472,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         ...targetThreadIds(proposal.plan),
         ...agentControlTargetSnapshots(principal).map((target) => target.threadId),
       ]);
+      let externalCeiling: ReturnType<typeof agentControlExternalCeiling> | undefined;
       if (principal.kind === "provider-session") {
         const origin = snapshot.threads.find((thread) => thread.id === principal.threadId);
         if (!origin || origin.projectId !== originProjectId) {
@@ -1211,11 +1480,23 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         }
         yield* validateLocalTaskStarts(proposal.plan);
         yield* validateHandoffArtifacts(proposal.plan, principal.threadId);
+        yield* refuseAwaitedDelegation(proposal.plan, principal.threadId);
+        yield* refuseOverDelegationLimits(proposal.plan, principal.threadId, 0);
+      } else if (
+        proposal.plan.kind === "pullRequestWatch" ||
+        proposal.plan.kind === "worktreeHandoff"
+      ) {
+        return yield* fail(
+          "privilege-escalation",
+          "Only an originating provider thread can watch pull requests or move itself.",
+        );
       } else if (startsLocalTaskChats(proposal.plan) || proposal.plan.kind === "deleteLocalTask") {
         return yield* fail(
           "privilege-escalation",
           "Only an originating provider thread can manage the node's Tasks.",
         );
+      } else if (proposal.plan.kind === "deviceControlConsent") {
+        return yield* fail("privilege-escalation", "External integrations cannot control devices.");
       } else if (handsOverArtifacts(proposal.plan)) {
         return yield* fail(
           "privilege-escalation",
@@ -1230,6 +1511,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           return yield* fail("caller-stale", "The external integration is unavailable.");
         }
         const integration = checked.value;
+        externalCeiling = agentControlExternalCeiling(integration);
         const scopeAllowed =
           integration.projectScope.kind === "all" ||
           integration.projectScope.projectIds.includes(originProjectId);
@@ -1243,11 +1525,21 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
                 : AGENT_CONTROL_CAPABILITIES.externalCreateTask;
         const requiresTaskCapability =
           proposal.plan.kind === "automationRun" || isAutomationLifecyclePlan(proposal.plan);
+        // A heartbeat queues into an existing chat: thread control.
+        const requiresThreadControl =
+          (proposal.plan.kind === "automationRun" ||
+            proposal.plan.kind === "createAutomation" ||
+            proposal.plan.kind === "updateAutomation") &&
+          automationDefinitionForPlan(proposal.plan).execution.target !== undefined;
         if (
           !scopeAllowed ||
           !integration.capabilities.includes(externalCapability) ||
           (requiresTaskCapability &&
             !integration.capabilities.includes(AGENT_CONTROL_CAPABILITIES.externalCreateTask)) ||
+          (requiresThreadControl &&
+            !integration.capabilities.includes(
+              AGENT_CONTROL_CAPABILITIES.externalControlThreads,
+            )) ||
           (originEnvMode === "local" &&
             !integration.capabilities.includes(
               AGENT_CONTROL_CAPABILITIES.externalSharedCheckout,
@@ -1293,7 +1585,14 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         );
         return;
       }
-      if (isAgentControlDevicePlan(proposal.plan)) {
+      if (proposal.plan.kind === "worktreeHandoff" && principal.kind === "provider-session") {
+        yield* validateWorktreeHandoff(proposal.plan, principal.threadId);
+        return;
+      }
+      if (
+        isAgentControlDevicePlan(proposal.plan) ||
+        proposal.plan.kind === "deviceControlConsent"
+      ) {
         if (principal.kind !== "provider-session") {
           return yield* fail(
             "privilege-escalation",
@@ -1301,6 +1600,39 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           );
         }
         const origin = snapshot.threads.find((thread) => thread.id === principal.threadId);
+        if (proposal.plan.kind === "deviceControlConsent") {
+          // Consent belongs to the exact task (turn) and runtime that asked: approving a
+          // card after that task ended grants nothing.
+          if (
+            !origin ||
+            principal.turnId === undefined ||
+            principal.runtimeSessionId === undefined ||
+            origin.session?.status !== "running" ||
+            origin.session.activeTurnId !== principal.turnId ||
+            origin.session.runtimeSessionId !== principal.runtimeSessionId ||
+            origin.session.providerInstanceId !== principal.providerInstanceId
+          ) {
+            return yield* fail("caller-stale", "The task that asked has ended.");
+          }
+          yield* validateDevicePlanScope(proposal.plan, {
+            originThreadId: principal.threadId,
+            originProjectId,
+            originProviderInstanceId: principal.providerInstanceId,
+          });
+          if (
+            deps.deviceService?.supported !== true ||
+            deps.deviceService.manager.exclusiveAttachment(
+              proposal.plan.threadId,
+              proposal.plan.udid,
+            ) !== "exclusive"
+          ) {
+            return yield* fail(
+              "thread-stale",
+              "The device is no longer attached to this thread only.",
+            );
+          }
+          return;
+        }
         const project = snapshot.projects.find((candidate) => candidate.id === originProjectId);
         if (
           !origin ||
@@ -1319,6 +1651,27 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         });
         return;
       }
+      // A heartbeat's chat passes its proposer's send rules (an integration's within its grants).
+      const senderCeiling =
+        externalCeiling === undefined
+          ? { runtimeMode: originRuntimeMode, envMode: originEnvMode }
+          : lowerSendCeiling(externalCeiling, {
+              runtimeMode: originRuntimeMode,
+              envMode: originEnvMode,
+            });
+      const targetSender =
+        principal.kind === "automation-owner"
+          ? undefined
+          : {
+              ...(principal.kind === "provider-session"
+                ? { originThreadId: principal.threadId }
+                : {}),
+              originProjectId,
+              originRuntimeMode: senderCeiling.runtimeMode,
+              originEnvMode: senderCeiling.envMode,
+              providers,
+              requireBaseRef,
+            };
       if (isAutomationLifecyclePlan(proposal.plan)) {
         if (deps.automations === undefined) {
           return yield* fail("automation-unavailable", "Automation control is unavailable.");
@@ -1340,6 +1693,9 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           providers,
           requireBaseRef,
         });
+        if (lifecycleTargetChecked(proposal.plan, principal.kind === "automation-owner")) {
+          yield* validateAutomationTarget(definition.execution, snapshot, targetSender);
+        }
         return;
       }
       if (proposal.plan.kind === "automationRun") {
@@ -1356,6 +1712,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           providers,
           requireBaseRef,
         });
+        yield* validateAutomationTarget(proposal.plan.execution, snapshot, targetSender);
         return;
       }
       if (proposal.plan.kind === "workspaceLifecycle") {
@@ -1387,6 +1744,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
 
       yield* validatePlanAgainstSnapshot({
         plan: proposal.plan,
+        originThreadId: principal.kind === "provider-session" ? principal.threadId : undefined,
         originProjectId,
         originRuntimeMode,
         originEnvMode,
@@ -1438,6 +1796,9 @@ const makeAgentControlActionValidator = Effect.gen(function* () {
   const gitNetwork = yield* Effect.serviceOption(GitNetwork);
   const nodeDirectory = yield* Effect.serviceOption(AgentControlNodeDirectory);
   const serverEnvironment = yield* Effect.serviceOption(ServerEnvironment);
+  const completionReturns = yield* Effect.serviceOption(CompletionReturnRepository);
+  const settings = yield* Effect.serviceOption(ServerSettingsService);
+  const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
   return makeAgentControlActionValidatorFromDeps({
     projections,
     getProviders: providerRegistry.getProviders,
@@ -1453,8 +1814,47 @@ const makeAgentControlActionValidator = Effect.gen(function* () {
     ...(Option.isSome(serverEnvironment)
       ? { thisEnvironmentId: serverEnvironment.value.getEnvironmentId }
       : {}),
+    ...(Option.isSome(completionReturns)
+      ? {
+          delegatedReturnPending: (threadId: ThreadId) =>
+            completionReturns.value.get(threadId).pipe(
+              Effect.map((record) => record !== undefined && isPendingCompletionReturn(record)),
+              // Fails closed: a watch never starts on a chat that may owe its result.
+              Effect.mapError(
+                () =>
+                  new AgentControlPlanValidationError({
+                    reason: "thread-unavailable",
+                    detail: "Could not check whether the chat was delegated. Try again.",
+                  }),
+              ),
+            ),
+        }
+      : {}),
     ...(Option.isSome(externalIntegrations)
       ? { revalidateExternal: externalIntegrations.value.revalidate }
+      : {}),
+    ...(Option.isSome(settings) && Option.isSome(sql)
+      ? {
+          delegationLimitRefusal: (input: {
+            readonly callerThreadId: ThreadId;
+            readonly newTasks: number;
+          }) =>
+            Effect.gen(function* () {
+              const limits = (yield* settings.value.getSettings).agentControl.delegation;
+              if (!hasDelegationLimits(limits)) return null;
+              const check = yield* Effect.promise(() => import("../delegationLimitCheck.ts"));
+              return yield* check.readDelegationLimitRefusal(sql.value, limits, input);
+            }).pipe(
+              // Fails closed: unreadable limits or lineage never let a request through.
+              Effect.mapError(
+                () =>
+                  new AgentControlPlanValidationError({
+                    reason: "thread-unavailable",
+                    detail: "Could not check the delegation limits. Try again.",
+                  }),
+              ),
+            ),
+        }
       : {}),
   });
 });

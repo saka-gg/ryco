@@ -1,6 +1,5 @@
 import { readComputerAuditHistory } from "@ryco/shared/computerAuditHistory";
 import { ComputerGetAuditHistoryInput } from "@ryco/contracts";
-import { execFileSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { readFileSync, writeFileSync, mkdirSync, renameSync, existsSync } from "node:fs";
@@ -19,7 +18,13 @@ import { CuaDriverHost } from "../cuaDriverHost.ts";
 import { ComputerFrameTap } from "../computerFrameTap.ts";
 import { EscapeKillSwitchMonitor } from "../escapeKillSwitchMonitor.ts";
 import { registerComputerDesktopLifecycle } from "../computerDesktopLifecycle.ts";
+import { macPrivacySettingsUrl, resolveMacAppBundle } from "../macAppBundle.ts";
 import { record, textArg } from "./native.ts";
+import {
+  ComputerConsentSheets,
+  ComputerTaskConsent,
+  type ComputerConsentKind,
+} from "./taskConsent.ts";
 
 const PERMISSIONS = ["accessibility", "inputMonitoring", "screenRecording"] as const;
 const preferencesSchema = Schema.Struct({
@@ -38,39 +43,10 @@ interface Task {
   threadId: string;
   turnId: string;
   controller: AbortController;
-  consent?: Promise<boolean>;
-  denied: boolean;
-  consentGeneration: number;
+  consent: ComputerTaskConsent;
 }
 const taskKey = (task: { threadId: string; turnId: string }) =>
   JSON.stringify([task.threadId, task.turnId]);
-
-const BUNDLE_IDENTIFIER_PATTERN = /<key>CFBundleIdentifier<\/key>\s*<string>([^<]+)<\/string>/;
-
-/**
- * The app bundle's identifier, read from its Info.plist. Bundles are written
- * as XML plists, so this is a file read rather than a PlistBuddy process on the
- * startup path; a binary plist (rare, hand-edited bundles) still uses it.
- */
-export function readBundleIdentifier(
-  infoPlistPath: string,
-  readFile: (path: string) => Buffer = (path) => readFileSync(path),
-): string | null {
-  try {
-    const contents = readFile(infoPlistPath);
-    if (contents.subarray(0, 6).toString("latin1") !== "bplist") {
-      return BUNDLE_IDENTIFIER_PATTERN.exec(contents.toString("utf8"))?.[1]?.trim() || null;
-    }
-    return (
-      execFileSync("/usr/libexec/PlistBuddy", ["-c", "Print:CFBundleIdentifier", infoPlistPath], {
-        encoding: "utf8",
-        timeout: 1000,
-      }).trim() || null
-    );
-  } catch {
-    return null;
-  }
-}
 
 /** Desktop ownership and presentation only. Tool authority remains server-owned. */
 export class DesktopComputerBeta {
@@ -99,7 +75,10 @@ export class DesktopComputerBeta {
   private error: string | null = null;
   private readonly removeLifecycle: () => void;
   private closed = false;
-  private pendingApprovals = 0;
+  /** Consent sheets go up one at a time, so each dialog's lifetime starts when it shows. */
+  private readonly consentSheets = new ComputerConsentSheets((kind, signal, onShown) =>
+    this.showConsent(kind, signal, onShown),
+  );
 
   constructor(options: {
     stateDir: string;
@@ -117,13 +96,7 @@ export class DesktopComputerBeta {
     } catch {
       /* Missing or invalid preferences retain disabled defaults. */
     }
-    const executable = app.getPath("exe");
-    const appEnd = executable.indexOf(".app/");
-    const bundlePath = appEnd >= 0 ? executable.slice(0, appEnd + 4) : undefined;
-    let bundleId = "com.laurinfrank.ryco";
-    if (bundlePath && process.platform === "darwin") {
-      bundleId = readBundleIdentifier(join(bundlePath, "Contents", "Info.plist")) ?? bundleId;
-    }
+    const { bundlePath, bundleId } = resolveMacAppBundle(app.getPath("exe"), process.platform);
     const helperPath = join(options.resourcesDir, "ryco-computer-ui-helper");
     this.permissions = new DesktopAppSnapManager({
       platform: process.platform,
@@ -139,14 +112,7 @@ export class DesktopComputerBeta {
         this.publishState();
       },
       openSettingsPane: (pane) => {
-        const suffix = {
-          accessibility: "Accessibility",
-          "input-monitoring": "ListenEvent",
-          "screen-recording": "ScreenCapture",
-        }[pane];
-        void shell.openExternal(
-          `x-apple.systempreferences:com.apple.preference.security?Privacy_${suffix}`,
-        );
+        void shell.openExternal(macPrivacySettingsUrl(pane));
       },
     });
     this.tap = new ComputerFrameTap({
@@ -193,11 +159,7 @@ export class DesktopComputerBeta {
         this.host.physicalInput(event);
       },
       onStateChange: (state) => {
-        if (!state.ready)
-          for (const task of this.tasks.values()) {
-            delete task.consent;
-            task.consentGeneration += 1;
-          }
+        if (!state.ready) for (const task of this.tasks.values()) task.consent.revokeGrant();
         this.host.inputMonitorStateChanged(state);
         this.publishState();
       },
@@ -265,10 +227,7 @@ export class DesktopComputerBeta {
       powerMonitor,
       {
         pauseDesktop: (reason) => {
-          for (const task of this.tasks.values()) {
-            delete task.consent;
-            task.consentGeneration += 1;
-          }
+          for (const task of this.tasks.values()) task.consent.revokeGrant();
           return this.host.pauseDesktop(reason);
         },
         resumeDesktop: (reason) => this.host.resumeDesktop(reason),
@@ -427,12 +386,12 @@ export class DesktopComputerBeta {
         throw new Error("Computer task expired or was stopped. Send a new request to resume.");
       if (!this.tasks.has(key)) {
         if (this.tasks.size >= 64) throw new Error("Too many active Computer tasks.");
+        const controller = new AbortController();
         this.tasks.set(key, {
           threadId,
           turnId,
-          controller: new AbortController(),
-          denied: false,
-          consentGeneration: 0,
+          controller,
+          consent: new ComputerTaskConsent(this.consentSheets.prompt, controller.signal),
         });
         this.send({ type: "target", threadId, turnId, targetId: "pending", label: "Computer" });
       }
@@ -448,44 +407,8 @@ export class DesktopComputerBeta {
       this.send({ type: "ended", threadId, turnId });
       return { ended: true };
     }
-    if (operation === "consent") {
-      if (task.denied) return { approved: false };
-      const clipboard = input.clipboard === true;
-      const ask = async () => {
-        if (this.pendingApprovals >= 8) return false;
-        const generation = task.consentGeneration;
-        const owner = this.getWindow();
-        if (!owner || owner.isDestroyed()) return false;
-        this.pendingApprovals += 1;
-        try {
-          const response = await dialog.showMessageBox(owner, {
-            type: "question",
-            title: clipboard ? "Allow clipboard access?" : "Allow Computer for this task?",
-            message: clipboard
-              ? "Allow this task to access your clipboard?"
-              : "Allow the agent to work in Mac apps and browsers for this task?",
-            detail:
-              "Use Stop in chat to end the task. Physical Escape interrupts the current action. Foreground use still requires your explicit request.",
-            buttons: ["Cancel", "Allow"],
-            defaultId: 0,
-            cancelId: 0,
-            noLink: true,
-            signal: task.controller.signal,
-          });
-          return (
-            response.response === 1 &&
-            !task.controller.signal.aborted &&
-            generation === task.consentGeneration
-          );
-        } finally {
-          this.pendingApprovals -= 1;
-        }
-      };
-      if (!clipboard) task.consent ??= ask();
-      const approved = await (clipboard ? ask() : task.consent!);
-      if (!approved && !clipboard) task.denied = true;
-      return { approved };
-    }
+    if (operation === "consent")
+      return task.consent.request(input.clipboard === true ? "clipboard" : "task");
     if (operation === "event") {
       const event = Schema.decodeUnknownSync(ComputerEvent)(input.event);
       this.send({ type: "event", event });
@@ -530,6 +453,32 @@ export class DesktopComputerBeta {
       return { visible: this.visible.has(threadId) };
     }
     throw new Error("Unknown Computer request.");
+  }
+  /** One consent sheet on the Ryco window; the task policy decides what its answer means. */
+  private async showConsent(
+    kind: ComputerConsentKind,
+    signal: AbortSignal,
+    onShown: () => void,
+  ): Promise<"accept" | "decline" | "unavailable"> {
+    const owner = this.getWindow();
+    if (!owner || owner.isDestroyed()) return "unavailable";
+    const clipboard = kind === "clipboard";
+    onShown();
+    const response = await dialog.showMessageBox(owner, {
+      type: "question",
+      title: clipboard ? "Allow clipboard access?" : "Allow Computer for this task?",
+      message: clipboard
+        ? "Allow this task to access your clipboard?"
+        : "Allow the agent to work in Mac apps and browsers for this task?",
+      detail:
+        "Use Stop in chat to end the task. Physical Escape interrupts the current action. Foreground use still requires your explicit request.",
+      buttons: ["Cancel", "Allow"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      signal,
+    });
+    return response.response === 1 ? "accept" : "decline";
   }
   async dispose(): Promise<void> {
     this.closed = true;

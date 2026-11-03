@@ -11,6 +11,7 @@ import {
   ProviderDriverKind,
   USAGE_CONTRACT_VERSION,
   type ServerSettings,
+  type UsageSummary,
 } from "@ryco/contracts";
 import { Duration, Effect, Fiber, Layer, Stream } from "effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
@@ -20,21 +21,29 @@ import { ServerConfig } from "../config.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import * as TranscriptReader from "./usageTranscriptReader.ts";
-import { UsageService, UsageServiceLive } from "./UsageService.ts";
+import {
+  makeUsageService,
+  UsageService,
+  UsageServiceLive,
+  type UsageServiceOptions,
+} from "./UsageService.ts";
+import { UsageServiceDeferredLive } from "./UsageServiceDeferred.ts";
+import { USAGE_RATES_WARM_DELAY_MS } from "./UsageServiceTag.ts";
 const roots: string[] = [];
 afterEach(async () => {
   for (const root of roots.splice(0)) await FS.rm(root, { recursive: true, force: true });
 });
 function testLayer(
   root: string,
-  settings: ServerSettings,
+  settings: ServerSettings | (() => ServerSettings),
   document: unknown = {},
   respond: (
     request: Parameters<Parameters<typeof HttpClient.make>[0]>[0],
   ) => ReturnType<Parameters<typeof HttpClient.make>[0]> = (request) =>
     Effect.succeed(HttpClientResponse.fromWeb(request, Response.json(document))),
+  layer: typeof UsageServiceLive = UsageServiceLive,
 ) {
-  return UsageServiceLive.pipe(
+  return layer.pipe(
     Layer.provide(
       Layer.mergeAll(
         NodeServices.layer,
@@ -43,8 +52,9 @@ function testLayer(
           withSettingsSnapshot: (effect) => effect,
           start: Effect.void,
           ready: Effect.void,
-          getSettings: Effect.succeed(settings),
-          updateSettings: () => Effect.succeed(settings),
+          getSettings: Effect.sync(() => (typeof settings === "function" ? settings() : settings)),
+          updateSettings: () =>
+            Effect.sync(() => (typeof settings === "function" ? settings() : settings)),
           streamChanges: Stream.empty,
         }),
         Layer.succeed(ServerEnvironment, {
@@ -144,6 +154,10 @@ it("deduplicates same-account exports from multiple instances and keeps failed r
       responseCount: 1,
       estimatedCostUsd: 0.2018232,
     });
+    // Reported cost of a model without a published rate cannot be split by token type.
+    expect(
+      first.buckets.find((bucket) => bucket.provider === "cursor")?.costBreakdown,
+    ).toBeUndefined();
     expect(first.buckets.find((bucket) => bucket.provider === "cursor")?.exportRecordId).toMatch(
       /^[a-f0-9]{64}$/,
     );
@@ -250,6 +264,14 @@ it("scans large histories past the old byte/line limits, then reuses them with c
       expect(summary.buckets[0]?.tokens.totalTokens).toBe(575);
       expect(summary.buckets[0]?.estimatedCostUsd).toBeCloseTo(305);
       expect(summary.buckets[0]?.estimatedCacheSavingsUsd).toBeCloseTo(900);
+      // Fast mode doubles every rate: half of the cost is its premium.
+      expect(summary.buckets[0]?.costBreakdown).toEqual({
+        inputUsd: 20,
+        cacheReadUsd: 100,
+        cacheWriteUsd: 125,
+        outputUsd: 60,
+        speedPremiumUsd: 152.5,
+      });
     }
     expect(warm.sources.find((source) => source.provider === "claude")?.reusedCacheFileCount).toBe(
       5,
@@ -596,6 +618,60 @@ it("lets a slow rates download finish once its headers arrived in time", async (
   );
 });
 
+it("refreshes stale cached rates 30 s after construction, or not at all when built without a warm-up", async () => {
+  const root = await FS.mkdtemp(join(tmpdir(), "ryco-rates-warm-"));
+  roots.push(root);
+  const claudeHome = join(root, "claude");
+  const state = usageStateDir(root);
+  await FS.mkdir(state, { recursive: true });
+  await FS.writeFile(
+    join(state, "pricing-cache.json"),
+    JSON.stringify({
+      version: 2,
+      fetchedAtMs: Date.now() - 3 * 24 * 60 * 60 * 1000,
+      revision: "stale",
+      document: rateDocument,
+    }),
+  );
+  const settle = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)));
+  const cases: ReadonlyArray<readonly [UsageServiceOptions, number]> = [
+    [{}, 1],
+    // What the deferred layer builds for a summary, which refreshes stale rates itself.
+    [{ ratesWarmDelayMs: null }, 0],
+  ];
+  for (const [options, expectedFetches] of cases) {
+    let fetches = 0;
+    const hanging = () => {
+      fetches += 1;
+      return Effect.never;
+    };
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* UsageService;
+        yield* settle;
+        yield* TestClock.adjust(Duration.millis(USAGE_RATES_WARM_DELAY_MS - 1));
+        yield* settle;
+        expect(fetches).toBe(0);
+        yield* TestClock.adjust(Duration.millis(1));
+        for (let attempt = 0; attempt < 10 && fetches < Math.max(1, expectedFetches); attempt++)
+          yield* settle;
+        expect(fetches).toBe(expectedFetches);
+      }).pipe(
+        Effect.provide(
+          testLayer(
+            root,
+            claudeSettings(claudeHome, root),
+            {},
+            hanging,
+            Layer.effect(UsageService, makeUsageService(options)),
+          ).pipe(Layer.provideMerge(TestClock.layer())),
+        ),
+        Effect.scoped,
+      ),
+    );
+  }
+});
+
 it("reuses an unchanged source's result, re-reads it after a change, and shares identical scans", async () => {
   const root = await FS.mkdtemp(join(tmpdir(), "ryco-memo-summary-"));
   roots.push(root);
@@ -650,6 +726,36 @@ it("reuses an unchanged source's result, re-reads it after a change, and shares 
       expect(summary.buckets[0]?.responseCount).toBe(3);
     }).pipe(Effect.provide(testLayer(root, claudeSettings(claudeHome, root))), Effect.scoped),
   );
+});
+
+it("serves the pipeline loaded on first use and flushes its scan cache with the server", async () => {
+  const root = await FS.mkdtemp(join(tmpdir(), "ryco-deferred-summary-"));
+  roots.push(root);
+  const claudeHome = join(root, "claude");
+  await FS.mkdir(join(claudeHome, "projects"), { recursive: true });
+  await FS.writeFile(join(claudeHome, "projects", "a.jsonl"), claudeLine("a"));
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const summary = yield* (yield* UsageService).readSummary(summaryRequest);
+      expect(summary.pricing.state).toBe("live");
+      expect(summary.buckets[0]?.responseCount).toBe(1);
+      expect(summary.buckets[0]?.estimatedCostUsd).toBe(8);
+    }).pipe(
+      Effect.provide(
+        testLayer(
+          root,
+          claudeSettings(claudeHome, root),
+          rateDocument,
+          undefined,
+          UsageServiceDeferredLive,
+        ),
+      ),
+      Effect.scoped,
+    ),
+  );
+  // The pipeline's finalizers run with the layer that loaded it.
+  const shards = await FS.readdir(join(usageStateDir(root), "scan-cache"));
+  expect(shards.some((name) => name.endsWith(".json"))).toBe(true);
 });
 
 it("drops a queued scan once every caller has gone away", async () => {
@@ -763,4 +869,97 @@ it("releases the in-memory scan cache only after usage has been idle", async () 
       Effect.scoped,
     ),
   );
+});
+
+/** $0.50 per input and $1 per output token: half of `rateDocument`'s price for claudeLine(). */
+const halfPrice = {
+  "claude-test": { price: { inputUsdPerMillion: 500_000, outputUsdPerMillion: 1_000_000 } },
+};
+
+it("reprices a memoized source when custom prices or mappings change, without reading its files", async () => {
+  const root = await FS.mkdtemp(join(tmpdir(), "ryco-overrides-summary-"));
+  roots.push(root);
+  const claudeHome = join(root, "claude");
+  const projects = join(claudeHome, "projects");
+  await FS.mkdir(projects, { recursive: true });
+  await FS.writeFile(join(projects, "a.jsonl"), claudeLine("a"));
+  await FS.writeFile(join(projects, "b.jsonl"), claudeLine("b"));
+  const published = claudeSettings(claudeHome, root);
+  let settings = published;
+  const claude = (summary: UsageSummary) =>
+    summary.sources.find((source) => source.provider === "claude");
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const service = yield* UsageService;
+      const first = yield* service.readSummary(summaryRequest);
+      expect(first.buckets[0]?.estimatedCostUsd).toBe(16);
+      expect(claude(first)?.parsedFileCount).toBe(2);
+      expect(first.pricing.customPriceCount).toBeUndefined();
+
+      settings = { ...published, usagePriceOverrides: halfPrice };
+      const custom = yield* service.readSummary(summaryRequest);
+      expect(custom.buckets[0]).toMatchObject({
+        model: "claude-test",
+        estimatedCostUsd: 8,
+        customPricedTokenCount: 10,
+        costSource: "litellm",
+      });
+      expect(custom.pricing).toMatchObject({ customPriceCount: 1, recognizedModelCount: 1 });
+      expect(claude(custom)).toMatchObject({ parsedFileCount: 0, reusedCacheFileCount: 2 });
+
+      settings = { ...published, usagePriceOverrides: { "Claude-Test": { mapTo: "claude-next" } } };
+      const mapped = yield* service.readSummary(summaryRequest);
+      expect(mapped.buckets).toHaveLength(1);
+      expect(mapped.buckets[0]).toMatchObject({ model: "claude-next", costSource: "unpriced" });
+      expect(mapped.pricing).toMatchObject({ mappedModelCount: 1, unrecognizedModelCount: 1 });
+      expect(claude(mapped)).toMatchObject({ parsedFileCount: 0, reusedCacheFileCount: 2 });
+
+      settings = published;
+      const restored = yield* service.readSummary(summaryRequest);
+      expect(restored.buckets).toEqual(first.buckets);
+      expect(claude(restored)?.parsedFileCount).toBe(0);
+    }).pipe(Effect.provide(testLayer(root, () => settings, rateDocument)), Effect.scoped),
+  );
+});
+
+it("never shares an in-flight scan between summaries priced under different overrides", async () => {
+  const root = await FS.mkdtemp(join(tmpdir(), "ryco-overrides-flight-"));
+  roots.push(root);
+  const claudeHome = join(root, "claude");
+  await FS.mkdir(join(claudeHome, "projects"), { recursive: true });
+  await FS.writeFile(join(claudeHome, "projects", "a.jsonl"), claudeLine("a"));
+  let settings = claudeSettings(claudeHome, root);
+  let release: (() => void) | undefined;
+  let entered: (() => void) | undefined;
+  const firstScanEntered = new Promise<void>((resolve) => (entered = resolve));
+  const original = TranscriptReader.listUsageTranscriptFiles;
+  const listing = vi
+    .spyOn(TranscriptReader, "listUsageTranscriptFiles")
+    .mockImplementation(async (...args) => {
+      // The first scan waits until a caller under other overrides has asked too.
+      if (release === undefined) {
+        const held = new Promise<void>((resolve) => (release = resolve));
+        entered?.();
+        await held;
+      }
+      return original(...args);
+    });
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const service = yield* UsageService;
+        const published = yield* Effect.forkChild(service.readSummary(summaryRequest));
+        yield* Effect.promise(() => firstScanEntered);
+        settings = { ...settings, usagePriceOverrides: halfPrice };
+        const custom = yield* Effect.forkChild(service.readSummary(summaryRequest));
+        yield* Effect.sleep("20 millis");
+        release?.();
+        expect((yield* Fiber.join(published)).buckets[0]?.estimatedCostUsd).toBe(8);
+        expect((yield* Fiber.join(custom)).buckets[0]?.estimatedCostUsd).toBe(4);
+        expect(listing).toHaveBeenCalledTimes(2);
+      }).pipe(Effect.provide(testLayer(root, () => settings, rateDocument)), Effect.scoped),
+    );
+  } finally {
+    listing.mockRestore();
+  }
 });

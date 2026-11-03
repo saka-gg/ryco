@@ -3,15 +3,25 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { DateTime, Effect, Layer, Option, Ref, Schema } from "effect";
 import { SourceControlProviderError } from "@ryco/contracts";
 import { ChildProcessSpawner } from "effect/process";
+import { TestClock } from "effect/testing";
+
+import { FetchHttpClient } from "effect/http";
 
 import { ServerConfig } from "../config.ts";
+import { inBackgroundProcessLane } from "../processGovernor.ts";
+import { AtlassianConnectionRepository } from "../persistence/Services/AtlassianConnections.ts";
+import { ServerSecretStore } from "../auth/Services/ServerSecretStore.ts";
+import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import type * as VcsDriver from "../vcs/VcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as AzureDevOpsCli from "./AzureDevOpsCli.ts";
 import * as BitbucketApi from "./BitbucketApi.ts";
+import { ForgeRateLimitStore, ForgeRateLimits } from "./forgeRateLimit.ts";
 import * as ForgejoApi from "./ForgejoApi.ts";
 import * as GitHubCli from "./GitHubCli.ts";
+import * as GitHubApi from "./gitHubApi.ts";
+import { fakeGitHub } from "./gitHubApiTestServer.ts";
 import * as GitLabCli from "./GitLabCli.ts";
 import * as SourceControlProvider from "./SourceControlProvider.ts";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
@@ -639,6 +649,330 @@ describe("change request page forwarding", () => {
       assert.strictEqual(states.issues.get(9), "closed");
     }),
   );
+
+  describe("pull request watch fingerprint", () => {
+    const fingerprint = { status: "OPEN MERGEABLE abc123 SUCCESS:3 ", remarks: "2  0  0" };
+    const watchInput = {
+      cwd: "/repo",
+      number: 7,
+      url: "https://github.com/acme/repo/pull/7",
+    };
+
+    it.effect(
+      "forwards it through the lazy provider and answers null where the host has none",
+      () =>
+        Effect.gen(function* () {
+          const calls: Array<unknown> = [];
+          const github = yield* SourceControlProviderRegistry.makeLazyProvider(
+            "github",
+            Effect.succeed({
+              kind: "github",
+              getChangeRequestWatchFingerprint: (input: unknown) =>
+                Effect.sync(() => {
+                  calls.push(input);
+                  return fingerprint;
+                }),
+            } as unknown as SourceControlProvider.SourceControlProviderShape),
+          );
+          assert.deepStrictEqual(
+            yield* github.getChangeRequestWatchFingerprint!(watchInput),
+            fingerprint,
+          );
+          assert.deepStrictEqual(calls, [watchInput]);
+
+          // Unsupported is not a failure (and not a rate limit): the watch reads in full.
+          const gitlab = yield* SourceControlProviderRegistry.makeLazyProvider(
+            "gitlab",
+            Effect.succeed({
+              kind: "gitlab",
+            } as unknown as SourceControlProvider.SourceControlProviderShape),
+          );
+          assert.isNull(yield* gitlab.getChangeRequestWatchFingerprint!(watchInput));
+        }),
+    );
+
+    it.effect("binds the detected remote context into it", () =>
+      Effect.gen(function* () {
+        const calls: Array<{ readonly context?: unknown }> = [];
+        const bound = SourceControlProviderRegistry.bindProviderContext(
+          {
+            kind: "github",
+            getChangeRequestWatchFingerprint: (input: { readonly context?: unknown }) =>
+              Effect.sync(() => {
+                calls.push(input);
+                return fingerprint;
+              }),
+          } as unknown as SourceControlProvider.SourceControlProviderShape,
+          context,
+        );
+        yield* bound.getChangeRequestWatchFingerprint!(watchInput);
+        assert.deepStrictEqual(calls[0]?.context, context);
+
+        const unbound = SourceControlProviderRegistry.bindProviderContext(
+          { kind: "github" } as unknown as SourceControlProvider.SourceControlProviderShape,
+          context,
+        );
+        assert.strictEqual(unbound.getChangeRequestWatchFingerprint, undefined);
+      }),
+    );
+
+    it.effect("reads a GitHub pull request's fingerprint through a resolved registry handle", () =>
+      Effect.gen(function* () {
+        const asked: Array<unknown> = [];
+        const registry = yield* makeRegistry({
+          remotes: [{ name: "origin", url: "git@github.com:acme/repo.git" }],
+          githubCli: {
+            getPullRequestWatchFingerprint: (input) =>
+              Effect.sync(() => {
+                asked.push(input);
+                return fingerprint;
+              }),
+          },
+        });
+        const handle = yield* registry.resolveHandle({ cwd: "/repo" });
+        assert.strictEqual(handle.provider.kind, "github");
+        const read = handle.provider.getChangeRequestWatchFingerprint;
+        assert.ok(read, "the fingerprint must survive the lazy provider and the context binding");
+        assert.deepStrictEqual(yield* read(watchInput), fingerprint);
+        assert.deepStrictEqual(asked, [
+          { cwd: "/repo", host: "github.com", repository: "acme/repo", number: 7 },
+        ]);
+      }),
+    );
+
+    it.effect("answers null through a resolved handle for a host without one", () =>
+      Effect.gen(function* () {
+        const registry = yield* makeRegistry({
+          remotes: [{ name: "origin", url: "git@gitlab.com:group/project.git" }],
+        });
+        const handle = yield* registry.resolveHandle({ cwd: "/repo" });
+        assert.strictEqual(handle.provider.kind, "gitlab");
+        assert.isNull(
+          yield* handle.provider.getChangeRequestWatchFingerprint!({
+            cwd: "/repo",
+            number: 7,
+            url: "https://gitlab.com/group/project/-/merge_requests/7",
+          }),
+        );
+      }),
+    );
+
+    it.effect("reads the rest of a long review thread through a resolved registry handle", () =>
+      Effect.gen(function* () {
+        const asked: Array<unknown> = [];
+        const reviewThread = { id: "PRRT_1", comments: [], totalComments: 0 };
+        const registry = yield* makeRegistry({
+          remotes: [{ name: "origin", url: "git@github.com:acme/repo.git" }],
+          githubCli: {
+            getPullRequestReviewThread: (input) =>
+              Effect.sync(() => {
+                asked.push(input);
+                return reviewThread as never;
+              }),
+          },
+        });
+        const handle = yield* registry.resolveHandle({ cwd: "/repo" });
+        const read = handle.provider.getChangeRequestReviewThread;
+        assert.ok(read, "the thread read must survive the lazy provider and the context binding");
+        assert.deepStrictEqual(
+          yield* read({ cwd: "/repo", reference: "7", threadId: "PRRT_1" }),
+          reviewThread as never,
+        );
+        assert.deepStrictEqual(asked, [{ cwd: "/repo", reference: "7", threadId: "PRRT_1" }]);
+
+        // A host without the read answers null: the conversation stays "not read whole".
+        const gitlab = yield* makeRegistry({
+          remotes: [{ name: "origin", url: "git@gitlab.com:group/project.git" }],
+        });
+        const gitlabHandle = yield* gitlab.resolveHandle({ cwd: "/repo" });
+        assert.isNull(
+          yield* gitlabHandle.provider.getChangeRequestReviewThread!({
+            cwd: "/repo",
+            reference: "7",
+            threadId: "t",
+          }),
+        );
+      }),
+    );
+  });
+
+  it.effect("forwards the involved search through the lazy provider with the bound context", () =>
+    Effect.gen(function* () {
+      const inputs: Array<unknown> = [];
+      const searching = {
+        kind: "github",
+        searchInvolvedChangeRequests: (input: unknown) =>
+          Effect.sync(() => {
+            inputs.push(input);
+            return {
+              host: "github.com",
+              viewerLogin: "octocat",
+              items: [],
+              truncated: false,
+              skippedRows: 0,
+            };
+          }),
+      } as unknown as SourceControlProvider.SourceControlProviderShape;
+      const lazy = yield* SourceControlProviderRegistry.makeLazyProvider(
+        "github",
+        Effect.succeed(searching),
+        { involvedSearch: true },
+      );
+      const bound = SourceControlProviderRegistry.bindProviderContext(lazy, context);
+      const search = bound.searchInvolvedChangeRequests;
+      assert.ok(search, "the involved search must survive the lazy provider and context");
+      const page = yield* search({ cwd: "/repo", involvement: "authored", state: "open" });
+      assert.strictEqual(page.viewerLogin, "octocat");
+      assert.deepStrictEqual((inputs[0] as { readonly context?: unknown }).context, context);
+
+      // Hosts without a host-wide search keep the method absent, so callers read per repository.
+      const gitlab = yield* SourceControlProviderRegistry.makeLazyProvider(
+        "gitlab",
+        Effect.succeed(recordingProvider([], { withOptional: false })),
+      );
+      assert.strictEqual(gitlab.searchInvolvedChangeRequests, undefined);
+      assert.strictEqual(
+        SourceControlProviderRegistry.bindProviderContext(gitlab, context)
+          .searchInvolvedChangeRequests,
+        undefined,
+      );
+    }),
+  );
+
+  it.effect("searches the checkout's host through registry.resolveHandle", () =>
+    Effect.gen(function* () {
+      const hosts: Array<string> = [];
+      const registry = yield* makeRegistry({
+        remotes: [{ name: "origin", url: "git@github.com:acme/repo.git" }],
+        githubCli: {
+          searchInvolvedPullRequests: (input) =>
+            Effect.sync(() => {
+              hosts.push(input.host);
+              return {
+                host: input.host,
+                viewerLogin: "octocat",
+                items: [
+                  {
+                    summary: {
+                      number: 4,
+                      title: "Four",
+                      url: "https://github.com/acme/other/pull/4",
+                      baseRefName: "main",
+                      headRefName: "feature/four",
+                    },
+                    stackSummary: null,
+                  },
+                ],
+                truncated: true,
+                skippedRows: 1,
+              };
+            }),
+        },
+      });
+      const handle = yield* registry.resolveHandle({ cwd: "/repo" });
+      const search = handle.provider.searchInvolvedChangeRequests;
+      assert.ok(search);
+      const page = yield* search({ cwd: "/repo", involvement: "review-requested", state: "open" });
+      assert.deepStrictEqual(hosts, ["github.com"]);
+      assert.strictEqual(page.items[0]?.url, "https://github.com/acme/other/pull/4");
+      assert.strictEqual(page.items[0]?.provider, "github");
+      assert.isTrue(page.truncated);
+      assert.strictEqual(page.skippedRows, 1);
+    }),
+  );
+});
+
+describe("the production GitHub client", () => {
+  it.effect("reads link states over the direct API through the lazily built client", () =>
+    Effect.gen(function* () {
+      const server = yield* fakeGitHub(() => ({
+        body: {
+          data: {
+            repository: {
+              p7: { number: 7, state: "OPEN", isDraft: true, closedAt: null, mergedAt: null },
+            },
+          },
+        },
+      }));
+      const ghCalls: string[] = [];
+      const driver = {
+        listRemotes: () =>
+          Effect.succeed({
+            remotes: [
+              {
+                name: "origin",
+                url: "git@github.com:acme/repo.git",
+                pushUrl: Option.none(),
+                isPrimary: true,
+              },
+            ],
+            freshness: {
+              source: "live-local" as const,
+              observedAt: TEST_EPOCH,
+              expiresAt: Option.none(),
+            },
+          }),
+      } satisfies Partial<VcsDriver.VcsDriverShape>;
+      const registry = yield* SourceControlProviderRegistry.SourceControlProviderRegistry.pipe(
+        Effect.provide(
+          SourceControlProviderRegistry.layer.pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                Layer.mock(VcsDriverRegistry.VcsDriverRegistry)({
+                  get: () => Effect.succeed(driver as unknown as VcsDriver.VcsDriverShape),
+                  resolve: () =>
+                    Effect.succeed({
+                      kind: "git",
+                      repository: {
+                        kind: "git",
+                        rootPath: "/repo",
+                        metadataPath: null,
+                        freshness: {
+                          source: "live-local" as const,
+                          observedAt: TEST_EPOCH,
+                          expiresAt: Option.none(),
+                        },
+                      },
+                      driver: driver as unknown as VcsDriver.VcsDriverShape,
+                    }),
+                }),
+                Layer.mock(VcsProcess.VcsProcess)({
+                  run: (input) =>
+                    Effect.sync(() => {
+                      ghCalls.push([input.command, ...input.args].join(" "));
+                      return processOutput(
+                        JSON.stringify({
+                          nameWithOwner: "acme/repo",
+                          url: "https://github.com/acme/repo",
+                        }),
+                      );
+                    }),
+                }),
+                Layer.mock(ForgejoApi.ForgejoApi)({ detectProviderFromRemoteUrl: () => null }),
+                Layer.mock(AtlassianConnectionRepository)({}),
+                Layer.mock(ServerSecretStore)({}),
+                Layer.mock(GitVcsDriver)({}),
+                Layer.succeed(GitHubApi.GitHubApiEnvironment, { GH_TOKEN: "ghp_registry" }),
+                Layer.succeed(GitHubApi.GitHubApiEndpoints, () => server.urls),
+                FetchHttpClient.layer,
+                NodeServices.layer,
+                ServerConfig.layerTest(process.cwd(), {
+                  prefix: "ryco-source-control-registry-direct-",
+                }).pipe(Layer.provide(NodeServices.layer)),
+              ),
+            ),
+          ),
+        ),
+      );
+      const provider = yield* registry.resolve({ cwd: "/repo" });
+      const state = yield* provider.getPullRequestState({ cwd: "/repo", number: 7 });
+      assert.deepStrictEqual(state, { state: "open", isDraft: true, terminalAt: null });
+      assert.lengthOf(server.requests, 1);
+      assert.strictEqual(server.requests[0]!.headers.authorization, "token ghp_registry");
+      // gh only resolved the repository; the state document went over HTTPS.
+      assert.deepStrictEqual(ghCalls, ["gh repo view --json nameWithOwner,url"]);
+    }),
+  );
 });
 
 describe("unsupported change request options", () => {
@@ -695,5 +1029,80 @@ describe("unsupported change request options", () => {
         "diff",
       );
     }),
+  );
+});
+
+describe("forge rate-limit pause", () => {
+  const T0 = 1_000_000_000_000;
+  const contextFor = (host: string): SourceControlProvider.SourceControlProviderContext => ({
+    provider: { kind: "github", name: "GitHub", baseUrl: `https://${host}` },
+    remoteName: "origin",
+    remoteUrl: `git@${host}:acme/repo.git`,
+  });
+
+  /** A GitHub provider whose first list read hits a rate limit; counts the reads that reach it. */
+  function rateLimitedOnce(calls: { count: number }) {
+    return {
+      kind: "github",
+      listChangeRequests: () =>
+        Effect.suspend(() => {
+          calls.count += 1;
+          return calls.count === 1
+            ? Effect.fail(
+                new SourceControlProviderError({
+                  provider: "github",
+                  operation: "listChangeRequests",
+                  detail: "GitHub API rate limit exceeded. Wait for the reset window and retry.",
+                  reason: "rate-limited",
+                }),
+              )
+            : Effect.succeed([]);
+        }),
+    } as unknown as SourceControlProvider.SourceControlProviderShape;
+  }
+
+  it.effect("pauses background reads for the host after a rate limit", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(T0);
+      const calls = { count: 0 };
+      const lazy = yield* SourceControlProviderRegistry.makeLazyProvider(
+        "github",
+        Effect.succeed(rateLimitedOnce(calls)),
+      );
+      const read = (host: string) =>
+        SourceControlProviderRegistry.bindProviderContext(
+          lazy,
+          contextFor(host),
+        ).listChangeRequests({ cwd: "/repo", headSelector: "", state: "open" });
+
+      const first = yield* read("github.com").pipe(inBackgroundProcessLane, Effect.flip);
+      assert.strictEqual(first.retryAt, T0 + 30_000);
+      for (let index = 0; index < 20; index += 1) {
+        const refused = yield* read("github.com").pipe(inBackgroundProcessLane, Effect.flip);
+        assert.strictEqual(refused.reason, "rate-limited");
+        assert.strictEqual(refused.retryAt, T0 + 30_000);
+      }
+      assert.strictEqual(calls.count, 1, "no background read reached the forge while paused");
+      assert.strictEqual(
+        yield* SourceControlProviderRegistry.forgePausedUntil(contextFor("github.com")).pipe(
+          inBackgroundProcessLane,
+        ),
+        T0 + 30_000,
+      );
+
+      // Another host is not paused; what a user asked for is never refused.
+      yield* read("ghe.corp.example").pipe(inBackgroundProcessLane);
+      assert.strictEqual(calls.count, 2);
+      yield* read("github.com");
+      assert.strictEqual(calls.count, 3);
+      // That interactive success ended the guessed pause.
+      yield* read("github.com").pipe(inBackgroundProcessLane);
+      assert.strictEqual(calls.count, 4);
+      assert.isNull(
+        yield* SourceControlProviderRegistry.forgePausedUntil(contextFor("github.com")).pipe(
+          inBackgroundProcessLane,
+        ),
+      );
+    }).pipe(Effect.provideService(ForgeRateLimits, new ForgeRateLimitStore())),
   );
 });

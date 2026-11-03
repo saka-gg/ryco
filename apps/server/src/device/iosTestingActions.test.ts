@@ -315,9 +315,10 @@ describe("iOS simulator testing", () => {
       await cleanupStarted.promise;
       command.resolve();
       expect(await result).toMatchObject({ message: expect.stringContaining("superseded") });
-      // New attempts are also refused throughout cleanup, even with a booted snapshot.
+      // New attempts are also refused throughout cleanup, even with a booted snapshot. A disposed
+      // manager refuses them itself, before they reach the backend's fence.
       await expect(manager.testing(input({ type: "appearance", value: "dark" }))).rejects.toThrow(
-        "superseded",
+        lifecycle === "dispose" ? "Device manager disposed" : "superseded",
       );
       expect(test.run.mock.calls.filter(([, args]) => args[1] === "ui")).toHaveLength(1);
       cleanup.resolve();

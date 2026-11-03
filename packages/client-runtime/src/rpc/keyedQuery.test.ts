@@ -620,6 +620,107 @@ describe("keyed query local writes", () => {
   });
 });
 
+describe("keyed query retry after a failure", () => {
+  it("reads a failed entry nothing polls again at its retry time, for subscribers that allow it", async () => {
+    vi.useFakeTimers();
+    const registry = createKeyedQueryRegistry<State>({
+      labelPrefix: "keyed-query-retry-test",
+      initialState,
+      gcTime: 60_000,
+      pollJitterRatio: 0,
+      buildFetchingState: (current) => ({ ...current, fetching: true, error: null }),
+      buildSuccessState: (data) => ({ data: data as string, fetching: false, error: null }),
+      buildErrorState: (current, error) => ({ ...current, fetching: false, error }),
+      isErrorState: (state) => state.error !== null,
+      onRunEnd: (controller, outcome) => {
+        controller.failed = outcome === "error";
+      },
+      // The registry knows when a failure may be retried; here, after 5 s.
+      retryFailedReadAfterMs: (controller) => (controller.failed === true ? 5_000 : null),
+    });
+    const failing = new Set(["allowed", "declined"]);
+    const run = vi.fn((key: string) =>
+      failing.has(key) ? Promise.reject(new Error(`failed ${key}`)) : Promise.resolve("rows"),
+    );
+    const binding = makeBinding(registry, run);
+    const allowed = { key: "allowed" };
+    const declined = { key: "declined" };
+    const releases = [
+      binding.watch(allowed, {
+        resolveIntervalMs: () => false,
+        allowsRetryAfterFailure: () => true,
+      }),
+      binding.watch(declined, {
+        resolveIntervalMs: () => false,
+        allowsRetryAfterFailure: () => false,
+      }),
+    ];
+    for (const input of [allowed, declined]) {
+      await registry.controllers.get(binding.targetKey(input) as string)?.inFlightPromise;
+    }
+    expect(run).toHaveBeenCalledTimes(2);
+    failing.clear();
+
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(run).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    // Only the subscriber that allows it got the read, and it succeeded.
+    expect(run).toHaveBeenCalledTimes(3);
+    expect(run).toHaveBeenLastCalledWith("allowed");
+    expect(binding.snapshotFor(allowed)).toMatchObject({ data: "rows", error: null });
+    expect(binding.snapshotFor(declined).error).not.toBeNull();
+    // A success leaves nothing to retry, and nothing polls.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(run).toHaveBeenCalledTimes(3);
+
+    for (const release of releases) release();
+    registry.dispose();
+  });
+});
+
+describe("keyed query run outcome hook", () => {
+  it("hands the failed read's error to onRunEnd, and nothing after a success", async () => {
+    const ends: Array<{ outcome: string; error: Error | undefined }> = [];
+    const registry = createKeyedQueryRegistry<State>({
+      labelPrefix: "keyed-query-run-end-test",
+      initialState,
+      gcTime: 20,
+      buildFetchingState: (current) => ({ ...current, fetching: true, error: null }),
+      buildSuccessState: (data) => ({ data: data as string, fetching: false, error: null }),
+      buildErrorState: (current, error) => ({ ...current, fetching: false, error }),
+      onRunEnd: (_controller, outcome, error) => {
+        ends.push({ outcome, error });
+      },
+    });
+    const paused = Object.assign(new Error("paused"), { reason: "rate-limited" });
+    let fail = true;
+    const binding = makeBinding(registry, async () => {
+      if (fail) throw paused;
+      return "rows";
+    });
+    const input = { key: "run-end" };
+    const release = binding.watch(input);
+    await registry.controllers.get(binding.targetKey(input) as string)?.inFlightPromise;
+    fail = false;
+    await binding.refreshAsync(input);
+    // A non-Error rejection arrives as the Error the state holds.
+    const rejectWith = makeBinding(registry, () => Promise.reject("offline"));
+    const stringInput = { key: "run-end-string" };
+    const releaseString = rejectWith.watch(stringInput);
+    await registry.controllers.get(rejectWith.targetKey(stringInput) as string)?.inFlightPromise;
+
+    expect(ends[0]).toEqual({ outcome: "error", error: paused });
+    expect(ends[0]?.error).toBe(paused);
+    expect(ends[1]).toEqual({ outcome: "success", error: undefined });
+    expect(ends[2]?.outcome).toBe("error");
+    expect(ends[2]?.error?.message).toBe("offline");
+    expect(rejectWith.snapshotFor(stringInput).error).toBe(ends[2]?.error);
+    release();
+    releaseString();
+    registry.dispose();
+  });
+});
+
 describe("keyed query publish hook", () => {
   it("reports published reads only, never superseded or fenced ones", async () => {
     const published: Array<{ key: string; data: unknown }> = [];

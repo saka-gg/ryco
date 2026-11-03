@@ -7,10 +7,10 @@ import {
   type ResolvedKeybindingsConfig,
 } from "@ryco/contracts";
 import {
-  compileResolvedKeybindingsConfig,
-  DEFAULT_RESOLVED_KEYBINDINGS,
-  mergeWithDefaultKeybindings,
-} from "@ryco/shared/keybindings";
+  APP_DEFAULT_RESOLVED_KEYBINDINGS,
+  resolveAppKeybindings,
+} from "@ryco/client-runtime/state/settings";
+import { NODE_DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/shared/keybindings";
 import {
   formatShortcutLabel,
   hasNoShortcutModifiers,
@@ -767,7 +767,7 @@ describe("resolveShortcutCommand", () => {
 
   it("resolves the default split-view shortcuts from physical keys", () => {
     const resolve = (overrides: Partial<ShortcutEventLike>, context = {}) =>
-      resolveShortcutCommand(event(overrides), DEFAULT_RESOLVED_KEYBINDINGS, {
+      resolveShortcutCommand(event(overrides), APP_DEFAULT_RESOLVED_KEYBINDINGS, {
         platform: "MacIntel",
         context,
       });
@@ -792,24 +792,144 @@ describe("resolveShortcutCommand", () => {
       null,
     );
     assert.strictEqual(
-      shortcutLabelForCommand(DEFAULT_RESOLVED_KEYBINDINGS, "pane.close", "MacIntel"),
+      shortcutLabelForCommand(APP_DEFAULT_RESOLVED_KEYBINDINGS, "pane.close", "MacIntel"),
       "⇧⌘\\",
     );
   });
 
-  it("matches alt+letter bindings through macOS Option dead keys and rewritten characters", () => {
-    // No default: a node sends every default to clients that may predate the command.
-    assert.isFalse(
-      DEFAULT_RESOLVED_KEYBINDINGS.some((rule) => rule.command === "chat.newWithoutProject"),
+  it("resolves the default history, interrupt and copy shortcuts outside the terminal", () => {
+    const resolve = (overrides: Partial<ShortcutEventLike>, platform = "MacIntel", context = {}) =>
+      resolveShortcutCommand(event(overrides), APP_DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform,
+        context,
+      });
+    const back = { key: "[", code: "BracketLeft", metaKey: true };
+    const forward = { key: "]", code: "BracketRight", metaKey: true };
+    const interrupt = { key: ".", code: "Period", metaKey: true };
+    const copyReference = { key: "c", code: "KeyC", metaKey: true, shiftKey: true };
+    assert.strictEqual(resolve(back), "navigation.back");
+    assert.strictEqual(resolve(forward), "navigation.forward");
+    assert.strictEqual(resolve(interrupt), "thread.interrupt");
+    assert.strictEqual(resolve(copyReference), "thread.copyReference");
+    assert.strictEqual(
+      resolve({ key: "]", code: "BracketRight", ctrlKey: true }, "Linux"),
+      "navigation.forward",
     );
-    // `chat.newWithoutProject` has no default key; this is a user's binding.
-    const keybindings = mergeWithDefaultKeybindings(
-      compileResolvedKeybindingsConfig([
-        { key: "mod+alt+n", command: "chat.newWithoutProject", when: "!terminalFocus" },
-      ]),
+    assert.strictEqual(
+      resolve({ key: "C", code: "KeyC", ctrlKey: true, shiftKey: true }, "Linux"),
+      "thread.copyReference",
+    );
+    // German layouts type "ü" on the physical [ key.
+    assert.strictEqual(
+      resolve({ key: "ü", code: "BracketLeft", metaKey: true }),
+      "navigation.back",
+    );
+    for (const overrides of [back, forward, interrupt, copyReference]) {
+      assert.isNull(resolve(overrides, "MacIntel", { terminalFocus: true }));
+    }
+    // Shift and Option keep the bracket keys' thread and pane commands.
+    assert.strictEqual(
+      resolve({ key: "{", code: "BracketLeft", metaKey: true, shiftKey: true }),
+      "thread.previous",
+    );
+    assert.strictEqual(
+      resolve({ key: "“", code: "BracketLeft", metaKey: true, altKey: true }),
+      "pane.focusPrevious",
+    );
+  });
+
+  it("resolves the default close and reopen view shortcuts outside the terminal", () => {
+    const resolve = (overrides: Partial<ShortcutEventLike>, terminalFocus = false) =>
+      resolveShortcutCommand(event(overrides), APP_DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+        context: { terminalFocus },
+      });
+    assert.strictEqual(resolve({ key: "w", metaKey: true }), "view.close");
+    // The focused terminal keeps mod+w for closing itself.
+    assert.strictEqual(resolve({ key: "w", metaKey: true }, true), "terminal.close");
+    assert.strictEqual(
+      resolve({ key: "T", code: "KeyT", metaKey: true, shiftKey: true }),
+      "view.reopenClosed",
+    );
+    assert.isNull(resolve({ key: "T", code: "KeyT", metaKey: true, shiftKey: true }, true));
+  });
+
+  it("also closes and reopens views with keys a browser tab passes to the page", () => {
+    const resolve = (overrides: Partial<ShortcutEventLike>, platform: string) =>
+      resolveShortcutCommand(event(overrides), APP_DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform,
+        context: { terminalFocus: false },
+      });
+    // A browser tab never passes ctrl+w and ctrl+shift+t to the page.
+    assert.strictEqual(
+      resolve({ key: "w", code: "KeyW", ctrlKey: true, altKey: true }, "Linux x86_64"),
+      "view.close",
+    );
+    assert.strictEqual(
+      resolve({ key: "T", code: "KeyT", ctrlKey: true, altKey: true, shiftKey: true }, "Win32"),
+      "view.reopenClosed",
+    );
+    // Option changes the letter on macOS; the physical key still matches.
+    assert.strictEqual(
+      resolve({ key: "∑", code: "KeyW", metaKey: true, altKey: true }, "MacIntel"),
+      "view.close",
+    );
+    // Labels show the keys that work in a browser tab too.
+    assert.strictEqual(
+      shortcutLabelForCommand(APP_DEFAULT_RESOLVED_KEYBINDINGS, "view.close", "Linux x86_64"),
+      "Ctrl+Alt+W",
+    );
+    assert.strictEqual(
+      shortcutLabelForCommand(APP_DEFAULT_RESOLVED_KEYBINDINGS, "view.reopenClosed", "MacIntel"),
+      "⌥⇧⌘T",
+    );
+  });
+
+  it("opens quick open on mod+p, find in files on mod+shift+f and the Files panel on mod+shift+e by default", () => {
+    const resolve = (
+      overrides: Partial<ShortcutEventLike>,
+      keybindings = APP_DEFAULT_RESOLVED_KEYBINDINGS,
+      context = {},
+    ) => resolveShortcutCommand(event(overrides), keybindings, { platform: "MacIntel", context });
+    assert.strictEqual(resolve({ key: "p", code: "KeyP", metaKey: true }), "workspace.quickOpen");
+    assert.strictEqual(
+      resolve({ key: "F", code: "KeyF", metaKey: true, shiftKey: true }),
+      "workspace.findInFiles",
+    );
+    // Thread search keeps mod+f.
+    assert.strictEqual(resolve({ key: "f", code: "KeyF", metaKey: true }), "thread.find");
+    assert.strictEqual(
+      resolve({ key: "E", code: "KeyE", metaKey: true, shiftKey: true }),
+      "workspace.files",
+    );
+    assert.strictEqual(
+      shortcutLabelForCommand(APP_DEFAULT_RESOLVED_KEYBINDINGS, "workspace.files", "MacIntel"),
+      "⇧⌘E",
+    );
+    // Terminal input keeps the key.
+    assert.isNull(
+      resolve({ key: "p", code: "KeyP", metaKey: true }, APP_DEFAULT_RESOLVED_KEYBINDINGS, {
+        terminalFocus: true,
+      }),
+    );
+    // A user's own mod+p rule for the Files panel still wins.
+    const filesOnModP = resolveAppKeybindings({
+      rules: [{ key: "mod+p", command: "workspace.files", when: "!terminalFocus" }],
+      disabledCommands: [],
+    });
+    assert.strictEqual(
+      resolve({ key: "p", code: "KeyP", metaKey: true }, filesOnModP),
+      "workspace.files",
+    );
+  });
+
+  it("matches alt+letter bindings through macOS Option dead keys and rewritten characters", () => {
+    // The default is client-only: a node sends every default to clients that may predate the command.
+    assert.isFalse(
+      NODE_DEFAULT_RESOLVED_KEYBINDINGS.some((rule) => rule.command === "chat.newWithoutProject"),
     );
     const resolve = (overrides: Partial<ShortcutEventLike>, platform = "MacIntel") =>
-      resolveShortcutCommand(event(overrides), keybindings, {
+      resolveShortcutCommand(event(overrides), APP_DEFAULT_RESOLVED_KEYBINDINGS, {
         platform,
         context: { terminalFocus: false },
       });
@@ -835,6 +955,83 @@ describe("resolveShortcutCommand", () => {
     );
     // Without Alt the physical key never stands in for the produced character.
     assert.isNull(resolve({ key: "Dead", code: "KeyN", metaKey: true }));
+  });
+
+  it("matches Ctrl+Alt defaults by their physical key outside a text field", () => {
+    const resolve = (overrides: Partial<ShortcutEventLike>) =>
+      resolveShortcutCommand(
+        event({ ctrlKey: true, altKey: true, ...overrides }),
+        APP_DEFAULT_RESOLVED_KEYBINDINGS,
+        { platform: "Win32", context: { terminalFocus: false } },
+      );
+    const altGraph = { getModifierState: (key: string) => key === "AltGraph" };
+    // Windows reports Ctrl+Alt as AltGr. Outside a text field it types nothing, so
+    // US-International Ctrl+Alt+P ("ö") and Ctrl+Alt+N ("ñ") and Polish (Programmers)
+    // Ctrl+Alt+N ("ń") keep their shortcuts. Text fields are covered in dialog.browser.tsx.
+    assert.strictEqual(resolve({ key: "ö", code: "KeyP" }), "thread.pinToggle");
+    assert.strictEqual(resolve({ key: "ñ", code: "KeyN" }), "chat.newWithoutProject");
+    assert.strictEqual(resolve({ key: "ń", code: "KeyN", ...altGraph }), "chat.newWithoutProject");
+    // US-International Ctrl+Alt+[ reports "«" with AltGraph.
+    assert.strictEqual(
+      resolve({ key: "«", code: "BracketLeft", ...altGraph }),
+      "pane.focusPrevious",
+    );
+  });
+
+  it("opens or minimizes the side chat on ⌘⌥S (Ctrl+Alt+S elsewhere), apart from snooze", () => {
+    const resolve = (overrides: Partial<ShortcutEventLike>, platform = "MacIntel", context = {}) =>
+      resolveShortcutCommand(event(overrides), APP_DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform,
+        context,
+      });
+    // Option+S types "ß" on macOS; the physical key names the binding.
+    const optionS = { key: "ß", code: "KeyS", metaKey: true, altKey: true };
+    assert.strictEqual(resolve(optionS), "sideChat.toggle");
+    assert.strictEqual(
+      resolve({ key: "s", code: "KeyS", ctrlKey: true, altKey: true }, "Linux"),
+      "sideChat.toggle",
+    );
+    assert.isNull(resolve(optionS, "MacIntel", { terminalFocus: true }));
+    // Shift makes it snooze, and ⌘S alone stays the composer stash.
+    assert.strictEqual(resolve({ ...optionS, key: "S", shiftKey: true }), "thread.snooze");
+    assert.strictEqual(resolve({ key: "s", code: "KeyS", metaKey: true }), "composer.stash");
+    const label = (platform: string) =>
+      shortcutLabelForCommand(APP_DEFAULT_RESOLVED_KEYBINDINGS, "sideChat.toggle", platform);
+    assert.strictEqual(label("MacIntel"), "⌥⌘S");
+    assert.strictEqual(label("Linux"), "Ctrl+Alt+S");
+  });
+
+  it("resolves the next thread that needs you outside the terminal", () => {
+    // The default is client-only: a node sends every default to clients that may predate the command.
+    assert.isFalse(
+      NODE_DEFAULT_RESOLVED_KEYBINDINGS.some((rule) =>
+        rule.command.startsWith("thread.attention."),
+      ),
+    );
+    const resolve = (overrides: Partial<ShortcutEventLike>, platform = "MacIntel", context = {}) =>
+      resolveShortcutCommand(event(overrides), APP_DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform,
+        context,
+      });
+    // Option+A types "å" on macOS; the physical key names the binding.
+    const optionA = { key: "å", code: "KeyA", metaKey: true, altKey: true };
+    assert.strictEqual(resolve(optionA), "thread.attention.next");
+    assert.strictEqual(
+      resolve({ key: "a", code: "KeyA", ctrlKey: true, altKey: true }, "Linux"),
+      "thread.attention.next",
+    );
+    assert.isNull(resolve(optionA, "MacIntel", { terminalFocus: true }));
+    // Polish AltGr+A, reported as Ctrl+Alt on Windows, types "ą" only in a text field
+    // (dialog.browser.tsx covers that); anywhere else the A key names the binding.
+    assert.strictEqual(
+      resolve({ key: "ą", code: "KeyA", ctrlKey: true, altKey: true }, "Win32"),
+      "thread.attention.next",
+    );
+    const label = (command: KeybindingCommand, platform: string) =>
+      shortcutLabelForCommand(APP_DEFAULT_RESOLVED_KEYBINDINGS, command, platform);
+    assert.strictEqual(label("thread.attention.next", "MacIntel"), "⌥⌘A");
+    assert.strictEqual(label("thread.attention.next", "Linux"), "Ctrl+Alt+A");
+    assert.isNull(label("thread.attention.previous", "MacIntel"));
   });
 });
 
@@ -973,6 +1170,47 @@ describe("plus key parsing", () => {
       isTerminalToggleShortcut(event({ key: "+", ctrlKey: true }), plusBindings, {
         platform: "Linux",
       }),
+    );
+  });
+});
+
+describe("open chat tab shortcuts", () => {
+  const resolve = (
+    overrides: Partial<ShortcutEventLike>,
+    platform: string,
+    context: { terminalFocus?: boolean } = {},
+  ) =>
+    resolveShortcutCommand(event(overrides), APP_DEFAULT_RESOLVED_KEYBINDINGS, {
+      platform,
+      context,
+    });
+
+  it("steps tabs with Cmd+Ctrl+Left/Right on macOS, also from the terminal", () => {
+    const right = { key: "ArrowRight", metaKey: true, ctrlKey: true };
+    const left = { key: "ArrowLeft", metaKey: true, ctrlKey: true };
+    assert.strictEqual(resolve(right, "MacIntel"), "threadTab.next");
+    assert.strictEqual(resolve(left, "MacIntel"), "threadTab.previous");
+    assert.strictEqual(resolve(right, "MacIntel", { terminalFocus: true }), "threadTab.next");
+    // Ctrl+PageDown is a Windows and Linux chord.
+    assert.isNull(resolve({ key: "PageDown", ctrlKey: true }, "MacIntel"));
+  });
+
+  it("steps tabs with Ctrl+PageUp/PageDown elsewhere, leaving them to a focused terminal", () => {
+    assert.strictEqual(resolve({ key: "PageDown", ctrlKey: true }, "Linux"), "threadTab.next");
+    assert.strictEqual(resolve({ key: "PageUp", ctrlKey: true }, "Win32"), "threadTab.previous");
+    assert.isNull(resolve({ key: "PageDown", ctrlKey: true }, "Linux", { terminalFocus: true }));
+    // `mod+ctrl` is plain Ctrl there: word movement must stay with the text field.
+    assert.isNull(resolve({ key: "ArrowRight", ctrlKey: true }, "Linux"));
+  });
+
+  it("labels the shortcut of the platform", () => {
+    assert.strictEqual(
+      shortcutLabelForCommand(APP_DEFAULT_RESOLVED_KEYBINDINGS, "threadTab.next", "MacIntel"),
+      "⌃⌘Right",
+    );
+    assert.strictEqual(
+      shortcutLabelForCommand(APP_DEFAULT_RESOLVED_KEYBINDINGS, "threadTab.next", "Linux"),
+      "Ctrl+PageDown",
     );
   });
 });

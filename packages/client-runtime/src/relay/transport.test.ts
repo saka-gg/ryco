@@ -37,6 +37,7 @@ import type {
   HostedRelayFailure,
   HostedServerAuthenticatedRelayInput,
 } from "../authorization/types.ts";
+import { bindHostedGitActionDelivery } from "../rpc/gitActionRecovery.ts";
 import { RpcRequestRefusedError } from "../rpc/protocol.ts";
 import type { WsRpcClient } from "../rpc/wsRpcClient.ts";
 import { encodeBase64Url } from "./base64url.ts";
@@ -1235,6 +1236,54 @@ describe("HostedRelayAttemptFactory", () => {
     // A mutation without a receipt stays tracked regardless.
     lifecycle.onRequestStart?.({ id: "write-1", tag: WS_METHODS.terminalWrite, stream: false });
     expect(claimed.hasPendingRequests()).toBe(true);
+  });
+
+  it("leaves a Git action's delivery to the recovery once it has claimed the connection", async () => {
+    vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
+      ticket: encodeBase64Url(new Uint8Array(32).fill(13)),
+      expiresAt: Date.now() + 60_000,
+      protocolMajor: 1,
+      protocolMinor: 2,
+    });
+    hostedHubStore.setState({ sessionStatus: "ready" });
+    const delivery = bindHostedGitActionDelivery(() => undefined);
+    const factory = new HostedRelayAttemptFactory();
+    const lifecycle = factory.lifecycleHandlers(undefined, delivery);
+    factory.createSocket(await factory.nextUrl());
+    const action = (id: string) => ({ id, tag: WS_METHODS.gitRunStackedAction, stream: true });
+
+    // Until the connection's recovery is attached it is tracked like any other mutation.
+    lifecycle.onRequestStart?.(action("stacked-action-1"));
+    expect(factory.hasPendingRequests()).toBe(true);
+    lifecycle.onRequestExit?.(action("stacked-action-1"));
+
+    delivery.claim();
+    lifecycle.onRequestStart?.(action("stacked-action-2"));
+    lifecycle.onRequestChunk?.({
+      id: "stacked-action-2",
+      tag: WS_METHODS.gitRunStackedAction,
+      chunkCount: 1,
+    });
+    expect(factory.hasPendingRequests()).toBe(false);
+    // Only the Git action itself: stopping it stays tracked.
+    lifecycle.onRequestStart?.({
+      id: "cancel-1",
+      tag: WS_METHODS.gitCancelStackedAction,
+      stream: false,
+    });
+    expect(factory.hasPendingRequests()).toBe(true);
+    lifecycle.onRequestExit?.({
+      id: "cancel-1",
+      tag: WS_METHODS.gitCancelStackedAction,
+      stream: false,
+    });
+
+    // The drop leaves the session stale, waiting for its replacement's own snapshot.
+    sockets[0]!.fail();
+    expect(hostedHubStore.getState()).toMatchObject({
+      transportStatus: "reconnecting",
+      sessionStatus: "stale",
+    });
   });
 
   it("tells the owner of a connection's commands when that connection closes unexpectedly", () => {

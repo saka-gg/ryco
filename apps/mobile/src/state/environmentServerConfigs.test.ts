@@ -18,22 +18,22 @@ describe("environment server config snapshots", () => {
       environment: { id: ENVIRONMENT_ID, label: "Node A", capabilities: {} },
       providers: [],
       settings: {
-        enableLegacyTokenStreaming: false,
-        inboxPriorityModelSelection: null,
+        responseStreamingMode: "turn",
+        textGenerationModelSelection: { instanceId: "codex", model: "gpt-5.4" },
       },
     } as unknown as ServerConfig;
     writeEnvironmentServerConfig(ENVIRONMENT_ID, config);
 
     patchEnvironmentServerSettings(ENVIRONMENT_ID, {
-      inboxPriorityModelSelection: {
+      textGenerationModelSelection: {
         instanceId: "codex" as never,
         model: "gpt-5.6",
       },
     });
 
     expect(readEnvironmentServerConfig(ENVIRONMENT_ID)?.settings).toMatchObject({
-      enableLegacyTokenStreaming: false,
-      inboxPriorityModelSelection: { model: "gpt-5.6" },
+      responseStreamingMode: "turn",
+      textGenerationModelSelection: { model: "gpt-5.6" },
     });
     expect(readEnvironmentServerConfig(EnvironmentId.make("node-b"))).toBeNull();
   });

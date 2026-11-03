@@ -9,7 +9,9 @@
  * each row's stack summary. Nodes are flattened into `gh`'s `--json` shape so the
  * existing decoders normalize them exactly as before.
  *
- * Everything here is pure; `GitHubCli` sends the documents over stdin.
+ * Everything here is pure; `GitHubCli` sends the documents over HTTPS, or to
+ * `gh api graphql` over stdin when the API cannot be used (no token for the
+ * host, a proxy Node.js would not use, an unreachable API).
  */
 import { Result, Schema } from "effect";
 import type {
@@ -44,6 +46,12 @@ export interface GitHubPullRequestListFields {
   readonly checks: boolean;
   /** `stackEntry` / `stack` (native stacks), absent on hosts without them. */
   readonly stack: boolean;
+  /**
+   * Only identity, branches, state and timestamps: what status lookups, the
+   * change request index and branch lookups read. Selects neither checks nor
+   * stacks, whatever `checks` and `stack` say.
+   */
+  readonly summary?: boolean;
 }
 
 // Same selections (and limits) `gh pr list --json <list fields>` asks for,
@@ -56,12 +64,21 @@ const PULL_REQUEST_ROW_FIELDS = `number title url baseRefName headRefName headRe
       headRepository { nameWithOwner }
       headRepositoryOwner { login }`;
 
+// Exactly the fields `gh pr list --json <summary fields>` reads
+// (`GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS`): no comments, checks,
+// mergeability (which makes GitHub compute it), reviews or stacks.
+const PULL_REQUEST_SUMMARY_FIELDS = `number title url baseRefName headRefName state mergedAt closedAt updatedAt createdAt isDraft isCrossRepository
+      author { __typename login }
+      headRepository { nameWithOwner }
+      headRepositoryOwner { login }`;
+
 const PULL_REQUEST_CHECK_FIELDS = `commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes { __typename ... on StatusContext { context state targetUrl createdAt } ... on CheckRun { name checkSuite { workflowRun { workflow { name } } } status conclusion startedAt completedAt detailsUrl } } } } } } }`;
 
 const PULL_REQUEST_STACK_FIELDS = `stackEntry { position }
       stack { number size baseRefName }`;
 
 function pullRequestRowSelection(fields: GitHubPullRequestListFields): string {
+  if (fields.summary === true) return PULL_REQUEST_SUMMARY_FIELDS;
   return [
     PULL_REQUEST_ROW_FIELDS,
     ...(fields.checks ? [PULL_REQUEST_CHECK_FIELDS] : []),
@@ -121,12 +138,17 @@ export function gitHubPullRequestListStates(
 /**
  * The search string `gh pr list --search <involvement> --state <state>` sends:
  * the involvement qualifier plus head, state, repository and type qualifiers.
+ * Without `repository` it searches every repository on the host; such searches
+ * add `archived:false` (`excludeArchived`) and `sort:updated-desc` (`sort`).
  */
 export function buildGitHubPullRequestInvolvementSearch(input: {
-  readonly repository: GitHubListRepository;
+  readonly repository?: GitHubListRepository | undefined;
   readonly involvement: ChangeRequestInvolvement;
   readonly state: GitHubPullRequestListState;
   readonly headSelector?: string | undefined;
+  readonly excludeArchived?: boolean | undefined;
+  /** Newest activity first; GitHub's search default is best match. */
+  readonly sort?: "updated" | undefined;
 }): string {
   const head = input.headSelector?.trim() ?? "";
   const state =
@@ -141,11 +163,34 @@ export function buildGitHubPullRequestInvolvementSearch(input: {
     gitHubInvolvementQualifier(input.involvement),
     head.length > 0 ? `head:${head}` : "",
     state,
-    `repo:${input.repository.owner}/${input.repository.name}`,
+    input.repository ? `repo:${input.repository.owner}/${input.repository.name}` : "",
+    input.excludeArchived ? "archived:false" : "",
     "type:pr",
+    input.sort === "updated" ? "sort:updated-desc" : "",
   ]
     .filter((part) => part.length > 0)
     .join(" ");
+}
+
+/**
+ * The account plus one page of a search across repositories, with the list row
+ * selection. No stack fields: stack numbers repeat across repositories. One page:
+ * callers report more matches as truncated instead of paging.
+ */
+export function buildGitHubInvolvedPullRequestSearchQuery(
+  fields: Pick<GitHubPullRequestListFields, "checks">,
+): string {
+  return `query($q: String!, $first: Int!) {
+  viewer { login }
+  search(query: $q, type: ISSUE, first: $first) {
+    pageInfo { hasNextPage }
+    nodes {
+      ... on PullRequest {
+      ${pullRequestRowSelection({ checks: fields.checks, stack: false })}
+      }
+    }
+  }
+}`;
 }
 
 export const GITHUB_ISSUE_LIST_QUERY = `query($owner: String!, $name: String!, $first: Int!, $after: String, $states: [IssueState!]) {
@@ -404,6 +449,90 @@ export function decodeGitHubPullRequestListPageJson(
     return row ? [row] : [];
   });
   return Result.succeed(pageOf(connection, rows));
+}
+
+const RawInvolvedSearchResponseSchema = Schema.Struct({
+  errors: Schema.optional(Schema.NullOr(Schema.Array(Schema.NullOr(RawGraphQlErrorSchema)))),
+  data: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        viewer: Schema.optional(
+          Schema.NullOr(Schema.Struct({ login: Schema.optional(Schema.NullOr(Schema.String)) })),
+        ),
+        search: Schema.optional(Schema.NullOr(RawConnectionSchema)),
+      }),
+    ),
+  ),
+});
+const decodeInvolvedSearchResponse = decodeJsonResult(RawInvolvedSearchResponseSchema);
+
+export interface GitHubInvolvedSearchPage {
+  /** The account GitHub answered for. */
+  readonly viewerLogin: string | null;
+  readonly rows: ReadonlyArray<GitHubPullRequestListRow>;
+  readonly hasNextPage: boolean;
+  /**
+   * Rows GitHub matched but did not return to this account (a null node with an error at
+   * `search.nodes.<n>`), as for organizations that enforce SAML single sign-on or restrict
+   * OAuth apps.
+   */
+  readonly skippedRows: number;
+}
+
+/** The search row a GraphQL error path points into (`["search", "nodes", 3, …]`). */
+function searchRowIndex(path: ReadonlyArray<string | number>): number | null {
+  return path[0] === "search" && path[1] === "nodes" && typeof path[2] === "number"
+    ? path[2]
+    : null;
+}
+
+/**
+ * A search across repositories answers rows from every organization the account
+ * touches, so an error inside one row costs that row only (just its checks, for a
+ * refused check rollup) and never the page. Errors outside the rows fail it.
+ */
+export function decodeGitHubInvolvedSearchJson(
+  raw: string,
+): Result.Result<GitHubInvolvedSearchPage, string> {
+  const decoded = decodeInvolvedSearchResponse(raw);
+  if (Result.isFailure(decoded)) {
+    return Result.fail(`Invalid GitHub search response: ${formatSchemaError(decoded.failure)}`);
+  }
+  const fatal: string[] = [];
+  const failedRows = new Set<number>();
+  const checksDeniedRows = new Set<number>();
+  for (const error of decoded.success.errors ?? []) {
+    const path = error?.path ?? [];
+    const row = searchRowIndex(path);
+    if (row === null) {
+      fatal.push(error?.message?.trim() || "GitHub GraphQL returned an error.");
+    } else if (
+      path.some((segment) => typeof segment === "string" && CHECK_PATH_SEGMENTS.has(segment))
+    ) {
+      checksDeniedRows.add(row);
+    } else {
+      failedRows.add(row);
+    }
+  }
+  if (fatal.length > 0) {
+    return Result.fail(`GitHub GraphQL returned errors: ${fatal.join("; ")}`);
+  }
+  const search = decoded.success.data?.search;
+  if (!search) return Result.fail("GitHub returned no search results connection.");
+  let skippedRows = 0;
+  const rows = search.nodes.flatMap((node, index) => {
+    const row = flattenPullRequestNode(node, { omitChecks: checksDeniedRows.has(index) });
+    if (row) return [row];
+    if (failedRows.has(index)) skippedRows += 1;
+    return [];
+  });
+  const login = decoded.success.data?.viewer?.login?.trim();
+  return Result.succeed({
+    viewerLogin: login ? login : null,
+    rows,
+    hasNextPage: search.pageInfo.hasNextPage,
+    skippedRows,
+  });
 }
 
 function flattenIssueNode(node: unknown): NormalizedGitHubIssueRecord | null {

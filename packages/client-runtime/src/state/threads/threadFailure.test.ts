@@ -2,6 +2,7 @@ import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuatio
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  failedTurnNotice,
   isThreadFailed,
   RESTART_INTERRUPTION_NOTICE,
   restartInterruptionNotice,
@@ -81,5 +82,37 @@ describe("restartInterruptionNotice", () => {
         restartInterruptionNotice({ session, latestTurn: interruptedTurn, activities: [] }),
       ).toBeNull();
     }
+  });
+});
+
+describe("failedTurnNotice", () => {
+  const failed = {
+    session: { status: "error", lastError: "Provider exited with code 1" },
+    latestTurn: { turnId: "turn-1", state: "error" },
+  };
+
+  it("names the failed turn and the provider's error", () => {
+    expect(failedTurnNotice(failed)).toEqual({
+      turnId: "turn-1",
+      title: "The last turn failed",
+      detail: "Provider exited with code 1",
+    });
+    expect(failedTurnNotice({ ...failed, session: { status: "ready" } })?.detail).toBeNull();
+  });
+
+  it("stays away while a turn runs, at a usage limit, after a restart and for other turns", () => {
+    expect(failedTurnNotice({ ...failed, session: { status: "running" } })).toBeNull();
+    expect(failedTurnNotice({ ...failed, session: { status: "connecting" } })).toBeNull();
+    expect(failedTurnNotice({ ...failed, usageLimit: { turnId: "turn-1" } })).toBeNull();
+    expect(
+      failedTurnNotice({
+        ...failed,
+        session: { status: "error", lastError: ORPHANED_PROVIDER_SESSION_ERROR },
+      }),
+    ).toBeNull();
+    expect(
+      failedTurnNotice({ ...failed, latestTurn: { turnId: "turn-1", state: "completed" } }),
+    ).toBeNull();
+    expect(failedTurnNotice({ session: null, latestTurn: null })).toBeNull();
   });
 });

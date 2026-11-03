@@ -69,6 +69,12 @@ export interface SessionPolicyInput {
    * disabled unless a provider explicitly declares it.
    */
   readonly askModeSupported: boolean;
+  /**
+   * From `getAutoRuntimeModeUnavailableReason`: set when the selected instance
+   * reports that its model cannot run Auto. The server downgrades an Auto
+   * session on its own; this keeps the picker from offering it.
+   */
+  readonly autoModeUnavailableReason?: string | null;
   /** Set while the environment cannot accept mutations (offline, viewer role…). */
   readonly mutationBlockedReason?: string | null;
 }
@@ -84,6 +90,9 @@ export function buildSessionPolicyModel(input: SessionPolicyInput): SessionPolic
     label: "Access",
     segments: runtimeModeOptions.map((value) => {
       const presentation = runtimeModeConfig[value];
+      // Like an unsupported `ask`, a refused `auto` stays disabled even when
+      // mutation is allowed.
+      const autoUnavailable = (value === "auto" && input.autoModeUnavailableReason?.trim()) || null;
       return {
         value,
         label: presentation.label,
@@ -92,8 +101,8 @@ export function buildSessionPolicyModel(input: SessionPolicyInput): SessionPolic
         icon: presentation.icon,
         tone: presentation.tone,
         selected: value === input.runtimeMode,
-        disabled: blocked !== null,
-        disabledReason: blocked,
+        disabled: blocked !== null || autoUnavailable !== null,
+        disabledReason: blocked ?? autoUnavailable,
       };
     }),
   };

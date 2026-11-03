@@ -34,8 +34,11 @@ import {
 import * as GitHubIssues from "./gitHubIssues.ts";
 import * as GitHubPullRequestMutations from "./gitHubPullRequestMutations.ts";
 import * as GitHubPullRequests from "./gitHubPullRequests.ts";
+import type * as GitHubRepositoryLists from "./gitHubRepositoryLists.ts";
 import * as GitHubRequiredChecks from "./gitHubRequiredChecks.ts";
+import { sourceControlProviderErrorFrom } from "./forgeFailure.ts";
 import * as SourceControlProvider from "./SourceControlProvider.ts";
+import { changeRequestHostName } from "./pullRequestIndex.ts";
 import { withSourceControlBodyFile } from "./sourceControlBodyFile.ts";
 export { githubDiscovery as discovery } from "./SourceControlProviderDiscoveryCatalog.ts";
 
@@ -43,12 +46,7 @@ function providerError(
   operation: string,
   cause: GitHubCli.GitHubCliError,
 ): SourceControlProviderError {
-  return new SourceControlProviderError({
-    provider: "github",
-    operation,
-    detail: cause.detail,
-    cause,
-  });
+  return sourceControlProviderErrorFrom("github", operation, cause);
 }
 
 function toChangeRequest(
@@ -205,6 +203,26 @@ function dateTimeOption(value: string | null | undefined): Option.Option<DateTim
   const date = new Date(trimmed);
   if (!Number.isFinite(date.getTime())) return Option.none();
   return Option.some(DateTime.fromDateUnsafe(date));
+}
+
+/** A pull request's state as `getPullRequestState` and `getLinkStates` report it. */
+function pullRequestLinkState(record: GitHubRepositoryLists.GitHubPullRequestStateRecord): {
+  readonly state: "open" | "closed" | "merged";
+  readonly isDraft: boolean;
+  readonly terminalAt: DateTime.Utc | null;
+} {
+  const terminal =
+    record.state === "merged"
+      ? (record.mergedAt ?? record.closedAt)
+      : record.state === "closed"
+        ? record.closedAt
+        : null;
+  const terminalAt = terminal === null ? null : DateTime.make(terminal);
+  return {
+    state: record.state,
+    isDraft: record.isDraft,
+    terminalAt: terminalAt !== null && Option.isSome(terminalAt) ? terminalAt.value : null,
+  };
 }
 
 function durationMsOption(
@@ -540,8 +558,11 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
       // Rows for lists (the page, overview, explorer and pickers share one
       // superset): one GraphQL request with comment counts, not bodies, and
       // stack summaries in the same request instead of a second round trip.
+      // The summary view (the change request index, branch lookups, pickers)
+      // is the same list with only identity, branches, state and timestamps.
       // Free-text search keeps `gh`'s own search (its advanced-search syntax).
-      if (input.fields !== "summary" && query.length === 0) {
+      if (query.length === 0) {
+        const summary = input.fields === "summary";
         return github
           .listPullRequests({
             cwd: input.cwd,
@@ -549,12 +570,18 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
             ...(headSelector.length > 0 ? { headSelector } : {}),
             ...(input.involvement !== undefined ? { involvement: input.involvement } : {}),
             ...(input.limit !== undefined ? { limit: input.limit } : {}),
-            ...(input.includeStackSummary === false ? { includeStackSummary: false } : {}),
+            ...(summary ? { fields: "summary" as const } : {}),
+            ...(summary || input.includeStackSummary === false
+              ? { includeStackSummary: false }
+              : {}),
           })
           .pipe(
             Effect.map((items) =>
               items.map((item) => toChangeRequest(item.summary, item.stackSummary ?? undefined)),
             ),
+            // Summary rows carry no stacks; a caller that wants them anyway
+            // gets the separate lookup, as before.
+            Effect.flatMap((items) => (summary ? enrich(items) : Effect.succeed(items))),
             Effect.mapError((error) => providerError("listChangeRequests", error)),
           );
       }
@@ -563,26 +590,14 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
       const executeListChangeRequests = (jsonFields: ReadonlyArray<string>) =>
         github.execute({
           cwd: input.cwd,
-          args: searchScoped
-            ? GitHubPullRequestMutations.buildGitHubPullRequestSearchListArgs({
-                involvement: input.involvement,
-                query,
-                state: stateArg,
-                headSelector,
-                limit: input.limit ?? 20,
-                jsonFields: GitHubCli.formatGitHubJsonFields(jsonFields),
-              })
-            : [
-                "pr",
-                "list",
-                ...(headSelector.length > 0 ? ["--head", headSelector] : []),
-                "--state",
-                stateArg,
-                "--limit",
-                String(input.limit ?? 20),
-                "--json",
-                GitHubCli.formatGitHubJsonFields(jsonFields),
-              ],
+          args: GitHubPullRequestMutations.buildGitHubPullRequestSearchListArgs({
+            involvement: input.involvement,
+            query,
+            state: stateArg,
+            headSelector,
+            limit: input.limit ?? 20,
+            jsonFields: GitHubCli.formatGitHubJsonFields(jsonFields),
+          }),
         });
 
       const listed =
@@ -1028,6 +1043,28 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
       github
         .getPullRequestActivity({ cwd: input.cwd, reference: input.reference })
         .pipe(Effect.mapError((error) => providerError("getChangeRequestActivity", error))),
+    // The pull request's own URL names the repository and host, whichever checkout reads it.
+    getChangeRequestWatchFingerprint: (input) => {
+      const identity = parseGitHubRepositoryIdentityFromUrl(input.url);
+      if (!identity) return Effect.succeed(null);
+      return github
+        .getPullRequestWatchFingerprint({
+          cwd: input.cwd,
+          host: identity.host,
+          repository: identity.nameWithOwner,
+          number: input.number,
+          ...(input.reuseSinceMs !== undefined ? { reuseSinceMs: input.reuseSinceMs } : {}),
+        })
+        .pipe(Effect.mapError((cause) => providerError("getChangeRequestWatchFingerprint", cause)));
+    },
+    getChangeRequestReviewThread: (input) =>
+      github
+        .getPullRequestReviewThread({
+          cwd: input.cwd,
+          reference: input.reference,
+          threadId: input.threadId,
+        })
+        .pipe(Effect.mapError((error) => providerError("getChangeRequestReviewThread", error))),
     getChangeRequestFileContents: ({ context: _context, ...input }) =>
       github
         .getPullRequestFileContents(input)
@@ -1150,25 +1187,23 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
         ),
         Effect.mapError((cause) => providerError("listAssignees", cause)),
       ),
+    // The batched state read with one number: one GraphQL document, which the
+    // client sends over HTTPS when it can (`gh pr view` always starts gh).
     getPullRequestState: (input) =>
-      github
-        .getPullRequest({ cwd: input.cwd, reference: String(input.number), fields: "summary" })
-        .pipe(
-          Effect.map((summary) => {
-            const state = summary.state ?? "open";
-            return {
-              state,
-              isDraft: summary.isDraft ?? false,
-              terminalAt:
-                state === "merged"
-                  ? (summary.mergedAt ?? summary.closedAt ?? null)
-                  : state === "closed"
-                    ? (summary.closedAt ?? null)
-                    : null,
-            };
-          }),
-          Effect.mapError((cause) => providerError("getPullRequestState", cause)),
-        ),
+      github.getLinkStates({ cwd: input.cwd, pullRequests: [input.number], issues: [] }).pipe(
+        Effect.flatMap((records) => {
+          const record = records.pullRequests.get(input.number);
+          return record === undefined
+            ? Effect.fail(
+                new GitHubCli.GitHubCliError({
+                  operation: "getPullRequestState",
+                  detail: `GitHub could not resolve pull request #${input.number}.`,
+                }),
+              )
+            : Effect.succeed(pullRequestLinkState(record));
+        }),
+        Effect.mapError((cause) => providerError("getPullRequestState", cause)),
+      ),
     getLinkStates: (input) =>
       github
         .getLinkStates({
@@ -1179,28 +1214,34 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
         .pipe(
           Effect.map((records) => ({
             pullRequests: new Map(
-              [...records.pullRequests].map(([number, record]) => {
-                const terminal =
-                  record.state === "merged"
-                    ? (record.mergedAt ?? record.closedAt)
-                    : record.state === "closed"
-                      ? record.closedAt
-                      : null;
-                const terminalAt = terminal === null ? null : DateTime.make(terminal);
-                return [
-                  number,
-                  {
-                    state: record.state,
-                    isDraft: record.isDraft,
-                    terminalAt:
-                      terminalAt !== null && Option.isSome(terminalAt) ? terminalAt.value : null,
-                  },
-                ] as const;
-              }),
+              [...records.pullRequests].map(
+                ([number, record]) => [number, pullRequestLinkState(record)] as const,
+              ),
             ),
             issues: records.issues,
           })),
           Effect.mapError((cause) => providerError("getLinkStates", cause)),
+        ),
+    searchInvolvedChangeRequests: (input) =>
+      github
+        .searchInvolvedPullRequests({
+          cwd: input.cwd,
+          host:
+            (input.context ? changeRequestHostName(input.context.provider.baseUrl) : null) ??
+            "github.com",
+          involvement: input.involvement,
+          state: input.state,
+          ...(input.limit !== undefined ? { limit: input.limit } : {}),
+        })
+        .pipe(
+          Effect.map((page) => ({
+            host: page.host,
+            viewerLogin: page.viewerLogin,
+            items: page.items.map((item) => toChangeRequest(item.summary)),
+            truncated: page.truncated,
+            skippedRows: page.skippedRows,
+          })),
+          Effect.mapError((cause) => providerError("searchInvolvedChangeRequests", cause)),
         ),
     // Only the state: one aliased GraphQL read, not the issue's body, comments and
     // comment reactions.

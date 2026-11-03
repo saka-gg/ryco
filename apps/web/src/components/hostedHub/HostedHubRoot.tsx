@@ -39,6 +39,7 @@ import {
 
 import {
   HostedRootAppShell as RootAppShell,
+  HostedThreadAlerts,
   preloadHostedRootAppShell,
 } from "./hostedRootAppShell";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
@@ -199,6 +200,20 @@ function selectEnvironmentHasShell(state: AppState, environmentId: EnvironmentId
 }
 
 export function HostedHubRoot() {
+  const accountAuthenticated = useHostedHubStore(
+    (state) => state.accountStatus === "authenticated",
+  );
+  return (
+    <>
+      {/* Above the choice of surface, so they keep running for the nodes that
+          stay connected while a Hub page or a node switch replaces the shell. */}
+      {accountAuthenticated ? <HostedThreadAlerts /> : null}
+      <HostedHubSurface />
+    </>
+  );
+}
+
+function HostedHubSurface() {
   const readCache = useHostedReadCache();
   const directoryNodes = useHostedHubStore((state) => state.nodes);
   const directoryStatus = useHostedHubStore((state) => state.directoryStatus);
@@ -683,6 +698,10 @@ export function HostedAuthenticationSurface({
   readonly context?: "hub" | "native-authorization";
   readonly autoExternalProvider?: "github" | null;
 } = {}) {
+  // Uncompiled on purpose: Babel's React Compiler never compiled this function
+  // (it bails on value blocks inside try/catch). Oxc can, but its render reads
+  // have not been audited for purity yet. Remove after that audit.
+  "use no memo";
   const status = useHostedHubStore((state) => state.accountStatus);
   const error = useHostedHubStore((state) => state.errorMessage);
   const errorReason = useHostedHubStore((state) => state.errorReason ?? null);

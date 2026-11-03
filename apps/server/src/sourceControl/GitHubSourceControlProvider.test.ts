@@ -366,88 +366,181 @@ it.effect("lists rows through the GraphQL list with counts and inline stack summ
   }),
 );
 
-it.effect("lists only summary fields, without stack lookups, when asked for the summary view", () =>
-  Effect.gen(function* () {
-    const executeArgs: ReadonlyArray<string>[] = [];
-    let stackLookups = 0;
-    const provider = yield* makeProvider({
-      execute: (input) => {
-        executeArgs.push(input.args);
-        return Effect.succeed(processResult("[]"));
-      },
-      getPullRequestStackSummaries: () =>
-        Effect.sync(() => {
-          stackLookups += 1;
-          return new Map();
-        }),
-    });
+it.effect(
+  "reads the change request index and branch lookups through the GraphQL summary list",
+  () =>
+    Effect.gen(function* () {
+      const requests: Array<Parameters<GitHubCli.GitHubCliShape["listPullRequests"]>[0]> = [];
+      const executeArgs: ReadonlyArray<string>[] = [];
+      let stackLookups = 0;
+      const provider = yield* makeProvider({
+        listPullRequests: (input) =>
+          Effect.sync(() => {
+            requests.push(input);
+            return [
+              {
+                summary: {
+                  number: 7,
+                  title: "Fix the index",
+                  url: "https://github.com/pingdotgg/ryco/pull/7",
+                  baseRefName: "main",
+                  headRefName: "feature/x",
+                  state: "open" as const,
+                  isDraft: false,
+                  isCrossRepository: false,
+                  author: "octocat",
+                  assignees: [],
+                  labels: [],
+                  commentsCount: null,
+                  headRepositoryNameWithOwner: "pingdotgg/ryco",
+                  headRepositoryOwnerLogin: "pingdotgg",
+                  updatedAt: Option.some(DateTime.makeUnsafe("2026-10-20T00:00:00.000Z")),
+                },
+                stackSummary: null,
+              },
+            ];
+          }),
+        execute: (input) => {
+          executeArgs.push(input.args);
+          return Effect.succeed(processResult("[]"));
+        },
+        getPullRequestStackSummaries: () =>
+          Effect.sync(() => {
+            stackLookups += 1;
+            return new Map();
+          }),
+      });
 
-    yield* provider.listChangeRequests({
-      cwd: "/repo",
-      headSelector: "",
-      state: "all",
-      limit: 100,
-      includeStackSummary: false,
-      fields: "summary",
-    });
-    yield* provider.listChangeRequests({
-      cwd: "/repo",
-      headSelector: "feature/x",
-      state: "open",
-      limit: 1,
-      includeStackSummary: false,
-      fields: "summary",
-    });
+      const indexed = yield* provider.listChangeRequests({
+        cwd: "/repo",
+        headSelector: "",
+        state: "all",
+        limit: 100,
+        includeStackSummary: false,
+        fields: "summary",
+      });
+      yield* provider.listChangeRequests({
+        cwd: "/repo",
+        headSelector: "feature/x",
+        state: "open",
+        limit: 1,
+        includeStackSummary: false,
+        fields: "summary",
+      });
 
-    const summaryFields = GitHubCli.formatGitHubJsonFields(
-      GitHubCli.GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS,
-    );
-    assert.deepStrictEqual(executeArgs, [
-      ["pr", "list", "--state", "all", "--limit", "100", "--json", summaryFields],
-      [
-        "pr",
-        "list",
-        "--head",
-        "feature/x",
-        "--state",
-        "open",
-        "--limit",
-        "1",
-        "--json",
-        summaryFields,
-      ],
-    ]);
-    assert.strictEqual(stackLookups, 0);
-    for (const field of ["comments", "statusCheckRollup", "mergeable", "reviewDecision"]) {
-      assert.notInclude(summaryFields.split(","), field);
-    }
-  }),
+      assert.deepStrictEqual(requests, [
+        { cwd: "/repo", state: "all", limit: 100, fields: "summary", includeStackSummary: false },
+        {
+          cwd: "/repo",
+          state: "open",
+          headSelector: "feature/x",
+          limit: 1,
+          fields: "summary",
+          includeStackSummary: false,
+        },
+      ]);
+      // No `gh pr list`, and no stack lookup the caller did not ask for.
+      assert.deepStrictEqual(executeArgs, []);
+      assert.strictEqual(stackLookups, 0);
+      assert.deepStrictEqual(indexed, [
+        {
+          provider: "github",
+          number: 7,
+          title: "Fix the index",
+          url: "https://github.com/pingdotgg/ryco/pull/7",
+          baseRefName: "main",
+          headRefName: "feature/x",
+          state: "open",
+          updatedAt: Option.some(DateTime.makeUnsafe("2026-10-20T00:00:00.000Z")),
+          isCrossRepository: false,
+          isDraft: false,
+          author: "octocat",
+          headRepositoryNameWithOwner: "pingdotgg/ryco",
+          headRepositoryOwnerLogin: "pingdotgg",
+        },
+      ]);
+
+      // A summary read that wants stacks still gets the separate lookup.
+      yield* provider.listChangeRequests({
+        cwd: "/repo",
+        headSelector: "",
+        state: "open",
+        fields: "summary",
+      });
+      assert.deepStrictEqual(requests.at(-1), {
+        cwd: "/repo",
+        state: "open",
+        fields: "summary",
+        includeStackSummary: false,
+      });
+      assert.strictEqual(stackLookups, 1);
+
+      // Free-text search keeps gh's own search syntax.
+      yield* provider.listChangeRequests({
+        cwd: "/repo",
+        headSelector: "",
+        state: "open",
+        query: "fix",
+        limit: 5,
+        includeStackSummary: false,
+        fields: "summary",
+      });
+      assert.lengthOf(requests, 3);
+      assert.deepStrictEqual(executeArgs, [
+        [
+          "pr",
+          "list",
+          "--search",
+          "fix",
+          "--state",
+          "open",
+          "--limit",
+          "5",
+          "--json",
+          GitHubCli.formatGitHubJsonFields(GitHubCli.GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS),
+        ],
+      ]);
+    }),
 );
 
-it.effect("reads pull request state with the summary field set", () =>
+it.effect("reads one pull request's state through the batched link read, not gh pr view", () =>
   Effect.gen(function* () {
-    let requestedFields: string | undefined;
+    const asked: Array<{ pullRequests: ReadonlyArray<number>; issues: ReadonlyArray<number> }> = [];
     const provider = yield* makeProvider({
-      getPullRequest: (input) =>
+      getPullRequest: () => Effect.die("gh pr view is not used for a state read"),
+      getLinkStates: (input) =>
         Effect.sync(() => {
-          requestedFields = input.fields;
+          asked.push({ pullRequests: input.pullRequests, issues: input.issues });
           return {
-            number: 5,
-            title: "Done",
-            url: "https://github.com/owner/repo/pull/5",
-            baseRefName: "main",
-            headRefName: "feature/done",
-            state: "merged" as const,
-            updatedAt: Option.none(),
-            mergedAt: DateTime.makeUnsafe("2026-01-03T00:00:00.000Z"),
+            pullRequests: new Map(
+              input.pullRequests.includes(5)
+                ? [
+                    [
+                      5,
+                      {
+                        state: "merged" as const,
+                        isDraft: false,
+                        closedAt: "2026-01-03T00:00:05Z",
+                        mergedAt: "2026-01-03T00:00:00Z",
+                      },
+                    ],
+                  ]
+                : [],
+            ),
+            issues: new Map(),
           };
         }),
     });
 
     const state = yield* provider.getPullRequestState({ cwd: "/repo", number: 5 });
-    assert.strictEqual(requestedFields, "summary");
     assert.strictEqual(state.state, "merged");
     assert.deepStrictEqual(state.terminalAt, DateTime.makeUnsafe("2026-01-03T00:00:00.000Z"));
+    assert.deepStrictEqual(asked, [{ pullRequests: [5], issues: [] }]);
+
+    const missing = yield* provider
+      .getPullRequestState({ cwd: "/repo", number: 42 })
+      .pipe(Effect.flip);
+    assert.include(missing.detail, "GitHub could not resolve pull request #42.");
   }),
 );
 
@@ -1953,40 +2046,45 @@ it.effect("returns a fresh uncapped detail after a lifecycle update", () =>
 
 it.effect("reports the PR terminal time from mergedAt and closedAt", () =>
   Effect.gen(function* () {
-    const mergedAt = DateTime.makeUnsafe("2026-05-01T10:00:00.000Z");
-    const closedAt = DateTime.makeUnsafe("2026-05-01T10:00:05.000Z");
     const pullRequest = (
       state: "open" | "closed" | "merged",
-      times: { readonly mergedAt?: DateTime.Utc; readonly closedAt?: DateTime.Utc },
+      times: { readonly mergedAt?: string; readonly closedAt?: string },
     ) =>
       makeProvider({
-        getPullRequest: () =>
+        getLinkStates: () =>
           Effect.succeed({
-            number: 42,
-            title: "Terminal time",
-            url: "https://github.com/owner/repo/pull/42",
-            baseRefName: "main",
-            headRefName: "feature/terminal-time",
-            state,
-            isDraft: false,
-            ...times,
+            pullRequests: new Map([
+              [
+                42,
+                {
+                  state,
+                  isDraft: false,
+                  mergedAt: times.mergedAt ?? null,
+                  closedAt: times.closedAt ?? null,
+                },
+              ],
+            ]),
+            issues: new Map(),
           }),
       }).pipe(
         Effect.flatMap((provider) => provider.getPullRequestState({ cwd: "/repo", number: 42 })),
       );
 
+    const mergedAt = "2026-05-01T10:00:00.000Z";
+    const closedAt = "2026-05-01T10:00:05.000Z";
     const merged = yield* pullRequest("merged", { mergedAt, closedAt });
     assert.strictEqual(merged.state, "merged");
     assert.isTrue(merged.terminalAt !== null && merged.terminalAt !== undefined);
-    assert.strictEqual(
-      merged.terminalAt && DateTime.formatIso(merged.terminalAt),
-      "2026-05-01T10:00:00.000Z",
-    );
+    assert.strictEqual(merged.terminalAt && DateTime.formatIso(merged.terminalAt), mergedAt);
 
     const closed = yield* pullRequest("closed", { closedAt });
+    assert.strictEqual(closed.terminalAt && DateTime.formatIso(closed.terminalAt), closedAt);
+
+    // A merge without a merge time falls back to the close time.
+    const mergedWithoutTime = yield* pullRequest("merged", { closedAt });
     assert.strictEqual(
-      closed.terminalAt && DateTime.formatIso(closed.terminalAt),
-      "2026-05-01T10:00:05.000Z",
+      mergedWithoutTime.terminalAt && DateTime.formatIso(mergedWithoutTime.terminalAt),
+      closedAt,
     );
 
     const open = yield* pullRequest("open", {});
@@ -2041,5 +2139,122 @@ it.effect("reads a linked issue's state alone, through the batched link read", (
       { pullRequests: [], issues: [8] },
       { pullRequests: [3], issues: [7] },
     ]);
+  }),
+);
+
+it.effect("reads a pull request's watch fingerprint from the repository its URL names", () =>
+  Effect.gen(function* () {
+    const asked: Array<{ host: string; repository: string; number: number; cwd: string }> = [];
+    const provider = yield* makeProvider({
+      getPullRequestWatchFingerprint: (input) =>
+        Effect.sync(() => {
+          asked.push(input);
+          return input.number === 404 ? null : { status: "OPEN", remarks: "0  0  0" };
+        }),
+    });
+    const fingerprint = provider.getChangeRequestWatchFingerprint;
+    assert.ok(fingerprint, "GitHub implements the watch fingerprint");
+
+    assert.deepStrictEqual(
+      yield* fingerprint({
+        cwd: "/repo",
+        number: 12,
+        url: "https://github.example.com/Acme/Widgets/pull/12",
+      }),
+      { status: "OPEN", remarks: "0  0  0" },
+    );
+    assert.isNull(
+      yield* fingerprint({
+        cwd: "/repo",
+        number: 404,
+        url: "https://github.com/acme/web/pull/404",
+      }),
+    );
+    // A URL that names no repository has no fingerprint: the watch reads it in full.
+    assert.isNull(yield* fingerprint({ cwd: "/repo", number: 5, url: "not a url" }));
+    assert.deepStrictEqual(asked, [
+      { cwd: "/repo", host: "github.example.com", repository: "Acme/Widgets", number: 12 },
+      { cwd: "/repo", host: "github.com", repository: "acme/web", number: 404 },
+    ]);
+  }),
+);
+
+it.effect("reports a failed watch fingerprint read as a provider error", () =>
+  Effect.gen(function* () {
+    const provider = yield* makeProvider({
+      getPullRequestWatchFingerprint: () =>
+        Effect.fail(
+          new GitHubCli.GitHubCliError({
+            operation: "getPullRequestWatchFingerprint",
+            detail: "GitHub API rate limit exceeded. Wait for the reset window and retry.",
+          }),
+        ),
+    });
+    const error = yield* provider.getChangeRequestWatchFingerprint!({
+      cwd: "/repo",
+      number: 12,
+      url: "https://github.com/acme/web/pull/12",
+    }).pipe(Effect.flip);
+    assert.equal(error.provider, "github");
+    assert.equal(error.operation, "getChangeRequestWatchFingerprint");
+    assert.include(error.detail, "rate limit");
+  }),
+);
+
+it.effect("searches involved pull requests on the context's host, github.com without one", () =>
+  Effect.gen(function* () {
+    const calls: Array<{ readonly host: string; readonly limit: number | undefined }> = [];
+    const provider = yield* makeProvider({
+      searchInvolvedPullRequests: (input) =>
+        Effect.sync(() => {
+          calls.push({ host: input.host, limit: input.limit });
+          return {
+            host: input.host,
+            viewerLogin: "octocat",
+            items: [
+              {
+                summary: {
+                  number: 9,
+                  title: "Nine",
+                  url: `https://${input.host}/acme/app/pull/9`,
+                  baseRefName: "main",
+                  headRefName: "feature/nine",
+                  state: "open" as const,
+                  isDraft: true,
+                },
+                stackSummary: null,
+              },
+            ],
+            truncated: false,
+            skippedRows: 0,
+          };
+        }),
+    });
+    const search = provider.searchInvolvedChangeRequests;
+    assert.ok(search);
+    const enterprise = yield* search({
+      cwd: "/repo",
+      context: {
+        provider: {
+          kind: "github",
+          name: "GitHub Self-Hosted",
+          baseUrl: "https://GitHub.Example.com:8443",
+        },
+        remoteName: "origin",
+        remoteUrl: "ssh://git@github.example.com:8443/acme/app.git",
+      },
+      involvement: "authored",
+      state: "open",
+      limit: 50,
+    });
+    yield* search({ cwd: "/repo", involvement: "authored", state: "open" });
+
+    assert.deepStrictEqual(calls, [
+      { host: "github.example.com", limit: 50 },
+      { host: "github.com", limit: undefined },
+    ]);
+    assert.strictEqual(enterprise.items[0]?.provider, "github");
+    assert.strictEqual(enterprise.items[0]?.isDraft, true);
+    assert.strictEqual(enterprise.viewerLogin, "octocat");
   }),
 );

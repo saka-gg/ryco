@@ -4,6 +4,7 @@ import { createModelSelection } from "./model.ts";
 import {
   applyServerSettingsPatch,
   extractPersistedServerObservabilitySettings,
+  migrateLegacyServerSettings,
   normalizePersistedServerSettingString,
   parsePersistedServerObservabilitySettings,
 } from "./serverSettings.ts";
@@ -203,6 +204,51 @@ describe("serverSettings helpers", () => {
   });
 });
 
+describe("response streaming mode", () => {
+  const withMode = (responseStreamingMode: "turn" | "paragraph" | "token") => ({
+    ...DEFAULT_SERVER_SETTINGS,
+    responseStreamingMode,
+  });
+
+  it("maps the legacy token switch that older clients write", () => {
+    const patch = (current: "turn" | "paragraph" | "token", enabled: boolean) =>
+      applyServerSettingsPatch(withMode(current), { enableLegacyTokenStreaming: enabled });
+    expect(patch("turn", true).responseStreamingMode).toBe("token");
+    expect(patch("token", false).responseStreamingMode).toBe("paragraph");
+    expect(patch("turn", false).responseStreamingMode).toBe("turn");
+    expect(patch("paragraph", false).responseStreamingMode).toBe("paragraph");
+    expect(patch("turn", true)).not.toHaveProperty("enableLegacyTokenStreaming");
+  });
+
+  it("lets the new key win when a patch carries both", () => {
+    expect(
+      applyServerSettingsPatch(withMode("paragraph"), {
+        responseStreamingMode: "turn",
+        enableLegacyTokenStreaming: true,
+      }).responseStreamingMode,
+    ).toBe("turn");
+  });
+
+  it("upgrades a saved token-streaming opt-in and leaves everything else alone", () => {
+    expect(migrateLegacyServerSettings({ enableLegacyTokenStreaming: true, a: 1 })).toEqual({
+      enableLegacyTokenStreaming: true,
+      a: 1,
+      responseStreamingMode: "token",
+    });
+    for (const persisted of [
+      { enableLegacyTokenStreaming: false },
+      { enableLegacyTokenStreaming: true, responseStreamingMode: "turn" },
+      { enableLegacyTokenStreaming: "yes" },
+      {},
+      [],
+      "text",
+      null,
+    ]) {
+      expect(migrateLegacyServerSettings(persisted)).toBe(persisted);
+    }
+  });
+});
+
 describe("node auto-settle rule patches", () => {
   it("sets the rule, Off included, and keeps it absent until then", () => {
     expect(Object.hasOwn(DEFAULT_SERVER_SETTINGS, "threadAutoSettleAfterDays")).toBe(false);
@@ -290,5 +336,59 @@ describe("worktree root override patches", () => {
     expect(applyServerSettingsPatch(reset, { worktreeRoot: "" }).projectWorktreeRoots).toEqual({
       b: "/volumes/b",
     });
+  });
+});
+
+describe("usage price override patches", () => {
+  const price = (input: number) => ({
+    price: { inputUsdPerMillion: input, outputUsdPerMillion: input * 5 },
+  });
+
+  it("patches individual models, removes them with null and leaves other settings alone", () => {
+    const first = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      usagePriceOverrides: { "kimi-k3": price(1), preview: { mapTo: "claude-opus-5" } },
+    });
+    const second = applyServerSettingsPatch(first, {
+      usagePriceOverrides: { "kimi-k3": price(2), other: price(3) },
+    });
+    expect(second.usagePriceOverrides).toEqual({
+      "kimi-k3": price(2),
+      preview: { mapTo: "claude-opus-5" },
+      other: price(3),
+    });
+    // An entry is replaced whole: a mapping does not keep the price it replaces.
+    const remapped = applyServerSettingsPatch(second, {
+      usagePriceOverrides: { "kimi-k3": { mapTo: "kimi-k2" }, preview: null },
+    });
+    expect(remapped.usagePriceOverrides).toEqual({
+      "kimi-k3": { mapTo: "kimi-k2" },
+      other: price(3),
+    });
+    expect({ ...remapped, usagePriceOverrides: {} }).toEqual(DEFAULT_SERVER_SETTINGS);
+    expect(
+      applyServerSettingsPatch(remapped, { enableProviderUpdateChecks: false }).usagePriceOverrides,
+    ).toBe(remapped.usagePriceOverrides);
+  });
+
+  it("renames a model ID, its case included, by removing the old key", () => {
+    const saved = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      usagePriceOverrides: { "Kimi-K3": price(1) },
+    });
+    expect(
+      applyServerSettingsPatch(saved, {
+        usagePriceOverrides: { "kimi-k3": price(2), "Kimi-K3": null },
+      }).usagePriceOverrides,
+    ).toEqual({ "kimi-k3": price(2) });
+  });
+
+  it("treats model IDs as data, including object prototype property names", () => {
+    const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      usagePriceOverrides: Object.fromEntries([
+        ["__proto__", price(1)],
+        ["constructor", price(2)],
+      ]),
+    });
+    expect(Object.hasOwn(settings.usagePriceOverrides, "__proto__")).toBe(true);
+    expect(settings.usagePriceOverrides.constructor).toEqual(price(2));
   });
 });

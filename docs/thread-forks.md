@@ -2,7 +2,8 @@
 
 A fork is a new thread that starts with a copy of another thread's conversation up to one reply.
 You keep working in the fork while the original stays exactly as it was. Use it to try another
-approach from an earlier point, or to continue a conversation in a fresh worktree.
+approach from an earlier point, or to continue a conversation in a fresh worktree. To rewind the
+thread itself and resend an earlier prompt, use [Edit from here](edit-from-here.md).
 
 ## Where to fork
 
@@ -47,7 +48,8 @@ Also copied:
 
 Not copied: approvals and questions, checkpoints, setup-script output, model-switch dividers, and
 other state that belongs to the original's sessions. The fork has no turn of its own yet: nothing
-is sent to the agent until you send a message, and the composer starts empty.
+is sent to the agent until you send a message, and the composer starts empty, except after
+[Continue as thread](side-chat.md#continue-as-thread), which puts the side chat there as a draft.
 
 The fork is titled `<original title> (fork)` and uses the original's model, access mode,
 interaction mode and token mode. Its timeline starts with the inherited conversation, followed by
@@ -240,5 +242,89 @@ fork that already finished, or that stopped for good, is answered right away.
   of the fork, and the divider notes it.
 - When settings leave a new worktree's submodules uninitialized, the fork's divider says so, with
   the same notice other new worktrees show.
-- Forks run on the original's node; you cannot fork a thread onto another node.
+- A fork made with **Fork from here** runs on the original's node. To continue on another node,
+  see [Continue on another machine](#continue-on-another-machine).
 - A fork of a fork works the same way. Its lineage points to the thread it was forked from.
+
+## Continue on another machine
+
+A fork can also start on another of your machines (nodes). Your app carries the conversation: it
+reads it from the original's node and sends it to the other node, which creates the fork. The two
+nodes never talk to each other, and the other node is not told how to reach the original's node.
+Both threads stay live afterwards; nothing moves.
+
+In the web and desktop apps, **Fork from here** shows **Continue on: This machine / Another
+machine** when another connected machine can take the fork. **Another machine** lists the machines
+that:
+
+- are connected, and where you may fork (operator or owner, so not a viewer or a paired device
+  that is not the owner's; on a hosted connection, once that machine's own session is ready for
+  changes);
+- run a Ryco that supports it;
+- have exactly one copy of the same project (the same repository and folder in it), or chats for a
+  chat without a project.
+
+A machine without an enabled provider of the same kind as the thread's is listed but cannot be
+picked. The list holds still while a request is in flight. The dialog says which branch and commit
+the other machine starts from: the branch must track the branch of the same name on `origin` (a
+local `main` that tracks `upstream/main` does not qualify), with nothing left to push. It offers
+**Push** while the branch has commits that are not pushed (or is not on `origin` yet). **Push** and
+**Archive the original afterwards** are changes on this machine, so they follow the same access
+rules as every other change here (on a hosted connection, this machine's session must be ready).
+**Archive the original afterwards** (off by default) archives the original on this machine, as you
+would yourself, once the other machine has created the fork. **Fork** reads the conversation from
+this machine, sends it to the other one, and opens the fork there; **Retry** sends the same request
+under the same key. If the request changed in between (the thread was renamed, its model or modes
+changed), the other machine refuses that key and the next try uses a new one. The native mobile app
+does not offer it yet.
+
+What travels: the messages you and the agent wrote up to and including the picked reply, with their
+times and turns, proposed plans, which turns were interrupted or failed, the original's title, the
+name of its machine, and its model by provider kind. What stays on the original's machine:
+attachments, tool activity, checkpoints, approvals, the provider's own session, and every file,
+including uncommitted changes and commits that are not pushed.
+
+The other node:
+
+- checks that you may fork there with your own access to it (operator), before it reads the
+  conversation;
+- refuses a conversation over 3.5 MB, with more than 2,000 messages, 200 proposed plans or 2,000
+  turn outcomes, or with a message over 200,000 characters, before it records anything; fork from an
+  earlier reply instead;
+- refuses a conversation that does not end with a reply of a turn that completed, has messages out
+  of order or turns split apart, names a turn it does not carry, or has a time more than five
+  minutes in its future (a time up to five minutes ahead is taken as its own current time);
+- runs the fork on its own instance of the same provider kind (its default instance of that kind,
+  otherwise the first one by id) with the original's model name, access mode and interaction mode,
+  and refuses when it has no enabled instance of that kind;
+- continues by [context handoff](context-handoffs.md#forks): your first message there starts a fresh
+  session that receives the carried conversation, built on that node. The divider says the thread
+  was forked from the original's title on the original's machine; older apps show a plain divider
+  whose link says the original is not available.
+
+Where the fork works on the other node:
+
+- **A project with Git:** a new worktree of that node's own copy of the project, on a new
+  `<worktree branch prefix>/fork-<8 characters>` branch that starts at the commit the original's
+  checkout is at. The original's checkout must track the branch of the same name on `origin` with
+  nothing left to push. The request names that commit. The other node fetches the branch from its own
+  `origin` with its own credentials (always a new fetch, even right after another one), and starts
+  the worktree from that commit only when its own `origin/<branch>` is that commit or a later one.
+  So a newer push does not change what the fork starts from, and a node whose `origin` is another
+  repository, or a branch rewritten since, is refused. The fetch happens before the fork takes one
+  of the node's fork slots, so a slow remote holds up no other fork. Refusals leave nothing recorded.
+- **A chat without a project:** a new chat with an empty folder.
+
+The fork's divider and lineage name the original by a placeholder id that ends in `:origin`. That
+ending is reserved: a node refuses to create any thread whose id ends in it, so the placeholder can
+never point to a thread of the other node.
+
+Retries work as for every fork: the request carries a fork key, the node records the fork with the
+carried conversation before it answers, a retry with the same key and conversation returns the same
+fork, and the same key with a different conversation is refused. Once the fork is created (or stops
+for good), the node drops the carried conversation from its record of the request; the fork's own
+thread keeps it.
+
+Your app knows how a thread's latest turn ended and, for a fork, how the turns it inherited ended
+(it reads all of the thread's activity to find that record); an older turn that was interrupted on
+the original's machine arrives as completed.

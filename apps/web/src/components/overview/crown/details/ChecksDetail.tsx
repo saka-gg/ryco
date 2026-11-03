@@ -6,14 +6,24 @@ import {
   CircleMinusIcon,
   CircleXIcon,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import type { PullRequestWatchTone } from "@ryco/client-runtime/state/threads";
+import { useMemo, type ReactNode } from "react";
 
 import { cn } from "~/lib/utils";
 import { handleInAppLinkClick } from "~/pullRequestsRoute";
 
+import { usePullRequestWatchControl } from "~/rpc/useSourceControl";
+import { Button } from "../../../ui/button";
+import { Switch } from "../../../ui/switch";
 import { getOverviewSummary } from "../../overviewSummary.logic";
-import type { OverviewPullRequestCheckRun } from "../../overviewTypes";
+import type {
+  OverviewLayoutProps,
+  OverviewPullRequestCheckRun,
+  OverviewPullRequestState,
+} from "../../overviewTypes";
 import {
+  CROWN_PILL_BUTTON_CLASS,
+  CrownDetailActions,
   CrownDetailEmpty,
   CrownDetailFootnote,
   CrownDetailHeading,
@@ -147,6 +157,101 @@ function CheckRunRow({
   );
 }
 
+const WATCH_TONE_CLASS: Record<PullRequestWatchTone, string> = {
+  muted: "text-muted-foreground",
+  active: "font-medium text-foreground",
+  warning: "text-warning-foreground",
+};
+
+/**
+ * The server-side watch of the thread's pull request: the Auto-fix CI switch,
+ * what the watch is doing, and Resume / Stop watching. The flyout previews the
+ * status line only; the card hosts the controls. Nothing on nodes without pull
+ * request watches, and nothing for branch-only CI.
+ */
+function PullRequestWatchSection({
+  layout,
+  pullRequest,
+  variant,
+}: {
+  layout: OverviewLayoutProps;
+  pullRequest: OverviewPullRequestState;
+  variant: CrownDetailViewProps["variant"];
+}) {
+  const binding = layout.pullRequestWatch;
+  const number = pullRequest.number ?? null;
+  const url = pullRequest.url ?? null;
+  const target = useMemo(() => (number === null ? null : { number, url }), [number, url]);
+  const control = usePullRequestWatchControl({
+    environmentId: layout.environmentId,
+    threadId: binding?.threadId ?? null,
+    target,
+    watches: binding?.watches,
+    closed: pullRequest.state === "merged" || pullRequest.state === "closed",
+  });
+  if (!control.supported) return null;
+  const { view } = control;
+  const statusLine = view ? (
+    <p className={cn("mx-1 text-[11.5px]", WATCH_TONE_CLASS[view.tone])}>{view.label}</p>
+  ) : control.endedLabel ? (
+    <p className="mx-1 text-[11.5px] text-muted-foreground">{control.endedLabel}</p>
+  ) : null;
+  // The flyout previews the status only; a merged or closed pull request only says why its
+  // watch ended, if it had one.
+  if (variant === "flyout" || !control.switchOffered) {
+    return statusLine ? (
+      <div className="mt-2" data-slot="crown-pull-request-watch">
+        {statusLine}
+      </div>
+    ) : null;
+  }
+  const disabled = !control.ready || control.pending;
+  return (
+    <div className="mt-2.5 flex min-w-0 flex-col gap-1" data-slot="crown-pull-request-watch">
+      <div className="flex min-w-0 items-center gap-2 px-1 text-[12px]">
+        <span className="min-w-0 flex-1 truncate font-medium" aria-hidden>
+          Auto-fix CI
+        </span>
+        <Switch
+          checked={control.autoFixChecked}
+          disabled={disabled}
+          aria-label="Auto-fix CI"
+          title={control.ready ? undefined : "Reconnect to change Auto-fix CI"}
+          onCheckedChange={(checked) => control.run(checked ? "auto-fix-on" : "auto-fix-off")}
+        />
+      </div>
+      {statusLine}
+      {view?.detail ? (
+        <p className="mx-1 text-[11.5px] text-muted-foreground">{view.detail}</p>
+      ) : null}
+      {view ? (
+        <CrownDetailActions>
+          {view.paused ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              className={CROWN_PILL_BUTTON_CLASS}
+              disabled={disabled}
+              onClick={() => control.run("resume")}
+            >
+              Resume
+            </Button>
+          ) : null}
+          <Button
+            variant="ghost"
+            size="sm"
+            className={CROWN_PILL_BUTTON_CLASS}
+            disabled={disabled}
+            onClick={() => control.run("stop")}
+          >
+            Stop watching
+          </Button>
+        </CrownDetailActions>
+      ) : null}
+    </div>
+  );
+}
+
 export function ChecksDetail({ layout, variant }: CrownDetailViewProps) {
   const pullRequest = layout.pullRequest;
   const summary = getOverviewSummary(layout);
@@ -202,6 +307,9 @@ export function ChecksDetail({ layout, variant }: CrownDetailViewProps) {
       ) : error ? null : (
         <CrownDetailEmpty>No checks reported</CrownDetailEmpty>
       )}
+      {pullRequest.number != null ? (
+        <PullRequestWatchSection layout={layout} pullRequest={pullRequest} variant={variant} />
+      ) : null}
       {footnote ? <CrownDetailFootnote>{footnote}</CrownDetailFootnote> : null}
     </>
   );

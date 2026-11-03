@@ -7,16 +7,26 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@ryco/contracts";
+import type { CurrentThreadLifecycle } from "../commandPaletteStore";
 import type { Thread } from "../types";
 import {
   buildBrowseGroups,
   buildBrowseItemValue,
+  buildCommandPaletteRows,
+  buildCurrentThreadLifecycleActions,
   buildMessageSearchItems,
+  buildSettingsSearchItems,
+  buildSnoozeUntilGroups,
   buildThreadActionItems,
   filterBrowseEntries,
   filterCommandPaletteGroups,
+  findHighlightedCommandPaletteItem,
+  SETTINGS_SEARCH_RESULT_LIMIT,
+  type CommandPaletteActionItem,
   type CommandPaletteGroup,
+  type CommandPaletteSubmenuItem,
 } from "./CommandPalette.logic";
+import { SETTINGS_SECTION_TITLES, type SettingsSearchEntry } from "./settings/settingsSearchIndex";
 
 const LOCAL_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 const PROJECT_ID = ProjectId.make("project-1");
@@ -112,6 +122,26 @@ describe("buildThreadActionItems", () => {
     }
   });
 
+  it("builds a thread's title content only when its row asks for it", () => {
+    const renderLeadingContent = vi.fn(() => "leading");
+    const renderTrailingContent = vi.fn(() => "trailing");
+    const items = buildThreadActionItems({
+      threads: [makeThread(), makeThread({ id: ThreadId.make("thread-2") })],
+      projectTitleById: new Map(),
+      sortOrder: "updated_at",
+      icon: null,
+      renderLeadingContent,
+      renderTrailingContent,
+      runThread: async (_thread) => undefined,
+    });
+
+    expect(renderLeadingContent).not.toHaveBeenCalled();
+    expect(renderTrailingContent).not.toHaveBeenCalled();
+    const content = items[0]?.titleLeadingContent;
+    expect(typeof content === "function" ? content() : content).toBe("leading");
+    expect(renderLeadingContent).toHaveBeenCalledOnce();
+  });
+
   it("ranks thread title matches ahead of contextual project-name matches", () => {
     const threadItems = buildThreadActionItems({
       threads: [
@@ -147,6 +177,35 @@ describe("buildThreadActionItems", () => {
       "thread:thread-title-match",
       "thread:thread-context-match",
     ]);
+  });
+
+  it("finds a thread by its workspace's pull request number or URL", () => {
+    const threadItems = buildThreadActionItems({
+      threads: [
+        makeThread({ id: ThreadId.make("thread-with-pr"), title: "Inbox work" }),
+        makeThread({ id: ThreadId.make("thread-without-pr"), title: "Other work" }),
+      ],
+      projectTitleById: new Map([[PROJECT_ID, "Project"]]),
+      sortOrder: "updated_at",
+      icon: null,
+      extraSearchTerms: (thread) =>
+        thread.id === "thread-with-pr"
+          ? ["#675", "acme/app#675", "https://github.com/acme/app/pull/675"]
+          : [],
+      runThread: async (_thread) => undefined,
+    });
+    const find = (query: string) =>
+      filterCommandPaletteGroups({
+        activeGroups: [],
+        query,
+        isInSubmenu: false,
+        projectSearchItems: [],
+        threadSearchItems: threadItems,
+      })[0]?.items.map((item) => item.value);
+
+    expect(find("#675")).toEqual(["thread:thread-with-pr"]);
+    expect(find("acme/app#675")).toEqual(["thread:thread-with-pr"]);
+    expect(find("github.com/acme/app/pull/675")).toEqual(["thread:thread-with-pr"]);
   });
 
   it("preserves thread project-name matches when there is no stronger title match", () => {
@@ -204,6 +263,72 @@ describe("buildThreadActionItems", () => {
   });
 });
 
+describe("thread ID search", () => {
+  const UUID_THREAD_ID = "3f2a9b1c-7d4e-4a0b-9c3d-5e6f7a8b9c0d";
+  const ID_SHAPED_THREADS = [
+    makeThread({ id: ThreadId.make(UUID_THREAD_ID), title: "Fix navbar spacing" }),
+    makeThread({
+      id: ThreadId.make("thread-agent-control-op-7c1d2e3f-1"),
+      title: "Port batch review",
+    }),
+    makeThread({ id: ThreadId.make("fork-0a1b2c3d4e5f60718293a4b5c6d7e8f9"), title: "Forked run" }),
+    makeThread({
+      id: ThreadId.make("thread-9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b"),
+      title: "Worktree cleanup",
+    }),
+    makeThread({ id: ThreadId.make("import-claude-session-42"), title: "Session recap" }),
+  ];
+
+  function searchThreads(query: string, threads: ReadonlyArray<Thread> = ID_SHAPED_THREADS) {
+    const groups = filterCommandPaletteGroups({
+      activeGroups: [],
+      query,
+      isInSubmenu: false,
+      projectSearchItems: [],
+      threadSearchItems: buildThreadActionItems({
+        threads,
+        projectTitleById: new Map([[PROJECT_ID, "Project"]]),
+        sortOrder: "updated_at",
+        icon: null,
+        runThread: async (_thread) => undefined,
+      }),
+    });
+    return groups.flatMap((group) => group.items.map((item) => item.value));
+  }
+
+  it("finds a thread by its full ID or an ID prefix", () => {
+    expect(searchThreads(UUID_THREAD_ID)).toEqual([`thread:${UUID_THREAD_ID}`]);
+    expect(searchThreads("  3F2A9B1C ")).toEqual([`thread:${UUID_THREAD_ID}`]);
+  });
+
+  it("finds threads whose IDs are not UUIDs", () => {
+    for (const thread of ID_SHAPED_THREADS) {
+      expect(searchThreads(thread.id)).toEqual([`thread:${thread.id}`]);
+    }
+    expect(searchThreads("op-7c1d2e3f")).toEqual(["thread:thread-agent-control-op-7c1d2e3f-1"]);
+    expect(searchThreads("session-42")).toEqual(["thread:import-claude-session-42"]);
+  });
+
+  it("lists a title match before an ID match", () => {
+    const titleMatch = makeThread({
+      id: ThreadId.make("thread-title-match"),
+      title: "Investigate 3f2a9b1c regression",
+      updatedAt: "2026-02-01T00:00:00.000Z",
+    });
+
+    expect(searchThreads("3f2a9b1c", [...ID_SHAPED_THREADS, titleMatch])).toEqual([
+      "thread:thread-title-match",
+      `thread:${UUID_THREAD_ID}`,
+    ]);
+  });
+
+  it("does not match words or short fragments by ID", () => {
+    for (const query of ["add", "face", "decade", "thread", "import", "ab12", "3f2a9"]) {
+      expect(searchThreads(query), query).toEqual([]);
+    }
+  });
+});
+
 describe("buildMessageSearchItems", () => {
   it("adds message search results to the Messages group with thread context", async () => {
     const result = {
@@ -240,6 +365,299 @@ describe("buildMessageSearchItems", () => {
     if (item?.kind !== "action") throw new Error("expected action item");
     await item.run();
     expect(runMessage).toHaveBeenCalledWith(result);
+  });
+});
+
+describe("buildSnoozeUntilGroups", () => {
+  it("ends with Custom…, which snoozes until the time picked and not when dismissed", async () => {
+    const snooze = vi.fn();
+    const pickCustom = vi
+      .fn<() => Promise<string | null>>()
+      .mockResolvedValueOnce("2026-03-06T08:00:00.000Z")
+      .mockResolvedValueOnce(null);
+    const groups = buildSnoozeUntilGroups({ options: [], icon: null, snooze, pickCustom });
+    const custom = groups[0]?.items.at(-1);
+    if (custom?.kind !== "action") throw new Error("expected action item");
+    expect(custom.title).toBe("Custom…");
+    await custom.run();
+    expect(snooze).toHaveBeenCalledWith("2026-03-06T08:00:00.000Z");
+    await custom.run();
+    expect(snooze).toHaveBeenCalledTimes(1);
+    expect(buildSnoozeUntilGroups({ options: [], icon: null, snooze })[0]?.items).toEqual([]);
+  });
+
+  it("lists each snooze time with when it wakes the thread, and snoozes until it", async () => {
+    const snooze = vi.fn();
+    const groups = buildSnoozeUntilGroups({
+      options: [
+        {
+          id: "hour",
+          label: "In 1 hour",
+          snoozedUntil: "2026-03-04T13:00:00.000Z",
+          timeLabel: "Wed 14:00",
+        },
+        {
+          id: "tomorrow",
+          label: "Tomorrow morning",
+          snoozedUntil: "2026-03-05T08:00:00.000Z",
+          timeLabel: "Thu 09:00",
+        },
+      ],
+      icon: null,
+      snooze,
+    });
+
+    expect(groups.map((group) => group.label)).toEqual(["Snooze until"]);
+    const items = groups[0]?.items ?? [];
+    expect(items.map((item) => [item.title, item.description])).toEqual([
+      ["In 1 hour", "Wed 14:00"],
+      ["Tomorrow morning", "Thu 09:00"],
+    ]);
+    const tomorrow = items[1];
+    if (tomorrow?.kind !== "action") throw new Error("expected action item");
+    await tomorrow.run();
+    expect(snooze).toHaveBeenCalledWith("2026-03-05T08:00:00.000Z");
+  });
+});
+
+describe("buildCurrentThreadLifecycleActions", () => {
+  const icons = {
+    settle: "settle-icon",
+    moveToActive: "move-to-active-icon",
+    snooze: "snooze-icon",
+    snoozeAddon: "snooze-addon-icon",
+    archive: "archive-icon",
+    markUnread: "mark-unread-icon",
+  };
+
+  function makeLifecycle(overrides: Partial<CurrentThreadLifecycle> = {}): CurrentThreadLifecycle {
+    return {
+      title: "Fix the relay",
+      settled: false,
+      snoozed: false,
+      pending: false,
+      disabledReasons: { settle: null, snooze: null, archive: null, markUnread: null },
+      snoozeOptions: () => [
+        {
+          id: "tomorrow",
+          label: "Tomorrow morning",
+          snoozedUntil: "2026-03-05T08:00:00.000Z",
+          timeLabel: "Thu 09:00",
+        },
+      ],
+      setSettled: vi.fn(),
+      snooze: vi.fn(),
+      archive: vi.fn(),
+      markUnread: vi.fn(),
+      ...overrides,
+    };
+  }
+
+  function itemByValue(
+    items: ReadonlyArray<CommandPaletteActionItem | CommandPaletteSubmenuItem>,
+    value: string,
+  ) {
+    const item = items.find((candidate) => candidate.value === value);
+    if (!item) throw new Error(`expected ${value}`);
+    return item;
+  }
+
+  it("offers each action with its shortcut and runs it on the open thread", async () => {
+    const lifecycle = makeLifecycle();
+    const { items, snoozeUntil } = buildCurrentThreadLifecycleActions({ lifecycle, icons });
+
+    expect(
+      items.map((item) => [item.kind, item.title, item.icon, item.shortcutCommand, item.disabled]),
+    ).toEqual([
+      ["action", "Settle current thread", "settle-icon", "thread.settle", undefined],
+      ["submenu", "Snooze current thread…", "snooze-icon", "thread.snooze", undefined],
+      ["action", "Archive current thread", "archive-icon", "thread.archive", undefined],
+      ["action", "Mark current thread unread", "mark-unread-icon", "thread.markUnread", undefined],
+    ]);
+    for (const item of items) {
+      if (item.kind === "action") await item.run();
+    }
+    expect(lifecycle.setSettled).toHaveBeenCalledWith(true);
+    expect(lifecycle.archive).toHaveBeenCalledOnce();
+    expect(lifecycle.markUnread).toHaveBeenCalledOnce();
+
+    // The submenu is the view of snooze times.
+    const snoozeItem = itemByValue(items, "action:current-thread-snooze");
+    if (snoozeItem.kind !== "submenu") throw new Error("expected submenu item");
+    expect(snoozeItem.addonIcon).toBe("snooze-addon-icon");
+    expect(snoozeItem.groups).toBe(snoozeUntil?.groups);
+    const tomorrow = snoozeUntil?.groups[0]?.items[0];
+    expect([tomorrow?.title, tomorrow?.description]).toEqual(["Tomorrow morning", "Thu 09:00"]);
+    if (tomorrow?.kind !== "action") throw new Error("expected action item");
+    await tomorrow.run();
+    expect(lifecycle.snooze).toHaveBeenCalledWith("2026-03-05T08:00:00.000Z");
+  });
+
+  it("moves a settled thread back to Active and wakes a snoozed one", async () => {
+    const lifecycle = makeLifecycle({ settled: true, snoozed: true });
+    const { items, snoozeUntil } = buildCurrentThreadLifecycleActions({ lifecycle, icons });
+
+    const settle = itemByValue(items, "action:current-thread-settle");
+    expect([settle.title, settle.icon]).toEqual([
+      "Move current thread to Active",
+      "move-to-active-icon",
+    ]);
+    const unsnooze = itemByValue(items, "action:current-thread-snooze");
+    expect([unsnooze.kind, unsnooze.title, unsnooze.shortcutCommand]).toEqual([
+      "action",
+      "Unsnooze current thread",
+      "thread.snooze",
+    ]);
+    expect(snoozeUntil).toBeNull();
+
+    if (settle.kind !== "action" || unsnooze.kind !== "action") {
+      throw new Error("expected action items");
+    }
+    await settle.run();
+    await unsnooze.run();
+    expect(lifecycle.setSettled).toHaveBeenCalledWith(false);
+    expect(lifecycle.snooze).toHaveBeenCalledWith(null);
+  });
+
+  it("disables an action that cannot run and says why", () => {
+    const { items } = buildCurrentThreadLifecycleActions({
+      lifecycle: makeLifecycle({
+        disabledReasons: {
+          settle: "Wait for the running work to finish.",
+          snooze: "Wait for the running work to finish.",
+          archive: null,
+          markUnread: "Nothing to mark unread yet.",
+        },
+      }),
+      icons,
+    });
+
+    expect(items.map((item) => [item.title, item.disabled, item.description])).toEqual([
+      ["Settle current thread", true, "Wait for the running work to finish."],
+      ["Snooze current thread…", true, "Wait for the running work to finish."],
+      ["Archive current thread", undefined, undefined],
+      ["Mark current thread unread", true, "Nothing to mark unread yet."],
+    ]);
+  });
+
+  it("disables all but mark unread while an action awaits the node", () => {
+    for (const snoozed of [false, true]) {
+      const { items } = buildCurrentThreadLifecycleActions({
+        lifecycle: makeLifecycle({ pending: true, snoozed }),
+        icons,
+      });
+      expect(items.map((item) => [item.value, item.disabled])).toEqual([
+        ["action:current-thread-settle", true],
+        ["action:current-thread-snooze", true],
+        ["action:current-thread-archive", true],
+        ["action:current-thread-mark-unread", undefined],
+      ]);
+    }
+  });
+
+  it("is found by what each action does", () => {
+    const { items } = buildCurrentThreadLifecycleActions({ lifecycle: makeLifecycle(), icons });
+    const titlesFor = (query: string) =>
+      filterCommandPaletteGroups({
+        activeGroups: [{ value: "actions", label: "Actions", items }],
+        query,
+        isInSubmenu: false,
+        projectSearchItems: [],
+        threadSearchItems: [],
+      }).flatMap((group) => group.items.map((item) => item.title));
+
+    expect(titlesFor("settle")).toEqual(["Settle current thread"]);
+    expect(titlesFor("snooze")).toEqual(["Snooze current thread…"]);
+    expect(titlesFor("archive")).toEqual(["Archive current thread"]);
+    expect(titlesFor("unread")).toEqual(["Mark current thread unread"]);
+  });
+});
+
+describe("buildSettingsSearchItems", () => {
+  function settingsEntry(
+    title: string,
+    overrides: Partial<SettingsSearchEntry> = {},
+  ): SettingsSearchEntry {
+    return { section: "appearance", owner: "client", title, description: "", ...overrides };
+  }
+
+  function actionItem(value: string, title: string): CommandPaletteActionItem {
+    return { kind: "action", value, searchTerms: [title], title, icon: null, run: async () => {} };
+  }
+
+  function settingsItems(entries: ReadonlyArray<SettingsSearchEntry>, runEntry = vi.fn()) {
+    return buildSettingsSearchItems({
+      entries,
+      sectionTitles: SETTINGS_SECTION_TITLES,
+      icon: null,
+      runEntry,
+    });
+  }
+
+  it("lists settings between threads and messages, described by their section", async () => {
+    const diffStyle = settingsEntry("Diff style", {
+      description: "Preview unified and split layouts for code changes.",
+      keywords: "side by side",
+    });
+    const runEntry = vi.fn();
+    const groups = filterCommandPaletteGroups({
+      activeGroups: [],
+      query: "diff",
+      isInSubmenu: false,
+      projectSearchItems: [],
+      threadSearchItems: [actionItem("thread:diff", "Diff review")],
+      settingsSearchItems: settingsItems([diffStyle], runEntry),
+      messageSearchItems: [actionItem("message:diff", "the diff looks right")],
+    });
+
+    expect(groups.map((group) => [group.value, group.label])).toEqual([
+      ["threads-search", "Threads"],
+      ["settings-search", "Settings"],
+      ["messages-search", "Messages"],
+    ]);
+    const item = groups[1]?.items[0];
+    expect(item).toMatchObject({ title: "Diff style", description: "Appearance" });
+    if (item?.kind !== "action") throw new Error("expected action item");
+    await item.run();
+    expect(runEntry).toHaveBeenCalledWith(diffStyle);
+  });
+
+  it("shows settings only while typing at the root, never under the actions filter", () => {
+    const settingsSearchItems = settingsItems([settingsEntry("Diff style")]);
+    const groupsFor = (query: string, isInSubmenu = false) =>
+      filterCommandPaletteGroups({
+        activeGroups: [],
+        query,
+        isInSubmenu,
+        projectSearchItems: [],
+        threadSearchItems: [],
+        settingsSearchItems,
+      }).map((group) => group.value);
+
+    expect(groupsFor("diff")).toEqual(["settings-search"]);
+    expect(groupsFor("")).toEqual([]);
+    expect(groupsFor(">diff")).toEqual([]);
+    expect(groupsFor("diff", true)).toEqual([]);
+  });
+
+  it("keeps the best matches, at most the limit", () => {
+    const entries = [
+      ...Array.from({ length: SETTINGS_SEARCH_RESULT_LIMIT + 1 }, (_, index) =>
+        settingsEntry(`Option ${index}`, { description: "Changes the font." }),
+      ),
+      settingsEntry("Font"),
+    ];
+    const [group] = filterCommandPaletteGroups({
+      activeGroups: [],
+      query: "font",
+      isInSubmenu: false,
+      projectSearchItems: [],
+      threadSearchItems: [],
+      settingsSearchItems: settingsItems(entries),
+    });
+
+    expect(group?.items).toHaveLength(SETTINGS_SEARCH_RESULT_LIMIT);
+    expect(group?.items[0]?.title).toBe("Font");
   });
 });
 
@@ -376,5 +794,48 @@ describe("filterBrowseEntries", () => {
     });
 
     expect(result.highlightedEntry).toBe(alias);
+  });
+});
+
+describe("virtualized command palette rows", () => {
+  const action = (value: string, disabled = false): CommandPaletteActionItem => ({
+    kind: "action",
+    value,
+    searchTerms: [],
+    title: value,
+    icon: null,
+    ...(disabled ? { disabled } : {}),
+    run: async () => {},
+  });
+  const groups: CommandPaletteGroup[] = [
+    { value: "actions", label: "Actions", items: [action("new-thread"), action("offline", true)] },
+    { value: "threads", label: "Threads", items: [action("thread-a"), action("thread-b")] },
+  ];
+
+  it("keeps group order and headings while indexing only enabled items", () => {
+    const { rows, itemValues, rowIndexByItemIndex } = buildCommandPaletteRows(groups);
+
+    expect(rows.map((row) => (row.kind === "label" ? `# ${row.label}` : row.key))).toEqual([
+      "# Actions",
+      "actions:new-thread",
+      "actions:offline",
+      "# Threads",
+      "threads:thread-a",
+      "threads:thread-b",
+    ]);
+    expect(itemValues).toEqual(["new-thread", "thread-a", "thread-b"]);
+    expect(rowIndexByItemIndex).toEqual([1, 4, 5]);
+    expect(rows.flatMap((row) => (row.kind === "item" ? [row.itemIndex] : []))).toEqual([
+      0,
+      null,
+      1,
+      2,
+    ]);
+  });
+
+  it("resolves Enter to the highlighted item without needing its row mounted", () => {
+    expect(findHighlightedCommandPaletteItem(groups, "thread-b")?.value).toBe("thread-b");
+    expect(findHighlightedCommandPaletteItem(groups, "offline")).toBeNull();
+    expect(findHighlightedCommandPaletteItem(groups, null)).toBeNull();
   });
 });

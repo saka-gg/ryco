@@ -9,6 +9,7 @@ import {
 import {
   applyClaudePromptEffortPrefix,
   buildProviderOptionSelectionsFromDescriptors,
+  CLAUDE_PROMPT_EFFORT_PREFIX_PATTERN,
   createModelCapabilities,
   createModelSelection,
   getModelDisplayLabel,
@@ -251,6 +252,15 @@ describe("misc helpers", () => {
     expect(applyClaudePromptEffortPrefix("Ultrathink:\nInvestigate", "ultrathink")).toBe(
       "Ultrathink:\nInvestigate",
     );
+  });
+
+  it("reads back the ultrathink prefix the send adds", () => {
+    const sent = applyClaudePromptEffortPrefix("Investigate\nthe flake", "ultrathink");
+    expect(CLAUDE_PROMPT_EFFORT_PREFIX_PATTERN.exec(sent)?.[0]).toBe("Ultrathink:\n");
+    expect(sent.replace(CLAUDE_PROMPT_EFFORT_PREFIX_PATTERN, "")).toBe("Investigate\nthe flake");
+    // As the composer's effort controls read it, typed in any case.
+    expect(CLAUDE_PROMPT_EFFORT_PREFIX_PATTERN.test("ultrathink: fix it")).toBe(true);
+    expect(CLAUDE_PROMPT_EFFORT_PREFIX_PATTERN.test("Please ultrathink: fix it")).toBe(false);
   });
 
   it("trims strings to null", () => {

@@ -1,6 +1,11 @@
+import { SourceControlProviderError } from "@ryco/contracts";
+import { Schema } from "effect";
 import { assert, describe, it } from "vite-plus/test";
 
 import { classifyOverviewError } from "./overviewErrors.logic";
+
+const NOW = 1_000_000_000_000;
+const options = { nowMs: NOW, formatTime: () => "14:32" };
 
 describe("classifyOverviewError", () => {
   it("returns null when there is no error", () => {
@@ -51,5 +56,89 @@ describe("classifyOverviewError", () => {
   it("reads the message from Error instances and message-bearing objects", () => {
     assert.equal(classifyOverviewError(new Error("request timed out"))?.kind, "transient");
     assert.equal(classifyOverviewError({ message: "HTTP 401" })?.kind, "terminal");
+  });
+});
+
+describe("classifyOverviewError with typed provider errors", () => {
+  it("says until when a rate-limited host pauses requests", () => {
+    const info = classifyOverviewError(
+      new SourceControlProviderError({
+        provider: "github",
+        operation: "getChangeRequestDetail",
+        detail: "GitHub requests are paused after a rate limit.",
+        reason: "rate-limited",
+        retryAt: NOW + 300_000,
+      }),
+      options,
+    );
+    assert.equal(info?.kind, "transient");
+    assert.equal(info?.message, "GitHub requests paused until 14:32");
+    assert.equal(info?.paused, true);
+  });
+
+  it("follows the typed reason, not words the command line put into the message", () => {
+    // `gh pr view` of a branch titled "Fix rate limit 401": the text matches every rule.
+    const detail = 'gh pr view "Fix rate limit 401" --json number: no pull requests found';
+    const notFound = classifyOverviewError(
+      new SourceControlProviderError({
+        provider: "github",
+        operation: "getChangeRequestDetail",
+        detail,
+        reason: "not-found",
+      }),
+      options,
+    );
+    assert.equal(notFound?.kind, "terminal");
+    assert.equal(notFound?.message, "This pull request could not be found.");
+    assert.equal(notFound?.paused, undefined);
+
+    const signIn = classifyOverviewError(
+      new SourceControlProviderError({
+        provider: "gitlab",
+        operation: "getChangeRequestDetail",
+        detail: "glab mr view 404 failed",
+        reason: "unauthenticated",
+      }),
+      options,
+    );
+    assert.equal(
+      signIn?.message,
+      "Sign in to your source control provider to load this pull request.",
+    );
+
+    // Any other typed reason skips the reason rules; timeouts still read as timeouts.
+    const failed = classifyOverviewError(
+      new SourceControlProviderError({
+        provider: "github",
+        operation: "getChangeRequestDetail",
+        detail: "gh pr view rate-limit-401-not-found timed out",
+        reason: "failed",
+      }),
+      options,
+    );
+    assert.equal(failed?.message, "Loading pull request details timed out. Try refreshing.");
+  });
+
+  it("keeps today's rules for errors without a reason", () => {
+    // A server before the reason field sends none.
+    const olderServerError = (detail: string) =>
+      Schema.decodeUnknownSync(SourceControlProviderError)({
+        _tag: "SourceControlProviderError",
+        provider: "github",
+        operation: "getChangeRequestDetail",
+        detail,
+      });
+    const legacy = classifyOverviewError(
+      olderServerError("Could not resolve to a PullRequest with the number 159."),
+      options,
+    );
+    assert.equal(legacy?.message, "This pull request could not be found.");
+    // An older server's rate-limit detail reads as a pause without a time.
+    const legacyPause = classifyOverviewError(
+      olderServerError("GitHub API rate limit exceeded. Wait for the reset window and retry."),
+      options,
+    );
+    assert.equal(legacyPause?.message, "GitHub requests paused");
+    assert.equal(legacyPause?.paused, true);
   });
 });

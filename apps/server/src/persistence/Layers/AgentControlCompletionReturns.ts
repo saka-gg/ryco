@@ -1,4 +1,5 @@
 import {
+  DELEGATION_RESULT_MESSAGE_ID_PREFIX,
   AgentControlCompletionReturn,
   AgentControlProposalId,
   AgentControlTaskNoticeOutcome,
@@ -18,13 +19,22 @@ import {
 import { Context, Effect, Layer, Schema } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import { toPersistenceSqlError } from "../Errors.ts";
-import { latestUserMessageIdQuery } from "../userMessageAnchors.ts";
-import { hasTurnStartEnded, hasTurnStartFailure } from "../delegatedRunStatus.ts";
+import { hasTurnStartFailure } from "../delegatedRunStatus.ts";
+import {
+  readLatestUserMessageId,
+  readPendingTurnStart,
+  readWakeStartState,
+} from "../serverWakeQueries.ts";
 
 /** Wake message ids carry this prefix; the turn they start is a delegation-wake turn. */
-export const DELEGATION_WAKE_MESSAGE_PREFIX = "delegation-result:";
+export const DELEGATION_WAKE_MESSAGE_PREFIX = DELEGATION_RESULT_MESSAGE_ID_PREFIX;
 /** Wake command ids carry this prefix (user-stop attribution). */
 export const DELEGATION_WAKE_COMMAND_PREFIX = "delegation-return:";
+/**
+ * A stall notice's wake (`delegationStallWakeIds`): a person's Stop of its turn stops that turn
+ * only, never the delegating chat's other returns (`cohortUserStop`).
+ */
+export const DELEGATION_STALL_NOTICE_COMMAND_PATTERN = `${DELEGATION_WAKE_COMMAND_PREFIX}%:stall:%`;
 
 export const CompletionReturnOutcome = Schema.Literals([
   "completed",
@@ -68,6 +78,37 @@ export const CompletionReturnBatch = Schema.Struct({
   cold: Schema.Boolean,
 });
 export type CompletionReturnBatch = typeof CompletionReturnBatch.Type;
+
+/**
+ * Why a task that still runs needs attention (`CompletionReturnDelivery`'s stall notices):
+ * its first message never started a turn, it waits on the person's approval or answer, or its
+ * provider went silent on a running turn.
+ */
+export const CompletionReturnStallKind = Schema.Literals([
+  "never-started",
+  "waiting-on-you",
+  "silent",
+]);
+export type CompletionReturnStallKind = typeof CompletionReturnStallKind.Type;
+
+/**
+ * A running task's stall notices: at most one per episode, and a few per task in all. The row
+ * stays `waiting`: a notice is never the task's result.
+ */
+export const CompletionReturnStallNotice = Schema.Struct({
+  /** Notices recorded for this task so far, the current one included. */
+  count: NonNegativeInt,
+  /** The current episode, or null once the task is moving again. */
+  current: Schema.NullOr(
+    Schema.Struct({
+      kind: CompletionReturnStallKind,
+      since: IsoDateTime,
+      /** `pending` until the delegating chat took the notice, `dropped` when it never will. */
+      state: Schema.Literals(["pending", "sent", "dropped"]),
+    }),
+  ),
+});
+export type CompletionReturnStallNotice = typeof CompletionReturnStallNotice.Type;
 
 export const CompletionReturnRecord = Schema.Struct({
   ...AgentControlCompletionReturn.fields,
@@ -114,6 +155,13 @@ export const CompletionReturnRecord = Schema.Struct({
    * clears, because the delivery window opens no earlier than the reset (usage-limits §5.2).
    */
   limitResetAt: Schema.optional(IsoDateTime),
+  /**
+   * When the task's first message was sent: at once, or when a capped request's slot freed. The
+   * return's time limit runs from it (`waitingReturnExpired`). Remembered once known.
+   */
+  startedAt: Schema.optional(IsoDateTime),
+  /** The task's stall notices; absent until one was recorded. */
+  stallNotice: Schema.optional(CompletionReturnStallNotice),
 });
 export type CompletionReturnRecord = typeof CompletionReturnRecord.Type;
 const decode = Schema.decodeUnknownSync(Schema.fromJsonString(CompletionReturnRecord));
@@ -300,6 +348,15 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
       AND turn_id IS NOT NULL LIMIT 1
   `.pipe(Effect.map((rows) => (rows[0] ? TurnId.make(rows[0].turnId) : null))),
     );
+  /** When the task's first message was sent, or null while it waits in the task's queue. */
+  const initialMessageSentAt = (record: CompletionReturnRecord) =>
+    safe(
+      sql<{ createdAt: string }>`
+    SELECT created_at AS "createdAt" FROM projection_thread_messages
+    WHERE message_id = ${record.initialMessageId} AND thread_id = ${record.childThreadId}
+    LIMIT 1
+  `.pipe(Effect.map((rows) => rows[0]?.createdAt ?? null)),
+    );
   const turnMessageId = (threadId: ThreadId, turnId: TurnId) =>
     safe(
       sql<{ messageId: string | null }>`
@@ -307,12 +364,7 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     WHERE thread_id = ${threadId} AND turn_id = ${turnId} LIMIT 1
   `.pipe(Effect.map((rows) => (rows[0]?.messageId ? MessageId.make(rows[0].messageId) : null))),
     );
-  const latestUserMessageId = (threadId: ThreadId) =>
-    safe(
-      latestUserMessageIdQuery(sql, threadId).pipe(
-        Effect.map((rows) => (rows[0] ? MessageId.make(rows[0].messageId) : null)),
-      ),
-    );
+  const latestUserMessageId = (threadId: ThreadId) => safe(readLatestUserMessageId(sql, threadId));
   // A completed message's whole text, wherever the projection keeps it.
   const messageText = sql.literal(
     "CASE WHEN m.text_json IS NULL THEN m.text ELSE json_extract(m.text_json, '$') END",
@@ -342,6 +394,8 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
   /**
    * The turn's reply: the message the turn is keyed on, else its latest
    * non-blank assistant message, else a note of the pages and files it showed.
+   * The text is cut a little past what a result shows; `messageId` names the
+   * reply message (null for the notes), so a reader can page its whole text.
    */
   const output = (threadId: ThreadId, turnId: TurnId) =>
     safe(
@@ -352,11 +406,12 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
           streaming: number;
         }>`
     SELECT
-      (SELECT substr(${messageText}, 1, 8001)
+      (SELECT json_object('id', m.message_id, 'text', substr(${messageText}, 1, 8001))
         FROM projection_turns t JOIN projection_thread_messages m ON m.message_id = t.assistant_message_id
           AND m.thread_id = t.thread_id AND m.turn_id = t.turn_id AND m.role = 'assistant'
         WHERE t.thread_id = ${threadId} AND t.turn_id = ${turnId} LIMIT 1) AS chosen,
-      (SELECT substr(${messageText}, 1, 8001) FROM projection_thread_messages m
+      (SELECT json_object('id', m.message_id, 'text', substr(${messageText}, 1, 8001))
+        FROM projection_thread_messages m
         WHERE m.thread_id = ${threadId} AND m.turn_id = ${turnId} AND m.role = 'assistant'
           AND trim(${messageText}, ${BLANK_CHARACTERS}) <> ''
         ORDER BY m.created_at DESC, m.message_id DESC LIMIT 1) AS latest,
@@ -364,12 +419,15 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
         AND live.turn_id = ${turnId} AND live.is_streaming <> 0) AS streaming
   `;
         const streaming = row?.streaming ?? 0;
-        const reply = [row?.chosen, row?.latest].find(
-          (text): text is string => typeof text === "string" && text.trim().length > 0,
-        );
-        if (reply !== undefined) return { text: reply, streaming };
+        const reply = [row?.chosen, row?.latest]
+          .map((json) =>
+            typeof json === "string" ? (JSON.parse(json) as { id: string; text: unknown }) : null,
+          )
+          .find((candidate) => typeof candidate?.text === "string" && candidate.text.trim() !== "");
+        if (reply)
+          return { text: reply.text as string, messageId: MessageId.make(reply.id), streaming };
         const notes = yield* attachmentNotes(threadId, turnId);
-        return { text: notes.join("\n"), streaming };
+        return { text: notes.join("\n"), messageId: null, streaming };
       }),
     );
   const observe = (input: {
@@ -512,40 +570,36 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
   `.pipe(Effect.map((rows) => rows[0] ?? null)),
     );
   /**
-   * Newest unbound turn start of the thread and whether its start already ended
-   * without a turn (`startFailed`: it failed, or a Stop cancelled it).
+   * When the provider went quiet on this turn, if it still is: the liveness sweep's one-time
+   * `provider.turn.unresponsive` notice for the turn (its `lastActivityAt`), with no activity of
+   * the thread after it. Null when the turn was never reported quiet or moved on since.
    */
-  const pendingTurnStart = (threadId: ThreadId) =>
+  const silentTurnSince = (threadId: ThreadId, turnId: TurnId) =>
     safe(
-      Effect.gen(function* () {
-        const rows = yield* sql<{ messageId: string | null }>`
-    SELECT pending_message_id AS "messageId" FROM projection_turns
-    WHERE thread_id = ${threadId} AND turn_id IS NULL
-    ORDER BY row_id DESC LIMIT 1
-  `;
-        const row = rows[0];
-        if (!row) return null;
-        const messageId = row.messageId ?? "";
-        return {
-          messageId,
-          startFailed:
-            messageId.length > 0 && (yield* hasTurnStartEnded(sql, { threadId, messageId })),
-        };
-      }),
+      sql<{ since: string | null; noticedAt: string }>`
+    SELECT json_extract(notice.payload_json, '$.lastActivityAt') AS since, notice.created_at AS "noticedAt"
+    FROM projection_thread_activities notice
+    WHERE notice.kind = 'provider.turn.unresponsive' AND notice.thread_id = ${threadId}
+      AND notice.turn_id = ${turnId}
+      AND NOT EXISTS (
+        SELECT 1 FROM projection_thread_activities later
+        WHERE later.thread_id = notice.thread_id AND later.sequence > notice.sequence)
+    ORDER BY notice.sequence DESC LIMIT 1`.pipe(
+        Effect.map((rows) => (rows[0] ? (rows[0].since ?? rows[0].noticedAt) : null)),
+      ),
     );
-  /** `failed`: the wake's start ended without a turn (it failed, or a Stop cancelled it). */
+  /** The shared server-wake reads (`serverWakeQueries.ts`); the fence takes the same ones. */
+  const pendingTurnStart = (threadId: ThreadId) => safe(readPendingTurnStart(sql, threadId));
   const wakeStartState = (threadId: ThreadId, messageId: MessageId) =>
+    safe(readWakeStartState(sql, { threadId, messageId }));
+  /** The thread's newest event sequence, or null without events. */
+  const lastEventSequence = (threadId: ThreadId) =>
     safe(
-      Effect.gen(function* () {
-        const rows = yield* sql<{ turnId: string | null }>`
-    SELECT turn_id AS "turnId" FROM projection_turns
-    WHERE thread_id = ${threadId} AND pending_message_id = ${messageId}
-    ORDER BY row_id DESC LIMIT 1
-  `;
-        if (rows[0]?.turnId) return "bound" as const;
-        if (yield* hasTurnStartEnded(sql, { threadId, messageId })) return "failed" as const;
-        return rows[0] ? ("pending" as const) : ("absent" as const);
-      }),
+      sql<{ sequence: number }>`
+    SELECT sequence FROM orchestration_events
+    WHERE aggregate_kind = 'thread' AND stream_id = ${threadId}
+    ORDER BY sequence DESC LIMIT 1
+  `.pipe(Effect.map((rows) => rows[0]?.sequence ?? null)),
     );
   const firstEventSequence = (threadId: ThreadId) =>
     safe(
@@ -593,10 +647,40 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
       AND ((${input.delegatingMessageId} IS NOT NULL
             AND json_extract(start.payload_json, '$.messageId') = ${input.delegatingMessageId})
         OR (substr(start.command_id, 1, ${DELEGATION_WAKE_COMMAND_PREFIX.length}) = ${DELEGATION_WAKE_COMMAND_PREFIX}
+            AND start.command_id NOT LIKE ${DELEGATION_STALL_NOTICE_COMMAND_PATTERN}
             AND start.occurred_at >= ${input.wakesSince}))
     LIMIT 1
   `.pipe(Effect.map((rows) => rows.length > 0)),
     );
+  /**
+   * The first event of any returnToOrigin task of request `proposalId`: its first task's
+   * creation, which follows the request's approval in the server's own event order.
+   */
+  const requestStartSequence = (proposalId: AgentControlProposalId) =>
+    safe(
+      sql<{ sequence: number | null }>`
+    SELECT min((SELECT e.sequence FROM orchestration_events e
+      WHERE e.aggregate_kind = 'thread' AND e.stream_id = r.child_thread_id
+      ORDER BY e.sequence ASC LIMIT 1)) AS sequence
+    FROM agent_control_completion_returns r WHERE r.proposal_id = ${proposalId}
+  `.pipe(Effect.map((rows) => rows[0]?.sequence ?? null)),
+    );
+  /**
+   * `cohortUserStop` for a task of a capped request (`maxConcurrent`): only Stops after the
+   * request's approval count (`requestStartSequence`), and after `afterSequence`. A Stop pressed
+   * while the request waited for approval does not keep its waiting tasks from starting, so it
+   * does not end their results either. The delivery and the slot runtime both decide with it.
+   */
+  const userStoppedAfterApproval = (record: CompletionReturnRecord, afterSequence: number) =>
+    Effect.gen(function* () {
+      const start = yield* requestStartSequence(record.proposalId);
+      return yield* cohortUserStop({
+        threadId: record.parentThreadId,
+        sinceSequence: Math.max(start ?? 0, afterSequence),
+        delegatingMessageId: yield* turnMessageId(record.parentThreadId, record.parentTurnId),
+        wakesSince: record.createdAt,
+      });
+    });
   /**
    * Whether a checkpoint revert on `threadId` after `sinceSequence` dropped `turnId`
    * (rollback-correctness: `thread.reverted` names the turns it dropped). The delegating
@@ -687,6 +771,7 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     get,
     save,
     initialTurnId,
+    initialMessageSentAt,
     observe,
     output,
     latestUserMessageId,
@@ -699,11 +784,14 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     cancelOwned,
     hasOutstandingDelegations,
     turnInfo,
+    silentTurnSince,
     pendingTurnStart,
     wakeStartState,
     firstEventSequence,
+    lastEventSequence,
     worktreeArchived,
     cohortUserStop,
+    userStoppedAfterApproval,
     turnDroppedByRevert,
     startFailed,
     turnStartSequence,

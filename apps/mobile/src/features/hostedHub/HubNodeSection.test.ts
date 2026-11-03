@@ -1,3 +1,4 @@
+import type { MobileHostedConnectionState } from "../../connection/hostedConnectionCoordinator";
 vi.mock("../nodes/DeviceIconPicker", () => ({ DeviceIconPicker: () => null }));
 vi.mock("../../components/DeviceIcon", () => ({
   DeviceIcon: () => null,
@@ -23,6 +24,7 @@ const hostedMock = vi.hoisted(() => ({
   available: true,
   e2eeStatus: "unavailable" as HostedE2eeChannelStatus,
   state: undefined as HostedHubState | undefined,
+  serverConfigs: new Map<string, { readonly lastEventLoopStall?: unknown }>(),
   controller: {
     selectNode: vi.fn(),
     returnToDirectory: vi.fn(),
@@ -86,6 +88,14 @@ vi.mock("../../hostedHub/acquireNode", () => ({
 // `ensureMobileHostedSession()` call and its own state, so it is mocked here
 // rather than re-implemented.
 vi.mock("./useHostedMode", () => ({ useHostedModeAvailable: () => hostedMock.available }));
+vi.mock("../../hostedHub/useLinkedDirectAccess", () => ({
+  useMobileLinkedDirectAccess: () => ({ linked: {}, linking: {}, directRoute: {}, notice: {} }),
+  addMobileDirectAccessLazily: vi.fn(),
+  removeMobileDirectAccessLazily: vi.fn(),
+}));
+vi.mock("../../state/environmentServerConfigs", () => ({
+  useEnvironmentServerConfigs: () => hostedMock.serverConfigs,
+}));
 // The §13 projection seam, for the same reason: this renderer invokes function
 // components directly, so a `useSyncExternalStore` hook has no dispatcher.
 vi.mock("../e2ee/useMobileE2eeSession", () => ({
@@ -216,6 +226,7 @@ function model(
             sessionEstablished: true,
             sessionRecoveredAfterUnknown: false,
             errorMessage: null,
+            outageFailure: null,
           },
         ]
       : [],
@@ -262,6 +273,93 @@ beforeEach(() => {
 });
 
 describe("Hub node selection guard", () => {
+  it("says since when an offline node was last heard from", () => {
+    const lastHeartbeatAt = new Date(2026, 9, 31, 14, 2).getTime();
+    const offline = node({
+      effectiveRole: "owner",
+      presence: { online: false, lastHeartbeatAt },
+    });
+    const at = (nowMs: number) =>
+      deriveHubNodeSectionModel({
+        state: state({ nodes: [offline] }),
+        available: true,
+        e2eeStatus: "unavailable",
+        actions: hostedMock.controller,
+        onSignIn: navigationMock.navigate,
+        hostFreeze: { lastEventLoopStall: () => undefined, nowMs },
+      }).rows[0]?.detail;
+    expect(at(lastHeartbeatAt + 60 * 60_000)).toBe("Offline since 14:02 · Owner");
+    expect(at(lastHeartbeatAt + 24 * 60 * 60_000)).toBe("Offline since yesterday 14:02 · Owner");
+    // Without a clock (a caller that passes none) it stays as it was.
+    expect(model({ nodes: [offline] }).rows[0]?.detail).toBe("Offline · Owner");
+  });
+
+  it("names the failing part of the way on the selected node's row", () => {
+    const selected = node();
+    const rows = (
+      outageFailure: "dns" | "draining" | null,
+      transportStatus: "online" | "reconnecting",
+    ) =>
+      deriveHubNodeSectionModel({
+        state: state({
+          selectedNode: selected,
+          selectionStatus: "online",
+          transportStatus,
+          sessionStatus: transportStatus === "online" ? "ready" : "closed",
+        }),
+        connections: [
+          {
+            environmentId: selected.environmentId,
+            nodeId: selected.id,
+            effectiveRole: "operator",
+            transportStatus,
+            sessionStatus: transportStatus === "online" ? "ready" : "closed",
+            label: selected.label,
+            generation: 1,
+            lastAccessedAt: 0,
+            attemptPrepared: true,
+            sessionEstablished: true,
+            sessionRecoveredAfterUnknown: false,
+            errorMessage: null,
+            outageFailure,
+          },
+        ],
+        available: true,
+        e2eeStatus: "unavailable",
+        actions: hostedMock.controller,
+        onSignIn: navigationMock.navigate,
+      }).rows;
+    expect(rows("dns", "reconnecting")[0]?.routeNotice).toBe("Can't reach the Hub (DNS)");
+    expect(rows("draining", "reconnecting")[0]?.routeNotice).toBe("Studio Mac is restarting");
+    expect(rows(null, "online")[0]?.routeNotice ?? null).toBeNull();
+  });
+
+  it("says on a node's row when it just froze, from the config it sent", () => {
+    const selected = node();
+    const withStall = (nowMs: number) =>
+      deriveHubNodeSectionModel({
+        state: state({ selectedNode: selected }),
+        available: true,
+        e2eeStatus: "unavailable",
+        actions: hostedMock.controller,
+        onSignIn: navigationMock.navigate,
+        hostFreeze: {
+          lastEventLoopStall: (environmentId) =>
+            environmentId === selected.environmentId
+              ? { startedAt: "2026-10-30T14:02:00.000Z", durationMs: 7_000, cpuCount: 8 }
+              : undefined,
+          nowMs,
+        },
+      });
+    const frozeAt = Date.parse("2026-10-30T14:02:00.000Z");
+    expect(withStall(frozeAt + 60_000).rows[0]?.freezeNotice).toMatch(
+      /^Froze for 7 s at \d{2}:\d{2}$/u,
+    );
+    // Gone five minutes on, though the config the node sent still holds it.
+    expect(withStall(frozeAt + 5 * 60_000 + 1).rows[0]?.freezeNotice ?? null).toBeNull();
+    expect(model().rows[0]?.freezeNotice ?? null).toBeNull();
+  });
+
   it("mirrors the controller's fail-closed guard", () => {
     expect(canSelectHubNode(state(), node())).toBe(true);
     expect(canSelectHubNode(state({ directoryStatus: "stale" }), node())).toBe(false);
@@ -590,6 +688,7 @@ describe("node icon settings authorization", () => {
             sessionEstablished: true,
             sessionRecoveredAfterUnknown: false,
             errorMessage: null,
+            outageFailure: null,
           },
         ],
       });
@@ -618,5 +717,79 @@ describe("node icon settings authorization", () => {
     ] as Partial<HostedHubState>[]) {
       expect(model({ ...ready, ...change }).rows[0]?.canEditIcon).not.toBe(true);
     }
+  });
+});
+
+describe("Hub node rows: linked direct access", () => {
+  const selected = node();
+  const readyConnection: MobileHostedConnectionState = {
+    environmentId: selected.environmentId,
+    nodeId: selected.id,
+    effectiveRole: "operator",
+    transportStatus: "online",
+    sessionStatus: "ready",
+    label: "Node",
+    generation: 1,
+    lastAccessedAt: 0,
+    attemptPrepared: true,
+    sessionEstablished: true,
+    sessionRecoveredAfterUnknown: false,
+    errorMessage: null,
+    outageFailure: null,
+  };
+  const addDirectAccess = vi.fn();
+  const removeDirectAccess = vi.fn();
+  const rowWith = (
+    directAccess: Partial<{
+      linked: Record<string, true>;
+      linking: Record<string, true>;
+      directRoute: Record<string, string>;
+      notice: Record<string, string>;
+    }>,
+    connection: MobileHostedConnectionState | null = readyConnection,
+  ) =>
+    deriveHubNodeSectionModel({
+      state: state({ selectedNode: selected, nodes: [selected] }),
+      connections: connection ? [connection] : [],
+      available: true,
+      e2eeStatus: "verified",
+      actions: { ...hostedMock.controller, addDirectAccess, removeDirectAccess },
+      onSignIn: navigationMock.navigate,
+      directAccess: { linked: {}, linking: {}, directRoute: {}, notice: {}, ...directAccess },
+    }).rows[0]!;
+
+  it("offers Add direct access only while the machine's relay session is ready", () => {
+    const row = rowWith({});
+    expect(row.directAccess?.label).toBe("Add direct access");
+    row.directAccess?.onPress();
+    expect(addDirectAccess).toHaveBeenCalledWith(selected);
+    expect(rowWith({}, { ...readyConnection, sessionStatus: "synchronizing" }).directAccess).toBe(
+      undefined,
+    );
+    expect(rowWith({}, null).directAccess).toBe(undefined);
+    expect(rowWith({ linking: { [selected.environmentId]: true } }).directAccess).toBe(undefined);
+    expect(rowWith({ linking: { [selected.environmentId]: true } }).detail).toContain(
+      "Adding direct access…",
+    );
+  });
+
+  it("offers Remove direct access for a linked machine, whatever its connection", () => {
+    const row = rowWith({ linked: { [selected.environmentId]: true } }, null);
+    expect(row.directAccess?.label).toBe("Remove direct access");
+    row.directAccess?.onPress();
+    expect(removeDirectAccess).toHaveBeenCalledWith(selected);
+  });
+
+  it("says which way the machine is reached, and what the last link attempt said", () => {
+    expect(rowWith({}).transportLabel).toBe("Hub relay");
+    expect(
+      rowWith({
+        linked: { [selected.environmentId]: true },
+        directRoute: { [selected.environmentId]: "https://studio.tail1.ts.net" },
+      }).transportLabel,
+    ).toBe("Direct");
+    expect(
+      rowWith({ notice: { [selected.environmentId]: "Update Ryco on Studio Mac first." } }).detail,
+    ).toContain("Update Ryco on Studio Mac first.");
   });
 });

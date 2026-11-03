@@ -416,10 +416,10 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
                 ...state,
                 snapshot: adopted.snapshot,
                 persistedFreshUntilMs: checkedAtMs + freshnessMs,
+                // As for a probe: a snapshot saved without usage is re-read too, since the next
+                // read may find some.
                 usageFreshUntilMs:
-                  carriesUsage && input.refreshUsage !== undefined
-                    ? checkedAtMs + snapshotFreshnessMs
-                    : null,
+                  input.refreshUsage !== undefined ? checkedAtMs + snapshotFreshnessMs : null,
               },
             ] as const;
           }),

@@ -35,6 +35,23 @@ describe("classifyTurnSteerFailure", () => {
     });
   });
 
+  it("marks a deferral its provider stopped the turn for, so the queue sends it next", () => {
+    expect(
+      classify(
+        new ProviderTurnNotSteerableError({
+          provider: "cursor",
+          threadId: "thread-1",
+          reason: "restarting",
+          detail: "Cursor can't take a message mid-turn, so Ryco stopped the turn.",
+        }),
+      ),
+    ).toEqual({
+      reason: "deferred",
+      error: "Cursor can't take a message mid-turn, so Ryco stopped the turn.",
+      restartedTurn: true,
+    });
+  });
+
   it.each([
     new ProviderSessionNotFoundError({ threadId: "thread-1" }),
     new ProviderAdapterSessionNotFoundError({ provider: "codex", threadId: "thread-1" }),

@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import type {
+  ModelSelection,
   OrchestrationCommand,
   OrchestrationProject,
   OrchestrationReadModel,
@@ -10,11 +11,15 @@ import type {
   ThreadId,
   WorktreeId,
 } from "@ryco/contracts";
-import { ContextHandoffActivityPayload } from "@ryco/contracts";
+import { CONTEXT_HANDOFF_SCHEMA_VERSION, ContextHandoffStatus, MessageId } from "@ryco/contracts";
 import { FORKED_THREAD_RELATIONSHIP } from "@ryco/shared/threadFork";
 import { Effect, Option, Schema } from "effect";
 
-import { OrchestrationCommandInvariantError } from "./Errors.ts";
+import {
+  OrchestrationCommandInvariantError,
+  OrchestrationModelSwitchBlockedError,
+} from "./Errors.ts";
+import { modelSelectionChangeRestartsSession } from "../provider/sessionModelRestart.ts";
 import { findThreadInArray } from "./threadIndex.ts";
 
 function invariantError(commandType: string, detail: string): OrchestrationCommandInvariantError {
@@ -87,14 +92,28 @@ function endedTurnStartMessageIds(thread: OrchestrationThread): ReadonlySet<stri
   return messageIds;
 }
 
+/**
+ * The part of a handoff activity that decides whether it is actionable. Lenient on purpose: the
+ * full payload of a newer server (for example a handoff reason this build does not know) still
+ * reads by its status, so a finished handoff never blocks reverts, promotion or the next handoff
+ * after a downgrade. A payload whose schema version, status or target cannot be read stays
+ * actionable.
+ */
+const decodeContextHandoffProgress = Schema.decodeUnknownOption(
+  Schema.Struct({
+    schemaVersion: Schema.Literal(CONTEXT_HANDOFF_SCHEMA_VERSION),
+    status: ContextHandoffStatus,
+    targetMessageId: MessageId,
+  }),
+);
+
 export function hasActionableContextHandoff(thread: OrchestrationThread): boolean {
-  const decode = Schema.decodeUnknownOption(ContextHandoffActivityPayload);
   let endedTurnStarts: ReadonlySet<string> | undefined;
   return thread.activities.some((activity) => {
     if (activity.kind !== "context-handoff") {
       return false;
     }
-    return Option.match(decode(activity.payload), {
+    return Option.match(decodeContextHandoffProgress(activity.payload), {
       onNone: () => true,
       onSome: (payload) => {
         if (payload.status === "dispatching") return true;
@@ -168,6 +187,59 @@ export function requireThreadIdleForContextHandoff(input: {
     );
   }
   return Effect.void;
+}
+
+/**
+ * Refuses a turn start that would replace the thread's live provider runtime while that runtime
+ * still runs native background work (subagents, background shells, watch loops): replacing the
+ * runtime ends every task with it. Two turn starts replace it: a context handoff the decider
+ * planned (another provider instance), and a model or option change that restarts the session
+ * on the same instance (`modelSelectionChangeRestartsSession`, compared with the selection the
+ * session runs, `sessionModelSelection`, as the provider reactor compares). Clients store a
+ * pick on the thread when it is made, so the thread's own selection may already be the one the
+ * turn asks for; it only stands in while no session selection is known.
+ * The decider cannot check this: background liveness is in-memory runtime state
+ * (`ThreadBackgroundLiveness`), not part of the read model, so the engine applies this to the
+ * events the decider planned. Only tasks the current runtime reported count. Only a turn start
+ * marked `keepBackgroundWork` is refused: a client that predates the refusal could not handle
+ * it (an older mobile outbox drops a refused message), so its turn starts switch as before. A
+ * turn start with `stopBackgroundWork` (the user chose to end the tasks) or a thread without a
+ * live runtime passes.
+ */
+export function requireNoBackgroundWorkForModelSwitch(input: {
+  readonly command: Extract<OrchestrationCommand, { type: "thread.turn.start" }>;
+  readonly events: ReadonlyArray<{ readonly type: string }>;
+  readonly thread: OrchestrationThread | undefined;
+  readonly liveTaskIds: (
+    threadId: ThreadId,
+    runtimeSessionId: string | null,
+  ) => ReadonlyArray<string>;
+  /** The selection the thread's session last applied (`ThreadSessionModelSelectionsService`). */
+  readonly sessionModelSelection?: (threadId: ThreadId) => ModelSelection | undefined;
+}): Effect.Effect<void, OrchestrationModelSwitchBlockedError> {
+  const { command, thread } = input;
+  const session = thread?.session;
+  if (
+    command.keepBackgroundWork !== true ||
+    command.stopBackgroundWork === true ||
+    !thread ||
+    !session ||
+    session.status === "stopped"
+  ) {
+    return Effect.void;
+  }
+  const replacesRuntime =
+    input.events.some((event) => event.type === "thread.context-handoff-requested") ||
+    modelSelectionChangeRestartsSession({
+      driver: session.providerName,
+      previous: input.sessionModelSelection?.(thread.id) ?? thread.modelSelection,
+      requested: command.modelSelection,
+    });
+  if (!replacesRuntime) return Effect.void;
+  const taskIds = input.liveTaskIds(thread.id, session.runtimeSessionId ?? null);
+  return taskIds.length === 0
+    ? Effect.void
+    : Effect.fail(new OrchestrationModelSwitchBlockedError({ threadId: thread.id, taskIds }));
 }
 
 export function findThreadById(
@@ -307,6 +379,62 @@ export function requireWorktreeNotDeleted(input: {
       )
     : Effect.void;
 }
+
+const describeBranch = (branch: string | null) =>
+  branch === null ? "no branch" : `branch '${branch}'`;
+
+/**
+ * Why a branch-guarded metadata update no longer applies, or null when it does: it carries no
+ * guard, the record still holds `expected`, or the record already holds `next` (the same change
+ * landed first, and applying it again only repeats it).
+ */
+export function branchPreconditionFailure(input: {
+  /** Names the record in the detail, e.g. "Thread 'x'". */
+  readonly subject: string;
+  readonly current: string | null;
+  readonly expected: string | null | undefined;
+  readonly next: string | null | undefined;
+}): string | null {
+  if (input.expected === undefined || input.current === input.expected) return null;
+  if (input.next !== undefined && input.current === input.next) return null;
+  return `${input.subject} records ${describeBranch(input.current)} now, but the update expected ${describeBranch(input.expected)}.`;
+}
+
+/** Fails a command whose `expectedBranch` no longer holds (see `branchPreconditionFailure`). */
+export function requireBranchPrecondition(input: {
+  readonly command: Extract<
+    OrchestrationCommand,
+    { type: "thread.meta.update" | "worktree.meta.update" }
+  >;
+  readonly subject: string;
+  /** The branch the record holds now. */
+  readonly current: string | null;
+}): Effect.Effect<void, OrchestrationCommandInvariantError> {
+  const detail = branchPreconditionFailure({
+    subject: input.subject,
+    current: input.current,
+    expected: input.command.expectedBranch,
+    next: input.command.branch,
+  });
+  return detail === null
+    ? Effect.void
+    : Effect.fail(
+        new OrchestrationCommandInvariantError({
+          commandType: input.command.type,
+          detail,
+          failedPrecondition: "expectedBranch",
+        }),
+      );
+}
+
+/**
+ * Whether a dispatch failed only because its `expectedBranch` lost a race to a newer branch
+ * write. Other invariant failures of the same commands (a pending checkout relocation, an
+ * unknown record) are real errors.
+ */
+export const isBranchPreconditionFailure = (error: unknown): boolean =>
+  Schema.is(OrchestrationCommandInvariantError)(error) &&
+  error.failedPrecondition === "expectedBranch";
 
 /** Why a conversation of a deleted workspace cannot continue. */
 export const deletedWorkspaceTurnBlocker = (

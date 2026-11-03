@@ -67,6 +67,7 @@ import {
   type ComputerBackendActionResult,
   type ComputerBrowserCallResult,
   type ComputerCaptureRequest,
+  type ComputerClipboardPayload,
   type ComputerStreamFrame,
   type ComputerMenuTarget,
   type ComputerResolvedTarget,
@@ -3458,36 +3459,68 @@ export class ComputerManager {
    * but it still goes through the keyboard-target path, so it lands exactly
    * where computer_type_text would and nowhere else.
    *
-   * `clipboardRestored` reports whether the previous contents went back. A
-   * clipboard holding an image or other non-text content cannot be saved or
-   * restored and is replaced; a failed restore is reported rather than
-   * silently leaving the pasted text behind.
+   * Native preservation retains every clipboard representation without
+   * returning it to the model, and refuses before writing when it cannot.
+   * `clipboardRestored` reports whether the user's contents went back; false
+   * also covers a newer human copy, which restoration must never overwrite.
    */
   async paste(
     threadId: string | undefined,
-    text: string,
+    content: string | ComputerClipboardPayload,
     windowId?: string,
   ): Promise<ComputerActionResult & { readonly clipboardRestored: boolean }> {
     return this.withDesktopControl(threadId, async () => {
-      const read = this.backend.readClipboard?.bind(this.backend);
-      const write = this.backend.writeClipboard?.bind(this.backend);
-      if (!read || !write) throw clipboardUnsupportedError();
-      const previous = await timedComputerLeg("dispatch", () => read().catch(() => undefined));
-      await timedComputerLeg("dispatch", () => write(text));
+      const payload = typeof content === "string" ? { text: content } : content;
+      // Validate the destination before temporarily touching the user's clipboard.
+      await timedComputerLeg("resolve", () => this.prepareKeyboardTarget(windowId, threadId));
+      // Background exact-target delivery posts the shortcut to that validated
+      // window's process, so the clipboard write in between cannot move it and
+      // the shortcut needs no second listing. Foreground delivery re-aims focus
+      // right before the shortcut, because focus decides where it lands.
+      const targetPrepared = this.canUseBackgroundTarget();
+      const prepare = this.backend.prepareClipboardPaste?.bind(this.backend);
+      let restore: () => Promise<boolean>;
+      if (prepare) {
+        restore = await timedComputerLeg("dispatch", () => prepare(payload));
+      } else {
+        // Text-only backends: a clipboard that cannot be read cannot be put
+        // back, so refuse before replacing it.
+        const read = this.backend.readClipboard?.bind(this.backend);
+        const write = this.backend.writeClipboard?.bind(this.backend);
+        if (!read || !write || !("text" in payload)) throw clipboardUnsupportedError();
+        const previous = await timedComputerLeg("dispatch", () =>
+          read().catch(() => {
+            throw new ComputerBackendError(
+              "Cannot preserve the current clipboard; no paste was sent. Use direct text input.",
+            );
+          }),
+        );
+        await timedComputerLeg("dispatch", () => write(payload.text));
+        restore = async () => {
+          if ((await read()) !== payload.text) return false;
+          await write(previous);
+          return true;
+        };
+      }
       let restored = false;
       let result: ComputerBackendActionResult | void;
       try {
-        result = await this.runKeyboardDispatch(threadId, windowId, () =>
-          this.backend.hotkey(
-            this.agentDialect === "macos" ? ["meta", "v"] : ["ctrl", "v"],
-            windowId,
-          ),
+        result = await this.runKeyboardDispatch(
+          threadId,
+          windowId,
+          () =>
+            this.backend.hotkey(
+              this.agentDialect === "macos" ? ["meta", "v"] : ["ctrl", "v"],
+              windowId,
+            ),
+          targetPrepared,
         );
       } finally {
         // The restore runs whether or not the shortcut dispatched: the payload
         // is already on the clipboard either way, and leaving it there leaks
-        // the agent's text into the next paste the human makes.
-        if (previous !== undefined) {
+        // the agent's content into the next paste the human makes. A Stop
+        // must not skip it.
+        await withoutDesktopCancellation(async () => {
           await timedComputerLeg(
             "settle",
             () =>
@@ -3495,17 +3528,16 @@ export class ComputerManager {
                 setTimeout(resolve, COMPUTER_PASTE_RESTORE_MS);
               }),
           );
-          restored = await write(previous).then(
-            () => true,
+          restored = await restore().then(
+            (value) => value,
             () => false,
           );
-        }
+        });
       }
       return {
         ...this.actionResult(threadId, "computer_paste", undefined, result, windowId),
-        // True only when what the user copied is back in place: a clipboard
-        // with no text had nothing to restore, and a failed restore reports
-        // false rather than claim their contents are safe.
+        // True only when what the user copied is back in place. False also
+        // covers a newer human copy, which must remain untouched.
         clipboardRestored: restored,
       };
     });
@@ -4782,14 +4814,17 @@ export class ComputerManager {
    * seat's keyboard at the named window (or leave it where the last action
    * put it), prove the operation is still live, then inject and hand back
    * the backend's own result. Type, key press, hotkey and paste differ only
-   * in the call each carries.
+   * in the call each carries. `targetPrepared` means the caller already ran
+   * the same targeting and nothing since can have moved the keyboard.
    */
   private async runKeyboardDispatch(
     threadId: string | undefined,
     windowId: string | undefined,
     dispatch: () => Promise<ComputerBackendActionResult | void>,
+    targetPrepared = false,
   ): Promise<ComputerBackendActionResult | void> {
-    await timedComputerLeg("resolve", () => this.prepareKeyboardTarget(windowId, threadId));
+    if (!targetPrepared)
+      await timedComputerLeg("resolve", () => this.prepareKeyboardTarget(windowId, threadId));
     assertDesktopOperationActive();
     return timedComputerLeg("dispatch", dispatch);
   }

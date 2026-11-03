@@ -656,6 +656,22 @@ describe("AccountSettingsPanel", () => {
     expect(refresh).toHaveBeenLastCalledWith({ force: true });
   });
 
+  it("deletes the account only after the email or username is typed to confirm", async () => {
+    const deleteAccount = vi
+      .spyOn(hostedHubController, "deleteAccount")
+      .mockImplementation(async () => committed());
+
+    await mount();
+    await page.getByRole("button", { name: "Delete account…" }).click();
+    expect(deleteAccount, "opening the dialog must not delete anything").not.toHaveBeenCalled();
+    const confirm = page.getByRole("button", { name: "Delete account", exact: true });
+    await expect.element(confirm).toBeDisabled();
+
+    await page.getByRole("textbox", { name: "Account email or username" }).fill("ada@example.test");
+    await confirm.click();
+    expect(deleteAccount).toHaveBeenCalledWith({ identifier: "ada@example.test" });
+  });
+
   it("rotates recovery codes only after an explicit confirmation that says what it destroys", async () => {
     const regenerate = vi
       .spyOn(hostedHubController, "regenerateRecoveryCodes")

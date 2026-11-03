@@ -10,7 +10,6 @@ import {
   type ServerLifecycleStreamEvent,
   type ServerProvider,
 } from "@ryco/contracts";
-import { DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/shared/keybindings";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { createEnvironmentConnection } from "../connection/connection.ts";
@@ -25,7 +24,6 @@ import {
   applyServerConfigEvent,
   clearWelcomeState,
   getServerConfig,
-  getLegacyServerKeybindings,
   onProvidersUpdated,
   onServerConfigUpdated,
   onWelcome,
@@ -71,7 +69,6 @@ const baseEnvironment = {
   capabilities: {
     repositoryIdentity: true,
     threadSettlement: false,
-    threadPriorityRanking: false,
   },
 };
 
@@ -162,11 +159,6 @@ afterEach(() => {
 });
 
 describe("serverState", () => {
-  it("uses default keybindings before a server config snapshot is available", () => {
-    expect(getServerConfig()).toBeNull();
-    expect(getLegacyServerKeybindings()).toEqual(DEFAULT_RESOLVED_KEYBINDINGS);
-  });
-
   it("keeps the welcome stream only and writes no config of its own", () => {
     const stop = startServerStateSync(connection);
 
@@ -351,7 +343,7 @@ describe("serverState", () => {
       payload: {
         settings: {
           ...DEFAULT_SERVER_SETTINGS,
-          enableLegacyTokenStreaming: true,
+          responseStreamingMode: "token",
         },
       },
     });
@@ -363,7 +355,7 @@ describe("serverState", () => {
       providers: nextProviders,
       settings: {
         ...DEFAULT_SERVER_SETTINGS,
-        enableLegacyTokenStreaming: true,
+        responseStreamingMode: "token",
       },
     });
 
@@ -392,7 +384,7 @@ describe("serverState", () => {
         providers: nextProviders,
         settings: {
           ...DEFAULT_SERVER_SETTINGS,
-          enableLegacyTokenStreaming: true,
+          responseStreamingMode: "token",
         },
       },
       "settingsUpdated",

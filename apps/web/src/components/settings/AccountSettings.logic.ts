@@ -309,7 +309,8 @@ export type AccountStepUpAction =
   | "add-passkey"
   | "regenerate-recovery-codes"
   | "connect-github"
-  | "disconnect-github";
+  | "disconnect-github"
+  | "delete-account";
 
 const STEP_UP_ACTION_TITLES: Record<AccountStepUpAction, string> = {
   "set-password": "Confirm the password change",
@@ -320,6 +321,7 @@ const STEP_UP_ACTION_TITLES: Record<AccountStepUpAction, string> = {
   "regenerate-recovery-codes": "Confirm new recovery codes",
   "connect-github": "Confirm connecting GitHub",
   "disconnect-github": "Confirm disconnecting GitHub",
+  "delete-account": "Confirm deleting the account",
 };
 
 export function stepUpTitle(action: AccountStepUpAction): string {

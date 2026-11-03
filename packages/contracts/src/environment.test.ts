@@ -23,7 +23,6 @@ describe("ExecutionEnvironmentCapabilities.threadSettlement", () => {
     expect(decodeDescriptor(descriptor({ repositoryIdentity: true })).capabilities).toEqual({
       repositoryIdentity: true,
       threadSettlement: false,
-      threadPriorityRanking: false,
     });
   });
 
@@ -31,14 +30,6 @@ describe("ExecutionEnvironmentCapabilities.threadSettlement", () => {
     expect(
       decodeDescriptor(descriptor({ repositoryIdentity: true, threadSettlement: true }))
         .capabilities.threadSettlement,
-    ).toBe(true);
-  });
-
-  it("decodes missing ranking support as false and preserves explicit support", () => {
-    expect(decodeDescriptor(descriptor({})).capabilities.threadPriorityRanking).toBe(false);
-    expect(
-      decodeDescriptor(descriptor({ threadPriorityRanking: true })).capabilities
-        .threadPriorityRanking,
     ).toBe(true);
   });
 });
@@ -99,6 +90,39 @@ describe("ExecutionEnvironmentCapabilities.projectSearchEmptyQuery", () => {
   });
 });
 
+describe("ExecutionEnvironmentCapabilities.projectContentSearch", () => {
+  it("stays absent for older nodes and decodes when advertised", () => {
+    expect(decodeDescriptor(descriptor({})).capabilities.projectContentSearch).toBeUndefined();
+    expect(
+      decodeDescriptor(descriptor({ projectContentSearch: true })).capabilities
+        .projectContentSearch,
+    ).toBe(true);
+    expect(() => decodeDescriptor(descriptor({ projectContentSearch: "true" }))).toThrow();
+  });
+});
+
+describe("ExecutionEnvironmentCapabilities.projectReadFileChunk", () => {
+  it("stays absent for older nodes and decodes when advertised", () => {
+    expect(decodeDescriptor(descriptor({})).capabilities.projectReadFileChunk).toBeUndefined();
+    expect(
+      decodeDescriptor(descriptor({ projectReadFileChunk: true })).capabilities
+        .projectReadFileChunk,
+    ).toBe(true);
+    expect(() => decodeDescriptor(descriptor({ projectReadFileChunk: "true" }))).toThrow();
+  });
+});
+
+describe("ExecutionEnvironmentCapabilities.terminalWriteRequireIdle", () => {
+  it("stays absent for older nodes and decodes when advertised", () => {
+    expect(decodeDescriptor(descriptor({})).capabilities.terminalWriteRequireIdle).toBeUndefined();
+    expect(
+      decodeDescriptor(descriptor({ terminalWriteRequireIdle: true })).capabilities
+        .terminalWriteRequireIdle,
+    ).toBe(true);
+    expect(() => decodeDescriptor(descriptor({ terminalWriteRequireIdle: "true" }))).toThrow();
+  });
+});
+
 describe("ExecutionEnvironmentCapabilities.worktreeNotes", () => {
   it("stays absent for older nodes and decodes when advertised", () => {
     expect(decodeDescriptor(descriptor({})).capabilities.worktreeNotes).toBeUndefined();
@@ -106,6 +130,27 @@ describe("ExecutionEnvironmentCapabilities.worktreeNotes", () => {
       true,
     );
     expect(() => decodeDescriptor(descriptor({ worktreeNotes: "true" }))).toThrow();
+  });
+});
+
+describe("ExecutionEnvironmentCapabilities.recoverableGitActions", () => {
+  it("stays absent for older nodes, which stop a Git action when its request closes", () => {
+    expect(decodeDescriptor(descriptor({})).capabilities.recoverableGitActions).toBeUndefined();
+    expect(
+      decodeDescriptor(descriptor({ recoverableGitActions: true })).capabilities
+        .recoverableGitActions,
+    ).toBe(true);
+    expect(() => decodeDescriptor(descriptor({ recoverableGitActions: "true" }))).toThrow();
+  });
+});
+
+describe("ExecutionEnvironmentCapabilities.stagedOnlyCommit", () => {
+  it("stays absent for older nodes, which would commit every change", () => {
+    expect(decodeDescriptor(descriptor({})).capabilities.stagedOnlyCommit).toBeUndefined();
+    expect(
+      decodeDescriptor(descriptor({ stagedOnlyCommit: true })).capabilities.stagedOnlyCommit,
+    ).toBe(true);
+    expect(() => decodeDescriptor(descriptor({ stagedOnlyCommit: "true" }))).toThrow();
   });
 });
 

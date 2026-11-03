@@ -1,11 +1,14 @@
 import * as fs from "node:fs";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { ChildProcessSpawner } from "effect/process";
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, FileSystem, Layer, Option, Schema } from "effect";
 import {
   AuthSessionId,
+  GitCommandError,
   SourceControlProviderError,
+  ThreadId,
   WorktreeId,
   WS_METHODS,
   type ChangeRequest,
@@ -23,6 +26,7 @@ import {
   type ProjectionWorktreeRepositoryShape,
 } from "../persistence/Services/ProjectionWorktrees.ts";
 import { ProcessLaneRef, type ProcessLane } from "../processGovernor.ts";
+import { markServedWhilePaused, pausedUntilOf } from "../sourceControl/lastGoodWhilePaused.ts";
 import type { SourceControlProviderShape } from "../sourceControl/SourceControlProvider.ts";
 import {
   makeRepositoryListCache,
@@ -32,7 +36,17 @@ import {
   SourceControlProviderRegistry,
   type SourceControlProviderRegistryShape,
 } from "../sourceControl/SourceControlProviderRegistry.ts";
+import * as GitManager from "../git/GitManager.ts";
+import * as GitWorkflowService from "../git/GitWorkflowService.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
+import {
+  WorkspaceAccessDeniedError,
+  WorkspaceAccessPolicy,
+  type WorkspaceAccessPolicyShape,
+} from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import type { WsRpcContext } from "./context.ts";
+import { rpcAccessFor } from "./RpcAccessPolicy.ts";
 import { makeSourceControlHandlers, selectCreatedChangeRequest } from "./sourceControlRpc.ts";
 
 const handlerLayer = Layer.mergeAll(
@@ -43,6 +57,7 @@ const handlerLayer = Layer.mergeAll(
 
 const ownerSession: AuthenticatedSession = {
   sessionId: AuthSessionId.make("session-owner"),
+  chainId: AuthSessionId.make("session-owner"),
   subject: "owner",
   method: "browser-session-cookie",
   role: "owner",
@@ -69,6 +84,8 @@ function makeContext(
   options?: {
     /** The repository index's open/recent listing; null when it cannot answer. */
     readonly indexed?: ReadonlyArray<ChangeRequest> | null;
+    /** The repository index's listing fails with this instead. */
+    readonly indexedError?: SourceControlProviderError;
     /** A real repository list cache (one repository) instead of reading through. */
     readonly listCache?: RepositoryListCache;
   },
@@ -90,7 +107,10 @@ function makeContext(
         Effect.sync(() => listInvalidations.push(cwd)).pipe(
           Effect.andThen(listCache ? listCache.invalidate("repo") : Effect.void),
         ),
-      indexedChangeRequests: () => Effect.succeed(options?.indexed ?? null),
+      indexedChangeRequests: () =>
+        options?.indexedError
+          ? Effect.fail(options.indexedError)
+          : Effect.succeed(options?.indexed ?? null),
     },
     sourceControlRegistry: {
       resolve: () => Effect.succeed(resolved),
@@ -105,7 +125,7 @@ function makeContext(
       Effect.sync(() => refreshes.push(`worktrees:${input.reason}`)),
     refreshGitStatus: () => Effect.sync(() => refreshes.push("git-status")),
   } as unknown as WsRpcContext;
-  return { handlers: makeSourceControlHandlers(ctx), refreshes, listInvalidations };
+  return { handlers: makeSourceControlHandlers(ctx), ctx, refreshes, listInvalidations };
 }
 
 describe("selectCreatedChangeRequest", () => {
@@ -276,6 +296,107 @@ describe("pull request page handlers", () => {
     }),
   );
 
+  it.effect("keeps rows served while the forge is paused marked and out of link writes", () =>
+    Effect.gen(function* () {
+      const indexed = markServedWhilePaused(
+        [1, 2, 3].map((number) => changeRequest({ number })),
+        1_000_000,
+      );
+      const { handlers, refreshes } = makeContext({}, undefined, { indexed });
+      const rows = yield* handlers[WS_METHODS.sourceControlListChangeRequests]({
+        cwd: "/repo",
+        state: "open",
+        limit: 2,
+        view: "picker",
+      }).pipe(Effect.provide(handlerLayer));
+      expect(rows.map((item) => item.number)).toEqual([1, 2]);
+      expect(pausedUntilOf(rows)).toBe(1_000_000);
+      expect(refreshes).not.toContain("worktrees:sourceControl.listChangeRequests");
+    }),
+  );
+
+  it.effect(
+    "does not ask a rate-limiting host again for picker rows the index could not read",
+    () =>
+      Effect.gen(function* () {
+        const listed: Array<unknown> = [];
+        const provider = {
+          listChangeRequests: (input: unknown) =>
+            Effect.sync(() => (listed.push(input), [changeRequest({ number: 9 })])),
+        } as Partial<SourceControlProviderShape>;
+        const readPicker = (indexedError: SourceControlProviderError) =>
+          makeContext(provider, undefined, { indexedError })
+            .handlers[WS_METHODS.sourceControlListChangeRequests]({
+              cwd: "/repo",
+              state: "open",
+              view: "picker",
+            })
+            .pipe(Effect.provide(handlerLayer));
+
+        const rateLimited = new SourceControlProviderError({
+          provider: "github",
+          operation: "listChangeRequests",
+          detail: "GitHub API rate limit exceeded.",
+          reason: "rate-limited",
+          retryAt: 1_000_000,
+        });
+        expect(yield* Effect.flip(readPicker(rateLimited))).toBe(rateLimited);
+        expect(listed).toEqual([]);
+
+        // Any other failed listing still falls back to lean host rows.
+        const offline = new SourceControlProviderError({
+          provider: "github",
+          operation: "listChangeRequests",
+          detail: "host unreachable",
+        });
+        expect((yield* readPicker(offline)).map((item) => item.number)).toEqual([9]);
+        expect(listed).toHaveLength(1);
+      }),
+  );
+
+  it.effect("keeps a row's last good detail while the forge is rate limiting", () =>
+    Effect.gen(function* () {
+      let now = 1_000_000;
+      let limited = false;
+      const listCache = makeRepositoryListCache({ nowMs: () => now });
+      const { handlers } = makeContext(
+        {
+          getChangeRequestDetail: (input) =>
+            limited
+              ? Effect.fail(
+                  new SourceControlProviderError({
+                    provider: "github",
+                    operation: "getChangeRequestDetail",
+                    detail: "GitHub requests are paused after a rate limit.",
+                    reason: "rate-limited",
+                    retryAt: now + 60_000,
+                  }),
+                )
+              : Effect.succeed({ number: Number(input.reference) } as never),
+        },
+        undefined,
+        { listCache },
+      );
+      const read = (fullContent?: boolean) =>
+        handlers[WS_METHODS.sourceControlGetChangeRequestDetail]({
+          cwd: "/repo",
+          reference: "42",
+          view: "row",
+          ...(fullContent !== undefined ? { fullContent } : {}),
+        }).pipe(Effect.provide(handlerLayer));
+
+      yield* read();
+      yield* read(true);
+      limited = true;
+      now += 60_000;
+      const kept = yield* read();
+      expect(kept).toMatchObject({ number: 42 });
+      expect(pausedUntilOf(kept)).toBe(now + 60_000);
+      // A full-content detail is too large to keep.
+      expect(yield* Effect.flip(read(true))).toMatchObject({ reason: "rate-limited" });
+    }),
+  );
+
   it.effect("shares list reads per repository until a change request mutation", () =>
     Effect.gen(function* () {
       let lists = 0;
@@ -351,6 +472,154 @@ describe("pull request page handlers", () => {
       yield* read("42");
       yield* read("42");
       expect(lanes.slice(3)).toEqual(["interactive", "interactive"]);
+    }),
+  );
+
+  it.effect("reads a row again only when the host's fingerprint moved", () =>
+    Effect.gen(function* () {
+      let now = 1_000_000;
+      let details = 0;
+      let fingerprint: { status: string; remarks: string; revision?: string } = {
+        status: "OPEN MERGEABLE abc SUCCESS:3",
+        remarks: "0  0  0",
+        revision: "2026-10-30T00:00:00Z ready",
+      };
+      const asked: Array<{ readonly number: number; readonly reuseSinceMs?: number | undefined }> =
+        [];
+      const listCache = makeRepositoryListCache({ nowMs: () => now });
+      const { handlers } = makeContext(
+        {
+          getChangeRequestDetail: (input) =>
+            Effect.sync(
+              () =>
+                ({
+                  number: Number(input.reference),
+                  url: `https://github.com/acme/repo/pull/${input.reference}`,
+                  version: ++details,
+                }) as never,
+            ),
+          getChangeRequestWatchFingerprint: (input) =>
+            Effect.sync(() => {
+              asked.push({ number: input.number, reuseSinceMs: input.reuseSinceMs });
+              return fingerprint;
+            }),
+          addChangeRequestComment: () => Effect.succeed({} as never),
+        },
+        undefined,
+        { listCache },
+      );
+      const read = handlers[WS_METHODS.sourceControlGetChangeRequestDetail]({
+        cwd: "/repo",
+        reference: "42",
+        view: "row",
+      }).pipe(Effect.provide(handlerLayer));
+      const poll = () => {
+        now += 30_000;
+        return read;
+      };
+
+      expect(yield* read).toMatchObject({ number: 42, version: 1 });
+      // The first fingerprint comes before the second full read, which it then stands for.
+      expect(yield* poll()).toMatchObject({ version: 2 });
+      expect(yield* poll()).toMatchObject({ version: 2 });
+      expect(yield* poll()).toMatchObject({ version: 2 });
+      expect(details).toBe(2);
+      expect(asked.at(-1)).toEqual({ number: 42, reuseSinceMs: 0 });
+
+      // A check finished: the fingerprint moved.
+      fingerprint = { ...fingerprint, status: "OPEN MERGEABLE abc FAILURE:1,SUCCESS:2" };
+      expect(yield* poll()).toMatchObject({ version: 3 });
+      // So does a new title (the revision).
+      fingerprint = { ...fingerprint, revision: "2026-10-30T01:00:00Z ready" };
+      expect(yield* poll()).toMatchObject({ version: 4 });
+      expect(yield* poll()).toMatchObject({ version: 4 });
+
+      // A push or an agent turn refreshes the repository: the next fingerprint must be newer.
+      yield* listCache.invalidate("repo", { revalidate: "fresh" });
+      const refreshedAt = now;
+      expect(yield* poll()).toMatchObject({ version: 4 });
+      expect(asked.at(-1)?.reuseSinceMs).toBe(refreshedAt);
+
+      // A change Ryco made reads the row in full at once, whatever the fingerprint says.
+      yield* handlers[WS_METHODS.sourceControlAddChangeRequestComment]({
+        cwd: "/repo",
+        reference: "42",
+        body: "LGTM",
+      }).pipe(Effect.provide(handlerLayer));
+      expect(yield* read).toMatchObject({ version: 5 });
+
+      // A fingerprint without a revision (a host that offers none) never stands for a row.
+      fingerprint = { status: fingerprint.status, remarks: fingerprint.remarks };
+      expect(yield* poll()).toMatchObject({ version: 6 });
+      expect(yield* poll()).toMatchObject({ version: 7 });
+    }),
+  );
+
+  it.effect("shares what rows learned across the server's connections", () =>
+    Effect.gen(function* () {
+      let now = 1_000_000;
+      let details = 0;
+      const listCache = makeRepositoryListCache({ nowMs: () => now });
+      const { handlers, ctx } = makeContext(
+        {
+          getChangeRequestDetail: (input) =>
+            Effect.sync(
+              () => ({ number: Number(input.reference), url: "u", version: ++details }) as never,
+            ),
+          getChangeRequestWatchFingerprint: () =>
+            Effect.succeed({
+              status: "OPEN MERGEABLE abc SUCCESS:3",
+              remarks: "0  0  0",
+              revision: "2026-10-30T00:00:00Z ready",
+            }),
+        },
+        undefined,
+        { listCache },
+      );
+      const pollOn = (connection: typeof handlers) => {
+        now += 30_000;
+        return connection[WS_METHODS.sourceControlGetChangeRequestDetail]({
+          cwd: "/repo",
+          reference: "42",
+          view: "row",
+        }).pipe(Effect.provide(handlerLayer));
+      };
+
+      expect(yield* pollOn(handlers)).toMatchObject({ version: 1 });
+      expect(yield* pollOn(handlers)).toMatchObject({ version: 2 });
+      // Another window, a phone or a reconnect polls the same row: the fingerprint the first
+      // connection's rows took still stands for it.
+      const other = makeSourceControlHandlers(ctx);
+      expect(yield* pollOn(other)).toMatchObject({ version: 2 });
+      expect(details).toBe(2);
+    }),
+  );
+
+  it.effect("reads rows of a host without a fingerprint in full, as before", () =>
+    Effect.gen(function* () {
+      let now = 1_000_000;
+      let details = 0;
+      const listCache = makeRepositoryListCache({ nowMs: () => now });
+      const { handlers } = makeContext(
+        {
+          getChangeRequestDetail: (input) =>
+            Effect.sync(
+              () => ({ number: Number(input.reference), url: "u", version: ++details }) as never,
+            ),
+        },
+        undefined,
+        { listCache },
+      );
+      const read = handlers[WS_METHODS.sourceControlGetChangeRequestDetail]({
+        cwd: "/repo",
+        reference: "42",
+        view: "row",
+      }).pipe(Effect.provide(handlerLayer));
+      for (let poll = 0; poll < 4; poll += 1) {
+        yield* read;
+        now += 30_000;
+      }
+      expect(details).toBe(4);
     }),
   );
 
@@ -905,4 +1174,130 @@ describe("checkout without a recognized hosting provider", () => {
       ).toBe("gh: authentication required");
     }),
   );
+});
+
+describe("pull request watch", () => {
+  const threadId = ThreadId.make("thread-watch");
+  const watchContext = (service: Option.Option<unknown>) => {
+    const ctx = { ownerEffect, pullRequestWatch: service } as unknown as WsRpcContext;
+    return makeSourceControlHandlers(ctx);
+  };
+
+  it.effect("starts the watch as the user's switch", () =>
+    Effect.gen(function* () {
+      const calls: unknown[] = [];
+      const handlers = watchContext(
+        Option.some({
+          setWatch: (input: unknown) =>
+            Effect.sync(() => {
+              calls.push(input);
+              return { watch: null, now: "All 3 checks passed." };
+            }),
+        }),
+      );
+      const result = yield* handlers[WS_METHODS.sourceControlSetPullRequestWatch]({
+        threadId,
+        autoFix: true,
+      });
+      expect(result.now).toBe("All 3 checks passed.");
+      expect(calls).toEqual([{ threadId, autoFix: true, origin: "user" }]);
+    }),
+  );
+
+  it.effect("answers plainly on a node without pull request watches", () =>
+    Effect.gen(function* () {
+      const handlers = watchContext(Option.none());
+      const error = yield* handlers[WS_METHODS.sourceControlSetPullRequestWatch]({
+        threadId,
+        news: true,
+      }).pipe(Effect.flip);
+      expect(error).toMatchObject({ _tag: "PullRequestWatchError", reason: "unsupported" });
+    }),
+  );
+});
+
+describe("change request template listing", () => {
+  const input = { cwd: "/requested", baseRefName: "main" };
+  for (const denied of ["role", "workspace", "none"] as const) {
+    it.effect(`checks role and workspace before any git read (${denied} denied)`, () =>
+      Effect.gen(function* () {
+        let pathReads = 0;
+        let gitReads = 0;
+        const listed: Array<{ readonly cwd: string; readonly baseRefName?: string | undefined }> =
+          [];
+        const gitWorkflow = yield* GitWorkflowService.make().pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              Layer.mock(VcsDriverRegistry.VcsDriverRegistry)({
+                resolve: () => Effect.succeed({ kind: "git" } as never),
+              }),
+              Layer.mock(GitVcsDriver.GitVcsDriver)({
+                execute: () =>
+                  Effect.sync(() => {
+                    gitReads++;
+                    return {
+                      exitCode: ChildProcessSpawner.ExitCode(0),
+                      stdout: "/canonical\n",
+                      stderr: "",
+                      stdoutTruncated: false,
+                      stderrTruncated: false,
+                    };
+                  }),
+              }),
+              Layer.mock(GitManager.GitManager)({
+                listChangeRequestTemplates: (request) =>
+                  Effect.sync(() => {
+                    listed.push(request);
+                    return { templates: [], generationTemplatePath: null };
+                  }),
+              }),
+            ),
+          ),
+        );
+        const ctx = {
+          ownerEffect: <A, E, R>(_method: string, work: Effect.Effect<A, E, R>) =>
+            denied === "role"
+              ? Effect.fail(
+                  new GitCommandError({
+                    cwd: input.cwd,
+                    command: "test",
+                    operation: "authorization",
+                    detail: "denied",
+                  }),
+                )
+              : work,
+          gitWorkflow,
+        } as unknown as WsRpcContext;
+        const policy = {
+          assertExistingPath: () =>
+            Effect.suspend(() => {
+              pathReads++;
+              return denied === "workspace"
+                ? Effect.fail(
+                    new WorkspaceAccessDeniedError({
+                      operation: "listChangeRequestTemplates",
+                      requestedPath: input.cwd,
+                      accessRoot: "/allowed",
+                      reason: "outsideRoot",
+                    }),
+                  )
+                : Effect.succeed("/canonical");
+            }),
+        } as unknown as WorkspaceAccessPolicyShape;
+        const outcome = yield* makeSourceControlHandlers(ctx)
+          [WS_METHODS.sourceControlListChangeRequestTemplates](input)
+          .pipe(
+            Effect.provideService(WorkspaceAccessPolicy, policy),
+            Effect.provide(handlerLayer),
+            Effect.result,
+          );
+        expect(outcome._tag).toBe(denied === "none" ? "Success" : "Failure");
+        expect(pathReads).toBe(denied === "role" ? 0 : denied === "workspace" ? 1 : 3);
+        // One `rev-parse --show-toplevel`, only once the path was allowed.
+        expect(gitReads).toBe(denied === "none" ? 1 : 0);
+        expect(listed).toEqual(denied === "none" ? [{ ...input, cwd: "/canonical" }] : []);
+        expect(rpcAccessFor(WS_METHODS.sourceControlListChangeRequestTemplates)).toBe("operator");
+      }),
+    );
+  }
 });

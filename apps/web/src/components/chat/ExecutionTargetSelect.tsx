@@ -87,7 +87,7 @@ export function ExecutionTargetSelect({
         <SelectPopup
           alignItemWithTrigger={false}
           {...(pill ? { align: "end" as const } : {})}
-          className="w-56 p-0.5"
+          className="w-56"
         >
           {targets.map((target) => (
             <SelectItem

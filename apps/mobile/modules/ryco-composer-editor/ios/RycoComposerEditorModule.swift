@@ -41,6 +41,9 @@ public class RycoComposerEditorModule: Module {
       Prop("spellCheck") { (view: RycoComposerEditorView, spellCheck: Bool) in
         view.setSpellCheck(spellCheck)
       }
+      Prop("submitsOnReturn") { (view: RycoComposerEditorView, submitsOnReturn: Bool) in
+        view.setSubmitsOnReturn(submitsOnReturn)
+      }
 
       Events(
         "onComposerChange",

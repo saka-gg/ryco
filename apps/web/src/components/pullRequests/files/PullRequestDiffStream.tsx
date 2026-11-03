@@ -52,6 +52,8 @@ export function PullRequestDiffStream(props: {
   readonly hostName: string;
   readonly commitScoped: boolean;
   readonly onRetry: () => void;
+  /** Find's bar while it is open: a strip above the diff, in flow. */
+  readonly findBar?: ReactNode;
   readonly className?: string | undefined;
 }) {
   const { files, state, settings, actionsRef, viewportRef } = props;
@@ -99,17 +101,21 @@ export function PullRequestDiffStream(props: {
       ref={viewportRef}
       className={cn("relative flex min-h-0 min-w-0 flex-1 flex-col", props.className)}
     >
+      {props.findBar}
       <Virtualizer
-        className="diff-render-surface min-h-0 flex-1 overflow-auto overscroll-contain [scrollbar-gutter:stable]"
+        // Find makes the scroller focusable (a click into the diff lands there, so
+        // keyboard scrolling keeps working): a ring for keyboard focus only.
+        className="diff-render-surface min-h-0 flex-1 overflow-auto overscroll-contain outline-hidden [scrollbar-gutter:stable] focus-visible:ring-1 focus-visible:ring-ring/70 focus-visible:ring-inset"
         contentClassName="px-6 pt-4 pb-40 @max-[640px]/reader:px-3"
         config={{ overscrollSize: 600, intersectionObserverMargin: 1200 }}
       >
-        {files.files.map((file) => {
+        {files.files.map((file, fileIndex) => {
           const viewedState: FileViewedState | undefined = state.viewed.states.get(file.path);
           return (
             <DiffFileSection
               key={`${file.renderKey}:${settings.theme}`}
               file={file}
+              fileIndex={fileIndex}
               open={state.isOpen(file.path)}
               viewedState={viewedState}
               viewedSupported={state.viewed.supported}

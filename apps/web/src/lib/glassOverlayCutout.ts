@@ -65,6 +65,12 @@ const backedOverlays = new WeakMap<HTMLElement, boolean>();
 export const GLASS_IN_PAGE_ATTRIBUTE = "data-glass-in-page";
 
 const inPageOverlays = new Set<HTMLElement>();
+/**
+ * Stops the installed cutout observing a registered in-page overlay. Kept per
+ * surface, so a surface registered before the cutout installs (it loads on
+ * demand) is still let go when it unregisters.
+ */
+const inPageOverlayUnobservers = new Map<HTMLElement, () => void>();
 let scheduleInstalledCutout: (() => void) | null = null;
 let observeInPageOverlay: ((surface: HTMLElement) => () => void) | null = null;
 
@@ -77,10 +83,12 @@ let observeInPageOverlay: ((surface: HTMLElement) => () => void) | null = null;
 export function registerInPageGlassOverlay(surface: HTMLElement): () => void {
   inPageOverlays.add(surface);
   surface.setAttribute(GLASS_IN_PAGE_ATTRIBUTE, "");
-  const unobserve = observeInPageOverlay?.(surface) ?? (() => {});
+  const unobserve = observeInPageOverlay?.(surface);
+  if (unobserve) inPageOverlayUnobservers.set(surface, unobserve);
   scheduleInstalledCutout?.();
   return () => {
-    unobserve();
+    inPageOverlayUnobservers.get(surface)?.();
+    inPageOverlayUnobservers.delete(surface);
     inPageOverlays.delete(surface);
     surface.removeAttribute(GLASS_IN_PAGE_ATTRIBUTE);
     scheduleInstalledCutout?.();
@@ -365,7 +373,9 @@ export function installGlassOverlayCutout(root: HTMLElement): () => void {
     };
   };
   observeInPageOverlay = observeSurface;
-  const unobserveExisting = [...inPageOverlays].map(observeSurface);
+  for (const surface of inPageOverlays) {
+    inPageOverlayUnobservers.set(surface, observeSurface(surface));
+  }
 
   // Portaled overlays mount inside containers appended to the body, never inside
   // the root, so the root's own (very busy) subtree is not observed.
@@ -398,7 +408,8 @@ export function installGlassOverlayCutout(root: HTMLElement): () => void {
     containerObserver.disconnect();
     scopeObserver.disconnect();
     inPageObserver.disconnect();
-    for (const unobserve of unobserveExisting) unobserve();
+    for (const unobserve of inPageOverlayUnobservers.values()) unobserve();
+    inPageOverlayUnobservers.clear();
     resizeObserver.disconnect();
     window.removeEventListener("resize", schedule);
     if (frame !== null) cancelAnimationFrame(frame);

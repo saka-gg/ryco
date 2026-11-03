@@ -1,35 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import {
-  createTerminalSpawnEnv,
-  nonInteractiveShellCommand,
-  resolveShellCandidates,
-} from "./terminalShell.ts";
+import { nonInteractiveShellCommand, resolveShellCandidates } from "./terminalShell.ts";
 
 function decodePowerShellScript(args: ReadonlyArray<string>): string {
   const encoded = args[args.indexOf("-EncodedCommand") + 1] ?? "";
   return Buffer.from(encoded, "base64").toString("utf16le");
 }
-
-describe("createTerminalSpawnEnv", () => {
-  it("drops the server's own variables in any case and layers the runtime env on top", () => {
-    const env = createTerminalSpawnEnv(
-      {
-        PATH: "/usr/bin",
-        HOME: "/home/me",
-        RYCO_AGENT_CONTROL_TOKEN: "secret",
-        ryco_port: "3773",
-        VITE_DEV_SERVER_URL: "http://localhost:5173",
-        PORT: "3000",
-        ELECTRON_RUN_AS_NODE: "1",
-        ELECTRON_RENDERER_PORT: "5173",
-        UNSET: undefined,
-      },
-      { RYCO_PROJECT_ROOT: "/repo", HOME: "/elsewhere" },
-    );
-    expect(env).toEqual({ PATH: "/usr/bin", HOME: "/elsewhere", RYCO_PROJECT_ROOT: "/repo" });
-  });
-});
 
 describe("nonInteractiveShellCommand", () => {
   it("runs a POSIX shell as a login shell, csh without the login flag", () => {

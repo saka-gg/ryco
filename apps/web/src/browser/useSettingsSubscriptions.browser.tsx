@@ -120,7 +120,7 @@ describe("useSettings subscriptions", () => {
       // The selected setting changes: one render with the new value.
       applySettingsUpdated({
         ...DEFAULT_SERVER_SETTINGS,
-        agentControl: { enabled: true },
+        agentControl: { ...DEFAULT_SERVER_SETTINGS.agentControl, enabled: true },
       });
       await vi.waitFor(() =>
         expect(mounted.container.querySelector('[data-testid="agent-control"]')?.textContent).toBe(

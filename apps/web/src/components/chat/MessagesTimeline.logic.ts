@@ -6,7 +6,8 @@ import {
   type WorkLogEntry,
 } from "../../session-logic";
 import type { AgentPanelModel } from "../../threadWorkspaceViewModel";
-import { deriveDisplayedUserMessageState } from "../../lib/terminalContext";
+import type { PresentationTier } from "../../lib/presentationTier";
+import { deriveDisplayedUserMessageForTier } from "../../lib/userMessageDisplay";
 import {
   isChatFileAttachment,
   isChatImageAttachment,
@@ -29,17 +30,16 @@ import { htmlRenderMetadataEqual, type HtmlRenderMetadata } from "@ryco/shared/h
 import { type ExpandedImagePreview } from "./ExpandedImagePreview";
 import {
   collectTurnHtmlRenders,
+  deriveRevertTurnCountByUserMessageId as deriveRevertTurnCountForMessages,
   deriveTerminalAssistantMessageIds,
   findTimelineMessageRowIndex,
   isBlankSettledReply,
   placeRepliesAfterHtmlRenders,
   type ForkOriginTimelineEntry,
   type TimelineRowMessages,
+  type UserInputExchangeTimelineEntry,
 } from "@ryco/client-runtime/state/session";
-import {
-  deriveForkableReplyMessageIds,
-  isMaterializableCheckpointSummary,
-} from "@ryco/client-runtime/state/threads";
+import { deriveForkableReplyMessageIds } from "@ryco/client-runtime/state/threads";
 import { isHtmlRenderOnlyMessage, readHtmlRenderAttachment } from "./htmlRender.logic";
 import type { ThreadMessageSearchOccurrence } from "./ThreadMessageSearch.logic";
 import { summarizeToolCallGroup, type ToolCallGroupSummary } from "./toolCallGroup.logic";
@@ -49,7 +49,6 @@ const MIN_COLLAPSIBLE_WORK_LOG_ENTRIES = 2;
 export const TIMELINE_MINIMAP_ITEM_SPACING = 8;
 export const TIMELINE_MINIMAP_MIN_ITEMS = 2;
 export const TIMELINE_MINIMAP_MAX_HEIGHT_CSS = "calc(100vh - 18rem)";
-export const TIMELINE_CONTENT_MAX_WIDTH = 768;
 export const TIMELINE_MINIMAP_PERSISTENT_GUTTER = 48;
 export const TIMELINE_MINIMAP_HIT_STRIP_LEFT = 12;
 export const TIMELINE_MINIMAP_HIT_STRIP_MAX_WIDTH = 40;
@@ -92,14 +91,22 @@ export function resolveTimelineMinimapIndexFromPointer(input: {
   return Math.max(0, Math.min(input.itemCount - 1, Math.round(progress * (input.itemCount - 1))));
 }
 
-export function resolveTimelineMinimapHasPersistentGutter(viewportWidth: number): boolean {
-  if (!Number.isFinite(viewportWidth) || viewportWidth <= 0) {
-    return false;
+/**
+ * The space beside the centered timeline column: `contentWidth` is the column's width, the
+ * viewport width capped at the Chat width setting's maximum.
+ */
+function timelineSideGutter(viewportWidth: number, contentWidth: number): number {
+  if (!Number.isFinite(viewportWidth) || viewportWidth <= 0 || !Number.isFinite(contentWidth)) {
+    return 0;
   }
+  return Math.max(0, (viewportWidth - Math.min(viewportWidth, contentWidth)) / 2);
+}
 
-  const contentWidth = Math.min(viewportWidth, TIMELINE_CONTENT_MAX_WIDTH);
-  const sideGutter = Math.max(0, (viewportWidth - contentWidth) / 2);
-  return sideGutter >= TIMELINE_MINIMAP_PERSISTENT_GUTTER;
+export function resolveTimelineMinimapHasPersistentGutter(
+  viewportWidth: number,
+  contentWidth: number,
+): boolean {
+  return timelineSideGutter(viewportWidth, contentWidth) >= TIMELINE_MINIMAP_PERSISTENT_GUTTER;
 }
 
 /**
@@ -107,13 +114,11 @@ export function resolveTimelineMinimapHasPersistentGutter(viewportWidth: number)
  * centered. Cap the collapsed hover strip to the side gutter so it cannot
  * intercept pointer events over message text under zoom or in a narrow pane.
  */
-export function resolveTimelineMinimapHitStripWidth(viewportWidth: number): number {
-  if (!Number.isFinite(viewportWidth) || viewportWidth <= 0) {
-    return 0;
-  }
-
-  const contentWidth = Math.min(viewportWidth, TIMELINE_CONTENT_MAX_WIDTH);
-  const sideGutter = Math.max(0, (viewportWidth - contentWidth) / 2);
+export function resolveTimelineMinimapHitStripWidth(
+  viewportWidth: number,
+  contentWidth: number,
+): number {
+  const sideGutter = timelineSideGutter(viewportWidth, contentWidth);
   return Math.max(
     0,
     Math.min(
@@ -278,6 +283,11 @@ export interface TimelineStableState {
   workspaceRoot: string | undefined;
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   activeThreadEnvironmentId: EnvironmentId;
+  /**
+   * Whether streaming assistant text is revealed gradually: only when the node streams
+   * token by token. Paragraph and whole-message releases land as finished blocks.
+   */
+  smoothAssistantText: boolean;
   highlightedMessageId: MessageId | null;
   threadMessageSearchQuery: string;
   threadMessageSearchOccurrencesByMessageId: ReadonlyMap<
@@ -336,6 +346,7 @@ export function buildTimelineStableState(input: TimelineStableState): TimelineSt
     workspaceRoot: input.workspaceRoot,
     skills: input.skills,
     activeThreadEnvironmentId: input.activeThreadEnvironmentId,
+    smoothAssistantText: input.smoothAssistantText,
     highlightedMessageId: input.highlightedMessageId,
     threadMessageSearchQuery: input.threadMessageSearchQuery,
     threadMessageSearchOccurrencesByMessageId: input.threadMessageSearchOccurrencesByMessageId,
@@ -455,6 +466,16 @@ export type MessagesTimelineRow =
     }
   | {
       /**
+       * An agent question and the user's answers. Like a plan card it stays visible when its
+       * turn folds into "Worked for".
+       */
+      kind: "user-input-exchange";
+      id: string;
+      createdAt: string;
+      exchange: UserInputExchangeTimelineEntry;
+    }
+  | {
+      /**
        * One commentary paragraph plus the steps (tool calls, reasoning) that
        * followed it inside an expanded turn. Finished chapters fold to a single
        * line; the live one shows its paragraph and a short step ticker.
@@ -504,6 +525,9 @@ export type MessagesTimelineRow =
     }
   | { kind: "working"; id: string; createdAt: string | null };
 
+/** A turn's changed-files card lists this many files; the rest hide behind "Show N more". */
+export const MAX_VISIBLE_CHANGED_FILES = 6;
+
 /**
  * The size class of a timeline row for the virtualized list. Rows of one class
  * share a measured-size average, so tall assistant replies do not inflate the
@@ -524,6 +548,7 @@ export function chapterStepsExpansionKey(chapterId: string): string {
 
 export function deriveTimelineMinimapItems(
   rows: ReadonlyArray<MessagesTimelineRow>,
+  presentationTier: PresentationTier = "desktop",
 ): TimelineMinimapItem[] {
   const items: TimelineMinimapItem[] = [];
 
@@ -537,7 +562,7 @@ export function deriveTimelineMinimapItems(
       id: row.id,
       rowIndex: index,
       userText: compactTimelineMinimapPreview(
-        deriveDisplayedUserMessageState(row.message.text).visibleText,
+        deriveDisplayedUserMessageForTier(row.message.text, presentationTier).visibleText,
       ),
       assistantText: compactTimelineMinimapPreview(
         resolveFinalAssistantTextForTimelineTurn(rows, index),
@@ -700,6 +725,8 @@ function deriveTurnFolds(input: {
   timelineEntries: ReadonlyArray<TimelineEntry>;
   terminalAssistantMessageIds: ReadonlySet<string>;
   latestTurn: TimelineLatestTurn | null;
+  /** See `deriveMessagesTimelineRows`' `latestTurnEndedBySession`. */
+  latestTurnEndedBySession: boolean;
   unsettledTurnId: TurnId | null;
   activeTurnStartedAt: string | null;
   /** See `deriveMessagesTimelineRows`' `launchTurnDurationStart`. */
@@ -803,13 +830,17 @@ function deriveTurnFolds(input: {
       const duration = elapsedMs === null ? null : formatDuration(elapsedMs);
       const interrupted =
         input.latestTurn?.turnId === turnId && input.latestTurn.state === "interrupted";
-      label = interrupted
+      label = !interrupted
         ? duration
-          ? `You stopped after ${duration}`
-          : "You stopped this response"
-        : duration
           ? `Worked for ${duration}`
-          : "Worked";
+          : "Worked"
+        : input.latestTurnEndedBySession
+          ? duration
+            ? `Interrupted after ${duration}`
+            : "Interrupted"
+          : duration
+            ? `You stopped after ${duration}`
+            : "You stopped this response";
     }
 
     foldsByAnchorEntryId.set(firstEntry.id, {
@@ -839,69 +870,13 @@ export function deriveRevertTurnCountByUserMessageId(input: {
   turnDiffSummaryByAssistantMessageId: ReadonlyMap<MessageId, TurnDiffSummary>;
   inferredCheckpointTurnCountByTurnId: Readonly<Partial<Record<TurnDiffSummary["turnId"], number>>>;
 }): Map<MessageId, number> {
-  const byUserMessageId = new Map<MessageId, number>();
-  let pendingUserMessageId: MessageId | null = null;
-
-  for (const entry of input.timelineEntries) {
-    if (entry.kind !== "message") {
-      continue;
-    }
-
-    if (entry.message.role === "user") {
-      pendingUserMessageId = entry.message.id;
-      continue;
-    }
-
-    if (!pendingUserMessageId) {
-      continue;
-    }
-
-    const summary = input.turnDiffSummaryByAssistantMessageId.get(entry.message.id);
-    if (!summary) {
-      continue;
-    }
-
-    const turnCount =
-      summary.checkpointTurnCount ?? input.inferredCheckpointTurnCountByTurnId[summary.turnId];
-    if (typeof turnCount === "number") {
-      byUserMessageId.set(pendingUserMessageId, Math.max(0, turnCount - 1));
-    }
-    pendingUserMessageId = null;
-  }
-
-  return byUserMessageId;
-}
-
-/**
- * Rollback target for each turn whose edits can still be undone, keyed by turn.
- *
- * A turn is undoable only when its checkpoint is real and reachable — the
- * shared `isMaterializableCheckpointSummary` rule, which also decides whether a
- * fork's worktree can start from the turn's checkpoint. The stored count is the
- * turn *before* this one — undoing means returning the tree to how it looked
- * when the turn started.
- */
-export function deriveUndoTurnCountByTurnId(input: {
-  turnDiffSummaries: ReadonlyArray<TurnDiffSummary>;
-  inferredCheckpointTurnCountByTurnId: Readonly<Partial<Record<TurnDiffSummary["turnId"], number>>>;
-}): Map<TurnId, number> {
-  const byTurnId = new Map<TurnId, number>();
-
-  for (const summary of input.turnDiffSummaries) {
-    if (!isMaterializableCheckpointSummary(summary)) {
-      continue;
-    }
-    if (summary.files.length === 0) {
-      continue;
-    }
-    const turnCount =
-      summary.checkpointTurnCount ?? input.inferredCheckpointTurnCountByTurnId[summary.turnId];
-    if (typeof turnCount === "number") {
-      byTurnId.set(summary.turnId, Math.max(0, turnCount - 1));
-    }
-  }
-
-  return byTurnId;
+  return deriveRevertTurnCountForMessages({
+    messages: input.timelineEntries.flatMap((entry) =>
+      entry.kind === "message" ? [entry.message] : [],
+    ),
+    turnDiffSummaryByAssistantMessageId: input.turnDiffSummaryByAssistantMessageId,
+    inferredCheckpointTurnCountByTurnId: input.inferredCheckpointTurnCountByTurnId,
+  });
 }
 
 const EMPTY_TURN_ID_SET: ReadonlySet<TurnId> = new Set();
@@ -1067,9 +1042,34 @@ function deriveForkReplyByTurn(
   return byTurn;
 }
 
+/**
+ * Each answered question back as the request and resolution work rows its exchange stands in
+ * for, in the exchange's place.
+ */
+function withBareUserInputRows(
+  entries: ReadonlyArray<TimelineEntry>,
+): ReadonlyArray<TimelineEntry> {
+  if (!entries.some((entry) => entry.kind === "user-input-exchange")) return entries;
+  return entries.flatMap((entry): TimelineEntry[] =>
+    entry.kind === "user-input-exchange"
+      ? entry.workEntries.map((workEntry) => ({
+          id: workEntry.id,
+          kind: "work",
+          createdAt: workEntry.createdAt,
+          entry: workEntry,
+        }))
+      : [entry],
+  );
+}
+
 export function deriveMessagesTimelineRows(input: {
   timelineEntries: ReadonlyArray<TimelineEntry>;
   latestTurn?: TimelineLatestTurn | null;
+  /**
+   * The thread's session ended in an error (a restart released it, or its runtime was lost), so
+   * an interrupted latest turn was not the person's Stop: it reads "Interrupted", not "You stopped".
+   */
+  latestTurnEndedBySession?: boolean | undefined;
   runningTurnId?: TurnId | null;
   turnFoldExpandedById?: Readonly<Record<string, boolean>>;
   workGroupExpandedById?: Readonly<Record<string, boolean>>;
@@ -1098,25 +1098,31 @@ export function deriveMessagesTimelineRows(input: {
   offerFork?: boolean | undefined;
   /** Renders a fork's origin divider; the frozen phone tier shows nothing new. */
   showForkOrigin?: boolean | undefined;
+  /**
+   * Renders answered agent questions; the frozen phone tier shows nothing new and keeps their
+   * bare "User input" rows.
+   */
+  showUserInputExchanges?: boolean | undefined;
 }): MessagesTimelineRow[] {
   const nextRows: MessagesTimelineRow[] = [];
-  const terminalAssistantMessageIds = deriveTerminalAssistantMessageIds(input.timelineEntries);
+  const sourceEntries = input.showUserInputExchanges
+    ? input.timelineEntries
+    : withBareUserInputRows(input.timelineEntries);
+  const terminalAssistantMessageIds = deriveTerminalAssistantMessageIds(sourceEntries);
   const unsettledTurnId = deriveUnsettledTurnId(
     input.latestTurn ?? null,
     input.runningTurnId ?? null,
   );
   const forkReplyByTurn = input.offerFork
-    ? deriveForkReplyByTurn(input.timelineEntries, input.latestTurn ?? null, unsettledTurnId)
+    ? deriveForkReplyByTurn(sourceEntries, input.latestTurn ?? null, unsettledTurnId)
     : null;
   const forkFromTurn = (turnId: TurnId | null | undefined): TimelineForkRequest | undefined => {
     const messageId = turnId ? forkReplyByTurn?.get(turnId) : undefined;
     return turnId && messageId ? { messageId, turnId } : undefined;
   };
-  const timelineEntries = placeRepliesAfterHtmlRenders(
-    input.timelineEntries,
-    terminalAssistantMessageIds,
-    { runningTurnId: unsettledTurnId },
-  );
+  const timelineEntries = placeRepliesAfterHtmlRenders(sourceEntries, terminalAssistantMessageIds, {
+    runningTurnId: unsettledTurnId,
+  });
   // A render's completion is not a response boundary: the reply after it still
   // counts from the turn's start.
   const durationStartByMessageId = computeMessageDurationStart(
@@ -1132,6 +1138,7 @@ export function deriveMessagesTimelineRows(input: {
     timelineEntries,
     terminalAssistantMessageIds,
     latestTurn: input.latestTurn ?? null,
+    latestTurnEndedBySession: input.latestTurnEndedBySession ?? false,
     unsettledTurnId,
     activeTurnStartedAt: input.activeTurnStartedAt,
     launchTurnDurationStart: input.launchTurnDurationStart ?? null,
@@ -1316,6 +1323,17 @@ export function deriveMessagesTimelineRows(input: {
       continue;
     }
 
+    // Only where they are shown: elsewhere `withBareUserInputRows` took them out.
+    if (timelineEntry.kind === "user-input-exchange") {
+      nextRows.push({
+        kind: "user-input-exchange",
+        id: timelineEntry.id,
+        createdAt: timelineEntry.createdAt,
+        exchange: timelineEntry.exchange,
+      });
+      continue;
+    }
+
     // Resolved once: the summary supplies both the changed-files card and the
     // turn identity its Undo action rolls back to.
     const assistantTurnDiffSummary =
@@ -1474,6 +1492,21 @@ export function findMessagesTimelineRowIndex(
   return findTimelineMessageRowIndex(rows, messageId, messagesOfTimelineRow);
 }
 
+/** The turn a row belongs to, or null for a row outside any turn (a user message, a marker). */
+export function timelineRowTurnId(row: MessagesTimelineRow): TurnId | null {
+  switch (row.kind) {
+    case "message":
+      return row.message.turnId ?? null;
+    case "work":
+      return row.groupedEntries[0]?.turnId ?? null;
+    case "turn-fold":
+    case "chapter":
+      return row.turnId;
+    default:
+      return null;
+  }
+}
+
 export function computeStableMessagesTimelineRows(
   rows: MessagesTimelineRow[],
   previous: StableMessagesTimelineRowsState,
@@ -1569,6 +1602,10 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
     case "fork-origin":
       // The shared decoder caches one marker per activity record.
       return a.marker === (b as typeof a).marker;
+
+    case "user-input-exchange":
+      // The shared derivation caches one exchange per answered request.
+      return a.exchange === (b as typeof a).exchange;
 
     case "html-render": {
       // Rows rebuild on every thread update; an equal page must keep its

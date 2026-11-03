@@ -1126,6 +1126,33 @@ describe("DeviceManager agent auto-attach", () => {
     ).toEqual([DEVICE_A, DEVICE_B]);
   });
 
+  it("surfaces an attached device once and never attaches one for Agent Control", async () => {
+    const { backend, manager, events } = makeManager();
+    await backend.boot(DEVICE_A);
+    await backend.boot(DEVICE_B);
+    await manager.attach(THREAD_A, DEVICE_A);
+
+    // Not attached here: no attachment, no pane request.
+    manager.surfaceAttachedDeviceForAgent(THREAD_A, DEVICE_B, "agent-tool");
+    manager.surfaceAttachedDeviceForAgent(THREAD_B, DEVICE_B, "agent-tool");
+    expect((await manager.getThreadState(THREAD_B)).attachedDeviceUdid).toBeNull();
+    expect((await manager.getThreadState(THREAD_A)).attachedDeviceUdid).toBe(DEVICE_A);
+
+    for (let call = 0; call < 3; call += 1) {
+      manager.surfaceAttachedDeviceForAgent(THREAD_A, DEVICE_A, "agent-launch");
+    }
+    const opened = events.filter((event) => event.type === "device.open-pane-requested");
+    expect(opened).toEqual([
+      {
+        type: "device.open-pane-requested",
+        threadId: THREAD_A,
+        udid: DEVICE_A,
+        reason: "agent-launch",
+      },
+    ]);
+    expect(backend.callsOfKind("attachStream")).toHaveLength(1);
+  });
+
   it("attaches each thread independently", async () => {
     const { backend, manager } = makeManager();
     await backend.boot(DEVICE_A);
@@ -1287,6 +1314,58 @@ describe("DeviceManager scrolling to an element", () => {
       /appears to be at its end/,
     );
     // Two swipes: one that could have moved it, one that proves it did not.
+    expect(backend.callsOfKind("swipe")).toHaveLength(2);
+  });
+
+  it("taps fixed chrome outside the safe band where it is after one swipe", async () => {
+    const backend = new FakeDeviceBackend();
+    // A navigation bar's back button above the band and a tab bar item below
+    // it, as direct children of the app (the simulator's tree has no bar
+    // containers): neither moves when the content behind them scrolls.
+    backend.describeUi = (udid: string) =>
+      Promise.resolve({
+        udid,
+        capturedAt: new Date().toISOString(),
+        root: {
+          role: "Application",
+          subrole: null,
+          label: "Settings",
+          value: null,
+          frame: { x: 0, y: 0, width: 393, height: 852 },
+          activationPoint: null,
+          children: [
+            {
+              role: "Button",
+              subrole: null,
+              label: "General",
+              value: null,
+              frame: { x: 16, y: 62, width: 44, height: 44 },
+              activationPoint: { x: 38, y: 84 },
+              children: [],
+            },
+            {
+              role: "Button",
+              subrole: null,
+              label: "Library",
+              value: null,
+              frame: { x: 150, y: 800, width: 90, height: 49 },
+              activationPoint: null,
+              children: [],
+            },
+          ],
+        },
+      });
+    const { manager } = makeManager(backend);
+    await backend.boot(DEVICE_A);
+
+    const back = await manager.tapElement(DEVICE_A, { label: "General" });
+    expect(back.point).toEqual({ x: 38, y: 84 });
+    // One swipe proves it does not scroll; then the tap lands on it.
+    expect(backend.callsOfKind("swipe")).toHaveLength(1);
+    expect(backend.calls.at(-1)).toEqual({ kind: "tap", udid: DEVICE_A, x: 38, y: 84 });
+
+    const tab = await manager.scrollToElement(DEVICE_A, { label: "Library" });
+    expect(tab.onScreen).toBe(true);
     expect(backend.callsOfKind("swipe")).toHaveLength(2);
   });
 

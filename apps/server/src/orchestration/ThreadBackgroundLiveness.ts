@@ -10,11 +10,18 @@
  * matches reality: orphaned background work is not live.
  *
  * All live background work presents as "working", including background
- * shells and monitor tasks that outlive the foreground turn.
+ * shells and monitor tasks that outlive the foreground turn. The agent-work
+ * tracker (`AgentWorkActivity`) also counts it, and listens for changes
+ * through `onLiveThreadsChange` because no domain event reports them.
  *
  * @module ThreadBackgroundLivenessService
  */
-import { INERT_TASK_TYPES, MONITOR_TASK_TYPES } from "@ryco/shared/taskClassification";
+import {
+  INERT_TASK_TYPES,
+  MONITOR_TASK_TYPES,
+  TERMINAL_TASK_STATUSES,
+  endsTaskLiveness,
+} from "@ryco/shared/taskClassification";
 import { Context, Effect, Layer } from "effect";
 
 export type ThreadBackgroundLiveness = "working" | "monitoring" | null;
@@ -29,15 +36,8 @@ interface ThreadLivenessState {
 // which in practice are PR babysitting/log tails since pacing sleeps
 // complete inside the turn; INERT_TASK_TYPES: plan-mode bookkeeping) so this
 // registry, ingestion's agentKind stamp, and the client fold can never
-// drift apart.
-
-const TERMINAL_STATUSES: ReadonlySet<string> = new Set([
-  "completed",
-  "failed",
-  "stopped",
-  "cancelled",
-  "interrupted",
-]);
+// drift apart. The status sets are shared the same way: the Agent Control wait wake filter
+// (threadWaitWakeEvents.ts) wakes on exactly the statuses that end liveness here.
 
 export class ThreadBackgroundLivenessService extends Context.Service<
   ThreadBackgroundLivenessService,
@@ -59,6 +59,12 @@ export class ThreadBackgroundLivenessService extends Context.Service<
       readonly agentId?: string | undefined;
       readonly attempt?: number | undefined;
       readonly parentAgentId?: string | undefined;
+      /**
+       * The runtime that reported the transition (null for a runtime without an id). A report
+       * from another runtime than the thread's earlier reports means that runtime was replaced:
+       * its work died with it, so the thread's earlier liveness is dropped first.
+       */
+      readonly runtimeSessionId?: string | null | undefined;
     }) => void;
 
     /** Session death orphans all of a thread's background work. */
@@ -69,10 +75,33 @@ export class ThreadBackgroundLivenessService extends Context.Service<
      */
     readonly getThreadBackgroundLiveness: (threadId: string) => ThreadBackgroundLiveness;
 
+    /**
+     * The task ids that keep the thread working; empty exactly when its liveness is null. Given
+     * a runtime, only that runtime's tasks: tasks a replaced runtime reported are dead, even
+     * though its late terminal events are dropped as stale and never clear them.
+     */
+    readonly listLiveTaskIds: (
+      threadId: string,
+      runtimeSessionId?: string | null,
+    ) => ReadonlyArray<string>;
+
     /** Threads with at least one live agent or watch loop (graceful-shutdown hints). */
     readonly listLiveThreadIds: () => ReadonlyArray<string>;
+
+    /**
+     * Called after a thread gains its first live task, loses its last one, or has its live
+     * tasks reported by another runtime: every change that can alter what
+     * {@link listLiveThreadIds} and a runtime-scoped {@link listLiveTaskIds} answer. Never called
+     * for progress ticks or for another task on a thread that already has live work. A listener
+     * that throws is ignored. Returns the unsubscribe function.
+     */
+    readonly onLiveThreadsChange: (listener: (threadId: string) => void) => () => void;
   }
 >()("ryco/orchestration/ThreadBackgroundLiveness/ThreadBackgroundLivenessService") {}
+
+type RecordTaskLivenessInput = Parameters<
+  ThreadBackgroundLivenessService["Service"]["recordTaskLiveness"]
+>[0];
 
 interface TaskLivenessHistory {
   taskType: string | undefined;
@@ -86,6 +115,14 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
   // Session-scoped history prevents delayed starts/status patches from reviving
   // completed tasks and retains classification on sparse updates.
   const history = new Map<string, Map<string, TaskLivenessHistory>>();
+  // The runtime whose reports the thread's state and history hold (see `recordTaskLiveness`).
+  const runtimeByThreadId = new Map<string, string | null>();
+
+  const clearThread = (threadId: string) => {
+    stateByThreadId.delete(threadId);
+    history.delete(threadId);
+    runtimeByThreadId.delete(threadId);
+  };
 
   const stateFor = (threadId: string): ThreadLivenessState => {
     const existing = stateByThreadId.get(threadId);
@@ -113,8 +150,42 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
     }
   };
 
-  return {
-    recordTaskLiveness: (input) => {
+  const listeners = new Set<(threadId: string) => void>();
+  // Runs one mutation of `threadId` and tells the listeners when it changed whether the thread
+  // has live work, or which runtime that work belongs to. Each mutation touches one thread only.
+  const mutateThread = (threadId: string, mutate: () => void) => {
+    if (listeners.size === 0) {
+      mutate();
+      return;
+    }
+    const wasLive = stateByThreadId.has(threadId);
+    const runtimeBefore = runtimeByThreadId.get(threadId);
+    mutate();
+    const isLive = stateByThreadId.has(threadId);
+    if (wasLive === isLive && (!isLive || runtimeByThreadId.get(threadId) === runtimeBefore)) {
+      return;
+    }
+    for (const listener of listeners) {
+      try {
+        listener(threadId);
+      } catch {
+        // A listener must not break ingestion, which calls in here synchronously.
+      }
+    }
+  };
+
+  // The mutations themselves; the service wraps each in `mutateThread`.
+  const mutations = {
+    recordTaskLiveness: (input: RecordTaskLivenessInput) => {
+      if (input.runtimeSessionId !== undefined) {
+        if (
+          runtimeByThreadId.has(input.threadId) &&
+          runtimeByThreadId.get(input.threadId) !== input.runtimeSessionId
+        ) {
+          clearThread(input.threadId);
+        }
+        runtimeByThreadId.set(input.threadId, input.runtimeSessionId);
+      }
       const tasks = history.get(input.threadId) ?? new Map<string, TaskLivenessHistory>();
       const previous = tasks.get(input.taskId);
       if (
@@ -132,7 +203,7 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
       const parentAgentId = input.parentAgentId ?? previous?.parentAgentId;
       const terminalEvent =
         input.kind === "completed" ||
-        (input.status !== undefined && TERMINAL_STATUSES.has(input.status));
+        (input.status !== undefined && TERMINAL_TASK_STATUSES.has(input.status));
       tasks.set(input.taskId, {
         taskType,
         parentAgentId,
@@ -172,10 +243,7 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
 
       // Idle counts as not-live: a resting (resumable) Codex child isn't
       // doing anything, and an all-idle fleet must not pin Working.
-      const terminal =
-        input.kind === "completed" ||
-        input.status === "idle" ||
-        (input.status !== undefined && TERMINAL_STATUSES.has(input.status));
+      const terminal = input.kind === "completed" || endsTaskLiveness(input.status);
       if (terminal) {
         drop(input.threadId, input.taskId);
         return;
@@ -199,14 +267,36 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
         taskType !== undefined && MONITOR_TASK_TYPES.has(taskType) ? state.monitors : state.agents;
       bucket.add(input.taskId);
     },
+  };
 
-    clearThreadLiveness: (threadId) => {
-      stateByThreadId.delete(threadId);
-      history.delete(threadId);
+  return {
+    recordTaskLiveness: (input) =>
+      mutateThread(input.threadId, () => mutations.recordTaskLiveness(input)),
+
+    clearThreadLiveness: (threadId) => mutateThread(threadId, () => clearThread(threadId)),
+
+    onLiveThreadsChange: (listener) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
     },
 
     // `drop` prunes empty threads, so every key has live work.
     listLiveThreadIds: () => [...stateByThreadId.keys()],
+
+    listLiveTaskIds: (threadId, runtimeSessionId) => {
+      const state = stateByThreadId.get(threadId);
+      if (!state) return [];
+      if (
+        runtimeSessionId !== undefined &&
+        runtimeByThreadId.has(threadId) &&
+        runtimeByThreadId.get(threadId) !== runtimeSessionId
+      ) {
+        return [];
+      }
+      return [...state.agents, ...state.monitors];
+    },
 
     getThreadBackgroundLiveness: (threadId) => {
       const state = stateByThreadId.get(threadId);

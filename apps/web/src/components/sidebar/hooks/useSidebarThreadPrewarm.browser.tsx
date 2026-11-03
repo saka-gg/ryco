@@ -28,12 +28,14 @@ function PrewarmProbe(props: {
   readonly threadRefs: ReadonlyArray<ScopedThreadRef>;
   readonly foregroundReady?: boolean;
   readonly foregroundKey?: string | null;
+  readonly keepAfterRelease?: boolean;
 }) {
   useSidebarThreadPrewarm(
     props.enabled,
     props.threadRefs,
     props.foregroundReady,
     props.foregroundKey,
+    { keepAfterRelease: props.keepAfterRelease === true },
   );
   return null;
 }
@@ -123,6 +125,25 @@ describe("useSidebarThreadPrewarm", () => {
     }
 
     await mounted.unmount();
+  });
+
+  it("hands released streams to the idle cache when asked to keep them", async () => {
+    const mounted = await render(
+      <PrewarmProbe enabled keepAfterRelease threadRefs={refs("thread-1", "thread-2")} />,
+    );
+    runStaggeredRetains([...idleCallbacks.values()][0]!, 2);
+    const [first, second] = prewarmHarness.retain.mock.results.map(
+      (result) => result.value as ReturnType<typeof vi.fn>,
+    );
+
+    // thread-1 stopped running: its stream goes to the idle cache, not away.
+    await mounted.rerender(<PrewarmProbe enabled keepAfterRelease threadRefs={refs("thread-2")} />);
+    expect(first).toHaveBeenCalledOnce();
+    expect(first).toHaveBeenCalledWith(undefined);
+    expect(second).not.toHaveBeenCalled();
+
+    await mounted.unmount();
+    expect(second).toHaveBeenCalledWith(undefined);
   });
 
   it("cancels stale list work before the idle callback runs", async () => {

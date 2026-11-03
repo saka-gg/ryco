@@ -1,12 +1,14 @@
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
-import { Context, DateTime, Effect, Layer, Option } from "effect";
+import { Context, DateTime, Effect, Layer, Option, Queue, Stream } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 
 import {
   GitCommandError,
   VcsProcessExitError,
+  type VcsError,
+  type GitStagedIndexChangedError,
   type VcsSwitchRefInput,
   type VcsSwitchRefResult,
   type VcsCreateRefInput,
@@ -24,7 +26,9 @@ import {
   type VcsStatusInput,
   type VcsStatusResult,
 } from "@ryco/contracts";
-import type { VerifiedWorktreeCleanup } from "../storage/filesystem.ts";
+import { governChildProcess } from "../processGovernor.ts";
+import type { VerifiedWorktreeCleanup } from "../storage/quarantineRemoval.ts";
+import { makeGitGrepOutputParser } from "./gitGrepOutput.ts";
 import * as GitVcsDriverCore from "./GitVcsDriverCore.ts";
 import * as VcsDriver from "./VcsDriver.ts";
 import * as VcsProcess from "./VcsProcess.ts";
@@ -37,6 +41,20 @@ export interface GitWorktreeCreationContext {
   readonly settingsSnapshot?: ServerSettings | undefined;
   /** Observes the fetch and checkout while the worktree is created. */
   readonly progress?: GitWorktreeCreationProgress | undefined;
+  /**
+   * Recreating a checkout at its recorded `path` (no `newRefName`): a Git registration of
+   * exactly that missing path, which storage cleanup keeps and a directory deleted outside
+   * Ryco leaves too, is replaced by the add itself (`git worktree add --force`). Only when it
+   * is on a branch, not locked, and no other worktree has `refName` checked out; otherwise the
+   * creation fails before anything changes. No other registration is touched: an interrupted
+   * storage cleanup keeps its quarantine's Git metadata.
+   */
+  readonly replaceMissingRegistration?: boolean | undefined;
+  /**
+   * `false`: leave out the gitignored files the source checkout's `.worktreeinclude` names (a
+   * pull request from another repository: its code must not get the user's `.env`).
+   */
+  readonly copyDeclaredIncludes?: boolean | undefined;
 }
 
 export interface GitWorktreeCreationProgress {
@@ -112,6 +130,64 @@ export const NO_INDEX_REFRESH_DIFF_ARGS = Object.freeze([
   "diff.autoRefreshIndex=false",
 ] as const);
 
+/**
+ * Leading arguments, the `diff` subcommand included, of every internal patch
+ * Ryco parses or hands on (turn diffs, comparisons, index review, pull request
+ * diffs, commit and PR text generation), so the patch keeps the format Ryco
+ * parses whatever the user's git config says. They override forced color
+ * (`color.ui=always`), external diff tools and textconv drivers
+ * (`diff.external`, `.gitattributes`), the `a/` / `b/` prefixes
+ * (`diff.noprefix`, `diff.mnemonicPrefix`, `diff.srcPrefix` /
+ * `diff.dstPrefix`), the context size (`diff.context`), cwd-relative paths
+ * (`diff.relative`), submodule logs in place of patches (`diff.submodule`) and
+ * blank context lines printed without their leading space
+ * (`diff.suppressBlankEmpty`, which has no command-line option). Rename
+ * detection stays with each reader. Settings that keep a valid patch still
+ * apply: the diff algorithm and hunk heuristics, file order, path quoting and
+ * ignored submodules.
+ */
+export const INTERNAL_PATCH_DIFF_ARGS = Object.freeze([
+  "-c",
+  "diff.suppressBlankEmpty=false",
+  "diff",
+  "--patch",
+  "--no-color",
+  "--no-ext-diff",
+  "--no-textconv",
+  "--src-prefix=a/",
+  "--dst-prefix=b/",
+  "--unified=3",
+  "--no-relative",
+  "--submodule=short",
+] as const);
+
+/**
+ * {@link INTERNAL_PATCH_DIFF_ARGS} for a patch `git apply` takes back: binary hunks with full
+ * object ids and no rename pairs. The index review and a cross-node project copy's changes patch
+ * use it.
+ */
+export const BINARY_PATCH_DIFF_ARGS = Object.freeze([
+  ...INTERNAL_PATCH_DIFF_ARGS,
+  "--binary",
+  "--full-index",
+  "--no-renames",
+] as const);
+
+/**
+ * Leading arguments, the `diff` subcommand included, of the `--stat` and
+ * `--name-status` summaries Ryco hands on next to an
+ * {@link INTERNAL_PATCH_DIFF_ARGS} patch, so both list the same files under
+ * the same repository-root paths: `diff.relative` would otherwise limit the
+ * summary to the cwd and shorten its paths. Summaries never run external diff
+ * tools or textconv drivers and print no prefixes or hunks, so forced color is
+ * the only other setting to override.
+ */
+export const INTERNAL_DIFF_SUMMARY_ARGS = Object.freeze([
+  "diff",
+  "--no-color",
+  "--no-relative",
+] as const);
+
 export interface ExecuteGitResult {
   readonly exitCode: ChildProcessSpawner.ExitCode;
   readonly stdout: string;
@@ -135,6 +211,8 @@ export interface GitStatusDetails {
   hasOriginRemote: boolean;
   isDefaultBranch: boolean;
   branch: string | null;
+  /** The commit HEAD is at (`# branch.oid`); absent on an unborn branch. */
+  headCommit?: string;
   upstreamRef: string | null;
   hasWorkingTreeChanges: boolean;
   workingTree: VcsStatusResult["workingTree"];
@@ -150,6 +228,16 @@ export interface GitPreparedCommitContext {
   stagedPatch: string;
 }
 
+/** HEAD and the staged content a staged-only commit context was read from. */
+export interface GitStagedIndexGuard {
+  readonly headOid: string | null;
+  readonly stagedDigest: string;
+}
+
+export interface GitPreparedStagedCommitContext extends GitPreparedCommitContext {
+  readonly stagedIndex: GitStagedIndexGuard;
+}
+
 export interface ExecuteGitProgress {
   readonly onStdoutLine?: (line: string) => Effect.Effect<void, never>;
   readonly onStderrLine?: (line: string) => Effect.Effect<void, never>;
@@ -159,6 +247,13 @@ export interface ExecuteGitProgress {
    * meter prints its final newline.
    */
   readonly splitStderrAtCarriageReturn?: boolean;
+  /**
+   * Keep calling `onStdoutLine` / `onStderrLine` after the collected output
+   * reached `maxOutputBytes` with `truncateOutputAtMaxBytes`. The collected
+   * text stays capped; only the callbacks see the rest (a long clone's
+   * progress meter).
+   */
+  readonly keepLineCallbacksAfterTruncation?: boolean;
   readonly onHookStarted?: (hookName: string) => Effect.Effect<void, never>;
   readonly onHookFinished?: (input: {
     hookName: string;
@@ -183,6 +278,12 @@ export interface GitCommitProgress {
 export interface GitCommitOptions {
   readonly timeoutMs?: number;
   readonly progress?: GitCommitProgress;
+  /**
+   * Commit only while HEAD and the staged content are still what
+   * {@link GitVcsDriverShape.prepareStagedCommitContext} read and HEAD is on
+   * `branch` (a branch name, null for a detached HEAD).
+   */
+  readonly stagedIndex?: GitStagedIndexGuard & { readonly branch: string | null };
 }
 
 export interface GitPushResult {
@@ -277,12 +378,22 @@ export interface GitVcsDriverShape {
     cwd: string,
     filePaths?: readonly string[],
   ) => Effect.Effect<GitPreparedCommitContext | null, GitCommandError>;
+  /**
+   * The commit context of exactly the index as it stands: nothing is reset or
+   * added. Refuses unmerged entries, an empty index, and an index whose staged
+   * revision is no longer `expectedRevision` (HEAD, the branch or the staged
+   * content moved since the review that returned it).
+   */
+  readonly prepareStagedCommitContext: (
+    cwd: string,
+    expectedRevision: string,
+  ) => Effect.Effect<GitPreparedStagedCommitContext, GitCommandError | GitStagedIndexChangedError>;
   readonly commit: (
     cwd: string,
     subject: string,
     body: string,
     options?: GitCommitOptions,
-  ) => Effect.Effect<{ commitSha: string }, GitCommandError>;
+  ) => Effect.Effect<{ commitSha: string }, GitCommandError | GitStagedIndexChangedError>;
   readonly pushCurrentBranch: (
     cwd: string,
     fallbackBranch: string | null,
@@ -313,12 +424,24 @@ export interface GitVcsDriverShape {
   ) => Effect.Effect<VcsCreateWorktreeResult, GitCommandError>;
   /**
    * Fetches a worktree base from origin ahead of `createWorktree`, which reuses
-   * the fetch while it runs and for a short while after it finished.
+   * the fetch while it runs and for a short while after it finished. `fresh`
+   * never stands on an earlier fetch: it waits for one that is running, then
+   * fetches again.
    */
   readonly prefetchWorktreeBase: (input: {
     readonly cwd: string;
     readonly refName: string;
+    readonly fresh?: boolean;
   }) => Effect.Effect<void, GitCommandError>;
+  /**
+   * Whether `ancestor` is `descendant` or one of its ancestors
+   * (`git merge-base --is-ancestor`); null when Git knows either of them not.
+   */
+  readonly isAncestorCommit: (input: {
+    readonly cwd: string;
+    readonly ancestor: string;
+    readonly descendant: string;
+  }) => Effect.Effect<boolean | null, GitCommandError>;
   readonly fetchPullRequestBranch: (
     input: GitFetchPullRequestBranchInput,
   ) => Effect.Effect<void, GitCommandError>;
@@ -336,7 +459,6 @@ export interface GitVcsDriverShape {
   readonly removeWorktree: (
     input: VcsRemoveWorktreeInput & { readonly cleanup?: VerifiedWorktreeCleanup },
   ) => Effect.Effect<void, GitCommandError>;
-  readonly pruneWorktrees: (cwd: string) => Effect.Effect<void, GitCommandError>;
   readonly renameBranch: (
     input: GitRenameBranchInput,
   ) => Effect.Effect<GitRenameBranchResult, GitCommandError>;
@@ -374,6 +496,14 @@ const WORKSPACE_GIT_HARDENED_CONFIG_ARGS = [
   "-c",
   "core.untrackedCache=false",
 ] as const;
+const WORKSPACE_GREP_ENV = Object.freeze({
+  ...READ_ONLY_GIT_ENV,
+  // Unicode case folding for -i, as the workspace's own scanner folds; where
+  // the locale is missing git falls back to C and folds ASCII only.
+  LC_ALL: "C.UTF-8",
+} satisfies NodeJS.ProcessEnv);
+/** Matching files parsed ahead of the reader; git pauses on a full pipe after that. */
+const WORKSPACE_GREP_BUFFERED_FILES = 16;
 
 const nowFreshness = Effect.fn("GitVcsDriver.nowFreshness")(function* () {
   const now = yield* DateTime.now;
@@ -782,6 +912,82 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
     };
   });
 
+  // `--untracked` searches the files `listWorkspaceFiles` lists, ignore rules
+  // applied, sorted by path. The query goes to stdin, never into the arguments
+  // (process lists, error text), and every option the user's config could
+  // change (`grep.fullName`, `grep.patternType`, `color.grep`,
+  // `submodule.recurse`) is set explicitly.
+  const streamWorkspaceContentMatches: NonNullable<
+    VcsDriver.VcsDriverShape["streamWorkspaceContentMatches"]
+  > = (cwd, options) =>
+    Stream.callback<VcsDriver.VcsWorkspaceContentFile, VcsError>(
+      (queue) =>
+        governChildProcess(
+          "git",
+          process.withProcess(
+            {
+              operation: "GitVcsDriver.streamWorkspaceContentMatches",
+              command: "git",
+              args: [
+                ...WORKSPACE_GIT_HARDENED_CONFIG_ARGS,
+                "-c",
+                "grep.fullName=false",
+                "grep",
+                "--untracked",
+                "--no-recurse-submodules",
+                "--threads=4",
+                "-I",
+                "-n",
+                "--column",
+                "-z",
+                "--no-color",
+                "-F",
+                ...(options.caseSensitive ? [] : ["-i"]),
+                ...(options.wholeWord ? ["-w"] : []),
+                "-f",
+                "-",
+                "--",
+                ".",
+                ...options.excludedTopLevelNames.map((name) => `:(exclude,literal)${name}`),
+              ],
+              cwd,
+              env: WORKSPACE_GREP_ENV,
+            },
+            (child) => {
+              const parser = makeGitGrepOutputParser(options);
+              return Effect.all(
+                [
+                  child.writeStdin(options.query),
+                  // Warnings (an unreadable folder) are dropped; an undrained pipe would stall git.
+                  Stream.runDrain(child.stderr),
+                  Stream.runForEach(child.stdout, (chunk) =>
+                    Queue.offerAll(queue, parser.push(chunk)),
+                  ).pipe(
+                    Effect.andThen(child.exitCode),
+                    Effect.flatMap((exitCode) =>
+                      // 1: nothing matched.
+                      exitCode === 0 || exitCode === 1
+                        ? Queue.offerAll(queue, parser.end())
+                        : Effect.fail(
+                            new VcsProcessExitError({
+                              operation: "GitVcsDriver.streamWorkspaceContentMatches",
+                              command: "git grep",
+                              cwd,
+                              exitCode,
+                              detail: `git grep exited with code ${exitCode}.`,
+                            }),
+                          ),
+                    ),
+                  ),
+                ],
+                { concurrency: "unbounded", discard: true },
+              );
+            },
+          ),
+        ).pipe(Effect.andThen(Queue.end(queue))),
+      { bufferSize: WORKSPACE_GREP_BUFFERED_FILES, strategy: "suspend" },
+    );
+
   const listRemotes: VcsDriver.VcsDriverShape["listRemotes"] = Effect.fn("listRemotes")(
     function* (cwd) {
       const remotes = yield* memoizeByRepositoryMetadata(
@@ -895,6 +1101,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
     detectRepository,
     isInsideWorkTree,
     listWorkspaceFiles,
+    streamWorkspaceContentMatches,
     listRemotes,
     filterIgnoredPaths,
     initRepository,

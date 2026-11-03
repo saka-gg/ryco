@@ -4,6 +4,7 @@ import {
   displayedBlameTarget,
   type BlameFile,
 } from "@ryco/client-runtime/state/comparison/lineBlame";
+import { comparisonBlameSides } from "@ryco/client-runtime/state/comparison";
 import { useEffect, useMemo, useState } from "react";
 import { ensureEnvironmentApi } from "../environmentApi";
 import { Dialog, DialogPopup, DialogTitle, DialogDescription } from "./ui/dialog";
@@ -35,15 +36,18 @@ export function DiffLineBlame(props: {
     result: GitReadLineBlameResult | null;
     error: string | null;
   } | null>(null);
+  const sides = comparisonBlameSides(props.source);
   const target = useMemo(
-    () => displayedBlameTarget(props.file, request.side, request.line),
-    [props.file, request],
+    () => displayedBlameTarget(props.file, request.side, request.line, props.source),
+    [props.file, props.source, request],
   );
   const currentOutcome = outcome?.request === request && outcome.reader === reader ? outcome : null;
   const result = target ? currentOutcome?.result : null;
   const error = target
     ? currentOutcome?.error
-    : "Choose a displayed context or deleted line. Added lines have no blame here.";
+    : sides.includes(request.side)
+      ? "Choose a displayed context or deleted line. Added lines have no blame here."
+      : "Working files have no committed blame. Choose a base line.";
   const loading = target !== null && currentOutcome === null;
   useEffect(() => () => reader.invalidate(), [reader]);
   useEffect(() => {
@@ -92,7 +96,7 @@ export function DiffLineBlame(props: {
               onChange={(event) => setSide(event.target.value as "base" | "head")}
             >
               <option value="base">Base</option>
-              <option value="head">Head</option>
+              {sides.includes("head") && <option value="head">Head</option>}
             </select>
           </label>
           <label className="flex min-w-0 flex-1 flex-col gap-1 text-xs">

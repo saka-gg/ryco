@@ -1,6 +1,10 @@
-import { getEnvironmentHttpBaseUrl } from "../environments/runtime";
-import { useEffect, useState, useRef, useCallback } from "react";
-import type { DiscoveredProjectSite, ProjectBrowserCommand, EnvironmentId } from "@ryco/contracts";
+import { type ReactNode, useEffect, useState, useRef, useCallback } from "react";
+import type {
+  DiscoveredProjectSite,
+  ProjectBrowserCommand,
+  EnvironmentId,
+  ScopedThreadRef,
+} from "@ryco/contracts";
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
@@ -13,19 +17,92 @@ import {
   XIcon,
 } from "lucide-react";
 import { Button } from "../components/ui/button";
+import { useComposerContextIntakeAvailable } from "../composerContextIntake";
+import { preloadableLazy, useLazyComponentReady } from "../lib/preloadableLazy";
+import { useBrowserElementPicker } from "./BrowserElementPicker";
 import { BrowserSurface } from "./BrowserSurface";
+import type { BrowserSide } from "./browserMode";
 import {
   normalizeBrowserUrl,
   projectBrowserKey,
   useBrowserUi,
   useProjectBrowserTabs,
 } from "./browserState";
+import { isDesktopOwnBackend, useBrowserMode } from "./useBrowserMode";
+
+// Node tabs load with the first panel that shows them; desktop and frame users never load them.
+const NodeBrowserPanel = preloadableLazy(() =>
+  import("./NodeBrowserPanel").then((module) => module.NodeBrowserPanel),
+);
 
 export interface BrowserProject {
   environmentId: EnvironmentId | null;
   cwd: string | null;
+  /**
+   * The thread whose workspace shows the panel: "Pick element" hands page
+   * elements to its composer. Without one (the sidebar's live preview) the
+   * control is not offered.
+   */
+  thread?: ScopedThreadRef | null;
 }
-export function BrowserPanel({ environmentId, cwd }: BrowserProject) {
+/**
+ * The Browser panel: the desktop app's own tabs, tabs that run on the node
+ * (`resolveBrowserMode`), or a sandboxed frame. For a remote environment the
+ * desktop app offers both its own tabs and the node's.
+ */
+export function BrowserPanel(props: BrowserProject) {
+  const [side, setSide] = useState<BrowserSide>("node");
+  const browser = useBrowserMode(props.environmentId, side);
+  const nodePanelReady = useLazyComponentReady(NodeBrowserPanel, browser.mode === "node");
+  const choice = browser.choice ? <BrowserSideChoice side={side} onChange={setSide} /> : null;
+  if (browser.mode === "node" && browser.nodeClient) {
+    return nodePanelReady ? (
+      <NodeBrowserPanel client={browser.nodeClient} cwd={props.cwd} choice={choice} />
+    ) : (
+      <p role="status" className="p-4 text-sm text-muted-foreground">
+        Loading browser…
+      </p>
+    );
+  }
+  return <ProjectBrowserPanel {...props} choice={choice} />;
+}
+
+/** Where the desktop app opens pages for a remote environment. */
+function BrowserSideChoice({
+  side,
+  onChange,
+}: {
+  readonly side: BrowserSide;
+  readonly onChange: (side: BrowserSide) => void;
+}) {
+  return (
+    <div role="group" aria-label="Where pages open" className="mr-1 flex shrink-0 rounded border">
+      {(
+        [
+          ["node", "Node"],
+          ["computer", "This computer"],
+        ] as const
+      ).map(([value, label]) => (
+        <button
+          key={value}
+          type="button"
+          aria-pressed={side === value}
+          className={`px-2 py-1 text-xs${side === value ? " bg-accent" : " text-muted-foreground"}`}
+          onClick={() => onChange(value)}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ProjectBrowserPanel({
+  environmentId,
+  cwd,
+  thread = null,
+  choice,
+}: BrowserProject & { readonly choice: ReactNode }) {
   const project = projectBrowserKey(environmentId, cwd);
   const { tabs, selected, api } = useProjectBrowserTabs(project);
   const addressInput = useRef<HTMLInputElement>(null);
@@ -34,21 +111,24 @@ export function BrowserPanel({ environmentId, cwd }: BrowserProject) {
   const [opening, setOpening] = useState(false);
   const [newTab, setNewTab] = useState(false);
   const [viewport, setViewport] = useState<number | null>(null);
-  let localCwd: string | undefined;
-  try {
-    const localUrl = window.desktopBridge?.getLocalEnvironmentBootstrap()?.httpBaseUrl;
-    const environmentUrl = environmentId ? getEnvironmentHttpBaseUrl(environmentId) : null;
-    if (localUrl && environmentUrl && new URL(localUrl).origin === new URL(environmentUrl).origin)
-      localCwd = cwd ?? undefined;
-  } catch {
-    /* Without exact endpoint evidence, show computer-level services only. */
-  }
+  // Without exact endpoint evidence, discovery shows computer-level services only.
+  const localCwd =
+    environmentId !== null && isDesktopOwnBackend(environmentId) ? (cwd ?? undefined) : undefined;
   const [sites, setSites] = useState<readonly DiscoveredProjectSite[]>([]);
   const [discovering, setDiscovering] = useState(false);
   const discovery = useRef({ generation: 0 }).current;
   const [saved, setSaved] = useState<string[]>([]);
   const active = newTab ? null : selected;
   const empty = active === null;
+  const composerAvailable = useComposerContextIntakeAvailable(thread);
+  const picker = useBrowserElementPicker({
+    api,
+    tab: active,
+    thread,
+    project,
+    available: composerAvailable,
+    onError: setError,
+  });
   useEffect(
     () =>
       api?.onFocusAddress((tab) => {
@@ -144,6 +224,7 @@ export function BrowserPanel({ environmentId, cwd }: BrowserProject) {
         role="tablist"
         aria-label="Browser tabs"
       >
+        {choice}
         {tabs.map((tab) => (
           <div
             key={tab.id}
@@ -153,7 +234,10 @@ export function BrowserPanel({ environmentId, cwd }: BrowserProject) {
               type="button"
               role="tab"
               aria-selected={active?.id === tab.id}
-              className="flex min-w-0 items-center gap-1.5 px-2 py-1.5 text-xs"
+              title={
+                tab.suspended ? "Suspended to save memory. Reloads when you open it." : undefined
+              }
+              className={`flex min-w-0 items-center gap-1.5 px-2 py-1.5 text-xs${tab.suspended ? " text-muted-foreground" : ""}`}
               onClick={() => {
                 useBrowserUi.getState().select(project, tab.id);
                 setNewTab(false);
@@ -165,6 +249,7 @@ export function BrowserPanel({ environmentId, cwd }: BrowserProject) {
                 <GlobeIcon className="size-3 shrink-0" />
               )}
               <span className="truncate">{tab.title || tab.url || "Loading…"}</span>
+              {tab.suspended ? <span className="sr-only">, suspended</span> : null}
             </button>
             <button
               type="button"
@@ -316,6 +401,7 @@ export function BrowserPanel({ environmentId, cwd }: BrowserProject) {
                     ? "Cancel sign-in"
                     : "Allow sign-in popup"}
               </button>
+              {picker?.control}
               <button type="button" onClick={() => command("devtools")}>
                 DevTools
               </button>
@@ -364,6 +450,9 @@ export function BrowserPanel({ environmentId, cwd }: BrowserProject) {
           {error ?? active?.error}
         </p>
       ) : null}
+      {/* One slot, always here, so opening the note never moves or remounts the surface below:
+          a new surface owner would detach the page and end the pick. */}
+      {picker?.panel ?? null}
       {active ? (
         active.presentation === "window" ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 text-sm">

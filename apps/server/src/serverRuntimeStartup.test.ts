@@ -31,21 +31,23 @@ import {
   Fiber,
   FileSystem,
   Layer,
+  Logger,
   Metric,
   Option,
   PubSub,
   Ref,
+  References,
   Scope,
   Stream,
 } from "effect";
-import { TestClock } from "effect/testing";
+import { TestClock, TestConsole } from "effect/testing";
 
 import { canonicalJson, sha256Hex } from "./canonicalJson.ts";
 import { ServerConfig } from "./config.ts";
 import { ServerAuth } from "./auth/Services/ServerAuth.ts";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment.ts";
 import { Keybindings } from "./keybindings.ts";
-import { Open } from "./open.ts";
+import { Open, OpenError } from "./open.ts";
 import { AdvertisedEndpointRegistry } from "./remote/Services/AdvertisedEndpointRegistry.ts";
 import { HttpServer } from "effect/http";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents.ts";
@@ -104,8 +106,10 @@ import { ProviderService, type ProviderServiceShape } from "./provider/Services/
 import { AnalyticsService } from "./telemetry/Services/AnalyticsService.ts";
 import {
   launchStartupHeartbeat,
+  recordStartupHeartbeat,
   makeCommandGate,
   makeServerRuntimeStartup,
+  presentStartupBrowserTarget,
   reconcileOrphanedProviderSessions,
   resolveAutoBootstrapWelcomeTargets,
   startOrchestrationRuntime,
@@ -1009,12 +1013,30 @@ it.effect("launchStartupHeartbeat does not block the caller while counts are loa
           searchThreadMessages: () => Effect.succeed([]),
         }),
         Effect.provideService(AnalyticsService, {
+          enabled: true,
           record: () => Effect.void,
           flush: Effect.void,
         }),
       );
     }),
   ),
+);
+
+it.effect("recordStartupHeartbeat skips the count query when telemetry is off", () =>
+  Effect.gen(function* () {
+    let countsQueried = false;
+    yield* recordStartupHeartbeat.pipe(
+      Effect.provideService(ProjectionSnapshotQuery, {
+        getCounts: () =>
+          Effect.sync(() => {
+            countsQueried = true;
+            return { projectCount: 0, threadCount: 0 };
+          }),
+      } as unknown as ProjectionSnapshotQuery["Service"]),
+      Effect.provideService(AnalyticsService, AnalyticsService.disabled),
+    );
+    assert.equal(countsQueried, false);
+  }),
 );
 
 it.effect("resolveWelcomeBase derives cwd and project name from server config", () =>
@@ -1088,7 +1110,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
         streamDomainEvents: Stream.empty,
         subscribeDomainEvents: Effect.gen(function* () {
           const pubsub = yield* PubSub.unbounded<OrchestrationEvent>();
-          return yield* PubSub.subscribe(pubsub);
+          return Stream.fromSubscription(yield* PubSub.subscribe(pubsub));
         }),
       } satisfies OrchestrationEngineShape),
       Effect.provide(Layer.merge(ServerSettingsService.layerTest(), NodeServices.layer)),
@@ -1142,7 +1164,7 @@ it.effect(
           streamDomainEvents: Stream.empty,
           subscribeDomainEvents: Effect.gen(function* () {
             const pubsub = yield* PubSub.unbounded<OrchestrationEvent>();
-            return yield* PubSub.subscribe(pubsub);
+            return Stream.fromSubscription(yield* PubSub.subscribe(pubsub));
           }),
         } satisfies OrchestrationEngineShape),
         Effect.provide(
@@ -1317,9 +1339,7 @@ const startupShellStubs = (input: {
       listSessions: input.listSessions ?? (() => Effect.succeed([])),
       stopSessionBinding: () => Effect.succeed("not-found" as const),
     } as unknown as ProviderServiceShape),
-    Layer.succeed(AnalyticsService, {
-      record: () => Effect.void,
-    } as unknown as AnalyticsService["Service"]),
+    Layer.succeed(AnalyticsService, AnalyticsService.disabled),
     Layer.succeed(ServerAuth, {
       issueStartupPairingUrl: (baseUrl: string) => Effect.succeed(baseUrl),
     } as unknown as ServerAuth["Service"]),
@@ -2087,6 +2107,45 @@ it.live("releases deferred provider driver construction once the HTTP listener s
             release: Effect.sync(() => void released.push("provider-instances")),
             awaitInitialReconcile: Effect.void,
           }),
+        ),
+      ),
+    ),
+  );
+});
+
+it.effect("prints the startup pairing URL to the terminal and never logs it", () => {
+  // Log records reach the trace file and, when traces or logs are exported, an OTLP collector.
+  const logged: Array<string> = [];
+  const captureLogs = Logger.layer([
+    Logger.make((options) => {
+      logged.push(
+        JSON.stringify({
+          message: options.message,
+          annotations: options.fiber.getRef(References.CurrentLogAnnotations),
+        }),
+      );
+    }),
+  ]);
+  const pairingUrl = "http://localhost:3773/pair#token=OWNER-SECRET-TOKEN";
+  return Effect.gen(function* () {
+    yield* presentStartupBrowserTarget(pairingUrl);
+
+    const printed = (yield* TestConsole.logLines).join("\n");
+    assert.include(printed, `Pairing URL: ${pairingUrl}`);
+    assert.include(printed, `Open ${pairingUrl} in your browser.`);
+    assert.isTrue(logged.some((line) => line.includes("Authentication required")));
+    assert.isTrue(logged.some((line) => line.includes("browser auto-open unavailable")));
+    assert.notInclude(logged.join("\n"), "OWNER-SECRET-TOKEN");
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        captureLogs,
+        Layer.fresh(TestConsole.layer),
+        Layer.succeed(Open, {
+          openBrowser: () => Effect.fail(new OpenError({ message: "no browser" })),
+        } as unknown as Open["Service"]),
+        ServerConfig.layerTest(process.cwd(), { prefix: "ryco-startup-pairing-" }).pipe(
+          Layer.provide(NodeServices.layer),
         ),
       ),
     ),

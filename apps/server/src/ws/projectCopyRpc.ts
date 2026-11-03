@@ -5,20 +5,38 @@ import { Effect, Option } from "effect";
 import { observeRpcEffect, observeRpcStreamEffect } from "../observability/RpcInstrumentation.ts";
 import type { ProjectCopyCallerChannel } from "../projectCopy/callerChannel.ts";
 import { defineWsHandlers, type WsRpcContext } from "./context.ts";
-import type { RpcPrincipal } from "./RpcPrincipal.ts";
+import type { RpcConnectionFacts } from "./RpcPrincipal.ts";
 
 const TRACE_ATTRIBUTES = { "rpc.aggregate": "project-copy" } as const;
 
+// The connection classifier loads with the first call that needs it, never at boot.
+const loadConnectionPath = Effect.promise(() => import("./rpcConnectionPath.ts"));
+
 /**
- * How the caller's bytes reach this node. A relay channel counts as encrypted only while it is,
- * and a relay principal that cannot tell counts as plaintext.
+ * How the caller's bytes reach this node, classified from the facts the node captured when the
+ * connection was built (`RpcPrincipal.connection`), by the same rule as secret answers: only an
+ * end-to-end encrypted relay channel, TLS, Tailscale or this machine counts as encrypted. A
+ * plaintext relay, plain `ws://` from another machine and a connection without facts do not.
  */
-export const projectCopyCallerChannel = (principal: RpcPrincipal): ProjectCopyCallerChannel =>
-  principal.transport === "direct"
-    ? "direct"
-    : principal.relayChannelEncrypted?.() === true
-      ? "relay-e2ee"
-      : "relay-plaintext";
+export const projectCopyCallerChannel = (
+  connection: RpcConnectionFacts | undefined,
+  readNodeTailscaleAddresses: Effect.Effect<ReadonlyArray<string> | undefined> = Effect.succeed(
+    undefined,
+  ),
+): Effect.Effect<ProjectCopyCallerChannel> =>
+  loadConnectionPath.pipe(
+    Effect.flatMap((module) =>
+      module
+        .readRpcConnectionPath(connection, readNodeTailscaleAddresses)
+        .pipe(
+          Effect.map((path) =>
+            module.isEncryptedConnectionPath(path)
+              ? ("encrypted" as const)
+              : ("unencrypted" as const),
+          ),
+        ),
+    ),
+  );
 
 /**
  * Cross-node project copy RPCs: reads and scratch transfers on either node, the durable import
@@ -27,7 +45,8 @@ export const projectCopyCallerChannel = (principal: RpcPrincipal): ProjectCopyCa
  * bytes travel, so opted-in ignored files never cross a plaintext relay on either leg (A33).
  */
 export const makeProjectCopyHandlers = (ctx: WsRpcContext) => {
-  const { ownerEffect, ownerStreamEffect, principal, projectCopy } = ctx;
+  const { ownerEffect, ownerStreamEffect, projectCopy } = ctx;
+  const callerChannel = projectCopyCallerChannel(ctx.connection, ctx.readNodeTailscaleAddresses);
 
   // Absent only in route tests that leave the project copy services out.
   const service = <S>(option: Option.Option<S>): Effect.Effect<S, ProjectCopyError> =>
@@ -81,7 +100,7 @@ export const makeProjectCopyHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.projectsExportStart,
         exporter.pipe(
           Effect.flatMap((source) =>
-            source.start({ input, channel: projectCopyCallerChannel(principal) }),
+            callerChannel.pipe(Effect.flatMap((channel) => source.start({ input, channel }))),
           ),
         ),
       ),
@@ -89,7 +108,9 @@ export const makeProjectCopyHandlers = (ctx: WsRpcContext) => {
       handle(
         WS_METHODS.projectsExportReadChunk,
         exporter.pipe(
-          Effect.flatMap((source) => source.readChunk(input, projectCopyCallerChannel(principal))),
+          Effect.flatMap((source) =>
+            callerChannel.pipe(Effect.flatMap((channel) => source.readChunk(input, channel))),
+          ),
         ),
       ),
     [WS_METHODS.projectsExportDispose]: (input) =>
@@ -104,14 +125,18 @@ export const makeProjectCopyHandlers = (ctx: WsRpcContext) => {
       handle(
         WS_METHODS.projectsTransferBegin,
         transfers.pipe(
-          Effect.flatMap((uploads) => uploads.begin(input, projectCopyCallerChannel(principal))),
+          Effect.flatMap((uploads) =>
+            callerChannel.pipe(Effect.flatMap((channel) => uploads.begin(input, channel))),
+          ),
         ),
       ),
     [WS_METHODS.projectsTransferAppend]: (input) =>
       handle(
         WS_METHODS.projectsTransferAppend,
         transfers.pipe(
-          Effect.flatMap((uploads) => uploads.append(input, projectCopyCallerChannel(principal))),
+          Effect.flatMap((uploads) =>
+            callerChannel.pipe(Effect.flatMap((channel) => uploads.append(input, channel))),
+          ),
         ),
       ),
     [WS_METHODS.projectsTransferCommit]: (input) =>

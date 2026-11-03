@@ -10,6 +10,7 @@ import {
   type OrchestrationThreadShell,
   type ThreadLineage,
 } from "@ryco/contracts";
+import { isThreadSnoozed } from "@ryco/shared/threadSnooze";
 import { describe, expect, it } from "vite-plus/test";
 
 import { scopeThreadRef } from "../../scoped.ts";
@@ -20,7 +21,6 @@ import {
   applyLoadedThreadShells,
   applyOrchestrationEvent,
   applyShellEvent,
-  applyThreadPriorities,
   demoteEnvironmentStateToCachedSnapshot,
   hydrateEnvironmentStateFromCache,
   selectDelegatedChildThreadsForThreadRef,
@@ -401,20 +401,6 @@ describe("archived thread stubs in the threads store", () => {
     expect(selectEnvironmentState(state, env).threadIdsByProjectId[projectId]).toEqual(["a"]);
   });
 
-  it("ranks no stub", () => {
-    let state = syncServerShellSnapshot(empty, snapshot([], [stubOf("a")]), env);
-    const before = selectEnvironmentState(state, env).sidebarThreadSummaryById;
-    state = applyThreadPriorities(
-      state,
-      {
-        kind: "thread-priorities",
-        priorities: [{ threadId: ThreadId.make("a"), priority: {} as never }],
-      },
-      env,
-    );
-    expect(selectEnvironmentState(state, env).sidebarThreadSummaryById).toBe(before);
-  });
-
   it("hydrates cached stubs whole and drops half a stub", () => {
     const stub: ArchivedThreadStub = {
       shellDetail: "archived-stub",
@@ -494,7 +480,7 @@ describe("archived thread stubs in client-runtime consumers", () => {
       ],
       nowMs: Date.parse(T2),
     });
-    const listed = [...inbox.focus, ...inbox.active, ...inbox.settled, ...inbox.snoozed].map(
+    const listed = [...inbox.active, ...inbox.settled, ...inbox.snoozed].map(
       (entry) => entry.thread?.id,
     );
     expect(listed).not.toContain("plain");
@@ -521,7 +507,10 @@ describe("archived thread stubs in client-runtime consumers", () => {
 
   it("baselines notifications without stubs, so a later full shell never notifies at once", () => {
     const generation = {};
-    const projector = createThreadNotificationProjector({ readGeneration: () => generation });
+    const projector = createThreadNotificationProjector({
+      readGeneration: () => generation,
+      isSnoozed: isThreadSnoozed,
+    });
     projector.baseline({
       environmentId: env,
       generation,

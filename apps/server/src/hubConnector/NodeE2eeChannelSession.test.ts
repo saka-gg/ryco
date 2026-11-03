@@ -306,12 +306,17 @@ describe("NodeE2eeChannelSession", () => {
     const registrations: {
       readonly tier: string;
       readonly verificationCode: string | undefined;
+      readonly nodeIdentityPublicKey: Uint8Array;
     }[] = [];
     let released = 0;
     const node = await harness({
       authorization: authorizationFor(undefined),
       registerSession: (session) => {
-        registrations.push({ tier: session.tier, verificationCode: session.verificationCode });
+        registrations.push({
+          tier: session.tier,
+          verificationCode: session.verificationCode,
+          nodeIdentityPublicKey: session.nodeIdentityPublicKey,
+        });
         return () => {
           released += 1;
         };
@@ -336,6 +341,8 @@ describe("NodeE2eeChannelSession", () => {
       sessionBindingHash: client.sessionBindingHash,
     }).display;
     expect(registrations[0]?.verificationCode).toBe(expected);
+    // The key the advertised statement carried: a linked direct grant names it.
+    expect(registrations[0]?.nodeIdentityPublicKey).toEqual(advertisement.nodeIdentityPublicKey);
 
     // §13.5: the code is ephemeral display state, so the entry goes when the
     // session does.

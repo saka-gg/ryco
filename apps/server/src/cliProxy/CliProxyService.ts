@@ -27,6 +27,7 @@ import {
   type CliProxyReadHubsResult,
   type CliProxyTestHubInput,
   type CliProxyTestHubResult,
+  type ProviderInstanceId,
 } from "@ryco/contracts";
 import { Clock, Context, Data, DateTime, Duration, Effect, Exit, Layer, Option } from "effect";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
@@ -111,6 +112,26 @@ export interface CliProxyServiceShape {
   readonly testHub: (
     input: CliProxyTestHubInput,
   ) => Effect.Effect<CliProxyTestHubResult, CliProxyHubError>;
+  /** What earlier reads left in the cache, per enabled hub. Sends nothing and refreshes nothing. */
+  readonly cachedQuotas: Effect.Effect<ReadonlyArray<CliProxyCachedHub>, CliProxyHubError>;
+}
+
+/** One enabled hub as the cache holds it, without account identities. */
+export interface CliProxyCachedHub {
+  /** The hub's own label, else its host. */
+  readonly label: string;
+  readonly routedInstanceIds: ReadonlyArray<ProviderInstanceId>;
+  /** The last account list a read returned, in the hub's order; absent before the first. */
+  readonly listed?: {
+    readonly fetchedAtMs: number;
+    readonly accounts: ReadonlyArray<{
+      readonly provider: string;
+      readonly disabled: boolean;
+      readonly quota: CliProxyAccountQuota;
+    }>;
+  };
+  /** The latest read failed, so `listed` is from an earlier one. */
+  readonly failed: boolean;
 }
 
 export class CliProxyService extends Context.Service<CliProxyService, CliProxyServiceShape>()(
@@ -159,6 +180,8 @@ interface HubState {
   readonly lock: Semaphore.Semaphore;
   api: ManagementApi | undefined;
   snapshot: { readonly fetchedAtMs: number; readonly value: HubRead } | undefined;
+  /** The last snapshot that listed accounts; a failed read keeps it. */
+  listed: { readonly fetchedAtMs: number; readonly value: HubRead } | undefined;
   readonly quotas: Map<string, CachedQuota>;
   readonly claudePlans: Map<string, { readonly fetchedAtMs: number; readonly plan?: string }>;
 }
@@ -229,6 +252,7 @@ export const makeCliProxyService = Effect.gen(function* () {
           lock: Semaphore.makeUnsafe(1),
           api: undefined,
           snapshot: undefined,
+          listed: undefined,
           quotas: new Map(),
           claudePlans: new Map(),
         };
@@ -816,7 +840,7 @@ export const makeCliProxyService = Effect.gen(function* () {
             apiKeys: "usage" in apiKeys ? apiKeys.usage : [],
             ...("error" in apiKeys ? { apiKeysError: apiKeys.error } : {}),
           };
-          state.snapshot = { fetchedAtMs: doneMs, value: snapshot };
+          state.snapshot = state.listed = { fetchedAtMs: doneMs, value: snapshot };
           return snapshot;
         }),
       );
@@ -909,7 +933,43 @@ export const makeCliProxyService = Effect.gen(function* () {
       };
     });
 
-  return CliProxyService.of({ readHubs, testHub });
+  const cachedQuotas: CliProxyServiceShape["cachedQuotas"] = readSettings.pipe(
+    Effect.map((settings) =>
+      Object.entries(settings.cliProxyHubs).flatMap(([hubId, config]): CliProxyCachedHub[] => {
+        if (!config.enabled) return [];
+        const baseUrl = normalizeHubBaseUrl(config.url);
+        const state = states.get(hubId as CliProxyHubId);
+        // A read from another address describes another hub.
+        const atAddress = <A extends { readonly value: HubRead }>(read: A | undefined) =>
+          read?.value.url === baseUrl ? read : undefined;
+        const listed = atAddress(state?.listed);
+        return [
+          {
+            label: config.label ?? (baseUrl ? hubHostLabel(baseUrl) : "CLIProxyAPI hub"),
+            routedInstanceIds: routedInstanceIds(config.url, settings.providerInstances),
+            // Each account carries the quota `state.quotas` held when the list was read (the
+            // entry's `checkedAt` is its fetch time); quotas are only read after a list, and a
+            // disabled account's entry there would be older than its `skipped`.
+            ...(listed
+              ? {
+                  listed: {
+                    fetchedAtMs: listed.fetchedAtMs,
+                    accounts: listed.value.accounts.map((account) => ({
+                      provider: account.provider,
+                      disabled: account.disabled,
+                      quota: account.quota,
+                    })),
+                  },
+                }
+              : {}),
+            failed: atAddress(state?.snapshot)?.value.status === "error",
+          },
+        ];
+      }),
+    ),
+  );
+
+  return CliProxyService.of({ readHubs, testHub, cachedQuotas });
 });
 
 export const CliProxyServiceLive = Layer.effect(CliProxyService, makeCliProxyService);
@@ -917,6 +977,7 @@ export const CliProxyServiceLive = Layer.effect(CliProxyService, makeCliProxySer
 /** Route tests that do not provide the live service read no hubs. */
 export const CliProxyServiceUnavailable = CliProxyService.of({
   readHubs: () => Effect.succeed({ hubs: [] }),
+  cachedQuotas: Effect.succeed([]),
   testHub: () =>
     Effect.fail(
       new CliProxyHubError({ message: "CLIProxyAPI hubs are unavailable on this node." }),

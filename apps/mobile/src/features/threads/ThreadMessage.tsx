@@ -1,4 +1,20 @@
 import {
+  agentMessageFoldOf,
+  type BrowserElementReference,
+  browserElementReferenceKey,
+  deriveDisplayedUserMessageContext,
+  type FileReference,
+  fileReferenceKey,
+  formatBrowserElementLabel,
+  formatBrowserElementTitle,
+  formatFileReferenceLabel,
+  formatFileReferenceTitle,
+  type ParsedTerminalContextEntry,
+} from "@ryco/client-runtime/state/composer";
+import {
+  canHtmlRenderSendFromMessage,
+  EDIT_FROM_HERE_COPY,
+  UNDO_FILE_CHANGES_COPY,
   readHtmlRenderAttachment,
   type HtmlRenderAttachment,
 } from "@ryco/client-runtime/state/session";
@@ -11,24 +27,22 @@ import {
   type ChatUnknownAttachment,
 } from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
+import { quoteCitationsToPlainText } from "@ryco/shared/quoteCitations";
 import { useVideoPlayer, VideoView } from "expo-video";
 import { useEvent } from "expo";
-import * as Linking from "expo-linking";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Image, Pressable, ScrollView, Share, View } from "react-native";
 
 import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
 import { CopyTextButton } from "../../components/CopyTextButton";
-import { resolveNativeMarkdownTypography } from "../../lib/appearancePreferences";
-import { useFontFamily } from "../../lib/useFontFamily";
+import { openWebLink } from "../../lib/openWebLink";
 import { useThemeColor } from "../../lib/useThemeColor";
 import {
   hasNativeSelectableMarkdownText,
   SelectableMarkdownText,
-  type NativeMarkdownTextStyle,
 } from "../../native/SelectableMarkdownText";
-import { useScaledTextRole } from "../settings/appearance/useScaledTextRole";
+import { useNativeMarkdownTextStyle } from "../../native/useNativeMarkdownTextStyle";
 import { HtmlRenderCards } from "./HtmlRenderCards";
 import { ThreadHtmlRender } from "./ThreadHtmlRender";
 import type { TurnHtmlRender } from "./threadActivityFold";
@@ -176,6 +190,86 @@ function AudioAttachmentRow({ attachment }: { readonly attachment: ChatFileAttac
   );
 }
 
+/**
+ * What a sent prompt carried besides its text: page elements picked in the
+ * project browser and lines of workspace files (each with the user's note) and
+ * terminal output, read back from the blocks the send wrote, the same way web
+ * shows them.
+ */
+function SentMessageContexts(props: {
+  readonly browserElements: ReadonlyArray<BrowserElementReference>;
+  readonly fileReferences: ReadonlyArray<FileReference>;
+  readonly terminalContexts: ReadonlyArray<ParsedTerminalContextEntry>;
+  readonly spaced: boolean;
+}) {
+  const subtle = String(useThemeColor("--color-icon-subtle"));
+  return (
+    <View className={`gap-1.5 ${props.spaced ? "mt-2" : ""}`}>
+      {props.browserElements.map((element) => (
+        <View
+          key={browserElementReferenceKey(element)}
+          accessibilityRole="text"
+          accessibilityLabel={
+            element.comment
+              ? `${formatBrowserElementTitle(element)}: ${element.comment}`
+              : formatBrowserElementTitle(element)
+          }
+          className="gap-0.5"
+        >
+          <View className="flex-row items-center gap-1 self-start rounded-full border border-border bg-card-translucent px-2 py-1">
+            <SymbolView name="globe" size={11} tintColor={subtle} type="monochrome" />
+            <Text className="text-[11px] font-ryco-medium text-foreground-muted" numberOfLines={1}>
+              {formatBrowserElementLabel(element)}
+            </Text>
+          </View>
+          {element.comment ? (
+            <Text className="pl-1 text-xs text-foreground-muted" numberOfLines={3}>
+              {element.comment}
+            </Text>
+          ) : null}
+        </View>
+      ))}
+      {props.fileReferences.map((reference) => (
+        <View
+          key={fileReferenceKey(reference)}
+          accessibilityRole="text"
+          accessibilityLabel={
+            reference.comment
+              ? `${formatFileReferenceTitle(reference)}: ${reference.comment}`
+              : formatFileReferenceTitle(reference)
+          }
+          className="gap-0.5"
+        >
+          <View className="flex-row items-center gap-1 self-start rounded-full border border-border bg-card-translucent px-2 py-1">
+            <SymbolView name="doc.text" size={11} tintColor={subtle} type="monochrome" />
+            <Text className="text-[11px] font-ryco-medium text-foreground-muted" numberOfLines={1}>
+              {formatFileReferenceLabel(reference)}
+            </Text>
+          </View>
+          {reference.comment ? (
+            <Text className="pl-1 text-xs text-foreground-muted" numberOfLines={3}>
+              {reference.comment}
+            </Text>
+          ) : null}
+        </View>
+      ))}
+      {props.terminalContexts.map((context) => (
+        <View
+          key={context.header}
+          accessibilityRole="text"
+          accessibilityLabel={context.header}
+          className="flex-row items-center gap-1 self-start rounded-full border border-border bg-card-translucent px-2 py-1"
+        >
+          <SymbolView name="terminal" size={11} tintColor={subtle} type="monochrome" />
+          <Text className="text-[11px] font-ryco-medium text-foreground-muted" numberOfLines={1}>
+            {context.header}
+          </Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
 export function ThreadMessage(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
@@ -188,48 +282,30 @@ export function ThreadMessage(props: {
    * which would fight the reply's text selection.
    */
   readonly onForkFromHere?: (() => void) | undefined;
+  /** Present only on a sent message the thread can be rewound to before, right now. */
+  readonly onEditFromHere?: (() => void) | undefined;
+  /** Present only on a reply whose turn's file changes can be undone right now. */
+  readonly onUndoFileChanges?: (() => void) | undefined;
 }) {
   const isUser = props.message.role === "user";
+  // A delegated result or another agent's message reads as one line until opened.
+  const agentFold = agentMessageFoldOf(props.message);
+  const [agentFoldOpen, setAgentFoldOpen] = useState(false);
   const sentAt = isUser ? Date.parse(props.message.createdAt) : Number.NaN;
   const sentLabel = Number.isFinite(sentAt) ? sentTimeFormatter.format(sentAt) : null;
   const presentation = threadMessagePresentation(isUser ? "user" : "assistant");
-  const bodyText = useScaledTextRole("body");
-  const typography = resolveNativeMarkdownTypography(bodyText.fontSize);
-  const regularFont = useFontFamily("regular");
-  const boldFont = useFontFamily("bold");
-  const bodyColor = useThemeColor("--color-md-body");
-  const strongColor = useThemeColor("--color-md-strong");
-  const mutedColor = useThemeColor("--color-foreground-muted");
   const metadataColor = useThemeColor("--color-foreground-tertiary");
-  const linkColor = useThemeColor("--color-md-link");
-  const codeColor = useThemeColor("--color-md-code-text");
-  const codeBackground = useThemeColor("--color-md-code-bg");
-  const codeBlockBackground = useThemeColor("--color-card-alt");
-  const fileTextColor = useThemeColor("--color-md-link");
-  const skillTextColor = useThemeColor("--color-inline-skill-foreground");
-  const quoteMarkerColor = useThemeColor("--color-md-blockquote-border");
-  const dividerColor = useThemeColor("--color-md-hr");
-  const markdownStyle: NativeMarkdownTextStyle = {
-    color: String(bodyColor),
-    strongColor: String(strongColor),
-    mutedColor: String(mutedColor),
-    linkColor: String(linkColor),
-    inlineCodeColor: String(codeColor),
-    codeColor: String(codeColor),
-    codeBackgroundColor: String(codeBackground),
-    codeBlockBackgroundColor: String(codeBlockBackground),
-    fileTextColor: String(fileTextColor),
-    skillTextColor: String(skillTextColor),
-    quoteMarkerColor: String(quoteMarkerColor),
-    dividerColor: String(dividerColor),
-    fontSize: typography.fontSize,
-    lineHeight: typography.lineHeight,
-    fontFamily: regularFont,
-    headingFontFamily: boldFont,
-    boldFontFamily: boldFont,
-    headingFontSizes: typography.headingFontSizes,
-  };
-  const text = props.message.text || (props.message.streaming ? "…" : "");
+  const markdownStyle = useNativeMarkdownTextStyle();
+  // A sent prompt's context blocks show as chips, not as raw text, and its
+  // quotes read as plain quoted lines; copying keeps the text as sent.
+  const sentContexts = isUser ? deriveDisplayedUserMessageContext(props.message.text) : null;
+  const sentContextCount =
+    (sentContexts?.browserElements.length ?? 0) +
+    (sentContexts?.fileReferences.length ?? 0) +
+    (sentContexts?.contexts.length ?? 0);
+  const text =
+    (sentContexts ? quoteCitationsToPlainText(sentContexts.visibleText) : props.message.text) ||
+    (props.message.streaming ? "…" : "");
   const attachments = props.message.attachments ?? [];
   const hasVideoPlaybackSource = (
     attachment: ChatFileAttachment | ChatImageAttachment | ChatUnknownAttachment,
@@ -267,10 +343,53 @@ export function ThreadMessage(props: {
   );
   // Attachment deliveries carry a placeholder " " body, which would render as
   // a blank line above the attachment.
-  const showText = text.trim().length > 0 || attachments.length === 0;
+  const showText = text.trim().length > 0 || (attachments.length === 0 && sentContextCount === 0);
+
+  if (agentFold && !agentFoldOpen) {
+    return (
+      <View className="items-end px-4 py-2">
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ expanded: false }}
+          accessibilityLabel={`${agentFold.label}${agentFold.summary ? `: ${agentFold.summary}` : ""}`}
+          onPress={() => setAgentFoldOpen(true)}
+          className="max-w-[88%] flex-row items-center gap-2 rounded-2xl border border-border px-3 py-2 active:opacity-70"
+        >
+          <Text className="text-xs font-ryco-medium text-foreground-muted">{agentFold.label}</Text>
+          {agentFold.summary ? (
+            <Text className="shrink text-xs text-foreground-tertiary" numberOfLines={1}>
+              {agentFold.summary}
+            </Text>
+          ) : null}
+          <SymbolView
+            name="chevron.down"
+            size={10}
+            tintColor={metadataColor as string}
+            type="monochrome"
+          />
+        </Pressable>
+      </View>
+    );
+  }
 
   return (
     <View className={`px-4 py-2 ${isUser ? "items-end" : "items-start"}`}>
+      {agentFold ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ expanded: true }}
+          onPress={() => setAgentFoldOpen(false)}
+          className="mb-1 flex-row items-center gap-1 active:opacity-70"
+        >
+          <Text className="text-2xs font-ryco-medium text-foreground-muted">{agentFold.label}</Text>
+          <SymbolView
+            name="chevron.up"
+            size={10}
+            tintColor={metadataColor as string}
+            type="monochrome"
+          />
+        </Pressable>
+      ) : null}
       <View
         className={
           isUser
@@ -297,11 +416,19 @@ export function ThreadMessage(props: {
             preserveSoftBreaks
             marginTop={0}
             marginBottom={0}
-            onLinkPress={(href) => {
-              void Linking.openURL(href).catch(() => undefined);
-            }}
+            // An agent's message can link to anything; only web links leave the app,
+            // as on the pull request screens (`isWebLink`).
+            onLinkPress={openWebLink}
           />
         )}
+        {sentContexts && sentContextCount > 0 ? (
+          <SentMessageContexts
+            browserElements={sentContexts.browserElements}
+            fileReferences={sentContexts.fileReferences}
+            terminalContexts={sentContexts.contexts}
+            spaced={showText}
+          />
+        ) : null}
         {htmlRenders.length > 0 ? (
           <View className={`w-full gap-2 ${showText ? "mt-2" : ""}`}>
             {htmlRenders.map(({ attachment, htmlRender }) => (
@@ -312,6 +439,7 @@ export function ThreadMessage(props: {
                 messageId={props.message.id}
                 attachment={attachment}
                 htmlRender={htmlRender}
+                canSendMessages={canHtmlRenderSendFromMessage(props.message, attachment)}
               />
             ))}
           </View>
@@ -404,26 +532,64 @@ export function ThreadMessage(props: {
               buttonSize={28}
             />
           ) : null}
+          {props.onEditFromHere ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={EDIT_FROM_HERE_COPY.action}
+              hitSlop={8}
+              onPress={props.onEditFromHere}
+              className="h-7 w-7 items-center justify-center rounded-full active:bg-subtle"
+            >
+              <SymbolView
+                name="arrow.uturn.backward"
+                size={12}
+                tintColor={metadataColor}
+                type="monochrome"
+              />
+            </Pressable>
+          ) : null}
         </View>
-      ) : props.message.role === "assistant" && props.onForkFromHere ? (
+      ) : props.message.role === "assistant" &&
+        (props.onForkFromHere || props.onUndoFileChanges) ? (
         <View className="mt-1 flex-row items-center pl-1">
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={THREAD_FORK_COPY.action}
-            hitSlop={8}
-            onPress={props.onForkFromHere}
-            className="h-7 flex-row items-center gap-1 rounded-full px-2 active:bg-subtle"
-          >
-            <SymbolView
-              name="arrow.triangle.branch"
-              size={12}
-              tintColor={metadataColor}
-              type="monochrome"
-            />
-            <Text className="text-2xs font-ryco-medium text-foreground-tertiary">
-              {THREAD_FORK_COPY.action}
-            </Text>
-          </Pressable>
+          {props.onForkFromHere ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={THREAD_FORK_COPY.action}
+              hitSlop={8}
+              onPress={props.onForkFromHere}
+              className="h-7 flex-row items-center gap-1 rounded-full px-2 active:bg-subtle"
+            >
+              <SymbolView
+                name="arrow.triangle.branch"
+                size={12}
+                tintColor={metadataColor}
+                type="monochrome"
+              />
+              <Text className="text-2xs font-ryco-medium text-foreground-tertiary">
+                {THREAD_FORK_COPY.action}
+              </Text>
+            </Pressable>
+          ) : null}
+          {props.onUndoFileChanges ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={UNDO_FILE_CHANGES_COPY.action}
+              hitSlop={8}
+              onPress={props.onUndoFileChanges}
+              className="h-7 flex-row items-center gap-1 rounded-full px-2 active:bg-subtle"
+            >
+              <SymbolView
+                name="arrow.uturn.backward"
+                size={12}
+                tintColor={metadataColor}
+                type="monochrome"
+              />
+              <Text className="text-2xs font-ryco-medium text-foreground-tertiary">
+                {UNDO_FILE_CHANGES_COPY.action}
+              </Text>
+            </Pressable>
+          ) : null}
         </View>
       ) : null}
     </View>

@@ -10,13 +10,25 @@
       "types": "./src/state/comparison/index.ts",
       "import": "./src/state/comparison/index.ts"
     },
+    "./commandPalette/search": {
+      "types": "./src/commandPalette/search.ts",
+      "import": "./src/commandPalette/search.ts"
+    },
     "./scoped": {
       "types": "./src/scoped.ts",
       "import": "./src/scoped.ts"
     },
+    "./promptLinks": {
+      "types": "./src/promptLinks.ts",
+      "import": "./src/promptLinks.ts"
+    },
     "./knownEnvironment": {
       "types": "./src/knownEnvironment.ts",
       "import": "./src/knownEnvironment.ts"
+    },
+    "./secretRequests": {
+      "types": "./src/secretRequests.ts",
+      "import": "./src/secretRequests.ts"
     },
     "./sourceControlDiscoveryState": {
       "types": "./src/sourceControlDiscoveryState.ts",
@@ -38,9 +50,45 @@
       "types": "./src/rpc/shellSnapshotAssembly.ts",
       "import": "./src/rpc/shellSnapshotAssembly.ts"
     },
+    "./rpc/workspaceFileRead": {
+      "types": "./src/rpc/workspaceFileRead.ts",
+      "import": "./src/rpc/workspaceFileRead.ts"
+    },
+    "./rpc/projectFileWatch": {
+      "types": "./src/rpc/projectFileWatch.ts",
+      "import": "./src/rpc/projectFileWatch.ts"
+    },
+    "./rpc/threadLocalServers": {
+      "types": "./src/rpc/threadLocalServers.ts",
+      "import": "./src/rpc/threadLocalServers.ts"
+    },
     "./connection": {
       "types": "./src/connection/index.ts",
       "import": "./src/connection/index.ts"
+    },
+    "./connection/desktopSshOwnerPairing": {
+      "types": "./src/connection/desktopSshOwnerPairing.ts",
+      "import": "./src/connection/desktopSshOwnerPairing.ts"
+    },
+    "./connection/directRouteIdentity": {
+      "types": "./src/connection/directRouteIdentity.ts",
+      "import": "./src/connection/directRouteIdentity.ts"
+    },
+    "./nodeBrowser/viewerInput": {
+      "types": "./src/nodeBrowser/viewerInput.ts",
+      "import": "./src/nodeBrowser/viewerInput.ts"
+    },
+    "./connection/nodeBrowserFrameSource": {
+      "types": "./src/connection/nodeBrowserFrameSource.ts",
+      "import": "./src/connection/nodeBrowserFrameSource.ts"
+    },
+    "./connection/hubLinkedRoutes": {
+      "types": "./src/connection/hubLinkedRoutes.ts",
+      "import": "./src/connection/hubLinkedRoutes.ts"
+    },
+    "./connection/savedEnvironmentSwitch": {
+      "types": "./src/connection/savedEnvironmentSwitch.ts",
+      "import": "./src/connection/savedEnvironmentSwitch.ts"
     },
     "./authorization": {
       "types": "./src/authorization/index.ts",
@@ -70,9 +118,17 @@
       "types": "./src/authorization/nodeMutationLease.ts",
       "import": "./src/authorization/nodeMutationLease.ts"
     },
+    "./notifications/push": {
+      "types": "./src/notifications/push/index.ts",
+      "import": "./src/notifications/push/index.ts"
+    },
     "./usage": {
       "types": "./src/usage/index.ts",
       "import": "./src/usage/index.ts"
+    },
+    "./usage/limits": {
+      "types": "./src/usage/limits.ts",
+      "import": "./src/usage/limits.ts"
     },
     "./relay": {
       "types": "./src/relay/index.ts",
@@ -126,6 +182,10 @@
       "types": "./src/state/tasks/index.ts",
       "import": "./src/state/tasks/index.ts"
     },
+    "./state/dailyRecap": {
+      "types": "./src/state/dailyRecap/index.ts",
+      "import": "./src/state/dailyRecap/index.ts"
+    },
     "./state/nodeUpdate": {
       "types": "./src/state/nodeUpdate/index.ts",
       "import": "./src/state/nodeUpdate/index.ts"
@@ -138,9 +198,25 @@
       "types": "./src/projectCopy/index.ts",
       "import": "./src/projectCopy/index.ts"
     },
+    "./state/providerSignIn": {
+      "types": "./src/state/providerSignIn/index.ts",
+      "import": "./src/state/providerSignIn/index.ts"
+    },
+    "./state/sessionImport": {
+      "types": "./src/state/sessionImport/index.ts",
+      "import": "./src/state/sessionImport/index.ts"
+    },
     "./updates": {
       "types": "./src/updates/index.ts",
       "import": "./src/updates/index.ts"
+    },
+    "./updates/view": {
+      "types": "./src/updates/view.ts",
+      "import": "./src/updates/view.ts"
+    },
+    "./updates/clientInteraction": {
+      "types": "./src/updates/clientInteraction.ts",
+      "import": "./src/updates/clientInteraction.ts"
     },
     "./state/orchestration": {
       "types": "./src/state/orchestration/index.ts",
@@ -149,6 +225,26 @@
     "./state/threads": {
       "types": "./src/state/threads/index.ts",
       "import": "./src/state/threads/index.ts"
+    },
+    "./state/threads/carriedFork": {
+      "types": "./src/state/threads/carriedFork.ts",
+      "import": "./src/state/threads/carriedFork.ts"
+    },
+    "./state/threads/interThreadMessage": {
+      "types": "./src/state/threads/interThreadMessage.ts",
+      "import": "./src/state/threads/interThreadMessage.ts"
+    },
+    "./state/threads/openChatTabs": {
+      "types": "./src/state/threads/openChatTabs.ts",
+      "import": "./src/state/threads/openChatTabs.ts"
+    },
+    "./state/threads/runningThreads": {
+      "types": "./src/state/threads/runningThreads.ts",
+      "import": "./src/state/threads/runningThreads.ts"
+    },
+    "./state/threads/sidebarUndoBatch": {
+      "types": "./src/state/threads/sidebarUndoBatch.ts",
+      "import": "./src/state/threads/sidebarUndoBatch.ts"
     },
     "./state/threads/threadBodyResidency": {
       "types": "./src/state/threads/threadBodyResidency.ts",
@@ -162,6 +258,14 @@
       "types": "./src/state/session/index.ts",
       "import": "./src/state/session/index.ts"
     },
+    "./state/session/subagentMessage": {
+      "types": "./src/state/session/subagentMessage.ts",
+      "import": "./src/state/session/subagentMessage.ts"
+    },
+    "./state/session/subagentStop": {
+      "types": "./src/state/session/subagentStop.ts",
+      "import": "./src/state/session/subagentStop.ts"
+    },
     "./state/user-input": {
       "types": "./src/state/user-input/index.ts",
       "import": "./src/state/user-input/index.ts"
@@ -170,21 +274,69 @@
       "types": "./src/state/message-queue/index.ts",
       "import": "./src/state/message-queue/index.ts"
     },
+    "./state/message-queue/serverQueue": {
+      "types": "./src/state/message-queue/serverQueue.ts",
+      "import": "./src/state/message-queue/serverQueue.ts"
+    },
+    "./state/message-queue/queueBadge": {
+      "types": "./src/state/message-queue/queueBadge.ts",
+      "import": "./src/state/message-queue/queueBadge.ts"
+    },
     "./state/settings": {
       "types": "./src/state/settings/index.ts",
       "import": "./src/state/settings/index.ts"
+    },
+    "./state/settings/projectPreferenceEditing": {
+      "types": "./src/state/settings/projectPreferenceEditing.ts",
+      "import": "./src/state/settings/projectPreferenceEditing.ts"
+    },
+    "./state/settings/nodeSettingsFanOut": {
+      "types": "./src/state/settings/nodeSettingsFanOut.ts",
+      "import": "./src/state/settings/nodeSettingsFanOut.ts"
     },
     "./state/terminal": {
       "types": "./src/state/terminal/index.ts",
       "import": "./src/state/terminal/index.ts"
     },
+    "./state/terminal/replayGate": {
+      "types": "./src/state/terminal/replayGate.ts",
+      "import": "./src/state/terminal/replayGate.ts"
+    },
     "./state/composer": {
       "types": "./src/state/composer/index.ts",
       "import": "./src/state/composer/index.ts"
     },
+    "./state/composer/imageCompression": {
+      "types": "./src/state/composer/imageCompression.ts",
+      "import": "./src/state/composer/imageCompression.ts"
+    },
+    "./state/composer/legacyModelFold": {
+      "types": "./src/state/composer/legacyModelFold.ts",
+      "import": "./src/state/composer/legacyModelFold.ts"
+    },
+    "./state/composer/providerUpdateRequiredNotice": {
+      "types": "./src/state/composer/providerUpdateRequiredNotice.ts",
+      "import": "./src/state/composer/providerUpdateRequiredNotice.ts"
+    },
+    "./state/composer/sendEngine": {
+      "types": "./src/state/composer/sendEngine.ts",
+      "import": "./src/state/composer/sendEngine.ts"
+    },
     "./state/files": {
       "types": "./src/state/files/index.ts",
       "import": "./src/state/files/index.ts"
+    },
+    "./state/device/previewSampler": {
+      "types": "./src/state/device/previewSampler.ts",
+      "import": "./src/state/device/previewSampler.ts"
+    },
+    "./state/device/previewLease": {
+      "types": "./src/state/device/previewLease.ts",
+      "import": "./src/state/device/previewLease.ts"
+    },
+    "./state/device/devicePoint": {
+      "types": "./src/state/device/devicePoint.ts",
+      "import": "./src/state/device/devicePoint.ts"
     },
     "./state/device": {
       "types": "./src/state/device/index.ts",
@@ -223,6 +375,7 @@
   "devDependencies": {
     "@noble/curves": "catalog:",
     "@noble/hashes": "catalog:",
+    "fast-check": "catalog:",
     "typescript": "catalog:",
     "vite-plus": "catalog:",
     "vitest": "catalog:"

@@ -30,6 +30,8 @@ import {
   type DeviceFrameListener,
   type DeviceKeyEvent,
   type DeviceListOptions,
+  type DeviceLogQuery,
+  type DeviceLogResult,
   type DeviceStreamFrame,
   type DeviceSwipeGesture,
 } from "./DeviceBackend.ts";
@@ -43,6 +45,7 @@ export interface FakeDeviceSeed {
 
 export type FakeDeviceCall =
   | { readonly kind: "testing"; readonly input: DeviceTestingInput }
+  | { readonly kind: "readLogs"; readonly udid: string; readonly query: DeviceLogQuery }
   | { readonly kind: "boot"; readonly udid: string }
   | { readonly kind: "shutdown"; readonly udid: string }
   | { readonly kind: "install"; readonly udid: string; readonly appPath: string }
@@ -109,6 +112,15 @@ export class FakeDeviceBackend implements DeviceBackend {
   private readonly devices = new Map<string, DeviceDescriptor>();
   private readonly listeners = new Map<string, DeviceFrameListener>();
   private nextStreamFailure: string | null = null;
+  private logResult: Omit<DeviceLogResult, "bundleId"> = {
+    process: "FakeApp",
+    log: [],
+    crashes: [],
+    omitted: 0,
+    truncated: false,
+    note: "Fake device logs.",
+  };
+  private screenshotPng = PNG_BASE64;
   private persistentStreamFailure: string | null = null;
   private readonly sequences = new Map<string, number>();
   private readonly installedBundles = new Map<string, string>();
@@ -117,6 +129,8 @@ export class FakeDeviceBackend implements DeviceBackend {
     string,
     { readonly path: string; readonly startedAt: string }
   >();
+  /** Set while `holdShutdowns` is in force: shutdowns wait on it before taking effect. */
+  private heldShutdowns: Promise<void> | null = null;
 
   constructor(options: FakeDeviceBackendOptions = {}) {
     this.availabilityValue = options.availability ?? { kind: "available" };
@@ -143,6 +157,16 @@ export class FakeDeviceBackend implements DeviceBackend {
     this.failures.set(kind, error);
   }
 
+  /** What the next `readLogs` calls answer; the bundle id echoes the query. */
+  setLogResult(result: Omit<DeviceLogResult, "bundleId">): void {
+    this.logResult = result;
+  }
+
+  /** Replace the 1x1 screenshot, e.g. with one too large for a transport. */
+  setScreenshotPng(base64: string): void {
+    this.screenshotPng = base64;
+  }
+
   /** Mark a device booted without going through Ryco, as Simulator.app would. */
   bootExternally(udid: string): void {
     const device = this.requireDevice(udid);
@@ -158,6 +182,23 @@ export class FakeDeviceBackend implements DeviceBackend {
     const device = this.requireDevice(udid);
     this.devices.set(udid, { ...device, state: "shutdown", bootSource: "user" });
     this.listeners.delete(udid);
+  }
+
+  /**
+   * Model a slow `simctl shutdown`: later `shutdown()` calls are recorded at
+   * once, then wait until the returned release runs before the device stops.
+   * Releasing twice is harmless.
+   */
+  holdShutdowns(): () => void {
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.heldShutdowns = held;
+    return () => {
+      if (this.heldShutdowns === held) this.heldShutdowns = null;
+      release();
+    };
   }
 
   hasStream(udid: string): boolean {
@@ -215,6 +256,7 @@ export class FakeDeviceBackend implements DeviceBackend {
 
   async shutdown(udid: string): Promise<void> {
     this.record({ kind: "shutdown", udid });
+    if (this.heldShutdowns !== null) await this.heldShutdowns;
     const device = this.requireDevice(udid);
     this.devices.set(udid, { ...device, state: "shutdown", bootSource: "user" });
     await this.detachStream(udid);
@@ -249,6 +291,12 @@ export class FakeDeviceBackend implements DeviceBackend {
 
   async testing(input: DeviceTestingInput): Promise<void> {
     this.record({ kind: "testing", input });
+  }
+
+  async readLogs(udid: string, query: DeviceLogQuery): Promise<DeviceLogResult> {
+    this.record({ kind: "readLogs", udid, query });
+    this.requireBooted(udid);
+    return { bundleId: query.bundleId, ...this.logResult };
   }
 
   async openUrl(udid: string, url: string): Promise<void> {
@@ -297,6 +345,8 @@ export class FakeDeviceBackend implements DeviceBackend {
   ): Promise<DeviceScreenshotResult> {
     this.record({ kind: "screenshot", udid });
     const device = this.requireBooted(udid);
+    // The PNG header's IHDR chunk carries the real size of a replaced image.
+    const png = Buffer.from(this.screenshotPng, "base64");
     return {
       // Mirrors the real backend: a saved shot reports where it landed, and it
       // lands beside the recordings rather than anywhere else.
@@ -304,10 +354,10 @@ export class FakeDeviceBackend implements DeviceBackend {
       udid,
       name: `${device.name}.png`,
       mimeType: "image/png",
-      width: 1,
-      height: 1,
-      sizeBytes: Buffer.from(PNG_BASE64, "base64").byteLength,
-      bytesBase64: PNG_BASE64,
+      width: png.byteLength >= 24 ? png.readUInt32BE(16) : 1,
+      height: png.byteLength >= 24 ? png.readUInt32BE(20) : 1,
+      sizeBytes: png.byteLength,
+      bytesBase64: this.screenshotPng,
       capturedAt: new Date(this.now()).toISOString(),
     };
   }

@@ -1,9 +1,14 @@
 import { LocalTaskServiceLive } from "./tasks/LocalTaskService.ts";
 import { WorktreeNotesServiceLive } from "./notes/WorktreeNotesService.ts";
-import { NodeUpdateServiceLive } from "./nodeUpdate/NodeUpdateService.ts";
+import {
+  confirmNodeUpdateAfterServe,
+  NodeUpdateServiceLive,
+} from "./nodeUpdate/NodeUpdateService.ts";
+import { ProviderSignInLive } from "./provider/signIn/ProviderSignIn.ts";
 import { DailyRecapQueryLive } from "./statistics/DailyRecapQuery.ts";
 import { StorageServiceLive } from "./storage/StorageService.ts";
 import { WorkspaceLifecycleLive } from "./workspace/WorkspaceLifecycle.ts";
+import { CheckoutMergeProverLive } from "./sourceControl/checkoutMergeProof.ts";
 import { WorkspaceChangeSummaryLive } from "./workspace/WorkspaceChangeSummary.ts";
 import { ChatFoldersLive } from "./project/chatFolders.ts";
 import { ProviderProtectedPathsLive } from "./storage/providerProtection.ts";
@@ -15,6 +20,10 @@ import { ProviderEffectIntentRepositoryLive } from "./persistence/Layers/Provide
 import { RestartContinuationRepositoryLive } from "./persistence/Layers/RestartContinuations.ts";
 import { RestartContinuationLive } from "./orchestration/Layers/RestartContinuation.ts";
 import { CompletionReturnDeliveryLive } from "./agentControl/Layers/CompletionReturnDelivery.ts";
+import { ServerWakeFenceLive } from "./orchestration/Layers/ServerWakeFence.ts";
+import { PullRequestWatchServiceLive } from "./sourceControl/PullRequestWatchService.ts";
+import { CommandWatchServiceLive } from "./commandWatch/CommandWatchService.ts";
+import { ServerQueueDrainLive } from "./orchestration/Layers/ServerQueueDrain.ts";
 import { AgentControlWorkspacesLive } from "./agentControl/workspaceLifecycle.ts";
 import { AutomationCentreLive } from "./agentControl/Layers/AutomationCentre.ts";
 import { Duration, Effect, Layer } from "effect";
@@ -42,6 +51,7 @@ import {
   isEarlyStaticRequest,
 } from "./httpStartupGate.ts";
 import { recordDesktopStartupPhase, writeDesktopLifecycleFrame } from "./desktopLifecycle.ts";
+import { DesktopParentLossShutdownLogLive } from "./desktopParentLifetime.ts";
 import { ProjectAvatarStoreLive } from "./project/Layers/ProjectAvatarStore.ts";
 import { fixPath } from "./os-jank.ts";
 import { deviceWebsocketRpcRouteLayer, websocketRpcRouteLayer } from "./ws.ts";
@@ -53,17 +63,28 @@ import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner
 import * as SourceControlDiscovery from "./sourceControl/SourceControlDiscovery.ts";
 import { ContextHandoffInspectionLive } from "./orchestration/Layers/ContextHandoffInspection.ts";
 import { DeviceServiceLive } from "./device/Layers/DeviceService.ts";
+import { DeviceThreadLifecycleLive } from "./device/Layers/DeviceThreadLifecycle.ts";
 import { deviceFrameRouteLayer } from "./device/deviceFrameRoute.ts";
+import { nodeBrowserFrameRouteLayer } from "./nodeBrowser/nodeBrowserRoute.ts";
+import { NodeBrowserLive } from "./nodeBrowser/NodeBrowser.ts";
 import {
   HubConnectorDeferredLive,
   startHubConnectorAfterServe,
 } from "./hubConnector/HubConnectorDeferred.ts";
+import { HubConnectorReady } from "./hubConnector/HubConnectorService.ts";
 import { hubConnectorRoutesLayer } from "./hubConnector/http.ts";
 import { desktopLocalIntroductionRoutesLayer } from "./hubConnector/localIntroductionHttp.ts";
 import { desktopHubReachabilityRouteLayer } from "./hubConnector/desktopHubReachabilityHttp.ts";
+import { directRouteIdentityRouteLayer } from "./hubConnector/directRouteIdentityHttp.ts";
 import { desktopNativeNodeClaimRoutesLayer } from "./hubConnector/desktopNativeNodeClaimHttp.ts";
 import { OpenLive } from "./open.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
+import { DatabaseMaintenanceLive } from "./persistence/Layers/DatabaseMaintenance.ts";
+import { EventLogCompactionDeferredLive } from "./persistence/Layers/EventLogCompactionDeferred.ts";
+import { EventLogCompactionUsageReaderLive } from "./statistics/statisticsRows.ts";
+import { DoctorSuggestionLogLive } from "./persistence/doctorSuggestionLog.ts";
+import { DatabaseOwnerLeaseLive } from "./persistence/databaseOwnerLock.ts";
+import { prefetchProcessIdentity } from "./processLock/processIdentity.ts";
 import { ServerLifecycleEventsLive } from "./serverLifecycleEvents.ts";
 import { AnalyticsServiceLayerLive } from "./telemetry/Layers/AnalyticsService.ts";
 import { ProviderSessionDirectoryLive } from "./provider/Layers/ProviderSessionDirectory.ts";
@@ -72,6 +93,7 @@ import { ContextHandoffRepositoryLive } from "./persistence/Layers/ContextHandof
 import { ProviderAdapterRegistryLive } from "./provider/Layers/ProviderAdapterRegistry.ts";
 import { ProviderEventLoggersLive } from "./provider/Layers/ProviderEventLoggers.ts";
 import * as ModelManifest from "./provider/ModelManifest.ts";
+import { AgentProcessPriorityLive } from "./provider/agentProcessPriority.ts";
 import { ProviderServiceLive } from "./provider/Layers/ProviderService.ts";
 import { ProviderSessionReaperLive } from "./provider/Layers/ProviderSessionReaper.ts";
 import { OpenCodeRuntimeLive } from "./provider/opencodeRuntime.ts";
@@ -79,12 +101,10 @@ import { CheckpointDiffQueryLive } from "./checkpointing/Layers/CheckpointDiffQu
 import { CheckpointStoreLive } from "./checkpointing/Layers/CheckpointStore.ts";
 import * as ForgejoApi from "./sourceControl/ForgejoApi.ts";
 import * as TextGeneration from "./textGeneration/TextGeneration.ts";
-import { ThreadPriorityCandidateQueryLive } from "./threadPriority/ThreadPriorityCandidateQuery.ts";
-import { ThreadPriorityCoordinatorLive } from "./threadPriority/ThreadPriorityCoordinator.ts";
-import { ThreadPriorityRepositoryLive } from "./threadPriority/ThreadPriorityRepository.ts";
 import { ProviderInstanceRegistryHydrationLive } from "./provider/Layers/ProviderInstanceRegistryHydration.ts";
 import { TerminalManagerLive } from "./terminal/Layers/Manager.ts";
 import { WorktreeSetupTrackerLive } from "./project/Layers/WorktreeSetupTracker.ts";
+import { GitActionRunnerLive } from "./git/GitActionRunner.ts";
 import * as GitManager from "./git/GitManager.ts";
 import { KeybindingsLive } from "./keybindings.ts";
 import { ServerRuntimeStartup, ServerRuntimeStartupLive } from "./serverRuntimeStartup.ts";
@@ -96,12 +116,15 @@ import { ProviderSessionPrewarmLive } from "./orchestration/Layers/ProviderSessi
 import { ContextHandoffCoordinatorLive } from "./orchestration/Layers/ContextHandoffCoordinator.ts";
 import { ContextHandoffServiceLive } from "./orchestration/contextHandoff/ContextHandoffService.ts";
 import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.ts";
+import { ThreadGitMetadataReactorLive } from "./orchestration/Layers/ThreadGitMetadataReactor.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import { ThreadPurgeReactorLive } from "./orchestration/Layers/ThreadPurgeReactor.ts";
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
+import { ProviderInstallLockLive } from "./provider/Layers/ProviderInstallLock.ts";
 import { ServerSettingsLive } from "./serverSettings.ts";
 import { ProjectFaviconResolverLive } from "./project/Layers/ProjectFaviconResolver.ts";
 import { RepositoryIdentityResolverLive } from "./project/Layers/RepositoryIdentityResolver.ts";
+import { WorkspaceContentSearchLive } from "./workspace/Layers/WorkspaceContentSearch.ts";
 import { WorkspaceEntriesLive } from "./workspace/Layers/WorkspaceEntries.ts";
 import { WorkspaceFileSystemLive } from "./workspace/Layers/WorkspaceFileSystem.ts";
 import { WorkspacePathsLive } from "./workspace/Layers/WorkspacePaths.ts";
@@ -118,10 +141,17 @@ import * as SourceControlRepositoryService from "./sourceControl/SourceControlRe
 import { ProjectSetupScriptRunnerLive } from "./project/Layers/ProjectSetupScriptRunner.ts";
 import { ObservabilityLive } from "./observability/Layers/Observability.ts";
 import { ServerEnvironmentLive } from "./environment/Layers/ServerEnvironment.ts";
-import { UsageServiceLive } from "./usage/UsageService.ts";
+import { UsageServiceDeferredLive } from "./usage/UsageServiceDeferred.ts";
 import { CliProxyServiceLive } from "./cliProxy/CliProxyService.ts";
 import { AdvertisedEndpointRegistryLive } from "./remote/AdvertisedEndpointRegistry.ts";
 import { SleepInhibitorLive } from "./service/sleepInhibitor.ts";
+import { EventLoopMonitorLive } from "./observability/EventLoopMonitor.ts";
+import { HeapSnapshotLive } from "./observability/HeapSnapshotSignal.ts";
+import { makeAgentWorkHoldLayer, ProviderBusyMarkerLive } from "./agentWorkHold.ts";
+import { AgentWorkActivityLive } from "./orchestration/AgentWorkActivity.ts";
+import { ClientInteractionLive } from "./updates/ClientInteraction.ts";
+import { DesktopAppUpdatePolicyLive } from "./updates/desktopAppUpdatePolicy.ts";
+import { UnattendedUpdatesLauncherLive } from "./updates/unattendedUpdatesLauncher.ts";
 import { StartupStallMonitorLive, trackStartupLayer } from "./startupStallMonitor.ts";
 import {
   authBearerBootstrapRouteLayer,
@@ -154,6 +184,7 @@ import { AgentControlAutomationRepositoryLive } from "./persistence/Layers/Agent
 import { AgentControlMcpInstallationRepositoryLive } from "./persistence/Layers/AgentControlMcpInstallation.ts";
 import { AgentControlMcpServerLive } from "./agentControl/Layers/AgentControlMcpServer.ts";
 import { HtmlRenderLive } from "./htmlRender/HtmlRenderLive.ts";
+import { PreviewBrowserLive } from "./htmlRender/PreviewBrowser.ts";
 import { AgentControlOperationStoreLive } from "./agentControl/Layers/AgentControlOperationStore.ts";
 import { AgentControlPolicyLive } from "./agentControl/Layers/AgentControlPolicy.ts";
 import { AgentControlProposalEventsLive } from "./agentControl/Layers/AgentControlProposalEvents.ts";
@@ -161,6 +192,7 @@ import { AgentControlProposalServiceLive } from "./agentControl/Layers/AgentCont
 import { AgentControlProposalStoreLive } from "./agentControl/Layers/AgentControlProposalStore.ts";
 import { AgentControlSessionRegistryLive } from "./agentControl/Layers/AgentControlSessionRegistry.ts";
 import { AgentControlActionValidatorLive } from "./agentControl/Layers/AgentControlActionValidator.ts";
+import { AgentControlDelegationSlotsLive } from "./agentControl/Layers/AgentControlDelegationSlots.ts";
 import { AgentControlExecutionLive } from "./agentControl/Layers/AgentControlExecution.ts";
 import { AgentControlNodeDirectoryLive } from "./agentControl/Layers/AgentControlNodeDirectoryLive.ts";
 import { ProjectCopyServicesLive } from "./projectCopy/Layers/ProjectCopyServices.ts";
@@ -176,6 +208,8 @@ import { AgentControlExternalInstallationServiceLive } from "./agentControl/Laye
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import { OrchestrationCommandApplicationLive } from "./orchestration/Layers/OrchestrationCommandApplication.ts";
 import { UsageLimitRecoveryLive } from "./orchestration/Layers/UsageLimitRecovery.ts";
+import { GoalContinuationLive } from "./orchestration/Layers/GoalContinuation.ts";
+import { SettleWhenIdleLive } from "./orchestration/Layers/SettleWhenIdle.ts";
 import {
   clearPersistedServerRuntimeState,
   makePersistedServerRuntimeState,
@@ -339,19 +373,13 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(ContextHandoffServiceLive),
   Layer.provideMerge(ContextHandoffRepositoryLive),
   Layer.provideMerge(CheckpointReactorLive),
+  Layer.provideMerge(ThreadGitMetadataReactorLive),
   Layer.provideMerge(ThreadDeletionReactorLive),
   Layer.provideMerge(ThreadPurgeReactorLive),
   Layer.provideMerge(RuntimeReceiptBusLive),
 );
 
-const RuntimeFeatureLayerLive = Layer.mergeAll(
-  ReactorLayerLive,
-  ThreadPriorityCoordinatorLive,
-).pipe(
-  Layer.provideMerge(ThreadPriorityCandidateQueryLive),
-  Layer.provideMerge(ThreadPriorityRepositoryLive),
-  Layer.provideMerge(TextGeneration.layer),
-);
+const RuntimeFeatureLayerLive = ReactorLayerLive.pipe(Layer.provideMerge(TextGeneration.layer));
 
 const ProviderSessionDirectoryLayerLive = ProviderSessionDirectoryLive.pipe(
   Layer.provide(ProviderSessionRuntimeRepositoryLive),
@@ -366,6 +394,9 @@ const ProviderSessionDirectoryLayerLive = ProviderSessionDirectoryLive.pipe(
 const ProviderLayerLive = ProviderServiceLive.pipe(
   Layer.provide(ProviderAdapterRegistryLive),
   Layer.provideMerge(ProviderSessionDirectoryLayerLive),
+  // The host-wide provider install lock: ProviderService waits for it before it launches a
+  // provider process, and the maintenance runner takes it around an install.
+  Layer.provideMerge(ProviderInstallLockLive),
 );
 
 const PersistenceLayerLive = Layer.empty.pipe(Layer.provideMerge(SqlitePersistenceLayerLive));
@@ -471,8 +502,9 @@ const CheckpointingLayerLive = Layer.empty.pipe(
   Layer.provideMerge(CheckpointStoreLive.pipe(Layer.provide(VcsDriverRegistryLayerLive))),
 );
 
+/** Keeps the PTY adapter in the runtime: provider sign-in runs its logins in terminals too. */
 const TerminalLayerLive = TerminalManagerLive.pipe(
-  Layer.provide(PtyAdapterLive),
+  Layer.provideMerge(PtyAdapterLive),
   Layer.provide(WorkspaceAccessPolicyLive),
 );
 
@@ -487,10 +519,16 @@ const WorkspaceFileSystemLayerLive = WorkspaceFileSystemLive.pipe(
   Layer.provide(WorkspaceEntriesLayerLive),
 );
 
+const WorkspaceContentSearchLayerLive = WorkspaceContentSearchLive.pipe(
+  Layer.provide(WorkspacePathsLive),
+  Layer.provide(WorkspaceEntriesLayerLive),
+);
+
 const WorkspaceLayerLive = Layer.mergeAll(
   WorkspaceAccessPolicyLive,
   WorkspacePathsLive,
   WorkspaceEntriesLayerLive,
+  WorkspaceContentSearchLayerLive,
   WorkspaceFileSystemLayerLive,
 );
 
@@ -523,8 +561,11 @@ const RuntimeCoreBaseDependenciesLive = RuntimeFeatureLayerLive.pipe(
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
   Layer.provideMerge(ProviderRuntimeLayerLive),
-  // With the one in-memory feed of first-send worktree setups, shared by every connection.
-  Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, WorktreeSetupTrackerLive)),
+  // With the one in-memory feed of first-send worktree setups and the runner of recoverable
+  // Git actions, each shared by every connection.
+  Layer.provideMerge(
+    Layer.mergeAll(TerminalLayerLive, WorktreeSetupTrackerLive, GitActionRunnerLive),
+  ),
   Layer.provideMerge(AgentControlLayerLive),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(ProjectionWorktreeRepositoryLive),
@@ -550,9 +591,10 @@ const RuntimeCoreBaseDependenciesLive = RuntimeFeatureLayerLive.pipe(
   // Provided once at the runtime level so every consumer sees the same
   // logger instances.
   Layer.provideMerge(ProviderEventLoggersLive),
-  // Remote-refreshable provider model metadata (bundled fallback). Provided
-  // at the same level as the event loggers so driver `create()` sees it.
-  Layer.provideMerge(ModelManifest.layer),
+  // Remote-refreshable provider model metadata (bundled fallback), and the CPU priority agent
+  // CLIs run at (the `lowerAgentProcessPriority` setting; every agent driver requires it).
+  // Provided at the same level as the event loggers so driver `create()` sees them.
+  Layer.provideMerge(Layer.mergeAll(ModelManifest.layer, AgentProcessPriorityLive)),
   // `OpenCodeDriver.create()` yields `OpenCodeRuntime`; previously the old
   // `ProviderRegistryLive` pulled `OpenCodeRuntimeLive` in for itself, but
   // the rewritten registry reads snapshots off the instance registry and
@@ -566,7 +608,7 @@ const RuntimeCoreBaseDependenciesLive = RuntimeFeatureLayerLive.pipe(
 
 const RuntimeCoreBaseWithSettingsLive = Layer.mergeAll(
   RuntimeCoreBaseDependenciesLive,
-  UsageServiceLive,
+  UsageServiceDeferredLive,
   CliProxyServiceLive,
 ).pipe(Layer.provideMerge(ServerSettingsLive));
 
@@ -597,14 +639,40 @@ const RuntimeDependenciesLive = RestartContinuationLive.pipe(
   Layer.provideMerge(RuntimeBaseDependenciesLive),
 );
 
+/**
+ * The pull request watch with the startup it waits on (its sweep starts once commands are
+ * admitted) and the command application its updates go through.
+ */
+const PullRequestWatchLayerLive = PullRequestWatchServiceLive.pipe(
+  Layer.provideMerge(ServerRuntimeStartupLive),
+  Layer.provideMerge(OrchestrationCommandApplicationLive),
+);
+
+/** Command watches, like the pull request watch: their looks start once commands are admitted. */
+const CommandWatchLayerLive = CommandWatchServiceLive.pipe(
+  Layer.provideMerge(ServerRuntimeStartupLive),
+  Layer.provideMerge(OrchestrationCommandApplicationLive),
+);
+
 // The private Agent Control MCP listener joins the runtime services here:
 // it consumes projections, proposals, provider snapshots, and the session
 // registry from the runtime dependencies, and its endpoint never touches
 // the public HTTP server, router, or any client-visible state.
 const RuntimeServicesLive = Layer.mergeAll(
   DailyRecapQueryLive,
+  // Background database upkeep (event-log compaction, free-page reclaim). Server only: CLI
+  // layers never build it.
+  DatabaseMaintenanceLive.pipe(Layer.provide(EventLogCompactionUsageReaderLive)),
   WorktreeNotesServiceLive,
-  StorageServiceLive.pipe(Layer.provide(ProviderProtectedPathsLive)),
+  // Compaction state for the database report (the same memoized layer the upkeep uses), and the
+  // once-per-boot log line suggesting `ryco doctor` when the database could shrink a lot.
+  Layer.mergeAll(
+    StorageServiceLive.pipe(Layer.provide(ProviderProtectedPathsLive)),
+    DoctorSuggestionLogLive,
+  ).pipe(
+    Layer.provide(EventLogCompactionDeferredLive),
+    Layer.provide(EventLogCompactionUsageReaderLive),
+  ),
   SessionImportLive,
   // Chat forks: recovery of unfinished forks once commands are admitted. The ledger is provided
   // beneath the services (below), so startup's orphan-chat sweep sees the chats forks still need.
@@ -622,6 +690,14 @@ const RuntimeServicesLive = Layer.mergeAll(
   // The node's own release and one-click update: one state for every connection, and the
   // boot report of an update that restarted this process.
   NodeUpdateServiceLive,
+  // When a person last used a client: every connection reports into one, unattended updates
+  // wait on it.
+  ClientInteractionLive,
+  // Provider sign-in flows: shared by every owner connection, ended with the server.
+  ProviderSignInLive,
+  // Node browser tabs: one browser for every connection and frame socket, ended with the
+  // server. The pinned browser's install is the same one HTML previews use (one memoized layer).
+  NodeBrowserLive.pipe(Layer.provide(PreviewBrowserLive)),
   ContextHandoffInspectionLive,
   AgentControlMcpServerLive.pipe(
     // HTML render tools exist only on the private listener; the external
@@ -653,6 +729,23 @@ const RuntimeServicesLive = Layer.mergeAll(
     Layer.provideMerge(ServerRuntimeStartupLive),
     Layer.provideMerge(OrchestrationCommandApplicationLive),
   ),
+  // The next turn toward a thread's goal, behind the same wake fence as delegated results.
+  GoalContinuationLive.pipe(
+    Layer.provideMerge(ServerRuntimeStartupLive),
+    Layer.provideMerge(OrchestrationCommandApplicationLive),
+  ),
+  // Settles a thread the person settled while it worked, once the work ends (loads lazily).
+  SettleWhenIdleLive.pipe(Layer.provideMerge(ServerRuntimeStartupLive)),
+  // Each thread's queued follow-ups, sent behind the same wake fence (its runtime loads lazily).
+  ServerQueueDrainLive.pipe(
+    Layer.provideMerge(ServerRuntimeStartupLive),
+    Layer.provideMerge(OrchestrationCommandApplicationLive),
+  ),
+  // The next waiting task of a capped delegation request (its runtime loads lazily).
+  AgentControlDelegationSlotsLive.pipe(
+    Layer.provideMerge(ServerRuntimeStartupLive),
+    Layer.provideMerge(OrchestrationCommandApplicationLive),
+  ),
   AgentControlExecutionLive.pipe(
     Layer.provideMerge(ServerRuntimeStartupLive),
     Layer.provideMerge(AgentControlActionValidatorLive),
@@ -660,6 +753,9 @@ const RuntimeServicesLive = Layer.mergeAll(
     Layer.provideMerge(AgentControlWorkspacesLive),
     Layer.provideMerge(OrchestrationCommandApplicationLive),
   ),
+  // Feeds the device manager each thread's running turn and thread removals,
+  // which end agent device holds and attachments (the simulator idle grace).
+  DeviceThreadLifecycleLive,
   // Cross-node imports an earlier process left behind: once commands are admitted, staging
   // folders of imports that never registered are deleted and pending settings replayed.
   ProjectImportsStartupRecoveryLive.pipe(Layer.provideMerge(ServerRuntimeStartupLive)),
@@ -669,6 +765,13 @@ const RuntimeServicesLive = Layer.mergeAll(
   // Control (its tools, validator and execution) share one instance of each. Topmost, so their
   // layers can use everything provided below.
   Layer.provideMerge(Layer.mergeAll(ProjectCopyServicesLive, AgentControlNodeDirectoryLive)),
+  // Pull request watches, beneath the services: the source-control RPC and Agent Control's
+  // execution share one instance (its read cache and per-chat lock). Right below the project
+  // copy layers, so the startup it waits on is built with every service below (chat folders,
+  // the fork ledger).
+  Layer.provideMerge(PullRequestWatchLayerLive),
+  // Command watches, beneath the services too: Agent Control's tools and the stop RPC share one.
+  Layer.provideMerge(CommandWatchLayerLive),
   // "No project" chat folders and the chats capability clients read from the server config.
   // Beneath the services so startup can clean up chats that never got a conversation.
   Layer.provideMerge(ChatFoldersLive),
@@ -681,6 +784,12 @@ const RuntimeServicesLive = Layer.mergeAll(
   Layer.provideMerge(WorkspaceLifecycleLive),
   // Delete dialog: what the work a checkout alone holds is about.
   Layer.provideMerge(WorkspaceChangeSummaryLive),
+  // One fence for every server wake (delegated results, pull request updates, goal
+  // continuations, queued follow-ups): they share its pending-start sightings and its cold-start
+  // budget.
+  Layer.provideMerge(ServerWakeFenceLive),
+  // Squash- and rebase-merge proofs for checkout removal: lifecycle, storage, Agent Control.
+  Layer.provideMerge(CheckoutMergeProverLive),
   Layer.provideMerge(RuntimeDependenciesLive),
   // One process-scoped manager is shared by control RPC, frame streaming,
   // provider tools, idle cleanup, and crash-recovery ownership.
@@ -721,10 +830,12 @@ export const makeRoutesLayer = Layer.mergeAll(
   websocketRpcRouteLayer,
   deviceWebsocketRpcRouteLayer,
   deviceFrameRouteLayer,
+  nodeBrowserFrameRouteLayer,
   hubConnectorRoutesLayer,
   desktopLocalIntroductionRoutesLayer,
   desktopNativeNodeClaimRoutesLayer,
   desktopHubReachabilityRouteLayer,
+  directRouteIdentityRouteLayer,
 ).pipe(Layer.provide(browserApiCorsLayer));
 
 export const makeServerLayer = Layer.unwrap(
@@ -732,6 +843,9 @@ export const makeServerLayer = Layer.unwrap(
     const config = yield* ServerConfig;
 
     fixPath({ inheritedFromDesktop: config.mode === "desktop" });
+    // The database owner lock records this boot's id, an exec on macOS: start
+    // the lookup now, so it overlaps the layers built before the lock.
+    prefetchProcessIdentity();
 
     // Built after `HttpRouter.serve` (see below), so the startup fiber only
     // logs readiness, publishes `ready` and opens the browser once request
@@ -747,6 +861,14 @@ export const makeServerLayer = Layer.unwrap(
         // Process lock and key custody: built now that handlers are attached;
         // Hub routes wait for it rather than the whole server.
         yield* startHubConnectorAfterServe(config.hubConnector);
+        // An update this process was restarted into succeeded once the node is ready.
+        const hubConnector = yield* HubConnectorReady;
+        yield* Effect.forkScoped(
+          confirmNodeUpdateAfterServe({
+            commandReady: startup.awaitCommandReady,
+            hubConnector: config.hubConnector?.enabled === true ? hubConnector.await : null,
+          }),
+        );
       }),
     );
     const runtimeStateLayer = Layer.effectDiscard(
@@ -835,31 +957,53 @@ export const makeServerLayer = Layer.unwrap(
       runtimeStateLayer,
       tailscaleServeLayer,
       SleepInhibitorLive,
+      // One agent-work tracker for the process. Sleep holds: Desktop main holds the machine awake
+      // from it in desktop mode, and a headless node without --prevent-sleep holds it itself.
+      // The busy marker: other Ryco processes on this machine wait for these agents before an
+      // unattended update. Unattended updates, loaded only once a node's owner turns them on.
+      Layer.mergeAll(
+        makeAgentWorkHoldLayer(config),
+        ProviderBusyMarkerLive,
+        UnattendedUpdatesLauncherLive,
+      ).pipe(Layer.provide(AgentWorkActivityLive)),
+      // The desktop app downloads and installs its own updates unattended only while this
+      // node's owner has automatic updates on; it hears that from its own backend alone.
+      config.mode === "desktop" ? DesktopAppUpdatePolicyLive : Layer.empty,
     );
 
     // Shutdown runs these stages in reverse build order; the markers log how
-    // long each took so slow finalizers can be attributed. The startup stall
-    // monitor is built before the HTTP bind and the runtime graph (migrations,
-    // read model, provider hydration), so stalls in any of them are
-    // attributed, but after observability so its warnings reach the server
-    // log. The hydration layer provides the same value; memoization keeps it
-    // to one monitor, owned here.
+    // long each took so slow finalizers can be attributed, after a line naming
+    // the desktop app's loss when that is the cause. The stall monitors are
+    // built before the HTTP bind and the runtime graph (migrations, read
+    // model, provider hydration), so stalls in any of them are attributed,
+    // but after observability so their warnings and spans reach the server
+    // log and the tracer. The startup monitor watches the first 30 s at a
+    // fine grain; the hydration layer provides the same value and memoization
+    // keeps it to one monitor, owned here. The lifetime event-loop monitor
+    // and the SIGUSR2 heap-snapshot handler run only in this server layer,
+    // never in provider tests or CLI commands; closing the lifetime monitor
+    // last writes the stalls of its open window.
     const shutdownClock = makeShutdownClock();
-    return shutdownClock
-      .marker("started")
-      .pipe(
-        Layer.provideMerge(serverApplicationLayer),
-        Layer.provideMerge(shutdownClock.marker("http-drained")),
-        Layer.provideMerge(RuntimeServicesLive),
-        Layer.provideMerge(shutdownClock.marker("runtime-services-closed")),
-        Layer.provideMerge(WorkspaceAccessPolicyLive),
-        Layer.provideMerge(HttpServerLive),
-        Layer.provideMerge(StartupStallMonitorLive),
-        Layer.provide(ObservabilityLive),
-        Layer.provideMerge(FetchHttpClient.layer),
-        Layer.provideMerge(VcsProcess.layer),
-        Layer.provideMerge(PlatformServicesLive),
-      );
+    return DesktopParentLossShutdownLogLive.pipe(
+      Layer.provideMerge(shutdownClock.marker("started")),
+      Layer.provideMerge(serverApplicationLayer),
+      Layer.provideMerge(shutdownClock.marker("http-drained")),
+      Layer.provideMerge(RuntimeServicesLive),
+      Layer.provideMerge(shutdownClock.marker("runtime-services-closed")),
+      Layer.provideMerge(WorkspaceAccessPolicyLive),
+      Layer.provideMerge(HttpServerLive),
+      Layer.provideMerge(StartupStallMonitorLive),
+      // One server per database: owned before the port binds and the database
+      // opens, released after both closed; built after observability so a wait
+      // or a refusal reaches the server log.
+      Layer.provideMerge(trackStartupLayer("persistence.owner-lock", DatabaseOwnerLeaseLive)),
+      Layer.provideMerge(HeapSnapshotLive),
+      Layer.provideMerge(EventLoopMonitorLive),
+      Layer.provide(ObservabilityLive),
+      Layer.provideMerge(FetchHttpClient.layer),
+      Layer.provideMerge(VcsProcess.layer),
+      Layer.provideMerge(PlatformServicesLive),
+    );
   }),
 );
 

@@ -150,6 +150,24 @@ its log; use `ryco auth pairing create` to pair devices. On Linux, run
 
 `ryco serve --prevent-sleep` holds the same sleep assertion for a foreground server.
 
+Without `--prevent-sleep`, a `ryco serve` (and a service installed with `--no-prevent-sleep`) still
+keeps the machine from idle-sleeping while its agents work: during a turn or background work, and
+for 2 minutes after it ends. It holds only on AC power and lets the display sleep; on macOS a closed
+lid or an explicit sleep still sleeps the machine. Turn it off with `--no-keep-awake-while-working`,
+`RYCO_KEEP_AWAKE_WHILE_WORKING=false` or `ryco config set keep-awake-while-working false`. On Linux
+it takes the same `systemd-inhibit` lock as `--prevent-sleep`, which also holds off an explicit
+suspend while agents work (a closed lid still suspends with logind's defaults); without
+`systemd-inhibit` the server logs one line and carries on.
+
+logind decides who may take that lock, through polkit. A desktop session gets it. A node in an SSH
+session or running as a service gets only the weaker idle lock, which Ryco takes instead: it still
+holds off idle suspend, not an explicit one. Without polkit at all (a minimal Debian server has no
+`polkitd`), logind refuses both to non-root users; the server then logs the refusal and why
+(`Failed to inhibit: Access denied`) once and carries on. Most such servers never idle-suspend
+(logind's `IdleAction` defaults to `ignore`). If yours does, install `polkitd` for the idle lock, or
+add a polkit rule that allows `org.freedesktop.login1.inhibit-block-sleep` for the node's user for
+the full lock.
+
 ### Node settings
 
 The node's settings live in `~/.ryco/userdata/node.json`. `ryco setup` and `ryco service install`
@@ -192,8 +210,10 @@ ryco remote threads mini
 ryco remote send mini <thread-id> "Run the tests and fix what fails"
 ```
 
-`send` continues a thread with its own model and prints the reply as it streams (`--no-wait` returns
-at once). The session is stored in `~/.ryco/userdata/cli-remotes.json`, readable only by you;
+`send` queues a message on a thread with its own model and prints the reply once the turn ends
+(`--no-wait` returns once it starts). It is `ryco thread send --remote mini`; every `ryco thread`
+command takes `--remote` (see the [server README](./apps/server/README.md#threads-from-scripts)).
+The session is stored in `~/.ryco/userdata/cli-remotes.json`, readable only by you;
 `ryco remote remove mini` forgets it.
 
 ### Option 3: Desktop-Managed SSH Launch

@@ -1,5 +1,5 @@
+import { CLI_PROXY_HUB_READ_REUSE_MS, readCliProxyHubsOutcome } from "@ryco/client-runtime/usage";
 import type { EnvironmentId } from "@ryco/contracts";
-import { isTagged } from "effect/Predicate";
 
 import { readEnvironmentApi } from "~/environmentApi";
 import { queryOptions } from "~/rpc/queryClient";
@@ -11,9 +11,10 @@ export function cliProxyHubsQueryKey(environmentId: EnvironmentId | null) {
 
 /**
  * A node's CLIProxyAPI hubs for surfaces that read them only while open (the composer's usage
- * popup): a read is reused for 30s so reopening does not ask the node again, a failed read is
- * retried on the next open, and nothing polls. The node caches its hub and quota reads further.
- * A session the node refuses hub reads (not its owner) reads as having no hubs.
+ * popup), by the shared hub-read policy (`usage/cliProxyHubReads`): a read is reused for 30s so
+ * reopening does not ask the node again, a failed read is retried on the next open, and nothing
+ * polls. The node caches its hub and quota reads further. A session the node refuses hub reads
+ * (not its owner) reads as having no hubs.
  */
 export function cliProxyHubsQueryOptions(environmentId: EnvironmentId | null) {
   return queryOptions({
@@ -24,15 +25,12 @@ export function cliProxyHubsQueryOptions(environmentId: EnvironmentId | null) {
         ? readEnvironmentApi(environmentId)?.server?.readCliProxyHubs
         : undefined;
       if (!readHubs) throw new Error("This node is not connected.");
-      try {
-        return (await readHubs({})).hubs;
-      } catch (cause) {
-        if (isTagged(cause, "AuthRpcError")) return [];
-        throw cause;
-      }
+      const read = await readCliProxyHubsOutcome(() => readHubs({}));
+      if (read.status !== "ok") throw new Error(read.message);
+      return read.hubs;
     },
     enabled: environmentId !== null,
-    staleTime: 30_000,
+    staleTime: CLI_PROXY_HUB_READ_REUSE_MS,
     retry: false,
   });
 }

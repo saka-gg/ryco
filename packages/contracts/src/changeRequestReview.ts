@@ -1,7 +1,9 @@
 import * as Schema from "effect/Schema";
 
 import { NonNegativeInt, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { GIT_REF_NAME_PATTERN } from "./settings.ts";
 import {
+  ChangeRequest,
   SourceControlChangeRequestDetail,
   SourceControlChangeRequestMergeMethod,
   SourceControlCommentReaction,
@@ -433,6 +435,53 @@ export const ChangeRequestCreateInput = Schema.Struct({
 });
 export type ChangeRequestCreateInput = typeof ChangeRequestCreateInput.Type;
 
+// ── Repository templates for new change requests ──────────────────────
+
+/** A template body is cut to this many bytes of UTF-8, never inside a character. */
+export const CHANGE_REQUEST_TEMPLATE_MAX_BYTES = 8_000;
+/** Templates read and listed per repository tree, default files first. */
+export const CHANGE_REQUEST_TEMPLATE_LIST_MAX = 16;
+
+/** A change request template from the repository's base tree (untrusted repository text). */
+export const ChangeRequestTemplate = Schema.Struct({
+  /** Repository-relative path, e.g. `.github/PULL_REQUEST_TEMPLATE/bug.md`. */
+  path: TrimmedNonEmptyString.check(Schema.isMaxLength(1024)),
+  /** File name without extension; "Default" for the template the host applies on its own. */
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+  /** The host applies it on its own (GitHub's default file, GitLab's `default.md`). */
+  isDefault: Schema.Boolean,
+  /** Byte-bounded below, so this character cap never rejects a read template. */
+  body: Schema.String.check(Schema.isMaxLength(CHANGE_REQUEST_TEMPLATE_MAX_BYTES)),
+  /** The file was longer than CHANGE_REQUEST_TEMPLATE_MAX_BYTES. */
+  truncated: Schema.Boolean,
+});
+export type ChangeRequestTemplate = typeof ChangeRequestTemplate.Type;
+
+export const ChangeRequestTemplateListInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  /**
+   * The branch the change request would target; templates come from its tree (the remote's
+   * branch, else the local one, else none). Without it, the remote's default branch, else
+   * HEAD. A branch name only: no revision syntax.
+   */
+  baseRefName: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(256), Schema.isPattern(GIT_REF_NAME_PATTERN)),
+  ),
+});
+export type ChangeRequestTemplateListInput = typeof ChangeRequestTemplateListInput.Type;
+
+export const ChangeRequestTemplateListResult = Schema.Struct({
+  templates: Schema.Array(ChangeRequestTemplate).check(
+    Schema.isMaxLength(CHANGE_REQUEST_TEMPLATE_LIST_MAX),
+  ),
+  /**
+   * The listed template a generated description follows, which a new description starts from
+   * too; null when the server's rule picks none (it never guesses between templates).
+   */
+  generationTemplatePath: Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(1024))),
+});
+export type ChangeRequestTemplateListResult = typeof ChangeRequestTemplateListResult.Type;
+
 // ── Diff file contents (hunk expansion) ───────────────────────────────
 
 export const CHANGE_REQUEST_FILE_CONTENTS_MAX_BYTES = 1024 * 1024; // 1 MB per side
@@ -473,3 +522,101 @@ export const ChangeRequestInvolvement = Schema.Literals([
   "involved",
 ]);
 export type ChangeRequestInvolvement = typeof ChangeRequestInvolvement.Type;
+
+// ── Involvement across repositories ───────────────────────────────────
+
+/** Most checkouts one `sourceControl.listInvolvedChangeRequests` call reads through. */
+export const INVOLVED_CHANGE_REQUESTS_MAX_CWDS = 64;
+/** Rows per involvement and source: one GitHub search page, the lists' superset size. */
+export const INVOLVED_CHANGE_REQUESTS_MAX_LIMIT = 100;
+
+export const SourceControlListInvolvedChangeRequestsInput = Schema.Struct({
+  /**
+   * Checkouts on this node, one per repository. Hosts that search across repositories
+   * (GitHub) are read once per host through any one of them.
+   */
+  cwds: Schema.Array(TrimmedNonEmptyString).check(
+    Schema.isMaxLength(INVOLVED_CHANGE_REQUESTS_MAX_CWDS),
+  ),
+  state: Schema.Literals(["open", "closed", "merged", "all"]),
+  involvements: Schema.Array(ChangeRequestInvolvement).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(5),
+  ),
+  /** Rows per involvement and source; default and maximum 100. */
+  limit: Schema.optional(PositiveInt),
+  /**
+   * Only the host searches (`hosts`, one request per host) or only the per-repository lists
+   * (`repositories`, one request per repository); both when absent. Asked apart, a few slow
+   * repository lists do not hold back every host's rows.
+   */
+  sources: Schema.optional(Schema.Literals(["hosts", "repositories"])),
+  /**
+   * Someone is waiting for this answer (nothing shown yet): reads skip the background queue.
+   * Asking again for sources still `loading` should leave it out.
+   */
+  interactive: Schema.optional(Schema.Boolean),
+  /** Someone asked to refresh: interactive, and cached reads older than a few seconds are read again. */
+  refresh: Schema.optional(Schema.Boolean),
+});
+export type SourceControlListInvolvedChangeRequestsInput =
+  typeof SourceControlListInvolvedChangeRequestsInput.Type;
+
+export const SourceControlInvolvedChangeRequest = Schema.Struct({
+  changeRequest: ChangeRequest,
+  /** `changeRequestRepositoryKey` of its URL (`github.com/acme/app`, `azure:org/project/repo`). */
+  repositoryKey: TrimmedNonEmptyString,
+  /** `acme/app`. */
+  repositoryLabel: TrimmedNonEmptyString,
+  /** The viewer's involvements this row matched. */
+  involvements: Schema.Array(ChangeRequestInvolvement),
+});
+export type SourceControlInvolvedChangeRequest = typeof SourceControlInvolvedChangeRequest.Type;
+
+export const SourceControlInvolvedChangeRequestsSource = Schema.Struct({
+  /** `host`: one search across every repository on the host; `repository`: one checkout's lists. */
+  scope: Schema.Literals(["host", "repository"]),
+  provider: SourceControlProviderKind,
+  /** The host (`github.com`) or the repository label (`acme/tools`). */
+  name: TrimmedNonEmptyString,
+  /**
+   * A host source read through checkouts whose remotes name another host: the SSH host
+   * alias (`github.com-work` in `git@github.com-work:acme/app.git`) that `name` resolved
+   * from. Its rows' keys use `name`; the checkouts' remotes use this.
+   */
+  checkoutHost: Schema.optional(TrimmedNonEmptyString),
+  /**
+   * `loading`: a read was still running when the answer was due; it keeps running and fills
+   * the server's cache, so asking again (without `refresh`) a few seconds later returns it.
+   * `paused`: the host is rate limited until `retryAt`. A closed set: a status added later
+   * must map to `failed`, since an older client cannot decode a literal it does not know.
+   */
+  status: Schema.Literals(["ok", "failed", "loading", "paused"]),
+  /** The account the host answered for, where it says (GitHub `viewer.login`). */
+  viewerLogin: Schema.optional(TrimmedNonEmptyString),
+  /** More rows matched than were returned. */
+  truncated: Schema.Boolean,
+  /**
+   * Rows the host matched but would not show this account, such as pull requests in
+   * organizations that enforce SAML single sign-on or restrict OAuth apps.
+   */
+  skippedRows: Schema.optional(NonNegativeInt),
+  /** One sentence for a failed or paused read, without the command line. */
+  message: Schema.optional(TrimmedNonEmptyString),
+  /** Epoch ms when a paused host accepts requests again. */
+  retryAt: Schema.optional(NonNegativeInt),
+});
+export type SourceControlInvolvedChangeRequestsSource =
+  typeof SourceControlInvolvedChangeRequestsSource.Type;
+
+export const SourceControlInvolvedChangeRequestsResult = Schema.Struct({
+  /** Newest activity first. */
+  entries: Schema.Array(SourceControlInvolvedChangeRequest),
+  sources: Schema.Array(SourceControlInvolvedChangeRequestsSource),
+  /** Checkouts with no host that lists change requests (no remote, unknown host). */
+  skippedCwds: Schema.Array(TrimmedNonEmptyString),
+  /** Rows past the response cap were dropped (the least recently updated). */
+  truncated: Schema.Boolean,
+});
+export type SourceControlInvolvedChangeRequestsResult =
+  typeof SourceControlInvolvedChangeRequestsResult.Type;

@@ -8,6 +8,8 @@ import {
   findCliProxyRouteForInstance,
   formatCliProxyPlan,
   poolCliProxyWindows,
+  rateLimitWindowList,
+  staleRateLimitsReason,
 } from "@ryco/client-runtime/usage";
 import type {
   ClaudeCacheObservation,
@@ -15,19 +17,18 @@ import type {
   EnvironmentId,
   ProviderInstanceId,
   ServerProviderRateLimits,
-  ServerProviderRateLimitWindow,
 } from "@ryco/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { ArrowUpRightIcon } from "lucide-react";
-import { type ReactNode, useMemo } from "react";
+import { type ReactNode, useMemo, useState } from "react";
 
 import { cn } from "~/lib/utils";
 import { type ContextWindowUsage, formatContextWindowTokens } from "~/lib/contextWindow";
 import { useQuery } from "~/rpc/queryClient";
 import { formatRelativeTimeLabel } from "~/timestampFormat";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
-import { describeRateLimitWindow } from "../settings/codexUsageLimits";
 import { parseStatisticsSearch } from "../statistics/statisticsSearch";
+import { Button } from "../ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 
 // The hub's provider slug for the accounts serving a routed Claude instance.
@@ -45,13 +46,26 @@ export interface ContextWindowAccount {
   readonly checkCliProxyRoute: boolean;
 }
 
+/** Compact now for the thread the composer sends to. */
+export interface ContextWindowCompactNow {
+  /**
+   * Why it cannot run now, or null when it can. Once the node took a request, the caller keeps
+   * this set until the thread's session reports the turn: the meter is pending only until then.
+   */
+  readonly blocker: string | null;
+  /** Settles once the node took the request or its failure was reported. */
+  readonly onCompact: () => Promise<void>;
+}
+
 interface ContextWindowMeterProps {
   usage: ContextWindowUsage;
+  /** When the provider read `rateLimits`; absent while they are not live, which disables pace. */
   checkedAt?: string | undefined;
   available?: boolean | undefined;
   rateLimits?: ServerProviderRateLimits | undefined;
   claudeCache?: ClaudeCacheObservation | null | undefined;
   account?: ContextWindowAccount | undefined;
+  compactNow?: ContextWindowCompactNow | undefined;
 }
 
 function formatPercentage(value: number | null): string | null {
@@ -95,19 +109,6 @@ function MeterBar(props: { readonly percent: number | null }) {
   );
 }
 
-function UsageLimitRow(props: {
-  readonly window: ServerProviderRateLimitWindow;
-  readonly fallbackLabel: string;
-  readonly checkedAt: string | undefined;
-  readonly available: boolean;
-  readonly now: number;
-}) {
-  const descriptor = describeRateLimitWindow(props.window);
-  const label =
-    props.window.windowDurationMins === undefined ? props.fallbackLabel : descriptor.label;
-  return <ProviderLimitWindow {...props} label={label} compact />;
-}
-
 /** The instance and login the composer sends with. The web phone tier is frozen without it. */
 function AccountSection(props: { readonly account: ContextWindowAccount }) {
   const { account } = props;
@@ -124,6 +125,33 @@ function AccountSection(props: { readonly account: ContextWindowAccount }) {
           <AccountEmail email={account.email} />
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/** Asks the provider to compact now; the transcript and this meter show the result. */
+function CompactNowAction(props: {
+  readonly blocker: string | null;
+  readonly compacting: boolean;
+  readonly onCompact: () => void;
+}) {
+  return (
+    <div className="space-y-1 pt-1">
+      <Button
+        variant="outline"
+        size="xs"
+        className="w-full"
+        disabled={props.compacting || props.blocker !== null}
+        onClick={props.onCompact}
+      >
+        {props.compacting ? "Compacting…" : "Compact now"}
+      </Button>
+      {props.blocker !== null && !props.compacting ? (
+        <div className="text-xs text-muted-foreground">{props.blocker}</div>
+      ) : null}
+      <div className="text-[11px] text-muted-foreground">
+        Summarizes older context. The summary request itself uses tokens.
+      </div>
     </div>
   );
 }
@@ -264,17 +292,19 @@ function CliProxyRouteSection(props: {
 const secondsToMs = (seconds: number | undefined) =>
   seconds === undefined ? undefined : seconds * 1000;
 
-/** The instants the popup labels relative to now: resets, the last cache read, the hub's last use. */
+/**
+ * The instants the popup labels relative to now: resets, a stale read, the last cache read, the
+ * hub's last use.
+ */
 export function contextWindowLabelInstants(
   rateLimits: ServerProviderRateLimits | undefined,
   claudeCache: ClaudeCacheObservation | null | undefined,
   route: CliProxyHubSnapshot | undefined,
 ): ReadonlyArray<number | undefined> {
-  const instants: Array<number | undefined> = [
-    secondsToMs(rateLimits?.primary?.resetsAt),
-    secondsToMs(rateLimits?.secondary?.resetsAt),
-    secondsToMs(rateLimits?.tertiary?.resetsAt),
-  ];
+  const instants = rateLimitWindowList(rateLimits).map(({ window }) =>
+    secondsToMs(window.resetsAt),
+  );
+  if (rateLimits?.stale && rateLimits.observedAt) instants.push(Date.parse(rateLimits.observedAt));
   if (claudeCache) instants.push(Date.parse(claudeCache.observedAt));
   for (const hubAccount of route?.accounts ?? []) {
     if (hubAccount.lastUsedAt) instants.push(Date.parse(hubAccount.lastUsedAt));
@@ -290,6 +320,8 @@ function ContextWindowDetails(
   props: ContextWindowMeterProps & {
     readonly usedPercentage: string | null;
     readonly normalizedPercentage: number;
+    readonly compacting: boolean;
+    readonly onCompactNow: () => void;
   },
 ) {
   const { usage, rateLimits, account, usedPercentage, normalizedPercentage } = props;
@@ -309,9 +341,9 @@ function ContextWindowDetails(
     ),
   );
   // A routed instance's own limits describe no account the hub uses.
-  const showUsageLimits =
-    route === undefined &&
-    Boolean(rateLimits && (rateLimits.primary || rateLimits.secondary || rateLimits.tertiary));
+  const limitWindows = route === undefined ? rateLimitWindowList(rateLimits) : [];
+  const staleReason = staleRateLimitsReason(rateLimits);
+  const observedAt = rateLimits?.observedAt ?? props.checkedAt;
 
   return (
     <>
@@ -347,6 +379,14 @@ function ContextWindowDetails(
             Automatically compacts its context when needed.
           </div>
         ) : null}
+        {/* A provider that compacts on its own can be asked to now. Not on the frozen phone tier. */}
+        {props.compactNow && usage.compactsAutomatically && !phone ? (
+          <CompactNowAction
+            blocker={props.compactNow.blocker}
+            compacting={props.compacting}
+            onCompact={props.onCompactNow}
+          />
+        ) : null}
       </div>
       {props.claudeCache ? <PromptCacheSection observation={props.claudeCache} now={now} /> : null}
       {route && account ? (
@@ -366,38 +406,29 @@ function ContextWindowDetails(
           Couldn't read CLIProxyAPI hubs: {hubsQuery.error.message}
         </div>
       ) : null}
-      {showUsageLimits && rateLimits ? (
+      {limitWindows.length > 0 ? (
         <div className="mt-2.5 space-y-1.5 border-t border-border/60 pt-2 leading-tight">
           <SectionLabel>Usage limits</SectionLabel>
           <div className="grid gap-1">
-            {rateLimits.primary ? (
-              <UsageLimitRow
+            {limitWindows.map(({ label, window }) => (
+              <ProviderLimitWindow
+                key={label}
+                window={window}
+                label={label}
                 checkedAt={props.checkedAt}
                 available={props.available === true}
                 now={now}
-                window={rateLimits.primary}
-                fallbackLabel="Short window"
+                compact
               />
-            ) : null}
-            {rateLimits.secondary ? (
-              <UsageLimitRow
-                checkedAt={props.checkedAt}
-                available={props.available === true}
-                now={now}
-                window={rateLimits.secondary}
-                fallbackLabel="Weekly"
-              />
-            ) : null}
-            {rateLimits.tertiary ? (
-              <UsageLimitRow
-                checkedAt={props.checkedAt}
-                available={props.available === true}
-                now={now}
-                window={rateLimits.tertiary}
-                fallbackLabel="Monthly"
-              />
-            ) : null}
+            ))}
           </div>
+          {staleReason ? (
+            <div className="text-[11px] text-muted-foreground first-letter:uppercase">
+              {observedAt
+                ? `Last read ${formatRelativeTimeLabel(observedAt, now)}; ${staleReason}.`
+                : `${staleReason}.`}
+            </div>
+          ) : null}
         </div>
       ) : null}
       {rateLimits?.resetCredits ? (
@@ -420,6 +451,14 @@ export function ContextWindowMeter(props: ContextWindowMeterProps) {
   const circumference = 2 * Math.PI * radius;
   const dashOffset = circumference - (normalizedPercentage / 100) * circumference;
   const wide = hasAccountDetails(account) || account?.checkCliProxyRoute === true;
+  // Held here, not in the popup body, so closing and reopening the popup keeps it.
+  const [compacting, setCompacting] = useState(false);
+  const onCompactNow = () => {
+    const onCompact = props.compactNow?.onCompact;
+    if (!onCompact || compacting) return;
+    setCompacting(true);
+    void onCompact().finally(() => setCompacting(false));
+  };
 
   return (
     <Popover>
@@ -492,6 +531,8 @@ export function ContextWindowMeter(props: ContextWindowMeterProps) {
           {...props}
           usedPercentage={usedPercentage}
           normalizedPercentage={normalizedPercentage}
+          compacting={compacting}
+          onCompactNow={onCompactNow}
         />
       </PopoverPopup>
     </Popover>

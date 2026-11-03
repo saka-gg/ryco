@@ -19,6 +19,20 @@ npm install -g ryco-cli
 ryco
 ```
 
+### From Ryco Desktop
+
+Ryco Desktop on macOS and Linux installs the same CLI from **Settings → General → Command line**: it
+links `ryco` (`ryco-nightly` for Ryco Nightly) into a folder on your `PATH`, running the app's
+bundled CLI against the app's own node. Admin commands (`auth`, `hub`, `e2ee`, `thread`, `remote`,
+`doctor`, …) work as usual. Commands that would start a second node for the app's home (`ryco`,
+`start`, `serve`, `setup`, `service install`) refuse, because the app already runs it. Install never
+replaces a file it did not write and refuses when another `ryco` runs first in a new terminal.
+
+On Linux, installing compiles the terminal backend (`node-pty` ships no Linux prebuild), so the
+machine needs a C/C++ toolchain and Python first (Debian/Ubuntu: `sudo apt install build-essential
+python3`). A node whose `node-pty` could not be built still starts; it logs why and its terminals
+stay unavailable.
+
 ### Run an unreleased build from a checkout
 
 To run a node from source — for example a branch that is not on npm yet — clone the repository on
@@ -40,7 +54,9 @@ they carry over. Run the same command again after every pull you want to deploy.
   [Memory](#memory) for the flag).
 
 The build compiles the native resource monitor, so it needs [rustup](https://rustup.rs); the script
-installs the pinned Rust toolchain itself. Use the Bun version pinned in the root `package.json`.
+installs the pinned Rust toolchain itself. Use the Bun version pinned in the root `package.json`, and
+the Node.js version in its `engines` range (24). On Linux, `bun install` also needs
+the C/C++ toolchain and Python above for `node-pty`.
 
 ## Provider Setup
 
@@ -93,6 +109,19 @@ ryco service install --tailscale-serve --hub ~/code
 ryco service status
 ```
 
+For scripts and health checks, `ryco service status --ready` asks the node this home runs (as a
+service or under `ryco serve`) for its identity, within 3 seconds, and exits 1 unless it answers as
+this home's node. `--json` prints `{ "ready", "reason", "origin" }`.
+
+A node that runs as a service updates itself from the apps. It checks the new release against a
+copy of its database before it restarts into it, and rolls back a release that fails to start,
+database included. See [node-updates.md](../../docs/node-updates.md).
+
+From a terminal, `ryco update` runs that same update on this node (or `--remote <name>` on a
+paired one): it shows the versions, asks (or `--yes`), and follows the update through the restart.
+`ryco update --check` only shows where the node stands, and `--channel nightly` moves it to
+nightly builds; a channel switch never installs an older release.
+
 Link the node to your Ryco account so the apps reach it from anywhere through the Hub relay:
 
 ```bash
@@ -110,6 +139,11 @@ Common options:
 - `--tailscale-serve`: expose this backend over HTTPS on the Tailnet through Tailscale Serve
 - `--hub`: reach this node through the hosted Hub relay (`--hub-origin` selects another Hub)
 - `--prevent-sleep`: keep the machine from idle-sleeping while the server runs
+- `--no-keep-awake-while-working`: let the machine idle-sleep while agents work. By default a
+  server keeps it awake while a turn or background work runs and for 2 minutes after, on AC power
+  only; the display may still sleep (`RYCO_KEEP_AWAKE_WHILE_WORKING`,
+  `ryco config set keep-awake-while-working false`). `--prevent-sleep` holds it for the whole run
+  instead, and Ryco Desktop manages this itself.
 - `--log-websocket-events`: emit server-side WebSocket traffic logs for debugging
 
 ### Memory
@@ -143,7 +177,8 @@ ryco setup
 ryco config [show | path | edit | set <key> <value> | unset <key>]
 
 ryco service install [serve flags] [cwd]
-ryco service status | logs [-f] | restart | stop | start | uninstall
+ryco service status [--ready] | logs [-f] | restart | stop | start | uninstall
+ryco update [--check] [--channel latest|nightly] [--yes] [--remote <name>] [--json]
 
 ryco hub login | enroll | status | pending | cancel | resume | leave
 
@@ -151,7 +186,52 @@ ryco remote add <name> <pairing-url>
 ryco remote list | remove <name>
 ryco remote threads <name>
 ryco remote send <name> <thread-id> <message>
+
+ryco thread start --project <id|path> [--title] [--model <instance/model>] [--runtime-mode] [--wait] [--json] <prompt|->
+ryco thread send <thread-id> [--wait] [--json] <prompt|->
+ryco thread wait <thread-id> [--turn <turn-id>] [--timeout 30m] [--json]
+ryco thread read <thread-id> [--limit 20] [--json] [--full]
 ```
+
+### Threads from scripts
+
+`ryco thread` drives agent threads on this machine's running node, or on a paired remote with
+`--remote <name>`. On this machine it signs in with a short-lived owner session that it revokes
+when the command ends (Ctrl-C included); no token is printed or written to disk.
+
+- `start` creates a thread in a project and starts its first turn, with the project's default
+  model and checkout (a new worktree when the project's threads start in one). `--runtime-mode`
+  may not be above the default the apps start a thread with.
+- `send` queues the message behind a running turn, with the thread's own model and modes. It
+  never steers the running turn. A node that keeps follow-up queues takes it at the end of the
+  thread's queue, as the apps queue a message sent while the thread is busy, so it goes after
+  the follow-ups queued before it and shows in the apps' queue; an older node gets it as the
+  next turn once the thread is idle.
+- `wait` waits for the turn `send` printed (`--turn`), else the running or latest turn.
+- `read` prints the thread's latest messages, each in full, and its queued follow-ups. `--json`
+  prints the page `ryco_read_thread` returns (a long message cut, with its continuation);
+  `--json --full` prints every message whole.
+
+`start` prints the thread id and `send` the turn id once the turn has started. With `--wait`
+(and always for `wait`) the command waits for exactly that turn and prints its final reply on
+stdout; diagnostics go to stderr. `--json` prints one line: `{ threadId, turnId, state, reply,
+error }`. Exit codes: 0 replied (or started), 1 failed or stopped, 2 needs an approval or an
+answer, or (`send`, state `held`) the thread's follow-up queue is held after a Stop, a failure,
+a usage limit or Pause, or waits for a Retry, 3 a node restart cut the turn off, 4 timed out
+(`--timeout`), 5 the turn ended but a later turn replaced it before the command saw how (`wait
+--turn` on an old turn). A message `send` queued on the node stays queued when the command exits
+2 or 4, and goes out once the queue is resumed or the thread is free.
+
+```bash
+thread=$(ryco thread start --project . "Fix the failing tests")
+ryco thread wait "$thread" --timeout 1h
+turn=$(ryco thread send "$thread" "Now update the changelog")
+ryco thread wait "$thread" --turn "$turn" --json
+```
+
+`--project` is a path when it is written as one (`.`, `..`, `/…`, `./…`, `~/…`) or exists;
+anything else is a project id. `ryco remote send <name> …` is
+`ryco thread send --remote <name> --wait`, except that its message is never read from stdin.
 
 See [REMOTE.md](../../REMOTE.md) for remote access setups.
 

@@ -16,6 +16,7 @@ import {
   turnSteerRejectionActivityId,
   type TurnSteerRejectionActivity,
 } from "@ryco/shared/turnSteer";
+
 import { extractThreadReferences } from "../composer/threadMentions.ts";
 
 /**
@@ -28,6 +29,24 @@ export interface QueuedMessage<Composer = unknown, Settings = unknown> {
   readonly deliveryStatus?: "sending" | "failed";
   readonly composer: Composer;
   readonly settings: Settings;
+}
+
+/**
+ * How a provider takes a steer, from its status: `native` adds the message to the running turn,
+ * `restart` stops the turn and sends the message next (`ServerProvider.turnSteeringMode`).
+ * Null: the message waits for the turn to end.
+ */
+export function providerSteering(
+  provider:
+    | {
+        readonly supportsTurnSteering?: boolean | undefined;
+        readonly turnSteeringMode?: string | undefined;
+      }
+    | null
+    | undefined,
+): "native" | "restart" | null {
+  if (provider?.supportsTurnSteering === true) return "native";
+  return provider?.turnSteeringMode === "interrupt-restart" ? "restart" : null;
 }
 
 export type QueuedMessageSteerEligibility =
@@ -309,12 +328,6 @@ export function moveQueuedMessage<Composer, Settings>(
   return next;
 }
 
-export interface QueuedMessageSummaryInput {
-  readonly trimmedPrompt: string;
-  readonly imageCount: number;
-  readonly terminalContextCount: number;
-}
-
 export function getQueuedThreadKeys<Composer, Settings>(
   queuesByThreadKey: Readonly<Record<string, readonly QueuedMessage<Composer, Settings>[]>>,
 ): Set<string> {
@@ -323,23 +336,4 @@ export function getQueuedThreadKeys<Composer, Settings>(
       queue.length > 0 ? [threadKey] : [],
     ),
   );
-}
-
-const QUEUED_MESSAGE_SUMMARY_MAX_CHARS = 120;
-
-export function summarizeQueuedMessage(input: QueuedMessageSummaryInput): string {
-  const text = input.trimmedPrompt.trim();
-  if (text.length > 0) {
-    return text.length > QUEUED_MESSAGE_SUMMARY_MAX_CHARS
-      ? `${text.slice(0, QUEUED_MESSAGE_SUMMARY_MAX_CHARS - 1)}…`
-      : text;
-  }
-  if (input.imageCount > 0)
-    return input.imageCount === 1 ? "1 image" : `${input.imageCount} images`;
-  if (input.terminalContextCount > 0) {
-    return input.terminalContextCount === 1
-      ? "1 terminal context"
-      : `${input.terminalContextCount} terminal contexts`;
-  }
-  return "Queued message";
 }

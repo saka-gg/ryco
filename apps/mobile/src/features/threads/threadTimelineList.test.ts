@@ -64,6 +64,42 @@ describe("createThreadListRowAnnotator", () => {
     expect(gone[2]).not.toBe(ready[2]);
   });
 
+  it("flags the sent messages that offer Edit from here, and drops the flag while busy", () => {
+    const annotate = createThreadListRowAnnotator();
+    const user = MessageId.make("user-1");
+    const editable = annotate(rows, {
+      forkableMessageIds: NONE,
+      editableMessageIds: new Set([user]),
+      highlightedMessageId: null,
+    });
+    expect(editable[0]).toMatchObject({ editable: true, id: rows[0]!.id });
+    expect(editable[1]).toBe(rows[1]);
+
+    const busy = annotate(rows, {
+      forkableMessageIds: NONE,
+      editableMessageIds: NONE,
+      highlightedMessageId: null,
+    });
+    expect(busy[0]).toBe(rows[0]);
+  });
+
+  it("flags the replies that offer Undo file changes, alongside their fork button", () => {
+    const annotate = createThreadListRowAnnotator();
+    const forkable = annotate(rows, {
+      forkableMessageIds: new Set([reply]),
+      highlightedMessageId: null,
+    });
+    const undoable = annotate(rows, {
+      forkableMessageIds: new Set([reply]),
+      undoableMessageIds: new Set([reply]),
+      highlightedMessageId: null,
+    });
+    expect(undoable[2]).toMatchObject({ forkable: true, undoable: true, id: rows[2]!.id });
+    // The undo button appearing is a new item for that row alone.
+    expect(undoable[2]).not.toBe(forkable[2]);
+    expect(undoable[1]).toBe(rows[1]);
+  });
+
   describe("a turn that answered with a page and ended on a blank reply", () => {
     const turnId = TurnId.make("turn-page");
     const chat = (id: string, overrides: Partial<ChatMessage>): ChatMessage =>

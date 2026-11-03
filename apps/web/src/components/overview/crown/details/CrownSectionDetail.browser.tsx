@@ -2,10 +2,17 @@ import "../../../../index.css";
 // The feature stylesheet loads with its page or dialog chunk in the app.
 import "../../overview.css";
 
-import { EnvironmentId, WorktreeId } from "@ryco/contracts";
+import { scopeThreadRef } from "@ryco/client-runtime/scoped";
+import type { SubagentStopAction } from "@ryco/client-runtime/state/session/subagentStop";
+import {
+  EnvironmentId,
+  ThreadId,
+  WorktreeId,
+  type ThreadPullRequestWatchShell,
+} from "@ryco/contracts";
 import type { ReactNode } from "react";
 import { page, userEvent } from "vite-plus/test/browser";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
 import { PaneFocusContext } from "../../../chat/PaneFocus";
@@ -14,6 +21,8 @@ import type { CrownOverviewProps, CrownSectionDetailProps, CrownShipBinding } fr
 import { CrownOverview } from "../CrownOverview";
 import { CrownSectionDetail } from "./CrownSectionDetail";
 import {
+  auditWorkflowAgents,
+  crownDirectAgents,
   crownLayoutFixture,
   crownPullRequestFixture,
   makeAgentPanelModel,
@@ -21,6 +30,14 @@ import {
   makeWorkflowMember,
 } from "../crownTestFixtures";
 import { makeRuntimeAgent } from "../../../agents/agentRosterTestFixtures";
+import { agentStopRequests } from "../../../agents/agentStopRequests";
+import {
+  installPullRequestWatchNode,
+  pullRequestWatchSummary,
+  resetPullRequestWatchNode,
+} from "../../../pullRequests/testing/pullRequestWatchTestSupport";
+import { __resetEnvironmentApiOverridesForTests } from "~/environmentApi";
+import { AppAtomRegistryProvider } from "~/rpc/atomRegistry";
 
 const hosts: HTMLElement[] = [];
 
@@ -32,7 +49,13 @@ async function mountDetail(props: CrownSectionDetailProps) {
   host.style.boxSizing = "border-box";
   document.body.append(host);
   hosts.push(host);
-  return render(<CrownSectionDetail {...props} />, { container: host });
+  // The app's atom registry, as the app root provides it (server config, connection state).
+  return render(
+    <AppAtomRegistryProvider>
+      <CrownSectionDetail {...props} />
+    </AppAtomRegistryProvider>,
+    { container: host },
+  );
 }
 
 /**
@@ -50,6 +73,12 @@ function guardLinkClicks() {
   return { state, dispose: () => window.removeEventListener("click", guard) };
 }
 
+function stopLabels(): string[] {
+  return [...document.querySelectorAll<HTMLButtonElement>("button[aria-label^='Stop']")].map(
+    (button) => button.getAttribute("aria-label") ?? "",
+  );
+}
+
 function BranchControlStub(): ReactNode {
   return <button type="button" className="flex h-9 w-full items-center px-3" aria-label="Branch" />;
 }
@@ -57,6 +86,7 @@ function BranchControlStub(): ReactNode {
 describe("CrownSectionDetail interactions", () => {
   afterEach(() => {
     for (const host of hosts.splice(0)) host.remove();
+    agentStopRequests.clear();
   });
 
   it("opens the review from the Changes detail", async () => {
@@ -87,6 +117,72 @@ describe("CrownSectionDetail interactions", () => {
     await page.getByRole("button", { name: "Show all 4 agents of Audit in Agents" }).click();
     expect(onOpenAgentsWorkflow.mock.calls).toEqual([["wf-audit"], ["wf-audit"]]);
     expect(onOpenAgent).toHaveBeenCalledTimes(2);
+  });
+
+  it("offers Stop on live direct agents in the Subagents detail, never on workflow members", async () => {
+    const stop = vi.fn<SubagentStopAction["stop"]>(() => Promise.resolve());
+    // One thread per variant: a stop the node took stays pending for every
+    // control of that agent, so a second surface on the same thread shows it.
+    const stopAgentFor = (variant: string): SubagentStopAction => ({
+      threadRef: scopeThreadRef(
+        EnvironmentId.make("environment-local"),
+        ThreadId.make(`thread-${variant}`),
+      ),
+      runtimeSessionId: "rt-1",
+      unavailableReason: null,
+      stop,
+    });
+    const onOpenAgent = vi.fn();
+    // Every row carries the current runtime's stop flag, as an older server
+    // also sends it on workflow members (the running "review:card" here).
+    const agentPanelModel = makeAgentPanelModel(
+      [...auditWorkflowAgents(), ...crownDirectAgents()].map((agent) =>
+        Object.assign(agent, { runtimeSessionId: "rt-1", canStop: true }),
+      ),
+    );
+
+    for (const variant of ["card", "flyout"] as const) {
+      const { container, unmount } = await mountDetail({
+        section: "agents",
+        variant,
+        isGitRepo: true,
+        layout: crownLayoutFixture({
+          agentPanelModel,
+          onOpenAgent,
+          stopAgent: stopAgentFor(variant),
+        }),
+      });
+      expect(stopLabels()).toEqual(["Stop Scout"]);
+      // With Stop beside it, the row still takes 30px, its divider included.
+      const scoutRow = container.querySelector('[data-agent-id="agent-scout"]')!.parentElement!;
+      expect(scoutRow.getBoundingClientRect().height).toBe(30);
+      // Stop takes pointer events once its row is hovered (always, on a device
+      // that can't hover), so the same steps reach it on any runner.
+      await page.getByRole("button", { name: "Open Scout transcript. Running." }).hover();
+      await page.getByRole("button", { name: "Stop Scout" }).click();
+      expect(stop).toHaveBeenLastCalledWith({
+        taskId: "agent-scout",
+        runtimeSessionId: "rt-1",
+        attempt: 0,
+      });
+      await unmount();
+    }
+    expect(stop).toHaveBeenCalledTimes(2);
+    expect(onOpenAgent).not.toHaveBeenCalled();
+
+    // Without a stop action the rows are the roster's own, with nothing beside them.
+    const { container } = await mountDetail({
+      section: "agents",
+      variant: "card",
+      isGitRepo: true,
+      layout: crownLayoutFixture({ agentPanelModel, onOpenAgent }),
+    });
+    expect(stopLabels()).toEqual([]);
+    const rows = [...container.querySelectorAll<HTMLElement>("[data-agent-row]")];
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.some((row) => row.parentElement?.classList.contains("group/agent-row"))).toBe(
+      false,
+    );
   });
 
   it("fits the workflow card into the flyout with fixed 30px member rows", async () => {
@@ -308,7 +404,10 @@ describe("CrownSectionDetail interactions", () => {
       isGitRepo: true,
       layout: crownLayoutFixture({ pullRequest: null, pullRequestLinking: linking }),
     });
-    await expect.element(empty.getByRole("button", { name: "Link pull request…" })).toBeEnabled();
+    const linkButton = empty.getByRole("button", { name: "Link pull request…" });
+    await expect.element(linkButton).toBeEnabled();
+    // A popup trigger, so the Crown leaves an early Escape to the popover (CrownOverview).
+    await expect.element(linkButton).toHaveAttribute("aria-haspopup", "dialog");
 
     const shown = await mountDetail({
       section: "pr",
@@ -620,5 +719,148 @@ describe("Crown Ship button", () => {
     // Enter in the field ships, like the rail button.
     await userEvent.keyboard("{Enter}");
     expect(binding.calls.ship).toBe(1);
+  });
+});
+
+describe("Checks: the pull request watch", () => {
+  const ENVIRONMENT_ID = EnvironmentId.make("environment-local");
+  const THREAD_ID = ThreadId.make("thread-crown-watch");
+
+  beforeEach(async () => {
+    await page.viewport(1200, 800);
+  });
+
+  afterEach(() => {
+    for (const host of hosts.splice(0)) host.remove();
+    resetPullRequestWatchNode();
+    __resetEnvironmentApiOverridesForTests();
+  });
+
+  const layoutWith = (watches?: ThreadPullRequestWatchShell) =>
+    crownLayoutFixture({ pullRequestWatch: { threadId: THREAD_ID, watches } });
+
+  it("turns Auto-fix CI on from the card", async () => {
+    const { setPullRequestWatch } = installPullRequestWatchNode(ENVIRONMENT_ID);
+    await mountDetail({
+      section: "checks",
+      variant: "card",
+      isGitRepo: true,
+      layout: layoutWith(),
+    });
+
+    const toggle = page.getByRole("switch", { name: "Auto-fix CI" });
+    await expect.element(toggle).not.toBeChecked();
+    await toggle.click();
+    expect(setPullRequestWatch).toHaveBeenCalledWith({
+      threadId: THREAD_ID,
+      number: crownPullRequestFixture.number,
+      url: crownPullRequestFixture.url,
+      autoFix: true,
+    });
+    await expect.element(toggle).toBeChecked();
+  });
+
+  it("shows a running fix turn with Stop watching in the card, and only its status in the flyout", async () => {
+    const { setPullRequestWatch } = installPullRequestWatchNode(ENVIRONMENT_ID);
+    const layout = layoutWith({
+      active: [
+        pullRequestWatchSummary({
+          autoFix: { status: "fixing", pauseReason: null, attempts: 1, maxAttempts: 3 },
+        }),
+      ],
+      ended: [],
+    });
+    await mountDetail({ section: "checks", variant: "card", isGitRepo: true, layout });
+    await expect.element(page.getByText("Fixing CI · attempt 1 of 3")).toBeVisible();
+    await page.getByRole("button", { name: "Stop watching" }).click();
+    expect(setPullRequestWatch).toHaveBeenCalledWith(
+      expect.objectContaining({ threadId: THREAD_ID, news: false, autoFix: false }),
+    );
+
+    for (const host of hosts.splice(0)) host.remove();
+    await mountDetail({ section: "checks", variant: "flyout", isGitRepo: true, layout });
+    await expect.element(page.getByText("Fixing CI · attempt 1 of 3")).toBeVisible();
+    await expect.element(page.getByRole("switch", { name: "Auto-fix CI" })).not.toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "Stop watching" }))
+      .not.toBeInTheDocument();
+  });
+
+  it("offers no switch on a merged pull request, only why its watch ended", async () => {
+    installPullRequestWatchNode(ENVIRONMENT_ID);
+    await mountDetail({
+      section: "checks",
+      variant: "card",
+      isGitRepo: true,
+      layout: crownLayoutFixture({
+        pullRequest: { ...crownPullRequestFixture, state: "merged" },
+        pullRequestWatch: {
+          threadId: THREAD_ID,
+          watches: {
+            active: [],
+            ended: [
+              {
+                watchId: "github.com/ryco/ryco#683",
+                number: 683,
+                reason: "merged",
+                endedAt: "2026-10-28T11:00:00.000Z",
+              },
+            ],
+          },
+        },
+      }),
+    });
+    await expect.element(page.getByText("Stopped watching: merged")).toBeVisible();
+    await expect.element(page.getByRole("switch", { name: "Auto-fix CI" })).not.toBeInTheDocument();
+  });
+
+  it("is not offered on the frozen phone tier", async () => {
+    installPullRequestWatchNode(ENVIRONMENT_ID);
+    await page.viewport(390, 844);
+    await mountDetail({
+      section: "checks",
+      variant: "card",
+      isGitRepo: true,
+      layout: layoutWith(),
+    });
+    await expect.element(page.getByRole("link", { name: "Format, Succeeded, 14s" })).toBeVisible();
+    await expect.element(page.getByRole("switch", { name: "Auto-fix CI" })).not.toBeInTheDocument();
+  });
+
+  it("offers nothing without server watches, without a thread, or for branch-only CI", async () => {
+    installPullRequestWatchNode(ENVIRONMENT_ID, { available: false });
+    await mountDetail({
+      section: "checks",
+      variant: "card",
+      isGitRepo: true,
+      layout: layoutWith(),
+    });
+    await expect.element(page.getByRole("link", { name: "Format, Succeeded, 14s" })).toBeVisible();
+    await expect.element(page.getByRole("switch", { name: "Auto-fix CI" })).not.toBeInTheDocument();
+
+    for (const host of hosts.splice(0)) host.remove();
+    installPullRequestWatchNode(ENVIRONMENT_ID);
+    await mountDetail({
+      section: "checks",
+      variant: "card",
+      isGitRepo: true,
+      layout: crownLayoutFixture(),
+    });
+    await expect.element(page.getByRole("link", { name: "Format, Succeeded, 14s" })).toBeVisible();
+    await expect.element(page.getByRole("switch", { name: "Auto-fix CI" })).not.toBeInTheDocument();
+
+    for (const host of hosts.splice(0)) host.remove();
+    const { number: _number, title: _title, ...branchOnly } = crownPullRequestFixture;
+    await mountDetail({
+      section: "checks",
+      variant: "card",
+      isGitRepo: true,
+      layout: crownLayoutFixture({
+        pullRequest: branchOnly,
+        pullRequestWatch: { threadId: THREAD_ID, watches: undefined },
+      }),
+    });
+    await expect.element(page.getByRole("link", { name: "Format, Succeeded, 14s" })).toBeVisible();
+    await expect.element(page.getByRole("switch", { name: "Auto-fix CI" })).not.toBeInTheDocument();
   });
 });

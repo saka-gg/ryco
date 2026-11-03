@@ -5,6 +5,11 @@ import { normalizeHubOrigin } from "../hostedHub/hubProfile";
 
 interface MobileExtraConfig {
   readonly appVariant?: string | null;
+  readonly iosPersonalTeamBuild?: boolean | null;
+  readonly push?: {
+    readonly topic?: string | null;
+    readonly apnsEnvironment?: string | null;
+  };
   readonly node?: {
     readonly httpBaseUrl?: string | null;
     readonly wsBaseUrl?: string | null;
@@ -78,6 +83,28 @@ export function readMobileAppVersion(): string {
 /** Native platform for the public enrollment record, without loading react-native at module scope. */
 export function readMobileNativePlatform(): "ios" | "android" {
   return Constants.platform?.ios === undefined ? "android" : "ios";
+}
+
+/** What background push alerts need to know about this build (`docs/push-alerts.md`). */
+export interface MobilePushBuild {
+  /** The bundle id: the APNs topic the Hub must be able to send to. */
+  readonly topic: string | null;
+  /** Which APNs gateway the build's entitlement names. */
+  readonly apnsEnvironment: "production" | "sandbox";
+  /** Signed by a free Personal Team, which cannot receive push. */
+  readonly personalTeamBuild: boolean;
+}
+
+export function readMobilePushBuild(): MobilePushBuild {
+  const extra = readExtra();
+  const push: unknown = extra.push;
+  const fields =
+    typeof push === "object" && push !== null ? (push as MobileExtraConfig["push"]) : {};
+  return {
+    topic: trimmed(fields?.topic) ?? null,
+    apnsEnvironment: trimmed(fields?.apnsEnvironment) === "sandbox" ? "sandbox" : "production",
+    personalTeamBuild: extra.iosPersonalTeamBuild === true,
+  };
 }
 
 export function isMobileDevelopmentBuild(): boolean {

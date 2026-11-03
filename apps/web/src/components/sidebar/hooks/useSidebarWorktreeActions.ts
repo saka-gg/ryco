@@ -10,9 +10,8 @@ import {
 } from "@ryco/contracts";
 import { newCommandId } from "../../../lib/utils";
 import { readEnvironmentApi } from "../../../environmentApi";
-import { readLocalApi } from "../../../localApi";
 import { useStore } from "../../../store";
-import { openInPreferredEditor } from "../../../editorPreferences";
+import { openPathInEditor } from "../../../editorPreferences";
 import {
   openWorkspaceReviewDialog,
   runWorkspaceLifecycleAction,
@@ -156,28 +155,29 @@ export function useSidebarWorktreeActions(params: {
   const openWorktreeInEditor = useCallback(
     (worktreeNode: SidebarTreeWorktree) => {
       const path = resolveWorktreeFilesystemPath(worktreeNode);
-      const api = readLocalApi();
-      if (!api || !path) {
+      if (!path) {
         toastManager.add(
           stackedThreadToast({
             type: "error",
             title: "Unable to open worktree",
-            description: "No local editor bridge is available.",
+            description: "This worktree does not have a workspace path.",
           }),
         );
         return;
       }
-      void openInPreferredEditor(api, path).catch((error: unknown) => {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Unable to open worktree",
-            description: error instanceof Error ? error.message : "An error occurred.",
-          }),
-        );
-      });
+      void openPathInEditor(resolveWorktreeEnvironmentId(worktreeNode), path).catch(
+        (error: unknown) => {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Unable to open worktree",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        },
+      );
     },
-    [resolveWorktreeFilesystemPath],
+    [resolveWorktreeEnvironmentId, resolveWorktreeFilesystemPath],
   );
 
   /**

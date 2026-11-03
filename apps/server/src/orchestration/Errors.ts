@@ -12,11 +12,31 @@ export class OrchestrationCommandAdmissionError extends Schema.TaggedError<Orche
   }
 }
 
+/**
+ * A model switch (a context handoff, or a change that restarts the session) refused while the
+ * thread's runtime still runs native background work that replacing the runtime would end.
+ * Retryable like an admission failure: no command receipt is rejected or consumed, so the same
+ * command can be sent again (see `ModelSwitchBlockedByBackgroundWork`).
+ */
+export class OrchestrationModelSwitchBlockedError extends Schema.TaggedError<OrchestrationModelSwitchBlockedError>()(
+  "OrchestrationModelSwitchBlockedError",
+  { threadId: Schema.String, taskIds: Schema.Array(Schema.String) },
+) {
+  override get message(): string {
+    return "This thread still has background tasks running, and switching the model now would stop them. Stop the tasks or wait for them to finish, then send again.";
+  }
+}
+
 export class OrchestrationCommandInvariantError extends Schema.TaggedError<OrchestrationCommandInvariantError>()(
   "OrchestrationCommandInvariantError",
   {
     commandType: Schema.String,
     detail: Schema.String,
+    /**
+     * Set when only a compare-and-swap field of a valid command no longer held: the caller lost
+     * a race to a newer write (see `isBranchPreconditionFailure`), it did not send a bad command.
+     */
+    failedPrecondition: Schema.optional(Schema.Literal("expectedBranch")),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
@@ -66,6 +86,7 @@ export class OrchestrationListenerCallbackError extends Schema.TaggedError<Orche
 
 export type OrchestrationDispatchError =
   | OrchestrationCommandAdmissionError
+  | OrchestrationModelSwitchBlockedError
   | ProjectionRepositoryError
   | OrchestrationCommandInvariantError
   | OrchestrationCommandPreviouslyRejectedError

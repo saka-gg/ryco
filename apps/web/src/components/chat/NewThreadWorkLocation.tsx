@@ -15,6 +15,7 @@ import { RollingText, useTravelDirection, type RollDirection } from "./RollingTe
 import { useFlipLayout } from "./useFlipLayout";
 import { NewThreadSourcePicker, type NewThreadSource } from "./NewThreadSourcePicker";
 import type { DraftWorktreeSource } from "@ryco/client-runtime/state/composer";
+import { newWorktreeBaseBranch } from "@ryco/client-runtime/state/worktree-setup";
 import {
   Combobox,
   ComboboxEmpty,
@@ -25,7 +26,7 @@ import {
 } from "../ui/combobox";
 import {
   branchSlotPreposition,
-  newWorktreeBaseBranch,
+  pullRequestWorktreeSource,
   resolveWorkLocation,
   showsBranchSlot,
   workLocationDraftPatch,
@@ -206,7 +207,7 @@ export function NewThreadWorkLocation({
   return (
     <p
       ref={sentenceRef}
-      className="flex max-w-208 flex-wrap items-center justify-center gap-x-0.5 gap-y-1 text-[13px] text-muted-foreground/70"
+      className="flex max-w-(--chat-composer-max-width) flex-wrap items-center justify-center gap-x-0.5 gap-y-1 text-[13px] text-muted-foreground/70"
       data-testid="new-thread-work-location"
     >
       <FlipItem id="lead">
@@ -345,11 +346,7 @@ function toDraftWorktreeSource(
   source: Exclude<NewThreadSource, { kind: "branch" }>,
 ): DraftWorktreeSource {
   if (source.kind === "pr") {
-    return {
-      kind: "pr",
-      number: source.changeRequest.number,
-      label: `#${source.changeRequest.number} ${source.changeRequest.title}`,
-    };
+    return pullRequestWorktreeSource(source.changeRequest.number, source.changeRequest.title);
   }
   if (source.kind === "issue") {
     return {

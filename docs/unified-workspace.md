@@ -97,12 +97,23 @@ and every 90 seconds while a window is in sight.
 
 The shared workspace index contains bounded project, worktree, thread-shell, and status summaries.
 Hosted Web's optional remembered-browser cache additionally stores recent message text, text drafts,
-and scroll positions in page-owned encrypted IndexedDB. It uses a non-exportable per-account AES-GCM
+and reading positions in page-owned encrypted IndexedDB. It uses a non-exportable per-account AES-GCM
 key, with origin, account, environment and format bound to each record. Up to 16 environments,
 32 conversations per environment and 150 messages per conversation fit within a 12 MiB ciphertext
 budget; each environment record is limited to 2 MiB. Larger histories are trimmed, with the routed
 thread preferred. Attachment bodies, preview URLs, terminal output, provider events, detailed diffs,
 credentials and transport secrets are excluded. Metadata persistence uses this same opt-in boundary.
+
+Every connection mode remembers, for the session, where each conversation was left: the row at the
+top of the transcript and how far into it. A conversation left away from its end reopens at that
+row, even when folds or earlier history above it changed since. One left at its end, or whose row
+is gone from its live history, reopens at its end and follows new output; text painted from a cache
+first does not count as gone. Scrolling, a search or link target, or a send while it reopens wins
+over the remembered row. Up to 100 conversations left away from their end are remembered, the least
+recently left dropped first. The remembered-browser cache above is the only place a reading position
+outlives the session; with it, a turn that was open around the row stays open after a reload, and
+turning the cache off keeps this session's positions. The web app's phone layout always opens a
+conversation at its end.
 
 Remembered text can render before session checking, including offline. Anyone with access to that
 browser profile can read it. Stored data never restores a role, session, streaming state, mutation
@@ -121,7 +132,7 @@ encrypted with the operating system's protected storage, and nothing is written 
 is unavailable. It holds up to three machines of one account, each with its 32 most recently
 visited conversations (150 messages at most per conversation) within about 1.9 MB; larger histories
 are trimmed oldest-visited first, with the open conversation preferred. Only message text is kept:
-attachments, drafts, scroll positions, tool output, credentials and transport secrets are not.
+attachments, drafts, reading positions, tool output, credentials and transport secrets are not.
 Sign-out, another account signing in, a machine being removed, revoked or losing eligibility,
 revoking this installation's account authorization, and turning the setting off all delete the
 affected content. Cached text is display only: a live snapshot always wins over it, it is never a
@@ -167,7 +178,8 @@ no connection of its own. The pages that act on one machine (Settings, Tasks, St
 machine of the last opened thread, and Settings can switch it in place. While open, Settings and
 Tasks keep the machine they show connected, and opened with no machine chosen yet, as after a
 reload, they offer the machines to choose from. Older addresses that named a machine on such a page
-open the page itself on that machine.
+open the page itself on that machine. Statistics' Today and Usage views are the exception: they
+combine the machines this client is already connected to and connect no other.
 
 Every client sorts a machine's threads into Active and Settled with that machine's own settlement
 capability, resolved the same way everywhere: what the machine reported to this client (live, or its

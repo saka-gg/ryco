@@ -108,6 +108,27 @@ export const SourceControlRouteScreen = lazyScreen(
       require("../features/sourceControl/SourceControlRouteScreen") as typeof import("../features/sourceControl/SourceControlRouteScreen")
     ).SourceControlRouteScreen,
 );
+export const PullRequestsRouteScreen = lazyScreen(
+  "PullRequestsRouteScreen",
+  () =>
+    (
+      require("../features/pullRequests/PullRequestsRouteScreen") as typeof import("../features/pullRequests/PullRequestsRouteScreen")
+    ).PullRequestsRouteScreen,
+);
+export const PullRequestRouteScreen = lazyScreen(
+  "PullRequestRouteScreen",
+  () =>
+    (
+      require("../features/pullRequests/PullRequestRouteScreen") as typeof import("../features/pullRequests/PullRequestRouteScreen")
+    ).PullRequestRouteScreen,
+);
+export const PullRequestFileRouteScreen = lazyScreen(
+  "PullRequestFileRouteScreen",
+  () =>
+    (
+      require("../features/pullRequests/PullRequestFileRouteScreen") as typeof import("../features/pullRequests/PullRequestFileRouteScreen")
+    ).PullRequestFileRouteScreen,
+);
 export const SettingsAppearanceRouteScreen = lazyScreen(
   "SettingsAppearanceRouteScreen",
   () =>
@@ -122,6 +143,13 @@ export const SettingsAboutRouteScreen = lazyScreen(
       require("../features/settings/SettingsAboutRouteScreen") as typeof import("../features/settings/SettingsAboutRouteScreen")
     ).SettingsAboutRouteScreen,
 );
+export const SettingsDiagnosticsRouteScreen = lazyScreen(
+  "SettingsDiagnosticsRouteScreen",
+  () =>
+    (
+      require("../features/settings/SettingsDiagnosticsRouteScreen") as typeof import("../features/settings/SettingsDiagnosticsRouteScreen")
+    ).SettingsDiagnosticsRouteScreen,
+);
 export const SettingsClientStorageRouteScreen = lazyScreen(
   "SettingsClientStorageRouteScreen",
   () =>
@@ -135,6 +163,13 @@ export const SettingsHubRouteScreen = lazyScreen(
     (
       require("../features/settings/SettingsHubRouteScreen") as typeof import("../features/settings/SettingsHubRouteScreen")
     ).SettingsHubRouteScreen,
+);
+export const SettingsProviderAccountsRouteScreen = lazyScreen(
+  "SettingsProviderAccountsRouteScreen",
+  () =>
+    (
+      require("../features/settings/SettingsProviderAccountsRouteScreen") as typeof import("../features/settings/SettingsProviderAccountsRouteScreen")
+    ).SettingsProviderAccountsRouteScreen,
 );
 export const SettingsStatisticsRouteScreen = lazyScreen(
   "SettingsStatisticsRouteScreen",
@@ -163,6 +198,20 @@ export const SettingsWorkspaceRouteScreen = lazyScreen(
     (
       require("../features/settings/SettingsWorkspaceRouteScreen") as typeof import("../features/settings/SettingsWorkspaceRouteScreen")
     ).SettingsWorkspaceRouteScreen,
+);
+export const ThreadTerminalRouteScreen = lazyScreen(
+  "ThreadTerminalRouteScreen",
+  () =>
+    (
+      require("../features/terminal/ThreadTerminalRouteScreen") as typeof import("../features/terminal/ThreadTerminalRouteScreen")
+    ).ThreadTerminalRouteScreen,
+);
+export const ThreadDeviceRouteScreen = lazyScreen(
+  "ThreadDeviceRouteScreen",
+  () =>
+    (
+      require("../features/devices/ThreadDeviceRouteScreen") as typeof import("../features/devices/ThreadDeviceRouteScreen")
+    ).ThreadDeviceRouteScreen,
 );
 export const ThreadRouteScreen = lazyScreen(
   "ThreadRouteScreen",

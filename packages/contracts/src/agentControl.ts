@@ -247,6 +247,15 @@ export const AGENT_CONTROL_CAPABILITIES = {
   readLocalTasks: AgentControlCapability.make("local-tasks.read"),
   /** Create, edit, complete, delete (with approval) Tasks and start their chats. */
   manageLocalTasks: AgentControlCapability.make("local-tasks.manage"),
+  /** Start or stop the server's pull request watch that wakes a chat with news. */
+  watchPullRequests: AgentControlCapability.make("pull-requests.watch"),
+  /** Start, list and stop command watches on the caller's own chat (`ryco_watch_command`). */
+  watchCommands: AgentControlCapability.make("commands.watch"),
+  /**
+   * Ask the user for a secret through a private card (`ryco_request_secret`); the node writes the
+   * answer into a Git-ignored dotenv file of the caller's own checkout.
+   */
+  requestSecrets: AgentControlCapability.make("secrets.request"),
   /** Clone a repository into a folder on this node and register it as a project. */
   importProject: AgentControlCapability.make("projects.import"),
   /** Copy a project or repository to another node, run by the approving client. */
@@ -298,7 +307,10 @@ export const AgentControlActionKind = Schema.Literals([
   "deviceStartRecording",
   "deviceStopRecording",
   "deviceShutdown",
+  "deviceControlConsent",
   "deleteLocalTask",
+  "pullRequestWatch",
+  "worktreeHandoff",
   "importProject",
   "copyProjectToNode",
 ]);
@@ -306,8 +318,9 @@ export type AgentControlActionKind = typeof AgentControlActionKind.Type;
 
 /**
  * The plan kinds every client built before `importProject` and
- * `copyProjectToNode` can decode. Proposals of any other kind reach only
- * subscribers that ask for the tolerant plan view (`planView: "tolerant"`).
+ * `copyProjectToNode` can decode: the 29 kinds released clients know, frozen
+ * here. Proposals of any other kind, including every kind added later, reach
+ * only subscribers that ask for the tolerant plan view (`planView: "tolerant"`).
  */
 export const AGENT_CONTROL_LEGACY_PLAN_KINDS = [
   "createThreads",
@@ -335,7 +348,10 @@ export const AGENT_CONTROL_LEGACY_PLAN_KINDS = [
   "deviceStartRecording",
   "deviceStopRecording",
   "deviceShutdown",
+  "deviceControlConsent",
   "deleteLocalTask",
+  "pullRequestWatch",
+  "worktreeHandoff",
 ] as const satisfies ReadonlyArray<AgentControlActionKind>;
 export type AgentControlLegacyPlanKind = (typeof AGENT_CONTROL_LEGACY_PLAN_KINDS)[number];
 
@@ -395,7 +411,10 @@ export const AGENT_CONTROL_ACTION_CAPABILITIES: Record<
   deviceStartRecording: AGENT_CONTROL_CAPABILITIES.controlDevices,
   deviceStopRecording: AGENT_CONTROL_CAPABILITIES.controlDevices,
   deviceShutdown: AGENT_CONTROL_CAPABILITIES.controlDevices,
+  deviceControlConsent: AGENT_CONTROL_CAPABILITIES.controlDevices,
   deleteLocalTask: AGENT_CONTROL_CAPABILITIES.manageLocalTasks,
+  pullRequestWatch: AGENT_CONTROL_CAPABILITIES.watchPullRequests,
+  worktreeHandoff: AGENT_CONTROL_CAPABILITIES.manageWorkspaces,
   importProject: AGENT_CONTROL_CAPABILITIES.importProject,
   copyProjectToNode: AGENT_CONTROL_CAPABILITIES.copyProjectToNode,
 };
@@ -405,6 +424,8 @@ export const AGENT_CONTROL_PLAN_VERSION = 1;
 export const AGENT_CONTROL_PROMPT_MAX_CHARS = 120_000;
 export const AGENT_CONTROL_TITLE_MAX_CHARS = 200;
 export const AGENT_CONTROL_CREATE_THREADS_MAX_ENTRIES = 10;
+/** The largest `maxConcurrent` a `createThreads` request may ask for. */
+export const AGENT_CONTROL_CREATE_THREADS_MAX_CONCURRENT = 8;
 export const AGENT_CONTROL_PERSISTENT_GOAL_MAX_CHARS = 4_000;
 export const AGENT_CONTROL_AUTOMATION_PROMPT_MAX_CHARS = 12_000;
 export const AGENT_CONTROL_AUTOMATION_MIN_INTERVAL_MS = 15 * 60_000;
@@ -473,6 +494,16 @@ export const AgentControlCreateThreadsPlan = Schema.Struct({
     Schema.isMinLength(1),
     Schema.isMaxLength(AGENT_CONTROL_CREATE_THREADS_MAX_ENTRIES),
   ),
+  /**
+   * At most this many entries work at once. The first ones start; each later one waits, held,
+   * in its chat's follow-up queue and starts, in entry order, when an earlier one stops working.
+   * Absent: every entry starts at once.
+   */
+  maxConcurrent: Schema.optional(
+    Schema.Int.check(
+      Schema.isBetween({ minimum: 1, maximum: AGENT_CONTROL_CREATE_THREADS_MAX_CONCURRENT }),
+    ),
+  ),
 }).pipe(rejectExcessProperties);
 export type AgentControlCreateThreadsPlan = typeof AgentControlCreateThreadsPlan.Type;
 
@@ -509,6 +540,10 @@ export const AgentControlProjectPreferences = Schema.Struct({
 });
 export type AgentControlProjectPreferences = typeof AgentControlProjectPreferences.Type;
 
+/** What an agent may report about its own thread's goal. */
+export const AgentControlGoalStatusUpdate = Schema.Literals(["complete", "blocked"]);
+export type AgentControlGoalStatusUpdate = typeof AgentControlGoalStatusUpdate.Type;
+
 export const AgentControlUpdateThreadPlan = Schema.Struct({
   kind: Schema.Literal("updateThread"),
   threadId: ThreadId,
@@ -521,6 +556,8 @@ export const AgentControlUpdateThreadPlan = Schema.Struct({
       TrimmedNonEmptyString.check(Schema.isMaxLength(AGENT_CONTROL_PERSISTENT_GOAL_MAX_CHARS)),
     ),
   ),
+  /** The caller marks its own thread's goal finished or blocked, which ends goal continuation. */
+  goalStatus: Schema.optional(AgentControlGoalStatusUpdate),
 }).pipe(rejectExcessProperties);
 export type AgentControlUpdateThreadPlan = typeof AgentControlUpdateThreadPlan.Type;
 
@@ -664,6 +701,11 @@ export const AgentControlProviderUpdateChecksChange = Schema.Struct({
   kind: Schema.Literal("providerUpdateChecks"),
   before: Schema.Boolean,
   after: Schema.Boolean,
+  /**
+   * Turning checks on also starts the node's automatic provider updates (its owner turned
+   * `automaticUpdates` on): Ryco would install provider CLIs on its own, so the owner approves.
+   */
+  startsAutomaticUpdates: Schema.optionalKey(Schema.Literal(true)),
 }).pipe(rejectExcessProperties);
 export type AgentControlProviderUpdateChecksChange =
   typeof AgentControlProviderUpdateChecksChange.Type;
@@ -689,6 +731,17 @@ export type AgentControlChangeSettingsPlan = typeof AgentControlChangeSettingsPl
  * exists in this schema. Each due occurrence copies this exact template into
  * a fresh `automationRun` proposal that still requires user approval.
  */
+/**
+ * Where a scheduled run goes: absent, a new chat each time; `thread`, the follow-up queue of one
+ * existing chat of the same project (a heartbeat), as an `automation` entry the chat's queue
+ * holds and sends like its other follow-ups, with the chat's current model and modes.
+ */
+export const AgentControlAutomationTarget = Schema.Struct({
+  kind: Schema.Literal("thread"),
+  threadId: ThreadId,
+}).pipe(rejectExcessProperties);
+export type AgentControlAutomationTarget = typeof AgentControlAutomationTarget.Type;
+
 export const AgentControlAutomationExecutionTemplate = Schema.Struct({
   projectId: ProjectId,
   title: AgentControlTitle,
@@ -700,6 +753,7 @@ export const AgentControlAutomationExecutionTemplate = Schema.Struct({
   tokenMode: Schema.optional(AgentTokenMode),
   envMode: ThreadEnvMode,
   baseRef: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
+  target: Schema.optional(AgentControlAutomationTarget),
 }).pipe(rejectExcessProperties);
 export type AgentControlAutomationExecutionTemplate =
   typeof AgentControlAutomationExecutionTemplate.Type;
@@ -716,13 +770,52 @@ export const AgentControlAutomationSchedule = Schema.Union([
     /** Required finite end: recurring schedules are never unbounded. */
     endsAt: IsoDateTime,
   }).pipe(rejectExcessProperties),
+  /**
+   * Runs at one wall-clock time on chosen weekdays in a named zone, from the first such
+   * time at or after `startsAt` until `endsAt` (`@ryco/shared/automationCalendar`). A
+   * time a clock change skips is skipped that day; a repeated time runs once.
+   */
+  Schema.Struct({
+    kind: Schema.Literal("calendar"),
+    /** IANA zone, e.g. "Europe/Berlin". */
+    timeZone: TrimmedNonEmptyString.check(Schema.isMaxLength(64)),
+    /** 24-hour "HH:MM". */
+    localTime: TrimmedNonEmptyString.check(Schema.isPattern(/^([01]\d|2[0-3]):[0-5]\d$/)),
+    /** 0 = Sunday … 6 = Saturday; at least one. */
+    weekdays: Schema.Array(Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 6 }))).check(
+      Schema.isMinLength(1),
+      Schema.isMaxLength(7),
+    ),
+    startsAt: IsoDateTime,
+    /** Required finite end, like a fixed interval's. */
+    endsAt: IsoDateTime,
+  }).pipe(rejectExcessProperties),
 ]);
 export type AgentControlAutomationSchedule = typeof AgentControlAutomationSchedule.Type;
+
+/**
+ * Whether a schedule's runs ask first. `approve-each` (also when absent, so every stored
+ * definition keeps it) makes every due run a proposal a person approves. With
+ * `run-without-asking` the scheduler approves each run on the owner's standing decision:
+ * only the owner-authored principal of Project settings may set it, never an agent, and an
+ * agent's edit of the schedule drops it. The run still uses exactly the definition's
+ * project, provider, model, runtime mode and checkout.
+ */
+export const AgentControlAutomationRunPolicy = Schema.Literals([
+  "approve-each",
+  "run-without-asking",
+]);
+export type AgentControlAutomationRunPolicy = typeof AgentControlAutomationRunPolicy.Type;
+
+/** A schedule that runs unattended pauses itself after this many failed runs in a row. */
+export const AGENT_CONTROL_AUTOMATION_UNATTENDED_FAILURES_MAX = 3;
 
 export const AgentControlAutomationDefinition = Schema.Struct({
   execution: AgentControlAutomationExecutionTemplate,
   schedule: AgentControlAutomationSchedule,
   enabled: Schema.Boolean,
+  /** Absent: `approve-each`. Written only when it is `run-without-asking`. */
+  runPolicy: Schema.optional(AgentControlAutomationRunPolicy),
 }).pipe(rejectExcessProperties);
 export type AgentControlAutomationDefinition = typeof AgentControlAutomationDefinition.Type;
 
@@ -918,6 +1011,22 @@ export const AgentControlDeviceActionPlan = Schema.Union([
 export type AgentControlDeviceActionPlan = typeof AgentControlDeviceActionPlan.Type;
 
 /**
+ * One user consent for routine input (tap, swipe, type, hardware buttons, scroll to
+ * element, launch, simulator settings) on the device attached to the requesting
+ * thread, for the exact provider turn that asked. Carries no coordinates, text,
+ * labels or bundle ids: the actions it allows run directly and are never persisted.
+ * Not a device action plan: approving it changes nothing on the device.
+ */
+export const AgentControlDeviceControlConsentPlan = Schema.Struct({
+  kind: Schema.Literal("deviceControlConsent"),
+  threadId: ThreadId,
+  projectId: ProjectId,
+  providerInstanceId: ProviderInstanceId,
+  udid: DeviceUdid,
+}).pipe(rejectExcessProperties);
+export type AgentControlDeviceControlConsentPlan = typeof AgentControlDeviceControlConsentPlan.Type;
+
+/**
  * Deletes one of the node's Tasks with its files and its record of started chats
  * (the chats themselves stay). Always approved by the user.
  */
@@ -930,6 +1039,68 @@ export const AgentControlDeleteLocalTaskPlan = Schema.Struct({
   title: LocalTaskTitle,
 }).pipe(rejectExcessProperties);
 export type AgentControlDeleteLocalTaskPlan = typeof AgentControlDeleteLocalTaskPlan.Type;
+
+/** A pull request's web address, as a host shows it. */
+export const AgentControlPullRequestUrl = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(2_048),
+  Schema.isPattern(/^https?:\/\//i),
+);
+
+/**
+ * Start or stop waking a chat with its pull request's news (failed checks, passing required
+ * checks, other people's comments and reviews, a conflict). Without `number` and `url` it is the
+ * pull request of the chat's workspace; a named one may belong to any workspace of the chat's
+ * project. Auto-fix CI is the user's switch and never part of a plan.
+ */
+export const AgentControlPullRequestWatchPlan = Schema.Struct({
+  kind: Schema.Literal("pullRequestWatch"),
+  threadId: ThreadId,
+  number: Schema.optional(PositiveInt),
+  url: Schema.optional(AgentControlPullRequestUrl),
+  watching: Schema.Boolean,
+}).pipe(rejectExcessProperties);
+export type AgentControlPullRequestWatchPlan = typeof AgentControlPullRequestWatchPlan.Type;
+
+/** Private-session tools that move the caller's own chat into a worktree (loaded on first use). */
+export const AGENT_CONTROL_WORKTREE_MCP_TOOLS = {
+  handoff: "ryco_worktree_handoff",
+  status: "ryco_worktree_status",
+} as const;
+
+const AgentControlGitRefName = TrimmedNonEmptyString.check(Schema.isMaxLength(256));
+
+/**
+ * Moves the calling chat itself into a new worktree on a new branch, created from `baseRef` (the
+ * branch the project's checkout has when absent), and queues `continuationPrompt` as its next
+ * turn there. Changes in the shared checkout stay there. Provider-session callers only, and only
+ * for their own chat; the defaults are resolved before the plan is made.
+ */
+export const AgentControlWorktreeHandoffPlan = Schema.Struct({
+  kind: Schema.Literal("worktreeHandoff"),
+  threadId: ThreadId,
+  branch: AgentControlGitRefName,
+  baseRef: Schema.optional(AgentControlGitRefName),
+  startFromOrigin: Schema.Boolean,
+  runSetupScript: Schema.Boolean,
+  continuationPrompt: Schema.optional(AgentControlPrompt),
+}).pipe(rejectExcessProperties);
+export type AgentControlWorktreeHandoffPlan = typeof AgentControlWorktreeHandoffPlan.Type;
+
+/** How a handoff went once the chat moved: no paths (the chat reads its own). */
+export const AgentControlWorktreeHandoffOutcome = Schema.Struct({
+  branch: AgentControlGitRefName,
+  baseRef: AgentControlGitRefName,
+  startedFromOrigin: Schema.Boolean,
+  setupScript: Schema.Literals(["started", "no-script", "skipped", "failed"]),
+  /** `held`: queued, with the queue held (the turn that asked was stopped, or Ryco restarted). */
+  continuation: Schema.Literals(["queued", "held", "skipped", "failed"]),
+  /**
+   * Whether the moved chat was linked to the worktree's record (`thread.attach-to-worktree`);
+   * the move stands either way. Absent in outcomes recorded before it was reported.
+   */
+  worktreeAttached: Schema.optional(Schema.Boolean),
+});
+export type AgentControlWorktreeHandoffOutcome = typeof AgentControlWorktreeHandoffOutcome.Type;
 
 // ── Cross-node project plans ──────────────────────────────────────────
 
@@ -1049,7 +1220,10 @@ export const AgentControlActionPlan = Schema.Union([
   AgentControlCancelAutomationPlan,
   AgentControlAutomationRunPlan,
   AgentControlDeviceActionPlan,
+  AgentControlDeviceControlConsentPlan,
   AgentControlDeleteLocalTaskPlan,
+  AgentControlPullRequestWatchPlan,
+  AgentControlWorktreeHandoffPlan,
   AgentControlImportProjectPlan,
   AgentControlCopyProjectToNodePlan,
 ]);
@@ -1188,6 +1362,7 @@ export const AgentControlExecutionReceipt = Schema.Struct({
       settledActiveTurnId: Schema.NullOr(TurnId),
     }),
   ),
+  worktreeHandoff: Schema.optional(AgentControlWorktreeHandoffOutcome),
   compensation: Schema.optional(
     Schema.Struct({
       attempted: Schema.Boolean,
@@ -1666,6 +1841,15 @@ export type AgentControlOperationStatus = typeof AgentControlOperationStatus.Typ
 export const AGENT_CONTROL_TERMINAL_OPERATION_STATUSES: ReadonlyArray<AgentControlOperationStatus> =
   ["completed", "failed", "cancelled"];
 
+/** A worktree an operation created and still owns: compensation removes it. */
+export const AgentControlOwnedWorktree = Schema.Struct({
+  worktreeId: WorktreeId,
+  projectId: ProjectId,
+  branch: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+  checkoutPath: TrimmedNonEmptyString,
+});
+export type AgentControlOwnedWorktree = typeof AgentControlOwnedWorktree.Type;
+
 /**
  * Resources an operation has created so far. Persisted so restart recovery
  * can prove operation ownership (e.g. of a preflighted worktree) and either
@@ -1682,14 +1866,9 @@ export const AgentControlOperationResources = Schema.Struct({
   threadIds: Schema.Array(ThreadId).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   ownedThreadIds: Schema.Array(ThreadId).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   worktreeIds: Schema.Array(WorktreeId).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
-  ownedWorktrees: Schema.Array(
-    Schema.Struct({
-      worktreeId: WorktreeId,
-      projectId: ProjectId,
-      branch: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
-      checkoutPath: TrimmedNonEmptyString,
-    }),
-  ).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  ownedWorktrees: Schema.Array(AgentControlOwnedWorktree).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
 });
 export type AgentControlOperationResources = typeof AgentControlOperationResources.Type;
 
@@ -1706,6 +1885,17 @@ export const AgentControlClientExecutionState = Schema.Struct({
   targetEnvironmentId: AgentControlNodeEnvironmentId,
 });
 export type AgentControlClientExecutionState = typeof AgentControlClientExecutionState.Type;
+
+/**
+ * The worktree a handoff gave its chat, recorded when the operation gives up owning it: restart
+ * recovery finishes the move when the chat points at it, or takes it back and removes it.
+ */
+export const AgentControlHandoffWorktree = Schema.Struct({
+  ...AgentControlOwnedWorktree.fields,
+  /** The outcome's base (`origin/<base>` when started from origin). */
+  baseRef: AgentControlGitRefName,
+});
+export type AgentControlHandoffWorktree = typeof AgentControlHandoffWorktree.Type;
 
 export const AgentControlOperationState = Schema.Struct({
   completedSteps: Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(128))).pipe(
@@ -1734,6 +1924,8 @@ export const AgentControlOperationState = Schema.Struct({
       settledActiveTurnId: Schema.NullOr(TurnId),
     }),
   ),
+  worktreeHandoff: Schema.optional(AgentControlWorktreeHandoffOutcome),
+  handoffWorktree: Schema.optional(AgentControlHandoffWorktree),
   compensation: Schema.optional(
     Schema.Struct({ attempted: Schema.Boolean, completed: Schema.Boolean }),
   ),

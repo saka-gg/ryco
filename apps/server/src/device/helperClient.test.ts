@@ -246,6 +246,57 @@ describe("helper frame envelope handling", () => {
   });
 });
 
+describe("attach", () => {
+  const attachResult = (overrides: Record<string, unknown> = {}) => ({
+    udid: DEVICE,
+    pixelWidth: 1206,
+    pixelHeight: 2622,
+    pointWidth: 402,
+    pointHeight: 874,
+    scale: 3,
+    capabilities: { input: true, accessibility: true },
+    degraded: { hid: null },
+    ...overrides,
+  });
+
+  /** A client whose `attach` request answers with `result`, without a process. */
+  const clientAnswering = (result: Record<string, unknown>) => {
+    const client = new HelperClient({ binaryPath: "/nonexistent" });
+    vi.spyOn(client, "request").mockResolvedValue(result);
+    return client;
+  };
+
+  it("records the input transport the helper reports", async () => {
+    const attachment = await clientAnswering(attachResult({ inputTransport: "dtuhid" })).attach(
+      DEVICE,
+    );
+
+    expect(attachment.inputTransport).toBe("dtuhid");
+    expect(attachment.inputAvailable).toBe(true);
+  });
+
+  it("reports no transport when the helper has no input client", async () => {
+    const attachment = await clientAnswering(
+      attachResult({
+        inputTransport: null,
+        capabilities: { input: false, accessibility: true },
+        degraded: { hid: "SimulatorKit was not loaded" },
+      }),
+    ).attach(DEVICE);
+
+    expect(attachment.inputTransport).toBeNull();
+    expect(attachment.inputAvailable).toBe(false);
+  });
+
+  it("reports no transport for a helper that predates the field, or an unknown value", async () => {
+    expect((await clientAnswering(attachResult()).attach(DEVICE)).inputTransport).toBeNull();
+    expect(
+      (await clientAnswering(attachResult({ inputTransport: "bluetooth" })).attach(DEVICE))
+        .inputTransport,
+    ).toBeNull();
+  });
+});
+
 describe("device point bounds", () => {
   const attachment = {
     udid: DEVICE,

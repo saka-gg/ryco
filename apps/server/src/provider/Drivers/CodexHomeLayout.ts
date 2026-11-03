@@ -1,7 +1,15 @@
-import { ProviderDriverKind, type CodexSettings } from "@ryco/contracts";
+import {
+  ProviderDriverKind,
+  type CodexSettings,
+  type ProviderInstanceEnvironment,
+} from "@ryco/contracts";
 import { Effect, FileSystem, Path, Schema } from "effect";
 import * as PlatformError from "effect/PlatformError";
 
+import {
+  mergeProviderInstanceEnvironment,
+  normalizeProviderHomeEnvironment,
+} from "../ProviderInstanceEnvironment.ts";
 import { parseProviderSourcePaths } from "../ProviderSourcePaths.ts";
 
 export interface CodexHomeLayout {
@@ -25,6 +33,17 @@ const KNOWN_SHARED_DIRECTORIES = [
 
 const PRIVATE_ENTRY_NAMES = new Set(["auth.json", "models_cache.json"]);
 const SHADOW_LOCAL_ENTRY_NAMES = new Set(["log", "memories", "tmp"]);
+
+// SQLite databases and their WAL/SHM/journal sidecars are never linked into a shadow home:
+// SQLite derives sidecar paths from the path it opened a database through, and on Windows
+// deleting a sidecar through a link removes only the link, so per-file links let two processes
+// write two WALs for one database ("database disk image is malformed"). An auth overlay points
+// `CODEX_SQLITE_HOME` at the shared home instead (`codexProcessEnvironment`).
+const SQLITE_STATE_ENTRY_PATTERN = /^.+\.sqlite(?:-(?:wal|shm|journal))?$/;
+
+function isSqliteStateEntry(entryName: string): boolean {
+  return SQLITE_STATE_ENTRY_PATTERN.test(entryName);
+}
 
 export const resolveCodexHomeLayout = Effect.fn("resolveCodexHomeLayout")(function* (
   config: CodexSettings,
@@ -54,6 +73,46 @@ export const resolveCodexHomeLayout = Effect.fn("resolveCodexHomeLayout")(functi
     continuationKey: `codex:home:${sharedHomePath}`,
   };
 });
+
+/**
+ * The environment and home layout of a Codex provider instance: the instance's variables over the
+ * server's, HOME normalized, and the layout resolved from that environment rather than the
+ * server's. The driver, MCP settings, reset credits and history sources all resolve an instance
+ * through this, so they agree on its homes.
+ */
+export const resolveCodexInstanceLayout = Effect.fn("resolveCodexInstanceLayout")(function* (
+  config: CodexSettings,
+  instanceEnvironment: ProviderInstanceEnvironment | undefined,
+): Effect.fn.Return<
+  { readonly environment: NodeJS.ProcessEnv; readonly layout: CodexHomeLayout },
+  never,
+  Path.Path
+> {
+  const environment = normalizeProviderHomeEnvironment(
+    mergeProviderInstanceEnvironment(instanceEnvironment),
+  );
+  const layout = yield* resolveCodexHomeLayout(config, environment);
+  return { environment, layout };
+});
+
+/**
+ * The environment every Codex process of a layout runs with: `CODEX_HOME` is the effective home,
+ * and an auth overlay keeps SQLite state in the shared home through `CODEX_SQLITE_HOME`, so all
+ * processes open the same databases through one path. A `CODEX_SQLITE_HOME` already in the
+ * environment is kept.
+ */
+export function codexProcessEnvironment(
+  layout: CodexHomeLayout,
+  baseEnv: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  return {
+    ...baseEnv,
+    ...(layout.effectiveHomePath ? { CODEX_HOME: layout.effectiveHomePath } : {}),
+    ...(layout.mode === "authOverlay" && !baseEnv.CODEX_SQLITE_HOME?.trim()
+      ? { CODEX_SQLITE_HOME: layout.sharedHomePath }
+      : {}),
+  };
+}
 
 export class CodexShadowHomeError extends Schema.TaggedError<CodexShadowHomeError>()(
   "CodexShadowHomeError",
@@ -123,16 +182,17 @@ const readLinkState = Effect.fn("CodexHomeLayout.readLinkState")(function* (
   );
 });
 
-const removePrivateSymlink = Effect.fn("CodexHomeLayout.removePrivateSymlink")(function* (input: {
+/** Removes a shadow-home entry only when it is a link; a real file or directory is kept. */
+const removeShadowSymlink = Effect.fn("CodexHomeLayout.removeShadowSymlink")(function* (input: {
   readonly fileSystem: FileSystem.FileSystem;
   readonly shadowPath: string;
   readonly entryName: string;
 }): Effect.fn.Return<void, CodexShadowHomeError, Path.Path> {
   const path = yield* Path.Path;
-  const privatePath = path.join(input.shadowPath, input.entryName);
-  const state = yield* readLinkState(input.fileSystem, privatePath);
+  const entryPath = path.join(input.shadowPath, input.entryName);
+  const state = yield* readLinkState(input.fileSystem, entryPath);
   if (state._tag === "Symlink") {
-    yield* normalizeShadowHomeError(input.fileSystem.remove(privatePath));
+    yield* normalizeShadowHomeError(input.fileSystem.remove(entryPath));
   }
 });
 
@@ -213,7 +273,11 @@ export const materializeCodexShadowHome = Effect.fn("materializeCodexShadowHome"
   );
   const entries = new Set<string>(KNOWN_SHARED_DIRECTORIES);
   for (const entryName of sharedEntryNames) {
-    if (!PRIVATE_ENTRY_NAMES.has(entryName) && !SHADOW_LOCAL_ENTRY_NAMES.has(entryName)) {
+    if (
+      !PRIVATE_ENTRY_NAMES.has(entryName) &&
+      !SHADOW_LOCAL_ENTRY_NAMES.has(entryName) &&
+      !isSqliteStateEntry(entryName)
+    ) {
       entries.add(entryName);
     }
   }
@@ -223,11 +287,26 @@ export const materializeCodexShadowHome = Effect.fn("materializeCodexShadowHome"
     (entryName) =>
       entryName === "auth.json"
         ? Effect.void
-        : removePrivateSymlink({
+        : removeShadowSymlink({
             fileSystem,
             shadowPath: effectiveHomePath,
             entryName,
           }),
+    { discard: true },
+  );
+
+  // Earlier releases linked SQLite state into the shadow home.
+  const shadowEntryNames = yield* normalizeShadowHomeError(
+    fileSystem.readDirectory(effectiveHomePath),
+  );
+  yield* Effect.forEach(
+    shadowEntryNames.filter(isSqliteStateEntry),
+    (entryName) =>
+      removeShadowSymlink({
+        fileSystem,
+        shadowPath: effectiveHomePath,
+        entryName,
+      }),
     { discard: true },
   );
 

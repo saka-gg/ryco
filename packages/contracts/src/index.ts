@@ -1,5 +1,6 @@
 export * from "./baseSchemas.ts";
 export * from "./auth.ts";
+export * from "./directRouteIdentity.ts";
 export * from "./environment.ts";
 export * from "./remoteAccess.ts";
 export * from "./relay.ts";
@@ -29,10 +30,12 @@ export * from "./git.ts";
 export * from "./vcs.ts";
 export * from "./sourceControl.ts";
 export * from "./changeRequestReview.ts";
+export * from "./pullRequestWatch.ts";
+export * from "./pullRequestWatchRpc.ts";
+export * from "./commandWatch.ts";
 export * from "./atlassian.ts";
 export * from "./workItems.ts";
 export * from "./threadGoal.ts";
-export * from "./threadPriority.ts";
 export * from "./orchestration.ts";
 export * from "./agentControl.ts";
 export * from "./agentControlMcp.ts";
@@ -51,6 +54,8 @@ export * from "./projectBrowser.ts";
 
 export * from "./agentControlInspection.ts";
 export * from "./agentControlDelegation.ts";
+export * from "./agentControlQueue.ts";
+export * from "./agentControlPullRequestLink.ts";
 export * from "./agentControlLocalTasks.ts";
 export * from "./agentControlProjectCopy.ts";
 
@@ -66,11 +71,16 @@ export * from "./computerSpaces.ts";
 export * from "./computerAudit.ts";
 export * from "./computerPermissions.ts";
 export * from "./computerBeta.ts";
+export * from "./windowCapture.ts";
 
 export * from "./codexResetCredits.ts";
+export * from "./providerSignIn.ts";
 export * from "./cliProxy.ts";
 export * from "./sessionImport.ts";
 export * from "./threadFork.ts";
+export * from "./threadForkCarried.ts";
+export * from "./threadLocalServers.ts";
+export * from "./secretRequest.ts";
 export * from "./claudeCache.ts";
 
 export * from "./storage.ts";
@@ -79,3 +89,4 @@ export * from "./dailyRecap.ts";
 export * from "./localTasks.ts";
 export * from "./notes.ts";
 export * from "./workspaceLifecycle.ts";
+export * from "./push.ts";

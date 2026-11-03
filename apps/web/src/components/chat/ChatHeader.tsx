@@ -4,8 +4,9 @@ import {
   type ProjectId,
   type ProjectScript,
   type ResolvedKeybindingsConfig,
+  type ScopedThreadRef,
 } from "@ryco/contracts";
-import { memo, useMemo } from "react";
+import { memo, type ReactNode, useMemo } from "react";
 import { ListChecksIcon, PanelRightIcon } from "lucide-react";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import ProjectScriptsControl, { type NewProjectScriptInput } from "../ProjectScriptsControl";
@@ -24,7 +25,11 @@ import { preloadWorkspacePanelForIntent } from "../../workspacePanelPreload";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
+  /** Binds the action dialog's load-failure toast (and its Retry) to this thread. */
+  activeThreadRef?: ScopedThreadRef | null;
   activeThreadTitle: string;
+  /** The open chat tabs (desktop and web), shown in place of the chat's title. */
+  sessionTabs?: ReactNode;
   activeProjectName: string | undefined;
   /**
    * The project's identity for the breadcrumb's artwork. Primitives, not one
@@ -179,6 +184,7 @@ export const ChatHeader = memo(function ChatHeader({
           onAddScript={props.onAddProjectScript}
           onUpdateScript={props.onUpdateProjectScript}
           onDeleteScript={props.onDeleteProjectScript}
+          threadRef={props.activeThreadRef ?? null}
         />
       ) : null}
       {showOpenInPicker ? (
@@ -212,6 +218,7 @@ export const ChatHeader = memo(function ChatHeader({
         worktreeWorkItemState={props.worktreeWorkItemState}
         worktreeWorkItemStateName={props.worktreeWorkItemStateName}
         sessionTitle={props.activeThreadTitle}
+        {...(props.sessionTabs ? { sessionTabs: props.sessionTabs } : {})}
         {...(props.onSelectProject ? { onSelectProject: props.onSelectProject } : {})}
         {...(props.onOpenLinkedWorktreeItem
           ? { onOpenLinkedWorktreeItem: props.onOpenLinkedWorktreeItem }

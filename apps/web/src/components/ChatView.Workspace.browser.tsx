@@ -3,6 +3,7 @@ import {
   type MessageId,
   ProviderDriverKind,
   ProviderInstanceId,
+  TerminalBusyError,
   type ThreadId,
   WS_METHODS,
 } from "@ryco/contracts";
@@ -10,7 +11,9 @@ import { createModelCapabilities, createModelSelection } from "@ryco/shared/mode
 import { page, userEvent } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { useComposerDraftStore, DraftId } from "../composerDraftStore";
-import { useTerminalStateStore } from "../terminalStateStore";
+import { RUNNING_TERMINAL_CLOSE_CONFIRMATION } from "../terminalClose";
+import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
+import { WsRpcFailure } from "../../test/wsRpcHarness";
 import {
   setupChatViewBrowserSuite,
   CHAT_NEW_KEYBINDING,
@@ -34,11 +37,10 @@ import {
   draftThreadIdFor,
   enableChatNewLocalShortcut,
   enableChatNewShortcut,
-  expectVisibleComboboxPopupToBeOpaqueAndClipped,
   fixture,
   materializePromotedDraftThreadViaDomainEvent,
   mountChatView,
-  openNewWorkspaceDialog,
+  openNewWorkspaceDraft,
   serverThreadPath,
   setDraftThreadWithoutWorktree,
   startPromotedServerThreadViaDomainEvent,
@@ -663,6 +665,189 @@ describe("ChatView Workspace (full app)", () => {
     }
   });
 
+  it("types a project script into the base terminal only behind the node's idle check", async () => {
+    setDraftThreadWithoutWorktree();
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: withProjectScripts(createDraftOnlySnapshot(), [
+        {
+          id: "lint",
+          name: "Lint",
+          command: "bun run lint",
+          icon: "lint",
+          runOnWorktreeCreate: false,
+        },
+      ]),
+      configureFixture: (nextFixture) => {
+        nextFixture.serverConfig = {
+          ...nextFixture.serverConfig,
+          environment: {
+            ...nextFixture.serverConfig.environment,
+            capabilities: {
+              ...nextFixture.serverConfig.environment.capabilities,
+              terminalWriteRequireIdle: true,
+            },
+          },
+        };
+      },
+      resolveRpc: (body) => {
+        // The node finds the reused shell running a command and writes nothing.
+        if (body._tag === WS_METHODS.terminalWrite && body.requireIdle === true) {
+          return new WsRpcFailure(
+            new TerminalBusyError({
+              threadId: THREAD_ID,
+              terminalId: String(body.terminalId),
+              reason: "running",
+            }),
+          );
+        }
+        return undefined;
+      },
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      const runButton = await waitForElement(
+        () =>
+          Array.from(document.querySelectorAll("button")).find(
+            (button) => button.title === "Run Lint",
+          ) as HTMLButtonElement | null,
+        "Unable to find Run Lint button.",
+      );
+      runButton.click();
+
+      await vi.waitFor(
+        () => {
+          const writes = wsRequests.filter((request) => request._tag === WS_METHODS.terminalWrite);
+          expect(writes).toHaveLength(2);
+          expect(writes[0]).toMatchObject({
+            terminalId: "default",
+            data: "bun run lint\r",
+            requireIdle: true,
+          });
+          // The script runs in a new terminal instead, opened before the command is typed.
+          const fallbackTerminalId = String(writes[1]?.terminalId);
+          expect(fallbackTerminalId).toMatch(/^terminal-/);
+          expect(writes[1]).toMatchObject({ data: "bun run lint\r" });
+          expect(writes[1]).not.toHaveProperty("requireIdle");
+          const fallbackOpen = wsRequests.findIndex(
+            (request) =>
+              request._tag === WS_METHODS.terminalOpen && request.terminalId === fallbackTerminalId,
+          );
+          expect(fallbackOpen).toBeGreaterThanOrEqual(0);
+          expect(fallbackOpen).toBeLessThan(wsRequests.indexOf(writes[1]!));
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("gives a project script a new terminal on nodes that cannot verify an idle shell", async () => {
+    setDraftThreadWithoutWorktree();
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: withProjectScripts(createDraftOnlySnapshot(), [
+        {
+          id: "lint",
+          name: "Lint",
+          command: "bun run lint",
+          icon: "lint",
+          runOnWorktreeCreate: false,
+        },
+      ]),
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      const runButton = await waitForElement(
+        () =>
+          Array.from(document.querySelectorAll("button")).find(
+            (button) => button.title === "Run Lint",
+          ) as HTMLButtonElement | null,
+        "Unable to find Run Lint button.",
+      );
+      runButton.click();
+
+      await vi.waitFor(
+        () => {
+          const writes = wsRequests.filter((request) => request._tag === WS_METHODS.terminalWrite);
+          expect(writes).toHaveLength(1);
+          expect(String(writes[0]?.terminalId)).toMatch(/^terminal-/);
+          expect(writes[0]).toMatchObject({ data: "bun run lint\r" });
+          expect(writes[0]).not.toHaveProperty("requireIdle");
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("asks before closing a terminal whose shell runs a command", async () => {
+    setDraftThreadWithoutWorktree();
+    useTerminalStateStore.setState({ terminalStateByThreadKey: {} });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createDraftOnlySnapshot(),
+    });
+
+    try {
+      const terminalStore = useTerminalStateStore.getState();
+      terminalStore.setTerminalOpen(THREAD_REF, true);
+      terminalStore.setTerminalActivity(THREAD_REF, "default", true);
+      const closeButton = await waitForElement(
+        () => document.querySelector<HTMLButtonElement>('button[aria-label^="Close Terminal"]'),
+        "Unable to find the Close Terminal button.",
+      );
+      const closeRequests = () =>
+        wsRequests.filter((request) => request._tag === WS_METHODS.terminalClose);
+
+      closeButton.click();
+      expect(confirm).toHaveBeenCalledExactlyOnceWith(RUNNING_TERMINAL_CLOSE_CONFIRMATION);
+      await waitForLayout();
+      expect(closeRequests()).toEqual([]);
+      expect(
+        selectThreadTerminalState(
+          useTerminalStateStore.getState().terminalStateByThreadKey,
+          THREAD_REF,
+        ).terminalOpen,
+      ).toBe(true);
+
+      confirm.mockReturnValue(true);
+      closeButton.click();
+      await vi.waitFor(
+        () => {
+          expect(closeRequests()).toEqual([
+            expect.objectContaining({ threadId: THREAD_ID, terminalId: "default" }),
+          ]);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+
+      // An idle shell closes at once.
+      confirm.mockClear();
+      useTerminalStateStore.getState().setTerminalOpen(THREAD_REF, true);
+      const idleCloseButton = await waitForElement(
+        () => document.querySelector<HTMLButtonElement>('button[aria-label^="Close Terminal"]'),
+        "Unable to find the Close Terminal button again.",
+      );
+      idleCloseButton.click();
+      await vi.waitFor(
+        () => {
+          expect(closeRequests()).toHaveLength(2);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+      expect(confirm).not.toHaveBeenCalled();
+    } finally {
+      confirm.mockRestore();
+      await mounted.cleanup();
+    }
+  });
+
   it("runs project scripts from worktree draft threads at the worktree cwd", async () => {
     useComposerDraftStore.setState({
       draftThreadsByThreadKey: {
@@ -1088,351 +1273,22 @@ describe("ChatView Workspace (full app)", () => {
     }
   });
 
-  it("creates a worktree from the sidebar new workspace dialog", async () => {
-    const createdThreadId = "thread-browser-test-created-worktree" as ThreadId;
+  it("opens the project's draft with a new worktree from the sidebar's new workspace button", async () => {
+    setDraftThreadWithoutWorktree();
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,
       snapshot: createDraftOnlySnapshot(),
-      resolveRpc: (body) => {
-        if (body._tag === WS_METHODS.vcsListRefs) {
-          return {
-            isRepo: true,
-            hasPrimaryRemote: true,
-            nextCursor: null,
-            totalCount: 1,
-            refs: [
-              {
-                name: "main",
-                current: true,
-                isDefault: true,
-                worktreePath: null,
-              },
-            ],
-          };
-        }
-        if (body._tag === WS_METHODS.gitCreateWorktreeForProject) {
-          return {
-            worktreeId: "worktree-browser-test-created",
-            sessionId: createdThreadId,
-          };
-        }
-        return undefined;
-      },
     });
 
     try {
-      await openNewWorkspaceDialog();
-      await page.getByRole("button", { name: /Create worktree/ }).click();
+      await openNewWorkspaceDraft();
 
-      await vi.waitFor(
-        () => {
-          const createWorktreeRequest = wsRequests.find(
-            (request) => request._tag === WS_METHODS.gitCreateWorktreeForProject,
-          ) as
-            | {
-                _tag: string;
-                intent?: { kind?: string; branchName?: string };
-                projectId?: string;
-              }
-            | undefined;
-
-          expect(createWorktreeRequest).toMatchObject({
-            _tag: WS_METHODS.gitCreateWorktreeForProject,
-            projectId: PROJECT_ID,
-            intent: {
-              kind: "branch",
-              branchName: "main",
-            },
-          });
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-
-      await waitForURL(
-        mounted.router,
-        (path) => path === serverThreadPath(createdThreadId),
-        "Route should switch to the created worktree session.",
-      );
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("updates the selected branch in the new workspace dialog before creation", async () => {
-    const createdThreadId = "thread-browser-test-selected-worktree" as ThreadId;
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createDraftOnlySnapshot(),
-      resolveRpc: (body) => {
-        if (body._tag === WS_METHODS.vcsListRefs) {
-          return {
-            isRepo: true,
-            hasPrimaryRemote: true,
-            nextCursor: null,
-            totalCount: 2,
-            refs: [
-              {
-                name: "main",
-                current: true,
-                isDefault: true,
-                worktreePath: null,
-              },
-              {
-                name: "release/next",
-                current: false,
-                isDefault: false,
-                worktreePath: null,
-              },
-            ],
-          };
-        }
-        if (body._tag === WS_METHODS.gitCreateWorktreeForProject) {
-          return {
-            worktreeId: "worktree-browser-test-selected",
-            sessionId: createdThreadId,
-          };
-        }
-        return undefined;
-      },
-    });
-
-    try {
-      await openNewWorkspaceDialog();
-      await page.getByText("release/next", { exact: true }).click();
-      await page.getByRole("button", { name: /Create worktree/ }).click();
-
-      await vi.waitFor(
-        () => {
-          const createWorktreeRequest = wsRequests.find(
-            (request) => request._tag === WS_METHODS.gitCreateWorktreeForProject,
-          ) as
-            | {
-                _tag: string;
-                intent?: { branchName?: string };
-              }
-            | undefined;
-
-          expect(createWorktreeRequest?.intent?.branchName).toBe("release/next");
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("keeps the new workspace from-branch picker opaque when opened wide", async () => {
-    const branches = [
-      {
-        name: "main",
-        current: true,
-        isDefault: true,
-        worktreePath: null,
-      },
-      ...Array.from({ length: 80 }, (_, index) => ({
-        name: `feature/very-long-worktree-branch-selector-regression-${String(index).padStart(2, "0")}`,
-        current: false,
-        isDefault: false,
-        worktreePath: null,
-      })),
-    ];
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createDraftOnlySnapshot(),
-      resolveRpc: (body) => {
-        if (body._tag === WS_METHODS.vcsListRefs) {
-          return {
-            isRepo: true,
-            hasPrimaryRemote: true,
-            nextCursor: null,
-            totalCount: branches.length,
-            refs: branches,
-          };
-        }
-        return undefined;
-      },
-    });
-
-    try {
-      await openNewWorkspaceDialog();
-      await page.getByRole("tab", { name: "New branch" }).click();
-
-      const fromBranchTrigger = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll<HTMLButtonElement>('[data-slot="combobox-trigger"]'))
-            .filter((element) => element.getBoundingClientRect().width > 0)
-            .find((element) => element.textContent?.includes("main")) ?? null,
-        "Unable to find the new workspace from-branch selector trigger.",
-      );
-
-      await clickEnabledButton(
-        fromBranchTrigger,
-        "New workspace branch selector did not become actionable.",
-      );
-      await expectVisibleComboboxPopupToBeOpaqueAndClipped();
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("ignores stale generated branch names after the base branch changes", async () => {
-    let resolveGeneration!: (value: { branch: string }) => void;
-    const generationPromise = new Promise<{ branch: string }>((resolve) => {
-      resolveGeneration = resolve;
-    });
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createDraftOnlySnapshot(),
-      resolveRpc: (body) => {
-        if (body._tag === WS_METHODS.vcsListRefs) {
-          return {
-            isRepo: true,
-            hasPrimaryRemote: true,
-            nextCursor: null,
-            totalCount: 2,
-            refs: [
-              {
-                name: "main",
-                current: true,
-                isDefault: true,
-                worktreePath: null,
-              },
-              {
-                name: "release/next",
-                current: false,
-                isDefault: false,
-                worktreePath: null,
-              },
-            ],
-          };
-        }
-        if (body._tag === WS_METHODS.textGenerationGenerateBranchName) {
-          return generationPromise;
-        }
-        return undefined;
-      },
-    });
-
-    try {
-      await openNewWorkspaceDialog();
-      await page.getByRole("tab", { name: "New branch" }).click();
-      await page.getByRole("button", { name: "Generate branch name" }).click();
-
-      await vi.waitFor(
-        () => {
-          expect(
-            wsRequests.some(
-              (request) => request._tag === WS_METHODS.textGenerationGenerateBranchName,
-            ),
-          ).toBe(true);
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-
-      const fromBranchTrigger = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll<HTMLButtonElement>('[data-slot="combobox-trigger"]'))
-            .filter((element) => element.getBoundingClientRect().width > 0)
-            .find((element) => element.textContent?.includes("main")) ?? null,
-        "Unable to find the new workspace from-branch selector trigger.",
-      );
-      await clickEnabledButton(
-        fromBranchTrigger,
-        "New workspace branch selector did not become actionable.",
-      );
-      await page.getByText("release/next", { exact: true }).click();
-
-      await vi.waitFor(
-        () => {
-          const releaseTrigger = Array.from(
-            document.querySelectorAll<HTMLButtonElement>('[data-slot="combobox-trigger"]'),
-          )
-            .filter((element) => element.getBoundingClientRect().width > 0)
-            .find((element) => element.textContent?.includes("release/next"));
-          expect(releaseTrigger).toBeTruthy();
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-
-      resolveGeneration({ branch: "stale/generated" });
-      await waitForLayout();
-      const branchNameInput = await waitForElement(
-        () => document.querySelector<HTMLInputElement>('input[placeholder="task/short-name"]'),
-        "Unable to find new branch name input.",
-      );
-
-      await vi.waitFor(
-        () => {
-          expect(branchNameInput.value).toBe("");
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("preserves the selected branch when reopening the new workspace dialog", async () => {
-    const createdThreadId = "thread-browser-test-reopened-worktree" as ThreadId;
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createDraftOnlySnapshot(),
-      resolveRpc: (body) => {
-        if (body._tag === WS_METHODS.vcsListRefs) {
-          return {
-            isRepo: true,
-            hasPrimaryRemote: true,
-            nextCursor: null,
-            totalCount: 2,
-            refs: [
-              {
-                name: "main",
-                current: true,
-                isDefault: true,
-                worktreePath: null,
-              },
-              {
-                name: "release/next",
-                current: false,
-                isDefault: false,
-                worktreePath: null,
-              },
-            ],
-          };
-        }
-        if (body._tag === WS_METHODS.gitCreateWorktreeForProject) {
-          return {
-            worktreeId: "worktree-browser-test-reopened",
-            sessionId: createdThreadId,
-          };
-        }
-        return undefined;
-      },
-    });
-
-    try {
-      await openNewWorkspaceDialog();
-      await page.getByText("release/next", { exact: true }).click();
-      await page.getByText("Cancel", { exact: true }).click();
-
-      await openNewWorkspaceDialog();
-      await page.getByRole("button", { name: /Create worktree/ }).click();
-
-      await vi.waitFor(
-        () => {
-          const createWorktreeRequest = wsRequests.findLast(
-            (request) => request._tag === WS_METHODS.gitCreateWorktreeForProject,
-          ) as
-            | {
-                _tag: string;
-                intent?: { branchName?: string };
-              }
-            | undefined;
-
-          expect(createWorktreeRequest?.intent?.branchName).toBe("release/next");
-        },
-        { timeout: 8_000, interval: 16 },
-      );
+      await expect
+        .element(page.getByRole("switch", { name: "New worktree" }))
+        .toHaveAttribute("aria-checked", "true");
+      expect(
+        wsRequests.some((request) => request._tag === WS_METHODS.gitCreateWorktreeForProject),
+      ).toBe(false);
     } finally {
       await mounted.cleanup();
     }
@@ -1478,6 +1334,10 @@ describe("ChatView Workspace (full app)", () => {
           runOnWorktreeCreate: true,
         },
       ]),
+      // A node without the setup feed: the send shows its wait, but no stages.
+      configureFixture: (nextFixture) => {
+        nextFixture.unservedStreams = new Set([WS_METHODS.subscribeWorktreeSetup]);
+      },
       resolveRpc: (body) => {
         if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
           return dispatchPromise;
@@ -1872,7 +1732,7 @@ describe("ChatView Workspace (full app)", () => {
     }
   });
 
-  it("hides the Crown rail on an empty thread and restores it on request", async () => {
+  it("opens the Crown rail on an empty thread, and its toggle closes and reopens it", async () => {
     const draftId = DraftId.make("draft-empty-thread-overview");
     useComposerDraftStore.setState({
       draftThreadsByThreadKey: {
@@ -1895,7 +1755,7 @@ describe("ChatView Workspace (full app)", () => {
     });
 
     const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
+      viewport: WIDE_FOOTER_VIEWPORT,
       snapshot: createDraftOnlySnapshot(),
       initialPath: `/draft/${draftId}`,
     });
@@ -1906,8 +1766,7 @@ describe("ChatView Workspace (full app)", () => {
         "Unable to find the new-thread hero.",
       );
 
-      // The overview describes a thread's history, so it stays out of the way
-      // until there is one — or until the user explicitly asks for it.
+      // The new-thread page opens with the overview docked, like any thread.
       // Open state plus visibility, not DOM presence: the rail stays mounted
       // through its exit transition.
       const overviewShowing = () => {
@@ -1917,7 +1776,7 @@ describe("ChatView Workspace (full app)", () => {
       };
       await vi.waitFor(
         () => {
-          expect(overviewShowing()).toBe(false);
+          expect(overviewShowing()).toBe(true);
         },
         { timeout: 8_000, interval: 16 },
       );
@@ -1928,7 +1787,14 @@ describe("ChatView Workspace (full app)", () => {
         "Unable to find the overview toggle.",
       );
       overviewToggle.click();
+      await vi.waitFor(
+        () => {
+          expect(overviewShowing()).toBe(false);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
 
+      overviewToggle.click();
       await vi.waitFor(
         () => {
           expect(overviewShowing()).toBe(true);
@@ -2115,7 +1981,23 @@ describe("ChatView Workspace (full app)", () => {
         targetMessageId: "msg-user-sticky-claude-model-test" as MessageId,
         targetText: "sticky claude model test",
       }),
-      configureFixture: enableChatNewLocalShortcut,
+      configureFixture: (nextFixture) => {
+        enableChatNewLocalShortcut(nextFixture);
+        // The last-used choice stands only on a node that lists its provider.
+        const codex = nextFixture.serverConfig.providers[0];
+        if (!codex) throw new Error("Expected the default Codex provider fixture.");
+        nextFixture.serverConfig = {
+          ...nextFixture.serverConfig,
+          providers: [
+            ...nextFixture.serverConfig.providers,
+            {
+              ...codex,
+              driver: ProviderDriverKind.make("claudeAgent"),
+              instanceId: ProviderInstanceId.make("claudeAgent"),
+            },
+          ],
+        };
+      },
     });
 
     try {

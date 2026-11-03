@@ -15,6 +15,7 @@ import {
 } from "./azureDevOpsPullRequestOperations.ts";
 import * as AzureDevOpsPullRequests from "./azureDevOpsPullRequests.ts";
 import * as AzureDevOpsWorkItems from "./azureDevOpsWorkItems.ts";
+import { sourceControlProviderErrorFrom } from "./forgeFailure.ts";
 import * as SourceControlProvider from "./SourceControlProvider.ts";
 export { azureDevOpsDiscovery as discovery } from "./SourceControlProviderDiscoveryCatalog.ts";
 
@@ -22,12 +23,7 @@ function providerError(
   operation: string,
   cause: AzureDevOpsCli.AzureDevOpsCliError,
 ): SourceControlProviderError {
-  return new SourceControlProviderError({
-    provider: "azure-devops",
-    operation,
-    detail: cause.detail,
-    cause,
-  });
+  return sourceControlProviderErrorFrom("azure-devops", operation, cause);
 }
 
 function toChangeRequest(

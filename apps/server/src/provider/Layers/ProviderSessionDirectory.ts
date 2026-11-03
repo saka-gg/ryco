@@ -172,21 +172,20 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
       ),
     );
 
-  const listThreadIds: ProviderSessionDirectoryShape["listThreadIds"] = () =>
-    repository.list().pipe(
-      Effect.mapError(toPersistenceError("ProviderSessionDirectory.listThreadIds:list")),
-      Effect.map((rows) => rows.map((row) => row.threadId)),
-    );
+  const toRuntimeBindings = (rows: ReadonlyArray<ProviderSessionRuntime>, operation: string) =>
+    Effect.forEach(rows, (row) => toRuntimeBinding(row, operation), { concurrency: "unbounded" });
 
   const listBindings: ProviderSessionDirectoryShape["listBindings"] = () =>
     repository.list().pipe(
       Effect.mapError(toPersistenceError("ProviderSessionDirectory.listBindings:list")),
+      Effect.flatMap((rows) => toRuntimeBindings(rows, "ProviderSessionDirectory.listBindings")),
+    );
+
+  const listActiveBindings: ProviderSessionDirectoryShape["listActiveBindings"] = () =>
+    repository.listActive().pipe(
+      Effect.mapError(toPersistenceError("ProviderSessionDirectory.listActiveBindings:list")),
       Effect.flatMap((rows) =>
-        Effect.forEach(
-          rows,
-          (row) => toRuntimeBinding(row, "ProviderSessionDirectory.listBindings"),
-          { concurrency: "unbounded" },
-        ),
+        toRuntimeBindings(rows, "ProviderSessionDirectory.listActiveBindings"),
       ),
     );
 
@@ -199,8 +198,8 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
       ),
     getProvider,
     getBinding,
-    listThreadIds,
     listBindings,
+    listActiveBindings,
   } satisfies ProviderSessionDirectoryShape;
 });
 

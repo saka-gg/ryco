@@ -20,14 +20,14 @@ import {
   type SessionEvent,
 } from "@github/copilot-sdk";
 import { Effect, Option } from "effect";
-import {
-  appendAttachmentPathLines,
-  formatAttachmentPathLines,
-  type AttachmentPathLineEntry,
-} from "@ryco/shared/attachmentPrompt";
+import { appendAttachmentPathLines } from "@ryco/shared/attachmentPrompt";
 import { getModelSelectionStringOptionValue } from "@ryco/shared/model";
 
-import { isPersistableChatAttachment, readPersistedAttachment } from "../../attachmentStore.ts";
+import {
+  attachmentPathLines,
+  isPersistableChatAttachment,
+  readPersistedAttachment,
+} from "../../attachmentStore.ts";
 import { createProcessDeviceToolBinding } from "../../providerTools/deviceToolGateway.ts";
 import {
   ProviderAdapterProcessError,
@@ -36,6 +36,7 @@ import {
   ProviderAdapterValidationError,
 } from "../Errors.ts";
 import type { CopilotAdapterShape } from "../Services/CopilotAdapter.ts";
+import { providerThreadSnapshotFromTurnIds } from "../providerThreadSnapshot.ts";
 import { requireRuntimeSessionId } from "../runtimeSession.ts";
 import {
   COPILOT_CLIENT_STOP_TIMEOUT_MS,
@@ -49,17 +50,18 @@ import {
   type PendingApprovalRequest,
   type PendingTurnStartRequest,
   type PendingUserInputRequest,
-  buildThreadSnapshot,
   isSessionNotFoundError,
   makeCopilotClientOptions,
   selectionTargetsCopilotInstance,
   toMessage,
+  withCopilotAgentPriority,
 } from "./CopilotAdapter.types.ts";
 import {
   installAgentControlNativeHttp,
   type AgentControlNativeHttpInjection,
   redactAgentControlSecrets,
 } from "../../agentControl/ProviderInjection.ts";
+import { withThreadAttribution } from "../../localServers/threadAttributionEnv.ts";
 
 type CopilotReasoningEffort = "low" | "medium" | "high" | "xhigh";
 
@@ -203,7 +205,17 @@ export const makeStartSession =
       }
 
       const clientOptions: CopilotClientOptions = yield* Effect.promise(() =>
-        makeCopilotClientOptions(deps.copilotSettings, deps.environment, input.cwd),
+        // The CLI and every job it starts carry the thread's id, so the servers it leaves running
+        // stay listed under this thread (`localServers/threadAttributionEnv.ts`).
+        makeCopilotClientOptions(
+          deps.copilotSettings,
+          withThreadAttribution(deps.environment, input.threadId),
+          input.cwd,
+        ),
+      ).pipe(
+        Effect.flatMap((options) =>
+          withCopilotAgentPriority(deps.options?.processPriority, options),
+        ),
       );
       const client =
         deps.options?.clientFactory?.(clientOptions) ?? new CopilotClient(clientOptions);
@@ -322,7 +334,7 @@ export const makeStartSession =
         pendingTurnStarts: new Set(),
         htmlRenderToolCalls: new Map(),
         deviceToolBinding,
-        turns: [],
+        turnIds: [],
         renewSession: () => client.createSession(sessionConfig),
         attachSession: (nextSession) => {
           record.unsubscribe();
@@ -424,13 +436,11 @@ export const makeSendTurn =
         });
       }
       let attachmentTotalBytes = 0;
-      const pathLineEntries: AttachmentPathLineEntry[] = [];
       const attachments: MessageOptions["attachments"] = (yield* Effect.forEach(
         input.attachments ?? [],
         (attachment) =>
           Effect.gen(function* () {
             if (!isPersistableChatAttachment(attachment)) {
-              pathLineEntries.push({ attachment });
               return null;
             }
             const persisted = yield* Effect.promise(() =>
@@ -506,7 +516,10 @@ export const makeSendTurn =
         prompt:
           appendAttachmentPathLines(
             input.input ?? "",
-            formatAttachmentPathLines(pathLineEntries),
+            attachmentPathLines({
+              attachmentsDir: deps.serverConfig.attachmentsDir,
+              attachments: input.attachments,
+            }),
           ) ?? "",
         ...(attachments.length > 0 ? { attachments } : {}),
         mode: "immediate",
@@ -706,7 +719,7 @@ export const makeReadThread =
   (threadId) =>
     Effect.gen(function* () {
       const record = yield* deps.requireSession(threadId);
-      return buildThreadSnapshot(threadId, record.turns);
+      return providerThreadSnapshotFromTurnIds(threadId, record.turnIds);
     });
 
 /** Copilot cannot forget turns; ProviderService refuses before reaching this. */

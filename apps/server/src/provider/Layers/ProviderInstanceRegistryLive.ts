@@ -40,10 +40,12 @@ import {
   type ProviderDriverKind,
   type ServerProvider,
 } from "@ryco/contracts";
+import { providerInstanceEnvelopeEnabled } from "@ryco/shared/providerInstanceEnablement";
 import { Effect, Equal, Exit, PubSub, Ref, Schema, Scope, Stream } from "effect";
 import * as Semaphore from "effect/Semaphore";
 
 import { trackStartupPhase } from "../../startupStallMonitor.ts";
+import { resolveInstanceEnabled } from "../providerInstanceConfig.ts";
 import { buildUnavailableProviderSnapshot } from "../unavailableProviderSnapshot.ts";
 import type {
   ConfiguredProviderIdentity,
@@ -132,22 +134,11 @@ const orderChanged = <A>(previousOrder: ReadonlyArray<A>, nextOrder: ReadonlyArr
   return false;
 };
 
-const decodedConfigEnabled = (config: unknown): boolean | undefined => {
-  if (!config || typeof config !== "object" || globalThis.Array.isArray(config)) {
-    return undefined;
-  }
-  const enabled = (config as { readonly enabled?: unknown }).enabled;
-  return typeof enabled === "boolean" ? enabled : undefined;
-};
-
 /** Decode an envelope's opaque config; the single decode path for builds and boot seeding. */
 const decodeInstanceConfig = <R>(driver: AnyProviderDriver<R>, entry: ProviderInstanceConfig) =>
   Schema.decodeUnknownEffect(driver.configSchema)(entry.config ?? driver.defaultConfig()).pipe(
     Effect.result,
   );
-
-const resolveInstanceEnabled = (entry: ProviderInstanceConfig, typedConfig: unknown): boolean =>
-  entry.enabled ?? decodedConfigEnabled(typedConfig) ?? true;
 
 /** The configured identity of a built instance. */
 export const configuredIdentityOfInstance = (
@@ -182,7 +173,7 @@ export const resolveConfiguredProviderIdentities = <R>(input: {
         driverKind: entry.driver,
         displayName: entry.displayName,
         accentColor: entry.accentColor,
-        enabled: resolveInstanceEnabled(entry, decoded.success),
+        enabled: providerInstanceEnvelopeEnabled(entry),
       });
     }
     return identities;
@@ -260,7 +251,7 @@ const buildEntry = <R>(input: {
     // from the parent, so replaced instances leave no finalizer behind.
     const childScope = yield* Scope.fork(parentScope);
 
-    const enabled = resolveInstanceEnabled(entry, typedConfig);
+    const enabled = providerInstanceEnvelopeEnabled(entry);
     const createResult = yield* trackStartupPhase(
       `provider.instance.create:${rawInstanceId}`,
       driver.create({

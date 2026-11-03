@@ -756,6 +756,22 @@ function deriveTaskAgentAliases(
   return { byLaunchTool, bySubagentId };
 }
 
+/**
+ * Whether `activities` hold anything the agent derivations start from: a task
+ * row (native subagents and workflows) or a subagent or collaboration tool
+ * call (the transcript fallback). Without one, `deriveThreadSubagents` and
+ * `deriveThreadAgentPanelModel` find no agents, so a surface that only needs
+ * them while a chat has agents can skip both (one cheap pass, no sort or fold).
+ */
+export function hasThreadAgentActivity(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): boolean {
+  return activities.some(
+    (activity) =>
+      activity.kind.startsWith("task.") || isSubagentPayload(payloadFromActivity(activity)),
+  );
+}
+
 export function deriveThreadSubagents(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   options?: {

@@ -1,11 +1,15 @@
-import { Cause, Context, Effect, Exit, FileSystem, Option, Path, Schema } from "effect";
+import { Cause, Context, Effect, Exit, FileSystem, Option, Path, Schema, Semaphore } from "effect";
 import {
   type ClientOrchestrationCommand,
   DEFAULT_PROJECT_METADATA_DIR,
+  type MessageId,
+  type ThreadId,
   type OrchestrationCommand,
   OrchestrationDispatchCommandError,
   ProjectMetadataDir,
   PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES,
+  PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
+  SERVER_MINTED_MESSAGE_ID_PREFIXES,
   type UploadChatAttachment,
   type UploadChatFileAttachment,
   type UploadChatImageAttachment,
@@ -35,6 +39,100 @@ function isKnownUploadAttachment(
   attachment: UploadChatAttachment,
 ): attachment is UploadChatImageAttachment | UploadChatFileAttachment {
   return attachment.type === "image" || attachment.type === "file";
+}
+
+/**
+ * A HEIC or HEIF photo, which no provider reads, continues as a JPEG converted with macOS's `sips`;
+ * a node without it refuses the photo with a message the composer shows. The converter loads only
+ * when such a photo arrives.
+ */
+/** At most two `sips` run at once, node-wide: a large photo's decode takes hundreds of megabytes. */
+const heicConversions = Semaphore.makeUnsafe(2);
+
+const convertHeicUpload = (name: string, bytes: Uint8Array) =>
+  Effect.tryPromise({
+    try: (signal) =>
+      import("../heicConversion.ts").then((conversion) =>
+        conversion.convertHeicAttachment({
+          name,
+          bytes,
+          maxOutputBytes: PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
+          signal,
+        }),
+      ),
+    catch: (cause) =>
+      new OrchestrationDispatchCommandError({
+        message: `'${name}' could not be converted from HEIC to JPEG.`,
+        cause,
+      }),
+  }).pipe(
+    Effect.flatMap((converted) =>
+      converted.ok
+        ? Effect.succeed(converted)
+        : Effect.fail(new OrchestrationDispatchCommandError({ message: converted.message })),
+    ),
+    heicConversions.withPermits(1),
+  );
+
+/** The id a command gives a new message: a turn start's, a steer's or a queued follow-up's. */
+const newMessageIdOf = (command: OrchestrationCommand): string | null => {
+  switch (command.type) {
+    case "thread.turn.start":
+    case "thread.turn.steer":
+      return command.message.messageId;
+    case "thread.queue.add":
+      return command.entry.messageId;
+    default:
+      return null;
+  }
+};
+
+/**
+ * A person's turn start, steer or queued follow-up may not use an id the server mints for
+ * messages nobody typed (`SERVER_MINTED_MESSAGE_ID_PREFIXES`): clients show those as another
+ * agent's message or a delegated result, and a queued entry is sent under its own id. Checked
+ * where a client's command enters, not here, because the server's own wakes pass through this
+ * normalizer too.
+ */
+export const refuseServerMintedMessageId = (
+  command: OrchestrationCommand,
+): Effect.Effect<void, OrchestrationDispatchCommandError> => {
+  const messageId = newMessageIdOf(command);
+  return messageId !== null &&
+    SERVER_MINTED_MESSAGE_ID_PREFIXES.some((prefix) => messageId.startsWith(prefix))
+    ? Effect.fail(
+        new OrchestrationDispatchCommandError({
+          message: "This message id is reserved for messages Ryco sends.",
+        }),
+      )
+    : Effect.void;
+};
+
+/**
+ * The attachments a client command uploads: a turn start's or steer's message, and a queued
+ * follow-up's (`thread.queue.add`, `thread.queue.edit`). All are stored the same way, so a
+ * queued entry holds attachment ids like a sent message.
+ */
+type UploadingCommand = Extract<
+  ClientOrchestrationCommand,
+  { type: "thread.turn.start" | "thread.turn.steer" | "thread.queue.add" | "thread.queue.edit" }
+>;
+
+const isUploadingCommand = (command: ClientOrchestrationCommand): command is UploadingCommand =>
+  command.type === "thread.turn.start" ||
+  command.type === "thread.turn.steer" ||
+  command.type === "thread.queue.add" ||
+  command.type === "thread.queue.edit";
+
+function uploadAttachmentsOf(command: UploadingCommand): ReadonlyArray<UploadChatAttachment> {
+  switch (command.type) {
+    case "thread.queue.add":
+      return command.entry.attachments;
+    case "thread.queue.edit":
+      return command.attachments;
+    default:
+      return command.message.attachments;
+  }
 }
 
 export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
@@ -170,15 +268,27 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
       } satisfies OrchestrationCommand;
     }
 
-    if (command.type !== "thread.turn.start" && command.type !== "thread.turn.steer") {
+    if (!isUploadingCommand(command)) {
       return command as OrchestrationCommand;
+    }
+    const uploads = uploadAttachmentsOf(command);
+    // A follow-up already sent as a message is a no-op add: its attachments are not stored again.
+    if (command.type === "thread.queue.add") {
+      const sent = yield* alreadySentMessage(command.threadId, command.entry.messageId);
+      if (sent) {
+        return {
+          ...command,
+          entry: { ...command.entry, attachments: [] },
+          alreadySent: true,
+        } satisfies OrchestrationCommand;
+      }
     }
 
     const adoptionAttempt = Option.getOrUndefined(
       yield* Effect.serviceOption(AttachmentAdoptionAttempt),
     );
     const preparedAttachments = yield* Effect.forEach(
-      command.message.attachments,
+      uploads,
       (attachment) =>
         Effect.gen(function* () {
           if (!isKnownUploadAttachment(attachment)) {
@@ -261,7 +371,14 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
           if (!decoded.ok) {
             return yield* new OrchestrationDispatchCommandError({ message: decoded.message });
           }
-          const { bytes, mimeType: normalizedMimeType } = decoded;
+          const {
+            name,
+            bytes,
+            mimeType: normalizedMimeType,
+          } = attachment.type === "image" &&
+          (decoded.mimeType === "image/heic" || decoded.mimeType === "image/heif")
+            ? yield* convertHeicUpload(attachment.name, decoded.bytes)
+            : { name: attachment.name, ...decoded };
 
           const attachmentId = createAttachmentId(command.threadId);
           if (!attachmentId) {
@@ -273,7 +390,7 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
           const persistedAttachment = {
             type: attachment.type,
             id: attachmentId,
-            name: attachment.name,
+            name,
             mimeType: normalizedMimeType,
             sizeBytes: bytes.byteLength,
           };
@@ -375,13 +492,44 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
       { concurrency: 1 },
     );
 
-    return {
-      ...command,
-      message: {
-        ...command.message,
-        attachments: normalizedAttachments,
-      },
-    } satisfies OrchestrationCommand;
+    switch (command.type) {
+      case "thread.queue.add":
+        return {
+          ...command,
+          entry: { ...command.entry, attachments: normalizedAttachments },
+        } satisfies OrchestrationCommand;
+      case "thread.queue.edit":
+        return { ...command, attachments: normalizedAttachments } satisfies OrchestrationCommand;
+      default:
+        return {
+          ...command,
+          message: {
+            ...command.message,
+            attachments: normalizedAttachments,
+          },
+        } satisfies OrchestrationCommand;
+    }
+  });
+
+/**
+ * Whether `messageId` is already a message of the thread. The decider's command model keeps only
+ * the thread's user-message anchors from before the server started, so an add of a follow-up
+ * sent before then is recognised here.
+ */
+const alreadySentMessage = (threadId: ThreadId, messageId: MessageId) =>
+  Effect.gen(function* () {
+    const query = yield* ProjectionSnapshotQuery;
+    if (query.getThreadMessageById === undefined) return false;
+    const message = yield* query.getThreadMessageById({ threadId, messageId }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new OrchestrationDispatchCommandError({
+            message: "Failed to read the thread before queuing the follow-up.",
+            cause,
+          }),
+      ),
+    );
+    return Option.isSome(message);
   });
 
 /** Keep streamed upload reservations until dispatch has a definitive result.
@@ -395,16 +543,14 @@ export function withChatAttachmentAdoption<A, E, R>(
   command: ClientOrchestrationCommand,
   dispatch: Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E, R> {
-  const tokens =
-    command.type === "thread.turn.start" || command.type === "thread.turn.steer"
-      ? command.message.attachments.flatMap((attachment) =>
-          isKnownUploadAttachment(attachment) &&
-          attachment.type === "file" &&
-          attachment.uploadToken !== undefined
-            ? [attachment.uploadToken]
-            : [],
-        )
-      : [];
+  const tokens = (isUploadingCommand(command) ? uploadAttachmentsOf(command) : []).flatMap(
+    (attachment) =>
+      isKnownUploadAttachment(attachment) &&
+      attachment.type === "file" &&
+      attachment.uploadToken !== undefined
+        ? [attachment.uploadToken]
+        : [],
+  );
   if (tokens.length === 0) return dispatch;
   return Effect.gen(function* () {
     const uploads = Option.getOrUndefined(yield* Effect.serviceOption(ChatAttachmentUploads));

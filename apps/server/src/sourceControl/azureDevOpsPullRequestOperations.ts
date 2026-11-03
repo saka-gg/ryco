@@ -87,6 +87,8 @@ import {
   type AzureDevOpsPullRequest,
   type NormalizedAzureDevOpsPullRequestRecord,
 } from "./azureDevOpsPullRequests.ts";
+import { forgeFailureFields } from "./forgeHttpRateLimit.ts";
+import { INTERNAL_PATCH_DIFF_ARGS } from "../vcs/GitVcsDriver.ts";
 
 export const AZURE_DEVOPS_DIFF_MAX_BYTES = 8 * 1024 * 1024;
 const VIEWER_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -265,7 +267,16 @@ export function makeAzureDevOpsPullRequestOperations(azure: AzureDevOpsCliShape)
   const executeJson = (cwd: string, operation: string, args: ReadonlyArray<string>) =>
     azure.execute({ cwd, args: [...args, "--only-show-errors", "--output", "json"] }).pipe(
       Effect.map((output) => output.stdout.trim()),
-      Effect.mapError((error) => cliError(operation, error.detail, error)),
+      // Keep the kind az's failure was read as, so a throttled read still reports a rate limit.
+      Effect.mapError(
+        (error) =>
+          new AzureDevOpsCliError({
+            operation,
+            detail: error.detail,
+            ...forgeFailureFields(error),
+            cause: error,
+          }),
+      ),
     );
 
   const readPullRequest = (cwd: string, reference: string) =>
@@ -522,25 +533,13 @@ export function makeAzureDevOpsPullRequestOperations(azure: AzureDevOpsCliShape)
       }
     });
 
-  // The page parses `a/` / `b/` headers, so the user's diff config (`diff.noprefix`,
-  // `diff.srcPrefix`, `diff.relative`, textconv drivers, `diff.submodule`) must not apply.
+  // The page parses `a/` / `b/` headers, so the user's diff config must not apply.
   const gitDiff = (cwd: string, operation: string, args: ReadonlyArray<string>) =>
     azure
       .runGit({
         cwd,
         operation,
-        args: [
-          "diff",
-          "--no-color",
-          "--no-ext-diff",
-          "--no-textconv",
-          "--find-renames",
-          "--src-prefix=a/",
-          "--dst-prefix=b/",
-          "--no-relative",
-          "--submodule=short",
-          ...args,
-        ],
+        args: [...INTERNAL_PATCH_DIFF_ARGS, "--find-renames", ...args],
         maxOutputBytes: AZURE_DEVOPS_DIFF_MAX_BYTES,
         timeoutMs: 120_000,
       })

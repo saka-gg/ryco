@@ -77,12 +77,21 @@ function upgrade(port: number) {
 
 const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Waits until the gate holds `count` connections. A fixed sleep lost the race to the request's
+ * arrival on a loaded CI runner, so this waits for the gate itself (bounded).
+ */
+async function untilHeld(gate: { readonly pendingCount: () => number }, count: number) {
+  const deadline = Date.now() + 5_000;
+  while (gate.pendingCount() < count && Date.now() < deadline) await tick(5);
+  expect(gate.pendingCount()).toBe(count);
+}
+
 describe("http startup gate", () => {
   it("holds requests that arrive before the handler and replays them once it attaches", async () => {
     const { server, gate, port } = await listenGated();
     const early = get(port, "/api/early");
-    await tick();
-    expect(gate.pendingCount()).toBe(1);
+    await untilHeld(gate, 1);
 
     server.on("request", (request, response) => {
       response.end(`handled ${request.url}`);
@@ -97,8 +106,7 @@ describe("http startup gate", () => {
   it("holds upgrades and replays them into the real upgrade handler", async () => {
     const { server, gate, port } = await listenGated();
     const early = upgrade(port);
-    await tick();
-    expect(gate.pendingCount()).toBe(1);
+    await untilHeld(gate, 1);
 
     server.on("request", (_request, response) => response.end());
     server.on("upgrade", (_request, socket: Net.Socket) => {
@@ -110,10 +118,10 @@ describe("http startup gate", () => {
   });
 
   it("answers 503 with Retry-After once the bound is full", async () => {
-    const { port } = await listenGated({ maxPending: 1 });
+    const { port, gate } = await listenGated({ maxPending: 1 });
     // Still held when the test ends; the teardown resets its connection.
     get(port, "/held").catch(() => undefined);
-    await tick();
+    await untilHeld(gate, 1);
     const overflow = await get(port, "/overflow");
     expect(overflow.status).toBe(503);
     expect(overflow.headers["retry-after"]).toBe("1");
@@ -128,10 +136,10 @@ describe("http startup gate", () => {
   });
 
   it("answers held requests and upgrades with 503 when the server closes while gated", async () => {
-    const { server, port } = await listenGated();
+    const { server, gate, port } = await listenGated();
     const request = get(port, "/held");
     const upgraded = upgrade(port);
-    await tick();
+    await untilHeld(gate, 2);
     server.close();
     await expect(request).resolves.toMatchObject({ status: 503 });
     await expect(upgraded).resolves.toContain("503 Service Unavailable");
@@ -150,8 +158,7 @@ describe("http startup gate", () => {
       body: "shell",
     });
     const api = get(port, "/api/auth/session");
-    await tick();
-    expect(gate.pendingCount()).toBe(1);
+    await untilHeld(gate, 1);
 
     server.on("request", (_request, response) => response.end("router"));
     await expect(api).resolves.toMatchObject({ body: "router" });

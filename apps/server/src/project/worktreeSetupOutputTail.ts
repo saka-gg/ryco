@@ -3,7 +3,7 @@ import { WORKTREE_SETUP_OUTPUT_TAIL_LINES } from "@ryco/contracts";
 // CSI (`ESC [ … final`), OSC (`ESC ] … BEL` or `ESC ] … ESC \`), and the
 // remaining two-byte escapes. A shell prompt is mostly these.
 const TERMINAL_ESCAPE =
-  // eslint-disable-next-line no-control-regex
+  // eslint-disable-next-line no-control-regex -- terminal escapes start with ESC, and OSC ends with BEL
   /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[@-Z\\-_]/gu;
 // Everything below space except tab, newline and carriage return.
 // eslint-disable-next-line no-control-regex

@@ -565,6 +565,33 @@ describe("environment snapshot persistence", () => {
     runtime.dispose();
   });
 
+  it("keeps a switched-off node's snapshot stored but does not show it", async () => {
+    const { db, snapshots } = createFakeSnapshotDb();
+    const offId = env("persist-switched-off");
+    const onId = env("persist-switched-on");
+    for (const environmentId of [offId, onId]) {
+      await db.saveEnvironmentSnapshot({
+        environmentId,
+        schemaVersion: ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION,
+        payload: boundStoredEnvironmentSnapshot(storedRecord(environmentId)).payload,
+        updatedAt: 1,
+      });
+    }
+    const runtime = createSnapshotPersistenceRuntime({
+      db,
+      store: useStore,
+      now: () => 10,
+      hasDirectEnvironment: () => true,
+      isEnvironmentSwitchedOff: (environmentId) => environmentId === offId,
+    });
+    await runtime.hydrate();
+
+    expect(useStore.getState().environmentStateById[offId]).toBeUndefined();
+    expect(snapshots.has(offId)).toBe(true);
+    expect(useStore.getState().environmentStateById[onId]?.projectIds).toHaveLength(1);
+    runtime.dispose();
+  });
+
   it("purges an orphan snapshot no roster entry or catalog record can name", async () => {
     const { db, snapshots } = createFakeSnapshotDb();
     const orphanId = env("persist-orphan");

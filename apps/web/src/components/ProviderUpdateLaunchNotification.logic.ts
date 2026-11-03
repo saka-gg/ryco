@@ -197,6 +197,55 @@ export function providerUpdateNotificationKey(
     : null;
 }
 
+/**
+ * A candidate's update by driver and version alone. Which instance represents a driver can change
+ * between refreshes (with the default instance not offered, the latest-checked custom one), so a
+ * dismissal must not depend on it.
+ */
+function providerUpdateDriverKey(
+  candidate: ProviderUpdateCandidate,
+  origin: Pick<EnvironmentNotificationOrigin, "environmentId">,
+): string {
+  return [
+    origin.environmentId,
+    [candidate.driver, candidate.versionAdvisory.latestVersion].join(":"),
+  ].join("|");
+}
+
+/**
+ * The update candidates whose update (this provider, this version, on this node) was not
+ * dismissed. Dismissal is per provider: a toast that offered several updates must not come back
+ * for the ones already dismissed when the set changes (another provider's update appears or goes
+ * away), or when another instance of the provider now represents it. A newer version is a new
+ * key, so it is offered again.
+ */
+export function undismissedProviderUpdateCandidates(
+  candidates: ReadonlyArray<ProviderUpdateCandidate>,
+  dismissedKeys: ReadonlySet<string>,
+  origin: Pick<EnvironmentNotificationOrigin, "environmentId">,
+): ProviderUpdateCandidate[] {
+  return candidates.filter(
+    (candidate) =>
+      !dismissedKeys.has(providerUpdateNotificationKey([candidate], origin)!) &&
+      !dismissedKeys.has(providerUpdateDriverKey(candidate, origin)),
+  );
+}
+
+/**
+ * What dismissing a toast for `candidates` records: each candidate's key, its driver's key and the
+ * whole set's.
+ */
+export function providerUpdateDismissalKeys(
+  candidates: ReadonlyArray<ProviderUpdateCandidate>,
+  origin: Pick<EnvironmentNotificationOrigin, "environmentId">,
+): string[] {
+  return [
+    providerUpdateNotificationKey(candidates, origin),
+    ...candidates.map((candidate) => providerUpdateNotificationKey([candidate], origin)),
+    ...candidates.map((candidate) => providerUpdateDriverKey(candidate, origin)),
+  ].filter((key): key is string => key !== null);
+}
+
 export function providerUpdateCandidateKey(provider: ProviderUpdateCandidate): string {
   return providerUpdateNotificationKey([provider])!;
 }

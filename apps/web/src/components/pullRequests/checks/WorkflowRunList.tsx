@@ -1,5 +1,10 @@
 import type { SourceControlWorkflowStep } from "@ryco/contracts";
-import type { ChangeRequestCheckState } from "@ryco/client-runtime/state/pull-request-review";
+import {
+  CHECK_STATE_LABEL,
+  checkStateOverall,
+  formatWorkflowDuration,
+  type ChangeRequestCheckState,
+} from "@ryco/client-runtime/state/pull-request-review";
 import { DateTime, Option } from "effect";
 import { ExternalLinkIcon, MoreHorizontalIcon, RotateCwIcon, SparklesIcon } from "lucide-react";
 import { memo, useCallback, useEffect, useId, useMemo, useState } from "react";
@@ -21,10 +26,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../../ui/tooltip";
 import { CheckStateGlyph } from "../primitives";
 import { useChecksTab } from "./checksContext";
 import {
-  CHECK_STATE_LABEL,
-  checkStateOverall,
   checksJobMemoryKey,
-  formatWorkflowDuration,
   isCompletedStatus,
   workflowItemState,
   type ChecksJobEntry,

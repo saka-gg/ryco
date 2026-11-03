@@ -1,4 +1,5 @@
-import type { ChangeRequest, ScopedThreadRef } from "@ryco/contracts";
+import { selectNodeRecordsThreadBranch } from "@ryco/client-runtime/state/threads";
+import type { ChangeRequest, ScopedThreadRef, ServerConfig } from "@ryco/contracts";
 import type {
   SourceControlCloneProtocol,
   SourceControlProviderDiscoveryItem,
@@ -9,7 +10,7 @@ import type {
   VcsStatusResult,
 } from "@ryco/contracts";
 import { Option } from "effect";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { flushSync } from "react-dom";
 import {
   ArrowDownIcon,
@@ -37,6 +38,7 @@ import { Spinner } from "~/components/ui/spinner";
 import { cn } from "~/lib/utils";
 import {
   buildMenuItems,
+  resolveCreatePrExecution,
   type GitActionIconName,
   type GitActionMenuItem,
   type GitQuickAction,
@@ -73,7 +75,7 @@ import { ScrollArea } from "~/components/ui/scroll-area";
 import { Textarea } from "~/components/ui/textarea";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
-import { openInPreferredEditor } from "~/editorPreferences";
+import { openPathInEditor } from "~/editorPreferences";
 import {
   GIT_USER_ACTION_KIND,
   gitMutationTrackingKey,
@@ -90,6 +92,9 @@ import { ensureEnvironmentApi } from "~/environmentApi";
 import { useSavedEnvironmentRuntimeStore } from "~/environments/runtime";
 import { usePrimaryEnvironmentId } from "~/environments/primary";
 import { useServerConfig } from "~/rpc/serverState";
+import { preloadableLazy, useLazyComponentReady } from "~/lib/preloadableLazy";
+import { useEnvironmentServerConfigSelector } from "~/hooks/useChatsAvailability";
+import { notifySurfaceLoadFailure } from "~/components/ui/surfaceLoadFailure";
 import { readLocalApi } from "~/localApi";
 import { getSourceControlPresentation } from "~/sourceControlPresentation";
 import { useSettingsDialogStore } from "../settingsDialogStore";
@@ -221,15 +226,22 @@ function getMenuActionDisabledReason({
   gitStatus,
   isBusy,
   hasPrimaryRemote,
+  createPrDialog,
 }: {
   item: GitActionMenuItem;
   gitStatus: VcsStatusResult | null;
   isBusy: boolean;
   hasPrimaryRemote: boolean;
+  /** Create PR opens the dialog, which commits and pushes too: its own rule says why not. */
+  createPrDialog: boolean;
 }): string | null {
   if (!item.disabled) return null;
   if (isBusy) return GIT_ACTION_BUSY_HINT;
   if (!gitStatus) return GIT_STATUS_UNAVAILABLE_HINT;
+  if (item.id === "pr" && createPrDialog && item.kind === "open_dialog") {
+    const execution = resolveCreatePrExecution({ gitStatus, isBusy, hasPrimaryRemote });
+    if (execution.kind === "unavailable") return execution.hint;
+  }
 
   const hasBranch = gitStatus.refName !== null;
   const hasChanges = gitStatus.hasWorkingTreeChanges;
@@ -959,8 +971,12 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
   );
 }
 
-/** The branch prefix of the environment's temporary worktree branches, once its config is known. */
-function useWorktreeBranchPrefix(environmentId: ScopedThreadRef["environmentId"] | null) {
+/**
+ * What following the checkout's branch needs from the environment's config: the
+ * prefix of its temporary worktree branches (undefined until the config is
+ * known), and whether the node records a started thread's branch itself.
+ */
+function useThreadBranchSyncConfig(environmentId: ScopedThreadRef["environmentId"] | null) {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const primaryServerConfig = useServerConfig();
   const environmentServerConfig = useSavedEnvironmentRuntimeStore((state) =>
@@ -968,15 +984,19 @@ function useWorktreeBranchPrefix(environmentId: ScopedThreadRef["environmentId"]
   );
   const serverConfig =
     environmentId === primaryEnvironmentId ? primaryServerConfig : environmentServerConfig;
-  return serverConfig?.settings.worktreeBranchPrefix;
+  return {
+    worktreeBranchPrefix: serverConfig?.settings.worktreeBranchPrefix,
+    nodeRecordsThreadBranch: selectNodeRecordsThreadBranch(serverConfig),
+  };
 }
 
 /**
  * The git controls' background work, independent of where (or whether) the
- * controls are shown: follows the checkout's live branch into the thread, and
- * refreshes git status when the window regains focus. The overview mounts it
- * once while it is open, so the hover flyout and the card can mount and
- * unmount the visual controls freely.
+ * controls are shown: follows the checkout's live branch into a draft (and
+ * into a started thread on an older node; a current node records that
+ * itself), and refreshes git status when the window regains focus. The
+ * overview mounts it once while it is open, so the hover flyout and the card
+ * can mount and unmount the visual controls freely.
  */
 export function GitThreadSync({
   gitCwd,
@@ -984,7 +1004,8 @@ export function GitThreadSync({
   draftId,
 }: Pick<GitActionsControlProps, "gitCwd" | "activeThreadRef" | "draftId">): null {
   const activeEnvironmentId = activeThreadRef?.environmentId ?? null;
-  const worktreeBranchPrefix = useWorktreeBranchPrefix(activeEnvironmentId);
+  const { worktreeBranchPrefix, nodeRecordsThreadBranch } =
+    useThreadBranchSyncConfig(activeEnvironmentId);
   const {
     activeServerThread,
     activeDraftThread,
@@ -1002,9 +1023,18 @@ export function GitThreadSync({
     !activeServerThread &&
     activeDraftThread?.envMode === "worktree" &&
     activeDraftThread.worktreePath === null;
+  // The node follows a started thread's checkout at every turn boundary and
+  // after its agent's git commands, guarded against newer branch changes; an
+  // unguarded second writer here could only race it.
+  const isBranchRecordedByNode = Boolean(activeServerThread) && nodeRecordsThreadBranch;
 
   useEffect(() => {
-    if (isGitActionRunning || isSelectingWorktreeBase || worktreeBranchPrefix === undefined) {
+    if (
+      isGitActionRunning ||
+      isSelectingWorktreeBase ||
+      isBranchRecordedByNode ||
+      worktreeBranchPrefix === undefined
+    ) {
       return;
     }
 
@@ -1028,6 +1058,7 @@ export function GitThreadSync({
     activeWorktreeBranch,
     gitCwd,
     gitStatus,
+    isBranchRecordedByNode,
     isGitActionRunning,
     isSelectingWorktreeBase,
     worktreeBranchPrefix,
@@ -1072,6 +1103,14 @@ export function GitThreadSync({
   return null;
 }
 
+const LazyGitCreatePullRequestDialog = preloadableLazy(() =>
+  import("./GitCreatePullRequestDialog").then((module) => module.default),
+);
+
+// Module level, so unrelated config pushes (provider probes) never re-render the control.
+const selectPullRequestOptions = (config: ServerConfig | null): boolean =>
+  config?.environment.capabilities.pullRequestOptions === true;
+
 export default function GitActionsControl({
   gitCwd,
   activeThreadRef,
@@ -1112,6 +1151,23 @@ export default function GitActionsControl({
   const [excludedFiles, setExcludedFiles] = useState<ReadonlySet<string>>(new Set());
   const [isEditingFiles, setIsEditingFiles] = useState(false);
   const [isPublishDialogOpen, setIsPublishDialogOpen] = useState(false);
+  const [isCreatePrDialogOpen, setIsCreatePrDialogOpen] = useState(false);
+  // Whether the node takes the Create PR dialog's title, description and draft choice.
+  const createPrDialog = useEnvironmentServerConfigSelector(
+    activeEnvironmentId,
+    selectPullRequestOptions,
+  );
+  // A failed dialog chunk closes it and offers a Retry, so the mount never throws to the route.
+  const createPrDialogReady = useLazyComponentReady(
+    LazyGitCreatePullRequestDialog,
+    isCreatePrDialogOpen,
+    {
+      onLoadError: (error) => {
+        setIsCreatePrDialogOpen(false);
+        notifySurfaceLoadFailure("pull request dialog", error, () => setIsCreatePrDialogOpen(true));
+      },
+    },
+  );
 
   const allFiles = gitStatusForActions?.workingTree.files ?? [];
   const selectedFiles = allFiles.filter((f) => !excludedFiles.has(f.path));
@@ -1119,8 +1175,8 @@ export default function GitActionsControl({
   const noneSelected = selectedFiles.length === 0;
 
   const gitActionMenuItems = useMemo(
-    () => buildMenuItems(gitStatusForActions, isGitActionRunning, hasPrimaryRemote),
-    [gitStatusForActions, hasPrimaryRemote, isGitActionRunning],
+    () => buildMenuItems(gitStatusForActions, isGitActionRunning, hasPrimaryRemote, createPrDialog),
+    [createPrDialog, gitStatusForActions, hasPrimaryRemote, isGitActionRunning],
   );
 
   const runDialogActionOnNewBranch = () => {
@@ -1179,6 +1235,10 @@ export default function GitActionsControl({
       return;
     }
     if (item.dialogAction === "create_pr") {
+      if (createPrDialog) {
+        setIsCreatePrDialogOpen(true);
+        return;
+      }
       void runGitActionWithToast({ action: "create_pr" });
       return;
     }
@@ -1203,8 +1263,7 @@ export default function GitActionsControl({
 
   const openChangedFileInEditor = useCallback(
     (filePath: string) => {
-      const api = readLocalApi();
-      if (!api || !gitCwd) {
+      if (!gitCwd) {
         toastManager.add({
           type: "error",
           title: "Editor opening is unavailable.",
@@ -1213,7 +1272,7 @@ export default function GitActionsControl({
         return;
       }
       const target = resolvePathLinkTarget(filePath, gitCwd);
-      void openInPreferredEditor(api, target).catch((error) => {
+      void openPathInEditor(activeEnvironmentId, target).catch((error) => {
         toastManager.add(
           stackedThreadToast({
             type: "error",
@@ -1224,7 +1283,7 @@ export default function GitActionsControl({
         );
       });
     },
-    [gitCwd, threadToastData],
+    [activeEnvironmentId, gitCwd, threadToastData],
   );
 
   const canPublishRepository = isRepo && gitStatusForActions !== null && !hasPrimaryRemote;
@@ -1336,6 +1395,7 @@ export default function GitActionsControl({
           <Menu
             onOpenChange={(open) => {
               if (open) {
+                if (createPrDialog) void LazyGitCreatePullRequestDialog.preload();
                 void refreshGitStatus({
                   environmentId: activeEnvironmentId,
                   cwd: gitCwd,
@@ -1427,6 +1487,7 @@ export default function GitActionsControl({
                       gitStatus: gitStatusForActions,
                       isBusy: isGitActionRunning,
                       hasPrimaryRemote,
+                      createPrDialog,
                     });
                     if (item.disabled && disabledReason) {
                       return (
@@ -1675,6 +1736,33 @@ export default function GitActionsControl({
         environmentId={activeEnvironmentId}
         gitCwd={gitCwd}
       />
+
+      {isCreatePrDialogOpen && createPrDialogReady ? (
+        <Suspense fallback={null}>
+          <LazyGitCreatePullRequestDialog
+            onOpenChange={setIsCreatePrDialogOpen}
+            context={{
+              gitStatus: gitStatusForActions,
+              isBusy: isGitActionRunning,
+              isDefaultRef,
+              hasPrimaryRemote,
+            }}
+            terminology={changeRequestTerminology}
+            onSubmit={(submission) => {
+              setIsCreatePrDialogOpen(false);
+              void runGitActionWithToast({
+                action: submission.action,
+                pullRequest: {
+                  ...(submission.title ? { title: submission.title } : {}),
+                  ...(submission.body ? { body: submission.body } : {}),
+                  ...(submission.draft ? { draft: true } : {}),
+                  ...(submission.leaveLocalChangesOut ? { allowDirtyWorkingTree: true } : {}),
+                },
+              });
+            }}
+          />
+        </Suspense>
+      ) : null}
 
       <GitDefaultBranchActionDialog runner={runner} />
     </>

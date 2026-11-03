@@ -275,3 +275,69 @@ describe("decider thread.delegated.create lineage", () => {
     }),
   );
 });
+
+describe("decider thread.delegated.create delegation limits", () => {
+  const limited = (
+    threadId: string,
+    parentThreadId: string,
+    limits: { readonly maxDepth: number | null; readonly maxTasksPerTree: number | null },
+  ): ThreadDelegatedCreate => ({
+    ...delegatedCreate(threadId, parentThreadId),
+    delegationLimits: limits,
+  });
+
+  it.effect("lets a root delegate but refuses a child past the depth limit", () =>
+    Effect.gen(function* () {
+      const limits = { maxDepth: 1, maxTasksPerTree: null };
+      const withChild = yield* dispatch(yield* seed, limited("child", "parent", limits));
+      const error = yield* expectInvariant(withChild, limited("grandchild", "child", limits));
+      assert.include(error.detail, "Delegation limit");
+      // Without limits the same create still works: the limits are opt-in.
+      createdPayload(yield* decide(withChild, delegatedCreate("grandchild", "child")));
+    }),
+  );
+
+  it.effect("counts every task of the tree against its budget, nested ones included", () =>
+    Effect.gen(function* () {
+      const limits = { maxDepth: null, maxTasksPerTree: 2 };
+      let readModel = yield* dispatch(yield* seed, limited("child", "parent", limits));
+      readModel = yield* dispatch(readModel, limited("grandchild", "child", limits));
+      // The tree rooted at "parent" now has two tasks; a third anywhere in it is refused.
+      const nested = yield* expectInvariant(readModel, limited("third", "grandchild", limits));
+      assert.include(nested.detail, "task limit");
+      yield* expectInvariant(readModel, limited("sibling", "parent", limits));
+      // Another tree has its own budget.
+      readModel = yield* dispatch(readModel, threadCreate("other-root"));
+      createdPayload(yield* decide(readModel, limited("other-child", "other-root", limits)));
+    }),
+  );
+
+  it.effect("stops counting a task once the person deletes it", () =>
+    Effect.gen(function* () {
+      const limits = { maxDepth: null, maxTasksPerTree: 1 };
+      let readModel = yield* dispatch(yield* seed, limited("child", "parent", limits));
+      yield* expectInvariant(readModel, limited("second", "parent", limits));
+      readModel = yield* dispatch(readModel, deleteThread("child"));
+      createdPayload(yield* decide(readModel, limited("second", "parent", limits)));
+    }),
+  );
+});
+
+describe("decider carried fork placeholder namespace", () => {
+  it.effect("refuses a new thread whose id a carried fork's placeholder source could name", () =>
+    Effect.gen(function* () {
+      const readModel = yield* seed;
+      for (const command of [
+        threadCreate("fork-0123456789abcdef:origin"),
+        delegatedCreate("fork-0123456789abcdef:origin", "parent"),
+      ]) {
+        const error = yield* Effect.flip(decide(readModel, command));
+        assert.instanceOf(error, OrchestrationCommandInvariantError);
+        assert.strictEqual(error.commandType, command.type);
+        assert.include(error.detail, "reserved for forks carried from another machine");
+      }
+      // Only the suffix is reserved.
+      createdPayload(yield* decide(readModel, threadCreate("origin:of-something")));
+    }),
+  );
+});

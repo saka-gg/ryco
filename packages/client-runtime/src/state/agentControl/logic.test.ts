@@ -18,12 +18,14 @@ import {
   EMPTY_AGENT_CONTROL_QUEUE_STATE,
   applyAgentControlStreamEvent,
   findCompletionReturnForChild,
+  isWaitingAutomationRun,
   selectActiveAgentControlProposals,
   selectCompletionReturnsByChildThreadId,
   selectAgentControlProposalsForThread,
   selectRecentAgentControlProposals,
   selectAgentControlExternalActivity,
   selectAgentControlThreadActivity,
+  waitingAutomationRunCount,
 } from "./logic.ts";
 
 const callerThreadId = ThreadId.make("thread-caller");
@@ -59,6 +61,12 @@ function makeProposal(
     ...overrides,
   };
 }
+
+/** An accepted action that directs `thread-target` (a message never does). */
+const interruptTarget = {
+  kind: "interruptThread",
+  threadId: ThreadId.make("thread-target"),
+} as const;
 
 function snapshotEvent(input: {
   revision: number;
@@ -406,7 +414,7 @@ describe("thread activity", () => {
   });
 
   it("shows only a manager notice in the target and preserves it across a snapshot", () => {
-    const state = queue(makeProposal("accepted", { status: "completed" }));
+    const state = queue(makeProposal("accepted", { status: "completed", plan: interruptTarget }));
     const expected = {
       pending: [],
       activity: [],
@@ -430,8 +438,10 @@ describe("thread activity", () => {
       "cancelled",
     ] as const) {
       expect(
-        selectAgentControlThreadActivity(queue(makeProposal("request", { status })), target)
-          .managerThreadId,
+        selectAgentControlThreadActivity(
+          queue(makeProposal("request", { status, plan: interruptTarget })),
+          target,
+        ).managerThreadId,
       ).toBeNull();
     }
     const self = makeProposal("self", {
@@ -493,6 +503,7 @@ describe("thread activity", () => {
     const newManager = ThreadId.make("new-manager");
     const newer = makeProposal("newer", {
       status: "executing",
+      plan: interruptTarget,
       decidedAt: "2026-09-30T00:00:00.000Z",
       updatedAt: "2026-09-30T00:00:00.000Z",
       principal: {
@@ -548,6 +559,7 @@ describe("thread activity", () => {
     const newManager = ThreadId.make("new-manager");
     const newer = makeProposal("newer", {
       status: "completed",
+      plan: interruptTarget,
       createdAt: "2026-08-17T00:03:00.000Z",
       decidedAt: "2026-08-17T00:04:00.000Z",
       updatedAt: "2026-08-17T00:05:00.000Z",
@@ -632,6 +644,7 @@ describe("thread activity", () => {
     // A manager equal to the lineage parent is suppressed.
     const parentManaged = makeProposal("parent-managed", {
       status: "completed",
+      plan: interruptTarget,
       principal: {
         kind: "provider-session",
         threadId: lineageParent,
@@ -649,6 +662,24 @@ describe("thread activity", () => {
         relationship: "future-kind",
       }),
     ).toMatchObject({ delegatedFromThreadId: callerThreadId, managerThreadId: null });
+  });
+
+  it("does not make the sender of a message the target's manager", () => {
+    // A delegated child reporting back to its parent, or any chat writing to another.
+    const reportBack = makeProposal("report-back", {
+      status: "completed",
+      decidedAt: "2026-09-30T00:00:00.000Z",
+    });
+    expect(selectAgentControlThreadActivity(queue(reportBack), target)).toEqual({
+      pending: [],
+      activity: [],
+      managerThreadId: null,
+      delegatedFromThreadId: null,
+    });
+    const directed = makeProposal("directed", { status: "completed", plan: interruptTarget });
+    expect(
+      selectAgentControlThreadActivity(queue(directed, reportBack), target).managerThreadId,
+    ).toBe(callerThreadId);
   });
 
   it("does not treat affected threads of a project operation as managed children", () => {
@@ -779,5 +810,31 @@ describe("delegated child returns", () => {
       parentThreadId: callerThreadId,
     });
     expect(findCompletionReturnForChild(state, ThreadId.make("unreturned"))).toBeNull();
+  });
+});
+
+const queued = (id: string, kind: string, status = "pending-user-approval") =>
+  ({ proposalId: id, status, plan: { kind } }) as unknown as AgentControlProposal;
+
+describe("runs waiting for approval", () => {
+  it("counts automation runs still pending, on the given devices only", () => {
+    const queues = {
+      "env-local": {
+        proposalsById: {
+          a: queued("a", "automationRun"),
+          b: queued("b", "automationRun", "expired"),
+          c: queued("c", "createAutomation"),
+        },
+      },
+      "env-studio": { proposalsById: { d: queued("d", "automationRun") } },
+      "env-gone": { proposalsById: { e: queued("e", "automationRun") } },
+    };
+    expect(waitingAutomationRunCount(queues, ["env-local", "env-studio"])).toBe(2);
+    expect(waitingAutomationRunCount(queues, [])).toBe(0);
+  });
+
+  it("leaves schedule changes to the dialog: they are proposed, not runs", () => {
+    expect(isWaitingAutomationRun(queued("x", "updateAutomation"))).toBe(false);
+    expect(isWaitingAutomationRun(queued("y", "automationRun", "approved"))).toBe(false);
   });
 });

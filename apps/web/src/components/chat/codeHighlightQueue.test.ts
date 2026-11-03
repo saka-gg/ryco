@@ -1,39 +1,78 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
-const { codeToHtmlMock, getLastGrammarStateMock, getSharedHighlighterMock } = vi.hoisted(() => {
-  // A stand-in for Shiki: one span per line, and a grammar state that names the
-  // slice's last line, recorded on the root its transformers see.
-  const grammarStates = new WeakMap<object, string>();
-  const codeToHtmlMock = vi.fn(
-    (
-      code: string,
-      options: {
-        lang: string;
-        transformers?: ReadonlyArray<{ root?: (node: object) => void }>;
-      },
-    ) => {
-      const lines = code.split("\n");
-      const root = { type: "root" };
-      for (const transformer of options.transformers ?? []) transformer.root?.(root);
-      grammarStates.set(root, `after:${lines.at(-1)}`);
-      return `<pre class="shiki" data-lang="${options.lang}"><code>${lines
-        .map((line) => `<span class="line">${line}</span>`)
-        .join("\n")}</code></pre>`;
-    },
-  );
-  const getLastGrammarStateMock = vi.fn((root: object) => grammarStates.get(root));
-  return {
-    codeToHtmlMock,
-    getLastGrammarStateMock,
-    getSharedHighlighterMock: vi.fn(async (input: { langs: ReadonlyArray<string> }) => {
-      if (input.langs.includes("not-a-language")) throw new Error("unknown language");
-      return { codeToHtml: codeToHtmlMock, getLastGrammarState: getLastGrammarStateMock };
-    }),
-  };
-});
+const { codeToHtmlMock, enqueuedChunks, getSharedHighlighterMock, tokensToHtmlMock } = vi.hoisted(
+  () => {
+    // A stand-in for the highlighters: one token per line, rendered as one span.
+    type Token = { content: string; offset: number };
+    const lineTokens = (line: string, offset: number): Token[] =>
+      line === "" ? [] : [{ content: line, offset }];
+    const tokensToHtmlMock = vi.fn(
+      (_source: string, result: { tokens: Token[][] }, options: { lang: string }) =>
+        `<pre class="diffs" data-lang="${options.lang}"><code>${result.tokens
+          .map((line) => `<span class="line">${line.map((token) => token.content).join("")}</span>`)
+          .join("\n")}</code></pre>`,
+    );
+    const codeToTokens = (code: string) => {
+      let offset = 0;
+      return {
+        tokens: code.split("\n").map((line) => {
+          const tokens = lineTokens(line, offset);
+          offset += line.length + 1;
+          return tokens;
+        }),
+        fg: "#fff",
+        bg: "#000",
+      };
+    };
+    const codeToHtmlMock = vi.fn((code: string, options: { lang: string }) =>
+      tokensToHtmlMock(code, codeToTokens(code), options),
+    );
+    // Each tokenizer's chunks; a tokenizer emits a line once its break arrives.
+    const enqueuedChunks: string[][] = [];
+    const createStreamTokenizer = () => {
+      const chunks: string[] = [];
+      enqueuedChunks.push(chunks);
+      let tail = "";
+      let offset = 0;
+      return {
+        enqueue(chunk: string) {
+          chunks.push(chunk);
+          const lines = (tail + chunk).split("\n");
+          tail = lines.pop()!;
+          const stable: Token[] = [];
+          for (const line of lines) {
+            stable.push(...lineTokens(line, offset), {
+              content: "\n",
+              offset: offset + line.length,
+            });
+            offset += line.length + 1;
+          }
+          return { recall: 0, stable, unstable: lineTokens(tail, offset) };
+        },
+        close: () => ({ stable: lineTokens(tail, offset) }),
+        dispose: vi.fn(),
+      };
+    };
+    return {
+      codeToHtmlMock,
+      enqueuedChunks,
+      tokensToHtmlMock,
+      getSharedHighlighterMock: vi.fn(async (input: { langs: ReadonlyArray<string> }) => {
+        if (input.langs.includes("not-a-language")) throw new Error("unknown language");
+        return {
+          name: "highlights",
+          codeToHtml: codeToHtmlMock,
+          codeToTokens,
+          createStreamTokenizer,
+        };
+      }),
+    };
+  },
+);
 
 vi.mock("@pierre/diffs", () => ({
   getSharedHighlighter: getSharedHighlighterMock,
+  tokensToHtml: tokensToHtmlMock,
 }));
 
 import {
@@ -55,8 +94,9 @@ function job(code: string, language = "ts") {
 afterEach(() => {
   resetCodeHighlightQueueForTests();
   codeToHtmlMock.mockClear();
-  getLastGrammarStateMock.mockClear();
+  tokensToHtmlMock.mockClear();
   getSharedHighlighterMock.mockClear();
+  enqueuedChunks.length = 0;
 });
 
 describe("requestCodeHighlight", () => {
@@ -116,25 +156,30 @@ describe("requestCodeHighlight", () => {
     );
   });
 
-  it("highlights a large block a slice per step, carrying the grammar state", async () => {
+  it("asks for the main thread's highlighter: Highlights where WASM compiles", async () => {
+    const onReady = vi.fn();
+    requestCodeHighlight(job("const a = 1;"), onReady);
+
+    await vi.waitFor(() => expect(onReady).toHaveBeenCalledTimes(1));
+    expect(getSharedHighlighterMock).toHaveBeenCalledWith(
+      expect.objectContaining({ preferredHighlighter: "highlights" }),
+    );
+  });
+
+  it("highlights a large block a slice per step, carrying the lexer state", async () => {
     const lines = Array.from({ length: 250 }, (_, index) => `line ${index}`);
     const onReady = vi.fn();
     requestCodeHighlight(job(lines.join("\n")), onReady);
 
     await vi.waitFor(() => expect(onReady).toHaveBeenCalledTimes(1));
-    const slices = codeToHtmlMock.mock.calls.map(([code, options]) => ({
-      lines: code.split("\n"),
-      grammarState: (options as { grammarState?: unknown }).grammarState,
-    }));
-    expect(slices.map((slice) => slice.lines.length)).toEqual([100, 100, 50]);
-    expect(slices.map((slice) => slice.grammarState)).toEqual([
-      undefined,
-      "after:line 99",
-      "after:line 199",
-    ]);
+    // One tokenizer took every slice, each but the last ending in its break.
+    expect(enqueuedChunks).toHaveLength(1);
+    expect(enqueuedChunks[0]!.map((chunk) => chunk.split("\n").length)).toEqual([101, 101, 50]);
+    expect(enqueuedChunks[0]!.join("")).toBe(lines.join("\n"));
+    expect(codeToHtmlMock).not.toHaveBeenCalled();
     // The slices join into what one call over the whole block renders.
     expect(onReady).toHaveBeenCalledWith(
-      `<pre class="shiki" data-lang="ts"><code>${lines
+      `<pre class="diffs" data-lang="ts"><code>${lines
         .map((line) => `<span class="line">${line}</span>`)
         .join("\n")}</code></pre>`,
     );
@@ -146,9 +191,19 @@ describe("requestCodeHighlight", () => {
     requestCodeHighlight(job(lines.join("\n")), onReady);
 
     await vi.waitFor(() => expect(onReady).toHaveBeenCalledTimes(1));
-    for (const [code] of codeToHtmlMock.mock.calls) {
-      expect(code.length).toBeLessThanOrEqual(16_000);
+    for (const chunk of enqueuedChunks[0]!) {
+      expect(chunk.length).toBeLessThanOrEqual(16_000);
     }
-    expect(codeToHtmlMock.mock.calls.length).toBeGreaterThan(1);
+    expect(enqueuedChunks[0]!.length).toBeGreaterThan(1);
+  });
+
+  it("highlights a large ANSI block in one step, since its escapes carry state across lines", async () => {
+    const lines = Array.from({ length: 250 }, (_, index) => `line ${index}`);
+    const onReady = vi.fn();
+    requestCodeHighlight(job(lines.join("\n"), "ansi"), onReady);
+
+    await vi.waitFor(() => expect(onReady).toHaveBeenCalledTimes(1));
+    expect(enqueuedChunks).toEqual([]);
+    expect(codeToHtmlMock).toHaveBeenCalledTimes(1);
   });
 });

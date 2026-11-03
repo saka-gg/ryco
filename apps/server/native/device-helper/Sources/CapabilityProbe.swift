@@ -27,7 +27,11 @@ enum CapabilityProbe {
           missing: missingSymbols(for: capability, simulatorKitHandle: simulatorKitHandle),
           failure: nil)
       case .hid:
-        guard simulatorKitHandle != nil else {
+        // Only the selected transport's symbols are checked (SymbolManifest):
+        // the Indigo builders still resolve on CoreSimulator 1155.4+, where
+        // the guest drops what they build. dtuhidd needs CoreSimulator and
+        // libxpc, not SimulatorKit.
+        if RycoPreferredInputTransport() == .indigo, simulatorKitHandle == nil {
           return CapabilityReport(
             capability: capability, missing: [],
             failure: "SimulatorKit could not be loaded from the active Xcode")
@@ -65,6 +69,9 @@ enum CapabilityProbe {
     case .simulatorKitFunction:
       guard let simulatorKitHandle else { return false }
       return dlsym(simulatorKitHandle, symbol.name) != nil
+    case .processFunction:
+      // RTLD_DEFAULT, which Swift does not import.
+      return dlsym(UnsafeMutableRawPointer(bitPattern: -2), symbol.name) != nil
     case .selector(let className):
       guard let owner = NSClassFromString(className) else { return false }
       let selector = NSSelectorFromString(symbol.name)
@@ -139,6 +146,8 @@ enum CapabilityProbe {
       "developerDirectory": developerDirectory,
       "capabilities": capabilities,
       "toolchain": toolchainInfo(developerDirectory: developerDirectory),
+      // The transport `attach` will use, so a broken `hid` names its path.
+      "inputTransport": RycoInputTransportName(RycoPreferredInputTransport()),
     ]
     if let deviceSetError {
       payload["error"] = deviceSetError
@@ -163,6 +172,11 @@ enum CapabilityProbe {
       if let build = firstMatch(#"Build version\s+(\S+)"#, in: version) {
         info["xcodeBuild"] = build
       }
+    }
+    // System-wide and installed by the newest Xcode on the machine, so it can
+    // be newer than the selected Xcode; it decides how input must travel.
+    if let coreSimulator = RycoCoreSimulatorVersion() {
+      info["coreSimulatorVersion"] = coreSimulator
     }
     return info
   }

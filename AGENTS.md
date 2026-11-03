@@ -34,6 +34,10 @@
   ```
 
 - NEVER run `bun test`. Always use `bun run test` (runs Vitest).
+- Dev servers (`bun run dev*`) started in a linked git worktree keep their state in
+  `~/.ryco/dev-homes/<worktree>-<hash>` and choose per-worktree ports. Read the real ports and home
+  from the `[dev-runner]` line, and pass `--no-browser` when no person is watching. Never point a
+  dev server at `~/.ryco/userdata`.
 - For very large or high-risk changes to web interaction, responsive layout, PWA behavior, browser
   lifecycle, or hosted reconnect behavior, also build the web package and run the browser suite:
 

@@ -13,6 +13,7 @@ import type { ObservabilityService, SocketService } from "../platform/index.ts";
 import { clearAllTrackedRpcRequests } from "./requestLatencyState.ts";
 import {
   createWsRpcProtocolLayer,
+  hasErrorTag,
   isAwaitingAdmission,
   makeHostedRpcProtocolClient,
   makeDeviceRpcProtocolClient,
@@ -138,12 +139,38 @@ export function resyncSubscriptionRetryDelayMs(
   );
 }
 
+export { isUnsupportedRpcError } from "../errors/transportError.ts";
+
 /**
- * The server does not implement the requested RPC: an older server, or a
- * handler that was never wired. A caller may fall back to an older method.
+ * Effect's `Cause.squash` of a cause made only of interruptions: what a request
+ * rejects with when its client is disposed or reconnected mid-request, or when
+ * the node interrupts it on its way down. The wire test pins it.
  */
-export function isUnsupportedRpcError(error: unknown): boolean {
-  return formatErrorMessage(error).includes("Unknown request tag");
+const INTERRUPTED_WITHOUT_ERROR = "All fibers interrupted without error";
+
+/**
+ * Whether the transport gave up on the request rather than the node answering
+ * it: every socket failure reaches a pending request as an `RpcClientError`, a
+ * disposal or reconnect interrupts it, and a disposed transport sends nothing.
+ */
+export function isRpcTransportFailure(error: unknown): boolean {
+  return (
+    hasErrorTag(error, "RpcClientError") ||
+    error instanceof RpcTransportDisposedError ||
+    (error instanceof Error && error.message === INTERRUPTED_WITHOUT_ERROR)
+  );
+}
+
+/**
+ * The node refused the call to this session (an `AuthRpcError`: a method above
+ * its role). Read by tag, so callers need no contracts value import.
+ */
+export function isAuthRpcError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { readonly _tag?: unknown })._tag === "AuthRpcError"
+  );
 }
 
 /** The response did not fit the largest message the connection carries (relay cap). */
@@ -174,6 +201,7 @@ class RpcTransport<Client> {
   private activeSessionId = 0;
   private session: TransportSession<Client>;
   private lastHeartbeatPongAt = 0;
+  private lastSocketOpenedAt = 0;
   private readonly makeClient: () => Effect.Effect<Client, never, RpcClient.Protocol | Scope.Scope>;
   private readonly subscriptionRetryWakeups = new Set<() => void>();
   private readonly streamRequestStartListeners = new Set<(info: StreamRequestStartInfo) => void>();
@@ -447,6 +475,11 @@ class RpcTransport<Client> {
     return this.lastHeartbeatPongAt > 0 && Date.now() - this.lastHeartbeatPongAt <= maxAgeMs;
   }
 
+  /** Whether a socket of this transport opened at or after `sinceMs` (a reconnect since then). */
+  hasReopenedSince(sinceMs: number): boolean {
+    return this.lastSocketOpenedAt > 0 && this.lastSocketOpenedAt >= sinceMs;
+  }
+
   async dispose() {
     if (this.disposed) {
       return;
@@ -482,6 +515,10 @@ class RpcTransport<Client> {
           onHeartbeatPong: () => {
             this.lastHeartbeatPongAt = Date.now();
             this.lifecycleHandlers?.onHeartbeatPong?.();
+          },
+          onOpen: () => {
+            this.lastSocketOpenedAt = Date.now();
+            this.lifecycleHandlers?.onOpen?.();
           },
           onRequestStart: (info) => {
             this.lifecycleHandlers?.onRequestStart?.(info);

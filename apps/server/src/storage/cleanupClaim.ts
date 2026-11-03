@@ -1,7 +1,7 @@
 import { Effect } from "effect";
 import type * as SqlClient from "effect/sql/SqlClient";
 import { StorageError } from "@ryco/contracts";
-import type { WorktreeIdentity } from "./filesystem.ts";
+import type { CacheMove, WorktreeIdentity } from "./filesystem.ts";
 import { assertStorageSettingsLease, type StorageSettingsLease } from "./settingsAdmission.ts";
 
 declare const cleanupClaimBrand: unique symbol;
@@ -16,15 +16,38 @@ interface ClaimInput {
   readonly quarantine: string;
   readonly fingerprint: string;
   readonly identity: WorktreeIdentity;
+  /** Cache folders the removal moves out whole; the ledger records them before the claim. */
+  readonly caches?: readonly CacheMove[];
+  /** The commit a merge proof vouched for (see `VerifiedWorktreeCleanup.mergedHead`). */
+  readonly mergedHead?: string | null;
   readonly lease: StorageSettingsLease;
 }
 interface ClaimRecord {
   readonly input: ClaimInput;
   readonly identityJSON: string;
+  readonly cachesJSON: string;
+  readonly mergedHead: string | null;
   readonly validate: () => Promise<void>;
 }
 const claims = new WeakMap<object, ClaimRecord>();
 const refused = (detail: string) => new StorageError({ detail });
+
+/**
+ * The ledger identity a removal persists before its claim: the recovery location, the cache
+ * folders it moves out with their purge still `planned` (an interrupted removal), and the commit
+ * a merge proof vouched for when the project HEAD does not contain the checkout's commits.
+ */
+export const removalProofIdentity = <Identity extends object>(
+  identity: Identity,
+  quarantine: string,
+  caches: readonly CacheMove[],
+  mergedHead: string | null = null,
+) => ({
+  ...identity,
+  quarantinePath: quarantine,
+  ...(caches.length > 0 ? { caches, purge: "planned" as const } : {}),
+  ...(mergedHead !== null ? { mergedHead } : {}),
+});
 
 /** Mint only after the ledger owns removal and persists the exact recovery location.
  * SQL plus an unforgeable active admission lease are mandatory, including in drivers.
@@ -33,10 +56,11 @@ export function mintStorageCleanupClaim(sql: SqlClient.SqlClient, input: ClaimIn
   return Effect.gen(function* () {
     const authorized = Object.freeze({ ...input });
     const identityJSON = JSON.stringify(authorized.identity);
-    const proofJSON = JSON.stringify({
-      ...authorized.identity,
-      quarantinePath: authorized.quarantine,
-    });
+    const caches = authorized.caches ?? [];
+    const mergedHead = authorized.mergedHead ?? null;
+    const proofJSON = JSON.stringify(
+      removalProofIdentity(authorized.identity, authorized.quarantine, caches, mergedHead),
+    );
     const durable = Effect.gen(function* () {
       yield* Effect.try({
         try: () => assertStorageSettingsLease(authorized.lease),
@@ -65,6 +89,8 @@ export function mintStorageCleanupClaim(sql: SqlClient.SqlClient, input: ClaimIn
     claims.set(claim, {
       input: authorized,
       identityJSON,
+      cachesJSON: JSON.stringify(caches),
+      mergedHead,
       validate: () => Effect.runPromise(durable),
     });
     return claim;
@@ -84,6 +110,8 @@ export async function validateStorageCleanupClaim(
   quarantine: string,
   fingerprint: string,
   identityJSON: string,
+  cachesJSON = "[]",
+  mergedHead: string | null = null,
 ): Promise<void> {
   assertStorageCleanupClaim(claim);
   const record = claims.get(claim)!;
@@ -93,7 +121,9 @@ export async function validateStorageCleanupClaim(
     expected.candidate !== candidate ||
     expected.quarantine !== quarantine ||
     expected.fingerprint !== fingerprint ||
-    record.identityJSON !== identityJSON
+    record.identityJSON !== identityJSON ||
+    record.cachesJSON !== cachesJSON ||
+    record.mergedHead !== mergedHead
   )
     throw refused("Cleanup capability does not authorize this removal target.");
   await record.validate();

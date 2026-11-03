@@ -8,10 +8,19 @@ import type {
 import { scopedThreadKey } from "../../scoped.ts";
 
 export const SIDEBAR_UNDO_DURATION_MS = 5_000;
-export type SidebarUndoAction = "archive" | "settle" | "snooze" | "unpin";
+/** A bulk notice applies for at most this long, so its Undo still finds the node's 30 s receipts. */
+const SIDEBAR_UNDO_APPLYING_LIMIT_MS = 25_000;
+/**
+ * Most threads one bulk action changes. Here rather than with the batch
+ * dispatcher, so the screens that cap a selection do not load it.
+ */
+export const SIDEBAR_UNDO_BATCH_LIMIT = 100;
+/** A node keeps its newest 256 Undo receipts and drops the oldest first. */
+const SIDEBAR_UNDO_NODE_RECEIPTS = 256;
+export type SidebarUndoAction = "archive" | "settle" | "snooze" | "hide" | "unpin";
 export type SidebarUndoCommand = Extract<
   DispatchableClientOrchestrationCommand,
-  { type: "thread.archive" | "thread.settle" | "thread.snooze" }
+  { type: "thread.archive" | "thread.settle" | "thread.snooze" | "thread.hide" }
 >;
 export type SidebarActionCommand = Extract<
   DispatchableClientOrchestrationCommand,
@@ -22,7 +31,9 @@ export type SidebarActionCommand = Extract<
       | "thread.settle"
       | "thread.unsettle"
       | "thread.snooze"
-      | "thread.unsnooze";
+      | "thread.unsnooze"
+      | "thread.hide"
+      | "thread.unhide";
   }
 >;
 export interface SidebarUndoContext {
@@ -41,13 +52,28 @@ export interface SidebarUndoLocalContext {
   readonly threadTitle?: string | undefined;
   readonly subscribe: (listener: () => void) => () => void;
 }
+/** Copy a bulk action supplies for its notice, so presenters need no plural copy of their own. */
+export interface SidebarUndoCopy {
+  readonly title: string;
+  readonly description?: string | undefined;
+  /** Accessible name of the Undo control. */
+  readonly undoLabel: string;
+}
+export type SidebarUndoDescribe = (notice: {
+  readonly count: number;
+  readonly applying: boolean;
+}) => SidebarUndoCopy;
 export interface SidebarUndoNotice {
   readonly id: number;
   readonly action: SidebarUndoAction;
+  /** The first thread the notice covers. */
   readonly target: ScopedThreadRef;
+  /** Threads a bulk notice covers; absent for one thread. */
+  readonly count?: number | undefined;
   readonly pending: boolean;
   readonly applying?: boolean;
   readonly threadTitle?: string | undefined;
+  readonly copy?: SidebarUndoCopy | undefined;
 }
 
 /**
@@ -82,13 +108,14 @@ export function sidebarUndoThreadRevision(thread: SidebarThreadOrStub): string {
     thread.settledAt,
     thread.snoozedUntil,
     thread.snoozedAt,
+    thread.hiddenAt ?? null,
+    thread.settleWhenIdleAt ?? null,
     thread.branch,
     thread.worktreePath,
     thread.worktreeId,
     thread.manualStatusBucket,
     thread.manualPosition,
     thread.latestUserMessageAt,
-    thread.priority,
     // The existing sorter uses updatedAt only when no user message provides recency.
     thread.latestUserMessageAt == null ? thread.updatedAt : null,
   ]);
@@ -123,47 +150,101 @@ export function createSidebarUndoHistory(deps: {
   const setTimer = deps.setTimer ?? ((callback, delay) => setTimeout(callback, delay));
   const clearTimer =
     deps.clearTimer ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
-  type Entry = Omit<SidebarUndoNotice, "pending" | "applying"> & {
+  type Entry = Pick<SidebarUndoNotice, "id" | "action" | "threadTitle"> & {
+    /** Threads Undo still restores; a notice closes with its last one. */
+    members: readonly ScopedThreadRef[];
     applying: boolean;
     pending: boolean;
     restoring: boolean;
     expiresAt: number;
-    context: SidebarUndoContext | SidebarUndoLocalContext;
-    valid: () => boolean;
-    restore: () => Promise<void>;
+    valid: (member: ScopedThreadRef) => boolean;
+    restore: (members: readonly ScopedThreadRef[]) => Promise<void>;
     ready: Promise<unknown>;
+    describe?: SidebarUndoDescribe | undefined;
     cleanup?: () => void;
   };
   let nextId = 0;
   let entries: Entry[] = [];
   let timer: unknown;
-  const current = (entry: Entry) => (entry.restoring || now() < entry.expiresAt) && entry.valid();
-  const publish = () =>
-    deps.changed(
-      entries.map(({ id, action, target, pending, applying, threadTitle }) => ({
-        id,
-        action,
-        target,
-        pending,
-        applying,
-        threadTitle,
-      })),
-    );
+  /** Each thread's newest action, so a bulk command still queued can step aside. */
+  const stamps = new Map<string, number>();
+  let lastStamp = 0;
+  const notice = ({
+    id,
+    action,
+    members,
+    pending,
+    applying,
+    threadTitle,
+    describe,
+  }: Entry): SidebarUndoNotice => ({
+    id,
+    action,
+    target: members[0]!,
+    count: members.length > 1 ? members.length : undefined,
+    pending,
+    applying,
+    threadTitle,
+    copy: describe?.({ count: members.length, applying }),
+  });
+  const publish = () => deps.changed(entries.map(notice));
   const remove = (id: number) => {
     entries.find((entry) => entry.id === id)?.cleanup?.();
     entries = entries.filter((entry) => entry.id !== id);
     publish();
   };
+  /** Drops a thread from its notice (only from `only` when given). */
+  const release = (target: ScopedThreadRef, only?: Entry) => {
+    const key = scopedThreadKey(target);
+    for (const entry of entries) {
+      if (only && entry !== only) continue;
+      const members = entry.members.filter((member) => scopedThreadKey(member) !== key);
+      if (members.length === entry.members.length) continue;
+      entry.members = members;
+      if (members.length) publish();
+      else remove(entry.id);
+    }
+  };
+  /** A newer action on a thread: older notices let it go and its stamp changes. */
+  const act = (target: ScopedThreadRef) => {
+    stamps.set(scopedThreadKey(target), ++lastStamp);
+    release(target);
+  };
+  /**
+   * Once the notices hold more of a node's threads than it keeps receipts, the oldest notices give
+   * up their oldest threads (the node dropped those receipts), so a count is what Undo restores.
+   */
+  const trimToReceipts = () => {
+    const counts = new Map<string, number>();
+    const server = entries.filter((entry) => entry.action !== "unpin");
+    for (const entry of server)
+      for (const { environmentId } of entry.members)
+        counts.set(environmentId, (counts.get(environmentId) ?? 0) + 1);
+    for (const entry of server) {
+      entry.members = entry.members.filter(({ environmentId }) => {
+        const count = counts.get(environmentId)!;
+        if (count <= SIDEBAR_UNDO_NODE_RECEIPTS) return true;
+        counts.set(environmentId, count - 1);
+        return false;
+      });
+      if (entry.members.length === 0) {
+        entry.cleanup?.();
+        entries = entries.filter((other) => other !== entry);
+      }
+    }
+  };
   const prune = () => {
-    const next = entries.filter((entry) => {
-      if (current(entry)) return true;
+    let changed = false;
+    entries = entries.filter((entry) => {
+      const members = entry.members.filter(entry.valid);
+      if (members.length !== entry.members.length) changed = true;
+      entry.members = members;
+      if (members.length && (entry.restoring || now() < entry.expiresAt)) return true;
       entry.cleanup?.();
+      changed = true;
       return false;
     });
-    if (next.length !== entries.length) {
-      entries = next;
-      publish();
-    }
+    if (changed) publish();
   };
   const schedule = () => {
     if (timer !== undefined) clearTimer(timer);
@@ -179,24 +260,21 @@ export function createSidebarUndoHistory(deps: {
     input: Omit<Entry, "id" | "expiresAt" | "pending" | "applying" | "restoring"> & {
       applying?: boolean;
     },
+    duration = SIDEBAR_UNDO_DURATION_MS,
   ) => {
-    // A newer action on the same thread supersedes its older notice, even while in flight.
-    entries = entries.filter((entry) => {
-      if (scopedThreadKey(entry.target) !== scopedThreadKey(input.target)) return true;
-      entry.cleanup?.();
-      return false;
-    });
+    // A newer action on a thread supersedes its older notice, even while in flight.
+    for (const member of input.members) release(member);
     const entry: Entry = {
       ...input,
       id: ++nextId,
-      expiresAt: now() + SIDEBAR_UNDO_DURATION_MS,
+      expiresAt: now() + duration,
       pending: false,
       restoring: false,
-      threadTitle: input.context.threadTitle,
       applying: input.applying ?? false,
     };
     entries.push(entry);
     if (entries.length > 5) entries.shift()?.cleanup?.();
+    trimToReceipts();
     publish();
     schedule();
     return entry;
@@ -210,18 +288,19 @@ export function createSidebarUndoHistory(deps: {
       const context = readContext(target);
       if (!context || command.threadId !== target.threadId)
         throw new Error("The owning node is not ready for this action.");
-      for (const entry of entries)
-        if (scopedThreadKey(entry.target) === scopedThreadKey(target)) remove(entry.id);
+      act(target);
       const ready = context.api.orchestration.dispatchCommand(command);
+      const valid = () => readContext(target)?.generation === context.generation;
       const entry =
         context.supported &&
         (command.type === "thread.archive" ||
           command.type === "thread.settle" ||
-          command.type === "thread.snooze")
+          command.type === "thread.snooze" ||
+          command.type === "thread.hide")
           ? add({
-              target,
-              context,
-              valid: () => readContext(target)?.generation === context.generation,
+              members: [target],
+              threadTitle: context.threadTitle,
+              valid,
               action: command.type.slice(7) as SidebarUndoAction,
               ready,
               applying: true,
@@ -232,16 +311,8 @@ export function createSidebarUndoHistory(deps: {
                   commandId: deps.newCommandId(),
                   undoCommandId: command.commandId,
                 });
-                if (
-                  entry &&
-                  entries.includes(entry) &&
-                  readContext(target)?.generation === context.generation
-                )
-                  await onRestored?.(
-                    () =>
-                      entries.includes(entry) &&
-                      readContext(target)?.generation === context.generation,
-                  );
+                if (entry && entries.includes(entry) && valid())
+                  await onRestored?.(() => entries.includes(entry) && valid());
               },
             })
           : null;
@@ -256,6 +327,24 @@ export function createSidebarUndoHistory(deps: {
         publish();
       }
       prune();
+    },
+    /**
+     * One notice for a bulk action. It stays while the commands apply (at most 25 s), and its
+     * five seconds start once `applied()` reports that every command settled.
+     */
+    track(input: Pick<Entry, "action" | "members" | "valid" | "restore" | "ready" | "describe">) {
+      const entry = add({ ...input, applying: true }, SIDEBAR_UNDO_APPLYING_LIMIT_MS);
+      return {
+        /** Takes out a thread whose command failed. */
+        drop: (target: ScopedThreadRef) => release(target, entry),
+        applied: () => {
+          prune();
+          if (!entries.includes(entry)) return;
+          entry.applying = false;
+          entry.expiresAt = now() + SIDEBAR_UNDO_DURATION_MS;
+          publish();
+        },
+      };
     },
     async archive(
       target: ScopedThreadRef,
@@ -335,8 +424,8 @@ export function createSidebarUndoHistory(deps: {
         unsubscribeLocal();
       };
       add({
-        target,
-        context,
+        members: [target],
+        threadTitle: context.threadTitle,
         valid: () => !changed && !pin.read() && sameLocalState(),
         action: "unpin",
         ready: Promise.resolve(),
@@ -349,9 +438,18 @@ export function createSidebarUndoHistory(deps: {
       });
     },
     supersede(target: ScopedThreadRef) {
-      for (const entry of entries)
-        if (scopedThreadKey(entry.target) === scopedThreadKey(target)) remove(entry.id);
+      act(target);
       schedule();
+    },
+    /** Changes with every newer action on the thread: `dispatch`, `supersede` and their callers. */
+    stamp(target: ScopedThreadRef): number {
+      return stamps.get(scopedThreadKey(target)) ?? 0;
+    },
+    /** The newest notice whose Undo can still run, for a keyboard Undo. */
+    latest(): SidebarUndoNotice | null {
+      prune();
+      const entry = entries.findLast((entry) => !entry.pending);
+      return entry === undefined ? null : notice(entry);
     },
     async undo(id: number) {
       prune();
@@ -361,10 +459,11 @@ export function createSidebarUndoHistory(deps: {
       publish();
       try {
         await entry.ready;
-        if (!entries.includes(entry) || !current(entry)) return;
+        prune();
+        if (!entries.includes(entry)) return;
         // Once submitted while valid, keep the progress notice until acknowledgment.
         entry.restoring = true;
-        await entry.restore();
+        await entry.restore(entry.members);
       } catch (error) {
         deps.failed(error);
       } finally {
@@ -387,3 +486,5 @@ export function createSidebarUndoHistory(deps: {
   };
   return history;
 }
+
+export type SidebarUndoHistory = ReturnType<typeof createSidebarUndoHistory>;

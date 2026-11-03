@@ -1,6 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
-import { constants } from "node:fs";
 import * as FS from "node:fs/promises";
+import { REGULAR_FILE_READ_FLAGS } from "@ryco/shared/regularFile";
 
 export class UsageFileReadError extends Error {
   readonly code: "usage-path-rejected" | "usage-file-oversized" | "usage-file-changed";
@@ -22,10 +22,7 @@ export async function readBoundedUsageFile(
   if (!before.isFile() || before.isSymbolicLink())
     throw new UsageFileReadError("usage-path-rejected");
   if (before.size > maxBytes) throw new UsageFileReadError("usage-file-oversized");
-  const file = await FS.open(
-    path,
-    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-  );
+  const file = await FS.open(path, REGULAR_FILE_READ_FLAGS);
   try {
     const opened = await file.stat();
     if (

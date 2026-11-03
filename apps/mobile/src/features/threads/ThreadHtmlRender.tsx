@@ -14,6 +14,7 @@ import {
   HtmlRenderPagePlaceholder,
   HtmlRenderWebView,
 } from "./HtmlRenderWebView";
+import { useHtmlRenderMessageSend } from "./useHtmlRenderMessageSend";
 import { useHtmlRenderSource } from "./useHtmlRenderSource";
 
 /**
@@ -41,6 +42,11 @@ export function ThreadHtmlRender(props: {
    * re-renders with the feed.
    */
   readonly htmlRender: HtmlRenderMetadata;
+  /**
+   * The page may send the reader's answers to this thread: its own agent
+   * published it (`canHtmlRenderSendFromMessage`). Off by default.
+   */
+  readonly canSendMessages?: boolean;
 }) {
   const render = props.htmlRender;
   const { title } = render;
@@ -63,6 +69,13 @@ export function ThreadHtmlRender(props: {
   const [pageAttempt, setPageAttempt] = useState(0);
   const fullScreen = useHtmlRenderFullScreen();
   const iconColor = useThemeColor("--color-icon");
+  const canSendMessages = props.canSendMessages === true;
+  const onSendMessage = useHtmlRenderMessageSend({
+    environmentId: props.environmentId,
+    threadId: props.threadId,
+    title,
+    enabled: canSendMessages,
+  });
 
   // The first size report snaps the frame to the page; later changes (the
   // page resizing itself, rotation) ease to the new height.
@@ -103,6 +116,7 @@ export function ThreadHtmlRender(props: {
               scrollable={contentHeight !== undefined && contentHeight > frameHeight + 1}
               onContentHeight={setContentHeight}
               onFailure={() => setPageFailed(true)}
+              onSendMessage={onSendMessage}
             />
           )
         ) : source.status === "failed" ? (
@@ -136,6 +150,7 @@ export function ThreadHtmlRender(props: {
                 title,
                 // The page is in hand, so full screen shows it without reading it again.
                 html: source.html,
+                canSendMessages,
               })
             }
             className="absolute right-1.5 top-1.5 h-7 w-7 items-center justify-center rounded-full border border-border bg-card-translucent active:opacity-70"

@@ -207,15 +207,39 @@ export class DesktopWorkspaceIpcSocket {
   }
 }
 
+/**
+ * The direct route an attempt may take instead of the relay: the socket URL of
+ * the best linked address that answered as this machine, or null for the
+ * relay. Asked once per attempt (`docs/environment-routes.md`).
+ */
+export interface DesktopWorkspaceDirectRoutes {
+  readonly resolve: (
+    signal: AbortSignal,
+  ) => Promise<{ readonly routeKey: string; readonly url: string } | null>;
+}
+
+/** The route the current attempt took: a direct route's key, or `"relay"`. */
+export type DesktopWorkspaceActiveRoute = string;
+
 export class DesktopWorkspaceIpcSocketFactory {
   readonly #environmentId: EnvironmentId;
   readonly #bridge: DesktopWorkspaceTransportBridge;
+  readonly #directRoutes: DesktopWorkspaceDirectRoutes | null;
   #pendingTransportId: string | null = null;
+  #pendingDirect: { readonly routeKey: string; readonly url: string } | null = null;
+  #pendingRouteCheck: AbortController | null = null;
+  #activeRoute: DesktopWorkspaceActiveRoute | null = null;
+  /**
+   * The relay ended this machine for good (authorization withdrawn, not
+   * verified, update required). Until a relay socket opens again, no attempt
+   * may take a direct route around that verdict, and no upgrade may start one.
+   */
+  #relayRefused = false;
   #generation = 0;
   #disposed = false;
   #retryable = true;
   #retryAfterMs: number | undefined;
-  #currentSocket: DesktopWorkspaceIpcSocket | null = null;
+  #currentSocket: DesktopWorkspaceIpcSocket | WebSocket | null = null;
   readonly #policy = new HostedReconnectPolicy();
 
   readonly lifecycleHandlers: WsProtocolLifecycleHandlers = {
@@ -226,6 +250,7 @@ export class DesktopWorkspaceIpcSocketFactory {
     onOpen: () => {
       this.#retryAfterMs = undefined;
       this.#policy.opened();
+      if (this.#activeRoute === "relay") this.#relayRefused = false;
     },
     onClose: () => this.#policy.closed(),
     isSocketCurrent: (socket) => socket === (this.#currentSocket as unknown),
@@ -244,21 +269,61 @@ export class DesktopWorkspaceIpcSocketFactory {
   #invalidatePending(): void {
     this.#generation += 1;
     this.#currentSocket = null;
+    this.#pendingDirect = null;
+    this.#pendingRouteCheck?.abort();
+    this.#pendingRouteCheck = null;
     if (this.#pendingTransportId) {
       this.#bridge.closeDesktopWorkspaceTransport?.(this.#pendingTransportId);
       this.#pendingTransportId = null;
     }
   }
 
-  constructor(environmentId: EnvironmentId, bridge: DesktopWorkspaceTransportBridge) {
+  constructor(
+    environmentId: EnvironmentId,
+    bridge: DesktopWorkspaceTransportBridge,
+    directRoutes?: DesktopWorkspaceDirectRoutes,
+  ) {
     this.#environmentId = environmentId;
     this.#bridge = bridge;
+    this.#directRoutes = directRoutes ?? null;
+  }
+
+  /** The route the open (or opening) socket took, or null before the first attempt. */
+  get activeRoute(): DesktopWorkspaceActiveRoute | null {
+    return this.#activeRoute;
+  }
+
+  /** Whether a better route may be tried now: never past the relay's own refusal. */
+  get mayUpgrade(): boolean {
+    return !this.#disposed && this.#retryable && !this.#relayRefused;
   }
 
   async nextUrl(): Promise<string> {
     if (this.#disposed || !this.#retryable)
       throw new Error("Desktop workspace requires attention.");
     const generation = this.#generation;
+    this.#pendingDirect = null;
+    if (this.#directRoutes && !this.#relayRefused) {
+      // Each attempt walks the routes again: a direct route that answers as
+      // this machine wins, otherwise the relay below. The walk belongs to this
+      // attempt; a newer one or a dispose abandons it.
+      this.#pendingRouteCheck?.abort();
+      const check = new AbortController();
+      this.#pendingRouteCheck = check;
+      const direct = await this.#directRoutes.resolve(check.signal).catch(() => null);
+      if (this.#pendingRouteCheck === check) this.#pendingRouteCheck = null;
+      if (this.#disposed || generation !== this.#generation || check.signal.aborted) {
+        throw new Error("Desktop workspace transport was cancelled.");
+      }
+      if (direct !== null) {
+        if (this.#pendingTransportId) {
+          this.#bridge.closeDesktopWorkspaceTransport?.(this.#pendingTransportId);
+          this.#pendingTransportId = null;
+        }
+        this.#pendingDirect = direct;
+        return direct.url;
+      }
+    }
     if (!this.#bridge.prepareDesktopWorkspaceTransport) {
       throw new Error("Desktop workspace transport is unavailable.");
     }
@@ -273,7 +338,19 @@ export class DesktopWorkspaceIpcSocketFactory {
     return `ws://desktop-workspace.invalid/${prepared.transportId}`;
   }
 
-  createSocket(url: string): DesktopWorkspaceIpcSocket {
+  createSocket(url: string): DesktopWorkspaceIpcSocket | WebSocket {
+    const direct = this.#pendingDirect;
+    this.#pendingDirect = null;
+    if (direct !== null) {
+      if (url !== direct.url) throw new Error("Desktop workspace route changed under the attempt.");
+      // The node's own socket, authenticated by the linked bearer's one-time
+      // token in the URL; the relay's credentials never reach it.
+      const socket = new WebSocket(url);
+      socket.binaryType = "arraybuffer";
+      this.#currentSocket = socket;
+      this.#activeRoute = direct.routeKey;
+      return socket;
+    }
     const transportId = this.#pendingTransportId;
     this.#pendingTransportId = null;
     if (!transportId || !url.endsWith(`/${transportId}`)) {
@@ -286,10 +363,12 @@ export class DesktopWorkspaceIpcSocketFactory {
       onClose: (event) => {
         if (this.#currentSocket !== socket) return;
         this.#retryable = event.retryable ?? true;
+        if (event.retryable === false) this.#relayRefused = true;
         this.#retryAfterMs = event.retryAfterMs;
       },
     });
     this.#currentSocket = socket;
+    this.#activeRoute = "relay";
     return socket;
   }
 }

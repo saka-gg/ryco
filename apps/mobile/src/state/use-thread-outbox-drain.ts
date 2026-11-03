@@ -1,4 +1,7 @@
-import { readEnvironmentServerConfig } from "./environmentServerConfigs";
+import {
+  readEnvironmentServerConfig,
+  subscribeEnvironmentServerConfigs,
+} from "./environmentServerConfigs";
 import { createMobileConnectionRegistry } from "../runtime/bootstrap";
 import { useEffect } from "react";
 
@@ -15,10 +18,13 @@ import { DEFAULT_AGENT_TOKEN_MODE } from "@ryco/contracts/orchestration";
 import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
   commitSendTurnDispatch,
+  composeOutgoingPrompt,
   captureReviewedSendReadiness,
 } from "@ryco/client-runtime/state/composer";
 import {
+  followUpSendWaitsForServerQueue,
   readQueueThreadView,
+  selectServerFollowUpQueueWaiting,
   type QueueEnvironmentReadiness,
   type QueueSendHooks,
 } from "@ryco/client-runtime/state/message-queue";
@@ -35,6 +41,13 @@ import {
   trackThreadOutboxLiveCauses,
   type ThreadOutboxDrainState,
 } from "./threadOutbox";
+import {
+  countPendingFollowUpAdds,
+  moveQueuedThreadMessageToServer,
+  readServerFollowUpQueueSupported,
+  recordServerQueueMigrated,
+} from "./followUpQueue";
+import { isClaudeResumeReviewEnabled } from "./preferencesStore";
 import { buildQueuedThreadMessageAttachments } from "./queuedThreadMessageAttachments";
 import type { QueuedThreadMessage } from "./threadOutboxModel";
 import {
@@ -66,10 +79,17 @@ export async function sendQueuedThreadMessage(
           review,
         ),
     },
+    // Asked like the Claude resume review: a cancelled choice holds the message for an
+    // explicit retry instead of dropping it (see the outbox's sendHead).
+    confirmStopBackgroundWork: async (blocked) =>
+      (await import("../features/threads/stopBackgroundWork")).mobileConfirmStopBackgroundWork(
+        blocked,
+      ),
     // The drain retains the queued thread's detail subscription, so the Claude
     // resume review can judge the subscribed state and skip the window read.
     readSubscribedClaudeReviewState: () =>
       selectSubscribedClaudeReviewState(useStore.getState(), threadRef),
+    skipClaudeResumeReview: () => !isClaudeResumeReviewEnabled(),
     sourceProviderDriver: selectThreadByRef(useStore.getState(), threadRef)?.session?.provider,
     providerDriver:
       readEnvironmentServerConfig(message.environmentId)?.providers.find(
@@ -84,7 +104,8 @@ export async function sendQueuedThreadMessage(
     isServerThread: true,
     title: "",
     messageId: message.messageId,
-    outgoingMessageText: message.text.trim() || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
+    outgoingMessageText:
+      composeOutgoingPrompt({ prompt: message.text }) || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
     turnAttachments,
     modelSelection: message.modelSelection,
     hasSelectedModel: true,
@@ -120,7 +141,25 @@ export function readThreadOutboxEnvironment(
   const shellLive = selectEnvironmentShellLive(state, environmentId);
   const connected =
     getWsConnectionUiState(getWsConnectionStatusForEnvironment(environmentId)) === "connected";
-  return { shellLive, mutationReady: shellLive && connected };
+  return {
+    shellLive,
+    mutationReady: shellLive && connected,
+    // A node that keeps follow-up queues itself takes the outbox's messages into its queue.
+    ...(readServerFollowUpQueueSupported(environmentId) ? { serverQueue: true } : {}),
+  };
+}
+
+/**
+ * Whether a message for the thread must wait behind the node's follow-up queue: the node is
+ * about to send its head (its dispatch leaves the session ready while it starts), or an add of
+ * this device is still on its way. A turn start now would jump ahead of them.
+ */
+export function readServerFollowUpQueueWaiting(ref: ScopedThreadRef): boolean {
+  return followUpSendWaitsForServerQueue({
+    serverQueueSupported: readServerFollowUpQueueSupported(ref.environmentId),
+    queueWaiting: selectServerFollowUpQueueWaiting(useStore.getState(), ref),
+    pendingAdds: countPendingFollowUpAdds(scopedThreadKey(ref)),
+  });
 }
 
 // Exported for testing: the drain gate's per-thread snapshot.
@@ -128,6 +167,7 @@ export function readThreadDrainState(ref: ScopedThreadRef): ThreadOutboxDrainSta
   return {
     view: readQueueThreadView(useStore.getState(), ref),
     environment: readThreadOutboxEnvironment(ref.environmentId),
+    ...(readServerFollowUpQueueWaiting(ref) ? { serverQueueWaiting: true } : {}),
   };
 }
 
@@ -173,6 +213,8 @@ export function runOutboxDrain(): void {
   void drainThreadOutbox({
     readThreadDrainState,
     sendQueuedMessage: sendQueuedThreadMessage,
+    moveQueuedMessageToServer: moveQueuedThreadMessageToServer,
+    onServerQueueMigrated: recordServerQueueMigrated,
   }).then(() => {
     const nowMs = Date.now();
     outboxLimitWake.sync(
@@ -289,6 +331,10 @@ export function useThreadOutboxDrain(): void {
 
   // Settle-edge: drain when a thread's turn settles while queued messages wait.
   useEffect(() => subscribeOutboxSettleDrain(runOutboxDrain), []);
+
+  // A node's config can land after its socket opened: one that keeps follow-up queues takes
+  // the outbox's messages into its queue as soon as it says so.
+  useEffect(() => subscribeEnvironmentServerConfigs(runOutboxDrain), []);
 
   // The failures each thread showed live baseline a message composed later
   // against cached rows.

@@ -8,6 +8,7 @@
 import type {
   AgentControlActionPlan,
   AgentControlMcpInterruptThreadInput,
+  AgentControlMcpPullRequestWatchInput,
   AgentControlMcpSendMessageInput,
   AgentControlMcpUpdateThreadInput,
   AgentControlPlanWorkspaceInput,
@@ -36,6 +37,19 @@ export const interruptThreadPlan = (
   ...(input.turnId === undefined ? {} : { turnId: input.turnId }),
 });
 
+/** The chat defaults to the caller's own: the one Ryco wakes with the pull request's news. */
+export const pullRequestWatchPlan = (
+  input: AgentControlMcpPullRequestWatchInput,
+  callerThreadId: ThreadId,
+  watching: boolean,
+): Plan<"pullRequestWatch"> => ({
+  kind: "pullRequestWatch",
+  threadId: input.threadId ?? callerThreadId,
+  ...(input.number === undefined ? {} : { number: input.number }),
+  ...(input.url === undefined ? {} : { url: input.url }),
+  watching,
+});
+
 export const updateThreadPlan = (
   input: AgentControlMcpUpdateThreadInput,
 ): Plan<"updateThread"> => ({
@@ -44,6 +58,7 @@ export const updateThreadPlan = (
   ...(input.title === undefined ? {} : { title: input.title }),
   ...(input.archived === undefined ? {} : { archived: input.archived }),
   ...(input.persistentGoal === undefined ? {} : { persistentGoal: input.persistentGoal }),
+  ...(input.goalStatus === undefined ? {} : { goalStatus: input.goalStatus }),
   ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
   ...(input.runtimeMode === undefined ? {} : { runtimeMode: input.runtimeMode }),
   ...(input.interactionMode === undefined ? {} : { interactionMode: input.interactionMode }),

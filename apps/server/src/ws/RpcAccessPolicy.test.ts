@@ -7,6 +7,7 @@ import {
   ORCHESTRATION_WS_METHODS,
   WS_METHODS,
 } from "@ryco/contracts";
+import { NODE_BROWSER_WS_METHODS } from "@ryco/contracts/node-browser";
 
 import { RPC_ACCESS_POLICY, rpcAccessFor } from "./RpcAccessPolicy.ts";
 
@@ -17,6 +18,7 @@ describe("RPC access policy", () => {
       ...Object.values(ORCHESTRATION_WS_METHODS),
       ...Object.values(CONTEXT_HANDOFF_WS_METHODS),
       ...Object.values(DEVICE_WS_METHODS),
+      ...Object.values(NODE_BROWSER_WS_METHODS),
       ...Object.values(AGENT_CONTROL_WS_METHODS),
     ]);
     expect(new Set(Object.keys(RPC_ACCESS_POLICY))).toEqual(contractMethods);

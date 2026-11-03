@@ -15,6 +15,7 @@ import IconArrowUpCircle from "@tabler/icons-react-native/IconArrowUpCircle";
 import IconArrowUpRight from "@tabler/icons-react-native/IconArrowUpRight";
 import IconArrowUpRightCircle from "@tabler/icons-react-native/IconArrowUpRightCircle";
 import IconArrowsMaximize from "@tabler/icons-react-native/IconArrowsMaximize";
+import IconArrowsMinimize from "@tabler/icons-react-native/IconArrowsMinimize";
 import IconBellRinging from "@tabler/icons-react-native/IconBellRinging";
 import IconBolt from "@tabler/icons-react-native/IconBolt";
 import IconCamera from "@tabler/icons-react-native/IconCamera";
@@ -44,6 +45,7 @@ import IconHammer from "@tabler/icons-react-native/IconHammer";
 import IconGitMerge from "@tabler/icons-react-native/IconGitMerge";
 import IconGitPullRequest from "@tabler/icons-react-native/IconGitPullRequest";
 import IconHelpCircle from "@tabler/icons-react-native/IconHelpCircle";
+import IconHistory from "@tabler/icons-react-native/IconHistory";
 import IconInfoCircle from "@tabler/icons-react-native/IconInfoCircle";
 import IconKeyboard from "@tabler/icons-react-native/IconKeyboard";
 import IconKeyboardHide from "@tabler/icons-react-native/IconKeyboardHide";
@@ -87,6 +89,7 @@ const ANDROID_ICON_BY_SF_SYMBOL: Partial<Record<SFSymbol, Icon>> = {
   "arrow.branch": IconGitBranch,
   "arrow.clockwise": IconRefresh,
   "arrow.down.circle": IconArrowDownCircle,
+  "arrow.down.right.and.arrow.up.left": IconArrowsMinimize,
   "arrow.right.circle": IconArrowRightCircle,
   "arrow.triangle.branch": IconGitBranch,
   "arrow.triangle.pull": IconGitPullRequest,
@@ -111,6 +114,7 @@ const ANDROID_ICON_BY_SF_SYMBOL: Partial<Record<SFSymbol, Icon>> = {
   "chevron.left.forwardslash.chevron.right": IconCode,
   "chevron.right": IconChevronRight,
   "chevron.up": IconChevronUp,
+  "clock.arrow.circlepath": IconHistory,
   desktopcomputer: IconDeviceDesktop,
   "doc.on.doc": IconCopy,
   "doc.text": IconFileText,
@@ -122,6 +126,7 @@ const ANDROID_ICON_BY_SF_SYMBOL: Partial<Record<SFSymbol, Icon>> = {
   "folder.badge.plus": IconFolderPlus,
   "folder.fill": IconFolder,
   gearshape: IconSettings,
+  globe: IconWorld,
   hammer: IconHammer,
   "info.circle": IconInfoCircle,
   link: IconLink,

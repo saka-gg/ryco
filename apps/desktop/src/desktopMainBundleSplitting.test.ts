@@ -73,6 +73,8 @@ const LAZY_FROM_MAIN = [
   "./sshEnvironment.ts",
   "./tailscaleEndpointProvider.ts",
   "./bundledGuide.ts",
+  "./desktopCliCommand.ts",
+  "./nightlyHandoff.ts",
   // Computer use: started during bootstrap, after Electron is ready.
   "./computerUse/desktopStack.ts",
   "./computerUse/runtime.ts",
@@ -80,6 +82,8 @@ const LAZY_FROM_MAIN = [
   "./browser/ipc.ts",
   "./cuaDriverHost.ts",
   "./appSnapManager.ts",
+  // Composer window capture: loaded during bootstrap on macOS only.
+  "./windowCapture.ts",
 ];
 const LAZY_EXTERNALS_FROM_MAIN = [
   "electron-updater",
@@ -109,11 +113,19 @@ describe("desktop main bundle splitting", () => {
     expect(main).toContain('import("./desktopHubStack.ts")');
     expect(main).toContain('import("./sshEnvironment.ts")');
     expect(main).toContain('import("./computerUse/desktopStack.ts")');
+    expect(main).toContain('import("./windowCapture.ts")');
     // A lazy CommonJS require: the ESM namespace of electron-updater has no
     // `autoUpdater` export, so `(await import("electron-updater")).autoUpdater`
     // would be undefined.
     expect(main).toContain('require("electron-updater")');
     expect(main).not.toMatch(/await import\("electron-updater"\)/);
+  });
+
+  it("keeps the sandboxed preload free of runtime imports besides electron", async () => {
+    // Its build does not bundle workspace packages, and a sandboxed preload can require
+    // nothing else: a value import from `@ryco/*` would fail when the window loads.
+    const { externals } = await staticGraph("./preload.ts");
+    expect([...externals]).toEqual(["electron"]);
   });
 
   it("keeps the launch entry free of the main bundle and of heavy dependencies", async () => {
@@ -124,7 +136,8 @@ describe("desktop main bundle splitting", () => {
         specifier.startsWith("node:") ||
           specifier === "electron" ||
           specifier === "@ryco/shared/shellEnvironment" ||
-          specifier === "@ryco/shared/runtimeEnv",
+          specifier === "@ryco/shared/runtimeEnv" ||
+          specifier === "@ryco/shared/desktopFlavor",
         specifier,
       ).toBe(true);
     }

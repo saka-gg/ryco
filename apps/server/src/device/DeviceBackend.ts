@@ -79,6 +79,40 @@ export interface DeviceKeyEvent {
   readonly direction: "down" | "up";
 }
 
+/** What `device_logs` asks for. Bounded by the gateway before it gets here. */
+export interface DeviceLogQuery {
+  readonly bundleId: string;
+  readonly sinceSeconds: number;
+  readonly level: "error" | "default" | "info" | "debug";
+  /**
+   * Case-insensitive text every returned entry's message must contain: the
+   * message only, not its timestamp, process or subsystem.
+   */
+  readonly contains?: string | undefined;
+  readonly limit: number;
+}
+
+/** A crash report by file name only, so the user's home directory never reaches a transcript. */
+export interface DeviceCrashReport {
+  readonly fileName: string;
+  readonly capturedAt: string;
+  readonly exception: string | null;
+  readonly reason: string | null;
+}
+
+export interface DeviceLogResult {
+  readonly bundleId: string;
+  /** The executable the unified log was filtered by, when the app is installed. */
+  readonly process: string | null;
+  readonly log: readonly string[];
+  readonly crashes: readonly DeviceCrashReport[];
+  /** Matching lines dropped by `limit`, oldest first. */
+  readonly omitted: number;
+  /** True when the log reader's output passed its cap. */
+  readonly truncated: boolean;
+  readonly note: string;
+}
+
 export interface DeviceDiscovery {
   readonly devices: readonly DeviceDescriptor[];
   /** Fresh, complete discovery for this target's host, including shutdown devices. */
@@ -119,6 +153,11 @@ export interface DeviceBackend {
    * Omitting the target fences every device during manager disposal. Release is nested-safe. */
   suspendTesting(udid?: string): () => void;
   testing(input: DeviceTestingInput): Promise<void>;
+  /**
+   * An app's recent unified log and crash reports. iOS simulators on this node
+   * only; other backends reject with a message the agent can act on.
+   */
+  readLogs(udid: string, query: DeviceLogQuery): Promise<DeviceLogResult>;
   openUrl(udid: string, url: string): Promise<void>;
 
   tap(udid: string, x: number, y: number): Promise<void>;

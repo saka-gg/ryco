@@ -1,13 +1,13 @@
 import { MessageSquareIcon } from "lucide-react";
 import { memo } from "react";
-
-import { cn } from "../../../lib/utils";
 import {
   FILE_STATUS_LABEL,
   FILE_STATUS_LETTER,
-  type FileViewedState,
   type PullRequestFileStatus,
-} from "./pullRequestFiles.logic";
+} from "@ryco/client-runtime/state/pull-request-review";
+
+import { cn } from "../../../lib/utils";
+import type { FileViewedState } from "./pullRequestFiles.logic";
 
 /**
  * Small marks the tree and the sticky file headers share, so a file's status,

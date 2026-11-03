@@ -1,13 +1,19 @@
 import { makeLocalTaskHandlers } from "./localTaskRpc.ts";
 import { makeNotesHandlers } from "./notesRpc.ts";
 import { makeNodeUpdateHandlers } from "./nodeUpdateRpc.ts";
+import { makeClientInteractionHandlers } from "./clientInteractionRpc.ts";
+import { makeProviderSignInHandlers } from "./providerSignInRpc.ts";
+import { makeNodeBrowserHandlers } from "./nodeBrowserRpc.ts";
+import { makePushHandlers } from "./pushRpc.ts";
 import { makeDailyRecapHandlers } from "./dailyRecapRpc.ts";
 import { makeStorageHandlers } from "./storageRpc.ts";
 import { makeLifecycleHandlers } from "./lifecycleRpc.ts";
 import { makeSessionImportHandlers } from "./sessionImportRpc.ts";
 import { makeThreadForkHandlers } from "./threadForkRpc.ts";
+import { makeThreadLocalServerHandlers } from "./threadLocalServersRpc.ts";
 import { makeAutomationCentreHandlers } from "./automationCentreRpc.ts";
 import { makeSideQuestionHandlers } from "./sideQuestionRpc.ts";
+import { makeSecretRequestHandlers } from "./secretRequestRpc.ts";
 import { Effect, Layer, Option, type Scope, type Stream } from "effect";
 import { WsDeviceRpcGroup, WsRpcGroup } from "@ryco/contracts";
 import { type Rpc, type RpcGroup, RpcSerialization } from "effect/rpc";
@@ -22,6 +28,7 @@ import { makeProjectHandlers } from "./projectRpc.ts";
 import { makeChatProjectHandlers } from "./chatProjectRpc.ts";
 import { makeProjectCopyHandlers } from "./projectCopyRpc.ts";
 import { makeSourceControlHandlers } from "./sourceControlRpc.ts";
+import { makeSourceControlInvolvedHandlers } from "./sourceControlInvolvedRpc.ts";
 import { makeProviderHandlers } from "./providerRpc.ts";
 import { makeProviderSessionPrewarmHandlers } from "./providerSessionPrewarmRpc.ts";
 import { makeProviderProjectCommandsHandlers } from "./providerProjectCommandsRpc.ts";
@@ -32,7 +39,48 @@ import { makeDeviceHandlers } from "./deviceRpc.ts";
 import { DeviceService } from "../device/Services/DeviceService.ts";
 import { authorizeRpcPrincipal, type WsRpcAccess } from "../auth/wsAuthorization.ts";
 
-const makeWsRpcHandlers = (principal: RpcPrincipal) =>
+/**
+ * The application group's handlers, named through each module's own factory. Inferred, the
+ * handler map is spelled out with every RPC's payload, once for each place the layer's type
+ * mentions it, and that outgrew the length TypeScript serializes a declaration's type to.
+ */
+type WsRpcHandlerMap = ReturnType<typeof makeAgentControlHandlers> &
+  ReturnType<typeof makeAutomationCentreHandlers> &
+  ReturnType<typeof makeOrchestrationHandlers> &
+  ReturnType<typeof makeContextHandoffHandlers> &
+  ReturnType<typeof makeProviderHandlers> &
+  ReturnType<typeof makeProviderSessionPrewarmHandlers> &
+  ReturnType<typeof makeProviderProjectCommandsHandlers> &
+  ReturnType<typeof makeSideQuestionHandlers> &
+  ReturnType<typeof makeStatisticsHandlers> &
+  ReturnType<typeof makeCliProxyHandlers> &
+  ReturnType<typeof makeSourceControlHandlers> &
+  ReturnType<typeof makeProjectHandlers> &
+  ReturnType<typeof makeChatProjectHandlers> &
+  ReturnType<typeof makeSessionImportHandlers> &
+  ReturnType<typeof makeThreadForkHandlers> &
+  ReturnType<typeof makeThreadLocalServerHandlers> &
+  ReturnType<typeof makeSecretRequestHandlers> &
+  ReturnType<typeof makeStorageHandlers> &
+  ReturnType<typeof makeLifecycleHandlers> &
+  ReturnType<typeof makeDailyRecapHandlers> &
+  ReturnType<typeof makeLocalTaskHandlers> &
+  ReturnType<typeof makeNotesHandlers> &
+  ReturnType<typeof makeNodeUpdateHandlers> &
+  ReturnType<typeof makeClientInteractionHandlers> &
+  ReturnType<typeof makeGitHandlers> &
+  ReturnType<typeof makeTerminalHandlers> &
+  ReturnType<typeof makeNodeBrowserHandlers>;
+
+type WsRpcContextBuild = ReturnType<typeof makeWsRpcContext>;
+
+const makeWsRpcHandlers = (
+  principal: RpcPrincipal,
+): Effect.Effect<
+  WsRpcHandlerMap,
+  Effect.Error<WsRpcContextBuild>,
+  Effect.Services<WsRpcContextBuild> | Scope.Scope
+> =>
   Effect.gen(function* () {
     const ctx = yield* makeWsRpcContext(principal);
     yield* Effect.addFinalizer(() => ctx.clientWorkspaceUse.release);
@@ -42,25 +90,32 @@ const makeWsRpcHandlers = (principal: RpcPrincipal) =>
       ...makeOrchestrationHandlers(ctx),
       ...makeContextHandoffHandlers(ctx),
       ...makeProviderHandlers(ctx),
+      ...makeProviderSignInHandlers(ctx),
       ...makeProviderSessionPrewarmHandlers(ctx),
       ...makeProviderProjectCommandsHandlers(ctx),
       ...makeSideQuestionHandlers(ctx),
       ...makeStatisticsHandlers(ctx),
       ...makeCliProxyHandlers(ctx),
       ...makeSourceControlHandlers(ctx),
+      ...makeSourceControlInvolvedHandlers(ctx),
       ...makeProjectHandlers(ctx),
       ...makeChatProjectHandlers(ctx),
       ...makeProjectCopyHandlers(ctx),
       ...makeSessionImportHandlers(ctx),
       ...makeThreadForkHandlers(ctx),
+      ...makeThreadLocalServerHandlers(ctx),
+      ...makeSecretRequestHandlers(ctx),
       ...makeStorageHandlers(ctx),
       ...makeLifecycleHandlers(ctx),
       ...makeDailyRecapHandlers(ctx),
       ...makeLocalTaskHandlers(ctx),
       ...makeNotesHandlers(ctx),
       ...makeNodeUpdateHandlers(ctx),
+      ...makeClientInteractionHandlers(ctx),
+      ...makePushHandlers(ctx),
       ...makeGitHandlers(ctx),
       ...makeTerminalHandlers(ctx),
+      ...makeNodeBrowserHandlers(ctx),
     });
   });
 
@@ -101,18 +156,24 @@ type HandlerMapServices<Handlers> = {
     : never;
 }[keyof Handlers];
 
-export const makeWsRpcLayer = (principal: RpcPrincipal) => {
+type WsRpcHandlersBuild = ReturnType<typeof makeWsRpcHandlers>;
+
+/**
+ * Named, so the layer's type is written by reference: inlined, it outgrew what the compiler
+ * serializes for an inferred export (TS7056).
+ */
+type WsRpcLayer = Layer.Layer<
+  Rpc.ToHandler<RpcGroup.Rpcs<typeof WsRpcGroup>>,
+  Effect.Error<WsRpcHandlersBuild>,
+  Exclude<
+    Effect.Services<WsRpcHandlersBuild> | HandlerMapServices<Effect.Success<WsRpcHandlersBuild>>,
+    Scope.Scope
+  >
+>;
+
+export const makeWsRpcLayer = (principal: RpcPrincipal): WsRpcLayer => {
   const build = makeWsRpcHandlers(principal);
   // `WsRpcGroup.of` in `makeWsRpcHandlers` already checks every RPC has its handler.
-  const toLayer = WsRpcGroup.toLayer as unknown as (
-    handlers: typeof build,
-  ) => Layer.Layer<
-    Rpc.ToHandler<RpcGroup.Rpcs<typeof WsRpcGroup>>,
-    Effect.Error<typeof build>,
-    Exclude<
-      Effect.Services<typeof build> | HandlerMapServices<Effect.Success<typeof build>>,
-      Scope.Scope
-    >
-  >;
+  const toLayer = WsRpcGroup.toLayer as unknown as (handlers: WsRpcHandlersBuild) => WsRpcLayer;
   return toLayer.call(WsRpcGroup, build);
 };

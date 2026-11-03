@@ -1,13 +1,25 @@
 import "../../index.css";
-import { EnvironmentId, ThreadId } from "@ryco/contracts";
+import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts";
+import { createQuoteCitation } from "@ryco/shared/quoteCitations";
+import { DEFAULT_CLIENT_SETTINGS } from "@ryco/contracts/settings";
 import { useRef } from "react";
 import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
+import { pinMediaQueryMatches } from "../../../test/browserPointer";
+import { replaceClientSettingsSnapshot } from "../../hooks/clientSettingsStore";
+import { isMacPlatform } from "../../lib/utils";
 import { TranscriptSelectionActions, readTranscriptSelection } from "./TranscriptSelectionActions";
+import { FINE_POINTER_MEDIA_QUERY } from "./useSendShortcut";
 
 const source = { environmentId: EnvironmentId.make("local"), threadId: ThreadId.make("source") };
 const text = "Keep the draft until the turn is accepted.";
+// The whole message selected: no context around it, offsets from its start.
+const citation = createQuoteCitation({
+  source,
+  messageId: MessageId.make("assistant"),
+  selector: { exact: text, prefix: "", suffix: "", start: 0, end: text.length },
+});
 const current = vi.fn();
 const side = vi.fn();
 const create = vi.fn(async () => {});
@@ -68,10 +80,10 @@ describe("TranscriptSelectionActions", () => {
       .element(page.getByRole("button", { name: "Add to chat", exact: true }))
       .toHaveFocus();
     await userEvent.keyboard("{Enter}");
-    expect(current).toHaveBeenCalledWith({ source, messageId: "assistant", text });
+    expect(current).toHaveBeenCalledWith(citation);
     await select();
     await userEvent.keyboard("{Tab}{Enter}");
-    expect(side).toHaveBeenCalledWith({ source, messageId: "assistant", text });
+    expect(side).toHaveBeenCalledWith(citation);
     const range = document.createRange();
     range.setStart(
       document.querySelector('[data-selection-message-id="assistant"]')!.firstChild!,
@@ -85,6 +97,22 @@ describe("TranscriptSelectionActions", () => {
     window.getSelection()!.removeAllRanges();
     window.getSelection()!.addRange(range);
     expect(readTranscriptSelection(document.body, source)).toBeNull();
+  });
+  it("quotes a partial selection with the context around it, for finding it again", async () => {
+    mounted = await render(<Harness />);
+    const node = document.querySelector('[data-selection-message-id="assistant"]')!.firstChild!;
+    const range = document.createRange();
+    range.setStart(node, 5);
+    range.setEnd(node, 15);
+    window.getSelection()!.removeAllRanges();
+    window.getSelection()!.addRange(range);
+    expect(readTranscriptSelection(document.body, source)?.citation.selector).toEqual({
+      exact: "the draft",
+      prefix: "Keep ",
+      suffix: " until the turn is accepted.",
+      start: 5,
+      end: 14,
+    });
   });
   it("keeps keyboard actions open when a scroll arrives before toolbar focus", async () => {
     mounted = await render(<Harness />);
@@ -100,13 +128,13 @@ describe("TranscriptSelectionActions", () => {
         .element(page.getByRole("button", { name: "Add to chat", exact: true }))
         .toHaveFocus();
       await userEvent.keyboard("{Enter}");
-      expect(current).toHaveBeenCalledWith({ source, messageId: "assistant", text });
+      expect(current).toHaveBeenCalledWith(citation);
       await select({ waitForPointerToolbar: true });
       await expect
         .element(page.getByRole("button", { name: "Add to chat", exact: true }))
         .toHaveFocus();
       await userEvent.keyboard("{Tab}{Enter}");
-      expect(side).toHaveBeenCalledWith({ source, messageId: "assistant", text });
+      expect(side).toHaveBeenCalledWith(citation);
       expect(create).not.toHaveBeenCalled();
       await select({ waitForPointerToolbar: true });
       await userEvent.keyboard("{Escape}");
@@ -141,6 +169,32 @@ describe("TranscriptSelectionActions", () => {
     expect(create.mock.calls[0]).toEqual(create.mock.calls[1]);
     await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
   });
+  it("adds a line with Enter and sends with Mod+Enter under the Always ⌘↵ send shortcut", async () => {
+    // The runner's default viewport is the phone tier, where only a fine pointer keeps the
+    // setting. Pin it: device-less Linux CI reports none, which would keep Enter sending.
+    const restorePointer = pinMediaQueryMatches(FINE_POINTER_MEDIA_QUERY, true);
+    replaceClientSettingsSnapshot({ ...DEFAULT_CLIENT_SETTINGS, sendShortcut: "mod-enter" });
+    try {
+      mounted = await render(<Harness />);
+      await select();
+      await page.getByRole("button", { name: "New chat", exact: true }).click();
+      const message = page.getByRole("textbox", { name: "Message for new chat" });
+      await message.click();
+      await userEvent.keyboard("First line{Enter}Second line");
+      await expect.element(message).toMatchTextContent(/First line\s*Second line/);
+      expect(create).not.toHaveBeenCalled();
+
+      const mod = isMacPlatform(navigator.platform) ? "Meta" : "Control";
+      await userEvent.keyboard(`{${mod}>}{Enter}{/${mod}}`);
+      await vi.waitFor(() => expect(create).toHaveBeenCalledOnce());
+      expect(create).toHaveBeenCalledWith(
+        expect.objectContaining({ prompt: "First line\nSecond line", intent: "send" }),
+      );
+    } finally {
+      replaceClientSettingsSnapshot(DEFAULT_CLIENT_SETTINGS);
+      restorePointer();
+    }
+  });
   it("allows empty-prompt Open in chat and blocks duplicate submits and dismissal while pending", async () => {
     let finish!: () => void;
     create.mockImplementationOnce(
@@ -162,7 +216,7 @@ describe("TranscriptSelectionActions", () => {
       expect.objectContaining({
         prompt: "",
         intent: "compose",
-        quote: { source, messageId: "assistant", text },
+        citation,
       }),
     );
     finish();

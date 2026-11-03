@@ -35,6 +35,8 @@ export function applyRightPanelSessionSearch(
     // Transient deep links: dropped here and never remembered (see below).
     workspacePrReveal: _workspacePrReveal,
     workspaceAgentsWorkflow: _workspaceAgentsWorkflow,
+    workspaceFile: _workspaceFile,
+    workspaceFileLine: _workspaceFileLine,
     ...rest
   } = search;
   return {
@@ -45,7 +47,7 @@ export function applyRightPanelSessionSearch(
 
 /**
  * The panel state worth restoring for a thread. The one-shot reveal keys
- * (`workspacePrReveal`, `workspaceAgentsWorkflow`) are transient and never
+ * (`workspacePrReveal`, `workspaceAgentsWorkflow`, `workspaceFile`) are transient and never
  * remembered: returning to a thread must not replay a deep link.
  */
 export function pickRightPanelSessionSearch(

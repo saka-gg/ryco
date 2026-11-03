@@ -20,16 +20,16 @@ import {
   ShieldAlertIcon,
   XIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ComponentType, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ensureEnvironmentApi } from "../../environmentApi";
 import {
-  CWD_RELOCATION_HANDOFF_COPY,
   FORK_HANDOFF_COPY,
   forkHandoffEndpointLabels,
   forkHandoffHeadline,
   isCwdRelocationHandoff,
   isForkHandoff,
+  resumeFallbackHandoffCopy,
   type ContextHandoffTimelineEntry,
 } from "../../session-logic";
 import {
@@ -121,10 +121,21 @@ function readableEntry(section: ContextHandoffInspectionSection, value: unknown)
   );
 }
 
+const FRESH_SESSION_ICON_CLASS = "size-3.5 shrink-0 text-muted-foreground";
+
 export function ContextHandoffInspectionPanel(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly marker: ContextHandoffTimelineEntry;
+  /**
+   * The timeline divider's resume fallback icon, passed in by ChatView for history the provider
+   * no longer had. Importing ContextHandoffMarkerRow or its icons here would split them into
+   * chunks of their own on the way to every thread.
+   */
+  readonly ResumeFallbackIcon: ComponentType<{
+    readonly marker: Pick<ContextHandoffTimelineEntry, "reason">;
+    readonly className: string;
+  }>;
   readonly onClose: () => void;
 }) {
   const api = useMemo(
@@ -296,12 +307,13 @@ export function ContextHandoffInspectionPanel(props: {
   const activeScope = summary?.[scope] ?? null;
   const sourceEndpoints = summary?.sources ?? props.marker.sources;
   const targetEndpoint = summary?.target ?? props.marker.target;
-  // Relocations and a fork's first session keep their model: the header names
-  // the fresh session instead of a model transition.
+  // Resume fallbacks and a fork's first session keep their model: the header
+  // names the fresh session instead of a model transition.
+  const resumeFallback = resumeFallbackHandoffCopy(props.marker);
   const freshSession = isForkHandoff(props.marker)
     ? {
         reason: "fork",
-        Icon: GitForkIcon,
+        icon: <GitForkIcon className={FRESH_SESSION_ICON_CLASS} />,
         label: forkHandoffHeadline(
           props.marker.status,
           null,
@@ -309,12 +321,16 @@ export function ContextHandoffInspectionPanel(props: {
         ),
         explanation: FORK_HANDOFF_COPY.explanation,
       }
-    : isCwdRelocationHandoff(props.marker)
+    : resumeFallback && props.marker.reason
       ? {
-          reason: "cwd-relocation",
-          Icon: FolderInputIcon,
-          label: CWD_RELOCATION_HANDOFF_COPY.attempted,
-          explanation: CWD_RELOCATION_HANDOFF_COPY.explanation,
+          reason: props.marker.reason,
+          icon: isCwdRelocationHandoff(props.marker) ? (
+            <FolderInputIcon className={FRESH_SESSION_ICON_CLASS} />
+          ) : (
+            <props.ResumeFallbackIcon marker={props.marker} className={FRESH_SESSION_ICON_CLASS} />
+          ),
+          label: resumeFallback.attempted,
+          explanation: resumeFallback.explanation,
         }
       : null;
 
@@ -337,7 +353,7 @@ export function ContextHandoffInspectionPanel(props: {
                 className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-sm font-medium"
                 data-context-handoff-reason={freshSession.reason}
               >
-                <freshSession.Icon className="size-3.5 shrink-0 text-muted-foreground" />
+                {freshSession.icon}
                 <span>{freshSession.label}</span>
                 <span className="text-muted-foreground/45" aria-hidden>
                   ·

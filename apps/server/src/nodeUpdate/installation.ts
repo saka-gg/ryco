@@ -15,10 +15,17 @@ import type {
   NodeServiceManager,
   NodeUpdateAvailability,
 } from "@ryco/contracts";
+import { releaseChannelForVersion } from "@ryco/shared/desktopFlavor";
 import { Duration, Effect, FileSystem, Option, Path, Schema } from "effect";
 
 import { compareCliVersions, isParseableCliVersion } from "../provider/cliVersion.ts";
-import { isEphemeralCliInstall, nodeServicePlatform } from "../service/nodeService.ts";
+import {
+  BUN_GLOBAL_INSTALL_LOCK_KEY,
+  npmGlobalInstallLockKey,
+  PNPM_GLOBAL_INSTALL_LOCK_KEY,
+} from "../provider/installLockKeys.ts";
+import { isEphemeralCliInstall } from "../service/nodeService.ts";
+import { nodeServiceManagerOfProcess } from "../service/nodeServiceManager.ts";
 
 export const RYCO_CLI_PACKAGE = "ryco-cli";
 
@@ -47,8 +54,11 @@ export interface NodeInstallationProbe {
   readonly resolvedScriptPath: string | null;
   readonly platform: NodeJS.Platform;
   readonly serviceLabel: string | undefined;
+  readonly pid: number;
   /** launchd starts its jobs itself, so a launchd service's parent is pid 1. */
   readonly parentPid: number;
+  /** `SYSTEMD_EXEC_PID`: the process a systemd unit started (systemd 248+). */
+  readonly systemdExecPid: string | undefined;
   readonly temporaryDirectory: string;
   /** Whether `root` is a Git checkout of the Ryco repository. */
   readonly isRycoCheckout: (root: string) => boolean;
@@ -88,16 +98,8 @@ export function npmGlobalPrefix(scriptPath: string, platform: NodeJS.Platform): 
   return scriptPath.slice(0, prefix.length);
 }
 
-function serviceManagerFor(probe: NodeInstallationProbe): NodeServiceManager | null {
-  if (!probe.serviceLabel) return null;
-  const manager = nodeServicePlatform(probe.platform);
-  // An inherited label alone does not make a foreground process the launchd job.
-  if (manager === "launchd" && probe.parentPid !== 1) return null;
-  return manager;
-}
-
 export function detectNodeInstallation(probe: NodeInstallationProbe): DetectedNodeInstallation {
-  const service = probe.mode === "desktop" ? null : serviceManagerFor(probe);
+  const service = probe.mode === "desktop" ? null : nodeServiceManagerOfProcess(probe);
   const base = {
     service,
     serviceLabel: service === null ? null : (probe.serviceLabel ?? null),
@@ -134,7 +136,7 @@ export function detectNodeInstallation(probe: NodeInstallationProbe): DetectedNo
 
 /** npm dist-tags double as release channels: a nightly build tracks `nightly`. */
 export function nodeReleaseChannel(version: string): NodeReleaseChannel {
-  return version.includes("-nightly.") ? "nightly" : "latest";
+  return releaseChannelForVersion(version);
 }
 
 /** Whether `candidate` is a newer release than `current` (prerelease order included). */
@@ -173,6 +175,25 @@ export function globalInstallCommandLine(kind: NodeInstallationKind, spec: strin
       return `bun add -g ${target}`;
     case "pnpm-global":
       return `pnpm add -g ${target}`;
+    default:
+      return null;
+  }
+}
+
+/**
+ * The host-wide install lock key of the installation this process runs from: the key a provider
+ * CLI update in the same global install takes (`installLockKeys.ts`), `null` for every other kind.
+ */
+export function nodeInstallLockKey(installation: DetectedNodeInstallation): string | null {
+  switch (installation.kind) {
+    case "npm-global":
+      return installation.npmPrefix === null
+        ? null
+        : npmGlobalInstallLockKey(installation.npmPrefix);
+    case "bun-global":
+      return BUN_GLOBAL_INSTALL_LOCK_KEY;
+    case "pnpm-global":
+      return PNPM_GLOBAL_INSTALL_LOCK_KEY;
     default:
       return null;
   }
@@ -255,63 +276,6 @@ export function nodeUpdateCapability(input: {
   return { canUpdate: true, manualReason: null, manualCommand: null };
 }
 
-export interface NodeUpdateCommand {
-  readonly command: string;
-  readonly args: ReadonlyArray<string>;
-  readonly timeout: Duration.Input;
-}
-
-export const NODE_INSTALL_TIMEOUT = Duration.minutes(10);
-export const NODE_VERIFY_TIMEOUT = Duration.seconds(60);
-
-/**
- * Installs exactly `version` into the installation this process runs from: npm into its
- * own prefix (not whichever `npm` the PATH finds first), bun with the running bun.
- */
-export function nodeInstallCommand(
-  installation: DetectedNodeInstallation,
-  version: string,
-  execPath: string,
-): NodeUpdateCommand | null {
-  const target = `${RYCO_CLI_PACKAGE}@${version}`;
-  switch (installation.kind) {
-    case "npm-global":
-      return installation.npmPrefix === null
-        ? null
-        : {
-            command: "npm",
-            args: ["install", "-g", "--prefix", installation.npmPrefix, target],
-            timeout: NODE_INSTALL_TIMEOUT,
-          };
-    case "bun-global": {
-      const runtime = execPath.split(/[\\/]/u).at(-1) ?? "";
-      return {
-        command: /^bun(?:\.exe)?$/iu.test(runtime) ? execPath : "bun",
-        args: ["add", "-g", target],
-        timeout: NODE_INSTALL_TIMEOUT,
-      };
-    }
-    case "pnpm-global":
-      return { command: "pnpm", args: ["add", "-g", target], timeout: NODE_INSTALL_TIMEOUT };
-    default:
-      return null;
-  }
-}
-
-/** Runs the installed entry script once; it must report the release that was installed. */
-export function nodeVerifyCommand(
-  installation: DetectedNodeInstallation,
-  execPath: string,
-): NodeUpdateCommand | null {
-  return installation.entryScript === null
-    ? null
-    : {
-        command: execPath,
-        args: [installation.entryScript, "--version"],
-        timeout: NODE_VERIFY_TIMEOUT,
-      };
-}
-
 const ROOT_PACKAGE_NAME = "@ryco/monorepo";
 const RootPackageJson = Schema.fromJsonString(
   Schema.Struct({ name: Schema.optional(Schema.String) }),
@@ -337,7 +301,9 @@ export const probeNodeInstallation = Effect.fn("probeNodeInstallation")(function
   readonly argv1: string | undefined;
   readonly platform: NodeJS.Platform;
   readonly serviceLabel: string | undefined;
+  readonly pid: number;
   readonly parentPid: number;
+  readonly systemdExecPid: string | undefined;
   readonly temporaryDirectory: string;
 }) {
   const fs = yield* FileSystem.FileSystem;
@@ -357,7 +323,9 @@ export const probeNodeInstallation = Effect.fn("probeNodeInstallation")(function
       resolvedScriptPath: resolved,
       platform: input.platform,
       serviceLabel: input.serviceLabel,
+      pid: input.pid,
       parentPid: input.parentPid,
+      systemdExecPid: input.systemdExecPid,
       temporaryDirectory: input.temporaryDirectory,
       isRycoCheckout: (root) => checkout && root === checkoutRoot,
     });

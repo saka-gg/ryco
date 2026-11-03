@@ -10,7 +10,9 @@ export function isSavedEnvironmentHubLink(value: unknown): value is SavedEnviron
     typeof value.hubEnvironmentId === "string" &&
     value.hubEnvironmentId.length > 0 &&
     typeof value.linkedAt === "string" &&
-    Number.isFinite(Date.parse(value.linkedAt))
+    Number.isFinite(Date.parse(value.linkedAt)) &&
+    (value.nodeIdentityPublicKey === undefined ||
+      (typeof value.nodeIdentityPublicKey === "string" && value.nodeIdentityPublicKey.length > 0))
   );
 }
 
@@ -20,9 +22,12 @@ export function isSavedEnvironmentHubLink(value: unknown): value is SavedEnviron
  * these, so a new record field is added here once rather than in each store.
  */
 export function persistedSavedEnvironmentRecordFields(
-  record: Readonly<Omit<PersistedSavedEnvironmentRecord, "desktopSsh" | "hubLink">> & {
+  record: Readonly<
+    Omit<PersistedSavedEnvironmentRecord, "desktopSsh" | "hubLink" | "disabledAt">
+  > & {
     readonly desktopSsh?: PersistedSavedEnvironmentRecord["desktopSsh"] | undefined;
     readonly hubLink?: PersistedSavedEnvironmentRecord["hubLink"] | undefined;
+    readonly disabledAt?: string | undefined;
   },
 ): PersistedSavedEnvironmentRecord {
   return {
@@ -34,5 +39,6 @@ export function persistedSavedEnvironmentRecordFields(
     lastConnectedAt: record.lastConnectedAt,
     ...(record.desktopSsh ? { desktopSsh: record.desktopSsh } : {}),
     ...(record.hubLink ? { hubLink: record.hubLink } : {}),
+    ...(typeof record.disabledAt === "string" ? { disabledAt: record.disabledAt } : {}),
   };
 }

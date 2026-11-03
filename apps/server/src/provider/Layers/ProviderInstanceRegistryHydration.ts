@@ -58,6 +58,7 @@ import {
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { StartupStallMonitorLive, trackStartupPhase } from "../../startupStallMonitor.ts";
 import { BUILT_IN_DRIVERS, type BuiltInDriversEnv } from "../builtInDrivers.ts";
+import { legacyProviderInstanceConfig } from "../providerInstanceConfig.ts";
 import { ProviderInstanceBootGate } from "../Services/ProviderInstanceBootGate.ts";
 import {
   ProviderInstanceRegistry,
@@ -97,19 +98,11 @@ export const deriveProviderInstanceConfigMap = (
 
     // Only built-in drivers have a legacy mirror; the registry's
     // `providers` struct is keyed on the same literal slug as
-    // `driverKind`. Access is dynamic (the driver kind is a branded string),
-    // but it's constrained to `keyof settings.providers` by the union of
-    // built-in driver kinds.
-    const legacyKey = driver.driverKind as keyof ServerSettings["providers"];
-    const legacyConfig = settings.providers[legacyKey];
-    if (legacyConfig === undefined) {
-      continue;
+    // `driverKind`.
+    const legacy = legacyProviderInstanceConfig(settings, instanceId);
+    if (legacy !== undefined) {
+      merged[instanceId] = legacy;
     }
-
-    merged[instanceId] = {
-      driver: driver.driverKind,
-      config: legacyConfig,
-    };
   }
 
   return merged as ProviderInstanceConfigMap;

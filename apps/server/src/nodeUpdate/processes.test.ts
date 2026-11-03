@@ -4,11 +4,22 @@ import { Effect } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 
 import {
+  BUN_GLOBAL_INSTALL_LOCK_KEY,
+  npmGlobalInstallLockKey,
+  PNPM_GLOBAL_INSTALL_LOCK_KEY,
+} from "../provider/installLockKeys.ts";
+import { type DetectedNodeInstallation, nodeInstallLockKey } from "./installation.ts";
+import {
   commandOutputTail,
   describeCommandFailure,
   makeNodeUpdateCommandRunner,
   NODE_UPDATE_OUTPUT_MAX_CHARS,
+  nodeInstallCommand,
+  nodeInstallHoldBack,
+  nodePreflightCommand,
+  nodeVerifyCommand,
   outputReportsVersion,
+  recordNodeUpdateCommand,
   serviceRestartCommand,
 } from "./processes.ts";
 
@@ -86,4 +97,137 @@ describe("node update processes", () => {
       expect(missing.spawnError).not.toBeNull();
     }).pipe(Effect.provide(NodeServices.layer)),
   );
+
+  it.live("hands an installer's pid to its install lock, and stops one the lock refuses", () =>
+    Effect.gen(function* () {
+      const run = makeNodeUpdateCommandRunner(yield* ChildProcessSpawner.ChildProcessSpawner);
+      const pids: Array<number> = [];
+      const recorded = yield* run(
+        { command: process.execPath, args: ["-e", "process.exit(0)"], timeout: "20 seconds" },
+        (pid) => Effect.sync(() => void pids.push(pid)),
+      );
+      expect(recorded.exitCode).toBe(0);
+      expect(pids).toHaveLength(1);
+      expect(pids[0]).toBeGreaterThan(0);
+
+      const refused = yield* run(
+        {
+          command: process.execPath,
+          args: ["-e", "setTimeout(() => {}, 30000)"],
+          timeout: "20 seconds",
+        },
+        () => Effect.fail(new Error("Another process took over this CLI's install lock.")),
+      );
+      expect(refused).toMatchObject({
+        exitCode: null,
+        timedOut: false,
+        spawnError: "Another process took over this CLI's install lock.",
+      });
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+});
+
+const installed = (overrides: Partial<DetectedNodeInstallation>): DetectedNodeInstallation => ({
+  kind: "npm-global",
+  service: "launchd",
+  serviceLabel: "space.ryco.node",
+  npmPrefix: "/opt/homebrew",
+  entryScript: "/opt/homebrew/lib/node_modules/ryco-cli/dist/bin.mjs",
+  pinnedRelease: false,
+  ...overrides,
+});
+
+describe("node install commands", () => {
+  it("installs the exact release into the same installation", () => {
+    expect(nodeInstallCommand(installed({}), "0.1.36", "/opt/homebrew/bin/node")).toMatchObject({
+      command: "npm",
+      args: ["install", "-g", "--prefix", "/opt/homebrew", "ryco-cli@0.1.36"],
+    });
+    expect(
+      nodeInstallCommand(installed({ kind: "bun-global" }), "0.1.36", "/Users/me/.bun/bin/bun"),
+    ).toMatchObject({ command: "/Users/me/.bun/bin/bun", args: ["add", "-g", "ryco-cli@0.1.36"] });
+    expect(
+      nodeInstallCommand(installed({ kind: "bun-global" }), "0.1.36", "/opt/homebrew/bin/node"),
+    ).toMatchObject({ command: "bun" });
+    expect(nodeInstallCommand(installed({ kind: "pnpm-global" }), "0.1.36", "node")).toMatchObject({
+      command: "pnpm",
+      args: ["add", "-g", "ryco-cli@0.1.36"],
+    });
+    expect(nodeInstallCommand(installed({ kind: "source-checkout" }), "0.1.36", "node")).toBeNull();
+  });
+
+  it("holds back brand-new dependency releases in an unattended install", () => {
+    const nowMs = Date.parse("2026-10-31T12:00:00.000Z");
+    const holdBack = nodeInstallHoldBack(nowMs, "48 hours");
+    expect(holdBack).toEqual({
+      publishedBeforeMs: Date.parse("2026-10-29T12:00:00.000Z"),
+      minimumReleaseAgeMinutes: 2880,
+    });
+    expect(
+      nodeInstallCommand(installed({}), "0.1.36", "/opt/homebrew/bin/node", holdBack),
+    ).toMatchObject({
+      command: "npm",
+      args: [
+        "install",
+        "-g",
+        "--prefix",
+        "/opt/homebrew",
+        "--before=2026-10-29T12:00:00.000Z",
+        "ryco-cli@0.1.36",
+      ],
+    });
+    expect(
+      nodeInstallCommand(installed({ kind: "pnpm-global" }), "0.1.36", "node", holdBack),
+    ).toMatchObject({
+      command: "pnpm",
+      args: ["add", "-g", "--config.minimumReleaseAge=2880", "ryco-cli@0.1.36"],
+    });
+    // bun installs without holding anything back.
+    expect(
+      nodeInstallCommand(installed({ kind: "bun-global" }), "0.1.36", "bun", holdBack),
+    ).toBeNull();
+  });
+
+  it("takes the install lock key a provider CLI update into the same install takes", () => {
+    expect(nodeInstallLockKey(installed({ npmPrefix: "C:\\Users\\Me\\npm" }))).toBe(
+      npmGlobalInstallLockKey("C:\\Users\\Me\\npm"),
+    );
+    expect(npmGlobalInstallLockKey("C:\\Users\\Me\\npm")).toBe("npm-global:c:/users/me/npm");
+    expect(nodeInstallLockKey(installed({ kind: "bun-global", npmPrefix: null }))).toBe(
+      BUN_GLOBAL_INSTALL_LOCK_KEY,
+    );
+    expect(nodeInstallLockKey(installed({ kind: "pnpm-global", npmPrefix: null }))).toBe(
+      PNPM_GLOBAL_INSTALL_LOCK_KEY,
+    );
+    expect(nodeInstallLockKey(installed({ kind: "source-checkout" }))).toBeNull();
+    expect(nodeInstallLockKey(installed({ npmPrefix: null }))).toBeNull();
+  });
+
+  it("checks the release with the runtime and entry script the service starts", () => {
+    expect(nodeVerifyCommand(installed({}), "/opt/homebrew/bin/node")).toMatchObject({
+      command: "/opt/homebrew/bin/node",
+      args: ["/opt/homebrew/lib/node_modules/ryco-cli/dist/bin.mjs", "--version"],
+    });
+    expect(
+      nodePreflightCommand(installed({}), "/opt/homebrew/bin/node", "/tmp/copy.sqlite"),
+    ).toMatchObject({
+      command: "/opt/homebrew/bin/node",
+      args: [
+        "/opt/homebrew/lib/node_modules/ryco-cli/dist/bin.mjs",
+        "node-update-preflight",
+        "--database",
+        "/tmp/copy.sqlite",
+      ],
+    });
+    expect(nodePreflightCommand(installed({ entryScript: null }), "node", "/tmp/x")).toBeNull();
+  });
+
+  it("records a command for the boot guard with its timeout in milliseconds", () => {
+    const install = nodeInstallCommand(installed({}), "0.1.35", "/opt/homebrew/bin/node")!;
+    expect(recordNodeUpdateCommand(install)).toEqual({
+      command: "npm",
+      args: ["install", "-g", "--prefix", "/opt/homebrew", "ryco-cli@0.1.35"],
+      timeoutMs: 600_000,
+    });
+  });
 });

@@ -8,7 +8,8 @@ import {
   CrownSectionDetail,
 } from "./details/CrownSectionDetail";
 import { CROWN_SECTION_LABEL, type CrownSection } from "./crownSections";
-import type { CrownChatBinding, CrownNotesBinding } from "./crownTypes";
+import type { CrownChatBinding, CrownNotesBinding, CrownServersBinding } from "./crownTypes";
+import { CrownServersDetail } from "./details/ServersDetail";
 
 /**
  * The expanded crown (prototype `.cr-card`): a header row and the selected
@@ -32,6 +33,8 @@ export function CrownCard({
   readonly notes?: CrownNotesBinding | undefined;
   /** Renders a chat's "Turn into project" section; without it the section is never selected. */
   readonly chat?: CrownChatBinding | undefined;
+  /** Renders the Servers section; without it the section is never selected. */
+  readonly servers?: CrownServersBinding | undefined;
   readonly onCollapse: () => void;
   readonly spine: ReactNode;
   readonly mainRef?: Ref<HTMLDivElement>;
@@ -116,6 +119,10 @@ export function CrownCard({
               ) : section === "project" ? (
                 props.chat ? (
                   <CrownChatDetail chat={props.chat} variant="card" />
+                ) : null
+              ) : section === "servers" ? (
+                props.servers ? (
+                  <CrownServersDetail servers={props.servers} variant="card" />
                 ) : null
               ) : (
                 <CrownSectionDetail

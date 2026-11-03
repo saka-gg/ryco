@@ -1,13 +1,20 @@
 import * as SqlClient from "effect/sql/SqlClient";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import fsPromises from "node:fs/promises";
+import * as NodeNet from "node:net";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, describe, expect } from "@effect/vitest";
-import { Effect, FileSystem, Layer, Path } from "effect";
-import { PROJECT_READ_FILE_BINARY_MAX_BYTES } from "@ryco/contracts";
+import { Effect, FileSystem, Layer, Option, Path } from "effect";
+import { TestClock } from "effect/testing";
+import {
+  PROJECT_READ_FILE_BINARY_MAX_BYTES,
+  PROJECT_READ_FILE_CHUNK_BYTES,
+  PROJECT_READ_FILE_CHUNKED_MAX_BYTES,
+} from "@ryco/contracts";
 
 import { ServerConfig } from "../../config.ts";
+import { makeNamedPipe, releaseNamedPipe } from "../../testing/namedPipe.ts";
 import * as VcsDriverRegistry from "../../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../../vcs/VcsProcess.ts";
 import { WorkspaceEntries } from "../Services/WorkspaceEntries.ts";
@@ -142,7 +149,122 @@ const writeDirectorySymlink = Effect.fn("writeDirectorySymlink")(function* (
   ).pipe(Effect.orDie);
 });
 
+const makeFifo = Effect.fn("makeFifo")(function* (cwd: string, relativePath: string) {
+  const path = yield* Path.Path;
+  const fifoPath = path.join(cwd, relativePath);
+  yield* Effect.sync(() => makeNamedPipe(fifoPath));
+  return fifoPath;
+});
+
+/** The Effect form of settleBeforeNamedPipeDeadline: a real deadline, then the pipe is released. */
+const failsWithoutWaiting = <A, E, R>(fifoPath: string, operation: Effect.Effect<A, E, R>) =>
+  operation.pipe(
+    Effect.flip,
+    Effect.timeoutOption("2 seconds"),
+    TestClock.withLive,
+    Effect.ensuring(Effect.sync(() => releaseNamedPipe(fifoPath))),
+    Effect.map(Option.getOrThrowWith(() => new Error(`Waited on the named pipe at ${fifoPath}.`))),
+  );
+
 it.layer(TestLayer)("WorkspaceFileSystemLive", (it) => {
+  describe.skipIf(process.platform === "win32")("named pipes and sockets", () => {
+    it.effect("refuses text and image previews without waiting for a writer", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        const textFifo = yield* makeFifo(cwd, "pipe.txt");
+        const imageFifo = yield* makeFifo(cwd, "pipe.png");
+        const pdfFifo = yield* makeFifo(cwd, "pipe.pdf");
+
+        for (const error of [
+          yield* failsWithoutWaiting(
+            textFifo,
+            workspaceFileSystem.readFile({ cwd, relativePath: "pipe.txt" }),
+          ),
+          yield* failsWithoutWaiting(
+            imageFifo,
+            workspaceFileSystem.readFileBinary({ cwd, relativePath: "pipe.png" }),
+          ),
+          yield* failsWithoutWaiting(
+            pdfFifo,
+            workspaceFileSystem.readFileChunk({ cwd, relativePath: "pipe.pdf", offset: 0 }),
+          ),
+        ]) {
+          expect(error._tag).toBe("WorkspaceFileSystemError");
+          expect("detail" in error && error.detail).toBe("Only regular files can be previewed.");
+        }
+      }),
+    );
+
+    it.effect("refuses a guarded save without waiting for a writer", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        const fifoPath = yield* makeFifo(cwd, "pipe.txt");
+
+        const error = yield* failsWithoutWaiting(
+          fifoPath,
+          workspaceFileSystem.writeFile({
+            cwd,
+            relativePath: "pipe.txt",
+            contents: "edited\n",
+            expectedVersion: `sha256:${"0".repeat(64)}`,
+            encoding: "utf8",
+            lineEnding: "lf",
+          }),
+        );
+
+        expect(error._tag).toBe("WorkspaceFileSystemError");
+        expect("detail" in error && error.detail).toBe("Only regular files can be previewed.");
+      }),
+    );
+
+    it.effect("refuses an unguarded write without waiting for a reader", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        const fifoPath = yield* makeFifo(cwd, "pipe.txt");
+
+        const error = yield* failsWithoutWaiting(
+          fifoPath,
+          workspaceFileSystem.writeFile({ cwd, relativePath: "pipe.txt", contents: "edited\n" }),
+        );
+
+        expect(error._tag).toBe("WorkspaceFileSystemError");
+        expect("detail" in error && error.detail).toBe("Only regular files can be opened.");
+        const stat = yield* Effect.promise(() => fsPromises.lstat(fifoPath));
+        expect(stat.isFIFO()).toBe(true);
+      }),
+    );
+
+    it.effect("refuses a socket preview with the regular-file wording", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const server = yield* Effect.acquireRelease(
+          Effect.callback<NodeNet.Server>((resume) => {
+            const listening = NodeNet.createServer();
+            listening.once("error", (cause) => resume(Effect.die(cause)));
+            listening.listen(path.join(cwd, "dev.sock"), () => resume(Effect.succeed(listening)));
+          }),
+          (listening) =>
+            Effect.callback<void>((resume) => {
+              listening.close(() => resume(Effect.void));
+            }),
+        );
+        expect(server.listening).toBe(true);
+
+        const error = yield* workspaceFileSystem
+          .readFile({ cwd, relativePath: "dev.sock" })
+          .pipe(Effect.flip);
+
+        expect(error._tag).toBe("WorkspaceFileSystemError");
+        expect("detail" in error && error.detail).toBe("Only regular files can be previewed.");
+      }),
+    );
+  });
+
   it.effect(
     "refuses parent-cwd writes into a removing checkout, aliases and removed descendants",
     () =>
@@ -590,6 +712,188 @@ it.layer(TestLayer)("WorkspaceFileSystemLive", (it) => {
     );
   });
 
+  describe("readFileChunk", () => {
+    const pdfBytes = (bodyBytes: number, fill = 0x61) =>
+      Buffer.concat([Buffer.from("%PDF-1.7\n", "latin1"), Buffer.alloc(bodyBytes, fill)]);
+
+    const failureDetail = (error: unknown): string => {
+      if (typeof error !== "object" || error === null || !("detail" in error)) {
+        throw new Error("Expected a WorkspaceFileSystemError detail.");
+      }
+      return String(error.detail);
+    };
+
+    it.effect("reads a PDF in bounded chunks under one fingerprint", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        const bytes = pdfBytes(600 * 1024);
+        for (let index = 0; index < bytes.length; index += 4096) bytes[index] = index % 251;
+        bytes.write("%PDF-1.7\n", 0, "latin1");
+        yield* writeBinaryFile(cwd, "docs/sample.pdf", bytes);
+
+        const chunks = [];
+        let offset = 0;
+        let fingerprint: string | undefined;
+        while (offset < bytes.length) {
+          const chunk = yield* workspaceFileSystem.readFileChunk({
+            cwd,
+            relativePath: "docs/sample.pdf",
+            offset,
+            ...(fingerprint !== undefined ? { expectedFingerprint: fingerprint } : {}),
+          });
+          fingerprint ??= chunk.fingerprint;
+          chunks.push(chunk);
+          offset += Buffer.from(chunk.dataBase64, "base64").byteLength;
+        }
+
+        expect(chunks.map((chunk) => chunk.offset)).toEqual([
+          0,
+          PROJECT_READ_FILE_CHUNK_BYTES,
+          2 * PROJECT_READ_FILE_CHUNK_BYTES,
+        ]);
+        expect(new Set(chunks.map((chunk) => chunk.fingerprint)).size).toBe(1);
+        for (const chunk of chunks) {
+          expect(chunk.relativePath).toBe("docs/sample.pdf");
+          expect(chunk.mimeType).toBe("application/pdf");
+          expect(chunk.totalBytes).toBe(bytes.length);
+        }
+        expect(
+          Buffer.concat(chunks.map((chunk) => Buffer.from(chunk.dataBase64, "base64"))).equals(
+            bytes,
+          ),
+        ).toBe(true);
+      }),
+    );
+
+    it.effect("sniffs raster images and accepts a PDF header inside the first KiB", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        yield* writeBinaryFile(cwd, "assets/mislabeled.pdf", TINY_PNG_BYTES);
+        yield* writeBinaryFile(
+          cwd,
+          "docs/late-header.bin",
+          Buffer.concat([Buffer.alloc(512, 0x20), pdfBytes(16)]),
+        );
+
+        const image = yield* workspaceFileSystem.readFileChunk({
+          cwd,
+          relativePath: "assets/mislabeled.pdf",
+          offset: 0,
+        });
+        expect(image.mimeType).toBe("image/png");
+        expect(image.totalBytes).toBe(TINY_PNG_BYTES.byteLength);
+        const pdf = yield* workspaceFileSystem.readFileChunk({
+          cwd,
+          relativePath: "docs/late-header.bin",
+          offset: 0,
+        });
+        expect(pdf.mimeType).toBe("application/pdf");
+      }),
+    );
+
+    it.effect("refuses files that are neither a PDF nor a raster image", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "notes/plain.pdf", "# Not a PDF\n");
+        yield* writeTextFile(cwd, "notes/empty.pdf", "");
+
+        for (const relativePath of ["notes/plain.pdf", "notes/empty.pdf"]) {
+          const error = yield* workspaceFileSystem
+            .readFileChunk({ cwd, relativePath, offset: 0 })
+            .pipe(Effect.flip);
+          expect(failureDetail(error)).toBe("Not a supported preview file.");
+        }
+      }),
+    );
+
+    it.effect("refuses files above the chunked preview limit", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        const path = yield* Path.Path;
+        yield* writeBinaryFile(cwd, "docs/huge.pdf", pdfBytes(16));
+        // Sparse: the size is over the cap without writing 32 MiB.
+        yield* Effect.promise(() =>
+          fsPromises.truncate(
+            path.join(cwd, "docs/huge.pdf"),
+            PROJECT_READ_FILE_CHUNKED_MAX_BYTES + 1,
+          ),
+        );
+
+        const error = yield* workspaceFileSystem
+          .readFileChunk({ cwd, relativePath: "docs/huge.pdf", offset: 0 })
+          .pipe(Effect.flip);
+        expect(failureDetail(error)).toBe(
+          `File is too large to preview (${PROJECT_READ_FILE_CHUNKED_MAX_BYTES + 1} bytes). Limit is ${PROJECT_READ_FILE_CHUNKED_MAX_BYTES} bytes.`,
+        );
+      }),
+    );
+
+    it.effect("refuses an offset at or past the end of the file", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        const bytes = pdfBytes(100);
+        yield* writeBinaryFile(cwd, "docs/small.pdf", bytes);
+
+        const error = yield* workspaceFileSystem
+          .readFileChunk({ cwd, relativePath: "docs/small.pdf", offset: bytes.length })
+          .pipe(Effect.flip);
+        expect(failureDetail(error)).toBe("Offset is outside the file.");
+      }),
+    );
+
+    it.effect("fails a later chunk when the file changed after the first", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        yield* writeBinaryFile(cwd, "docs/live.pdf", pdfBytes(300 * 1024));
+
+        const first = yield* workspaceFileSystem.readFileChunk({
+          cwd,
+          relativePath: "docs/live.pdf",
+          offset: 0,
+        });
+        yield* writeBinaryFile(cwd, "docs/live.pdf", pdfBytes(310 * 1024, 0x62));
+
+        const error = yield* workspaceFileSystem
+          .readFileChunk({
+            cwd,
+            relativePath: "docs/live.pdf",
+            offset: PROJECT_READ_FILE_CHUNK_BYTES,
+            expectedFingerprint: first.fingerprint,
+          })
+          .pipe(Effect.flip);
+        expect(failureDetail(error)).toBe("File changed while it was being read. Try again.");
+      }),
+    );
+
+    it.effect("rejects symlinked files that resolve outside the workspace root", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        const path = yield* Path.Path;
+
+        const externalDir = `${cwd}-outside`;
+        yield* Effect.promise(() => fsPromises.mkdir(externalDir, { recursive: true })).pipe(
+          Effect.orDie,
+        );
+        yield* Effect.promise(() =>
+          fsPromises.writeFile(path.join(externalDir, "secret.pdf"), pdfBytes(16)),
+        ).pipe(Effect.orDie);
+        yield* writeDirectorySymlink(cwd, "linked", externalDir);
+
+        const error = yield* workspaceFileSystem
+          .readFileChunk({ cwd, relativePath: "linked/secret.pdf", offset: 0 })
+          .pipe(Effect.flip);
+        expect(error._tag).toBe("WorkspacePathOutsideRootError");
+      }),
+    );
+  });
+
   describe("writeFile", () => {
     it.effect("writes files relative to the workspace root", () =>
       Effect.gen(function* () {
@@ -611,6 +915,26 @@ it.layer(TestLayer)("WorkspaceFileSystemLive", (it) => {
           version: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
         });
         expect(saved).toBe("# Plan\n");
+      }),
+    );
+
+    it.effect("replaces all of an existing file's contents", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        yield* writeTextFile(cwd, "notes/todo.md", "a much longer previous body\n");
+
+        yield* workspaceFileSystem.writeFile({
+          cwd,
+          relativePath: "notes/todo.md",
+          contents: "short\n",
+        });
+
+        expect(
+          yield* fileSystem.readFileString(path.join(cwd, "notes/todo.md")).pipe(Effect.orDie),
+        ).toBe("short\n");
       }),
     );
 
@@ -833,6 +1157,34 @@ it.layer(TestLayer)("WorkspaceFileSystemLive", (it) => {
           .pipe(Effect.catch(() => Effect.succeed(null)));
         expect(escapedStat).toBeNull();
       }),
+    );
+
+    it.effect.skipIf(process.platform === "win32")(
+      "does not create a file through a dangling symlink",
+      () =>
+        Effect.gen(function* () {
+          const workspaceFileSystem = yield* WorkspaceFileSystem;
+          const cwd = yield* makeTempDir;
+          const path = yield* Path.Path;
+          const fileSystem = yield* FileSystem.FileSystem;
+
+          const externalDir = `${cwd}-outside`;
+          yield* Effect.promise(() => fsPromises.mkdir(externalDir, { recursive: true })).pipe(
+            Effect.orDie,
+          );
+          // realpath cannot resolve a dangling link, so containment only ever
+          // sees the link's own path inside the workspace.
+          yield* Effect.promise(() =>
+            fsPromises.symlink(path.join(externalDir, "planted.txt"), path.join(cwd, "notes.md")),
+          ).pipe(Effect.orDie);
+
+          const error = yield* workspaceFileSystem
+            .writeFile({ cwd, relativePath: "notes.md", contents: "escaped\n" })
+            .pipe(Effect.flip);
+
+          expect("detail" in error && error.detail).toBe("Only regular files can be opened.");
+          expect(yield* fileSystem.exists(path.join(externalDir, "planted.txt"))).toBe(false);
+        }),
     );
   });
 

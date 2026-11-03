@@ -212,7 +212,7 @@ export const makeThreadPurgeReactor = (options: ThreadPurgeReactorOptions = {}) 
     const start: ThreadPurgeReactorShape["start"] = Effect.fn("ThreadPurgeReactor.start")(
       function* () {
         // Acquire synchronously so a trash committed right after start is not missed.
-        const subscription = yield* engine.subscribeDomainEvents;
+        const events = yield* engine.subscribeDomainEvents;
         const scheduled = yield* FiberMap.make<string>();
 
         const schedulePurge = (threadId: ThreadId, trashedAt: string, onlyIfMissing: boolean) =>
@@ -243,8 +243,8 @@ export const makeThreadPurgeReactor = (options: ThreadPurgeReactorOptions = {}) 
           }
         }).pipe(logFailure("thread purge sweep failed", {}));
 
-        // Handing off only forks (never waits on a dispatch), so the engine's publisher is never
-        // held up by this subscriber.
+        // Handing off only forks (never waits on a dispatch), so this subscriber keeps pace with
+        // the bus instead of falling behind and replaying missed events from the event store.
         const worker = yield* makeDrainableWorker({
           policy: losslessBackpressureQueuePolicy({
             component: "ThreadPurgeReactor",
@@ -265,7 +265,7 @@ export const makeThreadPurgeReactor = (options: ThreadPurgeReactorOptions = {}) 
           },
         });
         yield* Effect.forkScoped(
-          Stream.runForEach(Stream.fromSubscription(subscription), (event) =>
+          Stream.runForEach(events, (event) =>
             event.type === "thread.trashed" || event.type === "thread.deleted"
               ? worker.enqueue(event)
               : Effect.void,

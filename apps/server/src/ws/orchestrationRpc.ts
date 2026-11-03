@@ -14,9 +14,9 @@ import {
   OrchestrationGetWorkflowScriptError,
   OrchestrationReplayEventsError,
   OrchestrationStopBackgroundTaskError,
+  OrchestrationMessageBackgroundTaskError,
   ORCHESTRATION_WS_METHODS,
   WS_METHODS,
-  ThreadPriorityRpcError,
   type OrchestrationGetThreadHistoryPageInput,
   type OrchestrationGetThreadShellsInput,
   type OrchestrationGetThreadWindowInput,
@@ -34,6 +34,7 @@ import {
 } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 
 import { normalizeDispatchCommand } from "../orchestration/Normalizer.ts";
+import { stampTurnOrigin } from "../orchestration/turnOrigin.ts";
 import { shellSettlementPolicy } from "../orchestration/threadSettlementInput.ts";
 import { loadActivityPayload } from "../orchestration/activityPayloadPreview.ts";
 import { encodeThreadHistoryCursor } from "../orchestration/threadHistoryCursor.ts";
@@ -56,6 +57,7 @@ import {
   isServerPerfProfileEnabled,
   recordServerPerfPayload,
 } from "../observability/PerfInstrumentation.ts";
+import { TASK_MESSAGE_PENDING_LIMIT_METHOD } from "../provider/Errors.ts";
 import { defineWsHandlers, type WsRpcContext } from "./context.ts";
 import {
   ORCHESTRATION_LEGACY_REPLAY_MAX_EVENTS,
@@ -226,6 +228,7 @@ const makeThreadWindowLoadScheduler = () => {
 
 export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
   const {
+    turnOrigin,
     ownerEffect,
     withAccess,
     projectionSnapshotQuery,
@@ -243,10 +246,26 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
     enrichOrchestrationEvents,
     makeReplayableShellStream,
     makeReplayableThreadStream,
+    readLogReplayFloor,
     recordThreadSnapshotDurationMs,
     reconcileAllWorktrees,
-    threadPriorityCoordinator,
   } = ctx;
+
+  // The legacy replay RPCs read from any cursor: one below the retention floor would get a
+  // replay with a gap (`EventLogRetention`), so it fails instead. Checked after the read, as the
+  // subscriptions do, so a pass that ran meanwhile is caught too.
+  const refuseBelowLogFloor = (fromSequenceExclusive: number) =>
+    readLogReplayFloor.pipe(
+      Effect.flatMap((floor) =>
+        fromSequenceExclusive < floor
+          ? Effect.fail(
+              new Error(
+                `events after sequence ${fromSequenceExclusive} were removed; load a snapshot`,
+              ),
+            )
+          : Effect.void,
+      ),
+    );
 
   // This connection's thread subscriptions, so a view that attaches to a
   // subscription a prewarm opened can turn its history recovery on (and off
@@ -511,7 +530,11 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
           ORCHESTRATION_WS_METHODS.dispatchCommand,
           applyOrchestrationCommand({
             command,
-            normalize: normalizeDispatchCommand,
+            // The connection, never the payload, says where a turn comes from.
+            normalize: (input) =>
+              normalizeDispatchCommand(input).pipe(
+                Effect.map((normalized) => stampTurnOrigin(normalized, turnOrigin)),
+              ),
             dispatch: dispatchNormalizedCommand,
             projections: projectionSnapshotQuery,
             terminals: terminalManager,
@@ -650,6 +673,59 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
         ),
         { "rpc.aggregate": "orchestration" },
       ),
+    [ORCHESTRATION_WS_METHODS.messageBackgroundTask]: (input) =>
+      observeRpcEffect(
+        ORCHESTRATION_WS_METHODS.messageBackgroundTask,
+        ownerEffect(
+          ORCHESTRATION_WS_METHODS.messageBackgroundTask,
+          Option.match(providerService, {
+            onNone: () =>
+              Effect.logError("messageBackgroundTask has no ProviderService in context").pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new OrchestrationMessageBackgroundTaskError({
+                      reason: "message-failed",
+                      threadId: input.threadId,
+                      taskId: input.taskId,
+                    }),
+                  ),
+                ),
+              ),
+            onSome: (service) =>
+              service.messageBackgroundTask(input).pipe(
+                Effect.tapError((cause) =>
+                  Effect.logWarning("messageBackgroundTask failed", {
+                    threadId: input.threadId,
+                    taskId: input.taskId,
+                    cause,
+                  }),
+                ),
+                // The raw cause stays in server logs; the wire error carries only the reason.
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationMessageBackgroundTaskError({
+                      reason:
+                        cause._tag === "ProviderUnsupportedError"
+                          ? "unsupported"
+                          : cause._tag === "ProviderTaskEndedError"
+                            ? "task-ended"
+                            : cause._tag === "ProviderAdapterRequestError" &&
+                                cause.method === TASK_MESSAGE_PENDING_LIMIT_METHOD
+                              ? "too-many-pending"
+                              : cause._tag === "ProviderSessionNotFoundError" ||
+                                  cause._tag === "ProviderAdapterSessionNotFoundError" ||
+                                  cause._tag === "ProviderAdapterSessionClosedError"
+                                ? "session-not-found"
+                                : "message-failed",
+                      threadId: input.threadId,
+                      taskId: input.taskId,
+                    }),
+                ),
+              ),
+          }).pipe(Effect.as({})),
+        ),
+        { "rpc.aggregate": "orchestration" },
+      ),
     [ORCHESTRATION_WS_METHODS.getTurnDiff]: (input) =>
       observeRpcEffect(
         ORCHESTRATION_WS_METHODS.getTurnDiff,
@@ -739,6 +815,7 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
           ),
         ).pipe(
           Effect.map((events) => Array.from(events)),
+          Effect.tap(() => refuseBelowLogFloor(input.fromSequenceExclusive)),
           Effect.flatMap(enrichOrchestrationEvents),
           Effect.mapError(
             (cause) =>
@@ -765,6 +842,7 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
             }),
           )
           .pipe(
+            Effect.tap(() => refuseBelowLogFloor(input.fromSequenceExclusive)),
             Effect.flatMap((page) =>
               enrichOrchestrationEvents(page.events).pipe(
                 Effect.map((events) => ({
@@ -796,7 +874,6 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
               shellSnapshotLoad(withSettlementPolicy(projectionSnapshotQuery.getShellSnapshot())),
               {
                 resumeFromSequence: input.resumeFromSequence,
-                threadPriorities: input.threadPriorities,
                 snapshotDelivery: input.snapshotDelivery,
                 ...(input.archivedThreads === "stub"
                   ? {
@@ -982,26 +1059,6 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
           ),
         ),
         { "rpc.aggregate": "orchestration" },
-      ),
-    [WS_METHODS.threadPriorityEnsureCurrent]: (input) =>
-      observeRpcEffect(
-        WS_METHODS.threadPriorityEnsureCurrent,
-        ownerEffect(
-          WS_METHODS.threadPriorityEnsureCurrent,
-          Option.match(threadPriorityCoordinator, {
-            onNone: () =>
-              Effect.fail(
-                new ThreadPriorityRpcError({
-                  failure: {
-                    kind: "unsupported",
-                    detail: "Inbox priority ranking is not available on this server.",
-                  },
-                }),
-              ),
-            onSome: (coordinator) => coordinator.ensureCurrent(input),
-          }),
-        ),
-        { "rpc.aggregate": "threadPriority" },
       ),
     [WS_METHODS.chatAttachmentsReadChunk]: (input) =>
       observeRpcEffect(

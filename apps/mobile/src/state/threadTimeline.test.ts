@@ -35,6 +35,49 @@ describe("buildThreadTimeline", () => {
     expect(buildThreadTimeline(null)).toBeNull();
   });
 
+  it("shows an answered question as its exchange instead of the bare input rows", () => {
+    const turnId = "turn-1";
+    const built = buildThreadTimeline(
+      thread({
+        latestTurn: { turnId } as unknown as Thread["latestTurn"],
+        activities: [
+          {
+            id: "ask",
+            kind: "user-input.requested",
+            tone: "info",
+            summary: "User input requested",
+            turnId,
+            createdAt: "2026-07-24T09:00:01.000Z",
+            payload: {
+              requestId: "req",
+              questions: [
+                {
+                  id: "scope",
+                  header: "Scope",
+                  question: "Which scope?",
+                  options: [{ label: "Focused", description: "Focused." }],
+                },
+              ],
+            },
+          },
+          {
+            id: "answer",
+            kind: "user-input.resolved",
+            tone: "info",
+            summary: "User input submitted",
+            turnId,
+            createdAt: "2026-07-24T09:00:02.000Z",
+            payload: { requestId: "req", answers: { scope: "Focused" } },
+          },
+        ] as unknown as Thread["activities"],
+      }),
+    )!;
+    expect(built.viewModel.workLogEntries.map((entry) => entry.id)).toEqual(["ask", "answer"]);
+    expect(built.timeline.map((entry) => `${entry.kind}:${entry.id}`)).toEqual([
+      "user-input-exchange:user-input:answer",
+    ]);
+  });
+
   it("flows a proposed plan through the view model into a proposed-plan timeline entry", () => {
     const built = buildThreadTimeline(
       thread({

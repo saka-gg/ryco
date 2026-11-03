@@ -57,6 +57,21 @@ describe("node settings", () => {
     ]);
   });
 
+  it("passes keeping the machine awake while agents work as a flag only when it is turned off", () => {
+    expect(nodeConfigAsServeArgs({ version: 1 })).toEqual([]);
+    expect(nodeConfigAsServeArgs({ version: 1, keepAwakeWhileWorking: true })).toEqual([]);
+    expect(nodeConfigAsServeArgs({ version: 1, keepAwakeWhileWorking: false })).toEqual([
+      "--no-keep-awake-while-working",
+    ]);
+    expect(
+      applyNodeSettings({ version: 1, keepAwakeWhileWorking: false }, { preventSleep: true }),
+    ).toEqual({ version: 1, keepAwakeWhileWorking: false, preventSleep: true });
+    expect(parseNodeConfig('{"version":1,"keepAwakeWhileWorking":false}', "node.json")).toEqual({
+      version: 1,
+      keepAwakeWhileWorking: false,
+    });
+  });
+
   it("rejects hand edits it does not understand instead of ignoring them", () => {
     expect(() => parseNodeConfig('{"version":1,"hots":"0.0.0.0"}', "node.json")).toThrow(
       /does not understand/u,

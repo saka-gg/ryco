@@ -89,6 +89,57 @@ function asEvents(
   return Array.isArray(result) ? result : [result];
 }
 
+async function project(
+  readModel: OrchestrationReadModel,
+  events: ReadonlyArray<Omit<OrchestrationEvent, "sequence">>,
+): Promise<OrchestrationReadModel> {
+  let next = readModel;
+  for (const event of events) {
+    next = await Effect.runPromise(
+      projectEvent(next, { ...event, sequence: next.snapshotSequence + 1 } as OrchestrationEvent),
+    );
+  }
+  return next;
+}
+
+function withSession(
+  readModel: OrchestrationReadModel,
+  status: "running" | "ready" | "error" | "interrupted",
+  latestTurnState: "running" | "completed" | "error" | "interrupted",
+): OrchestrationReadModel {
+  const thread = readModel.threads[0]!;
+  const turnId = TurnId.make("turn-filed");
+  return {
+    ...readModel,
+    threads: [
+      {
+        ...thread,
+        session: {
+          threadId: thread.id,
+          status,
+          providerName: "codex",
+          runtimeMode: "full-access",
+          tokenMode: "balanced",
+          activeTurnId: status === "running" ? turnId : null,
+          lastError: status === "error" ? "boom" : null,
+          updatedAt: "2026-07-31T00:01:00.000Z",
+        },
+        latestTurn: {
+          turnId,
+          state: latestTurnState,
+          requestedAt: "2026-07-31T00:00:30.000Z",
+          startedAt: "2026-07-31T00:00:40.000Z",
+          completedAt: latestTurnState === "running" ? null : "2026-07-31T00:05:00.000Z",
+          assistantMessageId: null,
+        },
+      },
+    ],
+  };
+}
+
+const withRunningSession = (readModel: OrchestrationReadModel) =>
+  withSession(readModel, "running", "running");
+
 describe("thread settlement decider", () => {
   it("settles an eligible thread and preserves the timestamp when repeated", async () => {
     const readModel = await seedThread();
@@ -134,30 +185,13 @@ describe("thread settlement decider", () => {
     }
   });
 
-  it("rejects settlement while a provider session is running", async () => {
+  it("files a working thread instead of settling it, and keeps the first filing time", async () => {
     const readModel = await seedThread();
-    const thread = readModel.threads[0]!;
-    const running: OrchestrationReadModel = {
-      ...readModel,
-      threads: [
-        {
-          ...thread,
-          session: {
-            threadId: thread.id,
-            status: "running",
-            providerName: "codex",
-            runtimeMode: "full-access",
-            tokenMode: "balanced",
-            activeTurnId: TurnId.make("turn-running"),
-            lastError: null,
-            updatedAt: "2026-07-31T00:01:00.000Z",
-          },
-        },
-      ],
-    };
+    const running = withRunningSession(readModel);
+    const thread = running.threads[0]!;
 
-    await expect(
-      Effect.runPromise(
+    const filed = asEvents(
+      await Effect.runPromise(
         decideOrchestrationCommand({
           command: {
             type: "thread.settle",
@@ -167,7 +201,67 @@ describe("thread settlement decider", () => {
           readModel: running,
         }),
       ),
-    ).rejects.toThrow("provider session is running");
+    );
+    expect(filed.map((event) => event.type)).toEqual(["thread.settle-deferred"]);
+    const projected = await project(running, filed);
+    const filedThread = projected.threads[0]!;
+    expect(filedThread.settleWhenIdleAt).toEqual(expect.any(String));
+    // Filing is not a settle: the thread stays active while it works.
+    expect(filedThread.settledOverride).toBeNull();
+    expect(filedThread.updatedAt).toBe(thread.updatedAt);
+
+    const again = asEvents(
+      await Effect.runPromise(
+        decideOrchestrationCommand({
+          command: {
+            type: "thread.settle",
+            commandId: asCommandId("command-settle-running-again"),
+            threadId: thread.id,
+          },
+          readModel: projected,
+        }),
+      ),
+    );
+    expect(again[0]?.type).toBe("thread.settle-deferred");
+    if (again[0]?.type === "thread.settle-deferred") {
+      expect(again[0].payload.settleWhenIdleAt).toBe(filedThread.settleWhenIdleAt);
+    }
+  });
+
+  it("still refuses to file a working thread that waits on the person", async () => {
+    const running = withRunningSession(await seedThread());
+    const thread = running.threads[0]!;
+    const waiting: OrchestrationReadModel = {
+      ...running,
+      threads: [
+        {
+          ...thread,
+          activities: [
+            {
+              id: asEventId("activity-approval"),
+              tone: "approval",
+              kind: "approval.requested",
+              summary: "Approval required",
+              payload: { requestId: "request-approval" },
+              turnId: null,
+              createdAt: "2026-07-31T00:01:30.000Z",
+            },
+          ],
+        },
+      ],
+    };
+    await expect(
+      Effect.runPromise(
+        decideOrchestrationCommand({
+          command: {
+            type: "thread.settle",
+            commandId: asCommandId("command-settle-waiting"),
+            threadId: thread.id,
+          },
+          readModel: waiting,
+        }),
+      ),
+    ).rejects.toThrow("approval is pending");
   });
 
   it("rejects settlement for pending input and archived worktrees", async () => {
@@ -683,4 +777,196 @@ describe("pull request settlement signals in the decider", () => {
       expect(settled[0]?.type).toBe("thread.settled");
     },
   );
+});
+
+describe("settling a working thread once its work ends", () => {
+  async function filedThread(): Promise<OrchestrationReadModel> {
+    const running = withRunningSession(await seedThread());
+    const filed = asEvents(
+      await Effect.runPromise(
+        decideOrchestrationCommand({
+          command: {
+            type: "thread.settle",
+            commandId: asCommandId("command-file"),
+            threadId: running.threads[0]!.id,
+          },
+          readModel: running,
+        }),
+      ),
+    );
+    return project(running, filed);
+  }
+
+  const settleWhenIdle = (readModel: OrchestrationReadModel) =>
+    Effect.runPromise(
+      decideOrchestrationCommand({
+        command: {
+          type: "thread.settle-when-idle",
+          commandId: asCommandId("server:settle-when-idle:test"),
+          threadId: readModel.threads[0]!.id,
+          createdAt: "2026-07-31T00:06:00.000Z",
+        },
+        readModel,
+      }),
+    ).then(asEvents);
+
+  it("settles a filed thread whose turn finished, keeping its filing time", async () => {
+    const filed = await filedThread();
+    const filedAt = filed.threads[0]!.settleWhenIdleAt!;
+    const finished: OrchestrationReadModel = {
+      ...filed,
+      threads: [
+        { ...withSession(filed, "ready", "completed").threads[0]!, settleWhenIdleAt: filedAt },
+      ],
+    };
+    const events = await settleWhenIdle(finished);
+    expect(events.map((event) => event.type)).toEqual(["thread.settled"]);
+    if (events[0]?.type === "thread.settled") expect(events[0].payload.settledAt).toBe(filedAt);
+    const settled = (await project(finished, events)).threads[0]!;
+    expect(settled.settledOverride).toBe("settled");
+    expect(settled.settleWhenIdleAt).toBeNull();
+  });
+
+  it("leaves a thread active and unfiled when its turn failed or was stopped", async () => {
+    const filed = await filedThread();
+    const filedAt = filed.threads[0]!.settleWhenIdleAt!;
+    for (const [status, state] of [
+      ["error", "error"],
+      ["ready", "interrupted"],
+    ] as const) {
+      const ended: OrchestrationReadModel = {
+        ...filed,
+        threads: [{ ...withSession(filed, status, state).threads[0]!, settleWhenIdleAt: filedAt }],
+      };
+      const events = await settleWhenIdle(ended);
+      expect(events.map((event) => event.type)).toEqual(["thread.unsettled"]);
+      const thread = (await project(ended, events)).threads[0]!;
+      expect(thread.settleWhenIdleAt).toBeNull();
+      expect(thread.settledOverride).toBeNull();
+    }
+  });
+
+  it("waits while the filed thread still works, and refuses a thread nobody filed", async () => {
+    const filed = await filedThread();
+    await expect(settleWhenIdle(filed)).rejects.toThrow("cannot settle yet");
+    await expect(
+      settleWhenIdle(withSession(await seedThread(), "ready", "completed")),
+    ).rejects.toThrow("not waiting to settle");
+  });
+
+  it("takes the filing back when the person sends, but not for an Agent Control message", async () => {
+    const working = await filedThread();
+    const threadId = working.threads[0]!.id;
+    // The turn ended, and the node has not settled the thread yet.
+    const filed: OrchestrationReadModel = {
+      ...working,
+      threads: [
+        {
+          ...withSession(working, "ready", "completed").threads[0]!,
+          settleWhenIdleAt: working.threads[0]!.settleWhenIdleAt!,
+        },
+      ],
+    };
+    const turnStart = (
+      commandId: string,
+      extra: Partial<Extract<OrchestrationCommand, { type: "thread.turn.start" }>> = {},
+    ): Extract<OrchestrationCommand, { type: "thread.turn.start" }> => ({
+      type: "thread.turn.start",
+      commandId: asCommandId(commandId),
+      threadId,
+      message: {
+        messageId: MessageId.make(`message-${commandId}`),
+        role: "user",
+        text: "Continue",
+        attachments: [],
+      },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      createdAt: "2026-07-31T00:02:00.000Z",
+      ...extra,
+    });
+
+    const byPerson = asEvents(
+      await Effect.runPromise(
+        decideOrchestrationCommand({ command: turnStart("command-person"), readModel: filed }),
+      ),
+    );
+    expect(byPerson[0]?.type).toBe("thread.unsettled");
+    expect((await project(filed, byPerson)).threads[0]!.settleWhenIdleAt).toBeNull();
+
+    const byAgentControl = asEvents(
+      await Effect.runPromise(
+        decideOrchestrationCommand({
+          command: turnStart("agent-control:send"),
+          readModel: filed,
+        }),
+      ),
+    );
+    expect(byAgentControl.map((event) => event.type)).not.toContain("thread.unsettled");
+  });
+
+  it("takes the filing back when the person steers the running turn", async () => {
+    const filed = await filedThread();
+    const steer = asEvents(
+      await Effect.runPromise(
+        decideOrchestrationCommand({
+          command: {
+            type: "thread.turn.steer",
+            commandId: asCommandId("command-steer"),
+            threadId: filed.threads[0]!.id,
+            expectedTurnId: TurnId.make("turn-filed"),
+            message: {
+              messageId: MessageId.make("message-steer"),
+              role: "user",
+              text: "Also do this",
+              attachments: [],
+            },
+            createdAt: "2026-07-31T00:02:00.000Z",
+            requestedAt: "2026-07-31T00:02:00.000Z",
+          },
+          readModel: filed,
+        }),
+      ),
+    );
+    expect(steer.map((event) => event.type)).toEqual([
+      "thread.unsettled",
+      "thread.turn-steer-requested",
+    ]);
+  });
+});
+
+describe("the Hidden shelf", () => {
+  const decide = (readModel: OrchestrationReadModel, type: "thread.hide" | "thread.unhide") =>
+    Effect.runPromise(
+      decideOrchestrationCommand({
+        command: {
+          type,
+          commandId: asCommandId(`command-${type}`),
+          threadId: readModel.threads[0]!.id,
+        },
+        readModel,
+      }),
+    ).then(asEvents);
+
+  it("hides a thread without touching its recency, and unhides it", async () => {
+    const readModel = await seedThread();
+    const thread = readModel.threads[0]!;
+    const hiddenEvents = await decide(readModel, "thread.hide");
+    expect(hiddenEvents.map((event) => event.type)).toEqual(["thread.hidden"]);
+    const hidden = await project(readModel, hiddenEvents);
+    expect(hidden.threads[0]!.hiddenAt).toEqual(expect.any(String));
+    expect(hidden.threads[0]!.updatedAt).toBe(thread.updatedAt);
+
+    const shown = await project(hidden, await decide(hidden, "thread.unhide"));
+    expect(shown.threads[0]!.hiddenAt).toBeNull();
+  });
+
+  it("refuses to hide an archived thread", async () => {
+    const readModel = await seedThread();
+    const archived: OrchestrationReadModel = {
+      ...readModel,
+      threads: [{ ...readModel.threads[0]!, archivedAt: "2026-07-31T00:01:00.000Z" }],
+    };
+    await expect(decide(archived, "thread.hide")).rejects.toThrow("archived or deleted");
+  });
 });

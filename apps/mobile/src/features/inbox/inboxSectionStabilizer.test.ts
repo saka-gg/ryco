@@ -29,10 +29,6 @@ function row(key: string, overrides: Partial<InboxThreadRow> = {}): InboxThreadR
     roleLabel: null,
     providerDriver: null,
     providerLabel: null,
-    focus: { source: "pin", ranking: null },
-    focusTitle: null,
-    focusDetail: null,
-    focusAiGenerated: false,
     attentionState: "active",
     canSettle: true,
     settlementBlocker: null,
@@ -49,7 +45,7 @@ function active(rows: ReadonlyArray<InboxThreadRow>): InboxSection {
 describe("inbox row identity across rebuilds", () => {
   it("keeps every object when a rebuild produced identical content", () => {
     const previous = [active([row("a"), row("b")])];
-    // A fresh build: equal content, all-new objects (badges and focus included).
+    // A fresh build: equal content, all-new objects (badges included).
     const next = [active([row("a"), row("b")])];
     expect(stabilizeInboxSections(previous, next)).toBe(previous);
   });
@@ -68,7 +64,7 @@ describe("inbox row identity across rebuilds", () => {
     const moved = row("a");
     const previous = [active([moved, row("b")])];
     const next: InboxSection[] = [
-      { key: "focus", title: "Focus", rows: [row("a")] },
+      { key: "snoozed", title: "Snoozed", rows: [row("a")] },
       active([row("b")]),
     ];
     const stable = stabilizeInboxSections(previous, next);
@@ -112,11 +108,16 @@ describe("inbox row menu", () => {
     ).not.toContain("evening");
   });
 
-  it("lists settle first, then the snooze presets, gated by the row", () => {
+  it("lists settle first, then the snooze presets and Custom…, gated by the row", () => {
     const presets = [{ id: "hour", label: "In 1 hour" }];
     expect(buildInboxRowMenuActions(row("a", { canSnooze: false }), presets)).toEqual([
       { id: "settle", title: "Settle task", attributes: { disabled: false } },
       { id: "hour", title: "In 1 hour", attributes: { disabled: true } },
+      { id: "snooze-custom", title: "Custom…", attributes: { disabled: true } },
+      // A node without the Hidden shelf leaves Hide disabled.
+      { id: "hide", title: "Hide task", attributes: { disabled: true } },
+      // Copying the ID reads nothing from the node, so it is never disabled.
+      { id: "copy-id", title: "Copy task ID", attributes: { disabled: false } },
     ]);
     expect(
       buildInboxRowMenuActions(
@@ -130,6 +131,22 @@ describe("inbox row menu", () => {
     ).toEqual([
       { id: "unsettle", title: "Move to Active", attributes: { disabled: false } },
       { id: "unsnooze", title: "Unsnooze", attributes: { disabled: false } },
+      { id: "hide", title: "Hide task", attributes: { disabled: true } },
+      { id: "copy-id", title: "Copy task ID", attributes: { disabled: false } },
     ]);
+  });
+
+  it("hides a task, and shows one the person hid in the Inbox again", () => {
+    const presets = [{ id: "hour", label: "In 1 hour" }];
+    // Hide comes right before Copy task ID, which ends the menu.
+    expect(buildInboxRowMenuActions(row("a", { hideActionEnabled: true }), presets).at(-2)).toEqual(
+      { id: "hide", title: "Hide task", attributes: { disabled: false } },
+    );
+    expect(
+      buildInboxRowMenuActions(
+        row("a", { attentionState: "hidden", hiddenByUser: true, hideActionEnabled: true }),
+        presets,
+      ).at(-2),
+    ).toEqual({ id: "unhide", title: "Show in Inbox", attributes: { disabled: false } });
   });
 });

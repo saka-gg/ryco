@@ -286,23 +286,34 @@ describe("desktopWorkspaceMachineTrustPresentation", () => {
       verifyAction: "verify-independently",
       connectionActions: true,
       directAccessAction: true,
+      removeDirectAccessAction: false,
     });
     expect(present({ nativeTrust: "account-trusted", online: false })).toEqual({
       label: "Encrypted · Account trusted · Offline",
       verifyAction: null,
       connectionActions: false,
       directAccessAction: false,
+      removeDirectAccessAction: false,
     });
     expect(present({ nativeTrust: "verified" })).toEqual({
       label: "Encrypted · Verified locally · Online",
       verifyAction: null,
       connectionActions: true,
       directAccessAction: true,
+      removeDirectAccessAction: false,
     });
     expect(present({ nativeTrust: "identity-conflict" })).toMatchObject({
       verifyAction: null,
       connectionActions: false,
       directAccessAction: false,
+      removeDirectAccessAction: false,
+    });
+  });
+
+  it("offers removing a link the machine has, even while it is offline", () => {
+    expect(present({ nativeTrust: "verified", directLinked: true, online: false })).toMatchObject({
+      directAccessAction: false,
+      removeDirectAccessAction: true,
     });
   });
 
@@ -312,6 +323,7 @@ describe("desktopWorkspaceMachineTrustPresentation", () => {
       verifyAction: null,
       connectionActions: false,
       directAccessAction: false,
+      removeDirectAccessAction: false,
     });
     expect(
       present({ nativeTrust: "unknown", isThisDevice: true, accountE2ee: "securing" }),
@@ -320,6 +332,7 @@ describe("desktopWorkspaceMachineTrustPresentation", () => {
       verifyAction: null,
       connectionActions: false,
       directAccessAction: false,
+      removeDirectAccessAction: false,
     });
   });
 
@@ -327,6 +340,7 @@ describe("desktopWorkspaceMachineTrustPresentation", () => {
     expect(present({ nativeTrust: "account-trusted", directLinked: true })).toMatchObject({
       label: "Encrypted · Account trusted · Online · Direct access ready",
       directAccessAction: false,
+      removeDirectAccessAction: true,
     });
     // Never for a machine Desktop cannot yet reach through the Hub.
     expect(present({ nativeTrust: "unverified" }).directAccessAction).toBe(false);
@@ -338,12 +352,14 @@ describe("desktopWorkspaceMachineTrustPresentation", () => {
       verifyAction: null,
       connectionActions: false,
       directAccessAction: false,
+      removeDirectAccessAction: false,
     });
     expect(present({ nativeTrust: "unknown", accountE2ee: "securing", online: false })).toEqual({
       label: "Securing this device… · Offline",
       verifyAction: null,
       connectionActions: false,
       directAccessAction: false,
+      removeDirectAccessAction: false,
     });
   });
 
@@ -353,6 +369,7 @@ describe("desktopWorkspaceMachineTrustPresentation", () => {
       verifyAction: null,
       connectionActions: false,
       directAccessAction: false,
+      removeDirectAccessAction: false,
     });
   });
 
@@ -363,6 +380,7 @@ describe("desktopWorkspaceMachineTrustPresentation", () => {
         verifyAction: "verify",
         connectionActions: false,
         directAccessAction: false,
+        removeDirectAccessAction: false,
       });
     }
     expect(present({ accountE2ee: "unavailable", online: false })).toEqual({
@@ -370,6 +388,7 @@ describe("desktopWorkspaceMachineTrustPresentation", () => {
       verifyAction: null,
       connectionActions: false,
       directAccessAction: false,
+      removeDirectAccessAction: false,
     });
   });
 });

@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import {
+  Cause,
   Context,
   Effect,
   Exit,
@@ -15,28 +16,35 @@ import {
   Redacted,
   Schema,
   Scope,
+  Queue,
   Stream,
   Tracer,
 } from "effect";
+import { TestClock } from "effect/testing";
 import { beforeEach } from "vite-plus/test";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import {
   ApprovalRequestId,
+  type ComposerSourceControlContext,
   OpenCodeSettings,
   ProviderDriverKind,
   ProviderInstanceId,
+  type ProviderRuntimeEvent,
   RuntimeSessionId,
   ThreadId,
   TurnId,
 } from "@ryco/contracts";
 import { createModelSelection } from "@ryco/shared/model";
+import { formatSourceControlContextsForAgent } from "@ryco/shared/sourceControlContextFormatter";
 import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { agentControlHostContext } from "../../agentControl/ProviderInjection.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import type { OpenCodeAdapterShape } from "../Services/OpenCodeAdapter.ts";
+import { isMissingConversationError } from "../resumeFailure.ts";
+import { TOOL_UPDATE_HEARTBEAT_MS } from "../toolUpdateGate.ts";
 import {
   buildOpenCodePermissionRules,
   isOpenCodeNativeAttachment,
@@ -45,6 +53,11 @@ import {
   type OpenCodeRuntimeShape,
   OPENCODE_NATIVE_ATTACHMENT_MAX_BYTES,
 } from "../opencodeRuntime.ts";
+import {
+  drainRuntimeEvents,
+  makeRetentionProbe,
+  type RetentionProbe,
+} from "../testUtils/adapterRetention.ts";
 import {
   appendOpenCodeAssistantTextDelta,
   makeOpenCodeAdapter,
@@ -74,6 +87,8 @@ const runtimeMock = {
     sessionGetCalls: [] as string[],
     sessionUpdateCalls: [] as string[],
     resumableSession: null as { id: string; directory?: string } | null,
+    /** What `session.get` throws for a session that is not resumable; unset: a legacy 404. */
+    sessionGetError: undefined as unknown,
     authHeaders: [] as Array<string | null>,
     abortCalls: [] as string[],
     abortErrorSessionIds: new Set<string>(),
@@ -124,6 +139,19 @@ const runtimeMock = {
     subscribeError: null as Error | null,
     streamReadError: null as Error | null,
     startupOrder: [] as string[],
+    /** What `global.health` reports. */
+    healthVersion: "1.18.18",
+    sdkClients: [] as Array<{ baseUrl: string; directory: string }>,
+    /** What `command.list` answers. */
+    commands: [] as Array<unknown>,
+    commandListCalls: [] as Array<{ directory?: string } | undefined>,
+    commandListError: null as Error | null,
+    commandCalls: [] as Array<unknown>,
+    commandSignals: [] as Array<AbortSignal | undefined>,
+    /** Answers `session.command`; unset: it answers at once. */
+    commandHandler: null as
+      | ((input: unknown, signal: AbortSignal | undefined) => Promise<unknown>)
+      | null,
   },
   reset() {
     this.state.mcpAddCalls.length = 0;
@@ -132,6 +160,7 @@ const runtimeMock = {
     this.state.sessionGetCalls.length = 0;
     this.state.sessionUpdateCalls.length = 0;
     this.state.resumableSession = null;
+    this.state.sessionGetError = undefined;
     this.state.authHeaders.length = 0;
     this.state.abortCalls.length = 0;
     this.state.abortErrorSessionIds.clear();
@@ -157,6 +186,14 @@ const runtimeMock = {
     this.state.subscribeError = null;
     this.state.streamReadError = null;
     this.state.startupOrder = [];
+    this.state.healthVersion = "1.18.18";
+    this.state.sdkClients.length = 0;
+    this.state.commands = [];
+    this.state.commandListCalls.length = 0;
+    this.state.commandListError = null;
+    this.state.commandCalls.length = 0;
+    this.state.commandSignals.length = 0;
+    this.state.commandHandler = null;
   },
 };
 
@@ -201,7 +238,7 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
       };
     }),
   runOpenCodeCommand: () => Effect.succeed({ stdout: "", stderr: "", code: 0 }),
-  createOpenCodeSdkClient: ({ baseUrl, serverPassword }) =>
+  createOpenCodeSdkClient: ({ baseUrl, directory, serverPassword }) =>
     Effect.succeed({
       mcp: {
         add: async (input: { name: string; directory: string }) => {
@@ -210,9 +247,26 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
         },
       },
       global: {
-        health: async () => ({ data: { healthy: true, version: "1.18.18" } }),
+        health: async () => ({
+          data: { healthy: true, version: runtimeMock.state.healthVersion },
+        }),
+      },
+      command: {
+        list: async (parameters?: { directory?: string }) => {
+          runtimeMock.state.commandListCalls.push(parameters);
+          if (runtimeMock.state.commandListError) throw runtimeMock.state.commandListError;
+          return { data: runtimeMock.state.commands };
+        },
       },
       session: {
+        command: async (input: unknown, options?: { signal?: AbortSignal }) => {
+          runtimeMock.state.commandCalls.push(input);
+          runtimeMock.state.commandSignals.push(options?.signal);
+          if (runtimeMock.state.commandHandler) {
+            return runtimeMock.state.commandHandler(input, options?.signal);
+          }
+          return { data: { info: { id: "command-reply", role: "assistant" }, parts: [] } };
+        },
         create: async () => {
           runtimeMock.state.sessionCreateUrls.push(baseUrl);
           runtimeMock.state.authHeaders.push(
@@ -225,7 +279,7 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
           if (runtimeMock.state.resumableSession?.id === sessionID) {
             return { data: runtimeMock.state.resumableSession };
           }
-          throw { response: { status: 404 } };
+          throw runtimeMock.state.sessionGetError ?? { response: { status: 404 } };
         },
         update: async (input: { sessionID: string; permission?: unknown }) => {
           runtimeMock.state.sessionUpdateCalls.push(input.sessionID);
@@ -340,7 +394,11 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
           runtimeMock.state.questionReplyCalls.push(input);
         },
       },
-    } as unknown as OpencodeClient),
+    } as unknown as OpencodeClient).pipe(
+      Effect.tap(() =>
+        Effect.sync(() => runtimeMock.state.sdkClients.push({ baseUrl, directory })),
+      ),
+    ),
   loadOpenCodeInventory: () =>
     Effect.fail(
       new OpenCodeRuntimeError({
@@ -356,7 +414,7 @@ const providerSessionDirectoryTestLayer = Layer.succeed(ProviderSessionDirectory
   getProvider: () =>
     Effect.die(new Error("ProviderSessionDirectory.getProvider is not used in test")),
   getBinding: () => Effect.succeed(Option.none()),
-  listThreadIds: () => Effect.succeed([]),
+  listActiveBindings: () => Effect.succeed([]),
   listBindings: () => Effect.succeed([]),
 });
 
@@ -450,6 +508,55 @@ const taskSentinel = () =>
     callID: "sentinel",
     tool: "read",
   });
+const bashPart = (state: Record<string, unknown>, sessionID = taskRoot) => ({
+  id: "bash-part",
+  sessionID,
+  messageID: "bash-message",
+  type: "tool",
+  callID: "bash-call",
+  tool: "bash",
+  state,
+});
+
+const retentionToolPart = (call: string, state: Record<string, unknown>) => ({
+  id: `retention-part-${call}`,
+  sessionID: taskRoot,
+  messageID: "retention-message",
+  type: "tool",
+  callID: call,
+  tool: "bash",
+  state,
+});
+const RETENTION_RUNNING_UPDATES = 20;
+
+// Plain function: an Effect.gen frame would keep its last call's tracked parts alive. Each update
+// is a distinct part object, as OpenCode sends the whole part again; a running bash part carries
+// its output so far in `metadata.output`, so retained running updates grow quadratically.
+function queueRetentionToolCall(live: { queue: unknown[] }, probe: RetentionProbe, call: string) {
+  const input = { command: `cat ${call}` };
+  live.queue.push(
+    nativePartEvent(probe.track(retentionToolPart(call, { status: "pending", input, raw: "" }))),
+  );
+  for (let update = 1; update <= RETENTION_RUNNING_UPDATES; update += 1) {
+    const state = {
+      status: "running",
+      input,
+      title: input.command,
+      metadata: { output: probe.payload(200 * update) },
+      time: { start: 1 },
+    };
+    live.queue.push(nativePartEvent(probe.track(retentionToolPart(call, state))));
+  }
+  const completed = {
+    status: "completed",
+    input,
+    output: probe.payload(),
+    title: input.command,
+    metadata: {},
+    time: { start: 1, end: 2 },
+  };
+  live.queue.push(nativePartEvent(probe.track(retentionToolPart(call, completed))));
+}
 
 it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
   it.effect(
@@ -491,9 +598,213 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         );
         assert.equal(terminals[0]?.payload.subagent.model, "test/child-model");
         assert.equal(terminals[0]?.payload.subagent.parentProviderItemId, "native-call");
-        assert.equal(events.filter((event) => event.itemId === "native-call").length, 4);
+        // Two running and two failed parts arrive. The second running part repeats what clients
+        // already show, so the tool-update gate drops it; terminal updates always pass.
+        assert.equal(events.filter((event) => event.itemId === "native-call").length, 3);
         yield* adapter.stopSession(threadId);
       }),
+  );
+
+  it.effect("emits a running bash part only when what clients show changes", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("bash-tool-updates");
+      const input = { command: "bun run test", description: "Run tests" };
+      const outputUpTo = (lines: number) =>
+        Array.from({ length: lines }, (_, line) => `line ${line + 1}\n`).join("");
+      runtimeMock.state.subscribedEvents = [
+        // OpenCode streams the tool input into `raw` while the part is pending.
+        ...["", '{"command":', '{"command":"bun run test"'].map((raw) =>
+          nativePartEvent(bashPart({ status: "pending", input: {}, raw })),
+        ),
+        // Bash rewrites the part with the output so far for every chunk.
+        ...Array.from({ length: 40 }, (_, chunk) =>
+          nativePartEvent(
+            bashPart({
+              status: "running",
+              input,
+              metadata: { output: outputUpTo(chunk + 1) },
+              time: { start: 1 },
+            }),
+          ),
+        ),
+        ...Array.from({ length: 6 }, (_, chunk) =>
+          nativePartEvent(
+            bashPart({
+              status: "running",
+              input,
+              title: "Run tests",
+              metadata: { output: outputUpTo(41 + chunk) },
+              time: { start: 1 },
+            }),
+          ),
+        ),
+        nativePartEvent(
+          bashPart({
+            status: "completed",
+            input,
+            output: outputUpTo(46),
+            title: "Run tests",
+            metadata: { output: outputUpTo(46) },
+            time: { start: 1, end: 2 },
+          }),
+        ),
+        taskSentinel(),
+      ];
+      const fiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.takeUntil((event) => event.itemId === "sentinel"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("bash-tool-updates"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const events = Array.from(yield* Fiber.join(fiber).pipe(Effect.timeout("2 seconds")));
+      const toolEvents = events.filter((event) => event.itemId === "bash-call");
+      // Without the gate: 3 started, 46 updated, 1 completed.
+      assert.deepEqual(
+        toolEvents.map((event) => event.type),
+        ["item.started", "item.updated", "item.updated", "item.completed"],
+      );
+      assert.deepEqual(
+        toolEvents.map((event) => (event.type === "item.updated" ? event.payload.title : null)),
+        [null, "bash", "Run tests", null],
+      );
+      const completed = toolEvents.at(-1);
+      assert.equal(
+        completed?.type === "item.completed" ? completed.payload.detail : undefined,
+        outputUpTo(46),
+      );
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("re-emits an unchanged running tool once its heartbeat has passed", () => {
+    const live = { queue: [] as unknown[], wake: null as (() => void) | null, closed: false };
+    return Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("bash-tool-heartbeat");
+      runtimeMock.state.liveEvents = live;
+      // Startup primes the stream with its first event before reading history.
+      runtimeMock.state.subscribedEvents = [{ type: "server.connected", properties: {} }];
+      const received = yield* Queue.unbounded<ProviderRuntimeEvent>();
+      yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.runForEach((event) => Queue.offer(received, event)),
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("bash-tool-heartbeat"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const running = (chunk: number) =>
+        nativePartEvent(
+          bashPart({
+            status: "running",
+            input: { command: "bun run test" },
+            metadata: { output: "line\n".repeat(chunk) },
+            time: { start: 1 },
+          }),
+        );
+      // Events are handled in order and a terminal part always passes, so receiving the sentinel
+      // means every chunk sent before it was handled at the current clock.
+      const send = (...events: Array<unknown>) =>
+        Effect.gen(function* () {
+          live.queue.push(...events, taskSentinel());
+          live.wake?.();
+          live.wake = null;
+          const updates: Array<ProviderRuntimeEvent> = [];
+          for (;;) {
+            const event = yield* Queue.take(received);
+            if (event.itemId === "sentinel") return updates;
+            if (event.itemId === "bash-call") updates.push(event);
+          }
+        });
+
+      const first = yield* send(running(1), running(2));
+      yield* TestClock.adjust(TOOL_UPDATE_HEARTBEAT_MS - 1);
+      const beforeHeartbeat = yield* send(running(3));
+      yield* TestClock.adjust(1);
+      const atHeartbeat = yield* send(running(4), running(5));
+
+      assert.deepEqual(
+        [first, beforeHeartbeat, atHeartbeat].map((updates) => updates.length),
+        [1, 0, 1],
+      );
+      const [heartbeat] = atHeartbeat;
+      assert.equal(heartbeat?.type === "item.updated" ? heartbeat.payload.title : null, "bash");
+      yield* adapter.stopSession(threadId);
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          live.closed = true;
+          live.wake?.();
+        }),
+      ),
+    );
+  });
+
+  it.effect("gates a child-session tool's subagent.updated with its item.updated", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("child-bash-tool-updates");
+      const child = makeChildSession("bash-child", taskRoot);
+      const childPartEvent = (part: unknown) => ({
+        type: "message.part.updated",
+        properties: { sessionID: child.id, part },
+      });
+      runtimeMock.state.subscribedEvents = [
+        { type: "session.created", properties: { sessionID: child.id, info: child } },
+        ...Array.from({ length: 10 }, (_, chunk) =>
+          childPartEvent(
+            bashPart(
+              {
+                status: "running",
+                input: { command: "ls" },
+                metadata: { output: "file\n".repeat(chunk + 1) },
+                time: { start: 1 },
+              },
+              child.id,
+            ),
+          ),
+        ),
+        taskSentinel(),
+      ];
+      const fiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.takeUntil((event) => event.itemId === "sentinel"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("child-bash-tool-updates"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const events = Array.from(yield* Fiber.join(fiber).pipe(Effect.timeout("2 seconds")));
+      assert.equal(events.filter((event) => event.type === "subagent.started").length, 1);
+      // Only the tool branch's updates (their summary is the tool title); without the gate: 10.
+      const toolSubagentUpdates = events.filter(
+        (event) => event.type === "subagent.updated" && event.payload.summary === "bash",
+      );
+      assert.equal(toolSubagentUpdates.length, 1);
+      const toolUpdates = events.filter(
+        (event) => event.type === "item.updated" && event.itemId === "bash-call",
+      );
+      assert.equal(toolUpdates.length, 1);
+      const [toolUpdate] = toolUpdates;
+      assert.equal(
+        toolUpdate?.type === "item.updated" ? toolUpdate.payload.agentId : undefined,
+        toolSubagentUpdates[0]?.type === "subagent.updated"
+          ? String(toolSubagentUpdates[0].payload.subagent.subagentId)
+          : null,
+      );
+      yield* adapter.stopSession(threadId);
+    }),
   );
 
   it.effect("keeps background Tasks running until a native completion notification", () =>
@@ -726,6 +1037,57 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       assert.deepEqual(runtimeMock.state.sessionUpdateCalls, [cursor.sessionId]);
       assert.equal(runtimeMock.state.sessionCreateUrls.length, 1);
       yield* adapter.stopSession(asThreadId("thread-opencode-resume-second"));
+    }),
+  );
+
+  const resumeMissingSession = (sessionGetError: unknown) =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      runtimeMock.state.sessionGetError = sessionGetError;
+      const exit = yield* adapter
+        .startSession({
+          runtimeSessionId: RuntimeSessionId.make("test-opencodeadapter-resume-missing"),
+          provider: ProviderDriverKind.make("opencode"),
+          threadId: asThreadId("thread-opencode-resume-missing"),
+          runtimeMode: "full-access",
+          resumeCursor: { schemaVersion: 1, sessionId: "ses_gone" },
+        })
+        .pipe(Effect.exit);
+      assert.deepEqual(runtimeMock.state.sessionGetCalls, ["ses_gone"]);
+      // Never a silent new session: the orchestrator decides between fresh and a handoff.
+      assert.equal(runtimeMock.state.sessionCreateUrls.length, 0);
+      assert.equal(Exit.isFailure(exit), true);
+      return Exit.isFailure(exit) ? Cause.squash(exit.cause) : undefined;
+    });
+
+  it.effect("fails a resume of a session OpenCode no longer has as a missing session", () =>
+    Effect.gen(function* () {
+      for (const sessionGetError of [
+        // What the SDK throws for the server's 404 answer.
+        new Error("Resource not found: /home/u/.local/share/opencode/storage/session/ses_gone", {
+          cause: {
+            status: 404,
+            body: { name: "NotFoundError", data: { message: "Resource not found" } },
+          },
+        }),
+        // Older SDKs threw the response itself.
+        { response: { status: 404 } },
+      ]) {
+        runtimeMock.reset();
+        const failure = yield* resumeMissingSession(sessionGetError);
+        assert.equal(isMissingConversationError(failure), true);
+        assert.match(String(Reflect.get(failure ?? {}, "detail")), /^Session not found: ses_gone/);
+      }
+    }),
+  );
+
+  it.effect("keeps any other failure of the session lookup on resume", () =>
+    Effect.gen(function* () {
+      const failure = yield* resumeMissingSession(
+        new Error("Internal server error", { cause: { status: 500, body: {} } }),
+      );
+      assert.equal(isMissingConversationError(failure), false);
+      assert.equal(Reflect.get(failure ?? {}, "detail"), "Internal server error");
     }),
   );
 
@@ -1194,7 +1556,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         parts: [
           {
             type: "text",
-            text: `<ryco_host_context>${agentControlHostContext(false)}</ryco_host_context>\n\nReview this`,
+            text: `<ryco_host_context>${agentControlHostContext(false)}</ryco_host_context>\n\nReview this\n\n[Attached file] notes.txt (text/plain, 3 bytes) saved at: ${attachmentPath}`,
           },
           {
             type: "file",
@@ -1204,6 +1566,61 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
           },
         ],
       });
+    }),
+  );
+
+  it.effect("sends a pasted image natively and tells the agent where it is saved", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const config = yield* ServerConfig;
+      const threadId = asThreadId("thread-native-image");
+      const attachment = {
+        type: "image" as const,
+        id: "thread-native-image-attachment",
+        name: "screenshot.png",
+        mimeType: "image/png",
+        sizeBytes: 4,
+      };
+      yield* fileSystem.makeDirectory(config.attachmentsDir, { recursive: true });
+      const attachmentPath = `${config.attachmentsDir}/${attachmentRelativePath(attachment)}`;
+      yield* fileSystem.writeFile(attachmentPath, Uint8Array.from([1, 2, 3, 4]));
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-opencodeadapter-native-image"),
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter
+        .sendTurn({
+          threadId,
+          input: "Put this screenshot in the PR",
+          attachments: [attachment],
+          modelSelection: createModelSelection(ProviderInstanceId.make("opencode"), "openai/gpt-5"),
+        })
+        .pipe(Effect.ensuring(fileSystem.remove(attachmentPath).pipe(Effect.ignore)));
+
+      const lastPrompt = runtimeMock.state.promptCalls.at(-1) as {
+        parts: Array<Record<string, unknown>>;
+      };
+      assert.deepEqual(
+        lastPrompt.parts.filter((part) => part.type === "file"),
+        [
+          {
+            type: "file",
+            mime: "image/png",
+            filename: "screenshot.png",
+            url: "data:image/png;base64,AQIDBA==",
+          },
+        ],
+      );
+      const text = lastPrompt.parts.find((part) => part.type === "text")?.text as string;
+      assert.ok(
+        text.endsWith(
+          `Put this screenshot in the PR\n\n[Attached image "screenshot.png" is saved at: ${attachmentPath}]`,
+        ),
+      );
     }),
   );
 
@@ -1297,6 +1714,12 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       const text = textPart?.text as string;
       assert.equal(typeof text, "string");
       assert.ok(text.includes("Review everything"));
+      // Files sent natively are named with their saved path too.
+      assert.ok(
+        text.includes(
+          `[Attached file] report.pdf (application/pdf, 4 bytes) saved at: ${config.attachmentsDir}/${attachmentRelativePath(smallPdf)}`,
+        ),
+      );
       assert.ok(
         text.includes(
           `[Attached file] huge.pdf (application/pdf, ${OPENCODE_NATIVE_ATTACHMENT_MAX_BYTES + 1} bytes) saved at: ${config.attachmentsDir}/${attachmentRelativePath(oversizedPdf)}`,
@@ -1309,7 +1732,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       );
       assert.ok(
         text.includes(
-          `[Attached file] diagram.bmp (image/bmp, 2 bytes) saved at: ${config.attachmentsDir}/${attachmentRelativePath(bitmap)}`,
+          `[Attached image "diagram.bmp" is saved at: ${config.attachmentsDir}/${attachmentRelativePath(bitmap)}]`,
         ),
       );
     }),
@@ -1468,6 +1891,581 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }).pipe(Effect.provide(adapterLayer));
   });
 
+  const reviewCommand = { name: "review", hints: ["$ARGUMENTS"], template: "T" };
+  const commandModel = createModelSelection(ProviderInstanceId.make("opencode"), "p/m");
+  const hostContextText = `<ryco_host_context>${agentControlHostContext(false)}</ryco_host_context>`;
+  const lastPromptText = () =>
+    (runtimeMock.state.promptCalls.at(-1) as { parts: Array<{ text?: string }> } | undefined)
+      ?.parts[0]?.text;
+  const rootStatus = (type: "busy" | "idle") => ({
+    type: "session.status",
+    properties: { sessionID: taskRoot, status: { type } },
+  });
+  type LiveEvents = { queue: unknown[]; wake: (() => void) | null; closed: boolean };
+  const pushLive = (live: LiveEvents, ...events: Array<unknown>) => {
+    live.queue.push(...events);
+    live.wake?.();
+    live.wake = null;
+  };
+  const closeLive = (live: LiveEvents) =>
+    Effect.sync(() => {
+      live.closed = true;
+      live.wake?.();
+    });
+  /** A `session.command` that runs until the test settles it or its request is aborted. */
+  const holdCommand = () => {
+    const call = {
+      resolve: (_value: unknown) => {},
+      reject: (_error: unknown) => {},
+    };
+    runtimeMock.state.commandHandler = (_input, signal) =>
+      new Promise((resolve, reject) => {
+        call.resolve = resolve;
+        call.reject = reject;
+        signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
+          once: true,
+        });
+      });
+    return call;
+  };
+  const waitUntil = (condition: () => boolean) =>
+    Effect.gen(function* () {
+      for (let attempt = 0; attempt < 200 && !condition(); attempt += 1) yield* sleep(5);
+      assert.ok(condition());
+    });
+  const takeEvent = (
+    received: Queue.Queue<ProviderRuntimeEvent>,
+    predicate: (event: ProviderRuntimeEvent) => boolean,
+  ) =>
+    Effect.gen(function* () {
+      for (;;) {
+        const event = yield* Queue.take(received);
+        if (predicate(event)) return event;
+      }
+    });
+  /** A session whose directory lists `/review`, with its runtime events collected. */
+  const startCommandSession = (threadId: ThreadId, live: LiveEvents) =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      runtimeMock.state.liveEvents = live;
+      // Startup primes the stream with its first event before reading history.
+      runtimeMock.state.subscribedEvents = [{ type: "server.connected", properties: {} }];
+      runtimeMock.state.commands = [reviewCommand];
+      const received = yield* Queue.unbounded<ProviderRuntimeEvent>();
+      yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.runForEach((event) => Queue.offer(received, event)),
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make(`runtime-${threadId}`),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      return { adapter, received };
+    });
+
+  /** What the SDK throws for an error response: the status rides on the cause. */
+  const openCodeErrorResponse = (message: string, status: number) =>
+    new Error(message, { cause: { body: { name: "UnknownError", data: { message } }, status } });
+  const isSettling = (event: ProviderRuntimeEvent) =>
+    event.type === "runtime.warning" ||
+    event.type === "turn.completed" ||
+    event.type === "turn.aborted";
+  /** Sends `/review` with the call held, and returns once the send is admitted. */
+  const sendHeldCommand = (
+    adapter: OpenCodeAdapterShape,
+    threadId: ThreadId,
+    admit: Effect.Effect<void>,
+  ) =>
+    Effect.gen(function* () {
+      const call = holdCommand();
+      const send = yield* adapter
+        .sendTurn({ threadId, input: "/review", modelSelection: commandModel })
+        .pipe(Effect.forkChild);
+      yield* waitUntil(() => runtimeMock.state.commandCalls.length === 1);
+      yield* sleep(20);
+      yield* admit;
+      const { turnId } = yield* Fiber.join(send);
+      return { call, turnId };
+    });
+  const pastAdmissionBound = TestClock.adjust("10 seconds");
+  /** The thread's session; the adapter layer is shared by every test in this block. */
+  const sessionOf = (adapter: OpenCodeAdapterShape, threadId: ThreadId) =>
+    adapter
+      .listSessions()
+      .pipe(Effect.map((sessions) => sessions.find((session) => session.threadId === threadId)));
+  const waitForStatus = (adapter: OpenCodeAdapterShape, threadId: ThreadId, status: string) =>
+    Effect.gen(function* () {
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        if ((yield* sessionOf(adapter, threadId))?.status === status) return;
+        yield* sleep(5);
+      }
+      assert.equal((yield* sessionOf(adapter, threadId))?.status, status);
+    });
+
+  it.effect("runs a listed command with session.command and keeps the host context back", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-native-command");
+      runtimeMock.state.commands = [reviewCommand];
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("runtime-native-command"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "/review focus api",
+        modelSelection: commandModel,
+      });
+
+      // The client is bound to the session's directory.
+      assert.deepEqual(runtimeMock.state.commandListCalls, [undefined]);
+      assert.deepEqual(runtimeMock.state.commandCalls, [
+        { sessionID: taskRoot, command: "review", arguments: "focus api", model: "p/m" },
+      ]);
+      assert.deepEqual(runtimeMock.state.promptCalls, []);
+
+      // The host context waits for the next ordinary turn.
+      yield* adapter.sendTurn({ threadId, input: "Thanks", modelSelection: commandModel });
+      assert.equal(lastPromptText(), `${hostContextText}\n\nThanks`);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("sends an unknown name, a path or an unlisted command as an ordinary prompt", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-command-fallback");
+      runtimeMock.state.commands = [reviewCommand];
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("runtime-command-fallback"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const send = (input: string) =>
+        adapter.sendTurn({ threadId, input, modelSelection: commandModel });
+
+      yield* send("/nope x");
+      assert.equal(lastPromptText(), `${hostContextText}\n\n/nope x`);
+      yield* send("/Users/a/b.ts explain");
+      assert.equal(lastPromptText(), "/Users/a/b.ts explain");
+      // A path is never looked up.
+      assert.equal(runtimeMock.state.commandListCalls.length, 1);
+
+      runtimeMock.state.commandListError = new Error("command list unavailable");
+      yield* send("/review focus api");
+      assert.equal(lastPromptText(), "/review focus api");
+      assert.deepEqual(runtimeMock.state.commandCalls, []);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("appends source-control contexts and attachment paths to a command's arguments", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const config = yield* ServerConfig;
+      const threadId = asThreadId("thread-command-contexts");
+      runtimeMock.state.commands = [reviewCommand];
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("runtime-command-contexts"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const issue = {
+        id: "context-1",
+        kind: "issue",
+        provider: "github",
+        reference: "owner/repo#42",
+        detail: {
+          provider: "github",
+          number: 42,
+          title: "Login fails",
+          url: "https://github.com/owner/repo/issues/42",
+          state: "open",
+          body: "Steps to reproduce.",
+          comments: [],
+          truncated: false,
+        },
+      } as unknown as ComposerSourceControlContext;
+      const zip = {
+        type: "file" as const,
+        id: "thread-command-contexts-zip",
+        name: "bundle.zip",
+        mimeType: "application/zip",
+        sizeBytes: 10,
+      };
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "/review focus api",
+        sourceControlContexts: [issue],
+        attachments: [zip],
+        modelSelection: commandModel,
+      });
+
+      assert.deepEqual(runtimeMock.state.commandCalls, [
+        {
+          sessionID: taskRoot,
+          command: "review",
+          arguments: [
+            "focus api",
+            formatSourceControlContextsForAgent([issue]),
+            `[Attached file] bundle.zip (application/zip, 10 bytes) saved at: ${config.attachmentsDir}/${attachmentRelativePath(zip)}`,
+          ].join("\n\n"),
+          model: "p/m",
+        },
+      ]);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("returns once OpenCode takes a running command and completes it on idle", () => {
+    const live: LiveEvents = { queue: [], wake: null, closed: false };
+    return Effect.gen(function* () {
+      const threadId = asThreadId("thread-command-admission");
+      const { adapter, received } = yield* startCommandSession(threadId, live);
+      const call = holdCommand();
+
+      const send = yield* adapter
+        .sendTurn({ threadId, input: "/review", modelSelection: commandModel })
+        .pipe(Effect.forkChild);
+      yield* waitUntil(() => runtimeMock.state.commandCalls.length === 1);
+      yield* sleep(20);
+      // `session.command` answers only when the generation ends: busy is the admission.
+      assert.equal(send.pollUnsafe(), undefined);
+      assert.equal((runtimeMock.state.commandCalls[0] as { arguments: string }).arguments, "");
+      pushLive(live, rootStatus("busy"));
+      const { turnId } = yield* Fiber.join(send);
+
+      pushLive(live, rootStatus("idle"));
+      const completed = yield* takeEvent(received, (event) => event.type === "turn.completed");
+      assert.equal(completed.turnId, turnId);
+      call.resolve({ data: {} });
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.ensuring(closeLive(live)));
+  });
+
+  it.effect("admits a command when its user message is stored", () => {
+    const live: LiveEvents = { queue: [], wake: null, closed: false };
+    return Effect.gen(function* () {
+      const threadId = asThreadId("thread-command-user-message");
+      const { adapter } = yield* startCommandSession(threadId, live);
+      const userMessage = (sessionID: string, id: string) => ({
+        type: "message.updated",
+        properties: { sessionID, info: { id, role: "user" } },
+      });
+      pushLive(live, userMessage(taskRoot, "earlier-user"));
+      yield* sleep(20);
+      holdCommand();
+
+      const send = yield* adapter
+        .sendTurn({ threadId, input: "/review now", modelSelection: commandModel })
+        .pipe(Effect.forkChild);
+      yield* waitUntil(() => runtimeMock.state.commandCalls.length === 1);
+      // An earlier turn's user message updated again, or a child session's, is not this command's.
+      pushLive(live, userMessage(taskRoot, "earlier-user"), userMessage("child", "child-user"));
+      yield* sleep(20);
+      assert.equal(send.pollUnsafe(), undefined);
+      pushLive(live, userMessage(taskRoot, "command-user"));
+      yield* Fiber.join(send);
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.ensuring(closeLive(live)));
+  });
+
+  it.effect("interrupting a running command aborts its request and the OpenCode session", () => {
+    const live: LiveEvents = { queue: [], wake: null, closed: false };
+    return Effect.gen(function* () {
+      const threadId = asThreadId("thread-command-interrupt");
+      const { adapter, received } = yield* startCommandSession(threadId, live);
+      holdCommand();
+      const send = yield* adapter
+        .sendTurn({ threadId, input: "/review", modelSelection: commandModel })
+        .pipe(Effect.forkChild);
+      yield* waitUntil(() => runtimeMock.state.commandCalls.length === 1);
+      pushLive(live, rootStatus("busy"));
+      const { turnId } = yield* Fiber.join(send);
+
+      yield* adapter.interruptTurn(threadId);
+
+      assert.equal(runtimeMock.state.commandSignals[0]?.aborted, true);
+      assert.deepEqual(runtimeMock.state.abortCalls, [taskRoot]);
+      const aborted = yield* takeEvent(received, (event) => event.type === "turn.aborted");
+      assert.equal(aborted.turnId, turnId);
+      // An aborted request is no failure to warn about.
+      yield* sleep(20);
+      const rest = yield* Queue.clear(received);
+      assert.deepEqual(
+        rest.filter((event) => event.type === "runtime.warning"),
+        [],
+      );
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.ensuring(closeLive(live)));
+  });
+
+  it.effect("aborts the turn when OpenCode rejects a command before taking it", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-command-rejected");
+      runtimeMock.state.commands = [reviewCommand];
+      runtimeMock.state.commandHandler = async () => {
+        throw new Error("Agent not found");
+      };
+      const aborted = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId && event.type === "turn.aborted"),
+        Stream.runHead,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("runtime-command-rejected"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const error = yield* adapter
+        .sendTurn({ threadId, input: "/review", modelSelection: commandModel })
+        .pipe(Effect.flip);
+
+      assert.equal(error._tag, "ProviderAdapterRequestError");
+      if (error._tag !== "ProviderAdapterRequestError") throw new Error("Unexpected error type");
+      assert.equal(error.method, "session.command");
+      assert.equal(error.detail, "Agent not found");
+      const event = Option.getOrUndefined(yield* Fiber.join(aborted));
+      assert.equal(event?.type === "turn.aborted" ? event.payload.reason : null, "Agent not found");
+      const session = yield* sessionOf(adapter, threadId);
+      assert.equal(session?.status, "ready");
+      assert.equal(session?.activeTurnId, undefined);
+      assert.deepEqual(runtimeMock.state.promptCalls, []);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("warns on the turn when a command could not be checked against the list", () => {
+    const live: LiveEvents = { queue: [], wake: null, closed: false };
+    return Effect.gen(function* () {
+      const threadId = asThreadId("thread-command-unchecked");
+      const { adapter, received } = yield* startCommandSession(threadId, live);
+      runtimeMock.state.commandListError = new Error("command list unavailable");
+
+      const turn = yield* adapter.sendTurn({
+        threadId,
+        input: "/review focus api",
+        modelSelection: commandModel,
+      });
+      assert.equal(lastPromptText(), `${hostContextText}\n\n/review focus api`);
+      assert.deepEqual(runtimeMock.state.commandCalls, []);
+      const warning = yield* takeEvent(received, (event) => event.type === "runtime.warning");
+      assert.equal(warning.turnId, turn.turnId);
+      assert.equal(
+        warning.type === "runtime.warning" ? warning.payload.message : null,
+        "Couldn't check whether /review is an OpenCode command, so it went to the model as a prompt.",
+      );
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.ensuring(closeLive(live)));
+  });
+
+  it.effect("warns when OpenCode answers a started command with an error", () => {
+    const live: LiveEvents = { queue: [], wake: null, closed: false };
+    return Effect.gen(function* () {
+      const threadId = asThreadId("thread-command-late-failure");
+      const { adapter, received } = yield* startCommandSession(threadId, live);
+      const { call, turnId } = yield* sendHeldCommand(
+        adapter,
+        threadId,
+        Effect.sync(() => pushLive(live, rootStatus("busy"))),
+      );
+
+      call.reject(openCodeErrorResponse("Session is busy", 500));
+
+      const warning = yield* takeEvent(received, isSettling);
+      assert.equal(warning.type, "runtime.warning");
+      assert.equal(warning.turnId, turnId);
+      assert.deepEqual(warning.type === "runtime.warning" ? warning.payload : null, {
+        message: "OpenCode /review failed after it was accepted.",
+        detail: "Session is busy",
+      });
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.ensuring(closeLive(live)));
+  });
+
+  it.effect("keeps a started command's turn when its request ends without a response", () => {
+    const live: LiveEvents = { queue: [], wake: null, closed: false };
+    return Effect.gen(function* () {
+      const threadId = asThreadId("thread-command-request-dropped");
+      const { adapter, received } = yield* startCommandSession(threadId, live);
+      const { call, turnId } = yield* sendHeldCommand(
+        adapter,
+        threadId,
+        Effect.sync(() => pushLive(live, rootStatus("busy"))),
+      );
+
+      // Node's fetch gives up on the held response after 5 minutes; OpenCode keeps going.
+      call.reject(new TypeError("fetch failed"));
+      yield* sleep(20);
+      pushLive(live, rootStatus("idle"));
+
+      const settled = yield* takeEvent(received, isSettling);
+      assert.equal(settled.type, "turn.completed");
+      assert.equal(settled.turnId, turnId);
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.ensuring(closeLive(live)));
+  });
+
+  it.effect("runs a command OpenCode still holds at the admission bound", () => {
+    const live: LiveEvents = { queue: [], wake: null, closed: false };
+    return Effect.gen(function* () {
+      const threadId = asThreadId("thread-command-admission-bound");
+      const { adapter, received } = yield* startCommandSession(threadId, live);
+      // OpenCode resolves the template (a slow shell substitution) before the turn starts.
+      const { turnId } = yield* sendHeldCommand(adapter, threadId, pastAdmissionBound);
+
+      // Aborting the request would not stop OpenCode, so it stays open.
+      assert.equal(runtimeMock.state.commandSignals[0]?.aborted, false);
+      const session = yield* sessionOf(adapter, threadId);
+      assert.equal(session?.status, "running");
+      assert.equal(session?.activeTurnId, turnId);
+
+      pushLive(live, rootStatus("busy"), rootStatus("idle"));
+      const settled = yield* takeEvent(received, isSettling);
+      assert.equal(settled.type, "turn.completed");
+      assert.equal(settled.turnId, turnId);
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.ensuring(closeLive(live)));
+  });
+
+  it.effect("aborts the turn when OpenCode refuses a command it held past the bound", () => {
+    const live: LiveEvents = { queue: [], wake: null, closed: false };
+    return Effect.gen(function* () {
+      const threadId = asThreadId("thread-command-late-refusal");
+      const { adapter, received } = yield* startCommandSession(threadId, live);
+      const { call, turnId } = yield* sendHeldCommand(adapter, threadId, pastAdmissionBound);
+
+      call.reject(openCodeErrorResponse("Command not found: review", 400));
+
+      const settled = yield* takeEvent(received, isSettling);
+      assert.equal(settled.type, "turn.aborted");
+      assert.equal(settled.turnId, turnId);
+      assert.equal(
+        settled.type === "turn.aborted" ? settled.payload.reason : null,
+        "Command not found: review",
+      );
+      const session = yield* sessionOf(adapter, threadId);
+      assert.equal(session?.status, "ready");
+      assert.equal(session?.activeTurnId, undefined);
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.ensuring(closeLive(live)));
+  });
+
+  it.effect("hands the session back when an interrupted command runs anyway", () => {
+    const live: LiveEvents = { queue: [], wake: null, closed: false };
+    return Effect.gen(function* () {
+      const threadId = asThreadId("thread-command-untracked-run");
+      const { adapter } = yield* startCommandSession(threadId, live);
+      yield* sendHeldCommand(adapter, threadId, pastAdmissionBound);
+      yield* adapter.interruptTurn(threadId);
+
+      // OpenCode finishes the template and runs the command with no turn left to track it.
+      pushLive(live, rootStatus("busy"));
+      yield* waitForStatus(adapter, threadId, "running");
+      pushLive(live, rootStatus("idle"));
+      yield* waitForStatus(adapter, threadId, "ready");
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.ensuring(closeLive(live)));
+  });
+
+  const commandsAdapterLayer = (
+    settings: OpenCodeSettings,
+    options?: Parameters<typeof makeOpenCodeAdapter>[1],
+  ) =>
+    Layer.effect(OpenCodeAdapter, makeOpenCodeAdapter(settings, options)).pipe(
+      Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+  it.effect("lists a directory's commands through a lease on the shared server", () => {
+    const leases: Array<string> = [];
+    const layer = commandsAdapterLayer(
+      Schema.decodeSync(OpenCodeSettings)({ binaryPath: "fake-opencode" }),
+      {
+        serverOwner: {
+          acquire: Effect.gen(function* () {
+            leases.push("acquired");
+            yield* Effect.addFinalizer(() => Effect.sync(() => leases.push("released")));
+            return { url: "http://127.0.0.1:4555", exitCode: Effect.never };
+          }),
+        },
+      },
+    );
+    return Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      runtimeMock.state.commands = [
+        {
+          name: "review",
+          description: "Review changes",
+          source: "command",
+          hints: ["$ARGUMENTS"],
+          template: "Review $ARGUMENTS",
+        },
+        { name: "brainstorm", source: "skill", hints: [], template: "Skill body" },
+      ];
+      assert.ok(adapter.readProjectCommands);
+
+      const commands = yield* adapter.readProjectCommands("/repo");
+
+      assert.deepEqual(commands, {
+        skills: [],
+        slashCommands: [
+          { name: "review", description: "Review changes", input: { hint: "$ARGUMENTS" } },
+        ],
+      });
+      assert.deepEqual(runtimeMock.state.sdkClients, [
+        { baseUrl: "http://127.0.0.1:4555", directory: "/repo" },
+      ]);
+      assert.deepEqual(runtimeMock.state.commandListCalls, [{ directory: "/repo" }]);
+      assert.deepEqual(leases, ["acquired", "released"]);
+      assert.deepEqual(runtimeMock.state.startCalls, []);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("refuses an OpenCode 2.x server before listing its commands", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      runtimeMock.state.healthVersion = "2.0.18";
+      runtimeMock.state.commands = [reviewCommand];
+      assert.ok(adapter.readProjectCommands);
+
+      const error = yield* adapter.readProjectCommands("/repo").pipe(Effect.flip);
+
+      assert.equal(error._tag, "ProviderAdapterRequestError");
+      if (error._tag !== "ProviderAdapterRequestError") throw new Error("Unexpected error type");
+      assert.equal(error.method, "global.health");
+      assert.deepEqual(runtimeMock.state.commandListCalls, []);
+    }),
+  );
+
+  it.effect("lists no commands for a disabled instance", () => {
+    const layer = commandsAdapterLayer(
+      Schema.decodeSync(OpenCodeSettings)({ enabled: false, binaryPath: "fake-opencode" }),
+    );
+    return Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      runtimeMock.state.commands = [reviewCommand];
+      assert.ok(adapter.readProjectCommands);
+
+      assert.deepEqual(yield* adapter.readProjectCommands("/repo"), {
+        skills: [],
+        slashCommands: [],
+      });
+      assert.deepEqual(runtimeMock.state.sdkClients, []);
+      assert.deepEqual(runtimeMock.state.startCalls, []);
+    }).pipe(Effect.provide(layer));
+  });
+
   const rollbackMessages = () => [
     { info: { id: "u1", role: "user" as const }, parts: [] },
     { info: { id: "a1a", role: "assistant" as const }, parts: [] },
@@ -1537,6 +2535,45 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         { sessionID: ROOT_SESSION_ID, messageID: "u1" },
       ]);
       assert.deepEqual(snapshot.turns, []);
+    }),
+  );
+
+  it.effect("does not count OpenCode's background Task reports as turns", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-rollback-report");
+      const adapter = yield* startRollbackSession(threadId);
+      const [u1, a1a, a1b, u2, a2] = rollbackMessages();
+      // OpenCode stores a finished background Task's report as a user message of synthetic text.
+      runtimeMock.state.messages = [
+        u1!,
+        a1a!,
+        {
+          info: { id: "report", role: "user" },
+          parts: [
+            {
+              id: "report:text:0",
+              sessionID: ROOT_SESSION_ID,
+              messageID: "report",
+              type: "text",
+              synthetic: true,
+              text: '<task id="child" state="completed">\n<task_result>\nDone\n</task_result>\n</task>',
+            },
+          ],
+        },
+        a1b!,
+        u2!,
+        a2!,
+      ];
+
+      yield* adapter.rollbackThread(threadId, {
+        numTurns: 2,
+        targetTurnId: null,
+        droppedTurnIds: [],
+      });
+
+      assert.deepEqual(runtimeMock.state.forkCalls, [
+        { sessionID: ROOT_SESSION_ID, messageID: "u1" },
+      ]);
     }),
   );
 
@@ -2413,6 +3450,67 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       assert.deepEqual(closeCallsDuringRun, []);
     }),
   );
+
+  it.effect("retention: keeps no tool part history during a turn", () => {
+    const live = { queue: [] as unknown[], wake: null as (() => void) | null, closed: false };
+    const probe = makeRetentionProbe();
+    return Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-retention");
+      runtimeMock.state.liveEvents = live;
+      runtimeMock.state.subscribedEvents = [{ type: "server.connected", properties: {} }];
+      const events = yield* drainRuntimeEvents(adapter.streamEvents);
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("runtime-opencode-retention"),
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "Read every file",
+        modelSelection: createModelSelection(ProviderInstanceId.make("opencode"), "openai/gpt-5"),
+      });
+
+      const isCompleted = (event: ProviderRuntimeEvent) =>
+        event.threadId === threadId && event.type === "item.completed";
+      const toolsCompleted = events.expect(isCompleted, 50);
+      const sentinelSeen = events.expect(
+        (event) => isCompleted(event) && event.itemId === "retention-sentinel",
+      );
+      for (let call = 0; call < 50; call += 1) {
+        queueRetentionToolCall(live, probe, `retention-call-${call}`);
+      }
+      // Untracked and last, so the drained stream's latest event holds none of the tracked parts.
+      live.queue.push(
+        nativePartEvent(
+          retentionToolPart("retention-sentinel", {
+            status: "completed",
+            input: {},
+            output: "",
+            title: "sentinel",
+            metadata: {},
+            time: { start: 1, end: 2 },
+          }),
+        ),
+      );
+      live.wake?.();
+      live.wake = null;
+      yield* toolsCompleted;
+      yield* sentinelSeen;
+
+      assert.equal(probe.tracked, 50 * (RETENTION_RUNNING_UPDATES + 2));
+      assert.equal(yield* Effect.promise(probe.reachable), 0);
+      yield* adapter.stopSession(threadId);
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          live.closed = true;
+          live.wake?.();
+        }),
+      ),
+    );
+  });
 });
 
 it.effect(

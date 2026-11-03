@@ -1,4 +1,4 @@
-import { scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { scopedProjectKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type {
   Project,
   SidebarThreadOrStub,
@@ -6,27 +6,34 @@ import type {
   SidebarWorktreeSummary,
 } from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId, ScopedThreadRef } from "@ryco/contracts";
+import type { DraftId } from "../../composerDraftStore";
 import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
 import { ChevronDownIcon, ChevronRightIcon } from "lucide-react";
 import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 
-import { readEnvironmentApi } from "../../environmentApi";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
+import { useProjectGroupingSettings } from "../../hooks/useProjectGroupingSettings";
+import { useIdleLazyComponentReady } from "../../lib/idleLazyComponent";
 import { PREFERS_REDUCED_MOTION_QUERY, shouldEnableAutoAnimate } from "../../lib/perf/motion";
-import { newCommandId } from "../../lib/utils";
-import { sidebarUndo } from "../../sidebarUndo";
+import { preloadableLazy } from "../../lib/preloadableLazy";
+import { deriveLogicalProjectKeyFromSettings } from "../../logicalProject";
+import { dispatchThreadSettlementBatch } from "../../threadLifecycleCommands";
 import { SIDEBAR_AUTO_ANIMATE_VISIBLE_THREAD_LIMIT } from "../Sidebar.logic";
 import { handleSidebarListScroll } from "../sidebar/sidebarFold";
 import { omnifieldListQuery } from "../sidebar/sidebarOmnifield.logic";
 import { Button } from "../ui/button";
+import { ProjectImportBanner } from "../projectImport/ProjectImportBanner";
 import { SidebarContent } from "../ui/sidebar";
-import { toastManager } from "../ui/toast";
 import { TooltipCreateHandle } from "../ui/tooltip";
 import { InboxDelegatedGroup } from "./InboxDelegatedGroup";
+import type { InboxSidebarDraft } from "./inboxDrafts";
 import { useInboxFilterStore } from "./inboxFilterStore";
 import { InboxHoverLayer } from "./InboxHoverLayer";
+import type { InboxOrderSnapshot } from "./inboxOrderHold";
 import type { InboxRowPreviewPayload } from "./InboxRowPreview";
+import type { InboxSettleFinishedProps } from "./InboxSettleFinished";
+import { InboxSourceControlPause } from "./InboxSourceControlPause";
 import {
   buildInboxSidebarModel,
   createInboxSidebarModelSharing,
@@ -36,6 +43,25 @@ import {
 } from "./inboxSidebarModel";
 import { InboxThreadRow, type InboxThreadActions } from "./InboxThreadRow";
 import { InboxMotionContext, useInboxListMotion } from "./useInboxListMotion";
+import { useInboxOrderHold } from "./useInboxOrderHold";
+import { useInboxRowSelection } from "./useInboxRowSelection";
+
+// Settle finished is optional and shown on hover, so its code loads in an idle
+// slot after the shell instead of with it.
+const LazyInboxSettleFinished = preloadableLazy(() =>
+  import("./InboxSettleFinished").then((module) => module.InboxSettleFinished),
+);
+
+/** Loads Settle finished's chunk now; once it has, Recent shows it on its first render. */
+export const preloadInboxSettleFinished = LazyInboxSettleFinished.preload;
+
+const settleFinishedThreads = (targets: readonly ScopedThreadRef[]) =>
+  dispatchThreadSettlementBatch(targets, true);
+
+function DeferredInboxSettleFinished(props: Omit<InboxSettleFinishedProps, "onSettle">) {
+  const ready = useIdleLazyComponentReady(LazyInboxSettleFinished, "Settle finished");
+  return ready ? <LazyInboxSettleFinished {...props} onSettle={settleFinishedThreads} /> : null;
+}
 
 export interface InboxSidebarProps {
   readonly threadActions?: InboxThreadActions | undefined;
@@ -46,12 +72,19 @@ export interface InboxSidebarProps {
   readonly deliveryUnknownThreadKeys: ReadonlySet<string>;
   readonly localQueuedThreadKeys: ReadonlySet<string>;
   readonly activeThreadKey: string | null;
-  readonly aiFocusEnabled: boolean;
   readonly autoSettleAfterDays: SidebarAutoSettleAfterDays;
   readonly pinnedThreadKeys: ReadonlySet<string>;
   /** Rows on other machines are labelled; this one is implicit. */
   readonly primaryEnvironmentId?: EnvironmentId | null | undefined;
   readonly onOpenThread: (threadRef: ScopedThreadRef) => void;
+  /** New threads not sent yet whose composer holds content; listed as drafts. */
+  readonly drafts?: ReadonlyArray<InboxSidebarDraft> | undefined;
+  /** Opens a draft row; without it, draft rows are not listed. */
+  readonly onOpenDraft?: ((draftId: DraftId, threadRef: ScopedThreadRef) => void) | undefined;
+  /** Deletes a selection of rows after one confirmation; omit to offer no bulk Delete. */
+  readonly onDeleteThreads?:
+    | ((targets: readonly ScopedThreadRef[]) => Promise<boolean>)
+    | undefined;
   /** Offered from the empty state when no project exists yet; omit when adding is unavailable. */
   readonly onAddProject?: (() => void) | undefined;
   /**
@@ -65,14 +98,35 @@ export function InboxSidebar(props: InboxSidebarProps) {
   // Edited by the sidebar header's Omnifield; a token still being typed narrows nothing.
   const draft = useInboxFilterStore((store) => store.draft);
   const environmentId = useInboxFilterStore((store) => store.environmentId);
+  const project = useInboxFilterStore((store) => store.project);
   const status = useInboxFilterStore((store) => store.status);
   const publishCounts = useInboxFilterStore((store) => store.publishCounts);
   const query = useMemo(() => omnifieldListQuery(draft), [draft]);
+  const projectGroupingSettings = useProjectGroupingSettings();
+  // The filter names a logical project: its members on every machine match.
+  const projectKeys = useMemo(
+    () =>
+      project
+        ? props.projects
+            .filter(
+              (candidate) =>
+                deriveLogicalProjectKeyFromSettings(candidate, projectGroupingSettings) ===
+                project.logicalKey,
+            )
+            .map((candidate) =>
+              scopedProjectKey({ environmentId: candidate.environmentId, projectId: candidate.id }),
+            )
+        : null,
+    [project, projectGroupingSettings, props.projects],
+  );
   const [snoozedOpen, setSnoozedOpen] = useState(false);
   const [settledOpen, setSettledOpen] = useState(false);
+  const [hiddenOpen, setHiddenOpen] = useState(false);
   const [settlementNowMs, setSettlementNowMs] = useState(() => Date.now());
-  // The web phone tier is frozen (AGENTS.md): no delegated folding there.
-  const nestDelegated = usePresentationTier() !== "phone";
+  // The web phone tier is frozen (AGENTS.md): no delegated folding, row selection
+  // or Settle finished there.
+  const isPhone = usePresentationTier() === "phone";
+  const nestDelegated = !isPhone;
   const [expandedHostKeys, setExpandedHostKeys] = useState<ReadonlySet<string>>(() => new Set());
   const toggleHost = useCallback((hostKey: string) => {
     setExpandedHostKeys((previous) => {
@@ -82,50 +136,13 @@ export function InboxSidebar(props: InboxSidebarProps) {
       return next;
     });
   }, []);
-  const setThreadSettlement = useCallback(
-    async (row: InboxSidebarRow, settled: boolean): Promise<boolean> => {
-      const api = readEnvironmentApi(row.environmentId);
-      if (!api) {
-        toastManager.add({
-          type: "error",
-          title: "Could not update thread",
-          description: "The owning machine is not connected.",
-        });
-        return false;
-      }
-      // Built outside the try: the React Compiler cannot lower conditionals
-      // inside try/catch and would skip the whole component.
-      const command = settled
-        ? ({
-            type: "thread.settle",
-            commandId: newCommandId(),
-            threadId: row.threadId,
-          } as const)
-        : ({
-            type: "thread.unsettle",
-            commandId: newCommandId(),
-            threadId: row.threadId,
-            reason: "user",
-          } as const);
-      const failureTitle = settled ? "Could not settle thread" : "Could not move thread to Active";
-      try {
-        await sidebarUndo.dispatch(
-          { environmentId: row.environmentId, threadId: row.threadId },
-          command,
-        );
-        return true;
-      } catch (error) {
-        const description = error instanceof Error ? error.message : "The request failed.";
-        toastManager.add({ type: "error", title: failureTitle, description });
-        return false;
-      }
-    },
-    [],
-  );
   // Keeps rows that did not change identical across model runs, so memoized
   // rows skip rendering when only a few threads moved.
   const [modelSharing] = useState(() => createInboxSidebarModelSharing());
-  const model = useMemo(
+  // Every section: the status filter applies after the order hold, so a row
+  // that leaves the filtered section keeps its place too.
+  const drafts = props.onOpenDraft ? props.drafts : undefined;
+  const liveModel = useMemo(
     () =>
       modelSharing.share(
         buildInboxSidebarModel({
@@ -133,25 +150,26 @@ export function InboxSidebar(props: InboxSidebarProps) {
           worktrees: props.worktrees,
           threads: props.threads,
           environments: props.environments,
-          filters: { query, environmentId, status },
+          filters: { query, environmentId, projectKeys, status: "all" },
           deliveryUnknownThreadKeys: props.deliveryUnknownThreadKeys,
           localQueuedThreadKeys: props.localQueuedThreadKeys,
           activeThreadKey: props.activeThreadKey,
-          aiFocusEnabled: props.aiFocusEnabled,
           autoSettleAfterDays: props.autoSettleAfterDays,
           pinnedThreadKeys: props.pinnedThreadKeys,
           primaryEnvironmentId: props.primaryEnvironmentId ?? null,
           nestDelegated,
+          ...(drafts ? { drafts } : {}),
           nowMs: Math.max(settlementNowMs, Date.now()),
         }),
       ),
     [
+      drafts,
       environmentId,
       modelSharing,
       nestDelegated,
+      projectKeys,
       props.primaryEnvironmentId,
       props.activeThreadKey,
-      props.aiFocusEnabled,
       props.autoSettleAfterDays,
       props.deliveryUnknownThreadKeys,
       props.environments,
@@ -162,19 +180,55 @@ export function InboxSidebar(props: InboxSidebarProps) {
       props.worktrees,
       query,
       settlementNowMs,
-      status,
     ],
   );
+  // While the user aims at the list, rows keep their places and show live
+  // data; once the pointer leaves, they glide to their live order. Changing
+  // what the list shows starts a new hold.
+  const [holdElement, setHoldElement] = useState<HTMLElement | null>(null);
+  const [previewHandle] = useState(() => TooltipCreateHandle<InboxRowPreviewPayload>());
+  const [hintHandle] = useState(() => TooltipCreateHandle<ReactNode>());
+  // Rows that move as a hold ends drop the card's pending close, so the card
+  // would stay open after the pointer left. The user stopped aiming: close it.
+  const orderHold = useInboxOrderHold(holdElement, () => {
+    previewHandle.close();
+    hintHandle.close();
+  });
+  const holdLogic = orderHold.hold;
+  const holdKey = JSON.stringify([
+    query,
+    environmentId,
+    project?.logicalKey ?? null,
+    nestDelegated,
+  ]);
+  const [heldOrder, setHeldOrder] = useState<InboxOrderSnapshot | null>(null);
+  if (holdLogic ? heldOrder?.holdKey !== holdKey : heldOrder !== null) {
+    setHeldOrder(holdLogic ? holdLogic.captureInboxOrder(liveModel, holdKey) : null);
+  }
+  const model = useMemo(
+    () =>
+      heldOrder && holdLogic
+        ? holdLogic.applyInboxOrderHold(liveModel, heldOrder, status)
+        : liveModel,
+    [heldOrder, holdLogic, liveModel, status],
+  );
+  const sections = useMemo(
+    () =>
+      status === "all"
+        ? model.sections
+        : model.sections.filter((section) => section.key === status),
+    [model.sections, status],
+  );
   useEffect(() => {
-    if (model.nextSettlementEvaluationAtMs === null) return;
+    if (liveModel.nextSettlementEvaluationAtMs === null) return;
     const maxTimeoutMs = 2_147_483_647;
     const delayMs = Math.min(
       maxTimeoutMs,
-      Math.max(1, model.nextSettlementEvaluationAtMs - Date.now() + 1),
+      Math.max(1, liveModel.nextSettlementEvaluationAtMs - Date.now() + 1),
     );
     const timer = window.setTimeout(() => setSettlementNowMs(Date.now()), delayMs);
     return () => window.clearTimeout(timer);
-  }, [model.nextSettlementEvaluationAtMs]);
+  }, [liveModel.nextSettlementEvaluationAtMs]);
   useEffect(() => {
     const refresh = () => setSettlementNowMs(Date.now());
     window.addEventListener("focus", refresh);
@@ -184,7 +238,6 @@ export function InboxSidebar(props: InboxSidebarProps) {
       document.removeEventListener("visibilitychange", refresh);
     };
   }, []);
-  const sections = model.sections;
   useEffect(() => {
     const counts: Partial<Record<InboxSidebarSectionKey, number>> = {};
     let total = 0;
@@ -194,11 +247,12 @@ export function InboxSidebar(props: InboxSidebarProps) {
     }
     publishCounts(total, status === "all" ? counts : null);
   }, [publishCounts, sections, status]);
-  const hasFilters = query.trim().length > 0 || environmentId !== null || status !== "all";
+  const hasFilters =
+    query.trim().length > 0 || environmentId !== null || project !== null || status !== "all";
   const hasNoProjects = props.projects.length === 0;
   const isExpanded = (key: string) =>
-    (key !== "settled" && key !== "snoozed") ||
-    (key === "snoozed" ? snoozedOpen : settledOpen) ||
+    (key !== "settled" && key !== "snoozed" && key !== "hidden") ||
+    (key === "snoozed" ? snoozedOpen : key === "hidden" ? hiddenOpen : settledOpen) ||
     status === key ||
     query.trim().length > 0;
   // A host stays open while one of its folded children is the open thread or
@@ -208,10 +262,17 @@ export function InboxSidebar(props: InboxSidebarProps) {
     row.delegatedChildren.some(
       (child) => child.key === props.activeThreadKey || child.state === "needs-input",
     );
-  const visibleRowKeys = (row: InboxSidebarRow) =>
+  const visibleRows = (row: InboxSidebarRow) =>
     isHostExpanded(row) && row.delegatedChildren.length > 0
-      ? [row.key, ...row.delegatedChildren.map((child) => child.key)]
-      : [row.key];
+      ? [row, ...row.delegatedChildren]
+      : [row];
+  const visibleRowKeys = (row: InboxSidebarRow) => visibleRows(row).map((visible) => visible.key);
+  const selection = useInboxRowSelection({
+    displayedRows: sections.flatMap((section) =>
+      isExpanded(section.key) ? section.rows.flatMap(visibleRows) : [],
+    ),
+    onDeleteThreads: props.onDeleteThreads,
+  });
   const orderSignature = sections
     .map((section) =>
       isExpanded(section.key)
@@ -234,13 +295,15 @@ export function InboxSidebar(props: InboxSidebarProps) {
     enabled: motionEnabled,
     orderSignature,
   });
-  const [previewHandle] = useState(() => TooltipCreateHandle<InboxRowPreviewPayload>());
-  const [hintHandle] = useState(() => TooltipCreateHandle<ReactNode>());
-  const { onOpenThread } = props;
+  const { onOpenThread, onOpenDraft } = props;
   // One callback for every row: a per-row closure would defeat the row's memo.
   const openRow = useCallback(
-    (row: InboxSidebarRow) => onOpenThread(scopeThreadRef(row.environmentId, row.threadId)),
-    [onOpenThread],
+    (row: InboxSidebarRow) => {
+      const threadRef = scopeThreadRef(row.environmentId, row.threadId);
+      if (row.draftId !== undefined) onOpenDraft?.(row.draftId, threadRef);
+      else onOpenThread(threadRef);
+    },
+    [onOpenDraft, onOpenThread],
   );
   const renderRow = (row: InboxSidebarRow) => (
     <InboxThreadRow
@@ -249,18 +312,21 @@ export function InboxSidebar(props: InboxSidebarProps) {
       motionEnabled={motionEnabled}
       previewHandle={previewHandle}
       onOpenRow={openRow}
-      onSetSettlement={setThreadSettlement}
       row={row}
+      selection={isPhone ? undefined : selection}
     />
   );
 
   return (
     <InboxMotionContext value={gateRef}>
       <SidebarContent
+        ref={setHoldElement}
         className="gap-0 px-2 pt-1 pb-2"
         data-testid="inbox-sidebar"
+        onPointerOverCapture={orderHold.onPointerOverCapture}
         onViewportScroll={handleSidebarListScroll}
       >
+        {isPhone ? null : <InboxSourceControlPause />}
         <InboxHoverLayer hintHandle={hintHandle} previewHandle={previewHandle}>
           {sections.length === 0 ? (
             <div className="flex min-h-36 flex-col items-center justify-center gap-2 px-4 text-center">
@@ -289,6 +355,9 @@ export function InboxSidebar(props: InboxSidebarProps) {
                   Add project
                 </Button>
               ) : null}
+              {!hasFilters && hasNoProjects && !isPhone ? (
+                <ProjectImportBanner className="mt-2 w-full" />
+              ) : null}
             </div>
           ) : (
             <div
@@ -304,7 +373,10 @@ export function InboxSidebar(props: InboxSidebarProps) {
                 data-visible="false"
               />
               {sections.map((section) => {
-                const collapsible = section.key === "settled" || section.key === "snoozed";
+                const collapsible =
+                  section.key === "settled" ||
+                  section.key === "snoozed" ||
+                  section.key === "hidden";
                 const expanded = isExpanded(section.key);
                 return (
                   <section
@@ -319,7 +391,9 @@ export function InboxSidebar(props: InboxSidebarProps) {
                         onClick={() =>
                           section.key === "snoozed"
                             ? setSnoozedOpen((open) => !open)
-                            : setSettledOpen((open) => !open)
+                            : section.key === "hidden"
+                              ? setHiddenOpen((open) => !open)
+                              : setSettledOpen((open) => !open)
                         }
                         type="button"
                       >
@@ -345,7 +419,7 @@ export function InboxSidebar(props: InboxSidebarProps) {
                         </span>
                       </button>
                     ) : (
-                      <div className="flex items-center gap-2 px-2.5 py-1.5">
+                      <div className="group/inbox-section flex items-center gap-2 px-2.5 py-1.5">
                         <h2
                           id={`inbox-section-${section.key}`}
                           className="text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/65"
@@ -355,6 +429,12 @@ export function InboxSidebar(props: InboxSidebarProps) {
                         <span className="text-[10px] tabular-nums text-muted-foreground/45">
                           {section.rows.length}
                         </span>
+                        {section.key === "recent" && !isPhone ? (
+                          <DeferredInboxSettleFinished
+                            activeThreadKey={props.activeThreadKey}
+                            rows={section.rows}
+                          />
+                        ) : null}
                       </div>
                     )}
                     {expanded ? (

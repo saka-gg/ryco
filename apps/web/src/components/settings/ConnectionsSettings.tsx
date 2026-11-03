@@ -18,6 +18,11 @@ import {
   type EnvironmentId,
 } from "@ryco/contracts";
 import { DateTime } from "effect";
+import {
+  describeHostFreeze,
+  isSavedEnvironmentSwitchedOff,
+  SavedEnvironmentSwitchedOffError,
+} from "@ryco/client-runtime/connection";
 
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { cn } from "../../lib/utils";
@@ -30,6 +35,7 @@ import {
   useRelativeTimeTick,
 } from "./settingsLayout";
 import { Input } from "../ui/input";
+import { usePresentationTier } from "../../hooks/usePresentationTier";
 import {
   Dialog,
   DialogClose,
@@ -64,13 +70,23 @@ import { AnimatedHeight } from "../AnimatedHeight";
 import { HubSection } from "./HubSection";
 import { DesktopConversationCacheRow } from "./DesktopConversationCacheRow";
 import { DesktopKeepAwakeRow } from "./DesktopKeepAwakeRow";
+import { PAIRING_LINK_TARGET_ID } from "./settingsSearchReveal";
 import { savedChangeRelaunch, useDesktopRelaunchGuard } from "./useDesktopRelaunchGuard";
 import {
+  endpointDefaultPreferenceKey,
+  isHostedAppPairingUrl,
+  isQrShareableBaseUrl,
+  isTailscaleHttpsEndpoint,
+  resolveAdvertisedEndpointPairingUrl,
   savedBackendConnectionActionLabel,
   savedBackendNeedsRepair,
   savedBackendRepairHost,
   savedPairingLifetimeNote,
+  selectPairingEndpoint,
+  selectQrEndpoint,
 } from "./ConnectionsSettings.logic";
+import type { AddDeviceCode, AddDeviceOperations } from "./AddDeviceDialog.logic";
+import { AddDeviceButton, AddDeviceDialogHost } from "./AddDeviceEntry";
 import {
   Menu,
   MenuGroup,
@@ -106,6 +122,7 @@ import {
   reconnectSavedEnvironment,
   removeSavedEnvironment,
 } from "~/environments/runtime";
+import { setSavedEnvironmentEnabled } from "~/environments/runtime/savedEnvironmentSwitch";
 import { useUiStateStore } from "~/uiStateStore";
 import { resolveServerConfigVersionMismatch } from "~/versionSkew";
 import { useServerConfig } from "~/rpc/serverState";
@@ -185,6 +202,10 @@ function getSavedBackendStatusTooltip(
   nowMs: number,
 ) {
   const connectionState = runtime?.connectionState ?? "disconnected";
+
+  if (isSavedEnvironmentSwitchedOff(record)) {
+    return "Switched off. It stays paired, and this app does not connect to it until you switch it on.";
+  }
 
   if (savedBackendNeedsRepair(runtime, record)) {
     return runtime?.lastError ?? "This environment no longer accepts its saved pairing.";
@@ -432,55 +453,6 @@ function removeDesktopClientSession(
   return current.filter((clientSession) => clientSession.sessionId !== sessionId);
 }
 
-function selectPairingEndpoint(
-  endpoints: ReadonlyArray<AdvertisedEndpoint>,
-  defaultEndpointKey?: string | null,
-): AdvertisedEndpoint | null {
-  const availableEndpoints = endpoints.filter((endpoint) => endpoint.status !== "unavailable");
-  if (defaultEndpointKey) {
-    const selectedEndpoint = availableEndpoints.find(
-      (endpoint) => endpointDefaultPreferenceKey(endpoint) === defaultEndpointKey,
-    );
-    if (selectedEndpoint) {
-      return selectedEndpoint;
-    }
-  }
-  return (
-    availableEndpoints.find((endpoint) => endpoint.isDefault) ??
-    availableEndpoints.find((endpoint) => endpoint.reachability !== "loopback") ??
-    availableEndpoints.find((endpoint) => endpoint.compatibility.hostedHttpsApp === "compatible") ??
-    null
-  );
-}
-
-function isTailscaleHttpsEndpoint(endpoint: AdvertisedEndpoint): boolean {
-  return endpoint.id.startsWith("tailscale-magicdns:");
-}
-
-function endpointDefaultPreferenceKey(endpoint: AdvertisedEndpoint): string {
-  if (endpoint.id.startsWith("desktop-loopback:") || endpoint.id.startsWith("server-loopback:")) {
-    return "desktop-core:loopback:http";
-  }
-  if (endpoint.id.startsWith("desktop-lan:") || endpoint.id.startsWith("server-network:")) {
-    return "desktop-core:lan:http";
-  }
-  if (endpoint.id.startsWith("tailscale-ip:")) {
-    return "tailscale:ip:http";
-  }
-  if (isTailscaleHttpsEndpoint(endpoint)) {
-    return "tailscale:magicdns:https";
-  }
-
-  let scheme = "unknown";
-  try {
-    scheme = new URL(endpoint.httpBaseUrl).protocol.replace(/:$/u, "");
-  } catch {
-    // Keep the stored preference stable even if a custom endpoint is malformed.
-  }
-
-  return `${endpoint.provider.id}:${endpoint.reachability}:${scheme}:${endpoint.label}`;
-}
-
 function hostedHttpsCompatibilityLabel(
   compatibility: AdvertisedEndpoint["compatibility"]["hostedHttpsApp"],
 ): string | null {
@@ -507,31 +479,32 @@ function hostedHttpsCompatibilityDescription(
   }
 }
 
-function resolveAdvertisedEndpointPairingUrl(
-  endpoint: AdvertisedEndpoint,
-  credential: string,
-): string {
-  if (endpoint.compatibility.hostedHttpsApp === "compatible") {
-    return (
-      resolveHostedPairingUrl(endpoint.httpBaseUrl, credential) ??
-      resolveDesktopPairingUrl(endpoint.httpBaseUrl, credential)
-    );
-  }
-  return resolveDesktopPairingUrl(endpoint.httpBaseUrl, credential);
+/**
+ * A minted pairing code for the "Add a device" dialog. The response is read
+ * off JSON undecoded, so `expiresAt` arrives as an ISO string.
+ */
+function toAddDeviceCode(
+  result: Awaited<ReturnType<typeof createServerPairingCredential>>,
+): AddDeviceCode {
+  const expiresAt: unknown = result.expiresAt;
+  return {
+    id: result.id,
+    credential: result.credential,
+    label: result.label ?? null,
+    expiresAt: typeof expiresAt === "string" ? expiresAt : DateTime.formatIso(result.expiresAt),
+  };
 }
+
+/** The dialog's only reach into the node: mint a client code, revoke one code. */
+const ADD_DEVICE_OPERATIONS: AddDeviceOperations = {
+  createCode: async (label) =>
+    toAddDeviceCode(await createServerPairingCredential(label ?? undefined)),
+  revokeCode: (id) => revokeServerPairingLink(id),
+};
 
 function resolveCurrentOriginPairingUrl(credential: string): string {
   const url = new URL("/pair", window.location.href);
   return setPairingTokenOnUrl(url, credential).toString();
-}
-
-function isHostedAppPairingUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return url.pathname === "/pair" && url.searchParams.has("host");
-  } catch {
-    return false;
-  }
 }
 
 type PairingLinkListRowProps = {
@@ -597,6 +570,29 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
       : isLoopbackHostname(window.location.hostname)
         ? null
         : currentOriginPairingUrl);
+  // A QR code never encodes loopback. A saved loopback default still copies as
+  // the row's link, but the code shows the endpoint another device can reach
+  // (`selectQrEndpoint`); with no endpoint list, the fallback address must pass
+  // the same rule.
+  const qrPairingUrl = useMemo(() => {
+    const selection = selectQrEndpoint(endpoints, { defaultEndpointKey });
+    if (selection !== null) {
+      return selection.qrShareable
+        ? resolveAdvertisedEndpointPairingUrl(selection.endpoint, pairingLink.credential)
+        : null;
+    }
+    if (endpointPairingUrl !== null || shareablePairingUrl === null) return null;
+    const fallbackBaseUrl =
+      endpointUrl != null && endpointUrl !== "" ? endpointUrl : window.location.origin;
+    return isQrShareableBaseUrl(fallbackBaseUrl) ? shareablePairingUrl : null;
+  }, [
+    defaultEndpointKey,
+    endpointPairingUrl,
+    endpointUrl,
+    endpoints,
+    pairingLink.credential,
+    shareablePairingUrl,
+  ]);
   const revealValue = shareablePairingUrl ?? pairingLink.credential;
   const isShareableHostedAppPairingUrl =
     shareablePairingUrl !== null && isHostedAppPairingUrl(shareablePairingUrl);
@@ -770,7 +766,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
               {primaryLabel}
             </h3>
             <Popover>
-              {canShare && shareablePairingUrl ? (
+              {canShare && qrPairingUrl ? (
                 <>
                   <PopoverTrigger
                     openOnHover
@@ -788,7 +784,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
                   </PopoverTrigger>
                   <PopoverPopup side="top" align="start" tooltipStyle className="w-max">
                     <QRCodeSvg
-                      value={shareablePairingUrl}
+                      value={qrPairingUrl}
                       size={88}
                       level="M"
                       marginSize={2}
@@ -885,16 +881,21 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
                     onFocus={(event) => event.currentTarget.select()}
                     onClick={(event) => event.currentTarget.select()}
                   />
-                  {shareablePairingUrl ? (
+                  {qrPairingUrl ? (
                     <div className="flex justify-center rounded-xl border border-border/60 bg-muted/30 p-4">
                       <QRCodeSvg
-                        value={shareablePairingUrl}
+                        value={qrPairingUrl}
                         size={132}
                         level="M"
                         marginSize={2}
                         title="Pairing link — scan to open on another device"
                       />
                     </div>
+                  ) : shareablePairingUrl ? (
+                    <p className="text-center text-[11px] text-muted-foreground/70">
+                      No QR for this endpoint. Another device scanning a loopback link would reach
+                      itself.
+                    </p>
                   ) : null}
                 </DialogPanel>
                 <DialogFooter variant="bare">
@@ -1005,37 +1006,15 @@ type AuthorizedClientsHeaderActionProps = {
   clientSessions: ReadonlyArray<ServerClientSessionRecord>;
   isRevokingOtherClients: boolean;
   onRevokeOtherClients: () => void;
+  onAddDevice: () => void;
 };
 
 const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderAction({
   clientSessions,
   isRevokingOtherClients,
   onRevokeOtherClients,
+  onAddDevice,
 }: AuthorizedClientsHeaderActionProps) {
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [pairingLabel, setPairingLabel] = useState("");
-  const [isCreatingPairingLink, setIsCreatingPairingLink] = useState(false);
-
-  const handleCreatePairingLink = useCallback(async () => {
-    setIsCreatingPairingLink(true);
-    try {
-      await createServerPairingCredential(pairingLabel);
-      setPairingLabel("");
-      setDialogOpen(false);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to create pairing URL.";
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Could not create pairing URL",
-          description: message,
-        }),
-      );
-    } finally {
-      setIsCreatingPairingLink(false);
-    }
-  }, [pairingLabel]);
-
   return (
     <div className="flex items-center gap-2">
       <Button
@@ -1048,62 +1027,100 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
       >
         {isRevokingOtherClients ? "Revoking…" : "Revoke others"}
       </Button>
-      <Dialog
-        open={dialogOpen}
-        onOpenChange={(open) => {
-          setDialogOpen(open);
-          if (!open) {
-            setPairingLabel("");
-          }
-        }}
-      >
-        <DialogTrigger
-          render={
-            <Button size="xs" variant="default">
-              <PlusIcon className="size-3" />
-              Create link
-            </Button>
-          }
-        />
-        <DialogPopup className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Create pairing link</DialogTitle>
-            <DialogDescription>
-              Generate a one-time link that another device can use to pair with this backend as an
-              authorized client.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogPanel>
-            <label className="block">
-              <span className="mb-1.5 block text-xs font-medium text-foreground">
-                Client label (optional)
-              </span>
-              <Input
-                value={pairingLabel}
-                onChange={(event) => setPairingLabel(event.target.value)}
-                placeholder="e.g. Living room iPad"
-                disabled={isCreatingPairingLink}
-                autoFocus
-              />
-            </label>
-          </DialogPanel>
-          <DialogFooter variant="bare">
-            <Button
-              variant="outline"
-              disabled={isCreatingPairingLink}
-              onClick={() => setDialogOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button disabled={isCreatingPairingLink} onClick={() => void handleCreatePairingLink()}>
-              {isCreatingPairingLink ? "Creating…" : "Create link"}
-            </Button>
-          </DialogFooter>
-        </DialogPopup>
-      </Dialog>
+      {/* The frozen phone tier keeps the link it had (AGENTS.md); others get the dialog. */}
+      <PhonePairingLinkAction />
+      <AddDeviceButton onClick={onAddDevice} />
     </div>
   );
 });
+
+/**
+ * The phone tier's one-time pairing link, as it was before the "Add a device" dialog. The web
+ * phone tier is frozen: it keeps this and gets nothing new.
+ */
+function PhonePairingLinkAction() {
+  const isPhoneTier = usePresentationTier() === "phone";
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [pairingLabel, setPairingLabel] = useState("");
+  const [isCreatingPairingLink, setIsCreatingPairingLink] = useState(false);
+
+  const handleCreatePairingLink = useCallback(() => {
+    setIsCreatingPairingLink(true);
+    void createServerPairingCredential(pairingLabel)
+      .then(() => {
+        setPairingLabel("");
+        setDialogOpen(false);
+      })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : "Failed to create pairing URL.";
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not create pairing URL",
+            description: message,
+          }),
+        );
+      })
+      .finally(() => setIsCreatingPairingLink(false));
+  }, [pairingLabel]);
+
+  if (!isPhoneTier) return null;
+  return (
+    <Dialog
+      open={dialogOpen}
+      onOpenChange={(open) => {
+        setDialogOpen(open);
+        if (!open) {
+          setPairingLabel("");
+        }
+      }}
+    >
+      <DialogTrigger
+        render={
+          <Button size="xs" variant="default">
+            <PlusIcon className="size-3" />
+            Create link
+          </Button>
+        }
+      />
+      <DialogPopup className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle>Create pairing link</DialogTitle>
+          <DialogDescription>
+            Generate a one-time link that another device can use to pair with this backend as an
+            authorized client.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogPanel>
+          <label className="block">
+            <span className="mb-1.5 block text-xs font-medium text-foreground">
+              Client label (optional)
+            </span>
+            <Input
+              value={pairingLabel}
+              onChange={(event) => setPairingLabel(event.target.value)}
+              placeholder="e.g. Living room iPad"
+              disabled={isCreatingPairingLink}
+              autoFocus
+            />
+          </label>
+        </DialogPanel>
+        <DialogFooter variant="bare">
+          <Button
+            variant="outline"
+            disabled={isCreatingPairingLink}
+            onClick={() => setDialogOpen(false)}
+          >
+            Cancel
+          </Button>
+          <Button disabled={isCreatingPairingLink} onClick={handleCreatePairingLink}>
+            {isCreatingPairingLink ? "Creating…" : "Create link"}
+          </Button>
+        </DialogFooter>
+      </DialogPopup>
+    </Dialog>
+  );
+}
 
 type PairingClientsListProps = {
   endpointUrl: string | null | undefined;
@@ -1365,10 +1382,12 @@ type SavedBackendListRowProps = {
   reconnectingEnvironmentId: EnvironmentId | null;
   disconnectingEnvironmentId: EnvironmentId | null;
   removingEnvironmentId: EnvironmentId | null;
+  switchingEnvironmentId: EnvironmentId | null;
   onConnect: (environmentId: EnvironmentId) => void;
   onDisconnect: (environmentId: EnvironmentId) => void;
   onRepair: (environmentId: EnvironmentId) => void;
   onRemove: (environmentId: EnvironmentId) => void;
+  onSetEnabled: (environmentId: EnvironmentId, enabled: boolean) => void;
 };
 
 function SavedBackendListRow({
@@ -1376,10 +1395,12 @@ function SavedBackendListRow({
   reconnectingEnvironmentId,
   disconnectingEnvironmentId,
   removingEnvironmentId,
+  switchingEnvironmentId,
   onConnect,
   onDisconnect,
   onRepair,
   onRemove,
+  onSetEnabled,
 }: SavedBackendListRowProps) {
   const nowMs = useRelativeTimeTick(1_000);
   const record = useSavedEnvironmentRegistryStore((state) => state.byId[environmentId] ?? null);
@@ -1389,12 +1410,16 @@ function SavedBackendListRow({
     return null;
   }
 
-  const connectionState = runtime?.connectionState ?? "disconnected";
+  // Switched off: listed, dimmed, and never connected until switched on.
+  const switchedOff = isSavedEnvironmentSwitchedOff(record);
+  const connectionState = switchedOff
+    ? "disconnected"
+    : (runtime?.connectionState ?? "disconnected");
   const isConnected = connectionState === "connected";
   const isConnecting =
     connectionState === "connecting" || reconnectingEnvironmentId === environmentId;
   const isDisconnecting = disconnectingEnvironmentId === environmentId;
-  const needsRepair = !isConnecting && savedBackendNeedsRepair(runtime, record);
+  const needsRepair = !switchedOff && !isConnecting && savedBackendNeedsRepair(runtime, record);
   const stateDotClassName =
     connectionState === "connected"
       ? "bg-success"
@@ -1407,8 +1432,15 @@ function SavedBackendListRow({
   const descriptorLabel = runtime?.descriptor?.label ?? null;
   const displayLabel = descriptorLabel ?? record.label;
   const statusTooltip = getSavedBackendStatusTooltip(runtime, record, nowMs);
-  const versionMismatch = resolveServerConfigVersionMismatch(runtime?.serverConfig);
+  const versionMismatch = switchedOff
+    ? null
+    : resolveServerConfigVersionMismatch(runtime?.serverConfig);
+  // Why it just dropped, when it froze: shown for five minutes after the stall.
+  const freezeNotice = switchedOff
+    ? null
+    : describeHostFreeze(runtime?.serverConfig?.lastEventLoopStall, { nowMs });
   const metadataBits = [
+    switchedOff ? "Switched off" : null,
     record.desktopSsh ? `SSH ${formatDesktopSshTarget(record.desktopSsh)}` : null,
     roleLabel,
     record.lastConnectedAt
@@ -1417,9 +1449,9 @@ function SavedBackendListRow({
   ].filter((value): value is string => value !== null);
 
   return (
-    <div className={ITEM_ROW_CLASSNAME}>
+    <div className={ITEM_ROW_CLASSNAME} data-switched-off={switchedOff ? "" : undefined}>
       <div className={ITEM_ROW_INNER_CLASSNAME}>
-        <div className="min-w-0 flex-1 space-y-1">
+        <div className={cn("min-w-0 flex-1 space-y-1", switchedOff && "opacity-60")}>
           <div className="flex min-h-5 items-center gap-1.5">
             <ConnectionStatusDot
               tooltipText={statusTooltip}
@@ -1442,28 +1474,42 @@ function SavedBackendListRow({
               {versionMismatch.serverVersion}.
             </p>
           ) : null}
+          {freezeNotice ? (
+            <p className="flex items-center gap-1 text-warning text-xs">
+              <TriangleAlertIcon className="size-3.5 shrink-0" />
+              {freezeNotice}.
+            </p>
+          ) : null}
         </div>
         <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
+          <Switch
+            checked={!switchedOff}
+            disabled={switchingEnvironmentId === environmentId}
+            onCheckedChange={(checked) => onSetEnabled(environmentId, checked)}
+            aria-label={`Use ${displayLabel}`}
+          />
           {needsRepair ? (
             <Button size="xs" variant="outline" onClick={() => onRepair(environmentId)}>
               Re-pair
             </Button>
           ) : null}
-          <Button
-            size="xs"
-            variant="outline"
-            disabled={isConnected ? isDisconnecting : isConnecting}
-            onClick={() =>
-              void (isConnected ? onDisconnect(environmentId) : onConnect(environmentId))
-            }
-          >
-            {savedBackendConnectionActionLabel({
-              isConnected,
-              isConnecting,
-              isDisconnecting,
-              needsRepair,
-            })}
-          </Button>
+          {switchedOff ? null : (
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={isConnected ? isDisconnecting : isConnecting}
+              onClick={() =>
+                void (isConnected ? onDisconnect(environmentId) : onConnect(environmentId))
+              }
+            >
+              {savedBackendConnectionActionLabel({
+                isConnected,
+                isConnecting,
+                isDisconnecting,
+                needsRepair,
+              })}
+            </Button>
+          )}
           <Button
             size="xs"
             variant="destructive-outline"
@@ -1588,6 +1634,8 @@ export function ConnectionsSettings() {
     string | null
   >(null);
   const [isRevokingOtherDesktopClients, setIsRevokingOtherDesktopClients] = useState(false);
+  const [addDeviceOpening, setAddDeviceOpening] = useState(0);
+  const [isAddDeviceOpen, setIsAddDeviceOpen] = useState(false);
   const [addBackendDialogOpen, setAddBackendDialogOpen] = useState(false);
   const [savedBackendMode, setSavedBackendMode] = useState<"remote" | "ssh">("remote");
   const [savedBackendHost, setSavedBackendHost] = useState("");
@@ -1613,6 +1661,8 @@ export function ConnectionsSettings() {
   const [disconnectingSavedEnvironmentId, setDisconnectingSavedEnvironmentId] =
     useState<EnvironmentId | null>(null);
   const [removingSavedEnvironmentId, setRemovingSavedEnvironmentId] =
+    useState<EnvironmentId | null>(null);
+  const [switchingSavedEnvironmentId, setSwitchingSavedEnvironmentId] =
     useState<EnvironmentId | null>(null);
   const [isUpdatingDesktopServerExposure, setIsUpdatingDesktopServerExposure] = useState(false);
   const [isDesktopServerExposureDialogOpen, setIsDesktopServerExposureDialogOpen] = useState(false);
@@ -1841,6 +1891,29 @@ export function ConnectionsSettings() {
     }
   }, [desktopBridge, desktopServerExposureState]);
 
+  const handleOpenAddDevice = useCallback(() => {
+    setAddDeviceOpening((opening) => opening + 1);
+    setIsAddDeviceOpen(true);
+  }, []);
+
+  // The dialog's "Turn on network access" opens the same confirmation as the
+  // switch; it never changes exposure by itself.
+  const canTurnOnNetworkAccess =
+    desktopBridge !== undefined &&
+    desktopServerExposureState !== null &&
+    desktopServerExposureState.mode !== "network-accessible" &&
+    !isUpdatingDesktopServerExposure;
+  const handleTurnOnNetworkAccess = useMemo(
+    () =>
+      canTurnOnNetworkAccess
+        ? () => {
+            setPendingDesktopServerExposureMode("network-accessible");
+            setIsDesktopServerExposureDialogOpen(true);
+          }
+        : null,
+    [canTurnOnNetworkAccess],
+  );
+
   const handleRevokeDesktopPairingLink = useCallback(async (id: string) => {
     setRevokingDesktopPairingLinkId(id);
     setDesktopAccessManagementError(null);
@@ -1991,6 +2064,8 @@ export function ConnectionsSettings() {
     try {
       await reconnectSavedEnvironment(environmentId);
     } catch (error) {
+      // Switched off while it connected: its row says so.
+      if (error instanceof SavedEnvironmentSwitchedOffError) return;
       const message = error instanceof Error ? error.message : "Failed to connect backend.";
       setSavedBackendError(message);
       toastManager.add(
@@ -2036,6 +2111,32 @@ export function ConnectionsSettings() {
       setDisconnectingSavedEnvironmentId(null);
     }
   }, []);
+
+  const handleSetSavedBackendEnabled = useCallback(
+    async (environmentId: EnvironmentId, enabled: boolean) => {
+      setSwitchingSavedEnvironmentId(environmentId);
+      setSavedBackendError(null);
+      try {
+        await setSavedEnvironmentEnabled(environmentId, enabled);
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : `Failed to switch the environment ${enabled ? "on" : "off"}.`;
+        setSavedBackendError(message);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: enabled ? "Could not switch environment on" : "Could not switch environment off",
+            description: message,
+          }),
+        );
+      } finally {
+        setSwitchingSavedEnvironmentId(null);
+      }
+    },
+    [],
+  );
 
   const handleRemoveSavedBackend = useCallback(async (environmentId: EnvironmentId) => {
     setRemovingSavedEnvironmentId(environmentId);
@@ -2616,6 +2717,7 @@ export function ConnectionsSettings() {
   );
   const renderNetworkAccessRow = () => (
     <SettingsRow
+      id={PAIRING_LINK_TARGET_ID}
       title="Network access"
       description={
         isLocalBackendNetworkAccessible ? (
@@ -2664,6 +2766,7 @@ export function ConnectionsSettings() {
   );
   const renderDisabledNetworkAccessRow = () => (
     <SettingsRow
+      id={PAIRING_LINK_TARGET_ID}
       title="Network access"
       description={
         currentAuthPolicy === "remote-reachable"
@@ -2696,7 +2799,10 @@ export function ConnectionsSettings() {
     <SettingsPageContainer>
       {canManageLocalBackend ? (
         <>
-          <SettingsSection title="Manage local backend">
+          <SettingsSection
+            title="Manage local backend"
+            headerAction={<AddDeviceButton onClick={handleOpenAddDevice} />}
+          >
             {primaryVersionMismatch ? (
               <SettingsRow
                 title="Version drift"
@@ -2731,12 +2837,24 @@ export function ConnectionsSettings() {
                   clientSessions={desktopClientSessions}
                   isRevokingOtherClients={isRevokingOtherDesktopClients}
                   onRevokeOtherClients={handleRevokeOtherDesktopClients}
+                  onAddDevice={handleOpenAddDevice}
                 />
               }
             >
               {renderAuthorizedClients("current")}
             </SettingsSection>
           ) : null}
+          <AddDeviceDialogHost
+            open={isAddDeviceOpen}
+            onOpenChange={setIsAddDeviceOpen}
+            opening={addDeviceOpening}
+            operations={ADD_DEVICE_OPERATIONS}
+            pairingLinks={desktopPairingLinks}
+            clientSessions={desktopClientSessions}
+            endpoints={visibleDesktopAdvertisedEndpoints}
+            defaultEndpointKey={defaultDesktopAdvertisedEndpointKey}
+            onTurnOnNetworkAccess={handleTurnOnNetworkAccess}
+          />
           <AlertDialog
             open={isDesktopServerExposureDialogOpen}
             onOpenChange={(open) => {
@@ -2967,10 +3085,12 @@ export function ConnectionsSettings() {
             reconnectingEnvironmentId={reconnectingSavedEnvironmentId}
             disconnectingEnvironmentId={disconnectingSavedEnvironmentId}
             removingEnvironmentId={removingSavedEnvironmentId}
+            switchingEnvironmentId={switchingSavedEnvironmentId}
             onConnect={handleConnectSavedBackend}
             onDisconnect={handleDisconnectSavedBackend}
             onRepair={handleRepairSavedBackend}
             onRemove={handleRemoveSavedBackend}
+            onSetEnabled={handleSetSavedBackendEnabled}
           />
         ))}
 

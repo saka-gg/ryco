@@ -1,7 +1,10 @@
 // Dependency-free so the web appearance module can share these bounds without
 // loading the contracts barrel (subpath `@ryco/contracts/window-material`).
 
-/** Largest desktop blur radius a translucent window accepts, in points. */
+/**
+ * Largest desktop blur radius a translucent window accepts, in points. The window
+ * server blurs no further past it, so a larger radius would change nothing.
+ */
 export const DESKTOP_WINDOW_BLUR_RADIUS_MAX = 64;
 /** Smallest one: an unblurred desktop behind a clear window reads as a hole, not as glass. */
 export const DESKTOP_WINDOW_BLUR_RADIUS_MIN = 1;

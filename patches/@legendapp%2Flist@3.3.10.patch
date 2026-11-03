@@ -865,6 +865,325 @@ diff --git a/react-native.mjs b/react-native.mjs
        onScroll: onScrollHandler,
        recycleItems,
        refreshControl: refreshControlElement ? stylePaddingTopState > 0 ? React2.cloneElement(refreshControlElement, {
+diff --git a/react.d.ts b/react.d.ts
+--- a/react.d.ts
++++ b/react.d.ts
+@@ -224,6 +224,11 @@
+      * In case items always have a fixed size, you can provide a function to return it.
+      */
+     getFixedItemSize?: (item: ItemT, index: number, type: TItemType) => number | undefined;
++    /**
++     * Per-item size estimate for items that have not been measured yet. Takes precedence over
++     * the per-type average; a measurement replaces it like any other estimate.
++     */
++    getEstimatedItemSize?: (item: ItemT, index: number, type: TItemType) => number | undefined;
+     /**
+      * Returns a stable item type used for pooling and size estimation.
+      */
+diff --git a/react.js b/react.js
+--- a/react.js
++++ b/react.js
+@@ -1203,7 +1203,7 @@
+   const {
+     sizes,
+     averageSizes,
+-    props: { estimatedItemSize, getItemType },
++    props: { estimatedItemSize, getEstimatedItemSize, getItemType },
+     scrollingTo
+   } = state;
+   const sizeKnown = state.sizesKnown.get(key);
+@@ -1223,6 +1223,14 @@
+     return size;
+   }
+   const itemType = (_b = resolved == null ? void 0 : resolved.itemType) != null ? _b : getItemType ? (_a3 = getItemType(data, index)) != null ? _a3 : "" : "";
++  if (getEstimatedItemSize && (useAverageSize && !scrollingTo || renderedSize === void 0)) {
++    const estimatedSize = getEstimatedItemSize(data, index, itemType);
++    if (typeof estimatedSize === "number" && estimatedSize > 0 && Number.isFinite(estimatedSize)) {
++      size = roundSize(estimatedSize) + ctx.scrollAxisGap;
++      setSize(ctx, key, size, notifyTotalSize);
++      return size;
++    }
++  }
+   if (useAverageSize && !scrollingTo) {
+     const averageSizeForType = (_c = averageSizes[itemType]) == null ? void 0 : _c.avg;
+     if (averageSizeForType !== void 0) {
+@@ -1346,7 +1354,7 @@
+ var SMOOTH_SCROLL_DURATION_MS = 320;
+ var SCROLL_END_TARGET_EPSILON = 1;
+ function doScrollTo(ctx, params) {
+-  var _a3, _b;
++  var _a3, _b, _c;
+   const state = ctx.state;
+   const { animated, horizontal, offset } = params;
+   state.scheduledWork.cancel("platformScrollCompletion");
+@@ -1360,6 +1368,7 @@
+   const contentSize = isHorizontal ? getContentSize(ctx) : void 0;
+   const left = isHorizontal ? toNativeHorizontalOffset(state, offset, contentSize) : 0;
+   const top = isHorizontal ? 0 : offset;
++  const nativeWasAtTarget = !isAnimated && !isHorizontal && !!((_c = state.scrollingTo) == null ? void 0 : _c.isInitialScroll) && isNativeScrollAtInitialTarget(ctx, top);
+   scroller.scrollTo({ animated: isAnimated, x: left, y: top });
+   if (isAnimated) {
+     const target = (_b = (_a3 = scroller.getScrollEventTarget) == null ? void 0 : _a3.call(scroller)) != null ? _b : null;
+@@ -1380,6 +1389,9 @@
+       100,
+       "platformScrollCompletion"
+     );
++    if (nativeWasAtTarget) {
++      checkFinishedScroll(ctx);
++    }
+   }
+ }
+ function listenForScrollEnd(ctx, params) {
+@@ -3071,9 +3083,16 @@
+   const canUseAdjustedCompletion = !scrollingTo.animated || Platform.OS === "ios";
+   return {
+     clampedTargetOffset,
+-    isAtResolvedTarget: Math.abs(scroll - maxOffset) < 1 && (diff1 < 1 || canUseAdjustedCompletion && diff2 < 1)
++    isAtResolvedTarget: Math.abs(scroll - maxOffset) < 1 && (diff1 < 1 || canUseAdjustedCompletion && diff2 < 1) || isInstantInitialScrollPinnedAtNativeEnd(ctx, scrollingTo, scroll, clampedTargetOffset)
+   };
+ }
++function isInstantInitialScrollPinnedAtNativeEnd(ctx, scrollingTo, scroll, clampedTargetOffset) {
++  if (!scrollingTo.isInitialScroll || scrollingTo.animated) {
++    return false;
++  }
++  const nativeOffset = getNativeScrollOffset(ctx);
++  return nativeOffset !== void 0 && Math.abs(scroll - nativeOffset) <= INITIAL_SCROLL_COMPLETION_TARGET_EPSILON && isPinnedAtNativeScrollEnd(ctx, clampedTargetOffset);
++}
+ function checkFinishedScrollFrame(ctx) {
+   const scrollingTo = ctx.state.scrollingTo;
+   if (!scrollingTo) {
+@@ -3081,12 +3100,62 @@
+   }
+   const { state } = ctx;
+   const completionState = getResolvedScrollCompletionState(ctx, scrollingTo);
+-  if (completionState.isAtResolvedTarget && hasScrollCompletionOwnership(state, {
++  if (!completionState.isAtResolvedTarget) {
++    return;
++  }
++  if (hasScrollCompletionOwnership(state, {
+     clampedTargetOffset: completionState.clampedTargetOffset,
+     scrollingTo
+   })) {
+     finishScrollTo(ctx);
++  } else if (isInstantInitialScrollAlreadyApplied(ctx, scrollingTo, completionState.clampedTargetOffset)) {
++    const nativeOffset = getNativeScrollOffset(ctx);
++    if (nativeOffset !== void 0) {
++      syncInitialScrollOffset(state, nativeOffset);
++    }
++    finishScrollTo(ctx);
++  }
++}
++function getNativeScrollOffset(ctx) {
++  var _a3;
++  const scroller = ctx.state.refScroller.current;
++  const offset = (_a3 = scroller == null ? void 0 : scroller.getCurrentScrollOffset) == null ? void 0 : _a3.call(scroller);
++  return typeof offset === "number" && Number.isFinite(offset) ? offset : void 0;
++}
++function isPinnedAtNativeScrollEnd(ctx, targetOffset) {
++  var _a3;
++  const state = ctx.state;
++  const scroller = state.refScroller.current;
++  if (state.props.horizontal || !scroller || ((_a3 = scroller.isWindowScroll) == null ? void 0 : _a3.call(scroller))) {
++    return false;
++  }
++  const node = scroller.getScrollableNode();
++  if (!node || typeof node.scrollTop !== "number") {
++    return false;
++  }
++  const nativeOffset = node.scrollTop;
++  const nativeMaxOffset = node.scrollHeight - node.clientHeight;
++  const isDomSized = Math.abs(node.scrollHeight - Math.max(getContentSize(ctx), node.clientHeight)) <= INITIAL_SCROLL_COMPLETION_TARGET_EPSILON;
++  return isDomSized && targetOffset - nativeOffset > INITIAL_SCROLL_COMPLETION_TARGET_EPSILON && nativeMaxOffset - nativeOffset <= INITIAL_SCROLL_COMPLETION_TARGET_EPSILON;
++}
++function isNativeScrollAtInitialTarget(ctx, targetOffset) {
++  const nativeOffset = getNativeScrollOffset(ctx);
++  if (nativeOffset === void 0) {
++    return false;
++  }
++  return Math.abs(nativeOffset - targetOffset) <= INITIAL_SCROLL_COMPLETION_TARGET_EPSILON || isPinnedAtNativeScrollEnd(ctx, targetOffset);
++}
++function isInstantInitialScrollAlreadyApplied(ctx, scrollingTo, clampedTargetOffset) {
++  const { state } = ctx;
++  if (!scrollingTo.isInitialScroll || scrollingTo.animated || state.props.horizontal) {
++    return false;
++  }
++  const nativeOffset = getNativeScrollOffset(ctx);
++  if (nativeOffset === void 0) {
++    return false;
+   }
++  const isAtTarget = Math.abs(state.scroll - clampedTargetOffset) <= INITIAL_SCROLL_COMPLETION_TARGET_EPSILON && Math.abs(nativeOffset - clampedTargetOffset) <= INITIAL_SCROLL_COMPLETION_TARGET_EPSILON;
++  return isAtTarget || isPinnedAtNativeScrollEnd(ctx, clampedTargetOffset);
+ }
+ function scrollToFallbackOffset(ctx, offset) {
+   var _a3;
+@@ -7847,6 +7916,7 @@
+     estimatedItemSize = 100,
+     estimatedListSize,
+     extraData,
++    getEstimatedItemSize,
+     getFixedItemSize,
+     getItemType,
+     horizontal,
+@@ -8125,6 +8195,7 @@
+     dataVersion,
+     drawDistance,
+     estimatedItemSize,
++    getEstimatedItemSize: useWrapIfItem(getEstimatedItemSize),
+     getFixedItemSize: useWrapIfItem(getFixedItemSize),
+     getItemType: useWrapIfItem(getItemType),
+     hideItemsUntilMeasured: experimental_hideItemsUntilMeasured,
+diff --git a/react.mjs b/react.mjs
+--- a/react.mjs
++++ b/react.mjs
+@@ -1182,7 +1182,7 @@
+   const {
+     sizes,
+     averageSizes,
+-    props: { estimatedItemSize, getItemType },
++    props: { estimatedItemSize, getEstimatedItemSize, getItemType },
+     scrollingTo
+   } = state;
+   const sizeKnown = state.sizesKnown.get(key);
+@@ -1202,6 +1202,14 @@
+     return size;
+   }
+   const itemType = (_b = resolved == null ? void 0 : resolved.itemType) != null ? _b : getItemType ? (_a3 = getItemType(data, index)) != null ? _a3 : "" : "";
++  if (getEstimatedItemSize && (useAverageSize && !scrollingTo || renderedSize === void 0)) {
++    const estimatedSize = getEstimatedItemSize(data, index, itemType);
++    if (typeof estimatedSize === "number" && estimatedSize > 0 && Number.isFinite(estimatedSize)) {
++      size = roundSize(estimatedSize) + ctx.scrollAxisGap;
++      setSize(ctx, key, size, notifyTotalSize);
++      return size;
++    }
++  }
+   if (useAverageSize && !scrollingTo) {
+     const averageSizeForType = (_c = averageSizes[itemType]) == null ? void 0 : _c.avg;
+     if (averageSizeForType !== void 0) {
+@@ -1325,7 +1333,7 @@
+ var SMOOTH_SCROLL_DURATION_MS = 320;
+ var SCROLL_END_TARGET_EPSILON = 1;
+ function doScrollTo(ctx, params) {
+-  var _a3, _b;
++  var _a3, _b, _c;
+   const state = ctx.state;
+   const { animated, horizontal, offset } = params;
+   state.scheduledWork.cancel("platformScrollCompletion");
+@@ -1339,6 +1347,7 @@
+   const contentSize = isHorizontal ? getContentSize(ctx) : void 0;
+   const left = isHorizontal ? toNativeHorizontalOffset(state, offset, contentSize) : 0;
+   const top = isHorizontal ? 0 : offset;
++  const nativeWasAtTarget = !isAnimated && !isHorizontal && !!((_c = state.scrollingTo) == null ? void 0 : _c.isInitialScroll) && isNativeScrollAtInitialTarget(ctx, top);
+   scroller.scrollTo({ animated: isAnimated, x: left, y: top });
+   if (isAnimated) {
+     const target = (_b = (_a3 = scroller.getScrollEventTarget) == null ? void 0 : _a3.call(scroller)) != null ? _b : null;
+@@ -1359,6 +1368,9 @@
+       100,
+       "platformScrollCompletion"
+     );
++    if (nativeWasAtTarget) {
++      checkFinishedScroll(ctx);
++    }
+   }
+ }
+ function listenForScrollEnd(ctx, params) {
+@@ -3050,9 +3062,16 @@
+   const canUseAdjustedCompletion = !scrollingTo.animated || Platform.OS === "ios";
+   return {
+     clampedTargetOffset,
+-    isAtResolvedTarget: Math.abs(scroll - maxOffset) < 1 && (diff1 < 1 || canUseAdjustedCompletion && diff2 < 1)
++    isAtResolvedTarget: Math.abs(scroll - maxOffset) < 1 && (diff1 < 1 || canUseAdjustedCompletion && diff2 < 1) || isInstantInitialScrollPinnedAtNativeEnd(ctx, scrollingTo, scroll, clampedTargetOffset)
+   };
+ }
++function isInstantInitialScrollPinnedAtNativeEnd(ctx, scrollingTo, scroll, clampedTargetOffset) {
++  if (!scrollingTo.isInitialScroll || scrollingTo.animated) {
++    return false;
++  }
++  const nativeOffset = getNativeScrollOffset(ctx);
++  return nativeOffset !== void 0 && Math.abs(scroll - nativeOffset) <= INITIAL_SCROLL_COMPLETION_TARGET_EPSILON && isPinnedAtNativeScrollEnd(ctx, clampedTargetOffset);
++}
+ function checkFinishedScrollFrame(ctx) {
+   const scrollingTo = ctx.state.scrollingTo;
+   if (!scrollingTo) {
+@@ -3060,12 +3079,62 @@
+   }
+   const { state } = ctx;
+   const completionState = getResolvedScrollCompletionState(ctx, scrollingTo);
+-  if (completionState.isAtResolvedTarget && hasScrollCompletionOwnership(state, {
++  if (!completionState.isAtResolvedTarget) {
++    return;
++  }
++  if (hasScrollCompletionOwnership(state, {
+     clampedTargetOffset: completionState.clampedTargetOffset,
+     scrollingTo
+   })) {
+     finishScrollTo(ctx);
++  } else if (isInstantInitialScrollAlreadyApplied(ctx, scrollingTo, completionState.clampedTargetOffset)) {
++    const nativeOffset = getNativeScrollOffset(ctx);
++    if (nativeOffset !== void 0) {
++      syncInitialScrollOffset(state, nativeOffset);
++    }
++    finishScrollTo(ctx);
++  }
++}
++function getNativeScrollOffset(ctx) {
++  var _a3;
++  const scroller = ctx.state.refScroller.current;
++  const offset = (_a3 = scroller == null ? void 0 : scroller.getCurrentScrollOffset) == null ? void 0 : _a3.call(scroller);
++  return typeof offset === "number" && Number.isFinite(offset) ? offset : void 0;
++}
++function isPinnedAtNativeScrollEnd(ctx, targetOffset) {
++  var _a3;
++  const state = ctx.state;
++  const scroller = state.refScroller.current;
++  if (state.props.horizontal || !scroller || ((_a3 = scroller.isWindowScroll) == null ? void 0 : _a3.call(scroller))) {
++    return false;
++  }
++  const node = scroller.getScrollableNode();
++  if (!node || typeof node.scrollTop !== "number") {
++    return false;
++  }
++  const nativeOffset = node.scrollTop;
++  const nativeMaxOffset = node.scrollHeight - node.clientHeight;
++  const isDomSized = Math.abs(node.scrollHeight - Math.max(getContentSize(ctx), node.clientHeight)) <= INITIAL_SCROLL_COMPLETION_TARGET_EPSILON;
++  return isDomSized && targetOffset - nativeOffset > INITIAL_SCROLL_COMPLETION_TARGET_EPSILON && nativeMaxOffset - nativeOffset <= INITIAL_SCROLL_COMPLETION_TARGET_EPSILON;
++}
++function isNativeScrollAtInitialTarget(ctx, targetOffset) {
++  const nativeOffset = getNativeScrollOffset(ctx);
++  if (nativeOffset === void 0) {
++    return false;
++  }
++  return Math.abs(nativeOffset - targetOffset) <= INITIAL_SCROLL_COMPLETION_TARGET_EPSILON || isPinnedAtNativeScrollEnd(ctx, targetOffset);
++}
++function isInstantInitialScrollAlreadyApplied(ctx, scrollingTo, clampedTargetOffset) {
++  const { state } = ctx;
++  if (!scrollingTo.isInitialScroll || scrollingTo.animated || state.props.horizontal) {
++    return false;
++  }
++  const nativeOffset = getNativeScrollOffset(ctx);
++  if (nativeOffset === void 0) {
++    return false;
+   }
++  const isAtTarget = Math.abs(state.scroll - clampedTargetOffset) <= INITIAL_SCROLL_COMPLETION_TARGET_EPSILON && Math.abs(nativeOffset - clampedTargetOffset) <= INITIAL_SCROLL_COMPLETION_TARGET_EPSILON;
++  return isAtTarget || isPinnedAtNativeScrollEnd(ctx, clampedTargetOffset);
+ }
+ function scrollToFallbackOffset(ctx, offset) {
+   var _a3;
+@@ -7826,6 +7895,7 @@
+     estimatedItemSize = 100,
+     estimatedListSize,
+     extraData,
++    getEstimatedItemSize,
+     getFixedItemSize,
+     getItemType,
+     horizontal,
+@@ -8104,6 +8174,7 @@
+     dataVersion,
+     drawDistance,
+     estimatedItemSize,
++    getEstimatedItemSize: useWrapIfItem(getEstimatedItemSize),
+     getFixedItemSize: useWrapIfItem(getFixedItemSize),
+     getItemType: useWrapIfItem(getItemType),
+     hideItemsUntilMeasured: experimental_hideItemsUntilMeasured,
 diff --git a/reanimated.d.ts b/reanimated.d.ts
 --- a/reanimated.d.ts
 +++ b/reanimated.d.ts

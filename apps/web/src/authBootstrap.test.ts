@@ -14,16 +14,19 @@ function jsonResponse(body: unknown, init?: ResponseInit) {
 type TestWindow = {
   location: URL;
   history: {
-    replaceState: (_data: unknown, _unused: string, url: string) => void;
+    state: unknown;
+    replaceState: (data: unknown, _unused: string, url: string) => void;
   };
   desktopBridge?: DesktopBridge;
 };
 
-function installTestBrowser(url: string) {
+function installTestBrowser(url: string, historyState: unknown = null) {
   const testWindow: TestWindow = {
     location: new URL(url),
     history: {
-      replaceState: (_data, _unused, nextUrl) => {
+      state: historyState,
+      replaceState: (data, _unused, nextUrl) => {
+        testWindow.history.state = data;
         testWindow.location = new URL(nextUrl, testWindow.location.href);
       },
     },
@@ -284,12 +287,15 @@ describe("resolveInitialServerAuthGateState", () => {
   });
 
   it("takes a pairing token from the location hash and strips it immediately", async () => {
-    const testWindow = installTestBrowser("http://localhost/#token=pairing-token");
+    const routerState = { __TSR_index: 0, __TSR_key: "first", key: "first" };
+    const testWindow = installTestBrowser("http://localhost/#token=pairing-token", routerState);
     const { takePairingTokenFromUrl } = await import("./environments/primary");
 
     expect(takePairingTokenFromUrl()).toBe("pairing-token");
     expect(testWindow.location.hash).toBe("");
     expect(testWindow.location.searchParams.get("token")).toBeNull();
+    // The router's entry index survives, so back from the first page stays in the app.
+    expect(testWindow.history.state).toBe(routerState);
   });
 
   it("accepts query-string pairing tokens as a backward-compatible fallback", async () => {

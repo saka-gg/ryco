@@ -25,6 +25,7 @@ import type {
   ProviderSteerTurnInput,
   RuntimeSessionId,
   ProviderStopBackgroundTaskInput,
+  ProviderMessageBackgroundTaskInput,
   ProviderStopSessionInput,
   ThreadId,
   TurnId,
@@ -35,7 +36,7 @@ import { Context } from "effect";
 import type { Effect, Option, Stream } from "effect";
 
 import type { HeldStoragePathUseLease } from "../../storage/lifecycle.ts";
-import type { ProviderServiceError } from "../Errors.ts";
+import type { ProviderServiceError, ProviderTaskEndedError } from "../Errors.ts";
 import type { ProviderAdapterCapabilities, ProviderThreadHistory } from "./ProviderAdapter.ts";
 import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
 import type { ProviderRuntimeBinding } from "./ProviderSessionDirectory.ts";
@@ -121,7 +122,8 @@ export interface ProviderServiceShape {
    * The skills and slash commands `instanceId` offers in `cwd`, read without a session and
    * kept for five minutes (stale-while-revalidate). Empty when the instance cannot list per
    * directory or its first read fails; a failed refresh keeps serving the last good list, and
-   * a failure is never cached. Optional so existing test doubles stay valid.
+   * a failure is never cached. A list a running session in `cwd` pushed is served instead,
+   * uncached. Optional so existing test doubles stay valid.
    */
   readonly readProjectCommands?: (
     instanceId: ProviderInstanceId,
@@ -221,6 +223,15 @@ export interface ProviderServiceShape {
   readonly stopBackgroundTask: (
     input: ProviderStopBackgroundTaskInput,
   ) => Effect.Effect<void, ProviderServiceError>;
+
+  /**
+   * Queue a person's message for one running agent (it reads it at its next step). Fails with
+   * ProviderUnsupportedError when the routed adapter has no channel into running agents, and
+   * with ProviderTaskEndedError once the task settled.
+   */
+  readonly messageBackgroundTask: (
+    input: ProviderMessageBackgroundTaskInput,
+  ) => Effect.Effect<void, ProviderServiceError | ProviderTaskEndedError>;
 
   /**
    * Respond to a provider approval request.

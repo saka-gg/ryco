@@ -4,7 +4,10 @@ import { useCallback } from "react";
 import { EnvironmentId, ThreadId } from "@ryco/contracts/base-schemas";
 
 import { ThreadDetailScreen } from "../threads/ThreadDetailScreen";
-import { useFileWorkspaceLayout, useRegisterFileWorkspaceInspector } from "./FileWorkspaceLayout";
+import {
+  useRegisterThreadWorkspaceInspector,
+  useThreadWorkspaceLayout,
+} from "../workspace/ThreadWorkspaceLayout";
 import { ThreadFilesScreen } from "./ThreadFilesScreen";
 
 type ThreadFilesRouteScreenProps = StaticScreenProps<{
@@ -22,7 +25,7 @@ export function ThreadFilesRouteScreen(props: ThreadFilesRouteScreenProps) {
   const threadIdRaw = firstParam(props.route.params.threadId);
   const environmentId = environmentIdRaw ? EnvironmentId.make(environmentIdRaw) : null;
   const threadId = threadIdRaw ? ThreadId.make(threadIdRaw) : null;
-  const { inspector } = useFileWorkspaceLayout();
+  const { inspector } = useThreadWorkspaceLayout();
   const renderInspector = useCallback(
     () =>
       environmentId !== null && threadId !== null ? (
@@ -34,7 +37,11 @@ export function ThreadFilesRouteScreen(props: ThreadFilesRouteScreenProps) {
       ) : null,
     [environmentId, threadId],
   );
-  useRegisterFileWorkspaceInspector(inspector.supported ? renderInspector : undefined);
+  useRegisterThreadWorkspaceInspector(
+    "files",
+    inspector.supported ? renderInspector : undefined,
+    "Workspace files",
+  );
 
   if (environmentId === null || threadId === null) return null;
 

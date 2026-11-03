@@ -11,12 +11,18 @@ import {
   type UsageFileAggregate,
   UsageSlotAggregator,
 } from "./usageFileAggregate.ts";
-import { priceUsageRecord } from "./usagePricing.ts";
+import { makeUsagePricingPolicy, priceUsageRecord, resolveUsageModel } from "./usagePricing.ts";
+
 import {
   encodeUsageScanCache,
   decodeUsageScanCache,
   type UsageScanCache,
 } from "./usageScanCache.ts";
+import type { UsageRecord } from "./usageRecord.ts";
+
+/** Prices a record without any published rates or custom prices. */
+const priceWithoutRates = (record: UsageRecord) =>
+  priceUsageRecord(resolveUsageModel(makeUsagePricingPolicy(new Map()), record.model), record);
 
 /** Total tokens of every response a store aggregate holds. */
 function totalTokens(aggregate: UsageFileAggregate): number {
@@ -91,7 +97,7 @@ describe("OpenCode provider-native usage", () => {
       reasoningTokens: 5,
       totalTokens: 1001,
     });
-    expect(priceUsageRecord(new Map(), result.record)).toMatchObject({
+    expect(priceWithoutRates(result.record)).toMatchObject({
       estimatedCostUsd: null,
       unpricedTokenCount: 1001,
     });
@@ -107,7 +113,7 @@ describe("OpenCode provider-native usage", () => {
       provider: "opencode",
       timeZone: "UTC",
       endDate: "2026-09-30",
-      rates: new Map(),
+      pricing: makeUsagePricingPolicy(new Map()),
     });
     aggregator.addFile(scanned.aggregate);
     aggregator.addFile(scanned.aggregate);

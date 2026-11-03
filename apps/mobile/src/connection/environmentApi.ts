@@ -64,6 +64,19 @@ export function subscribeEnvironmentApis(listener: () => void): () => void {
   return registry().driver.supervisor.subscribe(listener);
 }
 
+/**
+ * The ids `readEnvironmentApi` answers for right now, sorted and newline-joined.
+ * A string, so `useSyncExternalStore` compares two snapshots by value and a
+ * supervisor notification that changed nobody's availability re-renders nothing.
+ */
+export function readEnvironmentApiAvailability(): string {
+  const environmentIds = new Set<string>(environmentApiOverridesForTests.keys());
+  for (const connection of registry().driver.supervisor.list()) {
+    environmentIds.add(connection.environmentId);
+  }
+  return [...environmentIds].toSorted().join("\n");
+}
+
 export function ensureEnvironmentApi(environmentId: EnvironmentId): EnvironmentApi {
   const api = readEnvironmentApi(environmentId);
   if (!api) throw new Error(`Environment API not found for environment ${environmentId}`);

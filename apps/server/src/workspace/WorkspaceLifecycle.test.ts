@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { Effect, Option, Schema } from "effect";
+import { Effect, Layer, ManagedRuntime, Option, Schema } from "effect";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 import {
   DEFAULT_LIFECYCLE_SUGGESTION_POLICY,
@@ -20,7 +20,16 @@ import {
   WorktreeId,
 } from "@ryco/contracts";
 
-import type { GitVcsDriverShape } from "../vcs/GitVcsDriver.ts";
+import { ServerConfig } from "../config.ts";
+import {
+  GitVcsDriver,
+  layer as GitVcsDriverLayer,
+  type GitVcsDriverShape,
+} from "../vcs/GitVcsDriver.ts";
+import type {
+  CheckoutMergeProof,
+  CheckoutMergeProverShape,
+} from "../sourceControl/checkoutMergeProof.ts";
 import { makeWorkspaceAccessPolicy } from "./Layers/WorkspaceAccessPolicy.ts";
 import type { CheckoutFence, CheckoutFenceClaim } from "./checkoutFence.ts";
 import {
@@ -155,6 +164,14 @@ function fixture() {
     failStop: false,
     failRemoval: false,
     gitCalls: [] as string[],
+    /** Replaces the fake Git workflow's worktree creation (the real driver, for instance). */
+    createWorktree: null as WorkspaceLifecycleDeps["git"]["createWorktree"] | null,
+    /** The merge prover the service gets; null: none (only the project HEAD counts). */
+    mergeProof: null as CheckoutMergeProverShape | null,
+    /** The restart-sensitive work counter the service gets; null: none. */
+    restartWork: null as WorkspaceLifecycleDeps["restartWork"] | null,
+    /** Runs with every git command the service runs itself. */
+    onGit: null as ((args: readonly string[]) => void) | null,
   };
 
   const updateWorktree = (id: WorktreeId, patch: Record<string, unknown>) => {
@@ -229,6 +246,7 @@ function fixture() {
 
   const runGit = (cwd: string, args: readonly string[]) => {
     state.gitCalls.push(`${cwd}\u0000${args.join(" ")}`);
+    state.onGit?.(args);
     return git(cwd, ...args);
   };
   const gitDriver = {
@@ -325,13 +343,21 @@ function fixture() {
           });
         }),
       createWorktree: (input) =>
-        Effect.try({
-          try: () => {
-            runGit(input.cwd, ["worktree", "add", input.path!, input.refName]);
-            return { worktree: { path: input.path!, refName: input.refName } };
-          },
-          catch: (cause) => ({ message: String(cause) }) as never,
-        }) as never,
+        state.createWorktree
+          ? state.createWorktree(input)
+          : (Effect.try({
+              try: () => {
+                runGit(input.cwd, ["worktree", "add", input.path!, input.refName]);
+                return { worktree: { path: input.path!, refName: input.refName } };
+              },
+              catch: (cause) => ({ message: String(cause) }) as never,
+            }) as never),
+      listLocalBranchNames: (cwd) =>
+        Effect.sync(() =>
+          runGit(cwd, ["for-each-ref", "--format=%(refname:short)", "refs/heads"])
+            .split("\n")
+            .filter((name) => name.length > 0),
+        ),
       listWorktreePaths: (cwd) =>
         Effect.sync(() =>
           runGit(cwd, ["worktree", "list", "--porcelain"])
@@ -349,6 +375,8 @@ function fixture() {
     },
     fence,
     now: () => NOW_MS,
+    ...(state.mergeProof ? { mergeProof: state.mergeProof } : {}),
+    ...(state.restartWork ? { restartWork: state.restartWork } : {}),
   });
 
   const run = <A, E>(
@@ -390,11 +418,39 @@ function fixture() {
     branchExists,
     commandTypes,
     updateThread,
+    updateWorktree,
   };
 }
 
 const neverDeletesConversations = (types: ReadonlyArray<string>) =>
   expect(types.filter((type) => type === "thread.delete" || type === "thread.trash")).toEqual([]);
+
+/**
+ * The topic branch gets a commit the project's main lacks, its workspace links pull request #7
+ * as merged, and the prover proves that pull request at exactly that commit (while `proven`).
+ */
+function squashMerged(f: ReturnType<typeof fixture>) {
+  f.commit(f.checkout, "squash-merged work");
+  const head = f.git(f.checkout, "rev-parse", "HEAD").trim();
+  f.updateWorktree(topicId, { prNumber: 7, prState: "merged" });
+  const calls: Parameters<CheckoutMergeProverShape["prove"]>[0][] = [];
+  const control = { proven: true, calls, head };
+  f.state.mergeProof = {
+    prove: (input) =>
+      Effect.sync((): CheckoutMergeProof | null => {
+        calls.push(input);
+        return control.proven &&
+          input.head === head &&
+          input.pullRequest?.number === 7 &&
+          input.pullRequest.state === "merged"
+          ? { kind: "pull-request", head, number: 7, baseRefName: "main" }
+          : null;
+      }),
+    remoteDefaultBranches: () =>
+      Effect.succeed({ ref: "origin/main", branch: "main", outside: new Set(["topic"]) }),
+  };
+  return control;
+}
 
 describe("workspace lifecycle service", () => {
   it("archives a workspace without touching its checkout, branch or conversations", async () => {
@@ -755,6 +811,35 @@ describe("workspace lifecycle service", () => {
     expect(f.branchExists("topic")).toBe(false);
   });
 
+  it("counts an applied action, branch deletion included, as work a restart waits for", async () => {
+    const f = fixture();
+    let running = 0;
+    f.state.restartWork = {
+      track: (effect) =>
+        Effect.acquireUseRelease(
+          Effect.sync(() => void (running += 1)),
+          () => effect,
+          () => Effect.sync(() => void (running -= 1)),
+        ),
+    };
+    const countedAt: Array<string> = [];
+    f.state.onGit = (args) => {
+      if (args[0] === "update-ref" || args[0] === "worktree")
+        countedAt.push(`${args[0]} ${running}`);
+    };
+    const { result } = await f.previewAndApply({
+      worktreeId: topicId,
+      action: "remove-checkout",
+      deleteBranch: true,
+    });
+    expect(result.outcome).toBe("completed");
+    expect(f.branchExists("topic")).toBe(false);
+    // The branch deletion runs git directly, past the counted git workflow.
+    expect(countedAt).toContain("update-ref 1");
+    expect(countedAt.every((entry) => entry.endsWith(" 1"))).toBe(true);
+    expect(running).toBe(0);
+  });
+
   it("deletes a workspace with unsaved and unmerged work only when discarding", async () => {
     const f = fixture();
     writeFileSync(path.join(f.checkout, "tracked.txt"), "v1");
@@ -1001,6 +1086,118 @@ describe("workspace lifecycle service", () => {
     expect(record).toMatchObject({ archivedAt: null, checkoutRemovedAt: null });
   });
 
+  it("restores a checkout that storage cleanup removed, replacing the registration Git kept", async () => {
+    const f = fixture();
+    // The real driver: Git itself refuses a plain add over the registration cleanup leaves.
+    const serverBase = realpathSync(mkdtempSync(path.join(os.tmpdir(), "ryco-lifecycle-driver-")));
+    roots.push(serverBase);
+    const runtime = ManagedRuntime.make(
+      GitVcsDriverLayer.pipe(
+        Layer.provideMerge(ServerConfig.layerTest(process.cwd(), serverBase)),
+        Layer.provideMerge(NodeServices.layer),
+      ),
+    );
+    try {
+      const driver = await runtime.runPromise(Effect.service(GitVcsDriver));
+      f.state.createWorktree = driver.createWorktree;
+      // Storage cleanup deletes the directory but keeps Git's registration and branch, then
+      // records the removal on the workspace.
+      rmSync(f.checkout, { recursive: true, force: true });
+      f.updateWorktree(topicId, {
+        checkoutRemovedAt: iso(1),
+        checkoutRemovalReason: "removed",
+        archivedAt: iso(1),
+      });
+      expect(f.git(f.repo, "worktree", "list", "--porcelain")).toContain(
+        `worktree ${f.checkout}\n`,
+      );
+
+      const listed = (await f.run((s) => s.list(projectId))).find((w) => w.worktreeId === topicId);
+      expect(listed?.actions.find((entry) => entry.action === "restore")).toMatchObject({
+        available: true,
+        blockers: [],
+      });
+      const { preview, result } = await f.previewAndApply({
+        worktreeId: topicId,
+        action: "restore",
+      });
+      expect(preview.blockers).toEqual([]);
+      expect(preview.effects).toMatchObject({ recreateCheckout: true, restoreWorkspace: true });
+      expect(preview.details.join(" ")).toContain(
+        "Git still registers this missing path; recreating replaces that entry.",
+      );
+      expect(result.outcome).toBe("completed");
+      expect(f.git(f.checkout, "symbolic-ref", "--short", "HEAD").trim()).toBe("topic");
+      expect(f.commandTypes().slice(-2)).toEqual(["worktree.checkout.restore", "worktree.restore"]);
+      const record = f.state.snapshot.worktrees?.find((w) => w.worktreeId === topicId);
+      expect(record).toMatchObject({ archivedAt: null, checkoutRemovedAt: null });
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("shows why Git could not recreate the checkout and changes nothing", async () => {
+    const f = fixture();
+    rmSync(f.checkout, { recursive: true, force: true });
+    f.updateWorktree(topicId, {
+      checkoutRemovedAt: iso(1),
+      checkoutRemovalReason: "removed",
+      archivedAt: iso(1),
+    });
+    // Git refuses the add itself, after the review found nothing in the way.
+    f.state.createWorktree = () => Effect.fail({ detail: "fatal: simulated refusal" } as never);
+    const { preview, result } = await f.previewAndApply({ worktreeId: topicId, action: "restore" });
+    expect(preview.blockers).toEqual([]);
+    expect(result.outcome).toBe("failed");
+    const step = result.steps.find((entry) => entry.id === "recreate-checkout");
+    expect(step?.status).toBe("failed");
+    expect(step?.detail).toBe("Git could not recreate the checkout. fatal: simulated refusal");
+    expect(existsSync(f.checkout)).toBe(false);
+    expect(f.commandTypes()).toEqual([]);
+  });
+
+  it("shows Git's refusal to replace a detached registration before anything changes", async () => {
+    const f = fixture();
+    // The registration Git keeps is on a detached commit, which may be referenced nowhere
+    // else: recreating must not replace it, and the review says so as the driver would.
+    f.git(f.checkout, "checkout", "--quiet", "--detach");
+    rmSync(f.checkout, { recursive: true, force: true });
+    f.updateWorktree(topicId, {
+      checkoutRemovedAt: iso(1),
+      checkoutRemovalReason: "removed",
+      archivedAt: iso(1),
+    });
+    const refusal = `Git registers the missing checkout at ${f.checkout} on a detached commit.`;
+    const recreate = await f.run((s) =>
+      s.preview({ worktreeId: topicId, action: "recreate-checkout" }),
+    );
+    expect(recreate.blockers.join(" ")).toContain(refusal);
+    const listed = (await f.run((s) => s.list(projectId))).find((w) => w.worktreeId === topicId);
+    expect(listed?.actions.find((entry) => entry.action === "recreate-checkout")?.available).toBe(
+      false,
+    );
+    // Restore only shows the workspace again and says why the checkout stays removed.
+    const { preview, result } = await f.previewAndApply({ worktreeId: topicId, action: "restore" });
+    expect(preview.blockers).toEqual([]);
+    expect(preview.effects).toMatchObject({ recreateCheckout: false, restoreWorkspace: true });
+    expect(preview.details.join(" ")).toContain(`The checkout stays removed: ${refusal}`);
+    expect(result.outcome).toBe("completed");
+    expect(existsSync(f.checkout)).toBe(false);
+    expect(f.git(f.repo, "worktree", "list", "--porcelain")).toContain(`worktree ${f.checkout}\n`);
+    expect(f.commandTypes()).toEqual(["worktree.restore"]);
+  });
+
+  it("keeps a locked registration of the missing checkout blocking", async () => {
+    const f = fixture();
+    f.git(f.repo, "worktree", "lock", f.checkout);
+    rmSync(f.checkout, { recursive: true, force: true });
+    f.updateWorktree(topicId, { checkoutRemovedAt: iso(1), checkoutRemovalReason: "removed" });
+    for (const action of ["restore", "recreate-checkout"] as const) {
+      const preview = await f.run((s) => s.preview({ worktreeId: topicId, action }));
+      expect(preview.blockers.join(" ")).toContain("locked");
+    }
+  });
+
   it("recreates a missing checkout of a workspace that is not archived", async () => {
     const f = fixture();
     f.git(f.repo, "worktree", "remove", f.checkout);
@@ -1030,6 +1227,98 @@ describe("workspace lifecycle service", () => {
     // Nothing is left to restore now.
     const again = await f.run((s) => s.preview({ worktreeId: topicId, action: "restore" }));
     expect(again.blockers.join(" ")).toContain("Branch topic no longer exists");
+  });
+
+  it("removes a squash-merged checkout and its branch once its pull request proves the merge", async () => {
+    const f = fixture();
+    f.commit(f.checkout, "unmerged without a proof");
+    const unproven = await f.run((s) =>
+      s.preview({ worktreeId: topicId, action: "remove-checkout", deleteBranch: true }),
+    );
+    expect(unproven.blockers.join(" ")).toContain(
+      "The branch has commits that the project HEAD does not contain.",
+    );
+    f.git(f.checkout, "reset", "--hard", "HEAD~1");
+
+    const merged = squashMerged(f);
+    const { preview, result } = await f.previewAndApply({
+      worktreeId: topicId,
+      action: "remove-checkout",
+      deleteBranch: true,
+    });
+    expect(preview.blockers).toEqual([]);
+    expect(preview.workspace).toMatchObject({
+      unmerged: false,
+      mergedBy: { kind: "pull-request", pullRequestNumber: 7 },
+    });
+    expect(preview.details).toContain("The branch is merged through pull request #7.");
+    expect(preview.summary).toContain("delete merged branch topic");
+    // The review may read the forge once; it asked with the workspace's own link.
+    expect(merged.calls[0]).toMatchObject({
+      head: merged.head,
+      branch: "topic",
+      pullRequest: { number: 7, state: "merged" },
+      reads: { remaining: 1 },
+    });
+    expect(result.outcome).toBe("completed");
+    expect(existsSync(f.checkout)).toBe(false);
+    expect(f.branchExists("topic")).toBe(false);
+    expect(result.steps.map((step) => step.detail)).toContain("Deleted merged branch topic.");
+  });
+
+  it("deleting a squash-merged workspace loses no work, and the review is bound to the proof", async () => {
+    const f = fixture();
+    const merged = squashMerged(f);
+    const request = {
+      worktreeId: topicId,
+      action: "remove-checkout" as const,
+      discard: true,
+    };
+    const preview = await f.run((s) => s.preview(request));
+    expect(preview.effects.discardsWork).toBe(false);
+    expect(preview.details).toContain("The branch is merged through pull request #7.");
+    expect(preview.details.join(" ")).toContain("Deletes the merged branch topic");
+    // The proof went away (the forge no longer confirms it): the reviewed state changed.
+    merged.proven = false;
+    const result = await f.run((s) =>
+      s.apply({ ...preview.request, expectedFingerprint: preview.fingerprint }),
+    );
+    expect(result.outcome).toBe("blocked");
+    expect(existsSync(f.checkout)).toBe(true);
+    expect(f.branchExists("topic")).toBe(true);
+  });
+
+  it("reads the forge for a merge proof only when reviewing a checkout removal", async () => {
+    const f = fixture();
+    const merged = squashMerged(f);
+    await f.run((s) => s.preview({ worktreeId: topicId, action: "archive" }));
+    const archived = await f.previewAndApply({ worktreeId: topicId, action: "archive" });
+    expect(archived.result.outcome).toBe("completed");
+    await f.run((s) => s.preview({ worktreeId: topicId, action: "restore" }));
+    // Archiving and restoring use only what is already known: no forge read to wait on.
+    expect(merged.calls.length).toBeGreaterThan(0);
+    expect(merged.calls.map((call) => call.reads)).toEqual(merged.calls.map(() => null));
+    merged.calls.length = 0;
+    await f.run((s) => s.preview({ worktreeId: topicId, action: "remove-checkout" }));
+    expect(merged.calls[0]?.reads).toMatchObject({ remaining: 1 });
+  });
+
+  it("suggests removing an archived squash-merged checkout", async () => {
+    const f = fixture();
+    f.updateThread(activeId, { session: null, archivedAt: iso(10) });
+    f.updateThread(pristineId, { archivedAt: iso(9) });
+    f.commit(f.checkout, "unmerged without a proof");
+    expect((await f.run((s) => s.suggestions())).checkouts).toEqual([]);
+    f.git(f.checkout, "reset", "--hard", "HEAD~1");
+    const merged = squashMerged(f);
+    const suggestions = await f.run((s) => s.suggestions());
+    expect(suggestions.checkouts.map((c) => c.worktreeId)).toEqual([topicId]);
+    // A listing reads the remote default branch once and shares its forge reads.
+    expect(merged.calls[0]?.remoteDefault).toMatchObject({ ref: "origin/main" });
+    expect(merged.calls[0]?.reads?.remaining).toBeLessThanOrEqual(3);
+    // Still only a suggestion: nothing was removed.
+    expect(f.state.commands).toEqual([]);
+    expect(existsSync(f.checkout)).toBe(true);
   });
 
   it("suggests only eligible conversations and finished checkouts", async () => {

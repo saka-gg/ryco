@@ -85,6 +85,25 @@ it.layer(NodeServices.layer)("BootstrapCredentialServiceLive", (it) => {
     }).pipe(Effect.provide(makeBootstrapCredentialLayer())),
   );
 
+  it.effect("keeps a linked code's Hub account through redemption", () =>
+    Effect.gen(function* () {
+      const bootstrapCredentials = yield* BootstrapCredentialService;
+      const link = {
+        trustSource: "account-enrolled",
+        enrollmentId: "enr_desk",
+        clientFingerprint: "fp-desk",
+        role: "operator",
+        accountId: "acct_1",
+      } as const;
+      const issued = yield* bootstrapCredentials.issueOneTimeToken({
+        ttl: Duration.minutes(2),
+        subject: "hub-linked",
+        link,
+      });
+      expect((yield* bootstrapCredentials.consume(issued.credential)).link).toEqual(link);
+    }).pipe(Effect.provide(makeBootstrapCredentialLayer())),
+  );
+
   it.effect("seeds the desktop bootstrap credential as a one-time grant", () =>
     Effect.gen(function* () {
       const bootstrapCredentials = yield* BootstrapCredentialService;

@@ -5,6 +5,7 @@ import {
   appendAttachmentPathLines,
   formatAttachmentPathLine,
   formatAttachmentPathLines,
+  stripAttachmentPathLines,
 } from "./attachmentPrompt.ts";
 
 const fileAttachment: ChatAttachment = {
@@ -53,10 +54,16 @@ describe("formatAttachmentPathLine", () => {
     );
   });
 
-  it("renders image attachments deterministically", () => {
+  it("tells the agent where an attached image is saved", () => {
     expect(
       formatAttachmentPathLine({ attachment: imageAttachment, resolvedPath: "/tmp/a.png" }),
-    ).toBe("[Attached file] diagram.png (image/png, 42 bytes) saved at: /tmp/a.png");
+    ).toBe('[Attached image "diagram.png" is saved at: /tmp/a.png]');
+  });
+
+  it("names an image whose saved path does not resolve", () => {
+    expect(formatAttachmentPathLine({ attachment: imageAttachment })).toBe(
+      '[Attached image "diagram.png"]',
+    );
   });
 });
 
@@ -68,7 +75,7 @@ describe("formatAttachmentPathLines", () => {
         { attachment: unknownAttachment },
       ]),
     ).toEqual([
-      "[Attached file] diagram.png (image/png, 42 bytes) saved at: /tmp/a.png",
+      '[Attached image "diagram.png" is saved at: /tmp/a.png]',
       "[Attached file] mystery.bin (application/octet-stream, size unknown bytes)",
     ]);
     expect(formatAttachmentPathLines([])).toEqual([]);
@@ -98,5 +105,40 @@ describe("appendAttachmentPathLines", () => {
       ]),
     ).toBe("[Attached file] mystery.bin (application/octet-stream, size unknown bytes)");
     expect(appendAttachmentPathLines(undefined, ["line"])).toBe("line");
+  });
+});
+
+describe("stripAttachmentPathLines", () => {
+  it("removes the trailing path lines the formatter appended", () => {
+    const lines = formatAttachmentPathLines([
+      { attachment: fileAttachment, resolvedPath: "/tmp/attachments/report (1).bin" },
+      { attachment: unknownAttachment },
+    ]);
+    expect(stripAttachmentPathLines(appendAttachmentPathLines("please review", lines) ?? "")).toBe(
+      "please review",
+    );
+    expect(stripAttachmentPathLines(appendAttachmentPathLines("", lines) ?? "")).toBe("");
+  });
+
+  it("removes image path lines with the file lines around them", () => {
+    const lines = formatAttachmentPathLines([
+      { attachment: imageAttachment, resolvedPath: "/tmp/attachments/shot (final).png" },
+      { attachment: fileAttachment, resolvedPath: "/tmp/attachments/report.bin" },
+      { attachment: { ...imageAttachment, name: 'say "cheese".png' } },
+    ]);
+    expect(stripAttachmentPathLines(appendAttachmentPathLines("what changed?", lines) ?? "")).toBe(
+      "what changed?",
+    );
+    const quoted = '[Attached image "a.png" is saved at: /tmp/a.png]\n\nwhy is this here?';
+    expect(stripAttachmentPathLines(quoted)).toBe(quoted);
+  });
+
+  it("keeps text without trailing path lines, including one quoted mid-text", () => {
+    const line = formatAttachmentPathLine({ attachment: imageAttachment });
+    expect(stripAttachmentPathLines("please review")).toBe("please review");
+    expect(stripAttachmentPathLines(`${line}\n\nwhy is this here?`)).toBe(
+      `${line}\n\nwhy is this here?`,
+    );
+    expect(stripAttachmentPathLines("[Attached file] notes")).toBe("[Attached file] notes");
   });
 });

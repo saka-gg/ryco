@@ -19,7 +19,7 @@ import {
   type TurnId,
 } from "@ryco/contracts";
 import { sameModelSelection } from "@ryco/shared/model";
-import { derivePendingThreadRequests } from "@ryco/shared/threadActivity";
+import { derivePendingThreadRequests } from "@ryco/shared/pendingThreadRequests";
 import { applicableUsageLimit } from "@ryco/shared/usageLimit";
 
 import {
@@ -27,8 +27,7 @@ import {
   isOrphanedProviderSession,
 } from "./restartReconciliation.ts";
 
-/** A continuation is never sent for work last observed longer ago than this. */
-export const RESTART_CONTINUATION_MAX_AGE_MS = 30 * 60_000;
+export { RESTART_CONTINUATION_MAX_AGE_MS } from "@ryco/shared/restartContinuation";
 /** Continuations dispatched per provider instance and startup, below start admission (64). */
 export const RESTART_CONTINUATIONS_PER_INSTANCE = 8;
 /** Candidates that get capture IO per startup; the rest are settled `capacity`. */

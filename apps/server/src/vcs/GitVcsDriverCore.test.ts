@@ -41,7 +41,10 @@ import {
   parseGitConfigList,
   parseListedRefs,
 } from "./GitVcsDriverCore.ts";
-import { configureTestGitCommitIdentity } from "./testing/GitTestRepo.ts";
+import {
+  configureHostileDiffConfig,
+  configureTestGitCommitIdentity,
+} from "./testing/GitTestRepo.ts";
 
 // Observe actual destination-lock acquisition for deterministic pre-mkdir races.
 // Preserve the real semaphore/map behavior; only the get boundary is observable.
@@ -155,6 +158,23 @@ const initRepoWithCommit = (
   });
 
 it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
+  describe("listLocalBranchNames", () => {
+    it.effect("names a branch a tag shares its name with by its plain name", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* git(cwd, ["branch", "release"]);
+        yield* git(cwd, ["tag", "release"]);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+
+        assert.deepStrictEqual(
+          (yield* driver.listLocalBranchNames(cwd)).toSorted(),
+          [initialBranch, "release"].toSorted(),
+        );
+      }),
+    );
+  });
+
   describe("readRangeContext", () => {
     it.effect("returns empty context when base and HEAD are identical", () =>
       Effect.gen(function* () {
@@ -252,6 +272,51 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         assert.include(error.detail, "Merge or rebase");
       }),
     );
+
+    it.effect("reads commit and range context the same whatever the diff config says", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* writeTextFile(cwd, "notes.txt", "first\n\nsecond\n\nthird\n");
+        yield* writeTextFile(cwd, "docs/guide.txt", "intro\n");
+        yield* git(cwd, ["add", "notes.txt", "docs/guide.txt"]);
+        yield* git(cwd, ["commit", "-m", "Add notes"]);
+        yield* git(cwd, ["checkout", "-b", "feature/notes"]);
+        yield* writeTextFile(cwd, "notes.txt", "first\n\nSECOND\n\nthird\n");
+        yield* git(cwd, ["commit", "-am", "Shout the second note"]);
+        yield* writeTextFile(cwd, "notes.txt", "first\n\nSECOND\n\nthird, edited\n");
+        yield* writeTextFile(cwd, "docs/guide.txt", "intro, edited\n");
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const read = (from: string) =>
+          Effect.all([
+            driver.prepareCommitContext(from),
+            driver.readRangeContext(from, initialBranch),
+          ]);
+        // A project may sit in a subdirectory; its context still covers the
+        // whole repository, as the commit does.
+        const subdirectory = nodePath.join(cwd, "docs");
+
+        const clean = yield* read(cwd);
+        assert.deepStrictEqual(yield* read(subdirectory), clean);
+        yield* configureHostileDiffConfig(cwd, git);
+        yield* git(cwd, ["config", "log.decorate", "full"]);
+
+        assert.deepStrictEqual(yield* read(cwd), clean);
+        assert.deepStrictEqual(yield* read(subdirectory), clean);
+        const [commitContext, rangeContext] = clean;
+        assert.strictEqual(commitContext?.stagedSummary, "M\tdocs/guide.txt\nM\tnotes.txt");
+        assert.include(
+          commitContext?.stagedPatch,
+          "diff --git a/docs/guide.txt b/docs/guide.txt\n",
+        );
+        assert.include(commitContext?.stagedPatch, "diff --git a/notes.txt b/notes.txt\n");
+        assert.include(commitContext?.stagedPatch, "\n \n-third\n+third, edited\n");
+        assert.include(rangeContext.diffPatch, "diff --git a/notes.txt b/notes.txt\n");
+        assert.include(rangeContext.diffPatch, "\n \n-second\n+SECOND\n \n");
+        assert.include(rangeContext.diffSummary, "notes.txt | 2 +-");
+        assert.match(rangeContext.commitSummary, /^[0-9a-f]+ Shout the second note\n$/);
+      }),
+    );
   });
 
   describe("repository status", () => {
@@ -306,7 +371,7 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
               if (command === "rev-parse" && input.args.includes("--git-common-dir")) {
                 return ok(".git\n");
               }
-              if (command === "--git-dir") {
+              if (input.operation === "GitVcsDriver.fetchRemoteForStatus") {
                 return ok();
               }
               if (command === "remote" && input.args.length === 1) {
@@ -353,6 +418,18 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         assert.isDefined(fetchCall);
         assert.equal(fetchCall?.env?.GIT_TERMINAL_PROMPT, "0");
         assert.equal(fetchCall?.env?.SSH_ASKPASS_REQUIRE, "never");
+        // A polled fetch starts no auto-maintenance, also not in submodule fetches.
+        assert.deepStrictEqual(fetchCall?.args, [
+          "-c",
+          "maintenance.auto=false",
+          "--git-dir",
+          nodePath.resolve("/repo", ".git"),
+          "fetch",
+          "--quiet",
+          "--no-tags",
+          "--no-auto-gc",
+          "origin",
+        ]);
         assert.deepStrictEqual(
           calls
             .filter((call) => call.args.includes("diff") && call.args.includes("--numstat"))
@@ -613,6 +690,35 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         assert.isFalse(yield* driver.refreshStatusUpstream("/repo"));
         assert.equal(fetches, 1);
       }).pipe(Effect.provide(OverrideTestLayer)),
+    );
+
+    it.effect("does not start git auto-maintenance from a status fetch", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const remote = yield* makeTmpDir("git-vcs-driver-remote-");
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* git(remote, ["init", "--bare"]);
+        yield* git(cwd, ["remote", "add", "origin", remote]);
+        yield* git(cwd, ["push", "-u", "origin", initialBranch]);
+        yield* git(cwd, ["repack", "-d"]);
+        yield* git(cwd, ["commit", "--allow-empty", "-m", "Second commit"]);
+        yield* git(cwd, ["repack", "-d"]);
+        // Two packs make `gc --auto` due, and without detaching it would run inside the fetch.
+        // Newer git defaults to geometric repacking instead, which these packs do not trigger.
+        yield* git(cwd, ["config", "gc.autoPackLimit", "1"]);
+        yield* git(cwd, ["config", "gc.autoDetach", "false"]);
+        yield* git(cwd, ["config", "maintenance.autoDetach", "false"]);
+        yield* git(cwd, ["config", "maintenance.gc.enabled", "true"]);
+        yield* git(cwd, ["config", "maintenance.geometric-repack.enabled", "false"]);
+        const packCount = git(cwd, ["count-objects", "-v"]).pipe(
+          Effect.map((stdout) => stdout.match(/^packs: (\d+)$/m)?.[1]),
+        );
+        assert.equal(yield* packCount, "2");
+
+        assert.isTrue(yield* (yield* GitVcsDriver.GitVcsDriver).refreshStatusUpstream(cwd));
+
+        assert.equal(yield* packCount, "2");
+      }),
     );
 
     it.effect("recomputes upstream counts only while HEAD stays on the status's branch", () =>
@@ -1383,6 +1489,172 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
           assert.include(yield* git(cwd, ["worktree", "list", "--porcelain"]), checkout);
           assert.isNotEmpty(yield* git(cwd, ["rev-parse", "refs/heads/verified-history"]));
         }).pipe(Effect.provide(SqlitePersistenceMemory)),
+    );
+    it.effect(
+      "recreates a checkout storage cleanup removed over its own registration and prunes no other",
+      () =>
+        Effect.gen(function* () {
+          const raw = yield* makeTmpDir();
+          const cwd = yield* Effect.promise(() => fsPromises.realpath(raw));
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          const pathService = yield* Path.Path;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const sql = yield* SqlClient.SqlClient;
+          // Records ownership and takes the creation lease, as the server's driver does.
+          const driver = yield* makeGitVcsDriverCore();
+          const cleaned = pathService.join(cwd, "cleaned");
+          const interrupted = pathService.join(cwd, "interrupted");
+          const plain = pathService.join(cwd, "plain");
+          for (const [checkout, branch] of [
+            [cleaned, "cleaned-history"],
+            [interrupted, "interrupted-history"],
+            [plain, "plain-history"],
+          ] as const)
+            yield* driver.createWorktree({
+              cwd,
+              path: checkout,
+              refName: initialBranch,
+              newRefName: branch,
+            });
+          // Storage cleanup removed two checkouts and kept their Git registrations.
+          yield* fileSystem.remove(cleaned, { recursive: true });
+          yield* fileSystem.remove(plain, { recursive: true });
+          yield* sql`UPDATE storage_owned_entries SET state = 'removed', created_at = '2026-01-01T00:00:00.000Z' WHERE path = ${cleaned}`;
+          // Another cleanup stopped half-way: its quarantine needs its own registration.
+          const quarantine = pathService.join(cwd, ".cleanup-interrupted");
+          yield* Effect.promise(() => fsPromises.rename(interrupted, quarantine));
+          yield* sql`UPDATE storage_owned_entries SET state = 'removing', identity_json = ${JSON.stringify({ quarantinePath: quarantine })} WHERE path = ${interrupted}`;
+
+          // Without the flag Git refuses the registration cleanup left behind.
+          const refused = yield* driver
+            .createWorktree({ cwd, path: plain, refName: "plain-history" })
+            .pipe(Effect.result);
+          assert.equal(refused._tag, "Failure");
+          // Storage admission still refuses a path whose cleanup is pending.
+          const pending = yield* driver
+            .createWorktree({
+              cwd,
+              path: interrupted,
+              refName: "interrupted-history",
+              replaceMissingRegistration: true,
+            })
+            .pipe(Effect.result);
+          assert.equal(pending._tag, "Failure");
+          if (pending._tag === "Failure")
+            assert.include(pending.failure.detail, "cleanup is pending");
+
+          const recreated = yield* driver.createWorktree({
+            cwd,
+            path: cleaned,
+            refName: "cleaned-history",
+            replaceMissingRegistration: true,
+          });
+          assert.equal(recreated.worktree.path, cleaned);
+          assert.equal(yield* git(cleaned, ["branch", "--show-current"]), "cleaned-history");
+          const rows = yield* sql<{
+            state: string;
+            created_at: string;
+          }>`SELECT state, created_at FROM storage_owned_entries WHERE path = ${cleaned}`;
+          assert.equal(rows[0]?.state, "owned");
+          assert.notEqual(rows[0]?.created_at, "2026-01-01T00:00:00.000Z");
+          // The interrupted cleanup's registration and quarantine are untouched.
+          assert.include(
+            yield* git(cwd, ["worktree", "list", "--porcelain"]),
+            `worktree ${interrupted}\n`,
+          );
+          assert.equal(yield* git(quarantine, ["branch", "--show-current"]), "interrupted-history");
+
+          // The refused plain add left its setup journal; Git's stale registration of that
+          // missing path does not keep the journal from being reclaimed when recreating.
+          const retried = yield* driver.createWorktree({
+            cwd,
+            path: plain,
+            refName: "plain-history",
+            replaceMissingRegistration: true,
+          });
+          assert.equal(retried.worktree.path, plain);
+          assert.equal(yield* git(plain, ["branch", "--show-current"]), "plain-history");
+          yield* driver.assertWorktreeSetupComplete(plain);
+        }).pipe(Effect.provide(Layer.merge(OverrideTestLayer, SqlitePersistenceMemory))),
+    );
+    it.effect("never replaces a locked, detached or duplicate registration", () =>
+      Effect.gen(function* () {
+        const raw = yield* makeTmpDir();
+        const cwd = yield* Effect.promise(() => fsPromises.realpath(raw));
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const pathService = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const listing = () => git(cwd, ["worktree", "list", "--porcelain"]);
+        const recreate = (checkout: string, refName: string) =>
+          driver
+            .createWorktree({ cwd, path: checkout, refName, replaceMissingRegistration: true })
+            .pipe(Effect.result);
+
+        const locked = pathService.join(cwd, "locked");
+        yield* git(cwd, ["worktree", "add", "-b", "locked-history", locked]);
+        yield* git(cwd, ["worktree", "lock", locked]);
+        yield* fileSystem.remove(locked, { recursive: true });
+        const lockedResult = yield* recreate(locked, "locked-history");
+        assert.equal(lockedResult._tag, "Failure");
+        if (lockedResult._tag === "Failure") assert.include(lockedResult.failure.detail, "locked");
+
+        // A detached HEAD may be the only reference to its commit.
+        const detached = pathService.join(cwd, "detached");
+        yield* git(cwd, ["worktree", "add", "--detach", detached]);
+        yield* fileSystem.remove(detached, { recursive: true });
+        yield* git(cwd, ["branch", "free-history"]);
+        const detachedResult = yield* recreate(detached, "free-history");
+        assert.equal(detachedResult._tag, "Failure");
+        if (detachedResult._tag === "Failure") {
+          assert.include(detachedResult.failure.detail, "on a detached commit");
+          // The hint names that one registration, never a repository-wide prune.
+          assert.include(detachedResult.failure.detail, `git worktree remove ${detached}`);
+          assert.notInclude(detachedResult.failure.detail, "prune");
+        }
+
+        // `--force` would check a branch out a second time.
+        const stale = pathService.join(cwd, "stale");
+        const other = pathService.join(cwd, "other");
+        yield* git(cwd, ["worktree", "add", "-b", "stale-history", stale]);
+        yield* git(cwd, ["worktree", "add", "-b", "other-history", other]);
+        yield* fileSystem.remove(stale, { recursive: true });
+        const duplicate = yield* recreate(stale, "other-history");
+        assert.equal(duplicate._tag, "Failure");
+        if (duplicate._tag === "Failure")
+          assert.include(duplicate.failure.detail, `checked out at ${other}.`);
+        const main = yield* recreate(stale, initialBranch);
+        assert.equal(main._tag, "Failure");
+        if (main._tag === "Failure") assert.include(main.failure.detail, `checked out at ${cwd}.`);
+
+        // A branch another missing checkout still holds: its registration is not this path's to
+        // replace (an interrupted cleanup's quarantine may need it), so nothing changes.
+        const moved = pathService.join(cwd, "moved");
+        const elsewhere = pathService.join(cwd, "elsewhere");
+        yield* git(cwd, ["worktree", "add", "-b", "moved-history", elsewhere]);
+        yield* fileSystem.remove(elsewhere, { recursive: true });
+        const held = yield* recreate(moved, "moved-history");
+        assert.equal(held._tag, "Failure");
+        if (held._tag === "Failure")
+          assert.include(
+            held.failure.detail,
+            `still checked out at ${elsewhere}, which is missing`,
+          );
+        assert.isFalse(yield* fileSystem.exists(moved));
+
+        for (const checkout of [locked, detached, stale, elsewhere]) {
+          assert.include(yield* listing(), `worktree ${checkout}\n`);
+          assert.isFalse(yield* fileSystem.exists(checkout));
+        }
+
+        // Without a leftover registration the flag is a plain add.
+        const removed = pathService.join(cwd, "removed");
+        yield* git(cwd, ["worktree", "add", "-b", "removed-history", removed]);
+        yield* git(cwd, ["worktree", "remove", removed]);
+        const plain = yield* recreate(removed, "removed-history");
+        assert.equal(plain._tag, "Success");
+        assert.equal(yield* git(removed, ["branch", "--show-current"]), "removed-history");
+      }),
     );
     it.effect(
       "verified cleanup preserves ignored external archives arriving during quarantine",
@@ -2584,6 +2856,74 @@ setInterval(() => {}, 1000);
           const error = yield* restarted.assertWorktreeSetupComplete(checkout).pipe(Effect.flip);
           assert.include(error.detail, "incomplete setup");
         }).pipe(Effect.provide(OverrideTestLayer)),
+    );
+
+    it.effect("copies the untracked files .worktreeinclude names into a new worktree", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const pathService = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const worktreeAt = (name: string) =>
+          Effect.map(makeTmpDir("git-worktrees-"), (dir) => pathService.join(dir, name));
+
+        yield* writeTextFile(cwd, ".gitignore", ".env\nconfig/local.json\n*.log\n");
+        yield* writeTextFile(cwd, "tracked.txt", "from the branch\n");
+        yield* git(cwd, ["add", ".gitignore", "tracked.txt"]);
+        yield* git(cwd, ["commit", "-m", "ignore local files"]);
+        yield* writeTextFile(cwd, ".env", "SECRET=1\n");
+        yield* writeTextFile(cwd, "config/local.json", "{}\n");
+        yield* writeTextFile(cwd, "packages/api/.env", "API=1\n");
+        yield* writeTextFile(cwd, "debug.log", "noise\n");
+        // Untracked but not ignored: never copied, or a commit in the worktree could pick it up.
+        yield* writeTextFile(cwd, "notes.env", "draft\n");
+
+        // Without the file nothing ignored is copied.
+        const plain = yield* worktreeAt("plain");
+        yield* driver.createWorktree({
+          cwd,
+          path: plain,
+          refName: initialBranch,
+          newRefName: "feature/plain",
+        });
+        assert.isFalse(yield* fileSystem.exists(pathService.join(plain, ".env")));
+
+        yield* writeTextFile(
+          cwd,
+          ".worktreeinclude",
+          ".env\n*.env\n/config/local.json\ntracked.txt\n",
+        );
+        // Untracked in the source but tracked by the new branch: the branch's copy stays.
+        yield* git(cwd, ["rm", "--cached", "-q", "tracked.txt"]);
+        yield* writeTextFile(cwd, "tracked.txt", "local edit\n");
+        const included = yield* worktreeAt("included");
+        yield* driver.createWorktree({
+          cwd,
+          path: included,
+          refName: initialBranch,
+          newRefName: "feature/included",
+        });
+        const read = (relative: string) =>
+          fileSystem.readFileString(pathService.join(included, relative));
+        assert.equal(yield* read(".env"), "SECRET=1\n");
+        assert.equal(yield* read("config/local.json"), "{}\n");
+        assert.equal(yield* read("packages/api/.env"), "API=1\n");
+        assert.isFalse(yield* fileSystem.exists(pathService.join(included, "debug.log")));
+        assert.equal(yield* read("tracked.txt"), "from the branch\n");
+        assert.isFalse(yield* fileSystem.exists(pathService.join(included, "notes.env")));
+
+        // A pull request from another repository gets none of them.
+        const fork = yield* worktreeAt("fork");
+        yield* driver.createWorktree({
+          cwd,
+          path: fork,
+          refName: initialBranch,
+          newRefName: "feature/fork",
+          copyDeclaredIncludes: false,
+        });
+        assert.isFalse(yield* fileSystem.exists(pathService.join(fork, ".env")));
+      }),
     );
 
     it.effect("copies dependency install directories when deprecated hydration is requested", () =>

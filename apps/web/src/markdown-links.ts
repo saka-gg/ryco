@@ -1,26 +1,19 @@
-import { formatWorkspaceRelativePath } from "./filePathDisplay";
-import { resolvePathLinkTarget, splitPathAndPosition } from "./terminal-links";
+import { resolveFileLinkReference } from "@ryco/client-runtime/state/files";
+import type { EnvironmentId, ProjectId, ProjectKind } from "@ryco/contracts";
+import {
+  checkoutRepositoryKey,
+  parseChangeRequestUrl,
+  repositoryKeysMatch,
+  type ChangeRequestUrlView,
+} from "@ryco/shared/git";
+import { isChatProject } from "@ryco/shared/projectKind";
 
-const WINDOWS_DRIVE_PATH_PATTERN = /^[A-Za-z]:[\\/]/;
-const WINDOWS_UNC_PATH_PATTERN = /^\\\\/;
-const EXTERNAL_SCHEME_PATTERN = /^([A-Za-z][A-Za-z0-9+.-]*):(.*)$/;
-const RELATIVE_PATH_PREFIX_PATTERN = /^(~\/|\.{1,2}\/)/;
-const RELATIVE_FILE_PATH_PATTERN = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+(?::\d+){0,2}$/;
-const RELATIVE_FILE_NAME_PATTERN = /^[A-Za-z0-9._-]+\.[A-Za-z0-9_-]+(?::\d+){0,2}$/;
-const POSITION_SUFFIX_PATTERN = /:\d+(?::\d+)?$/;
-const POSITION_ONLY_PATTERN = /^\d+(?::\d+)?$/;
-const POSIX_FILE_ROOT_PREFIXES = [
-  "/Users/",
-  "/home/",
-  "/tmp/",
-  "/var/",
-  "/etc/",
-  "/opt/",
-  "/mnt/",
-  "/Volumes/",
-  "/private/",
-  "/root/",
-] as const;
+import { formatWorkspaceRelativePath } from "./filePathDisplay";
+
+export {
+  resolveFileLinkTarget as resolveMarkdownFileLinkTarget,
+  rewriteMarkdownFileUriHref,
+} from "@ryco/client-runtime/state/files";
 
 export interface MarkdownFileLinkMeta {
   filePath: string;
@@ -29,129 +22,8 @@ export interface MarkdownFileLinkMeta {
   basename: string;
   line?: number;
   column?: number;
-}
-
-function safeDecode(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
-function stripSearchAndHash(value: string): { path: string; hash: string } {
-  const hashIndex = value.indexOf("#");
-  const pathWithSearch = hashIndex >= 0 ? value.slice(0, hashIndex) : value;
-  const rawHash = hashIndex >= 0 ? value.slice(hashIndex) : "";
-  const queryIndex = pathWithSearch.indexOf("?");
-  const path = queryIndex >= 0 ? pathWithSearch.slice(0, queryIndex) : pathWithSearch;
-  return { path, hash: rawHash };
-}
-
-function parseFileUrlHref(
-  href: string,
-  options?: { readonly decodePath?: boolean },
-): { path: string; hash: string } | null {
-  try {
-    const parsed = new URL(href);
-    if (parsed.protocol.toLowerCase() !== "file:") return null;
-
-    const rawPath = parsed.pathname;
-    if (rawPath.length === 0) return null;
-
-    // Browser URL parser encodes "C:/foo" as "/C:/foo" for file URLs.
-    const normalizedPath = /^\/[A-Za-z]:[\\/]/.test(rawPath) ? rawPath.slice(1) : rawPath;
-
-    return {
-      path: options?.decodePath === false ? normalizedPath : safeDecode(normalizedPath),
-      hash: parsed.hash,
-    };
-  } catch {
-    return null;
-  }
-}
-
-export function rewriteMarkdownFileUriHref(href: string | undefined): string | null {
-  if (!href) return null;
-  const target = parseFileUrlHref(href.trim(), { decodePath: false });
-  if (!target) return null;
-  return `${target.path}${target.hash}`;
-}
-
-function looksLikePosixFilesystemPath(path: string): boolean {
-  if (!path.startsWith("/")) return false;
-  if (POSIX_FILE_ROOT_PREFIXES.some((prefix) => path.startsWith(prefix))) return true;
-  if (POSITION_SUFFIX_PATTERN.test(path)) return true;
-  const basename = path.slice(path.lastIndexOf("/") + 1);
-  return /\.[A-Za-z0-9_-]+$/.test(basename);
-}
-
-function appendLineColumnFromHash(path: string, hash: string): string {
-  if (!hash || POSITION_SUFFIX_PATTERN.test(path)) return path;
-  const match = hash.match(/^#L(\d+)(?:C(\d+))?$/i);
-  if (!match?.[1]) return path;
-  const line = match[1];
-  const column = match[2];
-  return `${path}:${line}${column ? `:${column}` : ""}`;
-}
-
-function isLikelyPathCandidate(path: string): boolean {
-  if (WINDOWS_DRIVE_PATH_PATTERN.test(path) || WINDOWS_UNC_PATH_PATTERN.test(path)) return true;
-  if (RELATIVE_PATH_PREFIX_PATTERN.test(path)) return true;
-  if (path.startsWith("/")) return looksLikePosixFilesystemPath(path);
-  return RELATIVE_FILE_PATH_PATTERN.test(path) || RELATIVE_FILE_NAME_PATTERN.test(path);
-}
-
-function isRelativePath(path: string): boolean {
-  return (
-    RELATIVE_PATH_PREFIX_PATTERN.test(path) ||
-    (!path.startsWith("/") &&
-      !WINDOWS_DRIVE_PATH_PATTERN.test(path) &&
-      !WINDOWS_UNC_PATH_PATTERN.test(path))
-  );
-}
-
-function hasExternalScheme(path: string): boolean {
-  const match = path.match(EXTERNAL_SCHEME_PATTERN);
-  if (!match) return false;
-  const rest = match[2] ?? "";
-  if (rest.startsWith("//")) return true;
-  return !POSITION_ONLY_PATTERN.test(rest);
-}
-
-export function resolveMarkdownFileLinkTarget(
-  href: string | undefined,
-  cwd?: string,
-): string | null {
-  if (!href) return null;
-  const rawHref = href.trim();
-  if (rawHref.length === 0 || rawHref.startsWith("#")) return null;
-
-  const fileUrlTarget = rawHref.toLowerCase().startsWith("file:")
-    ? parseFileUrlHref(rawHref)
-    : null;
-  const source = fileUrlTarget ?? stripSearchAndHash(rawHref);
-  const decodedPath = fileUrlTarget ? source.path.trim() : safeDecode(source.path.trim());
-  const decodedHash = safeDecode(source.hash.trim());
-
-  if (decodedPath.length === 0) return null;
-  if (
-    !WINDOWS_DRIVE_PATH_PATTERN.test(decodedPath) &&
-    !WINDOWS_UNC_PATH_PATTERN.test(decodedPath) &&
-    hasExternalScheme(decodedPath)
-  ) {
-    return null;
-  }
-
-  if (!isLikelyPathCandidate(decodedPath)) return null;
-
-  const pathWithPosition = appendLineColumnFromHash(decodedPath, decodedHash);
-  if (!isRelativePath(pathWithPosition)) {
-    return pathWithPosition;
-  }
-
-  if (!cwd) return null;
-  return resolvePathLinkTarget(pathWithPosition, cwd);
+  /** The file inside the thread's workspace (`cwd`); null outside it or without a `cwd`. */
+  workspacePath: string | null;
 }
 
 function basenameOfPath(path: string): string {
@@ -159,26 +31,26 @@ function basenameOfPath(path: string): string {
   return separatorIndex >= 0 ? path.slice(separatorIndex + 1) : path;
 }
 
+/**
+ * `baseDirectory` is where relative links resolve (a rendered document's own
+ * folder); it defaults to `cwd`. The display path stays relative to `cwd`.
+ */
 export function resolveMarkdownFileLinkMeta(
   href: string | undefined,
   cwd?: string,
+  baseDirectory?: string,
 ): MarkdownFileLinkMeta | null {
-  const targetPath = resolveMarkdownFileLinkTarget(href, cwd);
-  if (!targetPath) return null;
-
-  const { path, line, column } = splitPathAndPosition(targetPath);
-  const parsedLine = line ? Number.parseInt(line, 10) : Number.NaN;
-  const parsedColumn = column ? Number.parseInt(column, 10) : Number.NaN;
-  const lineNumber = Number.isFinite(parsedLine) ? parsedLine : undefined;
-  const columnNumber = Number.isFinite(parsedColumn) ? parsedColumn : undefined;
+  const link = resolveFileLinkReference(href, { workspaceRoot: cwd, baseDirectory });
+  if (!link) return null;
 
   return {
-    filePath: path,
-    targetPath,
-    displayPath: formatWorkspaceRelativePath(targetPath, cwd),
-    basename: basenameOfPath(path),
-    ...(lineNumber !== undefined ? { line: lineNumber } : {}),
-    ...(columnNumber !== undefined ? { column: columnNumber } : {}),
+    filePath: link.filePath,
+    targetPath: link.targetPath,
+    displayPath: formatWorkspaceRelativePath(link.targetPath, cwd),
+    basename: basenameOfPath(link.filePath),
+    ...(link.line !== undefined ? { line: link.line } : {}),
+    ...(link.column !== undefined ? { column: link.column } : {}),
+    workspacePath: link.workspacePath,
   };
 }
 
@@ -198,4 +70,89 @@ export function resolveMarkdownThreadHref(
   } catch {
     return null;
   }
+}
+
+/**
+ * A plain primary click. Any modifier (a new tab, window or download) or
+ * another button keeps the browser's own handling of a link.
+ */
+export function isPlainLinkClick(event: {
+  readonly button: number;
+  readonly metaKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly shiftKey: boolean;
+  readonly altKey: boolean;
+}): boolean {
+  return event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
+}
+
+export interface MarkdownChangeRequestCheckoutProject {
+  readonly id: ProjectId;
+  readonly environmentId: EnvironmentId;
+  readonly kind?: ProjectKind | undefined;
+  readonly repositoryIdentity?:
+    | { readonly locator: { readonly remoteUrl: string } }
+    | null
+    | undefined;
+}
+
+export interface MarkdownChangeRequestCheckout {
+  readonly environmentId: EnvironmentId;
+  readonly projectId: ProjectId;
+  readonly number: number;
+  readonly tab?: ChangeRequestUrlView;
+}
+
+/**
+ * The checkout a pull request link in chat opens through: a project whose
+ * repository identity's remote matches the link's repository, on an
+ * environment that can be read now. It matches only the identity's remote
+ * (`upstream`, else `origin`, else the first by name), the one a number
+ * resolves in, so a fork's checkout never opens upstream's `#N` as its own.
+ * Order: the thread's own environment, then the primary one, then the order of
+ * `projects` (pass the sidebar's, whose first checkout the Pull requests page
+ * leads with). Null when the link is not one change request, points at one
+ * comment (only the host scrolls to it), or no available project holds its
+ * repository.
+ */
+export function resolveMarkdownChangeRequestCheckout(input: {
+  readonly href: string | undefined;
+  readonly projects: ReadonlyArray<MarkdownChangeRequestCheckoutProject>;
+  readonly threadEnvironmentId: EnvironmentId | undefined;
+  readonly primaryEnvironmentId: EnvironmentId | null;
+  /** Connected (its live snapshot is in) and, when hosted, admitted for reads. */
+  readonly isEnvironmentAvailable: (environmentId: EnvironmentId) => boolean;
+}): MarkdownChangeRequestCheckout | null {
+  if (!input.href) return null;
+  const link = parseChangeRequestUrl(input.href);
+  if (link === null || link.comment) return null;
+  const availability = new Map<EnvironmentId, boolean>();
+  const isAvailable = (environmentId: EnvironmentId) => {
+    let available = availability.get(environmentId);
+    if (available === undefined) {
+      available = input.isEnvironmentAvailable(environmentId);
+      availability.set(environmentId, available);
+    }
+    return available;
+  };
+  const matches = input.projects.filter((project) => {
+    if (isChatProject(project)) return false;
+    const key = checkoutRepositoryKey(project.repositoryIdentity?.locator.remoteUrl);
+    return (
+      key !== null &&
+      repositoryKeysMatch(key, link.repositoryKey) &&
+      isAvailable(project.environmentId)
+    );
+  });
+  const project =
+    matches.find((candidate) => candidate.environmentId === input.threadEnvironmentId) ??
+    matches.find((candidate) => candidate.environmentId === input.primaryEnvironmentId) ??
+    matches[0];
+  if (project === undefined) return null;
+  return {
+    environmentId: project.environmentId,
+    projectId: project.id,
+    number: link.number,
+    ...(link.view === undefined ? {} : { tab: link.view }),
+  };
 }

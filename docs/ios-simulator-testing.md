@@ -22,12 +22,32 @@ and notification permission overrides are not offered by this drawer. Runtime-sp
 failures are displayed and can be retried. The drawer does not retain bundle IDs, locations
 or push payloads across target/thread/connection-generation changes.
 
+## Agents
+
+Agents apply the same settings with the `device_configure` tool and read an app's unified
+log (os_log, Logger, NSLog) and recent crash reports with `device_logs`; both work on iOS
+simulators attached to this node only. Crash reports are returned by file name, never by
+path, and `print`/stdout is not captured. Agent inputs (tap, swipe, type, press a button,
+scroll to an element, launch, open a URL) wait for the screen to settle and return a
+settled flag, whether the screen changed, and a compact text snapshot of the screen;
+`device_wait` waits for a labelled element or a still screen without sending input.
+
 ## Boundaries
 
-`DeviceTestingInput` travels through the existing owner-only `device.app` RPC and the
-shared client-runtime device facade. The backend validates before spawning commands,
-requires an explicit booted target, and keeps the selected Xcode environment. It never
-boots or attaches a simulator, changes boot ownership, starts a helper, or modifies
+From the drawer, `DeviceTestingInput` travels through the existing owner-only `device.app`
+RPC and the shared client-runtime device facade. The same input has a second path: an
+agent's `device_configure` call on the provider device gateway (loopback-only, bound to
+one thread and accepted only during its active turn). That path is not owner-only. With
+Agent Control off, Ryco adds no approval of its own there; the provider's native tool
+approvals apply (Claude asks before every MCP call except in full-access mode, and auto mode
+uses Claude's own classifier).
+While Agent Control holds the thread, the gateway hides the tool. A gateway call also
+attaches the device to the agent's thread and opens the pane, like the gateway's other
+device tools.
+
+Both paths share the backend, which validates before spawning commands, requires an
+explicit booted target, and keeps the selected Xcode environment. The testing action
+itself never boots a simulator, changes boot ownership, starts a helper, or modifies
 hosted authorization/reconnect policy. Screenshot, recording and accessibility paths
 remain independent. No Android, multi-host or web phone-tier changes are included.
 
@@ -124,3 +144,47 @@ fences when combining this change with Android work.
 Follow-up tests total **147 passing tests**. No full repository suite/build or live
 simulator lifecycle mutations were run for this bounded change. The original documented
 limitations on real app push delivery remain. No commit, push or PR was created.
+
+## Xcode 27 input
+
+Simulator input (pane taps, hardware buttons, agent device tools) travels one of two ways,
+chosen by the Mac's CoreSimulator version, not by the selected Xcode. CoreSimulator
+1155.4 and later (installed by Xcode 27, even when an older Xcode is selected) delivers
+input through the guest's `dtuhidd` service. Older CoreSimulators keep SimulatorKit's
+legacy Indigo messages. There is no fallback from `dtuhidd` to Indigo: on Xcode 27.0 the
+guest dropped Indigo button and key events while the send still reported success (Synara's
+finding; the Xcode 27.1 qualification in the helper's HEADER.md did not reproduce it), and an
+Indigo send cannot confirm delivery. Keystrokes are mapped through the simulator's own
+keyboard layout, so on a German simulator "z" types "y". The server
+logs the transport once (`[device] iOS Simulator input goes through dtuhid on this Xcode`).
+
+`dtuhidd` starts on demand, so the first input after a boot can wait up to 9 seconds. When
+input is not delivered, the error tells agents and the pane how much went out:
+
+- `... not delivered to the simulator: nothing was sent: ...` (for example "the simulator's
+  input service (dtuhidd) is still starting"): no event of that call left the helper. The
+  server has already retried it once; a caller may retry it too.
+- `... not delivered to the simulator: input may have been partially delivered; do not
+  replay: ...`: part of it went out. The server never replays it; look at the screen
+  before sending more input.
+- `... nothing was sent: ... cannot finish inside the input deadline`: the gesture or hold
+  is longer than the helper's 13-second budget per input. Send a shorter one. A gesture
+  that fits but was left too little time by dtuhidd's warm-up is reported as still
+  starting instead, and retried.
+
+Long text is typed in chunks of 120 characters, in order, with no other input to the
+device in between. A failure stops at the chunk that failed; the chunks before it were
+delivered. If that was not the first chunk, the error starts with "Typed the first N of M
+characters" and says not to replay the text whole: send only the part that is missing.
+
+To qualify a new Xcode or runtime, build and probe the helper, then run the smoke against a
+simulator created for the run. `--probe` must report `"hid": "ok"` and the expected
+`inputTransport`. The smoke checks that the home button, a tap and keystrokes reach the
+guest:
+
+```sh
+bun scripts/device-helper-smoke.ts --probe-only --cache-dir /tmp/helper-cache
+bun scripts/device-helper-smoke.ts --udid <udid of a shut-down simulator> --cache-dir /tmp/helper-cache
+```
+
+Details are in `apps/server/native/device-helper/HEADER.md` ("Input transports").

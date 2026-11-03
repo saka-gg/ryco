@@ -5,6 +5,7 @@
  */
 import { subscribeEnvironmentServerConfigs } from "@ryco/client-runtime/rpc";
 import { createNodeUpdateStore } from "@ryco/client-runtime/state/nodeUpdate";
+import { createNodeUpdateWiring } from "@ryco/client-runtime/updates";
 import type { EnvironmentId, ServerConfig } from "@ryco/contracts";
 
 import { readNodeServerConfig } from "../environments/nodeServerConfig";
@@ -13,7 +14,6 @@ import {
   subscribeEnvironmentConnections,
 } from "../environments/runtime";
 import { mayFollowNodeUpdate, subscribeNodeMethodPermissions } from "./nodeUpdatePermissions";
-import { createNodeUpdateWiring } from "./nodeUpdateWiring";
 
 export const nodeUpdateStore = createNodeUpdateStore();
 

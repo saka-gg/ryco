@@ -24,10 +24,9 @@ import {
   buildIssueContentTitlePrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
-  buildThreadPriorityPrompt,
   buildWorkspaceChangesSummaryPrompt,
 } from "./TextGenerationPrompts.ts";
-import { type TextGenerationShape, validateRankInboxThreadsResult } from "./TextGeneration.ts";
+import type { TextGenerationShape } from "./TextGeneration.ts";
 import {
   extractJsonObject,
   sanitizeCommitSubject,
@@ -48,6 +47,7 @@ import {
   makeOpenCodeServerOwner,
   type OpenCodeServerOwner,
 } from "../provider/OpenCodeServerOwner.ts";
+import type { AgentProcessPriorityShape } from "../provider/agentProcessPriority.ts";
 
 /**
  * Titles, branch names and workspace change summaries are short; each has a fallback (the
@@ -102,14 +102,20 @@ function getOpenCodeTextResponse(parts: ReadonlyArray<unknown> | undefined): str
 export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration")(function* (
   openCodeSettings: OpenCodeSettings,
   environment: NodeJS.ProcessEnv = process.env,
-  options?: { readonly serverOwner?: OpenCodeServerOwner },
+  options?: {
+    readonly serverOwner?: OpenCodeServerOwner;
+    /** Lowers a server this text generation starts itself; undefined spawns it unchanged. */
+    readonly processPriority?: AgentProcessPriorityShape | undefined;
+  },
 ) {
   const serverConfig = yield* ServerConfig;
   const openCodeRuntime = yield* OpenCodeRuntime;
   const serverOwner =
     options?.serverOwner ??
     (openCodeSettings.serverUrl.trim().length === 0
-      ? yield* makeOpenCodeServerOwner(openCodeSettings, environment)
+      ? yield* makeOpenCodeServerOwner(openCodeSettings, environment, {
+          processPriority: options?.processPriority,
+        })
       : undefined);
 
   const runOpenCodeJson = Effect.fn("runOpenCodeJson")(function* <S extends Schema.Top>(input: {
@@ -119,7 +125,6 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
       | "generateBranchName"
       | "generateThreadTitle"
       | "generateIssueContent"
-      | "rankInboxThreads"
       | "summarizeWorkspaceChanges";
     readonly cwd: string;
     readonly prompt: string;
@@ -492,22 +497,6 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
       }),
     );
 
-  const rankInboxThreads: TextGenerationShape["rankInboxThreads"] = Effect.fn(
-    "OpenCodeTextGeneration.rankInboxThreads",
-  )(function* (input) {
-    const { prompt, outputSchema } = buildThreadPriorityPrompt({
-      serializedCandidates: input.chunk.serializedCandidates,
-    });
-    const generated = yield* runOpenCodeJson({
-      operation: "rankInboxThreads",
-      cwd: input.cwd,
-      prompt,
-      outputSchemaJson: outputSchema,
-      modelSelection: input.modelSelection,
-    });
-    return yield* validateRankInboxThreadsResult(input, generated.rankings);
-  });
-
   const summarizeWorkspaceChanges: TextGenerationShape["summarizeWorkspaceChanges"] = Effect.fn(
     "OpenCodeTextGeneration.summarizeWorkspaceChanges",
   )(function* (input) {
@@ -524,12 +513,14 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
   });
 
   return {
+    // Every session denies every tool call. Plugins from the user's OpenCode configuration still
+    // load (the side chat's stricter isolation refuses OpenCode for that reason).
+    gitWritingToolFree: true,
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
     generateIssueContent,
-    rankInboxThreads,
     answerSideQuestion,
     summarizeWorkspaceChanges,
   } satisfies TextGenerationShape;

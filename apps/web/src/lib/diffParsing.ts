@@ -1,6 +1,7 @@
 import { parsePatchFiles, type FileDiffMetadata } from "@pierre/diffs";
+import { gitDiffPaths } from "@ryco/shared/gitDiffPaths";
+
 import { buildPatchCacheKey } from "./diffRendering";
-import { gitDiffPaths } from "./gitDiffPaths";
 
 /** Git hunk lines always have a context/addition/deletion prefix. */
 export function splitPatchIntoFileSegments(patch: string): string[] {

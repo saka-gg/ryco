@@ -12,7 +12,6 @@ import {
   type MessageId,
   type OrchestrationStubbedShellSnapshot,
   type OrchestrationShellStreamEvent,
-  type OrchestrationShellThreadPrioritiesItem,
   type ServerConfig,
   type ServerSettingsPatch,
   type TerminalEvent,
@@ -20,6 +19,7 @@ import {
 } from "@ryco/contracts";
 import { Throttler } from "@tanstack/react-pacer";
 import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { createTerminalEventAdmission } from "@ryco/client-runtime/state/terminal";
 import {
   createKnownEnvironment,
   getKnownEnvironmentWsBaseUrl,
@@ -32,15 +32,17 @@ import {
   createDeviceFrameSource,
   isSavedEnvironmentAwaitingRepair,
   isSavedEnvironmentCredentialRejection,
+  isSavedEnvironmentSwitchedOff,
   type ReleaseThreadDetailSubscription,
   type ThreadDetailSubscriptionRetainOptions,
   awaitSavedEnvironmentConfig,
+  placeSavedEnvironmentRecord,
   SAVED_ENVIRONMENT_INITIAL_CONFIG_TIMEOUT_MS,
   SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE,
   SavedEnvironmentConnectionCancelledError,
   SavedEnvironmentCredentialError,
+  SavedEnvironmentSwitchedOffError,
   savedEnvironmentRequiresAuthState,
-  createDesktopSshOwnerRepairTracker,
   withSavedEnvironmentTimeout,
 } from "@ryco/client-runtime/connection";
 export {
@@ -67,8 +69,10 @@ import {
 } from "../remote/api";
 import { resolveRemotePairingTarget } from "../remote/target";
 import {
+  getLinkedDirectRecord,
   getSavedEnvironmentRecord,
   hasSavedEnvironmentRegistryHydrated,
+  listLinkedDirectRecords,
   listSavedEnvironmentRecords,
   persistSavedEnvironmentRecord,
   readSavedEnvironmentBearerToken,
@@ -81,8 +85,16 @@ import {
   writeSavedEnvironmentBearerToken,
 } from "./catalog";
 import { createEnvironmentConnection, type EnvironmentConnection } from "./connection";
+import type {
+  DesktopSshConnectOptions,
+  IssuedDesktopSshBearerSession,
+  PreparedSavedEnvironmentRecord,
+} from "./desktopSshConnection";
 import { useStore, selectEnvironmentState } from "~/store";
-import { createEnvironmentEventBatcher } from "@ryco/client-runtime/state/threads";
+import {
+  createEnvironmentEventBatcher,
+  type ThreadNotificationSource,
+} from "@ryco/client-runtime/state/threads";
 import {
   hasUnsentThreadWork,
   isThreadNonIdle,
@@ -122,7 +134,10 @@ import {
   type HostedConnectionFence,
 } from "./hostedEnvironmentConnection";
 import { webFrameScheduler, webSocket } from "../../platform";
+import { directNodeBrowserFrames } from "./nodeBrowserFrames";
 import { DesktopWorkspaceIpcSocketFactory } from "../../platform/desktopWorkspaceSocket";
+/** Desktop-only, and off the boot path: loaded by the first Hub machine connection. */
+const loadDesktopHubLinkedRoutes = () => import("../../platform/desktopHubLinkedRoutes");
 
 function isSavedEnvironmentConnectionCancelledError(
   error: unknown,
@@ -383,7 +398,7 @@ function isSshHttpAuthError(error: unknown, status: number): boolean {
   return readSshHttpErrorStatus(error) === status;
 }
 
-function isDesktopSshTargetEqual(
+export function isDesktopSshTargetEqual(
   left: DesktopSshEnvironmentTarget | undefined,
   right: DesktopSshEnvironmentTarget | undefined,
 ): boolean {
@@ -430,7 +445,7 @@ function snapshotSavedEnvironmentRegistry(
   return new Map(
     environmentIds.map((environmentId) => [
       environmentId,
-      getSavedEnvironmentRecord(environmentId) ?? null,
+      getSavedEnvironmentRecord(environmentId) ?? getLinkedDirectRecord(environmentId) ?? null,
     ]),
   );
 }
@@ -438,24 +453,25 @@ function snapshotSavedEnvironmentRegistry(
 async function persistSavedEnvironmentRegistryRollback(
   snapshot: SavedEnvironmentRegistrySnapshot,
 ): Promise<void> {
-  const byId = buildSavedEnvironmentRegistryById(listSavedEnvironmentRecords());
+  // Both lists are stored together: rolling back one record must not drop
+  // the Hub-linked routes from storage.
+  let next = {
+    byId: buildSavedEnvironmentRegistryById(listSavedEnvironmentRecords()),
+    linkedById: buildSavedEnvironmentRegistryById(listLinkedDirectRecords()),
+  };
   for (const [environmentId, record] of snapshot) {
-    if (record) {
-      byId[environmentId] = record;
-      continue;
-    }
-    delete byId[environmentId];
+    delete next.byId[environmentId];
+    delete next.linkedById[environmentId];
+    if (record) next = placeSavedEnvironmentRecord(next, record);
   }
-  const records = Object.values(byId);
+  const records = [...Object.values(next.byId), ...Object.values(next.linkedById)];
   await ensureLocalApi().persistence.setSavedEnvironmentRegistry(
     records.map((entry) => toPersistedSavedEnvironmentRecord(entry)),
   );
-  useSavedEnvironmentRegistryStore.setState({
-    byId,
-  });
+  useSavedEnvironmentRegistryStore.setState(next);
 }
 
-async function resolveDesktopSshEnvironmentBootstrap(
+export async function resolveDesktopSshEnvironmentBootstrap(
   target: DesktopSshEnvironmentTarget,
   options?: DesktopSshEnsureEnvironmentOptions,
 ): Promise<DesktopSshEnvironmentBootstrap> {
@@ -475,11 +491,11 @@ function getDesktopSshBridge() {
   return desktopBridge;
 }
 
-async function fetchDesktopSshEnvironmentDescriptor(httpBaseUrl: string) {
+export async function fetchDesktopSshEnvironmentDescriptor(httpBaseUrl: string) {
   return await getDesktopSshBridge().fetchSshEnvironmentDescriptor(httpBaseUrl);
 }
 
-async function bootstrapDesktopSshBearerSession(httpBaseUrl: string, credential: string) {
+export async function bootstrapDesktopSshBearerSession(httpBaseUrl: string, credential: string) {
   return await getDesktopSshBridge().bootstrapSshBearerSession(httpBaseUrl, credential);
 }
 
@@ -498,18 +514,14 @@ async function resolveDesktopSshWebSocketConnectionUrl(
   return url.toString();
 }
 
-interface PreparedSavedEnvironmentRecord {
-  readonly record: SavedEnvironmentRecord;
-  readonly pairingToken: string | null;
-  readonly pairingRole: AuthSessionRole | null;
-  readonly remotePort: number | null;
-  readonly remoteServerKind: "external" | "managed" | null;
-}
+/** Desktop-only, and off the boot path: loaded by an SSH machine's first connect. */
+let loadedDesktopSshConnection: typeof import("./desktopSshConnection") | null = null;
+const loadDesktopSshConnection = async () =>
+  (loadedDesktopSshConnection ??= await import("./desktopSshConnection"));
 
 /**
  * Stops a connect attempt a disconnect, a removal or a new pairing cancelled
- * before its next side effect: opening a tunnel, persisting a record or a
- * credential. Those belong to whoever cancelled it now.
+ * before its next side effect. Those belong to whoever cancelled it now.
  */
 function throwIfConnectionCancelled(
   environmentId: EnvironmentId,
@@ -520,8 +532,7 @@ function throwIfConnectionCancelled(
 
 async function prepareSavedEnvironmentRecordForConnection(
   record: SavedEnvironmentRecord,
-  options?: DesktopSshEnsureEnvironmentOptions,
-  isCancelled?: () => boolean,
+  options?: DesktopSshConnectOptions,
 ): Promise<PreparedSavedEnvironmentRecord> {
   if (!record.desktopSsh) {
     return {
@@ -532,278 +543,15 @@ async function prepareSavedEnvironmentRecordForConnection(
       remoteServerKind: null,
     };
   }
-
-  throwIfConnectionCancelled(record.environmentId, isCancelled);
-  const bootstrap = await resolveDesktopSshEnvironmentBootstrap(record.desktopSsh, options);
-  throwIfConnectionCancelled(record.environmentId, isCancelled);
-  const nextRecord: SavedEnvironmentRecord = {
-    ...record,
-    httpBaseUrl: bootstrap.httpBaseUrl,
-    wsBaseUrl: bootstrap.wsBaseUrl,
-    desktopSsh: bootstrap.target,
-  };
-
-  if (
-    nextRecord.httpBaseUrl !== record.httpBaseUrl ||
-    nextRecord.wsBaseUrl !== record.wsBaseUrl ||
-    !isDesktopSshTargetEqual(nextRecord.desktopSsh, record.desktopSsh)
-  ) {
-    await persistSavedEnvironmentRecord(nextRecord);
-    useSavedEnvironmentRegistryStore.getState().upsert(nextRecord);
-  }
-
-  return {
-    record: nextRecord,
-    pairingToken: bootstrap.pairingToken,
-    pairingRole: bootstrap.pairingToken === null ? null : (bootstrap.pairingRole ?? null),
-    remotePort: bootstrap.remotePort ?? null,
-    remoteServerKind: bootstrap.remoteServerKind ?? null,
-  };
-}
-
-interface IssuedDesktopSshBearer {
-  readonly record: SavedEnvironmentRecord;
-  readonly bearerToken: string;
-  readonly role: AuthSessionRole | null;
-}
-
-/**
- * The owner re-pair state of each Desktop SSH environment since the app
- * started; see `shouldRepairDesktopSshAsOwner`. A remote CLI that cannot
- * mint owner credentials is asked again once the node reports another Ryco
- * version; a failed attempt then too, or once its retry delay has passed,
- * which re-pairs a connected node in place.
- */
-const desktopSshOwnerRepairs = createDesktopSshOwnerRepairTracker({
-  onRetryDue: (environmentId) => {
-    const connection = getEnvironmentSupervisor().read(environmentId);
-    // Without a connection, the environment's next connect asks again.
-    if (connection) {
-      repairConnectedDesktopSshAsOwner(
-        environmentId,
-        connection,
-        reportedDesktopSshServerVersion(environmentId),
-      );
-    }
-  },
-});
-
-/** The Ryco version the environment's node last reported, or null. */
-function reportedDesktopSshServerVersion(environmentId: EnvironmentId): string | null {
-  return (
-    useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.descriptor?.serverVersion ??
-    null
-  );
-}
-
-/**
- * Records the role a Desktop SSH pairing, which asks for owner first, got:
- * a client bearer means the remote CLI cannot mint owner credentials on the
- * Ryco version the node reports now.
- */
-async function recordDesktopSshPairedRole(
-  record: SavedEnvironmentRecord,
-  role: AuthSessionRole | null,
-  /** The node's version, when already in hand; otherwise it is read over the tunnel. */
-  knownServerVersion?: string,
-): Promise<void> {
-  if (role !== "client") {
-    desktopSshOwnerRepairs.record(record.environmentId, undefined);
-    return;
-  }
-  const serverVersion =
-    knownServerVersion ??
-    (await fetchDesktopSshEnvironmentDescriptor(record.httpBaseUrl).then(
-      (descriptor) => descriptor.serverVersion ?? null,
-      () => null,
-    ));
-  desktopSshOwnerRepairs.record(record.environmentId, { kind: "unsupported", serverVersion });
-}
-
-/**
- * Runs one owner re-pair of a Desktop SSH environment; see
- * `DesktopSshOwnerRepairTracker.run`. Resolves null, and changes no
- * credential, when it fails: an SSH hiccup, a busy node or a refused redeem
- * says nothing about the remote CLI, so the client bearer stays and the retry
- * asks again. A cancelled one rethrows its
- * {@link SavedEnvironmentConnectionCancelledError}.
- */
-async function runDesktopSshOwnerRepair(
-  environmentId: EnvironmentId,
-  /** The version the node reported when the re-pair was decided. */
-  serverVersion: string | null,
-  repair: () => Promise<IssuedDesktopSshBearer | null>,
-): Promise<IssuedDesktopSshBearer | null> {
-  return await desktopSshOwnerRepairs
-    .run(environmentId, serverVersion, repair)
-    .catch((error: unknown) => {
-      if (isSavedEnvironmentConnectionCancelledError(error)) throw error;
-      return null;
-    });
-}
-
-/** Redeems a pairing token minted through the tunnel and persists the bearer. */
-async function redeemDesktopSshPairingToken(
-  prepared: PreparedSavedEnvironmentRecord & { readonly pairingToken: string },
-  isCancelled?: () => boolean,
-): Promise<IssuedDesktopSshBearer> {
-  const bearerSession = await bootstrapDesktopSshBearerSession(
-    prepared.record.httpBaseUrl,
-    prepared.pairingToken,
-  ).catch((error) => {
-    const detail = [
-      `local ${prepared.record.httpBaseUrl}`,
-      `remote port ${prepared.remotePort ?? "unknown"}`,
-      prepared.remoteServerKind ? `remote server ${prepared.remoteServerKind}` : null,
-    ]
-      .filter(Boolean)
-      .join(", ");
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`${message} (${detail})`);
-  });
-  // A cancelled attempt's credential would outlive the disconnect that
-  // dropped the environment's, or replace a newer pairing's.
-  throwIfConnectionCancelled(prepared.record.environmentId, isCancelled);
-  const didPersistBearerToken = await writeSavedEnvironmentBearerToken(
-    prepared.record.environmentId,
-    bearerSession.sessionToken,
-  );
-  if (!didPersistBearerToken) {
-    throw new Error("Unable to persist saved environment credentials.");
-  }
-
-  return {
-    record: prepared.record,
-    bearerToken: bearerSession.sessionToken,
-    role: bearerSession.role ?? null,
-  };
+  const { prepareDesktopSshRecordForConnection } = await loadDesktopSshConnection();
+  return await prepareDesktopSshRecordForConnection(record, record.desktopSsh, options);
 }
 
 async function issueDesktopSshBearerSession(
   record: SavedEnvironmentRecord,
   isCancelled?: () => boolean,
-): Promise<IssuedDesktopSshBearer> {
-  const registrySnapshot = snapshotSavedEnvironmentRegistry([record.environmentId]);
-  const prepared = await prepareSavedEnvironmentRecordForConnection(
-    record,
-    { issuePairingToken: true },
-    isCancelled,
-  );
-  const pairingToken = prepared.pairingToken;
-  if (!pairingToken) {
-    await persistSavedEnvironmentRegistryRollback(registrySnapshot);
-    throw new Error("Desktop SSH launch did not return a pairing token.");
-  }
-
-  const issued = await redeemDesktopSshPairingToken(
-    { ...prepared, pairingToken },
-    isCancelled,
-  ).catch(async (error: unknown) => {
-    // Whoever cancelled the attempt owns the registry now: rolling back would
-    // bring a removed environment back.
-    if (!isSavedEnvironmentConnectionCancelledError(error)) {
-      await persistSavedEnvironmentRegistryRollback(registrySnapshot);
-    }
-    throw error;
-  });
-  // The pairing script asks for owner first: a client bearer means the remote
-  // CLI cannot mint owner credentials yet.
-  await recordDesktopSshPairedRole(issued.record, issued.role);
-  return issued;
-}
-
-/**
- * Re-pairs a Desktop SSH environment that holds a client bearer as owner, over
- * the tunnel it already has, and records what came of it. The owner bearer is
- * persisted before the client session it replaces is revoked. Returns null,
- * and changes no credential, when the remote CLI cannot mint owner credentials
- * yet; once `isCancelled`, it stops before its next side effect and throws
- * {@link SavedEnvironmentConnectionCancelledError}. Run it through
- * {@link runDesktopSshOwnerRepair}.
- */
-async function repairDesktopSshBearerAsOwner(
-  record: SavedEnvironmentRecord,
-  replacedSession: AuthSessionState,
-  isCancelled: () => boolean,
-): Promise<IssuedDesktopSshBearer | null> {
-  const prepared = await prepareSavedEnvironmentRecordForConnection(
-    record,
-    { issuePairingToken: true, requireOwnerPairing: true },
-    isCancelled,
-  );
-  const pairingToken = prepared.pairingToken;
-  if (!pairingToken || prepared.pairingRole !== "owner") {
-    await recordDesktopSshPairedRole(prepared.record, "client");
-    return null;
-  }
-
-  const issued = await redeemDesktopSshPairingToken({ ...prepared, pairingToken }, isCancelled);
-  await recordDesktopSshPairedRole(issued.record, issued.role);
-  const revoke = window.desktopBridge?.revokeSshClientSession;
-  if (
-    issued.role === "owner" &&
-    replacedSession.sessionId !== undefined &&
-    revoke &&
-    !isCancelled()
-  ) {
-    // Best effort: a client session left behind only lingers until it expires.
-    await revoke(issued.record.httpBaseUrl, issued.bearerToken, replacedSession.sessionId).catch(
-      NOOP,
-    );
-  }
-  return issued;
-}
-
-/**
- * A connected Desktop SSH node still on a client session re-pairs as owner in
- * place when it may now mint owner credentials (see
- * `shouldRepairDesktopSshAsOwner`): when its socket (re)connects, since
- * updating Ryco there restarts its server and the socket reconnects on its
- * own, on the bearer it has, and when a failed re-pair's retry is due, since a
- * healthy socket never reconnects. The connection then reconnects on the owner
- * bearer.
- */
-function repairConnectedDesktopSshAsOwner(
-  environmentId: EnvironmentId,
-  connection: EnvironmentConnection,
-  serverVersion: string | null,
-): void {
-  const isCurrent = () => getEnvironmentSupervisor().read(environmentId) === connection;
-  if (
-    !isCurrent() ||
-    !desktopSshOwnerRepairs.shouldRepair(environmentId, {
-      sessionRole: useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.role,
-      bearerIssuedThisConnect: false,
-      serverVersion,
-    })
-  ) {
-    return;
-  }
-  const isCancelled = () => !isCurrent();
-  void (async () => {
-    const repaired = await runDesktopSshOwnerRepair(environmentId, serverVersion, async () => {
-      const record = getSavedEnvironmentRecord(environmentId);
-      const bearerToken = await readSavedEnvironmentBearerToken(environmentId);
-      throwIfConnectionCancelled(environmentId, isCancelled);
-      if (!record?.desktopSsh || !bearerToken) return null;
-      const session = await readSavedEnvironmentSession(record, bearerToken);
-      throwIfConnectionCancelled(environmentId, isCancelled);
-      // A rejected bearer is the socket's to report.
-      if (session === null) return null;
-      if (session.role !== "client") {
-        await recordDesktopSshPairedRole(record, session.role ?? null);
-        return null;
-      }
-      return await repairDesktopSshBearerAsOwner(record, session, isCancelled);
-    });
-    if (repaired && !isCancelled()) await connection.reconnect();
-  })().catch((error: unknown) => {
-    if (isSavedEnvironmentConnectionCancelledError(error)) return;
-    console.warn("Desktop SSH owner re-pair of a connected environment failed", {
-      environmentId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  });
+): Promise<IssuedDesktopSshBearerSession> {
+  return await (await loadDesktopSshConnection()).issueDesktopSshBearerSession(record, isCancelled);
 }
 
 function setRuntimeConnecting(environmentId: EnvironmentId) {
@@ -878,16 +626,18 @@ function markSavedEnvironmentCredentialRejected(
   }, 0);
 }
 
-export function shouldApplyTerminalEvent(input: {
-  serverThreadArchivedAt: string | null | undefined;
-  hasDraftThread: boolean;
-}): boolean {
-  if (input.serverThreadArchivedAt !== undefined) {
-    return input.serverThreadArchivedAt === null;
-  }
-
-  return input.hasDraftThread;
-}
+/** Web's binding of the shared terminal-event admission path. */
+const admitTerminalEvent = createTerminalEventAdmission({
+  // The shell entry, stub or full: an archived stub is still a known, archived thread.
+  readServerThreadArchivedAt: (threadRef) =>
+    selectEnvironmentState(useStore.getState(), threadRef.environmentId).threadShellById[
+      threadRef.threadId
+    ]?.archivedAt,
+  hasDraftThread: (threadRef) =>
+    useComposerDraftStore.getState().getDraftThreadByRef(threadRef) !== null,
+  applyTerminalEvent: (threadRef, event) =>
+    useTerminalStateStore.getState().applyTerminalEvent(threadRef, event),
+});
 
 function applyRecoveredEventBatch(
   events: ReadonlyArray<OrchestrationEvent>,
@@ -1025,6 +775,8 @@ function createEnvironmentConnectionHandlers(
       ? {
           readShellResumeSequence: (environmentId: EnvironmentId) =>
             getEnvironmentSupervisor().readShellProjectionSequence(environmentId),
+          skipShellEvent: (sequence: number, environmentId: EnvironmentId) =>
+            getEnvironmentSupervisor().skipShellEvent(sequence, environmentId),
           onShellResumed: (environmentId: EnvironmentId) => {
             completeQueryRefresh(environmentId);
           },
@@ -1046,13 +798,6 @@ function createEnvironmentConnectionHandlers(
       if (!acceptsEvent()) return;
       getEnvironmentSupervisor().applyShellEvent(event, environmentId);
     },
-    applyThreadPriorities: (
-      item: OrchestrationShellThreadPrioritiesItem,
-      environmentId: EnvironmentId,
-    ) => {
-      if (!acceptsEvent()) return;
-      getEnvironmentSupervisor().applyThreadPriorities(item, environmentId);
-    },
     syncShellSnapshot: (
       snapshot: OrchestrationStubbedShellSnapshot,
       environmentId: EnvironmentId,
@@ -1071,21 +816,7 @@ function createEnvironmentConnectionHandlers(
     },
     applyTerminalEvent: (event: TerminalEvent, environmentId: EnvironmentId) => {
       if (!acceptsEvent()) return;
-      const threadRef = scopeThreadRef(environmentId, ThreadId.make(event.threadId));
-      // The shell entry, stub or full: an archived stub is still a known, archived thread.
-      const serverThread = selectEnvironmentState(useStore.getState(), environmentId)
-        .threadShellById[threadRef.threadId];
-      const hasDraftThread =
-        useComposerDraftStore.getState().getDraftThreadByRef(threadRef) !== null;
-      if (
-        !shouldApplyTerminalEvent({
-          serverThreadArchivedAt: serverThread?.archivedAt,
-          hasDraftThread,
-        })
-      ) {
-        return;
-      }
-      useTerminalStateStore.getState().applyTerminalEvent(threadRef, event);
+      admitTerminalEvent(event, environmentId);
     },
   };
 }
@@ -1101,7 +832,7 @@ function createPrimaryEnvironmentClient(
   }
   const connectionLabel = knownEnvironment?.label ?? null;
   const authenticatedSocketUrl = async (
-    pathname: "/ws" | "/ws/device" | "/ws/device-frames",
+    pathname: "/ws" | "/ws/device" | "/ws/device-frames" | "/ws/node-browser-frames",
     signal?: AbortSignal,
   ) => {
     const issued = await issuePrimaryWebSocketToken(signal);
@@ -1146,13 +877,14 @@ function createPrimaryEnvironmentClient(
           }),
       },
     ),
+    { openNodeBrowserFrameSource: directNodeBrowserFrames(webSocket, authenticatedSocketUrl) },
   );
 }
 
 async function resolveSavedEnvironmentSocketUrl(
   environmentId: EnvironmentId,
   bearerToken: string,
-  pathname: "/ws" | "/ws/device" | "/ws/device-frames",
+  pathname: "/ws" | "/ws/device" | "/ws/device-frames" | "/ws/node-browser-frames",
   signal?: AbortSignal,
 ): Promise<string> {
   const saved = getSavedEnvironmentRecord(environmentId);
@@ -1229,7 +961,7 @@ function createSavedEnvironmentClient(
 ): WsRpcClient {
   useSavedEnvironmentRuntimeStore.getState().ensure(environmentId);
   const socketUrl = async (
-    pathname: "/ws" | "/ws/device" | "/ws/device-frames",
+    pathname: "/ws" | "/ws/device" | "/ws/device-frames" | "/ws/node-browser-frames",
     signal?: AbortSignal,
   ) =>
     resolveSavedEnvironmentSocketUrl(
@@ -1318,6 +1050,7 @@ function createSavedEnvironmentClient(
           }),
       },
     ),
+    { openNodeBrowserFrameSource: directNodeBrowserFrames(webSocket, (path) => socketUrl(path)) },
   );
 }
 
@@ -1327,7 +1060,7 @@ function createSavedEnvironmentClient(
  * `authenticated: false`, so this is asked before anything waits on a socket,
  * whose ws-token request for that bearer would fail on every reconnect.
  */
-async function readSavedEnvironmentSession(
+export async function readSavedEnvironmentSession(
   record: SavedEnvironmentRecord,
   bearerToken: string,
   signal?: AbortSignal,
@@ -1552,17 +1285,49 @@ export async function connectDesktopWorkspaceEnvironment(input: {
   if (!bridge?.prepareDesktopWorkspaceTransport) {
     throw new Error("Desktop workspace transport is unavailable.");
   }
+  // Hub-linked direct access is a route of its Hub machine now, not a second
+  // environment: drop what an earlier run kept under the direct id.
+  void loadDesktopHubLinkedRoutes()
+    .then(({ foldHubLinkedDirectAccessOnce }) =>
+      foldHubLinkedDirectAccessOnce(forgetFoldedEnvironment),
+    )
+    .catch(() => undefined);
   const existing = getEnvironmentSupervisor().read(input.environmentId);
   if (existing) {
     await existing.ensureBootstrapped();
     return existing;
   }
-  const socketFactory = new DesktopWorkspaceIpcSocketFactory(input.environmentId, bridge);
+  // Each attempt walks the machine's routes: a linked direct address that
+  // answers as the machine, else the relay Desktop main owns
+  // (`docs/environment-routes.md`). The machine keeps its Hub id either way.
+  // The link's renewal goes over the relay; the module that makes it loads with it.
+  const renewDirectAccess = (force: boolean) => {
+    void import("../../platform/desktopHubLinkedDirectAccess")
+      .then(({ renewDesktopMachineDirectAccess }) =>
+        renewDesktopMachineDirectAccess(input, force ? { force: true } : undefined),
+      )
+      .catch(() => undefined);
+  };
+  const socketFactory = new DesktopWorkspaceIpcSocketFactory(input.environmentId, bridge, {
+    resolve: async (signal) =>
+      (await loadDesktopHubLinkedRoutes())
+        .createDesktopHubLinkedRoutes(input.environmentId, {
+          onRefused: () => renewDirectAccess(true),
+        })
+        .resolve(signal),
+  });
+  let stopRouteUpgrades: () => void = NOOP;
+  let transportDisposed = false;
   const transport = new HostedWsTransport(() => socketFactory.nextUrl(), {
     preserveSocketPath: true,
     webSocketConstructor: (url) => socketFactory.createSocket(url) as unknown as WebSocket,
     retryTransientErrors: false,
     ...socketFactory.lifecycleHandlers,
+    onDispose: () => {
+      transportDisposed = true;
+      stopRouteUpgrades();
+      socketFactory.lifecycleHandlers.onDispose?.();
+    },
     getConnectionLabel: () => input.label,
     getEnvironmentId: () => input.environmentId,
   });
@@ -1598,6 +1363,21 @@ export async function connectDesktopWorkspaceEnvironment(input: {
       ...createEnvironmentConnectionHandlers(),
     }),
   );
+  void loadDesktopHubLinkedRoutes()
+    .then(({ keepDesktopHubRouteUpgraded }) => {
+      if (transportDisposed) return;
+      stopRouteUpgrades = keepDesktopHubRouteUpgraded({
+        hubEnvironmentId: input.environmentId,
+        readActiveRouteKey: () => socketFactory.activeRoute,
+        mayUpgrade: () => socketFactory.mayUpgrade,
+        onRelay: () => renewDirectAccess(false),
+        reconnect: () => {
+          if (getEnvironmentSupervisor().read(input.environmentId) !== connection) return;
+          void connection.reconnect().catch(() => undefined);
+        },
+      });
+    })
+    .catch(() => undefined);
   try {
     await connection.ensureBootstrapped();
     return connection;
@@ -1689,11 +1469,9 @@ async function connectSavedEnvironment(
         );
       }
     }
-    const prepared = await prepareSavedEnvironmentRecordForConnection(
-      activeRecord,
-      undefined,
+    const prepared = await prepareSavedEnvironmentRecordForConnection(activeRecord, {
       isCancelled,
-    );
+    });
     activeRecord = prepared.record;
 
     const presentedBearerToken = bearerToken;
@@ -1722,22 +1500,14 @@ async function connectSavedEnvironment(
     }
     // A Desktop SSH node still on a client bearer re-pairs as owner. A failed
     // or unsupported re-pair keeps the client bearer it has.
-    const serverVersion = reportedDesktopSshServerVersion(activeRecord.environmentId);
-    if (
-      activeRecord.desktopSsh &&
-      desktopSshOwnerRepairs.shouldRepair(activeRecord.environmentId, {
-        sessionRole: session.role,
+    if (activeRecord.desktopSsh) {
+      const { repairDesktopSshAsOwnerOnConnect } = await loadDesktopSshConnection();
+      const repaired = await repairDesktopSshAsOwnerOnConnect({
+        record: activeRecord,
+        session,
         bearerIssuedThisConnect,
-        serverVersion,
-      })
-    ) {
-      const repairRecord = activeRecord;
-      const replacedSession = session;
-      const repaired = await runDesktopSshOwnerRepair(
-        repairRecord.environmentId,
-        serverVersion,
-        () => repairDesktopSshBearerAsOwner(repairRecord, replacedSession, isCancelled),
-      );
+        isCancelled,
+      });
       throwIfConnectionCancelled(activeRecord.environmentId, isCancelled);
       if (repaired) {
         activeRecord = repaired.record;
@@ -1857,11 +1627,16 @@ async function connectSavedEnvironment(
         // Each socket (re)connect opens with a snapshot: the node may have
         // been updated meanwhile.
         if (type === "snapshot" && activeRecord.desktopSsh) {
-          repairConnectedDesktopSshAsOwner(
-            activeRecord.environmentId,
-            connection,
-            config.environment.serverVersion ?? null,
-          );
+          const environmentId = activeRecord.environmentId;
+          void loadDesktopSshConnection()
+            .then(({ repairConnectedDesktopSshAsOwner }) =>
+              repairConnectedDesktopSshAsOwner(
+                environmentId,
+                connection,
+                config.environment.serverVersion ?? null,
+              ),
+            )
+            .catch(() => undefined);
         }
       },
       onWelcome: (payload) => {
@@ -1974,7 +1749,9 @@ function subscribeBrowserResumeReconnects(listener: (reason: string) => void): (
   const handlePageShow = (event: PageTransitionEvent) => {
     if (event.persisted || lastBrowserHiddenAt !== null) {
       lastBrowserHiddenAt = null;
-      listener("pageshow");
+      // A page restored from the back/forward cache reconnects at once; one only shown again
+      // waits for a heartbeat like a visibility change.
+      listener(event.persisted ? "pageshow-restored" : "pageshow");
     }
   };
 
@@ -2014,6 +1791,11 @@ export function readEnvironmentConnection(
   return getEnvironmentSupervisor().read(environmentId);
 }
 
+/** The accepted shells of this app's connections, which the thread notification feed reads. */
+export function readThreadNotificationSource(): ThreadNotificationSource {
+  return getEnvironmentSupervisor();
+}
+
 export function requireEnvironmentConnection(environmentId: EnvironmentId): EnvironmentConnection {
   const connection = readEnvironmentConnection(environmentId);
   if (!connection) {
@@ -2045,8 +1827,8 @@ export function getPrimaryEnvironmentConnection(): EnvironmentConnection {
   return createPrimaryEnvironmentConnection();
 }
 
-export async function disconnectSavedEnvironment(environmentId: EnvironmentId): Promise<void> {
-  const record = getSavedEnvironmentRecord(environmentId);
+/** This client's side of a disconnect: the attempt, the connection, the runtime state. */
+async function dropSavedEnvironmentConnection(environmentId: EnvironmentId): Promise<void> {
   getEnvironmentSupervisor().cancelPendingSavedEnvironmentConnection(environmentId);
   const connection = getEnvironmentSupervisor().read(environmentId);
 
@@ -2054,12 +1836,32 @@ export async function disconnectSavedEnvironment(environmentId: EnvironmentId): 
     await removeConnection(environmentId).catch(() => false);
   }
   setRuntimeDisconnected(environmentId);
+}
 
-  if (record?.desktopSsh && typeof window !== "undefined") {
-    await window.desktopBridge?.disconnectSshEnvironment(record.desktopSsh);
+/**
+ * Closes an SSH machine's tunnel; with no tunnel up, the desktop SSHes in to
+ * stop the remote server a dead tunnel left running. The SSH-issued bearer
+ * goes either way: the next connect issues a fresh one through the tunnel.
+ */
+async function disconnectDesktopSshEnvironment(
+  environmentId: EnvironmentId,
+  target: DesktopSshEnvironmentTarget,
+): Promise<void> {
+  if (typeof window === "undefined") return;
+  try {
+    await window.desktopBridge?.disconnectSshEnvironment(target);
+  } finally {
     await removeSavedEnvironmentBearerToken(environmentId);
     // The next connect pairs afresh, owner first, and records what it gets.
-    desktopSshOwnerRepairs.record(environmentId, undefined);
+    loadedDesktopSshConnection?.forgetDesktopSshOwnerRepair(environmentId);
+  }
+}
+
+export async function disconnectSavedEnvironment(environmentId: EnvironmentId): Promise<void> {
+  const record = getSavedEnvironmentRecord(environmentId);
+  await dropSavedEnvironmentConnection(environmentId);
+  if (record?.desktopSsh) {
+    await disconnectDesktopSshEnvironment(environmentId, record.desktopSsh);
   }
 }
 
@@ -2067,6 +1869,11 @@ export async function reconnectSavedEnvironment(environmentId: EnvironmentId): P
   const record = getSavedEnvironmentRecord(environmentId);
   if (!record) {
     throw new Error("Saved environment not found.");
+  }
+  // A switched-off machine stays off. Before anything shows it connecting:
+  // nothing would ever settle that state, and the caller would report success.
+  if (isSavedEnvironmentSwitchedOff(record)) {
+    throw new SavedEnvironmentSwitchedOffError(environmentId);
   }
 
   const connection = getEnvironmentSupervisor().read(environmentId);
@@ -2076,6 +1883,10 @@ export async function reconnectSavedEnvironment(environmentId: EnvironmentId): P
       await ensureSavedEnvironmentConnection(record);
       return;
     } catch (error) {
+      // Switched off while it connected: the caller learns it is not connected.
+      if (error instanceof SavedEnvironmentSwitchedOffError) {
+        throw error;
+      }
       if (isSavedEnvironmentConnectionCancelledError(error)) {
         return;
       }
@@ -2093,6 +1904,9 @@ export async function reconnectSavedEnvironment(environmentId: EnvironmentId): P
     }
     await connection.reconnect();
   } catch (error) {
+    if (error instanceof SavedEnvironmentSwitchedOffError) {
+      throw error;
+    }
     if (record.desktopSsh) {
       try {
         const issued = await issueDesktopSshBearerSession(
@@ -2105,6 +1919,9 @@ export async function reconnectSavedEnvironment(environmentId: EnvironmentId): P
         });
         return;
       } catch (recoveryError) {
+        if (recoveryError instanceof SavedEnvironmentSwitchedOffError) {
+          throw recoveryError;
+        }
         if (isSavedEnvironmentConnectionCancelledError(recoveryError)) {
           return;
         }
@@ -2119,13 +1936,52 @@ export async function reconnectSavedEnvironment(environmentId: EnvironmentId): P
   }
 }
 
-export async function removeSavedEnvironment(environmentId: EnvironmentId): Promise<void> {
-  await disconnectSavedEnvironment(environmentId);
+/**
+ * Forget what this client held under a direct id that is now a route of a Hub
+ * machine: its connection, thread state, config and project artwork. The same
+ * machine's threads live under its Hub id; keeping the direct copies showed
+ * every thread twice. The record and its bearer stay: they are the route.
+ */
+async function forgetFoldedEnvironment(environmentId: EnvironmentId): Promise<void> {
+  getEnvironmentSupervisor().cancelPendingSavedEnvironmentConnection(environmentId);
+  if (getEnvironmentSupervisor().read(environmentId)) {
+    await removeConnection(environmentId).catch(() => false);
+  }
   disposeThreadDetailSubscriptionsForEnvironment(environmentId);
-  useSavedEnvironmentRegistryStore.getState().remove(environmentId);
   useSavedEnvironmentRuntimeStore.getState().clear(environmentId);
   forgetEnvironmentServerConfig(environmentId);
   useStore.getState().removeEnvironmentState(environmentId);
+  clearProjectIconCache(environmentId);
+}
+
+/**
+ * Ends what this client holds of a saved machine while it is in use: its
+ * connection (and SSH tunnel), thread subscriptions, threads and config. The
+ * record, its credential and its project artwork are the caller's to keep or
+ * forget.
+ */
+export async function teardownSavedEnvironmentSession(environmentId: EnvironmentId): Promise<void> {
+  const record = getSavedEnvironmentRecord(environmentId);
+  await dropSavedEnvironmentConnection(environmentId);
+  disposeThreadDetailSubscriptionsForEnvironment(environmentId);
+  useSavedEnvironmentRuntimeStore.getState().clear(environmentId);
+  forgetEnvironmentServerConfig(environmentId);
+  useStore.getState().removeEnvironmentState(environmentId);
+  // Last, and best effort: on a machine that cannot be reached the SSH side
+  // can prompt or time out, and must not leave this client's side half done.
+  if (record?.desktopSsh) {
+    await disconnectDesktopSshEnvironment(environmentId, record.desktopSsh).catch(
+      (error: unknown) => {
+        console.warn("[SAVED_ENVIRONMENTS] SSH disconnect failed", error);
+      },
+    );
+  }
+}
+
+export async function removeSavedEnvironment(environmentId: EnvironmentId): Promise<void> {
+  // The teardown reads the record (an SSH machine's tunnel) before it goes.
+  await teardownSavedEnvironmentSession(environmentId);
+  useSavedEnvironmentRegistryStore.getState().remove(environmentId);
   // Project artwork is cached per node, past its connections: forget it too.
   clearProjectIconCache(environmentId);
   await removeSavedEnvironmentBearerToken(environmentId);
@@ -2157,6 +2013,7 @@ export async function addSavedEnvironment(input: {
   const registrySnapshot = snapshotSavedEnvironmentRegistry([environmentId]);
   const existingRecord =
     getSavedEnvironmentRecord(environmentId) ??
+    getLinkedDirectRecord(environmentId) ??
     findSavedEnvironmentRecordByDesktopSshTarget(input.desktopSsh);
   const staleDesktopSshRecord =
     existingRecord && existingRecord.environmentId !== environmentId ? existingRecord : null;
@@ -2195,7 +2052,17 @@ export async function addSavedEnvironment(input: {
     await removeSavedEnvironment(staleDesktopSshRecord.environmentId);
   }
   if (record.desktopSsh) {
-    await recordDesktopSshPairedRole(record, bearerSession.role ?? null, descriptor.serverVersion);
+    await (
+      await loadDesktopSshConnection()
+    ).recordDesktopSshPairedRole(record, bearerSession.role ?? null, descriptor.serverVersion);
+  }
+  if (record.hubLink) {
+    // A route of the Hub machine, renewed in place: never connected as an
+    // environment of its own (`desktopHubLinkedRoutes.ts`).
+    await (
+      await loadDesktopHubLinkedRoutes()
+    ).adoptHubLinkedDirectAccess(record, forgetFoldedEnvironment);
+    return record;
   }
   // A connect still running started on the credential this pairing replaced;
   // joining it would answer for the old one.
@@ -2250,7 +2117,7 @@ export function startEnvironmentConnectionService(): () => void {
 export async function resetEnvironmentServiceForTests(): Promise<void> {
   await getEnvironmentSupervisor().resetForTests();
   environmentSupervisor = null;
-  desktopSshOwnerRepairs.reset();
+  loadedDesktopSshConnection?.resetDesktopSshOwnerRepairsForTests();
   clearEnvironmentServerConfigs();
   lastBrowserHiddenAt = null;
   primaryShellSnapshotApplied = false;

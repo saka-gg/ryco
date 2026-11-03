@@ -2,10 +2,8 @@ import * as Schema from "effect/Schema";
 import { ModelFavorite } from "@ryco/contracts/settings";
 import { uniqueModelFavorites } from "@ryco/client-runtime/state/composer";
 import { useSyncExternalStore } from "react";
-import { AI_FOCUS_REFRESH_INTERVAL_OPTIONS } from "@ryco/shared/aiFocusSettings";
 import {
   SIDEBAR_AUTO_SETTLE_DAY_OPTIONS,
-  type AiFocusRefreshIntervalMs,
   type SidebarAutoSettleAfterDays,
 } from "@ryco/contracts/settings";
 
@@ -33,14 +31,26 @@ export interface Preferences {
   readonly collapsedProjectGroups?: readonly string[];
   readonly projectGroupingEnabled?: boolean;
   readonly threadListV2Enabled?: boolean;
-  readonly aiFocusEnabled?: boolean;
-  readonly aiFocusRefreshIntervalMs?: AiFocusRefreshIntervalMs;
   readonly sidebarAutoSettleAfterDays?: SidebarAutoSettleAfterDays;
   /**
    * Keep bounded recent conversation text on this device so a thread opens with
    * its last messages before any connection is ready. Unset means on.
    */
   readonly rememberThreadContent?: boolean;
+  /** Local notifications when a thread finishes, fails or needs you. Unset means off. */
+  readonly threadAlerts?: boolean;
+  /** Thread alerts play the system sound. Unset means off. */
+  readonly threadAlertSound?: boolean;
+  /**
+   * Thread alerts also reach this device while Ryco is closed, through the Hub
+   * (`docs/push-alerts.md`). Unset means never turned on.
+   */
+  readonly backgroundAlerts?: boolean;
+  /**
+   * Review a send that resumes a large, idle Claude conversation first; "Don't ask
+   * again" turns it off. Unset means on.
+   */
+  readonly claudeResumeReview?: boolean;
 }
 
 export function sanitizePreferences(parsed: Preferences): Preferences {
@@ -56,10 +66,12 @@ export function sanitizePreferences(parsed: Preferences): Preferences {
     collapsedProjectGroups?: readonly string[];
     projectGroupingEnabled?: boolean;
     threadListV2Enabled?: boolean;
-    aiFocusEnabled?: boolean;
-    aiFocusRefreshIntervalMs?: AiFocusRefreshIntervalMs;
     sidebarAutoSettleAfterDays?: SidebarAutoSettleAfterDays;
     rememberThreadContent?: boolean;
+    threadAlerts?: boolean;
+    threadAlertSound?: boolean;
+    backgroundAlerts?: boolean;
+    claudeResumeReview?: boolean;
   } = {};
 
   if (typeof parsed.liveActivitiesEnabled === "boolean") {
@@ -92,18 +104,6 @@ export function sanitizePreferences(parsed: Preferences): Preferences {
   if (typeof parsed.threadListV2Enabled === "boolean") {
     preferences.threadListV2Enabled = parsed.threadListV2Enabled;
   }
-  if (typeof parsed.aiFocusEnabled === "boolean") {
-    preferences.aiFocusEnabled = parsed.aiFocusEnabled;
-  }
-  if (
-    typeof parsed.aiFocusRefreshIntervalMs === "number" &&
-    AI_FOCUS_REFRESH_INTERVAL_OPTIONS.some(
-      (option) => option.value === parsed.aiFocusRefreshIntervalMs,
-    )
-  ) {
-    preferences.aiFocusRefreshIntervalMs =
-      parsed.aiFocusRefreshIntervalMs as AiFocusRefreshIntervalMs;
-  }
   if (
     parsed.sidebarAutoSettleAfterDays === null ||
     (typeof parsed.sidebarAutoSettleAfterDays === "number" &&
@@ -115,6 +115,16 @@ export function sanitizePreferences(parsed: Preferences): Preferences {
   }
   if (typeof parsed.rememberThreadContent === "boolean") {
     preferences.rememberThreadContent = parsed.rememberThreadContent;
+  }
+  if (typeof parsed.threadAlerts === "boolean") preferences.threadAlerts = parsed.threadAlerts;
+  if (typeof parsed.threadAlertSound === "boolean") {
+    preferences.threadAlertSound = parsed.threadAlertSound;
+  }
+  if (typeof parsed.backgroundAlerts === "boolean") {
+    preferences.backgroundAlerts = parsed.backgroundAlerts;
+  }
+  if (typeof parsed.claudeResumeReview === "boolean") {
+    preferences.claudeResumeReview = parsed.claudeResumeReview;
   }
   if (Array.isArray(parsed.favorites)) {
     const decode = Schema.decodeUnknownOption(ModelFavorite);
@@ -207,6 +217,14 @@ export function isPreferencesHydrated(): boolean {
  */
 export function isThreadContentCacheEnabled(preferences: Preferences = state.preferences): boolean {
   return preferences.rememberThreadContent !== false;
+}
+
+/**
+ * Whether sends from this device get the Claude resume review. On unless the user turned
+ * it off; read at each send, so a change applies to the next one.
+ */
+export function isClaudeResumeReviewEnabled(preferences: Preferences = state.preferences): boolean {
+  return preferences.claudeResumeReview !== false;
 }
 
 export function subscribePreferences(listener: Listener): () => void {

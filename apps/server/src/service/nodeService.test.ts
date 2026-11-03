@@ -90,6 +90,11 @@ describe("node service definitions", () => {
     expect(unit).toContain("StandardOutput=append:/Users/me/.ryco/userdata/logs/service.log");
   });
 
+  it("keeps the systemd unit running when the OOM killer ends one of its processes", () => {
+    const service = renderSystemdUserUnit(spec).split("[Service]\n")[1]?.split("\n[")[0] ?? "";
+    expect(service.split("\n")).toContain("OOMPolicy=continue");
+  });
+
   it("refuses installs that disappear after a reboot", () => {
     expect(
       isEphemeralCliInstall("/Users/me/.npm/_npx/abc/node_modules/ryco-cli/dist/bin.mjs"),

@@ -16,6 +16,7 @@ import {
   type AgentControlTaskStatusResult,
   type OrchestrationThreadShell,
   type ThreadId,
+  type TurnId,
 } from "@ryco/contracts";
 import { redactDiagnosticText } from "@ryco/shared/diagnosticRedaction";
 import { Effect, Option, Schema } from "effect";
@@ -28,13 +29,27 @@ import {
 import { toPersistenceSqlError } from "../persistence/Errors.ts";
 import { readDelegatedRunState } from "../persistence/delegatedRunStatus.ts";
 import type { AgentControlProposalRepositoryShape } from "../persistence/Services/AgentControlProposals.ts";
+import {
+  cancelledTaskEntryIds,
+  delegationSlotCancelCommandId,
+  noUserMessageSent,
+  waitsForDelegationSlot,
+} from "../orchestration/delegationSlotHold.ts";
+import { findThreadInArray } from "../orchestration/threadIndex.ts";
+import type { OrchestrationEngineShape } from "../orchestration/Services/OrchestrationEngine.ts";
 import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { publishCompletionReturns } from "./completionReturnPublish.ts";
 import { redactAgentControlSecrets } from "./ProviderInjection.ts";
 import type { AgentControlProposalEventsShape } from "./Services/AgentControlProposalEvents.ts";
+import { loadMessagePages, MESSAGE_PAGE_LIMITS } from "./Mcp/threadReads.ts";
 
 export class DelegatedTaskNotOwned {
   readonly _tag = "DelegatedTaskNotOwned";
+}
+
+/** A result continuation named a version or offset the task's result no longer has. */
+export class DelegatedTaskResultChanged {
+  readonly _tag = "DelegatedTaskResultChanged";
 }
 
 export const DELEGATED_TASK_ACK_DETAIL =
@@ -46,6 +61,20 @@ const ackDetail = (record: CompletionReturnRecord) =>
 const isNoticeOutcome = Schema.is(AgentControlTaskNoticeOutcome);
 export const DELEGATED_TASK_CANCEL_DETAIL =
   "Cancelled by the delegating chat with ryco_task_cancel. No result will be returned automatically.";
+/** The return was cancelled with `ryco_task_cancel` (not by the chat's Stop, archive or delete). */
+export const cancelledByDelegatingChat = (
+  record: Pick<CompletionReturnRecord, "status" | "detail">,
+) => record.status === "cancelled" && record.detail === DELEGATED_TASK_CANCEL_DETAIL;
+/**
+ * The delegating chat no longer waits for the task's return: cancelled with `ryco_task_cancel`,
+ * by the chat's Stop, archive or delete, past its time limit, or settled otherwise. A task in this
+ * state whose first message was never sent (a capped request's task waiting for a slot) never
+ * starts.
+ */
+export const noLongerAwaited = (record: Pick<CompletionReturnRecord, "status">) =>
+  record.status !== "waiting";
+export const DELEGATED_TASK_WAITING_DETAIL =
+  "Waiting for a free slot: it starts when an earlier task of its request stops working.";
 
 export interface DelegatedTaskControlDeps {
   readonly repository: Pick<
@@ -61,15 +90,26 @@ export interface DelegatedTaskControlDeps {
   >;
   readonly proposals: Pick<AgentControlProposalRepositoryShape, "getById">;
   readonly events: Pick<AgentControlProposalEventsShape, "publish">;
-  readonly projections: Pick<ProjectionSnapshotQueryShape, "getThreadShellById">;
+  readonly projections: Pick<
+    ProjectionSnapshotQueryShape,
+    "getThreadShellById" | "getThreadMessageById"
+  >;
   readonly sql: SqlClient.SqlClient;
+  /**
+   * Takes a cancelled task's unsent first message out of its queue, reading the queue from the
+   * engine's model; without both, nothing is.
+   */
+  readonly engine?: Pick<OrchestrationEngineShape, "dispatch" | "getReadModel">;
 }
 
-const redact = (text: string) =>
-  redactDiagnosticText(String(redactAgentControlSecrets(text))).slice(
-    0,
-    AGENT_CONTROL_TASK_RESULT_MAX_CHARS,
-  );
+/** Redacts a whole text; slicing happens after, so a cut never splits a secret. */
+const redact = (text: string) => redactDiagnosticText(String(redactAgentControlSecrets(text)));
+
+/** Where a result read starts: its version and offset. */
+interface ResultContinuation {
+  readonly version: string;
+  readonly offsetChars: number;
+}
 
 export const makeDelegatedTaskControl = (deps: DelegatedTaskControlDeps) => {
   const publish = (record: CompletionReturnRecord) =>
@@ -97,22 +137,60 @@ export const makeDelegatedTaskControl = (deps: DelegatedTaskControlDeps) => {
       return !(turn?.pendingMessageId?.startsWith(DELEGATION_WAKE_MESSAGE_PREFIX) ?? false);
     });
 
-  const describe = (record: CompletionReturnRecord, acknowledged: boolean) =>
+  /**
+   * The child's result as one page. With `whole` (a read of one task) the reply message
+   * is read whole, so it can be paged; a list shows only its start.
+   */
+  const resultPage = (
+    record: CompletionReturnRecord,
+    settled: { readonly turnId: TurnId; readonly state: "completed" | "error" },
+    whole: boolean,
+    continuation: ResultContinuation | undefined,
+  ) =>
+    Effect.gen(function* () {
+      const output = yield* deps.repository.output(record.childThreadId, settled.turnId);
+      const message =
+        whole && output.messageId !== null && deps.projections.getThreadMessageById !== undefined
+          ? Option.getOrNull(
+              yield* deps.projections.getThreadMessageById({
+                threadId: record.childThreadId,
+                messageId: output.messageId,
+              }),
+            )
+          : null;
+      const page = (yield* loadMessagePages).pageTaskResult({
+        state: settled.state,
+        text: output.text,
+        whole: message,
+        redact,
+        continuation,
+        limits: MESSAGE_PAGE_LIMITS,
+      });
+      if (page === null) return yield* Effect.fail(new DelegatedTaskResultChanged());
+      return page;
+    });
+
+  const describe = (
+    record: CompletionReturnRecord,
+    acknowledged: boolean,
+    read: { readonly whole: boolean; readonly continuation?: ResultContinuation | undefined },
+  ) =>
     Effect.gen(function* () {
       const shell = yield* deps.projections.getThreadShellById(record.childThreadId);
       const child = Option.getOrNull(shell);
       const settled = record.settled;
       const result =
         settled && (settled.state === "completed" || settled.state === "error")
-          ? yield* deps.repository.output(record.childThreadId, settled.turnId).pipe(
-              Effect.map((output) => ({
-                untrustedChildOutput: true as const,
-                state: settled.state as "completed" | "error",
-                text: redact(output.text.slice(0, AGENT_CONTROL_TASK_RESULT_MAX_CHARS)),
-                truncated: output.text.length > AGENT_CONTROL_TASK_RESULT_MAX_CHARS,
-              })),
+          ? yield* resultPage(
+              record,
+              { turnId: settled.turnId, state: settled.state },
+              read.whole,
+              read.continuation,
             )
           : null;
+      if (read.continuation !== undefined && result === null) {
+        return yield* Effect.fail(new DelegatedTaskResultChanged());
+      }
       // The server-authored notice a wake would carry (no child text). It stays on the row,
       // so an acknowledged notice remains readable.
       const capture = record.capture;
@@ -123,19 +201,39 @@ export const makeDelegatedTaskControl = (deps: DelegatedTaskControlDeps) => {
               text: capture.section.slice(0, AGENT_CONTROL_TASK_NOTICE_MAX_CHARS),
             }
           : null;
+      let state = yield* runState(record);
+      // Its first message was never sent: a task of a capped request still waiting for a slot,
+      // or one its chat gave up on before that (it never starts).
+      const unsent = state === "starting" && child !== null && child.latestUserMessageAt === null;
+      const cancelled = unsent && noLongerAwaited(record);
+      const waiting =
+        unsent &&
+        !cancelled &&
+        waitsForDelegationSlot(child.followUpQueueSummary?.hold, record.proposalId);
+      if (cancelled) state = "interrupted";
+      if (waiting) state = "waiting";
       return {
         taskId: record.childThreadId,
         proposalId: record.proposalId,
-        title: child ? redact(child.title) : null,
+        title: child ? redact(child.title).slice(0, AGENT_CONTROL_TASK_RESULT_MAX_CHARS) : null,
         return: { status: record.status, detail: record.detail, updatedAt: record.updatedAt },
         run: {
-          state: yield* runState(record),
+          state,
+          ...(waiting ? { detail: DELEGATED_TASK_WAITING_DETAIL } : {}),
           sessionStatus: child?.session?.status ?? null,
           hasPendingApprovals: child?.hasPendingApprovals ?? false,
           // Questions are reported only as a flag; their text never crosses this boundary.
           hasPendingUserInput: child?.hasPendingUserInput ?? false,
           backgroundLiveness: child?.backgroundLiveness ?? null,
           advanced: yield* advanced(record, child),
+          ...(record.status === "waiting" && record.stallNotice?.current
+            ? {
+                stalled: {
+                  kind: record.stallNotice.current.kind,
+                  since: record.stallNotice.current.since,
+                },
+              }
+            : {}),
         },
         result,
         notice,
@@ -169,6 +267,8 @@ export const makeDelegatedTaskControl = (deps: DelegatedTaskControlDeps) => {
   const status = (input: {
     readonly callerThreadId: ThreadId;
     readonly taskId?: ThreadId | undefined;
+    /** Read on in the task's result; requires `taskId`. */
+    readonly result?: ResultContinuation | undefined;
     /** The caller holds exact active-turn authority for its own thread. */
     readonly exactTurn: boolean;
     readonly now: string;
@@ -178,6 +278,9 @@ export const makeDelegatedTaskControl = (deps: DelegatedTaskControlDeps) => {
       // one tool result, so marking every listed row read could drop content unseen; its
       // tasks still arrive in a wake.
       const acknowledges = input.exactTurn && input.taskId !== undefined;
+      if (input.result !== undefined && input.taskId === undefined) {
+        return yield* Effect.fail(new DelegatedTaskResultChanged());
+      }
       let rows: ReadonlyArray<CompletionReturnRecord>;
       if (input.taskId !== undefined) {
         const row = yield* deps.repository.get(input.taskId);
@@ -195,7 +298,12 @@ export const makeDelegatedTaskControl = (deps: DelegatedTaskControlDeps) => {
         const acked = acknowledges
           ? yield* acknowledge(row, input.now)
           : { record: row, acknowledged: false };
-        tasks.push(yield* describe(acked.record, acked.acknowledged));
+        tasks.push(
+          yield* describe(acked.record, acked.acknowledged, {
+            whole: input.taskId !== undefined,
+            continuation: input.result,
+          }),
+        );
       }
       return {
         tasks,
@@ -207,6 +315,51 @@ export const makeDelegatedTaskControl = (deps: DelegatedTaskControlDeps) => {
    * Stop the automatic return before anything interrupts the child, so the interrupt's
    * settlement cannot turn into a notice.
    */
+  /** The task's thread as the engine holds it now. */
+  const engineThread = (threadId: ThreadId) =>
+    deps.engine?.getReadModel === undefined
+      ? Effect.succeed(undefined)
+      : deps.engine
+          .getReadModel()
+          .pipe(Effect.map((model) => findThreadInArray(model.threads, threadId)));
+
+  /**
+   * A task whose first message waits in its queue (a capped request's task waiting for a slot,
+   * or released and not sent yet) never starts: that message and the agent's own follow-ups
+   * leave the queue, under one id per task. True only when the first message is out of the queue
+   * and was never sent: the drain may have sent it between the read and the removal.
+   */
+  const stopUnsent = (record: CompletionReturnRecord, now: string) =>
+    Effect.gen(function* () {
+      const before = yield* engineThread(record.childThreadId);
+      const queued = before?.followUpQueue?.entries ?? [];
+      if (
+        deps.engine === undefined ||
+        before === undefined ||
+        !noUserMessageSent(before) ||
+        !queued.some((entry) => entry.messageId === record.initialMessageId)
+      ) {
+        return false;
+      }
+      yield* Effect.exit(
+        deps.engine.dispatch({
+          type: "thread.queue.remove",
+          commandId: delegationSlotCancelCommandId(record.proposalId, record.childThreadId),
+          threadId: record.childThreadId,
+          messageIds: cancelledTaskEntryIds(queued, record.initialMessageId),
+          createdAt: now,
+        }),
+      );
+      const after = yield* engineThread(record.childThreadId);
+      return (
+        after !== undefined &&
+        noUserMessageSent(after) &&
+        !(after.followUpQueue?.entries ?? []).some(
+          (entry) => entry.messageId === record.initialMessageId,
+        )
+      );
+    });
+
   const cancel = (input: {
     readonly callerThreadId: ThreadId;
     readonly taskId: ThreadId;
@@ -220,10 +373,13 @@ export const makeDelegatedTaskControl = (deps: DelegatedTaskControlDeps) => {
         now: input.now,
       });
       if (!record) return yield* Effect.fail(new DelegatedTaskNotOwned());
-      if (record.status === "cancelled" && record.detail === DELEGATED_TASK_CANCEL_DETAIL)
-        yield* publish(record);
-      const child = yield* deps.projections.getThreadShellById(input.taskId);
-      return { record, child: Option.getOrNull(child) };
+      if (cancelledByDelegatingChat(record)) yield* publish(record);
+      const stoppedBeforeStart = cancelledByDelegatingChat(record)
+        ? yield* stopUnsent(record, input.now)
+        : false;
+      // Read after the removal: a task the drain started meanwhile shows its turn.
+      const child = Option.getOrNull(yield* deps.projections.getThreadShellById(input.taskId));
+      return { record, child, stoppedBeforeStart };
     });
 
   return { status, cancel };

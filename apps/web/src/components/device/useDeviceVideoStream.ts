@@ -6,13 +6,8 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 
 import { createDeviceFrameGateState, stepDeviceFrameGate } from "./deviceFrameGate";
 
-export type DeviceVideoStatus =
-  | "idle"
-  | "unsupported"
-  | "connecting"
-  | "streaming"
-  | "recovering"
-  | "error";
+export type { DeviceVideoStatus } from "@ryco/client-runtime/state/device/previewSampler";
+import type { DeviceVideoStatus } from "@ryco/client-runtime/state/device/previewSampler";
 
 function avcCodecString(payload: Uint8Array): string | null {
   for (let offset = 0; offset + 7 < payload.byteLength; offset += 1) {

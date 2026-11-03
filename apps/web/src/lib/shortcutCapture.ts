@@ -42,7 +42,8 @@ function normalizeKeyName(rawKey: string, code: string | undefined): string {
   if (lowered === "arrowleft") return "left";
   if (lowered === "arrowright") return "right";
   // Use Digit0..9 codes so shifted symbols still record the underlying number,
-  // matching the EVENT_CODE_KEY_ALIASES table used by the runtime matcher.
+  // matching the EVENT_CODE_KEY_ALIASES table of the runtime matcher
+  // (`@ryco/shared/keybindingMatch`).
   if (code) {
     const digitMatch = code.match(/^Digit(\d)$/);
     if (digitMatch) return digitMatch[1]!;

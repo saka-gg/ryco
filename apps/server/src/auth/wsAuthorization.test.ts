@@ -7,6 +7,7 @@ import type { AuthenticatedSession } from "./Services/ServerAuth.ts";
 
 const makeSession = (role: AuthenticatedSession["role"]): AuthenticatedSession => ({
   sessionId: AuthSessionId.make(`session-${role}`),
+  chainId: AuthSessionId.make(`session-${role}`),
   subject: role,
   method: "browser-session-cookie",
   role,

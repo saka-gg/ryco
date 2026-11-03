@@ -1,6 +1,11 @@
 import type { EffectiveProjectPreferences } from "./settings.ts";
 import type { DesktopWindowMaterial } from "./windowMaterial.ts";
 import type {
+  DesktopNotificationBadge,
+  DesktopThreadNotification,
+  DesktopThreadNotificationResult,
+} from "./desktopNotifications.ts";
+import type {
   LifecycleSuggestions,
   TrashListResult,
   WorkspaceChangesSummaryInput,
@@ -29,6 +34,18 @@ import type {
   ComputerBetaUpdate,
   ComputerTurnIntent,
 } from "./computerBeta.ts";
+import type {
+  DesktopAppSnapCapture,
+  DesktopAppSnapErrorEvent,
+  DesktopAppSnapPermissionKind,
+  DesktopAppSnapShortcut,
+  DesktopAppSnapWindowEntry,
+} from "./computerPermissions.ts";
+import type {
+  DesktopWindowCapturePendingEntry,
+  DesktopWindowCaptureShortcutResult,
+  DesktopWindowCaptureState,
+} from "./windowCapture.ts";
 import type {
   GitReadLineBlameInput,
   GitReadLineBlameResult,
@@ -67,6 +84,7 @@ import type {
   ProjectBrowserState,
   ProjectBrowserCommand,
   ProjectBrowserSurface,
+  ProjectBrowserPickResult,
   DiscoveredProjectSite,
 } from "./projectBrowser.ts";
 import type {
@@ -86,6 +104,14 @@ import type {
 import type { ExternalIdentitySummary } from "./hostedIdentity.ts";
 import type { RelayEffectiveRole } from "./relay.ts";
 import type { ThreadForkInput, ThreadForkResult } from "./threadFork.ts";
+import type { SecretRequestAnswerInput, SecretRequestAnswerResult } from "./secretRequest.ts";
+import type { ThreadForkCarriedInput } from "./threadForkCarried.ts";
+import type {
+  ThreadLocalServerList,
+  ThreadStopLocalServerInput,
+  ThreadStopLocalServerResult,
+  ThreadSubscribeLocalServersInput,
+} from "./threadLocalServers.ts";
 import type {
   ComputerUseState,
   ComputerUsePolicy,
@@ -112,6 +138,8 @@ import type {
   GitRunStackedActionInput,
   GitRunStackedActionResult,
   GitActionProgressEvent,
+  GitCancelStackedActionInput,
+  GitCancelStackedActionResult,
   VcsStatusInput,
   VcsStatusResult,
   VcsCreateRefResult,
@@ -204,10 +232,16 @@ import type {
   ProjectReadIconResult,
   ProjectReadFileBinaryInput,
   ProjectReadFileBinaryResult,
+  ProjectReadFileChunkInput,
+  ProjectReadFileChunkResult,
+  ProjectFileChangeEvent,
+  ProjectWatchFileInput,
   ProjectReadFileInput,
   ProjectReadFileResult,
   ProjectStageFileReferenceInput,
   ProjectStageFileReferenceResult,
+  ProjectSearchContentInput,
+  ProjectSearchContentResult,
   ProjectSearchEntriesInput,
   ProjectSearchEntriesResult,
   ProjectWriteFileInput,
@@ -270,6 +304,8 @@ import type {
   OrchestrationGetWorkflowScriptInput,
   OrchestrationGetWorkflowScriptResult,
   OrchestrationStopBackgroundTaskInput,
+  OrchestrationMessageBackgroundTaskInput,
+  OrchestrationMessageBackgroundTaskResult,
   OrchestrationStopBackgroundTaskResult,
   OrchestrationReplayEventsInput,
   OrchestrationReplayEventsPageInput,
@@ -298,6 +334,7 @@ import { EditorId } from "./editor.ts";
 import type {
   ExecutionEnvironmentDescriptor,
   ExecutionEnvironmentPlatformOs,
+  ScopedThreadRef,
 } from "./environment.ts";
 import type { ClientSettings, ServerSettings, ServerSettingsPatch } from "./settings.ts";
 import type {
@@ -344,6 +381,14 @@ import type {
   SourceControlRepositorySearchInput,
   SourceControlRepositorySearchResult,
 } from "./sourceControl.ts";
+import type {
+  SourceControlSetPullRequestWatchInput,
+  SourceControlSetPullRequestWatchResult,
+} from "./pullRequestWatchRpc.ts";
+import type {
+  ChangeRequestTemplateListInput,
+  ChangeRequestTemplateListResult,
+} from "./changeRequestReview.ts";
 
 export interface ContextMenuItem<T extends string = string> {
   id: T;
@@ -401,6 +446,11 @@ export interface DesktopUpdateState {
   canRetry: boolean;
   /** Absent or `null` unless another device asked this app to update. */
   remoteInstall?: DesktopRemoteInstallState | null;
+  /**
+   * The version this app ran before an update it installed took effect, on the first launch
+   * after it (`currentVersion` is the one it updated to). Absent or `null` otherwise.
+   */
+  updatedFromVersion?: string | null;
 }
 
 export interface DesktopUpdateActionResult {
@@ -472,6 +522,12 @@ export interface SavedEnvironmentHubLink {
   hubEnvironmentId: string;
   /** When the direct credential was last issued; it is renewed through the Hub. */
   linkedAt: string;
+  /**
+   * The node identity key (Ed25519, base64url) the grant named: each direct
+   * address must prove it before the bearer goes there. A link saved before
+   * the proof existed has none, so it is never used and is renewed instead.
+   */
+  nodeIdentityPublicKey?: string;
 }
 
 export interface PersistedSavedEnvironmentRecord {
@@ -483,6 +539,12 @@ export interface PersistedSavedEnvironmentRecord {
   lastConnectedAt: string | null;
   desktopSsh?: DesktopSshEnvironmentTarget;
   hubLink?: SavedEnvironmentHubLink;
+  /**
+   * When the user switched the machine off (ISO time). A switched-off machine
+   * stays saved with its credential but never connects until switched on.
+   * Absent means on, so an app that predates the field keeps it on.
+   */
+  disabledAt?: string;
 }
 
 export type DesktopServerExposureMode = "local-only" | "network-accessible";
@@ -509,18 +571,6 @@ export interface DesktopServerExposureState {
 
 export interface PickFolderOptions {
   initialPath?: string | null;
-}
-
-/**
- * Payload for a native "agent turn complete" desktop notification. Carries just
- * enough to render the toast and, on click, focus + navigate back to the thread
- * whose turn finished.
- */
-export interface DesktopTurnCompleteNotification {
-  readonly threadId: ThreadId;
-  readonly environmentId?: EnvironmentId | undefined;
-  readonly title: string;
-  readonly body?: string | undefined;
 }
 
 export interface DesktopHubLaunchConfig {
@@ -556,12 +606,21 @@ export interface DesktopHubLaunchConfigResult {
   readonly relaunching: boolean;
 }
 
-/** Whether Desktop main is holding this machine awake for the devices that reach it. */
+/**
+ * When Desktop main holds this machine awake: never, while other devices can reach it, or while
+ * they can reach it or agents work on its own backend. Always on AC power only; the display may
+ * still sleep.
+ */
+export type DesktopKeepAwakeMode = "off" | "reachable" | "reachable-or-working";
+
+/** Whether Desktop main is holding this machine awake, and why. */
 export interface DesktopKeepAwakeState {
-  /** The operator's preference. On by default. */
-  readonly enabled: boolean;
+  /** The operator's preference. "reachable-or-working" by default. */
+  readonly mode: DesktopKeepAwakeMode;
   /** Other devices can reach this node through the Hub, the network, or Tailscale. */
   readonly reachable: boolean;
+  /** The local backend reports agent work (and for 2 minutes after it ends). */
+  readonly agentWorking: boolean;
   readonly onBattery: boolean;
   /** Ryco currently holds the system awake. Only ever true on AC power. */
   readonly active: boolean;
@@ -809,6 +868,80 @@ export type DesktopHubOriginValidation =
 
 export type DesktopQuitShortcutMode = "press-twice" | "hold" | "immediately";
 
+/** Where the desktop app's `ryco` terminal command stands (`desktopCliCommand.ts`). */
+export interface DesktopCliCommandState {
+  /** macOS and Linux, installed app only. */
+  readonly supported: boolean;
+  /** `ryco`, or `ryco-nightly` for Ryco Nightly. */
+  readonly commandName: string;
+  /** The link on a PATH folder this app made, if any. */
+  readonly installedPath: string | null;
+  /** A new terminal runs this app's launcher for `commandName`. */
+  readonly onPath: boolean;
+  /** Another command of that name a new terminal runs first. */
+  readonly shadowedBy?: string;
+  /** The launcher itself, which runs without a PATH entry. */
+  readonly launcherPath: string | null;
+}
+
+/** Ryco and Ryco Nightly, as each app sees the other (`nightlyHandoff.ts`). */
+export interface DesktopNightlyState {
+  /** Which app this is. */
+  readonly flavor: "stable" | "nightly";
+  /** The other app is installed where this one looks for it (macOS Applications folders). */
+  readonly otherAppInstalled: boolean;
+  /** Ryco: Ryco Nightly's node is running now, so it cannot take a copy until it quits. */
+  readonly nightlyRunning: boolean;
+  /** Ryco Nightly: how the last copy of Ryco's data went; null when none was asked for. */
+  readonly lastImport: {
+    readonly completedAt: string;
+    readonly ok: boolean;
+    readonly error?: string;
+  } | null;
+  /** Where both apps are downloaded. */
+  readonly releasesUrl: string;
+}
+
+/**
+ * What a chat that quitting would stop is doing. Only `working` chats can be continued after a
+ * restart: chats waiting for a person are never continued.
+ */
+export type DesktopQuitRunningChatStatus = "working" | "approval" | "input" | "connecting";
+
+/** A chat on this desktop's own backend that quitting Ryco would stop. */
+export interface DesktopQuitRunningChat {
+  readonly threadId: string;
+  readonly title: string;
+  readonly status: DesktopQuitRunningChatStatus;
+}
+
+/**
+ * The renderer's answer to "which chats would quitting stop?". `unknown` while this desktop's
+ * environment is not known or has no live snapshot (cached or held-over rows show nothing running).
+ */
+export type DesktopQuitRunningChatsReport =
+  | { readonly status: "unknown" }
+  | {
+      readonly status: "known";
+      /** Every running chat on this desktop's backend; `chats` lists at most 8 of them. */
+      readonly runningCount: number;
+      /** Running chats that are `working`, the only ones a restart can continue. */
+      readonly resumableCount: number;
+      /** Most recently started first. */
+      readonly chats: ReadonlyArray<DesktopQuitRunningChat>;
+      /** Running chats on other nodes; quitting does not stop them. */
+      readonly otherNodesRunningCount: number;
+      /** The node's `continueThreadsAfterRestart`, `null` while its settings are not loaded. */
+      readonly continueThreadsAfterRestart: boolean | null;
+    };
+
+/** Answers Desktop main's questions before a quit. One per window; the last registration wins. */
+export interface DesktopQuitGuardResponder {
+  readonly runningChats: () => DesktopQuitRunningChatsReport;
+  /** Persist the node's `continueThreadsAfterRestart`; resolves once the node saved it. */
+  readonly setContinueAfterRestart: (enabled: boolean) => Promise<void>;
+}
+
 export interface DesktopThreadExportInput {
   readonly filename: string;
   readonly contents: string;
@@ -816,12 +949,40 @@ export interface DesktopThreadExportInput {
 
 export type DesktopThreadExportResult = { readonly status: "saved" | "cancelled" };
 
+/** The desktop menu action of Edit > Paste as Text; the app answers it with `pasteAsText`. */
+export const DESKTOP_PASTE_AS_TEXT_MENU_ACTION = "paste-as-text";
+
+/** The desktop menu actions of a window's trackpad swipes; the app steps its own history for them. */
+export const DESKTOP_NAVIGATE_BACK_MENU_ACTION = "navigate-back";
+export const DESKTOP_NAVIGATE_FORWARD_MENU_ACTION = "navigate-forward";
+
 export interface DesktopBridge {
   saveThreadExport?: (input: DesktopThreadExportInput) => Promise<DesktopThreadExportResult>;
+  /** Install the `ryco` command for terminals. Absent in desktop builds that predate it. */
+  cliCommand?: {
+    getState(): Promise<DesktopCliCommandState>;
+    install(): Promise<DesktopCliCommandState>;
+    uninstall(): Promise<DesktopCliCommandState>;
+  };
+  /** Try Ryco Nightly from Ryco, and switch back. Absent in desktop builds that predate it. */
+  nightly?: {
+    getState(): Promise<DesktopNightlyState>;
+    /** Ryco only. With `copyData`, Ryco Nightly takes a copy of Ryco's data when it starts. */
+    open(input: { readonly copyData: boolean }): Promise<void>;
+    /** Ryco Nightly only. Opens Ryco; nothing is copied back. */
+    switchBack(): Promise<void>;
+  };
   quitShortcut?: {
     getMode(): Promise<DesktopQuitShortcutMode>;
     setMode(mode: DesktopQuitShortcutMode): Promise<void>;
     onFeedback(listener: (state: "press-twice" | "hold" | null) => void): () => void;
+  };
+  /**
+   * Lets Desktop main ask this window, before a quit, which chats quitting would stop. Absent on
+   * hosts that predate the quit confirmation. Returns the unregister function.
+   */
+  quitGuard?: {
+    register(responder: DesktopQuitGuardResponder): () => void;
   };
   browser?: {
     getState(): Promise<ProjectBrowserState>;
@@ -829,6 +990,11 @@ export interface DesktopBridge {
     command(input: ProjectBrowserCommand): Promise<void>;
     surface(input: ProjectBrowserSurface): Promise<void>;
     capture(tab: string): Promise<string>;
+    /**
+     * Lets the user pick one element on a docked tab; settles when an element is picked or the pick
+     * ends. Optional: a desktop shell without it offers no picker.
+     */
+    pick?(tab: string): Promise<ProjectBrowserPickResult>;
     discover(cwd?: string): Promise<readonly DiscoveredProjectSite[]>;
     onFocusAddress(listener: (tab: string) => void): () => void;
     onState(listener: (state: ProjectBrowserState) => void): () => void;
@@ -855,6 +1021,40 @@ export interface DesktopBridge {
     openBrowserSetup(browser: ComputerBrowser): Promise<void>;
     stop(): Promise<void>;
     onState(listener: (state: ComputerUseState) => void): () => void;
+  };
+  /**
+   * Window capture into the composer. Only the macOS desktop app exposes it;
+   * web, hosted and other desktop platforms leave it undefined.
+   */
+  windowCapture?: {
+    /** Current state after a preflight grant check; never raises a macOS prompt. */
+    getState(): Promise<DesktopWindowCaptureState>;
+    /**
+     * Guides the user through the given grants (the picker asks for Screen
+     * Recording alone), or through those the current setup needs.
+     */
+    setup(
+      permissions?: readonly DesktopAppSnapPermissionKind[],
+    ): Promise<DesktopWindowCaptureState>;
+    /**
+     * Saves and arms the global shortcut; null turns it off. One that macOS,
+     * another app or typing uses is reported and not saved.
+     */
+    setShortcut(
+      shortcut: DesktopAppSnapShortcut | null,
+    ): Promise<DesktopWindowCaptureShortcutResult>;
+    listWindows(): Promise<readonly DesktopAppSnapWindowEntry[]>;
+    /** The capture stays pending in the desktop app until it is acknowledged. */
+    captureWindow(windowId: number): Promise<DesktopAppSnapCapture>;
+    /** Captures not yet acknowledged (e.g. taken while no composer was open), without bytes. */
+    listPendingCaptures(): Promise<readonly DesktopWindowCapturePendingEntry[]>;
+    /** One pending capture with its bytes; null once it was acknowledged. */
+    readPendingCapture(captureId: string): Promise<DesktopAppSnapCapture | null>;
+    acknowledgeCapture(captureId: string): Promise<void>;
+    onState(listener: (state: DesktopWindowCaptureState) => void): () => void;
+    /** A capture the global shortcut took; it is pending until acknowledged. */
+    onCaptured(listener: (capture: DesktopAppSnapCapture) => void): () => void;
+    onError(listener: (error: DesktopAppSnapErrorEvent) => void): () => void;
   };
   getAppBranding: () => DesktopAppBranding | null;
   getLocalEnvironmentBootstrap: () => DesktopEnvironmentBootstrap | null;
@@ -916,9 +1116,9 @@ export interface DesktopBridge {
     readonly deferRelaunch?: boolean;
   }) => Promise<DesktopServerExposureState>;
   getHubLaunchConfig: () => Promise<DesktopHubLaunchConfig>;
-  /** Keep a reachable desktop node awake while it is plugged in. Applies live. */
+  /** Keep this desktop awake while it is plugged in and reachable or working. Applies live. */
   getKeepAwakeState?: () => Promise<DesktopKeepAwakeState>;
-  setKeepAwakeEnabled?: (enabled: boolean) => Promise<DesktopKeepAwakeState>;
+  setKeepAwakeMode?: (mode: DesktopKeepAwakeMode) => Promise<DesktopKeepAwakeState>;
   /** Relaunch the Desktop shell without changing persisted launch configuration. */
   restartApp?: () => Promise<void>;
   /** Native account setup is available only in Desktop builds that support hardware-backed keys. */
@@ -1056,22 +1256,35 @@ export interface DesktopBridge {
   ) => Promise<T | null>;
   openExternal: (url: string) => Promise<boolean>;
   onMenuAction: (listener: (action: string) => void) => () => void;
+  /**
+   * Pastes the clipboard as plain text into the calling window's focused element. The Edit
+   * menu's Paste as Text sends `DESKTOP_PASTE_AS_TEXT_MENU_ACTION`, and the app calls this once
+   * it is ready for the paste. Absent in desktop builds that predate it.
+   */
+  pasteAsText?: () => Promise<void>;
   /** The machine woke from sleep or the screen was unlocked; live sockets may be dead. */
   onSystemResume?: (listener: () => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;
-  setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;
   checkForUpdate: () => Promise<DesktopUpdateCheckResult>;
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
   installUpdate: () => Promise<DesktopUpdateActionResult>;
   onUpdateState: (listener: (state: DesktopUpdateState) => void) => () => void;
   /** Answer a remote install's countdown: relaunch now, or postpone it (the download stays). */
   respondToRemoteInstall: (action: "now" | "postpone") => Promise<DesktopUpdateState>;
-  /** Show a native notification when a turn completes and the window is unfocused. */
-  notifyTurnComplete: (notification: DesktopTurnCompleteNotification) => Promise<void>;
-  /** Subscribe to notification clicks so the renderer can navigate to the thread. */
-  onTurnCompleteNotificationActivated: (
-    listener: (notification: DesktopTurnCompleteNotification) => void,
-  ) => () => void;
+  /**
+   * Shows a thread alert as an OS notification, one per thread. Answers
+   * `window-focused` instead while the window is in front. Absent in desktop
+   * builds that predate it.
+   */
+  notifyThread?: (
+    notification: DesktopThreadNotification,
+  ) => Promise<DesktopThreadNotificationResult>;
+  /** A thread notification was clicked: main revealed the window, the renderer opens the thread. */
+  onThreadNotificationActivated?: (listener: (thread: ScopedThreadRef) => void) => () => void;
+  /** Shows the count badge on the dock or taskbar; main clears it while a window has focus. */
+  setNotificationBadge?: (badge: DesktopNotificationBadge) => Promise<void>;
+  /** Main cleared the badge (a window got focus, or the app is quitting). */
+  onNotificationBadgeCleared?: (listener: () => void) => () => void;
 }
 
 /**
@@ -1220,6 +1433,29 @@ export interface LocalApi {
     reloadServers: (input: McpServersReloadInput) => Promise<McpListServersResult>;
     startOauthLogin: (input: McpOauthLoginInput) => Promise<McpOauthLoginResult>;
   };
+}
+
+/**
+ * Where a recoverable Git action stands, for the caller's notice. `started` says whether this
+ * run can outlive its connection: the caller asked for it and the node supports it.
+ * `reconnecting`: the connection dropped and the client waits to attach to the action again.
+ * `reattached`: it follows the action again.
+ */
+export type GitActionRecoveryState =
+  | { readonly kind: "started"; readonly recoverable: boolean }
+  | { readonly kind: "reconnecting" }
+  | { readonly kind: "reattached" };
+
+export interface GitRunStackedActionOptions {
+  readonly onProgress?: (event: GitActionProgressEvent) => void;
+  /**
+   * Keep the action running on the node when this connection drops, if the node supports it:
+   * the client attaches to it again instead of failing. Off by default. Closing or reloading
+   * the client then no longer stops the action, so only a caller that offers Stop
+   * (`cancelStackedAction`) asks for it.
+   */
+  readonly recoverable?: boolean;
+  readonly onRecoveryState?: (state: GitActionRecoveryState) => void;
 }
 
 /**
@@ -1372,7 +1608,35 @@ export interface EnvironmentApi {
     readFile: (input: ProjectReadFileInput) => Promise<ProjectReadFileResult>;
     readIcon: (input: ProjectReadIconInput) => Promise<ProjectReadIconResult>;
     readFileBinary: (input: ProjectReadFileBinaryInput) => Promise<ProjectReadFileBinaryResult>;
+    /**
+     * PDFs and raster images in bounded chunks (`projects.readFileChunk`). Optional so
+     * test fakes need not supply it; clients call it only when the node's config
+     * advertises `projectReadFileChunk`.
+     */
+    readFileChunk?: (input: ProjectReadFileChunkInput) => Promise<ProjectReadFileChunkResult>;
+    /**
+     * Notices when one file changes on disk (`projects.subscribeFileChanges`), never its
+     * content. Optional so test fakes need not supply it; clients call it only when the node's
+     * config advertises `projectFileWatch`. `onError`: the stream stopped for good, after
+     * `classifyFailure` saw the failure.
+     */
+    subscribeFileChanges?: (
+      input: ProjectWatchFileInput,
+      callback: (event: ProjectFileChangeEvent) => void,
+      options?: {
+        onError?: () => void;
+        classifyFailure?: (error: unknown) => "unsupported" | "response-too-large" | "failed";
+      },
+    ) => () => void;
     searchEntries: (input: ProjectSearchEntriesInput) => Promise<ProjectSearchEntriesResult>;
+    /**
+     * Only for nodes that advertise `projectContentSearch`. Aborting `signal` withdraws the
+     * request, and the node stops searching.
+     */
+    searchContent: (
+      input: ProjectSearchContentInput,
+      options?: { readonly signal?: AbortSignal | undefined },
+    ) => Promise<ProjectSearchContentResult>;
     writeFile: (input: ProjectWriteFileInput) => Promise<ProjectWriteFileResult>;
     stageFileReference: (
       input: ProjectStageFileReferenceInput,
@@ -1443,6 +1707,17 @@ export interface EnvironmentApi {
     publishRepository: (
       input: SourceControlPublishRepositoryInput,
     ) => Promise<SourceControlPublishRepositoryResult>;
+    /**
+     * Auto-fix CI and the pull request watch of a thread. Every RPC-backed API has it;
+     * optional so hand-built test doubles may leave it out (callers treat absence as offline).
+     */
+    setPullRequestWatch?: (
+      input: SourceControlSetPullRequestWatchInput,
+    ) => Promise<SourceControlSetPullRequestWatchResult>;
+    /** Optional: older shapes and test doubles lack it; gate on `changeRequestTemplates`. */
+    listChangeRequestTemplates?: (
+      input: ChangeRequestTemplateListInput,
+    ) => Promise<ChangeRequestTemplateListResult>;
   };
   vcs: {
     readLineBlame: (input: GitReadLineBlameInput) => Promise<GitReadLineBlameResult>;
@@ -1484,10 +1759,15 @@ export interface EnvironmentApi {
   git: {
     runStackedAction: (
       input: GitRunStackedActionInput,
-      options?: {
-        readonly onProgress?: (event: GitActionProgressEvent) => void;
-      },
+      options?: GitRunStackedActionOptions,
     ) => Promise<GitRunStackedActionResult>;
+    /**
+     * Stops a running recoverable action. `cancelled: false` when no running action of this
+     * client has the id. Absent on clients that predate recoverable actions.
+     */
+    cancelStackedAction?: (
+      input: GitCancelStackedActionInput,
+    ) => Promise<GitCancelStackedActionResult>;
     resolvePullRequest: (input: GitPullRequestRefInput) => Promise<GitResolvePullRequestResult>;
     preparePullRequestThread: (
       input: GitPreparePullRequestThreadInput,
@@ -1526,6 +1806,28 @@ export interface EnvironmentApi {
     setManualPosition: (input: ThreadsSetManualPositionInput) => Promise<EmptyRpcResult>;
     /** Optional so clients can feature-detect against older environments. */
     fork?: (input: ThreadForkInput) => Promise<ThreadForkResult>;
+    /**
+     * Continues a conversation carried from another node here (`threads.forkCarried`). Present
+     * when the client can send it; offer it only for nodes that advertise `threadForkCarried`.
+     */
+    forkCarried?: (input: ThreadForkCarriedInput) => Promise<ThreadForkResult>;
+    /**
+     * The servers a thread started (`threads.subscribeLocalServers`), current list first. Clients
+     * call it only when the node's config advertises `threadLocalServers`; `watchThreadLocalServers`
+     * shares one subscription per thread. `onError`: the stream stopped for good.
+     */
+    subscribeLocalServers?: (
+      input: ThreadSubscribeLocalServersInput,
+      callback: (list: ThreadLocalServerList) => void,
+      options?: { onError?: () => void },
+    ) => () => void;
+    /** Only for nodes that advertise `threadLocalServerStop`. */
+    stopLocalServer?: (input: ThreadStopLocalServerInput) => Promise<ThreadStopLocalServerResult>;
+    /**
+     * The owner's answer to an agent's secret request (`secrets.answerRequest`), on nodes that
+     * advertise `secretRequests`. Never retried: a repeat finds the request already answered.
+     */
+    answerSecretRequest?: (input: SecretRequestAnswerInput) => Promise<SecretRequestAnswerResult>;
   };
   orchestration: {
     dispatchCommand: (command: ClientOrchestrationCommand) => Promise<{ sequence: number }>;
@@ -1541,6 +1843,10 @@ export interface EnvironmentApi {
     stopBackgroundTask?: (
       input: OrchestrationStopBackgroundTaskInput,
     ) => Promise<OrchestrationStopBackgroundTaskResult>;
+    /** Optional so clients can feature-detect against older environments. */
+    messageBackgroundTask?: (
+      input: OrchestrationMessageBackgroundTaskInput,
+    ) => Promise<OrchestrationMessageBackgroundTaskResult>;
     getTurnDiff: (input: OrchestrationGetTurnDiffInput) => Promise<OrchestrationGetTurnDiffResult>;
     getFullThreadDiff: (
       input: OrchestrationGetFullThreadDiffInput,

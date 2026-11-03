@@ -291,6 +291,7 @@ function draft(overrides: Partial<ComposerDraftContent> = {}): ComposerDraftCont
     images: [],
     persistedAttachments: [],
     terminalContexts: [],
+    fileReferences: [],
     sourceControlContexts: [],
     interactionMode: "plan",
     ...overrides,
@@ -303,6 +304,7 @@ describe("hasComposerDraftContent", () => {
     ["an image", { images: [{ id: "image-1" }] }],
     ["a persisted attachment", { persistedAttachments: [{ id: "attachment-1" }] }],
     ["a terminal context", { terminalContexts: [{ id: "context-1" }] }],
+    ["a file reference", { fileReferences: [{ id: "reference-1" }] }],
     ["a source-control context", { sourceControlContexts: [{ id: "context-1" }] }],
   ])("is true for a draft with %s", (_name, overrides) => {
     expect(hasComposerDraftContent(draft(overrides))).toBe(true);

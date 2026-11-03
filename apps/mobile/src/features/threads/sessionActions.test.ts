@@ -4,13 +4,14 @@ import { describe, expect, it, vi } from "vite-plus/test";
 vi.mock("expo-crypto", () => ({ randomUUID: () => `id-${Math.random().toString(16).slice(2)}` }));
 
 import {
+  compactThreadNow,
   interruptThreadTurn,
   renameThread,
   respondToThreadApproval,
   respondToThreadUserInput,
-  revertThreadCheckpointWithGuards,
   setThreadArchived,
   setThreadSettled,
+  stopThreadSubagent,
 } from "./sessionActions";
 
 const THREAD_ID = "thread-1" as ThreadId;
@@ -37,6 +38,81 @@ describe("sessionActions", () => {
     expect(command.type).toBe("thread.turn.interrupt");
     expect(command.threadId).toBe(THREAD_ID);
     expect(command.commandId).toBeTruthy();
+  });
+
+  it("compacts on the thread's own model and modes, guarded to the turn it read", async () => {
+    const { api, dispatchCommand } = fakeApi();
+    const getThreadWindow = vi.fn(async () => ({
+      thread: {
+        modelSelection: { instanceId: "claude_work", model: "opus" },
+        runtimeMode: "approval-required",
+        interactionMode: "plan",
+        tokenMode: "aggressive",
+        latestTurn: { turnId: "turn-7" },
+        session: {
+          providerName: "claudeAgent",
+          status: "ready",
+          runtimeSessionId: "runtime-1",
+          activeTurnId: null,
+        },
+      },
+    }));
+    Object.assign(api.orchestration, { getThreadWindow });
+    const assertMutationReady = vi.fn();
+
+    await compactThreadNow(api, THREAD_ID, assertMutationReady);
+
+    // Before the read and again before the send.
+    expect(assertMutationReady).toHaveBeenCalledTimes(2);
+    expect(getThreadWindow).toHaveBeenCalledWith(expect.objectContaining({ threadId: THREAD_ID }));
+    const command = dispatchCommand.mock.calls[0]![0] as {
+      type: string;
+      commandId: string;
+      message: { messageId: string; text: string; attachments: unknown[] };
+    };
+    expect(command).toMatchObject({
+      type: "thread.turn.start",
+      threadId: THREAD_ID,
+      modelSelection: { instanceId: "claude_work", model: "opus" },
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+      tokenMode: "aggressive",
+      claudeResumeGuard: {
+        requireReady: true,
+        runtimeSessionId: "runtime-1",
+        latestTurnId: "turn-7",
+      },
+      message: { role: "user", text: "/compact", attachments: [] },
+    });
+    expect(command.commandId).toMatch(/^compact-now:/);
+    expect(command.message.messageId).toBe(command.commandId);
+  });
+
+  it("refuses to compact once the connection changed, without reading or sending", async () => {
+    const { api, dispatchCommand } = fakeApi();
+    const getThreadWindow = vi.fn();
+    Object.assign(api.orchestration, { getThreadWindow });
+
+    await expect(
+      compactThreadNow(api, THREAD_ID, () => {
+        throw new Error("The connection changed. Reconnect and try again.");
+      }),
+    ).rejects.toThrow("The connection changed.");
+    expect(getThreadWindow).not.toHaveBeenCalled();
+    expect(dispatchCommand).not.toHaveBeenCalled();
+  });
+
+  it("holds the node's follow-up queue with a person's Stop only when asked", async () => {
+    const { api, dispatchCommand } = fakeApi();
+    await interruptThreadTurn(api, THREAD_ID, { holdQueue: true });
+    await interruptThreadTurn(api, THREAD_ID, { holdQueue: false });
+    await interruptThreadTurn(api, THREAD_ID);
+    const commands = dispatchCommand.mock.calls.map(
+      ([command]) => command as { readonly holdQueue?: true },
+    );
+    expect(commands[0]?.holdQueue).toBe(true);
+    expect("holdQueue" in commands[1]!).toBe(false);
+    expect("holdQueue" in commands[2]!).toBe(false);
   });
 
   it("renames and archives through bounded thread commands", async () => {
@@ -105,78 +181,33 @@ describe("sessionActions", () => {
     expect(command.answers).toEqual({ q1: "yes" });
   });
 
-  it("guards checkpoint revert: cancels when confirm is declined, dispatches when confirmed", async () => {
+  it("stops one subagent's task activation, never the turn", async () => {
+    const stopBackgroundTask = vi.fn(async (_input: unknown) => ({}));
     const { api, dispatchCommand } = fakeApi();
-    const base = {
-      api,
-      thread: { id: THREAD_ID },
-      turnCount: 3,
-      environmentUnavailable: false,
-      environmentUnavailableLabel: null,
-      turnInProgress: false,
-      providerRefusal: null,
-      confirmMessage: "Revert?",
-    };
-
-    const cancelled = await revertThreadCheckpointWithGuards({
-      ...base,
-      confirm: async () => false,
+    const withStop = {
+      orchestration: { ...api.orchestration, stopBackgroundTask },
+    } as unknown as EnvironmentApi;
+    await stopThreadSubagent(withStop, THREAD_ID, {
+      taskId: "agent-1",
+      runtimeSessionId: "rt-1",
+      attempt: 0,
     });
-    expect(cancelled).toEqual({ ok: false, reason: { type: "user-cancelled" } });
-    expect(dispatchCommand).not.toHaveBeenCalled();
-
-    const confirmed = await revertThreadCheckpointWithGuards({
-      ...base,
-      confirm: async () => true,
+    expect(stopBackgroundTask).toHaveBeenCalledWith({
+      threadId: THREAD_ID,
+      taskId: "agent-1",
+      expected: { runtimeSessionId: "rt-1", attempt: 0 },
     });
-    expect(confirmed).toEqual({ ok: true });
-    const command = dispatchCommand.mock.calls[0]![0] as unknown as {
-      type: string;
-      turnCount: number;
-    };
-    expect(command.type).toBe("thread.checkpoint.revert");
-    expect(command.turnCount).toBe(3);
-  });
-
-  it("blocks revert while a turn is in progress", async () => {
-    const { api, dispatchCommand } = fakeApi();
-    const result = await revertThreadCheckpointWithGuards({
-      api,
-      thread: { id: THREAD_ID },
-      turnCount: 3,
-      environmentUnavailable: false,
-      environmentUnavailableLabel: null,
-      turnInProgress: true,
-      providerRefusal: null,
-      confirmMessage: "Revert?",
-      confirm: async () => true,
-    });
-    expect(result).toEqual({ ok: false, reason: { type: "turn-in-progress" } });
     expect(dispatchCommand).not.toHaveBeenCalled();
   });
 
-  it("refuses providers that cannot forget turns before asking for confirmation", async () => {
-    const { api, dispatchCommand } = fakeApi();
-    const confirm = vi.fn(async () => true);
-    const result = await revertThreadCheckpointWithGuards({
-      api,
-      thread: { id: THREAD_ID },
-      turnCount: 3,
-      environmentUnavailable: false,
-      environmentUnavailableLabel: null,
-      turnInProgress: false,
-      providerRefusal: "Cursor can't remove turns from its conversation.",
-      confirmMessage: "Revert?",
-      confirm,
-    });
-    expect(result).toEqual({
-      ok: false,
-      reason: {
-        type: "provider-unsupported",
-        message: "Cursor can't remove turns from its conversation.",
-      },
-    });
-    expect(confirm).not.toHaveBeenCalled();
-    expect(dispatchCommand).not.toHaveBeenCalled();
+  it("refuses to stop an agent on a node that can't", async () => {
+    const { api } = fakeApi();
+    await expect(
+      stopThreadSubagent(api, THREAD_ID, {
+        taskId: "agent-1",
+        runtimeSessionId: "rt-1",
+        attempt: 0,
+      }),
+    ).rejects.toThrow("This node can't stop single agents.");
   });
 });

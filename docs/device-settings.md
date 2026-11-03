@@ -18,3 +18,21 @@ Name lookup uses existing descriptor and directory state. It does not probe the 
 Under **Projects & threads**, **Worktree branch prefix** sets the selected server's default namespace for automatically generated worktree branches. The default is `ryco`; `team/agent` produces branches such as `team/agent/deadbeef`. Leave it empty to generate branches without a namespace. Enter a valid Git namespace without a trailing slash (maximum 128 characters).
 
 The setting applies to every client connected to that server, including native mobile and agent-created worktrees. Explicit branch names and source-specific issue naming keep their existing behavior. First-turn generated names retain the temporary branch's namespace. Changing the setting does not rename existing branches; reconciliation continues recognizing legacy `ryco/` branches. Internal checkpoint refs remain stable so existing checkpoints stay readable. There is no project override.
+
+## Export and import app preferences
+
+**Settings → General → Export / Import** (this app's own preferences, beside Restore defaults)
+saves or reads one `ryco-client-settings.json` (`apps/web/src/settingsFile/clientSettingsFile.ts`):
+the client settings that travel between machines (`CLIENT_SETTINGS_FILE_SCOPE`; a new client
+setting fails typecheck until it is placed), every appearance setting, the color mode and theme,
+and custom themes. It never carries anything that names a node, an account, a connection or a
+credential, nor machine-local state (onboarding, dismissed notices, model favorites and provider
+model order keyed by node-local instance ids, per-project grouping, the preferred editor).
+Keybindings keep their own file in Settings → Keybindings.
+
+An import is checked before anything is written: every value against its setting's schema, every
+custom theme against the theme file rules. Unknown keys and refused values are listed and keep
+the current value. The dialog lists each change as `key: old -> new`; nothing changes until
+Apply. A custom theme whose id is taken by another theme arrives as a copy, and the theme choice
+follows it. Client settings are saved last; if they cannot be saved, every other value the import
+wrote goes back.

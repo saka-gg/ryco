@@ -21,6 +21,7 @@ import { makeChildStdio, makeTerminationError } from "./_internal/stdio.ts";
 export interface CodexAppServerClientOptions {
   readonly onTermination?: CodexProtocol.CodexAppServerPatchedProtocolOptions["onTermination"];
   readonly requestTimeoutMs?: number;
+  readonly timeoutOrElse?: CodexProtocol.CodexAppServerPatchedProtocolOptions["timeoutOrElse"];
   readonly onNotificationError?: (method: string) => Effect.Effect<void>;
   readonly logIncoming?: boolean;
   readonly logOutgoing?: boolean;
@@ -209,6 +210,7 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
     ...(options.requestTimeoutMs !== undefined
       ? { requestTimeoutMs: options.requestTimeoutMs }
       : {}),
+    ...(options.timeoutOrElse ? { timeoutOrElse: options.timeoutOrElse } : {}),
     onNotification: dispatchNotification,
     onRequest: dispatchRequest,
   });

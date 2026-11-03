@@ -2,6 +2,7 @@ import {
   type ChangeRequest,
   type GitActionProgressEvent,
   type GitActionProgressPhase,
+  type GitActionRecoveryState,
   type GitRunStackedActionResult,
   type GitStackedAction,
   type ScopedThreadRef,
@@ -23,14 +24,13 @@ import {
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { type DraftId, useComposerDraftStore } from "~/composerDraftStore";
 import { ensureEnvironmentApi, readEnvironmentApi } from "~/environmentApi";
-import { requireEnvironmentConnection } from "~/environments/runtime";
 import {
   createGitActionReporter,
   gitActionNoticeKind,
   type GitActionReporter,
 } from "~/gitActionNotices";
 import { useEvent } from "~/hooks/useEvent";
-import { useGitStatus } from "~/lib/gitStatusState";
+import { refreshGitStatus, useGitStatus } from "~/lib/gitStatusState";
 import { newCommandId, randomUUID } from "~/lib/utils";
 import { createVisibilityAwarePoller } from "~/lib/visibilityPolling";
 import { readLocalApi } from "~/localApi";
@@ -39,6 +39,7 @@ import {
   GIT_USER_ACTION_KIND,
   gitMutationTrackingKey,
   gitScopeKey,
+  invalidateScopes,
   useGitActionActivity,
   useGitMutation,
 } from "~/rpc/useGit";
@@ -46,7 +47,7 @@ import { getSourceControlPresentation } from "~/sourceControlPresentation";
 import { useStore } from "~/store";
 import {
   createProjectSelectorByRef,
-  createThreadSelectorByRef,
+  createThreadStructureSelectorByRef,
   createWorktreeSelector,
 } from "~/storeSelectors";
 import {
@@ -77,6 +78,15 @@ export interface GitActionPostPushEvent {
   readonly pullRequestNumber: number | null;
 }
 
+/** The Create PR dialog's choices; nodes advertise `pullRequestOptions` before taking them. */
+export interface GitPullRequestOptions {
+  title?: string;
+  body?: string;
+  draft?: boolean;
+  /** Open the pull request from committed work and leave uncommitted changes out. */
+  allowDirtyWorkingTree?: boolean;
+}
+
 interface PendingDefaultBranchAction {
   action: DefaultBranchConfirmableAction;
   branchName: string;
@@ -84,6 +94,7 @@ interface PendingDefaultBranchAction {
   commitMessage?: string;
   onConfirmed?: () => void;
   filePaths?: string[];
+  pullRequest?: GitPullRequestOptions;
 }
 
 interface ActiveGitActionProgress {
@@ -94,6 +105,7 @@ interface ActiveGitActionProgress {
   hookStartedAtMs: number | null;
   hookName: string | null;
   lastOutputLine: string | null;
+  currentPhase: GitActionProgressPhase | null;
   currentPhaseLabel: string | null;
 }
 
@@ -103,8 +115,10 @@ interface RunGitStackedActionArgs {
   commitMessage?: string;
   featureBranch?: boolean;
   filePaths?: string[];
+  pullRequest?: GitPullRequestOptions;
   worktreeId?: WorktreeId | null;
   onProgress?: (event: GitActionProgressEvent) => void;
+  onRecoveryState?: (state: GitActionRecoveryState) => void;
 }
 
 export interface RunGitActionWithToastInput {
@@ -117,6 +131,7 @@ export interface RunGitActionWithToastInput {
   statusOverride?: VcsStatusResult | null;
   featureBranch?: boolean;
   filePaths?: string[];
+  pullRequest?: GitPullRequestOptions;
 }
 
 function formatElapsedDescription(startedAtMs: number | null): string | undefined {
@@ -132,11 +147,17 @@ function formatElapsedDescription(startedAtMs: number | null): string | undefine
   return `Running for ${minutes}m ${seconds}s`;
 }
 
-function resolveProgressDescription(progress: ActiveGitActionProgress): string | undefined {
+/** Until the node reports the action started. */
+const WAITING_FOR_GIT_DESCRIPTION = "Waiting for Git...";
+
+function resolveProgressDescription(progress: ActiveGitActionProgress): string {
   if (progress.lastOutputLine) {
     return progress.lastOutputLine;
   }
-  return formatElapsedDescription(progress.hookStartedAtMs ?? progress.phaseStartedAtMs);
+  return (
+    formatElapsedDescription(progress.hookStartedAtMs ?? progress.phaseStartedAtMs) ??
+    WAITING_FOR_GIT_DESCRIPTION
+  );
 }
 
 /** The thread the git controls act for, and how to record the branch its checkout is on. */
@@ -145,7 +166,7 @@ export function useThreadBranchPersistence(
   draftId: DraftId | undefined,
 ) {
   const activeServerThreadSelector = useMemo(
-    () => createThreadSelectorByRef(activeThreadRef),
+    () => createThreadStructureSelectorByRef(activeThreadRef),
     [activeThreadRef],
   );
   const activeServerThread = useStore(activeServerThreadSelector);
@@ -366,13 +387,15 @@ export function useGitActionRunner({
       commitMessage,
       featureBranch,
       filePaths,
+      pullRequest,
       worktreeId,
       onProgress,
+      onRecoveryState,
     }) => {
       if (!gitCwd || !activeEnvironmentId) {
         throw new Error("Git action is unavailable.");
       }
-      return requireEnvironmentConnection(activeEnvironmentId).client.git.runStackedAction(
+      return ensureEnvironmentApi(activeEnvironmentId).git.runStackedAction(
         {
           action,
           actionId,
@@ -381,8 +404,18 @@ export function useGitActionRunner({
           ...(commitMessage ? { commitMessage } : {}),
           ...(featureBranch ? { featureBranch: true } : {}),
           ...(filePaths && filePaths.length > 0 ? { filePaths } : {}),
+          ...(pullRequest?.title ? { prTitle: pullRequest.title } : {}),
+          ...(pullRequest?.body ? { prBody: pullRequest.body } : {}),
+          ...(pullRequest?.draft ? { prDraft: true } : {}),
+          ...(pullRequest?.allowDirtyWorkingTree ? { allowDirtyWorkingTree: true } : {}),
         },
-        ...(onProgress ? [{ onProgress }] : []),
+        {
+          // A dropped connection no longer fails the action: the node keeps it
+          // running and its notice follows it again, offering Stop meanwhile.
+          recoverable: true,
+          ...(onProgress ? { onProgress } : {}),
+          ...(onRecoveryState ? { onRecoveryState } : {}),
+        },
       );
     },
     invalidates: gitScopes,
@@ -465,6 +498,7 @@ export function useGitActionRunner({
       statusOverride,
       featureBranch = false,
       filePaths,
+      pullRequest,
     }: RunGitActionWithToastInput) => {
       const actionStatus = statusOverride ?? gitStatusForActions;
       const actionBranch = actionStatus?.refName ?? null;
@@ -494,6 +528,7 @@ export function useGitActionRunner({
           ...(commitMessage ? { commitMessage } : {}),
           ...(onConfirmed ? { onConfirmed } : {}),
           ...(filePaths ? { filePaths } : {}),
+          ...(pullRequest ? { pullRequest } : {}),
         });
         return;
       }
@@ -508,18 +543,25 @@ export function useGitActionRunner({
         shouldPushBeforePr:
           action === "create_pr" &&
           (!actionStatus?.hasUpstream || (actionStatus?.aheadCount ?? 0) > 0),
+        hasCustomPullRequestText: !!pullRequest?.title && !!pullRequest.body,
       });
       const actionThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
       const actionId = randomUUID();
+      const environmentId = activeEnvironmentId;
       // The crown showing this checkout reports the action; otherwise toasts do.
       const reporter = createGitActionReporter({
         id: actionId,
         kind: gitActionNoticeKind(action),
-        environmentId: activeEnvironmentId,
+        environmentId,
         cwd: gitCwd,
         toastData: threadToastData ? { ...threadToastData } : undefined,
+        // Through the environment's connection at the time of the click.
+        stop: () =>
+          environmentId
+            ? readEnvironmentApi(environmentId)?.git.cancelStackedAction?.({ actionId })
+            : undefined,
       });
-      reporter.running(progressStages[0] ?? "Running git action...", "Waiting for Git...");
+      reporter.running(progressStages[0] ?? "Running git action...", WAITING_FOR_GIT_DESCRIPTION);
 
       setActiveGitActionProgress({
         reporter,
@@ -529,9 +571,12 @@ export function useGitActionRunner({
         hookStartedAtMs: null,
         hookName: null,
         lastOutputLine: null,
+        currentPhase: null,
         currentPhaseLabel: progressStages[0] ?? "Running git action...",
       });
 
+      // A run followed again after a reconnect replays its start, current phase
+      // and running hook: those keep their clocks instead of starting over.
       const applyProgressEvent = (event: GitActionProgressEvent) => {
         const progress = activeGitActionProgressRef.current;
         if (!progress) {
@@ -543,18 +588,22 @@ export function useGitActionRunner({
         if (progress.actionId !== event.actionId) {
           return;
         }
+        reporter.onProgress(event);
 
         const now = Date.now();
         switch (event.kind) {
           case "action_started":
+            if (progress.phaseStartedAtMs !== null) break;
             progress.phaseStartedAtMs = now;
             progress.hookStartedAtMs = null;
             progress.hookName = null;
             progress.lastOutputLine = null;
             break;
           case "phase_started":
+            if (progress.currentPhase === event.phase) break;
             onProgressPhase?.(event.phase);
             progress.title = event.label;
+            progress.currentPhase = event.phase;
             progress.currentPhaseLabel = event.label;
             progress.phaseStartedAtMs = now;
             progress.hookStartedAtMs = null;
@@ -562,6 +611,7 @@ export function useGitActionRunner({
             progress.lastOutputLine = null;
             break;
           case "hook_started":
+            if (progress.hookName === event.hookName) break;
             progress.title = `Running ${event.hookName}...`;
             progress.hookName = event.hookName;
             progress.hookStartedAtMs = now;
@@ -598,7 +648,9 @@ export function useGitActionRunner({
         ...(commitMessage ? { commitMessage } : {}),
         ...(featureBranch ? { featureBranch } : {}),
         ...(filePaths ? { filePaths } : {}),
+        ...(pullRequest ? { pullRequest } : {}),
         onProgress: applyProgressEvent,
+        onRecoveryState: reporter.onRecoveryState,
       });
       // Ticks the elapsed time for as long as the action runs, not as long as
       // this control is mounted: a hover preview closes right after the click.
@@ -647,42 +699,52 @@ export function useGitActionRunner({
           action: followUp,
         });
       };
+      const finishFailed = (err: unknown) => {
+        elapsedTicker.stop();
+        clearActiveGitActionProgress();
+        // Stopped or unconfirmed: some steps may have run, so read the checkout again.
+        if (reporter.rejected(err, "Action failed")) {
+          invalidateScopes(gitScopes);
+          if (environmentId && gitCwd) {
+            void refreshGitStatus({ environmentId, cwd: gitCwd }).catch(() => undefined);
+          }
+        }
+      };
 
       try {
         finishSucceeded(await promise);
       } catch (err) {
-        elapsedTicker.stop();
-        clearActiveGitActionProgress();
-        reporter.failed({
-          title: "Action failed",
-          description: err instanceof Error ? err.message : "An error occurred.",
-        });
+        finishFailed(err);
       }
     },
   );
 
   const continuePendingDefaultBranchAction = useEvent(() => {
     if (!pendingDefaultBranchAction) return;
-    const { action, commitMessage, onConfirmed, filePaths } = pendingDefaultBranchAction;
+    const { action, commitMessage, onConfirmed, filePaths, pullRequest } =
+      pendingDefaultBranchAction;
     setPendingDefaultBranchAction(null);
     void runGitActionWithToast({
       action,
       ...(commitMessage ? { commitMessage } : {}),
       ...(onConfirmed ? { onConfirmed } : {}),
       ...(filePaths ? { filePaths } : {}),
+      ...(pullRequest ? { pullRequest } : {}),
       skipDefaultBranchPrompt: true,
     });
   });
 
   const checkoutFeatureBranchAndContinuePendingAction = useEvent(() => {
     if (!pendingDefaultBranchAction) return;
-    const { action, commitMessage, onConfirmed, filePaths } = pendingDefaultBranchAction;
+    const { action, commitMessage, onConfirmed, filePaths, pullRequest } =
+      pendingDefaultBranchAction;
     setPendingDefaultBranchAction(null);
     void runGitActionWithToast({
       action,
       ...(commitMessage ? { commitMessage } : {}),
       ...(onConfirmed ? { onConfirmed } : {}),
       ...(filePaths ? { filePaths } : {}),
+      ...(pullRequest ? { pullRequest } : {}),
       featureBranch: true,
       skipDefaultBranchPrompt: true,
     });

@@ -225,14 +225,14 @@ describe("ProjectTransfersLive", () => {
           const transfers = yield* openStore(stateDir);
           // Refused before anything exists on disk.
           const refused = newTransferId();
-          const denied = yield* Effect.flip(transfers.begin(sensitive(refused), "relay-plaintext"));
+          const denied = yield* Effect.flip(transfers.begin(sensitive(refused), "unencrypted"));
           expect(denied.code).toBe("access-denied");
           expect(listTransfers(stateDir)).toEqual([]);
 
-          yield* transfers.begin(sensitive(transferId), "relay-e2ee");
+          yield* transfers.begin(sensitive(transferId), "encrypted");
           yield* transfers.append(
             { transferId, offset: 0, dataBase64: chunk(bytes, 0) },
-            "relay-e2ee",
+            "encrypted",
           );
         }),
       );
@@ -244,25 +244,25 @@ describe("ProjectTransfersLive", () => {
         offset: PROJECT_COPY_CHUNK_BYTES,
         dataBase64: chunk(bytes, PROJECT_COPY_CHUNK_BYTES),
       };
-      expect((yield* Effect.flip(transfers.append(rest, "relay-plaintext"))).code).toBe(
+      expect((yield* Effect.flip(transfers.append(rest, "unencrypted"))).code).toBe(
         "access-denied",
       );
-      expect(
-        (yield* Effect.flip(transfers.begin(sensitive(transferId), "relay-plaintext"))).code,
-      ).toBe("access-denied");
+      expect((yield* Effect.flip(transfers.begin(sensitive(transferId), "unencrypted"))).code).toBe(
+        "access-denied",
+      );
       // Its declaration is part of the begin: it cannot be taken back under the same id.
       expect(
-        (yield* Effect.flip(transfers.begin(sensitive(transferId, false), "relay-plaintext"))).code,
+        (yield* Effect.flip(transfers.begin(sensitive(transferId, false), "unencrypted"))).code,
       ).toBe("conflict");
-      expect((yield* transfers.append(rest, "direct")).receivedBytes).toBe(bytes.byteLength);
+      expect((yield* transfers.append(rest, "encrypted")).receivedBytes).toBe(bytes.byteLength);
       yield* transfers.commit({ transferId });
 
       // Bytes without ignored files travel over any channel; calls from the node itself declare none.
       const plain = newTransferId();
-      yield* transfers.begin(sensitive(plain, false), "relay-plaintext");
+      yield* transfers.begin(sensitive(plain, false), "unencrypted");
       yield* transfers.append(
         { transferId: plain, offset: 0, dataBase64: chunk(bytes, 0) },
-        "relay-plaintext",
+        "unencrypted",
       );
       const internal = newTransferId();
       yield* transfers.begin(sensitive(internal));

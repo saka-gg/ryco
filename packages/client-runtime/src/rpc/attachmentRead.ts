@@ -5,6 +5,54 @@ import {
   type ChatAttachmentReadChunkResult,
 } from "@ryco/contracts/orchestration";
 
+/** The longest base64 text that can encode `maxChunkBytes` bytes. */
+export function maxBase64ChunkLength(maxChunkBytes: number): number {
+  return 4 * Math.ceil(maxChunkBytes / 3);
+}
+
+/**
+ * One base64 chunk as bytes, or null for an empty chunk or one longer than
+ * `maxChunkBytes` (either as text or once decoded), so each reader can refuse
+ * it in its own words.
+ */
+export function decodeByteChunk(
+  dataBase64: string,
+  maxChunkBytes: number,
+): Uint8Array<ArrayBuffer> | null {
+  if (dataBase64.length > maxBase64ChunkLength(maxChunkBytes)) return null;
+  const chunk = atob(dataBase64);
+  if (chunk.length === 0 || chunk.length > maxChunkBytes) return null;
+  const bytes = new Uint8Array(chunk.length);
+  for (let index = 0; index < chunk.length; index++) bytes[index] = chunk.charCodeAt(index);
+  return bytes;
+}
+
+/**
+ * Runs `read` against the transport function current now. Every call through
+ * the pinned `call`, and the end of the read, fail with `changed` when
+ * `current()` no longer returns the same function, so a replacement
+ * connection never contributes to an earlier attempt.
+ */
+export async function readOverPinnedTransport<Request, Response, Result>(input: {
+  /** The environment's authorized transport function right now; undefined while disconnected. */
+  readonly current: () => ((request: Request) => Promise<Response>) | undefined;
+  readonly unavailable: string;
+  readonly changed: string;
+  readonly read: (call: (request: Request) => Promise<Response>) => Promise<Result>;
+}): Promise<Result> {
+  const pinned = input.current();
+  if (!pinned) throw new Error(input.unavailable);
+  const assertCurrent = () => {
+    if (input.current() !== pinned) throw new Error(input.changed);
+  };
+  const result = await input.read((request) => {
+    assertCurrent();
+    return pinned(request);
+  });
+  assertCurrent();
+  return result;
+}
+
 /** Sequential, bounded reads over the existing authorized transport; no URLs or platform imports. */
 export async function readAttachmentBytes(input: {
   reference: Omit<ChatAttachmentReadChunkInput, "offset">;
@@ -26,18 +74,13 @@ export async function readAttachmentBytes(input: {
     if (
       result.offset !== offset ||
       result.totalBytes !== bytes.length ||
-      result.dataBase64.length > 4 * Math.ceil(CHAT_ATTACHMENT_READ_CHUNK_BYTES / 3)
+      result.dataBase64.length > maxBase64ChunkLength(CHAT_ATTACHMENT_READ_CHUNK_BYTES)
     )
       throw new Error("Attachment changed during loading.");
-    const chunk = atob(result.dataBase64);
-    if (
-      chunk.length === 0 ||
-      chunk.length > CHAT_ATTACHMENT_READ_CHUNK_BYTES ||
-      offset + chunk.length > bytes.length
-    )
+    const chunk = decodeByteChunk(result.dataBase64, CHAT_ATTACHMENT_READ_CHUNK_BYTES);
+    if (chunk === null || offset + chunk.length > bytes.length)
       throw new Error("Invalid attachment chunk.");
-    for (let index = 0; index < chunk.length; index++)
-      bytes[offset + index] = chunk.charCodeAt(index);
+    bytes.set(chunk, offset);
     offset += chunk.length;
   }
   return bytes;
@@ -61,21 +104,16 @@ export async function readAttachmentBytesFromTransport(input: {
   currentTransport: () => AttachmentReadTransport | undefined;
   signal?: AbortSignal;
 }): Promise<Uint8Array<ArrayBuffer>> {
-  const transport = input.currentTransport();
-  if (!transport) throw new Error("Attachment connection unavailable.");
-  const assertCurrent = () => {
-    if (input.currentTransport()?.readChunk !== transport.readChunk)
-      throw new Error("Attachment connection changed.");
-  };
-  const bytes = await readAttachmentBytes({
-    reference: input.reference,
-    sizeBytes: input.sizeBytes,
-    ...(input.signal ? { signal: input.signal } : {}),
-    readChunk: (chunk) => {
-      assertCurrent();
-      return transport.readChunk(chunk);
-    },
+  return readOverPinnedTransport({
+    current: () => input.currentTransport()?.readChunk,
+    unavailable: "Attachment connection unavailable.",
+    changed: "Attachment connection changed.",
+    read: (readChunk) =>
+      readAttachmentBytes({
+        reference: input.reference,
+        sizeBytes: input.sizeBytes,
+        ...(input.signal ? { signal: input.signal } : {}),
+        readChunk,
+      }),
   });
-  assertCurrent();
-  return bytes;
 }

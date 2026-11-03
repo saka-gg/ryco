@@ -9,6 +9,7 @@ import {
   Duration,
   Effect,
   Exit,
+  Fiber,
   FileSystem,
   Layer,
   Option,
@@ -34,6 +35,8 @@ import {
   ModelSelection,
   type OrchestrationProjectShell,
   type ServerSettings,
+  type ChangeRequestTemplateListInput,
+  type ChangeRequestTemplateListResult,
 } from "@ryco/contracts";
 import {
   parseGitHubRepositoryNameWithOwnerFromRemoteUrl,
@@ -51,29 +54,47 @@ import {
 import { GitManagerError } from "@ryco/contracts";
 import { TextGeneration } from "../textGeneration/TextGeneration.ts";
 import type { TextGenerationPolicy } from "../textGeneration/TextGenerationPolicy.ts";
-import { gitWritingPolicyFromSettings } from "../textGeneration/TextGenerationPresets.ts";
+import type { ChangeRequestTemplates } from "../sourceControl/changeRequestTemplates.ts";
 import { ProjectSetupScriptRunner } from "../project/Services/ProjectSetupScriptRunner.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { resolveProjectPreferences } from "../project/projectPreferences.ts";
+import {
+  resolveProjectPreferences,
+  resolveProjectPreferenceValue,
+} from "../project/projectPreferences.ts";
 import { extractBranchNameFromRemoteRef } from "./remoteRefs.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import type { GitManagerServiceError } from "@ryco/contracts";
 import {
   GitVcsDriver,
+  type GitPreparedCommitContext,
+  type GitStagedIndexGuard,
   type GitStatusDetails,
   type GitWorktreeCreationContext,
 } from "../vcs/GitVcsDriver.ts";
-import { SourceControlProviderRegistry } from "../sourceControl/SourceControlProviderRegistry.ts";
-import type { SourceControlProviderShape } from "../sourceControl/SourceControlProvider.ts";
+import {
+  forgePausedUntil,
+  SourceControlProviderRegistry,
+} from "../sourceControl/SourceControlProviderRegistry.ts";
+import type {
+  SourceControlProviderContext,
+  SourceControlProviderShape,
+} from "../sourceControl/SourceControlProvider.ts";
 import {
   BRANCH_CHANGE_REQUEST_LIMIT,
+  changeRequestHostKey,
   lookupIndexedChangeRequest,
   makePullRequestIndex,
   pullRequestIndexRepositoryKey,
   type PullRequestIndexScope,
 } from "../sourceControl/pullRequestIndex.ts";
-import { makeRepositoryListCache } from "../sourceControl/repositoryListCache.ts";
+import { pausedUntilOf } from "../sourceControl/lastGoodWhilePaused.ts";
+import {
+  makeRepositoryListCache,
+  type RepositoryChanges,
+} from "../sourceControl/repositoryListCache.ts";
+import { inBackgroundProcessLane } from "../processGovernor.ts";
 import { makeCheckoutGenerations } from "./checkoutGenerations.ts";
+import { RestartSensitiveWork } from "../updates/restartSensitiveWork.ts";
 import { readCheckoutHead } from "../vcs/gitCheckoutHead.ts";
 import type { ChangeRequest, PullRequestState, SourceControlProviderError } from "@ryco/contracts";
 
@@ -84,6 +105,12 @@ export interface GitActionProgressReporter {
 export interface GitRunStackedActionOptions {
   readonly actionId?: string;
   readonly progressReporter?: GitActionProgressReporter;
+  /**
+   * The project the checkout belongs to, resolved by the server from `cwd` (never client
+   * input). Read only when the action generates text, for the project's writing style.
+   * Absent: the node's writing style applies.
+   */
+  readonly checkoutProjectId?: Effect.Effect<string | null>;
 }
 
 /** Server-only creation snapshot; RPC callers cannot supply settings or project authority. */
@@ -142,15 +169,52 @@ export interface GitManagerShape {
     readonly load: Effect.Effect<A, E, R>;
     /** Shorter lifetime for reads that go stale faster than lists (details). */
     readonly ttlMs?: number;
+    /**
+     * Keep the last good value for background readers while the forge is rate limiting
+     * (see `lastGoodWhilePaused`): for reads background readers make, not for large ones.
+     */
+    readonly lastGood?: boolean;
+    /**
+     * Read through this instead of `load`, told what the repository went through (see
+     * `repositoryListCache`): remote refreshes say a fingerprint must be newer than them (a
+     * poll's says nothing changed), change request mutations (`invalidateRepositoryLists`)
+     * that only a full read will do.
+     */
+    readonly revalidate?: (changes: RepositoryChanges) => Effect.Effect<A, E, R>;
   }) => Effect.Effect<A, E, R>;
-  /** Drops `cwd`'s repository's cached list reads (after a change request mutation). */
+  /**
+   * A forge read for the involvement list across repositories
+   * (`sourceControl.listInvolvedChangeRequests`), cached apart from the repository lists:
+   * `host` scope keys it by `cwd`'s host (one search spans every repository there),
+   * `repository` scope by `cwd`'s repository. Change request mutations drop both
+   * (`invalidateRepositoryLists`); remote refreshes, which fire on every periodic poll, do
+   * not. Without a known host the read runs uncached.
+   */
+  readonly cachedInvolvedList: <A, E, R>(input: {
+    readonly cwd: string;
+    readonly scope: "host" | "repository";
+    readonly key: string;
+    readonly load: Effect.Effect<A, E, R>;
+    readonly ttlMs: number;
+    readonly maxAgeMs?: number;
+    /** Lifetime of an entry stored within `ttlMs` of a mutation dropping it (search lag). */
+    readonly settleTtlMs?: number;
+  }) => Effect.Effect<A, E, R>;
+  /**
+   * Drops `cwd`'s repository's cached list reads and its host's involvement reads (after a
+   * change request mutation).
+   */
   readonly invalidateRepositoryLists: (cwd: string) => Effect.Effect<void>;
   /** State and draft flag of the repository's indexed change requests; never asks the forge. */
   readonly indexedPullRequestStates: (
     cwd: string,
   ) => Effect.Effect<ReadonlyMap<number, IndexedPullRequestState>, never>;
   readonly invalidateLocalStatus: (cwd: string) => Effect.Effect<void, never>;
-  readonly invalidateRemoteStatus: (cwd: string) => Effect.Effect<void, never>;
+  /** `periodic`: a poll's refresh, which says nothing changed (cached row details may stand). */
+  readonly invalidateRemoteStatus: (
+    cwd: string,
+    options?: { readonly periodic?: boolean },
+  ) => Effect.Effect<void, never>;
   readonly invalidateStatus: (cwd: string) => Effect.Effect<void, never>;
   readonly resolvePullRequest: (
     input: GitPullRequestRefInput,
@@ -163,6 +227,14 @@ export interface GitManagerShape {
     input: GitRunStackedActionInput,
     options?: GitRunStackedActionOptions,
   ) => Effect.Effect<GitRunStackedActionResult, GitManagerServiceError>;
+  /**
+   * The change request templates of the base branch's tree (the remote's branch, else the
+   * local one) on hosts whose layout Ryco reads, and the one a generated description follows.
+   * Never fails: none on errors.
+   */
+  readonly listChangeRequestTemplates: (
+    input: ChangeRequestTemplateListInput,
+  ) => Effect.Effect<ChangeRequestTemplateListResult>;
 }
 
 export interface RemoteStatusOptions {
@@ -177,6 +249,11 @@ export interface VcsRefSummary {
   readonly hasUpstream: boolean;
   readonly sourceControlProvider: VcsStatusLocalResult["sourceControlProvider"] | null;
   readonly pr: VcsStatusRemoteResult["pr"];
+  /**
+   * `pr` was looked up in a listing served while the forge is rate limiting: it may be stale,
+   * so it is no proof for link writes or destructive decisions.
+   */
+  readonly prServedWhilePaused?: boolean;
 }
 
 export interface IndexedPullRequestState {
@@ -223,7 +300,16 @@ const pullRequestUpdatedAtDescOrder: Order.Order<PullRequestInfo> = Order.mapInp
 
 interface PullRequestIndexTarget {
   readonly repository: string;
+  /** `changeRequestHostKey` of the repository's host; null without a host name. */
+  readonly host: string | null;
   readonly provider: SourceControlProviderShape;
+  readonly context: SourceControlProviderContext;
+}
+
+/** A branch's change request, and whether a listing served while paused answered it. */
+interface LatestPullRequest {
+  readonly match: PullRequestInfo | null;
+  readonly servedWhilePaused: boolean;
 }
 
 interface ResolvedPullRequest {
@@ -507,10 +593,38 @@ function sanitizeProgressText(value: string): string | null {
   return trimmed.slice(0, MAX_PROGRESS_TEXT_LENGTH).trimEnd();
 }
 
-/** The model and the user's instructions for generated commit and pull request text. */
+/** The model and the writing policy for generated commit and pull request text. */
 interface GitWriting {
   readonly modelSelection: ModelSelection;
-  readonly policy: TextGenerationPolicy | undefined;
+  /**
+   * The writing style, the user's instructions and the repository's examples. Resolved on
+   * first use and at most once per action, so only generated text pays for its reads.
+   */
+  readonly policy: Effect.Effect<TextGenerationPolicy | undefined>;
+  /**
+   * Generated pull request descriptions follow the repository's template: the checkout's project
+   * may override the node setting. Resolved when the pull request step runs.
+   */
+  readonly pullRequestTemplates: Effect.Effect<boolean>;
+}
+
+/**
+ * The user's commit and pull request instructions without a style, or nothing when none are
+ * set: the policy when the writing style module cannot load. Built here, not from the presets,
+ * so boot still loads none of the writing style code.
+ */
+function instructionsOnlyWritingPolicy(
+  settings: Pick<ServerSettings, "commitMessageInstructions" | "pullRequestInstructions">,
+): TextGenerationPolicy | undefined {
+  const commitInstructions = settings.commitMessageInstructions.trim();
+  const changeRequestInstructions = settings.pullRequestInstructions.trim();
+  if (!commitInstructions && !changeRequestInstructions) return undefined;
+  return {
+    kind: "custom",
+    inferRepositoryConventions: false,
+    ...(commitInstructions ? { commitInstructions } : {}),
+    ...(changeRequestInstructions ? { changeRequestInstructions } : {}),
+  };
 }
 
 interface CommitAndBranchSuggestion {
@@ -518,6 +632,18 @@ interface CommitAndBranchSuggestion {
   body: string;
   branch?: string | undefined;
   commitMessage: string;
+  /** Set for a staged-only commit: what the commit must still find staged. */
+  stagedIndex?: GitStagedIndexGuard | undefined;
+}
+
+/** Which changes a commit records: selected files, every change, or exactly the index. */
+type CommitSelection = Pick<GitRunStackedActionInput, "filePaths" | "stagedOnly">;
+
+/** The user's own pull request text and draft choice, from `prTitle` / `prBody` / `prDraft`. */
+interface PullRequestStepOptions {
+  readonly title?: string;
+  readonly body?: string;
+  readonly draft?: true;
 }
 
 function isCommitAction(
@@ -664,7 +790,14 @@ function toPullRequestHeadRemoteInfo(pr: {
   };
 }
 
-export const makeGitManager = Effect.fn("makeGitManager")(function* () {
+export interface MakeGitManagerOptions {
+  /** Loads the writing style module; tests replace it with a load that fails. */
+  readonly importGitWritingPolicy?: () => Promise<typeof import("./gitWritingPolicy.ts")>;
+}
+
+export const makeGitManager = Effect.fn("makeGitManager")(function* (
+  managerOptions?: MakeGitManagerOptions,
+) {
   const gitCore = yield* GitVcsDriver;
   const sourceControlProviders = yield* SourceControlProviderRegistry;
   const textGeneration = yield* TextGeneration;
@@ -673,6 +806,8 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
 
   const sourceControlProvider = (cwd: string) => sourceControlProviders.resolve({ cwd });
   const serverSettingsService = yield* ServerSettingsService;
+  // A pull request checkout (its fetches, its worktree) cut off by a restart is left half made.
+  const restartWork = yield* RestartSensitiveWork;
 
   const createProgressEmitter = (
     input: { cwd: string; action: GitStackedAction },
@@ -1000,7 +1135,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
             upstreamRef: details.upstreamRef,
             isDefaultBranch: details.isDefaultBranch,
           }).pipe(
-            Effect.map((latest) => {
+            Effect.map(({ match: latest }) => {
               if (!latest) return null;
               // On the default branch, only surface open PRs.
               // Merged/closed matches are usually reverse-merge history, not the thread's PR context.
@@ -1012,6 +1147,9 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
 
     return {
       hasUpstream: details.hasUpstream,
+      upstreamRef: details.upstreamRef,
+      // Read with the counts, so with nothing ahead it is a commit of the upstream.
+      ...(details.headCommit ? { headCommit: details.headCommit } : {}),
       aheadCount: details.aheadCount,
       behindCount: details.behindCount,
       aheadOfDefaultCount: details.aheadOfDefaultCount,
@@ -1197,25 +1335,112 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
                 providerKind: handle.provider.kind,
                 remoteUrl: handle.context.remoteUrl,
               }),
+              host: changeRequestHostKey({
+                providerKind: handle.provider.kind,
+                baseUrl: handle.context.provider.baseUrl,
+              }),
               provider: handle.provider,
+              context: handle.context,
             },
       ),
       Effect.catch(() => Effect.succeed(null)),
     );
 
   const repositoryListCache = makeRepositoryListCache();
+  // Its own cache: page lists never join a background involvement read, and remote
+  // refreshes leave it alone.
+  const involvedListCache = makeRepositoryListCache();
 
-  const invalidatePullRequestIndex = (cwd: string) =>
+  // The writing style code (presets, example reader) loads with the first generated text. No
+  // result is kept here: the module system holds the loaded module, and a load that failed is
+  // attempted again by the next action rather than failing every later one until a restart.
+  const importGitWritingPolicy =
+    managerOptions?.importGitWritingPolicy ?? (() => import("./gitWritingPolicy.ts"));
+
+  /**
+   * Example reads that fail or time out leave the examples out; they never fail the action.
+   * When the module cannot load (an update replaced the running server's files), the style is
+   * left out as well and the user's own instructions apply alone, as before writing styles.
+   */
+  const resolveWritingPolicy = (
+    cwd: string,
+    settings: ServerSettings,
+    checkoutProjectId: Effect.Effect<string | null> | undefined,
+  ): Effect.Effect<TextGenerationPolicy | undefined> =>
+    Effect.tryPromise(() => importGitWritingPolicy()).pipe(
+      Effect.matchEffect({
+        onFailure: (error) =>
+          Effect.logWarning("writing style failed to load; using the instructions alone", {
+            cause: error.cause,
+          }).pipe(Effect.as(instructionsOnlyWritingPolicy(settings))),
+        onSuccess: ({ resolveGitWritingPolicy }) =>
+          resolveGitWritingPolicy({
+            cwd,
+            settings,
+            projectId: checkoutProjectId ?? Effect.succeed(null),
+            git: gitCore,
+            peekChangeRequestListings: resolvePullRequestIndexTarget(cwd).pipe(
+              Effect.flatMap((target) =>
+                target === null ? Effect.succeed([]) : pullRequestIndex.peek(target.repository),
+              ),
+            ),
+          }),
+      }),
+    );
+
+  // Pull request templates load on first use. One instance serves the pull request step and the
+  // create dialog, so both share its cache; a load that failed gives no templates.
+  let changeRequestTemplates: ChangeRequestTemplates | undefined;
+  const withChangeRequestTemplates = <A>(
+    use: (templates: ChangeRequestTemplates) => Effect.Effect<A>,
+    orElse: Effect.Effect<A>,
+  ) =>
+    Effect.tryPromise(() => import("../sourceControl/changeRequestTemplates.ts")).pipe(
+      Effect.matchEffect({
+        onFailure: () => orElse,
+        onSuccess: (module) =>
+          use((changeRequestTemplates ??= module.makeChangeRequestTemplates(gitCore))),
+      }),
+    );
+
+  const listChangeRequestTemplates: GitManagerShape["listChangeRequestTemplates"] = (input) =>
+    withChangeRequestTemplates(
+      (templates) => templates.list(input, sourceControlProvider(input.cwd)),
+      Effect.succeed({ templates: [], generationTemplatePath: null }),
+    );
+
+  /**
+   * Whether background reads to the target's forge are still paused after a rate limit. An
+   * invalidation keeps the forge's held rate-limited answers while they are (the periodic
+   * remote refresh would otherwise ask again every poll); a request of the user's that got
+   * through ends a guessed pause, and the next invalidation drops them.
+   */
+  const forgeStillPaused = (target: PullRequestIndexTarget) =>
+    inBackgroundProcessLane(forgePausedUntil(target.context)).pipe(
+      Effect.map((pausedUntil) => pausedUntil !== null),
+    );
+
+  const invalidatePullRequestIndex = (cwd: string, options?: { readonly periodic?: boolean }) =>
     resolvePullRequestIndexTarget(cwd).pipe(
       Effect.flatMap((target) =>
         target === null
           ? Effect.void
-          : Effect.all(
-              [
-                pullRequestIndex.invalidate(target.repository),
-                repositoryListCache.invalidate(target.repository),
-              ],
-              { discard: true },
+          : Effect.cached(forgeStillPaused(target)).pipe(
+              Effect.flatMap((keepHeldWhile) =>
+                Effect.all(
+                  [
+                    pullRequestIndex.invalidate(target.repository, { keepHeldWhile }),
+                    // A refresh follows git actions, agent turns and polls, not edits made
+                    // through Ryco: a row detail may stand on a fingerprint, given since the
+                    // refresh unless it is a poll's.
+                    repositoryListCache.invalidate(target.repository, {
+                      keepHeldWhile,
+                      revalidate: options?.periodic === true ? "reuse" : "fresh",
+                    }),
+                  ],
+                  { discard: true },
+                ),
+              ),
             ),
       ),
     );
@@ -1239,8 +1464,36 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
   const invalidateRepositoryLists: GitManagerShape["invalidateRepositoryLists"] = (cwd) =>
     resolvePullRequestIndexTarget(cwd).pipe(
       Effect.flatMap((target) =>
-        target === null ? Effect.void : repositoryListCache.invalidate(target.repository),
+        target === null
+          ? Effect.void
+          : Effect.all(
+              [
+                repositoryListCache.invalidate(target.repository, {
+                  keepHeldWhile: forgeStillPaused(target),
+                }),
+                involvedListCache.invalidate(target.repository),
+                target.host === null ? Effect.void : involvedListCache.invalidate(target.host),
+              ],
+              { discard: true },
+            ),
       ),
+    );
+
+  const cachedInvolvedList: GitManagerShape["cachedInvolvedList"] = (input) =>
+    resolvePullRequestIndexTarget(input.cwd).pipe(
+      Effect.flatMap((target) => {
+        const id = input.scope === "host" ? (target?.host ?? null) : (target?.repository ?? null);
+        return id === null
+          ? input.load
+          : involvedListCache.get({
+              repository: id,
+              key: input.key,
+              load: input.load,
+              ttlMs: input.ttlMs,
+              ...(input.maxAgeMs !== undefined ? { maxAgeMs: input.maxAgeMs } : {}),
+              ...(input.settleTtlMs !== undefined ? { settleTtlMs: input.settleTtlMs } : {}),
+            });
+      }),
     );
 
   const cachedRepositoryList: GitManagerShape["cachedRepositoryList"] = (input) =>
@@ -1253,6 +1506,8 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
               key: input.key,
               load: input.load,
               ...(input.ttlMs !== undefined ? { ttlMs: input.ttlMs } : {}),
+              ...(input.lastGood !== undefined ? { lastGood: input.lastGood } : {}),
+              ...(input.revalidate !== undefined ? { revalidate: input.revalidate } : {}),
             }),
       ),
     );
@@ -1262,15 +1517,18 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     target: PullRequestIndexTarget,
     headContext: BranchHeadContext,
     openOnly: boolean,
+    noteServed: <V>(value: V) => V,
   ) {
     return yield* lookupIndexedChangeRequest({
       readListing: (scope) =>
-        pullRequestIndex.read({
-          repository: target.repository,
-          scope,
-          cwd,
-          provider: target.provider,
-        }),
+        pullRequestIndex
+          .read({
+            repository: target.repository,
+            scope,
+            cwd,
+            provider: target.provider,
+          })
+          .pipe(Effect.map(noteServed)),
       matches: (item) => {
         const pr = toPullRequestInfo(item);
         return matchesBranchHeadContext(pr, headContext) ? pr : null;
@@ -1289,15 +1547,28 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     details: { branch: string; upstreamRef: string | null; isDefaultBranch: boolean },
   ) {
     const headContext = yield* resolveBranchHeadContext(cwd, details, { statusRead: true });
+    // A background reader may be answered from listings served while the forge
+    // is rate limiting; the answer then says so.
+    let servedWhilePaused = false;
+    const noteServed = <V>(value: V): V => {
+      if (pausedUntilOf(value) !== null) servedWhilePaused = true;
+      return value;
+    };
     // One listing per repository answers most branches; only a branch it
     // cannot answer for (older than the recent window) asks per head selector,
     // and those answers are cached per repository too. A failed listing fails
     // the lookup instead of fanning out into per-branch calls to the same host.
     const target = yield* resolvePullRequestIndexTarget(cwd);
     if (target !== null) {
-      const indexed = yield* findLatestPrInIndex(cwd, target, headContext, details.isDefaultBranch);
+      const indexed = yield* findLatestPrInIndex(
+        cwd,
+        target,
+        headContext,
+        details.isDefaultBranch,
+        noteServed,
+      );
       if (indexed.resolved) {
-        return indexed.match;
+        return { match: indexed.match, servedWhilePaused };
       }
     }
     const parsedByNumber = new Map<number, PullRequestInfo>();
@@ -1313,12 +1584,14 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
               includeStackSummary: false,
               fields: "summary",
             })
-          : yield* pullRequestIndex.readBranch({
-              repository: target.repository,
-              headSelector,
-              cwd,
-              provider: target.provider,
-            });
+          : yield* pullRequestIndex
+              .readBranch({
+                repository: target.repository,
+                headSelector,
+                cwd,
+                provider: target.provider,
+              })
+              .pipe(Effect.map(noteServed));
 
       for (const pr of pullRequests.map(toPullRequestInfo)) {
         if (!matchesBranchHeadContext(pr, headContext)) {
@@ -1331,10 +1604,10 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     const parsed = Arr.sort(parsedByNumber.values(), pullRequestUpdatedAtDescOrder);
 
     const latestOpenPr = parsed.find((pr) => pr.state === "open");
-    if (latestOpenPr) {
-      return latestOpenPr;
-    }
-    return parsed[0] ?? null;
+    return {
+      match: latestOpenPr ?? parsed[0] ?? null,
+      servedWhilePaused,
+    } satisfies LatestPullRequest;
   });
 
   const buildCompletionToast = Effect.fn("buildCompletionToast")(function* (
@@ -1467,15 +1740,26 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
       commitMessage?: string;
       /** When true, also produce a semantic feature branch name. */
       includeBranch?: boolean;
-      filePaths?: readonly string[];
+      selection: CommitSelection;
       writing: GitWriting;
     }) {
-      const context = yield* gitCore.prepareCommitContext(input.cwd, input.filePaths);
+      const stagedOnly = input.selection.stagedOnly;
+      const readContext = stagedOnly
+        ? gitCore.prepareStagedCommitContext(input.cwd, stagedOnly.expectedRevision)
+        : gitCore.prepareCommitContext(input.cwd, input.selection.filePaths);
+      const customCommit = parseCustomCommitMessage(input.commitMessage ?? "");
+      // A generated message's writing policy (repository reads included) overlaps the context
+      // read; a custom message needs neither the policy nor its reads. With nothing to commit
+      // the policy is not awaited: a later pull request step joins the same cached run, and
+      // the action's end stops it otherwise.
+      const policyFiber = customCommit ? null : yield* Effect.forkChild(input.writing.policy);
+      const context: (GitPreparedCommitContext & { stagedIndex?: GitStagedIndexGuard }) | null =
+        yield* readContext;
       if (!context) {
         return null;
       }
+      const stagedIndex = context.stagedIndex ? { stagedIndex: context.stagedIndex } : {};
 
-      const customCommit = parseCustomCommitMessage(input.commitMessage ?? "");
       if (customCommit) {
         return {
           subject: customCommit.subject,
@@ -1484,9 +1768,11 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
             ? { branch: sanitizeFeatureBranchName(customCommit.subject) }
             : {}),
           commitMessage: formatCommitMessage(customCommit.subject, customCommit.body),
+          ...stagedIndex,
         };
       }
 
+      const policy = policyFiber ? yield* Fiber.join(policyFiber) : undefined;
       const generated = yield* textGeneration
         .generateCommitMessage({
           cwd: input.cwd,
@@ -1495,7 +1781,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
           stagedPatch: limitContext(context.stagedPatch, 50_000),
           ...(input.includeBranch ? { includeBranch: true } : {}),
           modelSelection: input.writing.modelSelection,
-          policy: input.writing.policy,
+          policy,
         })
         .pipe(Effect.map((result) => sanitizeCommitMessage(result)));
 
@@ -1504,6 +1790,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         body: generated.body,
         ...(generated.branch !== undefined ? { branch: generated.branch } : {}),
         commitMessage: formatCommitMessage(generated.subject, generated.body),
+        ...stagedIndex,
       };
     },
   );
@@ -1515,7 +1802,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     branch: string | null,
     commitMessage?: string,
     preResolvedSuggestion?: CommitAndBranchSuggestion,
-    filePaths?: readonly string[],
+    selection: CommitSelection = {},
     progressReporter?: GitActionProgressReporter,
     actionId?: string,
   ) {
@@ -1543,12 +1830,15 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         cwd,
         branch,
         ...(commitMessage ? { commitMessage } : {}),
-        ...(filePaths ? { filePaths } : {}),
+        selection,
         writing,
       });
     }
     if (!suggestion) {
       return { status: "skipped_no_changes" as const };
+    }
+    if (selection.stagedOnly && !suggestion.stagedIndex) {
+      return yield* gitManagerError("runCommitStep", "Staged-only commit lost its staged index.");
     }
 
     yield* emit({
@@ -1604,6 +1894,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     const { commitSha } = yield* gitCore.commit(cwd, suggestion.subject, suggestion.body, {
       timeoutMs: COMMIT_TIMEOUT_MS,
       ...(commitProgress ? { progress: commitProgress } : {}),
+      ...(suggestion.stagedIndex ? { stagedIndex: { ...suggestion.stagedIndex, branch } } : {}),
     });
     if (currentHookName !== null) {
       yield* emit({
@@ -1627,6 +1918,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     fallbackBranch: string | null,
     linkedIssueNumbers: ReadonlyArray<number> | undefined,
     emit: GitActionProgressEmitter,
+    options: PullRequestStepOptions,
   ) {
     const provider = yield* sourceControlProvider(cwd);
     const terms = getChangeRequestTerminologyForKind(provider.kind);
@@ -1663,27 +1955,59 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     }
 
     const baseBranch = yield* resolveBaseBranch(cwd, branch, details.upstreamRef, headContext);
-    yield* emit({
-      kind: "phase_started",
-      phase: "pr",
-      label: `Generating ${terms.shortLabel} content...`,
-    });
-    const rangeContext = yield* gitCore.readRangeContext(cwd, baseBranch, {
-      // A fork's head remote must not supply the target repository's base.
-      remoteName: headContext.isCrossRepository ? "origin" : headContext.remoteName,
-    });
+    // Text the user wrote wins; only what is missing is generated, and nothing when both are given.
+    const content =
+      options.title !== undefined && options.body !== undefined
+        ? { title: options.title, body: options.body }
+        : yield* Effect.gen(function* () {
+            yield* emit({
+              kind: "phase_started",
+              phase: "pr",
+              label: `Generating ${terms.shortLabel} content...`,
+            });
+            // A fork's head remote must not supply the target repository's base.
+            const remoteName = headContext.isCrossRepository ? "origin" : headContext.remoteName;
+            // The writing policy (cached when the commit step resolved it) and the base branch's
+            // template overlap the range read.
+            const [rangeContext, policy] = yield* Effect.all(
+              [
+                gitCore.readRangeContext(cwd, baseBranch, { remoteName }),
+                writing.pullRequestTemplates.pipe(
+                  Effect.flatMap((followTemplate) =>
+                    followTemplate
+                      ? withChangeRequestTemplates(
+                          (templates) =>
+                            templates.withTemplate(writing.policy, {
+                              cwd,
+                              host: provider,
+                              baseBranch,
+                              remoteName,
+                            }),
+                          writing.policy,
+                        )
+                      : writing.policy,
+                  ),
+                ),
+              ],
+              { concurrency: 2 },
+            );
 
-    const generated = yield* textGeneration.generatePrContent({
-      cwd,
-      baseBranch,
-      headBranch: headContext.headBranch,
-      commitSummary: limitContext(rangeContext.commitSummary, 20_000),
-      diffSummary: limitContext(rangeContext.diffSummary, 20_000),
-      diffPatch: limitContext(rangeContext.diffPatch, 60_000),
-      modelSelection: writing.modelSelection,
-      policy: writing.policy,
-    });
-    const body = appendClosingIssueReferences(generated.body, linkedIssueNumbers);
+            const generated = yield* textGeneration.generatePrContent({
+              cwd,
+              baseBranch,
+              headBranch: headContext.headBranch,
+              commitSummary: limitContext(rangeContext.commitSummary, 20_000),
+              diffSummary: limitContext(rangeContext.diffSummary, 20_000),
+              diffPatch: limitContext(rangeContext.diffPatch, 60_000),
+              modelSelection: writing.modelSelection,
+              policy,
+            });
+            return {
+              title: options.title ?? generated.title,
+              body: options.body ?? generated.body,
+            };
+          });
+    const body = appendClosingIssueReferences(content.body, linkedIssueNumbers);
 
     const bodyFile = path.join(tempDir, `ryco-pr-body-${process.pid}-${randomUUID()}.md`);
     yield* fileSystem
@@ -1703,8 +2027,9 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         cwd,
         baseRefName: baseBranch,
         headSelector: headContext.preferredHeadSelector,
-        title: generated.title,
+        title: content.title,
         bodyFile,
+        ...(options.draft === true ? { draft: true } : {}),
       })
       .pipe(Effect.ensuring(fileSystem.remove(bodyFile).pipe(Effect.catch(() => Effect.void))));
 
@@ -1714,7 +2039,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         status: "created" as const,
         baseBranch,
         headBranch: headContext.headBranch,
-        title: generated.title,
+        title: content.title,
       };
     }
 
@@ -1846,22 +2171,19 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     // branch (an unpublished one only shares a name with someone else's, and
     // asking the forge about it is wasted) on a host the provider registry
     // recognizes, which includes self-hosted forges the remote URL alone does not.
-    const pr =
+    const latest =
       branch === null
         ? null
         : yield* Effect.gen(function* () {
             if ((yield* probeBranchPublished(cwd, branch, upstreamRef)) === false) return null;
             if ((yield* sourceControlProvider(cwd)).kind === "unknown") return null;
-            const latest = yield* findLatestPr(cwd, {
+            return yield* findLatestPr(cwd, {
               branch,
               upstreamRef,
               isDefaultBranch: isDefaultRef,
             });
-            if (!latest) return null;
-            // On the default branch, only surface open change requests.
-            if (isDefaultRef && latest.state !== "open") return null;
-            return toStatusPr(latest);
           }).pipe(Effect.catch(() => Effect.succeed(null)));
+    const match = latest?.match ?? null;
 
     return {
       isRepo: true,
@@ -1870,7 +2192,9 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
       hasPrimaryRemote: config.value.remoteNames.includes("origin"),
       hasUpstream: upstreamRef !== null,
       sourceControlProvider: hostingProvider,
-      pr,
+      // On the default branch, only surface open change requests.
+      pr: match === null || (isDefaultRef && match.state !== "open") ? null : toStatusPr(match),
+      ...(latest?.servedWhilePaused ? { prServedWhilePaused: true } : {}),
     } satisfies VcsRefSummary;
   });
 
@@ -1916,13 +2240,13 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
   // see change requests created meanwhile, so it also drops the repository's index.
   const invalidateRemoteStatus: GitManagerShape["invalidateRemoteStatus"] = Effect.fn(
     "invalidateRemoteStatus",
-  )(function* (cwd) {
+  )(function* (cwd, options) {
     const cacheKey = yield* normalizeStatusCacheKey(cwd);
     yield* Effect.all(
       [
         Cache.invalidate(remoteStatusResultCache, cacheKey),
         invalidateRefSummary(cacheKey),
-        invalidatePullRequestIndex(cacheKey),
+        invalidatePullRequestIndex(cacheKey, options),
       ],
       { discard: true },
     );
@@ -2177,6 +2501,8 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
 
       const worktree = yield* gitCore.createWorktree({
         settingsSnapshot: settings,
+        // Only a pull request known to be this repository's gets the declared local files.
+        copyDeclaredIncludes: pullRequestWithRemoteInfo.isCrossRepository === false,
         projectId: project?.id,
         projectTitle: project?.title,
         initialName: pullRequest.title || localPullRequestBranch,
@@ -2200,21 +2526,21 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         worktreePath: worktree.worktree.path,
         submoduleInitialization: worktree.submoduleInitialization,
       };
-    }).pipe(Effect.ensuring(invalidateStatus(input.cwd)));
+    }).pipe(restartWork.track, Effect.ensuring(invalidateStatus(input.cwd)));
   });
 
   const runFeatureBranchStep = Effect.fn("runFeatureBranchStep")(function* (
     writing: GitWriting,
     cwd: string,
     branch: string | null,
-    commitMessage?: string,
-    filePaths?: readonly string[],
+    commitMessage: string | undefined,
+    selection: CommitSelection,
   ) {
     const suggestion = yield* resolveCommitAndBranchSuggestion({
       cwd,
       branch,
       ...(commitMessage ? { commitMessage } : {}),
-      ...(filePaths ? { filePaths } : {}),
+      selection,
       includeBranch: true,
       writing,
     });
@@ -2264,7 +2590,22 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
             "Feature-branch checkout is only supported for commit actions.",
           );
         }
-        if (input.action === "create_pr" && initialStatus.hasWorkingTreeChanges) {
+        if (input.stagedOnly && !wantsCommit) {
+          return yield* gitManagerError(
+            "runStackedAction",
+            "Staged-only commits are only supported for commit actions.",
+          );
+        }
+        const selection: CommitSelection = input.stagedOnly
+          ? { stagedOnly: input.stagedOnly }
+          : input.filePaths
+            ? { filePaths: input.filePaths }
+            : {};
+        if (
+          input.action === "create_pr" &&
+          initialStatus.hasWorkingTreeChanges &&
+          input.allowDirtyWorkingTree !== true
+        ) {
           return yield* gitManagerError(
             "runStackedAction",
             "Commit local changes before creating a PR.",
@@ -2297,15 +2638,27 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         let commitMessageForStep = input.commitMessage;
         let preResolvedCommitSuggestion: CommitAndBranchSuggestion | undefined = undefined;
 
-        const writing: GitWriting = yield* serverSettingsService.getSettings.pipe(
-          Effect.map((settings) => ({
-            modelSelection: settings.textGenerationModelSelection,
-            policy: gitWritingPolicyFromSettings(settings),
-          })),
+        const settings = yield* serverSettingsService.getSettings.pipe(
           Effect.mapError((cause) =>
             gitManagerError("runStackedAction", "Failed to get server settings.", cause),
           ),
         );
+        // The checkout's project, looked up at most once per action: the writing policy and the
+        // pull request template setting both read it.
+        const checkoutProjectId = yield* Effect.cached(
+          options?.checkoutProjectId ?? Effect.succeed(null),
+        );
+        const writing: GitWriting = {
+          modelSelection: settings.textGenerationModelSelection,
+          policy: yield* Effect.cached(
+            resolveWritingPolicy(input.cwd, settings, checkoutProjectId),
+          ),
+          pullRequestTemplates: checkoutProjectId.pipe(
+            Effect.map((projectId) =>
+              resolveProjectPreferenceValue(settings, projectId, "pullRequestTemplates"),
+            ),
+          ),
+        };
 
         if (input.featureBranch) {
           yield* Ref.set(currentPhase, Option.some("branch"));
@@ -2319,7 +2672,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
             input.cwd,
             initialStatus.branch,
             input.commitMessage,
-            input.filePaths,
+            selection,
           );
           branchStep = result.branchStep;
           commitMessageForStep = result.resolvedCommitMessage;
@@ -2347,7 +2700,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
                   currentBranch,
                   commitMessageForStep,
                   preResolvedCommitSuggestion,
-                  input.filePaths,
+                  selection,
                   options?.progressReporter,
                   progress.actionId,
                 ),
@@ -2405,6 +2758,11 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
                     currentBranch,
                     input.linkedIssueNumbers,
                     progress.emit,
+                    {
+                      ...(input.prTitle !== undefined ? { title: input.prTitle } : {}),
+                      ...(input.prBody !== undefined ? { body: input.prBody } : {}),
+                      ...(input.prDraft === true ? { draft: true } : {}),
+                    },
                   ),
                 ),
               )
@@ -2459,11 +2817,13 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     indexedPullRequestStates,
     indexedChangeRequests,
     cachedRepositoryList,
+    cachedInvolvedList,
     invalidateRepositoryLists,
     invalidateStatus,
     resolvePullRequest,
     preparePullRequestThread,
     runStackedAction,
+    listChangeRequestTemplates,
   } satisfies GitManagerShape;
 });
 

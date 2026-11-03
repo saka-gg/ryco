@@ -1,6 +1,6 @@
 import { nodeMutationLeaseIsCurrent } from "@ryco/client-runtime/authorization/nodeMutationLease";
 import { toastManager } from "../components/ui/toast";
-import { initialDraftModelSelection } from "@ryco/client-runtime/state/settings";
+import { resolveNewDraftModelSelection } from "@ryco/client-runtime/state/settings";
 import { ensureEnvironmentApi } from "../environmentApi";
 import { isHostedHubMode } from "../env";
 import { preloadRouteChunk } from "../lib/routeChunkPreload";
@@ -44,7 +44,7 @@ import { useChatsAvailability } from "./useChatsAvailability";
 import { orderItemsByPreferredIds } from "../components/Sidebar.logic";
 import { deriveLogicalProjectKeyFromSettings, getProjectOrderKey } from "../logicalProject";
 import { selectProjectsAcrossEnvironments, useStore } from "../store";
-import { createThreadSelectorByRef } from "../storeSelectors";
+import { createThreadStructureSelectorByRef } from "../storeSelectors";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { useUiStateStore } from "../uiStateStore";
 import { useProjectGroupingSettings } from "./useProjectGroupingSettings";
@@ -208,17 +208,13 @@ function useNewThreadState() {
           input.register(config, preferences);
           const store = useComposerDraftStore.getState();
           store.applyStickyState(input.draftId);
-          const initialModel =
-            input.explicitModelSelection ?? preferences?.initialModelSelection.value;
-          if (initialModel)
-            store.setModelSelection(
-              input.draftId,
-              initialDraftModelSelection({
-                effective: preferences,
-                fallback: initialModel,
-                explicit: input.explicitModelSelection,
-              }),
-            );
+          const initialModel = resolveNewDraftModelSelection({
+            effective: preferences,
+            explicit: input.explicitModelSelection,
+            sticky: store,
+            providers: config.providers,
+          });
+          if (initialModel) store.setModelSelection(input.draftId, initialModel);
           const seeded = useComposerDraftStore.getState();
           return seededDraftDefaultsOf(
             seeded.getComposerDraft(input.draftId),
@@ -651,7 +647,7 @@ export function useHandleNewThread() {
   });
   const routeThreadRef = routeTarget?.kind === "server" ? routeTarget.threadRef : null;
   const activeThread = useStore(
-    useMemo(() => createThreadSelectorByRef(routeThreadRef), [routeThreadRef]),
+    useMemo(() => createThreadStructureSelectorByRef(routeThreadRef), [routeThreadRef]),
   );
   const getDraftThread = useComposerDraftStore((store) => store.getDraftThread);
   const activeDraftThread = useComposerDraftStore(() =>

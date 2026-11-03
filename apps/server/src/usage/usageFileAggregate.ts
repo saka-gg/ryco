@@ -8,7 +8,8 @@
  * multiple of 15 minutes, so a slot never straddles a local midnight and the per-day result
  * matches per-record bucketing in every time zone (only pre-1980 timestamps in zones with
  * irregular historical offsets could differ). Pricing is linear in tokens per (model, speed),
- * so a slot is priced once from its sums; USD totals match per-record pricing up to
+ * so a slot is priced once from its sums; USD totals and their split by token type (reported
+ * cost is split per bucket, see `UsageCostBreakdownSum`) match per-record pricing up to
  * floating-point summation order.
  *
  * Responses with a cross-file identity (`dedupeKey`, which providers copy into other
@@ -18,11 +19,11 @@
  */
 import type { UsageCalendarDate, UsageCostSource, UsageDailyBucket } from "@ryco/contracts";
 
-import { makeUsageDayFormatter } from "./usageAggregation.ts";
+import { makeUsageDayFormatter, UsageCostBreakdownSum } from "./usageAggregation.ts";
 import {
-  lookupUsageModelRate,
   priceUsageSlot,
-  type UsageRateTable,
+  resolveUsageModel,
+  type UsagePricingPolicy,
   type UsageSlotTotals,
 } from "./usagePricing.ts";
 import type { UsageRecord, UsageSpeed } from "./usageRecord.ts";
@@ -179,7 +180,7 @@ export interface UsageSlotAggregationOptions {
   readonly timeZone: string;
   readonly startDate?: UsageCalendarDate;
   readonly endDate: UsageCalendarDate;
-  readonly rates: UsageRateTable;
+  readonly pricing: UsagePricingPolicy;
 }
 
 export interface UsageSlotAggregationResult {
@@ -187,6 +188,7 @@ export interface UsageSlotAggregationResult {
   readonly duplicatesDropped: number;
   readonly acceptedRecords: number;
   readonly sessionIds: ReadonlySet<string>;
+  /** Models as reported (mapped model IDs), by whether they have a price. */
   readonly recognizedModels: ReadonlySet<string>;
   readonly unrecognizedModels: ReadonlySet<string>;
 }
@@ -209,8 +211,10 @@ interface MutableBucket {
   estimatedCacheSavingsUsd: number;
   hasCost: boolean;
   hasCacheSavings: boolean;
+  costBreakdown: UsageCostBreakdownSum;
   pricedTokenCount: number;
   unpricedTokenCount: number;
+  customPricedTokenCount: number;
   costSources: Set<Exclude<UsageCostSource, "mixed">>;
 }
 
@@ -274,14 +278,16 @@ export class UsageSlotAggregator {
 
   #addSlot(slot: UsageSlot, totals: UsageSlotTotals): void {
     const date = this.#day(slot.slotMs);
-    const { startDate, endDate, rates } = this.#options;
+    const { startDate, endDate, pricing } = this.#options;
     if ((startDate !== undefined && date < startDate) || date > endDate) return;
-    const key = `${date}\0${slot.model}`;
+    // Usage of a mapped model ID counts under its target, priced like it.
+    const resolution = resolveUsageModel(pricing, slot.model);
+    const key = `${date}\0${resolution.model}`;
     let bucket = this.#buckets.get(key);
     if (bucket === undefined) {
       bucket = {
         date: date as UsageCalendarDate,
-        model: slot.model,
+        model: resolution.model,
         tokens: {
           uncachedInputTokens: 0,
           cachedInputTokens: 0,
@@ -297,13 +303,15 @@ export class UsageSlotAggregator {
         estimatedCacheSavingsUsd: 0,
         hasCost: false,
         hasCacheSavings: false,
+        costBreakdown: new UsageCostBreakdownSum(),
         pricedTokenCount: 0,
         unpricedTokenCount: 0,
+        customPricedTokenCount: 0,
         costSources: new Set(),
       };
       this.#buckets.set(key, bucket);
     }
-    const price = priceUsageSlot(rates, slot, totals);
+    const price = priceUsageSlot(resolution, slot, totals);
     bucket.tokens.uncachedInputTokens += totals.uncachedInputTokens;
     bucket.tokens.cachedInputTokens += totals.cachedInputTokens;
     bucket.tokens.cacheCreationInputTokens += totals.cacheCreationInputTokens;
@@ -324,18 +332,21 @@ export class UsageSlotAggregator {
       bucket.estimatedCacheSavingsUsd += price.estimatedCacheSavingsUsd;
       bucket.hasCacheSavings = true;
     }
+    bucket.costBreakdown.add(price);
     bucket.pricedTokenCount += price.pricedTokenCount;
     bucket.unpricedTokenCount += price.unpricedTokenCount;
+    bucket.customPricedTokenCount += price.customPricedTokenCount;
     bucket.costSources.add(price.costSource);
     this.#acceptedRecords += totals.count;
-    const recognized = slot.reported || lookupUsageModelRate(rates, slot.model) !== null;
-    (recognized ? this.#recognizedModels : this.#unrecognizedModels).add(slot.model);
+    const recognized = slot.reported || resolution.rate !== null;
+    (recognized ? this.#recognizedModels : this.#unrecognizedModels).add(resolution.model);
   }
 
   finish(): UsageSlotAggregationResult {
     const buckets: UsageDailyBucket[] = [];
     for (const bucket of this.#buckets.values()) {
       const { reasoningTokens, ...tokens } = bucket.tokens;
+      const costBreakdown = bucket.costBreakdown.finish();
       buckets.push({
         sourceId: this.#options.sourceId,
         date: bucket.date,
@@ -348,8 +359,12 @@ export class UsageSlotAggregator {
         ...(bucket.hasCacheSavings
           ? { estimatedCacheSavingsUsd: bucket.estimatedCacheSavingsUsd }
           : {}),
+        ...(costBreakdown === undefined ? {} : { costBreakdown }),
         pricedTokenCount: bucket.pricedTokenCount,
         unpricedTokenCount: bucket.unpricedTokenCount,
+        ...(bucket.customPricedTokenCount > 0
+          ? { customPricedTokenCount: bucket.customPricedTokenCount }
+          : {}),
         costSource:
           bucket.costSources.size === 1
             ? (bucket.costSources.values().next().value ?? "unpriced")

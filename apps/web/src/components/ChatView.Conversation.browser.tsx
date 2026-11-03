@@ -1,4 +1,6 @@
 import { useSideChatStore } from "../sideChatStore";
+import { getAppKeybindings } from "../appKeybindings";
+import { LazySideChatPanel } from "./chat/chatViewLazySurfaces";
 import { getPreviewFileSession, resetPreviewFileSessionsForTests } from "./previewFileSessions";
 import { createPreviewFileDocument } from "./PreviewFileEditSession";
 import {
@@ -15,6 +17,7 @@ import {
   DEFAULT_AGENT_TOKEN_MODE,
 } from "@ryco/contracts";
 import { RESTART_INTERRUPTION_NOTICE } from "@ryco/client-runtime/state/threads";
+import { collectQuoteCitationTokens } from "@ryco/shared/quoteCitations";
 import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuation";
 import { page, userEvent } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -29,6 +32,7 @@ import {
   __setEnvironmentApiOverrideForTests,
 } from "../environmentApi";
 import { useUiStateStore } from "../uiStateStore";
+import { isMacPlatform } from "../lib/utils";
 import { DEFAULT_CLIENT_SETTINGS } from "@ryco/contracts/settings";
 import {
   setupChatViewBrowserSuite,
@@ -60,6 +64,7 @@ import {
   selectionSnapshot,
   waitForButtonByText,
   waitForButtonContainingText,
+  composerEditorHasFocus,
   waitForComposerEditor,
   waitForElement,
   waitForLayout,
@@ -113,6 +118,11 @@ function emitThreadSession(
   });
 }
 
+/** The quotes `prompt` carries as chips, by their quoted text. */
+function quotedTexts(prompt: string | undefined): string[] {
+  return collectQuoteCitationTokens(prompt ?? "").map((token) => token.citation.selector.exact);
+}
+
 function recordingDispatch(snapshot: OrchestrationReadModel) {
   const commands: Array<{ type: string; threadId?: unknown }> = [];
   const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
@@ -159,14 +169,22 @@ describe("ChatView Conversation (full app)", () => {
       await page
         .getByRole("button", { name: "Add to chat", exact: true })
         .click({ timeout: 4_000 });
+      // The quote goes in as a chip after the draft's text.
       await vi.waitFor(() =>
-        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toContain(
-          "My current draft\n\nQuoted assistant text",
-        ),
+        expect(
+          quotedTexts(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt),
+        ).toEqual(["assistant filler 21"]),
       );
-      expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toContain(
-        "> assistant filler 21",
+      expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toMatch(
+        /^My current draft \[assistant filler 21\]\(ryco-quote:v1\//,
       );
+      await expect
+        .element(
+          page.getByRole("button", {
+            name: "Show quoted text in conversation: assistant filler 21",
+          }),
+        )
+        .toBeVisible();
       await waitForLayout();
       await selectTranscriptQuote();
       await page
@@ -177,6 +195,62 @@ describe("ChatView Conversation (full app)", () => {
           "My side draft\n\nQuoted assistant text",
         ),
       );
+      await expect.element(page.getByLabelText("Side question")).toBeVisible();
+      expect(
+        wsRequests.some((request) => request._tag === WS_METHODS.textGenerationAskSideQuestion),
+      ).toBe(false);
+    } finally {
+      useSideChatStore.setState({ chatsByThreadKey: {} });
+      await mounted.cleanup();
+    }
+  });
+
+  it("opens the side chat on ⌘⌥S (Ctrl+Alt+S elsewhere) while typing and minimizes it on the same key", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: selectionSnapshot(),
+    });
+    try {
+      // As in the app, where the panel is preloaded while idle.
+      await LazySideChatPanel.preload();
+      const editor = await waitForComposerEditor();
+      await vi.waitFor(() =>
+        expect(getAppKeybindings().some((rule) => rule.command === "sideChat.toggle")).toBe(true),
+      );
+      const mac = isMacPlatform(navigator.platform);
+      const press = () => {
+        const event = new KeyboardEvent("keydown", {
+          // Option+S types "ß" on macOS; the binding matches the physical key.
+          key: mac ? "ß" : "s",
+          code: "KeyS",
+          altKey: true,
+          metaKey: mac,
+          ctrlKey: !mac,
+          bubbles: true,
+          cancelable: true,
+        });
+        (document.activeElement ?? window).dispatchEvent(event);
+        return event.defaultPrevented;
+      };
+      editor.focus();
+      expect(press()).toBe(true);
+      // A new side chat on the thread's model, with the typing in its question field.
+      const threadModel = selectThreadByRef(useStore.getState(), THREAD_REF)?.modelSelection;
+      expect(useSideChatStore.getState().chatsByThreadKey[THREAD_KEY]).toMatchObject({
+        open: true,
+        modelSelection: threadModel,
+      });
+      await vi.waitFor(() =>
+        expect(document.activeElement?.getAttribute("aria-label")).toBe("Side question"),
+      );
+      expect(press()).toBe(true);
+      expect(useSideChatStore.getState().chatsByThreadKey[THREAD_KEY]?.open).toBe(false);
+      await expect
+        .element(page.getByRole("button", { name: "Side chat", exact: true }))
+        .toBeVisible();
+      await vi.waitFor(() => expect(composerEditorHasFocus()).toBe(true));
+      // Reopening keeps the same side conversation.
+      expect(press()).toBe(true);
       await expect.element(page.getByLabelText("Side question")).toBeVisible();
       expect(
         wsRequests.some((request) => request._tag === WS_METHODS.textGenerationAskSideQuestion),
@@ -250,10 +324,8 @@ describe("ChatView Conversation (full app)", () => {
         expect(mounted.router.state.location.pathname).toMatch(/^\/draft\/selection-/),
       );
       const fresh = DraftId.make(mounted.router.state.location.pathname.split("/").at(-1)!);
-      expect(drafts.getComposerDraft(fresh)?.prompt).toContain(
-        "Explain the selection\n\nQuoted assistant text",
-      );
-      expect(drafts.getComposerDraft(fresh)?.prompt).toContain("> assistant filler 21");
+      expect(drafts.getComposerDraft(fresh)?.prompt).toMatch(/^Explain the selection \[/);
+      expect(quotedTexts(drafts.getComposerDraft(fresh)?.prompt)).toEqual(["assistant filler 21"]);
       expect(drafts.getComposerDraft(original)?.prompt).toBe("Keep existing project draft");
       expect(drafts.getComposerDraft(THREAD_REF)?.prompt).toBe("Keep source draft");
       expect(drafts.getDraftSessionByLogicalProjectKey(PROJECT_LOGICAL_KEY)?.draftId).toBe(
@@ -340,8 +412,8 @@ describe("ChatView Conversation (full app)", () => {
             ?.deliveryStatus,
         ).toBe("failed"),
       );
-      expect(queued[0]?.composer.prompt).toContain("Explain it\n\nQuoted assistant text");
-      expect(queued[0]?.composer.prompt).toContain("> assistant filler 21");
+      expect(queued[0]?.composer.prompt).toMatch(/^Explain it \[/);
+      expect(quotedTexts(queued[0]?.composer.prompt)).toEqual(["assistant filler 21"]);
       await waitForLayout();
       expect(attempts).toBe(1);
       await expect
@@ -983,6 +1055,52 @@ describe("ChatView Conversation (full app)", () => {
     }
   });
 
+  it("Stop offers to stop the chat's working delegated tasks too", async () => {
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: "stop-cascade-existing" as MessageId,
+      targetText: "Existing turn",
+      sessionStatus: "running",
+    });
+    const parent = snapshot.threads[0]!;
+    const childId = "thread-delegated-child" as ThreadId;
+    const withChild = {
+      ...snapshot,
+      threads: [
+        ...snapshot.threads,
+        {
+          ...parent,
+          id: childId,
+          title: "Delegated research",
+          lineage: {
+            parentThreadId: parent.id,
+            rootThreadId: parent.id,
+            relationship: "delegated",
+          },
+          session: parent.session ? { ...parent.session, threadId: childId } : parent.session,
+          messages: [],
+        },
+      ],
+    } as typeof snapshot;
+    const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot: withChild });
+    try {
+      await waitForComposerEditor();
+      const dispatch = recordingDispatch(withChild);
+      await page.getByRole("button", { name: "Stop generation" }).click();
+      await expect
+        .element(page.getByText("A task this chat delegated is still working."))
+        .toBeVisible();
+      await page.getByRole("button", { name: "Stop it too" }).click();
+      await vi.waitFor(() =>
+        expect(dispatch.commands).toContainEqual(
+          expect.objectContaining({ type: "thread.turn.interrupt", threadId: childId }),
+        ),
+      );
+    } finally {
+      __resetEnvironmentApiOverridesForTests();
+      await mounted.cleanup();
+    }
+  });
+
   it("an error end holds the queue", async () => {
     const snapshot = createSnapshotForTargetUser({
       targetMessageId: "error-hold-existing" as MessageId,
@@ -1004,6 +1122,55 @@ describe("ChatView Conversation (full app)", () => {
       await waitForLayout();
       expect(dispatch.turnStarts()).toEqual([]);
       expect(useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY]).toHaveLength(1);
+    } finally {
+      __resetEnvironmentApiOverridesForTests();
+      await mounted.cleanup();
+    }
+  });
+
+  it("keeps a failed last turn under the composer with Continue, instead of a toast", async () => {
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: "failed-turn-existing" as MessageId,
+      targetText: "Existing turn",
+    });
+    const base = snapshot.threads[0]!;
+    const failed = {
+      ...base,
+      latestTurn: {
+        turnId: "turn-failed" as TurnId,
+        state: "error" as const,
+        requestedAt: base.createdAt,
+        startedAt: base.createdAt,
+        completedAt: base.updatedAt,
+        assistantMessageId: null,
+      },
+      session: {
+        ...base.session!,
+        status: "error" as const,
+        lastError: "Provider exited with code 1",
+      },
+    };
+    const errorToast = () =>
+      document.querySelector<HTMLElement>('[data-slot="toast-root"][data-type="error"]');
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: { ...snapshot, threads: [failed] },
+    });
+    try {
+      await waitForComposerEditor();
+      await expect.element(page.getByText("The last turn failed")).toBeVisible();
+      await expect.element(page.getByText("Provider exited with code 1")).toBeVisible();
+      await waitForLayout();
+      expect(errorToast()).toBeNull();
+      const dispatch = recordingDispatch({ ...snapshot, threads: [failed] });
+      // The banner slides in while the timeline settles, so click it directly.
+      const continueButton = page.getByRole("button", { name: "Continue", exact: true });
+      await expect.element(continueButton).toBeVisible();
+      (continueButton.element() as HTMLButtonElement).click();
+      await vi.waitFor(() => expect(dispatch.turnStarts()).toHaveLength(1));
+      expect(JSON.stringify(dispatch.turnStarts()[0])).toContain(
+        "First check what the last turn already finished",
+      );
     } finally {
       __resetEnvironmentApiOverridesForTests();
       await mounted.cleanup();
@@ -1120,6 +1287,50 @@ describe("ChatView Conversation (full app)", () => {
       );
     } finally {
       setLocalGitRefNameForTests(undefined);
+      __resetEnvironmentApiOverridesForTests();
+      await mounted.cleanup();
+    }
+  });
+
+  it("stops the running turn and copies the thread ID from the keyboard while typing", async () => {
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: "msg-user-stop-key" as MessageId,
+      targetText: "stop key target",
+      sessionStatus: "running",
+    });
+    const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    // Returns whether the app consumed the key.
+    const press = (target: EventTarget, key: string, shiftKey = false) => {
+      const useMetaForMod = isMacPlatform(navigator.platform);
+      const event = new KeyboardEvent("keydown", {
+        key,
+        metaKey: useMetaForMod,
+        ctrlKey: !useMetaForMod,
+        shiftKey,
+        bubbles: true,
+        cancelable: true,
+      });
+      target.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+
+    try {
+      const composer = await waitForComposerEditor();
+      const dispatch = recordingDispatch(snapshot);
+      composer.focus();
+      expect(press(composer, ".")).toBe(true);
+      await vi.waitFor(() =>
+        expect(dispatch.commands).toContainEqual(
+          expect.objectContaining({ type: "thread.turn.interrupt", threadId: THREAD_ID }),
+        ),
+      );
+
+      expect(press(composer, "C", true)).toBe(true);
+      await vi.waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith(THREAD_ID));
+      await expect.element(page.getByText("Thread ID copied")).toBeVisible();
+    } finally {
+      writeText.mockRestore();
       __resetEnvironmentApiOverridesForTests();
       await mounted.cleanup();
     }

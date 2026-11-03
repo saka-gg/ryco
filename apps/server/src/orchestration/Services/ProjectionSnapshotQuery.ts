@@ -25,7 +25,6 @@ import type {
   OrchestrationThreadHistoryError,
   OrchestrationThreadHistoryPage,
   OrchestrationThreadActivity,
-  OrchestrationThreadPriorityEntry,
   OrchestrationThreadShell,
   OrchestrationThreadWindowSnapshot,
   OrchestrationWorktreeShell,
@@ -261,6 +260,14 @@ export interface ThreadHistoryRepairContext {
   readonly requestActivities: ReadonlyArray<OrchestrationThreadActivity>;
 }
 
+/** Limits a user message count to the messages recorded by an instant. */
+export interface ThreadUserMessageCountBound {
+  /** Counts only messages created at or before this instant; one created at it counts. */
+  readonly createdAtOrBefore: string;
+  /** Leaves this message out, e.g. the turn start's own. */
+  readonly excludingMessageId?: MessageId;
+}
+
 export interface ProjectionSnapshotQueryShape {
   /**
    * Read the lightweight command snapshot used to bootstrap the in-memory
@@ -395,15 +402,6 @@ export interface ProjectionSnapshotQueryShape {
   ) => Effect.Effect<Option.Option<OrchestrationThreadShell>, ProjectionRepositoryError>;
 
   /**
-   * Every thread's current projected priority ranking, for the shell stream's
-   * `thread-priorities` item (a ranking replaces them all at once).
-   */
-  readonly listThreadPriorities?: () => Effect.Effect<
-    ReadonlyArray<OrchestrationThreadPriorityEntry>,
-    ProjectionRepositoryError
-  >;
-
-  /**
    * Read a single worktree shell row by id.
    */
   readonly getWorktreeShellById?: (
@@ -530,13 +528,14 @@ export interface ProjectionSnapshotQueryShape {
   ) => Effect.Effect<ThreadHistoryRepairContext, ProjectionRepositoryError>;
 
   /**
-   * Count projected user messages for one thread (aggregate only). Turn start
-   * uses this to detect the first user message without reading them all.
-   * Optional so existing test doubles stay valid; callers fall back to
-   * `getThreadDetailById`.
+   * Count projected user messages for one thread (aggregate only), or only
+   * those within `bound`. Turn start uses this to detect the first user
+   * message without reading them all. Optional so existing test doubles stay
+   * valid; callers fall back to `getThreadDetailById`.
    */
   readonly countThreadUserMessages?: (
     threadId: ThreadId,
+    bound?: ThreadUserMessageCountBound,
   ) => Effect.Effect<number, ProjectionRepositoryError>;
 
   /**
@@ -572,12 +571,16 @@ export interface ProjectionSnapshotQueryShape {
   >;
 
   /**
-   * One thread's newest `checkpoint.revert` activity (any status), or null. Reads only
-   * that thread's journal through its thread index, so per-delivery callers (the
-   * delegated-return worker) never scan every thread's activities. Judge it with
-   * `isCheckpointRevertEntryPending`. Optional so hand-written fakes need no edits.
+   * One thread's newest `checkpoint.revert` activity (any status, or with `skipFailed`
+   * any but "failed"), or null. Reads only that thread's journal through its thread
+   * index, so per-delivery callers (the delegated-return worker) never scan every
+   * thread's activities. Judge it with `isCheckpointRevertEntryPending`. Optional so
+   * hand-written fakes need no edits.
    */
-  readonly getLatestCheckpointRevert?: (threadId: ThreadId) => Effect.Effect<
+  readonly getLatestCheckpointRevert?: (
+    threadId: ThreadId,
+    options?: { readonly skipFailed?: boolean },
+  ) => Effect.Effect<
     {
       readonly activity: OrchestrationThreadActivity;
       readonly payload: CheckpointRevertActivityPayload;

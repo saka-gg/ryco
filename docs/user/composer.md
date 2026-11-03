@@ -1,0 +1,105 @@
+# Composer
+
+## Send shortcut
+
+In **Settings > General > Composer controls > Send shortcut**, choose when Enter sends a message
+on web and desktop. `Cmd` below is `Ctrl` on Windows and Linux.
+
+- **Enter**: Enter sends. This is the default.
+- **⌘↵ for multiline prompts**: Enter sends a one-line prompt. Once the prompt has more than one
+  line, Enter adds a new line and `Cmd+Enter` sends.
+- **Always ⌘↵**: Enter always adds a new line and `Cmd+Enter` sends.
+
+`Shift+Enter` always adds a new line. The setting applies wherever you write a prompt: the chat
+composer, **Ask about this selection**, the side chat, and the comment on a quote. It belongs to this browser or app, so
+each device keeps its own. On the phone layout of the web app with a touch screen and no mouse or
+trackpad, Enter keeps sending; a narrow desktop window keeps your choice. The Ryco iPhone app has
+no Enter-to-send, so the setting does not apply there.
+
+While the agent works, **Messages sent while a turn runs** chooses whether a message waits in the
+queue or steers the running turn. Another shortcut does the opposite for one message: `Cmd+Enter`
+when the Send shortcut is **Enter**, and `Cmd+Shift+Enter` with either `⌘↵` option, where
+`Cmd+Enter` is the normal send however many lines the prompt has. The composer's hint while a turn
+runs and the setting's description name the shortcut that applies.
+
+## Chat width
+
+In **Settings > Appearance > Interface > Chat width**, choose how wide messages and the composer
+grow on large screens: **Comfortable** (the default), **Wide**, or **Full**, which fills the chat
+pane. The setting belongs to this browser or app. The phone layout keeps the comfortable width and
+does not offer the setting.
+
+## Large pastes
+
+On web and desktop, a text paste of 32 KiB or more becomes an attachment instead of prompt text.
+It shows as a **pasted-text.txt** card marked **Pasted text** with its size, and a short notice
+says where the paste went. Further folded pastes in the same message are named
+`pasted-text-2.txt`, `pasted-text-3.txt`, and so on. A smaller paste also becomes an attachment
+when it would push the message past its 120,000-character limit. Pasted over selected text, the
+paste replaces the selection, as a paste into the prompt would.
+
+The agent receives the attachment as a file it reads when it needs to, so a long log or document
+stays out of the message itself and the transcript shows a short message. Shorter pastes stay
+inline, where the agent sees them directly. The size counts both characters and UTF-8 bytes, so
+text in scripts that take more bytes per character folds sooner.
+
+Copied quote chips paste as chips again, and a paste of chips alone never folds: the size counts
+only the text around them, and the message limit counts each quote as the text it sends, not as
+the longer link that stands for it in the prompt. When the text around them is large enough to
+fold, the quotes go into the file with it, as quoted lines.
+
+The pasted text stays with your draft, like an attached image: wherever drafts are saved, it
+survives a reload or an app restart, and it goes with the message when you send it, so it never
+has to be attached again.
+
+To keep a large paste as text, paste with `Cmd+Shift+V` on macOS or `Ctrl+Shift+V` on Windows and
+Linux. In the desktop app, **Edit > Paste as Text** does the same, and on macOS so does
+`Cmd+Option+Shift+V`. Pastes stay text while you answer an agent's question, and when the message
+has no room for another attachment (at most eight, 50 MB in total) but the prompt can still hold
+the text. A paste that fits neither is refused with a message saying why. Remove the card to
+discard the pasted text; preview it from the card like any other attachment.
+
+## Large images
+
+On web and desktop, an image over the 10 MB image limit is shrunk instead of refused: its long
+edge drops to 2048 pixels and it is saved as WebP (JPEG where the browser cannot write WebP), at
+the highest quality that fits. A large screenshot keeps its text readable. Images up to 50 MB can
+be shrunk; larger ones are refused. While an image is being shrunk, the send button waits and
+says so, and the image appears in the composer once it is ready.
+
+Every attachment, images included, also reaches the agent as a line that says where the file is
+saved, such as `[Attached image "screenshot.png" is saved at: …]`. The agent sees the image
+itself, and with the path it can open or copy the file too, for example to add a pasted
+screenshot to a pull request.
+
+## HEIC and HEIF photos
+
+No agent reads HEIC or HEIF, the format iPhones save photos in, so a photo in that format is
+converted to JPEG before it is sent, its long edge at most 2048 pixels. Safari converts it in the
+browser while you add it. Chrome, Edge, Firefox and the desktop app cannot read HEIC: there the
+photo goes to the node as it is, and the composer shows its name instead of a preview. A Mac node
+converts it with macOS's built-in `sips` when you send the message; the agent and the chat then get
+the JPEG. A Linux or Windows node cannot convert it and refuses the message with a note saying so;
+remove the photo and attach a JPEG instead (on an iPhone, **Settings > Camera > Formats > Most
+Compatible** saves new photos as JPEG). A photo the browser cannot convert has to be within the
+10 MB image limit.
+
+## Recall a sent prompt
+
+Press `ArrowUp` in an empty composer to bring back the last prompt you sent in this thread. Press
+`ArrowUp` again to go further back, and `ArrowDown` to come forward. Moving forward past the newest
+prompt empties the composer again. Recall walks the prompts loaded in the thread, including a send
+that is still on its way.
+
+Only the text you typed comes back. Attachments, terminal context and quoted assistant text from
+the original message are not restored. File mentions, skills and thread mentions are part of the
+text, so they come back as chips. An `Ultrathink:` line at the start comes back too, so a Claude
+prompt sent with Ultrathink is sent with it again. Prompts that Ryco composed for you, such as
+**Implement plan**, are skipped.
+
+When the composer has text, the arrow keys move the caret as usual. Recall takes over only while
+the composer shows an unedited recalled prompt, with the caret on the first visual line for
+`ArrowUp` or the last visual line for `ArrowDown`, counting wrapped lines. Editing a recalled
+prompt turns it into a normal draft. A composer that holds an attachment or context chip does not
+count as empty, and while an approval or a question waits, the arrows stay with it. Nothing is
+stored for recall: it reads the thread's own messages.

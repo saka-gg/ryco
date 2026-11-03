@@ -20,6 +20,7 @@ import {
 import { resolveDiffThemeName } from "../../../lib/diffRendering";
 import { readMotionDurationMs } from "../../../lib/perf/motion";
 import { cn } from "../../../lib/utils";
+import { diffSearchHighlightCss } from "../../diffSearch/diffSearchDom";
 import { ReviewThread } from "../threads/ReviewThread";
 import { findDiffLineElement, PULL_REQUEST_DIFF_UNSAFE_CSS } from "./diffReveal";
 import { FileHeaderMeta } from "./FileHeaderMeta";
@@ -86,8 +87,16 @@ export interface DiffRenderSettings {
   readonly headUrlFor: (path: string) => string | null;
 }
 
+/** Find's highlight registry prefix for pull request files (the Diff panel has its own). */
+export const PULL_REQUEST_DIFF_SEARCH_HIGHLIGHT_NAME = "ryco-pr-diff-search";
+
+/** The diff surface plus find's match and current-match highlights (shadow roots need both). */
+const PULL_REQUEST_DIFF_SEARCH_UNSAFE_CSS = `${PULL_REQUEST_DIFF_UNSAFE_CSS}${diffSearchHighlightCss(PULL_REQUEST_DIFF_SEARCH_HIGHLIGHT_NAME)}`;
+
 export interface DiffFileSectionProps {
   readonly file: PullRequestDiffFile;
+  /** Position in the stream's reading order; find maps matches to files by it. */
+  readonly fileIndex: number;
   readonly open: boolean;
   readonly viewedState: FileViewedState | undefined;
   readonly viewedSupported: boolean;
@@ -173,7 +182,7 @@ export const DiffFileSection = memo(function DiffFileSection(props: DiffFileSect
       diffStyle: settings.diffStyle,
       theme: resolveDiffThemeName(settings.theme),
       themeType: settings.theme,
-      unsafeCSS: PULL_REQUEST_DIFF_UNSAFE_CSS,
+      unsafeCSS: PULL_REQUEST_DIFF_SEARCH_UNSAFE_CSS,
       lineDiffType: "none",
       overflow: "scroll",
       lineHoverHighlight: "number",
@@ -226,6 +235,7 @@ export const DiffFileSection = memo(function DiffFileSection(props: DiffFileSect
     <section
       ref={sectionRef}
       data-diff-file-path={path}
+      data-diff-file-index={props.fileIndex}
       aria-label={path}
       className="relative mt-6 first:mt-0"
     >

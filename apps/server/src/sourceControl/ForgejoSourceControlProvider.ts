@@ -12,6 +12,7 @@ import * as ForgejoApi from "./ForgejoApi.ts";
 import { stripCommentMutationMarker } from "./gitHubCommentMutationMarker.ts";
 import * as ForgejoIssues from "./forgejoIssues.ts";
 import * as ForgejoPullRequests from "./forgejoPullRequests.ts";
+import { sourceControlProviderErrorFrom } from "./forgeFailure.ts";
 import * as SourceControlProvider from "./SourceControlProvider.ts";
 import { makeForgejoDiscovery } from "./SourceControlProviderDiscoveryCatalog.ts";
 
@@ -19,12 +20,7 @@ function providerError(
   operation: string,
   cause: ForgejoApi.ForgejoApiError,
 ): SourceControlProviderError {
-  return new SourceControlProviderError({
-    provider: "forgejo",
-    operation,
-    detail: cause.detail,
-    cause,
-  });
+  return sourceControlProviderErrorFrom("forgejo", operation, cause);
 }
 
 function toChangeRequest(

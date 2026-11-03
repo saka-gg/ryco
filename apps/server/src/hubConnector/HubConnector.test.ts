@@ -101,6 +101,7 @@ function identity(overrides: Partial<HubIdentityRuntimeShape> = {}): HubIdentity
       },
     },
     nativeNodeClaim: stubNativeNodeClaimService(),
+    proveDirectRouteIdentity: async () => undefined,
     crossDeviceApproval: stubCrossDeviceApprovalService(),
     readPendingEnrollment: async () => null,
     leave: async () => undefined,
@@ -324,6 +325,128 @@ describe("HubConnector", () => {
     expect(sockets).toHaveLength(2);
     await connector.stop();
     expect(clock.timers.size).toBe(0);
+  });
+
+  it.each([
+    ["node_revoked", "while authenticating"],
+    ["revoked", "while authenticating"],
+    ["node_revoked", "while online"],
+    ["revoked", "while online"],
+  ] as const)(
+    "reports a Hub refusal %s %s as the node's revocation, once per terminal state",
+    async (code, when) => {
+      const clock = scheduler();
+      const socket = new FakeSocket();
+      let revocations = 0;
+      const connector = new HubConnector({
+        config: enabledConfig,
+        identity: identity(),
+        transport: { open: () => socket },
+        channels: { open: async () => Promise.reject(new Error("unused")) },
+        enrollmentMetadata,
+        livenessWatch: false,
+        scheduler: clock.value,
+        onRevoked: () => {
+          revocations += 1;
+        },
+      });
+      const starting = connector.start();
+      await settle();
+      socket.emit("open", {} as Event);
+      if (when === "while online") {
+        socket.emit("message", {
+          data: encoded({
+            type: "ready",
+            protocolMajor: 1,
+            protocolMinor: 2,
+            limits: RELAY_INITIAL_LIMITS,
+          }),
+        } as MessageEvent);
+        await starting;
+        expect(connector.status().state).toBe("online");
+        expect(revocations).toBe(0);
+      }
+      socket.emit("message", {
+        data: encoded({
+          type: "error",
+          protocolMajor: 1,
+          protocolMinor: 2,
+          code,
+          fatal: true,
+        }),
+      } as MessageEvent);
+      await starting;
+      await settle();
+      expect(connector.status().state).toBe("revoked");
+      expect(revocations).toBe(1);
+      // Terminal: nothing retries, so nothing reports it again.
+      await connector.resume();
+      await clock.advance(24 * 60 * 60_000);
+      expect(revocations).toBe(1);
+      await connector.stop();
+      expect(revocations).toBe(1);
+    },
+  );
+
+  it.each([
+    "authentication_failed",
+    "connection_replaced",
+    "rate_limited",
+    "server_draining",
+    "internal_error",
+    "network",
+  ] as const)("never reports a %s failure as the node's revocation", async (failure) => {
+    const clock = scheduler();
+    const sockets: FakeSocket[] = [];
+    let revocations = 0;
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: identity(),
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+      onRevoked: () => {
+        revocations += 1;
+      },
+    });
+    const starting = connector.start();
+    await settle();
+    sockets[0]!.emit("open", {} as Event);
+    sockets[0]!.emit("message", {
+      data: encoded({
+        type: "ready",
+        protocolMajor: 1,
+        protocolMinor: 2,
+        limits: RELAY_INITIAL_LIMITS,
+      }),
+    } as MessageEvent);
+    await starting;
+    if (failure === "network") {
+      sockets[0]!.emit("close", { code: 1006, reason: "" } as CloseEvent);
+    } else {
+      sockets[0]!.emit("message", {
+        data: encoded({
+          type: "error",
+          protocolMajor: 1,
+          protocolMinor: 2,
+          code: failure,
+          fatal: true,
+        }),
+      } as MessageEvent);
+    }
+    await settle();
+    expect(connector.status().state).toBe("degraded");
+    expect(revocations).toBe(0);
+    await connector.stop();
+    expect(revocations).toBe(0);
   });
 
   it.each(["close", "error", "opening"] as const)(
@@ -576,6 +699,8 @@ describe("HubConnector", () => {
     const socket = new FakeSocket();
     let currentAdvertisement = e2eeAdvertisement(1, 2_000_000);
     const revocations: RelayFrame[] = [];
+    let onlineCalls = 0;
+    let linkedAccessNudges = 0;
     const activeIdentity = identity();
     const connector = new HubConnector({
       config: enabledConfig,
@@ -599,6 +724,13 @@ describe("HubConnector", () => {
       scheduler: clock.value,
       onE2eeEnrollmentRevoked: (frame) => {
         revocations.push(frame);
+      },
+      features: ["linked-access-check"],
+      onOnline: () => {
+        onlineCalls += 1;
+      },
+      onLinkedAccessChanged: () => {
+        linkedAccessNudges += 1;
       },
     });
     const starting = connector.start();
@@ -632,6 +764,13 @@ describe("HubConnector", () => {
       } as unknown as RelayFrame),
     } as MessageEvent);
     await starting;
+    expect(onlineCalls).toBe(1);
+    // The auth frame asks for the linked-access nudge.
+    const auth = decodeRelayFrame(socket.sent[0]!);
+    expect(auth).toMatchObject({
+      ok: true,
+      value: { type: "auth", peer: "node", features: ["linked-access-check"] },
+    });
 
     const published = socket.sent
       .map((bytes) => decodeRelayFrame(bytes))
@@ -693,6 +832,17 @@ describe("HubConnector", () => {
     } as MessageEvent);
     await settle();
     expect(revocations).toHaveLength(1);
+
+    socket.emit("message", {
+      data: encoded({
+        type: "node.linked-access.changed",
+        protocolMajor: 1,
+        protocolMinor: 3,
+      } as unknown as RelayFrame),
+    } as MessageEvent);
+    await settle();
+    expect(linkedAccessNudges).toBe(1);
+    expect(connector.status().state).toBe("online");
     await connector.stop();
     expect(connector.e2eeSnapshot().accountGrantReady).toBe(false);
   });
@@ -2302,6 +2452,11 @@ describe("HubConnector", () => {
     const connector = makeConnector(enabledConfig);
     await connector.start();
     expect(connector.status()).toMatchObject({ failure: "connection_replaced" });
+    // A read no one authenticated (the direct-route proof) neither claims the
+    // identity nor runs its startup work: it answers as if there were none.
+    calls.length = 0;
+    await expect(connector.ifIdentityOwner(ownerOperation)).resolves.toBeUndefined();
+    expect(calls).toEqual([]);
     await expect(connector.asIdentityOwner(ownerOperation)).rejects.toThrow(
       "in use by another Ryco process",
     );
@@ -2314,6 +2469,9 @@ describe("HubConnector", () => {
     // startup work deferred for it runs before anything uses it.
     otherCopyRunning = false;
     calls.length = 0;
+    // Free now, but still not this process's: the read does not take it.
+    await expect(connector.ifIdentityOwner(ownerOperation)).resolves.toBeUndefined();
+    expect(calls).toEqual([]);
     await expect(connector.asIdentityOwner(ownerOperation)).resolves.toBe("done");
     expect(calls.slice(0, 3)).toEqual(["acquire", "startup", "operation"]);
     // A running connector keeps the claim, and stops waiting out a copy that is
@@ -2321,6 +2479,10 @@ describe("HubConnector", () => {
     await settle();
     expect(calls).toEqual(["acquire", "startup", "operation", "startup", "read"]);
     expect(connector.status().failure).not.toBe("connection_replaced");
+    // Once this process owns it, the read runs, with no lock or startup work of its own.
+    calls.length = 0;
+    await expect(connector.ifIdentityOwner(ownerOperation)).resolves.toBe("done");
+    expect(calls).toEqual(["operation"]);
     await connector.stop();
 
     // A connector that is switched off hands an operation's claim straight back.

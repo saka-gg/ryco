@@ -63,7 +63,6 @@ function capabilities(
   return {
     repositoryIdentity: false,
     threadSettlement: false,
-    threadPriorityRanking: false,
     ...overrides,
   };
 }

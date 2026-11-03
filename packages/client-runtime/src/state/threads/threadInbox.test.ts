@@ -2,19 +2,23 @@ import { scopedProjectKey, scopedThreadKey } from "@ryco/client-runtime/scoped";
 import {
   EnvironmentId,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
   TurnId,
   WorktreeId,
-  ThreadPriorityBatchId,
-  ThreadPriorityFingerprint,
-  ThreadPriorityReason,
 } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildThreadInbox,
+  createThreadWorktreeResolver,
   deriveThreadSnoozeEligibility,
+  isThreadOnHiddenShelf,
+  resolveThreadHideAvailability,
+  resolveThreadLifecycleAvailability,
+  resolveThreadReferenceCopyTarget,
+  resolveThreadWorkspacePullRequestLink,
   scopedInboxWorktreeKey,
   type BuildThreadInboxInput,
   type ThreadInboxDraftSummary,
@@ -480,6 +484,83 @@ describe("thread inbox", () => {
       expect(inbox.settled.map((entry) => entry.thread?.id)).toEqual([monitoring.id]);
     });
 
+    it("keeps a thread the node watches a pull request for active, even past a merge", () => {
+      const watching = {
+        active: [
+          {
+            watchId: "github.com/o/r#42",
+            number: 42,
+            url: "https://github.com/o/r/pull/42",
+            worktreeId,
+            startedAt: "2026-07-20T12:00:00.000Z",
+            startedBy: "agent" as const,
+            news: true,
+            autoFix: null,
+            headSha: null,
+            failingChecks: 0,
+            passed: false,
+            conflicting: false,
+            delivering: false,
+            lastChangeAt: null,
+          },
+        ],
+        ended: [],
+      };
+      const watched = makeThread(environmentA, "thread-watched", {
+        ...staleActivity,
+        worktreeId,
+        pullRequestWatches: watching,
+      });
+      const ended = makeThread(environmentA, "thread-watch-ended", {
+        ...staleActivity,
+        pullRequestWatches: {
+          active: [],
+          ended: [
+            {
+              watchId: "github.com/o/r#42",
+              number: 42,
+              reason: "unwatched",
+              endedAt: "2026-07-21T12:00:00.000Z",
+            },
+          ],
+        },
+      });
+      const inbox = buildThreadInbox(
+        baseInput({
+          autoSettleAfterDays: 7,
+          threads: [watched, ended],
+          worktrees: [
+            makeWorktree(environmentA, {
+              prState: "merged",
+              prTerminalAt: "2026-07-21T09:00:00.000Z",
+            }),
+          ],
+        }),
+      );
+
+      expect(inbox.active.map((entry) => entry.thread?.id)).toEqual([watched.id]);
+      expect(inbox.active[0]?.lifecycle).toMatchObject({
+        autoSettlementBlocker: "pull-request-watch",
+        settlementBlocker: null,
+      });
+      expect(inbox.settled.map((entry) => entry.thread?.id)).toEqual([ended.id]);
+    });
+
+    it("keeps a thread the node runs a command watch for active", () => {
+      const watched = makeThread(environmentA, "thread-command-watched", {
+        ...staleActivity,
+        commandWatchCount: 2,
+      });
+      const quiet = makeThread(environmentA, "thread-quiet", staleActivity);
+      const inbox = buildThreadInbox(
+        baseInput({ autoSettleAfterDays: 7, threads: [watched, quiet] }),
+      );
+
+      expect(inbox.active.map((entry) => entry.thread?.id)).toEqual([watched.id]);
+      expect(inbox.active[0]?.lifecycle.autoSettlementBlocker).toBe("command-watch");
+      expect(inbox.settled.map((entry) => entry.thread?.id)).toEqual([quiet.id]);
+    });
+
     it("keeps a PR worktree whose state is unknown active", () => {
       const thread = makeThread(environmentA, "thread-unknown-pr", {
         ...staleActivity,
@@ -707,55 +788,6 @@ describe("thread inbox", () => {
     ]);
   });
 
-  it("derives a duplicate-free Focus partition from scoped projected rankings", () => {
-    const rankedAt = new Date(nowMs - 60_000).toISOString();
-    const usableUntil = new Date(nowMs + 60_000).toISOString();
-    const ranked = (environmentId: EnvironmentId) =>
-      makeThread(environmentId, "shared-thread-id", {
-        priority: {
-          tier: "now",
-          confidence: "high",
-          reason: ThreadPriorityReason.make("Actionable next work"),
-          inputFingerprint: ThreadPriorityFingerprint.make(`fingerprint-${environmentId}`),
-          batchId: ThreadPriorityBatchId.make(`batch-${environmentId}`),
-          modelSelection: {
-            instanceId: ProviderInstanceId.make("codex"),
-            model: "gpt-5.4",
-          },
-          rankedAt,
-          usableUntil,
-        },
-      });
-    const approval = makeThread(environmentA, "approval", { hasPendingApprovals: true });
-    const active = makeThread(environmentB, "active");
-    const inbox = buildThreadInbox(
-      baseInput({
-        threads: [ranked(environmentA), ranked(environmentB), approval, active],
-        aiFocusEnabled: true,
-      }),
-    );
-
-    expect(inbox.focus.map((entry) => [entry.key, entry.focus?.source])).toEqual([
-      [scopedThreadKey({ environmentId: environmentA, threadId: approval.id }), "approval"],
-      [
-        scopedThreadKey({
-          environmentId: environmentA,
-          threadId: ThreadId.make("shared-thread-id"),
-        }),
-        "ai",
-      ],
-      [
-        scopedThreadKey({
-          environmentId: environmentB,
-          threadId: ThreadId.make("shared-thread-id"),
-        }),
-        "ai",
-      ],
-    ]);
-    expect(inbox.active.map((entry) => entry.thread?.id)).toEqual([active.id]);
-    expect(new Set([...inbox.focus, ...inbox.active].map((entry) => entry.key)).size).toBe(4);
-  });
-
   it("composes filters while retaining the currently routed settled row", () => {
     const settled = makeThread(environmentA, "thread-current", {
       title: "Needle",
@@ -820,6 +852,50 @@ describe("thread inbox", () => {
   });
 });
 
+describe("inbox search by pull request", () => {
+  it("finds a thread by its workspace's pull request number, repository reference or URL", () => {
+    const worktree = makeWorktree(environmentA, {
+      pullRequests: [
+        {
+          number: 675,
+          title: "Ship the inbox",
+          url: "https://github.com/acme/app/pull/675",
+          state: "open",
+          isDraft: false,
+          terminalAt: null,
+          headRefName: "feature",
+          baseRefName: "main",
+          source: "created",
+          linkedAt: "2026-07-31T02:00:00.000Z",
+          dismissedAt: null,
+        },
+      ],
+    });
+    const linked = makeThread(environmentA, "linked", {
+      worktreeId,
+      worktreePath: `/tmp/${environmentA}/worktree`,
+      title: "Inbox work",
+    });
+    const other = makeThread(environmentA, "other", { title: "Unrelated" });
+    const search = (text: string) =>
+      buildThreadInbox(
+        baseInput({ threads: [linked, other], worktrees: [worktree], filters: { text } }),
+      ).active.map((entry) => entry.thread?.id);
+
+    expect(search("#675")).toEqual([linked.id]);
+    expect(search("acme/app#675")).toEqual([linked.id]);
+    expect(search("https://github.com/acme/app/pull/675")).toEqual([linked.id]);
+    expect(search("ship the inbox")).toEqual([linked.id]);
+    expect(search("#676")).toEqual([]);
+
+    // Other lists find the same workspace by id or, without one, by checkout path.
+    const worktreeOf = createThreadWorktreeResolver([worktree]);
+    expect(worktreeOf(linked)?.id).toBe(worktree.id);
+    expect(worktreeOf({ ...linked, worktreeId: null })?.id).toBe(worktree.id);
+    expect(worktreeOf(other)).toBeNull();
+  });
+});
+
 describe("snoozed inbox entries", () => {
   const until = "2026-07-31T13:00:00.000Z";
   const since = "2026-07-31T11:00:00.000Z";
@@ -838,14 +914,13 @@ describe("snoozed inbox entries", () => {
       nowMs,
       ...overrides,
     });
-  it("keeps pins while suppressing focus and schedules the next wake", () => {
+  it("keeps pins on snoozed rows and schedules the next wake", () => {
     const key = scopedThreadKey({
       environmentId: environmentA,
       threadId: ThreadId.make("snoozed"),
     });
-    const inbox = build({ pinnedThreadKeys: [key], aiFocusEnabled: true });
+    const inbox = build({ pinnedThreadKeys: [key] });
     expect(inbox.active).toHaveLength(0);
-    expect(inbox.focus).toHaveLength(0);
     expect(inbox.snoozed[0]).toMatchObject({ pinned: true, canSnooze: true });
     expect(inbox.nextSettlementEvaluationAtMs).toBe(Date.parse(until));
     const awake = build({ nowMs: Date.parse(until), pinnedThreadKeys: [key] });
@@ -907,5 +982,387 @@ describe("deriveThreadSnoozeEligibility", () => {
         nowMs,
       }),
     ).toEqual({ canSnooze: false, blocker: "unsupported" });
+  });
+});
+
+describe("thread lifecycle availability", () => {
+  const completedTurn = {
+    turnId: TurnId.make("turn-1"),
+    state: "completed" as const,
+    requestedAt: "2026-07-31T10:00:00.000Z",
+    startedAt: "2026-07-31T10:00:00.000Z",
+    completedAt: "2026-07-31T10:05:00.000Z",
+    assistantMessageId: null,
+  };
+  const idle = (overrides: Partial<SidebarThreadSummary> = {}) =>
+    makeThread(environmentA, "thread-idle", {
+      latestUserMessageAt: "2026-07-31T10:00:00.000Z",
+      latestTurn: completedTurn,
+      ...overrides,
+    });
+  const running = idle({
+    session: {
+      provider: ProviderDriverKind.make("codex"),
+      status: "running",
+      orchestrationStatus: "running",
+      activeTurnId: TurnId.make("turn-2"),
+      createdAt: "2026-07-31T11:00:00.000Z",
+      updatedAt: "2026-07-31T11:00:00.000Z",
+    },
+    latestTurn: {
+      ...completedTurn,
+      turnId: TurnId.make("turn-2"),
+      state: "running",
+      completedAt: null,
+    },
+  });
+  const snoozed = idle({
+    snoozedAt: "2026-07-31T11:00:00.000Z",
+    snoozedUntil: "2026-07-31T13:00:00.000Z",
+  });
+  const key = scopedThreadKey({
+    environmentId: environmentA,
+    threadId: ThreadId.make("thread-idle"),
+  });
+  const availabilityOf = (
+    thread: SidebarThreadSummary,
+    environment: Partial<ThreadInboxEnvironment> = {},
+    overrides: Partial<BuildThreadInboxInput> = {},
+  ) => {
+    const inbox = buildThreadInbox(
+      baseInput({
+        threads: [thread],
+        environments: [
+          makeEnvironment(environmentA, { threadSnoozeSupported: true, ...environment }),
+        ],
+        ...overrides,
+      }),
+    );
+    const [entry] = [...inbox.active, ...inbox.settled, ...inbox.snoozed];
+    return resolveThreadLifecycleAvailability(entry!);
+  };
+
+  it("allows every action on an idle thread of a ready node", () => {
+    expect(availabilityOf(idle())).toEqual({
+      settle: { enabled: true, blocker: null, settled: false },
+      snooze: { enabled: true, blocker: null, snoozedUntil: null },
+      archive: { enabled: true, blocker: null },
+      markUnread: { enabled: true, blocker: null },
+    });
+  });
+
+  it("describes the toggle: Move to Active once settled, Unsnooze once snoozed", () => {
+    expect(
+      availabilityOf(idle({ settledOverride: "settled", settledAt: "2026-07-31T11:00:00.000Z" }))
+        .settle,
+    ).toEqual({ enabled: true, blocker: null, settled: true });
+    expect(availabilityOf(snoozed).snooze).toEqual({
+      enabled: true,
+      blocker: null,
+      snoozedUntil: "2026-07-31T13:00:00.000Z",
+    });
+    // Waking needs only Snooze on the node; snoozing needs settlement too.
+    expect(availabilityOf(snoozed, { threadSettlementSupported: "unknown" }).snooze.enabled).toBe(
+      true,
+    );
+    expect(availabilityOf(idle(), { threadSettlementSupported: "unknown" }).snooze.blocker).toBe(
+      "shell-stale",
+    );
+    expect(availabilityOf(snoozed, { threadSnoozeSupported: false }).snooze.blocker).toBe(
+      "unsupported",
+    );
+  });
+
+  it("holds settle, snooze and archive while a turn runs", () => {
+    expect(availabilityOf(running)).toMatchObject({
+      settle: { enabled: false, blocker: "session-running" },
+      snooze: { enabled: false, blocker: "session-running" },
+      archive: { enabled: false, blocker: "turn-running" },
+    });
+  });
+
+  it.each([
+    [{ hasPendingApprovals: true }, "pending-approval"],
+    [{ hasPendingUserInput: true }, "pending-user-input"],
+  ] as const)("holds settle and snooze for %j", (overrides, blocker) => {
+    expect(availabilityOf(idle(overrides))).toMatchObject({
+      settle: { enabled: false, blocker },
+      snooze: { enabled: false, blocker },
+      archive: { enabled: true },
+    });
+  });
+
+  it.each([
+    ["localQueuedThreadKeys", "local-queue"],
+    ["deliveryUnknownThreadKeys", "delivery-unknown"],
+  ] as const)("holds settle and snooze for %s", (input, blocker) => {
+    expect(availabilityOf(idle(), {}, { [input]: [key] })).toMatchObject({
+      settle: { enabled: false, blocker },
+      snooze: { enabled: false, blocker },
+      archive: { enabled: true },
+    });
+  });
+
+  it.each([
+    [{ connected: false }, "disconnected"],
+    [{ shellCurrent: false }, "shell-stale"],
+    [{ mutationReady: false }, "read-only"],
+  ] as const)("blocks every change through the node for %j", (environment, blocker) => {
+    expect(availabilityOf(idle(), environment)).toEqual({
+      settle: { enabled: false, blocker, settled: false },
+      snooze: { enabled: false, blocker, snoozedUntil: null },
+      archive: { enabled: false, blocker },
+      // Mark unread is this client's own state.
+      markUnread: { enabled: true, blocker: null },
+    });
+  });
+
+  it("files a working thread on a node that supports it, instead of holding settle", () => {
+    expect(availabilityOf(running, { threadTriageSupported: true }).settle).toEqual({
+      enabled: true,
+      blocker: null,
+      settled: false,
+    });
+    // An older node rejects a settle while a turn runs.
+    expect(availabilityOf(running, { threadTriageSupported: false }).settle.blocker).toBe(
+      "session-running",
+    );
+    // Requests waiting on the person still hold it.
+    expect(
+      availabilityOf({ ...running, hasPendingApprovals: true }, { threadTriageSupported: true })
+        .settle.blocker,
+    ).toBe("pending-approval");
+  });
+
+  it("archives on a node without settlement or snooze", () => {
+    expect(
+      availabilityOf(idle(), { threadSettlementSupported: false, threadSnoozeSupported: false }),
+    ).toMatchObject({
+      settle: { enabled: false, blocker: "unsupported" },
+      snooze: { enabled: false, blocker: "unsupported" },
+      archive: { enabled: true, blocker: null },
+    });
+    expect(availabilityOf(idle(), { threadSnoozeSupported: false }).snooze.blocker).toBe(
+      "unsupported",
+    );
+  });
+
+  it("needs a conversation to archive and a completed turn to mark unread", () => {
+    expect(availabilityOf(idle({ latestUserMessageAt: null, latestTurn: null }))).toMatchObject({
+      archive: { enabled: false, blocker: "no-conversation" },
+      markUnread: { enabled: false, blocker: "no-completed-turn" },
+    });
+  });
+
+  it("allows no action on a local draft", () => {
+    const draft: ThreadInboxDraftSummary = {
+      environmentId: environmentA,
+      threadId: ThreadId.make("thread-draft"),
+      projectId,
+      title: "Draft",
+      createdAt: "2026-07-31T11:00:00.000Z",
+      branch: null,
+      worktreePath: null,
+    };
+    const entry = buildThreadInbox(baseInput({ drafts: [draft] })).active[0]!;
+    expect(resolveThreadLifecycleAvailability(entry)).toEqual({
+      settle: { enabled: false, blocker: "client-draft", settled: false },
+      snooze: { enabled: false, blocker: "client-draft", snoozedUntil: null },
+      archive: { enabled: false, blocker: "no-conversation" },
+      markUnread: { enabled: false, blocker: "no-completed-turn" },
+    });
+  });
+
+  it("matches the entry's own snooze eligibility", () => {
+    for (const thread of [idle(), running, idle({ hasPendingApprovals: true })]) {
+      for (const environment of [
+        {},
+        { threadSnoozeSupported: "unknown" as const },
+        { connected: false },
+      ]) {
+        const inbox = buildThreadInbox(
+          baseInput({
+            threads: [thread],
+            environments: [
+              makeEnvironment(environmentA, { threadSnoozeSupported: true, ...environment }),
+            ],
+          }),
+        );
+        const entry = inbox.active[0]!;
+        expect(resolveThreadLifecycleAvailability(entry).snooze.enabled).toBe(entry.canSnooze);
+      }
+    }
+  });
+});
+
+describe("resolveThreadReferenceCopyTarget", () => {
+  const threadId = ThreadId.make("thread-reference");
+  const url = "https://github.com/acme/app/pull/42";
+
+  it("copies the pull request link when it is known, else the thread ID", () => {
+    expect(resolveThreadReferenceCopyTarget({ threadId, pullRequestUrl: url })).toEqual({
+      kind: "pull-request",
+      value: url,
+    });
+    for (const pullRequestUrl of [null, undefined, ""]) {
+      expect(resolveThreadReferenceCopyTarget({ threadId, pullRequestUrl })).toEqual({
+        kind: "thread",
+        value: threadId,
+      });
+    }
+  });
+
+  it("falls back to the thread ID when the thread's pull request was dismissed", () => {
+    const link = (dismissedAt: string | null) => ({
+      number: 42,
+      title: "Inbox",
+      url,
+      state: "open" as const,
+      isDraft: false,
+      terminalAt: null,
+      headRefName: "feature",
+      baseRefName: "main",
+      source: "created" as const,
+      linkedAt: "2026-07-31T01:00:00.000Z",
+      dismissedAt,
+    });
+    const thread = makeThread(environmentA, threadId, { worktreeId });
+    const copyTarget = (dismissedAt: string | null) =>
+      resolveThreadReferenceCopyTarget({
+        threadId,
+        pullRequestUrl: resolveThreadWorkspacePullRequestLink(
+          thread,
+          makeWorktree(environmentA, { pullRequests: [link(dismissedAt)] }),
+        )?.url,
+      });
+    expect(copyTarget(null)).toEqual({ kind: "pull-request", value: url });
+    expect(copyTarget("2026-07-31T02:00:00.000Z")).toEqual({ kind: "thread", value: threadId });
+  });
+});
+
+describe("the Hidden shelf and filed threads", () => {
+  const hiddenAt = "2026-07-31T11:00:00.000Z";
+  const completedTurn = {
+    turnId: TurnId.make("turn-1"),
+    state: "completed" as const,
+    requestedAt: "2026-07-31T10:00:00.000Z",
+    startedAt: "2026-07-31T10:00:00.000Z",
+    completedAt: "2026-07-31T10:05:00.000Z",
+    assistantMessageId: null,
+  };
+  const failedAt = (completedAt: string) =>
+    ({
+      latestTurn: { ...completedTurn, state: "error" as const, completedAt },
+      session: {
+        provider: ProviderDriverKind.make("codex"),
+        status: "error",
+        orchestrationStatus: "error",
+        createdAt: "2026-07-31T10:00:00.000Z",
+        updatedAt: completedAt,
+        lastError: "boom",
+      },
+    }) satisfies Partial<SidebarThreadSummary>;
+  const runningTurn = {
+    session: {
+      provider: ProviderDriverKind.make("codex"),
+      status: "running",
+      orchestrationStatus: "running",
+      activeTurnId: TurnId.make("turn-2"),
+      createdAt: "2026-07-31T11:30:00.000Z",
+      updatedAt: "2026-07-31T11:30:00.000Z",
+    },
+    latestTurn: {
+      ...completedTurn,
+      turnId: TurnId.make("turn-2"),
+      state: "running" as const,
+      completedAt: null,
+    },
+  } satisfies Partial<SidebarThreadSummary>;
+  const hidden = (overrides: Partial<SidebarThreadSummary> = {}) =>
+    makeThread(environmentA, "thread-hidden", {
+      hiddenAt,
+      latestUserMessageAt: "2026-07-31T10:00:00.000Z",
+      latestTurn: completedTurn,
+      ...overrides,
+    });
+
+  it("keeps a hidden thread on the shelf while it works and after it finishes", () => {
+    expect(isThreadOnHiddenShelf(hidden())).toBe(true);
+    expect(isThreadOnHiddenShelf(hidden(runningTurn))).toBe(true);
+    expect(isThreadOnHiddenShelf(hidden({ hiddenAt: null }))).toBe(false);
+    const inbox = buildThreadInbox(baseInput({ threads: [hidden(), hidden(runningTurn)] }));
+    expect(inbox.active).toEqual([]);
+    expect(inbox.hidden.map((entry) => entry.lifecycle.classification)).toEqual([
+      "hidden",
+      "hidden",
+    ]);
+  });
+
+  it("brings a hidden thread back while it needs the person", () => {
+    expect(isThreadOnHiddenShelf(hidden({ hasPendingApprovals: true }))).toBe(false);
+    expect(isThreadOnHiddenShelf(hidden({ hasPendingUserInput: true }))).toBe(false);
+    expect(
+      isThreadOnHiddenShelf(hidden({ interactionMode: "plan", hasActionableProposedPlan: true })),
+    ).toBe(false);
+    const inbox = buildThreadInbox(baseInput({ threads: [hidden({ hasPendingApprovals: true })] }));
+    expect(inbox.hidden).toEqual([]);
+    expect(inbox.active).toHaveLength(1);
+  });
+
+  it("shows a failure since it was hidden, until it is hidden again", () => {
+    expect(isThreadOnHiddenShelf(hidden(failedAt("2026-07-31T11:30:00.000Z")))).toBe(false);
+    // Hidden again after the failure: back on the shelf.
+    expect(
+      isThreadOnHiddenShelf(
+        hidden({ ...failedAt("2026-07-31T11:30:00.000Z"), hiddenAt: "2026-07-31T11:45:00.000Z" }),
+      ),
+    ).toBe(true);
+  });
+
+  it("offers Hide on a node with triage, and Unhide for a thread the person hid", () => {
+    const entryOf = (
+      thread: SidebarThreadSummary,
+      environment: Partial<ThreadInboxEnvironment>,
+    ) => {
+      const inbox = buildThreadInbox(
+        baseInput({
+          threads: [thread],
+          environments: [makeEnvironment(environmentA, environment)],
+        }),
+      );
+      return [...inbox.active, ...inbox.hidden][0]!;
+    };
+    const visible = makeThread(environmentA, "thread-visible");
+    expect(
+      resolveThreadHideAvailability(entryOf(visible, { threadTriageSupported: true })),
+    ).toEqual({ enabled: true, blocker: null, hidden: false });
+    expect(
+      resolveThreadHideAvailability(entryOf(hidden(), { threadTriageSupported: true })).hidden,
+    ).toBe(true);
+    expect(
+      resolveThreadHideAvailability(entryOf(visible, { threadTriageSupported: false })).blocker,
+    ).toBe("unsupported");
+  });
+
+  it("lists a filed thread as settled while it works, at its filing time", () => {
+    const filed = makeThread(environmentA, "thread-filed", {
+      ...runningTurn,
+      latestUserMessageAt: "2026-07-31T11:29:00.000Z",
+      settleWhenIdleAt: "2026-07-31T11:40:00.000Z",
+    });
+    const inbox = buildThreadInbox(baseInput({ threads: [filed] }));
+    expect(inbox.active).toEqual([]);
+    expect(inbox.settled).toHaveLength(1);
+    expect(inbox.settled[0]!.lifecycle).toMatchObject({
+      classification: "settled",
+      filed: true,
+      effectiveSettlementTimestamp: "2026-07-31T11:40:00.000Z",
+    });
+    // A request for the person brings it back to Active.
+    const asking = buildThreadInbox(
+      baseInput({ threads: [{ ...filed, hasPendingApprovals: true }] }),
+    );
+    expect(asking.settled).toEqual([]);
+    expect(asking.active).toHaveLength(1);
   });
 });

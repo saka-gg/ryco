@@ -36,7 +36,9 @@ import {
   Option,
   PubSub,
   Queue,
+  Schedule,
   Schema,
+  Semaphore,
   Stream,
 } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -50,6 +52,7 @@ import {
 import { makeServerQueueMetrics } from "../../observability/QueueMetrics.ts";
 import { toPersistenceSqlError } from "../../persistence/Errors.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
+import { orderBySequence } from "../sequenceOrderedStream.ts";
 import { OrchestrationCommandReceiptRepository } from "../../persistence/Services/OrchestrationCommandReceipts.ts";
 import {
   OrchestrationCommandAdmissionError,
@@ -58,7 +61,13 @@ import {
   type OrchestrationDispatchError,
   type OrchestrationProjectorDecodeError,
 } from "../Errors.ts";
-import { deletedWorkspaceTurnBlocker, findThreadWorktree } from "../commandInvariants.ts";
+import {
+  deletedWorkspaceTurnBlocker,
+  findThreadWorktree,
+  requireNoBackgroundWorkForModelSwitch,
+} from "../commandInvariants.ts";
+import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
+import { ThreadSessionModelSelectionsService } from "../ThreadSessionModelSelections.ts";
 import { createSidebarUndoReceipts } from "../sidebarUndo.ts";
 import { decideOrchestrationCommand } from "../decider.ts";
 import { createWorkspaceCommitFence } from "../workspaceCommitFence.ts";
@@ -118,6 +127,9 @@ function commandToAggregateRef(command: OrchestrationCommand): {
     case "thread.unarchive":
     case "thread.snooze":
     case "thread.unsnooze":
+    case "thread.hide":
+    case "thread.unhide":
+    case "thread.settle-when-idle":
     case "thread.usage-limit.record":
     case "thread.usage-limit.configure":
     case "thread.settle":
@@ -137,6 +149,8 @@ function commandToAggregateRef(command: OrchestrationCommand): {
     case "thread.approval.respond":
     case "thread.user-input.respond":
     case "thread.checkpoint.revert":
+    case "thread.conversation.revert":
+    case "thread.files.revert":
     case "thread.session.stop":
     case "thread.attach-to-worktree":
     case "thread.status-bucket.override":
@@ -150,6 +164,18 @@ function commandToAggregateRef(command: OrchestrationCommand): {
     case "thread.turn.diff.complete":
     case "thread.activity.append":
     case "thread.revert.complete":
+    case "thread.pull-request-watch.update":
+    case "thread.command-watch.update":
+    case "thread.command-watch.stop":
+    case "thread.queue.add":
+    case "thread.queue.edit":
+    case "thread.queue.move":
+    case "thread.queue.remove":
+    case "thread.queue.steer":
+    case "thread.queue.hold":
+    case "thread.queue.resume":
+    case "thread.queue.retry":
+    case "thread.queue.hold.record":
       return {
         aggregateKind: "thread",
         aggregateId: command.threadId,
@@ -157,7 +183,26 @@ function commandToAggregateRef(command: OrchestrationCommand): {
   }
 }
 
-const makeOrchestrationEngine = Effect.gen(function* () {
+/**
+ * Live window of the domain-event bus. A subscriber further behind than this reads the events it
+ * missed from the event store instead of holding back the command worker.
+ */
+export const ORCHESTRATION_DOMAIN_EVENT_BUS_CAPACITY = 4_096;
+
+/** A failed read of missed events is retried after 50 ms, doubling up to every 5 s. */
+const MISSED_EVENTS_READ_RETRY = Schedule.min([
+  Schedule.exponential("50 millis"),
+  Schedule.spaced("5 seconds"),
+]);
+
+export interface OrchestrationEngineOptions {
+  /** Test seam: the live window of the domain-event bus. */
+  readonly domainEventBusCapacity?: number;
+}
+
+const makeOrchestrationEngine = Effect.fnUntraced(function* (
+  options: OrchestrationEngineOptions = {},
+) {
   const sql = yield* SqlClient.SqlClient;
   const approvals = yield* ProjectionPendingApprovalRepository;
   const questions = yield* ProjectionThreadUserInputRequestRepository;
@@ -166,6 +211,16 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const projectionPipeline = yield* OrchestrationProjectionPipeline;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerEffectIntents = yield* ProviderEffectIntentRepository;
+  // Optional so engines built without runtime ingestion (tests, tools) skip the
+  // background-work model-switch check instead of requiring the registry.
+  const backgroundLiveness = Option.getOrUndefined(
+    yield* Effect.serviceOption(ThreadBackgroundLivenessService),
+  );
+  // What each session runs, as the provider command reactor applied it: a pick a client stored
+  // on the thread since then still restarts a Claude session at the next turn.
+  const sessionModelSelections = Option.getOrUndefined(
+    yield* Effect.serviceOption(ThreadSessionModelSelectionsService),
+  );
 
   const sidebarUndo = createSidebarUndoReceipts();
   let commandReadModel = createEmptyReadModel(new Date().toISOString());
@@ -178,7 +233,42 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     queue: "orchestration.command",
     component: "OrchestrationEngine",
   });
-  const eventPubSub = yield* PubSub.bounded<OrchestrationEvent>(4_096);
+  // Never back-pressures: reactors dispatch commands while they consume these events, so waiting
+  // for a slow subscriber here would stop the only command worker. A subscriber that falls behind
+  // the live window reads the missed range from the event store (subscribeDomainEvents).
+  const eventPubSub = yield* PubSub.sliding<OrchestrationEvent>(
+    options.domainEventBusCapacity ?? ORCHESTRATION_DOMAIN_EVENT_BUS_CAPACITY,
+  );
+  const domainEventBusMetrics = yield* makeServerQueueMetrics({
+    queue: "orchestration.domain-events",
+    component: "OrchestrationEngine",
+  });
+  // Orders publication against subscription, so each subscription's starting cursor is exact.
+  const publicationLock = yield* Semaphore.make(1);
+  /** Highest sequence handed to the bus: the store head at boot until this process publishes. */
+  let lastPublishedSequence = 0;
+  /**
+   * Publishes committed events (ascending) in one batch, each at most once: the reconcile path
+   * re-reads events that may already be published. Never waits for a subscriber: the sliding bus
+   * drops its oldest event instead, and that subscriber replays it.
+   */
+  const publishCommittedEvents = (events: ReadonlyArray<OrchestrationEvent>) =>
+    publicationLock
+      .withPermits(1)(
+        Effect.suspend(() => {
+          const unpublished = events.filter((event) => event.sequence > lastPublishedSequence);
+          const last = unpublished.at(-1);
+          if (last === undefined) return Effect.void;
+          return PubSub.publishAll(eventPubSub, unpublished).pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                lastPublishedSequence = last.sequence;
+              }),
+            ),
+          );
+        }),
+      )
+      .pipe(Effect.uninterruptible);
 
   const projectEventsOntoReadModel = (
     baseReadModel: OrchestrationReadModel,
@@ -214,9 +304,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
       workspaceCommitFence.publish();
       workspaceAuthorityHealthy = true;
 
-      for (const persistedEvent of persistedEvents) {
-        yield* PubSub.publish(eventPubSub, persistedEvent);
-      }
+      yield* publishCommittedEvents(persistedEvents);
     });
 
     return Effect.exit(
@@ -319,7 +407,11 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                   : storageCommand.type === "thread.sidebar.undo" ||
                       storageCommand.type === "thread.turn.start" ||
                       storageCommand.type === "thread.turn.steer" ||
-                      storageCommand.type === "thread.goal.set"
+                      storageCommand.type === "thread.goal.set" ||
+                      // A watch update's wake starts a turn in the thread's checkout.
+                      ((storageCommand.type === "thread.pull-request-watch.update" ||
+                        storageCommand.type === "thread.command-watch.update") &&
+                        storageCommand.wake !== undefined)
                     ? storageThreadPaths
                     : [];
         // ID attachment and legacy path metadata can coexist. Neither may
@@ -422,6 +514,17 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             }));
 
           const eventBases = Array.isArray(eventBase) ? eventBase : [eventBase];
+          if (backgroundLiveness !== undefined && envelope.command.type === "thread.turn.start") {
+            yield* requireNoBackgroundWorkForModelSwitch({
+              command: envelope.command,
+              events: eventBases,
+              thread: findThreadInArray(commandReadModel.threads, envelope.command.threadId),
+              liveTaskIds: backgroundLiveness.listLiveTaskIds,
+              ...(sessionModelSelections !== undefined
+                ? { sessionModelSelection: sessionModelSelections.get }
+                : {}),
+            });
+          }
           workspaceCommitFence.begin(eventBases);
           return yield* sql
             .withTransaction(
@@ -448,6 +551,30 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                     session: findThreadInArray(commandReadModel.threads, command.threadId)?.session,
                   });
                 }
+                // The message answers an optional question whose turn ended: the question is
+                // claimed here, in the commit's transaction, so a second answer is refused.
+                const turnStart =
+                  envelope.command.type === "thread.turn.start" ? envelope.command : undefined;
+                const answer = turnStart?.optionalAnswer;
+                if (turnStart && answer) {
+                  const row = yield* questions.getByRequestId({
+                    threadId: turnStart.threadId,
+                    requestId: answer.requestId,
+                  });
+                  const blocker = (yield* Effect.promise(
+                    () => import("../optionalQuestionAnswers.ts"),
+                  )).optionalAnswerClaimBlocker(
+                    Option.getOrUndefined(row),
+                    turnStart.threadId,
+                    answer,
+                  );
+                  if (blocker !== null) {
+                    return yield* new OrchestrationCommandInvariantError({
+                      commandType: turnStart.type,
+                      detail: blocker,
+                    });
+                  }
+                }
                 const committedEvents: OrchestrationEvent[] = [];
                 const postCommitEffects: Array<Effect.Effect<void>> = [];
                 let nextCommandReadModel = commandReadModel;
@@ -466,26 +593,30 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                 }
 
                 const lastSavedEvent = committedEvents.at(-1) ?? null;
-                if (lastSavedEvent === null) {
+                // Only a follow-up queue command may change nothing (an add that was already
+                // queued or sent, a resume of a released hold): it is accepted as it is.
+                if (lastSavedEvent === null && !envelope.command.type.startsWith("thread.queue.")) {
                   return yield* new OrchestrationCommandInvariantError({
                     commandType: envelope.command.type,
                     detail: "Command produced no events.",
                   });
                 }
+                const resultSequence =
+                  lastSavedEvent?.sequence ?? commandReadModel.snapshotSequence;
 
                 yield* commandReceiptRepository.upsert({
                   commandId: envelope.command.commandId,
-                  aggregateKind: lastSavedEvent.aggregateKind,
-                  aggregateId: lastSavedEvent.aggregateId,
-                  acceptedAt: lastSavedEvent.occurredAt,
-                  resultSequence: lastSavedEvent.sequence,
+                  aggregateKind: lastSavedEvent?.aggregateKind ?? aggregateRef.aggregateKind,
+                  aggregateId: lastSavedEvent?.aggregateId ?? aggregateRef.aggregateId,
+                  acceptedAt: lastSavedEvent?.occurredAt ?? new Date().toISOString(),
+                  resultSequence,
                   status: "accepted",
                   error: null,
                 });
 
                 return {
                   committedEvents,
-                  lastSequence: lastSavedEvent.sequence,
+                  lastSequence: resultSequence,
                   nextCommandReadModel,
                   postCommitEffects,
                 } as const;
@@ -514,20 +645,19 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           concurrency: 1,
           discard: true,
         });
-        for (const [index, event] of committedCommand.committedEvents.entries()) {
-          yield* PubSub.publish(eventPubSub, event);
-          if (index === 0) {
-            yield* Metric.update(
-              Metric.withAttributes(
-                orchestrationCommandAckDuration,
-                metricAttributes({
-                  ...baseMetricAttributes,
-                  ackEventType: event.type,
-                }),
-              ),
-              Duration.millis(Math.max(0, Date.now() - envelope.startedAtMs)),
-            );
-          }
+        yield* publishCommittedEvents(committedCommand.committedEvents);
+        const ackEvent = committedCommand.committedEvents[0];
+        if (ackEvent !== undefined) {
+          yield* Metric.update(
+            Metric.withAttributes(
+              orchestrationCommandAckDuration,
+              metricAttributes({
+                ...baseMetricAttributes,
+                ackEventType: ackEvent.type,
+              }),
+            ),
+            Duration.millis(Math.max(0, Date.now() - envelope.startedAtMs)),
+          );
         }
         return { sequence: committedCommand.lastSequence };
       }).pipe(Effect.withSpan(`orchestration.command.${envelope.command.type}`)),
@@ -608,6 +738,8 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   // Before the worker forks: everything at or below this was committed by an
   // earlier process, everything above by this one.
   const bootSequence = yield* eventStore.latestSequence;
+  // Subscriptions start at the store head: events of earlier processes are never delivered live.
+  lastPublishedSequence = bootSequence;
 
   const worker = Effect.forever(
     Queue.take(commandQueue).pipe(
@@ -627,7 +759,9 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     ),
   );
   yield* Effect.forkScoped(worker);
-  yield* Effect.addFinalizer(() => commandQueueMetrics.reset);
+  yield* Effect.addFinalizer(() =>
+    Effect.andThen(commandQueueMetrics.reset, domainEventBusMetrics.reset),
+  );
   yield* Effect.logDebug("orchestration engine started").pipe(
     Effect.annotateLogs({ sequence: commandReadModel.snapshotSequence, bootSequence }),
   );
@@ -646,6 +780,80 @@ const makeOrchestrationEngine = Effect.gen(function* () {
 
   const readRecentEvents: OrchestrationEngineShape["readRecentEvents"] = (input) =>
     eventStore.readRecent === undefined ? Effect.succeed([]) : eventStore.readRecent(input);
+
+  /**
+   * Every persisted event in `(fromExclusive, throughInclusive]`, for a subscriber that fell out of
+   * the bus's live window. A failed read is retried from the last event it already handed on; an
+   * event this process cannot decode ends the subscription with a defect instead of stalling it
+   * forever.
+   */
+  const readMissedEvents = (fromExclusive: number, throughInclusive: number) =>
+    Stream.unwrap(
+      Effect.gen(function* () {
+        yield* domainEventBusMetrics.recordOverflow(1);
+        yield* Effect.logDebug("domain event subscriber replays missed events", {
+          fromExclusive,
+          throughInclusive,
+        });
+        // Where a retry resumes, so it neither re-reads nor re-counts pages already handed on.
+        let readAfter = fromExclusive;
+        return Stream.suspend(() =>
+          eventStore.readThroughSequence(readAfter, throughInclusive),
+        ).pipe(
+          Stream.mapArrayEffect((events) =>
+            Effect.as(
+              Effect.andThen(
+                Effect.sync(() => {
+                  readAfter = events[events.length - 1]!.sequence;
+                }),
+                domainEventBusMetrics.recordRecovery(events.length),
+              ),
+              events,
+            ),
+          ),
+          Stream.catchTag("PersistenceDecodeError", (error) =>
+            Stream.unwrap(
+              Effect.logError("domain event subscriber cannot decode missed events", {
+                fromExclusive,
+                throughInclusive,
+                readAfter,
+                cause: error,
+              }).pipe(Effect.as(Stream.die(error))),
+            ),
+          ),
+          Stream.tapError((error) =>
+            Effect.logWarning("domain event subscriber could not read missed events; retrying", {
+              fromExclusive,
+              throughInclusive,
+              readAfter,
+              cause: error,
+            }),
+          ),
+          Stream.retry(MISSED_EVENTS_READ_RETRY),
+          // Unreachable: the schedule never ends.
+          Stream.orDie,
+        );
+      }),
+    );
+
+  const subscribeDomainEvents: OrchestrationEngineShape["subscribeDomainEvents"] = publicationLock
+    .withPermits(1)(
+      Effect.map(PubSub.subscribe(eventPubSub), (subscription) => ({
+        subscription,
+        cursor: lastPublishedSequence,
+      })),
+    )
+    .pipe(
+      Effect.map(({ subscription, cursor }) =>
+        Stream.fromSubscription(subscription).pipe(
+          orderBySequence({
+            getSequence: (event: OrchestrationEvent) => event.sequence,
+            initialSequence: cursor,
+            fillGap: readMissedEvents,
+          }),
+        ),
+      ),
+    );
 
   const dispatch: OrchestrationEngineShape["dispatch"] = (command, options) =>
     Effect.gen(function* () {
@@ -675,23 +883,18 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     readStreamEventsPage,
     readRecentEvents,
     dispatch,
-    // Each access creates a fresh PubSub subscription so that multiple
-    // consumers (wsServer, ProviderRuntimeIngestion, CheckpointReactor, etc.)
-    // each independently receive all domain events.
-    get streamDomainEvents(): OrchestrationEngineShape["streamDomainEvents"] {
-      return Stream.fromPubSub(eventPubSub);
-    },
-    get subscribeDomainEvents(): OrchestrationEngineShape["subscribeDomainEvents"] {
-      return PubSub.subscribe(eventPubSub);
-    },
+    // Each run of either one is its own subscription (wsServer, ProviderRuntimeIngestion,
+    // CheckpointReactor, ...), and each receives every domain event from its start, in order.
+    streamDomainEvents: Stream.unwrap(subscribeDomainEvents),
+    subscribeDomainEvents,
   } satisfies OrchestrationEngineShape;
 });
 
-export const OrchestrationEngineLive = Layer.effect(
-  OrchestrationEngineService,
-  makeOrchestrationEngine,
-).pipe(
-  Layer.provide(ProjectionPendingApprovalRepositoryLive),
-  Layer.provide(ProjectionThreadUserInputRequestRepositoryLive),
-  Layer.provide(ProviderEffectIntentRepositoryLive),
-);
+export const makeOrchestrationEngineLive = (options?: OrchestrationEngineOptions) =>
+  Layer.effect(OrchestrationEngineService, makeOrchestrationEngine(options)).pipe(
+    Layer.provide(ProjectionPendingApprovalRepositoryLive),
+    Layer.provide(ProjectionThreadUserInputRequestRepositoryLive),
+    Layer.provide(ProviderEffectIntentRepositoryLive),
+  );
+
+export const OrchestrationEngineLive = makeOrchestrationEngineLive();

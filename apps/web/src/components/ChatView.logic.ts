@@ -18,6 +18,7 @@ import {
   isPendingChatDraft,
 } from "../composerDraftStore";
 import { NEW_CHAT_DRAFT_TITLE } from "./sidebar/sidebarChats.logic";
+import { quoteCitationsToInlineText } from "@ryco/shared/quoteCitations";
 import { threadHasConversation } from "@ryco/shared/threadFork";
 import { DateTime, Schema } from "effect";
 import { selectThreadByRef, useStore } from "../store";
@@ -39,6 +40,40 @@ export const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "ryco:last-invoked-script-by-p
 export const MAX_HIDDEN_MOUNTED_TERMINAL_THREADS = 10;
 
 export const LastInvokedScriptByProjectSchema = Schema.Record(ProjectId, Schema.String);
+
+/** Why the chat's saved machine cannot take messages now. */
+export interface EnvironmentUnavailableState {
+  readonly environmentId: EnvironmentId;
+  readonly label: string;
+  readonly connectionState: "connecting" | "disconnected" | "error" | "switched-off";
+}
+
+/**
+ * The chat's saved machine, when it cannot take messages now; null when it
+ * can (or the chat is on no saved machine). A machine switched off says so:
+ * it refuses every connect until it is switched on, so Reconnect is no answer.
+ */
+export function resolveSavedEnvironmentUnavailableState(input: {
+  readonly environmentId: EnvironmentId | null;
+  readonly label: string | null;
+  readonly switchedOff: boolean;
+  readonly connectionState: "connecting" | "connected" | "disconnected" | "error";
+}): EnvironmentUnavailableState | null {
+  if (!input.environmentId || !input.label) return null;
+  if (input.switchedOff) {
+    return {
+      environmentId: input.environmentId,
+      label: input.label,
+      connectionState: "switched-off",
+    };
+  }
+  if (input.connectionState === "connected") return null;
+  return {
+    environmentId: input.environmentId,
+    label: input.label,
+    connectionState: input.connectionState,
+  };
+}
 
 export function resolveHeaderLiveAgentCount(input: {
   readonly liveCount: number;
@@ -234,8 +269,10 @@ export function buildChatSendTitleSeed(input: {
   trimmedPrompt: string;
   firstImageName: string | null;
   firstTerminalContextLabel: string | null;
+  firstFileReferenceTitle?: string | null;
 }): string {
-  const normalizedPrompt = input.trimmedPrompt.trim();
+  // A quote chip names the thread by its quoted preview, not by its token.
+  const normalizedPrompt = quoteCitationsToInlineText(input.trimmedPrompt).trim();
   if (normalizedPrompt.length > 0) {
     return normalizedPrompt;
   }
@@ -244,6 +281,9 @@ export function buildChatSendTitleSeed(input: {
   }
   if (input.firstTerminalContextLabel) {
     return input.firstTerminalContextLabel;
+  }
+  if (input.firstFileReferenceTitle) {
+    return input.firstFileReferenceTitle;
   }
   return "New thread";
 }
@@ -268,6 +308,7 @@ export function deriveComposerSendState(options: {
   prompt: string;
   imageCount: number;
   terminalContexts: ReadonlyArray<TerminalContextDraft>;
+  fileReferences?: ReadonlyArray<unknown>;
   sourceControlContexts?: ReadonlyArray<unknown>;
 }): {
   trimmedPrompt: string;
@@ -280,6 +321,7 @@ export function deriveComposerSendState(options: {
   const expiredTerminalContextCount =
     options.terminalContexts.length - sendableTerminalContexts.length;
   const sourceControlContextCount = options.sourceControlContexts?.length ?? 0;
+  const fileReferenceCount = options.fileReferences?.length ?? 0;
   return {
     trimmedPrompt,
     sendableTerminalContexts,
@@ -288,6 +330,7 @@ export function deriveComposerSendState(options: {
       trimmedPrompt.length > 0 ||
       options.imageCount > 0 ||
       sendableTerminalContexts.length > 0 ||
+      fileReferenceCount > 0 ||
       sourceControlContextCount > 0,
   };
 }
@@ -459,6 +502,24 @@ export function isServerThreadHistoryPending(input: {
         lineage: input.lineage,
       }))
   );
+}
+
+/**
+ * What the focused thread's read marker does with its latest completed turn:
+ * mark it read (`visit`), nothing when it is read already (`read`), or keep it
+ * unread (`hold`) after the user marked a turn unread that this focus of the
+ * thread already showed as read. A new turn, or the thread focused again, is
+ * read as before.
+ */
+export function resolveThreadVisit(input: {
+  readonly completedAt: string;
+  readonly lastVisitedAt: string | undefined;
+  /** The completed turn this focus of the thread showed as read, if any. */
+  readonly seenCompletedAt: string | null;
+}): "visit" | "read" | "hold" {
+  const lastVisitedAtMs = input.lastVisitedAt ? Date.parse(input.lastVisitedAt) : Number.NaN;
+  if (lastVisitedAtMs >= Date.parse(input.completedAt)) return "read";
+  return input.seenCompletedAt === input.completedAt ? "hold" : "visit";
 }
 
 /**

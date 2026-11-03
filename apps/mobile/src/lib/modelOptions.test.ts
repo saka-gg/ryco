@@ -62,6 +62,44 @@ describe("mobile model options", () => {
     ).toEqual([{ id: "fastMode", value: enabled }]);
   });
 
+  it("carries the legacy and custom flags the pickers fold by", () => {
+    const config = {
+      providers: [
+        {
+          instanceId: "claudeAgent",
+          driver: "claudeAgent",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          models: [
+            { slug: "claude-opus-5", name: "Claude Opus 5", isCustom: false, capabilities: null },
+            {
+              slug: "claude-opus-4-6",
+              name: "Claude Opus 4.6",
+              isLegacy: true,
+              isCustom: false,
+              capabilities: null,
+            },
+            { slug: "proxy/opus", name: "Proxy Opus", isCustom: true, capabilities: null },
+          ],
+        },
+      ],
+    } as unknown as ServerConfig;
+    const options = buildModelOptions(config, {
+      instanceId: ProviderInstanceId.make("gone"),
+      model: "retired",
+    });
+    const flags = options.map(({ key, isLegacy, isCustom }) => ({ key, isLegacy, isCustom }));
+
+    expect(flags).toEqual([
+      { key: "claudeAgent:claude-opus-5", isLegacy: false, isCustom: false },
+      { key: "claudeAgent:claude-opus-4-6", isLegacy: true, isCustom: false },
+      { key: "claudeAgent:proxy/opus", isLegacy: false, isCustom: true },
+      // The fallback for a selection the node no longer lists.
+      { key: "gone:retired", isLegacy: false, isCustom: false },
+    ]);
+  });
+
   it("normalizes a legacy fallback selection against current capabilities", () => {
     const config = {
       providers: [

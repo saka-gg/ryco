@@ -8,6 +8,7 @@ const labels = {
   archive: "Task archived",
   settle: "Task settled",
   snooze: "Task snoozed",
+  hide: "Task hidden",
   unpin: "Task unpinned",
 };
 export function SidebarUndoNoticeHost() {

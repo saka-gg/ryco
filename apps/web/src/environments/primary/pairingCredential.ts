@@ -11,7 +11,9 @@ export function stripPairingTokenFromUrl(): void {
   const url = new URL(window.location.href);
   const next = stripPairingTokenUrl(url);
   if (next.toString() !== url.toString()) {
-    window.history.replaceState({}, document.title, next.toString());
+    // Keep the router's entry state: without its index, back from the first
+    // page would leave the app.
+    window.history.replaceState(window.history.state, document.title, next.toString());
   }
 }
 

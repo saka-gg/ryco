@@ -35,12 +35,17 @@ import { ConnectionsSettings } from "./ConnectionsSettings";
 import { KeybindingsSettingsPanel } from "./KeybindingsSettings";
 import { ProvidersSettingsPanel } from "./ProvidersSettingsPanel";
 import { SourceControlPreferences } from "./SourceControlPreferences";
+import { ComposerSettings } from "./ComposerSettings";
+import { ChatWidthSetting } from "./ChatWidthSetting";
+import { isMacPlatform } from "../../lib/utils";
 import { useState } from "react";
 import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
 import { WorktreeSubmoduleEditor } from "./WorktreeSubmoduleSettings";
 import { WorktreeRootEditor } from "./WorktreeRootSettings";
 import { ProjectScopeSelect } from "./ProjectDefaultsSection";
 import { GeneralSettingsPanel } from "./SettingsPanels";
+import { PAIRING_LINK_TARGET_ID, type SettingsSearchTarget } from "./settingsSearchReveal";
+import { useSettingsSubsections } from "./useSettingsSubsections";
 import { desktopRelaunchScheduler } from "./useDesktopRelaunchGuard";
 import { useStore } from "../../store";
 import { SourceControlSettingsPanel } from "./SourceControlSettings";
@@ -150,6 +155,11 @@ vi.mock("../../desktopRelaunchGuard.logic", async (importOriginal) => ({
 const mockUpdateEnvironmentServerSettings = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const originalNavigatorPlatform = navigator.platform;
 
+// The saved-machine switch reaches the real runtime the mock above stands in for.
+vi.mock("../../environments/runtime/savedEnvironmentSwitch", () => ({
+  setSavedEnvironmentEnabled: vi.fn(),
+}));
+
 vi.mock("../../environments/runtime", () => {
   const primaryConnection = {
     kind: "primary" as const,
@@ -222,7 +232,6 @@ function createBaseServerConfig(): ServerConfig {
       capabilities: {
         repositoryIdentity: true,
         threadSettlement: false,
-        threadPriorityRanking: false,
       },
     },
     auth: {
@@ -385,7 +394,6 @@ const createDesktopBridgeStub = (overrides?: {
   readonly serverExposureState?: Awaited<ReturnType<DesktopBridge["getServerExposureState"]>>;
   readonly advertisedEndpoints?: Awaited<ReturnType<DesktopBridge["getAdvertisedEndpoints"]>>;
   readonly setServerExposureMode?: DesktopBridge["setServerExposureMode"];
-  readonly setUpdateChannel?: DesktopBridge["setUpdateChannel"];
   readonly getHubLaunchConfig?: DesktopBridge["getHubLaunchConfig"];
   readonly setHubLaunchConfig?: DesktopBridge["setHubLaunchConfig"];
   readonly restartApp?: NonNullable<DesktopBridge["restartApp"]>;
@@ -485,7 +493,6 @@ const createDesktopBridgeStub = (overrides?: {
       capabilities: {
         repositoryIdentity: true,
         threadSettlement: false,
-        threadPriorityRanking: false,
       },
     }),
     bootstrapSshBearerSession: vi.fn().mockResolvedValue({
@@ -546,12 +553,6 @@ const createDesktopBridgeStub = (overrides?: {
     openExternal: overrides?.openExternal ?? vi.fn().mockResolvedValue(true),
     onMenuAction: () => () => {},
     getUpdateState: vi.fn().mockResolvedValue(idleUpdateState),
-    setUpdateChannel:
-      overrides?.setUpdateChannel ??
-      vi.fn().mockImplementation(async (channel: DesktopUpdateChannel) => ({
-        ...idleUpdateState,
-        channel,
-      })),
     checkForUpdate: vi.fn().mockResolvedValue({ checked: false, state: idleUpdateState }),
     downloadUpdate: vi.fn().mockResolvedValue({
       accepted: false,
@@ -565,8 +566,6 @@ const createDesktopBridgeStub = (overrides?: {
     }),
     onUpdateState: () => () => {},
     respondToRemoteInstall: vi.fn().mockResolvedValue(idleUpdateState),
-    notifyTurnComplete: vi.fn().mockResolvedValue(undefined),
-    onTurnCompleteNotificationActivated: () => () => {},
   };
 };
 
@@ -862,6 +861,10 @@ describe("GeneralSettingsPanel observability", () => {
     await expect
       .element(page.getByRole("heading", { name: "Remote environments", exact: true }))
       .toBeInTheDocument();
+    // "Pairing link" in search and first-run setup lands on the row that says why it cannot pair.
+    expect(document.getElementById(PAIRING_LINK_TARGET_ID)?.querySelector("h3")?.textContent).toBe(
+      "Network access",
+    );
   });
 
   it("hides advertised endpoint rows when desktop network access is disabled", async () => {
@@ -1208,6 +1211,77 @@ describe("GeneralSettingsPanel observability", () => {
     });
   });
 
+  it("turns agent CPU priority off on a node that supports it", async () => {
+    useTierOverrideStore.setState({ override: "desktop" });
+    const environmentId = EnvironmentId.make("environment-priority");
+    const base = createBaseServerConfig();
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <SettingsEditingScopeProvider value="node">
+          <SettingsTargetProvider
+            value={{
+              environmentId,
+              nodeLabel: "Build node",
+              serverConfig: {
+                ...base,
+                environment: {
+                  ...base.environment,
+                  capabilities: { ...base.environment.capabilities, agentProcessPriority: true },
+                },
+              },
+              primary: false,
+              connected: true,
+            }}
+          >
+            <GeneralSettingsPanel />
+          </SettingsTargetProvider>
+        </SettingsEditingScopeProvider>
+      </AppAtomRegistryProvider>,
+    );
+
+    const prioritySwitch = page.getByLabelText("Lower agent CPU priority");
+    await expect.element(prioritySwitch).toBeChecked();
+    await expect.element(prioritySwitch).toBeEnabled();
+    await prioritySwitch.click();
+    await vi.waitFor(() => {
+      expect(mockUpdateEnvironmentServerSettings).toHaveBeenCalledWith(environmentId, {
+        lowerAgentProcessPriority: false,
+      });
+    });
+  });
+
+  it("disables agent CPU priority on a node without the capability", async () => {
+    useTierOverrideStore.setState({ override: "desktop" });
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <SettingsEditingScopeProvider value="node">
+          <SettingsTargetProvider
+            value={{
+              environmentId: EnvironmentId.make("environment-old-node"),
+              nodeLabel: "Old node",
+              serverConfig: createBaseServerConfig(),
+              primary: false,
+              connected: true,
+            }}
+          >
+            <GeneralSettingsPanel />
+          </SettingsTargetProvider>
+        </SettingsEditingScopeProvider>
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect.element(page.getByLabelText("Lower agent CPU priority")).toBeDisabled();
+    await expect
+      .element(
+        page.getByText(
+          "This node does not support agent priority. Update the node to change this setting.",
+        ),
+      )
+      .toBeVisible();
+    await page.getByLabelText("Lower agent CPU priority").click({ force: true });
+    expect(mockUpdateEnvironmentServerSettings).not.toHaveBeenCalled();
+  });
+
   it("validates, saves, clears and resets the selected node's worktree branch prefix", async () => {
     useTierOverrideStore.setState({ override: "desktop" });
     const environmentId = EnvironmentId.make("environment-prefix");
@@ -1234,6 +1308,8 @@ describe("GeneralSettingsPanel observability", () => {
 
     const input = page.getByRole("textbox", { name: "Worktree branch prefix" });
     await expect.element(input).toHaveValue("team");
+    // Thread alerts belong to this device, not to the node being edited.
+    await expect.element(page.getByText("Thread alerts", { exact: true })).not.toBeInTheDocument();
     await input.fill("  team/agent  ");
     await userEvent.keyboard("{Enter}");
     expect(mockUpdateEnvironmentServerSettings).toHaveBeenLastCalledWith(environmentId, {
@@ -1282,30 +1358,7 @@ describe("GeneralSettingsPanel observability", () => {
     expect(mockUpdateEnvironmentServerSettings).not.toHaveBeenCalled();
   });
 
-  it("reveals and focuses legacy token streaming when settings search targets it", async () => {
-    useTierOverrideStore.setState({ override: "desktop" });
-    syncDocumentPresentationTier();
-    installSettingsNativeApi();
-    setServerConfigSnapshot(createBaseServerConfig());
-
-    mounted = await render(
-      <AppAtomRegistryProvider>
-        <GeneralSettingsPanel searchTargetId="legacy-token-streaming" />
-      </AppAtomRegistryProvider>,
-    );
-
-    await expect.element(page.getByText("Legacy features", { exact: true })).toBeInTheDocument();
-    await expect
-      .element(page.getByText("Stream token by token (legacy)", { exact: true }))
-      .toBeInTheDocument();
-    const tokenStreamingSwitch = page.getByLabelText("Stream token by token (legacy)");
-    await expect.element(tokenStreamingSwitch).toBeInTheDocument();
-    await vi.waitFor(() => {
-      expect(document.activeElement).toBe(tokenStreamingSwitch.element());
-    });
-  });
-
-  it("confirms legacy token streaming before enabling and disables it immediately", async () => {
+  it("chooses how responses stream and confirms the legacy token mode", async () => {
     useTierOverrideStore.setState({ override: "desktop" });
     syncDocumentPresentationTier();
     const confirm = vi
@@ -1316,42 +1369,95 @@ describe("GeneralSettingsPanel observability", () => {
       .fn<LocalApi["server"]["updateSettings"]>()
       .mockImplementation(async (patch) => ({
         ...DEFAULT_SERVER_SETTINGS,
-        enableLegacyTokenStreaming:
-          patch.enableLegacyTokenStreaming ?? DEFAULT_SERVER_SETTINGS.enableLegacyTokenStreaming,
+        responseStreamingMode:
+          patch.responseStreamingMode ?? DEFAULT_SERVER_SETTINGS.responseStreamingMode,
       }));
     installSettingsNativeApi({ confirm, updateSettings });
+    const config = createBaseServerConfig();
+    setServerConfigSnapshot({
+      ...config,
+      environment: {
+        ...config.environment,
+        capabilities: { ...config.environment.capabilities, responseStreamingModes: true },
+      },
+    });
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <GeneralSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    const select = page.getByLabelText("Response streaming");
+    await expect.element(select).toHaveTextContent("Paragraphs");
+    await expect
+      .element(page.getByText("Each paragraph or code block appears once it is finished."))
+      .toBeInTheDocument();
+
+    await select.click();
+    await page.getByRole("option", { name: "Whole messages" }).click();
+    await vi.waitFor(() =>
+      expect(updateSettings).toHaveBeenLastCalledWith({ responseStreamingMode: "turn" }),
+    );
+    await expect.element(select).toHaveTextContent("Whole messages");
+    expect(confirm).not.toHaveBeenCalled();
+
+    await select.click();
+    await page.getByRole("option", { name: "Token by token (legacy)" }).click();
+    await vi.waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+    await expect.element(select).toHaveTextContent("Whole messages");
+
+    await select.click();
+    await page.getByRole("option", { name: "Token by token (legacy)" }).click();
+    await vi.waitFor(() => {
+      expect(confirm).toHaveBeenCalledTimes(2);
+      expect(updateSettings).toHaveBeenLastCalledWith({ responseStreamingMode: "token" });
+    });
+    await expect.element(select).toHaveTextContent("Token by token");
+    await expect.element(select).not.toHaveTextContent("(legacy)");
+  });
+
+  it("keeps response streaming read-only on a node that predates the modes", async () => {
+    useTierOverrideStore.setState({ override: "desktop" });
+    syncDocumentPresentationTier();
+    installSettingsNativeApi();
     setServerConfigSnapshot(createBaseServerConfig());
 
     mounted = await render(
       <AppAtomRegistryProvider>
-        <GeneralSettingsPanel searchTargetId="legacy-token-streaming" />
+        <GeneralSettingsPanel />
       </AppAtomRegistryProvider>,
     );
 
-    const tokenStreamingSwitch = page.getByLabelText("Stream token by token (legacy)");
-    await expect.element(tokenStreamingSwitch).not.toBeChecked();
+    const select = page.getByLabelText("Response streaming");
+    await expect.element(select).toBeDisabled();
+    // The client cannot tell what such a node does, so it claims no mode for it.
+    await expect.element(select).toHaveTextContent("Set by the node");
+    await expect.element(select).not.toHaveTextContent("Paragraphs");
+    await expect
+      .element(page.getByText("Each paragraph or code block appears once it is finished."))
+      .not.toBeInTheDocument();
+    await expect
+      .element(page.getByText(/This node does not support response streaming modes/))
+      .toBeInTheDocument();
+  });
 
-    await tokenStreamingSwitch.click();
-    await vi.waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
-    expect(updateSettings).not.toHaveBeenCalled();
-    await expect.element(tokenStreamingSwitch).not.toBeChecked();
+  it("does not call a node unsupported before its config has loaded", async () => {
+    useTierOverrideStore.setState({ override: "desktop" });
+    syncDocumentPresentationTier();
+    installSettingsNativeApi();
 
-    await tokenStreamingSwitch.click();
-    await vi.waitFor(() => {
-      expect(confirm).toHaveBeenCalledTimes(2);
-      expect(updateSettings).toHaveBeenLastCalledWith({
-        enableLegacyTokenStreaming: true,
-      });
-    });
-    await expect.element(tokenStreamingSwitch).toBeChecked();
-
-    await tokenStreamingSwitch.click();
-    await vi.waitFor(() =>
-      expect(updateSettings).toHaveBeenLastCalledWith({
-        enableLegacyTokenStreaming: false,
-      }),
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <GeneralSettingsPanel />
+      </AppAtomRegistryProvider>,
     );
-    expect(confirm).toHaveBeenCalledTimes(2);
+
+    await expect.element(page.getByLabelText("Response streaming")).toBeDisabled();
+    await expect
+      .element(page.getByText(/This node does not support response streaming modes/))
+      .not.toBeInTheDocument();
   });
 
   it("edits locally without depending on a node editor", async () => {
@@ -1478,6 +1584,164 @@ describe("GeneralSettingsPanel observability", () => {
     });
   });
 
+  it("persists the send shortcut and chat width and names the follow-up shortcut left", async () => {
+    const setClientSettings = vi
+      .fn<LocalApi["persistence"]["setClientSettings"]>()
+      .mockResolvedValue(undefined);
+    installSettingsNativeApi({ setClientSettings, clientSettings: DEFAULT_CLIENT_SETTINGS });
+    setServerConfigSnapshot(createBaseServerConfig());
+    const mac = isMacPlatform(navigator.platform);
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <ComposerSettings />
+        <ChatWidthSetting />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect
+      .element(page.getByText(`${mac ? "⌘↵" : "Ctrl+Enter"} does the opposite.`, { exact: false }))
+      .toBeVisible();
+    await page.getByRole("combobox", { name: "Send shortcut" }).click();
+    await page
+      .getByRole("option", { name: `Always ${mac ? "⌘↵" : "Ctrl+Enter"}`, exact: true })
+      .click();
+    await vi.waitFor(() => {
+      expect(setClientSettings).toHaveBeenLastCalledWith({
+        ...DEFAULT_CLIENT_SETTINGS,
+        sendShortcut: "mod-enter",
+      });
+    });
+    await expect
+      .element(
+        page.getByText(`${mac ? "⇧⌘↵" : "Ctrl+Shift+Enter"} does the opposite.`, { exact: false }),
+      )
+      .toBeVisible();
+
+    await page.getByRole("combobox", { name: "Chat width" }).click();
+    await page.getByRole("option", { name: "Wide", exact: true }).click();
+    await vi.waitFor(() => {
+      expect(setClientSettings).toHaveBeenLastCalledWith({
+        ...DEFAULT_CLIENT_SETTINGS,
+        sendShortcut: "mod-enter",
+        chatWidth: "wide",
+      });
+    });
+  });
+
+  it("turns the Claude resume review off and back on for this device", async () => {
+    const setClientSettings = vi
+      .fn<LocalApi["persistence"]["setClientSettings"]>()
+      .mockResolvedValue(undefined);
+    installSettingsNativeApi({ setClientSettings, clientSettings: DEFAULT_CLIENT_SETTINGS });
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <ComposerSettings />
+      </AppAtomRegistryProvider>,
+    );
+
+    const review = page.getByRole("switch", { name: "Review large Claude resumes" });
+    await expect.element(review).toBeChecked();
+    await review.click();
+    await vi.waitFor(() => {
+      expect(setClientSettings).toHaveBeenLastCalledWith({
+        ...DEFAULT_CLIENT_SETTINGS,
+        claudeResumeReview: false,
+      });
+    });
+    await page.getByRole("button", { name: "Reset Claude resume review to default" }).click();
+    await vi.waitFor(() => {
+      expect(setClientSettings).toHaveBeenLastCalledWith(DEFAULT_CLIENT_SETTINGS);
+    });
+    await expect.element(review).toBeChecked();
+  });
+
+  it("chooses thread alerts in the browser and asks for notification permission", async () => {
+    useTierOverrideStore.setState({ override: "desktop" });
+    syncDocumentPresentationTier();
+    const setClientSettings = vi
+      .fn<LocalApi["persistence"]["setClientSettings"]>()
+      .mockResolvedValue(undefined);
+    installSettingsNativeApi({ setClientSettings, clientSettings: DEFAULT_CLIENT_SETTINGS });
+    setServerConfigSnapshot(createBaseServerConfig());
+    const notification = { permission: "default", requestPermission: vi.fn() };
+    notification.requestPermission.mockImplementation(async () => {
+      notification.permission = "granted";
+      return "granted";
+    });
+    vi.stubGlobal("Notification", notification);
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <GeneralSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    const mode = page.getByRole("combobox", { name: "Thread alerts" });
+    await expect.element(mode).toMatchTextContent("Notifications");
+    await expect.element(page.getByRole("button", { name: "Allow notifications" })).toBeVisible();
+
+    await mode.click();
+    await page.getByRole("option", { name: "Notifications and sound", exact: true }).click();
+    await vi.waitFor(() => {
+      expect(setClientSettings).toHaveBeenLastCalledWith({
+        ...DEFAULT_CLIENT_SETTINGS,
+        notifyOnTurnCompleteWhenUnfocused: true,
+        threadNotificationSound: true,
+      });
+    });
+    expect(notification.requestPermission).toHaveBeenCalledTimes(1);
+    await expect
+      .element(page.getByRole("button", { name: "Allow notifications" }))
+      .not.toBeInTheDocument();
+
+    await mode.click();
+    await page.getByRole("option", { name: "Sound", exact: true }).click();
+    await vi.waitFor(() => {
+      expect(setClientSettings).toHaveBeenLastCalledWith({
+        ...DEFAULT_CLIENT_SETTINGS,
+        notifyOnTurnCompleteWhenUnfocused: false,
+        threadNotificationSound: true,
+      });
+    });
+
+    await page.getByLabelText("Show in-app alerts for other threads").click();
+    await vi.waitFor(() => {
+      expect(setClientSettings).toHaveBeenLastCalledWith({
+        ...DEFAULT_CLIENT_SETTINGS,
+        notifyOnTurnCompleteWhenUnfocused: false,
+        threadNotificationSound: true,
+        threadNotificationToasts: false,
+      });
+    });
+    expect(notification.requestPermission).toHaveBeenCalledTimes(1);
+  });
+
+  it("says when the browser blocks thread notifications", async () => {
+    useTierOverrideStore.setState({ override: "desktop" });
+    syncDocumentPresentationTier();
+    installSettingsNativeApi({ clientSettings: DEFAULT_CLIENT_SETTINGS });
+    setServerConfigSnapshot(createBaseServerConfig());
+    vi.stubGlobal("Notification", { permission: "denied", requestPermission: vi.fn() });
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <GeneralSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect
+      .element(
+        page.getByText("Notifications are blocked in this browser. Badges and sound still work."),
+      )
+      .toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "Allow notifications" }))
+      .not.toBeInTheDocument();
+  });
+
   it("shows separate remote Git and PR workflow refresh controls", async () => {
     const setClientSettings = vi
       .fn<LocalApi["persistence"]["setClientSettings"]>()
@@ -1510,7 +1774,38 @@ describe("GeneralSettingsPanel observability", () => {
     await expect.element(refreshMode).toMatchTextContent("Reduced");
   });
 
-  it("creates and shows a pairing link when network access is enabled", async () => {
+  it("chooses where pull request links in chat open", async () => {
+    const setClientSettings = vi
+      .fn<LocalApi["persistence"]["setClientSettings"]>()
+      .mockResolvedValue(undefined);
+    installSettingsNativeApi({ setClientSettings });
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <SourceControlPreferences />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect
+      .element(page.getByText("Pull request links in chat", { exact: true }))
+      .toBeInTheDocument();
+    const linkTarget = page.getByLabelText("Where pull request links open");
+    await expect.element(linkTarget).toMatchTextContent("Ryco");
+    await linkTarget.click();
+    await page.getByRole("option", { name: "Browser", exact: true }).click();
+
+    await vi.waitFor(() => {
+      expect(setClientSettings).toHaveBeenLastCalledWith({
+        ...DEFAULT_CLIENT_SETTINGS,
+        changeRequestLinkTarget: "browser",
+      });
+    });
+    await expect.element(linkTarget).toMatchTextContent("Browser");
+  });
+
+  it("adds a device through the dialog and lists its link when network access is enabled", async () => {
+    await page.viewport(1280, 800);
     window.desktopBridge = createDesktopBridgeStub({
       serverExposureState: {
         mode: "network-accessible",
@@ -1519,7 +1814,33 @@ describe("GeneralSettingsPanel observability", () => {
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
       },
+      advertisedEndpoints: [
+        {
+          id: "desktop-loopback:3773",
+          label: "This machine",
+          provider: { id: "desktop-core", label: "Desktop", kind: "core", isAddon: false },
+          httpBaseUrl: "http://127.0.0.1:3773/",
+          wsBaseUrl: "ws://127.0.0.1:3773/",
+          reachability: "loopback",
+          compatibility: { hostedHttpsApp: "mixed-content-blocked", desktopApp: "compatible" },
+          source: "desktop-core",
+          status: "available",
+        },
+        {
+          id: "desktop-lan:http://192.168.1.44:3773",
+          label: "Local network",
+          provider: { id: "desktop-core", label: "Desktop", kind: "core", isAddon: false },
+          httpBaseUrl: "http://192.168.1.44:3773/",
+          wsBaseUrl: "ws://192.168.1.44:3773/",
+          reachability: "lan",
+          compatibility: { hostedHttpsApp: "mixed-content-blocked", desktopApp: "compatible" },
+          source: "desktop-core",
+          status: "available",
+        },
+      ],
     });
+    // An owner who once made loopback the default: the QR code still never encodes it.
+    useUiStateStore.setState({ defaultAdvertisedEndpointKey: "desktop-core:loopback:http" });
     let pairingLinks: Array<AuthAccessSnapshot["pairingLinks"][number]> = [];
     let clientSessions: Array<AuthAccessSnapshot["clientSessions"][number]> = [
       makeClientSession({
@@ -1544,12 +1865,33 @@ describe("GeneralSettingsPanel observability", () => {
       pairingLinks,
       clientSessions,
     });
+    const revokedPairingLinkIds: string[] = [];
+    let mintedCount = 0;
     vi.stubGlobal(
       "fetch",
       vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
         const url = String(input);
         const method = init?.method ?? "GET";
+        if (url.endsWith("/api/auth/pairing-links/revoke") && method === "POST") {
+          revokedPairingLinkIds.push((JSON.parse(String(init?.body)) as { id: string }).id);
+          return new Response(JSON.stringify({ revoked: true }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
         if (url.endsWith("/api/auth/pairing-token") && method === "POST") {
+          mintedCount += 1;
+          if (mintedCount === 1) {
+            // The code the dialog mints when it opens, before it has a name.
+            return new Response(
+              JSON.stringify({
+                id: "pairing-link-0",
+                credential: "first-token",
+                expiresAt: "2036-04-10T00:05:00.000Z",
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            );
+          }
           pairingLinks = [
             makePairingLink({
               id: "pairing-link-1",
@@ -1614,10 +1956,21 @@ describe("GeneralSettingsPanel observability", () => {
     await expect.element(page.getByText("Authorized clients")).toBeInTheDocument();
     await expect.element(page.getByText("Revoke others")).toBeInTheDocument();
     await expect.element(page.getByText("This Mac", { exact: true })).toBeInTheDocument();
-    await page.getByRole("button", { name: "Create link", exact: true }).click();
-    await expect.element(page.getByText("Create pairing link")).toBeInTheDocument();
-    await page.getByRole("button", { name: "Create link", exact: true }).click();
+    // One entry in the backend header, the same one in Authorized clients.
+    await expect.element(page.getByRole("button", { name: "Create link" })).not.toBeInTheDocument();
+    await page.getByRole("button", { name: "Add a device" }).last().click();
+    await page.getByRole("button", { name: "More options" }).click();
+    await page.getByLabelText("Device name (optional)").fill("Julius iPhone");
+    await page.getByRole("button", { name: "New code with this name" }).click();
+    await expect
+      .element(page.getByRole("img", { name: "Pairing link — scan to open on another device" }))
+      .toBeInTheDocument();
+    await page.getByRole("tab", { name: "Computer" }).click();
+    await expect
+      .element(page.getByText("http://192.168.1.44:3773", { exact: true }))
+      .toBeInTheDocument();
     authAccessHarness.emitPairingLinkUpserted(pairingLinks[0]!);
+    await page.getByRole("button", { name: "Close" }).click();
     authAccessHarness.emitClientUpserted(clientSessions[1]!);
     await expect
       .element(page.getByText("Client · Mobile · iOS · Safari · 192.168.1.88"))
@@ -1626,6 +1979,8 @@ describe("GeneralSettingsPanel observability", () => {
       .element(page.getByRole("button", { name: /^Copy pairing URL for:/ }))
       .toBeInTheDocument();
     await expect.element(page.getByText("Revoke others")).toBeInTheDocument();
+    // Naming the device replaced only the dialog's own unused code.
+    expect(revokedPairingLinkIds).toEqual(["pairing-link-0"]);
   });
 
   it("revokes all other paired clients from settings", async () => {
@@ -2267,6 +2622,14 @@ describe("SourceControlSettingsPanel discovery states", () => {
       .element(page.getByRole("button", { name: "Rescan server environment" }))
       .toBeDisabled();
     await expect.element(page.getByText("Nothing detected yet")).not.toBeInTheDocument();
+    // Writing settings are node settings, not scan results: they never wait for the scan.
+    await expect
+      .element(page.getByText("Commit & pull request writing", { exact: true }))
+      .toBeInTheDocument();
+    await expect.element(page.getByRole("combobox", { name: "Writing style" })).toBeInTheDocument();
+    await expect
+      .element(page.getByRole("textbox", { name: "Commit message instructions" }))
+      .toBeInTheDocument();
   });
 
   it("uses the shared empty state when discovery completes without tools", async () => {
@@ -2354,7 +2717,61 @@ describe("SourceControlSettingsPanel discovery states", () => {
       .toBeInTheDocument();
     expect(calls).toBe(1);
   });
+
+  it("turns pull request templates off on a node that reads them", async () => {
+    resetServerStateForTests();
+    const updateSettings = vi
+      .fn<LocalApi["server"]["updateSettings"]>()
+      .mockResolvedValue({ ...DEFAULT_SERVER_SETTINGS, pullRequestTemplates: false });
+    installSettingsNativeApi({ updateSettings });
+    const config = createBaseServerConfig();
+    setServerConfigSnapshot({
+      ...config,
+      environment: {
+        ...config.environment,
+        capabilities: { ...config.environment.capabilities, changeRequestTemplates: true },
+      },
+    });
+
+    mounted = await renderSourceControlSettingsPanel();
+
+    const toggle = page.getByRole("switch", { name: "Use pull request templates" });
+    await expect.element(toggle).toBeChecked();
+    await expect.element(toggle).toBeEnabled();
+    await toggle.click();
+    await vi.waitFor(() =>
+      expect(updateSettings).toHaveBeenLastCalledWith({ pullRequestTemplates: false }),
+    );
+    await expect.element(toggle).not.toBeChecked();
+  });
+
+  it("asks a node that cannot read pull request templates to update", async () => {
+    resetServerStateForTests();
+    const updateSettings = vi.fn<LocalApi["server"]["updateSettings"]>();
+    installSettingsNativeApi({ updateSettings });
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await renderSourceControlSettingsPanel();
+
+    await expect
+      .element(page.getByRole("switch", { name: "Use pull request templates" }))
+      .toBeDisabled();
+    await expect
+      .element(page.getByText("Update this node to use pull request templates."))
+      .toBeInTheDocument();
+    expect(updateSettings).not.toHaveBeenCalled();
+  });
 });
+
+/** Connections under the settings page's reveal, as the palette and first-run setup reach it. */
+function RevealingConnectionsSettings({ target }: { target: SettingsSearchTarget }) {
+  const { contentRef } = useSettingsSubsections("connections", false, target);
+  return (
+    <div ref={contentRef}>
+      <ConnectionsSettings />
+    </div>
+  );
+}
 
 describe("ConnectionsSettings Hub section", () => {
   let mounted:
@@ -2427,6 +2844,7 @@ describe("ConnectionsSettings Hub section", () => {
   const renderHub = async (
     hubConfig?: Partial<Awaited<ReturnType<DesktopBridge["getHubLaunchConfig"]>>>,
     bridgeOverrides?: Parameters<typeof createDesktopBridgeStub>[0],
+    revealTarget?: SettingsSearchTarget,
   ) => {
     window.desktopBridge = createDesktopBridgeStub({
       serverExposureState: {
@@ -2450,7 +2868,11 @@ describe("ConnectionsSettings Hub section", () => {
     setServerConfigSnapshot(createBaseServerConfig());
     mounted = await render(
       <AppAtomRegistryProvider>
-        <ConnectionsSettings />
+        {revealTarget ? (
+          <RevealingConnectionsSettings target={revealTarget} />
+        ) : (
+          <ConnectionsSettings />
+        )}
       </AppAtomRegistryProvider>,
     );
   };
@@ -2478,6 +2900,23 @@ describe("ConnectionsSettings Hub section", () => {
     await expect.element(page.getByRole("button", { name: "Enable" })).toBeInTheDocument();
     // Nothing enrolled, so the address is editable.
     await expect.element(page.getByPlaceholder("https://…")).toBeEnabled();
+  });
+
+  // First-run setup's tour links here, and the "Pairing link" search result jumps by id.
+  it.each([
+    [PAIRING_LINK_TARGET_ID, "Network access"],
+    ["Remote environments", "Remote environments"],
+    ["Hub", "Hub"],
+  ])("reveals the %s target that setup links to", async (targetId, heading) => {
+    stubHubFetch({
+      status: { ...baseStatus, state: "disabled" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub(undefined, undefined, { targetId });
+
+    await vi.waitFor(() =>
+      expect(document.activeElement?.querySelector("h2, h3")?.textContent).toBe(heading),
+    );
   });
 
   it("uses account setup instead of a second manual enrollment on Desktop", async () => {

@@ -31,18 +31,22 @@ import type * as CodexClient from "effect-codex-app-server/client";
 import type * as CodexErrors from "effect-codex-app-server/errors";
 import type * as CodexSchema from "effect-codex-app-server/schema";
 import { ChildProcessSpawner } from "effect/process";
+import {
+  timeoutWhileResponsive,
+  timeoutWhileResponsiveOrElse,
+} from "@ryco/shared/responsiveDeadline";
 
 import { ServerConfig } from "../config.ts";
 import { runProcess } from "../processRunner.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import {
+  codexProcessEnvironment,
   materializeCodexShadowHome,
-  resolveCodexHomeLayout,
+  resolveCodexInstanceLayout,
   type CodexHomeLayout,
 } from "../provider/Drivers/CodexHomeLayout.ts";
 import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
 import { loadCodexAppServerModule } from "../provider/codexAppServerModule.ts";
-import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
 import {
   applyProviderMcpSecretMutations,
   providerMcpSecretPresence,
@@ -502,12 +506,7 @@ function buildServers(input: {
 }
 
 function runtimeEnvFor(workspace: WorkspaceRuntime): Record<string, string> {
-  return asSpawnEnv({
-    ...workspace.processEnv,
-    ...(workspace.layout.effectiveHomePath
-      ? { CODEX_HOME: workspace.layout.effectiveHomePath }
-      : {}),
-  });
+  return asSpawnEnv(codexProcessEnvironment(workspace.layout, workspace.processEnv));
 }
 
 function chooseWorkspaceRuntime(
@@ -588,9 +587,12 @@ export const makeCodexMcpService = Effect.gen(function* () {
       if (!codexSettings.enabled) {
         continue;
       }
-      const layout = yield* resolveCodexHomeLayout(codexSettings).pipe(
-        Effect.provideService(Path.Path, pathService),
-      );
+      // Resolved from the instance's environment, exactly as its driver does, so MCP calls use
+      // the instance's homes and materializing never re-points its shadow-home links.
+      const { environment: processEnv, layout } = yield* resolveCodexInstanceLayout(
+        codexSettings,
+        instance.environment,
+      ).pipe(Effect.provideService(Path.Path, pathService));
       const materialized = yield* materializeCodexShadowHome(layout).pipe(
         Effect.provideService(Path.Path, pathService),
         Effect.provideService(FileSystem.FileSystem, fileSystemService),
@@ -652,7 +654,7 @@ export const makeCodexMcpService = Effect.gen(function* () {
         },
         layout,
         codexSettings,
-        processEnv: mergeProviderInstanceEnvironment(instance.environment),
+        processEnv,
       });
     }
 
@@ -680,6 +682,7 @@ export const makeCodexMcpService = Effect.gen(function* () {
             args: ["app-server"],
             cwd: serverConfig.cwd,
             env: runtimeEnvFor(workspace),
+            timeoutOrElse: timeoutWhileResponsiveOrElse,
           }),
         ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
         const client = yield* Effect.service(codexAppServer.CodexClient.CodexAppServerClient).pipe(
@@ -690,7 +693,7 @@ export const makeCodexMcpService = Effect.gen(function* () {
         return yield* use(client);
       }),
     ).pipe(
-      Effect.timeout(MCP_APP_SERVER_TIMEOUT),
+      timeoutWhileResponsive(MCP_APP_SERVER_TIMEOUT),
       Effect.mapError((cause) => normalizeUnknownError(cause, "Codex app-server MCP call failed.")),
     );
 

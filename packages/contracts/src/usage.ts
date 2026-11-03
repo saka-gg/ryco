@@ -54,6 +54,20 @@ export const UsageTokenTotals = Schema.Struct({
 });
 export type UsageTokenTotals = typeof UsageTokenTotals.Type;
 
+/**
+ * Estimated cost split by token type at the billed speed; sums to the split part of
+ * `estimatedCostUsd` (provider-reported cost without a published rate stays unsplit).
+ */
+export const UsageCostBreakdown = Schema.Struct({
+  inputUsd: NonNegativeFinite,
+  cacheReadUsd: NonNegativeFinite,
+  cacheWriteUsd: NonNegativeFinite,
+  outputUsd: NonNegativeFinite,
+  /** Included in the four above: what fast/ultrafast tiers added over standard rates. Absent = 0. */
+  speedPremiumUsd: Schema.optional(NonNegativeFinite),
+});
+export type UsageCostBreakdown = typeof UsageCostBreakdown.Type;
+
 export const UsageDailyBucket = Schema.Struct({
   sourceId: TrimmedNonEmptyString,
   // Cursor exports retain only anonymized event/session identity for overlap dedupe.
@@ -68,8 +82,12 @@ export const UsageDailyBucket = Schema.Struct({
   sessionCount: NonNegativeInt,
   estimatedCostUsd: Schema.optional(NonNegativeFinite),
   estimatedCacheSavingsUsd: Schema.optional(NonNegativeFinite),
+  // Additive: older clients drop it, older nodes omit it (the cost then shows unsplit).
+  costBreakdown: Schema.optional(UsageCostBreakdown),
   pricedTokenCount: NonNegativeFinite,
   unpricedTokenCount: NonNegativeFinite,
+  /** Part of `pricedTokenCount` priced from the node's custom model prices. Absent = 0. */
+  customPricedTokenCount: Schema.optional(NonNegativeFinite),
   costSource: UsageCostSource,
 });
 export type UsageDailyBucket = typeof UsageDailyBucket.Type;
@@ -101,6 +119,9 @@ export const UsagePricingStatus = Schema.Struct({
   cacheAgeMs: Schema.optional(NonNegativeInt),
   recognizedModelCount: NonNegativeInt,
   unrecognizedModelCount: NonNegativeInt,
+  /** Custom model prices and model mappings in effect on the node. Absent = none. */
+  customPriceCount: Schema.optional(NonNegativeInt),
+  mappedModelCount: Schema.optional(NonNegativeInt),
 });
 export type UsagePricingStatus = typeof UsagePricingStatus.Type;
 

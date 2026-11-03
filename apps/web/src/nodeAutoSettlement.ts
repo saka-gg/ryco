@@ -1,123 +1,31 @@
 import { WS_METHODS, type EnvironmentId } from "@ryco/contracts";
 import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
+import { subscribeEnvironmentServerConfigs } from "@ryco/client-runtime/rpc";
 import {
-  getWsConnectionStatusForEnvironment,
-  subscribeEnvironmentServerConfigs,
-} from "@ryco/client-runtime/rpc";
-import {
-  applyAutoSettleRuleToNodes,
   autoSettleRuleHandOverKey,
-  autoSettleRuleTargetBlocker,
   changeAutoSettleRule,
   createAutoSettleRuleHandOver,
-  describeAutoSettleRuleApplyResult,
   nodeAwaitsAutoSettleRule,
   readAutoSettleRuleHandOverKey,
-  type AutoSettleRuleHandOverCandidate,
   type AutoSettleRuleHandOverListing,
   type AutoSettleRuleNodeView,
-  type AutoSettleRuleTarget,
 } from "@ryco/client-runtime/state/settings";
 import { useEffect, useMemo } from "react";
 
 import { isHostedHubMode } from "./env";
 import { readNodeServerConfig } from "./environments/nodeServerConfig";
-import { getPrimaryKnownEnvironment } from "./environments/primary";
-import {
-  readPrimarySessionRole,
-  requestPrimarySessionRole,
-  subscribePrimarySessionRole,
-} from "./environments/primarySessionRole";
-import {
-  readEnvironmentConnection,
-  updateEnvironmentServerSettings,
-  useSavedEnvironmentRuntimeStore,
-} from "./environments/runtime";
+import { readNodeRole, subscribePrimarySessionRole } from "./environments/nodeRole";
+import { updateEnvironmentServerSettings } from "./environments/runtime";
 import { updateClientAutoSettleAfterDays } from "./hooks/useSettings";
 import { readHostedRpcCapability } from "./hostedHub/capabilities";
-import { useHostedHubStore } from "./hostedHub/state";
-import { readDesktopWorkspaceState } from "./platform/desktopWorkspace";
 
 /**
- * The web side of node-owned automatic settlement: which nodes a rule can be
- * written to now, the one-time hand-over of this client's own rule, and the
- * settings writes. The decisions themselves are the client runtime's
- * (`state/settings`).
+ * The web side of node-owned automatic settlement: the one-time hand-over of
+ * this client's own rule, and the settings writes. The decisions themselves are
+ * the client runtime's (`state/settings`). Writing the rule to every node is
+ * the settings route's (`components/settings/nodeSettingsTargets`), so the app
+ * shell, which imports this module, never loads it.
  */
-
-export interface AutoSettleRuleNode {
-  readonly environmentId: EnvironmentId;
-  readonly label: string;
-}
-
-type NodeRole = AutoSettleRuleHandOverCandidate["role"];
-
-/**
- * The role this client holds on a node: a hosted node's own role, a Desktop
- * workspace machine's, a saved environment's session role, or this page's own
- * session on the primary. Undefined while the primary's is being asked.
- */
-function readNodeRole(environmentId: EnvironmentId): NodeRole {
-  if (isHostedHubMode()) {
-    return (
-      useHostedHubStore.getState().nodes.find((node) => node.environmentId === environmentId)
-        ?.effectiveRole ?? null
-    );
-  }
-  if (environmentId === getPrimaryKnownEnvironment()?.environmentId) {
-    const role = readPrimarySessionRole(environmentId);
-    if (role === undefined) requestPrimarySessionRole(environmentId);
-    return role;
-  }
-  const machine = readDesktopWorkspaceState().machines.find(
-    (candidate) => candidate.environmentId === environmentId,
-  );
-  if (machine) return machine.canConnect ? machine.effectiveRole : null;
-  return useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.role ?? null;
-}
-
-/**
- * Whether this client may change the node's settings now: in hosted mode the
- * node's own session must allow the write (role and a ready session), else
- * the owner role. The primary counts as writable until its own role is known,
- * as on the settings page; the node still checks every write.
- */
-function canWriteNodeSettings(environmentId: EnvironmentId): boolean {
-  if (isHostedHubMode()) {
-    return readHostedRpcCapability(WS_METHODS.serverUpdateSettings, environmentId).allowed;
-  }
-  const role = readNodeRole(environmentId);
-  return (
-    role === "owner" ||
-    (role === undefined && environmentId === getPrimaryKnownEnvironment()?.environmentId)
-  );
-}
-
-/** A node as "Apply to all connected nodes" finds it: writable now, or why not. */
-export function readAutoSettleRuleTarget(node: AutoSettleRuleNode): AutoSettleRuleTarget {
-  const connected =
-    readEnvironmentConnection(node.environmentId) !== null &&
-    getWsConnectionStatusForEnvironment(node.environmentId).phase === "connected";
-  return {
-    ...node,
-    blocker: autoSettleRuleTargetBlocker({
-      connected,
-      config: readNodeServerConfig(node.environmentId),
-      canWrite: canWriteNodeSettings(node.environmentId),
-    }),
-    write: (patch) => updateEnvironmentServerSettings(node.environmentId, patch),
-  };
-}
-
-/** Writes one rule to every listed node it can and says what it did, naming the nodes it could not. */
-export async function applyAutoSettleRuleToAllNodes(
-  value: SidebarAutoSettleAfterDays,
-  nodes: ReadonlyArray<AutoSettleRuleNode>,
-): Promise<string> {
-  return describeAutoSettleRuleApplyResult(
-    await applyAutoSettleRuleToNodes(value, nodes.map(readAutoSettleRuleTarget)),
-  );
-}
 
 /** Sets the rule on the node the settings show, or as this device's own for a node that keeps none. */
 export function setAutoSettleRule(
@@ -188,10 +96,10 @@ export function useAutoSettleRuleHandOver(
       handOverAutoSettleRule(listed, clientValue);
     };
     run();
-    const unsubscribeConfigs = subscribeEnvironmentServerConfigs(run);
+    const unsubscribe = subscribeEnvironmentServerConfigs(run);
     const unsubscribeRole = subscribePrimarySessionRole(run);
     return () => {
-      unsubscribeConfigs();
+      unsubscribe();
       unsubscribeRole();
     };
   }, [clientValue, key]);

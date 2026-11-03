@@ -3,9 +3,10 @@
  *
  * A supervisor (the desktop shell, a service manager) restarts a backend that
  * exits. For failures that will repeat on every attempt - a database written by
- * a newer binary, invalid configuration - the backend exits with
- * `EX_CONFIG` (78) and reports a structured `fatal` frame instead, so the
- * supervisor can stop and show the reason. Everything else keeps exit code 1.
+ * a newer binary or owned by another server, invalid configuration - the
+ * backend exits with `EX_CONFIG` (78) and reports a structured `fatal` frame
+ * instead, so the supervisor can stop and show the reason. Everything else
+ * keeps exit code 1.
  *
  * @module startupFailure
  */
@@ -18,8 +19,10 @@ export const DEFAULT_FAILURE_EXIT_CODE = 1;
 
 export type FatalStartupErrorCode =
   | "database-schema-newer"
+  | "database-in-use"
   | "invalid-config"
-  | "bootstrap-envelope-missing";
+  | "bootstrap-envelope-missing"
+  | "database-restore-interrupted";
 
 const tagOf = (error: unknown): unknown =>
   typeof error === "object" && error !== null ? (error as { readonly _tag?: unknown })._tag : null;
@@ -32,7 +35,19 @@ export function classifyFatalStartupError(error: unknown): FatalStartupErrorCode
   if (tag === "MigrationError" && (error as { readonly kind?: unknown }).kind === "BadState") {
     return "database-schema-newer";
   }
+  // Another server owns the database (`databaseOwnerLock.ts`): restarting
+  // changes nothing until that server stops, and the message says which it is.
+  // A lock still being written is the exception: either its writer finishes,
+  // or the half-written file turns stale and the next start reclaims it.
+  if (tag === "DatabaseOwnedError") {
+    return (error as { readonly reason?: unknown }).reason === "being-written"
+      ? null
+      : "database-in-use";
+  }
   if (tag === "ConfigError") return "invalid-config";
+  // An in-place database restore that stopped part-way and cannot be finished: it fails the same
+  // way on every start until someone looks at its journal (`databaseRestoreSwap.ts`).
+  if (tag === "DatabaseRestoreInterruptedError") return "database-restore-interrupted";
   // An explicit bootstrap fd without an envelope: the launcher is gone or
   // stalled, and a restart by that same launcher would wait the same way.
   if (tag === "BootstrapEnvelopeUnavailableError") return "bootstrap-envelope-missing";

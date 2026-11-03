@@ -22,6 +22,8 @@ export const TURN_STEER_FAILED_FALLBACK = "Provider rejected turn steering.";
 export interface TurnSteerFailureClassification {
   readonly reason: TurnSteerRejectionReason;
   readonly error: string;
+  /** The provider stopped the turn to take the message: the queue sends it next (`restartedTurn`). */
+  readonly restartedTurn?: true;
 }
 
 function bounded(text: string, fallback: string): string {
@@ -35,7 +37,11 @@ export function classifyTurnSteerFailure(
 ): TurnSteerFailureClassification {
   const failure = cause.reasons.find(Cause.isFailReason)?.error;
   if (Schema.is(ProviderTurnNotSteerableError)(failure)) {
-    return { reason: "deferred", error: bounded(failure.detail, TURN_STEER_SESSION_ENDED_DETAIL) };
+    return {
+      reason: "deferred",
+      error: bounded(failure.detail, TURN_STEER_SESSION_ENDED_DETAIL),
+      ...(failure.reason === "restarting" ? { restartedTurn: true as const } : {}),
+    };
   }
   if (
     Schema.is(ProviderSessionNotFoundError)(failure) ||

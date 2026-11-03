@@ -53,11 +53,11 @@ const project = {
   remoteEnvironmentLabels: ["Mac mini"],
 } as unknown as SidebarProjectSnapshot;
 
-function actionsFor(origin: CopyProjectDialogOrigin, openAddProjectWith = vi.fn()) {
+function actionsFor(origin: CopyProjectDialogOrigin, openAddProject = vi.fn()) {
   return crossNodeProjectActions({
     projectRef: { environmentId: LAPTOP, projectId: PROJECT },
     origin,
-    openAddProjectWith,
+    openAddProject,
   });
 }
 
@@ -153,14 +153,12 @@ describe("cross-node entry points", () => {
   });
 
   it("linking opens add project in link mode for the checkout", async () => {
-    const openAddProjectWith = vi.fn();
-    const screen = await render(
-      <Kebab crossNodeActions={actionsFor("kebab", openAddProjectWith)} />,
-    );
+    const openAddProject = vi.fn();
+    const screen = await render(<Kebab crossNodeActions={actionsFor("kebab", openAddProject)} />);
     try {
       await page.getByRole("menuitem", { name: "Link a copy that’s already on a node…" }).click();
-      expect(openAddProjectWith).toHaveBeenCalledTimes(1);
-      expect(openAddProjectWith).toHaveBeenCalledWith({
+      expect(openAddProject).toHaveBeenCalledTimes(1);
+      expect(openAddProject).toHaveBeenCalledWith({
         mode: "link",
         projectRef: { environmentId: LAPTOP, projectId: PROJECT },
       });

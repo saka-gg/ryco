@@ -32,6 +32,11 @@ vi.mock("../../env", async (importOriginal) => ({
   isHostedHubMode: () => true,
 }));
 
+// A marker in place of thread alerts, whose mounting is the subject of one case.
+vi.mock("../../notifications/ThreadAlertsBootstrap", () => ({
+  ThreadAlertsBootstrap: () => <div data-testid="thread-alerts" />,
+}));
+
 import {
   getHostedEnvironmentSessions,
   hostedHubController,
@@ -1404,5 +1409,50 @@ describe("hosted Hub routes", () => {
     await vi.waitFor(() => expect(getPresentationTier()).toBe("phone"));
     await expect.element(page.getByRole("heading", { name: "Account" })).toBeVisible();
     await expect.element(page.getByRole("button", { name: "Sign out" })).not.toBeInTheDocument();
+  });
+});
+
+describe("hosted thread alerts", () => {
+  it("keep running while a Hub page or an uncached node switch replaces the workspace", async () => {
+    navigateHubPathname("/", { replace: true });
+    installHostedNodeHistory(window);
+    const target = node("node_bbbbbbbbbbbbbbbbbbbbbb", true, "operator");
+    useHostedHubStore.setState({
+      accountStatus: "authenticated",
+      account,
+      session,
+      directoryStatus: "ready",
+      browserStatus: "current",
+      nodes: [target],
+    });
+    // The switch below stays on its full-page surface: the node never gets a session.
+    vi.spyOn(hostedHubController, "selectNode").mockResolvedValue();
+    vi.spyOn(hostedHubController, "acquireEnvironment").mockResolvedValue("connecting");
+
+    mounted = await render(<HostedHubRoot />);
+    await vi.waitFor(() => {
+      expect(document.querySelector('[data-slot="sidebar-wrapper"]')).not.toBeNull();
+    });
+    const alerts = () => document.querySelector('[data-testid="thread-alerts"]');
+    await vi.waitFor(() => expect(alerts()).not.toBeNull());
+    const mountedAlerts = alerts();
+
+    navigateHub({ kind: "account", section: "overview" });
+    await expect.element(page.getByRole("heading", { name: "Account" })).toBeVisible();
+    expect(alerts()).toBe(mountedAlerts);
+
+    navigateHub({ kind: "nodes" });
+    await expect.element(page.getByRole("heading", { name: /^Your nodes?$/ })).toBeVisible();
+    expect(alerts()).toBe(mountedAlerts);
+
+    // An in-app switch to a node the store holds no shell for.
+    window.history.pushState(null, "", `/node/${target.id}/${target.environmentId}/t_1`);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    await expect.element(page.getByRole("heading", { name: "Restoring your node" })).toBeVisible();
+    expect(alerts()).toBe(mountedAlerts);
+
+    // Signing out ends them, with their toasts and notifications.
+    useHostedHubStore.setState({ accountStatus: "signed-out" });
+    await vi.waitFor(() => expect(alerts()).toBeNull());
   });
 });

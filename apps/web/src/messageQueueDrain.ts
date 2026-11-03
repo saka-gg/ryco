@@ -1,22 +1,46 @@
-import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { parseScopedThreadKey, scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import {
+  addFollowUpToServerQueue,
+  buildFollowUpQueueAddCommand,
+  createFollowUpQueuePendingStore,
   createInterruptQueueHold,
   createMessageQueueDrainCoordinator,
+  MOVED_FAILED_ENTRY_FAILURE,
+  type FollowUpQueueAddOutcome,
+  type FollowUpQueueCommand,
+  type FollowUpQueueEntryContent,
   type MessageQueueDrainCoordinator,
   type MessageQueueDrainPlatform,
   type MessageQueueSender,
   type QueueDrainSteerRejection,
+  type QueueEntryMoveContext,
   type QueueSendHooks,
   type QueueThreadView,
+  selectThreadFollowUpQueue,
 } from "@ryco/client-runtime/state/message-queue";
-import type { EnvironmentId, ThreadId } from "@ryco/contracts";
-import { useEffect } from "react";
+import {
+  MessageId,
+  type EnvironmentId,
+  type ScopedThreadRef,
+  type ThreadId,
+} from "@ryco/contracts";
+import { rejectRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
+import { useEffect, useSyncExternalStore } from "react";
 
-import type { SendTurnComposerSnapshot, SendTurnSettings } from "./hooks/executeChatSendTurn";
+import {
+  buildOutgoingMessageText,
+  buildOutgoingTurnAttachments,
+  type SendTurnComposerSnapshot,
+  type SendTurnSettings,
+} from "./hooks/executeChatSendTurn";
+import { formatOutgoingPrompt } from "./hooks/chatSendShared";
+import { isClaudeResumeReviewSkipped } from "./hooks/useSettings";
 import { sendQueuedMessageInBackground } from "./hooks/sendQueuedMessageInBackground";
 import { useComposerDraftStore } from "./composerDraftStore";
 import { stackedThreadToast, toastManager } from "./components/ui/toast";
+import { readEnvironmentApi } from "./environmentApi";
 import { retainThreadDetailSubscription } from "./environments/runtime/service";
+import { newCommandId } from "./lib/utils";
 import {
   readWebQueueEnvironment,
   subscribeWebQueueEnvironmentReadiness,
@@ -98,6 +122,152 @@ function notifySteerRejected(_threadKey: string, rejection: QueueDrainSteerRejec
   if (toast !== null) toastManager.add(stackedThreadToast(toast));
 }
 
+// ---------------------------------------------------------------------------
+// The node's follow-up queue (`capabilities.serverFollowUpQueue`). A send while
+// the thread is busy becomes `thread.queue.add`; this tab's own entries move
+// there once the node is ready (`moveEntryToServer`).
+// ---------------------------------------------------------------------------
+
+/**
+ * `thread.queue.add`s this tab sent, shown as "Queuing…" until their entries
+ * arrive with the thread detail. Not in `messageQueueStore`, which boot loads.
+ */
+export const useFollowUpQueuePendingStore = createFollowUpQueuePendingStore();
+// An account teardown (`useMessageQueueStore.reset`) drops the adds on their way too.
+useMessageQueueStore.subscribe((state, previous) => {
+  if (state.epoch !== previous.epoch) useFollowUpQueuePendingStore.getState().reset();
+});
+
+/** The number of this tab's adds for the thread that the thread does not show yet. */
+export function countPendingFollowUpAdds(threadKey: string): number {
+  return useFollowUpQueuePendingStore.getState().pendingByThreadKey[threadKey]?.length ?? 0;
+}
+
+/** What a composer snapshot sends, as a queued follow-up: composed as a direct send would. */
+export async function buildWebFollowUpContent(
+  composer: SendTurnComposerSnapshot,
+  settings: SendTurnSettings,
+): Promise<FollowUpQueueEntryContent> {
+  rejectRetiredProjectMemory(composer);
+  return {
+    text: buildOutgoingMessageText({ composer, formatOutgoingPrompt }),
+    attachments: await buildOutgoingTurnAttachments(composer.images),
+    modelSelection: composer.selectedModelSelection,
+    runtimeMode: settings.runtimeMode,
+    interactionMode: settings.interactionMode,
+    tokenMode: settings.tokenMode,
+    // The node's drain asks this device's question for it: carry the answer.
+    skipClaudeResumeReview: isClaudeResumeReviewSkipped(),
+  };
+}
+
+/**
+ * Whether the node's queue can carry a composer send: a Computer Use turn and
+ * a goal ride only on a turn start, so such a send stays on this tab.
+ */
+export function isWebFollowUpMovable(
+  composer: SendTurnComposerSnapshot,
+  settings: SendTurnSettings,
+) {
+  return settings.computerUse === undefined && composer.goal === undefined;
+}
+
+/** Dispatches a `thread.queue.*` command; rejects with the node's answer. */
+export async function dispatchFollowUpQueueCommand(
+  environmentId: EnvironmentId,
+  command: FollowUpQueueCommand,
+): Promise<void> {
+  const api = readEnvironmentApi(environmentId);
+  if (!api) throw new Error("This environment is not connected.");
+  await api.orchestration.dispatchCommand(command);
+}
+
+async function moveEntryToServer(
+  threadKey: string,
+  entry: WebQueuedMessage,
+  context: QueueEntryMoveContext,
+): Promise<void> {
+  const ref = parseScopedThreadKey(threadKey);
+  if (!ref) throw new Error("This conversation is not available.");
+  const content = await buildWebFollowUpContent(entry.composer, entry.settings);
+  await dispatchFollowUpQueueCommand(
+    ref.environmentId,
+    buildFollowUpQueueAddCommand({
+      commandId: newCommandId(),
+      threadId: ref.threadId,
+      messageId: MessageId.make(entry.id),
+      content,
+      hold: context.hold,
+      ...(context.failed ? { failure: MOVED_FAILED_ENTRY_FAILURE } : {}),
+      createdAt: entry.createdAt ?? new Date().toISOString(),
+    }),
+  );
+}
+
+const MOVED_QUEUES_STORAGE_KEY = "ryco:follow-up-queue-moved:v1";
+
+/** Records, in this browser, that every queued message for the node moved to it. */
+function recordServerQueueMigrated(environmentId: EnvironmentId): void {
+  try {
+    const raw = window.localStorage.getItem(MOVED_QUEUES_STORAGE_KEY);
+    const record = raw ? (JSON.parse(raw) as Record<string, string>) : {};
+    if (record[environmentId] !== undefined) return;
+    record[environmentId] = new Date().toISOString();
+    window.localStorage.setItem(MOVED_QUEUES_STORAGE_KEY, JSON.stringify(record));
+  } catch {
+    // Storage unavailable: the record is informational, a later move is idempotent anyway.
+  }
+}
+
+/** Whether the thread already has the message, queued on the node or sent. */
+function followUpVisible(ref: ScopedThreadRef, messageId: string): boolean {
+  const state = useStore.getState();
+  if (
+    selectThreadFollowUpQueue(state, ref)?.entries.some((entry) => entry.messageId === messageId)
+  ) {
+    return true;
+  }
+  const messages = state.environmentStateById[ref.environmentId]?.messageByThreadId[ref.threadId];
+  return messages !== undefined && Object.hasOwn(messages, messageId);
+}
+
+/**
+ * Queues a composer send on the node (`thread.queue.add`), shown as "Queuing…"
+ * until its entry arrives. A definite refusal comes back so the caller can give
+ * the message back to the composer. When the reply was lost, the node may have
+ * queued it: the message stays in this tab's queue under the same id
+ * (`keepInTab`), so moving it re-adds it and the node's no-op on a known id
+ * keeps one copy.
+ */
+export async function queueFollowUpOnServer(input: {
+  readonly ref: ScopedThreadRef;
+  readonly messageId: MessageId;
+  readonly content: FollowUpQueueEntryContent;
+  readonly summary: string;
+  /** The tab's own entry for the message, under `messageId`. */
+  readonly keepInTab: () => WebQueuedMessage;
+}): Promise<FollowUpQueueAddOutcome> {
+  const outcome = await addFollowUpToServerQueue({
+    pendingStore: useFollowUpQueuePendingStore,
+    threadKey: scopedThreadKey(input.ref),
+    command: buildFollowUpQueueAddCommand({
+      commandId: newCommandId(),
+      threadId: input.ref.threadId,
+      messageId: input.messageId,
+      content: input.content,
+      createdAt: new Date().toISOString(),
+    }),
+    summary: input.summary,
+    dispatch: (command) => dispatchFollowUpQueueCommand(input.ref.environmentId, command),
+    isVisible: () => followUpVisible(input.ref, input.messageId),
+    subscribe: (listener) => useStore.subscribe(listener),
+  });
+  if (outcome.kind === "unknown") {
+    useMessageQueueStore.getState().enqueue(scopedThreadKey(input.ref), input.keepInTab());
+  }
+  return outcome;
+}
+
 const webPlatform: MessageQueueDrainPlatform<SendTurnComposerSnapshot, SendTurnSettings> = {
   threads: { getState: useStore.getState, subscribe: (listener) => useStore.subscribe(listener) },
   readEnvironment: readWebQueueEnvironment,
@@ -111,6 +281,10 @@ const webPlatform: MessageQueueDrainPlatform<SendTurnComposerSnapshot, SendTurnS
   retainThreadDetail: (ref) => retainThreadDetailSubscription(ref.environmentId, ref.threadId),
   onEntryRemoved: revokeQueuedPreviewUrls,
   onSteerRejected: notifySteerRejected,
+  moveEntryToServer,
+  isEntryMovable: (entry) => isWebFollowUpMovable(entry.composer, entry.settings),
+  onServerQueueMigrated: recordServerQueueMigrated,
+  isServerQueueAddPending: (threadKey) => countPendingFollowUpAdds(threadKey) > 0,
 };
 
 let coordinator: MessageQueueDrainCoordinator | null = null;
@@ -119,6 +293,9 @@ function getCoordinator(): MessageQueueDrainCoordinator {
   coordinator ??= createMessageQueueDrainCoordinator(useMessageQueueStore, webPlatform);
   return coordinator;
 }
+
+// A tab head the node cannot carry waits behind adds on their way: look again once they land.
+useFollowUpQueuePendingStore.subscribe(() => coordinator?.evaluate());
 
 /** Ref-counted; the final release stops the drain and clears its bookkeeping. */
 export function retainMessageQueueDrain(): () => void {
@@ -135,6 +312,20 @@ export function retryQueuedMessage(threadKey: string, messageId: string): void {
 
 export function inspectMessageQueueDrain(threadKey: string) {
   return getCoordinator().inspect(threadKey);
+}
+
+/**
+ * Whether the tab entry's add to the node's queue is on its way. It cannot be edited or steered
+ * meanwhile: the add can still land, so an edited copy or a steer would make a second message.
+ */
+export function isQueuedMessageMoving(threadKey: string, messageId: string): boolean {
+  return getCoordinator().inspect(threadKey).movingMessageId === messageId;
+}
+
+/** The thread's tab entry whose add to the node's queue is on its way, if any. */
+export function useMovingQueuedMessageId(threadKey: string | null): string | null {
+  const read = () => (threadKey ? getCoordinator().inspect(threadKey).movingMessageId : null);
+  return useSyncExternalStore((listener) => getCoordinator().subscribeMoving(listener), read, read);
 }
 
 /**

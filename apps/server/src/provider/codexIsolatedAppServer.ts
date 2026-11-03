@@ -5,19 +5,21 @@
  * with the job.
  *
  * Its `CODEX_HOME` is the instance's effective home (the shadow home for an auth overlay), and
- * the job only runs after Codex confirms it opened exactly that home.
+ * the job only runs after Codex confirms it opened exactly that home. An auth overlay's SQLite
+ * state stays in the shared home (`codexProcessEnvironment`).
  *
  * The app-server client is loaded on the first job (`loadCodexAppServerModule`), so importing this
  * module keeps the Codex protocol schema off the server's boot path.
  */
 import { realpath } from "node:fs/promises";
 
-import { Effect, Layer, Schema } from "effect";
+import { type Duration, Effect, Layer, Schema } from "effect";
 import type * as CodexClient from "effect-codex-app-server/client";
-import { ChildProcessSpawner } from "effect/process";
+import type { ChildProcessSpawner } from "effect/process";
+import { timeoutWhileResponsiveOrElse } from "@ryco/shared/responsiveDeadline";
 
 import { loadCodexAppServerModule } from "./codexAppServerModule.ts";
-import type { CodexHomeLayout } from "./Drivers/CodexHomeLayout.ts";
+import { codexProcessEnvironment, type CodexHomeLayout } from "./Drivers/CodexHomeLayout.ts";
 
 /** Whole job, including process start and the handshake. */
 export const CODEX_ISOLATED_APP_SERVER_TIMEOUT = "45 seconds";
@@ -46,6 +48,13 @@ export interface IsolatedCodexAppServerInput {
   readonly cwd: string;
   readonly environment: NodeJS.ProcessEnv;
   readonly binaryPath: string;
+  /** The whole job's budget; `CODEX_ISOLATED_APP_SERVER_TIMEOUT` unless a job waits on a person. */
+  readonly timeout?: Duration.Input;
+  /**
+   * Called once the process ended or its streams broke. Pending requests fail on their own; a job
+   * that waits on a notification needs this to stop waiting.
+   */
+  readonly onTermination?: CodexClient.CodexAppServerClientOptions["onTermination"];
 }
 
 const unavailable = (detail: string) => (cause: unknown) =>
@@ -74,7 +83,9 @@ export const withIsolatedCodexAppServer = <A, E, R>(
           command: input.binaryPath,
           args: ["app-server"],
           cwd: input.cwd,
-          env: { ...input.environment, CODEX_HOME: home },
+          env: { ...codexProcessEnvironment(input.layout, input.environment), CODEX_HOME: home },
+          timeoutOrElse: timeoutWhileResponsiveOrElse,
+          onTermination: input.onTermination,
         }),
       ).pipe(Effect.mapError(unavailable("Codex could not start.")));
       const client = yield* Effect.service(codexAppServer.CodexClient.CodexAppServerClient).pipe(
@@ -103,8 +114,8 @@ export const withIsolatedCodexAppServer = <A, E, R>(
       return yield* use(client);
     }),
   ).pipe(
-    Effect.timeoutOrElse({
-      duration: CODEX_ISOLATED_APP_SERVER_TIMEOUT,
+    timeoutWhileResponsiveOrElse({
+      duration: input.timeout ?? CODEX_ISOLATED_APP_SERVER_TIMEOUT,
       orElse: () =>
         Effect.fail(
           new CodexIsolatedAppServerError({

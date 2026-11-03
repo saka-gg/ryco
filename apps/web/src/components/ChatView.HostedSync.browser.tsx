@@ -11,6 +11,7 @@ import { render } from "vitest-browser-react";
 import { composerFileUploadEngine } from "../composerFileUpload";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { hostedHubStore } from "../hostedHub/state";
+import type { FollowUpQueueRow } from "@ryco/client-runtime/state/message-queue";
 import type { QueuedMessage } from "../messageQueue.logic";
 import { useMessageQueueStore } from "../messageQueueStore";
 import {
@@ -531,17 +532,20 @@ describe("ChatView while its node's connection is being established (full app)",
   it("shows the connection's own reason once a queued send waits past the sync deadline", async () => {
     // The queue's deadline is the hosted session's synchronization deadline.
     expect(CONNECTING_WAIT_DEADLINE_MS).toBe(HOSTED_ENVIRONMENT_SESSION_SYNC_DEADLINE_MS);
-    const message = {
+    const row: FollowUpQueueRow = {
       id: "queued-hosted-sync-deadline",
-      createdAt: "2026-03-04T12:00:00.000Z",
-      composer: { trimmedPrompt: "First message", images: [], sendableTerminalContexts: [] },
-    } as unknown as QueuedMessage;
+      source: "local",
+      summary: "First message",
+      status: "queued",
+      failureDetail: null,
+      author: "user",
+    };
 
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       const connecting = await render(
         <ComposerQueuedMessages
-          messages={[message]}
+          rows={[row]}
           wait={{
             kind: "connecting",
             copy: `Sends when ${NODE_LABEL} is ready`,
@@ -552,7 +556,6 @@ describe("ChatView while its node's connection is being established (full app)",
           getEditUnavailableReason={() => null}
           onMove={() => undefined}
           showSteerAction={false}
-          steeringIds={[]}
           getSteerUnavailableReason={() => null}
           onSteer={() => undefined}
         />,

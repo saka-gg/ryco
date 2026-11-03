@@ -10,6 +10,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES,
+  type ProviderProjectCommands,
   type ProviderRuntimeEvent,
   type ProviderSession,
   RuntimeSubagentId,
@@ -23,7 +24,19 @@ import {
   TurnId,
   type UserInputQuestion,
 } from "@ryco/contracts";
-import { Cause, Effect, Exit, Fiber, Queue, Ref, Scope, Semaphore, Stream } from "effect";
+import {
+  Cause,
+  Clock,
+  Deferred,
+  Effect,
+  Exit,
+  Fiber,
+  Queue,
+  Ref,
+  Scope,
+  Semaphore,
+  Stream,
+} from "effect";
 import type {
   OpencodeClient,
   Part,
@@ -31,15 +44,11 @@ import type {
   QuestionRequest,
   Session,
 } from "@opencode-ai/sdk/v2";
-import {
-  appendAttachmentPathLines,
-  formatAttachmentPathLines,
-  type AttachmentPathLineEntry,
-} from "@ryco/shared/attachmentPrompt";
+import { appendAttachmentPathLines } from "@ryco/shared/attachmentPrompt";
 import { getModelSelectionStringOptionValue } from "@ryco/shared/model";
 import { formatSourceControlContextsForAgent } from "@ryco/shared/sourceControlContextFormatter";
 
-import { readPersistedAttachment, resolveAttachmentPath } from "../../attachmentStore.ts";
+import { attachmentPathLines, readPersistedAttachment } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { makeServerQueueMetrics } from "../../observability/QueueMetrics.ts";
 import { createProcessDeviceToolBinding } from "../../providerTools/deviceToolGateway.ts";
@@ -60,6 +69,8 @@ import {
 import { type OpenCodeAdapterShape } from "../Services/OpenCodeAdapter.ts";
 import { requireRuntimeSessionId, stampRuntimeEvent } from "../runtimeSession.ts";
 import type { OpenCodeServerOwner } from "../OpenCodeServerOwner.ts";
+import type { OpenCodeApi } from "../openCodeApi.ts";
+import type { AgentProcessPriorityShape } from "../agentProcessPriority.ts";
 import {
   buildOpenCodePermissionRules,
   isOpenCodeNativeAttachment,
@@ -78,17 +89,24 @@ import {
 
 import { OpenCodeTaskLifecycle, type OpenCodeTaskTransition } from "../openCodeTaskLifecycle.ts";
 import { OpenCodePartIndex } from "../openCodePartIndex.ts";
+import { openCodeCommandsToSlashCommands } from "../openCodeCommands.ts";
+import { parseSlashCommandInput } from "../providerSlashCommands.ts";
+import { ToolUpdateGate, toolUpdateVisibleKey } from "../toolUpdateGate.ts";
 
 const PROVIDER = ProviderDriverKind.make("opencode");
 const OPENCODE_RESUME_VERSION = 1;
-
-interface OpenCodeTurnSnapshot {
-  readonly id: TurnId;
-  readonly items: Array<unknown>;
-}
+/** How long a send waits for the directory's command list before it sends a plain prompt. */
+const OPENCODE_COMMAND_LIST_TIMEOUT = "10 seconds";
+/**
+ * How long a send waits to see OpenCode take a `session.command`. A call still pending then is
+ * taken as admitted: OpenCode resolves the command's template (shell substitutions, an MCP
+ * prompt) before it starts the turn, and it runs the command even when the request is aborted.
+ */
+const OPENCODE_COMMAND_ADMISSION_TIMEOUT = "10 seconds";
+const EMPTY_PROJECT_COMMANDS: ProviderProjectCommands = { skills: [], slashCommands: [] };
 
 type OpenCodeSubscribedEvent =
-  Awaited<ReturnType<OpencodeClient["event"]["subscribe"]>> extends {
+  Awaited<ReturnType<OpenCodeApi["event"]["subscribe"]>> extends {
     readonly stream: AsyncIterable<infer TEvent>;
   }
     ? TEvent
@@ -97,7 +115,7 @@ type OpenCodeSubscribedEvent =
 interface OpenCodeSessionContext {
   readonly computerLease?: AgentControlNativeHttpInjection;
   session: ProviderSession;
-  readonly client: OpencodeClient;
+  readonly client: OpenCodeApi;
   readonly server: OpenCodeServerConnection;
   readonly directory: string;
   /** Root OpenCode session. A checkpoint revert rebinds it to a fork. */
@@ -122,7 +140,6 @@ interface OpenCodeSessionContext {
   readonly startedSubagentIds: Set<string>;
   readonly completedSubagentIds: Set<string>;
   readonly tasks: OpenCodeTaskLifecycle;
-  readonly turns: Array<OpenCodeTurnSnapshot>;
   activeTurnId: TurnId | undefined;
   activeAgent: string | undefined;
   activeVariant: string | undefined;
@@ -130,6 +147,11 @@ interface OpenCodeSessionContext {
   lastPlanFingerprint: string | undefined;
   /** Dedup guard: `${attempt}:${message}` of the last emitted retry warning. */
   lastRetryKey: string | undefined;
+  /**
+   * Drops repeats of a tool part's visible state (bash streams its output into metadata the
+   * projection discards).
+   */
+  readonly toolUpdates: ToolUpdateGate;
   readonly promptSemaphore: Semaphore.Semaphore;
   pendingPrompt:
     | {
@@ -138,6 +160,8 @@ interface OpenCodeSessionContext {
         idleEvent?: OpenCodeSubscribedEvent;
       }
     | undefined;
+  /** The newest `session.command` call; it outlives its admission (see `PendingOpenCodeCommand`). */
+  pendingCommand: PendingOpenCodeCommand | undefined;
   promptGeneration: number;
   agentControlHostContextDelivered: boolean;
   /**
@@ -157,6 +181,21 @@ interface OpenCodeSessionContext {
   readonly sessionScope: Scope.Closeable;
 }
 
+/**
+ * A command run with `session.command`, which answers only when the command's generation ends.
+ * The turn is admitted earlier: when the call settles, when the event stream shows OpenCode
+ * took it (the root session busy, or its user message stored), or when the call is still
+ * pending at `OPENCODE_COMMAND_ADMISSION_TIMEOUT`.
+ */
+interface PendingOpenCodeCommand {
+  readonly turnId: TurnId;
+  readonly admitted: Deferred.Deferred<void, ProviderAdapterRequestError>;
+  /** The event stream showed OpenCode starting the command's turn. */
+  started: boolean;
+  /** Set right after the call is forked; the admission signal exists before it starts. */
+  fiber: Fiber.Fiber<void> | undefined;
+}
+
 export interface OpenCodeAdapterLiveOptions {
   readonly agentControl?: AgentControlProviderBridge;
   readonly instanceId?: ProviderInstanceId;
@@ -164,6 +203,8 @@ export interface OpenCodeAdapterLiveOptions {
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
   readonly serverOwner?: OpenCodeServerOwner;
+  /** Lowers a server this adapter starts itself (the computer-use path); undefined: unchanged. */
+  readonly processPriority?: AgentProcessPriorityShape | undefined;
 }
 
 function nowIso(): string {
@@ -207,14 +248,25 @@ function openCodeResumeCursor(sessionId: string, forgottenTurnIds: ReadonlyArray
   };
 }
 
-function isOpenCodeNotFound(error: OpenCodeRuntimeError): boolean {
+/**
+ * The HTTP status the server answered an SDK call with; undefined when no response arrived (a
+ * refused or dropped connection, a fetch timeout, an abort). The SDK throws an `Error` whose
+ * `cause` carries the status; older SDKs threw an object with the `response` itself.
+ */
+function openCodeResponseStatus(error: OpenCodeRuntimeError): number | undefined {
   const cause = error.cause;
-  return (
-    typeof cause === "object" &&
-    cause !== null &&
-    "response" in cause &&
-    (cause.response as { readonly status?: unknown } | undefined)?.status === 404
-  );
+  if (typeof cause !== "object" || cause === null) return undefined;
+  const statusOf = (value: unknown) => {
+    const status =
+      typeof value === "object" && value !== null ? Reflect.get(value, "status") : undefined;
+    return typeof status === "number" ? status : undefined;
+  };
+  return statusOf(Reflect.get(cause, "response")) ?? statusOf(Reflect.get(cause, "cause"));
+}
+
+/** An SDK call the server answered with 404. */
+function isOpenCodeNotFound(error: OpenCodeRuntimeError): boolean {
+  return openCodeResponseStatus(error) === 404;
 }
 
 function scopedOpenCodeId(sessionId: string, id: string): string {
@@ -355,6 +407,65 @@ const abortOpenCodeSession = (context: OpenCodeSessionContext, sessionID: string
         ),
     }),
   );
+
+interface OpenCodeCommandLookup {
+  readonly command?: { readonly name: string; readonly arguments: string };
+  /** A `/name` that could not be checked against OpenCode's list, and why; it goes out as a prompt. */
+  readonly unchecked?: { readonly name: string; readonly detail: string };
+}
+
+/**
+ * `/name args` as `command` when OpenCode lists `name` in the session's directory. A path such as
+ * `/Users/me/x.ts`, an unknown name, or a list that fails or does not answer in time sends the
+ * input as an ordinary prompt, so the turn still goes out; the last two are `unchecked`.
+ */
+const findOpenCodeCommand = (
+  context: OpenCodeSessionContext,
+  input: string | undefined,
+): Effect.Effect<OpenCodeCommandLookup> => {
+  const parsed = parseSlashCommandInput(input);
+  if (parsed === undefined) return Effect.succeed({});
+  return runOpenCodeSdk("command.list", (signal) =>
+    context.client.command.list(undefined, { signal }),
+  ).pipe(
+    Effect.timeoutOption(OPENCODE_COMMAND_LIST_TIMEOUT),
+    Effect.map((listed): OpenCodeCommandLookup => {
+      if (Option.isNone(listed)) {
+        return {
+          unchecked: { name: parsed.name, detail: "OpenCode did not list its commands in time." },
+        };
+      }
+      return (listed.value.data ?? []).some((command) => command.name === parsed.name)
+        ? { command: parsed }
+        : {};
+    }),
+    Effect.catch((error) =>
+      Effect.logDebug("OpenCode command list failed; sending a prompt", error.detail).pipe(
+        Effect.as<OpenCodeCommandLookup>({
+          unchecked: { name: parsed.name, detail: error.detail },
+        }),
+      ),
+    ),
+  );
+};
+
+/** The event stream shows OpenCode starting the pending command's turn; admits it if still due. */
+const admitPendingOpenCodeCommand = (context: OpenCodeSessionContext) => {
+  const pending = context.pendingCommand;
+  if (pending === undefined) return Effect.void;
+  pending.started = true;
+  return Deferred.succeed(pending.admitted, undefined).pipe(Effect.asVoid);
+};
+
+/** Interrupting the call aborts its request; the caller still aborts the OpenCode session. */
+const interruptPendingOpenCodeCommand = (context: OpenCodeSessionContext, turnId?: TurnId) => {
+  const pending = context.pendingCommand;
+  if (pending === undefined || (turnId !== undefined && pending.turnId !== turnId)) {
+    return Effect.void;
+  }
+  context.pendingCommand = undefined;
+  return pending.fiber === undefined ? Effect.void : Fiber.interrupt(pending.fiber);
+};
 
 const buildEventBase = (input: {
   readonly threadId: ThreadId;
@@ -525,31 +636,6 @@ function planStepsFromOpenCodeTodos(
     });
   }
   return steps;
-}
-
-function resolveTurnSnapshot(
-  context: OpenCodeSessionContext,
-  turnId: TurnId,
-): OpenCodeTurnSnapshot {
-  const existing = context.turns.find((turn) => turn.id === turnId);
-  if (existing) {
-    return existing;
-  }
-
-  const created: OpenCodeTurnSnapshot = { id: turnId, items: [] };
-  context.turns.push(created);
-  return created;
-}
-
-function appendTurnItem(
-  context: OpenCodeSessionContext,
-  turnId: TurnId | undefined,
-  item: unknown,
-): void {
-  if (!turnId) {
-    return;
-  }
-  resolveTurnSnapshot(context, turnId).items.push(item);
 }
 
 function ensureSessionContext(
@@ -746,6 +832,7 @@ const stopOpenCodeContext = Effect.fn("stopOpenCodeContext")(function* (
     context.pendingPrompt = undefined;
     yield* Fiber.interrupt(pendingPrompt.fiber).pipe(Effect.ignore);
   }
+  yield* interruptPendingOpenCodeCommand(context).pipe(Effect.ignore);
 
   // Stop the root first so it cannot launch more work while we cancel the
   // child sessions already observed by the event stream or hydration pass.
@@ -1548,10 +1635,9 @@ export function makeOpenCodeAdapter(
         }
 
         case "message.updated": {
-          context.messageRoleById.set(
-            scopedOpenCodeId(event.properties.sessionID, event.properties.info.id),
-            event.properties.info.role,
-          );
+          const messageKey = scopedOpenCodeId(event.properties.sessionID, event.properties.info.id);
+          const firstSeen = !context.messageRoleById.has(messageKey);
+          context.messageRoleById.set(messageKey, event.properties.info.role);
           if (event.properties.info.role === "assistant") {
             if (event.properties.sessionID === context.openCodeSessionId) {
               const usage = threadTokenUsageFromOpenCodeTokens(
@@ -1581,6 +1667,11 @@ export function makeOpenCodeAdapter(
               event.properties.sessionID,
               event.properties.info.id,
             );
+            // A new root user message: OpenCode took the pending command. An earlier turn's user
+            // message is updated again later (its summary), so only a first sighting counts.
+            if (firstSeen && event.properties.sessionID === context.openCodeSessionId) {
+              yield* admitPendingOpenCodeCommand(context);
+            }
           }
           break;
         }
@@ -1594,9 +1685,9 @@ export function makeOpenCodeAdapter(
         }
 
         case "message.part.removed": {
-          context.parts.complete(
-            scopedOpenCodeId(event.properties.sessionID, event.properties.partID),
-          );
+          const partKey = scopedOpenCodeId(event.properties.sessionID, event.properties.partID);
+          context.parts.complete(partKey);
+          context.toolUpdates.forget(partKey);
           break;
         }
 
@@ -1694,7 +1785,27 @@ export function makeOpenCodeAdapter(
               part.state.status === "running" ? (part.state.title ?? part.tool) : part.tool;
             const detail = detailFromToolPart(part);
             const childSubagent = context.subagentBySessionId.get(part.sessionID);
-            if (childSubagent && !context.tasks.hasSession(part.sessionID)) {
+            // A running part is re-sent per output chunk (bash), each time with the same
+            // persisted payload: emit it only when what clients show changed, or per heartbeat.
+            const terminal = part.state.status === "completed" || part.state.status === "error";
+            const admitted = context.toolUpdates.admit(
+              scopedOpenCodeId(part.sessionID, part.id),
+              {
+                terminal,
+                visibleKey: terminal
+                  ? undefined
+                  : toolUpdateVisibleKey({
+                      status: part.state.status,
+                      title,
+                      detail,
+                      input: part.state.input,
+                      agentId: childSubagent ? String(childSubagent.subagentId) : undefined,
+                      turnId,
+                    }),
+              },
+              yield* Clock.currentTimeMillis,
+            );
+            if (admitted && childSubagent && !context.tasks.hasSession(part.sessionID)) {
               yield* emitOpenCodeSubagentUpdated(context, {
                 subagent: childSubagent,
                 status: statusFromOpenCodeSubagentState("running"),
@@ -1703,6 +1814,7 @@ export function makeOpenCodeAdapter(
                 raw: event,
               });
             }
+            if (!admitted) break;
             const payload = {
               itemType,
               ...(childSubagent ? { agentId: String(childSubagent.subagentId) } : {}),
@@ -1734,7 +1846,6 @@ export function makeOpenCodeAdapter(
                     : "item.updated",
               payload,
             };
-            if (!childSubagent) appendTurnItem(context, turnId, part);
             yield* emitForContext(context, runtimeEvent);
           }
           break;
@@ -1881,6 +1992,7 @@ export function makeOpenCodeAdapter(
               status: "running",
               activeTurnId: turnId,
             });
+            yield* admitPendingOpenCodeCommand(context);
           }
 
           if (event.properties.status.type === "retry") {
@@ -1901,6 +2013,15 @@ export function makeOpenCodeAdapter(
                   detail: event.properties.status,
                 },
               });
+            }
+            break;
+          }
+
+          if (event.properties.status.type === "idle" && !turnId) {
+            // A generation no turn tracks went busy, for example a command OpenCode started after
+            // its turn ended: its idle hands the session back.
+            if (context.session.status === "running") {
+              updateProviderSession(context, { status: "ready" }, { clearActiveTurnId: true });
             }
             break;
           }
@@ -2208,6 +2329,9 @@ export function makeOpenCodeAdapter(
                       serverUrl,
                       ...(serverPassword ? { serverPassword } : {}),
                       ...(options?.environment ? { environment: options.environment } : {}),
+                      ...(options?.processPriority
+                        ? { processPriority: options.processPriority }
+                        : {}),
                     });
               const client = yield* openCodeRuntime.createOpenCodeSdkClient({
                 baseUrl: server.url,
@@ -2244,12 +2368,23 @@ export function makeOpenCodeAdapter(
                   }),
                 );
               }
+              // A session OpenCode no longer has fails the start in words the orchestrator
+              // recognizes (`isMissingConversationError`), so it starts fresh or carries the
+              // conversation over by context handoff instead of a silent new session.
               const adoptedSession = resumeSessionId
                 ? yield* runOpenCodeSdk("session.get", () =>
                     client.session.get({ sessionID: resumeSessionId }),
                   ).pipe(
                     Effect.map((response) => response.data),
-                    Effect.catchIf(isOpenCodeNotFound, () => Effect.succeed(undefined)),
+                    Effect.mapError((error) =>
+                      isOpenCodeNotFound(error)
+                        ? new OpenCodeRuntimeError({
+                            operation: "session.get",
+                            detail: `Session not found: ${resumeSessionId} (${error.detail})`,
+                            cause: error.cause,
+                          })
+                        : error,
+                    ),
                   )
                 : undefined;
               if (adoptedSession) {
@@ -2336,14 +2471,15 @@ export function makeOpenCodeAdapter(
           startedSubagentIds: new Set(),
           completedSubagentIds: new Set(),
           tasks: new OpenCodeTaskLifecycle(),
-          turns: [],
           activeTurnId: undefined,
           activeAgent: undefined,
           activeVariant: undefined,
           lastPlanFingerprint: undefined,
           lastRetryKey: undefined,
+          toolUpdates: new ToolUpdateGate(),
           promptSemaphore: yield* Semaphore.make(1),
           pendingPrompt: undefined,
+          pendingCommand: undefined,
           promptGeneration: 0,
           agentControlHostContextDelivered: false,
           stopped: yield* Ref.make(false),
@@ -2410,6 +2546,109 @@ export function makeOpenCodeAdapter(
       },
     );
 
+    /**
+     * Ends a turn OpenCode never started: the session is ready again with the error, and the turn
+     * is aborted. A no-op once something else settled the turn.
+     */
+    const abortUnstartedOpenCodeTurn = Effect.fn("abortUnstartedOpenCodeTurn")(function* (
+      context: OpenCodeSessionContext,
+      turnId: TurnId,
+      reason: string,
+    ) {
+      if (context.activeTurnId !== turnId) return;
+      if (context.computerLease) yield* context.computerLease.retireTurn(turnId);
+      context.activeTurnId = undefined;
+      context.activeAgent = undefined;
+      context.activeVariant = undefined;
+      updateProviderSession(
+        context,
+        { status: "ready", lastError: reason },
+        { clearActiveTurnId: true },
+      );
+      yield* emitForContext(context, {
+        ...(yield* buildEventBase({ threadId: context.session.threadId, turnId })),
+        type: "turn.aborted",
+        payload: { reason },
+      });
+    });
+
+    /**
+     * Runs one of OpenCode's commands and returns once OpenCode took it (`PendingOpenCodeCommand`).
+     * `session.command` answers only when the generation ends, so the call keeps running in the
+     * session scope. Failing before admission fails the send. After it, only an answer from
+     * OpenCode counts: a refusal before the turn started aborts the turn, a failure of a started
+     * turn is a warning (OpenCode's idle and error events settle it), and a call that ends with no
+     * response says nothing about the command, which OpenCode keeps running.
+     */
+    const submitOpenCodeCommand = Effect.fn("submitOpenCodeCommand")(function* (
+      context: OpenCodeSessionContext,
+      turnId: TurnId,
+      request: Parameters<OpencodeClient["session"]["command"]>[0],
+    ) {
+      const admitted = yield* Deferred.make<void, ProviderAdapterRequestError>();
+      const pending: PendingOpenCodeCommand = {
+        turnId,
+        admitted,
+        started: false,
+        fiber: undefined,
+      };
+      context.pendingCommand = pending;
+      const fiber = yield* runOpenCodeSdk("session.command", (signal) =>
+        context.client.session.command(request, { signal }),
+      ).pipe(
+        Effect.matchEffect({
+          onSuccess: () => Deferred.succeed(admitted, undefined),
+          onFailure: (error) =>
+            Effect.gen(function* () {
+              // `fail` loses to an earlier admission: the command was accepted.
+              if (
+                (yield* Deferred.fail(admitted, toRequestError(error))) ||
+                context.activeTurnId !== turnId
+              ) {
+                return;
+              }
+              // Node's fetch gives up on a response after 5 minutes, and `session.command`
+              // answers only when the generation ends: a long command outlives its request.
+              if (openCodeResponseStatus(error) === undefined) {
+                return yield* Effect.logDebug(
+                  `OpenCode /${request.command} call ended without a response`,
+                  error.detail,
+                );
+              }
+              if (!pending.started) {
+                return yield* abortUnstartedOpenCodeTurn(context, turnId, error.detail);
+              }
+              yield* emitForContext(context, {
+                ...(yield* buildEventBase({ threadId: context.session.threadId, turnId })),
+                type: "runtime.warning",
+                payload: {
+                  message: `OpenCode /${request.command} failed after it was accepted.`,
+                  detail: error.detail,
+                },
+              });
+            }),
+        }),
+        Effect.onInterrupt(() => Deferred.interrupt(admitted)),
+        Effect.ensuring(
+          Effect.sync(() => {
+            if (context.pendingCommand === pending) context.pendingCommand = undefined;
+          }),
+        ),
+        Effect.asVoid,
+        Effect.forkIn(context.sessionScope),
+      );
+      pending.fiber = fiber;
+      // Still pending at the bound: OpenCode holds the command, most likely resolving its
+      // template. Aborting the request would not stop it, so the turn runs and events settle it.
+      yield* Deferred.await(admitted).pipe(
+        Effect.timeoutOrElse({
+          duration: OPENCODE_COMMAND_ADMISSION_TIMEOUT,
+          orElse: () =>
+            Deferred.succeed(admitted, undefined).pipe(Effect.andThen(Deferred.await(admitted))),
+        }),
+      );
+    });
+
     const sendTurn: OpenCodeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
       const context = ensureSessionContext(sessions, input.threadId);
       return yield* context.promptSemaphore.withPermits(1)(
@@ -2446,10 +2685,19 @@ export function makeOpenCodeAdapter(
             });
           }
 
+          // OpenCode 1.x's `promptAsync` hands `/name` to the model as text: only
+          // `session.command` runs one of OpenCode's own commands.
+          const commandLookup = yield* findOpenCodeCommand(context, input.input);
+          const command = commandLookup.command;
           const formatted = formatSourceControlContextsForAgent(input.sourceControlContexts ?? []);
-          let text = formatted
-            ? formatted + "\n\n" + (input.input?.trim() ?? "")
-            : input.input?.trim();
+          // A command's text is its arguments, which OpenCode substitutes into the template; the
+          // source-control contexts and attachment paths follow them.
+          let text =
+            command !== undefined
+              ? [command.arguments, formatted].filter((part) => part.length > 0).join("\n\n")
+              : formatted
+                ? formatted + "\n\n" + (input.input?.trim() ?? "")
+                : input.input?.trim();
           const attachmentUrlById = new Map<string, string>();
           const declaredAttachmentBytes = (input.attachments ?? []).reduce(
             (total, attachment) => total + (attachment.sizeBytes ?? 0),
@@ -2463,21 +2711,8 @@ export function makeOpenCodeAdapter(
             });
           }
           let attachmentTotalBytes = 0;
-          const pathLineEntries: AttachmentPathLineEntry[] = [];
           for (const attachment of input.attachments ?? []) {
             if (!isOpenCodeNativeAttachment(attachment)) {
-              pathLineEntries.push({
-                attachment,
-                ...(attachment.id === undefined
-                  ? {}
-                  : {
-                      resolvedPath:
-                        resolveAttachmentPath({
-                          attachmentsDir: serverConfig.attachmentsDir,
-                          attachment,
-                        }) ?? undefined,
-                    }),
-              });
               continue;
             }
             const persisted = yield* Effect.promise(() =>
@@ -2506,20 +2741,27 @@ export function makeOpenCodeAdapter(
               });
             }
           }
-          text = appendAttachmentPathLines(text, formatAttachmentPathLines(pathLineEntries));
+          text = appendAttachmentPathLines(
+            text,
+            attachmentPathLines({
+              attachmentsDir: serverConfig.attachmentsDir,
+              attachments: input.attachments,
+            }),
+          );
           const fileParts = toOpenCodeFileParts({
             attachments: input.attachments,
             resolveAttachmentUrl: (attachment) =>
               attachment.id === undefined ? null : (attachmentUrlById.get(attachment.id) ?? null),
           });
-          if ((!text || text.length === 0) && fileParts.length === 0) {
+          if (command === undefined && (!text || text.length === 0) && fileParts.length === 0) {
             return yield* new ProviderAdapterValidationError({
               provider: PROVIDER,
               operation: "sendTurn",
               issue: "OpenCode turns require text input or at least one attachment.",
             });
           }
-          if (!context.agentControlHostContextDelivered) {
+          // A command reaches OpenCode as itself: the context waits for the next ordinary turn.
+          if (command === undefined && !context.agentControlHostContextDelivered) {
             text = `<ryco_host_context>${context.computerLease ? "Computer Use tools are available through the private ryco_computer MCP server for this task. Start with computer_help and computer_inspect." : agentControlHostContext(false)}</ryco_host_context>${text ? `\n\n${text}` : ""}`;
             context.agentControlHostContextDelivered = true;
           }
@@ -2555,50 +2797,46 @@ export function makeOpenCodeAdapter(
               ...(variant ? { effort: variant } : {}),
             },
           });
+          if (commandLookup.unchecked !== undefined) {
+            yield* emitForContext(context, {
+              ...(yield* buildEventBase({ threadId: input.threadId, turnId })),
+              type: "runtime.warning",
+              payload: {
+                message: `Couldn't check whether /${commandLookup.unchecked.name} is an OpenCode command, so it went to the model as a prompt.`,
+                detail: commandLookup.unchecked.detail,
+              },
+            });
+          }
 
           context.promptGeneration += 1;
           const generation = context.promptGeneration;
-          const promptEffect = runOpenCodeSdk("session.promptAsync", (signal) =>
-            context.client.session.promptAsync(
-              {
-                sessionID: context.openCodeSessionId,
-                model: parsedModel,
-                ...(context.activeAgent ? { agent: context.activeAgent } : {}),
-                ...(context.activeVariant ? { variant: context.activeVariant } : {}),
-                parts: [...(text ? [{ type: "text" as const, text }] : []), ...fileParts],
-              },
-              { signal },
-            ),
-          ).pipe(
-            Effect.mapError(toRequestError),
+          const submission: Effect.Effect<unknown, ProviderAdapterRequestError> =
+            command !== undefined
+              ? submitOpenCodeCommand(context, turnId, {
+                  sessionID: context.openCodeSessionId,
+                  command: command.name,
+                  arguments: text ?? "",
+                  model: `${parsedModel.providerID}/${parsedModel.modelID}`,
+                  ...(context.activeAgent ? { agent: context.activeAgent } : {}),
+                  ...(context.activeVariant ? { variant: context.activeVariant } : {}),
+                  ...(fileParts.length > 0 ? { parts: fileParts } : {}),
+                })
+              : runOpenCodeSdk("session.promptAsync", (signal) =>
+                  context.client.session.promptAsync(
+                    {
+                      sessionID: context.openCodeSessionId,
+                      model: parsedModel,
+                      ...(context.activeAgent ? { agent: context.activeAgent } : {}),
+                      ...(context.activeVariant ? { variant: context.activeVariant } : {}),
+                      parts: [...(text ? [{ type: "text" as const, text }] : []), ...fileParts],
+                    },
+                    { signal },
+                  ),
+                ).pipe(Effect.mapError(toRequestError));
+          const promptEffect = submission.pipe(
             Effect.tapError((requestError) =>
-              context.activeTurnId === turnId && context.promptGeneration === generation
-                ? Effect.gen(function* () {
-                    if (context.computerLease && context.activeTurnId)
-                      yield* context.computerLease.retireTurn(context.activeTurnId);
-                    context.activeTurnId = undefined;
-                    context.activeAgent = undefined;
-                    context.activeVariant = undefined;
-                    updateProviderSession(
-                      context,
-                      {
-                        status: "ready",
-                        model: modelSelection?.model ?? context.session.model,
-                        lastError: requestError.detail,
-                      },
-                      { clearActiveTurnId: true },
-                    );
-                    yield* emitForContext(context, {
-                      ...(yield* buildEventBase({
-                        threadId: input.threadId,
-                        turnId,
-                      })),
-                      type: "turn.aborted",
-                      payload: {
-                        reason: requestError.detail,
-                      },
-                    });
-                  })
+              context.promptGeneration === generation
+                ? abortUnstartedOpenCodeTurn(context, turnId, requestError.detail)
                 : Effect.void,
             ),
           );
@@ -2675,6 +2913,7 @@ export function makeOpenCodeAdapter(
           context.pendingPrompt = undefined;
           yield* Fiber.interrupt(pendingPrompt.fiber).pipe(Effect.ignore);
         }
+        yield* interruptPendingOpenCodeCommand(context, interruptedTurnId).pipe(Effect.ignore);
 
         const rootAbortExit = yield* abortOpenCodeSession(context, context.openCodeSessionId).pipe(
           Effect.mapError(toRequestError),
@@ -2861,8 +3100,16 @@ export function makeOpenCodeAdapter(
           (yield* runOpenCodeSdk("session.messages", () =>
             context.client.session.messages({ sessionID: rootSessionId }),
           ).pipe(Effect.mapError(toRequestError))).data ?? [];
-        // One root user message per Ryco turn.
-        const users = messages.filter((entry) => entry.info.role === "user");
+        // One root user message per Ryco turn. OpenCode adds user messages of its own made only of
+        // synthetic text (a finished background Task's report); Ryco never sends synthetic text.
+        const users = messages.filter(
+          (entry) =>
+            entry.info.role === "user" &&
+            !(
+              entry.parts.length > 0 &&
+              entry.parts.every((part) => part.type === "text" && part.synthetic === true)
+            ),
+        );
         if (remainingTurns > users.length) {
           return yield* refuse(
             "OpenCode's conversation is shorter than this thread's history; it may already be reverted.",
@@ -2896,7 +3143,6 @@ export function makeOpenCodeAdapter(
           context.openCodeSessionId = fork.id;
           context.forgottenTurnIds = [...droppedTurnIds];
           context.childSessionIds.clear();
-          context.turns.splice(Math.max(0, context.turns.length - remainingTurns));
           // The host context rides on the first prompt; a fork before it loses it.
           if (boundaryIndex === 0) context.agentControlHostContextDelivered = false;
           context.session = {
@@ -2914,6 +3160,42 @@ export function makeOpenCodeAdapter(
         );
       },
     );
+
+    /**
+     * OpenCode's commands in `cwd`, read from its server without a session. The first read may
+     * start the shared `opencode serve`, as Claude's per-directory probe spawns its CLI; the
+     * owner keeps it for a while after the lease. No machine-level list: the provider probe runs
+     * in the server's own directory, whose project commands would show in every project.
+     */
+    const readProjectCommands: NonNullable<OpenCodeAdapterShape["readProjectCommands"]> = (cwd) =>
+      openCodeSettings.enabled
+        ? Effect.gen(function* () {
+            const server = options?.serverOwner
+              ? yield* options.serverOwner.acquire
+              : yield* openCodeRuntime.connectToOpenCodeServer({
+                  binaryPath: openCodeSettings.binaryPath,
+                  serverUrl: openCodeSettings.serverUrl,
+                  ...(openCodeSettings.serverPassword
+                    ? { serverPassword: openCodeSettings.serverPassword }
+                    : {}),
+                  ...(options?.environment ? { environment: options.environment } : {}),
+                });
+            const client = yield* openCodeRuntime.createOpenCodeSdkClient({
+              baseUrl: server.url,
+              directory: cwd,
+              ...(server.serverPassword ? { serverPassword: server.serverPassword } : {}),
+            });
+            // A 2.x server converts the shared OpenCode database in place: never talk to one.
+            yield* verifyOpenCodeServerVersion(client);
+            const listed = yield* runOpenCodeSdk("command.list", (signal) =>
+              client.command.list({ directory: cwd }, { signal }),
+            );
+            return {
+              skills: [],
+              slashCommands: openCodeCommandsToSlashCommands(listed.data ?? []),
+            } satisfies ProviderProjectCommands;
+          }).pipe(Effect.scoped, Effect.mapError(toRequestError))
+        : Effect.succeed(EMPTY_PROJECT_COMMANDS);
 
     const stopAll: OpenCodeAdapterShape["stopAll"] = () =>
       Effect.gen(function* () {
@@ -2935,6 +3217,8 @@ export function makeOpenCodeAdapter(
       capabilities: {
         sessionModelSwitch: "in-session",
         conversationRollback: "native",
+        // A steer stops the turn and sends the message next (ProviderService).
+        turnSteering: "interrupt-restart",
         // Unverified: OpenCode scopes sessions to a project directory.
         resumeSurvivesCwdChange: false,
       },
@@ -2949,6 +3233,7 @@ export function makeOpenCodeAdapter(
       readThread,
       rollbackThread,
       stopAll,
+      readProjectCommands,
       get streamEvents() {
         return Stream.fromQueue(runtimeEvents).pipe(
           Stream.tap(() => runtimeEventQueueMetrics.recordDequeued()),

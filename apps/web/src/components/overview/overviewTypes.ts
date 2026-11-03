@@ -1,6 +1,9 @@
+import type { SubagentStopAction } from "@ryco/client-runtime/state/session/subagentStop";
 import type {
   EnvironmentId,
   SourceControlChangeRequestMergeability,
+  ThreadId,
+  ThreadPullRequestWatchShell,
   WorktreePullRequestLink,
 } from "@ryco/contracts";
 import type { ReactNode } from "react";
@@ -49,6 +52,12 @@ export type OverviewPullRequestLinking = Pick<
   | "canEdit"
   | "onOpenPullRequest"
 >;
+
+/** The thread an overview belongs to, with the pull request watches its shell carries. */
+export interface OverviewPullRequestWatch {
+  readonly threadId: ThreadId;
+  readonly watches: ThreadPullRequestWatchShell | undefined;
+}
 
 export interface OverviewPullRequestState {
   /**
@@ -150,6 +159,8 @@ export interface OverviewLayoutProps {
   onRefreshPullRequest?: (() => void) | undefined;
   /** Links pull requests to the thread's workspace (desktop crown); absent where none can be. */
   pullRequestLinking?: OverviewPullRequestLinking | undefined;
+  /** The thread's server-side pull request watches (desktop crown): Auto-fix CI in Checks. */
+  pullRequestWatch?: OverviewPullRequestWatch | undefined;
   /**
    * Opens a pull request in the workspace panel: the shown one without a
    * number, another one pinned. ⌘/Ctrl-click keeps the host link.
@@ -171,6 +182,8 @@ export interface OverviewLayoutProps {
   onOpenAgent?: ((agentId: string) => void) | undefined;
   /** Opens the Agents tab focused on one workflow. */
   onOpenAgentsWorkflow?: ((workflowId: string) => void) | undefined;
+  /** Stop for the thread's native agents; without it the agent rows offer none. */
+  stopAgent?: SubagentStopAction | undefined;
   sourceControlActions?: ReactNode | undefined;
   branchControl?: ReactNode | undefined;
   environmentId: EnvironmentId;

@@ -133,10 +133,15 @@ export function createRemoteEnvironmentApi(httpClient: HttpClientService, baseOr
         bearerToken: input.bearerToken,
         ...(input.signal === undefined ? {} : { signal: input.signal }),
       }),
-    fetchRemoteEnvironmentDescriptor: async (input: { readonly httpBaseUrl: string }) =>
+    fetchRemoteEnvironmentDescriptor: async (input: {
+      readonly httpBaseUrl: string;
+      /** Abandons the request, e.g. a route check that timed out or was overtaken. */
+      readonly signal?: AbortSignal;
+    }) =>
       fetchRemoteJson<ExecutionEnvironmentDescriptor>(httpClient, {
         httpBaseUrl: input.httpBaseUrl,
         pathname: "/.well-known/ryco/environment",
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
       }),
     issueRemoteWebSocketToken: async (input: {
       readonly httpBaseUrl: string;
@@ -162,7 +167,9 @@ export function createRemoteEnvironmentApi(httpClient: HttpClientService, baseOr
         bearerToken: input.bearerToken,
         ...(input.signal === undefined ? {} : { signal: input.signal }),
       });
-      const url = new URL(input.wsBaseUrl, baseOrigin);
+      // The phone has no page origin unless a build pins a server; an empty
+      // base is an invalid URL and would throw even for an absolute address.
+      const url = new URL(input.wsBaseUrl, baseOrigin || undefined);
       url.searchParams.set("wsToken", issued.token);
       return url.toString();
     },

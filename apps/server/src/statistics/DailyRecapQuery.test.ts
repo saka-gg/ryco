@@ -2,7 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import { Effect, Layer, Schema } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlStatement from "effect/sql/Statement";
-import { DailyRecapRequest, DailyRecapSnapshot } from "@ryco/contracts";
+import { DailyRecapRequest, DailyRecapSnapshot, ProjectId } from "@ryco/contracts";
 
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,7 +18,24 @@ import { SqliteReadClient } from "../persistence/SqliteReadClient.ts";
 import { DailyRecapQuery, DailyRecapQueryLive, dailyRecapWindow } from "./DailyRecapQuery.ts";
 
 const request = { date: "2026-10-02", timeZone: "Europe/Berlin" };
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
 const encode = Schema.encodeUnknownSync(DailyRecapSnapshot);
+
+const project = (
+  sql: SqlClient.SqlClient,
+  id: string,
+  title: string,
+  kind: "project" | "chat" = "project",
+) => sql`
+  INSERT INTO projection_projects (
+    project_id, title, workspace_root, default_model_selection_json,
+    scripts_json, created_at, updated_at, deleted_at, kind
+  ) VALUES (
+    ${id}, ${title}, ${`/tmp/${id}`}, '{"provider":"codex","model":"model"}',
+    '[]', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', NULL, ${kind}
+  )
+`;
 
 const clean = (sql: SqlClient.SqlClient) =>
   Effect.gen(function* () {
@@ -26,25 +43,17 @@ const clean = (sql: SqlClient.SqlClient) =>
     yield* sql`DELETE FROM projection_thread_sessions`;
     yield* sql`DELETE FROM projection_threads`;
     yield* sql`DELETE FROM projection_projects`;
-    yield* sql`
-      INSERT INTO projection_projects (
-        project_id, title, workspace_root, default_model_selection_json,
-        scripts_json, created_at, updated_at, deleted_at
-      ) VALUES (
-        'project', 'Project', '/tmp/project', '{"provider":"codex","model":"model"}',
-        '[]', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', NULL
-      )
-    `;
+    yield* project(sql, "project", "Project");
   });
 
-const thread = (sql: SqlClient.SqlClient, id: string) => sql`
+const thread = (sql: SqlClient.SqlClient, id: string, projectId = "project") => sql`
   INSERT INTO projection_threads (
     thread_id, project_id, title, model_selection_json, runtime_mode,
     interaction_mode, branch, worktree_path, latest_turn_id,
     latest_user_message_at, pending_approval_count, pending_user_input_count,
     has_actionable_proposed_plan, created_at, updated_at, deleted_at
   ) VALUES (
-    ${id}, 'project', ${`Thread ${id}`}, '{"provider":"codex","model":"model"}',
+    ${id}, ${projectId}, ${`Thread ${id}`}, '{"provider":"codex","model":"model"}',
     'full-access', 'default', NULL, NULL, NULL, NULL, 0, 0, 0,
     '2026-01-01T00:00:00.000Z', '2026-10-03T12:00:00.000Z', NULL
   )
@@ -56,7 +65,10 @@ const turn = (
   turnId: string,
   state: string,
   completedAt: string | null,
-  assistantMessageId: string | null = null,
+  {
+    assistantMessageId = null,
+    startedAt = "2026-10-01T00:00:00.000Z",
+  }: { readonly assistantMessageId?: string | null; readonly startedAt?: string | null } = {},
 ) => sql`
   INSERT INTO projection_turns (
     thread_id, turn_id, pending_message_id, assistant_message_id, state,
@@ -64,7 +76,7 @@ const turn = (
     checkpoint_ref, checkpoint_status, checkpoint_files_json
   ) VALUES (
     ${threadId}, ${turnId}, NULL, ${assistantMessageId}, ${state},
-    '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z', ${completedAt},
+    '2026-10-01T00:00:00.000Z', ${startedAt}, ${completedAt},
     NULL, NULL, NULL, '[]'
   )
 `;
@@ -129,6 +141,7 @@ it.layer(DailyRecapQueryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)))(
           failedTurns: 0,
           interruptedTurns: 0,
         });
+        assert.deepStrictEqual(result.activity, { agentMs: 0, projects: [] });
         assert.deepStrictEqual(result.completed, {
           totalThreads: 0,
           threads: [],
@@ -185,6 +198,10 @@ it.layer(DailyRecapQueryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)))(
             interruptedTurns: 1,
           });
           assert.deepStrictEqual(
+            result.activity?.projects.map(({ projectId, turns }) => ({ projectId, turns })),
+            [{ projectId: "project", turns: 6 }],
+          );
+          assert.deepStrictEqual(
             result.completed.threads.map((item) => item.threadId),
             ["archived", "mixed", "boundary"],
           );
@@ -205,6 +222,7 @@ it.layer(DailyRecapQueryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)))(
           yield* sql`UPDATE projection_projects SET deleted_at = '2026-10-04T00:00:00.000Z'`;
           const afterDeletion = yield* service.getDailyRecap(request);
           assert.equal(afterDeletion.counts.completedTurns, 0);
+          assert.deepStrictEqual(afterDeletion.activity, { agentMs: 0, projects: [] });
           assert.equal(afterDeletion.completed.totalThreads, 0);
           assert.equal(afterDeletion.needsAttention.totalThreads, 0);
         }),
@@ -224,11 +242,16 @@ it.layer(DailyRecapQueryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)))(
         const running = yield* service.getDailyRecap(request);
         assert.equal(running.counts.completedTurns, 1);
         assert.equal(running.completed.threads[0]?.lastActivityAt, "2026-10-02T00:00:00.000Z");
+        // Both turns started before midnight (22:00 UTC), so each counts from there.
+        assert.equal(running.activity?.agentMs, 2 * HOUR_MS);
+        assert.equal(running.activity?.projects[0]?.turns, 1);
         yield* sql`UPDATE projection_thread_sessions SET active_turn_id = NULL, status = 'idle'
           WHERE thread_id = 'live'`;
         const completed = yield* service.getDailyRecap(request);
         assert.equal(completed.counts.completedTurns, 2);
         assert.equal(completed.completed.threads[0]?.lastActivityAt, "2026-10-02T01:00:00.000Z");
+        assert.equal(completed.activity?.agentMs, 5 * HOUR_MS);
+        assert.equal(completed.activity?.projects[0]?.turns, 2);
       }),
     );
 
@@ -244,15 +267,12 @@ it.layer(DailyRecapQueryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)))(
           ["turn-done", "2026-10-02T01:00:00.000Z"],
           ["turn-later", "2026-10-02T02:00:00.000Z"],
         ] as const) {
-          yield* turn(sql, "source", turnId, "completed", completedAt, `message-${turnId}`);
-          yield* turn(
-            sql,
-            "fork",
-            turnId,
-            "completed",
-            completedAt,
-            `fork:inherited:message-${turnId}`,
-          );
+          yield* turn(sql, "source", turnId, "completed", completedAt, {
+            assistantMessageId: `message-${turnId}`,
+          });
+          yield* turn(sql, "fork", turnId, "completed", completedAt, {
+            assistantMessageId: `fork:inherited:message-${turnId}`,
+          });
         }
         const statements: Array<readonly [string, ReadonlyArray<unknown>]> = [];
         const capture: SqlStatement.Transformer = (statement) =>
@@ -266,12 +286,16 @@ it.layer(DailyRecapQueryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)))(
           .getDailyRecap(request)
           .pipe(Effect.provideService(SqlStatement.CurrentTransformer, capture));
         assert.equal(inheritedOnly.counts.completedTurns, 2);
+        assert.equal(inheritedOnly.activity?.agentMs, 7 * HOUR_MS);
+        assert.equal(inheritedOnly.activity?.projects[0]?.turns, 2);
         assert.deepStrictEqual(
           inheritedOnly.completed.threads.map((item) => item.threadId),
           ["source"],
         );
 
-        yield* turn(sql, "fork", "turn-own", "error", "2026-10-02T03:00:00.000Z", "message-own");
+        yield* turn(sql, "fork", "turn-own", "error", "2026-10-02T03:00:00.000Z", {
+          assistantMessageId: "message-own",
+        });
         const withOwnTurn = yield* service.getDailyRecap(request);
         assert.deepStrictEqual(withOwnTurn.counts, {
           completedTurns: 2,
@@ -288,7 +312,7 @@ it.layer(DailyRecapQueryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)))(
         );
 
         // The inherited-turn filter is residual: the day range still drives every query.
-        assert.lengthOf(statements, 3);
+        assert.lengthOf(statements, 4);
         for (const [statement, params] of statements) {
           const plan = yield* sql.unsafe<{ detail: string }>(
             `EXPLAIN QUERY PLAN ${statement}`,
@@ -328,6 +352,116 @@ it.layer(DailyRecapQueryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)))(
         }
         assert.equal(result.counts.completedTurns, 3);
         assert.equal(result.counts.failedTurns, 3);
+      }),
+    );
+
+    it.effect("counts agent time of the counted turns inside the local day only", () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* clean(sql);
+        for (const id of ["overnight", "unstarted", "short", "stopped", "resumed"]) {
+          yield* thread(sql, id);
+        }
+        // Started at 23:00 the evening before (Berlin): only the half hour after midnight counts.
+        yield* turn(sql, "overnight", "overnight", "completed", "2026-10-01T22:30:00.000Z", {
+          startedAt: "2026-10-01T21:00:00.000Z",
+        });
+        yield* turn(sql, "unstarted", "unstarted", "completed", "2026-10-02T08:00:00.000Z", {
+          startedAt: null,
+        });
+        yield* turn(sql, "short", "short", "error", "2026-10-02T09:00:01.500Z", {
+          startedAt: "2026-10-02T09:00:00.000Z",
+        });
+        yield* turn(sql, "stopped", "stopped", "interrupted", "2026-10-02T10:01:00.000Z", {
+          startedAt: "2026-10-02T10:00:00.000Z",
+        });
+        // Interrupted, then resumed: it runs again and keeps its earlier completion time.
+        yield* turn(sql, "resumed", "resumed", "running", "2026-10-02T11:00:00.000Z", {
+          startedAt: "2026-10-02T10:30:00.000Z",
+        });
+        const result = yield* (yield* DailyRecapQuery).getDailyRecap(request);
+        encode(result);
+        assert.deepStrictEqual(result.counts, {
+          completedTurns: 2,
+          failedTurns: 1,
+          interruptedTurns: 1,
+        });
+        assert.deepStrictEqual(result.activity, {
+          agentMs: 31 * MINUTE_MS + 1_500,
+          projects: [
+            {
+              projectId: ProjectId.make("project"),
+              projectTitle: "Project",
+              turns: 4,
+              agentMs: 31 * MINUTE_MS + 1_500,
+            },
+          ],
+        });
+      }),
+    );
+
+    it.effect("ranks the busiest real projects deterministically and never chats", () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* clean(sql);
+        for (const [projectId, title, kind, turns, minutes] of [
+          ["chat", "Chat", "chat", 4, 10],
+          ["gone", "Gone", "project", 4, 10],
+          ["foxtrot", "Foxtrot", "project", 1, 1],
+          ["echo", "Echo", "project", 1, 1],
+          ["delta", "Delta", "project", 1, 3],
+          ["charlie", "Charlie", "project", 1, 3],
+          ["beta", "Beta", "project", 2, 5],
+          ["alpha", "Alpha", "project", 2, 10],
+        ] as const) {
+          yield* project(sql, projectId, title, kind);
+          yield* thread(sql, projectId, projectId);
+          for (let index = 0; index < turns; index += 1) {
+            const minute = String(minutes).padStart(2, "0");
+            yield* turn(
+              sql,
+              projectId,
+              `${projectId}-${index}`,
+              "completed",
+              `2026-10-02T0${index}:${minute}:00.000Z`,
+              { startedAt: `2026-10-02T0${index}:00:00.000Z` },
+            );
+          }
+        }
+        yield* sql`UPDATE projection_projects SET deleted_at = '2026-10-04T00:00:00.000Z'
+          WHERE project_id = 'gone'`;
+        const result = yield* (yield* DailyRecapQuery).getDailyRecap(request);
+        encode(result);
+        assert.equal(result.counts.completedTurns, 12);
+        // Chats count toward agent time; only the ranking leaves them out.
+        assert.equal(result.activity?.agentMs, 78 * MINUTE_MS);
+        assert.deepStrictEqual(result.activity?.projects, [
+          {
+            projectId: ProjectId.make("alpha"),
+            projectTitle: "Alpha",
+            turns: 2,
+            agentMs: 20 * MINUTE_MS,
+          },
+          {
+            projectId: ProjectId.make("beta"),
+            projectTitle: "Beta",
+            turns: 2,
+            agentMs: 10 * MINUTE_MS,
+          },
+          {
+            projectId: ProjectId.make("charlie"),
+            projectTitle: "Charlie",
+            turns: 1,
+            agentMs: 3 * MINUTE_MS,
+          },
+          {
+            projectId: ProjectId.make("delta"),
+            projectTitle: "Delta",
+            turns: 1,
+            agentMs: 3 * MINUTE_MS,
+          },
+          { projectId: ProjectId.make("echo"), projectTitle: "Echo", turns: 1, agentMs: MINUTE_MS },
+        ]);
       }),
     );
 

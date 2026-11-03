@@ -10,11 +10,21 @@ import {
 import { usePreferences, updatePreferences } from "../../state/preferencesStore";
 import type { MenuAction } from "@react-native-menu/menu";
 import type { ModelSelection } from "@ryco/contracts";
-import { applyModelOption, type ModelPickerModel } from "./modelPickerModel";
+import {
+  applyModelOption,
+  listModelPickerEntries,
+  type ModelPickerEntry,
+  type ModelPickerModel,
+} from "./modelPickerModel";
 import { ComposerModelOptions } from "./ComposerModelOptions";
 import type { ReactNode } from "react";
 import { AnchoredMenu } from "../../components/AnchoredMenu";
 import { ProviderIcon } from "../../components/ProviderIcon";
+
+// Model keys are `instance:slug` and instance ids start with a letter, so a
+// `#` id never collides with a model row.
+const LEGACY_SUBMENU_PREFIX = "#legacy:";
+const UPDATE_NOTICE_PREFIX = "#update:";
 
 export function ComposerModelMenu(props: {
   readonly model: ModelPickerModel;
@@ -33,7 +43,7 @@ export function ComposerModelMenu(props: {
 }) {
   const favorites = usePreferences().favorites ?? [];
   const groups = props.model.groups;
-  const entries = groups.flatMap((group) => group.entries);
+  const entries = listModelPickerEntries(props.model);
   const selectedKey = `${props.selection.instanceId}:${props.selection.model}`;
   const selectedOption = entries.find((option) => option.key === selectedKey);
   const controls = props.model.options;
@@ -50,17 +60,44 @@ export function ComposerModelMenu(props: {
       .filter(Boolean)
       .join(", "),
   };
+  const modelAction = (model: ModelPickerEntry): MenuAction => ({
+    id: model.key,
+    title: model.label,
+    state: model.key === selectedKey ? "on" : "off",
+    attributes: { disabled: props.disabled || model.disabled },
+    subtitle: model.disabledReason ?? undefined,
+  });
   const actions: MenuAction[] = groups.map((group) => ({
     id: `provider:${group.providerKey}`,
     title: group.providerLabel,
     subtitle: group.entries.find((model) => model.key === selectedKey)?.label,
-    subactions: group.entries.map((model) => ({
-      id: model.key,
-      title: model.label,
-      state: model.key === selectedKey ? "on" : "off",
-      attributes: { disabled: props.disabled || model.disabled },
-      subtitle: model.disabledReason ?? undefined,
-    })),
+    subactions: [
+      ...group.entries.map(modelAction),
+      ...(group.legacyEntries.length > 0
+        ? [
+            {
+              id: `${LEGACY_SUBMENU_PREFIX}${group.providerKey}`,
+              title: "Legacy models",
+              subtitle:
+                group.legacyEntries.length === 1
+                  ? "1 model"
+                  : `${group.legacyEntries.length} models`,
+              subactions: group.legacyEntries.map(modelAction),
+            },
+          ]
+        : []),
+      // Text, not a choice: which CLI update unlocks models this instance
+      // can't run yet. A search for one of them finds it.
+      ...(group.updateRequiredNotice
+        ? [
+            {
+              id: `${UPDATE_NOTICE_PREFIX}${group.providerKey}`,
+              title: group.updateRequiredNotice,
+              attributes: { disabled: true },
+            },
+          ]
+        : []),
+    ],
   }));
   const favoriteIndex = indexModelFavorites(favorites);
   const currentFavorite = resolveModelFavoriteForRow(
@@ -149,7 +186,12 @@ export function ComposerModelMenu(props: {
       className="min-w-0 flex-1"
       onClose={props.onClose}
       renderIcon={(action) => {
-        const group = groups.find((candidate) => `provider:${candidate.providerKey}` === action.id);
+        if (action.id?.startsWith(UPDATE_NOTICE_PREFIX)) return null;
+        const group = groups.find(
+          (candidate) =>
+            action.id === `provider:${candidate.providerKey}` ||
+            action.id === `${LEGACY_SUBMENU_PREFIX}${candidate.providerKey}`,
+        );
         const driver =
           group?.providerDriver ??
           entries.find((option) => option.key === action.id)?.providerDriver;

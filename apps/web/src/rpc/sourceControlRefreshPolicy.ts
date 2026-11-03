@@ -1,4 +1,5 @@
 import type { SourceControlRefreshMode } from "@ryco/contracts/settings";
+import { SOURCE_CONTROL_PAUSE_MAX_RETRY_DELAY_MS } from "@ryco/shared/sourceControlFailure";
 
 export const POST_PUSH_DISCOVERY_WINDOW_MS = 90_000;
 export const AUTOMATIC_DISCOVERY_REFRESH_MS = 10_000;
@@ -71,13 +72,27 @@ export function shouldRefreshSourceControlOnLifecycle(input: {
   return (input.nowMs ?? Date.now()) - input.lastFetchedAtMs >= input.staleTimeMs;
 }
 
+/**
+ * The wait for a rate-limit pause (already capped by
+ * `resolveSourceControlFailureDelay`), stretched so that poll jitter of up to
+ * `jitterRatio` either way never sends the read before the wait is over (that
+ * read would fail again, and a forge can extend its pause for it).
+ */
+export function resolveSourceControlPauseWaitMs(pauseMs: number, jitterRatio: number): number {
+  return Math.ceil(pauseMs / (1 - jitterRatio));
+}
+
+/**
+ * The wait after a failed read: the server's retry time when it gave one (a
+ * rate-limit pause, up to 15 min), otherwise backoff doubling to 5 min.
+ */
 export function resolveSourceControlFailureDelay(input: {
   readonly baseDelayMs: number;
   readonly consecutiveFailures: number;
   readonly retryAfterMs?: number | null;
 }): number {
   if (input.retryAfterMs != null && Number.isFinite(input.retryAfterMs)) {
-    return Math.min(SOURCE_CONTROL_MAX_BACKOFF_MS, Math.max(1_000, input.retryAfterMs));
+    return Math.min(SOURCE_CONTROL_PAUSE_MAX_RETRY_DELAY_MS, Math.max(1_000, input.retryAfterMs));
   }
   const exponent = Math.max(0, Math.min(8, Math.floor(input.consecutiveFailures) - 1));
   return Math.min(

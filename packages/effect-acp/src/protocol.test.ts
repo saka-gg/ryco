@@ -2,11 +2,16 @@ import * as Path from "effect/Path";
 import * as AcpError from "./errors.ts";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Fiber from "effect/Fiber";
+import { dual } from "effect/Function";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Ref from "effect/Ref";
+import * as Sink from "effect/Sink";
+import * as Stdio from "effect/Stdio";
+import { TestClock } from "effect/testing";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { it, assert } from "@effect/vitest";
@@ -21,6 +26,23 @@ import {
   jsonRpcResponse,
 } from "./_internal/shared.ts";
 import { makeInMemoryStdio, makeTerminationError, makeChildStdio } from "./_internal/stdio.ts";
+
+/**
+ * A `timeoutOrElse` whose deadlines expire only once `fire` completes, as a
+ * stall-aware one does while the loop is not free.
+ */
+const timeoutOrElseOnSignal = (fire: Deferred.Deferred<void>): typeof Effect.timeoutOrElse =>
+  dual(
+    2,
+    <A, E, R, A2, E2, R2>(
+      self: Effect.Effect<A, E, R>,
+      options: {
+        readonly duration: Duration.Input;
+        readonly orElse: () => Effect.Effect<A2, E2, R2>;
+      },
+    ): Effect.Effect<A | A2, E | E2, R | R2> =>
+      Effect.raceFirst(self, Effect.andThen(Deferred.await(fire), options.orElse)),
+  );
 
 const SessionCancelNotification = jsonRpcNotification(
   "session/cancel",
@@ -165,6 +187,47 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
             '{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"session-1"},"id":""}\n',
         },
       ]);
+    }),
+  );
+
+  it.effect("runs the outgoing enqueue deadline through the injected timeoutOrElse", () =>
+    Effect.gen(function* () {
+      const memory = yield* makeInMemoryStdio();
+      const fire = yield* Deferred.make<void>();
+      const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        stdio: Stdio.make({
+          args: Effect.succeed([]),
+          stdin: memory.stdio.stdin,
+          // A writer that never drains: the outgoing queue fills up.
+          stdout: () => Sink.forEach(() => Effect.never),
+          stderr: () => Sink.drain,
+        }),
+        serverRequestMethods: new Set(),
+        timeoutOrElse: timeoutOrElseOnSignal(fire),
+      });
+      const progress = { sent: 0 };
+      const flood = yield* Effect.forEach(
+        Array.from({ length: 1_000 }),
+        () =>
+          transport.notify("session/cancel", { sessionId: "session-1" }).pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                progress.sent += 1;
+              }),
+            ),
+          ),
+        { discard: true },
+      ).pipe(Effect.flip, Effect.forkScoped);
+      // Let the flood fill the queue (capacity 256) and block on the next offer.
+      for (let i = 0; i < 10_000 && progress.sent < 256; i++) yield* Effect.yieldNow;
+      assert.isAtLeast(progress.sent, 256);
+      for (let i = 0; i < 10; i++) yield* Effect.yieldNow;
+      // A plain 2 s enqueue deadline would have failed the flood here.
+      yield* TestClock.adjust("2 seconds");
+      assert.isUndefined(flood.pollUnsafe());
+      yield* Deferred.succeed(fire, undefined);
+      const error = yield* Fiber.join(flood);
+      assert.instanceOf(error, AcpError.AcpProtocolOverloadedError);
     }),
   );
 

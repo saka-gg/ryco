@@ -21,7 +21,8 @@ import {
   validateScheduleDraft,
   type ScheduleDraft,
 } from "@ryco/client-runtime/state/agentControl";
-import { AgentControlAutomationId } from "@ryco/contracts";
+import { AgentControlAutomationId, type ThreadId } from "@ryco/contracts";
+import { AGENT_CONTROL_AUTOMATION_UNATTENDED_FAILURES_MAX } from "@ryco/contracts/agent-control";
 import { AUTOMATION_LIMITS } from "@ryco/shared/automationSchedule";
 import { CircleAlertIcon, Repeat2Icon } from "lucide-react";
 import {
@@ -29,6 +30,7 @@ import {
   useEffectEvent,
   useId,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent,
@@ -38,13 +40,16 @@ import { useEvent } from "../../../../hooks/useEvent";
 import { cn, isMacPlatform, randomUUID } from "../../../../lib/utils";
 import { selectSidebarWorktreesForProjectRef, useStore } from "../../../../store";
 import { formatProjectPath, inferHomeDirectory } from "../../../projects/projectsModel.logic";
+import { Switch } from "../../../ui/switch";
 import { Textarea } from "../../../ui/textarea";
 import { toastManager } from "../../../ui/toast";
 import type { ProjectAutomationsCheckout } from "../../data/useProjectAutomations";
+import { useProjectChats } from "../../data/useProjectChats";
 import { PickerRadioRow } from "../../pickers/PickerRadioRow";
 import { RunPreview } from "../../pickers/RunPreview";
 import { DialogButton } from "../dialogControls";
 import type { ScheduleEditorDraftState, ScheduleEditorSlotProps } from "../editorContract";
+import { heartbeatChatChoices, heartbeatChatWords } from "../heartbeatChats.logic";
 import { AgentPicks } from "./AgentPicks";
 import {
   applyDraftFix,
@@ -58,6 +63,7 @@ import {
   SAVE_REFUSED,
   saveFailureField,
   sentenceWords,
+  calendarChoiceWeekdays,
   withStart,
   type EditorFocusField,
   type EditorTokenKind,
@@ -68,6 +74,7 @@ import {
   type OpenToken,
   type SentenceDevice,
   type SentenceMessageIds,
+  type SentenceRunsIn,
 } from "./SentenceEditor";
 import { findEditorToken } from "./tokenAnchor";
 
@@ -152,9 +159,22 @@ export function ScheduleEditor(props: ScheduleEditorSlotProps) {
   /** The last save was refused; its reason shows until the draft changes. */
   const [refused, setRefused] = useState(false);
   const [open, setOpen] = useState<OpenToken | null>(null);
+  /** "an existing chat" was picked for a draft with no chat yet: its list is open. */
+  const [choosingChat, setChoosingChat] = useState(false);
 
   const checkout = checkouts.find((candidate) => candidate.key === checkoutKey);
   const providers = checkout?.providers ?? [];
+  // A heartbeat is offered where the device takes one; a draft that has one keeps it. Only
+  // then are the project's chats read: every chat change would re-render the editor.
+  const offersHeartbeat = checkout?.snapshot?.heartbeats === true || draft.target !== null;
+  const projectChats = useProjectChats(
+    offersHeartbeat ? checkout?.environmentId : null,
+    checkout?.projectId,
+  );
+  const chats = useMemo(() => heartbeatChatChoices(projectChats), [projectChats]);
+  const heartbeat = offersHeartbeat
+    ? { chats, choosing: choosingChat && draft.target === null }
+    : null;
 
   // A new draft opened before the device's providers arrived takes their
   // default model once they do; it stays a clean draft.
@@ -186,7 +206,10 @@ export function ScheduleEditor(props: ScheduleEditorSlotProps) {
   useEffect(() => reportOpened(), []);
 
   // ── what it says ───────────────────────────────────────────────────
-  const words = sentenceWords(draft, nowMs);
+  const words = sentenceWords(draft, nowMs, {
+    words: draft.target ? heartbeatChatWords(projectChats, draft.target.threadId) : null,
+    choosingChat: heartbeat?.choosing ?? false,
+  });
   const validation = validateScheduleDraft(draft, {
     nowMs,
     snapshot: checkout?.snapshot ?? null,
@@ -296,8 +319,39 @@ export function ScheduleEditor(props: ScheduleEditorSlotProps) {
     }
   };
 
+  // ── a heartbeat's chat ─────────────────────────────────────────────
+  // "an existing chat" in the "Runs in" menu opens the chat list once the
+  // menu has closed (and handed focus back), so the two never fight over it.
+  const chatNextRef = useRef(false);
+  const onRunsIn = (choice: SentenceRunsIn) => {
+    if (choice === "chat") {
+      if (draft.target === null) setChoosingChat(true);
+      chatNextRef.current = true;
+      return;
+    }
+    setChoosingChat(false);
+    update({ ...draft, envMode: choice, target: null });
+  };
+  const onRunsInClosed = () => {
+    if (!chatNextRef.current) return;
+    chatNextRef.current = false;
+    cancelCloseSoon();
+    setOpen({ kind: "chat", text: null });
+  };
+  const onChat = (threadId: ThreadId) => {
+    setChoosingChat(false);
+    update({ ...draft, target: { kind: "thread", threadId } });
+  };
+  // Closed without a pick: the sentence says where it ran before, and focus goes back there.
+  const onChatClosed = () => {
+    if (!choosingChat || draft.target !== null) return;
+    setChoosingChat(false);
+    findEditorToken(editorId, "env")?.focus({ preventScroll: true });
+  };
+
+  /** "Repeats" covers an interval and a calendar schedule; "Once" is the other. */
   const setKind = (kind: ScheduleDraft["kind"]) => {
-    if (draft.kind === kind) return;
+    if (draft.kind === kind || (kind === "fixed-interval" && draft.kind === "calendar")) return;
     setOpen(null);
     update({ ...draft, kind });
   };
@@ -423,7 +477,7 @@ export function ScheduleEditor(props: ScheduleEditorSlotProps) {
               <span className="pk">
                 <PickerRadioRow
                   options={KIND_OPTIONS}
-                  value={draft.kind}
+                  value={draft.kind === "calendar" ? "fixed-interval" : draft.kind}
                   label="How often"
                   className="ae-kind"
                   onSelect={setKind}
@@ -444,17 +498,30 @@ export function ScheduleEditor(props: ScheduleEditorSlotProps) {
             devices={isNew && devices.length > 1 ? devices : null}
             deviceTip={isNew ? null : "A schedule stays on the device it was created on"}
             refSource={refSource}
-            onInterval={(ms) => update({ ...draft, intervalMs: ms })}
+            onInterval={(ms) => update({ ...draft, kind: "fixed-interval", intervalMs: ms })}
+            onCalendar={(choice) =>
+              update({
+                ...draft,
+                kind: "calendar",
+                weekdays: calendarChoiceWeekdays(choice, draft),
+              })
+            }
             onStart={(ms) => update(withStart(draft, ms))}
             onEnd={(ms) => update({ ...draft, endsAt: ms })}
             onDevice={(key) => {
               const next = checkouts.find((candidate) => candidate.key === key);
               if (!next || key === checkoutKey) return;
               setCheckoutKey(key);
-              update({ ...draft, projectId: next.projectId }, key);
+              // A chat lives on its own device: a heartbeat there runs in a new chat here.
+              setChoosingChat(false);
+              update({ ...draft, projectId: next.projectId, target: null }, key);
             }}
-            onEnv={(mode) => update({ ...draft, envMode: mode })}
+            heartbeat={heartbeat}
+            onEnv={onRunsIn}
+            onEnvClosed={onRunsInClosed}
             onRef={(ref) => update({ ...draft, baseRef: ref })}
+            onChat={onChat}
+            onChatClosed={onChatClosed}
             onPicked={closeSoon}
           />
           <div className="ae-msgs" aria-live="polite">
@@ -545,6 +612,26 @@ export function ScheduleEditor(props: ScheduleEditorSlotProps) {
               </p>
             ) : null}
           </div>
+          {checkout?.snapshot?.runWithoutAsking || draft.runWithoutAsking ? (
+            <div className="ae-fld ae-unattended">
+              <Switch
+                id={`${editorId}-unattended`}
+                checked={draft.runWithoutAsking}
+                aria-describedby={`${editorId}-unattended-d`}
+                onCheckedChange={(checked) => update({ ...draft, runWithoutAsking: checked })}
+              />
+              <div className="ae-unattended-t">
+                <label className="ae-unattended-l" htmlFor={`${editorId}-unattended`}>
+                  Run without asking
+                </label>
+                <p className="ae-unattended-d" id={`${editorId}-unattended-d`}>
+                  {draft.runWithoutAsking
+                    ? `Each run starts on its own with this model, permission and checkout. It pauses after ${AGENT_CONTROL_AUTOMATION_UNATTENDED_FAILURES_MAX} failed runs in a row.`
+                    : "Off: you approve each run before it starts."}
+                </p>
+              </div>
+            </div>
+          ) : null}
         </div>
       </div>
       <footer ref={footerRef} className="ad-ed-foot">

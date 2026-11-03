@@ -15,7 +15,7 @@ import {
   type OrchestrationThread,
   type OrchestrationThreadActivity,
 } from "@ryco/contracts";
-import { compareThreadActivities } from "@ryco/shared/threadActivity";
+import { latestCheckpointRevertActivity } from "@ryco/shared/threadActivity";
 import { hasQueuedTurnStart, type ThreadSettlementInput } from "@ryco/shared/threadSettlement";
 import { Effect, Option, Schema } from "effect";
 
@@ -40,20 +40,45 @@ export function checkpointRevertActivityId(revertRequestId: CommandId | string):
   return EventId.make(`checkpoint-revert:${revertRequestId}`);
 }
 
-function checkpointRevertSummary(status: CheckpointRevertStatus, turnCount: number): string {
+function checkpointRevertSummary(
+  status: CheckpointRevertStatus,
+  turnCount: number,
+  restoreFiles: boolean,
+  rollbackConversation: boolean,
+): string {
+  if (!rollbackConversation) return filesRevertSummary(status, turnCount);
   switch (status) {
     case "requested":
     case "rolling-back":
     case "restoring-files":
       return `Reverting to checkpoint ${turnCount}`;
     case "completed":
-      return `Reverted to checkpoint ${turnCount}`;
+      return restoreFiles
+        ? `Reverted to checkpoint ${turnCount}`
+        : `Reverted to checkpoint ${turnCount} and kept the files`;
     case "files-not-restored":
       return "Reverted conversation; files were not restored";
     case "failed":
       return "Revert failed";
     case "interrupted":
       return "Revert interrupted";
+  }
+}
+
+/** A files-only revert (`thread.files.revert`) changes no conversation, so says only files. */
+function filesRevertSummary(status: CheckpointRevertStatus, turnCount: number): string {
+  switch (status) {
+    case "requested":
+    case "rolling-back":
+    case "restoring-files":
+      return `Restoring files from checkpoint ${turnCount}`;
+    case "completed":
+      return `Restored files from checkpoint ${turnCount}`;
+    case "files-not-restored":
+    case "failed":
+      return "Files were not restored";
+    case "interrupted":
+      return "File restore interrupted";
   }
 }
 
@@ -65,18 +90,28 @@ export function makeCheckpointRevertActivity(input: {
   readonly reason?: CheckpointRevertFailureReason | undefined;
   readonly detail?: string | undefined;
   readonly cwd?: string | undefined;
+  /** `false` for a conversation-only revert; omitted (restore) otherwise. */
+  readonly restoreFiles?: false | undefined;
+  /** `false` for a files-only revert; omitted (rewind) otherwise. */
+  readonly rollbackConversation?: false | undefined;
   readonly createdAt: string;
 }): OrchestrationThreadActivity {
   const detail = input.detail?.trim();
+  // A files-only revert keeps its count under its own key, so an older server's
+  // recovery never finishes it as a full revert (`checkpointRevertFromTurnCount`).
+  const fromTurnCountKey =
+    input.rollbackConversation === false ? "filesFromTurnCount" : "fromTurnCount";
   const payload: CheckpointRevertActivityPayload = {
     schemaVersion: 1,
     revertRequestId: input.revertRequestId,
     turnCount: input.turnCount,
-    ...(input.fromTurnCount !== undefined ? { fromTurnCount: input.fromTurnCount } : {}),
+    ...(input.fromTurnCount !== undefined ? { [fromTurnCountKey]: input.fromTurnCount } : {}),
     status: input.status,
     ...(input.reason !== undefined ? { reason: input.reason } : {}),
     ...(detail ? { detail } : {}),
     ...(input.cwd !== undefined && input.cwd.trim().length > 0 ? { cwd: input.cwd } : {}),
+    ...(input.restoreFiles === false ? { restoreFiles: false } : {}),
+    ...(input.rollbackConversation === false ? { rollbackConversation: false } : {}),
   };
   return {
     id: checkpointRevertActivityId(input.revertRequestId),
@@ -85,12 +120,29 @@ export function makeCheckpointRevertActivity(input: {
         ? "info"
         : "error",
     kind: CHECKPOINT_REVERT_ACTIVITY_KIND,
-    summary: checkpointRevertSummary(input.status, input.turnCount),
+    summary: checkpointRevertSummary(
+      input.status,
+      input.turnCount,
+      input.restoreFiles !== false,
+      input.rollbackConversation !== false,
+    ),
     payload,
     // Lifecycle activities carry no turn so the revert's own activity filter keeps them.
     turnId: null,
     createdAt: input.createdAt,
   };
+}
+
+/** The checkpoint a journaled revert started from, whichever key its scope keeps it under. */
+export function checkpointRevertFromTurnCount(
+  payload: Pick<
+    CheckpointRevertActivityPayload,
+    "fromTurnCount" | "filesFromTurnCount" | "rollbackConversation"
+  >,
+): number | undefined {
+  return payload.rollbackConversation === false
+    ? payload.filesFromTurnCount
+    : payload.fromTurnCount;
 }
 
 const decodeRevertPayload = Schema.decodeUnknownOption(CheckpointRevertActivityPayload);
@@ -100,17 +152,16 @@ export interface CheckpointRevertEntry {
   readonly payload: CheckpointRevertActivityPayload;
 }
 
-/** Newest `checkpoint.revert` activity, decoded. Undecodable payloads yield none. */
+/**
+ * Newest `checkpoint.revert` activity, decoded; with `skipFailed`, the newest whose revert
+ * did not fail (`latestCheckpointRevertActivity`). Undecodable payloads yield none.
+ */
 export function latestCheckpointRevert(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
+  options?: { readonly skipFailed?: boolean },
 ): CheckpointRevertEntry | null {
-  let latest: OrchestrationThreadActivity | null = null;
-  for (const activity of activities) {
-    if (activity.kind !== CHECKPOINT_REVERT_ACTIVITY_KIND) continue;
-    if (latest === null || compareThreadActivities(activity, latest) > 0) latest = activity;
-  }
-  if (latest === null) return null;
-  const activity = latest;
+  const activity = latestCheckpointRevertActivity(activities, options);
+  if (activity === null) return null;
   return Option.match(decodeRevertPayload(activity.payload), {
     onNone: () => null,
     onSome: (payload) => ({ activity, payload }),
@@ -131,6 +182,28 @@ export function isCheckpointRevertEntryPending(
   const createdAtMs = Date.parse(entry.activity.createdAt);
   if (!Number.isFinite(createdAtMs) || !Number.isFinite(nowMs)) return true;
   return nowMs - createdAtMs < CHECKPOINT_REVERT_PENDING_STALE_MS;
+}
+
+/**
+ * When a thread's newest revert that did not fail (read with `skipFailed`: a failed
+ * one changed nothing, so an earlier one's kept changes are still there) may have
+ * changed the checkout without a turn: left the turns it dropped changing it (kept on
+ * purpose by a conversation-only revert, not restored, stopped part way, or still
+ * running), or restored files and kept the chat (a files-only revert); null when it
+ * restored the files along with the conversation, or changed nothing. The thread's own
+ * recency misses these changes, so a restore elsewhere in the same checkout counts
+ * this instead (its time is at or after them).
+ */
+export function checkpointRevertLeftDroppedChangesAt(
+  entry: CheckpointRevertEntry | null,
+): string | null {
+  if (entry === null) return null;
+  const { status, restoreFiles, rollbackConversation } = entry.payload;
+  if (status === "failed") return null;
+  if (status === "completed" && restoreFiles !== false && rollbackConversation !== false) {
+    return null;
+  }
+  return entry.activity.createdAt;
 }
 
 export function isCheckpointRevertPending(
@@ -177,7 +250,10 @@ export function threadBusyMessage(reason: ThreadBusyReason): string {
 export function requireThreadReadyForCheckpointRevert(input: {
   readonly readModel: OrchestrationReadModel;
   readonly thread: OrchestrationThread;
-  readonly command: Extract<OrchestrationCommand, { type: "thread.checkpoint.revert" }>;
+  readonly command: Extract<
+    OrchestrationCommand,
+    { type: "thread.checkpoint.revert" | "thread.conversation.revert" | "thread.files.revert" }
+  >;
   /**
    * Server time. Journal phases are server-stamped, so a client clock running
    * ahead must not age a pending revert out early.

@@ -1,13 +1,8 @@
-import {
-  assertStorageCleanupClaim,
-  validateStorageCleanupClaim,
-  type StorageCleanupClaim,
-} from "./cleanupClaim.ts";
 import type { Stats } from "node:fs";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
-import { constants } from "node:fs";
 import path from "node:path";
+import { REGULAR_FILE_READ_FLAGS } from "@ryco/shared/regularFile";
 import { runProcess } from "../processRunner.ts";
 
 export interface ScanBudget {
@@ -17,14 +12,77 @@ export interface ScanBudget {
 interface ManifestEntry {
   relativePath: string;
   stat: Stats;
+  /** A cache folder recorded by identity only: never traversed, moved out whole. */
+  opaque?: true;
 }
 export interface MeasuredSize {
   bytes: number | null;
   sizeStatus: "complete" | "bounded" | "unknown";
   unsafe: boolean;
+  /** Entries visited (files, directories and the root); all of them when complete. */
+  entries?: number;
   fingerprint?: string;
   manifest?: readonly ManifestEntry[];
 }
+
+/** How a checkout's removal manifest treats what a clean `git status` vouches for. */
+export interface CheckoutManifestOptions {
+  /**
+   * Cache folders, relative to the measured root: each is one manifest entry recorded by
+   * identity (path, device, inode, mode), never traversed and its bytes not counted. Each must
+   * be a plain directory on the root's device, and all of them must be present, or the result
+   * is unsafe. Contents may change; replacing the folder changes the fingerprint.
+   */
+  readonly opaque?: ReadonlySet<string>;
+  /**
+   * Symbolic links are leaves: removal unlinks the link itself and never follows it. Only for a
+   * checkout whose status is clean, so every link is tracked and unchanged (Ryco's own
+   * `CLAUDE.md` is one); anywhere else a link makes the result unsafe.
+   */
+  readonly linkLeaves?: boolean;
+}
+
+/**
+ * The manifest options of a checkout whose clean status lists these cache folders. Not on
+ * Windows, where a directory junction looks like a link but `unlink` cannot remove it.
+ */
+export const checkoutManifest = (cacheFolders: readonly string[]): CheckoutManifestOptions => ({
+  opaque: new Set(cacheFolders),
+  linkLeaves: process.platform !== "win32",
+});
+
+/** Most cache folders one checkout's removal moves out (Ryco itself has 15). */
+export const MAX_CACHE_FOLDERS = 256;
+
+/**
+ * Most entries (files, directories and the root) one quarantined removal takes on; a checkout
+ * of Ryco without dependencies has about 8,700. Bigger trees stay protected instead of being
+ * cut off half-way through their removal.
+ */
+export const MAX_QUARANTINE_REMOVAL_ENTRIES = 12_000;
+
+/**
+ * The removal's own budget grows with its manifest. It checks every file against its parents
+ * twice: measured at 0.5 to 6 ms per entry on an 18-core Mac, the slow end at load average 30
+ * with other processes busy on the same disk. 3 s plus 20 ms per entry only stops a stalled
+ * filesystem: running out leaves a half-removed quarantine for manual recovery, so a slow one
+ * must be allowed to finish.
+ */
+export const quarantineRemovalBudget = (entries: number, now = Date.now()): ScanBudget => ({
+  // Parent checks: two per file, one per directory.
+  remaining: 3 * entries + 16,
+  deadline: now + 3_000 + 20 * entries,
+});
+
+/**
+ * Entries a check of cache folders' contents may visit (`storage/cacheFolders.ts`): per scan,
+ * shared by its candidates, or per entry when one is previewed, retained or removed. A checkout
+ * of Ryco holds about 170,000 in its `node_modules` folders.
+ */
+export const cacheCheckBudget = (now = Date.now()): ScanBudget => ({
+  remaining: 2_000_000,
+  deadline: now + 30_000,
+});
 
 /** Apparent bytes, with a shared node-wide budget; never follows links or mounts. */
 export async function measureDirectory(
@@ -33,8 +91,11 @@ export async function measureDirectory(
   excluded: ReadonlySet<string> = new Set(),
   captureManifest = false,
   rootCtime?: number,
+  options: CheckoutManifestOptions = {},
 ): Promise<MeasuredSize> {
   let bytes = 0;
+  let entries = 0;
+  let opaqueFound = 0;
   const identities: string[] = [];
   const manifest: ManifestEntry[] = [];
   let unsafe = false;
@@ -57,11 +118,25 @@ export async function measureDirectory(
         bounded = true;
         continue;
       }
+      entries++;
+      const relativePath = path.relative(root, current);
+      if (current !== root && options.opaque?.has(relativePath)) {
+        opaqueFound++;
+        if (captureManifest) {
+          manifest.push({ relativePath, stat, opaque: true });
+          identities.push(JSON.stringify([relativePath, stat.dev, stat.ino, "opaque", stat.mode]));
+        }
+        if (stat.isSymbolicLink() || !stat.isDirectory() || stat.dev !== rootStat.dev) {
+          unsafe = true;
+          bounded = true;
+        }
+        continue;
+      }
       if (captureManifest) {
-        manifest.push({ relativePath: path.relative(root, current), stat });
+        manifest.push({ relativePath, stat });
         identities.push(
           JSON.stringify([
-            path.relative(root, current),
+            relativePath,
             stat.dev,
             stat.ino,
             stat.size,
@@ -72,12 +147,22 @@ export async function measureDirectory(
           ]),
         );
       }
-      if (stat.isSymbolicLink() || stat.dev !== rootStat.dev) {
+      if (path.basename(current) === ".git" && current !== path.join(root, ".git")) {
         unsafe = true;
         bounded = true;
         continue;
       }
-      if (path.basename(current) === ".git" && current !== path.join(root, ".git")) {
+      if (
+        stat.isSymbolicLink() &&
+        options.linkLeaves &&
+        current !== root &&
+        stat.dev === rootStat.dev &&
+        stat.nlink === 1
+      ) {
+        bytes += stat.size;
+        continue;
+      }
+      if (stat.isSymbolicLink() || stat.dev !== rootStat.dev) {
         unsafe = true;
         bounded = true;
         continue;
@@ -121,10 +206,13 @@ export async function measureDirectory(
         bounded = true;
       }
     }
+    // A recorded cache folder that is gone (or was never there) is not the checkout we checked.
+    if (!bounded && opaqueFound !== (options.opaque?.size ?? 0)) unsafe = true;
     return {
       bytes,
       sizeStatus: bounded ? "bounded" : "complete",
       unsafe,
+      entries,
       ...(captureManifest && !bounded && !unsafe
         ? {
             manifest,
@@ -155,14 +243,11 @@ export async function assertCanonicalPath(candidate: string): Promise<string> {
   return resolved;
 }
 
-async function readSmallFile(candidate: string): Promise<string> {
+export async function readSmallFile(candidate: string): Promise<string> {
   const stat = await fs.lstat(candidate);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4096)
     throw new Error("Invalid git ownership file.");
-  const handle = await fs.open(
-    candidate,
-    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-  );
+  const handle = await fs.open(candidate, REGULAR_FILE_READ_FLAGS);
   try {
     const opened = await handle.stat();
     if (
@@ -192,7 +277,7 @@ async function readSmallFile(candidate: string): Promise<string> {
   }
 }
 
-async function assertWorktreeUnlocked(gitDirectory: string): Promise<void> {
+export async function assertWorktreeUnlocked(gitDirectory: string): Promise<void> {
   try {
     await fs.lstat(path.join(gitDirectory, "locked"));
   } catch (cause) {
@@ -259,216 +344,61 @@ export async function captureWorktreeIdentity(
   };
 }
 
-/** Fresh status includes ignored files; an ignored archive may still be real user work. */
-export async function assertCleanWorktree(candidate: string, repository: string): Promise<void> {
-  const gitFile = await readSmallFile(path.join(candidate, ".git"));
-  const match = /^gitdir: (.+)\r?\n?$/.exec(gitFile);
-  if (!match) throw new Error("Only linked Git worktrees are eligible.");
-  await assertWorktreeUnlocked(path.resolve(candidate, match[1]!));
-  const result = await runProcess(
-    "git",
-    [
-      "-c",
-      "core.fsmonitor=false",
-      "-c",
-      "core.untrackedCache=false",
-      "status",
-      "--porcelain=v1",
-      "-z",
-      "--untracked-files=all",
-      "--ignored",
-      "--ignore-submodules=none",
-    ],
-    {
-      cwd: candidate,
-      timeoutMs: 5000,
-      maxBufferBytes: 256 * 1024,
-      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
-    },
-  );
-  if (result.stdout.length !== 0)
-    throw new Error("Dirty, untracked or ignored files are protected.");
-  const base = await runProcess("git", ["rev-parse", "--verify", "HEAD"], {
-    cwd: repository,
-    timeoutMs: 5000,
-    maxBufferBytes: 4096,
-  });
-  const unmerged = await runProcess("git", ["rev-list", "--count", `${base.stdout.trim()}..HEAD`], {
-    cwd: candidate,
-    timeoutMs: 5000,
-    maxBufferBytes: 4096,
-  });
-  if (unmerged.stdout.trim() !== "0")
-    throw new Error(
-      "Unmerged branch history is protected; merge into project HEAD before cleanup.",
-    );
-  // Even clean initialized submodules may own unpublished commits. Git removal is not a recursive cleanup tool.
-  try {
-    await fs.lstat(path.join(candidate, ".gitmodules"));
-    throw new Error("Submodule worktrees are protected.");
-  } catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
-  }
-}
-
-/** Quarantine first; never recursively delete a tree that external writers can extend.
- * Only entries from the post-rename manifest are considered. Each file is atomically
- * moved to a unique slot and rechecked before unlink; unknown children make rmdir fail.
- * Failures deliberately preserve the quarantine and its contents for manual recovery.
+/**
+ * A cache folder a checkout's removal moves out whole, before anything is deleted, to a
+ * Ryco-named sibling of the checkout; the ledger records it so the background purge deletes
+ * exactly that folder (`storage/cacheFolders.ts`).
  */
-export async function removeQuarantinedTemporaryDirectory(
-  source: string,
-  quarantine: string,
-  expectedFingerprint: string,
-  validateQuarantine?: (candidate: string) => Promise<void>,
-  assertAdmission?: () => void,
-): Promise<void> {
-  const budget = () => ({ remaining: 30_000, deadline: Date.now() + 3000 });
-  await assertCanonicalPath(source);
-  await assertCanonicalPath(path.dirname(quarantine));
-  const before = await measureDirectory(source, budget(), new Set(), true);
-  if (!before.manifest || before.fingerprint !== expectedFingerprint)
-    throw new Error("Temporary data changed at the removal boundary; preserved at " + source);
-  const originalRoot = before.manifest.find((entry) => entry.relativePath === "")!.stat;
-  // Destination names are unique and outside every producer allocation. Do not
-  // overwrite a previous recovery directory, even on an interrupted attempt.
-  try {
-    await fs.lstat(quarantine);
-    throw new Error("Cleanup quarantine already exists.");
-  } catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
-  }
-  assertAdmission?.();
-  await fs.rename(source, quarantine);
-  try {
-    await assertCanonicalPath(quarantine);
-    const after = await measureDirectory(
-      quarantine,
-      budget(),
-      new Set(),
-      true,
-      originalRoot.ctimeMs,
-    );
-    if (!after.manifest || after.fingerprint !== expectedFingerprint)
-      throw new Error("Temporary data changed during quarantine; no entries were deleted.");
-    if (validateQuarantine) await validateQuarantine(quarantine);
-    const sameIdentity = (a: Stats, b: Stats) =>
-      !a.isSymbolicLink() && a.dev === b.dev && a.ino === b.ino && a.mode === b.mode;
-    const sameFile = (a: Stats, b: Stats) =>
-      sameIdentity(a, b) &&
-      a.isFile() &&
-      a.nlink === 1 &&
-      a.size === b.size &&
-      a.mtimeMs === b.mtimeMs;
-    const directories = after.manifest.filter((entry) => entry.stat.isDirectory());
-    const directoryIdentities = new Map(
-      directories.map((entry) => [path.join(quarantine, entry.relativePath), entry.stat]),
-    );
-    const removalBudget = budget();
-    const assertParents = async (candidate: string) => {
-      if (removalBudget.remaining-- <= 0 || Date.now() >= removalBudget.deadline)
-        throw new Error("Quarantine removal budget exhausted.");
-      await assertCanonicalPath(candidate);
-      let parent = directoryIdentities.has(candidate) ? candidate : path.dirname(candidate);
-      for (;;) {
-        const expected = directoryIdentities.get(parent);
-        if (!expected || !sameIdentity(await fs.lstat(parent), expected))
-          throw new Error("Quarantine directory identity changed.");
-        if (parent === quarantine) break;
-        parent = path.dirname(parent);
-      }
-    };
-    // No discovered-at-delete-time traversal: newly introduced entries are never
-    // selected, followed or removed. File moves keep replacements at the old name.
-    for (const entry of after.manifest.filter((item) => item.stat.isFile())) {
-      const candidate = path.join(quarantine, entry.relativePath);
-      await assertParents(candidate);
-      const current = await fs.lstat(candidate);
-      if (!sameFile(current, entry.stat) || current.ctimeMs !== entry.stat.ctimeMs)
-        throw new Error("Quarantined file changed before removal.");
-      const slot = path.join(quarantine, `.verified-${crypto.randomUUID()}`);
-      assertAdmission?.();
-      await fs.rename(candidate, slot);
-      const moved = await fs.lstat(slot);
-      // rename changes ctime; identity, type, links, bytes and mtime must still match.
-      if (!sameFile(moved, entry.stat))
-        throw new Error("Quarantined file changed at the file removal boundary.");
-      await assertParents(slot);
-      const final = await fs.lstat(slot);
-      if (!sameFile(final, moved) || final.ctimeMs !== moved.ctimeMs)
-        throw new Error("Quarantined file changed during final validation.");
-      assertAdmission?.();
-      await fs.unlink(slot);
-    }
-    for (const entry of directories.toSorted(
-      (a, b) => b.relativePath.length - a.relativePath.length,
-    )) {
-      const candidate = path.join(quarantine, entry.relativePath);
-      await assertParents(candidate);
-      // Non-recursive rmdir refuses unexpected entries added during deletion.
-      assertAdmission?.();
-      await fs.rmdir(candidate);
-    }
-  } catch (cause) {
-    throw new Error(
-      `Storage cleanup interrupted; remaining data preserved at ${quarantine}: ${cause instanceof Error ? cause.message : "filesystem changed"}`,
-      { cause },
-    );
-  }
+export interface CacheMove {
+  /** Inside the checkout, e.g. `apps/web/node_modules`. */
+  readonly relativePath: string;
+  /** `<quarantine>-cache-<n>`, beside the checkout. */
+  readonly destination: string;
+  readonly device: number;
+  readonly inode: number;
 }
 
-export interface VerifiedWorktreeCleanup {
-  readonly quarantinePath: string;
-  readonly fingerprint: string;
-  readonly identity: WorktreeIdentity;
-  readonly claim: StorageCleanupClaim;
-  /** Compatibility only; callers cannot supply admission authority. */
-  readonly assertAdmission?: () => void;
-}
+/** The destination of a checkout's `index`-th cache folder. */
+export const cacheMoveDestination = (quarantine: string, index: number) =>
+  `${quarantine}-cache-${index}`;
 
-/** Cleanup never delegates checkout traversal to git worktree remove. Its status
- * check omits ignored files and may honor showUntrackedFiles=no. Keep registration,
- * refs and history; explicitly pruning the missing registration is a separate action.
+/**
+ * Where a removal recorded in a ledger row's identity put things: its quarantine (a
+ * `.cleanup-*` sibling of `checkout`) and its cache moves, each at exactly the destination that
+ * removal uses (`<quarantine>-cache-<n>`). Null when the record says anything else, so neither
+ * admission fencing nor the cache purge ever trusts a path the removal did not choose.
  */
-export async function removeVerifiedWorktree(
-  repository: string,
-  candidate: string,
-  cleanup: VerifiedWorktreeCleanup,
-): Promise<void> {
-  const { quarantinePath, fingerprint, claim } = cleanup;
-  const identityJSON = JSON.stringify(cleanup.identity);
-  await validateStorageCleanupClaim(
-    claim,
-    repository,
-    candidate,
-    quarantinePath,
-    fingerprint,
-    identityJSON,
-  );
+export function readRemovalRecord(
+  checkout: string,
+  identity: unknown,
+): { readonly quarantine: string; readonly caches: readonly CacheMove[] } | null {
+  const record = identity as { quarantinePath?: unknown; caches?: unknown } | null;
+  const quarantine = record?.quarantinePath;
   if (
-    path.dirname(quarantinePath) !== path.dirname(candidate) ||
-    !path.basename(quarantinePath).startsWith(".cleanup-")
+    typeof quarantine !== "string" ||
+    !path.isAbsolute(quarantine) ||
+    path.dirname(quarantine) !== path.dirname(checkout) ||
+    !path.basename(quarantine).startsWith(".cleanup-")
   )
-    throw new Error("Invalid worktree cleanup quarantine.");
-  const identity = await captureWorktreeIdentity(repository, candidate);
-  if (JSON.stringify(identity) !== identityJSON)
-    throw new Error("Worktree identity changed at the removal boundary.");
-  await assertCleanWorktree(candidate, repository);
-  await removeQuarantinedTemporaryDirectory(
-    candidate,
-    quarantinePath,
-    fingerprint,
-    async (quarantine) => {
-      await validateStorageCleanupClaim(
-        claim,
-        repository,
-        candidate,
-        quarantinePath,
-        fingerprint,
-        identityJSON,
-      );
-      await assertCleanWorktree(quarantine, repository);
-    },
-    () => assertStorageCleanupClaim(claim),
-  );
+    return null;
+  const caches = record?.caches ?? [];
+  if (!Array.isArray(caches) || caches.length > MAX_CACHE_FOLDERS) return null;
+  const moves: CacheMove[] = [];
+  for (const [index, value] of (caches as unknown[]).entries()) {
+    const move = value as Partial<CacheMove> | null;
+    if (
+      typeof move?.relativePath !== "string" ||
+      move.destination !== cacheMoveDestination(quarantine, index) ||
+      typeof move.device !== "number" ||
+      typeof move.inode !== "number"
+    )
+      return null;
+    moves.push({
+      relativePath: move.relativePath,
+      destination: move.destination,
+      device: move.device,
+      inode: move.inode,
+    });
+  }
+  return { quarantine, caches: moves };
 }

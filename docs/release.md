@@ -48,13 +48,124 @@ and npm trusted publishing retain their existing runners.
 - Publishes the CLI package (`apps/server`, npm package `ryco-cli`) to the `nightly` npm dist-tag using the same nightly version.
 - Does not commit version bumps back to `main`.
 
+## Ryco Nightly
+
+Nightly desktop builds become their own app, **Ryco Nightly**, installed next to Ryco with
+nothing shared. Trying a nightly then never touches the workspace the stable app keeps, and moving back never
+downgrades a binary over a database a newer one migrated.
+
+|                                                    | Ryco                           | Ryco Nightly                                 |
+| -------------------------------------------------- | ------------------------------ | -------------------------------------------- |
+| Bundle id (`appId`; NSIS derives its GUID from it) | `com.laurinfrank.ryco`         | `com.laurinfrank.ryco.nightly`               |
+| Data home                                          | `~/.ryco` (`RYCO_HOME`)        | `~/.ryco-nightly` (`RYCO_NIGHTLY_HOME` only) |
+| Electron profile and single-instance lock          | `ryco`                         | `ryco-nightly`                               |
+| Hosted sign-in callback scheme                     | `ryco://`                      | `ryco-preview://`                            |
+| Update channel                                     | `latest`, stable versions only | `nightly`, nightly versions only             |
+| Release file names                                 | `Ryco-<version>-…`             | `Ryco-Nightly-<version>-…`                   |
+| First backend port, Tailscale Serve port           | 7926, 443                      | 7936, 8443                                   |
+
+- The identity table lives in `packages/shared/src/desktopFlavor.ts`. The build writes the flavor
+  into the packaged `package.json` (`rycoDesktopFlavor`), so the running app cannot lose it.
+- Each app takes only versions of its own channel and only files with its own name prefix, and
+  `allowDowngrade` is off for both. There is no update-track switch any more: moving between them
+  means opening the other app. The default backend and Tailscale Serve ports differ, so both run
+  at once without taking each other's renderer origin or tailnet address.
+- Ryco Nightly is a separate node: its own environment id, Hub enrollment and E2EE keys follow from
+  its own data home. Its backend, MCP bridge and other CLI children get `RYCO_HOME` pinned to that
+  home, so a `RYCO_HOME` exported in a login shell never points it at Ryco's data.
+- The unsigned macOS installer refuses a downloaded bundle whose id differs from the running app's.
+- Features that ship only in Nightly are listed in `NIGHTLY_ONLY_FEATURES`
+  (`packages/shared/src/nightlyFeatures.ts`). The node is authoritative, from its own version.
+- CLI nodes keep the in-place npm `nightly` dist-tag.
+
+### Copying Ryco's data into Ryco Nightly
+
+In the app: **Settings → General → About → Ryco Nightly**. On Ryco (macOS) it finds Ryco Nightly in
+`/Applications` or `~/Applications` (only a real bundle whose `Info.plist` names
+`com.laurinfrank.ryco.nightly`), and offers **Open Ryco Nightly** and **Copy my data and open**
+(refused while Nightly's node runs or when the two data folders overlap, after a confirmation).
+Before opening, Ryco checks Nightly's code signature: signed by Ryco's own team and as
+`com.laurinfrank.ryco.nightly` (a development build of Ryco, unsigned itself, skips this). Ryco
+opens Nightly through macOS (`open -a … --env …`) with the login session's environment plus only
+`RYCO_STABLE_HOME`, `RYCO_STABLE_EXECUTABLE`, `RYCO_NIGHTLY_HOME` when Ryco has one, and for a copy
+`RYCO_FLAVOR_IMPORT_TOKEN`. Without Ryco Nightly installed, **Get Ryco Nightly** opens the
+releases page; installing it from inside the app is a later step. On Ryco Nightly, **Switch back to
+Ryco** opens Ryco the same way and copies nothing back, and the row says how the last copy went.
+
+Ryco can ask Ryco Nightly for a copy of its data. Ryco writes `import-requested.json` into
+Nightly's home; Nightly's backend takes the copy on its next start, before it opens its database,
+and reports the outcome in `import-result.json` beside it (`packages/shared/src/flavorImport.ts`,
+`apps/server/src/flavorImport/`). Nothing is ever written into Ryco's home.
+
+- Nightly copies only from the home Ryco handed over when it opened Nightly (`RYCO_STABLE_HOME`),
+  else `~/.ryco`, and never from its own. Links are refused, and a request older than an hour is
+  dropped without copying.
+- Nightly takes only the request of the launch that opened it: the request and the launch carry the
+  same one-time token, which Nightly's desktop app takes out of its environment at start and hands
+  to its backend. A request written while Nightly was already open is refused, never taken later.
+- It copies the database (a live `VACUUM INTO`, as `ryco db backup` takes it), `settings.json`,
+  `keybindings.json`, `attachments/` and `task-files/`, and nothing else: never the node identity,
+  environment id, Hub state, secrets, saved connections, logs, backups or runtime files. Nightly
+  stays a node of its own and enrolls with the Hub by itself.
+- The copy is migrated to Nightly's schema, then scrubbed by a table policy
+  (`flavorImportTablePolicy.ts`; a new table must be classified there). Sessions, pairing links,
+  Agent Control integrations, Atlassian connections, pull request watches, follow-up queues,
+  restart continuations, provider session bindings and storage ownership are cleared; schedules
+  and chat goals are paused; unfinished proposals, operations and hand-offs are cancelled. A Ryco
+  database newer than Nightly is refused ("Update Ryco Nightly, then copy again").
+- Nightly's previous data is replaced only once everything is copied; a failed move puts it back.
+
+### Rolling it out (`RYCO_DESKTOP_NIGHTLY_IDENTITY`)
+
+Before the split, nightly builds used the stable app's identity and data ("Ryco (Nightly)"). The
+release workflow reads the repository variable `RYCO_DESKTOP_NIGHTLY_IDENTITY` to decide how a
+nightly is packaged:
+
+1. `legacy` (the default while the variable is unset): the nightly keeps the stable identity. The
+   first nightly after the split is the **bridge**: it carries the new code, so in-place nightly
+   installs stop following nightlies and move to the next stable release, which installs over them
+   as an ordinary update (a nightly's base is the next stable patch).
+2. `separate`: nightlies build Ryco Nightly. Set the variable once in-place nightly installs have
+   taken the bridge (we suggest waiting about a week). **Keep it set from then on**: going back to
+   `legacy` would publish stable-identity nightlies again. Ryco Nightly ignores their files (wrong
+   name prefix), but anyone still on an in-place nightly would follow them.
+
+An in-place install that never took the bridge and meets a `separate` nightly keeps its data, but
+not always its app. A signed macOS update fails the code-signature requirement, and Windows installs
+a second app (new GUID). Builds from before the bridge have no bundle-id check, though, so an
+unsigned macOS app or a Linux AppImage is replaced by Ryco Nightly. `~/.ryco` stays as it was;
+install Ryco again from the releases page to use it.
+
+Known overlaps, left for later:
+
+- The bridge and Ryco Nightly both use the `ryco-preview://` sign-in callback (the Hub allows only
+  that one for nightlies). With both installed, the one that registered last receives the callback,
+  and the other's hosted sign-in fails until it is opened again.
+- SSH machines: both apps install their CLI into the remote's `~/.ryco` and share its managed
+  server; a remote home per app is a follow-up.
+
 ## Desktop auto-update notes
 
 - Runtime updater: `electron-updater` in `apps/desktop/src/main.ts`.
 - Update UX:
-  - Background checks run on startup delay + interval.
-  - No automatic download or install.
-  - The desktop UI shows a rocket update button when an update is available; click once to download, click again after download to restart/install.
+  - Each app follows one channel (see "Ryco Nightly"); there is no update-track switch.
+  - Background checks run on startup delay (15 s) + interval (4 h).
+  - By default, no automatic download or install. The desktop UI shows a rocket update button when an update is available; click once to download, click again after download to restart/install.
+  - With the node setting **Update automatically** on (`automaticUpdates`, owner only, together
+    with update checks), the startup and interval checks also download what they find. The
+    backend tells Desktop main with an `app-update-policy` frame on its private pipe; nothing
+    else can set it, and it turns off while no backend reports it. Windows (NSIS) and a Linux
+    AppImage named without a version then install the download when the app quits normally,
+    silently and without starting it again (`autoInstallOnAppQuit`). A quit during a system
+    shutdown or logout (or after SIGTERM) installs nothing; the update waits for a later quit.
+    macOS never installs at quit: Squirrel.Mac stages an armed update irreversibly and the
+    unsigned installer replaces the bundle, so the download waits for **Restart**. Neither does
+    an AppImage named with its version, as the release files are: electron-updater would move the
+    update to a new versioned file name that nothing starts, leaving the person's launcher on a
+    deleted file. A version whose download or install failed is not downloaded or armed again in
+    the background. Development builds never update themselves.
+  - Every install writes `desktop-update-install.json` in the state directory; the next launch
+    says "Updated to X", or, when still on the old version, skips that version in the background.
 - Provider: GitHub Releases (`provider: github`) configured at build time.
 - Repository slug source:
   - `RYCO_DESKTOP_UPDATE_REPOSITORY` (format `owner/repo`), if set.

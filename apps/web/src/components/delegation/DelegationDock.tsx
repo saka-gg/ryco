@@ -30,7 +30,7 @@ import { useEnvironmentServerConfigSelector } from "../../hooks/useChatsAvailabi
 import { cn } from "../../lib/utils";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { selectDelegatedChildThreadsForThreadRef, useStore, type AppState } from "../../store";
-import { buildThreadRouteParams } from "../../threadRoutes";
+import { buildThreadRouteHref, buildThreadRouteParams } from "../../threadRoutes";
 import { formatElapsedClockLabel } from "../../timestampFormat";
 import { useAgentControlClientExecutor } from "../agent-control/agentControlClientExecutor";
 import { useAgentControlSyncEnvironmentIds } from "../agent-control/agentControlSyncGate";
@@ -64,7 +64,7 @@ const NO_CHILDREN: ReadonlyArray<SidebarThreadSummary> = [];
 const selectProviders = (config: ServerConfig | null) => config?.providers ?? null;
 
 const threadHref = (environmentId: EnvironmentId, threadId: ThreadId) =>
-  `/${encodeURIComponent(environmentId)}/${encodeURIComponent(threadId)}`;
+  buildThreadRouteHref(scopeThreadRef(environmentId, threadId));
 
 const STATE_TEXT_TONE: Record<DelegationDockTone, string> = {
   working: "text-(--delegation-dock-working-text)",

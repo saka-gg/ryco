@@ -1,6 +1,8 @@
 import type {
   GitActionProgressEvent,
+  GitResumeStackedActionInput,
   GitRunStackedActionInput,
+  GitRunStackedActionOptions,
   GitRunStackedActionResult,
   VcsStatusResult,
   VcsStatusStreamEvent,
@@ -8,9 +10,13 @@ import type {
   LocalApi,
   OpinionatedPluginCheckInput,
   OpinionatedPluginInstallInput,
+  ProjectFileChangeEvent,
+  ThreadLocalServerList,
+  ProviderSignInWireEvent,
   ServerSettingsPatch,
 } from "@ryco/contracts";
 import { AGENT_CONTROL_WS_METHODS } from "@ryco/contracts/agent-control";
+import { isUnknownUnionMember } from "@ryco/contracts/base-schemas";
 import {
   CONTEXT_HANDOFF_WS_METHODS,
   ORCHESTRATION_WS_METHODS,
@@ -20,6 +26,7 @@ import {
   type OrchestrationThreadWindowStreamItem,
 } from "@ryco/contracts/orchestration";
 import type { ProjectImportSnapshot } from "@ryco/contracts/project-copy";
+import { NODE_BROWSER_WS_METHODS } from "@ryco/contracts/node-browser";
 import { WS_METHODS } from "@ryco/contracts/rpc";
 import {
   assertUsageContractVersion,
@@ -34,6 +41,11 @@ import { type WsRpcProtocolClient } from "./protocol.ts";
 import { resetWsReconnectBackoff } from "./wsConnectionState.ts";
 import { type SubscriptionFailureKind, WsTransport } from "./wsTransport.ts";
 import type { DeviceRpcClient } from "./deviceRpcClient.ts";
+import type {
+  NodeBrowserFrameRequest,
+  NodeBrowserFrameSource,
+  NodeBrowserFrameSourceHandlers,
+} from "../connection/nodeBrowserFrameSource.ts";
 import { createShellSnapshotAssembler } from "./shellSnapshotAssembly.ts";
 import {
   providerCatalogCache,
@@ -61,8 +73,6 @@ export interface ResumableSubscriptionOptions extends StreamSubscriptionOptions 
   readonly resumeFromSequence?: () => number | null;
 }
 export interface ShellSubscriptionOptions extends ResumableSubscriptionOptions {
-  /** Ask for small `thread-priorities` items instead of a snapshot per ranking. */
-  readonly threadPriorities?: "delta";
   /**
    * Ask for archived threads as stubs (`snapshot.archivedThreadStubs`). Only
    * for a listener whose store keeps stubs; older servers ignore it.
@@ -123,14 +133,43 @@ type RpcStreamMethod<TTag extends RpcTag> =
     ? (listener: (event: TEvent) => void, options?: StreamSubscriptionOptions) => () => void
     : never;
 
-interface GitRunStackedActionOptions {
+interface GitStackedActionProgressOptions {
   readonly onProgress?: (event: GitActionProgressEvent) => void;
+}
+
+/**
+ * Follows one stacked-action stream to its result. The node reports the result
+ * with `action_finished`; once it has, a failure after it (bookkeeping on an
+ * older node, or a dropped connection) does not undo the action, so the result
+ * stands. Without one, the stream's failure is the outcome. The result is kept
+ * before the caller's progress handler runs, so a handler that throws cannot
+ * lose it.
+ */
+async function collectStackedActionResult(
+  follow: (listener: (event: GitActionProgressEvent) => void) => Promise<void>,
+  options: GitStackedActionProgressOptions | undefined,
+): Promise<GitRunStackedActionResult> {
+  let result: GitRunStackedActionResult | null = null;
+  try {
+    await follow((event) => {
+      if (event.kind === "action_finished") result = event.result;
+      options?.onProgress?.(event);
+    });
+  } catch (error) {
+    if (result) return result;
+    throw error;
+  }
+  if (result) return result;
+  throw new Error("Git action stream completed without a final result.");
 }
 
 export interface WsRpcClient {
   readonly dispose: () => Promise<void>;
   readonly reconnect: () => Promise<void>;
-  readonly isHeartbeatFresh: () => boolean;
+  /** Whether the server answered a heartbeat within `maxAgeMs` (15 s by default). */
+  readonly isHeartbeatFresh: (maxAgeMs?: number) => boolean;
+  /** Whether a socket opened at or after `sinceMs`: the connection has reconnected since. */
+  readonly hasReopenedSince?: (sinceMs: number) => boolean;
   readonly device?: DeviceRpcClient;
   readonly terminal: {
     readonly open: RpcUnaryMethod<typeof WS_METHODS.terminalOpen>;
@@ -146,8 +185,20 @@ export interface WsRpcClient {
     readonly readFile: RpcUnaryMethod<typeof WS_METHODS.projectsReadFile>;
     readonly readIcon: RpcUnaryMethod<typeof WS_METHODS.projectsReadIcon>;
     readonly readFileBinary: RpcUnaryMethod<typeof WS_METHODS.projectsReadFileBinary>;
+    readonly readFileChunk: RpcUnaryMethod<typeof WS_METHODS.projectsReadFileChunk>;
     readonly searchEntries: RpcUnaryMethod<typeof WS_METHODS.projectsSearchEntries>;
+    /** Aborting `signal` withdraws the request; the node stops searching. */
+    readonly searchContent: (
+      input: RpcInput<typeof WS_METHODS.projectsSearchContent>,
+      options?: { readonly signal?: AbortSignal | undefined },
+    ) => ReturnType<RpcUnaryMethod<typeof WS_METHODS.projectsSearchContent>>;
     readonly writeFile: RpcUnaryMethod<typeof WS_METHODS.projectsWriteFile>;
+    /** Only for nodes that advertise `projectFileWatch`; `watchProjectFile` shares and retries it. */
+    readonly subscribeFileChanges: (
+      input: RpcInput<typeof WS_METHODS.projectsSubscribeFileChanges>,
+      listener: (event: ProjectFileChangeEvent) => void,
+      options?: StreamSubscriptionOptions,
+    ) => () => void;
     readonly stageFileReference: RpcUnaryMethod<typeof WS_METHODS.projectsStageFileReference>;
     readonly initializeGit: RpcUnaryMethod<typeof WS_METHODS.projectsInitializeGit>;
     readonly promoteChatPreview: RpcUnaryMethod<typeof WS_METHODS.projectsPromoteChatPreview>;
@@ -195,6 +246,9 @@ export interface WsRpcClient {
     readonly getIssue: RpcUnaryMethod<typeof WS_METHODS.sourceControlGetIssue>;
     readonly searchIssues: RpcUnaryMethod<typeof WS_METHODS.sourceControlSearchIssues>;
     readonly listChangeRequests: RpcUnaryMethod<typeof WS_METHODS.sourceControlListChangeRequests>;
+    readonly listInvolvedChangeRequests: RpcUnaryMethod<
+      typeof WS_METHODS.sourceControlListInvolvedChangeRequests
+    >;
     readonly searchChangeRequests: RpcUnaryMethod<
       typeof WS_METHODS.sourceControlSearchChangeRequests
     >;
@@ -252,11 +306,17 @@ export interface WsRpcClient {
     readonly createChangeRequest: RpcUnaryMethod<
       typeof WS_METHODS.sourceControlCreateChangeRequest
     >;
+    readonly listChangeRequestTemplates: RpcUnaryMethod<
+      typeof WS_METHODS.sourceControlListChangeRequestTemplates
+    >;
     readonly linkWorktreePullRequest: RpcUnaryMethod<
       typeof WS_METHODS.sourceControlLinkWorktreePullRequest
     >;
     readonly dismissWorktreePullRequest: RpcUnaryMethod<
       typeof WS_METHODS.sourceControlDismissWorktreePullRequest
+    >;
+    readonly setPullRequestWatch: RpcUnaryMethod<
+      typeof WS_METHODS.sourceControlSetPullRequestWatch
     >;
   };
   readonly textGeneration: {
@@ -333,10 +393,21 @@ export interface WsRpcClient {
    * Git-specific workflows. Local repository mechanics live under `vcs`.
    */
   readonly git: {
+    /**
+     * One attempt on this connection. The connection's client wraps it with
+     * `GitActionRecovery`, which reads `recoverable` and `onRecoveryState`;
+     * here they are ignored.
+     */
     readonly runStackedAction: (
       input: GitRunStackedActionInput,
       options?: GitRunStackedActionOptions,
     ) => Promise<GitRunStackedActionResult>;
+    /** One attempt to follow a recoverable action again on this connection; never starts one. */
+    readonly resumeStackedAction: (
+      input: GitResumeStackedActionInput,
+      options?: GitStackedActionProgressOptions,
+    ) => Promise<GitRunStackedActionResult>;
+    readonly cancelStackedAction: RpcUnaryMethod<typeof WS_METHODS.gitCancelStackedAction>;
     readonly resolvePullRequest: RpcUnaryMethod<typeof WS_METHODS.gitResolvePullRequest>;
     readonly preparePullRequestThread: RpcUnaryMethod<
       typeof WS_METHODS.gitPreparePullRequestThread
@@ -372,6 +443,18 @@ export interface WsRpcClient {
     readonly searchMessages: RpcUnaryMethod<typeof WS_METHODS.searchThreadMessages>;
     /** Idempotent per `forkKey`; never retried here (see `runThreadFork`). */
     readonly fork: RpcUnaryMethod<typeof WS_METHODS.threadsFork>;
+    /** Idempotent per `forkKey`; never retried here (see `runCarriedFork`). */
+    readonly forkCarried: RpcUnaryMethod<typeof WS_METHODS.threadsForkCarried>;
+    /** Only for nodes that advertise `threadLocalServers`; `watchThreadLocalServers` shares it. */
+    readonly subscribeLocalServers: (
+      input: RpcInput<typeof WS_METHODS.threadsSubscribeLocalServers>,
+      listener: (list: ThreadLocalServerList) => void,
+      options?: StreamSubscriptionOptions,
+    ) => () => void;
+    /** Only for nodes that advertise `threadLocalServerStop`; never retried (it signals). */
+    readonly stopLocalServer: RpcUnaryMethod<typeof WS_METHODS.threadsStopLocalServer>;
+    /** Only for nodes that advertise `secretRequests`; never retried (a repeat finds it answered). */
+    readonly answerSecretRequest: RpcUnaryMethod<typeof WS_METHODS.secretsAnswerRequest>;
   };
   readonly server: {
     readonly getConfig: RpcUnaryNoArgMethod<typeof WS_METHODS.serverGetConfig>;
@@ -413,7 +496,11 @@ export interface WsRpcClient {
     readonly subscribeLocalTaskChanges: RpcStreamMethod<
       typeof WS_METHODS.serverSubscribeLocalTaskChanges
     >;
-    readonly getDailyRecap: RpcUnaryMethod<typeof WS_METHODS.serverGetDailyRecap>;
+    /** Aborting `signal` withdraws the request. */
+    readonly getDailyRecap: (
+      input: RpcInput<typeof WS_METHODS.serverGetDailyRecap>,
+      options?: { readonly signal?: AbortSignal | undefined },
+    ) => ReturnType<RpcUnaryMethod<typeof WS_METHODS.serverGetDailyRecap>>;
     readonly prewarmProviderSession: RpcUnaryMethod<typeof WS_METHODS.providerPrewarmSession>;
     readonly readProjectProviderCommands: RpcUnaryMethod<
       typeof WS_METHODS.providerReadProjectCommands
@@ -430,6 +517,13 @@ export interface WsRpcClient {
       typeof WS_METHODS.serverAuthenticateAcpRegistry
     >;
     readonly updateProvider: RpcUnaryMethod<typeof WS_METHODS.serverUpdateProvider>;
+    /**
+     * Tells the node a person is using this client, so its unattended updates wait. Only for
+     * nodes with `automaticUpdates` on; `createClientInteractionReporter` throttles it.
+     */
+    readonly noteClientInteraction: RpcUnaryNoArgMethod<
+      typeof WS_METHODS.serverNoteClientInteraction
+    >;
     readonly subscribeNodeUpdate: RpcStreamMethod<typeof WS_METHODS.serverSubscribeNodeUpdate>;
     readonly checkNodeUpdate: RpcUnaryNoArgMethod<typeof WS_METHODS.serverCheckNodeUpdate>;
     readonly updateNode: RpcUnaryMethod<typeof WS_METHODS.serverUpdateNode>;
@@ -471,6 +565,30 @@ export interface WsRpcClient {
     readonly subscribeLifecycle: RpcStreamMethod<typeof WS_METHODS.subscribeServerLifecycle>;
     readonly subscribeAuthAccess: RpcStreamMethod<typeof WS_METHODS.subscribeAuthAccess>;
   };
+  /**
+   * Browser tabs that run on the node (`ServerConfig.nodeBrowser`); operator sessions only.
+   * `openFrameSource` exists on direct connections, whose clients can open the frame socket.
+   */
+  readonly nodeBrowser: {
+    readonly read: RpcUnaryMethod<typeof NODE_BROWSER_WS_METHODS.read>;
+    readonly command: RpcUnaryMethod<typeof NODE_BROWSER_WS_METHODS.command>;
+    readonly input: RpcUnaryMethod<typeof NODE_BROWSER_WS_METHODS.input>;
+    readonly subscribe: RpcStreamMethod<typeof NODE_BROWSER_WS_METHODS.subscribe>;
+    readonly openFrameSource?: (
+      request: NodeBrowserFrameRequest,
+      handlers: NodeBrowserFrameSourceHandlers,
+    ) => NodeBrowserFrameSource;
+  };
+  /** Owner-only; a node without it answers "Unknown request tag" (`isUnsupportedRpcError`). */
+  readonly providerSignIn: {
+    readonly subscribe: (
+      input: RpcInput<typeof WS_METHODS.providerSignInSubscribe>,
+      listener: (event: ProviderSignInWireEvent) => void,
+      options?: StreamSubscriptionOptions,
+    ) => () => void;
+    readonly start: RpcUnaryMethod<typeof WS_METHODS.providerSignInStart>;
+    readonly respond: RpcUnaryMethod<typeof WS_METHODS.providerSignInRespond>;
+  };
   readonly keybindings: {
     readonly replaceCustom: RpcUnaryMethod<typeof WS_METHODS.keybindingsReplaceCustom>;
   };
@@ -489,6 +607,9 @@ export interface WsRpcClient {
     readonly getWorkflowScript: RpcUnaryMethod<typeof ORCHESTRATION_WS_METHODS.getWorkflowScript>;
     readonly getTaskOutput: RpcUnaryMethod<typeof ORCHESTRATION_WS_METHODS.getTaskOutput>;
     readonly stopBackgroundTask: RpcUnaryMethod<typeof ORCHESTRATION_WS_METHODS.stopBackgroundTask>;
+    readonly messageBackgroundTask: RpcUnaryMethod<
+      typeof ORCHESTRATION_WS_METHODS.messageBackgroundTask
+    >;
     readonly getFullThreadDiff: RpcUnaryMethod<typeof ORCHESTRATION_WS_METHODS.getFullThreadDiff>;
     readonly searchThreadMessages: RpcUnaryMethod<
       typeof ORCHESTRATION_WS_METHODS.searchThreadMessages
@@ -532,9 +653,6 @@ export interface WsRpcClient {
       options?: ThreadSubscriptionOptions,
     ) => () => void;
   };
-  readonly threadPriority: {
-    readonly ensureCurrent: RpcUnaryMethod<typeof WS_METHODS.threadPriorityEnsureCurrent>;
-  };
   readonly contextHandoff: {
     readonly getInspectionSummary: RpcUnaryMethod<
       typeof CONTEXT_HANDOFF_WS_METHODS.getInspectionSummary
@@ -554,6 +672,16 @@ export interface WsRpcClient {
   readonly notes: {
     readonly list: RpcUnaryMethod<typeof WS_METHODS.notesList>;
     readonly command: RpcUnaryMethod<typeof WS_METHODS.notesCommand>;
+  };
+  /**
+   * Background push alerts for this device (`docs/push-alerts.md`). The node
+   * accepts them only on a Hub relay channel of an account-enrolled device, and
+   * takes the device from that channel, never from the request.
+   */
+  readonly push: {
+    readonly registerDevice: RpcUnaryMethod<typeof WS_METHODS.pushRegisterDevice>;
+    readonly unregisterDevice: RpcUnaryMethod<typeof WS_METHODS.pushUnregisterDevice>;
+    readonly setPresence: RpcUnaryMethod<typeof WS_METHODS.pushSetPresence>;
   };
   readonly agentControl: {
     readonly listProposals: RpcUnaryMethod<typeof AGENT_CONTROL_WS_METHODS.listProposals>;
@@ -594,7 +722,13 @@ export interface WsRpcClient {
   };
 }
 
-export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClient): WsRpcClient {
+export function createWsRpcClient(
+  transport: WsTransport,
+  device?: DeviceRpcClient,
+  options?: {
+    readonly openNodeBrowserFrameSource?: WsRpcClient["nodeBrowser"]["openFrameSource"];
+  },
+): WsRpcClient {
   return {
     dispose: async () => {
       await Promise.all([transport.dispose(), device?.dispose()]);
@@ -603,7 +737,8 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
       resetWsReconnectBackoff();
       await Promise.all([transport.reconnect(), device?.reconnect()]);
     },
-    isHeartbeatFresh: () => transport.isHeartbeatFresh(),
+    isHeartbeatFresh: (maxAgeMs) => transport.isHeartbeatFresh(maxAgeMs),
+    hasReopenedSince: (sinceMs) => transport.hasReopenedSince(sinceMs),
     ...(device ? { device } : {}),
     terminal: {
       open: (input) => transport.request((client) => client[WS_METHODS.terminalOpen](input)),
@@ -635,10 +770,25 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.projectsReadIcon](input)),
       readFileBinary: (input) =>
         transport.request((client) => client[WS_METHODS.projectsReadFileBinary](input)),
+      readFileChunk: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsReadFileChunk](input)),
       searchEntries: (input) =>
         transport.request((client) => client[WS_METHODS.projectsSearchEntries](input)),
+      searchContent: (input, options) => {
+        const signal = options?.signal;
+        return transport.request(
+          (client) => client[WS_METHODS.projectsSearchContent](input),
+          signal === undefined ? undefined : { signal },
+        );
+      },
       writeFile: (input) =>
         transport.request((client) => client[WS_METHODS.projectsWriteFile](input)),
+      subscribeFileChanges: (input, listener, options) =>
+        transport.subscribe(
+          (client) => client[WS_METHODS.projectsSubscribeFileChanges](input),
+          listener,
+          transportSubscribeOptions(options, WS_METHODS.projectsSubscribeFileChanges),
+        ),
       stageFileReference: (input) =>
         transport.request((client) => client[WS_METHODS.projectsStageFileReference](input)),
       initializeGit: (input) =>
@@ -718,6 +868,10 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.sourceControlSearchIssues](input)),
       listChangeRequests: (input) =>
         transport.request((client) => client[WS_METHODS.sourceControlListChangeRequests](input)),
+      listInvolvedChangeRequests: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.sourceControlListInvolvedChangeRequests](input),
+        ),
       searchChangeRequests: (input) =>
         transport.request((client) => client[WS_METHODS.sourceControlSearchChangeRequests](input)),
       getChangeRequestDetail: (input) =>
@@ -790,6 +944,10 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.sourceControlUpdateChangeRequest](input)),
       createChangeRequest: (input) =>
         transport.request((client) => client[WS_METHODS.sourceControlCreateChangeRequest](input)),
+      listChangeRequestTemplates: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.sourceControlListChangeRequestTemplates](input),
+        ),
       linkWorktreePullRequest: (input) =>
         transport.request((client) =>
           client[WS_METHODS.sourceControlLinkWorktreePullRequest](input),
@@ -798,6 +956,8 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) =>
           client[WS_METHODS.sourceControlDismissWorktreePullRequest](input),
         ),
+      setPullRequestWatch: (input) =>
+        transport.request((client) => client[WS_METHODS.sourceControlSetPullRequestWatch](input)),
     },
     textGeneration: {
       askSideQuestion: (input) =>
@@ -904,25 +1064,26 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
       init: (input) => transport.request((client) => client[WS_METHODS.vcsInit](input)),
     },
     git: {
-      runStackedAction: async (input, options) => {
-        let result: GitRunStackedActionResult | null = null;
-
-        await transport.requestStream(
-          (client) => client[WS_METHODS.gitRunStackedAction](input),
-          (event) => {
-            options?.onProgress?.(event);
-            if (event.kind === "action_finished") {
-              result = event.result;
-            }
-          },
-        );
-
-        if (result) {
-          return result;
-        }
-
-        throw new Error("Git action stream completed without a final result.");
-      },
+      runStackedAction: (input, options) =>
+        collectStackedActionResult(
+          (listener) =>
+            transport.requestStream(
+              (client) => client[WS_METHODS.gitRunStackedAction](input),
+              listener,
+            ),
+          options,
+        ),
+      resumeStackedAction: (input, options) =>
+        collectStackedActionResult(
+          (listener) =>
+            transport.requestStream(
+              (client) => client[WS_METHODS.gitResumeStackedAction](input),
+              listener,
+            ),
+          options,
+        ),
+      cancelStackedAction: (input) =>
+        transport.request((client) => client[WS_METHODS.gitCancelStackedAction](input)),
       resolvePullRequest: (input) =>
         transport.request((client) => client[WS_METHODS.gitResolvePullRequest](input)),
       preparePullRequestThread: (input) =>
@@ -971,6 +1132,18 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
       searchMessages: (input) =>
         transport.request((client) => client[WS_METHODS.searchThreadMessages](input)),
       fork: (input) => transport.request((client) => client[WS_METHODS.threadsFork](input)),
+      forkCarried: (input) =>
+        transport.request((client) => client[WS_METHODS.threadsForkCarried](input)),
+      subscribeLocalServers: (input, listener, options) =>
+        transport.subscribe(
+          (client) => client[WS_METHODS.threadsSubscribeLocalServers](input),
+          listener,
+          transportSubscribeOptions(options, WS_METHODS.threadsSubscribeLocalServers),
+        ),
+      stopLocalServer: (input) =>
+        transport.request((client) => client[WS_METHODS.threadsStopLocalServer](input)),
+      answerSecretRequest: (input) =>
+        transport.request((client) => client[WS_METHODS.secretsAnswerRequest](input)),
     },
     server: {
       getConfig: () => transport.request((client) => client[WS_METHODS.serverGetConfig]({})),
@@ -1030,8 +1203,8 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
           listener,
           { ...options, tag: WS_METHODS.serverSubscribeLocalTaskChanges },
         ),
-      getDailyRecap: (input) =>
-        transport.request((client) => client[WS_METHODS.serverGetDailyRecap](input)),
+      getDailyRecap: (input, options) =>
+        transport.request((client) => client[WS_METHODS.serverGetDailyRecap](input), options),
       prewarmProviderSession: (input) =>
         transport.request((client) => client[WS_METHODS.providerPrewarmSession](input)),
       readProjectProviderCommands: (input) =>
@@ -1048,6 +1221,8 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.serverAuthenticateAcpRegistry](input)),
       updateProvider: (input) =>
         transport.request((client) => client[WS_METHODS.serverUpdateProvider](input)),
+      noteClientInteraction: () =>
+        transport.request((client) => client[WS_METHODS.serverNoteClientInteraction]({})),
       subscribeNodeUpdate: (listener, options) =>
         transport.subscribe(
           (client) => client[WS_METHODS.serverSubscribeNodeUpdate]({}),
@@ -1100,7 +1275,8 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
               });
             },
             (event) => {
-              if (event.type !== "snapshot") {
+              // An event type from a newer node goes to the listener, which skips it.
+              if (isUnknownUnionMember(event) || event.type !== "snapshot") {
                 listener(event);
                 return;
               }
@@ -1146,6 +1322,33 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
           tag: WS_METHODS.subscribeAuthAccess,
         }),
     },
+    nodeBrowser: {
+      read: (input) => transport.request((client) => client[NODE_BROWSER_WS_METHODS.read](input)),
+      command: (input) =>
+        transport.request((client) => client[NODE_BROWSER_WS_METHODS.command](input)),
+      // Input is never retried: a click or a key cannot be taken back.
+      input: (input) => transport.request((client) => client[NODE_BROWSER_WS_METHODS.input](input)),
+      subscribe: (listener, subscribeOptions) =>
+        transport.subscribe((client) => client[NODE_BROWSER_WS_METHODS.subscribe]({}), listener, {
+          ...subscribeOptions,
+          tag: NODE_BROWSER_WS_METHODS.subscribe,
+        }),
+      ...(options?.openNodeBrowserFrameSource
+        ? { openFrameSource: options.openNodeBrowserFrameSource }
+        : {}),
+    },
+    providerSignIn: {
+      subscribe: (input, listener, options) =>
+        transport.subscribe(
+          (client) => client[WS_METHODS.providerSignInSubscribe](input),
+          listener,
+          { ...options, tag: WS_METHODS.providerSignInSubscribe },
+        ),
+      start: (input) =>
+        transport.request((client) => client[WS_METHODS.providerSignInStart](input)),
+      respond: (input) =>
+        transport.request((client) => client[WS_METHODS.providerSignInRespond](input)),
+    },
     keybindings: {
       replaceCustom: (input) =>
         transport.request((client) => client[WS_METHODS.keybindingsReplaceCustom](input)),
@@ -1176,6 +1379,10 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.getTaskOutput](input)),
       stopBackgroundTask: (input) =>
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.stopBackgroundTask](input)),
+      messageBackgroundTask: (input) =>
+        transport.request((client) =>
+          client[ORCHESTRATION_WS_METHODS.messageBackgroundTask](input),
+        ),
       getFullThreadDiff: (input) =>
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.getFullThreadDiff](input)),
       searchThreadMessages: (input) =>
@@ -1200,9 +1407,6 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
             assembler.reset();
             return client[ORCHESTRATION_WS_METHODS.subscribeShell]({
               ...resumeInput(options),
-              ...(options?.threadPriorities === undefined
-                ? {}
-                : { threadPriorities: options.threadPriorities }),
               // Bounded messages: a large shell stays under the relay's
               // message cap. Older servers ignore this and send one item.
               snapshotDelivery: "paged",
@@ -1239,10 +1443,6 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
           transportSubscribeOptions(options, ORCHESTRATION_WS_METHODS.subscribeThreadWindow),
         ),
     },
-    threadPriority: {
-      ensureCurrent: (input) =>
-        transport.request((client) => client[WS_METHODS.threadPriorityEnsureCurrent](input)),
-    },
     contextHandoff: {
       getInspectionSummary: (input) =>
         transport.request((client) =>
@@ -1268,6 +1468,14 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
     notes: {
       list: (input) => transport.request((client) => client[WS_METHODS.notesList](input)),
       command: (input) => transport.request((client) => client[WS_METHODS.notesCommand](input)),
+    },
+    push: {
+      registerDevice: (input) =>
+        transport.request((client) => client[WS_METHODS.pushRegisterDevice](input)),
+      unregisterDevice: (input) =>
+        transport.request((client) => client[WS_METHODS.pushUnregisterDevice](input)),
+      setPresence: (input) =>
+        transport.request((client) => client[WS_METHODS.pushSetPresence](input)),
     },
     // The proposal reads always ask for the tolerant plan view: this client decodes
     // a plan kind it does not know as `unsupported`, so the node sends every kind.

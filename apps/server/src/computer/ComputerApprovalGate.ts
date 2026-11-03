@@ -21,15 +21,102 @@ export const COMPUTER_APPROVAL_QUEUE_THREAD_LIMIT = 8;
 
 export class ComputerApprovalQueueFullError extends Error {
   readonly code = COMPUTER_APPROVAL_QUEUE_FULL_CODE;
-  readonly retryable = true;
-  constructor(scope: "thread" | "global") {
+  readonly effect = "not-dispatched";
+  /** False once the desktop stopped asking for this turn. */
+  readonly retryable: boolean;
+  constructor(scope: "thread" | "global", retryable = true) {
     super(
-      scope === "thread"
-        ? "Too many computer approvals are waiting for this chat; try again once an earlier prompt settles."
-        : "Too many computer approvals are waiting.",
+      !retryable
+        ? "Other computer approvals kept the dialog from showing; no input was sent. Do not ask again in this turn; tell the user what needs approval."
+        : scope === "thread"
+          ? "Too many computer approvals are waiting for this chat; try again once an earlier prompt settles."
+          : "Too many computer approvals are waiting.",
     );
+    this.retryable = retryable;
     this.name = "ComputerApprovalQueueFullError";
   }
+}
+
+// Expiry semantics adapted from Synara v1.0.4 (d36a31a29). The desktop consent
+// dialog owns the policy (apps/desktop/src/computerUse/taskConsent.ts); these
+// are the refusals the server maps its reply to.
+export const COMPUTER_APPROVAL_EXPIRED_CODE = "approval_expired";
+export const COMPUTER_APPROVAL_PENDING_CODE = "approval_pending";
+export const COMPUTER_APPROVAL_UNAVAILABLE_CODE = "approval_unavailable";
+
+/** An unanswered card is not a user decision and must not become a turn-long denial. */
+export class ComputerApprovalExpiredError extends Error {
+  readonly code = COMPUTER_APPROVAL_EXPIRED_CODE;
+  readonly effect = "not-dispatched";
+  /** False once the turn's one re-request also expired. */
+  readonly retryable: boolean;
+  constructor(retryable = true) {
+    super(
+      retryable
+        ? "The computer approval expired without an answer; no input was sent. Request approval again only if the action is still needed."
+        : "The computer approval expired again without an answer; no input was sent. Do not ask again in this turn; tell the user what needs approval.",
+    );
+    this.retryable = retryable;
+    this.name = "ComputerApprovalExpiredError";
+  }
+}
+
+/** The dialog is still open; one tool call cannot outwait the request ceiling. */
+export class ComputerApprovalPendingError extends Error {
+  readonly code = COMPUTER_APPROVAL_PENDING_CODE;
+  readonly effect = "not-dispatched";
+  readonly retryable = true;
+  constructor() {
+    super(
+      "The user has not answered the Computer approval yet; no input was sent. Call the same tool again to keep waiting.",
+    );
+    this.name = "ComputerApprovalPendingError";
+  }
+}
+
+/** No dialog could be shown, or the desktop's answer was not one it gives. */
+export class ComputerApprovalUnavailableError extends Error {
+  readonly code = COMPUTER_APPROVAL_UNAVAILABLE_CODE;
+  readonly effect = "not-dispatched";
+  /** False once the desktop stopped asking for this turn. */
+  readonly retryable: boolean;
+  constructor(retryable = true) {
+    super(
+      retryable
+        ? "Ryco could not show the Computer approval dialog; no input was sent. Try again when the Ryco window is open."
+        : "Ryco could not show the Computer approval dialog again; no input was sent. Do not ask again in this turn; tell the user to open the Ryco window.",
+    );
+    this.retryable = retryable;
+    this.name = "ComputerApprovalUnavailableError";
+  }
+}
+
+/** A consent request that refused this call without a user decision binding the turn. */
+export type ComputerApprovalRefusal =
+  | ComputerApprovalExpiredError
+  | ComputerApprovalPendingError
+  | ComputerApprovalUnavailableError
+  | ComputerApprovalQueueFullError;
+
+export function isComputerApprovalRefusal(error: unknown): error is ComputerApprovalRefusal {
+  return (
+    error instanceof ComputerApprovalExpiredError ||
+    error instanceof ComputerApprovalPendingError ||
+    error instanceof ComputerApprovalUnavailableError ||
+    error instanceof ComputerApprovalQueueFullError
+  );
+}
+
+/** The tool-result body both Computer tool families return for an approval refusal. */
+export function computerApprovalRefusalPayload(error: ComputerApprovalRefusal) {
+  return {
+    error: {
+      code: error.code,
+      effect: error.effect,
+      retryable: error.retryable,
+      message: error.message,
+    },
+  };
 }
 
 /** Synara-owned Computer consent, scoped to one live turn. Clipboard reads use

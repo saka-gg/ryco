@@ -23,3 +23,13 @@ export function isTransportConnectionErrorMessage(message: string | null | undef
 export function sanitizeThreadErrorMessage(message: string | null | undefined): string | null {
   return isTransportConnectionErrorMessage(message) ? null : (message ?? null);
 }
+
+/**
+ * The server does not implement the requested RPC: an older server, or a
+ * handler that was never wired. A caller may fall back to an older method.
+ */
+export function isUnsupportedRpcError(error: unknown): boolean {
+  const message =
+    error instanceof Error && error.message.trim().length > 0 ? error.message : String(error);
+  return message.includes("Unknown request tag");
+}

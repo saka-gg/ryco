@@ -12,7 +12,7 @@ import {
   ThreadId,
   WorktreeId,
 } from "@ryco/contracts";
-import { Clock, Effect, PubSub } from "effect";
+import { Clock, Effect, PubSub, Stream } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import Migration0089 from "../../persistence/Migrations/089_RetireThreadTrash.ts";
@@ -201,7 +201,7 @@ export const makeFakeEngine = (initial: {
     const engine = {
       getReadModel: () => Effect.sync(() => model),
       dispatch,
-      subscribeDomainEvents: PubSub.subscribe(events),
+      subscribeDomainEvents: Effect.map(PubSub.subscribe(events), Stream.fromSubscription),
     } as unknown as OrchestrationEngineShape;
 
     return {

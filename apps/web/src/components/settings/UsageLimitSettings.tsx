@@ -7,7 +7,7 @@ import { useServerConfig } from "../../rpc/serverState";
 import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
 import { Switch } from "../ui/switch";
 import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayout";
-import { settingsScopeLabel } from "./settingsSections.logic";
+import { isNodeSettingsTargetReadOnly, settingsScopeLabel } from "./settingsSections.logic";
 
 const UNSUPPORTED_STATUS =
   "This node does not support usage-limit recovery. Update the node to change this setting.";
@@ -29,13 +29,7 @@ export function UsageLimitSettings() {
     nodeLabel: target?.nodeLabel ?? null,
   });
   const supported = config?.environment.capabilities.usageLimitRecovery === true;
-  const disabled =
-    !supported ||
-    scope === "client" ||
-    (scope === "node" && !target) ||
-    Boolean(
-      target && (!target.connected || target.canManage === false || target.canMutate === false),
-    );
+  const disabled = !supported || isNodeSettingsTargetReadOnly(scope, target);
   const status = supported ? undefined : UNSUPPORTED_STATUS;
 
   return (

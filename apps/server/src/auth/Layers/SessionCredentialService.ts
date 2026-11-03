@@ -1,14 +1,27 @@
 import { AuthSessionId, type AuthClientMetadata, type AuthClientSession } from "@ryco/contracts";
-import { Clock, DateTime, Duration, Effect, Layer, PubSub, Ref, Schema, Stream } from "effect";
+import {
+  Clock,
+  DateTime,
+  Duration,
+  Effect,
+  Layer,
+  PubSub,
+  Ref,
+  Schedule,
+  Schema,
+  Stream,
+} from "effect";
 import { Option } from "effect";
 import * as Semaphore from "effect/Semaphore";
 
 import { ServerConfig } from "../../config.ts";
 import { LocalDiagnosticsMetrics } from "../../observability/Services/LocalDiagnosticsMetrics.ts";
 import { AuthSessionRepositoryLive } from "../../persistence/Layers/AuthSessions.ts";
+import type { AuthAccessLink } from "../../persistence/Services/AuthAccessLink.ts";
 import {
   type AuthSessionRecord,
   AuthSessionRepository,
+  type RevokedAuthSession,
 } from "../../persistence/Services/AuthSessions.ts";
 import { ServerSecretStore } from "../Services/ServerSecretStore.ts";
 import {
@@ -25,7 +38,9 @@ import {
   base64UrlDecodeUtf8,
   base64UrlEncode,
   resolveLegacySessionCookieNames,
+  resolveSessionCookieMaxAge,
   resolveSessionCookieName,
+  resolveSessionCookieScope,
   signPayload,
   timingSafeEqualBase64Url,
 } from "../utils.ts";
@@ -47,10 +62,30 @@ const SUPERSEDED_SESSION_GRACE = Duration.minutes(1);
 /**
  * The longest a Hub-linked session lives, and the cap on its rotation chain.
  * It is renewed by asking the node again over the relay, so a device whose Hub
- * enrollment was revoked while this node was off the Hub loses direct access
- * within this bound.
+ * enrollment was revoked, or whose member lost or changed their role on this
+ * machine, while the node was not told keeps direct access at most this long.
+ * Clients renew a link after three days (`HUB_LINKED_DIRECT_ACCESS_RENEW_AFTER_MS`).
+ * Every check applies it, so a link issued under the earlier seven days ends
+ * at this bound too.
  */
-export const LINKED_SESSION_MAX_AGE = Duration.days(7);
+export const LINKED_SESSION_MAX_AGE = Duration.days(4);
+/**
+ * The cap for a link of a locally verified device: a key the node's owner
+ * approved on the node, never enrolled through the Hub. The Hub cannot say
+ * whether such a device's member still reaches the node (its linked-access
+ * check answers `unknown`), so a member it removed keeps the link until it
+ * ends. Clients that find the link refused fall back to the relay and link
+ * again there, at the role the Hub grants then. Applied on every check, like
+ * the four days, so longer links issued before it end at this bound too.
+ */
+export const LOCALLY_VERIFIED_LINKED_SESSION_MAX_AGE = Duration.hours(24);
+
+/** How long a Hub-linked pairing may live, counted from when it was made. */
+export function linkedSessionMaxAge(link: Pick<AuthAccessLink, "trustSource">): Duration.Duration {
+  return link.trustSource === "locally-verified"
+    ? LOCALLY_VERIFIED_LINKED_SESSION_MAX_AGE
+    : LINKED_SESSION_MAX_AGE;
+}
 /** The least time between two rotations of one pairing. */
 const BEARER_ROTATION_MIN_INTERVAL = Duration.hours(1);
 const DEFAULT_WEBSOCKET_TOKEN_TTL = Duration.minutes(5);
@@ -113,6 +148,47 @@ type DisconnectOutcome = {
   readonly chainId: AuthSessionId;
 };
 
+/**
+ * When a session stops authenticating: its own expiry, and for a Hub-linked one
+ * never later than its trust source's cap (`linkedSessionMaxAge`) after its
+ * pairing.
+ */
+export function sessionExpiresAtMs(
+  record: Pick<AuthSessionRecord, "expiresAt" | "chainIssuedAt" | "link">,
+): number {
+  return record.link === null
+    ? record.expiresAt.epochMilliseconds
+    : Math.min(
+        record.expiresAt.epochMilliseconds,
+        record.chainIssuedAt.epochMilliseconds +
+          Duration.toMillis(linkedSessionMaxAge(record.link)),
+      );
+}
+
+/** A connected session's record read: a busy database gets a few tries. */
+const AWAIT_END_READ_RETRY = {
+  schedule: Schedule.spaced(Duration.millis(250)),
+  times: 3,
+} as const;
+
+/** The longest single wait of `sleepUntil`. */
+const WALL_CLOCK_CHECK_INTERVAL = Duration.hours(1);
+
+/**
+ * Waits until the wall clock reaches `deadlineMs`. It re-reads the clock at
+ * least hourly: a timer does not count the time a machine slept.
+ */
+const sleepUntil = (deadlineMs: number): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    while (true) {
+      const remainingMs = deadlineMs - (yield* Clock.currentTimeMillis);
+      if (remainingMs <= 0) return;
+      yield* Effect.sleep(
+        Duration.millis(Math.min(remainingMs, Duration.toMillis(WALL_CLOCK_CHECK_INTERVAL))),
+      );
+    }
+  });
+
 function createDefaultClientMetadata(): AuthClientMetadata {
   return {
     deviceType: "unknown",
@@ -158,14 +234,11 @@ export const makeSessionCredentialService = Effect.gen(function* () {
   const rotationLock = yield* Semaphore.make(1);
   const wsReconnectEligibleSessionsRef = yield* Ref.make(new Set<string>());
   const changesPubSub = yield* PubSub.unbounded<SessionCredentialChange>();
-  const cookieName = resolveSessionCookieName({
-    mode: serverConfig.mode,
-    port: serverConfig.port,
-  });
-  const legacyCookieNames = resolveLegacySessionCookieNames({
-    mode: serverConfig.mode,
-    port: serverConfig.port,
-  });
+  const cookieScope = resolveSessionCookieScope(serverConfig);
+  const cookieName = resolveSessionCookieName(cookieScope);
+  const legacyCookieNames = resolveLegacySessionCookieNames(cookieScope);
+  // A browser cookie lives as long as its session (http.ts), so this caps both.
+  const cookieSessionMaxAge = resolveSessionCookieMaxAge(cookieScope);
 
   const toSessionCredentialError = (message: string) => (cause: unknown) =>
     new SessionCredentialError({
@@ -209,7 +282,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
       method: record.method,
       client: toClientMetadata(record.client),
       issuedAt: record.issuedAt,
-      expiresAt: record.expiresAt,
+      expiresAt: DateTime.makeUnsafe(sessionExpiresAtMs(record)),
       lastConnectedAt: record.lastConnectedAt,
       connected: isChainConnected(connectedSessions, record.chainId),
     });
@@ -220,10 +293,12 @@ export const makeSessionCredentialService = Effect.gen(function* () {
       clientSession,
     }).pipe(Effect.asVoid);
 
-  const emitRemoved = (sessionId: AuthSessionId) =>
+  const emitRemoved = (removed: RevokedAuthSession, reason: "revoked" | "superseded") =>
     PubSub.publish(changesPubSub, {
       type: "clientRemoved",
-      sessionId,
+      sessionId: removed.sessionId,
+      chainId: removed.chainId,
+      reason,
     }).pipe(Effect.asVoid);
 
   // A pairing shows as its current session; rotation and sockets of earlier
@@ -304,28 +379,30 @@ export const makeSessionCredentialService = Effect.gen(function* () {
     );
 
   /** Drops revoked sessions from the connected set and announces their removal. */
-  const forgetRevoked = (revokedSessionIds: ReadonlyArray<AuthSessionId>) =>
+  const forgetRevoked = (revoked: ReadonlyArray<RevokedAuthSession>) =>
     Effect.gen(function* () {
-      if (revokedSessionIds.length === 0) return;
+      if (revoked.length === 0) return;
       yield* Ref.update(connectedSessionsRef, (current) => {
         const next = new Map(current);
-        for (const revokedSessionId of revokedSessionIds) next.delete(revokedSessionId);
+        for (const session of revoked) next.delete(session.sessionId);
         return next;
       });
-      yield* Effect.forEach(revokedSessionIds, emitRemoved, {
+      yield* Effect.forEach(revoked, (session) => emitRemoved(session, "revoked"), {
         concurrency: "unbounded",
         discard: true,
       });
     });
 
   // Revoking any session of a pairing revokes the whole pairing.
+  // Every revocation stores and announces together: a request dropped in
+  // between must not leave a revoked session's socket open.
   const revokeChain = (sessionId: AuthSessionId) =>
     Effect.gen(function* () {
       const revokedAt = yield* DateTime.now;
-      const revokedSessionIds = yield* authSessions.revoke({ sessionId, revokedAt });
-      yield* forgetRevoked(revokedSessionIds);
-      return revokedSessionIds;
-    });
+      const revoked = yield* authSessions.revoke({ sessionId, revokedAt });
+      yield* forgetRevoked(revoked);
+      return revoked;
+    }).pipe(Effect.uninterruptible);
 
   // A rotated session's first use: the session it replaced is superseded, and
   // the pairing's entry moves to the new session.
@@ -337,7 +414,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
         supersededAt,
       });
       if (!superseded) return;
-      yield* emitRemoved(predecessorId);
+      yield* emitRemoved({ sessionId: predecessorId, chainId: record.chainId }, "superseded");
       yield* publishChainHead(record.chainId);
     });
 
@@ -345,12 +422,17 @@ export const makeSessionCredentialService = Effect.gen(function* () {
     Effect.gen(function* () {
       const sessionId = AuthSessionId.make(crypto.randomUUID());
       const issuedAt = yield* DateTime.now;
-      const ttl = input?.ttl ?? DEFAULT_SESSION_TTL;
+      const requestedTtl = input?.ttl ?? DEFAULT_SESSION_TTL;
+      const ttl =
+        (input?.method ?? "browser-session-cookie") === "browser-session-cookie" &&
+        cookieSessionMaxAge !== undefined
+          ? Duration.min(requestedTtl, cookieSessionMaxAge)
+          : requestedTtl;
       const expiresAt = DateTime.add(issuedAt, {
         milliseconds:
           input?.link === undefined
             ? Duration.toMillis(ttl)
-            : Math.min(Duration.toMillis(ttl), Duration.toMillis(LINKED_SESSION_MAX_AGE)),
+            : Math.min(Duration.toMillis(ttl), Duration.toMillis(linkedSessionMaxAge(input.link))),
       });
       const claims = sessionClaims({
         sessionId,
@@ -447,6 +529,12 @@ export const makeSessionCredentialService = Effect.gen(function* () {
         });
       }
       const record = row.value;
+      const expiresAtMs = Math.min(claims.exp, sessionExpiresAtMs(record));
+      if (expiresAtMs <= now) {
+        return yield* new SessionCredentialError({
+          message: "Session token expired.",
+        });
+      }
       if (record.supersededAt !== null) {
         if (
           now - record.supersededAt.epochMilliseconds >
@@ -465,10 +553,11 @@ export const makeSessionCredentialService = Effect.gen(function* () {
 
       return {
         sessionId: claims.sid,
+        chainId: record.chainId,
         token,
         method: claims.method,
         client: toClientMetadata(row.value.client),
-        expiresAt: DateTime.makeUnsafe(claims.exp),
+        expiresAt: DateTime.makeUnsafe(expiresAtMs),
         subject: claims.sub,
         role: claims.role,
         link: record.link,
@@ -538,7 +627,8 @@ export const makeSessionCredentialService = Effect.gen(function* () {
           message: "Unknown websocket session.",
         });
       }
-      if (row.value.expiresAt.epochMilliseconds <= now) {
+      const sessionExpiresAt = sessionExpiresAtMs(row.value);
+      if (sessionExpiresAt <= now) {
         return yield* new SessionCredentialError({
           message: "Websocket session expired.",
         });
@@ -551,10 +641,11 @@ export const makeSessionCredentialService = Effect.gen(function* () {
 
       return {
         sessionId: row.value.sessionId,
+        chainId: row.value.chainId,
         token,
         method: row.value.method,
         client: toClientMetadata(row.value.client),
-        expiresAt: row.value.expiresAt,
+        expiresAt: DateTime.makeUnsafe(sessionExpiresAt),
         subject: row.value.subject,
         role: row.value.role,
         link: row.value.link,
@@ -567,12 +658,14 @@ export const makeSessionCredentialService = Effect.gen(function* () {
       const connectedSessions = yield* Ref.get(connectedSessionsRef);
       const rows = yield* authSessions.listActive({ now });
 
-      return rows.map((row) => toClientSession(row, connectedSessions));
+      return rows
+        .filter((row) => sessionExpiresAtMs(row) > now.epochMilliseconds)
+        .map((row) => toClientSession(row, connectedSessions));
     }).pipe(Effect.mapError(toSessionCredentialError("Failed to list active sessions.")));
 
   const revoke: SessionCredentialServiceShape["revoke"] = (sessionId) =>
     revokeChain(sessionId).pipe(
-      Effect.map((revokedSessionIds) => revokedSessionIds.length > 0),
+      Effect.map((revoked) => revoked.length > 0),
       Effect.mapError(toSessionCredentialError("Failed to revoke session.")),
     );
 
@@ -586,7 +679,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
             return yield* new SessionCredentialError({ message: "Unknown session." });
           }
           const current = row.value;
-          if (current.expiresAt.epochMilliseconds <= now.epochMilliseconds) {
+          if (sessionExpiresAtMs(current) <= now.epochMilliseconds) {
             return yield* new SessionCredentialError({ message: "Session token expired." });
           }
           if (current.method !== "bearer-session-token") {
@@ -648,7 +741,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
           }
           // A linked chain never outlives its device's last relay renewal.
           const chainMaxAge =
-            current.link === null ? BEARER_PAIRING_MAX_AGE : LINKED_SESSION_MAX_AGE;
+            current.link === null ? BEARER_PAIRING_MAX_AGE : linkedSessionMaxAge(current.link);
           const expiresAtMs = Math.min(
             nowMs + Duration.toMillis(DEFAULT_SESSION_TTL),
             current.chainIssuedAt.epochMilliseconds + Duration.toMillis(chainMaxAge),
@@ -715,9 +808,44 @@ export const makeSessionCredentialService = Effect.gen(function* () {
     Effect.gen(function* () {
       const revokedAt = yield* DateTime.now;
       const revoked = yield* authSessions.revokeLinked({ ...selector, revokedAt });
-      yield* forgetRevoked(revoked.map((session) => session.sessionId));
+      yield* forgetRevoked(revoked);
       return new Set(revoked.map((session) => session.chainId)).size;
-    }).pipe(Effect.mapError(toSessionCredentialError("Failed to revoke linked sessions.")));
+    }).pipe(
+      Effect.uninterruptible,
+      Effect.mapError(toSessionCredentialError("Failed to revoke linked sessions.")),
+    );
+
+  const awaitEnd: SessionCredentialServiceShape["awaitEnd"] = (session) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const changes = yield* PubSub.subscribe(changesPubSub);
+        // Read after subscribing: a revocation since the socket's check shows here.
+        const row = yield* authSessions
+          .getById({ sessionId: session.sessionId })
+          .pipe(Effect.retry(AWAIT_END_READ_RETRY), Effect.option);
+        if (Option.isNone(row)) {
+          yield* Effect.logWarning("Could not read a connected session; closing its socket.");
+          return;
+        }
+        if (Option.isNone(row.value) || row.value.value.revokedAt !== null) return;
+        const record = row.value.value;
+        const revoked = Effect.gen(function* () {
+          while (true) {
+            const change = yield* PubSub.take(changes);
+            if (
+              change.type === "clientRemoved" &&
+              change.reason === "revoked" &&
+              change.chainId === session.chainId
+            ) {
+              return;
+            }
+          }
+        });
+        yield* record.link === null
+          ? revoked
+          : Effect.raceFirst(revoked, sleepUntil(sessionExpiresAtMs(record)));
+      }),
+    );
 
   const revokeAllExcept: SessionCredentialServiceShape["revokeAllExcept"] = (sessionId) =>
     Effect.gen(function* () {
@@ -726,11 +854,14 @@ export const makeSessionCredentialService = Effect.gen(function* () {
         currentSessionId: sessionId,
         revokedAt,
       });
-      yield* forgetRevoked(revoked.map((session) => session.sessionId));
+      yield* forgetRevoked(revoked);
       // Clients revoked, not sessions: each pairing counts once, however many
       // times it rotated.
       return new Set(revoked.map((session) => session.chainId)).size;
-    }).pipe(Effect.mapError(toSessionCredentialError("Failed to revoke other sessions.")));
+    }).pipe(
+      Effect.uninterruptible,
+      Effect.mapError(toSessionCredentialError("Failed to revoke other sessions.")),
+    );
 
   return {
     cookieName,
@@ -747,6 +878,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
     revoke,
     revokeLinked,
     revokeAllExcept,
+    awaitEnd,
     markConnected,
     markDisconnected,
   } satisfies SessionCredentialServiceShape;

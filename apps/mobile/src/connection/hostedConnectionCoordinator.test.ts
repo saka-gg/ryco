@@ -377,6 +377,24 @@ describe("mobile hosted connection coordinator", () => {
     expect(hostedHubStore.getState().selectedNode).toBe(nodeD);
   });
 
+  it("holds a mounted terminal's environment like a mounted thread view", async () => {
+    const releaseTerminal = scopes.retain(nodeA.environmentId, {
+      type: "terminal",
+      threadId: ThreadId.make(`thread_${nodeA.id}`),
+    });
+    viewThread(nodeB);
+    viewThread(nodeC);
+    await vi.advanceTimersByTimeAsync(3 * MOBILE_HOSTED_WAKE_STAGGER_MS);
+    expect(live.size).toBe(3);
+
+    await coordinator.acquireNode(nodeD.id);
+    await vi.advanceTimersByTimeAsync(3 * MOBILE_HOSTED_WAKE_STAGGER_MS);
+
+    expect(releaseEnvironment).not.toHaveBeenCalled();
+    expect(coordinator.demand().queuedEnvironmentIds).toEqual([nodeD.environmentId]);
+    releaseTerminal();
+  });
+
   it("lets the foreground displace a pairing ceremony, never a mounted view", async () => {
     const releasePairing = coordinator.retainPairingScope(nodeA.id, nodeA.environmentId);
     expect(releasePairing).not.toBeNull();

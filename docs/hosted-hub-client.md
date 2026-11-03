@@ -879,16 +879,16 @@ session verification code: all of them live in process memory, the browser has n
 of them may enter, and each is erased when the channel — or, for the downgrade check, the
 application session — that produced it ends. Draft, terminal, general UI, script-selection,
 and other generic local-storage hooks use in-memory storage. The explicitly enabled remembered-browser
-feature stores bounded conversation text, workspace metadata, text drafts, and scroll positions in
+feature stores bounded conversation text, workspace metadata, text drafts, and reading positions in
 encrypted IndexedDB using a separate non-exportable local AES-GCM key. Relay keys and credentials
 are never reused for this storage. Disabling the feature or observing sign-out, expiry, account
 change, or loss of node eligibility deletes the corresponding records and keys. Restoring records
 does not establish a session or role; fresh snapshots reconcile the saved display. See
 [cache bounds and behavior](unified-workspace.md#cache-and-failure-behavior).
 A separate, schema-validated inbox
-preference record stores only three finite user choices: the auto-settle interval, whether AI Focus
-is enabled, and its refresh interval. It contains no node identifiers, rankings, model/provider
-preferences, content, or authentication material. These browser-local choices survive reloads. The
+preference record stores only finite user choices: the auto-settle interval and the thread alert
+preferences. It contains no node identifiers, model/provider preferences, content, or
+authentication material. These browser-local choices survive reloads. The
 auto-settle interval there applies only to nodes that keep no rule of their own, and is what a first
 connection hands to a node that keeps the rule but has none set.
 The hosted root installs a fail-closed

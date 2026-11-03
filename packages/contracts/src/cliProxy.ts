@@ -82,7 +82,8 @@ export const CliProxyHubs = Schema.Record(CliProxyHubId, CliProxyHubConfig);
 export type CliProxyHubs = typeof CliProxyHubs.Type;
 
 /**
- * One usage window of a subscription account. Structurally compatible with
+ * One usage window of a subscription account, read through a hub or directly by a provider
+ * instance (`ServerProviderRateLimits.windows`). Structurally compatible with
  * `ServerProviderRateLimitWindow` so the shared limit presentation renders both; clients
  * derive the cadence label ("5h", "Weekly") from the duration and append `scope`.
  */

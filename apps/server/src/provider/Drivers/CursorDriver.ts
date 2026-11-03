@@ -25,6 +25,7 @@ import {
   checkCursorProviderStatus,
   enrichCursorSnapshot,
 } from "../Layers/CursorProvider.ts";
+import { AgentProcessPriority } from "../agentProcessPriority.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import {
@@ -37,15 +38,16 @@ import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment
 import { makeProviderProbeFingerprint } from "../providerProbeFingerprint.ts";
 import {
   cursorAgentCommandCandidates,
-  resolveCursorMaintenanceCapabilities,
   resolveCursorAgentCommand,
 } from "../acp/CursorAgentCommand.ts";
+import { resolveCursorMaintenanceCapabilities } from "../acp/CursorAgentMaintenance.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { AgentControlSessionRegistry } from "../../agentControl/Services/AgentControlSessionRegistry.ts";
 
 const DRIVER_KIND = ProviderDriverKind.make("cursor");
 
 export type CursorDriverEnv =
+  | AgentProcessPriority
   | ChildProcessSpawner.ChildProcessSpawner
   | FileSystem.FileSystem
   | HttpClient.HttpClient
@@ -86,6 +88,7 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
+      const processPriority = yield* AgentProcessPriority;
       const agentControl = yield* Effect.serviceOption(AgentControlSessionRegistry);
       const processEnv = mergeProviderInstanceEnvironment(environment);
       const continuationIdentity = defaultProviderContinuationIdentity({
@@ -109,10 +112,13 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
 
       const adapter = yield* makeCursorAdapter(effectiveConfig, {
         environment: processEnv,
+        processPriority,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
         instanceId,
       });
-      const textGeneration = yield* makeCursorTextGeneration(effectiveConfig, processEnv);
+      const textGeneration = yield* makeCursorTextGeneration(effectiveConfig, processEnv, {
+        processPriority,
+      });
 
       // Cursor updates itself with the command sessions and probes run, resolved on each read
       // (cheap, and rare) so installing `cursor-agent` later is picked up.

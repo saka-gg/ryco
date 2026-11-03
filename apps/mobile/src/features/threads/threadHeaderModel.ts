@@ -1,11 +1,24 @@
-import { CHAT_WORKSPACE_LABEL, projectDisplayLabel } from "@ryco/client-runtime/state/composer";
+import {
+  CHAT_WORKSPACE_LABEL,
+  describeNativeCompactionBlocker,
+  nativeCompactionAdvertised,
+  nativeCompactionBlockerForSession,
+  projectDisplayLabel,
+} from "@ryco/client-runtime/state/composer";
 import { resolveThreadWorkspaceRoot } from "@ryco/client-runtime/state/files";
-import type {
-  Project,
-  SidebarWorktreeSummary,
-  Thread,
-  ThreadInboxMutationBlocker,
+import {
+  findPullRequestWatch,
+  pullRequestWatchView,
+  resolveThreadReferenceCopyTarget,
+  type Project,
+  type PullRequestWatchTarget,
+  type PullRequestWatchTone,
+  type SidebarWorktreeSummary,
+  type Thread,
+  type ThreadInboxMutationBlocker,
+  type ThreadReferenceCopyTarget,
 } from "@ryco/client-runtime/state/threads";
+import type { ThreadPullRequestWatchShell } from "@ryco/contracts";
 import { isChatProject } from "@ryco/shared/projectKind";
 import type { ThreadSettlementBlocker } from "@ryco/shared/threadSettlement";
 
@@ -23,6 +36,50 @@ export type ThreadMoreAction = "rename" | "archive" | "unarchive" | "stop" | "de
 export interface ThreadSettlementActionModel {
   readonly kind: "settle" | "unsettle";
   readonly label: "Settle task" | "Move to Active";
+  readonly detail: string;
+  readonly disabled: boolean;
+}
+
+/** The compact chip beside the change-request badge while a watch is on. */
+export interface ThreadPullRequestWatchChip {
+  /**
+   * "Watching", "Auto-fix on", "Fixing 2/3", "Auto-fix paused"; "#77 Watching" when the
+   * watched pull request is not the one the badge beside it names.
+   */
+  readonly label: string;
+  /** Muted while the thread is cached: the watch's state is then last known, not live. */
+  readonly tone: PullRequestWatchTone;
+  /** The whole status, spoken: the chip itself is a word or two. */
+  readonly accessibilityLabel: string;
+}
+
+/**
+ * The node's server-side watch of the thread's pull request (Auto-fix CI and
+ * the news wakes), as the header and the task sheet show it.
+ */
+export interface ThreadHeaderPullRequestWatch {
+  /**
+   * The pull request the sheet's controls act on: the one the thread watches
+   * (its workspace's first, then one of another workspace in the project), else
+   * its workspace's current one.
+   */
+  readonly target: PullRequestWatchTarget;
+  /** A watch may start: the pull request is open as last known and the chat is active. */
+  readonly startable: boolean;
+  /**
+   * The watched pull request is another workspace's (a delegated chat's, say): Auto-fix CI
+   * runs only in the chat's own checkout, so the switch is not offered there.
+   */
+  readonly otherWorkspace: boolean;
+  /** The thread's watches as its shell carries them (active, and ended within a day). */
+  readonly watches: ThreadPullRequestWatchShell | null;
+  readonly chip: ThreadPullRequestWatchChip | null;
+}
+
+/** Compact now, as web's context meter offers it: the provider summarizes older context. */
+export interface ThreadCompactActionModel {
+  readonly label: "Compact conversation";
+  /** Why it cannot run now, or what it does when it can. */
   readonly detail: string;
   readonly disabled: boolean;
 }
@@ -49,10 +106,49 @@ export interface ThreadHeaderModel {
    * action is withheld rather than opening onto an empty screen.
    */
   readonly filesVisible: boolean;
+  /** The terminal needs the same workspace, and an archived thread takes no terminal events. */
+  readonly terminalVisible: boolean;
   readonly moreActions: ReadonlyArray<ThreadMoreAction>;
   /** Last known pull request / work item for the thread's worktree, if any. */
   readonly changeRequest: ChangeRequestBadge | null;
+  /** The worktree's pull request, which the task sheet opens on the phone; null without one. */
+  readonly pullRequestNumber: number | null;
   readonly settlementAction: ThreadSettlementActionModel | null;
+  /** Null on nodes without pull request watches, and when there is no pull request. */
+  readonly pullRequestWatch: ThreadHeaderPullRequestWatch | null;
+  /**
+   * Null unless the thread's session belongs to a provider that compacts on request and its
+   * latest context usage says the node can (for Claude, that its CLI lists `/compact`).
+   */
+  readonly compactAction: ThreadCompactActionModel | null;
+  /**
+   * What "Copy" puts on the clipboard: the pull request link when one is known, else the
+   * task's ID (the shared rule web's Copy Thread ID uses, `resolveThreadReferenceCopyTarget`).
+   */
+  readonly copyReference: ThreadReferenceCopyTarget;
+  /** The task's own ID, also offered beside a pull request link. */
+  readonly taskId: string;
+}
+
+function compactAction(
+  thread: Pick<Thread, "session" | "activities">,
+): ThreadCompactActionModel | null {
+  // The thread's session, not the composer's selection: after a handoff they differ.
+  const blocker = nativeCompactionBlockerForSession(thread.session);
+  if (
+    blocker === "unsupported" ||
+    !nativeCompactionAdvertised(thread.activities, thread.session?.provider)
+  ) {
+    return null;
+  }
+  return {
+    label: "Compact conversation",
+    detail:
+      blocker === null
+        ? "Summarize older context. The summary request itself uses tokens."
+        : describeNativeCompactionBlocker(blocker),
+    disabled: blocker !== null,
+  };
 }
 
 function settlementDisabledReason(input: {
@@ -103,21 +199,84 @@ function settlementDisabledReason(input: {
   }
 }
 
+type WatchWorktree = Pick<SidebarWorktreeSummary, "prNumber" | "prState" | "pullRequests"> | null;
+
+function buildPullRequestWatch(input: {
+  readonly available: boolean;
+  readonly watches: ThreadPullRequestWatchShell | null;
+  readonly worktree: WatchWorktree;
+  /** The thread's own workspace, when it records one. */
+  readonly threadWorktreeId: string | null;
+  /** The node takes a new watch on this thread (the server refuses archived and settled ones). */
+  readonly threadActive: boolean;
+  /** The thread is cached (`forcedOffline`): the shell's watch state is last known. */
+  readonly stale: boolean;
+}): ThreadHeaderPullRequestWatch | null {
+  if (!input.available) return null;
+  const active = input.watches?.active ?? [];
+  const prNumber = input.worktree?.prNumber ?? null;
+  const watched =
+    (prNumber === null ? undefined : active.find((watch) => watch.number === prNumber)) ??
+    active[0];
+  const target: PullRequestWatchTarget | null = watched
+    ? { number: watched.number, url: watched.url }
+    : prNumber === null
+      ? null
+      : {
+          number: prNumber,
+          url:
+            input.worktree?.pullRequests?.find(
+              (link) => link.number === prNumber && !link.dismissedAt,
+            )?.url ?? null,
+        };
+  if (target === null) return null;
+  const prState = watched ? "open" : (input.worktree?.prState ?? null);
+  const found = findPullRequestWatch(input.watches, target);
+  const view = found?.kind === "active" ? pullRequestWatchView(found.watch) : null;
+  return {
+    target,
+    startable: input.threadActive && prState !== "merged" && prState !== "closed",
+    otherWorkspace:
+      watched !== undefined &&
+      input.threadWorktreeId !== null &&
+      watched.worktreeId !== input.threadWorktreeId,
+    watches: input.watches,
+    chip: view
+      ? {
+          // The badge beside the chip names the workspace's pull request; a watch of another
+          // one (a delegated chat's) says which it is.
+          label:
+            target.number === prNumber ? view.shortLabel : `#${target.number} ${view.shortLabel}`,
+          tone: input.stale ? "muted" : view.tone,
+          accessibilityLabel: `Pull request ${target.number}: ${view.label}.${
+            view.detail ? ` ${view.detail}.` : ""
+          }${input.stale ? " Last known." : ""}`,
+        }
+      : null,
+  };
+}
+
 function basename(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean);
   return parts.at(-1) ?? path;
 }
 
 export function buildThreadHeaderModel(input: {
+  /** The pull request link `resolveThreadWorkspacePullRequestLink` picks, when known. */
+  readonly pullRequestUrl?: string | null | undefined;
   readonly thread: Pick<
     Thread,
+    | "id"
     | "title"
     | "archivedAt"
     | "latestTurn"
     | "session"
+    | "activities"
     | "turnDiffSummaries"
     | "branch"
     | "worktreePath"
+    | "settledOverride"
+    | "worktreeId"
   >;
   readonly project: Pick<Project, "name" | "cwd" | "kind"> | null;
   readonly worktree: Pick<
@@ -133,6 +292,7 @@ export function buildThreadHeaderModel(input: {
     | "workItemKey"
     | "workItemState"
     | "workItemStateName"
+    | "pullRequests"
   > | null;
   readonly nodeLabel: string | null;
   readonly hasPendingApproval: boolean;
@@ -152,6 +312,15 @@ export function buildThreadHeaderModel(input: {
         readonly settlementBlocker: ThreadSettlementBlocker | null;
         readonly mutationEnabled: boolean;
         readonly mutationBlocker: ThreadInboxMutationBlocker | null;
+      }
+    | undefined;
+  /** Absent: the node's config has not said yet, which shows nothing. */
+  readonly pullRequestWatch?:
+    | {
+        /** The node watches pull requests (`ServerConfig.pullRequestWatch.available`). */
+        readonly available: boolean;
+        /** The thread's watches from its shell (absent when it has none). */
+        readonly watches: ThreadPullRequestWatchShell | null | undefined;
       }
     | undefined;
 }): ThreadHeaderModel {
@@ -178,6 +347,11 @@ export function buildThreadHeaderModel(input: {
           : running
             ? "Running"
             : "Ready";
+  const workspaceRoot = resolveThreadWorkspaceRoot({
+    thread: input.thread,
+    worktree: input.worktree,
+    project: input.project,
+  });
   const moreActions: ThreadMoreAction[] = ["rename"];
   if (running) moreActions.push("stop");
   moreActions.push(input.thread.archivedAt === null ? "archive" : "unarchive", "details");
@@ -199,6 +373,18 @@ export function buildThreadHeaderModel(input: {
             disabled: settlementDisabled !== null,
           };
 
+  const pullRequestWatch = buildPullRequestWatch({
+    available: input.pullRequestWatch?.available ?? false,
+    watches: input.pullRequestWatch?.watches ?? null,
+    worktree: input.worktree,
+    threadWorktreeId: input.thread.worktreeId ?? null,
+    threadActive: input.thread.archivedAt === null && input.thread.settledOverride !== "settled",
+    stale: input.forcedOffline === true,
+  });
+  const contextAccessibilityLabel = isChat
+    ? `Working in node ${nodeLabel}, ${projectLabel}, in a chat folder. ${statusLabel}.`
+    : `Working in node ${nodeLabel}, project ${projectLabel}, worktree ${worktreeLabel}. ${statusLabel}.`;
+
   return {
     title: input.thread.title.trim() || "Untitled task",
     nodeLabel,
@@ -206,18 +392,24 @@ export function buildThreadHeaderModel(input: {
     worktreeLabel,
     contextHeading: isChat ? "Project · Folder" : "Project · Worktree",
     statusLabel,
-    contextAccessibilityLabel: isChat
-      ? `Working in node ${nodeLabel}, ${projectLabel}, in a chat folder. ${statusLabel}.`
-      : `Working in node ${nodeLabel}, project ${projectLabel}, worktree ${worktreeLabel}. ${statusLabel}.`,
+    // The context bar is one button, so a screen reader reaches nothing inside it: the
+    // watch chip's status is spoken here.
+    contextAccessibilityLabel: pullRequestWatch?.chip
+      ? `${contextAccessibilityLabel} ${pullRequestWatch.chip.accessibilityLabel}`
+      : contextAccessibilityLabel,
     reviewVisible: input.thread.turnDiffSummaries.some((summary) => summary.files.length > 0),
-    filesVisible:
-      resolveThreadWorkspaceRoot({
-        thread: input.thread,
-        worktree: input.worktree,
-        project: input.project,
-      }) !== null,
+    filesVisible: workspaceRoot !== null,
+    terminalVisible: workspaceRoot !== null && input.thread.archivedAt === null,
+    copyReference: resolveThreadReferenceCopyTarget({
+      threadId: input.thread.id,
+      pullRequestUrl: input.pullRequestUrl,
+    }),
+    taskId: input.thread.id,
     moreActions,
     changeRequest: buildChangeRequestBadge(input.worktree),
+    pullRequestNumber: input.worktree?.prNumber ?? null,
     settlementAction,
+    pullRequestWatch,
+    compactAction: compactAction(input.thread),
   };
 }

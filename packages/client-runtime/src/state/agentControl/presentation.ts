@@ -14,6 +14,7 @@
 import type { ThreadId } from "@ryco/contracts";
 import {
   AGENT_CONTROL_AUTOMATION_MAX_ACTIVE_PER_PROJECT,
+  AGENT_CONTROL_AUTOMATION_UNATTENDED_FAILURES_MAX,
   AGENT_CONTROL_AUTOMATION_MAX_HORIZON_MS,
   AGENT_CONTROL_AUTOMATION_MIN_INTERVAL_MS,
   AGENT_CONTROL_AUTOMATION_RUN_HISTORY_MAX,
@@ -23,10 +24,13 @@ import {
   type AgentControlCopyProjectToNodePlan,
   type AgentControlImportProjectPlan,
   type AgentControlPlanView,
+  type AgentControlDeviceActionPlan,
+  type AgentControlProposal,
   type AgentControlProposalId,
   type AgentControlProposalStatus,
   type AgentControlProposalView,
 } from "@ryco/contracts/agent-control";
+import { calendarDaysWords } from "@ryco/shared/automationCalendar";
 
 export type AgentControlStatusTone = "pending" | "info" | "success" | "danger" | "muted";
 
@@ -217,12 +221,32 @@ function planPresentation(proposal: AgentControlProposalView): PlanPresentation 
   ) =>
     schedule.kind === "once"
       ? [`Schedule: one-shot`, `Next run: ${schedule.runAt}`]
-      : [
-          `Schedule: every ${schedule.intervalMs}ms`,
-          `Next run: ${schedule.startsAt}`,
-          `Ends: ${schedule.endsAt}`,
-          "Missed intervals coalesce into at most one pending run.",
-        ];
+      : schedule.kind === "calendar"
+        ? [
+            `Schedule: ${calendarDaysWords(schedule.weekdays)} at ${schedule.localTime} (${schedule.timeZone})`,
+            `Starts: ${schedule.startsAt}`,
+            `Ends: ${schedule.endsAt}`,
+            "A time a clock change skips is skipped that day; a repeated time runs once.",
+            "Missed times coalesce into at most one pending run.",
+          ]
+        : [
+            `Schedule: every ${schedule.intervalMs}ms`,
+            `Next run: ${schedule.startsAt}`,
+            `Ends: ${schedule.endsAt}`,
+            "Missed intervals coalesce into at most one pending run.",
+          ];
+  const runPolicyLines = (
+    runPolicy: Extract<
+      AgentControlProposal["plan"],
+      { kind: "createAutomation" }
+    >["definition"]["runPolicy"],
+  ) =>
+    runPolicy === "run-without-asking"
+      ? [
+          "Runs without asking: each due run starts on its own, with exactly this project, provider, model, runtime mode and checkout.",
+          `It pauses after ${AGENT_CONTROL_AUTOMATION_UNATTENDED_FAILURES_MAX} failed runs in a row.`,
+        ]
+      : ["Asks before each run."];
   const scheduleLimitLines = [
     `Limits: ${AGENT_CONTROL_AUTOMATION_MAX_ACTIVE_PER_PROJECT} active schedules per project; minimum interval ${AGENT_CONTROL_AUTOMATION_MIN_INTERVAL_MS}ms.`,
     `Horizon: ${AGENT_CONTROL_AUTOMATION_MAX_HORIZON_MS}ms; retained run history: ${AGENT_CONTROL_AUTOMATION_RUN_HISTORY_MAX}.`,
@@ -233,6 +257,9 @@ function planPresentation(proposal: AgentControlProposalView): PlanPresentation 
     `Project: ${execution.projectId}`,
     `Provider: ${execution.modelSelection.instanceId} · ${execution.modelSelection.model}`,
     `Runtime: ${execution.runtimeMode} · ${execution.envMode}`,
+    ...(execution.target === undefined
+      ? []
+      : [`Runs in: the follow-up queue of thread ${execution.target.threadId}`]),
     ...(execution.tokenMode === undefined ? [] : [`Token mode: ${execution.tokenMode}`]),
     ...(execution.baseRef === undefined ? [] : [`Base ref: ${execution.baseRef}`]),
     `Intended work: ${execution.title}`,
@@ -240,7 +267,7 @@ function planPresentation(proposal: AgentControlProposalView): PlanPresentation 
   ];
   const plan = proposal.plan;
   const deviceDetails = (
-    devicePlan: Extract<AgentControlProposalView["plan"], { kind: `device${string}` }>,
+    devicePlan: AgentControlDeviceActionPlan,
     actionLines: ReadonlyArray<string>,
   ): ReadonlyArray<AgentControlDetailSection> => [
     {
@@ -286,13 +313,17 @@ function planPresentation(proposal: AgentControlProposalView): PlanPresentation 
       const runtimes = [
         ...new Set(plan.entries.map((entry) => `${entry.runtimeMode} · ${entry.envMode}`)),
       ];
+      const runtime = runtimes.length === 1 ? runtimes[0]! : "mixed runtime modes";
       return {
         actionLabel: count === 1 ? "Create 1 thread" : `Create ${count} threads`,
         targetLabel:
           projectIds.length === 1
             ? `project ${shortId(projectIds[0]!)}`
             : `${projectIds.length} projects`,
-        runtimeLabel: runtimes.length === 1 ? runtimes[0]! : "mixed runtime modes",
+        runtimeLabel:
+          plan.maxConcurrent === undefined
+            ? runtime
+            : `${runtime} · at most ${plan.maxConcurrent} run at once`,
         detailSections: plan.entries.map((entry, index) => ({
           heading: `Thread ${index + 1}: ${entry.title}`,
           lines: [
@@ -328,6 +359,41 @@ function planPresentation(proposal: AgentControlProposalView): PlanPresentation 
         runtimeLabel: null,
         detailSections: [{ heading: "Message", lines: [`Thread: ${plan.threadId}`, plan.text] }],
       };
+    case "worktreeHandoff":
+      return {
+        actionLabel: "Move chat into a worktree",
+        targetLabel: `thread ${shortId(plan.threadId)}`,
+        runtimeLabel: null,
+        detailSections: [
+          {
+            heading: "Worktree",
+            lines: [
+              `Branch: ${plan.branch}`,
+              ...(plan.continuationPrompt === undefined ? [] : [plan.continuationPrompt]),
+            ],
+          },
+        ],
+      };
+    case "pullRequestWatch":
+      return {
+        actionLabel: plan.watching ? "Watch pull request" : "Stop watching pull request",
+        targetLabel: `thread ${shortId(plan.threadId)}`,
+        runtimeLabel: null,
+        detailSections: [
+          {
+            heading: plan.watching ? "Watch" : "Stop watching",
+            lines: [
+              `Thread: ${plan.threadId}`,
+              `Pull request: ${plan.number === undefined ? (plan.url ?? "the chat's own") : `#${plan.number}`}`,
+              ...(plan.watching
+                ? [
+                    "Ryco wakes the chat when a check fails, the required checks pass, someone else comments or reviews, or the branch conflicts.",
+                  ]
+                : []),
+            ],
+          },
+        ],
+      };
     case "interruptThread":
       return {
         actionLabel: "Interrupt thread",
@@ -358,6 +424,9 @@ function planPresentation(proposal: AgentControlProposalView): PlanPresentation 
         changes.push(
           plan.persistentGoal === null ? "Clear persistent goal" : `Goal: ${plan.persistentGoal}`,
         );
+      }
+      if (plan.goalStatus !== undefined) {
+        changes.push(plan.goalStatus === "complete" ? "Mark goal complete" : "Mark goal blocked");
       }
       return {
         actionLabel: "Update thread",
@@ -428,7 +497,7 @@ function planPresentation(proposal: AgentControlProposalView): PlanPresentation 
               `Checkout action: ${plan.checkoutMode}`,
               `Branch: ${plan.expected.branch} (${plan.deleteBranch ? "delete" : "retain"})`,
               `Expected branch commit: ${plan.expected.branchHead ?? "missing"}`,
-              `Merged into project HEAD: ${plan.expected.unmerged === false ? "yes" : "unverified"}`,
+              `Branch merged: ${plan.expected.unmerged === false ? "yes" : "unverified"}`,
               `Expected revision: ${plan.expected.updatedAt}`,
               `Conversations: ${
                 plan.sessions === "delete"
@@ -506,9 +575,12 @@ function planPresentation(proposal: AgentControlProposalView): PlanPresentation 
               ...scheduleLines(plan.definition.schedule),
               ...scheduleLimitLines,
               `Enabled: ${plan.definition.enabled ? "yes" : "no"}`,
+              ...runPolicyLines(plan.definition.runPolicy),
               ...executionLines(plan.definition.execution),
               "This approval authorizes only the schedule definition.",
-              "Every due run creates a fresh exact proposal and waits for user approval.",
+              ...(plan.definition.runPolicy === "run-without-asking"
+                ? []
+                : ["Every due run creates a fresh exact proposal and waits for user approval."]),
               "At most one pending or executing run is allowed for this automation.",
             ],
           },
@@ -525,6 +597,7 @@ function planPresentation(proposal: AgentControlProposalView): PlanPresentation 
             lines: [
               ...scheduleLines(plan.before.definition.schedule),
               `Enabled: ${plan.before.definition.enabled ? "yes" : "no"}`,
+              ...runPolicyLines(plan.before.definition.runPolicy),
               `Last changed: ${plan.before.updatedAt}`,
             ],
           },
@@ -534,10 +607,13 @@ function planPresentation(proposal: AgentControlProposalView): PlanPresentation 
               ...scheduleLines(plan.after.schedule),
               ...scheduleLimitLines,
               `Enabled: ${plan.after.enabled ? "yes" : "no"}`,
+              ...runPolicyLines(plan.after.runPolicy),
               ...executionLines(plan.after.execution),
               "Pending, unaccepted runs from the old definition are cancelled.",
               "Already accepted or executing runs are not interrupted.",
-              "Future runs still require separate approval.",
+              ...(plan.after.runPolicy === "run-without-asking"
+                ? []
+                : ["Future runs still require separate approval."]),
             ],
           },
         ],
@@ -674,6 +750,28 @@ function planPresentation(proposal: AgentControlProposalView): PlanPresentation 
         targetLabel: `device ${shortId(plan.udid)}`,
         runtimeLabel: "explicit approval required",
         detailSections: deviceDetails(plan, ["Action: shut down this exact Simulator."]),
+      };
+    case "deviceControlConsent":
+      return {
+        actionLabel: "Allow Device for this task",
+        targetLabel: `device ${shortId(plan.udid)}`,
+        runtimeLabel: "this task only",
+        detailSections: [
+          {
+            heading: "Routine device actions until this response ends",
+            lines: [
+              "The agent may tap, swipe, type, press hardware buttons, scroll, launch installed apps and change simulator settings on this device.",
+              "It can type into any app on the device, including its web browser.",
+              "Installing apps, opening links directly, booting, attaching and shutting down still ask each time.",
+              "Use Stop in chat to end the task. Messages sent while the agent is working continue it; the next task asks again.",
+              `Device UDID: ${plan.udid}`,
+              `Thread: ${plan.threadId}`,
+              `Project: ${plan.projectId}`,
+              `Provider instance: ${plan.providerInstanceId}`,
+              "Nothing the agent types or taps is stored with this request.",
+            ],
+          },
+        ],
       };
     case "importProject":
       return importProjectPresentation(plan);

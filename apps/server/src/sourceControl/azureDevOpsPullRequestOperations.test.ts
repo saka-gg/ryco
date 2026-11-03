@@ -3,6 +3,7 @@ import { Cause, Effect, Exit, Option, Result, Schema } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 import { expect } from "vite-plus/test";
 
+import { INTERNAL_PATCH_DIFF_ARGS } from "../vcs/GitVcsDriver.ts";
 import type * as VcsProcess from "../vcs/VcsProcess.ts";
 import {
   AzureDevOpsCliError,
@@ -281,15 +282,8 @@ describe("getDiff and file contents (local git)", () => {
       // Pinned prefixes and no textconv: the user's `diff.noprefix` / `diff.srcPrefix`
       // would otherwise produce headers the page's diff parser rejects.
       assert.deepStrictEqual(calls.git.at(-1), [
-        "diff",
-        "--no-color",
-        "--no-ext-diff",
-        "--no-textconv",
+        ...INTERNAL_PATCH_DIFF_ARGS,
         "--find-renames",
-        "--src-prefix=a/",
-        "--dst-prefix=b/",
-        "--no-relative",
-        "--submodule=short",
         `${TARGET}...${HEAD}`,
       ]);
     }),
@@ -347,7 +341,7 @@ describe("getDiff and file contents (local git)", () => {
     Effect.gen(function* () {
       const { page, calls } = fakeAzure({
         invoke: readRoutes,
-        git: (args) => (args[0] === "diff" ? { stdout: "commit diff" } : {}),
+        git: (args) => (args.includes("diff") ? { stdout: "commit diff" } : {}),
       });
       const diff = yield* page.getDiff({
         cwd: "/repo",
@@ -1015,6 +1009,24 @@ describe("lists, detail and pickers", () => {
         [calls.invokes[0]?.area, calls.invokes[0]?.resource, calls.invokes[0]?.routeParameters],
         ["wit", "tags", { project: PROJECT }],
       );
+    }),
+  );
+});
+
+describe("failure kinds", () => {
+  it.effect("keeps a rate limit when an az read fails", () =>
+    Effect.gen(function* () {
+      const { page } = fakeAzure({
+        execute: () =>
+          new AzureDevOpsCliError({
+            operation: "execute",
+            detail: "Azure DevOps is rate limiting requests. Ryco tries again shortly.",
+            failureKind: "rate-limited",
+          }),
+      });
+      const error = yield* page.listAssignees({ cwd: "/repo" }).pipe(Effect.flip);
+      assert.strictEqual(error.operation, "listAssignees");
+      assert.strictEqual(error.failureKind, "rate-limited");
     }),
   );
 });

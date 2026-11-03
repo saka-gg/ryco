@@ -3,6 +3,7 @@
 import { mergeProps } from "@base-ui/react/merge-props";
 import { useRender } from "@base-ui/react/use-render";
 import { cva, type VariantProps } from "class-variance-authority";
+import { createContext, use, type ReactNode } from "react";
 import type * as React from "react";
 
 import { cn } from "~/lib/utils";
@@ -45,6 +46,8 @@ const buttonVariants = cva(
       variant: {
         default:
           "not-disabled:inset-shadow-[0_1px_--theme(--color-white/16%)] border-primary bg-primary text-primary-foreground shadow-primary/24 shadow-xs [:active,[data-pressed]]:inset-shadow-[0_1px_--theme(--color-black/8%)] [:disabled,:active,[data-pressed]]:shadow-none [:hover,[data-pressed]]:bg-primary/90",
+        "destructive-secondary":
+          "border-transparent bg-destructive/10 text-destructive-foreground [:active,[data-pressed]]:bg-destructive/20 [:hover,[data-pressed]]:bg-destructive/15",
         destructive:
           "not-disabled:inset-shadow-[0_1px_--theme(--color-white/16%)] border-destructive bg-destructive text-white shadow-destructive/24 shadow-xs [:active,[data-pressed]]:inset-shadow-[0_1px_--theme(--color-black/8%)] [:disabled,:active,[data-pressed]]:shadow-none [:hover,[data-pressed]]:bg-destructive/90",
         "destructive-outline":
@@ -61,18 +64,46 @@ const buttonVariants = cva(
   },
 );
 
+type ButtonVariant = NonNullable<VariantProps<typeof buttonVariants>["variant"]>;
+
+/**
+ * Dialogs draw every button as a solid fill: outlined variants trade their
+ * border for the matching tint, and filled ones drop their edge shadows. Dialog
+ * popups provide this, so call sites keep naming their usual variants.
+ */
+const SolidButtonsContext = createContext(false);
+
+const SOLID_BUTTON_VARIANTS: Partial<Record<ButtonVariant, ButtonVariant>> = {
+  outline: "secondary",
+  "destructive-outline": "destructive-secondary",
+};
+
+const SOLID_BUTTON_CLASS_NAME = "border-transparent shadow-none not-disabled:inset-shadow-none";
+
+function SolidButtons({ children }: { children: ReactNode }) {
+  return <SolidButtonsContext value>{children}</SolidButtonsContext>;
+}
+
 interface ButtonProps extends useRender.ComponentProps<"button"> {
   variant?: VariantProps<typeof buttonVariants>["variant"];
   size?: VariantProps<typeof buttonVariants>["size"];
 }
 
 function Button({ className, variant, size, render, ...props }: ButtonProps) {
+  const solid = use(SolidButtonsContext);
   const typeValue: React.ButtonHTMLAttributes<HTMLButtonElement>["type"] = render
     ? undefined
     : "button";
+  const resolvedVariant = solid
+    ? (SOLID_BUTTON_VARIANTS[variant ?? "default"] ?? variant)
+    : variant;
 
   const defaultProps = {
-    className: cn(buttonVariants({ className, size, variant })),
+    className: cn(
+      buttonVariants({ size, variant: resolvedVariant }),
+      solid && resolvedVariant !== "link" && resolvedVariant !== "ghost" && SOLID_BUTTON_CLASS_NAME,
+      className,
+    ),
     "data-slot": "button",
     type: typeValue,
   };
@@ -84,4 +115,4 @@ function Button({ className, variant, size, render, ...props }: ButtonProps) {
   });
 }
 
-export { Button, buttonVariants };
+export { Button, SolidButtons, buttonVariants };

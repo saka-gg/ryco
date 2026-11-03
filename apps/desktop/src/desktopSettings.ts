@@ -2,14 +2,14 @@ import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
 import * as FS from "node:fs";
 import * as Path from "node:path";
 import type {
+  DesktopKeepAwakeMode,
   DesktopQuitShortcutMode,
   DesktopServerExposureMode,
-  DesktopUpdateChannel,
 } from "@ryco/contracts";
+import { type RycoDesktopFlavor, rycoDesktopFlavorIdentity } from "@ryco/shared/desktopFlavor";
 import { normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
 
 import { normalizeDesktopBackendPort } from "./backendPort.ts";
-import { resolveDefaultDesktopUpdateChannel } from "./updateChannels.ts";
 
 export interface DesktopSettings {
   readonly quitShortcutMode: DesktopQuitShortcutMode;
@@ -41,12 +41,13 @@ export interface DesktopSettings {
   readonly tailscaleServeEnabled: boolean;
   readonly tailscaleServePort: number;
   /**
-   * Hold the machine awake while it is plugged in and other devices can reach
-   * it. On by default; it has no effect until the node is reachable.
+   * When to hold the machine awake while it is plugged in: never, while other
+   * devices can reach it, or also while agents work on this desktop's backend.
+   * The file also stores the legacy `keepAwakeWhileReachable` boolean beside it,
+   * and `desktop-keep-awake.json` repeats the mode (see `writeDesktopSettings`);
+   * in memory this is the only field.
    */
-  readonly keepAwakeWhileReachable: boolean;
-  readonly updateChannel: DesktopUpdateChannel;
-  readonly updateChannelConfiguredByUser: boolean;
+  readonly keepAwakeMode: DesktopKeepAwakeMode;
   /**
    * The port the backend last served on. The renderer's origin (and with it
    * localStorage and the HTTP/V8 caches) follows the port, so the next launch
@@ -56,6 +57,61 @@ export interface DesktopSettings {
 }
 
 export const DEFAULT_TAILSCALE_SERVE_PORT = 443;
+
+export const DESKTOP_KEEP_AWAKE_MODES = [
+  "off",
+  "reachable",
+  "reachable-or-working",
+] as const satisfies ReadonlyArray<DesktopKeepAwakeMode>;
+export const DEFAULT_DESKTOP_KEEP_AWAKE_MODE: DesktopKeepAwakeMode = "reachable-or-working";
+
+export function isDesktopKeepAwakeMode(value: unknown): value is DesktopKeepAwakeMode {
+  return (DESKTOP_KEEP_AWAKE_MODES as ReadonlyArray<unknown>).includes(value);
+}
+
+/**
+ * The stored mode, or the one a file written without it implies. An explicit
+ * `keepAwakeWhileReachable: false` was a choice and stays off. A stored `true` cannot say which
+ * mode was chosen: a desktop from before modes existed rewrites the file with only the fields it
+ * knows, so after a rollback and re-upgrade the mode remembered beside the file decides. Without
+ * one (or with a remembered Off that such a desktop turned back on), `true` was the default nearly
+ * every file holds (every write stored the whole object), not a choice, so it gets today's
+ * default. Anything unreadable falls back the same way instead of failing the whole file.
+ */
+export function resolveDesktopKeepAwakeMode(
+  parsed: {
+    readonly keepAwakeMode?: unknown;
+    readonly keepAwakeWhileReachable?: unknown;
+  },
+  readRememberedMode: () => unknown,
+): DesktopKeepAwakeMode {
+  if (isDesktopKeepAwakeMode(parsed.keepAwakeMode)) return parsed.keepAwakeMode;
+  if (parsed.keepAwakeWhileReachable === false) return "off";
+  const remembered = readRememberedMode();
+  return isDesktopKeepAwakeMode(remembered) && remembered !== "off"
+    ? remembered
+    : DEFAULT_DESKTOP_KEEP_AWAKE_MODE;
+}
+
+/**
+ * Holds the keep-awake mode beside the settings file. No desktop from before modes existed
+ * writes it, so it keeps "While reachable" through such a desktop's next settings write.
+ */
+function resolveDesktopKeepAwakeModePath(settingsPath: string): string {
+  return Path.join(Path.dirname(settingsPath), "desktop-keep-awake.json");
+}
+
+function readRememberedDesktopKeepAwakeMode(settingsPath: string): unknown {
+  try {
+    const parsed = JSON.parse(
+      FS.readFileSync(resolveDesktopKeepAwakeModePath(settingsPath), "utf8"),
+    ) as { readonly keepAwakeMode?: unknown } | null;
+    return parsed?.keepAwakeMode;
+  } catch {
+    // Missing or unreadable: it is only a hint for a file written without a mode.
+    return undefined;
+  }
+}
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   quitShortcutMode: "press-twice",
@@ -67,16 +123,22 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   hubAllowFileSecretStore: false,
   tailscaleServeEnabled: false,
   tailscaleServePort: DEFAULT_TAILSCALE_SERVE_PORT,
-  keepAwakeWhileReachable: true,
-  updateChannel: "latest",
-  updateChannelConfiguredByUser: false,
+  keepAwakeMode: DEFAULT_DESKTOP_KEEP_AWAKE_MODE,
   backendPort: null,
 };
 
-export function resolveDefaultDesktopSettings(appVersion: string): DesktopSettings {
+/**
+ * The update channel is not a setting: Ryco follows stable releases and Ryco Nightly follows
+ * nightlies (`@ryco/shared/desktopFlavor`). A file from before the split may still carry
+ * `updateChannel`; it is ignored, and dropped on the next write.
+ */
+export function resolveDefaultDesktopSettings(
+  _appVersion: string,
+  flavor: RycoDesktopFlavor = "stable",
+): DesktopSettings {
   return {
     ...DEFAULT_DESKTOP_SETTINGS,
-    updateChannel: resolveDefaultDesktopUpdateChannel(appVersion),
+    tailscaleServePort: rycoDesktopFlavorIdentity(flavor).defaultTailscaleServePort,
   };
 }
 
@@ -196,19 +258,20 @@ export function planDesktopTailscaleServeChange(input: {
   };
 }
 
-export function setDesktopKeepAwakePreference(
+export function setDesktopKeepAwakeMode(
   settings: DesktopSettings,
-  enabled: boolean,
+  mode: DesktopKeepAwakeMode,
 ): DesktopSettings {
-  return settings.keepAwakeWhileReachable === enabled
-    ? settings
-    : { ...settings, keepAwakeWhileReachable: enabled };
+  return settings.keepAwakeMode === mode ? settings : { ...settings, keepAwakeMode: mode };
 }
 
-export function normalizeTailscaleServePort(value: unknown): number {
+export function normalizeTailscaleServePort(
+  value: unknown,
+  fallback: number = DEFAULT_TAILSCALE_SERVE_PORT,
+): number {
   return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 65_535
     ? value
-    : DEFAULT_TAILSCALE_SERVE_PORT;
+    : fallback;
 }
 
 export function setDesktopHubPreference(
@@ -282,10 +345,12 @@ export interface DesktopHubConnectorLaunch {
  */
 export function resolveDesktopHubConnectorLaunch(
   settings: DesktopSettings,
+  /** The node name when the user chose none (Ryco Nightly: `<host> Nightly`). */
+  defaultNodeName: string | null = null,
 ): DesktopHubConnectorLaunch {
   const shared = {
     origin: settings.hubOrigin,
-    nodeName: settings.hubNodeName,
+    nodeName: settings.hubNodeName ?? defaultNodeName,
     allowFileSecretStore: settings.hubAllowFileSecretStore,
   };
   if (settings.hubOrigin === null) return { ...shared, enabled: false, standby: false };
@@ -349,17 +414,6 @@ export function isDesktopHostedIdentitySupported(platform: NodeJS.Platform): boo
   return platform === "darwin";
 }
 
-export function setDesktopUpdateChannelPreference(
-  settings: DesktopSettings,
-  requestedChannel: DesktopUpdateChannel,
-): DesktopSettings {
-  return {
-    ...settings,
-    updateChannel: requestedChannel,
-    updateChannelConfiguredByUser: true,
-  };
-}
-
 /** A settings file exists but could not be understood. */
 export class DesktopSettingsReadError extends Error {
   constructor(cause: unknown) {
@@ -378,8 +432,9 @@ export function readDesktopSettings(
      */
     readonly hasRetainedHubSession: () => boolean;
   },
+  flavor: RycoDesktopFlavor = "stable",
 ): DesktopSettings {
-  const defaultSettings = resolveDefaultDesktopSettings(appVersion);
+  const defaultSettings = resolveDefaultDesktopSettings(appVersion, flavor);
 
   try {
     if (!FS.existsSync(settingsPath)) {
@@ -392,9 +447,8 @@ export function readDesktopSettings(
       readonly serverExposureMode?: unknown;
       readonly tailscaleServeEnabled?: unknown;
       readonly tailscaleServePort?: unknown;
+      readonly keepAwakeMode?: unknown;
       readonly keepAwakeWhileReachable?: unknown;
-      readonly updateChannel?: unknown;
-      readonly updateChannelConfiguredByUser?: unknown;
       readonly hubConnectorEnabled?: unknown;
       readonly hubConnectorDisabledByUser?: unknown;
       readonly hubOrigin?: unknown;
@@ -402,14 +456,6 @@ export function readDesktopSettings(
       readonly hubAllowFileSecretStore?: unknown;
       readonly backendPort?: unknown;
     };
-    const parsedUpdateChannel =
-      parsed.updateChannel === "nightly" || parsed.updateChannel === "latest"
-        ? parsed.updateChannel
-        : null;
-    const isLegacySettings = parsed.updateChannelConfiguredByUser === undefined;
-    const updateChannelConfiguredByUser =
-      parsed.updateChannelConfiguredByUser === true ||
-      (isLegacySettings && parsedUpdateChannel === "nightly");
 
     let hubNodeName: string | null = null;
     if (parsed.hubNodeName !== undefined && parsed.hubNodeName !== null) {
@@ -430,14 +476,13 @@ export function readDesktopSettings(
       serverExposureMode:
         parsed.serverExposureMode === "network-accessible" ? "network-accessible" : "local-only",
       tailscaleServeEnabled: parsed.tailscaleServeEnabled === true,
-      tailscaleServePort: normalizeTailscaleServePort(parsed.tailscaleServePort),
-      // Absent in settings written before the preference existed: keep the default.
-      keepAwakeWhileReachable: parsed.keepAwakeWhileReachable !== false,
-      updateChannel:
-        updateChannelConfiguredByUser && parsedUpdateChannel !== null
-          ? parsedUpdateChannel
-          : defaultSettings.updateChannel,
-      updateChannelConfiguredByUser,
+      tailscaleServePort: normalizeTailscaleServePort(
+        parsed.tailscaleServePort,
+        defaultSettings.tailscaleServePort,
+      ),
+      keepAwakeMode: resolveDesktopKeepAwakeMode(parsed, () =>
+        readRememberedDesktopKeepAwakeMode(settingsPath),
+      ),
       hubConnectorEnabled: parsed.hubConnectorEnabled === true,
       hubConnectorDisabledByUser:
         typeof parsed.hubConnectorDisabledByUser === "boolean"
@@ -464,16 +509,27 @@ export function readDesktopSettings(
   }
 }
 
-export function writeDesktopSettings(settingsPath: string, settings: DesktopSettings): void {
-  const directory = Path.dirname(settingsPath);
-  const tempPath = `${settingsPath}.${process.pid}.${Date.now()}.tmp`;
-  // The Hub address says where this machine is reachable, so the file is
-  // owner-only — matching the 0700/0600 posture the identity state already uses,
-  // rather than the world-readable default.
-  FS.mkdirSync(directory, { recursive: true, mode: 0o700 });
-  FS.writeFileSync(tempPath, `${JSON.stringify(settings, null, 2)}\n`, {
+function writeOwnerOnlyJsonFile(filePath: string, value: unknown): void {
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  FS.writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, {
     encoding: "utf8",
     mode: 0o600,
   });
-  FS.renameSync(tempPath, settingsPath);
+  FS.renameSync(tempPath, filePath);
+}
+
+export function writeDesktopSettings(settingsPath: string, settings: DesktopSettings): void {
+  // The Hub address says where this machine is reachable, so the file is
+  // owner-only — matching the 0700/0600 posture the identity state already uses,
+  // rather than the world-readable default.
+  FS.mkdirSync(Path.dirname(settingsPath), { recursive: true, mode: 0o700 });
+  // The remembered mode goes first, so a failed write leaves the settings file unchanged. A
+  // downgraded desktop drops the mode from the settings file on its next write, never this one.
+  writeOwnerOnlyJsonFile(resolveDesktopKeepAwakeModePath(settingsPath), {
+    keepAwakeMode: settings.keepAwakeMode,
+  });
+  // The legacy boolean is written beside the mode, so a downgraded desktop (which reads only
+  // `keepAwakeWhileReachable !== false`) cannot turn on a hold the operator turned off.
+  const stored = { ...settings, keepAwakeWhileReachable: settings.keepAwakeMode !== "off" };
+  writeOwnerOnlyJsonFile(settingsPath, stored);
 }

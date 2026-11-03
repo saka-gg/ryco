@@ -1,3 +1,5 @@
+import { AlarmClockIcon, PencilLineIcon } from "lucide-react";
+
 import { cn } from "../../lib/utils";
 
 import type { InboxGlyphKind } from "./inboxRowPresentation";
@@ -83,6 +85,9 @@ function GlyphMark({ kind }: { readonly kind: InboxGlyphKind }) {
       );
     case "completed":
       return <CompletedMark />;
+    case "woke":
+      // On you like a request, without one waiting: the snooze ran out.
+      return <AlarmClockIcon aria-hidden className="size-[13px] text-warning-foreground" />;
     case "limited":
       // A static gauge at its limit: on you, but nothing failed and nothing runs.
       return (
@@ -114,5 +119,8 @@ function GlyphMark({ kind }: { readonly kind: InboxGlyphKind }) {
       return <span className="size-[9px] rounded-full border-[1.5px] border-muted-foreground/45" />;
     case "idle":
       return <span className="size-[5px] rounded-full bg-muted-foreground/35" />;
+    case "draft":
+      // Nothing runs and nothing waits on the person's answer: it waits to be sent.
+      return <PencilLineIcon aria-hidden className="size-3 text-muted-foreground/80" />;
   }
 }

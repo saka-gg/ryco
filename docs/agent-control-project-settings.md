@@ -33,10 +33,13 @@ Workspace changes, script edits and custom system prompt edits still require app
 plan includes before/after preferences, and the project revision guard rejects stale updates.
 Previously persisted plans without preference fields remain readable and do not reset preferences.
 
-The global settings allowlist contains only `legacyTokenStreaming` (`enableLegacyTokenStreaming`)
-and `providerUpdateChecks` (`enableProviderUpdateChecks`). These non-secret boolean preferences
-can execute for a private session through the same durable executor. Execution verifies the captured
-before value and refuses stale requests. The settings service persists only the selected key.
+The global settings allowlist contains only `legacyTokenStreaming` and `providerUpdateChecks`
+(`enableProviderUpdateChecks`). `legacyTokenStreaming` is a boolean view of `responseStreamingMode`
+(see [response streaming](response-streaming.md)): it reads true only in token mode, on selects
+token mode, and off returns token mode to the paragraph default while leaving other modes alone.
+These non-secret boolean preferences can execute for a private session through the same durable
+executor. Execution verifies the captured before value and refuses stale requests. The settings
+service persists only the selected key.
 
 Secrets, credentials, provider commands and environment, MCP connection/auth configuration,
 remote/relay/hosted authentication, filesystem roots, network exposure and Agent Control policy

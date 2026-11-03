@@ -12,6 +12,10 @@ import {
   forkTimelineInheritedPrefix,
   type ForkOriginTimelineEntry,
 } from "./forkOrigin.ts";
+import {
+  userInputExchangeTimeline,
+  type UserInputExchangeTimelineEntry,
+} from "./userInputExchange.ts";
 
 export interface TimelineEntrySources {
   readonly messages: ReadonlyArray<ChatMessage>;
@@ -21,6 +25,11 @@ export interface TimelineEntrySources {
   readonly contextHandoffEntries: ReadonlyArray<ContextHandoffTimelineEntry>;
   /** `ThreadActivityViewModel.forkOriginEntries`: at most one, on forked threads. */
   readonly forkOriginEntries: ReadonlyArray<ForkOriginTimelineEntry>;
+  /**
+   * `ThreadActivityViewModel.userInputExchangeEntries`; each stands in for its request and
+   * resolution work rows (`userInputExchangeTimeline`).
+   */
+  readonly userInputExchangeEntries: ReadonlyArray<UserInputExchangeTimelineEntry>;
 }
 
 export interface TimelineEntryIndex {
@@ -52,6 +61,7 @@ const SOURCE_RANK: Record<SourceKind, number> = {
   "context-handoff": 4,
   // Its own band on a fork (`forkTimelineBand`); the rank only matters without one.
   "fork-origin": 5,
+  "user-input-exchange": 6,
 };
 
 function compareIndexedEntries(left: IndexedTimelineEntry, right: IndexedTimelineEntry): number {
@@ -171,7 +181,12 @@ export function createTimelineEntryIndex(): TimelineEntryIndex {
           true,
         ),
       );
-      sources.workEntries.forEach((workEntry, sourceIndex) =>
+      const userInputExchanges = userInputExchangeTimeline(
+        sources.workEntries,
+        sources.userInputExchangeEntries,
+      );
+      sources.workEntries.forEach((workEntry, sourceIndex) => {
+        if (!userInputExchanges.keepsWorkEntry(workEntry)) return;
         add(
           indexedEntry(indexedByKey, inheritedPrefix, {
             sourceKind: "work",
@@ -185,8 +200,8 @@ export function createTimelineEntryIndex(): TimelineEntryIndex {
             },
           }),
           true,
-        ),
-      );
+        );
+      });
       sources.contextCompactionEntries.forEach((marker, sourceIndex) =>
         add(
           indexedEntry(indexedByKey, inheritedPrefix, {
@@ -230,6 +245,18 @@ export function createTimelineEntryIndex(): TimelineEntryIndex {
             sourceIndex,
             source: marker,
             entry: { id: marker.id, kind: "fork-origin", createdAt: marker.createdAt, marker },
+          }),
+          true,
+        ),
+      );
+
+      userInputExchanges.entries.forEach((entry, sourceIndex) =>
+        add(
+          indexedEntry(indexedByKey, inheritedPrefix, {
+            sourceKind: "user-input-exchange",
+            sourceIndex,
+            source: entry,
+            entry,
           }),
           true,
         ),

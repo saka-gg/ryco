@@ -11,6 +11,7 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
+import { AgentProcessPriorityOffLive } from "../agentProcessPriority.ts";
 import { CursorDriver } from "./CursorDriver.ts";
 
 const testLayer = ServerConfig.layerTest(process.cwd(), { prefix: "cursor-driver-test" }).pipe(
@@ -24,6 +25,7 @@ const testLayer = ServerConfig.layerTest(process.cwd(), { prefix: "cursor-driver
     ),
   ),
   Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+  Layer.provideMerge(AgentProcessPriorityOffLive),
   Layer.provideMerge(ServerSettingsService.layerTest()),
 );
 

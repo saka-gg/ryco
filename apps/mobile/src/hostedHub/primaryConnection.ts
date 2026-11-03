@@ -6,6 +6,7 @@ import {
 } from "@ryco/client-runtime/connection";
 import {
   getHostedEnvironmentSessions,
+  hostedEnvironmentResumeReadiness,
   hostedHubController,
   hostedHubStore,
   markHostedSessionReady,
@@ -21,8 +22,13 @@ import {
   bindHostedDispatchReplay,
   createHostedEnvironmentAttemptFactory,
   hostedDispatchLineage,
+  type HostedDirectSocket,
 } from "@ryco/client-runtime/relay";
-import { createWsRpcClient } from "@ryco/client-runtime/rpc";
+import {
+  bindHostedGitActionDelivery,
+  createDeviceRpcClient,
+  createWsRpcClient,
+} from "@ryco/client-runtime/rpc";
 
 import { WsTransport } from "../rpc/wsTransport";
 import { readMobileHostedConnectionCoordinator } from "../connection/hostedConnectionCoordinator";
@@ -36,6 +42,12 @@ import { mobileHostedRelayUrl, openMobileEarlyRelaySocket } from "./relaySocket"
 import { getMobileHostedConfig } from "./runtimeConfig";
 import { writeEnvironmentServerConfig } from "../state/environmentServerConfigs";
 import { getMobileNativeE2eeEnrollmentCoordinator } from "./e2eeEnrollment";
+import {
+  mobileLinkedDirectAccess,
+  subscribeMobileRouteTriggers,
+} from "./linkedDirectAccessRuntime";
+import { capLinkedRole } from "./linkedDirectAccess";
+import { setMobileDirectRoute } from "./linkedDirectAccessState";
 
 /**
  * The supervisor's stream handlers a hosted node connection feeds. The
@@ -44,14 +56,8 @@ import { getMobileNativeE2eeEnrollmentCoordinator } from "./e2eeEnrollment";
  */
 export interface HostedPrimaryConnectionDeps extends Pick<
   OrchestrationHandlers,
-  "applyShellEvent" | "resetShellProjection"
+  "applyShellEvent" | "applyTerminalEvent" | "resetShellProjection"
 > {
-  /**
-   * Required, unlike on the shared handlers: supplying it makes the connection
-   * ask for thread-priority deltas, so an AI Focus ranking batch reaches the
-   * phone as a small item instead of a full shell snapshot over the relay.
-   */
-  readonly applyThreadPriorities: NonNullable<OrchestrationHandlers["applyThreadPriorities"]>;
   readonly syncShellSnapshot: EnvironmentConnectionSupervisor["syncShellSnapshot"];
   readonly pushSequenceMonitor: Parameters<
     typeof createEnvironmentConnection
@@ -94,6 +100,10 @@ export function createHostedEnvironmentConnection(
     isCurrent: acceptsEvent,
   };
 
+  // The machine's linked direct routes (`linkedDirectAccess.ts`): each attempt
+  // asks them first; this factory stays the attempt's lifecycle owner.
+  const linked = mobileLinkedDirectAccess();
+  const machine = { environmentId, label: node.label };
   const { factory: attemptFactory } = createHostedEnvironmentAttemptFactory({
     sessions,
     environmentId,
@@ -122,23 +132,39 @@ export function createHostedEnvironmentConnection(
           getMobileNativeE2eeEnrollmentCoordinator()?.applyRevocation(failure.enrollmentRevoked);
         }
       },
+      resolveDirectRoute: async (signal) => {
+        const route = await linked.resolveRoute(machine, signal);
+        if (route === null) return null;
+        const directoryRole =
+          hostedHubStore
+            .getState()
+            .nodes.find((entry) => entry.id === node.id && entry.revokedAt === null)
+            ?.effectiveRole ?? null;
+        const role = capLinkedRole(route.role, directoryRole);
+        return role === null ? null : { ...route, role };
+      },
+      createDirectSocket: (url) => new WebSocket(url) as unknown as HostedDirectSocket,
+      directRouteHold: linked.directRouteHold(environmentId),
     },
   });
+  // Environment-scoped, not generation-scoped: the replay may give up, and a
+  // Git action fail, after this connection's generation has been replaced.
+  const markUncertain = () => hostedHubController.markEnvironmentDeliveryUnknown(environmentId);
   const dispatchReplay = bindHostedDispatchReplay({
     environmentId,
     lineage: hostedDispatchLineage(hostedHubStore.getState()),
-    // Environment-scoped, not generation-scoped: the replay may give up after
-    // this connection's generation has been replaced.
-    markUncertain: () => hostedHubController.markEnvironmentDeliveryUnknown(environmentId),
+    markUncertain,
   });
+  // The connection's Git action recovery answers for its actions' delivery.
+  const gitActionDelivery = bindHostedGitActionDelivery(markUncertain);
+  const transport = new WsTransport(() => attemptFactory.nextUrl(), {
+    ...attemptFactory.lifecycleHandlers(dispatchReplay, gitActionDelivery),
+    getConnectionLabel: () => node.label,
+    getEnvironmentId: () => environmentId,
+  });
+  // Device previews and input borrow the relay socket; its lifecycle owner manages it.
   const client = dispatchReplay.wrap(
-    createWsRpcClient(
-      new WsTransport(() => attemptFactory.nextUrl(), {
-        ...attemptFactory.lifecycleHandlers(dispatchReplay),
-        getConnectionLabel: () => node.label,
-        getEnvironmentId: () => environmentId,
-      }),
-    ),
+    createWsRpcClient(transport, createDeviceRpcClient(transport, { manageTransport: false })),
   );
 
   // The node is reached only through the relay, so the "target" is the Hub's
@@ -157,7 +183,7 @@ export function createHostedEnvironmentConnection(
     environmentId,
   };
 
-  return createEnvironmentConnection({
+  const connection = createEnvironmentConnection({
     // The supervisor keeps hosted node connections as "primary" ones.
     kind: "primary",
     knownEnvironment,
@@ -169,6 +195,9 @@ export function createHostedEnvironmentConnection(
       generation,
       readCurrent: () => sessions.read(environmentId)?.generation ?? null,
     },
+    // A dropped Git action is followed again only once this generation's session is adoptable.
+    resumeReadiness: hostedEnvironmentResumeReadiness(sessions, environmentId, generation),
+    gitActionDelivery,
     onConfigUpdated: (config) => {
       if (!acceptsEvent()) return;
       writeEnvironmentServerConfig(environmentId, config);
@@ -188,16 +217,55 @@ export function createHostedEnvironmentConnection(
       if (!acceptsEvent()) return;
       input.applyShellEvent(event, eventEnvironmentId);
     },
-    applyThreadPriorities: (item, eventEnvironmentId) => {
-      if (!acceptsEvent()) return;
-      input.applyThreadPriorities(item, eventEnvironmentId);
-    },
     syncShellSnapshot: (snapshot, eventEnvironmentId) => {
       if (!acceptsEvent()) return;
       const ready = () => markHostedSessionReady(eventEnvironmentId, generation);
       input.syncShellSnapshot(snapshot, eventEnvironmentId, { onCurrent: ready, onReady: ready });
     },
-    // Terminal streaming is deferred, matching the direct plane.
-    applyTerminalEvent: () => undefined,
+    // A superseded generation publishes no started snapshot, output, activity,
+    // exit or error into the terminal store.
+    applyTerminalEvent: (event, eventEnvironmentId) => {
+      if (!acceptsEvent()) return;
+      input.applyTerminalEvent(event, eventEnvironmentId);
+    },
   });
+  // The row's "Direct" label, from the route this generation's open socket took.
+  // A newer generation publishes its own; a released environment shows none.
+  let stopRouteLabel: (() => void) | null = null;
+  const publishRouteLabel = () => {
+    const current = sessions.read(environmentId);
+    if (current === undefined) setMobileDirectRoute(environmentId, null);
+    if (current?.generation !== generation) {
+      stopRouteLabel?.();
+      stopRouteLabel = null;
+      return;
+    }
+    const routeKey = current.transportStatus === "online" ? attemptFactory.activeRouteKey() : null;
+    setMobileDirectRoute(
+      environmentId,
+      routeKey !== null && routeKey !== "relay" ? routeKey : null,
+    );
+  };
+  stopRouteLabel = sessions.subscribe(publishRouteLabel);
+  // While on the relay: better routes are checked, and the link renewed when due.
+  // It stops once this generation is replaced or released.
+  linked.keepUpgraded({
+    machine,
+    readActiveRouteKey: () => attemptFactory.activeRouteKey(),
+    mayUpgrade: () =>
+      attemptFactory.mayTakeDirectRoutes() &&
+      sessions.read(environmentId)?.sessionStatus === "ready",
+    relayReady: () => {
+      const record = sessions.read(environmentId);
+      return (
+        record?.generation === generation &&
+        record.transportStatus === "online" &&
+        record.sessionStatus === "ready"
+      );
+    },
+    isCurrent: acceptsEvent,
+    reconnect: () => void connection.reconnect().catch(() => undefined),
+    subscribeTriggers: subscribeMobileRouteTriggers,
+  });
+  return connection;
 }

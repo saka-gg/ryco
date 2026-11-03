@@ -1,4 +1,5 @@
 import { EnvironmentId, ProjectId, ThreadId, TurnId } from "@ryco/contracts";
+import { isThreadSnoozed } from "@ryco/shared/threadSnooze";
 import { describe, expect, it } from "vite-plus/test";
 import { createThreadNotificationProjector } from "./threadNotifications.ts";
 import type { SidebarThreadSummary } from "./types.ts";
@@ -45,7 +46,10 @@ function completed(patch: Partial<SidebarThreadSummary> = {}): SidebarThreadSumm
 function fixture(initial: SidebarThreadSummary = thread()) {
   const generation = {};
   let current: object | null = generation;
-  const projector = createThreadNotificationProjector({ readGeneration: () => current });
+  const projector = createThreadNotificationProjector({
+    readGeneration: () => current,
+    isSnoozed: isThreadSnoozed,
+  });
   projector.baseline({ environmentId, generation, sequence: 1, threads: [initial], nowMs });
   return {
     projector,
@@ -165,6 +169,20 @@ describe("thread notification projection", () => {
     expect(test.observe(failed, 4)?.kind).toBe("failed");
   });
 
+  it("announces a turn that stopped before it finished, once", () => {
+    // A provider that exits or aborts mid-turn leaves it interrupted, not failed.
+    const interrupted = completed({
+      latestTurn: { ...completed().latestTurn!, state: "interrupted" },
+    });
+    const test = fixture();
+    expect(test.observe(interrupted, 2)?.kind).toBe("stopped");
+    expect(test.observe({ ...interrupted, title: "Renamed" }, 3)).toBeNull();
+    expect(test.observe({ ...interrupted, hasPendingApprovals: true }, 4)?.kind).toBe("approval");
+    expect(test.observe(interrupted, 5)).toBeNull();
+    // Already stopped when the baseline was taken: history, not news.
+    expect(fixture(interrupted).observe(interrupted, 2)).toBeNull();
+  });
+
   it("suppresses archival and already-snoozed history, with shared wake rules for new requests", () => {
     const test = fixture();
     expect(test.observe(completed({ archivedAt: "2026-10-02T11:30:00.000Z" }), 2)).toBeNull();
@@ -232,5 +250,43 @@ describe("thread notification projection", () => {
       test.observe(completed({ interactionMode: "plan", hasActionableProposedPlan: true }), 3),
     ).toBeNull();
     expect(test.observe(completed({ interactionMode: "plan" }), 4)).toBeNull();
+  });
+});
+
+describe("quiet completion of hidden and filed threads", () => {
+  it.each([
+    ["hidden", { hiddenAt: "2026-10-02T09:00:00.000Z" }],
+    ["settled while working", { settleWhenIdleAt: "2026-10-02T10:30:00.000Z" }],
+    [
+      "settled when its turn ended",
+      { settledOverride: "settled", settledAt: "2026-10-02T10:30:00.000Z" },
+    ],
+  ] as const)("does not announce the completion of a thread %s", (_label, patch) => {
+    const test = fixture(thread(patch));
+    expect(test.observe(completed(patch), 2)).toBeNull();
+  });
+
+  it.each([
+    ["shown in the Inbox again", { hiddenAt: "2026-10-02T09:00:00.000Z" }],
+    ["moved back to Active", { settleWhenIdleAt: "2026-10-02T10:30:00.000Z" }],
+  ] as const)(
+    "never announces a quiet completion later, once the thread is %s",
+    (_label, patch) => {
+      const test = fixture(thread(patch));
+      expect(test.observe(completed(patch), 2)).toBeNull();
+      expect(test.observe(completed(), 3)).toBeNull();
+    },
+  );
+
+  it("still announces its requests and failures", () => {
+    const patch = { hiddenAt: "2026-10-02T09:00:00.000Z" };
+    expect(
+      fixture(thread(patch)).observe(thread({ ...patch, hasPendingApprovals: true }), 2)?.kind,
+    ).toBe("approval");
+    const failed = completed({
+      ...patch,
+      latestTurn: { ...completed().latestTurn!, state: "error" },
+    });
+    expect(fixture(thread(patch)).observe(failed, 2)?.kind).toBe("failed");
   });
 });

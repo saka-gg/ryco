@@ -16,7 +16,7 @@ import {
 } from "../../persistence/SqliteReadClient.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
-import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
+import { ORCHESTRATION_PROJECTOR_NAMES } from "../projectorNames.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 
 const MODEL = '{"instanceId":"codex","model":"gpt-5-codex"}';

@@ -1,5 +1,6 @@
 import { useLayoutEffect, useMemo, useState, useSyncExternalStore } from "react";
 import {
+  type DatabaseStorageReport,
   type EnvironmentId,
   type ServerSettingsPatch,
   type StorageRetentionPolicy,
@@ -9,12 +10,14 @@ import { createStorageManagementController } from "@ryco/client-runtime/state/st
 import { formatStorageSize, resolveStorageRetentionPolicy } from "@ryco/shared/storageRetention";
 import { useServerConfig } from "../../rpc/serverState";
 import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
+import { isNodeSettingsTargetReadOnly } from "./settingsSections.logic";
 import {
   readEnvironmentConnection,
   updateEnvironmentServerSettings,
 } from "../../environments/runtime";
-import { HardDriveIcon } from "lucide-react";
+import { CheckIcon, CopyIcon, HardDriveIcon } from "lucide-react";
 
+import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -44,13 +47,9 @@ export function StorageSettings() {
       key={environmentId ?? "offline"}
       environmentId={environmentId}
       disabled={
-        scope === "client" ||
         !config ||
         config.environment.capabilities.storageManagement !== true ||
-        (scope === "node" && !target) ||
-        Boolean(
-          target && (!target.connected || target.canManage === false || target.canMutate === false),
-        )
+        isNodeSettingsTargetReadOnly(scope, target)
       }
     />
   );
@@ -158,7 +157,7 @@ function StorageEditor({
         <>
           <SettingsRow
             title="Retention policy"
-            description="Applies hourly after the device starts. Only archived, stopped, clean, unshared Ryco checkouts qualify; abandoned ones get a 24-hour grace period."
+            description="Applies hourly after the device starts. Only archived, stopped, unshared Ryco checkouts with no uncommitted work qualify. Dependency folders such as node_modules go with them; .env and other ignored files keep a checkout. Abandoned checkouts get a 24-hour grace period."
             status={retentionScopeLabel}
             resetAction={
               projectId && settings?.projectStorageRetention[projectId] ? (
@@ -227,7 +226,8 @@ function StorageEditor({
                   }
                 >
                   Qualifying checkouts are removed after {enableApproval.completedWorktreeDays}{" "}
-                  days. Dirty, untracked, ignored, shared, and running work stays protected.
+                  days. Uncommitted, untracked, shared, and running work stays protected, and so do
+                  ignored files that are not dependency caches, such as .env.
                 </SettingsNotice>
               </div>
             ) : null}
@@ -382,6 +382,9 @@ function StorageEditor({
               </Collapsible>
             </SettingsBlock>
           ) : null}
+          {state.snapshot.database ? (
+            <DatabaseStorageRows database={state.snapshot.database} />
+          ) : null}
         </>
       )}
       {state.preview ? (
@@ -453,5 +456,133 @@ function StorageEditor({
         </SettingsBlock>
       ) : null}
     </SettingsSection>
+  );
+}
+
+const formatBytes = (bytes: number) => formatStorageSize(bytes, "complete");
+
+function compactionStatus(compaction: DatabaseStorageReport["compaction"]): string {
+  const removed =
+    compaction.removedEvents > 0
+      ? `Removed ${compaction.removedEvents.toLocaleString()} superseded progress updates (${formatBytes(compaction.removedBytes)}).`
+      : "Nothing removed yet.";
+  if (!compaction.enabled) return `Off on this node. ${removed}`;
+  if (compaction.lastPassCompletedAt === null)
+    return compaction.compactedThroughSequence > 0
+      ? `${removed} The first pass is running.`
+      : "Not run yet; the first pass starts 10 minutes after the node starts.";
+  const lastRun = `last run ${new Date(compaction.lastPassCompletedAt).toLocaleString()}`;
+  if (compaction.caughtUp) return `${removed} Up to date, ${lastRun}.`;
+  const examined =
+    compaction.headSequence > 0
+      ? Math.floor((compaction.compactedThroughSequence / compaction.headSequence) * 100)
+      : 0;
+  return `${removed} Catching up: ${examined}% of history examined, ${lastRun}.`;
+}
+
+/**
+ * The node's database, from the last scan, inside the storage card. Kept in this module: it is
+ * part of the lazy settings chunk, so the app shell's static graph does not grow.
+ */
+function DatabaseStorageRows({ database }: { database: DatabaseStorageReport }) {
+  const value = (text: string) => (
+    <span className="text-xs tabular-nums text-muted-foreground">{text}</span>
+  );
+  const shrinking = database.autoVacuum !== "none";
+  return (
+    <>
+      <SettingsBlock className="pt-4 pb-1">
+        <h3 className="text-[13px] font-semibold text-foreground">Database</h3>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          Chats, history and settings of this node, in one SQLite file.
+        </p>
+      </SettingsBlock>
+      <SettingsRow
+        title="Database file"
+        description={
+          // The log's file size, not pending writes: SQLite keeps the file after merging it.
+          database.walBytes > 0
+            ? `On disk, including the ${formatBytes(database.walBytes)} write-ahead log. SQLite keeps reusing it after merging its writes into the file.`
+            : "On disk; the write-ahead log is empty."
+        }
+        control={value(formatBytes(database.fileBytes + database.walBytes))}
+      />
+      <SettingsRow
+        title="Free space inside the file"
+        description="Left by removed data. SQLite reuses it for new data before the file grows."
+        control={value(formatBytes(database.freePages * database.pageSize))}
+      />
+      <SettingsRow
+        title="Automatic shrinking"
+        description={
+          database.autoVacuum === "incremental"
+            ? "Free space beyond 1 MiB is returned to the disk, up to 4 MiB a minute."
+            : database.autoVacuum === "full"
+              ? "SQLite returns free space to the disk at every removal."
+              : "This database was created before automatic shrinking. Its free space is reused, but the file does not get smaller."
+        }
+        control={
+          <Badge variant="outline" size="sm">
+            {shrinking ? "On" : "Off"}
+          </Badge>
+        }
+      />
+      <SettingsRow
+        title="History compaction"
+        description="Removes older copies of progress updates once they are a day old; only the newest copy of each is ever shown."
+        status={compactionStatus(database.compaction)}
+      />
+      <SettingsRow
+        title="Estimated reclaimable"
+        description={
+          database.compaction.estimatedCompactableBytes === null
+            ? "Free space inside the file. An estimate of superseded history follows the first compaction pass."
+            : `Free space plus about ${formatBytes(database.compaction.estimatedCompactableBytes)} of superseded history not yet removed.`
+        }
+        control={value(formatBytes(database.reclaimableBytes))}
+      />
+      {database.doctor?.recommended ? <DatabaseDoctorRow database={database} /> : null}
+    </>
+  );
+}
+
+/**
+ * The offline repair, suggested when the file could shrink a lot but never shrinks by itself.
+ * The node names the command: `ryco doctor --apply` for a CLI node, the CLI of the desktop app's
+ * own version through npx for the desktop app (which the CLI cannot stop).
+ */
+function DatabaseDoctorRow({ database }: { database: DatabaseStorageReport }) {
+  const { copyToClipboard, isCopied } = useCopyToClipboard();
+  const command = database.doctor?.command ?? null;
+  const desktop = command?.startsWith("npx ") === true;
+  const intro = `About ${formatBytes(database.reclaimableBytes)} could be returned to the disk, but this database never shrinks by itself.`;
+  return (
+    <SettingsRow
+      title="Shrink the database file"
+      description={
+        command === null
+          ? `${intro} Stop this development server and run \`ryco doctor --apply\` with the same \`--base-dir\` and \`--dev-url\` it was started with.`
+          : desktop
+            ? `${intro} Quit the Ryco app first, then run this in a terminal (needs Node.js 22.16 or newer). It removes superseded history, writes a compacted copy and turns automatic shrinking on.`
+            : `${intro} Run this in a terminal on the node. It stops the node's background service while it works and starts it again; quit a running \`ryco serve\` first.`
+      }
+      control={
+        command === null ? null : (
+          <Button size="xs" variant="outline" onClick={() => copyToClipboard(command)}>
+            {isCopied ? <CheckIcon className="size-3.5" /> : <CopyIcon className="size-3.5" />}
+            {isCopied ? "Copied" : "Copy"}
+          </Button>
+        )
+      }
+    >
+      {command === null ? null : (
+        <p
+          data-testid="database-doctor-command"
+          className="font-mono text-[13px] break-all select-all"
+        >
+          {command}
+        </p>
+      )}
+    </SettingsRow>
   );
 }

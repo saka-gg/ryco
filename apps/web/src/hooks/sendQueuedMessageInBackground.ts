@@ -161,6 +161,7 @@ export async function sendQueuedMessageInBackground(
     messageId: MessageId.make(entry.id),
     preserveComposerDraft: true,
     claudeCacheReview: null,
+    confirmStopBackgroundWork: null,
     suppressToasts: true,
     onBeforeTurnStart: hooks.onBeforeTurnStart,
     onSendError: (error) => {
@@ -191,6 +192,7 @@ export async function sendQueuedMessageInBackground(
       removeComposerDraftImage: noop,
       addComposerDraftImages: noop,
       setComposerDraftTerminalContexts: noop,
+      setComposerDraftFileReferences: noop,
       setDraftThreadContext: noop,
       readComposerDraftContent: () => null,
     },
@@ -205,6 +207,7 @@ export async function sendQueuedMessageInBackground(
       promptRef: { current: "" },
       composerImagesRef: { current: [] },
       composerTerminalContextsRef: { current: [] },
+      composerFileReferencesRef: { current: [] },
       sendInFlightRef: { current: false },
     },
     sourceControl: {

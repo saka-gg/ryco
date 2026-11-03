@@ -13,7 +13,8 @@ export type ConnectionToneState =
   | "reconnecting"
   | "error"
   | "offline"
-  | "disconnected";
+  | "disconnected"
+  | "switched-off";
 
 export function resolveConnectionTone(state: ConnectionToneState): StatusTone {
   switch (state) {
@@ -45,6 +46,12 @@ export function resolveConnectionTone(state: ConnectionToneState): StatusTone {
     case "disconnected":
       return {
         label: "Disconnected",
+        pillClassName: "bg-subtle",
+        textClassName: "text-foreground-muted",
+      };
+    case "switched-off":
+      return {
+        label: "Switched off",
         pillClassName: "bg-subtle",
         textClassName: "text-foreground-muted",
       };

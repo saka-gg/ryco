@@ -42,6 +42,24 @@ describe("parsePullRequestLinkTarget", () => {
     ).toMatchObject({ kind: "url", number: 9, repositoryKey: "gitlab.com/group/sub/app" });
   });
 
+  it("parses a Bitbucket pull request link", () => {
+    expect(parsePullRequestLinkTarget("https://bitbucket.org/ws/repo/pull-requests/3")).toEqual({
+      kind: "url",
+      number: 3,
+      url: "https://bitbucket.org/ws/repo/pull-requests/3",
+      repositoryKey: "bitbucket.org/ws/repo",
+    });
+  });
+
+  it("parses links on self-hosted GitHub and GitLab", () => {
+    expect(
+      parsePullRequestLinkTarget("https://ghe.example.com:8443/Acme/App/pull/7/files"),
+    ).toMatchObject({ kind: "url", number: 7, repositoryKey: "ghe.example.com/acme/app" });
+    expect(
+      parsePullRequestLinkTarget("https://code.example.com/group/app/-/merge_requests/4"),
+    ).toMatchObject({ kind: "url", number: 4, repositoryKey: "code.example.com/group/app" });
+  });
+
   it("leaves search text alone", () => {
     expect(parsePullRequestLinkTarget("stack rail")).toBeNull();
     expect(parsePullRequestLinkTarget("#12a")).toBeNull();
@@ -114,6 +132,18 @@ describe("resolvePullRequestLink", () => {
         knownUrls: [],
       }),
     ).toEqual({ kind: "switch", number: 3, repository: monorepo });
+  });
+
+  it("switches to a Bitbucket repository Ryco knows", () => {
+    const bitbucket = option("bb", "bitbucket.org/ws/repo");
+    expect(
+      resolvePullRequestLink({
+        target: link("https://bitbucket.org/ws/repo/pull-requests/3"),
+        current,
+        repositories: [current, bitbucket],
+        knownUrls: [],
+      }),
+    ).toEqual({ kind: "switch", number: 3, repository: bitbucket });
   });
 
   it("hands unknown repositories to the host", () => {

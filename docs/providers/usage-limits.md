@@ -10,20 +10,63 @@ that check is **20 percentage points above even pace** (a deficit).
 
 The comparison is labelled **at last check**. Time passing does not improve the comparison without
 a new provider snapshot. It is neither a forecast nor banked credit or debt. Refresh provider status
-for another check. Each provider instance and window is displayed separately; duplicate instances
-and different accounts are never added or averaged into a combined allowance.
+for another check. Each window is displayed separately; duplicate instances of one account and
+different accounts are never added or averaged into a combined allowance.
 
 Pace is unavailable for disconnected, disabled, unavailable, unready or unauthenticated providers,
 missing or invalid inputs, clock inconsistencies, and windows that have reset. Missing usage is
 unavailable, never zero. Small differences within two percentage points and the first 3% of a
 window have no pace label. Existing usage amounts, credits, reset times and accounting are unchanged.
 
-Accounts pooled in a CLIProxyAPI hub appear on Statistics → Limits instead; see
-[CLIProxyAPI hubs](./cliproxyapi.md).
+Statistics → Limits lists the accounts provider instances sign in to directly, grouped by
+provider, next to the accounts pooled in CLIProxyAPI hubs (see
+[CLIProxyAPI hubs](./cliproxyapi.md)). An account signed in on several nodes or instances shows
+once, with its freshest reading and the nodes it was seen on. Instances count as one account when
+they report the same provider, email and plan; a node that reports no plan joins only when that is
+unambiguous. Banked Codex resets come from the newest read that reported them. Instances routed
+through a hub show a note instead of their own limits, and direct accounts never enter a hub's
+pooled average. The iOS app's Limits tab lists accounts the same way, naming the devices each is
+signed in on, with a banked-reset block for each device's Codex instance.
+
+Every surface lists each window a provider reports, labelled the same way for direct and hub
+accounts. A direct Claude account shows its 5-hour and weekly windows, its model-scoped weekly
+windows such as **Weekly · Opus**, and its cloud session credits; older nodes report only the
+5-hour and weekly windows. Ryco re-reads usage between full provider checks, so pace is judged
+at the time the usage was read, not at the provider's last check.
+
+A Grok account signed in with `grok login` shows one window, the share of its billing period's
+credits that is used, labelled **Weekly** or **Monthly** after the period Grok reports, or
+**Credits** when Grok reports no period. Ryco reads it with the Grok CLI's own login, read-only,
+and skips API-key instances and custom auth or endpoint setups (see [Grok](./grok.md#credit-usage)).
+Grok accounts are listed under Grok, apart from a hub's xAI accounts.
+
+When Claude, OpenCode Go or Grok throttles a usage read (HTTP 429) or the read fails, Ryco keeps
+showing the last good numbers with the time they were read and a note that they are not current.
+It does not ask that provider again until the cooldown ends: the provider's `Retry-After`, kept
+between 1 and 15 minutes (5 without one), or 1 minute after a failure. Numbers older than an hour
+and windows that have reset since are not shown. On Statistics → Limits, a full window in
+re-served numbers still marks the account **Limit reached**, next to the note. Ryco never uses
+re-served numbers to work out when a chat stopped by a usage limit can resume; only a fresh read
+does that. A rejected login (401/403) or another account clears them at once. Codex reads its
+limits through its app-server, which handles retries itself.
 
 Claude instances with a separate home use that home's credential file for usage reads. They do not
 fall back to the default account's global macOS Keychain entry. Refreshes are persisted only to the
 credential store that supplied the account. Missing separate-home credentials mean usage is unavailable.
+
+### Agents
+
+With Agent Control on, agents read the same numbers with `ryco_usage_limits` (see
+[Agent Control](../agent-control.md)), for example to send work to an instance with headroom or
+to stop before a limit. It lists each enabled instance's windows, labelled as on the Limits page,
+with the percent used, the reset time, the pace at the read, the read time, and whether the
+numbers are re-served after a failed or throttled read. Each enabled CLIProxyAPI hub gets one
+entry with its accounts numbered in the hub's order (`Account 1`, `Account 2`…), their provider
+and their windows, labelled and paced as on the hub cards. An instance routed through a hub lists
+no windows of its own and points at the hub's entry. The tool reads what Ryco already holds and
+never asks a provider or a hub for a new reading: a hub's accounts appear once the Limits page or
+the composer's usage popup has read the hub since the server started, and keep the time of that
+read. Emails, account names, ids, credential files, plans and credits are left out.
 
 ### Codex banked resets
 

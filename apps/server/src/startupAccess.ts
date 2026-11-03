@@ -2,8 +2,8 @@ import { networkInterfaces } from "node:os";
 
 import type { AdvertisedEndpoint } from "@ryco/contracts";
 import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
+import { isLoopbackHost, isWildcardHost, pairingQrUrl } from "@ryco/shared/pairingQr";
 import { buildDirectPairingUrl, buildHostedPairingUrl } from "@ryco/shared/pairingUrl";
-import { QrCode } from "@ryco/shared/qrCode";
 import { isTailscaleIpv4Address } from "@ryco/tailscale";
 import { DateTime, Effect } from "effect";
 import { HttpServer } from "effect/http";
@@ -26,6 +26,8 @@ export interface HeadlessServeAccessInfo {
    */
   readonly token?: string;
   readonly pairingUrl?: string;
+  /** What the QR code holds: `pairingUrl`, or null when only this computer can reach it. */
+  readonly qrUrl?: string | null;
   /** Minutes until the one-time token expires, when known. */
   readonly tokenExpiresInMinutes?: number;
   /** Further ways to reach this server, beyond `pairingUrl`. */
@@ -36,22 +38,15 @@ export interface HeadlessServeAccessInfo {
 
 type NetworkInterfacesMap = ReturnType<typeof networkInterfaces>;
 
-export const isLoopbackHost = (host: string | undefined): boolean => {
-  if (!host || host.length === 0) {
-    return true;
-  }
+// The loopback rule lives with the pairing links, so the web's QR codes follow it too.
+export { isLoopbackHost, isWildcardHost, pairingQrUrl };
 
-  return (
-    host === "localhost" ||
-    host === "127.0.0.1" ||
-    host === "::1" ||
-    host === "[::1]" ||
-    host.startsWith("127.")
-  );
-};
-
-export const isWildcardHost = (host: string | undefined): boolean =>
-  host === "0.0.0.0" || host === "::" || host === "[::]";
+/**
+ * Printed instead of a QR code when the only pairing link is a loopback address: a
+ * phone scanning it would reach itself, not this node.
+ */
+export const LOOPBACK_ONLY_PAIRING_NOTE =
+  "Only this computer can reach this node. Turn on network access or Tailscale Serve to pair another device.";
 
 /**
  * Does the listener accept connections on every interface? An unset host does:
@@ -140,29 +135,18 @@ export const buildPairingUrl = (connectionString: string, token: string): string
   return url.toString();
 };
 
-export const renderTerminalQrCode = (value: string, margin = 2): string => {
-  const qrCode = QrCode.encodeText(value, QrCode.Ecc.MEDIUM);
-  const rows: Array<string> = [];
-  const isDark = (x: number, y: number): boolean =>
-    x >= 0 && x < qrCode.size && y >= 0 && y < qrCode.size && qrCode.getModule(x, y);
+/**
+ * `renderTerminalQrCode` of `terminalQrCode.ts`: the QR encoder loads when a command prints a
+ * code, never with the server's boot.
+ */
+export const loadTerminalQrCode = Effect.promise(() => import("./terminalQrCode.ts")).pipe(
+  Effect.map((module) => module.renderTerminalQrCode),
+);
 
-  for (let y = -margin; y < qrCode.size + margin; y += 2) {
-    let row = "";
-
-    for (let x = -margin; x < qrCode.size + margin; x += 1) {
-      const topDark = isDark(x, y);
-      const bottomDark = isDark(x, y + 1);
-
-      row += topDark ? (bottomDark ? "█" : "▀") : bottomDark ? "▄" : " ";
-    }
-
-    rows.push(row);
-  }
-
-  return rows.join("\n");
-};
-
-export const formatHeadlessServeOutput = (accessInfo: HeadlessServeAccessInfo): string => {
+export const formatHeadlessServeOutput = (
+  accessInfo: HeadlessServeAccessInfo,
+  renderQrCode: (value: string) => string,
+): string => {
   if (accessInfo.token === undefined || accessInfo.pairingUrl === undefined) {
     return [
       "Ryco server is ready.",
@@ -199,7 +183,11 @@ export const formatHeadlessServeOutput = (accessInfo: HeadlessServeAccessInfo): 
           `Hub relay: enabled via ${accessInfo.hubOrigin}. Link this node to your account with \`ryco hub login\` (or \`ryco hub enroll\`); check it with \`ryco hub status\`.`,
         ]),
     "",
-    renderTerminalQrCode(accessInfo.pairingUrl),
+    ...(accessInfo.qrUrl === undefined
+      ? [renderQrCode(accessInfo.pairingUrl)]
+      : accessInfo.qrUrl === null
+        ? [LOOPBACK_ONLY_PAIRING_NOTE]
+        : [renderQrCode(accessInfo.qrUrl)]),
     "",
   ].join("\n");
 };
@@ -221,6 +209,8 @@ export const resolveHeadlessServeLinks = (input: {
 }): {
   readonly connectionString: string;
   readonly pairingUrl: string;
+  /** `pairingUrl` unless it is a loopback address (the fallback, or a loopback `--base-url`). */
+  readonly qrUrl: string | null;
   readonly alternativeLinks: ReadonlyArray<HeadlessServeAccessLink>;
 } => {
   const reachable = input.endpoints.filter(
@@ -249,9 +239,11 @@ export const resolveHeadlessServeLinks = (input: {
       });
     }
   }
+  const pairingUrl = buildPairingUrl(connectionString, input.credential);
   return {
     connectionString,
-    pairingUrl: buildPairingUrl(connectionString, input.credential),
+    pairingUrl,
+    qrUrl: pairingQrUrl(pairingUrl),
     alternativeLinks,
   };
 };

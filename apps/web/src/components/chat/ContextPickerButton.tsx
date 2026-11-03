@@ -16,6 +16,7 @@ export function ContextPickerButton(props: {
   onSelectIssue: (issue: SourceControlIssueSummary) => void;
   onSelectChangeRequest: (cr: ChangeRequest) => void;
   onAttachFile: (file: File) => void;
+  onCaptureWindow?: (windowId: number) => void;
 }) {
   const [open, setOpen] = useState(false);
   // Auth state only matters once the picker is wanted: discovery probes several
@@ -74,6 +75,14 @@ export function ContextPickerButton(props: {
             props.onAttachFile(file);
             setOpen(false);
           }}
+          {...(props.onCaptureWindow
+            ? {
+                onCaptureWindow: (windowId: number) => {
+                  props.onCaptureWindow?.(windowId);
+                  setOpen(false);
+                },
+              }
+            : {})}
         />
       </PopoverPopup>
     </Popover>

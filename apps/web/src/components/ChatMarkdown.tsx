@@ -11,6 +11,7 @@ import {
 } from "./chat/codeHighlightQueue";
 import { terminalFenceSource } from "../lib/terminalFenceSource";
 import type { EnvironmentId, ServerProviderSkill } from "@ryco/contracts";
+import { isQuoteCitationHref, parseQuoteCitationHref } from "@ryco/shared/quoteCitations";
 import {
   Children,
   type ComponentPropsWithoutRef,
@@ -20,24 +21,35 @@ import {
   memo,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  use,
   type ReactNode,
 } from "react";
-import type { Components } from "react-markdown";
-import ReactMarkdown from "react-markdown";
+import { useRouter } from "@tanstack/react-router";
+import type { Components, UrlTransform } from "react-markdown";
 import { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import type { PluggableList } from "unified";
 import { createIncrementalMarkdownPlugin } from "../markdown-incremental";
+import {
+  buildStreamingMarkdownChildren,
+  renderMarkdownBlock,
+  type MarkdownBlock,
+  type StreamingMarkdownChildren,
+} from "../markdown-blocks";
 import { VscodeEntryIcon } from "./chat/VscodeEntryIcon";
+import { QuoteCitationChip } from "./chat/QuoteCitationChip";
+import { QuoteCitationContext } from "./chat/quoteCitationContext";
 import {
   renderSkillInlineMarkdownChildren,
   type SkillInlineTextSearchHighlight,
 } from "./chat/SkillInlineText";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { stackedThreadToast, toastManager } from "./ui/toast";
-import { openInPreferredEditor } from "../editorPreferences";
+import { openPathInEditor } from "../editorPreferences";
 import { resolveDiffThemeName, type DiffThemeName } from "../lib/diffRendering";
 import {
   isClosedMermaidFence,
@@ -48,13 +60,31 @@ import { MermaidDiagram } from "./MermaidDiagram";
 import { useTheme } from "../hooks/useTheme";
 import { useLongPress } from "../hooks/useLongPress";
 import { usePresentationTier } from "../hooks/usePresentationTier";
+import { useEvent } from "../hooks/useEvent";
+import { getClientSettings } from "../hooks/useSettings";
+import { getPresentationTier } from "../lib/presentationTier";
+import { readPrimaryEnvironmentDescriptor } from "../environments/primary";
+import { buildPullRequestLocation } from "../pullRequestsRoute";
+import { isSourceControlReadAdmitted } from "../rpc/sourceControlAtoms";
+import {
+  selectBootstrapCompleteForEnvironment,
+  selectProjectsAcrossEnvironments,
+  useStore,
+} from "../store";
+import { orderItemsByPreferredIds } from "./Sidebar.logic";
+import { getProjectOrderKey } from "../logicalProject";
+import { useUiStateStore } from "../uiStateStore";
 import { useSmoothStreamedText } from "../hooks/useSmoothStreamedText";
 import {
+  isPlainLinkClick,
+  resolveMarkdownChangeRequestCheckout,
   resolveMarkdownFileLinkMeta,
   resolveMarkdownThreadHref,
   rewriteMarkdownFileUriHref,
+  type MarkdownFileLinkMeta,
 } from "../markdown-links";
 import { readLocalApi } from "../localApi";
+import { useWorkspaceFileOpener } from "../workspaceFileNavigation";
 import { cn } from "../lib/utils";
 import { usePerfMark } from "../perf/tabSwitchInstrumentation";
 import { readEnvironmentApi } from "../environmentApi";
@@ -69,11 +99,49 @@ interface ChatMarkdownProps {
   cwd: string | undefined;
   environmentId?: EnvironmentId;
   isStreaming?: boolean;
+  /**
+   * Reveal streaming text gradually (the default). Off for text that arrives as finished
+   * blocks, such as paragraph-streamed replies: each block appears at once, and blocks that
+   * arrive after the message is on screen fade in.
+   */
+  smoothStreaming?: boolean;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   searchHighlight?: Omit<SkillInlineTextSearchHighlight, "cursor" | "keyPrefix"> | undefined;
+  /**
+   * Set when this renders a workspace document (a Markdown file in the Files
+   * panel) instead of a message: the document's own folder, which relative
+   * links and images resolve against. Containment, workspace reads and the
+   * Files panel stay scoped to `cwd`. It also switches links to document
+   * mode: the text is third-party content, so a link may open a workspace
+   * file in Ryco or an http(s)/mailto page, and nothing else; thread
+   * references (`/ryco/thread/…` links, `@thread:` mentions) stay text.
+   */
+  documentFolder?: string | undefined;
 }
 
 const EMPTY_MARKDOWN_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
+
+const MARKDOWN_REMARK_PLUGINS: PluggableList = [remarkGfm];
+
+interface MarkdownParseOptions {
+  readonly remarkPlugins: PluggableList;
+  /** The plugins of a stream's tail block: the streaming renderer's prefix cache too. */
+  readonly tailRemarkPlugins: PluggableList;
+  readonly components: Components;
+  readonly urlTransform: UrlTransform;
+}
+
+function parseMarkdownBlock(
+  block: MarkdownBlock,
+  options: MarkdownParseOptions,
+  tail: boolean,
+): readonly ReactNode[] {
+  return renderMarkdownBlock(block, {
+    remarkPlugins: tail ? options.tailRemarkPlugins : options.remarkPlugins,
+    components: options.components,
+    urlTransform: options.urlTransform,
+  });
+}
 
 const WorkspaceMarkdownImage = memo(function WorkspaceMarkdownImage(props: {
   environmentId: EnvironmentId;
@@ -346,10 +414,23 @@ interface MarkdownFileLinkProps {
   targetPath: string;
   displayPath: string;
   filePath: string;
+  /** The file inside the thread's workspace, when it is there; null otherwise. */
+  workspacePath: string | null;
+  line: number | undefined;
   label: string;
   theme: "light" | "dark";
   className?: string | undefined;
+  /**
+   * A plain click that cannot open the file in Ryco falls back to the editor
+   * (the default, for agent replies). Off in a rendered document, whose links
+   * reach the editor only on Cmd/Ctrl-click or from the link's menu.
+   */
+  editorOnPlainClick?: boolean | undefined;
+  /** Where the thread runs: decides how Open in editor reaches the file. */
+  environmentId: EnvironmentId | undefined;
 }
+
+type MarkdownFileLinkAction = "open-ryco" | "open" | "copy-relative" | "copy-full";
 
 const MARKDOWN_LINK_HREF_PATTERN = /\[[^\]]*]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g;
 // Plain inline flow — sizing and color live in the stylesheet so the chip sits
@@ -357,6 +438,17 @@ const MARKDOWN_LINK_HREF_PATTERN = /\[[^\]]*]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)
 const MARKDOWN_FILE_LINK_CLASS_NAME = "chat-markdown-file-link";
 const MARKDOWN_FILE_LINK_ICON_CLASS_NAME = "chat-markdown-file-link-icon";
 const MARKDOWN_FILE_LINK_LABEL_CLASS_NAME = "chat-markdown-file-link-label";
+const DOCUMENT_WEB_LINK_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
+
+/** A document link that may leave the app: an absolute http(s) or mailto URL. */
+function isDocumentWebLink(href: string | undefined): boolean {
+  if (!href) return false;
+  try {
+    return DOCUMENT_WEB_LINK_PROTOCOLS.has(new URL(href).protocol);
+  } catch {
+    return false;
+  }
+}
 
 function pathParentSegments(path: string): string[] {
   const normalized = path.replaceAll("\\", "/");
@@ -437,21 +529,38 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   targetPath,
   displayPath,
   filePath,
+  workspacePath,
+  line,
   label,
   theme,
   className,
+  editorOnPlainClick = true,
+  environmentId,
 }: MarkdownFileLinkProps) {
-  const handleOpen = useCallback(() => {
-    const api = readLocalApi();
-    if (!api) {
-      toastManager.add({
-        type: "error",
-        title: "Open in editor is unavailable",
-      });
-      return;
-    }
+  // Phone tier: long-press mirrors right-click, presenting the same file
+  // actions through the shared bottom action sheet. Its file actions stay
+  // as they were (the web phone tier is frozen).
+  const isPhoneTier = usePresentationTier() === "phone";
+  const workspaceFileOpener = useWorkspaceFileOpener();
+  // Ryco's own Files panel reads through the thread's node, so a file inside
+  // the workspace opens there on hosted web and remote nodes alike.
+  const canOpenInRyco = useCallback(
+    () =>
+      !isPhoneTier &&
+      workspacePath !== null &&
+      workspaceFileOpener.canOpen({ path: workspacePath, line }),
+    [isPhoneTier, line, workspaceFileOpener, workspacePath],
+  );
+  const handleOpenInRyco = useCallback(
+    () =>
+      canOpenInRyco() &&
+      workspacePath !== null &&
+      workspaceFileOpener.open({ path: workspacePath, line }),
+    [canOpenInRyco, line, workspaceFileOpener, workspacePath],
+  );
 
-    void openInPreferredEditor(api, targetPath).catch((error) => {
+  const handleOpen = useCallback(() => {
+    void openPathInEditor(environmentId, targetPath).catch((error) => {
       toastManager.add(
         stackedThreadToast({
           type: "error",
@@ -460,7 +569,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         }),
       );
     });
-  }, [targetPath]);
+  }, [environmentId, targetPath]);
 
   const handleCopy = useCallback((value: string, title: string) => {
     if (typeof window === "undefined" || !navigator.clipboard?.writeText) {
@@ -499,15 +608,20 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       const api = readLocalApi();
       if (!api) return;
 
-      const clicked = await api.contextMenu.show(
+      const clicked = await api.contextMenu.show<MarkdownFileLinkAction>(
         [
+          ...(canOpenInRyco() ? [{ id: "open-ryco" as const, label: "Open in Ryco" }] : []),
           { id: "open", label: "Open in editor" },
           { id: "copy-relative", label: "Copy relative path" },
           { id: "copy-full", label: "Copy full path" },
-        ] as const,
+        ],
         position,
       );
 
+      if (clicked === "open-ryco") {
+        if (!handleOpenInRyco()) handleOpen();
+        return;
+      }
       if (clicked === "open") {
         handleOpen();
         return;
@@ -520,7 +634,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         handleCopy(targetPath, "Full path");
       }
     },
-    [displayPath, handleCopy, handleOpen, targetPath],
+    [canOpenInRyco, displayPath, handleCopy, handleOpen, handleOpenInRyco, targetPath],
   );
 
   const handleContextMenu = useCallback(
@@ -532,9 +646,6 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
     [openFileLinkMenu],
   );
 
-  // Phone tier: long-press mirrors right-click, presenting the same file
-  // actions through the shared bottom action sheet.
-  const isPhoneTier = usePresentationTier() === "phone";
   const longPress = useLongPress(
     (point) => {
       void openFileLinkMenu(point);
@@ -558,8 +669,32 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
             onClick={(event) => {
               event.preventDefault();
               event.stopPropagation();
-              handleOpen();
+              // Cmd/Ctrl-click asks for the editor; a plain click opens the
+              // file in Ryco when it can.
+              if (event.metaKey || event.ctrlKey) handleOpen();
+              else if (!handleOpenInRyco()) {
+                if (editorOnPlainClick) handleOpen();
+                else
+                  toastManager.add({
+                    type: "info",
+                    title:
+                      workspacePath === null
+                        ? "This file is outside the thread's workspace."
+                        : "This file cannot be opened here.",
+                  });
+              }
             }}
+            {...(editorOnPlainClick
+              ? {}
+              : {
+                  // A document's href is its own relative text: a middle click
+                  // would open it against the app's origin in a new tab (or,
+                  // in the desktop app, in the external browser).
+                  onAuxClick: (event: ReactMouseEvent<HTMLAnchorElement>) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                  },
+                })}
             onContextMenu={(event) => {
               // A fired long-press already presented the menu; swallow the
               // platform's synthetic contextmenu instead of double-firing.
@@ -599,9 +734,13 @@ function areMarkdownFileLinkPropsEqual(
     previous.targetPath === next.targetPath &&
     previous.displayPath === next.displayPath &&
     previous.filePath === next.filePath &&
+    previous.workspacePath === next.workspacePath &&
+    previous.line === next.line &&
     previous.label === next.label &&
     previous.theme === next.theme &&
-    previous.className === next.className
+    previous.className === next.className &&
+    previous.editorOnPlainClick === next.editorOnPlainClick &&
+    previous.environmentId === next.environmentId
   );
 }
 
@@ -609,7 +748,10 @@ function ChatMarkdown(props: ChatMarkdownProps) {
   const isStreaming = Boolean(props.isStreaming);
   // Reveal streamed text at a steady, adaptive cadence so tokens appear fluidly
   // instead of in the bursts that land in the store. Governs cadence only.
-  const smoothedText = useSmoothStreamedText(props.text, isStreaming);
+  const smoothedText = useSmoothStreamedText(
+    props.text,
+    isStreaming && props.smoothStreaming !== false,
+  );
   // Bounding the markdown re-parse is the deferred value's job, not a fixed
   // timer's: React coalesces adaptively, so a cheap parse updates every frame
   // (which is what makes the smoothing above visible) while an expensive one
@@ -626,20 +768,41 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
   cwd,
   environmentId,
   isStreaming = false,
+  smoothStreaming = true,
   skills = EMPTY_MARKDOWN_SKILLS,
   searchHighlight,
   allowTerminalInsertion = false,
+  documentFolder,
 }: ChatMarkdownProps) {
   usePerfMark("ChatMarkdown");
+  const rootRef = useRef<HTMLDivElement>(null);
+  const fadeArrivingBlocks = isStreaming && !smoothStreaming;
+  // Arms the fade of arriving blocks (index.css) only once the blocks already on screen
+  // have their styles, so mounting or remounting a streaming message never fades it in.
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    if (!fadeArrivingBlocks) {
+      root.removeAttribute("data-streaming");
+      return;
+    }
+    if (root.hasAttribute("data-streaming")) return;
+    // Reading a computed style styles the current blocks first; @starting-style then
+    // applies only to blocks inserted later.
+    if (root.lastElementChild) void getComputedStyle(root.lastElementChild).opacity;
+    root.setAttribute("data-streaming", "");
+  }, [fadeArrivingBlocks]);
   const completedText = isStreaming ? "" : text;
   const { resolvedTheme } = useTheme();
   const diffThemeName = resolveDiffThemeName(resolvedTheme);
-  const incrementalParsing = isStreaming && /(?:^|\n) {0,3}(?:`{3}|~{3})/.test(text);
-  // Own the cache for this streaming renderer only; completion returns to the
-  // full parser so final replacements and highlighting always take effect.
-  const remarkPlugins = useMemo(
-    () => [remarkGfm, ...(incrementalParsing ? [createIncrementalMarkdownPlugin()] : [])],
-    [incrementalParsing],
+  // Own the prefix cache for this streaming renderer only; completion returns
+  // to the full parser so final replacements and highlighting always take effect.
+  const tailRemarkPlugins = useMemo<PluggableList>(
+    () =>
+      isStreaming
+        ? [...MARKDOWN_REMARK_PLUGINS, createIncrementalMarkdownPlugin()]
+        : MARKDOWN_REMARK_PLUGINS,
+    [isStreaming],
   );
   const searchHighlightCursorRef = useRef({ occurrenceIndex: 0 });
   searchHighlightCursorRef.current.occurrenceIndex = 0;
@@ -652,30 +815,76 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
       }
     : undefined;
   // Growing prose/code must not recreate every custom Markdown component (and
-  // remount completed images/code blocks) when the link destinations are unchanged.
+  // remount completed images/code blocks, or re-parse a stream's settled
+  // blocks) when the file link destinations are unchanged. Only file links
+  // reach the renderers, so a new web link keeps them too.
   const markdownLinkHrefsKey = JSON.stringify(extractMarkdownLinkHrefs(text));
-  const markdownFileLinkMetaByHref = useMemo(() => {
-    const metaByHref = new Map<
-      string,
-      NonNullable<ReturnType<typeof resolveMarkdownFileLinkMeta>>
-    >();
+  const markdownFileLinksKey = useMemo(() => {
+    const entries: Array<[string, MarkdownFileLinkMeta]> = [];
+    const seenHrefs = new Set<string>();
     for (const href of JSON.parse(markdownLinkHrefsKey) as string[]) {
       const normalizedHref = normalizeMarkdownLinkHrefKey(href);
-      if (metaByHref.has(normalizedHref)) continue;
-      const meta = resolveMarkdownFileLinkMeta(normalizedHref, cwd);
-      if (meta) {
-        metaByHref.set(normalizedHref, meta);
-      }
+      if (seenHrefs.has(normalizedHref)) continue;
+      seenHrefs.add(normalizedHref);
+      const meta = resolveMarkdownFileLinkMeta(normalizedHref, cwd, documentFolder);
+      if (meta) entries.push([normalizedHref, meta]);
     }
-    return metaByHref;
-  }, [cwd, markdownLinkHrefsKey]);
+    return JSON.stringify(entries);
+  }, [cwd, documentFolder, markdownLinkHrefsKey]);
+  const markdownFileLinkMetaByHref = useMemo(
+    () => new Map(JSON.parse(markdownFileLinksKey) as Array<[string, MarkdownFileLinkMeta]>),
+    [markdownFileLinksKey],
+  );
   const fileLinkParentSuffixByPath = useMemo(() => {
     const filePaths = [...markdownFileLinkMetaByHref.values()].map((meta) => meta.filePath);
     return buildFileLinkParentSuffixByPath(filePaths);
   }, [markdownFileLinkMetaByHref]);
-  const markdownUrlTransform = useCallback((href: string) => {
-    return rewriteMarkdownFileUriHref(href) ?? defaultUrlTransform(href);
-  }, []);
+  // Quote links render as chips, and only inside a sent user message. One
+  // that does not parse is an unsafe link like any other.
+  const rendersQuoteCitations = use(QuoteCitationContext) !== null;
+  const markdownUrlTransform = useCallback(
+    (href: string) => {
+      if (rendersQuoteCitations && parseQuoteCitationHref(href) !== null) return href;
+      return rewriteMarkdownFileUriHref(href) ?? defaultUrlTransform(href);
+    },
+    [rendersQuoteCitations],
+  );
+  // A rendered workspace file is third-party content: it never names threads,
+  // so its `@thread:` text stays text instead of a chip that opens one.
+  const documentMode = documentFolder !== undefined;
+  const inlineEnvironmentId = documentMode ? undefined : environmentId;
+  // Absent outside a router (isolated renders): links then keep opening the browser.
+  const router: ReturnType<typeof useRouter> | null | undefined = useRouter({ warn: false });
+  // A plain click on a pull request link opens it on the Pull requests page when one of the
+  // projects holds its repository. Everything is read at click time, so markdown never
+  // re-renders for project, settings or connection changes.
+  const handleChangeRequestLinkClick = useEvent(
+    (event: ReactMouseEvent<HTMLAnchorElement>, href: string | undefined) => {
+      if (!router || event.defaultPrevented || !isPlainLinkClick(event)) return;
+      if (getClientSettings().changeRequestLinkTarget === "browser") return;
+      // The frozen phone tier has no Pull requests page.
+      if (getPresentationTier() === "phone") return;
+      const state = useStore.getState();
+      const target = resolveMarkdownChangeRequestCheckout({
+        href,
+        // The sidebar's order, so a repository opens through the checkout the Pull requests
+        // page leads with.
+        projects: orderItemsByPreferredIds({
+          items: selectProjectsAcrossEnvironments(state),
+          preferredIds: useUiStateStore.getState().projectOrder,
+          getId: getProjectOrderKey,
+        }),
+        threadEnvironmentId: environmentId,
+        primaryEnvironmentId: readPrimaryEnvironmentDescriptor()?.environmentId ?? null,
+        isEnvironmentAvailable: (candidate) =>
+          selectBootstrapCompleteForEnvironment(state, candidate) &&
+          isSourceControlReadAdmitted(candidate),
+      });
+      if (target === null) return;
+      event.preventDefault();
+      void router.navigate(buildPullRequestLocation(target));
+    },
+  );
   const markdownComponents = useMemo<Components>(
     () => ({
       p({ node: _node, children, ...props }) {
@@ -685,7 +894,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
               children,
               skills,
               markdownSearchHighlightRef.current,
-              environmentId,
+              inlineEnvironmentId,
             )}
           </p>
         );
@@ -697,7 +906,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
               children,
               skills,
               markdownSearchHighlightRef.current,
-              environmentId,
+              inlineEnvironmentId,
             )}
           </li>
         );
@@ -709,7 +918,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
               children,
               skills,
               markdownSearchHighlightRef.current,
-              environmentId,
+              inlineEnvironmentId,
             )}
           </blockquote>
         );
@@ -730,7 +939,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
               children,
               skills,
               markdownSearchHighlightRef.current,
-              environmentId,
+              inlineEnvironmentId,
             )}
           </td>
         );
@@ -742,13 +951,16 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
               children,
               skills,
               markdownSearchHighlightRef.current,
-              environmentId,
+              inlineEnvironmentId,
             )}
           </th>
         );
       },
       a({ node: _node, href, ...props }) {
-        const threadHref = resolveMarkdownThreadHref(href, environmentId);
+        const quoteCitation =
+          rendersQuoteCitations && isQuoteCitationHref(href) ? parseQuoteCitationHref(href) : null;
+        if (quoteCitation) return <QuoteCitationChip citation={quoteCitation} />;
+        const threadHref = documentMode ? null : resolveMarkdownThreadHref(href, environmentId);
         if (threadHref)
           return (
             <a {...props} href={threadHref}>
@@ -756,10 +968,36 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
             </a>
           );
         const normalizedHref = href ? normalizeMarkdownLinkHrefKey(href) : "";
-        const fileLinkMeta = normalizedHref ? markdownFileLinkMetaByHref.get(normalizedHref) : null;
+        // The precomputed map holds inline links only; a document's reference
+        // links (`[x][ref]`) and linked images resolve from the href here.
+        const fileLinkMeta = normalizedHref
+          ? (markdownFileLinkMetaByHref.get(normalizedHref) ??
+            (documentMode
+              ? resolveMarkdownFileLinkMeta(normalizedHref, cwd, documentFolder)
+              : null))
+          : null;
+        if (!fileLinkMeta && documentMode && !isDocumentWebLink(href)) {
+          // Anchors, other relative links and emptied hrefs do nothing in a
+          // document: no new tab of the app's own origin, no external browser.
+          return (
+            <span className="chat-markdown-inert-link" title={href || undefined}>
+              {renderSkillInlineMarkdownChildren(
+                props.children,
+                skills,
+                markdownSearchHighlightRef.current,
+              )}
+            </span>
+          );
+        }
         if (!fileLinkMeta) {
           return (
-            <a {...props} href={href} target="_blank" rel="noopener noreferrer">
+            <a
+              {...props}
+              href={href}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(event) => handleChangeRequestLinkClick(event, href)}
+            >
               {renderSkillInlineMarkdownChildren(
                 props.children,
                 skills,
@@ -789,14 +1027,18 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
             targetPath={fileLinkMeta.targetPath}
             displayPath={fileLinkMeta.displayPath}
             filePath={fileLinkMeta.filePath}
+            workspacePath={fileLinkMeta.workspacePath}
+            line={fileLinkMeta.line}
             label={labelParts.join(" · ")}
             theme={resolvedTheme}
             className={props.className}
+            {...(documentMode ? { editorOnPlainClick: false } : {})}
+            environmentId={environmentId}
           />
         );
       },
       img({ node: _node, src, alt, title }) {
-        const relativePath = resolveMarkdownWorkspaceImagePath(src, cwd);
+        const relativePath = resolveMarkdownWorkspaceImagePath(src, cwd, documentFolder);
         if (relativePath && cwd && environmentId) {
           return (
             <WorkspaceMarkdownImage
@@ -909,26 +1151,49 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
     [
       diffThemeName,
       cwd,
+      documentFolder,
+      documentMode,
       environmentId,
       fileLinkParentSuffixByPath,
+      inlineEnvironmentId,
       isStreaming,
       completedText,
       markdownFileLinkMetaByHref,
       resolvedTheme,
       skills,
       allowTerminalInsertion,
+      rendersQuoteCitations,
+      handleChangeRequestLinkClick,
     ],
   );
 
+  // A streaming message parses and renders its settled top-level blocks once:
+  // they keep their element objects, so React skips them and only the tail
+  // re-renders. A search highlight numbers its hits in render order across the
+  // whole message, so a message with hits renders as one parse instead.
+  // Everything else the renderers read is in `markdownComponents`: a changed
+  // file link set (basename disambiguation) re-parses every block.
+  const markdownChildrenRef = useRef<StreamingMarkdownChildren<MarkdownParseOptions> | null>(null);
+  const markdownChildren = buildStreamingMarkdownChildren(
+    markdownChildrenRef.current,
+    text,
+    isStreaming && searchHighlight === undefined,
+    {
+      remarkPlugins: MARKDOWN_REMARK_PLUGINS,
+      tailRemarkPlugins,
+      components: markdownComponents,
+      urlTransform: markdownUrlTransform,
+    },
+    parseMarkdownBlock,
+  );
+  markdownChildrenRef.current = markdownChildren;
+
   return (
-    <div className="chat-markdown w-full min-w-0 text-sm leading-relaxed text-foreground/80">
-      <ReactMarkdown
-        remarkPlugins={remarkPlugins}
-        components={markdownComponents}
-        urlTransform={markdownUrlTransform}
-      >
-        {text}
-      </ReactMarkdown>
+    <div
+      ref={rootRef}
+      className="chat-markdown w-full min-w-0 text-sm leading-relaxed text-foreground/80"
+    >
+      {markdownChildren.children}
     </div>
   );
 });

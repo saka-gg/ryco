@@ -33,10 +33,13 @@ import {
   AGENT_CONTROL_MCP_MODELS_PER_INSTANCE_MAX,
   AGENT_CONTROL_MCP_TOOLS,
   AGENT_CONTROL_MCP_TOOL_NAMES,
+  AGENT_CONTROL_MCP_USAGE_LIMITS_MAX,
   AGENT_CONTROL_MCP_WAIT_TIMEOUT_MS_MAX,
   AGENT_CONTROL_CAPABILITIES,
+  AGENT_CONTROL_CREATE_THREADS_MAX_CONCURRENT,
   AgentControlMcpCapabilitiesResult,
   AgentControlAutomationId,
+  AgentControlProposalId,
   AgentControlMcpDiagnosticsSummaryInput,
   AgentControlMcpDiagnosticsSummaryResult,
   AgentControlMcpListDevicesInput,
@@ -77,11 +80,14 @@ import {
   AgentControlMcpProposeProjectRemoveInput,
   AgentControlMcpProposeProjectUpdateInput,
   AgentControlMcpProposeSettingsChangeInput,
+  AgentControlMcpPullRequestWatchInput,
   AgentControlMcpReadControlRequestInput,
   AgentControlMcpReadThreadInput,
   AgentControlMcpSendMessageInput,
   AgentControlMcpSettingsSummaryResult,
   AgentControlMcpUpdateThreadInput,
+  AgentControlMcpUsageLimitsInput,
+  AgentControlMcpUsageLimitsResult,
   AgentControlMcpWaitForControlRequestInput,
   type AgentControlAutomation,
   type AgentControlMcpProviderInstanceSummary,
@@ -89,19 +95,22 @@ import {
   type AgentControlActionPlan,
   type AgentControlDeviceActionPlan,
   type AgentControlCapability,
+  type CliProxyHubError,
   type OrchestrationProjectShell,
   type ServerProvider,
   type ServerSettings,
   type ServerSettingsError,
 } from "@ryco/contracts";
 import { projectKindOf } from "@ryco/shared/projectKind";
-import { Effect, Option, Schema } from "effect";
+import { Clock, Effect, Option, Schema } from "effect";
 
 import {
   type ProjectionSnapshotQueryShape,
   readProjectShells,
 } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import type { CliProxyCachedHub } from "../../cliProxy/CliProxyService.ts";
 import type { DeviceServiceShape } from "../../device/Services/DeviceService.ts";
+import { fitScreenshotToBase64Budget } from "../../screenshotFit.ts";
 import type { WorkspaceAccessPolicyShape } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import type { AgentControlPolicyShape } from "../Services/AgentControlPolicy.ts";
 import type { AgentControlActionValidatorShape } from "../Services/AgentControlActionValidator.ts";
@@ -116,6 +125,10 @@ import type {
   AgentControlTurnAuthority,
 } from "../Services/AgentControlSessionRegistry.ts";
 import { agentControlSupportForDriver } from "../ProviderInjection.ts";
+import {
+  automationDefinitionAfterUpdateInput,
+  automationDefinitionFromCreateInput,
+} from "../automationToolInput.ts";
 import { agentControlSettingsPlan, agentControlSettingsSummary } from "../settingsControl.ts";
 import {
   assertSafeAgentControlDeviceUrl,
@@ -133,6 +146,7 @@ import { readControlRequestReceipt, waitForControlRequestReceipt } from "./propo
 import {
   interruptThreadPlan,
   planWorkspaceLifecycle,
+  pullRequestWatchPlan,
   sendMessagePlan,
   updateThreadPlan,
 } from "./controlPlans.ts";
@@ -177,6 +191,8 @@ export interface AgentControlMcpToolDeps {
   readonly deviceService?: DeviceServiceShape;
   readonly workspaceAccess?: WorkspaceAccessPolicyShape;
   readonly getSettings?: Effect.Effect<ServerSettings, ServerSettingsError>;
+  /** Enabled CLIProxyAPI hubs as earlier reads cached them (`CliProxyService.cachedQuotas`). */
+  readonly getCliProxyHubs?: Effect.Effect<ReadonlyArray<CliProxyCachedHub>, CliProxyHubError>;
   readonly getTurnAuthority?: (
     sessionId: string,
   ) => Effect.Effect<Option.Option<AgentControlTurnAuthority>>;
@@ -246,7 +262,18 @@ const projectScriptsSchema = {
 } as const;
 
 const cursorSchemaProperty = { type: "string", maxLength: 1_024 } as const;
-const AGENT_CONTROL_DEVICE_UI_CONTENT_MAX_CHARS = 512 * 1_024;
+/**
+ * A UI tree as JSON, measured as it travels (escaped inside the result's
+ * JSON, in UTF-8), with room left in the 512 KiB response cap
+ * (`transportGuard.ts`) for the JSON-RPC envelope.
+ */
+const AGENT_CONTROL_DEVICE_UI_CONTENT_MAX_BYTES = 400_000;
+/**
+ * Base64 characters one device image may use in an Agent Control result: the
+ * HTML preview's budget, which leaves about 150 KB of the 512 KiB response
+ * cap for the JSON, a screen snapshot and the driving guide beside it.
+ */
+export const AGENT_CONTROL_DEVICE_IMAGE_MAX_BASE64_CHARS = 360_000;
 const limitSchemaProperty = (maximum: number) =>
   ({ type: "integer", minimum: 1, maximum }) as const;
 const automationScheduleSchema = {
@@ -268,6 +295,20 @@ const automationScheduleSchema = {
       required: ["kind", "startsAt", "intervalMs", "endsAt"],
       additionalProperties: false,
     },
+    {
+      // localTime "HH:MM" on weekdays (0 = Sunday) in an IANA timeZone; the contract checks it.
+      type: "object",
+      properties: {
+        kind: { const: "calendar" },
+        timeZone: { type: "string" },
+        localTime: { type: "string" },
+        weekdays: { type: "array", items: { type: "integer" } },
+        startsAt: { type: "string" },
+        endsAt: { type: "string" },
+      },
+      required: ["kind", "timeZone", "localTime", "weekdays", "startsAt", "endsAt"],
+      additionalProperties: false,
+    },
   ],
 } as const;
 
@@ -285,6 +326,25 @@ const deviceMutationTargetProperties = {
   expectedDeviceBootSource: { type: "string", enum: ["ryco", "user"] },
   expectedRecording: { type: "boolean" },
 } as const;
+
+const pullRequestWatchInputSchema = {
+  type: "object",
+  properties: {
+    requestId: { type: "string", maxLength: 128 },
+    threadId: {
+      type: "string",
+      maxLength: 256,
+      description: "The chat to wake; defaults to this one.",
+    },
+    number: { type: "integer", minimum: 1 },
+    url: { type: "string", maxLength: 2048, pattern: "^https?://" },
+  },
+  required: ["requestId"],
+  additionalProperties: false,
+} as const;
+
+// Its handler module loads on the first call, off the boot path.
+const loadUsageLimits = Effect.promise(() => import("./usageLimits.ts"));
 
 const deviceMutationTargetRequired = [
   "requestId",
@@ -529,13 +589,24 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
   {
     name: AGENT_CONTROL_MCP_TOOLS.readThread,
     description:
-      "Read one thread's status header and a bounded, newest-first page of its conversation messages (cursor pages older history).",
+      "Read one thread's status header and a bounded, newest-first page of its conversation messages (cursor pages older history). A message cut short carries version and nextOffsetChars: pass them with its messageId as message to read the rest. The first page also lists the thread's queued follow-ups, next first, and why the queue waits.",
     inputSchema: {
       type: "object",
       properties: {
         threadId: { type: "string", maxLength: 256 },
         messageLimit: limitSchemaProperty(AGENT_CONTROL_MCP_MESSAGE_LIMIT_MAX),
         cursor: cursorSchemaProperty,
+        message: {
+          type: "object",
+          description: "Continue one long message instead of reading a page; not with cursor.",
+          properties: {
+            messageId: { type: "string", maxLength: 256 },
+            version: { type: "string", maxLength: 64 },
+            offsetChars: { type: "integer", minimum: 0 },
+          },
+          required: ["messageId", "version", "offsetChars"],
+          additionalProperties: false,
+        },
       },
       required: ["threadId"],
       additionalProperties: false,
@@ -570,7 +641,7 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
   {
     name: AGENT_CONTROL_MCP_TOOLS.createThreads,
     description:
-      "Create a bounded batch of Ryco threads, including isolated worktrees. Routine requests execute asynchronously. Keep requestId stable on retries; wait for the returned receipt to obtain created thread IDs. A completed receipt means dispatch, not task completion. Opt in per entry with returnToOrigin to have Ryco wake this chat with the task's result, or a failure/stop notice, when it reaches a terminal state; results of tasks finishing together arrive in one automatic message, even after a restart or after this chat moved on, with copies of the pages and files the task published attached. Hand this thread's artifacts (ids from ryco_list_artifacts) to a new thread with an entry's artifacts: it gets copies attached to its first message. Confirm creation with ryco_wait_for_control_request, then end your turn instead of polling. Inspect completionReturns with ryco_read_control_request. No self-approval or exactly-once provider delivery is implied.",
+      "Create a bounded batch of Ryco threads, including isolated worktrees. Routine requests execute asynchronously. Keep requestId stable on retries; wait for the returned receipt to obtain created thread IDs. A completed receipt means dispatch, not task completion. Opt in per entry with returnToOrigin to have Ryco wake this chat with the task's result, or a failure/stop notice, when it reaches a terminal state; results of tasks finishing together arrive in one automatic message, even after a restart or after this chat moved on, with copies of the pages and files the task published attached. Hand this thread's artifacts (ids from ryco_list_artifacts) to a new thread with an entry's artifacts: it gets copies attached to its first message. Set maxConcurrent to run at most that many at once: the first entries start, each later one waits in its thread's follow-up queue and starts, in order, when an earlier one stops working. Confirm creation with ryco_wait_for_control_request, then end your turn instead of polling. Inspect completionReturns with ryco_read_control_request. No self-approval or exactly-once provider delivery is implied.",
     inputSchema: {
       type: "object",
       properties: {
@@ -617,6 +688,13 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
             additionalProperties: false,
           },
         },
+        maxConcurrent: {
+          type: "integer",
+          minimum: 1,
+          maximum: AGENT_CONTROL_CREATE_THREADS_MAX_CONCURRENT,
+          description:
+            "Run at most this many entries at once, in entry order; the others wait, queued in their thread. Defaults to all at once.",
+        },
       },
       required: ["requestId", "entries"],
       additionalProperties: false,
@@ -625,7 +703,7 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
   {
     name: AGENT_CONTROL_MCP_TOOLS.sendMessage,
     description:
-      "Queue or steer a message to a Ryco thread through the durable operation queue. Use a stable requestId for retries and read or wait for the returned receipt.",
+      "Queue or steer a message to a Ryco thread through the durable operation queue. A queued message joins the thread's follow-up queue, visible and editable in the chat, and is sent when the thread is idle, after follow-ups queued before it; the request completes once it is queued. Use a stable requestId for retries and read or wait for the returned receipt.",
     inputSchema: {
       type: "object",
       properties: {
@@ -654,9 +732,21 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
     },
   },
   {
+    name: AGENT_CONTROL_MCP_TOOLS.watchPullRequest,
+    description:
+      "Use this instead of polling, sleeping or running a watcher: Ryco watches a pull request for a chat (this one by default) every 2 minutes, with no app open, and wakes the chat with an automatic message when a check fails, the required checks pass, someone else comments or reviews, or the branch starts to conflict. Without number or url: the pull request of the chat's workspace (one you just opened is linked first). A number or url may name a pull request of any workspace in this project. Only changes after this call wake you; the result's detail says how it stands now. End your turn after it. A wake is news, not a merge decision. Ryco stops after 8 failed reads, 10 comment-only updates in a row, or a merge or close. Before you hand the work back, call ryco_unwatch_pull_request so the chat can settle. A chat delegated with returnToOrigin cannot watch: report the pull request in your result. Waits up to 25 s for the outcome; if timedOut, use ryco_wait_for_control_request.",
+    inputSchema: pullRequestWatchInputSchema,
+  },
+  {
+    name: AGENT_CONTROL_MCP_TOOLS.unwatchPullRequest,
+    description:
+      "Stop Ryco waking a chat (this one by default) with a pull request's news: the one named by number or url, else the one the chat watches (of several, its own workspace's). Call it before you hand the work back, so the chat can settle. The user's Auto-fix CI keeps running.",
+    inputSchema: pullRequestWatchInputSchema,
+  },
+  {
     name: AGENT_CONTROL_MCP_TOOLS.updateThread,
     description:
-      "Update thread title, model and options, interaction mode, token mode, archive state, or persistent goal. Archiving and runtime permission changes require approval; other changes execute asynchronously.",
+      'Update thread title, model and options, interaction mode, token mode, archive state, or persistent goal. goalStatus reports on your own thread\'s goal: "complete" when the whole objective is verified done, "blocked" when the same outside blocker has stopped progress for three goal turns; either ends Ryco\'s automatic goal turns. Archiving and runtime permission changes require approval; other changes execute asynchronously.',
     inputSchema: {
       type: "object",
       properties: {
@@ -665,6 +755,7 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
         title: { type: "string", minLength: 1, maxLength: 200 },
         archived: { type: "boolean" },
         persistentGoal: { anyOf: [{ type: "string", maxLength: 4000 }, { type: "null" }] },
+        goalStatus: { type: "string", enum: ["complete", "blocked"] },
         modelSelection: modelSelectionSchema,
         runtimeMode: {
           type: "string",
@@ -809,7 +900,7 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
   {
     name: AGENT_CONTROL_MCP_TOOLS.proposeAutomationCreate,
     description:
-      "Request approval for a bounded schedule definition. Approval creates no thread or provider turn; every due run gets a new approval request.",
+      "Request approval for a bounded schedule definition. Approval creates no thread or provider turn; every due run gets a new approval request. A calendar schedule runs at localTime (HH:MM) on weekdays (0 = Sunday) in an IANA timeZone. Each run starts a new thread, or with targetThreadId queues its prompt in that existing thread of the same project (a heartbeat; sent like the thread's other follow-ups, with its current model and modes).",
     inputSchema: {
       type: "object",
       properties: {
@@ -824,6 +915,7 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
         tokenMode: { type: "string", enum: ["off", "balanced", "aggressive"] },
         envMode: { type: "string", enum: ["local", "worktree"] },
         baseRef: { type: "string", maxLength: 256 },
+        targetThreadId: { type: "string", maxLength: 256 },
         schedule: automationScheduleSchema,
         enabled: { type: "boolean" },
       },
@@ -844,7 +936,8 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
   },
   {
     name: AGENT_CONTROL_MCP_TOOLS.proposeAutomationUpdate,
-    description: "Request approval for an exact revision-guarded schedule replacement.",
+    description:
+      "Request approval for an exact revision-guarded schedule replacement. targetThreadId null makes runs start new threads again.",
     inputSchema: {
       type: "object",
       properties: {
@@ -860,6 +953,7 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
         tokenMode: { type: "string", enum: ["off", "balanced", "aggressive"] },
         envMode: { type: "string", enum: ["local", "worktree"] },
         baseRef: { anyOf: [{ type: "string", maxLength: 256 }, { type: "null" }] },
+        targetThreadId: { anyOf: [{ type: "string", maxLength: 256 }, { type: "null" }] },
         schedule: automationScheduleSchema,
         enabled: { type: "boolean" },
       },
@@ -923,6 +1017,16 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
       additionalProperties: false,
     },
   },
+  {
+    name: AGENT_CONTROL_MCP_TOOLS.usageLimits,
+    description:
+      "Read the usage limits Ryco last read for each enabled provider instance and each CLIProxyAPI hub's accounts: per window the percent used, the reset time and the pace. Never asks a provider or a hub. Use it to pick an instance with headroom or to stop before a limit.",
+    inputSchema: {
+      type: "object",
+      properties: { instanceId: { type: "string", maxLength: 256 } },
+      additionalProperties: false,
+    },
+  },
 ];
 
 const WRITE_TOOL_NAMES = new Set<string>([
@@ -947,6 +1051,8 @@ const WRITE_TOOL_NAMES = new Set<string>([
   AGENT_CONTROL_MCP_TOOLS.proposeDeviceInput,
   AGENT_CONTROL_MCP_TOOLS.proposeDeviceRecording,
   AGENT_CONTROL_MCP_TOOLS.proposeDeviceShutdown,
+  AGENT_CONTROL_MCP_TOOLS.watchPullRequest,
+  AGENT_CONTROL_MCP_TOOLS.unwatchPullRequest,
 ]);
 
 const DEVICE_CONTROL_TOOL_NAMES = new Set<string>([
@@ -999,6 +1105,9 @@ const writeCapabilityForTool = (name: string): AgentControlCapability | null => 
     case AGENT_CONTROL_MCP_TOOLS.proposeDeviceRecording:
     case AGENT_CONTROL_MCP_TOOLS.proposeDeviceShutdown:
       return AGENT_CONTROL_CAPABILITIES.controlDevices;
+    case AGENT_CONTROL_MCP_TOOLS.watchPullRequest:
+    case AGENT_CONTROL_MCP_TOOLS.unwatchPullRequest:
+      return AGENT_CONTROL_CAPABILITIES.watchPullRequests;
     default:
       return null;
   }
@@ -1029,7 +1138,10 @@ const readCapabilityForTool = (name: string): AgentControlCapability => {
     name === AGENT_CONTROL_MCP_TOOLS.providerRuntimeEvents
   )
     return AGENT_CONTROL_CAPABILITIES.readActivity;
-  if (name === AGENT_CONTROL_MCP_TOOLS.diagnosticsSummary) {
+  if (
+    name === AGENT_CONTROL_MCP_TOOLS.diagnosticsSummary ||
+    name === AGENT_CONTROL_MCP_TOOLS.usageLimits
+  ) {
     return AGENT_CONTROL_CAPABILITIES.readDiagnostics;
   }
   return AGENT_CONTROL_CAPABILITIES.read;
@@ -1094,12 +1206,46 @@ const toInstanceSummary = (provider: ServerProvider): AgentControlMcpProviderIns
  * a provider-session principal of the same thread. Everything else reads
  * as not-found — absence and authorization failure stay indistinguishable.
  */
-const proposalVisibleToSession = (
+export const proposalVisibleToSession = (
   proposal: AgentControlProposal,
   session: AgentControlSessionRecord,
 ): boolean =>
   proposal.principal.kind === "provider-session" &&
   proposal.principal.threadId === session.threadId;
+
+/**
+ * The caller's own earlier request of `requestId`, as a replayed mutation answer (its receipt),
+ * or none when the id is new. The same id with another plan is refused.
+ */
+export const replayedAgentControlMutation = (
+  proposals: Pick<AgentControlProposalServiceShape, "findByRequest">,
+  session: AgentControlSessionRecord,
+  requestId: Parameters<AgentControlProposalServiceShape["submit"]>[0]["requestId"],
+  plan: AgentControlActionPlan,
+) =>
+  Effect.gen(function* () {
+    if (proposals.findByRequest === undefined) return Option.none();
+    const existing = yield* proposals
+      .findByRequest(
+        {
+          kind: "provider-session",
+          threadId: session.threadId,
+          providerInstanceId: session.providerInstanceId,
+        },
+        requestId,
+      )
+      .pipe(Effect.mapError(() => new ToolFailure("Control request lookup failed.")));
+    if (Option.isNone(existing)) return Option.none();
+    if (existing.value.planDigest !== computeAgentControlPlanDigest(plan)) {
+      return yield* failTool("Request ID was already used with a different plan.");
+    }
+    return Option.some(
+      Schema.encodeSync(AgentControlMcpMutationResult)({
+        receipt: toAgentControlProposalReceipt(existing.value),
+        replayed: true,
+      }),
+    );
+  });
 
 /**
  * Submits a validated mutation plan for the caller's exact turn: routine plans execute, the rest
@@ -1304,7 +1450,11 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
         session,
         authority,
         requestId: input.requestId,
-        plan: { kind: "createThreads", entries: input.entries },
+        plan: {
+          kind: "createThreads",
+          entries: input.entries,
+          ...(input.maxConcurrent === undefined ? {} : { maxConcurrent: input.maxConcurrent }),
+        },
       });
     });
 
@@ -1353,6 +1503,42 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
       });
     });
 
+  /**
+   * Routine and quick: the answer waits (bounded) for the outcome, so the agent reads how the pull
+   * request stands, or why it cannot be watched, in the same call.
+   */
+  const pullRequestWatch = (
+    session: AgentControlSessionRecord,
+    authority: AgentControlTurnAuthority,
+    args: unknown,
+    watching: boolean,
+  ) =>
+    Effect.gen(function* () {
+      const input = yield* decodeArgs(AgentControlMcpPullRequestWatchInput, args);
+      const submitted = yield* submitMutation({
+        session,
+        authority,
+        requestId: input.requestId,
+        plan: pullRequestWatchPlan(input, session.threadId, watching),
+      });
+      const settled = yield* waitForControlRequestReceipt({
+        proposals: deps.proposals,
+        proposalEvents: deps.proposalEvents,
+        proposalId: AgentControlProposalId.make(submitted.receipt.proposalId),
+        waitFor: "terminal",
+        timeoutMs: undefined,
+        visible: (proposal) => proposalVisibleToSession(proposal, session),
+      }).pipe(
+        // The request stands either way: an unreadable outcome is followed up like a slow one.
+        Effect.catch(() => Effect.succeed({ receipt: submitted.receipt, timedOut: true })),
+      );
+      return {
+        receipt: settled.receipt,
+        replayed: submitted.replayed,
+        timedOut: settled.timedOut ?? false,
+      };
+    });
+
   const workspaceTool = (
     session: AgentControlSessionRecord,
     name: string,
@@ -1376,26 +1562,13 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
       }
       if (!authority) return yield* failTool("Exact active-turn authority required.");
       const input = yield* decodeArgs(AgentControlProposeWorkspaceInput, args);
-      if (deps.proposals.findByRequest) {
-        const existing = yield* deps.proposals
-          .findByRequest(
-            {
-              kind: "provider-session",
-              threadId: session.threadId,
-              providerInstanceId: session.providerInstanceId,
-            },
-            input.requestId,
-          )
-          .pipe(Effect.mapError(() => new ToolFailure("Control request lookup failed.")));
-        if (Option.isSome(existing)) {
-          if (existing.value.planDigest !== computeAgentControlPlanDigest(input.plan))
-            return yield* failTool("Request ID was already used with a different plan.");
-          return Schema.encodeSync(AgentControlMcpMutationResult)({
-            receipt: toAgentControlProposalReceipt(existing.value),
-            replayed: true,
-          });
-        }
-      }
+      const replayed = yield* replayedAgentControlMutation(
+        deps.proposals,
+        session,
+        input.requestId,
+        input.plan,
+      );
+      if (Option.isSome(replayed)) return replayed.value;
       return yield* submitMutation({
         session,
         authority,
@@ -1620,13 +1793,49 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
         () => service.manager.screenshot(udid, { save: false }),
         "Device screenshot read failed.",
       );
+      const image = {
+        type: "image",
+        data: screenshot.bytesBase64,
+        mimeType: screenshot.mimeType,
+      } as AgentControlMcpToolResult["content"][number];
+      if (screenshot.bytesBase64.length <= AGENT_CONTROL_DEVICE_IMAGE_MAX_BASE64_CHARS) {
+        return {
+          _tag: "PrivateDeviceContentResult",
+          content: [image],
+        } satisfies PrivateDeviceContentResult;
+      }
+      // A full-resolution simulator PNG often passes the response cap; the
+      // listener would replace it with an opaque "Response too large".
+      const fitted = yield* devicePromise(
+        () =>
+          fitScreenshotToBase64Budget(
+            screenshot.bytesBase64,
+            AGENT_CONTROL_DEVICE_IMAGE_MAX_BASE64_CHARS,
+          ),
+        "The screenshot is too large to return.",
+      );
       return {
         _tag: "PrivateDeviceContentResult",
         content: [
+          // The capture's own size beside the fitted one (as device_screenshot
+          // reports it): Android input coordinates are capture pixels, so a
+          // position read from a scaled image needs scaling back.
+          {
+            type: "text",
+            text: JSON.stringify({
+              width: screenshot.width,
+              height: screenshot.height,
+              scaledToFitTransport: {
+                mimeType: fitted.mimeType,
+                width: fitted.width,
+                height: fitted.height,
+              },
+            }),
+          },
           {
             type: "image",
-            data: screenshot.bytesBase64,
-            mimeType: "image/png",
+            data: fitted.data,
+            mimeType: fitted.mimeType,
           } as AgentControlMcpToolResult["content"][number],
         ],
       } satisfies PrivateDeviceContentResult;
@@ -1640,7 +1849,10 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
         "Device UI read failed.",
       );
       const encoded = JSON.stringify(tree);
-      if (encoded.length > AGENT_CONTROL_DEVICE_UI_CONTENT_MAX_CHARS) {
+      if (
+        Buffer.byteLength(JSON.stringify(encoded), "utf8") >
+        AGENT_CONTROL_DEVICE_UI_CONTENT_MAX_BYTES
+      ) {
         return yield* failTool("Device UI content exceeds the internal read limit.");
       }
       return {
@@ -1942,24 +2154,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
         plan: {
           kind: "createAutomation",
           automationId,
-          definition: {
-            execution: {
-              projectId: input.projectId,
-              title: input.title,
-              prompt: input.prompt,
-              modelSelection: {
-                instanceId: input.providerInstanceId,
-                model: input.model,
-                options: input.options,
-              },
-              runtimeMode: input.runtimeMode,
-              ...(input.tokenMode === undefined ? {} : { tokenMode: input.tokenMode }),
-              envMode: input.envMode,
-              ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
-            },
-            schedule: input.schedule,
-            enabled: input.enabled ?? true,
-          },
+          definition: automationDefinitionFromCreateInput(input),
         },
       });
     });
@@ -1981,10 +2176,6 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
       if (current.revision !== input.expectedRevision) {
         return yield* failTool("Automation revision changed.");
       }
-      const currentExecution = current.definition.execution;
-      const nextBaseRef =
-        input.baseRef === null ? undefined : (input.baseRef ?? currentExecution.baseRef);
-      const nextOptions = input.options ?? currentExecution.modelSelection.options;
       return yield* submitMutation({
         session,
         authority,
@@ -1998,28 +2189,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
             cancelled: current.cancelled,
             updatedAt: current.updatedAt,
           },
-          after: {
-            execution: {
-              projectId: currentExecution.projectId,
-              title: input.title ?? currentExecution.title,
-              prompt: input.prompt ?? currentExecution.prompt,
-              modelSelection: {
-                instanceId: input.providerInstanceId ?? currentExecution.modelSelection.instanceId,
-                model: input.model ?? currentExecution.modelSelection.model,
-                ...(nextOptions === undefined ? {} : { options: nextOptions }),
-              },
-              runtimeMode: input.runtimeMode ?? currentExecution.runtimeMode,
-              ...(input.tokenMode !== undefined
-                ? { tokenMode: input.tokenMode }
-                : currentExecution.tokenMode !== undefined
-                  ? { tokenMode: currentExecution.tokenMode }
-                  : {}),
-              envMode: input.envMode ?? currentExecution.envMode,
-              ...(nextBaseRef === undefined ? {} : { baseRef: nextBaseRef }),
-            },
-            schedule: input.schedule ?? current.definition.schedule,
-            enabled: input.enabled ?? current.definition.enabled,
-          },
+          after: automationDefinitionAfterUpdateInput(current, input),
         },
       });
     });
@@ -2107,6 +2277,25 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
         .summary(scope)
         .pipe(Effect.mapError(() => new ToolFailure("Diagnostics read failed.")));
       return Schema.encodeSync(AgentControlMcpDiagnosticsSummaryResult)(result);
+    });
+
+  const usageLimits = (args: unknown) =>
+    Effect.gen(function* () {
+      const input = yield* decodeArgs(AgentControlMcpUsageLimitsInput, args);
+      const providers = yield* deps.getProviders;
+      const hubs = yield* (deps.getCliProxyHubs ?? Effect.succeed([])).pipe(
+        Effect.mapError(() => new ToolFailure("Usage limits read failed.")),
+      );
+      const { agentControlUsageLimits } = yield* loadUsageLimits;
+      return Schema.encodeSync(AgentControlMcpUsageLimitsResult)(
+        agentControlUsageLimits({
+          providers,
+          hubs,
+          instanceId: input.instanceId,
+          nowMs: yield* Clock.currentTimeMillis,
+          max: AGENT_CONTROL_MCP_USAGE_LIMITS_MAX,
+        }),
+      );
     });
 
   const listProjects = (_session: AgentControlSessionRecord, args: unknown) =>
@@ -2219,6 +2408,8 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
           return providerRuntimeEvents(session, args);
         case AGENT_CONTROL_MCP_TOOLS.diagnosticsSummary:
           return diagnosticsSummary(session, args);
+        case AGENT_CONTROL_MCP_TOOLS.usageLimits:
+          return usageLimits(args);
         case AGENT_CONTROL_MCP_TOOLS.createThreads:
           return authority
             ? createThreads(session, authority, args)
@@ -2234,6 +2425,16 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
         case AGENT_CONTROL_MCP_TOOLS.updateThread:
           return authority
             ? updateThread(session, authority, args)
+            : failTool("Exact active-turn write authority is unavailable.");
+        case AGENT_CONTROL_MCP_TOOLS.watchPullRequest:
+        case AGENT_CONTROL_MCP_TOOLS.unwatchPullRequest:
+          return authority
+            ? pullRequestWatch(
+                session,
+                authority,
+                args,
+                name === AGENT_CONTROL_MCP_TOOLS.watchPullRequest,
+              )
             : failTool("Exact active-turn write authority is unavailable.");
         case AGENT_CONTROL_MCP_TOOLS.settingsSummary:
           return settingsSummary();

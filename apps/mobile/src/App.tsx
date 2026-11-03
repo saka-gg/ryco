@@ -18,7 +18,9 @@ import { appBlurTargetRef } from "./lib/appBlurTarget";
 import { useThemeColor } from "./lib/useThemeColor";
 import { ConnectionRegistryProvider } from "./providers/ConnectionRegistryProvider";
 import { AppProviders } from "./providers/AppProviders";
+import { FatalRenderErrorBoundary } from "./diagnostics/FatalRenderErrorBoundary";
 import { useHostedAppLifecycle } from "./hostedHub/useHostedAppLifecycle";
+import { noteMobileClientInteraction } from "./runtime/clientInteraction";
 import { AppAccessGate } from "./features/access/AppAccessGate";
 import {
   isAppAccessDecided,
@@ -90,10 +92,20 @@ function HostedAppLifecycle() {
   return null;
 }
 
+// The boundary goes around everything, App's own hooks included: a crash while
+// rendering never reaches the global handler, so this is where it is recorded.
+export default function App() {
+  return (
+    <FatalRenderErrorBoundary>
+      <AppRoot />
+    </FatalRenderErrorBoundary>
+  );
+}
+
 // B2 app root: B1's provider stack (gesture/atom-registry/safe-area/keyboard) +
 // the connection-registry context + appearance preferences, then the full
 // navigation shell. Cloud auth, incoming-share, and the showcase rig are stripped.
-export default function App() {
+function AppRoot() {
   // Resolved via the single scheme seam, not the raw system scheme — dark today,
   // preference-overridable later (§4). Re-assert on mount so Fast Refresh keeps it.
   applyResolvedAppColorScheme();
@@ -114,7 +126,13 @@ export default function App() {
           {/* The navigation theme drives the NATIVE header appearance (dark ->
               overrideUserInterfaceStyle). Blur target hosts Android dropdown
               backdrops (see appBlurTarget.ts). */}
-          <BlurTargetView ref={appBlurTargetRef} style={{ flex: 1 }}>
+          {/* Touches bubble here from every screen (observed, never handled): machines that
+              update themselves unattended wait while someone uses the app. */}
+          <BlurTargetView
+            ref={appBlurTargetRef}
+            style={{ flex: 1 }}
+            onTouchStart={noteMobileClientInteraction}
+          >
             <AppAccessGate
               linking={appLinking}
               theme={colorScheme === "dark" ? DarkTheme : DefaultTheme}

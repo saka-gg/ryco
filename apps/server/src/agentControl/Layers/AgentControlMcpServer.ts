@@ -5,13 +5,22 @@ import { withInspectionTools } from "../Mcp/inspectionTools.ts";
 import { withArtifactTools } from "../Mcp/artifactTools.ts";
 import { withDelegationTools } from "../Mcp/delegationTools.ts";
 import { withLocalTaskTools } from "../Mcp/localTaskTools.ts";
-import { withProjectCopyTools } from "../Mcp/projectCopyTools.ts";
 import { AgentControlNodeDirectory } from "../Services/AgentControlNodeDirectory.ts";
 import { GitNetwork } from "../../projectCopy/Services/GitNetwork.ts";
 import { NodePaths } from "../../projectCopy/Services/NodePaths.ts";
+import { withLazyAgentControlTools } from "../Mcp/lazyTools.ts";
+import { PullRequestWatchService } from "../../sourceControl/PullRequestWatchService.ts";
+import { toMcpFollowUpQueue } from "../Mcp/threadTranscript.ts";
+import { findThreadInArray } from "../../orchestration/threadIndex.ts";
+import { extractThreadReferences } from "@ryco/shared/threadMentions";
+import { AGENT_CONTROL_DEVICE_TOOL } from "../../providerTools/deviceToolGateway.ts";
 import { LocalTaskService } from "../../tasks/LocalTaskService.ts";
 import { makeDelegatedTaskControl } from "../delegatedTaskControl.ts";
-import { CompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
+import {
+  CompletionReturnRepository,
+  isPendingCompletionReturn,
+} from "../../persistence/Layers/AgentControlCompletionReturns.ts";
+import { CommandWatchService } from "../../commandWatch/CommandWatchService.ts";
 import { AgentControlProposalRepository } from "../../persistence/Services/AgentControlProposals.ts";
 import * as SqlClient from "effect/sql/SqlClient";
 import { TerminalManager } from "../../terminal/Services/Manager.ts";
@@ -33,8 +42,20 @@ import { TerminalManager } from "../../terminal/Services/Manager.ts";
  *
  * @module AgentControlMcpServer
  */
+import {
+  AGENT_CONTROL_CAPABILITIES,
+  AGENT_CONTROL_COMMAND_WATCH_MCP_TOOLS,
+  AGENT_CONTROL_LINK_PULL_REQUEST_TOOL,
+  AGENT_CONTROL_MCP_WAIT_TIMEOUT_MS_MAX,
+  AGENT_CONTROL_PROJECT_COPY_MCP_TOOLS,
+  AGENT_CONTROL_QUEUE_MCP_TOOLS,
+  AGENT_CONTROL_WORKTREE_MCP_TOOLS,
+  AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL,
+} from "@ryco/contracts";
+import { threadWakeSource, waitUntil } from "../eventDrivenWait.ts";
 import { Effect, Exit, Layer, Option, Scope, Stream } from "effect";
 import { ServerConfig } from "../../config.ts";
+import { CliProxyService } from "../../cliProxy/CliProxyService.ts";
 import { withComputerUseTools } from "../Mcp/computerTools.ts";
 import { withAssistantAttachmentTools } from "../Mcp/attachmentTools.ts";
 import { withHtmlRenderTools } from "../Mcp/htmlRenderTools.ts";
@@ -44,12 +65,21 @@ import { OrchestrationEngineService } from "../../orchestration/Services/Orchest
 import * as Semaphore from "effect/Semaphore";
 
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
+import { waitForControlRequestReceipt } from "../Mcp/proposalReads.ts";
 import { DeviceService } from "../../device/Services/DeviceService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { WorkspaceAccessPolicy } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import { makeAgentControlMcpListener } from "../Mcp/listener.ts";
-import { makeAgentControlMcpTools, withCompleteAgentControlCatalog } from "../Mcp/tools.ts";
+import {
+  AGENT_CONTROL_DEVICE_IMAGE_MAX_BASE64_CHARS,
+  makeAgentControlMcpTools,
+  proposalVisibleToSession,
+  replayedAgentControlMutation,
+  submitAgentControlMutation,
+  withCompleteAgentControlCatalog,
+} from "../Mcp/tools.ts";
 import { AgentControlPolicy } from "../Services/AgentControlPolicy.ts";
 import { AgentControlActionValidator } from "../Services/AgentControlActionValidator.ts";
 import { AgentControlAutomationService } from "../Services/AgentControlAutomation.ts";
@@ -79,7 +109,8 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
   const deviceService = yield* Effect.serviceOption(DeviceService);
   const workspaceAccess = yield* Effect.serviceOption(WorkspaceAccessPolicy);
   const config = yield* Effect.serviceOption(ServerConfig);
-  const engine = yield* Effect.serviceOption(OrchestrationEngineService);
+  // Required: `ryco_wait_threads` wakes on its events (without them it would only re-check every 5 s).
+  const engine = yield* OrchestrationEngineService;
   const htmlRender = yield* Effect.serviceOption(HtmlRender);
 
   const files = yield* Effect.serviceOption(WorkspaceFileSystem);
@@ -92,6 +123,10 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
   const nodeDirectory = yield* Effect.serviceOption(AgentControlNodeDirectory);
   const nodePaths = yield* Effect.serviceOption(NodePaths);
   const gitNetwork = yield* Effect.serviceOption(GitNetwork);
+  const cliProxy = yield* Effect.serviceOption(CliProxyService);
+  const commandWatches = yield* Effect.serviceOption(CommandWatchService);
+  const pullRequestWatch = yield* Effect.serviceOption(PullRequestWatchService);
+  const git = yield* Effect.serviceOption(GitWorkflowService);
   const toolDeps = {
     policy,
     proposals,
@@ -103,6 +138,7 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
     ...(Option.isSome(automations) ? { automations: automations.value } : {}),
     ...(Option.isSome(diagnostics) ? { diagnostics: diagnostics.value } : {}),
     getSettings: serverSettings.getSettings,
+    ...(Option.isSome(cliProxy) ? { getCliProxyHubs: cliProxy.value.cachedQuotas } : {}),
     getProviders: providerRegistry.getProviders,
     ...(Option.isSome(validator) ? { validator: validator.value } : {}),
     ...(Option.isSome(projectPlans) ? { projectPlans: projectPlans.value } : {}),
@@ -110,6 +146,7 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
   };
   const inspectionTools = withInspectionTools(makeAgentControlMcpTools(toolDeps), {
     ...toolDeps,
+    domainEvents: engine,
     ...(Option.isSome(files) ? { files: files.value } : {}),
     ...(Option.isSome(diffs) ? { diffs: diffs.value } : {}),
     ...(Option.isSome(terminals) ? { terminals: terminals.value } : {}),
@@ -127,20 +164,21 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
             events: proposalEvents,
             projections,
             sql: sql.value,
+            engine,
           }),
         })
       : artifactTools;
   // Tools that show an attachment in the caller's turn share one delivery, so
   // file attachments and HTML renders draw on one serialized per-turn budget.
   const deliveryDeps =
-    Option.isSome(config) && Option.isSome(workspaceAccess) && Option.isSome(engine)
+    Option.isSome(config) && Option.isSome(workspaceAccess)
       ? {
           attachmentsDir: config.value.attachmentsDir,
           registry,
           policy,
           projections,
           workspaceAccess: workspaceAccess.value,
-          engine: engine.value,
+          engine,
         }
       : undefined;
   const delivery = deliveryDeps ? yield* makeTurnAttachmentDelivery(deliveryDeps) : undefined;
@@ -162,6 +200,8 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
       : {}),
     policy,
     registry,
+    projections,
+    ...(Option.isSome(workspaceAccess) ? { workspaceAccess: workspaceAccess.value } : {}),
   });
   // The native Computer stack (CUA backend, UI tree, browser tools) is only
   // loaded when Desktop hands over a native bridge; other servers never
@@ -193,15 +233,183 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
         ...(Option.isSome(config) ? { taskFilesDir: config.value.taskFilesDir } : {}),
       })
     : computerTools;
-  const projectCopyTools = withProjectCopyTools(taskTools, {
-    policy,
-    registry,
-    proposals,
-    ...(Option.isSome(validator) ? { validator: validator.value } : {}),
-    projections,
-    ...(Option.isSome(nodeDirectory) ? { nodeDirectory: nodeDirectory.value } : {}),
-    ...(Option.isSome(nodePaths) ? { nodePaths: nodePaths.value } : {}),
-    ...(Option.isSome(gitNetwork) ? { gitNetwork: gitNetwork.value } : {}),
+  // A thread's follow-up queue for agents: list it, change their own entries. The module loads
+  // the first time a session lists or calls tools, never at boot.
+  const queueTools = withLazyAgentControlTools(taskTools, {
+    names: Object.values(AGENT_CONTROL_QUEUE_MCP_TOOLS),
+    writeNames: [
+      AGENT_CONTROL_QUEUE_MCP_TOOLS.queueEdit,
+      AGENT_CONTROL_QUEUE_MCP_TOOLS.queueRemove,
+    ],
+    mayUse: (session) => session.grantedCapabilities.includes(AGENT_CONTROL_CAPABILITIES.read),
+    load: () =>
+      import("../Mcp/queueTools.ts").then((module) =>
+        module.withQueueTools(taskTools, {
+          policy,
+          registry,
+          projections,
+          engine,
+          helpers: { findThreadInArray, toMcpFollowUpQueue, extractThreadReferences },
+        }),
+      ),
+  });
+  // An agent links the pull requests it opens to its chat's workspace. Loads on first use.
+  const pullRequestTools = Option.isSome(pullRequestWatch)
+    ? withLazyAgentControlTools(queueTools, {
+        names: [AGENT_CONTROL_LINK_PULL_REQUEST_TOOL],
+        writeNames: [AGENT_CONTROL_LINK_PULL_REQUEST_TOOL],
+        mayUse: (session) =>
+          session.grantedCapabilities.includes(AGENT_CONTROL_CAPABILITIES.watchPullRequests),
+        load: () =>
+          import("../Mcp/pullRequestLinkTools.ts").then((module) =>
+            module.withPullRequestLinkTools(queueTools, {
+              policy,
+              registry,
+              pullRequestWatch: pullRequestWatch.value,
+            }),
+          ),
+      })
+    : queueTools;
+  // Routine device input under per-task consent, where devices exist. Its
+  // module (consent index, driving guide) loads the first time a session that
+  // may drive devices lists or calls tools, never at boot.
+  const deviceTools =
+    Option.isSome(deviceService) && deviceService.value.supported
+      ? withLazyAgentControlTools(pullRequestTools, {
+          names: [AGENT_CONTROL_DEVICE_TOOL],
+          writeNames: [AGENT_CONTROL_DEVICE_TOOL],
+          mayUse: (session) =>
+            session.grantedCapabilities.includes(AGENT_CONTROL_CAPABILITIES.controlDevices),
+          load: () =>
+            import("../Mcp/deviceRoutineTools.ts").then((module) =>
+              module.withDeviceRoutineTools(pullRequestTools, {
+                policy,
+                registry,
+                proposals,
+                submitMutation: (input) =>
+                  submitAgentControlMutation(
+                    {
+                      proposals,
+                      ...(Option.isSome(validator) ? { validator: validator.value } : {}),
+                    },
+                    input,
+                  ),
+                projections,
+                deviceService: deviceService.value,
+                maxImageBase64Chars: AGENT_CONTROL_DEVICE_IMAGE_MAX_BASE64_CHARS,
+              }),
+            ),
+        })
+      : pullRequestTools;
+  // Command watches on the caller's own chat. Their module loads the first time a session that
+  // may watch commands lists or calls tools, never at boot.
+  const watchTools = Option.isSome(commandWatches)
+    ? withLazyAgentControlTools(deviceTools, {
+        names: Object.values(AGENT_CONTROL_COMMAND_WATCH_MCP_TOOLS),
+        writeNames: [
+          AGENT_CONTROL_COMMAND_WATCH_MCP_TOOLS.watch,
+          AGENT_CONTROL_COMMAND_WATCH_MCP_TOOLS.unwatch,
+        ],
+        mayUse: (session) =>
+          session.grantedCapabilities.includes(AGENT_CONTROL_CAPABILITIES.watchCommands),
+        load: () =>
+          import("../Mcp/commandWatchTools.ts").then((module) =>
+            module.withCommandWatchTools(deviceTools, {
+              policy,
+              registry,
+              projections,
+              watches: commandWatches.value,
+              completionReturns: Option.getOrUndefined(completionReturns),
+              isPendingCompletionReturn,
+            }),
+          ),
+      })
+    : deviceTools;
+  // An agent's move of its own chat into a new worktree. Its module loads the first time a
+  // session that may manage workspaces lists or calls tools, never at boot.
+  const handoffTools = withLazyAgentControlTools(watchTools, {
+    names: Object.values(AGENT_CONTROL_WORKTREE_MCP_TOOLS),
+    writeNames: [AGENT_CONTROL_WORKTREE_MCP_TOOLS.handoff],
+    mayUse: (session) =>
+      session.grantedCapabilities.includes(AGENT_CONTROL_CAPABILITIES.manageWorkspaces),
+    load: () =>
+      import("../Mcp/worktreeHandoffTools.ts").then((module) =>
+        module.withWorktreeHandoffTools(watchTools, {
+          policy,
+          registry,
+          projections,
+          submitMutation: (input) =>
+            submitAgentControlMutation(
+              { proposals, ...(Option.isSome(validator) ? { validator: validator.value } : {}) },
+              input,
+            ),
+          waitForTerminal: (session, proposalId) =>
+            waitForControlRequestReceipt({
+              proposals,
+              proposalEvents,
+              proposalId,
+              waitFor: "terminal",
+              timeoutMs: AGENT_CONTROL_MCP_WAIT_TIMEOUT_MS_MAX,
+              visible: (proposal) => proposalVisibleToSession(proposal, session),
+            }),
+          replay: (session, requestId, plan) =>
+            replayedAgentControlMutation(proposals, session, requestId, plan),
+          ...(Option.isSome(git)
+            ? { checkoutBranch: (cwd) => git.value.localStatus({ cwd }) }
+            : {}),
+        }),
+      ),
+  });
+  // `ryco_request_secret`: a private card for a secret the agent needs, written into a
+  // Git-ignored dotenv file of its own checkout. Its module (and the dotenv writer) loads the
+  // first time a session that may ask lists or calls tools, never at boot.
+  const secretTools = withLazyAgentControlTools(handoffTools, {
+    names: [AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL],
+    writeNames: [AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL],
+    mayUse: (session) =>
+      session.grantedCapabilities.includes(AGENT_CONTROL_CAPABILITIES.requestSecrets),
+    load: () =>
+      import("../Mcp/secretRequestTools.ts").then((module) =>
+        module.withSecretRequestTools(handoffTools, {
+          policy,
+          registry,
+          engine,
+          projections,
+          ...(Option.isSome(workspaceAccess) ? { workspaceAccess: workspaceAccess.value } : {}),
+          helpers: { findThreadInArray, waitUntil, threadWakeSource },
+        }),
+      ),
+  });
+  // Setting projects up on this node from a repository, or on another node: the node directory,
+  // destination suggestions and the two proposals the user approves. Its module loads the first
+  // time a session that may use any of them lists or calls tools, never at boot.
+  const projectCopyCapabilities: ReadonlySet<string> = new Set([
+    AGENT_CONTROL_CAPABILITIES.read,
+    AGENT_CONTROL_CAPABILITIES.readNodes,
+    AGENT_CONTROL_CAPABILITIES.importProject,
+    AGENT_CONTROL_CAPABILITIES.copyProjectToNode,
+  ]);
+  const projectCopyTools = withLazyAgentControlTools(secretTools, {
+    names: Object.values(AGENT_CONTROL_PROJECT_COPY_MCP_TOOLS),
+    writeNames: [
+      AGENT_CONTROL_PROJECT_COPY_MCP_TOOLS.proposeImport,
+      AGENT_CONTROL_PROJECT_COPY_MCP_TOOLS.proposeCopy,
+    ],
+    mayUse: (session) =>
+      session.grantedCapabilities.some((capability) => projectCopyCapabilities.has(capability)),
+    load: () =>
+      import("../Mcp/projectCopyTools.ts").then((module) =>
+        module.withProjectCopyTools(secretTools, {
+          policy,
+          registry,
+          proposals,
+          ...(Option.isSome(validator) ? { validator: validator.value } : {}),
+          projections,
+          ...(Option.isSome(nodeDirectory) ? { nodeDirectory: nodeDirectory.value } : {}),
+          ...(Option.isSome(nodePaths) ? { nodePaths: nodePaths.value } : {}),
+          ...(Option.isSome(gitNetwork) ? { gitNetwork: gitNetwork.value } : {}),
+        }),
+      ),
   });
   const tools = withCompleteAgentControlCatalog(projectCopyTools);
 

@@ -1,3 +1,4 @@
+import { normalizeWorkspaceRelativePath } from "@ryco/client-runtime/state/files";
 import { type EnvironmentId, MessageId, type ThreadId, type TurnId } from "@ryco/contracts";
 import { formatThreadArtifactId, parseThreadArtifactId } from "@ryco/shared/threadArtifacts";
 
@@ -47,6 +48,10 @@ export type WorkspaceRouteSearch = {
   workspacePrReveal?: string | undefined;
   /** Agents tab: a one-shot focus on one workflow, consumed like `workspacePrReveal`. */
   workspaceAgentsWorkflow?: string | undefined;
+  /** Files tab: a one-shot open of one workspace file, consumed like `workspacePrReveal`. */
+  workspaceFile?: string | undefined;
+  /** The line `workspaceFile` opens at; only alongside it. */
+  workspaceFileLine?: number | undefined;
 };
 
 /** Every search key the workspace panel owns, legacy diff/preview included. */
@@ -61,7 +66,9 @@ export type WorkspacePanelSearchKey =
   | "workspacePr"
   | "workspaceRender"
   | "workspacePrReveal"
-  | "workspaceAgentsWorkflow";
+  | "workspaceAgentsWorkflow"
+  | "workspaceFile"
+  | "workspaceFileLine";
 
 type WorkspaceSearchKey =
   | "workspaceOpen"
@@ -72,7 +79,11 @@ type WorkspaceSearchKey =
   | WorkspaceRevealSearchKey;
 
 /** The one-shot keys: consumed once, then stripped (`stripWorkspaceRevealSearch`). */
-type WorkspaceRevealSearchKey = "workspacePrReveal" | "workspaceAgentsWorkflow";
+type WorkspaceRevealSearchKey =
+  | "workspacePrReveal"
+  | "workspaceAgentsWorkflow"
+  | "workspaceFile"
+  | "workspaceFileLine";
 
 /** Keys that name something in the thread that opened them. */
 type ThreadScopedWorkspaceSearchKey = "workspacePr" | "workspaceRender" | WorkspaceRevealSearchKey;
@@ -162,6 +173,26 @@ function normalizePullRequestRevealKey(value: unknown): string | undefined {
   return reveal === null ? undefined : formatWorkspacePullRequestReveal(reveal);
 }
 
+/** Files tab deep link: a workspace file, optionally revealed at one line. */
+export interface WorkspaceFileReveal {
+  /** Workspace-relative (`normalizeWorkspaceRelativePath` form). */
+  readonly path: string;
+  readonly line?: number | undefined;
+}
+
+/** The reveal the `workspaceFile` / `workspaceFileLine` keys name, or null. */
+export function parseWorkspaceFileReveal(
+  search: Record<string, unknown>,
+): WorkspaceFileReveal | null {
+  const path =
+    typeof search.workspaceFile === "string"
+      ? normalizeWorkspaceRelativePath(search.workspaceFile)
+      : null;
+  if (path === null) return null;
+  const line = normalizePositiveInt(search.workspaceFileLine);
+  return line === undefined ? { path } : { path, line };
+}
+
 /**
  * The Agents tab row key of one runtime subagent. Idempotent: transcript-backed
  * runtime agents already carry the `subagent:` prefix.
@@ -181,6 +212,8 @@ export function stripWorkspaceSearchParams<T extends Record<string, unknown>>(
     workspaceRender: _workspaceRender,
     workspacePrReveal: _workspacePrReveal,
     workspaceAgentsWorkflow: _workspaceAgentsWorkflow,
+    workspaceFile: _workspaceFile,
+    workspaceFileLine: _workspaceFileLine,
     ...rest
   } = params;
   return rest as Omit<T, WorkspaceSearchKey>;
@@ -203,13 +236,23 @@ export function stripWorkspaceRevealSearch<T extends Record<string, unknown>>(
 ): Omit<T, WorkspaceRevealSearchKey> & {
   workspacePrReveal: undefined;
   workspaceAgentsWorkflow: undefined;
+  workspaceFile: undefined;
+  workspaceFileLine: undefined;
 } {
   const {
     workspacePrReveal: _workspacePrReveal,
     workspaceAgentsWorkflow: _workspaceAgentsWorkflow,
+    workspaceFile: _workspaceFile,
+    workspaceFileLine: _workspaceFileLine,
     ...rest
   } = params;
-  return { ...rest, workspacePrReveal: undefined, workspaceAgentsWorkflow: undefined };
+  return {
+    ...rest,
+    workspacePrReveal: undefined,
+    workspaceAgentsWorkflow: undefined,
+    workspaceFile: undefined,
+    workspaceFileLine: undefined,
+  };
 }
 
 /**
@@ -227,6 +270,8 @@ export function stripThreadScopedWorkspaceSearch<T extends Record<string, unknow
     workspaceRender: _workspaceRender,
     workspacePrReveal: _workspacePrReveal,
     workspaceAgentsWorkflow: _workspaceAgentsWorkflow,
+    workspaceFile: _workspaceFile,
+    workspaceFileLine: _workspaceFileLine,
     ...rest
   } = params;
   return (rest.workspaceTab === "render" ? { ...rest, workspaceTab: undefined } : rest) as Omit<
@@ -273,6 +318,8 @@ function withWorkspacePanelSearch<T extends Record<string, unknown>, Legacy>(
     workspaceRender: undefined,
     workspacePrReveal: undefined,
     workspaceAgentsWorkflow: undefined,
+    workspaceFile: undefined,
+    workspaceFileLine: undefined,
     diff: undefined,
     diffTurnId: undefined,
     diffFilePath: undefined,
@@ -311,13 +358,23 @@ export function buildOpenReviewSearch<T extends Record<string, unknown>>(
   });
 }
 
+/** Files tab; a `reveal` opens one file there once, at a line when it names one. */
 export function buildOpenFilesSearch<T extends Record<string, unknown>>(
   params: T,
+  reveal?: WorkspaceFileReveal,
 ): WorkspacePanelSearch<T, { diff?: undefined; preview: "1" }> {
+  const file = reveal
+    ? parseWorkspaceFileReveal({
+        workspaceFile: reveal.path,
+        workspaceFileLine: reveal.line,
+      })
+    : null;
   return withWorkspacePanelSearch(params, {
     workspaceOpen: "1",
     workspaceTab: "files",
     preview: "1",
+    workspaceFile: file?.path,
+    workspaceFileLine: file?.line,
   });
 }
 
@@ -442,6 +499,7 @@ export function parseWorkspaceRouteSearch(search: Record<string, unknown>): Work
     workspaceTab === "agents"
       ? normalizeSearchString(search.workspaceAgentsWorkflow, AGENTS_WORKFLOW_MAX_LENGTH)
       : undefined;
+  const workspaceFile = workspaceTab === "files" ? parseWorkspaceFileReveal(search) : null;
 
   return {
     workspaceOpen: "1",
@@ -451,5 +509,7 @@ export function parseWorkspaceRouteSearch(search: Record<string, unknown>): Work
     ...(workspaceRender ? { workspaceRender } : {}),
     ...(workspacePrReveal ? { workspacePrReveal } : {}),
     ...(workspaceAgentsWorkflow ? { workspaceAgentsWorkflow } : {}),
+    ...(workspaceFile ? { workspaceFile: workspaceFile.path } : {}),
+    ...(workspaceFile?.line !== undefined ? { workspaceFileLine: workspaceFile.line } : {}),
   };
 }

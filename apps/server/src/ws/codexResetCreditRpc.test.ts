@@ -46,4 +46,49 @@ describe("reset RPC confirmed results", () => {
     expect(owner).toHaveBeenCalled();
     expect(calls.consume).toHaveBeenCalledOnce();
   });
+
+  it("starts Codex with the homes the instance's own environment selects", async () => {
+    calls.consume.mockClear();
+    // The server runs with a different Codex home than the instance selects.
+    vi.stubEnv("CODEX_HOME", "/tmp/fixture-server-codex");
+    try {
+      const instanceId = ProviderInstanceId.make("fixture-codex");
+      const handlers = makeProviderHandlers({
+        config: { stateDir: "/tmp/fixture-reset-rpc" },
+        ownerEffect: (_method: string, effect: Effect.Effect<unknown>) => effect,
+        serverSettings: {
+          getSettings: Effect.succeed({
+            providerInstances: {
+              [instanceId]: {
+                driver: "codex",
+                enabled: true,
+                config: { shadowHomePath: "/tmp/fixture-account-shadow" },
+                environment: [
+                  { name: "CODEX_HOME", value: "/tmp/fixture-instance-codex", sensitive: false },
+                ],
+              },
+            },
+          }),
+        },
+        providerRegistry: { refreshInstance: () => Effect.void },
+      } as unknown as WsRpcContext);
+      await Effect.runPromise(
+        handlers[WS_METHODS.serverConsumeCodexResetCredit]({
+          instanceId,
+          accountBinding: "fixture-binding",
+          idempotencyKey: "fixture-key",
+        }).pipe(Effect.provide(NodeServices.layer)),
+      );
+      expect(calls.consume).toHaveBeenCalledOnce();
+      expect(calls.consume.mock.calls[0]?.[0]).toMatchObject({
+        homePath: "/tmp/fixture-account-shadow",
+        environment: {
+          CODEX_HOME: "/tmp/fixture-account-shadow",
+          CODEX_SQLITE_HOME: "/tmp/fixture-instance-codex",
+        },
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });

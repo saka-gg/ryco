@@ -30,7 +30,10 @@ import {
   __resetEnvironmentApiOverridesForTests,
   __setEnvironmentApiOverrideForTests,
 } from "./environmentApi";
-import { createMobileEnvironmentStateSink } from "./environmentStateSink";
+import {
+  createMobileEnvironmentStateSink,
+  reconcileMobileTerminalState,
+} from "./environmentStateSink";
 import {
   checkpointDiffCacheKey,
   checkpointDiffStateAtom,
@@ -40,6 +43,7 @@ import {
 } from "../rpc/checkpointDiffAtoms";
 import { useComposerDraftStore } from "../state/composerDraftStore";
 import { useTerminalStateStore } from "../state/terminalStateStore";
+import { selectEnvironmentState, useStore } from "../state/threadsRuntime";
 
 const ENV_ID = "env-1" as EnvironmentId;
 const THREAD_ID = "thread-1" as ThreadId;
@@ -195,5 +199,35 @@ describe("createMobileEnvironmentStateSink checkpoint-diff release", () => {
 
     expect(readDiff()).toBeNull();
     __resetEnvironmentApiOverridesForTests();
+  });
+});
+
+describe("reconcileMobileTerminalState", () => {
+  const OTHER_THREAD = "thread-unlisted" as ThreadId;
+  const ref = scopeThreadRef(ENV_ID, OTHER_THREAD);
+  const output = {
+    type: "output",
+    threadId: OTHER_THREAD,
+    terminalId: "default",
+    createdAt: "2026-10-28T00:00:00.000Z",
+    data: "x",
+  } as const;
+
+  it("keeps an unlisted thread's terminal state until its environment's shell has arrived", () => {
+    useTerminalStateStore.getState().applyTerminalEvent(ref, output);
+    reconcileMobileTerminalState();
+    expect(Object.keys(useTerminalStateStore.getState().terminalEventEntriesByKey)).toHaveLength(1);
+
+    useStore.setState({
+      environmentStateById: {
+        ...useStore.getState().environmentStateById,
+        [ENV_ID]: {
+          ...selectEnvironmentState(useStore.getState(), ENV_ID),
+          bootstrapComplete: true,
+        },
+      },
+    });
+    reconcileMobileTerminalState();
+    expect(useTerminalStateStore.getState().terminalEventEntriesByKey).toEqual({});
   });
 });

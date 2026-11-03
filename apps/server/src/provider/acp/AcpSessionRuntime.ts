@@ -13,12 +13,15 @@ import {
   Stream,
 } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
+import { timeoutWhileResponsiveOrElse } from "@ryco/shared/responsiveDeadline";
 import * as EffectAcpClient from "effect-acp/client";
 import * as EffectAcpErrors from "effect-acp/errors";
 import * as Schema from "effect/Schema";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import type * as EffectAcpProtocol from "effect-acp/protocol";
 
+import { type AgentProcessPriorityShape, spawnAgentProcess } from "../agentProcessPriority.ts";
+import { withThreadAttribution } from "../../localServers/threadAttributionEnv.ts";
 import { providerStartupPhaseTimeoutDetail } from "../providerOperationPolicy.ts";
 import {
   collectSessionConfigOptionValues,
@@ -70,6 +73,36 @@ const failedWithStartupPhaseTimeout = (cause: Cause.Cause<EffectAcpErrors.AcpErr
     (reason) => Cause.isFailReason(reason) && isAcpStartupPhaseTimeout(reason.error),
   );
 
+const isAcpRequestError = Schema.is(EffectAcpErrors.AcpRequestError);
+
+/** ACP's "Resource not found" error code. */
+const ACP_RESOURCE_NOT_FOUND = -32002;
+
+/**
+ * A strict resume the agent answers with "Resource not found" (-32002) fails as "Session not
+ * found: <id>", so the orchestrator can tell a lost conversation from other failures
+ * (`isMissingConversationError`). Only this call site maps the code: on its own it does not say
+ * which resource is missing, but the session is the one resource `session/load` and
+ * `session/resume` look up. A `data.uri` naming something other than the session keeps the
+ * agent's error.
+ */
+const nameMissingResumeSession = (
+  error: EffectAcpErrors.AcpError,
+  sessionId: string,
+): EffectAcpErrors.AcpError => {
+  if (!isAcpRequestError(error) || error.code !== ACP_RESOURCE_NOT_FOUND) return error;
+  const uri =
+    typeof error.data === "object" && error.data !== null
+      ? Reflect.get(error.data, "uri")
+      : undefined;
+  if (typeof uri === "string" && !uri.includes(sessionId)) return error;
+  return new EffectAcpErrors.AcpRequestError({
+    code: ACP_RESOURCE_NOT_FOUND,
+    errorMessage: `Session not found: ${sessionId} (${error.errorMessage})`,
+    ...(error.data !== undefined ? { data: error.data } : {}),
+  });
+};
+
 export interface AcpSpawnInput {
   readonly command: string;
   readonly args: ReadonlyArray<string>;
@@ -80,6 +113,12 @@ export interface AcpSpawnInput {
 
 export interface AcpSessionRuntimeOptions {
   readonly spawn: AcpSpawnInput;
+  /**
+   * The thread a session runs for: the agent and every job it starts carry its id, so the servers
+   * it leaves running stay listed under the thread (`localServers/threadAttributionEnv.ts`).
+   * Unset for probes and text generation, which start nothing that outlives them.
+   */
+  readonly threadId?: string;
   readonly cwd: string;
   readonly resumeSessionId?: string;
   readonly clientCapabilities?: EffectAcpSchema.InitializeRequest["clientCapabilities"];
@@ -110,6 +149,11 @@ export interface AcpSessionRuntimeOptions {
     readonly logOutgoing?: boolean;
     readonly logger?: (event: EffectAcpProtocol.AcpProtocolLogEvent) => Effect.Effect<void, never>;
   };
+  /**
+   * Lowers the agent process (and everything it starts). Opt-in per call site: sessions and
+   * text generation pass it, provider probes and registry authentication do not.
+   */
+  readonly processPriority?: AgentProcessPriorityShape | undefined;
 }
 
 export interface AcpSessionRequestLogEvent {
@@ -297,24 +341,33 @@ const makeAcpSessionRuntime = (
         ),
       );
 
-    const child = yield* spawner
-      .spawn(
-        ChildProcess.make(options.spawn.command, [...options.spawn.args], {
-          ...(options.spawn.cwd ? { cwd: options.spawn.cwd } : {}),
-          ...(options.spawn.env ? { env: { ...process.env, ...options.spawn.env } } : {}),
-          shell: options.spawn.shell ?? process.platform === "win32",
-        }),
-      )
-      .pipe(
-        Effect.provideService(Scope.Scope, runtimeScope),
-        Effect.mapError(
-          (cause) =>
-            new EffectAcpErrors.AcpSpawnError({
-              command: options.spawn.command,
-              cause,
-            }),
-        ),
-      );
+    const child = yield* spawnAgentProcess(
+      spawner,
+      options.processPriority,
+      ChildProcess.make(options.spawn.command, [...options.spawn.args], {
+        ...(options.spawn.cwd ? { cwd: options.spawn.cwd } : {}),
+        ...(options.threadId !== undefined
+          ? {
+              env: withThreadAttribution(
+                options.spawn.env ? { ...process.env, ...options.spawn.env } : process.env,
+                options.threadId,
+              ),
+            }
+          : options.spawn.env
+            ? { env: { ...process.env, ...options.spawn.env } }
+            : {}),
+        shell: options.spawn.shell ?? process.platform === "win32",
+      }),
+    ).pipe(
+      Effect.provideService(Scope.Scope, runtimeScope),
+      Effect.mapError(
+        (cause) =>
+          new EffectAcpErrors.AcpSpawnError({
+            command: options.spawn.command,
+            cause,
+          }),
+      ),
+    );
 
     if (options.onProcessExit) {
       yield* child.exitCode.pipe(
@@ -333,6 +386,7 @@ const makeAcpSessionRuntime = (
           ? { logOutgoing: options.protocolLogging.logOutgoing }
           : {}),
         ...(options.protocolLogging?.logger ? { logger: options.protocolLogging.logger } : {}),
+        timeoutOrElse: timeoutWhileResponsiveOrElse,
       }),
     ).pipe(Effect.provideService(Scope.Scope, runtimeScope));
 
@@ -493,7 +547,7 @@ const makeAcpSessionRuntime = (
       );
       const hint = options.phaseTimeoutHints?.[phase];
       return effect.pipe(
-        Effect.timeoutOrElse({
+        timeoutWhileResponsiveOrElse({
           duration: timeoutMs,
           orElse: () =>
             Effect.fail(
@@ -599,7 +653,8 @@ const makeAcpSessionRuntime = (
         if (options.onMcpSetupFailure) yield* options.onMcpSetupFailure();
         return yield* createSession(staticMcpServers);
       });
-      if (options.resumeSessionId) {
+      const resumeSessionId = options.resumeSessionId;
+      if (resumeSessionId) {
         const useResume =
           options.strictResume === true &&
           initializeResult.agentCapabilities?.sessionCapabilities?.resume != null;
@@ -614,7 +669,7 @@ const makeAcpSessionRuntime = (
           });
         }
         const loadPayload = {
-          sessionId: options.resumeSessionId,
+          sessionId: resumeSessionId,
           cwd: options.cwd,
           mcpServers,
         } satisfies EffectAcpSchema.LoadSessionRequest;
@@ -627,10 +682,14 @@ const makeAcpSessionRuntime = (
           ),
         ).pipe(Effect.exit);
         if (Exit.isSuccess(resumed)) {
-          sessionId = options.resumeSessionId;
+          sessionId = resumeSessionId;
           sessionSetupResult = resumed.value;
         } else {
-          if (options.strictResume || failedWithStartupPhaseTimeout(resumed.cause))
+          if (options.strictResume)
+            return yield* Effect.failCause(resumed.cause).pipe(
+              Effect.mapError((error) => nameMissingResumeSession(error, resumeSessionId)),
+            );
+          if (failedWithStartupPhaseTimeout(resumed.cause))
             return yield* Effect.failCause(resumed.cause);
           const created = yield* createSessionWithFallback;
           sessionId = created.sessionId;

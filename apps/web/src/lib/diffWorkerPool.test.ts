@@ -6,18 +6,21 @@ interface FakeStats {
   workersFailed: boolean;
 }
 
-const pools = vi.hoisted(
-  () =>
-    [] as Array<{
-      readonly preferredHighlighter: string;
-      readonly stats: FakeStats;
-      readonly subscribers: Set<(stats: FakeStats) => void>;
-      terminated: boolean;
-    }>,
-);
+const { pools, sharedHighlighterRequests } = vi.hoisted(() => ({
+  pools: [] as Array<{
+    readonly preferredHighlighter: string;
+    readonly stats: FakeStats;
+    readonly subscribers: Set<(stats: FakeStats) => void>;
+    terminated: boolean;
+  }>,
+  sharedHighlighterRequests: [] as string[],
+}));
 
 vi.mock("@pierre/diffs", () => ({
-  getSharedHighlighter: () => Promise.resolve(undefined),
+  getSharedHighlighter: (options: { readonly preferredHighlighter: string }) => {
+    sharedHighlighterRequests.push(options.preferredHighlighter);
+    return Promise.resolve(undefined);
+  },
 }));
 
 vi.mock("@pierre/diffs/worker/worker.js?worker", () => ({
@@ -68,11 +71,21 @@ describe("diff worker pool highlighter wiring", () => {
     vi.resetModules();
     vi.useFakeTimers();
     pools.length = 0;
+    sharedHighlighterRequests.length = 0;
   });
 
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it("highlights with Highlights in the workers and on the main thread where WASM compiles", async () => {
+    const { acquireDiffWorkerPool } = await loadDiffWorkerPool();
+
+    acquireDiffWorkerPool("pierre-dark");
+
+    expect(pools.map((pool) => pool.preferredHighlighter)).toEqual(["highlights"]);
+    expect(sharedHighlighterRequests).toEqual(["highlights"]);
   });
 
   it("builds the pool with the JS engine when WebAssembly cannot compile", async () => {
@@ -87,19 +100,22 @@ describe("diff worker pool highlighter wiring", () => {
     acquireDiffWorkerPool("pierre-dark");
 
     expect(pools.map((pool) => pool.preferredHighlighter)).toEqual(["shiki-js"]);
+    expect(sharedHighlighterRequests).toEqual(["shiki-js"]);
   });
 
   it("uses the JS engine for the next pool once a WASM pool reports failed workers", async () => {
     const { acquireDiffWorkerPool } = await loadDiffWorkerPool();
 
     const first = acquireDiffWorkerPool("pierre-dark");
-    expect(pools[0]?.preferredHighlighter).toBe("shiki-wasm");
+    expect(pools[0]?.preferredHighlighter).toBe("highlights");
     pools[0]!.stats.workersFailed = true;
     for (const subscriber of pools[0]!.subscribers) subscriber({ workersFailed: true });
     releaseAndExpire(first);
 
     acquireDiffWorkerPool("pierre-dark");
-    expect(pools.map((pool) => pool.preferredHighlighter)).toEqual(["shiki-wasm", "shiki-js"]);
+    expect(pools.map((pool) => pool.preferredHighlighter)).toEqual(["highlights", "shiki-js"]);
+    // The page itself still compiles WASM: its main thread keeps Highlights.
+    expect(sharedHighlighterRequests).toEqual(["highlights", "highlights"]);
   });
 
   it("records a WASM pool failure that no stat broadcast delivered before termination", async () => {
@@ -112,7 +128,7 @@ describe("diff worker pool highlighter wiring", () => {
     expect(pools[0]?.terminated).toBe(true);
 
     acquireDiffWorkerPool("pierre-dark");
-    expect(pools.map((pool) => pool.preferredHighlighter)).toEqual(["shiki-wasm", "shiki-js"]);
+    expect(pools.map((pool) => pool.preferredHighlighter)).toEqual(["highlights", "shiki-js"]);
   });
 
   it("keeps WASM for the next pool when the previous one started fine", async () => {
@@ -121,6 +137,6 @@ describe("diff worker pool highlighter wiring", () => {
     releaseAndExpire(acquireDiffWorkerPool("pierre-dark"));
     acquireDiffWorkerPool("pierre-dark");
 
-    expect(pools.map((pool) => pool.preferredHighlighter)).toEqual(["shiki-wasm", "shiki-wasm"]);
+    expect(pools.map((pool) => pool.preferredHighlighter)).toEqual(["highlights", "highlights"]);
   });
 });

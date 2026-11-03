@@ -15,7 +15,12 @@ const PANEL_SHORTCUTS = [
 ] as const;
 
 const KEYBINDINGS: ResolvedKeybindingsConfig = [
-  ...PANEL_SHORTCUTS.map(({ command, key }) => ({
+  ...[
+    ...PANEL_SHORTCUTS,
+    { command: "thread.interrupt", key: "." },
+    { command: "thread.copyReference", key: "c" },
+    { command: "sideChat.toggle", key: "x" },
+  ].map(({ command, key }) => ({
     command,
     shortcut: { key, metaKey: false, ctrlKey: false, shiftKey: true, altKey: true, modKey: false },
   })),
@@ -52,7 +57,40 @@ function createInput(): UseChatGlobalShortcutsInput {
     onOpenTerminalPanel: vi.fn(),
     onOpenSimulatorPanel: vi.fn(),
     runProjectScript: vi.fn(),
+    interruptAvailable: true,
+    onInterruptTurn: vi.fn(),
+    copyReferenceTarget: { kind: "thread", value: "thread-shortcuts" },
+    onCopyReference: vi.fn(),
+    sideChatAvailable: true,
+    onToggleSideChat: vi.fn(),
   };
+}
+
+/** Presses alt+shift+`key` in the focused composer-like field; returns whether it was consumed. */
+function pressInEditable(
+  key: string,
+  init: KeyboardEventInit = {},
+  options: { composer?: boolean } = {},
+): boolean {
+  const editable = document.createElement("div");
+  editable.contentEditable = "true";
+  if (options.composer) editable.dataset.testid = "composer-editor";
+  document.body.append(editable);
+  editable.focus();
+  try {
+    const event = new KeyboardEvent("keydown", {
+      key,
+      altKey: true,
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+      ...init,
+    });
+    editable.dispatchEvent(event);
+    return event.defaultPrevented;
+  } finally {
+    editable.remove();
+  }
 }
 
 describe("useChatGlobalShortcuts", () => {
@@ -112,6 +150,119 @@ describe("useChatGlobalShortcuts", () => {
       expect(preloadWorkspacePanel).not.toHaveBeenCalled();
     } finally {
       await openHook.unmount();
+    }
+  });
+
+  it("stops the running turn while typing, once per press", async () => {
+    const input = createInput();
+    const hook = await renderHook(() => useChatGlobalShortcuts(input));
+
+    try {
+      expect(pressInEditable(".")).toBe(true);
+      expect(pressInEditable(".", { repeat: true })).toBe(true);
+      expect(input.onInterruptTurn).toHaveBeenCalledOnce();
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  it("leaves the stop key alone with nothing to stop", async () => {
+    const input = { ...createInput(), interruptAvailable: false };
+    const hook = await renderHook(() => useChatGlobalShortcuts(input));
+
+    try {
+      expect(pressInEditable(".")).toBe(false);
+      expect(input.onInterruptTurn).not.toHaveBeenCalled();
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  it("copies the thread's reference while typing, and leaves the key alone without one", async () => {
+    const input = createInput();
+    const hook = await renderHook(() => useChatGlobalShortcuts(input));
+    try {
+      expect(pressInEditable("c")).toBe(true);
+      expect(pressInEditable("c", { repeat: true })).toBe(true);
+      expect(input.onCopyReference).toHaveBeenCalledExactlyOnceWith(input.copyReferenceTarget);
+    } finally {
+      await hook.unmount();
+    }
+
+    const draftInput = { ...createInput(), copyReferenceTarget: null };
+    const draftHook = await renderHook(() => useChatGlobalShortcuts(draftInput));
+    try {
+      expect(pressInEditable("c")).toBe(false);
+      expect(draftInput.onCopyReference).not.toHaveBeenCalled();
+    } finally {
+      await draftHook.unmount();
+    }
+  });
+
+  it("opens or minimizes the side chat while typing, once per press", async () => {
+    const input = createInput();
+    const hook = await renderHook(() => useChatGlobalShortcuts(input));
+    try {
+      // From the composer, and from the side question field that the same key minimizes.
+      expect(pressInEditable("x", {}, { composer: true })).toBe(true);
+      expect(pressInEditable("x")).toBe(true);
+      expect(pressInEditable("x", { repeat: true })).toBe(true);
+      expect(input.onToggleSideChat).toHaveBeenCalledTimes(2);
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "x", altKey: true, shiftKey: true, bubbles: true }),
+      );
+      expect(input.onToggleSideChat).toHaveBeenCalledTimes(3);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  it("leaves the side chat key alone where the thread has no side chat or a dialog is open", async () => {
+    const input = { ...createInput(), sideChatAvailable: false };
+    const hook = await renderHook(() => useChatGlobalShortcuts(input));
+    try {
+      expect(pressInEditable("x")).toBe(false);
+      expect(input.onToggleSideChat).not.toHaveBeenCalled();
+    } finally {
+      await hook.unmount();
+    }
+
+    const dialogInput = createInput();
+    const dialogHook = await renderHook(() => useChatGlobalShortcuts(dialogInput));
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    dialog.textContent = "Open dialog";
+    document.body.append(dialog);
+    try {
+      expect(pressInEditable("x")).toBe(false);
+      expect(dialogInput.onToggleSideChat).not.toHaveBeenCalled();
+    } finally {
+      dialog.remove();
+      await dialogHook.unmount();
+    }
+  });
+
+  it("scopes stop and copy to the composer by their when clause", async () => {
+    const composerFocus = { type: "identifier", name: "composerFocus" } as const;
+    for (const [whenAst, inComposer] of [
+      [composerFocus, true],
+      [{ type: "not", node: composerFocus }, false],
+    ] as const) {
+      const input = {
+        ...createInput(),
+        keybindings: KEYBINDINGS.map((rule) => ({ ...rule, whenAst })),
+      };
+      const hook = await renderHook(() => useChatGlobalShortcuts(input));
+      try {
+        expect(pressInEditable(".", {}, { composer: true })).toBe(inComposer);
+        expect(pressInEditable("c", {}, { composer: true })).toBe(inComposer);
+        expect(pressInEditable(".")).toBe(!inComposer);
+        expect(pressInEditable("c")).toBe(!inComposer);
+        expect(input.onInterruptTurn).toHaveBeenCalledOnce();
+        expect(input.onCopyReference).toHaveBeenCalledOnce();
+      } finally {
+        await hook.unmount();
+      }
     }
   });
 });

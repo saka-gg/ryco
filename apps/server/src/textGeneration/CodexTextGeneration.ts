@@ -19,7 +19,6 @@ import {
   type BranchNameGenerationInput,
   type ThreadTitleGenerationResult,
   type TextGenerationShape,
-  validateRankInboxThreadsResult,
 } from "./TextGeneration.ts";
 import {
   buildBranchNamePrompt,
@@ -28,11 +27,11 @@ import {
   buildIssueContentTitlePrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
-  buildThreadPriorityPrompt,
   buildSideQuestionPrompt,
   buildWorkspaceChangesSummaryPrompt,
 } from "./TextGenerationPrompts.ts";
 import {
+  cliFailureDetail,
   normalizeCliError,
   sanitizeCommitSubject,
   sanitizePrTitle,
@@ -42,6 +41,10 @@ import {
 } from "./TextGenerationUtils.ts";
 import { getModelSelectionStringOptionValue } from "@ryco/shared/model";
 import { codexServiceTierForSelection } from "../provider/CodexServiceTier.ts";
+import {
+  type AgentProcessPriorityShape,
+  spawnAgentProcess,
+} from "../provider/agentProcessPriority.ts";
 
 const CODEX_GIT_TEXT_GENERATION_REASONING_EFFORT = "low";
 const CODEX_TIMEOUT_MS = 180_000;
@@ -53,6 +56,37 @@ const CODEX_NAMING_TIMEOUT_MS = 30_000;
 const CODEX_TIMEOUT_DETAIL = "Codex CLI request timed out.";
 
 /**
+ * `--config` entries that switch off Codex's tools (shell and exec, images, freeform patches,
+ * web and tool search, apps, plugins, memory, JavaScript, subagents, goals, sleep) while the
+ * user's config, auth, rules and project docs still load. Every run but issue drafting uses
+ * them: commit messages, pull request text and inbox ranking carry repository or forge text.
+ *
+ * Two tools stay and can do nothing here: `apply_patch` cannot write in the read-only
+ * sandbox, and `request_user_input` has no one to answer in `codex exec`.
+ * `mcp_servers={}` empties the MCP table only when the user's config is not loaded: Codex
+ * merges a table override into the user's table, so MCP servers from the user's config stay
+ * reachable in a run that keeps it (checked against Codex CLI 0.163.0).
+ */
+const CODEX_TOOL_FREE_ARGS: ReadonlyArray<string> = [
+  'web_search="disabled"',
+  "mcp_servers={}",
+  "features.shell_tool=false",
+  "features.view_image=false",
+  "features.search_tool=false",
+  "features.tool_search=false",
+  "features.tool_suggest=false",
+  "features.unified_exec=false",
+  "features.apply_patch_freeform=false",
+  "features.apps=false",
+  "features.plugins=false",
+  "features.memory_tool=false",
+  "features.js_repl=false",
+  "features.multi_agent=false",
+  "features.goals=false",
+  "features.sleep_tool=false",
+].flatMap((config) => ["--config", config]);
+
+/**
  * `codex exec` without the user's config, rules, project docs, MCP servers,
  * plugins, hooks or tools: a plain structured-output model call.
  */
@@ -61,27 +95,14 @@ const CODEX_LIGHTWEIGHT_ARGS: ReadonlyArray<string> = [
   "--ignore-rules",
   ...[
     'approval_policy="never"',
-    'web_search="disabled"',
     "project_doc_max_bytes=0",
-    "mcp_servers={}",
-    "features.shell_tool=false",
-    "features.view_image=false",
-    "features.search_tool=false",
-    "features.tool_search=false",
-    "features.tool_suggest=false",
     "features.external_agent_memory_import=false",
-    "features.unified_exec=false",
-    "features.apply_patch_freeform=false",
-    "features.apps=false",
-    "features.plugins=false",
     "features.hooks=false",
     "features.codex_hooks=false",
     "features.plugin_hooks=false",
     "features.memories=false",
-    "features.memory_tool=false",
-    "features.js_repl=false",
-    "features.multi_agent=false",
   ].flatMap((config) => ["--config", config]),
+  ...CODEX_TOOL_FREE_ARGS,
 ];
 /**
  * Build a Codex text-generation closure bound to a specific `CodexSettings`
@@ -90,6 +111,7 @@ const CODEX_LIGHTWEIGHT_ARGS: ReadonlyArray<string> = [
 export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(function* (
   codexConfig: CodexSettings,
   environment: NodeJS.ProcessEnv = process.env,
+  options?: { readonly processPriority?: AgentProcessPriorityShape | undefined },
 ) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -188,6 +210,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     cleanupPaths = [],
     modelSelection,
     lightweight = operation === "answerSideQuestion",
+    toolsEnabled = operation === "generateIssueContent",
     timeoutMs = CODEX_TIMEOUT_MS,
   }: {
     operation:
@@ -196,7 +219,6 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       | "generateBranchName"
       | "generateThreadTitle"
       | "generateIssueContent"
-      | "rankInboxThreads"
       | "answerSideQuestion"
       | "summarizeWorkspaceChanges";
     cwd: string;
@@ -207,6 +229,11 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     modelSelection: ModelSelection;
     /** Run without the user's configuration (`CODEX_LIGHTWEIGHT_ARGS`), in an isolated environment. */
     lightweight?: boolean;
+    /**
+     * False (every operation but issue drafting) keeps the user's configuration and auth but
+     * switches tools off (`CODEX_TOOL_FREE_ARGS`). Lightweight runs never have tools.
+     */
+    toolsEnabled?: boolean;
     timeoutMs?: number;
   }): Effect.fn.Return<S["Type"], TextGenerationError, S["DecodingServices"]> {
     const schemaPath = yield* writeTempFile(
@@ -226,7 +253,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         [
           "exec",
           "--ephemeral",
-          ...(lightweight ? CODEX_LIGHTWEIGHT_ARGS : []),
+          ...(lightweight ? CODEX_LIGHTWEIGHT_ARGS : toolsEnabled ? [] : CODEX_TOOL_FREE_ARGS),
           "--skip-git-repo-check",
           "-s",
           "read-only",
@@ -255,13 +282,15 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         },
       );
 
-      const child = yield* commandSpawner
-        .spawn(command)
-        .pipe(
-          Effect.mapError((cause) =>
-            normalizeCliError("codex", operation, cause, "Failed to spawn Codex CLI process"),
-          ),
-        );
+      const child = yield* spawnAgentProcess(
+        commandSpawner,
+        options?.processPriority,
+        command,
+      ).pipe(
+        Effect.mapError((cause) =>
+          normalizeCliError("codex", operation, cause, "Failed to spawn Codex CLI process"),
+        ),
+      );
 
       const [stdout, stderr, exitCode] = yield* Effect.all(
         [
@@ -277,15 +306,9 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       );
 
       if (exitCode !== 0) {
-        const stderrDetail = stderr.trim();
-        const stdoutDetail = stdout.trim();
-        const detail = stderrDetail.length > 0 ? stderrDetail : stdoutDetail;
         return yield* new TextGenerationError({
           operation,
-          detail:
-            detail.length > 0
-              ? `Codex CLI command failed: ${detail}`
-              : `Codex CLI command failed with code ${exitCode}.`,
+          detail: cliFailureDetail("codex", { stdout, stderr, exitCode, prompt }),
         });
       }
     });
@@ -519,22 +542,6 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       }),
     );
 
-  const rankInboxThreads: TextGenerationShape["rankInboxThreads"] = Effect.fn(
-    "CodexTextGeneration.rankInboxThreads",
-  )(function* (input) {
-    const { prompt, outputSchema } = buildThreadPriorityPrompt({
-      serializedCandidates: input.chunk.serializedCandidates,
-    });
-    const generated = yield* runCodexJson({
-      operation: "rankInboxThreads",
-      cwd: input.cwd,
-      prompt,
-      outputSchemaJson: outputSchema,
-      modelSelection: input.modelSelection,
-    });
-    return yield* validateRankInboxThreadsResult(input, generated.rankings);
-  });
-
   const summarizeWorkspaceChanges: TextGenerationShape["summarizeWorkspaceChanges"] = Effect.fn(
     "CodexTextGeneration.summarizeWorkspaceChanges",
   )(function* (input) {
@@ -551,12 +558,13 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
   });
 
   return {
+    // Commit and pull request runs append `CODEX_TOOL_FREE_ARGS`.
+    gitWritingToolFree: true,
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
     generateIssueContent,
-    rankInboxThreads,
     answerSideQuestion,
     summarizeWorkspaceChanges,
   } satisfies TextGenerationShape;

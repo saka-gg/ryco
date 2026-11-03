@@ -1,7 +1,11 @@
 /**
  * One builder for server-initiated "continue this thread" turn starts: usage-limit
- * auto-resume today, delegated returns and restart continuation next. The turn runs
- * with the thread's own model and modes, never a client's staged composer state.
+ * auto-resume, goal continuations and restart continuation. The turn runs with the
+ * thread's own modes, never a client's staged composer state. It names no model: a
+ * client stores a pick on the thread when it is made, and the provider reactor applies
+ * the chat's stored pick to a turn that names none only where the session can take it
+ * (`implicitTurnModelSelection`), so an unattended turn never fails on a session that
+ * cannot switch models nor ends background work a model restart would end.
  *
  * @module threadContinuation
  */
@@ -20,10 +24,7 @@ export type ClientThreadTurnStartCommand = Extract<
 >;
 
 export function buildThreadContinuationTurnStart(
-  thread: Pick<
-    OrchestrationThreadShell,
-    "id" | "modelSelection" | "runtimeMode" | "interactionMode" | "tokenMode"
-  >,
+  thread: Pick<OrchestrationThreadShell, "id" | "runtimeMode" | "interactionMode" | "tokenMode">,
   input: {
     readonly commandId: CommandId;
     readonly messageId: MessageId;
@@ -44,7 +45,6 @@ export function buildThreadContinuationTurnStart(
       text: input.text,
       attachments: [],
     },
-    modelSelection: thread.modelSelection,
     runtimeMode: thread.runtimeMode,
     interactionMode: thread.interactionMode,
     ...(thread.tokenMode !== undefined ? { tokenMode: thread.tokenMode } : {}),

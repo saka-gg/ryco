@@ -1,5 +1,6 @@
 import { rejectRemoteKeybindingWrite } from "../state/settings/appKeybindings.ts";
 import type { EnvironmentApi, EnvironmentId } from "@ryco/contracts";
+import { isUnknownUnionMember } from "@ryco/contracts/base-schemas";
 
 import type { WsRpcClient } from "../rpc/index.ts";
 
@@ -61,15 +62,22 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       clear: (input) => rpcClient.terminal.clear(input as never),
       restart: (input) => rpcClient.terminal.restart(input as never),
       close: (input) => rpcClient.terminal.close(input as never),
-      onEvent: (callback) => rpcClient.terminal.onEvent(callback),
+      // The connection records event types a newer node added; this API never sees them.
+      onEvent: (callback) =>
+        rpcClient.terminal.onEvent((event) => {
+          if (!isUnknownUnionMember(event)) callback(event);
+        }),
     },
     projects: {
       listEntries: rpcClient.projects.listEntries,
       readFile: rpcClient.projects.readFile,
       readIcon: rpcClient.projects.readIcon,
       readFileBinary: rpcClient.projects.readFileBinary,
+      readFileChunk: rpcClient.projects.readFileChunk,
       searchEntries: rpcClient.projects.searchEntries,
+      searchContent: rpcClient.projects.searchContent,
       writeFile: rpcClient.projects.writeFile,
+      subscribeFileChanges: rpcClient.projects.subscribeFileChanges,
       stageFileReference: rpcClient.projects.stageFileReference,
       initializeGit: rpcClient.projects.initializeGit,
       promoteChatPreview: rpcClient.projects.promoteChatPreview,
@@ -101,6 +109,8 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       searchRepositories: rpcClient.sourceControl.searchRepositories,
       cloneRepository: rpcClient.sourceControl.cloneRepository,
       publishRepository: rpcClient.sourceControl.publishRepository,
+      setPullRequestWatch: rpcClient.sourceControl.setPullRequestWatch,
+      listChangeRequestTemplates: rpcClient.sourceControl.listChangeRequestTemplates,
     },
     vcs: {
       pull: rpcClient.vcs.pull,
@@ -125,6 +135,7 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
     },
     git: {
       runStackedAction: rpcClient.git.runStackedAction,
+      cancelStackedAction: rpcClient.git.cancelStackedAction,
       resolvePullRequest: rpcClient.git.resolvePullRequest,
       preparePullRequestThread: rpcClient.git.preparePullRequestThread,
       createWorktreeForProject: rpcClient.git.createWorktreeForProject,
@@ -159,6 +170,18 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
             setManualBucket: rpcClient.threads.setManualBucket,
             setManualPosition: rpcClient.threads.setManualPosition,
             ...(rpcClient.threads.fork ? { fork: rpcClient.threads.fork } : {}),
+            ...(rpcClient.threads.forkCarried
+              ? { forkCarried: rpcClient.threads.forkCarried }
+              : {}),
+            ...(rpcClient.threads.subscribeLocalServers
+              ? { subscribeLocalServers: rpcClient.threads.subscribeLocalServers }
+              : {}),
+            ...(rpcClient.threads.stopLocalServer
+              ? { stopLocalServer: rpcClient.threads.stopLocalServer }
+              : {}),
+            ...(rpcClient.threads.answerSecretRequest
+              ? { answerSecretRequest: rpcClient.threads.answerSecretRequest }
+              : {}),
           },
         }
       : {}),
@@ -168,6 +191,7 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       getWorkflowScript: rpcClient.orchestration.getWorkflowScript,
       getTaskOutput: rpcClient.orchestration.getTaskOutput,
       stopBackgroundTask: rpcClient.orchestration.stopBackgroundTask,
+      messageBackgroundTask: rpcClient.orchestration.messageBackgroundTask,
       getFullThreadDiff: rpcClient.orchestration.getFullThreadDiff,
       searchThreadMessages: rpcClient.orchestration.searchThreadMessages,
       ...(rpcClient.orchestration.getThreadWindow

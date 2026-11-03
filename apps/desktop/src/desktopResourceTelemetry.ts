@@ -3,11 +3,13 @@ import { app, powerMonitor } from "electron";
 import type { DesktopUpdateState } from "@ryco/contracts";
 import {
   createTelemetryLineReader,
+  type DesktopAgentWorkFrame,
   type DesktopAppUpdateRequestFrame,
   type DesktopAppUpdateSnapshot,
   type DesktopAppUpdateStateFrame,
   type DesktopBackendLifecycleFrame,
   type DesktopResourceTelemetrySnapshot,
+  parseDesktopAgentWorkFrame,
   parseDesktopAppUpdateRequestFrame,
   parseDesktopBackendLifecycleFrame,
 } from "@ryco/shared/desktopResourceTelemetry";
@@ -15,10 +17,15 @@ import {
 export interface DesktopBackendPipeHandlers {
   /** Readiness, startup phases and fatal errors of this backend generation. */
   readonly onLifecycleFrame?: (frame: DesktopBackendLifecycleFrame) => void;
-  /** A client's app update check or install request, relayed by the backend. */
+  /**
+   * A client's app update check or install request, relayed by the backend, or the backend's
+   * automatic update policy. Only this pipe carries them: it is the backend this app launched.
+   */
   readonly onAppUpdateRequest?: (frame: DesktopAppUpdateRequestFrame) => void;
   /** The updater's state now; reported once when the pipe attaches. */
   readonly appUpdateState?: () => DesktopUpdateState;
+  /** Whether agents are working on this backend; reported on every change. */
+  readonly onAgentWork?: (frame: DesktopAgentWorkFrame) => void;
 }
 
 export interface DesktopBackendPipe {
@@ -28,7 +35,10 @@ export interface DesktopBackendPipe {
    * waits for `drain`.
    */
   readonly sendAppUpdateState: (state: DesktopUpdateState, options?: { force?: boolean }) => void;
-  /** Detach: stop the heartbeat and remove every listener. */
+  /**
+   * Detach: stop the heartbeat and remove every listener. The pipe stays open:
+   * the backend takes its close for the app's exit and shuts down.
+   */
   readonly close: () => void;
 }
 
@@ -57,8 +67,8 @@ export function toDesktopAppUpdateSnapshot(state: DesktopUpdateState): DesktopAp
 /**
  * Attached to one backend generation; closed pipes remove all listeners.
  * Besides answering `sample` requests, the pipe carries the backend's lifecycle
- * frames (readiness, startup phases, fatal errors) and relayed app update
- * requests. Both are validated with the shared protocol parsers the backend
+ * frames (readiness, startup phases, fatal errors), its agent-work reports and
+ * relayed app update requests. All are validated with the shared protocol parsers the backend
  * writes against and handed to their handler; anything else is ignored. In the
  * other direction the app reports its updater state (`app-update-state`) on
  * attach and through {@link DesktopBackendPipe.sendAppUpdateState}.
@@ -180,13 +190,27 @@ export function attachDesktopResourceTelemetry(
     createTelemetryLineReader(
       (value) => {
         if (typeof value !== "object" || value === null || !("type" in value)) return;
-        if (value.type === "app-update-check" || value.type === "app-update-install") {
+        if (
+          value.type === "app-update-check" ||
+          value.type === "app-update-install" ||
+          value.type === "app-update-policy"
+        ) {
           const request = parseDesktopAppUpdateRequestFrame(value);
           if (request === null) return;
           try {
             handlers.onAppUpdateRequest?.(request);
           } catch {
             // The updater owns its failures; a throw here would tear down the pipe.
+          }
+          return;
+        }
+        if (value.type === "agent-work") {
+          const frame = parseDesktopAgentWorkFrame(value);
+          if (frame === null) return;
+          try {
+            handlers.onAgentWork?.(frame);
+          } catch {
+            // The keep-awake owner handles its own failures; see onAppUpdateRequest.
           }
           return;
         }
@@ -199,7 +223,9 @@ export function attachDesktopResourceTelemetry(
         lastSampleAt = Date.now();
         send(true);
       },
-      () => pipe.destroy(),
+      // A malformed line is dropped. Closing the pipe over it would stop a
+      // backend this app still wants: the backend takes the close for its exit.
+      () => undefined,
     ),
   );
   pipe.on("drain", () => {

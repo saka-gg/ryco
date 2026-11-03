@@ -18,6 +18,7 @@ import type {
 import { Context } from "effect";
 import type { Effect } from "effect";
 
+import type { DelegationLimits } from "../../orchestration/delegationLimits.ts";
 import type { AgentControlCapabilityDeniedError, AgentControlDisabledError } from "../Errors.ts";
 
 export interface AgentControlAuthorizeInput {
@@ -35,6 +36,13 @@ export interface AgentControlAuthorizeInput {
 export interface AgentControlPolicyShape {
   /** Whether Agent Control is enabled. Never fails: unreadable settings read as disabled. */
   readonly isEnabled: Effect.Effect<boolean>;
+
+  /**
+   * The person's opt-in delegation limits (`AgentControlDelegationLimits`). Never fails:
+   * unreadable settings read as no limits, and as disabled for `isEnabled`, so no lease or
+   * request gets through then anyway.
+   */
+  readonly delegationLimits: Effect.Effect<DelegationLimits>;
 
   /** Fail with `AgentControlDisabledError` unless the feature is enabled. */
   readonly requireEnabled: (operation: string) => Effect.Effect<void, AgentControlDisabledError>;

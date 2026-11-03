@@ -7,7 +7,13 @@
  * The server owns every decision that matters (boundary, inherited history, checkout, provider
  * context); these helpers are hints that keep the UI honest and are re-checked by the node.
  */
-import type { MessageId, ThreadId, EnvironmentApi, OrchestrationLatestTurn } from "@ryco/contracts";
+import type {
+  EnvironmentApi,
+  MessageId,
+  OrchestrationLatestTurn,
+  ThreadId,
+  TurnId,
+} from "@ryco/contracts";
 import {
   ThreadForkAttemptState,
   ThreadForkBaseRef,
@@ -46,6 +52,11 @@ const THREAD_FORK_ERROR_COPY = {
   "idempotency-conflict": "A fork from this reply was already requested with different options.",
   "preparation-failed": "Preparing the fork didn't finish.",
   deleted: "This fork was created earlier, but it has since been deleted.",
+  "history-too-large":
+    "This conversation is too long to continue on another machine. Fork from an earlier reply.",
+  "history-invalid": "The other machine couldn't read this conversation.",
+  "base-ref-unavailable":
+    "The other machine couldn't fetch this branch, or its copy doesn't have the commit you're on. Push it, and check both machines use the same origin.",
 } as const satisfies Record<ThreadForkErrorReason, string>;
 
 /**
@@ -196,6 +207,35 @@ export function deriveForkableReplyMessageIds(
     if (isSettledReply(reply, input)) eligible.add(reply.id);
   }
   return eligible;
+}
+
+/**
+ * The newest reply "Fork from here" may be offered on (`deriveForkableReplyMessageIds`), or null.
+ * "Continue as thread" forks a side chat's thread from it, so the fork holds everything the side
+ * chat could read.
+ */
+export function selectLatestForkableReply<Message extends ForkReplyMessage>(
+  input: ThreadForkReplyContext & { readonly messages: ReadonlyArray<Message> },
+): (Message & { readonly turnId: TurnId }) | null {
+  const forkable = deriveForkableReplyMessageIds(input);
+  for (let index = input.messages.length - 1; index >= 0; index -= 1) {
+    const message = input.messages[index];
+    if (message && message.turnId && forkable.has(message.id)) {
+      return message as Message & { readonly turnId: TurnId };
+    }
+  }
+  return null;
+}
+
+/**
+ * The fork's composer draft once `seed` is in it: after the text already there, one blank line
+ * apart. Null when the draft already holds the seed (the dialog opened the same fork again), so
+ * a seed lands once and nothing is ever sent by it.
+ */
+export function threadForkSeededPrompt(prompt: string, seed: string): string | null {
+  const body = seed.trim();
+  if (body.length === 0 || prompt.includes(body)) return null;
+  return prompt.trim().length === 0 ? seed : `${prompt.trimEnd()}\n\n${seed}`;
 }
 
 // ── Destinations ───────────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 import { memo, useState } from "react";
 import type { ApprovalRequestId, EnvironmentId, ProviderApprovalDecision } from "@ryco/contracts";
+import { pendingApprovalOffersAcceptForSession } from "@ryco/client-runtime/state/session";
 import { ExpandIcon } from "lucide-react";
 
 import { type PendingApproval } from "../../session-logic";
@@ -37,9 +38,11 @@ interface ApprovalCardProps {
  * phone tier long detail expands into a bottom sheet pinned above the
  * keyboard inset; while the sheet is open the action set moves into the sheet
  * footer so exactly one set is ever rendered. Arrival is announced through an
- * assertive live region with the bounded summary only. Approval semantics,
- * stores, and capability gating are untouched — this component only composes
- * the existing panel and actions.
+ * assertive live region with the bounded summary only. Off the phone tier the
+ * card leads with Decline and Approve once and says why the provider asked;
+ * typing a message and sending it is the other answer (decline and redirect).
+ * Approval semantics, stores, and capability gating are untouched — this
+ * component only composes the existing panel and actions.
  */
 export const ApprovalCard = memo(function ApprovalCard({
   environmentId,
@@ -67,6 +70,10 @@ export const ApprovalCard = memo(function ApprovalCard({
         isResponding ||
         (approval.responseState !== undefined && approval.responseState !== "retryable")
       }
+      // The frozen phone tier keeps its four inline buttons; elsewhere the explicit decisions
+      // lead and the session-wide grant and Cancel turn move into a menu.
+      layout={tier === "phone" ? "inline" : "compact"}
+      acceptForSessionOffered={pendingApprovalOffersAcceptForSession(approval)}
       onRespondToApproval={onRespondToApproval}
     />
   );
@@ -77,7 +84,11 @@ export const ApprovalCard = memo(function ApprovalCard({
       <p role="alert" className="sr-only">
         {pendingApprovalSummaryLabel(approval)}
       </p>
-      <ComposerPendingApprovalPanel approval={approval} pendingCount={pendingCount} />
+      <ComposerPendingApprovalPanel
+        approval={approval}
+        pendingCount={pendingCount}
+        showReason={tier !== "phone"}
+      />
       {tier === "phone" && approval.detail ? (
         <div className="px-4 pb-1 sm:px-5">
           <Button

@@ -2,6 +2,9 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   createTelemetryLineReader,
   DESKTOP_TELEMETRY_MAX_BYTES,
+  desktopAppAutomaticUpdateMode,
+  parseDesktopAgentWorkFrame,
+  parseDesktopAppUpdateRequestFrame,
   parseDesktopBackendLifecycleFrame,
   parseDesktopResourceTelemetry,
 } from "./desktopResourceTelemetry.ts";
@@ -133,5 +136,91 @@ describe("private desktop telemetry protocol", () => {
     expect(parseDesktopBackendLifecycleFrame({ type: "fatal", message: "no code" })).toBeNull();
     expect(parseDesktopBackendLifecycleFrame({ type: "sample" })).toBeNull();
     expect(parseDesktopBackendLifecycleFrame(null)).toBeNull();
+  });
+
+  it("parses agent-work frames and keeps them out of the lifecycle frames", () => {
+    expect(
+      parseDesktopAgentWorkFrame({ type: "agent-work", working: true, keepAwake: true }),
+    ).toEqual({ type: "agent-work", working: true, keepAwake: true });
+    // Extra fields are stripped.
+    expect(
+      parseDesktopAgentWorkFrame({
+        type: "agent-work",
+        working: false,
+        keepAwake: true,
+        threads: ["t-1"],
+      }),
+    ).toEqual({ type: "agent-work", working: false, keepAwake: true });
+    for (const malformed of [
+      { type: "agent-work", working: true },
+      { type: "agent-work", keepAwake: false },
+      { type: "agent-work", working: "yes", keepAwake: true },
+      { type: "agent-work", working: true, keepAwake: 1 },
+      { type: "startup-ready", working: true, keepAwake: true },
+      null,
+      "agent-work",
+      [{ type: "agent-work", working: true, keepAwake: true }],
+    ]) {
+      expect(parseDesktopAgentWorkFrame(malformed)).toBeNull();
+    }
+    expect(
+      parseDesktopBackendLifecycleFrame({ type: "agent-work", working: true, keepAwake: true }),
+    ).toBeNull();
+  });
+
+  it("round-trips the app update policy frame and rejects malformed ones", () => {
+    for (const automatic of [true, false]) {
+      const frame = { type: "app-update-policy", automatic } as const;
+      // The backend writes JSON lines; the app parses them back.
+      expect(parseDesktopAppUpdateRequestFrame(JSON.parse(JSON.stringify(frame)))).toEqual(frame);
+    }
+    expect(
+      parseDesktopAppUpdateRequestFrame({ type: "app-update-policy", automatic: true, x: 1 }),
+    ).toEqual({ type: "app-update-policy", automatic: true });
+    for (const malformed of [
+      { type: "app-update-policy" },
+      { type: "app-update-policy", automatic: "true" },
+      { type: "app-update-policy", automatic: 1 },
+      { type: "app-update-policy", automatic: null },
+    ]) {
+      expect(parseDesktopAppUpdateRequestFrame(malformed)).toBeNull();
+    }
+    expect(
+      parseDesktopBackendLifecycleFrame({ type: "app-update-policy", automatic: true }),
+    ).toBeNull();
+  });
+
+  it("installs at quit only where the platform's updater can do it unattended", () => {
+    expect(desktopAppAutomaticUpdateMode({ platform: "darwin", appImage: undefined })).toBe(
+      "restart",
+    );
+    // An AppImage path in the environment changes nothing on macOS.
+    expect(desktopAppAutomaticUpdateMode({ platform: "darwin", appImage: "/x.AppImage" })).toBe(
+      "restart",
+    );
+    expect(desktopAppAutomaticUpdateMode({ platform: "win32", appImage: undefined })).toBe(
+      "install-on-quit",
+    );
+    expect(desktopAppAutomaticUpdateMode({ platform: "linux", appImage: "/x.AppImage" })).toBe(
+      "install-on-quit",
+    );
+    // electron-updater overwrites an AppImage named without a version in place.
+    expect(
+      desktopAppAutomaticUpdateMode({
+        platform: "linux",
+        appImage: "/home/sam/Applications/0.1.36/Ryco.AppImage",
+      }),
+    ).toBe("install-on-quit");
+    // A release file name carries its version: the update would land under a new name that
+    // nothing starts, so it waits for Restart.
+    for (const appImage of [
+      "/home/sam/Applications/Ryco-0.1.36-x86_64.AppImage",
+      "/opt/Ryco-Nightly-0.1.37-nightly.20261031.1-arm64.AppImage",
+    ]) {
+      expect(desktopAppAutomaticUpdateMode({ platform: "linux", appImage })).toBe("restart");
+    }
+    expect(desktopAppAutomaticUpdateMode({ platform: "linux", appImage: undefined })).toBeNull();
+    expect(desktopAppAutomaticUpdateMode({ platform: "linux", appImage: "" })).toBeNull();
+    expect(desktopAppAutomaticUpdateMode({ platform: "freebsd", appImage: undefined })).toBeNull();
   });
 });

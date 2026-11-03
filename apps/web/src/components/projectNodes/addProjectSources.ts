@@ -5,6 +5,7 @@
 //          creating the project once a folder is chosen.
 // Layer: Web UI logic. Rendering stays with each surface; nothing here reads a store reactively.
 
+import { isSavedEnvironmentSwitchedOff } from "@ryco/client-runtime/connection";
 import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type {
   EnvironmentApi,
@@ -25,14 +26,14 @@ import { createElement, type ReactNode } from "react";
 import { isLocalHubAlias, resolveDeviceName } from "../../deviceName.logic";
 import {
   findProjectByPath,
-  inferProjectTitleFromPath,
   isExplicitRelativeProjectPath,
   isUnsupportedWindowsProjectPath,
   resolveInitialProjectBrowsePath,
   resolveProjectPathForDispatch,
 } from "../../lib/projectPaths";
 import { getLatestThreadForProject, type ThreadSortInput } from "../../lib/threadSort";
-import { isMacPlatform, isWindowsPlatform, newCommandId, newProjectId } from "../../lib/utils";
+import { buildProjectCreateCommand } from "../../lib/projectCreateCommand";
+import { isMacPlatform, isWindowsPlatform, newProjectId } from "../../lib/utils";
 import {
   deriveLogicalProjectKeyFromSettings,
   type ProjectGroupingSettings,
@@ -54,6 +55,8 @@ export interface AddProjectEnvironmentOption {
 interface SavedEnvironmentLabels {
   readonly environmentId: EnvironmentId;
   readonly label: string;
+  /** Set while the machine is switched off. */
+  readonly disabledAt?: string | undefined;
 }
 
 interface SavedEnvironmentRuntimeLabels {
@@ -98,6 +101,8 @@ export function buildAddProjectEnvironmentOptions(input: {
 
   for (const record of Object.values(input.savedEnvironments)) {
     if (
+      // Left out while switched off, as in the sidebar.
+      isSavedEnvironmentSwitchedOff(record) ||
       seenEnvironmentIds.has(record.environmentId) ||
       isLocalHubAlias(record.environmentId, primaryEnvironmentId, input.localHubEnvironmentId)
     ) {
@@ -642,16 +647,13 @@ export async function openOrCreateProjectAtPath<
 
   try {
     const projectId = newProjectId();
-    await input.api.orchestration.dispatchCommand({
-      type: "project.create",
-      commandId: newCommandId(),
-      projectId,
-      title: inferProjectTitleFromPath(input.cwd),
-      workspaceRoot: input.cwd,
-      projectMetadataDir: ".ryco",
-      createWorkspaceRootIfMissing: true,
-      createdAt: new Date().toISOString(),
-    });
+    await input.api.orchestration.dispatchCommand(
+      buildProjectCreateCommand({
+        projectId,
+        workspaceRoot: input.cwd,
+        createWorkspaceRootIfMissing: true,
+      }),
+    );
     await input
       .handleNewThread(scopeProjectRef(environmentId, projectId), {
         envMode: settings.defaultThreadEnvMode,

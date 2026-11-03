@@ -49,7 +49,8 @@ describe("Cua artifact cache", () => {
   it("keys compiler intermediates by pinned release, architecture, and build settings", () => {
     const key = cuaBuildCacheKey(release, "linux", "arm64");
     expect(cuaBuildCacheKey(release, "linux", "x64")).not.toBe(key);
-    expect(cuaBuildCacheKey({ ...release, nativeRevision: 40 }, "linux", "arm64")).not.toBe(key);
+    const nextRevision = { ...release, nativeRevision: release.nativeRevision + 1 };
+    expect(cuaBuildCacheKey(nextRevision, "linux", "arm64")).not.toBe(key);
     vi.stubEnv("CARGO_PROFILE_RELEASE_STRIP", "symbols");
     expect(cuaBuildCacheKey(release, "linux", "arm64")).not.toBe(key);
   });

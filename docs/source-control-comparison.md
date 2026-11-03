@@ -1,9 +1,10 @@
 # Repository comparisons
 
-The desktop/web diff panel offers **Turn review**, **Branch changes → HEAD**, and
-**Commit to HEAD**. Enter a local branch, remote-tracking branch, tag, or commit ID,
-then select **Compare**. References resolve in the connected server's repository;
-comparison never fetches a remote, checks out a branch, or modifies the index.
+The desktop/web diff panel offers **Turn review**, **Branch changes → HEAD**,
+**Branch changes → working tree**, **Commit to HEAD**, and **Commit to working tree**.
+Enter a local branch, remote-tracking branch, tag, or commit ID, then select
+**Compare**. References resolve in the connected server's repository; comparison
+never fetches a remote, checks out a branch, or modifies the index.
 
 - **Branch changes → HEAD** compares the unique merge-base of the entered reference
   and HEAD with HEAD. Changes exclusive to the base branch are excluded.
@@ -11,6 +12,11 @@ comparison never fetches a remote, checks out a branch, or modifies the index.
   either side of a diverged history appear in the resulting patch.
 - Both compare committed trees. Staged, unstaged, and untracked changes are
   explicitly excluded. Editing local files therefore does not change this patch.
+- **Branch changes → working tree** and **Commit to working tree** use the same left
+  endpoint and compare it with the working files instead of HEAD: committed, staged,
+  unstaged, and untracked changes together, "everything this agent did since it left
+  main". See [Working tree comparisons](#working-tree-comparisons). Nodes that do not
+  advertise `workingTreeComparison` do not offer them.
 - **Turn review** returns to the existing conversation/checkpoint view. Explicit
   links to a particular turn still open that turn even when a comparison is saved.
 
@@ -45,7 +51,7 @@ pairs, avoiding repository-config-dependent rename detection costs.
 `EnvironmentApi.vcs.readComparison` / `vcs.readComparison` takes:
 
 ```ts
-{ cwd, selection: { ref, mode: "mergeBase" | "direct" }, ignoreWhitespace }
+{ cwd, selection: { ref, mode: "mergeBase" | "direct", target?: "workingTree" }, ignoreWhitespace }
 ```
 
 It returns `{ selection, patch, source }`. `source` contains:
@@ -53,13 +59,14 @@ It returns `{ selection, patch, source }`. `source` contains:
 - `repositoryPath`: absolute Git common metadata directory (shared by linked worktrees).
 - `worktreePath`: Git worktree root.
 - `refOid`: resolved entered reference.
-- `headOid`: captured HEAD.
+- `headOid`: captured HEAD (the right endpoint, unless `target` is set).
 - `baseOid`: effective left endpoint (merge-base or entered commit).
+- `target`: `"workingTree"` when the right side is the working files.
 - `revision`: opaque content/options/endpoint identity for this comparison.
 
 The server verifies the entered reference and HEAD again after producing the patch.
-A move during the read fails and asks for refresh. No server patch cache or temporary
-index is required. Existing Pierre rendering, ActiveDiffParser reuse, and file
+A move during the read fails and asks for refresh. Committed comparisons need no server
+patch cache or temporary index; working-tree comparisons read through a disposable one. Existing Pierre rendering, ActiveDiffParser reuse, and file
 navigation remain the diff implementation. Totals, when rendered, must describe
 this patch rather than independent working-tree status totals.
 
@@ -79,8 +86,9 @@ persisted; patches stay in memory.
 
 ## Line blame
 
-In committed comparisons, click a code line or use the file header's **Line blame**
-button. The dialog supports keyboard lookup by side and displayed line number.
+In repository comparisons, click a code line or use the file header's **Line blame**
+button. A working-tree comparison attributes base lines only: its right side is working
+files, whose line numbers belong to no commit, so the dialog offers only the base side. The dialog supports keyboard lookup by side and displayed line number.
 Base context/deleted lines use the captured base commit and old path; head context
 lines use the captured head commit and new path. Line-number clicks still open the
 editor. Added lines, checkpoint review, binary files, symlinks, submodules and lines
@@ -116,6 +124,62 @@ directory cannot authorize reading its ancestor repository. Subsequent commands
 run at the authorized canonical root. Returned comparison metadata remains an
 identity, never an authorization token. Both RPCs retain operator access guards.
 
+## Working tree comparisons
+
+`selection.target: "workingTree"` compares the left endpoint (the merge-base of the
+reference and HEAD, or the reference itself) with the working files. The server resolves
+the reference and HEAD to object IDs first, exactly as for committed comparisons, then
+diffs inside a disposable index (the machinery of the local review below), loaded on
+first use:
+
+1. The real index is copied, and the copy lists what it adds to the left endpoint: files
+   committed since then, force-added ignored files, and changed submodule pointers.
+2. `read-tree -m <left>` turns the copy into the left tree while keeping the index's stat
+   data, so Git hashes only files that changed. An index with unmerged entries falls back
+   to a plain `read-tree`, and conflict markers then show as working-file content.
+3. The additions from step 1 return as entries, and untracked files that are not ignored
+   become intent-to-add entries (up to 200, like the Unstaged review).
+4. One `git diff <left>` against that index produces the patch.
+
+A path the index dropped and the working tree recreated therefore reads as one
+modification, not as a deletion plus an addition, and a force-added file appears even
+though an ignore rule hides it from untracked listings. When Git refuses the
+intent-to-add batch (a sparse-checkout path, an unwritable object store), the index is
+rebuilt without it and each untracked file is diffed on its own. The user's index, HEAD,
+refs, and working files are never written; scratch index writes run without the user's
+hooks or fsmonitor.
+
+HEAD, the current branch, and the index bytes must be unchanged from the start to the end
+of the read, as must the reference; otherwise the read fails and asks for refresh. Agent
+edits to working files after the read appear on **Refresh comparison** (Git invalidation,
+foreground, and reconnects refresh too). The same limits apply: 15 seconds per command,
+2 MB of patch. Image previews read the new side from the working file. A node without
+`workingTreeComparison` drops `target` and echoes the selection without it; the client
+then shows an error rather than a HEAD comparison labeled as the working tree.
+
+## Diff panel review tools
+
+Every diff the panel shows (turns, comparisons, staged and unstaged review) gets a toolbar
+above the files, on desktop presentations (the frozen phone tier is unchanged):
+
+- **File count and line totals** of the displayed patch.
+- **Show file tree**: the Files tab's tree (`FileTreePane`) beside the diff, listing the
+  files the diff lists (find filters both). Its highlighted row follows the file at the top
+  of the diff; a click scrolls the diff to that file.
+- **Previous hunk / Next hunk**, also `diff.hunk.previous` / `diff.hunk.next` (Alt+Up /
+  Alt+Down by default) while focus is in the diff but not in a text field. The current hunk
+  is the last one starting at or above the middle of the diff; a jump centers the target's
+  first changed line. Steps continue from the last jump while the reader has not scrolled,
+  so the last screen of hunks is reachable. Folded files are skipped.
+- **Collapse all files / Expand all files** for the listed files.
+- **Scrollbar markers**: one tick per hunk (green added, red deleted, amber both), placed by
+  the hunk's position in its file; ticks closer than 3 px merge. A click reveals the hunk.
+
+Changed line pairs get word-level highlighting from the shared highlight pool
+(`lineDiffType: "word-alt"`), computed per file as the virtualizer draws it and cached
+under that file's own content key. Without highlight workers, the main thread renders
+without the word diff.
+
 ## Staged and unstaged review
 
 **Staged changes** compares HEAD with the Git index. **Unstaged changes** compares
@@ -138,9 +202,83 @@ Symlinks and submodules have no staging actions, and conflicted indexes fail wit
 explicit message. Partial creation/deletion and mode changes cannot be staged as
 individual hunks. Unsupported rendering retains the existing raw-patch fallback.
 
-Staging does not commit. Existing Ryco commit actions retain their selected-file/all-file
-staging behavior; they do not preserve partial-hunk selection. To commit precisely the
-reviewed index, use Git's staged-only commit workflow outside those actions.
+Staging does not commit by itself. **Commit staged** in the Staged changes view commits
+exactly the reviewed index: nothing is reset or added, so partial hunks stay staged as
+reviewed and unstaged edits and untracked files remain in the working tree. It generates
+the commit message from the staged diff and runs the repository's commit hooks like any
+other commit. The other Ryco commit actions keep their selected-file/all-file staging
+behavior and do not preserve partial-hunk selection. Nodes that do not advertise
+`stagedOnlyCommit` do not offer the action, because they would ignore the request and
+commit every change.
+
+### Staged-only commit
+
+`vcs.readLocalChanges` also returns a `stagedRevision`, binding the canonical worktree,
+branch, HEAD, and the staged content (the HEAD-to-index modes and object IDs, read with
+submodules never ignored), but not the unstaged patch: later agent edits to working
+files do not invalidate it. `git.runStackedAction` with `stagedOnly.expectedRevision`
+recomputes that revision before reading the commit-message context and refuses with
+`GitStagedIndexChangedError` when it differs, so a later `git add`, commit, or branch
+switch cannot slip into the commit. It refuses an empty index and unmerged entries. Right
+before `git commit` it checks HEAD, the branch, and the staged content again, covering
+changes made while the message was generated. `stagedOnly` cannot be combined with
+`filePaths`; a feature-branch commit, push, and pull request follow the same path. The
+Staged review and the commit-message context list staged submodule pointers even when
+the user's config ignores submodules, because the commit records them.
+
+### Git actions across reconnects
+
+A commit, push or pull request action normally belongs to its request: when the client's
+connection closes, the node stops the action and its Git child. A client that can attach
+again sends `recoverable: true` with a random UUID `actionId` to a node that advertises
+`recoverableGitActions`. The action then runs on the node until it ends, whatever happens
+to the connection. The client follows it again with `git.resumeStackedAction` (the same
+input; it replays the current step, then the rest, and never starts Git) and stops it with
+`git.cancelStackedAction`. Steps that already finished stay done.
+
+Actions belong to the client that started them: a direct client's pairing (a bearer
+renewal keeps it), a relay device's identity key, or, for hosted web channels that identify
+no device, the action id alone. Revoking a direct pairing stops its running actions and
+refuses its later starts; renewing it does not. Revoking a relay device ends its channels, but
+an action it already started runs to its end. While a recoverable action runs, the node refuses
+another one in the same checkout and holds the checkout against storage cleanup.
+
+The node keeps the outcome of the last 256 actions for 30 minutes, in memory only. A resume
+it has no record of (after a restart, for an old action, or for a start that never arrived)
+fails with `GitActionResultUnavailableError`, and a start for that id that arrives later is
+refused, so Git never runs twice for one action. The client then asks the user to check the
+repository status instead of retrying: a graceful node shutdown stops the Git child, but a
+node that crashed may leave it running to completion, and a retry could race it.
+
+Clients go through `GitActionRecovery` (`packages/client-runtime/src/rpc/gitActionRecovery.ts`),
+which wraps every environment connection's `git.runStackedAction`. A caller asks for recovery per
+call (`runStackedAction(input, { recoverable: true })`), and only a caller that offers Stop should:
+closing or reloading the client no longer stops the action. The run is recoverable only when the
+connection it goes to reports `recoverableGitActions`; otherwise it stays request-owned. When a
+recoverable start ends without an answer, the client never sends it again. It waits until a
+connection of the same environment is ready (newest first): connected, on its current lifecycle
+generation, with a shell snapshot of the current socket attempt, and for a hosted connection a
+session the lifecycle owner can adopt (`canAdoptHostedEnvironmentSession`). Then it sends
+`git.resumeStackedAction`. A resume is a read, so it is admitted while a hosted session holds
+mutations after an unconfirmed action. On a hosted connection the recovery also answers for the
+delivery of its Git actions (`bindHostedGitActionDelivery`), the way the dispatch replay does for
+orchestration commands: a dropped recoverable action does not make the session delivery unknown,
+while a request-owned one lost with its connection still does. Progress from a connection that
+was replaced or disposed is dropped. The client stops waiting after 30 minutes without progress or a new connection
+(`expired`), when the hosted account session ends (`ended`), or when the node cannot resume
+(`unsupported`). In-flight actions are kept in memory only, so a reloaded client cannot follow
+them again.
+
+In the web app, the commit, push and pull request actions of the git controls and the crown's
+Ship button, and the review panel's Commit staged, ask for recovery. Their notice (the crown's
+live alert, or a toast) offers Stop once the node has reported the action, until the action
+reports its end; Stop acts in place and the notice ends with "Stopped" when the node stopped it,
+or keeps Stop with the reason when the stop request failed. While the client waits for a
+connection the notice says "Reconnecting... It keeps running on the node.", and a resume that
+replays the current step keeps that step's elapsed time. When the client cannot learn the outcome
+the notice says "Couldn't confirm the Git action" and asks to check the repository status; the
+checkout's status is read again after that and after a stop. The mobile app keeps request-owned
+actions until it offers Stop too.
 
 ### Guarded index mutation
 

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ClaudeSettings } from "@ryco/contracts";
 import { Duration, Effect, Schema } from "effect";
+import { TestClock } from "effect/testing";
 
 const mocks = vi.hoisted(() => ({
   readFile: vi.fn(),
@@ -20,11 +21,13 @@ vi.mock("node:child_process", async (original) => ({
   ...(await original<typeof import("node:child_process")>()),
   execFile: mocks.execFile,
 }));
+import { makeUsageReadGate } from "../usageReadGate.ts";
 import { checkClaudeProviderStatus } from "./ClaudeProvider.ts";
 import {
+  type ClaudeCredentialStore,
   type ClaudeLoginAccount,
   makeCachedClaudeUsageProbe,
-  probeClaudeUsageRateLimits,
+  planClaudeUsageRead,
   resolveClaudeLoginStore,
 } from "./ClaudeUsage.ts";
 
@@ -45,6 +48,9 @@ const claudeAccount = (
   tokenSource: account.tokenSource,
   slashCommands: [],
 });
+// One usage read through a fresh gate, so no earlier read is re-served.
+const readOnce = (store: ClaudeCredentialStore) =>
+  Effect.flatMap(makeUsageReadGate(), (gate) => gate.read(planClaudeUsageRead(store, null)));
 const probe = (environment: NodeJS.ProcessEnv) => {
   const store = resolveClaudeLoginStore(
     { USER: "mock-user", ...environment },
@@ -52,7 +58,7 @@ const probe = (environment: NodeJS.ProcessEnv) => {
     "/mock/default",
   );
   if (!store) throw new Error("Expected a local Claude login store.");
-  return Effect.runPromise(probeClaudeUsageRateLimits(store, null));
+  return Effect.runPromise(readOnce(store));
 };
 // The test runtime's own binary stands in for the Claude CLI's version check.
 const checkStatus = (environment: NodeJS.ProcessEnv, account = claudeAccount()) =>
@@ -61,7 +67,7 @@ const checkStatus = (environment: NodeJS.ProcessEnv, account = claudeAccount()) 
       { ...Schema.decodeSync(ClaudeSettings)({}), binaryPath: process.execPath },
       () => Effect.succeed(account),
       environment,
-      yield* makeCachedClaudeUsageProbe(Duration.minutes(1)),
+      yield* makeCachedClaudeUsageProbe(Duration.minutes(1), yield* makeUsageReadGate()),
     );
   }).pipe(Effect.provide(NodeServices.layer), Effect.runPromise);
 const keychainCalls = () =>
@@ -141,11 +147,27 @@ describe("Claude usage credential isolation", () => {
     expect(mocks.writeFile).not.toHaveBeenCalled();
   });
 
+  it("stamps the limits it reads with the read time and lists every window", async () => {
+    const store = { credentialsPath: "/mock/separate/.credentials.json", keychain: undefined };
+    const limits = await Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse("2026-05-11T15:04:05.000Z"));
+      return yield* readOnce(store);
+    }).pipe(Effect.provide(TestClock.layer()), Effect.runPromise);
+    expect(limits?.observedAt).toBe("2026-05-11T15:04:05.000Z");
+    expect(limits?.primary).toEqual({ usedPercent: 42, windowDurationMins: 300 });
+    expect(limits?.windows).toEqual([
+      { id: "five_hour", usedPercent: 42, windowDurationMins: 300 },
+    ]);
+  });
+
   it("serves cached usage only for the credential store it was read from", async () => {
     const separate = { credentialsPath: "/mock/separate/.credentials.json", keychain: undefined };
     const config = { credentialsPath: "/mock/config/.credentials.json", keychain: undefined };
     await Effect.gen(function* () {
-      const probeUsage = yield* makeCachedClaudeUsageProbe(Duration.minutes(1));
+      const probeUsage = yield* makeCachedClaudeUsageProbe(
+        Duration.minutes(1),
+        yield* makeUsageReadGate(),
+      );
       yield* probeUsage(separate, null);
       yield* probeUsage({ ...separate }, null);
       yield* probeUsage(config, null);

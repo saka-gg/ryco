@@ -20,7 +20,7 @@
  *   is an allowlisted kind (a stream batch mixing in anything else is left
  *   alone, except that a leading shell `snapshot-begin` is split off and sent
  *   uncompressed in a message of its own);
- * - the encoded message is at least the permessage-deflate threshold, and it
+ * - the encoded message is at least 16 KiB, and it
  *   and its compressed frame TOGETHER fit the channel's message ceiling: the
  *   client holds both while it inflates, and charges both to its inbound queue;
  * - compressing (fresh context, level 1, padded) saves at least 10%.
@@ -132,8 +132,12 @@ export const RELAY_COMPRESSION_ALLOWLIST: Readonly<
   },
 };
 
-/** Messages below this many bytes are never compressed (permessage-deflate's threshold). */
-export const RELAY_COMPRESSION_THRESHOLD_BYTES = WEBSOCKET_PER_MESSAGE_DEFLATE.threshold;
+/**
+ * Messages below this many bytes are never compressed. Relay compression is for large allowlisted
+ * responses only (shell pages, provider lists): a padded frame must save 10%, which smaller
+ * messages rarely do.
+ */
+export const RELAY_COMPRESSION_THRESHOLD_BYTES = 16 * 1024;
 /** The padded frame must be at most this fraction of the original, or the original is sent. */
 export const RELAY_COMPRESSION_MAX_RATIO = 0.9;
 /** Allowlisted requests tracked per channel; beyond it new ones are simply not compressed. */

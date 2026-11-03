@@ -1,6 +1,8 @@
+import type { StaticScreenProps } from "@react-navigation/native";
 import { MotionReveal } from "../../components/MotionReveal";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, RefreshControl, ScrollView, View } from "react-native";
+import type { EnvironmentId } from "@ryco/contracts";
 import type { StatRange } from "@ryco/client-runtime/usage";
 import { AppText as Text } from "../../components/AppText";
 import { useHomeEnvironments } from "../home/useHomeEnvironments";
@@ -16,11 +18,29 @@ import {
 import { UsageStatistics } from "./statistics/UsageStatistics";
 import { ActivityStatistics } from "./statistics/ActivityStatistics";
 import { ProviderLimits } from "./statistics/ProviderLimits";
+import { providerLimitsNodes } from "./statistics/providerLimitsModel";
+import { statisticsTabParam } from "./statistics/statisticsRoute";
+import { canChangeNodeSettings } from "./nodeSettingsTargets";
 
-export function SettingsStatisticsRouteScreen() {
+type SettingsStatisticsRouteScreenProps = StaticScreenProps<
+  | {
+      /** The tab to open, as a link names it (`settings/statistics?tab=limits`). */
+      readonly tab?: string | string[];
+    }
+  | undefined
+>;
+
+export function SettingsStatisticsRouteScreen(props: SettingsStatisticsRouteScreenProps) {
   const colors = useStatisticsPalette();
   const environments = useHomeEnvironments();
-  const [tab, setTab] = useState<StatisticsTab>("usage");
+  const linkedTab = statisticsTabParam(props.route.params?.tab);
+  const [tab, setTab] = useState<StatisticsTab>(linkedTab ?? "usage");
+  // A link that names a tab opens it, also while Statistics is already open.
+  const [followedTab, setFollowedTab] = useState(linkedTab);
+  if (linkedTab !== followedTab) {
+    setFollowedTab(linkedTab);
+    if (linkedTab !== null) setTab(linkedTab);
+  }
   const [range, setRange] = useState<StatRange>("30d");
   const [device, setDevice] = useState("all");
   const selected =
@@ -36,6 +56,14 @@ export function SettingsStatisticsRouteScreen() {
     selected.find((environment) => environment.connectionState === "connected") ?? selected[0];
   const scoped = tab === "activity" ? (activityDevice ? [activityDevice] : []) : selected;
   const data = useStatisticsData(scoped, tab, range);
+  // Memoized: this screen is not React-compiled, and the limits selector keys on it.
+  const limitNodes = useMemo(() => providerLimitsNodes(data.nodes), [data.nodes]);
+  // Reset credits are spent only through a connected, mutation-ready owner session.
+  const canRedeem = (environmentId: EnvironmentId) =>
+    environments.some(
+      (environment) =>
+        environment.environmentId === environmentId && canChangeNodeSettings(environment),
+    );
   return (
     <ScrollView
       className="flex-1"
@@ -128,35 +156,11 @@ export function SettingsStatisticsRouteScreen() {
             ) : null,
           )
         : null}
-      {tab === "limits"
-        ? data.nodes.map((node) =>
-            node.providers ? (
-              <View key={node.environment.environmentId} className="gap-3">
-                <Text className="text-lg font-ryco-bold text-foreground">
-                  {node.environment.label}
-                </Text>
-                <MotionReveal>
-                  <ProviderLimits
-                    providers={node.providers}
-                    onRefresh={data.refresh}
-                    environmentId={node.environment.environmentId}
-                    canRedeem={environments.some(
-                      (environment) =>
-                        environment.environmentId === node.environment.environmentId &&
-                        environment.mutationReady === true &&
-                        environment.role === "owner" &&
-                        environment.connectionState === "connected",
-                    )}
-                    connected={
-                      node.environment.connectionState === "connected" ||
-                      node.environment.connectionState === "read-only"
-                    }
-                  />
-                </MotionReveal>
-              </View>
-            ) : null,
-          )
-        : null}
+      {tab === "limits" && limitNodes.length > 0 ? (
+        <MotionReveal key="limits">
+          <ProviderLimits nodes={limitNodes} canRedeem={canRedeem} onRefresh={data.refresh} />
+        </MotionReveal>
+      ) : null}
     </ScrollView>
   );
 }

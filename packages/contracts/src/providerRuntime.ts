@@ -208,6 +208,8 @@ const ProviderRuntimeEventType = Schema.Literals([
   "deprecation.notice",
   "files.persisted",
   "tool.denied",
+  "vcs.state.changed",
+  "runtime.notice",
   "runtime.warning",
   "runtime.error",
 ]);
@@ -266,6 +268,8 @@ const ConfigWarningType = Schema.Literal("config.warning");
 const DeprecationNoticeType = Schema.Literal("deprecation.notice");
 const FilesPersistedType = Schema.Literal("files.persisted");
 const ToolDeniedType = Schema.Literal("tool.denied");
+const VcsStateChangedType = Schema.Literal("vcs.state.changed");
+const RuntimeNoticeType = Schema.Literal("runtime.notice");
 const RuntimeWarningType = Schema.Literal("runtime.warning");
 const RuntimeErrorType = Schema.Literal("runtime.error");
 
@@ -371,6 +375,12 @@ export const ThreadTokenUsageSnapshot = Schema.Struct({
   toolUses: Schema.optional(NonNegativeInt),
   durationMs: Schema.optional(NonNegativeInt),
   compactsAutomatically: Schema.optional(Schema.Boolean),
+  /**
+   * The node compacts this session when sent `/compact`, rather than passing it to the model.
+   * Claude Code's sessions always have when they compact automatically; for any other provider
+   * only a node that sets this does.
+   */
+  compactsOnRequest: Schema.optional(Schema.Boolean),
 });
 export type ThreadTokenUsageSnapshot = typeof ThreadTokenUsageSnapshot.Type;
 
@@ -479,6 +489,17 @@ export type ContentDeltaPayload = typeof ContentDeltaPayload.Type;
 const RequestOpenedPayload = Schema.Struct({
   requestType: CanonicalRequestType,
   detail: Schema.optional(TrimmedNonEmptyStringSchema),
+  /**
+   * Why the provider asks, in its own words, when that says more than `detail`
+   * (Claude's permission decision reason). Older clients ignore it.
+   */
+  reason: Schema.optional(TrimmedNonEmptyStringSchema),
+  /**
+   * `false` when the provider refuses a session-wide grant for this request:
+   * allowing it for the session would allow more than this one action. Older
+   * clients still offer the choice; the adapter then answers it as one approval.
+   */
+  acceptForSessionOffered: Schema.optional(Schema.Boolean),
   args: Schema.optional(Schema.Unknown),
 });
 export type RequestOpenedPayload = typeof RequestOpenedPayload.Type;
@@ -575,6 +596,11 @@ const taskAgentLinkageFields = {
   isBackgrounded: Schema.optional(Schema.Boolean),
   /** This session can stop the individual provider task. */
   canStop: Schema.optional(Schema.Boolean),
+  /**
+   * The person can send this running agent a message (`orchestration.messageBackgroundTask`),
+   * which it reads at its next step.
+   */
+  canMessage: Schema.optional(Schema.Boolean),
   /** SDK task_type (subagent/shell/monitor/local_workflow/…), repeated on
    * every row so folds can classify without the start row. */
   taskType: Schema.optional(TrimmedNonEmptyStringSchema),
@@ -869,6 +895,34 @@ const ToolDeniedPayload = Schema.Struct({
   agentId: Schema.optional(TrimmedNonEmptyStringSchema),
 });
 export type ToolDeniedPayload = typeof ToolDeniedPayload.Type;
+
+/**
+ * The provider's own report that a command it ran changed git or forge state (Claude Code's
+ * `vcs_state_changed` and `code_change_published`). A cue to re-read the checkout, never the new
+ * state itself.
+ */
+const VcsStateChangedPayload = Schema.Struct({
+  /**
+   * commit | push | merge | rebase | change-request | …: an open set, and an unknown kind still
+   * means something changed.
+   */
+  kind: TrimmedNonEmptyStringSchema,
+  /** The shell's directory when the command finished: where to look, never proof. */
+  cwd: Schema.optional(TrimmedNonEmptyStringSchema),
+  /** For `change-request`: what the command did (created, merged, closed, checked-out, …). */
+  action: Schema.optional(TrimmedNonEmptyStringSchema),
+});
+export type VcsStateChangedPayload = typeof VcsStateChangedPayload.Type;
+
+/**
+ * A low-key provider status line that is neither a warning nor an error (a request retry, a
+ * provider banner): an info row labelled with `message`, with `detail` as its plain-text body.
+ */
+const RuntimeNoticePayload = Schema.Struct({
+  message: TrimmedNonEmptyStringSchema,
+  detail: Schema.optional(TrimmedNonEmptyStringSchema),
+});
+export type RuntimeNoticePayload = typeof RuntimeNoticePayload.Type;
 
 const RuntimeWarningPayload = Schema.Struct({
   message: TrimmedNonEmptyStringSchema,
@@ -1280,6 +1334,20 @@ const ProviderRuntimeToolDeniedEvent = Schema.Struct({
 });
 export type ProviderRuntimeToolDeniedEvent = typeof ProviderRuntimeToolDeniedEvent.Type;
 
+const ProviderRuntimeVcsStateChangedEvent = Schema.Struct({
+  ...ProviderRuntimeEventBase.fields,
+  type: VcsStateChangedType,
+  payload: VcsStateChangedPayload,
+});
+export type ProviderRuntimeVcsStateChangedEvent = typeof ProviderRuntimeVcsStateChangedEvent.Type;
+
+const ProviderRuntimeNoticeEvent = Schema.Struct({
+  ...ProviderRuntimeEventBase.fields,
+  type: RuntimeNoticeType,
+  payload: RuntimeNoticePayload,
+});
+export type ProviderRuntimeNoticeEvent = typeof ProviderRuntimeNoticeEvent.Type;
+
 const ProviderRuntimeWarningEvent = Schema.Struct({
   ...ProviderRuntimeEventBase.fields,
   type: RuntimeWarningType,
@@ -1348,6 +1416,8 @@ export const ProviderRuntimeEventV2 = Schema.Union([
   ProviderRuntimeDeprecationNoticeEvent,
   ProviderRuntimeFilesPersistedEvent,
   ProviderRuntimeToolDeniedEvent,
+  ProviderRuntimeVcsStateChangedEvent,
+  ProviderRuntimeNoticeEvent,
   ProviderRuntimeWarningEvent,
   ProviderRuntimeErrorEvent,
 ]);

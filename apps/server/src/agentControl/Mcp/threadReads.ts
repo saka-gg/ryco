@@ -18,28 +18,26 @@ import type {
 import {
   AGENT_CONTROL_MCP_LIST_LIMIT_DEFAULT,
   AGENT_CONTROL_MCP_LIST_LIMIT_MAX,
-  AGENT_CONTROL_MCP_MESSAGE_LIMIT_DEFAULT,
-  AGENT_CONTROL_MCP_MESSAGE_LIMIT_MAX,
-  AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS,
-  AGENT_CONTROL_MCP_READ_THREAD_TEXT_BUDGET_CHARS,
   AgentControlMcpListThreadsResult,
   AgentControlMcpReadThreadResult,
   OrchestrationThreadActivity,
   OrchestrationThreadHistoryCursor,
+  MessageId,
   type AgentControlMcpListThreadsInput,
-  type AgentControlMcpMessage,
+  type AgentControlMcpMessageContinuation,
   type AgentControlMcpReadThreadInput,
-  type AgentControlMcpThreadSummary,
   type OrchestrationMessage,
   type OrchestrationProjectShell,
   type OrchestrationThreadHistoryPageInfo,
   type OrchestrationThreadShell,
+  type ThreadFollowUpQueue,
 } from "@ryco/contracts";
 import { deriveThreadSubagents } from "@ryco/client-runtime/state/session";
 import { redactDiagnosticText } from "@ryco/shared/diagnosticRedaction";
 import { Effect, Option, Schema } from "effect";
 
 import type { CheckpointDiffQueryShape } from "../../checkpointing/Services/CheckpointDiffQuery.ts";
+import type { OrchestrationEngineShape } from "../../orchestration/Services/OrchestrationEngine.ts";
 import {
   readScopedShellSnapshot,
   readThreadKeyPage,
@@ -48,7 +46,18 @@ import {
 import type { TerminalManagerShape } from "../../terminal/Services/Manager.ts";
 import type { WorkspaceAccessPolicyShape } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import type { WorkspaceFileSystemShape } from "../../workspace/Services/WorkspaceFileSystem.ts";
+import { isThreadWaitWakeEvent } from "../../orchestration/threadWaitWakeEvents.ts";
+import { threadWakeSource, waitUntil, type WaitWakeSource } from "../eventDrivenWait.ts";
+import {
+  loadMessagePages,
+  MESSAGE_PAGE_LIMITS,
+  readThreadMessageLimit,
+  toReadThreadResult,
+  toThreadSummary,
+} from "./threadTranscript.ts";
 import { redactAgentControlSecrets } from "../ProviderInjection.ts";
+
+export { loadMessagePages, MESSAGE_PAGE_LIMITS } from "./threadTranscript.ts";
 
 /** Bounded, presentation-safe tool failure. Never carries internals. */
 export class ToolFailure {
@@ -204,56 +213,7 @@ const collectThreadsInOrder = (
 
 // ── Result mapping ────────────────────────────────────────────────────
 
-export const toThreadSummary = (shell: OrchestrationThreadShell): AgentControlMcpThreadSummary => ({
-  threadId: shell.id,
-  projectId: shell.projectId,
-  title: shell.title,
-  status: shell.session?.status ?? "idle",
-  activeTurnId: shell.session?.activeTurnId ?? null,
-  providerInstanceId: shell.session?.providerInstanceId ?? null,
-  archived: shell.archivedAt !== null,
-  createdAt: shell.createdAt,
-  updatedAt: shell.updatedAt,
-});
-
-const toMcpMessage = (message: OrchestrationMessage): AgentControlMcpMessage => {
-  const truncated = message.text.length > AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS;
-  return {
-    messageId: message.id,
-    role: message.role,
-    text: truncated
-      ? message.text.slice(0, AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS)
-      : message.text,
-    truncated,
-    turnId: message.turnId,
-    attachmentCount: message.attachments?.length ?? 0,
-    createdAt: message.createdAt,
-  };
-};
-
-/**
- * Enforce the aggregate transcript budget over an ascending-order page.
- * Newest messages keep their text; once the budget is exhausted walking
- * backwards, older messages are truncated (possibly to empty) and
- * flagged. The message set itself is untouched, so history cursors stay
- * exact, and the bounded page can never blow the listener's response cap.
- */
-const applyTranscriptTextBudget = (
-  messages: ReadonlyArray<AgentControlMcpMessage>,
-): ReadonlyArray<AgentControlMcpMessage> => {
-  let remaining = AGENT_CONTROL_MCP_READ_THREAD_TEXT_BUDGET_CHARS;
-  const bounded = [...messages];
-  for (let index = bounded.length - 1; index >= 0; index -= 1) {
-    const message = bounded[index]!;
-    if (message.text.length <= remaining) {
-      remaining -= message.text.length;
-      continue;
-    }
-    bounded[index] = { ...message, text: message.text.slice(0, remaining), truncated: true };
-    remaining = 0;
-  }
-  return bounded;
-};
+export { toThreadSummary } from "./threadTranscript.ts";
 
 // Bound both arbitrary activity payloads and the aggregate response. Never stringify
 // an unbounded payload first, and never return raw connection/session credentials.
@@ -363,18 +323,50 @@ export const listThreadsPage = (
     });
   });
 
+/** The next slice of one long message, bound to the version the reader started from. */
+const readMessageContinuation = (
+  projections: ProjectionSnapshotQueryShape,
+  shell: OrchestrationThreadShell,
+  continuation: AgentControlMcpMessageContinuation,
+) =>
+  Effect.gen(function* () {
+    const getThreadMessageById = projections.getThreadMessageById;
+    if (getThreadMessageById === undefined) {
+      return yield* failTool("Thread history is unavailable.");
+    }
+    const found = yield* getThreadMessageById({
+      threadId: shell.id,
+      messageId: MessageId.make(continuation.messageId),
+    }).pipe(Effect.mapError(() => new ToolFailure("Thread read failed.")));
+    if (Option.isNone(found)) return yield* failTool("Message not found.");
+    const slice = (yield* loadMessagePages).continueMessage(
+      found.value,
+      continuation,
+      MESSAGE_PAGE_LIMITS,
+    );
+    if ("failure" in slice) return yield* failTool(slice.failure);
+    return Schema.encodeSync(AgentControlMcpReadThreadResult)({
+      thread: toThreadSummary(shell),
+      messages: [slice.message],
+      hasMoreBefore: false,
+      nextCursor: null,
+    });
+  });
+
 export const readThreadPage = (
   projections: ProjectionSnapshotQueryShape,
   input: AgentControlMcpReadThreadInput,
   visible: ThreadVisibility = allThreadsVisible,
 ) =>
   Effect.gen(function* () {
-    const limit = clampLimit(
-      input.messageLimit,
-      AGENT_CONTROL_MCP_MESSAGE_LIMIT_DEFAULT,
-      AGENT_CONTROL_MCP_MESSAGE_LIMIT_MAX,
-    );
+    const limit = readThreadMessageLimit(input.messageLimit);
     const shell = yield* findVisibleThread(projections, input.threadId, visible);
+    if (input.message !== undefined) {
+      if (input.cursor !== undefined) {
+        return yield* failTool("Pass either cursor or message, not both.");
+      }
+      return yield* readMessageContinuation(projections, shell, input.message);
+    }
 
     const getThreadWindow = projections.getThreadWindow;
     const getThreadHistoryPage = projections.getThreadHistoryPage;
@@ -391,6 +383,7 @@ export const readThreadPage = (
 
     let messages: ReadonlyArray<OrchestrationMessage>;
     let pageInfo: OrchestrationThreadHistoryPageInfo;
+    let followUpQueue: ThreadFollowUpQueue | undefined;
     if (input.cursor === undefined) {
       const window = yield* getThreadWindow({
         threadId: input.threadId,
@@ -398,6 +391,7 @@ export const readThreadPage = (
       }).pipe(Effect.mapError(mapHistoryError));
       messages = window.thread.messages;
       pageInfo = window.history.messages;
+      followUpQueue = window.thread.followUpQueue;
     } else {
       const cursor = Schema.decodeUnknownOption(OrchestrationThreadHistoryCursor)(input.cursor);
       if (Option.isNone(cursor)) return yield* failTool("Invalid or stale cursor.");
@@ -414,12 +408,7 @@ export const readThreadPage = (
       pageInfo = historyPage.page;
     }
 
-    return Schema.encodeSync(AgentControlMcpReadThreadResult)({
-      thread: toThreadSummary(shell),
-      messages: applyTranscriptTextBudget(messages.map(toMcpMessage)),
-      hasMoreBefore: pageInfo.hasMoreBefore,
-      nextCursor: pageInfo.hasMoreBefore ? pageInfo.oldestCursor : null,
-    });
+    return yield* toReadThreadResult({ shell, messages, pageInfo, followUpQueue });
   });
 
 const WAIT_THREADS_TIMEOUT_MS_DEFAULT = 30_000;
@@ -433,48 +422,64 @@ const threadSettled = (thread: OrchestrationThreadShell): boolean =>
     !thread.backgroundLiveness &&
     thread.latestTurn?.state !== "running");
 
+/** What can end a thread wait before its next safety-net re-check. */
+export interface ThreadWaitWake {
+  /** The node's live orchestration events: a waited thread settling wakes the wait at once. */
+  readonly domainEvents: Pick<OrchestrationEngineShape, "subscribeDomainEvents">;
+  /** More change feeds that can end the wait (the external integration's grant changes). */
+  readonly extra?: ReadonlyArray<WaitWakeSource>;
+}
+
 /**
- * Wait until any requested thread settles or needs attention. `access` runs
- * before every poll and yields the caller's current visibility, so a revoked
- * grant or disabled policy ends the wait instead of leaking later state.
+ * Wait until any requested thread settles or needs attention. The wait wakes on
+ * the threads' orchestration events that can settle them (and on `wake.extra`),
+ * and re-checks at least every 5 seconds otherwise. `access` runs before every
+ * check and yields the caller's current visibility, so a revoked grant or
+ * disabled policy ends the wait instead of leaking later state.
  */
 export const waitThreads = <E>(
   projections: ProjectionSnapshotQueryShape,
   input: typeof AgentControlWaitThreadsInput.Type,
   access: Effect.Effect<ThreadVisibility, E>,
+  wake: ThreadWaitWake,
 ) =>
   Effect.gen(function* () {
-    const deadline =
-      Date.now() +
-      Math.min(input.timeoutMs ?? WAIT_THREADS_TIMEOUT_MS_DEFAULT, WAIT_THREADS_TIMEOUT_MS_MAX);
     const ids = [...new Set(input.threadIds)];
-    while (true) {
-      const visible = yield* access;
-      const states = yield* Effect.forEach(ids, (id) => projections.getThreadShellById(id), {
-        concurrency: 4,
-      });
-      const ready = states.some(
-        (state) => Option.isNone(state) || !visible(state.value) || threadSettled(state.value),
-      );
-      if (ready || Date.now() >= deadline) {
-        const threads = yield* Effect.forEach(
-          ids,
-          (threadId) =>
-            readThreadPage(projections, { threadId, messageLimit: 5 }, visible).pipe(
-              Effect.match({
-                onFailure: (failure) => ({
-                  threadId,
-                  error: [{ type: "text" as const, text: failure.reason }],
-                }),
-                onSuccess: (result) => ({ threadId, result }),
-              }),
-            ),
-          { concurrency: 4 },
+    const { value: visible, timedOut } = yield* waitUntil({
+      sources: [
+        threadWakeSource(wake.domainEvents, ids, isThreadWaitWakeEvent),
+        ...(wake.extra ?? []),
+      ],
+      timeoutMs: Math.min(
+        input.timeoutMs ?? WAIT_THREADS_TIMEOUT_MS_DEFAULT,
+        WAIT_THREADS_TIMEOUT_MS_MAX,
+      ),
+      check: Effect.gen(function* () {
+        const visible = yield* access;
+        const states = yield* Effect.forEach(ids, (id) => projections.getThreadShellById(id), {
+          concurrency: 4,
+        });
+        const done = states.some(
+          (state) => Option.isNone(state) || !visible(state.value) || threadSettled(state.value),
         );
-        return { timedOut: !ready, threads };
-      }
-      yield* Effect.sleep(Math.min(500, Math.max(1, deadline - Date.now())));
-    }
+        return { done, value: visible };
+      }),
+    });
+    const threads = yield* Effect.forEach(
+      ids,
+      (threadId) =>
+        readThreadPage(projections, { threadId, messageLimit: 5 }, visible).pipe(
+          Effect.match({
+            onFailure: (failure) => ({
+              threadId,
+              error: [{ type: "text" as const, text: failure.reason }],
+            }),
+            onSuccess: (result) => ({ threadId, result }),
+          }),
+        ),
+      { concurrency: 4 },
+    );
+    return { timedOut, threads };
   });
 
 export interface InspectThreadDeps {

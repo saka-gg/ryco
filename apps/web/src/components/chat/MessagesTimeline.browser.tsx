@@ -13,13 +13,21 @@ import {
 import { createRef } from "react";
 import type { LegendListRef } from "@legendapp/list/react";
 import {
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  Outlet,
+  RouterProvider,
+} from "@tanstack/react-router";
+import {
   deriveThreadActivityViewModel,
   deriveTimelineEntries,
   type ContextHandoffTimelineEntry,
 } from "../../session-logic";
 import type { ChatMessage } from "../../types";
 import { page, userEvent } from "vite-plus/test/browser";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 import { useTierOverrideStore } from "../../tierOverrideStore";
 import { syncDocumentPresentationTier } from "../../lib/presentationTier";
@@ -130,6 +138,23 @@ import {
 import { __rememberHtmlRenderSourceForTests } from "./useHtmlRenderSource";
 import { useUiStateStore } from "~/uiStateStore";
 import { type EnvironmentState, useStore } from "../../store";
+import {
+  createQuoteCitation,
+  expandQuoteCitations,
+  serializeQuoteCitation,
+  withQuoteCitationComment,
+  type QuoteCitation,
+} from "@ryco/shared/quoteCitations";
+import { cssHighlightRegistry } from "~/lib/cssHighlights";
+import { captureTextQuoteSelector } from "~/lib/textQuoteDom";
+import { useComposerDraftStore } from "../../composerDraftStore";
+import { useQuoteSourceJumpStore } from "../../quoteSourceJumpStore";
+import { useTimelineRevealStore } from "../../timelineRevealStore";
+import { PENDING_QUOTE_HIGHLIGHT_NAME } from "./usePendingQuoteHighlight";
+import {
+  QUOTE_SOURCE_HIGHLIGHT_NAME,
+  QUOTE_SOURCE_JUMP_TIMEOUT_MS,
+} from "./useQuoteSourceHighlight";
 
 const THINKING_ENTRIES = [
   {
@@ -259,6 +284,107 @@ describe("MessagesTimeline", () => {
       threadWorkEntryExpandedById: {},
     });
     document.body.innerHTML = "";
+  });
+
+  it("keeps answered and cancelled agent questions in the transcript as an exchange", async () => {
+    useTierOverrideStore.setState({ override: "desktop" });
+    const stopTier = syncDocumentPresentationTier();
+    const turnId = TurnId.make("turn-questions");
+    const at = (second: number) => `2026-04-13T12:00:${String(second).padStart(2, "0")}.000Z`;
+    const ask = (
+      id: string,
+      requestId: string,
+      second: number,
+      header: string,
+      text: string,
+      labels: ReadonlyArray<string>,
+    ) =>
+      ({
+        id,
+        kind: "user-input.requested",
+        tone: "info",
+        summary: "User input requested",
+        payload: {
+          requestId,
+          questions: [
+            {
+              id: text,
+              header,
+              question: text,
+              options: labels.map((label) => ({ label, description: `${label}.` })),
+            },
+          ],
+        },
+        turnId,
+        createdAt: at(second),
+      }) as unknown as OrchestrationThreadActivity;
+    const resolve = (id: string, requestId: string, second: number, payload: object) =>
+      ({
+        id,
+        kind: "user-input.resolved",
+        tone: "info",
+        summary: "User input submitted",
+        payload: { requestId, ...payload },
+        turnId,
+        createdAt: at(second),
+      }) as unknown as OrchestrationThreadActivity;
+    const viewModel = deriveThreadActivityViewModel(
+      [
+        ask("ask-1", "req-1", 2, "Library", "Which library should we use?", ["React", "Vue"]),
+        resolve("answer-1", "req-1", 3, { answers: { "Which library should we use?": "React" } }),
+        ask("ask-2", "req-2", 4, "Styling", "Which styling approach?", ["Tailwind", "CSS"]),
+        resolve("answer-2", "req-2", 5, { answers: {}, cancelled: true }),
+      ],
+      turnId,
+    );
+    const reply = {
+      id: MessageId.make("reply"),
+      role: "assistant",
+      text: "Set up with React.",
+      turnId,
+      createdAt: at(10),
+      completedAt: at(10),
+      streaming: false,
+    } as ChatMessage;
+    const screen = await render(
+      <MessagesTimeline
+        {...buildProps()}
+        latestTurn={{ turnId, state: "completed", startedAt: at(1), completedAt: at(11) }}
+        timelineEntries={deriveTimelineEntries(
+          [reply],
+          [],
+          viewModel.workLogEntries,
+          [],
+          [],
+          [],
+          viewModel.userInputExchangeEntries,
+        )}
+      />,
+    );
+    try {
+      await expect.element(page.getByText("Which library should we use?")).toBeVisible();
+      await expect.element(page.getByText("Library", { exact: true })).toBeVisible();
+      const answer = page.getByText("React", { exact: true }).last();
+      await expect.element(answer).toBeVisible();
+      // The answer sits on the user's side, past the question card's right edge.
+      const question = page.getByText("Which library should we use?").element();
+      expect(answer.element().getBoundingClientRect().right).toBeGreaterThan(
+        question.getBoundingClientRect().right,
+      );
+      // A cancelled question keeps what was asked and says it went unanswered.
+      await expect.element(page.getByText("Which styling approach?")).toBeVisible();
+      await expect.element(page.getByText(/^Question cancelled · /)).toBeVisible();
+      // The bare lifecycle rows are gone, and the settled turn's fold does not hide them.
+      await expect.element(page.getByText("User input submitted")).not.toBeInTheDocument();
+      await expect.element(page.getByText("User input requested")).not.toBeInTheDocument();
+      expect(
+        document.querySelectorAll("[data-timeline-row-kind='user-input-exchange']"),
+      ).toHaveLength(2);
+    } finally {
+      await screen.unmount();
+      useTierOverrideStore.setState({ override: null });
+      stopTier();
+    }
   });
 
   it("keeps a multi-source handoff accessible and contained across narrow light and dark layouts", async () => {
@@ -426,6 +552,65 @@ describe("MessagesTimeline", () => {
 
       await userEvent.click(failedDivider);
       expect(onInspectContextHandoff).toHaveBeenCalledWith(failed, expect.any(HTMLButtonElement));
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("shows missing native history as a fresh session that says why, still inspectable", async () => {
+    const sameModel = makeContextHandoffMarker().target;
+    const continued = makeContextHandoffMarker({
+      id: "context-handoff:history-gone",
+      handoffId: ContextHandoffId.make("handoff-history-gone"),
+      reason: "native-history-unavailable",
+      status: "consumed",
+      sources: [sameModel],
+      target: sameModel,
+    });
+    const onInspectContextHandoff = vi.fn();
+    const screen = await render(
+      <div style={{ width: 320 }}>
+        <MessagesTimeline
+          {...buildProps()}
+          onInspectContextHandoff={onInspectContextHandoff}
+          timelineEntries={[
+            {
+              id: continued.id,
+              kind: "context-handoff" as const,
+              createdAt: continued.createdAt,
+              marker: continued,
+            },
+          ]}
+        />
+      </div>,
+    );
+
+    try {
+      const divider = page.getByRole("button", {
+        name: "Continued in a fresh session",
+        exact: true,
+      });
+      await expect.element(divider).toBeVisible();
+      const element = divider.element();
+      expect(element.dataset.contextHandoffReason).toBe("native-history-unavailable");
+      expect(element.querySelector(".lucide-history")).not.toBeNull();
+      expect(element.textContent).not.toContain("Fable 5");
+      expect(element.scrollWidth).toBeLessThanOrEqual(element.clientWidth);
+
+      await userEvent.hover(divider);
+      await expect
+        .element(
+          page.getByText(
+            "The provider no longer has this conversation's history, so a fresh session received the conversation's context.",
+          ),
+        )
+        .toBeVisible();
+
+      await userEvent.click(divider);
+      expect(onInspectContextHandoff).toHaveBeenCalledWith(
+        continued,
+        expect.any(HTMLButtonElement),
+      );
     } finally {
       await screen.unmount();
     }
@@ -693,7 +878,7 @@ describe("MessagesTimeline", () => {
         'button[aria-label="Copy message"]',
       );
       const revertButton = document.querySelector<HTMLButtonElement>(
-        'button[title="Revert to this message"]',
+        'button[title="Edit from here"]',
       );
 
       for (const button of [copyButton, revertButton]) {
@@ -1177,6 +1362,46 @@ describe("MessagesTimeline", () => {
     }
   });
 
+  it("shows a runtime notice's body with its line breaks and no empty-output note", async () => {
+    const body = "Usage: 42% of the weekly limit\n  Resets Monday 09:00";
+    const screen = await render(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "notice-entry",
+            kind: "work",
+            createdAt: "2026-04-13T12:00:00.000Z",
+            entry: {
+              id: "notice",
+              createdAt: "2026-04-13T12:00:00.000Z",
+              label: "Command output",
+              detail: body,
+              tone: "info",
+            },
+          },
+        ]}
+      />,
+    );
+
+    try {
+      const row = document.querySelector<HTMLElement>("[data-tool-entry-kind='expandable']");
+      expect(row).not.toBeNull();
+      await row!.click();
+      const detail = await vi.waitFor(() => {
+        const block = document.querySelector<HTMLElement>('[data-work-entry-detail="true"]');
+        expect(block).not.toBeNull();
+        return block!;
+      });
+      expect(detail.textContent).toBe(body);
+      expect(getComputedStyle(detail).whiteSpace).toBe("pre-wrap");
+      // A notice has no output to miss: the panel does not claim one was lost.
+      await expect.element(page.getByText("No output was captured.")).not.toBeInTheDocument();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("loads the full output of a previewed tool payload when its row expands", async () => {
     resetActivityPayloadAtomsForTests();
     let attempts = 0;
@@ -1363,6 +1588,68 @@ describe("MessagesTimeline", () => {
       );
 
       await expect.element(page.getByText("Edited 1 file")).toBeVisible();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("renders only the changed files in view once a huge checkpoint shows all its files", async () => {
+    const assistantMessageId = MessageId.make("message-assistant-huge");
+    const turnId = TurnId.make("turn-huge");
+    const files = Array.from({ length: 2_000 }, (_, index) => ({
+      path: `src/file-${index.toString().padStart(4, "0")}.ts`,
+      additions: 1,
+      deletions: 0,
+    }));
+    const props = {
+      ...buildProps(),
+      turnDiffSummaryByAssistantMessageId: new Map([
+        [
+          assistantMessageId,
+          { turnId, completedAt: "2026-04-13T12:00:03.000Z", files, assistantMessageId },
+        ],
+      ]),
+    };
+    const entry = {
+      id: "message-huge",
+      kind: "message" as const,
+      createdAt: "2026-04-13T12:00:00.000Z",
+      message: {
+        id: assistantMessageId,
+        role: "assistant" as const,
+        text: "Vendored the dependencies",
+        turnId,
+        createdAt: "2026-04-13T12:00:00.000Z",
+        completedAt: "2026-04-13T12:00:04.000Z",
+        streaming: false,
+      },
+    };
+    const fileRows = () => document.querySelectorAll("[data-changed-file-row]");
+    const screen = await render(
+      <div style={{ height: 480 }}>
+        <MessagesTimeline {...props} timelineEntries={[entry]} />
+      </div>,
+    );
+
+    try {
+      await expect.element(page.getByText("Edited 2000 files")).toBeVisible();
+      expect(fileRows()).toHaveLength(6);
+      await page.getByText("Show 1994 more files").click();
+      await expect.poll(() => fileRows().length).toBeGreaterThan(6);
+      expect(fileRows().length).toBeLessThan(60);
+
+      // The transcript scroller, not the row's own overflow-x box, bounds the window.
+      const scroller = page.getByTestId("legend-list").element() as HTMLElement;
+      expect(scroller.scrollHeight).toBeGreaterThan(2_000 * 35);
+      scroller.scrollTop = scroller.scrollHeight;
+      scroller.dispatchEvent(new Event("scroll"));
+      await expect.element(page.getByText("src/file-1999.ts")).toBeInTheDocument();
+      expect(fileRows().length).toBeLessThan(60);
+      await page.getByText("src/file-1999.ts").click();
+      expect(props.onOpenTurnDiff).toHaveBeenCalledWith(turnId, "src/file-1999.ts");
+
+      await page.getByText("Show less").click();
+      await expect.poll(() => fileRows().length).toBe(6);
     } finally {
       await screen.unmount();
     }
@@ -2046,6 +2333,528 @@ describe("MessagesTimeline", () => {
           await screen.unmount();
         }
       });
+    });
+  });
+
+  describe("quote citations", () => {
+    const threadKey = "environment-local:thread-1";
+    const passage = "The cache keeps reads fast.";
+    const assistantText = `Some context first.\n\n${passage} Then more detail follows.`;
+
+    const messageEntry = (messageId: string, role: "user" | "assistant", text: string) => ({
+      id: `row-${messageId}`,
+      kind: "message" as const,
+      createdAt: "2026-10-22T12:00:00.000Z",
+      message: {
+        id: MessageId.make(messageId),
+        role,
+        text,
+        createdAt: "2026-10-22T12:00:00.000Z",
+        streaming: false,
+      },
+    });
+
+    const citationOf = (messageId: string, overrides: Partial<QuoteCitation["selector"]> = {}) =>
+      createQuoteCitation({
+        source: {
+          environmentId: EnvironmentId.make("environment-local"),
+          threadId: ThreadId.make("thread-1"),
+        },
+        messageId: MessageId.make(messageId),
+        selector: {
+          exact: passage,
+          prefix: "",
+          suffix: "",
+          start: 0,
+          end: passage.length,
+          ...overrides,
+        },
+      });
+
+    const quoteChips = () => [
+      ...document.querySelectorAll<HTMLButtonElement>("[data-quote-citation-chip]"),
+    ];
+
+    // The desktop tier: the frozen phone tier renders user messages as plain text.
+    let stopTier: () => void = () => undefined;
+    beforeEach(() => {
+      useTierOverrideStore.setState({ override: "desktop" });
+      stopTier = syncDocumentPresentationTier();
+    });
+
+    afterEach(() => {
+      useTierOverrideStore.setState({ override: null });
+      stopTier();
+      useQuoteSourceJumpStore.setState({ active: null, unavailableSourceKeys: new Set() });
+      useTimelineRevealStore.setState({ requestsByThreadKey: {}, settledByThreadKey: {} });
+      useComposerDraftStore.setState({ draftsByThreadKey: {} });
+      cssHighlightRegistry()?.clear();
+    });
+
+    it("shows a sent message's quotes as chips in place of its quote block", async () => {
+      const citation = withQuoteCitationComment(citationOf("assistant-1"), "Why is that?");
+      const sent = expandQuoteCitations(`Compare ${serializeQuoteCitation(citation)} with this.`);
+      const screen = await render(
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={[
+            messageEntry("assistant-1", "assistant", assistantText),
+            messageEntry("user-1", "user", sent),
+          ]}
+        />,
+      );
+      try {
+        await vi.waitFor(() => expect(quoteChips()).toHaveLength(1));
+        const chip = quoteChips()[0]!;
+        expect(chip.textContent).toBe(passage);
+        expect(chip.getAttribute("aria-label")).toBe(
+          `Show quoted text in conversation: ${passage}`,
+        );
+        const bubble = document.querySelector<HTMLElement>(
+          '[data-message-id="user-1"] [data-quote-citation-chip]',
+        )?.parentElement?.parentElement?.parentElement;
+        expect(bubble?.textContent).toContain(`Compare ${passage} with this.`);
+        const userRow = document.querySelector<HTMLElement>('[data-message-id="user-1"]')!;
+        expect(userRow.textContent).not.toContain("assistant_quotes");
+        expect(userRow.textContent).not.toContain("[Quote 1]");
+        expect(userRow.textContent).not.toContain("Why is that?");
+      } finally {
+        await screen.unmount();
+      }
+    });
+
+    it("jumps to the quoted passage and highlights it", async () => {
+      const assistantOnly = [messageEntry("assistant-1", "assistant", assistantText)];
+      const screen = await render(
+        <MessagesTimeline {...buildProps()} timelineEntries={assistantOnly} />,
+      );
+      try {
+        // Capture the selector from the rendered reply, as the selection actions do.
+        const source = await vi.waitFor(() => {
+          const element = document.querySelector<HTMLElement>(
+            '[data-selection-message-id="assistant-1"]',
+          );
+          expect(element).not.toBeNull();
+          return element!;
+        });
+        const walker = document.createTreeWalker(source, NodeFilter.SHOW_TEXT);
+        let textNode: Text | null = null;
+        while (walker.nextNode()) {
+          if ((walker.currentNode as Text).data.includes(passage)) {
+            textNode = walker.currentNode as Text;
+            break;
+          }
+        }
+        expect(textNode).not.toBeNull();
+        const range = document.createRange();
+        const offset = textNode!.data.indexOf(passage);
+        range.setStart(textNode!, offset);
+        range.setEnd(textNode!, offset + passage.length);
+        const selector = captureTextQuoteSelector(source, range)!;
+        expect(selector).toMatchObject({ exact: passage, prefix: "Some context first. " });
+
+        const citation = citationOf("assistant-1", selector);
+        await screen.rerender(
+          <MessagesTimeline
+            {...buildProps()}
+            timelineEntries={[
+              ...assistantOnly,
+              messageEntry(
+                "user-1",
+                "user",
+                expandQuoteCitations(serializeQuoteCitation(citation)),
+              ),
+            ]}
+          />,
+        );
+        await vi.waitFor(() => expect(quoteChips()).toHaveLength(1));
+        quoteChips()[0]!.click();
+
+        expect(useTimelineRevealStore.getState().requestsByThreadKey[threadKey]?.messageId).toBe(
+          "assistant-1",
+        );
+        await vi.waitFor(() => {
+          const highlight = cssHighlightRegistry()?.get(QUOTE_SOURCE_HIGHLIGHT_NAME);
+          expect(highlight?.size).toBe(1);
+          const [painted] = [...highlight!] as Range[];
+          expect(painted!.toString()).toBe(passage);
+          expect(source.contains(painted!.startContainer)).toBe(true);
+        });
+        expect(useQuoteSourceJumpStore.getState().active).toBeNull();
+        expect(quoteChips()[0]!.dataset.sourceUnavailable).toBeUndefined();
+      } finally {
+        await screen.unmount();
+      }
+    });
+
+    it("quietly marks a quote whose source can no longer be found", async () => {
+      const gone = citationOf("assistant-removed");
+      const reworded = citationOf("assistant-1", { exact: "A sentence the reply never had." });
+      const sent = expandQuoteCitations(
+        `${serializeQuoteCitation(gone)} and ${serializeQuoteCitation(reworded)}`,
+      );
+      const screen = await render(
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={[
+            messageEntry("assistant-1", "assistant", assistantText),
+            messageEntry("user-1", "user", sent),
+          ]}
+        />,
+      );
+      try {
+        await vi.waitFor(() => expect(quoteChips()).toHaveLength(2));
+        const [goneChip, rewordedChip] = quoteChips();
+
+        // The message is still there, the passage is not.
+        rewordedChip!.click();
+        await vi.waitFor(() => expect(quoteChips()[1]!.dataset.sourceUnavailable).toBe("true"));
+        expect(cssHighlightRegistry()?.has(QUOTE_SOURCE_HIGHLIGHT_NAME) ?? false).toBe(false);
+
+        // The message is gone: the reveal settles without showing it.
+        goneChip!.click();
+        const request = useTimelineRevealStore.getState().requestsByThreadKey[threadKey]!;
+        expect(request.messageId).toBe("assistant-removed");
+        useTimelineRevealStore.getState().settle(threadKey, request.requestId, "missing");
+        await vi.waitFor(
+          () => {
+            const chip = quoteChips()[0]!;
+            expect(chip.dataset.sourceUnavailable).toBe("true");
+            expect(chip.getAttribute("aria-label")).toBe(
+              `Quoted text, source no longer available: ${passage}`,
+            );
+          },
+          { timeout: 3_000 },
+        );
+      } finally {
+        await screen.unmount();
+      }
+    });
+
+    it("renders quotes as chips in a user message shown as Markdown", async () => {
+      const marked = citationOf("assistant-1");
+      const draft = citationOf("assistant-1", { exact: "Then more detail follows." });
+      const sent = `${expandQuoteCitations(`See ${serializeQuoteCitation(marked)}`).replace(
+        "See [Quote 1]",
+        `See [Quote 1] and ${serializeQuoteCitation(draft)}\n\n\`\`\`ts\nconst x = 1;\n\`\`\``,
+      )}`;
+      const screen = await render(
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={[
+            messageEntry("assistant-1", "assistant", assistantText),
+            messageEntry("user-1", "user", sent),
+          ]}
+        />,
+      );
+      try {
+        await vi.waitFor(() => {
+          expect(quoteChips().map((chip) => chip.textContent)).toEqual([
+            passage,
+            "Then more detail follows.",
+          ]);
+        });
+        const userRow = document.querySelector<HTMLElement>('[data-message-id="user-1"]')!;
+        expect(userRow.querySelector(".chat-markdown")).not.toBeNull();
+        expect(userRow.textContent).not.toContain("ryco-quote:");
+        expect(userRow.textContent).not.toContain("assistant_quotes");
+      } finally {
+        await screen.unmount();
+      }
+    });
+
+    it("leaves the frozen phone tier's messages as sent", async () => {
+      useTierOverrideStore.setState({ override: "phone" });
+      const sent = expandQuoteCitations(`See ${serializeQuoteCitation(citationOf("assistant-1"))}`);
+      const screen = await render(
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={[
+            messageEntry("assistant-1", "assistant", assistantText),
+            messageEntry("user-1", "user", sent),
+          ]}
+        />,
+      );
+      try {
+        await vi.waitFor(() => {
+          const userRow = document.querySelector<HTMLElement>('[data-message-id="user-1"]');
+          expect(userRow?.textContent).toContain("See [Quote 1]");
+          expect(userRow?.textContent).toContain(`> ${passage}`);
+        });
+        expect(quoteChips()).toHaveLength(0);
+      } finally {
+        await screen.unmount();
+      }
+    });
+
+    it("leaves quote syntax as text in assistant replies", async () => {
+      const token = serializeQuoteCitation(citationOf("assistant-1"));
+      const screen = await render(
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={[messageEntry("assistant-2", "assistant", `Echo: ${token}`)]}
+        />,
+      );
+      try {
+        const reply = await vi.waitFor(() => {
+          const element = document.querySelector<HTMLElement>('[data-message-id="assistant-2"]');
+          expect(element?.textContent).toContain(`Echo: ${passage}`);
+          return element!;
+        });
+        expect(quoteChips()).toHaveLength(0);
+        expect(reply.querySelector("a")?.getAttribute("href")).toBe("");
+      } finally {
+        await screen.unmount();
+      }
+    });
+
+    it("opens a quote from another thread there, and highlights the passage", async () => {
+      // Thread 2 quotes a reply in thread 1, as a quote started from New chat does.
+      const sent = expandQuoteCitations(
+        `About ${serializeQuoteCitation(citationOf("assistant-1"))}`,
+      );
+      const entriesByThreadId: Record<string, ReturnType<typeof messageEntry>[]> = {
+        "thread-1": [messageEntry("assistant-1", "assistant", assistantText)],
+        "thread-2": [messageEntry("user-2", "user", sent)],
+      };
+      const root = createRootRoute({ component: () => <Outlet /> });
+      const threadRoute = createRoute({
+        getParentRoute: () => root,
+        path: "/$environmentId/$threadId",
+        component: function ThreadTimeline() {
+          const { environmentId, threadId } = threadRoute.useParams();
+          return (
+            <MessagesTimeline
+              {...buildProps()}
+              routeThreadKey={`${environmentId}:${threadId}`}
+              timelineEntries={entriesByThreadId[threadId] ?? []}
+            />
+          );
+        },
+      });
+      const router = createRouter({
+        routeTree: root.addChildren([threadRoute]),
+        history: createMemoryHistory({ initialEntries: ["/environment-local/thread-2"] }),
+      });
+      const screen = await render(<RouterProvider router={router} />);
+      try {
+        await vi.waitFor(() => expect(quoteChips()).toHaveLength(1));
+        quoteChips()[0]!.click();
+
+        await vi.waitFor(() =>
+          expect(router.state.location.pathname).toBe("/environment-local/thread-1"),
+        );
+        expect(useTimelineRevealStore.getState().requestsByThreadKey[threadKey]?.messageId).toBe(
+          "assistant-1",
+        );
+        await vi.waitFor(() => {
+          const highlight = cssHighlightRegistry()?.get(QUOTE_SOURCE_HIGHLIGHT_NAME);
+          const [painted] = [...(highlight ?? [])] as Range[];
+          expect(painted?.toString()).toBe(passage);
+        });
+        expect(useQuoteSourceJumpStore.getState().active).toBeNull();
+      } finally {
+        await screen.unmount();
+      }
+    });
+
+    it("marks a quote from a thread that is gone without opening anything", async () => {
+      // The machine's shell has arrived and has no such thread: the source is gone.
+      useStore.setState({
+        environmentStateById: {
+          [EnvironmentId.make("environment-local")]: {
+            bootstrapComplete: true,
+            threadShellById: {},
+          } as unknown as EnvironmentState,
+        },
+      });
+      const sent = expandQuoteCitations(serializeQuoteCitation(citationOf("assistant-1")));
+      const screen = await render(
+        <MessagesTimeline
+          {...buildProps()}
+          routeThreadKey="environment-local:thread-2"
+          timelineEntries={[messageEntry("user-2", "user", sent)]}
+        />,
+      );
+      try {
+        await vi.waitFor(() => expect(quoteChips()).toHaveLength(1));
+        quoteChips()[0]!.click();
+        await vi.waitFor(() => expect(quoteChips()[0]!.dataset.sourceUnavailable).toBe("true"));
+        expect(useTimelineRevealStore.getState().requestsByThreadKey).toEqual({});
+        expect(useQuoteSourceJumpStore.getState().active).toBeNull();
+      } finally {
+        await screen.unmount();
+        useStore.setState({ environmentStateById: {} });
+      }
+    });
+
+    it("gives up on a reveal whose load failed without saying the source is gone", async () => {
+      const sent = expandQuoteCitations(serializeQuoteCitation(citationOf("assistant-paged-out")));
+      const screen = await render(
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={[messageEntry("user-1", "user", sent)]}
+        />,
+      );
+      try {
+        await vi.waitFor(() => expect(quoteChips()).toHaveLength(1));
+        quoteChips()[0]!.click();
+        // The history load around the message failed (a dropped connection, say).
+        const request = useTimelineRevealStore.getState().requestsByThreadKey[threadKey]!;
+        useTimelineRevealStore.getState().settle(threadKey, request.requestId, "failed");
+        await vi.waitFor(() => expect(useQuoteSourceJumpStore.getState().active).toBeNull());
+        // Past the grace a settled reveal gets, the chip still says nothing.
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        expect(quoteChips()[0]!.dataset.sourceUnavailable).toBeUndefined();
+        expect(useQuoteSourceJumpStore.getState().unavailableSourceKeys.size).toBe(0);
+      } finally {
+        await screen.unmount();
+      }
+    });
+
+    it("marks the passages each timeline's draft quotes, in every timeline on screen", async () => {
+      const environmentId = EnvironmentId.make("environment-local");
+      const firstRef = { environmentId, threadId: ThreadId.make("thread-1") };
+      const secondRef = { environmentId, threadId: ThreadId.make("thread-2") };
+      const secondCitation = createQuoteCitation({
+        source: secondRef,
+        messageId: MessageId.make("assistant-2"),
+        selector: { exact: "Then more detail follows.", prefix: "", suffix: "", start: 0, end: 25 },
+      });
+      const pane = (key: string, messageId: string) => (
+        <div className="h-80">
+          <MessagesTimeline
+            {...buildProps()}
+            routeThreadKey={key}
+            timelineEntries={[messageEntry(messageId, "assistant", assistantText)]}
+          />
+        </div>
+      );
+      const highlighted = () => {
+        const highlight = cssHighlightRegistry()?.get(PENDING_QUOTE_HIGHLIGHT_NAME);
+        return highlight
+          ? [...highlight].map((range) => (range as Range).toString()).toSorted()
+          : [];
+      };
+      useComposerDraftStore
+        .getState()
+        .setPrompt(firstRef, `About ${serializeQuoteCitation(citationOf("assistant-1"))} `);
+      useComposerDraftStore
+        .getState()
+        .setPrompt(secondRef, `And ${serializeQuoteCitation(secondCitation)} `);
+      const screen = await render(
+        <>
+          {pane(threadKey, "assistant-1")}
+          {pane("environment-local:thread-2", "assistant-2")}
+        </>,
+      );
+      try {
+        await vi.waitFor(() =>
+          expect(highlighted()).toEqual([passage, "Then more detail follows."]),
+        );
+        const nextFrames = () =>
+          new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        await nextFrames();
+        const [firstRange] = [
+          ...cssHighlightRegistry()!.get(PENDING_QUOTE_HIGHLIGHT_NAME)!,
+        ] as Range[];
+
+        // A change outside the quoted messages (a reply streaming in) repaints nothing.
+        const firstMessage = document.querySelector<HTMLElement>(
+          '[data-selection-message-id="assistant-1"]',
+        )!;
+        const elsewhere = document.createElement("span");
+        firstMessage.closest("[data-message-id]")!.parentElement!.append(elsewhere);
+        elsewhere.textContent = "streaming";
+        await nextFrames();
+        expect(
+          [...cssHighlightRegistry()!.get(PENDING_QUOTE_HIGHLIGHT_NAME)!].includes(firstRange!),
+        ).toBe(true);
+        elsewhere.remove();
+
+        // One timeline going leaves the other's marks in place.
+        await screen.rerender(<>{pane(threadKey, "assistant-1")}</>);
+        await vi.waitFor(() => expect(highlighted()).toEqual([passage]));
+        useComposerDraftStore.getState().setPrompt(firstRef, "About nothing");
+        await vi.waitFor(() =>
+          expect(cssHighlightRegistry()?.has(PENDING_QUOTE_HIGHLIGHT_NAME) ?? false).toBe(false),
+        );
+      } finally {
+        await screen.unmount();
+      }
+    });
+
+    it("gives up on a reveal still loading without saying the source is gone", async () => {
+      const sent = expandQuoteCitations(serializeQuoteCitation(citationOf("assistant-paged-out")));
+      const screen = await render(
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={[messageEntry("user-1", "user", sent)]}
+        />,
+      );
+      const now = Date.now();
+      const clock = vi.spyOn(Date, "now");
+      try {
+        await vi.waitFor(() => expect(quoteChips()).toHaveLength(1));
+        quoteChips()[0]!.click();
+        expect(useQuoteSourceJumpStore.getState().active).not.toBeNull();
+
+        // The history load is still out when the jump times out.
+        clock.mockReturnValue(now + QUOTE_SOURCE_JUMP_TIMEOUT_MS + 1);
+        await vi.waitFor(() => expect(useQuoteSourceJumpStore.getState().active).toBeNull());
+        expect(quoteChips()[0]!.dataset.sourceUnavailable).toBeUndefined();
+        expect(useQuoteSourceJumpStore.getState().unavailableSourceKeys.size).toBe(0);
+      } finally {
+        clock.mockRestore();
+        await screen.unmount();
+      }
+    });
+
+    it("leads with a quote whose marker Markdown reads as a link", async () => {
+      // A parenthesis typed right after the chip makes `[Quote 1](above)` a link.
+      const sent = expandQuoteCitations(
+        `See ${serializeQuoteCitation(citationOf("assistant-1"))}(above)\n\n\`\`\`ts\nconst x = 1;\n\`\`\``,
+      );
+      expect(sent).toContain("See [Quote 1](above)");
+      const screen = await render(
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={[
+            messageEntry("assistant-1", "assistant", assistantText),
+            messageEntry("user-1", "user", sent),
+          ]}
+        />,
+      );
+      try {
+        await vi.waitFor(() => {
+          expect(quoteChips().map((chip) => chip.textContent)).toEqual([passage]);
+        });
+        const userRow = document.querySelector<HTMLElement>('[data-message-id="user-1"]')!;
+        expect(userRow.querySelector(".chat-markdown")).not.toBeNull();
+      } finally {
+        await screen.unmount();
+      }
+    });
+
+    it("keeps a quote link that does not parse from passing as a link", async () => {
+      const sent = "Broken [x](ryco-quote:v1/a/b/c?start=1)\n\n```ts\nconst x = 1;\n```";
+      const screen = await render(
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={[messageEntry("user-1", "user", sent)]}
+        />,
+      );
+      try {
+        const userRow = await vi.waitFor(() => {
+          const element = document.querySelector<HTMLElement>('[data-message-id="user-1"]');
+          expect(element?.querySelector(".chat-markdown")).not.toBeNull();
+          return element!;
+        });
+        expect(quoteChips()).toHaveLength(0);
+        expect(userRow.querySelector('a[href^="ryco-quote:"]')).toBeNull();
+      } finally {
+        await screen.unmount();
+      }
     });
   });
 });

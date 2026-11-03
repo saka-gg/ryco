@@ -104,7 +104,9 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
         { concurrency: "unbounded", discard: true },
       );
 
-      const bindings = yield* directory.listBindings();
+      // Stopped bindings hold no process: only the active ones are read, so a sweep costs the
+      // same on a node with a long history as on a new one.
+      const bindings = yield* directory.listActiveBindings();
       const now = Date.now();
       let reapedCount = 0;
       const idle: Array<{
@@ -113,10 +115,6 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
       }> = [];
 
       for (const binding of bindings) {
-        if (binding.status === "stopped") {
-          continue;
-        }
-
         const lastSeenMs = Date.parse(binding.lastSeenAt);
         if (Number.isNaN(lastSeenMs)) {
           yield* Effect.logWarning("provider.session.reaper.invalid-last-seen", {

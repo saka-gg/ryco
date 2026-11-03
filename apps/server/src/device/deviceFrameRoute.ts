@@ -17,6 +17,7 @@ import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 
 import { respondToAuthError } from "../auth/http.ts";
 import { ServerAuth } from "../auth/Services/ServerAuth.ts";
+import { SessionCredentialService } from "../auth/Services/SessionCredentialService.ts";
 import { DeviceService } from "./Services/DeviceService.ts";
 import type { DeviceFrameSink } from "./deviceFrameTransport.ts";
 
@@ -83,7 +84,8 @@ export const deviceFrameRouteLayer = Layer.effectDiscard(
       Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest;
         const serverAuth = yield* ServerAuth;
-        yield* serverAuth.authenticateWebSocketUpgrade(request);
+        const sessions = yield* SessionCredentialService;
+        const session = yield* serverAuth.authenticateWebSocketUpgrade(request);
 
         const deviceService = yield* DeviceService;
         if (!deviceService.supported) {
@@ -112,7 +114,7 @@ export const deviceFrameRouteLayer = Layer.effectDiscard(
         // Decoder errors and sequence gaps request fresh codec parameters plus
         // an IDR on this same stream. Unknown messages are deliberately ignored.
         const { pull } = yield* socket.reader;
-        return yield* pull.pipe(
+        const readResyncRequests = pull.pipe(
           Effect.flatMap((messages) =>
             Effect.sync(() => {
               for (const message of messages) {
@@ -126,6 +128,13 @@ export const deviceFrameRouteLayer = Layer.effectDiscard(
             }),
           ),
           Effect.forever,
+        );
+        // The stream ends with its session, like the RPC sockets.
+        return yield* Effect.raceFirst(
+          readResyncRequests,
+          sessions
+            .awaitEnd({ sessionId: session.sessionId, chainId: session.chainId })
+            .pipe(Effect.as(HttpServerResponse.empty())),
         );
       }).pipe(
         Effect.catchTag("AuthError", respondToAuthError),

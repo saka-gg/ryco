@@ -4,11 +4,47 @@ import { page } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 import DiffPanel, { DiffWorkerPoolProvider } from "./DiffPanel";
-const fixture = vi.hoisted(() => ({ read: vi.fn(), apply: vi.fn() }));
-vi.mock("../environmentApi", () => ({
-  ensureEnvironmentApi: () => ({
+const fixture = vi.hoisted(() => ({
+  read: vi.fn(),
+  apply: vi.fn(),
+  commit: vi.fn(),
+  cancel: vi.fn(),
+  stagedOnlyCommit: true,
+}));
+vi.mock("../environmentApi", () => {
+  const api = () => ({
     vcs: { readLocalChanges: fixture.read, applyIndexPatch: fixture.apply },
-  }),
+    git: { runStackedAction: fixture.commit, cancelStackedAction: fixture.cancel },
+  });
+  return { ensureEnvironmentApi: api, readEnvironmentApi: api };
+});
+vi.mock("../rpc/useGit", () => ({
+  GIT_USER_ACTION_KIND: { runStackedAction: "run-stacked-action" },
+  gitMutationTrackingKey: (kind: string, environmentId: string, cwd: string) =>
+    `${kind}:${environmentId}:${cwd}`,
+}));
+const reporter = vi.hoisted(() => ({
+  running: vi.fn(),
+  succeeded: vi.fn(),
+  failed: vi.fn(),
+  rejected: vi.fn(() => false),
+  onProgress: vi.fn(),
+  onRecoveryState: vi.fn(),
+}));
+const reporterInputs = vi.hoisted(
+  () => [] as Array<{ readonly id: string; readonly stop?: () => unknown }>,
+);
+vi.mock("../gitActionNotices", () => ({
+  createGitActionReporter: (input: { readonly id: string; readonly stop?: () => unknown }) => {
+    reporterInputs.push(input);
+    return reporter;
+  },
+}));
+vi.mock("../hooks/useChatsAvailability", () => ({
+  useEnvironmentServerConfigSelector: (
+    _environmentId: unknown,
+    select: (config: unknown) => unknown,
+  ) => select({ environment: { capabilities: { stagedOnlyCommit: fixture.stagedOnlyCommit } } }),
 }));
 vi.mock("../environments/runtime", () => ({
   readEnvironmentConnection: () => null,
@@ -29,11 +65,19 @@ vi.mock("../rpc/gitAtoms", () => ({
   gitScopeKey: (cwd: string) => cwd,
   invalidateScopes: vi.fn(),
   subscribeInvalidationScope: () => () => {},
+  beginMutationTracking: vi.fn(),
+  endMutationTracking: vi.fn(),
 }));
 const openInPreferredEditor = vi.hoisted(() => vi.fn());
 vi.mock("../composerDraftStore", () => import("@ryco/client-runtime/state/composer"));
 vi.mock("../editorPreferences", () => ({
   openInPreferredEditor,
+  // Where a path opens (this machine, over SSH, or not at all) is `editorOpenRoute.test.ts`'s
+  // concern; here every path opens on this machine.
+  openPathInEditor: (_environmentId: unknown, target: string) => openInPreferredEditor({}, target),
+  openPathInEditorWithToast: (_environmentId: unknown, target: string) =>
+    void openInPreferredEditor({}, target),
+  canOpenInEditor: () => true,
 }));
 
 vi.mock("@tanstack/react-router", () => ({
@@ -106,7 +150,7 @@ vi.mock("../threadRoutes", () => ({
 }));
 
 vi.mock("../storeSelectors", () => ({
-  createThreadSelectorByRef: () => () => ({
+  createThreadStructureSelectorByRef: () => () => ({
     id: ThreadId.make("thread-1"),
     environmentId: EnvironmentId.make("environment-local"),
     projectId: ProjectId.make("project-1"),
@@ -147,7 +191,12 @@ index 1111111..2222222 100644
  context 21
  context 22
 `;
-function snapshot(revision: string, staged = "", unstaged = patch): GitLocalChangesResult {
+function snapshot(
+  revision: string,
+  staged = "",
+  unstaged = patch,
+  stagedRevision = "c".repeat(64),
+): GitLocalChangesResult {
   const files = (value: string) =>
     value
       ? [
@@ -165,6 +214,7 @@ function snapshot(revision: string, staged = "", unstaged = patch): GitLocalChan
     branch: "refs/heads/main",
     indexIdentity: "index",
     revision,
+    stagedRevision,
     staged: { patch: staged, files: files(staged) },
     unstaged: { patch: unstaged, files: files(unstaged) },
   };
@@ -224,5 +274,144 @@ describe("staged and unstaged review", () => {
       .element(screen.getByRole("button", { name: "Unstage file a/file.ts" }))
       .toBeVisible();
     await screen.unmount();
+  });
+
+  it("commits exactly the reviewed staged revision and requires a fresh review after failure", async () => {
+    await page.viewport(1100, 850);
+    fixture.stagedOnlyCommit = true;
+    // The same file is partly staged and has later unstaged edits.
+    fixture.read.mockResolvedValue(snapshot("1".repeat(64), patch, patch, "d".repeat(64)));
+    fixture.commit.mockResolvedValue({
+      toast: { title: "Committed 89abcde", description: "Commit the staged edit" },
+    });
+    const screen = await render(<App />);
+    await screen.getByRole("button", { name: "Unstaged changes", exact: true }).click();
+    // Unstaged review offers no commit of the index.
+    await expect
+      .element(screen.getByRole("button", { name: "Stage file a/file.ts" }))
+      .toBeVisible();
+    await expect
+      .element(screen.getByRole("button", { name: "Commit staged" }))
+      .not.toBeInTheDocument();
+    await screen.getByRole("button", { name: "Staged changes", exact: true }).click();
+    await expect
+      .element(screen.getByRole("button", { name: "Unstage file a/file.ts" }))
+      .toBeVisible();
+    await expect
+      .element(screen.getByText(/Commit staged records exactly this index/))
+      .toBeVisible();
+    fixture.read.mockResolvedValue(snapshot("2".repeat(64), "", patch, "e".repeat(64)));
+    await screen.getByRole("button", { name: "Commit staged" }).click();
+    await expect
+      .poll(() => fixture.commit.mock.calls[0]?.[0])
+      .toMatchObject({
+        cwd: "/repo",
+        action: "commit",
+        stagedOnly: { expectedRevision: "d".repeat(64) },
+      });
+    expect(fixture.commit.mock.calls[0]?.[0]).not.toHaveProperty("filePaths");
+    // Like the git controls' commits, it outlives a dropped connection and its notice offers Stop.
+    expect(fixture.commit.mock.calls[0]?.[1]).toMatchObject({
+      recoverable: true,
+      onRecoveryState: reporter.onRecoveryState,
+    });
+    const { actionId } = fixture.commit.mock.calls[0]?.[0] as { actionId: string };
+    expect(reporterInputs.at(-1)?.id).toBe(actionId);
+    reporterInputs.at(-1)?.stop?.();
+    expect(fixture.cancel).toHaveBeenCalledExactlyOnceWith({ actionId });
+    // A finished hook hands the notice back to its step.
+    const { onProgress } = fixture.commit.mock.calls[0]?.[1] as {
+      onProgress: (event: object) => void;
+    };
+    const event = { actionId, cwd: "/repo", action: "commit" } as const;
+    onProgress({ ...event, kind: "phase_started", phase: "commit", label: "Committing..." });
+    onProgress({ ...event, kind: "hook_started", hookName: "pre-commit" });
+    expect(reporter.running).toHaveBeenLastCalledWith("Running pre-commit...");
+    onProgress({
+      ...event,
+      kind: "hook_finished",
+      hookName: "pre-commit",
+      exitCode: 0,
+      durationMs: 5,
+    });
+    expect(reporter.running).toHaveBeenLastCalledWith("Committing...");
+    await expect
+      .poll(() => reporter.succeeded.mock.calls[0]?.[0])
+      .toEqual({ title: "Committed 89abcde", description: "Commit the staged edit" });
+    // The refreshed review has nothing staged left to commit.
+    await expect.element(screen.getByRole("button", { name: "Commit staged" })).toBeDisabled();
+
+    fixture.read.mockResolvedValue(snapshot("3".repeat(64), patch, "", "f".repeat(64)));
+    await screen.getByRole("button", { name: "Refresh local changes" }).click();
+    fixture.commit.mockRejectedValueOnce(
+      new Error("The staged changes, HEAD or branch moved since your review."),
+    );
+    await screen.getByRole("button", { name: "Commit staged" }).click();
+    await expect.element(screen.getByRole("alert")).toMatchTextContent(/moved since your review/);
+    expect(fixture.commit).toHaveBeenCalledTimes(2);
+    expect(reporter.rejected).toHaveBeenCalledWith(
+      new Error("The staged changes, HEAD or branch moved since your review."),
+      "Commit failed",
+    );
+    await expect.element(screen.getByRole("button", { name: "Commit staged" })).toBeDisabled();
+    await screen.unmount();
+  });
+
+  it("keeps the review when the message cannot be generated and commits a typed one", async () => {
+    await page.viewport(1100, 850);
+    fixture.stagedOnlyCommit = true;
+    fixture.read.mockResolvedValue(snapshot("1".repeat(64), patch, "", "d".repeat(64)));
+    fixture.commit.mockRejectedValueOnce(
+      Object.assign(new Error("Text generation failed in generateCommitMessage"), {
+        _tag: "TextGenerationError",
+        operation: "generateCommitMessage",
+        detail: "Codex CLI command failed: ERROR: unexpected status 401 Unauthorized",
+      }),
+    );
+    const screen = await render(<App />);
+    await screen.getByRole("button", { name: "Staged changes", exact: true }).click();
+    await expect
+      .element(screen.getByRole("button", { name: "Unstage file a/file.ts" }))
+      .toBeVisible();
+    await screen.getByRole("button", { name: "Commit staged" }).click();
+    await expect
+      .element(screen.getByRole("alert"))
+      .toMatchTextContent(/could not be generated .*401 Unauthorized.*Type a message/);
+    expect(fixture.commit.mock.calls[0]?.[0]).not.toHaveProperty("commitMessage");
+    // Nothing was written, so the review stays and can be committed with a typed message.
+    await expect
+      .element(screen.getByRole("button", { name: "Unstage file a/file.ts" }))
+      .toBeVisible();
+    fixture.commit.mockResolvedValue({
+      toast: { title: "Committed 89abcde", description: "Fix the greeting" },
+    });
+    fixture.read.mockResolvedValue(snapshot("2".repeat(64), "", "", "e".repeat(64)));
+    await screen.getByRole("textbox", { name: "Commit message" }).fill("Fix the greeting");
+    await screen.getByRole("button", { name: "Commit staged" }).click();
+    await expect
+      .poll(() => fixture.commit.mock.calls[1]?.[0])
+      .toMatchObject({
+        action: "commit",
+        stagedOnly: { expectedRevision: "d".repeat(64) },
+        commitMessage: "Fix the greeting",
+      });
+    await expect.element(screen.getByRole("textbox", { name: "Commit message" })).toHaveValue("");
+    await screen.unmount();
+  });
+
+  it("hides the staged commit when the node does not advertise it", async () => {
+    fixture.stagedOnlyCommit = false;
+    fixture.read.mockResolvedValue(snapshot("1".repeat(64), patch, ""));
+    const screen = await render(<App />);
+    await screen.getByRole("button", { name: "Staged changes", exact: true }).click();
+    await expect
+      .element(screen.getByRole("button", { name: "Unstage file a/file.ts" }))
+      .toBeVisible();
+    await expect.element(screen.getByText(/Staging does not commit/)).toBeVisible();
+    await expect
+      .element(screen.getByRole("button", { name: "Commit staged" }))
+      .not.toBeInTheDocument();
+    await screen.unmount();
+    fixture.stagedOnlyCommit = true;
   });
 });

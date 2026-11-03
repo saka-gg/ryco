@@ -20,11 +20,34 @@ import {
   type CompletionReturnOutcome,
   type CompletionReturnRecord,
 } from "../persistence/Layers/AgentControlCompletionReturns.ts";
+import { serverWakeGuard } from "../orchestration/serverWake.ts";
 
 export const MAX_WAKE_SECTIONS = 10;
 export const MAX_WAKE_TEXT_CHARS = 100_000;
-/** A child that never reaches a terminal state within this window yields an `expired` notice. */
+/**
+ * A child that never reaches a terminal state within this window of its first message's send
+ * yields an `expired` notice. A capped request's task sends it when its slot frees, so the window
+ * runs from then, within `WAITING_EXPIRY_MS` of the task's creation.
+ */
 export const CAPTURE_EXPIRY_MS = 24 * 60 * 60 * 1000;
+/** A task that never started is waited for this long after it was created. */
+export const WAITING_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Whether a waiting return expired: `CAPTURE_EXPIRY_MS` after the task's first message was sent
+ * (`startedAt`), or, while it was never sent, `WAITING_EXPIRY_MS` after the task was created. A
+ * task that starts late still gets its whole 24 hours.
+ */
+export function waitingReturnExpired(input: {
+  readonly createdAt: string;
+  readonly startedAt: string | null | undefined;
+  readonly nowMs: number;
+}): boolean {
+  const startedMs = input.startedAt ? Date.parse(input.startedAt) : Number.NaN;
+  return Number.isFinite(startedMs)
+    ? input.nowMs - startedMs > CAPTURE_EXPIRY_MS
+    : input.nowMs - Date.parse(input.createdAt) > WAITING_EXPIRY_MS;
+}
 /** A captured return held this long (busy chat, scope change, policy off) fails without a wake. */
 export const DELIVERY_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
@@ -59,17 +82,9 @@ export function laterInstant(
 }
 export const MAX_DELIVERY_ATTEMPTS = 5;
 export const MAX_REPLAYS = 2;
-/**
- * Cold wakes start a session for their parent. The reactor runs each thread in
- * its own lane, so they no longer block other threads; the cap matches the
- * default concurrent provider starts per instance, which avoids admission-busy
- * failures in post-restart bursts.
- */
-export const MAX_COLD_WAKES_IN_FLIGHT = 4;
-export const COLD_WAKE_GRACE_MS = 120_000;
 export const CHILD_OUTPUT_MAX_CHARS = 8000;
 
-const threadLink = (label: string, threadId: string) =>
+export const threadLink = (label: string, threadId: string) =>
   `[${label}](/ryco/thread/${encodeURIComponent(threadId)})`;
 
 export function renderCompletionReturn(
@@ -93,6 +108,11 @@ export function renderCompletionReturn(
     JSON.stringify({
       summary: text.slice(0, CHILD_OUTPUT_MAX_CHARS),
       truncated: text.length > CHILD_OUTPUT_MAX_CHARS,
+      ...(text.length > CHILD_OUTPUT_MAX_CHARS
+        ? {
+            readMore: `ryco_task_status with taskId ${record.childThreadId} returns the whole result in pages.`,
+          }
+        : {}),
       ...(state === "error"
         ? { error: "The initial child run failed. Inspect the child for details." }
         : {}),
@@ -114,7 +134,8 @@ const NOTICE_SENTENCES: Record<CompletionReturnNoticeOutcome, string> = {
     "The task received a follow-up before its result was captured. Open the task to read it.",
   archived: "The task was archived or deleted before it finished.",
   "request-failed": "The request that created this task failed, was rejected or was cancelled.",
-  expired: "The task did not finish within 24 hours. Ryco stopped waiting for it.",
+  expired:
+    "The task did not finish within 24 hours of starting, or did not start within 7 days. Ryco stopped waiting for it.",
 };
 
 /** Server-authored notice section. Never contains child-authored text. */
@@ -238,19 +259,19 @@ export function buildDelegationReturnCommand(input: {
     type: "thread.turn.start",
     commandId: ids.commandId,
     threadId: input.parent.id,
-    delegationReturnGuard: {
-      latestUserMessageId: input.latestUserMessageId,
-      projectId: input.parent.projectId,
-      runtimeMode: input.parent.runtimeMode,
-      worktreePath: input.parent.worktreePath,
-    },
+    delegationReturnGuard: serverWakeGuard(
+      input.parent,
+      input.latestUserMessageId,
+      "delegation-return",
+    ),
     message: {
       messageId: ids.messageId,
       role: "user" as const,
       text,
       attachments: [],
     },
-    modelSelection: input.parent.modelSelection,
+    // No model: the chat's stored pick applies where the session can take it
+    // (`threadContinuation.ts`).
     runtimeMode: input.parent.runtimeMode,
     interactionMode: input.parent.interactionMode,
     ...(input.parent.tokenMode === undefined ? {} : { tokenMode: input.parent.tokenMode }),
@@ -260,3 +281,16 @@ export function buildDelegationReturnCommand(input: {
     ? command
     : { ...command, message: { ...command.message, attachments } };
 }
+
+// ── Stall notices ───────────────────────────────────────────────────────
+
+/**
+ * Stall thresholds (Synara's worker health: `WORKER_NEVER_STARTED_MS`, `WORKER_STUCK_WAITING_MS`).
+ * A silent turn is the liveness sweep's `unresponsive` verdict (`providerTurnLiveness`), 15
+ * minutes by default.
+ */
+export const STALL_NEVER_STARTED_MS = 3 * 60 * 1000;
+export const STALL_WAITING_ON_YOU_MS = 5 * 60 * 1000;
+/** Notices one task may send its delegating chat in all, across episodes. */
+export const MAX_STALL_NOTICES = 3;
+// The notices' texts and wake commands load on the first notice (`completionReturnStallMessages.ts`).

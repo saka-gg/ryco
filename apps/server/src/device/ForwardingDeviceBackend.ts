@@ -3,6 +3,8 @@ import type {
   DeviceBackend,
   DeviceFrameListener,
   DeviceListOptions,
+  DeviceLogQuery,
+  DeviceLogResult,
   DeviceSwipeGesture,
   DeviceKeyEvent,
 } from "./DeviceBackend.ts";
@@ -18,6 +20,8 @@ export type DeviceCall = Exclude<
   | "discoverDevices"
   | "testing"
   | "suspendTesting"
+  // Local simulators only; kept out of the device host protocol.
+  | "readLogs"
 >;
 export type DeviceArgs<K extends DeviceCall> = Parameters<DeviceBackend[K]>;
 export type DeviceResult<K extends DeviceCall> = Awaited<ReturnType<DeviceBackend[K]>>;
@@ -31,6 +35,7 @@ export abstract class ForwardingDeviceBackend implements DeviceBackend {
   abstract dispose(): Promise<void>;
   abstract testing(input: Parameters<DeviceBackend["testing"]>[0]): Promise<void>;
   abstract suspendTesting(udid?: string): () => void;
+  abstract readLogs(udid: string, query: DeviceLogQuery): Promise<DeviceLogResult>;
   availability(): ReturnType<DeviceBackend["availability"]> {
     return this.call("availability", []);
   }

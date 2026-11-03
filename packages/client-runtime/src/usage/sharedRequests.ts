@@ -110,6 +110,12 @@ export class SharedRequests<T> {
     this.#handoffs.delete(key);
   }
 
+  /** {@link forget} every key `matches` accepts. */
+  forgetMatching(matches: (key: string) => boolean): void {
+    for (const key of this.#flights.keys()) if (matches(key)) this.#flights.delete(key);
+    for (const key of this.#handoffs.keys()) if (matches(key)) this.#handoffs.delete(key);
+  }
+
   /** Forget every answer and stop sharing in-flight requests (they still settle). */
   clear(): void {
     this.#flights.clear();

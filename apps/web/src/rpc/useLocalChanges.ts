@@ -1,8 +1,89 @@
-import { createLocalChangesController } from "@ryco/client-runtime/state/comparison";
-import type { EnvironmentId } from "@ryco/contracts";
-import { useMemo, useSyncExternalStore } from "react";
-import { ensureEnvironmentApi } from "../environmentApi";
+import {
+  createLocalChangesController,
+  type LocalChangesStagedCommit,
+} from "@ryco/client-runtime/state/comparison";
+import type { EnvironmentId, ServerConfig } from "@ryco/contracts";
+import { useCallback, useMemo, useSyncExternalStore } from "react";
+import type { ThreadToastData } from "../components/ui/toast";
+import { ensureEnvironmentApi, readEnvironmentApi } from "../environmentApi";
+import { createGitActionReporter } from "../gitActionNotices";
+import { useEnvironmentServerConfigSelector } from "../hooks/useChatsAvailability";
+import { randomUUID } from "../lib/utils";
+import {
+  beginMutationTracking,
+  endMutationTracking,
+  gitScopeKey,
+  invalidateScopes,
+} from "./gitAtoms";
+import { GIT_USER_ACTION_KIND, gitMutationTrackingKey } from "./useGit";
 import { useRepositoryReadLifecycle } from "./useRepositoryReadLifecycle";
+
+// Module level, so unrelated config pushes (provider probes) never re-render.
+const selectStagedOnlyCommit = (config: ServerConfig | null): boolean =>
+  config?.environment.capabilities.stagedOnlyCommit === true;
+
+/**
+ * Commits exactly the reviewed index, reported like the git controls' commits:
+ * on the checkout's crown or a toast, and as its running git action. Like
+ * them, the commit outlives a dropped connection and its notice offers Stop.
+ */
+async function commitStagedChanges(
+  environmentId: EnvironmentId,
+  commit: LocalChangesStagedCommit,
+  toastData: ThreadToastData | undefined,
+): Promise<void> {
+  const actionId = randomUUID();
+  const reporter = createGitActionReporter({
+    id: actionId,
+    kind: "commit",
+    environmentId,
+    cwd: commit.cwd,
+    toastData,
+    stop: () => readEnvironmentApi(environmentId)?.git.cancelStackedAction?.({ actionId }),
+  });
+  let stepTitle = "Committing staged changes...";
+  reporter.running(stepTitle);
+  const trackingKey = gitMutationTrackingKey(
+    GIT_USER_ACTION_KIND.runStackedAction,
+    environmentId,
+    commit.cwd,
+  );
+  beginMutationTracking(trackingKey);
+  try {
+    const result = await ensureEnvironmentApi(environmentId).git.runStackedAction(
+      {
+        actionId,
+        cwd: commit.cwd,
+        action: "commit",
+        stagedOnly: { expectedRevision: commit.expectedRevision },
+        ...(commit.commitMessage ? { commitMessage: commit.commitMessage } : {}),
+      },
+      {
+        recoverable: true,
+        onRecoveryState: reporter.onRecoveryState,
+        onProgress: (event) => {
+          reporter.onProgress(event);
+          if (event.kind === "phase_started") {
+            stepTitle = event.label;
+            reporter.running(stepTitle);
+          } else if (event.kind === "hook_started") {
+            reporter.running(`Running ${event.hookName}...`);
+          } else if (event.kind === "hook_finished") {
+            // Back to the step (also when a resume replays a hook that finished meanwhile).
+            reporter.running(stepTitle);
+          }
+        },
+      },
+    );
+    reporter.succeeded({ title: result.toast.title, description: result.toast.description });
+  } catch (error) {
+    // Stopped or unconfirmed: the commit may exist, so other reads of the checkout go stale.
+    if (reporter.rejected(error, "Commit failed")) invalidateScopes([gitScopeKey(commit.cwd)]);
+    throw error;
+  } finally {
+    endMutationTracking(trackingKey);
+  }
+}
 
 export function useLocalChanges(
   environmentId: EnvironmentId | null,
@@ -26,5 +107,28 @@ export function useLocalChanges(
   );
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   useRepositoryReadLifecycle(controller, environmentId, cwd, enabled, controller.refresh);
-  return { ...state, refresh: controller.refresh, apply: controller.apply };
+  // Older nodes drop `stagedOnly` and would commit every change.
+  const stagedOnlyCommit = useEnvironmentServerConfigSelector(
+    environmentId,
+    selectStagedOnlyCommit,
+  );
+  const commitStaged = useCallback(
+    async (toastData?: ThreadToastData, commitMessage?: string) => {
+      if (!environmentId || !cwd) return false;
+      const committed = await controller.commitStaged(
+        (commit) => commitStagedChanges(environmentId, commit, toastData),
+        commitMessage,
+      );
+      // After the controller's own refresh: other reads of this checkout (comparisons, refs).
+      if (committed) invalidateScopes([gitScopeKey(cwd)]);
+      return committed;
+    },
+    [controller, environmentId, cwd],
+  );
+  return {
+    ...state,
+    refresh: controller.refresh,
+    apply: controller.apply,
+    commitStaged: stagedOnlyCommit ? commitStaged : null,
+  };
 }

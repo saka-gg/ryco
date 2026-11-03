@@ -4,6 +4,7 @@ import { createContext, use, useCallback, useState, type ReactNode } from "react
 
 import type { ChatFileAttachment } from "../../types";
 import { Dialog, DialogDescription, DialogHeader, DialogPopup, DialogTitle } from "../ui/dialog";
+import { useHtmlRenderMessageSend } from "./htmlRenderMessages";
 import { HtmlRenderFullView, HtmlRenderViewActions } from "./HtmlRenderView";
 import { useHtmlRenderSource } from "./useHtmlRenderSource";
 
@@ -14,6 +15,8 @@ export interface HtmlRenderTarget {
   readonly messageId: MessageId | undefined;
   readonly attachment: ChatFileAttachment;
   readonly htmlRender: HtmlRenderMetadata;
+  /** The page may send the reader's answers to its thread (see `HtmlRenderFrame`). */
+  readonly canSendMessages?: boolean | undefined;
 }
 
 /** A render to show full size, and the element its dialog grows out of. */
@@ -35,6 +38,12 @@ function HtmlRenderDialogPopup(props: {
   // A page already shown inline comes from memory.
   const source = useHtmlRenderSource(target);
   const [showSource, setShowSource] = useState(false);
+  const onSendMessage = useHtmlRenderMessageSend({
+    environmentId: target.environmentId,
+    threadId: target.threadId,
+    title,
+    enabled: target.canSendMessages === true,
+  });
   return (
     <DialogPopup
       className="h-[85dvh] max-w-5xl overflow-hidden"
@@ -62,6 +71,7 @@ function HtmlRenderDialogPopup(props: {
         sizeBytes={target.attachment.sizeBytes}
         showSource={showSource}
         onEscape={props.onClose}
+        onSendMessage={onSendMessage}
         className="rounded-b-[calc(min(var(--radius-2xl),1.25rem)-1px)] px-4 pt-4 sm:px-6"
       />
     </DialogPopup>

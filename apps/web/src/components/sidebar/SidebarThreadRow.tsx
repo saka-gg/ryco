@@ -3,6 +3,7 @@ import { ArchiveIcon, CloudIcon, PinIcon, XIcon } from "lucide-react";
 import React, { memo, useCallback, useMemo } from "react";
 import type { ScopedThreadRef } from "@ryco/contracts";
 import { scopedThreadKey, scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { followUpQueueBadgeOf } from "@ryco/client-runtime/state/message-queue/queueBadge";
 import { usePrimaryEnvironmentId } from "../../environments/primary";
 import {
   useSavedEnvironmentRegistryStore,
@@ -29,6 +30,7 @@ import {
 } from "../Sidebar.logic";
 import { SidebarMenuSubButton, SidebarMenuSubItem } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { FollowUpQueueMark } from "./FollowUpQueueMark";
 import {
   resolveSidebarStatusTextStyle,
   resolveThreadStatusTextClassName,
@@ -221,6 +223,7 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
   });
   const pr = gitStatus ? resolveThreadPr(thread.branch, gitStatus.data) : null;
   const prStatus = prStatusIndicator(pr, gitStatus?.data?.sourceControlProvider);
+  const queueBadge = followUpQueueBadgeOf(thread.followUpQueueSummary);
   const PrStatusIcon = prStatus?.Icon;
   const isConfirmingArchive = confirmingArchiveThreadKey === threadKey && !isThreadRunning;
   const canArchiveThread = !draftId && canArchiveSidebarThread(thread);
@@ -665,6 +668,7 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
                     <TooltipPopup side="top">{threadEnvironmentLabel}</TooltipPopup>
                   </Tooltip>
                 )}
+                {queueBadge && !isMobile ? <FollowUpQueueMark badge={queueBadge} /> : null}
                 {jumpLabel ? (
                   <span
                     className="inline-flex h-5 items-center rounded-full border border-border/80 bg-background/90 px-1.5 font-mono text-[10px] font-medium tracking-tight text-foreground shadow-sm"

@@ -46,3 +46,14 @@ export function deriveThreadActivityStatus(
   if (thread.backgroundLiveness === "monitoring") return "monitoring";
   return "idle";
 }
+
+/**
+ * Start of the running turn, for a working thread's ticking clock. Background
+ * liveness has no turn clock, so a row showing it falls back to recency.
+ */
+export function resolveRunningSince(
+  thread: Pick<SidebarThreadSummary, "latestTurn">,
+): string | null {
+  const turn = thread.latestTurn;
+  return turn?.state === "running" ? (turn.startedAt ?? turn.requestedAt) : null;
+}

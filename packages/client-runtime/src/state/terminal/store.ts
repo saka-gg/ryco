@@ -661,6 +661,8 @@ export interface TerminalStateStoreState {
   ) => void;
   setActiveTerminal: (threadRef: ScopedThreadRef, terminalId: string) => void;
   closeTerminal: (threadRef: ScopedThreadRef, terminalId: string) => void;
+  /** Forget one closed session's buffered events and reconciliation, leaving its siblings. */
+  clearTerminalEventHistory: (threadRef: ScopedThreadRef, terminalId: string) => void;
   setTerminalLaunchContext: (
     threadRef: ScopedThreadRef,
     context: ThreadTerminalLaunchContext,
@@ -757,6 +759,21 @@ export function createTerminalStateStore(options?: {
             updateTerminal(threadRef, (state) => setThreadActiveTerminal(state, terminalId)),
           closeTerminal: (threadRef, terminalId) =>
             updateTerminal(threadRef, (state) => closeThreadTerminal(state, terminalId)),
+          clearTerminalEventHistory: (threadRef, terminalId) =>
+            set((state) => {
+              const key = terminalEventBufferKey(threadRef, terminalId);
+              if (
+                state.terminalEventEntriesByKey[key] === undefined &&
+                state.terminalEventReconciliationByKey[key] === undefined
+              ) {
+                return state;
+              }
+              const { [key]: _entries, ...terminalEventEntriesByKey } =
+                state.terminalEventEntriesByKey;
+              const { [key]: _reconciliation, ...terminalEventReconciliationByKey } =
+                state.terminalEventReconciliationByKey;
+              return { terminalEventEntriesByKey, terminalEventReconciliationByKey };
+            }),
           setTerminalLaunchContext: (threadRef, context) =>
             set((state) => ({
               terminalLaunchContextByThreadKey: {

@@ -1,4 +1,6 @@
+import { deriveClaudeFastModeNotice } from "@ryco/client-runtime/state/session";
 import {
+  type OrchestrationThreadActivity,
   type ProviderDriverKind,
   type ProviderInstanceId,
   type ProviderOptionSelection,
@@ -15,7 +17,7 @@ import type { ReactNode } from "react";
 
 import type { DraftId } from "../../composerDraftStore";
 import { getProviderModelCapabilities } from "../../providerModels";
-import { ComposerModelTuning } from "./ModelTuningDial";
+import { LazyComposerModelTuning } from "./ProviderModelPicker";
 import {
   resolveModelTuning,
   summarizeModelTuning,
@@ -178,14 +180,17 @@ export function renderProviderTraitsChips(input: TraitsRenderInput): ReactNode {
   );
 }
 
-/** The model picker's tuning dial for the composer's active model, or null. */
+/**
+ * The model picker's tuning dial for the composer's active model, or null.
+ * The dial's code loads with the picker body, the only place it renders.
+ */
 export function renderProviderModelTuning(input: TraitsRenderInput): ReactNode {
   const { provider, instanceId, threadRef, draftId, model, models, modelOptions } = input;
   if (threadRef === undefined && draftId === undefined) return null;
   const caps = getProviderModelCapabilities(models, model, provider);
   if (!resolveModelTuning({ caps, selections: modelOptions, prompt: input.prompt })) return null;
   return (
-    <ComposerModelTuning
+    <LazyComposerModelTuning
       provider={provider}
       {...(instanceId ? { instanceId } : {})}
       models={models}
@@ -200,16 +205,31 @@ export function renderProviderModelTuning(input: TraitsRenderInput): ReactNode {
   );
 }
 
-/** What the composer's model pill shows next to the model name. */
+/**
+ * What the composer's model pill shows next to the model name. For Claude it also reads the
+ * thread's Fast mode report, so the pill can say when Claude Code serves another speed than the
+ * requested one; other providers never scan the activities.
+ */
 export function getProviderModelTuningSummary(input: {
   provider: ProviderDriverKind;
   model: string;
   models: ReadonlyArray<ServerProviderModel>;
   modelOptions: ReadonlyArray<ProviderOptionSelection> | null | undefined;
   prompt: string;
+  activities?: ReadonlyArray<OrchestrationThreadActivity> | undefined;
+  /** The selected provider instance, matched against the report's. */
+  instanceId?: string;
 }): ModelTuningSummary | null {
   const caps = getProviderModelCapabilities(input.models, input.model, input.provider);
-  return summarizeModelTuning(
+  const summary = summarizeModelTuning(
     resolveModelTuning({ caps, selections: input.modelOptions, prompt: input.prompt }),
   );
+  if (!summary || input.provider !== "claudeAgent" || !input.activities) return summary;
+  const speedNotice = deriveClaudeFastModeNotice({
+    activities: input.activities,
+    instanceId: input.instanceId,
+    model: input.model,
+    fastRequested: summary.speed === "fast",
+  });
+  return speedNotice ? { ...summary, speedNotice } : summary;
 }

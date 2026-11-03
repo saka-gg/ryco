@@ -1,5 +1,5 @@
 import * as NodeOS from "node:os";
-import { Context, Effect, FileSystem, Layer, Path, Result, Schema } from "effect";
+import { Context, Effect, FileSystem, Layer, Path, Result, Schema, Scope } from "effect";
 
 import {
   SourceControlRepositoryError,
@@ -18,11 +18,15 @@ import {
 
 import { ServerConfig } from "../config.ts";
 import { withProjectDestinationReservation } from "../projectCopy/destinationReservation.ts";
+import { RestartSensitiveWork } from "../updates/restartSensitiveWork.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import * as GitCloneAccess from "./gitCloneAccess.ts";
 import type * as SourceControlProvider from "./SourceControlProvider.ts";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
+
+/** The clone runner stays off the boot path: it loads with the first clone. */
+const loadGitCloneRun = Effect.promise(() => import("./gitCloneRun.ts"));
 
 export interface SourceControlRepositoryServiceShape {
   readonly lookupRepository: (
@@ -174,6 +178,16 @@ export const make = Effect.fn("makeSourceControlRepositoryService")(function* ()
   const path = yield* Path.Path;
   const providers = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
   const workspaceAccessPolicy = yield* WorkspaceAccessPolicy;
+  const restartWork = yield* RestartSensitiveWork;
+  // Clones outlive the request that started them (see gitCloneRun.ts); they live as long as
+  // this service, and the registry is built with the first clone.
+  const serviceScope = yield* Effect.scope;
+  const cloneJobs = yield* Effect.cached(
+    loadGitCloneRun.pipe(
+      Effect.flatMap((cloneRun) => cloneRun.makeCloneJobs),
+      Scope.provide(serviceScope),
+    ),
+  );
 
   const authorizeExistingPath = (operation: string, candidate: string) =>
     workspaceAccessPolicy
@@ -319,29 +333,7 @@ export const make = Effect.fn("makeSourceControlRepositoryService")(function* ()
             }),
           ),
         );
-      if (yield* fileSystem.exists(authorizedDestination).pipe(Effect.orElseSucceed(() => false))) {
-        const entries = yield* fileSystem
-          .readDirectory(authorizedDestination, { recursive: false })
-          .pipe(
-            Effect.mapError((cause) =>
-              repositoryError({
-                operation: "cloneRepository",
-                provider: "unknown",
-                detail: "Destination path already exists and is not a directory.",
-                cause,
-              }),
-            ),
-          );
-        if (entries.length > 0) {
-          return yield* repositoryError({
-            operation: "cloneRepository",
-            provider: "unknown",
-            detail: "Destination path already exists and is not empty.",
-          });
-        }
-      } else {
-        yield* fileSystem.makeDirectory(path.dirname(authorizedDestination), { recursive: true });
-      }
+      yield* fileSystem.makeDirectory(path.dirname(authorizedDestination), { recursive: true });
 
       return {
         destinationPath: authorizedDestination,
@@ -351,10 +343,40 @@ export const make = Effect.fn("makeSourceControlRepositoryService")(function* ()
     },
   );
 
+  // The full check runs inside the clone, so the same request again can join a running clone
+  // or get the outcome of a finished one instead of failing on the destination it filled.
+  // Before the provider lookup, `unlessRepository` fails fast for a destination that cannot be
+  // one: neither a running clone nor a kept outcome is answered without `<dest>/.git`.
+  const assertDestinationEmpty = Effect.fn("SourceControlRepositoryService.assertDestinationEmpty")(
+    function* (destinationPath: string, options?: { readonly unlessRepository?: boolean }) {
+      if (!(yield* fileSystem.exists(destinationPath).pipe(Effect.orElseSucceed(() => false)))) {
+        return;
+      }
+      const entries = yield* fileSystem.readDirectory(destinationPath, { recursive: false }).pipe(
+        Effect.mapError((cause) =>
+          repositoryError({
+            operation: "cloneRepository",
+            provider: "unknown",
+            detail: "Destination path already exists and is not a directory.",
+            cause,
+          }),
+        ),
+      );
+      if (entries.length > 0 && !(options?.unlessRepository === true && entries.includes(".git"))) {
+        return yield* repositoryError({
+          operation: "cloneRepository",
+          provider: "unknown",
+          detail: "Destination path already exists and is not empty.",
+        });
+      }
+    },
+  );
+
   const cloneRepository = Effect.fn("SourceControlRepositoryService.cloneRepository")(function* (
     input: SourceControlCloneRepositoryInput,
   ) {
     const preparedDestination = yield* prepareDestination(input.destinationPath);
+    yield* assertDestinationEmpty(preparedDestination.destinationPath, { unlessRepository: true });
     let repository: SourceControlRepositoryInfo | null = null;
     let remoteUrl = input.remoteUrl?.trim() ?? null;
     let provider: SourceControlProviderKind = input.provider ?? "unknown";
@@ -399,29 +421,59 @@ export const make = Effect.fn("makeSourceControlRepositoryService")(function* ()
       provider: cloneProvider,
     });
 
-    yield* GitCloneAccess.withCloneAskpass(clone.authentication, (env) =>
-      git.execute({
-        operation: "SourceControlRepositoryService.cloneRepository",
-        cwd: preparedDestination.parentPath,
-        args: ["clone", "--", clone.remoteUrl, preparedDestination.directoryName],
-        timeoutMs: 120_000,
-        maxOutputBytes: 256 * 1024,
-        ...(env ? { env } : {}),
-      }),
-    ).pipe(
-      Effect.provideService(FileSystem.FileSystem, fileSystem),
-      Effect.provideService(Path.Path, path),
-    );
+    // An https URL without a given provider takes the one detected from it.
+    if (clone.provider !== null) provider = clone.provider.kind;
+    const cloneRemoteUrl = clone.remoteUrl;
 
-    const clonedPath = yield* authorizeExistingPath(
-      "cloneRepository",
-      preparedDestination.destinationPath,
-    );
-    return {
-      cwd: clonedPath,
-      remoteUrl: clone.remoteUrl,
-      repository,
-    };
+    const cloneRun = yield* loadGitCloneRun;
+    const jobs = yield* cloneJobs;
+    return yield* jobs.runOrJoin({
+      key: yield* cloneRun.cloneJobKey(preparedDestination, cloneRemoteUrl),
+      destinationPath: preparedDestination.destinationPath,
+      clone: cloneRun
+        .cloneIntoDestination({
+          git,
+          destination: preparedDestination,
+          remoteUrl: cloneRemoteUrl,
+          provider,
+          checkDestination: assertDestinationEmpty(preparedDestination.destinationPath),
+          allowStagingAt: (stagingPath) =>
+            workspaceAccessPolicy
+              .assertPath({ path: stagingPath, operation: "cloneRepository" })
+              .pipe(
+                Effect.as(true),
+                Effect.orElseSucceed(() => false),
+              ),
+          withCredentials: (use) =>
+            GitCloneAccess.withCloneAskpass(clone.authentication, use).pipe(
+              Effect.provideService(FileSystem.FileSystem, fileSystem),
+              Effect.provideService(Path.Path, path),
+              mapRepositoryError("cloneRepository", provider),
+            ),
+        })
+        .pipe(
+          Effect.andThen(
+            authorizeExistingPath("cloneRepository", preparedDestination.destinationPath),
+          ),
+          Effect.map((clonedPath) => ({
+            cwd: clonedPath,
+            remoteUrl: cloneRemoteUrl,
+            repository,
+          })),
+          // Inside the detached clone, so a second request for the same clone joins it instead
+          // of being refused: the clone holds the destination's reservation for its whole run,
+          // and a cross-node import into the same folder (or another clone) cannot race it
+          // between the empty check and the clone.
+          withProjectDestinationReservation({
+            destinationPath: preparedDestination.destinationPath,
+            holder: "sourceControl.cloneRepository",
+            onReserved: (detail) =>
+              repositoryError({ operation: "cloneRepository", provider, detail }),
+          }),
+          // The clone runs detached for as long as this, so a restart waits for all of it.
+          restartWork.track,
+        ),
+    });
   });
 
   const publishRepository = Effect.fn("SourceControlRepositoryService.publishRepository")(
@@ -489,20 +541,8 @@ export const make = Effect.fn("makeSourceControlRepositoryService")(function* ()
       lookupRepository(input).pipe(mapRepositoryError("lookupRepository", input.provider)),
     searchRepositories: (input) =>
       searchRepositories(input).pipe(mapRepositoryError("searchRepositories", input.provider)),
-    // Holds the destination's reservation for the whole clone, so a cross-node import into the
-    // same folder (or a second clone) cannot race it between the empty check and the clone.
     cloneRepository: (input) =>
       cloneRepository(input).pipe(
-        withProjectDestinationReservation({
-          destinationPath: input.destinationPath,
-          holder: "sourceControl.cloneRepository",
-          onReserved: (detail) =>
-            repositoryError({
-              operation: "cloneRepository",
-              provider: input.provider ?? "unknown",
-              detail,
-            }),
-        }),
         mapRepositoryError("cloneRepository", input.provider ?? "unknown"),
       ),
     publishRepository: (input) =>

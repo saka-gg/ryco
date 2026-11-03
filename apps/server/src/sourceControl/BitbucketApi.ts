@@ -1,4 +1,4 @@
-import { Config, Context, Effect, FileSystem, Layer, Option, Schema } from "effect";
+import { Clock, Config, Context, Effect, FileSystem, Layer, Option, Schema } from "effect";
 import {
   TrimmedNonEmptyString,
   type ChangeRequestInvolvement,
@@ -12,6 +12,7 @@ import { sanitizeBranchFragment, WORKTREE_BRANCH_PREFIX } from "@ryco/shared/git
 import { detectSourceControlProviderFromRemoteUrl } from "@ryco/shared/sourceControl";
 
 import { BitbucketApiError, isBitbucketApiError } from "./bitbucketApiError.ts";
+import { forgeHttpFailureFields } from "./forgeHttpRateLimit.ts";
 import * as BitbucketIssues from "./bitbucketIssues.ts";
 import * as BitbucketPullRequests from "./bitbucketPullRequests.ts";
 import { makeBitbucketPullRequestPageApi } from "./bitbucketPullRequestPageApi.ts";
@@ -653,21 +654,25 @@ function responseError(
   operation: string,
   response: HttpClientResponse.HttpClientResponse,
 ): Effect.Effect<never, BitbucketApiError> {
-  return response.text.pipe(
-    Effect.catch(() => Effect.succeed("")),
-    Effect.flatMap((body) =>
-      Effect.fail(
-        new BitbucketApiError({
-          operation,
-          status: response.status,
-          detail:
-            body.trim().length > 0
-              ? `Bitbucket returned HTTP ${response.status}: ${body.trim()}`
-              : `Bitbucket returned HTTP ${response.status}.`,
-        }),
-      ),
-    ),
-  );
+  return Effect.gen(function* () {
+    const body = (yield* response.text.pipe(Effect.catch(() => Effect.succeed("")))).trim();
+    const failure = forgeHttpFailureFields(
+      response.status,
+      response.headers,
+      yield* Clock.currentTimeMillis,
+    );
+    return yield* new BitbucketApiError({
+      operation,
+      status: response.status,
+      detail:
+        failure.failureKind === "rate-limited"
+          ? `Bitbucket is rate limiting requests (HTTP ${response.status}).`
+          : body.length > 0
+            ? `Bitbucket returned HTTP ${response.status}: ${body}`
+            : `Bitbucket returned HTTP ${response.status}.`,
+      ...failure,
+    });
+  });
 }
 
 export const make = Effect.fn("makeBitbucketApi")(function* () {

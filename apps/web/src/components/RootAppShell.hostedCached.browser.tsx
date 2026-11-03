@@ -38,8 +38,8 @@ vi.mock("./ServerStateBootstrap", () => ({
 vi.mock("./MessageQueueDrainBridge", () => ({
   MessageQueueDrainBridge: () => <div data-testid="message-queue-drain" />,
 }));
-vi.mock("./ThreadPriorityRefreshBridge", () => ({
-  ThreadPriorityRefreshBridge: () => <div data-testid="thread-priority-refresh" />,
+vi.mock("../notifications/ThreadAlertsBootstrap", () => ({
+  ThreadAlertsBootstrap: () => <div data-testid="thread-alerts" />,
 }));
 vi.mock("./AppSidebarLayout", () => ({
   AppSidebarLayout: ({ children }: { readonly children?: ReactNode }) => (
@@ -76,6 +76,7 @@ async function mountShell(status: GateStatus) {
 const mountedOwners = () => ({
   serverStateBootstrap: document.querySelector('[data-testid="server-state-bootstrap"]') !== null,
   messageQueueDrain: document.querySelector('[data-testid="message-queue-drain"]') !== null,
+  threadAlerts: document.querySelector('[data-testid="thread-alerts"]') !== null,
   coordinatorOwner:
     document.querySelector('[data-testid="connection-coordinator"]')?.getAttribute("data-owner") ??
     null,
@@ -99,12 +100,13 @@ describe("hosted workspace owners by gate state", () => {
     await mountShell("hosted-cached");
 
     await expect.element(page.getByTestId("app-sidebar-layout")).toBeInTheDocument();
+    // Thread alerts run in the hosted root, above the shell (HostedHubRoot).
     expect(mountedOwners()).toEqual({
       serverStateBootstrap: true,
       messageQueueDrain: true,
+      threadAlerts: false,
       coordinatorOwner: null,
     });
-    expect(document.querySelector('[data-testid="thread-priority-refresh"]')).toBeNull();
     expect(coordinatorMounts).toEqual([]);
   });
 
@@ -115,9 +117,9 @@ describe("hosted workspace owners by gate state", () => {
     expect(mountedOwners()).toEqual({
       serverStateBootstrap: true,
       messageQueueDrain: true,
+      threadAlerts: false,
       coordinatorOwner: "hosted-lifecycle",
     });
-    expect(document.querySelector('[data-testid="thread-priority-refresh"]')).not.toBeNull();
   });
 
   it("mounts no connection owner for a static hosted shell", async () => {
@@ -127,6 +129,7 @@ describe("hosted workspace owners by gate state", () => {
     expect(mountedOwners()).toEqual({
       serverStateBootstrap: false,
       messageQueueDrain: true,
+      threadAlerts: true,
       coordinatorOwner: null,
     });
   });
@@ -172,11 +175,12 @@ describe("hosted workspace owners by gate state", () => {
     expect(coordinatorMounts.map((mount) => mount.recoveryOwner)).not.toContain("generic");
   });
 
-  it("keeps the generic owner for a standard authenticated client", async () => {
+  it("keeps the generic owner and thread alerts for a standard authenticated client", async () => {
     mode.hosted = false;
     await mountShell("authenticated");
 
     await expect.element(page.getByTestId("connection-coordinator")).toBeInTheDocument();
     expect(mountedOwners().coordinatorOwner).toBe("generic");
+    expect(mountedOwners().threadAlerts).toBe(true);
   });
 });

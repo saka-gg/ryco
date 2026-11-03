@@ -30,7 +30,7 @@ import { cn } from "../lib/utils";
 import { parsePullRequestReference } from "../pullRequestReference";
 import { getSourceControlPresentation } from "../sourceControlPresentation";
 import { useStore } from "../store";
-import { createProjectSelectorByRef, createThreadSelectorByRef } from "../storeSelectors";
+import { createProjectSelectorByRef, createThreadStructureSelectorByRef } from "../storeSelectors";
 import {
   deriveLocalBranchNameFromRemoteRef,
   deriveRepositoryWebUrl,
@@ -122,7 +122,10 @@ export function BranchToolbarBranchSelector({
     () => scopeThreadRef(environmentId, threadId),
     [environmentId, threadId],
   );
-  const serverThreadSelector = useMemo(() => createThreadSelectorByRef(threadRef), [threadRef]);
+  const serverThreadSelector = useMemo(
+    () => createThreadStructureSelectorByRef(threadRef),
+    [threadRef],
+  );
   const serverThread = useStore(serverThreadSelector);
   const serverSession = serverThread?.session ?? null;
   const setThreadBranchAction = useStore((store) => store.setThreadBranch);

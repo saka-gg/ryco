@@ -1,4 +1,10 @@
-import { AGENT_CONTROL_WS_METHODS, WS_METHODS } from "@ryco/contracts";
+import {
+  AGENT_CONTROL_WS_METHODS,
+  ORCHESTRATION_WS_METHODS,
+  ThreadId,
+  WS_METHODS,
+} from "@ryco/contracts";
+import { isUnknownUnionMember, UnknownUnionMember } from "@ryco/contracts/base-schemas";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { fakeSocketPlatform, type FakeWebSocket } from "../../test/fakeWebSocket.ts";
@@ -269,7 +275,7 @@ describe("WsTransport stream chunks", () => {
     const stop = transport.subscribe(
       (client) => client[WS_METHODS.subscribeTerminalEvents]({}),
       (event) => {
-        if (event.type !== "output") return;
+        if (isUnknownUnionMember(event) || event.type !== "output") return;
         if (delivered.length === 0) {
           // Batching consumers (one store commit per chunk) run after the pass.
           void Promise.resolve().then(() => delivered.push("after-chunk"));
@@ -302,6 +308,71 @@ describe("WsTransport stream chunks", () => {
     });
 
     await vi.waitFor(() => expect(delivered).toEqual(["a", "b", "c", "after-chunk"]));
+    stop();
+  });
+
+  it("keeps a stream past what a newer node added instead of ending it", async () => {
+    const transport = connect(() => "allowed");
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    sockets[0]!.open();
+    const delivered: unknown[] = [];
+    const onError = vi.fn();
+    const stop = transport.subscribe(
+      (client) =>
+        client[ORCHESTRATION_WS_METHODS.subscribeThread]({ threadId: ThreadId.make("thread-1") }),
+      (item) => delivered.push(item),
+      { onError, tag: ORCHESTRATION_WS_METHODS.subscribeThread },
+    );
+    const request = await vi.waitFor(() => {
+      const found = sockets[0]!
+        .requests()
+        .find((candidate) => candidate.tag === ORCHESTRATION_WS_METHODS.subscribeThread);
+      expect(found).toBeDefined();
+      return found!;
+    });
+    const futureEvent = {
+      sequence: 8,
+      eventId: "event-8",
+      aggregateKind: "thread",
+      aggregateId: "thread-1",
+      occurredAt: "2026-10-22T00:00:00.000Z",
+      commandId: null,
+      causationEventId: null,
+      correlationId: null,
+      metadata: {},
+      type: "thread.teleported",
+      payload: { to: "elsewhere" },
+    };
+    sockets[0]!.reply({
+      _tag: "Chunk",
+      requestId: request.id,
+      values: [
+        { kind: "resumed", fromSequence: 7 },
+        { kind: "event", event: futureEvent },
+        { kind: "snapshot-page", rows: [] },
+      ],
+    });
+    sockets[0]!.reply({
+      _tag: "Chunk",
+      requestId: request.id,
+      values: [{ kind: "resumed", fromSequence: 8 }],
+    });
+
+    await vi.waitFor(() => expect(delivered).toHaveLength(4));
+    expect(delivered).toEqual([
+      { kind: "resumed", fromSequence: 7 },
+      {
+        kind: "event",
+        event: Object.assign(new UnknownUnionMember("type", "thread.teleported"), {
+          sequence: 8,
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+        }),
+      },
+      new UnknownUnionMember("kind", "snapshot-page"),
+      { kind: "resumed", fromSequence: 8 },
+    ]);
+    expect(onError).not.toHaveBeenCalled();
     stop();
   });
 

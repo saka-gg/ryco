@@ -5,7 +5,7 @@ import type {
   ServerSettings,
   SidebarAutoSettleAfterDays,
 } from "@ryco/contracts";
-import { derivePendingThreadRequestState } from "@ryco/shared/threadActivity";
+import { derivePendingThreadRequestState } from "@ryco/shared/pendingThreadRequests";
 import {
   resolveAutoSettleAfterDays,
   type ThreadSettlementInput,
@@ -33,17 +33,21 @@ export function shellSettlementPolicy(
 /**
  * Server-side settlement input for manual settle and snooze eligibility
  * (`canSettleThread`/`canSnoozeThread`), which never depends on the automatic
- * rule, so it is left off here; the AI Focus candidates apply the node's rule
- * ({@link nodeAutoSettleAfterDays}) themselves. Pins are client-local and
- * liveness is not in the read model, and neither ever gates manual settlement,
- * so both are passed as neutral values.
+ * rule, so it is left off here. Pins are client-local and liveness is not in
+ * the read model, and neither ever gates manual settlement, so both are passed
+ * as neutral values.
  */
 export function threadSettlementInput(
   readModel: OrchestrationReadModel,
   thread: OrchestrationReadModel["threads"][number],
   occurredAt: string,
 ) {
-  const pendingRequests = derivePendingThreadRequestState(thread.activities);
+  // At `occurredAt`: a secret request past its expiry no longer holds the thread, even if its
+  // expiry was not recorded.
+  const pendingRequests = derivePendingThreadRequestState(
+    thread.activities,
+    Date.parse(occurredAt),
+  );
   const worktree = threadWorktree(readModel, thread);
   return {
     threadSettlementSupported: true,
@@ -60,10 +64,13 @@ export function threadSettlementInput(
     latestUserMessageAt: latestUserMessageAt(thread),
     hasPendingApprovals: pendingRequests.hasPendingApprovals,
     hasPendingUserInput: pendingRequests.hasPendingUserInput,
-    hasLocalQueuedMessage: false,
+    // The server-owned follow-up queue: a thread with queued follow-ups never settles.
+    hasLocalQueuedMessage: (thread.followUpQueue?.entries.length ?? 0) > 0,
     deliveryUnknown: false,
     pinned: false,
     backgroundLiveness: null,
+    pullRequestWatched: (thread.pullRequestWatchState?.active.length ?? 0) > 0,
+    commandWatched: (thread.commandWatchState?.active.length ?? 0) > 0,
     prNumber: worktree?.prNumber ?? null,
     prState: worktree?.prState ?? null,
     prTerminalAt: worktree?.prTerminalAt ?? null,
@@ -100,10 +107,12 @@ export function threadShellSettlementInput(
     latestUserMessageAt: shell.latestUserMessageAt,
     hasPendingApprovals: shell.hasPendingApprovals,
     hasPendingUserInput: shell.hasPendingUserInput,
-    hasLocalQueuedMessage: false,
+    hasLocalQueuedMessage: shell.followUpQueueSummary !== undefined,
     deliveryUnknown: false,
     pinned: false,
     backgroundLiveness: shell.backgroundLiveness ?? null,
+    pullRequestWatched: (shell.pullRequestWatches?.active.length ?? 0) > 0,
+    commandWatched: shell.commandWatchCount !== undefined,
     prNumber: null,
     prState: null,
     prTerminalAt: null,

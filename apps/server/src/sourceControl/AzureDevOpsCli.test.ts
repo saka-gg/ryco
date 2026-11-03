@@ -2,10 +2,11 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it, afterEach, describe, expect, vi } from "@effect/vitest";
 import { Effect, FileSystem, Layer, Option } from "effect";
 import { ChildProcessSpawner } from "effect/process";
-import { VcsProcessExitError } from "@ryco/contracts";
+import { VcsProcessExitError, VcsProcessSpawnError } from "@ryco/contracts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as AzureDevOpsCli from "./AzureDevOpsCli.ts";
+import { ForgeRequestPausedError, forgeChildAdmission } from "./forgeRateLimit.ts";
 import {
   AZURE_PULL_REQUEST_22,
   AZURE_PULL_REQUEST_LIST,
@@ -87,6 +88,7 @@ describe("AzureDevOpsCli.layer", () => {
         cwd: "/repo",
         timeoutMs: 30_000,
         env: { LC_ALL: "C" },
+        admit: forgeChildAdmission,
       });
     }).pipe(Effect.provide(layer)),
   );
@@ -146,6 +148,7 @@ describe("AzureDevOpsCli.layer", () => {
         cwd: "/repo",
         timeoutMs: 30_000,
         env: { LC_ALL: "C" },
+        admit: forgeChildAdmission,
       });
     }).pipe(Effect.provide(layer)),
   );
@@ -231,6 +234,7 @@ describe("AzureDevOpsCli.layer", () => {
         cwd: "/repo",
         timeoutMs: 30_000,
         env: { LC_ALL: "C" },
+        admit: forgeChildAdmission,
       });
     }).pipe(Effect.provide(layer)),
   );
@@ -290,6 +294,7 @@ describe("AzureDevOpsCli.layer", () => {
         cwd: "/repo",
         timeoutMs: 30_000,
         env: { LC_ALL: "C" },
+        admit: forgeChildAdmission,
       });
     }).pipe(Effect.provide(layer)),
   );
@@ -548,6 +553,134 @@ describe("AzureDevOpsCli.layer", () => {
         call?.args.some((a) => typeof a === "string" && a.toUpperCase().includes("SELECT")),
       ).toBe(true);
       expect(call?.env).toEqual(expect.objectContaining({ LC_ALL: "C" }));
+    }).pipe(Effect.provide(layer)),
+  );
+});
+
+describe("AzureDevOpsCli error normalization", () => {
+  const failWith = (command: string, detail: string) =>
+    mockRun.mockReturnValueOnce(
+      Effect.fail(
+        new VcsProcessExitError({
+          operation: "AzureDevOpsCli.execute",
+          command,
+          cwd: "/repo",
+          exitCode: 1,
+          detail,
+        }),
+      ),
+    );
+
+  it.effect("types TF400733 throttling as a rate limit", () =>
+    Effect.gen(function* () {
+      failWith(
+        "az repos pr list --status active",
+        "ERROR: TF400733: The request has been canceled: Request was blocked due to exceeding usage of resource 'Concurrency' in namespace 'User'.",
+      );
+      const az = yield* AzureDevOpsCli.AzureDevOpsCli;
+      const error = yield* az
+        .execute({ cwd: "/repo", args: ["repos", "pr", "list"] })
+        .pipe(Effect.flip);
+      assert.strictEqual(error.failureKind, "rate-limited");
+      assert.strictEqual(
+        error.detail,
+        "Azure DevOps is rate limiting requests. Ryco tries again shortly.",
+      );
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("checks the rate-limit pause after the forge permit and reports a refusal", () =>
+    Effect.gen(function* () {
+      mockRun.mockReturnValueOnce(
+        Effect.fail(
+          new VcsProcessSpawnError({
+            operation: "AzureDevOpsCli.execute",
+            command: "az repos pr list",
+            cwd: "/repo",
+            cause: new ForgeRequestPausedError({
+              provider: "azure-devops",
+              host: "dev.azure.com",
+              retryAt: 1_000_000_030_000,
+            }),
+          }),
+        ),
+      );
+      const az = yield* AzureDevOpsCli.AzureDevOpsCli;
+      const error = yield* az
+        .execute({ cwd: "/repo", args: ["repos", "pr", "list"] })
+        .pipe(Effect.flip);
+      assert.strictEqual(error.failureKind, "rate-limited");
+      assert.strictEqual(error.retryAt, 1_000_000_030_000);
+      assert.strictEqual(error.detail, "Azure DevOps requests are paused after a rate limit.");
+      assert.strictEqual(mockRun.mock.calls.at(-1)?.[0].admit, forgeChildAdmission);
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("types nothing from rate limit or sign-in words in a title", () =>
+    Effect.gen(function* () {
+      failWith(
+        "az repos pr create --title Handle rate limit and unauthorized errors --source-branch feature",
+        "ERROR: TF401179: An active pull request for the source and target branch already exists.",
+      );
+      const az = yield* AzureDevOpsCli.AzureDevOpsCli;
+      const error = yield* az
+        .execute({ cwd: "/repo", args: ["repos", "pr", "create"] })
+        .pipe(Effect.flip);
+      assert.strictEqual(error.failureKind, undefined);
+      expect(error.detail).not.toContain("rate limiting");
+      // The sign-in detail still matches the whole text, command line included, as before
+      // (moving the detail rules to az's own text is a follow-up).
+      expect(error.detail).toContain("not authenticated");
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("types nothing from names az echoes", () =>
+    Effect.gen(function* () {
+      failWith(
+        "az repos pr list --repository unauthorized-api --source-branch fix/tf400733-retry",
+        "ERROR: TF401019: The Git repository with name or identifier unauthorized-api does not exist or you do not have permissions for the operation you are attempting. Branch: fix/tf400733-retry",
+      );
+      const az = yield* AzureDevOpsCli.AzureDevOpsCli;
+      const error = yield* az
+        .execute({ cwd: "/repo", args: ["repos", "pr", "list"] })
+        .pipe(Effect.flip);
+      assert.strictEqual(error.failureKind, undefined);
+      expect(error.detail).not.toContain("rate limiting");
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("keeps the kind through invoke", () =>
+    Effect.gen(function* () {
+      failWith(
+        "az devops invoke --area git --resource pullRequestThreads",
+        "ERROR: TF400733: The request has been canceled: Request was blocked due to exceeding usage of resource 'Throughput' in namespace 'User'.",
+      );
+      const az = yield* AzureDevOpsCli.AzureDevOpsCli;
+      const error = yield* az
+        .invoke({
+          cwd: "/repo",
+          operation: "listThreads",
+          area: "git",
+          resource: "pullRequestThreads",
+          routeParameters: { project: "p", repositoryId: "r", pullRequestId: 22 },
+        })
+        .pipe(Effect.flip);
+      assert.strictEqual(error.operation, "listThreads");
+      assert.strictEqual(error.failureKind, "rate-limited");
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("types sign-in failures az reports", () =>
+    Effect.gen(function* () {
+      failWith(
+        "az repos pr list",
+        "ERROR: Before you can run Azure DevOps commands, you need to run the login command (az login if using AAD/MSA identity else az devops login if using PAT token) to setup credentials.",
+      );
+      const az = yield* AzureDevOpsCli.AzureDevOpsCli;
+      const error = yield* az
+        .execute({ cwd: "/repo", args: ["repos", "pr", "list"] })
+        .pipe(Effect.flip);
+      assert.strictEqual(error.failureKind, "unauthenticated");
     }).pipe(Effect.provide(layer)),
   );
 });

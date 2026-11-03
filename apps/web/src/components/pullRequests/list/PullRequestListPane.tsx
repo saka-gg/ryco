@@ -4,6 +4,7 @@ import { useHandOffFocusOnUnmount } from "../pullRequestsFocus";
 import { usePullRequestsLayoutStore } from "../pullRequestsLayoutStore";
 import { usePullRequestsShortcut } from "../pullRequestsShortcuts";
 import { ActiveFilterChips } from "./ActiveFilterChips";
+import { CrossRepositoryNotes } from "./CrossRepositoryNotes";
 import { ListHeader, type PullRequestListVariant } from "./ListHeader";
 import { PullRequestInbox, type PullRequestInboxActions } from "./PullRequestInbox";
 import { usePullRequestListSearch } from "./usePullRequestListSearch";
@@ -69,7 +70,12 @@ export function PullRequestListPane(props: { readonly variant: PullRequestListVa
         variant={variant}
         search={search}
         onFocusSearch={focusSearch}
-        header={<ActiveFilterChips />}
+        header={
+          <>
+            <ActiveFilterChips />
+            <CrossRepositoryNotes />
+          </>
+        }
       />
     </div>
   );

@@ -14,6 +14,7 @@ import {
 } from "./baseSchemas.ts";
 import {
   BackgroundTaskStopIdentity,
+  OrchestrationMessageBackgroundTaskInput,
   ChatAttachment,
   ModelSelection,
   ProjectCustomSystemPrompt,
@@ -159,6 +160,10 @@ export const ProviderStopBackgroundTaskInput = Schema.Struct({
   taskId: TrimmedNonEmptyString,
 });
 export type ProviderStopBackgroundTaskInput = typeof ProviderStopBackgroundTaskInput.Type;
+
+/** A person's message to one running agent (`orchestration.messageBackgroundTask`). */
+export const ProviderMessageBackgroundTaskInput = OrchestrationMessageBackgroundTaskInput;
+export type ProviderMessageBackgroundTaskInput = typeof ProviderMessageBackgroundTaskInput.Type;
 
 export const ProviderRespondToRequestInput = Schema.Struct({
   threadId: ThreadId,

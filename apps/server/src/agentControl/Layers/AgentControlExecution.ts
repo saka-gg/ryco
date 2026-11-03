@@ -3,10 +3,12 @@ import { ProjectSetupScriptRunner } from "../../project/Services/ProjectSetupScr
 import { CompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { WorkspaceLifecycle } from "../../workspace/WorkspaceLifecycle.ts";
 import { workspacePlanLifecycleAction } from "../workspaceLifecycle.ts";
-import { DEFAULT_SERVER_SETTINGS } from "@ryco/contracts";
+import { AGENT_CONTROL_MESSAGE_ID_PREFIX, DEFAULT_SERVER_SETTINGS } from "@ryco/contracts";
 import { buildGeneratedWorktreeBranchName } from "@ryco/shared/git";
+import { agentSentMessageId } from "@ryco/shared/interThreadMessage";
 import { setupProjectScript } from "@ryco/shared/projectScripts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { hasDelegationLimits } from "../../orchestration/delegationLimits.ts";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
@@ -28,8 +30,14 @@ import {
   type AgentControlProposal,
   type AgentControlProposalId,
   type AgentControlResultEnvelope,
+  type ChatAttachment,
   type ClientOrchestrationCommand,
+  type OrchestrationProjectShell,
+  type OrchestrationThreadShell,
+  type ServerSettings,
+  type SourceControlSetPullRequestWatchResult,
   type ThreadDelegatedCreateCommand,
+  type ThreadQueueAddCommand,
   type ThreadTurnStartCommand,
 } from "@ryco/contracts";
 import {
@@ -41,9 +49,13 @@ import { Cause, Duration, Effect, Layer, Option, Stream } from "effect";
 
 import { ServerConfig } from "../../config.ts";
 import { GitWorkflowService, type GitWorkflowServiceShape } from "../../git/GitWorkflowService.ts";
+import { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
 import { OrchestrationCommandApplication } from "../../orchestration/Services/OrchestrationCommandApplication.ts";
 import { DeviceService } from "../../device/Services/DeviceService.ts";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
+import { findThreadInArray } from "../../orchestration/threadIndex.ts";
+import { delegationSlotHold } from "../../orchestration/delegationSlotHold.ts";
+import { isThreadSessionWakeEvent } from "../../orchestration/threadWaitWakeEvents.ts";
 import {
   ProjectionSnapshotQuery,
   readProjectShells,
@@ -56,9 +68,12 @@ import {
   type WorkspaceAccessPolicyShape,
 } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import { ignoreAlreadyMissingGitResource } from "../../ws/context/gitErrors.ts";
+import { threadWakeSource, waitUntil } from "../eventDrivenWait.ts";
 import { computeAgentControlPlanDigest } from "../planDigest.ts";
+import { legacyTokenStreamingEnabled } from "../settingsControl.ts";
 import { copyArtifactsToThread, resolveThreadArtifacts } from "../artifactHandoff.ts";
 import { LocalTaskService } from "../../tasks/LocalTaskService.ts";
+import { PullRequestWatchService } from "../../sourceControl/PullRequestWatchService.ts";
 import { copyTaskFilesToThread, deleteTaskFileCopies } from "../../tasks/taskFiles.ts";
 import { extractThreadReferences } from "@ryco/shared/threadMentions";
 import {
@@ -93,7 +108,8 @@ import {
 import { ProjectImports } from "../../projectCopy/Services/ProjectImports.ts";
 
 const TARGET_WAIT_TIMEOUT_MS = 60_000;
-const TARGET_POLL_INTERVAL_MS = 100;
+/** Minimum spacing of woken target checks: the interval of the poll the waits replaced. */
+const TARGET_WAKE_SPACING_MS = 100;
 const RECOVERY_SCAN_LIMIT = 100;
 /** How often expired client executions are failed while the node runs. */
 const CLIENT_EXECUTION_SWEEP_INTERVAL = Duration.minutes(1);
@@ -121,6 +137,12 @@ const isProjectAction = (proposal: AgentControlProposal): boolean =>
   proposal.plan.kind === "importProject" ||
   proposal.plan.kind === "copyProjectToNode";
 
+/** Actions whose failure the agent reads in the node's own words (what to do about it). */
+const explainsFailure = (proposal: AgentControlProposal): boolean =>
+  isProjectAction(proposal) ||
+  proposal.plan.kind === "pullRequestWatch" ||
+  proposal.plan.kind === "worktreeHandoff";
+
 class AgentControlDeviceExecutionError extends Error {
   readonly code: AgentControlErrorCode;
   readonly retryable: boolean;
@@ -131,6 +153,30 @@ class AgentControlDeviceExecutionError extends Error {
     this.retryable = retryable;
   }
 }
+
+/** What the agent reads once its watch request ran: what is watched now and how it stands. */
+const pullRequestWatchNote = (
+  proposal: AgentControlProposal,
+  plan: Extract<AgentControlProposal["plan"], { kind: "pullRequestWatch" }>,
+  result: SourceControlSetPullRequestWatchResult,
+): string => {
+  const watch = result.watch;
+  // The chat Ryco wakes may be another one than the caller's (`threadId`).
+  const own =
+    proposal.principal.kind === "provider-session" && proposal.principal.threadId === plan.threadId;
+  const note =
+    watch === null
+      ? result.now
+      : plan.watching
+        ? `Watching #${watch.number} (${watch.url}). Now: ${result.now} ${
+            own
+              ? "Ryco wakes this chat on the next change, so end your turn when you are done."
+              : `Ryco wakes chat ${plan.threadId} on the next change.`
+          }`
+        : `${own ? "This chat" : `Chat ${plan.threadId}`} no longer gets #${watch.number}'s news; the user's Auto-fix CI keeps watching its checks. Now: ${result.now}`;
+  // A result message is never blank nor padded (the operation state would not encode).
+  return note.slice(0, 2_000).trim() || (plan.watching ? "Watching." : "Not watching.");
+};
 
 const boundedCauseMessage = (cause: Cause.Cause<unknown>, fallback: string): string => {
   const failure = Cause.squash(cause);
@@ -179,7 +225,7 @@ const branchFor = (operationId: AgentControlOperationId, index: number, prefix: 
   );
 
 const messageIdFor = (operationId: AgentControlOperationId, step: string): MessageId =>
-  MessageId.make(`message-agent-control-${operationSlug(operationId)}-${step}`);
+  MessageId.make(`${AGENT_CONTROL_MESSAGE_ID_PREFIX}${operationSlug(operationId)}-${step}`);
 
 export const preflightAgentControlWorktreeCheckout = (input: {
   readonly cwd: string;
@@ -238,6 +284,9 @@ const executionReceipt = (operation: AgentControlOperation): AgentControlExecuti
   worktreeIds: operation.state.resources.worktreeIds,
   ...(operation.state.delivery === undefined ? {} : { delivery: operation.state.delivery }),
   ...(operation.state.interrupt === undefined ? {} : { interrupt: operation.state.interrupt }),
+  ...(operation.state.worktreeHandoff === undefined
+    ? {}
+    : { worktreeHandoff: operation.state.worktreeHandoff }),
   ...(operation.state.compensation === undefined
     ? {}
     : { compensation: operation.state.compensation }),
@@ -245,7 +294,8 @@ const executionReceipt = (operation: AgentControlOperation): AgentControlExecuti
 
 const completedResult = (
   operation: AgentControlOperation,
-  detail?: string,
+  /** What the agent reads about the outcome; the action's recorded note when absent. */
+  detail: string | undefined = operation.state.note,
 ): AgentControlResultEnvelope => ({
   outcome: "completed",
   createdThreadIds:
@@ -260,7 +310,9 @@ const completedResult = (
       ? (operation.state.resources.projectIds ?? [])
       : undefined,
   execution: executionReceipt(operation),
-  ...(detail ? { detail } : {}),
+  // What the agent reads about the outcome (a watch's answer, a project copy's summary), when
+  // there is one.
+  ...(detail === undefined || detail === "" ? {} : { detail }),
   completedAt: new Date().toISOString(),
 });
 
@@ -301,15 +353,50 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
     const engine = yield* OrchestrationEngineService;
     const projections = yield* ProjectionSnapshotQuery;
     const git = yield* GitWorkflowService;
+    // The branch-name fence of a worktree handoff (its remotes, refs it would shadow).
+    const gitDriver = yield* Effect.serviceOption(GitVcsDriver);
     const workspaceLifecycleOption = yield* Effect.serviceOption(WorkspaceLifecycle);
     const workspaceAccess = yield* WorkspaceAccessPolicy;
     const deviceService = yield* Effect.serviceOption(DeviceService);
     const localTasks = yield* Effect.serviceOption(LocalTaskService);
     const projectImports = yield* Effect.serviceOption(ProjectImports);
+    // Required, not optional: provided beneath the runtime services (`server.ts`), so a layer
+    // placed where execution cannot see it fails to compile instead of failing every watch.
+    const pullRequestWatches = yield* PullRequestWatchService;
     const config = yield* ServerConfig;
+
+    /** Applies an agent's watch change: idempotent, so a replay finds it applied. */
+    const setPullRequestWatch = (
+      proposal: AgentControlProposal,
+      plan: Extract<AgentControlProposal["plan"], { kind: "pullRequestWatch" }>,
+    ) =>
+      pullRequestWatches
+        .setWatch({
+          threadId: plan.threadId,
+          number: plan.number,
+          url: plan.url,
+          news: plan.watching,
+          origin: "agent",
+        })
+        .pipe(
+          Effect.map((result) => pullRequestWatchNote(proposal, plan, result)),
+          Effect.mapError((error) => new Error(error.detail)),
+        );
     const startup = yield* ServerRuntimeStartup;
     // Import followers outlive the execution that started them, never the layer.
     const followerScope = yield* Effect.scope;
+
+    /** A heartbeat's run logic, loaded on its first run or recovery (`heartbeatRuns.ts`). */
+    const heartbeatRuns = Effect.promise(() => import("../heartbeatRuns.ts"));
+    /** An agent's move of its own chat into a worktree (`worktreeHandoffRuns.ts`), on first use. */
+    const worktreeHandoffRuns = Effect.promise(() => import("../worktreeHandoffRuns.ts"));
+    const queuedIn = (threadId: ThreadId) =>
+      engine.getReadModel === undefined
+        ? Effect.succeed([])
+        : Effect.map(
+            engine.getReadModel(),
+            (model) => findThreadInArray(model.threads, threadId)?.followUpQueue?.entries ?? [],
+          );
 
     const loadThread = (threadId: ThreadId) =>
       projections.getThreadShellById(threadId).pipe(
@@ -321,23 +408,28 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
         ),
       );
 
-    const waitForIdle = (threadId: ThreadId) =>
-      Effect.gen(function* () {
-        const startedAt = Date.now();
-        while (Date.now() - startedAt < TARGET_WAIT_TIMEOUT_MS) {
+    /**
+     * Waits until `settled` accepts the target thread, re-reading it whenever its session or
+     * archive state changes (or it is deleted), and at least every 5 s otherwise.
+     */
+    const waitForThread = (
+      threadId: ThreadId,
+      settled: (thread: OrchestrationThreadShell) => Effect.Effect<boolean, Error>,
+      timeoutMessage: string,
+    ) =>
+      waitUntil({
+        sources: [threadWakeSource(engine, [threadId], isThreadSessionWakeEvent)],
+        timeoutMs: TARGET_WAIT_TIMEOUT_MS,
+        wakeSpacingMs: TARGET_WAKE_SPACING_MS,
+        check: Effect.gen(function* () {
           const thread = yield* loadThread(threadId);
-          if (thread.archivedAt !== null) {
-            return yield* Effect.fail(new Error("Target thread became archived."));
-          }
-          if (thread.session?.status !== "running" || thread.session.activeTurnId === null) {
-            return thread;
-          }
-          yield* Effect.sleep(Duration.millis(TARGET_POLL_INTERVAL_MS));
-        }
-        return yield* Effect.fail(
-          new Error("Timed out waiting for the target thread to become idle."),
-        );
-      });
+          return { done: yield* settled(thread), value: thread };
+        }),
+      }).pipe(
+        Effect.flatMap(({ value, timedOut }) =>
+          timedOut ? Effect.fail(new Error(timeoutMessage)) : Effect.succeed(value),
+        ),
+      );
 
     const settleProposalFailure = (
       proposal: AgentControlProposal,
@@ -541,6 +633,53 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
         return current;
       });
 
+    /**
+     * The checkout path of a worktree an operation will create, checked before anything is made
+     * (delegated worktrees and handoffs alike): the setup it needs, the path policy, the base ref.
+     */
+    const planWorktreeCheckout = (input: {
+      readonly project: OrchestrationProjectShell;
+      readonly settings: ServerSettings;
+      readonly branch: string;
+      readonly initialName: string;
+      readonly baseRef: string;
+      readonly runSetupScript: boolean;
+    }) =>
+      Effect.gen(function* () {
+        const { project } = input;
+        if (
+          input.runSetupScript &&
+          Option.isNone(setupScriptRunner) &&
+          setupProjectScript(project.scripts ?? [])
+        )
+          return yield* Effect.fail(
+            new Error("Project setup is unavailable. Retry when the server is ready."),
+          );
+        const checkoutPath = yield* resolveWorktreeCheckoutPath({
+          location: undefined,
+          appWorktreesRoot: yield* resolveConfiguredWorktreeRoot({
+            settings: input.settings,
+            projectId: project.id,
+            config,
+            policy: workspaceAccess,
+          }),
+          projectId: project.id,
+          workspaceRoot: project.workspaceRoot,
+          projectMetadataDir: project.projectMetadataDir,
+          projectTitle: project.title,
+          initialName: input.initialName,
+          branchName: input.branch,
+        });
+        yield* preflightAgentControlWorktreeCheckout({
+          cwd: project.workspaceRoot,
+          checkoutPath,
+          baseRef: input.baseRef,
+          workspaceAccess,
+          git,
+        });
+        return checkoutPath;
+      });
+
     const runAction = (proposal: AgentControlProposal, initial: AgentControlOperation) =>
       Effect.gen(function* () {
         let operation = initial;
@@ -562,16 +701,21 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             | ClientOrchestrationCommand
             | ThreadDelegatedCreateCommand
             /** A turn start whose attachments the server already stored (handed-over artifacts). */
-            | { readonly stored: ThreadTurnStartCommand },
+            | { readonly stored: ThreadTurnStartCommand }
+            /** A follow-up the node queues as the agent's (`author` is server-only). */
+            | { readonly queued: ThreadQueueAddCommand },
           updateState?: (state: AgentControlOperationState) => AgentControlOperationState,
         ) =>
           Effect.gen(function* () {
-            const command = "stored" in request ? request.stored : request;
+            const command =
+              "stored" in request ? request.stored : "queued" in request ? request.queued : request;
             const result = yield* "stored" in request
               ? commandApplication.applyInternal(request.stored)
-              : request.type === "thread.delegated.create"
-                ? commandApplication.applyInternal(request)
-                : commandApplication.apply(request);
+              : "queued" in request
+                ? commandApplication.applyInternal(request.queued)
+                : request.type === "thread.delegated.create"
+                  ? commandApplication.applyInternal(request)
+                  : commandApplication.apply(request);
             const state = updateState?.(operation.state) ?? operation.state;
             yield* checkpoint(
               appendStep(
@@ -592,7 +736,137 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             return result;
           });
 
-        if (isAgentControlDevicePlan(proposal.plan)) {
+        /**
+         * Creates a planned worktree, then records it as the operation's own (the durable
+         * ownership point compensation removes) and creates its workspace record.
+         */
+        const createOwnedWorktree = (worktree: {
+          readonly index: number;
+          readonly settings: ServerSettings;
+          readonly project: OrchestrationProjectShell;
+          readonly worktreeId: WorktreeId;
+          readonly branch: string;
+          readonly checkoutPath: string;
+          readonly baseRef: string;
+          readonly fetchOrigin?: boolean;
+        }) =>
+          Effect.gen(function* () {
+            const created = yield* git.createWorktree({
+              settingsSnapshot: worktree.settings,
+              projectId: worktree.project.id,
+              cwd: worktree.project.workspaceRoot,
+              refName: worktree.baseRef,
+              newRefName: worktree.branch,
+              path: worktree.checkoutPath,
+              ...(worktree.fetchOrigin === true ? { fetchOrigin: true } : {}),
+            });
+            const authorizedCreatedPath = yield* workspaceAccess.assertExistingPath({
+              path: created.worktree.path,
+              operation: "AgentControlExecution.createWorktree",
+            });
+            if (path.resolve(authorizedCreatedPath) !== path.resolve(worktree.checkoutPath)) {
+              return yield* Effect.fail(new Error("Created worktree path did not match its plan."));
+            }
+
+            // This is the durable ownership point. No dependent thread step
+            // runs before the exact id/project/branch/path evidence is stored.
+            yield* checkpoint({
+              ...operation.state,
+              completedSteps: unique([
+                ...operation.state.completedSteps,
+                `worktree-owned:${worktree.index}`,
+              ]),
+              resources: {
+                ...operation.state.resources,
+                worktreeIds: unique([
+                  ...operation.state.resources.worktreeIds,
+                  worktree.worktreeId,
+                ]),
+                ownedWorktrees: [
+                  ...operation.state.resources.ownedWorktrees,
+                  {
+                    worktreeId: worktree.worktreeId,
+                    projectId: worktree.project.id,
+                    branch: worktree.branch,
+                    checkoutPath: authorizedCreatedPath,
+                  },
+                ],
+              },
+            });
+            yield* dispatch(`worktree-created:${worktree.index}`, {
+              type: "worktree.create",
+              commandId: commandIdFor(operation.operationId, `worktree-create-${worktree.index}`),
+              worktreeId: worktree.worktreeId,
+              projectId: worktree.project.id,
+              branch: worktree.branch,
+              worktreePath: authorizedCreatedPath,
+              origin: "manual",
+              prNumber: null,
+              issueNumber: null,
+              prTitle: null,
+              issueTitle: null,
+              workItemProvider: null,
+              workItemKey: null,
+              workItemTitle: null,
+              workItemState: null,
+              workItemStateName: null,
+              workItemUrl: null,
+              createdAt: new Date().toISOString(),
+            });
+            return authorizedCreatedPath;
+          });
+
+        /** Starts the project's setup script for a thread in its new worktree, and records it. */
+        const launchSetupScript = (
+          index: number,
+          input: {
+            readonly threadId: ThreadId;
+            readonly projectId: string;
+            readonly projectCwd: string;
+            readonly worktreePath: string;
+          },
+        ) =>
+          Option.isNone(setupScriptRunner)
+            ? Effect.succeed({ status: "no-script" as const })
+            : setupScriptRunner.value
+                .runForThread(input)
+                .pipe(
+                  Effect.tap(() =>
+                    checkpoint(appendStep(operation.state, `setup-launched:${index}`)),
+                  ),
+                );
+
+        if (proposal.plan.kind === "worktreeHandoff") {
+          const { runWorktreeHandoff } = yield* worktreeHandoffRuns;
+          yield* runWorktreeHandoff(
+            {
+              settings: settingsService,
+              projects: readProjectShells(projections),
+              loadThread,
+              git,
+              gitDriver,
+              readModel: engine.getReadModel,
+              ids: { commandIdFor, messageIdFor, worktreeIdFor },
+              operation: () => operation,
+              checkpoint,
+              appendStep,
+              dispatch,
+              planWorktreeCheckout,
+              createOwnedWorktree,
+              launchSetupScript,
+              resolvePreferences: resolveProjectPreferences,
+            },
+            proposal.plan,
+            // A Stop of the turn that asked (or a newer turn) before the move rolls it back.
+            proposal.principal,
+          );
+          return operation;
+        }
+
+        if (
+          isAgentControlDevicePlan(proposal.plan) ||
+          proposal.plan.kind === "deviceControlConsent"
+        ) {
           const plan = proposal.plan;
           if (Option.isNone(deviceService)) {
             return yield* Effect.fail(
@@ -619,11 +893,23 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             },
           });
           yield* validator.revalidateExecution(proposal);
+          if (plan.kind === "deviceControlConsent") {
+            // The user's consent is the whole effect: the routine input it allows
+            // runs directly through ryco_device. Nothing touches the device here.
+            yield* checkpoint(appendStep(operation.state, "device-consent-granted"));
+            return operation;
+          }
 
           const run = async (): Promise<void> => {
             switch (plan.kind) {
               case "deviceBoot": {
-                const result = await service.manager.boot(plan.udid);
+                // Up while the thread's provider turn runs; an approval that
+                // lands after the turn ended holds nothing and the grace starts.
+                const result = await service.manager.holdForAgentTurn(
+                  plan.threadId,
+                  plan.udid,
+                  () => service.manager.boot(plan.udid),
+                );
                 if (result.kind === "boot-limit-reached") {
                   throw new AgentControlDeviceExecutionError(
                     AGENT_CONTROL_ERROR_CODES.deviceBootLimitReached,
@@ -634,7 +920,10 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                 return;
               }
               case "deviceAttach":
-                await service.manager.attach(plan.threadId, plan.udid);
+                // The agent's attachment is metadata; its turn keeps the device up.
+                await service.manager.holdForAgentTurn(plan.threadId, plan.udid, () =>
+                  service.manager.attach(plan.threadId, plan.udid, "agent"),
+                );
                 service.manager.requestOpenPane(plan.threadId, plan.udid, "agent-tool");
                 return;
               case "deviceDetach":
@@ -723,7 +1012,11 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               plan.kind === "deviceDetach" ||
               plan.kind === "deviceShutdown"
                 ? action()
-                : service.manager.withAgentActivity(plan.threadId, action),
+                : // Approved actions may run after their turn: never join a later one.
+                  service.manager.withAgentActivity(plan.threadId, action, {
+                    udid: plan.udid,
+                    joinLateTurn: false,
+                  }),
             catch: (cause) =>
               cause instanceof AgentControlDeviceExecutionError
                 ? cause
@@ -887,21 +1180,46 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
           return operation;
         }
 
+        if (proposal.plan.kind === "pullRequestWatch") {
+          const plan = proposal.plan;
+          // Idempotent: a step replayed after a restart answers with the watch as it is.
+          if (operation.state.completedSteps.includes("pull-request-watch-set")) return operation;
+          const note = yield* setPullRequestWatch(proposal, plan);
+          yield* checkpoint(
+            appendStep(
+              {
+                ...operation.state,
+                resources: {
+                  ...operation.state.resources,
+                  threadIds: unique([...operation.state.resources.threadIds, plan.threadId]),
+                },
+                note,
+              },
+              "pull-request-watch-set",
+            ),
+          );
+          return operation;
+        }
+
         if (proposal.plan.kind === "changeSettings") {
           if (operation.state.completedSteps.includes("settings-updated")) return operation;
           if (Option.isNone(settingsService))
             return yield* Effect.fail(new Error("Settings service unavailable."));
           const change = proposal.plan.change;
           const settings = yield* settingsService.value.getSettings;
-          const key =
+          // The legacy token switch maps onto `responseStreamingMode` through the patch alias.
+          const [current, patch] =
             change.kind === "legacyTokenStreaming"
-              ? "enableLegacyTokenStreaming"
-              : "enableProviderUpdateChecks";
-          if (settings[key] !== change.before)
+              ? [
+                  legacyTokenStreamingEnabled(settings),
+                  { enableLegacyTokenStreaming: change.after },
+                ]
+              : [settings.enableProviderUpdateChecks, { enableProviderUpdateChecks: change.after }];
+          if (current !== change.before)
             return yield* Effect.fail(
               new Error("Settings changed after the request was prepared."),
             );
-          yield* settingsService.value.updateSettings({ [key]: change.after });
+          yield* settingsService.value.updateSettings(patch);
           yield* checkpoint({
             ...operation.state,
             completedSteps: unique([...operation.state.completedSteps, "settings-updated"]),
@@ -932,6 +1250,40 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
           return operation;
         }
 
+        // A heartbeat's run queues its prompt in its chat instead of creating one.
+        if (
+          proposal.plan.kind === "automationRun" &&
+          proposal.plan.execution.target !== undefined
+        ) {
+          const plan = proposal.plan;
+          yield* checkpoint({
+            ...operation.state,
+            resources: {
+              ...operation.state.resources,
+              automationIds: unique([
+                ...(operation.state.resources.automationIds ?? []),
+                plan.automationId,
+              ]),
+              automationRunId: plan.runId,
+            },
+          });
+          const { runHeartbeat } = yield* heartbeatRuns;
+          yield* runHeartbeat(
+            {
+              messageId: (step) => messageIdFor(operation.operationId, step),
+              commandId: (step) => commandIdFor(operation.operationId, step),
+              loadThread,
+              queuedIn,
+              coalesced: Effect.asVoid(
+                checkpoint(appendStep(operation.state, "automation-coalesced")),
+              ),
+              queue: (queued) => Effect.asVoid(dispatch("automation-queued", { queued })),
+            },
+            plan,
+          );
+          return operation;
+        }
+
         if (proposal.plan.kind === "createThreads" || proposal.plan.kind === "automationRun") {
           const entries =
             proposal.plan.kind === "createThreads"
@@ -958,6 +1310,9 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             },
           });
 
+          // Entries past the request's cap wait for a free slot; without a cap all start at once.
+          const maxConcurrent =
+            proposal.plan.kind === "createThreads" ? proposal.plan.maxConcurrent : undefined;
           // Provenance only (spec D4/D5): never authority; automation runs are not children.
           const delegatedParentThreadId =
             proposal.plan.kind === "createThreads" && proposal.principal.kind === "provider-session"
@@ -992,41 +1347,19 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             const project = projects.find((candidate) => candidate.id === entry.projectId);
             if (!project) return yield* Effect.fail(new Error("Requested project is unavailable."));
             const effective = resolveProjectPreferences({ settings: worktreeSettings, project });
-            if (
-              effective.runSetupScript.value &&
-              Option.isNone(setupScriptRunner) &&
-              setupProjectScript(project.scripts ?? [])
-            )
-              return yield* Effect.fail(
-                new Error("Project setup is unavailable. Retry when the server is ready."),
-              );
             const branch = branchFor(
               operation.operationId,
               index,
               effective.worktreeBranchPrefix.value,
             );
-            const checkoutPath = yield* resolveWorktreeCheckoutPath({
-              location: undefined,
-              appWorktreesRoot: yield* resolveConfiguredWorktreeRoot({
-                settings: worktreeSettings,
-                projectId: project.id,
-                config,
-                policy: workspaceAccess,
-              }),
-              projectId: project.id,
-              workspaceRoot: project.workspaceRoot,
-              projectMetadataDir: project.projectMetadataDir,
-              projectTitle: project.title,
-              initialName: entry.title,
-              branchName: branch,
-            });
             const baseRef = entry.baseRef ?? "HEAD";
-            yield* preflightAgentControlWorktreeCheckout({
-              cwd: project.workspaceRoot,
-              checkoutPath,
+            const checkoutPath = yield* planWorktreeCheckout({
+              project,
+              settings: worktreeSettings,
+              branch,
+              initialName: entry.title,
               baseRef,
-              workspaceAccess,
-              git,
+              runSetupScript: effective.runSetupScript.value,
             });
             prepared.push({
               index,
@@ -1041,68 +1374,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
           }
 
           for (const worktree of prepared) {
-            const created = yield* git.createWorktree({
-              settingsSnapshot: worktreeSettings,
-              projectId: worktree.project.id,
-              cwd: worktree.project.workspaceRoot,
-              refName: worktree.baseRef,
-              newRefName: worktree.branch,
-              path: worktree.checkoutPath,
-            });
-            const authorizedCreatedPath = yield* workspaceAccess.assertExistingPath({
-              path: created.worktree.path,
-              operation: "AgentControlExecution.createWorktree",
-            });
-            if (path.resolve(authorizedCreatedPath) !== path.resolve(worktree.checkoutPath)) {
-              return yield* Effect.fail(new Error("Created worktree path did not match its plan."));
-            }
-
-            // This is the durable ownership point. No dependent thread step
-            // runs before the exact id/project/branch/path evidence is stored.
-            yield* checkpoint({
-              ...operation.state,
-              completedSteps: unique([
-                ...operation.state.completedSteps,
-                `worktree-owned:${worktree.index}`,
-              ]),
-              resources: {
-                ...operation.state.resources,
-                worktreeIds: unique([
-                  ...operation.state.resources.worktreeIds,
-                  worktree.worktreeId,
-                ]),
-                ownedWorktrees: [
-                  ...operation.state.resources.ownedWorktrees,
-                  {
-                    worktreeId: worktree.worktreeId,
-                    projectId: worktree.project.id,
-                    branch: worktree.branch,
-                    checkoutPath: authorizedCreatedPath,
-                  },
-                ],
-              },
-            });
-            const createdAt = new Date().toISOString();
-            yield* dispatch(`worktree-created:${worktree.index}`, {
-              type: "worktree.create",
-              commandId: commandIdFor(operation.operationId, `worktree-create-${worktree.index}`),
-              worktreeId: worktree.worktreeId,
-              projectId: worktree.project.id,
-              branch: worktree.branch,
-              worktreePath: authorizedCreatedPath,
-              origin: "manual",
-              prNumber: null,
-              issueNumber: null,
-              prTitle: null,
-              issueTitle: null,
-              workItemProvider: null,
-              workItemKey: null,
-              workItemTitle: null,
-              workItemState: null,
-              workItemStateName: null,
-              workItemUrl: null,
-              createdAt,
-            });
+            yield* createOwnedWorktree({ ...worktree, settings: worktreeSettings });
           }
 
           for (const [index, entry] of entries.entries()) {
@@ -1135,6 +1407,11 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                     type: "thread.delegated.create",
                     ...createFields,
                     parentThreadId: delegatedParentThreadId,
+                    // Checked again by the decider, which serializes every create, so concurrent
+                    // requests cannot overshoot a budget the validator saw room in.
+                    ...(hasDelegationLimits(worktreeSettings.agentControl.delegation)
+                      ? { delegationLimits: worktreeSettings.agentControl.delegation }
+                      : {}),
                   },
               (state) => ({
                 ...state,
@@ -1156,13 +1433,12 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               // finish before setup. Required plan model/env inputs stay explicit.
               if (worktree.runSetupScript && Option.isSome(setupScriptRunner)) {
                 yield* validator.revalidateExecution(proposal);
-                yield* setupScriptRunner.value.runForThread({
+                yield* launchSetupScript(index, {
                   threadId,
                   projectId: project.id,
                   projectCwd: project.workspaceRoot,
                   worktreePath: worktree.checkoutPath,
                 });
-                yield* checkpoint(appendStep(operation.state, `setup-launched:${index}`));
               }
             }
             if ("returnToOrigin" in entry && entry.returnToOrigin) {
@@ -1252,6 +1528,40 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               ...(threadReferences.length > 0 ? { threadReferences } : {}),
               createdAt,
             };
+            // Past the request's cap the same first message (same id, so a completion return
+            // still binds to it) waits, held, in the child's own follow-up queue, at the child's
+            // own modes; the slot runtime releases it when an earlier task stops working.
+            const sendFirstMessage = (attachments: ReadonlyArray<ChatAttachment>) =>
+              maxConcurrent !== undefined && index >= maxConcurrent
+                ? dispatch(`turn-queued:${index}`, {
+                    queued: {
+                      type: "thread.queue.add",
+                      // The turn start's id: a task's start ledger reads this command's receipt.
+                      commandId: turnStart.commandId,
+                      threadId,
+                      author: "agent",
+                      entry: {
+                        messageId: turnStart.message.messageId,
+                        text: entry.prompt,
+                        attachments,
+                        modelSelection: entry.modelSelection,
+                        runtimeMode: entry.runtimeMode,
+                        interactionMode: "default",
+                        tokenMode,
+                        ...(threadReferences.length > 0 ? { threadReferences } : {}),
+                      },
+                      hold: delegationSlotHold(proposal.proposalId, maxConcurrent),
+                      createdAt,
+                    },
+                  })
+                : dispatch(
+                    `turn-started:${index}`,
+                    attachments.length === 0
+                      ? turnStart
+                      : {
+                          stored: { ...turnStart, message: { ...turnStart.message, attachments } },
+                        },
+                  );
             if (localTaskId !== undefined) {
               // The chat starts as the task's: recorded under the task first (a replay after a
               // restart finds the same start), then given copies of the task's files.
@@ -1277,17 +1587,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                 ),
                 Effect.mapError((error) => new Error(error.message)),
               );
-              yield* dispatch(
-                `turn-started:${index}`,
-                copies.attachments.length === 0
-                  ? turnStart
-                  : {
-                      stored: {
-                        ...turnStart,
-                        message: { ...turnStart.message, attachments: copies.attachments },
-                      },
-                    },
-              ).pipe(
+              yield* sendFirstMessage(copies.attachments).pipe(
                 Effect.tapError((error) =>
                   tasks
                     .markDelegationFailed(
@@ -1313,17 +1613,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               yield* tasks.markDelegated(turnStart.commandId).pipe(Effect.ignore);
               continue;
             }
-            yield* dispatch(
-              `turn-started:${index}`,
-              handedOver.length === 0
-                ? turnStart
-                : {
-                    stored: {
-                      ...turnStart,
-                      message: { ...turnStart.message, attachments: handedOver },
-                    },
-                  },
-            );
+            yield* sendFirstMessage(handedOver);
           }
           return operation;
         }
@@ -1348,7 +1638,14 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
           const expectedTarget = agentControlTargetSnapshots(proposal.principal).find(
             (snapshot) => snapshot.threadId === plan.threadId,
           );
-          const messageId = messageIdFor(operation.operationId, "send-message");
+          // The id names the sending chat, so the target shows who wrote it.
+          const messageId = MessageId.make(
+            agentSentMessageId({
+              operationSlug: operationSlug(operation.operationId),
+              senderThreadId:
+                proposal.principal.kind === "provider-session" ? proposal.principal.threadId : null,
+            }),
+          );
           let delivery: "queued" | "steered" | "queued-after-steer-fallback" = "queued";
           let shouldQueue = plan.delivery === "queue";
 
@@ -1368,7 +1665,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             } else {
               const resolution = yield* Effect.scoped(
                 Effect.gen(function* () {
-                  const subscription = yield* engine.subscribeDomainEvents;
+                  const events = yield* engine.subscribeDomainEvents;
                   yield* dispatch("turn-steer-requested", {
                     type: "thread.turn.steer",
                     commandId: commandIdFor(operation.operationId, "turn-steer"),
@@ -1383,7 +1680,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                     createdAt: new Date().toISOString(),
                     requestedAt: new Date().toISOString(),
                   });
-                  return yield* Stream.fromSubscription(subscription).pipe(
+                  return yield* events.pipe(
                     Stream.filter(
                       (event) =>
                         (event.type === "thread.turn-steer-accepted" ||
@@ -1411,23 +1708,33 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
           }
 
           if (shouldQueue) {
-            const idle = yield* waitForIdle(plan.threadId);
+            // The thread's own follow-up queue: visible and editable in the chat, sent by the
+            // node's drain at the next idle moment, after the person's own follow-ups, and held
+            // like them. The operation ends once the message is queued.
             yield* validator.revalidateExecution(proposal, { allowTurnAdvance: true });
-            yield* dispatch("turn-queued", {
-              type: "thread.turn.start",
-              commandId: commandIdFor(operation.operationId, "turn-queue"),
-              threadId: plan.threadId,
-              message: {
-                messageId,
-                role: "user",
-                text: plan.text,
-                attachments: [],
+            const current = yield* loadThread(plan.threadId);
+            const createdAt = new Date().toISOString();
+            yield* dispatch("follow-up-queued", {
+              queued: {
+                type: "thread.queue.add",
+                commandId: commandIdFor(operation.operationId, "follow-up-queue"),
+                threadId: plan.threadId,
+                author: "agent",
+                // Its chat's agent may edit or remove it later (`ryco_queue_*`).
+                ...(proposal.principal.kind === "provider-session"
+                  ? { queuedBy: proposal.principal.threadId }
+                  : {}),
+                entry: {
+                  messageId,
+                  text: plan.text,
+                  attachments: [],
+                  modelSelection: current.modelSelection,
+                  runtimeMode: current.runtimeMode,
+                  interactionMode: current.interactionMode,
+                  ...(current.tokenMode === undefined ? {} : { tokenMode: current.tokenMode }),
+                },
+                createdAt,
               },
-              modelSelection: idle.modelSelection,
-              runtimeMode: idle.runtimeMode,
-              interactionMode: idle.interactionMode,
-              ...(idle.tokenMode === undefined ? {} : { tokenMode: idle.tokenMode }),
-              createdAt: new Date().toISOString(),
             });
           }
           yield* checkpoint({ ...operation.state, delivery });
@@ -1457,18 +1764,15 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             ...(requestedTurnId === null ? {} : { turnId: requestedTurnId }),
             createdAt: new Date().toISOString(),
           });
-          const settled = yield* Effect.gen(function* () {
-            const startedAt = Date.now();
-            while (Date.now() - startedAt < TARGET_WAIT_TIMEOUT_MS) {
-              const current = yield* loadThread(plan.threadId);
-              const activeTurnId = current.session?.activeTurnId ?? null;
-              if (current.session?.status !== "running" || activeTurnId !== requestedTurnId) {
-                return current;
-              }
-              yield* Effect.sleep(Duration.millis(TARGET_POLL_INTERVAL_MS));
-            }
-            return yield* Effect.fail(new Error("Timed out waiting for interrupt settlement."));
-          });
+          const settled = yield* waitForThread(
+            plan.threadId,
+            (current) =>
+              Effect.succeed(
+                current.session?.status !== "running" ||
+                  (current.session.activeTurnId ?? null) !== requestedTurnId,
+              ),
+            "Timed out waiting for interrupt settlement.",
+          );
           yield* checkpoint({
             ...operation.state,
             interrupt: {
@@ -1535,6 +1839,16 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                   createdAt: new Date().toISOString(),
                 },
           );
+        }
+        if (plan.goalStatus !== undefined) {
+          // The same goal update a person makes, so a native goal is synced to its provider.
+          yield* dispatch("thread-goal-status", {
+            type: "thread.goal.set",
+            commandId: commandIdFor(operation.operationId, "thread-goal-status"),
+            threadId: plan.threadId,
+            status: plan.goalStatus,
+            createdAt: new Date().toISOString(),
+          });
         }
         if (plan.archived !== undefined) {
           const current = yield* loadThread(plan.threadId);
@@ -2153,9 +2467,10 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
           yield* settleProposalFailure(executing, operation, {
             revalidation: true,
             message:
-              isProjectAction(executing) ||
+              explainsFailure(executing) ||
               executing.plan.kind === "changeSettings" ||
               executing.plan.kind === "deleteLocalTask" ||
+              executing.plan.kind === "deviceControlConsent" ||
               executing.plan.kind === "createAutomation" ||
               executing.plan.kind === "updateAutomation" ||
               executing.plan.kind === "cancelAutomation"
@@ -2165,7 +2480,8 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                   )
                 : "The approved plan no longer passes current server validation.",
             retryable: true,
-            ...(isAgentControlDevicePlan(executing.plan)
+            ...(isAgentControlDevicePlan(executing.plan) ||
+            executing.plan.kind === "deviceControlConsent"
               ? { code: deviceRevalidationErrorCode(validation.cause) }
               : {}),
           });
@@ -2189,15 +2505,19 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             executing.plan.kind === "workspaceLifecycle"
               ? durable
               : yield* compensate(durable).pipe(Effect.catch(() => Effect.succeed(durable)));
-          const deviceFailure = isAgentControlDevicePlan(executing.plan)
-            ? Cause.squash(outcome.cause)
-            : null;
+          const deviceFailure =
+            isAgentControlDevicePlan(executing.plan) ||
+            executing.plan.kind === "deviceControlConsent"
+              ? Cause.squash(outcome.cause)
+              : null;
           yield* settleProposalFailure(executing, compensated, {
             revalidation: false,
-            message: isProjectAction(executing)
+            message: explainsFailure(executing)
               ? boundedCauseMessage(
                   outcome.cause,
-                  "The approved project action failed during execution.",
+                  isProjectAction(executing)
+                    ? "The approved project action failed during execution."
+                    : "The approved Agent Control action failed during execution.",
                 )
               : "The approved Agent Control action failed during execution.",
             retryable:
@@ -2243,11 +2563,38 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
         ),
       );
 
+    /** Completes a running operation whose outcome recovery established, and settles it. */
+    const completeRecovered = (
+      proposal: AgentControlProposal,
+      operation: AgentControlOperation,
+      state: AgentControlOperationState,
+    ) =>
+      operations
+        .transition({
+          operationId: operation.operationId,
+          expectedStatus: "running",
+          nextStatus: "completed",
+          actor: "executor",
+          attempt: operation.attempt,
+          state,
+          result: completedResult({ ...operation, state }),
+          updatedAt: new Date().toISOString(),
+        })
+        .pipe(
+          Effect.flatMap((completed) =>
+            proposals.settleExecution({
+              proposalId: proposal.proposalId,
+              result: completedResult(completed),
+              now: new Date().toISOString(),
+            }),
+          ),
+        );
+
     const recoverIncomplete: AgentControlExecutionShape["recoverIncomplete"] = Effect.gen(
       function* () {
         const recoverable = yield* operations.listRecoverable();
         const now = new Date().toISOString();
-        for (const operation of recoverable) {
+        for (let operation of recoverable) {
           // The approving client may still be copying: its report deadline decides, never this
           // restart (an update-everything restart must not fail a running copy).
           if (operation.state.clientExecution !== undefined) {
@@ -2285,22 +2632,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                   ]),
                 },
               };
-              const result = completedResult({ ...operation, state });
-              const completed = yield* operations.transition({
-                operationId: operation.operationId,
-                expectedStatus: "running",
-                nextStatus: "completed",
-                actor: "executor",
-                attempt: operation.attempt,
-                state,
-                result,
-                updatedAt: new Date().toISOString(),
-              });
-              yield* proposals.settleExecution({
-                proposalId: proposal.proposalId,
-                result: completedResult(completed),
-                now: new Date().toISOString(),
-              });
+              yield* completeRecovered(proposal, operation, state);
               continue;
             }
           }
@@ -2319,23 +2651,98 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                 ...operation.state,
                 completedSteps: unique([...operation.state.completedSteps, "local-task-deleted"]),
               };
-              const completed = yield* operations.transition({
-                operationId: operation.operationId,
-                expectedStatus: "running",
-                nextStatus: "completed",
-                actor: "executor",
-                attempt: operation.attempt,
-                state,
-                result: completedResult({ ...operation, state }),
-                updatedAt: new Date().toISOString(),
-              });
-              yield* proposals.settleExecution({
-                proposalId: proposal.proposalId,
-                result: completedResult(completed),
-                now: new Date().toISOString(),
-              });
+              yield* completeRecovered(proposal, operation, state);
               continue;
             }
+          }
+          // A watch change a restart cut off is applied again: the same change answers with the
+          // watch as it is, so the receipt tells the agent what really happened. One recorded
+          // before the restart only lost its completion: its answer stands, with no host read.
+          if (operation.status === "running" && proposal.plan.kind === "pullRequestWatch") {
+            if (operation.state.completedSteps.includes("pull-request-watch-set")) {
+              yield* completeRecovered(proposal, operation, operation.state);
+              continue;
+            }
+            const plan = proposal.plan;
+            const replayed = yield* Effect.exit(
+              validator
+                .revalidateExecution(proposal)
+                .pipe(Effect.andThen(setPullRequestWatch(proposal, plan))),
+            );
+            if (replayed._tag === "Success") {
+              yield* completeRecovered(
+                proposal,
+                operation,
+                appendStep({ ...operation.state, note: replayed.value }, "pull-request-watch-set"),
+              );
+            } else {
+              yield* settleProposalFailure(proposal, operation, {
+                revalidation: false,
+                message: boundedCauseMessage(
+                  replayed.cause,
+                  "The pull request watch change was interrupted by a restart.",
+                ),
+                retryable: true,
+              });
+            }
+            continue;
+          }
+          // A heartbeat run whose prompt was queued (or coalesced) before a restart has done its
+          // work: the entry is in the chat's queue and the drain sends it. Counting it failed
+          // would pause an unattended schedule for nothing. So has one whose queue add committed
+          // although the restart lost its checkpoint: its message is queued, or already sent.
+          if (
+            operation.status === "running" &&
+            proposal.plan.kind === "automationRun" &&
+            proposal.plan.execution.target !== undefined
+          ) {
+            if (
+              operation.state.completedSteps.includes("automation-queued") ||
+              operation.state.completedSteps.includes("automation-coalesced")
+            ) {
+              yield* completeRecovered(proposal, operation, operation.state);
+              continue;
+            }
+            const { heartbeatRunReachedChat } = yield* heartbeatRuns;
+            const reached = yield* heartbeatRunReachedChat(
+              {
+                messageId: (step) => messageIdFor(operation.operationId, step),
+                queuedIn,
+                sentMessage: (threadId, messageId) =>
+                  projections.getThreadMessageById === undefined
+                    ? Effect.succeed(Option.none())
+                    : projections
+                        .getThreadMessageById({ threadId, messageId })
+                        .pipe(Effect.orElseSucceed(() => Option.none())),
+              },
+              proposal.plan,
+            );
+            if (reached) {
+              yield* completeRecovered(
+                proposal,
+                operation,
+                appendStep(operation.state, "automation-queued"),
+              );
+              continue;
+            }
+          }
+          // A handoff that gave its worktree up for the move: finished when the chat points at
+          // the worktree (the move stands), else the worktree is the operation's again and the
+          // compensation below removes it.
+          if (
+            operation.status === "running" &&
+            proposal.plan.kind === "worktreeHandoff" &&
+            operation.state.completedSteps.includes("handoff-bind-started")
+          ) {
+            const resumed = yield* Effect.exit(runAction(proposal, operation));
+            if (resumed._tag === "Success") {
+              yield* completeRecovered(proposal, resumed.value, resumed.value.state);
+              continue;
+            }
+            operation = Option.getOrElse(
+              yield* operations.getByProposalId(proposal.proposalId),
+              () => operation,
+            );
           }
           if (proposal.plan.kind === "workspaceLifecycle") {
             yield* settleProposalFailure(proposal, operation, {

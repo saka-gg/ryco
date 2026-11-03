@@ -3,10 +3,16 @@ import {
   USAGE_PROVIDER_COLORS,
   USAGE_PROVIDER_LABELS,
   filterUsageImports,
+  listUnpricedUsageModels,
+  sumUsageCostBreakdown,
   sumUsageImports,
+  usageCacheReadShare,
   type MergedUsageSummary,
+  type UnpricedUsageModel,
+  type UsageBreakdownRow,
+  type UsageModelKey,
 } from "@ryco/client-runtime/usage";
-import type { UsageImportedMetric, UsageProviderKind } from "@ryco/contracts";
+import type { EnvironmentId, UsageImportedMetric, UsageProviderKind } from "@ryco/contracts";
 import {
   AlertCircleIcon,
   BrainCircuitIcon,
@@ -17,11 +23,20 @@ import {
   SparklesIcon,
   type LucideIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 
-import { Button } from "~/components/ui/button";
-import { cn } from "~/lib/utils";
 import {
+  requestUsagePriceRow,
+  USAGE_PRICE_SECTION_TITLE,
+} from "~/components/settings/usagePriceSettingsRequest";
+import { requestSettingsReveal } from "~/components/settings/settingsSearchReveal";
+import { Button } from "~/components/ui/button";
+import { notifySurfaceLoadFailure } from "~/components/ui/surfaceLoadFailure";
+import { preloadableLazy, useLazyComponentReady } from "~/lib/preloadableLazy";
+import { cn } from "~/lib/utils";
+import { useSettingsDialogStore } from "~/settingsDialogStore";
+import {
+  formatCost,
   formatDayLabel,
   formatInteger,
   formatModelLabel,
@@ -31,27 +46,25 @@ import {
 } from "~/lib/statisticsFormat";
 
 import { Panel, StatePanel, StatSkeleton } from "../../settings/statistics/parts";
-import { SeriesAreaChart } from "../charts";
 import { EnvironmentSelect } from "../EnvironmentSelect";
 import type { StatisticsSearch } from "../statisticsSearch";
 import { useUsageSummary } from "../useUsageSummary";
+import { CostByTypeBar } from "./CostByTypeBar";
 import {
   buildUsageBreakdown,
   buildUsageDaySeries,
   filterUsageBuckets,
   sumUsageTotals,
 } from "./selectors";
+import { UsageMetricChart, type UsageChartMetric } from "./UsageMetricChart";
 
-const usd = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
-function formatCost(value: number | null): string {
-  return value === null ? "Unavailable" : usd.format(value);
-}
+// Most visits never open a model, so its detail loads on the first open (warmed on intent).
+const UsageModelDialog = preloadableLazy(() =>
+  import("./UsageModelDialog").then((module) => module.UsageModelDialog),
+);
+const preloadUsageModelDialog = () => {
+  void UsageModelDialog.preload();
+};
 
 export function UsageView({
   search,
@@ -65,6 +78,20 @@ export function UsageView({
     environmentIds: search.environmentIds,
   });
   const { merged } = result;
+  // Kept through the close animation; cleared once it ends.
+  const [modelDetail, setModelDetail] = useState<{
+    readonly target: UsageModelKey;
+    readonly open: boolean;
+  } | null>(null);
+  const modelDialogReady = useLazyComponentReady(UsageModelDialog, modelDetail !== null, {
+    onLoadError: (error) => {
+      const target = modelDetail?.target;
+      setModelDetail(null);
+      notifySurfaceLoadFailure("model details", error, () => {
+        if (target) setModelDetail({ target, open: true });
+      });
+    },
+  });
   const derived = useMemo(() => {
     if (!merged) return null;
     const buckets = filterUsageBuckets(merged, search.providers);
@@ -72,8 +99,10 @@ export function UsageView({
       buckets,
       imports: filterUsageImports(merged, search.providers),
       totals: sumUsageTotals(merged, buckets),
+      costByType: sumUsageCostBreakdown(buckets),
       days: buildUsageDaySeries(merged, buckets),
       breakdown: buildUsageBreakdown(buckets, search.usageBreakdown),
+      unpriced: listUnpricedUsageModels(merged, buckets),
     };
   }, [merged, search.providers, search.usageBreakdown]);
 
@@ -105,16 +134,12 @@ export function UsageView({
     );
   }
 
-  const { totals, days, breakdown } = derived;
+  const { totals, costByType, days, breakdown } = derived;
   const pricedShare =
     totals.pricedTokenCount + totals.unpricedTokenCount > 0
       ? totals.pricedTokenCount / (totals.pricedTokenCount + totals.unpricedTokenCount)
       : 0;
-  const cacheShare =
-    totals.uncachedInputTokens + totals.cachedInputTokens + totals.cacheCreationInputTokens > 0
-      ? totals.cachedInputTokens /
-        (totals.uncachedInputTokens + totals.cachedInputTokens + totals.cacheCreationInputTokens)
-      : 0;
+  const cacheShare = usageCacheReadShare(totals) ?? 0;
   const pendingLabels = result.pendingEnvironmentIds.flatMap((environmentId) => {
     const label = result.availableEnvironments.find(
       (environment) => environment.environmentId === environmentId,
@@ -194,9 +219,13 @@ export function UsageView({
                   label="Provider-recorded tokens"
                   value={formatInteger(totals.totalTokens)}
                 />
+                {costByType === null ? null : (
+                  <CostByTypeBar totals={costByType} className="border-t border-border/65 pt-4" />
+                )}
               </div>
             </div>
-            <div className="min-w-0 p-4 sm:p-6">
+            {/* The chart fills what the cost column's breakdown adds to the card's height. */}
+            <div className="flex min-w-0 flex-col p-4 sm:p-6">
               <div className="mb-2 flex items-center justify-between gap-3 px-1">
                 <div>
                   <h2 className="text-sm font-semibold">Usage over time</h2>
@@ -241,38 +270,28 @@ export function UsageView({
           >
             <div className="divide-y divide-border/60">
               {breakdown.slice(0, 20).map((row) => (
-                <div
+                <BreakdownRow
                   key={row.key}
-                  className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-5 px-4 py-3.5 sm:px-5"
-                >
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-medium">
-                      {search.usageBreakdown === "model"
-                        ? formatModelLabel(row.label)
-                        : formatDayLabel(row.label)}
-                    </p>
-                    <p className="mt-0.5 text-[11px] text-muted-foreground">
-                      {row.provider
-                        ? formatProviderLabel(row.provider)
-                        : `${row.responses} responses`}
-                    </p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-sm font-medium tabular-nums">{formatTokens(row.tokens)}</p>
-                    <p className="text-[11px] text-muted-foreground">tokens</p>
-                  </div>
-                  <div className="w-24 text-right">
-                    <p className="text-sm font-medium tabular-nums">{formatCost(row.costUsd)}</p>
-                    <p className="text-[11px] text-muted-foreground">
-                      {row.unpricedTokens > 0
-                        ? `${formatTokens(row.unpricedTokens)} unpriced`
-                        : "estimated"}
-                    </p>
-                  </div>
-                </div>
+                  row={row}
+                  dimension={search.usageBreakdown}
+                  onOpenModel={(target) => setModelDetail({ target, open: true })}
+                />
               ))}
             </div>
           </Panel>
+          {modelDetail !== null && modelDialogReady ? (
+            <UsageModelDialog
+              target={modelDetail.target}
+              open={modelDetail.open}
+              onOpenChange={(open) =>
+                setModelDetail((current) => (current === null ? null : { ...current, open }))
+              }
+              onClosed={() => setModelDetail(null)}
+              summary={merged}
+              buckets={derived.buckets}
+              metric={search.usageMetric}
+            />
+          ) : null}
         </>
       )}
       <Coverage
@@ -283,6 +302,7 @@ export function UsageView({
               search.providers === undefined || search.providers.includes(source.provider),
           ),
         }}
+        unpriced={derived.unpriced}
       />
     </div>
   );
@@ -399,12 +419,75 @@ function BreakdownToggle({ search, onSearchChange }: SearchControlProps) {
   );
 }
 
+/** A model row opens that model's detail; a day row only reads. */
+function BreakdownRow({
+  row,
+  dimension,
+  onOpenModel,
+}: {
+  readonly row: UsageBreakdownRow;
+  readonly dimension: StatisticsSearch["usageBreakdown"];
+  readonly onOpenModel: (target: UsageModelKey) => void;
+}) {
+  const id = useId();
+  const layout = "grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-5 px-4 py-3.5 sm:px-5";
+  // Spans, not paragraphs: a model row is a button, which takes phrasing content only.
+  const content = (
+    <>
+      <span className="block min-w-0">
+        <span id={`${id}-label`} className="block truncate text-sm font-medium">
+          {dimension === "model" ? formatModelLabel(row.label) : formatDayLabel(row.label)}
+        </span>
+        <span id={`${id}-source`} className="mt-0.5 block text-[11px] text-muted-foreground">
+          {row.provider ? formatProviderLabel(row.provider) : `${row.responses} responses`}
+        </span>
+      </span>
+      <span id={`${id}-tokens`} className="block text-right">
+        <span className="block text-sm font-medium tabular-nums">{formatTokens(row.tokens)}</span>
+        <span className="block text-[11px] text-muted-foreground">tokens</span>
+      </span>
+      <span id={`${id}-cost`} className="block w-24 text-right">
+        <span className="block text-sm font-medium tabular-nums">{formatCost(row.costUsd)}</span>
+        <span className="block text-[11px] text-muted-foreground">
+          {row.unpricedTokens > 0
+            ? `${formatTokens(row.unpricedTokens)} unpriced`
+            : row.customPricedTokens > 0
+              ? "custom price"
+              : "estimated"}
+        </span>
+      </span>
+    </>
+  );
+  const provider = row.provider;
+  if (dimension !== "model" || provider === undefined) {
+    return <div className={layout}>{content}</div>;
+  }
+  return (
+    <button
+      type="button"
+      aria-haspopup="dialog"
+      // Named by model and provider (one model ID can run through several providers).
+      aria-labelledby={`${id}-label ${id}-source`}
+      aria-describedby={`${id}-tokens ${id}-cost`}
+      onClick={() => onOpenModel({ provider, model: row.label })}
+      onPointerEnter={preloadUsageModelDialog}
+      onFocus={preloadUsageModelDialog}
+      className={cn(
+        layout,
+        "w-full text-left outline-none transition-colors hover:bg-accent/40 focus-visible:bg-accent/40 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
+      )}
+    >
+      {content}
+    </button>
+  );
+}
+
 function UsageAreaChart({
   data,
   metric,
 }: {
   readonly data: ReturnType<typeof buildUsageDaySeries>;
-  readonly metric: "cost" | "tokens";
+  readonly metric: UsageChartMetric;
 }) {
   const dates = useMemo(() => data.map((point) => point.date), [data]);
   const series = useMemo(
@@ -418,17 +501,12 @@ function UsageAreaChart({
     [data, metric],
   );
   return (
-    <SeriesAreaChart
-      className="h-[300px]"
+    <UsageMetricChart
+      className="min-h-[300px] flex-1"
       label="Usage over time"
       dates={dates}
       series={series}
-      yAxisWidth={44}
-      dashedGrid
-      formatYTick={(value) =>
-        metric === "cost" ? `$${value.toFixed(value < 10 ? 1 : 0)}` : formatTokens(value)
-      }
-      formatValue={(value) => (metric === "cost" ? usd.format(value) : formatInteger(value))}
+      metric={metric}
     />
   );
 }
@@ -471,7 +549,20 @@ function LegendDot({ color, label }: { readonly color: string; readonly label: s
   );
 }
 
-function Coverage({ summary }: { readonly summary: MergedUsageSummary }) {
+/** Open the node's model price editor with a row for `model`. */
+function setModelPrices(environmentId: EnvironmentId, model: string) {
+  requestUsagePriceRow(environmentId, model);
+  useSettingsDialogStore.getState().openSettings("general", environmentId);
+  requestSettingsReveal(USAGE_PRICE_SECTION_TITLE);
+}
+
+function Coverage({
+  summary,
+  unpriced,
+}: {
+  readonly summary: MergedUsageSummary;
+  readonly unpriced: readonly UnpricedUsageModel[];
+}) {
   const included = summary.sources.filter((source) => source.included);
   const issues = included.filter((source) => source.status !== "complete");
   const failedEnvironments = summary.environments.filter(
@@ -500,6 +591,16 @@ function Coverage({ summary }: { readonly summary: MergedUsageSummary }) {
     })
     .toSorted()
     .at(-1);
+  let customPriceCount = 0;
+  let mappedModelCount = 0;
+  for (const environment of summary.environments) {
+    customPriceCount += environment.summary?.pricing.customPriceCount ?? 0;
+    mappedModelCount += environment.summary?.pricing.mappedModelCount ?? 0;
+  }
+  const customPricing = [
+    customPriceCount > 0 ? plural(customPriceCount, "custom price") : null,
+    mappedModelCount > 0 ? plural(mappedModelCount, "mapped model") : null,
+  ].filter((part) => part !== null);
   const latestScan = included
     .map((source) => source.scanFinishedAt)
     .toSorted()
@@ -536,11 +637,12 @@ function Coverage({ summary }: { readonly summary: MergedUsageSummary }) {
           icon={CircleDollarSignIcon}
           label="Pricing"
           value={pricingState}
-          detail={
+          detail={[
             pricingFetch
               ? `Rates fetched ${formatTimestamp(pricingFetch)}`
-              : "Token totals remain available without rates"
-          }
+              : "Token totals remain available without rates",
+            ...customPricing,
+          ].join(" · ")}
         />
         <CoverageItem
           icon={AlertCircleIcon}
@@ -557,6 +659,9 @@ function Coverage({ summary }: { readonly summary: MergedUsageSummary }) {
           }
         />
       </div>
+      {unpriced.length > 0 ? (
+        <UnpricedModels unpriced={unpriced} environments={summary.environments} />
+      ) : null}
       {issues.map((source) => (
         <p
           key={`${source.environmentId}:${source.sourceId}`}
@@ -567,6 +672,73 @@ function Coverage({ summary }: { readonly summary: MergedUsageSummary }) {
         </p>
       ))}
     </Panel>
+  );
+}
+
+function plural(count: number, noun: string): string {
+  return `${formatInteger(count)} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+const UNPRICED_MODEL_LIMIT = 8;
+
+function UnpricedModels({
+  unpriced,
+  environments,
+}: {
+  readonly unpriced: readonly UnpricedUsageModel[];
+  readonly environments: MergedUsageSummary["environments"];
+}) {
+  const labels = new Map(
+    environments.map((environment) => [environment.environmentId, environment.label]),
+  );
+  const hidden = unpriced.length - UNPRICED_MODEL_LIMIT;
+  return (
+    <div className="mt-5 border-t border-border/60 pt-4">
+      <p className="text-xs font-medium">Unpriced models</p>
+      <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+        No published rate covers these model IDs. Set a price for them, or map them to a priced
+        model, on the machine that recorded them.
+      </p>
+      <ul aria-label="Unpriced models" className="mt-2 divide-y divide-border/60">
+        {unpriced.slice(0, UNPRICED_MODEL_LIMIT).map((entry) => (
+          <li
+            key={`${entry.provider}:${entry.model}`}
+            className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 py-2 text-xs"
+          >
+            <span className="min-w-0">
+              <span className="font-mono break-all">{entry.model}</span>
+              <span className="text-muted-foreground">
+                {" "}
+                · {formatProviderLabel(entry.provider)} · {formatTokens(entry.unpricedTokens)}{" "}
+                tokens
+              </span>
+            </span>
+            <span className="flex flex-wrap gap-1.5">
+              {entry.environmentIds.map((environmentId) => {
+                const label = labels.get(environmentId) ?? "this machine";
+                const several = entry.environmentIds.length > 1;
+                return (
+                  <Button
+                    key={environmentId}
+                    size="xs"
+                    variant="outline"
+                    aria-label={`Set prices for ${entry.model}${several ? ` on ${label}` : ""}`}
+                    onClick={() => setModelPrices(environmentId, entry.model)}
+                  >
+                    {several ? `Set prices on ${label}` : "Set prices"}
+                  </Button>
+                );
+              })}
+            </span>
+          </li>
+        ))}
+      </ul>
+      {hidden > 0 ? (
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          {plural(hidden, "more unpriced model")}
+        </p>
+      ) : null}
+    </div>
   );
 }
 

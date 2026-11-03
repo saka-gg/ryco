@@ -6,6 +6,8 @@ import {
   type RelayErrorFrame,
   type RelayFrame,
   RelayNodeClientVersion,
+  RelayNodeFeature,
+  RELAY_NODE_FEATURES_MAX,
   type RelayNodeAuthHandshake,
   type RelayReadyFrame,
 } from "@ryco/contracts/relay";
@@ -44,6 +46,7 @@ export const defaultRelayScheduler: RelaySessionScheduler = {
 };
 
 const isRelayNodeClientVersion = Schema.is(RelayNodeClientVersion);
+const isRelayNodeFeature = Schema.is(RelayNodeFeature);
 
 function unwrapEncoded(frame: RelayFrame): Uint8Array {
   const result = encodeRelayFrame(frame);
@@ -219,6 +222,7 @@ export class RelayConnectionSession {
   readonly #now: () => number;
   readonly #proofFirst: boolean;
   readonly #clientVersion: string | undefined;
+  readonly #features: ReadonlyArray<string> | undefined;
   #proofRefused = false;
   #proofRequestedAt: number | undefined;
   #proofSentAt: number | undefined;
@@ -261,6 +265,11 @@ export class RelayConnectionSession {
      * current after updates. Display metadata only; it is not signed.
      */
     readonly clientVersion?: string;
+    /**
+     * Hub features this node understands (`RelayNodeAuthHandshake.features`), so the Hub may
+     * send their frames. Unsigned, like `clientVersion`; Hubs that predate it ignore it.
+     */
+    readonly features?: ReadonlyArray<string>;
     readonly onFrame: (frame: RelayFrame) => void;
     readonly onTerminal: (error: RelayConnectionError) => void;
   }) {
@@ -275,6 +284,11 @@ export class RelayConnectionSession {
       options.clientVersion !== undefined && isRelayNodeClientVersion(options.clientVersion)
         ? options.clientVersion
         : undefined;
+    // Names the frame schema would refuse are left out rather than failing the connection.
+    const features = (options.features ?? [])
+      .filter(isRelayNodeFeature)
+      .slice(0, RELAY_NODE_FEATURES_MAX);
+    this.#features = features.length === 0 ? undefined : features;
     this.#onFrame = options.onFrame;
     this.#onTerminal = options.onTerminal;
   }
@@ -356,9 +370,11 @@ export class RelayConnectionSession {
       throw new RelayConnectionError("network");
     }
     try {
-      return unwrapEncoded(
-        this.#clientVersion === undefined ? auth : { ...auth, clientVersion: this.#clientVersion },
-      );
+      return unwrapEncoded({
+        ...auth,
+        ...(this.#clientVersion === undefined ? {} : { clientVersion: this.#clientVersion }),
+        ...(this.#features === undefined ? {} : { features: [...this.#features] }),
+      });
     } finally {
       auth.nonce.fill(0);
       auth.signature.fill(0);

@@ -204,6 +204,20 @@ it("carries the one-shot reveal keys only on the tab they belong to", () => {
   ).toEqual({ workspaceOpen: "1", workspaceTab: "pullRequest" });
   expect(
     parseRightPanelRouteSearch({
+      workspaceTab: "files",
+      workspaceFile: "src/app.ts",
+      workspaceFileLine: "12",
+      workspacePrReveal: "checks",
+    }),
+  ).toEqual({
+    workspaceOpen: "1",
+    workspaceTab: "files",
+    preview: "1",
+    workspaceFile: "src/app.ts",
+    workspaceFileLine: 12,
+  });
+  expect(
+    parseRightPanelRouteSearch({
       workspaceTab: "terminal",
       workspacePrReveal: "checks",
       workspaceAgentsWorkflow: "wf-audit",

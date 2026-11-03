@@ -124,7 +124,6 @@ function config(label: string, tokenMode: "off" | "balanced" | "aggressive"): Se
       capabilities: {
         repositoryIdentity: true,
         threadSettlement: false,
-        threadPriorityRanking: false,
         projectPreferences: true,
       },
     },

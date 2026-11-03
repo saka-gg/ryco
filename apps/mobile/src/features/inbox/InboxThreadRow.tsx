@@ -7,6 +7,7 @@ import { Pressable, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
 import { ChangeRequestBadge } from "../../components/ChangeRequestBadge";
+import { FollowUpQueueMark } from "../../components/FollowUpQueueMark";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { relativeTime } from "../../lib/time";
 import type { InboxThreadRow as InboxThreadRowModel, InboxThreadState } from "./inboxModel";
@@ -62,16 +63,18 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
   // A chat works in one plain folder: no branch or worktree glyph to imply Git.
   const WorkspaceIcon = row.isChat ? IconFolder : row.isWorktree ? IconGitFork : IconGitBranch;
   const showStatus = row.state !== "idle" && row.state !== "settled";
+  // Set only on idle rows: the snooze ran out and this device has not opened the thread since.
+  const woke = row.woke === true;
   const accessibilityLabel = [
     row.title,
     row.contextLabel,
     row.isChat ? null : row.isWorktree ? "Worktree" : "Original directory",
-    row.statusLabel,
+    woke ? "Woke from snooze" : row.statusLabel,
     row.roleLabel,
+    // The queue's sentence, not its short mark: "2 queued follow-ups: Paused after an error".
+    row.followUpQueue?.title,
     row.changeRequest?.accessibilityLabel,
     row.providerLabel ? `Provider: ${row.providerLabel}` : null,
-    row.focusTitle,
-    row.focusDetail,
   ]
     .filter(Boolean)
     .join(", ");
@@ -85,7 +88,11 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
       className="mx-4 mb-2 gap-2 rounded-2xl bg-card px-3.5 py-3 active:bg-card-alt"
     >
       <View className="flex-row items-start gap-2">
-        <View className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${statusDotClassName(row.state)}`} />
+        <View
+          className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${
+            woke ? "bg-warning" : statusDotClassName(row.state)
+          }`}
+        />
         <Text
           className="min-w-0 flex-1 font-ryco-medium text-[15px] leading-[20px] text-foreground"
           numberOfLines={2}
@@ -140,22 +147,10 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
           </Text>
         </View>
       </View>
-      {row.focusTitle ? (
-        <View className="gap-0.5">
-          <Text className="font-ryco-medium text-xs text-foreground" numberOfLines={1}>
-            {row.focusTitle}
-            {row.focusAiGenerated ? " · AI" : ""}
-          </Text>
-          {row.focusDetail ? (
-            <Text className="text-xs text-foreground-muted" numberOfLines={2}>
-              {row.focusDetail}
-            </Text>
-          ) : null}
-        </View>
-      ) : null}
-      {(showStatus && !row.focusTitle) || row.roleLabel || row.snoozedUntil ? (
+      {showStatus || woke || row.roleLabel || row.followUpQueue || row.snoozedUntil ? (
         <View className="flex-row flex-wrap items-center gap-2">
-          {showStatus && !row.focusTitle ? (
+          {woke ? <Text className="text-xs font-ryco-medium text-warning">Woke</Text> : null}
+          {showStatus ? (
             <Text className={`text-xs font-ryco-medium ${statusTextClassName(row.state)}`}>
               {row.statusLabel}
             </Text>
@@ -163,6 +158,7 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
           {row.roleLabel ? (
             <Text className="text-xs text-foreground-tertiary">{row.roleLabel}</Text>
           ) : null}
+          {row.followUpQueue ? <FollowUpQueueMark badge={row.followUpQueue} /> : null}
           {row.snoozedUntil ? (
             <Text className="text-xs text-foreground-tertiary">
               Until{" "}

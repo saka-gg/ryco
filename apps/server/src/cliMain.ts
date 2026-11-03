@@ -74,3 +74,12 @@ const program = Command.run(cli, { version: packageJson.version }).pipe(
 export function runCli(): void {
   NodeRuntime.runMain(program as Effect.Effect<void, never, never>);
 }
+
+/**
+ * `ryco node-update-preflight` (nodeUpdate/preflight.ts), once loading this module has loaded
+ * the server graph it checks.
+ */
+export const runNodeUpdatePreflight = (): Promise<void> =>
+  import("./nodeUpdate/preflight.ts").then((preflight) =>
+    preflight.runNodeUpdatePreflightFromProcess(),
+  );

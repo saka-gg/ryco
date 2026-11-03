@@ -1,5 +1,6 @@
 import type { ThreadCapabilitySupport } from "@ryco/client-runtime/rpc";
 import {
+  applicableUsageLimit,
   deriveThreadActivityStatus,
   deriveUsageLimitStatus,
   isThreadFailed,
@@ -11,16 +12,20 @@ import type {
   SidebarWorktreeSummary,
   ThreadInboxMutationBlocker,
 } from "@ryco/client-runtime/state/threads";
-import { buildThreadInbox } from "@ryco/client-runtime/state/threads";
+import {
+  buildThreadInbox,
+  resolveThreadHideAvailability,
+} from "@ryco/client-runtime/state/threads";
+import {
+  followUpQueueBadgeOf,
+  type FollowUpQueueBadge,
+} from "@ryco/client-runtime/state/message-queue/queueBadge";
 import { CHAT_WORKSPACE_LABEL, projectDisplayLabel } from "@ryco/client-runtime/state/composer";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
 import { isChatProject } from "@ryco/shared/projectKind";
 import type { ThreadSettlementBlocker } from "@ryco/shared/threadSettlement";
-import {
-  describeThreadPriorityFocus,
-  type ThreadPriorityFocusMetadata,
-} from "@ryco/shared/threadPriority";
+import { isThreadWokeUnseen, threadSnoozeWokeAt } from "@ryco/shared/threadSnooze";
 
 import { buildChangeRequestBadge, type ChangeRequestBadge } from "../../lib/changeRequestBadge";
 import {
@@ -70,6 +75,8 @@ export interface InboxEnvironment {
   readonly deliveryUnknown?: boolean;
   readonly threadSettlementSupported?: ThreadCapabilitySupport;
   readonly threadSnoozeSupported?: ThreadCapabilitySupport;
+  /** The Hidden shelf and settling a working task (`threadTriage`). */
+  readonly threadTriageSupported?: ThreadCapabilitySupport;
   /** The node's own auto-settle rule; absent lists its threads by this device's rule. */
   readonly autoSettleAfterDays?: SidebarAutoSettleAfterDays;
   readonly mutationReady?: boolean;
@@ -104,15 +111,26 @@ export interface InboxThreadRow {
    * matches HubNodeSection's `ROLE_LABELS`.
    */
   readonly roleLabel: "Viewer" | null;
+  /**
+   * The node's follow-up queue for the thread, as web's sidebar marks it: "2 queued", or
+   * "2 held" when nothing goes out without the person. Null while it holds none.
+   */
+  readonly followUpQueue: FollowUpQueueBadge | null;
   /** Current provider brand for the task; null renders the neutral mark. */
   readonly providerDriver: string | null;
   readonly providerLabel: string | null;
-  readonly focus: ThreadPriorityFocusMetadata | null;
-  readonly focusTitle: string | null;
-  readonly focusDetail: string | null;
-  readonly focusAiGenerated: boolean;
-  readonly attentionState: "active" | "settled" | "snoozed";
+  readonly attentionState: "active" | "settled" | "snoozed" | "hidden";
+  /** Settled while it works: the node settles it when the work ends. */
+  readonly filed?: boolean;
+  /** The person hid it: its toggle shows it in the Inbox again, else it hides it. */
+  readonly hiddenByUser?: boolean;
+  /** Whether Hide (or Show in Inbox) can run now; false on a node without the Hidden shelf. */
+  readonly hideActionEnabled?: boolean;
   readonly snoozedUntil?: string | null;
+  /** When an awake, unsettled thread woke from its snooze by the timer. */
+  readonly wokeAt?: string | null;
+  /** It woke from its snooze and this device has not opened it since: the row says "Woke". */
+  readonly woke?: boolean;
   readonly canSnooze?: boolean;
   readonly canUnsnooze?: boolean;
   readonly canSettle: boolean;
@@ -122,8 +140,8 @@ export interface InboxThreadRow {
 }
 
 export interface InboxSection {
-  readonly key: "focus" | "active" | "settled" | "snoozed";
-  readonly title: "Focus" | "Active" | "Settled" | "Snoozed";
+  readonly key: "active" | "settled" | "snoozed" | "hidden";
+  readonly title: "Active" | "Settled" | "Snoozed" | "Hidden";
   readonly rows: ReadonlyArray<InboxThreadRow>;
 }
 
@@ -138,9 +156,10 @@ export interface BuildInboxInput {
   readonly deliveryUnknownThreadIds?: ReadonlySet<string>;
   readonly localQueuedThreadIds?: ReadonlySet<string>;
   readonly pinnedThreadKeys?: ReadonlySet<string> | ReadonlyArray<string>;
-  readonly aiFocusEnabled?: boolean;
   readonly autoSettleAfterDays?: SidebarAutoSettleAfterDays;
   readonly nowMs?: number;
+  /** When this device last saw each thread after it woke from snooze, by scoped key. */
+  readonly wokeSeenAtByThreadKey?: Readonly<Record<string, string>>;
 }
 
 function scopedKey(environmentId: EnvironmentId, id: string): string {
@@ -151,7 +170,6 @@ function threadState(
   thread: SidebarThreadSummary,
   environment: InboxEnvironment | undefined,
   deliveryUnknownThreadIds: ReadonlySet<string>,
-  nowMs: number,
 ): InboxThreadState {
   // A stale environment's rows are last-known state: nothing on them may
   // present as live activity (or as actionable), whatever the cached fields
@@ -169,8 +187,9 @@ function threadState(
   if (environment?.connectionState === "offline") return "offline";
   if (activity === "working") return "working";
   if (activity === "connecting") return "connecting";
-  // Same predicate as web: a usage limit outranks the generic error it ended in.
-  if (deriveUsageLimitStatus(thread, nowMs) !== null) return "limited";
+  // Same predicate as web: a usage limit outranks the generic error it ended in, before and
+  // after its reset (the row's words tell the two apart), so the state never reads the clock.
+  if (applicableUsageLimit(thread) !== null) return "limited";
   // Same rule as web: a restart release is an interruption, not a failure.
   if (isThreadFailed(thread)) return "error";
   if (environment?.connectionState === "reconnecting") return "reconnecting";
@@ -202,6 +221,18 @@ function statusLabel(state: InboxThreadState): string {
   }
 }
 
+/**
+ * One thread's state and its words as its inbox row shows them, for a surface
+ * that lists the thread outside the inbox (a chat's delegated tasks).
+ */
+export function inboxThreadStatus(
+  thread: SidebarThreadSummary,
+  environment: InboxEnvironment | undefined,
+): { readonly state: InboxThreadState; readonly label: string } {
+  const state = threadState(thread, environment, new Set());
+  return { state, label: statusLabel(state) };
+}
+
 function timestamp(thread: SidebarThreadSummary): string {
   return thread.updatedAt ?? thread.latestUserMessageAt ?? thread.createdAt;
 }
@@ -226,6 +257,7 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
       label: environment.label,
       threadSettlementSupported: environment.threadSettlementSupported ?? false,
       threadSnoozeSupported: environment.threadSnoozeSupported ?? false,
+      threadTriageSupported: environment.threadTriageSupported ?? false,
       autoSettleAfterDays: environment.autoSettleAfterDays,
       connected: environment.connectionState === "connected",
       mutationReady: environment.mutationReady ?? false,
@@ -234,7 +266,6 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
     localQueuedThreadKeys: input.localQueuedThreadIds,
     deliveryUnknownThreadKeys: deliveryUnknown,
     pinnedThreadKeys: input.pinnedThreadKeys,
-    aiFocusEnabled: input.aiFocusEnabled ?? false,
     autoSettleAfterDays: input.autoSettleAfterDays,
     filters: {
       ...(input.nodeScope ? { environmentIds: [input.nodeScope] } : {}),
@@ -253,18 +284,21 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
       ? CHAT_WORKSPACE_LABEL
       : entry.worktree?.title || entry.worktree?.branch || thread.branch || "Local workspace";
     const contextLabel = `${nodeLabel} · ${projectLabel} · ${worktreeLabel}`;
+    const filed = entry.lifecycle.filed === true;
     const state =
       environment?.stale ||
       (environment?.connectionState === "offline" && !deliveryUnknown.has(entry.key))
         ? "offline"
-        : entry.lifecycle.classification === "settled"
+        : entry.lifecycle.classification === "settled" && !filed
           ? "settled"
-          : threadState(thread, environment, deliveryUnknown, nowMs);
+          : threadState(thread, environment, deliveryUnknown);
+    const hide = resolveThreadHideAvailability(entry);
+    const wokeAt =
+      entry.lifecycle.classification === "active" ? threadSnoozeWokeAt(thread, nowMs) : null;
     const providerDriver =
       thread.session?.provider ??
       thread.providerDriver ??
       builtInProviderDriverForInstanceId(thread.modelSelection?.instanceId);
-    const focusExplanation = entry.focus === null ? null : describeThreadPriorityFocus(entry.focus);
     return {
       key: entry.key,
       environmentId: thread.environmentId,
@@ -283,42 +317,53 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
           ? (environment?.staleDetail ?? "Offline")
           : state === "limited"
             ? (deriveUsageLimitStatus(thread, nowMs)?.label ?? statusLabel(state))
-            : statusLabel(state),
+            : filed && state === "working"
+              ? "Settles when done"
+              : statusLabel(state),
       updatedAt: entry.lifecycle.effectiveSettlementTimestamp ?? timestamp(thread),
       changeRequest: buildChangeRequestBadge(entry.worktree),
       roleLabel: environment?.role === "viewer" ? "Viewer" : null,
+      followUpQueue: followUpQueueBadgeOf(thread.followUpQueueSummary),
       providerDriver,
       providerLabel: providerDisplayLabel(providerDriver),
-      focus: entry.focus,
-      focusTitle: focusExplanation?.title ?? null,
-      focusDetail: focusExplanation?.detail ?? null,
-      focusAiGenerated: focusExplanation?.aiGenerated ?? false,
       attentionState: entry.lifecycle.classification,
+      ...(filed ? { filed } : {}),
+      hiddenByUser: hide.hidden,
+      hideActionEnabled: hide.enabled,
       snoozedUntil:
         entry.lifecycle.classification === "snoozed" ? (thread.snoozedUntil ?? null) : null,
+      wokeAt,
+      // Only an idle row: a request, a failure or running work says more.
+      woke:
+        state === "idle" &&
+        isThreadWokeUnseen({
+          wokeAt,
+          lastVisitedAt: input.wokeSeenAtByThreadKey?.[entry.key],
+        }),
       canSnooze: entry.canSnooze,
       canUnsnooze:
         environment?.threadSnoozeSupported === true &&
         environment.mutationReady === true &&
         environment.shellCurrent === true &&
         environment.connectionState === "connected",
-      canSettle: entry.lifecycle.eligibility.canSettle,
+      // A working task files: the node settles it when the work ends.
+      canSettle: entry.lifecycle.eligibility.canSettle || entry.lifecycle.settleFiles === true,
       settlementBlocker: entry.lifecycle.settlementBlocker,
       mutationEnabled: entry.mutationEnabled,
       mutationBlocker: entry.mutationBlocker,
     };
   };
 
-  const focus = inbox.focus.map(toRow);
   const active = inbox.active.map(toRow);
   const settled = inbox.settled.map(toRow);
   const snoozed = inbox.snoozed.map(toRow);
+  const hidden = inbox.hidden.map(toRow);
 
   const sections: InboxSection[] = [];
-  if (focus.length > 0) sections.push({ key: "focus", title: "Focus", rows: focus });
   if (active.length > 0) sections.push({ key: "active", title: "Active", rows: active });
   if (snoozed.length > 0) sections.push({ key: "snoozed", title: "Snoozed", rows: snoozed });
   if (settled.length > 0) sections.push({ key: "settled", title: "Settled", rows: settled });
+  if (hidden.length > 0) sections.push({ key: "hidden", title: "Hidden", rows: hidden });
   return sections;
 }
 
@@ -341,7 +386,7 @@ export function resolveInboxEmptyState(input: {
 
 /**
  * Structural equality for row field values, bounded in depth. Row fields are
- * primitives or small plain records (badge, focus metadata, the store's
+ * primitives or small plain records (badge, the store's
  * project record); anything deeper than `depth` compares by identity.
  */
 function rowValueEqual(left: unknown, right: unknown, depth: number): boolean {

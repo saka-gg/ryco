@@ -14,6 +14,7 @@ import {
 } from "@ryco/contracts";
 import { assessClaudeCacheResume, latestClaudeCacheObservation } from "./claudeCacheReview.ts";
 import { commitSendTurnDispatch, type CommitSendTurnDispatchInput } from "./sendEngine.ts";
+import { buildUsageLimitResumeDispatch } from "./usageLimitResume.ts";
 
 const now = Date.parse("2026-09-27T12:00:00.000Z");
 const observation: ClaudeCacheObservation = {
@@ -667,5 +668,100 @@ describe("usage-limit resume through the Claude review", () => {
       usageLimitResumeGuard: { limitId: "limit-1", origin: "manual" },
       claudeResumeGuard: { runtimeSessionId: "runtime-1" },
     });
+  });
+});
+
+describe("a device that turned the review off", () => {
+  it("sends a large idle resume unguarded without reading the thread or asking", async () => {
+    const f = setup("cancel");
+    const skipClaudeResumeReview = vi.fn(() => true);
+    const endLocalDispatch = vi.fn();
+    await commitSendTurnDispatch({ ...f.input, skipClaudeResumeReview, endLocalDispatch });
+    expect(skipClaudeResumeReview).toHaveBeenCalledOnce();
+    expect(f.read).not.toHaveBeenCalled();
+    expect(f.review).not.toHaveBeenCalled();
+    expect(endLocalDispatch).not.toHaveBeenCalled();
+    expect(f.dispatch).toHaveBeenCalledTimes(1);
+    expect(f.dispatch.mock.calls[0]?.[0]).toMatchObject({
+      type: "thread.turn.start",
+      commandId: "composer-send:thread-1:original-1",
+      createdAt: f.input.createdAt,
+      message: { text: "Original prompt" },
+    });
+    expect(f.dispatch.mock.calls[0]?.[0]).not.toHaveProperty("claudeResumeGuard");
+  });
+
+  it("lets a send without a presentation through instead of holding it for review", async () => {
+    const f = setup();
+    const { claudeCacheReview: _presentation, ...background } = f.input;
+    await expect(commitSendTurnDispatch(background)).rejects.toThrow("needs review");
+    expect(f.dispatch).not.toHaveBeenCalled();
+
+    await commitSendTurnDispatch({ ...background, skipClaudeResumeReview: () => true });
+    expect(f.dispatch).toHaveBeenCalledTimes(1);
+    expect(f.dispatch.mock.calls[0]?.[0]).not.toHaveProperty("claudeResumeGuard");
+  });
+
+  it("still reviews while the review is on", async () => {
+    const f = setup("continue");
+    await commitSendTurnDispatch({ ...f.input, skipClaudeResumeReview: () => false });
+    expect(f.read).toHaveBeenCalled();
+    expect(f.review).toHaveBeenCalledTimes(1);
+    expect(f.dispatch.mock.calls[0]?.[0]).toMatchObject({
+      claudeResumeGuard: { runtimeSessionId: "runtime-1" },
+    });
+  });
+
+  it("reads the choice at each send, so turning the review back on applies to the next one", async () => {
+    const f = setup("cancel");
+    let skipped = true;
+    const input = { ...f.input, skipClaudeResumeReview: () => skipped };
+    await commitSendTurnDispatch(input);
+    expect(f.review).not.toHaveBeenCalled();
+    skipped = false;
+    await expect(
+      commitSendTurnDispatch({ ...input, messageId: MessageId.make("original-2") }),
+    ).rejects.toThrow("cancelled");
+    expect(f.review).toHaveBeenCalledTimes(1);
+    expect(f.dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("forwards the device choice into a usage-limit resume", async () => {
+    const f = setup("cancel");
+    const thread = fixture();
+    const dispatch = buildUsageLimitResumeDispatch({
+      api: f.input.api,
+      thread: {
+        id: thread.id,
+        title: "Limited",
+        modelSelection: thread.modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        session: { provider: ProviderDriverKind.make("claudeAgent") },
+        usageLimit: {
+          limitId: "limit-1",
+          provider: ProviderDriverKind.make("claudeAgent"),
+          providerInstanceId: observation.providerInstanceId,
+          turnId: TurnId.make("limited-turn"),
+          message: "Claude usage limit reached.",
+          limitedAt: observation.observedAt,
+          resetAt: observation.observedAt,
+          autoResume: null,
+          updatedAt: observation.observedAt,
+        },
+      },
+      claudeCacheReview: { review: f.review },
+      skipClaudeResumeReview: () => true,
+      createdAt: new Date(now).toISOString(),
+      newCommandId: () => CommandId.make("unused"),
+    });
+    expect(dispatch).not.toBeNull();
+    await commitSendTurnDispatch(dispatch!);
+    expect(f.read).not.toHaveBeenCalled();
+    expect(f.review).not.toHaveBeenCalled();
+    expect(f.dispatch.mock.calls[0]?.[0]).toMatchObject({
+      usageLimitResumeGuard: { origin: "manual" },
+    });
+    expect(f.dispatch.mock.calls[0]?.[0]).not.toHaveProperty("claudeResumeGuard");
   });
 });

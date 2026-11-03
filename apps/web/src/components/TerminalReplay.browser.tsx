@@ -8,6 +8,7 @@ import type { TerminalSessionSnapshot } from "@ryco/contracts";
 import { createTerminalEventReconciler } from "@ryco/client-runtime/state/terminal";
 import {
   createTerminalOutputBatcher,
+  disposeCachedTerminalViewsForTests,
   writeTerminalSnapshot,
   TerminalViewport,
 } from "./ThreadTerminalDrawer";
@@ -17,7 +18,7 @@ const { api } = vi.hoisted(() => ({
   api: {
     terminal: {
       open: vi.fn(),
-      write: vi.fn(async () => undefined),
+      write: vi.fn(async (_input: { readonly threadId: string; readonly data: string }) => {}),
       resize: vi.fn(async () => undefined),
     },
   },
@@ -310,6 +311,173 @@ it("re-hydrates a missed reconnect from the history after the view's cursor", as
   } finally {
     await screen.unmount();
     useTerminalStateStore.getState().removeTerminalState(threadRef);
+  }
+});
+
+/** Cursor position, device attributes and mode queries: xterm answers each of them. */
+const REPLAYED_QUERIES = "\u001b[6n\u001b[c\u001b[?2026$p";
+// eslint-disable-next-line no-control-regex -- A cursor position report is a control sequence.
+const CURSOR_POSITION_REPORT = /^\u001b\[\d+;\d+R$/;
+
+function renderReplyViewport(threadRef: ReturnType<typeof scopeThreadRef>, id: ThreadId) {
+  mount?.remove();
+  mount = document.createElement("div");
+  mount.style.cssText = "width:800px;height:400px";
+  document.body.append(mount);
+  return render(
+    <TerminalViewport
+      threadRef={threadRef}
+      threadId={id}
+      terminalId="default"
+      terminalLabel="Terminal"
+      cwd="/tmp"
+      onSessionExited={() => undefined}
+      onAddTerminalContext={() => undefined}
+      focusRequestId={0}
+      autoFocus={false}
+      resizeEpoch={0}
+      drawerHeight={320}
+      keybindings={[]}
+    />,
+    { container: mount },
+  );
+}
+
+it("does not answer queries in replayed history or a reconnect delta, only live ones", async () => {
+  const id = ThreadId.make("terminal-replay-queries");
+  const threadRef = scopeThreadRef("environment-a" as never, id);
+  const cursor = (sequence: number) => ({ generation: "query-view", sequence });
+  const snapshot: TerminalSessionSnapshot = {
+    threadId: id,
+    terminalId: "default",
+    cwd: "/tmp",
+    worktreePath: null,
+    status: "running",
+    pid: 1,
+    history: `${REPLAYED_QUERIES}prompt$ `,
+    exitCode: null,
+    exitSignal: null,
+    updatedAt: "2026-10-22T00:00:00.000Z",
+    cursor: cursor(1),
+  };
+  api.terminal.open.mockResolvedValueOnce(snapshot);
+  const terminalOpen = vi.spyOn(Terminal.prototype, "open");
+  const screen = await renderReplyViewport(threadRef, id);
+  const viewTerminal = () => terminalOpen.mock.contexts.at(-1) as Terminal | undefined;
+  const firstLine = () =>
+    viewTerminal()?.buffer.active.getLine(0)?.translateToString(true).trimEnd();
+  const parsed = () => new Promise<void>((resolve) => viewTerminal()?.write("", resolve));
+  const sent = () =>
+    api.terminal.write.mock.calls.flatMap(([input]) => (input.threadId === id ? [input.data] : []));
+  try {
+    await vi.waitFor(() => expect(firstLine()).toBe("prompt$"));
+    await parsed();
+    expect(sent()).toEqual([]);
+
+    // A reconnect that missed output appends the history after the view's cursor.
+    api.terminal.open.mockResolvedValueOnce({
+      ...snapshot,
+      history: `${REPLAYED_QUERIES}missed`,
+      cursor: cursor(3),
+      historySince: cursor(1),
+    });
+    useTerminalStateStore.getState().applyTerminalEvent(threadRef, {
+      type: "started",
+      threadId: id,
+      terminalId: "default",
+      createdAt: snapshot.updatedAt,
+      cursor: cursor(3),
+      snapshot: { ...snapshot, history: "", cursor: cursor(3) },
+      replay: true,
+    });
+    await vi.waitFor(() => expect(firstLine()).toBe("prompt$ missed"));
+    await parsed();
+    expect(sent()).toEqual([]);
+
+    // A query in live output still gets its answer.
+    useTerminalStateStore.getState().applyTerminalEvent(threadRef, {
+      type: "output",
+      threadId: id,
+      terminalId: "default",
+      createdAt: snapshot.updatedAt,
+      cursor: cursor(4),
+      data: "\u001b[6n",
+    });
+    await vi.waitFor(() => expect(sent()).toEqual([expect.stringMatching(CURSOR_POSITION_REPORT)]));
+  } finally {
+    await screen.unmount();
+    useTerminalStateStore.getState().removeTerminalState(threadRef);
+    disposeCachedTerminalViewsForTests();
+  }
+});
+
+it("does not answer queries in output a kept view catches up on after reattaching", async () => {
+  const id = ThreadId.make("terminal-replay-kept-queries");
+  const threadRef = scopeThreadRef("environment-a" as never, id);
+  const cursor = (sequence: number) => ({ generation: "kept-query-view", sequence });
+  const snapshot: TerminalSessionSnapshot = {
+    threadId: id,
+    terminalId: "default",
+    cwd: "/tmp",
+    worktreePath: null,
+    status: "running",
+    pid: 1,
+    history: "prompt$ ",
+    exitCode: null,
+    exitSignal: null,
+    updatedAt: "2026-10-22T00:00:00.000Z",
+    cursor: cursor(1),
+  };
+  const output = (sequence: number, data: string) => ({
+    type: "output" as const,
+    threadId: id,
+    terminalId: "default",
+    createdAt: snapshot.updatedAt,
+    cursor: cursor(sequence),
+    data,
+  });
+  api.terminal.open.mockResolvedValueOnce(snapshot);
+  const terminalOpen = vi.spyOn(Terminal.prototype, "open");
+  const viewTerminal = () => terminalOpen.mock.contexts.at(-1) as Terminal | undefined;
+  const firstLine = () =>
+    viewTerminal()?.buffer.active.getLine(0)?.translateToString(true).trimEnd();
+  const parsed = () => new Promise<void>((resolve) => viewTerminal()?.write("", resolve));
+  const sent = () =>
+    api.terminal.write.mock.calls.flatMap(([input]) => (input.threadId === id ? [input.data] : []));
+  let screen = await renderReplyViewport(threadRef, id);
+  try {
+    await vi.waitFor(() => expect(firstLine()).toBe("prompt$"));
+    useTerminalStateStore.getState().applyTerminalEvent(threadRef, output(2, "live "));
+    await vi.waitFor(() => expect(firstLine()).toBe("prompt$ live"));
+    await screen.unmount();
+
+    // Arrives while the view is detached, so nothing answers it live.
+    useTerminalStateStore
+      .getState()
+      .applyTerminalEvent(threadRef, output(3, `${REPLAYED_QUERIES}caught up`));
+    api.terminal.open.mockResolvedValueOnce({
+      ...snapshot,
+      history: "",
+      cursor: cursor(3),
+      historySince: cursor(3),
+    });
+    screen = await renderReplyViewport(threadRef, id);
+    await vi.waitFor(() => expect(firstLine()).toBe("prompt$ live caught up"));
+    await vi.waitFor(() =>
+      expect(api.terminal.open).toHaveBeenLastCalledWith(
+        expect.objectContaining({ threadId: id, sinceCursor: cursor(3) }),
+      ),
+    );
+    await parsed();
+    expect(terminalOpen).toHaveBeenCalledTimes(1);
+    expect(sent()).toEqual([]);
+
+    useTerminalStateStore.getState().applyTerminalEvent(threadRef, output(4, "\u001b[6n"));
+    await vi.waitFor(() => expect(sent()).toEqual([expect.stringMatching(CURSOR_POSITION_REPORT)]));
+  } finally {
+    await screen.unmount();
+    useTerminalStateStore.getState().removeTerminalState(threadRef);
+    disposeCachedTerminalViewsForTests();
   }
 });
 

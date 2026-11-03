@@ -1,11 +1,11 @@
 import {
   AGENT_CONTROL_CAPABILITIES,
+  AGENT_CONTROL_AUTOMATION_UNATTENDED_FAILURES_MAX,
   AGENT_CONTROL_AUTOMATION_MAX_ACTIVE_PER_PROJECT,
   AGENT_CONTROL_AUTOMATION_MAX_HORIZON_MS,
   AGENT_CONTROL_AUTOMATION_MIN_INTERVAL_MS,
   AGENT_CONTROL_AUTOMATION_PROPOSAL_TTL_MS,
   AGENT_CONTROL_AUTOMATION_RUN_HISTORY_MAX,
-  AGENT_CONTROL_RISK_TAGS,
   AgentControlRequestId,
   type AgentControlAutomation,
   type AgentControlAutomationDefinition,
@@ -19,6 +19,7 @@ import { AgentControlAutomationRepository } from "../../persistence/Services/Age
 import { AgentControlPlanValidationError } from "../Errors.ts";
 import {
   AgentControlAutomationService,
+  UNATTENDED_OWNER_ONLY,
   type AgentControlAutomationShape,
   type AgentControlAutomationServiceError,
 } from "../Services/AgentControlAutomation.ts";
@@ -26,6 +27,7 @@ import { AgentControlPolicy } from "../Services/AgentControlPolicy.ts";
 import { AgentControlProposalEvents } from "../Services/AgentControlProposalEvents.ts";
 import { AgentControlProposalStore } from "../Services/AgentControlProposalStore.ts";
 import { AgentControlExternalIntegrationService } from "../Services/AgentControlExternalIntegration.ts";
+import { agentControlRiskTagsForPlan } from "../proposalPresentation.ts";
 
 const SCHEDULER_INTERVAL_MS = 30_000;
 const SCHEDULER_BATCH_LIMIT = 25;
@@ -43,15 +45,32 @@ const revisionState = (automation: AgentControlAutomation) => ({
   updatedAt: automation.updatedAt,
 });
 
-const nextRunAt = (definition: AgentControlAutomationDefinition): string | null => {
-  if (!definition.enabled) return null;
-  return definition.schedule.kind === "once"
-    ? definition.schedule.runAt
-    : definition.schedule.startsAt;
-};
+/** Calendar schedule rules, loaded the first time one is checked so they stay off boot. */
+const loadCalendarSchedules = Effect.promise(() => import("../calendarSchedules.ts"));
+
+/** The first run: a calendar schedule's first time at or after its start. */
+const firstRunAt = (schedule: AgentControlAutomationDefinition["schedule"]) =>
+  schedule.kind === "calendar"
+    ? loadCalendarSchedules.pipe(Effect.map((calendar) => calendar.firstCalendarRun(schedule)))
+    : Effect.succeed(schedule.kind === "once" ? schedule.runAt : schedule.startsAt);
+
+const nextRunAt = (definition: AgentControlAutomationDefinition) =>
+  definition.enabled ? firstRunAt(definition.schedule) : Effect.succeed(null);
 
 const exactState = (left: unknown, right: unknown): boolean =>
   JSON.stringify(left) === JSON.stringify(right);
+
+/**
+ * Whether the schedule's runs are approved on its owner's standing decision: the owner
+ * set it (an agent-authored definition never runs unattended, whatever it says).
+ */
+export const runsWithoutAsking = (
+  automation: Pick<AgentControlAutomation, "principal" | "definition">,
+): boolean =>
+  automation.principal.kind === "automation-owner" &&
+  automation.definition.runPolicy === "run-without-asking";
+
+const UNATTENDED_PAUSE_DETAIL = `Paused after ${AGENT_CONTROL_AUTOMATION_UNATTENDED_FAILURES_MAX} failed runs in a row. Open the schedule to review it.`;
 
 const runStatusForProposal = (
   proposal: AgentControlProposal,
@@ -96,31 +115,38 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
       const validateDefinition: AgentControlAutomationShape["validateDefinition"] = (
         definition,
         now,
-      ) => {
-        const nowMs = Date.parse(now);
-        const schedule = definition.schedule;
-        const firstMs = Date.parse(schedule.kind === "once" ? schedule.runAt : schedule.startsAt);
-        const endMs = Date.parse(schedule.kind === "once" ? schedule.runAt : schedule.endsAt);
-        if (!Number.isFinite(firstMs) || firstMs <= nowMs) {
-          return invalid("schedule-invalid", "The first scheduled run must be in the future.");
-        }
-        if (endMs < firstMs || endMs > nowMs + AGENT_CONTROL_AUTOMATION_MAX_HORIZON_MS) {
-          return invalid(
-            "schedule-invalid",
-            "The schedule must end at or before the server scheduling horizon.",
-          );
-        }
-        if (
-          schedule.kind === "fixed-interval" &&
-          schedule.intervalMs < AGENT_CONTROL_AUTOMATION_MIN_INTERVAL_MS
-        ) {
-          return invalid(
-            "schedule-invalid",
-            `Recurring intervals must be at least ${AGENT_CONTROL_AUTOMATION_MIN_INTERVAL_MS}ms.`,
-          );
-        }
-        return Effect.void;
-      };
+      ) =>
+        Effect.gen(function* () {
+          const nowMs = Date.parse(now);
+          const schedule = definition.schedule;
+          if (schedule.kind === "calendar") {
+            const problem = (yield* loadCalendarSchedules).calendarScheduleProblem(schedule);
+            if (problem !== null) return yield* invalid("schedule-invalid", problem);
+          }
+          const firstMs = Date.parse((yield* firstRunAt(schedule)) ?? "");
+          const endMs = Date.parse(schedule.kind === "once" ? schedule.runAt : schedule.endsAt);
+          if (!Number.isFinite(firstMs) || firstMs <= nowMs) {
+            return yield* invalid(
+              "schedule-invalid",
+              "The first scheduled run must be in the future.",
+            );
+          }
+          if (endMs < firstMs || endMs > nowMs + AGENT_CONTROL_AUTOMATION_MAX_HORIZON_MS) {
+            return yield* invalid(
+              "schedule-invalid",
+              "The schedule must end at or before the server scheduling horizon.",
+            );
+          }
+          if (
+            schedule.kind === "fixed-interval" &&
+            schedule.intervalMs < AGENT_CONTROL_AUTOMATION_MIN_INTERVAL_MS
+          ) {
+            return yield* invalid(
+              "schedule-invalid",
+              `Recurring intervals must be at least ${AGENT_CONTROL_AUTOMATION_MIN_INTERVAL_MS}ms.`,
+            );
+          }
+        });
 
       const get: AgentControlAutomationShape["get"] = (automationId, scope) =>
         repository.getAutomation(automationId).pipe(
@@ -283,6 +309,18 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
             }
           }
           yield* validateLifecyclePlan(plan);
+          const proposed =
+            plan.kind === "createAutomation"
+              ? plan.definition
+              : plan.kind === "updateAutomation"
+                ? plan.after
+                : null;
+          if (
+            proposed?.runPolicy === "run-without-asking" &&
+            proposal.principal.kind !== "automation-owner"
+          ) {
+            return yield* invalid("privilege-escalation", UNATTENDED_OWNER_ONLY);
+          }
           const now = new Date().toISOString();
           if (plan.kind === "createAutomation") {
             const automation: AgentControlAutomation = {
@@ -295,7 +333,7 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
               enabled: plan.definition.enabled,
               cancelled: false,
               cancelledAt: null,
-              nextRunAt: nextRunAt(plan.definition),
+              nextRunAt: yield* nextRunAt(plan.definition),
               createdAt: now,
               updatedAt: now,
             };
@@ -318,7 +356,7 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
                   definition: plan.after,
                   revision: current.value.revision + 1,
                   enabled: plan.after.enabled,
-                  nextRunAt: nextRunAt(plan.after),
+                  nextRunAt: yield* nextRunAt(plan.after),
                   updatedAt: now,
                 }
               : {
@@ -404,6 +442,56 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
               keepNewest: AGENT_CONTROL_AUTOMATION_RUN_HISTORY_MAX,
             });
           }
+          if (next.status === "failed") yield* pauseAfterFailures(current.value.automationId);
+        });
+
+      /**
+       * A schedule that runs without asking stops after its last runs all failed: nobody
+       * watches it, so it must not keep failing. It is disabled (a new revision; the owner
+       * turns it on again), never cancelled. A schedule that asks first needs no pause:
+       * every run already waits for a person.
+       */
+      const pauseAfterFailures = (automationId: AgentControlAutomation["automationId"]) =>
+        Effect.gen(function* () {
+          const found = yield* repository.getAutomation(automationId);
+          if (Option.isNone(found)) return;
+          const automation = found.value;
+          if (!runsWithoutAsking(automation) || !automation.enabled || automation.cancelled) return;
+          const recent = yield* repository.listRuns({
+            automationId,
+            limit: AGENT_CONTROL_AUTOMATION_UNATTENDED_FAILURES_MAX,
+          });
+          if (
+            recent.length < AGENT_CONTROL_AUTOMATION_UNATTENDED_FAILURES_MAX ||
+            recent.some((run) => run.status !== "failed")
+          )
+            return;
+          const now = new Date().toISOString();
+          const paused = yield* repository.replaceAutomation({
+            automation: {
+              ...automation,
+              definition: { ...automation.definition, enabled: false },
+              revision: automation.revision + 1,
+              enabled: false,
+              nextRunAt: null,
+              updatedAt: now,
+            },
+            expectedRevision: automation.revision,
+            expectedCancelled: false,
+          });
+          if (!paused) return;
+          yield* repository.transitionRun({
+            runId: recent[0]!.runId,
+            expectedStatuses: ["failed"],
+            status: "failed",
+            proposalId: recent[0]!.proposalId,
+            safeFailureDetail: UNATTENDED_PAUSE_DETAIL,
+            updatedAt: now,
+            completedAt: recent[0]!.completedAt ?? now,
+          });
+          yield* Effect.logWarning("agent-control.automation-paused-after-failures", {
+            automationId,
+          });
         });
 
       const materialize = (run: AgentControlAutomationRun) =>
@@ -442,7 +530,10 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
                   AGENT_CONTROL_CAPABILITIES.externalSharedCheckout,
                 )) &&
               (definition.execution.runtimeMode !== "full-access" ||
-                current?.capabilities.includes(AGENT_CONTROL_CAPABILITIES.externalFullAccess));
+                current?.capabilities.includes(AGENT_CONTROL_CAPABILITIES.externalFullAccess)) &&
+              // A heartbeat queues into an existing chat: thread control.
+              (definition.execution.target === undefined ||
+                current?.capabilities.includes(AGENT_CONTROL_CAPABILITIES.externalControlThreads));
             if (
               current === undefined ||
               !projectAllowed ||
@@ -466,24 +557,26 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
             }
           }
           const now = new Date();
+          const execution = automation.value.definition.execution;
+          const plan = {
+            kind: "automationRun" as const,
+            automationId: run.automationId,
+            runId: run.runId,
+            automationRevision: run.automationRevision,
+            scheduledFor: run.scheduledFor,
+            coalescedOccurrences: run.coalescedOccurrences,
+            execution,
+          };
           const submitted = yield* proposals.submit({
             principal: automation.value.principal,
             requestId: AgentControlRequestId.make(`automation-run:${run.runId}`),
-            plan: {
-              kind: "automationRun",
-              automationId: run.automationId,
-              runId: run.runId,
-              automationRevision: run.automationRevision,
-              scheduledFor: run.scheduledFor,
-              coalescedOccurrences: run.coalescedOccurrences,
-              execution: automation.value.definition.execution,
-            },
-            riskTags: [
-              AGENT_CONTROL_RISK_TAGS.scheduledRun,
-              AGENT_CONTROL_RISK_TAGS.createsThreads,
-              AGENT_CONTROL_RISK_TAGS.startsProviderTurn,
-            ],
-            promptSummary: `Scheduled run for ${automation.value.definition.execution.title}`,
+            plan,
+            // A heartbeat's run queues into its chat and creates none.
+            riskTags: agentControlRiskTagsForPlan(plan),
+            promptSummary:
+              execution.target === undefined
+                ? `Scheduled run for ${execution.title}`
+                : `Scheduled run for ${execution.title}, queued in thread ${execution.target.threadId}`,
             now: now.toISOString(),
             expiresAt: new Date(
               now.getTime() + AGENT_CONTROL_AUTOMATION_PROPOSAL_TTL_MS,
@@ -494,6 +587,23 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
             proposalId: submitted.proposal.proposalId,
             updatedAt: new Date().toISOString(),
           });
+          if (attached && runsWithoutAsking(automation.value)) {
+            // The owner approved this schedule to run without asking: this run is approved
+            // on that standing decision. Execution revalidates the run against the current
+            // definition, so a schedule changed since runs nothing it did not approve.
+            const approved = yield* proposals
+              .decide({
+                proposalId: submitted.proposal.proposalId,
+                decision: "approved",
+                actor: "standing-approval",
+                decidedAt: new Date().toISOString(),
+              })
+              .pipe(Effect.option);
+            if (Option.isSome(approved)) {
+              yield* syncRun(approved.value);
+              return;
+            }
+          }
           if (!attached) {
             // Cancellation/update won between the immutable proposal insert and
             // run attachment. The proposal is made inert immediately; even if

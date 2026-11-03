@@ -85,7 +85,8 @@ function forkHandoffChangesProvider(handoff: ContextHandoffTransitionSubject): b
 /**
  * Whether a handoff moved the thread to another provider instance or model: every model change
  * (a missing reason is one recorded before handoffs carried a reason), and a fork's first fresh
- * session when the first message also switched provider instance. Relocations keep their model.
+ * session when the first message also switched provider instance. Resume fallbacks (a relocation,
+ * missing native history) keep their model.
  */
 export function isModelChangeHandoff(handoff: ContextHandoffTransitionSubject): boolean {
   if (handoff.reason === undefined || handoff.reason === "model-change") return true;
@@ -111,27 +112,66 @@ export function contextHandoffSourceEndpoint(handoff: {
 }
 
 /**
- * Platform-neutral copy for a working-directory relocation handoff. Its source
- * and target are normally the same model, so it reads as a fresh session in
- * the new folder instead of a model transition.
+ * Platform-neutral copy for a handoff the node started itself because the thread's native
+ * conversation could not be resumed. Its source and target are normally the same model, so it
+ * reads as a fresh session, with the reason it was needed, instead of a model transition.
  */
-export const CWD_RELOCATION_HANDOFF_COPY = {
+export interface ResumeFallbackHandoffCopy {
   /** Divider headline once the fresh session received the context. */
-  continued: "Continued in a fresh session in the new folder",
+  readonly continued: string;
   /** Divider headline for an attempt that failed or could not be confirmed. */
-  attempted: "Fresh session in the new folder",
+  readonly attempted: string;
+  /** Hover card title for an attempt that failed. */
+  readonly failed: string;
   /** Why the conversation was not resumed natively. */
+  readonly explanation: string;
+  /** Nothing was sent: the same message goes out again with a new send. */
+  readonly retryHint: string;
+}
+
+/** A working-directory relocation: the provider can't resume a conversation from another folder. */
+export const CWD_RELOCATION_HANDOFF_COPY = {
+  continued: "Continued in a fresh session in the new folder",
+  attempted: "Fresh session in the new folder",
+  failed: "Couldn't continue in the new folder",
   explanation:
     "The working folder moved and this provider can't resume a conversation from another folder, so a fresh session received the conversation's context.",
-  /** Nothing was sent: the same message goes out again with a new send. */
   retryHint: "Send your message again to retry.",
-} as const;
+} as const satisfies ResumeFallbackHandoffCopy;
 
-/** The relocation divider's headline for a terminal handoff status. */
-export function cwdRelocationHandoffHeadline(status: ContextHandoffTimelineStatus): string {
-  return status === "consumed"
-    ? CWD_RELOCATION_HANDOFF_COPY.continued
-    : CWD_RELOCATION_HANDOFF_COPY.attempted;
+/** The provider no longer had the conversation (for example, it cleaned up old history). */
+export const NATIVE_HISTORY_UNAVAILABLE_HANDOFF_COPY = {
+  continued: "Continued in a fresh session",
+  attempted: "Fresh session",
+  failed: "Couldn't continue in a fresh session",
+  explanation:
+    "The provider no longer has this conversation's history, so a fresh session received the conversation's context.",
+  retryHint: "Send your message again to retry.",
+} as const satisfies ResumeFallbackHandoffCopy;
+
+/**
+ * The copy of a handoff that stood in for a native resume: a working-directory relocation, or
+ * native history the provider no longer had. Null for model changes and forks.
+ */
+export function resumeFallbackHandoffCopy(handoff: {
+  readonly reason?: ContextHandoffReason | undefined;
+}): ResumeFallbackHandoffCopy | null {
+  switch (handoff.reason) {
+    case "cwd-relocation":
+      return CWD_RELOCATION_HANDOFF_COPY;
+    case "native-history-unavailable":
+      return NATIVE_HISTORY_UNAVAILABLE_HANDOFF_COPY;
+    default:
+      return null;
+  }
+}
+
+/** A resume-fallback divider's headline for its terminal status. */
+export function resumeFallbackHandoffHeadline(
+  copy: ResumeFallbackHandoffCopy,
+  status: ContextHandoffTimelineStatus,
+): string {
+  return status === "consumed" ? copy.continued : copy.attempted;
 }
 
 /**
@@ -252,14 +292,15 @@ export function contextHandoffStatusSuffix(handoff: ContextHandoffMarkerSubject)
 }
 
 /**
- * What a failed working-directory relocation tells the user to do: nothing was
- * sent, so the same message goes out again with a new send. Null for every
- * other handoff, including model changes, which offer no retry of their own.
+ * What a failed resume-fallback handoff tells the user to do: nothing was sent,
+ * so the same message goes out again with a new send. Null once it completed or
+ * when its delivery is uncertain. Model changes offer no retry of their own.
  */
-export function cwdRelocationHandoffRetryHint(handoff: ContextHandoffMarkerSubject): string | null {
-  return isCwdRelocationHandoff(handoff) && handoff.status === "failed"
-    ? CWD_RELOCATION_HANDOFF_COPY.retryHint
-    : null;
+export function resumeFallbackHandoffRetryHint(
+  copy: ResumeFallbackHandoffCopy,
+  handoff: ContextHandoffMarkerSubject,
+): string | null {
+  return handoff.status === "failed" ? copy.retryHint : null;
 }
 
 /**
@@ -280,19 +321,22 @@ function joinAccessibleSentences(parts: ReadonlyArray<string | null>): string {
 }
 
 /**
- * The screen-reader label of a relocation divider: its headline, how it ended
- * and what to do next, as sentences. Model changes name their endpoints, which
- * each platform labels itself.
+ * The screen-reader label of a resume-fallback divider: its headline, how it
+ * ended and what to do next, as sentences. Model changes name their endpoints,
+ * which each platform labels itself.
  */
-export function cwdRelocationHandoffAccessibleLabel(handoff: ContextHandoffMarkerSubject): string {
+export function resumeFallbackHandoffAccessibleLabel(
+  copy: ResumeFallbackHandoffCopy,
+  handoff: ContextHandoffMarkerSubject,
+): string {
   return joinAccessibleSentences([
-    cwdRelocationHandoffHeadline(handoff.status),
+    resumeFallbackHandoffHeadline(copy, handoff.status),
     contextHandoffStatusSuffix(handoff),
-    cwdRelocationHandoffRetryHint(handoff),
+    resumeFallbackHandoffRetryHint(copy, handoff),
   ]);
 }
 
-/** The screen-reader label of a fork handoff divider, like a relocation's. */
+/** The screen-reader label of a fork handoff divider, like a resume fallback's. */
 export function forkHandoffAccessibleLabel(
   handoff: ContextHandoffMarkerSubject,
   targetLabel?: string | null,

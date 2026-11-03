@@ -15,6 +15,8 @@ import {
 import { usageLimitHoldReleaseAtMs } from "@ryco/shared/usageLimit";
 import { deriveQueueFailureCauses, releaseQueueHoldKeys, type QueueHold } from "./hold.ts";
 import type { QueuedMessage } from "./logic.ts";
+import { moveDeviceQueueToServer, queueMigrationFailedHold } from "./migrate.ts";
+import { selectServerFollowUpQueueWaiting, selectThreadFollowUpQueue } from "./serverQueue.ts";
 import type { MessageQueueState } from "./store.ts";
 import {
   queueThreadViewInputs,
@@ -45,6 +47,19 @@ export interface QueueEnvironmentReadiness {
   readonly shellLive: boolean;
   /** Mutations may be sent to this environment now. */
   readonly mutationReady: boolean;
+  /**
+   * The node keeps follow-up queues itself (`capabilities.serverFollowUpQueue`): this device's
+   * entries of its started threads move there instead of being sent from here.
+   */
+  readonly serverQueue?: boolean | undefined;
+}
+
+/** What moving one device entry to the node's queue needs to know. */
+export interface QueueEntryMoveContext {
+  /** The device's hold, which moves with the queue (`thread.queue.add`'s `hold`). */
+  readonly hold: QueueHold | null;
+  /** The entry's send failed: it may have been delivered, so it moves as failed. */
+  readonly failed: boolean;
 }
 
 export interface MessageQueueDrainPlatform<C, S> {
@@ -68,8 +83,30 @@ export interface MessageQueueDrainPlatform<C, S> {
   readonly onEntryRemoved?: (
     threadKey: string,
     entry: QueuedMessage<C, S>,
-    cause: "accepted" | "projected",
+    cause: "accepted" | "projected" | "migrated",
   ) => void;
+  /**
+   * Sends `thread.queue.add` for one entry under its own message id. Resolves once the node
+   * accepted it (a no-op for an id it already has counts); rejects otherwise. Without it, a
+   * node's queue never takes this device's entries and they are sent from here.
+   */
+  readonly moveEntryToServer?: (
+    threadKey: string,
+    entry: QueuedMessage<C, S>,
+    context: QueueEntryMoveContext,
+  ) => Promise<void>;
+  /** Whether the node's queue can carry the entry (default: yes). */
+  readonly isEntryMovable?: (entry: QueuedMessage<C, S>) => boolean;
+  /**
+   * An add of this device to the node's queue is still on its way for the thread ("Queuing…").
+   * A head the node cannot carry waits behind it. Re-evaluate (`evaluate`) when it changes.
+   */
+  readonly isServerQueueAddPending?: (threadKey: string) => boolean;
+  /**
+   * Every entry this device held for the environment's threads moved to its node. Recorded in
+   * the device's own storage; a move cut short resumes on the next evaluation either way.
+   */
+  readonly onServerQueueMigrated?: (environmentId: EnvironmentId) => void;
   /**
    * A steer attempt was rejected; its message stays queued (marked failed, for an explicit
    * retry, when `deliveryUncertain`). Called once per attempt.
@@ -98,8 +135,12 @@ export interface MessageQueueDrainCoordinator {
   inspect(threadKey: string): {
     pendingDispatch: QueuedDispatchSnapshot | null;
     inFlightMessageId: string | null;
+    /** The entry whose add to the node's queue is on its way; it must not be edited or steered. */
+    movingMessageId: string | null;
     lastStep: QueueDrainStep | null;
   };
+  /** Notified whenever an entry starts or stops moving to the node's queue. */
+  subscribeMoving(listener: () => void): () => void;
 }
 
 const DEFAULT_ACK_TIMEOUT_MS = 90_000;
@@ -152,6 +193,9 @@ export function createMessageQueueDrainCoordinator<C, S>(
   const pending = new Map<string, QueuedDispatchSnapshot>();
   const ackTimers = new Map<string, unknown>();
   const inFlight = new Map<string, { messageId: string; runId: number; epoch: number }>();
+  /** Per thread, the entry whose `thread.queue.add` is on its way. */
+  const moving = new Map<string, string>();
+  const movingListeners = new Set<() => void>();
   const hookSnapshots = new Map<string, QueuedDispatchSnapshot>();
   const failedSnapshots = new Map<string, QueuedDispatchSnapshot>();
   const dispatched = new Map<string, Set<string>>();
@@ -262,6 +306,18 @@ export function createMessageQueueDrainCoordinator<C, S>(
     lastInputs.delete(key);
   }
 
+  function setMoving(key: string, messageId: string | null): void {
+    if ((moving.get(key) ?? null) === messageId) return;
+    if (messageId === null) moving.delete(key);
+    else moving.set(key, messageId);
+    for (const listener of movingListeners) listener();
+  }
+
+  /** What the thread's evaluation reads from the threads store; the node's queue included. */
+  function threadInputs(state: AppState, ref: ScopedThreadRef): readonly unknown[] {
+    return [...queueThreadViewInputs(state, ref), selectThreadFollowUpQueue(state, ref)];
+  }
+
   function clearAllBookkeeping(): void {
     for (const timer of ackTimers.values()) timers.clearTimeout(timer);
     for (const timer of deferTimers.values()) timers.clearTimeout(timer);
@@ -273,6 +329,10 @@ export function createMessageQueueDrainCoordinator<C, S>(
     pending.clear();
     ackTimers.clear();
     inFlight.clear();
+    if (moving.size > 0) {
+      moving.clear();
+      for (const listener of movingListeners) listener();
+    }
     hookSnapshots.clear();
     failedSnapshots.clear();
     dispatched.clear();
@@ -338,7 +398,7 @@ export function createMessageQueueDrainCoordinator<C, S>(
         return;
       }
       const threadsState = platform.threads.getState();
-      lastInputs.set(key, queueThreadViewInputs(threadsState, ref));
+      lastInputs.set(key, threadInputs(threadsState, ref));
       const view = readQueueThreadView(threadsState, ref);
       const sender = platform.resolveSender(key, view);
       const environment = platform.readEnvironment(ref.environmentId, threadsState);
@@ -358,10 +418,19 @@ export function createMessageQueueDrainCoordinator<C, S>(
         headProviderInstanceId: platform.headProviderInstanceId(queue[0]!),
         view,
         draft,
-        environment,
+        environment: {
+          shellLive: environment.shellLive,
+          mutationReady: environment.mutationReady,
+          serverQueue: environment.serverQueue === true && platform.moveEntryToServer !== undefined,
+        },
+        headMigratable: platform.isEntryMovable?.(queue[0]!) ?? true,
         pendingDispatch: pending.get(key) ?? null,
         dispatchedMessageIds: dispatchedFor(key),
         sender: sender?.kind ?? null,
+        serverQueueWaiting:
+          environment.serverQueue === true &&
+          (selectServerFollowUpQueueWaiting(threadsState, ref) ||
+            (platform.isServerQueueAddPending?.(key) ?? false)),
       });
       lastSteps.set(key, step);
       if (!applyStep(key, step, { ref, view, queue, hold, sender })) return;
@@ -436,7 +505,78 @@ export function createMessageQueueDrainCoordinator<C, S>(
       case "send":
         send(key, step.messageId, context);
         return false;
+      case "migrate":
+        migrate(key, context.ref);
+        return false;
     }
+  }
+
+  /**
+   * Moves this device's entries of one thread to the node's queue (`moveDeviceQueueToServer`).
+   * Holds the thread's in-flight slot, so no send or second move starts meanwhile.
+   */
+  function migrate(key: string, ref: ScopedThreadRef): void {
+    const move = platform.moveEntryToServer;
+    if (!move || inFlight.has(key) || deferTimers.has(key)) return;
+    const head = queueOf(key)[0];
+    if (!head) return;
+    const moveRunId = runId;
+    const epoch = queueStore.getState().epoch;
+    inFlight.set(key, { messageId: head.id, runId: moveRunId, epoch });
+    const current = () => runId === moveRunId && queueStore.getState().epoch === epoch;
+    void (async () => {
+      const outcome = await moveDeviceQueueToServer({
+        nextEntry: () => {
+          const state = queueStore.getState();
+          const entry = (state.queuesByThreadKey[key] ?? [])[0];
+          return entry &&
+            (platform.isEntryMovable?.(entry) ?? true) &&
+            entry.deliveryStatus !== "sending" &&
+            state.steerAttemptsByThreadKey[key]?.[entry.id] === undefined
+            ? entry
+            : null;
+        },
+        move: (entry) =>
+          move(key, entry, {
+            hold: queueStore.getState().holdsByThreadKey[key] ?? null,
+            failed: entry.deliveryStatus === "failed",
+          }),
+        isQueued: (entry) => queueOf(key).some((candidate) => candidate.id === entry.id),
+        drop: (entry) => {
+          queueStore.getState().remove(key, entry.id);
+          platform.onEntryRemoved?.(key, entry, "migrated");
+        },
+        current,
+        onMoving: (entry) => {
+          if (current()) setMoving(key, entry?.id ?? null);
+        },
+      });
+      if (outcome.kind === "stale") return;
+      if (inFlight.get(key)?.runId === moveRunId) inFlight.delete(key);
+      if (outcome.kind === "failed") {
+        // A connection that went away is not a failure: the move resumes once it is back.
+        const environment = platform.readEnvironment(
+          ref.environmentId,
+          platform.threads.getState(),
+        );
+        if (environment.mutationReady) {
+          queueStore
+            .getState()
+            .hold(key, queueMigrationFailedHold(outcome.entry.id, outcome.error, nowIso()));
+        }
+      } else if (queueOf(key).length === 0) {
+        notifyEnvironmentMigrated(ref.environmentId);
+      }
+      markDirty(key);
+    })();
+  }
+
+  function notifyEnvironmentMigrated(environmentId: EnvironmentId): void {
+    if (!platform.onServerQueueMigrated) return;
+    const remaining = activeKeys().some(
+      (key) => parseScopedThreadKey(key)?.environmentId === environmentId,
+    );
+    if (!remaining) platform.onServerQueueMigrated(environmentId);
   }
 
   function send(
@@ -613,9 +753,7 @@ export function createMessageQueueDrainCoordinator<C, S>(
     for (const key of activeKeys()) {
       const ref = parseScopedThreadKey(key);
       if (!ref) continue;
-      if (
-        !queueThreadViewInputsEqual(lastInputs.get(key), queueThreadViewInputs(threadsState, ref))
-      ) {
+      if (!queueThreadViewInputsEqual(lastInputs.get(key), threadInputs(threadsState, ref))) {
         markDirty(key);
       }
     }
@@ -696,7 +834,14 @@ export function createMessageQueueDrainCoordinator<C, S>(
       return {
         pendingDispatch: pending.get(threadKey) ?? null,
         inFlightMessageId: inFlight.get(threadKey)?.messageId ?? null,
+        movingMessageId: moving.get(threadKey) ?? null,
         lastStep: lastSteps.get(threadKey) ?? null,
+      };
+    },
+    subscribeMoving(listener) {
+      movingListeners.add(listener);
+      return () => {
+        movingListeners.delete(listener);
       };
     },
   };

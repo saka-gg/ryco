@@ -144,7 +144,7 @@ function makeEngine(
     streamDomainEvents: Stream.empty,
     subscribeDomainEvents: Effect.gen(function* () {
       const pubsub = yield* PubSub.unbounded<OrchestrationEvent>();
-      return yield* PubSub.subscribe(pubsub);
+      return Stream.fromSubscription(yield* PubSub.subscribe(pubsub));
     }),
   } satisfies OrchestrationEngineShape;
 }

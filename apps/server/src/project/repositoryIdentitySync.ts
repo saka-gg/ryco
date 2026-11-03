@@ -29,7 +29,7 @@ import {
 import { makeDrainableWorker } from "@ryco/shared/DrainableWorker";
 import { isChatProject } from "@ryco/shared/projectKind";
 import { losslessBackpressureQueuePolicy } from "@ryco/shared/QueuePolicy";
-import { Cause, Duration, Effect, PubSub, Schedule, Scope, Semaphore, Stream } from "effect";
+import { Cause, Duration, Effect, Schedule, Scope, Semaphore, Stream } from "effect";
 
 import type {
   ProjectionProjectRepositoryIdentityState,
@@ -255,7 +255,7 @@ export const makeRepositoryIdentitySync = Effect.fn("makeRepositoryIdentitySync"
 export const runRepositoryIdentitySync = (
   deps: RepositoryIdentitySyncDependencies & {
     /** Acquired before the first sweep, so no project created meanwhile is missed. */
-    readonly subscribe: Effect.Effect<PubSub.Subscription<OrchestrationEvent>, never, Scope.Scope>;
+    readonly subscribe: Effect.Effect<Stream.Stream<OrchestrationEvent>, never, Scope.Scope>;
     readonly sweepInterval?: Duration.Input;
   },
 ) =>
@@ -276,9 +276,9 @@ export const runRepositoryIdentitySync = (
         );
       });
     const { sync } = yield* makeRepositoryIdentitySync({ ...deps, onProbeFailed: scheduleRetry });
-    // The domain-event subscription is backpressured: a subscriber stuck behind a sweep (or a
-    // slow `git`) would eventually stall the engine's publishing. Hand triggered projects to a
-    // worker instead and keep the subscriber at the speed of the event stream.
+    // The bus never waits for subscribers, but one stuck behind a sweep (or a slow `git`) would
+    // replay what it missed from the event store. Hand triggered projects to a worker instead and
+    // keep the subscriber at the speed of the event stream.
     const worker = yield* makeDrainableWorker({
       policy: losslessBackpressureQueuePolicy({
         component: "RepositoryIdentitySync",
@@ -286,9 +286,9 @@ export const runRepositoryIdentitySync = (
       }),
       process: (projectId: ProjectId) => sync(projectId).pipe(Effect.asVoid),
     });
-    const subscription = yield* deps.subscribe;
+    const events = yield* deps.subscribe;
     yield* Effect.forkScoped(
-      Stream.runForEach(Stream.fromSubscription(subscription), (event) => {
+      Stream.runForEach(events, (event) => {
         const projectId = repositoryIdentityTrigger(event);
         return projectId === null ? Effect.void : worker.enqueue(projectId);
       }),

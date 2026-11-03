@@ -10,6 +10,7 @@ import {
   TurnId,
   ProviderInstanceId,
   RuntimeSessionId,
+  type OrchestrationEvent,
 } from "@ryco/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -26,9 +27,9 @@ import { OrchestrationEventStore } from "../../persistence/Services/Orchestratio
 import { ProjectAvatarStore } from "../../project/Services/ProjectAvatarStore.ts";
 import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
+import { ORCHESTRATION_PROJECTOR_NAMES } from "../projectorNames.ts";
 import {
   ORCHESTRATION_EVENT_PROJECTORS,
-  ORCHESTRATION_PROJECTOR_NAMES,
   OrchestrationProjectionPipelineLive,
 } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
@@ -83,6 +84,11 @@ it("routes each event only to its explicit projection owners", () => {
   assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.unsettled"], ["projection.threads"]);
   assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.snoozed"], ["projection.threads"]);
   assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.unsnoozed"], ["projection.threads"]);
+  assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.settle-deferred"], [
+    "projection.threads",
+  ]);
+  assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.hidden"], ["projection.threads"]);
+  assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.unhidden"], ["projection.threads"]);
   assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.usage-limit-set"], [
     "projection.threads",
   ]);
@@ -105,7 +111,24 @@ it("routes each event only to its explicit projection owners", () => {
   assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["worktree.relocated"], [
     ORCHESTRATION_PROJECTOR_NAMES.worktrees,
   ]);
-  assert.equal(Object.keys(ORCHESTRATION_EVENT_PROJECTORS).length, 51);
+  // Pull request watches have their own table; thread rows never change with them.
+  assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.pull-request-watch-updated"], [
+    ORCHESTRATION_PROJECTOR_NAMES.threadPullRequestWatches,
+  ]);
+  assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.command-watch-updated"], [
+    ORCHESTRATION_PROJECTOR_NAMES.threadCommandWatches,
+  ]);
+  assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.deleted"], [
+    ORCHESTRATION_PROJECTOR_NAMES.threads,
+    ORCHESTRATION_PROJECTOR_NAMES.threadPullRequestWatches,
+    ORCHESTRATION_PROJECTOR_NAMES.threadCommandWatches,
+    ORCHESTRATION_PROJECTOR_NAMES.threadFollowUpQueues,
+  ]);
+  // The follow-up queue has its own tables too.
+  assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.queue-entry-added"], [
+    ORCHESTRATION_PROJECTOR_NAMES.threadFollowUpQueues,
+  ]);
+  assert.equal(Object.keys(ORCHESTRATION_EVENT_PROJECTORS).length, 63);
 });
 
 it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
@@ -300,6 +323,66 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         yield* sql`SELECT snoozed_until, snoozed_at FROM projection_threads WHERE thread_id = 'thread-1'`,
         [{ snoozed_until: null, snoozed_at: null }],
       );
+
+      // The Hidden shelf and a settle filed while the thread worked.
+      const triageEvent = (
+        id: string,
+        event: Pick<OrchestrationEvent, "type" | "payload">,
+      ): Parameters<typeof eventStore.append>[0] =>
+        ({
+          ...event,
+          eventId: EventId.make(id),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-1"),
+          occurredAt: settledAt,
+          commandId: CommandId.make(`cmd-${id}`),
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+        }) as Parameters<typeof eventStore.append>[0];
+      const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+        eventStore
+          .append(event)
+          .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+      const triageRows = sql`SELECT hidden_at, settle_when_idle_at, settled_override FROM projection_threads WHERE thread_id = 'thread-1'`;
+      yield* appendAndProject(
+        triageEvent("evt-hide", {
+          type: "thread.hidden",
+          payload: {
+            threadId: ThreadId.make("thread-1"),
+            hiddenAt: settledAt,
+            updatedAt: settledAt,
+          },
+        }),
+      );
+      yield* appendAndProject(
+        triageEvent("evt-file", {
+          type: "thread.settle-deferred",
+          payload: {
+            threadId: ThreadId.make("thread-1"),
+            settleWhenIdleAt: settledAt,
+            updatedAt: settledAt,
+          },
+        }),
+      );
+      assert.deepEqual(yield* triageRows, [
+        { hidden_at: settledAt, settle_when_idle_at: settledAt, settled_override: "active" },
+      ]);
+      yield* appendAndProject(
+        triageEvent("evt-settle-filed", {
+          type: "thread.settled",
+          payload: { threadId: ThreadId.make("thread-1"), settledAt, updatedAt: settledAt },
+        }),
+      );
+      yield* appendAndProject(
+        triageEvent("evt-unhide", {
+          type: "thread.unhidden",
+          payload: { threadId: ThreadId.make("thread-1"), updatedAt: settledAt },
+        }),
+      );
+      assert.deepEqual(yield* triageRows, [
+        { hidden_at: null, settle_when_idle_at: null, settled_override: "settled" },
+      ]);
     }),
   );
 
@@ -1213,6 +1296,47 @@ it.layer(
       assert.isTrue(yield* exists(removePath));
       assert.isTrue(yield* exists(otherThreadPath));
 
+      // A queued follow-up's attachment is no message's yet; it is sent after the revert.
+      const queuedAttachmentId = "thread-revert-files-00000000-0000-4000-8000-000000000004";
+      const queuedPath = path.join(attachmentsDir, `${queuedAttachmentId}.png`);
+      yield* fileSystem.writeFileString(queuedPath, "queued");
+      yield* appendAndProject({
+        type: "thread.queue-entry-added",
+        eventId: EventId.make("evt-revert-files-queue"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: now,
+        commandId: CommandId.make("cmd-revert-files-queue"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-revert-files-queue"),
+        metadata: {},
+        payload: {
+          threadId,
+          entry: {
+            messageId: MessageId.make("message-queued"),
+            text: "Next",
+            attachments: [
+              {
+                type: "image",
+                id: queuedAttachmentId,
+                name: "queued.png",
+                mimeType: "image/png",
+                sizeBytes: 6,
+              },
+            ],
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            createdAt: now,
+            updatedAt: now,
+            revision: 1,
+            status: "queued",
+            author: "user",
+          },
+          beforeMessageId: null,
+        },
+      });
+
       yield* appendAndProject({
         type: "thread.reverted",
         eventId: EventId.make("evt-revert-files-7"),
@@ -1232,6 +1356,7 @@ it.layer(
       assert.isTrue(yield* exists(keepPath));
       assert.isFalse(yield* exists(removePath));
       assert.isTrue(yield* exists(otherThreadPath));
+      assert.isTrue(yield* exists(queuedPath));
     }),
   );
 });

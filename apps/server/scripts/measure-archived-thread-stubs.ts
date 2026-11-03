@@ -18,7 +18,8 @@ import { parseArgs } from "node:util";
 import { deflateRawSync } from "node:zlib";
 
 import { syncServerShellSnapshot } from "@ryco/client-runtime/state/threads";
-import { EnvironmentId, OrchestrationShellStreamItem } from "@ryco/contracts";
+import { EnvironmentId, OrchestrationShellStreamWireItem } from "@ryco/contracts";
+import { isUnknownUnionMember } from "@ryco/contracts/base-schemas";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { RpcSerialization } from "effect/rpc";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -119,7 +120,7 @@ const runtime = ManagedRuntime.make(
 );
 
 const itemsCodec = RpcSerialization.json.codecFor(
-  Schema.NonEmptyArray(OrchestrationShellStreamItem),
+  Schema.NonEmptyArray(OrchestrationShellStreamWireItem),
 );
 const encodeItems = Schema.encodeUnknownSync(itemsCodec);
 const decodeItems = Schema.decodeUnknownSync(itemsCodec);
@@ -148,7 +149,7 @@ async function measure(form: "full" | "stub") {
       }),
     );
   }
-  let decoded: OrchestrationShellStreamItem[][] = [];
+  let decoded: OrchestrationShellStreamWireItem[][] = [];
   const decodeMs: number[] = [];
   for (let run = 0; run < RUNS; run += 1) {
     decodeMs.push(
@@ -164,7 +165,7 @@ async function measure(form: "full" | "stub") {
         const assembler = createShellSnapshotAssembler();
         for (const item of decoded.flat()) {
           const delivered = assembler.accept(item);
-          if (delivered?.kind === "snapshot") {
+          if (delivered && !isUnknownUnionMember(delivered) && delivered.kind === "snapshot") {
             syncServerShellSnapshot(
               { activeEnvironmentId: null, environmentStateById: {} },
               delivered.snapshot,

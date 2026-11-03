@@ -148,7 +148,11 @@ export function AttachmentDocumentPreview({
                 </p>
               }
             >
-              <PdfAttachmentPreview key={src} src={src} name={attachment.name} />
+              <PdfAttachmentPreview
+                key={src}
+                source={{ kind: "url", url: src }}
+                name={attachment.name}
+              />
             </Suspense>
           ) : attachment.sizeBytes > ATTACHMENT_TEXT_PREVIEW_MAX_BYTES ? (
             <p role="status" className="p-6 text-sm">

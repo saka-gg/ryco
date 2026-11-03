@@ -1,4 +1,4 @@
-import { Array as Arr, Deferred, Effect, Fiber, Option, PubSub, Queue, Ref, Stream } from "effect";
+import { Array as Arr, Effect, Fiber, Option, Queue, Ref, Stream } from "effect";
 import {
   type OrchestrationEvent,
   type OrchestrationShellSnapshot,
@@ -6,7 +6,6 @@ import {
   type OrchestrationShellStreamEvent,
   type OrchestrationShellStreamItem,
   type OrchestrationStubbedShellSnapshot,
-  type OrchestrationThreadPriorityEntry,
   OrchestrationGetSnapshotError,
   ThreadId,
   WorktreeId,
@@ -41,67 +40,9 @@ import {
   orchestrationShellFrameKey,
 } from "./orchestrationEventCoalescing.ts";
 import { rechunkByBudget, tapArray } from "../streamBatching.ts";
+import { dedupeBySequence } from "../../orchestration/sequenceOrderedStream.ts";
 import { orchestrationEventBytes } from "./orchestrationStreamBatching.ts";
 import { pageShellSnapshot } from "./shellSnapshotPages.ts";
-
-/**
- * One shared load for the subscribers a thread-priority ranking woke together.
- * It is joinable only until its read begins: every subscriber that joins heard
- * of its ranking before the read, so the shared result includes that ranking.
- * A ranking heard later starts a new load.
- */
-interface PriorityLoadFlight<A> {
-  reading: boolean;
-  readonly result: Deferred.Deferred<A, OrchestrationGetSnapshotError>;
-}
-
-// Keyed by the projection query service, which every connection of a server
-// shares, so subscribers on different connections join the same load. Each
-// shell form (full archived shells or archived stubs) has loads of its own.
-const prioritySnapshotFlights = new WeakMap<
-  object,
-  PriorityLoadFlight<OrchestrationStubbedShellSnapshot>
->();
-const priorityStubbedSnapshotFlights = new WeakMap<
-  object,
-  PriorityLoadFlight<OrchestrationStubbedShellSnapshot>
->();
-const priorityEntryFlights = new WeakMap<
-  object,
-  PriorityLoadFlight<ReadonlyArray<OrchestrationThreadPriorityEntry>>
->();
-
-/** Joins the open load in `flights` for `key`, or starts one that later callers can join. */
-const joinPriorityLoad = <A>(
-  flights: WeakMap<object, PriorityLoadFlight<A>>,
-  key: object,
-  load: Effect.Effect<A, OrchestrationGetSnapshotError>,
-): Effect.Effect<A, OrchestrationGetSnapshotError> =>
-  Effect.gen(function* () {
-    const flight = flights.get(key);
-    if (flight !== undefined && !flight.reading) {
-      return yield* Deferred.await(flight.result);
-    }
-    const next: PriorityLoadFlight<A> = {
-      reading: false,
-      result: yield* Deferred.make<A, OrchestrationGetSnapshotError>(),
-    };
-    flights.set(key, next);
-    // Detached: a subscriber that disconnects must not strand the others.
-    // The yield lets the other subscribers the same ranking woke join first.
-    yield* Effect.yieldNow.pipe(
-      Effect.andThen(
-        Effect.sync(() => {
-          next.reading = true;
-        }),
-      ),
-      Effect.andThen(load),
-      Effect.exit,
-      Effect.flatMap((exit) => Deferred.done(next.result, exit)),
-      Effect.forkDetach,
-    );
-    return yield* Deferred.await(next.result);
-  });
 
 const makeLiveQueueOverflowError = (input: {
   readonly stream: WsReplayStreamKind;
@@ -427,14 +368,14 @@ export const makeOrchestrationStreamHelpers = (deps: {
   readonly orchestrationEngine: OrchestrationEngineShape;
   readonly projectionSnapshotQuery: ProjectionSnapshotQueryShape;
   readonly repositoryIdentityResolver: RepositoryIdentityResolverShape;
-  readonly threadPriorityChanges?: Stream.Stream<void>;
   /** Payload-free resume probe; without it resumption reads event pages. */
   readonly probeResume?: OrchestrationEventStoreShape["probeResume"];
   /** One thread's events through the stream index; without it thread replay scans global pages. */
   readonly readStreamEventsPage?: OrchestrationEventStoreShape["readStreamEventsPage"];
+  /** Retention's replay floors; without it a resumed replay is never re-checked. */
+  readonly readReplayFloor?: OrchestrationEventStoreShape["readReplayFloor"];
 }) => {
   const { orchestrationEngine, projectionSnapshotQuery, repositoryIdentityResolver } = deps;
-  const threadPriorityChanges = deps.threadPriorityChanges ?? Stream.empty;
 
   const enrichProjectEvent = (
     event: OrchestrationEvent,
@@ -493,24 +434,6 @@ export const makeOrchestrationStreamHelpers = (deps: {
   const enrichOrchestrationEvents = (events: ReadonlyArray<OrchestrationEvent>) =>
     Effect.forEach(events, enrichProjectEvent, { concurrency: 4 });
 
-  /**
-   * Drops items at or below the last sequence sent. The state lives in the
-   * closure: each subscription builds its own pipeline.
-   */
-  const dedupeBySequence =
-    <A>(getSequence: (item: A) => number, initialSequence: number) =>
-    <E, R>(stream: Stream.Stream<A, E, R>): Stream.Stream<A, E, R> => {
-      let lastSequence = initialSequence;
-      return stream.pipe(
-        Stream.filter((item) => {
-          const nextSequence = getSequence(item);
-          if (nextSequence <= lastSequence) return false;
-          lastSequence = nextSequence;
-          return true;
-        }),
-      );
-    };
-
   const makeReplayBoundaryTracker = (snapshotSequence: number) =>
     Effect.gen(function* () {
       const latestLiveSequence = yield* Ref.make(snapshotSequence);
@@ -557,6 +480,12 @@ export const makeOrchestrationStreamHelpers = (deps: {
     readonly errorMessage: string;
     /** Pages to replay; the whole event log by default. */
     readonly readPage?: ReplayPageReader;
+    /**
+     * A resumed replay's floor: checked after each page is read and before it is sent. Retention
+     * raises a floor in the transaction that removes events below it, so a floor still at or
+     * below the resume point after a read means that page has no gap.
+     */
+    readonly replayFloor?: Effect.Effect<number, OrchestrationEventStoreError>;
   }): Stream.Stream<OrchestrationEvent, OrchestrationGetSnapshotError> => {
     const readReplayPage: ReplayPageReader =
       input.readPage ?? ((from, limit) => orchestrationEngine.readEventsPage(from, limit));
@@ -585,6 +514,19 @@ export const makeOrchestrationStreamHelpers = (deps: {
                 }),
             ),
           );
+          if (input.replayFloor !== undefined) {
+            const floor = yield* input.replayFloor.pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationGetSnapshotError({ message: input.errorMessage, cause }),
+              ),
+            );
+            if (floor > input.snapshotSequence) {
+              return yield* new OrchestrationGetSnapshotError({
+                message: `${input.errorMessage}: events after the resume point were removed`,
+              });
+            }
+          }
           const upperBound = Option.isSome(upperBoundBeforeRead)
             ? upperBoundBeforeRead
             : yield* input.captureReplayUpperBound;
@@ -626,7 +568,7 @@ export const makeOrchestrationStreamHelpers = (deps: {
    */
   const runLiveFeed = (input: {
     readonly stream: WsReplayStreamKind;
-    readonly liveSubscription: PubSub.Subscription<OrchestrationEvent>;
+    readonly liveEvents: Stream.Stream<OrchestrationEvent>;
     readonly liveQueue: Queue.Queue<OrchestrationEvent, OrchestrationGetSnapshotError>;
     readonly overflowedRef: Ref.Ref<boolean>;
     readonly replayMetrics: WsReplayMetrics;
@@ -684,7 +626,7 @@ export const makeOrchestrationStreamHelpers = (deps: {
           .push(event)
           .pipe(Effect.andThen(input.coalesceKey(event) === null ? Effect.void : armFlush));
 
-      yield* Stream.fromSubscription(input.liveSubscription).pipe(
+      yield* input.liveEvents.pipe(
         Stream.runForEach((event) => input.onEvent(event, push)),
         Effect.ensuring(
           Effect.gen(function* () {
@@ -724,14 +666,17 @@ export const makeOrchestrationStreamHelpers = (deps: {
   /**
    * Can a client that last applied `fromSequence` catch up from the event log
    * rather than a snapshot — of the shell or of one thread? Only when that
-   * sequence names an event this log still holds — a reset or foreign log
-   * restarts below it — and no more than one replay page of what the
-   * subscription delivers has happened since, beyond which a snapshot is the
-   * cheaper send. A thread is judged on its own backlog, so an idle retained
-   * thread still resumes while other threads stream. Its replay reads the
-   * thread's own stream when the store offers that; otherwise it scans global
-   * pages, so that scan is bounded as well. The log is never pruned today;
-   * pruning must keep this answer truthful.
+   * sequence lies within this log — a reset or foreign log restarts below it —
+   * and no more than one replay page of what the subscription delivers has
+   * happened since, beyond which a snapshot is the cheaper send. A thread is
+   * judged on its own backlog, so an idle retained thread still resumes while
+   * other threads stream. Its replay reads the thread's own stream when the
+   * store offers that; otherwise it scans global pages, so that scan is bounded
+   * as well. Compaction removes superseded progress events older than a day,
+   * leaving holes; the store's probe anchors on the log's range because replay
+   * from a hole reaches the same state (`EventLogCompaction`). The fallback
+   * below, for stores without a probe, still requires the exact event: a hole
+   * there costs a snapshot, never a wrong resume.
    */
   const canResumeAfter = (fromSequence: number, scope?: { readonly threadId: ThreadId }) =>
     Effect.gen(function* () {
@@ -777,20 +722,6 @@ export const makeOrchestrationStreamHelpers = (deps: {
       return !missed.hasMore;
     }).pipe(Effect.orElseSucceed(() => false));
 
-  /** Every thread's current ranking, when the projection can list them on their own. */
-  const loadThreadPriorityEntries =
-    projectionSnapshotQuery.listThreadPriorities === undefined
-      ? undefined
-      : projectionSnapshotQuery.listThreadPriorities().pipe(
-          Effect.mapError(
-            (cause) =>
-              new OrchestrationGetSnapshotError({
-                message: "Failed to load thread priorities",
-                cause,
-              }),
-          ),
-        );
-
   /**
    * A shell snapshot as the subscriber asked to receive it: one item, or pages.
    * Archived stubs only ever reach a paged subscriber (see `makeReplayableShellStream`).
@@ -803,64 +734,10 @@ export const makeOrchestrationStreamHelpers = (deps: {
       ? Stream.fromArrays(...pageShellSnapshot(snapshot))
       : Stream.make({ kind: "snapshot" as const, snapshot: withoutArchivedStubs(snapshot) });
 
-  /**
-   * The shell items a thread-priority ranking sends a subscriber. A client
-   * that takes deltas gets the rankings alone (dozens of rows); any other
-   * client gets a full snapshot, which every client understands. Every shell
-   * subscriber hears a ranking at the same moment, so they join one load.
-   */
-  const priorityStream = (
-    snapshot: Effect.Effect<OrchestrationStubbedShellSnapshot, OrchestrationGetSnapshotError>,
-    threadPriorities: "delta" | undefined,
-    snapshotDelivery: OrchestrationShellSnapshotDelivery | undefined,
-    stubbed: boolean,
-  ): Stream.Stream<OrchestrationShellStreamItem, OrchestrationGetSnapshotError> => {
-    const loadPriorities = loadThreadPriorityEntries;
-    if (threadPriorities === "delta" && loadPriorities !== undefined) {
-      return threadPriorityChanges.pipe(
-        Stream.mapEffect(() =>
-          joinPriorityLoad(priorityEntryFlights, projectionSnapshotQuery, loadPriorities),
-        ),
-        Stream.map((priorities) => ({ kind: "thread-priorities" as const, priorities })),
-      );
-    }
-    return threadPriorityChanges.pipe(
-      Stream.mapEffect(() =>
-        joinPriorityLoad(
-          stubbed ? priorityStubbedSnapshotFlights : prioritySnapshotFlights,
-          projectionSnapshotQuery,
-          snapshot,
-        ),
-      ),
-      Stream.flatMap((nextSnapshot) => shellSnapshotItems(nextSnapshot, snapshotDelivery)),
-    );
-  };
-
-  /**
-   * A resumed client keeps the shell it had, and a ranking made while it was
-   * away is no event it replays: a client that takes deltas gets the current
-   * rankings right after the resume marker. A failed read only skips it.
-   */
-  const resumedPriorityItems = (
-    threadPriorities: "delta" | undefined,
-  ): Stream.Stream<OrchestrationShellStreamItem> => {
-    const loadPriorities = loadThreadPriorityEntries;
-    if (threadPriorities !== "delta" || loadPriorities === undefined) return Stream.empty;
-    return Stream.unwrap(
-      loadPriorities.pipe(
-        Effect.map((priorities): Stream.Stream<OrchestrationShellStreamItem> =>
-          Stream.make({ kind: "thread-priorities" as const, priorities }),
-        ),
-        Effect.catch(() => Effect.succeed(Stream.empty)),
-      ),
-    );
-  };
-
   const makeReplayableShellStream = (
     fullSnapshot: Effect.Effect<OrchestrationShellSnapshot, OrchestrationGetSnapshotError>,
     options: {
       readonly resumeFromSequence?: number | undefined;
-      readonly threadPriorities?: "delta" | undefined;
       readonly snapshotDelivery?: OrchestrationShellSnapshotDelivery | undefined;
       /**
        * The snapshot with archived stubs, for a subscriber that asked for
@@ -874,20 +751,20 @@ export const makeOrchestrationStreamHelpers = (deps: {
   ) =>
     Stream.unwrap(
       Effect.gen(function* () {
-        const stubbed =
-          options.stubbedSnapshot !== undefined && options.snapshotDelivery === "paged";
         const snapshot: Effect.Effect<
           OrchestrationStubbedShellSnapshot,
           OrchestrationGetSnapshotError
         > =
-          stubbed && options.stubbedSnapshot !== undefined ? options.stubbedSnapshot : fullSnapshot;
+          options.stubbedSnapshot !== undefined && options.snapshotDelivery === "paged"
+            ? options.stubbedSnapshot
+            : fullSnapshot;
         const resumeFromSequence = options.resumeFromSequence;
         const resumed =
           resumeFromSequence !== undefined && (yield* canResumeAfter(resumeFromSequence));
         const loadedSnapshot = resumed ? undefined : yield* snapshot;
         const snapshotSequence =
           loadedSnapshot?.snapshotSequence ?? (resumed ? resumeFromSequence : 0);
-        const liveSubscription = yield* orchestrationEngine.subscribeDomainEvents;
+        const liveEvents = yield* orchestrationEngine.subscribeDomainEvents;
         const liveQueue = yield* Queue.bounded<OrchestrationEvent, OrchestrationGetSnapshotError>(
           ORCHESTRATION_LIVE_QUEUE_MAX_EVENTS,
         );
@@ -901,7 +778,7 @@ export const makeOrchestrationStreamHelpers = (deps: {
 
         const queuedBytesRef = yield* runLiveFeed({
           stream: "shell",
-          liveSubscription,
+          liveEvents,
           liveQueue,
           overflowedRef,
           replayMetrics,
@@ -918,6 +795,9 @@ export const makeOrchestrationStreamHelpers = (deps: {
           snapshotSequence,
           captureReplayUpperBound: replayBoundary.captureReplayUpperBound,
           errorMessage: "Failed to replay orchestration shell events",
+          ...(resumed && deps.readReplayFloor !== undefined
+            ? { replayFloor: deps.readReplayFloor({ aggregateKind: "log", streamId: "" }) }
+            : {}),
         }).pipe(tapArray((events) => replayMetrics.recordReplayEvent(lastSequenceOf(events))));
         const liveStream = drainLiveQueue({ liveQueue, queuedBytesRef, replayMetrics });
 
@@ -928,27 +808,15 @@ export const makeOrchestrationStreamHelpers = (deps: {
           dedupeBySequence((event) => event.sequence, snapshotSequence),
           rechunkByBudget({ maxItems: ORCHESTRATION_SHELL_STREAM_CHUNK_MAX_ITEMS }),
         );
-        const priorityItems = priorityStream(
-          snapshot,
-          options.threadPriorities,
-          options.snapshotDelivery,
-          stubbed,
-        );
-
         const resumedItem: OrchestrationShellStreamItem = {
           kind: "resumed",
           fromSequence: snapshotSequence,
         };
         const headItems =
           loadedSnapshot === undefined
-            ? Stream.concat(
-                Stream.make(resumedItem),
-                resumedPriorityItems(options.threadPriorities),
-              )
+            ? Stream.make(resumedItem)
             : shellSnapshotItems(loadedSnapshot, options.snapshotDelivery);
-        return Stream.concat(headItems, Stream.merge(eventStream, priorityItems)).pipe(
-          Stream.ensuring(replayMetrics.reset),
-        );
+        return Stream.concat(headItems, eventStream).pipe(Stream.ensuring(replayMetrics.reset));
       }),
     );
 
@@ -969,7 +837,7 @@ export const makeOrchestrationStreamHelpers = (deps: {
         const loadedSnapshot = resumed ? undefined : yield* snapshot;
         const snapshotSequence =
           loadedSnapshot?.snapshotSequence ?? (resumed ? resumeFromSequence : 0);
-        const liveSubscription = yield* orchestrationEngine.subscribeDomainEvents;
+        const liveEvents = yield* orchestrationEngine.subscribeDomainEvents;
         const liveQueue = yield* Queue.bounded<OrchestrationEvent, OrchestrationGetSnapshotError>(
           ORCHESTRATION_LIVE_QUEUE_MAX_EVENTS,
         );
@@ -997,7 +865,7 @@ export const makeOrchestrationStreamHelpers = (deps: {
 
         const queuedBytesRef = yield* runLiveFeed({
           stream: "thread",
-          liveSubscription,
+          liveEvents,
           liveQueue,
           overflowedRef,
           replayMetrics,
@@ -1018,6 +886,11 @@ export const makeOrchestrationStreamHelpers = (deps: {
           snapshotSequence,
           captureReplayUpperBound: replayBoundary.captureReplayUpperBound,
           errorMessage: "Failed to replay orchestration thread events",
+          ...(resumed && deps.readReplayFloor !== undefined
+            ? {
+                replayFloor: deps.readReplayFloor({ aggregateKind: "thread", streamId: threadId }),
+              }
+            : {}),
           ...(readStreamEventsPage === undefined
             ? {}
             : {

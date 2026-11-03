@@ -22,6 +22,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { OrchestrationGetTaskOutputError, type ServerSettings } from "@ryco/contracts";
+import { NotRegularFileError, openRegularFile } from "@ryco/shared/regularFile";
 import { Effect } from "effect";
 
 import { workflowScriptRootsFromSettings } from "./workflowScriptQuery.ts";
@@ -131,12 +132,17 @@ export const readTaskOutput = Effect.fn("orchestration.readTaskOutput")(function
   // the file descriptor (same rationale as workflowScriptQuery).
   const offset = input.offset;
   const read = yield* Effect.tryPromise(async () => {
-    const handle = await NodeFSP.open(resolved, "r");
+    const opened = await openRegularFile(resolved, { followSymlinks: true }).catch(
+      (cause: unknown) => {
+        if (cause instanceof NotRegularFileError) return null;
+        throw cause;
+      },
+    );
+    if (opened === null) {
+      return { failure: "not-regular-file" as const };
+    }
+    const { handle, stat } = opened;
     try {
-      const stat = await handle.stat();
-      if (!stat.isFile()) {
-        return { failure: "not-regular-file" as const };
-      }
       const pathStat = await NodeFSP.lstat(resolved);
       if (stat.ino !== pathStat.ino || stat.dev !== pathStat.dev) {
         return { failure: "changed-during-read" as const };

@@ -17,6 +17,9 @@
  * move the test to TestClock, then take the file off the list.
  */
 export const SERVER_TIMING_TEST_FILES = [
+  // Three real server processes start on one base directory; the second exits
+  // after its 0.5 s owner-lock wait.
+  "integration/databaseOwnerLock.integration.test.ts",
   // Failed discovery retries finish within 1 s.
   "src/agentControl/externalSecurity.test.ts",
   // Measurements answer within 3-6.5 s, and a stopped browser's cleanup is
@@ -28,12 +31,20 @@ export const SERVER_TIMING_TEST_FILES = [
   "src/httpShutdown.test.ts",
   // 16 in-process lock handoffs finish within 50 ms each.
   "src/hubIdentity/LocalHubIdentityState.test.ts",
+  // A real 900 ms busy-wait must reach a record through a real 100 ms ticker
+  // within 10 s, with its phase attributed.
+  "src/observability/EventLoopMonitor.test.ts",
+  // About 4,600 real dispatches past a stalled subscriber must finish within 10 s.
+  "src/orchestration/Layers/OrchestrationEngine.eventBus.test.ts",
   // Paging a large thread history finishes within 2 s.
   "src/orchestration/Layers/ProjectionSnapshotQuery.test.ts",
   // A prewarmed send reaches the provider within half of a 300 ms fake start.
   "src/orchestration/Layers/ProviderCommandReactor.test.ts",
   // Event-loop gaps stay under 250 ms while sqlite waits for a write lock.
   "src/persistence/Layers/Sqlite.test.ts",
+  // Owner-lock waits end within their 0.3-5 s budgets, and maintenance is refused
+  // well before its wait.
+  "src/persistence/databaseOwnerLock.test.ts",
   // Event-loop gaps and main-connection latency stay under a heavy read's time.
   "src/persistence/SqliteReadClient.test.ts",
   // A hanging folder probe is cut off within 1 s.
@@ -50,12 +61,23 @@ export const SERVER_TIMING_TEST_FILES = [
   "src/provider/Layers/ProviderInstanceRegistryLive.test.ts",
   // Provider shutdown finishes within 1 s.
   "src/provider/Layers/ProviderService.test.ts",
+  // A provider operation that needs 250 ms and an I/O round trip after a 600 ms
+  // stall finishes inside the rest of a 300 ms responsive budget, and a hung one
+  // still fails within a second of its deadline.
+  "src/provider/detachedDeadline.test.ts",
   // A hanging shutdown-hint write is cut off after 2 s, within 6 s overall.
   "src/serverRuntimeStartup.test.ts",
+  // A quarantined removal of a 9,092-entry tree finishes within its proportional
+  // deadline (3 s + 20 ms per entry).
+  "src/storage/filesystem.test.ts",
   // Shutdown flushes analytics within 2 s.
   "src/telemetry/Layers/AnalyticsService.test.ts",
   // Usage summaries answer within 2 s while the rates download hangs.
   "src/usage/UsageService.test.ts",
+  // A git child that exits during a 600 ms stall is read inside the rest of a
+  // 300 ms responsive budget (also for forge CLIs in VcsProcess).
+  "src/vcs/GitVcsDriverCore.stall.test.ts",
+  "src/vcs/VcsProcess.test.ts",
   // Allows 20 ms for a 200-event backlog to queue behind a held chunk; under
   // parallel load it split into 4 chunks in CI.
   "src/ws/context/orchestrationStreamBatching.test.ts",

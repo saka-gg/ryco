@@ -705,3 +705,83 @@ it.effect("tests a hub with the stored key when editing a saved hub", () => {
     assert.strictEqual(harness.requests.length, requestsBefore);
   }).pipe(Effect.provide(harness.layer));
 });
+
+it.effect("hands over the cached accounts without a request, a refresh or an identity", () => {
+  let reply: { readonly status: number; readonly error: string } | undefined;
+  const claudeHub = ProviderInstanceId.make("claude_hub");
+  const harness = makeHarness({
+    hubs: { local: hub({ label: "Home hub" }), off: hub({ enabled: false }) },
+    providerInstances: {
+      [claudeHub]: {
+        driver: ProviderDriverKind.make("claudeAgent"),
+        environment: [{ name: "ANTHROPIC_BASE_URL", value: HUB_URL, sensitive: false }],
+      },
+    },
+    managementReply: () => reply,
+  });
+  return Effect.gen(function* () {
+    const service = yield* CliProxyService;
+    const settings = yield* ServerSettingsService;
+    // Before any read: the hub is listed without accounts, and nothing is sent.
+    assert.deepStrictEqual(yield* service.cachedQuotas, [
+      { label: "Home hub", routedInstanceIds: [claudeHub], failed: false },
+    ]);
+    assert.strictEqual(harness.requests.length, 0);
+
+    yield* service.readHubs({});
+    const sent = harness.requests.length;
+    // Long past every cache lifetime: still no read.
+    yield* TestClock.adjust("3 hours");
+    const cached = yield* service.cachedQuotas;
+    assert.strictEqual(harness.requests.length, sent, "the cache read sends nothing");
+    assert.strictEqual(cached.length, 1, "disabled hubs are left out");
+    assert.deepStrictEqual(
+      cached[0]?.listed?.accounts.map((account) => [
+        account.provider,
+        account.disabled,
+        account.quota.status,
+      ]),
+      [
+        ["claude", false, "ok"],
+        ["codex", true, "skipped"],
+        ["kimi", false, "unsupported"],
+      ],
+      "accounts keep the hub's order",
+    );
+    assert.deepStrictEqual(
+      cached[0]?.listed?.accounts[0]?.quota.windows.map((window) => window.id),
+      ["five_hour", "seven_day"],
+    );
+    const serialized = JSON.stringify(cached);
+    for (const forbidden of [
+      "a@example.com",
+      "b@example.com",
+      "claude-a.json",
+      "codex-b.json",
+      "kimi.json",
+      "claude0000000001",
+      "authIndex",
+      "email",
+      MANAGEMENT_KEY,
+      HUB_URL,
+    ]) {
+      assert.notInclude(serialized, forbidden);
+    }
+
+    // A failed read keeps the last list, marked as failed.
+    reply = { status: 500, error: "down" };
+    yield* service.readHubs({ refresh: true });
+    const afterFailure = yield* service.cachedQuotas;
+    assert.isTrue(afterFailure[0]?.failed);
+    assert.strictEqual(afterFailure[0]?.listed?.accounts.length, 3);
+
+    // A list read at another address describes another hub.
+    yield* settings.updateSettings({
+      cliProxyHubs: { ["local" as CliProxyHubId]: hub({ url: "http://other.test:8317" }) },
+    });
+    const moved = yield* service.cachedQuotas;
+    assert.isUndefined(moved[0]?.listed);
+    assert.isFalse(moved[0]?.failed);
+    assert.strictEqual(moved[0]?.label, "other.test:8317");
+  }).pipe(Effect.provide(harness.layer));
+});

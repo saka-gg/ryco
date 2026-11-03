@@ -1,14 +1,45 @@
 import {
+  CHECKPOINT_REVERT_ACTIVITY_KIND,
   CONTEXT_HANDOFF_ACTIVITY_KIND,
   ContextHandoffActivityPayload,
   type OrchestrationThreadActivity,
 } from "@ryco/contracts/orchestration";
 import { THREAD_FORKED_ACTIVITY_KIND } from "@ryco/contracts/thread-fork";
+import {
+  SECRET_REQUESTED_ACTIVITY_KIND,
+  SECRET_RESOLVED_ACTIVITY_KIND,
+} from "@ryco/contracts/secret-request";
 import * as Schema from "effect/Schema";
 import { backgroundWorkCheckpoint, BACKGROUND_WORK_CHECKPOINT } from "./backgroundWork.ts";
+import {
+  comparePendingRequestActivities,
+  type PendingThreadRequestActivity,
+} from "./pendingRequestOrder.ts";
 import { isForkBaseItemId } from "./threadFork.ts";
 
 export const CONTEXT_COMPACTION_ACTIVITY_KIND = "context-compaction";
+
+/** The message a client sends to ask the thread's provider to compact its own context. */
+export const NATIVE_COMPACTION_COMMAND = "/compact";
+
+/**
+ * Whether a session of this driver compacts its context when sent `NATIVE_COMPACTION_COMMAND`:
+ * Claude Code runs its own `/compact`, Codex runs `thread/compact/start`. To others the command
+ * is plain text for the model.
+ */
+export function compactsOnRequest(driver: string | null | undefined): boolean {
+  return driver === "claudeAgent" || driver === "codex";
+}
+
+/** Only the exact command without attachments asks for compaction; anything else is a prompt. */
+export function isNativeCompactionCommand(message: {
+  readonly input?: string | undefined;
+  readonly attachments?: readonly unknown[] | undefined;
+}): boolean {
+  return (
+    message.input?.trim() === NATIVE_COMPACTION_COMMAND && (message.attachments?.length ?? 0) === 0
+  );
+}
 
 const decodeContextHandoffActivityPayload = Schema.decodeUnknownSync(ContextHandoffActivityPayload);
 
@@ -54,7 +85,11 @@ export function isThreadActivityMilestone(
   return (
     isContextCompactionActivity(activity) ||
     isTerminalContextHandoffActivity(activity) ||
-    isThreadForkedActivity(activity)
+    isThreadForkedActivity(activity) ||
+    // Rare, small and long-lived (a request waits up to a day): the cap never drops a pending
+    // secret request's card or the answer that closed it.
+    activity.kind === SECRET_REQUESTED_ACTIVITY_KIND ||
+    activity.kind === SECRET_RESOLVED_ACTIVITY_KIND
   );
 }
 
@@ -75,29 +110,54 @@ export function capThreadActivitiesPreservingMilestones<
     ? undefined
     : backgroundWorkCheckpoint(activities.slice(0, -limit));
   const recentIds = new Set(recent.map((activity) => activity.id));
+  const openQuestions = openOptionalQuestionActivityIds(activities);
   const preserved = activities.filter(
-    (activity) => isThreadActivityMilestone(activity) && !recentIds.has(activity.id),
+    (activity) =>
+      (isThreadActivityMilestone(activity) || openQuestions.has(activity.id)) &&
+      !recentIds.has(activity.id),
   );
 
   return [...preserved, ...(checkpoint ? [checkpoint] : []), ...recent];
 }
 
-interface PendingThreadRequestActivity {
-  readonly kind: string;
-  readonly payload: unknown;
-  readonly createdAt: string;
-  readonly id?: string | undefined;
-  readonly activityId?: string | undefined;
-  readonly sequence?: number | undefined;
-  readonly turnId?: string | null | undefined;
+/**
+ * The `user-input.requested` activities of optional questions nobody answered or dismissed
+ * yet, and the node did not clear. They stay answerable after their turn (an answer then starts
+ * the next turn), so the activity cap keeps them however much came after. Input in order.
+ */
+function openOptionalQuestionActivityIds(
+  activities: ReadonlyArray<Pick<OrchestrationThreadActivity, "id" | "kind" | "payload">>,
+): Set<string> {
+  const open = new Map<string, string>();
+  for (const { id, kind, payload } of activities) {
+    const requestId = activityRequestId(payload);
+    if (requestId === null) continue;
+    const fields = payload as { nonBlocking?: unknown; responseState?: unknown };
+    if (kind === "user-input.requested" && fields.nonBlocking === true) open.set(requestId, id);
+    else if (
+      kind === "user-input.requested" ||
+      kind === "user-input.resolved" ||
+      (kind === "provider.user-input.respond.failed" && fields.responseState === "invalidated")
+    )
+      open.delete(requestId);
+  }
+  return new Set(open.values());
 }
 
-export interface PendingThreadRequestState {
-  readonly pendingApprovalCount: number;
-  readonly pendingUserInputCount: number;
-  readonly hasPendingApprovals: boolean;
-  readonly hasPendingUserInput: boolean;
-}
+/**
+ * The activity kinds `derivePendingThreadRequests` (`@ryco/shared/pendingThreadRequests`) reads:
+ * they open, resolve or clear a pending approval, user-input or secret request.
+ */
+export const PENDING_REQUEST_ACTIVITY_KINDS = [
+  "approval.requested",
+  "approval.resolved",
+  "provider.approval.respond.failed",
+  "user-input.requested",
+  "user-input.resolved",
+  "provider.user-input.respond.failed",
+  SECRET_REQUESTED_ACTIVITY_KIND,
+  SECRET_RESOLVED_ACTIVITY_KIND,
+] as const;
 
 function activityRequestId(payload: unknown): string | null {
   if (typeof payload !== "object" || payload === null || !("requestId" in payload)) {
@@ -130,26 +190,21 @@ function isStaleRequestFailure(detail: string | null, requestKind: "approval" | 
   );
 }
 
-function comparePendingRequestActivities(
-  left: PendingThreadRequestActivity,
-  right: PendingThreadRequestActivity,
-): number {
-  const bySequence =
-    (left.sequence ?? Number.MAX_SAFE_INTEGER) - (right.sequence ?? Number.MAX_SAFE_INTEGER);
-  if (bySequence !== 0) return bySequence;
-  const byCreatedAt = left.createdAt.localeCompare(right.createdAt);
-  if (byCreatedAt !== 0) return byCreatedAt;
-  return (left.id ?? left.activityId ?? "").localeCompare(right.id ?? right.activityId ?? "");
-}
-
-export function derivePendingThreadRequests(
-  activities: ReadonlyArray<PendingThreadRequestActivity>,
-): ReadonlyArray<{
+export interface PendingProviderCallbackRequest {
   readonly requestId: string;
   readonly kind: "approval" | "user-input";
   readonly nonBlocking?: boolean;
   readonly turnId: string | null;
-}> {
+}
+
+/**
+ * The pending requests a provider callback answers (approvals and questions). A turn's end, a
+ * superseding turn or a restart invalidates them; a secret request is the node's own and outlives
+ * all three, so it is left out here.
+ */
+export function derivePendingProviderCallbackRequests(
+  activities: ReadonlyArray<PendingThreadRequestActivity>,
+): ReadonlyArray<PendingProviderCallbackRequest> {
   const approvalIds = new Map<string, string | null>();
   const userInputIds = new Map<string, string | null>();
   const optionalIds = new Set<string>();
@@ -197,22 +252,6 @@ export function derivePendingThreadRequests(
   ];
 }
 
-export function derivePendingThreadRequestState(
-  activities: ReadonlyArray<PendingThreadRequestActivity>,
-): PendingThreadRequestState {
-  const requests = derivePendingThreadRequests(activities);
-  const pendingApprovalCount = requests.filter((request) => request.kind === "approval").length;
-  const pendingUserInputCount = requests.filter(
-    (request) => request.kind === "user-input" && !request.nonBlocking,
-  ).length;
-  return {
-    pendingApprovalCount,
-    pendingUserInputCount,
-    hasPendingApprovals: pendingApprovalCount > 0,
-    hasPendingUserInput: pendingUserInputCount > 0,
-  };
-}
-
 /** Response attempts and provider callbacks share the durable orchestration order.
  * Provider-local sequence numbers cannot be compared to local response attempts.
  */
@@ -223,7 +262,9 @@ export function pendingRequestActivityInOrchestrationOrder(
   return activity.kind.startsWith("approval.") ||
     activity.kind === "provider.approval.respond.failed" ||
     activity.kind.startsWith("user-input.") ||
-    activity.kind === "provider.user-input.respond.failed"
+    activity.kind === "provider.user-input.respond.failed" ||
+    activity.kind === SECRET_REQUESTED_ACTIVITY_KIND ||
+    activity.kind === SECRET_RESOLVED_ACTIVITY_KIND
     ? { ...activity, sequence }
     : activity;
 }
@@ -259,6 +300,57 @@ export function compareThreadActivities(
   return (
     compareThreadActivitySequence(left, right) ||
     left.createdAt.localeCompare(right.createdAt) ||
+    left.id.localeCompare(right.id)
+  );
+}
+
+function isFailedCheckpointRevert(activity: Pick<OrchestrationThreadActivity, "payload">): boolean {
+  const { payload } = activity;
+  return (
+    payload !== null &&
+    typeof payload === "object" &&
+    "status" in payload &&
+    payload.status === "failed"
+  );
+}
+
+/**
+ * A thread's newest `checkpoint.revert` journal row in display order, or null. With
+ * `skipFailed`, rows of reverts that failed are passed over: a failed revert changed nothing,
+ * so the row before it still says what the thread's reverts left in its checkout. The server's
+ * shared-checkout check and every client's restore warning pick their row here.
+ */
+export function latestCheckpointRevertActivity<
+  T extends ThreadActivityOrderKey & Pick<OrchestrationThreadActivity, "kind" | "payload">,
+>(activities: ReadonlyArray<T>, options?: { readonly skipFailed?: boolean }): T | null {
+  let latest: T | null = null;
+  for (const activity of activities) {
+    if (activity.kind !== CHECKPOINT_REVERT_ACTIVITY_KIND) continue;
+    if (options?.skipFailed === true && isFailedCheckpointRevert(activity)) continue;
+    if (latest === null || compareThreadActivities(activity, latest) > 0) latest = activity;
+  }
+  return latest;
+}
+
+/** A start before its progress, progress before its completion or resolution. */
+function threadActivityLifecycleRank(kind: string): number {
+  if (kind.endsWith(".started")) return 0;
+  if (kind.endsWith(".completed") || kind.endsWith(".resolved")) return 2;
+  return 1;
+}
+
+/**
+ * The transcript's order: `compareThreadActivities`, except that activities recorded in the same
+ * instant follow their lifecycle (a request before its resolution) before the id decides.
+ */
+export function compareThreadActivitiesInLifecycleOrder(
+  left: ThreadActivityOrderKey & { readonly kind: string },
+  right: ThreadActivityOrderKey & { readonly kind: string },
+): number {
+  return (
+    compareThreadActivitySequence(left, right) ||
+    left.createdAt.localeCompare(right.createdAt) ||
+    threadActivityLifecycleRank(left.kind) - threadActivityLifecycleRank(right.kind) ||
     left.id.localeCompare(right.id)
   );
 }

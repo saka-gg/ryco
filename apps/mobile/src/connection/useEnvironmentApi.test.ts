@@ -16,6 +16,7 @@ const hoisted = vi.hoisted(() => ({
 vi.mock("react", async (importOriginal) => ({
   ...(await importOriginal<typeof import("react")>()),
   useCallback: <T>(callback: T) => callback,
+  useMemo: <T>(factory: () => T) => factory(),
   useSyncExternalStore: <T>(subscribe: (listener: () => void) => () => void, read: () => T) => {
     hoisted.subscribe = subscribe;
     return read();
@@ -26,6 +27,11 @@ vi.mock("../runtime/bootstrap", () => ({
     driver: {
       supervisor: {
         read: (environmentId: string) => hoisted.connections.get(environmentId) ?? null,
+        list: () =>
+          [...hoisted.connections].map(([environmentId, { client }]) => ({
+            environmentId,
+            client,
+          })),
         subscribe: (listener: () => void) => {
           hoisted.listeners.add(listener);
           return () => hoisted.listeners.delete(listener);
@@ -36,9 +42,11 @@ vi.mock("../runtime/bootstrap", () => ({
 }));
 vi.mock("../state/environmentServerConfigs", () => ({ patchEnvironmentServerSettings: () => {} }));
 
-import { useEnvironmentApi } from "./useEnvironmentApi";
+import { readEnvironmentApiAvailability } from "./environmentApi";
+import { useEnvironmentApi, useEnvironmentsWithApi } from "./useEnvironmentApi";
 
 const ENVIRONMENT = EnvironmentId.make("env-api-hook");
+const OTHER_ENVIRONMENT = EnvironmentId.make("env-api-other");
 
 /** A live client answering every RPC family, so the facade exposes `threads.fork`. */
 function fakeClient(): unknown {
@@ -49,8 +57,8 @@ function fakeClient(): unknown {
   return proxy;
 }
 
-function register(client: unknown): void {
-  hoisted.connections.set(ENVIRONMENT, { client });
+function register(client: unknown, environmentId: string = ENVIRONMENT): void {
+  hoisted.connections.set(environmentId, { client });
   for (const listener of hoisted.listeners) listener();
 }
 
@@ -87,5 +95,36 @@ describe("useEnvironmentApi", () => {
 
     hoisted.connections.delete(ENVIRONMENT);
     expect(useEnvironmentApi(ENVIRONMENT)).toBeUndefined();
+  });
+
+  it("reads no api for no environment and still subscribes", () => {
+    register(fakeClient());
+    expect(useEnvironmentApi(null)).toBeUndefined();
+    expect(hoisted.subscribe).not.toBeNull();
+  });
+});
+
+describe("useEnvironmentsWithApi", () => {
+  it("lists the environments with a live client and follows registrations", () => {
+    expect(useEnvironmentsWithApi().size).toBe(0);
+
+    register(fakeClient());
+    register(fakeClient(), OTHER_ENVIRONMENT);
+    expect([...useEnvironmentsWithApi()].toSorted()).toEqual([ENVIRONMENT, OTHER_ENVIRONMENT]);
+
+    hoisted.connections.delete(ENVIRONMENT);
+    expect([...useEnvironmentsWithApi()]).toEqual([OTHER_ENVIRONMENT]);
+  });
+
+  it("keeps an equal snapshot while availability is unchanged", () => {
+    register(fakeClient());
+    const before = readEnvironmentApiAvailability();
+
+    // Replacing a client changes the api object but not who has one, and the
+    // string snapshot compares equal, so React does not re-render for it.
+    register(fakeClient());
+    expect(readEnvironmentApiAvailability()).toBe(before);
+    register(fakeClient(), OTHER_ENVIRONMENT);
+    expect(readEnvironmentApiAvailability()).not.toBe(before);
   });
 });

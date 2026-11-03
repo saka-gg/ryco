@@ -61,4 +61,17 @@ describe("acquireNode", () => {
       "Mac mini was paired with limited access; pair it again as its owner to add projects",
     );
   });
+
+  it("refuses a switched-off machine by name, which the catalog leaves out", async () => {
+    useSavedEnvironmentRegistryStore.getState().upsert({
+      environmentId: MINI,
+      label: "Mac mini",
+      httpBaseUrl: "https://mini.example.com/",
+      wsBaseUrl: "wss://mini.example.com/",
+      createdAt: "2026-10-22T00:00:00.000Z",
+      lastConnectedAt: null,
+      disabledAt: "2026-10-23T00:00:00.000Z",
+    });
+    await expect(acquireNode(MINI)).rejects.toThrow("Mac mini is switched off");
+  });
 });

@@ -56,6 +56,7 @@ const sourceControlHandlerLayer = Layer.mergeAll(
 
 const makeSession = (role: AuthenticatedSession["role"]): AuthenticatedSession => ({
   sessionId: AuthSessionId.make(`session-${role}`),
+  chainId: AuthSessionId.make(`session-${role}`),
   subject: role,
   method: "browser-session-cookie",
   role,

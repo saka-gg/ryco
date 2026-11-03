@@ -66,6 +66,7 @@ async function mountMenu(props?: { modelSelection?: ModelSelection; prompt?: str
         nonPersistedImageIds: [],
         persistedAttachments: [],
         terminalContexts: [],
+        fileReferences: [],
         sourceControlContexts: [],
         modelSelectionByProvider: {
           [instanceId]: createModelSelection(instanceId, model, props?.modelSelection?.options),
@@ -358,6 +359,44 @@ describe("CompactComposerControlsMenu", () => {
       expect(askItem).toBeDefined();
       expect(askItem?.hasAttribute("data-disabled")).toBe(true);
       expect(askItem?.textContent).toContain("Not supported by this provider.");
+    });
+
+    await screen.unmount();
+    host.remove();
+  });
+
+  it("disables the Auto access item with the reason when the model cannot run it", async () => {
+    const reason = "Claude Opus 4.8 can't run in Auto mode on this provider.";
+    const host = document.createElement("div");
+    document.body.append(host);
+    const screen = await render(
+      <CompactComposerControlsMenu
+        activePlan={false}
+        interactionMode="default"
+        planSidebarLabel="Plan"
+        planSidebarOpen={false}
+        runtimeMode="approval-required"
+        showInteractionModeToggle={false}
+        askModeSupported
+        autoModeUnavailableReason={reason}
+        onInteractionModeChange={vi.fn()}
+        onTogglePlanSidebar={vi.fn()}
+        onRuntimeModeChange={vi.fn()}
+      />,
+      { container: host },
+    );
+
+    await page.getByLabelText("More composer controls").click();
+
+    await vi.waitFor(() => {
+      const items = Array.from(document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'));
+      const autoItem = items.find(
+        (item) => item.textContent?.startsWith("Auto") && item.textContent !== "Auto-accept edits",
+      );
+      expect(autoItem?.hasAttribute("data-disabled")).toBe(true);
+      expect(autoItem?.textContent).toContain(reason);
+      const fullAccess = items.find((item) => item.textContent === "Full access");
+      expect(fullAccess?.hasAttribute("data-disabled")).toBe(false);
     });
 
     await screen.unmount();

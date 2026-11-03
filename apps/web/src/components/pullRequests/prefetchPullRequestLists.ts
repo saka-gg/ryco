@@ -7,18 +7,19 @@
  */
 import type { ChangeRequestInvolvement, EnvironmentId } from "@ryco/contracts";
 import { isChatProject, type ProjectKindCarrier } from "@ryco/shared/projectKind";
+import {
+  derivePullRequestsCapabilities,
+  PULL_REQUESTS_LIST_LIMIT,
+  resolvePullRequestsStateFilter,
+  shouldReadInvolvementLists,
+} from "@ryco/client-runtime/state/pull-request-review";
 
 import { getGitStatusSnapshot } from "../../lib/gitStatusState";
 import { projectCheckoutKey } from "../../projectCheckouts.logic";
 import { changeRequestListBinding } from "../../rpc/sourceControlAtoms";
 import { selectProjectsAcrossEnvironments, useStore } from "../../store";
 import { usePullRequestsLayoutStore } from "./pullRequestsLayoutStore";
-import {
-  derivePullRequestsCapabilities,
-  PULL_REQUESTS_LIST_LIMIT,
-  shouldReadInvolvementLists,
-} from "./pullRequestsModel.logic";
-import { resolvePullRequestsStateFilter, type PullRequestsSearch } from "./pullRequestsSearch";
+import type { PullRequestsSearch } from "./pullRequestsSearch";
 
 export interface PullRequestListPrefetchTarget {
   readonly environmentId: EnvironmentId;
@@ -37,11 +38,16 @@ interface PrefetchProject extends ProjectKindCarrier {
  * the first project, a project that has not synced yet) is left to the page.
  */
 export function resolvePullRequestListPrefetchTarget(input: {
-  readonly search: Pick<PullRequestsSearch, "env" | "project">;
+  readonly search: Pick<PullRequestsSearch, "env" | "project" | "scope">;
   readonly projects: ReadonlyArray<PrefetchProject>;
   readonly lastRepositoryKey: string | null;
+  /** The page opens on All repositories when the URL names no repository. */
+  readonly lastScope?: "all" | null | undefined;
 }): PullRequestListPrefetchTarget | null {
   const { search } = input;
+  // All repositories reads no single repository's lists (its rows open by themselves).
+  if (search.scope === "all") return null;
+  if (search.project === undefined && input.lastScope === "all") return null;
   const candidates = input.projects.filter((project) => !isChatProject(project));
   const match =
     search.project !== undefined
@@ -78,10 +84,12 @@ export function pullRequestListPrefetchInputs(input: {
 }
 
 export function prefetchPullRequestLists(search: PullRequestsSearch): void {
+  const layout = usePullRequestsLayoutStore.getState();
   const target = resolvePullRequestListPrefetchTarget({
     search,
     projects: selectProjectsAcrossEnvironments(useStore.getState()),
-    lastRepositoryKey: usePullRequestsLayoutStore.getState().lastRepositoryKey,
+    lastRepositoryKey: layout.lastRepositoryKey,
+    lastScope: layout.lastScope,
   });
   if (target === null) return;
   // The page reads the involvement lists until its host is known not to filter.

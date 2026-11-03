@@ -2,10 +2,13 @@ import { usePaneEffect } from "./chat/PaneFocus";
 import "@xterm/xterm/css/xterm.css";
 import {
   createTerminalEventReconciler,
-  isTerminalEventAfterSnapshot,
+  createTerminalReplayGate,
   isTerminalReplayEvent,
   isTerminalSnapshotDeltaFor,
   bracketedTerminalSnippet,
+  selectPendingTerminalEventEntries,
+  selectTerminalEventEntriesAfterSnapshot,
+  type TerminalReplayGate,
 } from "@ryco/client-runtime/state/terminal";
 import { terminalSnippetBroker } from "../terminalSnippetInsertion";
 
@@ -32,12 +35,13 @@ import {
 } from "react";
 import { Popover, PopoverPopup, PopoverTrigger } from "~/components/ui/popover";
 import { type TerminalContextSelection } from "~/lib/terminalContext";
-import { openInPreferredEditor } from "../editorPreferences";
-import { APPEARANCE_PREFERENCES_CHANGE_EVENT } from "../themes/appearancePreferences";
+import { openPathInEditor } from "../editorPreferences";
 import {
-  WINDOW_TRANSLUCENCY_ATTRIBUTE,
-  getDocumentWindowTranslucencyScope,
-} from "../themes/windowTranslucency";
+  followAppTerminalAppearance,
+  readTerminalFontFamily,
+  terminalFollowsWindowGlass,
+  terminalThemeFromApp,
+} from "./terminal/terminalTheme";
 import {
   collectWrappedTerminalLinkLine,
   extractTerminalLinks,
@@ -95,18 +99,6 @@ import {
 const MIN_DRAWER_HEIGHT = 180;
 const MAX_DRAWER_HEIGHT_RATIO = 0.75;
 const MULTI_CLICK_SELECTION_ACTION_DELAY_MS = 260;
-const DEFAULT_TERMINAL_FONT_FAMILY =
-  '"SF Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace';
-
-function readTerminalFontFamily(): string {
-  if (typeof document === "undefined" || typeof getComputedStyle === "undefined") {
-    return DEFAULT_TERMINAL_FONT_FAMILY;
-  }
-  return (
-    getComputedStyle(document.documentElement).getPropertyValue("--font-family-mono").trim() ||
-    DEFAULT_TERMINAL_FONT_FAMILY
-  );
-}
 
 function maxDrawerHeight(): number {
   if (typeof window === "undefined") return DEFAULT_THREAD_TERMINAL_HEIGHT;
@@ -133,6 +125,7 @@ export function writeTerminalSnapshot(terminal: Terminal, snapshot: TerminalSess
 interface CachedTerminalViewState {
   readonly fitAddon: FitAddon;
   readonly eventReconciler: ReturnType<typeof createTerminalEventReconciler>;
+  readonly replayGate: TerminalReplayGate;
   readonly hydratedSnapshot: TerminalSessionSnapshot | null;
 }
 
@@ -233,26 +226,6 @@ export function createTerminalOutputBatcher(options: {
   };
 }
 
-export function selectTerminalEventEntriesAfterSnapshot(
-  entries: ReadonlyArray<{ id: number; event: TerminalEvent }>,
-  snapshotUpdatedAt: string,
-  cursor?: TerminalSessionSnapshot["cursor"],
-): ReadonlyArray<{ id: number; event: TerminalEvent }> {
-  return entries.filter((entry) =>
-    isTerminalEventAfterSnapshot(entry.event, {
-      updatedAt: snapshotUpdatedAt,
-      ...(cursor ? { cursor } : {}),
-    }),
-  );
-}
-
-export function selectPendingTerminalEventEntries(
-  entries: ReadonlyArray<{ id: number; event: TerminalEvent }>,
-  lastAppliedTerminalEventId: number,
-): ReadonlyArray<{ id: number; event: TerminalEvent }> {
-  return entries.filter((entry) => entry.id > lastAppliedTerminalEventId);
-}
-
 export function resolveTabLabel(group: ThreadTerminalGroup, groupIndex: number): string {
   return group.terminalIds.length > 1 ? `Split ${groupIndex}` : `Terminal ${groupIndex}`;
 }
@@ -266,102 +239,13 @@ export function groupHasRunningTerminal(
   return group.terminalIds.some((id) => runningSet.has(id));
 }
 
-function normalizeComputedColor(value: string | null | undefined, fallback: string): string {
-  const normalizedValue = value?.trim().toLowerCase();
-  if (
-    !normalizedValue ||
-    normalizedValue === "transparent" ||
-    normalizedValue === "rgba(0, 0, 0, 0)" ||
-    normalizedValue === "rgba(0 0 0 / 0)"
-  ) {
-    return fallback;
-  }
-  return value ?? fallback;
-}
-
-/**
- * On a whole-window translucent window the terminal is clear like the surface
- * around it, so the window's glass shows through (index.css). xterm only paints
- * a non-opaque background when created with `allowTransparency`.
- */
-function terminalFollowsWindowGlass(): boolean {
-  return getDocumentWindowTranslucencyScope() === "window";
-}
-
-function terminalThemeFromApp(mountElement?: HTMLElement | null): ITheme {
-  const isDark = document.documentElement.classList.contains("dark");
-  const fallbackBackground = isDark ? "rgb(14, 18, 24)" : "rgb(255, 255, 255)";
-  const fallbackForeground = isDark ? "rgb(237, 241, 247)" : "rgb(28, 33, 41)";
-  const drawerSurface =
+/** The drawer's terminals take the drawer's colors. */
+function drawerTerminalTheme(mountElement?: HTMLElement | null): ITheme {
+  return terminalThemeFromApp(
     mountElement?.closest(".thread-terminal-drawer") ??
-    document.querySelector(".thread-terminal-drawer") ??
-    document.body;
-  const drawerStyles = getComputedStyle(drawerSurface);
-  const bodyStyles = getComputedStyle(document.body);
-  const background = terminalFollowsWindowGlass()
-    ? "rgba(0, 0, 0, 0)"
-    : normalizeComputedColor(
-        drawerStyles.backgroundColor,
-        normalizeComputedColor(bodyStyles.backgroundColor, fallbackBackground),
-      );
-  const foreground = normalizeComputedColor(
-    drawerStyles.color,
-    normalizeComputedColor(bodyStyles.color, fallbackForeground),
+      document.querySelector(".thread-terminal-drawer") ??
+      document.body,
   );
-
-  if (isDark) {
-    return {
-      background,
-      foreground,
-      cursor: "rgb(180, 203, 255)",
-      selectionBackground: "rgba(180, 203, 255, 0.25)",
-      scrollbarSliderBackground: "rgba(255, 255, 255, 0.1)",
-      scrollbarSliderHoverBackground: "rgba(255, 255, 255, 0.18)",
-      scrollbarSliderActiveBackground: "rgba(255, 255, 255, 0.22)",
-      black: "rgb(24, 30, 38)",
-      red: "rgb(255, 122, 142)",
-      green: "rgb(134, 231, 149)",
-      yellow: "rgb(244, 205, 114)",
-      blue: "rgb(137, 190, 255)",
-      magenta: "rgb(208, 176, 255)",
-      cyan: "rgb(124, 232, 237)",
-      white: "rgb(210, 218, 230)",
-      brightBlack: "rgb(110, 120, 136)",
-      brightRed: "rgb(255, 168, 180)",
-      brightGreen: "rgb(176, 245, 186)",
-      brightYellow: "rgb(255, 224, 149)",
-      brightBlue: "rgb(174, 210, 255)",
-      brightMagenta: "rgb(229, 203, 255)",
-      brightCyan: "rgb(167, 244, 247)",
-      brightWhite: "rgb(244, 247, 252)",
-    };
-  }
-
-  return {
-    background,
-    foreground,
-    cursor: "rgb(38, 56, 78)",
-    selectionBackground: "rgba(37, 63, 99, 0.2)",
-    scrollbarSliderBackground: "rgba(0, 0, 0, 0.15)",
-    scrollbarSliderHoverBackground: "rgba(0, 0, 0, 0.25)",
-    scrollbarSliderActiveBackground: "rgba(0, 0, 0, 0.3)",
-    black: "rgb(44, 53, 66)",
-    red: "rgb(191, 70, 87)",
-    green: "rgb(60, 126, 86)",
-    yellow: "rgb(146, 112, 35)",
-    blue: "rgb(72, 102, 163)",
-    magenta: "rgb(132, 86, 149)",
-    cyan: "rgb(53, 127, 141)",
-    white: "rgb(210, 215, 223)",
-    brightBlack: "rgb(112, 123, 140)",
-    brightRed: "rgb(212, 95, 112)",
-    brightGreen: "rgb(85, 148, 111)",
-    brightYellow: "rgb(173, 133, 45)",
-    brightBlue: "rgb(91, 124, 194)",
-    brightMagenta: "rgb(153, 107, 172)",
-    brightCyan: "rgb(70, 149, 164)",
-    brightWhite: "rgb(236, 240, 246)",
-  };
 }
 
 function getTerminalSelectionRect(mountElement: HTMLElement): DOMRect | null {
@@ -529,7 +413,7 @@ export function TerminalViewport({
       terminal = cachedView.terminal;
       mount.append(cachedView.element);
       // Appearance may have changed while it was detached.
-      terminal.options.theme = terminalThemeFromApp(mount);
+      terminal.options.theme = drawerTerminalTheme(mount);
       const fontFamily = readTerminalFontFamily();
       if (terminal.options.fontFamily !== fontFamily) terminal.options.fontFamily = fontFamily;
       fitAddon.fit();
@@ -544,7 +428,7 @@ export function TerminalViewport({
         scrollback: 5_000,
         fontFamily: readTerminalFontFamily(),
         allowTransparency: terminalFollowsWindowGlass(),
-        theme: terminalThemeFromApp(mount),
+        theme: drawerTerminalTheme(mount),
       });
       terminal.loadAddon(fitAddon);
       terminal.open(mount);
@@ -553,6 +437,7 @@ export function TerminalViewport({
 
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
+    const replayGate = cachedView?.state.replayGate ?? createTerminalReplayGate(terminal);
     const outputBatcher = createTerminalOutputBatcher({
       write: (data) => {
         terminal.write(data);
@@ -563,13 +448,10 @@ export function TerminalViewport({
       writeSystemMessage(targetTerminal, message);
     };
 
-    const syncTerminalFontFamily = () => {
-      const nextFontFamily = readTerminalFontFamily();
-      if (terminal.options.fontFamily === nextFontFamily) return;
-      terminal.options.fontFamily = nextFontFamily;
-      fitAddon.fit();
-    };
-    window.addEventListener(APPEARANCE_PREFERENCES_CHANGE_EVENT, syncTerminalFontFamily);
+    const stopFollowingAppearance = followAppTerminalAppearance(terminal, {
+      theme: () => drawerTerminalTheme(containerRef.current),
+      refit: () => fitAddon.fit(),
+    });
 
     const clearSelectionAction = () => {
       selectionActionRequestIdRef.current += 1;
@@ -750,7 +632,7 @@ export function TerminalViewport({
               }
 
               const target = resolvePathLinkTarget(match.text, cwd);
-              void openInPreferredEditor(localApi, target).catch((error) => {
+              void openPathInEditor(environmentId, target).catch((error) => {
                 writeBufferedSystemMessage(
                   latestTerminal,
                   error instanceof Error ? error.message : "Unable to open path",
@@ -764,6 +646,8 @@ export function TerminalViewport({
 
     const inputDisposable = terminal.onData((data) => {
       if (inputBlocked()) return;
+      // Replayed output already had its queries answered (or timed out) when it was live.
+      if (replayGate.dropsData(data)) return;
       void api.terminal
         .write({ threadId, terminalId, data })
         .catch((err) =>
@@ -805,17 +689,6 @@ export function TerminalViewport({
     };
     window.addEventListener("mouseup", handleMouseUp);
     mount.addEventListener("pointerdown", handlePointerDown);
-
-    const themeObserver = new MutationObserver(() => {
-      const activeTerminal = terminalRef.current;
-      if (!activeTerminal) return;
-      activeTerminal.options.theme = terminalThemeFromApp(containerRef.current);
-      activeTerminal.refresh(0, activeTerminal.rows - 1);
-    });
-    themeObserver.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["class", "style", WINDOW_TRANSLUCENCY_ATTRIBUTE],
-    });
 
     const applyTerminalEvent = (event: TerminalEvent) => {
       const perfEnabled = isWebPerfProfileEnabled();
@@ -893,7 +766,7 @@ export function TerminalViewport({
           recordTerminalApply();
           return;
         }
-        writeTerminalSnapshot(activeTerminal, event.snapshot);
+        replayGate.replay(() => writeTerminalSnapshot(activeTerminal, event.snapshot));
         hydratedSnapshot = event.snapshot;
         if (snippetRequest)
           activeTerminal.write("", () => {
@@ -1052,11 +925,13 @@ export function TerminalViewport({
           eventReconciler.reset(snapshot);
           // Output batched before the answer belongs before what it writes.
           outputBatcher.flush();
-          if (historyDelta) {
-            if (snapshot.history.length > 0) activeTerminal.write(snapshot.history);
-          } else {
-            writeTerminalSnapshot(activeTerminal, snapshot);
-          }
+          replayGate.replay(() => {
+            if (historyDelta) {
+              if (snapshot.history.length > 0) activeTerminal.write(snapshot.history);
+            } else {
+              writeTerminalSnapshot(activeTerminal, snapshot);
+            }
+          });
           appliedCursor = snapshot.cursor;
           if (snippetRequest)
             activeTerminal.write("", () => {
@@ -1119,9 +994,13 @@ export function TerminalViewport({
         cachedView.lastAppliedTerminalEventId,
       );
       if (catchUp !== null) {
-        for (const entry of catchUp) {
-          applyTerminalEvent(entry.event);
-        }
+        // Output that arrived while the view was detached is not live either.
+        replayGate.replay(() => {
+          for (const entry of catchUp) {
+            applyTerminalEvent(entry.event);
+          }
+          outputBatcher.flush();
+        });
         lastAppliedTerminalEventIdRef.current =
           catchUp.at(-1)?.id ?? cachedView.lastAppliedTerminalEventId;
         terminalHydratedRef.current = true;
@@ -1249,8 +1128,7 @@ export function TerminalViewport({
       }
       window.removeEventListener("mouseup", handleMouseUp);
       mount.removeEventListener("pointerdown", handlePointerDown);
-      themeObserver.disconnect();
-      window.removeEventListener(APPEARANCE_PREFERENCES_CHANGE_EVENT, syncTerminalFontFamily);
+      stopFollowingAppearance();
       terminalRef.current = null;
       fitAddonRef.current = null;
       if (keepView) {
@@ -1259,7 +1137,7 @@ export function TerminalViewport({
           launchKey,
           terminal,
           element: keptElement,
-          state: { fitAddon, eventReconciler, hydratedSnapshot },
+          state: { fitAddon, eventReconciler, replayGate, hydratedSnapshot },
           lastAppliedTerminalEventId,
           appliedCursor,
         });

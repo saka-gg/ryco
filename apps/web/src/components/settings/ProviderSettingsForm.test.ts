@@ -38,6 +38,56 @@ describe("ProviderSettingsForm helpers", () => {
     });
   });
 
+  it("derives a select with its choices and default from the schema", () => {
+    const claude = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("claudeAgent")];
+    expect(claude).toBeDefined();
+    const fields = deriveProviderSettingsFields(claude!);
+
+    expect(fields.map((field) => field.key)).toEqual([
+      "binaryPath",
+      "homePath",
+      "autoCompact",
+      "autoCompactWindow",
+      "launchArgs",
+    ]);
+    expect(fields.find((field) => field.key === "autoCompact")).toEqual({
+      key: "autoCompact",
+      control: "select",
+      label: "Automatic compaction",
+      clearWhenEmpty: "omit",
+      options: [
+        { value: "ryco", label: "At 80% between turns (Ryco)" },
+        { value: "claudeCode", label: "When Claude Code decides" },
+      ],
+      defaultStringValue: "ryco",
+    });
+    expect(fields.find((field) => field.key === "autoCompactWindow")).toMatchObject({
+      control: "text",
+      label: "Compact within (tokens)",
+    });
+  });
+
+  it("stores a non-default select choice and omits the default", () => {
+    const claude = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("claudeAgent")];
+    const autoCompact = deriveProviderSettingsFields(claude!).find(
+      (field) => field.key === "autoCompact",
+    )!;
+
+    expect(
+      nextProviderConfigWithFieldValue({ launchArgs: "--chrome" }, autoCompact, "claudeCode"),
+    ).toEqual({ launchArgs: "--chrome", autoCompact: "claudeCode" });
+    expect(
+      nextProviderConfigWithFieldValue(
+        { launchArgs: "--chrome", autoCompact: "claudeCode" },
+        autoCompact,
+        "ryco",
+      ),
+    ).toEqual({ launchArgs: "--chrome" });
+    expect(
+      nextProviderConfigWithFieldValue({ autoCompact: "claudeCode" }, autoCompact, "ryco"),
+    ).toBeUndefined();
+  });
+
   it("exposes Grok as an early-access provider with a binary path field", () => {
     const grok = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("grok")];
 

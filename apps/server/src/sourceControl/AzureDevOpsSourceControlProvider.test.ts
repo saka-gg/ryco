@@ -277,7 +277,7 @@ it.effect("serves commit-scoped diffs through the option guard and refuses react
         gitCalls.push(input.args);
         return Effect.succeed({
           exitCode: ChildProcessSpawner.ExitCode(0),
-          stdout: input.args[0] === "diff" ? "commit diff" : "",
+          stdout: input.args.includes("diff") ? "commit diff" : "",
           stderr: "",
           stdoutTruncated: false,
           stderrTruncated: false,

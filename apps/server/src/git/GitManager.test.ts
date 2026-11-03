@@ -4,9 +4,20 @@ import { spawnSync } from "node:child_process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { Deferred, Effect, Fiber, FileSystem, Layer, Option, PlatformError, Scope } from "effect";
+import {
+  Deferred,
+  Effect,
+  Fiber,
+  FileSystem,
+  Layer,
+  Option,
+  PlatformError,
+  Result,
+  Scope,
+} from "effect";
 import { ChildProcessSpawner } from "effect/process";
-import { expect } from "vite-plus/test";
+import { TestClock } from "effect/testing";
+import { describe, expect } from "vite-plus/test";
 import type {
   GitActionProgressEvent,
   GitPreparePullRequestThreadInput,
@@ -19,13 +30,16 @@ import type {
 import {
   DEFAULT_SERVER_SETTINGS,
   GitCommandError,
+  GitStagedIndexChangedError,
   ProjectId,
+  ProviderInstanceId,
   TextGenerationError,
 } from "@ryco/contracts";
 import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
 import { type GitManagerShape } from "./GitManager.ts";
 import {
   GitHubCliError,
+  GITHUB_PULL_REQUEST_LIST_JSON_FIELDS,
   GITHUB_PULL_REQUEST_SUMMARY_JSON_FIELDS,
   GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS,
   type GitHubCliShape,
@@ -33,15 +47,31 @@ import {
   GitHubCli,
   formatGitHubJsonFields,
 } from "../sourceControl/GitHubCli.ts";
-import { type TextGenerationShape, TextGeneration } from "../textGeneration/TextGeneration.ts";
+import { decodeGitHubPullRequestListJson } from "../sourceControl/gitHubPullRequests.ts";
+import {
+  makeTextGenerationFromRegistry,
+  type TextGenerationShape,
+  TextGeneration,
+} from "../textGeneration/TextGeneration.ts";
+import type { ProviderInstanceRegistryShape } from "../provider/Services/ProviderInstanceRegistry.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { makeGitVcsDriverCore } from "../vcs/GitVcsDriverCore.ts";
+import { readGitLocalChanges } from "../vcs/GitIndexReview.ts";
+import { WorkspaceAccessPolicyLayer } from "../workspace/Layers/WorkspaceAccessPolicy.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GitHubSourceControlProvider from "../sourceControl/GitHubSourceControlProvider.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import { githubDiscovery } from "../sourceControl/SourceControlProviderDiscoveryCatalog.ts";
+import {
+  ForgeRateLimitStore,
+  ForgeRateLimits,
+  withForgeRateLimitGuards,
+} from "../sourceControl/forgeRateLimit.ts";
+import { pausedUntilOf } from "../sourceControl/lastGoodWhilePaused.ts";
+import { inBackgroundProcessLane } from "../processGovernor.ts";
+import { makeRestartSensitiveWork, RestartSensitiveWork } from "../updates/restartSensitiveWork.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
-import { makeGitManager } from "./GitManager.ts";
+import { makeGitManager, type MakeGitManagerOptions } from "./GitManager.ts";
 import { ServerConfig } from "../config.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import type { TextGenerationPolicy } from "../textGeneration/TextGenerationPolicy.ts";
@@ -72,8 +102,8 @@ interface FakeGhScenario {
   };
   repositoryCloneUrls?: Record<string, { url: string; sshUrl: string }>;
   failWith?: GitHubCliError;
-  /** Fails only repository-wide `pr list` calls (no `--head`). */
-  failRepositoryListWith?: GitHubCliError;
+  /** Fails only repository-wide `pr list` calls (no `--head`); read per call when a function. */
+  failRepositoryListWith?: GitHubCliError | (() => GitHubCliError | undefined);
 }
 
 function fakeGhOutput(stdout: string): VcsProcess.VcsProcessOutput {
@@ -293,6 +323,15 @@ function initRepo(
   });
 }
 
+/** The `stagedRevision` a Staged changes review shows the user. */
+function readStagedRevision(cwd: string) {
+  return Effect.gen(function* () {
+    const git = yield* GitVcsDriver.GitVcsDriver;
+    const review = yield* readGitLocalChanges(git.execute, { cwd });
+    return review.stagedRevision!;
+  }).pipe(Effect.provide(WorkspaceAccessPolicyLayer(undefined)));
+}
+
 function createBareRemote(): Effect.Effect<
   string,
   PlatformError.PlatformError | GitCommandError,
@@ -408,7 +447,6 @@ function createTextGeneration(overrides: Partial<FakeGitTextGeneration> = {}): T
         ),
       ),
     answerSideQuestion: () => Effect.die("Unexpected side question"),
-    rankInboxThreads: () => Effect.succeed({ rankings: [] }),
     summarizeWorkspaceChanges: () => Effect.die("Unexpected workspace change summary"),
   };
 }
@@ -442,8 +480,12 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
         headSelectorIndex >= 0 && headSelectorIndex < args.length - 1
           ? args[headSelectorIndex + 1]
           : undefined;
-      if (headSelector === undefined && scenario.failRepositoryListWith) {
-        return Effect.fail(scenario.failRepositoryListWith);
+      const repositoryListFailure =
+        typeof scenario.failRepositoryListWith === "function"
+          ? scenario.failRepositoryListWith()
+          : scenario.failRepositoryListWith;
+      if (headSelector === undefined && repositoryListFailure) {
+        return Effect.fail(repositoryListFailure);
       }
       const mappedQueue =
         typeof headSelector === "string"
@@ -579,7 +621,41 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
       updatePullRequest: () => Effect.die("unused"),
       getPullRequestFileContents: () => Effect.die("unused"),
       execute,
-      listPullRequests: () => Effect.die("unused"),
+      // Lists (the change request index and branch lookups read summary rows)
+      // answer from the same `pr list` scenarios, logged as the `gh pr list`
+      // call each one stands for, and decode the way gh's list output does.
+      listPullRequests: (input) =>
+        execute({
+          cwd: input.cwd,
+          args: [
+            "pr",
+            "list",
+            ...(input.headSelector ? ["--head", input.headSelector] : []),
+            "--state",
+            input.state,
+            "--limit",
+            String(input.limit ?? 20),
+            "--json",
+            formatGitHubJsonFields(
+              input.fields === "summary"
+                ? GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS
+                : GITHUB_PULL_REQUEST_LIST_JSON_FIELDS,
+            ),
+          ],
+        }).pipe(
+          Effect.flatMap((result) => {
+            const decoded = decodeGitHubPullRequestListJson(result.stdout.trim() || "[]");
+            return Result.isSuccess(decoded)
+              ? Effect.succeed(decoded.success.map((summary) => ({ summary, stackSummary: null })))
+              : Effect.fail(
+                  new GitHubCliError({
+                    operation: "listPullRequests",
+                    detail: "Invalid fake pull request list JSON.",
+                  }),
+                );
+          }),
+        ),
+      searchInvolvedPullRequests: () => Effect.die("unused"),
       getLinkStates: () => Effect.die("unused"),
       listOpenPullRequests: (input) =>
         execute({
@@ -622,6 +698,7 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
                 input.title,
                 "--body-file",
                 input.bodyFile,
+                ...(input.draft ? ["--draft"] : []),
               ],
             }),
           ),
@@ -692,6 +769,7 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
         Effect.fail(
           new GitHubCliError({ operation: "getPullRequestRequiredChecks", detail: "stub" }),
         ),
+      getPullRequestWatchFingerprint: () => Effect.die("unused"),
       mergePullRequestAsync: () =>
         Effect.fail(new GitHubCliError({ operation: "mergePullRequestAsync", detail: "stub" })),
       getPullRequestDiff: () =>
@@ -741,7 +819,12 @@ function runStackedAction(
     commitMessage?: string;
     featureBranch?: boolean;
     filePaths?: readonly string[];
+    stagedOnly?: { readonly expectedRevision: string };
     linkedIssueNumbers?: readonly number[];
+    prTitle?: string;
+    prBody?: string;
+    prDraft?: boolean;
+    allowDirtyWorkingTree?: boolean;
   },
   options?: Parameters<GitManagerShape["runStackedAction"]>[1],
 ) {
@@ -770,23 +853,29 @@ function makeManager(input?: {
   worktreeBranchPrefix?: string;
   ghScenario?: FakeGhScenario;
   textGeneration?: Partial<FakeGitTextGeneration>;
+  /** Replaces the fake text generation service whole (e.g. with the real router). */
+  textGenerationService?: TextGenerationShape;
   setupScriptRunner?: ProjectSetupScriptRunnerShape;
   settingsPatch?: ServerSettingsPatch;
   project?: OrchestrationProjectShell;
   /** Route through the production registry, which detects the provider from git remotes. */
   detectSourceControlFromRemotes?: boolean;
+  /** Wrap the provider in the forge rate-limit guards, as the production registry does. */
+  guardForgeRateLimits?: boolean;
   /** Wraps every git command the manager's driver runs (observe, delay or replace it). */
   gitExecute?: (
     input: GitVcsDriver.ExecuteGitInput,
     execute: GitVcsDriver.GitVcsDriverShape["execute"],
   ) => ReturnType<GitVcsDriver.GitVcsDriverShape["execute"]>;
+  importGitWritingPolicy?: MakeGitManagerOptions["importGitWritingPolicy"];
 }) {
   const {
     service: gitHubCli,
     ghCalls,
     createdPrBodies,
   } = createGitHubCliWithFakeGh(input?.ghScenario);
-  const textGeneration = createTextGeneration(input?.textGeneration);
+  const textGeneration =
+    input?.textGenerationService ?? createTextGeneration(input?.textGeneration);
   const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
     prefix: "ryco-git-manager-test-",
   });
@@ -858,7 +947,13 @@ function makeManager(input?: {
       Effect.flatMap((provider) =>
         input?.detectSourceControlFromRemotes
           ? SourceControlProviderRegistry.makeWithProviders([
-              { kind: "github", provider, discovery: githubDiscovery },
+              {
+                kind: "github",
+                provider: input.guardForgeRateLimits
+                  ? withForgeRateLimitGuards(provider)
+                  : provider,
+                discovery: githubDiscovery,
+              },
             ])
           : Effect.succeed(
               SourceControlProviderRegistry.SourceControlProviderRegistry.of({
@@ -887,7 +982,9 @@ function makeManager(input?: {
     projectLayer,
   ).pipe(Layer.provideMerge(sourceControlRegistryLayer), Layer.provideMerge(NodeServices.layer));
 
-  return makeGitManager().pipe(
+  return makeGitManager(
+    input?.importGitWritingPolicy ? { importGitWritingPolicy: input.importGitWritingPolicy } : {},
+  ).pipe(
     Effect.provide(managerLayer),
     Effect.map((manager) => ({
       manager,
@@ -975,6 +1072,41 @@ const GitManagerTestLayer = GitVcsDriver.layer.pipe(
 );
 
 it.layer(GitManagerTestLayer)("GitManager", (it) => {
+  it.effect("counts a pull request checkout as work a restart waits for", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makePreferencePullRequestFixture();
+      const restartWork = makeRestartSensitiveWork();
+      // Its fetches and its worktree run past the counted git workflow; the setup script starts
+      // once they are done, still inside the checkout.
+      const countedAtSetup: Array<number> = [];
+      const { manager } = yield* makeManager({
+        ghScenario: fixture.ghScenario,
+        project: fixture.project,
+        settingsPatch: { runSetupScript: true },
+        setupScriptRunner: {
+          runForThread: () =>
+            restartWork.count.pipe(
+              Effect.map((count) => {
+                countedAtSetup.push(count);
+                return { status: "no-script" as const };
+              }),
+            ),
+        },
+      }).pipe(Effect.provideService(RestartSensitiveWork, restartWork));
+      const result = yield* preparePullRequestThread(manager, {
+        cwd: fixture.repoDir,
+        reference: "991",
+        mode: "worktree",
+        worktreesDir: fixture.worktreesDir,
+        threadId: asThreadId("pr-restart-work"),
+        projectId: fixture.project.id,
+      });
+      expect(result.worktreePath).not.toBeNull();
+      expect(countedAtSetup).toEqual([1]);
+      expect(yield* restartWork.count).toBe(0);
+    }),
+  );
+
   it.effect(
     "PR preferences: resolved project submodule policy survives by-root and explicit creation",
     () =>
@@ -1534,6 +1666,34 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
+  it.effect("names the upstream and the commit its counts were read at", () =>
+    Effect.gen(function* () {
+      const { repoDir } = yield* makeRemoteAheadFixture;
+      const head = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
+      const { manager } = yield* makeManager();
+
+      const remote = yield* manager.remoteStatus({ cwd: repoDir }, { fetch: true });
+      expect(remote).toMatchObject({
+        hasUpstream: true,
+        upstreamRef: "origin/feature/tracked",
+        headCommit: head,
+        aheadCount: 0,
+        behindCount: 1,
+      });
+      expect(yield* manager.status({ cwd: repoDir })).toMatchObject({
+        upstreamRef: "origin/feature/tracked",
+        headCommit: head,
+      });
+
+      yield* runGit(repoDir, ["checkout", "-b", "feature/unpublished"]);
+      yield* manager.invalidateStatus(repoDir);
+      expect(yield* manager.remoteStatus({ cwd: repoDir })).toMatchObject({
+        hasUpstream: false,
+        upstreamRef: null,
+      });
+    }),
+  );
+
   it.effect("reuses local status details when the status fetch fails", () =>
     Effect.gen(function* () {
       const { repoDir } = yield* makeRemoteAheadFixture;
@@ -1828,6 +1988,84 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       // The failed listing is remembered briefly instead of retried per read.
       expect(ghCalls.filter((call) => call.startsWith("pr list --state all "))).toHaveLength(1);
     }),
+  );
+
+  it.effect("asks a rate-limited forge once per pause and keeps badges on the last listing", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("ryco-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/indexed"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/indexed"]);
+      const worktreeDir = path.join(yield* makeTempDir("ryco-git-manager-wt-"), "second");
+      yield* runGit(repoDir, ["worktree", "add", "-b", "feature/second", worktreeDir, "main"]);
+      yield* runGit(worktreeDir, ["push", "-u", "origin", "feature/second"]);
+      yield* runGit(repoDir, ["remote", "set-url", "origin", "https://github.com/acme/app.git"]);
+
+      const listing = JSON.stringify([
+        indexedPullRequest({ number: 12, headRefName: "feature/indexed", state: "OPEN" }),
+        indexedPullRequest({ number: 11, headRefName: "feature/second", state: "MERGED" }),
+      ]);
+      const pauseEnd = 5 * 60_000;
+      let rateLimited: GitHubCliError | undefined;
+      const { manager, ghCalls } = yield* makeManager({
+        detectSourceControlFromRemotes: true,
+        guardForgeRateLimits: true,
+        ghScenario: {
+          prListSequence: [listing, listing],
+          failRepositoryListWith: () => rateLimited,
+        },
+      });
+      const listCalls = () =>
+        ghCalls.filter((call) => call.startsWith("pr list --state all ")).length;
+      /** One tick of a checkout's remote-status poll: invalidate, then read. */
+      const poll = (cwd: string) =>
+        manager
+          .invalidateRemoteStatus(cwd)
+          .pipe(Effect.andThen(manager.remoteStatus({ cwd })), Effect.flip);
+
+      expect((yield* manager.remoteStatus({ cwd: repoDir }))?.pr).toMatchObject({ number: 12 });
+      expect(listCalls()).toBe(1);
+
+      // GitHub starts rate limiting until five minutes from now.
+      rateLimited = new GitHubCliError({
+        operation: "execute",
+        detail: "GitHub API rate limit exceeded. Wait for the reset window and retry.",
+        failureKind: "rate-limited",
+        retryAt: pauseEnd,
+      });
+      expect(yield* poll(repoDir)).toMatchObject({ reason: "rate-limited", retryAt: pauseEnd });
+      expect(listCalls()).toBe(2);
+
+      // Every poll of every checkout of the repository invalidates first; while
+      // the pause runs they share the held answer instead of asking again.
+      for (let tick = 0; tick < 9; tick += 1) {
+        yield* TestClock.adjust("30 seconds");
+        expect(yield* poll(repoDir)).toMatchObject({ reason: "rate-limited" });
+        expect(yield* poll(worktreeDir)).toMatchObject({ reason: "rate-limited" });
+      }
+      expect(listCalls()).toBe(2);
+
+      // Background badges keep the last listing, flagged so it creates no links.
+      const badge = yield* inBackgroundProcessLane(manager.refSummary(worktreeDir));
+      expect(badge).toMatchObject({ pr: { number: 11 }, prServedWhilePaused: true });
+      const rows = yield* inBackgroundProcessLane(
+        manager.indexedChangeRequests({ cwd: repoDir, scope: "all" }),
+      );
+      expect(rows?.map((row) => row.number)).toEqual([12, 11]);
+      expect(pausedUntilOf(rows)).toBe(pauseEnd);
+      expect((yield* manager.indexedPullRequestStates(repoDir)).size).toBe(0);
+      expect(listCalls()).toBe(2);
+
+      // The pause is over: the next poll asks again.
+      rateLimited = undefined;
+      yield* TestClock.adjust("31 seconds");
+      yield* manager.invalidateRemoteStatus(repoDir);
+      expect((yield* manager.remoteStatus({ cwd: repoDir }))?.pr).toMatchObject({ number: 12 });
+      expect(listCalls()).toBe(3);
+      expect(yield* manager.refSummary(repoDir)).not.toHaveProperty("prServedWhilePaused");
+    }).pipe(Effect.provideService(ForgeRateLimits, new ForgeRateLimitStore())),
   );
 
   it.effect("summarizes a checkout's badge from HEAD, config and the index", () =>
@@ -2376,6 +2614,299 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect(statusStdout).not.toContain("a.txt");
     }),
   );
+
+  describe("staged-only commits", () => {
+    const LINES = Array.from({ length: 30 }, (_, index) => `line ${index}\n`).join("");
+    /** `notes.txt` with its first hunk staged and a second, later hunk only in the working file. */
+    const stagePartialEdit = (repoDir: string) =>
+      Effect.gen(function* () {
+        fs.writeFileSync(path.join(repoDir, "notes.txt"), LINES);
+        yield* runGit(repoDir, ["add", "notes.txt"]);
+        yield* runGit(repoDir, ["commit", "-m", "Add notes"]);
+        const staged = LINES.replace("line 2\n", "staged edit\n");
+        fs.writeFileSync(path.join(repoDir, "notes.txt"), staged);
+        yield* runGit(repoDir, ["add", "notes.txt"]);
+        fs.writeFileSync(
+          path.join(repoDir, "notes.txt"),
+          staged.replace("line 25\n", "unstaged edit\n"),
+        );
+      });
+    const headSha = (repoDir: string) =>
+      runGit(repoDir, ["rev-parse", "HEAD"]).pipe(Effect.map((result) => result.stdout.trim()));
+
+    it.effect("commits exactly the reviewed index and keeps every unstaged change", () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("ryco-git-manager-");
+        yield* initRepo(repoDir);
+        yield* stagePartialEdit(repoDir);
+        fs.writeFileSync(path.join(repoDir, "README.md"), "hello\nunstaged readme\n");
+        fs.writeFileSync(path.join(repoDir, "scratch.txt"), "untracked\n");
+        const expectedRevision = yield* readStagedRevision(repoDir);
+        // Agent edits to working files after the review do not move what gets committed.
+        fs.writeFileSync(path.join(repoDir, "README.md"), "hello\nlater agent edit\n");
+        const summaries: string[] = [];
+
+        const { manager } = yield* makeManager({
+          textGeneration: {
+            generateCommitMessage: (input) =>
+              Effect.sync(() => {
+                summaries.push(input.stagedSummary);
+                return { subject: "Commit the staged notes edit", body: "" };
+              }),
+          },
+        });
+        const result = yield* runStackedAction(manager, {
+          cwd: repoDir,
+          action: "commit",
+          stagedOnly: { expectedRevision },
+        });
+
+        expect(result.commit.status).toBe("created");
+        expect(summaries).toEqual(["M\tnotes.txt"]);
+        const committed = (yield* runGit(repoDir, ["show", "HEAD:notes.txt"])).stdout;
+        expect(committed).toContain("staged edit");
+        expect(committed).not.toContain("unstaged edit");
+        expect((yield* runGit(repoDir, ["diff", "--cached", "--name-only"])).stdout).toBe("");
+        expect((yield* runGit(repoDir, ["diff"])).stdout).toContain("+unstaged edit");
+        expect(fs.readFileSync(path.join(repoDir, "notes.txt"), "utf8")).toContain("unstaged edit");
+        const status = (yield* runGit(repoDir, ["status", "--porcelain"])).stdout;
+        expect(status).toContain(" M README.md");
+        expect(status).toContain("?? scratch.txt");
+      }),
+    );
+
+    it.effect("describes a staged submodule pointer the user's config would hide", () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("ryco-git-manager-");
+        yield* initRepo(repoDir);
+        const pointer = yield* headSha(repoDir);
+        yield* runGit(repoDir, ["config", "diff.ignoreSubmodules", "all"]);
+        fs.mkdirSync(path.join(repoDir, "lib"));
+        yield* runGit(repoDir, ["update-index", "--add", "--cacheinfo", `160000,${pointer},lib`]);
+        fs.writeFileSync(path.join(repoDir, "a.txt"), "reviewed\n");
+        yield* runGit(repoDir, ["add", "a.txt"]);
+        const expectedRevision = yield* readStagedRevision(repoDir);
+        const contexts: { summary: string; patch: string }[] = [];
+
+        const { manager } = yield* makeManager({
+          textGeneration: {
+            generateCommitMessage: (input) =>
+              Effect.sync(() => {
+                contexts.push({ summary: input.stagedSummary, patch: input.stagedPatch });
+                return { subject: "Commit the file and the submodule pointer", body: "" };
+              }),
+          },
+        });
+        const result = yield* runStackedAction(manager, {
+          cwd: repoDir,
+          action: "commit",
+          stagedOnly: { expectedRevision },
+        });
+
+        expect(result.commit.status).toBe("created");
+        expect(contexts).toHaveLength(1);
+        expect(contexts[0]!.summary).toBe("A\ta.txt\nA\tlib");
+        expect(contexts[0]!.patch).toContain(`+Subproject commit ${pointer}`);
+        expect((yield* runGit(repoDir, ["ls-tree", "HEAD", "lib"])).stdout).toContain(
+          `160000 commit ${pointer}\tlib`,
+        );
+      }),
+    );
+
+    it.effect("creates the feature branch and pushes only the staged index", () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("ryco-git-manager-");
+        yield* initRepo(repoDir);
+        const remoteDir = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+        yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+        yield* stagePartialEdit(repoDir);
+        const expectedRevision = yield* readStagedRevision(repoDir);
+
+        const { manager } = yield* makeManager();
+        const result = yield* runStackedAction(manager, {
+          cwd: repoDir,
+          action: "commit_push",
+          featureBranch: true,
+          stagedOnly: { expectedRevision },
+        });
+
+        expect(result.branch).toEqual({
+          status: "created",
+          name: "feature/implement-stacked-git-actions",
+        });
+        expect(result.push.status).toBe("pushed");
+        const pushed = (yield* runGit(remoteDir, [
+          "show",
+          "feature/implement-stacked-git-actions:notes.txt",
+        ])).stdout;
+        expect(pushed).toContain("staged edit");
+        expect(pushed).not.toContain("unstaged edit");
+        expect((yield* runGit(repoDir, ["diff"])).stdout).toContain("+unstaged edit");
+      }),
+    );
+
+    it.effect("refuses an empty index instead of committing working changes", () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("ryco-git-manager-");
+        yield* initRepo(repoDir);
+        fs.writeFileSync(path.join(repoDir, "README.md"), "hello\nunstaged\n");
+        const expectedRevision = yield* readStagedRevision(repoDir);
+        const before = yield* headSha(repoDir);
+
+        const { manager } = yield* makeManager();
+        const error = yield* runStackedAction(manager, {
+          cwd: repoDir,
+          action: "commit",
+          stagedOnly: { expectedRevision },
+        }).pipe(Effect.flip);
+
+        expect(error.message).toContain("Nothing is staged");
+        expect(yield* headSha(repoDir)).toBe(before);
+        expect((yield* runGit(repoDir, ["status", "--porcelain"])).stdout).toContain(
+          " M README.md",
+        );
+      }),
+    );
+
+    it.effect("refuses an index with unmerged entries", () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("ryco-git-manager-");
+        yield* initRepo(repoDir);
+        yield* runGit(repoDir, ["checkout", "-b", "other"]);
+        fs.writeFileSync(path.join(repoDir, "README.md"), "other\n");
+        yield* runGit(repoDir, ["commit", "-am", "Other edit"]);
+        yield* runGit(repoDir, ["checkout", "main"]);
+        fs.writeFileSync(path.join(repoDir, "README.md"), "main\n");
+        yield* runGit(repoDir, ["commit", "-am", "Main edit"]);
+        const expectedRevision = yield* readStagedRevision(repoDir);
+        yield* runGit(repoDir, ["merge", "other"], true);
+        const before = yield* headSha(repoDir);
+
+        const { manager } = yield* makeManager();
+        const error = yield* runStackedAction(manager, {
+          cwd: repoDir,
+          action: "commit",
+          stagedOnly: { expectedRevision },
+        }).pipe(Effect.flip);
+
+        expect(error.message).toContain("Resolve merge conflicts");
+        expect(yield* headSha(repoDir)).toBe(before);
+        expect((yield* runGit(repoDir, ["ls-files", "--unmerged"])).stdout).not.toBe("");
+      }),
+    );
+
+    it.effect("refuses an index, HEAD or branch that moved since the review", () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("ryco-git-manager-");
+        yield* initRepo(repoDir);
+        fs.writeFileSync(path.join(repoDir, "a.txt"), "reviewed\n");
+        yield* runGit(repoDir, ["add", "a.txt"]);
+        const { manager } = yield* makeManager();
+        const expectRefused = (expectedRevision: string) =>
+          Effect.gen(function* () {
+            const before = yield* headSha(repoDir);
+            const error = yield* runStackedAction(manager, {
+              cwd: repoDir,
+              action: "commit",
+              stagedOnly: { expectedRevision },
+            }).pipe(Effect.flip);
+            expect(error).toBeInstanceOf(GitStagedIndexChangedError);
+            expect(yield* headSha(repoDir)).toBe(before);
+          });
+
+        let expectedRevision = yield* readStagedRevision(repoDir);
+        // An agent stages more after the user reviewed the index.
+        fs.writeFileSync(path.join(repoDir, "b.txt"), "agent\n");
+        yield* runGit(repoDir, ["add", "b.txt"]);
+        yield* expectRefused(expectedRevision);
+        expect((yield* runGit(repoDir, ["diff", "--cached", "--name-only"])).stdout).toBe(
+          "a.txt\nb.txt\n",
+        );
+
+        expectedRevision = yield* readStagedRevision(repoDir);
+        yield* runGit(repoDir, ["commit", "--allow-empty", "-m", "HEAD moved"]);
+        yield* expectRefused(expectedRevision);
+
+        expectedRevision = yield* readStagedRevision(repoDir);
+        yield* runGit(repoDir, ["checkout", "-b", "elsewhere"]);
+        yield* expectRefused(expectedRevision);
+      }),
+    );
+
+    it.effect("refuses changes staged while the commit message was generated", () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("ryco-git-manager-");
+        yield* initRepo(repoDir);
+        fs.writeFileSync(path.join(repoDir, "a.txt"), "reviewed\n");
+        fs.writeFileSync(path.join(repoDir, "b.txt"), "agent\n");
+        yield* runGit(repoDir, ["add", "a.txt"]);
+        const expectedRevision = yield* readStagedRevision(repoDir);
+        const before = yield* headSha(repoDir);
+
+        const { manager } = yield* makeManager({
+          textGeneration: {
+            generateCommitMessage: () =>
+              Effect.sync(() => {
+                spawnSync("git", ["add", "b.txt"], { cwd: repoDir });
+                return { subject: "Commit the reviewed file", body: "" };
+              }),
+          },
+        });
+        const error = yield* runStackedAction(manager, {
+          cwd: repoDir,
+          action: "commit",
+          stagedOnly: { expectedRevision },
+        }).pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(GitStagedIndexChangedError);
+        expect(yield* headSha(repoDir)).toBe(before);
+      }),
+    );
+
+    it.effect("runs commit hooks as the regular commit path does", () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("ryco-git-manager-");
+        yield* initRepo(repoDir);
+        yield* stagePartialEdit(repoDir);
+        fs.writeFileSync(
+          path.join(repoDir, ".git", "hooks", "pre-commit"),
+          '#!/bin/sh\necho "hook: fail" >&2\nexit 1\n',
+          { mode: 0o755 },
+        );
+        const expectedRevision = yield* readStagedRevision(repoDir);
+        const before = yield* headSha(repoDir);
+
+        const { manager } = yield* makeManager();
+        const error = yield* runStackedAction(manager, {
+          cwd: repoDir,
+          action: "commit",
+          commitMessage: "Commit the staged notes edit",
+          stagedOnly: { expectedRevision },
+        }).pipe(Effect.flip);
+
+        expect(error.message).toContain("hook: fail");
+        expect(yield* headSha(repoDir)).toBe(before);
+        expect((yield* runGit(repoDir, ["diff", "--cached"])).stdout).toContain("+staged edit");
+      }),
+    );
+
+    it.effect("is only accepted for commit actions", () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("ryco-git-manager-");
+        yield* initRepo(repoDir);
+
+        const { manager } = yield* makeManager();
+        const error = yield* runStackedAction(manager, {
+          cwd: repoDir,
+          action: "push",
+          stagedOnly: { expectedRevision: "0".repeat(64) },
+        }).pipe(Effect.flip);
+
+        expect(error.message).toContain("only supported for commit actions");
+      }),
+    );
+  });
 
   it.effect("creates feature branch, commits, and pushes with featureBranch option", () =>
     Effect.gen(function* () {
@@ -3251,6 +3782,513 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
+  /** Commits "Add login page" and "Fix logout redirect" on main; an uncommitted change on a branch. */
+  const makeWritingStyleFixture = Effect.gen(function* () {
+    const repoDir = yield* makeTempDir("ryco-git-manager-");
+    yield* initRepo(repoDir);
+    for (const [file, subject] of [
+      ["login.txt", "Add login page"],
+      ["logout.txt", "Fix logout redirect"],
+    ] as const) {
+      fs.writeFileSync(path.join(repoDir, file), `${file}\n`);
+      yield* runGit(repoDir, ["add", file]);
+      yield* runGit(repoDir, ["commit", "-m", subject]);
+    }
+    yield* runGit(repoDir, ["checkout", "-b", "feature/writing"]);
+    fs.writeFileSync(path.join(repoDir, "feature.txt"), "feature change\n");
+    return repoDir;
+  });
+
+  const recordCommitPolicies = () => {
+    const policies: Array<TextGenerationPolicy | undefined> = [];
+    return {
+      policies,
+      textGeneration: {
+        generateCommitMessage: (input: { policy?: TextGenerationPolicy | undefined }) => {
+          policies.push(input.policy);
+          return Effect.succeed({ subject: "Add feature", body: "" });
+        },
+      },
+    };
+  };
+
+  const isExampleRead = (input: GitVcsDriver.ExecuteGitInput) =>
+    input.operation.startsWith("repositoryWritingExamples.");
+
+  it.effect("feeds the default branch's recent subjects to repository-style commits", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeWritingStyleFixture;
+      const recorded = recordCommitPolicies();
+      const exampleReads: string[] = [];
+      const { manager } = yield* makeManager({
+        textGeneration: recorded.textGeneration,
+        gitExecute: (input, execute) => {
+          if (isExampleRead(input)) exampleReads.push(input.operation);
+          return execute(input);
+        },
+      });
+
+      const result = yield* runStackedAction(manager, { cwd: repoDir, action: "commit" });
+
+      expect(result.commit.status).toBe("created");
+      expect(recorded.policies).toHaveLength(1);
+      expect(recorded.policies[0]).toMatchObject({
+        kind: "repo_conventions",
+        repositoryExamples: {
+          commitSubjects: ["Fix logout redirect", "Add login page", "Initial commit"],
+          pullRequestTitles: [],
+        },
+      });
+      // One ref listing and one log: three subjects are enough, so no merge-workflow fallback.
+      expect(exampleReads).toEqual([
+        "repositoryWritingExamples.refs",
+        "repositoryWritingExamples.firstParentLog",
+      ]);
+    }),
+  );
+
+  it.effect("writes a worktree checkout's commits in its project's style", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeWritingStyleFixture;
+      const worktreeDir = path.join(yield* makeTempDir("ryco-git-manager-wt-"), "workspace");
+      yield* runGit(repoDir, ["worktree", "add", "-b", "feature/workspace", worktreeDir, "main"]);
+      fs.writeFileSync(path.join(worktreeDir, "workspace.txt"), "workspace change\n");
+      const projectId = ProjectId.make("writing-project");
+      const recorded = recordCommitPolicies();
+      const exampleReads: string[] = [];
+      const { manager } = yield* makeManager({
+        settingsPatch: {
+          gitWritingStyle: "repository",
+          projectGitWritingStyle: { [projectId]: "conventional", other: "default" },
+        },
+        textGeneration: recorded.textGeneration,
+        gitExecute: (input, execute) => {
+          if (isExampleRead(input)) exampleReads.push(input.operation);
+          return execute(input);
+        },
+      });
+
+      yield* runStackedAction(
+        manager,
+        { cwd: worktreeDir, action: "commit" },
+        { checkoutProjectId: Effect.succeed(projectId) },
+      );
+
+      expect(recorded.policies).toHaveLength(1);
+      expect(recorded.policies[0]?.kind).toBe("conventional_commits");
+      expect(recorded.policies[0]?.commitStyle).toContain("Conventional Commits");
+      expect(recorded.policies[0]).not.toHaveProperty("repositoryExamples");
+      // Conventional Commits reads nothing from the repository.
+      expect(exampleReads).toEqual([]);
+    }),
+  );
+
+  it.effect("reads no examples for a custom commit message", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeWritingStyleFixture;
+      const recorded = recordCommitPolicies();
+      const exampleReads: string[] = [];
+      let projectReads = 0;
+      const { manager } = yield* makeManager({
+        textGeneration: recorded.textGeneration,
+        gitExecute: (input, execute) => {
+          if (isExampleRead(input)) exampleReads.push(input.operation);
+          return execute(input);
+        },
+      });
+
+      const result = yield* runStackedAction(
+        manager,
+        { cwd: repoDir, action: "commit", commitMessage: "Write my own message" },
+        {
+          checkoutProjectId: Effect.sync(() => {
+            projectReads++;
+            return null;
+          }),
+        },
+      );
+
+      expect(result.commit).toMatchObject({ status: "created", subject: "Write my own message" });
+      expect(recorded.policies).toEqual([]);
+      expect(exampleReads).toEqual([]);
+      expect(projectReads).toBe(0);
+    }),
+  );
+
+  it.effect("still commits when the example read fails", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeWritingStyleFixture;
+      const recorded = recordCommitPolicies();
+      const { manager } = yield* makeManager({
+        textGeneration: recorded.textGeneration,
+        gitExecute: (input, execute) =>
+          input.operation === "repositoryWritingExamples.firstParentLog"
+            ? Effect.fail(
+                new GitCommandError({
+                  operation: input.operation,
+                  command: "git log",
+                  cwd: input.cwd,
+                  detail: "simulated failure",
+                }),
+              )
+            : execute(input),
+      });
+
+      const result = yield* runStackedAction(manager, { cwd: repoDir, action: "commit" });
+
+      expect(result.commit.status).toBe("created");
+      expect(recorded.policies[0]).toMatchObject({
+        kind: "repo_conventions",
+        repositoryExamples: { commitSubjects: [], pullRequestTitles: [] },
+      });
+    }),
+  );
+
+  it.effect("still commits with the user's instructions when the writing style fails to load", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeWritingStyleFixture;
+      const recorded = recordCommitPolicies();
+      const exampleReads: string[] = [];
+      let loads = 0;
+      const { manager } = yield* makeManager({
+        settingsPatch: { commitMessageInstructions: "  Mention the ticket.  " },
+        textGeneration: recorded.textGeneration,
+        gitExecute: (input, execute) => {
+          if (isExampleRead(input)) exampleReads.push(input.operation);
+          return execute(input);
+        },
+        // An update replaced the running server's files, so the lazy chunk is gone.
+        importGitWritingPolicy: () => {
+          loads++;
+          return Promise.reject(new Error("Cannot find module './gitWritingPolicy-abc123.mjs'"));
+        },
+      });
+
+      const result = yield* runStackedAction(manager, { cwd: repoDir, action: "commit" });
+
+      expect(result.commit.status).toBe("created");
+      expect(recorded.policies).toEqual([
+        {
+          kind: "custom",
+          inferRepositoryConventions: false,
+          commitInstructions: "Mention the ticket.",
+        },
+      ]);
+      expect(exampleReads).toEqual([]);
+      expect(loads).toBe(1);
+    }),
+  );
+
+  it.effect("takes only merged pull request titles from the index a status read loaded", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeWritingStyleFixture;
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "origin", "main"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/writing"]);
+      yield* runGit(repoDir, ["remote", "set-url", "origin", "https://github.com/acme/app.git"]);
+      const listed = (number: number, title: string, state: "OPEN" | "MERGED" | "CLOSED") => ({
+        number,
+        title,
+        url: `https://github.com/acme/app/pull/${number}`,
+        baseRefName: "main",
+        headRefName: `other/${number}`,
+        state,
+        updatedAt: `2026-10-${String(number).padStart(2, "0")}T07:00:00Z`,
+        isCrossRepository: false,
+      });
+      const recorded = recordCommitPolicies();
+      const { manager, ghCalls } = yield* makeManager({
+        detectSourceControlFromRemotes: true,
+        ghScenario: {
+          prListSequence: [
+            JSON.stringify([
+              listed(14, "Open from a stranger", "OPEN"),
+              listed(13, "Remember the reading position", "MERGED"),
+              listed(12, "Closed attempt", "CLOSED"),
+              listed(11, "Hide credentials in diagnostics", "MERGED"),
+            ]),
+          ],
+        },
+        textGeneration: recorded.textGeneration,
+      });
+
+      yield* manager.remoteStatus({ cwd: repoDir });
+      const listingCalls = ghCalls.length;
+      yield* runStackedAction(manager, { cwd: repoDir, action: "commit" });
+
+      expect(recorded.policies[0]?.repositoryExamples).toEqual({
+        commitSubjects: ["Fix logout redirect", "Add login page", "Initial commit"],
+        pullRequestTitles: ["Remember the reading position", "Hide credentials in diagnostics"],
+      });
+      // The titles came from the loaded index: generation asked the forge nothing.
+      expect(ghCalls.slice(listingCalls).filter((call) => call.startsWith("pr list "))).toEqual([]);
+    }),
+  );
+
+  it.effect("gives the pull request its writing policy when there was nothing to commit", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeWritingStyleFixture;
+      yield* runGit(repoDir, ["add", "feature.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Add feature"]);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "origin", "main"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/writing"]);
+      const prPolicies: Array<TextGenerationPolicy | undefined> = [];
+      let commitGenerations = 0;
+      const { manager } = yield* makeManager({
+        ghScenario: { prListSequence: ["[]", "[]"] },
+        textGeneration: {
+          generateCommitMessage: () => {
+            commitGenerations++;
+            return Effect.succeed({ subject: "Unused", body: "" });
+          },
+          generatePrContent: (input) => {
+            prPolicies.push(input.policy);
+            return Effect.succeed({ title: "Add feature", body: "Feature body" });
+          },
+        },
+      });
+
+      const result = yield* runStackedAction(manager, {
+        cwd: repoDir,
+        action: "commit_push_pr",
+      });
+
+      // The commit step did not wait for the policy it started; the pull request step used it.
+      expect(result.commit.status).toBe("skipped_no_changes");
+      expect(result.pr.status).toBe("created");
+      expect(commitGenerations).toBe(0);
+      expect(prPolicies).toHaveLength(1);
+      expect(prPolicies[0]).toMatchObject({
+        kind: "repo_conventions",
+        repositoryExamples: {
+          commitSubjects: ["Fix logout redirect", "Add login page", "Initial commit"],
+          pullRequestTitles: [],
+        },
+      });
+    }),
+  );
+
+  /**
+   * `main` (pushed) holds the given template files; `feature/templates` (pushed, nothing left to
+   * commit) changes them, so a read of the wrong tree shows.
+   */
+  const makeTemplateFixture = (templates: Record<string, string>) =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("ryco-git-manager-");
+      yield* initRepo(repoDir);
+      const write = (files: Record<string, string>) => {
+        for (const [file, content] of Object.entries(files)) {
+          fs.mkdirSync(path.dirname(path.join(repoDir, file)), { recursive: true });
+          fs.writeFileSync(path.join(repoDir, file), content);
+        }
+      };
+      write(templates);
+      yield* runGit(repoDir, ["add", "-A"]);
+      yield* runGit(repoDir, ["commit", "-m", "Add templates"]);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/templates"]);
+      write(
+        Object.fromEntries(
+          Object.keys(templates).map((file) => [file, "Changed on the feature branch.\n"]),
+        ),
+      );
+      fs.writeFileSync(path.join(repoDir, "feature.txt"), "feature change\n");
+      yield* runGit(repoDir, ["add", "-A"]);
+      yield* runGit(repoDir, ["commit", "-m", "Add feature"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/templates"]);
+      return repoDir;
+    });
+
+  const createPullRequestWithTemplates = (
+    repoDir: string,
+    options: {
+      readonly settingsPatch?: ServerSettingsPatch;
+      readonly gitOperations?: Array<string>;
+      readonly checkoutProjectId?: string;
+    } = {},
+  ) =>
+    Effect.gen(function* () {
+      const prPolicies: Array<TextGenerationPolicy | undefined> = [];
+      const { manager } = yield* makeManager({
+        ghScenario: { prListSequence: ["[]", "[]"] },
+        ...(options.settingsPatch ? { settingsPatch: options.settingsPatch } : {}),
+        gitExecute: (command, execute) => {
+          options.gitOperations?.push(command.operation);
+          return execute(command);
+        },
+        textGeneration: {
+          generatePrContent: (input) => {
+            prPolicies.push(input.policy);
+            return Effect.succeed({ title: "Add feature", body: "Feature body" });
+          },
+        },
+      });
+      const result = yield* runStackedAction(
+        manager,
+        { cwd: repoDir, action: "commit_push_pr" },
+        options.checkoutProjectId === undefined
+          ? undefined
+          : { checkoutProjectId: Effect.succeed(options.checkoutProjectId) },
+      );
+      expect(result.pr.status).toBe("created");
+      expect(prPolicies).toHaveLength(1);
+      return { policy: prPolicies[0], manager };
+    });
+
+  it.effect("fills generated pull request descriptions from the base branch's template", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTemplateFixture({
+        ".github/pull_request_template.md": "## What changed\n\n## How to test\n",
+      });
+      const { policy, manager } = yield* createPullRequestWithTemplates(repoDir);
+      expect(policy?.changeRequestTemplate).toMatchObject({
+        path: ".github/pull_request_template.md",
+        body: "## What changed\n\n## How to test",
+      });
+      expect(policy?.changeRequestTemplate?.rules.length).toBeGreaterThan(0);
+      // The writing style stays as it was; the template is added to it.
+      expect(policy?.kind).toBe("repo_conventions");
+
+      // The create dialog lists the same base tree's templates.
+      expect(
+        yield* manager.listChangeRequestTemplates({ cwd: repoDir, baseRefName: "main" }),
+      ).toEqual({
+        templates: [
+          {
+            path: ".github/pull_request_template.md",
+            name: "Default",
+            isDefault: true,
+            body: "## What changed\n\n## How to test",
+            truncated: false,
+          },
+        ],
+        generationTemplatePath: ".github/pull_request_template.md",
+      });
+    }),
+  );
+
+  it.effect("reads no template when pull request templates are off", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTemplateFixture({
+        ".github/pull_request_template.md": "## What changed\n",
+      });
+      const gitOperations: Array<string> = [];
+      const { policy } = yield* createPullRequestWithTemplates(repoDir, {
+        settingsPatch: { pullRequestTemplates: false, gitWritingStyle: "default" },
+        gitOperations,
+      });
+      expect(policy).toBeUndefined();
+      expect(
+        gitOperations.filter((operation) => operation.startsWith("changeRequestTemplates.")),
+      ).toEqual([]);
+    }),
+  );
+
+  it.effect("follows the checkout's project when it turns pull request templates off", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTemplateFixture({
+        ".github/pull_request_template.md": "## What changed\n",
+      });
+      const gitOperations: Array<string> = [];
+      const { policy } = yield* createPullRequestWithTemplates(repoDir, {
+        settingsPatch: {
+          pullRequestTemplates: true,
+          gitWritingStyle: "default",
+          projectPreferences: { "project-without-templates": { pullRequestTemplates: false } },
+        },
+        gitOperations,
+        checkoutProjectId: "project-without-templates",
+      });
+      expect(policy).toBeUndefined();
+      expect(
+        gitOperations.filter((operation) => operation.startsWith("changeRequestTemplates.")),
+      ).toEqual([]);
+
+      // Another project of the node keeps the node's setting.
+      const other = yield* createPullRequestWithTemplates(
+        yield* makeTemplateFixture({ ".github/pull_request_template.md": "## What changed\n" }),
+        {
+          settingsPatch: {
+            gitWritingStyle: "default",
+            projectPreferences: { "project-without-templates": { pullRequestTemplates: false } },
+          },
+          checkoutProjectId: "another-project",
+        },
+      );
+      expect(other.policy?.changeRequestTemplate?.path).toBe(".github/pull_request_template.md");
+    }),
+  );
+
+  it.effect("never guesses between several pull request templates", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTemplateFixture({
+        ".github/PULL_REQUEST_TEMPLATE/bug.md": "## Bug\n",
+        ".github/PULL_REQUEST_TEMPLATE/feature.md": "## Feature\n",
+      });
+      const { policy, manager } = yield* createPullRequestWithTemplates(repoDir, {
+        settingsPatch: { gitWritingStyle: "default" },
+      });
+      expect(policy).toBeUndefined();
+      const listed = yield* manager.listChangeRequestTemplates({
+        cwd: repoDir,
+        baseRefName: "main",
+      });
+      expect(listed.templates.map((template) => template.name)).toEqual(["bug", "feature"]);
+      expect(listed.generationTemplatePath).toBeNull();
+    }),
+  );
+
+  it.effect("keeps repository text from providers that cannot write without tools", () =>
+    Effect.gen(function* () {
+      const received = new Map<string, TextGenerationPolicy | undefined>();
+      const instance = (id: string, gitWritingToolFree: boolean) => ({
+        instanceId: ProviderInstanceId.make(id),
+        // The router runs enabled instances only (#904).
+        enabled: true,
+        textGeneration: {
+          ...createTextGeneration(),
+          gitWritingToolFree,
+          generateCommitMessage: (input: { policy?: TextGenerationPolicy | undefined }) => {
+            received.set(id, input.policy);
+            return Effect.succeed({ subject: "Add feature", body: "" });
+          },
+        },
+      });
+      const instances = new Map(
+        [instance("claudeAgent", true), instance("cursor", false)].map(
+          (entry) => [entry.instanceId, entry] as const,
+        ),
+      );
+      const router = makeTextGenerationFromRegistry({
+        getInstance: (id: ProviderInstanceId) => Effect.succeed(instances.get(id)),
+      } as unknown as ProviderInstanceRegistryShape);
+
+      for (const id of ["claudeAgent", "cursor"]) {
+        const repoDir = yield* makeWritingStyleFixture;
+        const { manager } = yield* makeManager({
+          settingsPatch: {
+            textGenerationModelSelection: { instanceId: ProviderInstanceId.make(id), model: "m" },
+          },
+          textGenerationService: router,
+        });
+        yield* runStackedAction(manager, { cwd: repoDir, action: "commit" });
+      }
+
+      expect(received.get("claudeAgent")?.repositoryExamples?.commitSubjects).toEqual([
+        "Fix logout redirect",
+        "Add login page",
+        "Initial commit",
+      ]);
+      expect(received.get("cursor")).toMatchObject({ kind: "repo_conventions" });
+      expect(received.get("cursor")).not.toHaveProperty("repositoryExamples");
+    }),
+  );
+
   for (const scenario of [
     "stale",
     "missing",
@@ -3393,6 +4431,132 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect(result.pr.status).toBe("created");
       expect(createdPrBodies).toHaveLength(1);
       expect(createdPrBodies[0]).toContain("Fixes #123");
+    }),
+  );
+
+  const pushedFeatureBranch = (branch: string) =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("ryco-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", branch]);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      fs.writeFileSync(path.join(repoDir, "changes.txt"), "change\n");
+      yield* runGit(repoDir, ["add", "changes.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Feature commit"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", branch]);
+      yield* runGit(repoDir, ["config", `branch.${branch}.gh-merge-base`, "main"]);
+      return repoDir;
+    });
+  const createdPrList = (branch: string) =>
+    JSON.stringify([
+      {
+        number: 90,
+        title: "Created",
+        url: "https://github.com/pingdotgg/codething-mvp/pull/90",
+        baseRefName: "main",
+        headRefName: branch,
+      },
+    ]);
+
+  it.effect("opens a draft PR with the user's title and body without generating text", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* pushedFeatureBranch("feature-own-text");
+      let generated = 0;
+      const { manager, ghCalls, createdPrBodies } = yield* makeManager({
+        ghScenario: { prListSequence: ["[]", createdPrList("feature-own-text")] },
+        textGeneration: {
+          generatePrContent: () => {
+            generated += 1;
+            return Effect.succeed({ title: "Generated title", body: "Generated body" });
+          },
+        },
+      });
+      const stages: string[] = [];
+      const result = yield* runStackedAction(
+        manager,
+        {
+          cwd: repoDir,
+          action: "create_pr",
+          prTitle: "My own title",
+          prBody: "My own body",
+          prDraft: true,
+          linkedIssueNumbers: [7],
+        },
+        {
+          progressReporter: {
+            publish: (event) =>
+              Effect.sync(() => {
+                if (event.kind === "phase_started") stages.push(event.label);
+              }),
+          },
+        },
+      );
+
+      expect(result.pr.status).toBe("created");
+      expect(generated).toBe(0);
+      expect(stages.some((label) => label.startsWith("Generating"))).toBe(false);
+      const create = ghCalls.find((call) => call.startsWith("pr create "));
+      expect(create).toContain("--title My own title");
+      expect(create?.endsWith("--draft")).toBe(true);
+      expect(createdPrBodies).toEqual([expect.stringContaining("My own body")]);
+      expect(createdPrBodies[0]).toContain("Fixes #7");
+    }),
+  );
+
+  it.effect("generates only the PR text the user left empty and opens it ready", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* pushedFeatureBranch("feature-own-title");
+      let generated = 0;
+      const { manager, ghCalls, createdPrBodies } = yield* makeManager({
+        ghScenario: { prListSequence: ["[]", createdPrList("feature-own-title")] },
+        textGeneration: {
+          generatePrContent: () => {
+            generated += 1;
+            return Effect.succeed({ title: "Generated title", body: "Generated body" });
+          },
+        },
+      });
+      const result = yield* runStackedAction(manager, {
+        cwd: repoDir,
+        action: "create_pr",
+        prTitle: "My own title",
+      });
+
+      expect(result.pr.status).toBe("created");
+      expect(generated).toBe(1);
+      const create = ghCalls.find((call) => call.startsWith("pr create "));
+      expect(create).toContain("--title My own title");
+      expect(create).not.toContain("--draft");
+      expect(createdPrBodies).toEqual(["Generated body"]);
+    }),
+  );
+
+  it.effect("creates a PR from committed work and leaves local changes out when asked", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* pushedFeatureBranch("feature-dirty-pr");
+      fs.writeFileSync(path.join(repoDir, "changes.txt"), "local edit\n");
+      const { manager, ghCalls } = yield* makeManager({
+        ghScenario: { prListSequence: ["[]", createdPrList("feature-dirty-pr")] },
+      });
+
+      const refused = yield* runStackedAction(manager, {
+        cwd: repoDir,
+        action: "create_pr",
+      }).pipe(Effect.flip);
+      expect(refused.message).toContain("Commit local changes before creating a PR.");
+
+      const result = yield* runStackedAction(manager, {
+        cwd: repoDir,
+        action: "create_pr",
+        allowDirtyWorkingTree: true,
+      });
+      expect(result.commit.status).toBe("skipped_not_requested");
+      expect(result.pr.status).toBe("created");
+      expect(ghCalls.some((call) => call.startsWith("pr create "))).toBe(true);
+      expect(fs.readFileSync(path.join(repoDir, "changes.txt"), "utf8")).toBe("local edit\n");
+      const status = yield* runGit(repoDir, ["status", "--porcelain"]);
+      expect(status.stdout).toContain("changes.txt");
     }),
   );
 

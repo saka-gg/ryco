@@ -1,3 +1,5 @@
+import { PLAN_IMPLEMENTATION_PROMPT_PREFIX } from "@ryco/client-runtime/state/composer";
+
 export function proposedPlanTitle(planMarkdown: string): string | null {
   const heading = planMarkdown.match(/^\s{0,3}#{1,6}\s+(.+)$/m)?.[1]?.trim();
   return heading && heading.length > 0 ? heading : null;
@@ -17,6 +19,21 @@ export function stripDisplayedPlanMarkdown(planMarkdown: string): string {
     }
   }
   return sourceLines.join("\n");
+}
+
+/** A plan card starts folded to a preview (with "Expand plan") above these sizes. */
+const COLLAPSIBLE_PLAN_MIN_CHARS = 900;
+const COLLAPSIBLE_PLAN_MIN_LINES = 20;
+
+export function isProposedPlanCollapsible(planMarkdown: string): boolean {
+  if (planMarkdown.length > COLLAPSIBLE_PLAN_MIN_CHARS) return true;
+  let lines = 1;
+  for (let index = planMarkdown.indexOf("\n"); index !== -1;) {
+    lines += 1;
+    if (lines > COLLAPSIBLE_PLAN_MIN_LINES) return true;
+    index = planMarkdown.indexOf("\n", index + 1);
+  }
+  return false;
 }
 
 export function buildCollapsedProposedPlanPreviewMarkdown(
@@ -71,9 +88,29 @@ function sanitizePlanFileSegment(input: string): string {
 }
 
 export function buildPlanImplementationPrompt(planMarkdown: string): string {
-  return `PLEASE IMPLEMENT THIS PLAN:\n${planMarkdown.trim()}`;
+  return `${PLAN_IMPLEMENTATION_PROMPT_PREFIX}${planMarkdown.trim()}`;
 }
 
+/**
+ * A plan follow-up refines the plan when the composer holds typed text or
+ * file references (lines picked while reading the plan are feedback on it),
+ * and implements it otherwise. The composer's primary action reads this with
+ * the prompt the send reads, so its label says what the send does; the send
+ * composes the references into `draftText` (`composeOutgoingPrompt`), which
+ * then is never empty.
+ */
+export function planFollowUpRefines(input: {
+  readonly draftText: string;
+  readonly fileReferenceCount: number;
+}): boolean {
+  return input.draftText.trim().length > 0 || input.fileReferenceCount > 0;
+}
+
+/**
+ * `draftText` is the whole refinement as sent, context blocks included. The
+ * send engine is not imported here: these helpers also load lazily, and
+ * sharing the engine with them would split it out of the shell's chunks.
+ */
 export function resolvePlanFollowUpSubmission(input: { draftText: string; planMarkdown: string }): {
   text: string;
   interactionMode: "default" | "plan";

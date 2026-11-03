@@ -11,6 +11,8 @@ import {
   type ChatImageAttachment,
 } from "@ryco/contracts";
 
+import { formatAttachmentPathLines } from "@ryco/shared/attachmentPrompt";
+
 import {
   normalizeAttachmentRelativePath,
   resolveAttachmentRelativePath,
@@ -174,6 +176,26 @@ export function resolveAttachmentPath(input: {
     attachmentsDir: input.attachmentsDir,
     relativePath,
   });
+}
+
+/**
+ * One line per attachment, in order, telling the agent where the file is saved. Attachments a
+ * provider also receives natively (images, PDFs) get one too: the model sees their content, but
+ * only the path lets its tools open, copy or attach the file.
+ */
+export function attachmentPathLines(input: {
+  readonly attachmentsDir: string;
+  readonly attachments: ReadonlyArray<ChatAttachment> | undefined;
+}): string[] {
+  return formatAttachmentPathLines(
+    (input.attachments ?? []).map((attachment) => {
+      const resolvedPath = resolveAttachmentPath({
+        attachmentsDir: input.attachmentsDir,
+        attachment,
+      });
+      return resolvedPath === null ? { attachment } : { attachment, resolvedPath };
+    }),
+  );
 }
 
 export type PersistedAttachmentRead =

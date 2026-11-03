@@ -20,14 +20,15 @@ afterEach(() => {
 });
 
 describe("hosted inbox preference persistence", () => {
-  it("restores inbox choices after reload without persisting node metadata or secrets", async () => {
+  it("restores inbox and alert choices after reload without persisting node metadata or secrets", async () => {
     const { values } = installStorage();
     const persistence = await import("./clientPersistenceStorage");
     persistence.writeBrowserClientSettings({
       ...DEFAULT_CLIENT_SETTINGS,
       sidebarAutoSettleAfterDays: 3,
-      aiFocusEnabled: true,
-      aiFocusRefreshIntervalMs: 0,
+      notifyOnTurnCompleteWhenUnfocused: false,
+      threadNotificationSound: true,
+      threadNotificationToasts: false,
       sidebarProjectGroupingOverrides: { "private-project-path": "separate" },
       dismissedProviderUpdateNotificationKeys: ["private-provider-notice"],
     });
@@ -45,15 +46,17 @@ describe("hosted inbox preference persistence", () => {
     expect([...values.keys()]).toEqual([HOSTED_INBOX_PREFERENCES_KEY]);
     expect(JSON.parse(values.get(HOSTED_INBOX_PREFERENCES_KEY)!)).toEqual({
       sidebarAutoSettleAfterDays: 3,
-      aiFocusEnabled: true,
-      aiFocusRefreshIntervalMs: 0,
+      notifyOnTurnCompleteWhenUnfocused: false,
+      threadNotificationSound: true,
+      threadNotificationToasts: false,
     });
     vi.resetModules();
     const reloaded = await import("./clientPersistenceStorage");
     expect(reloaded.readBrowserClientSettings()).toMatchObject({
       sidebarAutoSettleAfterDays: 3,
-      aiFocusEnabled: true,
-      aiFocusRefreshIntervalMs: 0,
+      notifyOnTurnCompleteWhenUnfocused: false,
+      threadNotificationSound: true,
+      threadNotificationToasts: false,
       sidebarProjectGroupingOverrides: {},
       dismissedProviderUpdateNotificationKeys: [],
     });
@@ -61,6 +64,28 @@ describe("hosted inbox preference persistence", () => {
     expect(
       reloaded.readBrowserSavedEnvironmentSecret(EnvironmentId.make("private-node")),
     ).toBeNull();
+  });
+
+  it("restores a record stored while it also kept the AI Focus choices", async () => {
+    const { storage } = installStorage();
+    storage.setItem(
+      HOSTED_INBOX_PREFERENCES_KEY,
+      JSON.stringify({
+        sidebarAutoSettleAfterDays: 3,
+        aiFocusEnabled: true,
+        aiFocusRefreshIntervalMs: 0,
+        notifyOnTurnCompleteWhenUnfocused: false,
+        threadNotificationSound: true,
+        threadNotificationToasts: false,
+      }),
+    );
+    const { readBrowserClientSettings } = await import("./clientPersistenceStorage");
+    const settings = readBrowserClientSettings();
+    expect(settings).toMatchObject({
+      sidebarAutoSettleAfterDays: 3,
+      notifyOnTurnCompleteWhenUnfocused: false,
+    });
+    expect(Object.hasOwn(settings ?? {}, "aiFocusEnabled")).toBe(false);
   });
 
   it.each(["not json", '{"sidebarAutoSettleAfterDays":2}', "x".repeat(513)])(

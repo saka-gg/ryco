@@ -1,7 +1,7 @@
 import { resolveActivityChangedFiles } from "@ryco/client-runtime/state/session";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import type { SFSymbol } from "expo-symbols";
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { Pressable, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
@@ -9,7 +9,12 @@ import { SymbolView } from "../../components/AppSymbol";
 import { cn } from "../../lib/cn";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { useActivityPayloadOutput } from "../../rpc/useActivityPayloadOutput";
-import type { ActivityFold, ActivityRow, ActivityTone } from "./threadActivityFold";
+import type {
+  ActivityFold,
+  ActivityFoldThought,
+  ActivityRow,
+  ActivityTone,
+} from "./threadActivityFold";
 
 const TONE_ICON: Readonly<Record<ActivityTone, SFSymbol>> = {
   thinking: "text.bubble",
@@ -147,6 +152,22 @@ function ToolRow(props: {
   );
 }
 
+/** The agent's latest thought, a quiet gray line above the step it is on. */
+function ThoughtRow(props: { readonly thought: ActivityFoldThought }) {
+  return (
+    <View
+      accessible
+      accessibilityLabel={`Thinking: ${props.thought.text}`}
+      className="flex-row items-start gap-2 py-1"
+    >
+      <View className="h-3.5 w-3.5" />
+      <Text className="min-w-0 flex-1 text-xs text-foreground-tertiary" numberOfLines={2}>
+        {props.thought.text}
+      </Text>
+    </View>
+  );
+}
+
 export function ThreadActivityFoldRow(props: {
   readonly fold: ActivityFold;
   readonly environmentId: EnvironmentId;
@@ -181,13 +202,16 @@ export function ThreadActivityFoldRow(props: {
       {fold.expanded ? (
         <View className="mt-0.5 gap-0.5 border-l border-border pl-3 ml-2">
           {fold.rows.map((row) => (
-            <ToolRow
-              key={row.id}
-              row={row}
-              environmentId={props.environmentId}
-              threadId={props.threadId}
-            />
+            <Fragment key={row.id}>
+              {fold.liveThought?.beforeRowId === row.id ? (
+                <ThoughtRow thought={fold.liveThought} />
+              ) : null}
+              <ToolRow row={row} environmentId={props.environmentId} threadId={props.threadId} />
+            </Fragment>
           ))}
+          {fold.liveThought && fold.liveThought.beforeRowId === null ? (
+            <ThoughtRow thought={fold.liveThought} />
+          ) : null}
         </View>
       ) : null}
     </View>

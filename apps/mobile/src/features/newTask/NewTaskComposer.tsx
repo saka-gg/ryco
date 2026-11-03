@@ -11,6 +11,7 @@ import type {
   RuntimeMode,
   ModelSelection,
   ProviderInteractionMode,
+  ServerProvider,
 } from "@ryco/contracts";
 import { Pressable, TextInput, View } from "react-native";
 import { IconGitBranch, IconGitFork } from "../../components/icons";
@@ -55,16 +56,21 @@ export function NewTaskComposer(props: {
   readonly interactionMode: ProviderInteractionMode;
   readonly interactionModeSupported: boolean;
   readonly askModeSupported: boolean;
+  readonly autoModeUnavailableReason: string | null;
   readonly onChangeInteractionMode: (mode: ProviderInteractionMode) => void;
   readonly busy: boolean;
   readonly canSend: boolean;
   readonly sendDisabledReason: string | null;
+  /** Set while the task will wait for its machine instead of starting now. */
+  readonly queueNotice?: string | null;
   readonly onChangePrompt: (prompt: string) => void;
   readonly onRemoveAttachment: (id: string) => void;
   readonly onPickAttachments: () => void;
   readonly onOpenWorkspace: () => void;
   readonly onSelectEnvironment: (environmentId: EnvironmentId) => void;
   readonly modelOptions: ReadonlyArray<ModelOption>;
+  /** The node's provider snapshots, for the notices naming the update a model needs. */
+  readonly providers: ReadonlyArray<ServerProvider> | undefined;
   readonly modelSelection: ModelSelection;
   readonly onSelectModel: (selection: ModelSelection) => void;
   readonly onChangeRuntimeMode: (mode: RuntimeMode) => void;
@@ -231,6 +237,7 @@ export function NewTaskComposer(props: {
             <ComposerModelMenu
               model={buildModelPickerModelFromOptions({
                 modelOptions: props.modelOptions,
+                providers: props.providers,
                 currentSelection: props.modelSelection,
               })}
               selection={props.modelSelection}
@@ -262,6 +269,7 @@ export function NewTaskComposer(props: {
                 interactionMode: props.interactionMode,
                 interactionModeSupported: props.interactionModeSupported,
                 askModeSupported: props.askModeSupported,
+                autoModeUnavailableReason: props.autoModeUnavailableReason,
               })}
               disabled={props.busy}
               onSelectRuntimeMode={props.onChangeRuntimeMode}
@@ -290,7 +298,9 @@ export function NewTaskComposer(props: {
             </ComposerAccessMenu>
             <ComposerToolbarButton
               icon={props.busy ? "ellipsis" : "arrow.up"}
-              accessibilityLabel={props.busy ? "Starting task" : "Start task"}
+              accessibilityLabel={
+                props.busy ? "Starting task" : props.queueNotice ? "Queue task" : "Start task"
+              }
               showChevron={false}
               variant="primary"
               disabled={!props.canSend || props.busy}
@@ -300,6 +310,8 @@ export function NewTaskComposer(props: {
         </GlassSurface>
         {!props.canSend && props.sendDisabledReason ? (
           <Text className="px-3 text-sm text-danger-foreground">{props.sendDisabledReason}</Text>
+        ) : props.queueNotice ? (
+          <Text className="px-3 text-sm text-foreground-muted">{props.queueNotice}</Text>
         ) : null}
       </View>
     </View>

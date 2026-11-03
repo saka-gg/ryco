@@ -19,6 +19,11 @@ export interface CdpFrameLimits {
   readonly maxReplyChars: number;
   /** Everything else: events, whose size a page may decide. */
   readonly maxEventChars: number;
+  /**
+   * A larger limit for some events, picked from the message's start (its
+   * method), such as screencast frames.
+   */
+  readonly maxEventCharsFor?: (head: string) => number | undefined;
 }
 
 // Enough for a message's id or method and first parameter, and its session.
@@ -50,7 +55,9 @@ export const makeCdpFrameReader = (limits: CdpFrameLimits) => {
     }
     parts.push(text);
     // The limit is only reached long after the head is complete.
-    const limit = head.startsWith('{"id":') ? limits.maxReplyChars : limits.maxEventChars;
+    const limit = head.startsWith('{"id":')
+      ? limits.maxReplyChars
+      : (limits.maxEventCharsFor?.(head) ?? limits.maxEventChars);
     if (length > limit) {
       dropping = true;
       tail = lastChars(parts, EDGE_CHARS);

@@ -8,6 +8,7 @@ import {
   getHostedEnvironmentSessions,
   HOSTED_ENVIRONMENT_SESSION_SYNC_DEADLINE_MS,
   hostedBrowserRevalidated,
+  hostedEnvironmentResumeReadiness,
   hostedNodeEntryKey,
   isHostedEnvironmentConnectBlocked,
   isHostedEnvironmentSessionLive,
@@ -16,6 +17,7 @@ import {
   selectedProjectionFields,
   type HostedEnvironmentSessionRecord,
   type HostedEnvironmentSessions,
+  hostedOutageFailure,
 } from "./hostedEnvironmentSessions.ts";
 import type { HostedHubNode } from "./types.ts";
 
@@ -284,6 +286,23 @@ describe("hosted environment sessions", () => {
     expect(record(sessions, ENV_A)).toEqual(next);
   });
 
+  it("forgets an outage's failure once the transport is online, so a later plain drop has none", () => {
+    const sessions = createSessions();
+    const generation = establish(sessions, ENV_A);
+    sessions.failure(ENV_A, generation, {
+      kind: "dns",
+      retryable: true,
+      message: "lookup",
+    } as never);
+    expect(hostedOutageFailure(record(sessions, ENV_A))).toBe("dns");
+    sessions.transportStatus(ENV_A, generation, "online");
+    expect(record(sessions, ENV_A).outageFailure).toBeNull();
+    // The record still keeps its last failure, but a plain disconnect is no DNS outage.
+    sessions.connectionClosed(ENV_A, generation);
+    expect(record(sessions, ENV_A).transportStatus).toBe("reconnecting");
+    expect(hostedOutageFailure(record(sessions, ENV_A))).toBeNull();
+  });
+
   it("ignores a snapshot inside a relay gap and adopts the replacement only after its own", () => {
     const sessions = createSessions();
     const generation = establish(sessions, ENV_A);
@@ -372,6 +391,7 @@ describe("hosted environment sessions", () => {
       transportStatus: "idle",
       sessionStatus: "synchronizing",
       failure: null,
+      outageFailure: null,
       terminalNodeKey: null,
       syncFailed: false,
       connectRequested: false,
@@ -677,6 +697,50 @@ describe("hosted environment sessions", () => {
     expect(isHostedEnvironmentSessionLive({ ...ready, transportStatus: "terminal-failure" })).toBe(
       false,
     );
+  });
+
+  it("lets only an adoptable record's own generation follow a dropped Git action again", () => {
+    const sessions = createSessions();
+    const generation = establish(sessions, ENV_A);
+    const readiness = hostedEnvironmentResumeReadiness(sessions, ENV_A, generation);
+    const notified = vi.fn();
+    const unsubscribe = readiness.subscribe(notified);
+    expect(readiness.read()).toBe(true);
+    // Another environment's record never answers for this one.
+    expect(hostedEnvironmentResumeReadiness(sessions, ENV_B, generation).read()).toBe(false);
+
+    // A relay gap, then the replacement channel before and after its own snapshot.
+    sessions.connectionClosed(ENV_A, generation);
+    expect(readiness.read()).toBe(false);
+    expect(notified).toHaveBeenCalled();
+    sessions.transportStatus(ENV_A, generation, "online");
+    sessions.connectionRecovered(ENV_A, generation);
+    expect(readiness.read()).toBe(false);
+    sessions.markSessionReady(ENV_A, generation);
+    expect(readiness.read()).toBe(true);
+
+    // Delivery unknown after a drop: adoptable again only once its own snapshot arrived.
+    sessions.markDeliveryUnknown(ENV_A, generation);
+    expect(record(sessions, ENV_A).sessionStatus).toBe("delivery-unknown");
+    expect(readiness.read()).toBe(false);
+    sessions.markSessionReady(ENV_A, generation);
+    expect(record(sessions, ENV_A).sessionRecoveredAfterUnknown).toBe(true);
+    expect(readiness.read()).toBe(true);
+
+    // Suspension moves the record to a fresh generation: the old one never resumes again.
+    sessions.suspendAll();
+    expect(readiness.read()).toBe(false);
+    const next = record(sessions, ENV_A).generation;
+    expect(next).not.toBe(generation);
+    sessions.markConnectRequested(ENV_A, next);
+    sessions.transportStatus(ENV_A, next, "online");
+    sessions.markSessionReady(ENV_A, next);
+    expect(readiness.read()).toBe(false);
+    expect(hostedEnvironmentResumeReadiness(sessions, ENV_A, next).read()).toBe(true);
+
+    sessions.release(ENV_A);
+    expect(hostedEnvironmentResumeReadiness(sessions, ENV_A, next).read()).toBe(false);
+    unsubscribe();
   });
 
   it("tracks whether the transport reached online since the connection last opened", () => {

@@ -16,7 +16,14 @@ import {
   buildInitialGrokProviderSnapshot,
   checkGrokProviderStatus,
   enrichGrokSnapshot,
+  withGrokAccount,
 } from "../Layers/GrokProvider.ts";
+import {
+  GrokAccountReadOptions,
+  resolveGrokAccount,
+  resolveGrokAuthPath,
+} from "../Layers/GrokUsage.ts";
+import { AgentProcessPriority } from "../agentProcessPriority.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import {
@@ -32,6 +39,7 @@ import {
   normalizeCommandPath,
 } from "../providerMaintenance.ts";
 import { makeProviderProbeFingerprint } from "../providerProbeFingerprint.ts";
+import { makeUsageReadGate } from "../usageReadGate.ts";
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("grok");
@@ -52,6 +60,7 @@ const UPDATE = makePackageManagedProviderMaintenanceResolver({
 });
 
 export type GrokDriverEnv =
+  | AgentProcessPriority
   | ChildProcessSpawner.ChildProcessSpawner
   | FileSystem.FileSystem
   | HttpClient.HttpClient
@@ -90,6 +99,7 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
+      const processPriority = yield* AgentProcessPriority;
       const processEnv = mergeProviderInstanceEnvironment(environment);
       const continuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
@@ -111,16 +121,31 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
         binaryPaths: [effectiveConfig.binaryPath],
         env: processEnv,
         settings: { instanceId, displayName, accentColor, environment, config: effectiveConfig },
+        // The probe names the CLI login it read, so a new login re-probes.
+        authFiles: [resolveGrokAuthPath(processEnv)],
       });
 
       const adapter = yield* makeGrokAdapter(effectiveConfig, {
         environment: processEnv,
+        processPriority,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
         instanceId,
       });
-      const textGeneration = yield* makeGrokTextGeneration(effectiveConfig, processEnv);
+      const textGeneration = yield* makeGrokTextGeneration(effectiveConfig, processEnv, {
+        processPriority,
+      });
 
-      const checkProvider = checkGrokProviderStatus(effectiveConfig, processEnv).pipe(
+      // Probes and usage re-reads share one gate: a throttled read re-serves the last good
+      // numbers to both, and neither calls the billing API again until its cooldown ends.
+      const usageGate = yield* makeUsageReadGate();
+      const accountReadOptions = yield* GrokAccountReadOptions;
+      const resolveAccount = (accountEnvironment: NodeJS.ProcessEnv) =>
+        resolveGrokAccount(accountEnvironment, usageGate, accountReadOptions);
+      const checkProvider = checkGrokProviderStatus(
+        effectiveConfig,
+        processEnv,
+        resolveAccount,
+      ).pipe(
         Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       );
@@ -133,6 +158,15 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
         haveSettingsChanged: () => false,
         initialSnapshot: (settings) => stampIdentity(buildInitialGrokProviderSnapshot(settings)),
         checkProvider,
+        // A ready snapshot's credits are re-read over HTTP alone: no `grok` process. That also
+        // lets a ready probe stand in for the next ones longer, so revalidation stops spawning
+        // `grok --version` and `grok agent stdio` while only the usage is due.
+        refreshUsage: (current) =>
+          current.status === "ready"
+            ? resolveAccount(processEnv).pipe(
+                Effect.map((account) => withGrokAccount(current, processEnv, account)),
+              )
+            : Effect.succeed(current),
         enrichSnapshot: ({ snapshot: currentSnapshot, publishSnapshot }) =>
           maintenanceCapabilities.pipe(
             Effect.flatMap((capabilities) =>

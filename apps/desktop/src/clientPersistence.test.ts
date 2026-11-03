@@ -51,15 +51,18 @@ function makeSecretStorage(available: boolean): DesktopSecretStorage {
 }
 
 const clientSettings: ClientSettings = {
-  aiFocusEnabled: false,
-  aiFocusRefreshIntervalMs: 600_000,
   confirmThreadArchive: true,
   confirmThreadDelete: false,
   confirmThreadUnpin: false,
   dismissedProviderUpdateNotificationKeys: [],
   diffIgnoreWhitespace: true,
   diffWordWrap: true,
+  changeRequestLinkTarget: "ryco",
   followUpBehavior: "queue",
+  sendShortcut: "enter",
+  claudeResumeReview: false,
+  chatWidth: "comfortable",
+  openChatTabs: true,
   favorites: [],
   providerModelPreferences: {},
   sidebarProjectGroupingMode: "repository_path",
@@ -74,6 +77,8 @@ const clientSettings: ClientSettings = {
   gitStatusPollIntervalMs: 0,
   sourceControlRefreshMode: "automatic",
   notifyOnTurnCompleteWhenUnfocused: true,
+  threadNotificationSound: false,
+  threadNotificationToasts: true,
 };
 
 const savedRegistryRecord: PersistedSavedEnvironmentRecord = {
@@ -137,6 +142,37 @@ describe("clientPersistence", () => {
     writeSavedEnvironmentRegistry(registryPath, [linked]);
 
     expect(readSavedEnvironmentRegistry(registryPath)).toEqual([linked]);
+  });
+
+  it("keeps a switched-off machine off and its credential stored through rewrites", () => {
+    const registryPath = makeTempPath("saved-environments.json");
+    const secretStorage = makeSecretStorage(true);
+    const switchedOff: PersistedSavedEnvironmentRecord = {
+      ...savedRegistryRecord,
+      disabledAt: "2026-10-31T09:00:00.000Z",
+    };
+
+    writeSavedEnvironmentRegistry(registryPath, [savedRegistryRecord]);
+    writeSavedEnvironmentSecret({
+      registryPath,
+      environmentId: savedRegistryRecord.environmentId,
+      secret: "bearer-token",
+      secretStorage,
+    });
+    writeSavedEnvironmentRegistry(registryPath, [switchedOff]);
+
+    expect(readSavedEnvironmentRegistry(registryPath)).toEqual([switchedOff]);
+    expect(
+      readSavedEnvironmentSecret({
+        registryPath,
+        environmentId: savedRegistryRecord.environmentId,
+        secretStorage,
+      }),
+    ).toBe("bearer-token");
+
+    // Switched on again: the record is written without the field.
+    writeSavedEnvironmentRegistry(registryPath, [savedRegistryRecord]);
+    expect(readSavedEnvironmentRegistry(registryPath)).toEqual([savedRegistryRecord]);
   });
 
   it("persists encrypted saved environment secrets when encryption is available", () => {
@@ -305,11 +341,37 @@ describe("installation-owned app keybindings", () => {
       "client-settings.json",
     ]);
   });
-  it("retains the previous document when a new payload fails validation", () => {
+  it("writes entries from a newer version unchanged", () => {
+    const file = makeTempPath("app-keybindings.json");
+    const document = JSON.stringify({
+      version: 2,
+      rules: [
+        { key: "mod+shift+t", command: "view.futureCommand", extra: 1 },
+        { key: "mod+x", command: "terminal.toggle" },
+      ],
+      disabledCommands: ["future.command", "chat.new"],
+    });
+    writeAppKeybindings(file, document);
+    expect(JSON.stringify(JSON.parse(readAppKeybindings(file)!))).toBe(document);
+  });
+  it.each([
+    { name: "broken JSON", payload: "{broken" },
+    {
+      name: "rules that are not a list",
+      payload: JSON.stringify({ rules: "x", disabledCommands: [] }),
+    },
+    {
+      name: "too many rules",
+      payload: JSON.stringify({
+        rules: Array.from({ length: 257 }, () => ({ key: "mod+x", command: "terminal.toggle" })),
+        disabledCommands: [],
+      }),
+    },
+  ])("retains the previous document when a new payload has $name", ({ payload }) => {
     const file = makeTempPath("app-keybindings.json");
     const preferences = { rules: [], disabledCommands: [] };
     writeAppKeybindings(file, JSON.stringify(preferences));
-    expect(() => writeAppKeybindings(file, "{broken")).toThrow();
+    expect(() => writeAppKeybindings(file, payload)).toThrow();
     expect(JSON.parse(readAppKeybindings(file)!)).toEqual(preferences);
   });
 });

@@ -1,10 +1,14 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
+import { startDesktopQuitGuardResponder } from "../desktopQuitGuard";
 import { isMacPlatform } from "../lib/utils";
 
 export function QuitShortcutFeedback() {
   const [state, setState] = useState<"press-twice" | "hold" | null>(null);
   const [ready, setReady] = useState(false);
+  // Desktop main asks this window, before a quit, which chats quitting would stop. Mounted on
+  // every Electron window (main.tsx), behind this lazy chunk rather than in the app shell.
+  useEffect(() => startDesktopQuitGuardResponder(), []);
   useEffect(
     () =>
       window.desktopBridge?.quitShortcut?.onFeedback((next) => {

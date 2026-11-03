@@ -55,11 +55,15 @@ export function usageLimitStateFromWindows(
   };
 }
 
-/** Reads a registry usage probe (`ServerProvider.rateLimits`, resets in epoch seconds). */
+/**
+ * Reads a registry usage probe (`ServerProvider.rateLimits`, resets in epoch seconds). Only the
+ * account-wide slots count, and re-served (stale) numbers never do: recovery acts on fresh reads.
+ */
 export function usageLimitStateFromServerRateLimits(
   rateLimits: ServerProviderRateLimits | undefined,
   nowMs: number,
 ): UsageLimitState {
+  if (rateLimits?.stale) return { exhausted: false, resetAt: null };
   const windows: UsageWindowObservation[] = [];
   for (const window of [rateLimits?.primary, rateLimits?.secondary, rateLimits?.tertiary]) {
     if (!window || !Number.isFinite(window.usedPercent)) continue;

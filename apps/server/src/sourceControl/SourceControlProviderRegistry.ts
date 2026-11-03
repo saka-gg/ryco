@@ -13,6 +13,7 @@ import type * as BitbucketApi from "./BitbucketApi.ts";
 import * as ForgejoApi from "./ForgejoApi.ts";
 import type * as GitHubCli from "./GitHubCli.ts";
 import type * as GitLabCli from "./GitLabCli.ts";
+import type { ForgeRateLimitTarget } from "./forgeRateLimit.ts";
 import * as SourceControlProvider from "./SourceControlProvider.ts";
 import {
   azureDevOpsDiscovery,
@@ -37,6 +38,8 @@ interface LazyProviderOptions {
   readonly cloneAuthentication?: boolean;
   /** The loaded provider reads link states in batches (`getLinkStates`). */
   readonly linkStates?: boolean;
+  /** The loaded provider searches across the host's repositories (`searchInvolvedChangeRequests`). */
+  readonly involvedSearch?: boolean;
 }
 
 export interface SourceControlProviderRegistration {
@@ -181,13 +184,41 @@ function withProviderContext<
   return (input) => method({ ...input, context: input.context ?? context });
 }
 
-/** Exported for registry forwarding tests. */
+/** The forge rate-limit pause; it loads with the first provider, off the boot path. */
+const loadForgeRateLimit = () => import("./forgeRateLimit.ts");
+
+/**
+ * Until when a forge call to `target` from the current process lane must wait
+ * for a rate-limit pause to end (epoch ms), or null when it may go. Boot-safe:
+ * services that poll a forge on a timer can skip a tick instead of being
+ * refused, without importing the pause statically.
+ */
+export const forgePausedUntil = (target: ForgeRateLimitTarget): Effect.Effect<number | null> =>
+  Effect.tryPromise(loadForgeRateLimit).pipe(
+    Effect.flatMap((module) => module.pausedUntilFor(target)),
+    // The pause cannot load, so nothing was ever paused.
+    Effect.orElseSucceed(() => null),
+  );
+
+/**
+ * Exported for registry forwarding tests. The loaded provider is wrapped in
+ * the forge rate-limit guards: after a rate limit, background calls to that
+ * host fail fast until the pause ends.
+ */
 export const makeLazyProvider = Effect.fn("makeLazySourceControlProvider")(function* (
   kind: SourceControlProviderKind,
   load: Effect.Effect<SourceControlProvider.SourceControlProviderShape, SourceControlProviderError>,
   options: LazyProviderOptions = {},
 ) {
-  const provider = yield* Effect.cached(load);
+  const provider = yield* Effect.cached(
+    Effect.zipWith(
+      load,
+      loadModule(kind, loadForgeRateLimit),
+      (loaded, rateLimit) => rateLimit.withForgeRateLimitGuards(loaded),
+      // Both are chunk imports on the first call: fetch them side by side.
+      { concurrent: true },
+    ),
+  );
 
   return SourceControlProvider.SourceControlProvider.of({
     kind,
@@ -286,6 +317,18 @@ export const makeLazyProvider = Effect.fn("makeLazySourceControlProvider")(funct
       () =>
         SourceControlProvider.unsupportedChangeRequestOperation(kind, "getChangeRequestActivity"),
     ),
+    // A host without a fingerprint answers null, so its watches read in full: never a failure.
+    getChangeRequestWatchFingerprint: lazyOptionalMethod(
+      provider,
+      (loaded) => loaded.getChangeRequestWatchFingerprint,
+      () => Effect.succeed(null),
+    ),
+    // Without a thread read, a long review thread stays unread past its first page (null).
+    getChangeRequestReviewThread: lazyOptionalMethod(
+      provider,
+      (loaded) => loaded.getChangeRequestReviewThread,
+      () => Effect.succeed(null),
+    ),
     getChangeRequestFileContents: lazyOptionalMethod(
       provider,
       (loaded) => loaded.getChangeRequestFileContents,
@@ -340,6 +383,15 @@ export const makeLazyProvider = Effect.fn("makeLazySourceControlProvider")(funct
                 return method ? method(input) : unsupportedProviderOperation(kind, "getLinkStates");
               }),
             ),
+        }
+      : {}),
+    ...(options.involvedSearch
+      ? {
+          searchInvolvedChangeRequests: lazyOptionalMethod(
+            provider,
+            (loaded) => loaded.searchInvolvedChangeRequests,
+            () => unsupportedProviderOperation(kind, "searchInvolvedChangeRequests"),
+          ),
         }
       : {}),
     listWorkflowRuns: (input) =>
@@ -546,6 +598,22 @@ export function bindProviderContext(
           getChangeRequestActivity: withProviderContext(provider.getChangeRequestActivity, context),
         }
       : {}),
+    ...(provider.getChangeRequestWatchFingerprint
+      ? {
+          getChangeRequestWatchFingerprint: withProviderContext(
+            provider.getChangeRequestWatchFingerprint,
+            context,
+          ),
+        }
+      : {}),
+    ...(provider.getChangeRequestReviewThread
+      ? {
+          getChangeRequestReviewThread: withProviderContext(
+            provider.getChangeRequestReviewThread,
+            context,
+          ),
+        }
+      : {}),
     ...(provider.getChangeRequestFileContents
       ? {
           getChangeRequestFileContents: withProviderContext(
@@ -606,6 +674,14 @@ export function bindProviderContext(
       }),
     ...(provider.getLinkStates
       ? { getLinkStates: withProviderContext(provider.getLinkStates, context) }
+      : {}),
+    ...(provider.searchInvolvedChangeRequests
+      ? {
+          searchInvolvedChangeRequests: withProviderContext(
+            provider.searchInvolvedChangeRequests,
+            context,
+          ),
+        }
       : {}),
     ...(provider.listWorkflowRuns
       ? {
@@ -790,7 +866,7 @@ export const makeWithClients = Effect.fn("makeSourceControlProviderRegistry")(fu
           Effect.provideService(FileSystem.FileSystem, fileSystem),
         );
     }),
-    { linkStates: true },
+    { linkStates: true, involvedSearch: true },
   );
 
   const gitlab = yield* makeLazyProvider(
@@ -901,7 +977,7 @@ export const layer = Layer.effect(
       github: yield* lazyClient(
         Effect.flatMap(
           Effect.promise(() => import("./GitHubCli.ts")),
-          (module) => module.make(),
+          (module) => module.makeWithDirectApi(),
         ),
         context,
       ),

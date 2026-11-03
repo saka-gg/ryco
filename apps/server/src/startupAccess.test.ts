@@ -3,12 +3,13 @@ import { assert, expect, it } from "@effect/vitest";
 import {
   buildPairingUrl,
   formatHeadlessServeOutput,
-  renderTerminalQrCode,
+  LOOPBACK_ONLY_PAIRING_NOTE,
   resolveHeadlessConnectionHost,
   resolveHeadlessConnectionString,
   resolveHeadlessServeLinks,
   resolveListeningPort,
 } from "./startupAccess.ts";
+import { renderTerminalQrCode } from "./terminalQrCode.ts";
 import { resolveServerAdvertisedEndpointsWithTailscale } from "./remote/AdvertisedEndpointRegistry.ts";
 
 const lanAndTailnetInterfaces = {
@@ -91,11 +92,14 @@ it("renders terminal QR codes as a multi-line unicode block grid", () => {
 });
 
 it("formats headless serve output with the connection string, token, pairing url, and qr code", () => {
-  const output = formatHeadlessServeOutput({
-    connectionString: "http://192.168.1.42:3773",
-    token: "PAIRCODE",
-    pairingUrl: "http://192.168.1.42:3773/pair#token=PAIRCODE",
-  });
+  const output = formatHeadlessServeOutput(
+    {
+      connectionString: "http://192.168.1.42:3773",
+      token: "PAIRCODE",
+      pairingUrl: "http://192.168.1.42:3773/pair#token=PAIRCODE",
+    },
+    renderTerminalQrCode,
+  );
 
   expect(output).toContain("Connection string: http://192.168.1.42:3773");
   expect(output).toContain("Token: PAIRCODE");
@@ -157,19 +161,99 @@ it("leads with the Tailnet HTTPS URL for a loopback server behind Tailscale Serv
 });
 
 it("prints alternatives, the token lifetime, and the Hub hint", () => {
-  const output = formatHeadlessServeOutput({
-    connectionString: "http://192.168.1.42:3773",
-    token: "PAIRCODE",
-    pairingUrl: "http://192.168.1.42:3773/pair#token=PAIRCODE",
-    tokenExpiresInMinutes: 5,
-    alternativeLinks: [
-      { label: "Tailscale IP", url: "http://100.100.100.100:3773/pair#token=PAIRCODE" },
-    ],
-    hubOrigin: "https://app.example",
-  });
+  const output = formatHeadlessServeOutput(
+    {
+      connectionString: "http://192.168.1.42:3773",
+      token: "PAIRCODE",
+      pairingUrl: "http://192.168.1.42:3773/pair#token=PAIRCODE",
+      tokenExpiresInMinutes: 5,
+      alternativeLinks: [
+        { label: "Tailscale IP", url: "http://100.100.100.100:3773/pair#token=PAIRCODE" },
+      ],
+      hubOrigin: "https://app.example",
+    },
+    renderTerminalQrCode,
+  );
 
   expect(output).toContain("Token: PAIRCODE (one-time, expires in 5 min");
   expect(output).toContain("Also reachable at:");
   expect(output).toContain("Tailscale IP  http://100.100.100.100:3773/pair#token=PAIRCODE");
   expect(output).toContain("Hub relay: enabled via https://app.example.");
+});
+
+it("never puts a loopback address in a QR code", () => {
+  const loopbackOnly = resolveHeadlessServeLinks({
+    endpoints: [],
+    credential: "PAIRCODE",
+    fallbackConnectionString: "http://127.0.0.1:3773",
+  });
+  expect(loopbackOnly.pairingUrl).toBe("http://127.0.0.1:3773/pair#token=PAIRCODE");
+  expect(loopbackOnly.qrUrl).toBeNull();
+  for (const base of [
+    "http://localhost:3773",
+    "http://LOCALHOST.:3773",
+    "http://node.localhost:3773",
+    "http://[::1]:3773",
+    "http://[0:0:0:0:0:0:0:1]:3773",
+    "http://[::ffff:127.0.0.1]:3773",
+    "http://127.0.0.2:3773",
+    "http://127.1:3773",
+    "http://0.0.0.0:3773",
+    "http://[::]:3773",
+  ]) {
+    expect(
+      resolveHeadlessServeLinks({ endpoints: [], credential: "X", fallbackConnectionString: base })
+        .qrUrl,
+    ).toBeNull();
+  }
+  expect(
+    resolveHeadlessServeLinks({
+      endpoints: [],
+      credential: "PAIRCODE",
+      fallbackConnectionString: "http://192.168.1.42:3773",
+    }).qrUrl,
+  ).toBe("http://192.168.1.42:3773/pair#token=PAIRCODE");
+});
+
+it("draws the reachable address, LAN or Tailnet, as the QR code", async () => {
+  const lan = resolveHeadlessServeLinks({
+    endpoints: await resolveServerAdvertisedEndpointsWithTailscale({
+      host: undefined,
+      port: 3773,
+      networkInterfaces: lanAndTailnetInterfaces,
+      tailscaleServeEnabled: false,
+    }),
+    credential: "PAIRCODE",
+    fallbackConnectionString: "http://localhost:3773",
+  });
+  expect(lan.qrUrl).toBe("http://192.168.1.42:3773/pair#token=PAIRCODE");
+
+  const tailnet = resolveHeadlessServeLinks({
+    endpoints: await resolveServerAdvertisedEndpointsWithTailscale({
+      host: "127.0.0.1",
+      port: 3773,
+      networkInterfaces: lanAndTailnetInterfaces,
+      tailscaleServeEnabled: true,
+      readMagicDnsName: async () => "node.tail.ts.net",
+      probe: async () => true,
+    }),
+    credential: "PAIRCODE",
+    fallbackConnectionString: "http://127.0.0.1:3773",
+  });
+  expect(tailnet.qrUrl).toBe("https://node.tail.ts.net/pair#token=PAIRCODE");
+});
+
+it("says why there is no QR code when only this computer can reach the node", () => {
+  const output = formatHeadlessServeOutput(
+    {
+      connectionString: "http://127.0.0.1:3773",
+      token: "PAIRCODE",
+      pairingUrl: "http://127.0.0.1:3773/pair#token=PAIRCODE",
+      qrUrl: null,
+    },
+    renderTerminalQrCode,
+  );
+  expect(output).toContain("Pairing URL: http://127.0.0.1:3773/pair#token=PAIRCODE");
+  expect(output).toContain(LOOPBACK_ONLY_PAIRING_NOTE);
+  expect(output).not.toMatch(/[█▀▄]/u);
 });

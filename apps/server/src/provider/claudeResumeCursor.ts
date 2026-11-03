@@ -17,6 +17,12 @@ export interface ClaudeResumeState {
    */
   readonly rewindAt?: string;
   readonly turnCount?: number;
+  /**
+   * Set once the instance's config root was seen to hold the `resume` session's transcript, so a
+   * later resume may read its absence there as deleted. Without it, that root may not be the store
+   * the CLI uses (a wrapper binary, a container).
+   */
+  readonly transcriptSeen?: true;
 }
 
 function isUuid(value: string): boolean {
@@ -37,6 +43,7 @@ export function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState 
     sessionId?: unknown;
     resumeSessionAt?: unknown;
     turnCount?: unknown;
+    transcriptSeen?: unknown;
   };
 
   const threadIdCandidate = typeof cursor.threadId === "string" ? cursor.threadId : undefined;
@@ -71,5 +78,6 @@ export function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState 
     ...(turnCountValue !== undefined && Number.isInteger(turnCountValue) && turnCountValue >= 0
       ? { turnCount: turnCountValue }
       : {}),
+    ...(resume && cursor.transcriptSeen === true ? { transcriptSeen: true as const } : {}),
   };
 }

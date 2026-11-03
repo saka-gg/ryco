@@ -6,9 +6,10 @@ import { assert, it, afterEach, describe, expect, vi } from "@effect/vitest";
 import { Effect, Layer } from "effect";
 import { TestClock } from "effect/testing";
 import { ChildProcessSpawner } from "effect/process";
-import { VcsProcessExitError } from "@ryco/contracts";
+import { VcsProcessExitError, VcsProcessSpawnError } from "@ryco/contracts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import { ForgeRequestPausedError, forgeChildAdmission } from "./forgeRateLimit.ts";
 import * as GitHubCli from "./GitHubCli.ts";
 
 const processOutput = (stdout: string): VcsProcess.VcsProcessOutput => ({
@@ -98,6 +99,7 @@ describe("GitHubCli.layer", () => {
         args: ["pr", "view", "#42", "--json", prSummaryJsonFields],
         cwd: "/repo",
         timeoutMs: 30_000,
+        admit: forgeChildAdmission,
       });
     }).pipe(Effect.provide(layer)),
   );
@@ -146,6 +148,7 @@ describe("GitHubCli.layer", () => {
         args: ["pr", "view", "#42", "--json", prSummaryJsonFields],
         cwd: "/repo",
         timeoutMs: 30_000,
+        admit: forgeChildAdmission,
       });
       expect(mockRun).toHaveBeenNthCalledWith(2, {
         operation: "GitHubCli.execute",
@@ -153,6 +156,7 @@ describe("GitHubCli.layer", () => {
         args: ["pr", "view", "#42", "--json", prSummaryJsonFieldsWithoutCheckRollup],
         cwd: "/repo",
         timeoutMs: 30_000,
+        admit: forgeChildAdmission,
       });
     }).pipe(Effect.provide(layer)),
   );
@@ -317,6 +321,7 @@ describe("GitHubCli.layer", () => {
         args: ["repo", "create", "octocat/codething-mvp", "--private"],
         cwd: "/repo",
         timeoutMs: 30_000,
+        admit: forgeChildAdmission,
       });
     }).pipe(Effect.provide(layer)),
   );
@@ -407,6 +412,7 @@ describe("GitHubCli.layer", () => {
           args: ["pr", "view", "42", "--json", prDetailJsonFields],
           cwd: "/tmp",
           timeoutMs: 30_000,
+          admit: forgeChildAdmission,
         });
       }).pipe(Effect.provide(layer)),
     );
@@ -441,6 +447,7 @@ describe("GitHubCli.layer", () => {
           ],
           cwd: "/tmp",
           timeoutMs: 30_000,
+          admit: forgeChildAdmission,
         });
       }).pipe(Effect.provide(layer)),
     );
@@ -479,6 +486,7 @@ describe("GitHubCli.layer", () => {
           args: ["pr", "list", "--search", "fix", "--limit", "20", "--json", prSummaryJsonFields],
           cwd: "/tmp",
           timeoutMs: 30_000,
+          admit: forgeChildAdmission,
         });
       }).pipe(Effect.provide(layer)),
     );
@@ -520,6 +528,7 @@ describe("GitHubCli.layer", () => {
           ],
           cwd: "/tmp",
           timeoutMs: 30_000,
+          admit: forgeChildAdmission,
         });
       }).pipe(Effect.provide(layer)),
     );
@@ -619,7 +628,47 @@ describe("GitHubCli.layer", () => {
           ],
           cwd: "/tmp",
           timeoutMs: 30_000,
+          admit: forgeChildAdmission,
         });
+      }).pipe(Effect.provide(layer)),
+    );
+
+    it.effect("asks the issue's own host for its comment reactions", () =>
+      Effect.gen(function* () {
+        mockRun.mockReturnValueOnce(
+          Effect.succeed(
+            processOutput(
+              JSON.stringify({
+                number: 42,
+                title: "t",
+                url: "https://ghes.example:8443/acme/web/issues/42",
+                state: "OPEN",
+                body: "BODY",
+                comments: [
+                  {
+                    id: "IC_1",
+                    author: { login: "bob" },
+                    body: "hi",
+                    createdAt: "2026-03-14T10:00:00Z",
+                  },
+                ],
+              }),
+            ),
+          ),
+        );
+        mockRun.mockReturnValueOnce(
+          Effect.succeed(processOutput(JSON.stringify({ data: { nodes: [] } }))),
+        );
+
+        const gh = yield* GitHubCli.GitHubCli;
+        yield* gh.getIssue({ cwd: "/tmp", reference: "42" });
+        // Comment node ids belong to that host; gh's default host would not resolve them.
+        assert.deepStrictEqual(mockRun.mock.calls[1]?.[0].args.slice(0, 4), [
+          "api",
+          "graphql",
+          "--hostname",
+          "ghes.example:8443",
+        ]);
       }).pipe(Effect.provide(layer)),
     );
   });
@@ -877,6 +926,40 @@ describe("GitHubCli.layer", () => {
           expect(repoViews()).toHaveLength(2);
         }).pipe(Effect.provide(layer)),
       );
+
+      it.effect("resolves again at once after a resolution refused during a rate-limit pause", () =>
+        Effect.gen(function* () {
+          const { main } = makeCheckouts();
+          answer(["repo"]);
+          const answerRepository = mockRun.getMockImplementation()!;
+          // The admission after the forge permit refused the first `gh repo view`.
+          mockRun.mockImplementationOnce((input) =>
+            Effect.fail(
+              new VcsProcessSpawnError({
+                operation: "GitHubCli.execute",
+                command: "gh repo view",
+                cwd: input.cwd,
+                cause: new ForgeRequestPausedError({
+                  provider: "github",
+                  host: "github.com",
+                  retryAt: 30_000,
+                }),
+              }),
+            ),
+          );
+          const gh = yield* GitHubCli.GitHubCli;
+          const refused = yield* gh
+            .listPullRequests({ cwd: main, state: "open" })
+            .pipe(Effect.flip);
+          expect(refused.failureKind).toBe("rate-limited");
+          expect(mockRun.getMockImplementation()).toBe(answerRepository);
+
+          // A failed resolution is kept for 5 s; a refused one reached no forge and is not.
+          const rows = yield* gh.listPullRequests({ cwd: main, state: "open" });
+          expect(rows).toHaveLength(1);
+          expect(repoViews()).toHaveLength(2);
+        }).pipe(Effect.provide(layer)),
+      );
     });
 
     it.effect("runs involvement lists as the search gh pr list --search would", () =>
@@ -988,6 +1071,7 @@ describe("GitHubCli.layer", () => {
           args: ["issue", "comment", "42", "--body-file", "/tmp/comment.md"],
           cwd: "/tmp",
           timeoutMs: 30_000,
+          admit: forgeChildAdmission,
         });
       }).pipe(Effect.provide(layer)),
     );
@@ -1009,6 +1093,7 @@ describe("GitHubCli.layer", () => {
           args: ["pr", "comment", "7", "--body-file", "/tmp/comment.md"],
           cwd: "/tmp",
           timeoutMs: 30_000,
+          admit: forgeChildAdmission,
         });
       }).pipe(Effect.provide(layer)),
     );
@@ -1039,6 +1124,7 @@ describe("GitHubCli.layer", () => {
           ],
           cwd: "/tmp",
           timeoutMs: 30_000,
+          admit: forgeChildAdmission,
         });
       }).pipe(Effect.provide(layer)),
     );
@@ -1069,6 +1155,7 @@ describe("GitHubCli.layer", () => {
           ],
           cwd: "/tmp",
           timeoutMs: 30_000,
+          admit: forgeChildAdmission,
         });
       }).pipe(Effect.provide(layer)),
     );
@@ -1088,6 +1175,7 @@ describe("GitHubCli.layer", () => {
           args: ["api", "-X", "POST", "repos/{owner}/{repo}/actions/runs/12345/rerun-failed-jobs"],
           cwd: "/tmp",
           timeoutMs: 45_000,
+          admit: forgeChildAdmission,
         });
       }).pipe(Effect.provide(layer)),
     );
@@ -1105,6 +1193,7 @@ describe("GitHubCli.layer", () => {
           args: ["api", "-X", "POST", "repos/{owner}/{repo}/actions/jobs/67890/rerun"],
           cwd: "/tmp",
           timeoutMs: 45_000,
+          admit: forgeChildAdmission,
         });
       }).pipe(Effect.provide(layer)),
     );

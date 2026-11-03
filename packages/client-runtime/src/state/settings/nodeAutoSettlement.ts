@@ -32,7 +32,10 @@ export function nodeAwaitsAutoSettleRule(config: NodeConfig | null | undefined):
   );
 }
 
-/** The settings patch that sets a node's rule. */
+/**
+ * The settings patch that sets a node's rule. Applied to every node through
+ * `applyNodeSettingsPatch` with {@link nodeOwnsAutoSettleRule} as `supported`.
+ */
 export function nodeAutoSettleRulePatch(value: SidebarAutoSettleAfterDays): ServerSettingsPatch {
   return { threadAutoSettleAfterDays: value };
 }
@@ -158,112 +161,6 @@ export function readAutoSettleRuleHandOverKey(
     mutationReady,
     role,
   }));
-}
-
-export type AutoSettleRuleTargetBlocker = "unsupported" | "disconnected" | "read-only";
-
-export interface AutoSettleRuleTarget {
-  readonly environmentId: EnvironmentId;
-  readonly label: string;
-  /** Why the rule cannot be written to this node now, or null when it can. */
-  readonly blocker: AutoSettleRuleTargetBlocker | null;
-  readonly write: (patch: ServerSettingsPatch) => Promise<unknown>;
-}
-
-/**
- * Why a rule cannot be written to a node now: not connected (or no config yet),
- * an older node that keeps no rule, or a client that may not change it.
- */
-export function autoSettleRuleTargetBlocker(input: {
-  readonly connected: boolean;
-  readonly config: NodeConfig | null | undefined;
-  readonly canWrite: boolean;
-}): AutoSettleRuleTargetBlocker | null {
-  if (!input.connected || input.config == null) return "disconnected";
-  if (!nodeOwnsAutoSettleRule(input.config)) return "unsupported";
-  return input.canWrite ? null : "read-only";
-}
-
-export interface AutoSettleRuleNotApplied {
-  readonly environmentId: EnvironmentId;
-  readonly label: string;
-  readonly reason: AutoSettleRuleTargetBlocker | "failed";
-  readonly detail?: string;
-}
-
-export interface AutoSettleRuleApplyResult {
-  readonly applied: ReadonlyArray<{
-    readonly environmentId: EnvironmentId;
-    readonly label: string;
-  }>;
-  readonly notApplied: ReadonlyArray<AutoSettleRuleNotApplied>;
-}
-
-/**
- * Writes one rule to every node it can reach, in parallel, and reports the
- * nodes it could not: blocked ones (an older node, one not connected, one
- * this client may not change) and failed writes.
- */
-export async function applyAutoSettleRuleToNodes(
-  value: SidebarAutoSettleAfterDays,
-  targets: ReadonlyArray<AutoSettleRuleTarget>,
-): Promise<AutoSettleRuleApplyResult> {
-  const patch = nodeAutoSettleRulePatch(value);
-  const outcomes = await Promise.all(
-    targets.map(async (target) => {
-      if (target.blocker !== null) {
-        return {
-          ok: false as const,
-          entry: {
-            environmentId: target.environmentId,
-            label: target.label,
-            reason: target.blocker,
-          },
-        };
-      }
-      try {
-        await target.write(patch);
-        return {
-          ok: true as const,
-          entry: { environmentId: target.environmentId, label: target.label },
-        };
-      } catch (error) {
-        return {
-          ok: false as const,
-          entry: {
-            environmentId: target.environmentId,
-            label: target.label,
-            reason: "failed" as const,
-            ...(error instanceof Error ? { detail: error.message } : {}),
-          },
-        };
-      }
-    }),
-  );
-  return {
-    applied: outcomes.flatMap((outcome) => (outcome.ok ? [outcome.entry] : [])),
-    notApplied: outcomes.flatMap((outcome) => (outcome.ok ? [] : [outcome.entry])),
-  };
-}
-
-const NOT_APPLIED_REASON: Record<AutoSettleRuleNotApplied["reason"], string> = {
-  disconnected: "not connected",
-  unsupported: "needs an update",
-  "read-only": "only its owner can change it",
-  failed: "could not save",
-};
-
-/** One line on what applying a rule to every node did, naming every node it left out. */
-export function describeAutoSettleRuleApplyResult(result: AutoSettleRuleApplyResult): string {
-  const applied =
-    result.applied.length === 0
-      ? "No node was changed."
-      : `Applied to ${result.applied.map((node) => node.label).join(", ")}.`;
-  if (result.notApplied.length === 0) return applied;
-  const left = result.notApplied
-    .map((node) => `${node.label} (${node.detail ?? NOT_APPLIED_REASON[node.reason]})`)
-    .join(", ");
-  return `${applied} Not changed: ${left}.`;
 }
 
 /** The node a settings screen sets the rule on. */

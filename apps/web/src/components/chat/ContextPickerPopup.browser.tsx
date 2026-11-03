@@ -3,7 +3,12 @@ import "../../index.css";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 import { page, userEvent } from "vite-plus/test/browser";
-import type { ChangeRequest, EnvironmentId, SourceControlIssueSummary } from "@ryco/contracts";
+import type {
+  ChangeRequest,
+  DesktopWindowCaptureState,
+  EnvironmentId,
+  SourceControlIssueSummary,
+} from "@ryco/contracts";
 
 const issueListData: SourceControlIssueSummary[] = [
   {
@@ -73,6 +78,7 @@ async function mountPopup(overrides?: {
   onSelectIssue?: (issue: SourceControlIssueSummary) => void;
   onSelectChangeRequest?: (cr: ChangeRequest) => void;
   onAttachFile?: (file: File) => void;
+  onCaptureWindow?: (windowId: number) => void;
 }) {
   const host = document.createElement("div");
   document.body.append(host);
@@ -89,6 +95,7 @@ async function mountPopup(overrides?: {
       onSelectIssue={onSelectIssue}
       onSelectChangeRequest={onSelectChangeRequest}
       onAttachFile={onAttachFile}
+      {...(overrides?.onCaptureWindow ? { onCaptureWindow: overrides.onCaptureWindow } : {})}
     />,
     { container: host },
   );
@@ -205,5 +212,97 @@ describe("ContextPickerPopup", () => {
     } finally {
       await cleanup();
     }
+  });
+
+  describe("window capture", () => {
+    function installWindowCapture(options: { screenRecording: "granted" | "denied" }) {
+      const state: DesktopWindowCaptureState = {
+        supported: true,
+        shortcut: null,
+        screenRecordingPermission: options.screenRecording,
+        inputMonitoringPermission: "unknown",
+        missingPermissions: options.screenRecording === "granted" ? [] : ["screenRecording"],
+        message: null,
+        appDisplayName: "Ryco Dev",
+      };
+      const windowCapture = {
+        getState: vi.fn(async () => state),
+        setup: vi.fn(async () => state),
+        listWindows: vi.fn(async () => [
+          {
+            windowId: 11,
+            appName: "Safari",
+            bundleIdentifier: "com.apple.Safari",
+            windowTitle: "Release notes",
+            appIconDataUrl: null,
+          },
+          {
+            windowId: 12,
+            appName: "Ghostty",
+            bundleIdentifier: "com.mitchellh.ghostty",
+            windowTitle: null,
+            appIconDataUrl: null,
+          },
+        ]),
+        onState: vi.fn(() => () => undefined),
+      };
+      (window as { desktopBridge?: unknown }).desktopBridge = { windowCapture };
+      return windowCapture;
+    }
+
+    afterEach(() => {
+      delete (window as { desktopBridge?: unknown }).desktopBridge;
+    });
+
+    it("shows no capture entry where the desktop app cannot capture", async () => {
+      const { cleanup } = await mountPopup();
+      try {
+        await expect.element(page.getByRole("button", { name: "Attach file" })).toBeVisible();
+        await expect
+          .element(page.getByRole("button", { name: "Capture window" }))
+          .not.toBeInTheDocument();
+      } finally {
+        await cleanup();
+      }
+    });
+
+    it("lists capturable windows and captures the chosen one", async () => {
+      const windowCapture = installWindowCapture({ screenRecording: "granted" });
+      const onCaptureWindow = vi.fn();
+      const { cleanup } = await mountPopup({ onCaptureWindow });
+      try {
+        await userEvent.click(page.getByRole("button", { name: "Capture window" }));
+        await expect
+          .element(page.getByRole("button", { name: "Capture Safari: Release notes" }))
+          .toBeVisible();
+        await expect.element(page.getByRole("button", { name: "Capture Ghostty" })).toBeVisible();
+        expect(windowCapture.listWindows).toHaveBeenCalledTimes(1);
+
+        await userEvent.click(page.getByRole("button", { name: "Capture Safari: Release notes" }));
+        expect(onCaptureWindow).toHaveBeenCalledWith(11);
+
+        await userEvent.click(page.getByRole("button", { name: "Back to context" }));
+        await expect.element(page.getByPlaceholder("Search…")).toBeVisible();
+      } finally {
+        await cleanup();
+      }
+    });
+
+    it("offers the macOS permission setup before listing without Screen Recording", async () => {
+      const windowCapture = installWindowCapture({ screenRecording: "denied" });
+      const { cleanup } = await mountPopup({ onCaptureWindow: vi.fn() });
+      try {
+        await userEvent.click(page.getByRole("button", { name: "Capture window" }));
+        await expect
+          .element(page.getByText(/Allow Screen Recording for Ryco Dev in System Settings/))
+          .toBeVisible();
+        expect(windowCapture.listWindows).not.toHaveBeenCalled();
+        await userEvent.click(page.getByRole("button", { name: "Set up" }));
+        // Only Screen Recording, even with the Option-key shortcut saved.
+        expect(windowCapture.setup).toHaveBeenCalledExactlyOnceWith(["screenRecording"]);
+      } finally {
+        await cleanup();
+      }
+    });
   });
 });

@@ -41,6 +41,12 @@ const CARD_CONTENT_LINGER_MS = 600;
 const ROOT_STYLE = { ...ISLAND_DARK_TOKEN_STYLE, ...CROWN_GEOMETRY_STYLE };
 
 const POPUP_SELECTOR = '[role="menu"], [role="listbox"], [role="dialog"], [role="alertdialog"]';
+/**
+ * The trigger of an open popup. Base UI moves focus into a popup one animation
+ * frame after it opens, so an Escape pressed in that frame still lands in the card.
+ */
+const OPEN_POPUP_TRIGGER_SELECTOR =
+  '[aria-expanded="true"][aria-haspopup]:not([aria-haspopup="false"])';
 
 function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -70,6 +76,8 @@ function isFocusDropped(): boolean {
  */
 export function CrownOverview(props: CrownOverviewProps & { readonly open?: boolean }) {
   const { open = true, isGitRepo, chat, ship } = props;
+  // The Servers section exists only while the thread has servers running.
+  const servers = props.servers && props.servers.servers.length > 0 ? props.servers : undefined;
   const notes = props.notes?.available ? props.notes : undefined;
   const reducedMotion = useReducedMotionEffective();
   const paneFocused = usePaneFocus();
@@ -82,6 +90,7 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
     isGitRepo,
     notesFilled: notes?.filled === true,
     ship,
+    serverCount: servers?.servers.length ?? 0,
   });
   const headline = resolveCrownHeadline(summary, props);
   const items = visibleCrownRailItems({
@@ -89,6 +98,7 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
     notesAvailable: notes !== undefined,
     chatAvailable: chat !== undefined,
     hasPlan: crownHasPlan(props),
+    hasServers: servers !== undefined,
   });
   /** The card only opens on sections the rail shows. */
   const isShown = (section: CrownSection) => items.some((item) => item.section === section);
@@ -252,8 +262,10 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
   const handleEscape = useEvent((event: KeyboardEvent) => {
     if (event.key !== "Escape" || event.defaultPrevented) return;
     if (isEditableTarget(event.target)) return;
-    // A menu or dialog (often portaled out of the card) owns its own Escape.
+    // A menu or dialog (often portaled out of the card) owns its own Escape,
+    // also before it has taken focus from the card.
     if (event.target instanceof Element && event.target.closest(POPUP_SELECTOR)) return;
+    if (rootRef.current?.querySelector(OPEN_POPUP_TRIGGER_SELECTOR)) return;
     flyout.close();
     if (alertLayerRef.current?.contains(document.activeElement)) {
       faceRef.current?.focus({ preventScroll: true });
@@ -312,10 +324,11 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
   }, [liveGitNoticeId, collapse]);
 
   const onAlertAction = () => {
-    const action = shownAlert?.action;
-    if (!action) return;
-    alerts.clear();
-    action.onClick();
+    const alert = shownAlert;
+    if (!alert?.action) return;
+    // A running git action's Stop acts in place: its alert stays until the result replaces it.
+    if (!alert.live) alerts.clear();
+    alert.action.onClick();
   };
 
   const onAlertOpen = (event: MouseEvent<HTMLElement>) => {
@@ -384,6 +397,7 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
           branchName={refName}
           notes={notes}
           chat={chat}
+          servers={servers}
           onCollapse={() => collapse(true)}
           spine={
             <CrownRailNav
@@ -420,6 +434,7 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
         notes={notes}
         chat={chat}
         ship={ship}
+        servers={servers}
         onPointerEnter={onFlyoutPointerEnter}
         onPointerLeave={onFlyoutPointerLeave}
         onEditingChange={onFlyoutEditingChange}

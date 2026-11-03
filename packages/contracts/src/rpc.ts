@@ -43,7 +43,32 @@ import {
   SessionImportResult,
   SessionImportError,
 } from "./sessionImport.ts";
-import { ThreadForkError, ThreadForkInput, ThreadForkResult } from "./threadFork.ts";
+import {
+  ThreadForkCarriedRequest,
+  ThreadForkError,
+  ThreadForkInput,
+  ThreadForkResult,
+} from "./threadFork.ts";
+import {
+  ThreadLocalServerList,
+  ThreadLocalServersError,
+  ThreadStopLocalServerError,
+  ThreadStopLocalServerInput,
+  ThreadStopLocalServerResult,
+  ThreadSubscribeLocalServersInput,
+} from "./threadLocalServers.ts";
+import {
+  SecretRequestAnswerInput,
+  SecretRequestAnswerResult,
+  SecretRequestError,
+} from "./secretRequest.ts";
+import {
+  ProviderSignInError,
+  ProviderSignInInput,
+  ProviderSignInRespondInput,
+  ProviderSignInState,
+  ProviderSignInWireEvent,
+} from "./providerSignIn.ts";
 import {
   WorktreeSetupCancelInput,
   WorktreeSetupCancelResult,
@@ -124,6 +149,15 @@ import {
   AuthRpcError,
 } from "./auth.ts";
 import {
+  PushDeviceStatus,
+  PushRegisterDeviceInput,
+  PushRpcError,
+  PushSetPresenceInput,
+  PushSetPresenceResult,
+  PushUnregisterDeviceInput,
+  PushUnregisterDeviceResult,
+} from "./push.ts";
+import {
   DiagnosticsError,
   DiagnosticsSnapshot,
   DiagnosticsSignalProcessInput,
@@ -155,6 +189,16 @@ import {
   AtlassianStartOAuthResult,
 } from "./atlassian.ts";
 import { ProjectId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  NODE_BROWSER_WS_METHODS,
+  NodeBrowserCommand,
+  NodeBrowserCommandResult,
+  NodeBrowserInputRequest,
+  NodeBrowserReadRequest,
+  NodeBrowserReadResponse,
+  NodeBrowserRpcError,
+  NodeBrowserWireEvent,
+} from "./nodeBrowser.ts";
 import {
   DEVICE_WS_METHODS,
   DeviceAppRequest,
@@ -209,6 +253,11 @@ import {
 } from "./projectCopy.ts";
 import {
   GitActionProgressEvent,
+  GitActionResultUnavailableError,
+  GitActionStoppedError,
+  GitCancelStackedActionInput,
+  GitCancelStackedActionResult,
+  GitResumeStackedActionInput,
   VcsSwitchRefInput,
   VcsSwitchRefResult,
   GitCommandError,
@@ -279,6 +328,7 @@ import {
   OrchestrationGetTaskOutputError,
   OrchestrationGetWorkflowScriptError,
   OrchestrationStopBackgroundTaskError,
+  OrchestrationMessageBackgroundTaskError,
   OrchestrationGetFullThreadDiffError,
   OrchestrationGetFullThreadDiffInput,
   OrchestrationGetSnapshotError,
@@ -303,15 +353,24 @@ import {
   ProjectReadIconError,
   ProjectReadFileBinaryInput,
   ProjectReadFileBinaryResult,
+  ProjectReadFileChunkError,
+  ProjectReadFileChunkInput,
+  ProjectReadFileChunkResult,
   ProjectReadFileError,
   ProjectReadFileInput,
   ProjectReadFileResult,
+  ProjectSearchContentError,
+  ProjectSearchContentInput,
+  ProjectSearchContentResult,
   ProjectSearchEntriesError,
   ProjectSearchEntriesInput,
   ProjectSearchEntriesResult,
   ProjectStageFileReferenceError,
   ProjectStageFileReferenceInput,
   ProjectStageFileReferenceResult,
+  ProjectWatchFileError,
+  ProjectWatchFileInput,
+  ProjectFileChangeEvent,
   ProjectWriteFileError,
   ProjectWriteFileInput,
   ProjectWriteFileResult,
@@ -327,7 +386,7 @@ import {
   TerminalClearInput,
   TerminalCloseInput,
   TerminalError,
-  TerminalEvent,
+  TerminalWireEvent,
   TerminalOpenInput,
   TerminalResizeInput,
   TerminalRestartInput,
@@ -337,7 +396,7 @@ import {
   TerminalWriteInput,
 } from "./terminal.ts";
 import {
-  ServerConfigStreamEvent,
+  ServerConfigStreamWireEvent,
   ServerSubscribeConfigInput,
   ServerConfig,
   ServerLocalDiagnosticsMetrics,
@@ -358,11 +417,6 @@ import {
   NodeUpdateState,
 } from "./nodeUpdate.ts";
 import { ServerSettings, ServerSettingsError, ServerSettingsPatch } from "./settings.ts";
-import {
-  ThreadPriorityEnsureCurrentInput,
-  ThreadPriorityEnsureCurrentResult,
-  ThreadPriorityRpcError,
-} from "./threadPriority.ts";
 import {
   SourceControlGetChangeRequestFilesViewedInput,
   SourceControlChangeRequestFilesViewed,
@@ -405,6 +459,11 @@ import {
   SourceControlWorkflowRunListResult,
 } from "./sourceControl.ts";
 import {
+  PullRequestWatchError,
+  SourceControlSetPullRequestWatchInput,
+  SourceControlSetPullRequestWatchResult,
+} from "./pullRequestWatchRpc.ts";
+import {
   ChangeRequestActivity,
   ChangeRequestActivityInput,
   ChangeRequestCreateInput,
@@ -417,10 +476,14 @@ import {
   ChangeRequestSetThreadResolvedResult,
   ChangeRequestSubmitReviewInput,
   ChangeRequestSubmitReviewResult,
+  ChangeRequestTemplateListInput,
+  ChangeRequestTemplateListResult,
   ChangeRequestUpdateCommentInput,
   ChangeRequestUpdateCommentResult,
   ChangeRequestUpdateInput,
   ChangeRequestUpdateResult,
+  SourceControlInvolvedChangeRequestsResult,
+  SourceControlListInvolvedChangeRequestsInput,
 } from "./changeRequestReview.ts";
 import { VcsError } from "./vcs.ts";
 import {
@@ -475,10 +538,13 @@ export const WS_METHODS = {
   projectsRemove: "projects.remove",
   projectsListEntries: "projects.listEntries",
   projectsSearchEntries: "projects.searchEntries",
+  projectsSearchContent: "projects.searchContent",
   projectsReadFile: "projects.readFile",
   projectsReadIcon: "projects.readIcon",
   projectsReadFileBinary: "projects.readFileBinary",
+  projectsReadFileChunk: "projects.readFileChunk",
   projectsWriteFile: "projects.writeFile",
+  projectsSubscribeFileChanges: "projects.subscribeFileChanges",
   projectsStageFileReference: "projects.stageFileReference",
 
   // Cross-node project copy (announced by `capabilities.projectCopy`)
@@ -534,6 +600,8 @@ export const WS_METHODS = {
 
   // Git workflow methods
   gitRunStackedAction: "git.runStackedAction",
+  gitResumeStackedAction: "git.resumeStackedAction",
+  gitCancelStackedAction: "git.cancelStackedAction",
   gitResolvePullRequest: "git.resolvePullRequest",
   gitPreparePullRequestThread: "git.preparePullRequestThread",
   gitCreateWorktreeForProject: "git.createWorktreeForProject",
@@ -555,6 +623,10 @@ export const WS_METHODS = {
   threadsSetManualBucket: "threads.setManualBucket",
   threadsSetManualPosition: "threads.setManualPosition",
   threadsFork: "threads.fork",
+  threadsForkCarried: "threads.forkCarried",
+  threadsSubscribeLocalServers: "threads.subscribeLocalServers",
+  threadsStopLocalServer: "threads.stopLocalServer",
+  secretsAnswerRequest: "secrets.answerRequest",
   worktreesSetManualPosition: "worktrees.setManualPosition",
   projectsInitializeGit: "projects.initializeGit",
   projectsPromoteChatPreview: "projects.promoteChatPreview",
@@ -563,7 +635,6 @@ export const WS_METHODS = {
 
   // Thread search methods
   searchThreadMessages: "threads.searchMessages",
-  threadPriorityEnsureCurrent: "threadPriority.ensureCurrent",
 
   // Terminal methods
   terminalOpen: "terminal.open",
@@ -602,9 +673,13 @@ export const WS_METHODS = {
   notesCommand: "notes.command",
 
   serverRefreshProviders: "server.refreshProviders",
+  providerSignInSubscribe: "provider.signIn.subscribe",
+  providerSignInStart: "provider.signIn.start",
+  providerSignInRespond: "provider.signIn.respond",
   providerPrewarmSession: "provider.prewarmSession",
   providerReadProjectCommands: "provider.readProjectCommands",
   serverUpdateProvider: "server.updateProvider",
+  serverNoteClientInteraction: "server.noteClientInteraction",
   serverSubscribeNodeUpdate: "server.subscribeNodeUpdate",
   serverCheckNodeUpdate: "server.checkNodeUpdate",
   serverUpdateNode: "server.updateNode",
@@ -642,6 +717,7 @@ export const WS_METHODS = {
   sourceControlGetIssue: "sourceControl.getIssue",
   sourceControlSearchIssues: "sourceControl.searchIssues",
   sourceControlListChangeRequests: "sourceControl.listChangeRequests",
+  sourceControlListInvolvedChangeRequests: "sourceControl.listInvolvedChangeRequests",
   sourceControlSearchChangeRequests: "sourceControl.searchChangeRequests",
   sourceControlGetChangeRequestDetail: "sourceControl.getChangeRequestDetail",
   sourceControlGetChangeRequestFilesViewed: "sourceControl.getChangeRequestFilesViewed",
@@ -667,8 +743,10 @@ export const WS_METHODS = {
   sourceControlUpdateChangeRequestComment: "sourceControl.updateChangeRequestComment",
   sourceControlUpdateChangeRequest: "sourceControl.updateChangeRequest",
   sourceControlCreateChangeRequest: "sourceControl.createChangeRequest",
+  sourceControlListChangeRequestTemplates: "sourceControl.listChangeRequestTemplates",
   sourceControlLinkWorktreePullRequest: "sourceControl.linkWorktreePullRequest",
   sourceControlDismissWorktreePullRequest: "sourceControl.dismissWorktreePullRequest",
+  sourceControlSetPullRequestWatch: "sourceControl.setPullRequestWatch",
 
   // Text generation methods
   textGenerationGenerateIssueContent: "textGeneration.generateIssueContent",
@@ -706,6 +784,11 @@ export const WS_METHODS = {
   subscribeServerLifecycle: "subscribeServerLifecycle",
   subscribeAuthAccess: "subscribeAuthAccess",
   authIssueLinkedDirectAccess: "auth.issueLinkedDirectAccess",
+
+  // Push alerts for native devices (docs/push-alerts.md)
+  pushRegisterDevice: "push.registerDevice",
+  pushUnregisterDevice: "push.unregisterDevice",
+  pushSetPresence: "push.setPresence",
 } as const;
 
 export const GitCreateWorktreeForProjectInput = Schema.Struct({
@@ -1093,10 +1176,42 @@ export const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProv
   error: AuthRpcError,
 });
 
+/** Follows an instance's sign-in: its state, and a terminal flow's output. Owners only. */
+export const WsProviderSignInSubscribeRpc = Rpc.make(WS_METHODS.providerSignInSubscribe, {
+  payload: ProviderSignInInput,
+  success: ProviderSignInWireEvent,
+  error: Schema.Union([ProviderSignInError, AuthRpcError]),
+  stream: true,
+});
+
+/** Starts a sign-in, or answers the running one's state; one flow per instance. */
+export const WsProviderSignInStartRpc = Rpc.make(WS_METHODS.providerSignInStart, {
+  payload: ProviderSignInInput,
+  success: ProviderSignInState,
+  error: Schema.Union([ProviderSignInError, AuthRpcError]),
+});
+
+export const WsProviderSignInRespondRpc = Rpc.make(WS_METHODS.providerSignInRespond, {
+  payload: ProviderSignInRespondInput,
+  error: Schema.Union([ProviderSignInError, AuthRpcError]),
+});
+
 export const WsServerUpdateProviderRpc = Rpc.make(WS_METHODS.serverUpdateProvider, {
   payload: ServerProviderUpdateInput,
   success: ServerProviderUpdatedPayload,
   error: Schema.Union([ServerProviderUpdateError, AuthRpcError]),
+});
+
+/**
+ * A person is using a client of this node (input in the app). Clients send it at most every 30 s
+ * while there is input, and only to nodes with `automaticUpdates` on; the node keeps the newest
+ * time (at most one per 15 s per session) so unattended updates wait for a quiet window. It can
+ * only delay an update, never start or allow one.
+ */
+export const WsServerNoteClientInteractionRpc = Rpc.make(WS_METHODS.serverNoteClientInteraction, {
+  payload: Schema.Struct({}),
+  success: EmptyRpcResult,
+  error: AuthRpcError,
 });
 
 export const WsServerSubscribeNodeUpdateRpc = Rpc.make(WS_METHODS.serverSubscribeNodeUpdate, {
@@ -1344,6 +1459,20 @@ export const WsSourceControlListChangeRequestsRpc = Rpc.make(
   },
 );
 
+/**
+ * Change requests involving the viewer across the node's repositories: one search per host
+ * where the host can (GitHub), each other repository's involvement lists otherwise. A source
+ * that fails is reported in `sources`; it never fails the call.
+ */
+export const WsSourceControlListInvolvedChangeRequestsRpc = Rpc.make(
+  WS_METHODS.sourceControlListInvolvedChangeRequests,
+  {
+    payload: SourceControlListInvolvedChangeRequestsInput,
+    success: SourceControlInvolvedChangeRequestsResult,
+    error: Schema.Union([SourceControlProviderError, AuthRpcError]),
+  },
+);
+
 export const WsSourceControlSearchChangeRequestsRpc = Rpc.make(
   WS_METHODS.sourceControlSearchChangeRequests,
   {
@@ -1576,6 +1705,15 @@ export const WsSourceControlCreateChangeRequestRpc = Rpc.make(
   },
 );
 
+export const WsSourceControlListChangeRequestTemplatesRpc = Rpc.make(
+  WS_METHODS.sourceControlListChangeRequestTemplates,
+  {
+    payload: ChangeRequestTemplateListInput,
+    success: ChangeRequestTemplateListResult,
+    error: Schema.Union([GitCommandError, AuthRpcError]),
+  },
+);
+
 export const WsSourceControlLinkWorktreePullRequestRpc = Rpc.make(
   WS_METHODS.sourceControlLinkWorktreePullRequest,
   {
@@ -1590,6 +1728,16 @@ export const WsSourceControlDismissWorktreePullRequestRpc = Rpc.make(
   {
     payload: DismissWorktreePullRequestInput,
     error: Schema.Union([SourceControlProviderError, AuthRpcError]),
+  },
+);
+
+/** Start, change or stop the server's watch of a thread's pull request (Auto-fix CI included). */
+export const WsSourceControlSetPullRequestWatchRpc = Rpc.make(
+  WS_METHODS.sourceControlSetPullRequestWatch,
+  {
+    payload: SourceControlSetPullRequestWatchInput,
+    success: SourceControlSetPullRequestWatchResult,
+    error: Schema.Union([PullRequestWatchError, AuthRpcError]),
   },
 );
 
@@ -1745,6 +1893,12 @@ export const WsProjectsSearchEntriesRpc = Rpc.make(WS_METHODS.projectsSearchEntr
   error: Schema.Union([ProjectSearchEntriesError, AuthRpcError]),
 });
 
+export const WsProjectsSearchContentRpc = Rpc.make(WS_METHODS.projectsSearchContent, {
+  payload: ProjectSearchContentInput,
+  success: ProjectSearchContentResult,
+  error: Schema.Union([ProjectSearchContentError, AuthRpcError]),
+});
+
 export const WsProjectsListEntriesRpc = Rpc.make(WS_METHODS.projectsListEntries, {
   payload: ProjectListEntriesInput,
   success: ProjectListEntriesResult,
@@ -1769,10 +1923,24 @@ export const WsProjectsReadFileBinaryRpc = Rpc.make(WS_METHODS.projectsReadFileB
   error: Schema.Union([ProjectReadFileBinaryError, AuthRpcError]),
 });
 
+export const WsProjectsReadFileChunkRpc = Rpc.make(WS_METHODS.projectsReadFileChunk, {
+  payload: ProjectReadFileChunkInput,
+  success: ProjectReadFileChunkResult,
+  error: Schema.Union([ProjectReadFileChunkError, AuthRpcError]),
+});
+
 export const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
   payload: ProjectWriteFileInput,
   success: ProjectWriteFileResult,
   error: Schema.Union([ProjectWriteFileError, AuthRpcError]),
+});
+
+/** Only on nodes that advertise `projectFileWatch`; see `ProjectFileChangeEvent`. */
+export const WsProjectsSubscribeFileChangesRpc = Rpc.make(WS_METHODS.projectsSubscribeFileChanges, {
+  payload: ProjectWatchFileInput,
+  success: ProjectFileChangeEvent,
+  error: Schema.Union([ProjectWatchFileError, AuthRpcError]),
+  stream: true,
 });
 
 export const WsProjectsStageFileReferenceRpc = Rpc.make(WS_METHODS.projectsStageFileReference, {
@@ -1976,6 +2144,27 @@ export const WsSubscribeDeviceEventsRpc = Rpc.make(DEVICE_WS_METHODS.subscribeEv
   stream: true,
 });
 
+export const WsNodeBrowserReadRpc = Rpc.make(NODE_BROWSER_WS_METHODS.read, {
+  payload: NodeBrowserReadRequest,
+  success: NodeBrowserReadResponse,
+  error: Schema.Union([NodeBrowserRpcError, AuthRpcError]),
+});
+export const WsNodeBrowserCommandRpc = Rpc.make(NODE_BROWSER_WS_METHODS.command, {
+  payload: NodeBrowserCommand,
+  success: NodeBrowserCommandResult,
+  error: Schema.Union([NodeBrowserRpcError, AuthRpcError]),
+});
+export const WsNodeBrowserInputRpc = Rpc.make(NODE_BROWSER_WS_METHODS.input, {
+  payload: NodeBrowserInputRequest,
+  error: Schema.Union([NodeBrowserRpcError, AuthRpcError]),
+});
+export const WsNodeBrowserSubscribeRpc = Rpc.make(NODE_BROWSER_WS_METHODS.subscribe, {
+  payload: Schema.Struct({}),
+  success: NodeBrowserWireEvent,
+  error: Schema.Union([NodeBrowserRpcError, AuthRpcError]),
+  stream: true,
+});
+
 export const WsSubscribeVcsStatusRpc = Rpc.make(WS_METHODS.subscribeVcsStatus, {
   payload: VcsStatusInput,
   success: VcsStatusStreamEvent,
@@ -1998,8 +2187,27 @@ export const WsVcsRefreshStatusRpc = Rpc.make(WS_METHODS.vcsRefreshStatus, {
 export const WsGitRunStackedActionRpc = Rpc.make(WS_METHODS.gitRunStackedAction, {
   payload: GitRunStackedActionInput,
   success: GitActionProgressEvent,
-  error: Schema.Union([GitManagerServiceError, AuthRpcError]),
+  // Only a recoverable action can be stopped, and only clients that know the error start one.
+  error: Schema.Union([GitManagerServiceError, GitActionStoppedError, AuthRpcError]),
   stream: true,
+});
+
+export const WsGitResumeStackedActionRpc = Rpc.make(WS_METHODS.gitResumeStackedAction, {
+  payload: GitResumeStackedActionInput,
+  success: GitActionProgressEvent,
+  error: Schema.Union([
+    GitManagerServiceError,
+    GitActionStoppedError,
+    GitActionResultUnavailableError,
+    AuthRpcError,
+  ]),
+  stream: true,
+});
+
+export const WsGitCancelStackedActionRpc = Rpc.make(WS_METHODS.gitCancelStackedAction, {
+  payload: GitCancelStackedActionInput,
+  success: GitCancelStackedActionResult,
+  error: AuthRpcError,
 });
 
 export const WsGitResolvePullRequestRpc = Rpc.make(WS_METHODS.gitResolvePullRequest, {
@@ -2120,16 +2328,45 @@ export const WsThreadsForkRpc = Rpc.make(WS_METHODS.threadsFork, {
   error: Schema.Union([ThreadForkError, AuthRpcError]),
 });
 
+/**
+ * Creates a fork on this node from a conversation the client carried from another node. Only on
+ * nodes that advertise `threadForkCarried`; see `ThreadForkCarriedRequest`.
+ */
+export const WsThreadsForkCarriedRpc = Rpc.make(WS_METHODS.threadsForkCarried, {
+  payload: ThreadForkCarriedRequest,
+  success: ThreadForkResult,
+  error: Schema.Union([ThreadForkError, AuthRpcError]),
+});
+
+/** Only on nodes that advertise `threadLocalServers`; see `ThreadLocalServerList`. */
+export const WsThreadsSubscribeLocalServersRpc = Rpc.make(WS_METHODS.threadsSubscribeLocalServers, {
+  payload: ThreadSubscribeLocalServersInput,
+  success: ThreadLocalServerList,
+  error: Schema.Union([ThreadLocalServersError, AuthRpcError]),
+  stream: true,
+});
+
+/** Only on nodes that advertise `threadLocalServerStop`. */
+export const WsThreadsStopLocalServerRpc = Rpc.make(WS_METHODS.threadsStopLocalServer, {
+  payload: ThreadStopLocalServerInput,
+  success: ThreadStopLocalServerResult,
+  error: Schema.Union([ThreadStopLocalServerError, AuthRpcError]),
+});
+
+/**
+ * The user's answer to an agent's `ryco_request_secret` (owner only, on nodes that advertise
+ * `secretRequests`). The value is written into the request's dotenv file and goes nowhere else.
+ */
+export const WsSecretsAnswerRequestRpc = Rpc.make(WS_METHODS.secretsAnswerRequest, {
+  payload: SecretRequestAnswerInput,
+  success: SecretRequestAnswerResult,
+  error: Schema.Union([SecretRequestError, AuthRpcError]),
+});
+
 export const WsSearchThreadMessagesRpc = Rpc.make(WS_METHODS.searchThreadMessages, {
   payload: SearchThreadMessagesInput,
   success: SearchThreadMessagesResult,
   error: Schema.Union([AuthRpcError]),
-});
-
-export const WsThreadPriorityEnsureCurrentRpc = Rpc.make(WS_METHODS.threadPriorityEnsureCurrent, {
-  payload: ThreadPriorityEnsureCurrentInput,
-  success: ThreadPriorityEnsureCurrentResult,
-  error: Schema.Union([ThreadPriorityRpcError, AuthRpcError]),
 });
 
 export const WsWorktreesSetManualPositionRpc = Rpc.make(WS_METHODS.worktreesSetManualPosition, {
@@ -2308,6 +2545,15 @@ export const WsOrchestrationStopBackgroundTaskRpc = Rpc.make(
   },
 );
 
+export const WsOrchestrationMessageBackgroundTaskRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.messageBackgroundTask,
+  {
+    payload: OrchestrationRpcSchemas.messageBackgroundTask.input,
+    success: OrchestrationRpcSchemas.messageBackgroundTask.output,
+    error: Schema.Union([OrchestrationMessageBackgroundTaskError, AuthRpcError]),
+  },
+);
+
 export const WsOrchestrationGetTurnDiffRpc = Rpc.make(ORCHESTRATION_WS_METHODS.getTurnDiff, {
   payload: OrchestrationGetTurnDiffInput,
   success: OrchestrationRpcSchemas.getTurnDiff.output,
@@ -2456,14 +2702,14 @@ export const WsContextHandoffReadExportChunkRpc = Rpc.make(
 
 export const WsSubscribeTerminalEventsRpc = Rpc.make(WS_METHODS.subscribeTerminalEvents, {
   payload: TerminalSubscribeEventsInput,
-  success: TerminalEvent,
+  success: TerminalWireEvent,
   error: Schema.Union([AuthRpcError, TerminalSubscriptionResyncError]),
   stream: true,
 });
 
 export const WsSubscribeServerConfigRpc = Rpc.make(WS_METHODS.subscribeServerConfig, {
   payload: ServerSubscribeConfigInput,
-  success: ServerConfigStreamEvent,
+  success: ServerConfigStreamWireEvent,
   error: Schema.Union([KeybindingsConfigError, ServerSettingsError]),
   stream: true,
 });
@@ -2478,6 +2724,24 @@ export const WsAuthIssueLinkedDirectAccessRpc = Rpc.make(WS_METHODS.authIssueLin
   payload: AuthIssueLinkedDirectAccessInput,
   success: AuthLinkedDirectAccess,
   error: AuthRpcError,
+});
+
+export const WsPushRegisterDeviceRpc = Rpc.make(WS_METHODS.pushRegisterDevice, {
+  payload: PushRegisterDeviceInput,
+  success: PushDeviceStatus,
+  error: Schema.Union([PushRpcError, AuthRpcError]),
+});
+
+export const WsPushUnregisterDeviceRpc = Rpc.make(WS_METHODS.pushUnregisterDevice, {
+  payload: PushUnregisterDeviceInput,
+  success: PushUnregisterDeviceResult,
+  error: Schema.Union([PushRpcError, AuthRpcError]),
+});
+
+export const WsPushSetPresenceRpc = Rpc.make(WS_METHODS.pushSetPresence, {
+  payload: PushSetPresenceInput,
+  success: PushSetPresenceResult,
+  error: Schema.Union([PushRpcError, AuthRpcError]),
 });
 
 export const WsSubscribeAuthAccessRpc = Rpc.make(WS_METHODS.subscribeAuthAccess, {
@@ -2666,6 +2930,9 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsServerGetConfigRpc
   | typeof WsServerGetAdvertisedEndpointsRpc
   | typeof WsAuthIssueLinkedDirectAccessRpc
+  | typeof WsPushRegisterDeviceRpc
+  | typeof WsPushUnregisterDeviceRpc
+  | typeof WsPushSetPresenceRpc
   | typeof WsServerGetDiagnosticsMetricsRpc
   | typeof WsServerGetStatisticsRpc
   | typeof WsServerGetUsageSummaryRpc
@@ -2691,9 +2958,13 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsNotesCommandRpc
   | typeof WsServerGetDailyRecapRpc
   | typeof WsServerRefreshProvidersRpc
+  | typeof WsProviderSignInSubscribeRpc
+  | typeof WsProviderSignInStartRpc
+  | typeof WsProviderSignInRespondRpc
   | typeof WsProviderPrewarmSessionRpc
   | typeof WsProviderReadProjectCommandsRpc
   | typeof WsServerUpdateProviderRpc
+  | typeof WsServerNoteClientInteractionRpc
   | typeof WsServerSubscribeNodeUpdateRpc
   | typeof WsServerCheckNodeUpdateRpc
   | typeof WsServerUpdateNodeRpc
@@ -2725,6 +2996,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsSourceControlGetIssueRpc
   | typeof WsSourceControlSearchIssuesRpc
   | typeof WsSourceControlListChangeRequestsRpc
+  | typeof WsSourceControlListInvolvedChangeRequestsRpc
   | typeof WsSourceControlSearchChangeRequestsRpc
   | typeof WsSourceControlGetChangeRequestDetailRpc
   | typeof WsSourceControlGetChangeRequestFilesViewedRpc
@@ -2750,8 +3022,10 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsSourceControlUpdateChangeRequestCommentRpc
   | typeof WsSourceControlUpdateChangeRequestRpc
   | typeof WsSourceControlCreateChangeRequestRpc
+  | typeof WsSourceControlListChangeRequestTemplatesRpc
   | typeof WsSourceControlLinkWorktreePullRequestRpc
   | typeof WsSourceControlDismissWorktreePullRequestRpc
+  | typeof WsSourceControlSetPullRequestWatchRpc
   | typeof WsTextGenerationAskSideQuestionRpc
   | typeof WsTextGenerationCancelSideQuestionRpc
   | typeof WsTextGenerationGenerateIssueContentRpc
@@ -2776,10 +3050,13 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsWorkItemsTransitionRpc
   | typeof WsProjectsListEntriesRpc
   | typeof WsProjectsSearchEntriesRpc
+  | typeof WsProjectsSearchContentRpc
   | typeof WsProjectsReadFileRpc
   | typeof WsProjectsReadIconRpc
   | typeof WsProjectsReadFileBinaryRpc
+  | typeof WsProjectsReadFileChunkRpc
   | typeof WsProjectsWriteFileRpc
+  | typeof WsProjectsSubscribeFileChangesRpc
   | typeof WsProjectsStageFileReferenceRpc
   | typeof WsChatAttachmentsCreateFileUploadRpc
   | typeof WsChatAttachmentsReadChunkRpc
@@ -2806,6 +3083,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsVcsPullRpc
   | typeof WsVcsRefreshStatusRpc
   | typeof WsGitRunStackedActionRpc
+  | typeof WsGitResumeStackedActionRpc
+  | typeof WsGitCancelStackedActionRpc
   | typeof WsGitResolvePullRequestRpc
   | typeof WsGitPreparePullRequestThreadRpc
   | typeof WsStorageScanRpc
@@ -2825,9 +3104,12 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsLifecycleSummarizeChangesRpc
   | typeof WsThreadsSetManualBucketRpc
   | typeof WsThreadsForkRpc
+  | typeof WsThreadsForkCarriedRpc
+  | typeof WsThreadsSubscribeLocalServersRpc
+  | typeof WsThreadsStopLocalServerRpc
+  | typeof WsSecretsAnswerRequestRpc
   | typeof WsThreadsSetManualPositionRpc
   | typeof WsSearchThreadMessagesRpc
-  | typeof WsThreadPriorityEnsureCurrentRpc
   | typeof WsWorktreesSetManualPositionRpc
   | typeof WsProjectsInitializeGitRpc
   | typeof WsProjectsPromoteChatPreviewRpc
@@ -2857,6 +3139,10 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsSubscribeServerConfigRpc
   | typeof WsSubscribeServerLifecycleRpc
   | typeof WsSubscribeAuthAccessRpc
+  | typeof WsNodeBrowserReadRpc
+  | typeof WsNodeBrowserCommandRpc
+  | typeof WsNodeBrowserInputRpc
+  | typeof WsNodeBrowserSubscribeRpc
   | typeof WsAutomationCentreRpc
   | typeof WsAutomationCommandRpc
   | typeof WsAgentControlListProposalsRpc
@@ -2880,6 +3166,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsOrchestrationGetWorkflowScriptRpc
   | typeof WsOrchestrationGetTaskOutputRpc
   | typeof WsOrchestrationStopBackgroundTaskRpc
+  | typeof WsOrchestrationMessageBackgroundTaskRpc
   | typeof WsOrchestrationGetTurnDiffRpc
   | typeof WsOrchestrationGetFullThreadDiffRpc
   | typeof WsOrchestrationSearchThreadMessagesRpc
@@ -2906,6 +3193,9 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsServerGetConfigRpc,
   WsServerGetAdvertisedEndpointsRpc,
   WsAuthIssueLinkedDirectAccessRpc,
+  WsPushRegisterDeviceRpc,
+  WsPushUnregisterDeviceRpc,
+  WsPushSetPresenceRpc,
   WsServerGetDiagnosticsMetricsRpc,
   WsServerGetStatisticsRpc,
   WsServerGetUsageSummaryRpc,
@@ -2931,9 +3221,13 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsNotesCommandRpc,
   WsServerGetDailyRecapRpc,
   WsServerRefreshProvidersRpc,
+  WsProviderSignInSubscribeRpc,
+  WsProviderSignInStartRpc,
+  WsProviderSignInRespondRpc,
   WsProviderPrewarmSessionRpc,
   WsProviderReadProjectCommandsRpc,
   WsServerUpdateProviderRpc,
+  WsServerNoteClientInteractionRpc,
   WsServerSubscribeNodeUpdateRpc,
   WsServerCheckNodeUpdateRpc,
   WsServerUpdateNodeRpc,
@@ -2965,6 +3259,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsSourceControlGetIssueRpc,
   WsSourceControlSearchIssuesRpc,
   WsSourceControlListChangeRequestsRpc,
+  WsSourceControlListInvolvedChangeRequestsRpc,
   WsSourceControlSearchChangeRequestsRpc,
   WsSourceControlGetChangeRequestDetailRpc,
   WsSourceControlGetChangeRequestFilesViewedRpc,
@@ -2990,8 +3285,10 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsSourceControlUpdateChangeRequestCommentRpc,
   WsSourceControlUpdateChangeRequestRpc,
   WsSourceControlCreateChangeRequestRpc,
+  WsSourceControlListChangeRequestTemplatesRpc,
   WsSourceControlLinkWorktreePullRequestRpc,
   WsSourceControlDismissWorktreePullRequestRpc,
+  WsSourceControlSetPullRequestWatchRpc,
   WsTextGenerationAskSideQuestionRpc,
   WsTextGenerationCancelSideQuestionRpc,
   WsTextGenerationGenerateIssueContentRpc,
@@ -3016,10 +3313,13 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsWorkItemsTransitionRpc,
   WsProjectsListEntriesRpc,
   WsProjectsSearchEntriesRpc,
+  WsProjectsSearchContentRpc,
   WsProjectsReadFileRpc,
   WsProjectsReadIconRpc,
   WsProjectsReadFileBinaryRpc,
+  WsProjectsReadFileChunkRpc,
   WsProjectsWriteFileRpc,
+  WsProjectsSubscribeFileChangesRpc,
   WsProjectsStageFileReferenceRpc,
   WsChatAttachmentsCreateFileUploadRpc,
   WsChatAttachmentsReadChunkRpc,
@@ -3046,6 +3346,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsVcsPullRpc,
   WsVcsRefreshStatusRpc,
   WsGitRunStackedActionRpc,
+  WsGitResumeStackedActionRpc,
+  WsGitCancelStackedActionRpc,
   WsGitResolvePullRequestRpc,
   WsGitPreparePullRequestThreadRpc,
   WsStorageScanRpc,
@@ -3065,9 +3367,12 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsLifecycleSummarizeChangesRpc,
   WsThreadsSetManualBucketRpc,
   WsThreadsForkRpc,
+  WsThreadsForkCarriedRpc,
+  WsThreadsSubscribeLocalServersRpc,
+  WsThreadsStopLocalServerRpc,
+  WsSecretsAnswerRequestRpc,
   WsThreadsSetManualPositionRpc,
   WsSearchThreadMessagesRpc,
-  WsThreadPriorityEnsureCurrentRpc,
   WsWorktreesSetManualPositionRpc,
   WsProjectsInitializeGitRpc,
   WsProjectsPromoteChatPreviewRpc,
@@ -3097,6 +3402,10 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsSubscribeServerConfigRpc,
   WsSubscribeServerLifecycleRpc,
   WsSubscribeAuthAccessRpc,
+  WsNodeBrowserReadRpc,
+  WsNodeBrowserCommandRpc,
+  WsNodeBrowserInputRpc,
+  WsNodeBrowserSubscribeRpc,
   WsAutomationCentreRpc,
   WsAutomationCommandRpc,
   WsAgentControlListProposalsRpc,
@@ -3120,6 +3429,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsOrchestrationGetWorkflowScriptRpc,
   WsOrchestrationGetTaskOutputRpc,
   WsOrchestrationStopBackgroundTaskRpc,
+  WsOrchestrationMessageBackgroundTaskRpc,
   WsOrchestrationGetTurnDiffRpc,
   WsOrchestrationGetFullThreadDiffRpc,
   WsOrchestrationSearchThreadMessagesRpc,

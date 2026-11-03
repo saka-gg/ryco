@@ -14,6 +14,11 @@ const buildSourcemap = parseOptInSourcemapEnv(readEnv("RYCO_SERVER_SOURCEMAP"));
  * applies to them travel with the build. Native addons and provider SDKs stay
  * external (sharp, node-pty, @github/keytar, the agent SDKs), and nothing that
  * stays external may depend on these packages, or it would load a second copy.
+ *
+ * The OpenCode 2 client (`@opencode/*`, build-time dependencies) is bundled
+ * too: its protocol and schema packages depend on effect. The fetch-based
+ * promise client the 2.x facade imports needs neither and ships alone, in the
+ * lazy chunk that facade loads through `import()`.
  */
 const BUNDLED_RUNTIME_PACKAGES = [
   "effect",
@@ -21,6 +26,9 @@ const BUNDLED_RUNTIME_PACKAGES = [
   "@effect/platform-node-shared",
   "@effect/platform-bun",
   "@effect/sql-sqlite-bun",
+  "@opencode/client",
+  "@opencode/protocol",
+  "@opencode/schema",
   "mime",
 ];
 

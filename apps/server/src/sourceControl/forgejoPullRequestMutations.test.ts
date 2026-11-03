@@ -7,8 +7,6 @@ import {
   buildForgejoReviewSubmissionBody,
   encodeForgejoPathSegments,
   forgejoSubmitReviewResult,
-  forgejoWorkInProgressTitle,
-  hasForgejoWorkInProgressPrefix,
   isForgejoRepositoryFilePath,
   nextForgejoAssignees,
   resolveForgejoLabelIds,
@@ -113,18 +111,6 @@ describe("buildForgejoMergeBody", () => {
       head_commit_id: forgejoHeadSha,
     });
     expect(buildForgejoMergeBody({ mergeMethod: "squash" })).toEqual({ Do: "squash" });
-  });
-});
-
-describe("work-in-progress titles", () => {
-  it("adds and strips Forgejo's default prefixes", () => {
-    expect(forgejoWorkInProgressTitle("Add page", true)).toBe("WIP: Add page");
-    expect(forgejoWorkInProgressTitle("[WIP] Add page", true)).toBe("[WIP] Add page");
-    expect(forgejoWorkInProgressTitle("WIP: Add page", false)).toBe("Add page");
-    expect(forgejoWorkInProgressTitle("wip: [WIP] Add page", false)).toBe("Add page");
-    expect(forgejoWorkInProgressTitle("Add page", false)).toBe("Add page");
-    expect(hasForgejoWorkInProgressPrefix("[wip] x")).toBe(true);
-    expect(hasForgejoWorkInProgressPrefix("Wipe the cache")).toBe(false);
   });
 });
 

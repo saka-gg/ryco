@@ -34,6 +34,13 @@ export const AutomationCentreSnapshot = Schema.Struct({
   unavailableRecords: NonNegativeInt,
   /** This bounded view does not imply complete history. */
   historyLimit: PositiveInt,
+  /** The node lets the owner set `runPolicy: "run-without-asking"`; absent on older nodes. */
+  runWithoutAsking: Schema.optional(Schema.Literal(true)),
+  /**
+   * The node takes a schedule that runs into an existing chat (`execution.target`) from the
+   * owner's editor; absent on older nodes, which refuse the key.
+   */
+  heartbeats: Schema.optional(Schema.Literal(true)),
 });
 export type AutomationCentreSnapshot = typeof AutomationCentreSnapshot.Type;
 const commandScope = { projectId: ProjectId, requestId: AgentControlRequestId };

@@ -130,6 +130,34 @@ describe("device host routing", () => {
     }
   });
 
+  it("routes log reads to the local simulator by native udid and refuses SSH hosts", async () => {
+    const { backend, local, remote } = fixture();
+    const query = {
+      bundleId: "com.example.app",
+      sinceSeconds: 60,
+      level: "error",
+      limit: 10,
+    } as const;
+    try {
+      await backend.listDevices({ includeShutdown: true });
+      await backend.boot("FAKE-0001");
+      await expect(backend.readLogs("FAKE-0001", query)).resolves.toMatchObject({
+        bundleId: "com.example.app",
+      });
+      expect(local.callsOfKind("readLogs")).toEqual([
+        { kind: "readLogs", udid: "FAKE-0001", query },
+      ]);
+
+      await backend.boot(hostDeviceId("mac", "FAKE-0001"));
+      await expect(backend.readLogs(hostDeviceId("mac", "FAKE-0001"), query)).rejects.toThrow(
+        "Device logs are unavailable on SSH hosts.",
+      );
+      expect(remote.callsOfKind("readLogs")).toEqual([]);
+    } finally {
+      await backend.dispose();
+    }
+  });
+
   it("retains a cold incomplete orphan inventory and reclaims it after discovery completes", async () => {
     const { backend, local } = fixture();
     local.bootExternally("FAKE-0001");

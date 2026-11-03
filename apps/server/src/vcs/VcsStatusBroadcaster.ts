@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 
 import {
+  Cause,
   Clock,
   Context,
   Deferred,
@@ -9,6 +10,7 @@ import {
   Exit,
   Fiber,
   Layer,
+  Option,
   PubSub,
   Ref,
   Schedule,
@@ -25,6 +27,7 @@ import type {
   VcsStatusStreamEvent,
 } from "@ryco/contracts";
 import { mergeGitStatusParts } from "@ryco/shared/git";
+import { readSourceControlFailure } from "@ryco/shared/sourceControlFailure";
 
 import type { VcsRefSummary } from "../git/GitManager.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
@@ -179,6 +182,25 @@ export function remoteRefreshFailureDelay(
 }
 
 /**
+ * How long a remote refresh that failed because the forge is rate limiting
+ * waits for the pause to end (at most the failure backoff's cap); zero for
+ * other failures. The poll then asks a paused forge once per pause instead of
+ * on every backoff step, and every poll of the repository shares the answer
+ * the caches hold until then.
+ */
+export function remoteRefreshPauseDelay(
+  cause: Cause.Cause<unknown>,
+  nowMs: number,
+): Duration.Duration {
+  const failure = readSourceControlFailure(Option.getOrUndefined(Cause.findErrorOption(cause)));
+  if (failure?.reason !== "rate-limited" || failure.retryAt === null) return Duration.zero;
+  return Duration.min(
+    Duration.millis(Math.max(0, failure.retryAt - nowMs)),
+    VCS_STATUS_REFRESH_FAILURE_MAX_DELAY,
+  );
+}
+
+/**
  * The log window for a failed remote refresh retried after `nextDelay`. It
  * spans at least two retries: a window shorter than the backoff makes every
  * failure a new burst, logged in full with its cause.
@@ -326,6 +348,8 @@ export const layer = Layer.effect(
 
     const coalesceLocalStatus = yield* makeStatusSingleFlight<VcsStatusLocalResult>();
     const coalesceRemoteStatus = yield* makeStatusSingleFlight<VcsStatusRemoteResult | null>();
+    /** Folders whose next remote refresh must not let rows reuse an older fingerprint. */
+    const freshRemoteWanted = new Set<string>();
 
     const getCachedStatus = Effect.fn("VcsStatusBroadcaster.getCachedStatus")(function* (
       cwd: string,
@@ -497,6 +521,7 @@ export const layer = Layer.effect(
 
     const refreshRemoteStatus = Effect.fn("VcsStatusBroadcaster.refreshRemoteStatus")(function* (
       rawCwd: string,
+      options?: { readonly periodic?: boolean },
     ) {
       const cwd = normalizeCwd(rawCwd);
       // An explicit refresh or poll brings the remote-tracking refs up to date
@@ -510,12 +535,18 @@ export const layer = Layer.effect(
         Effect.catchCause(() => Effect.succeed(false)),
         Effect.forkIn(broadcasterScope, { startImmediately: true }),
       );
-      yield* Fiber.join(fetch);
+      const moved = yield* Fiber.join(fetch);
+      // Only a poll whose fetch found nothing new lets rows reuse an older fingerprint. Any
+      // other refresh (explicit, or a poll that saw a push from elsewhere) may end up sharing a
+      // poll's refresh that starts after it, so it hands its rule to the next one that runs.
+      const changed = options?.periodic !== true || moved;
+      if (changed) freshRemoteWanted.add(cwd);
       return yield* coalesceRemoteStatus(
         cwd,
         "refresh",
         Effect.gen(function* () {
-          yield* workflow.invalidateRemoteStatus(cwd);
+          const handedOver = freshRemoteWanted.delete(cwd);
+          yield* workflow.invalidateRemoteStatus(cwd, { periodic: !changed && !handedOver });
           const remote = yield* workflow.remoteStatus({ cwd });
           return yield* updateCachedRemoteStatus(cwd, remote, { publish: true });
         }),
@@ -567,7 +598,7 @@ export const layer = Layer.effect(
             return DEFAULT_VCS_STATUS_REFRESH_INTERVAL;
           }
 
-          const exit = yield* refreshRemoteStatus(cwd).pipe(Effect.exit);
+          const exit = yield* refreshRemoteStatus(cwd, { periodic: true }).pipe(Effect.exit);
           if (Exit.isSuccess(exit)) {
             yield* Ref.set(consecutiveFailuresRef, 0);
             return configuredInterval;
@@ -576,7 +607,10 @@ export const layer = Layer.effect(
           const consecutiveFailures = yield* Ref.updateAndGet(consecutiveFailuresRef, (count) =>
             Math.min(count + 1, MAX_REMOTE_REFRESH_CONSECUTIVE_FAILURES),
           );
-          const nextDelay = remoteRefreshFailureDelay(consecutiveFailures, configuredInterval);
+          const nextDelay = Duration.max(
+            remoteRefreshFailureDelay(consecutiveFailures, configuredInterval),
+            remoteRefreshPauseDelay(exit.cause, yield* Clock.currentTimeMillis),
+          );
           // Offline or signed out, every backoff step fails the same way.
           yield* logOnceEvery({
             key: `vcs.remoteStatusRefresh:${cwd}`,

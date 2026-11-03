@@ -57,6 +57,7 @@ function service(
     stop: async () => undefined,
     localIntroduction,
     nativeNodeClaim: stubNativeNodeClaimService(),
+    proveDirectRouteIdentity: async () => undefined,
     e2ee: stubE2eeOperator(),
   };
 }

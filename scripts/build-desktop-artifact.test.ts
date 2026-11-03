@@ -39,6 +39,8 @@ import {
   resolveElectronBuilderDebugEnv,
   resolveBuildOptions,
   resolveDesktopBuildIconAssets,
+  resolveDesktopBuildFlavor,
+  resolveDesktopNightlyIdentityMode,
   resolveDesktopProductName,
   resolveDesktopUpdateChannel,
   resolveDesktopWebAssetBrand,
@@ -398,6 +400,83 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         process.env.PATH = previousPath;
         rmSync(tempRoot, { recursive: true, force: true });
       }
+    }),
+  );
+
+  it("builds Ryco Nightly only for a nightly version packaged with the separate identity", () => {
+    assert.equal(resolveDesktopNightlyIdentityMode(undefined), "legacy");
+    assert.equal(resolveDesktopNightlyIdentityMode(" separate "), "separate");
+    assert.throws(() => resolveDesktopNightlyIdentityMode("beta"), /legacy" or "separate/);
+    assert.equal(resolveDesktopBuildFlavor("0.1.37", "separate"), "stable");
+    assert.equal(resolveDesktopBuildFlavor("0.1.38-nightly.20261101.4", "legacy"), "stable");
+    assert.equal(resolveDesktopBuildFlavor("0.1.38-nightly.20261101.4", "separate"), "nightly");
+    assert.equal(
+      resolveDesktopProductName("0.1.38-nightly.20261101.4", "separate"),
+      "Ryco Nightly",
+    );
+  });
+
+  it.effect("gives Ryco Nightly its own app id, name, Linux identity and flavor field", () =>
+    Effect.gen(function* () {
+      const nightly = "0.1.38-nightly.20261101.4";
+      for (const platform of ["mac", "linux", "win"] as const) {
+        const config = yield* createBuildConfig(
+          platform,
+          platform === "mac" ? "dmg" : platform === "linux" ? "AppImage" : "nsis",
+          nightly,
+          false,
+          false,
+          undefined,
+          undefined,
+          undefined,
+          "separate",
+        );
+        assert.equal(config.appId, "com.laurinfrank.ryco.nightly");
+        assert.equal(config.artifactName, "Ryco-Nightly-${version}-${arch}.${ext}");
+        assert.equal(config.productName, "Ryco Nightly");
+        assert.deepStrictEqual(config.extraMetadata, { rycoDesktopFlavor: "nightly" });
+        if (platform === "mac") {
+          // Never the stable `ryco://` scheme.
+          assert.deepStrictEqual(config.protocols, [
+            { name: "Ryco Hosted Authorization", schemes: ["ryco-preview"] },
+          ]);
+        }
+        if (platform === "linux") {
+          const linux = config.linux as { executableName: string; desktop: unknown };
+          assert.equal(linux.executableName, "ryco-nightly");
+          assert.deepStrictEqual(linux.desktop, { entry: { StartupWMClass: "ryco-nightly" } });
+        }
+      }
+
+      // The bridge release: a nightly version with the stable app's identity, as before the split.
+      const bridge = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        nightly,
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      assert.equal(bridge.appId, "com.laurinfrank.ryco");
+      assert.equal(bridge.productName, "Ryco (Nightly)");
+      assert.deepStrictEqual(bridge.extraMetadata, { rycoDesktopFlavor: "stable" });
+      assert.deepStrictEqual(bridge.protocols, [
+        { name: "Ryco Hosted Authorization", schemes: ["ryco-preview"] },
+      ]);
+
+      const stable = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "0.1.37",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      assert.equal(stable.appId, "com.laurinfrank.ryco");
+      assert.equal(stable.artifactName, "Ryco-${version}-${arch}.${ext}");
+      assert.deepStrictEqual(stable.extraMetadata, { rycoDesktopFlavor: "stable" });
     }),
   );
 

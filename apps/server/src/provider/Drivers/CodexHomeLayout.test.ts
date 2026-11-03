@@ -5,6 +5,7 @@ import { Effect, FileSystem, Path, Schema } from "effect";
 import { CodexSettings } from "@ryco/contracts";
 import {
   CodexShadowHomeError,
+  codexProcessEnvironment,
   materializeCodexShadowHome,
   resolveCodexHomeLayout,
 } from "./CodexHomeLayout.ts";
@@ -168,6 +169,70 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
       }),
     );
 
+    it.effect("keeps SQLite state out of the shadow home and removes links to it", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const sharedHome = yield* makeTempDir("ryco-codex-shared-");
+        const shadowRoot = yield* makeTempDir("ryco-codex-shadow-root-");
+        const shadowHome = path.join(shadowRoot, "shadow");
+        const sqliteEntries = [
+          "state_5.sqlite",
+          "state_5.sqlite-wal",
+          "state_5.sqlite-shm",
+          "goals_1.sqlite-journal",
+        ];
+
+        yield* writeTextFile(path.join(sharedHome, "config.toml"), 'model = "gpt-5-codex"\n');
+        for (const entryName of [...sqliteEntries, "logs_2.sqlite"]) {
+          yield* writeTextFile(path.join(sharedHome, entryName), "shared");
+        }
+        yield* writeTextFile(path.join(shadowHome, "auth.json"), '{"shadow":true}\n');
+        // Links an earlier release made, one of them to a sidecar that is gone by now.
+        yield* fileSystem.symlink(
+          path.join(sharedHome, "state_5.sqlite"),
+          path.join(shadowHome, "state_5.sqlite"),
+        );
+        yield* fileSystem.symlink(
+          path.join(sharedHome, "state_5.sqlite-wal"),
+          path.join(shadowHome, "state_5.sqlite-wal"),
+        );
+        yield* fileSystem.symlink(
+          path.join(sharedHome, "memories_1.sqlite-shm"),
+          path.join(shadowHome, "memories_1.sqlite-shm"),
+        );
+        // A database Codex created in the shadow home itself.
+        yield* writeTextFile(path.join(shadowHome, "logs_2.sqlite"), "shadow");
+
+        const layout = yield* resolveCodexHomeLayout(
+          decodeCodexSettings({
+            homePath: sharedHome,
+            shadowHomePath: shadowHome,
+          }),
+        );
+
+        yield* materializeCodexShadowHome(layout);
+
+        const shadowEntryNames = yield* fileSystem.readDirectory(shadowHome);
+        const configTarget = yield* fileSystem.readLink(path.join(shadowHome, "config.toml"));
+        const sqliteDirectoryTarget = yield* fileSystem.readLink(path.join(shadowHome, "sqlite"));
+        const shadowDatabase = yield* fileSystem.readFileString(
+          path.join(shadowHome, "logs_2.sqlite"),
+        );
+        const sharedDatabases = yield* Effect.forEach(sqliteEntries, (entryName) =>
+          fileSystem.readFileString(path.join(sharedHome, entryName)),
+        );
+
+        expect(shadowEntryNames.filter((entryName) => entryName.includes(".sqlite"))).toEqual([
+          "logs_2.sqlite",
+        ]);
+        expect(shadowDatabase).toBe("shadow");
+        expect(sharedDatabases).toEqual(sqliteEntries.map(() => "shared"));
+        expect(configTarget).toBe(path.join(sharedHome, "config.toml"));
+        expect(sqliteDirectoryTarget).toBe(path.join(sharedHome, "sqlite"));
+      }),
+    );
+
     it.effect("rejects shadow homes that point at the shared home", () =>
       Effect.gen(function* () {
         const sharedHome = yield* makeTempDir("ryco-codex-shared-");
@@ -203,6 +268,65 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
         const error = yield* materializeCodexShadowHome(layout).pipe(Effect.flip);
 
         expect(error.detail).toContain("already exists and is not a symlink");
+      }),
+    );
+  });
+
+  describe("codexProcessEnvironment", () => {
+    it.effect("points an auth overlay's SQLite state at the shared home", () =>
+      Effect.gen(function* () {
+        const baseEnv = { PATH: "/synthetic/bin" };
+        const layout = yield* resolveCodexHomeLayout(
+          decodeCodexSettings({
+            homePath: "/synthetic/shared",
+            shadowHomePath: "/synthetic/shadow",
+          }),
+          {},
+        );
+
+        expect(codexProcessEnvironment(layout, baseEnv)).toEqual({
+          PATH: "/synthetic/bin",
+          CODEX_HOME: "/synthetic/shadow",
+          CODEX_SQLITE_HOME: "/synthetic/shared",
+        });
+        expect(baseEnv).toEqual({ PATH: "/synthetic/bin" });
+      }),
+    );
+
+    it.effect("keeps a CODEX_SQLITE_HOME the environment already sets", () =>
+      Effect.gen(function* () {
+        const layout = yield* resolveCodexHomeLayout(
+          decodeCodexSettings({
+            homePath: "/synthetic/shared",
+            shadowHomePath: "/synthetic/shadow",
+          }),
+          {},
+        );
+
+        expect(codexProcessEnvironment(layout, { CODEX_SQLITE_HOME: "/synthetic/sqlite" })).toEqual(
+          {
+            CODEX_HOME: "/synthetic/shadow",
+            CODEX_SQLITE_HOME: "/synthetic/sqlite",
+          },
+        );
+      }),
+    );
+
+    it.effect("leaves SQLite state to Codex for a direct home", () =>
+      Effect.gen(function* () {
+        const explicit = yield* resolveCodexHomeLayout(
+          decodeCodexSettings({ homePath: "/synthetic/home" }),
+          {},
+        );
+        const defaultHome = yield* resolveCodexHomeLayout(decodeCodexSettings({}), {});
+
+        expect(codexProcessEnvironment(explicit, { PATH: "/synthetic/bin" })).toEqual({
+          PATH: "/synthetic/bin",
+          CODEX_HOME: "/synthetic/home",
+        });
+        expect(codexProcessEnvironment(defaultHome, { PATH: "/synthetic/bin" })).toEqual({
+          PATH: "/synthetic/bin",
+        });
       }),
     );
   });

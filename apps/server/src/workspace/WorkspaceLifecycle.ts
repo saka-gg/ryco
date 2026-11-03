@@ -3,7 +3,7 @@ import { makeManagedWorktreeMigration } from "./managedWorktreeMigration.ts";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 
-import { Context, Effect, Layer, Option, Semaphore } from "effect";
+import { Cause, Context, Effect, Layer, Option, Semaphore } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import {
   CommandId,
@@ -70,13 +70,27 @@ import {
   type ProviderSessionDirectoryShape,
 } from "../provider/Services/ProviderSessionDirectory.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../serverSettings.ts";
+import {
+  CheckoutMergeProver,
+  type CheckoutMergeProverShape,
+  describeMergeProof,
+  listingMergeProofReads,
+  type MergeProofReads,
+  reviewMergeProofReads,
+  workspacePullRequestLink,
+} from "../sourceControl/checkoutMergeProof.ts";
 import { TerminalManager, type TerminalManagerShape } from "../terminal/Services/Manager.ts";
 import { isTerminalAlive, isTerminalWorking } from "../terminal/terminalActivity.ts";
+import {
+  RestartSensitiveWork,
+  type RestartSensitiveWorkShape,
+} from "../updates/restartSensitiveWork.ts";
 import { GitVcsDriver, type GitVcsDriverShape } from "../vcs/GitVcsDriver.ts";
 import { type CheckoutFence, makeSqlCheckoutFence } from "./checkoutFence.ts";
 import {
   type CheckoutFacts,
   containsPath,
+  effectiveUnmerged,
   inspectCheckout,
   inspectProjectGitFacts,
   makeCheckoutInspectionCaches,
@@ -84,6 +98,7 @@ import {
   type ProjectGitFacts,
   samePath,
 } from "./checkoutInspection.ts";
+import { checkoutChangeBlockers, describeProtectedIgnored, plural } from "./checkoutStatus.ts";
 import { type DiskUsageCache, exclusiveDiskUsage, makeDiskUsageCache } from "./diskUsage.ts";
 import {
   WorkspaceAccessPolicy,
@@ -151,13 +166,28 @@ export interface WorkspaceLifecycleDeps {
   readonly gitDriver: GitVcsDriverShape;
   readonly git: Pick<
     GitWorkflowServiceShape,
-    "removeWorktree" | "createWorktree" | "listWorktreePaths" | "invalidateStatus"
+    | "removeWorktree"
+    | "createWorktree"
+    | "listLocalBranchNames"
+    | "listWorktreePaths"
+    | "invalidateStatus"
   >;
   readonly settings: Pick<ServerSettingsShape, "getSettings">;
   readonly fence: CheckoutFence;
   readonly diskUsage?: DiskUsageCache;
   readonly now?: () => number;
   readonly migration?: { readonly sql: SqlClient.SqlClient; readonly stateDir: string } | undefined;
+  /**
+   * Proves a branch the project HEAD lacks merged anyway (squash and rebase merges, the remote
+   * default branch), so its checkout can be removed and its branch deleted. Absent: only the
+   * project HEAD counts.
+   */
+  readonly mergeProof?: CheckoutMergeProverShape | undefined;
+  /**
+   * Counts an applied action while it runs (checkout removal, branch deletion, conversation
+   * changes), so an unattended restart waits for it. Absent: not counted.
+   */
+  readonly restartWork?: Pick<RestartSensitiveWorkShape, "track"> | undefined;
 }
 
 interface LoadedContext {
@@ -202,7 +232,6 @@ const statusKey = (status: CheckoutFacts["status"] | undefined) =>
       truncated: status.truncated,
     },
   );
-const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
 
 /**
  * A Trash row for clients. `projectKind` comes from the project record, also a deleted one, so a
@@ -262,22 +291,32 @@ const activeWorkBlocker = (state: BlockerState) =>
     ? `Associated work is still active: ${state.activeWork.join("; ")}.`
     : null;
 
+/**
+ * Forge reads a review of `request` may spend on a merge proof: only checkout removal (with
+ * the branch deletion and the Delete review that come with it) depends on the merge state.
+ * Other actions use what is already known, so archiving or restoring never waits on the forge.
+ */
+const reviewReadsFor = (request: Pick<WorkspaceLifecycleRequest, "action">) =>
+  request.action === "remove-checkout" ? reviewMergeProofReads() : null;
+
 /** The checkout is gone: recorded as removed, or found missing. */
 const checkoutGone = (state: BlockerState) =>
   state.worktree.checkoutRemovedAt != null || state.facts?.checkout === "missing";
 
-/** Why the checkout cannot be checked out again at its recorded path; empty when it can. */
+/**
+ * Why the checkout cannot be checked out again at its recorded path; empty when it can. A Git
+ * registration left at the missing path (storage cleanup keeps it) does not block: recreating
+ * replaces it, unless the driver's rule refuses to (a detached one; a locked one already fails
+ * the inspection).
+ */
 function recreateCheckoutBlockers(state: BlockerState): string[] {
   const { worktree, facts } = state;
   if (!facts) return [state.inspectionError ?? "The checkout could not be inspected."];
   const blockers: string[] = [];
   if (facts.checkout === "present") blockers.push("The checkout already exists.");
-  else if (facts.gitRegistered)
-    blockers.push(
-      "Git still registers this missing path. Run `git worktree prune` in the project, then retry.",
-    );
   if (facts.branchHead === null)
     blockers.push(`Branch ${worktree.branch} no longer exists; the checkout cannot be recreated.`);
+  if (facts.registrationRefusal !== null) blockers.push(facts.registrationRefusal);
   return blockers;
 }
 
@@ -358,26 +397,16 @@ export function workspaceActionBlockers(
           blockers.push("Git does not register this directory as a worktree of the project.");
         const status = facts.status;
         if (!status) blockers.push("The checkout status could not be read.");
-        else {
-          if (status.truncated)
-            blockers.push("The checkout has too many changes to verify safely.");
-          if (status.modified > 0)
-            blockers.push(`${plural(status.modified, "tracked file")} has uncommitted changes.`);
-          if (status.untracked > 0)
-            blockers.push(`${plural(status.untracked, "untracked file")} would be lost.`);
-          if (status.protectedIgnored.length > 0)
-            blockers.push(
-              `${plural(status.protectedIgnored.length, "ignored file")} that ${status.protectedIgnored.length === 1 ? "is" : "are"} not a known cache would be lost (${status.protectedIgnored.slice(0, 3).join(", ")}).`,
-            );
-        }
-        if (facts.unmerged !== false)
+        else blockers.push(...checkoutChangeBlockers(status));
+        const unmerged = effectiveUnmerged(facts);
+        if (unmerged !== false)
           blockers.push(
-            facts.unmerged === true
+            unmerged === true
               ? "The branch has commits that the project HEAD does not contain."
               : "The branch could not be verified as merged.",
           );
       }
-      if (request.deleteBranch && (facts.branchHead === null || facts.unmerged !== false))
+      if (request.deleteBranch && (facts.branchHead === null || effectiveUnmerged(facts) !== false))
         blockers.push("Only a verified merged branch can be deleted.");
       if (activeWork) blockers.push(activeWork);
       break;
@@ -459,6 +488,8 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
   const inspectWorkspace = (
     context: LoadedContext,
     worktree: OrchestrationWorktreeShell,
+    /** Forge reads for merge proofs (a listing shares one budget); null: only what is known. */
+    reads: MergeProofReads | null,
     projectFacts?: ProjectGitFacts,
     caches?: CheckoutInspectionCaches,
   ) =>
@@ -514,7 +545,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
         main || worktree.worktreePath === null
           ? { facts: null, inspectionError: null }
           : yield* inspectCheckout(
-              { policy: deps.policy, git: deps.gitDriver },
+              { policy: deps.policy, git: deps.gitDriver, mergeProof: deps.mergeProof },
               {
                 snapshot: context.placement,
                 project,
@@ -524,6 +555,8 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
                 operation: "workspace lifecycle inspection",
                 projectFacts,
                 caches,
+                pullRequest: workspacePullRequestLink(worktree),
+                mergeProofReads: reads,
               },
             ).pipe(
               Effect.match({
@@ -577,7 +610,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
       const project = context.placement.projects.find((p) => p.id === projectId);
       if (!project) return Effect.succeed(undefined);
       return inspectProjectGitFacts(
-        { policy: deps.policy, git: deps.gitDriver },
+        { policy: deps.policy, git: deps.gitDriver, mergeProof: deps.mergeProof },
         { project, operation: "workspace lifecycle inspection", withUnmergedBranches: true },
       ).pipe(Effect.orElseSucceed(() => undefined));
     });
@@ -604,7 +637,12 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
       checkout: state.checkout,
       gitRegistered: state.facts?.gitRegistered ?? null,
       branchExists: state.facts ? state.facts.branchHead !== null : null,
-      unmerged: state.facts?.unmerged ?? null,
+      unmerged: effectiveUnmerged(state.facts),
+      mergedBy: state.facts?.mergedBy
+        ? state.facts.mergedBy.kind === "pull-request"
+          ? { kind: "pull-request", pullRequestNumber: state.facts.mergedBy.number }
+          : { kind: "default-branch", ref: state.facts.mergedBy.ref }
+        : null,
       changes: status
         ? {
             modified: status.modified,
@@ -704,7 +742,8 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
       branch: state.worktree.branch,
       discard,
       trashConversationIds,
-      discardsWork: discard && (discardsFiles || (deleteBranch && state.facts?.unmerged !== false)),
+      discardsWork:
+        discard && (discardsFiles || (deleteBranch && effectiveUnmerged(state.facts) !== false)),
       // A record is provenance for its conversations, Trash included: only one no
       // conversation belongs to is deleted (the decider enforces the same rule).
       // Otherwise it stays hidden until the last of them is gone.
@@ -727,6 +766,8 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
       details.push(
         `Discards ${plural(effects.discardedRegenerableIgnored, "ignored cache/build directory")} that can be regenerated (${(state.facts?.status?.regenerableIgnored ?? []).slice(0, 3).join(", ")}).`,
       );
+    if (request.action === "remove-checkout" && state.facts?.mergedBy)
+      details.push(`The branch is ${describeMergeProof(state.facts.mergedBy)}.`);
     if (effects.stopSessionThreadIds.length > 0)
       details.push(
         `Stops ${plural(effects.stopSessionThreadIds.length, "provider session")} first; removal is cancelled if any fails to stop.`,
@@ -751,10 +792,13 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
     }
     if (request.action === "archive")
       details.push("Hides the workspace. Its directory, branch and conversations are untouched.");
-    if (effects.recreateCheckout)
+    if (effects.recreateCheckout) {
       details.push(
         `Checks out the existing branch ${state.worktree.branch} at ${state.worktree.worktreePath ?? "its recorded path"}.`,
       );
+      if (state.facts?.gitRegistered)
+        details.push("Git still registers this missing path; recreating replaces that entry.");
+    }
     if (request.action === "restore") {
       if (effects.restoreWorkspace) details.push("Shows the workspace again.");
       if (!effects.recreateCheckout && checkoutGone(state))
@@ -784,9 +828,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
       if (status.untracked > 0)
         details.push(`Deletes ${plural(status.untracked, "untracked file")}.`);
       if (status.protectedIgnored.length > 0)
-        details.push(
-          `Deletes ${plural(status.protectedIgnored.length, "ignored file")} that ${status.protectedIgnored.length === 1 ? "is" : "are"} not a known cache (${status.protectedIgnored.slice(0, 3).join(", ")}).`,
-        );
+        details.push(`Deletes ${describeProtectedIgnored(status.protectedIgnored)}.`);
       if (status.truncated)
         details.push("There are more changes than could be counted; all of them are discarded.");
     }
@@ -798,7 +840,9 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
       details.push(
         `Stops ${plural(effects.stopSessionThreadIds.length, "provider session")} first; nothing is removed if any fails to stop.`,
       );
-    const unmerged = state.facts?.unmerged !== false;
+    if (state.facts?.mergedBy)
+      details.push(`The branch is ${describeMergeProof(state.facts.mergedBy)}.`);
+    const unmerged = effectiveUnmerged(state.facts) !== false;
     details.push(
       effects.deleteBranch
         ? unmerged
@@ -858,10 +902,12 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
             checkout: facts.checkout,
             checkoutIdentity: facts.checkoutIdentity,
             gitRegistered: facts.gitRegistered,
+            registrationRefusal: facts.registrationRefusal,
             head: facts.head,
             branchHead: facts.branchHead,
             baseHead: facts.baseHead,
             unmerged: facts.unmerged,
+            mergedBy: facts.mergedBy,
             status: status && {
               modified: status.modified,
               untracked: status.untracked,
@@ -897,7 +943,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
     } satisfies WorkspaceLifecyclePreview;
   };
 
-  const loadState = (worktreeId: WorktreeId) =>
+  const loadState = (worktreeId: WorktreeId, reads: MergeProofReads | null) =>
     Effect.gen(function* () {
       const context = yield* loadContext({ worktreeId });
       const worktree = context.placement.worktrees.find(
@@ -909,7 +955,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
             "This workspace has no record. Groups derived from conversations cannot be changed.",
           ),
         );
-      return yield* inspectWorkspace(context, worktree);
+      return yield* inspectWorkspace(context, worktree, reads);
     });
 
   const dispatch = (command: OrchestrationCommand) =>
@@ -931,6 +977,9 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
       terminals: deps.terminals,
     }).pipe(Effect.asVoid);
 
+  const restartSensitive = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    deps.restartWork === undefined ? effect : deps.restartWork.track(effect);
+
   const execute = (
     rawRequest: WorkspaceLifecycleRequest,
     expectedFingerprint: string | null,
@@ -949,7 +998,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
           message: string,
         ): WorkspaceLifecycleResult => ({ outcome, message, steps: [...steps] });
 
-        const state = yield* loadState(rawRequest.worktreeId);
+        const state = yield* loadState(rawRequest.worktreeId, reviewReadsFor(rawRequest));
         const preview = buildPreview(state, rawRequest);
         const { request, effects } = preview;
         if (expectedFingerprint !== null && preview.fingerprint !== expectedFingerprint) {
@@ -974,17 +1023,25 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
         // Shared by Restore and Recreate checkout: check the existing branch out again at the
         // recorded path, then clear the removal and the archive from the record.
         const recreateCheckout = Effect.gen(function* () {
-          const path = state.worktree.worktreePath!;
           const created = yield* Effect.exit(
-            deps.git.createWorktree({
-              projectId: state.worktree.projectId,
-              cwd: projectRoot,
-              refName: state.worktree.branch,
-              path,
-            }),
+            // Loaded when a checkout is recreated: off the server's boot path.
+            Effect.promise(() => import("./checkoutRecreation.ts")).pipe(
+              Effect.flatMap(({ recreateRecordedCheckout }) =>
+                recreateRecordedCheckout(deps.git, {
+                  projectId: state.worktree.projectId,
+                  repositoryRoot: projectRoot,
+                  path: state.worktree.worktreePath!,
+                  branch: state.worktree.branch,
+                }),
+              ),
+              Effect.mapError((error) => error.detail),
+            ),
           );
           if (created._tag === "Failure") {
-            step("recreate-checkout", "failed", "Git could not recreate the checkout.");
+            // Git's reason, or the routine's (a deleted branch); nothing for a defect.
+            const detail = Cause.squash(created.cause);
+            const reason = typeof detail === "string" ? ` ${detail}` : "";
+            step("recreate-checkout", "failed", `Git could not recreate the checkout.${reason}`);
             return result("failed", "The checkout could not be recreated. Nothing was changed.");
           }
           step(
@@ -1133,7 +1190,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
               step("fence-checkout", "done", "New work in this checkout is refused.");
 
               // 3. Revalidate immediately before removal.
-              const fresh = yield* Effect.exit(loadState(worktreeId));
+              const fresh = yield* Effect.exit(loadState(worktreeId, reviewReadsFor(request)));
               const freshBlockers =
                 fresh._tag === "Success"
                   ? workspaceActionBlockers(fresh.value, request)
@@ -1313,7 +1370,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
                 branchFailed ? "failed" : "done",
                 branchFailed
                   ? `Branch ${state.worktree.branch} was kept (it moved or could not be deleted).`
-                  : `Deleted ${state.facts.unmerged === false ? "merged " : ""}branch ${state.worktree.branch}.`,
+                  : `Deleted ${effectiveUnmerged(state.facts) === false ? "merged " : ""}branch ${state.worktree.branch}.`,
               );
             }
             if (!effects.discard) {
@@ -1356,11 +1413,13 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
             return result("completed", preview.summary);
           }
         }
-      }),
+      }).pipe(restartSensitive),
     );
 
   const preview: WorkspaceLifecycleShape["preview"] = (request) =>
-    loadState(request.worktreeId).pipe(Effect.map((state) => buildPreview(state, request)));
+    loadState(request.worktreeId, reviewReadsFor(request)).pipe(
+      Effect.map((state) => buildPreview(state, request)),
+    );
 
   const migration = deps.migration
     ? makeManagedWorktreeMigration(deps, deps.migration.sql, deps.migration.stateDir, lockFor)
@@ -1379,9 +1438,11 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
         const projectFacts = worktrees.some((worktree) => worktree.worktreePath !== null)
           ? yield* projectFactsFor(context, projectId)
           : undefined;
+        // A few forge reads per listing prove squash-merged branches; answers are kept.
+        const reads = listingMergeProofReads();
         const states = yield* Effect.forEach(
           worktrees,
-          (worktree) => inspectWorkspace(context, worktree, projectFacts, listingCaches),
+          (worktree) => inspectWorkspace(context, worktree, reads, projectFacts, listingCaches),
           { concurrency: 4 },
         );
         return states.map(summarize);
@@ -1422,6 +1483,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
             yield* Effect.cached(projectFactsFor(context, projectId as ProjectId)),
           );
         }
+        const reads = listingMergeProofReads();
         const verified = yield* Effect.forEach(
           candidates,
           (candidate) =>
@@ -1436,6 +1498,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
               const state = yield* inspectWorkspace(
                 context,
                 worktree,
+                reads,
                 projectFacts,
                 listingCaches,
               ).pipe(Effect.orElseSucceed(() => null));
@@ -1556,6 +1619,9 @@ export const WorkspaceLifecycleLive = Layer.effect(
       settings: yield* ServerSettingsService,
       fence: makeSqlCheckoutFence(yield* SqlClient.SqlClient),
       migration: { sql: yield* SqlClient.SqlClient, stateDir: (yield* ServerConfig).stateDir },
+      mergeProof: yield* CheckoutMergeProver,
+      // Its branch deletion runs git directly, past the counted git workflow.
+      restartWork: yield* RestartSensitiveWork,
     });
   }),
 );

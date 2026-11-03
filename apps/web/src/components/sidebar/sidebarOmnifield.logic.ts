@@ -18,7 +18,6 @@ export const INBOX_STATUS_OPTIONS: ReadonlyArray<{
   readonly label: string;
 }> = [
   { value: "pinned", label: "Pinned" },
-  { value: "focus", label: "Focus" },
   { value: "active", label: "Active now" },
   { value: "needs-input", label: "Needs input" },
   { value: "recent", label: "Recent" },

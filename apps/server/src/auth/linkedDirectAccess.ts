@@ -49,6 +49,9 @@ export function accessLinkForRelayAuthority(
     enrollmentId: authority.trustSource === "account-enrolled" ? authority.enrollmentId : null,
     clientFingerprint: base64UrlEncode(authority.clientIdentityFingerprint),
     role: authority.role,
+    ...(authority.trustSource === "account-enrolled" && authority.accountId !== undefined
+      ? { accountId: authority.accountId }
+      : {}),
   };
 }
 
@@ -85,5 +88,8 @@ export const issueLinkedDirectAccess = (input: {
       endpoints,
       credential: issued.credential,
       expiresAt: issued.expiresAt,
+      ...(authority.nodeIdentityPublicKey === undefined
+        ? {}
+        : { nodeIdentityPublicKey: base64UrlEncode(authority.nodeIdentityPublicKey) }),
     } as const;
   });

@@ -34,6 +34,14 @@ export interface ClaudeCacheResumeContext {
   readonly workspaceCwd?: string | undefined;
 }
 
+/** The thread window a review reads: its newest activities hold the latest cache observation. */
+export const CLAUDE_CACHE_REVIEW_WINDOW_LIMITS = {
+  messages: 1,
+  activities: 40,
+  proposedPlans: 1,
+  checkpoints: 1,
+} as const;
+
 const decodeObservation = Schema.decodeUnknownOption(ClaudeCacheObservation);
 export function latestClaudeCacheObservation(
   activities: readonly OrchestrationThreadActivity[],

@@ -44,6 +44,43 @@ carry both callback and attempt identity. A late qualified settlement can comple
 a stopped runtime, but cannot cross into a newer runtime. Duplicate source request
 activities and settlements cannot reopen or overwrite the current callback.
 
+## Redirecting sends
+
+A message sent while approvals wait declines them and steers the turn
+(`packages/client-runtime/src/state/composer/approvalRedirect.ts`, shared by web and
+mobile). `resolveApprovalRedirect` is the one decision: the composer's placeholder and
+primary action and the send all read it. It is the send path's last step, so local
+commands, queued-message edits and refused drafts never touch approvals, and it only
+runs when the message can steer. A slash command never steers, so it queues and leaves
+the approvals on web and mobile alike. Approvals of an ended runtime are skipped, and
+while an approval is `submitting` or `uncertain` nothing is declined: the message follows
+the follow-up setting and the approvals stay.
+
+Responses and steers run on separate reactor lanes and adapters refuse a steer while an
+approval waits, so the client steers only after every decline left the pending list.
+Approvals the redirected turn opens meanwhile (the next tool of the same batch) are
+declined too, for up to 15 seconds. The draft stays, and nothing is sent, when an approval
+to decline appeared less than 750 ms before the send, when the node refuses a decline,
+when one ends `retryable` or `uncertain` or is still in flight after 15 seconds, when an
+approval of another turn arrives or the redirected turn asks again after those 15
+seconds, or when the draft changed meanwhile. If declines went through before that, the
+next send on the same turn steers whatever the setting says.
+
+## Steering providers without native steering
+
+Claude and Codex add a steer to the running turn. GitHub Copilot, OpenCode and Cursor cannot, so
+they report `turnSteeringMode: "interrupt-restart"` on their provider status (adapter capability
+`turnSteering: "interrupt-restart"`), and a steer stops the turn instead: `ProviderService` asks
+the adapter to interrupt it and defers the steer, so the message goes back to the follow-up queue
+and is sent as the next turn once the stopped turn settles. A node's own stop holds no queue (only
+a person's Stop does). The deferral carries `restartedTurn`, and the queue moves the message to its
+head, so it goes next even when other follow-ups were queued before it. If the turn cannot be
+stopped, the message stays queued. The composer says "Stop this turn and send this next", and a
+queued message's Steer button says the same on web and the phone. With the follow-up setting on
+Queue, Enter still waits for the turn to end; a message sent while approvals wait still redirects
+(above), which on these providers declines the approvals and then stops the turn. Older clients
+ignore the field and keep queueing; ACP registry agents keep queueing too (as in T3).
+
 ## Lifecycle integration boundary
 
 `apps/server/src/orchestration/approvalResponses.ts` owns `requireApprovalClaim`,

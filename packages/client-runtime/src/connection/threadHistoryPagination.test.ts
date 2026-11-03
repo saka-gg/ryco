@@ -7,7 +7,10 @@ import {
 } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { createThreadHistoryPaginationController } from "./threadHistoryPagination.ts";
+import {
+  createThreadHistoryPaginationController,
+  isThreadHistoryAnchorMissing,
+} from "./threadHistoryPagination.ts";
 
 const scope = {
   environmentId: EnvironmentId.make("environment-1"),
@@ -118,4 +121,54 @@ describe("thread history pagination", () => {
     expect(recoverStale).toHaveBeenCalledWith(scope);
     expect(setRequestState).not.toHaveBeenCalledWith(expect.objectContaining({ status: "error" }));
   });
+
+  it("tells a missing message from a load that failed", () => {
+    const historyError = (reason: string) => ({ _tag: "OrchestrationThreadHistoryError", reason });
+    expect(isThreadHistoryAnchorMissing(historyError("stale-cursor"))).toBe(true);
+    expect(isThreadHistoryAnchorMissing(historyError("thread-not-found"))).toBe(true);
+    expect(isThreadHistoryAnchorMissing(historyError("invalid-cursor"))).toBe(false);
+    expect(isThreadHistoryAnchorMissing(new Error("socket closed"))).toBe(false);
+    expect(
+      isThreadHistoryAnchorMissing({
+        _tag: "OrchestrationGetSnapshotError",
+        reason: "stale-cursor",
+      }),
+    ).toBe(false);
+    expect(isThreadHistoryAnchorMissing(undefined)).toBe(false);
+  });
+
+  it.each(["stale-cursor", "thread-not-found"])(
+    "reports a message that is gone (%s) instead of resnapshotting or failing the loader",
+    async (reason) => {
+      const recoverStale = vi.fn(async () => undefined);
+      const setRequestState = vi.fn();
+      const missingAnchor = { _tag: "OrchestrationThreadHistoryError", reason };
+      const controller = createThreadHistoryPaginationController({
+        request: vi.fn(async () => {
+          throw missingAnchor;
+        }),
+        apply: vi.fn(),
+        setRequestState,
+        recoverStale,
+      });
+      controller.beginSnapshot(scope);
+
+      // A reveal or quote jump settles on this rejection; a resnapshot resolved null instead.
+      await expect(
+        controller.loadAroundMessage({
+          scope,
+          anchorId: MessageId.make("message-deleted"),
+          limit: 101,
+        }),
+      ).rejects.toBe(missingAnchor);
+      expect(recoverStale).not.toHaveBeenCalled();
+      // Loading older messages did not fail, so the timeline shows no error.
+      expect(setRequestState).toHaveBeenLastCalledWith(
+        expect.objectContaining({ status: "idle", cursor: null, error: null }),
+      );
+      expect(setRequestState).not.toHaveBeenCalledWith(
+        expect.objectContaining({ status: "error" }),
+      );
+    },
+  );
 });

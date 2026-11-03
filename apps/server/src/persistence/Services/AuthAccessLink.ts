@@ -16,5 +16,7 @@ export const AuthAccessLink = Schema.Struct({
   /** Base64url `ryco.client-key.v1` fingerprint of the device's identity key. */
   clientFingerprint: Schema.String,
   role: Schema.Literals(["viewer", "operator", "owner"]),
+  /** The Hub account the linking grant named (`account-enrolled`); absent before nodes kept it. */
+  accountId: Schema.optionalKey(Schema.String),
 });
 export type AuthAccessLink = typeof AuthAccessLink.Type;

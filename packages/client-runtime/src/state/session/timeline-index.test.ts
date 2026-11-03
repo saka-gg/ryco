@@ -6,6 +6,10 @@ import type { ContextHandoffTimelineEntry } from "./contextHandoff.ts";
 import type { ForkOriginTimelineEntry } from "./forkOrigin.ts";
 import { deriveTimelineEntries, type WorkLogEntry } from "./session-logic.ts";
 import { createTimelineEntryIndex, type TimelineEntrySources } from "./timeline-index.ts";
+import {
+  userInputExchangeTimeline,
+  type UserInputExchangeTimelineEntry,
+} from "./userInputExchange.ts";
 
 function message(id: string, second: number, text = id): ChatMessage {
   return {
@@ -68,6 +72,7 @@ function emptySources(overrides: Partial<TimelineEntrySources> = {}): TimelineEn
     contextCompactionEntries: [],
     contextHandoffEntries: [],
     forkOriginEntries: [],
+    userInputExchangeEntries: [],
     ...overrides,
   };
 }
@@ -80,6 +85,7 @@ function oracle(sources: TimelineEntrySources) {
     [...sources.contextCompactionEntries],
     [...sources.contextHandoffEntries],
     [...sources.forkOriginEntries],
+    [...sources.userInputExchangeEntries],
   );
 }
 
@@ -203,6 +209,91 @@ describe("timeline entry index", () => {
       "own-2",
     ]);
     expect(index.inspect().mode).toBe("incremental");
+  });
+
+  it("places answered questions by time and keeps their entries across updates", () => {
+    const index = createTimelineEntryIndex();
+    const exchange: UserInputExchangeTimelineEntry = {
+      id: "user-input:answer-1",
+      activityId: "answer-1",
+      requestActivityId: "ask-1",
+      createdAt: "2026-08-12T00:00:02.000Z",
+      turnId: null,
+      cancelled: false,
+      questions: [],
+    };
+    let sources = emptySources({
+      messages: [message("message-1", 1), message("message-3", 3)],
+      // Same time as the exchange: the work row reads first, as in the oracle.
+      workEntries: [{ id: "work-2", createdAt: exchange.createdAt, label: "work", tone: "tool" }],
+      userInputExchangeEntries: [exchange],
+    });
+    const first = expectMatchesOracle(index, sources);
+    expect(first.map((entry) => entry.id)).toEqual([
+      "message-1",
+      "work-2",
+      "user-input:answer-1",
+      "message-3",
+    ]);
+    sources = { ...sources, messages: [...sources.messages, message("message-5", 5)] };
+    const next = expectMatchesOracle(index, sources);
+    expect(next[2]).toBe(first[2]);
+  });
+
+  it("replaces an exchange's request and resolution rows, which its entry carries", () => {
+    const index = createTimelineEntryIndex();
+    const row = (id: string, second: number): WorkLogEntry => ({
+      id,
+      createdAt: `2026-08-12T00:00:0${second}.000Z`,
+      label: id,
+      tone: "info",
+    });
+    const exchange: UserInputExchangeTimelineEntry = {
+      id: "user-input:answer-1",
+      activityId: "answer-1",
+      requestActivityId: "ask-1",
+      createdAt: "2026-08-12T00:00:03.000Z",
+      turnId: null,
+      cancelled: false,
+      questions: [],
+    };
+    // Without its exchange, a question keeps its bare rows.
+    let sources = emptySources({
+      workEntries: [row("tool-1", 1), row("ask-1", 2), row("answer-1", 3), row("tool-2", 4)],
+    });
+    expect(expectMatchesOracle(index, sources).map((entry) => entry.id)).toEqual([
+      "tool-1",
+      "ask-1",
+      "answer-1",
+      "tool-2",
+    ]);
+    sources = { ...sources, userInputExchangeEntries: [exchange] };
+    const withExchange = expectMatchesOracle(index, sources);
+    expect(withExchange.map((entry) => entry.id)).toEqual([
+      "tool-1",
+      "user-input:answer-1",
+      "tool-2",
+    ]);
+    const entry = withExchange[1];
+    expect(entry?.kind === "user-input-exchange" && entry.workEntries).toEqual([
+      sources.workEntries[1],
+      sources.workEntries[2],
+    ]);
+
+    // A streamed reply keeps the activity view model's arrays: the exchange work is reused.
+    const exchanges = userInputExchangeTimeline(
+      sources.workEntries,
+      sources.userInputExchangeEntries,
+    );
+    sources = { ...sources, messages: [message("message-5", 5)] };
+    expect(expectMatchesOracle(index, sources)[1]).toBe(entry);
+    expect(userInputExchangeTimeline(sources.workEntries, sources.userInputExchangeEntries)).toBe(
+      exchanges,
+    );
+    // New activities rebuild it.
+    expect(
+      userInputExchangeTimeline([...sources.workEntries], sources.userInputExchangeEntries),
+    ).not.toBe(exchanges);
   });
 
   it("reuses the result and unchanged entry references", () => {

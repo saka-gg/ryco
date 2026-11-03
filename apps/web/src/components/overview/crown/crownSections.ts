@@ -4,6 +4,7 @@ import {
   FileDiffIcon,
   FolderGit2Icon,
   GitPullRequestIcon,
+  GlobeIcon,
   NotebookPenIcon,
   RocketIcon,
   SparklesIcon,
@@ -23,6 +24,7 @@ export type CrownSection =
   | "checks"
   | "plan"
   | "agents"
+  | "servers"
   | "pr"
   | "notes"
   | "project";
@@ -66,6 +68,8 @@ export interface CrownRailItem {
   readonly requiresChat?: boolean;
   /** Shown only while the thread has a plan to show. */
   readonly requiresPlan?: boolean;
+  /** Shown only while the thread has servers running (`threads.subscribeLocalServers`). */
+  readonly requiresServers?: boolean;
 }
 
 export const CROWN_RAIL_ITEMS: ReadonlyArray<CrownRailItem> = [
@@ -109,6 +113,17 @@ export const CROWN_RAIL_ITEMS: ReadonlyArray<CrownRailItem> = [
     group: "status",
     requiresGit: false,
     requiresNotes: false,
+  },
+  {
+    key: "servers",
+    section: "servers",
+    label: "Servers",
+    icon: GlobeIcon,
+    glyph: "icon",
+    group: "status",
+    requiresGit: false,
+    requiresNotes: false,
+    requiresServers: true,
   },
   {
     key: "pr",
@@ -188,12 +203,15 @@ export function visibleCrownRailItems(input: {
   readonly chatAvailable?: boolean;
   /** The thread has a plan (steps, an explanation or a proposed plan). */
   readonly hasPlan?: boolean;
+  /** The thread has servers running. */
+  readonly hasServers?: boolean;
 }): ReadonlyArray<CrownRailItem> {
   return CROWN_RAIL_ITEMS.filter(
     (item) =>
       (!item.requiresGit || input.isGitRepo) &&
       (!item.requiresNotes || input.notesAvailable) &&
       (!item.requiresChat || input.chatAvailable === true) &&
-      (!item.requiresPlan || input.hasPlan === true),
+      (!item.requiresPlan || input.hasPlan === true) &&
+      (!item.requiresServers || input.hasServers === true),
   );
 }

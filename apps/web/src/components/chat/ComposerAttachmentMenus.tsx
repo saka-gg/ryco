@@ -9,34 +9,21 @@ import type {
   ServerProvider,
   SourceControlIssueSummary,
 } from "@ryco/contracts";
-import { useDebouncedValue } from "@tanstack/react-pacer";
 import { DateTime } from "effect";
 import { useCallback, useMemo } from "react";
 
 import type { ComposerTrigger } from "../../composer-logic";
 import { useComposerDraftStore, type DraftId } from "../../composerDraftStore";
-import {
-  canResolveProjectSearchEntriesLocally,
-  retryProjectSearchEntries,
-} from "~/rpc/projectAtoms";
-import { useProjectSearchEntries } from "~/rpc/useProject";
-import { useEnvironmentServerConfigSelector } from "~/hooks/useChatsAvailability";
+import { useWorkspacePathSearch } from "~/rpc/useProject";
 import {
   fetchSourceControlChangeRequestDetail,
   fetchSourceControlIssueDetail,
   useSourceControlChangeRequestList,
   useSourceControlIssueList,
 } from "~/rpc/useSourceControl";
-import { normalizeWorkspaceEntryQuery } from "@ryco/shared/workspaceEntrySearch";
 import { buildScopedSourceControlComposerItems } from "./composerSourceControlItems";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
-import {
-  type ComposerMenuEmptyState,
-  isRelatedPathQuery,
-  resolveComposerPathMenuEmptyState,
-  selectServerListsEmptyPathQuery,
-  shouldRequestComposerPathSearch,
-} from "./composerPathMenu";
+import { type ComposerMenuEmptyState, resolveComposerPathMenuEmptyState } from "./composerPathMenu";
 import { searchSlashCommandItems } from "./composerSlashCommandSearch";
 import { formatProviderSkillDisplayName } from "../../providerSkillPresentation";
 import { searchProviderSkills } from "../../providerSkillSearch";
@@ -45,8 +32,6 @@ import { randomUUID } from "~/lib/utils";
 import { toastManager } from "../ui/toast";
 import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommandMenu";
 
-const COMPOSER_PATH_QUERY_DEBOUNCE_MS = 120;
-const COMPOSER_PATH_SEARCH_LIMIT = 80;
 /** The `#` picker shows open issues and PRs from the shared superset list, sliced to this. */
 const COMPOSER_SOURCE_CONTROL_LIST_LIMIT = 50;
 const EMPTY_PROJECT_ENTRIES: ProjectEntry[] = [];
@@ -95,56 +80,19 @@ export function useComposerAttachmentMenus(
   const presentationTier = usePresentationTier();
   const composerTriggerKind = composerTrigger?.kind ?? null;
   const pathTriggerQuery = composerTrigger?.kind === "path" ? composerTrigger.query : "";
-  const isPathTrigger = composerTriggerKind === "path";
-  // Older servers reject an empty search query; until the server's live config
-  // says it lists the workspace for one, a bare `@` waits for the first
-  // typed character. A narrow selection: config pushes must not re-render the
-  // composer.
-  const listsBarePathTrigger = useEnvironmentServerConfigSelector(
-    environmentId,
-    selectServerListsEmptyPathQuery,
-  );
-  const [debouncedPathQuery, composerPathQueryDebouncer] = useDebouncedValue(
-    pathTriggerQuery,
-    { wait: COMPOSER_PATH_QUERY_DEBOUNCE_MS },
-    (debouncerState) => ({ isPending: debouncerState.isPending }),
-  );
-  // A bare `@` requests the top-level listing at once, which also warms the
-  // server's index while the user types. A query answerable from cached
-  // results (narrowing a complete prefix result) skips the debounce.
-  const resolvesPathQueryLocally =
-    isPathTrigger &&
-    pathTriggerQuery.length > 0 &&
-    canResolveProjectSearchEntriesLocally({
-      environmentId,
-      cwd: gitCwd,
-      query: pathTriggerQuery,
-      limit: COMPOSER_PATH_SEARCH_LIMIT,
-    });
-  const effectivePathQuery =
-    pathTriggerQuery.length === 0 || resolvesPathQueryLocally
-      ? pathTriggerQuery
-      : debouncedPathQuery;
-  const requestsPathSearch = shouldRequestComposerPathSearch({
-    isPathTrigger,
-    query: effectivePathQuery,
-    serverListsEmptyQuery: listsBarePathTrigger,
-  });
-  const workspaceEntriesQuery = useProjectSearchEntries({
+  const {
+    results: pathResults,
+    requestsSearch: requestsPathSearch,
+    isLoading: isPathSearchLoading,
+    hasResults: hasPathResults,
+    error: pathSearchError,
+    retry: retryPathSearch,
+  } = useWorkspacePathSearch({
     environmentId,
     cwd: gitCwd,
-    query: effectivePathQuery,
-    enabled: requestsPathSearch,
-    limit: COMPOSER_PATH_SEARCH_LIMIT,
+    query: pathTriggerQuery,
+    enabled: composerTriggerKind === "path",
   });
-  // Judged against what the user typed, not the debounced query: the bare
-  // listing must not stand in for a typed character while its search waits.
-  const pathResults = isRelatedPathQuery(
-    workspaceEntriesQuery.dataQuery,
-    normalizeWorkspaceEntryQuery(pathTriggerQuery),
-  )
-    ? workspaceEntriesQuery.data
-    : null;
   const workspaceEntries = pathResults?.entries ?? EMPTY_PROJECT_ENTRIES;
 
   const isSourceControlTrigger = composerTriggerKind === "source-control";
@@ -301,25 +249,11 @@ export function useComposerAttachmentMenus(
   ]);
 
   const isComposerMenuLoading =
-    (composerTriggerKind === "path" &&
-      ((pathTriggerQuery.length > 0 &&
-        !resolvesPathQueryLocally &&
-        composerPathQueryDebouncer.state.isPending) ||
-        (requestsPathSearch &&
-          (workspaceEntriesQuery.isLoading || workspaceEntriesQuery.isFetching)))) ||
+    isPathSearchLoading ||
     (composerTriggerKind === "source-control" &&
       (issueListQuery.isLoading || changeRequestListQuery.isLoading));
 
-  const pathSearchError = workspaceEntriesQuery.error;
   const pathResultsArePartial = pathResults?.partial === true;
-  const hasPathResults = workspaceEntriesQuery.data !== null;
-  const retryPathSearch = useCallback(() => {
-    retryProjectSearchEntries({
-      environmentId,
-      cwd: gitCwd,
-      limit: COMPOSER_PATH_SEARCH_LIMIT,
-    });
-  }, [environmentId, gitCwd]);
   const composerMenuEmptyState = useMemo<ComposerMenuEmptyState>(() => {
     if (composerTriggerKind === "skill") {
       return { text: "No skills found. Try / to browse provider commands." };

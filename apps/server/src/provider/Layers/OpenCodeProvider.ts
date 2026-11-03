@@ -18,7 +18,6 @@ import {
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
 import type { ServerProviderRateLimits } from "@ryco/contracts";
-import { probeOpenCodeGoUsageRateLimits } from "./OpenCodeGoUsage.ts";
 import {
   describeUnsupportedOpenCodeVersion,
   OPENCODE_UNKNOWN_CLI_VERSION_MESSAGE,
@@ -32,9 +31,16 @@ import {
 import type { Agent, ProviderListResponse } from "@opencode-ai/sdk/v2";
 
 const PROVIDER = ProviderDriverKind.make("opencode");
+/**
+ * Shown while Ryco runs a local OpenCode 2: starting it (as running `opencode` does) converts the
+ * shared OpenCode data, so the user learns it where they configured the binary.
+ */
+export const OPENCODE_V2_LOCAL_DATA_NOTE =
+  "OpenCode 2 converts the shared OpenCode database to its own format when it first starts. Don't run OpenCode 1.x alongside it on the same data.";
 const OPENCODE_PRESENTATION = {
   displayName: "OpenCode",
   showInteractionModeToggle: false,
+  turnSteeringMode: "interrupt-restart",
 } as const;
 class OpenCodeProbeError extends Data.TaggedError("OpenCodeProbeError")<{
   readonly cause: unknown;
@@ -98,6 +104,7 @@ function formatOpenCodeProbeError(input: {
     }
 
     if (
+      lower.includes("couldn't reach the opencode server") ||
       lower.includes("econnrefused") ||
       lower.includes("enotfound") ||
       lower.includes("fetch failed") ||
@@ -352,10 +359,11 @@ export const makePendingOpenCodeProvider = (
 export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatus")(function* (
   openCodeSettings: OpenCodeSettings,
   cwd: string,
-  environment: NodeJS.ProcessEnv = process.env,
+  environment: NodeJS.ProcessEnv,
+  // The instance's Go usage read (`OpenCodeDriver` passes its gated one).
   probeUsage: (
     probeEnvironment: NodeJS.ProcessEnv,
-  ) => Effect.Effect<ServerProviderRateLimits | undefined> = probeOpenCodeGoUsageRateLimits,
+  ) => Effect.Effect<ServerProviderRateLimits | undefined>,
 ): Effect.fn.Return<ServerProviderDraft, never, OpenCodeRuntime> {
   const openCodeRuntime = yield* OpenCodeRuntime;
   const checkedAt = new Date().toISOString();
@@ -434,9 +442,9 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
     if (!version) {
       return fallback(new Error(OPENCODE_UNKNOWN_CLI_VERSION_MESSAGE), null);
     }
-    // Gate before connecting: a 2.x binary must never be started as a server (it converts the
-    // shared OpenCode database in place). Built directly, so formatOpenCodeProbeError never
-    // rewrites the message.
+    // Gate before connecting: an OpenCode this build cannot run must never be started as a server
+    // (a 2.x converts the shared OpenCode database when it starts). Built directly, so
+    // formatOpenCodeProbeError never rewrites the message.
     const versionProblem = describeUnsupportedOpenCodeVersion(version, "binary");
     if (versionProblem !== null) {
       return buildServerProvider({
@@ -505,7 +513,7 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
                 new OpenCodeProbeError({ cause, detail: openCodeRuntimeErrorDetail(cause) }),
             ),
           );
-        return { inventory, serverVersion };
+        return { inventory, serverVersion, v2: client.generation === "v2" };
       }),
     ),
   );
@@ -521,6 +529,8 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
     DEFAULT_OPENCODE_MODEL_CAPABILITIES,
   );
   const connectedCount = new Set(inventoryExit.value.inventory.providerList.connected).size;
+  const dataNote =
+    inventoryExit.value.v2 && !isExternalServer ? ` ${OPENCODE_V2_LOCAL_DATA_NOTE}` : "";
   // Account-level Go usage limits; degrades to `undefined` without a Go key.
   const rateLimits = yield* probeUsage(environment).pipe(Effect.orElseSucceed(() => undefined));
   return buildServerProvider({
@@ -537,12 +547,13 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
         status: connectedCount > 0 ? "authenticated" : "unknown",
         type: "opencode",
       },
-      message:
+      message: `${
         connectedCount > 0
           ? `${connectedCount} upstream provider${connectedCount === 1 ? "" : "s"} connected through ${isExternalServer ? "the configured OpenCode server" : "OpenCode"}.`
           : isExternalServer
             ? "Connected to the configured OpenCode server, but it did not report any connected upstream providers."
-            : "OpenCode is available, but it did not report any connected upstream providers.",
+            : "OpenCode is available, but it did not report any connected upstream providers."
+      }${dataNote}`,
     },
   });
 });

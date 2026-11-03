@@ -12,6 +12,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
+import * as Struct from "effect/Struct";
 import {
   EnvironmentId,
   TrimmedNonEmptyString,
@@ -80,20 +81,36 @@ export const SourceControlRefreshMode = Schema.Literals(["automatic", "reduced",
 export type SourceControlRefreshMode = typeof SourceControlRefreshMode.Type;
 export const DEFAULT_SOURCE_CONTROL_REFRESH_MODE: SourceControlRefreshMode = "automatic";
 
-export const AiFocusRefreshIntervalMs = Schema.Literals([
-  0, 300_000, 600_000, 1_800_000, 3_600_000, 21_600_000, 86_400_000,
-]);
-export type AiFocusRefreshIntervalMs = typeof AiFocusRefreshIntervalMs.Type;
-export const DEFAULT_AI_FOCUS_REFRESH_INTERVAL_MS: AiFocusRefreshIntervalMs = 600_000;
-
 /**
  * What Enter does with a message sent while a turn runs: `queue` waits for the turn to finish,
  * `steer` adds it to the running turn when the provider supports steering. Mod+Enter does the
- * opposite.
+ * opposite, or Mod+Shift+Enter when the Send shortcut uses Mod+Enter (`SendShortcut`).
  */
 export const FollowUpBehavior = Schema.Literals(["queue", "steer"]);
 export type FollowUpBehavior = typeof FollowUpBehavior.Type;
 export const DEFAULT_FOLLOW_UP_BEHAVIOR: FollowUpBehavior = "queue";
+
+/**
+ * When Enter sends from web and desktop prompt inputs: `enter` always, `mod-enter-multiline` only
+ * while the prompt is one line (Mod+Enter sends a multiline prompt), `mod-enter` never (Mod+Enter
+ * sends). Under either Mod+Enter option the follow-up inversion is Mod+Shift+Enter.
+ */
+export const SendShortcut = Schema.Literals(["enter", "mod-enter-multiline", "mod-enter"]);
+export type SendShortcut = typeof SendShortcut.Type;
+export const DEFAULT_SEND_SHORTCUT: SendShortcut = "enter";
+
+/**
+ * Where a plain click on a pull request link in chat opens: `ryco` on the Pull requests page when
+ * the repository is one of the client's projects, `browser` always on the host.
+ */
+export const ChangeRequestLinkTarget = Schema.Literals(["ryco", "browser"]);
+export type ChangeRequestLinkTarget = typeof ChangeRequestLinkTarget.Type;
+export const DEFAULT_CHANGE_REQUEST_LINK_TARGET: ChangeRequestLinkTarget = "ryco";
+
+/** How wide the chat timeline and composer grow on large screens. */
+export const ChatWidth = Schema.Literals(["comfortable", "wide", "full"]);
+export type ChatWidth = typeof ChatWidth.Type;
+export const DEFAULT_CHAT_WIDTH: ChatWidth = "comfortable";
 
 /** Missing effort is a legacy model-only preset; provider remains the stable instance id. */
 export const ModelFavorite = Schema.Struct({
@@ -106,10 +123,6 @@ export type ModelFavorite = typeof ModelFavorite.Type;
 export const ClientSettingsSchema = Schema.Struct({
   // Local lifecycle metadata. Optional so restoring default preferences preserves it.
   localOnboardingCompletedEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
-  aiFocusEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
-  aiFocusRefreshIntervalMs: AiFocusRefreshIntervalMs.pipe(
-    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AI_FOCUS_REFRESH_INTERVAL_MS)),
-  ),
   confirmThreadArchive: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   confirmThreadDelete: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   confirmThreadUnpin: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
@@ -118,9 +131,22 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   diffIgnoreWhitespace: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   diffWordWrap: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  changeRequestLinkTarget: ChangeRequestLinkTarget.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CHANGE_REQUEST_LINK_TARGET)),
+  ),
   followUpBehavior: FollowUpBehavior.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_FOLLOW_UP_BEHAVIOR)),
   ),
+  sendShortcut: SendShortcut.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SEND_SHORTCUT)),
+  ),
+  // The review before a send resumes a large, idle Claude conversation. Off ("Don't ask
+  // again") sends from this device continue with full context, unreviewed; the node's
+  // restart continuation still leaves such threads for a person to resume.
+  claudeResumeReview: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  chatWidth: ChatWidth.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_CHAT_WIDTH))),
+  // Desktop and web: open chats as closable, reorderable tabs in the chat header.
+  openChatTabs: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   // Model favorites. Historically keyed by provider kind, now
   // widened to `ProviderInstanceId` so users can favorite a specific model
   // on a custom provider instance (e.g. "Codex Personal · gpt-5") without
@@ -170,11 +196,17 @@ export const ClientSettingsSchema = Schema.Struct({
   sourceControlRefreshMode: SourceControlRefreshMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SOURCE_CONTROL_REFRESH_MODE)),
   ),
-  // Desktop-only: post a native notification when an agent turn completes while
-  // the Ryco window is unfocused. No-op in the browser (no desktop bridge).
+  // The "Notifications" half of the thread alert mode: a system notification on
+  // desktop or in the browser when a thread on any connected machine finishes,
+  // fails or needs you while Ryco is in the background. The name predates that
+  // scope and stays for storage stability; older builds read the same switch.
   notifyOnTurnCompleteWhenUnfocused: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(true)),
   ),
+  // The "Sound" half of the thread alert mode.
+  threadNotificationSound: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // In-app "Open thread" toasts for other threads while Ryco is in front.
+  threadNotificationToasts: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
 });
 export type ClientSettings = typeof ClientSettingsSchema.Type;
 
@@ -184,6 +216,16 @@ export const DEFAULT_CLIENT_SETTINGS: ClientSettings = Schema.decodeSync(ClientS
 
 export const ThreadEnvMode = Schema.Literals(["local", "worktree"]);
 export type ThreadEnvMode = typeof ThreadEnvMode.Type;
+
+/**
+ * How the node delivers assistant text while a message streams:
+ * - `turn`: the whole message once it completes or the turn pauses for the user.
+ * - `paragraph`: each finished paragraph or closed code block, at most every 400 ms.
+ * - `token`: every provider delta. Legacy, kept for compatibility.
+ */
+export const ResponseStreamingMode = Schema.Literals(["turn", "paragraph", "token"]);
+export type ResponseStreamingMode = typeof ResponseStreamingMode.Type;
+export const DEFAULT_RESPONSE_STREAMING_MODE: ResponseStreamingMode = "paragraph";
 
 const makeBinaryPathSetting = (fallback: string) =>
   TrimmedString.pipe(
@@ -197,13 +239,32 @@ const makeBinaryPathSetting = (fallback: string) =>
     Schema.withDecodingDefault(Effect.succeed(fallback)),
   );
 
-export type ProviderSettingsFormControl = "text" | "password" | "textarea" | "switch";
+/**
+ * A text setting whose value its reader parses, and ignores when unusable. A JSON number or
+ * boolean written by hand decodes as its text and null as empty, so no scalar fails the decode.
+ */
+const makeLenientTextSetting = (fallback: string) =>
+  Schema.Union([Schema.String, Schema.Number, Schema.Boolean, Schema.Null]).pipe(
+    Schema.decodeTo(
+      Schema.String,
+      SchemaTransformation.transformEffect({
+        decode: (value) => Effect.succeed(value === null ? "" : String(value).trim()),
+        encode: (value) => Effect.succeed(value),
+      }),
+    ),
+    Schema.withDecodingDefault(Effect.succeed(fallback)),
+  );
+
+export type ProviderSettingsFormControl = "text" | "password" | "textarea" | "switch" | "select";
 
 export interface ProviderSettingsFormAnnotation {
   readonly control?: ProviderSettingsFormControl | undefined;
   readonly placeholder?: string | undefined;
   readonly hidden?: boolean | undefined;
+  /** `omit` drops the key when the value is empty (or, for a switch or select, its default). */
   readonly clearWhenEmpty?: "omit" | "persist" | undefined;
+  /** The choices of a `select`. */
+  readonly options?: ReadonlyArray<{ readonly value: string; readonly label: string }> | undefined;
 }
 
 export interface ProviderSettingsFormSchemaAnnotation {
@@ -322,9 +383,31 @@ export const ClaudeSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    // Text, not literals: a value this node does not know (or a typo) falls back to the
+    // default instead of failing the instance's decode (`@ryco/shared/claudeAutoCompact`).
+    // The form drops either key at its default (`clearWhenEmpty` defaults to `omit`).
+    autoCompact: makeLenientTextSetting("ryco").pipe(
+      Schema.annotateKey({
+        title: "Automatic compaction",
+        providerSettingsForm: {
+          control: "select",
+          options: [
+            { value: "ryco", label: "At 80% between turns (Ryco)" },
+            { value: "claudeCode", label: "When Claude Code decides" },
+          ],
+        },
+      }),
+    ),
+    autoCompactWindow: makeLenientTextSetting("").pipe(
+      Schema.annotateKey({
+        title: "Compact within (tokens)",
+        description:
+          "100,000 to 1,000,000. Compaction treats the context window as this size. Empty uses the model's window.",
+      }),
+    ),
   },
   {
-    order: ["binaryPath", "homePath", "launchArgs"],
+    order: ["binaryPath", "homePath", "autoCompact", "autoCompactWindow", "launchArgs"],
   },
 );
 export type ClaudeSettings = typeof ClaudeSettings.Type;
@@ -520,22 +603,59 @@ export type ObservabilitySettings = typeof ObservabilitySettings.Type;
  * closed. The struct exists (rather than a bare boolean) so later slices can
  * add non-secret operational limits without a settings migration.
  */
+/** The deepest a delegation limit can allow: a chat, its tasks, and nine more levels below. */
+export const AGENT_CONTROL_DELEGATION_MAX_DEPTH_LIMIT = 10;
+/** The largest per-tree task budget a person can set. */
+export const AGENT_CONTROL_DELEGATION_MAX_TASKS_LIMIT = 1_000;
+
+const DelegationMaxDepth = Schema.Int.check(
+  Schema.isBetween({ minimum: 1, maximum: AGENT_CONTROL_DELEGATION_MAX_DEPTH_LIMIT }),
+);
+const DelegationMaxTasks = Schema.Int.check(
+  Schema.isBetween({ minimum: 1, maximum: AGENT_CONTROL_DELEGATION_MAX_TASKS_LIMIT }),
+);
+
+/**
+ * Opt-in limits on agents delegating to agents (`ryco_create_threads` and
+ * `ryco_start_local_task_chat`). A delegation tree starts at a chat that was not delegated
+ * itself; its tasks are depth 1, their tasks depth 2, and so on. `null` is no limit.
+ *
+ * - `maxDepth`: the deepest a task may sit. A chat at that depth gets no delegation tools.
+ * - `maxTasksPerTree`: how many tasks one tree may create in all, counting finished and archived
+ *   ones; a task the person deletes no longer counts.
+ */
+export const AgentControlDelegationLimits = Schema.Struct({
+  maxDepth: Schema.NullOr(DelegationMaxDepth).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  maxTasksPerTree: Schema.NullOr(DelegationMaxTasks).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+});
+export type AgentControlDelegationLimits = typeof AgentControlDelegationLimits.Type;
+
 export const AgentControlSettings = Schema.Struct({
   enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  delegation: AgentControlDelegationLimits.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 });
 export type AgentControlSettings = typeof AgentControlSettings.Type;
 
 export const DEFAULT_WORKTREE_BRANCH_PREFIX = "ryco";
 
+/**
+ * Git's rules for a branch name or ref path (`git check-ref-format`): no `..`, `@{`, `:`, spaces
+ * or other special characters, no leading `-` or `/`, no `.lock` components. Also matches "".
+ */
+export const GIT_REF_NAME_PATTERN =
+  // Git refs cannot contain ASCII controls, including DEL. `s`: the lookaheads see past
+  // U+2028/U+2029, which the body accepts.
+  // eslint-disable-next-line no-control-regex
+  /^(?:$|(?![-/])(?!.*(?:\.\.|@\{|[\x00-\x20\x7f~^:?*[\\]))(?!.*(?:^|\/)\.)(?!.*\.lock(?:\/|$))(?!.*\/\/)(?!.*[/.]$)[^]+)$/s;
+
 /** A Git branch namespace without a trailing slash; empty disables the namespace. */
 export const WorktreeBranchPrefix = TrimmedString.check(
   Schema.isMaxLength(128),
-  Schema.isPattern(
-    // Git refs cannot contain ASCII controls, including DEL. `s`: the lookaheads see past
-    // U+2028/U+2029, which the body accepts.
-    // eslint-disable-next-line no-control-regex
-    /^(?:$|(?![-/])(?!.*(?:\.\.|@\{|[\x00-\x20\x7f~^:?*[\\]))(?!.*(?:^|\/)\.)(?!.*\.lock(?:\/|$))(?!.*\/\/)(?!.*[/.]$)[^]+)$/s,
-  ),
+  Schema.isPattern(GIT_REF_NAME_PATTERN),
 );
 
 /** Server-local filesystem input; platform and filesystem validation belongs to the server. */
@@ -543,6 +663,13 @@ export const WorktreeRoot = TrimmedString.check(Schema.isMaxLength(4096));
 
 /** Free-form guidance appended to a generated Git text prompt. Empty adds nothing. */
 export const GitWritingInstructions = TrimmedString.check(Schema.isMaxLength(4_000));
+
+/**
+ * How generated commit messages and pull request text are written: like the repository's
+ * recent history, as Conventional Commits, or in Ryco's standard style.
+ */
+export const GitWritingStyle = Schema.Literals(["default", "repository", "conventional"]);
+export type GitWritingStyle = typeof GitWritingStyle.Type;
 
 /** Initialization applies only to newly created Git worktree checkouts. */
 export const WorktreeSubmodules = Schema.Literals(["recursive", "top-level", "none"]);
@@ -580,21 +707,68 @@ export const InitialModelSelection = ModelSelection.check(
   }),
 );
 
+/** Overrides every node with project preferences reports in its effective preferences. */
+const REPORTED_PROJECT_PREFERENCE_VALUES = {
+  defaultThreadEnvMode: ThreadEnvMode,
+  worktreeBranchPrefix: WorktreeBranchPrefix,
+  runSetupScript: Schema.Boolean,
+};
+/**
+ * Overrides added since: an older node's effective preferences omit them, so they are optional
+ * in {@link EffectiveProjectPreferences} and a client hides their rows. New keys go here.
+ */
+const ADDED_PROJECT_PREFERENCE_VALUES = {
+  worktreeBranchChangeTypes: Schema.Boolean,
+  pullRequestTemplates: Schema.Boolean,
+};
+/**
+ * The whole opt-in for project overrides. Each key is the node setting of the same name, with
+ * its plain value schema; a project may set it for itself and otherwise inherits the node's
+ * value. The stored overrides, their patch, the compare-and-set values and the effective
+ * preferences derive from this list, so a key added here reaches every one of them.
+ * Deliberately bounded to creation preferences, never execution authority: no runtime or
+ * interaction mode, approvals, providers, scripts, environment variables or paths.
+ */
+export const PROJECT_PREFERENCE_VALUES = Schema.Struct({
+  ...REPORTED_PROJECT_PREFERENCE_VALUES,
+  ...ADDED_PROJECT_PREFERENCE_VALUES,
+});
+/** A project override that inherits the node setting of the same name. */
+export type ProjectPreferenceValueKey = keyof typeof PROJECT_PREFERENCE_VALUES.fields;
+export const PROJECT_PREFERENCE_VALUE_KEYS = Object.keys(
+  PROJECT_PREFERENCE_VALUES.fields,
+) as ReadonlyArray<ProjectPreferenceValueKey>;
+/**
+ * The overrides an older node's effective preferences omit: a client shows their rows only once
+ * a node's reply has them.
+ */
+export const PROJECT_PREFERENCE_ADDED_KEYS = Object.keys(
+  ADDED_PROJECT_PREFERENCE_VALUES,
+) as ReadonlyArray<ProjectPreferenceValueKey>;
+/**
+ * Every project preference. The initial model is the one special key: null masks a model saved
+ * on the project before project defaults existed, and without a node default it falls back to
+ * Ryco's built-in model.
+ */
+export type ProjectPreferenceKey = "initialModelSelection" | ProjectPreferenceValueKey;
+
+const ProjectInitialModelSelection = Schema.optionalKey(Schema.NullOr(InitialModelSelection));
+
 /** Deliberately bounded: these are creation preferences, never execution authority. */
 export const ProjectPreferences = Schema.Struct({
-  initialModelSelection: Schema.optionalKey(Schema.NullOr(InitialModelSelection)),
-  defaultThreadEnvMode: Schema.optionalKey(ThreadEnvMode),
-  worktreeBranchPrefix: Schema.optionalKey(WorktreeBranchPrefix),
-  runSetupScript: Schema.optionalKey(Schema.Boolean),
+  initialModelSelection: ProjectInitialModelSelection,
+  ...Struct.map(PROJECT_PREFERENCE_VALUES.fields, Schema.optionalKey),
 });
 export type ProjectPreferences = typeof ProjectPreferences.Type;
+/** {@link ProjectPreferenceKey} in order: the initial model, then the registry. */
+export const PROJECT_PREFERENCE_KEYS = /* @__PURE__ */ Object.keys(
+  ProjectPreferences.fields,
+) as ReadonlyArray<ProjectPreferenceKey>;
 
 /** Null resets a single field to inheritance. Model null also masks a legacy project preset. */
 export const ProjectPreferencesPatch = Schema.Struct({
-  initialModelSelection: Schema.optionalKey(Schema.NullOr(InitialModelSelection)),
-  defaultThreadEnvMode: Schema.optionalKey(Schema.NullOr(ThreadEnvMode)),
-  worktreeBranchPrefix: Schema.optionalKey(Schema.NullOr(WorktreeBranchPrefix)),
-  runSetupScript: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
+  initialModelSelection: ProjectInitialModelSelection,
+  ...Struct.map(Struct.map(PROJECT_PREFERENCE_VALUES.fields, Schema.NullOr), Schema.optionalKey),
 }).pipe(rejectExcessProperties);
 export type ProjectPreferencesPatch = typeof ProjectPreferencesPatch.Type;
 
@@ -609,17 +783,74 @@ export type ProjectPreferencesExpected = typeof ProjectPreferencesExpected.Type;
 
 export const PreferenceSource = Schema.Literals(["project", "legacy-project", "node", "builtin"]);
 export type PreferenceSource = typeof PreferenceSource.Type;
-const sourced = <S extends Schema.Top>(value: S) =>
-  Schema.Struct({ value, source: PreferenceSource });
+type Sourced<S extends Schema.Top> = Schema.Struct<{
+  readonly value: S;
+  readonly source: typeof PreferenceSource;
+}>;
+interface SourcedLambda extends Struct.Lambda {
+  <S extends Schema.Top>(value: S): Sourced<S>;
+  readonly "~lambda.out": this["~lambda.in"] extends Schema.Top
+    ? Sourced<this["~lambda.in"]>
+    : never;
+}
+const sourced = Struct.lambda<SourcedLambda>((value) =>
+  Schema.Struct({ value, source: PreferenceSource }),
+);
 export const EffectiveProjectPreferences = Schema.Struct({
   initialModelSelection: sourced(ModelSelection),
-  defaultThreadEnvMode: sourced(ThreadEnvMode),
-  worktreeBranchPrefix: sourced(WorktreeBranchPrefix),
-  runSetupScript: sourced(Schema.Boolean),
+  ...Struct.map(REPORTED_PROJECT_PREFERENCE_VALUES, sourced),
+  ...Struct.map(Struct.map(ADDED_PROJECT_PREFERENCE_VALUES, sourced), Schema.optionalKey),
   worktreeRoot: sourced(WorktreeRoot),
   overrides: ProjectPreferences.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 });
 export type EffectiveProjectPreferences = typeof EffectiveProjectPreferences.Type;
+
+/** A model ID as recorded in provider usage history; matched case-insensitively. */
+const UsageModelId = TrimmedNonEmptyString.check(Schema.isMaxLength(256));
+const UsageUsdPerMillion = Schema.Finite.check(
+  Schema.isGreaterThanOrEqualTo(0),
+  Schema.isLessThanOrEqualTo(1_000_000),
+);
+
+/** USD per million tokens. A missing cache price charges the input price; 0 is free. */
+export const UsageModelPrice = Schema.Struct({
+  inputUsdPerMillion: UsageUsdPerMillion,
+  outputUsdPerMillion: UsageUsdPerMillion,
+  cacheReadUsdPerMillion: Schema.optionalKey(UsageUsdPerMillion),
+  cacheWriteUsdPerMillion: Schema.optionalKey(UsageUsdPerMillion),
+});
+export type UsageModelPrice = typeof UsageModelPrice.Type;
+
+/**
+ * Exactly one of: a custom price (at every speed; it replaces provider-reported cost), or the
+ * model whose price and usage row this model ID uses (`mapTo`, e.g. a preview ID).
+ */
+export const UsagePriceOverride = Schema.Struct({
+  price: Schema.optionalKey(UsageModelPrice),
+  mapTo: Schema.optionalKey(UsageModelId),
+}).check(
+  Schema.makeFilter((entry) =>
+    (entry.price === undefined) !== (entry.mapTo === undefined)
+      ? undefined
+      : "Set either a price or a model to map to",
+  ),
+);
+export type UsagePriceOverride = typeof UsagePriceOverride.Type;
+
+export const USAGE_PRICE_OVERRIDE_LIMIT = 200;
+
+/** Node-wide custom prices and model mappings for usage cost, keyed by model ID. */
+export const UsagePriceOverrides = Schema.Record(UsageModelId, UsagePriceOverride).check(
+  Schema.makeFilter((entries) => {
+    const keys = Object.keys(entries);
+    if (keys.length > USAGE_PRICE_OVERRIDE_LIMIT)
+      return `At most ${USAGE_PRICE_OVERRIDE_LIMIT} custom model entries`;
+    for (const key of keys)
+      if (entries[key]?.mapTo?.toLowerCase() === key.toLowerCase()) return `${key} maps to itself`;
+    return undefined;
+  }),
+);
+export type UsagePriceOverrides = typeof UsagePriceOverrides.Type;
 
 export const ServerSettings = Schema.Struct({
   initialModelSelection: Schema.NullOr(InitialModelSelection).pipe(
@@ -631,16 +862,25 @@ export const ServerSettings = Schema.Struct({
     ProjectPreferences,
   ).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   environmentIcon: EnvironmentMachineHint.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
-  // Legacy token-by-token assistant output. This is deliberately a fresh key
-  // (formerly `enableAssistantStreaming`): decoding drops the old key so all
-  // installations, including previous opt-ins, return to buffered output.
-  enableLegacyTokenStreaming: Schema.Boolean.pipe(
-    Schema.withDecodingDefault(Effect.succeed(false)),
+  // A fresh key: the node migrates a saved `enableLegacyTokenStreaming: true` to `token` when it
+  // reads its settings file, and maps that key in patches from older clients and Agent Control.
+  responseStreamingMode: ResponseStreamingMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_RESPONSE_STREAMING_MODE)),
   ),
   // When disabled, the server skips provider CLI latest-version resolution
   // entirely (no npm registry contact) instead of merely hiding the update
   // notification — for users who install providers via Nix/nixpkgs/etc.
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  // Opt-in: install provider CLI updates unattended while nobody uses a client and no agent works,
+  // and on a CLI service node installed with npm or pnpm also Ryco's own newest release,
+  // restarting only while nothing would be cut off. Effective only with `enableProviderUpdateChecks`; dev servers never act on it.
+  // Node-scoped and owner-only; never part of Agent Control's settings allowlist (an agent must not
+  // let its own CLI, or the node it runs on, be replaced unattended).
+  automaticUpdates: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // Agent CLIs and everything they start run at a lower CPU priority (nice +5, Below Normal on
+  // Windows), read at each agent launch. Node-scoped; deliberately not in Agent Control's
+  // settings allowlist (an agent must not raise its own priority).
+  lowerAgentProcessPriority: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   // Opt-in automatic "continue" turn after a server restart. Node-scoped; never part of
   // Agent Control's settings allowlist (an agent must not grant itself unattended resumption).
   continueThreadsAfterRestart: Schema.Boolean.pipe(
@@ -710,9 +950,17 @@ export const ServerSettings = Schema.Struct({
   pullRequestInstructions: GitWritingInstructions.pipe(
     Schema.withDecodingDefault(Effect.succeed("")),
   ),
-  inboxPriorityModelSelection: Schema.NullOr(ModelSelection).pipe(
-    Schema.withDecodingDefault(Effect.succeed(null)),
+  // The style of generated commit messages and pull request text; the instructions above take
+  // precedence. Null entries of the project map inherit; entries are patched independently.
+  gitWritingStyle: GitWritingStyle.pipe(
+    Schema.withDecodingDefault(Effect.succeed("repository" as const)),
   ),
+  projectGitWritingStyle: Schema.Record(Schema.String, Schema.NullOr(GitWritingStyle)).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  // Generated pull request descriptions follow the repository's template, and the create dialog
+  // offers its templates.
+  pullRequestTemplates: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   // The node's automatic settlement rule, the same on every client that lists its threads.
   // Absent until someone sets it (the shared default applies); null turns it off. Named apart
   // from the client's `sidebarAutoSettleAfterDays`, which older nodes still leave to clients.
@@ -746,6 +994,8 @@ export const ServerSettings = Schema.Struct({
   ),
   // CLIProxyAPI hubs read as usage sources. Management keys live in the secret store.
   cliProxyHubs: CliProxyHubs.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  // Node-scoped; not in Agent Control's settings allowlist.
+  usagePriceOverrides: UsagePriceOverrides.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   agentControl: AgentControlSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 });
@@ -796,6 +1046,8 @@ const ClaudeSettingsPatch = Schema.Struct({
   homePath: Schema.optionalKey(Schema.String),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
   launchArgs: Schema.optionalKey(Schema.String),
+  autoCompact: Schema.optionalKey(Schema.String),
+  autoCompactWindow: Schema.optionalKey(Schema.String),
 });
 
 const CursorSettingsPatch = Schema.Struct({
@@ -848,8 +1100,16 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   environmentIcon: Schema.optionalKey(Schema.NullOr(EnvironmentMachineKind)),
   // Server settings
+  responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
+  /**
+   * Older clients and Agent Control's `legacyTokenStreaming` change still write this key.
+   * True selects `token`; false leaves `token` for the default and keeps any other mode.
+   * `responseStreamingMode` wins when a patch carries both.
+   */
   enableLegacyTokenStreaming: Schema.optionalKey(Schema.Boolean),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
+  automaticUpdates: Schema.optionalKey(Schema.Boolean),
+  lowerAgentProcessPriority: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterRestart: Schema.optionalKey(Schema.Boolean),
   autoResumeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   snoozeLimitedThreads: Schema.optionalKey(Schema.Boolean),
@@ -879,7 +1139,11 @@ export const ServerSettingsPatch = Schema.Struct({
   textGenerationModelSelection: Schema.optionalKey(ModelSelectionPatch),
   commitMessageInstructions: Schema.optionalKey(GitWritingInstructions),
   pullRequestInstructions: Schema.optionalKey(GitWritingInstructions),
-  inboxPriorityModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelectionPatch)),
+  gitWritingStyle: Schema.optionalKey(GitWritingStyle),
+  projectGitWritingStyle: Schema.optionalKey(
+    Schema.Record(Schema.String, Schema.NullOr(GitWritingStyle)),
+  ),
+  pullRequestTemplates: Schema.optionalKey(Schema.Boolean),
   threadAutoSettleAfterDays: Schema.optionalKey(SidebarAutoSettleAfterDays),
   /**
    * Applies the patch only while the node's rule is still this (`"absent"`: never set), so of
@@ -898,6 +1162,12 @@ export const ServerSettingsPatch = Schema.Struct({
   agentControl: Schema.optionalKey(
     Schema.Struct({
       enabled: Schema.optionalKey(Schema.Boolean),
+      delegation: Schema.optionalKey(
+        Schema.Struct({
+          maxDepth: Schema.optionalKey(Schema.NullOr(DelegationMaxDepth)),
+          maxTasksPerTree: Schema.optionalKey(Schema.NullOr(DelegationMaxTasks)),
+        }),
+      ),
     }),
   ),
   providers: Schema.optionalKey(
@@ -919,19 +1189,26 @@ export const ServerSettingsPatch = Schema.Struct({
   cliProxyHubs: Schema.optionalKey(
     Schema.Record(CliProxyHubId, Schema.NullOr(CliProxyHubConfigInput)),
   ),
+  // Per-model replacement; `null` removes the model's entry.
+  usagePriceOverrides: Schema.optionalKey(
+    Schema.Record(UsageModelId, Schema.NullOr(UsagePriceOverride)),
+  ),
 });
 export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 
 export const ClientSettingsPatch = Schema.Struct({
   localOnboardingCompletedEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
-  aiFocusEnabled: Schema.optionalKey(Schema.Boolean),
-  aiFocusRefreshIntervalMs: Schema.optionalKey(AiFocusRefreshIntervalMs),
   confirmThreadArchive: Schema.optionalKey(Schema.Boolean),
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),
   confirmThreadUnpin: Schema.optionalKey(Schema.Boolean),
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
   diffWordWrap: Schema.optionalKey(Schema.Boolean),
+  changeRequestLinkTarget: Schema.optionalKey(ChangeRequestLinkTarget),
   followUpBehavior: Schema.optionalKey(FollowUpBehavior),
+  sendShortcut: Schema.optionalKey(SendShortcut),
+  claudeResumeReview: Schema.optionalKey(Schema.Boolean),
+  chatWidth: Schema.optionalKey(ChatWidth),
+  openChatTabs: Schema.optionalKey(Schema.Boolean),
   favorites: Schema.optionalKey(Schema.Array(ModelFavorite)),
   providerModelPreferences: Schema.optionalKey(
     Schema.Record(
@@ -957,5 +1234,8 @@ export const ClientSettingsPatch = Schema.Struct({
   preferredEditor: Schema.optionalKey(Schema.NullOr(EditorId)),
   gitStatusPollIntervalMs: Schema.optionalKey(GitStatusPollIntervalMs),
   sourceControlRefreshMode: Schema.optionalKey(SourceControlRefreshMode),
+  notifyOnTurnCompleteWhenUnfocused: Schema.optionalKey(Schema.Boolean),
+  threadNotificationSound: Schema.optionalKey(Schema.Boolean),
+  threadNotificationToasts: Schema.optionalKey(Schema.Boolean),
 });
 export type ClientSettingsPatch = typeof ClientSettingsPatch.Type;

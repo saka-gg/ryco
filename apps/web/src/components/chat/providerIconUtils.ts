@@ -42,6 +42,8 @@ export type ModelEsque = {
   shortName?: string | undefined;
   subProvider?: string | undefined;
   isUnavailable?: boolean | undefined;
+  isLegacy?: boolean | undefined;
+  isCustom?: boolean | undefined;
 };
 
 export function getDisplayModelName(

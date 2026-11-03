@@ -7,15 +7,20 @@ import type {
   CliProxyAccount,
   CliProxyApiKeyUsage,
   CliProxyHubSnapshot,
-  CliProxyQuotaWindow,
   CliProxyRequestCounts,
   ProviderInstanceId,
 } from "@ryco/contracts";
 import { isLoopbackHost } from "@ryco/shared/cliProxyHubUrl";
 
-import { clampUsedPercent, describeRateLimitWindow } from "./limits.ts";
+import {
+  clampUsedPercent,
+  limitWindowLabel,
+  poolLimitWindows,
+  type LabelledLimitWindow,
+  type PooledLimitWindow,
+} from "./limits.ts";
 
-const PROVIDER_ORDER = ["claude", "codex", "antigravity"];
+const PROVIDER_ORDER = ["claude", "codex", "antigravity", "opencode"];
 const RECENT_USE_WINDOW_MS = 10 * 60_000;
 const PROVIDER_LABELS: Readonly<Record<string, string>> = {
   aistudio: "AI Studio",
@@ -27,6 +32,7 @@ const PROVIDER_LABELS: Readonly<Record<string, string>> = {
   iflow: "iFlow",
   kimi: "Kimi",
   meta: "Meta",
+  opencode: "OpenCode",
   openrouter: "OpenRouter",
   qwen: "Qwen",
   vertex: "Vertex",
@@ -50,12 +56,8 @@ export function formatCliProxyPlan(planType: string | undefined): string | undef
   return planType ? titleCase(planType) : undefined;
 }
 
-/** `5h`, `Weekly`, `Weekly · Opus`, or just the scope for windows without a duration. */
-export function cliProxyWindowLabel(window: CliProxyQuotaWindow): string {
-  if (window.windowDurationMins === undefined) return window.scope ?? "Window";
-  const cadence = describeRateLimitWindow(window).label;
-  return window.scope ? `${cadence} · ${window.scope}` : cadence;
-}
+/** A hub window's label; hub and direct windows are labelled alike (`limitWindowLabel`). */
+export const cliProxyWindowLabel = limitWindowLabel;
 
 export type CliProxyAccountHealth =
   | { readonly kind: "ready" }
@@ -64,7 +66,7 @@ export type CliProxyAccountHealth =
   | { readonly kind: "error"; readonly message: string | undefined }
   | { readonly kind: "disabled" };
 
-function isDisabled(account: CliProxyAccount): boolean {
+export function isCliProxyAccountDisabled(account: CliProxyAccount): boolean {
   return account.disabled || account.status === "disabled";
 }
 
@@ -73,7 +75,7 @@ export function cliProxyAccountHealth(
   account: CliProxyAccount,
   nowMs: number,
 ): CliProxyAccountHealth {
-  if (isDisabled(account)) return { kind: "disabled" };
+  if (isCliProxyAccountDisabled(account)) return { kind: "disabled" };
   if (account.status === "error") return { kind: "error", message: account.statusMessage };
   const retryTimes = [
     ...account.cooldowns.flatMap((cooldown) => (cooldown.retryAt ? [cooldown.retryAt] : [])),
@@ -123,7 +125,7 @@ export function cliProxyCurrentAccount(
   nowMs: number,
 ): CliProxyCurrentAccount | null {
   const usable = hub.accounts.filter(
-    (account) => account.provider === provider && !isDisabled(account),
+    (account) => account.provider === provider && !isCliProxyAccountDisabled(account),
   );
   const used = usable
     .flatMap((account) =>
@@ -157,6 +159,32 @@ export function cliProxyAccountDisplayName(account: CliProxyAccount): {
   return { value, sensitive: EMAIL_PATTERN.test(value) };
 }
 
+/**
+ * A hub account's name where no email may ever appear: the phone's Limits list and, later, Home
+ * and Lock Screen widgets. Its label or credential file name when that names no email, else
+ * `Account N`, N being its 1-based position in the list shown. Any `@` counts as email-like, so
+ * a partial address (`alice@work`) is never shown either.
+ */
+export function cliProxyAccountPublicName(account: CliProxyAccount, position: number): string {
+  const name = cliProxyAccountDisplayName(account);
+  return name.sensitive || name.value.includes("@") ? `Account ${position}` : name.value;
+}
+
+/** Why a hub account shows no usage windows, or null when it shows them. */
+export function cliProxyQuotaNote(account: CliProxyAccount): string | null {
+  const { quota } = account;
+  switch (quota.status) {
+    case "ok":
+      return quota.windows.length === 0 ? "No usage windows reported." : null;
+    case "unsupported":
+      return `${cliProxyProviderLabel(account.provider)} has no quota API Ryco reads; request counts only.`;
+    case "skipped":
+      return "Disabled on the hub, so its quota is not read.";
+    case "failed":
+      return quota.message ?? "The quota could not be read.";
+  }
+}
+
 /** A hub snapshot as one connected environment reported it. */
 export interface CliProxyEnvironmentHub {
   readonly environmentId: string;
@@ -185,17 +213,7 @@ export interface CliProxyHubAccountEntry {
   readonly account: CliProxyAccount;
 }
 
-export interface CliProxyPooledWindow {
-  /** Window id shared by the pooled accounts (`five_hour`, `seven_day`, …). */
-  readonly id: string;
-  readonly label: string;
-  readonly windowDurationMins: number | undefined;
-  /** Mean used percent across accounts reporting this window. */
-  readonly usedPercent: number;
-  readonly accountCount: number;
-  /** The soonest reset among the pooled accounts, epoch seconds. */
-  readonly nextResetsAt: number | undefined;
-}
+export type CliProxyPooledWindow = PooledLimitWindow;
 
 export interface CliProxyProviderGroup {
   readonly provider: string;
@@ -204,7 +222,7 @@ export interface CliProxyProviderGroup {
   readonly pooled: ReadonlyArray<CliProxyPooledWindow>;
 }
 
-function providerRank(provider: string): number {
+export function cliProxyProviderRank(provider: string): number {
   const index = PROVIDER_ORDER.indexOf(provider);
   return index === -1 ? PROVIDER_ORDER.length : index;
 }
@@ -213,33 +231,17 @@ function accountSortKey(account: CliProxyAccount): string {
   return (account.email ?? account.label ?? account.name).toLowerCase();
 }
 
+/** The labelled windows an account adds to a pool: none while it cannot serve requests. */
+export function cliProxyPoolableWindows(account: CliProxyAccount): LabelledLimitWindow[] {
+  if (isCliProxyAccountDisabled(account) || account.quota.status !== "ok") return [];
+  return account.quota.windows.map((window) => ({ label: cliProxyWindowLabel(window), window }));
+}
+
 /** Averages each window over the accounts that can currently serve requests. */
 export function poolCliProxyWindows(
   accounts: ReadonlyArray<CliProxyAccount>,
 ): CliProxyPooledWindow[] {
-  const pools = new Map<
-    string,
-    { window: CliProxyQuotaWindow; used: number[]; resets: number[] }
-  >();
-  for (const account of accounts) {
-    if (account.disabled || account.quota.status !== "ok") continue;
-    for (const window of account.quota.windows) {
-      const used = clampUsedPercent(window.usedPercent);
-      if (used === null) continue;
-      const pool = pools.get(window.id) ?? { window, used: [], resets: [] };
-      pool.used.push(used);
-      if (window.resetsAt !== undefined) pool.resets.push(window.resetsAt);
-      pools.set(window.id, pool);
-    }
-  }
-  return [...pools.values()].map(({ window, used, resets }) => ({
-    id: window.id,
-    label: cliProxyWindowLabel(window),
-    windowDurationMins: window.windowDurationMins,
-    usedPercent: Math.round((used.reduce((sum, value) => sum + value, 0) / used.length) * 10) / 10,
-    accountCount: used.length,
-    nextResetsAt: resets.length > 0 ? Math.min(...resets) : undefined,
-  }));
+  return poolLimitWindows(accounts.map(cliProxyPoolableWindows));
 }
 
 /**
@@ -266,7 +268,8 @@ export function groupCliProxyAccounts(
   }
   return [...byProvider.entries()]
     .toSorted(
-      ([left], [right]) => providerRank(left) - providerRank(right) || left.localeCompare(right),
+      ([left], [right]) =>
+        cliProxyProviderRank(left) - cliProxyProviderRank(right) || left.localeCompare(right),
     )
     .map(([provider, entries]) => {
       const accounts = entries.toSorted((left, right) =>

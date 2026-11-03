@@ -9,6 +9,7 @@ import { memo, useId } from "react";
 
 import { cn } from "~/lib/utils";
 import {
+  agentActivityText,
   agentWorkflowStatusText,
   formatSubagentTokenCount,
   type AgentPanelModel,
@@ -20,7 +21,6 @@ import {
   AgentRowList,
   useAgentRowLabel,
 } from "../agents/agentRoster";
-import { agentActivityText } from "../agents/agentRoster.logic";
 import { glassSurfaceClassName } from "../mobile/GlassSurface";
 import {
   summarizeAgentSpawn,

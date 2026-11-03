@@ -10,17 +10,17 @@ import { render } from "vitest-browser-react";
 import { DRIVER_OPTION_BY_VALUE } from "./providerDriverMeta";
 import { ProviderSettingsForm } from "./ProviderSettingsForm";
 
-/** Renders the OpenCode form over config as the server sends it (secrets redacted). */
-async function mountOpenCodeForm(config: Record<string, unknown>) {
+/** Renders a driver's form over config as the server sends it (secrets redacted). */
+async function mountProviderForm(driver: string, config: Record<string, unknown>) {
   const published: Array<Record<string, unknown> | undefined> = [];
-  const definition = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("opencode")]!;
+  const definition = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make(driver)]!;
   function Harness() {
     const [value, setValue] = useState<Record<string, unknown> | undefined>(config);
     return (
       <ProviderSettingsForm
         definition={definition}
         value={value}
-        idPrefix="opencode"
+        idPrefix={driver}
         variant="card"
         onChange={(next) => {
           published.push(next);
@@ -32,6 +32,9 @@ async function mountOpenCodeForm(config: Record<string, unknown>) {
   await render(<Harness />);
   return { published };
 }
+
+const mountOpenCodeForm = (config: Record<string, unknown>) =>
+  mountProviderForm("opencode", config);
 
 // The label wraps the description too, so match its start.
 const passwordInput = () => page.getByLabelText(/^Server password/);
@@ -89,5 +92,31 @@ describe("ProviderSettingsForm saved secrets", () => {
         ),
       )
       .toBeVisible();
+  });
+});
+
+describe("ProviderSettingsForm select fields", () => {
+  const autoCompact = () => page.getByRole("combobox", { name: "Automatic compaction" });
+
+  it("shows the default while unset, stores another choice and omits the default again", async () => {
+    const { published } = await mountProviderForm("claudeAgent", { launchArgs: "--chrome" });
+
+    await expect.element(autoCompact()).toHaveTextContent("At 80% between turns (Ryco)");
+
+    await autoCompact().click();
+    await page.getByRole("option", { name: "When Claude Code decides" }).click();
+    expect(published.at(-1)).toStrictEqual({ launchArgs: "--chrome", autoCompact: "claudeCode" });
+    await expect.element(autoCompact()).toHaveTextContent("When Claude Code decides");
+
+    await autoCompact().click();
+    await page.getByRole("option", { name: "At 80% between turns (Ryco)" }).click();
+    expect(published.at(-1)).toStrictEqual({ launchArgs: "--chrome" });
+    await expect.element(autoCompact()).toHaveTextContent("At 80% between turns (Ryco)");
+  });
+
+  it("shows no choice for a value this client does not offer", async () => {
+    await mountProviderForm("claudeAgent", { autoCompact: "fromANewerClient" });
+
+    await expect.element(autoCompact()).toHaveTextContent("Choose…");
   });
 });

@@ -1,48 +1,13 @@
 /**
- * terminalShell - the user's shell and the environment Ryco starts commands in on their behalf.
+ * terminalShell - the user's shell Ryco starts commands in on their behalf.
  *
  * Shared by the terminal manager (an interactive shell in a PTY) and by commands that run
  * unattended in a project, such as an import's setup command (the same shell, non-interactive).
- * Both get the server's environment without the server's own variables, plus whatever the caller
- * adds (the project script variables).
+ * Both get the environment of `terminalSpawnEnv.ts`.
  *
  * @module terminalShell
  */
 import path from "node:path";
-
-/** Server variables never handed to a shell: they belong to this server, not to the user's tools. */
-const TERMINAL_ENV_BLOCKLIST = new Set(["PORT", "ELECTRON_RENDERER_PORT", "ELECTRON_RUN_AS_NODE"]);
-
-/** `RYCO_*` (tokens, ports, state paths), `VITE_*` and the blocklist above. */
-export function shouldExcludeTerminalEnvKey(key: string): boolean {
-  const normalizedKey = key.toUpperCase();
-  if (normalizedKey.startsWith("RYCO_")) {
-    return true;
-  }
-  if (normalizedKey.startsWith("VITE_")) {
-    return true;
-  }
-  return TERMINAL_ENV_BLOCKLIST.has(normalizedKey);
-}
-
-/** `baseEnv` without the excluded keys, then `runtimeEnv` on top (it may set `RYCO_*` itself). */
-export function createTerminalSpawnEnv(
-  baseEnv: NodeJS.ProcessEnv,
-  runtimeEnv?: Record<string, string> | null,
-): NodeJS.ProcessEnv {
-  const spawnEnv: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(baseEnv)) {
-    if (value === undefined) continue;
-    if (shouldExcludeTerminalEnvKey(key)) continue;
-    spawnEnv[key] = value;
-  }
-  if (runtimeEnv) {
-    for (const [key, value] of Object.entries(runtimeEnv)) {
-      spawnEnv[key] = value;
-    }
-  }
-  return spawnEnv;
-}
 
 export interface ShellCandidate {
   shell: string;

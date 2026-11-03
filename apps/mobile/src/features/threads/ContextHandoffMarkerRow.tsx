@@ -1,13 +1,13 @@
 import {
-  CWD_RELOCATION_HANDOFF_COPY,
-  cwdRelocationHandoffHeadline,
-  cwdRelocationHandoffRetryHint,
   FORK_HANDOFF_COPY,
   forkHandoffEndpointLabels,
   forkHandoffHeadline,
   forkHandoffRetryHint,
   isCwdRelocationHandoff,
   isForkHandoff,
+  resumeFallbackHandoffCopy,
+  resumeFallbackHandoffHeadline,
+  resumeFallbackHandoffRetryHint,
   type ContextHandoffTimelineEntry,
 } from "@ryco/client-runtime/state/session";
 import { View } from "react-native";
@@ -25,28 +25,28 @@ export function ContextHandoffMarkerRow(props: { readonly marker: ContextHandoff
   const { marker } = props;
   const failed = marker.status === "failed";
   const uncertain = marker.status === "delivery-uncertain";
-  // A working-folder relocation (a chat turned into a project) and a fork's first session read as
-  // a fresh session, not as a model transition; a fork that also switched provider names the
-  // model it switched from in its headline (`changedFrom`).
-  const relocation = isCwdRelocationHandoff(marker);
+  // A resume fallback (a working-folder relocation, or native history the provider no longer
+  // had) and a fork's first session read as a fresh session, not as a model transition; a fork
+  // that also switched provider names the model it switched from in its headline (`changedFrom`).
+  const resumeFallback = resumeFallbackHandoffCopy(marker);
   const fork = isForkHandoff(marker);
-  const freshSession = relocation || fork;
+  const freshSession = resumeFallback !== null || fork;
   const forkLabels = fork
     ? forkHandoffEndpointLabels(marker, CONTEXT_HANDOFF_ENDPOINT_LABELERS)
     : null;
-  const headline = relocation
-    ? cwdRelocationHandoffHeadline(marker.status)
+  const headline = resumeFallback
+    ? resumeFallbackHandoffHeadline(resumeFallback, marker.status)
     : forkLabels
       ? forkHandoffHeadline(marker.status, forkLabels.target, forkLabels.source)
       : "Context handoff";
-  const retryHint = relocation
-    ? cwdRelocationHandoffRetryHint(marker)
+  const retryHint = resumeFallback
+    ? resumeFallbackHandoffRetryHint(resumeFallback, marker)
     : fork
       ? forkHandoffRetryHint(marker)
       : null;
   // Why the conversation moved to a fresh session (the web divider's hover card says the same).
-  const explanation = relocation
-    ? CWD_RELOCATION_HANDOFF_COPY.explanation
+  const explanation = resumeFallback
+    ? resumeFallback.explanation
     : fork
       ? FORK_HANDOFF_COPY.explanation
       : undefined;
@@ -77,7 +77,15 @@ export function ContextHandoffMarkerRow(props: { readonly marker: ContextHandoff
       <View className="max-w-[82%] items-center gap-1">
         <View className="flex-row items-center gap-1">
           <SymbolView
-            name={relocation ? "folder" : fork ? "arrow.triangle.branch" : "arrow.left.arrow.right"}
+            name={
+              resumeFallback
+                ? isCwdRelocationHandoff(marker)
+                  ? "folder"
+                  : "clock.arrow.circlepath"
+                : fork
+                  ? "arrow.triangle.branch"
+                  : "arrow.left.arrow.right"
+            }
             size={13}
             tintColor={iconColor}
             type="monochrome"

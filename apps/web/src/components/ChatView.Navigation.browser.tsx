@@ -18,6 +18,7 @@ import {
   useSavedEnvironmentRuntimeStore,
 } from "../environments/runtime";
 import { isMacPlatform } from "../lib/utils";
+import { useSettingsDialogStore } from "../settingsDialogStore";
 import { useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import { useInboxFilterStore } from "./inboxSidebar/inboxFilterStore";
@@ -32,6 +33,7 @@ import {
   CHAT_NEW_KEYBINDING,
   COMPOSER_STASH_KEYBINDING,
   DEFAULT_VIEWPORT,
+  LIFECYCLE_TURN_COMPLETED_AT,
   LOCAL_ENVIRONMENT_ID,
   NOW_ISO,
   PHONE_VIEWPORT,
@@ -50,31 +52,37 @@ import {
   createDraftFromChatNewLocalShortcut,
   createDraftFromChatNewShortcut,
   createDraftOnlySnapshot,
+  createLifecycleSnapshot,
   createMockEnvironmentApi,
   createProjectlessSnapshot,
   createSnapshotForTargetUser,
   createSnapshotWithSecondaryProject,
   dispatchChatNewShortcut,
   dispatchThreadPinToggleShortcut,
+  dispatchedCommandTypes,
   draftIdFromPath,
   draftThreadIdFor,
   enableChatNewLocalShortcut,
   enableChatNewShortcut,
+  enableThreadLifecycle,
   fixture,
   materializePromotedDraftThreadViaDomainEvent,
   mountChatView,
   openCommandPaletteFromTrigger,
+  pressLifecycleChord,
   selectionSnapshot,
   serverThreadPath,
   startPromotedServerThreadViaDomainEvent,
   threadKeyFor,
   threadRefFor,
+  triggerChatNewShortcutUntilPath,
   waitForCommandPaletteInput,
   waitForCommandPaletteShortcutLabel,
   waitForComposerEditor,
   waitForElement,
   waitForLayout,
   waitForServerConfigToApply,
+  waitForThreadLifecycleShortcuts,
   waitForURL,
   waitForWsRequestsToSettle,
   wsRequests,
@@ -622,6 +630,30 @@ describe("ChatView Navigation (full app)", () => {
     }
   });
 
+  it("creates a new thread from the chat.new shortcut outside the chat routes", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-chat-shortcut-settings-test" as MessageId,
+        targetText: "chat shortcut settings test",
+      }),
+      configureFixture: enableChatNewShortcut,
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      await mounted.router.navigate({ to: "/settings" });
+      await waitForURL(mounted.router, (path) => path === "/settings", "Settings should open.");
+      await triggerChatNewShortcutUntilPath(
+        mounted.router,
+        (path) => UUID_ROUTE_RE.test(path),
+        "The shortcut should start a new draft thread from the settings page.",
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
   it("pins from the global shortcut and exposes the matching palette action", async () => {
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,
@@ -654,6 +686,169 @@ describe("ChatView Navigation (full app)", () => {
       await vi.waitFor(() => {
         expect(useUiStateStore.getState().pinnedThreadKeys[THREAD_KEY]).not.toBe(true);
       });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("settles the open thread from its shortcut while the composer has focus", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createLifecycleSnapshot(),
+      configureFixture: enableThreadLifecycle,
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      await waitForThreadLifecycleShortcuts();
+      (await waitForComposerEditor()).focus();
+      const event = pressLifecycleChord("D");
+      expect(event.defaultPrevented).toBe(true);
+      await vi.waitFor(() => expect(dispatchedCommandTypes()).toContain("thread.settle"));
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("says why a running thread cannot be settled and sends nothing", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createLifecycleSnapshot({ running: true }),
+      configureFixture: enableThreadLifecycle,
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      await waitForThreadLifecycleShortcuts();
+      expect(pressLifecycleChord("D").defaultPrevented).toBe(true);
+      await expect
+        .element(page.getByText("Wait for the running work to finish.", { exact: true }))
+        .toBeInTheDocument();
+      expect(dispatchedCommandTypes()).not.toContain("thread.settle");
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("opens the snooze times from the snooze shortcut and snoozes until the one picked", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createLifecycleSnapshot(),
+      configureFixture: enableThreadLifecycle,
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      await waitForThreadLifecycleShortcuts();
+      pressLifecycleChord("S");
+      const palette = page.getByTestId("command-palette");
+      await expect.element(palette.getByText("Snooze until", { exact: true })).toBeInTheDocument();
+      await palette.getByText("Tomorrow morning", { exact: true }).click();
+      await vi.waitFor(() => expect(dispatchedCommandTypes()).toContain("thread.snooze"));
+      expect(useCommandPaletteStore.getState().open).toBe(false);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("keeps the open thread unread after Mark unread until it is left", async () => {
+    const otherThreadId = "thread-lifecycle-other" as ThreadId;
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: addThreadToSnapshot(createLifecycleSnapshot(), otherThreadId),
+      configureFixture: enableThreadLifecycle,
+    });
+    const lastVisitedAt = () => useUiStateStore.getState().threadLastVisitedAtById[THREAD_KEY];
+    const markedUnread = new Date(Date.parse(LIFECYCLE_TURN_COMPLETED_AT) - 1).toISOString();
+
+    try {
+      await waitForServerConfigToApply();
+      await waitForThreadLifecycleShortcuts();
+      // Opening the thread reads its finished turn.
+      await vi.waitFor(() => expect(lastVisitedAt()).toBe(LIFECYCLE_TURN_COMPLETED_AT));
+
+      pressLifecycleChord("U");
+      await expect
+        .element(page.getByText("Thread marked unread", { exact: true }))
+        .toBeInTheDocument();
+      expect(lastVisitedAt()).toBe(markedUnread);
+      await waitForLayout();
+      expect(lastVisitedAt()).toBe(markedUnread);
+
+      await mounted.router.navigate({
+        to: "/$environmentId/$threadId",
+        params: { environmentId: LOCAL_ENVIRONMENT_ID, threadId: otherThreadId },
+      });
+      await waitForURL(
+        mounted.router,
+        (path) => path === serverThreadPath(otherThreadId),
+        "The other thread should open.",
+      );
+      await waitForLayout();
+      expect(lastVisitedAt()).toBe(markedUnread);
+
+      // Opening it again reads it.
+      await mounted.router.navigate({
+        to: "/$environmentId/$threadId",
+        params: { environmentId: LOCAL_ENVIRONMENT_ID, threadId: THREAD_ID },
+      });
+      await vi.waitFor(() => expect(lastVisitedAt()).toBe(LIFECYCLE_TURN_COMPLETED_AT));
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("reads a thread whose snooze ran out at its wake, clearing its Woke mark", async () => {
+    const snapshot = createLifecycleSnapshot();
+    const wokeAt = new Date(Date.now() - 10_000).toISOString();
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: {
+        ...snapshot,
+        threads: snapshot.threads.map((thread) => ({
+          ...thread,
+          snoozedAt: new Date(Date.parse(LIFECYCLE_TURN_COMPLETED_AT) + 1_000).toISOString(),
+          snoozedUntil: wokeAt,
+        })),
+      },
+      configureFixture: enableThreadLifecycle,
+    });
+    try {
+      await waitForServerConfigToApply();
+      await vi.waitFor(() =>
+        expect(useUiStateStore.getState().threadLastVisitedAtById[THREAD_KEY]).toBe(wokeAt),
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("explains a snoozed thread above the composer and wakes it with Return now", async () => {
+    const snapshot = createLifecycleSnapshot();
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: {
+        ...snapshot,
+        threads: snapshot.threads.map((thread) => ({
+          ...thread,
+          // After the fixture's messages and turn: nothing woke it since.
+          snoozedAt: new Date().toISOString(),
+          snoozedUntil: new Date(Date.now() + 2 * 3_600_000 + 30 * 60_000).toISOString(),
+        })),
+      },
+      configureFixture: enableThreadLifecycle,
+    });
+    try {
+      await waitForServerConfigToApply();
+      await vi.waitFor(() => {
+        expect(document.body.textContent).toContain("Sending a message ends the snooze.");
+        expect(document.body.textContent).toMatch(/Returns .+ · 2 hr 29 min left/u);
+      });
+      // Another notice may sit in front of it in the banner stack.
+      Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+        .find((button) => button.textContent === "Return now")
+        ?.click();
+      await vi.waitFor(() => expect(dispatchedCommandTypes()).toContain("thread.unsnooze"));
     } finally {
       await mounted.cleanup();
     }
@@ -699,6 +894,77 @@ describe("ChatView Navigation (full app)", () => {
     }
   });
 
+  it("goes back and forward through visited pages from the keyboard", async () => {
+    const other = "history-other-thread" as ThreadId;
+    const firstPath = serverThreadPath(THREAD_ID);
+    const otherPath = serverThreadPath(other);
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: addThreadToSnapshot(selectionSnapshot(), other),
+    });
+    // Returns whether the app consumed the key.
+    const press = (key: "[" | "]", target: EventTarget = window, repeat = false) => {
+      const useMetaForMod = isMacPlatform(navigator.platform);
+      const event = new KeyboardEvent("keydown", {
+        key,
+        code: key === "[" ? "BracketLeft" : "BracketRight",
+        metaKey: useMetaForMod,
+        ctrlKey: !useMetaForMod,
+        repeat,
+        bubbles: true,
+        cancelable: true,
+      });
+      target.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    const expectPath = async (path: string) => {
+      await waitForLayout();
+      expect(mounted.router.state.location.pathname).toBe(path);
+    };
+
+    try {
+      await waitForComposerEditor();
+      // Nothing is behind the first page, and the key never reaches the
+      // browser's own Back.
+      expect(press("[")).toBe(true);
+      await expectPath(firstPath);
+
+      await mounted.router.navigate({
+        to: "/$environmentId/$threadId",
+        params: { environmentId: LOCAL_ENVIRONMENT_ID, threadId: other },
+      });
+      await waitForURL(mounted.router, (path) => path === otherPath, "The thread should open.");
+
+      expect(press("[", window, true)).toBe(true);
+      await expectPath(otherPath);
+
+      const field = document.createElement("textarea");
+      document.body.append(field);
+      try {
+        field.focus();
+        expect(press("[", field)).toBe(false);
+      } finally {
+        field.remove();
+      }
+      await expectPath(otherPath);
+
+      useCommandPaletteStore.getState().setOpen(true);
+      expect(press("[")).toBe(false);
+      useCommandPaletteStore.getState().setOpen(false);
+      await expectPath(otherPath);
+
+      const composer = await waitForComposerEditor();
+      composer.focus();
+      expect(press("[", composer)).toBe(true);
+      await waitForURL(mounted.router, (path) => path === firstPath, "Back should return.");
+
+      expect(press("]")).toBe(true);
+      await waitForURL(mounted.router, (path) => path === otherPath, "Forward should return.");
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
   it("turns is: picks in the sidebar field into status tokens that Backspace removes", async () => {
     useUiStateStore.setState({ sidebarMode: "inbox" });
     const mounted = await mountChatView({
@@ -734,6 +1000,37 @@ describe("ChatView Navigation (full app)", () => {
       expect(menu?.dataset.open).toBe("true");
       await userEvent.keyboard("{Tab}");
       await vi.waitFor(() => expect(menu?.dataset.open).toBe("false"));
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("shows a row menu's project filter as a token before the status token", async () => {
+    useUiStateStore.setState({ sidebarMode: "inbox" });
+    useInboxFilterStore.setState({
+      project: { logicalKey: "github.com/example/ryco", label: "Ryco" },
+      status: "active",
+    });
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-omnifield-project" as MessageId,
+        targetText: "omnifield project",
+      }),
+    });
+
+    try {
+      const token = page.getByRole("button", { name: "Remove project filter Ryco" });
+      await expect.element(token).toBeInTheDocument();
+      expect(
+        [...document.querySelectorAll<HTMLElement>(".sidebar-omnifield-token")].map(
+          (element) => element.dataset.kind,
+        ),
+      ).toEqual(["project", "status"]);
+
+      await token.click();
+      await vi.waitFor(() => expect(useInboxFilterStore.getState().project).toBeNull());
+      expect(useInboxFilterStore.getState().status).toBe("active");
     } finally {
       await mounted.cleanup();
     }
@@ -909,6 +1206,65 @@ describe("ChatView Navigation (full app)", () => {
     }
   });
 
+  it("finds a setting while typing and reveals it in its section", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-command-palette-settings-search" as MessageId,
+        targetText: "command palette settings search",
+      }),
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      useCommandPaletteStore.getState().setOpen(true);
+      const palette = page.getByTestId("command-palette");
+      await page.getByPlaceholder("Search commands, projects, and threads...").fill("diff style");
+      await expect.element(palette.getByText("Settings", { exact: true })).toBeInTheDocument();
+      await expect.element(palette.getByText("Appearance", { exact: true })).toBeInTheDocument();
+      await palette.getByText("Diff style", { exact: true }).click();
+
+      await waitForURL(mounted.router, (path) => path === "/settings", "Settings should open.");
+      expect(useSettingsDialogStore.getState()).toMatchObject({
+        section: "appearance",
+        editingScope: "client",
+      });
+      await vi.waitFor(() =>
+        expect(document.activeElement?.getAttribute("data-settings-section")).toBe("Diff style"),
+      );
+    } finally {
+      useSettingsDialogStore.getState().closeSettings();
+      await mounted.cleanup();
+    }
+  });
+
+  it("keeps Settings results off the frozen phone tier", async () => {
+    const mounted = await mountChatView({
+      viewport: PHONE_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-command-palette-phone-settings" as MessageId,
+        targetText: "command palette phone settings",
+      }),
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      await vi.waitFor(() =>
+        expect(document.documentElement.getAttribute("data-tier")).toBe("phone"),
+      );
+      useCommandPaletteStore.getState().setOpen(true);
+      const palette = page.getByTestId("command-palette");
+      await page.getByPlaceholder("Search commands, projects, and threads...").fill("diff style");
+      await expect
+        .element(palette.getByText("No matching commands, projects, or threads."))
+        .toBeInTheDocument();
+      expect(palette.element().textContent).not.toContain("Diff style");
+    } finally {
+      useCommandPaletteStore.getState().setOpen(false);
+      await mounted.cleanup();
+    }
+  });
+
   // Adding a project: desktop tiers use the add-project dialog (A26); the frozen
   // phone tier keeps the command palette's add-project views.
 
@@ -1024,6 +1380,76 @@ describe("ChatView Navigation (full app)", () => {
         .element(page.getByTestId("add-project-done"))
         .toMatchTextContent(/Development is on Studio Mac/);
     } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("adds a folder handed over with its path once, without showing the source list", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotWithSecondaryProject(),
+      resolveRpc: (body) =>
+        body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+          ? { sequence: fixture.snapshot.snapshotSequence + 1 }
+          : undefined,
+      // The dev app replays the palette's mount effects; the folder is still added once.
+      strictMode: true,
+    });
+    const projectCreates = () =>
+      wsRequests.filter(
+        (request) =>
+          request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+          request.type === "project.create",
+      );
+
+    // The palette mounts for the flow, but never shows the add-project sources.
+    let sawSourceList = false;
+    const observer = new MutationObserver(() => {
+      sawSourceList ||=
+        document
+          .querySelector('[data-testid="command-palette"]')
+          ?.textContent?.includes("Local folder") === true;
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+
+    try {
+      await waitForServerConfigToApply();
+      // A folder that already is a project opens it instead of adding it again.
+      useCommandPaletteStore.getState().openAddProject({
+        path: "/repo/clients/docs-portal",
+        environmentId: LOCAL_ENVIRONMENT_ID,
+      });
+      await waitForURL(
+        mounted.router,
+        (path) => path === serverThreadPath("thread-secondary-project" as ThreadId),
+        "Route should have changed to the existing project's latest thread.",
+      );
+      await vi.waitFor(() => expect(useCommandPaletteStore.getState().open).toBe(false));
+      expect(projectCreates()).toHaveLength(0);
+
+      useCommandPaletteStore.getState().openAddProject({ path: "/repo/new" });
+      await vi.waitFor(
+        () => {
+          expect(projectCreates()).toEqual([
+            expect.objectContaining({
+              workspaceRoot: "/repo/new",
+              projectMetadataDir: ".ryco",
+              title: "new",
+            }),
+          ]);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+      await waitForURL(
+        mounted.router,
+        (path) => UUID_ROUTE_RE.test(path),
+        "Route should have changed to a new draft thread after adding the folder.",
+      );
+      await vi.waitFor(() => expect(useCommandPaletteStore.getState().open).toBe(false));
+      expect(projectCreates()).toHaveLength(1);
+      expect(sawSourceList).toBe(false);
+    } finally {
+      observer.disconnect();
       await mounted.cleanup();
     }
   });

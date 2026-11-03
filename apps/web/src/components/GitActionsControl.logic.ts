@@ -86,6 +86,8 @@ export function buildGitActionProgressStages(input: {
   pushTarget?: string;
   featureBranch?: boolean;
   shouldPushBeforePr?: boolean;
+  /** The user wrote both the title and the description, so none is generated. */
+  hasCustomPullRequestText?: boolean;
   terminology?: ChangeRequestTerminology;
 }): string[] {
   const terminology = input.terminology ?? DEFAULT_CHANGE_REQUEST_TERMINOLOGY;
@@ -93,7 +95,7 @@ export function buildGitActionProgressStages(input: {
   const pushStage = input.pushTarget ? `Pushing to ${input.pushTarget}...` : "Pushing...";
   const prStages = [
     `Preparing ${terminology.shortLabel}...`,
-    `Generating ${terminology.shortLabel} content...`,
+    ...(input.hasCustomPullRequestText ? [] : [`Generating ${terminology.shortLabel} content...`]),
     `Creating ${terminology.singular}...`,
   ];
 
@@ -123,6 +125,8 @@ export function buildMenuItems(
   gitStatus: VcsStatusResult | null,
   isBusy: boolean,
   hasPrimaryRemote = true,
+  /** The node takes pull request options, so Create PR opens its dialog (commit and push included). */
+  createPrDialog = false,
 ): GitActionMenuItem[] {
   if (!gitStatus) return [];
   const terminology = resolveChangeRequestTerminology(gitStatus);
@@ -149,6 +153,8 @@ export function buildMenuItems(
     !isBehind &&
     (gitStatus.hasUpstream || canPushWithoutUpstream);
   const canOpenPr = !isBusy && hasOpenPr;
+  const canOpenCreatePrDialog =
+    resolveCreatePrExecution({ gitStatus, isBusy, hasPrimaryRemote }).kind === "run_action";
 
   const commitItem: GitActionMenuItem = {
     id: "commit",
@@ -184,7 +190,7 @@ export function buildMenuItems(
       : {
           id: "pr",
           label: `Create ${terminology.shortLabel}`,
-          disabled: !canCreatePr,
+          disabled: createPrDialog ? !canOpenCreatePrDialog : !canCreatePr,
           icon: "pr",
           kind: "open_dialog",
           dialogAction: "create_pr",
@@ -196,6 +202,106 @@ export function buildMenuItems(
 export const GIT_ACTION_BUSY_HINT = "Git action in progress.";
 export const GIT_STATUS_UNAVAILABLE_HINT = "Git status is unavailable.";
 export const GIT_DIVERGED_HINT = "Branch has diverged from upstream. Rebase/merge first.";
+
+export type CreatePrExecution =
+  | { kind: "run_action"; action: "create_pr" | "commit_push_pr" }
+  | { kind: "open_pr" }
+  | { kind: "unavailable"; hint: string };
+
+/**
+ * Create PR runs whichever stacked action completes the missing steps (commit, push, pull
+ * request) from the current state. A branch behind its upstream stays blocked, so the action
+ * never has to merge; the default ref keeps its confirmation (asked by the runner).
+ */
+export function resolveCreatePrExecution(input: {
+  gitStatus: VcsStatusResult | null;
+  isBusy: boolean;
+  hasPrimaryRemote: boolean;
+}): CreatePrExecution {
+  const { gitStatus } = input;
+  if (input.isBusy) return { kind: "unavailable", hint: GIT_ACTION_BUSY_HINT };
+  if (!gitStatus) return { kind: "unavailable", hint: GIT_STATUS_UNAVAILABLE_HINT };
+  const terminology = resolveChangeRequestTerminology(gitStatus);
+  if (gitStatus.pr?.state === "open") return { kind: "open_pr" };
+  if (gitStatus.refName === null) {
+    return {
+      kind: "unavailable",
+      hint: `Create and checkout a ref before opening a ${terminology.singular}.`,
+    };
+  }
+  if (gitStatus.behindCount > 0) {
+    return {
+      kind: "unavailable",
+      hint:
+        gitStatus.aheadCount > 0
+          ? GIT_DIVERGED_HINT
+          : `Branch is behind upstream. Pull before creating a ${terminology.shortLabel}.`,
+    };
+  }
+  if (!gitStatus.hasUpstream && !input.hasPrimaryRemote) {
+    return {
+      kind: "unavailable",
+      hint: `Add a remote before creating a ${terminology.shortLabel}.`,
+    };
+  }
+  if (gitStatus.hasWorkingTreeChanges) return { kind: "run_action", action: "commit_push_pr" };
+  if ((gitStatus.aheadOfDefaultCount ?? gitStatus.aheadCount) > 0) {
+    return { kind: "run_action", action: "create_pr" };
+  }
+  return {
+    kind: "unavailable",
+    hint: `No branch changes to include in a ${terminology.shortLabel}.`,
+  };
+}
+
+export interface CreatePrDialogContext {
+  gitStatus: VcsStatusResult | null;
+  isBusy: boolean;
+  isDefaultRef: boolean;
+  hasPrimaryRemote: boolean;
+}
+
+/**
+ * The dialog's action, honouring its "Commit and push local changes" toggle: with the toggle
+ * off a dirty tree counts as clean, so the pull request takes the committed work only (and is
+ * unavailable when nothing is committed).
+ */
+export function resolveCreatePrDialogExecution(
+  context: CreatePrDialogContext,
+  includeLocalChanges: boolean,
+): CreatePrExecution {
+  const { gitStatus } = context;
+  if (!gitStatus || includeLocalChanges || !gitStatus.hasWorkingTreeChanges) {
+    return resolveCreatePrExecution(context);
+  }
+  return resolveCreatePrExecution({
+    ...context,
+    gitStatus: { ...gitStatus, hasWorkingTreeChanges: false },
+  });
+}
+
+export interface CreatePrDialogView {
+  refName: string | null;
+  /** The head is not on the remote yet: unpublished, or a feature ref made off the default ref. */
+  isNewBranch: boolean;
+  /** Submitting first creates an auto-named feature ref (the default-ref flow). */
+  willCreateFeatureBranch: boolean;
+  showCommitToggle: boolean;
+  insertions: number;
+  deletions: number;
+}
+
+export function resolveCreatePrDialogView(context: CreatePrDialogContext): CreatePrDialogView {
+  const { gitStatus } = context;
+  return {
+    refName: gitStatus?.refName ?? null,
+    isNewBranch: context.isDefaultRef || gitStatus?.hasUpstream !== true,
+    willCreateFeatureBranch: context.isDefaultRef,
+    showCommitToggle: gitStatus?.hasWorkingTreeChanges === true,
+    insertions: gitStatus?.workingTree.insertions ?? 0,
+    deletions: gitStatus?.workingTree.deletions ?? 0,
+  };
+}
 
 export function resolveQuickAction(
   gitStatus: VcsStatusResult | null,

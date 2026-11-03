@@ -7,6 +7,11 @@ import {
   resolveModelFavoriteForRow,
   getModelFavoriteEffortLabel,
 } from "@ryco/client-runtime/state/composer";
+import {
+  foldsAsLegacy,
+  splitLegacyModels,
+} from "@ryco/client-runtime/state/composer/legacyModelFold";
+import { formatProviderUpdateRequiredNotice } from "@ryco/client-runtime/state/composer/providerUpdateRequiredNotice";
 import type { ModelFavorite } from "@ryco/contracts/settings";
 import type { ModelCapabilities, ProviderOptionSelection } from "@ryco/contracts";
 import { usePaneEffect, usePaneFocus } from "./PaneFocus";
@@ -25,11 +30,11 @@ import {
   useRef,
   type ReactNode,
 } from "react";
-import { SearchIcon } from "lucide-react";
+import { ChevronDownIcon, SearchIcon } from "lucide-react";
 import { ModelListRow } from "./ModelListRow";
 import { ModelPickerSidebar } from "./ModelPickerSidebar";
 import { buildModelPickerSearchText, scoreModelPickerSearch } from "./modelPickerSearch";
-import { Combobox, ComboboxEmpty, ComboboxInput, ComboboxList } from "../ui/combobox";
+import { Combobox, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList } from "../ui/combobox";
 import {
   ModelEsque,
   PROVIDER_ICON_BY_PROVIDER,
@@ -64,14 +69,23 @@ type ModelPickerItem = {
   instanceDisplayName: string;
   instanceAccentColor?: string | undefined;
   continuationGroupKey?: string | undefined;
+  isLegacy?: boolean | undefined;
+  isCustom?: boolean | undefined;
 };
 
 const EMPTY_MODEL_JUMP_LABELS = new Map<string, string>();
+const NO_EXPANDED_LEGACY_SECTIONS: ReadonlySet<ProviderInstanceId> = new Set();
 
 function itemKey(model: ModelPickerItem): string {
   return model.favorite
     ? modelFavoriteKey(model.favorite)
     : providerModelKey(model.instanceId, model.slug);
+}
+
+// Instance ids start with a letter and favorite keys with `[`, so a `#` key
+// never collides with a model row.
+function legacySectionKey(instanceId: ProviderInstanceId): string {
+  return `#legacy:${instanceId}`;
 }
 
 export const ModelPickerContent = memo(function ModelPickerContent(props: {
@@ -128,6 +142,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     onInstanceModelChange,
   } = props;
   const [searchQuery, setSearchQuery] = useState("");
+  // Legacy sections the user opened. Every open of the picker starts folded.
+  const [expandedLegacySections, setExpandedLegacySections] = useState(NO_EXPANDED_LEGACY_SECTIONS);
   const paneFocused = usePaneFocus();
   const searchInputRef = useRef<HTMLInputElement>(null);
   const listRegionRef = useRef<HTMLDivElement>(null);
@@ -202,6 +218,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     return index;
   }, [instanceEntries]);
   const currentModelKey = providerModelKey(props.activeInstanceId, props.model);
+  // The active model as the picker opened (the popup remounts on every open).
+  const [openedModelKey] = useState(currentModelKey);
   const currentFavorite = useMemo(
     () =>
       createModelFavorite(
@@ -271,6 +289,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
           ...(entry.continuationGroupKey
             ? { continuationGroupKey: entry.continuationGroupKey }
             : {}),
+          ...(model.isLegacy ? { isLegacy: true } : {}),
+          ...(model.isCustom ? { isCustom: true } : {}),
         });
       }
     }
@@ -446,6 +466,81 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     selectedInstanceId,
   ]);
 
+  // One instance's list (a provider tab or a locked picker) folds its legacy
+  // models into a collapsed section after the current ones. Search shows them
+  // inline, and Favorites lists exactly what the user starred.
+  const showsFavorites = !isLocked && selectedInstanceId === "favorites";
+  // Favorites and the model that was active when the picker opened never fold.
+  // Pinning the live active model instead would lift a row picked from the open
+  // section above its header while a tuning footer keeps the picker open,
+  // sliding another row under the pointer.
+  const isPinnedModel = useCallback(
+    (model: Pick<ModelPickerItem, "instanceId" | "slug">): boolean => {
+      const key = providerModelKey(model.instanceId, model.slug);
+      return key === openedModelKey || favoritesSet.has(key);
+    },
+    [favoritesSet, openedModelKey],
+  );
+  const legacyFold = useMemo(() => {
+    if (isSearching || showsFavorites) return null;
+    const instanceId = filteredModels[0]?.instanceId;
+    if (!instanceId || filteredModels.some((model) => model.instanceId !== instanceId)) {
+      return null;
+    }
+    const { current, legacy } = splitLegacyModels(filteredModels, isPinnedModel);
+    if (legacy.length === 0) return null;
+    const key = legacySectionKey(instanceId);
+    const expanded = expandedLegacySections.has(instanceId);
+    return {
+      key,
+      instanceId,
+      expanded,
+      legacyCount: legacy.length,
+      visibleModels: expanded ? [...current, ...legacy] : current,
+      itemKeys: [...current.map(itemKey), key, ...(expanded ? legacy.map(itemKey) : [])],
+    };
+  }, [expandedLegacySections, filteredModels, isPinnedModel, isSearching, showsFavorites]);
+  const visibleModels = legacyFold?.visibleModels ?? filteredModels;
+  const toggleLegacySection = useCallback((instanceId: ProviderInstanceId) => {
+    setExpandedLegacySections((expanded) => {
+      const next = new Set(expanded);
+      if (!next.delete(instanceId)) next.add(instanceId);
+      return next;
+    });
+  }, []);
+
+  // Current catalog models this instance's CLI is too old to run, under the
+  // list of the instance on screen, or of every instance the search covers.
+  const updateRequiredNotices = useMemo(() => {
+    const acrossInstances = isSearching || (isLocked && !showLockedInstanceSidebar);
+    const shown = setupInstanceEntries.filter((entry) =>
+      acrossInstances ? matchesLockedProvider(entry) : entry.instanceId === selectedInstanceId,
+    );
+    return shown.flatMap((entry) => {
+      const notice = formatProviderUpdateRequiredNotice(entry.snapshot, searchQuery);
+      if (!notice) return [];
+      // Search rows from two instances of one driver carry their instance's
+      // name, so its notice does too.
+      const sharesDriver = shown.some(
+        (other) => other !== entry && other.driverKind === entry.driverKind,
+      );
+      return [
+        {
+          instanceId: entry.instanceId,
+          notice: sharesDriver ? `${entry.displayName}: ${notice}` : notice,
+        },
+      ];
+    });
+  }, [
+    isLocked,
+    isSearching,
+    matchesLockedProvider,
+    searchQuery,
+    selectedInstanceId,
+    setupInstanceEntries,
+    showLockedInstanceSidebar,
+  ]);
+
   const handleModelSelect = useCallback(
     (
       modelSlug: string,
@@ -521,7 +616,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       string,
       NonNullable<ReturnType<typeof modelPickerJumpCommandForIndex>>
     >();
-    for (const [visibleModelIndex, model] of filteredModels.entries()) {
+    for (const [visibleModelIndex, model] of visibleModels.entries()) {
       const jumpCommand = modelPickerJumpCommandForIndex(visibleModelIndex);
       if (!jumpCommand) {
         return mapping;
@@ -529,20 +624,24 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       mapping.set(itemKey(model), jumpCommand);
     }
     return mapping;
-  }, [filteredModels]);
+  }, [visibleModels]);
   const modelJumpModelKeys = useMemo(
     () => [...modelJumpCommandByKey.keys()],
     [modelJumpCommandByKey],
   );
-  const allModelKeys = useMemo(
-    (): string[] => [...new Set([...flatModels, ...filteredModels].map(itemKey))],
-    [flatModels, filteredModels],
+  const allModelKeys = useMemo((): string[] => {
+    const keys = [...new Set([...flatModels, ...filteredModels].map(itemKey))];
+    return legacyFold ? [...keys, legacyFold.key] : keys;
+  }, [flatModels, filteredModels, legacyFold]);
+  // The combobox rows in order: models, plus the legacy section row when one folds.
+  const filteredModelKeys = useMemo(
+    (): string[] => legacyFold?.itemKeys ?? filteredModels.map(itemKey),
+    [filteredModels, legacyFold],
   );
-  const filteredModelKeys = useMemo((): string[] => filteredModels.map(itemKey), [filteredModels]);
   const filteredModelByKey = useMemo(
     (): ReadonlyMap<string, ModelPickerItem> =>
-      new Map(filteredModels.map((model) => [itemKey(model), model] as const)),
-    [filteredModels],
+      new Map(visibleModels.map((model) => [itemKey(model), model] as const)),
+    [visibleModels],
   );
   const modelJumpShortcutContext = useMemo(
     () =>
@@ -653,7 +752,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     };
   }, [filteredModelKeys]);
 
-  const selectedRow = filteredModels.find(
+  const selectedRow = visibleModels.find(
     (model) =>
       model.instanceId === props.activeInstanceId &&
       model.slug === props.model &&
@@ -664,21 +763,38 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
 
   const hasTuning = props.tuning !== undefined && props.tuning !== null;
   const stepperRef = useRef<TuningStepper | null>(null);
-  const activeModelLabel = useMemo(() => {
-    const active = flatModels.find(
-      (model) => model.instanceId === props.activeInstanceId && model.slug === props.model,
-    );
-    return active ? getTriggerDisplayModelName(active) : null;
-  }, [flatModels, props.activeInstanceId, props.model]);
+  const activeModel = useMemo(
+    () =>
+      flatModels.find(
+        (model) => model.instanceId === props.activeInstanceId && model.slug === props.model,
+      ),
+    [flatModels, props.activeInstanceId, props.model],
+  );
+  const activeModelLabel = activeModel ? getTriggerDisplayModelName(activeModel) : null;
   const revealActiveModel = useCallback(() => {
     setSearchQuery("");
     if (!isLocked || showLockedInstanceSidebar) setRequestedInstanceId(props.activeInstanceId);
+    // A model picked from the open legacy section stays in it, so open the
+    // section again when it was folded since.
+    if (activeModel && foldsAsLegacy(activeModel, isPinnedModel)) {
+      const { instanceId } = activeModel;
+      setExpandedLegacySections((expanded) =>
+        expanded.has(instanceId) ? expanded : new Set(expanded).add(instanceId),
+      );
+    }
     window.requestAnimationFrame(() => {
       const selected = listRegionRef.current?.querySelector<HTMLElement>("[data-selected]");
       selected?.scrollIntoView({ block: "nearest" });
       focusSearchInput();
     });
-  }, [focusSearchInput, isLocked, props.activeInstanceId, showLockedInstanceSidebar]);
+  }, [
+    activeModel,
+    focusSearchInput,
+    isLocked,
+    isPinnedModel,
+    props.activeInstanceId,
+    showLockedInstanceSidebar,
+  ]);
   const tuningBridge = useMemo<ModelPickerTuningBridge>(
     () => ({
       activeModelLabel,
@@ -734,6 +850,10 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
           if (typeof modelKey !== "string") {
             return;
           }
+          if (modelKey === legacyFold?.key) {
+            toggleLegacySection(legacyFold.instanceId);
+            return;
+          }
           const target = filteredModelByKey.get(modelKey);
           if (!target) return;
           // With a tuning footer, a pointer pick of another row switches the
@@ -780,6 +900,10 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                   (e as typeof e & { preventBaseUIHandler?: () => void }).preventBaseUIHandler?.();
                   e.preventDefault();
                   e.stopPropagation();
+                  if (highlightedModelKeyRef.current === legacyFold?.key) {
+                    toggleLegacySection(legacyFold.instanceId);
+                    return;
+                  }
                   const target = filteredModelByKey.get(highlightedModelKeyRef.current);
                   if (target) handleModelSelect(target.slug, target.instanceId, target.favorite);
                   return;
@@ -799,6 +923,37 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
           >
             <ComboboxList className="model-picker-list size-full divide-y px-2 py-1">
               {filteredModelKeys.map((modelKey, index) => {
+                if (modelKey === legacyFold?.key) {
+                  return (
+                    <ComboboxItem
+                      key={modelKey}
+                      hideIndicator
+                      index={index}
+                      value={modelKey}
+                      aria-expanded={legacyFold.expanded}
+                      data-model-picker-legacy-section=""
+                      contentClassName="flex w-full items-center gap-2"
+                      className="w-full cursor-pointer rounded px-3 py-2 transition-colors data-highlighted:bg-muted"
+                    >
+                      <div className="min-w-0 flex-1 text-left text-xs leading-snug">
+                        <div>Legacy models</div>
+                        <div className="mt-0.5 text-muted-foreground/70">
+                          {legacyFold.legacyCount === 1
+                            ? "1 model"
+                            : `${legacyFold.legacyCount} models`}
+                        </div>
+                      </div>
+                      {/* The trigger's chevron, turned: an icon new to this chunk would
+                          split the shared lucide chunks and cost the chat route a file. */}
+                      <ChevronDownIcon
+                        className={cn(
+                          "size-4 shrink-0 text-muted-foreground transition-transform",
+                          !legacyFold.expanded && "-rotate-90",
+                        )}
+                      />
+                    </ComboboxItem>
+                  );
+                }
                 const model = filteredModelByKey.get(modelKey);
                 const row = rowStateByKey.get(modelKey);
                 if (!model || !row) {
@@ -833,6 +988,15 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
           <ComboboxEmpty className="not-empty:py-6 empty:h-0 text-xs font-normal leading-snug">
             No models found
           </ComboboxEmpty>
+          {updateRequiredNotices.map(({ instanceId, notice }) => (
+            <p
+              key={instanceId}
+              className="shrink-0 border-t px-3 py-2 text-xs leading-snug text-muted-foreground"
+              data-model-picker-update-notice=""
+            >
+              {notice}
+            </p>
+          ))}
         </div>
       </Combobox>
     </div>

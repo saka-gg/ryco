@@ -79,6 +79,26 @@ it.layer(NodeServices.layer)("ServerAuthPolicyLive", (it) => {
     ),
   );
 
+  it.effect("names a dev server's cookie after its state directory, not the shared name", () =>
+    Effect.gen(function* () {
+      const policy = yield* ServerAuthPolicy;
+      const descriptor = yield* policy.getDescriptor();
+
+      // Another worktree's dev server on this host must not overwrite it (auth/utils.test.ts
+      // covers the name itself).
+      expect(descriptor.sessionCookieName).toMatch(/^ryco_session_dev_[0-9a-f]{8}$/);
+    }).pipe(
+      Effect.provide(
+        makeServerAuthPolicyLayer({
+          mode: "web",
+          host: "127.0.0.1",
+          port: 13790,
+          devUrl: new URL("http://localhost:5750"),
+        }),
+      ),
+    ),
+  );
+
   it.effect("uses remote-reachable policy for wildcard web hosts", () =>
     Effect.gen(function* () {
       const policy = yield* ServerAuthPolicy;

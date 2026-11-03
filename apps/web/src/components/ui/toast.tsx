@@ -396,7 +396,8 @@ interface ToastProviderProps extends Toast.Provider.Props {
   position?: ToastPosition;
 }
 
-function useActiveThreadRefFromRoute(): ScopedThreadRef | null {
+/** The thread the route shows; on a draft route, the thread the draft starts. */
+export function useActiveThreadRefFromRoute(): ScopedThreadRef | null {
   const routeTarget = useParams({
     strict: false,
     select: (params) => resolveThreadRouteTarget(params),

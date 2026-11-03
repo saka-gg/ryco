@@ -258,7 +258,7 @@ const exportFromA = (
             ...include,
           },
         },
-        channel: "direct",
+        channel: "encrypted",
       });
       return { exportId, result };
     }),
@@ -300,7 +300,7 @@ const transferArtifacts = (
                 offset,
                 length: PROJECT_COPY_CHUNK_BYTES,
               },
-              "direct",
+              "encrypted",
             );
           }),
         );

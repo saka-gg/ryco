@@ -11,6 +11,14 @@ const snapshot = (revision: string): GitLocalChangesResult => ({
   staged: { patch: "", files: [] },
   unstaged: { patch: "diff", files: [] },
 });
+const stagedSnapshot = (stagedRevision?: string): GitLocalChangesResult => ({
+  ...snapshot("review"),
+  ...(stagedRevision ? { stagedRevision } : {}),
+  staged: {
+    patch: "diff",
+    files: [{ id: "file", hunkCount: 1, fileAction: true, hunkAction: true }],
+  },
+});
 const selection = { scope: "unstaged" as const, fileId: "file", hunkIndex: 1 };
 describe("local changes controller", () => {
   it("binds mutations to the displayed snapshot, serializes and refreshes after success", async () => {
@@ -49,6 +57,84 @@ describe("local changes controller", () => {
       error: "Delivery uncertain",
       isApplying: false,
     });
+  });
+  it("commits only the displayed staged revision, once, and refreshes after success", async () => {
+    let finish!: () => void;
+    const commit = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const read = vi.fn(async () => stagedSnapshot("reviewed"));
+    const c = createLocalChangesController({ cwd: "/repo", read, apply: vi.fn() });
+    await c.refresh();
+    const request = c.commitStaged(commit);
+    expect(c.getSnapshot().isCommitting).toBe(true);
+    expect(await c.commitStaged(commit)).toBe(false);
+    await c.apply(selection);
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(commit).toHaveBeenCalledWith({ cwd: "/repo", expectedRevision: "reviewed" });
+    read.mockResolvedValue(snapshot("after"));
+    finish();
+    expect(await request).toBe(true);
+    expect(c.getSnapshot()).toMatchObject({ isCommitting: false, error: null });
+    expect(c.getSnapshot().data?.revision).toBe("after");
+  });
+  it("needs staged changes and a staged revision, and requires fresh review after failure", async () => {
+    const commit = vi.fn(async () => {
+      throw new Error("The staged changes, HEAD or branch moved since your review.");
+    });
+    const read = vi.fn(async () => stagedSnapshot());
+    const c = createLocalChangesController({ cwd: "/repo", read, apply: vi.fn() });
+    await c.refresh();
+    expect(await c.commitStaged(commit)).toBe(false);
+    read.mockResolvedValue(snapshot("nothing staged"));
+    await c.refresh();
+    expect(await c.commitStaged(commit)).toBe(false);
+    expect(commit).not.toHaveBeenCalled();
+    read.mockResolvedValue(stagedSnapshot("reviewed"));
+    await c.refresh();
+    expect(await c.commitStaged(commit)).toBe(false);
+    expect(await c.commitStaged(commit)).toBe(false);
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(read).toHaveBeenCalledTimes(3);
+    expect(c.getSnapshot()).toMatchObject({
+      data: null,
+      error: "The staged changes, HEAD or branch moved since your review.",
+      isCommitting: false,
+    });
+  });
+  it("keeps the review when the commit message could not be generated, then commits a typed one", async () => {
+    const generationFailed = Object.assign(new Error("Text generation failed"), {
+      _tag: "TextGenerationError",
+      operation: "generateCommitMessage",
+      detail: "Codex CLI command failed: ERROR: unexpected status 401 Unauthorized.",
+    });
+    const commit = vi.fn(async (): Promise<void> => {
+      throw generationFailed;
+    });
+    const read = vi.fn(async () => stagedSnapshot("reviewed"));
+    const c = createLocalChangesController({ cwd: "/repo", read, apply: vi.fn() });
+    await c.refresh();
+    expect(await c.commitStaged(commit, "  ")).toBe(false);
+    expect(commit).toHaveBeenCalledWith({ cwd: "/repo", expectedRevision: "reviewed" });
+    expect(c.getSnapshot()).toMatchObject({
+      error: null,
+      isCommitting: false,
+      commitError:
+        "No commit: the commit message could not be generated (Codex CLI command failed: ERROR: unexpected status 401 Unauthorized). Type a message and commit again.",
+    });
+    expect(c.getSnapshot().data?.stagedRevision).toBe("reviewed");
+    commit.mockResolvedValue(undefined);
+    expect(await c.commitStaged(commit, " Fix the greeting ")).toBe(true);
+    expect(commit).toHaveBeenLastCalledWith({
+      cwd: "/repo",
+      expectedRevision: "reviewed",
+      commitMessage: "Fix the greeting",
+    });
+    expect(c.getSnapshot().commitError).toBeNull();
+    expect(read).toHaveBeenCalledTimes(2);
   });
   it("ignores reads and write completion from an invalidated connection generation", async () => {
     let resolveRead!: (data: GitLocalChangesResult) => void;

@@ -1,4 +1,8 @@
 import "./polyfills";
+// Second, and bare, so it evaluates before every other module of the app and a crash anywhere
+// after it is kept for Settings > About > Diagnostics (metroStartupConfig.test.ts). Its file
+// store loads only when an error is fatal (mobileStartupImports.test.ts).
+import "./src/diagnostics/fatalErrorRecorderEntry";
 // Import-time registrations. Metro inlines requires (metro.config.js), so a
 // module is evaluated at its first use; bare imports are never inlined, which
 // keeps these lazy configurators registered at startup, before any runtime
@@ -25,6 +29,16 @@ if (__DEV__) {
   (
     require("./src/devtools/e2eeVectorRunner") as typeof import("./src/devtools/e2eeVectorRunner")
   ).installE2eeVectorRunnerDevHook();
+}
+
+// The render counter `scripts/measure-renders.mts` reads through the inspector.
+// Same `__DEV__` fold as above, so a release bundle never contains it; the
+// flag keeps it off in ordinary dev sessions. It must load before
+// `registerRootComponent` renders anything, to see every commit.
+if (__DEV__ && process.env.EXPO_PUBLIC_RYCO_RENDER_COUNTER === "1") {
+  (
+    require("./src/devtools/renderCounter") as typeof import("./src/devtools/renderCounter")
+  ).installRenderCounterDevHook();
 }
 
 registerRootComponent(App);

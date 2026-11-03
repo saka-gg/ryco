@@ -1,10 +1,40 @@
 import type { EnvironmentId, OrchestrationEvent, ThreadId } from "@ryco/contracts";
+import { CHECKPOINT_REVERT_ACTIVITY_KIND } from "@ryco/contracts/orchestration";
 import { projectScriptCwd } from "@ryco/shared/projectScripts";
 
 import { selectEnvironmentState, useStore } from "~/store";
 import { invalidateProjectSearchEntries } from "./projectAtoms";
 
 type InvalidateProjectSearchEntries = typeof invalidateProjectSearchEntries;
+
+/**
+ * The thread whose checkout an event changed files in, or null. A files-only revert
+ * (`thread.files.revert`) changes files without `thread.reverted`: its journal row
+ * reaching an end says so.
+ */
+function threadWithChangedFiles(event: OrchestrationEvent): ThreadId | null {
+  if (event.type === "thread.turn-diff-completed" || event.type === "thread.reverted") {
+    return event.payload.threadId;
+  }
+  return isFinishedFilesRevert(event) ? event.payload.threadId : null;
+}
+
+function isFinishedFilesRevert(
+  event: OrchestrationEvent,
+): event is Extract<OrchestrationEvent, { type: "thread.activity-appended" }> {
+  if (event.type !== "thread.activity-appended") return false;
+  const { activity } = event.payload;
+  if (activity.kind !== CHECKPOINT_REVERT_ACTIVITY_KIND) return false;
+  const payload = activity.payload as {
+    readonly status?: unknown;
+    readonly rollbackConversation?: unknown;
+  } | null;
+  return (
+    payload?.rollbackConversation === false &&
+    payload.status !== "requested" &&
+    payload.status !== "restoring-files"
+  );
+}
 
 /**
  * Turn diffs and reverts change files in one thread's checkout. The queue
@@ -51,15 +81,14 @@ export function createProjectSearchInvalidationQueue(
   return {
     noteEvents: (environmentId, events) => {
       for (const event of events) {
-        if (event.type !== "thread.turn-diff-completed" && event.type !== "thread.reverted") {
-          continue;
-        }
+        const threadId = threadWithChangedFiles(event);
+        if (threadId === null) continue;
         let threads = pendingThreadsByEnvironment.get(environmentId);
         if (!threads) {
           threads = new Set();
           pendingThreadsByEnvironment.set(environmentId, threads);
         }
-        threads.add(event.payload.threadId);
+        threads.add(threadId);
       }
     },
     flush: () => {

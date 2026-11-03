@@ -5,9 +5,18 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import type { ServerProviderRateLimits } from "@ryco/contracts";
+import { claudeNonLoginCredentialSource } from "@ryco/shared/claudeCredentialVariables";
 import { Cache, type Duration, Effect } from "effect";
 
 import { parseProviderSourcePaths } from "../ProviderSourcePaths.ts";
+import {
+  credentialUsageReadPlan,
+  parseCredentialExpiresAtMs,
+  requestUsage,
+  usageAccountKey,
+  type UsageReadGate,
+  type UsageReadPlan,
+} from "../usageReadGate.ts";
 import {
   CLAUDE_OAUTH_BETA_HEADER,
   CLAUDE_OAUTH_USAGE_URL,
@@ -21,35 +30,12 @@ import {
  */
 const KEYCHAIN_SERVICE_NAME = "Claude Code-credentials";
 const KEYCHAIN_FALLBACK_ACCOUNT = "claude-code-user";
-const TOKEN_EXPIRY_SKEW_MS = 60_000;
 const USAGE_REQUEST_TIMEOUT_MS = 10_000;
-
-// Claude Code's own credential and provider selection, checked against Claude Code 2.1.296.
-// Each of these makes it authenticate with something other than the local claude.ai login, or
-// send that login to another endpoint, so the login's usage would describe another account.
-const NON_LOGIN_CREDENTIAL_VARIABLES = [
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_AUTH_TOKEN",
-  "ANTHROPIC_BASE_URL",
-  "ANTHROPIC_PROFILE",
-  "ANTHROPIC_UNIX_SOCKET",
-  "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
-  "CLAUDE_CODE_OAUTH_TOKEN",
-  "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
-] as const;
-const THIRD_PARTY_PROVIDER_FLAGS = [
-  "CLAUDE_CODE_USE_BEDROCK",
-  "CLAUDE_CODE_USE_VERTEX",
-  "CLAUDE_CODE_USE_FOUNDRY",
-  "CLAUDE_CODE_USE_ANTHROPIC_AWS",
-  "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
-  "CLAUDE_CODE_USE_MANTLE",
-  "CLAUDE_CODE_USE_GATEWAY",
-] as const;
 
 interface ClaudeCredentials {
   readonly claudeAiOauth?: {
     readonly accessToken?: string;
+    readonly refreshToken?: string;
     readonly expiresAt?: string | number;
     readonly subscriptionType?: string;
     readonly rateLimitTier?: string;
@@ -73,11 +59,6 @@ export interface ClaudeLoginAccount {
   readonly tokenSource: string | undefined;
 }
 
-// Claude Code's reading of its boolean variables.
-function isClaudeEnvFlagSet(value: string | undefined): boolean {
-  return ["1", "true", "yes", "on"].includes(value?.trim().toLowerCase() ?? "");
-}
-
 function usesLocalClaudeLogin(
   environment: NodeJS.ProcessEnv,
   account: ClaudeLoginAccount,
@@ -85,11 +66,9 @@ function usesLocalClaudeLogin(
   // Claude Code reports a subscription, and no token source, only while it authenticates with its
   // claude.ai login; a "claude.ai" token source means a login exists but something else is used.
   // A base URL set only in its settings files is not reported, so it cannot be detected here.
+  // Any other credential or provider would make the login's usage describe another account.
   if (account.subscriptionType === undefined || account.tokenSource !== undefined) return false;
-  return (
-    !NON_LOGIN_CREDENTIAL_VARIABLES.some((name) => environment[name]?.trim()) &&
-    !THIRD_PARTY_PROVIDER_FLAGS.some((name) => isClaudeEnvFlagSet(environment[name]))
-  );
+  return claudeNonLoginCredentialSource(environment) === undefined;
 }
 
 function keychainService(configDir: string | undefined): string {
@@ -190,27 +169,16 @@ async function readClaudeCredentials(store: ClaudeCredentialStore): Promise<{
   return credentials ? { credentials, keychain: undefined } : null;
 }
 
-function parseExpiresAtMs(value: string | number | undefined): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value < 1_000_000_000_000 ? value * 1000 : value;
-  }
-  if (typeof value !== "string" || value.trim().length === 0) {
-    return undefined;
-  }
-  const numeric = Number(value);
-  if (Number.isFinite(numeric)) {
-    return numeric < 1_000_000_000_000 ? numeric * 1000 : numeric;
-  }
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
 function claudeUsageUserAgent(version: string | null): string {
   return version ? `claude-code/${version}` : "claude-code";
 }
 
-async function callUsageApi(accessToken: string, version: string | null): Promise<Response> {
-  return fetch(CLAUDE_OAUTH_USAGE_URL, {
+function callUsageApi(
+  fetchImpl: typeof globalThis.fetch,
+  accessToken: string,
+  version: string | null,
+): Promise<Response> {
+  return fetchImpl(CLAUDE_OAUTH_USAGE_URL, {
     signal: AbortSignal.timeout(USAGE_REQUEST_TIMEOUT_MS),
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -232,9 +200,14 @@ function rateLimitWindow(window: ClaudeUsageWindow) {
   };
 }
 
+/**
+ * The usage response as rate limits, read at `nowMs`. The account-wide five-hour and weekly
+ * windows fill the legacy slots; `windows` also carries the model-scoped ones and credit pools.
+ */
 export function parseClaudeUsageRateLimits(
-  data: Record<string, unknown>,
+  data: unknown,
   plan: string | null | undefined,
+  nowMs: number,
 ): ServerProviderRateLimits | undefined {
   const windows = parseClaudeUsageWindows(data);
   const fiveHour = windows.find((window) => window.id === "five_hour");
@@ -249,57 +222,61 @@ export function parseClaudeUsageRateLimits(
     ...(plan ? { limitName: plan, planType: plan } : {}),
     ...(fiveHour ? { primary: rateLimitWindow(fiveHour) } : {}),
     ...(sevenDay ? { secondary: rateLimitWindow(sevenDay) } : {}),
+    windows,
+    observedAt: new Date(nowMs).toISOString(),
   };
 }
 
-async function fetchClaudeUsageRateLimits(
+/**
+ * The usage read of the login in `store` (resolve it with `resolveClaudeLoginStore`): its account
+ * key and the one usage request, or undefined when the store holds no login. An expired token
+ * clears usage without a request; Claude Code refreshes its own tokens.
+ */
+export const planClaudeUsageRead = Effect.fn("planClaudeUsageRead")(function* (
   store: ClaudeCredentialStore,
   version: string | null,
-): Promise<ServerProviderRateLimits | undefined> {
-  const selected = await readClaudeCredentials(store);
-  if (!selected) return undefined;
-  const { credentials } = selected;
-  const oauth = credentials.claudeAiOauth;
-  if (!oauth?.accessToken) return undefined;
+  fetchImpl: typeof globalThis.fetch = fetch,
+): Effect.fn.Return<UsageReadPlan | undefined> {
+  const selected = yield* Effect.tryPromise(() => readClaudeCredentials(store)).pipe(
+    Effect.orElseSucceed(() => null),
+  );
+  const oauth = selected?.credentials.claudeAiOauth;
+  const accessToken = oauth?.accessToken;
+  if (!oauth || !accessToken) return undefined;
 
+  // Keyed on the login's token too, so another login in the same store never gets these
+  // numbers; a token rotation only starts a fresh read state.
+  const accountKey = usageAccountKey(
+    "claude",
+    store.credentialsPath,
+    store.keychain?.service ?? "",
+    oauth.refreshToken ?? accessToken,
+  );
   const plan = oauth.subscriptionType ?? oauth.rateLimitTier ?? null;
-  const expiresAt = parseExpiresAtMs(oauth.expiresAt);
-  if (expiresAt !== undefined && Date.now() > expiresAt - TOKEN_EXPIRY_SKEW_MS) {
-    return undefined;
-  }
-
-  const response = await callUsageApi(oauth.accessToken, version);
-  if (!response.ok) {
-    return undefined;
-  }
-
-  const data = (await response.json()) as Record<string, unknown>;
-  return parseClaudeUsageRateLimits(data, plan);
-}
-
-/** Usage of the login in `store`; resolve it with `resolveClaudeLoginStore`. */
-export const probeClaudeUsageRateLimits = Effect.fn("probeClaudeUsageRateLimits")(function* (
-  store: ClaudeCredentialStore,
-  version: string | null,
-): Effect.fn.Return<ServerProviderRateLimits | undefined> {
-  return yield* Effect.tryPromise({
-    try: () => fetchClaudeUsageRateLimits(store, version),
-    catch: () => undefined,
-  }).pipe(Effect.orElseSucceed(() => undefined));
+  return yield* credentialUsageReadPlan(
+    accountKey,
+    parseCredentialExpiresAtMs(oauth.expiresAt),
+    requestUsage(
+      () => callUsageApi(fetchImpl, accessToken, version),
+      (body, nowMs) => parseClaudeUsageRateLimits(body, plan, nowMs),
+    ),
+  );
 });
 
 /**
- * `probeClaudeUsageRateLimits` behind a cache keyed on the credential store as well as the CLI
- * version, so usage read for one login is never served for another.
+ * Usage reads of this instance's login through its `gate`, behind a cache keyed on the
+ * credential store as well as the CLI version, so usage read for one login is never served for
+ * another.
  */
 export const makeCachedClaudeUsageProbe = Effect.fn("makeCachedClaudeUsageProbe")(function* (
   timeToLive: Duration.Input,
+  gate: UsageReadGate,
 ) {
   const cache = yield* Cache.make({
     capacity: 1,
     timeToLive,
     lookup: (key: ClaudeCredentialStore & { readonly version: string | null }) =>
-      probeClaudeUsageRateLimits(key, key.version),
+      gate.read(planClaudeUsageRead(key, key.version)),
   });
   return (store: ClaudeCredentialStore, version: string | null) =>
     Cache.get(cache, { ...store, version });

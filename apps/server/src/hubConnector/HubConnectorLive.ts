@@ -1,6 +1,7 @@
 import { dirname, join } from "node:path";
 
-import { Config, Context, Effect, Exit, Layer, Option, Scope, Stream } from "effect";
+import { Config, Context, DateTime, Effect, Exit, Layer, Option, Scope, Stream } from "effect";
+import * as SqlClient from "effect/sql/SqlClient";
 import { WsHostedRpcGroup } from "@ryco/contracts";
 import { installE2eeNodeNativePrimitives } from "@ryco/shared/relayE2eeNodeCrypto";
 
@@ -10,7 +11,18 @@ import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts"
 import { makeRpcByteSession } from "../ws/RpcByteSession.ts";
 import { relayRpcPrincipal, type RelayChannelAuthority } from "../ws/RpcPrincipal.ts";
 import { RelayResponseCompressor } from "../ws/relayResponseCompression.ts";
-import { SessionCredentialService } from "../auth/Services/SessionCredentialService.ts";
+import { NODE_LINKED_ACCESS_CHECK_FEATURE } from "@ryco/contracts/node-linked-access";
+import type { RelayCloseReason } from "@ryco/contracts/relay";
+import {
+  makeLinkedAccessCodes,
+  type LinkedCodeSelector,
+} from "../persistence/Layers/LinkedAccessCodes.ts";
+import {
+  SessionCredentialService,
+  type LinkedSessionSelector,
+} from "../auth/Services/SessionCredentialService.ts";
+import { sessionExpiresAtMs } from "../auth/Layers/SessionCredentialService.ts";
+import { AuthSessionRepository } from "../persistence/Services/AuthSessions.ts";
 import { base64UrlEncode } from "../auth/utils.ts";
 import { makeDeviceWsRpcLayer } from "../ws/index.ts";
 import { makeServerWsRpcLayer } from "../ws.ts";
@@ -47,7 +59,17 @@ import {
   nodeE2eeChannelPlaintextCeiling,
 } from "./NodeE2eeRelayChannel.ts";
 import { makeNodeE2eeSessionDirectory } from "./NodeE2eeSessionDirectory.ts";
-import { relayChannelAuthority } from "./relayChannelAuthority.ts";
+import { relayChannelAuthority, relayChannelPrincipal } from "./relayChannelAuthority.ts";
+import {
+  channelDeviceLinks,
+  linkedAccessCloseReaction,
+  linkedAccessOpenNarrowing,
+  startLinkedAccessCheck,
+  linkedAccessDevices,
+  type LinkedAccessCheck,
+} from "./linkedAccessCheck.ts";
+import { makeLinkedAccessAsker } from "./linkedAccessCheckHttp.ts";
+import { linkedAccessRevocation } from "./linkedAccessRevocation.ts";
 import type { RelayChannelSessionFactory } from "./RelayChannelRegistry.ts";
 import type { ProjectionRepositoryError } from "../persistence/Errors.ts";
 import {
@@ -56,12 +78,18 @@ import {
 } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { startThreadReadCacheSync } from "./ThreadReadCacheSync.ts";
+import { startNodeAttentionPublisher } from "../push/attentionPublisherLive.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import {
   nodeAutoSettleAfterDays,
   shellSettlementPolicy,
 } from "../orchestration/threadSettlementInput.ts";
 import { HubConnectorService, type HubConnectorServiceShape } from "./HubConnectorService.ts";
+import { NodePushRegistry } from "../push/NodePushRegistry.ts";
+import {
+  makeNodePushRegistry,
+  PUSH_REGISTRATION_FILE_NAME,
+} from "../push/nodePushRegistryStore.ts";
 
 export {
   awaitHubConnector,
@@ -166,6 +194,8 @@ const offlineE2eeSurface = {
     sign: e2eeOperatorUnavailable,
     commit: e2eeOperatorUnavailable,
   },
+  // No identity to prove; the route answers as it does for a node never enrolled.
+  proveDirectRouteIdentity: async () => undefined,
   // 0 is the generation that has never been issued, which is the truthful
   // reading for a runtime that must not advertise at all (§5.7).
   e2eeGeneration: () => 0,
@@ -195,6 +225,7 @@ const offlineE2eeSurface = {
   | "crossDeviceApproval"
   | "localIntroduction"
   | "nativeNodeClaim"
+  | "proveDirectRouteIdentity"
   | "e2eeGeneration"
   | "applyE2eePolicy"
   | "previewE2eePolicy"
@@ -404,21 +435,79 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
     // Optional so a connector built without the auth stack (tests) still runs;
     // the server always provides it.
     const authSessions = yield* Effect.serviceOption(SessionCredentialService);
-    // Hub-linked direct sessions follow their device: a revoked enrollment or a
-    // withdrawn local authorization ends them, like the relay lease.
+    const authSessionRows = yield* Effect.serviceOption(AuthSessionRepository);
+    // The device's unredeemed linked codes: queries that load with the connector, not at boot.
+    const sqlClient = yield* Effect.serviceOption(SqlClient.SqlClient);
+    const linkedCodes = Option.isNone(sqlClient)
+      ? undefined
+      : yield* makeLinkedAccessCodes.pipe(
+          Effect.provideService(SqlClient.SqlClient, sqlClient.value),
+        );
+    // Hub-linked direct sessions follow their device: a revoked enrollment, a
+    // withdrawn local authorization or an access the Hub withdrew or narrowed
+    // ends them, like the relay lease. Its unredeemed linked codes go with them,
+    // so a code issued just before cannot link it again.
+    // `resweep` sweeps the sessions again a few seconds later, for a code redeemed during the
+    // revocation (`linkedAccessRevocation`). Only where the device cannot legitimately link again
+    // within those seconds: the second sweep would end a link it rightly got after the first.
     const revokeLinkedSessions = (
-      selector: { readonly enrollmentId: string } | { readonly clientFingerprint: string },
-    ) =>
-      Option.isNone(authSessions)
-        ? Promise.resolve()
-        : runPromise(
-            authSessions.value.revokeLinked(selector).pipe(
-              Effect.asVoid,
-              Effect.catchCause((cause) =>
-                Effect.logError("Failed to revoke Hub-linked direct sessions", { cause }),
-              ),
-            ),
-          );
+      selector: LinkedSessionSelector,
+      options: { readonly resweep: boolean; readonly codes?: LinkedCodeSelector } = {
+        resweep: false,
+      },
+    ) => {
+      if (Option.isNone(authSessions)) return Promise.resolve();
+      const revocation = linkedAccessRevocation({
+        revokeCodes:
+          linkedCodes === undefined
+            ? Effect.void
+            : Effect.asVoid(linkedCodes.revoke(options.codes ?? linkedCodeSelector(selector))),
+        revokeSessions: Effect.asVoid(authSessions.value.revokeLinked(selector)),
+      });
+      const done = runPromise(revocation.now);
+      if (options.resweep) void done.then(() => runPromise(revocation.resweep));
+      return done;
+    };
+    // A device's pending codes go with its sessions, narrowed the same way (all roles).
+    const linkedCodeSelector = (selector: LinkedSessionSelector): LinkedCodeSelector => {
+      if ("allLinks" in selector) return selector;
+      if (!("clientFingerprint" in selector)) return { enrollmentId: selector.enrollmentId };
+      const { roles: _roles, ...narrowed } = selector;
+      return narrowed;
+    };
+    // Set once the connector exists; see `linkedAccessCheck`.
+    let linkedAccessCheck: LinkedAccessCheck | undefined;
+    // The Hub closed a device's relay channel; see `linkedAccessCloseReaction`.
+    const onHubChannelClose = (
+      reason: RelayCloseReason | undefined,
+      authority: RelayChannelAuthority,
+    ) => {
+      const device = authority.trustSource === "none" ? null : authority;
+      const reaction = linkedAccessCloseReaction(reason, device);
+      const revoked =
+        reaction.revokeDevice && device !== null
+          ? revokeLinkedSessions(channelDeviceLinks(device))
+          : Promise.resolve();
+      if (reaction.check) void revoked.then(() => linkedAccessCheck?.request("channel-closed"));
+    };
+    // A device's relay channel opened at a lower role than some of its links carry; see
+    // `linkedAccessOpenNarrowing`. Its unredeemed codes above that role go too, and only those:
+    // the code it may ask for on this very channel carries the lower role.
+    const onDeviceChannelOpened = (authority: RelayChannelAuthority) => {
+      if (authority.trustSource === "none") return;
+      const narrowing = linkedAccessOpenNarrowing(authority);
+      // The device links again only at its new role, below the ones swept.
+      if (narrowing !== null)
+        void revokeLinkedSessions(narrowing, { resweep: true, codes: narrowing });
+    };
+    // Push alert registrations: offered to every relay channel's RPCs, read by the publisher.
+    const pushRegistry = yield* makeNodePushRegistry({
+      filePath: join(dirname(config.hubIdentityStatePath), PUSH_REGISTRATION_FILE_NAME),
+    });
+    const pushRegistryLayer = Layer.succeed(NodePushRegistry, pushRegistry);
+    // A revoked device stops getting alerts at once, not when the Hub says so next.
+    const forgetPushEnrollment = (enrollmentId: string) =>
+      runPromise(pushRegistry.removeEnrollments([enrollmentId]));
     const runtimeContext = yield* Effect.context<never>();
     const runPromise = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
       Effect.runPromiseWith(runtimeContext as Context.Context<R>)(effect);
@@ -627,6 +716,7 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
           rateLimiter: handshakeRateLimiter,
           registerSession: (session) => {
             channelAuthority = relayChannelAuthority(effectiveRole, session);
+            onDeviceChannelOpened(channelAuthority);
             const release = sessionDirectory.register({
               ...session,
               terminate: () => {
@@ -659,13 +749,8 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
               WsHostedRpcGroup,
               Layer.merge(
                 makeServerWsRpcLayer(
-                  relayRpcPrincipal(
-                    effectiveRole,
-                    channelId,
-                    () => (e2ee.mode() === "e2ee" ? channelAuthority : { trustSource: "none" }),
-                    () => e2ee.mode() === "e2ee",
-                  ),
-                ),
+                  relayChannelPrincipal(effectiveRole, channelId, e2ee, () => channelAuthority),
+                ).pipe(Layer.provide(pushRegistryLayer)),
                 makeDeviceWsRpcLayer(relayRpcPrincipal(effectiveRole, channelId)),
               ),
               // A refused response is a value carrying its reason, not a defect,
@@ -705,7 +790,7 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
           // The lifecycle — §10's close, §10.4's truncation input, and the §5.4
           // announcement — belongs to the binding, so the channel's only signal
           // that it is ending cannot silently bypass the authenticated close.
-          return makeNodeE2eeRelayChannelSession({
+          const relaySession = makeNodeE2eeRelayChannelSession({
             e2ee,
             rpc: {
               receive: (bytes) => runPromise(session.receive(bytes)),
@@ -715,6 +800,15 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
             },
             release: () => runPromise(Scope.close(scope, Exit.void)),
           });
+          return {
+            ...relaySession,
+            // Read before the registry tears the channel down and the lease ends.
+            onPeerClose: (reason) =>
+              onHubChannelClose(
+                reason,
+                e2ee.mode() === "e2ee" ? channelAuthority : { trustSource: "none" },
+              ),
+          };
         } catch (error: unknown) {
           e2ee.dispose();
           await runPromise(Scope.close(scope, Exit.void));
@@ -742,8 +836,18 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
       },
       onE2eeEnrollmentRevoked: async (frame) => {
         await sessionDirectory.revokeEnrollment(frame);
-        await revokeLinkedSessions({ enrollmentId: frame.enrollmentId });
+        // The enrollment is gone for good: nothing links under it again.
+        await revokeLinkedSessions({ enrollmentId: frame.enrollmentId }, { resweep: true });
+        await forgetPushEnrollment(frame.enrollmentId);
       },
+      features: [NODE_LINKED_ACCESS_CHECK_FEATURE],
+      onOnline: () => linkedAccessCheck?.request("online"),
+      onLinkedAccessChanged: () => linkedAccessCheck?.request("nudge"),
+      // A TLS-authenticated Hub said this node is revoked: every link it issued on the Hub's
+      // word ends now, and the devices link again once the node is enrolled again. Pairings the
+      // owner made by hand and the owner's own sessions carry no link and stay.
+      // A revoked node issues no link until it enrolls again.
+      onRevoked: () => void revokeLinkedSessions({ allLinks: true }, { resweep: true }),
       processLock,
       // Only a lock actually held: past an unusable one the connector asks
       // again each time it needs the identity.
@@ -754,6 +858,65 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
     });
     const asIdentityOwner = <A>(operation: () => Promise<A>) =>
       connector.asIdentityOwner(operation);
+    // Linked direct sessions in step with the Hub, asked over node-proof HTTPS.
+    if (connectorConfig.enabled && connectorConfig.origin && Option.isSome(authSessions)) {
+      const sessions = authSessions.value;
+      const hubOrigin = connectorConfig.origin;
+      yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          const abort = new AbortController();
+          const check = startLinkedAccessCheck({
+            listDevices: () =>
+              runPromise(
+                Effect.gen(function* () {
+                  const now = yield* DateTime.now;
+                  const sessionLinks = Option.isNone(authSessionRows)
+                    ? []
+                    : (yield* authSessionRows.value.listActive({ now })).flatMap((row) =>
+                        row.link !== null && sessionExpiresAtMs(row) > now.epochMilliseconds
+                          ? [row.link]
+                          : [],
+                      );
+                  const pending = linkedCodes === undefined ? [] : yield* linkedCodes.listPending();
+                  return linkedAccessDevices([...sessionLinks, ...pending]);
+                }),
+              ),
+            ask: makeLinkedAccessAsker({ hubOrigin, identity, connector, signal: abort.signal }),
+            // Withdrawn access can't link again, and a narrowed device links again only below
+            // the roles swept.
+            revoke: (device, roles) =>
+              revokeLinkedSessions(
+                {
+                  clientFingerprint: device.clientFingerprint,
+                  trustSource: device.trustSource,
+                  enrollmentId: device.enrollmentId,
+                  accountId: device.accountId,
+                  ...(roles === undefined ? {} : { roles }),
+                },
+                { resweep: true },
+              ),
+            isOnline: () => connector.status().state === "online",
+            now: Date.now,
+            random: Math.random,
+            setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+            clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+            onError: (error) => {
+              void runPromise(
+                Effect.logWarning("Hub linked access check failed", { error: String(error) }),
+              );
+            },
+          });
+          linkedAccessCheck = check;
+          return { check, abort };
+        }),
+        ({ check, abort }) =>
+          Effect.sync(() => {
+            linkedAccessCheck = undefined;
+            check.stop();
+            abort.abort();
+          }),
+      );
+    }
     yield* Effect.acquireRelease(
       Effect.sync(() => {
         void connector.start();
@@ -768,6 +931,15 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
           await identity.stopE2eeInstrumentation();
         }),
     );
+    // Push alerts: the node decides, seals per device, and signals its Hub.
+    if (connectorConfig.enabled && connectorConfig.origin) {
+      yield* startNodeAttentionPublisher({
+        hubOrigin: connectorConfig.origin,
+        identity,
+        connector,
+        registry: pushRegistry,
+      });
+    }
     const cloudHistoryEnabled = yield* Config.Boolean("RYCO_HUB_THREAD_CACHE_ENABLED").pipe(
       Config.withDefault(false),
     );
@@ -804,7 +976,7 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
         const engine = yield* Effect.serviceOption(OrchestrationEngineService);
         if (Option.isSome(engine)) {
           const changes = yield* engine.value.subscribeDomainEvents;
-          yield* Stream.fromSubscription(changes).pipe(
+          yield* changes.pipe(
             Stream.runForEach((event) => Effect.sync(() => sync.notifyChanged(event))),
             Effect.forkScoped,
           );
@@ -837,7 +1009,12 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
       enroll: () => connector.enroll(),
       readEnrollment: () => connector.readEnrollment(),
       identitySummary: (options) => connector.identitySummary(options),
-      leave: () => connector.leave(),
+      // Registrations are Hub-scoped, like the approved-client records: leaving erases them.
+      leave: async () => {
+        const status = await connector.leave();
+        await runPromise(pushRegistry.clear);
+        return status;
+      },
       cancelEnrollment: () => connector.cancelEnrollment(),
       stop: () => connector.stop(),
       // Both commit what the identity's owner relies on — an approved client,
@@ -851,6 +1028,13 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
         sign: (input) => asIdentityOwner(() => identity.nativeNodeClaim.sign(input)),
         commit: (input) => asIdentityOwner(() => identity.nativeNodeClaim.commit(input)),
       },
+      // Only the process that already owns the identity speaks for it, and an
+      // unauthenticated proof never claims the identity lock or starts its
+      // repairs; a standby backend answers as a node without one.
+      proveDirectRouteIdentity: (input) =>
+        connectorConfig.enabled
+          ? connector.ifIdentityOwner(() => identity.proveDirectRouteIdentity(input))
+          : Promise.resolve(undefined),
       e2ee: makeNodeE2eeOperator({
         identity,
         sessions: sessionDirectory,

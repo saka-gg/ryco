@@ -4,6 +4,7 @@ import {
   hostedBrowserRevalidated,
   hostedHubController,
   hostedHubStore,
+  hostedOutageFailure,
   isHostedEnvironmentConnectBlocked,
   isHostedEnvironmentSessionLive,
   type HostedEnvironmentReconcileRequest,
@@ -12,6 +13,7 @@ import {
   type HostedHubNode,
   type HostedHubState,
   type HostedRelayFailure,
+  type HostedRelayFailureKind,
   type HostedRelayTransportStatus,
   type HostedRycoSessionStatus,
 } from "@ryco/client-runtime/authorization";
@@ -55,6 +57,8 @@ export interface MobileHostedConnectionState {
   readonly sessionEstablished: boolean;
   readonly sessionRecoveredAfterUnknown: boolean;
   readonly errorMessage: string | null;
+  /** The failure this connection is waiting out, while its transport is not online (`hostedOutageFailure`). */
+  readonly outageFailure: HostedRelayFailureKind | null;
 }
 
 interface MobileHostedConnectionsSnapshot {
@@ -109,6 +113,7 @@ function connectionStateFor(record: HostedEnvironmentSessionRecord): MobileHoste
       : record.failure === null
         ? null
         : relayFailureMessage(record.failure),
+    outageFailure: hostedOutageFailure(record),
   };
   projectedStates.set(record, state);
   return state;
@@ -212,6 +217,9 @@ function scopeDemand(
 ): ConnectionDemandLeaseInput {
   switch (scope.type) {
     case "thread-detail":
+    // A terminal is mounted thread work: it counts toward the warm set as the
+    // thread's own view does, with no retention policy of its own.
+    case "terminal":
       return { environmentId, scope: { type: "thread-detail", threadId: scope.threadId } };
     case "vcs-status":
       return { environmentId, scope: { type: "vcs-status", cwd: scope.cwd } };

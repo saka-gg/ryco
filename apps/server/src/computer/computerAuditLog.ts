@@ -85,14 +85,17 @@ export interface ComputerAuditEntry {
 
 /**
  * Argument keys whose values are user payloads. Recorded as sizes only —
- * typed text, a set-value payload, a clipboard write, a launch argument list
- * and an upload's file paths are exactly the fields a secret could ride in.
+ * typed text, a set-value payload, a clipboard write, a launch argument list,
+ * an upload's file paths and a pasted image or file path are exactly the
+ * fields a secret could ride in.
  */
 const COMPUTER_AUDIT_SENSITIVE_ARGS: ReadonlySet<string> = new Set([
   "text",
   "value",
   "arguments",
   "files",
+  "image_path",
+  "file_path",
   "clipboard",
   "contents",
   "data",

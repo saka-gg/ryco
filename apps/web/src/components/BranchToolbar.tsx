@@ -1,12 +1,12 @@
 import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
-import { GitBranchIcon, GitPullRequestIcon, LockIcon, TerminalSquareIcon } from "lucide-react";
+import { GitBranchIcon, LockIcon, TerminalSquareIcon } from "lucide-react";
 import { memo, useCallback, useMemo } from "react";
 
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import { cn } from "../lib/utils";
 import { useStore } from "../store";
-import { createProjectSelectorByRef, createThreadSelectorByRef } from "../storeSelectors";
+import { createProjectSelectorByRef, createThreadStructureSelectorByRef } from "../storeSelectors";
 import { loadThreadTerminalDrawer } from "../workspacePanelPreload";
 import {
   resolveEffectiveEnvMode,
@@ -22,7 +22,6 @@ import { TERMINAL_RUNNING_TONE, TerminalRunningDot } from "./ThreadTerminalStatu
 import { formatTerminalRunningLine } from "./ThreadTerminalStatus.logic";
 import { Button } from "./ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
-import { LazyNewWorktreeDialog } from "./worktrees/lazyWorktreeDialogs";
 
 /**
  * Hover or focus on the terminal toggle: fetch the drawer's xterm chunk so the
@@ -31,11 +30,6 @@ import { LazyNewWorktreeDialog } from "./worktrees/lazyWorktreeDialogs";
  */
 function preloadTerminalDrawerForIntent(): void {
   void loadThreadTerminalDrawer().catch(() => undefined);
-}
-
-/** Hover or focus on "From PR / issue": the dialog mounts on its chunk. */
-function preloadNewWorktreeDialogForIntent(): void {
-  void LazyNewWorktreeDialog.preload();
 }
 
 interface BranchToolbarProps {
@@ -47,12 +41,6 @@ interface BranchToolbarProps {
   envLocked: boolean;
   onCheckoutPullRequestRequest?: (reference: string) => void;
   onComposerFocusRequest?: () => void;
-  /**
-   * Opens the full `NewWorktreeDialog` (branches / PRs / issues / Jira). The
-   * inline chips cover the fast path; this is the escape hatch for worktrees
-   * sourced from a tracked item.
-   */
-  onOpenWorktreeSources?: () => void;
   /**
    * While the thread is empty the "Work in …" row above the composer owns the
    * project, location, branch and environment controls, so the toolbar drops
@@ -91,7 +79,6 @@ export const BranchToolbar = memo(function BranchToolbar({
   envLocked,
   onCheckoutPullRequestRequest,
   onComposerFocusRequest,
-  onOpenWorktreeSources,
   contextControlsHoisted = false,
   availableEnvironments,
   onEnvironmentChange,
@@ -107,7 +94,10 @@ export const BranchToolbar = memo(function BranchToolbar({
     () => scopeThreadRef(environmentId, threadId),
     [environmentId, threadId],
   );
-  const serverThreadSelector = useMemo(() => createThreadSelectorByRef(threadRef), [threadRef]);
+  const serverThreadSelector = useMemo(
+    () => createThreadStructureSelectorByRef(threadRef),
+    [threadRef],
+  );
   const serverThread = useStore(serverThreadSelector);
   const draftThread = useComposerDraftStore((store) =>
     draftId ? store.getDraftSession(draftId) : store.getDraftThreadByRef(threadRef),
@@ -154,7 +144,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   if (!hasActiveThread || !activeProject) return null;
 
   return (
-    <div className="mx-auto flex w-full max-w-208 items-center gap-1 px-2.5 pb-3 pt-1 sm:px-3">
+    <div className="mx-auto flex w-full max-w-(--chat-composer-max-width) items-center gap-1 px-2.5 pb-3 pt-1 sm:px-3">
       {contextControlsHoisted ? null : (
         <div className="flex min-w-0 shrink items-center gap-0.5">
           {/* A started thread already names its project in the header breadcrumb;
@@ -260,30 +250,6 @@ export const BranchToolbar = memo(function BranchToolbar({
               />
             </span>
           ) : null}
-          {canChooseEnvMode && onOpenWorktreeSources ? (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    className="shrink-0 font-medium text-muted-foreground/70 hover:text-foreground/80 phone:hidden"
-                    onClick={onOpenWorktreeSources}
-                    onPointerEnter={preloadNewWorktreeDialogForIntent}
-                    onFocus={preloadNewWorktreeDialogForIntent}
-                    data-testid="branch-toolbar-worktree-sources"
-                  >
-                    <GitPullRequestIcon className="size-3 shrink-0" />
-                    <span>From PR / issue</span>
-                  </Button>
-                }
-              />
-              <TooltipPopup side="top">
-                Create a worktree from a pull request, issue, or Jira item
-              </TooltipPopup>
-            </Tooltip>
-          ) : null}
-
           {worktreeLaunch ? null : (
             <BranchToolbarBranchSelector
               className="min-w-0"

@@ -47,6 +47,12 @@ export interface DiffCheckpointCommitsInput {
   readonly ignoreWhitespace: boolean;
 }
 
+export interface SameCheckpointTreeInput {
+  readonly cwd: string;
+  readonly leftRef: CheckpointRef;
+  readonly rightRef: CheckpointRef;
+}
+
 export interface DeleteCheckpointRefsInput {
   readonly cwd: string;
   readonly checkpointRefs: ReadonlyArray<CheckpointRef>;
@@ -112,6 +118,14 @@ export interface CheckpointStoreShape {
   readonly resolveCheckpointCommits: (
     input: ResolveCheckpointCommitsInput,
   ) => Effect.Effect<ReadonlyArray<string | null>, CheckpointStoreError>;
+
+  /**
+   * Whether two checkpoint refs hold the same files (the same tree), with one Git
+   * process; false when either does not resolve.
+   */
+  readonly sameCheckpointTree: (
+    input: SameCheckpointTreeInput,
+  ) => Effect.Effect<boolean, CheckpointStoreError>;
 
   /**
    * Compute patch diff between two checkpoint refs.

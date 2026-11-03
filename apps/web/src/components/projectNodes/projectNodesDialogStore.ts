@@ -139,9 +139,8 @@ export function addProjectDialogAvailable(tier: PresentationTier = getPresentati
 /**
  * Opens the add-project dialog. Entry points that must keep the palette on the
  * phone tier (and while the dialog is off) go through
- * `useCommandPaletteStore.getState().openAddProject()`, or `openAddProjectWith`
- * when they know the node or the source, which call this when
- * `addProjectDialogAvailable()`.
+ * `useCommandPaletteStore.getState().openAddProject(options)`, which calls this
+ * when `addProjectDialogAvailable()` and no folder path is handed over.
  */
 export function openAddProject(options: OpenAddProjectOptions = {}): void {
   const request: AddProjectDialogRequest = {
@@ -180,7 +179,7 @@ export function closeCopyProject(): void {
 
 /**
  * A project menu's cross-node actions for one checkout: copy it (the dialog
- * starts from it) and link a copy already on a node (`openAddProjectWith` in
+ * starts from it) and link a copy already on a node (the palette store's `openAddProject` in
  * link mode, passed in by the caller: the add-project dialog where it is
  * available, else the palette's add-project views). Both preload the dialogs
  * on menu intent.
@@ -188,13 +187,13 @@ export function closeCopyProject(): void {
 export function crossNodeProjectActions(input: {
   readonly projectRef: ScopedProjectRef;
   readonly origin: CopyProjectDialogOrigin;
-  /** `openAddProjectWith` from the command palette's store (which imports this module). */
-  readonly openAddProjectWith: (options: OpenAddProjectOptions) => void;
+  /** `openAddProject` from the command palette's store (which imports this module). */
+  readonly openAddProject: (options: OpenAddProjectOptions) => void;
 }): CrossNodeProjectActions {
   const { projectRef, origin } = input;
   return {
     onCopy: () => openCopyProject({ source: projectRef, origin }),
-    onLink: () => input.openAddProjectWith({ mode: "link", projectRef }),
+    onLink: () => input.openAddProject({ mode: "link", projectRef }),
     onIntent: preloadProjectNodesDialogs,
   };
 }

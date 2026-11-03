@@ -8,6 +8,7 @@ import {
   projectListEntriesQuery,
   projectReadFileQuery,
   type ProjectReadFileInput,
+  refetchProjectReadFileFresh,
 } from "./projectPreviewAtoms";
 
 export interface ProjectPreviewQueryResult<T> extends ProjectPreviewQueryState<T> {
@@ -59,10 +60,14 @@ export function useProjectListEntries(
  * Atom-backed replacement for PreviewPanel's `useQuery(readFile)`.
  *
  * Preserves keep-previous-data while refetching and imperative `refetch`.
+ * `refetchFresh` drops a read already in flight first, for a change on disk
+ * that read may predate.
  */
 export function useProjectReadFile(
   input: ProjectReadFileInput,
-): ProjectPreviewQueryResult<ProjectReadFileResult> {
+): ProjectPreviewQueryResult<ProjectReadFileResult> & {
+  readonly refetchFresh: () => Promise<void>;
+} {
   const { environmentId, cwd, relativePath, enabled } = input;
   const cacheKey = projectReadFileQuery.keyOf(input);
 
@@ -83,6 +88,7 @@ export function useProjectReadFile(
     const next = await projectReadFileQuery.refreshAsync(cacheKey);
     return { data: next.data };
   }, [cacheKey]);
+  const refetchFresh = useCallback(() => refetchProjectReadFileFresh(cacheKey), [cacheKey]);
 
   return {
     data: state.data,
@@ -90,5 +96,6 @@ export function useProjectReadFile(
     isFetching: state.isFetching,
     error: state.error,
     refetch,
+    refetchFresh,
   };
 }

@@ -5,6 +5,7 @@ import path from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import { Cause, Effect, Layer, Logger, References } from "effect";
+import { FetchHttpClient } from "effect/http";
 
 import { ServerConfig, type RuntimeMode } from "./config.ts";
 import {
@@ -124,7 +125,12 @@ it.layer(NodeServices.layer)("ServerLoggerLive", (it) => {
             yield* Effect.logInfo("probe line");
             return yield* ServerConfig;
           }).pipe(
-            Effect.provide(ServerLoggerLive.pipe(Layer.provideMerge(configLayer(baseDir, mode)))),
+            Effect.provide(
+              ServerLoggerLive.pipe(
+                Layer.provideMerge(configLayer(baseDir, mode)),
+                Layer.provide(FetchHttpClient.layer),
+              ),
+            ),
           );
           assert.equal(path.basename(config.serverLogPath), "server.log");
           const lines = readLines(config.serverLogPath);

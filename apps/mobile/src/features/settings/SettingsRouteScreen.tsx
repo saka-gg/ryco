@@ -59,13 +59,17 @@ export function SettingsRouteScreen() {
       <SettingsSection title="Workspace">
         <SettingsRow
           first
-          label="Inbox and AI Focus"
+          label="Inbox"
           onPress={() => navigation.navigate("SettingsInbox" as never)}
         />
         <SettingsRow
           label="Statistics"
           value="Usage, activity, limits"
           onPress={() => navigation.navigate("SettingsStatistics" as never)}
+        />
+        <SettingsRow
+          label="Provider accounts"
+          onPress={() => navigation.navigate("SettingsProviderAccounts" as never)}
         />
         <SettingsRow
           label="Defaults"

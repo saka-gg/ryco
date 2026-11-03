@@ -1,11 +1,9 @@
-import {
-  DESKTOP_WINDOW_BLUR_RADIUS_MAX,
-  DESKTOP_WINDOW_BLUR_RADIUS_MIN,
-} from "@ryco/contracts/window-material";
 import { useEffect, useState } from "react";
 
 import {
   APPEARANCE_PREFERENCES_CHANGE_EVENT,
+  WINDOW_TRANSLUCENCY_BLUR_STRENGTH_MAX,
+  WINDOW_TRANSLUCENCY_BLUR_STRENGTH_MIN,
   WINDOW_TRANSLUCENCY_OPACITY_MAX,
   WINDOW_TRANSLUCENCY_OPACITY_MIN,
   hasAppearancePreferenceOverride,
@@ -108,12 +106,12 @@ export function WindowTranslucencySettings({
                 : "How strongly the desktop behind the window is blurred."
             }
             ariaLabel="Translucent window blur"
-            min={DESKTOP_WINDOW_BLUR_RADIUS_MIN}
-            max={DESKTOP_WINDOW_BLUR_RADIUS_MAX}
-            suffix=" pt"
-            value={Number(preferences.windowTranslucencyBlur)}
-            onChange={(value) => onChange("windowTranslucencyBlur", String(value))}
-            resetAction={resetFor("windowTranslucencyBlur", "desktop blur")}
+            min={WINDOW_TRANSLUCENCY_BLUR_STRENGTH_MIN}
+            max={WINDOW_TRANSLUCENCY_BLUR_STRENGTH_MAX}
+            suffix="%"
+            value={Number(preferences.windowTranslucencyBlurStrength)}
+            onChange={(value) => onChange("windowTranslucencyBlurStrength", String(value))}
+            resetAction={resetFor("windowTranslucencyBlurStrength", "desktop blur")}
           />
         </>
       ) : null}

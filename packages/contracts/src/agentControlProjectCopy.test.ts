@@ -163,7 +163,7 @@ describe("cross-node project plans", () => {
 
 describe("tolerant proposal views", () => {
   it("lists exactly the plan kinds that existed before the cross-node kinds", () => {
-    expect(AGENT_CONTROL_LEGACY_PLAN_KINDS).toHaveLength(26);
+    expect(AGENT_CONTROL_LEGACY_PLAN_KINDS).toHaveLength(29);
     expect(AGENT_CONTROL_LEGACY_PLAN_KINDS).not.toContain("importProject");
     expect(AGENT_CONTROL_LEGACY_PLAN_KINDS).not.toContain("copyProjectToNode");
     expect(

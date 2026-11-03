@@ -1,13 +1,13 @@
 import { XIcon } from "lucide-react";
 import { useMemo, useState } from "react";
-
-import { cn } from "../../../lib/utils";
-import { usePullRequestsPage } from "../PullRequestsPageContext";
 import {
   PULL_REQUEST_FILTER_RESET,
   pullRequestFilterChips,
   type PullRequestFilterChip,
-} from "./pullRequestListFilters.logic";
+} from "@ryco/client-runtime/state/pull-request-review";
+
+import { cn } from "../../../lib/utils";
+import { usePullRequestsPage } from "../PullRequestsPageContext";
 
 const CHIP_CLASS =
   "inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-[11px] text-muted-foreground outline-hidden transition-colors duration-(--app-motion-duration-chip) hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring";
@@ -18,11 +18,9 @@ const CHIP_CLASS =
  * motion, keeping its last chips on screen while it closes.
  */
 export function ActiveFilterChips() {
-  const { nav, model } = usePullRequestsPage();
-  const chips = useMemo(
-    () => pullRequestFilterChips(nav.search, model.list.labels),
-    [model.list.labels, nav.search],
-  );
+  const { nav, model, crossRepository } = usePullRequestsPage();
+  const labels = crossRepository?.labels ?? model.list.labels;
+  const chips = useMemo(() => pullRequestFilterChips(nav.search, labels), [labels, nav.search]);
   // The last chips shown, remembered during render, so the row closes on them.
   const [lastChips, setLastChips] = useState<ReadonlyArray<PullRequestFilterChip>>(chips);
   if (chips.length > 0 && chips !== lastChips) setLastChips(chips);

@@ -2,11 +2,14 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildRightPanelTargetSearch,
+  closedRightPanelTarget,
   closeRightPanelTab,
+  isRightPanelTargetVisible,
   markRightPanelTabOpened,
   openedTabsFromRoute,
   rememberActiveAgentTab,
   rememberActiveRenderTab,
+  resolveActiveRightPanelClose,
   resolveOpenedTabs,
   resolveRightPanelReopenTarget,
   shouldMountRightPanelContent,
@@ -275,6 +278,62 @@ describe("the page tab", () => {
     expect(shouldMountRightPanelContent({ ...base, phone: false })).toBe(true);
     expect(shouldMountRightPanelContent({ ...base, phone: true })).toBe(false);
     expect(shouldMountRightPanelContent({ ...base, route: pageRoute("m:page"), phone: true })).toBe(
+      false,
+    );
+  });
+});
+
+describe("closing and reopening the active view", () => {
+  it("closes the active tab of an open panel, else the panel on its launcher", () => {
+    expect(resolveActiveRightPanelClose({ open: false, route: route("files") })).toBeNull();
+    expect(resolveActiveRightPanelClose({ open: true, route: route(null) })).toEqual({
+      kind: "panel",
+    });
+    expect(resolveActiveRightPanelClose({ open: true, route: route("review") })).toEqual({
+      kind: "tab",
+      tab: { mode: "review" },
+    });
+    expect(
+      resolveActiveRightPanelClose({ open: true, route: route("agent", "subagent:a") }),
+    ).toEqual({ kind: "tab", tab: { mode: "agent", agentKey: "subagent:a" } });
+    expect(
+      resolveActiveRightPanelClose({
+        open: true,
+        route: { ...route("render"), activeRenderKey: "m:page" },
+      }),
+    ).toEqual({ kind: "tab", tab: { mode: "render" } });
+  });
+
+  it("reopens a closed tab to what it showed", () => {
+    const visible = { modes: ["files" as const], agentKeys: [], renderKey: "m:page" };
+    expect(closedRightPanelTarget(visible, { mode: "review" })).toEqual({
+      kind: "tab",
+      mode: "review",
+    });
+    expect(closedRightPanelTarget(visible, { mode: "agent", agentKey: "subagent:a" })).toEqual({
+      kind: "agent",
+      agentKey: "subagent:a",
+    });
+    expect(closedRightPanelTarget(visible, { mode: "agent" })).toBeNull();
+    expect(closedRightPanelTarget(visible, { mode: "render" })).toEqual({
+      kind: "render",
+      renderKey: "m:page",
+    });
+    expect(closedRightPanelTarget({ ...visible, renderKey: null }, { mode: "render" })).toBeNull();
+  });
+
+  it("knows which targets the tab strip already shows", () => {
+    const visible = { modes: ["files" as const], agentKeys: ["subagent:a"], renderKey: "m:page" };
+    expect(isRightPanelTargetVisible(visible, { kind: "tab", mode: "files" })).toBe(true);
+    expect(isRightPanelTargetVisible(visible, { kind: "tab", mode: "review" })).toBe(false);
+    expect(isRightPanelTargetVisible(visible, { kind: "agent", agentKey: "subagent:a" })).toBe(
+      true,
+    );
+    expect(isRightPanelTargetVisible(visible, { kind: "agent", agentKey: "subagent:b" })).toBe(
+      false,
+    );
+    expect(isRightPanelTargetVisible(visible, { kind: "render", renderKey: "m:page" })).toBe(true);
+    expect(isRightPanelTargetVisible(visible, { kind: "render", renderKey: "m:other" })).toBe(
       false,
     );
   });

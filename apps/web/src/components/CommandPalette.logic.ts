@@ -4,29 +4,57 @@ import {
   type FilesystemBrowseEntry,
   type OrchestrationThreadMessageSearchResult,
 } from "@ryco/contracts";
+import {
+  buildCommandPaletteRootGroups,
+  buildCommandPaletteRows as buildSharedCommandPaletteRows,
+  COMMAND_PALETTE_RECENT_THREAD_LIMIT,
+  filterCommandPaletteGroups as filterSharedCommandPaletteGroups,
+  findHighlightedCommandPaletteItem as findSharedHighlightedCommandPaletteItem,
+  type CommandPaletteRow as SharedCommandPaletteRow,
+  type CommandPaletteRows as SharedCommandPaletteRows,
+} from "@ryco/client-runtime/commandPalette/search";
+import type { ThreadLifecycleAction } from "@ryco/client-runtime/state/threads";
 import type { SidebarThreadSortOrder } from "@ryco/contracts/settings";
 import { type ReactNode } from "react";
+import type { CurrentThreadLifecycle, ThreadSnoozeOption } from "../commandPaletteStore";
 import { sortThreads } from "../lib/threadSort";
+import type { SettingsSectionId } from "../settingsDialogStore";
 import { formatRelativeTimeLabel } from "../timestampFormat";
 import { type Project, type SidebarThreadSummary, type Thread } from "../types";
+import type { SettingsSearchEntry } from "./settings/settingsSearchIndex";
 
-export const RECENT_THREAD_LIMIT = 12;
+export const RECENT_THREAD_LIMIT = COMMAND_PALETTE_RECENT_THREAD_LIMIT;
+/** Settings results show only while typing, under Threads, at most this many. */
+export const SETTINGS_SEARCH_RESULT_LIMIT = 8;
 export const ITEM_ICON_CLASS = "size-4 text-muted-foreground/80";
 export const ADDON_ICON_CLASS = "size-4";
+/**
+ * Above this many selectable results the list renders only the rows in view (a
+ * one-letter query can match every thread). Shorter lists keep the plain grouped list.
+ */
+export const COMMAND_PALETTE_VIRTUALIZE_AFTER_ITEMS = 60;
+
+/**
+ * Content shown beside an item's title, or a function that builds it when the row
+ * mounts, so a list with an item per thread builds no elements for rows it never shows.
+ */
+export type CommandPaletteItemContent = ReactNode | (() => ReactNode);
 
 export interface CommandPaletteItem {
   readonly kind: "action" | "submenu";
   readonly value: string;
   readonly searchTerms: ReadonlyArray<string>;
+  /** IDs that find the item when the query is an ID or ID fragment; such matches list last. */
+  readonly idSearchTerms?: ReadonlyArray<string>;
   readonly title: ReactNode;
   readonly description?: string;
   readonly timestamp?: string;
   readonly icon: ReactNode;
   readonly disabled?: boolean;
   /** Optional content rendered inline before the title text. */
-  readonly titleLeadingContent?: ReactNode;
+  readonly titleLeadingContent?: CommandPaletteItemContent;
   /** Optional content rendered inline after the title text (before the timestamp). */
-  readonly titleTrailingContent?: ReactNode;
+  readonly titleTrailingContent?: CommandPaletteItemContent;
   readonly shortcutCommand?: KeybindingCommand;
 }
 
@@ -106,10 +134,6 @@ export function filterBrowseEntries(input: {
   return { filteredEntries, highlightedEntry, exactEntry };
 }
 
-export function normalizeSearchText(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, " ");
-}
-
 export function buildProjectActionItems(input: {
   projects: ReadonlyArray<Project>;
   valuePrefix: string;
@@ -143,10 +167,12 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
   projectTitleById: ReadonlyMap<Project["id"], string>;
   sortOrder: SidebarThreadSortOrder;
   icon: ReactNode;
-  /** Optional content rendered inline before the title text per-thread. */
+  /** Optional content rendered inline before the title text per-thread, once its row mounts. */
   renderLeadingContent?: (thread: TThread) => ReactNode;
-  /** Optional content rendered inline after the title text per-thread. */
+  /** Optional content rendered inline after the title text per-thread, once its row mounts. */
   renderTrailingContent?: (thread: TThread) => ReactNode;
+  /** Extra terms that find the thread: its workspace's pull requests (`#123`, URL, title). */
+  extraSearchTerms?: (thread: TThread) => ReadonlyArray<string>;
   runThread: (thread: Pick<SidebarThreadSummary, "environmentId" | "id">) => Promise<void>;
   limit?: number;
 }): CommandPaletteActionItem[] {
@@ -156,6 +182,7 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
   );
   const visibleThreads =
     input.limit === undefined ? sortedThreads : sortedThreads.slice(0, input.limit);
+  const { renderLeadingContent, renderTrailingContent } = input;
 
   return visibleThreads.map((thread) => {
     const projectTitle = input.projectTitleById.get(thread.projectId);
@@ -171,14 +198,17 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
       descriptionParts.push("Current thread");
     }
 
-    const leadingContent = input.renderLeadingContent?.(thread);
-    const trailingContent = input.renderTrailingContent?.(thread);
-
     return Object.assign(
       {
         kind: "action" as const,
         value: `thread:${thread.id}`,
-        searchTerms: [thread.title, projectTitle ?? ``, thread.branch ?? ``],
+        searchTerms: [
+          thread.title,
+          projectTitle ?? ``,
+          thread.branch ?? ``,
+          ...(input.extraSearchTerms?.(thread) ?? []),
+        ],
+        idSearchTerms: [thread.id],
         title: thread.title,
         description: descriptionParts.join(` · `),
         timestamp: formatRelativeTimeLabel(
@@ -186,8 +216,8 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
         ),
         icon: input.icon,
       },
-      leadingContent ? { titleLeadingContent: leadingContent } : {},
-      trailingContent ? { titleTrailingContent: trailingContent } : {},
+      renderLeadingContent ? { titleLeadingContent: () => renderLeadingContent(thread) } : {},
+      renderTrailingContent ? { titleTrailingContent: () => renderTrailingContent(thread) } : {},
       {
         run: async () => {
           await input.runThread(thread);
@@ -195,39 +225,6 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
       },
     );
   });
-}
-
-function rankSearchFieldMatch(field: string, normalizedQuery: string): number {
-  const normalizedField = normalizeSearchText(field);
-  if (normalizedField.length === 0 || !normalizedField.includes(normalizedQuery)) {
-    return Number.NEGATIVE_INFINITY;
-  }
-  if (normalizedField === normalizedQuery) {
-    return 3;
-  }
-  if (normalizedField.startsWith(normalizedQuery)) {
-    return 2;
-  }
-  return 1;
-}
-
-function rankCommandPaletteItemMatch(
-  item: CommandPaletteActionItem | CommandPaletteSubmenuItem,
-  normalizedQuery: string,
-): number {
-  const terms = item.searchTerms.filter((term) => term.length > 0);
-  if (terms.length === 0) {
-    return 0;
-  }
-
-  for (const [index, field] of terms.entries()) {
-    const fieldRank = rankSearchFieldMatch(field, normalizedQuery);
-    if (fieldRank !== Number.NEGATIVE_INFINITY) {
-      return 1_000 - index * 100 + fieldRank;
-    }
-  }
-
-  return 0;
 }
 
 export type CommandPaletteMessageSearchResult = OrchestrationThreadMessageSearchResult & {
@@ -261,84 +258,233 @@ export function buildMessageSearchItems(input: {
   });
 }
 
+export function buildSettingsSearchItems(input: {
+  entries: ReadonlyArray<SettingsSearchEntry>;
+  sectionTitles: Readonly<Record<SettingsSectionId, string>>;
+  icon: ReactNode;
+  runEntry: (entry: SettingsSearchEntry) => void;
+}): CommandPaletteActionItem[] {
+  return input.entries.map((entry) => ({
+    kind: "action" as const,
+    value: `settings:${entry.owner}:${entry.section}:${entry.title}`,
+    searchTerms: [entry.title, entry.description, entry.keywords ?? ""],
+    title: entry.title,
+    description: input.sectionTitles[entry.section],
+    icon: input.icon,
+    run: async () => {
+      input.runEntry(entry);
+    },
+  }));
+}
+
+/**
+ * The open thread's "Snooze until" view: each time, with when it wakes the
+ * thread, then "Custom…" when `pickCustom` asks the user for a time.
+ */
+export function buildSnoozeUntilGroups(input: {
+  options: ReadonlyArray<ThreadSnoozeOption>;
+  icon: ReactNode;
+  snooze: (snoozedUntil: string) => void;
+  /** Resolves the time the user picked, or null when they dismissed it. */
+  pickCustom?: (() => Promise<string | null>) | undefined;
+}): CommandPaletteGroup[] {
+  const { pickCustom } = input;
+  return [
+    {
+      value: "snooze-until",
+      label: "Snooze until",
+      items: [
+        ...input.options.map((option) => ({
+          kind: "action" as const,
+          value: `snooze-until:${option.id}`,
+          searchTerms: [option.label, option.timeLabel],
+          title: option.label,
+          description: option.timeLabel,
+          icon: input.icon,
+          run: async () => {
+            input.snooze(option.snoozedUntil);
+          },
+        })),
+        ...(pickCustom
+          ? [
+              {
+                kind: "action" as const,
+                value: "snooze-until:custom",
+                searchTerms: ["custom", "date", "time", "duration"],
+                title: "Custom…",
+                description: "A date and time, or a duration",
+                icon: input.icon,
+                run: async () => {
+                  const snoozedUntil = await pickCustom();
+                  if (snoozedUntil) input.snooze(snoozedUntil);
+                },
+              },
+            ]
+          : []),
+      ],
+    },
+  ];
+}
+
+export interface CurrentThreadLifecycleIcons {
+  readonly settle: ReactNode;
+  readonly moveToActive: ReactNode;
+  readonly snooze: ReactNode;
+  readonly snoozeAddon: ReactNode;
+  readonly archive: ReactNode;
+  readonly markUnread: ReactNode;
+}
+
+/**
+ * Settle, snooze, archive and mark unread for the open thread, disabled with
+ * the Inbox's reason when they cannot run (and all but mark unread while one
+ * is pending). Settle and snooze toggle like the Inbox row's buttons.
+ * `snoozeUntil` is the view of snooze times, null while the thread is snoozed.
+ */
+export function buildCurrentThreadLifecycleActions(input: {
+  lifecycle: CurrentThreadLifecycle;
+  icons: CurrentThreadLifecycleIcons;
+  /** Asks for a custom snooze time; omitted, the snooze view lists only the presets. */
+  pickCustomSnooze?: (() => Promise<string | null>) | undefined;
+}): {
+  items: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem>;
+  snoozeUntil: CommandPaletteView | null;
+} {
+  const { lifecycle, icons } = input;
+  const unavailable = (action: ThreadLifecycleAction) => {
+    const reason = lifecycle.disabledReasons[action];
+    if (reason !== null) return { description: reason, disabled: true };
+    return lifecycle.pending && action !== "markUnread" ? { disabled: true } : {};
+  };
+  const snoozeUntil: CommandPaletteView | null = lifecycle.snoozed
+    ? null
+    : {
+        addonIcon: icons.snoozeAddon,
+        groups: buildSnoozeUntilGroups({
+          options: lifecycle.snoozeOptions(),
+          icon: icons.snooze,
+          snooze: lifecycle.snooze,
+          pickCustom: input.pickCustomSnooze,
+        }),
+      };
+  const snoozeSearchTerms = ["snooze", "unsnooze", "later", "remind", "wake", "current thread"];
+  const items: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [
+    {
+      kind: "action",
+      value: "action:current-thread-settle",
+      searchTerms: ["settle", "done", "move to active", "unsettle", "active", "current thread"],
+      title: lifecycle.settled ? "Move current thread to Active" : "Settle current thread",
+      icon: lifecycle.settled ? icons.moveToActive : icons.settle,
+      shortcutCommand: "thread.settle",
+      ...unavailable("settle"),
+      run: async () => {
+        lifecycle.setSettled(!lifecycle.settled);
+      },
+    },
+    snoozeUntil === null
+      ? {
+          kind: "action",
+          value: "action:current-thread-snooze",
+          searchTerms: snoozeSearchTerms,
+          title: "Unsnooze current thread",
+          icon: icons.snooze,
+          shortcutCommand: "thread.snooze",
+          ...unavailable("snooze"),
+          run: async () => {
+            lifecycle.snooze(null);
+          },
+        }
+      : {
+          kind: "submenu",
+          value: "action:current-thread-snooze",
+          searchTerms: snoozeSearchTerms,
+          title: "Snooze current thread…",
+          icon: icons.snooze,
+          shortcutCommand: "thread.snooze",
+          ...unavailable("snooze"),
+          ...snoozeUntil,
+        },
+    {
+      kind: "action",
+      value: "action:current-thread-archive",
+      searchTerms: ["archive", "hide", "current thread"],
+      title: "Archive current thread",
+      icon: icons.archive,
+      shortcutCommand: "thread.archive",
+      ...unavailable("archive"),
+      run: async () => {
+        lifecycle.archive();
+      },
+    },
+    {
+      kind: "action",
+      value: "action:current-thread-mark-unread",
+      searchTerms: ["mark unread", "unread", "unseen", "current thread"],
+      title: "Mark current thread unread",
+      icon: icons.markUnread,
+      shortcutCommand: "thread.markUnread",
+      ...unavailable("markUnread"),
+      run: async () => {
+        lifecycle.markUnread();
+      },
+    },
+  ];
+  return { items, snoozeUntil };
+}
+
+/** The palette's search, shared with the mobile palette; see `filterCommandPaletteGroups` there. */
 export function filterCommandPaletteGroups(input: {
   activeGroups: ReadonlyArray<CommandPaletteGroup>;
   query: string;
   isInSubmenu: boolean;
   projectSearchItems: ReadonlyArray<CommandPaletteActionItem>;
   threadSearchItems: ReadonlyArray<CommandPaletteActionItem>;
+  settingsSearchItems?: ReadonlyArray<CommandPaletteActionItem>;
   messageSearchItems?: ReadonlyArray<CommandPaletteActionItem>;
 }): CommandPaletteGroup[] {
-  const isActionsFilter = input.query.startsWith(">");
-  const searchQuery = isActionsFilter ? input.query.slice(1) : input.query;
-  const normalizedQuery = normalizeSearchText(searchQuery);
-
-  if (normalizedQuery.length === 0) {
-    if (isActionsFilter) {
-      return input.activeGroups.filter((group) => group.value === "actions");
-    }
-    return [...input.activeGroups];
-  }
-
-  let baseGroups = [...input.activeGroups];
-  if (isActionsFilter) {
-    baseGroups = baseGroups.filter((group) => group.value === "actions");
-  } else if (!input.isInSubmenu) {
-    baseGroups = baseGroups.filter((group) => group.value !== "recent-threads");
-  }
-
-  const searchableGroups = [...baseGroups];
-  if (!input.isInSubmenu && !isActionsFilter) {
-    if (input.projectSearchItems.length > 0) {
-      searchableGroups.push({
-        value: "projects-search",
-        label: "Projects",
-        items: input.projectSearchItems,
-      });
-    }
-    if (input.threadSearchItems.length > 0) {
-      searchableGroups.push({
-        value: "threads-search",
-        label: "Threads",
-        items: input.threadSearchItems,
-      });
-    }
-    if (input.messageSearchItems && input.messageSearchItems.length > 0) {
-      searchableGroups.push({
-        value: "messages-search",
-        label: "Messages",
-        items: input.messageSearchItems,
-      });
-    }
-  }
-
-  return searchableGroups.flatMap((group) => {
-    const items = group.items
-      .map((item, index) => {
-        const haystack = normalizeSearchText(item.searchTerms.join(" "));
-        if (!haystack.includes(normalizedQuery)) {
-          return null;
-        }
-
-        return {
-          item,
-          index,
-          rank: rankCommandPaletteItemMatch(item, normalizedQuery),
-        };
-      })
-      .filter(
-        (entry): entry is { item: (typeof group.items)[number]; index: number; rank: number } =>
-          entry !== null,
-      )
-      .toSorted((left, right) => right.rank - left.rank || left.index - right.index)
-      .map((entry) => entry.item);
-
-    if (items.length === 0) {
-      return [];
-    }
-
-    return [{ value: group.value, label: group.label, items }];
+  return filterSharedCommandPaletteGroups({
+    activeGroups: input.activeGroups,
+    query: input.query,
+    isInSubmenu: input.isInSubmenu,
+    searchGroups: [
+      { value: "projects-search", label: "Projects", items: input.projectSearchItems },
+      { value: "threads-search", label: "Threads", items: input.threadSearchItems },
+      {
+        value: "settings-search",
+        label: "Settings",
+        items: input.settingsSearchItems ?? [],
+        limit: SETTINGS_SEARCH_RESULT_LIMIT,
+      },
+      { value: "messages-search", label: "Messages", items: input.messageSearchItems ?? [] },
+    ],
   });
+}
+
+export type CommandPaletteRow = SharedCommandPaletteRow<
+  CommandPaletteActionItem | CommandPaletteSubmenuItem
+>;
+
+export type CommandPaletteRows = SharedCommandPaletteRows<
+  CommandPaletteActionItem | CommandPaletteSubmenuItem
+>;
+
+/**
+ * Flattens groups into the rows a virtualized list renders: each group's label,
+ * then its items. Disabled items get a row but no item index, as they are not
+ * options the keyboard can reach.
+ */
+export function buildCommandPaletteRows(
+  groups: ReadonlyArray<CommandPaletteGroup>,
+): CommandPaletteRows {
+  return buildSharedCommandPaletteRows(groups);
+}
+
+/** The enabled item Enter should run for a highlight, whether or not its row is mounted. */
+export function findHighlightedCommandPaletteItem(
+  groups: ReadonlyArray<CommandPaletteGroup>,
+  highlightedItemValue: string | null,
+): CommandPaletteActionItem | CommandPaletteSubmenuItem | null {
+  return findSharedHighlightedCommandPaletteItem(groups, highlightedItemValue);
 }
 
 export function buildBrowseGroups(input: {
@@ -406,18 +552,7 @@ export function buildRootGroups(input: {
   actionItems: ReadonlyArray<CommandPaletteActionItem | CommandPaletteSubmenuItem>;
   recentThreadItems: ReadonlyArray<CommandPaletteActionItem>;
 }): CommandPaletteGroup[] {
-  const groups: CommandPaletteGroup[] = [];
-  if (input.actionItems.length > 0) {
-    groups.push({ value: "actions", label: "Actions", items: input.actionItems });
-  }
-  if (input.recentThreadItems.length > 0) {
-    groups.push({
-      value: "recent-threads",
-      label: "Recent Threads",
-      items: input.recentThreadItems,
-    });
-  }
-  return groups;
+  return buildCommandPaletteRootGroups<CommandPaletteActionItem | CommandPaletteSubmenuItem>(input);
 }
 
 export function getCommandPaletteInputPlaceholder(mode: CommandPaletteMode): string {

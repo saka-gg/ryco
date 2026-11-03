@@ -3,13 +3,17 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { Effect, Layer } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { databaseBackupsDirectory } from "../databaseBackups.ts";
+import { runMigrations, SUPPORTED_MIGRATION_ID } from "../Migrations.ts";
 import * as NodeSqliteClient from "../NodeSqliteClient.ts";
+import { checkpointWorkerUnavailableReason } from "../SqliteCheckpointWorker.ts";
 import { MAIN_CONNECTION_BUSY_TIMEOUT_MS } from "../sqliteBusy.ts";
 import {
   makeSqlitePersistenceLive,
@@ -24,20 +28,34 @@ db.exec("BEGIN IMMEDIATE");
 process.stdout.write("locked\\n");
 setTimeout(() => {
   db.exec("COMMIT");
+  process.stdout.write("released " + Date.now() + "\\n");
   db.close();
 }, Number(process.argv[2]));
 `;
 
+/** Resolves once the child holds the write lock; `released` gives its wall-clock release time. */
 const spawnWriteLockHolder = (dbPath: string, holdMs: number) =>
   Effect.promise(
     () =>
-      new Promise<void>((resolve, reject) => {
+      new Promise<{ readonly released: Promise<number> }>((resolve, reject) => {
         const holder = NodeChildProcess.spawn(
           process.execPath,
           ["-e", lockHolderSource, dbPath, String(holdMs)],
           { stdio: ["ignore", "pipe", "ignore"] },
         );
-        holder.stdout.once("data", () => resolve());
+        let output = "";
+        const released = new Promise<number>((resolveReleased, rejectReleased) => {
+          holder.stdout.on("data", (chunk: Buffer) => {
+            output += chunk.toString("utf8");
+            if (output.includes("locked\n")) resolve({ released });
+            const match = /released (\d+)\n/.exec(output);
+            if (match) resolveReleased(Number(match[1]));
+          });
+          // "close", not "exit": the last output can arrive after the process exited.
+          holder.on("close", () => rejectReleased(new Error("lock holder exited unreleased")));
+        });
+        // Callers that only need the lock never await the release.
+        released.catch(() => undefined);
         holder.on("error", reject);
         holder.on("exit", () =>
           reject(new Error("lock holder exited before acquiring the write lock")),
@@ -91,6 +109,47 @@ it.effect("keeps the event loop running while it waits for another process's wri
   );
 });
 
+it.effect("backs up before migrating while another process holds the write lock", () => {
+  const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "ryco-sqlite-backup-busy-"));
+  const dbPath = NodePath.join(tempDir, "state.sqlite");
+
+  return Effect.gen(function* () {
+    // A database one migration behind, as an upgrade finds it.
+    yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`PRAGMA journal_mode = WAL`;
+      yield* runMigrations({ toMigrationInclusive: SUPPORTED_MIGRATION_ID - 1 });
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: dbPath })));
+    const holder = yield* spawnWriteLockHolder(dbPath, 600);
+    // Wall-clock time, comparable with the holder's release time.
+    let lastTick = Date.now();
+    const gaps: Array<{ readonly startedAt: number; readonly ms: number }> = [];
+    const interval = setInterval(() => {
+      const now = Date.now();
+      gaps.push({ startedAt: lastTick, ms: now - lastTick });
+      lastTick = now;
+    }, 5);
+    const startedAt = performance.now();
+    yield* Effect.void.pipe(
+      Effect.provide(makeSqlitePersistenceLive(dbPath).pipe(Layer.provide(NodeServices.layer))),
+      Effect.ensuring(Effect.sync(() => clearInterval(interval))),
+    );
+    // The snapshot waited for the writer's lock and still produced a backup...
+    assert.isAbove(performance.now() - startedAt, 300);
+    const backups = NodeFS.readdirSync(databaseBackupsDirectory(dbPath));
+    assert.equal(backups.length, 1, backups.join(", "));
+    assert.match(backups[0]!, /^state-v\d{3}-before-v\d{3}-\d{8}T\d{9}Z\.sqlite$/);
+    // ...without blocking the event loop while it waited. Only gaps that began while the lock
+    // was held count: the migration after the release runs synchronously by design.
+    const releasedAt = yield* Effect.promise(() => holder.released);
+    const waitingGaps = gaps.filter((gap) => gap.startedAt < releasedAt - 50);
+    assert.isAbove(waitingGaps.length, 0);
+    assert.isBelow(Math.max(...waitingGaps.map((gap) => gap.ms)), 250);
+  }).pipe(
+    Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
+  );
+});
+
 it.effect(
   "applies a short busy_timeout in the shared persistence setup (retried asynchronously)",
   () =>
@@ -120,11 +179,134 @@ it.effect("applies the A/B-tested read tuning to file databases", () => {
       readonly journal_size_limit: number;
     }>`PRAGMA journal_size_limit`;
     assert.equal(journalLimit?.journal_size_limit, 67108864);
+    // Checkpoints move to a worker where it is supported and measured faster; the writer keeps
+    // a 10,000-frame backstop. Elsewhere it keeps SQLite's default.
+    const [version] = yield* sql<{ readonly version: string }>`SELECT sqlite_version() AS version`;
+    const [autocheckpoint] = yield* sql<{
+      readonly wal_autocheckpoint: number;
+    }>`PRAGMA wal_autocheckpoint`;
+    const probe = new DatabaseSync(":memory:");
+    const hasIsTransaction = typeof probe.isTransaction === "boolean";
+    probe.close();
+    const usesWorker =
+      checkpointWorkerUnavailableReason({
+        filename: dbPath,
+        readonly: false,
+        image: false,
+        hasIsTransaction,
+        sqliteVersion: version?.version ?? "",
+        platform: process.platform,
+        electron: process.versions.electron !== undefined,
+        anyPlatform: false,
+      }) === undefined;
+    assert.equal(autocheckpoint?.wal_autocheckpoint, usesWorker ? 10_000 : 1_000);
   }).pipe(
     Effect.provide(makeSqlitePersistenceLive(dbPath).pipe(Layer.provide(NodeServices.layer))),
     Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
   );
 });
+
+it.effect("keeps SQLite's own checkpoints without the worker and in memory", () => {
+  const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "ryco-sqlite-no-worker-"));
+  const dbPath = NodePath.join(tempDir, "state.sqlite");
+  const autocheckpoint = Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const [row] = yield* sql<{ readonly wal_autocheckpoint: number }>`PRAGMA wal_autocheckpoint`;
+    return row?.wal_autocheckpoint;
+  });
+
+  return Effect.gen(function* () {
+    // Short-lived CLI processes (layerConfigCli) open the database this way.
+    const withoutWorker = yield* autocheckpoint.pipe(
+      Effect.provide(
+        makeSqlitePersistenceLive(dbPath, { checkpointWorker: false }).pipe(
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    );
+    assert.equal(withoutWorker, 1_000);
+    assert.equal(yield* autocheckpoint.pipe(Effect.provide(SqlitePersistenceMemory)), 1_000);
+  }).pipe(
+    Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
+  );
+});
+
+const withTempDatabase = <E>(
+  prefix: string,
+  test: (dbPath: string) => Effect.Effect<void, E, SqlClient.SqlClient>,
+  prepare?: (dbPath: string) => void,
+) => {
+  const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), prefix));
+  const dbPath = NodePath.join(tempDir, "state.sqlite");
+  prepare?.(dbPath);
+  return test(dbPath).pipe(
+    Effect.provide(makeSqlitePersistenceLive(dbPath).pipe(Layer.provide(NodeServices.layer))),
+    Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
+  );
+};
+
+const readModes = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const [vacuum] = yield* sql<{ readonly auto_vacuum: number }>`PRAGMA auto_vacuum`;
+  const [journal] = yield* sql<{ readonly journal_mode: string }>`PRAGMA journal_mode`;
+  const [ledger] = yield* sql<{
+    readonly migrations: number;
+  }>`SELECT count(*) AS migrations FROM effect_sql_migrations`;
+  return {
+    autoVacuum: vacuum?.auto_vacuum,
+    journalMode: journal?.journal_mode,
+    migrations: Number(ledger?.migrations ?? 0),
+  };
+});
+
+it.effect("creates new database files with incremental auto-vacuum, in WAL mode", () =>
+  withTempDatabase("ryco-sqlite-new-", () =>
+    Effect.gen(function* () {
+      const modes = yield* readModes;
+      assert.equal(modes.autoVacuum, 2);
+      assert.equal(modes.journalMode, "wal");
+      assert.isAbove(modes.migrations, 0);
+    }),
+  ),
+);
+
+it.effect("treats an empty database file as new", () =>
+  withTempDatabase(
+    "ryco-sqlite-empty-",
+    () =>
+      Effect.gen(function* () {
+        const modes = yield* readModes;
+        assert.equal(modes.autoVacuum, 2);
+        assert.equal(modes.journalMode, "wal");
+      }),
+    (dbPath) => NodeFS.writeFileSync(dbPath, ""),
+  ),
+);
+
+it.effect("keeps the auto-vacuum mode of an existing database and migrates it as before", () =>
+  withTempDatabase(
+    "ryco-sqlite-existing-",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const modes = yield* readModes;
+        assert.equal(modes.autoVacuum, 0);
+        assert.equal(modes.journalMode, "wal");
+        assert.isAbove(modes.migrations, 0);
+        const rows = yield* sql<{ readonly id: number }>`SELECT id FROM legacy_probe`;
+        assert.deepEqual([...rows], [{ id: 1 }]);
+      }),
+    (dbPath) => {
+      // A database written before this change: tables exist, auto_vacuum NONE, WAL.
+      const db = new DatabaseSync(dbPath);
+      db.exec("PRAGMA journal_mode = WAL");
+      db.exec(
+        "CREATE TABLE legacy_probe(id INTEGER PRIMARY KEY); INSERT INTO legacy_probe VALUES (1)",
+      );
+      db.close();
+    },
+  ),
+);
 
 const schemaAndLedger = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;

@@ -1,5 +1,16 @@
+import type { LineAnnotation, SelectedLineRange } from "@pierre/diffs";
 import { File as DiffsFile } from "@pierre/diffs/react";
-import { useParams, useSearch } from "@tanstack/react-router";
+import { scopeThreadRef } from "@ryco/client-runtime/scoped";
+import {
+  formatFileReferenceTitle,
+  normalizeFileReferencePath,
+} from "@ryco/client-runtime/state/composer";
+import {
+  resolveWorkspaceFileViewMode,
+  workspaceFileFolder,
+  type WorkspaceFileViewMode,
+} from "@ryco/client-runtime/state/files";
+import { useSearch } from "@tanstack/react-router";
 import { Schema } from "effect";
 import {
   ArrowLeftIcon,
@@ -28,21 +39,34 @@ import {
 import { parsePreviewRouteSearch } from "../previewRouteSearch";
 import {
   fnv1a32,
+  GUTTER_UTILITY_UNSAFE_CSS,
+  NEUTRAL_LINE_SELECTION_UNSAFE_CSS,
+  PLAIN_ANNOTATION_UNSAFE_CSS,
   resolveDiffThemeName,
   SYNTAX_TOKENIZE_MAX_LINE_LENGTH,
 } from "../lib/diffRendering";
+import { useEnvironmentServerConfigSelector } from "../hooks/useChatsAvailability";
 import { useSettings } from "../hooks/useSettings";
 import { useTheme } from "../hooks/useTheme";
 import { getLocalStorageItem, setLocalStorageItem } from "../hooks/useLocalStorage";
 import { useProjectListEntries, useProjectReadFile } from "~/rpc/useProjectPreview";
-import { selectProjectByRef, useStore } from "../store";
-import { createThreadSelectorByRef } from "../storeSelectors";
-import { resolveThreadRouteRef } from "../threadRoutes";
-import { DraftId, useComposerDraftStore } from "../composerDraftStore";
-import type { TurnDiffSummary } from "../types";
+import { useDocumentVisible } from "../hooks/useDocumentVisible";
+import { useEvent } from "../hooks/useEvent";
+import { useRouteWorkspaceTarget } from "../hooks/useRouteWorkspaceTarget";
+import { endWorkspaceFileDrag, startWorkspaceFileDrag } from "../workspaceFileDrag";
+import type { WorkspaceFileReveal } from "../workspaceRouteSearch";
+import ChatMarkdown from "./ChatMarkdown";
 import { ChangedFilesTree } from "./chat/ChangedFilesTree";
 import { DiffPanelLoadingState, DiffPanelShell, type DiffPanelMode } from "./DiffPanelShell";
 import { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
+import {
+  fileContentsReference,
+  fileLineSelection,
+  fileLineSelectionRange,
+} from "./fileReferences/fileReferenceSelection";
+import { FileReferenceNoteComposer } from "./fileReferences/FileReferenceNoteComposer";
+import { useFileReferencePicker } from "./fileReferences/useFileReferencePicker";
+import { revealFileLine, waitForDiffLayout } from "./pullRequests/files/diffReveal";
 import { PreviewFileEditor } from "./PreviewFileEditor";
 import { PREVIEW_FILE_UNSAFE_CSS } from "./PreviewFileStyles";
 import { createPreviewFileDocument, isPreviewFileSessionDirty } from "./PreviewFileEditSession";
@@ -55,6 +79,7 @@ import { Badge } from "./ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "./ui/alert";
 import { Button } from "./ui/button";
 import { Toggle } from "./ui/toggle";
+import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group";
 import {
   AlertDialog,
   AlertDialogDescription,
@@ -63,15 +88,22 @@ import {
   AlertDialogPopup,
   AlertDialogTitle,
 } from "./ui/alert-dialog";
-import { cn } from "~/lib/utils";
+import { cn, isMacPlatform } from "~/lib/utils";
 import {
   detectPreviewFileKind,
   filterPreviewProjectEntries,
   inferPreviewLanguage,
+  isMarkdownPreviewPath,
+  PREVIEW_MARKDOWN_RENDER_DEFAULT_MAX_CHARS,
   resolvePreviewImageSource,
+  selectServerReadsFileChunks,
+  selectServerWatchesFiles,
 } from "./PreviewPanel.logic";
 import { PreviewImage } from "./PreviewImage";
+import { PreviewPdf } from "./PreviewPdf";
+import { useProjectFileChanges } from "./useProjectFileChanges";
 
+const NO_MARKDOWN_VIEW_MODES: ReadonlyMap<string, WorkspaceFileViewMode> = new Map();
 const subscribeNoSession = () => () => {};
 const readNoSession = () => null;
 
@@ -142,7 +174,23 @@ function buildPreviewFileCacheKey(filePath: string, contents: string): string {
   return `preview:${filePath}:${contents.length}:${fnv1a32(contents).toString(36)}`;
 }
 
-const EMPTY_TURN_DIFF_SUMMARIES: readonly TurnDiffSummary[] = [];
+const NO_FILE_ANNOTATIONS: LineAnnotation[] = [];
+
+/** The line a deep link marks in its file; `token` lets the same link reveal again. */
+interface PreviewLineReveal {
+  readonly path: string;
+  readonly line: number;
+  readonly token: number;
+}
+
+/** The scrolling element between a rendered file and the card that holds it. */
+function scrollParentWithin(element: Element, boundary: HTMLElement): HTMLElement | null {
+  for (let node = element.parentElement; node && node !== boundary; node = node.parentElement) {
+    const { overflowY } = getComputedStyle(node);
+    if (overflowY === "auto" || overflowY === "scroll") return node;
+  }
+  return null;
+}
 
 function PreviewTreeMotionFrame(props: {
   children: ReactNode;
@@ -213,9 +261,21 @@ function PreviewOpenFileEmptyState() {
 
 interface PreviewPanelProps {
   mode?: DiffPanelMode;
+  /** A one-shot deep link (an agent's file link): open this file, at a line when it names one. */
+  reveal?: WorkspaceFileReveal | null | undefined;
+  /** The reveal was acted on; the caller clears it so a repeat link fires again. */
+  onRevealHandled?: (() => void) | undefined;
 }
 
-export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
+/** The Save button's shortcut hint, in this platform's notation. */
+const SAVE_SHORTCUT_LABEL =
+  typeof navigator !== "undefined" && isMacPlatform(navigator.platform) ? "⌘S" : "Ctrl+S";
+
+export default function PreviewPanel({
+  mode = "inline",
+  reveal = null,
+  onRevealHandled,
+}: PreviewPanelProps) {
   const { resolvedTheme } = useTheme();
   const settings = useSettings();
   // Phone work surface: the two-pane tree+preview split becomes a single-pane
@@ -223,64 +283,64 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
   // full-width file view with a back-to-tree affordance. Tree data, filter,
   // and file loading logic are shared with the desktop presentations.
   const isPhonePresentation = mode === "phone";
-  const routeThreadRef = useParams({
-    strict: false,
-    select: (params) => resolveThreadRouteRef(params),
-  });
-  const routeDraftId = useParams({
-    strict: false,
-    select: (params) => (typeof params.draftId === "string" ? DraftId.make(params.draftId) : null),
-  });
   const previewSearch = useSearch({
     strict: false,
     select: (search) => parsePreviewRouteSearch(search),
   });
-  const serverThread = useStore(
-    useMemo(() => createThreadSelectorByRef(routeThreadRef), [routeThreadRef]),
+  const { activeThread, activeCwd } = useRouteWorkspaceTarget();
+  const activeEnvironmentId = activeThread?.environmentId ?? null;
+  const activeThreadId = activeThread?.id ?? null;
+  const activeThreadRef = useMemo(
+    () =>
+      activeEnvironmentId && activeThreadId
+        ? scopeThreadRef(activeEnvironmentId, activeThreadId)
+        : null,
+    [activeEnvironmentId, activeThreadId],
   );
-  const draftThread = useComposerDraftStore((store) => {
-    if (serverThread) return null;
-    if (routeDraftId) return store.getDraftSession(routeDraftId);
-    if (routeThreadRef) return store.getDraftThreadByRef(routeThreadRef);
-    return null;
-  });
-  const activeThread = useMemo(() => {
-    if (serverThread) {
-      return {
-        id: serverThread.id,
-        environmentId: serverThread.environmentId,
-        projectId: serverThread.projectId,
-        worktreePath: serverThread.worktreePath,
-        turnDiffSummaries: serverThread.turnDiffSummaries,
-      };
-    }
-    if (draftThread) {
-      return {
-        id: draftThread.threadId,
-        environmentId: draftThread.environmentId,
-        projectId: draftThread.projectId,
-        worktreePath: draftThread.worktreePath,
-        turnDiffSummaries: EMPTY_TURN_DIFF_SUMMARIES,
-      };
-    }
-    return undefined;
-  }, [serverThread, draftThread]);
-  const activeProjectId = activeThread?.projectId ?? null;
-  const activeProject = useStore((store) =>
-    activeThread && activeProjectId
-      ? selectProjectByRef(store, {
-          environmentId: activeThread.environmentId,
-          projectId: activeProjectId,
-        })
-      : undefined,
-  );
-  const activeCwd = activeThread?.worktreePath ?? activeProject?.cwd ?? null;
+  // "Add to chat" from the gutter; the frozen phone tier does not get it.
+  const fileReferencePicker = useFileReferencePicker(isPhonePresentation ? null : activeThreadRef);
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
+  // The thread and folder the selection below was last reset for. A deep
+  // link waits until the reset for its own thread has applied: the panel is
+  // not keyed per thread, and opening against the previous thread's
+  // selection would find its file "already open" and never open it.
+  const selectionScopeKey =
+    activeEnvironmentId && activeThreadId && activeCwd
+      ? `${isPhonePresentation ? "phone" : "wide"}\u0000${activeEnvironmentId}\u0000${activeThreadId}\u0000${activeCwd}`
+      : null;
+  const [selectionScope, setSelectionScope] = useState<string | null>(null);
+  // The file a deep link opened. The listing leaves files out (ignored and
+  // gitignored folders, past its entry cap, untracked files while it is still
+  // the quick build), so for this file the read decides whether it exists.
+  const linkedFilePathRef = useRef<string | null>(null);
+  // Set only as its file opens, and replaced by every later open: a deep
+  // link marks its line while that file stays open, never on a return to it.
+  const [lineReveal, setLineReveal] = useState<PreviewLineReveal | null>(null);
+  const fileCardRef = useRef<HTMLDivElement | null>(null);
   const [recoveryAction, setRecoveryAction] = useState<"reload" | "discard" | "overwrite" | null>(
     null,
   );
-  const [pendingFilePath, setPendingFilePath] = useState<string | null>(null);
+  // A file waiting on the unsaved-draft prompt, with the line a deep link
+  // asked for; cancelling drops both.
+  const [pendingNavigation, setPendingNavigation] = useState<{
+    readonly path: string;
+    readonly lineReveal: PreviewLineReveal | null;
+  } | null>(null);
+  const pendingFilePath = pendingNavigation?.path ?? null;
   const [fileFilterQuery, setFileFilterQuery] = useState("");
+  // Preview or Source per Markdown file while the panel shows this thread: a
+  // toggle, a deep link's line (Source), or the default pinned when it opens,
+  // so editing or an agent resizing the file never flips the view.
+  const [markdownViewModes, setMarkdownViewModes] = useState(NO_MARKDOWN_VIEW_MODES);
+  const rememberMarkdownViewMode = useCallback(
+    (filePath: string, mode: WorkspaceFileViewMode, options?: { readonly ifUnset?: boolean }) =>
+      setMarkdownViewModes((current) =>
+        current.get(filePath) === mode || (options?.ifUnset && current.has(filePath))
+          ? current
+          : new Map(current).set(filePath, mode),
+      ),
+    [],
+  );
   const [isTreeVisible, setIsTreeVisible] = useState(true);
   // Same readability rationale as the phone diff surface: 320-430px columns
   // are unreadable with horizontal code scroll, so wrap defaults on for the
@@ -305,6 +365,9 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
     startX: number;
   } | null>(null);
   const previousPreviewOpenRef = useRef(previewSearch.preview === "1");
+  // A deep link opens its file once: the route key is cleared as soon as it
+  // is read.
+  const handledRevealRef = useRef<WorkspaceFileReveal | null>(null);
   const previousProjectFilesRefreshKeyRef = useRef<string | null>(null);
   const previousSelectedFileRefreshKeyRef = useRef<string | null>(null);
   const missingFileRefreshKeyRef = useRef<string | null>(null);
@@ -319,10 +382,20 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
         ? retainedPreviewFilePath({ environmentId: activeThread.environmentId, cwd: activeCwd })
         : null,
     );
-    setPendingFilePath(null);
+    setLineReveal(null);
+    setPendingNavigation(null);
     setRecoveryAction(null);
+    setMarkdownViewModes(NO_MARKDOWN_VIEW_MODES);
     setIsTreeVisible(true);
-  }, [activeCwd, activeThread?.environmentId, activeThread?.id, isPhonePresentation]);
+    linkedFilePathRef.current = null;
+    setSelectionScope(selectionScopeKey);
+  }, [
+    activeCwd,
+    activeThread?.environmentId,
+    activeThread?.id,
+    isPhonePresentation,
+    selectionScopeKey,
+  ]);
 
   const latestProjectFilesRefreshKey = useMemo(() => {
     const latestChangedSummary = (activeThread?.turnDiffSummaries ?? [])
@@ -365,12 +438,16 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
   const isFilteringProjectFiles = fileFilterQuery.trim().length > 0;
 
   useEffect(() => {
-    if (
-      !projectFiles ||
-      !selectedFilePath ||
-      projectFiles.entries.some((file) => file.path === selectedFilePath)
-    )
+    if (!projectFiles || !selectedFilePath) return;
+    const entry = projectFiles.entries.find((file) => file.path === selectedFilePath);
+    // A deep link can name a folder: the tree shows it, a read would only fail.
+    if (entry?.kind === "directory") {
+      setSelectedFilePath(null);
+      setFileFilterQuery(selectedFilePath);
+      setIsTreeVisible(true);
       return;
+    }
+    if (entry || selectedFilePath === linkedFilePathRef.current) return;
     const retained =
       activeThread?.environmentId && activeCwd
         ? readPreviewFileSession(
@@ -399,34 +476,57 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
 
   useEffect(() => {
     const previewOpen = previewSearch.preview === "1";
-    if (previewOpen && !previousPreviewOpenRef.current) {
+    // Reopening starts at the tree, unless a link opened the panel: the link
+    // picks the file, and it would find the file left open before the panel
+    // closed "already open" against this reset and land on the tree.
+    const linkPending =
+      !isPhonePresentation && reveal !== null && handledRevealRef.current !== reveal;
+    if (previewOpen && !previousPreviewOpenRef.current && !linkPending) {
       setSelectedFilePath(null);
     }
     previousPreviewOpenRef.current = previewOpen;
-  }, [previewSearch.preview]);
+  }, [isPhonePresentation, previewSearch.preview, reveal]);
 
   // Raster images read through the binary API; the text read would always be
   // rejected for them. Oversized files are refused by the server with a
   // message, since workspace entries carry no size metadata.
   const selectedImageSource = selectedFilePath ? resolvePreviewImageSource(selectedFilePath) : null;
+  const selectedFileKind = selectedFilePath
+    ? detectPreviewFileKind({ filePath: selectedFilePath })
+    : "text";
+  // PDFs read in bounded chunks on nodes that serve them, never through the
+  // text read. Null while the node's config is unknown: the PDF waits rather
+  // than flashing an update message. The frozen phone tier keeps today's view.
+  const readsFileChunks = useEnvironmentServerConfigSelector(
+    activeEnvironmentId,
+    selectServerReadsFileChunks,
+  );
+  const pdfPreview =
+    selectedFileKind !== "pdf" || isPhonePresentation
+      ? "off"
+      : readsFileChunks === null
+        ? "pending"
+        : readsFileChunks
+          ? "chunked"
+          : "outdated-node";
 
+  // The open panel shows this file through the text read (not an image or PDF preview).
+  const selectedFileReadsText = Boolean(
+    activeThread?.environmentId &&
+    activeCwd &&
+    selectedFilePath &&
+    previewSearch.preview === "1" &&
+    selectedImageSource !== "raster" &&
+    !(selectedFileKind === "pdf" && pdfPreview !== "off"),
+  );
   const selectedFileQuery = useProjectReadFile({
     environmentId: activeThread?.environmentId ?? null,
     cwd: activeCwd,
     relativePath: selectedFilePath,
-    enabled: Boolean(
-      activeThread?.environmentId &&
-      activeCwd &&
-      selectedFilePath &&
-      previewSearch.preview === "1" &&
-      selectedImageSource !== "raster",
-    ),
+    enabled: selectedFileReadsText,
   });
   const selectedFileData =
     selectedFileQuery.data?.relativePath === selectedFilePath ? selectedFileQuery.data : null;
-  const selectedFileKind = selectedFilePath
-    ? detectPreviewFileKind({ filePath: selectedFilePath })
-    : "text";
   const selectedFileError =
     selectedFileQuery.error instanceof Error
       ? selectedFileQuery.error.message
@@ -434,6 +534,35 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
         ? "Failed to load file preview."
         : null;
   const refetchSelectedFile = selectedFileQuery.refetch;
+
+  // Live revalidation: on nodes that watch files, the open text file is read again as soon
+  // as it changes on disk (an agent mid-turn, a terminal, another editor, a checkout), while
+  // the panel shows it and the page is visible. The edit session then adopts the new text, or
+  // flags a conflict over unsaved edits. The turn refetch below stays, for older nodes and for
+  // a watch the node refused.
+  const nodeWatchesFiles = useEnvironmentServerConfigSelector(
+    activeEnvironmentId,
+    selectServerWatchesFiles,
+  );
+  const documentVisible = useDocumentVisible();
+  useProjectFileChanges({
+    environmentId: activeEnvironmentId,
+    cwd: activeCwd,
+    relativePath: selectedFilePath,
+    // Once the file has been read: the stream's first event then catches a change since.
+    enabled:
+      nodeWatchesFiles &&
+      documentVisible &&
+      !isPhonePresentation &&
+      selectedFileReadsText &&
+      selectedFileData !== null,
+    onChange: (event) => {
+      // The version this panel holds already, as after its own save: nothing to read.
+      if (event.type !== "deleted" && event.version === selectedFileData?.version) return;
+      // A delete reads too: the failed read reaches the missing-file handling below.
+      void selectedFileQuery.refetchFresh();
+    },
+  });
 
   useEffect(() => {
     if (!selectedFilePath || previewSearch.preview !== "1") {
@@ -498,6 +627,36 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
     currentEditSession.lineEnding !== "mixed" &&
     currentEditSession.diskState === "known",
   );
+  // Markdown opens rendered (a link to a line opens Source); unsaved edits render too.
+  const isMarkdownFile =
+    selectedFilePath !== null && !isPhonePresentation && isMarkdownPreviewPath(selectedFilePath);
+  const markdownContents = isMarkdownFile
+    ? (currentEditSession?.contents ?? selectedFileData?.contents)
+    : undefined;
+  const markdownViewChoice =
+    selectedFilePath !== null ? markdownViewModes.get(selectedFilePath) : undefined;
+  const markdownViewMode =
+    isMarkdownFile && markdownContents !== undefined
+      ? resolveWorkspaceFileViewMode({
+          path: selectedFilePath,
+          kind: "markdown",
+          markdownRendererAvailable:
+            markdownContents.length <= PREVIEW_MARKDOWN_RENDER_DEFAULT_MAX_CHARS,
+          override:
+            markdownViewChoice === undefined
+              ? null
+              : { path: selectedFilePath, mode: markdownViewChoice },
+        })
+      : "source";
+  const showRenderedMarkdown = markdownViewMode === "preview";
+  // The size default holds for the whole visit: pinned once the file's contents arrive.
+  const markdownDefaultViewPending =
+    isMarkdownFile && markdownContents !== undefined && markdownViewChoice === undefined;
+  useEffect(() => {
+    if (markdownDefaultViewPending && selectedFilePath !== null) {
+      rememberMarkdownViewMode(selectedFilePath, markdownViewMode, { ifUnset: true });
+    }
+  }, [markdownDefaultViewPending, markdownViewMode, rememberMarkdownViewMode, selectedFilePath]);
   const selectionGeneration = useRef(0);
   useEffect(() => {
     selectionGeneration.current++;
@@ -506,18 +665,83 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
     };
   }, [sessionOwner]);
 
-  const onSelectFile = useCallback(
-    async (filePath: string) => {
-      if (filePath === selectedFilePath) return;
-      const generation = ++selectionGeneration.current;
-      if (sessionOwner?.unsaved && !(await sessionOwner.flush())) {
-        if (generation === selectionGeneration.current) setPendingFilePath(filePath);
+  // Shows a file, with the line a deep link asked for. A linked line is marked
+  // in the source, so a Markdown file opens there; only a file that actually
+  // opens takes that choice, never one the unsaved-draft prompt held back.
+  const selectFile = useCallback(
+    (filePath: string, nextLineReveal: PreviewLineReveal | null) => {
+      setSelectedFilePath(filePath);
+      setLineReveal(nextLineReveal);
+      if (nextLineReveal !== null && isMarkdownPreviewPath(filePath)) {
+        rememberMarkdownViewMode(filePath, "source");
+      }
+    },
+    [rememberMarkdownViewMode],
+  );
+  // Opens a file the way a tree click does: an unsaved draft asks first. A
+  // deep link's line is marked only once its file is the one open.
+  const openFile = useCallback(
+    async (filePath: string, nextLineReveal: PreviewLineReveal | null) => {
+      if (filePath === selectedFilePath) {
+        selectFile(filePath, nextLineReveal);
         return;
       }
-      if (generation === selectionGeneration.current) setSelectedFilePath(filePath);
+      const generation = ++selectionGeneration.current;
+      if (sessionOwner?.unsaved && !(await sessionOwner.flush())) {
+        if (generation === selectionGeneration.current) {
+          setPendingNavigation({ path: filePath, lineReveal: nextLineReveal });
+        }
+        return;
+      }
+      if (generation !== selectionGeneration.current) return;
+      selectFile(filePath, nextLineReveal);
     },
-    [selectedFilePath, sessionOwner],
+    [selectFile, selectedFilePath, sessionOwner],
   );
+  // Every other open drops the mark, so coming back does not replay the link.
+  const onSelectFile = useCallback((filePath: string) => openFile(filePath, null), [openFile]);
+
+  const revealTokenRef = useRef(0);
+  useEffect(() => {
+    if (!reveal || handledRevealRef.current === reveal) return;
+    if (previewSearch.preview !== "1" || !activeThread?.environmentId || !activeCwd) return;
+    // Wait for the selection of the thread the link opened, so `openFile`
+    // compares against that thread's open file.
+    if (selectionScopeKey === null || selectionScope !== selectionScopeKey) return;
+    handledRevealRef.current = reveal;
+    onRevealHandled?.();
+    // The frozen phone tier keeps landing on the tree.
+    if (isPhonePresentation) return;
+    if (
+      projectFiles?.entries.some(
+        (entry) => entry.path === reveal.path && entry.kind === "directory",
+      )
+    ) {
+      // A folder shows in the tree; the open file stays as it is.
+      setFileFilterQuery(reveal.path);
+      setIsTreeVisible(true);
+      return;
+    }
+    revealTokenRef.current += 1;
+    linkedFilePathRef.current = reveal.path;
+    void openFile(
+      reveal.path,
+      reveal.line === undefined
+        ? null
+        : { path: reveal.path, line: reveal.line, token: revealTokenRef.current },
+    );
+  }, [
+    activeCwd,
+    activeThread?.environmentId,
+    isPhonePresentation,
+    onRevealHandled,
+    openFile,
+    previewSearch.preview,
+    projectFiles,
+    reveal,
+    selectionScope,
+    selectionScopeKey,
+  ]);
 
   const onEditContentsChange = useCallback(
     (contents: string) => sessionOwner?.change(contents),
@@ -590,17 +814,95 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
     selectedFileKind,
     selectedFilePath,
   ]);
+  // Offered only for a file a reference can name.
+  const canPickLines =
+    fileReferencePicker.available &&
+    selectedFilePath !== null &&
+    normalizeFileReferencePath(selectedFilePath) !== null &&
+    !showRenderedMarkdown;
+  // Stable, so the renderer's options change only when the `+` comes or goes.
+  const onGutterPick = useEvent((range: SelectedLineRange) => {
+    if (!selectedFilePath) return;
+    // The pick's range takes over from a deep link's mark.
+    setLineReveal(null);
+    fileReferencePicker.open(selectedFilePath, fileLineSelection(selectedFilePath, range));
+  });
   const previewFileOptions = useMemo(
     () => ({
       disableFileHeader: true,
       overflow: wrapPreviewLines ? ("wrap" as const) : ("scroll" as const),
       theme: resolveDiffThemeName(resolvedTheme),
       themeType: resolvedTheme,
-      unsafeCSS: PREVIEW_FILE_UNSAFE_CSS,
+      unsafeCSS: `${PREVIEW_FILE_UNSAFE_CSS}${NEUTRAL_LINE_SELECTION_UNSAFE_CSS}${PLAIN_ANNOTATION_UNSAFE_CSS}${GUTTER_UTILITY_UNSAFE_CSS}`,
       tokenizeMaxLineLength: SYNTAX_TOKENIZE_MAX_LINE_LENGTH,
+      ...(canPickLines ? { enableGutterUtility: true, onGutterUtilityClick: onGutterPick } : {}),
     }),
-    [resolvedTheme, wrapPreviewLines],
+    [canPickLines, onGutterPick, resolvedTheme, wrapPreviewLines],
   );
+  const filePick =
+    fileReferencePicker.pick && fileReferencePicker.pick.fileKey === selectedFilePath
+      ? fileReferencePicker.pick
+      : null;
+  const revealedLine = lineReveal && lineReveal.path === selectedFilePath ? lineReveal : null;
+  // An open pick shows its range; otherwise a deep link's line stays marked.
+  const previewSelectedLines = useMemo<SelectedLineRange | null>(
+    () =>
+      filePick
+        ? fileLineSelectionRange(filePick.selection)
+        : revealedLine
+          ? { start: revealedLine.line, end: revealedLine.line }
+          : null,
+    [filePick, revealedLine],
+  );
+  const previewLineAnnotations = useMemo(
+    () => (filePick ? [{ lineNumber: filePick.selection.lineEnd }] : NO_FILE_ANNOTATIONS),
+    [filePick],
+  );
+  const renderPreviewAnnotation = () =>
+    filePick ? (
+      <FileReferenceNoteComposer
+        key={filePick.id}
+        title={formatFileReferenceTitle(filePick.selection)}
+        restoreComment={fileReferencePicker.restoreComment}
+        onCommentChange={fileReferencePicker.rememberComment}
+        onCancel={fileReferencePicker.cancel}
+        onAdd={(comment) =>
+          fileReferencePicker.add(
+            fileContentsReference({
+              // What the view shows, unsaved edits included.
+              contents: currentEditSession?.contents ?? selectedFileData?.contents ?? "",
+              selection: filePick.selection,
+              comment,
+            }),
+          )
+        }
+      />
+    ) : null;
+
+  // Scroll a deep link's line into view once its file has rendered.
+  const fileViewReady =
+    (previewTextFile !== null || isSelectedFileEditable) && !showRenderedMarkdown;
+  const revealedTokenRef = useRef<number | null>(null);
+  useEffect(() => {
+    const card = fileCardRef.current;
+    if (!revealedLine || !fileViewReady || !card) return;
+    if (revealedTokenRef.current === revealedLine.token) return;
+    const controller = new AbortController();
+    void (async () => {
+      if (!(await waitForDiffLayout(card, controller.signal))) return;
+      const container = card.querySelector("diffs-container");
+      const scroller = container ? scrollParentWithin(container, card) : null;
+      if (!scroller || controller.signal.aborted) return;
+      const element = await revealFileLine({
+        scroller,
+        fileElement: card,
+        line: revealedLine.line,
+        signal: controller.signal,
+      });
+      if (element) revealedTokenRef.current = revealedLine.token;
+    })();
+    return () => controller.abort();
+  }, [fileViewReady, revealedLine]);
 
   const onResizePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -678,20 +980,26 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
   }, [isTreeVisible]);
 
   const unsavedDialogOpen = pendingFilePath !== null;
-  const cancelUnsavedNavigation = useCallback(() => setPendingFilePath(null), []);
+  const cancelUnsavedNavigation = useCallback(() => setPendingNavigation(null), []);
+  const finishUnsavedNavigation = useCallback(() => {
+    if (pendingNavigation) selectFile(pendingNavigation.path, pendingNavigation.lineReveal);
+    else {
+      setSelectedFilePath(null);
+      setLineReveal(null);
+    }
+    setPendingNavigation(null);
+  }, [pendingNavigation, selectFile]);
   const continueUnsavedNavigation = useCallback(async () => {
     const generation = selectionGeneration.current;
     if (sessionOwner && !(await sessionOwner.discard())) return;
     if (generation !== selectionGeneration.current) return;
-    setSelectedFilePath(pendingFilePath);
-    setPendingFilePath(null);
-  }, [sessionOwner, pendingFilePath]);
+    finishUnsavedNavigation();
+  }, [finishUnsavedNavigation, sessionOwner]);
   const saveAndContinueNavigation = useCallback(async () => {
     const generation = selectionGeneration.current;
     if (!(await saveSelectedFile()) || generation !== selectionGeneration.current) return;
-    setSelectedFilePath(pendingFilePath);
-    setPendingFilePath(null);
-  }, [pendingFilePath, saveSelectedFile]);
+    finishUnsavedNavigation();
+  }, [finishUnsavedNavigation, saveSelectedFile]);
   const confirmRecovery = async () => {
     const owner = sessionOwner;
     const generation = selectionGeneration.current;
@@ -706,6 +1014,17 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
         setSelectedFilePath(null);
     }
   };
+
+  // Tree rows drag out as workspace files; the composer takes them as mentions.
+  const onTreeFileDragStart = useMemo(() => {
+    if (isPhonePresentation || !activeEnvironmentId || !activeCwd) return undefined;
+    return (path: string, transfer: DataTransfer) =>
+      startWorkspaceFileDrag(transfer, {
+        environmentId: activeEnvironmentId,
+        workspaceRoot: activeCwd,
+        path,
+      });
+  }, [activeCwd, activeEnvironmentId, isPhonePresentation]);
 
   const headerRow = (
     <>
@@ -778,7 +1097,10 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
     ) : (
       <div className="min-h-0 flex-1 p-2">
         <style>{PREVIEW_CODE_CSS}</style>
-        <div className="preview-panel-file-card flex h-full min-h-0 flex-col overflow-hidden rounded-md border border-border/70 bg-[color:color-mix(in_srgb,var(--card)_90%,var(--background))]">
+        <div
+          ref={fileCardRef}
+          className="preview-panel-file-card flex h-full min-h-0 flex-col overflow-hidden rounded-md border border-border/70 bg-[color:color-mix(in_srgb,var(--card)_90%,var(--background))]"
+        >
           <div className="preview-panel-file-toolbar flex min-h-10 shrink-0 items-center gap-3 border-b border-border/70 bg-[color:color-mix(in_srgb,var(--card)_94%,var(--foreground))] px-3 py-1.5 text-foreground">
             <div className="preview-panel-file-identity flex min-w-0 flex-1 items-center gap-2">
               <div className="truncate font-mono text-[12px] font-medium">{selectedFilePath}</div>
@@ -803,6 +1125,27 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
                 </span>
               ) : null}
             </div>
+            {isMarkdownFile && markdownContents !== undefined ? (
+              <ToggleGroup
+                className="shrink-0"
+                variant="outline"
+                size="xs"
+                value={[markdownViewMode]}
+                onValueChange={(value) => {
+                  const mode = value[0];
+                  if (selectedFilePath && (mode === "preview" || mode === "source")) {
+                    rememberMarkdownViewMode(selectedFilePath, mode);
+                  }
+                }}
+              >
+                <ToggleGroupItem aria-label="Show rendered Markdown" value="preview">
+                  Preview
+                </ToggleGroupItem>
+                <ToggleGroupItem aria-label="Show Markdown source" value="source">
+                  Source
+                </ToggleGroupItem>
+              </ToggleGroup>
+            ) : null}
             {!isPhonePresentation &&
             currentEditSession &&
             (isSelectedFileEditable || sessionOwner?.unsaved) ? (
@@ -821,7 +1164,7 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
                   disabled={!canSaveSelectedFile}
                   onClick={() => void saveSelectedFile()}
                   size="xs"
-                  title="Save file (Ctrl/⌘ S)"
+                  title={`Save file (${SAVE_SHORTCUT_LABEL})`}
                 >
                   {currentEditSession.saveStatus === "saving" ? (
                     <LoaderCircleIcon className="animate-spin" />
@@ -829,7 +1172,7 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
                     <SaveIcon />
                   )}
                   Save
-                  <span className="ml-0.5 text-[9px] opacity-70">⌘S</span>
+                  <span className="ml-0.5 text-[9px] opacity-70">{SAVE_SHORTCUT_LABEL}</span>
                 </Button>
               </div>
             ) : null}
@@ -905,6 +1248,33 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
               svgContents={selectedFileData?.contents}
               refreshKey={latestSelectedFileRefreshKey}
             />
+          ) : selectedFileKind === "pdf" && pdfPreview === "chunked" && selectedFilePath ? (
+            <PreviewPdf
+              environmentId={activeEnvironmentId}
+              cwd={activeCwd}
+              relativePath={selectedFilePath}
+              refreshKey={latestSelectedFileRefreshKey}
+            />
+          ) : selectedFileKind === "pdf" && pdfPreview === "pending" ? (
+            <DiffPanelLoadingState label="Loading PDF..." />
+          ) : selectedFileKind === "pdf" && pdfPreview === "outdated-node" ? (
+            <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
+              Update Ryco on this node to preview PDFs.
+            </div>
+          ) : showRenderedMarkdown &&
+            markdownContents !== undefined &&
+            activeCwd &&
+            selectedFilePath &&
+            currentEditSession?.diskState !== "unknown" ? (
+            <div className="min-h-0 flex-1 overflow-auto px-5 py-4" data-preview-markdown>
+              <ChatMarkdown
+                text={markdownContents}
+                cwd={activeCwd}
+                documentFolder={workspaceFileFolder(activeCwd, selectedFilePath)}
+                {...(activeEnvironmentId ? { environmentId: activeEnvironmentId } : {})}
+                smoothStreaming={false}
+              />
+            </div>
           ) : isSelectedFileEditable && currentEditSession ? (
             <PreviewFileEditor
               cacheKey={currentEditSession.key}
@@ -914,6 +1284,9 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
               language={inferPreviewLanguage(currentEditSession.relativePath)}
               onChange={onEditContentsChange}
               options={previewFileOptions}
+              lineAnnotations={previewLineAnnotations}
+              renderAnnotation={renderPreviewAnnotation}
+              selectedLines={previewSelectedLines}
             />
           ) : currentEditSession?.diskState === "unknown" ? null : previewTextFile ? (
             <div className="min-h-0 flex-1 overflow-auto">
@@ -924,6 +1297,9 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
                   file={previewTextFile}
                   className="preview-panel-diffs-file"
                   options={previewFileOptions}
+                  lineAnnotations={previewLineAnnotations}
+                  renderAnnotation={renderPreviewAnnotation}
+                  selectedLines={previewSelectedLines}
                 />
               </DiffWorkerPoolProvider>
             </div>
@@ -1002,6 +1378,8 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
             onSelectFile={onSelectFile}
             selectedFilePath={selectedFilePath}
             showStats={false}
+            onFileDragStart={onTreeFileDragStart}
+            onFileDragEnd={endWorkspaceFileDrag}
           />
         )}
       </div>

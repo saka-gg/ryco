@@ -22,8 +22,8 @@ export const CHAT_CONTENT_MAX_WIDTH = 960;
 export const AUXILIARY_PANE_MIN_WIDTH = 260;
 export const AUXILIARY_PANE_MAX_WIDTH = 480;
 const AUXILIARY_PANE_DEFAULT_MAX_WIDTH = 320;
-const FILE_INSPECTOR_MIN_VIEWPORT_WIDTH = 820;
-const FILE_INSPECTOR_MIN_MAIN_WIDTH = 560;
+const WORKSPACE_INSPECTOR_MIN_VIEWPORT_WIDTH = 820;
+const WORKSPACE_INSPECTOR_MIN_MAIN_WIDTH = 560;
 const STABLE_FORM_SHEET_MAX_HEIGHT = 720;
 const STABLE_FORM_SHEET_VERTICAL_MARGIN = 64;
 const STABLE_FORM_SHEET_MIN_DETENT = 0.62;
@@ -47,7 +47,7 @@ export interface WorkspacePaneLayout {
   readonly auxiliaryPaneWidth: number | null;
 }
 
-export interface FileInspectorPaneLayout {
+export interface ThreadWorkspaceInspectorPaneLayout {
   readonly supported: boolean;
   readonly width: number | null;
 }
@@ -96,20 +96,21 @@ export function deriveWorkspacePaneLayout(input: {
     : 0;
 
   if (auxiliaryPaneRole === "inspector") {
-    const fileInspector = deriveFileInspectorPaneLayout({
+    const workspaceInspector = deriveThreadWorkspaceInspectorPaneLayout({
       layout: input.layout,
       viewportWidth,
       preferredWidth: input.auxiliaryPanePreferredWidth,
       reservedLeadingWidth: preferredPrimarySidebarWidth,
     });
-    const auxiliaryPaneVisible = fileInspector.supported && input.auxiliaryPanePreferredVisible;
+    const auxiliaryPaneVisible =
+      workspaceInspector.supported && input.auxiliaryPanePreferredVisible;
     const primarySidebarSuppressedByAuxiliary =
       preferredPrimarySidebarVisible &&
       auxiliaryPaneVisible &&
-      fileInspector.width !== null &&
+      workspaceInspector.width !== null &&
       input.layout.listPaneWidth !== null &&
-      viewportWidth - input.layout.listPaneWidth - fileInspector.width <
-        FILE_INSPECTOR_MIN_MAIN_WIDTH;
+      viewportWidth - input.layout.listPaneWidth - workspaceInspector.width <
+        WORKSPACE_INSPECTOR_MIN_MAIN_WIDTH;
     const primarySidebarVisible =
       preferredPrimarySidebarVisible && !primarySidebarSuppressedByAuxiliary;
     const primarySidebarWidth = primarySidebarVisible ? (input.layout.listPaneWidth ?? 0) : 0;
@@ -118,9 +119,9 @@ export function deriveWorkspacePaneLayout(input: {
       primarySidebarVisible,
       primarySidebarSuppressedByAuxiliary,
       contentPaneWidth: Math.max(0, viewportWidth - primarySidebarWidth),
-      supportsAuxiliaryPane: fileInspector.supported,
+      supportsAuxiliaryPane: workspaceInspector.supported,
       auxiliaryPaneVisible,
-      auxiliaryPaneWidth: fileInspector.width,
+      auxiliaryPaneWidth: workspaceInspector.width,
     };
   }
 
@@ -149,19 +150,19 @@ export function deriveWorkspacePaneLayout(input: {
   };
 }
 
-export function deriveFileInspectorPaneLayout(input: {
+export function deriveThreadWorkspaceInspectorPaneLayout(input: {
   readonly layout: Layout;
   readonly viewportWidth: number;
   readonly preferredWidth?: number;
   readonly reservedLeadingWidth?: number;
-}): FileInspectorPaneLayout {
+}): ThreadWorkspaceInspectorPaneLayout {
   const viewportWidth = Math.max(0, input.viewportWidth);
   const reservedLeadingWidth = Number.isFinite(input.reservedLeadingWidth)
     ? Math.max(0, input.reservedLeadingWidth ?? 0)
     : 0;
   const availableContentWidth = Math.max(0, viewportWidth - reservedLeadingWidth);
   const supported =
-    input.layout.usesSplitView && viewportWidth >= FILE_INSPECTOR_MIN_VIEWPORT_WIDTH;
+    input.layout.usesSplitView && viewportWidth >= WORKSPACE_INSPECTOR_MIN_VIEWPORT_WIDTH;
 
   return {
     supported,
@@ -212,7 +213,7 @@ export function constrainAuxiliaryPaneWidth(input: {
     : 0;
   const maxWidth = Math.max(
     AUXILIARY_PANE_MIN_WIDTH,
-    Math.min(AUXILIARY_PANE_MAX_WIDTH, availableWidth - FILE_INSPECTOR_MIN_MAIN_WIDTH),
+    Math.min(AUXILIARY_PANE_MAX_WIDTH, availableWidth - WORKSPACE_INSPECTOR_MIN_MAIN_WIDTH),
   );
   return clamp(Math.round(safePreferredWidth), AUXILIARY_PANE_MIN_WIDTH, maxWidth);
 }

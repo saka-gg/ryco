@@ -8,7 +8,6 @@ import type {
 import type {
   Agent,
   FilePartInput,
-  OpencodeClient,
   PermissionRuleset,
   ProviderListResponse,
   QuestionAnswer,
@@ -31,26 +30,46 @@ import {
   Stream,
 } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
+import { randomBytes } from "node:crypto";
 
 import { isWindowsCommandNotFound } from "../processRunner.ts";
 import { isPersistableChatAttachment } from "../attachmentStore.ts";
+import type { OpenCodeApi } from "./openCodeApi.ts";
 import {
+  classifyOpenCodeGeneration,
   describeUnsupportedOpenCodeVersion,
-  normalizeOpenCodeVersion,
-  OPENCODE_NON_JSON_HEALTH_MESSAGE,
   OPENCODE_UNKNOWN_CLI_VERSION_MESSAGE,
+  type OpenCodeGeneration,
 } from "./openCodeVersion.ts";
 import { collectStreamAsString, parseGenericCliVersion } from "./providerSnapshot.ts";
+import { type AgentProcessPriorityShape, spawnAgentProcess } from "./agentProcessPriority.ts";
 import { NetService } from "@ryco/shared/Net";
+import { timeoutWhileResponsiveOption } from "@ryco/shared/responsiveDeadline";
 
-const OPENCODE_SERVER_READY_PREFIX = "opencode server listening";
+/**
+ * The ready line. 1.x prints `opencode server listening on <url>` at the start of a line, 2.x
+ * `OpenCode Server listening on <url>` after a log level. Anchored to a line's start (a level word
+ * may come first), so another "… server listening on <url>" a plugin prints earlier is not taken
+ * for the server's, which would get the password.
+ */
+const OPENCODE_SERVER_READY_LINE =
+  /^(?:[A-Za-z]+\s+)?opencode server listening on\s+(https?:\/\/\S+)/im;
 const DEFAULT_OPENCODE_SERVER_TIMEOUT_MS = 5_000;
+/**
+ * 2.x converts the shared OpenCode database to its own format on its first start, so it gets T3's
+ * startup budget: a start cut short there is killed in the middle of the conversion.
+ */
+const OPENCODE_V2_SERVER_TIMEOUT_MS = 30_000;
 const DEFAULT_HOSTNAME = "127.0.0.1";
 const OPENCODE_VERSION_PREFLIGHT_TIMEOUT_MS = 5_000;
 /** How long a stopping `opencode serve` group gets after SIGTERM before it is SIGKILLed. */
 const OPENCODE_SERVER_TERMINATE_GRACE = "1 second";
 export interface OpenCodeServerProcess {
   readonly url: string;
+  /**
+   * What clients send. A 2.x server always has one: the configured password or one generated in
+   * memory for this process. Never logged or put in a snapshot.
+   */
   readonly serverPassword?: string;
   readonly exitCode: Effect.Effect<number, never>;
 }
@@ -99,58 +118,50 @@ export const runOpenCodeSdk = <A>(
       new OpenCodeRuntimeError({ operation, detail: openCodeRuntimeErrorDetail(cause), cause }),
   }).pipe(Effect.withSpan(`opencode.${operation}`));
 
+/** A cached `import()` that a failed load does not poison. */
+export const lazyOpenCodeModule = <M>(
+  name: string,
+  load: () => Promise<M>,
+): Effect.Effect<M, OpenCodeRuntimeError> => {
+  let promise: Promise<M> | undefined;
+  return Effect.tryPromise({
+    try: () =>
+      (promise ??= load().catch((cause: unknown) => {
+        promise = undefined;
+        throw cause;
+      })),
+    catch: (cause) =>
+      new OpenCodeRuntimeError({
+        operation: "createOpenCodeSdkClient",
+        detail: `Failed to load OpenCode ${name}: ${openCodeRuntimeErrorDetail(cause)}`,
+        cause,
+      }),
+  }).pipe(Effect.withSpan(`opencode.${name.toLowerCase()}.load`));
+};
+
+/**
+ * API detection, client creation and the server version check (`openCodeProtocol.ts`) load on
+ * first use, outside the boot chunk.
+ */
+const loadOpenCodeProtocol = lazyOpenCodeModule("protocol", () => import("./openCodeProtocol.ts"));
+
+/**
+ * The server's normalised version; fails unless this build runs it on the client's API
+ * generation. Every caller runs it before its first mutation.
+ */
 export const verifyOpenCodeServerVersion = (
-  client: OpencodeClient,
+  client: OpenCodeApi,
 ): Effect.Effect<string, OpenCodeRuntimeError> =>
-  runOpenCodeSdk("global.health", (signal) => client.global.health({ signal })).pipe(
-    Effect.timeoutOption("5 seconds"),
-    Effect.flatMap((result) => {
-      if (Option.isNone(result)) {
-        return Effect.fail(
-          new OpenCodeRuntimeError({
-            operation: "global.health",
-            detail: "Timed out while checking the OpenCode server version.",
-          }),
-        );
-      }
-      // The SDK parses `text/*` responses as text, so an HTML page (an OpenCode 2.x web UI, a
-      // proxy or a sign-in page) arrives here as a string rather than a health object.
-      const raw: unknown = result.value.data;
-      if (typeof raw === "string") {
-        return Effect.fail(
-          new OpenCodeRuntimeError({
-            operation: "global.health",
-            detail: OPENCODE_NON_JSON_HEALTH_MESSAGE,
-          }),
-        );
-      }
-      const health = result.value.data;
-      if (!health?.healthy || typeof health.version !== "string" || health.version.length === 0) {
-        return Effect.fail(
-          new OpenCodeRuntimeError({
-            operation: "global.health",
-            detail: "OpenCode server health check returned an invalid response.",
-          }),
-        );
-      }
-      // Fails closed: an unparseable or 2.x version is refused, never compared as a string.
-      const problem = describeUnsupportedOpenCodeVersion(health.version, "server");
-      if (problem !== null) {
-        return Effect.fail(
-          new OpenCodeRuntimeError({ operation: "global.health", detail: problem }),
-        );
-      }
-      return Effect.succeed(normalizeOpenCodeVersion(health.version));
-    }),
-  );
+  Effect.flatMap(loadOpenCodeProtocol, (protocol) => protocol.checkOpenCodeServerVersion(client));
 
 /**
  * Runs `<binary> --version` and fails unless it reports an OpenCode version this build can run.
- * Called before every `opencode serve` spawn: Ryco must never start a 2.x server (2.x converts the
- * shared OpenCode database in place and prints a generated password on stdout). Deliberately not
- * cached — a binary swapped on PATH is caught at the next cold start. The only reuse is within one
- * provider probe, which runs this exact check on the same binary moments before it starts its
- * server (`verifiedBinaryVersion`). Ignores the exit code, like the provider probe.
+ * Called before every `opencode serve` spawn: Ryco must never start an OpenCode it cannot run (a
+ * 2.x below its minimum, or a 3.x, would still convert or touch the shared OpenCode data), and the
+ * version decides how the server is started. Deliberately not cached — a binary swapped on PATH is
+ * caught at the next cold start. The only reuse is within one provider probe, which runs this exact
+ * check on the same binary moments before it starts its server (`verifiedBinaryVersion`). Ignores
+ * the exit code, like the provider probe.
  */
 export const assertSupportedOpenCodeBinary = (
   runCommand: OpenCodeRuntimeShape["runOpenCodeCommand"],
@@ -190,29 +201,6 @@ export const assertSupportedOpenCodeBinary = (
     }),
   );
 
-type OpenCodeSdkModule = typeof import("@opencode-ai/sdk/v2");
-
-let openCodeSdkModulePromise: Promise<OpenCodeSdkModule> | undefined;
-
-const loadOpenCodeSdkModule = (): Effect.Effect<OpenCodeSdkModule, OpenCodeRuntimeError> =>
-  Effect.tryPromise({
-    try: async () => {
-      try {
-        openCodeSdkModulePromise ??= import("@opencode-ai/sdk/v2");
-        return await openCodeSdkModulePromise;
-      } catch (cause) {
-        openCodeSdkModulePromise = undefined;
-        throw cause;
-      }
-    },
-    catch: (cause) =>
-      new OpenCodeRuntimeError({
-        operation: "createOpenCodeSdkClient",
-        detail: `Failed to load OpenCode SDK: ${openCodeRuntimeErrorDetail(cause)}`,
-        cause,
-      }),
-  }).pipe(Effect.withSpan("opencode.sdk.load"));
-
 export interface OpenCodeCommandResult {
   readonly stdout: string;
   readonly stderr: string;
@@ -248,6 +236,8 @@ export interface OpenCodeRuntimeShape {
     readonly port?: number;
     readonly hostname?: string;
     readonly timeoutMs?: number;
+    /** Lowers the server (it runs the agent work); probes leave it unset. */
+    readonly processPriority?: AgentProcessPriorityShape | undefined;
   }) => Effect.Effect<OpenCodeServerProcess, OpenCodeRuntimeError, Scope.Scope>;
   /**
    * Returns a handle to either an externally-managed OpenCode server (when
@@ -263,19 +253,27 @@ export interface OpenCodeRuntimeShape {
     readonly port?: number;
     readonly hostname?: string;
     readonly timeoutMs?: number;
+    /** Lowers a server this call starts; ignored for an external `serverUrl`. */
+    readonly processPriority?: AgentProcessPriorityShape | undefined;
   }) => Effect.Effect<OpenCodeServerConnection, OpenCodeRuntimeError, Scope.Scope>;
   readonly runOpenCodeCommand: (input: {
     readonly binaryPath: string;
     readonly args: ReadonlyArray<string>;
     readonly environment?: NodeJS.ProcessEnv;
   }) => Effect.Effect<OpenCodeCommandResult, OpenCodeRuntimeError>;
+  /**
+   * Detects the server's API generation (read-only requests) before returning a client bound to
+   * it: the 1.x SDK client, or the 2.x facade (`openCodeV2Client.ts`). A server this runtime
+   * started must answer as the generation of the binary it verified. Not cached: an external
+   * server can change generation.
+   */
   readonly createOpenCodeSdkClient: (input: {
     readonly baseUrl: string;
     readonly directory: string;
     readonly serverPassword?: string;
-  }) => Effect.Effect<OpencodeClient, OpenCodeRuntimeError>;
+  }) => Effect.Effect<OpenCodeApi, OpenCodeRuntimeError>;
   readonly loadOpenCodeInventory: (
-    client: OpencodeClient,
+    client: OpenCodeApi,
   ) => Effect.Effect<OpenCodeInventory, OpenCodeRuntimeError>;
 }
 
@@ -296,14 +294,7 @@ export function resolveOpenCodeServerPassword(input: {
 }
 
 function parseServerUrlFromOutput(output: string): string | null {
-  for (const line of output.split("\n")) {
-    if (!line.startsWith(OPENCODE_SERVER_READY_PREFIX)) {
-      continue;
-    }
-    const match = line.match(/on\s+(https?:\/\/[^\s]+)/);
-    return match?.[1] ?? null;
-  }
-  return null;
+  return OPENCODE_SERVER_READY_LINE.exec(output)?.[1] ?? null;
 }
 
 export function parseOpenCodeModelSlug(
@@ -448,6 +439,14 @@ function ensureRuntimeError(
 const makeOpenCodeRuntime = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const netService = yield* NetService;
+  /**
+   * The API generation of every server this runtime started and still runs, by URL, as its
+   * verified binary reported it. Client creation asks such a server on its own generation's route
+   * only (so a 2.x server never gets the 1.x health request, which its catch-all can forward with
+   * the password to app.opencode.ai) and refuses one that answers as the other generation (a
+   * binary swapped between its version check and `serve`).
+   */
+  const ownedServers = new Map<string, OpenCodeGeneration>();
 
   const runOpenCodeCommand: OpenCodeRuntimeShape["runOpenCodeCommand"] = (input) =>
     Effect.gen(function* () {
@@ -489,15 +488,17 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       // Version gate before anything else: never spawn `serve` on an OpenCode this build cannot
       // run. This is the single spawn site, so the owner, the probe and the adapter all inherit it.
       // A caller that just ran the same gate on this binary passes its result instead.
-      if (
-        input.verifiedBinaryVersion === undefined ||
-        describeUnsupportedOpenCodeVersion(input.verifiedBinaryVersion, "binary") !== null
-      ) {
-        yield* assertSupportedOpenCodeBinary(runOpenCodeCommand, {
-          binaryPath: input.binaryPath,
-          ...(input.environment !== undefined ? { environment: input.environment } : {}),
-        });
-      }
+      const version =
+        input.verifiedBinaryVersion !== undefined &&
+        describeUnsupportedOpenCodeVersion(input.verifiedBinaryVersion, "binary") === null
+          ? input.verifiedBinaryVersion
+          : yield* assertSupportedOpenCodeBinary(runOpenCodeCommand, {
+              binaryPath: input.binaryPath,
+              ...(input.environment !== undefined ? { environment: input.environment } : {}),
+            });
+      // The gate passes only 1.x and 2.x; the binary's generation is its server's.
+      const generation: OpenCodeGeneration = classifyOpenCodeGeneration(version) ?? "v1";
+      const v2 = generation === "v2";
 
       // Bind this server's lifetime to the caller's scope. When the caller's
       // scope closes, the spawned child is killed and all associated fibers
@@ -517,37 +518,56 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
               }),
           ),
         ));
-      const timeoutMs = input.timeoutMs ?? DEFAULT_OPENCODE_SERVER_TIMEOUT_MS;
+      const timeoutMs =
+        input.timeoutMs ??
+        (v2 ? OPENCODE_V2_SERVER_TIMEOUT_MS : DEFAULT_OPENCODE_SERVER_TIMEOUT_MS);
       const args = ["serve", `--hostname=${hostname}`, `--port=${port}`];
-      const serverPassword = resolveOpenCodeServerPassword({
-        external: false,
-        ...(input.serverPassword !== undefined ? { configuredPassword: input.serverPassword } : {}),
-        ...(input.environment !== undefined ? { environment: input.environment } : {}),
-      });
+      // 2.x always requires a password and prints one it generated on stdout otherwise, so it gets
+      // the configured one or a fresh one held only in memory, in its own variable; the inherited
+      // 1.x variable is dropped (T3 `OpenCode2Server.serverEnvironment`).
+      const serverPassword = v2
+        ? input.serverPassword || randomBytes(32).toString("base64url")
+        : resolveOpenCodeServerPassword({
+            external: false,
+            ...(input.serverPassword !== undefined
+              ? { configuredPassword: input.serverPassword }
+              : {}),
+            ...(input.environment !== undefined ? { environment: input.environment } : {}),
+          });
+      const { OPENCODE_SERVER_PASSWORD: _inheritedPassword, ...environment } =
+        input.environment ?? process.env;
+      /** Startup output can end up in an error; the password never does. */
+      const redact = (text: string) =>
+        serverPassword ? text.replaceAll(serverPassword, "<redacted>") : text;
 
-      const child = yield* spawner
-        .spawn(
-          ChildProcess.make(input.binaryPath, args, {
-            detached: process.platform !== "win32",
-            shell: process.platform === "win32",
-            env: {
-              ...(input.environment ?? process.env),
-              ...(serverPassword !== undefined ? { OPENCODE_SERVER_PASSWORD: serverPassword } : {}),
-              OPENCODE_CONFIG_CONTENT: JSON.stringify({}),
-            },
-          }),
-        )
-        .pipe(
-          Effect.provideService(Scope.Scope, runtimeScope),
-          Effect.mapError(
-            (cause) =>
-              new OpenCodeRuntimeError({
-                operation: "startOpenCodeServerProcess",
-                detail: `Failed to spawn OpenCode server process: ${openCodeRuntimeErrorDetail(cause)}`,
-                cause,
-              }),
-          ),
-        );
+      const child = yield* spawnAgentProcess(
+        spawner,
+        input.processPriority,
+        ChildProcess.make(input.binaryPath, args, {
+          detached: process.platform !== "win32",
+          shell: process.platform === "win32",
+          env: {
+            ...environment,
+            // 1.x gets the inherited variable back: its password resolves to it unless configured.
+            ...(v2
+              ? { OPENCODE_PASSWORD: serverPassword }
+              : serverPassword !== undefined
+                ? { OPENCODE_SERVER_PASSWORD: serverPassword }
+                : {}),
+            OPENCODE_CONFIG_CONTENT: JSON.stringify({}),
+          },
+        }),
+      ).pipe(
+        Effect.provideService(Scope.Scope, runtimeScope),
+        Effect.mapError(
+          (cause) =>
+            new OpenCodeRuntimeError({
+              operation: "startOpenCodeServerProcess",
+              detail: `Failed to spawn OpenCode server process: ${openCodeRuntimeErrorDetail(cause)}`,
+              cause,
+            }),
+        ),
+      );
 
       // The direct child may already have exited after starting the server, so
       // the whole process group is terminated: the spawner's kill signals the
@@ -592,8 +612,8 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       const exitFiber = yield* child.exitCode.pipe(
         Effect.flatMap((code) =>
           Effect.gen(function* () {
-            const stdout = yield* Ref.get(stdoutRef);
-            const stderr = yield* Ref.get(stderrRef);
+            const stdout = redact(yield* Ref.get(stdoutRef));
+            const stderr = redact(yield* Ref.get(stderrRef));
             const exitCode = Number(code);
             yield* Deferred.fail(
               readyDeferred,
@@ -616,7 +636,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       );
 
       const readyExit = yield* Effect.exit(
-        Deferred.await(readyDeferred).pipe(Effect.timeoutOption(timeoutMs)),
+        Deferred.await(readyDeferred).pipe(timeoutWhileResponsiveOption(timeoutMs)),
       );
 
       // Startup-time fibers are no longer needed once ready has resolved (either
@@ -644,8 +664,15 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
         });
       }
 
+      const url = readyOption.value;
+      ownedServers.set(url, generation);
+      // Registered after the kill, so it runs first: the entry is gone before the port is free.
+      yield* Scope.addFinalizer(
+        runtimeScope,
+        Effect.sync(() => ownedServers.delete(url)),
+      );
       return {
-        url: readyOption.value,
+        url,
         ...(serverPassword !== undefined ? { serverPassword } : {}),
         exitCode: child.exitCode.pipe(
           Effect.map(Number),
@@ -680,6 +707,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       ...(input.port !== undefined ? { port: input.port } : {}),
       ...(input.hostname !== undefined ? { hostname: input.hostname } : {}),
       ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+      ...(input.processPriority !== undefined ? { processPriority: input.processPriority } : {}),
     }).pipe(
       Effect.map((server) => ({
         url: server.url,
@@ -691,24 +719,11 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
   };
 
   const createOpenCodeSdkClient: OpenCodeRuntimeShape["createOpenCodeSdkClient"] = (input) =>
-    loadOpenCodeSdkModule().pipe(
-      Effect.map(({ createOpencodeClient }) =>
-        createOpencodeClient({
-          baseUrl: input.baseUrl,
-          directory: input.directory,
-          ...(input.serverPassword
-            ? {
-                headers: {
-                  Authorization: `Basic ${Buffer.from(`opencode:${input.serverPassword}`, "utf8").toString("base64")}`,
-                },
-              }
-            : {}),
-          throwOnError: true,
-        }),
-      ),
+    Effect.flatMap(loadOpenCodeProtocol, (protocol) =>
+      protocol.createOpenCodeApi(input, ownedServers.get(input.baseUrl)),
     );
 
-  const loadProviders = (client: OpencodeClient) =>
+  const loadProviders = (client: OpenCodeApi) =>
     runOpenCodeSdk("provider.list", (signal) => client.provider.list({}, { signal })).pipe(
       Effect.filterMapOrFail(
         (list) =>
@@ -724,7 +739,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       ),
     );
 
-  const loadAgents = (client: OpencodeClient) =>
+  const loadAgents = (client: OpenCodeApi) =>
     runOpenCodeSdk("app.agents", (signal) => client.app.agents({}, { signal })).pipe(
       Effect.map((result) => result.data ?? []),
     );

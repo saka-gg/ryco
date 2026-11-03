@@ -12,6 +12,7 @@ import { Skeleton } from "../ui/skeleton";
 import { Toggle } from "../ui/toggle";
 import { formatAttachmentBytes } from "./attachmentPreview";
 import { HtmlRenderDocument } from "./HtmlRenderDocument";
+import type { HtmlRenderPageMessageSender } from "./htmlRenderMessages";
 import type { HtmlRenderSource } from "./useHtmlRenderSource";
 
 /**
@@ -165,6 +166,8 @@ export function HtmlRenderFullView(props: {
   readonly showSource: boolean;
   /** The reader pressed Escape inside the page (its keys never reach the app). */
   readonly onEscape?: (() => void) | undefined;
+  /** Where the page's `ryco.send` goes; absent where it may not send. */
+  readonly onSendMessage?: HtmlRenderPageMessageSender | undefined;
   /** The page area: its gutter and corners. */
   readonly className?: string;
 }) {
@@ -184,12 +187,17 @@ export function HtmlRenderFullView(props: {
   return (
     <>
       {props.showSource && <HtmlRenderSourceView html={html} />}
-      <div className={cn(pageClassName, props.showSource && "hidden")}>
+      <div
+        // Where a send confirmation returns focus: the page's container, not the page.
+        tabIndex={-1}
+        className={cn(pageClassName, "outline-none", props.showSource && "hidden")}
+      >
         <HtmlRenderDocument
           html={html}
           title={title}
           className="min-h-0 w-full flex-1"
           {...(props.onEscape ? { onEscape: props.onEscape } : {})}
+          onSendMessage={props.onSendMessage}
         />
       </div>
     </>

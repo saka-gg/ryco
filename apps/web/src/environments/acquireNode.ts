@@ -6,6 +6,10 @@ import {
   type NodeAcquireConnection,
   type NodeAcquirePorts,
 } from "@ryco/client-runtime/state/nodes";
+import {
+  isSavedEnvironmentSwitchedOff,
+  SavedEnvironmentSwitchedOffError,
+} from "@ryco/client-runtime/connection";
 import type { EnvironmentId } from "@ryco/contracts";
 
 import { isElectron, isHostedHubMode } from "../env";
@@ -114,7 +118,16 @@ function timeoutMessageFor(environmentId: EnvironmentId): () => string {
   };
 }
 
-function directPorts(environmentId: EnvironmentId, purpose: AcquireNodePurpose): NodeAcquirePorts {
+/** A saved machine the user switched off: it never connects until switched on again. */
+function switchedOffReason(label: string): string {
+  return `${label} is switched off`;
+}
+
+function directPorts(
+  environmentId: EnvironmentId,
+  label: string,
+  purpose: AcquireNodePurpose,
+): NodeAcquirePorts {
   const timeoutMessage = timeoutMessageFor(environmentId);
   if (environmentId === readPrimaryEnvironmentDescriptor()?.environmentId) {
     return {
@@ -135,8 +148,15 @@ function directPorts(environmentId: EnvironmentId, purpose: AcquireNodePurpose):
       connect: async (signal) => {
         // Waking a saved environment that has no connection surfaces its
         // failure (a refused credential) instead of waiting it out.
-        if (!readEnvironmentConnection(environmentId))
-          await reconnectSavedEnvironment(environmentId);
+        if (!readEnvironmentConnection(environmentId)) {
+          await reconnectSavedEnvironment(environmentId).catch((error: unknown) => {
+            // Switched off meanwhile: say so, not which id refused.
+            if (error instanceof SavedEnvironmentSwitchedOffError) {
+              throw new Error(switchedOffReason(label), { cause: error });
+            }
+            throw error;
+          });
+        }
         return awaitBootstrappedConnection(environmentId, signal);
       },
       timeoutMessage,
@@ -178,6 +198,10 @@ export async function acquireNode(
   },
 ): Promise<AcquiredNode> {
   const purpose = options?.purpose ?? "copy";
+  // The catalog leaves switched-off machines out; name the reason instead.
+  const saved = getSavedEnvironmentRecord(environmentId);
+  if (saved && isSavedEnvironmentSwitchedOff(saved))
+    throw new Error(switchedOffReason(saved.label));
   const catalog = readNodeCatalogSnapshot();
   const node = catalog.nodes.find((entry) => entry.environmentId === environmentId);
   // An id this client does not know is refused, never guessed at.
@@ -201,7 +225,7 @@ export async function acquireNode(
       timeoutMessage: timeoutMessageFor(environmentId),
     };
   } else {
-    ports = directPorts(environmentId, purpose);
+    ports = directPorts(environmentId, node.label, purpose);
   }
   return acquireNodeConnection({
     environmentId,

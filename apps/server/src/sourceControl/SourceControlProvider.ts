@@ -2,6 +2,7 @@ import { Context, Effect, type DateTime } from "effect";
 import {
   SourceControlProviderError,
   type ChangeRequestActivity,
+  type ChangeRequestReviewThread,
   type ChangeRequestActivityInput,
   type ChangeRequestFileContents,
   type ChangeRequestFileContentsInput,
@@ -45,7 +46,7 @@ import {
 import {
   describeUnsupportedChangeRequestRequest,
   type ChangeRequestHostRequest,
-} from "@ryco/shared/sourceControl";
+} from "@ryco/shared/changeRequestHostCapabilities";
 
 export interface SourceControlProviderContext {
   readonly provider: SourceControlProviderInfo;
@@ -157,6 +158,35 @@ export interface SourceControlLinkStates {
     }
   >;
   readonly issues: ReadonlyMap<number, IssueState>;
+}
+
+/**
+ * A cheap summary of what a pull request watch reports, compared between
+ * passes so the watch reads a change request in full only when it moved.
+ * `status` moves with the state, mergeability, head or checks, which the
+ * detail read reports; `remarks` moves with comments, reviews and review
+ * threads, which only the costlier activity read reports. `revision`, where
+ * the host gives one, moves with the rest a change request row shows (GitHub:
+ * `updatedAt`, which title, label and review-request edits move, and the draft
+ * flag), so a row read can stand on a fingerprint too.
+ */
+export interface ChangeRequestWatchFingerprint {
+  readonly status: string;
+  readonly remarks: string;
+  readonly revision?: string;
+}
+
+/** One page of a search across every repository on a host (see `searchInvolvedChangeRequests`). */
+export interface SourceControlInvolvedSearchPage {
+  /** The host searched (`github.com`). */
+  readonly host: string;
+  /** The account the host answered for. */
+  readonly viewerLogin: string | null;
+  readonly items: ReadonlyArray<ChangeRequest>;
+  /** More change requests matched than the page holds. */
+  readonly truncated: boolean;
+  /** Matches the host did not return to this account (organization access policies). */
+  readonly skippedRows: number;
 }
 
 export interface SourceControlProviderShape {
@@ -313,6 +343,37 @@ export interface SourceControlProviderShape {
   readonly getChangeRequestActivity?: (
     input: ChangeRequestActivityInput & { readonly context?: SourceControlProviderContext },
   ) => Effect.Effect<ChangeRequestActivity, SourceControlProviderError>;
+  /**
+   * The change request's watch fingerprint (GitHub: one GraphQL point, where
+   * the detail and activity reads it gates cost several calls each). Null when
+   * the host has none for it (the URL names no repository the host reads, or
+   * the change request is gone), so the watch reads it in full. Optional:
+   * hosts without one have their watched change requests read in full.
+   */
+  readonly getChangeRequestWatchFingerprint?: (input: {
+    readonly cwd: string;
+    readonly context?: SourceControlProviderContext;
+    readonly number: number;
+    /** The change request's web URL (`ChangeRequest.url`), which names its repository and host. */
+    readonly url: string;
+    /**
+     * An answer the host gave at or after this time may stand in for a new read, within the
+     * provider's own reuse window (GitHub: 20 s, 5 min for a pull request nobody updated for
+     * 30 min). Omitted: ask the host now.
+     */
+    readonly reuseSinceMs?: number | undefined;
+  }) => Effect.Effect<ChangeRequestWatchFingerprint | null, SourceControlProviderError>;
+  /**
+   * One review thread with every comment the host returns for it (GitHub: up to 100), for a
+   * pull request watch whose activity read carried only the first page of a long thread. Null
+   * when the host has no such read; the watch then treats that conversation as not read whole.
+   */
+  readonly getChangeRequestReviewThread?: (input: {
+    readonly cwd: string;
+    readonly context?: SourceControlProviderContext;
+    readonly reference: string;
+    readonly threadId: string;
+  }) => Effect.Effect<ChangeRequestReviewThread | null, SourceControlProviderError>;
   readonly getChangeRequestFileContents?: (
     input: ChangeRequestFileContentsInput & { readonly context?: SourceControlProviderContext },
   ) => Effect.Effect<ChangeRequestFileContents, SourceControlProviderError>;
@@ -377,6 +438,18 @@ export interface SourceControlProviderShape {
     readonly cwd: string;
     readonly context?: SourceControlProviderContext;
   }) => Effect.Effect<SourceControlLinkStates, SourceControlProviderError>;
+  /**
+   * Change requests involving the viewer across every repository on the host `cwd`'s
+   * repository belongs to, newest activity first (GitHub: one search). Optional: without
+   * it, callers read each repository's involvement list.
+   */
+  readonly searchInvolvedChangeRequests?: (input: {
+    readonly cwd: string;
+    readonly context?: SourceControlProviderContext;
+    readonly involvement: ChangeRequestInvolvement;
+    readonly state: ChangeRequestState | "all";
+    readonly limit?: number;
+  }) => Effect.Effect<SourceControlInvolvedSearchPage, SourceControlProviderError>;
   readonly getIssueState: (input: {
     readonly number: number;
     readonly cwd: string;
@@ -412,7 +485,8 @@ export interface SourceControlProviderShape {
  * capability matrix, so every caller (not only the ws handlers) asking for an
  * involvement filter, list search, single-commit diff, or draft the host does
  * not support gets a clear error instead of silently broader results. Flip the
- * host's flag in `@ryco/shared/sourceControl` when the provider implements it.
+ * host's flag in `@ryco/shared/changeRequestHostCapabilities` when the
+ * provider implements it.
  */
 export function withUnsupportedChangeRequestOptionGuards(
   provider: SourceControlProviderShape,

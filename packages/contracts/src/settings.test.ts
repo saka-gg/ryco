@@ -5,17 +5,21 @@ import { Schema } from "effect";
 
 import { ProviderInstanceId } from "./providerInstance.ts";
 import { CliProxyHubId } from "./cliProxy.ts";
+import { ChangeRequestTemplateListInput } from "./changeRequestReview.ts";
 import {
-  AiFocusRefreshIntervalMs,
+  ClaudeSettings,
   ClientSettingsPatch,
   ClientSettingsSchema,
+  DEFAULT_CHAT_WIDTH,
   DEFAULT_CLIENT_SETTINGS,
   DEFAULT_FOLLOW_UP_BEHAVIOR,
+  DEFAULT_SEND_SHORTCUT,
   DEFAULT_SERVER_SETTINGS,
   SIDEBAR_AUTO_SETTLE_DAY_OPTIONS,
   SidebarAutoSettleAfterDays,
   ServerSettings,
   ServerSettingsPatch,
+  USAGE_PRICE_OVERRIDE_LIMIT,
 } from "./settings.ts";
 
 const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
@@ -66,42 +70,18 @@ describe("ServerSettings.threadAutoSettleAfterDays", () => {
   });
 });
 
-describe("AI Focus settings", () => {
-  it("decodes historical client settings as disabled with a ten-minute interval", () => {
-    const decoded = decodeClientSettings({});
-    expect(decoded.aiFocusEnabled).toBe(false);
-    expect(decoded.aiFocusRefreshIntervalMs).toBe(600_000);
-    expect(DEFAULT_CLIENT_SETTINGS.aiFocusEnabled).toBe(false);
-    expect(DEFAULT_CLIENT_SETTINGS.aiFocusRefreshIntervalMs).toBe(600_000);
-  });
-
-  it("accepts manual-only and the approved literal intervals, but rejects arbitrary values", () => {
-    const decodeInterval = Schema.decodeUnknownSync(AiFocusRefreshIntervalMs);
-    for (const interval of [
-      0, 300_000, 600_000, 1_800_000, 3_600_000, 21_600_000, 86_400_000,
-    ] as const) {
-      expect(decodeInterval(interval)).toBe(interval);
-      expect(decodeClientSettingsPatch({ aiFocusRefreshIntervalMs: interval })).toMatchObject({
-        aiFocusRefreshIntervalMs: interval,
-      });
-    }
-    expect(() => decodeInterval(60_000)).toThrow();
-  });
-
-  it("decodes historical server settings with no ranking model override", () => {
-    expect(decodeServerSettings({}).inboxPriorityModelSelection).toBeNull();
-    expect(DEFAULT_SERVER_SETTINGS.inboxPriorityModelSelection).toBeNull();
-  });
-
-  it("patches an environment-local model override or resets it to inheritance", () => {
-    expect(
-      decodeServerSettingsPatch({
-        inboxPriorityModelSelection: { instanceId: "claude", model: "claude-sonnet" },
-      }).inboxPriorityModelSelection,
-    ).toMatchObject({ instanceId: "claude", model: "claude-sonnet" });
-    expect(
-      decodeServerSettingsPatch({ inboxPriorityModelSelection: null }).inboxPriorityModelSelection,
-    ).toBeNull();
+describe("Removed AI Focus settings", () => {
+  it("decodes settings saved while AI Focus existed, dropping its keys", () => {
+    const client = decodeClientSettings({
+      aiFocusEnabled: true,
+      aiFocusRefreshIntervalMs: 600_000,
+    });
+    expect(Object.hasOwn(client, "aiFocusEnabled")).toBe(false);
+    expect(Object.hasOwn(client, "aiFocusRefreshIntervalMs")).toBe(false);
+    const server = decodeServerSettings({
+      inboxPriorityModelSelection: { instanceId: "claude", model: "claude-sonnet" },
+    });
+    expect(Object.hasOwn(server, "inboxPriorityModelSelection")).toBe(false);
   });
 });
 
@@ -159,18 +139,128 @@ describe("ClientSettings.followUpBehavior", () => {
   });
 });
 
-describe("ServerSettings.enableLegacyTokenStreaming", () => {
-  it("defaults to buffered output and deliberately ignores the retired key", () => {
-    expect(DEFAULT_SERVER_SETTINGS.enableLegacyTokenStreaming).toBe(false);
-    expect(
-      decodeServerSettings({ enableAssistantStreaming: true }).enableLegacyTokenStreaming,
-    ).toBe(false);
+describe("ClientSettings.sendShortcut", () => {
+  it("keeps Enter sending for settings saved before the choice existed", () => {
+    expect(DEFAULT_SEND_SHORTCUT).toBe("enter");
+    expect(DEFAULT_CLIENT_SETTINGS.sendShortcut).toBe("enter");
+    expect(decodeClientSettings({ followUpBehavior: "steer" }).sendShortcut).toBe("enter");
   });
 
-  it("round-trips the fresh legacy setting key", () => {
+  it("accepts each shortcut and rejects unknown ones", () => {
+    for (const sendShortcut of ["enter", "mod-enter-multiline", "mod-enter"] as const) {
+      expect(decodeClientSettings({ sendShortcut }).sendShortcut).toBe(sendShortcut);
+      expect(decodeClientSettingsPatch({ sendShortcut }).sendShortcut).toBe(sendShortcut);
+    }
+    expect(() => decodeClientSettingsPatch({ sendShortcut: "shift-enter" })).toThrow();
+  });
+});
+
+describe("ClientSettings.changeRequestLinkTarget", () => {
+  it("opens pull request links in Ryco for settings saved before the choice existed", () => {
+    expect(DEFAULT_CLIENT_SETTINGS.changeRequestLinkTarget).toBe("ryco");
+    expect(decodeClientSettings({ diffWordWrap: true }).changeRequestLinkTarget).toBe("ryco");
+  });
+
+  it("accepts each target and rejects unknown ones", () => {
+    for (const changeRequestLinkTarget of ["ryco", "browser"] as const) {
+      expect(decodeClientSettings({ changeRequestLinkTarget }).changeRequestLinkTarget).toBe(
+        changeRequestLinkTarget,
+      );
+      expect(decodeClientSettingsPatch({ changeRequestLinkTarget }).changeRequestLinkTarget).toBe(
+        changeRequestLinkTarget,
+      );
+    }
+    expect(() => decodeClientSettingsPatch({ changeRequestLinkTarget: "editor" })).toThrow();
+  });
+});
+
+describe("ClientSettings.claudeResumeReview", () => {
+  it("keeps the review on for settings saved before the choice existed", () => {
+    expect(DEFAULT_CLIENT_SETTINGS.claudeResumeReview).toBe(true);
+    expect(decodeClientSettings({ sendShortcut: "mod-enter" }).claudeResumeReview).toBe(true);
+  });
+
+  it("keeps a turned-off review off and patches it on its own", () => {
+    expect(decodeClientSettings({ claudeResumeReview: false }).claudeResumeReview).toBe(false);
+    expect(decodeClientSettingsPatch({ claudeResumeReview: false })).toEqual({
+      claudeResumeReview: false,
+    });
+    expect(() => decodeClientSettingsPatch({ claudeResumeReview: "off" })).toThrow();
+  });
+});
+
+describe("ClientSettings.chatWidth", () => {
+  it("keeps the comfortable width for settings saved before the choice existed", () => {
+    expect(DEFAULT_CHAT_WIDTH).toBe("comfortable");
+    expect(DEFAULT_CLIENT_SETTINGS.chatWidth).toBe("comfortable");
+    expect(decodeClientSettings({ diffWordWrap: true }).chatWidth).toBe("comfortable");
+  });
+
+  it("accepts each width and rejects unknown ones", () => {
+    for (const chatWidth of ["comfortable", "wide", "full"] as const) {
+      expect(decodeClientSettings({ chatWidth }).chatWidth).toBe(chatWidth);
+      expect(decodeClientSettingsPatch({ chatWidth }).chatWidth).toBe(chatWidth);
+    }
+    expect(() => decodeClientSettingsPatch({ chatWidth: "huge" })).toThrow();
+  });
+});
+
+describe("ClientSettings thread alerts", () => {
+  it("turns on notifications and toasts, but not sound, for settings saved before them", () => {
+    for (const settings of [decodeClientSettings({}), DEFAULT_CLIENT_SETTINGS]) {
+      expect(settings.notifyOnTurnCompleteWhenUnfocused).toBe(true);
+      expect(settings.threadNotificationSound).toBe(false);
+      expect(settings.threadNotificationToasts).toBe(true);
+    }
+  });
+
+  it("keeps a switched-off desktop notification switch off", () => {
+    expect(decodeClientSettings({ notifyOnTurnCompleteWhenUnfocused: false })).toMatchObject({
+      notifyOnTurnCompleteWhenUnfocused: false,
+      threadNotificationSound: false,
+      threadNotificationToasts: true,
+    });
+  });
+
+  it("patches each switch independently", () => {
     expect(
-      decodeServerSettings({ enableLegacyTokenStreaming: true }).enableLegacyTokenStreaming,
-    ).toBe(true);
+      decodeClientSettingsPatch({
+        notifyOnTurnCompleteWhenUnfocused: false,
+        threadNotificationSound: true,
+        threadNotificationToasts: false,
+      }),
+    ).toEqual({
+      notifyOnTurnCompleteWhenUnfocused: false,
+      threadNotificationSound: true,
+      threadNotificationToasts: false,
+    });
+    expect(decodeClientSettingsPatch({})).toEqual({});
+    expect(() => decodeClientSettingsPatch({ threadNotificationSound: "on" })).toThrow();
+  });
+});
+
+describe("ServerSettings.responseStreamingMode", () => {
+  it("defaults to paragraph streaming and ignores the retired keys", () => {
+    expect(DEFAULT_SERVER_SETTINGS.responseStreamingMode).toBe("paragraph");
+    expect(decodeServerSettings({}).responseStreamingMode).toBe("paragraph");
+    expect(decodeServerSettings({ enableAssistantStreaming: true }).responseStreamingMode).toBe(
+      "paragraph",
+    );
+  });
+
+  it("round-trips every mode and rejects unknown ones", () => {
+    for (const responseStreamingMode of ["turn", "paragraph", "token"] as const) {
+      expect(decodeServerSettings({ responseStreamingMode }).responseStreamingMode).toBe(
+        responseStreamingMode,
+      );
+      expect(decodeServerSettingsPatch({ responseStreamingMode }).responseStreamingMode).toBe(
+        responseStreamingMode,
+      );
+    }
+    expect(() => decodeServerSettingsPatch({ responseStreamingMode: "sentence" })).toThrow();
+  });
+
+  it("still accepts the legacy token switch in patches from older clients", () => {
     expect(
       decodeServerSettingsPatch({ enableLegacyTokenStreaming: true }).enableLegacyTokenStreaming,
     ).toBe(true);
@@ -206,6 +296,22 @@ describe("ServerSettings.enableProviderUpdateChecks", () => {
   });
 });
 
+describe("ServerSettings.lowerAgentProcessPriority", () => {
+  it("defaults on, including settings files written before the key existed", () => {
+    expect(DEFAULT_SERVER_SETTINGS.lowerAgentProcessPriority).toBe(true);
+    expect(decodeServerSettings({}).lowerAgentProcessPriority).toBe(true);
+  });
+
+  it("can be turned off and round-trips through the settings patch", () => {
+    expect(
+      decodeServerSettings({ lowerAgentProcessPriority: false }).lowerAgentProcessPriority,
+    ).toBe(false);
+    expect(
+      decodeServerSettingsPatch({ lowerAgentProcessPriority: false }).lowerAgentProcessPriority,
+    ).toBe(false);
+  });
+});
+
 describe("ServerSettings.continueThreadsAfterRestart", () => {
   it("defaults off, so old settings files decode without auto-continuation", () => {
     expect(DEFAULT_SERVER_SETTINGS.continueThreadsAfterRestart).toBe(false);
@@ -219,6 +325,18 @@ describe("ServerSettings.continueThreadsAfterRestart", () => {
     expect(
       decodeServerSettingsPatch({ continueThreadsAfterRestart: true }).continueThreadsAfterRestart,
     ).toBe(true);
+  });
+});
+
+describe("ServerSettings.automaticUpdates", () => {
+  it("defaults off, so no node updates its provider CLIs unattended unless its owner opts in", () => {
+    expect(DEFAULT_SERVER_SETTINGS.automaticUpdates).toBe(false);
+    expect(decodeServerSettings({}).automaticUpdates).toBe(false);
+  });
+
+  it("can be enabled and round-trips through the settings patch", () => {
+    expect(decodeServerSettings({ automaticUpdates: true }).automaticUpdates).toBe(true);
+    expect(decodeServerSettingsPatch({ automaticUpdates: true }).automaticUpdates).toBe(true);
   });
 });
 
@@ -344,6 +462,33 @@ describe("ServerSettingsPatch.providers.grok", () => {
     expect(patch.providers?.grok).toEqual({
       binaryPath: "/opt/grok",
       customModels: ["grok-build"],
+    });
+  });
+});
+
+describe("ClaudeSettings compaction keys", () => {
+  const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+
+  it("defaults to Ryco's policy and the model's window", () => {
+    expect(decodeClaudeSettings({})).toMatchObject({ autoCompact: "ryco", autoCompactWindow: "" });
+  });
+
+  it("keeps any text for the adapter to parse", () => {
+    expect(
+      decodeClaudeSettings({ autoCompact: " never ", autoCompactWindow: "200,000" }),
+    ).toMatchObject({ autoCompact: "never", autoCompactWindow: "200,000" });
+  });
+
+  // Claude Code keeps its window as a number and auto-compact as a boolean, so a hand edit may
+  // write either; neither may make the instance unavailable.
+  it("decodes a hand-written number, boolean or null as text", () => {
+    expect(decodeClaudeSettings({ autoCompact: true, autoCompactWindow: 200_000 })).toMatchObject({
+      autoCompact: "true",
+      autoCompactWindow: "200000",
+    });
+    expect(decodeClaudeSettings({ autoCompact: null, autoCompactWindow: null })).toMatchObject({
+      autoCompact: "",
+      autoCompactWindow: "",
     });
   });
 });
@@ -623,5 +768,132 @@ describe("ServerSettingsPatch strict entries", () => {
       completedWorktreeDays: null,
       temporaryDataDays: null,
     });
+  });
+});
+
+describe("git writing style settings", () => {
+  it("decodes old settings to the repository style with no project overrides", () => {
+    expect(decodeServerSettings({})).toMatchObject({
+      gitWritingStyle: "repository",
+      projectGitWritingStyle: {},
+    });
+    expect(decodeServerSettingsPatch({})).not.toHaveProperty("gitWritingStyle");
+  });
+  it.each(["default", "repository", "conventional"])(
+    "accepts %s for the node and a project",
+    (style) => {
+      expect(
+        decodeServerSettingsPatch({
+          gitWritingStyle: style,
+          projectGitWritingStyle: { a: style, b: null },
+        }),
+      ).toEqual({ gitWritingStyle: style, projectGitWritingStyle: { a: style, b: null } });
+    },
+  );
+  it.each(["custom", "Conventional", "", false, null, {}])(
+    "rejects the invalid style %j",
+    (style) => {
+      expect(() => decodeServerSettings({ gitWritingStyle: style })).toThrow();
+      expect(() => decodeServerSettingsPatch({ gitWritingStyle: style })).toThrow();
+      if (style !== null)
+        expect(() => decodeServerSettingsPatch({ projectGitWritingStyle: { a: style } })).toThrow();
+    },
+  );
+});
+
+describe("pull request template settings and listing input", () => {
+  const decodeListInput = Schema.decodeUnknownSync(ChangeRequestTemplateListInput);
+
+  it("turns pull request templates on for old settings and patches the switch alone", () => {
+    expect(decodeServerSettings({}).pullRequestTemplates).toBe(true);
+    expect(decodeServerSettingsPatch({ pullRequestTemplates: false })).toEqual({
+      pullRequestTemplates: false,
+    });
+    expect(() => decodeServerSettingsPatch({ pullRequestTemplates: "no" })).toThrow();
+  });
+
+  it("takes a branch name as the base, never revision syntax", () => {
+    for (const base of ["main", "release/2026.10", "refs/heads/main"]) {
+      expect(decodeListInput({ cwd: "/repo", baseRefName: base }).baseRefName).toBe(base);
+    }
+    expect(decodeListInput({ cwd: "/repo" })).toEqual({ cwd: "/repo" });
+    for (const base of [":/fix", "main:docs", "main@{1}", "@{-1}", "-x", "a..b", "a b", "main^"]) {
+      expect(() => decodeListInput({ cwd: "/repo", baseRefName: base })).toThrow();
+    }
+  });
+});
+
+describe("ServerSettings.usagePriceOverrides", () => {
+  const decode = Schema.decodeUnknownExit(ServerSettings);
+  const decodePatch = Schema.decodeUnknownExit(ServerSettingsPatch);
+  const price = { inputUsdPerMillion: 3, outputUsdPerMillion: 15 };
+
+  it("defaults to no overrides and keeps prices, optional cache prices and mappings", () => {
+    expect(DEFAULT_SERVER_SETTINGS.usagePriceOverrides).toEqual({});
+    const overrides = {
+      "kimi-k3": { price: { ...price, cacheReadUsdPerMillion: 0, cacheWriteUsdPerMillion: 3.75 } },
+      "claude-preview": { mapTo: "claude-opus-5" },
+      free: { price: { inputUsdPerMillion: 0, outputUsdPerMillion: 0 } },
+    };
+    expect(decodeServerSettings({ usagePriceOverrides: overrides }).usagePriceOverrides).toEqual(
+      overrides,
+    );
+    expect(
+      decodeServerSettings({ usagePriceOverrides: { " padded ": { mapTo: " target " } } })
+        .usagePriceOverrides,
+    ).toEqual({ padded: { mapTo: "target" } });
+  });
+
+  it("rejects prices out of bounds", () => {
+    for (const bad of [
+      { ...price, inputUsdPerMillion: -1 },
+      { ...price, outputUsdPerMillion: 1_000_001 },
+      { ...price, cacheReadUsdPerMillion: Number.NaN },
+      { inputUsdPerMillion: 3 },
+    ])
+      expect(decode({ usagePriceOverrides: { model: { price: bad } } })._tag).toBe("Failure");
+    expect(
+      decode({ usagePriceOverrides: { model: { price: { ...price, inputUsdPerMillion: 1e6 } } } })
+        ._tag,
+    ).toBe("Success");
+  });
+
+  it("needs exactly one of a price and a mapping", () => {
+    expect(decode({ usagePriceOverrides: { model: {} } })._tag).toBe("Failure");
+    expect(decode({ usagePriceOverrides: { model: { price, mapTo: "other" } } })._tag).toBe(
+      "Failure",
+    );
+    expect(decode({ usagePriceOverrides: { model: { mapTo: " " } } })._tag).toBe("Failure");
+    expect(decodePatch({ usagePriceOverrides: { model: { price, mapTo: "other" } } })._tag).toBe(
+      "Failure",
+    );
+  });
+
+  it("rejects a model mapped to itself, in any case", () => {
+    expect(decode({ usagePriceOverrides: { Model: { mapTo: "model" } } })._tag).toBe("Failure");
+    expect(decode({ usagePriceOverrides: { model: { mapTo: "model[1m]" } } })._tag).toBe("Success");
+  });
+
+  it(`keeps at most ${USAGE_PRICE_OVERRIDE_LIMIT} entries`, () => {
+    const entries = (count: number) =>
+      Object.fromEntries(
+        Array.from({ length: count }, (_, index) => [`model-${index}`, { price }]),
+      );
+    expect(decode({ usagePriceOverrides: entries(USAGE_PRICE_OVERRIDE_LIMIT) })._tag).toBe(
+      "Success",
+    );
+    expect(decode({ usagePriceOverrides: entries(USAGE_PRICE_OVERRIDE_LIMIT + 1) })._tag).toBe(
+      "Failure",
+    );
+  });
+
+  it("patches single entries and removes them with null", () => {
+    const patch = decodeServerSettingsPatch({
+      usagePriceOverrides: { "kimi-k3": { price }, preview: null },
+    });
+    expect(patch.usagePriceOverrides).toEqual({ "kimi-k3": { price }, preview: null });
+    expect(
+      decodePatch({ usagePriceOverrides: { model: { price: { inputUsdPerMillion: 1 } } } })._tag,
+    ).toBe("Failure");
   });
 });

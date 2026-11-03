@@ -24,7 +24,6 @@ function descriptorForNode(node: HostedHubNode): ExecutionEnvironmentDescriptor 
     capabilities: {
       repositoryIdentity: false,
       threadSettlement: node.capabilities?.threadSettlement === true,
-      threadPriorityRanking: false,
     },
   };
 }

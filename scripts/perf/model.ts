@@ -267,6 +267,7 @@ const MARKDOWN_SOURCES: readonly ForbiddenBundleSource[] = [
 const DIFF_RENDERER_SOURCES: readonly ForbiddenBundleSource[] = [
   { pattern: /^node_modules\/@pierre\/diffs\//u, reason: "diff renderer" },
   { pattern: /^node_modules\/(?:shiki|@shikijs\/)/u, reason: "syntax highlighter" },
+  { pattern: /^node_modules\/@pierre\/highlights\//u, reason: "syntax highlighter" },
 ];
 
 /**
@@ -283,7 +284,7 @@ const CHAT_DEFERRED_SOURCES: readonly ForbiddenBundleSource[] = [
   },
   {
     pattern:
-      /^apps\/web\/src\/components\/(?:SideChatPanel|chat\/ContextHandoffInspectionPanel|chat\/ComputerBetaPreview|chat\/ExpandedImageDialog|PullRequestThreadDialog|agent-control\/AgentControlApprovals)\.tsx$/u,
+      /^apps\/web\/src\/components\/(?:SideChatPanel|chat\/ContextHandoffInspectionPanel|chat\/ComputerBetaPreview|chat\/ExpandedImageDialog|chat\/OpenChatTabStrip|chat\/ContentTabStrip|PullRequestThreadDialog|agent-control\/AgentControlApprovals)\.tsx$/u,
     reason: "on-demand chat surface",
   },
   {
@@ -299,6 +300,27 @@ const CHAT_DEFERRED_SOURCES: readonly ForbiddenBundleSource[] = [
   { pattern: /^node_modules\/parse5\//u, reason: "HTML parser (rehype-raw)" },
 ];
 
+/**
+ * The Automations dialog and its schedule vocabulary and math. The shell's
+ * Automations badge counts queue proposals, and the missed-runs notice loads
+ * its words with the first notice; a static edge to these puts them back on
+ * every launch.
+ */
+const AUTOMATION_SCHEDULE_SOURCES: readonly ForbiddenBundleSource[] = [
+  {
+    pattern: /^packages\/shared\/src\/automationSchedule\.ts$/u,
+    reason: "automation schedule math (@ryco/shared/automationSchedule)",
+  },
+  {
+    pattern: /^packages\/client-runtime\/src\/state\/agentControl\/automationSchedules\.ts$/u,
+    reason: "Automations dialog schedule rows",
+  },
+  {
+    pattern: /^apps\/web\/src\/components\/automations\/(?:dialog\/|missedRunsNotice\.logic\.ts$)/u,
+    reason: "Automations dialog or the missed-runs notice's words",
+  },
+];
+
 /** Schemas only the server speaks (`@ryco/contracts/agent-control-mcp`). */
 const SERVER_ONLY_SOURCES: readonly ForbiddenBundleSource[] = [
   {
@@ -307,20 +329,107 @@ const SERVER_ONLY_SOURCES: readonly ForbiddenBundleSource[] = [
   },
 ];
 
+/**
+ * A workspace's pull requests popover (its list, the stack, the link picker) mounts on its first
+ * open (`WorkspacePullRequestsPopoverOnDemand`) in the sidebar, the chat header, the workspace
+ * panel and the crown: about 20 KiB gzip that the shell and the chat route no longer load.
+ */
+const PULL_REQUESTS_POPOVER_SOURCES: readonly ForbiddenBundleSource[] = [
+  {
+    pattern: /^apps\/web\/src\/components\/worktrees\/WorkspacePullRequestsPopover\.tsx$/u,
+    reason: "workspace pull requests popover (mounts on its first open)",
+  },
+];
+
+/**
+ * The relay's wire schemas. The standard build never decodes a relay frame: a reconnect's
+ * retry ceiling and an upload's message cap are plain numbers
+ * (`@ryco/contracts/relay-constants`) and node proofs name a node with `RelayNodeId`
+ * from its own module. Importing one of them from `@ryco/contracts/relay` put every relay schema
+ * on the first paint (about 2 KiB gzip; schema constructors are not tree-shaken).
+ */
+const RELAY_WIRE_SCHEMA_SOURCES: readonly ForbiddenBundleSource[] = [
+  {
+    pattern: /^packages\/contracts\/src\/relay\.ts$/u,
+    reason: "relay wire schemas (import numbers from @ryco/contracts/relay-constants)",
+  },
+];
+
+/** The pairing form: `/pair` loads it as its route body, so a paired launch never does. */
+const PAIRING_SOURCES: readonly ForbiddenBundleSource[] = [
+  {
+    pattern:
+      /^apps\/web\/src\/components\/(?:auth\/PairingRouteSurface|routeViews\/PairRouteView)\.tsx$/u,
+    reason: "pairing form (the /pair route body)",
+  },
+];
+
+/**
+ * The quote citation parser. The follow-up queue's ordering logic runs at boot; its chip
+ * summary, which reads quote chips as their passage, loads with the shell
+ * (`@ryco/client-runtime/state/message-queue` `summary.ts`).
+ */
+const QUOTE_CITATION_SOURCES: readonly ForbiddenBundleSource[] = [
+  {
+    pattern: /^packages\/shared\/src\/quoteCitations\.ts$/u,
+    reason: "quote citation parser (the queued message summary loads with the shell)",
+  },
+];
+
+/**
+ * The desktop's account prompt on the empty thread view, with the relaunch confirmation it
+ * may open. Only the desktop app shows it, after its bridge confirms native sign-in, so
+ * `NoActiveThreadState` loads it on demand; boot then carries no alert dialog at all.
+ */
+const DESKTOP_ACCOUNT_PROMPT_SOURCES: readonly ForbiddenBundleSource[] = [
+  {
+    pattern:
+      /^apps\/web\/src\/components\/(?:DesktopAccountConnect|settings\/useDesktopRelaunchGuard)\.tsx$/u,
+    reason: "desktop account prompt (the empty thread view loads it on demand)",
+  },
+  {
+    pattern:
+      /^(?:apps\/web\/src\/components\/ui\/alert-dialog\.tsx|node_modules\/@base-ui\/react\/alert-dialog\/)/u,
+    reason: "alert dialog (opens on a click; boot shows none)",
+  },
+];
+
 /** The thread routes (server thread and draft) share their chat graph. */
 const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
   ...HOSTED_RUNTIME_SOURCES,
   ...DIFF_RENDERER_SOURCES,
   ...CHAT_DEFERRED_SOURCES,
+  ...PULL_REQUESTS_POPOVER_SOURCES,
   ...SERVER_ONLY_SOURCES,
+  ...RELAY_WIRE_SCHEMA_SOURCES,
+  ...PAIRING_SOURCES,
 ];
 /**
  * 709 KiB gzip and 142 files beyond boot on 2026-10-15 (813 KiB on 2026-10-12,
  * 974 KiB before route-level splitting). Tight enough that the overview stack
  * (78 KiB) returning to the static graph fails the budget, not only the rules.
+ * 750 KiB on 2026-10-24 with the navigation and long-running-health batches,
+ * 757 KiB with the transcript's row height estimates (6 KiB that every thread
+ * open and switch uses before its first paint). 761 KiB on 2026-10-29 with the
+ * composer's view of the node's follow-up queue, 763 KiB with its moving
+ * marks, queue-waiting signal, add outcome and edit state. 765 KiB on
+ * 2026-10-30 after the new-worktree dialog left: the route's own chunks
+ * shrank, but losing the dialog as an icon importer regrouped the shared
+ * lucide chunks, and one now carries 26 icons the route does not use
+ * (+2.7 KiB; the grouping is entries-aware, see `CHAT_ROUTE_MAX_FILES`).
+ * 2026-10-30 later: 749 KiB and 150 files once the pull requests popover mounted
+ * on its first open; 753 KiB and 151 files once the quote citation parser
+ * left boot (the route shares it with the shell, so a thread open loads it as
+ * before). 752 KiB on 2026-10-31 once the alert dialog left boot (likewise).
  */
-const CHAT_ROUTE_GZIP_BUDGET = 750 * KIB;
-const CHAT_ROUTE_MAX_FILES = 155;
+const CHAT_ROUTE_GZIP_BUDGET = 765 * KIB;
+/**
+ * 156 since removing AI Focus on 2026-10-29: the same 44 KiB of shared lucide
+ * icons regrouped by importing entry set into six `icons` chunks instead of
+ * five. The grouping is entries-aware and not additive, so removing importers
+ * can add a file as easily as adding them.
+ */
+const CHAT_ROUTE_MAX_FILES = 156;
 
 /** OTLP export loads when client tracing is configured, never at boot. */
 const TRACING_EXPORTER_SOURCES: readonly ForbiddenBundleSource[] = [
@@ -333,7 +442,27 @@ const TRACING_EXPORTER_SOURCES: readonly ForbiddenBundleSource[] = [
  * (644 KiB before), RootAppShell beyond boot 367 KiB (538 KiB before),
  * ChatThreadRouteView beyond boot 974 KiB. The thread route's target is
  * 700 KiB; its budget sits just above today's size so it blocks growth until
- * the thread route is split further.
+ * the thread route is split further. Boot 526 KiB on 2026-10-29 (520 before):
+ * picked page elements as chat chips, Git actions that outlive a dropped
+ * connection and pull request links from chat add about 5 KiB to the first
+ * paint path. 527 KiB with the push alert device RPCs, whose schemas the
+ * boot RPC client carries. 528 KiB with the follow-up queue's commands and
+ * events in the orchestration contracts that boot decodes. 529 KiB with the
+ * threads store applying the queue's events. 530 KiB with the push alert
+ * device methods on the boot RPC client, which the phone's background alerts
+ * call (about 0.1 KiB), after Desktop's linked direct routes took the rest.
+ * 522 KiB later on 2026-10-30 (529 before): the pairing form became the
+ * `/pair` route's body, boot stopped carrying the relay's wire schemas for two
+ * of its numbers, and the queued message summary with its quote citation
+ * parser moved to the shell. A paired launch's first load (boot, shell and a
+ * thread) shrank by about 3 KiB; the cap stays so the rest is room for the
+ * contract fields boot decodes. 526 KiB from 2026-10-30 (530 before): boot
+ * measured 522.4 KiB, so the cap leaves about 3.6 KiB of room instead of 7.6.
+ * 520.1 KiB on 2026-10-31 (525.3 before): the desktop's account prompt, with
+ * its relaunch confirmation and Base UI's alert dialog, loads on demand from
+ * the empty thread view. The shell and the thread routes load the alert dialog
+ * as before; their first loads shrank by 0.3 to 2.3 KiB. The cap stays, so the
+ * room goes to the contract fields boot decodes.
  */
 export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
   bootChunk: "main",
@@ -342,13 +471,17 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       name: "boot",
       chunk: "main",
       beyondBoot: false,
-      maxGzipBytes: 520 * KIB,
+      maxGzipBytes: 526 * KIB,
       forbiddenSources: [
         ...HOSTED_RUNTIME_SOURCES,
         ...MARKDOWN_SOURCES,
         ...DIFF_RENDERER_SOURCES,
         ...TRACING_EXPORTER_SOURCES,
         ...SERVER_ONLY_SOURCES,
+        ...RELAY_WIRE_SCHEMA_SOURCES,
+        ...PAIRING_SOURCES,
+        ...QUOTE_CITATION_SOURCES,
+        ...DESKTOP_ACCOUNT_PROMPT_SOURCES,
       ],
     },
     {
@@ -357,26 +490,22 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       beyondBoot: true,
       // The boot code-splitting group keeps shell-only @base-ui and lucide
       // modules out of boot, so ~20 KiB gzip sits here instead (405 KiB).
-      // 103 files on 2026-10-15; 115 files / 414.2 KiB on 2026-10-22 before
-      // cross-node project copy. 116 / 415.2 KiB with it: its shell pieces add
-      // no file (the dialog store joins boot through the palette's store), but
-      // the copy runtime's node catalog is the first lazy importer of
-      // `@ryco/shared/environmentIcon` without `EnvironmentMachineIcon`, so
-      // automatic chunking splits their shared chunk in two. With all of the
-      // feature's lazy surfaces the shell's lucide icons drifted into a seventh
-      // chunk (117); `ICON_MERGE_THRESHOLD_BYTES` folds them back (116 / 417.1 KiB).
-      // 117 / 417.2 KiB once the page's own role on the primary became one store
-      // (`environments/primarySessionRole`, ~0.3 KiB gzip) that node
-      // auto-settlement in the shell and the lazy node catalog share, so it is
-      // a chunk of its own. Folding an icon chunk instead (a 15 KiB threshold)
-      // moves ~3.5 KiB gzip each into the pull request and settings routes.
+      // 103 files on 2026-10-15. 419 KiB on 2026-10-29; 400 KiB and 106 files
+      // on 2026-10-30 once the pull requests popover mounted on its first open,
+      // 403 KiB and 107 with the queued message summary's quote citation
+      // parser, which boot no longer carries. 403 KiB and 83 files on
+      // 2026-10-31 with the alert dialog, which boot no longer carries.
       maxGzipBytes: 420 * KIB,
-      maxFiles: 117,
+      maxFiles: 115,
       forbiddenSources: [
         ...HOSTED_RUNTIME_SOURCES,
         ...MARKDOWN_SOURCES,
         ...DIFF_RENDERER_SOURCES,
         ...SERVER_ONLY_SOURCES,
+        ...AUTOMATION_SCHEDULE_SOURCES,
+        ...PULL_REQUESTS_POPOVER_SOURCES,
+        ...RELAY_WIRE_SCHEMA_SOURCES,
+        ...PAIRING_SOURCES,
       ],
     },
     {
@@ -414,8 +543,9 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
   ],
   chunks: [
     {
-      // The `@pierre/diffs` highlight worker (213 KiB on 2026-10-15). Built as
-      // an ES module it imports Shiki's Oniguruma engine (`wasm-*.js`, 608 KiB)
+      // The `@pierre/diffs` highlight worker (213 KiB on 2026-10-15, 45 KiB
+      // with Highlights on 2026-10-30). Built as an ES module it imports its
+      // WASM highlighter (`highlights-*.js`, 400 KiB with the module inlined)
       // only where WebAssembly may compile; an IIFE worker inlined it into
       // every worker start, hosted and JS-engine users included.
       name: "diff highlight worker",

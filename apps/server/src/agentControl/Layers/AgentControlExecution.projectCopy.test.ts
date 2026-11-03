@@ -38,6 +38,7 @@ import { AgentControlOperationRepositoryLive } from "../../persistence/Layers/Ag
 import { AgentControlProposalRepositoryLive } from "../../persistence/Layers/AgentControlProposals.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { AgentControlAuditRepository } from "../../persistence/Services/AgentControlAudit.ts";
+import { PullRequestWatchService } from "../../sourceControl/PullRequestWatchService.ts";
 import {
   ProjectImports,
   type ProjectImportsShape,
@@ -180,6 +181,7 @@ const makeExecution = (
     Effect.provideService(DeviceService, { supported: false, manager: {} } as never),
     Effect.provideService(ServerRuntimeStartup, {} as never),
     Effect.provideService(ProjectImports, input.imports ?? noImports),
+    Effect.provideService(PullRequestWatchService, {} as never),
     Effect.provide(
       ServerConfig.layerTest(process.cwd(), { prefix: "agent-control-project-copy-" }).pipe(
         Layer.provideMerge(NodeServices.layer),

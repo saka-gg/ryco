@@ -4,8 +4,10 @@ import { describe, expect, it } from "vite-plus/test";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { SETTINGS_SECTION_IDS, SETTINGS_SECTION_LABELS } from "./SettingsPage";
 import { SETTINGS_SEARCH_INDEX } from "./settingsSearchIndex";
+import type { SettingsTarget } from "../../settingsTarget";
 import {
   hostedSettingsSectionAllowed,
+  isNodeSettingsTargetReadOnly,
   settingsSectionAvailable,
   settingsSectionInDestination,
   settingsSectionReachable,
@@ -55,5 +57,35 @@ describe("the Updates section", () => {
           .includes("check for updates"),
       ),
     ).toBe(true);
+  });
+});
+
+describe("isNodeSettingsTargetReadOnly", () => {
+  const target: SettingsTarget = {
+    environmentId: EnvironmentId.make("environment-local"),
+    nodeLabel: "This Mac",
+    serverConfig: null,
+    primary: true,
+    connected: true,
+  };
+
+  it("allows a connected node this client may change", () => {
+    expect(isNodeSettingsTargetReadOnly("all", target)).toBe(false);
+    expect(isNodeSettingsTargetReadOnly("node", target)).toBe(false);
+    expect(
+      isNodeSettingsTargetReadOnly("all", { ...target, canManage: true, canMutate: true }),
+    ).toBe(false);
+    expect(isNodeSettingsTargetReadOnly("all", null)).toBe(false);
+  });
+
+  it("is read-only for client-only editing and node editing without a target", () => {
+    expect(isNodeSettingsTargetReadOnly("client", target)).toBe(true);
+    expect(isNodeSettingsTargetReadOnly("node", null)).toBe(true);
+  });
+
+  it("is read-only for a disconnected, unmanaged or immutable target", () => {
+    expect(isNodeSettingsTargetReadOnly("all", { ...target, connected: false })).toBe(true);
+    expect(isNodeSettingsTargetReadOnly("all", { ...target, canManage: false })).toBe(true);
+    expect(isNodeSettingsTargetReadOnly("node", { ...target, canMutate: false })).toBe(true);
   });
 });

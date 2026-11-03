@@ -1,5 +1,11 @@
-import { ServerSettings, type ServerSettingsPatch } from "@ryco/contracts/settings";
+import {
+  DEFAULT_RESPONSE_STREAMING_MODE,
+  type ResponseStreamingMode,
+  ServerSettings,
+  type ServerSettingsPatch,
+} from "@ryco/contracts/settings";
 import * as Equal from "effect/Equal";
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import { deepMerge } from "./Struct.ts";
 import { fromLenientJson } from "./schemaJson.ts";
@@ -46,6 +52,33 @@ export function parsePersistedServerObservabilitySettings(
   }
 }
 
+/**
+ * The streaming mode a legacy `enableLegacyTokenStreaming` value stands for: on is token
+ * output; off leaves token output for the default and keeps any other mode.
+ */
+function responseStreamingModeFromLegacyTokenStreaming(
+  enabled: boolean,
+  current: ResponseStreamingMode,
+): ResponseStreamingMode {
+  if (enabled) return "token";
+  return current === "token" ? DEFAULT_RESPONSE_STREAMING_MODE : current;
+}
+
+/**
+ * Upgrades a settings file written before `responseStreamingMode`: a saved token-streaming
+ * opt-in keeps token output. Everything else in the object is left to the schema.
+ */
+export function migrateLegacyServerSettings(persisted: unknown): unknown {
+  if (
+    !Predicate.isObject(persisted) ||
+    Object.hasOwn(persisted, "responseStreamingMode") ||
+    persisted.enableLegacyTokenStreaming !== true
+  ) {
+    return persisted;
+  }
+  return { ...persisted, responseStreamingMode: "token" satisfies ResponseStreamingMode };
+}
+
 function shouldReplaceTextGenerationModelSelection(
   patch: ServerSettingsPatch["textGenerationModelSelection"] | undefined,
 ): boolean {
@@ -68,6 +101,24 @@ function mergeModelSelectionOptionsById(input: {
     merged.set(selection.id, selection.value);
   }
   return [...merged.entries()].map(([id, value]) => ({ id, value }));
+}
+
+/**
+ * Patches a per-project override map entry by entry, so edits to different projects never
+ * collide: a null entry (or one `keeps` rejects) removes the project's override, which then
+ * inherits again; any other entry replaces it. Project ids are data, prototype names included.
+ */
+function patchProjectOverrides<Value, PatchValue extends Value>(
+  current: Readonly<Record<string, Value>>,
+  patch: Readonly<Record<string, PatchValue | null>>,
+  keeps: (value: PatchValue) => boolean = () => true,
+): Record<string, Value> {
+  const overrides = new Map<string, Value>(Object.entries(current));
+  for (const [projectId, value] of Object.entries(patch)) {
+    if (value === null || !keeps(value)) overrides.delete(projectId);
+    else overrides.set(projectId, value);
+  }
+  return Object.fromEntries(overrides);
 }
 
 /**
@@ -110,9 +161,19 @@ export function applyServerSettingsPatch(
     expectedThreadAutoSettleAfterDays: _expectedAutoSettle,
     projectPreferences: _projects,
     cliProxyHubs: _cliProxyHubs,
+    usagePriceOverrides: _usagePriceOverrides,
+    enableLegacyTokenStreaming: legacyTokenStreaming,
     ...persistedPatch
   } = patch;
   let next = deepMerge(current, persistedPatch);
+  if (patch.responseStreamingMode === undefined && legacyTokenStreaming !== undefined)
+    next = {
+      ...next,
+      responseStreamingMode: responseStreamingModeFromLegacyTokenStreaming(
+        legacyTokenStreaming,
+        current.responseStreamingMode,
+      ),
+    };
   if (patch.initialModelSelection !== undefined)
     next = { ...next, initialModelSelection: patch.initialModelSelection };
   if (patch.projectPreferences !== undefined) {
@@ -133,38 +194,48 @@ export function applyServerSettingsPatch(
     }
     next = { ...next, projectPreferences: Object.fromEntries(projects) };
   }
-  if (patch.projectWorktreeSubmodules !== undefined) {
-    const modes = new Map(Object.entries(current.projectWorktreeSubmodules));
-    for (const [projectId, mode] of Object.entries(patch.projectWorktreeSubmodules)) {
-      if (mode === null) modes.delete(projectId);
-      else modes.set(projectId, mode);
-    }
-    next = { ...next, projectWorktreeSubmodules: Object.fromEntries(modes) };
-  }
-  if (patch.projectWorktreeRoots !== undefined) {
-    const roots = new Map(Object.entries(current.projectWorktreeRoots));
-    for (const [projectId, root] of Object.entries(patch.projectWorktreeRoots)) {
-      if (root === null || root === "") roots.delete(projectId);
-      else roots.set(projectId, root);
-    }
-    next = { ...next, projectWorktreeRoots: Object.fromEntries(roots) };
-  }
-  if (patch.projectStorageRetention !== undefined) {
-    const policies = new Map(Object.entries(current.projectStorageRetention));
-    for (const [projectId, policy] of Object.entries(patch.projectStorageRetention)) {
-      if (policy === null) policies.delete(projectId);
-      else policies.set(projectId, policy);
-    }
-    next = { ...next, projectStorageRetention: Object.fromEntries(policies) };
-  }
-  if (patch.projectLifecycleSuggestions !== undefined) {
-    const policies = new Map(Object.entries(current.projectLifecycleSuggestions));
-    for (const [projectId, policy] of Object.entries(patch.projectLifecycleSuggestions)) {
-      if (policy === null) policies.delete(projectId);
-      else policies.set(projectId, policy);
-    }
-    next = { ...next, projectLifecycleSuggestions: Object.fromEntries(policies) };
-  }
+  if (patch.projectWorktreeSubmodules !== undefined)
+    next = {
+      ...next,
+      projectWorktreeSubmodules: patchProjectOverrides(
+        current.projectWorktreeSubmodules,
+        patch.projectWorktreeSubmodules,
+      ),
+    };
+  if (patch.projectGitWritingStyle !== undefined)
+    next = {
+      ...next,
+      projectGitWritingStyle: patchProjectOverrides(
+        current.projectGitWritingStyle,
+        patch.projectGitWritingStyle,
+      ),
+    };
+  if (patch.projectWorktreeRoots !== undefined)
+    next = {
+      ...next,
+      // An empty root inherits too.
+      projectWorktreeRoots: patchProjectOverrides(
+        current.projectWorktreeRoots,
+        patch.projectWorktreeRoots,
+        (root) => root !== "",
+      ),
+    };
+  if (patch.projectStorageRetention !== undefined)
+    next = {
+      ...next,
+      projectStorageRetention: patchProjectOverrides(
+        current.projectStorageRetention,
+        patch.projectStorageRetention,
+      ),
+    };
+  if (patch.projectLifecycleSuggestions !== undefined)
+    next = {
+      ...next,
+      projectLifecycleSuggestions: patchProjectOverrides(
+        current.projectLifecycleSuggestions,
+        patch.projectLifecycleSuggestions,
+      ),
+    };
   if (patch.cliProxyHubs !== undefined) {
     const hubs = new Map(Object.entries(current.cliProxyHubs));
     for (const [hubId, hub] of Object.entries(patch.cliProxyHubs)) {
@@ -172,6 +243,15 @@ export function applyServerSettingsPatch(
       else hubs.set(hubId, hub);
     }
     next = { ...next, cliProxyHubs: Object.fromEntries(hubs) as ServerSettings["cliProxyHubs"] };
+  }
+  if (patch.usagePriceOverrides !== undefined) {
+    // Entries are replaced whole: a mapping never keeps the price it replaces.
+    const overrides = new Map(Object.entries(current.usagePriceOverrides));
+    for (const [model, override] of Object.entries(patch.usagePriceOverrides)) {
+      if (override === null) overrides.delete(model);
+      else overrides.set(model, override);
+    }
+    next = { ...next, usagePriceOverrides: Object.fromEntries(overrides) };
   }
   const nextWithReplacements =
     patch.providerInstances !== undefined

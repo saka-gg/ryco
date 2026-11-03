@@ -48,6 +48,7 @@ const AuthSessionDbRow = Schema.Struct({
   linkEnrollmentId: Schema.NullOr(Schema.String),
   linkClientFingerprint: Schema.NullOr(Schema.String),
   linkRole: Schema.NullOr(Schema.Literals(["viewer", "operator", "owner"])),
+  linkAccountId: Schema.NullOr(Schema.String),
 });
 
 function toAuthSessionRecord(row: typeof AuthSessionDbRow.Type): typeof AuthSessionRecord.Type {
@@ -80,6 +81,7 @@ function toAuthSessionRecord(row: typeof AuthSessionDbRow.Type): typeof AuthSess
             enrollmentId: row.linkEnrollmentId,
             clientFingerprint: row.linkClientFingerprint,
             role: row.linkRole,
+            ...(row.linkAccountId === null ? {} : { accountId: row.linkAccountId }),
           }
         : null,
   };
@@ -120,7 +122,8 @@ const makeAuthSessionRepository = Effect.gen(function* () {
     s.link_trust_source AS "linkTrustSource",
     s.link_enrollment_id AS "linkEnrollmentId",
     s.link_client_fingerprint AS "linkClientFingerprint",
-    s.link_role AS "linkRole"
+    s.link_role AS "linkRole",
+    s.link_account_id AS "linkAccountId"
   `);
   const sessionsWithPredecessor = sql.literal(`
     auth_sessions s
@@ -165,7 +168,8 @@ const makeAuthSessionRepository = Effect.gen(function* () {
           link_trust_source,
           link_enrollment_id,
           link_client_fingerprint,
-          link_role
+          link_role,
+          link_account_id
         )
         VALUES (
           ${input.sessionId},
@@ -188,7 +192,8 @@ const makeAuthSessionRepository = Effect.gen(function* () {
           ${input.link?.trustSource ?? null},
           ${input.link?.enrollmentId ?? null},
           ${input.link?.clientFingerprint ?? null},
-          ${input.link?.role ?? null}
+          ${input.link?.role ?? null},
+          ${input.link?.accountId ?? null}
         )
       `,
   });
@@ -275,7 +280,7 @@ const makeAuthSessionRepository = Effect.gen(function* () {
   // it, before and after.
   const revokeSessionRows = SqlSchema.findAll({
     Request: RevokeAuthSessionInput,
-    Result: Schema.Struct({ sessionId: AuthSessionId }),
+    Result: Schema.Struct({ sessionId: AuthSessionId, chainId: AuthSessionId }),
     execute: ({ sessionId, revokedAt }) =>
       sql`
         UPDATE auth_sessions
@@ -286,7 +291,9 @@ const makeAuthSessionRepository = Effect.gen(function* () {
             WHERE session_id = ${sessionId}
           )
           AND revoked_at IS NULL
-        RETURNING session_id AS "sessionId"
+        RETURNING
+          session_id AS "sessionId",
+          COALESCE(chain_id, session_id) AS "chainId"
       `,
   });
 
@@ -316,8 +323,18 @@ const makeAuthSessionRepository = Effect.gen(function* () {
     Request: RevokeLinkedAuthSessionsInput,
     Result: Schema.Struct({ sessionId: AuthSessionId, chainId: AuthSessionId }),
     execute: (input) =>
-      "enrollmentId" in input
+      "allLinks" in input
         ? sql`
+            UPDATE auth_sessions
+            SET revoked_at = ${input.revokedAt}
+            WHERE link_trust_source IS NOT NULL
+              AND revoked_at IS NULL
+            RETURNING
+              session_id AS "sessionId",
+              COALESCE(chain_id, session_id) AS "chainId"
+          `
+        : !("clientFingerprint" in input)
+          ? sql`
             UPDATE auth_sessions
             SET revoked_at = ${input.revokedAt}
             WHERE link_enrollment_id = ${input.enrollmentId}
@@ -326,11 +343,31 @@ const makeAuthSessionRepository = Effect.gen(function* () {
               session_id AS "sessionId",
               COALESCE(chain_id, session_id) AS "chainId"
           `
-        : sql`
+          : sql`
             UPDATE auth_sessions
             SET revoked_at = ${input.revokedAt}
-            WHERE link_client_fingerprint = ${input.clientFingerprint}
-              AND revoked_at IS NULL
+            WHERE ${sql.and([
+              sql`link_client_fingerprint = ${input.clientFingerprint}`,
+              sql`revoked_at IS NULL`,
+              ...(input.trustSource === undefined
+                ? []
+                : [sql`link_trust_source = ${input.trustSource}`]),
+              ...(input.enrollmentId === undefined
+                ? []
+                : [
+                    input.enrollmentId === null
+                      ? sql`link_enrollment_id IS NULL`
+                      : sql`link_enrollment_id = ${input.enrollmentId}`,
+                  ]),
+              ...(input.accountId === undefined
+                ? []
+                : [
+                    input.accountId === null
+                      ? sql`link_account_id IS NULL`
+                      : sql`link_account_id = ${input.accountId}`,
+                  ]),
+              ...(input.roles === undefined ? [] : [sql.in("link_role", input.roles)]),
+            ])}
             RETURNING
               session_id AS "sessionId",
               COALESCE(chain_id, session_id) AS "chainId"
@@ -382,7 +419,7 @@ const makeAuthSessionRepository = Effect.gen(function* () {
           "AuthSessionRepository.revoke:decodeRows",
         ),
       ),
-      Effect.map((rows) => rows.map((row) => row.sessionId)),
+      Effect.map((rows) => rows.map((row) => ({ sessionId: row.sessionId, chainId: row.chainId }))),
     );
 
   const revokeAllExcept: AuthSessionRepositoryShape["revokeAllExcept"] = (input) =>

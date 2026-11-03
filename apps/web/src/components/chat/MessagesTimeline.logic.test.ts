@@ -23,7 +23,6 @@ import {
   deriveMessagesTimelineRows,
   deriveRevertTurnCountByUserMessageId,
   deriveTimelineMinimapItems,
-  deriveUndoTurnCountByTurnId,
   findMessagesTimelineRowIndex,
   isErroredWorkEntry,
   isTimelineScrolledToEnd,
@@ -123,12 +122,20 @@ describe("timeline minimap", () => {
   });
 
   it("caps the collapsed hit strip to the safe content gutter", () => {
-    expect(resolveTimelineMinimapHasPersistentGutter(863)).toBe(false);
-    expect(resolveTimelineMinimapHasPersistentGutter(864)).toBe(true);
-    expect(resolveTimelineMinimapHitStripWidth(768)).toBe(0);
-    expect(resolveTimelineMinimapHitStripWidth(820)).toBe(14);
-    expect(resolveTimelineMinimapHitStripWidth(872)).toBe(40);
-    expect(resolveTimelineMinimapHitStripWidth(Number.NaN)).toBe(0);
+    // The comfortable column: 48rem at the default text size.
+    expect(resolveTimelineMinimapHasPersistentGutter(863, 768)).toBe(false);
+    expect(resolveTimelineMinimapHasPersistentGutter(864, 768)).toBe(true);
+    expect(resolveTimelineMinimapHitStripWidth(768, 768)).toBe(0);
+    expect(resolveTimelineMinimapHitStripWidth(820, 768)).toBe(14);
+    expect(resolveTimelineMinimapHitStripWidth(872, 768)).toBe(40);
+    expect(resolveTimelineMinimapHitStripWidth(Number.NaN, 768)).toBe(0);
+    expect(resolveTimelineMinimapHitStripWidth(872, Number.NaN)).toBe(0);
+    // A wider column leaves less gutter; a full-width one leaves none, so the strip is inert.
+    expect(resolveTimelineMinimapHasPersistentGutter(1_200, 1_152)).toBe(false);
+    expect(resolveTimelineMinimapHitStripWidth(1_200, 1_152)).toBe(12);
+    expect(resolveTimelineMinimapHasPersistentGutter(1_680, 1_152)).toBe(true);
+    expect(resolveTimelineMinimapHasPersistentGutter(1_680, 1_680)).toBe(false);
+    expect(resolveTimelineMinimapHitStripWidth(1_680, 1_680)).toBe(0);
     expect(resolveTimelineMinimapInteractiveWidth(14, false)).toBe(14);
     expect(resolveTimelineMinimapInteractiveWidth(14, true)).toBe("22rem");
   });
@@ -1024,6 +1031,43 @@ describe("deriveMessagesTimelineRows", () => {
     ]);
   });
 
+  it("says Interrupted, not You stopped, when the session ended the turn", () => {
+    const turnId = TurnId.make("turn-released");
+    const input = {
+      timelineEntries: [
+        {
+          id: "work-entry",
+          kind: "work" as const,
+          createdAt: "2026-01-01T00:00:05Z",
+          entry: makeWorkEntry({ id: "work-1", turnId }),
+        },
+      ],
+      latestTurn: {
+        turnId,
+        state: "interrupted" as const,
+        startedAt: "2026-01-01T00:00:00Z",
+        completedAt: "2026-01-01T00:00:47Z",
+      },
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    };
+    const released = deriveMessagesTimelineRows({ ...input, latestTurnEndedBySession: true });
+    expect(released).toEqual([
+      expect.objectContaining({ kind: "turn-fold", label: "Interrupted after 47s" }),
+    ]);
+    // A completed turn never reads as interrupted, whatever the session did after.
+    const completed = deriveMessagesTimelineRows({
+      ...input,
+      latestTurn: { ...input.latestTurn, state: "completed" as const },
+      latestTurnEndedBySession: true,
+    });
+    expect(completed).toEqual([
+      expect.objectContaining({ kind: "turn-fold", label: "Worked for 47s" }),
+    ]);
+  });
+
   it("keeps the previous turn settled while a newly sent message awaits its turn id", () => {
     const previousTurnId = TurnId.make("turn-previous");
     const rows = deriveMessagesTimelineRows({
@@ -1455,52 +1499,107 @@ describe("chapter rows", () => {
     });
     expect(deriveTimelineMinimapItems(rows)[0]?.assistantText).toBe("Second update.");
   });
-});
 
-describe("deriveUndoTurnCountByTurnId", () => {
-  const summary = (
-    turnId: string,
-    overrides: Partial<Record<keyof TurnDiffSummary, unknown>> = {},
-  ): TurnDiffSummary =>
-    ({
-      turnId: TurnId.make(turnId),
-      completedAt: "2026-01-01T00:00:10Z",
-      files: [{ path: "src/app.ts", additions: 2, deletions: 1 }],
-      checkpointRef: "checkpoint-abc",
-      checkpointTurnCount: 3,
-      ...overrides,
-    }) as TurnDiffSummary;
+  describe("answered agent questions", () => {
+    const exchangeEntry = (createdAt: string): TimelineEntry => {
+      const exchange = {
+        id: "user-input:answer-1",
+        activityId: "answer-1",
+        requestActivityId: "ask-1",
+        createdAt,
+        turnId,
+        cancelled: false,
+        questions: [
+          {
+            id: "Which library?",
+            header: "Library",
+            question: "Which library?",
+            options: ["React", "Vue"],
+            answer: "React",
+          },
+        ],
+      };
+      // The request and resolution rows the exchange stands in for.
+      const workEntries = [
+        makeWorkEntry({ id: "ask-1", createdAt: "2026-01-01T00:00:04Z", turnId }),
+        makeWorkEntry({ id: "answer-1", createdAt, turnId }),
+      ];
+      return { id: exchange.id, kind: "user-input-exchange", createdAt, exchange, workEntries };
+    };
+    const timelineEntries = [
+      userEntry,
+      assistant("c1", "2026-01-01T00:00:02Z", "Checking the stack."),
+      work("w1", "2026-01-01T00:00:03Z"),
+      exchangeEntry("2026-01-01T00:00:05Z"),
+      work("w2", "2026-01-01T00:00:06Z"),
+      assistant("final", "2026-01-01T00:00:20Z", "Done."),
+    ];
+    const settled = {
+      turnId,
+      state: "completed" as const,
+      startedAt: "2026-01-01T00:00:01Z",
+      completedAt: "2026-01-01T00:00:21Z",
+    };
 
-  it("targets the turn before the one being undone", () => {
-    const result = deriveUndoTurnCountByTurnId({
-      turnDiffSummaries: [summary("turn-1")],
-      inferredCheckpointTurnCountByTurnId: {},
+    it("stay visible when their turn folds into its disclosure", () => {
+      const rows = deriveMessagesTimelineRows({
+        ...baseInput,
+        timelineEntries,
+        latestTurn: settled,
+        showUserInputExchanges: true,
+      });
+      expect(rows.map((row) => row.id)).toEqual([
+        "user-entry",
+        "turn-fold:settled:turn-ch",
+        "user-input:answer-1",
+        "final-entry",
+      ]);
     });
-    expect(result.get(TurnId.make("turn-1"))).toBe(2);
-  });
 
-  it("falls back to the inferred checkpoint count", () => {
-    const result = deriveUndoTurnCountByTurnId({
-      turnDiffSummaries: [summary("turn-1", { checkpointTurnCount: undefined })],
-      inferredCheckpointTurnCountByTurnId: { [TurnId.make("turn-1")]: 5 },
+    it("sit between the chapters of an open turn, never inside one", () => {
+      const rows = deriveMessagesTimelineRows({
+        ...baseInput,
+        timelineEntries,
+        latestTurn: settled,
+        turnFoldExpandedById: { "turn-fold:settled:turn-ch": true },
+        showUserInputExchanges: true,
+      });
+      expect(rows.map((row) => row.id)).toEqual([
+        "user-entry",
+        "turn-fold:settled:turn-ch",
+        "chapter:c1",
+        "user-input:answer-1",
+        "chapter:w2",
+        "final-entry",
+      ]);
+      expect(chapters(rows).map((row) => row.entries.map((entry) => entry.id))).toEqual([
+        ["w1"],
+        ["w2"],
+      ]);
     });
-    expect(result.get(TurnId.make("turn-1"))).toBe(4);
-  });
 
-  it("skips turns with nothing restorable", () => {
-    const result = deriveUndoTurnCountByTurnId({
-      turnDiffSummaries: [
-        summary("missing", { status: "missing" }),
-        summary("errored", { status: "error" }),
-        // A reported provider diff is not a checkpoint we can roll back to.
-        summary("provider", { checkpointRef: "provider-diff:xyz" }),
-        summary("uncaptured", { checkpointRef: undefined }),
-        summary("empty", { files: [] }),
-        summary("no-count", { checkpointTurnCount: undefined }),
-      ],
-      inferredCheckpointTurnCountByTurnId: {},
+    it("render only where they are shown, keeping their row across rebuilds", () => {
+      const derive = (show: boolean) =>
+        deriveMessagesTimelineRows({
+          ...baseInput,
+          timelineEntries,
+          latestTurn: settled,
+          turnFoldExpandedById: { "turn-fold:settled:turn-ch": true },
+          showUserInputExchanges: show,
+        });
+      const first = computeStableMessagesTimelineRows(derive(true), {
+        byId: new Map(),
+        result: [],
+      });
+      expect(computeStableMessagesTimelineRows(derive(true), first)).toBe(first);
+
+      // The frozen phone tier shows nothing new: the question's bare rows stay in its turn.
+      const hidden = derive(false);
+      expect(hidden.some((row) => row.kind === "user-input-exchange")).toBe(false);
+      expect(chapters(hidden).map((row) => row.entries.map((entry) => entry.id))).toEqual([
+        ["w1", "ask-1", "answer-1", "w2"],
+      ]);
     });
-    expect(result.size).toBe(0);
   });
 });
 
@@ -1769,6 +1868,7 @@ describe("fork from here", () => {
       workspaceRoot: undefined,
       skills: [],
       activeThreadEnvironmentId: EnvironmentId.make("environment-local"),
+      smoothAssistantText: false,
       highlightedMessageId: null,
       threadMessageSearchQuery: "",
       threadMessageSearchOccurrencesByMessageId: new Map(),
@@ -2170,6 +2270,7 @@ describe("timeline context split", () => {
     "workspaceRoot",
     "skills",
     "activeThreadEnvironmentId",
+    "smoothAssistantText",
     "highlightedMessageId",
     "threadMessageSearchQuery",
     "threadMessageSearchOccurrencesByMessageId",
@@ -2199,6 +2300,7 @@ describe("timeline context split", () => {
       workspaceRoot: "/repo",
       skills: [],
       activeThreadEnvironmentId: EnvironmentId.make("environment-local"),
+      smoothAssistantText: false,
       highlightedMessageId: null,
       threadMessageSearchQuery: "",
       threadMessageSearchOccurrencesByMessageId: new Map(),

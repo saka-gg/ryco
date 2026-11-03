@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as path from "node:path";
 import * as os from "node:os";
-import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -20,10 +20,20 @@ import {
   ThreadId,
   ProviderInstanceId,
   RuntimeSessionId,
+  TurnId,
   type ProviderRuntimeEvent,
 } from "@ryco/contracts";
 
+import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import { makeGrokAcpRuntime, resolveGrokAcpBaseModelId } from "../acp/GrokAcpSupport.ts";
+import {
+  assertTurnIdsOnly,
+  drainRuntimeEvents,
+  makeRetentionProbe,
+} from "../testUtils/adapterRetention.ts";
+import { waitForLiveProjectCommands } from "../testUtils/liveProjectCommands.ts";
+import { makeAcpAdapter } from "./AcpAdapter.ts";
 import { makeGrokAdapter } from "./GrokAdapter.ts";
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 
@@ -354,6 +364,59 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
     }),
   );
 
+  it.effect("sends a pasted image natively and tells the agent where it is saved", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("grok-image-attachment");
+      const tempDir = yield* Effect.promise(() => mkdtemp(path.join(os.tmpdir(), "grok-acp-")));
+      const requestLogPath = path.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockGrokWrapper({ RYCO_ACP_REQUEST_LOG_PATH: requestLogPath }),
+      );
+      const { attachmentsDir } = yield* ServerConfig;
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-grokadapter-image-attachment"),
+        threadId,
+        provider: ProviderDriverKind.make("grok"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      const imageAttachment = {
+        type: "image" as const,
+        id: "grok-image-attachment-12345678-1234-1234-1234-123456789abc",
+        name: "screenshot.png",
+        mimeType: "image/png",
+        sizeBytes: 4,
+      };
+      const imagePath = path.join(attachmentsDir, attachmentRelativePath(imageAttachment)!);
+      yield* Effect.promise(async () => {
+        await mkdir(path.dirname(imagePath), { recursive: true });
+        await writeFile(imagePath, Uint8Array.from([1, 2, 3, 4]));
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "put this screenshot in the PR",
+        attachments: [imageAttachment],
+      });
+      yield* adapter.stopSession(threadId);
+
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      const promptRequest = requests.find((entry) => entry.method === "session/prompt");
+      const prompt =
+        (promptRequest?.params as { prompt: Array<Record<string, unknown>> } | undefined)?.prompt ??
+        [];
+      assert.deepInclude(prompt, { type: "image", data: "AQIDBA==", mimeType: "image/png" });
+      const textBlock = prompt.find((block) => block.type === "text") as { text: string };
+      assert.ok(
+        textBlock.text.endsWith(
+          `put this screenshot in the PR\n\n[Attached image "screenshot.png" is saved at: ${imagePath}]`,
+        ),
+      );
+    }),
+  );
+
   it.effect("applies a model change to the live session without restarting", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("grok-in-session-model-switch");
@@ -547,6 +610,150 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       yield* Deferred.await(contentDelta);
 
       yield* Fiber.interrupt(eventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("serves the commands Grok advertises per directory, after its session too", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("grok-live-commands");
+      const cwd = process.cwd();
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockGrokWrapper({
+          RYCO_ACP_AVAILABLE_COMMANDS: JSON.stringify([
+            { name: "review", description: " Review ", input: { hint: "<pr>" } },
+            { name: "always-approve", description: "x" },
+            { name: " ", description: "y" },
+          ]),
+          RYCO_ACP_AVAILABLE_COMMANDS_AFTER_PROMPT: JSON.stringify([
+            { name: "/plan", description: "Plan the work" },
+            { name: "context", description: "Hidden" },
+          ]),
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      assert.isUndefined(yield* adapter.readLiveProjectCommands(cwd));
+
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-grokadapter-live-commands"),
+        threadId,
+        provider: ProviderDriverKind.make("grok"),
+        cwd,
+        runtimeMode: "full-access",
+      });
+      assert.deepStrictEqual(yield* waitForLiveProjectCommands(adapter, cwd), {
+        skills: [],
+        slashCommands: [{ name: "review", description: "Review", input: { hint: "<pr>" } }],
+      });
+      assert.isUndefined(yield* adapter.readLiveProjectCommands(path.join(cwd, "another-project")));
+
+      yield* adapter.sendTurn({ threadId, input: "hello grok", attachments: [] });
+      const afterPrompt = {
+        skills: [],
+        slashCommands: [{ name: "plan", description: "Plan the work" }],
+      };
+      assert.deepStrictEqual(
+        yield* waitForLiveProjectCommands(
+          adapter,
+          cwd,
+          (commands) => commands?.slashCommands[0]?.name === "plan",
+        ),
+        afterPrompt,
+      );
+
+      yield* adapter.stopSession(threadId);
+      assert.deepStrictEqual(yield* adapter.readLiveProjectCommands(cwd), afterPrompt);
+    }),
+  );
+
+  it.effect("refuses /always-approve before the turn reaches Grok", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("grok-refused-command");
+      const tempDir = yield* Effect.promise(() => mkdtemp(path.join(os.tmpdir(), "grok-acp-")));
+      const requestLogPath = path.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockGrokWrapper({ RYCO_ACP_REQUEST_LOG_PATH: requestLogPath }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-grokadapter-refused-command"),
+        threadId,
+        provider: ProviderDriverKind.make("grok"),
+        cwd: process.cwd(),
+        runtimeMode: "approval-required",
+      });
+      for (const input of ["/always-approve", "  /Always-Approve on"]) {
+        const error = yield* Effect.flip(adapter.sendTurn({ threadId, input, attachments: [] }));
+        assert.equal(error._tag, "ProviderAdapterRequestError");
+        if (error._tag === "ProviderAdapterRequestError") {
+          assert.include(error.detail, "access selector");
+        }
+      }
+      assert.isTrue(yield* adapter.hasSession(threadId));
+      yield* adapter.stopSession(threadId);
+
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      assert.isTrue(requests.some((entry) => entry.method === "session/new"));
+      assert.isFalse(requests.some((entry) => entry.method === "session/prompt"));
+    }),
+  );
+
+  it.effect("retention: keeps no prompts, image attachments or results of completed turns", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("grok-retention-thread");
+      const wrapperPath = yield* Effect.promise(() => makeMockGrokWrapper());
+      const probe = makeRetentionProbe();
+      const grokSettings = decodeGrokSettings({ binaryPath: wrapperPath });
+      // The ACP adapter behind Grok, with each prompt array it sends tracked.
+      const adapter = yield* makeAcpAdapter({
+        provider: ProviderDriverKind.make("grok"),
+        normalizeModel: resolveGrokAcpBaseModelId,
+        xaiExtensions: true,
+        makeRuntime: (input) =>
+          Effect.map(makeGrokAcpRuntime({ ...input, grokSettings }), (runtime) => ({
+            ...runtime,
+            prompt: (payload) => {
+              probe.track(payload.prompt);
+              return runtime.prompt(payload);
+            },
+          })),
+      }).pipe(Effect.orDie);
+      const { attachmentsDir } = yield* ServerConfig;
+      yield* drainRuntimeEvents(adapter.streamEvents);
+
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-grokadapter-retention"),
+        threadId,
+        provider: ProviderDriverKind.make("grok"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const turnIds: Array<TurnId> = [];
+      for (const n of [1, 2]) {
+        const attachment = {
+          type: "image" as const,
+          id: `grok-retention-image-${n}-12345678-1234-1234-1234-123456789abc`,
+          name: `screenshot-${n}.png`,
+          mimeType: "image/png",
+          sizeBytes: 4,
+        };
+        const attachmentPath = path.join(attachmentsDir, attachmentRelativePath(attachment)!);
+        yield* Effect.promise(async () => {
+          await mkdir(path.dirname(attachmentPath), { recursive: true });
+          await writeFile(attachmentPath, Uint8Array.from([1, 2, 3, 4]));
+        });
+        const turn = yield* adapter.sendTurn({
+          threadId,
+          input: `screenshot ${n}`,
+          attachments: [attachment],
+        });
+        turnIds.push(turn.turnId);
+      }
+
+      assert.equal(probe.tracked, 2);
+      assert.equal(yield* Effect.promise(probe.reachable), 0);
+      assertTurnIdsOnly(yield* adapter.readThread(threadId), turnIds);
       yield* adapter.stopSession(threadId);
     }),
   );

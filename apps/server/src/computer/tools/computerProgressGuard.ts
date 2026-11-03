@@ -62,6 +62,8 @@ const TRANSIENT_ADMISSION_CODES = new Set([
   "computer_setup_required",
   "browser_requires_setup",
   "approval_denied",
+  "approval_expired",
+  "approval_pending",
   "approval_unavailable",
   "approval_queue_full",
   "target_not_on_active_space",

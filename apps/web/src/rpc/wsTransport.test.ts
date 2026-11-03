@@ -905,7 +905,6 @@ describe("WsTransport", () => {
           capabilities: {
             repositoryIdentity: true,
             threadSettlement: false,
-            threadPriorityRanking: false,
           },
         },
         cwd: "/tmp/workspace",
@@ -964,7 +963,6 @@ describe("WsTransport", () => {
                 capabilities: {
                   repositoryIdentity: true,
                   threadSettlement: false,
-                  threadPriorityRanking: false,
                 },
               },
               cwd: "/tmp/workspace",
@@ -1023,7 +1021,6 @@ describe("WsTransport", () => {
                 capabilities: {
                   repositoryIdentity: true,
                   threadSettlement: false,
-                  threadPriorityRanking: false,
                 },
               },
               cwd: "/tmp/one",
@@ -1077,7 +1074,6 @@ describe("WsTransport", () => {
           capabilities: {
             repositoryIdentity: true,
             threadSettlement: false,
-            threadPriorityRanking: false,
           },
         },
         cwd: "/tmp/two",
@@ -1136,7 +1132,6 @@ describe("WsTransport", () => {
           capabilities: {
             repositoryIdentity: true,
             threadSettlement: false,
-            threadPriorityRanking: false,
           },
         },
         cwd: "/tmp/one",
@@ -1193,7 +1188,6 @@ describe("WsTransport", () => {
           capabilities: {
             repositoryIdentity: true,
             threadSettlement: false,
-            threadPriorityRanking: false,
           },
         },
         cwd: "/tmp/two",
@@ -1253,7 +1247,6 @@ describe("WsTransport", () => {
           capabilities: {
             repositoryIdentity: true,
             threadSettlement: false,
-            threadPriorityRanking: false,
           },
         },
         cwd: "/tmp/one",
@@ -1375,7 +1368,6 @@ describe("WsTransport", () => {
                 capabilities: {
                   repositoryIdentity: true,
                   threadSettlement: false,
-                  threadPriorityRanking: false,
                 },
               },
               cwd: "/tmp/example",

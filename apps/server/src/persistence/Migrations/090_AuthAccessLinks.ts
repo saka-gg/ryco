@@ -1,7 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
-const LINK_COLUMNS = [
+export const LINK_COLUMNS = [
   "link_trust_source",
   "link_enrollment_id",
   "link_client_fingerprint",

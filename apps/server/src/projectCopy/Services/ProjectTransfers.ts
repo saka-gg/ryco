@@ -47,7 +47,7 @@ export interface ProjectTransfersShape {
   /**
    * Idempotent for the same id, purpose, length, digest and `carriesIgnoredFiles`; a different
    * one fails `conflict`. With the caller's `channel`, a transfer that carries opted-in ignored
-   * files is refused on `relay-plaintext` (`access-denied`), before anything is stored.
+   * files is refused on an `unencrypted` channel (`access-denied`), before anything is stored.
    */
   readonly begin: (
     input: ProjectTransferBeginInput,
@@ -56,8 +56,8 @@ export interface ProjectTransfersShape {
   /**
    * Appends at `offset == receivedBytes`. A range already written is a no-op when its bytes
    * match and `conflict` when they differ; a gap fails with the node's `receivedBytes`. Bytes of
-   * a transfer that carries ignored files are refused on `relay-plaintext`, whatever channel
-   * began it.
+   * a transfer that carries ignored files are refused on an `unencrypted` channel, whatever
+   * channel began it.
    */
   readonly append: (
     input: ProjectTransferAppendInput,

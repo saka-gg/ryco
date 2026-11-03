@@ -1,6 +1,6 @@
 {
   "name": "@ryco/contracts",
-  "version": "0.1.35",
+  "version": "0.1.37",
   "private": true,
   "type": "module",
   "sideEffects": false,
@@ -16,6 +16,21 @@
       "import": "./src/threadReadCache.ts",
       "require": "./src/threadReadCache.ts"
     },
+    "./push": {
+      "types": "./src/push.ts",
+      "import": "./src/push.ts",
+      "require": "./src/push.ts"
+    },
+    "./push-hub": {
+      "types": "./src/pushHub.ts",
+      "import": "./src/pushHub.ts",
+      "require": "./src/pushHub.ts"
+    },
+    "./node-linked-access": {
+      "types": "./src/nodeLinkedAccess.ts",
+      "import": "./src/nodeLinkedAccess.ts",
+      "require": "./src/nodeLinkedAccess.ts"
+    },
     "./settings": {
       "types": "./src/settings.ts",
       "import": "./src/settings.ts",
@@ -25,6 +40,11 @@
       "types": "./src/windowMaterial.ts",
       "import": "./src/windowMaterial.ts",
       "require": "./src/windowMaterial.ts"
+    },
+    "./relay-constants": {
+      "types": "./src/relayConstants.ts",
+      "import": "./src/relayConstants.ts",
+      "require": "./src/relayConstants.ts"
     },
     "./relay": {
       "types": "./src/relay.ts",
@@ -41,6 +61,11 @@
       "import": "./src/hostedIdentity.ts",
       "require": "./src/hostedIdentity.ts"
     },
+    "./direct-route-identity": {
+      "types": "./src/directRouteIdentity.ts",
+      "import": "./src/directRouteIdentity.ts",
+      "require": "./src/directRouteIdentity.ts"
+    },
     "./native-e2ee": {
       "types": "./src/nativeE2ee.ts",
       "import": "./src/nativeE2ee.ts",
@@ -55,6 +80,11 @@
       "types": "./src/localIntroduction.ts",
       "import": "./src/localIntroduction.ts",
       "require": "./src/localIntroduction.ts"
+    },
+    "./desktop-notifications": {
+      "types": "./src/desktopNotifications.ts",
+      "import": "./src/desktopNotifications.ts",
+      "require": "./src/desktopNotifications.ts"
     },
     "./desktop-native-node-claim": {
       "types": "./src/desktopNativeNodeClaim.ts",
@@ -81,6 +111,11 @@
       "import": "./src/baseSchemas.ts",
       "require": "./src/baseSchemas.ts"
     },
+    "./change-request-review": {
+      "types": "./src/changeRequestReview.ts",
+      "import": "./src/changeRequestReview.ts",
+      "require": "./src/changeRequestReview.ts"
+    },
     "./claude-cache": {
       "types": "./src/claudeCache.ts",
       "import": "./src/claudeCache.ts",
@@ -101,10 +136,25 @@
       "import": "./src/computerAudit.ts",
       "require": "./src/computerAudit.ts"
     },
+    "./daily-recap": {
+      "types": "./src/dailyRecap.ts",
+      "import": "./src/dailyRecap.ts",
+      "require": "./src/dailyRecap.ts"
+    },
     "./device": {
       "types": "./src/device.ts",
       "import": "./src/device.ts",
       "require": "./src/device.ts"
+    },
+    "./node-browser": {
+      "types": "./src/nodeBrowser.ts",
+      "import": "./src/nodeBrowser.ts",
+      "require": "./src/nodeBrowser.ts"
+    },
+    "./editor": {
+      "types": "./src/editor.ts",
+      "import": "./src/editor.ts",
+      "require": "./src/editor.ts"
     },
     "./environment": {
       "types": "./src/environment.ts",
@@ -136,6 +186,21 @@
       "import": "./src/orchestration.ts",
       "require": "./src/orchestration.ts"
     },
+    "./browser-element-limits": {
+      "types": "./src/browserElementLimits.ts",
+      "import": "./src/browserElementLimits.ts",
+      "require": "./src/browserElementLimits.ts"
+    },
+    "./project": {
+      "types": "./src/project.ts",
+      "import": "./src/project.ts",
+      "require": "./src/project.ts"
+    },
+    "./project-browser": {
+      "types": "./src/projectBrowser.ts",
+      "import": "./src/projectBrowser.ts",
+      "require": "./src/projectBrowser.ts"
+    },
     "./project-copy": {
       "types": "./src/projectCopy.ts",
       "import": "./src/projectCopy.ts",
@@ -150,6 +215,11 @@
       "types": "./src/providerRuntime.ts",
       "import": "./src/providerRuntime.ts",
       "require": "./src/providerRuntime.ts"
+    },
+    "./pull-request-watch": {
+      "types": "./src/pullRequestWatch.ts",
+      "import": "./src/pullRequestWatch.ts",
+      "require": "./src/pullRequestWatch.ts"
     },
     "./rpc": {
       "types": "./src/rpc.ts",
@@ -170,6 +240,21 @@
       "types": "./src/threadFork.ts",
       "import": "./src/threadFork.ts",
       "require": "./src/threadFork.ts"
+    },
+    "./thread-fork-carried": {
+      "types": "./src/threadForkCarried.ts",
+      "import": "./src/threadForkCarried.ts",
+      "require": "./src/threadForkCarried.ts"
+    },
+    "./secret-request": {
+      "types": "./src/secretRequest.ts",
+      "import": "./src/secretRequest.ts",
+      "require": "./src/secretRequest.ts"
+    },
+    "./secret-request-details": {
+      "types": "./src/secretRequestDetails.ts",
+      "import": "./src/secretRequestDetails.ts",
+      "require": "./src/secretRequestDetails.ts"
     },
     "./usage": {
       "types": "./src/usage.ts",

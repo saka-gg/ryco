@@ -3,9 +3,11 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   DEFAULT_TERMINAL_ID,
+  TerminalBusyError,
   TerminalClearInput,
   TerminalCloseInput,
   TerminalCursor,
+  TerminalError,
   TerminalEvent,
   TerminalOpenInput,
   TerminalResizeInput,
@@ -197,6 +199,31 @@ describe("TerminalWriteInput", () => {
         data: "",
       }),
     ).toBe(false);
+  });
+
+  it("accepts only `true` as the idle requirement", () => {
+    const input = { threadId: "thread-1", data: "bun dev\r" };
+    expect(
+      Schema.decodeUnknownSync(TerminalWriteInput)({ ...input, requireIdle: true }).requireIdle,
+    ).toBe(true);
+    expect(decodes(TerminalWriteInput, { ...input, requireIdle: false })).toBe(false);
+    expect(Object.hasOwn(Schema.decodeUnknownSync(TerminalWriteInput)(input), "requireIdle")).toBe(
+      false,
+    );
+  });
+});
+
+describe("TerminalBusyError", () => {
+  it("round-trips through the terminal error union with its reason", () => {
+    const encoded = Schema.encodeSync(TerminalError)(
+      new TerminalBusyError({ threadId: "thread-1", terminalId: "default", reason: "inputRaced" }),
+    );
+    const decoded = Schema.decodeUnknownSync(TerminalError)(encoded);
+    expect(decoded).toBeInstanceOf(TerminalBusyError);
+    expect(decoded).toMatchObject({ reason: "inputRaced", terminalId: "default" });
+    expect(() =>
+      Schema.decodeUnknownSync(TerminalError)({ ...encoded, reason: "unknown" }),
+    ).toThrow();
   });
 });
 

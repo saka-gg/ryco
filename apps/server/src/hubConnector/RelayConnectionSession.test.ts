@@ -87,6 +87,7 @@ function identity(): HubIdentityRuntimeShape {
       },
     },
     nativeNodeClaim: stubNativeNodeClaimService(),
+    proveDirectRouteIdentity: async () => undefined,
     crossDeviceApproval: stubCrossDeviceApprovalService(),
     readPendingEnrollment: async () => null,
     leave: async () => undefined,
@@ -336,6 +337,28 @@ describe("RelayConnectionSession", () => {
     }
     expect(decoded.value.clientVersion).toBe(expected);
     expect("clientVersion" in decoded.value).toBe(expected !== undefined);
+    session.close();
+  });
+
+  it("lists the node's features beside the proof, leaving out names the schema refuses", async () => {
+    const socket = new FakeSocket();
+    const session = new RelayConnectionSession({
+      identity: identity(),
+      transport: { open: () => socket },
+      hubOrigin: "https://relay.example",
+      features: ["linked-access-check", " padded", "x".repeat(65)],
+      onFrame: () => undefined,
+      onTerminal: () => undefined,
+    });
+    void session.authenticate().catch(() => undefined);
+    await proofPrepared();
+    socket.emit("open", {} as Event);
+    await proofPrepared();
+    const decoded = decodeRelayFrame(socket.sent[0]!);
+    expect(decoded).toMatchObject({
+      ok: true,
+      value: { type: "auth", peer: "node", features: ["linked-access-check"] },
+    });
     session.close();
   });
 

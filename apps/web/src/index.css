@@ -502,7 +502,11 @@
 
 :root {
   color-scheme: light;
-  --radius: 0.625rem;
+  /* The one corner radius. It is fixed, not a preference: every surface's
+     rounding derives from it through the `--radius-*` ramp in `@theme`, so
+     nested corners (a menu and its items, a dialog and its footer) stay
+     concentric. Keep `RYCO_DEFAULT_RADIUS` in `@ryco/shared` in step. */
+  --radius: 1.125rem;
   --font-family-sans:
     "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --font-family-mono: "SF Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
@@ -758,6 +762,23 @@ body {
    chrome does not pad itself. */
 :root[data-tier="phone"] #root {
   padding-top: 0;
+}
+
+/* Chat column widths, from the Chat width setting (`data-chat-width`, written by the app shell).
+   The timeline column holds the messages; the composer column (composer, banners, toolbars, the
+   new-thread hero) overhangs it by 2rem on each side. Full fills the pane, where the overhang has
+   no room left, so both columns fill it. The frozen phone tier keeps the comfortable widths. */
+:root {
+  --chat-timeline-max-width: 48rem;
+  --chat-composer-max-width: calc(var(--chat-timeline-max-width) + 4rem);
+}
+
+:root[data-chat-width="wide"]:not([data-tier="phone"]) {
+  --chat-timeline-max-width: 72rem;
+}
+
+:root[data-chat-width="full"]:not([data-tier="phone"]) {
+  --chat-timeline-max-width: 100%;
 }
 
 pre,
@@ -1629,6 +1650,21 @@ label:has(> select#reasoning-effort) select {
   margin-bottom: 0;
 }
 
+/* Paragraph streaming lands a reply a block at a time. Each new block (and each new list
+   item) fades in over 600ms instead of popping. @starting-style applies only when an
+   element is inserted, and ChatMarkdown sets data-streaming on block-streamed text only
+   after the blocks already shown are styled, so opening a thread, even mid-reply, never
+   replays it. Opacity only, so the layout does not move. The duration follows the motion
+   scale, which reduced motion (the OS setting or the app's) collapses to 0s. */
+.chat-markdown[data-streaming] > *,
+.chat-markdown[data-streaming] li {
+  transition: opacity calc(var(--app-motion-duration-stack, 260ms) * 600 / 260) ease-out;
+
+  @starting-style {
+    opacity: 0;
+  }
+}
+
 .chat-markdown p,
 .chat-markdown ul,
 .chat-markdown ol,
@@ -1725,6 +1761,19 @@ label:has(> select#reasoning-effort) select {
   box-shadow:
     0 0 0 1px color-mix(in srgb, var(--warning) 64%, transparent),
     0 0 0 3px color-mix(in srgb, var(--warning) 18%, transparent);
+}
+
+/* The passage a quote chip jumps to (useQuoteSourceHighlight). */
+::highlight(ryco-quote-source) {
+  background-color: color-mix(in srgb, var(--warning) 45%, transparent);
+  color: inherit;
+}
+
+/* Passages the unsent prompt quotes (usePendingQuoteHighlight). Its lower
+   priority leaves the jump highlight on top where both apply. */
+::highlight(ryco-quote-pending) {
+  background-color: color-mix(in srgb, var(--primary) 16%, transparent);
+  color: inherit;
 }
 
 .chat-markdown blockquote {
@@ -1887,7 +1936,9 @@ label:has(> select#reasoning-effort) select {
   cursor: default;
 }
 
-.chat-markdown .chat-markdown-shiki .shiki {
+/* `@pierre/diffs` renders highlighted code as `pre.diffs`, with either
+   highlighter, carrying the theme's own background inline. */
+.chat-markdown .chat-markdown-shiki .diffs {
   background: color-mix(in srgb, var(--muted) 78%, var(--background)) !important;
 }
 
@@ -2551,13 +2602,13 @@ label:has(> select#reasoning-effort) select {
   left: 0;
   width: calc(100% - 36px);
   height: 30px;
-  padding: 0 5px 0 2px;
+  padding: 0 6px 0 3px;
 }
 
 .sidebar-fold[data-folded="true"] .sidebar-fold-field {
   top: 3px;
   width: 30px;
-  padding: 0 0 0 2px;
+  padding: 0 0 0 3px;
   border-color: transparent;
   background-color: transparent;
   box-shadow: none;
@@ -2771,7 +2822,7 @@ label:has(> select#reasoning-effort) select {
 
 .sidebar-omnifield-menu {
   position: absolute;
-  top: 34px;
+  top: 36px;
   right: 0;
   left: 0;
   z-index: 20;
@@ -3713,16 +3764,19 @@ label:has(> select#reasoning-effort) select {
     var(--app-glass-raised-surface);
 }
 
-/* The Crown rail's docked islands sit in their own gutter with only the coat
-   behind them, so the always-dark mat thins to smoked glass. Light windows keep
-   it denser: its light icons need a dark ground over the white coat. Its
-   flyouts float over the transcript and keep the solid mat. */
+/* The Crown rail and its island (with its alerts) float over the transcript
+   in a chat with content, so the always-dark mat stays dense rather than
+   following the glass opacity: smoked glass, not a window onto the text under
+   it. Its flyouts keep the solid mat. */
 :root[data-window-translucency="window"] :is(.crown-rail, .crown-island).crown-mat {
-  background: color-mix(in srgb, #0d0d0e var(--app-glass-raised-dark-alpha, 50%), transparent);
+  background: color-mix(in srgb, #0d0d0e 90%, transparent);
 }
 
-:root:not(.dark)[data-window-translucency="window"] :is(.crown-rail, .crown-island).crown-mat {
-  background: color-mix(in srgb, #0d0d0e 82%, transparent);
+/* Opened as a card, the island leaves the gutter and covers the transcript:
+   a near-solid mat so the text under it never reads through. No backdrop
+   blur: on a translucent window it paints an opaque box over the glass. */
+:root[data-window-translucency="window"] .crown-island.crown-mat[data-mode="card"] {
+  background: color-mix(in srgb, #0d0d0e 94%, transparent);
 }
 
 /* ─── Floating overlays on a translucent window ─────────────────────────────
@@ -3843,7 +3897,94 @@ label:has(> select#reasoning-effort) select {
 }
 
 /* Terminals follow the glass: their xterm theme resolves a clear background
-   (ThreadTerminalDrawer.tsx), and xterm backs its viewport with black. */
+   (components/terminal/terminalTheme.ts), and xterm backs its viewport with black. */
 :root[data-window-translucency="window"] .xterm .xterm-viewport {
   background-color: transparent;
+}
+
+/* Open chat tabs (components/chat/ContentTabStrip.tsx), after Synara's SurfaceTabStrip. The
+   scroller softly fades whichever edge still has tabs hidden behind it: scroll-driven, so a strip
+   whose tabs fit shows no fade at all, and browsers without scroll timelines show none. */
+@property --content-tab-fade-start {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --content-tab-fade-end {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@keyframes content-tab-fade-start {
+  from {
+    --content-tab-fade-start: 0px;
+  }
+  to {
+    --content-tab-fade-start: 1.5rem;
+  }
+}
+
+@keyframes content-tab-fade-end {
+  from {
+    --content-tab-fade-end: 1.5rem;
+  }
+  to {
+    --content-tab-fade-end: 0px;
+  }
+}
+
+.content-tab-scroller {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 var(--content-tab-fade-start),
+    #000 calc(100% - var(--content-tab-fade-end)),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 var(--content-tab-fade-start),
+    #000 calc(100% - var(--content-tab-fade-end)),
+    transparent 100%
+  );
+  animation:
+    content-tab-fade-start linear both,
+    content-tab-fade-end linear both;
+  animation-timeline: scroll(self x), scroll(self x);
+  animation-range:
+    0 1.5rem,
+    calc(100% - 1.5rem) 100%;
+}
+
+/* A hairline between adjacent tabs, centred in the 4px gutter. It steps aside next to the active
+   or hovered tab, whose own fill already sets it apart, like browser tab strips. */
+.content-tab-scroller > [data-content-tab] + [data-content-tab]::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: calc(-0.125rem - 0.5px);
+  width: 1px;
+  height: 1.25rem;
+  translate: 0 -50%;
+  pointer-events: none;
+  background: var(--border);
+  transition: opacity 150ms ease-out;
+}
+
+.content-tab-scroller > [data-content-tab]:is([data-content-tab-active], :hover)::before,
+.content-tab-scroller
+  > [data-content-tab]:is([data-content-tab-active], :hover)
+  + [data-content-tab]::before {
+  opacity: 0;
+}
+
+/* A tab title dissolves at its end instead of ending in an ellipsis. */
+.content-tab-label {
+  overflow: hidden;
+  white-space: nowrap;
+  -webkit-mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 1rem), transparent 100%);
+  mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 1rem), transparent 100%);
 }

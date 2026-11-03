@@ -186,7 +186,7 @@ function deps() {
     pushSequenceMonitor: { recordEvent: () => undefined, recordSnapshot: () => undefined },
     resetShellProjection: vi.fn(),
     applyShellEvent: vi.fn(),
-    applyThreadPriorities: vi.fn(),
+    applyTerminalEvent: vi.fn(),
     syncShellSnapshot: vi.fn(),
   };
 }
@@ -397,6 +397,46 @@ describe("hosted environment connection", () => {
     expect(getHostedEnvironmentSessions().read(laptop.environmentId)).toBeUndefined();
   });
 
+  it("lets its own record generation follow a dropped Git action only once it is adoptable", () => {
+    const { generation } = connect(studio);
+    const sessions = getHostedEnvironmentSessions();
+    const readiness = connectionFactory.input?.resumeReadiness as {
+      read: () => boolean;
+      subscribe: (listener: () => void) => () => void;
+    };
+    const notified = vi.fn();
+    const unsubscribe = readiness.subscribe(notified);
+
+    expect(readiness.read()).toBe(false);
+    sessions.transportStatus(studio.environmentId, generation, "online");
+    sessions.markSessionReady(studio.environmentId, generation);
+    expect(readiness.read()).toBe(true);
+    expect(notified).toHaveBeenCalled();
+
+    // A replaced generation never follows anything again.
+    sessions.renew(studio.environmentId);
+    expect(readiness.read()).toBe(false);
+    unsubscribe();
+  });
+
+  it("hands its Git actions' delivery to the connection, which marks the environment", () => {
+    const { generation } = connect(studio);
+    const sessions = getHostedEnvironmentSessions();
+    const delivery = connectionFactory.input?.gitActionDelivery as {
+      ownsGitActionStarts: () => boolean;
+      markUncertain: () => void;
+    };
+    // The relay attempt factory keeps tracking them until the connection's recovery claims them.
+    expect(delivery.ownsGitActionStarts()).toBe(false);
+    sessions.transportStatus(studio.environmentId, generation, "online");
+    sessions.markSessionReady(studio.environmentId, generation);
+
+    // Environment-scoped: a request-owned action may fail after its generation was replaced.
+    sessions.renew(studio.environmentId);
+    delivery.markUncertain();
+    expect(sessions.read(studio.environmentId)?.sessionStatus).toBe("delivery-unknown");
+  });
+
   it("reports replay and snapshot failure for its own record generation", () => {
     connect(studio);
     const connectionInput = connectionFactory.input as {
@@ -436,22 +476,25 @@ describe("hosted environment connection", () => {
     expect(input.syncShellSnapshot).not.toHaveBeenCalled();
   });
 
-  it("asks for thread-priority deltas and drops them from a replaced generation", () => {
+  it("forwards terminal events only from the current session generation", () => {
     const { input } = connect(studio);
-    // The shared connection requests `threadPriorities: "delta"` exactly when
-    // this handler is supplied; without it every ranking batch is a full
-    // shell snapshot over the relay.
     const connectionInput = connectionFactory.input as {
-      applyThreadPriorities?: (item: unknown, environmentId: string) => void;
+      applyTerminalEvent: (event: unknown, environmentId: string) => void;
     };
-    expect(connectionInput.applyThreadPriorities).toBeTypeOf("function");
-    const item = { kind: "thread-priorities", priorities: [] };
-    connectionInput.applyThreadPriorities!(item, studio.environmentId);
-    expect(input.applyThreadPriorities).toHaveBeenCalledExactlyOnceWith(item, studio.environmentId);
+    const event = {
+      type: "output",
+      threadId: "thread-a",
+      terminalId: "default",
+      createdAt: "2026-08-11T12:00:00.000Z",
+      data: "payload",
+    };
 
-    getHostedEnvironmentSessions().release(studio.environmentId);
-    connectionInput.applyThreadPriorities!(item, studio.environmentId);
-    expect(input.applyThreadPriorities).toHaveBeenCalledOnce();
+    connectionInput.applyTerminalEvent(event, studio.environmentId);
+    expect(input.applyTerminalEvent).toHaveBeenCalledWith(event, studio.environmentId);
+
+    getHostedEnvironmentSessions().renew(studio.environmentId);
+    connectionInput.applyTerminalEvent({ ...event, data: "stale" }, studio.environmentId);
+    expect(input.applyTerminalEvent).toHaveBeenCalledTimes(1);
   });
 
   it("never reads or publishes config from a replaced generation", async () => {

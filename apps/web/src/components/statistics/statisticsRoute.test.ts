@@ -32,6 +32,11 @@ describe("statistics route loader", () => {
       loaderDeps({ view: "activity", range: "90d" }),
     );
     expect(loaderDeps({ view: "activity" })).not.toEqual(loaderDeps({ view: "usage" }));
+    // Today asks for the local day whatever the range, and asks a newly selected environment itself.
+    expect(loaderDeps({ view: "today", range: "7d", environmentIds: ["a"] })).toEqual({
+      view: "today",
+    });
+    expect(loaderDeps({ view: "today", range: "90d" })).toEqual(loaderDeps({ view: "today" }));
   });
 
   it("prefetches the requests of the location being entered, environment filter included", async () => {

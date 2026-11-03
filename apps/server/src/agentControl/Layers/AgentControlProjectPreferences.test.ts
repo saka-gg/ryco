@@ -23,6 +23,7 @@ import { OrchestrationEngineService } from "../../orchestration/Services/Orchest
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProjectSetupScriptRunner } from "../../project/Services/ProjectSetupScriptRunner.ts";
 import { ServerRuntimeStartup } from "../../serverRuntimeStartup.ts";
+import { PullRequestWatchService } from "../../sourceControl/PullRequestWatchService.ts";
 import { WorkspaceAccessPolicy } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import { computeAgentControlPlanDigest } from "../planDigest.ts";
 import { AgentControlActionValidator } from "../Services/AgentControlActionValidator.ts";
@@ -212,6 +213,7 @@ for (const { envMode, runSetupScript, setupFails, missingRunner } of [
                 }),
           ),
           Effect.provideService(ServerRuntimeStartup, {} as never),
+          Effect.provideService(PullRequestWatchService, {} as never),
           Effect.provide(
             ServerConfig.layerTest(process.cwd(), { prefix: "project-preferences-batch-" }).pipe(
               Layer.provideMerge(NodeServices.layer),

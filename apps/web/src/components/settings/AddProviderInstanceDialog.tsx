@@ -30,6 +30,7 @@ import { toastManager } from "../ui/toast";
 import { DRIVER_OPTION_BY_VALUE, DRIVER_OPTIONS } from "./providerDriverMeta";
 import { ProviderSettingsForm, deriveProviderSettingsFields } from "./ProviderSettingsForm";
 import { AcpRegistrySettings } from "./AcpRegistrySettings";
+import { isAcpAgentConfigComplete } from "./acpAgentConfig.logic";
 import { AnimatedHeight } from "../AnimatedHeight";
 
 const PROVIDER_ACCENT_SWATCHES = [
@@ -111,6 +112,10 @@ export function AddProviderInstanceDialog({
   onOpenChange,
   onCreated,
 }: AddProviderInstanceDialogProps) {
+  // Uncompiled on purpose: Babel's React Compiler never compiled this function
+  // (it bails on value blocks inside try/catch). Oxc can, but its render reads
+  // have not been audited for purity yet. Remove after that audit.
+  "use no memo";
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
   // The dialog folds into the row of the instance it just added.
@@ -188,7 +193,7 @@ export function AddProviderInstanceDialog({
   const handleSave = useCallback(() => {
     setHasAttemptedSubmit(true);
     if (instanceIdError !== null) return;
-    if (driver === "acpRegistry" && (!configDraft.agentId || !configDraft.version)) return;
+    if (driver === "acpRegistry" && !isAcpAgentConfigComplete(configDraft)) return;
 
     const config = configByDriver[driver] ?? {};
     const hasConfig = Object.keys(config).length > 0;
@@ -429,7 +434,11 @@ export function AddProviderInstanceDialog({
 
               {driver === "acpRegistry" ? (
                 wizardStep === 2 ? (
-                  <AcpRegistrySettings value={configDraft} onChange={setConfigDraft} />
+                  <AcpRegistrySettings
+                    value={configDraft}
+                    onChange={setConfigDraft}
+                    variant="dialog"
+                  />
                 ) : null
               ) : driverSettingsFields.length > 0 ? (
                 <div className={cn("grid gap-4", wizardStep !== 2 && "hidden")}>
@@ -473,9 +482,7 @@ export function AddProviderInstanceDialog({
               <Button
                 size="sm"
                 onClick={handleSave}
-                disabled={
-                  driver === "acpRegistry" && (!configDraft.agentId || !configDraft.version)
-                }
+                disabled={driver === "acpRegistry" && !isAcpAgentConfigComplete(configDraft)}
               >
                 Add instance
               </Button>

@@ -17,6 +17,7 @@ import {
   setBrowserOnlineStatus,
   WS_RECONNECT_MAX_ATTEMPTS,
   wsConnectionOpenedCountAtom,
+  wsConnectionStatusesForEnvironmentsAtom,
 } from "./wsConnectionState.ts";
 
 describe("wsConnectionState", () => {
@@ -227,5 +228,39 @@ describe("per-environment wsConnectionState", () => {
 
     expect(getWsConnectionStatus().phase).toBe("connected");
     expect(getWsConnectionStatusForEnvironment(environmentId).phase).toBe("disconnected");
+  });
+
+  it("publishes several environments' slots as one value that follows each slot", () => {
+    const atom = wsConnectionStatusesForEnvironmentsAtom([ENV_A, ENV_B]);
+    // Equal lists share one atom, so a fresh array per render subscribes once.
+    expect(wsConnectionStatusesForEnvironmentsAtom([ENV_A, ENV_B])).toBe(atom);
+    const changes = vi.fn();
+    const unsubscribe = appAtomRegistry.subscribe(atom, changes);
+
+    recordWsConnectionAttempt("ws://node-a:13773/ws", { environmentId: ENV_A });
+    recordWsConnectionOpened({ environmentId: ENV_A });
+    const connected = appAtomRegistry.get(atom);
+    expect(connected.get(ENV_A)?.phase).toBe("connected");
+    expect(connected.get(ENV_B)?.phase).toBe("idle");
+
+    // A drop that only this environment's slot records (a secondary socket
+    // that leaves the global alone) still reaches the subscriber.
+    changes.mockClear();
+    recordWsConnectionClosed(
+      { code: 1006, reason: "server stopped" },
+      { environmentId: ENV_A, recordGlobal: false },
+    );
+    expect(changes).toHaveBeenCalled();
+    expect(appAtomRegistry.get(atom).get(ENV_A)?.phase).toBe("disconnected");
+    expect(appAtomRegistry.get(atom)).not.toBe(connected);
+
+    // Nothing listed changed: the value keeps its identity.
+    const settled = appAtomRegistry.get(atom);
+    recordWsConnectionAttempt("ws://node-c:13775/ws", {
+      environmentId: "environment-c" as EnvironmentId,
+      recordGlobal: false,
+    });
+    expect(appAtomRegistry.get(atom)).toBe(settled);
+    unsubscribe();
   });
 });

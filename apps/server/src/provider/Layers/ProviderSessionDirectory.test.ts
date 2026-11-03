@@ -78,8 +78,11 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
         assert.equal(runtime.value.providerName, "codex");
       }
 
-      const threadIds = yield* directory.listThreadIds();
-      assert.deepEqual(threadIds, [nextThreadId]);
+      const bindings = yield* directory.listBindings();
+      assert.deepEqual(
+        bindings.map((binding) => binding.threadId),
+        [nextThreadId],
+      );
     }));
 
   it("persists runtime fields and merges payload updates", () =>
@@ -231,6 +234,42 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
           },
         },
       ]);
+    }));
+
+  it("lists only bindings that are not stopped as active, oldest first", () =>
+    Effect.gen(function* () {
+      const directory = yield* ProviderSessionDirectory;
+      const runtimeRepository = yield* ProviderSessionRuntimeRepository;
+
+      const statuses = ["error", "stopped", "running", "starting"] as const;
+      yield* Effect.forEach(statuses, (status, index) =>
+        runtimeRepository.upsert({
+          threadId: ThreadId.make(`thread-active-${status}`),
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          adapterKey: "codex",
+          runtimeMode: "full-access",
+          status,
+          lastSeenAt: `2026-05-0${index + 1}T00:00:00.000Z`,
+          resumeCursor: null,
+          runtimePayload: null,
+        }),
+      );
+
+      const active = (yield* directory.listActiveBindings()).filter((binding) =>
+        binding.threadId.startsWith("thread-active-"),
+      );
+      assert.deepEqual(
+        active.map((binding) => `${binding.threadId}:${binding.status}`),
+        [
+          "thread-active-error:error",
+          "thread-active-running:running",
+          "thread-active-starting:starting",
+        ],
+      );
+      // Every binding, stopped ones included, still lists through listBindings.
+      const all = yield* directory.listBindings();
+      assert.isTrue(all.some((binding) => binding.threadId === "thread-active-stopped"));
     }));
 
   it("resets adapterKey to the new provider when provider changes without an explicit adapter key", () =>

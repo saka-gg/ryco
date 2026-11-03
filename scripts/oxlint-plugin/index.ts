@@ -1,0 +1,26 @@
+/**
+ * Ryco's own oxlint rules, loaded through `jsPlugins` in the root vite.config.ts lint block and
+ * reported as `ryco/<rule>`. Each rule lives in `rules/<rule>.ts` with its RuleTester cases in
+ * `rules/<rule>.test.ts`; `wiring.test.ts` checks the real `vp lint` path loads this file.
+ *
+ * oxlint's JS plugin API is alpha. A vite-plus or oxlint bump can change it, and the tests in this
+ * directory are the first place that shows.
+ */
+import { definePlugin } from "vite-plus/lint/plugins";
+
+import noPartialRuntimeMockInBrowserTests from "./rules/no-partial-runtime-mock-in-browser-tests.ts";
+import noRawMcpDispatch from "./rules/no-raw-mcp-dispatch.ts";
+import noRealTimeWaitInTests from "./rules/no-real-time-wait-in-tests.ts";
+import requireSuppressionReason from "./rules/require-suppression-reason.ts";
+
+export default definePlugin({
+  meta: {
+    name: "ryco",
+  },
+  rules: {
+    "no-partial-runtime-mock-in-browser-tests": noPartialRuntimeMockInBrowserTests,
+    "no-raw-mcp-dispatch": noRawMcpDispatch,
+    "no-real-time-wait-in-tests": noRealTimeWaitInTests,
+    "require-suppression-reason": requireSuppressionReason,
+  },
+});

@@ -99,6 +99,13 @@ class FakeRuntime implements CodexSessionRuntimeShape {
     } satisfies ProviderTurnStartResult);
   }
 
+  compactThread() {
+    return Effect.succeed({
+      threadId: this.options.threadId,
+      turnId: TurnId.make("turn-compact"),
+    } satisfies ProviderTurnStartResult);
+  }
+
   steerTurn(input: CodexSessionRuntimeSteerTurnInput) {
     return Effect.succeed({
       threadId: this.options.threadId,
@@ -220,7 +227,7 @@ const providerSessionDirectoryTestLayer = Layer.succeed(ProviderSessionDirectory
   upsert: () => Effect.void,
   getProvider: () => Effect.die(new Error("getProvider unused")),
   getBinding: () => Effect.succeed(Option.none()),
-  listThreadIds: () => Effect.succeed([]),
+  listActiveBindings: () => Effect.succeed([]),
   listBindings: () => Effect.succeed([]),
 });
 
@@ -293,6 +300,9 @@ it.effect("injects the MCP connection into runtime options, never the environmen
           AGENT_CONTROL_CAPABILITIES.controlBrowser,
           AGENT_CONTROL_CAPABILITIES.readLocalTasks,
           AGENT_CONTROL_CAPABILITIES.manageLocalTasks,
+          AGENT_CONTROL_CAPABILITIES.watchPullRequests,
+          AGENT_CONTROL_CAPABILITIES.watchCommands,
+          AGENT_CONTROL_CAPABILITIES.requestSecrets,
           AGENT_CONTROL_CAPABILITIES.importProject,
           AGENT_CONTROL_CAPABILITIES.copyProjectToNode,
           AGENT_CONTROL_CAPABILITIES.readNodes,
@@ -412,6 +422,24 @@ it.live("binds write authority to the exact started turn and retires it on compl
         threadId,
         turnId: TurnId.make("turn-1"),
       });
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.provide(makeAdapterLayer({ bridge, runtimeFactory })));
+  }),
+);
+
+it.effect("binds write authority to a compaction's turn like any other", () =>
+  Effect.gen(function* () {
+    const { bridge, bindTurnAuthority } = makeBridge();
+    const runtimeFactory = makeRuntimeFactory();
+
+    yield* Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession(startInput);
+      const started = yield* adapter.sendTurn({ threadId, input: "/compact", attachments: [] });
+      assert.strictEqual(started.turnId, TurnId.make("turn-compact"));
+      assert.deepStrictEqual(bindTurnAuthority.mock.calls, [
+        [{ sessionId: "session-ac", turnId: TurnId.make("turn-compact") }],
+      ]);
       yield* adapter.stopSession(threadId);
     }).pipe(Effect.provide(makeAdapterLayer({ bridge, runtimeFactory })));
   }),

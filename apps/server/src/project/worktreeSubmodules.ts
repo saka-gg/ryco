@@ -1,9 +1,9 @@
-import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import path from "node:path";
 import { Effect, Schema } from "effect";
 import { WorktreeSubmoduleRepositoryConfig, type ServerSettings } from "@ryco/contracts";
 import { selectWorktreeSubmodules } from "@ryco/shared/worktreeSubmodules";
+import { REGULAR_FILE_READ_FLAGS } from "@ryco/shared/regularFile";
 import type { WorkspaceAccessPolicyShape } from "../workspace/Services/WorkspaceAccessPolicy.ts";
 
 /** Fixed checkout-owned file. Never search parents, follow includes, or accept caller paths. */
@@ -72,10 +72,7 @@ export const resolveWorktreeSubmodules = (input: {
                 });
               return yield* Effect.tryPromise({
                 try: async () => {
-                  const file = await open(
-                    configPath,
-                    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-                  );
+                  const file = await open(configPath, REGULAR_FILE_READ_FLAGS);
                   try {
                     const stat = await file.stat();
                     if (!stat.isFile()) throw new Error("ryco.json must be a regular file.");

@@ -6,12 +6,18 @@ import {
   ThreadId,
   type ServerProvider,
 } from "@ryco/contracts";
+import { DEFAULT_CLIENT_SETTINGS } from "@ryco/contracts/settings";
 import { scopedThreadKey } from "@ryco/client-runtime/scoped";
-import { page } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
+import { pinMediaQueryMatches } from "../../test/browserPointer";
 import { SideChatPanel } from "./SideChatPanel";
+import { FINE_POINTER_MEDIA_QUERY } from "./chat/useSendShortcut";
+import { replaceClientSettingsSnapshot } from "../hooks/clientSettingsStore";
+import { isMacPlatform } from "../lib/utils";
 import { useSideChatStore } from "../sideChatStore";
+import { useTierOverrideStore } from "../tierOverrideStore";
 
 const mocks = vi.hoisted(() => ({ ask: vi.fn(), cancel: vi.fn(async () => ({})), allowed: true }));
 // The model picker reaches the environment registry; the side chat needs only
@@ -113,13 +119,61 @@ describe("SideChatPanel", () => {
     mounted = undefined;
     document.body.innerHTML = "";
   });
-  const mount = async (connected = true) => {
+  const mount = async (
+    connected = true,
+    onContinueAsThread?: ((trigger: HTMLElement) => void) | undefined,
+  ) => {
     mounted = await render(
       <div className="relative h-[650px] w-[800px]">
-        <SideChatPanel threadRef={threadRef} providers={providers} connected={connected} />
+        <SideChatPanel
+          threadRef={threadRef}
+          providers={providers}
+          connected={connected}
+          onContinueAsThread={onContinueAsThread}
+        />
       </div>,
     );
   };
+  it("offers Continue as thread once there is an answer, and not while one is on its way", async () => {
+    let finish!: (result: { requestId: string; answer: string }) => void;
+    mocks.ask.mockImplementation(
+      (input) =>
+        new Promise((resolve) => {
+          finish = (result) => resolve({ ...result, requestId: input.requestId });
+        }),
+    );
+    const onContinue = vi.fn();
+    await mount(true, onContinue);
+    const continueButton = page.getByRole("button", { name: "Continue as thread" });
+    await expect.element(page.getByRole("button", { name: "New chat" })).toBeVisible();
+    await expect.element(continueButton).not.toBeInTheDocument();
+    await page.getByLabelText("Side question").fill("Why?");
+    await page.getByRole("button", { name: "Ask", exact: true }).click();
+    // Nothing answered yet: a question on its way is not side history.
+    await expect.element(page.getByText("Thinking", { exact: true })).toBeVisible();
+    await expect.element(continueButton).not.toBeInTheDocument();
+    finish({ requestId: "", answer: "Because." });
+    await expect.element(continueButton).toBeEnabled();
+    await page.getByLabelText("Side question").fill("And then?");
+    await page.getByRole("button", { name: "Ask", exact: true }).click();
+    await expect.element(continueButton).toBeDisabled();
+    finish({ requestId: "", answer: "Then this." });
+    await expect.element(continueButton).toBeEnabled();
+    await continueButton.click();
+    // The dialog grows out of the button that opened it.
+    expect(onContinue).toHaveBeenCalledExactlyOnceWith(continueButton.element());
+    expect(useSideChatStore.getState().chatsByThreadKey[key]?.exchanges).toHaveLength(2);
+  });
+  it("never offers Continue as thread where the thread cannot be forked", async () => {
+    mocks.ask.mockImplementation(async (input) => ({ requestId: input.requestId, answer: "Yes." }));
+    await mount();
+    await page.getByLabelText("Side question").fill("Why?");
+    await page.getByRole("button", { name: "Ask", exact: true }).click();
+    await expect.element(page.getByText("Yes.", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "Continue as thread" }))
+      .not.toBeInTheDocument();
+  });
   it("sends independent model/reasoning choices and successful follow-up history", async () => {
     mocks.ask.mockImplementation(async (input) => ({
       requestId: input.requestId,
@@ -156,6 +210,37 @@ describe("SideChatPanel", () => {
     expect(mocks.ask).toHaveBeenLastCalledWith(
       expect.objectContaining({ history: [{ question: "Why?", answer: "A separate answer" }] }),
     );
+  });
+  it("follows the Send shortcut, also in a phone-tier window with a mouse", async () => {
+    mocks.ask.mockImplementation(async (input) => ({
+      requestId: input.requestId,
+      answer: "Two lines answered",
+    }));
+    // A narrow desktop window: the phone tier with a fine pointer keeps the setting. The
+    // pointer is pinned because device-less Linux CI reports none.
+    const restorePointer = pinMediaQueryMatches(FINE_POINTER_MEDIA_QUERY, true);
+    useTierOverrideStore.setState({ override: "phone" });
+    replaceClientSettingsSnapshot({ ...DEFAULT_CLIENT_SETTINGS, sendShortcut: "mod-enter" });
+    try {
+      await mount();
+      const question = page.getByLabelText("Side question");
+      await question.fill("First line");
+      await userEvent.keyboard("{Enter}Second line");
+      await expect.element(question).toHaveValue("First line\nSecond line");
+      expect(mocks.ask).not.toHaveBeenCalled();
+
+      const mod = isMacPlatform(navigator.platform) ? "Meta" : "Control";
+      await userEvent.keyboard(`{${mod}>}{Enter}{/${mod}}`);
+      await expect.element(page.getByText("Two lines answered", { exact: true })).toBeVisible();
+      expect(mocks.ask).toHaveBeenCalledOnce();
+      expect(mocks.ask).toHaveBeenLastCalledWith(
+        expect.objectContaining({ question: "First line\nSecond line" }),
+      );
+    } finally {
+      replaceClientSettingsSnapshot(DEFAULT_CLIENT_SETTINGS);
+      useTierOverrideStore.setState({ override: null });
+      restorePointer();
+    }
   });
   it("minimizes without stopping; cancel restores draft and ignores a late answer", async () => {
     let finish!: (result: { requestId: string; answer: string }) => void;

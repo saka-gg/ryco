@@ -3,6 +3,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { Effect } from "effect";
 import { afterAll, assert, describe, it } from "vite-plus/test";
+import { makeNamedPipe, settleBeforeNamedPipeDeadline } from "../testing/namedPipe.ts";
 import { readTaskOutput } from "./taskOutputQuery.ts";
 
 // A dedicated sandbox root passed via the roots override, so the test never
@@ -66,6 +67,19 @@ describe("readTaskOutput containment", () => {
     const result = await runFlip(readTaskOutput({ outputPath, roots: [missingRoot] }));
     assert.equal(result.reason, "root-unavailable");
   });
+
+  it.skipIf(process.platform === "win32")(
+    "refuses a named pipe without waiting for a writer",
+    async () => {
+      const fifo = NodePath.join(root, "pipe.output");
+      makeNamedPipe(fifo);
+      const result = await settleBeforeNamedPipeDeadline(fifo, () =>
+        runFlip(readTaskOutput({ outputPath: fifo, roots })),
+      );
+      assert.equal(result.reason, "not-regular-file");
+      assert.equal(result.outputPath, fifo);
+    },
+  );
 });
 
 describe("readTaskOutput windows", () => {

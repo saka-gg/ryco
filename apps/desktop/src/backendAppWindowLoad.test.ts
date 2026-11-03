@@ -7,6 +7,7 @@ import {
   isAppLoadRequestCurrent,
   isEarlyAppLoadStalled,
   resolveBackendAppWindowAction,
+  resolveCrashedAppWindowRecovery,
 } from "./backendAppWindowLoad.ts";
 
 const backendHttpUrl = "http://127.0.0.1:7926";
@@ -168,5 +169,73 @@ describe("early app load commit", () => {
     expect(stalled({ request: started(), currentUrl: "file:///app/desktop-boot.html" })).toBe(
       false,
     );
+  });
+});
+
+describe("resolveCrashedAppWindowRecovery", () => {
+  const appUrl = `${backendHttpUrl}/#/env/thread`;
+  const bootUrl = "ryco://app/desktop-boot.html";
+
+  it("shows the boot page while the backend is not serving", () => {
+    for (const currentUrl of [appUrl, bootUrl, "about:blank"]) {
+      for (const keepRoute of [true, false]) {
+        expect(
+          resolveCrashedAppWindowRecovery({
+            currentUrl,
+            backendHttpUrl,
+            backendServing: false,
+            keepRoute,
+          }),
+        ).toBe("boot-page");
+      }
+    }
+  });
+
+  it("shows the boot page without a backend URL", () => {
+    expect(
+      resolveCrashedAppWindowRecovery({
+        currentUrl: appUrl,
+        backendHttpUrl: "",
+        backendServing: true,
+        keepRoute: true,
+      }),
+    ).toBe("boot-page");
+  });
+
+  it("reloads the app in place, keeping its route, on the first reload", () => {
+    expect(
+      resolveCrashedAppWindowRecovery({
+        currentUrl: appUrl,
+        backendHttpUrl,
+        backendServing: true,
+        keepRoute: true,
+      }),
+    ).toBe("reload");
+  });
+
+  it("loads the app root on later reloads", () => {
+    expect(
+      resolveCrashedAppWindowRecovery({
+        currentUrl: appUrl,
+        backendHttpUrl,
+        backendServing: true,
+        keepRoute: false,
+      }),
+    ).toBe("load-app");
+  });
+
+  it("loads the app over a boot page, a blank or a foreign document", () => {
+    for (const currentUrl of [bootUrl, "about:blank", "", "https://example.com"]) {
+      for (const keepRoute of [true, false]) {
+        expect(
+          resolveCrashedAppWindowRecovery({
+            currentUrl,
+            backendHttpUrl,
+            backendServing: true,
+            keepRoute,
+          }),
+        ).toBe("load-app");
+      }
+    }
   });
 });

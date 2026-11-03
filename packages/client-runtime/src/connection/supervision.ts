@@ -3,16 +3,17 @@ import type {
   MessageId,
   OrchestrationStubbedShellSnapshot,
   OrchestrationShellStreamEvent,
-  OrchestrationShellThreadPrioritiesItem,
   OrchestrationThreadHistoryCollection,
   OrchestrationThreadHistoryLimits,
   OrchestrationThreadHistoryPage,
   OrchestrationThreadHistoryPageInfo,
   OrchestrationThreadWindowSnapshot,
+  OrchestrationWireEvent,
   ScopedThreadRef,
   ThreadId,
 } from "@ryco/contracts";
 
+import { skipNewerNodeContent } from "../rpc/newerNodeState.ts";
 import {
   isResponseTooLargeError,
   isUnsupportedRpcError,
@@ -21,7 +22,6 @@ import {
 import { recordEnvironmentShellSettlementPolicy } from "../rpc/environmentServerConfigs.ts";
 import { scopedThreadKey, scopeThreadRef } from "../scoped.ts";
 import { createEnvironmentEventBatcher } from "../state/threads/eventBatching.ts";
-import type { ShellStoreUpdate } from "../state/threads/store.ts";
 import {
   planThreadBodyResidency,
   THREAD_BODY_RECENT_ACCESS_MS,
@@ -29,6 +29,7 @@ import {
   type ThreadBodyResidencyEntry,
   type ThreadBodyUsage,
 } from "../state/threads/threadBodyResidency.ts";
+import { isSavedEnvironmentSwitchedOff } from "./catalog.ts";
 import type { EnvironmentConnection } from "./connection.ts";
 import type { EnvironmentStateSink } from "./environmentStateSink.ts";
 import { createArchivedThreadShellLoader } from "./archivedThreadShellLoader.ts";
@@ -46,6 +47,12 @@ import {
 import { createThreadHistoryPaginationController } from "./threadHistoryPagination.ts";
 
 const NOOP = () => undefined;
+/** A shell event of a kind a newer node added, queued in order with the rest. */
+const SKIPPED_SHELL_EVENT = Symbol("skipped-shell-event");
+interface SkippedShellEvent {
+  readonly kind: typeof SKIPPED_SHELL_EVENT;
+  readonly sequence: number;
+}
 /** Runs after the current task's synchronous work, e.g. after a delivered chunk. */
 const afterCurrentChunk = (callback: () => void) => {
   void Promise.resolve().then(callback);
@@ -65,6 +72,21 @@ const MIN_THREAD_WINDOW_ITEMS = 10;
 const THREAD_WINDOW_RETRY_BASE_MS = 1_000;
 const THREAD_WINDOW_RETRY_MAX_MS = 30_000;
 const BROWSER_RESUME_RECONNECT_COOLDOWN_MS = 2_000;
+/**
+ * A page or window that comes back into view does not reconnect a socket only because its last
+ * pong is old. While hidden, the RPC pinger ran about once a minute (Chrome's intensive timer
+ * throttling), so the pong is always old there, yet the socket is alive: Effect 4.0.5 sends a
+ * ping on a late tick before it can declare silence. The pinger's first visible tick (every 8 s)
+ * pings, so a socket that answered nothing within this window after the page came back, and did
+ * not reconnect by itself meanwhile, is reconnected. A connection with no answer for
+ * {@link VIEW_RESUME_SILENT_MS} is reconnected at once: hidden, it still pings about once a
+ * minute, so that long a silence means the machine slept or the page was frozen. Waking from
+ * sleep where it is signalled (desktop, phone), a page restored from the back/forward cache,
+ * coming online and network changes reconnect at once, as before.
+ */
+export const VIEW_RESUME_HEARTBEAT_GRACE_MS = 12_000;
+export const VIEW_RESUME_SILENT_MS = 3 * 60_000;
+const VIEW_RESUME_REASONS: ReadonlySet<string> = new Set(["visibilitychange", "pageshow"]);
 const SAVED_ENVIRONMENT_STARTUP_DELAY_MS = 2500;
 const SAVED_ENVIRONMENT_CONNECT_CONCURRENCY = 2;
 /**
@@ -95,6 +117,11 @@ export interface EnvironmentSupervisorInput<SavedEnvironmentRecord> {
   readonly createInvalidationThrottle: () => EnvironmentSupervisorThrottle;
   readonly resetProviderInvalidation: () => void;
   readonly createPrimaryConnection: () => EnvironmentConnection | null;
+  /**
+   * Every saved machine, switched off ones included: a record whose
+   * `disabledAt` is set is left unconnected by every path here
+   * (`isSavedEnvironmentSwitchedOff`).
+   */
   readonly listSavedEnvironmentRecords: () => ReadonlyArray<SavedEnvironmentRecord>;
   readonly hasSavedEnvironmentRegistryHydrated: () => boolean;
   readonly waitForSavedEnvironmentRegistryHydration: () => Promise<void>;
@@ -115,6 +142,11 @@ export interface EnvironmentSupervisorInput<SavedEnvironmentRecord> {
   readonly disconnectSavedEnvironment: (environmentId: EnvironmentId) => Promise<void>;
   readonly waitForPrimaryShellSnapshotApplied: (timeoutMs: number) => Promise<void>;
   readonly subscribeBrowserResume: (listener: (reason: string) => void) => () => void;
+  /**
+   * The device stayed online but moved to another network path (the platform's
+   * `network-changed`). Optional: a platform that cannot tell paths apart omits it.
+   */
+  readonly subscribeNetworkChange?: (listener: () => void) => () => void;
   readonly isThreadDetailSubscriptionNonIdle: (
     environmentId: EnvironmentId,
     threadId: ThreadId,
@@ -187,6 +219,19 @@ export class SavedEnvironmentCredentialError extends Error {
   constructor(message: string, options?: { readonly cause?: unknown }) {
     super(message, options);
     this.name = "SavedEnvironmentCredentialError";
+  }
+}
+
+/**
+ * The user switched the saved machine off. A cancellation like any other: the
+ * retry ladder stops and nothing reports it as a connection failure. Every
+ * connect path rejects with it until the machine is switched on again.
+ */
+export class SavedEnvironmentSwitchedOffError extends SavedEnvironmentConnectionCancelledError {
+  constructor(environmentId: EnvironmentId) {
+    super(environmentId);
+    this.message = `Saved environment ${environmentId} is switched off.`;
+    this.name = "SavedEnvironmentSwitchedOffError";
   }
 }
 
@@ -295,6 +340,19 @@ export type ReleaseThreadDetailSubscription = (
   options?: ThreadDetailSubscriptionReleaseOptions,
 ) => void;
 
+/**
+ * What the shell stream just committed to the store: a snapshot that replaced
+ * the environment's shell, or one batch's accepted events in order (rankings
+ * and kinds a newer node added are left out).
+ */
+export type ShellAcceptance =
+  | { readonly kind: "snapshot"; readonly environmentId: EnvironmentId }
+  | {
+      readonly kind: "events";
+      readonly environmentId: EnvironmentId;
+      readonly events: ReadonlyArray<OrchestrationShellStreamEvent>;
+    };
+
 interface PendingSavedEnvironmentConnection {
   /**
    * Cancels the attempt and aborts its requests. With `error`, everyone waiting
@@ -323,11 +381,12 @@ export interface EnvironmentConnectionSupervisor {
     event: OrchestrationShellStreamEvent,
     environmentId: EnvironmentId,
   ) => void;
-  /** Buffers a thread-priority ranking behind the shell events before it. */
-  readonly applyThreadPriorities: (
-    item: OrchestrationShellThreadPrioritiesItem,
-    environmentId: EnvironmentId,
-  ) => void;
+  /**
+   * Buffers a shell event of a kind a newer node added, at `sequence`: nothing
+   * is applied, but the shell's sequence moves past it in order with the
+   * events around it, so a resume does not replay it.
+   */
+  readonly skipShellEvent: (sequence: number, environmentId: EnvironmentId) => void;
   /** Commits buffered shell items now (tests, teardown). */
   readonly flushShellEvents: () => void;
   readonly resetShellProjection: (environmentId: EnvironmentId) => void;
@@ -341,6 +400,14 @@ export interface EnvironmentConnectionSupervisor {
       readonly onReady: () => void;
     },
   ) => void;
+  /**
+   * Observes what the shell stream commits, once the store holds it and its
+   * after-hooks ran. A listener can run inside a store mutation barrier, so it
+   * must not reach the user synchronously.
+   */
+  readonly subscribeShellAcceptance: (
+    listener: (acceptance: ShellAcceptance) => void,
+  ) => () => void;
   readonly retainThreadDetailSubscription: (
     environmentId: EnvironmentId,
     threadId: ThreadId,
@@ -398,6 +465,7 @@ export function createEnvironmentConnectionSupervisor<
   SavedEnvironmentRecord extends {
     readonly environmentId: EnvironmentId;
     readonly lastConnectedAt?: string | null;
+    readonly disabledAt?: string | undefined;
   },
 >(input: EnvironmentSupervisorInput<SavedEnvironmentRecord>): EnvironmentConnectionSupervisor {
   const connections = new Map<EnvironmentId, EnvironmentConnection>();
@@ -406,6 +474,7 @@ export function createEnvironmentConnectionSupervisor<
     PendingSavedEnvironmentConnection
   >();
   const listeners = new Set<() => void>();
+  const shellAcceptanceListeners = new Set<(acceptance: ShellAcceptance) => void>();
   const threadDetailSubscriptions = new Map<string, ThreadDetailSubscriptionEntry>();
   // When, and how large, the thread bodies of disposed subscriptions were last
   // used. The store keeps those bodies after the subscription goes; this is
@@ -423,6 +492,8 @@ export function createEnvironmentConnectionSupervisor<
     stop: () => void;
   } | null = null;
   let lastBrowserResumeReconnectAt = Number.NEGATIVE_INFINITY;
+  let viewResumeCheckTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  let lastNetworkChangeReconnectAt = Number.NEGATIVE_INFINITY;
   const savedRetries = new Map<
     EnvironmentId,
     { failedAttempts: number; timeoutId: ReturnType<typeof setTimeout> | null }
@@ -450,6 +521,19 @@ export function createEnvironmentConnectionSupervisor<
   const emit = () => {
     for (const listener of listeners) listener();
     input.onRegistryChange?.();
+  };
+  const emitShellAcceptance = (acceptance: ShellAcceptance) => {
+    // Listeners run inside shell application: one failing must not stop it.
+    for (const listener of Array.from(shellAcceptanceListeners)) {
+      try {
+        listener(acceptance);
+      } catch (error) {
+        console.warn("Shell acceptance listener failed", {
+          environmentId: acceptance.environmentId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
   };
   const keyFor = (environmentId: EnvironmentId, threadId: ThreadId) =>
     scopedThreadKey(scopeThreadRef(environmentId, threadId));
@@ -644,8 +728,10 @@ export function createEnvironmentConnectionSupervisor<
       ...(resumable ? { resumeFromSequence: () => appliedSequence } : {}),
       historyRecovery: () => historyRecoveryMode(entry),
     };
-    const applyEvent = (event: { readonly sequence: number }) => {
+    const applyEvent = (event: OrchestrationWireEvent) => {
       appliedSequence = Math.max(appliedSequence ?? 0, event.sequence);
+      // An event type a newer node added: skipped, but a resume starts after it.
+      if (skipNewerNodeContent(entry.environmentId, event)) return;
       recordRetainedEvent(entry, event);
       scheduleEvictToCapacity();
       input.applyThreadDetailEvent(entry.environmentId, event);
@@ -658,7 +744,7 @@ export function createEnvironmentConnectionSupervisor<
       unsubscribeCurrent = connection.client.orchestration.subscribeThread(
         { threadId: entry.threadId },
         (item) => {
-          if (item.kind === "resumed") return;
+          if (skipNewerNodeContent(entry.environmentId, item) || item.kind === "resumed") return;
           if (item.kind === "snapshot") {
             appliedSequence = item.snapshot.snapshotSequence;
             historyPagination.beginSnapshot(scope);
@@ -737,7 +823,7 @@ export function createEnvironmentConnectionSupervisor<
         (item) => {
           // Any item, a resume included, means the server served this window.
           failedWindowAttempts = 0;
-          if (item.kind === "resumed") return;
+          if (skipNewerNodeContent(entry.environmentId, item) || item.kind === "resumed") return;
           if (item.kind === "snapshot") {
             appliedSequence = item.snapshot.snapshotSequence;
             historyPagination.beginSnapshot(scope);
@@ -1149,10 +1235,22 @@ export function createEnvironmentConnectionSupervisor<
     if (connection?.kind !== "primary") return;
     if (connection) await remove(connection.environmentId).catch(() => false);
   };
+  /** Read from the registry now, never from a record a caller kept. */
+  const isSwitchedOff = (environmentId: EnvironmentId) =>
+    input
+      .listSavedEnvironmentRecords()
+      .some(
+        (record) => record.environmentId === environmentId && isSavedEnvironmentSwitchedOff(record),
+      );
   const ensureSavedEnvironmentConnection = (
     record: { readonly environmentId: EnvironmentId },
     connect: (isCancelled: () => boolean, signal: AbortSignal) => Promise<EnvironmentConnection>,
   ) => {
+    // A resume, a network change, a stray Connect or a renewal never reaches a
+    // machine the user switched off.
+    if (isSwitchedOff(record.environmentId)) {
+      return Promise.reject(new SavedEnvironmentSwitchedOffError(record.environmentId));
+    }
     const existing = read(record.environmentId);
     if (existing) return Promise.resolve(existing);
     const pending = pendingSavedEnvironmentConnections.get(record.environmentId);
@@ -1170,6 +1268,15 @@ export function createEnvironmentConnectionSupervisor<
         connection = await connect(() => state.cancelled, controller.signal);
       } catch (error) {
         if (state.abandonedWith !== null) throw state.abandonedWith;
+        // Switched off while it connected: whatever the attempt hit on its way
+        // out (the switch-off's own cancellation, a dropped tunnel), its
+        // waiters learn the machine is off, not that it failed or was merely
+        // cancelled.
+        if (isSwitchedOff(record.environmentId)) {
+          throw error instanceof SavedEnvironmentSwitchedOffError
+            ? error
+            : new SavedEnvironmentSwitchedOffError(record.environmentId);
+        }
         // A cancelled attempt's failure is not the environment's: a disconnect
         // or a new pairing replaced it, and that owner reports the outcome.
         if (state.cancelled && !(error instanceof SavedEnvironmentConnectionCancelledError)) {
@@ -1179,11 +1286,20 @@ export function createEnvironmentConnectionSupervisor<
         }
         throw error;
       }
-      if (state.cancelled) {
+      // Switched off while it connected: what it opened goes at once. This
+      // fallback only sees a machine that is still off when the attempt lands.
+      // One switched off and on again meanwhile relies on the switch-off having
+      // cancelled the attempt (`state.cancelled`): every switch path does, in
+      // its session teardown (web and mobile `teardownSavedEnvironmentSession`).
+      const switchedOff = isSwitchedOff(record.environmentId);
+      if (state.cancelled || switchedOff) {
         const removed = await remove(connection.environmentId).catch(() => false);
         if (!removed) await connection.dispose().catch(NOOP);
         throw (
-          state.abandonedWith ?? new SavedEnvironmentConnectionCancelledError(record.environmentId)
+          state.abandonedWith ??
+          (switchedOff
+            ? new SavedEnvironmentSwitchedOffError(record.environmentId)
+            : new SavedEnvironmentConnectionCancelledError(record.environmentId))
         );
       }
       return connection;
@@ -1258,33 +1374,34 @@ export function createEnvironmentConnectionSupervisor<
     });
   /**
    * Applies one environment's buffered shell items: the events the projection
-   * does not hold yet, and every priority ranking, land in one store commit;
+   * does not hold yet land in one store commit;
    * the after-hooks then run per event against the applied state.
    */
   const applyShellBatch = (
     environmentId: EnvironmentId,
-    updates: ReadonlyArray<ShellStoreUpdate>,
+    updates: ReadonlyArray<OrchestrationShellStreamEvent | SkippedShellEvent>,
   ) => {
-    const accepted: ShellStoreUpdate[] = [];
+    const accepted: OrchestrationShellStreamEvent[] = [];
     for (const update of updates) {
-      if (update.kind !== "thread-priorities") {
-        if (
-          !shouldApplyProjectionEvent({
-            current: projectionTracker.read(environmentId),
-            sequence: update.sequence,
-          })
-        ) {
-          continue;
-        }
+      if (update.kind === SKIPPED_SHELL_EVENT) {
         projectionTracker.markEvent(environmentId, update.sequence);
+        continue;
       }
+      if (
+        !shouldApplyProjectionEvent({
+          current: projectionTracker.read(environmentId),
+          sequence: update.sequence,
+        })
+      ) {
+        continue;
+      }
+      projectionTracker.markEvent(environmentId, update.sequence);
       accepted.push(update);
     }
     if (accepted.length === 0) return;
     const contexts = input.stateSink.applyShellEvents(environmentId, accepted);
     for (let index = 0; index < accepted.length; index += 1) {
       const event = accepted[index]!;
-      if (event.kind === "thread-priorities") continue;
       input.stateSink.afterShellEventApplied(environmentId, event, contexts[index]);
       const shellThreadIds = shellThreadIdsByEnvironment.get(environmentId);
       if (shellThreadIds === undefined) continue;
@@ -1296,23 +1413,25 @@ export function createEnvironmentConnectionSupervisor<
         attachListedThreads(environmentId);
       }
     }
+    if (shellAcceptanceListeners.size === 0) return;
+    emitShellAcceptance({ kind: "events", environmentId, events: accepted });
   };
   // Shell items arrive one WebSocket chunk at a time (a thread upsert per
   // streaming tick). They wait for the next frame and land as one store commit
   // per environment. The batcher is a store mutation barrier, so any other
   // store write applies them first; snapshots, resets and resume reads flush
   // them explicitly, since those consult the projection tracker first.
-  const shellBatcher = createEnvironmentEventBatcher<ShellStoreUpdate>({
+  const shellBatcher = createEnvironmentEventBatcher<
+    OrchestrationShellStreamEvent | SkippedShellEvent
+  >({
     apply: applyShellBatch,
     ...(input.scheduleShellFrame === undefined ? {} : { scheduleFrame: input.scheduleShellFrame }),
   });
   const flushShellEvents = () => shellBatcher.flush();
   const applyShellEvent = (event: OrchestrationShellStreamEvent, environmentId: EnvironmentId) =>
     shellBatcher.enqueue(environmentId, event);
-  const applyThreadPriorities = (
-    item: OrchestrationShellThreadPrioritiesItem,
-    environmentId: EnvironmentId,
-  ) => shellBatcher.enqueue(environmentId, item);
+  const skipShellEvent = (sequence: number, environmentId: EnvironmentId) =>
+    shellBatcher.enqueue(environmentId, { kind: SKIPPED_SHELL_EVENT, sequence });
   const syncShellSnapshot = (
     snapshot: OrchestrationStubbedShellSnapshot,
     environmentId: EnvironmentId,
@@ -1360,9 +1479,15 @@ export function createEnvironmentConnectionSupervisor<
     }
     reconcileForEnvironment(environmentId);
     input.stateSink.reconcileSnapshotDerivedState();
+    emitShellAcceptance({ kind: "snapshot", environmentId });
   };
   const syncSaved = async () => {
-    const records = input.listSavedEnvironmentRecords();
+    // A switched-off machine is saved but never connected: its live connection
+    // is stale and its retry stops. An attempt under way drops what it opened
+    // when it lands (`ensureSavedEnvironmentConnection`).
+    const records = input
+      .listSavedEnvironmentRecords()
+      .filter((record) => !isSavedEnvironmentSwitchedOff(record));
     const expected = new Set(records.map((record) => record.environmentId));
     // Desktop's Hub relay connections register as `saved` without a registry
     // record. A registry write must not drop them: they are owned by main's
@@ -1432,30 +1557,92 @@ export function createEnvironmentConnectionSupervisor<
       return active;
     };
   };
+  // Waking or regaining the network is the moment an unreachable environment
+  // most likely became reachable: try every one now rather than on the backoff
+  // it had grown while the machine slept or sat on the other network.
+  const retrySavedEnvironmentsNow = () => {
+    if (savedRetries.size === 0) return;
+    for (const retry of savedRetries.values()) {
+      if (retry.timeoutId !== null) input.clearTimeout(retry.timeoutId);
+      retry.timeoutId = null;
+      retry.failedAttempts = 0;
+    }
+    requestSavedSyncForRetry?.();
+  };
+  const reconnectLogged = (connection: EnvironmentConnection, reason: string) => {
+    void connection.reconnect().catch((error) => {
+      console.warn("Environment reconnect after a wake signal failed", {
+        environmentId: connection.environmentId,
+        reason,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  };
+  const cancelViewResumeCheck = () => {
+    if (viewResumeCheckTimeoutId !== null) input.clearTimeout(viewResumeCheckTimeoutId);
+    viewResumeCheckTimeoutId = null;
+  };
+  /**
+   * After the page came back into view, reconnects the connections it already had that have not
+   * answered a heartbeat since and did not reconnect by themselves (see
+   * {@link VIEW_RESUME_HEARTBEAT_GRACE_MS}); one silent for {@link VIEW_RESUME_SILENT_MS} is
+   * reconnected at once. Connections made meanwhile are left alone: their pinger has not run yet.
+   */
+  const checkHeartbeatsAfterViewResume = (reason: string) => {
+    cancelViewResumeCheck();
+    const resumedAt = input.now();
+    const stale = [...connections.values()].filter(
+      (connection) => !connection.client.isHeartbeatFresh(),
+    );
+    const resumed: EnvironmentConnection[] = [];
+    for (const connection of stale) {
+      if (connection.client.isHeartbeatFresh(VIEW_RESUME_SILENT_MS)) {
+        resumed.push(connection);
+      } else {
+        lastBrowserResumeReconnectAt = resumedAt;
+        reconnectLogged(connection, reason);
+      }
+    }
+    if (resumed.length === 0) return;
+    viewResumeCheckTimeoutId = input.setTimeout(() => {
+      viewResumeCheckTimeoutId = null;
+      for (const connection of resumed) {
+        if (connections.get(connection.environmentId) !== connection) continue;
+        if (connection.client.isHeartbeatFresh(VIEW_RESUME_HEARTBEAT_GRACE_MS)) continue;
+        if (connection.client.hasReopenedSince?.(resumedAt) === true) continue;
+        lastBrowserResumeReconnectAt = input.now();
+        reconnectLogged(connection, reason);
+      }
+    }, VIEW_RESUME_HEARTBEAT_GRACE_MS);
+  };
   const reconnectAfterResume = (reason: string) => {
     const now = input.now();
     if (now - lastBrowserResumeReconnectAt < BROWSER_RESUME_RECONNECT_COOLDOWN_MS) return;
-    // Waking or regaining the network is the moment an unreachable environment
-    // most likely became reachable: try every one now rather than on the
-    // backoff it had grown while the machine slept.
-    if (savedRetries.size > 0) {
-      for (const retry of savedRetries.values()) {
-        if (retry.timeoutId !== null) input.clearTimeout(retry.timeoutId);
-        retry.timeoutId = null;
-        retry.failedAttempts = 0;
-      }
-      requestSavedSyncForRetry?.();
+    retrySavedEnvironmentsNow();
+    if (VIEW_RESUME_REASONS.has(reason)) {
+      checkHeartbeatsAfterViewResume(reason);
+      return;
     }
+    cancelViewResumeCheck();
     for (const connection of connections.values()) {
       if (connection.client.isHeartbeatFresh()) continue;
       lastBrowserResumeReconnectAt = now;
-      void connection.reconnect().catch((error) => {
-        console.warn("Environment reconnect after browser resume failed", {
-          environmentId: connection.environmentId,
-          reason,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
+      reconnectLogged(connection, reason);
+    }
+  };
+  // A new network path leaves sockets opened on the old one dead without a close,
+  // and a heartbeat answered just before the move still reads as fresh for up
+  // to its 16 s timeout. So every direct connection reconnects now, not only
+  // the stale ones resume picks. Hub relay connections are left to their own
+  // lifecycle owner.
+  const reconnectAfterNetworkChange = () => {
+    const now = input.now();
+    if (now - lastNetworkChangeReconnectAt < BROWSER_RESUME_RECONNECT_COOLDOWN_MS) return;
+    lastNetworkChangeReconnectAt = now;
+    retrySavedEnvironmentsNow();
+    for (const connection of connections.values()) {
+      if (connection.knownEnvironment.source === "hub-hosted") continue;
+      reconnectLogged(connection, "network-changed");
     }
   };
   const stopActive = () => {
@@ -1463,6 +1650,7 @@ export function createEnvironmentConnectionSupervisor<
     activeService = null;
     requestSavedSyncForRetry = null;
     clearAllSavedRetries();
+    cancelViewResumeCheck();
   };
   const requestProviderInvalidation = () => {
     activeService?.throttle.maybeExecute();
@@ -1496,12 +1684,16 @@ export function createEnvironmentConnectionSupervisor<
     const unsubscribeResume = input.isHostedMode()
       ? NOOP
       : input.subscribeBrowserResume(reconnectAfterResume);
+    const unsubscribeNetworkChange = input.isHostedMode()
+      ? NOOP
+      : (input.subscribeNetworkChange?.(reconnectAfterNetworkChange) ?? NOOP);
     const service = {
       throttle,
       refCount: 1,
       stop: () => {
         unsubscribeSaved();
         unsubscribeResume();
+        unsubscribeNetworkChange();
         throttle.cancel();
       },
     };
@@ -1516,6 +1708,7 @@ export function createEnvironmentConnectionSupervisor<
     flushShellEvents();
     stopActive();
     lastBrowserResumeReconnectAt = Number.NEGATIVE_INFINITY;
+    lastNetworkChangeReconnectAt = Number.NEGATIVE_INFINITY;
     for (const key of threadDetailSubscriptions.keys()) disposeByKey(key);
     departedThreadBodies.clear();
     // The disposals above scheduled a pass; with no access records left it
@@ -1543,7 +1736,7 @@ export function createEnvironmentConnectionSupervisor<
     ensureSavedEnvironmentConnection,
     cancelPendingSavedEnvironmentConnection,
     applyShellEvent,
-    applyThreadPriorities,
+    skipShellEvent,
     flushShellEvents,
     resetShellProjection: (environmentId) => {
       // What the old subscription delivered applies before its baseline goes.
@@ -1555,6 +1748,12 @@ export function createEnvironmentConnectionSupervisor<
       return projectionTracker.read(environmentId)?.sequence ?? null;
     },
     syncShellSnapshot,
+    subscribeShellAcceptance: (listener) => {
+      shellAcceptanceListeners.add(listener);
+      return () => {
+        shellAcceptanceListeners.delete(listener);
+      };
+    },
     retainThreadDetailSubscription: retain,
     disposeThreadDetailSubscriptionsForEnvironment: disposeForEnvironment,
     disposeThreadDetailSubscription: (environmentId, threadId) =>

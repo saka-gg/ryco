@@ -35,4 +35,56 @@ describe("probeClaudeCapabilities", () => {
     expect(options?.mcpServers).toEqual({});
     expect(options?.strictMcpConfig).toBe(true);
   });
+
+  it("reads Claude Code's own model report from the initialization result", async () => {
+    mocks.query.mockReturnValue({
+      initializationResult: async () => ({
+        account: { subscriptionType: "max" },
+        commands: [],
+        models: [
+          {
+            value: "opus",
+            resolvedModel: "claude-opus-4-8",
+            displayName: "Opus",
+            description: "Most capable",
+            supportsAutoMode: false,
+            supportsFastMode: true,
+            supportedEffortLevels: ["low", "medium", "high"],
+          },
+          { value: 42 },
+        ],
+      }),
+    });
+
+    const result = await Effect.runPromise(
+      probeClaudeCapabilities(Schema.decodeSync(ClaudeSettings)({}), {}).pipe(
+        Effect.provide(NodeServices.layer),
+      ),
+    );
+
+    expect(result?.models).toEqual([
+      {
+        value: "opus",
+        resolvedModel: "claude-opus-4-8",
+        supportsAutoMode: false,
+        supportsFastMode: true,
+        supportedEffortLevels: ["low", "medium", "high"],
+      },
+    ]);
+  });
+
+  it("reports no models when the initialization result has none", async () => {
+    mocks.query.mockReturnValue({
+      initializationResult: async () => ({ account: {}, commands: [] }),
+    });
+
+    const result = await Effect.runPromise(
+      probeClaudeCapabilities(Schema.decodeSync(ClaudeSettings)({}), {}).pipe(
+        Effect.provide(NodeServices.layer),
+      ),
+    );
+
+    expect(result).toBeDefined();
+    expect(result).not.toHaveProperty("models");
+  });
 });

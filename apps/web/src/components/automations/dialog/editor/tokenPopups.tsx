@@ -92,6 +92,8 @@ export interface TokenMenuProps<Value extends string> {
   readonly onPick: (value: Value) => void;
   /** Two-line menus are wider (the lab's 300px). */
   readonly wide?: boolean | undefined;
+  /** The menu finished closing, with focus back on its token. */
+  readonly onClosed?: (() => void) | undefined;
 }
 
 /** The checked choice of an open token menu. */
@@ -122,7 +124,9 @@ export function TokenMenu<Value extends string>(props: TokenMenuProps<Value>) {
         props.onOpenChange(next);
       }}
       onOpenChangeComplete={(next) => {
-        if (!next) steerRef.current = true;
+        if (next) return;
+        steerRef.current = true;
+        props.onClosed?.();
       }}
     >
       <MenuTrigger render={props.trigger} />

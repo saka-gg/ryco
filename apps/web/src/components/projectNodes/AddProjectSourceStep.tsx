@@ -2,18 +2,20 @@
 // Purpose: The add-project dialog's source step: open a folder, clone a repository (the
 //          node's clone sources with their readiness, the user's own repositories, provider
 //          lookup and Bitbucket search, any Git URL), copy a project from another node, and,
-//          for a link request, link a checkout that is already there.
+//          for a link request, link a checkout that is already there. "Import from Codex or
+//          Claude Code" hands over to the conversation import dialog for the node.
 // Layer: Web UI. Rendered by `AddProjectDialog`, which owns the flow; this step resolves the
 //        repository to clone and hands everything else back through callbacks.
 
 import type { NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
-import type { SourceControlRepositoryInfo } from "@ryco/contracts";
+import { type SourceControlRepositoryInfo, WS_METHODS } from "@ryco/contracts";
 import { useDebouncedValue } from "@tanstack/react-pacer";
 import {
   ChevronDownIcon,
   ChevronRightIcon,
   CopyIcon,
   FolderIcon,
+  FolderInputIcon,
   GitCommitHorizontalIcon,
   LinkIcon,
   SearchIcon,
@@ -21,11 +23,17 @@ import {
 import { useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
 
 import { readEnvironmentApi } from "../../environmentApi";
+import { useHostedRpcCapability } from "../../hostedHub/capabilities";
+import { hostedCapabilityCopy } from "../../hostedHub/switchTarget";
 import { useSourceControlDiscovery } from "../../lib/sourceControlDiscoveryState";
 import { cn } from "../../lib/utils";
 import { useSourceControlRepositorySearch } from "../../rpc/useSourceControl";
 import type { Project } from "../../types";
 import { ProjectFavicon } from "../ProjectFavicon";
+import {
+  openProjectImportDialog,
+  preloadProjectImportDialog,
+} from "../projectImport/projectImportDialogStore";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Spinner } from "../ui/spinner";
 import {
@@ -50,6 +58,7 @@ import {
 } from "./addProjectSources";
 import { displayNodePath } from "./folderPicker.logic";
 import { NodeBadge } from "./NodePicker";
+import { closeAddProject } from "./projectNodesDialogStore";
 
 const REPOSITORY_SEARCH_DEBOUNCE_MS = 200;
 
@@ -84,17 +93,24 @@ function SourceOption(props: {
   readonly description: string;
   readonly onClick: () => void;
   readonly expanded?: boolean | undefined;
+  readonly disabled?: boolean | undefined;
+  /** Starts loading what the row opens. */
+  readonly onIntent?: (() => void) | undefined;
 }) {
   return (
     <button
       type="button"
       aria-pressed={props.selected}
       aria-expanded={props.expanded}
+      disabled={props.disabled}
       onClick={props.onClick}
+      onPointerEnter={props.onIntent}
+      onFocus={props.onIntent}
       className={cn(
         "flex w-full cursor-pointer items-center gap-3 rounded-[10px] border border-border px-3 py-[11px] text-left outline-none",
         "transition-[border-color,background-color,box-shadow] duration-(--app-motion-duration-chip) ease-(--app-motion-ease)",
-        "hover:bg-accent/60 focus-visible:ring-2 focus-visible:ring-ring",
+        "hover:not-disabled:bg-accent/60 focus-visible:ring-2 focus-visible:ring-ring",
+        "disabled:cursor-not-allowed disabled:opacity-55",
         props.selected && "border-primary shadow-[0_0_0_1px_var(--primary)]",
       )}
     >
@@ -145,6 +161,11 @@ function errorText(error: unknown): string {
 
 export function AddProjectSourceStep(props: AddProjectSourceStepProps) {
   const { node, kind, onKindChange } = props;
+  // Gated on the node as the command palette's import action is.
+  const sessionImportCapability = useHostedRpcCapability(
+    WS_METHODS.sessionImportRun,
+    node.environmentId,
+  );
   return (
     <>
       <p className="m-0 text-muted-foreground">
@@ -184,6 +205,21 @@ export function AddProjectSourceStep(props: AddProjectSourceStepProps) {
           onClick={() => onKindChange("link")}
         />
       ) : null}
+      <SourceOption
+        selected={false}
+        icon={<FolderInputIcon />}
+        title="Import from Codex or Claude Code…"
+        description={
+          hostedCapabilityCopy(sessionImportCapability, node.label) ??
+          `Your conversations on ${node.label}, grouped into projects by folder`
+        }
+        disabled={!sessionImportCapability.allowed}
+        onIntent={preloadProjectImportDialog}
+        onClick={() => {
+          closeAddProject();
+          openProjectImportDialog({ environmentId: node.environmentId });
+        }}
+      />
     </>
   );
 }

@@ -6,13 +6,10 @@ import {
   CircleHelpIcon,
   FolderInputIcon,
   GitForkIcon,
+  HistoryIcon,
 } from "lucide-react";
 import {
   contextHandoffStatusSuffix,
-  CWD_RELOCATION_HANDOFF_COPY,
-  cwdRelocationHandoffAccessibleLabel,
-  cwdRelocationHandoffHeadline,
-  cwdRelocationHandoffRetryHint,
   FORK_HANDOFF_COPY,
   forkHandoffAccessibleLabel,
   forkHandoffEndpointLabels,
@@ -20,6 +17,10 @@ import {
   forkHandoffRetryHint,
   isCwdRelocationHandoff,
   isForkHandoff,
+  resumeFallbackHandoffAccessibleLabel,
+  resumeFallbackHandoffCopy,
+  resumeFallbackHandoffHeadline,
+  resumeFallbackHandoffRetryHint,
   type ContextHandoffTimelineEntry,
 } from "../../session-logic";
 
@@ -54,11 +55,12 @@ function forkHeadline(marker: ContextHandoffTimelineEntry): string {
 }
 
 /**
- * A model change reads as `<source> → <target>`. A working-directory relocation
- * keeps its model, so it reads as a fresh session in the new folder instead;
- * a failed one says how to try again. A fork's handoff reads as its inherited
- * conversation reaching a fresh session. Handoffs recorded before they carried
- * a reason are model changes.
+ * A model change reads as `<source> → <target>`. A resume fallback (a moved
+ * working directory, or native history the provider no longer had) keeps its
+ * model, so it reads as a fresh session and says why; a failed one says how to
+ * try again. A fork's handoff reads as its inherited conversation reaching a
+ * fresh session. Handoffs recorded before they carried a reason are model
+ * changes.
  */
 export function describeContextHandoffMarker(
   marker: ContextHandoffTimelineEntry,
@@ -77,17 +79,18 @@ export function describeContextHandoffMarker(
       retryHint: forkHandoffRetryHint(marker),
     };
   }
-  if (isCwdRelocationHandoff(marker)) {
+  const resumeFallback = resumeFallbackHandoffCopy(marker);
+  if (resumeFallback) {
     return {
-      accessibleLabel: cwdRelocationHandoffAccessibleLabel(marker),
+      accessibleLabel: resumeFallbackHandoffAccessibleLabel(resumeFallback, marker),
       tooltipTitle:
         marker.status === "consumed"
           ? "Sent to a fresh session"
           : marker.status === "failed"
-            ? "Couldn't continue in the new folder"
+            ? resumeFallback.failed
             : "Delivery uncertain",
-      tooltipDetail: CWD_RELOCATION_HANDOFF_COPY.explanation,
-      retryHint: cwdRelocationHandoffRetryHint(marker),
+      tooltipDetail: resumeFallback.explanation,
+      retryHint: resumeFallbackHandoffRetryHint(resumeFallback, marker),
     };
   }
   const transition = `Context handoff from ${marker.sources
@@ -136,6 +139,25 @@ function ModelTransition({
   );
 }
 
+/**
+ * A resume fallback's icon: a moved folder, or history the provider no longer
+ * had. ChatView hands it to the lazy inspection panel, which must not import
+ * this module: sharing it would split it into a chunk of its own.
+ */
+export function ResumeFallbackHandoffIcon({
+  marker,
+  className,
+}: {
+  readonly marker: Pick<ContextHandoffTimelineEntry, "reason">;
+  readonly className: string;
+}) {
+  return isCwdRelocationHandoff(marker) ? (
+    <FolderInputIcon className={className} />
+  ) : (
+    <HistoryIcon className={className} />
+  );
+}
+
 function MarkerContents({
   marker,
   presentation,
@@ -147,7 +169,7 @@ function MarkerContents({
   readonly failed: boolean;
   readonly uncertain: boolean;
 }) {
-  const relocation = isCwdRelocationHandoff(marker);
+  const resumeFallback = resumeFallbackHandoffCopy(marker);
   const fork = isForkHandoff(marker);
   return (
     <>
@@ -176,11 +198,11 @@ function MarkerContents({
               {forkHeadline(marker)}
             </span>
           </>
-        ) : relocation ? (
+        ) : resumeFallback ? (
           <>
-            <FolderInputIcon className="size-3.5 shrink-0" />
+            <ResumeFallbackHandoffIcon marker={marker} className="size-3.5 shrink-0" />
             <span className="min-w-0 font-medium" data-context-handoff-headline>
-              {cwdRelocationHandoffHeadline(marker.status)}
+              {resumeFallbackHandoffHeadline(resumeFallback, marker.status)}
             </span>
           </>
         ) : (

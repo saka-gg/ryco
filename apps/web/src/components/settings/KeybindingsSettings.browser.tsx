@@ -1,17 +1,17 @@
 import "../../index.css";
 import { EnvironmentId } from "@ryco/contracts";
 import { page } from "vite-plus/test/browser";
-import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
-import {
-  resetAppKeybindings,
-  getAppKeybindings,
-  replaceAppKeybindings,
-} from "../../appKeybindings";
+import { resetAppKeybindings, getAppKeybindings } from "../../appKeybindings";
+import { replaceAppKeybindings } from "../../appKeybindingsEditing";
 import { APP_KEYBINDINGS_STORAGE_KEY } from "@ryco/client-runtime/state/settings";
 import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
 import { SettingsTargetProvider } from "../../settingsTarget";
+import { keybindingRowId } from "../../lib/keybindingCategories";
 import { KeybindingsSettingsPanel } from "./KeybindingsSettings";
+import type { SettingsSearchTarget } from "./settingsSearchReveal";
+import { useSettingsSubsections } from "./useSettingsSubsections";
 
 let screen: Awaited<ReturnType<typeof render>> | null = null;
 const target = {
@@ -43,6 +43,15 @@ const mount = async () => {
     </AppAtomRegistryProvider>,
   );
 };
+/** The panel inside the settings page's scroller, which reveals a search result's target. */
+function SearchTargetHarness({ searchTarget }: { searchTarget: SettingsSearchTarget }) {
+  const { contentRef } = useSettingsSubsections("keybindings", false, searchTarget);
+  return (
+    <div ref={contentRef} data-testid="settings-scroller" style={{ height: 600, overflow: "auto" }}>
+      <KeybindingsSettingsPanel />
+    </div>
+  );
+}
 beforeEach(async () => {
   await resetAppKeybindings();
   await page.viewport(1100, 900);
@@ -84,6 +93,68 @@ describe("local app keybindings", () => {
         () => getAppKeybindings().find((rule) => rule.command === "terminal.toggle")?.shortcut.key,
       )
       .toBe("j");
+  });
+  it("treats client-only defaults as defaults when editing and resetting a command", async () => {
+    await mount();
+    await page.getByLabelText("Search keybindings").fill("without a project");
+    const reset = page.getByRole("button", {
+      name: "Reset New chat without a project to default",
+      exact: true,
+    });
+    const chip = page.getByRole("button", {
+      name: "Edit shortcut for chat.newWithoutProject",
+      exact: true,
+    });
+    await expect.element(chip).toBeInTheDocument();
+    expect(reset.elements()).toHaveLength(0);
+    await chip.click();
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "y",
+        code: "KeyY",
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await expect
+      .poll(
+        () =>
+          getAppKeybindings().find((rule) => rule.command === "chat.newWithoutProject")?.shortcut
+            .key,
+      )
+      .toBe("y");
+    await reset.click();
+    await expect
+      .poll(
+        () =>
+          getAppKeybindings().find((rule) => rule.command === "chat.newWithoutProject")?.shortcut,
+      )
+      .toMatchObject({ key: "n", altKey: true, modKey: true });
+    expect(JSON.parse(localStorage.getItem(APP_KEYBINDINGS_STORAGE_KEY)!)).toEqual({
+      rules: [],
+      disabledCommands: [],
+    });
+  });
+  it("scrolls to and highlights the row a settings search result names", async () => {
+    screen = await render(
+      <AppAtomRegistryProvider>
+        <SettingsTargetProvider value={target}>
+          <SearchTargetHarness searchTarget={{ targetId: keybindingRowId("navigation.back") }} />
+        </SettingsTargetProvider>
+      </AppAtomRegistryProvider>,
+    );
+    const scroller = page.getByTestId("settings-scroller").element();
+    await vi.waitFor(() => {
+      const row = document.activeElement as HTMLElement | null;
+      expect(row?.dataset.keybindingCommand).toBe("navigation.back");
+      expect(row?.dataset.flash).toBe("true");
+      const { top, bottom } = scroller.getBoundingClientRect();
+      const rowBox = row!.getBoundingClientRect();
+      expect(scroller.scrollTop).toBeGreaterThan(0);
+      expect(rowBox.top).toBeGreaterThanOrEqual(top);
+      expect(rowBox.bottom).toBeLessThanOrEqual(bottom);
+    });
   });
   it("shows the app-owned persistence and reviewed import controls", async () => {
     await mount();
@@ -163,6 +234,46 @@ describe("local app keybindings", () => {
     await expect
       .element(page.getByRole("button", { name: "Restore defaults", exact: true }))
       .toBeEnabled();
+  });
+  it("keeps working with shortcuts saved by a newer version and saves them back", async () => {
+    await mount();
+    const futureRule = { key: "mod+shift+t", command: "view.futureCommand", extra: 1 };
+    localStorage.setItem(
+      APP_KEYBINDINGS_STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        rules: [{ key: "mod+x", command: "terminal.toggle" }, futureRule],
+        disabledCommands: ["future.command", "chat.newLocal"],
+      }),
+    );
+    window.dispatchEvent(new StorageEvent("storage", { key: APP_KEYBINDINGS_STORAGE_KEY }));
+    const shortcutKey = (command: string) =>
+      getAppKeybindings().find((rule) => rule.command === command)?.shortcut.key;
+    await expect.poll(() => shortcutKey("terminal.toggle")).toBe("x");
+    expect(getAppKeybindings().some((rule) => rule.command === "chat.newLocal")).toBe(false);
+    expect(
+      page.getByText("Local keybindings need attention", { exact: true }).elements(),
+    ).toHaveLength(0);
+    await expect
+      .element(page.getByRole("button", { name: "Restore defaults", exact: true }))
+      .toBeEnabled();
+    await page.getByRole("button", { name: "Edit shortcut for diff.toggle", exact: true }).click();
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "y",
+        code: "KeyY",
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await expect.poll(() => shortcutKey("diff.toggle")).toBe("y");
+    const stored = JSON.parse(localStorage.getItem(APP_KEYBINDINGS_STORAGE_KEY)!);
+    expect(stored.version).toBe(2);
+    expect(stored.rules).toContainEqual(futureRule);
+    expect(stored.disabledCommands).toEqual(
+      expect.arrayContaining(["future.command", "chat.newLocal"]),
+    );
   });
   it("supports deliberately disabling a shortcut and preserves it through reset/reimport", async () => {
     await replaceAppKeybindings([]);

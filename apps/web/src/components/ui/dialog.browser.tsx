@@ -4,12 +4,15 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 import { useEffect, useState } from "react";
+import { compileResolvedKeybindingsConfig } from "@ryco/shared/keybindings";
 
 import {
   hasOpenDialogShortcutTarget,
   isDifferentDialogShortcutTarget,
   matchesExactModShortcut,
+  resolveShortcutCommand,
   shouldIgnoreGlobalNavigationShortcut,
+  type ShortcutEventLike,
 } from "../../keybindings";
 import { installVisualViewportStub } from "../../../test/browserVisualViewport";
 import { syncDocumentPresentationTier } from "../../lib/presentationTier";
@@ -235,6 +238,45 @@ describe("Dialog", () => {
         target: input,
       }),
     ).toBe(true);
+  });
+
+  it("leaves characters typed with AltGr to text fields outside macOS", () => {
+    const textarea = document.createElement("textarea");
+    const button = document.createElement("button");
+    document.body.append(textarea, button);
+    const keybindings = compileResolvedKeybindingsConfig([
+      { key: "mod+alt+a", command: "chat.newWithoutProject" },
+      { key: "mod+alt+[", command: "pane.focusPrevious" },
+    ]);
+    // Windows reports AltGr as Ctrl+Alt.
+    const keydown = (target: EventTarget, overrides: Partial<ShortcutEventLike>) => ({
+      type: "keydown",
+      key: "a",
+      metaKey: false,
+      ctrlKey: true,
+      shiftKey: false,
+      altKey: true,
+      target,
+      ...overrides,
+    });
+    const resolve = (target: EventTarget, overrides: Partial<ShortcutEventLike>) =>
+      resolveShortcutCommand(keydown(target, overrides), keybindings, { platform: "Win32" });
+    const altGraph = { getModifierState: (key: string) => key === "AltGraph" };
+
+    // Polish AltGr+A types "ą" in a text field; outside one it types nothing.
+    expect(resolve(textarea, { key: "ą", code: "KeyA" })).toBeNull();
+    expect(resolve(button, { key: "ą", code: "KeyA" })).toBe("chat.newWithoutProject");
+    expect(
+      matchesExactModShortcut(keydown(textarea, { key: "ą", code: "KeyA" }), "a", {
+        platform: "Win32",
+        altKey: true,
+      }),
+    ).toBe(false);
+    // German AltGr+8 types "[".
+    expect(resolve(textarea, { key: "[", code: "Digit8", ...altGraph })).toBeNull();
+    expect(resolve(button, { key: "[", code: "Digit8", ...altGraph })).toBe("pane.focusPrevious");
+    // A chord that types no AltGr character still runs in a text field.
+    expect(resolve(textarea, { key: "a", code: "KeyA" })).toBe("chat.newWithoutProject");
   });
 
   it("ignores hidden dialog nodes when checking global shortcut boundaries", () => {

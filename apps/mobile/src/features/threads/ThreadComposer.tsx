@@ -1,7 +1,8 @@
 import { useImperativeHandle, useRef, useState, type Ref } from "react";
 import { useKeyboardState } from "react-native-keyboard-controller";
 import type { ModelSelection, RuntimeMode, ProviderInteractionMode } from "@ryco/contracts";
-import type { ModelPickerModel } from "./modelPickerModel";
+import type { FastModeNotice } from "@ryco/client-runtime/state/session";
+import { resolveModelPillFastMode, type ModelPickerModel } from "./modelPickerModel";
 import type { SessionPolicyModel } from "./sessionPolicyModel";
 import { ComposerModelMenu } from "./ComposerModelMenu";
 import { ComposerAccessMenu } from "./ComposerAccessMenu";
@@ -30,6 +31,7 @@ import { PendingContextHandoffChip, PendingForkHandoffChip } from "./PendingCont
 export interface ThreadComposerHandle {
   /** The composer holds typed text (attachments live in the owning screen). */
   readonly hasText: () => boolean;
+  readonly getText: () => string;
   /** Replaces the typed text, e.g. with a queued message pulled back for editing. */
   readonly setText: (text: string) => void;
   readonly focus: () => void;
@@ -53,12 +55,16 @@ export function ThreadComposer(props: {
   readonly sendBlock?: string | null;
   readonly fileUploadRecords?: ReadonlyMap<string, ChatFileUploadRecord>;
   readonly disabled?: boolean;
+  /** Replaces the "Message" placeholder, e.g. while a send would redirect a waiting approval. */
+  readonly placeholder?: string;
   readonly policyModel?: SessionPolicyModel | null;
   readonly policyDisabled?: boolean;
   readonly onSelectRuntimeMode: (mode: RuntimeMode) => void;
   readonly onSelectInteractionMode: (mode: ProviderInteractionMode) => void;
   readonly modelPicker?: ModelPickerModel | null;
   readonly modelSelection?: ModelSelection | null;
+  /** Claude Code's Fast mode when it differs from the selection's (`deriveClaudeFastModeNotice`). */
+  readonly fastModeNotice?: FastModeNotice | null;
   readonly onSelectModel: (selection: ModelSelection) => void;
   readonly onOpenSideChat?: () => void;
   /** What the next message's context handoff is (`derivePendingComposerHandoff`). */
@@ -84,6 +90,7 @@ export function ThreadComposer(props: {
     ref,
     () => ({
       hasText: () => text.trim().length > 0,
+      getText: () => text,
       setText,
       focus: () => editorRef.current?.focus(),
     }),
@@ -94,6 +101,9 @@ export function ThreadComposer(props: {
   const iconColor = useThemeColor("--color-icon");
   const accessColor = useThemeColor("--color-access-caution");
   const warningColor = useThemeColor("--color-warning");
+  const pillFastMode = modelPicker
+    ? resolveModelPillFastMode(modelPicker, props.fastModeNotice)
+    : null;
 
   const visibleAttachmentError = props.attachmentError ?? props.sendBlock;
   const canSend =
@@ -153,11 +163,9 @@ export function ThreadComposer(props: {
                       }
                       label={modelPicker.pillLabel}
                       suffixLabel={modelPicker.pillReasoningLabel ?? undefined}
-                      suffixIcon={modelPicker.pillFastEnabled ? "bolt.fill" : undefined}
-                      suffixIconColor={warningColor as string}
-                      accessibilityLabel={
-                        modelPicker.pillAccessibilityLabel ?? modelPicker.pillLabel
-                      }
+                      suffixIcon={pillFastMode?.icon}
+                      suffixIconColor={(pillFastMode?.muted ? iconSubtle : warningColor) as string}
+                      accessibilityLabel={pillFastMode?.accessibilityLabel ?? modelPicker.pillLabel}
                       disabled={props.policyDisabled}
                       onPress={open}
                       className="max-w-full flex-1"
@@ -236,7 +244,7 @@ export function ThreadComposer(props: {
                 setText(nextText);
               }}
               onFocus={props.onComposerIntent}
-              placeholder="Message"
+              placeholder={props.placeholder ?? "Message"}
               multiline
               editable={!props.disabled && !sending}
               contentInsetVertical={10}

@@ -75,6 +75,33 @@ export const wsConnectionStatusForEnvironmentAtom = Atom.family((environmentId: 
   }).pipe(Atom.keepAlive, Atom.withLabel(`ws-connection-status:${environmentId}`));
 });
 
+// Keyed by the JSON list of environment ids, so equal lists share one atom.
+const wsConnectionStatusesForEnvironmentsFamily = Atom.family((environmentIdsKey: string) => {
+  const environmentIds = JSON.parse(environmentIdsKey) as ReadonlyArray<EnvironmentId>;
+  return Atom.make(
+    (get): ReadonlyMap<EnvironmentId, WsConnectionStatus> =>
+      new Map(
+        environmentIds.map((environmentId) => [
+          environmentId,
+          get(wsConnectionStatusForEnvironmentAtom(environmentId)),
+        ]),
+      ),
+  ).pipe(Atom.withLabel(`ws-connection-statuses:${environmentIdsKey}`));
+});
+
+/**
+ * The listed environments' own slots as one value, which changes whenever any
+ * of them does. A view that derives one row per environment subscribes to
+ * this instead of reading `getWsConnectionStatusForEnvironment` while it
+ * renders: React Compiler caches such a read on the row inputs, so a node that
+ * dropped would keep showing its old status.
+ */
+export function wsConnectionStatusesForEnvironmentsAtom(
+  environmentIds: ReadonlyArray<EnvironmentId>,
+): Atom.Atom<ReadonlyMap<EnvironmentId, WsConnectionStatus>> {
+  return wsConnectionStatusesForEnvironmentsFamily(JSON.stringify(environmentIds));
+}
+
 /**
  * Bumped on every socket open, from any environment. The global phase can sit at
  * "connected" while a second environment's socket opens, so consumers that must

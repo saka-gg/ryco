@@ -94,6 +94,59 @@ function emitPlanSnapshot(input: { turnId: string; title: string; offset: number
   });
 }
 
+/** A thread whose agent asked a question that was then answered. */
+function createSnapshotWithAnsweredQuestion(targetText: string) {
+  const snapshot = createSnapshotForTargetUser({
+    targetMessageId: `msg-user-${targetText.replaceAll(" ", "-")}` as MessageId,
+    targetText,
+  });
+  return {
+    ...snapshot,
+    threads: snapshot.threads.map((thread) =>
+      thread.id === THREAD_ID
+        ? Object.assign({}, thread, {
+            activities: [
+              {
+                id: EventId.make("activity-question-asked"),
+                tone: "info" as const,
+                kind: "user-input.requested",
+                summary: "User input requested",
+                payload: {
+                  requestId: "req-question",
+                  questions: [
+                    {
+                      id: "Which library?",
+                      header: "Library",
+                      question: "Which library?",
+                      options: [
+                        { label: "React", description: "React." },
+                        { label: "Vue", description: "Vue." },
+                      ],
+                    },
+                  ],
+                },
+                turnId: null,
+                sequence: 1,
+                createdAt: isoAt(1_000),
+              },
+              {
+                id: EventId.make("activity-question-answered"),
+                tone: "info" as const,
+                kind: "user-input.resolved",
+                summary: "User input submitted",
+                payload: { requestId: "req-question", answers: { "Which library?": "React" } },
+                turnId: null,
+                sequence: 2,
+                createdAt: isoAt(1_001),
+              },
+            ],
+            updatedAt: isoAt(1_001),
+          })
+        : thread,
+    ),
+  };
+}
+
 function threadTitleShown(title: string): boolean {
   return [...document.querySelectorAll<HTMLElement>("header p")].some(
     (element) => element.textContent === title,
@@ -873,6 +926,46 @@ describe("ChatView PhoneSurfaces (full app)", () => {
       expect(document.querySelector('[data-slot="mobile-dock"]')).toBeNull();
     } finally {
       await mounted.cleanup();
+    }
+  });
+
+  it("keeps an answered question's bare rows on the frozen phone tier", async () => {
+    const exchangeRows = () =>
+      document.querySelectorAll("[data-timeline-row-kind='user-input-exchange']");
+    const phone = await mountChatView({
+      viewport: PHONE_VIEWPORT,
+      snapshot: createSnapshotWithAnsweredQuestion("phone answered question"),
+    });
+    try {
+      // The phone tier shows nothing new: no exchange, and the request and answer rows stay.
+      const toggle = await waitForElement(
+        () => document.querySelector<HTMLElement>("[data-timeline-row-kind='work-toggle'] button"),
+        "Unable to find the phone tier's log rows.",
+      );
+      expect(toggle.textContent).toContain("2 log entries");
+      expect(exchangeRows()).toHaveLength(0);
+      toggle.click();
+      await vi.waitFor(() => {
+        expect(surfaceContainsText(document.body, "User input requested")).toBe(true);
+        expect(surfaceContainsText(document.body, "User input submitted")).toBe(true);
+      });
+    } finally {
+      await phone.cleanup();
+    }
+
+    const desktop = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotWithAnsweredQuestion("desktop answered question"),
+    });
+    try {
+      await vi.waitFor(() => {
+        expect(document.documentElement.getAttribute("data-tier")).toBe("desktop");
+        expect(exchangeRows()).toHaveLength(1);
+      });
+      expect(surfaceContainsText(document.body, "User input submitted")).toBe(false);
+      expect(surfaceContainsText(document.body, "User input requested")).toBe(false);
+    } finally {
+      await desktop.cleanup();
     }
   });
 

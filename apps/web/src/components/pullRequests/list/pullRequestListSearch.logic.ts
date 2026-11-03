@@ -1,4 +1,4 @@
-import { normalizeGitRemoteUrl } from "@ryco/shared/git";
+import { normalizeGitRemoteUrl, parseChangeRequestUrl } from "@ryco/shared/git";
 
 import { parsePullRequestReference } from "../../../pullRequestReference";
 import type { ProjectCheckoutOption } from "../../../projectCheckouts.logic";
@@ -23,32 +23,25 @@ export type PullRequestLinkTarget =
       readonly repositoryKey: string;
     };
 
-const PULL_REQUEST_PATH_PATTERNS: ReadonlyArray<RegExp> = [
-  /^(.*?)\/pull\/(\d+)(?:[/?#].*)?$/iu, // GitHub
-  /^(.*?)\/-\/merge_requests\/(\d+)(?:[/?#].*)?$/iu, // GitLab
-  /^(.*?)\/pulls\/(\d+)(?:[/?#].*)?$/iu, // Forgejo / Gitea
-  /^(.*?)\/pullrequest\/(\d+)(?:[/?#].*)?$/iu, // Azure DevOps
-];
-
-/** A pasted link, `#123` or `123`; null for anything else (plain search text). */
+/**
+ * A pasted link, `#123` or `123`; null for anything else (plain search text).
+ * Links are read on every host Ryco knows (Bitbucket and self-hosted ones
+ * included), not only the shapes a checkout command accepts.
+ */
 export function parsePullRequestLinkTarget(text: string): PullRequestLinkTarget | null {
-  const reference = parsePullRequestReference(text);
-  if (reference === null) return null;
+  const reference = parsePullRequestReference(text) ?? text.trim();
   if (/^\d+$/u.test(reference)) {
     const number = Number(reference);
     return Number.isSafeInteger(number) && number > 0 ? { kind: "number", number } : null;
   }
-  for (const pattern of PULL_REQUEST_PATH_PATTERNS) {
-    const match = pattern.exec(reference);
-    if (!match?.[1] || !match[2]) continue;
-    return {
-      kind: "url",
-      number: Number(match[2]),
-      url: reference,
-      repositoryKey: normalizeGitRemoteUrl(match[1]),
-    };
-  }
-  return null;
+  const link = parseChangeRequestUrl(reference);
+  if (link === null) return null;
+  return {
+    kind: "url",
+    number: link.number,
+    url: reference,
+    repositoryKey: normalizeGitRemoteUrl(link.repositoryUrl),
+  };
 }
 
 export type PullRequestLinkResolution =

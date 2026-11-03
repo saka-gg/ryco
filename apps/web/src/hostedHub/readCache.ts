@@ -4,12 +4,16 @@ import {
   THREAD_CONTENT_CACHE_DECODE_MAX_DRAFT_ENTRIES,
   THREAD_CONTENT_CACHE_MAX_DRAFT_CHARS,
   THREAD_CONTENT_CACHE_RECORD_BUDGET_BYTES,
+  THREAD_READING_POSITION_CAPACITY,
   createThreadContentCapture,
   decodeCachedEnvironmentContent,
+  decodeThreadReadingAnchor,
   measureRecordBodyBytes,
+  sameThreadReadingAnchors,
   selectThreadsForContentCache,
   trimContentToBudget,
   type CachedThreadContent,
+  type SavedThreadReadingAnchor,
 } from "@ryco/client-runtime/state/threads";
 import {
   isWorkspaceMetadataSnapshot,
@@ -32,9 +36,9 @@ import {
 } from "../workspaceMetadataProjection";
 import { getHostedReadVault, type ReadVaultAccount } from "../persistence/hostedReadVault";
 import {
-  hostedScrollPositions as scrollPositions,
-  configureHostedReadViewState,
-} from "../persistence/hostedReadViewState";
+  configureThreadReadingPositionPersistence,
+  threadReadingPositions,
+} from "../persistence/threadReadingPositions";
 import { hostedHubStore } from "./state";
 import { clearWebHostedAccountScopedState } from "./environment";
 
@@ -51,7 +55,8 @@ interface CachedEnvironment {
   readonly content: Record<string, CachedThreadContent>;
   readonly drafts: Record<string, string>;
   readonly draftSessions: Record<string, DraftThreadState>;
-  readonly scroll: Record<string, number>;
+  /** Where each thread was left away from its end; a thread at its end has none. */
+  readonly readingPositions: Record<string, SavedThreadReadingAnchor>;
 }
 interface ReadCacheState {
   readonly enabled: boolean;
@@ -110,9 +115,9 @@ let writtenCatalog: { readonly owner: ReadVaultAccount; readonly key: string } |
  * The inputs each environment's record was last written from. A save whose
  * inputs are all unchanged has nothing new to encrypt and write; during
  * streaming that is every environment but the one receiving tokens. The
- * store-wide inputs (drafts, scroll positions, visits) are compared through
- * this environment's own slice of them, so a keystroke, an auto-follow scroll
- * or a visit elsewhere does not rewrite every record.
+ * store-wide inputs (drafts, reading positions, visits) are compared through
+ * this environment's own slice of them, so a keystroke, a scroll or a visit
+ * elsewhere does not rewrite every record.
  */
 interface SavedEnvironmentInputs {
   readonly owner: ReadVaultAccount;
@@ -120,7 +125,7 @@ interface SavedEnvironmentInputs {
   readonly fallbackMetadata: unknown;
   readonly draftSessions: Readonly<Record<string, DraftThreadState>>;
   readonly drafts: Readonly<Record<string, string>>;
-  readonly scroll: Readonly<Record<string, number>>;
+  readonly readingPositions: Readonly<Record<string, SavedThreadReadingAnchor>>;
   readonly visits: Readonly<Record<string, string>>;
   readonly routedThreadId: string | null;
 }
@@ -143,7 +148,7 @@ function sameEnvironmentInputs(left: SavedEnvironmentInputs, right: SavedEnviron
     left.routedThreadId === right.routedThreadId &&
     sameRecordEntries(left.draftSessions, right.draftSessions) &&
     sameRecordEntries(left.drafts, right.drafts) &&
-    sameRecordEntries(left.scroll, right.scroll) &&
+    sameThreadReadingAnchors(left.readingPositions, right.readingPositions) &&
     sameRecordEntries(left.visits, right.visits)
   );
 }
@@ -157,13 +162,15 @@ function forgetInMemory(clearUi: boolean) {
   revision++;
   account = null;
   rememberedAccountId = null;
-  configureHostedReadViewState(null);
+  configureThreadReadingPositionPersistence(null);
   environments.clear();
   savedInputs.clear();
   threadContentCapture.clear();
   writtenCatalog = null;
-  scrollPositions.clear();
   publish({ accountId: null, nodes: [], snapshots: [] });
+  // Reading positions are this session's in every mode, the cache only their
+  // persistence: turning it off keeps them, and the account-scoped reset
+  // (sign-out, expiry, another account or tab) clears them.
   if (clearUi) clearWebHostedAccountScopedState();
 }
 
@@ -205,7 +212,7 @@ function decodeEnvironment(value: unknown, environmentId: EnvironmentId): Cached
   const record = value as Partial<CachedEnvironment>;
   if (!isWorkspaceMetadataSnapshot(record.metadata, environmentId)) return null;
   const drafts: Record<string, string> = {};
-  const scroll: Record<string, number> = {};
+  const readingPositions: Record<string, SavedThreadReadingAnchor> = {};
   const draftSessions: Record<string, DraftThreadState> = {};
   const threadIds = new Set(record.metadata.threads.map((thread) => thread.id as string));
   for (const [key, value] of Object.entries(record.draftSessions ?? {}).slice(0, 32)) {
@@ -232,19 +239,17 @@ function decodeEnvironment(value: unknown, environmentId: EnvironmentId): Cached
     )
       drafts[key] = value;
   }
-  for (const [key, value] of Object.entries(record.scroll ?? {}).slice(
-    0,
-    THREAD_CONTENT_CACHE_DECODE_MAX_DRAFT_ENTRIES,
+  // Saved least recently left first, so the most recent are the ones kept. A
+  // pixel offset under the older `scroll` key is not an anchor: those threads
+  // open at their end.
+  for (const [key, value] of Object.entries(record.readingPositions ?? {}).slice(
+    -THREAD_READING_POSITION_CAPACITY,
   )) {
-    if (
-      parseScopedThreadKey(key)?.environmentId === environmentId &&
-      typeof value === "number" &&
-      Number.isFinite(value) &&
-      value >= 0
-    )
-      scroll[key] = value;
+    const anchor = decodeThreadReadingAnchor(value);
+    if (anchor && parseScopedThreadKey(key)?.environmentId === environmentId)
+      readingPositions[key] = anchor;
   }
-  return { metadata: record.metadata, content, drafts, draftSessions, scroll };
+  return { metadata: record.metadata, content, drafts, draftSessions, readingPositions };
 }
 
 async function restore(): Promise<boolean> {
@@ -296,7 +301,7 @@ async function restore(): Promise<boolean> {
   )
     return false;
   account = savedAccount;
-  configureHostedReadViewState(onScrollChanged);
+  configureThreadReadingPositionPersistence(onReadingPositionChanged);
   const eligible = nodes.filter(
     (node) =>
       state.directoryStatus !== "ready" ||
@@ -308,6 +313,7 @@ async function restore(): Promise<boolean> {
           !live.capabilities?.nativeClientRequired,
       ),
   );
+  const readingPositions: Array<readonly [string, SavedThreadReadingAnchor]> = [];
   for (const { node, record } of records) {
     if (!record || !eligible.includes(node)) continue;
     environments.set(node.environmentId, record);
@@ -339,8 +345,11 @@ async function restore(): Promise<boolean> {
       if (target && !useComposerDraftStore.getState().draftsByThreadKey[key])
         useComposerDraftStore.getState().setPrompt(target, prompt);
     }
-    for (const [key, position] of Object.entries(record.scroll)) scrollPositions.set(key, position);
+    readingPositions.push(...Object.entries(record.readingPositions));
   }
+  // Read back together, so the anchors kept past the memory's capacity are
+  // the most recently left of every environment's.
+  threadReadingPositions.restore(readingPositions);
   publish({
     accountId: savedAccount.id,
     nodes: eligible,
@@ -375,7 +384,7 @@ async function reconcile() {
     account = opened;
     if (!opened) return;
     rememberedAccountId = opened.id;
-    configureHostedReadViewState(onScrollChanged);
+    configureThreadReadingPositionPersistence(onReadingPositionChanged);
     window.localStorage.setItem(
       ACCOUNT_KEY,
       JSON.stringify({ id: opened.id, epoch: opened.epoch }),
@@ -433,8 +442,9 @@ async function reconcile() {
         const ref = parseScopedThreadKey(key);
         if (ref?.environmentId === environmentId) composer.clearDraftThread(ref);
       }
-      for (const key of scrollPositions.keys())
-        if (parseScopedThreadKey(key)?.environmentId === environmentId) scrollPositions.delete(key);
+      threadReadingPositions.forget(
+        (key) => parseScopedThreadKey(key)?.environmentId === environmentId,
+      );
       await getHostedReadVault().remove(owner, environmentId);
     }
     if (!isCurrent()) return;
@@ -470,7 +480,7 @@ function sameItems<T>(left: ReadonlyArray<T>, right: ReadonlyArray<T>): boolean 
   return left.length === right.length && left.every((item, index) => item === right[index]);
 }
 
-function onScrollChanged(): void {
+function onReadingPositionChanged(): void {
   scheduleSave();
 }
 
@@ -490,7 +500,7 @@ async function save() {
     const routedThreadId =
       state.threadIds.find((id) => encodeURIComponent(id) === routedSegment) ?? null;
     const drafts: Record<string, string> = {};
-    const scroll: Record<string, number> = {};
+    const readingPositions: Record<string, SavedThreadReadingAnchor> = {};
     const draftSessions: Record<string, DraftThreadState> = {};
     const visits: Record<string, string> = {};
     for (const [key, draft] of Object.entries(composer.draftThreadsByThreadKey).slice(-32)) {
@@ -505,8 +515,15 @@ async function save() {
       )
         drafts[key] = draft.prompt;
     }
-    for (const [key, position] of scrollPositions)
-      if (parseScopedThreadKey(key)?.environmentId === node.environmentId) scroll[key] = position;
+    threadReadingPositions.forEach((key, anchor) => {
+      if (parseScopedThreadKey(key)?.environmentId === node.environmentId)
+        readingPositions[key] = {
+          rowId: anchor.rowId,
+          offsetWithinRow: anchor.offsetWithinRow,
+          ...(anchor.turnId === undefined ? {} : { turnId: anchor.turnId }),
+          leftAt: anchor.leftAt,
+        };
+    });
     for (const [key, visitedAt] of Object.entries(
       useUiStateStore.getState().threadLastVisitedAtById,
     ))
@@ -517,7 +534,7 @@ async function save() {
       fallbackMetadata: environments.get(node.environmentId)?.metadata,
       draftSessions,
       drafts,
-      scroll,
+      readingPositions,
       visits,
       routedThreadId,
     };
@@ -542,12 +559,18 @@ async function save() {
     // per-record budget.
     const content: Record<string, CachedThreadContent> = Object.fromEntries(
       trimContentToBudget({
-        bodyBytes: measureRecordBodyBytes({ metadata, drafts, draftSessions, scroll }),
+        bodyBytes: measureRecordBodyBytes({ metadata, drafts, draftSessions, readingPositions }),
         entries: captured,
         budgetBytes: THREAD_CONTENT_CACHE_RECORD_BUDGET_BYTES,
       }).map((thread) => [thread.threadId, thread.content]),
     );
-    const record: CachedEnvironment = { metadata, content, drafts, draftSessions, scroll };
+    const record: CachedEnvironment = {
+      metadata,
+      content,
+      drafts,
+      draftSessions,
+      readingPositions,
+    };
     if (owner !== account) return;
     environments.set(node.environmentId, record);
     await vault.write(owner, node.environmentId, record);

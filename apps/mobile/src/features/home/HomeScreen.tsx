@@ -1,7 +1,6 @@
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { useIsFocused, useNavigation } from "@react-navigation/native";
 import { useHeaderHeight } from "@react-navigation/elements";
-import { getQueuedThreadKeys } from "@ryco/client-runtime/state/message-queue";
 import {
   useCallback,
   useEffect,
@@ -11,7 +10,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { AppState, Pressable, View } from "react-native";
+import { AppState, Pressable, View, type TextInput } from "react-native";
 
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import { excludeChatProjects } from "@ryco/shared/projectKind";
@@ -22,10 +21,10 @@ import { RycoWordmark } from "../../components/RycoWordmark";
 import { SymbolView } from "../../components/AppSymbol";
 import { useDirectoryPresenceDemand } from "../../hostedHub/directoryDemand";
 import { useThemeColor } from "../../lib/useThemeColor";
-import { useHomeWorkspaceData } from "../../state/homeData";
-import { useMessageQueueStore } from "../../state/messageQueueStore";
+import { openThread as openThreadOverSheets } from "../../navigation/openThread";
 import { resolveHomeGroupingMode } from "../../state/homeGrouping";
 import { usePreferences } from "../../state/preferencesStore";
+import { markSnoozeWokeSeen } from "../../state/snoozeWokeSeen";
 import { useStore } from "../../state/threadsRuntime";
 import {
   buildInboxSections,
@@ -35,6 +34,8 @@ import {
   type InboxSection,
   type InboxThreadRow,
 } from "../inbox/inboxModel";
+import { CustomSnoozeSheetHost } from "../inbox/CustomSnoozeSheet";
+import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
 import { InboxScreen } from "../inbox/InboxScreen";
 import { buildProjectRows, type ProjectListRow } from "../projects/projectsModel";
 import { ProjectsScreen } from "../projects/ProjectsScreen";
@@ -42,8 +43,9 @@ import { buildHomeChromeModel } from "./homeChromeModel";
 import { createHomeModeState, reduceHomeModeState, type HomeMode } from "./homeMode";
 import { createHomeScrollMemory, homeListFilterKey } from "./homeScrollMemory";
 import { useAutoSettleRuleHandOver } from "./useAutoSettleRuleHandOver";
-import { useHomeEnvironments } from "./useHomeEnvironments";
+import { useInboxSource } from "./useInboxSource";
 import { NeedsVerificationSection } from "./NeedsVerificationSection";
+import { QueuedTasksSection } from "../newTask/QueuedTasksSection";
 
 const NO_INBOX_SECTIONS: ReadonlyArray<InboxSection> = [];
 const NO_PROJECT_ROWS: ReadonlyArray<ProjectListRow> = [];
@@ -83,22 +85,14 @@ export function HomeScreen() {
     };
   }, [isFocused]);
   // The same clock keeps cached Hub nodes' "last seen" text current.
-  const environments = useHomeEnvironments({ nowMs });
-  // Keyed by the ids alone: a list rebuilt for a clock tick or a status change
-  // keeps the same eligible set, so the workspace rows are not refiltered.
-  const eligibleEnvironmentKey = environments
-    .map((environment) => environment.environmentId)
-    .join("\u0000");
-  const eligibleEnvironmentIds = useMemo(
-    () => new Set(eligibleEnvironmentKey === "" ? [] : eligibleEnvironmentKey.split("\u0000")),
-    [eligibleEnvironmentKey],
-  );
-  const { projects, worktrees, threads } = useHomeWorkspaceData(eligibleEnvironmentIds);
-  const queuesByThreadKey = useMessageQueueStore((state) => state.queuesByThreadKey);
-  const localQueuedThreadIds = useMemo(
-    () => getQueuedThreadKeys(queuesByThreadKey),
-    [queuesByThreadKey],
-  );
+  const {
+    environments,
+    projects,
+    worktrees,
+    threads,
+    localQueuedThreadIds,
+    wokeSeenAtByThreadKey: wokeSeen,
+  } = useInboxSource(nowMs);
   const preferences = usePreferences();
   useAutoSettleRuleHandOver(environments, preferences.sidebarAutoSettleAfterDays);
   const groupingMode = resolveHomeGroupingMode(preferences.projectGroupingEnabled);
@@ -123,20 +117,20 @@ export function HomeScreen() {
               query: home.queryByMode.inbox,
               nodeScope: home.nodeScopeByMode.inbox,
               localQueuedThreadIds,
-              aiFocusEnabled: preferences.aiFocusEnabled ?? false,
               autoSettleAfterDays: preferences.sidebarAutoSettleAfterDays,
               nowMs,
+              wokeSeenAtByThreadKey: wokeSeen,
             }),
           )
         : NO_INBOX_SECTIONS,
     [
+      wokeSeen,
       environments,
       home.mode,
       home.nodeScopeByMode.inbox,
       home.queryByMode.inbox,
       localQueuedThreadIds,
       nowMs,
-      preferences.aiFocusEnabled,
       preferences.sidebarAutoSettleAfterDays,
       projects,
       stabilizeInboxSections,
@@ -189,12 +183,22 @@ export function HomeScreen() {
 
   const chrome = useMemo(() => buildHomeChromeModel({ mode: home.mode }), [home.mode]);
 
-  const openNewTask = () =>
-    navigation.navigate("NewTask", {
-      environmentId: currentNodeScope ?? undefined,
-    });
+  const openNewTask = useCallback(
+    () =>
+      navigation.navigate("NewTask", {
+        environmentId: currentNodeScope ?? undefined,
+      }),
+    [currentNodeScope, navigation],
+  );
 
   const openMachines = useCallback(() => navigation.navigate("Connections"), [navigation]);
+
+  // Command-F and Command-N do what the toolbar's search field and New Task
+  // button do, while Home is the screen in front.
+  const searchInputRef = useRef<TextInput>(null);
+  const focusSearch = useCallback(() => searchInputRef.current?.focus(), []);
+  useHardwareKeyboardCommand("focusSearch", isFocused ? focusSearch : undefined);
+  useHardwareKeyboardCommand("newTask", isFocused ? openNewTask : undefined);
 
   useLayoutEffect(() => {
     navigation.setOptions({
@@ -226,17 +230,21 @@ export function HomeScreen() {
     dispatch({ type: "select-mode", mode });
   }, []);
 
+  // A row tap pushes the thread; a thread jump (Command-1…9) can come while a
+  // sheet covers Home or a thread is open, and closes or replaces those.
   const openThread = useCallback(
-    (thread: { readonly environmentId: EnvironmentId; readonly threadId: ThreadId }) => {
-      useStore.getState().setActiveEnvironmentId(thread.environmentId);
-      navigation.navigate("Thread", {
-        environmentId: thread.environmentId,
-        threadId: thread.threadId,
-      });
-    },
+    (thread: { readonly environmentId: EnvironmentId; readonly threadId: ThreadId }) =>
+      openThreadOverSheets(navigation, thread),
     [navigation],
   );
-  const openInboxThread = useCallback((row: InboxThreadRow) => openThread(row), [openThread]);
+  const openInboxThread = useCallback(
+    (row: InboxThreadRow) => {
+      // Opening a woken thread clears its "Woke" mark.
+      if (row.wokeAt) markSnoozeWokeSeen(row.key, row.wokeAt);
+      openThread(row);
+    },
+    [openThread],
+  );
 
   const handleInboxEmptyAction = useCallback(
     (state: Exclude<InboxEmptyState, null>) => {
@@ -280,6 +288,8 @@ export function HomeScreen() {
         <HomeModeControl mode={home.mode} onSelect={selectMode} />
         <View className="min-h-0 flex-1">
           <NeedsVerificationSection />
+          <QueuedTasksSection machines={environments} />
+          <CustomSnoozeSheetHost />
           {home.mode === "inbox" ? (
             <InboxScreen
               filterKey={inboxFilterKey}
@@ -314,6 +324,7 @@ export function HomeScreen() {
             dispatch({ type: "set-node-scope", mode: home.mode, environmentId })
           }
           onNewTask={openNewTask}
+          searchInputRef={searchInputRef}
         />
       </View>
     </KeyboardAvoidingView>

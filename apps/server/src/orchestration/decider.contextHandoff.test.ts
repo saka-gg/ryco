@@ -298,6 +298,60 @@ describe("context handoff decider", () => {
     });
   });
 
+  // A downgraded server meets handoffs whose reason (or other field) it cannot decode.
+  describe("a handoff a newer server wrote", () => {
+    const newerHandoff = (status: string, extra: Record<string, unknown> = {}) => ({
+      id: EventId.make(`context-handoff-activity:newer-${status}`),
+      tone: "info" as const,
+      kind: "context-handoff",
+      summary: "Context handoff",
+      payload: {
+        schemaVersion: 1,
+        handoffId: `context-handoff:newer-${status}`,
+        mode: "full-context-fresh-session",
+        reason: "a-reason-this-build-does-not-know",
+        status,
+        targetMessageId: "message-before",
+        sourceSelection: { instanceId: "codex_work", model: "gpt-5.6" },
+        targetSelection: { instanceId: "codex_work", model: "gpt-5.6" },
+        ...extra,
+      },
+      turnId: null,
+      createdAt: now,
+    });
+    const decide = (activities: OrchestrationThread["activities"]) =>
+      Effect.runPromise(
+        Effect.result(
+          decideOrchestrationCommand({
+            command: makeCommand(),
+            readModel: makeReadModel(makeThread({ activities })),
+          }),
+        ),
+      );
+
+    it("stops blocking once it finished", async () => {
+      for (const status of ["consumed", "failed", "delivery-uncertain"]) {
+        const result = await decide([newerHandoff(status, { error: "Delivery failed." })]);
+        expect(result._tag, status).toBe("Success");
+      }
+    });
+
+    it("keeps blocking while it may still dispatch", async () => {
+      expect((await decide([newerHandoff("dispatching")]))._tag).toBe("Failure");
+      expect((await decide([newerHandoff("requested")]))._tag).toBe("Failure");
+    });
+
+    it("keeps blocking when its status cannot be read", async () => {
+      expect((await decide([newerHandoff("a-status-this-build-does-not-know")]))._tag).toBe(
+        "Failure",
+      );
+      expect((await decide([newerHandoff("consumed", { schemaVersion: 2 })]))._tag).toBe("Failure");
+      expect((await decide([newerHandoff("consumed", { targetMessageId: 42 })]))._tag).toBe(
+        "Failure",
+      );
+    });
+  });
+
   it("derives stable correlation ids and captures repeated A→B→A source selection", async () => {
     const command = makeCommand({
       commandId: CommandId.make("command-return-to-a"),
@@ -597,6 +651,43 @@ describe("delegation return atomic origin fence", () => {
     const result = await decide({ ...parent(), usageLimit: usageLimit("other_instance") });
     expect(result._tag).toBe("Success");
   });
+  // One fence for every server wake; only the wording names what the wake carried.
+  for (const [source, originChanged, usageLimited] of [
+    [
+      undefined,
+      "Delegated result origin changed. Open the child task and return its result manually.",
+      "The originating chat hit its usage limit. The delegated result waits until it is resumed.",
+    ],
+    [
+      "pull-request-watch",
+      "The chat changed while this pull request update was prepared.",
+      "The chat hit its usage limit. The pull request update waits until it is resumed.",
+    ],
+  ] as const) {
+    it(`words its rejections for a ${source ?? "delegated result"} wake`, async () => {
+      const base = queuedReturn();
+      const command = {
+        ...base,
+        delegationReturnGuard: {
+          ...base.delegationReturnGuard!,
+          ...(source === undefined ? {} : { source }),
+        },
+      };
+      const changed = await decide({ ...parent(), archivedAt: now }, command);
+      expect(changed._tag === "Failure" ? changed.failure.detail : "").toBe(originChanged);
+      const limited = await decide({ ...parent(), usageLimit: usageLimit("codex_work") }, command);
+      expect(limited._tag === "Failure" ? limited.failure.detail : "").toBe(usageLimited);
+      // The wake's own turn start carries the source on, for the reactor's wording.
+      const accepted = await Effect.runPromise(
+        decideOrchestrationCommand({ command, readModel: makeReadModel(parent()) }),
+      );
+      expect(
+        (Array.isArray(accepted) ? accepted : [accepted]).find(
+          (event) => event.type === "thread.turn-start-requested",
+        )?.payload,
+      ).toMatchObject({ delegationReturnGuard: command.delegationReturnGuard });
+    });
+  }
   it("accepts a later user message whose createdAt is older than the guard's latest", async () => {
     // Order consistency with latestUserMessageIdQuery: max created_at, ties by insertion order.
     const thread = parent();

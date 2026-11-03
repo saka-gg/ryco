@@ -1,5 +1,11 @@
 import * as Schema from "effect/Schema";
-import { IsoDateTime, ThreadId, rejectExcessProperties } from "./baseSchemas.ts";
+import {
+  IsoDateTime,
+  NonNegativeInt,
+  ThreadId,
+  TrimmedNonEmptyString,
+  rejectExcessProperties,
+} from "./baseSchemas.ts";
 import {
   AgentControlCompletionReturn,
   AgentControlProposalId,
@@ -19,6 +25,8 @@ export const AGENT_CONTROL_DELEGATION_MCP_TOOLS = {
 
 export const AGENT_CONTROL_TASK_STATUS_MAX_TASKS = 20;
 export const AGENT_CONTROL_TASK_RESULT_MAX_CHARS = 8_000;
+/** Opaque version of a task result's text; a continuation must name the version it continues. */
+export const AGENT_CONTROL_TASK_RESULT_VERSION_MAX_CHARS = 64;
 export const AGENT_CONTROL_TASK_NOTICE_MAX_CHARS = 4_000;
 
 /** Child-side terminal outcomes a task returns as a server-authored notice instead of a result. */
@@ -33,8 +41,22 @@ export const AgentControlTaskNoticeOutcome = Schema.Literals([
 ]);
 export type AgentControlTaskNoticeOutcome = typeof AgentControlTaskNoticeOutcome.Type;
 
+export const AgentControlTaskResultVersion = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(AGENT_CONTROL_TASK_RESULT_VERSION_MAX_CHARS),
+);
+
 export const AgentControlTaskStatusInput = Schema.Struct({
   taskId: Schema.optional(ThreadId),
+  /**
+   * Read on in a long result: the `version` and `nextOffsetChars` a previous read of
+   * the same task reported. Requires `taskId`. Offsets count UTF-16 code units.
+   */
+  result: Schema.optional(
+    Schema.Struct({
+      version: AgentControlTaskResultVersion,
+      offsetChars: NonNegativeInt,
+    }).pipe(rejectExcessProperties),
+  ),
 }).pipe(rejectExcessProperties);
 export type AgentControlTaskStatusInput = typeof AgentControlTaskStatusInput.Type;
 
@@ -44,7 +66,12 @@ export const AgentControlTaskCancelInput = Schema.Struct({
 }).pipe(rejectExcessProperties);
 export type AgentControlTaskCancelInput = typeof AgentControlTaskCancelInput.Type;
 
+/**
+ * Only the node encodes this (for an agent's tool result); no client decodes it, so a new state
+ * reaches no older decoder. `waiting`: a capped request's task waiting for a free slot.
+ */
 export const AgentControlTaskRunState = Schema.Literals([
+  "waiting",
   "starting",
   "running",
   "needs-you",
@@ -66,11 +93,24 @@ export const AgentControlTaskStatusEntry = Schema.Struct({
   }),
   run: Schema.Struct({
     state: AgentControlTaskRunState,
+    /** Why the run waits, while it is `waiting`. */
+    detail: Schema.optional(Schema.String),
     sessionStatus: Schema.NullOr(OrchestrationSessionStatus),
     hasPendingApprovals: Schema.Boolean,
     hasPendingUserInput: Schema.Boolean,
     backgroundLiveness: Schema.NullOr(Schema.Literals(["working", "monitoring"])),
     advanced: Schema.Boolean,
+    /**
+     * Why the still-running task needs attention, since when: its first message never started a
+     * turn, it waits on the person, or its provider went quiet. The delegating chat gets one
+     * notice per episode; Ryco never nudges, interrupts or answers for the task.
+     */
+    stalled: Schema.optional(
+      Schema.Struct({
+        kind: Schema.Literals(["never-started", "waiting-on-you", "silent"]),
+        since: IsoDateTime,
+      }),
+    ),
   }),
   /** Untrusted child output: reference data, never instructions or approval. */
   result: Schema.NullOr(
@@ -79,6 +119,17 @@ export const AgentControlTaskStatusEntry = Schema.Struct({
       state: Schema.Literals(["completed", "error"]),
       text: Schema.String.check(Schema.isMaxLength(AGENT_CONTROL_TASK_RESULT_MAX_CHARS)),
       truncated: Schema.Boolean,
+      /**
+       * Set when `text` is a slice of a longer result: pass `version` and
+       * `nextOffsetChars` back as `result` (with this `taskId`) to read on.
+       */
+      version: Schema.optional(AgentControlTaskResultVersion),
+      /** Where `text` starts in the whole (redacted) result. */
+      offsetChars: Schema.optional(NonNegativeInt),
+      /** Length of the whole (redacted) result. */
+      totalChars: Schema.optional(NonNegativeInt),
+      /** Where the next slice starts; null once `text` reaches the end. */
+      nextOffsetChars: Schema.optional(Schema.NullOr(NonNegativeInt)),
     }),
   ),
   /**

@@ -44,11 +44,13 @@ const lockFor = (
     readonly bootTime?: number;
     readonly bootId?: string;
     readonly startTimes?: ReadonlyMap<number, string>;
+    readonly platform?: NodeJS.Platform;
   } = {},
 ) =>
   makeHubIdentityProcessLock({
     path,
     pid,
+    ...(options.platform !== undefined ? { platform: options.platform } : {}),
     bootTime: () => options.bootTime ?? BOOT,
     bootId: async () => options.bootId,
     processStartTime: async (candidate) => options.startTimes?.get(candidate),
@@ -163,6 +165,27 @@ describe("Hub identity process lock", () => {
         startTimes: new Map([[100, "9000"]]),
       }).acquire(),
     ).resolves.toBe("acquired");
+  });
+
+  it("on macOS, tells a live pid that started at another time from the holder", async () => {
+    const path = await lockPath();
+    const alive = new Set([100, 200]);
+    // macOS start times are epoch seconds: the holder's own estimate and `ps`
+    // may differ by a second, so they match within two.
+    const darwin = (startTime: string) =>
+      lockFor(path, 200, alive, {
+        platform: "darwin",
+        bootId: BOOT_ID,
+        startTimes: new Map([[100, startTime]]),
+      });
+    await writeFile(path, `100 ${BOOT} ${BOOT_ID} 1784000000\n`, { mode: 0o600 });
+    await expect(darwin("1784000001").acquire()).resolves.toBe("held");
+    // A macOS lock from before start times were recorded is still trusted.
+    await writeFile(path, `100 ${BOOT} ${BOOT_ID} -\n`, { mode: 0o600 });
+    await expect(darwin("1784000600").acquire()).resolves.toBe("held");
+    // After a crash, pid 100 belongs to a process that started ten minutes later.
+    await writeFile(path, `100 ${BOOT} ${BOOT_ID} 1784000000\n`, { mode: 0o600 });
+    await expect(darwin("1784000600").acquire()).resolves.toBe("acquired");
   });
 
   it("shares one attempt between racing callers, and lets a release win over it", async () => {

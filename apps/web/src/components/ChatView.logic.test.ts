@@ -8,6 +8,7 @@ import {
   ThreadId,
   TurnId,
 } from "@ryco/contracts";
+import { createQuoteCitation, serializeQuoteCitation } from "@ryco/shared/quoteCitations";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { type EnvironmentState, useStore } from "../store";
 import { type ChatMessage, type Thread } from "../types";
@@ -23,10 +24,12 @@ import {
   normalizeInteractionModeForProviderTarget,
   reconcileMountedTerminalThreadIds,
   resolveHeaderLiveAgentCount,
+  resolveSavedEnvironmentUnavailableState,
   resolveSendEnvMode,
   resolveChatSendWorktreePlan,
   shouldShowNewThreadSurface,
   isServerThreadHistoryPending,
+  resolveThreadVisit,
   createThreadSendFlags,
   createThreadSubmitGuard,
   buildChatSendTitleSeed,
@@ -54,6 +57,55 @@ const idleProviderSelectionPolicyInput = {
   environmentAvailable: true,
   isPhoneTier: false,
 };
+
+describe("resolveSavedEnvironmentUnavailableState", () => {
+  const environmentId = EnvironmentId.make("env-studio");
+
+  it("offers Switch on, not Reconnect, for a machine switched off", () => {
+    // Its runtime state is gone with its session: it reads as disconnected.
+    expect(
+      resolveSavedEnvironmentUnavailableState({
+        environmentId,
+        label: "Studio Mac",
+        switchedOff: true,
+        connectionState: "disconnected",
+      }),
+    ).toEqual({ environmentId, label: "Studio Mac", connectionState: "switched-off" });
+    expect(
+      resolveSavedEnvironmentUnavailableState({
+        environmentId,
+        label: "Studio Mac",
+        switchedOff: true,
+        connectionState: "connected",
+      })?.connectionState,
+    ).toBe("switched-off");
+  });
+
+  it("reports a machine that is on by its connection", () => {
+    const state = (connectionState: "connecting" | "connected" | "disconnected" | "error") =>
+      resolveSavedEnvironmentUnavailableState({
+        environmentId,
+        label: "Studio Mac",
+        switchedOff: false,
+        connectionState,
+      })?.connectionState ?? null;
+    expect(state("connected")).toBeNull();
+    expect(state("connecting")).toBe("connecting");
+    expect(state("disconnected")).toBe("disconnected");
+    expect(state("error")).toBe("error");
+  });
+
+  it("is null for a chat on no saved machine", () => {
+    expect(
+      resolveSavedEnvironmentUnavailableState({
+        environmentId: null,
+        label: null,
+        switchedOff: false,
+        connectionState: "connected",
+      }),
+    ).toBeNull();
+  });
+});
 
 describe("resolveHeaderLiveAgentCount", () => {
   it("suppresses only the redundant badge while the Agents roster is visible", () => {
@@ -347,6 +399,23 @@ describe("buildChatSendTitleSeed", () => {
         firstTerminalContextLabel: "Terminal 1",
       }),
     ).toBe("Fix sidebar perf");
+  });
+
+  it("names a quote by its quoted preview", () => {
+    const token = serializeQuoteCitation(
+      createQuoteCitation({
+        source: { environmentId: EnvironmentId.make("env"), threadId: ThreadId.make("thread") },
+        messageId: MessageId.make("message"),
+        selector: { exact: "The passage.", prefix: "", suffix: "", start: 0, end: 12 },
+      }),
+    );
+    expect(
+      buildChatSendTitleSeed({
+        trimmedPrompt: `Why ${token}`,
+        firstImageName: null,
+        firstTerminalContextLabel: null,
+      }),
+    ).toBe("Why “The passage.”");
   });
 
   it("falls back to image and terminal labels", () => {
@@ -1160,6 +1229,44 @@ describe("isServerThreadHistoryPending", () => {
 
   it("never applies to drafts", () => {
     expect(isServerThreadHistoryPending({ ...base, isServerThread: false })).toBe(false);
+  });
+});
+
+describe("resolveThreadVisit", () => {
+  const completedAt = "2026-03-04T12:00:00.000Z";
+  // What Mark unread writes: just before the turn completed.
+  const markedUnread = "2026-03-04T11:59:59.999Z";
+
+  it("marks an unread turn read, and leaves a read one alone", () => {
+    expect(
+      resolveThreadVisit({ completedAt, lastVisitedAt: undefined, seenCompletedAt: null }),
+    ).toBe("visit");
+    expect(
+      resolveThreadVisit({ completedAt, lastVisitedAt: markedUnread, seenCompletedAt: null }),
+    ).toBe("visit");
+    expect(
+      resolveThreadVisit({ completedAt, lastVisitedAt: completedAt, seenCompletedAt: null }),
+    ).toBe("read");
+  });
+
+  it("holds a Mark unread made after this focus showed the turn as read", () => {
+    expect(
+      resolveThreadVisit({
+        completedAt,
+        lastVisitedAt: markedUnread,
+        seenCompletedAt: completedAt,
+      }),
+    ).toBe("hold");
+  });
+
+  it("reads a turn that completes after the thread was marked unread", () => {
+    expect(
+      resolveThreadVisit({
+        completedAt: "2026-03-04T12:05:00.000Z",
+        lastVisitedAt: markedUnread,
+        seenCompletedAt: completedAt,
+      }),
+    ).toBe("visit");
   });
 });
 

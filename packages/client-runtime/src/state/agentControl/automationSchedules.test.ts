@@ -53,6 +53,7 @@ import {
   scheduleProposalOf,
   scheduleRetryState,
   scheduleRowPresentation,
+  runsInWords,
   startFix,
   validateScheduleDraft,
   type ScheduleRow,
@@ -1053,6 +1054,55 @@ describe("drafts", () => {
     });
     expect(local.execution).not.toHaveProperty("baseRef");
     expect(local.execution).toMatchObject({ title: "Spaced", tokenMode: "balanced" });
+  });
+
+  it("saves no branch for a heartbeat, whose runs go to its chat", () => {
+    // A new draft defaults to a worktree off the main checkout's branch; picking a chat must not
+    // keep that branch, which the node would check on every run, hidden from the editor.
+    const draft = {
+      ...draftFromDefinition(twoHourly),
+      envMode: "worktree" as const,
+      baseRef: "feat/x",
+      target: { kind: "thread" as const, threadId: ThreadId.make("thread-ci") },
+    };
+    expect(definitionFromDraft(draft).execution).not.toHaveProperty("baseRef");
+    expect(definitionFromDraft({ ...draft, target: null }).execution.baseRef).toBe("feat/x");
+  });
+
+  it("carries a heartbeat's chat through an edit, and names where runs go", () => {
+    const heartbeat = {
+      ...twoHourly,
+      execution: {
+        ...twoHourly.execution,
+        target: { kind: "thread" as const, threadId: ThreadId.make("thread-ci") },
+      },
+    };
+    const draft = draftFromDefinition(heartbeat);
+    expect(draft.target).toEqual({ kind: "thread", threadId: "thread-ci" });
+    expect(definitionFromDraft({ ...draft, title: "Check CI" }).execution.target).toEqual({
+      kind: "thread",
+      threadId: "thread-ci",
+    });
+    expect(definitionFromDraft(draftFromDefinition(twoHourly)).execution).not.toHaveProperty(
+      "target",
+    );
+    expect(runsInWords(heartbeat.execution)).toBe("an existing chat");
+    expect(runsInWords(twoHourly.execution)).toBe("a new worktree");
+    expect(
+      diffScheduleDefinitions(twoHourly, heartbeat, {
+        nowMs: T(2026, 10, 7, 12, 0),
+        runtimeModeLabel: (mode) => mode,
+      }).map((row) => [row.key, row.before, row.after]),
+    ).toEqual([["runsIn", "a new worktree", "an existing chat"]]);
+  });
+
+  it("carries run without asking, and writes the policy only when it is on", () => {
+    const asking = draftFromDefinition(twoHourly);
+    expect(asking.runWithoutAsking).toBe(false);
+    expect(definitionFromDraft(asking)).not.toHaveProperty("runPolicy");
+    const unattended = definitionFromDraft({ ...asking, runWithoutAsking: true });
+    expect(unattended.runPolicy).toBe("run-without-asking");
+    expect(draftFromDefinition(unattended).runWithoutAsking).toBe(true);
   });
 
   it("keeps a worktree schedule without a branch without one", () => {

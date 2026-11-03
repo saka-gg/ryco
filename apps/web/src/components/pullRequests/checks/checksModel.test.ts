@@ -23,11 +23,9 @@ import {
 } from "../testing/pullRequestFixtures";
 import {
   buildPullRequestChecksModel,
-  checkStateOverall,
   checksJobExpansionWrites,
   checksJobMemoryKey,
   checksSummarySegments,
-  formatWorkflowDuration,
   isChecksJobExpanded,
   orderByCheckGroup,
   resolveChecksJobParam,
@@ -367,26 +365,5 @@ describe("job expansion memory", () => {
     // Opened by hand, it stays open after the job stops failing.
     expect(isChecksJobExpanded(reopened, failingKey, false)).toBe(true);
     expect(apply([], passingKey, false, false)).toEqual([]);
-  });
-});
-
-describe("checkStateOverall", () => {
-  it("maps job states onto the four-way glyph", () => {
-    expect(checkStateOverall("failure")).toBe("failing");
-    expect(checkStateOverall("cancelled")).toBe("failing");
-    expect(checkStateOverall("running")).toBe("pending");
-    expect(checkStateOverall("pending")).toBe("none");
-    expect(checkStateOverall("neutral")).toBe("passing");
-    expect(checkStateOverall("skipped")).toBe("none");
-  });
-});
-
-describe("formatWorkflowDuration", () => {
-  it("formats seconds, minutes and hours", () => {
-    expect(formatWorkflowDuration(null)).toBeNull();
-    expect(formatWorkflowDuration(48_000)).toBe("48s");
-    expect(formatWorkflowDuration(131_000)).toBe("2m 11s");
-    expect(formatWorkflowDuration(120_000)).toBe("2m");
-    expect(formatWorkflowDuration(3_840_000)).toBe("1h 4m");
   });
 });

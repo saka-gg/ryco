@@ -1,11 +1,11 @@
 // @effect-diagnostics nodeBuiltinImport:off
 // @effect-diagnostics globalDate:off
 import { createHash } from "node:crypto";
-import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 
 import type { UsageProviderKind } from "@ryco/contracts";
+import { REGULAR_FILE_READ_FLAGS } from "@ryco/shared/regularFile";
 
 import { parseClaudeTranscriptLine } from "./claudeTranscript.ts";
 import {
@@ -358,10 +358,7 @@ async function readTranscript(
     signal?.throwIfAborted();
     const pathBefore = await NodeFSP.lstat(filePath);
     if (!pathBefore.isFile() || pathBefore.isSymbolicLink()) return null;
-    file = await NodeFSP.open(
-      filePath,
-      NodeFS.constants.O_RDONLY | NodeFS.constants.O_NOFOLLOW | NodeFS.constants.O_NONBLOCK,
-    );
+    file = await NodeFSP.open(filePath, REGULAR_FILE_READ_FLAGS);
     const before = await file.stat();
     if (
       before.dev !== pathBefore.dev ||

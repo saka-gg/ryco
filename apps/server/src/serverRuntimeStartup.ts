@@ -4,7 +4,8 @@ import {
   callbackRepositories,
   pendingCallbackInvalidation,
 } from "./orchestration/approvalResponses.ts";
-import { derivePendingThreadRequests } from "@ryco/shared/threadActivity";
+import { pendingSecretRequests } from "@ryco/shared/secretRequestState";
+import { derivePendingProviderCallbackRequests } from "@ryco/shared/threadActivity";
 import {
   TURN_FINALIZATION_REASON,
   fallbackReleasedTurnState,
@@ -75,6 +76,7 @@ import { RepositoryIdentityResolver } from "./project/Services/RepositoryIdentit
 import { Keybindings } from "./keybindings.ts";
 import { Open } from "./open.ts";
 import { currentCommandReadModel } from "./orchestration/currentCommandReadModel.ts";
+import { findThreadInArray } from "./orchestration/threadIndex.ts";
 import { ContextHandoffService } from "./orchestration/contextHandoff/ContextHandoffService.ts";
 import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -105,6 +107,7 @@ import {
   formatHostForUrl,
   isWildcardHost,
   issueHeadlessServeAccessInfo,
+  loadTerminalQrCode,
 } from "./startupAccess.ts";
 
 export const DEFAULT_STARTUP_COMMAND_GATE_MAX_PENDING = 2_048;
@@ -378,6 +381,10 @@ export const makeCommandGate = (options: CommandGateOptions = {}) =>
 
 export const recordStartupHeartbeat = Effect.gen(function* () {
   const analytics = yield* AnalyticsService;
+  // The counts only feed the heartbeat; skip the query when telemetry is off.
+  if (!analytics.enabled) {
+    return;
+  }
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
 
   const { threadCount, projectCount } = yield* projectionSnapshotQuery.getCounts().pipe(
@@ -517,9 +524,9 @@ const maybeOpenBrowser = (target: string) =>
 
     yield* openBrowser(target).pipe(
       Effect.catch(() =>
-        Effect.logInfo("browser auto-open unavailable", {
-          hint: `Open ${target} in your browser.`,
-        }),
+        Effect.logInfo("browser auto-open unavailable").pipe(
+          Effect.andThen(Console.log(`Open ${target} in your browser.`)),
+        ),
       ),
     );
   });
@@ -532,6 +539,21 @@ const runStartupPhase = <A, E, R>(phase: string, effect: Effect.Effect<A, E, R>)
       Effect.withSpan(`server.startup.${phase}`),
     ),
   );
+
+/**
+ * Shows the browser target and opens it. Outside desktop mode the target is a pairing URL holding
+ * a one-time owner credential, so it is printed to the terminal and never logged: log records
+ * reach the trace file and, when traces or logs are exported, an OTLP collector.
+ */
+export const presentStartupBrowserTarget = (target: string) =>
+  Effect.gen(function* () {
+    const serverConfig = yield* ServerConfig;
+    if (serverConfig.mode !== "desktop") {
+      yield* Effect.logInfo("Authentication required. Open Ryco using the pairing URL below.");
+      yield* Console.log(`Pairing URL: ${target}`);
+    }
+    yield* runStartupPhase("browser.open", maybeOpenBrowser(target));
+  });
 
 const incompatibleWorkspaceStateError = (cause: unknown) =>
   new ServerRuntimeStartupError({
@@ -699,6 +721,36 @@ const repairHandoffDigestFailures = Effect.fn("repairHandoffDigestFailures")(fun
 });
 
 /**
+ * Secret requests (`ryco_request_secret`) outlive a restart, but their expiry timers do not: set
+ * them again, and sweep what an answer that crashed mid-write left behind. Their module loads
+ * only when a request is pending.
+ */
+const rescheduleSecretRequestExpiries = (
+  snapshot: OrchestrationReadModel,
+  engine: typeof OrchestrationEngineService.Service,
+  projections: typeof ProjectionSnapshotQuery.Service,
+) =>
+  snapshot.threads.some(
+    (thread) => thread.deletedAt === null && pendingSecretRequests(thread.activities).length > 0,
+  )
+    ? Effect.promise(() => import("./secretRequests/secretRequests.ts")).pipe(
+        Effect.flatMap((module) =>
+          module.reconcileSecretRequestsAfterRestart(
+            { engine, projections, findThreadInArray },
+            snapshot.threads,
+          ),
+        ),
+        Effect.catchCause((cause) =>
+          Cause.hasInterrupts(cause)
+            ? Effect.failCause(cause)
+            : Effect.logWarning("failed to schedule secret request expiries", {
+                cause: Cause.pretty(cause),
+              }),
+        ),
+      )
+    : Effect.void;
+
+/**
  * Settle projected provider sessions whose native process did not survive this
  * server process, and put back to rest the ones a handoff left in the digest
  * error. This runs after the provider/orchestration roots subscribe, but before
@@ -716,6 +768,7 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
   // command read model in memory; hydrating it from SQL again cost a full read per boot.
   const snapshot = yield* currentCommandReadModel(orchestrationEngine, projectionSnapshotQuery);
   yield* settleStaleProjectedTurns(snapshot);
+  yield* rescheduleSecretRequestExpiries(snapshot, orchestrationEngine, projectionSnapshotQuery);
 
   const liveSessionsExit = yield* Effect.exit(providerService.listSessions());
   if (Exit.isFailure(liveSessionsExit)) {
@@ -738,7 +791,7 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
   // inbox summary, conversation and settlement policy all recover together.
   for (const thread of snapshot.threads) {
     if (thread.deletedAt !== null) continue;
-    for (const request of derivePendingThreadRequests(thread.activities)) {
+    for (const request of derivePendingProviderCallbackRequests(thread.activities)) {
       const payload = yield* pendingCallbackInvalidation({
         threadId: thread.id,
         ...request,
@@ -1205,17 +1258,13 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
         });
         yield* runStartupPhase(
           "headless.output",
-          Console.log(formatHeadlessServeOutput(accessInfo)),
+          Effect.flatMap(loadTerminalQrCode, (renderQrCode) =>
+            Console.log(formatHeadlessServeOutput(accessInfo, renderQrCode)),
+          ),
         );
       } else {
         yield* Effect.logDebug("startup phase: browser open check");
-        const startupBrowserTarget = yield* resolveStartupBrowserTarget;
-        if (serverConfig.mode !== "desktop") {
-          yield* Effect.logInfo("Authentication required. Open Ryco using the pairing URL.").pipe(
-            Effect.annotateLogs({ pairingUrl: startupBrowserTarget }),
-          );
-        }
-        yield* runStartupPhase("browser.open", maybeOpenBrowser(startupBrowserTarget));
+        yield* presentStartupBrowserTarget(yield* resolveStartupBrowserTarget);
       }
       yield* Effect.logInfo("startup phase complete", {
         durationMs: Date.now() - runtimeStartedAt,

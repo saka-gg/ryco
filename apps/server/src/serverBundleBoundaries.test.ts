@@ -124,12 +124,35 @@ describe("server boot import boundaries", () => {
 
   it("keeps the process entry free of the server graph", () => {
     const graph = staticGraph("src/bin.ts");
+    // A node update's preflight handshake and the service-start check that loads the boot guard
+    // (bootGuard.ts, through import()) run before the server graph: node builtins only.
     expect(graph.files.toSorted()).toEqual([
       "apps/server/src/agentControl/stdioProxyProtocol.ts",
       "apps/server/src/bin.ts",
       "apps/server/src/compileCache.ts",
+      "apps/server/src/nodeUpdate/updateProtocol.ts",
+      "apps/server/src/service/nodeServiceManager.ts",
     ]);
-    expect(graph.externals).toEqual(["node:module"]);
+    expect(graph.externals.toSorted()).toEqual(["node:fs", "node:module"]);
+  });
+
+  it("rolls back a node update without loading what it guards", () => {
+    // The boot guard runs before the server graph, so that a release that cannot load it is
+    // still rolled back; the update itself (cliUpdate.ts) stays off the serve path.
+    const guard = staticGraph("src/nodeUpdate/bootGuard.ts");
+    expect(guard.files.toSorted()).toEqual([
+      "apps/server/src/nodeUpdate/bootGuard.ts",
+      "apps/server/src/nodeUpdate/updateProtocol.ts",
+    ]);
+    expect(guard.externals.every((specifier) => specifier.startsWith("node:"))).toBe(true);
+    const serve = staticGraph("src/cliMain.ts");
+    expect(
+      serve.files.filter((file) =>
+        /^apps\/server\/src\/nodeUpdate\/(?:bootGuard|cliUpdate|preflight|processes)\.ts$/u.test(
+          file,
+        ),
+      ),
+    ).toEqual([]);
   });
 
   it("loads the Agent Control stdio proxy without the server graph", () => {
@@ -142,16 +165,21 @@ describe("server boot import boundaries", () => {
     const graph = staticGraph("src/cliMain.ts");
     // Image processing loads on first use (`loadSharp`).
     expect(graph.externals).not.toContain("sharp");
-    // Only the patch parser; the package root pulls in shiki and its grammars.
-    expect(graph.externals).not.toContain("@pierre/diffs");
+    // The patch parser loads with the first turn diff summary; the package root pulls in shiki
+    // and its grammars.
+    expect(graph.externals.filter((specifier) => specifier.startsWith("@pierre/diffs"))).toEqual(
+      [],
+    );
     // Provider SDKs load with their driver's adapter (chat forks read resume cursors from the
     // SDK-free cursor modules).
     expect(graph.externals.filter((specifier) => PROVIDER_SDKS.test(specifier))).toEqual([]);
-    // Protocol schemas load with the Codex/ACP features that use them. The error classes are
-    // schema-free (chat forks classify Codex request failures with them).
+    // The OpenCode 2 client loads with the 2.x facade.
+    expect(graph.externals.filter((specifier) => specifier.startsWith("@opencode/"))).toEqual([]);
+    // Protocol schemas load with the Codex/ACP features that use them, and so do the error
+    // classes chat forks classify Codex request failures with (with the native fork code).
     expect(
       graph.files.filter((file) => file.startsWith("packages/effect-codex-app-server/")),
-    ).toEqual(["packages/effect-codex-app-server/src/errors.ts"]);
+    ).toEqual([]);
     expect(graph.files.filter((file) => file.startsWith("packages/effect-acp/"))).toEqual([]);
     // `ryco remote` client stores load with that command only.
     expect(
@@ -159,9 +187,105 @@ describe("server boot import boundaries", () => {
     ).toEqual([]);
   });
 
+  it("loads the working-tree comparison with its first read", () => {
+    // GitComparison imports it with import(): committed comparisons never build its scratch index.
+    const target = "apps/server/src/vcs/GitWorkingTreeComparison.ts";
+    expect(staticGraph("src/cliMain.ts").files).not.toContain(target);
+    expect(staticGraph("src/cliMain.ts", { dynamic: true }).files).toContain(target);
+  });
+
+  it("loads the pull request watch fingerprint with the GitHub client", () => {
+    // Its query, decoder and batching board ride with GitHubCli, which loads on first GitHub
+    // use; the row reads that stand on it load with the first row read.
+    const graph = staticGraph("src/cliMain.ts");
+    expect(
+      graph.files.filter((file) =>
+        /\/sourceControl\/(?:gitHubPullRequestWatchFingerprint|gitHubPullRequestFingerprintBoard|changeRequestRowRevalidation)\.ts$/u.test(
+          file,
+        ),
+      ),
+    ).toEqual([]);
+    expect(staticGraph("src/cliMain.ts", { dynamic: true }).files).toContain(
+      "apps/server/src/sourceControl/changeRequestRowRevalidation.ts",
+    );
+  });
+
+  it("loads the pull request watch sweep after the server serves", () => {
+    // Only the thin service layer is on the serve path; the sweep, its host-read adapters and
+    // the shared decision rules load through import() once commands are admitted.
+    const graph = staticGraph("src/cliMain.ts");
+    expect(
+      graph.files.filter((file) =>
+        /(?:\/sourceControl\/(?:pullRequestWatchSweep|pullRequestWatchObservation)|\/persistence\/wakeStartDelivery|packages\/shared\/src\/pullRequestWatch)\.ts$/u.test(
+          file,
+        ),
+      ),
+    ).toEqual([]);
+    expect(graph.files).toContain("apps/server/src/sourceControl/PullRequestWatchService.ts");
+    expect(staticGraph("src/cliMain.ts", { dynamic: true }).files).toContain(
+      "apps/server/src/sourceControl/pullRequestWatchSweep.ts",
+    );
+  });
+
+  it("loads the command watch runner, its rules, its SQL and its tools after the server serves", () => {
+    // Only the thin service layer and the two loaders are on the serve path; the runner, the
+    // decider's command watch rules, the projection SQL, the Agent Control tools and the shared
+    // run rules (with the output sanitiser) load through import().
+    const lazy =
+      /(?:apps\/server\/src\/(?:commandWatch\/commandWatchRuntime|orchestration\/commandWatchUpdates|persistence\/commandWatchProjection|agentControl\/Mcp\/commandWatchTools)|packages\/shared\/src\/(?:commandWatch|untrustedText))\.ts$/u;
+    const graph = staticGraph("src/cliMain.ts");
+    expect(graph.files.filter((file) => lazy.test(file))).toEqual([]);
+    expect(graph.files).toContain("apps/server/src/commandWatch/CommandWatchService.ts");
+    expect(
+      staticGraph("src/cliMain.ts", { dynamic: true })
+        .files.filter((file) => lazy.test(file))
+        .toSorted(),
+    ).toEqual([
+      "apps/server/src/agentControl/Mcp/commandWatchTools.ts",
+      "apps/server/src/commandWatch/commandWatchRuntime.ts",
+      "apps/server/src/orchestration/commandWatchUpdates.ts",
+      "apps/server/src/persistence/commandWatchProjection.ts",
+      "packages/shared/src/commandWatch.ts",
+      "packages/shared/src/untrustedText.ts",
+    ]);
+  });
+
+  it("loads the native fork copies with the first native fork", () => {
+    // Acceptance needs only the configuration fingerprint; the Codex and Claude copy code loads
+    // with the first native fork, pin or cleanup.
+    const graph = staticGraph("src/cliMain.ts");
+    expect(graph.files).toContain("apps/server/src/threadFork/nativeForkFingerprint.ts");
+    expect(graph.files).not.toContain("apps/server/src/threadFork/nativeFork.ts");
+    expect(staticGraph("src/cliMain.ts", { dynamic: true }).files).toContain(
+      "apps/server/src/threadFork/nativeFork.ts",
+    );
+  });
+
+  it("loads the carried fork checks and acceptance with the first carried fork", () => {
+    // The fork service at boot only hands its helpers over and calls import(); the checks, the
+    // acceptance and the shared carried rules load with the first `threads.forkCarried`.
+    const lazy =
+      /(?:apps\/server\/src\/threadFork\/carriedFork|packages\/shared\/src\/carriedFork)\.ts$/u;
+    const graph = staticGraph("src/cliMain.ts");
+    expect(graph.files.filter((file) => lazy.test(file))).toEqual([]);
+    expect(graph.files).toContain("apps/server/src/threadFork/Layers/ThreadFork.ts");
+    expect(
+      staticGraph("src/cliMain.ts", { dynamic: true })
+        .files.filter((file) => lazy.test(file))
+        .toSorted(),
+    ).toEqual(["apps/server/src/threadFork/carriedFork.ts", "packages/shared/src/carriedFork.ts"]);
+  });
+
   it("keeps optional feature stacks off the serve path", () => {
     const graph = staticGraph("src/cliMain.ts");
     const reached = (pattern: RegExp) => graph.files.filter((file) => pattern.test(file));
+    // Test helpers (replay transports, tripwires, fakes) and captured fixtures never load, not
+    // even lazily.
+    expect(
+      staticGraph("src/bin.ts", { dynamic: true }).files.filter((file) =>
+        /\/(?:testUtils|testFixtures)\//u.test(file),
+      ),
+    ).toEqual([]);
     // Native Computer use loads only when Desktop hands over a native bridge; the turn
     // lifecycle and the tool guidance the provider reactor reads stay eager.
     expect(reached(/^apps\/server\/src\/computer\//u).toSorted()).toEqual([
@@ -177,11 +301,279 @@ describe("server boot import boundaries", () => {
     ).toEqual([]);
     expect(reached(/^packages\/shared\/src\/relayE2ee(?!Constants)/u)).toEqual([]);
     expect(graph.externals.filter((specifier) => specifier.startsWith("@noble/"))).toEqual([]);
+    // The SSH device backend and its host protocol load only when a node configures an SSH
+    // device host.
+    expect(
+      reached(/^apps\/server\/src\/device\/(?:SshDeviceBackend|deviceHostProtocol)\.ts$/u),
+    ).toEqual([]);
+    // Forge failure classification loads with the forge clients. Only the import-free HTTP
+    // status and header helpers the eager Forgejo client reads are on the serve path.
+    expect(
+      reached(/^apps\/server\/src\/sourceControl\/forge(?:Failure|HttpRateLimit)\.ts$/u),
+    ).toEqual(["apps/server/src/sourceControl/forgeHttpRateLimit.ts"]);
+    // The forge rate-limit pause loads with the providers it guards. Only the import-free
+    // refusal check the boot-path caches read is on the serve path.
+    expect(
+      reached(/^apps\/server\/src\/sourceControl\/forge(?:RateLimit|RequestPaused)\.ts$/u),
+    ).toEqual(["apps/server/src/sourceControl/forgeRequestPaused.ts"]);
     // Source-control clients load with the provider that uses them (Forgejo answers
     // synchronous remote detection and stays eager).
     expect(
       reached(
         /^apps\/server\/src\/sourceControl\/(?:GitHubCli|GitLabCli|BitbucketApi|AzureDevOpsCli|gitHubPullRequests|gitLabMergeRequests|bitbucketPullRequests|azureDevOpsPullRequests)\.ts$/u,
+      ),
+    ).toEqual([]);
+    // Database backups load once a migration is pending, their background pass runs or a
+    // `ryco db` command runs (dbRun.ts); startup only needs databaseBackupPolicy.ts.
+    expect(
+      reached(/^apps\/server\/src\/(?:persistence\/databaseBackups|cliDb\/dbRun)\.ts$/u),
+    ).toEqual([]);
+    // Storage cleanup loads its checks and removal on first use: the status check and the
+    // quarantined removal, and the cache folder (node_modules) check and background purge.
+    expect(
+      reached(/^apps\/server\/src\/storage\/(?:cacheFolders|quarantineRemoval)\.ts$/u),
+    ).toEqual([]);
+    // Merge proofs for checkout removal (squash-merged pull requests, the remote default
+    // branch) load with the first checkout whose branch the project HEAD lacks.
+    expect(reached(/^apps\/server\/src\/sourceControl\/checkoutMergeProver\.ts$/u)).toEqual([]);
+    // OpenCode 2.x support (facade, mappings, event translation) loads once a server is detected
+    // as 2.x.
+    expect(reached(/^apps\/server\/src\/provider\/openCodeV2\w*\.ts$/u)).toEqual([]);
+    // The OpenCode MCP config adapter loads with the first MCP settings or Agent Control call
+    // that reaches OpenCode.
+    expect(reached(/^apps\/server\/src\/mcp\/adapters\/OpenCodeMcpConfig\.ts$/u)).toEqual([]);
+    // Provider sign-in flows load with the first sign-in call; boot carries only the facade.
+    expect(reached(/^apps\/server\/src\/provider\/signIn\//u)).toEqual([
+      "apps/server/src/provider/signIn/ProviderSignIn.ts",
+    ]);
+    // The preview browser's launcher loads with the first HTML preview or measurement (and with
+    // node browser tabs); boot carries the render service and the pinned browser's install.
+    expect(
+      reached(
+        /^apps\/server\/src\/htmlRender\/(?:headlessChrome|cdpPipeBrowser|cdpFrameReader|publicProxy)\.ts$/u,
+      ),
+    ).toEqual([]);
+    // Node browser tabs load with the first node browser call or frame socket; boot carries only
+    // the facade and the frame route.
+    expect(reached(/^apps\/server\/src\/nodeBrowser\//u).toSorted()).toEqual([
+      "apps/server/src/nodeBrowser/NodeBrowser.ts",
+      "apps/server/src/nodeBrowser/nodeBrowserRoute.ts",
+    ]);
+    expect(staticGraph("src/bin.ts", { dynamic: true }).files).toContain(
+      "apps/server/src/nodeBrowser/nodeBrowserRuntime.ts",
+    );
+    // Agent-advertised slash commands are normalized in the driver chunks that receive them.
+    expect(
+      reached(/^apps\/server\/src\/provider\/(?:providerSlashCommands|openCodeCommands)\.ts$/u),
+    ).toEqual([]);
+    // The heap snapshot writer loads with the first SIGUSR2, the event-loop stall history reader
+    // with the first Diagnostics snapshot.
+    expect(
+      reached(/^apps\/server\/src\/observability\/(?:HeapSnapshot|EventLoopStallHistory)\.ts$/u),
+    ).toEqual([]);
+    // Recreating a recorded checkout (Restore, or a turn start that finds it missing) loads its
+    // routine and Git's registration rule on first use.
+    expect(
+      reached(
+        /^apps\/server\/src\/(?:workspace\/checkoutRecreation|vcs\/worktreeRegistrationReplacement)\.ts$/u,
+      ),
+    ).toEqual([]);
+    // The OTEL variable resolver and the OTLP exporters load only when an export is configured,
+    // and the `ryco trace summary` implementation only when that command runs.
+    expect(
+      reached(
+        /^apps\/server\/src\/(?:observability\/(?:OtelEnvironmentResolver|OtlpExporters)|cliTrace\/(?:traceRun|traceSummary))\.ts$/u,
+      ),
+    ).toEqual([]);
+    // The usage pipeline loads with the first usage summary, or shortly after boot on a node that
+    // has downloaded rates before. Storage cleanup protects provider history paths eagerly.
+    expect(reached(/^apps\/server\/src\/usage\//u).toSorted()).toEqual([
+      "apps/server/src/usage/UsageServiceDeferred.ts",
+      "apps/server/src/usage/UsageServiceTag.ts",
+      "apps/server/src/usage/usageDay.ts",
+      "apps/server/src/usage/usageProtectedPaths.ts",
+    ]);
+    // The ACP runtime loads with its drivers, the ACP Registry catalog with the first registry
+    // search or install.
+    expect(reached(/^apps\/server\/src\/provider\/acp\//u)).toEqual([]);
+    // Agent device tool actions, evidence, waits, logs and the driving guide load with the first
+    // device tool call, the tool catalogue with the first `tools/list`; Agent Control's
+    // ryco_device and its consent index where devices exist.
+    expect(
+      reached(
+        /^apps\/server\/src\/(?:device\/(?:deviceObservation|deviceUiSnapshot|deviceLogs)|providerTools\/deviceTool(?:Actions|Guidance|Definitions)|agentControl\/(?:Mcp\/deviceRoutineTools|deviceControlConsent))\.ts$/u,
+      ),
+    ).toEqual([]);
+    // The follow-up queue drain loads once commands are admitted; the boot path holds only its
+    // layer (and the decider's and projector's queue rules).
+    expect(reached(/^apps\/server\/src\/orchestration\/serverQueueDrainRuntime\.ts$/u)).toEqual([]);
+    // Delegation slots load with the first queue held for one (a capped ryco_create_threads).
+    expect(reached(/^apps\/server\/src\/agentControl\/delegationSlotRuntime\.ts$/u)).toEqual([]);
+    // The provider update runner (with its unattended pinning and release-age rules) loads with
+    // the first update, the host-wide provider install lock (and its busy markers) with the first
+    // install, provider session start or busy period; boot carries their facades.
+    expect(
+      reached(
+        /^apps\/server\/src\/provider\/provider(?:InstallLock|MaintenanceRunnerRuntime|UpdatePinning|ReleaseAge)\.ts$/u,
+      ),
+    ).toEqual([]);
+    expect(graph.files).toContain("apps/server/src/provider/Layers/ProviderInstallLock.ts");
+    expect(graph.files).toContain("apps/server/src/provider/providerMaintenanceRunner.ts");
+    const reachable = staticGraph("src/cliMain.ts", { dynamic: true }).files;
+    expect(reachable).toContain("apps/server/src/provider/providerInstallLock.ts");
+    expect(reachable).toContain("apps/server/src/provider/providerMaintenanceRunnerRuntime.ts");
+    // Forgejo's review, merge readiness and diff line code loads with its pull request page API,
+    // the first time a Forgejo pull request is listed, opened or changed. The eager client keeps
+    // only the draft title rule (forgejoPullRequests.ts).
+    expect(
+      reached(
+        /^apps\/server\/src\/sourceControl\/forgejo(?:PullRequestActivity|PullRequestMutations|PullRequestReadiness|DiffLines)\.ts$/u,
+      ),
+    ).toEqual([]);
+    // The setup guide and node manager load when `ryco setup`, `ryco config edit` or a bare
+    // `ryco` in a terminal opens them; the turn diff parser with the first turn diff summary.
+    expect(
+      reached(/^apps\/server\/src\/(?:cliSetup\/(?:setupFlow|machine)|checkpointing\/Diffs)\.ts$/u),
+    ).toEqual([]);
+    const loadable = staticGraph("src/bin.ts", { dynamic: true }).files;
+    for (const file of [
+      "apps/server/src/sourceControl/forgejoPullRequestMutations.ts",
+      "apps/server/src/cliSetup/setupFlow.ts",
+      "apps/server/src/checkpointing/Diffs.ts",
+    ]) {
+      expect(loadable).toContain(file);
+    }
+    // Unattended updates: boot holds the interaction clock (the RPC writes it), the counter that
+    // clones, checkouts and storage cleanup write, the launcher, which loads the window and the
+    // updaters only once a node's owner turns them on, and the small reporter that tells a
+    // desktop app the setting from the start.
+    expect(reached(/^apps\/server\/src\/updates\//u).toSorted()).toEqual([
+      "apps/server/src/updates/ClientInteraction.ts",
+      "apps/server/src/updates/desktopAppUpdatePolicy.ts",
+      "apps/server/src/updates/restartSensitiveWork.ts",
+      "apps/server/src/updates/unattendedUpdatesLauncher.ts",
+    ]);
+    expect(reachable).toEqual(
+      expect.arrayContaining([
+        "apps/server/src/updates/unattendedUpdates.ts",
+        "apps/server/src/updates/providerAutoUpdater.ts",
+        "apps/server/src/updates/nodeAutoUpdater.ts",
+        "apps/server/src/updates/nodeAutoSkip.ts",
+        "apps/server/src/updates/updateWindow.ts",
+      ]),
+    );
+  });
+
+  it("loads the copy of Ryco's data into Ryco Nightly only when one was asked for", () => {
+    // Boot checks for the request (flavorImportStartup.ts); the copy, its table policy and the
+    // backup code it uses load with import().
+    const graph = staticGraph("src/cliMain.ts");
+    expect(graph.files).toContain("apps/server/src/flavorImportStartup.ts");
+    expect(graph.files.filter((file) => file.startsWith("apps/server/src/flavorImport/"))).toEqual(
+      [],
+    );
+    expect(staticGraph("src/cliMain.ts", { dynamic: true }).files).toContain(
+      "apps/server/src/flavorImport/consumeFlavorImport.ts",
+    );
+  });
+
+  it("loads the repository clone runner with the first clone", () => {
+    const graph = staticGraph("src/cliMain.ts");
+    expect(graph.files).toContain(
+      "apps/server/src/sourceControl/SourceControlRepositoryService.ts",
+    );
+    expect(graph.files).not.toContain("apps/server/src/sourceControl/gitCloneRun.ts");
+  });
+
+  it("loads the cross-repository involvement read on its first call", () => {
+    // `sourceControl.listInvolvedChangeRequests` imports it with import(); a static import
+    // anywhere on the serve path would put it in every boot.
+    const graph = staticGraph("src/cliMain.ts");
+    expect(
+      graph.files.filter((file) =>
+        /^apps\/server\/src\/sourceControl\/involvedChangeRequests\.ts$/u.test(file),
+      ),
+    ).toEqual([]);
+    // It is reachable at all (the handler's import() points at the file this test guards).
+    expect(staticGraph("src/cliMain.ts", { dynamic: true }).files).toContain(
+      "apps/server/src/sourceControl/involvedChangeRequests.ts",
+    );
+  });
+
+  it("loads the open-file watch with its first subscription", () => {
+    // `projects.subscribeFileChanges` imports it with import(); a static import anywhere on the
+    // serve path would put it in every boot.
+    const watch = "apps/server/src/workspace/workspaceFileWatch.ts";
+    expect(staticGraph("src/cliMain.ts").files).not.toContain(watch);
+    expect(staticGraph("src/cliMain.ts", { dynamic: true }).files).toContain(watch);
+  });
+
+  it("loads the thread local server monitor with its first subscription or stop", () => {
+    // `threads.subscribeLocalServers` and `threads.stopLocalServer` import it with import(); the
+    // spawn sites load only the marker helper.
+    const monitor = [
+      "apps/server/src/localServers/threadLocalServerMonitor.ts",
+      "apps/server/src/localServers/localServerScan.ts",
+      "apps/server/src/localServers/localServerTitles.ts",
+    ];
+    const boot = staticGraph("src/cliMain.ts").files;
+    expect(monitor.filter((file) => boot.includes(file))).toEqual([]);
+    expect(boot).toContain("apps/server/src/localServers/threadAttributionEnv.ts");
+    const reachable = staticGraph("src/cliMain.ts", { dynamic: true }).files;
+    expect(monitor.filter((file) => reachable.includes(file))).toEqual(monitor);
+  });
+
+  it("loads secret requests (tool, answer, dotenv writer) on first use, never at boot", () => {
+    // `ryco_request_secret` loads through `withLazyAgentControlTools`, the owner's answer and the
+    // restart's expiry timers through import(); the boot path keeps the activity kinds and the
+    // request derivation the pending-input count reads (`@ryco/shared/secretRequestState`). The
+    // answer's connection check loads with it: boot only records the connection's facts on the
+    // principal.
+    const secretRequests = [
+      "apps/server/src/agentControl/Mcp/secretRequestTools.ts",
+      "apps/server/src/secretRequests/secretRequests.ts",
+      "apps/server/src/secretRequests/dotenvSink.ts",
+      "apps/server/src/ws/rpcConnectionPath.ts",
+      "packages/shared/src/secretRequests.ts",
+    ];
+    const boot = staticGraph("src/cliMain.ts").files;
+    expect(secretRequests.filter((file) => boot.includes(file))).toEqual([]);
+    expect(boot).toContain("apps/server/src/ws/secretRequestRpc.ts");
+    const reachable = staticGraph("src/cliMain.ts", { dynamic: true }).files;
+    expect(secretRequests.filter((file) => reachable.includes(file))).toEqual(secretRequests);
+  });
+
+  it("loads the agents' usage limits read and its limit presentation on the first call", () => {
+    const usageLimits = [
+      "apps/server/src/agentControl/Mcp/usageLimits.ts",
+      "packages/client-runtime/src/usage/limits.ts",
+    ];
+    const boot = staticGraph("src/cliMain.ts").files;
+    expect(usageLimits.filter((file) => boot.includes(file))).toEqual([]);
+    const reachable = staticGraph("src/cliMain.ts", { dynamic: true }).files;
+    expect(usageLimits.filter((file) => reachable.includes(file))).toEqual(usageLimits);
+  });
+
+  it("keeps the direct GitHub API transport behind the GitHub client's import()", () => {
+    const graph = staticGraph("src/cliMain.ts");
+    expect(
+      graph.files.filter((file) =>
+        /^apps\/server\/src\/sourceControl\/gitHub(?:Api|ApiTestServer|Credentials)\.ts$/u.test(
+          file,
+        ),
+      ),
+    ).toEqual([]);
+  });
+
+  it("loads the thread git metadata sync with the first provider event that can use it", () => {
+    const graph = staticGraph("src/cliMain.ts");
+    // The reactor layer at boot is only an event filter and an import(); the sync, its rules,
+    // the command classifier and the tool-command reader load with the first turn.
+    expect(
+      graph.files.filter((file) =>
+        /^(?:apps\/server\/src\/orchestration\/threadGitMetadata(?:Runtime)?|packages\/shared\/src\/(?:vcsCommand|toolActivity))\.ts$/u.test(
+          file,
+        ),
       ),
     ).toEqual([]);
   });
@@ -242,6 +634,18 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     }
   });
 
+  it("loads the node update boot guard with nothing but the entry chunk", () => {
+    const guardChunk = readFileSync(builtEntry, "utf8").match(
+      /import\("(\.\/bootGuard[^"]+)"\)/u,
+    )?.[1];
+    expect(guardChunk).toBeDefined();
+    const guard = builtStaticClosure(path.resolve(serverRoot, "dist", guardChunk!));
+    expect(guard.chunks.map((chunk) => path.basename(chunk)).toSorted()).toEqual(
+      [path.basename(guardChunk!), "bin.mjs"].toSorted(),
+    );
+    expect(guard.externals.every((specifier) => specifier.startsWith("node:"))).toBe(true);
+  });
+
   it("bundles effect and the platform packages instead of resolving them per file", () => {
     const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
     const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
@@ -252,39 +656,258 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     ).toEqual([]);
   });
 
+  it("keeps the pull request watch fingerprint decoder out of the boot chunks", () => {
+    const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
+    const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
+    for (const chunk of serve.chunks) {
+      expect(readFileSync(chunk, "utf8")).not.toMatch(
+        /^\/\/#region src\/sourceControl\/gitHubPullRequestWatchFingerprint\.ts$/mu,
+      );
+    }
+  });
+
+  it("loads the worktree handoff runner and its tools after the server serves", () => {
+    // The executor and the MCP server hold only an import() and the deps they pass in.
+    const lazy =
+      /apps\/server\/src\/(?:agentControl\/(?:worktreeHandoffRuns|Mcp\/worktreeHandoffTools)|orchestration\/threadGitMetadata)\.ts$/u;
+    expect(staticGraph("src/cliMain.ts").files.filter((file) => lazy.test(file))).toEqual([]);
+    expect(
+      staticGraph("src/cliMain.ts", { dynamic: true })
+        .files.filter((file) => lazy.test(file))
+        .toSorted(),
+    ).toEqual([
+      "apps/server/src/agentControl/Mcp/worktreeHandoffTools.ts",
+      "apps/server/src/agentControl/worktreeHandoffRuns.ts",
+      "apps/server/src/orchestration/threadGitMetadata.ts",
+    ]);
+  });
+
   it("keeps the boot chunks within budget", () => {
     const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
     const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
     const bytes = serve.chunks.reduce((total, chunk) => total + statSync(chunk).size, 0);
     // 6.6 MB with effect and the platform packages bundled in, and with Computer use,
     // the Hub connector and the source-control clients behind import(). Raise it only
-    // for code that every boot needs.
-    expect(bytes).toBeLessThan(7_000_000);
+    // for code that every boot needs. 6.91 MB in October 2026; the database owner lock,
+    // event-loop stall monitor, WAL checkpoint worker and database maintenance that every
+    // server starts add about 0.14 MB (their backup, doctor, trace, OTLP and heap-snapshot
+    // code loads through import()). 7.101 MB at the end of October 2026: the in-place
+    // restore's startup check (1.3 KB) and the sidebar rows' fingerprint revalidation
+    // (1.7 KB: the repository list cache's change record, the row read path and the
+    // status poll's rule) passed 7.1 MB. 7.00 MB once Forgejo's review code, the setup guide
+    // and the turn diff parser loaded through import() (-98 KB).
+    expect(bytes).toBeLessThan(7_105_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.
       expect(source).not.toMatch(/^\/\/#region src\/computer\/CuaComputerBackend\.ts$/mu);
+      expect(source).not.toMatch(/^\/\/#region src\/nodeBrowser\/nodeBrowserRuntime\.ts$/mu);
+      // `ryco update` loads when it runs.
+      expect(source).not.toMatch(/^\/\/#region src\/cliNodeUpdate\/updateCommand\.ts$/mu);
+      // The terminal QR encoder loads when a command prints a pairing code.
+      expect(source).not.toMatch(/^\/\/#region \.\.\/\.\.\/packages\/shared\/src\/qrCode\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/hubConnector\/HubIdentityRuntime\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/sourceControl\/GitHubCli\.ts$/mu);
+      // Loaded when a Forgejo pull request is first opened, listed or changed.
+      expect(source).not.toMatch(
+        /^\/\/#region src\/sourceControl\/ForgejoPullRequestPageApi\.ts$/mu,
+      );
+      // Loaded the first time a person sets a delegation limit.
+      expect(source).not.toMatch(/^\/\/#region src\/agentControl\/delegationLimitCheck\.ts$/mu);
+      expect(source).not.toMatch(/^\/\/#region src\/persistence\/delegationTreeQueries\.ts$/mu);
+      // Loaded with the first stall notice a node sends a delegating chat.
+      expect(source).not.toMatch(
+        /^\/\/#region src\/agentControl\/completionReturnStallMessages\.ts$/mu,
+      );
       // Loaded when the external Agent Control integration first starts.
       expect(source).not.toMatch(/^\/\/#region src\/agentControl\/ExternalMcp\/tools\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/agentControl\/ExternalMcp\/listener\.ts$/mu);
+      // Loaded with the first Ryco browser upload.
+      expect(source).not.toMatch(/^\/\/#region src\/agentControl\/Mcp\/browserUploadTool\.ts$/mu);
+      expect(source).not.toMatch(
+        /^\/\/#region src\/agentControl\/Mcp\/browserUploadStaging\.ts$/mu,
+      );
+      // Loaded with the first SIGUSR2 and the first Diagnostics snapshot.
+      expect(source).not.toMatch(/^\/\/#region src\/observability\/HeapSnapshot\.ts$/mu);
+      expect(source).not.toMatch(/^\/\/#region src\/observability\/EventLoopStallHistory\.ts$/mu);
+      // Loaded only when an OTLP export is configured (with Effect's exporters and protobuf
+      // encoder), or when `ryco trace summary` runs.
+      expect(source).not.toMatch(/^\/\/#region src\/observability\/OtlpExporters\.ts$/mu);
+      expect(source).not.toMatch(/^\/\/#region .*\/effect\/dist\/observability\/Otlp\w+\.js$/mu);
+      expect(source).not.toMatch(
+        /^\/\/#region .*\/effect\/dist\/observability\/internal\/\w+\.js$/mu,
+      );
+      expect(source).not.toMatch(/^\/\/#region src\/cliTrace\/traceSummary\.ts$/mu);
+      // Loaded with the first usage summary (UsageServiceDeferred.ts).
+      expect(source).not.toMatch(/^\/\/#region src\/usage\/UsageService\.ts$/mu);
+      // Loaded with the first ACP Registry search or install.
+      expect(source).not.toMatch(/^\/\/#region src\/provider\/acp\/AcpRegistryCatalog\.ts$/mu);
+      // Loaded with the first chunked PDF or image preview.
+      expect(source).not.toMatch(/^\/\/#region src\/workspace\/previewFileChunk\.ts$/mu);
+      // Loaded with the first open-file watch.
+      expect(source).not.toMatch(/^\/\/#region src\/workspace\/workspaceFileWatch\.ts$/mu);
+      // Loaded with the first thread local server subscription or stop.
+      expect(source).not.toMatch(
+        /^\/\/#region src\/localServers\/(?:threadLocalServerMonitor|localServerScan|localServerTitles)\.ts$/mu,
+      );
+      // Loaded once an OpenCode server is detected as 2.x.
+      expect(source).not.toMatch(/^\/\/#region .*@opencode\//mu);
+      expect(source).not.toMatch(/^\/\/#region src\/provider\/openCodeV2\w*\.ts$/mu);
+      // Loaded only on the start of Ryco Nightly after Ryco asked it to copy its data. In case a
+      // module carries no region marker of its own: the copy's refusal text is unique.
+      expect(source).not.toMatch(/^\/\/#region src\/flavorImport\//mu);
+      expect(source).not.toContain("Ryco Nightly copies no links");
+      // Loaded with the first provider sign-in call.
+      expect(source).not.toMatch(
+        /^\/\/#region src\/provider\/signIn\/(?:providerSignInRuntime|codexDeviceCodeSignIn|terminalSignIn|signInCommands|privateDirectory)\.ts$/mu,
+      );
+      // Loaded with the first provider update (the lock also with the first session start).
+      expect(source).not.toMatch(
+        /^\/\/#region src\/provider\/provider(?:InstallLock|MaintenanceRunnerRuntime|UpdatePinning)\.ts$/mu,
+      );
+      // Loaded once a node's owner turns on automatic updates.
+      expect(source).not.toMatch(
+        /^\/\/#region src\/updates\/(?:unattendedUpdates|providerAutoUpdater|nodeAutoUpdater|nodeAutoSkip|updateWindow)\.ts$/mu,
+      );
+      // Loaded with Forgejo's pull request page API.
+      expect(source).not.toMatch(
+        /^\/\/#region src\/sourceControl\/forgejo(?:DiffLines|PullRequestReadiness|PullRequestMutations)\.ts$/mu,
+      );
+      // Loaded when a command opens the setup guide.
+      expect(source).not.toMatch(/^\/\/#region src\/cliSetup\/setupFlow\.ts$/mu);
+      // Loaded with the first turn diff summary.
+      expect(source).not.toMatch(/^\/\/#region .*\/@pierre\/diffs\//mu);
     }
   });
 });
 
+describe.skipIf(!hasCurrentBuild)("built server bundle pull request watches", () => {
+  it("keeps the watch decision rules out of the boot chunks", () => {
+    const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
+    const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
+    const boot = serve.chunks.map((chunk) => readFileSync(chunk, "utf8")).join("\n");
+    // The decider and the shell use the small summary module (it is inlined without a region
+    // marker, so the check names functions); only the watch sweep, which loads after the server
+    // serves, needs the decision rules and the renderers.
+    expect(boot).toContain("function summarizePullRequestWatches(");
+    expect(boot).not.toContain("function decidePullRequestWatch(");
+    expect(boot).not.toContain("function renderPullRequestWatchWake(");
+  });
+
+  it("keeps the carried fork checks and acceptance out of the boot chunks", () => {
+    const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
+    const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
+    for (const chunk of serve.chunks) {
+      expect(readFileSync(chunk, "utf8")).not.toMatch(
+        /^\/\/#region (?:src\/threadFork\/carriedFork|\.\.\/\.\.\/packages\/shared\/src\/carriedFork)\.ts$/mu,
+      );
+    }
+  });
+
+  it("keeps the command watch runner, rules, SQL and tools out of the boot chunks", () => {
+    const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
+    const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
+    for (const chunk of serve.chunks) {
+      expect(readFileSync(chunk, "utf8")).not.toMatch(
+        /^\/\/#region (?:src\/(?:commandWatch\/commandWatchRuntime|orchestration\/commandWatchUpdates|persistence\/commandWatchProjection|agentControl\/Mcp\/commandWatchTools)|\.\.\/\.\.\/packages\/shared\/src\/(?:commandWatch|untrustedText))\.ts$/mu,
+      );
+    }
+  });
+
+  it("keeps the watch sweep and its host-read adapters out of the boot chunks", () => {
+    const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
+    const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
+    for (const chunk of serve.chunks) {
+      expect(readFileSync(chunk, "utf8")).not.toMatch(
+        /^\/\/#region src\/(?:sourceControl\/(?:pullRequestWatchSweep|pullRequestWatchObservation)|persistence\/wakeStartDelivery)\.ts$/mu,
+      );
+    }
+  });
+
+  it("loads the Git writing style code with the first generated commit message", () => {
+    const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
+    const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
+    for (const chunk of serve.chunks) {
+      const source = readFileSync(chunk, "utf8");
+      expect(source).not.toMatch(/^\/\/#region src\/git\/gitWritingPolicy\.ts$/mu);
+      expect(source).not.toMatch(/^\/\/#region src\/textGeneration\/TextGenerationPresets\.ts$/mu);
+      // The example reader's output carries no region marker of its own; its log line is unique.
+      expect(source).not.toContain("repository writing examples: commit subjects unavailable");
+    }
+  });
+
+  it("loads the pull request template reader on first use", () => {
+    const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
+    const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
+    for (const chunk of serve.chunks) {
+      const source = readFileSync(chunk, "utf8");
+      expect(source).not.toMatch(/^\/\/#region src\/sourceControl\/changeRequestTemplates\.ts$/mu);
+      // In case the module carries no region marker of its own: its log line is unique.
+      expect(source).not.toContain("change request templates: read failed");
+    }
+  });
+});
+
+describe.skipIf(!hasCurrentBuild)("built thread git metadata chunks", () => {
+  it("keeps the thread git metadata sync out of the boot chunks", () => {
+    const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
+    const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
+    for (const chunk of serve.chunks) {
+      const source = readFileSync(chunk, "utf8");
+      expect(source).not.toMatch(
+        /^\/\/#region src\/orchestration\/threadGitMetadataRuntime\.ts$/mu,
+      );
+      expect(source).not.toMatch(/^\/\/#region src\/orchestration\/threadGitMetadata\.ts$/mu);
+      expect(source).not.toMatch(
+        /^\/\/#region \.\.\/\.\.\/packages\/shared\/src\/vcsCommand\.ts$/mu,
+      );
+    }
+  });
+});
+
+/** Every specifier the built chunks import, statically or through `import()`. */
+function builtImports(): ReadonlySet<string> {
+  const distDir = path.join(serverRoot, "dist");
+  const imports = new Set<string>();
+  for (const file of readdirSync(distDir)) {
+    if (!file.endsWith(".mjs")) continue;
+    const source = readFileSync(path.join(distDir, file), "utf8");
+    for (const match of source.matchAll(CHUNK_STATIC_IMPORT)) imports.add((match[1] ?? match[2])!);
+    for (const match of source.matchAll(DYNAMIC_IMPORT)) imports.add(match[1]!);
+  }
+  return imports;
+}
+
 describe.skipIf(!hasCurrentBuild)("built server bundle imports", () => {
   it("leaves no import of a patch-added export to the installed package", () => {
     const patchAdded = patchAddedExports();
-    const distDir = path.join(serverRoot, "dist");
-    const external = new Set<string>();
-    for (const file of readdirSync(distDir)) {
-      if (!file.endsWith(".mjs")) continue;
-      const source = readFileSync(path.join(distDir, file), "utf8");
-      for (const match of source.matchAll(CHUNK_STATIC_IMPORT))
-        external.add((match[1] ?? match[2])!);
-      for (const match of source.matchAll(DYNAMIC_IMPORT)) external.add(match[1]!);
+    expect([...builtImports()].filter((specifier) => patchAdded.has(specifier))).toEqual([]);
+  });
+
+  it("bundles the OpenCode 2 client instead of importing the package", () => {
+    // `@opencode/*` are build-time dependencies: the published package does not install them.
+    expect([...builtImports()].filter((specifier) => specifier.startsWith("@opencode/"))).toEqual(
+      [],
+    );
+  });
+});
+
+// Recoverable Git actions: the service and its layer are on the boot path, the runner
+// itself loads with the first recoverable action.
+describe("recoverable git action boundaries", () => {
+  it("keeps the runner off the serve path's static imports", () => {
+    const graph = staticGraph("src/cliMain.ts");
+    expect(graph.files).toContain("apps/server/src/git/GitActionRunner.ts");
+    expect(graph.files).not.toContain("apps/server/src/git/gitActionRunnerCore.ts");
+  });
+
+  it.skipIf(!hasCurrentBuild)("keeps the runner out of the built boot chunks", () => {
+    const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
+    const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
+    for (const chunk of serve.chunks) {
+      expect(readFileSync(chunk, "utf8")).not.toMatch(
+        /^\/\/#region src\/git\/gitActionRunnerCore\.ts$/mu,
+      );
     }
-    expect([...external].filter((specifier) => patchAdded.has(specifier))).toEqual([]);
   });
 });

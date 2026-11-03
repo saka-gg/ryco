@@ -4,6 +4,14 @@
     "allowImportingTsExtensions": true,
     "strict": true
   },
-  "//": "app.config.ts, config/, and plugins/ are Node build-time files (like babel/metro config, which expo excludes); they run under Node and are validated by `expo config`, not the react-native bundler typecheck scope. vitest.config.ts also runs under Node but is included: it checks cleanly here, and no other program typechecks its test list or the options it passes the shared helper.",
-  "include": ["index.ts", "src", "modules", "assets.d.ts", "uniwind-types.d.ts", "vitest.config.ts"]
+  "//": "app.config.ts, config/, and plugins/ are Node build-time files (like babel/metro config, which expo excludes); they run under Node and are validated by `expo config`, not the react-native bundler typecheck scope. vitest.config.ts also runs under Node but is included: it checks cleanly here, and no other program typechecks its test list or the options it passes the shared helper. scripts/ holds Node scripts (run with `node`) that are included for the same reason; each pulls in the Node types with a `/// <reference types=\"node\" />`.",
+  "include": [
+    "index.ts",
+    "src",
+    "modules",
+    "scripts",
+    "assets.d.ts",
+    "uniwind-types.d.ts",
+    "vitest.config.ts"
+  ]
 }

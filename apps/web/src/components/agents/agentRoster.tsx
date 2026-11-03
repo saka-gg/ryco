@@ -14,96 +14,98 @@ import {
   useMemo,
   useRef,
   type CSSProperties,
+  type ReactElement,
   type ReactNode,
 } from "react";
 
+import { visibleSecondTicker } from "~/lib/perf/ticker";
 import { cn } from "~/lib/utils";
 import { subagentAvatarColor } from "../sidebar/SubagentAvatar";
 import {
+  agentActivityText,
   buildAgentRosterIdentity,
+  elapsedBetween,
   resolveAgentRowIdentity,
+  settledDuration,
   splitSubagentLabelScope,
   subagentMonogramInitials,
+  SUBAGENT_STATUS_TEXT,
   type AgentPanelModel,
   type AgentRosterIdentity,
   type RuntimeSubagent,
 } from "../../threadWorkspaceViewModel";
-import {
-  agentActivityText,
-  elapsedBetween,
-  monogramInkColor,
-  settledDuration,
-} from "./agentRoster.logic";
+import { monogramInkColor } from "./agentRoster.logic";
 
 /**
- * Provider phases remain distinct, including resumable idle agents. `word` is
- * the status a row spells out next to its time: running and completed read
- * from the dot and the ticking/frozen time alone, every other state is named
- * so it never depends on color (or on a stale activity line).
+ * Status dot colors. Provider phases remain distinct, including resumable idle
+ * agents; their words are the shared {@link SUBAGENT_STATUS_TEXT}, whose `word`
+ * a row spells out next to its time: running and completed read from the dot
+ * and the ticking/frozen time alone, every other state is named so it never
+ * depends on color (or on a stale activity line).
  */
-export const AGENT_STATUS_VISUALS: Record<
-  RuntimeSubagent["status"],
-  { dotClass: string; label: string; word: { text: string; className: string } | null }
-> = {
-  pending: { dotClass: "bg-info", label: "Queued", word: { text: "Queued", className: "" } },
-  running: { dotClass: "bg-info", label: "Running", word: null },
-  waiting: {
-    dotClass: "bg-info",
-    label: "Waiting",
-    word: { text: "Waiting", className: "text-info-foreground" },
-  },
+const AGENT_STATUS_DOT_CLASS: Record<RuntimeSubagent["status"], string> = {
+  pending: "bg-info",
+  running: "bg-info",
+  waiting: "bg-info",
   // Idle reads as settled (muted, not sky): a resting Codex child looks done
   // unless resumed.
-  idle: {
-    dotClass: "bg-muted-foreground/50",
-    label: "Idle · resumable",
-    word: { text: "Idle", className: "" },
-  },
-  completed: { dotClass: "bg-success", label: "Completed", word: null },
-  failed: {
-    dotClass: "bg-destructive",
-    label: "Failed",
-    word: { text: "Failed", className: "text-destructive-foreground" },
-  },
-  cancelled: {
-    dotClass: "bg-muted-foreground/60",
-    label: "Stopped",
-    word: { text: "Stopped", className: "" },
-  },
-  interrupted: {
-    dotClass: "bg-muted-foreground/60",
-    label: "Interrupted",
-    word: { text: "Interrupted", className: "" },
-  },
+  idle: "bg-muted-foreground/50",
+  completed: "bg-success",
+  failed: "bg-destructive",
+  cancelled: "bg-muted-foreground/60",
+  interrupted: "bg-muted-foreground/60",
 };
+
+/** Status words in their own color; the rest take the row's muted aside color. */
+const AGENT_STATUS_WORD_CLASS: Partial<Record<RuntimeSubagent["status"], string>> = {
+  waiting: "text-info-foreground",
+  failed: "text-destructive-foreground",
+};
+
+/**
+ * Renders around a finished row, e.g. to set a control beside it: a row that
+ * opens its agent is a button, so nothing interactive can go inside it. The
+ * row fills its wrapper, which takes the row's height from
+ * {@link AGENT_ROW_HEIGHT_CLASS}, so a list's divider stays inside that height.
+ */
+export type AgentRowDecorator = (
+  agent: RuntimeSubagent,
+  row: ReactElement,
+  density: AgentRowDensity,
+) => ReactNode;
 
 interface AgentRosterContextValue extends AgentRosterIdentity {
   readonly onOpenAgent: ((agentId: string) => void) | null;
+  readonly decorateRow: AgentRowDecorator | null;
 }
 
 const AgentRosterContext = createContext<AgentRosterContextValue>({
   identities: new Map(),
   labels: new Map(),
   onOpenAgent: null,
+  decorateRow: null,
 });
 
 /**
  * Supplies roster identities for every row below it. With an opener, rows are
- * buttons that open the agent; without one they are static.
+ * buttons that open the agent; without one they are static. A decorator
+ * renders around every row.
  */
 export function AgentRosterProvider({
   model,
   onOpenAgent = null,
+  decorateRow = null,
   children,
 }: {
   model: AgentPanelModel;
   onOpenAgent?: ((agentId: string) => void) | null | undefined;
+  decorateRow?: AgentRowDecorator | null | undefined;
   children: ReactNode;
 }) {
   const identity = useMemo(() => buildAgentRosterIdentity(model), [model]);
   const value = useMemo<AgentRosterContextValue>(
-    () => ({ ...identity, onOpenAgent }),
-    [identity, onOpenAgent],
+    () => ({ ...identity, onOpenAgent, decorateRow }),
+    [identity, onOpenAgent, decorateRow],
   );
   return <AgentRosterContext value={value}>{children}</AgentRosterContext>;
 }
@@ -133,11 +135,7 @@ export function AgentStatusDot({
   return (
     <span
       aria-hidden
-      className={cn(
-        "size-1.5 shrink-0 rounded-full",
-        AGENT_STATUS_VISUALS[status].dotClass,
-        className,
-      )}
+      className={cn("size-1.5 shrink-0 rounded-full", AGENT_STATUS_DOT_CLASS[status], className)}
     />
   );
 }
@@ -173,7 +171,7 @@ export function AgentMonogram({
         data-slot="agent-status-badge"
         className={cn(
           "absolute -right-0.5 -bottom-0.5 size-[7px] rounded-full ring-[1.5px] ring-background",
-          AGENT_STATUS_VISUALS[agent.status].dotClass,
+          AGENT_STATUS_DOT_CLASS[agent.status],
         )}
       />
     </span>
@@ -237,9 +235,9 @@ function StackedMonogram({
 }
 
 /**
- * Elapsed time for the current activation. Live agents self-tick via DOM
- * writes (zero React commits per tick); settled agents freeze at the run's
- * actual duration.
+ * Elapsed time for the current activation. Live agents tick on the shared
+ * second clock via DOM writes (zero React commits per tick); settled agents
+ * freeze at the run's actual duration.
  */
 export function AgentElapsed({ agent }: { agent: RuntimeSubagent }) {
   const textRef = useRef<HTMLSpanElement>(null);
@@ -250,14 +248,11 @@ export function AgentElapsed({ agent }: { agent: RuntimeSubagent }) {
     if (!live || !startedAt) {
       return;
     }
-    const update = () => {
+    return visibleSecondTicker.subscribe((nowMs) => {
       if (textRef.current) {
-        textRef.current.textContent = elapsedBetween(startedAt, null);
+        textRef.current.textContent = elapsedBetween(startedAt, null, nowMs);
       }
-    };
-    update();
-    const id = setInterval(update, 1000);
-    return () => clearInterval(id);
+    });
   }, [live, startedAt]);
 
   if (!live) {
@@ -339,20 +334,28 @@ export function PhaseMemberDots({
 }
 
 /**
- * Row geometry per density; updates never change a row's height.
+ * Row geometry per density, with its height in {@link AGENT_ROW_HEIGHT_CLASS};
+ * updates never change a row's height.
  * - panel: monogram, then two lines (label + time, then activity + role/run), 40px.
  * - compact: one line (monogram, label, activity, status word + time), 30px.
  * - mini: compact without the activity, for columns too narrow to show it.
  */
 const AGENT_ROW_GRID_CLASS = {
   panel:
-    "grid h-10 w-full grid-cols-[1.125rem_minmax(0,1fr)_auto] grid-rows-[1.125rem_1rem] content-center items-center gap-x-2.5 rounded-md px-2 text-left",
+    "grid w-full grid-cols-[1.125rem_minmax(0,1fr)_auto] grid-rows-[1.125rem_1rem] content-center items-center gap-x-2.5 rounded-md px-2 text-left",
   compact:
-    "grid h-[30px] w-full grid-cols-[1.125rem_minmax(0,max-content)_minmax(0,1fr)_auto] items-center gap-x-2 rounded-md px-2 text-left",
-  mini: "grid h-[30px] w-full grid-cols-[1.125rem_minmax(0,1fr)_auto] items-center gap-x-2 rounded-md px-2 text-left",
+    "grid w-full grid-cols-[1.125rem_minmax(0,max-content)_minmax(0,1fr)_auto] items-center gap-x-2 rounded-md px-2 text-left",
+  mini: "grid w-full grid-cols-[1.125rem_minmax(0,1fr)_auto] items-center gap-x-2 rounded-md px-2 text-left",
 } as const;
 
 export type AgentRowDensity = keyof typeof AGENT_ROW_GRID_CLASS;
+
+/** A row's fixed height; a decorated row's wrapper takes it instead. */
+export const AGENT_ROW_HEIGHT_CLASS: Record<AgentRowDensity, string> = {
+  panel: "h-10",
+  compact: "h-[30px]",
+  mini: "h-[30px]",
+};
 
 /** Fixed-height row: what the agent is, then what it is doing now. */
 export function AgentRow({
@@ -362,21 +365,23 @@ export function AgentRow({
   agent: RuntimeSubagent;
   density?: AgentRowDensity;
 }) {
-  const { onOpenAgent } = use(AgentRosterContext);
+  const { onOpenAgent, decorateRow } = use(AgentRosterContext);
   const { label, role } = useAgentRowIdentity(agent);
-  const visuals = AGENT_STATUS_VISUALS[agent.status];
+  const statusText = SUBAGENT_STATUS_TEXT[agent.status];
   const activity = agentActivityText(agent);
   // A named status already says what a quiet row is doing; do not repeat it.
-  const activityLine = activity ?? (visuals.word ? "" : visuals.label);
+  const activityLine = activity ?? (statusText.word ? "" : statusText.label);
   const activityTone =
     agent.status === "failed" ? "text-destructive-foreground" : "text-muted-foreground";
-  const statusWord = visuals.word ? (
-    <span className={cn("font-sans", visuals.word.className)}>{visuals.word.text}</span>
+  const statusWord = statusText.word ? (
+    <span className={cn("font-sans", AGENT_STATUS_WORD_CLASS[agent.status])}>
+      {statusText.word}
+    </span>
   ) : null;
   // Rows without a visible status word still name their status (buttons
   // carry it in their accessible name instead).
   const srStatus =
-    visuals.word || onOpenAgent ? null : <span className="sr-only">{visuals.label}</span>;
+    statusText.word || onOpenAgent ? null : <span className="sr-only">{statusText.label}</span>;
 
   let content: ReactNode;
   if (density === "compact" || density === "mini") {
@@ -394,7 +399,10 @@ export function AgentRow({
             {activityLine}
           </span>
         ) : null}
-        <span className="inline-flex items-center justify-end gap-1.5 text-right font-mono text-[10.5px] text-muted-foreground/70">
+        <span
+          data-agent-row-aside
+          className="inline-flex items-center justify-end gap-1.5 text-right font-mono text-[10.5px] text-muted-foreground/70"
+        >
           {statusWord}
           <AgentElapsed agent={agent} />
         </span>
@@ -411,7 +419,10 @@ export function AgentRow({
           <AgentMonogram agent={agent} label={label} />
         </span>
         <AgentLabel label={label} className="col-start-2 row-start-1" />
-        <span className="col-start-3 row-start-1 inline-flex items-center justify-end gap-1.5 text-right font-mono text-[10.5px] text-muted-foreground/70">
+        <span
+          data-agent-row-aside
+          className="col-start-3 row-start-1 inline-flex items-center justify-end gap-1.5 text-right font-mono text-[10.5px] text-muted-foreground/70"
+        >
           {statusWord}
           <AgentElapsed agent={agent} />
         </span>
@@ -425,7 +436,10 @@ export function AgentRow({
           {activityLine}
         </span>
         {aside ? (
-          <span className="col-start-3 row-start-2 max-w-32 truncate text-right text-[10.5px] text-muted-foreground/65">
+          <span
+            data-agent-row-aside
+            className="col-start-3 row-start-2 max-w-32 truncate text-right text-[10.5px] text-muted-foreground/65"
+          >
             {aside}
           </span>
         ) : null}
@@ -436,11 +450,12 @@ export function AgentRow({
 
   const className = cn(
     AGENT_ROW_GRID_CLASS[density],
+    decorateRow ? "h-full" : AGENT_ROW_HEIGHT_CLASS[density],
     "outline-none transition-colors",
     onOpenAgent && "hover:bg-accent/35 focus-visible:ring-2 focus-visible:ring-ring/50",
   );
   const densityAttribute = density === "panel" ? {} : { "data-density": density };
-  return onOpenAgent ? (
+  const row = onOpenAgent ? (
     <button
       type="button"
       className={className}
@@ -448,7 +463,7 @@ export function AgentRow({
       data-agent-id={agent.id}
       {...densityAttribute}
       onClick={() => onOpenAgent(agent.id)}
-      aria-label={`Open ${label}${role ? `, ${role}` : ""} transcript. ${visuals.label}.`}
+      aria-label={`Open ${label}${role ? `, ${role}` : ""} transcript. ${statusText.label}.`}
     >
       {content}
     </button>
@@ -457,4 +472,5 @@ export function AgentRow({
       {content}
     </div>
   );
+  return decorateRow ? decorateRow(agent, row, density) : row;
 }

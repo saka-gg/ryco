@@ -25,8 +25,10 @@ import {
   WorktreeId,
 } from "@ryco/contracts";
 
+import type { CheckoutMergeProverShape } from "../sourceControl/checkoutMergeProof.ts";
 import type { WorkspaceChangesSummaryGenerationInput } from "../textGeneration/TextGeneration.ts";
 import type { GitVcsDriverShape } from "../vcs/GitVcsDriver.ts";
+import { configureHostileDiffConfig } from "../vcs/testing/GitTestRepo.ts";
 import { makeWorkspaceAccessPolicy } from "./Layers/WorkspaceAccessPolicy.ts";
 import {
   makeWorkspaceChangeSummary,
@@ -115,6 +117,9 @@ function fixture() {
     gitCalls: [] as string[],
     fail: false,
     summary: "Adds a **farewell** greeting.",
+    /** The topic branch's commits are squash-merged (a merge proof covers its head). */
+    squashMerged: false,
+    proofCalls: [] as Parameters<CheckoutMergeProverShape["prove"]>[0][],
   };
 
   const gitDriver = {
@@ -162,6 +167,16 @@ function fixture() {
     },
     settings: {
       getSettings: Effect.succeed({ textGenerationModelSelection: modelSelection } as never),
+    },
+    mergeProof: {
+      prove: (input) =>
+        Effect.sync(() => {
+          state.proofCalls.push(input);
+          return state.squashMerged
+            ? { kind: "pull-request" as const, head: input.head, number: 7, baseRefName: "main" }
+            : null;
+        }),
+      remoteDefaultBranches: () => Effect.succeed(null),
     },
   });
 
@@ -236,6 +251,31 @@ describe("workspace change summary", () => {
     expect(call.diffPatch).not.toContain("other.ts");
   });
 
+  it("reads the same change context whatever the repository's diff config says", async () => {
+    const read = async (hostile: boolean) => {
+      const f = fixture();
+      if (hostile) {
+        await Effect.runPromise(
+          configureHostileDiffConfig(f.repo, (cwd, args) => Effect.sync(() => f.git(cwd, ...args))),
+        );
+      }
+      writeFileSync(path.join(f.checkout, "notes.txt"), "first\n\nsecond\n\nthird\n");
+      f.git(f.checkout, "add", "notes.txt");
+      f.commit(f.checkout, "Add notes");
+      writeFileSync(path.join(f.checkout, "notes.txt"), "first\n\nsecond, edited\n\nthird\n");
+      await f.summarize();
+      return f.state.calls[0]!;
+    };
+
+    const clean = await read(false);
+    const hostile = await read(true);
+
+    expect(hostile.diffPatch).toBe(clean.diffPatch);
+    expect(hostile.statusSummary).toBe(clean.statusSummary);
+    expect(clean.diffPatch).toContain("diff --git a/notes.txt b/notes.txt\n");
+    expect(clean.diffPatch).toContain("\n \n-second\n+second, edited\n \n");
+  });
+
   it("summarizes unmerged commits on an otherwise clean checkout", async () => {
     const f = fixture();
     f.commit(f.checkout, "Wire up billing export");
@@ -243,6 +283,22 @@ describe("workspace change summary", () => {
     expect(f.state.calls).toHaveLength(1);
     expect(f.state.calls[0]!.unmergedLog).toContain("Wire up billing export");
     expect(f.state.calls[0]!.diffPatch).toBe("");
+  });
+
+  it("does not describe commits a merge proof covers, and asks no forge for it", async () => {
+    const f = fixture();
+    f.commit(f.checkout, "Wire up billing export");
+    f.state.squashMerged = true;
+    // Nothing exists only here: no summary, no model call.
+    expect(await f.summarize()).toEqual({ summary: null });
+    expect(f.state.calls).toEqual([]);
+    expect(f.state.proofCalls[0]?.reads).toBeNull();
+    // Local changes are still described, without the merged commits.
+    writeFileSync(path.join(f.checkout, "notes.md"), "todo\n");
+    await f.summarize();
+    expect(f.state.calls).toHaveLength(1);
+    expect(f.state.calls[0]!.untrackedFiles).toContain("notes.md");
+    expect(f.state.calls[0]!.unmergedLog).toBe("");
   });
 
   it("returns no summary when the model fails, and does not keep the failure", async () => {

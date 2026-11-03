@@ -2,7 +2,11 @@ import { useState } from "react";
 import { Pressable, View } from "react-native";
 
 import type { EnvironmentId, ProviderApprovalDecision, ThreadId } from "@ryco/contracts";
-import type { PendingApproval } from "@ryco/client-runtime/state/session";
+import {
+  APPROVAL_REASON_LABEL,
+  pendingApprovalReason,
+  type PendingApproval,
+} from "@ryco/client-runtime/state/session";
 
 import { AppText as Text } from "../../components/AppText";
 import { ensureEnvironmentApi } from "../../connection/environmentApi";
@@ -24,6 +28,8 @@ export function PendingApprovalCard(props: {
 }) {
   const [pending, setPending] = useState<ProviderApprovalDecision | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reasonOpen, setReasonOpen] = useState(false);
+  const reason = pendingApprovalReason(props.approval);
 
   const respond = async (decision: ProviderApprovalDecision) => {
     setPending(decision);
@@ -62,6 +68,21 @@ export function PendingApprovalCard(props: {
         <Text className="mt-1 font-mono text-sm text-foreground-muted" numberOfLines={4}>
           {props.approval.detail}
         </Text>
+      ) : null}
+      {reason ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ expanded: reasonOpen }}
+          onPress={() => setReasonOpen((open) => !open)}
+          className="mt-2 active:opacity-70"
+        >
+          <Text className="text-xs font-ryco-medium text-foreground-muted underline">
+            {APPROVAL_REASON_LABEL}
+          </Text>
+          {reasonOpen ? (
+            <Text className="mt-1 font-sans text-sm text-foreground-muted">{reason}</Text>
+          ) : null}
+        </Pressable>
       ) : null}
       {props.approval.responseState === "submitting" ||
       props.approval.responseState === "uncertain" ? (

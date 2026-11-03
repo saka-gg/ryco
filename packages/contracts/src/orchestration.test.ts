@@ -10,6 +10,7 @@ import {
   ContextHandoffActivityPayload,
   ContextHandoffExportChunk,
   ContextHandoffInspectionEntriesInput,
+  ContextHandoffStatus,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   FileAttachmentCreateUploadUrlInput,
@@ -124,6 +125,18 @@ it.effect("accepts bounded general file uploads for capable providers", () =>
       throw new Error(`Unexpected command type: ${parsed.type}`);
     }
     assert.strictEqual(parsed.message.attachments[0]?.type, "file");
+  }),
+);
+
+it.effect("strips a turn origin a client sends: only the connection edge sets it", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeClientOrchestrationCommand({
+      ...clientTurnWithAttachments([]),
+      message: { messageId: "msg-origin", role: "user", text: "Hi", attachments: [] },
+      origin: { connection: "local" },
+    });
+    assert.strictEqual(parsed.type, "thread.turn.start");
+    assert.isFalse(Object.hasOwn(parsed, "origin"));
   }),
 );
 
@@ -768,6 +781,51 @@ it.effect("decodes thread archive and unarchive commands", () =>
 
     assert.strictEqual(archive.type, "thread.archive");
     assert.strictEqual(unarchive.type, "thread.unarchive");
+  }),
+);
+
+it.effect("decodes branch-guarded thread and workspace metadata updates", () =>
+  Effect.gen(function* () {
+    const fromBranch = yield* decodeOrchestrationCommand({
+      type: "thread.meta.update",
+      commandId: "cmd-branch-guarded",
+      threadId: "thread-1",
+      branch: "feat/agent",
+      expectedBranch: "ryco/1234abcd",
+    });
+    assert.deepInclude(fromBranch, { expectedBranch: "ryco/1234abcd" });
+    const fromNone = yield* decodeClientOrchestrationCommand({
+      type: "thread.meta.update",
+      commandId: "cmd-branch-guarded-null",
+      threadId: "thread-1",
+      branch: "feat/agent",
+      expectedBranch: null,
+    });
+    assert.deepInclude(fromNone, { expectedBranch: null });
+    const workspace = yield* decodeOrchestrationCommand({
+      type: "worktree.meta.update",
+      commandId: "cmd-workspace-branch-guarded",
+      worktreeId: "worktree-1",
+      branch: "feat/agent",
+      expectedBranch: "ryco/1234abcd",
+      changedAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.deepInclude(workspace, { expectedBranch: "ryco/1234abcd" });
+
+    // A workspace always records a branch, so its guard names one.
+    for (const expectedBranch of ["", "  ", null]) {
+      const refused = yield* Effect.exit(
+        decodeOrchestrationCommand({
+          type: "worktree.meta.update",
+          commandId: "cmd-workspace-branch-guard-invalid",
+          worktreeId: "worktree-1",
+          branch: "feat/agent",
+          expectedBranch,
+          changedAt: "2026-01-01T00:00:00.000Z",
+        }),
+      );
+      assert.strictEqual(refused._tag, "Failure");
+    }
   }),
 );
 
@@ -1535,7 +1593,12 @@ it.effect("decodes the context handoff reason, absent on historical records", ()
 
     const historical = yield* decodeContextHandoffActivity(requested);
     assert.strictEqual(historical.reason, undefined);
-    for (const reason of ["model-change", "cwd-relocation"] as const) {
+    for (const reason of [
+      "model-change",
+      "cwd-relocation",
+      "fork",
+      "native-history-unavailable",
+    ] as const) {
       const decoded = yield* decodeContextHandoffActivity({ ...requested, reason });
       assert.strictEqual(decoded.reason, reason);
     }
@@ -1556,6 +1619,13 @@ it.effect("decodes the context handoff reason, absent on historical records", ()
     assert.strictEqual(unknownReason._tag, "Failure");
   }),
 );
+
+it("lists every context handoff payload status, and only those", () => {
+  assert.deepStrictEqual(
+    ContextHandoffActivityPayload.members.map((member) => member.fields.status.literal).toSorted(),
+    [...ContextHandoffStatus.literals].toSorted(),
+  );
+});
 
 it.effect("bounds context handoff inspection pages and export filenames", () =>
   Effect.gen(function* () {
@@ -2109,3 +2179,97 @@ it("accepts shell subscribe input with and without paged delivery", () => {
   });
   assert.throws(() => decodeSubscribeShellInput({ snapshotDelivery: "streamed" }));
 });
+
+it.effect("decodes a conversation-only revert as a command of its own", () =>
+  Effect.gen(function* () {
+    const command = {
+      commandId: "revert-command",
+      threadId: "revert-thread",
+      turnCount: 1,
+      createdAt: "2026-10-22T00:00:00.000Z",
+    };
+    const conversation = yield* decodeClientOrchestrationCommand({
+      ...command,
+      type: "thread.conversation.revert",
+    });
+    assert.strictEqual(conversation.type, "thread.conversation.revert");
+    // A file restore never carries a keep-files flag an older server would drop.
+    const restore = yield* decodeClientOrchestrationCommand({
+      ...command,
+      type: "thread.checkpoint.revert",
+      restoreFiles: false,
+    });
+    assert.strictEqual(restore.type, "thread.checkpoint.revert");
+    assert.isFalse("restoreFiles" in restore);
+
+    const requested = (payload: Record<string, unknown>) =>
+      decodeOrchestrationEvent({
+        sequence: 1,
+        eventId: "revert-event",
+        aggregateKind: "thread",
+        aggregateId: "revert-thread",
+        type: "thread.checkpoint-revert-requested",
+        occurredAt: "2026-10-22T00:00:00.000Z",
+        commandId: "revert-command",
+        causationEventId: null,
+        correlationId: "revert-command",
+        metadata: {},
+        payload: {
+          threadId: "revert-thread",
+          turnCount: 1,
+          createdAt: "2026-10-22T00:00:00.000Z",
+          ...payload,
+        },
+      });
+    const legacy = yield* requested({});
+    const keepFiles = yield* requested({ restoreFiles: false });
+    assert.strictEqual(
+      legacy.type === "thread.checkpoint-revert-requested" ? legacy.payload.restoreFiles : null,
+      undefined,
+    );
+    assert.strictEqual(
+      keepFiles.type === "thread.checkpoint-revert-requested"
+        ? keepFiles.payload.restoreFiles
+        : null,
+      false,
+    );
+  }),
+);
+
+it.effect("decodes a files-only revert as a command of its own", () =>
+  Effect.gen(function* () {
+    const files = yield* decodeClientOrchestrationCommand({
+      type: "thread.files.revert",
+      commandId: "revert-command",
+      threadId: "revert-thread",
+      turnCount: 1,
+      createdAt: "2026-10-28T00:00:00.000Z",
+    });
+    assert.strictEqual(files.type, "thread.files.revert");
+
+    const requested = yield* decodeOrchestrationEvent({
+      sequence: 1,
+      eventId: "revert-event",
+      aggregateKind: "thread",
+      aggregateId: "revert-thread",
+      type: "thread.checkpoint-revert-requested",
+      occurredAt: "2026-10-28T00:00:00.000Z",
+      commandId: "revert-command",
+      causationEventId: null,
+      correlationId: "revert-command",
+      metadata: {},
+      payload: {
+        threadId: "revert-thread",
+        turnCount: 1,
+        rollbackConversation: false,
+        createdAt: "2026-10-28T00:00:00.000Z",
+      },
+    });
+    assert.strictEqual(
+      requested.type === "thread.checkpoint-revert-requested"
+        ? requested.payload.rollbackConversation
+        : null,
+      false,
+    );
+  }),
+);

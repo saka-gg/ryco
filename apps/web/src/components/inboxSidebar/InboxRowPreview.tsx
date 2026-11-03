@@ -2,7 +2,6 @@ import {
   FolderIcon,
   GitBranchIcon,
   GitForkIcon,
-  InfoIcon,
   MessageCircleIcon,
   ShieldAlertIcon,
 } from "lucide-react";
@@ -17,12 +16,13 @@ import { InboxPullRequestBadges } from "./InboxPullRequestBadges";
 import { InboxChangeStatsLine } from "./InboxChangeStats";
 import type { InboxChangeStats, resolveInboxPullRequests } from "./inboxPullRequests";
 import {
+  formatInboxDayTime,
   inboxAttentionDetail,
   inboxGlyphLabel,
   resolveInboxGlyph,
   resolveInboxStateLine,
 } from "./inboxRowPresentation";
-import { describeInboxFocus, type InboxSidebarRow } from "./inboxSidebarModel";
+import type { InboxSidebarRow } from "./inboxSidebarModel";
 import { InboxStatusGlyph } from "./InboxStatusGlyph";
 import { useInboxClock } from "./useInboxListMotion";
 
@@ -30,6 +30,8 @@ import { useInboxClock } from "./useInboxListMotion";
 export interface InboxRowPreviewPayload {
   readonly row: InboxSidebarRow;
   readonly unseen: boolean;
+  /** Woke from its snooze and not opened since; wins over `unseen`. */
+  readonly woke: boolean;
   readonly timestamp: string;
   readonly pullRequests: ReturnType<typeof resolveInboxPullRequests>;
   readonly changeRequestShortName: string;
@@ -40,12 +42,14 @@ export interface InboxRowPreviewPayload {
 const STATUS_TONE = {
   "needs-input": "text-warning-foreground",
   completed: "text-success-foreground",
+  woke: "text-warning-foreground",
   limited: "text-warning-foreground",
   error: "text-destructive-foreground",
   working: "text-foreground",
   connecting: "text-muted-foreground",
   offline: "text-muted-foreground",
   idle: "text-muted-foreground",
+  draft: "text-muted-foreground",
 } as const;
 
 export function InboxProjectIcon(props: {
@@ -88,9 +92,9 @@ function RunningClock(props: { readonly since: string }) {
  * lives. No tool calls, no reasoning; the transcript owns those.
  */
 export function InboxRowPreview({ payload }: { readonly payload: InboxRowPreviewPayload }) {
-  const { row, unseen } = payload;
-  const glyph = resolveInboxGlyph(row, unseen);
-  const line = resolveInboxStateLine(row);
+  const { row, unseen, woke } = payload;
+  const glyph = resolveInboxGlyph(row, unseen, woke);
+  const line = resolveInboxStateLine(row, woke);
   const ProviderIcon = row.providerDriver
     ? (PROVIDER_ICON_BY_PROVIDER[row.providerDriver] ?? null)
     : null;
@@ -102,7 +106,6 @@ export function InboxRowPreview({ payload }: { readonly payload: InboxRowPreview
   const alsoLinked = isPhone
     ? []
     : row.otherPullRequests.filter((pr) => !shownNumbers.has(pr.number));
-  const focus = row.focus ? describeInboxFocus(row.focus) : null;
   return (
     <div className="w-[18.875rem] space-y-2 py-1.5 text-left" data-testid="inbox-preview">
       <div className="flex min-w-0 items-center gap-3 text-[11px] leading-4">
@@ -111,7 +114,7 @@ export function InboxRowPreview({ payload }: { readonly payload: InboxRowPreview
           data-testid="inbox-preview-status"
         >
           <InboxStatusGlyph key={glyph} kind={glyph} />
-          <span className="truncate">{inboxGlyphLabel(row, unseen)}</span>
+          <span className="truncate">{inboxGlyphLabel(row, unseen, woke)}</span>
         </span>
         <span className="ml-auto shrink-0 tabular-nums text-muted-foreground/75">
           {row.runningSince ? (
@@ -134,6 +137,15 @@ export function InboxRowPreview({ payload }: { readonly payload: InboxRowPreview
       ) : line.kind === "attention" ? (
         <p className="text-[11.5px] leading-4 text-warning-foreground">
           {inboxAttentionDetail(row)}
+        </p>
+      ) : line.kind === "woke" && row.wokeAt ? (
+        <p className="text-[11.5px] leading-4 text-warning-foreground">
+          {`Woke from snooze ${formatInboxDayTime(row.wokeAt)}.`}
+        </p>
+      ) : row.draftId !== undefined ? (
+        // The header already says "Draft".
+        <p className="text-[11.5px] leading-4 text-muted-foreground">
+          Not sent yet. Open it to keep writing.
         </p>
       ) : line.kind === "status" ? (
         <p className="text-[11.5px] leading-4 text-muted-foreground">{line.text}</p>
@@ -233,22 +245,6 @@ export function InboxRowPreview({ payload }: { readonly payload: InboxRowPreview
           />
         ) : null}
       </div>
-      {focus ? (
-        <div className="border-t border-border/60 pt-1.5 text-[11px] leading-4 text-muted-foreground">
-          <div className="flex items-start gap-2 text-popover-foreground/85">
-            <InfoIcon aria-hidden className="mt-0.5 size-3.5 shrink-0" />
-            <span className="whitespace-normal">
-              <span className="font-medium">Why focused? {focus.title}.</span> {focus.detail}
-            </span>
-          </div>
-          {focus.aiGenerated && row.focus?.ranking ? (
-            <div className="ml-5 mt-1 whitespace-normal text-[10px] text-muted-foreground/75">
-              {row.rankingModelLabel ? `${row.rankingModelLabel} · ` : ""}
-              ranked {formatRelativeTimeLabel(row.focus.ranking.rankedAt)}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
     </div>
   );
 }

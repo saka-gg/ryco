@@ -9,6 +9,8 @@ import {
   type DeviceBackend,
   type DeviceDiscovery,
   type DeviceFrameListener,
+  type DeviceLogQuery,
+  type DeviceLogResult,
 } from "./DeviceBackend.ts";
 import {
   ForwardingDeviceBackend,
@@ -341,6 +343,17 @@ export class HostDeviceBackend extends ForwardingDeviceBackend {
     await backend.testing({ ...input, udid: nativeUdid });
     if (this.disposed || generation !== (this.generations.get(host) ?? 0))
       throw new DeviceBackendError("Stale device host operation");
+  }
+
+  async readLogs(udid: string, query: DeviceLogQuery): Promise<DeviceLogResult> {
+    const { backend, nativeUdid, host } = this.resolve(udid);
+    if (host.host.transport === "ssh")
+      throw new DeviceBackendError("Device logs are unavailable on SSH hosts.");
+    const generation = this.generations.get(host) ?? 0;
+    const result = await backend.readLogs(nativeUdid, query);
+    if (this.disposed || generation !== (this.generations.get(host) ?? 0))
+      throw new DeviceBackendError("Stale device host operation");
+    return result;
   }
 
   async call<K extends DeviceCall>(method: K, args: DeviceArgs<K>): Promise<DeviceResult<K>> {

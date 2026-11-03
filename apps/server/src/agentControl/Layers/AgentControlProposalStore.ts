@@ -71,6 +71,15 @@ const auditMetadataForProposal = (proposal: AgentControlProposal): AgentControlA
           localTaskId: proposal.plan.taskId,
           expectedRevision: String(proposal.plan.expectedRevision),
         };
+      case "pullRequestWatch":
+        // The URL stays in the proposal row, like every other free-form plan field.
+        return {
+          targetThreadId: proposal.plan.threadId,
+          watching: String(proposal.plan.watching),
+          ...(proposal.plan.number === undefined
+            ? {}
+            : { pullRequestNumber: String(proposal.plan.number) }),
+        };
       case "createProject":
         return { projectId: proposal.plan.projectId };
       case "updateProject":
@@ -174,6 +183,16 @@ const auditMetadataForProposal = (proposal: AgentControlProposal): AgentControlA
           copySettings: String(proposal.plan.copySettings),
           setup: String(proposal.plan.setup !== null),
           followUpThread: String(proposal.plan.followUpThread !== null),
+        };
+      case "deviceControlConsent":
+        // What the consent allows runs directly and is never recorded here.
+        return {
+          deviceUdid: proposal.plan.udid,
+          projectId: proposal.plan.projectId,
+          providerInstanceId: proposal.plan.providerInstanceId,
+          deviceThreadId: proposal.plan.threadId,
+          riskClass: "device-control",
+          sensitivePayloadsExcluded: "true",
         };
       default:
         return {};
@@ -291,6 +310,7 @@ const makeAgentControlProposalStore = Effect.gen(function* () {
     readonly result: AgentControlProposal["result"];
     readonly eventKind: AgentControlAuditEventKind;
     readonly updatedAt: IsoDateTime;
+    readonly extraMetadata?: AgentControlAuditMetadata;
     /** Joins the transaction after the audit row (see `beginExecution`). */
     readonly withinTransaction?:
       | ((updated: AgentControlProposal) => Effect.Effect<void, E>)
@@ -337,7 +357,9 @@ const makeAgentControlProposalStore = Effect.gen(function* () {
               eventKind: input.eventKind,
               createdAt: input.updatedAt,
               ...(input.result === null
-                ? {}
+                ? input.extraMetadata === undefined
+                  ? {}
+                  : { extraMetadata: input.extraMetadata }
                 : {
                     extraMetadata:
                       input.result.outcome === "completed"
@@ -602,6 +624,10 @@ const makeAgentControlProposalStore = Effect.gen(function* () {
         result,
         eventKind: DECISION_AUDIT_EVENT_KINDS[input.decision],
         updatedAt: input.decidedAt,
+        // A run its schedule's owner let run without asking: the audit row says so.
+        ...(input.actor === "standing-approval"
+          ? { extraMetadata: { approvedBy: "standing-approval" } }
+          : {}),
       });
     });
 

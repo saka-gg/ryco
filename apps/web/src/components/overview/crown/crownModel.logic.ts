@@ -62,6 +62,8 @@ export interface CrownRailSummary {
    * count), `live` the running, queued and waiting ones.
    */
   readonly agents: { readonly count: number; readonly live: number };
+  /** The servers the thread's agents and terminals started that still listen. */
+  readonly servers: { readonly count: number };
   readonly pr: { readonly state: CrownPrState | null; readonly conflict: boolean };
   /** The thread's worktree or project notes have text. */
   readonly notes: { readonly filled: boolean };
@@ -311,6 +313,7 @@ export function buildCrownRailSummary(
     readonly isGitRepo: boolean;
     readonly notesFilled?: boolean;
     readonly ship?: CrownShipSummaryInput | undefined;
+    readonly serverCount?: number;
   },
 ): CrownRailSummary {
   const summary = getOverviewSummary(layout);
@@ -338,6 +341,7 @@ export function buildCrownRailSummary(
       stepLabel: activeStep?.step ?? null,
     },
     agents: { count: summary.agentsTotal, live: summary.agentsRunning },
+    servers: { count: input.serverCount ?? 0 },
     pr: {
       state: prState,
       conflict: prState !== null && layout.pullRequest?.hasMergeConflicts === true,
@@ -380,6 +384,10 @@ export function crownRailItemDescription(
         ? `${formatCount(count, "subagent")}, ${live} active`
         : formatCount(count, "subagent");
     }
+    case "servers":
+      return summary.servers.count > 0
+        ? `${formatCount(summary.servers.count, "server")} running`
+        : "No servers";
     case "pr": {
       const { state, conflict } = summary.pr;
       if (state === null) return "No pull request";

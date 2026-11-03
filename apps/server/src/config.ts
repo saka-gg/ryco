@@ -17,7 +17,14 @@ import { Effect, FileSystem, Layer, LogLevel, Path, Schema, Context } from "effe
 import { SERVER_LOG_FILE_NAME } from "@ryco/shared/logging";
 import { canonicalizeHubOrigin, normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
 
+import type { OtlpSignal, OtlpSignalExport } from "./observability/OtelEnvironment.ts";
+
 export const DEFAULT_PORT = 3773;
+/**
+ * A headless server holds the machine awake while its agents work unless told not to
+ * (`--no-keep-awake-while-working`). Desktop mode never does: Desktop main owns that hold.
+ */
+export const DEFAULT_KEEP_AWAKE_WHILE_WORKING = true;
 
 export const RuntimeMode = Schema.Literals(["web", "desktop"]);
 export type RuntimeMode = typeof RuntimeMode.Type;
@@ -271,6 +278,17 @@ export interface ServerConfigShape extends ServerDerivedPaths {
   /** Ask browsers for their spans even without an OTLP collector (`RYCO_BROWSER_TRACES`). */
   readonly browserTracesEnabled?: boolean;
   readonly otlpMetricsUrl: string | undefined;
+  /** OTLP logs endpoint (`RYCO_OTLP_LOGS_URL` or the OTEL variables); environment only. */
+  readonly otlpLogsUrl?: string | undefined;
+  /**
+   * How each signal whose endpoint came from `OTEL_EXPORTER_OTLP_*` variables is sent. Absent for
+   * a signal: OTLP/HTTP JSON with no headers, which is how every Ryco-configured URL is sent.
+   */
+  readonly otlpExports?: Partial<Record<OtlpSignal, OtlpSignalExport>> | undefined;
+  /** Validated `OTEL_RESOURCE_ATTRIBUTES`, handed to the exporters instead of the raw variable. */
+  readonly otlpResourceAttributes?: Readonly<Record<string, string>> | undefined;
+  /** Ignored or disabling OTEL settings, logged once at startup. Absent when there are none. */
+  readonly observabilityWarnings?: ReadonlyArray<string> | undefined;
   readonly otlpExportIntervalMs: number;
   readonly otlpServiceName: string;
   readonly mode: RuntimeMode;
@@ -292,12 +310,26 @@ export interface ServerConfigShape extends ServerDerivedPaths {
   /** Process-private credential for Desktop main's loopback control channel. */
   readonly desktopControlToken?: string | undefined;
   readonly computerUseBridge?: ComputerUseBridgeConfig | undefined;
+  /**
+   * Ryco Nightly's desktop backend only: the one Ryco data home it may copy from when Ryco left a
+   * copy request in this home (flavorImportStartup.ts), and the token of the launch Ryco opened
+   * it with. Only the desktop envelope sets it.
+   */
+  readonly flavorImport?:
+    | { readonly allowedSourceHome: string; readonly requestToken: string }
+    | undefined;
   readonly autoBootstrapProjectFromCwd: boolean;
   readonly logWebSocketEvents: boolean;
   readonly tailscaleServeEnabled: boolean;
   readonly tailscaleServePort: number;
   /** Hold an OS sleep assertion for the life of this process (`--prevent-sleep`). */
   readonly preventSleep?: boolean;
+  /**
+   * Hold an OS idle-sleep assertion while agents work, on AC power
+   * (`--keep-awake-while-working`). The CLI resolves the default; unset means off, so a config
+   * built by hand never spawns anything.
+   */
+  readonly keepAwakeWhileWorking?: boolean;
   readonly hubConnector?: HubConnectorConfig;
   /**
    * Kept beside `hubConnector` rather than inside it: `resolveHubConnectorConfig`
@@ -324,6 +356,12 @@ export function resolveManagedChatsRoot(
     ? config.chatsDir
     : path.join(config.workspaceAccessRoot, ".ryco", "chats");
 }
+
+/**
+ * Where a running server records its pid and address, next to its database.
+ * Servers from before the database owner lock are recognized by it.
+ */
+export const SERVER_RUNTIME_STATE_FILE_NAME = "server-runtime.json";
 
 export const deriveServerPaths = Effect.fn(function* (
   baseDir: ServerConfigShape["baseDir"],
@@ -355,7 +393,7 @@ export const deriveServerPaths = Effect.fn(function* (
     terminalLogsDir: join(logsDir, "terminals"),
     anonymousIdPath: join(stateDir, "anonymous-id"),
     environmentIdPath: join(stateDir, "environment-id"),
-    serverRuntimeStatePath: join(stateDir, "server-runtime.json"),
+    serverRuntimeStatePath: join(stateDir, SERVER_RUNTIME_STATE_FILE_NAME),
     hubIdentityStatePath: join(stateDir, "hub-identity.json"),
     secretsDir: join(stateDir, "secrets"),
   };

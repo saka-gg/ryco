@@ -99,7 +99,7 @@ describe("ChatView PhoneComposer (full app)", () => {
     }
   });
 
-  it("wraps the expanded approval action row so all actions stay visible at 390px", async () => {
+  it("keeps the compact approval action row inside a 390px chat column", async () => {
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,
       snapshot: createSnapshotWithPendingApproval(),
@@ -120,8 +120,15 @@ describe("ChatView PhoneComposer (full app)", () => {
         height: DEFAULT_VIEWPORT.height,
       });
 
-      const buttons: HTMLElement[] = [];
-      for (const label of APPROVAL_ACTION_LABELS) {
+      // Off the phone tier the session-wide grant and Cancel turn live in the
+      // overflow menu, so the row holds Decline, Approve once and the menu.
+      const buttons: HTMLElement[] = [
+        await waitForElement(
+          () => document.querySelector<HTMLElement>('[aria-label="More approval actions"]'),
+          "Unable to find the approval overflow menu.",
+        ),
+      ];
+      for (const label of ["Decline", "Approve once"]) {
         buttons.push(
           await waitForElement(
             () => findButtonByText(label),
@@ -140,12 +147,6 @@ describe("ChatView PhoneComposer (full app)", () => {
         expect(rect.right).toBeLessThanOrEqual(rowRect.right + 0.5);
         expect(rect.bottom).toBeLessThanOrEqual(window.innerHeight + 0.5);
       }
-      // The row is too wide for one line at this width, so it must have
-      // wrapped instead of pushing actions out of view.
-      const rowTops = new Set(
-        buttons.map((button) => Math.round(button.getBoundingClientRect().top)),
-      );
-      expect(rowTops.size).toBeGreaterThan(1);
       expect(actionRow.scrollWidth).toBeLessThanOrEqual(actionRow.clientWidth + 1);
     } finally {
       await mounted.cleanup();

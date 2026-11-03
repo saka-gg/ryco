@@ -1,6 +1,6 @@
 // The reader styles load with the panel chunk, not the boot stylesheet.
 import "../pullRequests.css";
-import type { EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId, ScopedThreadRef } from "@ryco/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { GitPullRequestIcon } from "lucide-react";
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
@@ -71,6 +71,8 @@ const NO_DRAWER: Partial<PullRequestsLayout> = {
 export interface WorkspacePullRequestPanelProps {
   readonly environmentId: EnvironmentId | null;
   readonly project: Pick<Project, "id" | "name" | "cwd" | "customAvatarContentHash"> | null;
+  /** The thread beside the panel: diff find resolves the find key with its `when` context. */
+  readonly threadRef?: ScopedThreadRef | null | undefined;
   /** The change request to read: the route's pinned one, else the thread's. */
   readonly number: number | null;
   /** The thread's change request is still being looked up. */
@@ -127,6 +129,7 @@ export default function WorkspacePullRequestPanel(props: WorkspacePullRequestPan
       key={pullRequestReaderKey(repository.key, number)}
       repository={repository}
       number={number}
+      threadRef={props.threadRef ?? null}
       onSelectNumber={props.onSelectNumber}
       onTogglePullRequests={props.onTogglePullRequests}
       reveal={props.reveal ?? null}
@@ -138,12 +141,13 @@ export default function WorkspacePullRequestPanel(props: WorkspacePullRequestPan
 function WorkspacePullRequestReader(props: {
   readonly repository: ProjectCheckoutOption;
   readonly number: number;
+  readonly threadRef: ScopedThreadRef | null;
   readonly onSelectNumber: (number: number) => void;
   readonly onTogglePullRequests?: (() => void) | undefined;
   readonly reveal: WorkspacePullRequestReveal | null;
   readonly onRevealHandled: (() => void) | undefined;
 }) {
-  const { repository, number } = props;
+  const { repository, number, threadRef } = props;
   const readerKey = pullRequestReaderKey(repository.key, number);
   const [reader, setReader] = useState<ReaderSearch>(() => readerSearchByKey.get(readerKey) ?? {});
   const search = useMemo<PullRequestsSearch>(() => ({ ...reader, pr: number }), [number, reader]);
@@ -236,8 +240,8 @@ function WorkspacePullRequestReader(props: {
     );
   });
   const surface = useMemo<PullRequestsSurface>(
-    () => ({ kind: "workspace", openOnPage }),
-    [openOnPage],
+    () => ({ kind: "workspace", openOnPage, threadRef }),
+    [openOnPage, threadRef],
   );
 
   const value = useMemo<PullRequestsPageContextValue>(

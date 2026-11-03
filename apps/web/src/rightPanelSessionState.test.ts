@@ -107,6 +107,8 @@ describe("right panel session state", () => {
           workspaceTab: "agents",
           workspaceAgentsWorkflow: "wf-audit",
           workspacePrReveal: "checks",
+          workspaceFile: "src/app.ts",
+          workspaceFileLine: 3,
         },
         { workspaceOpen: "1", workspaceTab: "agents" },
       ),

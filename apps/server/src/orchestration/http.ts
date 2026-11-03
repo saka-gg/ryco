@@ -9,7 +9,11 @@ import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 
 import { ServerAuth } from "../auth/Services/ServerAuth.ts";
 import { rejectCrossOriginMutation, respondToAuthError } from "../auth/http.ts";
-import { normalizeDispatchCommand, withChatAttachmentAdoption } from "./Normalizer.ts";
+import {
+  normalizeDispatchCommand,
+  refuseServerMintedMessageId,
+  withChatAttachmentAdoption,
+} from "./Normalizer.ts";
 import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
 
@@ -92,6 +96,7 @@ export const orchestrationDispatchRouteLayer = HttpRouter.add(
     const result = yield* withChatAttachmentAdoption(
       command,
       normalizeDispatchCommand(command).pipe(
+        Effect.tap(refuseServerMintedMessageId),
         Effect.flatMap((normalizedCommand) =>
           orchestrationEngine.dispatch(normalizedCommand).pipe(
             Effect.mapError(

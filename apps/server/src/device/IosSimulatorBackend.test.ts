@@ -11,7 +11,6 @@ import type { ProcessRunResult } from "../processRunner.ts";
 import {
   formatRuntimeIdentifier,
   IosSimulatorBackend,
-  normalizeUiNode,
   parseSimctlDevices,
   readPngDimensions,
   resolveDeviceHelperSourceDir,
@@ -233,87 +232,6 @@ describe("simctl device parsing", () => {
 
   it("throws on output that is not JSON at all", () => {
     expect(() => parseSimctlDevices("xcrun: error: unable to find utility")).toThrow();
-  });
-});
-
-describe("accessibility tree normalization", () => {
-  it("fills in the attributes the helper omits rather than sending as null", () => {
-    // The helper leaves absent accessibility attributes out of the object
-    // entirely; the contract wants explicit nulls and a complete frame.
-    expect(normalizeUiNode({ role: "Button" })).toEqual({
-      role: "Button",
-      subrole: null,
-      label: null,
-      value: null,
-      frame: { x: 0, y: 0, width: 0, height: 0 },
-      activationPoint: null,
-      children: [],
-    });
-  });
-
-  it("keeps a switch's own activation point, which is not its row centre", () => {
-    // The exact shape of a UIKit settings row: one merged element whose frame
-    // spans the row, so tapping the frame centre (x=201) does nothing and only
-    // the activation point (x=336.5) flips the switch.
-    const node = normalizeUiNode({
-      role: "CheckBox",
-      subrole: "Switch",
-      label: "Dark Appearance",
-      value: "0",
-      frame: { x: 36, y: 184, width: 330, height: 28 },
-      activationPoint: { x: 336.5, y: 198 },
-    });
-
-    expect(node).toMatchObject({
-      role: "CheckBox",
-      subrole: "Switch",
-      value: "0",
-      activationPoint: { x: 336.5, y: 198 },
-    });
-  });
-
-  it("drops an activation point that is not a complete pair of coordinates", () => {
-    // Half a point would aim taps at (0, y): worse than having none at all.
-    expect(normalizeUiNode({ activationPoint: { x: 12 } }).activationPoint).toBeNull();
-    expect(
-      normalizeUiNode({ activationPoint: { x: Number.NaN, y: 4 } }).activationPoint,
-    ).toBeNull();
-    expect(normalizeUiNode({ activationPoint: "336,198" }).activationPoint).toBeNull();
-  });
-
-  it("keeps the attributes the helper does send", () => {
-    const node = normalizeUiNode({
-      role: "TextField",
-      label: "Email",
-      value: "a@b.c",
-      frame: { x: 12, y: 34, width: 200, height: 44 },
-    });
-
-    expect(node).toMatchObject({
-      role: "TextField",
-      label: "Email",
-      value: "a@b.c",
-      frame: { x: 12, y: 34, width: 200, height: 44 },
-    });
-  });
-
-  it("normalizes the whole subtree", () => {
-    const node = normalizeUiNode({
-      role: "Window",
-      children: [{ role: "Button", children: [{ label: "Deep" }] }],
-    });
-
-    expect(node.children[0]?.children[0]).toMatchObject({ role: "Unknown", label: "Deep" });
-  });
-
-  it("clamps negative sizes and survives a shapeless node", () => {
-    expect(normalizeUiNode({ frame: { width: -5, height: 10 } }).frame).toEqual({
-      x: 0,
-      y: 0,
-      width: 0,
-      height: 10,
-    });
-    expect(normalizeUiNode(null).role).toBe("Unknown");
   });
 });
 

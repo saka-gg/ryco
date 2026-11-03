@@ -1,5 +1,6 @@
 import type { EnvironmentId } from "@ryco/contracts";
 import { describe, expect, it } from "vitest";
+import { PULL_REQUESTS_LIST_LIMIT } from "@ryco/client-runtime/state/pull-request-review";
 
 import { changeRequestListBinding } from "../../rpc/sourceControlAtoms";
 import { projectCheckoutKey } from "../../projectCheckouts.logic";
@@ -7,7 +8,6 @@ import {
   pullRequestListPrefetchInputs,
   resolvePullRequestListPrefetchTarget,
 } from "./prefetchPullRequestLists";
-import { PULL_REQUESTS_LIST_LIMIT } from "./pullRequestsModel.logic";
 
 const local = "local" as EnvironmentId;
 const remote = "remote" as EnvironmentId;
@@ -55,6 +55,34 @@ describe("resolvePullRequestListPrefetchTarget", () => {
     expect(
       resolvePullRequestListPrefetchTarget({ search: {}, projects, lastRepositoryKey: null }),
     ).toBeNull();
+  });
+
+  it("reads no single repository's lists for All repositories", () => {
+    expect(
+      resolvePullRequestListPrefetchTarget({
+        search: { scope: "all", env: local, project: "p1" },
+        projects,
+        lastRepositoryKey: null,
+      }),
+    ).toBeNull();
+    // The page reopens on All repositories when it was the last choice.
+    expect(
+      resolvePullRequestListPrefetchTarget({
+        search: {},
+        projects,
+        lastRepositoryKey: projectCheckoutKey(remote, "p1"),
+        lastScope: "all",
+      }),
+    ).toBeNull();
+    // A link into one repository still prefetches it.
+    expect(
+      resolvePullRequestListPrefetchTarget({
+        search: { env: local, project: "p2" },
+        projects,
+        lastRepositoryKey: null,
+        lastScope: "all",
+      }),
+    ).toEqual({ environmentId: local, cwd: "/repo/two" });
   });
 
   it("never prefetches a chat folder", () => {

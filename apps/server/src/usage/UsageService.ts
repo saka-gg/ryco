@@ -5,9 +5,11 @@ import { createHash } from "node:crypto";
 import {
   USAGE_CONTRACT_VERSION,
   UsageReadError,
+  type ServerSettings,
   type UsageCalendarDate,
   type UsageDailyBucket,
   type UsageImportedMetric,
+  type UsagePriceOverrides,
   type UsagePricingStatus,
   type UsageProviderKind,
   type UsageSourceCoverage,
@@ -18,7 +20,6 @@ import {
 import {
   Cause,
   Clock,
-  Context,
   Deferred,
   Duration,
   Effect,
@@ -48,10 +49,13 @@ import {
   UsageSlotAggregator,
 } from "./usageFileAggregate.ts";
 import {
-  lookupUsageModelRate,
+  compileUsagePriceOverrides,
   encodeUsageRateTable,
+  makeUsagePricingPolicy,
   parseUsageRateTable,
-  priceUsageRecord,
+  resolveUsageModel,
+  type UsagePriceOverrideTables,
+  type UsagePricingPolicy,
   type UsageRateTable,
 } from "./usagePricing.ts";
 import {
@@ -83,6 +87,20 @@ import {
 } from "./usageTranscriptReader.ts";
 import { readBoundedUsageFile } from "./usageFileReader.ts";
 import type { UsageRecord } from "./usageRecord.ts";
+import {
+  USAGE_RATES_WARM_DELAY_MS,
+  UsageService,
+  type UsageServiceShape,
+  usageRatesCachePath,
+  usageStateDirectory,
+} from "./UsageServiceTag.ts";
+
+export {
+  makeEmptyUsageSummary,
+  UsageService,
+  type UsageServiceShape,
+  UsageServiceTest,
+} from "./UsageServiceTag.ts";
 
 export const LITELLM_USAGE_RATES_URL =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
@@ -100,8 +118,6 @@ const RATES_RESPONSE_TIMEOUT_MS = 10_000;
 const RATES_BODY_TIMEOUT_MS = 3 * 60_000;
 /** With no rates at all, a summary waits at most this long for the first download. */
 const RATES_FIRST_FETCH_WAIT_MS = 2_000;
-/** Refresh stale cached rates once shortly after boot, before a summary needs them. */
-const RATES_WARM_DELAY_MS = 30_000;
 const MTIME_WINDOW_SLACK_MS = 36 * 60 * 60 * 1000;
 const PRICING_CACHE_VERSION = 2;
 /** Freshly parsed work per source and request. Cached records do not count against it. */
@@ -156,10 +172,12 @@ interface PlannedSource {
   readonly deduplicationKind: UsageSourceDeduplicationKind;
 }
 
-/** Rates and pricing status captured once per summary, so every source prices alike. */
+/** Rates, overrides and pricing status captured once per summary, so every source prices alike. */
 interface PricingSnapshot {
-  readonly rates: UsageRateTable;
+  readonly policy: UsagePricingPolicy;
   readonly generation: number;
+  /** Of the custom prices and mappings in effect ({@link usagePriceOverridesRevision}). */
+  readonly overridesRevision: string;
   readonly state: UsagePricingStatus["state"];
   readonly revision: string | null;
   readonly fetchedAtMs: number | null;
@@ -200,33 +218,15 @@ interface SourceTally {
   existingRootCount: number;
 }
 
-export interface UsageServiceShape {
-  readonly readSummary: (input: UsageSummaryRequest) => Effect.Effect<UsageSummary, UsageReadError>;
+export interface UsageServiceOptions {
+  /**
+   * When a node that downloaded rates before refreshes them if stale, after construction:
+   * 30 s by default, `null` for never. The deferred layer passes 0 when its own warm-up loads
+   * the pipeline, and `null` when a summary does, because that summary refreshes stale rates
+   * itself and a second refresh would read the rates file from disk twice at the same time.
+   */
+  readonly ratesWarmDelayMs?: number | null;
 }
-
-export class UsageService extends Context.Service<UsageService, UsageServiceShape>()(
-  "ryco/usage/UsageService",
-) {}
-
-export const makeEmptyUsageSummary = (input: UsageSummaryRequest): UsageSummary => ({
-  contractVersion: USAGE_CONTRACT_VERSION,
-  ...(input.startDate === undefined ? {} : { startDate: input.startDate }),
-  endDate: input.endDate,
-  timeZone: input.timeZone,
-  generatedAt: "1970-01-01T00:00:00.000Z",
-  scanDurationMs: 0,
-  buckets: [],
-  sources: [],
-  pricing: {
-    state: "unavailable",
-    recognizedModelCount: 0,
-    unrecognizedModelCount: 0,
-  },
-});
-
-export const UsageServiceTest = UsageService.of({
-  readSummary: (input) => Effect.succeed(makeEmptyUsageSummary(input)),
-});
 
 function isValidCalendarDate(value: UsageCalendarDate): boolean {
   const timestamp = Date.parse(`${value}T00:00:00.000Z`);
@@ -256,6 +256,17 @@ function ratesRevision(text: string): string {
 
 function summaryRequestKey(input: UsageSummaryRequest): string {
   return `${input.contractVersion}\0${input.startDate ?? ""}\0${input.endDate}\0${input.timeZone}`;
+}
+
+/** Digest of the effective custom prices and mappings: results priced under other ones differ. */
+function usagePriceOverridesRevision(tables: UsagePriceOverrideTables): string {
+  if (tables.prices.size === 0 && tables.mappings.size === 0) return "";
+  const sorted = <T>(entries: ReadonlyMap<string, T>) =>
+    [...entries].toSorted(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+  return createHash("sha256")
+    .update(JSON.stringify([sorted(tables.prices), sorted(tables.mappings)]))
+    .digest("hex")
+    .slice(0, 16);
 }
 
 /** Everything a transcript source's result depends on besides the request and rates. */
@@ -294,7 +305,11 @@ function coverageMessage(
   return undefined;
 }
 
-const makeUsageService = Effect.gen(function* () {
+/**
+ * Builds the usage pipeline. The server loads this module on first use
+ * (`UsageServiceDeferred.ts`); tests build it eagerly with {@link UsageServiceLive}.
+ */
+export const makeUsageService = Effect.fnUntraced(function* (options: UsageServiceOptions = {}) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const config = yield* ServerConfig;
@@ -305,11 +320,11 @@ const makeUsageService = Effect.gen(function* () {
   const scanSemaphore = yield* Semaphore.make(1);
   const persistLock = yield* Semaphore.make(1);
 
-  const usageStateDir = path.join(config.stateDir, "usage");
+  const usageStateDir = usageStateDirectory(path, config.stateDir);
   yield* fileSystem
     .makeDirectory(usageStateDir, { recursive: true })
     .pipe(Effect.catchCause(() => Effect.void));
-  const ratesCachePath = path.join(usageStateDir, "pricing-cache.json");
+  const ratesCachePath = usageRatesCachePath(path, config.stateDir);
   const store = yield* makeUsageScanCacheStore({
     directory: path.join(usageStateDir, "scan-cache"),
     legacyFilePath: path.join(usageStateDir, "scan-cache.json"),
@@ -477,24 +492,46 @@ const makeUsageService = Effect.gen(function* () {
   });
 
   // Users who opened usage before get fresh rates before their next visit.
-  yield* Effect.sleep(Duration.millis(RATES_WARM_DELAY_MS)).pipe(
-    Effect.andThen(fileSystem.exists(ratesCachePath)),
-    Effect.flatMap((exists) => (exists ? startRatesRefresh : Effect.void)),
-    Effect.catchCause(() => Effect.void),
-    Effect.forkIn(serviceScope),
+  const ratesWarmDelayMs =
+    options.ratesWarmDelayMs === undefined ? USAGE_RATES_WARM_DELAY_MS : options.ratesWarmDelayMs;
+  if (ratesWarmDelayMs !== null)
+    yield* Effect.sleep(Duration.millis(ratesWarmDelayMs)).pipe(
+      Effect.andThen(fileSystem.exists(ratesCachePath)),
+      Effect.flatMap((exists) => (exists ? startRatesRefresh : Effect.void)),
+      Effect.catchCause(() => Effect.void),
+      Effect.forkIn(serviceScope),
+    );
+
+  const readSettings = settingsService.getSettings.pipe(
+    Effect.mapError(
+      (cause) =>
+        new UsageReadError({
+          reason: "scan-failed",
+          detail: "Server settings could not be read for usage history.",
+          cause,
+        }),
+    ),
   );
 
-  const resolveTranscriptSources = Effect.fn("UsageService.resolveTranscriptSources")(function* () {
-    const settings = yield* settingsService.getSettings.pipe(
-      Effect.mapError(
-        (cause) =>
-          new UsageReadError({
-            reason: "scan-failed",
-            detail: "Server settings could not be read while locating provider transcripts.",
-            cause,
-          }),
-      ),
-    );
+  // Settings reads return the same overrides object until they change: compile them once.
+  let compiledOverrides:
+    | {
+        readonly source: UsagePriceOverrides;
+        readonly tables: UsagePriceOverrideTables;
+        readonly revision: string;
+      }
+    | undefined;
+  const compileOverrides = (source: UsagePriceOverrides) => {
+    if (compiledOverrides?.source !== source) {
+      const tables = compileUsagePriceOverrides(source);
+      compiledOverrides = { source, tables, revision: usagePriceOverridesRevision(tables) };
+    }
+    return compiledOverrides;
+  };
+
+  const resolveTranscriptSources = Effect.fn("UsageService.resolveTranscriptSources")(function* (
+    settings: ServerSettings,
+  ) {
     const claudeHomes = [
       yield* resolveClaudeHomePath(settings.providers.claudeAgent).pipe(
         Effect.provideService(Path.Path, path),
@@ -680,13 +717,13 @@ const makeUsageService = Effect.gen(function* () {
       sourceId: plan.sourceId,
       retainExportIdentity: true,
       ...window,
-      price: (record) => priceUsageRecord(pricing.rates, record),
+      pricing: pricing.policy,
     });
     const slotAggregator = new UsageSlotAggregator({
       sourceId: plan.sourceId,
       provider: source.provider,
       ...window,
-      rates: pricing.rates,
+      pricing: pricing.policy,
     });
     const recognizedModels = new Set<string>();
     const unrecognizedModels = new Set<string>();
@@ -709,16 +746,15 @@ const makeUsageService = Effect.gen(function* () {
     let nativeDiagnostic: string | undefined;
     const addRecord = (record: UsageRecord) => {
       if (recordAggregator.add(record)) {
-        const recognized =
-          record.reportedCostUsd !== null ||
-          lookupUsageModelRate(pricing.rates, record.model) !== null;
-        (recognized ? recognizedModels : unrecognizedModels).add(record.model);
+        const resolution = resolveUsageModel(pricing.policy, record.model);
+        const recognized = record.reportedCostUsd !== null || resolution.rate !== null;
+        (recognized ? recognizedModels : unrecognizedModels).add(resolution.model);
         if (record.sessionId.length > 0) sessionIds.add(record.sessionId);
       }
     };
 
     // Transcript sources are memoized on their listing: an unchanged listing
-    // under the same window and rates yields the same result.
+    // under the same window, rates and overrides yields the same result.
     let memo: { readonly key: string; readonly fingerprint: string } | undefined;
     if (
       index >= SUMMARY_SOURCE_LIMIT ||
@@ -802,7 +838,7 @@ const makeUsageService = Effect.gen(function* () {
       for (const { fileKey } of files) liveFileKeys.push(fileKey);
 
       const memoKey = `${plan.sourceId}\0${summaryRequestKey(input)}`;
-      const fingerprint = `${pricing.generation}\0${listingFingerprint(tally.existingRootCount, listings)}`;
+      const fingerprint = `${pricing.generation}\0${pricing.overridesRevision}\0${listingFingerprint(tally.existingRootCount, listings)}`;
       const hit = sourceMemos.get(memoKey);
       if (hit !== undefined && hit.fingerprint === fingerprint) {
         sourceMemos.delete(memoKey);
@@ -944,6 +980,7 @@ const makeUsageService = Effect.gen(function* () {
 
   const readSummaryUnlocked = Effect.fn("UsageService.readSummaryUnlocked")(function* (
     input: UsageSummaryRequest,
+    settings: ServerSettings,
   ) {
     if (input.contractVersion !== USAGE_CONTRACT_VERSION)
       return yield* new UsageReadError({
@@ -978,13 +1015,14 @@ const makeUsageService = Effect.gen(function* () {
     const scanStartedAtMs = yield* Clock.currentTimeMillis;
     // Pricing is only needed by the aggregators: any download overlaps source discovery.
     const refresh = yield* startRatesRefresh;
-    const plans = yield* planSources(yield* resolveTranscriptSources());
+    const plans = yield* planSources(yield* resolveTranscriptSources(settings));
     if (refresh !== null && rates.size === 0) {
       const waitedMs = (yield* Clock.currentTimeMillis) - scanStartedAtMs;
       yield* Deferred.await(refresh).pipe(
         Effect.timeoutOption(Duration.millis(Math.max(0, RATES_FIRST_FETCH_WAIT_MS - waitedMs))),
       );
     }
+    const overrides = compileOverrides(settings.usagePriceOverrides);
     const context: SummaryContext = {
       input,
       scanStartedAtMs,
@@ -993,8 +1031,9 @@ const makeUsageService = Effect.gen(function* () {
           ? 0
           : Math.max(0, startOfCalendarDateMs(input.startDate) - MTIME_WINDOW_SLACK_MS),
       pricing: {
-        rates,
+        policy: makeUsagePricingPolicy(rates, overrides.tables),
         generation: ratesGeneration,
+        overridesRevision: overrides.revision,
         state: ratesState,
         revision: ratesRevisionValue,
         fetchedAtMs: ratesFetchedAtMs,
@@ -1113,6 +1152,10 @@ const makeUsageService = Effect.gen(function* () {
       state: snapshot.state,
       recognizedModelCount: recognizedModels.size,
       unrecognizedModelCount: unrecognizedModels.size,
+      ...(snapshot.policy.prices.size > 0 ? { customPriceCount: snapshot.policy.prices.size } : {}),
+      ...(snapshot.policy.mappings.size > 0
+        ? { mappedModelCount: snapshot.policy.mappings.size }
+        : {}),
       ...(snapshot.revision === null ? {} : { sourceRevision: snapshot.revision }),
       ...(snapshot.fetchedAtMs === null
         ? {}
@@ -1135,13 +1178,13 @@ const makeUsageService = Effect.gen(function* () {
     } satisfies UsageSummary;
   });
 
-  const computeSummary = (input: UsageSummaryRequest) =>
+  const computeSummary = (input: UsageSummaryRequest, settings: ServerSettings) =>
     scanSemaphore
       .withPermits(1)(
         // Mark activity under the lock too, so a waiting idle release sees it.
         Clock.currentTimeMillis.pipe(
           Effect.tap((nowMs) => Effect.sync(() => (lastSummaryAtMs = nowMs))),
-          Effect.andThen(readSummaryUnlocked(input)),
+          Effect.andThen(readSummaryUnlocked(input, settings)),
         ),
       )
       .pipe(
@@ -1165,7 +1208,8 @@ const makeUsageService = Effect.gen(function* () {
   // Identical requests (several tabs or clients) share one scan. It runs in the
   // service scope and is interrupted only once every caller has gone away (a
   // closed socket, an abandoned request), so a queued scan nobody waits for
-  // never runs.
+  // never runs. A scan prices with the settings its first caller saw; requests
+  // under other custom prices or mappings do not join it.
   interface Flight {
     readonly done: Deferred.Deferred<UsageSummary, UsageReadError>;
     fiber: Fiber.Fiber<unknown, unknown> | undefined;
@@ -1174,7 +1218,9 @@ const makeUsageService = Effect.gen(function* () {
   const inflight = new Map<string, Flight>();
   const readSummary = (input: UsageSummaryRequest) =>
     Effect.gen(function* () {
-      const key = summaryRequestKey(input);
+      const settings = yield* readSettings;
+      const { revision } = compileOverrides(settings.usagePriceOverrides);
+      const key = `${summaryRequestKey(input)}\0${revision}`;
       let flight = inflight.get(key);
       if (flight === undefined) {
         const started: Flight = {
@@ -1184,7 +1230,7 @@ const makeUsageService = Effect.gen(function* () {
         };
         flight = started;
         inflight.set(key, started);
-        started.fiber = yield* computeSummary(input).pipe(
+        started.fiber = yield* computeSummary(input, settings).pipe(
           Effect.onExit((exit) =>
             Effect.sync(() => {
               if (inflight.get(key) === started) inflight.delete(key);
@@ -1211,4 +1257,5 @@ const makeUsageService = Effect.gen(function* () {
   return { readSummary } satisfies UsageServiceShape;
 });
 
-export const UsageServiceLive = Layer.effect(UsageService, makeUsageService);
+/** The pipeline built with its layer. The server uses `UsageServiceDeferredLive`. */
+export const UsageServiceLive = Layer.effect(UsageService, makeUsageService());

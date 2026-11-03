@@ -1,9 +1,13 @@
 import {
   EventId,
   ProviderDriverKind,
+  ProviderInstanceId,
+  RuntimeItemId,
+  RuntimeRequestId,
   RuntimeTaskId,
   RuntimeSessionId,
   ThreadId,
+  TurnId,
   type ProviderRuntimeEvent,
 } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
@@ -89,6 +93,123 @@ describe("runtimeEventToActivities task progress", () => {
     expect(usagePayload.role).toBe("reviewer");
     expect(usagePayload.agentKind).toBe("agent");
     expect(usagePayload).not.toHaveProperty("status");
+  });
+});
+
+describe("runtimeEventToActivities runtime notices", () => {
+  it("labels a notice by its own message, with its detail as the body", () => {
+    const activities = runtimeEventToActivities({
+      ...base,
+      type: "runtime.notice",
+      eventId: EventId.make("evt-retry"),
+      turnId: TurnId.make("turn-1"),
+      payload: { message: "Retrying request (2/10) in 4s", detail: "API overloaded (HTTP 529)" },
+    } satisfies ProviderRuntimeEvent);
+
+    expect(activities).toEqual([
+      {
+        id: "evt-retry",
+        createdAt: base.createdAt,
+        tone: "info",
+        kind: "runtime.notice",
+        summary: "Retrying request (2/10) in 4s",
+        payload: { detail: "API overloaded (HTTP 529)" },
+        turnId: "turn-1",
+      },
+    ]);
+  });
+
+  it("bounds a long body and keeps a notice without one empty", () => {
+    const [long] = runtimeEventToActivities({
+      ...base,
+      type: "runtime.notice",
+      eventId: EventId.make("evt-output"),
+      payload: { message: "Command output", detail: "x".repeat(10_000) },
+    } satisfies ProviderRuntimeEvent);
+    const [bare] = runtimeEventToActivities({
+      ...base,
+      type: "runtime.notice",
+      eventId: EventId.make("evt-bare"),
+      payload: { message: "Recalled 2 memories" },
+    } satisfies ProviderRuntimeEvent);
+
+    expect((long?.payload as { readonly detail?: string } | undefined)?.detail?.length).toBe(4_000);
+    expect(bare?.payload).toEqual({});
+    expect(bare?.turnId).toBeNull();
+  });
+});
+
+describe("runtimeEventToActivities Claude Fast mode state", () => {
+  const configured = (config: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+    runtimeEventToActivities({
+      ...base,
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: ProviderInstanceId.make("claude-hub"),
+      type: "session.configured",
+      eventId: EventId.make("evt-configured"),
+      payload: { config },
+      ...extra,
+    } satisfies ProviderRuntimeEvent);
+
+  it("projects the report as the thread's one turn-less Fast mode activity", () => {
+    expect(
+      configured(
+        {
+          fastModeState: {
+            state: "off",
+            disabledReason: "not_first_party",
+            model: "claude-opus-4-8",
+            requested: true,
+          },
+        },
+        { turnId: TurnId.make("turn-1"), sessionSequence: 12 },
+      ),
+    ).toEqual([
+      {
+        id: "claude-fast-mode:thread-1:state",
+        createdAt: base.createdAt,
+        tone: "info",
+        kind: "fast-mode.state",
+        summary: "Fast mode state",
+        payload: {
+          state: "off",
+          disabledReason: "not_first_party",
+          model: "claude-opus-4-8",
+          requested: true,
+          instanceId: "claude-hub",
+        },
+        turnId: null,
+        sequence: 12,
+      },
+    ]);
+  });
+
+  it("projects nothing for the raw init config or the start options", () => {
+    expect(
+      configured({
+        type: "system",
+        subtype: "init",
+        model: "claude-opus-4-8",
+        fast_mode_state: "on",
+        fast_mode_disabled_reason: "free",
+      }),
+    ).toEqual([]);
+    expect(configured({ model: "claude-opus-4-8", fastMode: true })).toEqual([]);
+  });
+
+  it("projects nothing for an invalid report and drops invalid optional fields", () => {
+    for (const fastModeState of [null, "on", { state: "turbo" }, { disabledReason: "free" }]) {
+      expect(configured({ fastModeState }), JSON.stringify(fastModeState)).toEqual([]);
+    }
+    const [activity] = configured({
+      fastModeState: {
+        state: "cooldown",
+        disabledReason: "Not Allowed",
+        model: "m".repeat(200),
+        requested: "yes",
+      },
+    });
+    expect(activity?.payload).toEqual({ state: "cooldown", instanceId: "claude-hub" });
   });
 });
 
@@ -230,6 +351,41 @@ describe("runtimeEventToActivities tool streaming persistence", () => {
     expect(stdout.trimEnd().endsWith("Capturing frame 1999/9028")).toBe(true);
     expect(cappedData.content[0]!.content.text).toContain("chars truncated");
   });
+
+  // OpenCodeAdapter's ToolUpdateGate drops running updates that differ only in the output bash
+  // streams into `state.metadata`. That is lossless only while the persisted activity leaves the
+  // metadata out: if this fails, add what is now persisted to the gate's visible key
+  // (apps/server/src/provider/toolUpdateGate.ts).
+  it("persists nothing of a running OpenCode tool's streamed metadata", () => {
+    const runningBash = (lines: number) =>
+      ({
+        ...base,
+        provider: ProviderDriverKind.make("opencode"),
+        type: "item.updated",
+        eventId: EventId.make(`evt-opencode-bash-${lines}`),
+        turnId: TurnId.make("turn-1"),
+        itemId: RuntimeItemId.make("bash-call"),
+        payload: {
+          itemType: "command_execution",
+          status: "inProgress",
+          title: "bash",
+          data: {
+            tool: "bash",
+            state: {
+              status: "running",
+              input: { command: "bun run test", description: "Run tests" },
+              metadata: { output: "line\n".repeat(lines), description: "Run tests" },
+              time: { start: 1 },
+            },
+          },
+        },
+      }) satisfies ProviderRuntimeEvent;
+    const persisted = (lines: number) =>
+      runtimeEventToActivities(runningBash(lines)).map(({ id: _id, ...activity }) => activity);
+
+    expect(persisted(1)).toHaveLength(1);
+    expect(persisted(2_000)).toEqual(persisted(1));
+  });
 });
 
 describe("background work projection", () => {
@@ -325,5 +481,113 @@ describe("runtimeEventToActivities for Ryco HTML tool calls", () => {
         },
       },
     ]);
+  });
+});
+
+describe("runtimeEventToActivities credential-named tool parameters", () => {
+  const deepFreeze = <T>(value: T): T => {
+    if (value !== null && typeof value === "object") {
+      for (const entry of Object.values(value)) deepFreeze(entry);
+      Object.freeze(value);
+    }
+    return value;
+  };
+
+  it("persists tool data redacted while the provider keeps its own input", () => {
+    const input = deepFreeze({
+      url: "https://api.example.com/deploy",
+      headers: { Authorization: "Bearer live-secret", Accept: "application/json" },
+      body: '{"target":"staging","apiKey":"live-key"}',
+    });
+    const activities = (["item.started", "item.updated", "item.completed"] as const).flatMap(
+      (type) =>
+        runtimeEventToActivities({
+          ...base,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          type,
+          eventId: EventId.make(`evt-${type}`),
+          payload: {
+            itemType: "mcp_tool_call",
+            status: type === "item.completed" ? "completed" : "inProgress",
+            title: "MCP tool call",
+            data: { toolName: "mcp__http__fetch", input },
+          },
+        }),
+    );
+
+    expect(activities).toHaveLength(3);
+    for (const activity of activities) {
+      expect(activity.payload).toMatchObject({
+        data: {
+          toolName: "mcp__http__fetch",
+          input: {
+            url: "https://api.example.com/deploy",
+            headers: { Authorization: "[redacted]", Accept: "application/json" },
+            body: '{"target":"staging","apiKey":"[redacted]"}',
+          },
+        },
+      });
+    }
+    expect(JSON.stringify(activities)).not.toMatch(/live-secret|live-key/u);
+    expect(input.headers.Authorization).toBe("Bearer live-secret");
+    expect(input.body).toBe('{"target":"staging","apiKey":"live-key"}');
+  });
+
+  it("redacts Codex MCP arguments and keeps commands reviewable", () => {
+    const [mcp] = runtimeEventToActivities({
+      ...base,
+      type: "item.completed",
+      eventId: EventId.make("evt-codex-mcp"),
+      payload: {
+        itemType: "mcp_tool_call",
+        status: "completed",
+        title: "MCP tool call",
+        data: {
+          item: {
+            type: "mcpToolCall",
+            tool: "create_issue",
+            server: "github",
+            arguments: { repo: "ryco", github_token: "ghp_live", max_tokens: 5 },
+          },
+        },
+      },
+    });
+    const command = "curl -H 'Authorization: Bearer live-secret' https://api.example.com";
+    const [execution] = runtimeEventToActivities({
+      ...base,
+      type: "item.completed",
+      eventId: EventId.make("evt-codex-command"),
+      payload: {
+        itemType: "command_execution",
+        status: "completed",
+        title: "Command run",
+        detail: command,
+        data: { item: { type: "commandExecution", command } },
+      },
+    });
+
+    expect(mcp?.payload).toMatchObject({
+      data: { item: { arguments: { repo: "ryco", github_token: "[redacted]", max_tokens: 5 } } },
+    });
+    expect(execution?.payload).toMatchObject({
+      detail: command,
+      data: { item: { command } },
+    });
+  });
+
+  it("redacts a structured approval detail before truncating it", () => {
+    const detail = JSON.stringify({ apiKey: "live-key", notes: "x".repeat(400) });
+    const [approval] = runtimeEventToActivities({
+      ...base,
+      type: "request.opened",
+      eventId: EventId.make("evt-approval-structured"),
+      requestId: RuntimeRequestId.make("req-structured"),
+      payload: { requestType: "dynamic_tool_call", detail },
+    });
+
+    const redacted = (approval?.payload as { detail?: string } | undefined)?.detail ?? "";
+    expect(redacted.startsWith('{"apiKey":"[redacted]","notes":"xxx')).toBe(true);
+    expect(redacted).toHaveLength(180);
+    expect(redacted).not.toContain("live-key");
   });
 });

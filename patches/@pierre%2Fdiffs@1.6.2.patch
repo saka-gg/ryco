@@ -1,0 +1,18 @@
+diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -60,6 +60,14 @@
+     "./worker/worker-portable.js": {
+       "types": "./dist/worker/worker-portable.d.ts",
+       "import": "./dist/worker/worker-portable.js"
++    },
++    "./utils/getFiletypeFromFileName": {
++      "types": "./dist/utils/getFiletypeFromFileName.d.ts",
++      "import": "./dist/utils/getFiletypeFromFileName.js"
++    },
++    "./utils/parsePatchFiles": {
++      "types": "./dist/utils/parsePatchFiles.d.ts",
++      "import": "./dist/utils/parsePatchFiles.js"
+     }
+   },
+   "publishConfig": {

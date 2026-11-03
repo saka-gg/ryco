@@ -30,6 +30,8 @@ export interface ChatHeaderBarProps {
   worktreeWorkItemState?: "open" | "in_progress" | "done" | "closed" | "unknown" | null | undefined;
   worktreeWorkItemStateName?: string | null | undefined;
   sessionTitle: string;
+  /** The open chat tabs, shown in place of the session title. */
+  sessionTabs?: React.ReactNode;
   onSelectProject?: (() => void) | undefined;
   onOpenLinkedWorktreeItem?: ((item: LinkedWorktreeItem) => void) | undefined;
   inlineActions?: React.ReactNode;
@@ -46,6 +48,7 @@ export const ChatHeaderBar = memo(function ChatHeaderBar({
           projectName={props.projectName}
           projectIcon={props.projectIcon ?? null}
           sessionTitle={props.sessionTitle}
+          {...(props.sessionTabs ? { sessionTabs: props.sessionTabs } : {})}
           {...(props.onSelectProject ? { onSelectProject: props.onSelectProject } : {})}
         />
         <WorktreeSourceControlBadges

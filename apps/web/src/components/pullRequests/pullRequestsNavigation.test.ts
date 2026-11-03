@@ -39,7 +39,10 @@ function modelWith(selected: number | null) {
 
 function harness(
   initial: PullRequestsSearch,
-  extra: Pick<PullRequestsNavigationDeps, "onRevealJob"> = {},
+  extra: Pick<
+    PullRequestsNavigationDeps,
+    "onRevealJob" | "getCrossRepositoryRows" | "rememberScope" | "openExternal"
+  > = {},
 ) {
   let search = initial;
   const commits: Array<{ next: PullRequestsSearch; push: boolean; types?: unknown }> = [];
@@ -153,5 +156,125 @@ describe("derivePullRequestSelectionMotion", () => {
         token: 7,
       }),
     ).toEqual({ kind: "settle", direction: 1, token: 7 });
+  });
+});
+
+describe("All repositories navigation", () => {
+  const checkout = (environmentId: string, projectId: string) => ({ environmentId, projectId });
+  const rows = [
+    {
+      rowKey: "github.com/acme/app#12",
+      number: 12,
+      url: "https://github.com/acme/app/pull/12",
+      checkout: checkout("env-a", "app"),
+    },
+    {
+      rowKey: "github.com/acme/api#3",
+      number: 3,
+      url: "https://github.com/acme/api/pull/3",
+      checkout: checkout("env-b", "api"),
+    },
+    {
+      rowKey: "github.com/other/x#9",
+      number: 9,
+      url: "https://github.com/other/x/pull/9",
+      checkout: null,
+    },
+  ];
+  function crossHarness(initial: PullRequestsSearch) {
+    const scopes: Array<"all" | null> = [];
+    const opened: string[] = [];
+    let page: ReturnType<typeof harness>;
+    const selectedKey = () => {
+      const search = page.search;
+      const row = rows.find(
+        (entry) =>
+          entry.checkout !== null &&
+          entry.checkout.environmentId === search.env &&
+          entry.checkout.projectId === search.project &&
+          entry.number === search.pr,
+      );
+      return row?.rowKey ?? null;
+    };
+    page = harness(initial, {
+      getCrossRepositoryRows: () =>
+        ({
+          ordered: rows.slice(0, 2),
+          byKey: new Map(rows.map((row) => [row.rowKey, row])),
+          selectedKey: selectedKey(),
+        }) as unknown as ReturnType<
+          NonNullable<PullRequestsNavigationDeps["getCrossRepositoryRows"]>
+        >,
+      rememberScope: (scope) => scopes.push(scope),
+      openExternal: (url) => opened.push(url),
+    });
+    return { page, scopes, opened };
+  }
+
+  it("shows All repositories without one repository's or pull request's params", () => {
+    const { page, scopes } = crossHarness({
+      env: "env",
+      project: "project",
+      pr: 4,
+      tab: "files",
+      file: "a.ts",
+      thread: "t",
+      q: "fix",
+      state: "merged",
+      only: "review",
+      sort: "updated",
+    });
+    page.nav.showAllRepositories();
+    expect(page.search).toEqual({ scope: "all", state: "merged", only: "review", sort: "updated" });
+    expect(page.commits.at(-1)?.push).toBe(true);
+    expect(scopes).toEqual(["all"]);
+  });
+
+  it("selects a row through its checkout and stays in All repositories", () => {
+    const { page } = crossHarness({ scope: "all", tab: "checks" });
+    page.nav.selectCrossRepositoryRow("github.com/acme/api#3", { push: true, via: "list" });
+    expect(page.search).toEqual({
+      scope: "all",
+      env: "env-b",
+      project: "api",
+      pr: 3,
+      tab: "checks",
+    });
+    expect(page.commits.at(-1)?.push).toBe(true);
+  });
+
+  it("keeps the search for a list selection and drops it with a link's, in one navigation", () => {
+    const { page } = crossHarness({ scope: "all", q: "fix" });
+    page.nav.selectCrossRepositoryRow("github.com/acme/app#12", { via: "list" });
+    expect(page.search).toMatchObject({ q: "fix", pr: 12 });
+    page.nav.selectCrossRepositoryRow("github.com/acme/api#3", { push: true, via: "link" });
+    expect(page.commits).toHaveLength(2);
+    expect(page.search.q).toBeUndefined();
+    expect(page.search).toMatchObject({ scope: "all", env: "env-b", project: "api", pr: 3 });
+  });
+
+  it("opens a row whose repository is not in Ryco on its host", () => {
+    const { page, opened } = crossHarness({ scope: "all" });
+    page.nav.selectCrossRepositoryRow("github.com/other/x#9");
+    expect(opened).toEqual(["https://github.com/other/x/pull/9"]);
+    expect(page.commits).toEqual([]);
+  });
+
+  it("moves J/K across repositories in list order", () => {
+    const { page } = crossHarness({ scope: "all" });
+    page.nav.stepPullRequest(1);
+    expect(page.search).toMatchObject({ env: "env-a", project: "app", pr: 12 });
+    page.nav.stepPullRequest(1);
+    expect(page.search).toMatchObject({ scope: "all", env: "env-b", project: "api", pr: 3 });
+    expect(page.motions.at(-1)).toEqual({ kind: "settle", direction: 1, token: 1 });
+    page.nav.stepPullRequest(1);
+    expect(page.commits).toHaveLength(2);
+  });
+
+  it("leaves All repositories when a repository is chosen", () => {
+    const { page, scopes } = crossHarness({ scope: "all", env: "env-a", project: "app", pr: 12 });
+    page.nav.selectRepository({ environmentId: "env-b", projectId: "api" } as never);
+    expect(page.search).toEqual({ env: "env-b", project: "api" });
+    expect(scopes).toEqual([null]);
   });
 });

@@ -1,19 +1,23 @@
-import { Effect, Option, Schema } from "effect";
+import { Effect, Option, Schema, Stream } from "effect";
 import {
   FilesystemBrowseError,
   ProjectListEntriesError,
   type ProjectListEntriesResult,
   ProjectReadIconError,
   ProjectReadFileBinaryError,
+  ProjectReadFileChunkError,
   ProjectReadFileError,
+  ProjectSearchContentError,
   ProjectSearchEntriesError,
   ProjectStageFileReferenceError,
+  ProjectWatchFileError,
   ProjectWriteFileError,
   WS_METHODS,
 } from "@ryco/contracts";
 
 import { readProjectIcon } from "../project/readProjectIcon.ts";
-import { observeRpcEffect } from "../observability/RpcInstrumentation.ts";
+import { observeRpcEffect, observeRpcStream } from "../observability/RpcInstrumentation.ts";
+import { WorkspaceContentSearchCursorError } from "../workspace/Services/WorkspaceContentSearch.ts";
 import {
   WorkspaceFileConflictError,
   WorkspaceFileDeletedError,
@@ -23,29 +27,61 @@ import {
 import { WorkspacePathOutsideRootError } from "../workspace/Services/WorkspacePaths.ts";
 import { defineWsHandlers, type WsRpcContext } from "./context.ts";
 
+// The open-file watch loads with the first subscription: nothing in it is needed at boot.
+const loadWorkspaceFileWatch = Effect.promise(() => import("../workspace/workspaceFileWatch.ts"));
+
 export const makeProjectHandlers = (ctx: WsRpcContext) => {
-  const { ownerEffect, workspaceEntries, workspaceFileSystem, open } = ctx;
+  const { ownerEffect, workspaceEntries, workspaceContentSearch, workspaceFileSystem, open } = ctx;
+  /** Files this connection watches now; the watch module enforces its cap. */
+  const fileWatches = { active: 0 };
   /**
    * A chat folder empty-folder cleanup removed lists as empty: looking at an old chat's files
    * does not bring its folder back (`project/chatFolderRestore.ts`). Checked only on failure.
    */
   const emptyListing: ProjectListEntriesResult = { entries: [], truncated: false };
-  const emptyForRemovedChatFolder = <A, E>(
+  const emptyForRemovedChatFolder = <A, E, B>(
     cwd: string,
     listing: Effect.Effect<A, E>,
-  ): Effect.Effect<A | ProjectListEntriesResult, E> =>
+    empty: B,
+  ): Effect.Effect<A | B, E> =>
     listing.pipe(
       Effect.catch((cause) =>
         Option.match(ctx.removedChatFolders, {
           onNone: () => Effect.fail(cause),
           onSome: ({ isRemoved }) =>
             isRemoved(cwd).pipe(
-              Effect.flatMap((removed) =>
-                removed ? Effect.succeed(emptyListing) : Effect.fail(cause),
-              ),
+              Effect.flatMap((removed) => (removed ? Effect.succeed(empty) : Effect.fail(cause))),
             ),
         }),
       ),
+    );
+
+  /**
+   * A client's read of a workspace file: operator access, the workspace held
+   * while that client reads it, and one wording for a path outside the root.
+   */
+  const workspaceRead = <A, R, E>(
+    method: string,
+    cwd: string,
+    read: Effect.Effect<A, WorkspaceFileSystemError | WorkspacePathOutsideRootError, R>,
+    toError: (props: { readonly message: string; readonly cause: unknown }) => E,
+  ) =>
+    observeRpcEffect(
+      method,
+      ownerEffect(
+        method,
+        ctx.clientWorkspaceUse.use(cwd, read).pipe(
+          Effect.mapError((cause) =>
+            toError({
+              message: Schema.is(WorkspacePathOutsideRootError)(cause)
+                ? "Workspace file path must stay within the project root."
+                : cause.detail,
+              cause,
+            }),
+          ),
+        ),
+      ),
+      { "rpc.aggregate": "workspace" },
     );
 
   return defineWsHandlers({
@@ -77,7 +113,7 @@ export const makeProjectHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.projectsSearchEntries,
         ownerEffect(
           WS_METHODS.projectsSearchEntries,
-          emptyForRemovedChatFolder(input.cwd, workspaceEntries.search(input)).pipe(
+          emptyForRemovedChatFolder(input.cwd, workspaceEntries.search(input), emptyListing).pipe(
             Effect.mapError(
               (cause) =>
                 new ProjectSearchEntriesError({
@@ -89,12 +125,38 @@ export const makeProjectHandlers = (ctx: WsRpcContext) => {
         ),
         { "rpc.aggregate": "workspace" },
       ),
+    // The query never reaches logs or span attributes: it may be anything the user typed.
+    [WS_METHODS.projectsSearchContent]: (input) =>
+      observeRpcEffect(
+        WS_METHODS.projectsSearchContent,
+        ownerEffect(
+          WS_METHODS.projectsSearchContent,
+          emptyForRemovedChatFolder(input.cwd, workspaceContentSearch.search(input), {
+            matches: [],
+          }).pipe(
+            Effect.mapError((cause) =>
+              Schema.is(WorkspaceContentSearchCursorError)(cause)
+                ? new ProjectSearchContentError({ message: cause.message, reason: "cursor" })
+                : new ProjectSearchContentError({
+                    message: `Failed to search workspace contents: ${cause.detail}`,
+                    reason: "failed",
+                    cause,
+                  }),
+            ),
+          ),
+        ),
+        { "rpc.aggregate": "workspace" },
+      ),
     [WS_METHODS.projectsListEntries]: (input) =>
       observeRpcEffect(
         WS_METHODS.projectsListEntries,
         ownerEffect(
           WS_METHODS.projectsListEntries,
-          emptyForRemovedChatFolder(input.cwd, workspaceEntries.listEntries(input)).pipe(
+          emptyForRemovedChatFolder(
+            input.cwd,
+            workspaceEntries.listEntries(input),
+            emptyListing,
+          ).pipe(
             Effect.mapError(
               (cause) =>
                 new ProjectListEntriesError({
@@ -107,39 +169,48 @@ export const makeProjectHandlers = (ctx: WsRpcContext) => {
         { "rpc.aggregate": "workspace" },
       ),
     [WS_METHODS.projectsReadFile]: (input) =>
-      observeRpcEffect(
+      workspaceRead(
         WS_METHODS.projectsReadFile,
-        ownerEffect(
-          WS_METHODS.projectsReadFile,
-          ctx.clientWorkspaceUse.use(input.cwd, workspaceFileSystem.readFile(input)).pipe(
-            Effect.mapError((cause) => {
-              const message = Schema.is(WorkspacePathOutsideRootError)(cause)
-                ? "Workspace file path must stay within the project root."
-                : cause.detail;
-              return new ProjectReadFileError({
-                message,
-                cause,
-              });
-            }),
-          ),
-        ),
-        { "rpc.aggregate": "workspace" },
+        input.cwd,
+        workspaceFileSystem.readFile(input),
+        (props) => new ProjectReadFileError(props),
       ),
     [WS_METHODS.projectsReadFileBinary]: (input) =>
-      observeRpcEffect(
+      workspaceRead(
         WS_METHODS.projectsReadFileBinary,
-        ownerEffect(
-          WS_METHODS.projectsReadFileBinary,
-          ctx.clientWorkspaceUse.use(input.cwd, workspaceFileSystem.readFileBinary(input)).pipe(
-            Effect.mapError((cause) => {
-              const message = Schema.is(WorkspacePathOutsideRootError)(cause)
-                ? "Workspace file path must stay within the project root."
-                : cause.detail;
-              return new ProjectReadFileBinaryError({
-                message,
-                cause,
-              });
-            }),
+        input.cwd,
+        workspaceFileSystem.readFileBinary(input),
+        (props) => new ProjectReadFileBinaryError(props),
+      ),
+    [WS_METHODS.projectsReadFileChunk]: (input) =>
+      workspaceRead(
+        WS_METHODS.projectsReadFileChunk,
+        input.cwd,
+        workspaceFileSystem.readFileChunk(input),
+        (props) => new ProjectReadFileChunkError(props),
+      ),
+    // Holds the workspace like a read does (until the connection closes) and carries no content.
+    [WS_METHODS.projectsSubscribeFileChanges]: (input) =>
+      observeRpcStream(
+        WS_METHODS.projectsSubscribeFileChanges,
+        ctx.ownerStream(
+          WS_METHODS.projectsSubscribeFileChanges,
+          Stream.unwrap(
+            ctx.clientWorkspaceUse.use(input.cwd, loadWorkspaceFileWatch).pipe(
+              Effect.map((module) =>
+                module.watchWorkspaceFile(
+                  { resolveTarget: workspaceFileSystem.resolveTarget, connection: fileWatches },
+                  input,
+                ),
+              ),
+              Effect.mapError(
+                (cause) =>
+                  new ProjectWatchFileError({
+                    message: cause.detail.trim() || "The file's folder cannot be watched now.",
+                    reason: "unavailable",
+                  }),
+              ),
+            ),
           ),
         ),
         { "rpc.aggregate": "workspace" },

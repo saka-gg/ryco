@@ -5,6 +5,7 @@ import type {
   HubConnectorFailureCode,
   HubIdentitySummary,
 } from "@ryco/contracts";
+import { describeHubLinkOutcome } from "@ryco/client-runtime/connection";
 
 /**
  * What the Hub row offers the operator.
@@ -390,6 +391,8 @@ export function desktopWorkspaceMachineTrustPresentation(input: {
   readonly connectionActions: boolean;
   /** Offer "Add direct access": a trusted, online machine with no direct link yet. */
   readonly directAccessAction: boolean;
+  /** Offer "Remove direct access": the machine has a link, reachable or not. */
+  readonly removeDirectAccessAction: boolean;
 } {
   if (input.isThisDevice === true) {
     return {
@@ -400,6 +403,7 @@ export function desktopWorkspaceMachineTrustPresentation(input: {
       verifyAction: null,
       connectionActions: false,
       directAccessAction: false,
+      removeDirectAccessAction: false,
     };
   }
   const presence = input.online ? (input.connected ? "Connected" : "Online") : "Offline";
@@ -412,6 +416,7 @@ export function desktopWorkspaceMachineTrustPresentation(input: {
     verifyAction,
     connectionActions: input.online && trusted,
     directAccessAction: input.online && trusted && input.directLinked !== true,
+    removeDirectAccessAction: input.directLinked === true,
   });
   switch (input.nativeTrust) {
     case "verified":
@@ -442,22 +447,6 @@ export function desktopWorkspaceMachineTrustPresentation(input: {
 
 /**
  * What "Add direct access" reports. `null` once linked: the row itself then
- * reads "Direct access ready".
+ * reads "Direct access ready". The phone shows the same words.
  */
-export function desktopDirectAccessOutcomeMessage(
-  label: string,
-  outcome: "linked" | "already-paired" | "no-direct-endpoint" | "unreachable" | "failed",
-): string | null {
-  switch (outcome) {
-    case "linked":
-      return null;
-    case "already-paired":
-      return `${label} is already paired directly on this device.`;
-    case "no-direct-endpoint":
-      return `${label} only listens on its own loopback address, so no other device can reach it directly.`;
-    case "unreachable":
-      return `None of ${label}'s direct addresses answered from this network.`;
-    case "failed":
-      return `Direct access to ${label} could not be set up. Try again in a moment.`;
-  }
-}
+export const desktopDirectAccessOutcomeMessage = describeHubLinkOutcome;

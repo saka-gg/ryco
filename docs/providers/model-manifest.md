@@ -68,20 +68,91 @@ Semantics of the Claude adapter payloads:
   context-window suffix today).
 - `contextWindowTokens` / `fixedContextWindowTokens` — kept for upstream
   format parity; Ryco reads live window sizes from runtime usage events.
+- model `status` — `current` or `legacy`. Pickers fold `legacy` models into a
+  collapsed "Legacy models" section under each provider's current models.
+  Favorites, custom models and the model that was active when the picker
+  opened never fold, and a search lists matching legacy models inline. A
+  remote manifest edit reclassifies a model on the next provider check. Never
+  add another value: older releases reject the whole remote manifest on one
+  they don't know.
 - model `adapter.claudeCode.minVersion` / `maxVersionExclusive` — hide the
   model on incompatible Claude Code versions. The provider check surfaces an
-  upgrade message naming the model with the lowest unmet minimum.
+  upgrade message naming the model with the lowest unmet minimum. Each
+  instance's snapshot also lists its gated `current` models in
+  `updateRequiredModels` (sorted by `minVersion`, computed from that
+  instance's own `claude --version`), so pickers can say "Update Claude Code
+  to vX or newer to use …". `legacy` models are never listed there, and a
+  model gated only by `maxVersionExclusive` is not either, since an update
+  cannot unlock it. Models listed in `updateRequiredModels` and gated `legacy`
+  models stay out of the instance's `models` even when an earlier snapshot,
+  such as the boot placeholder, still lists them. Two cases are not covered
+  yet: a `current` model gated only by `maxVersionExclusive`, and gated models
+  when `claude --version` cannot be parsed. No bundled entry uses
+  `maxVersionExclusive` today.
+
+### Claude Code's own model report
+
+The provider check's capabilities probe already starts the installed Claude
+Code, and its `initialize` answer lists the models that CLI offers. Ryco uses
+that list to correct the controls of **that provider instance only**; the
+manifest stays the source of the model list, and the report never adds a
+model or a control:
+
+- `supportsAutoMode` is copied onto the instance's model as `supportsAutoMode`,
+  which the pickers and the Auto-mode gate read (see
+  [Auto Mode](./claude.md#auto-mode)).
+- `supportsFastMode: false` removes the model's Fast toggle. `true` adds none
+  where the manifest has no `fastMode` descriptor.
+- `supportedEffortLevels` drops the effort options whose CLI value (after the
+  profile's `effortMap`, so `ultracode` needs `xhigh`) is not offered. Options
+  sent without an effort flag (`ultrathink`) stay. A dropped default moves to
+  the highest remaining option below it. If no offered option would remain,
+  the effort control is left as the manifest has it.
+
+Rows are matched by the model's slug first, then its aliases (with a `[1m]`
+suffix ignored). A row that names the model it resolves to (`resolvedModel`)
+describes that model only: it matches when that model, or the row's own value,
+is the slug, else through one of that model's aliases, but never because its
+alias value is a manifest alias. So an `opus` row that resolves to a newer Opus
+than the manifest's, or a `sonnet` row a proxy remaps to another model, leaves
+the manifest's `opus` and `sonnet` models alone. A row without a resolved model
+is matched by its value, except `default`, `best` and `opusplan`, which are
+skipped. When several rows match and disagree on a flag, it stays unknown.
+Custom models are never changed.
+
+The report is kept per instance and per Claude Code version: a probe that
+fails or comes back without a model list reuses the last report of the same
+version, and an updated CLI starts from the manifest again. Because the data
+rides on each instance's snapshot, an instance routed through a proxy such as
+CLIProxyAPI can lose Fast mode while a first-party instance keeps it; nothing
+reaches the process-wide catalog. Code map: `claudeCliModels.ts`.
 
 ## Provider compatibility (`compatibility`)
 
 The optional top-level `compatibility` array rates provider versions against
-the running Ryco release. The bundled file seeds OpenCode:
+the running Ryco release. The bundled file seeds OpenCode with two policies:
+one for the releases that run OpenCode 2 and, after it, one for the earlier
+releases, which keep refusing 2.x:
 
 ```jsonc
 "compatibility": [
   {
     "driver": "opencode",          // provider driver kind
-    "rycoRange": ">=0.1.30",       // Ryco releases this policy applies to
+    "rycoRange": ">=0.1.36",       // Ryco releases this policy applies to
+    "ranges": [
+      { "range": ">=3.0.0", "status": "unsupported" },
+      {
+        "range": ">=2.0.0 <2.2.0",
+        "status": "unsupported",
+        "message": "Upgrade OpenCode 2 to v2.2.0 or newer."
+      },
+      { "range": ">=2.2.0 <3.0.0", "status": "supported" },
+      { "range": ">=1.14.19 <2.0.0", "status": "supported" }
+    ]
+  },
+  {
+    "driver": "opencode",
+    "rycoRange": ">=0.1.30 <0.1.36",
     "ranges": [
       {
         "range": ">=2.0.0",
@@ -93,6 +164,13 @@ the running Ryco release. The bundled file seeds OpenCode:
   }
 ]
 ```
+
+`0.1.36` is the release that ships OpenCode 2 support. The remote copy on
+`main` rates every running release, so a release that moves the line must
+change the manifest and the drift guard (`FIRST_RYCO_WITH_OPENCODE_2` in
+`providerCompatibility.test.ts`) together. Until `apps/server/package.json`
+reaches that version, a development build selects the older policy and shows
+2.x as unsupported on the settings card even though it runs it.
 
 - **Ranges.** Comparator groups joined by `||`; whitespace-separated
   comparators in a group are ANDed. A comparator is `>=`, `>`, `<=`, `<`, `=`
@@ -126,9 +204,10 @@ the running Ryco release. The bundled file seeds OpenCode:
   rating, publish an explicit overriding policy for that `rycoRange`.
 - **Code-owned floors.** Limits of a build that no manifest can lift are rated
   before any policy, for both the installed and the latest version. In this
-  build that is OpenCode `>=2.0.0` (always `unsupported`). The bundled
-  OpenCode `>=2.0.0` range only repeats the floor for readers; a test pins the
-  two together.
+  build that is OpenCode `>=3.0.0` and `>=2.0.0 <2.2.0` (always `unsupported`;
+  `openCodeVersionFloor` in `openCodeVersion.ts`, with the minimum in
+  `MINIMUM_OPENCODE_V2_VERSION`). The bundled ranges for them only repeat the
+  floor for readers; a test pins the newest policy and the floor together.
 - **Lenient decoding.** Invalid entries are dropped one by one, and a malformed
   or non-array `compatibility` is ignored; it never rejects the manifest (and
   with it the remote Claude catalog). Older releases ignore the field.
@@ -139,7 +218,8 @@ the running Ryco release. The bundled file seeds OpenCode:
   no 2.x releases (2.x ships as `@opencode/cli`). In practice an OpenCode
   policy only blocks updates when it marks a specific 1.x release.
   Homebrew and native updaters are rated from the same npm number, as a
-  best-effort proxy.
+  best-effort proxy. An OpenCode 2 install is never offered that 1.x number
+  (it is older); updating 2.x stays manual (see [OpenCode](./opencode.md)).
 
 Code map: `providerCompatibility.ts` (policy schema, selection, floors,
 rating), `Layers/ProviderRegistry.ts` (rates snapshots, post-sync refresh),

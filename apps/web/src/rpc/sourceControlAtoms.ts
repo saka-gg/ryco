@@ -60,10 +60,16 @@ import {
   sourceControlReadAdmission,
   subscribeSourceControlReadAdmission,
 } from "./sourceControlReadAdmission";
+import { sourceControlPauseRetryDelayMs } from "@ryco/shared/sourceControlFailure";
 import { webAppLifecycle } from "~/platform/appLifecycle";
+import {
+  noteSourceControlReadOutcome,
+  resetSourceControlPausesForTests,
+} from "../sourceControlPause";
 import {
   AUTOMATIC_ACTIVE_REFRESH_MS,
   resolveSourceControlFailureDelay,
+  resolveSourceControlPauseWaitMs,
 } from "./sourceControlRefreshPolicy";
 
 // ---------------------------------------------------------------------------
@@ -85,6 +91,13 @@ const CHANGE_REQUEST_SEARCH_FAMILY = "changeRequests:search";
 const CHANGE_REQUEST_DETAIL_FAMILY = "changeRequests:detail";
 const WORKFLOW_RUNS_FAMILY = "workflows:runs";
 const WORKFLOW_JOBS_FAMILY = "workflows:jobs";
+/**
+ * Pull requests that need the viewer across a node's repositories. The reads
+ * live with the pull requests page (`involvedChangeRequestsQuery.ts`); they span
+ * checkouts, so a change request change on any checkout drops the
+ * environment's entries.
+ */
+export const CHANGE_REQUEST_INVOLVED_FAMILY = "changeRequests:involved";
 
 const ISSUE_LIST_STALE_TIME_MS = 60_000;
 const CHANGE_REQUEST_LIST_STALE_TIME_MS = 60_000;
@@ -108,6 +121,28 @@ const DETAIL_CACHE_MAX_BYTES = 8 * 1024 * 1024;
 const FILE_CONTENTS_CACHE_GC_TIME_MS = 5 * 60_000;
 const FILE_CONTENTS_CACHE_MAX_ENTRIES = 64;
 const FILE_CONTENTS_CACHE_MAX_BYTES = 24 * 1024 * 1024;
+const POLL_JITTER_RATIO = 0.08;
+
+/**
+ * The wait until the read's rate-limit pause ends (up to 15 min, backing off
+ * when that end already passed), stretched so poll jitter never reads before it
+ * is over; null when the last read did not run into a pause.
+ */
+function sourceControlPauseWaitMs(controller: Record<string, unknown>): number | null {
+  const consecutiveFailures = controller.consecutiveFailures as number;
+  const pauseMs = sourceControlPauseRetryDelayMs(
+    controller.lastReadError,
+    Date.now(),
+    consecutiveFailures,
+  );
+  if (pauseMs === null) return null;
+  const delayMs = resolveSourceControlFailureDelay({
+    baseDelayMs: pauseMs,
+    consecutiveFailures,
+    retryAfterMs: pauseMs,
+  });
+  return resolveSourceControlPauseWaitMs(delayMs, POLL_JITTER_RATIO);
+}
 
 export interface SourceControlQueryState<T> {
   readonly data: T | null;
@@ -157,7 +192,7 @@ const sourceControlRegistry = createKeyedQueryRegistry<SourceControlQueryState<u
       };
     },
   },
-  pollJitterRatio: 0.08,
+  pollJitterRatio: POLL_JITTER_RATIO,
   buildFetchingState: (current) => ({
     data: current.data,
     isLoading: current.data === null,
@@ -181,18 +216,27 @@ const sourceControlRegistry = createKeyedQueryRegistry<SourceControlQueryState<u
   onRunStart: (controller) => {
     controller.fetching = true;
   },
-  onRunEnd: (controller, outcome) => {
+  onRunEnd: (controller, outcome, error) => {
     controller.fetching = false;
     controller.consecutiveFailures =
       outcome === "success" ? 0 : (controller.consecutiveFailures as number) + 1;
+    controller.lastReadError = error ?? null;
+    noteSourceControlReadOutcome(controller.compositeKey, error, Date.now());
   },
-  adjustPollDelay: (baseDelayMs, controller) =>
-    (controller.consecutiveFailures as number) > 0
-      ? resolveSourceControlFailureDelay({
-          baseDelayMs,
-          consecutiveFailures: controller.consecutiveFailures as number,
-        })
-      : baseDelayMs,
+  adjustPollDelay: (baseDelayMs, controller) => {
+    const consecutiveFailures = controller.consecutiveFailures as number;
+    if (consecutiveFailures <= 0) return baseDelayMs;
+    // A rate-limit pause says when the host takes requests again: wait for it
+    // (up to 15 min) instead of backing off from the regular cadence.
+    return (
+      sourceControlPauseWaitMs(controller) ??
+      resolveSourceControlFailureDelay({ baseDelayMs, consecutiveFailures })
+    );
+  },
+  // A read that ran into a pause is read again when it ends, also where
+  // nothing polls (a settled list), so "tries again then" holds everywhere.
+  retryFailedReadAfterMs: (controller) =>
+    (controller.consecutiveFailures as number) > 0 ? sourceControlPauseWaitMs(controller) : null,
   onPublish: (controller, data) => {
     if (controller.family === CHANGE_REQUEST_DETAIL_FAMILY) {
       shareFetchedChangeRequestDetail(controller, data as SourceControlChangeRequestDetail);
@@ -208,7 +252,7 @@ export type QueryBinding<TInput, TData> = import("@ryco/client-runtime/rpc").Key
   SourceControlQueryState<TData>
 >;
 
-interface SourceControlQueryDefinition<TInput, TData> {
+export interface SourceControlQueryDefinition<TInput, TData> {
   readonly label: string;
   readonly staleTime: number;
   readonly gcTime?: number;
@@ -219,7 +263,8 @@ interface SourceControlQueryDefinition<TInput, TData> {
   readonly run: (input: TInput) => Promise<TData>;
 }
 
-function defineQuery<TInput, TData>(
+/** A read in the shared source-control registry (admission, lifecycle, fencing, invalidation). */
+export function defineQuery<TInput, TData>(
   definition: SourceControlQueryDefinition<TInput, TData>,
 ): QueryBinding<TInput, TData> {
   return defineKeyedQueryByInput(
@@ -230,6 +275,7 @@ function defineQuery<TInput, TData>(
         cwd: definition.resolveCwd(input),
         fetching: false,
         consecutiveFailures: 0,
+        lastReadError: null,
       }),
     },
     (controller) => {
@@ -242,6 +288,16 @@ function defineQuery<TInput, TData>(
 
 function sourceControlClient(environmentId: EnvironmentId) {
   return requireEnvironmentConnection(environmentId).client.sourceControl;
+}
+
+/**
+ * Whether the environment's source-control reads are admitted now: always
+ * outside the hosted Hub, else once its own session allows them. A pull
+ * request link opens in the app only then, so it never lands on a page that
+ * cannot load.
+ */
+export function isSourceControlReadAdmitted(environmentId: EnvironmentId): boolean {
+  return sourceControlReadAdmission(environmentId).key !== null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1393,9 +1449,16 @@ function invalidateKeys(compositeKeys: ReadonlyArray<string | null>): void {
   }
 }
 
+/** The environment's pull requests across repositories (they span every checkout). */
+function invalidateInvolvedChangeRequests(environmentId: EnvironmentId | null | undefined): void {
+  if (environmentId) invalidateFamilies({ environmentId }, [CHANGE_REQUEST_INVOLVED_FAMILY]);
+}
+
 /** Every source-control read of a checkout (or environment, or all of them). */
 export function invalidateSourceControl(input?: SourceControlInvalidationFilter): void {
   invalidateFamilies(input ?? {}, null);
+  // A checkout filter skips reads that span checkouts.
+  if (input?.cwd) invalidateInvolvedChangeRequests(input.environmentId);
   detailCache.invalidate({
     environmentId: input?.environmentId ?? null,
     cwd: input?.cwd ?? null,
@@ -1427,6 +1490,7 @@ export function invalidateSourceControlAfterWorkflowRerun(
     CHANGE_REQUEST_LIST_FAMILY,
     CHANGE_REQUEST_SEARCH_FAMILY,
   ]);
+  if (filter.cwd) invalidateInvolvedChangeRequests(filter.environmentId);
 }
 
 /** Retries one job log (and nothing else). */
@@ -1557,6 +1621,7 @@ function refreshAfterChangeRequestMutation(
   ]);
   if (scope.lists) {
     invalidateFamilies(target, [CHANGE_REQUEST_LIST_FAMILY, CHANGE_REQUEST_SEARCH_FAMILY]);
+    invalidateInvolvedChangeRequests(target.environmentId);
   }
 }
 
@@ -1899,6 +1964,7 @@ export async function createChangeRequest(
     CHANGE_REQUEST_LIST_FAMILY,
     CHANGE_REQUEST_SEARCH_FAMILY,
   ]);
+  invalidateInvolvedChangeRequests(environmentId);
   return result;
 }
 
@@ -1975,6 +2041,7 @@ export async function toggleIssueCommentReaction(
 
 export function resetSourceControlAtomsForTests(): void {
   sourceControlRegistry.resetForTests();
+  resetSourceControlPausesForTests();
   detailCache.reset();
   fileContentsCache.reset();
   pendingThreadResolutions.clear();

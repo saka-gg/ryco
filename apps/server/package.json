@@ -1,6 +1,6 @@
 {
   "name": "ryco-cli",
-  "version": "0.1.35",
+  "version": "0.1.37",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -45,6 +45,9 @@
   },
   "devDependencies": {
     "@effect/vitest": "catalog:",
+    "@opencode/client": "2.2.0",
+    "@opencode/protocol": "2.2.0",
+    "@opencode/schema": "2.2.0",
     "@ryco/client-runtime": "workspace:*",
     "@ryco/contracts": "workspace:*",
     "@ryco/shared": "workspace:*",
@@ -55,6 +58,7 @@
     "@types/node": "catalog:",
     "effect-acp": "workspace:*",
     "effect-codex-app-server": "workspace:*",
+    "fast-check": "catalog:",
     "tsdown": "catalog:",
     "typescript": "catalog:",
     "vite-plus": "catalog:",

@@ -1,6 +1,6 @@
 {
   "name": "@ryco/web",
-  "version": "0.1.35",
+  "version": "0.1.37",
   "private": true,
   "type": "module",
   "scripts": {
@@ -33,7 +33,7 @@
     "@formkit/auto-animate": "^0.10.0",
     "@legendapp/list": "3.3.10",
     "@lexical/react": "^0.50.0",
-    "@pierre/diffs": "1.4.1",
+    "@pierre/diffs": "1.6.2",
     "@ryco/client-runtime": "workspace:*",
     "@ryco/contracts": "workspace:*",
     "@ryco/shared": "workspace:*",
@@ -59,19 +59,16 @@
     "zustand": "^5.0.15"
   },
   "devDependencies": {
-    "@babel/core": "catalog:",
-    "@rolldown/plugin-babel": "^0.2.4",
     "@tailwindcss/vite": "^4.3.3",
     "@tanstack/router-plugin": "^1.168.36",
-    "@types/babel__core": "^7.20.5",
     "@types/mdast": "^4.0.4",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
-    "@vitejs/plugin-react": "^6.1.1",
+    "@vitejs/plugin-react": "6.1.2",
     "@vitest/browser-playwright": "5.0.3",
-    "babel-plugin-react-compiler": "1.0.0",
     "fast-check": "catalog:",
     "msw": "2.15.0",
+    "oxc-transform-react": "0.152.0",
     "playwright": "^1.63.0",
     "tailwindcss": "^4.3.3",
     "typescript": "catalog:",

@@ -1,4 +1,3 @@
-import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import {
   CHAT_ATTACHMENT_READ_CHUNK_BYTES,
@@ -7,6 +6,7 @@ import {
   type ChatAttachmentReadChunkInput,
 } from "@ryco/contracts";
 import { Effect, Option } from "effect";
+import { REGULAR_FILE_READ_FLAGS } from "@ryco/shared/regularFile";
 import { isPersistableChatAttachment, resolveAttachmentPath } from "./attachmentStore.ts";
 import type { ProjectionSnapshotQueryShape } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 
@@ -30,10 +30,7 @@ export const readAttachmentChunk = (
       return yield* new ChatAttachmentReadError({ message: "Attachment unavailable." });
     return yield* Effect.tryPromise({
       try: async () => {
-        const file = await open(
-          filePath,
-          constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-        );
+        const file = await open(filePath, REGULAR_FILE_READ_FLAGS);
         try {
           const stat = await file.stat();
           if (

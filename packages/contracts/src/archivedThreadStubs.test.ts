@@ -34,21 +34,18 @@ describe("archived thread stubs: subscribeShell input compatibility", () => {
       JSON.stringify(
         Schema.encodeSync(serverPayloadCodec(OrchestrationSubscribeShellInput))({
           snapshotDelivery: "paged",
-          threadPriorities: "delta",
           archivedThreads: "stub",
         }),
       ),
     );
     expect(wire).toEqual({
       snapshotDelivery: "paged",
-      threadPriorities: "delta",
       archivedThreads: "stub",
     });
     // An older server's decode (the RPC server's default parse options) ignores the
     // unknown key: it answers as it always did, with full archived shells.
     expect(Schema.decodeUnknownSync(serverPayloadCodec(LegacySubscribeShellInput))(wire)).toEqual({
       snapshotDelivery: "paged",
-      threadPriorities: "delta",
     });
   });
 

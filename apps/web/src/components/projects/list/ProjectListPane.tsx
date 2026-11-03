@@ -304,7 +304,7 @@ export function ProjectListPane(props: { readonly variant: ProjectListVariant })
               <div
                 ref={highlightRef}
                 aria-hidden
-                className="pointer-events-none absolute inset-x-0 top-0 rounded-[min(var(--radius-lg),0.625rem)] bg-accent/55 opacity-0 transition-[transform,height,opacity] duration-(--app-motion-duration-stack) ease-(--app-motion-spring-gentle) motion-reduce:transition-none data-[visible=true]:opacity-100"
+                className="pointer-events-none absolute inset-x-0 top-0 rounded-lg bg-accent/55 opacity-0 transition-[transform,height,opacity] duration-(--app-motion-duration-stack) ease-(--app-motion-spring-gentle) motion-reduce:transition-none data-[visible=true]:opacity-100"
                 data-visible="false"
               />
               <div

@@ -32,8 +32,10 @@ describe("web bundle splitting boundaries", () => {
       "../routes/pull-requests.tsx",
       "../routes/projects.tsx",
       "../routes/tasks.tsx",
+      "../routes/_chat.new.tsx",
       "../routes/_settings.diagnostics.tsx",
       "../routes/native.authorize.$handoffId.tsx",
+      "../routes/pair.tsx",
     ];
     for (const file of routeFiles) {
       const source = await readSource(file);
@@ -145,11 +147,24 @@ describe("web bundle splitting boundaries", () => {
     expect(commandPalette).not.toContain("./CommandPalette.logic");
   });
 
+  it("loads setup's provider sign-in, and its controller, only on the first Sign in", async () => {
+    const onboardingDialog = await readSource("../components/onboarding/OnboardingDialog.tsx");
+    const signInSection = await readSource("../components/settings/ProviderSignInSection.tsx");
+
+    expect(onboardingDialog).toContain('import("../settings/ProviderSignInSection")');
+    expect(onboardingDialog).not.toMatch(/from\s+"\.\.\/settings\/ProviderSignInSection"/u);
+    expect(onboardingDialog).not.toContain("@ryco/client-runtime/state/providerSignIn");
+    // A lazy entry that needs `AccountEmail` without the usage rows splits it out of their
+    // shared chunk, one more file on the chat route's way.
+    expect(signInSection).not.toContain("../usage/AccountEmail");
+  });
+
   it("keeps heavy route bodies out of the eager route registration graph", async () => {
     const statisticsRoute = await readSource("../routes/statistics.tsx");
     const pullRequestsRoute = await readSource("../routes/pull-requests.tsx");
     const projectsRoute = await readSource("../routes/projects.tsx");
     const tasksRoute = await readSource("../routes/tasks.tsx");
+    const promptLinkRoute = await readSource("../routes/_chat.new.tsx");
     const settingsRoute = await readSource("../routes/settings.tsx");
     const diagnosticsRoute = await readSource("../routes/_settings.diagnostics.tsx");
     const nativeAuthorizationRoute = await readSource("../routes/native.authorize.$handoffId.tsx");
@@ -169,6 +184,9 @@ describe("web bundle splitting boundaries", () => {
     expect(projectsRoute).not.toContain("components/projects/ProjectsPage");
     expect(tasksRoute).toContain('import("../components/routeViews/TasksRouteView")');
     expect(tasksRoute).not.toContain("components/tasks/TasksPage");
+    // A prompt link's parser and resolver load with its page, not with the boot bundle.
+    expect(promptLinkRoute).toContain('import("../components/routeViews/PromptLinkRouteView")');
+    expect(promptLinkRoute).not.toMatch(/from "@ryco\/(shared|client-runtime)\/promptLinks"/);
     expect(settingsRouteModule).toContain('import("./components/routeViews/SettingsRouteView")');
     expect(settingsRouteModule).not.toContain('from "./components/settings/SettingsPage"');
     expect(settingsRoute).not.toContain("components/settings/SettingsPage");
@@ -182,11 +200,34 @@ describe("web bundle splitting boundaries", () => {
     );
   });
 
-  it("keeps the first-navigation pairing surface eager", async () => {
+  it("loads the pairing form as the pairing route's body, alongside the session check", async () => {
     const pairRoute = await readSource("../routes/pair.tsx");
+    const rootRoute = await readSource("../routes/__root.tsx");
 
-    expect(pairRoute).toContain('from "../components/auth/PairingRouteSurface"');
-    expect(pairRoute).not.toContain('import("../components/auth/PairingRouteSurface")');
+    // A paired launch never renders the form, so it stays out of boot; the
+    // pending surface the route shows meanwhile is the light shell.
+    expect(pairRoute).toContain('import("../components/routeViews/PairRouteView")');
+    expect(pairRoute).not.toContain("components/auth/PairingRouteSurface");
+    expect(pairRoute).toContain('from "../components/auth/PairingSurface"');
+    // The root starts the chunk with the session check on a pairing link, and
+    // as soon as the check sends any other route to pairing.
+    expect(rootRoute).toMatch(
+      /pathname === "\/pair" && !isHostedHubMode\(\)\) \{[^}]*preloadMatchedRouteChunks\(pathname\)/u,
+    );
+    expect(rootRoute).toMatch(
+      /authGateState\.status !== "authenticated"\) \{[^}]*preloadRouteChunk\("\/pair"\)/u,
+    );
+  });
+
+  it("loads a sign-in's terminal, with xterm, only once a terminal sign-in shows", async () => {
+    const signInSection = await readSource("../components/settings/ProviderSignInSection.tsx");
+    const signInTerminal = await readSource("../components/settings/ProviderSignInTerminal.tsx");
+
+    expect(signInSection).toContain('import("./ProviderSignInTerminal")');
+    expect(signInSection).not.toMatch(/from\s+"\.\/ProviderSignInTerminal"/u);
+    expect(signInSection).not.toContain("@xterm/");
+    expect(signInSection).toContain("preloadableLazy(");
+    expect(signInTerminal).toContain('import "@xterm/xterm/css/xterm.css";');
   });
 
   it("loads xterm css from the terminal drawer chunk instead of the app entry", async () => {
@@ -212,32 +253,50 @@ describe("web bundle splitting boundaries", () => {
 
   it("mounts sidebar worktree dialogs lazily and preloads them on intent", async () => {
     const worktreeList = await readSource("../components/sidebar/SidebarWorktreeList.tsx");
-    const projectDialogs = await readSource("../components/sidebar/SidebarProjectDialogOwner.tsx");
-    const projectItem = await readSource("../components/sidebar/SidebarProjectItem.tsx");
     const sharedDialogs = await readSource("../components/worktrees/lazyWorktreeDialogs.ts");
 
-    // One code-split wrapper per dialog, shared with the chat, so a preload
-    // from either surface serves both.
+    // One code-split wrapper, shared with the chat, so a preload from either
+    // surface serves both.
     expect(sharedDialogs).toContain('import("./LinkedWorktreeItemDialog")');
-    expect(sharedDialogs).toContain('import("./NewWorktreeDialog")');
     expect(sharedDialogs).toContain("preloadableLazy(");
-    expect(sharedDialogs).not.toMatch(
-      /^import \{[^}]*\} from "\.\/(?:LinkedWorktreeItemDialog|NewWorktreeDialog)";$/mu,
-    );
+    expect(sharedDialogs).not.toMatch(/^import \{[^}]*\} from "\.\/LinkedWorktreeItemDialog";$/mu);
     expect(worktreeList).not.toMatch(/import \{[^}]*\bLinkedWorktreeItemDialog\b/u);
-    expect(projectDialogs).not.toMatch(/import \{[^}]*\bNewWorktreeDialog\b/u);
-    for (const source of [worktreeList, projectDialogs]) {
-      expect(source).toContain('from "../worktrees/lazyWorktreeDialogs"');
-      expect(source).not.toContain("preloadableLazy(");
-      expect(source).toContain("useLazyComponentReady(");
-      // A failed chunk is a toast with a Retry, never the root error view.
-      expect(source).toContain("onLoadError:");
-      expect(source).not.toMatch(REACT_LAZY_IMPORT);
-      expect(source).not.toContain("<Suspense");
+    expect(worktreeList).toContain('from "../worktrees/lazyWorktreeDialogs"');
+    expect(worktreeList).not.toContain("preloadableLazy(");
+    expect(worktreeList).toContain("useLazyComponentReady(");
+    // A failed chunk is a toast with a Retry, never the root error view.
+    expect(worktreeList).toContain("onLoadError:");
+    expect(worktreeList).not.toMatch(REACT_LAZY_IMPORT);
+    expect(worktreeList).not.toContain("<Suspense");
+    // Pointing at what opens them starts the chunk load: a badge opens the linked-item
+    // dialog, or with several pull requests the pull requests popover.
+    expect(worktreeList).toContain("onOpenLinkedItemIntent={preloadWorktreeBadgeSurfaces}");
+    expect(sharedDialogs).toMatch(
+      /export function preloadWorktreeBadgeSurfaces\(\): void \{\n  void LazyLinkedWorktreeItemDialog\.preload\(\);\n  void LazyWorkspacePullRequestsPopover\.preload\(\);/u,
+    );
+  });
+
+  it("mounts the workspace pull requests popover on its first open, wherever it opens", async () => {
+    const sharedDialogs = await readSource("../components/worktrees/lazyWorktreeDialogs.ts");
+    const onDemand = await readSource(
+      "../components/worktrees/WorkspacePullRequestsPopoverOnDemand.tsx",
+    );
+    expect(sharedDialogs).toContain('import("./WorkspacePullRequestsPopover")');
+    expect(onDemand).toContain("useLazyComponentReady(");
+    expect(onDemand).toContain("onLoadError:");
+    for (const path of [
+      "../components/sidebar/SidebarWorktreeList.tsx",
+      "../components/ChatView.tsx",
+      "../components/ThreadWorkspacePanel.tsx",
+      "../components/overview/crown/details/PullRequestDetail.tsx",
+    ]) {
+      const source = await readSource(path);
+      expect(source).toContain("<WorkspacePullRequestsPopoverOnDemand");
+      // Only types from the popover module itself, so its code stays in its own chunk.
+      expect(source).not.toMatch(
+        /^import \{[^}]*\} from "[./]+(?:worktrees\/)?WorkspacePullRequestsPopover";$/mu,
+      );
     }
-    // Pointing at what opens them starts the chunk load.
-    expect(worktreeList).toContain("onOpenLinkedItemIntent={preloadLinkedWorktreeItemDialog}");
-    expect(projectItem).toContain("onOpenNewWorktreeIntent={preloadNewWorktreeDialog}");
   });
 
   it("preloads the shell's on-demand dialogs from their entry points", async () => {
@@ -249,6 +308,33 @@ describe("web bundle splitting boundaries", () => {
     expect(automationsStore).toContain('import("./dialog/AutomationsDialog")');
     expect(primaryActions).toContain("onPointerEnter={preloadAutomationsDialog}");
     expect(primaryActions).toContain("onFocus={preloadAutomationsDialog}");
+  });
+
+  it("loads the usage model detail on its first open and preloads it on intent", async () => {
+    const usageView = await readSource("../components/statistics/usage/UsageView.tsx");
+
+    expect(usageView).toContain('import("./UsageModelDialog")');
+    expect(usageView).not.toMatch(/^import \{[^}]*\} from "\.\/UsageModelDialog";$/mu);
+    expect(usageView).toContain("useLazyComponentReady(UsageModelDialog");
+    expect(usageView).toContain("onLoadError:");
+    expect(usageView).toContain("onPointerEnter={preloadUsageModelDialog}");
+    expect(usageView).toContain("onFocus={preloadUsageModelDialog}");
+  });
+
+  it("starts the desktop quit guard on every Electron window, behind the quit feedback chunk", async () => {
+    // Without the responder, Desktop main quits without asking, and nothing else would notice.
+    const mainEntry = await readSource("../main.tsx");
+    const feedback = await readSource("../components/QuitShortcutFeedback.tsx");
+
+    expect(mainEntry).toContain('import("./components/QuitShortcutFeedback")');
+    expect(mainEntry).toMatch(
+      /\{isElectron && \(\s*<React\.Suspense fallback=\{null\}>\s*<DesktopQuitFeedback \/>/u,
+    );
+    expect(mainEntry).not.toContain("desktopQuitGuard");
+    expect(feedback).toContain(
+      'import { startDesktopQuitGuardResponder } from "../desktopQuitGuard";',
+    );
+    expect(feedback).toContain("useEffect(() => startDesktopQuitGuardResponder(), []);");
   });
 
   it("keeps React.lazy off every surface except an explicit allowlist", async () => {

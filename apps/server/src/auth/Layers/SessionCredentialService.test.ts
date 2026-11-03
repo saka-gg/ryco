@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { Clock, Duration, Effect, Layer } from "effect";
+import { Clock, Duration, Effect, Fiber, Layer, Stream } from "effect";
+import * as SqlClient from "effect/sql/SqlClient";
 import { TestClock } from "effect/testing";
 
 import type { ServerConfigShape } from "../../config.ts";
@@ -9,10 +10,12 @@ import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { AuthSessionRepositoryLive } from "../../persistence/Layers/AuthSessions.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { AuthSessionRepository } from "../../persistence/Services/AuthSessions.ts";
+import { ServerSecretStore } from "../Services/ServerSecretStore.ts";
 import {
   SessionCredentialService,
   SessionRotationError,
 } from "../Services/SessionCredentialService.ts";
+import { base64UrlEncode, signPayload } from "../utils.ts";
 import { ServerSecretStoreLive } from "./ServerSecretStore.ts";
 import {
   makeSessionCredentialService,
@@ -20,7 +23,7 @@ import {
 } from "./SessionCredentialService.ts";
 
 const makeServerConfigLayer = (
-  overrides?: Partial<Pick<ServerConfigShape, "desktopBootstrapToken">>,
+  overrides?: Partial<Pick<ServerConfigShape, "desktopBootstrapToken" | "devUrl">>,
 ) =>
   Layer.effect(
     ServerConfig,
@@ -36,7 +39,7 @@ const makeServerConfigLayer = (
   );
 
 const makeSessionCredentialLayer = (
-  overrides?: Partial<Pick<ServerConfigShape, "desktopBootstrapToken">>,
+  overrides?: Partial<Pick<ServerConfigShape, "desktopBootstrapToken" | "devUrl">>,
 ) =>
   SessionCredentialServiceLive.pipe(
     Layer.provide(SqlitePersistenceMemory),
@@ -93,6 +96,26 @@ it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
       store.failing = false;
       expect((yield* sessions.verify(issued.token)).sessionId).toBe(issued.sessionId);
     }).pipe(Effect.provide(makeFaultySessionCredentialLayer(store)));
+  });
+
+  it.effect("closes a socket whose session record it cannot read, after a few tries", () => {
+    const store = { failing: false };
+    return Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const issued = yield* sessions.issue({ method: "bearer-session-token", subject: "phone" });
+      const verified = yield* sessions.verify(issued.token);
+
+      store.failing = true;
+      const socket = yield* sessions
+        .awaitEnd({ sessionId: verified.sessionId, chainId: verified.chainId })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      yield* TestClock.adjust(Duration.millis(500));
+      expect(socket.pollUnsafe()).toBeUndefined();
+      yield* TestClock.adjust(Duration.millis(500));
+      yield* Fiber.join(socket);
+    }).pipe(
+      Effect.provide(Layer.merge(makeFaultySessionCredentialLayer(store), TestClock.layer())),
+    );
   });
 
   it.effect("issues and verifies signed browser session tokens", () =>
@@ -251,6 +274,22 @@ it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
   );
 
   const withClock = () => Layer.merge(makeSessionCredentialLayer(), TestClock.layer());
+  /** Also exposes the session store and the signing key: what an older node wrote. */
+  const withStore = () =>
+    Layer.merge(
+      SessionCredentialServiceLive.pipe(
+        Layer.provideMerge(SqlitePersistenceMemory),
+        Layer.provideMerge(ServerSecretStoreLive),
+        Layer.provide(makeServerConfigLayer()),
+      ),
+      TestClock.layer(),
+    );
+  const studioLink = {
+    trustSource: "account-enrolled",
+    enrollmentId: "enr_studio",
+    clientFingerprint: "fp-studio",
+    role: "owner",
+  } as const;
 
   it.effect("renews a bearer pairing by rotation and supersedes it on first use", () =>
     Effect.gen(function* () {
@@ -287,6 +326,47 @@ it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
       const refused = yield* Effect.flip(sessions.rotate(paired.sessionId));
       expect(refused).toBeInstanceOf(SessionRotationError);
       expect((refused as SessionRotationError).reason).toBe("superseded");
+    }).pipe(Effect.provide(withClock())),
+  );
+
+  it.effect("announces a renewal's predecessor as superseded and a revocation as revoked", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const removals = yield* sessions.streamChanges.pipe(
+        Stream.filter((change) => change.type === "clientRemoved"),
+        Stream.take(3),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      const paired = yield* sessions.issue({ method: "bearer-session-token", subject: "renewing" });
+      yield* TestClock.adjust(Duration.days(2));
+      const rotated = yield* sessions.rotate(paired.sessionId);
+      // The successor belongs to the same pairing: its chain is the first session.
+      const verified = yield* sessions.verify(rotated.token);
+      expect(verified.chainId).toBe(paired.sessionId);
+      expect((yield* sessions.verify(paired.token)).chainId).toBe(paired.sessionId);
+      expect(yield* sessions.revoke(rotated.sessionId)).toBe(true);
+
+      const [superseded, ...revoked] = [...(yield* Fiber.join(removals))];
+      // The renewal leaves the pairing in place; only the revocation ends it.
+      expect(superseded).toEqual({
+        type: "clientRemoved",
+        sessionId: paired.sessionId,
+        chainId: paired.sessionId,
+        reason: "superseded",
+      });
+      // Revoking any session of a pairing revokes all of them, in no particular order.
+      expect(revoked).toHaveLength(2);
+      expect(revoked).toEqual(
+        expect.arrayContaining(
+          [paired.sessionId, rotated.sessionId].map((sessionId) => ({
+            type: "clientRemoved",
+            sessionId,
+            chainId: paired.sessionId,
+            reason: "revoked",
+          })),
+        ),
+      );
     }).pipe(Effect.provide(withClock())),
   );
 
@@ -339,26 +419,20 @@ it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
     }).pipe(Effect.provide(withClock())),
   );
 
-  it.effect("keeps a Hub-linked session within seven days and never renews it by rotation", () =>
+  it.effect("keeps a Hub-linked session within four days and never renews it by rotation", () =>
     Effect.gen(function* () {
       const sessions = yield* SessionCredentialService;
-      const link = {
-        trustSource: "account-enrolled",
-        enrollmentId: "enr_studio",
-        clientFingerprint: "fp-studio",
-        role: "owner",
-      } as const;
       const linked = yield* sessions.issue({
         method: "bearer-session-token",
         subject: "hub-linked",
         role: "client",
-        link,
+        link: studioLink,
       });
       const issuedAtMs = yield* Clock.currentTimeMillis;
       expect(linked.expiresAt.epochMilliseconds).toBe(
-        issuedAtMs + Duration.toMillis(Duration.days(7)),
+        issuedAtMs + Duration.toMillis(Duration.days(4)),
       );
-      expect((yield* sessions.verify(linked.token)).link).toEqual(link);
+      expect((yield* sessions.verify(linked.token)).link).toEqual(studioLink);
 
       // It renews only by asking the node again over the Hub relay.
       yield* TestClock.adjust(Duration.days(2));
@@ -366,10 +440,210 @@ it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
       expect(refused).toBeInstanceOf(SessionRotationError);
       expect((refused as SessionRotationError).reason).toBe("renewal-limit");
 
-      yield* TestClock.adjust(Duration.days(5));
+      yield* TestClock.adjust(Duration.days(2));
       const expired = yield* Effect.flip(sessions.verify(linked.token));
       expect(expired.message).toContain("expired");
     }).pipe(Effect.provide(withClock())),
+  );
+
+  it.effect("ends a link an earlier node issued for seven days after four", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const sql = yield* SqlClient.SqlClient;
+      const secrets = yield* ServerSecretStore;
+      const linked = yield* sessions.issue({
+        method: "bearer-session-token",
+        subject: "hub-linked",
+        link: studioLink,
+      });
+      const issuedAtMs = yield* Clock.currentTimeMillis;
+      const fourDaysMs = issuedAtMs + Duration.toMillis(Duration.days(4));
+      const sevenDaysMs = issuedAtMs + Duration.toMillis(Duration.days(7));
+      // What a node before the four-day limit wrote: a seven-day row and token.
+      yield* sql`
+        UPDATE auth_sessions
+        SET expires_at = ${new Date(sevenDaysMs).toISOString()}
+        WHERE session_id = ${linked.sessionId}
+      `;
+      const claims = JSON.parse(
+        Buffer.from(linked.token.split(".")[0] ?? "", "base64url").toString("utf8"),
+      ) as Record<string, unknown>;
+      const payload = base64UrlEncode(JSON.stringify({ ...claims, exp: sevenDaysMs }));
+      const signingKey = yield* secrets.getOrCreateRandom("server-signing-key", 32);
+      const sevenDayToken = `${payload}.${signPayload(payload, signingKey)}`;
+
+      expect((yield* sessions.verify(sevenDayToken)).expiresAt?.epochMilliseconds).toBe(fourDaysMs);
+      const socketToken = yield* sessions.issueWebSocketToken(linked.sessionId, {
+        ttl: Duration.days(5),
+      });
+      expect(
+        (yield* sessions.verifyWebSocketToken(socketToken.token)).expiresAt?.epochMilliseconds,
+      ).toBe(fourDaysMs);
+      expect(
+        (yield* sessions.listActive()).find((entry) => entry.sessionId === linked.sessionId)
+          ?.expiresAt.epochMilliseconds,
+      ).toBe(fourDaysMs);
+
+      yield* TestClock.adjust(Duration.days(4));
+      expect((yield* Effect.flip(sessions.verify(sevenDayToken))).message).toBe(
+        "Session token expired.",
+      );
+      expect((yield* Effect.flip(sessions.verifyWebSocketToken(socketToken.token))).message).toBe(
+        "Websocket session expired.",
+      );
+      expect((yield* sessions.listActive()).map((entry) => entry.sessionId)).not.toContain(
+        linked.sessionId,
+      );
+    }).pipe(Effect.provide(withStore())),
+  );
+
+  it.effect("keeps a locally verified device's link within 24 hours, older links included", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const sql = yield* SqlClient.SqlClient;
+      const secrets = yield* ServerSecretStore;
+      const localLink = {
+        trustSource: "locally-verified",
+        enrollmentId: null,
+        clientFingerprint: "fp-desk",
+        role: "operator",
+      } as const;
+      const issuedAtMs = yield* Clock.currentTimeMillis;
+      const dayMs = issuedAtMs + Duration.toMillis(Duration.hours(24));
+      const fourDaysMs = issuedAtMs + Duration.toMillis(Duration.days(4));
+      const local = yield* sessions.issue({
+        method: "bearer-session-token",
+        subject: "hub-linked",
+        link: localLink,
+      });
+      expect(local.expiresAt.epochMilliseconds).toBe(dayMs);
+      // An account-enrolled device keeps its four days.
+      const enrolled = yield* sessions.issue({
+        method: "bearer-session-token",
+        subject: "hub-linked",
+        link: studioLink,
+      });
+      expect(enrolled.expiresAt.epochMilliseconds).toBe(fourDaysMs);
+
+      // What a node before the 24-hour limit wrote: a four-day row and token.
+      const earlier = yield* sessions.issue({
+        method: "bearer-session-token",
+        subject: "hub-linked",
+        link: localLink,
+      });
+      yield* sql`
+        UPDATE auth_sessions
+        SET expires_at = ${new Date(fourDaysMs).toISOString()}
+        WHERE session_id = ${earlier.sessionId}
+      `;
+      const claims = JSON.parse(
+        Buffer.from(earlier.token.split(".")[0] ?? "", "base64url").toString("utf8"),
+      ) as Record<string, unknown>;
+      const payload = base64UrlEncode(JSON.stringify({ ...claims, exp: fourDaysMs }));
+      const signingKey = yield* secrets.getOrCreateRandom("server-signing-key", 32);
+      const fourDayToken = `${payload}.${signPayload(payload, signingKey)}`;
+      const verified = yield* sessions.verify(fourDayToken);
+      expect(verified.expiresAt?.epochMilliseconds).toBe(dayMs);
+      const socketToken = yield* sessions.issueWebSocketToken(earlier.sessionId, {
+        ttl: Duration.days(2),
+      });
+      expect(
+        (yield* sessions.verifyWebSocketToken(socketToken.token)).expiresAt?.epochMilliseconds,
+      ).toBe(dayMs);
+      const socket = yield* sessions
+        .awaitEnd({ sessionId: verified.sessionId, chainId: verified.chainId })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+
+      // It renews only over the relay, never by rotation.
+      yield* TestClock.adjust(Duration.hours(2));
+      const refused = yield* Effect.flip(sessions.rotate(local.sessionId));
+      expect((refused as SessionRotationError).reason).toBe("renewal-limit");
+
+      yield* TestClock.adjust(Duration.hours(22));
+      // The live socket closes at the 24 hours.
+      yield* Fiber.join(socket);
+      for (const token of [local.token, fourDayToken]) {
+        expect((yield* Effect.flip(sessions.verify(token))).message).toBe("Session token expired.");
+      }
+      expect((yield* Effect.flip(sessions.verifyWebSocketToken(socketToken.token))).message).toBe(
+        "Websocket session expired.",
+      );
+      expect((yield* sessions.verify(enrolled.token)).expiresAt?.epochMilliseconds).toBe(
+        fourDaysMs,
+      );
+      expect((yield* sessions.listActive()).map((entry) => entry.sessionId)).toEqual([
+        enrolled.sessionId,
+      ]);
+    }).pipe(Effect.provide(withStore())),
+  );
+
+  it.effect("ends a socket's wait when its pairing is revoked, or a link at its end", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const phone = yield* sessions.issue({ method: "bearer-session-token", subject: "phone" });
+      const desk = yield* sessions.issue({ method: "bearer-session-token", subject: "desk" });
+      const linked = yield* sessions.issue({
+        method: "bearer-session-token",
+        subject: "hub-linked",
+        link: studioLink,
+      });
+      const verifiedPhone = yield* sessions.verify(phone.token);
+      const verifiedLink = yield* sessions.verify(linked.token);
+      expect(verifiedLink.expiresAt).toEqual(linked.expiresAt);
+      const phoneSocket = yield* sessions
+        .awaitEnd({ sessionId: verifiedPhone.sessionId, chainId: verifiedPhone.chainId })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      const linkSocket = yield* sessions
+        .awaitEnd({ sessionId: verifiedLink.sessionId, chainId: verifiedLink.chainId })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+
+      // Another client's revocation leaves the phone's socket alone.
+      expect(yield* sessions.revoke(desk.sessionId)).toBe(true);
+      yield* TestClock.adjust(Duration.days(3));
+      expect(phoneSocket.pollUnsafe()).toBeUndefined();
+      expect(linkSocket.pollUnsafe()).toBeUndefined();
+
+      expect(yield* sessions.revoke(phone.sessionId)).toBe(true);
+      yield* Fiber.join(phoneSocket);
+      yield* TestClock.adjust(Duration.days(1));
+      yield* Fiber.join(linkSocket);
+
+      // Already revoked when the socket starts waiting: it ends at once.
+      yield* sessions.awaitEnd({
+        sessionId: verifiedPhone.sessionId,
+        chainId: verifiedPhone.chainId,
+      });
+    }).pipe(Effect.provide(withClock())),
+  );
+
+  it.effect("caps the browser sessions of a dev server with its own home at seven days", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const issuedAtMs = yield* Clock.currentTimeMillis;
+      const cookie = yield* sessions.issue({
+        method: "browser-session-cookie",
+        subject: "browser",
+      });
+      const bearer = yield* sessions.issue({ method: "bearer-session-token", subject: "phone" });
+
+      // The cookie's expiry is the session's, so it leaves the browser within a week.
+      expect(cookie.expiresAt.epochMilliseconds).toBe(
+        issuedAtMs + Duration.toMillis(Duration.days(7)),
+      );
+      expect(bearer.expiresAt.epochMilliseconds).toBe(
+        issuedAtMs + Duration.toMillis(Duration.days(30)),
+      );
+      expect(sessions.cookieName).toMatch(/^ryco_session_dev_[0-9a-f]{8}$/);
+      // Not the default home: the shared cookie belongs to another signing key.
+      expect(sessions.legacyCookieNames).toEqual([]);
+    }).pipe(
+      Effect.provide(
+        Layer.merge(
+          makeSessionCredentialLayer({ devUrl: new URL("http://localhost:5750") }),
+          TestClock.layer(),
+        ),
+      ),
+    ),
   );
 
   it.effect("revokes a device's Hub-linked sessions by enrollment or by client key", () =>
@@ -399,6 +673,120 @@ it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
       expect((yield* Effect.flip(sessions.verify(desk.token))).message).toContain("revoked");
       yield* sessions.verify(phone.token);
       expect((yield* sessions.verify(pasted.token)).link).toBeNull();
+    }).pipe(Effect.provide(withClock())),
+  );
+
+  it.effect("ends every Hub-linked session, and only those, when the Hub revokes the node", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const enrolled = yield* sessions.issue({
+        method: "bearer-session-token",
+        subject: "hub-linked",
+        link: studioLink,
+      });
+      const local = yield* sessions.issue({
+        method: "bearer-session-token",
+        subject: "hub-linked",
+        link: {
+          trustSource: "locally-verified",
+          enrollmentId: null,
+          clientFingerprint: "fp-desk",
+          role: "operator",
+        },
+      });
+      const owner = yield* sessions.issue({
+        method: "bearer-session-token",
+        subject: "owner-bootstrap",
+        role: "owner",
+      });
+      const cookie = yield* sessions.issue({ subject: "browser", role: "owner" });
+      const pasted = yield* sessions.issue({ method: "bearer-session-token", subject: "paired" });
+      const verifiedLink = yield* sessions.verify(local.token);
+      const linkSocket = yield* sessions
+        .awaitEnd({ sessionId: verifiedLink.sessionId, chainId: verifiedLink.chainId })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+
+      expect(yield* sessions.revokeLinked({ allLinks: true })).toBe(2);
+      // A live linked socket closes at once.
+      yield* Fiber.join(linkSocket);
+      expect((yield* Effect.flip(sessions.verify(enrolled.token))).message).toContain("revoked");
+      expect((yield* Effect.flip(sessions.verify(local.token))).message).toContain("revoked");
+      // The owner's sessions and a pairing made by hand carry no link and stay.
+      for (const kept of [owner, cookie, pasted]) {
+        expect((yield* sessions.verify(kept.token)).link).toBeNull();
+      }
+      expect(yield* sessions.revokeLinked({ allLinks: true })).toBe(0);
+    }).pipe(Effect.provide(withClock())),
+  );
+
+  it.effect("narrows a linked revocation by trust source, enrollment, account and role", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const issueLinked = (input: {
+        readonly accountId?: string;
+        readonly role: "viewer" | "operator" | "owner";
+      }) =>
+        sessions.issue({
+          method: "bearer-session-token",
+          subject: "hub-linked",
+          link: {
+            trustSource: "account-enrolled",
+            enrollmentId: "enr_studio",
+            clientFingerprint: "fp-studio",
+            role: input.role,
+            ...(input.accountId === undefined ? {} : { accountId: input.accountId }),
+          },
+        });
+      // One device, signed in to two accounts, linked twice under the first.
+      const asOwner = yield* issueLinked({ accountId: "acct_a", role: "owner" });
+      const asViewer = yield* issueLinked({ accountId: "acct_a", role: "viewer" });
+      const otherAccount = yield* issueLinked({ accountId: "acct_b", role: "operator" });
+      const beforeAccounts = yield* issueLinked({ role: "operator" });
+      yield* sessions.issue({ method: "bearer-session-token", subject: "paired" });
+
+      // Account A lowered to viewer: only its sessions above viewer end.
+      expect(
+        yield* sessions.revokeLinked({
+          clientFingerprint: "fp-studio",
+          accountId: "acct_a",
+          roles: ["operator", "owner"],
+        }),
+      ).toBe(1);
+      expect((yield* Effect.flip(sessions.verify(asOwner.token))).message).toContain("revoked");
+      yield* sessions.verify(asViewer.token);
+      yield* sessions.verify(otherAccount.token);
+      // The same key, locally verified on this node: not the Hub's to end.
+      const localLink = yield* sessions.issue({
+        method: "bearer-session-token",
+        subject: "hub-linked",
+        link: {
+          trustSource: "locally-verified",
+          enrollmentId: null,
+          clientFingerprint: "fp-studio",
+          role: "operator",
+        },
+      });
+      // Links from before nodes kept the account are selected by `null`.
+      expect(
+        yield* sessions.revokeLinked({
+          clientFingerprint: "fp-studio",
+          trustSource: "account-enrolled",
+          enrollmentId: "enr_studio",
+          accountId: null,
+        }),
+      ).toBe(1);
+      yield* sessions.verify(localLink.token);
+      expect(
+        yield* sessions.revokeLinked({
+          clientFingerprint: "fp-studio",
+          trustSource: "account-enrolled",
+          enrollmentId: "enr_other",
+        }),
+      ).toBe(0);
+      expect((yield* Effect.flip(sessions.verify(beforeAccounts.token))).message).toContain(
+        "revoked",
+      );
+      yield* sessions.verify(otherAccount.token);
     }).pipe(Effect.provide(withClock())),
   );
 

@@ -43,9 +43,9 @@ import { useSidebarProjectActions } from "./hooks/useSidebarProjectActions";
 import { useSidebarThreadActions } from "./hooks/useSidebarThreadActions";
 import { useSidebarWorktreeActions } from "./hooks/useSidebarWorktreeActions";
 import { useSidebarProjectContextMenu } from "./hooks/useSidebarProjectContextMenu";
-import { preloadNewWorktreeDialog, useSidebarProjectDialogs } from "./SidebarProjectDialogOwner";
+import { useSidebarProjectDialogs } from "./SidebarProjectDialogOwner";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
-import { openAddProjectWith } from "../../commandPaletteStore";
+import { useCommandPaletteStore } from "../../commandPaletteStore";
 import {
   crossNodeProjectActions,
   type CopyProjectDialogOrigin,
@@ -372,7 +372,7 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
       crossNodeProjectActions({
         projectRef: { environmentId: project.environmentId, projectId: project.id },
         origin,
-        openAddProjectWith,
+        openAddProject: useCommandPaletteStore.getState().openAddProject,
       }),
     [project.environmentId, project.id],
   );
@@ -472,13 +472,17 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
     [suppressProjectClickAfterDragRef, suppressProjectClickForContextMenuRef],
   );
 
+  // The new-thread surface with its "New worktree" switch already on; the
+  // base, branch and any pull request, issue or Jira source are picked there.
   const handleOpenNewWorktreeClick = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       event.preventDefault();
       event.stopPropagation();
-      projectDialogs.openNewWorktree(project, "branches");
+      const member = project.memberProjects[0];
+      if (!member) return;
+      createThreadForProjectMember(member, { envMode: "worktree", worktreePath: null });
     },
-    [project, projectDialogs],
+    [createThreadForProjectMember, project.memberProjects],
   );
 
   // Routes through the ordinary new-thread path, which reuses this project's
@@ -520,7 +524,6 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
         onContextMenu={handleProjectButtonContextMenu}
         onOpenProjectOverviewClick={handleOpenProjectOverviewClick}
         onOpenNewWorktreeClick={handleOpenNewWorktreeClick}
-        onOpenNewWorktreeIntent={preloadNewWorktreeDialog}
         onOpenNewThreadClick={handleOpenNewThreadClick}
         onCopyPath={(member) => {
           copyPathToClipboard(member.cwd, { path: member.cwd });

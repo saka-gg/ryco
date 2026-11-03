@@ -6,9 +6,54 @@ import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
 import { ChangeRequestBadge } from "../../components/ChangeRequestBadge";
 import { CheckSummaryBadge } from "../../components/CheckSummaryBadge";
+import { cn } from "../../lib/cn";
 import { useThemeColor } from "../../lib/useThemeColor";
 import type { CheckSummary } from "./prCheckSummary";
-import type { ThreadHeaderModel } from "./threadHeaderModel";
+import type { ThreadHeaderModel, ThreadPullRequestWatchChip } from "./threadHeaderModel";
+
+const WATCH_CHIP_CLASS: Readonly<Record<ThreadPullRequestWatchChip["tone"], string>> = {
+  muted: "border-border",
+  active: "border-accent-border bg-accent-bg",
+  warning: "border-warning-border bg-warning-bg",
+};
+
+const WATCH_TEXT_CLASS: Readonly<Record<ThreadPullRequestWatchChip["tone"], string>> = {
+  muted: "text-foreground-tertiary",
+  active: "text-accent-strong",
+  warning: "text-warning",
+};
+
+const WATCH_DOT_CLASS: Readonly<Record<ThreadPullRequestWatchChip["tone"], string>> = {
+  muted: "bg-foreground-tertiary",
+  active: "bg-accent",
+  warning: "bg-warning",
+};
+
+/**
+ * The node's watch of the pull request beside its badge: live state from the
+ * thread's shell (unlike the badge's last known one), so it may look live.
+ */
+export function PullRequestWatchChip(props: { readonly chip: ThreadPullRequestWatchChip }) {
+  const { chip } = props;
+  return (
+    <View
+      accessible
+      accessibilityLabel={chip.accessibilityLabel}
+      className={cn(
+        "shrink-0 flex-row items-center gap-1 rounded-full border px-2 py-0.5",
+        WATCH_CHIP_CLASS[chip.tone],
+      )}
+    >
+      <View className={cn("h-1.5 w-1.5 rounded-full", WATCH_DOT_CLASS[chip.tone])} />
+      <Text
+        className={cn("text-2xs font-ryco-medium", WATCH_TEXT_CLASS[chip.tone])}
+        numberOfLines={1}
+      >
+        {chip.label}
+      </Text>
+    </View>
+  );
+}
 
 export function ThreadContextBar(props: {
   readonly model: ThreadHeaderModel;
@@ -54,6 +99,9 @@ export function ThreadContextBar(props: {
             <ChangeRequestBadge badge={props.model.changeRequest} />
           ) : null}
           {props.checks ? <CheckSummaryBadge summary={props.checks} /> : null}
+          {props.model.pullRequestWatch?.chip ? (
+            <PullRequestWatchChip chip={props.model.pullRequestWatch.chip} />
+          ) : null}
         </View>
       </View>
       <SymbolView

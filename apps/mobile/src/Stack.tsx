@@ -16,8 +16,8 @@ import { useResolveClassNames } from "uniwind";
 import { AppText as Text } from "./components/AppText";
 import { NavigationHeaderButton } from "./components/NavigationHeaderButton";
 import { HardwareKeyboardCommandProvider } from "./features/keyboard/HardwareKeyboardCommandProvider";
-import { FileWorkspaceLayout } from "./features/files/FileWorkspaceLayout";
 import { HomeRouteScreen } from "./features/home/HomeRouteScreen";
+import { ThreadWorkspaceLayout } from "./features/workspace/ThreadWorkspaceLayout";
 import {
   AddProjectRouteScreen,
   ConnectionsNewRouteScreen,
@@ -28,13 +28,18 @@ import {
   NativeIdentityScreen,
   NewTaskRouteScreen,
   ProjectRouteScreen,
+  PullRequestFileRouteScreen,
+  PullRequestRouteScreen,
+  PullRequestsRouteScreen,
   ReviewCommentComposerSheet,
   ReviewSheet,
   SettingsAboutRouteScreen,
   SettingsAppearanceRouteScreen,
   SettingsClientStorageRouteScreen,
+  SettingsDiagnosticsRouteScreen,
   SettingsHubRouteScreen,
   SettingsInboxRouteScreen,
+  SettingsProviderAccountsRouteScreen,
   SettingsRouteScreen,
   SettingsStatisticsRouteScreen,
   SettingsWorkspaceRouteScreen,
@@ -42,6 +47,8 @@ import {
   ThreadFileRouteScreen,
   ThreadFilesRouteScreen,
   ThreadRouteScreen,
+  ThreadTerminalRouteScreen,
+  ThreadDeviceRouteScreen,
 } from "./navigation/lazyRouteScreens";
 import {
   MVP_ROOT_ROUTES,
@@ -54,6 +61,7 @@ import {
 import { NATIVE_LIQUID_GLASS_SUPPORTED } from "./native/native-glass";
 import { nativeHeaderScrollEdgeEffects } from "./native/StackHeader";
 import { useThreadOutboxDrain } from "./state/use-thread-outbox-drain";
+import { useNewTaskOutboxDrain } from "./state/use-new-task-outbox-drain";
 
 const HEADER_SCROLL_EDGE_EFFECTS = nativeHeaderScrollEdgeEffects(Platform.OS, Platform.Version);
 
@@ -186,10 +194,15 @@ const SettingsSheetStack = createNativeStackNavigator({
       linking: MVP_SETTINGS_SHEET_ROUTES.SettingsStatistics.linking,
       options: settingsRouteOptions("SettingsStatistics", "Statistics"),
     }),
+    SettingsProviderAccounts: createNativeStackScreen({
+      screen: SettingsProviderAccountsRouteScreen,
+      linking: MVP_SETTINGS_SHEET_ROUTES.SettingsProviderAccounts.linking,
+      options: settingsRouteOptions("SettingsProviderAccounts", "Provider accounts"),
+    }),
     SettingsInbox: createNativeStackScreen({
       screen: SettingsInboxRouteScreen,
       linking: MVP_SETTINGS_SHEET_ROUTES.SettingsInbox.linking,
-      options: settingsRouteOptions("SettingsInbox", "Inbox and AI Focus"),
+      options: settingsRouteOptions("SettingsInbox", "Inbox"),
     }),
     SettingsAccount: createNativeStackScreen({
       screen: HostedAccountRouteScreen,
@@ -219,6 +232,11 @@ const SettingsSheetStack = createNativeStackNavigator({
       screen: SettingsClientStorageRouteScreen,
       linking: MVP_SETTINGS_SHEET_ROUTES.SettingsClientStorage.linking,
       options: settingsRouteOptions("SettingsClientStorage", "Client Storage"),
+    }),
+    SettingsDiagnostics: createNativeStackScreen({
+      screen: SettingsDiagnosticsRouteScreen,
+      linking: MVP_SETTINGS_SHEET_ROUTES.SettingsDiagnostics.linking,
+      options: settingsRouteOptions("SettingsDiagnostics", "Diagnostics"),
     }),
     SettingsAbout: createNativeStackScreen({
       screen: SettingsAboutRouteScreen,
@@ -293,13 +311,17 @@ function RootStackLayout(props: {
 }) {
   // Drain the offline outbox on reconnect (real drain lands with the send task).
   useThreadOutboxDrain();
-  // Full pathname (sheets included) for keyboard-command scoping.
+  // New tasks written while their machine was away start once it is live.
+  useNewTaskOutboxDrain();
+  // Full pathname (sheets included) and the screen beneath any sheets, for
+  // keyboard-command scoping.
   const path = getPathFromState(props.state, navigationPathConfig);
   const pathname = path.startsWith("/") ? path : `/${path}`;
+  const workspacePathname = workspacePathFromState(props.state);
 
   return (
-    <HardwareKeyboardCommandProvider pathname={pathname}>
-      <FileWorkspaceLayout>{props.children}</FileWorkspaceLayout>
+    <HardwareKeyboardCommandProvider pathname={pathname} workspacePathname={workspacePathname}>
+      <ThreadWorkspaceLayout>{props.children}</ThreadWorkspaceLayout>
     </HardwareKeyboardCommandProvider>
   );
 }
@@ -372,6 +394,23 @@ export const ROOT_STACK_SCREENS = {
     linking: MVP_ROOT_ROUTES.ProjectSourceControl.linking,
     options: routeOptions("ProjectSourceControl", { title: "Source Control" }),
   }),
+  ProjectPullRequests: createNativeStackScreen({
+    screen: PullRequestsRouteScreen,
+    linking: MVP_ROOT_ROUTES.ProjectPullRequests.linking,
+    options: routeOptions("ProjectPullRequests", { title: "Pull requests" }),
+  }),
+  ProjectPullRequest: createNativeStackScreen({
+    screen: PullRequestRouteScreen,
+    linking: MVP_ROOT_ROUTES.ProjectPullRequest.linking,
+    // The title is `#number`, which the screen sets once the param is parsed.
+    options: routeOptions("ProjectPullRequest"),
+  }),
+  ProjectPullRequestFile: createNativeStackScreen({
+    screen: PullRequestFileRouteScreen,
+    linking: MVP_ROOT_ROUTES.ProjectPullRequestFile.linking,
+    // The title is the file's basename, which only the screen knows.
+    options: routeOptions("ProjectPullRequestFile"),
+  }),
   NewTask: createNativeStackScreen({
     screen: NewTaskRouteScreen,
     linking: MVP_ROOT_ROUTES.NewTask.linking,
@@ -403,6 +442,16 @@ export const ROOT_STACK_SCREENS = {
     // The title is the file's basename, which only the screen knows; it sets it
     // through `navigation.setOptions` once the path param has been normalized.
     options: routeOptions("ThreadFile"),
+  }),
+  ThreadDevice: createNativeStackScreen({
+    screen: ThreadDeviceRouteScreen,
+    linking: MVP_ROOT_ROUTES.ThreadDevice.linking,
+    options: routeOptions("ThreadDevice", { title: "Device" }),
+  }),
+  ThreadTerminal: createNativeStackScreen({
+    screen: ThreadTerminalRouteScreen,
+    linking: MVP_ROOT_ROUTES.ThreadTerminal.linking,
+    options: routeOptions("ThreadTerminal", { title: "Terminal" }),
   }),
   Connections: createNativeStackScreen({
     screen: ConnectionsRouteScreen,

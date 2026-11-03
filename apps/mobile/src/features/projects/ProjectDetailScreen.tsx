@@ -32,6 +32,7 @@ import {
   type WorkspaceMutationReadiness,
 } from "./projectActions";
 import { buildProjectDetail } from "./projectsModel";
+import { ProjectThreadRow } from "./ProjectThreadRow";
 import { WorktreeEditorSheet } from "./WorktreeEditorSheet";
 import { WorktreeRow } from "./WorktreeRow";
 
@@ -50,28 +51,6 @@ function readinessFor(
 ): WorkspaceMutationReadiness {
   if (connectionState === "connected") return "ready";
   return connectionState ?? "offline";
-}
-
-function ThreadRow(props: { readonly thread: SidebarThreadSummary; readonly onPress: () => void }) {
-  const iconColor = useThemeColor("--color-icon-subtle");
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={`Open task ${props.thread.title}`}
-      onPress={props.onPress}
-      className="min-h-12 flex-row items-center gap-3 rounded-xl bg-subtle px-4 py-3 active:bg-subtle-strong"
-    >
-      <Text className="min-w-0 flex-1 text-sm font-ryco-medium text-foreground" numberOfLines={1}>
-        {props.thread.title}
-      </Text>
-      <SymbolView
-        name="chevron.right"
-        size={14}
-        tintColor={iconColor as string}
-        type="monochrome"
-      />
-    </Pressable>
-  );
 }
 
 export function ProjectDetailScreen(props: {
@@ -351,19 +330,34 @@ export function ProjectDetailScreen(props: {
           </Pressable>
         </View>
 
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Open project Source Control"
-          onPress={() =>
-            navigation.navigate("ProjectSourceControl", {
-              environmentId: props.environmentId,
-              projectId: props.projectId,
-            })
-          }
-          className="h-12 items-center justify-center rounded-full bg-card px-4 active:bg-card-alt"
-        >
-          <Text className="text-sm font-ryco-bold text-foreground">Source Control</Text>
-        </Pressable>
+        <View className="flex-row gap-3">
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Open project Source Control"
+            onPress={() =>
+              navigation.navigate("ProjectSourceControl", {
+                environmentId: props.environmentId,
+                projectId: props.projectId,
+              })
+            }
+            className="h-12 flex-1 items-center justify-center rounded-full bg-card px-4 active:bg-card-alt"
+          >
+            <Text className="text-sm font-ryco-bold text-foreground">Source Control</Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Open the project's pull requests"
+            onPress={() =>
+              navigation.navigate("ProjectPullRequests", {
+                environmentId: props.environmentId,
+                projectId: props.projectId,
+              })
+            }
+            className="h-12 flex-1 items-center justify-center rounded-full bg-card px-4 active:bg-card-alt"
+          >
+            <Text className="text-sm font-ryco-bold text-foreground">Pull requests</Text>
+          </Pressable>
+        </View>
 
         <View className="gap-3">
           <Text className="px-1 text-sm font-ryco-bold text-foreground-muted">Worktrees</Text>
@@ -408,7 +402,7 @@ export function ProjectDetailScreen(props: {
               />
               {group.threads.map((thread) => (
                 <View key={thread.id} className="pl-4">
-                  <ThreadRow thread={thread} onPress={() => openThread(thread)} />
+                  <ProjectThreadRow thread={thread} onPress={() => openThread(thread)} />
                 </View>
               ))}
             </View>
@@ -428,7 +422,11 @@ export function ProjectDetailScreen(props: {
               Local workspace tasks
             </Text>
             {detail.projectThreads.map((thread) => (
-              <ThreadRow key={thread.id} thread={thread} onPress={() => openThread(thread)} />
+              <ProjectThreadRow
+                key={thread.id}
+                thread={thread}
+                onPress={() => openThread(thread)}
+              />
             ))}
           </View>
         ) : null}

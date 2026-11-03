@@ -12,6 +12,7 @@ import {
   REDUCED_WATCH_REFRESH_MS,
   SOURCE_CONTROL_MAX_BACKOFF_MS,
   resolveSourceControlFailureDelay,
+  resolveSourceControlPauseWaitMs,
   resolveSourceControlRefreshDelay,
   resolveWorkflowRunJobsPhase,
   shouldRefreshSourceControlOnLifecycle,
@@ -138,6 +139,27 @@ describe("source-control refresh policy", () => {
         retryAfterMs: 45_000,
       }),
     ).toBe(45_000);
+  });
+
+  it("waits out a rate-limit pause past the backoff cap, up to 15 minutes", () => {
+    const wait = (retryAfterMs: number) =>
+      resolveSourceControlFailureDelay({
+        baseDelayMs: 30_000,
+        consecutiveFailures: 1,
+        retryAfterMs,
+      });
+    expect(wait(600_000)).toBe(600_000);
+    expect(wait(2_000_000)).toBe(900_000);
+    expect(wait(200)).toBe(1_000);
+  });
+
+  it("stretches a pause's wait so poll jitter never reads before the pause ends", () => {
+    for (const pauseMs of [1_000, 30_000, 300_000, 899_999]) {
+      const waitMs = resolveSourceControlPauseWaitMs(pauseMs, 0.08);
+      expect(waitMs * (1 - 0.08)).toBeGreaterThanOrEqual(pauseMs);
+      expect(waitMs).toBeLessThan(pauseMs * 1.09 + 1);
+    }
+    expect(resolveSourceControlPauseWaitMs(300_000, 0)).toBe(300_000);
   });
 });
 

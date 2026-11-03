@@ -63,6 +63,7 @@ import {
   MenuTrigger,
 } from "../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { ProjectImportBanner } from "../projectImport/ProjectImportBanner";
 import {
   SidebarContent,
   SidebarGroup,
@@ -603,9 +604,12 @@ export const SidebarProjectsContent = memo(function SidebarProjectsContent(
           </DndContext>
 
           {projectsLength === 0 && projectTreeRows.length === 0 && (
-            <div className="px-2 pt-4 text-center text-xs text-muted-foreground/60">
-              No projects yet
-            </div>
+            <>
+              <div className="px-2 pt-4 text-center text-xs text-muted-foreground/60">
+                No projects yet
+              </div>
+              <ProjectImportBanner className="mx-2 mt-3" />
+            </>
           )}
         </SidebarGroup>
         {chatsSection}

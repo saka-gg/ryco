@@ -1,4 +1,5 @@
-// Adapted from Synara v0.9.1; see docs/licenses/synara-computer-use.txt.
+// Adapted from Synara v0.9.1, readiness watchdog from v1.0.4 (d36a31a29);
+// see docs/licenses/synara-computer-use.txt.
 import * as ChildProcess from "node:child_process";
 import * as Readline from "node:readline";
 
@@ -6,7 +7,14 @@ import { parseAppSnapHelperMessage, type AppSnapHelperMessage } from "./appSnapM
 
 const RESPAWN_BASE_DELAY_MS = 1_000;
 const RESPAWN_MAX_DELAY_MS = 30_000;
+const LISTENER_START_TIMEOUT_MS = 10_000;
 const MAX_HELPER_STDERR_CHARS = 4_000;
+/** Helper failures the helper itself retries (tap reinstall, a fresh grant probe). */
+const SELF_RECOVERING_HELPER_ERRORS: ReadonlySet<string> = new Set([
+  "input-monitoring-required",
+  "event_tap_disabled",
+  "event_tap_unavailable",
+]);
 
 export type PhysicalComputerInput = Extract<AppSnapHelperMessage, { type: "physical-input" }>;
 export interface ComputerInputMonitorState {
@@ -49,6 +57,7 @@ export class EscapeKillSwitchMonitor {
   #disposed = false;
   #armed = false;
   #restartTimer: NodeJS.Timeout | null = null;
+  #readinessTimer: NodeJS.Timeout | null = null;
   #consecutiveFailures = 0;
   #state: ComputerInputMonitorState = { ready: false, error: "input_monitor_starting" };
   #readinessWaiters = new Set<() => void>();
@@ -105,7 +114,10 @@ export class EscapeKillSwitchMonitor {
     const changed = this.#armed !== armed;
     this.#armed = armed;
     if (armed && !this.#child) {
-      this.start();
+      // The first respawn after a failure follows demand at once. Once the
+      // helper keeps failing, activations wait out the backoff instead of
+      // respawning a helper that dies or stalls on every action.
+      if (!this.#restartTimer || this.#consecutiveFailures <= 1) this.start();
       return;
     }
     if (changed)
@@ -113,8 +125,10 @@ export class EscapeKillSwitchMonitor {
         ready: false,
         error: armed ? "input_monitor_starting" : "input_monitor_idle",
       });
-    if (armed) this.#writeCommand("arm");
-    else {
+    if (armed) {
+      if (changed) this.#watchReadiness();
+      this.#writeCommand("arm");
+    } else {
       this.#writeCommand("disarm");
       if (this.#restartTimer) {
         clearTimeout(this.#restartTimer);
@@ -150,7 +164,7 @@ export class EscapeKillSwitchMonitor {
     lines.on("line", (line) => {
       if (this.#child !== child || this.#disposed) return;
       const message = parseAppSnapHelperMessage(line);
-      if (message) this.#handleMessage(message);
+      if (message) this.#handleMessage(message, child);
     });
 
     let stderr = "";
@@ -180,10 +194,50 @@ export class EscapeKillSwitchMonitor {
 
     // A fresh helper starts disarmed; replay the armed side of the gate so a
     // respawn does not silently widen the window where Escape is inert.
-    if (this.#armed) this.#writeCommand("arm");
+    if (this.#armed) {
+      this.#watchReadiness();
+      this.#writeCommand("arm");
+    }
   }
 
-  #handleMessage(message: AppSnapHelperMessage): void {
+  #watchReadiness(): void {
+    if (this.#readinessTimer) clearTimeout(this.#readinessTimer);
+    const child = this.#child;
+    if (!child || !this.#armed || this.#disposed) return;
+    // An alive process can stall before acknowledging arm. Its mere presence
+    // must not leave control paused forever; ordinary activation calls must
+    // not restart this deadline. Known tap failures retain native retry logic.
+    this.#readinessTimer = setTimeout(() => {
+      this.#readinessTimer = null;
+      if (
+        this.#child !== child ||
+        !this.#armed ||
+        this.#disposed ||
+        this.#state.error !== "input_monitor_starting"
+      )
+        return;
+      this.#replaceHelper(
+        child,
+        "The Escape monitor helper did not acknowledge readiness; restarting.",
+      );
+    }, LISTENER_START_TIMEOUT_MS);
+    this.#readinessTimer.unref?.();
+  }
+
+  /** Drops a live helper that cannot recover on its own and respawns it with backoff. */
+  #replaceHelper(child: ChildProcess.ChildProcess, message: string): void {
+    this.#child = null;
+    this.#setState({ ready: false, error: "input_monitor_unavailable" });
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      // Input remains fenced, and messages from this helper are ignored.
+    }
+    this.#reportError(message);
+    this.#scheduleRestart();
+  }
+
+  #handleMessage(message: AppSnapHelperMessage, child: ChildProcess.ChildProcess): void {
     switch (message.type) {
       case "ready":
         if (!this.#armed) return;
@@ -199,16 +253,19 @@ export class EscapeKillSwitchMonitor {
       case "escape-monitor-state":
         return;
       case "error":
-        this.#setState({
-          ready: false,
-          error: [
-            "input-monitoring-required",
-            "event_tap_disabled",
-            "event_tap_unavailable",
-          ].includes(message.code)
-            ? message.code
-            : "input_monitor_unavailable",
-        });
+        if (SELF_RECOVERING_HELPER_ERRORS.has(message.code)) {
+          this.#setState({ ready: false, error: message.code });
+          this.#reportError(message.message);
+          return;
+        }
+        // Nothing would bring an armed, still running helper back from any
+        // other failure, so it is replaced rather than left paused.
+        if (this.#armed) {
+          this.#replaceHelper(child, `${message.message} Restarting the Escape monitor helper.`);
+          return;
+        }
+        // Disarmed: the next arm restarts the readiness deadline.
+        this.#setState({ ready: false, error: "input_monitor_unavailable" });
         this.#reportError(message.message);
         return;
       default:
@@ -250,6 +307,10 @@ export class EscapeKillSwitchMonitor {
 
   #setState(state: ComputerInputMonitorState): void {
     if (this.#state.ready === state.ready && this.#state.error === state.error) return;
+    if (state.error !== "input_monitor_starting" && this.#readinessTimer) {
+      clearTimeout(this.#readinessTimer);
+      this.#readinessTimer = null;
+    }
     this.#state = state;
     this.#options.onStateChange?.(state);
     if (state.ready || state.error !== "input_monitor_starting") {

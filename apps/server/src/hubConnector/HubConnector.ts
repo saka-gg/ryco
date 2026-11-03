@@ -228,6 +228,10 @@ export class HubConnector {
   readonly #onE2eeEnrollmentRevoked: (
     frame: RelayE2eeEnrollmentRevokedFrame,
   ) => void | Promise<void>;
+  readonly #features: ReadonlyArray<string>;
+  readonly #onOnline: () => void;
+  readonly #onLinkedAccessChanged: () => void;
+  readonly #onRevoked: () => void;
   readonly #networkFingerprint: () => string;
   readonly #livenessWatchEnabled: boolean;
   readonly #processLock: HubIdentityProcessLock | undefined;
@@ -325,6 +329,21 @@ export class HubConnector {
     readonly onE2eeEnrollmentRevoked?: (
       frame: RelayE2eeEnrollmentRevokedFrame,
     ) => void | Promise<void>;
+    /** Hub features this node understands, listed in its relay auth (`RelayNodeFeature`). */
+    readonly features?: ReadonlyArray<string>;
+    /** Each time a connection authenticates and goes online. Must not block. */
+    readonly onOnline?: () => void;
+    /**
+     * The Hub's `node.linked-access.changed`: ask it which linked direct sessions still stand.
+     * Must not block: it runs in the connection's frame order.
+     */
+    readonly onLinkedAccessChanged?: () => void;
+    /**
+     * The Hub refused this node's connection as revoked (`revoked`, `node_revoked`): each time
+     * the connector enters its terminal `revoked` state, never on a failure it retries. Must not
+     * block.
+     */
+    readonly onRevoked?: () => void;
     /** Injectable for tests; see `defaultNetworkFingerprint`. */
     readonly networkFingerprint?: () => string;
     /** Watch for wake and network changes; see `nudge`. On unless a test opts out. */
@@ -361,6 +380,10 @@ export class HubConnector {
       authorization: this.#identity.e2eeClientAuthorization,
     });
     this.#onE2eeEnrollmentRevoked = options.onE2eeEnrollmentRevoked ?? (() => undefined);
+    this.#features = options.features ?? [];
+    this.#onOnline = options.onOnline ?? (() => undefined);
+    this.#onLinkedAccessChanged = options.onLinkedAccessChanged ?? (() => undefined);
+    this.#onRevoked = options.onRevoked ?? (() => undefined);
     this.#networkFingerprint = options.networkFingerprint ?? defaultNetworkFingerprint;
     this.#livenessWatchEnabled = options.livenessWatch ?? true;
     this.#processLock = options.processLock;
@@ -710,6 +733,17 @@ export class HubConnector {
    * at once rather than reporting a copy that is gone — and handed back
    * afterwards when it does not.
    */
+  /**
+   * Run a read that speaks for the identity only when this process already owns it: it never
+   * claims the lock and never runs the identity's deferred startup work, so a request no one
+   * authenticated (the direct-route identity proof) can neither take the identity from another
+   * local process nor start a repair. `undefined` when this process does not own it.
+   */
+  async ifIdentityOwner<A>(operation: () => Promise<A>): Promise<A | undefined> {
+    if (this.#stopping || !this.#ownsIdentity) return undefined;
+    return operation();
+  }
+
   async asIdentityOwner<A>(operation: () => Promise<A>): Promise<A> {
     if (this.#stopping) throw new Error("Hub identity is unavailable while stopping.");
     const claim = await this.#takeIdentity();
@@ -1018,6 +1052,7 @@ export class HubConnector {
       now: this.#scheduler.now,
       proofFirst: this.#proofFirst,
       clientVersion: this.#enrollmentMetadata.clientVersion,
+      features: this.#features,
       onFrame: (frame) => {
         if (!this.#state.isCurrent(generation) || this.#stopping) return;
         // Heartbeats describe this socket, not a channel. Key custody during
@@ -1118,6 +1153,7 @@ export class HubConnector {
       );
       this.#scheduleStableReset(generation);
       this.#scheduleHeartbeatTimeout(generation, ready.limits.deadConnectionTimeoutMs);
+      this.#onOnline();
     } catch (error: unknown) {
       if (session.proofRefused) this.#proofFirst = true;
       if (!this.#state.isCurrent(generation) || this.#stopping) return;
@@ -1348,6 +1384,8 @@ export class HubConnector {
       if (result === "invalid") throw new RelayChannelProtocolError();
       if (result === "stale") return;
       await this.#onE2eeEnrollmentRevoked(frame);
+    } else if (frame.type === "node.linked-access.changed") {
+      this.#onLinkedAccessChanged();
     } else if (
       frame.type === "channel.open" ||
       frame.type === "data" ||
@@ -1402,6 +1440,7 @@ export class HubConnector {
     if (disposition.action === "operator") {
       if (disposition.terminalState !== undefined) {
         this.#state.transition(disposition.terminalState, { failure: disposition.failure });
+        if (disposition.terminalState === "revoked") this.#onRevoked();
       } else {
         this.#state.transition("degraded", {
           degradedMode: "operator_action_required",

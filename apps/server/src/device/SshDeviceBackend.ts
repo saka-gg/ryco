@@ -272,6 +272,11 @@ export class SshDeviceBackend extends ForwardingDeviceBackend {
     throw new DeviceBackendError("Simulator testing controls are unavailable on SSH hosts.");
   }
 
+  async readLogs(..._args: Parameters<ForwardingDeviceBackend["readLogs"]>): Promise<never> {
+    // No log operation exists in the remote protocol.
+    throw new DeviceBackendError("Device logs are unavailable on SSH hosts.");
+  }
+
   async call<K extends DeviceCall>(method: K, args: DeviceArgs<K>): Promise<DeviceResult<K>> {
     if (method === "availability" || method === "listDevices") await this.connect();
     if (method === "install") {

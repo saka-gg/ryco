@@ -126,6 +126,8 @@ export const fixtureRepositoryOption: ProjectCheckoutOption = {
   customAvatarContentHash: null,
   repositoryKey: "github.com/ryco-labs/ryco",
   isRepresentative: true,
+  repositoryRemoteUrl: "https://github.com/ryco-labs/ryco.git",
+  repositoryProvider: "github",
 };
 
 interface FixturePerson {

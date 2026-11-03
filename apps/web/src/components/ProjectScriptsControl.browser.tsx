@@ -79,6 +79,20 @@ describe("ProjectScriptsControl action dialog", () => {
     );
   }
 
+  // First in the file on purpose: the dialog's chunk has not loaded yet. The
+  // menu opening starts the load, so the dialog still grows out of the closing
+  // menu (an origin that is gone once the menu has closed).
+  it("grows out of the scripts menu on a cold open", async () => {
+    mounted = await renderControl([BUILD_SCRIPT]);
+
+    await page.getByRole("button", { name: "Script actions" }).click();
+    await page.getByRole("menuitem", { name: "Add action" }).click();
+
+    await vi.waitFor(() => expect(ghosts()).toHaveLength(1), { timeout: 2_000, interval: 10 });
+    expect(ghosts()[0]!.parentElement?.dataset.slot).toBe("dialog-viewport");
+    await expect.element(page.getByRole("textbox", { name: "Name" })).toHaveFocus();
+  });
+
   it("grows out of the Add action button and folds back into it when dismissed", async () => {
     mounted = await renderControl([]);
     const addButton = document.querySelector<HTMLButtonElement>('button[title="Add action"]')!;
@@ -86,8 +100,9 @@ describe("ProjectScriptsControl action dialog", () => {
     await page.getByRole("button", { name: "Add action" }).click();
 
     // Mid-grow: a ghost of the dialog surface travels from the button, inside
-    // the dialog viewport (above the scrim, beneath the popup).
-    expect(ghosts()).toHaveLength(1);
+    // the dialog viewport (above the scrim, beneath the popup). The dialog
+    // mounts as its chunk lands (here already, after the open above).
+    await vi.waitFor(() => expect(ghosts()).toHaveLength(1), { timeout: 2_000, interval: 10 });
     const growGhost = ghosts()[0]!;
     expect(growGhost.parentElement?.dataset.slot).toBe("dialog-viewport");
     const popup = growGhost.nextElementSibling as HTMLElement;

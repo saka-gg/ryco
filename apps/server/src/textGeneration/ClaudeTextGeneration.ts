@@ -22,7 +22,7 @@ import { type ClaudeSettings, type ModelSelection } from "@ryco/contracts";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@ryco/shared/git";
 
 import { TextGenerationError } from "@ryco/contracts";
-import { type TextGenerationShape, validateRankInboxThreadsResult } from "./TextGeneration.ts";
+import type { TextGenerationShape } from "./TextGeneration.ts";
 import {
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
@@ -30,11 +30,11 @@ import {
   buildIssueContentTitlePrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
-  buildThreadPriorityPrompt,
   buildSideQuestionPrompt,
   buildWorkspaceChangesSummaryPrompt,
 } from "./TextGenerationPrompts.ts";
 import {
+  cliFailureDetail,
   normalizeCliError,
   sanitizeCommitSubject,
   sanitizePrTitle,
@@ -54,6 +54,10 @@ import {
   resolveClaudeEffort,
 } from "../provider/Layers/ClaudeProvider.ts";
 import { makeClaudeEnvironment } from "../provider/Drivers/ClaudeHome.ts";
+import {
+  type AgentProcessPriorityShape,
+  spawnAgentProcess,
+} from "../provider/agentProcessPriority.ts";
 
 const CLAUDE_TIMEOUT_MS = 180_000;
 /**
@@ -71,9 +75,18 @@ const ClaudeOutputEnvelope = Schema.Struct({
   structured_output: Schema.Unknown,
 });
 
+/**
+ * The same wrapper for a failed run: no `structured_output`, and the error
+ * message in `result` (e.g. "Not logged in · Please run /login").
+ */
+const decodeClaudeErrorEnvelope = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Struct({ is_error: Schema.Literal(true), result: Schema.String })),
+);
+
 export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(function* (
   claudeSettings: ClaudeSettings,
   environment: NodeJS.ProcessEnv = process.env,
+  options?: { readonly processPriority?: AgentProcessPriorityShape | undefined },
 ) {
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, environment);
@@ -103,7 +116,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     prompt,
     outputSchemaJson,
     modelSelection,
-    toolsEnabled = true,
+    toolsEnabled = operation === "generateIssueContent",
     lightweight = operation === "answerSideQuestion",
     persistSession = true,
     timeoutMs = CLAUDE_TIMEOUT_MS,
@@ -114,13 +127,16 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       | "generateBranchName"
       | "generateThreadTitle"
       | "generateIssueContent"
-      | "rankInboxThreads"
       | "answerSideQuestion"
       | "summarizeWorkspaceChanges";
     cwd: string;
     prompt: string;
     outputSchemaJson: S;
     modelSelection: ModelSelection;
+    /**
+     * True (issue drafting only) gives the run Claude's tools with permission checks skipped.
+     * False runs without built-in tools and without MCP servers.
+     */
     toolsEnabled?: boolean;
     /**
      * Run without the user's setting sources, MCP servers, hooks, memory and
@@ -168,15 +184,11 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
           "-p",
           ...(lightweight || !persistSession ? ["--no-session-persistence"] : []),
           ...(lightweight
-            ? [
-                "--setting-sources",
-                "",
-                "--strict-mcp-config",
-                "--mcp-config",
-                '{"mcpServers":{}}',
-                "--system-prompt",
-                lightweightSystemPrompt(operation),
-              ]
+            ? ["--setting-sources", "", "--system-prompt", lightweightSystemPrompt(operation)]
+            : []),
+          // `--tools ""` turns off built-in tools only; MCP servers need their own switch.
+          ...(lightweight || !toolsEnabled
+            ? ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}']
             : []),
           "--output-format",
           "json",
@@ -198,13 +210,15 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
         },
       );
 
-      const child = yield* commandSpawner
-        .spawn(command)
-        .pipe(
-          Effect.mapError((cause) =>
-            normalizeCliError("claude", operation, cause, "Failed to spawn Claude CLI process"),
-          ),
-        );
+      const child = yield* spawnAgentProcess(
+        commandSpawner,
+        options?.processPriority,
+        command,
+      ).pipe(
+        Effect.mapError((cause) =>
+          normalizeCliError("claude", operation, cause, "Failed to spawn Claude CLI process"),
+        ),
+      );
 
       const [stdout, stderr, exitCode] = yield* Effect.all(
         [
@@ -220,15 +234,19 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       );
 
       if (exitCode !== 0) {
-        const stderrDetail = stderr.trim();
-        const stdoutDetail = stdout.trim();
-        const detail = stderrDetail.length > 0 ? stderrDetail : stdoutDetail;
+        // The envelope's message, when stdout has one, rather than the envelope itself.
+        const result = decodeClaudeErrorEnvelope(stdout.trim()).pipe(
+          Option.map((envelope) => envelope.result),
+          Option.filter((message) => message.trim().length > 0),
+        );
         return yield* new TextGenerationError({
           operation,
-          detail:
-            detail.length > 0
-              ? `Claude CLI command failed: ${detail}`
-              : `Claude CLI command failed with code ${exitCode}.`,
+          detail: cliFailureDetail(
+            "claude",
+            Option.isSome(result)
+              ? { stdout: result.value, stderr: "", exitCode, prompt }
+              : { stdout, stderr, exitCode, prompt },
+          ),
         });
       }
 
@@ -457,23 +475,6 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       }),
     );
 
-  const rankInboxThreads: TextGenerationShape["rankInboxThreads"] = Effect.fn(
-    "ClaudeTextGeneration.rankInboxThreads",
-  )(function* (input) {
-    const { prompt, outputSchema } = buildThreadPriorityPrompt({
-      serializedCandidates: input.chunk.serializedCandidates,
-    });
-    const generated = yield* runClaudeJson({
-      operation: "rankInboxThreads",
-      cwd: input.cwd,
-      prompt,
-      outputSchemaJson: outputSchema,
-      modelSelection: input.modelSelection,
-      toolsEnabled: false,
-    });
-    return yield* validateRankInboxThreadsResult(input, generated.rankings);
-  });
-
   const summarizeWorkspaceChanges: TextGenerationShape["summarizeWorkspaceChanges"] = Effect.fn(
     "ClaudeTextGeneration.summarizeWorkspaceChanges",
   )(function* (input) {
@@ -489,12 +490,13 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
   });
 
   return {
+    // Commit and pull request runs pass `--tools ""` and an empty, strict MCP configuration.
+    gitWritingToolFree: true,
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
     generateIssueContent,
-    rankInboxThreads,
     answerSideQuestion,
     summarizeWorkspaceChanges,
   } satisfies TextGenerationShape;

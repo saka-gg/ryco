@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { type CSSProperties, memo, type ReactElement, type ReactNode, useEffect } from "react";
 
+import { useCommandPaletteStore } from "../../commandPaletteStore";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { cn } from "../../lib/utils";
@@ -100,6 +101,11 @@ export const SidebarPrimaryActions = memo(function SidebarPrimaryActions(
   const projectsIndex = pullRequestsIndex + Number(pullRequestsCapability.allowed);
   const destinationCount = projectsIndex + Number(projectsCapability.allowed);
 
+  // The command palette offers the Tasks page while this does.
+  useEffect(() => {
+    useCommandPaletteStore.setState({ tasksAvailable: showTasks });
+    return () => useCommandPaletteStore.setState({ tasksAvailable: false });
+  }, [showTasks]);
   // The frozen phone tier keeps a still header (AGENTS.md).
   useEffect(() => setFoldEnabled(!phone), [phone, setFoldEnabled]);
   useEffect(
@@ -140,7 +146,7 @@ export const SidebarPrimaryActions = memo(function SidebarPrimaryActions(
               onPointerEnter={preloadDraftRoute}
               onFocus={preloadDraftRoute}
               data-testid="sidebar-new-thread-button"
-              className="sidebar-fold-item sidebar-fold-new grid cursor-pointer place-items-center rounded-[10px] bg-primary text-primary-foreground outline-hidden ring-ring hover:shadow-[0_0_0_4px_color-mix(in_srgb,var(--primary)_10%,transparent)] focus-visible:ring-2 active:scale-90 disabled:pointer-events-none disabled:opacity-50"
+              className="sidebar-fold-item sidebar-fold-new grid cursor-pointer place-items-center rounded-full bg-primary text-primary-foreground outline-hidden ring-ring hover:shadow-[0_0_0_4px_color-mix(in_srgb,var(--primary)_10%,transparent)] focus-visible:ring-2 active:scale-90 disabled:pointer-events-none disabled:opacity-50"
             />
           }
         >

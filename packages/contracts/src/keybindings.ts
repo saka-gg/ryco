@@ -49,6 +49,53 @@ export const MODEL_PICKER_KEYBINDING_COMMANDS = [
 ] as const;
 export type ModelPickerKeybindingCommand = (typeof MODEL_PICKER_KEYBINDING_COMMANDS)[number];
 
+/*
+ * Commands of features built in parallel, one group each, so their changes never touch the same
+ * lines. Never give these commands a node default: their default keys go into the matching group
+ * in client-runtime's appKeybindingDefaults.ts.
+ */
+
+// Quick open and find in files.
+export const FILE_SEARCH_KEYBINDING_COMMANDS = [
+  "workspace.quickOpen",
+  "workspace.findInFiles",
+] as const;
+
+// Settle, snooze, archive, mark unread and undo for threads.
+export const THREAD_LIFECYCLE_KEYBINDING_COMMANDS = [
+  "thread.settle",
+  "thread.snooze",
+  "thread.archive",
+  "thread.markUnread",
+  "thread.undo",
+] as const;
+
+// The next thread that needs attention.
+export const THREAD_ATTENTION_KEYBINDING_COMMANDS = [
+  "thread.attention.next",
+  "thread.attention.previous",
+] as const;
+
+// Back and forward, and the thread commands that ship with them.
+export const NAVIGATION_KEYBINDING_COMMANDS = [
+  "navigation.back",
+  "navigation.forward",
+  "thread.interrupt",
+  "thread.copyReference",
+] as const;
+
+// Close and reopen views and tabs.
+export const VIEW_KEYBINDING_COMMANDS = ["view.close", "view.reopenClosed"] as const;
+
+// Open or minimize the current thread's side chat.
+export const SIDE_CHAT_KEYBINDING_COMMANDS = ["sideChat.toggle"] as const;
+
+// Step through the hunks of the diff panel.
+export const DIFF_HUNK_KEYBINDING_COMMANDS = ["diff.hunk.next", "diff.hunk.previous"] as const;
+
+// The next or previous open chat tab in the chat header.
+export const THREAD_TAB_KEYBINDING_COMMANDS = ["threadTab.next", "threadTab.previous"] as const;
+
 /**
  * Every built-in command a key can be bound to. Some ship without a default
  * key, so this — not the default keymap — is the list a keybindings editor
@@ -69,8 +116,8 @@ export const STATIC_KEYBINDING_COMMANDS = [
   "sidebar.showProjects",
   "chat.new",
   "chat.newLocal",
-  // Start a chat in its own Ryco-managed folder instead of a project; no default key (users bind
-  // it), because a default reaches clients that cannot decode a command newer than they are.
+  // Start a chat in its own Ryco-managed folder instead of a project. Its default key is
+  // client-only, because nodes send their defaults to clients that cannot decode a newer command.
   "chat.newWithoutProject",
   "composer.stash",
   "editor.openFavorite",
@@ -83,7 +130,16 @@ export const STATIC_KEYBINDING_COMMANDS = [
   "projects.open",
   ...MODEL_PICKER_KEYBINDING_COMMANDS,
   ...THREAD_KEYBINDING_COMMANDS,
+  ...FILE_SEARCH_KEYBINDING_COMMANDS,
+  ...THREAD_LIFECYCLE_KEYBINDING_COMMANDS,
+  ...THREAD_ATTENTION_KEYBINDING_COMMANDS,
+  ...NAVIGATION_KEYBINDING_COMMANDS,
+  ...VIEW_KEYBINDING_COMMANDS,
+  ...SIDE_CHAT_KEYBINDING_COMMANDS,
+  ...DIFF_HUNK_KEYBINDING_COMMANDS,
+  ...THREAD_TAB_KEYBINDING_COMMANDS,
 ] as const;
+export type StaticKeybindingCommand = (typeof STATIC_KEYBINDING_COMMANDS)[number];
 
 export const SCRIPT_RUN_COMMAND_PATTERN = Schema.TemplateLiteral([
   Schema.Literal("script."),

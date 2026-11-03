@@ -37,6 +37,39 @@ Claude HOME path: empty
 
 An empty `Claude HOME path` means Ryco uses your normal home directory.
 
+## Sign In From Settings
+
+A Claude instance that has no claude.ai login shows **Account sign-in** in its provider settings.
+Click **Sign in** and Ryco runs `claude auth login` on the machine the instance runs on, which can
+be this computer or a remote node, in a terminal shown in Settings:
+
+1. Follow Claude Code's prompts in that terminal: choose how to log in, open the sign-in page it
+   shows, and paste the code back into the terminal if it asks for one. Clicking an `https` link in
+   the terminal opens it on the device you are using, not on the node.
+2. When the login finishes, the node checks the instance again, and every connected app shows the
+   account.
+
+The login runs with the instance's own environment variables and `Claude HOME path`, so it signs in
+exactly the account that instance uses: a work and a personal instance each sign in on their own.
+Two instances that share one Claude configuration directory cannot sign in at the same time.
+
+The sign-in runs on the node, so closing Settings does not stop it; come back to see how it went.
+It ends when the login exits, after 15 minutes, with **Cancel**, or when the node restarts. Only
+owners of a node can sign its providers in, and what the terminal shows or receives is never logged.
+
+Ryco offers no sign-in for an instance that Claude Code would not use a login for: one with an API
+key or token (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`), another
+endpoint (`ANTHROPIC_BASE_URL`, such as a router, OpenRouter or a CLIProxyAPI hub), or a Bedrock,
+Vertex or Foundry flag. The variable counts whether the instance's environment variables or the
+node's own environment set it. An instance whose own variables set it shows no sign-in at all; for
+one where only the node's environment does, Settings names the variable, never its value. Either
+way Ryco runs no login and touches no stored login for that instance.
+
+If the login fails, the terminal stays in Settings with what it printed, so you can read why.
+If the login finishes but Settings says Claude still reports no sign-in, refresh the provider. On a
+Mac without a logged-in desktop session, Claude Code may not be able to save its login to the
+Keychain; run `claude auth login` on that Mac instead.
+
 ## I Want Work And Personal Claude Accounts
 
 Use a different Claude home for each account.
@@ -221,7 +254,31 @@ configuration steps: <https://github.com/musistudio/claude-code-router>.
 CLIProxyAPI pools several Claude Code subscriptions behind one proxy. Route a Claude provider
 through it with the same environment variables as a router, and connect the hub itself under
 Settings → Providers → CLIProxyAPI hubs to see each subscription's usage on Statistics → Limits.
-See [CLIProxyAPI hubs](./cliproxyapi.md).
+See [CLIProxyAPI hubs](./cliproxyapi.md). A Claude provider routed through the hub offers no sign-in
+from Settings: its accounts sign in on the hub.
+
+## Fast Mode
+
+Fast mode is a model option on the Claude models whose manifest entry offers it. Claude Code
+reports on each turn whether Fast mode actually serves requests, and Ryco keeps the latest report
+per thread. When it differs from what the composer asks for, the bolt in the composer's model pill
+says so. On the web it turns into an outline, muted while Fast mode is paused or unavailable, and
+its tooltip and accessible name give the notice. In the iOS app a paused or unavailable Fast mode
+strikes the bolt through, Fast mode turned on elsewhere shows an outline bolt, and VoiceOver reads
+the notice with the model:
+
+- **Fast paused**: a rate limit paused Fast mode, so requests run at standard speed for now.
+- **Fast unavailable**: Claude Code refused Fast mode, for example because the plan does not
+  include it, usage credits are off, or the model does not support it. Claude Code may also serve
+  Fast mode only on a direct Anthropic connection; a provider routed through a proxy such as
+  CLIProxyAPI then shows this notice while its Fast option is on.
+- **Fast on**: the composer asks for standard speed, but Claude Code's own settings (for example
+  `fastMode` in the Claude HOME's settings) turned Fast mode on.
+
+A report belongs to the provider instance and model of the session that sent it, and records
+whether Ryco asked that session for Fast mode. After you switch the instance or the model, or turn
+off a Fast mode the session was asked for, the composer shows the requested option until the new
+session reports. Turning Fast mode on still shows a paused or unavailable notice in advance.
 
 ## I Want Different Claude Settings, Not A Different Account
 
@@ -245,12 +302,156 @@ finishes. Ryco shows the thread as working from the moment Claude starts that re
 reasoning and text stream like any other turn. Stop ends a background turn too. If a background turn
 starts but produces no output for two minutes, Ryco ends it.
 
+## Stopping One Subagent
+
+A running subagent can be stopped on its own: hover its row in the Agents panel or in the crown's
+Subagents section and click the stop button, or open the agent and click Stop in its header. On a
+touch screen, or any device that can't hover, the stop button stays in view on the row. Ryco asks
+Claude Code to stop just that task. The turn that launched it keeps running, and the agent's
+row then reads Interrupted (or Stopped, when Claude Code reports the task as killed). Ryco never
+stops the turn instead. If the stop fails, or the agent still runs after 20 seconds, a notice says
+so and Stop is offered again.
+
+Stop is only offered for agents the thread's current Claude session started. Workflows and their
+agents have no Stop of their own, and neither do other providers' agents.
+
+## Messaging a Running Subagent
+
+Open a running subagent in the Agents panel and type in the box under its activity to send it a
+message without stopping it or the turn. Claude Code has no way to hand a running subagent a new
+message directly, so Ryco keeps it and gives it to the agent at its next tool call, as context
+the agent reads before it continues ("The user sent you a message mid-task: …"). The chat shows a
+notice when the agent read it. An agent that finishes before its next tool call never reads it:
+the chat then says the message was not delivered and shows its text.
+
+Up to 5 messages can wait for one agent, each at most 8,000 characters. The hook runs on every
+tool call of a Claude session and returns at once when no message waits. The box is offered only for
+agents (not shell or monitor tasks, and not a workflow's coordinator) that the thread's current
+Claude session started.
+
+## Auto Mode
+
+Ryco starts a Claude session in Auto mode only when this provider's Claude Code can run the
+selected model that way. Claude Code reports which models support Auto mode (see
+[Claude Code's own model report](./model-manifest.md#claude-codes-own-model-report)). When it says
+the model can't, Ryco starts the session in Claude Code's default mode instead and warns once in
+the thread: Claude then asks before commands and file changes. The thread keeps Auto as its
+selected mode, so switching to a model that supports it brings Auto back with the next session.
+When the report is missing or doesn't cover the model (custom models included), Ryco starts in
+Auto as before.
+
+The access pickers read the same report, per provider: in the web composer and the mobile app,
+Auto is greyed out with the reason for such a model. If the thread is already in Auto, the web
+composer's access control says on hover that sessions ask before commands and file changes
+instead. Automations and the web phone layout still offer Auto; the session start above covers
+them.
+
+If Claude Code accepts the Auto session but its first report of the session shows the default
+mode, Ryco treats that as the same refusal: it warns once and stops asking for Auto in that
+session.
+
+## Plan Panel
+
+Claude's task list fills the thread's plan: the Plan panel and the plan in the overview and the
+crown. Claude Code plans with its Task tools (TaskCreate, TaskUpdate, TaskGet and TaskList), or
+with TodoWrite when the Task tools are off. Ryco updates the plan from each call's result, so a
+change Claude Code rejected never shows. Subagents write to the session's task list, so their
+task changes update the same plan; a subagent's TodoWrite list is its own and is not shown. The
+calls stay in the work log as tool rows such as "TaskUpdate: #2 → completed".
+
+The plan keeps working after the server restarts, after an idle session is stopped, and after a
+checkpoint revert: Ryco stores each task's number, subject and status with the thread's Claude
+session, never its description. A revert rewinds the conversation but not Claude's task list, so
+right after one the plan shows the list as it was at that checkpoint; Claude's next task call brings
+it back to Claude's current list. A new Claude session (after a revert to the start, a fork or a
+handoff) starts with an empty task list.
+
+Claude Code decides which models get planning tools. As of Claude Code 2.1.296 these are Opus 4.5
+to 4.7, Sonnet 4.6, Haiku 4.5 and older models, model ids Claude Code does not know (a router's
+own names, for example), and background sessions. Newer models (Opus 4.8, the 5.x models and Fable)
+get none by default, so their plan stays empty. Environment variables on the Claude provider
+instance change this:
+
+- `CLAUDE_CODE_ENABLE_TODO_TOOLS=true` gives every model planning tools. They add tool definitions
+  and task reminders to the prompt, so they cost tokens and change how the model works.
+- `CLAUDE_CODE_ENABLE_TASKS=false` makes Claude plan with TodoWrite instead of the Task tools.
+
+## Approvals
+
+When Claude asks before running a tool, the approval card leads with Decline and Approve once.
+Always allow this session and Cancel turn are in the card's menu. When Claude says why it asked
+(for example an ask rule or a path outside the working directories), the card shows it under
+"Why am I being asked?". When accepting for the session would allow more than this one action,
+Claude withholds that choice and Ryco leaves it out; an older client that still offers it gets a
+single approval.
+
+## Automatic Compaction
+
+When a turn you started finishes its work with the context window at least 80% full, Ryco compacts
+the conversation before the turn ends: it sends Claude Code's own `/compact`, and the turn ends
+when that command does. The thread keeps showing the turn as working until then, and no extra turn
+appears. Claude Code fixes the window it auto-compacts at when the session starts and ignores a
+change sent while it runs, so this explicit command is what makes compaction start at 80%. Ryco
+sends it only when Claude Code lists `/compact` among its slash commands; otherwise it shows the
+warning described below.
+
+A message sent meanwhile stays in the queue, even with Steer selected, and runs after compaction.
+Stop ends the compaction (and the turn) without a warning. If the `/compact` finishes without
+compacting, or fails, the turn still ends as completed, and Ryco warns that automatic compaction is
+unavailable and does not try again in that session; Claude Code's own auto-compaction near a full
+window still applies. After a compaction, or a stopped one, Ryco compacts again only once the
+context has dropped to 65% or below and climbed back to 80%.
+
+### Choosing How An Instance Compacts
+
+Each Claude instance has two settings for this in Settings → Providers:
+
+- **Automatic compaction.** _At 80% between turns (Ryco)_, the default, is the behavior described
+  above. _When Claude Code decides_ turns Ryco's compaction off for the instance: Ryco never sends
+  `/compact` itself and never shows the unavailable warning, and Claude Code compacts on its own
+  shortly before the window is full, which can happen in the middle of a turn. If you turned
+  auto-compact off in your own Claude config, nothing compacts automatically in this mode. A value
+  Ryco does not know counts as the default.
+- **Compact within (tokens).** A whole number from 100,000 to 1,000,000 (commas are allowed). Ryco's
+  80% and 65% marks then apply to that window instead of the model's, and Ryco starts Claude Code
+  with it as its auto-compact window in both modes, so Claude Code's own compaction is bounded by
+  it too (with a small allowance below 200,000 tokens, described next). It replaces a window you
+  chose with `/autocompact`, but it does not turn auto-compact back on if you turned it off in your
+  Claude config. A window larger than the model's changes nothing; Ryco always uses the smaller of
+  the two. Empty, the default, uses the model's window and leaves your own `/autocompact` choice
+  alone.
+
+Claude Code compacts about 33,000 tokens below its window (it keeps room for a reply), in the
+middle of a turn if need be. With Ryco's policy and a window below 200,000 tokens, that would come
+before Ryco's 80% mark, so Ryco starts Claude Code with a somewhat larger window for its own
+compaction: one that keeps it at least 7,000 tokens above the mark, as on a 200,000-token model.
+For a 150,000-token window, Ryco compacts at 120,000 between turns, and Claude Code at about
+127,000 only when a single turn runs past that. When Claude Code decides, it gets the window as
+you set it.
+
+A value outside the range, or one that is not a number, is ignored: the instance keeps working with
+the default, and the server logs `claude.compaction.settingsIgnored` once when the instance starts.
+This also holds for a number, `true`/`false` or `null` written into the instance's settings by
+hand: a number counts as its digits typed into the field, and `null` as empty. The settings form
+shows such a value as empty until you enter one there.
+Claude Code reads its window only when a session starts. Saving an instance's settings restarts
+that instance, so its open chats pick up a change with their next message.
+
+An opt-in probe checks this Claude Code behavior, including how a window given at start-up combines
+with your own Claude settings, without inference (temporary home, fake API key, a local endpoint
+that rejects every request):
+
+```sh
+RYCO_CLAUDE_NATIVE_PROBE=1 bun run --cwd apps/server test -- src/provider/claudeCompactionCliProbe.test.ts
+```
+
 ## Steering A Running Turn
 
 A message you send while a Claude turn runs can steer that turn instead of waiting in the queue.
 Choose the default in Settings → Composer controls → Messages sent while a turn runs: Queue (the
-default) or Steer. While a turn runs, ⌘↵ / Ctrl+Enter does the opposite. Each queued row also has
-a Steer button.
+default) or Steer. While a turn runs, the opposite shortcut sends one message the other way: ⌘↵ /
+Ctrl+Enter, or ⇧⌘↵ / Ctrl+Shift+Enter when your Send shortcut is one of the ⌘↵ options (see
+[Send shortcut](../user/composer.md#send-shortcut)). Each queued row also has a Steer button.
 
 How it works:
 
@@ -260,12 +461,18 @@ How it works:
   appears in that turn and the reply continues there, with one working state and one completion.
 - The turn waits for the steered message's reply only while Claude Code reports more queued work
   (`queued_turn_count > 0`). It never waits on a timer.
+- While Claude waits for an approval, the composer stays usable on desktop and in the app: sending
+  a message declines the approval and steers the message into the turn, whatever the setting says
+  (the opposite shortcut still queues it and leaves the approval to you). Ryco waits until Claude
+  has taken the decline before it steers, and declines the next tool's approval too when Claude
+  asks again in the same turn. If the decline fails or its delivery is unknown, or the approval
+  appeared just before you sent, nothing is sent and your draft stays.
 - A steer that cannot be applied stays in the queue and is sent as the next turn. This happens
   when the turn has already finished, while Claude waits for an approval or an answer, for slash
   commands, and on Claude Code versions without the `interrupt_receipt_v1` capability. A deferral
   never adds an error or a work-log row. A steer sent automatically by the follow-up setting is
-  deferred silently; an explicit steer (the Steer button or ⌘↵ / Ctrl+Enter) shows a "Not
-  steered" notice saying why.
+  deferred silently; an explicit steer (the Steer button or the opposite shortcut) shows a
+  "Not steered" notice saying why.
 - If a steer stops Claude's current request but Claude Code reports no further queued work, the
   turn completes normally rather than as interrupted, so the queue keeps draining. The steered
   message then runs as its own request and its reply appears in a background turn.
@@ -318,5 +525,14 @@ running request or folds into it, which `terminal_reason` an abort reports, and 
 `queued_turn_count` the aborted result carries. Ryco handles every combination above. The manual
 checks that settle them (steer mid-stream, steer during a Bash tool, Stop right after a steer on
 each capability level) still need to be run and their findings recorded here.
+
+Replay tests play hand-authored Claude Agent SDK frames through the real adapter and orchestrator.
+They cover two of the edges above (a steer accepted as the turn finishes, and a dropped steer that
+Claude Code runs together with your next message) and Stop with a pending steer on each capability
+level. They pin how Ryco handles these orderings, not whether Claude Code produces them:
+
+```sh
+bun run --cwd apps/server test -- integration/replay/claudeReplay.integration.test.ts
+```
 
 See [observed cache usage and resume review](./claude-cache.md) for evidence scopes, compaction, and recovery behavior.

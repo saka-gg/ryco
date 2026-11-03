@@ -21,7 +21,11 @@ import {
   CompactComposerControlsMenu,
 } from "./CompactComposerControlsMenu";
 import { ContextPickerButton } from "./ContextPickerButton";
-import { type ContextWindowAccount, ContextWindowMeter } from "./ContextWindowMeter";
+import {
+  type ContextWindowAccount,
+  type ContextWindowCompactNow,
+  ContextWindowMeter,
+} from "./ContextWindowMeter";
 import type { ComposerExecutionTarget } from "./ExecutionTarget.logic";
 import { ExecutionTargetSelect } from "./ExecutionTargetSelect";
 import { ProviderModelPicker } from "./ProviderModelPicker";
@@ -49,10 +53,14 @@ import { usePhoneThreadSurfaceReady } from "../shell/phone/usePhoneThreadSurface
 import { tokenModeOptions, tokenModePresentation } from "../../tokenModePresentation";
 
 const SELECT_OPEN_SUPPRESSION_MS = 300;
+/** The secondary line under each mode option's label: a step below the label. */
+const MODE_OPTION_DESCRIPTION_CLASS_NAME = "text-[11px] leading-3.5 text-muted-foreground";
 
 export const ComposerFooterModeControls = memo(function ComposerFooterModeControls(props: {
   showInteractionModeToggle: boolean;
   askModeSupported: boolean;
+  /** Why the selected model cannot run Auto mode; the server downgrades an Auto session. */
+  autoModeUnavailableReason?: string | null | undefined;
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
   tokenMode: AgentTokenMode;
@@ -189,7 +197,7 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
             </SelectTrigger>
             <SelectPopup
               alignItemWithTrigger={false}
-              className="w-56 p-0.5 [&_[data-slot=select-item]]:min-h-7"
+              className="w-56 [&_[data-slot=select-item]]:min-h-7"
             >
               {interactionModeOptions.map((mode) => {
                 const option = interactionModeConfig[mode];
@@ -208,7 +216,7 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
                         <OptionIcon className="size-3.5 shrink-0 text-muted-foreground" />
                         {option.label}
                       </span>
-                      <span className="text-muted-foreground text-xs leading-4">
+                      <span className={MODE_OPTION_DESCRIPTION_CLASS_NAME}>
                         {unsupported ? ASK_MODE_UNSUPPORTED_DESCRIPTION : option.description}
                       </span>
                     </div>
@@ -246,7 +254,11 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
             props.runtimeMode === CAUTION_RUNTIME_MODE && CAUTION_RUNTIME_MODE_CLASS_NAME,
           )}
           aria-label={`Runtime mode: ${runtimeModeOption.triggerLabel}`}
-          title={runtimeModeOption.description}
+          title={
+            props.runtimeMode === "auto" && props.autoModeUnavailableReason
+              ? `${props.autoModeUnavailableReason} Sessions ask before commands and file changes instead.`
+              : runtimeModeOption.description
+          }
         >
           <ComposerExpandableLabelControl
             collapsed={wideComposerControlsAutoCollapse}
@@ -257,15 +269,17 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
         </SelectTrigger>
         <SelectPopup
           alignItemWithTrigger={false}
-          className="w-56 p-0.5 [&_[data-slot=select-item]]:min-h-7"
+          className="w-56 [&_[data-slot=select-item]]:min-h-7"
         >
           {runtimeModeOptions.map((mode) => {
             const option = runtimeModeConfig[mode];
             const OptionIcon = option.icon;
+            const unavailableReason = mode === "auto" ? props.autoModeUnavailableReason : null;
             return (
               <SelectItem
                 key={mode}
                 value={mode}
+                disabled={Boolean(unavailableReason)}
                 className="min-w-0 py-1.5"
                 onClick={closeRuntimeModeSelectAfterItemPress}
               >
@@ -287,12 +301,12 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
                   </span>
                   <span
                     className={cn(
-                      "text-muted-foreground text-xs leading-4",
+                      MODE_OPTION_DESCRIPTION_CLASS_NAME,
                       mode === CAUTION_RUNTIME_MODE && CAUTION_RUNTIME_MODE_CLASS_NAME,
                     )}
                     data-runtime-mode-option-description={mode}
                   >
-                    {option.description}
+                    {unavailableReason || option.description}
                   </span>
                 </div>
               </SelectItem>
@@ -344,7 +358,7 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
         </SelectTrigger>
         <SelectPopup
           alignItemWithTrigger={false}
-          className="w-60 p-0.5 [&_[data-slot=select-item]]:min-h-7"
+          className="w-60 [&_[data-slot=select-item]]:min-h-7"
         >
           {tokenModeOptions.map((mode) => {
             const option = tokenModePresentation[mode];
@@ -361,9 +375,7 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
                     <OptionIcon className="size-3.5 shrink-0 text-muted-foreground" />
                     {option.label}
                   </span>
-                  <span className="text-muted-foreground text-xs leading-4">
-                    {option.description}
-                  </span>
+                  <span className={MODE_OPTION_DESCRIPTION_CLASS_NAME}>{option.description}</span>
                 </div>
               </SelectItem>
             );
@@ -408,6 +420,7 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
   contextWindowRateLimitsCheckedAt?: string | undefined;
   contextWindowAccount?: ContextWindowAccount | undefined;
   claudeCacheObservation?: ClaudeCacheObservation | null | undefined;
+  compactNow?: ContextWindowCompactNow | undefined;
   isPreparingWorktree: boolean;
   pendingAction: {
     questionIndex: number;
@@ -423,6 +436,7 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
   isConnecting: boolean;
   isEnvironmentUnavailable: boolean;
   hasSendableContent: boolean;
+  sendRedirectsApproval?: boolean;
   sendDisabledReason?: string | null | undefined;
   sendsQueueUntilReady?: string | null | undefined;
   mutationUnavailableReason?: string | null | undefined;
@@ -440,6 +454,7 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
         available={!props.isEnvironmentUnavailable}
         claudeCache={props.claudeCacheObservation}
         account={props.contextWindowAccount}
+        compactNow={props.compactNow}
       />
       <ComposerPrimaryActions
         compact={props.compact}
@@ -452,6 +467,7 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
         isEnvironmentUnavailable={props.isEnvironmentUnavailable}
         isPreparingWorktree={props.isPreparingWorktree}
         hasSendableContent={props.hasSendableContent}
+        sendRedirectsApproval={props.sendRedirectsApproval ?? false}
         sendDisabledReason={props.sendDisabledReason}
         sendsQueueUntilReady={props.sendsQueueUntilReady}
         mutationUnavailableReason={props.mutationUnavailableReason}
@@ -476,6 +492,8 @@ export interface ComposerFooterProps {
   onSelectIssue: (issue: SourceControlIssueSummary) => void;
   onSelectChangeRequest: (cr: ChangeRequest) => void;
   onAttachFile: (file: File) => void;
+  /** Present only where the desktop app can capture windows (macOS). */
+  onCaptureWindow?: (windowId: number) => void;
   executionTargets?: ReadonlyArray<ComposerExecutionTarget>;
   selectedExecutionEnvironmentId?: EnvironmentId;
   executionTargetLocked?: boolean;
@@ -509,6 +527,8 @@ export interface ComposerFooterProps {
   // Mode controls
   showInteractionModeToggle: boolean;
   askModeSupported: boolean;
+  /** Why the selected model cannot run Auto mode (desktop pickers only). */
+  autoModeUnavailableReason?: string | null | undefined;
   showPlanSidebarToggle: boolean;
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
@@ -537,6 +557,8 @@ export interface ComposerFooterProps {
   /** The selected instance and its login, for the context popup's account details. */
   contextWindowAccount?: ContextWindowAccount | undefined;
   claudeCacheObservation?: ClaudeCacheObservation | null | undefined;
+  /** Compact now in the context meter, for a thread whose provider can compact on request. */
+  compactNow?: ContextWindowCompactNow | undefined;
   pendingAction: {
     questionIndex: number;
     isLastQuestion: boolean;
@@ -552,6 +574,8 @@ export interface ComposerFooterProps {
   isEnvironmentUnavailable: boolean;
   isPreparingWorktree: boolean;
   hasSendableContent: boolean;
+  /** A send declines the waiting approval and redirects the turn. */
+  sendRedirectsApproval?: boolean;
   sendDisabledReason?: string | null | undefined;
   /** Set while a send waits in the queue for the environment; the caption says when it goes out. */
   sendsQueueUntilReady?: string | null | undefined;
@@ -603,6 +627,7 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
           onSelectIssue={props.onSelectIssue}
           onSelectChangeRequest={props.onSelectChangeRequest}
           onAttachFile={props.onAttachFile}
+          {...(props.onCaptureWindow ? { onCaptureWindow: props.onCaptureWindow } : {})}
         />
         <ProviderModelPicker
           openOnHover
@@ -700,6 +725,7 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
             tokenMode={props.tokenMode}
             showInteractionModeToggle={props.showInteractionModeToggle}
             askModeSupported={props.askModeSupported}
+            autoModeUnavailableReason={props.autoModeUnavailableReason}
             traitsMenuContent={props.providerExtraTraitsMenuContent}
             onInteractionModeChange={props.onInteractionModeChange}
             onTogglePlanSidebar={props.onTogglePlanSidebar}
@@ -712,6 +738,7 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
             <ComposerFooterModeControls
               showInteractionModeToggle={props.showInteractionModeToggle}
               askModeSupported={props.askModeSupported}
+              autoModeUnavailableReason={props.autoModeUnavailableReason}
               interactionMode={props.interactionMode}
               runtimeMode={props.runtimeMode}
               tokenMode={props.tokenMode}
@@ -742,6 +769,7 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
           contextWindowRateLimitsCheckedAt={props.contextWindowRateLimitsCheckedAt}
           contextWindowAccount={props.contextWindowAccount}
           claudeCacheObservation={props.claudeCacheObservation}
+          compactNow={props.compactNow}
           pendingAction={props.pendingAction}
           isRunning={props.isRunning}
           showPlanFollowUpPrompt={props.showPlanFollowUpPrompt}
@@ -751,6 +779,7 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
           isEnvironmentUnavailable={props.isEnvironmentUnavailable}
           isPreparingWorktree={props.isPreparingWorktree}
           hasSendableContent={props.hasSendableContent}
+          sendRedirectsApproval={props.sendRedirectsApproval ?? false}
           sendDisabledReason={props.sendDisabledReason}
           sendsQueueUntilReady={props.sendsQueueUntilReady}
           mutationUnavailableReason={props.mutationUnavailableReason}

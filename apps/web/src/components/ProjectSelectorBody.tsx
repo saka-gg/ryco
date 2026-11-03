@@ -18,7 +18,7 @@ import {
   type RefObject,
 } from "react";
 
-import { openAddProjectWith } from "../commandPaletteStore";
+import { useCommandPaletteStore } from "../commandPaletteStore";
 import {
   buildChatDraftTarget,
   CHAT_PROJECT_LABEL,
@@ -329,7 +329,7 @@ export function ProjectSelectorBody(props: ProjectSelectorBodyProps) {
   const openAddProjectFromSelector = useCallback(() => {
     onClose();
     const environmentId = nodeFilter === "none" ? null : nodeFilter;
-    openAddProjectWith(environmentId ? { environmentId } : {});
+    useCommandPaletteStore.getState().openAddProject(environmentId ? { environmentId } : {});
   }, [nodeFilter, onClose]);
   const copyActiveProject = useCallback(() => {
     onClose();

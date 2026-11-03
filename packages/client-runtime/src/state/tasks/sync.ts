@@ -5,6 +5,7 @@ import type {
   LocalTaskChangePosition,
 } from "@ryco/contracts";
 
+import { isAuthRpcError } from "../../rpc/wsTransport.ts";
 import { createSingleFlightReader, type SingleFlightReader } from "../singleFlightReader.ts";
 import { delegatedThreadSignature } from "./logic.ts";
 import {
@@ -58,19 +59,6 @@ export const LOCAL_TASKS_FORBIDDEN_ERROR: LocalTasksError = {
   kind: "forbidden",
   message: "Only the node’s owner can use its tasks.",
 };
-
-/**
- * The node refused the call to this session (an `AuthRpcError`: the task
- * methods are owner-only). Read by tag, so the contracts root stays out of
- * this package's value imports.
- */
-function isAuthRpcError(cause: unknown): boolean {
-  return (
-    typeof cause === "object" &&
-    cause !== null &&
-    (cause as { readonly _tag?: unknown })._tag === "AuthRpcError"
-  );
-}
 
 /** The connected node has no such task method (it predates it). */
 export class LocalTasksUnsupportedError extends Error {

@@ -38,7 +38,19 @@ export class Socket extends Context.Service<Socket, SocketService>()(
   "@ryco/client-runtime/platform/Socket",
 ) {}
 
-export type AppLifecycleEvent = "background" | "foreground" | "offline" | "online" | "resume";
+/**
+ * `network-changed`: the device stayed online but its network path changed
+ * (Wi-Fi to cellular and back). Sockets opened on the old path are usually
+ * dead, though the OS reports no disconnect; platforms that cannot tell the
+ * path apart never emit it.
+ */
+export type AppLifecycleEvent =
+  | "background"
+  | "foreground"
+  | "network-changed"
+  | "offline"
+  | "online"
+  | "resume";
 
 /** Foreground/background, connectivity, and resume signals. */
 export interface AppLifecycleService {

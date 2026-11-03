@@ -7,7 +7,9 @@ import {
 import type {
   ClaudeResumeGuard,
   ComputerTurnIntent,
+  ModelSwitchBlockedByBackgroundWork,
   LocalTaskDelegateInput,
+  OptionalQuestionTurnAnswer,
   UsageLimitResumeGuard,
 } from "@ryco/contracts";
 import { rejectRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
@@ -28,10 +30,21 @@ import {
   type ThreadId,
 } from "@ryco/contracts/base-schemas";
 import { DEFAULT_MODEL } from "@ryco/contracts/model";
+import { PROVIDER_SEND_TURN_MAX_INPUT_CHARS } from "@ryco/contracts/orchestration";
 import { buildTemporaryWorktreeBranchName } from "@ryco/shared/git";
 import { createModelSelection } from "@ryco/shared/model";
+import { expandQuoteCitations } from "@ryco/shared/quoteCitations";
 import type { ComposerAttachment } from "../../platform/index.ts";
+import { startTurnPastBackgroundWork } from "./backgroundWorkModelSwitch.ts";
 import { isChatProjectRetiredError } from "./chatDrafts.ts";
+import { buildBrowserElementBlock } from "./browserElementReference.ts";
+import { type ComposerReference, splitComposerReferences } from "./composerReference.ts";
+import { buildFileReferenceBlock } from "./fileReference.ts";
+import {
+  buildTerminalContextBlock,
+  materializeInlineTerminalContextPrompt,
+  type TerminalContextSelection,
+} from "./terminalContext.ts";
 import { extractThreadReferences } from "./threadMentions.ts";
 
 export interface SendTurnBootstrapInput {
@@ -190,6 +203,59 @@ export const ATTACHMENT_ONLY_BOOTSTRAP_PROMPT =
 /** @deprecated Use `ATTACHMENT_ONLY_BOOTSTRAP_PROMPT`. */
 export const IMAGE_ONLY_BOOTSTRAP_PROMPT = ATTACHMENT_ONLY_BOOTSTRAP_PROMPT;
 
+export interface OutgoingPromptInput {
+  readonly prompt: string;
+  /**
+   * The draft's reference chips: file lines and picked page elements. The
+   * name predates page elements.
+   */
+  readonly fileReferences?: ReadonlyArray<ComposerReference> | undefined;
+  readonly terminalContexts?: ReadonlyArray<TerminalContextSelection> | undefined;
+}
+
+/**
+ * The text a prompt is sent as: the user's text with its quote tokens
+ * expanded into the `<assistant_quotes>` block, then the `<browser_context>`
+ * block, then the `<file_context>` block, then the `<terminal_context>` block,
+ * which stays last. The page-element block goes first so a client from before
+ * it still reads the file and terminal blocks after it (and shows only it as
+ * text). It travels in the ordinary text payload so every provider, the queue
+ * and send retries see the same context; `extractTrailingPromptContexts` reads
+ * it back. Inline terminal placeholders are resolved in the user's own text
+ * only: a file excerpt, a page element or a quote keeps a U+FFFC it contains.
+ * Every send composes here, once: web, desktop and mobile alike.
+ */
+export function composeOutgoingPrompt(input: OutgoingPromptInput): string {
+  const terminalContexts = input.terminalContexts ?? [];
+  const references = splitComposerReferences(input.fileReferences ?? []);
+  return [
+    expandQuoteCitations(
+      materializeInlineTerminalContextPrompt(input.prompt, terminalContexts).trim(),
+    ),
+    buildBrowserElementBlock(references.browserElements),
+    buildFileReferenceBlock(references.fileReferences),
+    buildTerminalContextBlock(terminalContexts),
+  ]
+    .filter((part) => part.length > 0)
+    .join("\n\n");
+}
+
+/**
+ * How many characters the prompt runs over what one turn may carry, as it is
+ * dispatched: composed, then formatted for the provider (an effort prefix);
+ * 0 within the limit. A quote chip counts as the quote and comment it sends.
+ */
+export function outgoingPromptOverflow(
+  input: OutgoingPromptInput & {
+    /** The provider's formatting of the composed text, as the send applies it. */
+    readonly format?: ((text: string) => string) | undefined;
+  },
+  limit: number = PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
+): number {
+  const composed = composeOutgoingPrompt(input);
+  return Math.max(0, (input.format ? input.format(composed) : composed).length - limit);
+}
+
 /**
  * Resolves the model selection recorded on a freshly created thread's
  * bootstrap: the composer's selection with its slug backfilled from the
@@ -285,11 +351,26 @@ export function buildSendTurnUploadTokenDispatchAttachment(input: {
 export interface CommitSendTurnDispatchInput {
   readonly claudeCacheReview?: ClaudeCacheReviewPresentation;
   /**
+   * Asked when the node refuses this send's model switch while the thread's
+   * background tasks run: true sends again so the switch ends them, false
+   * cancels (see `startTurnPastBackgroundWork`). Absent, the refusal is the
+   * send's outcome.
+   */
+  readonly confirmStopBackgroundWork?: (
+    blocked: ModelSwitchBlockedByBackgroundWork,
+  ) => Promise<boolean>;
+  /**
    * The thread as the client's live subscription holds it (undefined when it is not live or
    * not loaded). The Claude resume review is assessed from it first: a send that needs no
    * review then skips the review's thread read.
    */
   readonly readSubscribedClaudeReviewState?: () => SubscribedClaudeReviewState | undefined;
+  /**
+   * True when the user turned the Claude resume review off on this device ("Don't ask
+   * again"): the send continues unguarded, like one the review cleared, even without a
+   * presentation. Read when the review would run, so a change applies to the next send.
+   */
+  readonly skipClaudeResumeReview?: (() => boolean) | undefined;
   readonly providerDriver?: ProviderDriverKind | null;
   /** Known source session; null means no session, undefined means unavailable. */
   readonly sourceProviderDriver?: ProviderDriverKind | null | undefined;
@@ -328,16 +409,18 @@ export interface CommitSendTurnDispatchInput {
   readonly newCommandId: () => CommandId;
   readonly beginLocalDispatch: (options: { readonly preparingWorktree: boolean }) => void;
   /**
-   * Closes the local dispatch window while the Claude resume review holds the
-   * send, so the settled previous turn does not read as running behind the
-   * dialog. `beginLocalDispatch` reopens it right before the turn starts.
+   * Closes the local dispatch window while the Claude resume review or the
+   * "Stop tasks and switch" choice holds the send, so the settled previous turn
+   * does not read as running behind the dialog. `beginLocalDispatch` reopens it
+   * right before the turn starts.
    */
   readonly endLocalDispatch?: () => void;
   /**
    * Runs immediately before the final `thread.turn.start`: after the Claude
    * resume review (including any `/compact` turn and its wait), the settings
-   * writes and the readiness asserts. Not called when those throw, nor for a
-   * call that joins a pending send of the same message id.
+   * writes and the readiness asserts, and again before a turn start sent again
+   * past background work. Not called when those throw, nor for a call that
+   * joins a pending send of the same message id.
    */
   readonly onBeforeTurnStart?: () => void;
   readonly persistThreadSettingsForNextTurn: (input: {
@@ -356,6 +439,11 @@ export interface CommitSendTurnDispatchInput {
   readonly localTask?: {
     readonly delegate: (command: LocalTaskDelegateInput["command"]) => Promise<void>;
   };
+  /**
+   * The message answers a Codex optional question whose turn ended: the node records the
+   * question answered with it, or refuses the send when it already was.
+   */
+  readonly optionalAnswer?: OptionalQuestionTurnAnswer;
 }
 
 /**
@@ -417,7 +505,9 @@ async function commitSendTurnDispatchOnce(sendInput: CommitSendTurnDispatchInput
   input.beginLocalDispatch({ preparingWorktree: Boolean(input.bootstrap?.prepareWorktree) });
   input.onBeforeTurnStart?.();
   const startTurn = (bootstrap: SendTurnBootstrap, commandId: CommandId) =>
-    dispatchTurnStart(input, reviewed?.guard, bootstrap, commandId);
+    startTurnPastBackgroundWork(input, (retry) =>
+      dispatchTurnStart(input, reviewed?.guard, bootstrap, commandId, retry),
+    );
   try {
     await startTurn(
       input.bootstrap,
@@ -438,39 +528,103 @@ async function commitSendTurnDispatchOnce(sendInput: CommitSendTurnDispatchInput
   }
 }
 
-function dispatchTurnStart(
-  input: CommitSendTurnDispatchInput,
-  claudeResumeGuard: ClaudeResumeGuard | undefined,
-  bootstrap: SendTurnBootstrap,
-  commandId: CommandId,
-) {
-  const threadReferences = extractThreadReferences(input.outgoingMessageText, input.threadId);
-  const command: LocalTaskDelegateInput["command"] = {
+export interface TurnStartCommandInput {
+  readonly commandId: CommandId;
+  readonly threadId: ThreadId;
+  readonly messageId: MessageId;
+  /** The composed message text (`composeOutgoingPrompt`). */
+  readonly text: string;
+  readonly attachments: readonly SendTurnDispatchAttachment[];
+  readonly modelSelection: ModelSelection;
+  /** The prompt-derived title; the node may give a thread still titled so a generated one. */
+  readonly titleSeed: string;
+  readonly runtimeMode: RuntimeMode;
+  readonly interactionMode: ProviderInteractionMode;
+  /** Absent keeps the thread's own. */
+  readonly tokenMode?: AgentTokenMode | undefined;
+  readonly goal?: ThreadGoalUpdate | undefined;
+  readonly bootstrap?: SendTurnBootstrap;
+  readonly sourceControlContexts?: readonly ComposerSourceControlContext[] | undefined;
+  readonly computerUse?: ComputerTurnIntent | undefined;
+  readonly claudeResumeGuard?: ClaudeResumeGuard | undefined;
+  readonly usageLimitResumeGuard?: UsageLimitResumeGuard | undefined;
+  /** A turn start sent again past background work (see `startTurnPastBackgroundWork`). */
+  readonly retryPastBackgroundWork?: { readonly createdAt: string } | undefined;
+  readonly optionalAnswer?: OptionalQuestionTurnAnswer | undefined;
+  readonly createdAt: string;
+}
+
+/**
+ * The `thread.turn.start` command every client sends: web, desktop and mobile through
+ * `commitSendTurnDispatch`, and `ryco thread start|send`. Thread references are read from
+ * the text here, so no sender assembles the command by hand.
+ */
+export function buildTurnStartCommand(
+  input: TurnStartCommandInput,
+): LocalTaskDelegateInput["command"] {
+  const threadReferences = extractThreadReferences(input.text, input.threadId);
+  const sourceControlContexts = input.sourceControlContexts ?? [];
+  return {
     type: "thread.turn.start",
     ...(input.computerUse ? { computerUse: input.computerUse } : {}),
-    commandId,
-    ...(claudeResumeGuard ? { claudeResumeGuard } : {}),
+    commandId: input.commandId,
+    ...(input.claudeResumeGuard ? { claudeResumeGuard: input.claudeResumeGuard } : {}),
     ...(input.usageLimitResumeGuard ? { usageLimitResumeGuard: input.usageLimitResumeGuard } : {}),
     threadId: input.threadId,
     message: {
       messageId: input.messageId,
       role: "user",
-      text: input.outgoingMessageText,
-      attachments: input.turnAttachments,
+      text: input.text,
+      attachments: input.attachments,
     },
+    modelSelection: input.modelSelection,
+    titleSeed: input.titleSeed,
+    runtimeMode: input.runtimeMode,
+    interactionMode: input.interactionMode,
+    ...(input.tokenMode === undefined ? {} : { tokenMode: input.tokenMode }),
+    ...(input.goal ? { goal: input.goal } : {}),
+    ...(input.bootstrap ? { bootstrap: input.bootstrap } : {}),
+    ...(sourceControlContexts.length > 0 ? { sourceControlContexts } : {}),
+    ...(threadReferences.length > 0 ? { threadReferences } : {}),
+    ...(input.optionalAnswer ? { optionalAnswer: input.optionalAnswer } : {}),
+    // Every caller handles the node's refusal (the choice, a held queue message, or a failed
+    // send that keeps the draft), so each turn start asks for it until the user chose to stop.
+    ...(input.retryPastBackgroundWork
+      ? { stopBackgroundWork: true }
+      : { keepBackgroundWork: true }),
+    createdAt: input.retryPastBackgroundWork?.createdAt ?? input.createdAt,
+  };
+}
+
+function dispatchTurnStart(
+  input: CommitSendTurnDispatchInput,
+  claudeResumeGuard: ClaudeResumeGuard | undefined,
+  bootstrap: SendTurnBootstrap,
+  commandId: CommandId,
+  /** A turn start sent again past background work (see `startTurnPastBackgroundWork`). */
+  retryPastBackgroundWork: { readonly createdAt: string } | undefined,
+) {
+  const command = buildTurnStartCommand({
+    commandId,
+    threadId: input.threadId,
+    messageId: input.messageId,
+    text: input.outgoingMessageText,
+    attachments: input.turnAttachments,
     modelSelection: input.modelSelection,
     titleSeed: input.title,
     runtimeMode: input.runtimeMode,
     interactionMode: input.interactionMode,
     tokenMode: input.tokenMode,
-    ...(input.goal ? { goal: input.goal } : {}),
-    ...(bootstrap ? { bootstrap } : {}),
-    ...(input.sourceControlContexts.length > 0
-      ? { sourceControlContexts: input.sourceControlContexts }
-      : {}),
-    ...(threadReferences.length > 0 ? { threadReferences } : {}),
+    goal: input.goal,
+    bootstrap,
+    sourceControlContexts: input.sourceControlContexts,
+    computerUse: input.computerUse,
+    claudeResumeGuard,
+    usageLimitResumeGuard: input.usageLimitResumeGuard,
+    retryPastBackgroundWork,
+    optionalAnswer: input.optionalAnswer,
     createdAt: input.createdAt,
-  };
+  });
   return input.localTask
     ? input.localTask.delegate(command)
     : input.api.orchestration.dispatchCommand(command);

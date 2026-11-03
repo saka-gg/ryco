@@ -93,6 +93,29 @@ async function hydrateClientSettings(): Promise<void> {
   return hydrationPromise;
 }
 
+/**
+ * Saves a client settings patch and resolves once it is stored; rejects (and restores the
+ * previous settings) when it could not be. For callers that must know, such as an import that
+ * undoes its other writes on failure.
+ */
+export async function persistClientSettingsUpdate(patch: Partial<ClientSettings>): Promise<void> {
+  const previous = getClientSettingsSnapshot();
+  const next = { ...previous, ...patch };
+  replaceClientSettingsSnapshot(next);
+  try {
+    await ensureLocalApi().persistence.setClientSettings(next);
+  } catch (error) {
+    // Only the keys this write set, and only where nothing changed them meanwhile.
+    const latest = getClientSettingsSnapshot();
+    const restored = { ...latest };
+    for (const key of Object.keys(patch) as Array<keyof ClientSettings>) {
+      if (latest[key] === next[key]) Object.assign(restored, { [key]: previous[key] });
+    }
+    replaceClientSettingsSnapshot(restored);
+    throw error;
+  }
+}
+
 function persistClientSettings(settings: ClientSettings): void {
   replaceClientSettingsSnapshot(settings);
   void ensureLocalApi()
@@ -156,6 +179,19 @@ export function updateClientAutoSettleAfterDays(
   value: ClientSettings["sidebarAutoSettleAfterDays"],
 ): void {
   persistClientSettings({ ...getClientSettingsSnapshot(), sidebarAutoSettleAfterDays: value });
+}
+
+/** The Claude resume review on this device, written by the review's "Don't ask again". */
+export function updateClientClaudeResumeReview(enabled: boolean): void {
+  persistClientSettings({ ...getClientSettingsSnapshot(), claudeResumeReview: enabled });
+}
+
+/**
+ * `CommitSendTurnDispatchInput.skipClaudeResumeReview` for this device's sends: read at
+ * each send, so turning the review back on applies to the next one.
+ */
+export function isClaudeResumeReviewSkipped(): boolean {
+  return !getClientSettingsSnapshot().claudeResumeReview;
 }
 
 /**

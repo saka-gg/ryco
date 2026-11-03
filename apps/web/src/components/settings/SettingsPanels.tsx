@@ -11,12 +11,17 @@ import { OnboardingReplaySetting } from "../onboarding/OnboardingReplaySetting";
 import { SourceControlPreferences } from "./SourceControlPreferences";
 import { ComposerSettings } from "./ComposerSettings";
 import { QuitShortcutSetting } from "./QuitShortcutSetting";
+import { ThreadNotificationSettings } from "./ThreadNotificationSettings";
+import { WindowCaptureSettings } from "./WindowCaptureSettings";
+import { CliCommandSettings } from "./CliCommandSettings";
 import { UsageLimitSettings } from "./UsageLimitSettings";
-import { ArchiveIcon, ArchiveX, ChevronRightIcon, MessageCircleDashedIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { UsagePriceSettings } from "./UsagePriceSettings";
+import { ResponseStreamingSettings } from "./ResponseStreamingSettings";
+import { ApplyToAllNodes } from "./ApplyToAllNodes";
+import { ArchiveIcon, ArchiveX, MessageCircleDashedIcon } from "lucide-react";
+import { useCallback, useMemo, useState } from "react";
 import {
   ORCHESTRATION_WS_METHODS,
-  type DesktopUpdateChannel,
   EDITORS,
   type EditorId,
   type EnvironmentId,
@@ -24,7 +29,11 @@ import {
 } from "@ryco/contracts";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { CHAT_PROJECT_LABEL } from "@ryco/client-runtime/state/composer";
-import { DEFAULT_UNIFIED_SETTINGS, WorktreeBranchPrefix } from "@ryco/contracts/settings";
+import {
+  DEFAULT_UNIFIED_SETTINGS,
+  type ServerSettings,
+  WorktreeBranchPrefix,
+} from "@ryco/contracts/settings";
 import { APP_BASE_NAME, APP_VERSION } from "../../branding";
 import {
   canCheckForUpdate,
@@ -56,7 +65,6 @@ import {
 } from "../../store";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { Button } from "../ui/button";
-import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { DraftInput } from "../ui/draft-input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
@@ -69,15 +77,16 @@ import {
   SettingsPageContainer,
   SettingsRow,
   SettingsSection,
-  SettingsCard,
 } from "./settingsLayout";
 import { LifecycleSuggestionSettings } from "./LifecycleSettings";
 import { LIFECYCLE_RETENTION_COPY } from "@ryco/client-runtime/state/lifecycle";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { RycoLetterMark } from "../RycoLetterMark";
 import { useServerAvailableEditors, useServerObservability } from "../../rpc/serverState";
+import { describeDesktopUpdateTrack } from "./desktopUpdateTrack";
+import { NightlyAppSettings } from "./NightlyAppSettings";
 import { getEditorIcon, getEditorLabel } from "./SettingsPanels.editor";
-import { settingsScopeLabel } from "./settingsSections.logic";
+import { isNodeSettingsTargetReadOnly, settingsScopeLabel } from "./settingsSections.logic";
 import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
 
 const TIMESTAMP_FORMAT_LABELS = {
@@ -101,7 +110,12 @@ function AboutVersionTitle() {
   );
 }
 
-const REPOSITORY_URL = "https://github.com/sak0a/ryco";
+const REPOSITORY_URL = "https://github.com/saka-gg/ryco";
+
+const selectBranchChangeTypes = (settings: ServerSettings): boolean =>
+  settings.worktreeBranchChangeTypes;
+const formatBranchChangeTypes = (byType: boolean): string =>
+  byType ? "By change type" : "By prefix";
 
 function openExternalLink(url: string) {
   void ensureLocalApi()
@@ -130,7 +144,7 @@ function AboutBrandingHeader() {
             className="h-auto px-0 text-[11px] text-muted-foreground hover:text-foreground"
             onClick={() => openExternalLink(REPOSITORY_URL)}
           >
-            github.com/sak0a/ryco
+            github.com/saka-gg/ryco
           </Button>
         </p>
       </div>
@@ -140,43 +154,11 @@ function AboutBrandingHeader() {
 
 function AboutVersionSection({ scopeLabel }: { readonly scopeLabel: string }) {
   const updateState = useDesktopUpdateState();
-  const [isChangingUpdateChannel, setIsChangingUpdateChannel] = useState(false);
 
-  const hasDesktopBridge = typeof window !== "undefined" && Boolean(window.desktopBridge);
-  const selectedUpdateChannel = updateState?.channel ?? "latest";
-
-  const handleUpdateChannelChange = useCallback(
-    (channel: DesktopUpdateChannel) => {
-      const bridge = window.desktopBridge;
-      if (
-        !bridge ||
-        typeof bridge.setUpdateChannel !== "function" ||
-        channel === selectedUpdateChannel
-      ) {
-        return;
-      }
-
-      setIsChangingUpdateChannel(true);
-      void bridge
-        .setUpdateChannel(channel)
-        .then((state) => {
-          setDesktopUpdateState(state);
-        })
-        .catch((error: unknown) => {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not change update track",
-              description: error instanceof Error ? error.message : "Update track change failed.",
-            }),
-          );
-        })
-        .finally(() => {
-          setIsChangingUpdateChannel(false);
-        });
-    },
-    [selectedUpdateChannel],
-  );
+  const updateTrack = describeDesktopUpdateTrack({
+    channel: updateState?.channel ?? "latest",
+    currentVersion: updateState?.currentVersion ?? "",
+  });
 
   const handleButtonClick = useCallback(() => {
     const bridge = window.desktopBridge;
@@ -302,34 +284,9 @@ function AboutVersionSection({ scopeLabel }: { readonly scopeLabel: string }) {
       />
       <SettingsRow
         title="Update track"
-        description="Stable follows full releases. Nightly follows the nightly desktop channel and can switch back to stable immediately."
+        description={updateTrack.description}
         scope={scopeLabel}
-        control={
-          <Select
-            value={selectedUpdateChannel}
-            onValueChange={(value) => {
-              handleUpdateChannelChange(value as DesktopUpdateChannel);
-            }}
-          >
-            <SelectTrigger
-              className="w-full sm:w-40"
-              aria-label="Update track"
-              disabled={!hasDesktopBridge || isChangingUpdateChannel}
-            >
-              <SelectValue>
-                {selectedUpdateChannel === "nightly" ? "Nightly" : "Stable"}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectPopup align="end" alignItemWithTrigger={false}>
-              <SelectItem hideIndicator value="latest">
-                Stable
-              </SelectItem>
-              <SelectItem hideIndicator value="nightly">
-                Nightly
-              </SelectItem>
-            </SelectPopup>
-          </Select>
-        }
+        control={<span className="text-sm text-muted-foreground">{updateTrack.label}</span>}
       />
     </>
   );
@@ -360,115 +317,21 @@ export function useSettingsRestore(onRestored?: () => void) {
   };
 }
 
-function LegacyFeaturesSection({
-  searchTargetId,
-  nodeScopeLabel,
-}: {
-  searchTargetId: string | null;
-  nodeScopeLabel: string;
-}) {
-  const settings = useSettings();
-  const { updateSettings } = useUpdateSettings();
-  const targeted = searchTargetId === "legacy-token-streaming";
-  const [open, setOpen] = useState(targeted);
-  const tokenStreamingRowRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!targeted) return;
-    setOpen(true);
-    const frame = requestAnimationFrame(() => {
-      tokenStreamingRowRef.current?.scrollIntoView({ block: "center" });
-      tokenStreamingRowRef.current?.querySelector<HTMLElement>("[role=switch]")?.focus();
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [targeted]);
-
-  return (
-    <section data-settings-section="Legacy features" className="min-w-0 scroll-mt-6">
-      <Collapsible open={open} onOpenChange={setOpen}>
-        <CollapsibleTrigger className="group flex w-full items-center justify-between gap-3 rounded-[min(var(--radius-md),0.5rem)] px-0.5 py-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50">
-          <span className="min-w-0">
-            <span className="block text-[13px] font-semibold text-foreground">Legacy features</span>
-            <span className="block text-xs text-muted-foreground">
-              Compatibility controls you shouldn&apos;t normally need.
-            </span>
-          </span>
-          <ChevronRightIcon
-            aria-hidden
-            className="size-4 text-muted-foreground transition-transform duration-(--app-motion-duration-chip) group-data-panel-open:rotate-90"
-          />
-        </CollapsibleTrigger>
-        <CollapsiblePanel>
-          <div className="pt-2.5">
-            <SettingsCard>
-              <div ref={tokenStreamingRowRef} id="legacy-token-streaming">
-                <SettingsRow
-                  title="Stream token by token (legacy)"
-                  description="Paint assistant output token by token instead of in complete chunks. This legacy mode is significantly slower and makes long responses harder to follow."
-                  owner="node"
-                  scope={nodeScopeLabel}
-                  resetAction={
-                    settings.enableLegacyTokenStreaming !==
-                    DEFAULT_UNIFIED_SETTINGS.enableLegacyTokenStreaming ? (
-                      <SettingResetButton
-                        label="legacy token streaming"
-                        onClick={() =>
-                          updateSettings({
-                            enableLegacyTokenStreaming:
-                              DEFAULT_UNIFIED_SETTINGS.enableLegacyTokenStreaming,
-                          })
-                        }
-                      />
-                    ) : null
-                  }
-                  control={
-                    <Switch
-                      checked={settings.enableLegacyTokenStreaming}
-                      onCheckedChange={(checked) => {
-                        if (!checked) {
-                          updateSettings({ enableLegacyTokenStreaming: false });
-                          return;
-                        }
-                        void (async () => {
-                          const api = readLocalApi();
-                          const confirmed = await (api ?? ensureLocalApi()).dialogs.confirm(
-                            [
-                              "Turn on token-by-token output?",
-                              "It is significantly slower than buffered output and makes long responses harder to follow. This switch exists only for backwards compatibility.",
-                            ].join("\n"),
-                          );
-                          if (confirmed) {
-                            updateSettings({
-                              enableLegacyTokenStreaming: true,
-                            });
-                          }
-                        })();
-                      }}
-                      aria-label="Stream token by token (legacy)"
-                    />
-                  }
-                />
-              </div>
-            </SettingsCard>
-          </div>
-        </CollapsiblePanel>
-      </Collapsible>
-    </section>
-  );
-}
-
-export function GeneralSettingsPanel({
-  searchTargetId = null,
-}: {
-  searchTargetId?: string | null;
-}) {
+export function GeneralSettingsPanel() {
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
   const isPhoneTier = usePresentationTier() === "phone";
+  const serverConfig = useServerConfig();
   const supportsProjectPreferences =
-    useServerConfig()?.environment.capabilities.projectPreferences === true;
+    serverConfig?.environment.capabilities.projectPreferences === true;
+  const supportsAgentProcessPriority =
+    serverConfig?.environment.capabilities.agentProcessPriority === true;
   const settingsTarget = useSettingsTarget();
   const editingScope = useSettingsEditingScope();
+  // As for usage-limit recovery: an older node would drop the key, and client-only editing or an
+  // unreachable or read-only node cannot change it.
+  const agentProcessPriorityDisabled =
+    !supportsAgentProcessPriority || isNodeSettingsTargetReadOnly(editingScope, settingsTarget);
   const appLabel = useAppPreferencesLabel();
   const scopeOptions = {
     appLabel,
@@ -577,7 +440,7 @@ export function GeneralSettingsPanel({
                 }
               }}
             >
-              <SelectTrigger className="w-full sm:w-40" aria-label="Timestamp format">
+              <SelectTrigger size="sm" className="w-full sm:w-40" aria-label="Timestamp format">
                 <SelectValue>{TIMESTAMP_FORMAT_LABELS[settings.timestampFormat]}</SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>
@@ -628,7 +491,7 @@ export function GeneralSettingsPanel({
                 if (match) updateSettings({ preferredEditor: match.id as EditorId });
               }}
             >
-              <SelectTrigger className="w-full sm:w-56" aria-label="Default editor">
+              <SelectTrigger size="sm" className="w-full sm:w-56" aria-label="Default editor">
                 {settings.preferredEditor ? (
                   <EditorOptionIcon editor={settings.preferredEditor} />
                 ) : null}
@@ -663,6 +526,7 @@ export function GeneralSettingsPanel({
         />
       </SettingsSection>
       {isPhoneTier && <SourceControlPreferences />}
+      {!isPhoneTier && <ResponseStreamingSettings />}
       <SettingsSection title="Provider updates" owner="node">
         <SettingsRow
           title="Provider update checks"
@@ -693,7 +557,47 @@ export function GeneralSettingsPanel({
           }
         />
       </SettingsSection>
+      {!isPhoneTier && (
+        <SettingsSection title="Agent processes" owner="node">
+          <SettingsRow
+            title="Lower agent CPU priority"
+            description="Run agents and everything they start (tests, builds, browsers) at a lower CPU priority, so Ryco, its UI and Git stay responsive when agents load this machine. Applies to agents started after the change (OpenCode: when its shared server restarts)."
+            owner="node"
+            scope={nodeScopeLabel}
+            status={
+              supportsAgentProcessPriority
+                ? undefined
+                : "This node does not support agent priority. Update the node to change this setting."
+            }
+            resetAction={
+              !agentProcessPriorityDisabled &&
+              settings.lowerAgentProcessPriority !==
+                DEFAULT_UNIFIED_SETTINGS.lowerAgentProcessPriority ? (
+                <SettingResetButton
+                  label="lower agent CPU priority"
+                  onClick={() =>
+                    updateSettings({
+                      lowerAgentProcessPriority: DEFAULT_UNIFIED_SETTINGS.lowerAgentProcessPriority,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                checked={settings.lowerAgentProcessPriority}
+                disabled={agentProcessPriorityDisabled}
+                onCheckedChange={(checked) =>
+                  updateSettings({ lowerAgentProcessPriority: Boolean(checked) })
+                }
+                aria-label="Lower agent CPU priority"
+              />
+            }
+          />
+        </SettingsSection>
+      )}
       {!isPhoneTier && <UsageLimitSettings />}
+      {!isPhoneTier && <UsagePriceSettings />}
       {!isPhoneTier && editingScope !== "node" && <ComposerSettings />}
       {!isPhoneTier && <ProjectDefaultsSection />}
       {!isPhoneTier && <StorageSettings />}
@@ -726,7 +630,11 @@ export function GeneralSettingsPanel({
                     }
                   }}
                 >
-                  <SelectTrigger className="w-full sm:w-44" aria-label="Default thread mode">
+                  <SelectTrigger
+                    size="sm"
+                    className="w-full sm:w-44"
+                    aria-label="Default thread mode"
+                  >
                     <SelectValue>
                       {settings.defaultThreadEnvMode === "worktree" ? "New worktree" : "Local"}
                     </SelectValue>
@@ -787,39 +695,47 @@ export function GeneralSettingsPanel({
                 }
               />
             )}
-
-            {!isPhoneTier && (
-              <SettingsRow
-                title="Name branches by change type"
-                description="Generated worktree branches start with the kind of change, such as fix/ or feat/, instead of the prefix. The prefix still names a new worktree's temporary branch until its first message is named."
-                owner="node"
-                scope={nodeScopeLabel}
-                resetAction={
-                  settings.worktreeBranchChangeTypes !==
-                  DEFAULT_UNIFIED_SETTINGS.worktreeBranchChangeTypes ? (
-                    <SettingResetButton
-                      label="change type branch names"
-                      onClick={() =>
-                        updateSettings({
-                          worktreeBranchChangeTypes:
-                            DEFAULT_UNIFIED_SETTINGS.worktreeBranchChangeTypes,
-                        })
-                      }
-                    />
-                  ) : null
-                }
-                control={
-                  <Switch
-                    checked={settings.worktreeBranchChangeTypes}
-                    onCheckedChange={(checked) =>
-                      updateSettings({ worktreeBranchChangeTypes: Boolean(checked) })
-                    }
-                    aria-label="Name worktree branches by change type"
-                  />
-                }
-              />
-            )}
           </>
+        )}
+
+        {/* Every node has it, also one with project defaults, where a project may override it. */}
+        {!isPhoneTier && (
+          <SettingsRow
+            title="Name branches by change type"
+            description="Generated worktree branches start with the kind of change, such as fix/ or feat/, instead of the prefix. The prefix still names a new worktree's temporary branch until its first message is named."
+            owner="node"
+            scope={nodeScopeLabel}
+            status={
+              <ApplyToAllNodes
+                label="change type branch names"
+                select={selectBranchChangeTypes}
+                format={formatBranchChangeTypes}
+                patch={{ worktreeBranchChangeTypes: settings.worktreeBranchChangeTypes }}
+              />
+            }
+            resetAction={
+              settings.worktreeBranchChangeTypes !==
+              DEFAULT_UNIFIED_SETTINGS.worktreeBranchChangeTypes ? (
+                <SettingResetButton
+                  label="change type branch names"
+                  onClick={() =>
+                    updateSettings({
+                      worktreeBranchChangeTypes: DEFAULT_UNIFIED_SETTINGS.worktreeBranchChangeTypes,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                checked={settings.worktreeBranchChangeTypes}
+                onCheckedChange={(checked) =>
+                  updateSettings({ worktreeBranchChangeTypes: Boolean(checked) })
+                }
+                aria-label="Name worktree branches by change type"
+              />
+            }
+          />
         )}
 
         {!isPhoneTier && (
@@ -970,50 +886,15 @@ export function GeneralSettingsPanel({
           }
         />
       </SettingsSection>
-      {isElectron && (
-        <SettingsSection title="Notifications" owner="client">
-          <SettingsRow
-            title="Turn-complete notifications"
-            description="Show a desktop notification when an agent finishes a turn while the Ryco window is unfocused."
-            owner="client"
-            scope={deviceScopeLabel}
-            resetAction={
-              settings.notifyOnTurnCompleteWhenUnfocused !==
-              DEFAULT_UNIFIED_SETTINGS.notifyOnTurnCompleteWhenUnfocused ? (
-                <SettingResetButton
-                  label="turn-complete notifications"
-                  onClick={() =>
-                    updateSettings({
-                      notifyOnTurnCompleteWhenUnfocused:
-                        DEFAULT_UNIFIED_SETTINGS.notifyOnTurnCompleteWhenUnfocused,
-                    })
-                  }
-                />
-              ) : null
-            }
-            control={
-              <Switch
-                checked={settings.notifyOnTurnCompleteWhenUnfocused}
-                onCheckedChange={(checked) =>
-                  updateSettings({
-                    notifyOnTurnCompleteWhenUnfocused: Boolean(checked),
-                  })
-                }
-                aria-label="Notify when a turn completes while unfocused"
-              />
-            }
-          />
-        </SettingsSection>
+      {!isPhoneTier && editingScope !== "node" && (
+        <ThreadNotificationSettings scope={deviceScopeLabel} />
       )}
 
-      {!isPhoneTier
-        ? editingScope !== "client" && (
-            <LegacyFeaturesSection
-              searchTargetId={searchTargetId}
-              nodeScopeLabel={nodeScopeLabel}
-            />
-          )
-        : null}
+      {!isPhoneTier && editingScope !== "node" && (
+        <WindowCaptureSettings scope={deviceScopeLabel} />
+      )}
+
+      {!isPhoneTier && editingScope !== "node" && <CliCommandSettings scope={deviceScopeLabel} />}
 
       <SettingsSection title="About">
         {editingScope !== "node" && <AboutBrandingHeader />}
@@ -1026,6 +907,9 @@ export function GeneralSettingsPanel({
             owner="client"
             scope={localScopeLabel}
           />
+        )}
+        {isElectron && !isPhoneTier && editingScope !== "node" && (
+          <NightlyAppSettings scope={deviceScopeLabel} />
         )}
         <SettingsRow
           title="Diagnostics"

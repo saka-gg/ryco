@@ -37,10 +37,19 @@ const FOCUS_AFTER_UNFOLD_MS = 160;
 
 interface OmnifieldToken {
   readonly key: string;
-  readonly kind: "machine" | "status";
+  readonly kind: "machine" | "project" | "status";
   readonly label: string;
   readonly online: boolean;
 }
+
+/** Tokens keep this order whichever was added first, leaving ones included. */
+const TOKEN_ORDER: Record<OmnifieldToken["kind"], number> = { machine: 0, project: 1, status: 2 };
+
+const TOKEN_TONE: Record<OmnifieldToken["kind"], string> = {
+  machine: "bg-sky-500/12 text-sky-700 dark:bg-sky-400/14 dark:text-sky-300",
+  project: "bg-violet-500/12 text-violet-700 dark:bg-violet-400/14 dark:text-violet-300",
+  status: "bg-amber-500/14 text-amber-700 dark:bg-amber-400/13 dark:text-amber-300",
+};
 
 export interface SidebarOmnifieldProps {
   readonly mode: SidebarMode;
@@ -61,6 +70,8 @@ export function SidebarOmnifield(props: SidebarOmnifieldProps) {
   const setInboxDraft = useInboxFilterStore((store) => store.setDraft);
   const environmentId = useInboxFilterStore((store) => store.environmentId);
   const setEnvironmentId = useInboxFilterStore((store) => store.setEnvironmentId);
+  const project = useInboxFilterStore((store) => store.project);
+  const setProject = useInboxFilterStore((store) => store.setProject);
   const status = useInboxFilterStore((store) => store.status);
   const setStatus = useInboxFilterStore((store) => store.setStatus);
   const matchCount = useInboxFilterStore((store) => store.matchCount);
@@ -145,12 +156,20 @@ export function SidebarOmnifield(props: SidebarOmnifieldProps) {
         online: machine?.online ?? false,
       });
     }
+    if (project) {
+      next.push({
+        key: `project:${project.logicalKey}`,
+        kind: "project",
+        label: project.label,
+        online: false,
+      });
+    }
     if (status !== "all") {
       const label = INBOX_STATUS_OPTIONS.find((option) => option.value === status)?.label ?? status;
       next.push({ key: `status:${status}`, kind: "status", label, online: false });
     }
     return next;
-  }, [environmentId, machines, mode, status]);
+  }, [environmentId, machines, mode, project, status]);
   const leavingTokens = useLeavingTokens(tokens, !prefersReducedMotion);
   const filterCount = tokens.length;
 
@@ -208,6 +227,7 @@ export function SidebarOmnifield(props: SidebarOmnifieldProps) {
 
   const removeToken = (token: OmnifieldToken) => {
     if (token.kind === "machine") setEnvironmentId(null);
+    else if (token.kind === "project") setProject(null);
     else setStatus("all");
     setArmed(false);
   };
@@ -288,7 +308,7 @@ export function SidebarOmnifield(props: SidebarOmnifieldProps) {
               data-tokens={tokens.length > 0}
               data-typing={typing}
               onPointerDown={onFieldPointerDown}
-              className="sidebar-fold-item sidebar-fold-field flex cursor-text items-center gap-[3px] overflow-hidden rounded-[10px] border border-input bg-foreground/[0.035] focus-within:border-ring focus-within:bg-foreground/5 focus-within:shadow-[0_0_0_3px_color-mix(in_srgb,var(--ring)_18%,transparent)]"
+              className="sidebar-fold-item sidebar-fold-field flex cursor-text items-center gap-[3px] overflow-hidden rounded-full border border-input bg-foreground/[0.035] focus-within:border-ring focus-within:bg-foreground/5 focus-within:shadow-[0_0_0_3px_color-mix(in_srgb,var(--ring)_18%,transparent)]"
               data-testid="sidebar-omnifield"
             />
           }
@@ -301,7 +321,7 @@ export function SidebarOmnifield(props: SidebarOmnifieldProps) {
                 { "aria-hidden": true, tabIndex: -1 })}
             data-on={filterCount > 0}
             onClick={onLeadClick}
-            className="sidebar-omnifield-lead relative grid h-[22px] w-6 shrink-0 place-items-center rounded-[6px] text-muted-foreground/75 outline-none transition-colors duration-(--app-motion-duration-chip) hover:bg-sidebar-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring aria-expanded:bg-sidebar-accent aria-expanded:text-foreground data-[on=true]:text-foreground"
+            className="sidebar-omnifield-lead relative grid size-[22px] shrink-0 place-items-center rounded-full text-muted-foreground/75 outline-none transition-colors duration-(--app-motion-duration-chip) hover:bg-sidebar-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring aria-expanded:bg-sidebar-accent aria-expanded:text-foreground data-[on=true]:text-foreground"
           >
             <span className="sidebar-omnifield-icon" data-shown={mode === "inbox"}>
               <svg
@@ -333,9 +353,7 @@ export function SidebarOmnifield(props: SidebarOmnifieldProps) {
           </button>
           <span className="sidebar-omnifield-tokens flex min-w-0 max-w-[calc(100%-40px)] shrink gap-[3px] overflow-hidden">
             {[...tokens, ...leavingTokens.list]
-              .toSorted((left, right) =>
-                left.kind === right.kind ? 0 : left.kind === "machine" ? -1 : 1,
-              )
+              .toSorted((left, right) => TOKEN_ORDER[left.kind] - TOKEN_ORDER[right.kind])
               .map((token) => {
                 const leaving = !tokens.includes(token);
                 return (
@@ -350,16 +368,17 @@ export function SidebarOmnifield(props: SidebarOmnifieldProps) {
                     onClick={() => removeToken(token)}
                     onAnimationEnd={leaving ? () => leavingTokens.done(token) : undefined}
                     className={cn(
-                      "sidebar-omnifield-token inline-flex h-5 min-w-0 shrink items-center gap-1 overflow-hidden whitespace-nowrap rounded-[6px] px-1.5 text-[10.5px] outline-none",
-                      token.kind === "machine"
-                        ? "bg-sky-500/12 text-sky-700 dark:bg-sky-400/14 dark:text-sky-300"
-                        : "bg-amber-500/14 text-amber-700 dark:bg-amber-400/13 dark:text-amber-300",
+                      "sidebar-omnifield-token inline-flex h-5 min-w-0 shrink items-center gap-1 overflow-hidden whitespace-nowrap rounded-full px-2 text-[10.5px] outline-none",
+                      // A status label is short and has no ellipsis: the named
+                      // tokens shrink instead, so it is never cut mid-word.
+                      token.kind === "status" && "shrink-0",
+                      TOKEN_TONE[token.kind],
                     )}
                   >
                     {token.kind === "machine" ? <MachineDot online={token.online} /> : null}
                     <span
                       className={
-                        token.kind === "machine" ? "sidebar-omnifield-token-label" : undefined
+                        token.kind === "status" ? undefined : "sidebar-omnifield-token-label"
                       }
                     >
                       {token.label}
@@ -440,7 +459,7 @@ export function SidebarOmnifield(props: SidebarOmnifieldProps) {
         inert={!menuVisible}
         // Keep focus in the field while choosing.
         onPointerDown={(event) => event.preventDefault()}
-        className="sidebar-omnifield-menu rounded-xl border border-foreground/10 bg-popover p-1 text-popover-foreground shadow-[0_16px_40px_-16px_rgba(0,0,0,0.8),0_2px_8px_rgba(0,0,0,0.4)]"
+        className="sidebar-omnifield-menu rounded-lg border bg-popover p-1 text-popover-foreground shadow-[0_16px_40px_-16px_rgba(0,0,0,0.8),0_2px_8px_rgba(0,0,0,0.4)]"
       >
         {keyedRows.map(({ key, row, optionIndex }) =>
           row.type === "option" ? (
@@ -517,7 +536,7 @@ function SuggestionChrome({
         </div>
       );
     case "separator":
-      return <div role="separator" className="mx-1.5 my-1 h-px bg-foreground/7" />;
+      return <div role="separator" className="mx-2 my-1 h-px bg-foreground/7" />;
     case "hint":
       return (
         <div
@@ -552,7 +571,7 @@ function SuggestionOption(props: {
       onPointerMove={props.onHighlight}
       onClick={props.onChoose}
       className={cn(
-        "flex h-[26px] cursor-pointer items-center gap-2 rounded-[7px] px-2 text-xs data-[highlighted=true]:bg-sidebar-accent",
+        "flex h-[26px] cursor-pointer items-center gap-2 rounded-sm px-2 text-xs data-[highlighted=true]:bg-sidebar-accent",
         everywhere ? "text-foreground" : "text-foreground/86",
       )}
     >

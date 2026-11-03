@@ -5,15 +5,19 @@ import {
   TurnId,
   type OrchestrationThreadActivity,
 } from "@ryco/contracts";
+import { FAST_MODE_STATE_ACTIVITY_KIND } from "@ryco/shared/claudeFastMode";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   contextHandoffStatusSuffix,
   CWD_RELOCATION_HANDOFF_COPY,
-  cwdRelocationHandoffAccessibleLabel,
-  cwdRelocationHandoffHeadline,
-  cwdRelocationHandoffRetryHint,
   isCwdRelocationHandoff,
+  isModelChangeHandoff,
+  NATIVE_HISTORY_UNAVAILABLE_HANDOFF_COPY,
+  resumeFallbackHandoffAccessibleLabel,
+  resumeFallbackHandoffCopy,
+  resumeFallbackHandoffHeadline,
+  resumeFallbackHandoffRetryHint,
 } from "./contextHandoff.ts";
 import {
   deriveCompletionDividerBeforeEntryId,
@@ -141,6 +145,38 @@ describe("derivePendingApprovals", () => {
         requestKind: "command",
         createdAt: "2026-02-23T00:00:01.000Z",
         detail: "bun run lint",
+      },
+    ]);
+  });
+
+  it("carries the asking turn, the provider's reason and a refused session grant", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "approval-open-reason",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "approval.requested",
+        summary: "Command approval requested",
+        tone: "approval",
+        turnId: "turn-asking",
+        payload: {
+          requestId: "req-reason",
+          requestKind: "command",
+          detail: "Bash: git push",
+          reason: "Pushing needs your confirmation",
+          acceptForSessionOffered: false,
+        },
+      }),
+    ];
+
+    expect(derivePendingApprovals(activities)).toEqual([
+      {
+        requestId: "req-reason",
+        requestKind: "command",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        turnId: "turn-asking",
+        detail: "Bash: git push",
+        reason: "Pushing needs your confirmation",
+        acceptForSessionOffered: false,
       },
     ]);
   });
@@ -2158,6 +2194,23 @@ describe("deriveWorkLogEntries context window handling", () => {
     expect(entries[0]?.label).toBe("Ran command");
   });
 
+  it("never turns a Fast mode state into a work log row", () => {
+    const fastModeState = makeActivity({
+      id: "claude-fast-mode:thread-1:state",
+      kind: FAST_MODE_STATE_ACTIVITY_KIND,
+      summary: "Fast mode state",
+      tone: "info",
+      payload: { state: "off", disabledReason: "not_first_party" },
+    });
+    // A fresh thread: no turn yet, so turn-less activities are not filtered by turn.
+    expect(deriveWorkLogEntries([fastModeState], undefined)).toEqual([]);
+    expect(
+      deriveWorkLogEntries([fastModeState], undefined, { agentTimeline: true }).map(
+        (entry) => entry.id,
+      ),
+    ).toEqual([]);
+  });
+
   it("excludes context compaction activities from the work log", () => {
     const entries = deriveWorkLogEntries(
       [
@@ -2327,32 +2380,62 @@ describe("deriveWorkLogEntries context window handling", () => {
           reason: "cwd-relocation",
         }),
       }),
+      makeActivity({
+        id: "handoff-history-gone",
+        createdAt: "2026-02-23T00:00:03.000Z",
+        kind: "context-handoff",
+        summary: "Context handoff",
+        tone: "info",
+        payload: contextHandoffPayload("consumed", {
+          handoffId: "handoff-history-gone",
+          reason: "native-history-unavailable",
+        }),
+      }),
     ]);
 
-    expect(entries).toHaveLength(2);
+    expect(entries).toHaveLength(3);
     expect(entries[0]).not.toHaveProperty("reason");
     expect(entries[1]?.reason).toBe("cwd-relocation");
-    expect(entries.map(isCwdRelocationHandoff)).toEqual([false, true]);
+    expect(entries[2]?.reason).toBe("native-history-unavailable");
+    expect(entries.map(isCwdRelocationHandoff)).toEqual([false, true, false]);
+    expect(entries.map(resumeFallbackHandoffCopy)).toEqual([
+      null,
+      CWD_RELOCATION_HANDOFF_COPY,
+      NATIVE_HISTORY_UNAVAILABLE_HANDOFF_COPY,
+    ]);
+    // A fresh session on the same model is not a model change.
+    expect(entries.map(isModelChangeHandoff)).toEqual([true, false, false]);
     expect(isCwdRelocationHandoff({ reason: "model-change" })).toBe(false);
+    expect(resumeFallbackHandoffCopy({ reason: "model-change" })).toBeNull();
+    expect(resumeFallbackHandoffCopy({ reason: "fork" })).toBeNull();
   });
 
-  it("names a relocation by its outcome, not by a model transition", () => {
-    expect(cwdRelocationHandoffHeadline("consumed")).toBe(
+  it("names a resume fallback by its outcome, not by a model transition", () => {
+    expect(resumeFallbackHandoffHeadline(CWD_RELOCATION_HANDOFF_COPY, "consumed")).toBe(
       "Continued in a fresh session in the new folder",
     );
-    expect(cwdRelocationHandoffHeadline("failed")).toBe(CWD_RELOCATION_HANDOFF_COPY.attempted);
-    expect(cwdRelocationHandoffHeadline("delivery-uncertain")).toBe(
+    expect(resumeFallbackHandoffHeadline(CWD_RELOCATION_HANDOFF_COPY, "failed")).toBe(
       CWD_RELOCATION_HANDOFF_COPY.attempted,
+    );
+    expect(resumeFallbackHandoffHeadline(CWD_RELOCATION_HANDOFF_COPY, "delivery-uncertain")).toBe(
+      CWD_RELOCATION_HANDOFF_COPY.attempted,
+    );
+    expect(resumeFallbackHandoffHeadline(NATIVE_HISTORY_UNAVAILABLE_HANDOFF_COPY, "consumed")).toBe(
+      "Continued in a fresh session",
+    );
+    expect(resumeFallbackHandoffHeadline(NATIVE_HISTORY_UNAVAILABLE_HANDOFF_COPY, "failed")).toBe(
+      "Fresh session",
     );
   });
 
-  it("describes a relocation divider for screen readers, with a retry hint only on failure", () => {
+  it("describes a resume-fallback divider for screen readers, with a retry hint only on failure", () => {
     const relocation = { reason: "cwd-relocation" as const };
-    expect(cwdRelocationHandoffAccessibleLabel({ ...relocation, status: "consumed" })).toBe(
+    const copy = CWD_RELOCATION_HANDOFF_COPY;
+    expect(resumeFallbackHandoffAccessibleLabel(copy, { ...relocation, status: "consumed" })).toBe(
       "Continued in a fresh session in the new folder",
     );
     expect(
-      cwdRelocationHandoffAccessibleLabel({
+      resumeFallbackHandoffAccessibleLabel(copy, {
         ...relocation,
         status: "failed",
         error: "Provider exited",
@@ -2361,16 +2444,23 @@ describe("deriveWorkLogEntries context window handling", () => {
       "Fresh session in the new folder. Failed: Provider exited. Send your message again to retry",
     );
     expect(
-      cwdRelocationHandoffAccessibleLabel({ ...relocation, status: "delivery-uncertain" }),
+      resumeFallbackHandoffAccessibleLabel(copy, { ...relocation, status: "delivery-uncertain" }),
     ).toBe("Fresh session in the new folder. Delivery uncertain");
+    expect(
+      resumeFallbackHandoffAccessibleLabel(NATIVE_HISTORY_UNAVAILABLE_HANDOFF_COPY, {
+        reason: "native-history-unavailable",
+        status: "delivery-uncertain",
+      }),
+    ).toBe("Fresh session. Delivery uncertain");
 
-    expect(cwdRelocationHandoffRetryHint({ ...relocation, status: "failed" })).toBe(
+    expect(resumeFallbackHandoffRetryHint(copy, { ...relocation, status: "failed" })).toBe(
       CWD_RELOCATION_HANDOFF_COPY.retryHint,
     );
-    expect(cwdRelocationHandoffRetryHint({ ...relocation, status: "consumed" })).toBeNull();
-    // A model change, even one recorded before handoffs carried a reason, offers no retry.
-    expect(cwdRelocationHandoffRetryHint({ status: "failed" })).toBeNull();
-    expect(cwdRelocationHandoffRetryHint({ status: "failed", reason: "model-change" })).toBeNull();
+    expect(resumeFallbackHandoffRetryHint(copy, { ...relocation, status: "consumed" })).toBeNull();
+    // An unconfirmed delivery is never sent again, so it offers no retry.
+    expect(
+      resumeFallbackHandoffRetryHint(copy, { ...relocation, status: "delivery-uncertain" }),
+    ).toBeNull();
   });
 
   it("names how an unfinished handoff ended", () => {
@@ -2635,5 +2725,186 @@ describe("deriveActiveWorkStartedAt", () => {
         "2026-02-27T21:11:00.000Z",
       ),
     ).toBe("2026-02-27T21:11:00.000Z");
+  });
+});
+
+describe("user input exchanges", () => {
+  const askActivity = (id: string, requestId: string, turnId: string, second: number) =>
+    makeActivity({
+      id,
+      createdAt: `2026-02-23T00:00:${String(second).padStart(2, "0")}.000Z`,
+      kind: "user-input.requested",
+      summary: "User input requested",
+      tone: "info",
+      turnId,
+      payload: {
+        requestId,
+        userInputIdentity: { requestEventId: id },
+        questions: [
+          {
+            id: "Which library?",
+            header: "Library",
+            question: "Which library?",
+            options: [
+              { label: "React", description: "React." },
+              { label: "Vue", description: "Vue." },
+            ],
+          },
+        ],
+      },
+    });
+  const answerActivity = (
+    id: string,
+    requestId: string,
+    turnId: string,
+    second: number,
+    payload: Record<string, unknown> = { answers: { "Which library?": "React" } },
+  ) =>
+    makeActivity({
+      id,
+      createdAt: `2026-02-23T00:00:${String(second).padStart(2, "0")}.000Z`,
+      kind: "user-input.resolved",
+      summary: "User input submitted",
+      tone: "info",
+      turnId,
+      payload: { requestId, ...payload },
+    });
+
+  it("keeps every turn's answered questions and replaces their bare rows in the timeline", () => {
+    const activities = [
+      askActivity("ask-1", "req-1", "turn-1", 1),
+      answerActivity("answer-1", "req-1", "turn-1", 2),
+      askActivity("ask-2", "req-2", "turn-2", 3),
+      answerActivity("answer-2", "req-2", "turn-2", 4, { answers: {}, cancelled: true }),
+      askActivity("ask-3", "req-3", "turn-2", 5),
+    ];
+    const viewModel = deriveThreadActivityViewModel(activities, TurnId.make("turn-2"));
+
+    expect(viewModel.userInputExchangeEntries).toEqual([
+      {
+        id: "user-input:answer-1",
+        activityId: "answer-1",
+        requestActivityId: "ask-1",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        turnId: "turn-1",
+        cancelled: false,
+        questions: [
+          {
+            id: "Which library?",
+            header: "Library",
+            question: "Which library?",
+            options: ["React", "Vue"],
+            answer: "React",
+          },
+        ],
+      },
+      expect.objectContaining({ id: "user-input:answer-2", cancelled: true }),
+    ]);
+    // The work log keeps the latest turn's rows; the timeline drops the ones an exchange stands
+    // in for, and the open question keeps its row.
+    expect(viewModel.workLogEntries.map((entry) => entry.id)).toEqual([
+      "ask-2",
+      "answer-2",
+      "ask-3",
+    ]);
+    expect(viewModel.workLogEntries).toEqual(
+      deriveWorkLogEntries(activities, TurnId.make("turn-2")),
+    );
+    const entries = deriveTimelineEntries(
+      [],
+      [],
+      viewModel.workLogEntries,
+      [],
+      [],
+      [],
+      viewModel.userInputExchangeEntries,
+    );
+    expect(entries.map((entry) => `${entry.kind}:${entry.id}`)).toEqual([
+      "user-input-exchange:user-input:answer-1",
+      "user-input-exchange:user-input:answer-2",
+      "work:ask-3",
+    ]);
+    expect(viewModel.pendingUserInputs.map((input) => input.requestId)).toEqual(["req-3"]);
+  });
+
+  it("carries an exchange's bare rows for a surface that shows no exchanges", () => {
+    const viewModel = deriveThreadActivityViewModel(
+      [
+        askActivity("ask-1", "req-1", "turn-1", 1),
+        answerActivity("answer-1", "req-1", "turn-1", 2),
+      ],
+      TurnId.make("turn-1"),
+    );
+    const entries = deriveTimelineEntries(
+      [],
+      [],
+      viewModel.workLogEntries,
+      [],
+      [],
+      [],
+      viewModel.userInputExchangeEntries,
+    );
+    expect(entries.map((entry) => entry.kind)).toEqual(["user-input-exchange"]);
+    // The frozen web phone tier renders these in the exchange's place, as before.
+    const [entry] = entries;
+    expect(
+      entry?.kind === "user-input-exchange" && entry.workEntries.map((row) => row.label),
+    ).toEqual(["User input requested", "User input submitted"]);
+  });
+
+  it("keeps an exchange's identity while other activities change", () => {
+    const ask = askActivity("ask-1", "req-1", "turn-1", 1);
+    const answer = answerActivity("answer-1", "req-1", "turn-1", 2);
+    const first = deriveThreadActivityViewModel([ask, answer], TurnId.make("turn-1"));
+    const later = deriveThreadActivityViewModel(
+      [
+        ask,
+        answer,
+        makeActivity({ id: "tool", createdAt: "2026-02-23T00:00:03.000Z", turnId: "turn-1" }),
+      ],
+      TurnId.make("turn-1"),
+    );
+    expect(later.userInputExchangeEntries[0]).toBe(first.userInputExchangeEntries[0]);
+  });
+
+  it("leaves an answer without its question as a plain row", () => {
+    const viewModel = deriveThreadActivityViewModel(
+      [answerActivity("answer-1", "req-1", "turn-1", 2)],
+      TurnId.make("turn-1"),
+    );
+    expect(viewModel.userInputExchangeEntries).toEqual([]);
+    expect(viewModel.workLogEntries.map((entry) => entry.label)).toEqual(["User input submitted"]);
+  });
+
+  it("orders exchanges with the messages around them", () => {
+    const viewModel = deriveThreadActivityViewModel(
+      [
+        askActivity("ask-1", "req-1", "turn-1", 1),
+        answerActivity("answer-1", "req-1", "turn-1", 2),
+      ],
+      TurnId.make("turn-1"),
+    );
+    const message = (id: string, second: number) => ({
+      id: MessageId.make(id),
+      role: "assistant" as const,
+      text: id,
+      streaming: false,
+      turnId: TurnId.make("turn-1"),
+      createdAt: `2026-02-23T00:00:${String(second).padStart(2, "0")}.000Z`,
+    });
+    const entries = deriveTimelineEntries(
+      [message("before", 0), message("after", 3)],
+      [],
+      viewModel.workLogEntries,
+      [],
+      [],
+      [],
+      viewModel.userInputExchangeEntries,
+    );
+    expect(entries.map((entry) => `${entry.kind}:${entry.id}`)).toEqual([
+      "message:before",
+      "user-input-exchange:user-input:answer-1",
+      "message:after",
+    ]);
   });
 });

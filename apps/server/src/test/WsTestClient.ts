@@ -15,6 +15,7 @@ import {
   type ServerLifecycleStreamEvent,
   type ServerLifecycleStreamWelcomeEvent,
 } from "@ryco/contracts";
+import { UnknownUnionMember } from "@ryco/contracts/base-schemas";
 
 /**
  * `WsTestClient` is a thin, reusable harness around the websocket RPC client
@@ -157,8 +158,14 @@ type GroupMethodKeys<Rpcs extends Rpc.Any> = {
   [Tag in RpcTags<Rpcs>]: IsStreamRpc<Rpcs, Tag> extends true ? never : Tag;
 }[RpcTags<Rpcs>];
 
-type GroupChannelEvent<Rpcs extends Rpc.Any, Tag extends RpcTags<Rpcs>> = Rpc.SuccessChunk<
-  RpcFor<Rpcs, Tag>
+/**
+ * The server under test is as new as the contract it is tested with, so a push
+ * it sends never decodes as a member this build does not know: the combinators
+ * fail on one and leave it out of the type.
+ */
+type GroupChannelEvent<Rpcs extends Rpc.Any, Tag extends RpcTags<Rpcs>> = Exclude<
+  Rpc.SuccessChunk<RpcFor<Rpcs, Tag>>,
+  UnknownUnionMember
 >;
 
 type GroupChannelError<Rpcs extends Rpc.Any, Tag extends RpcTags<Rpcs>, E> =
@@ -264,7 +271,17 @@ export const makeConnectedWsTestClient = <Client>(
   const looseClient = client as unknown as LooseRpcClient;
 
   const callStream = (channel: string, input: unknown) =>
-    looseClient[channel]!(input ?? {}) as Stream.Stream<unknown, never>;
+    (looseClient[channel]!(input ?? {}) as Stream.Stream<unknown, never>).pipe(
+      Stream.tap((event) =>
+        event instanceof UnknownUnionMember
+          ? Effect.die(
+              new Error(
+                `WsTestClient: "${channel}" pushed ${event.tag} "${event.value}", which its contract does not know`,
+              ),
+            )
+          : Effect.void,
+      ),
+    );
 
   const rpc = ((method: string, input: unknown) =>
     looseClient[method]!(input)) as StructuralConnectedWsTestClient<Client>["rpc"];

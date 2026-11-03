@@ -5,6 +5,7 @@ import { useState, type ReactNode } from "react";
 
 import { parseWorkspaceRenderKey } from "../../workspaceRouteSearch";
 import { Button } from "../ui/button";
+import { useHtmlRenderMessageSend } from "./htmlRenderMessages";
 import { HtmlRenderFullView, HtmlRenderViewActions } from "./HtmlRenderView";
 import { useHtmlRenderSource } from "./useHtmlRenderSource";
 import type { WorkspaceHtmlRender } from "./useWorkspaceHtmlRender";
@@ -14,6 +15,7 @@ function HtmlRenderPanelPage(props: {
   readonly threadId: ThreadId;
   readonly messageId: MessageId;
   readonly render: HtmlRenderAttachment;
+  readonly canSendMessages: boolean;
 }) {
   const { attachment, htmlRender } = props.render;
   const { title } = htmlRender;
@@ -25,6 +27,12 @@ function HtmlRenderPanelPage(props: {
     attachment,
   });
   const [showSource, setShowSource] = useState(false);
+  const onSendMessage = useHtmlRenderMessageSend({
+    environmentId: props.environmentId,
+    threadId: props.threadId,
+    title,
+    enabled: props.canSendMessages,
+  });
   return (
     <div data-html-render-panel="" className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 items-center gap-2 border-b border-border/60 py-2 ps-4 pe-3">
@@ -45,6 +53,7 @@ function HtmlRenderPanelPage(props: {
         sizeBytes={attachment.sizeBytes}
         showSource={showSource}
         className="px-4 pt-3"
+        onSendMessage={onSendMessage}
       />
     </div>
   );
@@ -79,18 +88,27 @@ export function HtmlRenderPanel(props: {
   readonly threadId: ThreadId | null;
   readonly renderKey: string;
   readonly resolution: WorkspaceHtmlRender;
+  /**
+   * The page may send the reader's answers to this thread: its message, as
+   * the thread has it loaded, is the thread's own agent's
+   * (`canHtmlRenderSendFromMessage`). A page handed over from another thread,
+   * or one looked up further back, never sends.
+   */
+  readonly canSendMessages?: boolean;
 }) {
   const { environmentId, threadId, renderKey, resolution } = props;
   const messageId = parseWorkspaceRenderKey(renderKey)?.messageId;
   if (resolution.status === "found" && environmentId && threadId && messageId) {
     return (
       <HtmlRenderPanelPage
-        // Another page is another document; never reuse the frame.
-        key={renderKey}
+        // Another page is another document; never reuse the frame. The frame
+        // name tells the page whether it may send, so that remounts it too.
+        key={`${renderKey}:${props.canSendMessages === true}`}
         environmentId={environmentId}
         threadId={threadId}
         messageId={messageId}
         render={resolution.render}
+        canSendMessages={props.canSendMessages === true}
       />
     );
   }

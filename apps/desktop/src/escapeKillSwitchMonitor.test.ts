@@ -238,6 +238,150 @@ describe("EscapeKillSwitchMonitor", () => {
     monitor.dispose();
   });
 
+  it.each([false, true])(
+    "recovers a silent listener readiness stall after rearm=%s without trusting its late output",
+    async (rearm) => {
+      vi.useFakeTimers();
+      const onEscape = vi.fn();
+      const { monitor, helpers } = makeMonitor({ onEscape });
+      let activation = monitor.activate();
+      const stalled = helpers[0]!;
+      if (rearm) {
+        stalled.stdout.write('{"type":"ready"}\n');
+        await activation;
+        monitor.setArmed(false);
+        activation = monitor.activate();
+      }
+      await vi.advanceTimersByTimeAsync(10_000);
+      await activation;
+      expect(monitor.state.ready).toBe(false);
+      expect(stalled.kill).toHaveBeenCalledWith("SIGTERM");
+      stalled.stdout.write('{"type":"ready"}\n{"type":"escape"}\n');
+      expect(onEscape).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(helpers).toHaveLength(2);
+      expect(helpers[1]!.stdinCommands).toEqual(["arm\n"]);
+      expect(monitor.state.ready).toBe(false);
+      helpers[1]!.stdout.write('{"type":"ready"}\n{"type":"escape"}\n');
+      expect(monitor.state.ready).toBe(true);
+      expect(onEscape).toHaveBeenCalledOnce();
+      monitor.dispose();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(helpers).toHaveLength(2);
+    },
+  );
+
+  it("does not restart the readiness deadline on an ordinary activation", async () => {
+    vi.useFakeTimers();
+    const { monitor, helpers } = makeMonitor();
+    void monitor.activate();
+    await vi.advanceTimersByTimeAsync(6_000);
+    // Already armed: another action's activation must not extend the deadline.
+    void monitor.activate();
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(helpers[0]!.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(monitor.state).toEqual({ ready: false, error: "input_monitor_unavailable" });
+    monitor.dispose();
+  });
+
+  it.each([
+    ["ready", '{"type":"ready"}\n', { ready: true }],
+    [
+      "a native tap failure",
+      '{"type":"error","code":"event_tap_disabled","message":"Tap disabled."}\n',
+      { ready: false, error: "event_tap_disabled" },
+    ],
+  ] as const)(
+    "leaves a listener that reported %s to its own recovery",
+    async (_label, line, state) => {
+      vi.useFakeTimers();
+      const { monitor, helpers } = makeMonitor();
+      const activation = monitor.activate();
+      helpers[0]!.stdout.write(line);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await activation;
+      expect(monitor.state).toEqual(state);
+      expect(helpers[0]!.kill).not.toHaveBeenCalled();
+      expect(helpers).toHaveLength(1);
+      monitor.dispose();
+    },
+  );
+
+  it("replaces an armed helper that reports a failure it cannot recover from", async () => {
+    vi.useFakeTimers();
+    const onError = vi.fn();
+    const onEscape = vi.fn();
+    const { monitor, helpers } = makeMonitor({ onError, onEscape });
+    const activation = monitor.activate();
+    const broken = helpers[0]!;
+    broken.stdout.write('{"type":"ready"}\n');
+    await activation;
+    broken.stdout.write(
+      '{"type":"error","code":"invalid_request","message":"Unknown Escape monitor request."}\n',
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(monitor.state).toEqual({ ready: false, error: "input_monitor_unavailable" });
+    expect(broken.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining("Restarting"));
+    // Late output from the dropped helper is ignored.
+    broken.stdout.write('{"type":"ready"}\n{"type":"escape"}\n');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(monitor.state.ready).toBe(false);
+    expect(onEscape).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(helpers).toHaveLength(2);
+    expect(helpers[1]!.stdinCommands).toEqual(["arm\n"]);
+    helpers[1]!.stdout.write('{"type":"ready"}\n');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(monitor.state).toEqual({ ready: true });
+    monitor.dispose();
+  });
+
+  it("leaves a disarmed helper's unknown failure to the next arm's readiness deadline", async () => {
+    vi.useFakeTimers();
+    const { monitor, helpers } = makeMonitor();
+    monitor.start();
+    helpers[0]!.stdout.write('{"type":"error","code":"invalid_request","message":"Bad line."}\n');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(monitor.state).toEqual({ ready: false, error: "input_monitor_unavailable" });
+    expect(helpers[0]!.kill).not.toHaveBeenCalled();
+    monitor.setArmed(true);
+    expect(monitor.state).toEqual({ ready: false, error: "input_monitor_starting" });
+    helpers[0]!.stdout.write('{"type":"ready"}\n');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(monitor.state).toEqual({ ready: true });
+    monitor.dispose();
+  });
+
+  it("waits out the backoff once a stalled helper keeps failing", async () => {
+    vi.useFakeTimers();
+    const { monitor, helpers } = makeMonitor();
+    void monitor.activate();
+    // First stall: the next activation respawns at once, as after a crash.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(helpers[0]!.kill).toHaveBeenCalledWith("SIGTERM");
+    void monitor.activate();
+    expect(helpers).toHaveLength(2);
+    // Second stall in a row: activations no longer bypass the 2 s backoff.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(helpers[1]!.kill).toHaveBeenCalledWith("SIGTERM");
+    void monitor.activate();
+    void monitor.activate();
+    expect(helpers).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(helpers).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(helpers).toHaveLength(3);
+    // A helper that reports ready resets the backoff.
+    helpers[2]!.stdout.write('{"type":"ready"}\n');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(monitor.state).toEqual({ ready: true });
+    helpers[2]!.emit("close", 1);
+    void monitor.activate();
+    expect(helpers).toHaveLength(4);
+    monitor.dispose();
+  });
+
   it("does not spawn twice when activation overtakes the restart timer", async () => {
     vi.useFakeTimers();
     const { monitor, helpers } = makeMonitor();

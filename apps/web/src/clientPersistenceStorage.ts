@@ -41,8 +41,10 @@ const BrowserSavedEnvironmentRecordSchema = Schema.Struct({
     Schema.Struct({
       hubEnvironmentId: Schema.String,
       linkedAt: Schema.String,
+      nodeIdentityPublicKey: Schema.optionalKey(Schema.String),
     }),
   ),
+  disabledAt: Schema.optionalKey(Schema.String),
   bearerToken: Schema.optionalKey(Schema.String),
   bearerTokenSavedAt: Schema.optionalKey(Schema.String),
   bearerTokenExpiresAt: Schema.optionalKey(Schema.String),

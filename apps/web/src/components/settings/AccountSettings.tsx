@@ -570,6 +570,8 @@ export function AccountSettingsPanel() {
         cancel={action.cancel}
       />
 
+      <DeleteAccountSection busy={busy} actionStatus={actionStatus} run={action.run} />
+
       <StepUpDialog
         pending={action.stepUp}
         attempts={action.stepUpAttempts}
@@ -670,6 +672,89 @@ function ExternalIdentitySection({
             <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
             <Button disabled={busy} onClick={() => void disconnect()}>
               <ActionLabel busy={disconnecting}>Disconnect GitHub</ActionLabel>
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogPopup>
+      </AlertDialog>
+    </SettingsSection>
+  );
+}
+
+/* ------------------------------------------------------------ delete account */
+
+/**
+ * Deleting the account, behind a typed confirmation and the usual step-up.
+ * Nodes, their projects and chats stay where they are; only the Hub account,
+ * its sessions, devices and node access go.
+ */
+function DeleteAccountSection({
+  busy,
+  actionStatus,
+  run,
+}: {
+  readonly busy: boolean;
+  readonly actionStatus: string;
+  readonly run: RunAccountAction;
+}) {
+  const [open, setOpen] = useState(false);
+  const [identifier, setIdentifier] = useState("");
+  const deleting = actionStatus === "deleting-account";
+  const close = (next: boolean) => {
+    setOpen(next);
+    if (!next) setIdentifier("");
+  };
+  const confirm = async () => {
+    const typed = identifier;
+    await run(
+      "delete-account",
+      (stepUp) => hostedHubController.deleteAccount({ identifier: typed, ...stepUp }),
+      { onCommitted: () => close(false) },
+    );
+  };
+
+  return (
+    <SettingsSection title="Delete account" icon={<Trash2Icon aria-hidden className="size-3.5" />}>
+      <SettingsRow
+        title="Delete this Hub account"
+        description="Ends every session, removes your devices and your access to nodes, and erases the account. Chats and projects on your nodes stay there."
+        control={
+          <Button
+            size="sm"
+            variant="destructive-outline"
+            disabled={busy}
+            onClick={() => close(true)}
+          >
+            <ActionLabel busy={deleting}>Delete account…</ActionLabel>
+          </Button>
+        }
+      />
+      <AlertDialog open={open} onOpenChange={close}>
+        <AlertDialogPopup>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete your Hub account?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This can't be undone. Type your account's email, or its username if it has no email,
+              to confirm.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="px-6 pb-2">
+            <Input
+              aria-label="Account email or username"
+              autoComplete="off"
+              value={identifier}
+              onChange={(event) => setIdentifier(event.target.value)}
+            />
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogClose render={<Button variant="outline" />}>
+              Keep my account
+            </AlertDialogClose>
+            <Button
+              variant="destructive"
+              disabled={busy || identifier.trim().length === 0}
+              onClick={() => void confirm()}
+            >
+              <ActionLabel busy={deleting}>Delete account</ActionLabel>
             </Button>
           </AlertDialogFooter>
         </AlertDialogPopup>

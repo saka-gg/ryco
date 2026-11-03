@@ -304,6 +304,64 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect(
+    "keeps the machine awake while agents work unless a flag, env or node.json turns it off",
+    () =>
+      Effect.gen(function* () {
+        const baseDir = join(os.tmpdir(), `ryco-cli-config-keep-awake-${process.pid}`);
+        const fs = yield* FileSystem.FileSystem;
+        yield* fs.makeDirectory(join(baseDir, "userdata"), { recursive: true });
+        const nodeJsonPath = join(baseDir, "userdata", "node.json");
+        yield* fs.remove(nodeJsonPath, { force: true });
+        const resolve = (overrides: Partial<ResolveServerFlags>, env: Record<string, string>) =>
+          resolveServerConfig(makeServerFlags(baseDir, overrides), Option.none(), {
+            useNodeConfig: true,
+          }).pipe(
+            Effect.provide(
+              Layer.mergeAll(
+                ConfigProvider.layer(ConfigProvider.fromEnv({ env })),
+                NetService.layer,
+              ),
+            ),
+          );
+        const keepAwake = (overrides: Partial<ResolveServerFlags>, env: Record<string, string>) =>
+          resolve(overrides, env).pipe(Effect.map((config) => config.keepAwakeWhileWorking));
+
+        // Nothing configured: on.
+        assert.strictEqual(yield* keepAwake({}, {}), true);
+
+        // node.json beats the default, the environment beats node.json, and a flag beats both.
+        yield* fs.writeFileString(
+          nodeJsonPath,
+          JSON.stringify({ version: 1, keepAwakeWhileWorking: false }),
+        );
+        assert.strictEqual(yield* keepAwake({}, {}), false);
+        assert.strictEqual(yield* keepAwake({}, { RYCO_KEEP_AWAKE_WHILE_WORKING: "true" }), true);
+        assert.strictEqual(
+          yield* keepAwake(
+            { keepAwakeWhileWorking: Option.some(false) },
+            { RYCO_KEEP_AWAKE_WHILE_WORKING: "true" },
+          ),
+          false,
+        );
+        assert.strictEqual(
+          yield* keepAwake(
+            { keepAwakeWhileWorking: Option.some(true) },
+            { RYCO_KEEP_AWAKE_WHILE_WORKING: "false" },
+          ),
+          true,
+        );
+
+        // Desktop main holds a desktop backend awake, so the setting stays unset there.
+        const desktop = yield* resolve(
+          { mode: Option.some("desktop"), keepAwakeWhileWorking: Option.some(true) },
+          { RYCO_KEEP_AWAKE_WHILE_WORKING: "true" },
+        );
+        assert.isFalse("keepAwakeWhileWorking" in desktop);
+        yield* fs.remove(baseDir, { recursive: true });
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("refuses an unknown command word instead of creating a folder for it", () =>
     Effect.gen(function* () {
       const baseDir = join(os.tmpdir(), `ryco-cli-config-word-${process.pid}`);
@@ -544,6 +602,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         tailscaleServeEnabled: true,
         tailscaleServePort: 8443,
         preventSleep: false,
+        keepAwakeWhileWorking: true,
       });
     }),
   );
@@ -616,6 +675,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
         preventSleep: false,
+        keepAwakeWhileWorking: true,
       });
     }),
   );
@@ -864,6 +924,48 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     }),
   );
 
+  it.effect("takes the envelope's copy allowance for Ryco Nightly only in desktop mode", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "ryco-cli-config-flavor-" });
+      const stableHome = join(baseDir, "stable-home");
+      const resolveWith = (envelope: Record<string, unknown>) =>
+        Effect.gen(function* () {
+          const fd = yield* openBootstrapFd({ rycoHome: baseDir, noBrowser: true, ...envelope });
+          return yield* resolveServerConfig(
+            makeServerFlags(baseDir, { baseDir: Option.none(), bootstrapFd: Option.some(fd) }),
+            Option.none(),
+          ).pipe(
+            Effect.provide(
+              Layer.mergeAll(
+                ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
+                NetService.layer,
+              ),
+            ),
+          );
+        });
+
+      const desktop = yield* resolveWith({
+        mode: "desktop",
+        flavorImport: { allowedSourceHome: stableHome, requestToken: "launch-token" },
+      });
+      expect(desktop.flavorImport).toEqual({
+        allowedSourceHome: stableHome,
+        requestToken: "launch-token",
+      });
+
+      const web = yield* resolveWith({
+        mode: "web",
+        flavorImport: { allowedSourceHome: stableHome, requestToken: "launch-token" },
+      });
+      expect(web.mode).toBe("web");
+      expect(web.flavorImport).toBeUndefined();
+
+      const absent = yield* resolveWith({ mode: "desktop" });
+      expect(absent.flavorImport).toBeUndefined();
+    }),
+  );
+
   it.effect("creates derived runtime directories during config resolution", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -1074,6 +1176,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
         preventSleep: false,
+        keepAwakeWhileWorking: true,
       });
     }),
   );
@@ -1148,6 +1251,130 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     }),
   );
 
+  const resolveWithObservability = Effect.fn(function* (options: {
+    readonly name: string;
+    readonly env: Record<string, string>;
+    readonly settings?: { readonly otlpTracesUrl?: string; readonly otlpMetricsUrl?: string };
+  }) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const baseDir = yield* fs.makeTempDirectoryScoped({
+      prefix: `ryco-cli-config-${options.name}-`,
+    });
+    if (options.settings !== undefined) {
+      const derivedPaths = yield* deriveServerPaths(baseDir, undefined);
+      yield* fs.makeDirectory(path.dirname(derivedPaths.settingsPath), { recursive: true });
+      yield* fs.writeFileString(
+        derivedPaths.settingsPath,
+        `${JSON.stringify({ observability: options.settings })}\n`,
+      );
+    }
+    return yield* resolveServerConfig(makeServerFlags(baseDir), Option.none()).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          ConfigProvider.layer(ConfigProvider.fromEnv({ env: options.env })),
+          NetService.layer,
+        ),
+      ),
+    );
+  });
+
+  it.effect("exports to the standard OTEL endpoint when nothing in Ryco configures OTLP", () =>
+    Effect.gen(function* () {
+      const resolved = yield* resolveWithObservability({
+        name: "otel-endpoint",
+        env: { OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector:4318" },
+      });
+
+      expect(resolved.otlpTracesUrl).toBe("http://collector:4318/v1/traces");
+      expect(resolved.otlpMetricsUrl).toBe("http://collector:4318/v1/metrics");
+      expect(resolved.otlpLogsUrl).toBe("http://collector:4318/v1/logs");
+      expect(resolved.otlpExports).toEqual({
+        traces: { protocol: "http/protobuf", endpointVariable: "OTEL_EXPORTER_OTLP_ENDPOINT" },
+        metrics: { protocol: "http/protobuf", endpointVariable: "OTEL_EXPORTER_OTLP_ENDPOINT" },
+        logs: { protocol: "http/protobuf", endpointVariable: "OTEL_EXPORTER_OTLP_ENDPOINT" },
+      });
+      expect(resolved.observabilityWarnings).toBeUndefined();
+    }),
+  );
+
+  it.effect("turns off Settings exports for OTEL_SDK_DISABLED=true with one warning each", () =>
+    Effect.gen(function* () {
+      const resolved = yield* resolveWithObservability({
+        name: "otel-disabled",
+        env: { OTEL_SDK_DISABLED: "true" },
+        settings: {
+          otlpTracesUrl: "http://localhost:4318/v1/traces",
+          otlpMetricsUrl: "http://localhost:4318/v1/metrics",
+        },
+      });
+
+      expect(resolved.otlpTracesUrl).toBeUndefined();
+      expect(resolved.otlpMetricsUrl).toBeUndefined();
+      expect(resolved.observabilityWarnings).toEqual([
+        "OTEL_SDK_DISABLED=true turned off the OTLP traces export set by Settings.",
+        "OTEL_SDK_DISABLED=true turned off the OTLP metrics export set by Settings.",
+      ]);
+    }),
+  );
+
+  it.effect("keeps Settings URLs ahead of an inherited OTEL endpoint, usable or not", () =>
+    Effect.gen(function* () {
+      const settings = {
+        otlpTracesUrl: "http://localhost:4318/v1/traces",
+        otlpMetricsUrl: "http://localhost:4318/v1/metrics",
+      };
+      // Claude Code's documented telemetry setup, inherited from the shell.
+      const grpc = yield* resolveWithObservability({
+        name: "otel-grpc",
+        env: {
+          OTEL_EXPORTER_OTLP_PROTOCOL: "grpc",
+          OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4317",
+          OTEL_LOGS_EXPORTER: "otlp",
+        },
+        settings,
+      });
+      expect(grpc.otlpTracesUrl).toBe(settings.otlpTracesUrl);
+      expect(grpc.otlpMetricsUrl).toBe(settings.otlpMetricsUrl);
+      expect(grpc.otlpExports).toBeUndefined();
+      expect(grpc.otlpLogsUrl).toBeUndefined();
+      expect(grpc.observabilityWarnings).toEqual([
+        "OTEL_EXPORTER_OTLP_PROTOCOL=grpc is not supported (Ryco sends OTLP over HTTP only), so logs are not sent to OTEL_EXPORTER_OTLP_ENDPOINT.",
+      ]);
+
+      const http = yield* resolveWithObservability({
+        name: "otel-http",
+        env: {
+          OTEL_EXPORTER_OTLP_ENDPOINT: "http://other-collector:4318",
+          OTEL_EXPORTER_OTLP_HEADERS: "x-honeycomb-team=secret",
+        },
+        settings,
+      });
+      expect(http.otlpTracesUrl).toBe(settings.otlpTracesUrl);
+      expect(http.otlpMetricsUrl).toBe(settings.otlpMetricsUrl);
+      expect(http.otlpLogsUrl).toBe("http://other-collector:4318/v1/logs");
+      expect(Object.keys(http.otlpExports ?? {})).toEqual(["logs"]);
+    }),
+  );
+
+  it.effect("keeps a validated OTEL_RESOURCE_ATTRIBUTES and warns about an invalid one", () =>
+    Effect.gen(function* () {
+      const valid = yield* resolveWithObservability({
+        name: "otel-resource",
+        env: { OTEL_RESOURCE_ATTRIBUTES: "team=core,service.name=other" },
+      });
+      expect(valid.otlpResourceAttributes).toEqual({ team: "core" });
+
+      const invalid = yield* resolveWithObservability({
+        name: "otel-resource-invalid",
+        env: { OTEL_RESOURCE_ATTRIBUTES: "a=%zz", RYCO_OTLP_TRACES_URL: "http://x/v1/traces" },
+      });
+      expect(invalid.otlpTracesUrl).toBe("http://x/v1/traces");
+      expect(invalid.otlpResourceAttributes).toBeUndefined();
+      expect(invalid.observabilityWarnings).toHaveLength(1);
+    }),
+  );
+
   it.effect("forces noBrowser and disables auto-bootstrap for headless startup presentation", () =>
     Effect.gen(function* () {
       const { join } = yield* Path.Path;
@@ -1209,7 +1436,47 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
         preventSleep: false,
+        keepAwakeWhileWorking: true,
       });
+    }),
+  );
+
+  it.effect("lets an explicit --auto-bootstrap-project-from-cwd win over `serve`'s default", () =>
+    Effect.gen(function* () {
+      const { join } = yield* Path.Path;
+      const resolve = (autoBootstrapProjectFromCwd: Option.Option<boolean>) =>
+        resolveServerConfig(
+          {
+            mode: Option.some("web"),
+            port: Option.some(3773),
+            host: Option.none(),
+            baseDir: Option.some(join(os.tmpdir(), "ryco-cli-config-serve-bootstrap")),
+            cwd: Option.none(),
+            devUrl: Option.none(),
+            noBrowser: Option.none(),
+            bootstrapFd: Option.none(),
+            autoBootstrapProjectFromCwd,
+            logWebSocketEvents: Option.none(),
+            tailscaleServeEnabled: Option.none(),
+            tailscaleServePort: Option.none(),
+          },
+          Option.none(),
+          // What `ryco serve` passes.
+          { startupPresentation: "headless", defaultAutoBootstrapProjectFromCwd: false },
+        ).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              ConfigProvider.layer(
+                ConfigProvider.fromEnv({ env: { RYCO_AUTO_BOOTSTRAP_PROJECT_FROM_CWD: "true" } }),
+              ),
+              NetService.layer,
+            ),
+          ),
+        );
+
+      expect((yield* resolve(Option.some(true))).autoBootstrapProjectFromCwd).toBe(true);
+      // Without the flag the environment does not override it.
+      expect((yield* resolve(Option.none())).autoBootstrapProjectFromCwd).toBe(false);
     }),
   );
 });

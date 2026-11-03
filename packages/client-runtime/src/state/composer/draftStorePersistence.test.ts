@@ -2,7 +2,12 @@ import { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { scopedThreadKey, scopeThreadRef } from "../../scoped.ts";
-import { createComposerDraftStore, DraftId, type ComposerDraftImage } from "./draftStore.ts";
+import {
+  createComposerDraftStore,
+  DraftId,
+  hasVerifiedPersistedAttachment,
+  type ComposerDraftImage,
+} from "./draftStore.ts";
 import {
   COMPOSER_DRAFT_INDEX_STORAGE_KEY,
   COMPOSER_DRAFT_STORAGE_KEY,
@@ -11,6 +16,8 @@ import {
   type PersistedComposerImageAttachment,
 } from "./draftPersistence.ts";
 import type { ComposerDraftStorage } from "./draftSplitStorage.ts";
+import { createBrowserElementReference } from "./browserElementReference.ts";
+import { createFileReference } from "./fileReference.ts";
 
 function makeStorage(
   options: {
@@ -281,6 +288,89 @@ describe("composer draft persistence", () => {
     expect(draft.persistedAttachments.map((attachment) => attachment.id)).toEqual(["present"]);
   });
 
+  it("counts a staged attachment as saved only once storage reads it back", async () => {
+    const { storage, values } = makeStorage();
+    let storedIds: string[] = [];
+    const { useComposerDraftStore } = createComposerDraftStore<ComposerDraftImage>({
+      storage,
+      flushStorage: () => undefined,
+      revokePreviewUrl: () => undefined,
+      hydrateImages: () => [],
+      readPersistedAttachmentIds: () => storedIds,
+    });
+    const image = (id: string): ComposerDraftImage => ({
+      type: "image",
+      id,
+      name: `${id}.png`,
+      mimeType: "image/png",
+      sizeBytes: 4,
+      previewUrl: `blob:${id}`,
+    });
+    const draft = () => useComposerDraftStore.getState().getComposerDraft(threadRef)!;
+    useComposerDraftStore.getState().addImages(threadRef, [image("kept"), image("lost")]);
+    // The write keeps one of the two, e.g. storage filled up.
+    storedIds = ["kept"];
+    useComposerDraftStore
+      .getState()
+      .syncPersistedAttachments(threadRef, [localImage("kept"), localImage("lost")]);
+    expect(hasVerifiedPersistedAttachment(draft(), "kept")).toBe(false);
+
+    await Promise.resolve();
+    expect(hasVerifiedPersistedAttachment(draft(), "kept")).toBe(true);
+    expect(hasVerifiedPersistedAttachment(draft(), "lost")).toBe(false);
+
+    // A draft hydrated from storage holds what storage holds.
+    const hydrated = createComposerDraftStore<ComposerDraftImage>({
+      storage: makeStorage({ initial: Object.fromEntries(values) }).storage,
+      flushStorage: () => undefined,
+      revokePreviewUrl: () => undefined,
+      hydrateImages: () => [],
+      readPersistedAttachmentIds: () => [],
+    });
+    const restored = hydrated.useComposerDraftStore.getState().getComposerDraft(threadRef)!;
+    expect(hasVerifiedPersistedAttachment(restored, "kept")).toBe(true);
+  });
+
+  it("verifies a staged draft under the key it moved to before the read-back", async () => {
+    const { storage } = makeStorage();
+    const draftKey = "draft-before-promotion";
+    const threadKey = scopedThreadKey(threadRef);
+    const readKeys: string[] = [];
+    const { useComposerDraftStore } = createComposerDraftStore<ComposerDraftImage>({
+      storage,
+      flushStorage: () => undefined,
+      revokePreviewUrl: () => undefined,
+      hydrateImages: () => [],
+      readPersistedAttachmentIds: (key) => {
+        readKeys.push(key);
+        return key === threadKey ? ["kept"] : [];
+      },
+    });
+    const draftId = DraftId.make(draftKey);
+    useComposerDraftStore.getState().addImages(draftId, [
+      {
+        type: "image",
+        id: "kept",
+        name: "kept.png",
+        mimeType: "image/png",
+        sizeBytes: 4,
+        previewUrl: "blob:kept",
+      },
+    ]);
+    useComposerDraftStore.getState().syncPersistedAttachments(draftId, [localImage("kept")]);
+    // The draft moves to its thread's key (e.g. a promotion) before the read-back runs.
+    useComposerDraftStore.setState((state) => {
+      const { [draftKey]: moved, ...rest } = state.draftsByThreadKey;
+      return { draftsByThreadKey: { ...rest, [threadKey]: moved! } };
+    });
+
+    await Promise.resolve();
+    const draft = useComposerDraftStore.getState().draftsByThreadKey[threadKey]!;
+    expect(readKeys).toEqual([threadKey]);
+    expect(draft.persistedAttachmentsUnverified).toBeUndefined();
+    expect(hasVerifiedPersistedAttachment(draft, "kept")).toBe(true);
+  });
+
   it("promotes every draft of materialized threads in one pass", () => {
     const { storage } = makeStorage({ scheduled: true });
     const store = makeStore(storage);
@@ -497,5 +587,70 @@ describe("composer draft persistence", () => {
       expect(indexOf(values).state.draftKeys).toContain(lateKey);
       expect(openTab(values).state().getComposerDraft(threadRef)?.prompt).toBe("late");
     });
+  });
+});
+
+describe("composer draft persistence of reference chips", () => {
+  const element = createBrowserElementReference({
+    url: "http://localhost:3000/settings",
+    pageTitle: "Settings",
+    selector: "#save",
+    tagName: "button",
+    role: "button",
+    name: "Save",
+    text: "Save",
+    box: { x: 1, y: 2, width: 3, height: 4 },
+    comment: "Make it primary",
+  })!;
+  const lines = createFileReference({
+    path: "src/app.ts",
+    lineStart: 1,
+    lineEnd: 1,
+    lines: ["const a = 1;"],
+  })!;
+  const createdAt = "2026-10-28T00:00:00.000Z";
+
+  it("keeps a picked page element through persist and hydrate, next to file lines", () => {
+    const writer = makeStorage();
+    const store = makeStore(writer.storage);
+    store.useComposerDraftStore.getState().setPrompt(threadRef, "Fix these");
+    store.useComposerDraftStore
+      .getState()
+      .addFileReference(threadRef, { ...element, id: "e1", createdAt });
+    store.useComposerDraftStore
+      .getState()
+      .addFileReference(threadRef, { ...lines, id: "f1", createdAt });
+    expect(entryOf(writer.values, threadRef).fileReferences).toHaveLength(2);
+
+    const reader = makeStore(makeStorage({ initial: Object.fromEntries(writer.values) }).storage);
+    const draft = reader.useComposerDraftStore.getState().getComposerDraft(threadRef);
+    expect(draft?.prompt).toBe("Fix these");
+    expect(draft?.fileReferences).toEqual([
+      { ...element, id: "e1", createdAt },
+      { ...lines, id: "f1", createdAt },
+    ]);
+  });
+
+  it("drops entries of an unknown kind or that no longer hold up, and keeps the prompt", () => {
+    const writer = makeStorage();
+    const store = makeStore(writer.storage);
+    store.useComposerDraftStore.getState().setPrompt(threadRef, "Kept");
+    store.useComposerDraftStore
+      .getState()
+      .addFileReference(threadRef, { ...element, id: "e1", createdAt });
+    const key = composerDraftEntryStorageKey(scopedThreadKey(threadRef));
+    const stored = entryOf(writer.values, threadRef);
+    // A newer client's chip kind, and an element whose URL is no longer http(s).
+    stored.fileReferences = [
+      { id: "x1", createdAt, kind: "region", rect: [0, 0, 1, 1] },
+      { ...stored.fileReferences[0], id: "e2", url: "file:///etc/passwd" },
+      ...stored.fileReferences,
+    ];
+    writer.values.set(key, JSON.stringify(stored));
+
+    const reader = makeStore(makeStorage({ initial: Object.fromEntries(writer.values) }).storage);
+    const draft = reader.useComposerDraftStore.getState().getComposerDraft(threadRef);
+    expect(draft?.prompt).toBe("Kept");
+    expect(draft?.fileReferences).toEqual([{ ...element, id: "e1", createdAt }]);
   });
 });

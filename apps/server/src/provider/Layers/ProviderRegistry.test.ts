@@ -27,6 +27,7 @@ import {
   ProviderInstanceId,
   ServerSettings,
   type ServerProvider,
+  type ServerProviderModel,
   type ServerProviderRateLimits,
   type ServerProviderSlashCommand,
   type ServerSettings as ContractServerSettings,
@@ -45,8 +46,10 @@ import {
   resolveClaudeApiModelId,
 } from "./ClaudeProvider.ts";
 import type { ClaudeCredentialStore } from "./ClaudeUsage.ts";
+import { type ClaudeCliModelInfo, makeClaudeCliModelMemory } from "../claudeCliModels.ts";
 import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
+import { AgentProcessPriorityOffLive } from "../agentProcessPriority.ts";
 import { ProviderInstanceRegistryHydrationLive } from "./ProviderInstanceRegistryHydration.ts";
 import {
   haveProvidersChanged,
@@ -227,7 +230,10 @@ type TestClaudeCapabilities = {
   readonly email: string | undefined;
   readonly subscriptionType: string | undefined;
   readonly tokenSource: string | undefined;
+  readonly apiKeySource?: string | undefined;
+  readonly apiProvider?: string | undefined;
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
+  readonly models?: ReadonlyArray<ClaudeCliModelInfo>;
 };
 
 function claudeCapabilities(overrides: Partial<TestClaudeCapabilities> = {}) {
@@ -684,6 +690,62 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         ]);
       });
 
+      it("never brings back a model the next probe gated out by CLI version", () => {
+        const placeholderModel = (slug: string, name: string, isLegacy?: true) => ({
+          slug,
+          name,
+          isCustom: false,
+          capabilities: null,
+          ...(isLegacy ? { isLegacy } : {}),
+        });
+        // The boot placeholder publishes the whole catalog without version gates.
+        const placeholder = {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          driver: ProviderDriverKind.make("claudeAgent"),
+          status: "warning",
+          enabled: true,
+          installed: false,
+          auth: { status: "unknown" },
+          checkedAt: "2026-10-28T00:00:00.000Z",
+          version: null,
+          models: [
+            placeholderModel("claude-opus-5-5", "Claude Opus 5.5"),
+            placeholderModel("claude-opus-5", "Claude Opus 5"),
+            placeholderModel("claude-opus-4-8", "Claude Opus 4.8", true),
+            placeholderModel("claude-opus-4-6", "Claude Opus 4.6", true),
+          ],
+          slashCommands: [],
+          skills: [],
+        } as const satisfies ServerProvider;
+        const probed = {
+          ...placeholder,
+          status: "ready",
+          installed: true,
+          auth: { status: "authenticated" },
+          checkedAt: "2026-10-28T00:01:00.000Z",
+          version: "2.1.150",
+          // Opus 4.8 is gated too; as a legacy model it is not listed as update-required.
+          models: [
+            placeholderModel("claude-opus-5-5", "Claude Opus 5.5"),
+            placeholderModel("claude-opus-4-6", "Claude Opus 4.6", true),
+          ],
+          updateRequiredModels: [
+            { slug: "claude-opus-5", name: "Claude Opus 5", minVersion: "2.1.219" },
+          ],
+        } satisfies ServerProvider;
+
+        assert.deepStrictEqual(
+          mergeProviderSnapshot(placeholder, probed).models.map((model) => model.slug),
+          ["claude-opus-5-5", "claude-opus-4-6"],
+        );
+        assert.deepStrictEqual(
+          mergeProviderSnapshot(placeholder, { ...probed, models: [] }).models.map(
+            (model) => model.slug,
+          ),
+          ["claude-opus-5-5"],
+        );
+      });
+
       it("fills missing capabilities from the previous provider snapshot", () => {
         const previousProvider = {
           instanceId: ProviderInstanceId.make("cursor"),
@@ -977,6 +1039,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             models: [],
           } satisfies ServerProvider;
           const changes = yield* PubSub.unbounded<ServerProvider>();
+          // The registry subscribes to an instance's changes in a forked fiber.
+          const changesSubscribed = yield* Deferred.make<void>();
           const instance = {
             instanceId: cursorInstanceId,
             driverKind: cursorDriver,
@@ -996,7 +1060,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               getSnapshot: Effect.succeed(initialProvider),
               revalidate: Effect.succeed(initialProvider),
               refresh: Effect.succeed(refreshedProvider),
-              streamChanges: Stream.fromPubSub(changes),
+              streamChanges: Stream.unwrap(
+                PubSub.subscribe(changes).pipe(
+                  Effect.tap(() => Deferred.succeed(changesSubscribed, undefined)),
+                  Effect.map(Stream.fromSubscription),
+                ),
+              ),
             },
             adapter: {} as ProviderInstance["adapter"],
             textGeneration: {} as ProviderInstance["textGeneration"],
@@ -1036,17 +1105,17 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             assert.deepStrictEqual((yield* registry.getProviders)[0]?.models, [
               ...initialProvider.models,
             ]);
-            // The per-instance change subscription starts in a forked fiber.
-            for (let attempt = 0; attempt < 5; attempt += 1) yield* Effect.yieldNow;
+            yield* Deferred.await(changesSubscribed);
             yield* PubSub.publish(changes, refreshedProvider);
 
+            // The write is real disk work: wait for it by time, not by scheduler turns.
+            const deadline = Date.now() + 10_000;
             let cachedProvider = yield* readProviderStatusCache(filePath);
-            for (
-              let attempt = 0;
-              attempt < 50 && cachedProvider?.checkedAt !== refreshedProvider.checkedAt;
-              attempt += 1
+            while (
+              cachedProvider?.checkedAt !== refreshedProvider.checkedAt &&
+              Date.now() < deadline
             ) {
-              yield* Effect.yieldNow;
+              yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 5)));
               cachedProvider = yield* readProviderStatusCache(filePath);
             }
 
@@ -1417,6 +1486,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             ),
             Layer.provideMerge(TestHttpClientLive),
             Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+            Layer.provideMerge(AgentProcessPriorityOffLive),
             Layer.provideMerge(OpenCodeRuntimeLive),
             // NO spawner mock — `ChildProcessSpawner` is supplied by the
             // outer `NodeServices.layer` on `it.layer(...)` and will
@@ -1517,6 +1587,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             ),
             Layer.provideMerge(TestHttpClientLive),
             Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+            Layer.provideMerge(AgentProcessPriorityOffLive),
             Layer.provideMerge(OpenCodeRuntimeLive),
             // `it.live` does not inherit layers from the outer `it.layer`
             // wrapper, so provide `NodeServices.layer` inline. This is the
@@ -1632,6 +1703,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               ),
               Layer.provideMerge(TestHttpClientLive),
               Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+              Layer.provideMerge(AgentProcessPriorityOffLive),
               Layer.provideMerge(OpenCodeRuntimeLive),
               Layer.provideMerge(NodeServices.layer),
             ),
@@ -1689,6 +1761,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               ),
               Layer.provideMerge(TestHttpClientLive),
               Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+              Layer.provideMerge(AgentProcessPriorityOffLive),
               Layer.provideMerge(OpenCodeRuntimeLive),
               Layer.provideMerge(NodeServices.layer),
             ),
@@ -1740,6 +1813,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               ),
               Layer.provideMerge(TestHttpClientLive),
               Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+              Layer.provideMerge(AgentProcessPriorityOffLive),
               Layer.provideMerge(OpenCodeRuntimeLive),
               Layer.provideMerge(NodeServices.layer),
             ),
@@ -1838,6 +1912,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               Layer.provideMerge(Layer.succeed(ServerSettingsService, serverSettings)),
               Layer.provideMerge(TestHttpClientLive),
               Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+              Layer.provideMerge(AgentProcessPriorityOffLive),
               Layer.provideMerge(OpenCodeRuntimeLive),
               Layer.provideMerge(Layer.succeedContext(base)),
             ),
@@ -1914,6 +1989,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               ),
               Layer.provideMerge(TestHttpClientLive),
               Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+              Layer.provideMerge(AgentProcessPriorityOffLive),
               Layer.provideMerge(OpenCodeRuntimeLive),
               Layer.provideMerge(NodeServices.layer),
             ),
@@ -1965,6 +2041,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             ),
             Layer.provideMerge(TestHttpClientLive),
             Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+            Layer.provideMerge(AgentProcessPriorityOffLive),
             Layer.provideMerge(OpenCodeRuntimeLive),
             Layer.provideMerge(NodeServices.layer),
           );
@@ -2030,6 +2107,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               ),
               Layer.provideMerge(TestHttpClientLive),
               Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+              Layer.provideMerge(AgentProcessPriorityOffLive),
               Layer.provideMerge(OpenCodeRuntimeLive),
               Layer.provideMerge(
                 mockCommandSpawnerLayer((command, args) => {
@@ -2241,6 +2319,37 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         }).pipe(Effect.provide(claudeVersionSpawnerLayer));
       });
 
+      it.effect("reports a signed-out Claude Code as not authenticated", () =>
+        Effect.gen(function* () {
+          // What Claude Code 2.1 answers with no login and no API key.
+          const status = yield* checkClaudeProviderStatus(
+            defaultClaudeSettings,
+            claudeCapabilities({ tokenSource: "none", apiProvider: "firstParty" }),
+          );
+          assert.strictEqual(status.status, "error");
+          assert.strictEqual(status.auth.status, "unauthenticated");
+          assert.include(status.message ?? "", "claude auth login");
+        }).pipe(Effect.provide(claudeVersionSpawnerLayer)),
+      );
+
+      it.effect("keeps API keys, tokens and third-party backends authenticated", () =>
+        Effect.gen(function* () {
+          for (const account of [
+            { tokenSource: "none", apiKeySource: "ANTHROPIC_API_KEY", apiProvider: "firstParty" },
+            { tokenSource: "ANTHROPIC_AUTH_TOKEN", apiProvider: "firstParty" },
+            { tokenSource: "apiKeyHelper", apiKeySource: "apiKeyHelper" },
+            { tokenSource: "none", apiProvider: "bedrock" },
+            {},
+          ]) {
+            const status = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              claudeCapabilities(account),
+            );
+            assert.strictEqual(status.auth.status, "authenticated", JSON.stringify(account));
+          }
+        }).pipe(Effect.provide(claudeVersionSpawnerLayer)),
+      );
+
       it.effect(
         "includes Claude Opus 4.7 with fast mode and xhigh as the default effort on supported versions",
         () =>
@@ -2443,6 +2552,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             status.message,
             "Claude Code v2.1.218 is too old for Claude Opus 5. Upgrade to v2.1.219 or newer to access it.",
           );
+          assert.deepStrictEqual(status.updateRequiredModels, [
+            { slug: "claude-opus-5", name: "Claude Opus 5", minVersion: "2.1.219" },
+            { slug: "claude-fable-5-1", name: "Claude Fable 5.1", minVersion: "2.1.257" },
+          ]);
         }).pipe(
           Effect.provide(
             mockSpawnerLayer((args) => {
@@ -2454,6 +2567,82 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
                   stderr: "",
                   code: 0,
                 };
+              throw new Error(`Unexpected args: ${joined}`);
+            }),
+          ),
+        ),
+      );
+
+      it.effect(
+        "lists the models an update unlocks when the initialization result is unavailable",
+        () =>
+          Effect.gen(function* () {
+            const status = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              noClaudeCapabilities,
+            );
+            assert.strictEqual(status.status, "warning");
+            assert.deepStrictEqual(
+              status.updateRequiredModels?.map((model) => model.slug),
+              ["claude-opus-5", "claude-fable-5-1"],
+            );
+            assert.strictEqual(
+              status.models.some((model) => model.slug === "claude-opus-5"),
+              false,
+            );
+          }).pipe(
+            Effect.provide(
+              mockSpawnerLayer((args) => {
+                const joined = args.join(" ");
+                if (joined === "--version") return { stdout: "2.1.218\n", stderr: "", code: 0 };
+                throw new Error(`Unexpected args: ${joined}`);
+              }),
+            ),
+          ),
+      );
+
+      it.effect("needs no update notice for a gated model the user added as a custom model", () =>
+        Effect.gen(function* () {
+          const status = yield* checkClaudeProviderStatus(
+            { ...defaultClaudeSettings, customModels: ["claude-opus-5"] },
+            claudeCapabilities(),
+          );
+          assert.deepStrictEqual(
+            status.models.find((model) => model.slug === "claude-opus-5")?.isCustom,
+            true,
+          );
+          assert.deepStrictEqual(
+            status.updateRequiredModels?.map((model) => model.slug),
+            ["claude-fable-5-1"],
+          );
+        }).pipe(
+          Effect.provide(
+            mockSpawnerLayer((args) => {
+              const joined = args.join(" ");
+              if (joined === "--version") return { stdout: "2.1.218\n", stderr: "", code: 0 };
+              throw new Error(`Unexpected args: ${joined}`);
+            }),
+          ),
+        ),
+      );
+
+      it.effect("leaves out the update-required key once Claude Code runs every model", () =>
+        Effect.gen(function* () {
+          const status = yield* checkClaudeProviderStatus(
+            defaultClaudeSettings,
+            claudeCapabilities(),
+          );
+          assert.strictEqual(status.status, "ready");
+          assert.strictEqual("updateRequiredModels" in status, false);
+          assert.strictEqual(
+            status.models.some((model) => model.slug === "claude-fable-5-1"),
+            true,
+          );
+        }).pipe(
+          Effect.provide(
+            mockSpawnerLayer((args) => {
+              const joined = args.join(" ");
+              if (joined === "--version") return { stdout: "2.1.257\n", stderr: "", code: 0 };
               throw new Error(`Unexpected args: ${joined}`);
             }),
           ),
@@ -2967,6 +3156,195 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           ),
         ),
       );
+
+      describe("with Claude Code's own model report", () => {
+        const cliModels: ReadonlyArray<ClaudeCliModelInfo> = [
+          {
+            value: "claude-opus-5-5",
+            supportsAutoMode: false,
+            supportsFastMode: false,
+            supportedEffortLevels: ["low", "medium", "high"],
+          },
+          { value: "sonnet", resolvedModel: "claude-sonnet-5", supportsAutoMode: true },
+        ];
+        const claudeVersionLayer = (version: string) =>
+          mockSpawnerLayer((args) => {
+            const joined = args.join(" ");
+            if (joined === "--version") return { stdout: `${version}\n`, stderr: "", code: 0 };
+            throw new Error(`Unexpected args: ${joined}`);
+          });
+        const opusOf = (status: { readonly models: ReadonlyArray<ServerProviderModel> }) => {
+          const opus = status.models.find((model) => model.slug === "claude-opus-5-5");
+          if (!opus) assert.fail("Expected Claude Opus 5.5 in the snapshot.");
+          return opus;
+        };
+        const effortIds = (model: ServerProviderModel) => {
+          const effort = model.capabilities?.optionDescriptors?.find(
+            (descriptor) => descriptor.id === "effort",
+          );
+          return effort?.type === "select" ? effort.options.map((option) => option.id) : undefined;
+        };
+        const hasFastMode = (model: ServerProviderModel) =>
+          model.capabilities?.optionDescriptors?.some(
+            (descriptor) => descriptor.type === "boolean" && descriptor.id === "fastMode",
+          ) ?? false;
+
+        it.effect("carries Auto support and the narrowed controls on a ready snapshot", () =>
+          Effect.gen(function* () {
+            const status = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              claudeCapabilities({ models: cliModels }),
+            );
+            assert.strictEqual(status.status, "ready");
+            const opus = opusOf(status);
+            assert.strictEqual(opus.supportsAutoMode, false);
+            assert.isFalse(hasFastMode(opus));
+            assert.deepStrictEqual(effortIds(opus), ["low", "medium", "high"]);
+            assert.strictEqual(
+              status.models.find((model) => model.slug === "claude-sonnet-5")?.supportsAutoMode,
+              true,
+            );
+            // Models the report does not name keep the manifest's controls.
+            const opus46 = status.models.find((model) => model.slug === "claude-opus-4-6");
+            assert.strictEqual(opus46?.supportsAutoMode, undefined);
+            assert.isTrue(opus46 !== undefined && hasFastMode(opus46));
+          }).pipe(Effect.provide(claudeVersionLayer("1.0.0"))),
+        );
+
+        it.effect("keeps the last report of the same CLI version when a later probe has none", () =>
+          Effect.gen(function* () {
+            const memory = yield* makeClaudeCliModelMemory();
+            const options = { cliModelMemory: memory };
+            yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              claudeCapabilities({ models: cliModels }),
+              {},
+              undefined,
+              undefined,
+              options,
+            );
+
+            const failed = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              noClaudeCapabilities,
+              {},
+              undefined,
+              undefined,
+              options,
+            );
+            assert.strictEqual(failed.status, "warning");
+            assert.strictEqual(opusOf(failed).supportsAutoMode, false);
+            assert.isFalse(hasFastMode(opusOf(failed)));
+
+            const partial = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              claudeCapabilities(),
+              {},
+              undefined,
+              undefined,
+              options,
+            );
+            assert.strictEqual(partial.status, "ready");
+            assert.strictEqual(opusOf(partial).supportsAutoMode, false);
+            assert.deepStrictEqual(effortIds(opusOf(partial)), ["low", "medium", "high"]);
+          }).pipe(Effect.provide(claudeVersionLayer("1.0.0"))),
+        );
+
+        it.effect("asks for the capabilities of the CLI version it just read", () =>
+          Effect.gen(function* () {
+            const versions: Array<string | null> = [];
+            const resolve = (_settings: unknown, cliVersion: string | null) => {
+              versions.push(cliVersion);
+              return claudeCapabilities({ models: cliModels })();
+            };
+            yield* checkClaudeProviderStatus(defaultClaudeSettings, resolve).pipe(
+              Effect.provide(claudeVersionLayer("1.0.0")),
+            );
+            yield* checkClaudeProviderStatus(defaultClaudeSettings, resolve).pipe(
+              Effect.provide(claudeVersionLayer("1.0.1")),
+            );
+            assert.deepStrictEqual(versions, ["1.0.0", "1.0.1"]);
+          }),
+        );
+
+        it.effect("drops the remembered report once the CLI version changes", () =>
+          Effect.gen(function* () {
+            const memory = yield* makeClaudeCliModelMemory();
+            const options = { cliModelMemory: memory };
+            yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              claudeCapabilities({ models: cliModels }),
+              {},
+              undefined,
+              undefined,
+              options,
+            ).pipe(Effect.provide(claudeVersionLayer("1.0.0")));
+
+            const updated = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              noClaudeCapabilities,
+              {},
+              undefined,
+              undefined,
+              options,
+            ).pipe(Effect.provide(claudeVersionLayer("1.0.1")));
+            assert.strictEqual(opusOf(updated).supportsAutoMode, undefined);
+            assert.isTrue(hasFastMode(opusOf(updated)));
+
+            // Going back does not resurrect it either.
+            const reverted = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              noClaudeCapabilities,
+              {},
+              undefined,
+              undefined,
+              options,
+            ).pipe(Effect.provide(claudeVersionLayer("1.0.0")));
+            assert.strictEqual(opusOf(reverted).supportsAutoMode, undefined);
+          }),
+        );
+
+        it.effect("keeps each instance's report to itself", () =>
+          Effect.gen(function* () {
+            // A first-party instance and one routed through a proxy, each with its own memory.
+            const firstParty = { cliModelMemory: yield* makeClaudeCliModelMemory() };
+            const proxied = { cliModelMemory: yield* makeClaudeCliModelMemory() };
+            const firstPartyStatus = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              claudeCapabilities({
+                models: [{ value: "claude-opus-5-5", supportsAutoMode: true }],
+              }),
+              {},
+              undefined,
+              undefined,
+              firstParty,
+            );
+            const proxiedStatus = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              claudeCapabilities({ tokenSource: "ANTHROPIC_AUTH_TOKEN", models: cliModels }),
+              PROXIED_CLAUDE_ENVIRONMENT,
+              undefined,
+              undefined,
+              proxied,
+            );
+            assert.strictEqual(opusOf(firstPartyStatus).supportsAutoMode, true);
+            assert.isTrue(hasFastMode(opusOf(firstPartyStatus)));
+            assert.strictEqual(opusOf(proxiedStatus).supportsAutoMode, false);
+            assert.isFalse(hasFastMode(opusOf(proxiedStatus)));
+
+            const firstPartyFailed = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              noClaudeCapabilities,
+              {},
+              undefined,
+              undefined,
+              firstParty,
+            );
+            assert.strictEqual(opusOf(firstPartyFailed).supportsAutoMode, true);
+            assert.isTrue(hasFastMode(opusOf(firstPartyFailed)));
+          }).pipe(Effect.provide(claudeVersionLayer("1.0.0"))),
+        );
+      });
     });
   },
 );
@@ -3046,31 +3424,33 @@ const waitForProvider = (
   });
 
 describe("ProviderRegistry compatibility advisories", () => {
-  it.effect("rates an installed OpenCode 2.x as unsupported from the code floor", () =>
-    Effect.gen(function* () {
-      const instanceId = ProviderInstanceId.make("opencode");
-      const { runtimeServices } = yield* buildSingleInstanceRegistry({
-        instanceId,
-        driver: ProviderDriverKind.make("opencode"),
-        enabled: true,
-        installed: true,
-        version: "2.0.18",
-        status: "error",
-        auth: { status: "unknown" },
-        checkedAt: "2026-10-04T00:00:00.000Z",
-        message: "OpenCode v2.0.18 is not supported yet.",
-        models: [],
-        slashCommands: [],
-        skills: [],
-      });
+  it.effect(
+    "rates an installed OpenCode 2.x below its minimum as unsupported from the code floor",
+    () =>
+      Effect.gen(function* () {
+        const instanceId = ProviderInstanceId.make("opencode");
+        const { runtimeServices } = yield* buildSingleInstanceRegistry({
+          instanceId,
+          driver: ProviderDriverKind.make("opencode"),
+          enabled: true,
+          installed: true,
+          version: "2.0.18",
+          status: "error",
+          auth: { status: "unknown" },
+          checkedAt: "2026-10-04T00:00:00.000Z",
+          message: "OpenCode v2.0.18 is too old. Upgrade OpenCode 2 to v2.2.0 or newer.",
+          models: [],
+          slashCommands: [],
+          skills: [],
+        });
 
-      const provider = yield* waitForProvider(
-        instanceId,
-        (candidate) => candidate?.compatibilityAdvisory !== undefined,
-      ).pipe(Effect.provide(runtimeServices));
+        const provider = yield* waitForProvider(
+          instanceId,
+          (candidate) => candidate?.compatibilityAdvisory !== undefined,
+        ).pipe(Effect.provide(runtimeServices));
 
-      assert.strictEqual(provider?.compatibilityAdvisory?.status, "unsupported");
-    }),
+        assert.strictEqual(provider?.compatibilityAdvisory?.status, "unsupported");
+      }),
   );
 
   it.effect(

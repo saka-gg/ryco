@@ -3,6 +3,8 @@ import { constants } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 
+import { syncDirectory } from "../fsDurability.ts";
+
 // The owner-only, crash-atomic JSON record discipline the node's durable
 // security state is held under.
 //
@@ -298,12 +300,7 @@ export async function openProtectedStateFile(options: {
         file = undefined;
         await rename(temporaryPath, path);
         if (process.platform !== "win32") await chmod(path, 0o600);
-        const handle = await open(directory, constants.O_RDONLY);
-        try {
-          await handle.sync();
-        } finally {
-          await handle.close();
-        }
+        await syncDirectory(directory);
       } catch (error: unknown) {
         await file?.close().catch(() => undefined);
         await rm(temporaryPath, { force: true }).catch(() => undefined);

@@ -41,6 +41,8 @@ vi.mock("../RootAppShell", () => ({
       </div>
     );
   },
+  // The hosted root loads thread alerts from the shell's module.
+  ThreadAlertsBootstrap: () => null,
 }));
 
 import { hostedHubController, useHostedHubStore } from "../../hostedHub/state";

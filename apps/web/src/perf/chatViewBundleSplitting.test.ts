@@ -27,7 +27,6 @@ describe("chat route first-frame graph", () => {
       // The linked-item dialog statically reaches the work item detail views
       // and the raw-HTML markdown stack (parse5), about 330 KiB raw.
       "./worktrees/LinkedWorktreeItemDialog",
-      "./worktrees/NewWorktreeDialog",
       "./chat/ExpandedImageDialog",
       "./agent-control/AgentControlApprovals",
       "./delegation/DelegationDock",
@@ -47,10 +46,9 @@ describe("chat route first-frame graph", () => {
     const composer = await readSource("../components/chat/ChatComposer.tsx");
     expect(staticValueImports(composer, "../delegation/DelegationDock")).toEqual([]);
     expect(lazySurfaces).toContain('import("../delegation/DelegationDock")');
-    // The worktree dialogs are split once for the chat and the sidebar.
+    // The linked-item dialog is split once for the chat and the sidebar.
     const worktreeDialogs = await readSource("../components/worktrees/lazyWorktreeDialogs.ts");
     expect(worktreeDialogs).toContain('import("./LinkedWorktreeItemDialog")');
-    expect(worktreeDialogs).toContain('import("./NewWorktreeDialog")');
     // The new-thread source picker sits in the hero; its PR, issue and Jira
     // lists (in the panel it shares with the Tasks page) load with the
     // picker's first open.

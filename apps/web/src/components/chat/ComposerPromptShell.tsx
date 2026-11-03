@@ -6,19 +6,37 @@ import type {
 import { AttachmentPreviewButton } from "./AttachmentDocumentPreview";
 import { formatAttachmentBytes } from "./attachmentPreview";
 import { memo } from "react";
-import { CircleAlertIcon, FileIcon, PaperclipIcon, RotateCcwIcon, XIcon } from "lucide-react";
+import {
+  type ComposerReferenceDraft,
+  isPastedTextAttachment,
+} from "@ryco/client-runtime/state/composer";
+import {
+  CircleAlertIcon,
+  ClipboardPasteIcon,
+  FileIcon,
+  PaperclipIcon,
+  RotateCcwIcon,
+  XIcon,
+} from "lucide-react";
 import type { ComposerImageAttachment } from "../../composerDraftStore";
 import type { ChatFileUploadRecord } from "../../composerFileUpload";
 import { isFileUploadTokenUsable } from "../../composerFileUpload";
 import type { ComposerTrigger } from "../../composer-logic";
 import type { TerminalContextDraft } from "../../lib/terminalContext";
 import type { SessionPhase, Thread } from "../../types";
-import { type ComposerPromptEditorHandle, ComposerPromptEditor } from "../ComposerPromptEditor";
+import {
+  type ComposerPromptEditorHandle,
+  type ComposerTextPaste,
+  type ComposerTextPasteResult,
+  ComposerPromptEditor,
+} from "../ComposerPromptEditor";
 import { ComposerCommandMenuOverlay } from "./ComposerAttachmentMenus";
 import type { ComposerMenuEmptyState } from "./composerPathMenu";
 import { type ComposerCommandItem } from "./ComposerCommandMenu";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
+import { ComposerReferenceChip } from "./FileReferenceChip";
+import { SendGlyph } from "./SendGlyph";
 import { SourceControlContextChip } from "./SourceControlContextChip";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -40,12 +58,19 @@ export interface ComposerPromptShellProps {
   editorRef: React.RefObject<ComposerPromptEditorHandle | null>;
   /** Whose prompt the editor holds; its undo history never crosses to another. */
   historyScope: string;
+  /** The thread on screen, where a quote chip shows its passage; null for a draft. */
+  threadKey: string | null;
   /** Thread mentions in the prompt are named from this environment's threads. */
   environmentId: EnvironmentId;
 
   isComposerCollapsedMobile: boolean;
   hasComposerHeader: boolean;
-  isComposerApprovalState: boolean;
+  /**
+   * An approval waits and the editor gives way to it: on the frozen phone tier, or while a
+   * question waits too. Elsewhere the editor keeps the draft while an approval waits, and a
+   * send declines and redirects.
+   */
+  isApprovalLocked: boolean;
   resolvedTheme: "light" | "dark";
 
   // Command menu overlay
@@ -64,6 +89,10 @@ export interface ComposerPromptShellProps {
   onRemoveSourceControlContext: (id: string) => void;
   /** Chips shown before the source-control contexts (a task draft's task). */
   leadingContextChips?: React.ReactNode;
+
+  // Reference chips: lines from the Review and Files panels, page elements from the Browser panel
+  composerFileReferences: ReadonlyArray<ComposerReferenceDraft>;
+  onRemoveFileReference: (id: string) => void;
 
   // Image attachments
   composerImages: ComposerImageAttachment[];
@@ -94,6 +123,7 @@ export interface ComposerPromptShellProps {
     event: KeyboardEvent,
   ) => boolean;
   onComposerPaste: (event: React.ClipboardEvent<HTMLElement>) => void;
+  onComposerPasteText: (paste: ComposerTextPaste) => ComposerTextPasteResult;
 
   // Placeholder / disabled state
   activePendingProgress: ComposerPromptShellPendingProgress | null;
@@ -101,7 +131,7 @@ export interface ComposerPromptShellProps {
   activeProposedPlan: Thread["proposedPlans"][number] | null;
   environmentUnavailable: {
     readonly label: string;
-    readonly connectionState: "connecting" | "disconnected" | "error";
+    readonly connectionState: "connecting" | "disconnected" | "error" | "switched-off";
   } | null;
   phase: SessionPhase;
   /** While a turn runs: the effective Enter action and its alternate shortcut. */
@@ -138,10 +168,11 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
   const {
     editorRef,
     historyScope,
+    threadKey,
     environmentId,
     isComposerCollapsedMobile,
     hasComposerHeader,
-    isComposerApprovalState,
+    isApprovalLocked,
     resolvedTheme,
     composerMenuOpen,
     composerMenuItems,
@@ -155,6 +186,8 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
     composerSourceControlContexts,
     onRemoveSourceControlContext,
     leadingContextChips,
+    composerFileReferences,
+    onRemoveFileReference,
     composerImages,
     nonPersistedComposerImageIdSet,
     fileUploadRecords,
@@ -172,6 +205,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
     onPromptChange,
     onComposerCommandKey,
     onComposerPaste,
+    onComposerPasteText,
     activePendingProgress,
     showPlanFollowUpPrompt,
     activeProposedPlan,
@@ -199,7 +233,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
       )}
     >
       <ComposerCommandMenuOverlay
-        open={composerMenuOpen && !isComposerApprovalState}
+        open={composerMenuOpen && !isApprovalLocked}
         items={composerMenuItems}
         resolvedTheme={resolvedTheme}
         isLoading={isComposerMenuLoading}
@@ -214,9 +248,11 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
       />
 
       {!isComposerCollapsedMobile &&
-        !isComposerApprovalState &&
+        !isApprovalLocked &&
         pendingUserInputCount === 0 &&
-        (leadingContextChips || composerSourceControlContexts.length > 0) && (
+        (leadingContextChips ||
+          composerSourceControlContexts.length > 0 ||
+          composerFileReferences.length > 0) && (
           <div className="mb-2 flex flex-wrap gap-1.5">
             {leadingContextChips}
             {composerSourceControlContexts.map((ctx) => (
@@ -226,11 +262,19 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
                 onRemove={onRemoveSourceControlContext}
               />
             ))}
+            {composerFileReferences.map((reference) => (
+              <ComposerReferenceChip
+                key={reference.id}
+                reference={reference}
+                theme={resolvedTheme}
+                onRemove={() => onRemoveFileReference(reference.id)}
+              />
+            ))}
           </div>
         )}
 
       {!isComposerCollapsedMobile &&
-        !isComposerApprovalState &&
+        !isApprovalLocked &&
         pendingUserInputCount === 0 &&
         composerImages.length > 0 && (
           <div className="mb-3 flex flex-wrap gap-2">
@@ -312,10 +356,11 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
           <ComposerPromptEditor
             ref={editorRef}
             historyScope={historyScope}
+            threadKey={threadKey}
             environmentId={environmentId}
             collapsed={isComposerCollapsedMobile}
             value={
-              isComposerApprovalState
+              isApprovalLocked
                 ? ""
                 : activePendingProgress
                   ? activePendingProgress.customAnswer
@@ -323,9 +368,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
             }
             cursor={composerCursor}
             terminalContexts={
-              !isComposerApprovalState && pendingUserInputCount === 0
-                ? composerTerminalContexts
-                : []
+              !isApprovalLocked && pendingUserInputCount === 0 ? composerTerminalContexts : []
             }
             skills={skills}
             {...(showMobilePendingAnswerActions ? { className: "phone:pb-11" } : {})}
@@ -333,8 +376,9 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
             onChange={onPromptChange}
             onCommandKeyDown={onComposerCommandKey}
             onPaste={onComposerPaste}
+            onPasteText={onComposerPasteText}
             placeholder={
-              isComposerApprovalState
+              isApprovalLocked
                 ? // The full approval detail renders as a scrollable block in the
                   // pending-approval panel; the clipped placeholder only carries
                   // the generic hint.
@@ -353,7 +397,9 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
                       ? `${environmentUnavailable.label} is ${
                           environmentUnavailable.connectionState === "connecting"
                             ? "connecting"
-                            : "disconnected"
+                            : environmentUnavailable.connectionState === "switched-off"
+                              ? "switched off"
+                              : "disconnected"
                         }`
                       : phase === "disconnected"
                         ? "Ask for follow-up changes or attach images"
@@ -384,15 +430,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
               onCollapsedSend();
             }}
           >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path
-                d="M8 3L8 13M8 3L4 7M8 3L12 7"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
+            <SendGlyph className="size-4" />
           </button>
         ) : null}
         {showMobilePendingAnswerActions ? (
@@ -443,13 +481,16 @@ const ComposerFileAttachmentRow = memo(function ComposerFileAttachmentRow({
     image.uploadToken !== undefined &&
     image.expiresAt !== undefined &&
     isFileUploadTokenUsable(image.expiresAt, Date.now());
+  // A saved draft's file whose bytes are still loading is not missing them.
   const needsReattach =
     status === undefined
-      ? image.file === null && !hasValidUploadToken
+      ? image.file === null && !image.bytesPending && !hasValidUploadToken
       : status.kind === "needsReattach";
   const isUploading = status?.kind === "uploading" || status?.kind === "pending";
   const isUploaded = status?.kind === "uploaded";
   const progress = status?.kind === "uploading" ? status.progress : null;
+  const isPastedText = isPastedTextAttachment(image);
+  const KindIcon = isPastedText ? ClipboardPasteIcon : FileIcon;
   return (
     <div
       className="relative flex h-16 min-w-44 max-w-56 items-center gap-2 overflow-hidden rounded-lg border border-border/80 bg-background px-3 py-2"
@@ -457,7 +498,7 @@ const ComposerFileAttachmentRow = memo(function ComposerFileAttachmentRow({
         needsReattach ? "reattach" : isUploading ? "uploading" : isUploaded ? "uploaded" : "ready"
       }
     >
-      <FileIcon className="size-4 shrink-0 text-muted-foreground" />
+      <KindIcon className="size-4 shrink-0 text-muted-foreground" />
       <span className="min-w-0 flex-1">
         <span className="block truncate text-xs font-medium">{image.name}</span>
         {needsReattach ? (
@@ -492,6 +533,7 @@ const ComposerFileAttachmentRow = memo(function ComposerFileAttachmentRow({
           </span>
         ) : (
           <span className="block text-[10px] text-muted-foreground">
+            {isPastedText ? "Pasted text · " : ""}
             {formatAttachmentBytes(image.sizeBytes)}
             {isUploaded ? " · Uploaded" : ""}
           </span>

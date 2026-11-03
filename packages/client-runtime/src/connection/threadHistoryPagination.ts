@@ -32,6 +32,25 @@ export interface ThreadHistoryPaginationController {
   }) => Promise<OrchestrationThreadHistoryPage | null>;
 }
 
+function threadHistoryErrorReason(error: unknown): unknown {
+  const record =
+    typeof error === "object" && error !== null
+      ? (error as { readonly _tag?: unknown; readonly reason?: unknown })
+      : null;
+  return record?._tag === "OrchestrationThreadHistoryError" ? record.reason : undefined;
+}
+
+/**
+ * Whether a rejected `loadAroundMessage` says the message is gone: the server
+ * answers stale-cursor for an anchor the thread no longer has, and
+ * thread-not-found for a thread it no longer has. Any other rejection (a
+ * dropped connection, a timeout) says nothing about the message.
+ */
+export function isThreadHistoryAnchorMissing(error: unknown): boolean {
+  const reason = threadHistoryErrorReason(error);
+  return reason === "stale-cursor" || reason === "thread-not-found";
+}
+
 export function createThreadHistoryPaginationController(deps: {
   readonly request: (
     environmentId: EnvironmentId,
@@ -103,15 +122,28 @@ export function createThreadHistoryPaginationController(deps: {
         return page;
       })
       .catch(async (error: unknown) => {
-        const errorRecord =
-          typeof error === "object" && error !== null
-            ? (error as { readonly _tag?: unknown; readonly reason?: unknown })
-            : null;
+        // Around a message (or thread) that is gone, the server answers
+        // stale-cursor (or thread-not-found) though nothing loaded is stale or
+        // failed. A resnapshot would reload the window for nothing and resolve
+        // as if the load worked, and an error would show on the older-messages
+        // loader; the caller needs the answer (a reveal settles on it).
+        if (input.request.mode.kind === "around" && isThreadHistoryAnchorMissing(error)) {
+          if (currentGeneration(input.scope) === generation) {
+            deps.setRequestState({
+              ...input.scope,
+              collection: input.collection,
+              status: "idle",
+              cursor: null,
+              error: null,
+            });
+          }
+          throw error;
+        }
+        const historyErrorReason = threadHistoryErrorReason(error);
         const shouldRecover =
-          errorRecord?._tag === "OrchestrationThreadHistoryError" &&
-          (errorRecord.reason === "stale-cursor" ||
-            errorRecord.reason === "invalid-cursor" ||
-            errorRecord.reason === "unsupported-version");
+          historyErrorReason === "stale-cursor" ||
+          historyErrorReason === "invalid-cursor" ||
+          historyErrorReason === "unsupported-version";
         if (shouldRecover && deps.recoverStale && currentGeneration(input.scope) === generation) {
           try {
             await deps.recoverStale(input.scope);
