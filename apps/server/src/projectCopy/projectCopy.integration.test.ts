@@ -23,7 +23,6 @@ import {
 } from "node:fs";
 import path from "node:path";
 
-import * as NodeServices from "@effect/platform-node/NodeServices";
 import { afterEach, assert, describe, it } from "@effect/vitest";
 import { CommandId, ProjectId, ProviderInstanceId, type ProjectScript } from "@ryco/contracts";
 import {
@@ -43,23 +42,12 @@ import {
   type ProjectImportSnapshot,
   type ProjectImportStartInput,
 } from "@ryco/contracts/project-copy";
-import { Context, Effect, Layer, Option, Stream } from "effect";
-import type { Scope } from "effect";
+import { Effect, Option, Stream } from "effect";
 
-import { ServerConfig } from "../config.ts";
-import { OrchestrationLayerLive } from "../orchestration/runtimeLayer.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { ProjectionProjectRepositoryLive } from "../persistence/Layers/ProjectionProjects.ts";
-import { layerConfig as SqlitePersistenceLive } from "../persistence/Layers/Sqlite.ts";
-import { ProjectAvatarStoreLive } from "../project/Layers/ProjectAvatarStore.ts";
-import { RepositoryIdentityResolverLive } from "../project/Layers/RepositoryIdentityResolver.ts";
 import { RepositoryIdentityResolver } from "../project/Services/RepositoryIdentityResolver.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
-import { SourceControlProviderRegistry } from "../sourceControl/SourceControlProviderRegistry.ts";
-import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
-import { WorkspaceAccessPolicyLayer } from "../workspace/Layers/WorkspaceAccessPolicy.ts";
-import { WorkspacePathsLive } from "../workspace/Layers/WorkspacePaths.ts";
 import { ProjectCopyServicesLive } from "./Layers/ProjectCopyServices.ts";
 import { PROJECT_IMPORTS_DIRECTORY, PROJECT_TRANSFERS_DIRECTORY } from "./projectCopyStartup.ts";
 import {
@@ -71,6 +59,7 @@ import {
   withSimulatedLatency,
   writeFakeSsh,
 } from "./projectCopyGit.fixtures.ts";
+import { startProjectCopyNode } from "./projectCopyNodes.fixtures.ts";
 import { ProjectExport } from "./Services/ProjectExport.ts";
 import { ProjectImports } from "./Services/ProjectImports.ts";
 import { ProjectTransfers } from "./Services/ProjectTransfers.ts";
@@ -102,49 +91,10 @@ const COPIED_FILES = [
 
 // ── Nodes ─────────────────────────────────────────────────────────────
 
-/** One node: its own state directory and database, the real project copy services on top. */
-const nodeLayer = (baseDir: string) =>
-  ProjectCopyServicesLive.pipe(
-    Layer.provideMerge(OrchestrationLayerLive),
-    Layer.provideMerge(ProjectionProjectRepositoryLive),
-    Layer.provideMerge(
-      Layer.unwrap(
-        Effect.gen(function* () {
-          const config = yield* ServerConfig;
-          return ProjectAvatarStoreLive({ dataDir: config.stateDir });
-        }),
-      ),
-    ),
-    Layer.provideMerge(RepositoryIdentityResolverLive),
-    Layer.provideMerge(GitVcsDriver.layer),
-    Layer.provideMerge(
-      Layer.mock(SourceControlProviderRegistry)({ detectProviderFromRemoteUrl: () => null }),
-    ),
-    Layer.provideMerge(WorkspacePathsLive),
-    Layer.provideMerge(WorkspaceAccessPolicyLayer(undefined)),
-    Layer.provideMerge(ServerSettingsService.layerTest()),
-    Layer.provideMerge(SqlitePersistenceLive),
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
-    Layer.provideMerge(NodeServices.layer),
-  );
-
-type NodeServicesOf = Layer.Success<ReturnType<typeof nodeLayer>>;
-type NodeBuildError = Layer.Error<ReturnType<typeof nodeLayer>>;
-
-interface TestNode {
-  readonly stateDir: string;
-  readonly run: <A, E>(effect: Effect.Effect<A, E, NodeServicesOf>) => Effect.Effect<A, E>;
-}
+type TestNode = Effect.Success<ReturnType<typeof startNode>>;
 
 /** Builds a node in the test's scope; a second call builds a second, separate node. */
-const startNode = (name: string): Effect.Effect<TestNode, NodeBuildError, Scope.Scope> =>
-  Effect.gen(function* () {
-    const context = yield* Layer.build(nodeLayer(roots.make(`ryco-xnode-${name}-`)));
-    return {
-      stateDir: Context.get(context, ServerConfig).stateDir,
-      run: (effect) => Effect.provideContext(effect, context),
-    };
-  });
+const startNode = (name: string) => startProjectCopyNode(roots, name, ProjectCopyServicesLive);
 
 // ── Fixture ───────────────────────────────────────────────────────────
 
