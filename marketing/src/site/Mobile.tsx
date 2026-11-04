@@ -211,8 +211,26 @@ export function Mobile() {
         scrollTrigger: { trigger: pin, start: "top bottom", end: "top top", scrub: 0.8 },
       });
 
+      /* a hidden chapter's loop shouldn't keep decoding: every other
+         chapter's video is held (LoopVideo won't start a held video) */
+      const videos = Array.from(screens).map((el) => (el instanceof HTMLVideoElement ? el : null));
+      let active = -1;
+      const showChapter = (i: number) => {
+        if (i === active) return;
+        active = i;
+        videos.forEach((v, k) => {
+          if (!v) return;
+          v.toggleAttribute("data-hold", k !== i);
+          if (k === i) v.play().catch(() => {});
+          else v.pause();
+        });
+      };
+      showChapter(0);
+
       const tl = gsap.timeline({
         defaults: { ease: "ryco.inOut", duration: 0.5 },
+        /* chapter i takes over at time i - 0.25 (see below) */
+        onUpdate: () => showChapter(Math.min(n - 1, Math.floor(tl.time() + 0.25))),
         scrollTrigger: {
           trigger: pin,
           start: "top top",
@@ -249,6 +267,7 @@ export function Mobile() {
       }
       /* a short hold on the last chapter before the pin releases */
       tl.to({}, { duration: 0.35 });
+      return () => videos.forEach((v) => v?.removeAttribute("data-hold"));
     });
     return () => mm.revert();
   });

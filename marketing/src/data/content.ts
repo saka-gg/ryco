@@ -235,8 +235,8 @@ export const CLOUD = {
       body: "Sign in with a passkey, or a password plus a second factor. Remove a device, or the whole account, whenever you like.",
     },
     {
-      title: "Encrypted to your machine",
-      body: "Sessions are encrypted between your device and the machine that runs the work, and each connection says how it is protected.",
+      title: "Encrypted end to end, where it can be",
+      body: "When both ends support it, sessions are encrypted between your device and the machine that runs the work. Each connection says how it's protected, and a machine can refuse anything less.",
     },
     {
       title: "No ports to open",

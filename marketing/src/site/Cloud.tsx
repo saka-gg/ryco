@@ -49,7 +49,8 @@ interface Layout {
   web: Box;
   phone: Box;
   paths: Record<Wire, string>;
-  /** one lock at the midpoint of every wire: each hop is encrypted */
+  /** one lock at the midpoint of every wire: every hop runs over TLS (the
+   *  payload inside is end-to-end encrypted only when both ends support it) */
   locks: Array<{ x: number; y: number }>;
 }
 
@@ -367,7 +368,7 @@ function Diagram({ L }: { L: Layout }) {
             </div>
           </div>
           <div className="flex h-10 shrink-0 items-center gap-2 border-t border-white/[0.06] px-3.5 text-[11.5px] text-ink/50">
-            <Network className="size-3.5 shrink-0 text-accent" /> Relayed live, stored nowhere
+            <Network className="size-3.5 shrink-0 text-accent" /> Relayed live from your machines
           </div>
         </div>
 

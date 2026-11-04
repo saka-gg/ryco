@@ -1,7 +1,8 @@
 /**
  * A muted product loop (real screen recordings in /public/media). It loads
  * nothing until it nears the viewport, plays only while visible, and under
- * reduced motion stays on its poster frame.
+ * reduced motion stays on its poster frame. An owner that hides the video
+ * itself (the phone's chapters) sets `data-hold` and drives play/pause.
  */
 import { useEffect, useRef } from "react";
 import { useReducedMotion } from "@/lib/motion";
@@ -27,6 +28,7 @@ export function LoopVideo({
     const io = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
+          if (video.hasAttribute("data-hold")) return;
           if (video.preload === "none") video.preload = "auto";
           /* autoplay can still be refused (data saver, low power); the poster stays */
           video.play().catch(() => {});

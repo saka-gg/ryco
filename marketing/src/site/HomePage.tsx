@@ -15,6 +15,11 @@ import { Nav } from "./Nav";
 import { ProductFilm } from "./ProductFilm";
 import { Toolkit } from "./Toolkit";
 
+/** The "Look closer" capture gallery is hidden for now: the page already
+ *  carries the film, the live demos and the phone. Its captures and SHOTS
+ *  stay, so flipping this brings it back. */
+const SHOW_GALLERY = false;
+
 export default function HomePage() {
   useSmoothScroll();
   usePauseOffscreenLoops();
@@ -26,7 +31,7 @@ export default function HomePage() {
         <ProductFilm />
         <Agents />
         <Latest />
-        <Gallery />
+        {SHOW_GALLERY && <Gallery />}
         <Toolkit />
         <Cloud />
         <Mobile />
