@@ -144,6 +144,14 @@ export function ProjectSwitcher({
   const preload = useCallback(() => {
     void ProjectSelectorBody.preload();
   }, []);
+  // The headline's popup centers under the whole headline rather than under
+  // the project name inside it (which sits right of center), at its own width
+  // (`min-w-0` drops the popup's anchor-width minimum); the chip and the
+  // sentence open from their own start.
+  const headlineAnchor = useCallback(
+    () => triggerRef.current?.closest("h1") ?? triggerRef.current,
+    [],
+  );
   const beginHostedProjectMove = useCallback<(typeof hostedDraftTargetController)["beginProject"]>(
     (input) => hostedDraftTargetController.beginProject(input),
     [],
@@ -194,10 +202,10 @@ export function ProjectSwitcher({
         <span className={appearance === "headline" ? undefined : "min-w-0 truncate"}>{label}</span>
       </ComboboxTrigger>
       <ComboboxPopup
-        anchor={triggerRef}
-        align="start"
+        anchor={appearance === "headline" ? headlineAnchor : triggerRef}
+        align={appearance === "headline" ? "center" : "start"}
         side={appearance === "chip" ? "top" : "bottom"}
-        className="w-[440px] overflow-hidden rounded-xl font-normal text-[13px] tracking-normal"
+        className="w-[440px] min-w-0 overflow-hidden rounded-xl font-normal text-[13px] tracking-normal"
         popupClassName="max-h-[min(var(--available-height),30rem)]"
         data-testid="project-selector"
       >
