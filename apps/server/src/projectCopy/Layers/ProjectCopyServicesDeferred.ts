@@ -152,17 +152,17 @@ export const makeProjectCopyServicesDeferred = Effect.fnUntraced(function* (
   const projectExport = ProjectExport.of({
     inspect: (input) => Effect.flatMap(copy, (s) => s.projectExport.inspect(input)),
     start: (request) => Effect.flatMap(copy, (s) => s.projectExport.start(request)),
-    readChunk: (input, channel) =>
-      Effect.flatMap(copy, (s) => s.projectExport.readChunk(input, channel)),
+    readChunk: (input, channel, maxChunkBytes) =>
+      Effect.flatMap(copy, (s) => s.projectExport.readChunk(input, channel, maxChunkBytes)),
     dispose: (input) => Effect.flatMap(copy, (s) => s.projectExport.dispose(input)),
     sweep: () => Effect.flatMap(infallible, (s) => s.projectExport.sweep()),
   });
 
   const projectTransfers = ProjectTransfers.of({
-    begin: (input, channel) =>
-      Effect.flatMap(copy, (s) => s.projectTransfers.begin(input, channel)),
-    append: (input, channel) =>
-      Effect.flatMap(copy, (s) => s.projectTransfers.append(input, channel)),
+    begin: (input, channel, maxChunkBytes) =>
+      Effect.flatMap(copy, (s) => s.projectTransfers.begin(input, channel, maxChunkBytes)),
+    append: (input, channel, maxChunkBytes) =>
+      Effect.flatMap(copy, (s) => s.projectTransfers.append(input, channel, maxChunkBytes)),
     commit: (input) => Effect.flatMap(copy, (s) => s.projectTransfers.commit(input)),
     abort: (input) => Effect.flatMap(copy, (s) => s.projectTransfers.abort(input)),
     claimForImport: (input) =>

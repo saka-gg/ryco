@@ -24,6 +24,15 @@ const unused = () => Effect.die("unused");
 /** Fake services, and how often their module was loaded and recovery ran. */
 const makeFakeModule = (options: { readonly failFirstLoad?: boolean } = {}) => {
   const counts = { loads: 0, builds: 0, recoveries: 0 };
+  /** The arguments each chunk-carrying call reached the real service with. */
+  const forwarded: Array<readonly [string, ...ReadonlyArray<unknown>]> = [];
+  const record =
+    (method: string) =>
+    (...args: ReadonlyArray<unknown>) =>
+      Effect.sync(() => {
+        forwarded.push([method, ...args]);
+        return {} as never;
+      });
   const imports: ProjectImportsShape = {
     start: unused,
     get: () => Effect.succeed(Option.none()),
@@ -41,8 +50,13 @@ const makeFakeModule = (options: { readonly failFirstLoad?: boolean } = {}) => {
       counts.builds += 1;
       return Context.make(NodePaths, {} as NodePathsShape).pipe(
         Context.add(GitNetwork, {} as GitNetworkShape),
-        Context.add(ProjectExport, {} as ProjectExportShape),
-        Context.add(ProjectTransfers, {} as ProjectTransfersShape),
+        Context.add(ProjectExport, {
+          readChunk: record("readChunk"),
+        } as unknown as ProjectExportShape),
+        Context.add(ProjectTransfers, {
+          begin: record("begin"),
+          append: record("append"),
+        } as unknown as ProjectTransfersShape),
         Context.add(ProjectImports, imports),
       );
     }),
@@ -52,24 +66,31 @@ const makeFakeModule = (options: { readonly failFirstLoad?: boolean } = {}) => {
     if (options.failFirstLoad === true && counts.loads === 1) throw new Error("chunk missing");
     return { ProjectCopyServicesLive: layer as never };
   };
-  return { counts, load };
+  return { counts, forwarded, load };
 };
 
 const withDeferred = <A, E>(
   load: () => Promise<ProjectCopyServicesModule>,
   use: (services: {
     readonly imports: ProjectImportsShape;
+    readonly exporter: ProjectExportShape;
+    readonly transfers: ProjectTransfersShape;
     readonly stateDir: string;
   }) => Effect.Effect<A, E, SqlClient.SqlClient>,
 ) =>
   Effect.gen(function* () {
     const context = yield* makeProjectCopyServicesDeferred(load) as Effect.Effect<
-      Context.Context<ProjectImports>,
+      Context.Context<ProjectImports | ProjectExport | ProjectTransfers>,
       never,
       never
     >;
     const config = yield* ServerConfig;
-    return yield* use({ imports: Context.get(context, ProjectImports), stateDir: config.stateDir });
+    return yield* use({
+      imports: Context.get(context, ProjectImports),
+      exporter: Context.get(context, ProjectExport),
+      transfers: Context.get(context, ProjectTransfers),
+      stateDir: config.stateDir,
+    });
   }).pipe(
     Effect.scoped,
     Effect.provide(
@@ -101,6 +122,26 @@ describe("ProjectCopyServicesDeferred", () => {
         // Once loaded, a start's recovery always runs.
         yield* imports.recoverOnStartup();
         assert.equal(fake.counts.recoveries, 1);
+      }),
+    );
+  });
+
+  it.effect("passes the caller's channel and chunk limit through to the real services", () => {
+    const fake = makeFakeModule();
+    return withDeferred(fake.load, ({ exporter, transfers }) =>
+      Effect.gen(function* () {
+        const read = { exportId: "export-1" } as never;
+        const begin = { transferId: "transfer-1" } as never;
+        const append = { transferId: "transfer-1" } as never;
+        yield* exporter.readChunk(read, "unencrypted", 160 * 1024);
+        yield* transfers.begin(begin, "unencrypted", 160 * 1024);
+        yield* transfers.append(append, "encrypted", 160 * 1024);
+        // A relayed caller's limit, not the direct default the real services fall back to.
+        assert.deepEqual(fake.forwarded, [
+          ["readChunk", read, "unencrypted", 160 * 1024],
+          ["begin", begin, "unencrypted", 160 * 1024],
+          ["append", append, "encrypted", 160 * 1024],
+        ]);
       }),
     );
   });
