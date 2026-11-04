@@ -10,6 +10,7 @@ This document covers the unified release workflow for stable and nightly desktop
 - Verify runs alongside the builds: `.github/workflows/_validation.yml` at the release commit (format, lint, typecheck, unit tests, the build, the mobile bundle and release smoke). It skips the desktop build, because the build legs produce the real artifacts, and it skips browser tests, as the release preflight did before.
   - Verify is skipped when a successful `ci.yml` run on `main` exists for the same SHA: that run covered a superset of these checks. Releases from any other branch always run Verify.
   - Nothing is published unless Verify passed or was skipped for that reason.
+- Builds the platform-independent JS once (web client, server bundle, Electron main and preload) in the `Build JS bundle` job and shares it as the `js-bundle` artifact. The build legs start in parallel with it, run their own setup, and wait for the artifact only right before packaging; each leg still builds its own native helpers and target resource monitor (`--prebuilt-js`). The npm package ships the same server build.
 - Builds five artifacts in parallel for both channels:
   - macOS `arm64` DMG
   - Linux `x64` AppImage
@@ -200,17 +201,16 @@ Checklist:
    - run `npm publish --access public --tag latest`
 5. Nightly runs from the same workflow file publish with `npm publish --access public --tag nightly`.
 
-## 1) Dry-run release without signing
+## 1) Dry-run release
 
-Use this first to validate the release pipeline.
+Use this to test changes to the release pipeline. A dry run resolves the version, builds the JS
+bundle and all five desktop artifacts with the configured signing, and uploads them as workflow
+artifacts. It skips Verify and publishes nothing: no npm package, no GitHub Release, no tag.
 
-1. Confirm no signing secrets are required for this test.
-2. Create a test tag:
-   - `git tag v0.0.0-test.1`
-   - `git push origin v0.0.0-test.1`
-3. Wait for `.github/workflows/release.yml` to finish.
-4. Verify the GitHub Release contains all platform artifacts.
-5. Download each artifact and sanity-check installation on each OS.
+1. Dispatch the workflow from the branch under test:
+   `gh workflow run release.yml --ref <branch> -f channel=nightly -f dry_run=true`
+2. Wait for the run to finish and download the `desktop-*` artifacts from it.
+3. Sanity-check installation on each OS.
 
 ## 2) Apple signing + notarization setup (macOS)
 

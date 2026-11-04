@@ -50,6 +50,7 @@
     "start:mock-update-server": "node scripts/mock-update-server.ts",
     "build": "turbo run build",
     "build:desktop": "turbo run build --filter=@ryco/desktop --filter=ryco-cli",
+    "build:desktop:bundle": "turbo run build --filter=ryco-cli && bun run --cwd apps/desktop build:bundle",
     "typecheck": "turbo run typecheck",
     "typecheck:fast": "turbo run typecheck:fast",
     "check": "vp check --quiet && turbo run typecheck:fast --continue --output-logs=errors-only",
