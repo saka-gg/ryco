@@ -105,7 +105,7 @@ export const PANES: Pane[] = [
   },
   {
     thread: "t2",
-    model: "GPT-5.6 Sol",
+    model: "GPT-6.1-Sol",
     rows: [
       { verb: "Read", target: "themes/editor.tsx" },
       { verb: "Edited", target: "themes/tokens.ts", meta: { add: 84, del: 31 } },

@@ -15,14 +15,20 @@
  */
 import { gsap } from "@/lib/motion";
 import {
+  BODY_W,
+  CHAT_W,
+  EMPTY_LIFT,
   FULL_CROP,
   HEADER_H,
   NARROW_CROP,
   REVIEW_W,
+  SCROLL_DONE,
+  SCROLL_REVIEW,
   SIDEBAR_W,
   STAGE_H,
   STAGE_W,
   TERMINAL_H,
+  THREAD_SCROLL,
 } from "./Stage";
 import { ANSWER, PROMPT, SPLIT_PANES, TERMINAL_CMD } from "./script";
 
@@ -35,7 +41,7 @@ export const CHAPTERS = [
     line: "Every agent at once, four threads side by side in split view.",
   },
   { id: "review", title: "Review", line: "Per-turn diffs. Click a line to land in your editor." },
-  { id: "run", title: "Run", line: "Real terminals in a drawer, right beside the thread." },
+  { id: "run", title: "Run", line: "Real terminals in a drawer, right under the thread." },
 ] as const;
 
 export type ChapterId = (typeof CHAPTERS)[number]["id"];
@@ -47,7 +53,7 @@ export const CHAPTER_AT: Record<ChapterId | "end", number> = {
   parallel: 5.7,
   review: 8.2,
   run: 11.1,
-  end: 14.2,
+  end: 15.1,
 };
 
 const setText = (el: Element | null, text: string) => {
@@ -56,6 +62,10 @@ const setText = (el: Element | null, text: string) => {
   if (node && node.nodeType === Node.TEXT_NODE) node.nodeValue = text;
   else el.textContent = text;
 };
+
+/* The workspace panel toggle, pressed (review open) and not. */
+const PANEL_ON = { backgroundColor: "rgba(236,236,237,0.1)", color: "#ececed" };
+const PANEL_OFF = { backgroundColor: "rgba(236,236,237,0)", color: "rgba(178,178,178,0.72)" };
 
 export function buildFilm(root: HTMLElement, opts: { narrow: boolean }) {
   const q = <T extends HTMLElement = HTMLElement>(s: string, scope: ParentNode = root) =>
@@ -78,6 +88,13 @@ export function buildFilm(root: HTMLElement, opts: { narrow: boolean }) {
   const review = q("review");
   const terminal = q("terminal");
   const termLines = qa("term-line");
+  const crown = q("crown");
+  const crownDot = q("crown-dot");
+  const panelBtn = q("btn-panel");
+  const send = q("send");
+  const stop = q("stop");
+  const editor = q("editor");
+  const diffCount = q("diff-count");
 
   /* Position of an element's centre in window (design) coordinates. Uses
      layout offsets, so it is unaffected by whatever transforms are in play. */
@@ -97,7 +114,20 @@ export function buildFilm(root: HTMLElement, opts: { narrow: boolean }) {
   gsap.set(cam, { transformOrigin: "0 0", scale: 1, x: 0, y: 0 });
   /* (camTo below re-homes the camera for the narrow crop before t=0) */
   gsap.set(cursor, { opacity: 0, x: 980, y: 560 });
-  gsap.set(chat, { x: 0, y: 0 });
+  /* the chat row spans the body until the review panel takes its share */
+  gsap.set(chat, { width: BODY_W });
+  gsap.set(thread, { y: 0 });
+  gsap.set(q("side-recent"), { opacity: 1 });
+  gsap.set(q("side-active"), { opacity: 0 });
+  /* a new thread: the focused composer sits under the centred hero */
+  gsap.set(composer, { y: -EMPTY_LIFT });
+  gsap.set(editor, { minHeight: 70 });
+  gsap.set(q("placeholder"), { opacity: 1 });
+  gsap.set(q("placeholder-run"), { opacity: 0 });
+  gsap.set(send, { autoAlpha: 1 });
+  gsap.set(stop, { autoAlpha: 0 });
+  gsap.set(crownDot, { autoAlpha: 0, backgroundColor: "#fe9a00" });
+  gsap.set(panelBtn, PANEL_OFF);
   gsap.set(q("title-new"), { opacity: 1 });
   gsap.set(q("title-real"), { opacity: 0 });
   gsap.set(q("side-title-new"), { opacity: 1 });
@@ -109,19 +139,25 @@ export function buildFilm(root: HTMLElement, opts: { narrow: boolean }) {
   gsap.set(mainTools, { autoAlpha: 0, x: -8 });
   gsap.set(qa("tool-done", assistant), { opacity: 0 });
   gsap.set(assistant.querySelectorAll(".tool-spin"), { opacity: 1 });
-  gsap.set(q("worked"), { autoAlpha: 0 });
+  gsap.set(q("turn-working"), { opacity: 1 });
+  gsap.set(q("worked"), { opacity: 0 });
+  gsap.set(q("think"), { autoAlpha: 0, x: -8 });
+  gsap.set(q("answer-meta"), { autoAlpha: 0 });
   gsap.set(q("changes"), { autoAlpha: 0, y: 10 });
-  gsap.set(q("diff-count"), { autoAlpha: 0, width: 0 });
+  gsap.set(diffCount, { autoAlpha: 0, scale: 0.4 });
+  gsap.set(q("ship-ready"), { autoAlpha: 0, scale: 0.8 });
   gsap.set(review, { x: REVIEW_W + 2 });
-  gsap.set(terminal, { autoAlpha: 1, y: TERMINAL_H });
+  gsap.set(terminal, { height: 0 });
   gsap.set(termLines, { autoAlpha: 0 });
+  gsap.set(q("term-open"), { opacity: 1 });
+  gsap.set(q("term-close"), { opacity: 0 });
   gsap.set(q("toast"), { autoAlpha: 0, y: -8 });
   setText(q("typed"), "");
   setText(q("answer"), "");
   setText(q("term-cmd"), "");
 
   /* Panes are dealt out from the centre of the body like cards. */
-  const bodyW = STAGE_W - SIDEBAR_W;
+  const bodyW = BODY_W;
   const bodyH = STAGE_H - HEADER_H;
   gsap.set(q("grid"), { autoAlpha: 0 });
   panes.forEach((pane) => {
@@ -205,14 +241,14 @@ export function buildFilm(root: HTMLElement, opts: { narrow: boolean }) {
 
   /* ---------------------------------- ask ---------------------------------- */
   const A = CHAPTER_AT.ask;
-  const composerFocus = { x: SIDEBAR_W + bodyW / 2, y: STAGE_H - 70 };
+  /* layout offsets ignore the lift, so add it back */
+  const composerFocus = centre(q("composer-plate"), 0, -EMPTY_LIFT);
   camTo(z(1.14, 1), composerFocus, A, 0.9);
   tl.to(q("placeholder"), { opacity: 0, duration: 0.1 }, A + 0.15);
   loopOn(q("typed-caret"), A + 0.15);
   type(q("typed"), PROMPT, A + 0.2, 1.25);
 
-  const send = q("send");
-  const sendAt = centre(send);
+  const sendAt = centre(send, 0, -EMPTY_LIFT);
   showCursor(A + 1.25, { x: sendAt.x + 110, y: sendAt.y + 70 });
   moveCursor(sendAt, A + 1.3, 0.35);
   click(send, A + 1.7);
@@ -221,7 +257,13 @@ export function buildFilm(root: HTMLElement, opts: { narrow: boolean }) {
   /* the sent prompt clears from the composer */
   tl.to(typer(q("typed"), PROMPT), { n: 0, duration: 0.01, ease: "none" }, A + 1.95);
   tl.to(q("typed"), { opacity: 1, duration: 0.01 }, A + 1.97);
-  tl.to(q("placeholder"), { opacity: 1, duration: 0.2 }, A + 1.98);
+  /* sent: the composer docks at the bottom and rests, the agent runs */
+  tl.to(composer, { y: 0, duration: 0.6, ease: "ryco.inOut" }, A + 1.76);
+  tl.to(editor, { minHeight: 26, duration: 0.4, ease: "ryco.inOut" }, A + 1.76);
+  tl.to(send, { autoAlpha: 0, duration: 0.15 }, A + 1.75);
+  tl.to(stop, { autoAlpha: 1, duration: 0.15 }, A + 1.75);
+  tl.to(q("placeholder-run"), { opacity: 1, duration: 0.2 }, A + 1.98);
+  tl.to(crownDot, { autoAlpha: 1, duration: 0.25 }, A + 1.9);
   tl.to(q("empty"), { opacity: 0, y: -14, duration: 0.3 }, A + 1.72);
   tl.to(q("user-msg"), { autoAlpha: 1, y: 0, duration: 0.5 }, A + 1.78);
   tl.to(q("title-new"), { opacity: 0, duration: 0.2 }, A + 1.85);
@@ -233,36 +275,47 @@ export function buildFilm(root: HTMLElement, opts: { narrow: boolean }) {
 
   /* ---------------------------------- work --------------------------------- */
   const W = CHAPTER_AT.work;
-  const threadFocus = { x: SIDEBAR_W + bodyW / 2, y: HEADER_H + 250 };
+  const threadFocus = { x: SIDEBAR_W + CHAT_W / 2, y: HEADER_H + 250 };
   camTo(z(1.07, 1.1), threadFocus, W, 1.2);
   tl.to(assistant, { autoAlpha: 1, duration: 0.3 }, W);
   loopOn(sideRows[0].querySelector(".side-spin"), W, 0.2);
+  tl.to(qa("side-age")[0], { opacity: 0, duration: 0.15 }, W);
+  tl.to(q("think"), { autoAlpha: 1, x: 0, duration: 0.3 }, W + 0.05);
   mainTools.forEach((row, i) => {
-    const at = W + 0.2 + i * 0.3;
+    const at = W + 0.35 + i * 0.3;
     tl.to(row, { autoAlpha: 1, x: 0, duration: 0.3 }, at);
     tl.set(row.querySelector(".tool-spin"), { animationPlayState: "running" }, at);
     loopOff(row.querySelector(".tool-spin"), at + 0.24, 0.1);
     tl.to(q("tool-done", row), { opacity: 1, duration: 0.15 }, at + 0.26);
-    if (i === 2) tl.to(q("diff-count"), { autoAlpha: 1, width: "auto", duration: 0.35 }, at + 0.3);
+    /* the first edit lands: the Crown's Changes badge appears */
+    if (i === 2)
+      tl.to(diffCount, { autoAlpha: 1, scale: 1, duration: 0.35, ease: "back.out(2.4)" }, at + 0.3);
   });
-  tl.to(q("worked"), { autoAlpha: 1, duration: 0.25 }, W + 2.1);
-  loopOn(q("answer-caret"), W + 2.15);
-  type(q("answer"), ANSWER, W + 2.2, 0.95);
-  loopOff(q("answer-caret"), W + 3.15);
-  tl.to(q("changes"), { autoAlpha: 1, y: 0, duration: 0.4 }, W + 3.1);
-  loopOff(sideRows[0].querySelector(".side-spin"), W + 3.15, 0.15);
-  tl.to(qa("side-age")[0], { opacity: 1, duration: 0.2 }, W + 3.2);
+  tl.to(q("turn-working"), { opacity: 0, duration: 0.2 }, W + 2.2);
+  tl.to(q("worked"), { opacity: 1, duration: 0.25 }, W + 2.2);
+  loopOn(q("answer-caret"), W + 2.25);
+  type(q("answer"), ANSWER, W + 2.3, 0.9);
+  loopOff(q("answer-caret"), W + 3.2);
+  tl.to(q("answer-meta"), { autoAlpha: 1, duration: 0.25 }, W + 3.2);
+  tl.to(q("changes"), { autoAlpha: 1, y: 0, duration: 0.4 }, W + 3.2);
+  tl.to(thread, { y: -SCROLL_DONE, duration: 0.5, ease: "ryco.inOut" }, W + 3.2);
+  /* changes to ship: the Crown's Ship button lights up */
+  tl.to(q("ship-ready"), { autoAlpha: 1, scale: 1, duration: 0.4, ease: "back.out(2)" }, W + 3.25);
+  loopOff(sideRows[0].querySelector(".side-spin"), W + 3.25, 0.15);
+  tl.to(qa("side-age")[0], { opacity: 1, duration: 0.2 }, W + 3.3);
+  /* done: Stop turns back into Send, the composer invites a new message */
+  tl.to(stop, { autoAlpha: 0, duration: 0.15 }, W + 3.25);
+  tl.to(send, { autoAlpha: 1, duration: 0.15 }, W + 3.25);
+  tl.to(q("placeholder-run"), { opacity: 0, duration: 0.15 }, W + 3.25);
+  tl.to(q("placeholder"), { opacity: 1, duration: 0.2 }, W + 3.3);
+  tl.to(crownDot, { backgroundColor: "#00bc7d", duration: 0.3 }, W + 3.25);
   camTo(1, null, W + 2.9, 0.7);
 
   /* -------------------------------- parallel ------------------------------- */
   const P = CHAPTER_AT.parallel;
   /* phones pull back to show the whole grid; wide screens already do */
   if (opts.narrow) camTo(0.6, { x: SIDEBAR_W + bodyW / 2, y: HEADER_H + bodyH / 2 }, P, 0.8);
-  tl.to(
-    q("btn-split"),
-    { backgroundColor: "rgba(255,255,255,0.09)", color: "#e4e4e5", duration: 0.2 },
-    P,
-  );
+  tl.to(crown, { autoAlpha: 0, duration: 0.3 }, P);
   tl.to(
     thread,
     { autoAlpha: 0, scale: 0.94, transformOrigin: "50% 35%", duration: 0.45 },
@@ -275,6 +328,8 @@ export function buildFilm(root: HTMLElement, opts: { narrow: boolean }) {
     { x: 0, y: 0, scale: 1, autoAlpha: 1, duration: 0.75, stagger: 0.09, ease: "ryco" },
     P + 0.12,
   );
+  tl.to(q("side-recent"), { opacity: 0, duration: 0.2 }, P + 0.3);
+  tl.to(q("side-active"), { opacity: 1, duration: 0.2 }, P + 0.3);
   sideRows.slice(1).forEach((row, i) => {
     tl.to(
       row.querySelector('[data-s="side-age"]'),
@@ -304,12 +359,8 @@ export function buildFilm(root: HTMLElement, opts: { narrow: boolean }) {
   if (opts.narrow) camTo(1, null, R, 0.6);
   tl.to([...panes].reverse(), { autoAlpha: 0, scale: 0.92, duration: 0.35, stagger: 0.04 }, R);
   tl.set(q("grid"), { autoAlpha: 0 }, R + 0.6);
-  tl.to(
-    q("btn-split"),
-    { backgroundColor: "rgba(255,255,255,0)", color: "#9a9aa1", duration: 0.2 },
-    R,
-  );
   tl.to(thread, { autoAlpha: 1, scale: 1, duration: 0.45 }, R + 0.3);
+  tl.to(crown, { autoAlpha: 1, duration: 0.4 }, R + 0.35);
   tl.to(composer, { autoAlpha: 1, y: 0, duration: 0.4 }, R + 0.35);
   [1, 3].forEach((i, k) => {
     loopOff(sideRows[i].querySelector(".side-spin"), R + 0.5 + k * 0.3, 0.12);
@@ -325,8 +376,11 @@ export function buildFilm(root: HTMLElement, opts: { narrow: boolean }) {
   showCursor(R + 0.75, { x: reviewAt.x + 140, y: reviewAt.y + 120 });
   moveCursor(reviewAt, R + 0.8, 0.45);
   click(reviewBtn, R + 1.3);
+  /* the review panel opens beside the chat, which narrows to make room */
   tl.to(review, { x: 0, duration: 0.7, ease: "ryco" }, R + 1.38);
-  tl.to(chat, { x: -REVIEW_W / 2, duration: 0.7, ease: "ryco" }, R + 1.38);
+  tl.to(chat, { width: BODY_W - REVIEW_W, duration: 0.7, ease: "ryco" }, R + 1.38);
+  tl.to(thread, { y: -SCROLL_REVIEW, duration: 0.7, ease: "ryco" }, R + 1.38);
+  tl.to(panelBtn, { ...PANEL_ON, duration: 0.2 }, R + 1.38);
 
   const hit = q("diff-hit");
   const hitAt = centre(hit, -60, 0);
@@ -344,29 +398,32 @@ export function buildFilm(root: HTMLElement, opts: { narrow: boolean }) {
   const U = CHAPTER_AT.run;
   tl.to(q("toast"), { autoAlpha: 0, y: -8, duration: 0.3 }, U);
   tl.to(q("diff-hit-glow"), { opacity: 0, duration: 0.2 }, U);
+  /* the review panel closes, the chat takes the width back */
+  tl.to(review, { x: REVIEW_W + 2, duration: 0.6, ease: "ryco.inOut" }, U + 0.05);
+  tl.to(chat, { width: BODY_W, duration: 0.6, ease: "ryco.inOut" }, U + 0.05);
+  tl.to(thread, { y: -SCROLL_DONE, duration: 0.6, ease: "ryco.inOut" }, U + 0.05);
+  tl.to(panelBtn, { ...PANEL_OFF, duration: 0.2 }, U + 0.05);
+  /* Open Terminal, under the composer */
   const termBtn = q("btn-term");
   const termAt = centre(termBtn);
-  /* phones pan to the header's terminal button before the click */
-  if (opts.narrow) camTo(1, { x: termAt.x - 60, y: STAGE_H / 2 }, U, 0.5);
-  showCursor(U + 0.05, { x: termAt.x - 160, y: termAt.y + 140 });
-  moveCursor(termAt, U + 0.1, 0.45);
-  click(termBtn, U + 0.6);
-  tl.to(
-    termBtn,
-    { backgroundColor: "rgba(255,255,255,0.09)", color: "#e4e4e5", duration: 0.2 },
-    U + 0.62,
-  );
-  hideCursor(U + 0.8);
-  tl.to(review, { x: REVIEW_W + 2, duration: 0.6, ease: "ryco.inOut" }, U + 0.65);
-  tl.to(chat, { x: 0, y: -TERMINAL_H, duration: 0.7, ease: "ryco.inOut" }, U + 0.65);
-  tl.to(terminal, { y: 0, duration: 0.7, ease: "ryco.inOut" }, U + 0.65);
-  camTo(z(1.08, 1.12), { x: SIDEBAR_W + 300, y: STAGE_H - TERMINAL_H / 2 - 10 }, U + 1.0, 0.9);
-  loopOn(q("term-caret"), U + 1.35);
-  type(q("term-cmd"), TERMINAL_CMD, U + 1.4, 0.5);
-  loopOff(q("term-caret"), U + 1.95);
-  tl.to(termLines, { autoAlpha: 1, duration: 0.12, stagger: 0.11 }, U + 2.0);
+  /* phones pan to the button before the click */
+  if (opts.narrow) camTo(1, { x: termAt.x, y: STAGE_H / 2 }, U + 0.1, 0.5);
+  showCursor(U + 0.6, { x: termAt.x + 150, y: termAt.y - 120 });
+  moveCursor(termAt, U + 0.65, 0.45);
+  click(termBtn, U + 1.15);
+  tl.to(q("term-open"), { opacity: 0, duration: 0.15 }, U + 1.2);
+  tl.to(q("term-close"), { opacity: 1, duration: 0.15 }, U + 1.2);
+  hideCursor(U + 1.35);
+  tl.to(terminal, { height: TERMINAL_H, duration: 0.7, ease: "ryco.inOut" }, U + 1.2);
+  /* the transcript keeps its latest turn in view above the composer */
+  tl.to(thread, { y: -THREAD_SCROLL, duration: 0.7, ease: "ryco.inOut" }, U + 1.2);
+  camTo(z(1.08, 1.12), { x: SIDEBAR_W + 300, y: STAGE_H - TERMINAL_H / 2 - 10 }, U + 1.55, 0.9);
+  loopOn(q("term-caret"), U + 1.9);
+  type(q("term-cmd"), TERMINAL_CMD, U + 1.95, 0.5);
+  loopOff(q("term-caret"), U + 2.5);
+  tl.to(termLines, { autoAlpha: 1, duration: 0.12, stagger: 0.11 }, U + 2.55);
   /* end framed on the terminal's left edge, so phones see "42 passed" */
-  camTo(1, opts.narrow ? { x: SIDEBAR_W + 310, y: STAGE_H / 2 } : null, U + 2.75, 0.6);
+  camTo(1, opts.narrow ? { x: SIDEBAR_W + 310, y: STAGE_H / 2 } : null, U + 3.3, 0.6);
   tl.to({}, { duration: 0.01 }, CHAPTER_AT.end);
 
   return tl;

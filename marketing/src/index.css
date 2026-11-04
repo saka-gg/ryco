@@ -27,6 +27,27 @@
   --color-app-indigo: #5b5bf0;
 
   --ease-ryco: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* The product film's window (stage/) uses the desktop app's own default
+     dark theme, value for value (apps/web/src/index.css, themes/builtin.ts). */
+  --color-rw-bg: #0b0b0c;
+  --color-rw-side: #070708;
+  --color-rw-card: #151516;
+  --color-rw-surface: #1a1a1b;
+  --color-rw-bubble: #1d1d1e;
+  --color-rw-fg: #ececed;
+  --color-rw-muted: #b2b2b2;
+  --color-rw-primary: #e4e4e5;
+  --color-rw-crown: #0d0d0e;
+  --color-rw-success: #00bc7d;
+  --color-rw-success-fg: #00d492;
+  --color-rw-danger: #fb414a;
+  --color-rw-danger-fg: #ff6467;
+  --color-rw-info: #2b7fff;
+  --color-rw-info-fg: #51a2ff;
+  --color-rw-warn: #fe9a00;
+  --color-rw-monogram: #cf364c;
+  --font-rwmono: "SF Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
 }
 
 :root {
