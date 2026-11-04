@@ -1,6 +1,6 @@
 // FILE: folderPicker.logic.ts
 // Purpose: The folder picker's path model on a node of any platform (breadcrumbs, places,
-//          joining a child folder), match highlighting, the note under search results, and the
+//          joining a child folder), the note under search results, and the
 //          status line that says what the selected folder is and whether it can be used for the
 //          picker's mode.
 // Layer: Web UI logic, pure. Path parsing reuses `lib/projectPaths.ts`.
@@ -137,23 +137,6 @@ export function buildFolderPlaces(
   return places;
 }
 
-export interface HighlightSegment {
-  readonly text: string;
-  readonly match: boolean;
-}
-
-/** `text` cut around the first case-insensitive occurrence of `query`. */
-export function highlightMatch(text: string, query: string): HighlightSegment[] {
-  const needle = query.trim().toLowerCase();
-  const index = needle.length === 0 ? -1 : text.toLowerCase().indexOf(needle);
-  if (index < 0) return [{ text, match: false }];
-  return [
-    { text: text.slice(0, index), match: false },
-    { text: text.slice(index, index + needle.length), match: true },
-    { text: text.slice(index + needle.length), match: false },
-  ].filter((segment) => segment.text.length > 0);
-}
-
 /** The folder a mode's selection points at: the child folder for `parent`, else the selection. */
 export function resolveFolderDestination(
   mode: FolderPickerMode,
@@ -268,7 +251,6 @@ export function describeFolderSelection(
 ): FolderSelectionStatus {
   const { mode, nodeLabel, selectedPath, destinationPath, preview } = input;
   const base = { selectedPath, destinationPath, preview };
-  const shown = (path: string) => formatNodePath(path, input.homeDirectory);
 
   if (selectedPath === null) {
     return status({
@@ -339,11 +321,7 @@ export function describeFolderSelection(
       ...base,
       kind: "checking",
       tone: "neutral",
-      segments: [
-        { text: "Checking " },
-        { text: shown(destinationPath), path: true },
-        { text: "…" },
-      ],
+      segments: [{ text: `Checking on ${nodeLabel}…` }],
       usable: false,
     });
   }
@@ -406,7 +384,7 @@ export function describeFolderSelection(
         ...base,
         kind: "unchecked",
         tone: "neutral",
-        segments: [{ text: "Goes into " }, { text: shown(destinationPath), path: true }],
+        segments: [{ text: `Goes here; ${nodeLabel} checks the folder when it starts.` }],
         usable: true,
       });
     }
@@ -416,7 +394,7 @@ export function describeFolderSelection(
           ...base,
           kind: "new-folder",
           tone: "positive",
-          segments: [{ text: "Creates " }, { text: shown(destinationPath), path: true }],
+          segments: [{ text: "New folder; it's created for the project." }],
           usable: true,
         });
       case "exists-empty":
@@ -424,10 +402,7 @@ export function describeFolderSelection(
           ...base,
           kind: "empty-folder",
           tone: "positive",
-          segments: [
-            { text: shown(destinationPath), path: true },
-            { text: " exists and is empty; it's used as is." },
-          ],
+          segments: [{ text: "Exists and is empty; it's used as is." }],
           usable: true,
         });
       default: {
@@ -441,11 +416,10 @@ export function describeFolderSelection(
           kind: sameRepository ? "same-repository" : "occupied",
           tone: "caution",
           segments: [
-            { text: shown(destinationPath), path: true },
             {
               text: sameRepository
-                ? " is already a checkout of this repository."
-                : " already exists.",
+                ? "Already a checkout of this repository."
+                : "This folder already exists.",
             },
           ],
           usable: false,
@@ -461,10 +435,7 @@ export function describeFolderSelection(
       ...base,
       kind: "missing-folder",
       tone: "caution",
-      segments: [
-        { text: shown(destinationPath), path: true },
-        { text: " doesn't exist yet; adding the project creates it." },
-      ],
+      segments: [{ text: "Doesn't exist yet; adding the project creates it." }],
       usable: true,
     });
   }
@@ -501,9 +472,22 @@ export function describeFolderSelection(
     ...base,
     kind: "unchecked",
     tone: "neutral",
-    segments: [{ text: shown(destinationPath), path: true }],
+    segments: [{ text: `Folder on ${nodeLabel}; it's checked when you add it.` }],
     usable: true,
   });
+}
+
+/**
+ * The path the status bar shows above its line: the folder the project would live in, else
+ * the selection (a parent whose new folder has no name yet), home-relative; null before
+ * anything is selected. The status line itself never repeats it.
+ */
+export function folderStatusPath(
+  value: Pick<FolderSelectionStatus, "destinationPath" | "selectedPath">,
+  homeDirectory: string | null | undefined,
+): string | null {
+  const path = value.destinationPath ?? value.selectedPath;
+  return path === null ? null : formatNodePath(path, homeDirectory);
 }
 
 /** A stable key for a status, so a parent hears about real changes only. */

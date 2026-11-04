@@ -92,7 +92,8 @@ import {
 vi.mock("../lib/gitStatusState", () => import("../../test/gitStatusStateMock"));
 
 const addProjectDialog = () => page.getByTestId("add-project-dialog");
-const folderStatus = () => page.getByTestId("folder-picker-status");
+const folderStatusPath = () => page.getByTestId("folder-picker-status-path");
+const folderStatusLine = () => page.getByTestId("folder-picker-status-line");
 
 /** From the add-project dialog's sources to its folder step; returns the folder field. */
 async function openAddProjectFolderStep() {
@@ -1341,7 +1342,7 @@ describe("ChatView Navigation (full app)", () => {
         .toBeVisible();
       await field.fill("~/Development");
       await userEvent.keyboard("{Enter}");
-      await expect.element(folderStatus()).toHaveTextContent("~/Development");
+      await expect.element(folderStatusPath()).toHaveTextContent("~/Development");
       await userEvent.keyboard("{Enter}");
 
       await vi.waitFor(
@@ -1504,14 +1505,14 @@ describe("ChatView Navigation (full app)", () => {
       await addProjectDialog()
         .getByRole("button", { name: /Clone a repository/ })
         .click();
-      const sourceMenu = addProjectDialog().getByRole("button", { name: "Clone source: GitHub" });
-      await expect.element(sourceMenu).toBeVisible();
+      const sources = addProjectDialog().getByRole("group", { name: "Clone source" });
+      const github = sources.getByRole("button", { name: "GitHub", exact: true });
+      await expect.element(github).toHaveAttribute("aria-pressed", "true");
       // Providers the node can't use yet say so and lead to their setup.
-      await sourceMenu.click();
       await expect
-        .element(page.getByRole("menuitem", { name: /Forgejo repository.*Setup Required/ }))
+        .element(sources.getByRole("button", { name: "Forgejo: Setup Required" }))
         .toBeVisible();
-      await page.getByRole("menuitem", { name: "GitHub repository" }).click();
+      await github.click();
       await addProjectDialog()
         .getByRole("textbox", { name: "Repository to clone" })
         .fill("openai/codex");
@@ -1528,14 +1529,16 @@ describe("ChatView Navigation (full app)", () => {
       await expect
         .element(addProjectDialog().getByText(/Where should/))
         .toMatchTextContent(/Where should codex go on Studio Mac\? Pick the parent folder\./);
+      await expect.element(folderStatusPath()).toHaveTextContent("~/codex");
       await expect
-        .element(folderStatus())
-        .toHaveTextContent("Clones github.com/openai/codex into ~/codex");
+        .element(folderStatusLine())
+        .toHaveTextContent("Clones github.com/openai/codex here");
 
       await addProjectDialog().getByRole("option", { name: "Development" }).click();
+      await expect.element(folderStatusPath()).toHaveTextContent("~/Development/codex");
       await expect
-        .element(folderStatus())
-        .toHaveTextContent("Clones github.com/openai/codex into ~/Development/codex");
+        .element(folderStatusLine())
+        .toHaveTextContent("Clones github.com/openai/codex here");
       await addProjectDialog().getByRole("button", { name: "Clone to Studio Mac" }).click();
 
       await vi.waitFor(
@@ -1707,7 +1710,13 @@ describe("ChatView Navigation (full app)", () => {
       // The path starts at the access root: no folder above it to go to.
       const crumbs = addProjectDialog().getByRole("navigation", { name: "Folder path" });
       await expect.element(crumbs).toHaveTextContent(workspaceAccessRoot);
-      expect(crumbs.getByRole("button").elements()).toHaveLength(1);
+      await expect.element(crumbs.getByRole("button", { name: "Up one folder" })).toBeDisabled();
+      expect(
+        crumbs
+          .getByRole("button")
+          .elements()
+          .filter((button) => button.getAttribute("aria-label") !== "Up one folder"),
+      ).toHaveLength(1);
 
       await vi.waitFor(
         () => {
@@ -1770,11 +1779,10 @@ describe("ChatView Navigation (full app)", () => {
         .not.toBeInTheDocument();
       await userEvent.keyboard("{Enter}");
 
+      await expect.element(folderStatusPath()).toHaveTextContent("~/Desktop/fresh-project");
       await expect
-        .element(folderStatus())
-        .toHaveTextContent(
-          "~/Desktop/fresh-project doesn't exist yet; adding the project creates it.",
-        );
+        .element(folderStatusLine())
+        .toHaveTextContent("Doesn't exist yet; adding the project creates it.");
       await addProjectDialog().getByRole("button", { name: "Add project" }).click();
 
       await vi.waitFor(
@@ -1869,7 +1877,7 @@ describe("ChatView Navigation (full app)", () => {
       await field.fill("~/Development/codex");
       await expect.element(addProjectDialog().getByRole("option", { name: "codex" })).toBeVisible();
       await userEvent.keyboard("{Enter}");
-      await expect.element(folderStatus()).toHaveTextContent("~/Development/codex");
+      await expect.element(folderStatusPath()).toHaveTextContent("~/Development/codex");
       await addProjectDialog().getByRole("button", { name: "Add project" }).click();
 
       await vi.waitFor(
@@ -2007,7 +2015,7 @@ describe("ChatView Navigation (full app)", () => {
 
       await field.fill("~/workspaces");
       await userEvent.keyboard("{Enter}");
-      await expect.element(folderStatus()).toHaveTextContent("~/workspaces");
+      await expect.element(folderStatusPath()).toHaveTextContent("~/workspaces");
       await addProjectDialog().getByRole("button", { name: "Add project" }).click();
 
       await vi.waitFor(
@@ -2185,7 +2193,7 @@ describe("ChatView Navigation (full app)", () => {
       // The first arrow highlights alpha; Enter selects it, and Enter again adds it.
       await userEvent.keyboard("{ArrowDown}");
       await userEvent.keyboard("{Enter}");
-      await expect.element(folderStatus()).toHaveTextContent("~/Development/alpha");
+      await expect.element(folderStatusPath()).toHaveTextContent("~/Development/alpha");
       await userEvent.keyboard("{Enter}");
 
       await vi.waitFor(

@@ -26,14 +26,20 @@ import {
   sanitizeRemoteUrl,
 } from "@ryco/shared/gitRemoteUrl";
 import { isChatProject } from "@ryco/shared/projectKind";
+import { detectSourceControlProviderFromRemoteUrl } from "@ryco/shared/sourceControlHost";
 import * as Schema from "effect/Schema";
 
 import { inferProjectTitleFromPath, isSameFilesystemPath } from "../../lib/projectPaths";
 import type { Project } from "../../types";
+import {
+  remoteProjectSourceLabel,
+  type AddProjectRemoteSource,
+  type AddProjectRemoteSourceReadiness,
+} from "./addProjectSources";
 import type { AddProjectDialogMode, AddProjectDialogRequest } from "./projectNodesDialogStore";
 import type { CopyProgressStep } from "./copyProjectDialog.logic";
 import { lastOutputLine, projectImportStepLabel } from "./copyRuntime/projectCopyProgress.logic";
-import { formatNodePath, type FolderSelectionStatus } from "./folderPicker.logic";
+import type { FolderSelectionStatus } from "./folderPicker.logic";
 import { resolveNodePickerAvailability } from "./nodePicker.logic";
 
 /** What the project is added from: a folder on the node, a clone, a copy, or a checkout to link. */
@@ -163,21 +169,19 @@ export function addProjectPrimaryLabel(input: {
 /* ───────── Status line ───────── */
 
 /**
- * The clone's status line: "Clones <remote> into <path>", flagged when that
- * folder already exists. The folder picker's other states (checking, refused, an
- * existing project) stay as they are.
+ * The clone's status line: "Clones <remote> here" under the destination path the
+ * picker shows, flagged when that folder already exists. The folder picker's other
+ * states (checking, refused, an existing project) stay as they are.
  */
 export function describeCloneDestination(
   status: FolderSelectionStatus,
-  input: { readonly remoteUrl: string; readonly homeDirectory: string | null },
+  input: { readonly remoteUrl: string },
 ): FolderSelectionStatus {
-  const destination = status.destinationPath;
-  if (destination === null) return status;
+  if (status.destinationPath === null) return status;
   const line = [
     { text: "Clones " },
     { text: displayRemoteUrl(input.remoteUrl), path: true },
-    { text: " into " },
-    { text: formatNodePath(destination, input.homeDirectory), path: true },
+    { text: " here" },
   ];
   switch (status.kind) {
     case "new-folder":
@@ -187,7 +191,7 @@ export function describeCloneDestination(
     case "occupied":
     case "same-repository":
     case "existing-project":
-      return withSegments(status, [...line, { text: ": that folder already exists" }], {
+      return withSegments(status, [...line, { text: ", but that folder already exists" }], {
         kind: "clone-destination",
         tone: "caution",
         usable: false,
@@ -351,6 +355,71 @@ export function buildRepositorySuggestions(input: {
     });
   }
   return suggestions;
+}
+
+/* ───────── Clone sources ───────── */
+
+/** The clone source strip, left to right: the providers, then any Git URL. */
+export const CLONE_SOURCE_CHIP_ORDER: ReadonlyArray<AddProjectRemoteSource> = [
+  "github",
+  "gitlab",
+  "forgejo",
+  "bitbucket",
+  "azure-devops",
+  "url",
+];
+
+/** The provider a Git URL's host belongs to; "url" for any other host. */
+export function detectCloneSourceFromUrl(remoteUrl: string): AddProjectRemoteSource {
+  const kind = detectSourceControlProviderFromRemoteUrl(remoteUrl.trim())?.kind;
+  return kind === undefined || kind === "unknown" ? "url" : kind;
+}
+
+/** One chip of the clone source strip. */
+export interface CloneSourceChip {
+  readonly source: AddProjectRemoteSource;
+  readonly label: string;
+  /** The node can clone from it now (a Git URL always can). */
+  readonly ready: boolean;
+  /** Why it is not ready; null when it is. */
+  readonly hint: string | null;
+  /** The source the field resolves "owner/repo" with, or the host a typed URL is on. */
+  readonly active: boolean;
+  /** Active because the typed URL is on this provider's host. */
+  readonly detected: boolean;
+}
+
+/**
+ * The clone source strip: every source in a fixed order, each with its readiness. A typed
+ * URL lights the chip of its host's provider (it still clones as typed); otherwise the
+ * source "owner/repo" resolves against is lit.
+ */
+export function buildCloneSourceChips(input: {
+  readonly readiness: AddProjectRemoteSourceReadiness;
+  readonly providerSource: AddProjectRemoteSource;
+  /** The field's text when it is a Git URL; null otherwise. */
+  readonly typedUrl: string | null;
+}): CloneSourceChip[] {
+  const detected = input.typedUrl === null ? null : detectCloneSourceFromUrl(input.typedUrl);
+  const active = detected ?? input.providerSource;
+  return CLONE_SOURCE_CHIP_ORDER.map((source) => ({
+    source,
+    label: remoteProjectSourceLabel(source),
+    ready: input.readiness[source].ready,
+    hint: input.readiness[source].hint,
+    active: source === active,
+    detected: detected !== null && source === detected && source !== "url",
+  }));
+}
+
+/** "owner/name" split for display: the owner path (muted) and the repository's own name. */
+export function splitRepositoryLabel(label: string): {
+  readonly owner: string | null;
+  readonly name: string;
+} {
+  const index = label.lastIndexOf("/");
+  if (index <= 0 || index === label.length - 1) return { owner: null, name: label };
+  return { owner: label.slice(0, index), name: label.slice(index + 1) };
 }
 
 /** Typed clone input that is a URL (https, ssh, scp-style, file) rather than "owner/repo". */

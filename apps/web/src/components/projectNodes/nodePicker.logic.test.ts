@@ -8,7 +8,7 @@ import {
   nodeCodeRootLabels,
   nodeMachineKind,
   nodeOsLabel,
-  nodeSummaryLine,
+  nodeSummaryParts,
   nodeTone,
   NODE_TONES,
   resolveNodePickerAvailability,
@@ -141,14 +141,23 @@ describe("node presentation", () => {
       ],
     };
     expect(nodeCodeRootLabels(pathHints)).toEqual(["~/Code", "~/Dropbox/Code/Web"]);
-    expect(nodeSummaryLine({ projectCount: 3, pathHints })).toBe(
-      "3 projects · ~/Code, ~/Dropbox/Code/Web",
-    );
-    expect(nodeSummaryLine({ projectCount: 1 })).toBe("1 project");
-    expect(nodeSummaryLine({ projectCount: 1, detail: "has it · ~/dev/ryco" })).toBe(
-      "has it · ~/dev/ryco",
-    );
-    expect(nodeSummaryLine(undefined)).toBeNull();
+    expect(nodeSummaryParts({ projectCount: 3, pathHints })).toEqual({
+      kind: "projects",
+      projects: "3 projects",
+      roots: "~/Code, ~/Dropbox/Code/Web",
+    });
+    expect(nodeSummaryParts({ projectCount: 1 })).toEqual({
+      kind: "projects",
+      projects: "1 project",
+      roots: null,
+    });
+    expect(nodeSummaryParts({ pathHints })).toMatchObject({ projects: null });
+    expect(nodeSummaryParts({ projectCount: 1, detail: "has it · ~/dev/ryco" })).toEqual({
+      kind: "detail",
+      text: "has it · ~/dev/ryco",
+    });
+    expect(nodeSummaryParts({})).toBeNull();
+    expect(nodeSummaryParts(undefined)).toBeNull();
   });
 
   it("prefers the configured machine kind over the inferred one", () => {

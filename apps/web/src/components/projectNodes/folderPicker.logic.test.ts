@@ -8,7 +8,7 @@ import {
   describeFolderSelection,
   folderSearchNote,
   folderSelectionStatusKey,
-  highlightMatch,
+  folderStatusPath,
   resolveFolderDestination,
   type DescribeFolderSelectionInput,
 } from "./folderPicker.logic";
@@ -102,16 +102,6 @@ describe("buildFolderPlaces", () => {
   });
 });
 
-describe("highlightMatch", () => {
-  it("marks the first case-insensitive occurrence", () => {
-    expect(highlightMatch("~/dev/homebrew-tap", "TAP")).toEqual([
-      { text: "~/dev/homebrew-", match: false },
-      { text: "tap", match: true },
-    ]);
-    expect(highlightMatch("ryco", "zzz")).toEqual([{ text: "ryco", match: false }]);
-  });
-});
-
 describe("resolveFolderDestination", () => {
   it("joins the child in parent mode and uses the selection otherwise", () => {
     expect(resolveFolderDestination("parent", "/Users/me/Code", "ryco-hub")).toBe(
@@ -170,7 +160,7 @@ describe("describeFolderSelection", () => {
     expect([status.kind, status.usable, status.text]).toEqual([
       "checking",
       false,
-      "Checking ~/Code/ryco…",
+      "Checking on Mac mini…",
     ]);
   });
 
@@ -224,7 +214,7 @@ describe("describeFolderSelection", () => {
       "occupied",
       false,
       "/Users/me/Code/ryco-2",
-      "~/Code/ryco already exists.",
+      "This folder already exists.",
     ]);
     const created = statusFor({
       mode: "parent",
@@ -234,7 +224,7 @@ describe("describeFolderSelection", () => {
     expect([created.kind, created.usable, created.text]).toEqual([
       "new-folder",
       true,
-      "Creates ~/Code/ryco",
+      "New folder; it's created for the project.",
     ]);
   });
 
@@ -285,8 +275,30 @@ describe("describeFolderSelection", () => {
     expect([missing.kind, missing.usable, missing.text]).toEqual([
       "missing-folder",
       true,
-      "~/Code/ryco doesn't exist yet; adding the project creates it.",
+      "Doesn't exist yet; adding the project creates it.",
     ]);
+  });
+
+  it("leaves the destination's path to the status bar's path line", () => {
+    const parent = statusFor({
+      mode: "parent",
+      selectedPath: "/Users/me/Code",
+      destinationPath: "/Users/me/Code/ryco",
+      preview: preview({ state: "available" }),
+    });
+    expect(folderStatusPath(parent, "/Users/me")).toBe("~/Code/ryco");
+    expect(parent.text).not.toContain("~/Code/ryco");
+    // A parent whose new folder has no name yet shows the parent itself.
+    expect(
+      folderStatusPath(
+        statusFor({ mode: "parent", selectedPath: "/Users/me/Code", destinationPath: null }),
+        "/Users/me",
+      ),
+    ).toBe("~/Code");
+    expect(
+      folderStatusPath(statusFor({ selectedPath: null, destinationPath: null }), "/Users/me"),
+    ).toBe(null);
+    expect(folderStatusPath(statusFor({}), null)).toBe("/Users/me/Code/ryco");
   });
 
   it("keeps a failed check usable outside link mode", () => {

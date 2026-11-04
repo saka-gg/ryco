@@ -148,17 +148,33 @@ export function nodeCodeRootLabels(
   return labels;
 }
 
-/** The summary line under a node: "3 projects · ~/Code, ~/Dropbox/Code/Web". */
-export function nodeSummaryLine(extras: NodePickerNodeExtras | undefined): string | null {
+/**
+ * What a node card says under its status: the caller's detail, or its projects and code
+ * roots ("3 projects · ~/Code, ~/Dropbox/Code/Web", the roots cut at their start).
+ */
+export type NodeSummaryParts =
+  | { readonly kind: "detail"; readonly text: string }
+  | {
+      readonly kind: "projects";
+      /** "3 projects"; null when the count is unknown. */
+      readonly projects: string | null;
+      /** "~/Code, ~/Dropbox/Code/Web"; null when the node named none. */
+      readonly roots: string | null;
+    };
+
+export function nodeSummaryParts(
+  extras: NodePickerNodeExtras | undefined,
+): NodeSummaryParts | null {
   if (!extras) return null;
-  if (extras.detail?.trim()) return extras.detail.trim();
-  const parts: string[] = [];
-  if (typeof extras.projectCount === "number") {
-    parts.push(`${extras.projectCount} project${extras.projectCount === 1 ? "" : "s"}`);
-  }
+  const detail = extras.detail?.trim();
+  if (detail) return { kind: "detail", text: detail };
+  const projects =
+    typeof extras.projectCount === "number"
+      ? `${extras.projectCount} project${extras.projectCount === 1 ? "" : "s"}`
+      : null;
   const roots = nodeCodeRootLabels(extras.pathHints);
-  if (roots.length > 0) parts.push(roots.join(", "));
-  return parts.length > 0 ? parts.join(" · ") : null;
+  if (projects === null && roots.length === 0) return null;
+  return { kind: "projects", projects, roots: roots.length > 0 ? roots.join(", ") : null };
 }
 
 /**
