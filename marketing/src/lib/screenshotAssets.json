@@ -1,74 +1,74 @@
 {
-  "/shots/actions.png": {
-    "width": 2660,
-    "height": 1046,
-    "src": "/shots/actions-2660.webp",
-    "srcSet": "/shots/actions-640.webp 640w, /shots/actions-1280.webp 1280w, /shots/actions-2660.webp 2660w"
+  "/shots/desktop-appearance.png": {
+    "width": 2200,
+    "height": 1560,
+    "src": "/shots/desktop-appearance-2200.webp",
+    "srcSet": "/shots/desktop-appearance-640.webp 640w, /shots/desktop-appearance-1280.webp 1280w, /shots/desktop-appearance-2200.webp 2200w"
   },
-  "/shots/diagnostics.png": {
-    "width": 1946,
-    "height": 1564,
-    "src": "/shots/diagnostics-1946.webp",
-    "srcSet": "/shots/diagnostics-640.webp 640w, /shots/diagnostics-1280.webp 1280w, /shots/diagnostics-1946.webp 1946w"
+  "/shots/desktop-hero-agents.png": {
+    "width": 2200,
+    "height": 1560,
+    "src": "/shots/desktop-hero-agents-2200.webp",
+    "srcSet": "/shots/desktop-hero-agents-640.webp 640w, /shots/desktop-hero-agents-1280.webp 1280w, /shots/desktop-hero-agents-2200.webp 2200w"
   },
-  "/shots/diff.png": {
-    "width": 1798,
-    "height": 1894,
-    "src": "/shots/diff-1798.webp",
-    "srcSet": "/shots/diff-640.webp 640w, /shots/diff-1280.webp 1280w, /shots/diff-1798.webp 1798w"
+  "/shots/desktop-pull-requests.png": {
+    "width": 2200,
+    "height": 1560,
+    "src": "/shots/desktop-pull-requests-2200.webp",
+    "srcSet": "/shots/desktop-pull-requests-640.webp 640w, /shots/desktop-pull-requests-1280.webp 1280w, /shots/desktop-pull-requests-2200.webp 2200w"
   },
-  "/shots/files.png": {
-    "width": 1798,
-    "height": 1894,
-    "src": "/shots/files-1798.webp",
-    "srcSet": "/shots/files-640.webp 640w, /shots/files-1280.webp 1280w, /shots/files-1798.webp 1798w"
+  "/shots/desktop-quick-open.png": {
+    "width": 2200,
+    "height": 1560,
+    "src": "/shots/desktop-quick-open-2200.webp",
+    "srcSet": "/shots/desktop-quick-open-640.webp 640w, /shots/desktop-quick-open-1280.webp 1280w, /shots/desktop-quick-open-2200.webp 2200w"
   },
-  "/shots/instance.png": {
-    "width": 1832,
-    "height": 1578,
-    "src": "/shots/instance-1832.webp",
-    "srcSet": "/shots/instance-640.webp 640w, /shots/instance-1280.webp 1280w, /shots/instance-1832.webp 1832w"
+  "/shots/desktop-review.png": {
+    "width": 2200,
+    "height": 1560,
+    "src": "/shots/desktop-review-2200.webp",
+    "srcSet": "/shots/desktop-review-640.webp 640w, /shots/desktop-review-1280.webp 1280w, /shots/desktop-review-2200.webp 2200w"
   },
-  "/shots/model-picker.png": {
-    "width": 1594,
-    "height": 850,
-    "src": "/shots/model-picker-1594.webp",
-    "srcSet": "/shots/model-picker-640.webp 640w, /shots/model-picker-1280.webp 1280w, /shots/model-picker-1594.webp 1594w"
+  "/shots/desktop-tasks.png": {
+    "width": 2200,
+    "height": 1560,
+    "src": "/shots/desktop-tasks-2200.webp",
+    "srcSet": "/shots/desktop-tasks-640.webp 640w, /shots/desktop-tasks-1280.webp 1280w, /shots/desktop-tasks-2200.webp 2200w"
   },
-  "/shots/overview.png": {
-    "width": 2660,
-    "height": 1492,
-    "src": "/shots/overview-2660.webp",
-    "srcSet": "/shots/overview-640.webp 640w, /shots/overview-1280.webp 1280w, /shots/overview-2660.webp 2660w"
+  "/shots/desktop-terminal.png": {
+    "width": 2200,
+    "height": 1560,
+    "src": "/shots/desktop-terminal-2200.webp",
+    "srcSet": "/shots/desktop-terminal-640.webp 640w, /shots/desktop-terminal-1280.webp 1280w, /shots/desktop-terminal-2200.webp 2200w"
   },
-  "/shots/plugins.png": {
-    "width": 1946,
-    "height": 1586,
-    "src": "/shots/plugins-1946.webp",
-    "srcSet": "/shots/plugins-640.webp 640w, /shots/plugins-1280.webp 1280w, /shots/plugins-1946.webp 1946w"
+  "/shots/iphone-agents.png": {
+    "width": 1206,
+    "height": 2622,
+    "src": "/shots/iphone-agents-1206.webp",
+    "srcSet": "/shots/iphone-agents-640.webp 640w, /shots/iphone-agents-1206.webp 1206w"
   },
-  "/shots/project.png": {
-    "width": 1540,
-    "height": 1258,
-    "src": "/shots/project-1540.webp",
-    "srcSet": "/shots/project-640.webp 640w, /shots/project-1280.webp 1280w, /shots/project-1540.webp 1540w"
+  "/shots/iphone-inbox.png": {
+    "width": 1206,
+    "height": 2622,
+    "src": "/shots/iphone-inbox-1206.webp",
+    "srcSet": "/shots/iphone-inbox-640.webp 640w, /shots/iphone-inbox-1206.webp 1206w"
   },
-  "/shots/providers.png": {
-    "width": 1946,
-    "height": 1088,
-    "src": "/shots/providers-1946.webp",
-    "srcSet": "/shots/providers-640.webp 640w, /shots/providers-1280.webp 1280w, /shots/providers-1946.webp 1946w"
+  "/shots/iphone-provider-picker.png": {
+    "width": 1206,
+    "height": 2622,
+    "src": "/shots/iphone-provider-picker-1206.webp",
+    "srcSet": "/shots/iphone-provider-picker-640.webp 640w, /shots/iphone-provider-picker-1206.webp 1206w"
   },
-  "/shots/terminal.png": {
-    "width": 1782,
-    "height": 1010,
-    "src": "/shots/terminal-1782.webp",
-    "srcSet": "/shots/terminal-640.webp 640w, /shots/terminal-1280.webp 1280w, /shots/terminal-1782.webp 1782w"
+  "/shots/iphone-streaming.png": {
+    "width": 1206,
+    "height": 2622,
+    "src": "/shots/iphone-streaming-1206.webp",
+    "srcSet": "/shots/iphone-streaming-640.webp 640w, /shots/iphone-streaming-1206.webp 1206w"
   },
-  "/shots/themes.png": {
-    "width": 1946,
-    "height": 1590,
-    "src": "/shots/themes-1946.webp",
-    "srcSet": "/shots/themes-640.webp 640w, /shots/themes-1280.webp 1280w, /shots/themes-1946.webp 1946w"
+  "/shots/web-conversation.png": {
+    "width": 2880,
+    "height": 1800,
+    "src": "/shots/web-conversation-2880.webp",
+    "srcSet": "/shots/web-conversation-640.webp 640w, /shots/web-conversation-1280.webp 1280w, /shots/web-conversation-2880.webp 2880w"
   }
 }

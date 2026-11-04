@@ -2,8 +2,9 @@
 
 The landing page (`/`) and changelog (`/changelog`) for Ryco. It is a motion-led
 product site: the centrepiece is a coded, faithful replica of the Ryco desktop
-window that plays a complete agent run as you scroll, next to real product
-captures and a section for Ryco Cloud (the hosted Hub at app.ryco.space).
+window that plays a complete agent run as you scroll, next to live demos of the
+latest release, real product captures, a section for Ryco Cloud (the hosted Hub
+at app.ryco.space) and the coming iPhone app.
 
 ## Stack
 
@@ -29,7 +30,8 @@ never disturbs the pinned Effect/Bun catalog used by `apps/web`.
 
 ```
 src/
-  data/content.ts        copy and product facts (providers, platforms, shots, Cloud, FAQ)
+  data/content.ts        copy and product facts (providers, platforms, shots, Cloud, mobile, FAQ)
+  data/changelog.ts      editorial release notes; the first entry also leads What's new
   lib/motion.ts          GSAP registration, eases, useGsap(), Lenis, reduced-motion hook
   lib/useMediaQuery.ts   shared narrow-screen query
   site/HomePage.tsx      composes the sections below
@@ -39,11 +41,13 @@ src/
     film.ts              the scroll-scrubbed timeline: Ask, Work, Parallel, Review, Run
     script.ts            the screenplay (prompt, tool rows, diff, terminal, six panes)
   site/Agents.tsx        provider roster with width-axis hover + trailing preview
+  site/Latest.tsx        What's new: five live demos of the latest release + a marquee
   site/Gallery.tsx       real captures, pinned horizontal pan
   site/Toolkit.tsx       five live micro-demos (worktrees, ⌘K, # issues, themes, traces)
-  site/Cloud.tsx         Ryco Cloud relay diagram
+  site/Cloud.tsx         Ryco Cloud relay diagram (machines, hub, browser, phone)
+  site/Mobile.tsx        the iPhone app: pinned chapter player over real simulator captures
   site/Download.tsx      OS-detected platforms + typing terminal
-  site/Faq.tsx, Finale.tsx, Nav.tsx, ui/
+  site/Faq.tsx, Finale.tsx, Nav.tsx, ui/ (Button, CopyCommand, reveal, loops)
   pages/ChangelogPage.tsx
 ```
 
@@ -92,3 +96,18 @@ RYCO_HOME=/tmp/ryco-shots RYCO_PORT=13773 RYCO_HOST=127.0.0.1 RYCO_MODE=web \
 cd marketing
 RYCO_TOKEN=<token> node scripts/app-shots.mjs   # → marketing/app-screenshots/
 ```
+
+## Claims to keep honest
+
+- Ryco Cloud is free during an invite-only beta, for a limited number of devices
+  per account. Public signup is off, so the call to action is "Request access"
+  (Discord) with "Sign in" for existing accounts. Update `CLOUD` and the FAQ in
+  `src/data/content.ts` when that changes.
+- The iPhone app is not in the App Store or TestFlight yet; every surface says
+  "coming soon". Update `MOBILE.status`, the Download row and the FAQ at launch.
+- Encryption copy follows `docs/hosted-hub-client.md` and
+  `docs/relay-e2ee-protocol.md`: encrypted to the machine when both sides support
+  it, never a blanket end-to-end promise.
+- iPhone captures (`public/shots/iphone-*.png`) come from the iOS Simulator
+  paired directly to an isolated node; regenerate variants with
+  `bun run assets:optimize` after replacing them.

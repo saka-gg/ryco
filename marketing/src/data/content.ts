@@ -135,9 +135,11 @@ export const PLATFORMS: Platform[] = [
   },
 ];
 
-/** Real product captures in /public/shots, dark mode, identities blurred.
- *  `src` is the source PNG key; pages render the responsive WebP variants
- *  through screenshotImageProps(). */
+/** Real product captures, dark mode, from an isolated demo node (no personal
+ *  data). Stills live in /public/shots: `src` is the source PNG key and pages
+ *  render its responsive WebP variants through screenshotImageProps(). A shot
+ *  with `video` plays that loop from /public/media instead, `src` naming the
+ *  path without extension. */
 export interface Shot {
   src: string;
   title: string;
@@ -145,45 +147,75 @@ export interface Shot {
   alt: string;
   /** Native width / height. */
   aspect: number;
+  video?: boolean;
 }
+
+const DESKTOP = 2200 / 1560;
 
 export const SHOTS: Shot[] = [
   {
-    src: "/shots/model-picker.png",
-    title: "Model picker",
-    caption: "Every model from every provider in one picker, with ⌘1 to ⌘9 jumps.",
-    alt: "Ryco model picker listing Claude models with keyboard shortcuts and a provider rail.",
-    aspect: 1594 / 850,
+    src: "/media/desktop-agent-work",
+    video: true,
+    title: "Watch it work",
+    caption: "Live chapters, tool rows and the reasoning timeline, as the agent runs.",
+    alt: "A Ryco thread mid-run: live work chapters and tool rows update as the agent reads and searches.",
+    aspect: 1600 / 1134,
   },
   {
-    src: "/shots/diff.png",
+    src: "/shots/desktop-hero-agents.png",
+    title: "Agents that delegate",
+    caption: "A thread hands work to a subagent and keeps going. Everything active sits on top.",
+    alt: "A Ryco thread delegating a review to a subagent, with the active threads listed in the sidebar.",
+    aspect: DESKTOP,
+  },
+  {
+    src: "/shots/desktop-review.png",
     title: "Review",
-    caption: "Per-turn diffs. Click any line to open your editor right there.",
-    alt: "Ryco review panel showing per-turn diffs of TypeScript files.",
-    aspect: 1798 / 1894,
-  },
-
-  {
-    src: "/shots/overview.png",
-    title: "Project overview",
-    caption: "Issues, pull requests, Actions and Jira for the repo at a glance.",
-    alt: "Ryco project overview with open issues, pull requests, Actions and Jira status.",
-    aspect: 2660 / 1492,
-  },
-
-  {
-    src: "/shots/providers.png",
-    title: "Providers",
-    caption: "Live auth, version and subscription status per provider.",
-    alt: "Ryco provider settings listing authenticated Codex, Claude, Copilot, Cursor and OpenCode.",
-    aspect: 1946 / 1088,
+    caption: "Turn diffs or branch changes, staged and unstaged, with a file tree and find.",
+    alt: "The Ryco review panel comparing branch changes with a diff of a test file.",
+    aspect: DESKTOP,
   },
   {
-    src: "/shots/themes.png",
+    src: "/shots/desktop-pull-requests.png",
+    title: "Pull requests",
+    caption: "Every pull request that needs you, with checks, conflicts and size at a glance.",
+    alt: "The Ryco pull requests page listing open pull requests of the public Ryco repository.",
+    aspect: DESKTOP,
+  },
+  {
+    src: "/shots/desktop-quick-open.png",
+    title: "Quick open",
+    caption: "⌘P finds any file in the project, and ⇧⌘F searches inside them.",
+    alt: "Ryco's quick open dialog matching project files for the query automation.",
+    aspect: DESKTOP,
+  },
+  {
+    src: "/shots/desktop-terminal.png",
+    title: "Terminal",
+    caption: "Real terminals in a drawer, right under the thread that needs them.",
+    alt: "A Ryco thread with the terminal drawer open below the conversation.",
+    aspect: DESKTOP,
+  },
+  {
+    src: "/shots/desktop-tasks.png",
+    title: "Tasks",
+    caption: "Your to-do list next to your chats. Start a chat from any task.",
+    alt: "The Ryco Tasks page with three open tasks.",
+    aspect: DESKTOP,
+  },
+  {
+    src: "/shots/desktop-appearance.png",
     title: "Appearance",
-    caption: "Fonts, size, radius and a custom accent, tuned live.",
-    alt: "Ryco appearance settings with font pickers, size, radius and accent colour.",
-    aspect: 1946 / 1590,
+    caption: "System, light and dark, theme palettes, and VS Code themes on import.",
+    alt: "Ryco appearance settings with color modes and theme palettes.",
+    aspect: DESKTOP,
+  },
+  {
+    src: "/shots/web-conversation.png",
+    title: "In any browser",
+    caption: "The same app in a browser tab, from npx ryco-cli or Ryco Cloud.",
+    alt: "Ryco running in a browser window, showing a finished conversation.",
+    aspect: 2880 / 1800,
   },
 ];
 
@@ -233,7 +265,10 @@ export const CLOUD = {
 export interface MobileChapter {
   title: string;
   body: string;
+  /** Still (and poster stand-in) in /public/shots. */
   shot?: string;
+  /** Optional loop in /public/media, path without extension. */
+  video?: string;
   alt?: string;
 }
 
@@ -245,21 +280,28 @@ export const MOBILE: {
   chapters: [
     {
       title: "Every thread, every machine",
-      body: "One inbox across all your machines, each thread tagged with where it runs and what it's doing.",
+      body: "One inbox across your projects and machines, each thread tagged with where it runs.",
       shot: "/shots/iphone-inbox.png",
-      alt: "Ryco for iPhone: the inbox listing active threads from several machines.",
+      alt: "Ryco for iPhone: the inbox listing five active threads across two projects.",
     },
     {
-      title: "Approve, steer, queue",
-      body: "Watch replies stream in, answer questions, approve tools, and queue follow-ups the machine sends when the agent is ready.",
-      shot: "/shots/iphone-thread.png",
-      alt: "Ryco for iPhone: a thread with the agent's replies and the composer.",
+      title: "Watch it stream, steer it live",
+      body: "Replies stream in as the agent writes. Answer questions, approve tools, or queue a follow-up the machine sends when the agent is ready.",
+      shot: "/shots/iphone-streaming.png",
+      video: "/media/iphone-reply-stream",
+      alt: "Ryco for iPhone: an agent's reply streaming into a running thread.",
+    },
+    {
+      title: "Every agent at a glance",
+      body: "See the agents a chat started, with live time, tokens and what each is thinking.",
+      shot: "/shots/iphone-agents.png",
+      alt: "Ryco for iPhone: the agents sheet with a running subagent and its reasoning state.",
     },
     {
       title: "Every model in your pocket",
       body: "Switch provider, model, reasoning effort and fast mode per thread, the same picker as on desktop.",
-      shot: "/shots/iphone-model-picker.png",
-      alt: "Ryco for iPhone: the model picker with providers, reasoning effort and fast mode.",
+      shot: "/shots/iphone-provider-picker.png",
+      alt: "Ryco for iPhone: the provider picker with Claude, Codex, Copilot, Grok and OpenCode.",
     },
     {
       title: "Review and merge",

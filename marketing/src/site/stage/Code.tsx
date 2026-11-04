@@ -1,6 +1,6 @@
 /**
  * A tiny TypeScript line highlighter for the replica's diff and file views.
- * Colours approximate the app's dark syntax theme (see public/shots/files.png):
+ * Colours approximate the app's dark syntax theme (see public/shots/desktop-review.png):
  * salmon keywords, violet calls, green strings, blue numbers.
  */
 const RULES: Array<[RegExp, string]> = [

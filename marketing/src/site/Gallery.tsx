@@ -8,6 +8,7 @@ import { SHOTS } from "@/data/content";
 import { screenshotImageProps } from "@/lib/screenshotAssets";
 import { cn } from "@/lib/cn";
 import { gsap, ScrollTrigger, useGsap } from "@/lib/motion";
+import { LoopVideo } from "./ui/LoopVideo";
 import { revealText } from "./ui/reveal";
 import { focusRing, SECTION_X } from "./theme";
 
@@ -41,7 +42,7 @@ export function Gallery() {
 
       /* each capture slides against its frame as it crosses the viewport */
       track.querySelectorAll<HTMLElement>("[data-shot]").forEach((frame) => {
-        const img = frame.querySelector("img")!;
+        const img = frame.querySelector("[data-media]")!;
         gsap.fromTo(
           img,
           { xPercent: -6 },
@@ -99,8 +100,8 @@ export function Gallery() {
           Look closer<span className="text-accent">.</span>
         </h2>
         <p data-gallery-sub className="mt-6 max-w-[46ch] text-[17px] leading-relaxed text-ink/60">
-          Real captures from the app, nothing mocked up. Models, review, the project overview,
-          providers and the settings that tune it all.
+          Real captures from the current app, nothing mocked up: agents at work, review, pull
+          requests, quick open, terminals, tasks and the settings that tune it all.
         </p>
       </div>
 
@@ -130,16 +131,26 @@ export function Gallery() {
                 className="relative overflow-hidden rounded-[14px] bg-app ring-1 ring-white/[0.12] lg:h-[62svh] lg:will-change-transform"
                 style={{ aspectRatio: `${Math.min(Math.max(shot.aspect, 0.95), 1.7)}` }}
               >
-                <img
-                  /* responsive lossless variants from scripts/optimize-assets.mjs;
-                     the image is 114% of its frame for the parallax drift */
-                  {...screenshotImageProps(shot.src, "(min-width: 1024px) 80vw, 96vw")}
-                  alt={shot.alt}
-                  loading="lazy"
-                  decoding="async"
-                  draggable={false}
-                  className="absolute inset-y-0 left-[-7%] h-full w-[114%] max-w-none object-cover object-top lg:will-change-transform"
-                />
+                {shot.video ? (
+                  <LoopVideo
+                    data-media
+                    src={shot.src}
+                    label={shot.alt}
+                    className="absolute inset-y-0 left-[-7%] h-full w-[114%] max-w-none object-cover object-top lg:will-change-transform"
+                  />
+                ) : (
+                  <img
+                    data-media
+                    /* responsive lossless variants from scripts/optimize-assets.mjs;
+                       the image is 114% of its frame for the parallax drift */
+                    {...screenshotImageProps(shot.src, "(min-width: 1024px) 80vw, 96vw")}
+                    alt={shot.alt}
+                    loading="lazy"
+                    decoding="async"
+                    draggable={false}
+                    className="absolute inset-y-0 left-[-7%] h-full w-[114%] max-w-none object-cover object-top lg:will-change-transform"
+                  />
+                )}
               </div>
               <figcaption className="mt-5 max-w-[42ch]">
                 <span className="block font-display text-[19px] font-semibold tracking-[-0.01em] text-ink">

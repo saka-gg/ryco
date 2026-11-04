@@ -14,13 +14,14 @@ import { cn } from "@/lib/cn";
 import { screenshotImageProps } from "@/lib/screenshotAssets";
 import { gsap, useGsap } from "@/lib/motion";
 import { Button } from "./ui/Button";
+import { LoopVideo } from "./ui/LoopVideo";
 import { revealText, revealUp } from "./ui/reveal";
 import { focusRing, SECTION_X } from "./theme";
 
 /** iPhone 17 Pro screen, 402 × 874 pt. */
 const SCREEN_ASPECT = 402 / 874;
 
-const SHOWN = MOBILE.chapters.filter((c): c is Required<MobileChapter> => Boolean(c.shot));
+const SHOWN = MOBILE.chapters.filter((c): c is Shown => Boolean(c.shot && c.alt));
 const LISTED = MOBILE.chapters.filter((c) => !c.shot);
 
 /** A CSS iPhone: bezel, rounded screen, Dynamic Island. Children fill the screen. */
@@ -37,16 +38,31 @@ function PhoneFrame({ children, className }: { children: React.ReactNode; classN
         style={{ aspectRatio: `${SCREEN_ASPECT}` }}
       >
         {children}
+        {/* the simulator's island, which screenshots leave out and recordings keep */}
         <span
           aria-hidden
-          className="absolute left-1/2 top-[1.3%] h-[4.1%] w-[30.5%] -translate-x-1/2 rounded-full bg-black"
+          className="absolute left-1/2 top-[1.5%] h-[4.25%] w-[23.7%] -translate-x-1/2 rounded-full bg-black"
         />
       </div>
     </div>
   );
 }
 
-function Screen({ chapter, index }: { chapter: Required<MobileChapter>; index: number }) {
+type Shown = MobileChapter & { shot: string; alt: string };
+
+function Screen({ chapter, index }: { chapter: Shown; index: number }) {
+  /* the settled frame (reduced motion) is the first capture */
+  const hidden = index > 0 && "opacity-0";
+  if (chapter.video) {
+    return (
+      <LoopVideo
+        data-screen
+        src={chapter.video}
+        label={chapter.alt}
+        className={cn("absolute inset-0 size-full object-cover", hidden)}
+      />
+    );
+  }
   return (
     <img
       data-screen
@@ -55,8 +71,7 @@ function Screen({ chapter, index }: { chapter: Required<MobileChapter>; index: n
       loading="lazy"
       decoding="async"
       draggable={false}
-      /* the settled frame (reduced motion) is the first capture */
-      className={cn("absolute inset-0 size-full object-cover", index > 0 && "opacity-0")}
+      className={cn("absolute inset-0 size-full object-cover", hidden)}
     />
   );
 }
@@ -140,14 +155,22 @@ function Strip() {
       {SHOWN.map((c, i) => (
         <figure key={c.title} className="w-[64vw] max-w-[300px] shrink-0 snap-center">
           <PhoneFrame>
-            <img
-              {...screenshotImageProps(c.shot, "(max-width: 768px) 64vw, 300px")}
-              alt={c.alt}
-              loading={i === 0 ? "eager" : "lazy"}
-              decoding="async"
-              draggable={false}
-              className="absolute inset-0 size-full object-cover"
-            />
+            {c.video ? (
+              <LoopVideo
+                src={c.video}
+                label={c.alt}
+                className="absolute inset-0 size-full object-cover"
+              />
+            ) : (
+              <img
+                {...screenshotImageProps(c.shot, "(max-width: 768px) 64vw, 300px")}
+                alt={c.alt}
+                loading={i === 0 ? "eager" : "lazy"}
+                decoding="async"
+                draggable={false}
+                className="absolute inset-0 size-full object-cover"
+              />
+            )}
           </PhoneFrame>
           <figcaption className="mt-5">
             <span className="block font-display text-[19px] font-semibold tracking-[-0.01em] text-ink">
@@ -197,7 +220,8 @@ export function Mobile() {
           pin: true,
           scrub: 0.6,
           invalidateOnRefresh: true,
-          refreshPriority: -1,
+          /* sort by document position, like the film and gallery pins */
+          refreshPriority: 0,
         },
       });
       gsap.set(screens, { autoAlpha: 0 });

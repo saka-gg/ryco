@@ -98,8 +98,14 @@ export function Finale() {
             <a href="#agents" onClick={go("agents")} className={linkCls}>
               Agents
             </a>
+            <a href="#new" onClick={go("new")} className={linkCls}>
+              What's new
+            </a>
             <a href="#cloud" onClick={go("cloud")} className={linkCls}>
               Cloud
+            </a>
+            <a href="#mobile" onClick={go("mobile")} className={linkCls}>
+              iPhone app
             </a>
             <a href="#download" onClick={go("download")} className={linkCls}>
               Download
