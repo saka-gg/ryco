@@ -64,7 +64,6 @@ export function useGsap<T extends HTMLElement = HTMLDivElement>(
       cleanup?.();
       ctx.revert();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- the caller passes the dependency list, as with useEffect itself
   }, [...deps, reduced]);
   return scope;
 }

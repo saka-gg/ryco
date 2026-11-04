@@ -8,23 +8,10 @@ import { Command, CornerDownLeft, GitPullRequest, Search } from "lucide-react";
 import { BrandIcon, GitHubIcon } from "@/assets/brands";
 import { providerById } from "@/data/content";
 import { cn } from "@/lib/cn";
-import { gsap, ScrollTrigger, useGsap } from "@/lib/motion";
+import { gsap, useGsap } from "@/lib/motion";
+import { setText, whileVisible } from "./ui/loops";
 import { revealText, revealUp } from "./ui/reveal";
 import { SECTION_X } from "./theme";
-
-/** Play `tl` only while `cell` is in the viewport. */
-function whileVisible(cell: Element, tl: { play: () => unknown; pause: () => unknown }) {
-  return ScrollTrigger.create({
-    trigger: cell,
-    start: "top bottom",
-    end: "bottom top",
-    onToggle: (self) => (self.isActive ? tl.play() : tl.pause()),
-  });
-}
-
-const setText = (el: Element, text: string) => {
-  el.textContent = text;
-};
 
 /* ------------------------------- worktrees -------------------------------- */
 
@@ -32,7 +19,7 @@ const COLUMNS = ["Idle", "In progress", "Review", "Done"];
 const CARDS = [
   { branch: "feat/relay-backoff", provider: "claude", note: "+131 −2" },
   { branch: "fix/worktree-flake", provider: "copilot", note: "1 test" },
-  { branch: "docs/changelog-0.1.29", provider: "opencode", note: "draft" },
+  { branch: "docs/changelog-0.1.37", provider: "opencode", note: "draft" },
   { branch: "perf/diff-search", provider: "cursor", note: "+38 −22" },
   { branch: "feat/theme-tokens", provider: "codex", note: "+84 −31" },
 ];

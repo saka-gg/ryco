@@ -197,6 +197,19 @@ body {
   }
 }
 
+/* What's new marquee: two copies of the row, so -50% loops seamlessly. */
+.ry-marquee {
+  animation: ry-marquee 70s linear infinite;
+}
+.ry-marquee-rev {
+  animation: ry-marquee 70s linear infinite reverse;
+}
+@keyframes ry-marquee {
+  to {
+    transform: translateX(-50%);
+  }
+}
+
 /* The Stage's spinners and carets are paused until the film shows them
    (film.ts flips animation-play-state as it reveals and hides each one), so
    hidden loops never cost a frame. */

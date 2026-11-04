@@ -12,6 +12,7 @@
 import { memo, useEffect, useRef } from "react";
 import {
   ArrowUp,
+  CalendarClock,
   Check,
   ChevronDown,
   ChevronRight,
@@ -19,13 +20,17 @@ import {
   ExternalLink,
   FileDiff,
   FilePlus2,
-  FolderClosed,
-  FolderOpen,
-  GitBranch,
+  Folder,
+  FolderKanban,
   GitCompareArrows,
+  GitPullRequest,
+  Inbox,
+  Laptop,
+  ListChecks,
+  ListFilter,
+  PanelLeft,
   Paperclip,
   Plus,
-  Search,
   Settings,
   SquareTerminal,
   X,
@@ -170,52 +175,77 @@ function Sidebar() {
         <span className="size-3 rounded-full bg-[#febc2e]" />
         <span className="size-3 rounded-full bg-[#28c840]" />
       </div>
-      <div className="flex h-9 items-center justify-between px-3.5">
-        <RycoMark className="h-[17px] text-app-fg" />
-        <div className="flex items-center gap-0.5">
-          <IconButton>
-            <Search />
-          </IconButton>
+      {/* header: machine switch, mark, inbox; settings and collapse */}
+      <div className="flex h-9 items-center gap-1.5 px-3">
+        <span className="grid h-[26px] w-11 place-items-center rounded-full bg-app-indigo/80 text-white [&_svg]:size-[14px]">
+          <Laptop />
+        </span>
+        <RycoMark className="ml-1 h-[16px] text-app-fg" />
+        <IconButton className="ml-0.5">
+          <Inbox />
+        </IconButton>
+        <div className="ml-auto flex items-center">
           <IconButton>
             <Settings />
           </IconButton>
+          <IconButton>
+            <PanelLeft />
+          </IconButton>
         </div>
       </div>
 
-      <div className="mx-2.5 mt-1.5 flex h-[34px] items-center gap-2 rounded-lg px-2.5 text-[13px] text-app-fg/90 hover:bg-white/5">
-        <Plus className="size-4 text-app-muted" />
-        New thread
-        <span className="ml-auto font-mono text-[11px] text-app-muted/70">⌘N</span>
+      {/* the Omnifield */}
+      <div className="mx-2.5 mt-2 flex items-center gap-1.5">
+        <span className="flex h-[30px] flex-1 items-center gap-2 rounded-full border border-white/[0.08] bg-white/[0.03] pl-2.5 pr-1 text-[12px] text-app-muted/70">
+          <ListFilter className="size-3.5" />
+          Filter, or type @ or is:
+          <span className="ml-auto rounded-full bg-white/[0.06] px-1.5 py-px font-mono text-[10px] text-app-muted">
+            ⌘K
+          </span>
+        </span>
+        <span className="grid size-[30px] place-items-center rounded-full bg-app-fg text-app-side">
+          <Plus className="size-4" strokeWidth={2.4} />
+        </span>
       </div>
 
-      <p className="mt-5 px-5 text-[11px] font-medium tracking-[0.04em] text-app-muted/70">
-        Projects
+      <nav className="mt-3 px-2.5 text-[12.5px] text-app-fg/80">
+        {[
+          [CalendarClock, "Automations"],
+          [ListChecks, "Tasks"],
+          [GitPullRequest, "Pull requests"],
+          [FolderKanban, "Projects"],
+        ].map(([Icon, label]) => {
+          const I = Icon as typeof Inbox;
+          return (
+            <div
+              key={label as string}
+              className="flex h-[28px] items-center gap-2.5 rounded-md px-2"
+            >
+              <I className="size-[15px] text-app-muted" />
+              {label as string}
+            </div>
+          );
+        })}
+      </nav>
+
+      <p className="mt-4 flex items-center gap-2 px-[18px] text-[10.5px] font-semibold tracking-[0.08em] text-app-muted/70">
+        ACTIVE NOW <span className="font-normal">{THREADS.length}</span>
       </p>
 
-      <div className="mt-1.5 px-2.5">
-        <div className="flex h-8 items-center gap-2 rounded-lg px-2.5 text-[13px] font-medium text-app-fg">
-          <FolderOpen className="size-4 text-app-muted" />
-          ryco
-          <span className="ml-auto text-[11px] font-normal text-app-muted/70">6</span>
-        </div>
-        <div className="relative ml-[17px] border-l border-white/[0.07] pl-1.5">
-          {THREADS.map((t, i) => {
-            const p = providerById(t.provider);
-            return (
-              <div
-                key={t.id}
-                data-s="side-row"
-                data-i={i}
-                className={cn(
-                  "relative flex h-[30px] items-center gap-2 rounded-md px-2 text-[12.5px]",
-                  i === 0 ? "bg-white/[0.075] text-app-fg" : "text-app-fg/75",
-                )}
-              >
-                <BrandIcon
-                  name={p.brand}
-                  className="size-[13px] shrink-0"
-                  style={{ color: p.accent }}
-                />
+      <div className="mt-1.5 space-y-0.5 px-2.5">
+        {THREADS.map((t, i) => {
+          const p = providerById(t.provider);
+          return (
+            <div
+              key={t.id}
+              data-s="side-row"
+              data-i={i}
+              className={cn(
+                "relative rounded-[10px] px-2.5 py-[7px]",
+                i === 0 ? "bg-white/[0.075] text-app-fg" : "text-app-fg/80",
+              )}
+            >
+              <div className="flex items-center gap-2 text-[12.5px]">
                 <span className="relative min-w-0 flex-1">
                   {i === 0 ? (
                     <>
@@ -225,7 +255,7 @@ function Sidebar() {
                       >
                         New thread
                       </span>
-                      <span data-s="side-title" className="block truncate">
+                      <span data-s="side-title" className="block truncate font-medium">
                         {t.title}
                       </span>
                     </>
@@ -240,18 +270,17 @@ function Sidebar() {
                   <Spinner className="side-spin absolute right-0 top-1/2 size-3 -translate-y-1/2 text-app-muted opacity-0" />
                 </span>
               </div>
-            );
-          })}
-        </div>
-        {["website", "dotfiles"].map((name) => (
-          <div
-            key={name}
-            className="mt-0.5 flex h-8 items-center gap-2 rounded-lg px-2.5 text-[13px] text-app-fg/75"
-          >
-            <FolderClosed className="size-4 text-app-muted" />
-            {name}
-          </div>
-        ))}
+              <div className="mt-[3px] flex items-center gap-1.5 text-[10.5px] text-app-muted/75">
+                <BrandIcon
+                  name={p.brand}
+                  className="size-[11px] shrink-0"
+                  style={{ color: p.accent }}
+                />
+                <span className="truncate font-mono">ryco · {t.branch}</span>
+              </div>
+            </div>
+          );
+        })}
       </div>
 
       <div className="mt-auto flex h-12 items-center gap-2.5 border-t border-white/[0.06] px-4 text-[12px] text-app-muted">
@@ -259,7 +288,7 @@ function Sidebar() {
           <span className="size-2 rounded-full bg-[#5fcf86]" />
         </span>
         MacBook Pro
-        <span className="ml-auto text-app-muted/60">Local</span>
+        <span className="ml-auto text-app-muted/60">2 machines</span>
       </div>
     </aside>
   );
@@ -284,18 +313,43 @@ function Composer() {
       </div>
       <div className="mt-2 flex items-center gap-1.5 text-[12px] text-app-muted">
         <Paperclip className="mr-1 size-4" />
-        <span className="flex h-7 items-center gap-1.5 rounded-full border border-white/[0.08] px-2.5 text-app-fg/90">
+        <span className="flex h-7 items-center gap-1.5 rounded-full px-2 text-app-fg/90">
           <BrandIcon name={claude.brand} className="size-3.5" style={{ color: claude.accent }} />
           Opus 5.5
+          <span className="font-medium text-[#8fa8ff]">High</span>
           <ChevronDown className="size-3.5 text-app-muted" />
         </span>
-        <span className="flex h-7 items-center rounded-full bg-[#3a2a55] px-2.5 font-medium text-[#d6b8ff]">
-          High
+        <span className="flex h-7 items-center gap-1.5 rounded-full px-2 text-app-muted">
+          <Laptop className="size-3.5" />
+          MacBook Pro
+          <ChevronDown className="size-3.5" />
         </span>
-        <span className="flex h-7 items-center rounded-full px-2 text-app-muted">1M</span>
+        <span className="ml-auto grid size-7 place-items-center" aria-hidden>
+          <svg viewBox="0 0 20 20" className="size-5 -rotate-90">
+            <circle
+              cx="10"
+              cy="10"
+              r="7.5"
+              fill="none"
+              stroke="rgba(255,255,255,0.12)"
+              strokeWidth="2.2"
+            />
+            <circle
+              cx="10"
+              cy="10"
+              r="7.5"
+              fill="none"
+              stroke="rgba(255,255,255,0.55)"
+              strokeWidth="2.2"
+              strokeDasharray="47.1"
+              strokeDashoffset="38"
+              strokeLinecap="round"
+            />
+          </svg>
+        </span>
         <span
           data-s="send"
-          className="ml-auto grid size-8 place-items-center rounded-full bg-app-indigo text-white"
+          className="grid size-8 place-items-center rounded-full bg-app-indigo text-white"
         >
           <ArrowUp className="size-4" strokeWidth={2.4} />
         </span>
@@ -622,21 +676,44 @@ const Window = memo(function Window() {
           className="relative z-[2] flex items-center gap-2.5 border-b border-white/[0.06] bg-app px-4"
           style={{ height: HEADER_H }}
         >
-          <span className="relative h-5 min-w-[180px] text-[13.5px] font-semibold">
-            <span data-s="title-new" className="absolute inset-0 text-app-muted opacity-0">
-              New thread
-            </span>
-            <span data-s="title-real" className="absolute inset-0">
-              {THREADS[0].title}
-            </span>
-          </span>
-          <span className="rounded-md bg-white/[0.05] px-2 py-0.5 text-[11.5px] text-app-muted">
+          {/* breadcrumb, then the open chats as tabs */}
+          <span className="flex items-center gap-1.5 text-[13px] text-app-fg/80">
+            <Folder className="size-[15px] text-app-muted" />
             ryco
+            <ChevronRight className="size-3.5 text-app-muted/60" />
           </span>
-          <span className="flex items-center gap-1 rounded-md bg-white/[0.05] px-2 py-0.5 font-mono text-[11px] text-app-muted">
-            <GitBranch className="size-3" />
-            {BRANCH}
+          <span className="flex h-[30px] items-center gap-2 rounded-full border border-white/[0.09] bg-white/[0.04] pl-2.5 pr-2 text-[12.5px]">
+            <BrandIcon
+              name={providerById("claude").brand}
+              className="size-3.5"
+              style={{ color: providerById("claude").accent }}
+            />
+            <span className="relative h-5 w-[150px] font-semibold leading-5">
+              <span data-s="title-new" className="absolute inset-0 text-app-muted opacity-0">
+                New thread
+              </span>
+              <span data-s="title-real" className="absolute inset-0 truncate">
+                {THREADS[0].title}
+              </span>
+            </span>
+            <X className="size-3.5 text-app-muted" />
           </span>
+          {THREADS.slice(1, 3).map((t) => {
+            const p = providerById(t.provider);
+            return (
+              <span
+                key={t.id}
+                className="flex h-[30px] max-w-[150px] items-center gap-2 px-1.5 text-[12.5px] text-app-muted"
+              >
+                <BrandIcon
+                  name={p.brand}
+                  className="size-3.5 shrink-0"
+                  style={{ color: p.accent }}
+                />
+                <span className="truncate">{t.title}</span>
+              </span>
+            );
+          })}
           <div className="ml-auto flex items-center gap-1">
             <IconButton data-s="btn-split">
               <Columns2 />

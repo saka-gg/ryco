@@ -18,7 +18,9 @@ import { focusRing } from "./theme";
 export const NAV_LINKS = [
   { id: "product", label: "Product" },
   { id: "agents", label: "Agents" },
+  { id: "new", label: "New" },
   { id: "cloud", label: "Cloud" },
+  { id: "mobile", label: "Mobile" },
   { id: "download", label: "Download" },
   { id: "faq", label: "FAQ" },
 ] as const;

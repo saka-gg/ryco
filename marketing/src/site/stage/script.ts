@@ -37,17 +37,54 @@ export interface SideThread {
   provider: string;
   title: string;
   age: string;
+  branch: string;
 }
 
 /** Sidebar threads (all six run at once); the first four also fill the
  *  parallel scene's split view, which the app caps at a 2x2 grid. */
 export const THREADS: SideThread[] = [
-  { id: "t1", provider: "claude", title: "Relay reconnect backoff", age: "now" },
-  { id: "t2", provider: "codex", title: "Theme editor on tokens", age: "2m" },
-  { id: "t3", provider: "copilot", title: "Fix flaky worktree test", age: "4m" },
-  { id: "t4", provider: "opencode", title: "Draft v0.1.29 changelog", age: "9m" },
-  { id: "t5", provider: "cursor", title: "Faster diff search", age: "12m" },
-  { id: "t6", provider: "grok", title: "Audit MCP settings copy", age: "21m" },
+  {
+    id: "t1",
+    provider: "claude",
+    title: "Relay reconnect backoff",
+    age: "now",
+    branch: "feat/relay-backoff",
+  },
+  {
+    id: "t2",
+    provider: "codex",
+    title: "Theme editor on tokens",
+    age: "2m",
+    branch: "feat/theme-tokens",
+  },
+  {
+    id: "t3",
+    provider: "copilot",
+    title: "Fix flaky worktree test",
+    age: "4m",
+    branch: "fix/worktree-flake",
+  },
+  {
+    id: "t4",
+    provider: "opencode",
+    title: "Changelog for v0.1.37",
+    age: "9m",
+    branch: "docs/changelog-0.1.37",
+  },
+  {
+    id: "t5",
+    provider: "cursor",
+    title: "Faster diff search",
+    age: "12m",
+    branch: "perf/diff-search",
+  },
+  {
+    id: "t6",
+    provider: "grok",
+    title: "Audit MCP settings copy",
+    age: "21m",
+    branch: "chore/mcp-copy",
+  },
 ];
 
 export interface Pane {
@@ -87,7 +124,7 @@ export const PANES: Pane[] = [
   {
     thread: "t4",
     model: "OpenCode",
-    rows: [{ verb: "Read", target: "git log v0.1.28..HEAD" }],
+    rows: [{ verb: "Read", target: "git log v0.1.36..HEAD" }],
     text: "Drafting highlights: split panes, hosted sign-in, faster cold start and MCP profiles.",
   },
   {

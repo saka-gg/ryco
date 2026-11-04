@@ -1,23 +1,28 @@
 /**
- * Ryco Cloud (the hosted Hub at app.ryco.space). Optional, free for now.
+ * Ryco Cloud (the hosted Hub at app.ryco.space): optional, free during an
+ * invite-only beta, for a limited number of devices per account.
  *
  * The diagram is a scaled design canvas like the Stage: machines dial *out*
- * to the hub (no inbound ports), the hub relays an encrypted channel to the
- * browser, and threads from both machines land in one inbox, each tagged with
- * where it runs. Scroll draws the network; once live, packets keep flowing.
+ * to the hub (no inbound ports), the hub relays encrypted channels to a
+ * browser and to the coming iPhone app, and threads from both machines land in
+ * one inbox, each tagged with where it runs. Scroll draws the network; once
+ * live, packets keep flowing.
  */
 import { useEffect, useRef } from "react";
 import {
   ArrowUpRight,
+  BellRing,
   Check,
+  Gift,
   HardDrive,
   KeyRound,
   Laptop,
-  Layers,
   Lock,
+  LogIn,
   Network,
   Router,
   Server,
+  ShieldCheck,
 } from "lucide-react";
 import { BrandIcon } from "@/assets/brands";
 import { RycoMark } from "@/assets/RycoLogo";
@@ -32,6 +37,9 @@ import { revealText, revealUp } from "./ui/reveal";
 import { SECTION_X } from "./theme";
 
 type Box = { x: number; y: number; w: number; h: number };
+type Wire = "mac" | "box" | "web" | "phone";
+const WIRES: Wire[] = ["mac", "box", "web", "phone"];
+
 interface Layout {
   w: number;
   h: number;
@@ -39,43 +47,53 @@ interface Layout {
   box: Box;
   hub: Box;
   web: Box;
-  paths: { mac: string; box: string; web: string };
+  phone: Box;
+  paths: Record<Wire, string>;
+  /** one lock at the midpoint of every wire: each hop is encrypted */
   locks: Array<{ x: number; y: number }>;
 }
 
 const WIDE: Layout = {
   w: 1200,
-  h: 520,
+  h: 560,
   mac: { x: 30, y: 70, w: 260, h: 92 },
-  box: { x: 30, y: 358, w: 260, h: 92 },
-  hub: { x: 480, y: 196, w: 240, h: 128 },
-  web: { x: 830, y: 100, w: 350, h: 320 },
+  box: { x: 30, y: 398, w: 260, h: 92 },
+  hub: { x: 450, y: 216, w: 240, h: 128 },
+  web: { x: 770, y: 40, w: 330, h: 300 },
+  phone: { x: 1030, y: 250, w: 150, h: 270 },
   paths: {
-    mac: "M290 116 C 390 116, 380 260, 480 260",
-    box: "M290 404 C 390 404, 380 260, 480 260",
-    web: "M720 260 C 770 260, 780 260, 830 260",
+    mac: "M290 116 C 370 116, 370 280, 450 280",
+    box: "M290 444 C 370 444, 370 280, 450 280",
+    web: "M690 250 C 730 250, 730 190, 770 190",
+    phone: "M690 310 C 760 330, 840 460, 1030 460",
   },
   locks: [
-    { x: 385, y: 188 },
-    { x: 385, y: 332 },
+    { x: 370, y: 198 },
+    { x: 370, y: 362 },
+    { x: 730, y: 220 },
+    { x: 815, y: 393 },
   ],
 };
 
 const TALL: Layout = {
   w: 360,
-  h: 760,
+  h: 820,
   mac: { x: 6, y: 10, w: 168, h: 96 },
   box: { x: 186, y: 10, w: 168, h: 96 },
-  hub: { x: 70, y: 220, w: 220, h: 120 },
-  web: { x: 10, y: 430, w: 340, h: 320 },
+  hub: { x: 70, y: 210, w: 220, h: 120 },
+  web: { x: 6, y: 440, w: 224, h: 290 },
+  phone: { x: 210, y: 506, w: 144, h: 264 },
   paths: {
-    mac: "M90 106 C 90 170, 180 150, 180 220",
-    box: "M270 106 C 270 170, 180 150, 180 220",
-    web: "M180 340 C 180 380, 180 390, 180 430",
+    mac: "M90 106 C 90 160, 180 150, 180 210",
+    box: "M270 106 C 270 160, 180 150, 180 210",
+    web: "M150 330 C 150 380, 118 390, 118 440",
+    phone: "M210 330 C 210 400, 282 430, 282 506",
   },
   locks: [
-    { x: 116, y: 162 },
-    { x: 244, y: 162 },
+    { x: 135, y: 156 },
+    { x: 225, y: 156 },
+    { x: 133, y: 385 },
+    { x: 246, y: 418 },
   ],
 };
 
@@ -83,10 +101,10 @@ const INBOX = [
   { provider: "claude", title: "Relay reconnect backoff", machine: "MacBook Pro", done: true },
   { provider: "codex", title: "Nightly perf sweep", machine: "build-box", done: false },
   { provider: "copilot", title: "Fix flaky worktree test", machine: "MacBook Pro", done: false },
-  { provider: "opencode", title: "Draft v0.1.29 changelog", machine: "build-box", done: true },
+  { provider: "opencode", title: "Changelog for v0.1.37", machine: "build-box", done: true },
 ];
 
-const POINT_ICONS = [KeyRound, Router, HardDrive, Layers];
+const POINT_ICONS = [Gift, KeyRound, ShieldCheck, Router, HardDrive, BellRing];
 
 function Machine({
   box,
@@ -118,6 +136,61 @@ function Machine({
   );
 }
 
+/** The coming iPhone app: the same inbox, in a pocket. */
+function Phone({ box }: { box: Box }) {
+  return (
+    <div
+      data-node="phone"
+      className="absolute"
+      style={{ left: box.x, top: box.y, width: box.w, height: box.h }}
+    >
+      <span className="absolute -right-2 -top-3 z-10 rounded-full bg-accent px-2 py-0.5 text-[10px] font-semibold text-accent-ink shadow-[0_6px_16px_-6px_rgba(255,92,40,0.7)]">
+        Soon
+      </span>
+      <div className="flex h-full flex-col overflow-hidden rounded-[30px] border-[5px] border-[#050505] bg-app shadow-[0_40px_90px_-30px_rgba(0,0,0,0.95)] ring-1 ring-white/15">
+        <div className="relative flex h-8 shrink-0 items-center justify-between px-4 text-[9.5px] font-semibold text-ink/80">
+          <span>9:41</span>
+          <span className="absolute left-1/2 top-1.5 h-[18px] w-[52px] -translate-x-1/2 rounded-full bg-black" />
+          <span className="flex gap-0.5">
+            <span className="h-2 w-0.5 rounded-full bg-ink/70" />
+            <span className="h-2 w-0.5 rounded-full bg-ink/70" />
+            <span className="h-2 w-0.5 rounded-full bg-ink/40" />
+          </span>
+        </div>
+        <p className="px-3 pt-1 text-[14px] font-semibold text-ink">Inbox</p>
+        <div className="mt-2 space-y-1 px-2">
+          {[INBOX[1], INBOX[2], INBOX[0]].map((row) => {
+            const p = providerById(row.provider);
+            return (
+              <div
+                key={row.title}
+                data-phone-row
+                className="flex h-[38px] items-center gap-2 rounded-[10px] bg-white/[0.035] px-2"
+              >
+                <BrandIcon name={p.brand} className="size-3 shrink-0" style={{ color: p.accent }} />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[10.5px] text-ink/90">{row.title}</span>
+                  <span className="block truncate font-mono text-[8.5px] text-ink/40">
+                    {row.machine}
+                  </span>
+                </span>
+                {row.done ? (
+                  <Check className="size-3 shrink-0 text-[#5fcf86]" />
+                ) : (
+                  <Spinner className="size-3 shrink-0 text-ink/50" />
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <div className="mx-2 mb-2 mt-auto flex h-8 items-center rounded-full bg-white/[0.05] px-3 text-[10px] text-ink/40 ring-1 ring-inset ring-white/[0.06]">
+          Message…
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Diagram({ L }: { L: Layout }) {
   const box = useRef<HTMLDivElement>(null);
   const inner = useRef<HTMLDivElement>(null);
@@ -140,7 +213,7 @@ function Diagram({ L }: { L: Layout }) {
     if (!root || prefersReducedMotion()) return;
     const STEPS = 36;
     const anims: Animation[] = [];
-    (Object.keys(L.paths) as Array<keyof Layout["paths"]>).forEach((k, wire) => {
+    WIRES.forEach((k, wire) => {
       const path = root.querySelector<SVGPathElement>(`[data-wire="${k}"]`);
       if (!path) return;
       const len = path.getTotalLength();
@@ -150,7 +223,7 @@ function Diagram({ L }: { L: Layout }) {
         return { transform: `translate(${pt.x}px, ${pt.y}px)`, opacity: Math.min(1, edge / 4) };
       });
       root.querySelectorAll<HTMLElement>(`[data-packet="${k}"]`).forEach((dot, j) => {
-        const duration = k === "web" ? 1600 : 2400;
+        const duration = k === "web" || k === "phone" ? 1600 : 2400;
         anims.push(
           dot.animate(frames, {
             duration,
@@ -185,7 +258,7 @@ function Diagram({ L }: { L: Layout }) {
           fill="none"
           aria-hidden
         >
-          {(["mac", "box", "web"] as const).map((k) => (
+          {WIRES.map((k) => (
             <g key={k}>
               <path
                 data-wire={k}
@@ -199,7 +272,7 @@ function Diagram({ L }: { L: Layout }) {
 
         {/* relay packets: plain dots moved by compositor-only animations */}
         <div data-packets className="absolute inset-0 opacity-0">
-          {(["mac", "box", "web"] as const).flatMap((k) =>
+          {WIRES.flatMap((k) =>
             [0, 1, 2].map((j) => (
               <span
                 key={`${k}${j}`}
@@ -222,13 +295,7 @@ function Diagram({ L }: { L: Layout }) {
         ))}
 
         <Machine side="mac" box={L.mac} icon={<Laptop />} name="MacBook Pro" sub="Desktop app" />
-        <Machine
-          side="box"
-          box={L.box}
-          icon={<Server />}
-          name="build-box"
-          sub={L === TALL ? "serve --hub" : "ryco serve --hub"}
-        />
+        <Machine side="box" box={L.box} icon={<Server />} name="build-box" sub="ryco service" />
 
         {/* the hub */}
         <div
@@ -270,7 +337,7 @@ function Diagram({ L }: { L: Layout }) {
           <div className="flex-1 px-3.5 pt-3.5">
             <p className="text-[12px] font-medium text-ink/50">Inbox, all machines</p>
             <div className="mt-2.5 space-y-1.5">
-              {INBOX.map((row) => {
+              {INBOX.slice(0, 3).map((row) => {
                 const p = providerById(row.provider);
                 return (
                   <div
@@ -300,10 +367,11 @@ function Diagram({ L }: { L: Layout }) {
             </div>
           </div>
           <div className="flex h-10 shrink-0 items-center gap-2 border-t border-white/[0.06] px-3.5 text-[11.5px] text-ink/50">
-            <Network className="size-3.5 text-accent" /> Relayed live from your machines, stored
-            nowhere
+            <Network className="size-3.5 shrink-0 text-accent" /> Relayed live, stored nowhere
           </div>
         </div>
+
+        <Phone box={L.phone} />
       </div>
     </div>
   );
@@ -374,7 +442,23 @@ export function Cloud() {
           { autoAlpha: 0, x: (i) => (i % 2 ? 24 : -24), duration: 0.45, stagger: 0.12 },
           1.9,
         )
-        .to(packets, { opacity: 1, duration: 0.4 }, 2.2);
+        .fromTo(
+          wire("phone"),
+          { drawSVG: "0%" },
+          { drawSVG: "100%", duration: 0.6, ease: "power2.inOut" },
+          1.7,
+        )
+        .from(
+          node("phone"),
+          { autoAlpha: 0, y: narrow ? 40 : 60, rotate: narrow ? 0 : 6, duration: 0.8 },
+          2.05,
+        )
+        .from(
+          root.querySelectorAll("[data-phone-row]"),
+          { autoAlpha: 0, y: 10, duration: 0.4, stagger: 0.1 },
+          2.4,
+        )
+        .to(packets, { opacity: 1, duration: 0.4 }, 2.6);
     },
     [narrow],
   );
@@ -402,7 +486,7 @@ export function Cloud() {
           <span className="rounded-full bg-accent px-2 py-0.5 text-[11.5px] font-semibold text-accent-ink">
             New
           </span>
-          Ryco Cloud is optional, and free for now
+          {CLOUD.badge}
         </p>
         <h2
           id="cloud-title"
@@ -411,10 +495,10 @@ export function Cloud() {
         >
           Your machines, from anywhere<span className="text-accent">.</span>
         </h2>
-        <p data-cloud-sub className="mt-6 max-w-[50ch] text-[17px] leading-relaxed text-ink/60">
+        <p data-cloud-sub className="mt-6 max-w-[54ch] text-[17px] leading-relaxed text-ink/60">
           Connect the machines you already run Ryco on, then pick up any thread from a browser at{" "}
-          <span className="font-mono text-[15px] text-ink/85">{SITE.cloudHost}</span>. Your code
-          stays on your machines.
+          <span className="font-mono text-[15px] text-ink/85">{SITE.cloudHost}</span>, and soon from
+          your phone. It's optional, free during the beta, and your code stays on your machines.
         </p>
 
         <div
@@ -427,7 +511,7 @@ export function Cloud() {
 
         <ul
           data-points
-          className="mt-16 grid gap-x-8 gap-y-10 sm:mt-24 sm:grid-cols-2 lg:grid-cols-4"
+          className="mt-16 grid gap-x-8 gap-y-10 sm:mt-24 sm:grid-cols-2 lg:grid-cols-3"
         >
           {CLOUD.points.map((pt, i) => {
             const Icon = POINT_ICONS[i];
@@ -445,24 +529,29 @@ export function Cloud() {
 
         <div className="mt-14 grid gap-10 lg:grid-cols-[auto_minmax(0,1fr)] lg:items-start lg:gap-16">
           <div data-cloud-cta>
-            <Button href={SITE.cloud} external icon={<ArrowUpRight />}>
-              Open Ryco Cloud
-            </Button>
+            <div className="flex flex-wrap gap-3">
+              <Button href={SITE.cloudRequestAccess} external icon={<ArrowUpRight />}>
+                Request access
+              </Button>
+              <Button href={SITE.cloud} external variant="ghost" icon={<LogIn />}>
+                Sign in
+              </Button>
+            </div>
+            <p className="mt-4 max-w-[34ch] text-[13.5px] leading-snug text-ink/50">
+              Cloud is invite-only while it's in beta. Ask in the Discord and we'll send you an
+              invite.
+            </p>
           </div>
           <div data-cloud-cta className="text-[14.5px] leading-snug text-ink/60">
             <p>
               In the desktop app, click <span className="text-ink/85">Connect Ryco account</span>.
-              On a server or a headless box, start Ryco with the relay on, then link the machine to
-              your account:
+              On a server or a headless box, the guided setup installs the background service and
+              links the machine to your account. A machine that's already running links on its own:
             </p>
             <div className="mt-4 flex flex-wrap gap-2.5">
-              <CopyCommand command={CLOUD.serve} />
+              <CopyCommand command={CLOUD.setup} />
               <CopyCommand command={CLOUD.link} />
             </div>
-            <p className="mt-3 text-[13.5px] text-ink/55">
-              No password on your account? Run <span className="font-mono">hub enroll</span> instead
-              and approve the code in Cloud.
-            </p>
           </div>
         </div>
       </div>

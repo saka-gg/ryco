@@ -1,14 +1,15 @@
 /**
  * Download. The detected platform leads the list; each row floods on hover.
- * A terminal types the two commands that matter (try it, or serve it to
- * Cloud) once it scrolls into view, and prints instantly under reduced motion.
+ * A terminal types the two commands that matter (try it, or set the machine
+ * up for your other devices) once it scrolls into view, and prints instantly
+ * under reduced motion. The iPhone app is listed as coming soon.
  */
 import { useEffect, useRef, useState } from "react";
-import { ArrowDown, ArrowUpRight } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpRight, Smartphone } from "lucide-react";
 import { BrandIcon } from "@/assets/brands";
 import { CLOUD, PLATFORMS, SITE } from "@/data/content";
 import { cn } from "@/lib/cn";
-import { prefersReducedMotion, useGsap } from "@/lib/motion";
+import { prefersReducedMotion, scrollToId, useGsap } from "@/lib/motion";
 import { revealText, revealUp } from "./ui/reveal";
 import { useDownload } from "./useDownload";
 import { focusRing, SECTION_X } from "./theme";
@@ -18,9 +19,8 @@ const LINES: Tok[][] = [
   [{ t: "# try it without installing", tone: "muted" }],
   [{ t: "$ ", tone: "accent" }, { t: SITE.npx }],
   [],
-  [{ t: "# or reach this machine from anywhere", tone: "muted" }],
-  [{ t: "$ ", tone: "accent" }, { t: CLOUD.serve }],
-  [{ t: "$ ", tone: "accent" }, { t: CLOUD.link }],
+  [{ t: "# or set this machine up for your other devices", tone: "muted" }],
+  [{ t: "$ ", tone: "accent" }, { t: CLOUD.setup }],
 ];
 const lineLen = (i: number) => LINES[i].reduce((n, tok) => n + tok.t.length, 0);
 
@@ -207,6 +207,39 @@ export function Download() {
                 </li>
               );
             })}
+            <li data-platform>
+              <a
+                href="#mobile"
+                onClick={(e) => {
+                  e.preventDefault();
+                  scrollToId("mobile");
+                }}
+                className={cn(
+                  "group/pl relative flex items-center gap-5 overflow-hidden border-t border-white/12 py-7 pr-2",
+                  focusRing,
+                )}
+              >
+                <span className="relative grid size-14 shrink-0 place-items-center rounded-2xl bg-white/[0.04] text-ink/70 ring-1 ring-inset ring-white/[0.08]">
+                  <Smartphone className="size-6" strokeWidth={1.75} />
+                </span>
+                <span className="relative min-w-0 flex-1">
+                  <span className="flex items-center gap-3">
+                    <span className="font-display text-[clamp(1.5rem,3vw,2.2rem)] font-semibold tracking-[-0.025em] text-ink/70">
+                      iPhone and iPad
+                    </span>
+                    <span className="rounded-full border border-white/15 px-2.5 py-0.5 text-[11.5px] font-medium text-ink/60">
+                      Coming soon
+                    </span>
+                  </span>
+                  <span className="mt-1 block text-[14px] text-ink/50">
+                    Not in the App Store yet. See what's coming.
+                  </span>
+                </span>
+                <span className="relative grid size-12 shrink-0 place-items-center rounded-full border border-white/10 text-ink/60 transition-colors duration-500 group-hover/pl:border-white/30 group-hover/pl:text-ink">
+                  <ArrowUp className="size-5 transition-transform duration-500 ease-ryco group-hover/pl:-translate-y-0.5" />
+                </span>
+              </a>
+            </li>
           </ul>
           <p className="border-t border-white/12 pt-6 text-[14px] leading-snug text-ink/50">
             {dl.version && <span className="font-mono text-ink/70">{dl.version}. </span>}

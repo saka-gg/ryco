@@ -21,6 +21,266 @@ const RELEASE_BASE = "https://github.com/saka-gg/ryco/releases/tag";
  */
 export const CHANGELOG_RELEASES: ChangelogRelease[] = [
   {
+    version: "0.1.37",
+    date: "November 1, 2026",
+    dateTime: "2026-11-01",
+    summary:
+      "Chat tabs, VS Code themes, agents that watch and wait for you, updates that install themselves, and a markedly faster app.",
+    releaseUrl: `${RELEASE_BASE}/v0.1.37`,
+    highlights: [
+      {
+        title: "Tabs, forks and other machines",
+        summary:
+          "Open chats stay as tabs in the chat header. A side chat continues as its own forked thread (⌘⌥S), Fork from here can carry a conversation to another of your machines, and whole Codex and Claude Code projects import in one go.",
+      },
+      {
+        title: "Agents that watch, wait and ask",
+        summary:
+          "Agents can watch a command and wake only when its output changes, link the pull requests they open to their chat, move into a new worktree and carry on, and ask for an API key through a private card that writes it to your .env, never into the chat. You can message a running Claude subagent without stopping it, and cap how deep agents delegate.",
+      },
+      {
+        title: "Review against any branch",
+        summary:
+          "The diff panel compares your working tree with any branch, jumps between hunks and browses changed files as a tree. The Create PR dialog takes your own title and description, opens drafts and commits local changes first.",
+      },
+      {
+        title: "Make it yours",
+        summary:
+          "Import VS Code color themes with contrast repair and light/dark pairing, pick dark mode's palette on its own, make text and borders stronger or softer, and export your preferences to set up another machine.",
+      },
+      {
+        title: "Updates that look after themselves",
+        summary:
+          "With automatic updates on, the desktop app downloads updates and installs them when you quit, and CLI nodes and provider CLIs update while nobody is using them; ryco update does the same from a terminal. Ryco Nightly is now its own app, with its own data and update channel.",
+      },
+      {
+        title: "Faster everywhere",
+        summary:
+          "Code highlighting runs on a WebAssembly highlighter about ten times faster than before, long streaming answers update in about a millisecond, live streaming to remote clients uses roughly half the traffic, and pull request badges spend about 78% fewer GitHub API points.",
+      },
+    ],
+  },
+  {
+    version: "0.1.36",
+    date: "October 30, 2026",
+    dateTime: "2026-10-30",
+    summary:
+      "One-click updates for every machine, pull requests you can ship and watch from anywhere, a follow-up queue that lives on the node, and goals agents keep working toward.",
+    releaseUrl: `${RELEASE_BASE}/v0.1.36`,
+    highlights: [
+      {
+        title: "Update everything in one click",
+        summary:
+          "Update every machine, its provider CLIs and the app itself from one button, on desktop or phone, and leave out any update you want to skip. A node update that fails to start rolls back on its own, database included.",
+      },
+      {
+        title: "Ship, watch and fix pull requests",
+        summary:
+          "Ship commits, pushes and opens the pull request in one click from the Crown. Agents watch a pull request instead of polling and wake when a check fails or someone reviews, Auto-fix CI turns failures into fixes, and every pull request that needs you, across repositories and machines, sits on one page.",
+      },
+      {
+        title: "A queue and goals on the node",
+        summary:
+          "Messages you send to a busy chat queue on the node and go out in order, even with every window closed. Give a thread a goal and it keeps working after each clean turn until the agent marks it done or blocked. Schedules can run on weekdays at a set time, or feed an existing chat as a heartbeat.",
+      },
+      {
+        title: "Keyboard first",
+        summary:
+          "Open any file with ⌘P, search contents with ⇧⌘F, go back and forward with ⌘[ and ⌘], close and reopen tabs with ⌘W and ⇧⌘T, jump to the next thread that needs you, and settle or snooze many inbox threads at once with one Undo.",
+      },
+      {
+        title: "Write, quote and undo",
+        summary:
+          "Large pastes fold into attachments, ↑ recalls earlier prompts, assistant text can be quoted back as a chip with your comment, and macOS app windows drop straight into the composer. Edit an earlier prompt and keep the agent's file changes, or undo a turn's changes with a rescue snapshot taken first.",
+      },
+      {
+        title: "Providers, usage and alerts",
+        summary:
+          "Sign in to Codex, Claude, Cursor, Grok and OpenCode from Settings, run OpenCode 2, and compact Claude and Codex conversations on request. Statistics gains a Today recap and cost by token type, and Ryco alerts you with toasts, notifications, sound and a badge when any connected thread finishes or needs you.",
+      },
+      {
+        title: "A sturdier node",
+        summary:
+          "Ryco keeps the machine awake while agents work, runs them at a lower CPU priority, backs up the database before every migration and adds ryco db backup, ryco db restore and ryco doctor. Git actions keep running through dropped connections and pick up again after reconnecting.",
+      },
+    ],
+  },
+  {
+    version: "0.1.35",
+    date: "October 21, 2026",
+    dateTime: "2026-10-21",
+    summary: "A calmer Hub inbox that follows each machine's own settled state.",
+    releaseUrl: `${RELEASE_BASE}/v0.1.35`,
+    highlights: [
+      {
+        title: "Old errors stop topping the inbox",
+        summary:
+          "The Hub takes the settled state from your machines, so a thread that failed earlier and was dealt with no longer floats to the top of the inbox.",
+      },
+    ],
+  },
+  {
+    version: "0.1.34",
+    date: "October 20, 2026",
+    dateTime: "2026-10-20",
+    summary: "Machines report their Ryco version when they connect to the Hub.",
+    releaseUrl: `${RELEASE_BASE}/v0.1.34`,
+    highlights: [
+      {
+        title: "Know what each machine runs",
+        summary:
+          "A node reports its version when it connects to the Hub, so the apps can tell which machines are behind.",
+      },
+    ],
+  },
+  {
+    version: "0.1.33",
+    date: "October 20, 2026",
+    dateTime: "2026-10-20",
+    summary:
+      "Tasks inside Ryco, a translucent Mac window, thread artifacts, and instant switching between your machines.",
+    releaseUrl: `${RELEASE_BASE}/v0.1.33`,
+    highlights: [
+      {
+        title: "Tasks, built in",
+        summary:
+          "A Tasks workspace keeps your to-do list next to your chats. Start a chat from a task and it stays linked to it.",
+      },
+      {
+        title: "Switch machines instantly",
+        summary:
+          "Ryco keeps recent machines warm, so moving between them through the Hub is instant and project icons stay in place.",
+      },
+      {
+        title: "A translucent window on macOS",
+        summary: "The desktop app can let your wallpaper through, with adjustable translucency.",
+      },
+      {
+        title: "Mentions, artifacts and terminals",
+        summary:
+          "Drag a thread into the composer to mention it, find a thread's pages and files in its own Artifacts tab, and see terminal counts and running status across thread views.",
+      },
+      {
+        title: "Git text your way",
+        summary:
+          "Give Ryco your own instructions for generated commit messages and pull request text. Idle temporary chat folders clean themselves up.",
+      },
+    ],
+  },
+  {
+    version: "0.1.32",
+    date: "October 16, 2026",
+    dateTime: "2026-10-16",
+    summary:
+      "Fork any chat, edit queued messages, follow worktree setup live, and open, reconnect and boot noticeably faster.",
+    releaseUrl: `${RELEASE_BASE}/v0.1.32`,
+    highlights: [
+      {
+        title: "Fork a chat",
+        summary:
+          "Branch any conversation into a new thread and take it in another direction, on desktop, web and mobile.",
+      },
+      {
+        title: "Edit what's queued",
+        summary:
+          "Queued messages can be edited before they send, and background subagents fold into one work-log row, grouped by the batch that spawned them.",
+      },
+      {
+        title: "Worktrees that tell you more",
+        summary:
+          "Watch worktree setup progress live, switch a new thread to a worktree in one click, see each checkout's disk usage, and link several pull requests to one workspace.",
+      },
+      {
+        title: "Usage through CLIProxyAPI",
+        summary:
+          "Accounts routed through a CLIProxyAPI hub show their usage in Ryco like any other provider.",
+      },
+      {
+        title: "Faster to open",
+        summary:
+          "Cold boot, first page opens and reconnects are quicker, and archived threads travel as slim stubs instead of full records.",
+      },
+      {
+        title: "Stronger Hub sessions",
+        summary:
+          "Relay tickets are now minted by the Hub over your account connection, relay responses are compressed inside the encrypted payload, and credentials never reach the client's copy of the server settings.",
+      },
+    ],
+  },
+  {
+    version: "0.1.31",
+    date: "October 10, 2026",
+    dateTime: "2026-10-10",
+    summary:
+      "Live work chapters, a pull requests page, settings as their own page, chats without a project, and new speed and context options for Codex and Claude.",
+    releaseUrl: `${RELEASE_BASE}/v0.1.31`,
+    highlights: [
+      {
+        title: "Watch the work as it happens",
+        summary:
+          "A running turn reads as live chapters with a reasoning timeline, and the inbox uses compact rows with status glyphs and motion.",
+      },
+      {
+        title: "Pull requests, front and centre",
+        summary:
+          "A dedicated pull requests page and a workspace pull request tab, image previews in pull requests and diffs, and inline HTML previews on mobile and web.",
+      },
+      {
+        title: "The Crown and a new settings page",
+        summary:
+          "The overview rail shows the project's logo, clickable CI checks, workflow cards, git actions and per-worktree Notes. Settings moved to a dedicated page, with morphing dialogs throughout.",
+      },
+      {
+        title: "Projects, workspaces and chats",
+        summary:
+          "A projects map, safe workspace deletion and an Automations dialog that tells you about missed runs. Chats can start without a project and be promoted into one later.",
+      },
+      {
+        title: "Speed and context options",
+        summary:
+          "Codex gains an Ultrafast speed tier; Claude Opus 5.5 gains fast mode and a 1M context window, now the default. The composer tunes models in place and the context meter shows Claude's prompt cache. Model comparison launches were retired.",
+      },
+      {
+        title: "Cloud that heals itself",
+        summary:
+          "Cloud connections recover on their own, hosted browser sessions persist across devices, device trust gaps are closed, and thread history in Cloud is opt-in. Standalone MCP clients can use Agent Control with approval-gated thread and workspace actions.",
+      },
+    ],
+  },
+  {
+    version: "0.1.30",
+    date: "October 1, 2026",
+    dateTime: "2026-10-01",
+    summary:
+      "Set a machine up for your other devices with ryco setup, keep it running as a background service, and resume streams after a reconnect.",
+    releaseUrl: `${RELEASE_BASE}/v0.1.30`,
+    highlights: [
+      {
+        title: "ryco setup and a background service",
+        summary:
+          "An interactive guide sets up the background service, your Ryco account, Tailscale and pairing. The service starts at login and restarts if it stops.",
+      },
+      {
+        title: "Reconnects that resume",
+        summary:
+          "Remote machines reconnect more resiliently, and streaming replies resume where they left off instead of starting over.",
+      },
+    ],
+  },
+  {
+    version: "0.1.29",
+    date: "September 30, 2026",
+    dateTime: "2026-09-30",
+    summary: "A fix release for draft authorization and desktop diagnostics.",
+    releaseUrl: `${RELEASE_BASE}/v0.1.29`,
+    highlights: [
+      {
+        title: "Tighter drafts, working diagnostics",
+        summary: "Draft requests are authorized more strictly, and desktop diagnostics work again.",
+      },
+    ],
+  },
+  {
     version: "0.1.28",
     date: "September 30, 2026",
     dateTime: "2026-09-30",

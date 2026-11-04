@@ -9,6 +9,8 @@ import { Download } from "./Download";
 import { Faq } from "./Faq";
 import { Finale } from "./Finale";
 import { Gallery } from "./Gallery";
+import { Latest } from "./Latest";
+import { Mobile } from "./Mobile";
 import { Nav } from "./Nav";
 import { ProductFilm } from "./ProductFilm";
 import { Toolkit } from "./Toolkit";
@@ -23,9 +25,11 @@ export default function HomePage() {
       <main>
         <ProductFilm />
         <Agents />
+        <Latest />
         <Gallery />
         <Toolkit />
         <Cloud />
+        <Mobile />
         <Download />
         <Faq />
       </main>
