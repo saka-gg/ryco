@@ -36,9 +36,13 @@ import { makeAgentControlMcpListener } from "./listener.ts";
 import { EMPTY_NODE_DIRECTORY_HINT, withProjectCopyTools } from "./projectCopyTools.ts";
 import {
   makeAgentControlMcpTools,
+  replayedAgentControlMutation,
+  submitAgentControlMutation,
   type AgentControlMcpToolResult,
   type AgentControlMcpTools,
 } from "./tools.ts";
+
+const mutations = { submit: submitAgentControlMutation, replay: replayedAgentControlMutation };
 
 const TOOLS = AGENT_CONTROL_PROJECT_COPY_MCP_TOOLS;
 const now = "2026-10-22T09:00:00.000Z";
@@ -179,6 +183,7 @@ const setup = (
   /** Folders a request created since. */
   const occupied = new Set<string>();
   const tools = withProjectCopyTools(emptyBase, {
+    mutations,
     policy: {
       isEnabled: Effect.sync(() => enabled),
       authorize: (input) =>
@@ -668,6 +673,7 @@ describe("project copy tools on the private MCP listener", () => {
           getProviders: Effect.succeed([]),
         });
         const tools = withProjectCopyTools(base, {
+          mutations,
           policy,
           registry,
           proposals: { getProposal: () => Effect.succeed(Option.none()) },

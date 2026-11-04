@@ -408,6 +408,7 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
           ...(Option.isSome(nodeDirectory) ? { nodeDirectory: nodeDirectory.value } : {}),
           ...(Option.isSome(nodePaths) ? { nodePaths: nodePaths.value } : {}),
           ...(Option.isSome(gitNetwork) ? { gitNetwork: gitNetwork.value } : {}),
+          mutations: { submit: submitAgentControlMutation, replay: replayedAgentControlMutation },
         }),
       ),
   });

@@ -577,6 +577,21 @@ describe("server boot import boundaries", () => {
       ),
     ).toEqual([]);
   });
+
+  it("keeps the cross-node project copy's lazy chunks from statically importing boot tool and identity modules", () => {
+    // A lazy chunk's static import of a module the boot graph also holds can make the bundler
+    // split boot modules into extra chunks (about 18 KB of boot bytes for these two). Shared
+    // pieces live in leaf modules (`toolFailure.ts`, `modelSelectionToolSchema.ts`,
+    // `gitRemoteListing.ts`); the MCP submit and replay come in through the tools' deps.
+    const shared =
+      /^apps\/server\/src\/(?:agentControl\/Mcp\/(?:tools|threadReads)|project\/Layers\/RepositoryIdentityResolver)\.ts$/u;
+    for (const entry of [
+      "src/agentControl/Mcp/projectCopyTools.ts",
+      "src/projectCopy/Layers/ProjectCopyServices.ts",
+    ]) {
+      expect(staticGraph(entry).files.filter((file) => shared.test(file))).toEqual([]);
+    }
+  });
 });
 
 /** Static imports of a built ES chunk (rolldown output keeps them at top level). */
@@ -739,7 +754,9 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // Agent Control plan checks, its migration and the startup check that decides whether an
     // earlier process left copy work (about 85 KB), and the chunk boundaries its import() splits
     // add; its services, runs, tools and the node directory's store (about 200 KB) load on first
-    // use. 7.185 MB once the node directory's store moved behind import() (-6 KB).
+    // use. 7.185 MB once the node directory's store moved behind import() (-6 KB). 7.177 MB
+    // after main's settings redesign (+9 KB) once the copy's MCP tools and export stopped
+    // statically importing boot modules, whose sharing split boot code into extra chunks (-18 KB).
     expect(bytes).toBeLessThan(7_191_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");

@@ -29,7 +29,7 @@ import {
   parseRemoteFetchUrls,
   pickPrimaryRemote,
   remoteNamed,
-} from "../project/Layers/RepositoryIdentityResolver.ts";
+} from "../project/gitRemoteListing.ts";
 import { seedIndexFromCheckout } from "../vcs/GitTemporaryIndex.ts";
 import { NO_FSMONITOR_CONFIG_ARGS, SCRATCH_INDEX_CONFIG_ARGS } from "../vcs/GitDurableWrites.ts";
 import { BINARY_PATCH_DIFF_ARGS } from "../vcs/GitVcsDriver.ts";

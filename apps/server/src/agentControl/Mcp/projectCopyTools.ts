@@ -66,15 +66,17 @@ import type {
   AgentControlSessionRegistryShape,
   AgentControlTurnAuthority,
 } from "../Services/AgentControlSessionRegistry.ts";
-import { ToolFailure } from "./threadReads.ts";
-import {
-  modelSelectionSchema,
+import { modelSelectionSchema } from "./modelSelectionToolSchema.ts";
+import { ToolFailure } from "./toolFailure.ts";
+// Types only: a static import of the boot-loaded tool modules would split them into extra boot
+// chunks, so the mutation helpers come in through `ProjectCopyToolDeps.mutations`.
+import type {
+  AgentControlMcpToolDeps,
+  AgentControlMcpToolDescriptor,
+  AgentControlMcpToolResult,
+  AgentControlMcpTools,
   replayedAgentControlMutation,
   submitAgentControlMutation,
-  type AgentControlMcpToolDeps,
-  type AgentControlMcpToolDescriptor,
-  type AgentControlMcpToolResult,
-  type AgentControlMcpTools,
 } from "./tools.ts";
 
 const TOOLS = AGENT_CONTROL_PROJECT_COPY_MCP_TOOLS;
@@ -438,6 +440,11 @@ export interface ProjectCopyToolDeps extends Pick<
   >;
   /** Strips credentials from agent-given URLs before they enter a plan. */
   readonly gitNetwork?: Pick<GitNetworkShape, "sanitizeRemoteUrl">;
+  /** The shared submit and replay of `./tools.ts`, passed in by the loader. */
+  readonly mutations: {
+    readonly submit: typeof submitAgentControlMutation;
+    readonly replay: typeof replayedAgentControlMutation;
+  };
 }
 
 /** Private, provider-session tools only. Same wrapper pattern as the local task tools. */
@@ -669,15 +676,10 @@ export function withProjectCopyTools(
     problem: ToolFailure | null = null,
   ) =>
     Effect.gen(function* () {
-      const replayed = yield* replayedAgentControlMutation(
-        deps.proposals,
-        session,
-        requestId,
-        plan,
-      );
+      const replayed = yield* deps.mutations.replay(deps.proposals, session, requestId, plan);
       if (Option.isSome(replayed)) return replayed.value;
       if (problem !== null) return yield* Effect.fail(problem);
-      return yield* submitAgentControlMutation(deps, { session, authority, requestId, plan });
+      return yield* deps.mutations.submit(deps, { session, authority, requestId, plan });
     });
 
   /** One project per request: a retry of the same request builds the same plan. */
