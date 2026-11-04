@@ -648,9 +648,10 @@ export const DEFAULT_WORKTREE_BRANCH_PREFIX = "ryco";
  * or other special characters, no leading `-` or `/`, no `.lock` components. Also matches "".
  */
 export const GIT_REF_NAME_PATTERN =
-  // Git refs cannot contain ASCII controls, including DEL.
+  // Git refs cannot contain ASCII controls, including DEL. `s`: the lookaheads see past
+  // U+2028/U+2029, which the body accepts.
   // eslint-disable-next-line no-control-regex
-  /^(?:$|(?![-/])(?!.*(?:\.\.|@\{|[\x00-\x20\x7f~^:?*[\\]))(?!.*(?:^|\/)\.)(?!.*\.lock(?:\/|$))(?!.*\/\/)(?!.*[/.]$)[^]+)$/;
+  /^(?:$|(?![-/])(?!.*(?:\.\.|@\{|[\x00-\x20\x7f~^:?*[\\]))(?!.*(?:^|\/)\.)(?!.*\.lock(?:\/|$))(?!.*\/\/)(?!.*[/.]$)[^]+)$/s;
 
 /** A Git branch namespace without a trailing slash; empty disables the namespace. */
 export const WorktreeBranchPrefix = TrimmedString.check(

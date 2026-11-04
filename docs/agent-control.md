@@ -122,6 +122,10 @@ called. This matters for clients such as Codex that cache the initial MCP catalo
   budget. Its result, like `ryco_attach_file`'s, names the stored artifact's id. A published page
   can call `ryco.send(text)` to send the reader's answer to its thread once they confirm it (see
   [Answering from a page](./user/html-renders.md#answering-from-a-page)).
+- `ryco_list_nodes`, `ryco_suggest_project_destination`, `ryco_propose_project_import`,
+  `ryco_propose_project_copy`: the user's other devices running Ryco, and setting a project up on
+  this node or copying one to another node, always with the user's approval (see
+  [Projects on other nodes](#projects-on-other-nodes)).
 
 Mutation calls return a durable receipt. Reuse `requestId` when retrying the same action, then use
 `ryco_wait_for_control_request` with `waitFor: "terminal"` to get dispatch results and created thread
@@ -452,6 +456,112 @@ the runs a chat delegates (`ryco_task_status`).
 Tasks are the node's own list, not one project's: these tools read and edit tasks of every
 project. Only starting a chat is bound to the caller's project. Changes reach the Tasks page as
 they happen. Standalone integrations have no task tools and cannot start a task's chat.
+
+## Projects on other nodes
+
+A node is one machine running Ryco (a laptop, a Mac mini, a server). Nodes never talk to each other:
+the Ryco app the user approves a request in holds connections to both and does the work. (What a
+copy does, from the user's side: [Projects across nodes](features/cross-node-projects.md).) These
+tools are for private sessions only; standalone integrations neither see them nor may propose
+either kind.
+
+- `ryco_list_nodes` (grant `nodes.read`): the node directory, the devices the user's own Ryco apps
+  know and published to this node: `environmentId`, `label` (the name the user calls it, such as
+  "Mac mini"), `platformOs`, `online`, `projectCopySupport` (`yes`, `no` or `unknown`),
+  `isThisNode` and `lastPublishedAt`. When the publishing app knows them it adds `transport`
+  (`direct`, or `relay` through the Hub, where one copy sends at most 24 MB of unpushed commits,
+  changes or files), `defaultProjectDirectory` (the node's normal code directory) and `thisProject`
+  (`{ present: true, path }` when this chat's repository is already a project there,
+  `{ present: false }` when it is not; absent when the app does not know that node's projects).
+  These are the user's own folder names; an agent uses them to avoid copying to a node that already
+  has the project. When no other node is known, the answer says so: opening Ryco on a device
+  connected to that node publishes its list.
+- `ryco_suggest_project_destination({ name })` (grant `read`): this node's normal code directory
+  (where its projects usually live) and a free folder in it for `name`, with that folder's state.
+  Its paths are this node's only; it is the one tool whose result carries workspace paths, because
+  the agent already runs on this node. For another node, `destination: { kind: "default" }` lets
+  the approving app resolve that node's code directory.
+- `ryco_propose_project_import` (grant `projects.import`): clone a repository into a folder on
+  **this** node (by default `<normal code directory>/<repository name>`, missing or empty), register
+  it as a project, then optionally run one setup command and start an agent thread that finishes
+  setting it up. The node runs it once approved.
+- `ryco_propose_project_copy` (grant `projects.copy`): copy a project of this node, or a
+  repository URL, to **another** node. `target` is the node's `environmentId` or its label (a
+  unique, case-insensitive match against the directory; zero or several matches fail and list the
+  candidates). `destination` is `{ kind: "default" }` (the target's normal code directory, in a
+  folder named after the source), `{ kind: "child-of-default", name }` or `{ kind: "path", path }`.
+  The target clones from the project's remote; `bringCommits` and `bringChanges` also send unpushed
+  commits and uncommitted changes (both default to true for a project, as in the copy dialog;
+  nothing is sent when there is none), `copySettings` (default true for a project) its scripts,
+  system prompt and avatar. `branch` checks out another branch, as the remote has it (then
+  `bringCommits` and `bringChanges` default to false; changes on the source's own branch never come
+  along). `setup: {}` takes the project's worktree setup script as it is when the request
+  is made; `setup: { command }` names one. `followUpThread` starts an agent on the target after
+  setup; without a `modelSelection` it uses the target's default model.
+
+After proposing, the agent ends its turn. When the request completes or fails, Ryco queues a short
+note in the agent's chat (its follow-up queue, like `ryco_send_message`): it starts the agent's next
+turn once the chat is idle, after the user's own queued messages. The note says where the project
+is (node, folder, project id), how the setup command ended (its exit status), the setup thread's
+title and id, and any warnings, or why it failed. The completed result carries the same as
+`projectCopy` (`path`, `setup`, `followUpThreadId`, `warnings`). The note's ids follow from the
+request, so a restart never queues it twice.
+
+Both proposals are always approved by the user, never routine, and carry the risk tags
+`creates-project`, `cross-node` (copies), `runs-commands` (a setup command or a setup thread) and
+`copies-workspace-content` (commits or changes). The setup command is part of the approved plan and
+is shown verbatim; nothing else ever runs as setup.
+
+### Approving a copy
+
+A copy is executed by the client that approves it, not by the node the request lives on:
+
+1. The card shows the source, the target and the options, with what the copy brings and the setup
+   command it runs (verbatim) without expanding the plan. Next to them, once the app has asked the
+   target, it shows what approving does there: the folder (resolved from the target's path hints; "new folder",
+   "renamed, folder exists" when the name is taken, or "existing checkout" when a checkout of the
+   same repository is already there and becomes the project as it is) and the setup thread's model
+   when the plan leaves it to the target's default. A problem (an option it can't honour, a remote
+   the target can't reach, no ready provider for the setup thread) shows there too, and approving
+   then changes nothing.
+2. Only a Ryco app connected to the target can approve: the target must be in that app's own list
+   of nodes and accept changes from it (through the Hub, as its owner). Phones, the mobile app and
+   apps that do not know the target show "Approve in Ryco on a computer connected to <target>" and
+   Reject.
+3. Approving reads both nodes again and refuses if anything differs from what the card showed (the
+   card then shows the new state), if an option can't be honoured exactly, or if the setup command
+   would reach the target in any other form than the approved one. An agent's copy only clones (or
+   links an existing checkout); a repository the target can't clone is copied from the Projects page
+   instead, where the files can be sent.
+4. The app accepts with a client-minted executor id (`executeOnClient`); the node binds the request
+   to it, moves it to `executing` and hands the copy to no other app. The copy starts only once the
+   proposal is `executing`, and shows the same progress toast as a copy from the dialog.
+5. The app reports back: `started` once the target accepted the import (the node then waits up to
+   six hours), then `completed` with the new project, its folder, how setup ended and the setup
+   thread, or `failed` with the reason. The agent is woken with that outcome (see above). A request nobody reports on fails after two hours (six once started): "The app that
+   approved this request did not report back".
+6. Once the target runs the import, the app may close; it reports when it opens again. If it closed
+   during the upload, it rebuilds the copy from the proposal while the node still runs it and goes on
+   with the same ids; otherwise it cleans up what it left and reports `failed`.
+
+### Example
+
+The user asks the agent, in a chat of the project `ryco` on their laptop, to "set up ryco on my Mac
+mini in the normal code directory". The agent:
+
+1. calls `ryco_list_nodes` and finds `{ environmentId: "…", label: "Mac mini", online: true,
+   projectCopySupport: "yes" }`;
+2. calls `ryco_propose_project_copy` with
+   `{ requestId, target: "Mac mini", destination: { kind: "default" }, setup: {}, followUpThread: { prompt: "Install the toolchain this repository needs and check that its tests run." } }`
+   (the source defaults to this chat's project);
+3. tells the user it waits for approval, then ends its turn.
+
+The user's laptop app shows the card: "Copy to Mac mini · ryco", the folder
+`/Users/me/Code/ryco` (new folder, Mac mini's code directory), the setup command `bun install`
+and the setup thread's model. After Approve the copy runs, the Mac mini clones the repository,
+registers the project, runs `bun install` and starts the setup thread there; the agent is woken
+with where the project is on the Mac mini, that `bun install` succeeded and the setup thread's id,
+and tells the user.
 
 ## Handing over artifacts
 

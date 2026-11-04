@@ -13,7 +13,7 @@ import path from "node:path";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import { createRemoteEnvironmentApi } from "@ryco/client-runtime/connection";
 import { resolveRemotePairingTarget } from "@ryco/client-runtime/connection";
-import { WsRpcGroup } from "@ryco/contracts";
+import { WsApplicationRpcGroup } from "@ryco/contracts/project-copy-rpc";
 import { getPairingTokenFromUrl } from "@ryco/shared/pairingUrl";
 import { Data, Effect, Layer, Schedule, Schema, type Scope } from "effect";
 import { RpcClient, RpcClientError, RpcSerialization } from "effect/rpc";
@@ -45,7 +45,7 @@ export class CliRemoteError extends Data.TaggedError("CliRemoteError")<{
 
 /** The RPC client a connected remote exposes: the same surface the apps use. */
 export type CliRemoteRpcClient = RpcClient.FromGroup<
-  typeof WsRpcGroup,
+  typeof WsApplicationRpcGroup,
   RpcClientError.RpcClientError
 >;
 
@@ -194,5 +194,5 @@ export const connectCliRemote = (
     );
     // Built into the caller's scope: the socket must outlive client construction.
     const context = yield* Layer.build(protocol);
-    return yield* RpcClient.make(WsRpcGroup).pipe(Effect.provideContext(context));
+    return yield* RpcClient.make(WsApplicationRpcGroup).pipe(Effect.provideContext(context));
   });

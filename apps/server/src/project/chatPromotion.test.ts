@@ -871,6 +871,26 @@ describe("promoteChatPreview", () => {
     expect(preview.defaultDestination).toBe(path.join(base, "plan-the-offsite"));
   });
 
+  it("uses the node's normal code directory when the node paths service answers", async () => {
+    const work = path.join(scratch, "work");
+    await mkdir(work);
+    const harness = await makeHarness();
+    const withCodeRoots = (
+      resolveCodeRoots: NonNullable<ChatPromotionDependencies["resolveCodeRoots"]>,
+    ) =>
+      Effect.runPromise(
+        makeChatPromotion({ ...harness.dependencies, resolveCodeRoots }).preview({ projectId }),
+      );
+    expect(
+      (await withCodeRoots(() => Effect.succeed({ defaultProjectDirectory: work })))
+        .defaultDestination,
+    ).toBe(path.join(work, "plan-the-offsite"));
+    // A failing resolver falls back to the settings alone.
+    expect(
+      (await withCodeRoots(() => Effect.fail({ message: "not available yet" }))).defaultDestination,
+    ).toBe(path.join(harness.home, "Code", "plan-the-offsite"));
+  });
+
   it.each([
     ["exists", (h: ChatPaths): string => path.join(h.home, "Code")],
     ["invalid", (_h: ChatPaths): string => "relative/path"],
@@ -1136,6 +1156,20 @@ describe("folder helpers", () => {
     expect(await parent({ workspaceAccessRoot: "/srv/root", addProjectBaseDirectory: "/x" })).toBe(
       "/srv/root",
     );
+    // The folder holding two of the node's projects wins over `~/Code`.
+    const work = path.join(scratch, "work");
+    await mkdir(work);
+    const withProjects = (temporaryDirectories?: ReadonlyArray<string>) =>
+      resolvePromotionParent({
+        workspaceAccessRoot: undefined,
+        addProjectBaseDirectory: "",
+        homeDir: home,
+        projectRoots: [path.join(work, "a"), path.join(work, "b")],
+        ...(temporaryDirectories === undefined ? {} : { temporaryDirectories }),
+      });
+    expect(await withProjects([])).toBe(work);
+    // Unless it is in the OS temporary directory, as this scratch folder is: the OS empties it.
+    expect(await withProjects()).toBe(path.join(home, "Code"));
   });
 });
 

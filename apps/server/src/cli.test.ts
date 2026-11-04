@@ -43,6 +43,11 @@ import { WorkspacePathsLive } from "./workspace/Layers/WorkspacePaths.ts";
 import { WorkspaceAccessPolicyLayer } from "./workspace/Layers/WorkspaceAccessPolicy.ts";
 import { ServerSecretStoreLive } from "./auth/Layers/ServerSecretStore.ts";
 import { ServerAuthLive } from "./auth/Layers/ServerAuth.ts";
+import { AuthControlPlaneRuntimeLive } from "./auth/Layers/AuthControlPlane.ts";
+import {
+  AuthControlPlane,
+  OWNER_BOOTSTRAP_PAIRING_SUBJECT,
+} from "./auth/Services/AuthControlPlane.ts";
 import { hubConnectorRoutesLayer } from "./hubConnector/http.ts";
 import {
   hubConnectorReadyLayer,
@@ -384,6 +389,153 @@ it.layer(NodeServices.layer)("cli log-level parsing", (it) => {
       assert.equal(listed.length, 1);
       assert.equal(listed[0]?.id, created.id);
       assert.equal("credential" in (listed[0] ?? {}), false);
+    }),
+  );
+
+  it.effect("issues, lists, and revokes owner pairing links next to client links", () =>
+    Effect.gen(function* () {
+      const baseDir = mkdtempSync(join(tmpdir(), "ryco-cli-auth-owner-pairing-test-"));
+      // The startup owner link a server mints for itself is never listed.
+      const config = yield* makeCliTestServerConfig(baseDir);
+      yield* Effect.gen(function* () {
+        const authControlPlane = yield* AuthControlPlane;
+        yield* authControlPlane.createPairingLink({
+          role: "owner",
+          subject: OWNER_BOOTSTRAP_PAIRING_SUBJECT,
+        });
+      }).pipe(
+        Effect.provide(
+          AuthControlPlaneRuntimeLive.pipe(Layer.provide(Layer.succeed(ServerConfig, config))),
+        ),
+      );
+
+      const ownerOutput = yield* captureStdout(
+        runCli([
+          "auth",
+          "pairing",
+          "create",
+          "--role",
+          "owner",
+          "--label",
+          "Desktop SSH",
+          "--ttl",
+          "15m",
+          "--base-dir",
+          baseDir,
+          "--json",
+        ]),
+      );
+      const owner = JSON.parse(ownerOutput.output) as {
+        readonly id: string;
+        readonly credential: string;
+        readonly role: string;
+        readonly label?: string;
+      };
+      assert.equal(owner.role, "owner");
+      assert.equal(owner.label, "Desktop SSH");
+      assert.isAbove(owner.credential.length, 0);
+
+      const clientOutput = yield* captureStdout(
+        runCli(["auth", "pairing", "create", "--base-dir", baseDir, "--json"]),
+      );
+      const client = JSON.parse(clientOutput.output) as {
+        readonly id: string;
+        readonly role: string;
+      };
+      assert.equal(client.role, "client");
+
+      const listedOutput = yield* captureStdout(
+        runCli(["auth", "pairing", "list", "--base-dir", baseDir, "--json"]),
+      );
+      const listed = JSON.parse(listedOutput.output) as ReadonlyArray<{
+        readonly id: string;
+        readonly role: string;
+        readonly createdAt: string;
+        readonly expiresAt: string;
+      }>;
+      assert.deepEqual(
+        listed.map((link) => [link.id, link.role]).toSorted(),
+        [
+          [client.id, "client"],
+          [owner.id, "owner"],
+        ].toSorted(),
+      );
+      const listedOwner = listed.find((link) => link.id === owner.id);
+      assert.equal(
+        Date.parse(listedOwner?.expiresAt ?? "") - Date.parse(listedOwner?.createdAt ?? ""),
+        15 * 60_000,
+      );
+
+      const humanOutput = yield* captureStdout(
+        runCli(["auth", "pairing", "list", "--base-dir", baseDir]),
+      );
+      assert.include(humanOutput.output, `${owner.id} (Desktop SSH)\n  role: owner`);
+      assert.include(humanOutput.output, `${client.id}\n  role: client`);
+
+      const revokeOutput = yield* captureStdout(
+        runCli(["auth", "pairing", "revoke", "--base-dir", baseDir, owner.id]),
+      );
+      assert.include(revokeOutput.output, `Revoked pairing credential ${owner.id}.`);
+      const afterRevokeOutput = yield* captureStdout(
+        runCli(["auth", "pairing", "list", "--base-dir", baseDir, "--json"]),
+      );
+      const afterRevoke = JSON.parse(afterRevokeOutput.output) as ReadonlyArray<{
+        readonly id: string;
+      }>;
+      assert.deepEqual(
+        afterRevoke.map((link) => link.id),
+        [client.id],
+      );
+    }),
+  );
+
+  it.effect("caps owner pairing links at 15 minutes and rejects unknown roles", () =>
+    Effect.gen(function* () {
+      const baseDir = mkdtempSync(join(tmpdir(), "ryco-cli-auth-owner-ttl-test-"));
+
+      const tooLong = yield* captureStdout(
+        runCli([
+          "auth",
+          "pairing",
+          "create",
+          "--role",
+          "owner",
+          "--ttl",
+          "1h",
+          "--base-dir",
+          baseDir,
+          "--json",
+        ]),
+      ).pipe(Effect.flip);
+      assert.include(String(tooLong.message), "at most 15 minutes");
+
+      // A client link keeps any TTL.
+      const clientOutput = yield* captureStdout(
+        runCli(["auth", "pairing", "create", "--ttl", "1h", "--base-dir", baseDir, "--json"]),
+      );
+      assert.equal((JSON.parse(clientOutput.output) as { readonly role: string }).role, "client");
+
+      const unknownRole = yield* runCliWithRuntime([
+        "auth",
+        "pairing",
+        "create",
+        "--role",
+        "admin",
+        "--base-dir",
+        baseDir,
+      ]).pipe(Effect.flip);
+      if (!CliError.isCliError(unknownRole)) {
+        assert.fail(`Expected CliError, got ${String(unknownRole)}`);
+      }
+      if (unknownRole._tag !== "ShowHelp") {
+        assert.fail(`Expected ShowHelp, got ${unknownRole._tag}`);
+      }
+      const roleError = unknownRole.errors[0] as CliError.CliError | undefined;
+      if (!roleError || roleError._tag !== "InvalidValue") {
+        assert.fail(`Expected InvalidValue, got ${String(roleError?._tag)}`);
+      }
+      assert.equal(roleError.option, "role");
+      assert.equal(roleError.value, "admin");
     }),
   );
 

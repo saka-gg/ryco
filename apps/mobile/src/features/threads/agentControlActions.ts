@@ -1,6 +1,6 @@
 import type {
   AgentControlProposalId,
-  AgentControlProposalReceipt,
+  AgentControlProposalReceiptView,
   EnvironmentApi,
 } from "@ryco/contracts";
 
@@ -20,13 +20,13 @@ function requireAgentControlApi(api: EnvironmentApi): NonNullable<EnvironmentApi
 export async function acceptAgentControlProposal(input: {
   readonly api: EnvironmentApi;
   readonly proposalId: AgentControlProposalId;
-}): Promise<AgentControlProposalReceipt> {
+}): Promise<AgentControlProposalReceiptView> {
   return requireAgentControlApi(input.api).acceptProposal({ proposalId: input.proposalId });
 }
 
 export async function rejectAgentControlProposal(input: {
   readonly api: EnvironmentApi;
   readonly proposalId: AgentControlProposalId;
-}): Promise<AgentControlProposalReceipt> {
+}): Promise<AgentControlProposalReceiptView> {
   return requireAgentControlApi(input.api).rejectProposal({ proposalId: input.proposalId });
 }

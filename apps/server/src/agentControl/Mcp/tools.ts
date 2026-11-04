@@ -143,6 +143,7 @@ import {
   readThreadPage,
 } from "./threadReads.ts";
 import { readControlRequestReceipt, waitForControlRequestReceipt } from "./proposalReads.ts";
+import { modelSelectionSchema } from "./modelSelectionToolSchema.ts";
 import {
   interruptThreadPlan,
   planWorkspaceLifecycle,
@@ -217,33 +218,14 @@ interface PrivateDeviceContentResult {
   readonly content: AgentControlMcpToolResult["content"];
 }
 
+export { modelSelectionSchema } from "./modelSelectionToolSchema.ts";
+
 const isPrivateDeviceContentResult = (value: unknown): value is PrivateDeviceContentResult =>
   typeof value === "object" &&
   value !== null &&
   "_tag" in value &&
   value._tag === "PrivateDeviceContentResult";
 
-export const modelSelectionSchema = {
-  type: "object",
-  properties: {
-    instanceId: { type: "string", description: "Provider instance ID from ryco_capabilities." },
-    model: { type: "string", description: "Exact model slug from that provider instance." },
-    options: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          id: { type: "string" },
-          value: { anyOf: [{ type: "string" }, { type: "boolean" }] },
-        },
-        required: ["id", "value"],
-        additionalProperties: false,
-      },
-    },
-  },
-  required: ["instanceId", "model"],
-  additionalProperties: false,
-} as const;
 const projectScriptsSchema = {
   type: "array",
   maxItems: 100,

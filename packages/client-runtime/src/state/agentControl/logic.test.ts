@@ -9,7 +9,8 @@ import {
   ThreadId,
   type AgentControlProposal,
   type AgentControlProposalStatus,
-  type AgentControlProposalStreamEvent,
+  type AgentControlProposalStreamEventView,
+  type AgentControlProposalView,
 } from "@ryco/contracts";
 
 import {
@@ -69,9 +70,9 @@ const interruptTarget = {
 
 function snapshotEvent(input: {
   revision: number;
-  active?: AgentControlProposal[];
-  recent?: AgentControlProposal[];
-}): AgentControlProposalStreamEvent {
+  active?: AgentControlProposalView[];
+  recent?: AgentControlProposalView[];
+}): AgentControlProposalStreamEventView {
   return {
     version: 1,
     type: "snapshot",
@@ -86,7 +87,7 @@ function snapshotEvent(input: {
 function proposalEvent(
   revision: number,
   proposal: AgentControlProposal,
-): AgentControlProposalStreamEvent {
+): AgentControlProposalStreamEventView {
   return { version: 1, type: "proposal", revision, proposal };
 }
 
@@ -109,6 +110,34 @@ describe("applyAgentControlStreamEvent", () => {
     const next = applyAgentControlStreamEvent(hydrated, proposalEvent(6, approved));
     expect(next.revision).toBe(6);
     expect(next.proposalsById[approved.proposalId]?.status).toBe("approved");
+  });
+
+  it("keeps a plan kind this build cannot read in the queue and its caller thread", () => {
+    const unsupported: AgentControlProposalView = {
+      ...makeProposal("future"),
+      plan: { kind: "unsupported", originalKind: "mirrorRepository" },
+    };
+    const state = applyAgentControlStreamEvent(
+      EMPTY_AGENT_CONTROL_QUEUE_STATE,
+      snapshotEvent({ revision: 1, active: [makeProposal("known"), unsupported] }),
+    );
+    expect(selectActiveAgentControlProposals(state).map((p) => p.proposalId)).toEqual([
+      "future",
+      "known",
+    ]);
+    const rejected = applyAgentControlStreamEvent(state, {
+      version: 1,
+      type: "proposal",
+      revision: 2,
+      proposal: { ...unsupported, status: "rejected", updatedAt: "2026-08-17T00:01:00.000Z" },
+    });
+    expect(selectRecentAgentControlProposals(rejected)[0]?.plan).toEqual(unsupported.plan);
+    const activity = selectAgentControlThreadActivity(state, callerThreadId);
+    expect(activity.pending.map((p) => p.proposalId)).toContain("future");
+    // An unreadable plan never names a thread it manages.
+    expect(selectAgentControlThreadActivity(state, ThreadId.make("thread-target"))).toMatchObject({
+      managerThreadId: null,
+    });
   });
 
   it("ignores change events before hydration", () => {

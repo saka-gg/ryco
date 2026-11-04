@@ -2,7 +2,7 @@ import { dirname, join } from "node:path";
 
 import { Config, Context, DateTime, Effect, Exit, Layer, Option, Scope, Stream } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
-import { WsHostedRpcGroup } from "@ryco/contracts";
+import { WsNodeRpcGroup } from "@ryco/contracts/project-copy-rpc";
 import { installE2eeNodeNativePrimitives } from "@ryco/shared/relayE2eeNodeCrypto";
 
 import { AgentControlExternalTopologyService } from "../agentControl/Services/AgentControlExternalTopology.ts";
@@ -746,7 +746,7 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
         try {
           const session = await runPromise(
             makeRpcByteSession(
-              WsHostedRpcGroup,
+              WsNodeRpcGroup,
               Layer.merge(
                 makeServerWsRpcLayer(
                   relayChannelPrincipal(effectiveRole, channelId, e2ee, () => channelAuthority),

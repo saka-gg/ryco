@@ -44,6 +44,10 @@ import { useSidebarThreadActions } from "./hooks/useSidebarThreadActions";
 import { useSidebarWorktreeActions } from "./hooks/useSidebarWorktreeActions";
 import { useSidebarProjectContextMenu } from "./hooks/useSidebarProjectContextMenu";
 import { useSidebarProjectDialogs } from "./SidebarProjectDialogOwner";
+import { usePresentationTier } from "../../hooks/usePresentationTier";
+import { useCommandPaletteStore } from "../../commandPaletteStore";
+import type { CopyProjectDialogOrigin } from "../projectNodes/projectNodesDialogStore";
+import { crossNodeProjectActions } from "../projectNodes/projectNodesShellActions";
 
 interface SidebarProjectItemProps {
   project: SidebarProjectSnapshot;
@@ -358,6 +362,27 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
     projectDialogs.openOverview(project);
   }, [project, projectDialogs]);
 
+  // Copy and link across nodes (A26): the frozen phone tier's menus keep
+  // today's actions, so only the other tiers get them.
+  const presentationTier = usePresentationTier();
+  const crossNodeActionsFor = useCallback(
+    (origin: CopyProjectDialogOrigin) =>
+      crossNodeProjectActions({
+        projectRef: { environmentId: project.environmentId, projectId: project.id },
+        origin,
+        openAddProject: useCommandPaletteStore.getState().openAddProject,
+      }),
+    [project.environmentId, project.id],
+  );
+  const contextMenuCrossNodeActions = useMemo(
+    () => (presentationTier === "phone" ? undefined : crossNodeActionsFor("sidebar")),
+    [crossNodeActionsFor, presentationTier],
+  );
+  const kebabCrossNodeActions = useMemo(
+    () => (presentationTier === "phone" ? undefined : crossNodeActionsFor("kebab")),
+    [crossNodeActionsFor, presentationTier],
+  );
+
   const { handleProjectButtonContextMenu } = useSidebarProjectContextMenu({
     project,
     jiraProjectOpenUrlByProjectKey,
@@ -370,6 +395,7 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
     openProjectGroupingDialog: projectDialogs.openGrouping,
     copyPathToClipboard,
     handleRemoveProject,
+    crossNodeActions: contextMenuCrossNodeActions,
   });
 
   const handleProjectButtonClick = useCallback(
@@ -510,6 +536,7 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
         }}
         onRename={projectDialogs.openRename}
         onSettings={projectDialogs.openSettings}
+        crossNodeActions={kebabCrossNodeActions}
       />
 
       {projectExpanded ? (

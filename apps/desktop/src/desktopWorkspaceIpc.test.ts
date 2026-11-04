@@ -126,6 +126,8 @@ describe("Desktop workspace state projections", () => {
     effectiveRole: "owner",
     presence: { online: true, lastSeenAt: 1, observedAt: 1 },
     connectionState: "connected",
+    transport: "relay",
+    projectCopySupport: "unknown",
     deliveryUnknown: false,
     revokedAt: null,
     removed: false,
@@ -207,6 +209,38 @@ describe("Desktop workspace state projections", () => {
       state({ catalog: [{ ...machine, capabilities }] }),
     );
     expect(unstated.machines[0]).not.toHaveProperty("threadSettlementSupported");
+  });
+
+  it("passes on the directory's platform only when it knows one", () => {
+    expect(projectDesktopWorkspaceSummary(state()).machines[0]).toMatchObject({
+      platformOs: "darwin",
+    });
+    const unknown = projectDesktopWorkspaceSummary(
+      state({ catalog: [{ ...machine, platform: { os: "unknown", arch: "other" } }] }),
+    );
+    expect(unknown.machines[0]).not.toHaveProperty("platformOs");
+  });
+
+  it("retains a project copy scope exactly and refuses a malformed copy id", async () => {
+    const retainScope = vi.fn(async () => ({ leaseId: "desktop-workspace-1", snapshot: state() }));
+    const handlers = createDesktopWorkspaceIpcHandlers({
+      snapshot: () => state(),
+      retainScope,
+    } as unknown as DesktopWorkspaceClient);
+    await handlers.retainScope({
+      environmentId,
+      scope: { type: "project-copy", copyId: "copy-1" },
+    });
+    expect(retainScope).toHaveBeenCalledWith({
+      environmentId,
+      scope: { type: "project-copy", copyId: "copy-1" },
+    });
+    for (const copyId of ["../copy", "", 42, undefined]) {
+      await expect(
+        handlers.retainScope({ environmentId, scope: { type: "project-copy", copyId } }),
+      ).rejects.toThrow("Desktop workspace scope is invalid.");
+    }
+    expect(retainScope).toHaveBeenCalledTimes(1);
   });
 
   it("answers a state read with every snapshot and a command with none", async () => {

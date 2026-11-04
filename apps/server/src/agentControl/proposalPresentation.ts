@@ -9,7 +9,27 @@ import {
   AGENT_CONTROL_RISK_TAGS,
   type AgentControlActionPlan,
   type AgentControlRiskTag,
+  type RuntimeMode,
 } from "@ryco/contracts";
+
+/** The setup command and follow-up thread an `importProject` or `copyProjectToNode` plan runs. */
+const projectSetupRiskTags = (plan: {
+  readonly setup: unknown;
+  readonly followUpThread: { readonly runtimeMode: RuntimeMode } | null;
+}): Array<AgentControlRiskTag> => [
+  ...(plan.setup !== null || plan.followUpThread !== null
+    ? [AGENT_CONTROL_RISK_TAGS.runsCommands]
+    : []),
+  ...(plan.followUpThread === null
+    ? []
+    : [
+        AGENT_CONTROL_RISK_TAGS.createsThreads,
+        AGENT_CONTROL_RISK_TAGS.startsProviderTurn,
+        ...(plan.followUpThread.runtimeMode === "approval-required"
+          ? []
+          : [AGENT_CONTROL_RISK_TAGS.elevatedRuntimeMode]),
+      ]),
+];
 
 export const agentControlRiskTagsForPlan = (
   plan: AgentControlActionPlan,
@@ -86,6 +106,17 @@ export const agentControlRiskTagsForPlan = (
     case "devicePressButton":
     case "deviceControlConsent":
       return [AGENT_CONTROL_RISK_TAGS.deviceMutation];
+    case "importProject":
+      return [AGENT_CONTROL_RISK_TAGS.createsProject, ...projectSetupRiskTags(plan)];
+    case "copyProjectToNode":
+      return [
+        AGENT_CONTROL_RISK_TAGS.createsProject,
+        AGENT_CONTROL_RISK_TAGS.crossNode,
+        ...(plan.bringCommits || plan.bringChanges
+          ? [AGENT_CONTROL_RISK_TAGS.copiesWorkspaceContent]
+          : []),
+        ...projectSetupRiskTags(plan),
+      ];
   }
 };
 
@@ -160,5 +191,10 @@ export const agentControlPromptSummaryForPlan = (plan: AgentControlActionPlan): 
       return plan.executionSummary;
     case "deviceControlConsent":
       return `Allow routine input on device ${plan.udid} for this task`;
+    // Titles only: repository URLs, paths and node labels stay out of audit rows.
+    case "importProject":
+      return `Set up project ${plan.title.slice(0, 200)} from a repository on this node`;
+    case "copyProjectToNode":
+      return `Copy project ${plan.source.title.slice(0, 200)} to another node`;
   }
 };

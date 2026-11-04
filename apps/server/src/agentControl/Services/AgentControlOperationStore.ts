@@ -35,6 +35,11 @@ export interface CreateAgentControlOperationInput {
   /** Must be in `executing`; the operation records that execution durably. */
   readonly proposal: AgentControlProposal;
   readonly now: IsoDateTime;
+  /**
+   * The new operation's evidence from the start, e.g. a client-executed operation's executor
+   * binding. Ignored when the proposal already owns an operation.
+   */
+  readonly state?: AgentControlOperationState | undefined;
 }
 
 export interface CreateAgentControlOperationResult {

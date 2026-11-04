@@ -1,4 +1,8 @@
-import type { DesktopSshEnvironmentBootstrap, DesktopSshEnvironmentTarget } from "@ryco/contracts";
+import type {
+  AuthSessionRole,
+  DesktopSshEnvironmentBootstrap,
+  DesktopSshEnvironmentTarget,
+} from "@ryco/contracts";
 import { type NetError, NetService } from "@ryco/shared/Net";
 import { fromLenientJson } from "@ryco/shared/schemaJson";
 import {
@@ -143,10 +147,20 @@ interface SshAuthAttemptInput<T> extends SshAuthOperationInput<T> {
   readonly authSecret: string | null;
 }
 
+export interface SshEnvironmentEnsureOptions {
+  readonly issuePairingToken?: boolean;
+  /**
+   * Issue an owner pairing token or none: a remote CLI from before owner
+   * pairing then mints nothing and the bootstrap's `pairingToken` is null,
+   * instead of falling back to a client token.
+   */
+  readonly requireOwnerPairing?: boolean;
+}
+
 export interface SshEnvironmentManagerShape {
   readonly ensureEnvironment: (
     target: DesktopSshEnvironmentTarget,
-    options?: { readonly issuePairingToken?: boolean },
+    options?: SshEnvironmentEnsureOptions,
   ) => Effect.Effect<
     DesktopSshEnvironmentBootstrap,
     SshEnvironmentEffectError,
@@ -163,8 +177,20 @@ const RemoteLaunchResult = Schema.Struct({
 });
 
 const RemotePairingResult = Schema.Struct({
-  credential: Schema.String,
+  credential: Schema.optional(Schema.String),
+  // Every CLI that knows `--role` reports it; one that does not only mints client links.
+  role: Schema.optional(Schema.Literals(["owner", "client"])),
+  ownerPairingUnsupported: Schema.optional(Schema.Boolean),
 });
+
+/**
+ * What the remote pairing script issued. `credential` is null only when an
+ * owner token was required and the remote CLI predates owner pairing.
+ */
+export interface RemotePairingToken {
+  readonly credential: string | null;
+  readonly role: AuthSessionRole | null;
+}
 
 const RemoteHttpError = Schema.Struct({
   error: Schema.optional(Schema.String),
@@ -483,6 +509,13 @@ fi
 printf '{"remotePort":%s,"serverKind":"%s"}\\n' "$REMOTE_PORT" "\${REMOTE_MANAGED:-managed}"
 `;
 
+/**
+ * Mints a one-time pairing token on the remote. It asks for an owner token
+ * first, since only an owner can add projects there, and retries as a client
+ * only when the remote CLI rejects `--role` as an unknown option (a CLI from
+ * before owner pairing); any other failure is reported as it is. With the client
+ * fallback off it prints `{"ownerPairingUnsupported":true}` instead.
+ */
 export const REMOTE_PAIRING_SCRIPT = `set -eu
 DEFAULT_SERVER_HOME="$HOME/.ryco"
 STATE_DIR="$DEFAULT_SERVER_HOME/ssh-launch/@@RYCO_STATE_KEY@@"
@@ -493,7 +526,28 @@ cat >"$RUNNER_FILE" <<'SH'
 SH
 chmod 700 "$RUNNER_FILE"
 PAIRING_BASE_DIR="$DEFAULT_SERVER_HOME"
-"$RUNNER_FILE" auth pairing create --base-dir "$PAIRING_BASE_DIR" --json
+PAIRING_CLIENT_FALLBACK=@@RYCO_PAIRING_CLIENT_FALLBACK@@
+PAIRING_OUT="$STATE_DIR/pairing.out.$$"
+PAIRING_ERR="$STATE_DIR/pairing.err.$$"
+cleanup_pairing_output() {
+  rm -f "$PAIRING_OUT" "$PAIRING_ERR"
+}
+trap cleanup_pairing_output EXIT
+PAIRING_STATUS=0
+"$RUNNER_FILE" auth pairing create --role owner --label "Desktop SSH" --base-dir "$PAIRING_BASE_DIR" --json >"$PAIRING_OUT" 2>"$PAIRING_ERR" || PAIRING_STATUS=$?
+if [ "$PAIRING_STATUS" -eq 0 ]; then
+  cat "$PAIRING_OUT"
+  exit 0
+fi
+if ! grep -Eqi '(unrecognized|unknown).*--role' "$PAIRING_ERR"; then
+  cat "$PAIRING_ERR" >&2
+  exit "$PAIRING_STATUS"
+fi
+if [ "$PAIRING_CLIENT_FALLBACK" != "1" ]; then
+  printf '{"ownerPairingUnsupported":true}\\n'
+  exit 0
+fi
+"$RUNNER_FILE" auth pairing create --label "Desktop SSH" --base-dir "$PAIRING_BASE_DIR" --json
 `;
 
 export const REMOTE_STOP_SCRIPT = `set -eu
@@ -554,12 +608,53 @@ export function buildRemoteLaunchScript(input?: RemoteRycoRunnerOptions): string
 export function buildRemotePairingScript(
   target: DesktopSshEnvironmentTarget,
   input?: RemoteRycoRunnerOptions,
+  options?: { readonly requireOwner?: boolean },
 ): string {
   return applyScriptPlaceholders(REMOTE_PAIRING_SCRIPT, {
     RYCO_STATE_KEY: remoteStateKey(target),
     RYCO_RUNNER_SCRIPT: stripTrailingNewlines(buildRemoteRycoRunnerScript(input)),
+    RYCO_PAIRING_CLIENT_FALLBACK: options?.requireOwner === true ? "0" : "1",
   });
 }
+
+/** Reads the pairing script's JSON document; see {@link REMOTE_PAIRING_SCRIPT}. */
+export const decodeRemotePairingToken = Effect.fn("ssh/tunnel.decodeRemotePairingToken")(function* (
+  stdout: string,
+  options?: { readonly requireOwner?: boolean },
+): Effect.fn.Return<RemotePairingToken, SshPairingError> {
+  if (!getLastNonEmptyOutputLine(stdout)) {
+    return yield* new SshPairingError({
+      message: "SSH pairing did not return a credential.",
+      stdout,
+    });
+  }
+  const parsed = yield* decodeRemotePairingResult(stdout).pipe(
+    Effect.mapError(
+      (cause) =>
+        new SshPairingError({
+          message: "SSH pairing returned unparseable output.",
+          stdout,
+          cause,
+        }),
+    ),
+  );
+  if (options?.requireOwner === true && parsed.ownerPairingUnsupported === true) {
+    return { credential: null, role: null };
+  }
+  const credential = parsed.credential?.trim() ?? "";
+  if (credential.length === 0) {
+    return yield* new SshPairingError({
+      message: "SSH pairing command returned an invalid credential.",
+      stdout,
+    });
+  }
+  const role = parsed.role ?? "client";
+  // An owner token was required; a client one is not used.
+  if (options?.requireOwner === true && role !== "owner") {
+    return { credential: null, role: null };
+  }
+  return { credential, role };
+});
 
 export function buildRemoteStopScript(target: DesktopSshEnvironmentTarget): string {
   return applyScriptPlaceholders(REMOTE_STOP_SCRIPT, {
@@ -634,53 +729,37 @@ export const issueRemotePairingToken = Effect.fn("ssh/tunnel.issueRemotePairingT
   target: DesktopSshEnvironmentTarget,
   input?: SshAuthOptions,
   runner?: RemoteRycoRunnerOptions,
+  options?: { readonly requireOwner?: boolean },
 ): Effect.fn.Return<
-  {
-    readonly credential: string;
-  },
+  RemotePairingToken,
   SshCommandError | SshInvalidTargetError | SshPairingError,
   ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path
 > {
+  const requireOwner = options?.requireOwner === true;
   yield* Effect.logDebug("ssh.remoteServer.pairingToken.start", {
     ...sshTargetLogFields(target),
     stateKey: remoteStateKey(target),
+    requireOwner,
   });
   const result = yield* runSshCommand(target, {
     remoteCommandArgs: ["sh", "-s"],
-    stdin: buildRemotePairingScript(target, runner),
+    stdin: buildRemotePairingScript(target, runner, { requireOwner }),
     ...(input?.authSecret === undefined ? {} : { authSecret: input.authSecret }),
     ...(input?.batchMode === undefined ? {} : { batchMode: input.batchMode }),
     ...(input?.interactiveAuth === undefined ? {} : { interactiveAuth: input.interactiveAuth }),
   });
-  if (!getLastNonEmptyOutputLine(result.stdout)) {
-    return yield* new SshPairingError({
-      message: "SSH pairing did not return a credential.",
-      stdout: result.stdout,
-    });
-  }
-  const parsed = yield* decodeRemotePairingResult(result.stdout).pipe(
-    Effect.mapError(
-      (cause) =>
-        new SshPairingError({
-          message: "SSH pairing returned unparseable output.",
-          stdout: result.stdout,
-          cause,
-        }),
-    ),
+  const token = yield* decodeRemotePairingToken(result.stdout, { requireOwner });
+  yield* Effect.logDebug(
+    token.credential === null
+      ? "ssh.remoteServer.pairingToken.ownerUnsupported"
+      : "ssh.remoteServer.pairingToken.created",
+    {
+      ...sshTargetLogFields(target),
+      stateKey: remoteStateKey(target),
+      role: token.role,
+    },
   );
-  if (parsed.credential.trim().length === 0) {
-    return yield* new SshPairingError({
-      message: "SSH pairing command returned an invalid credential.",
-      stdout: result.stdout,
-    });
-  }
-  yield* Effect.logDebug("ssh.remoteServer.pairingToken.created", {
-    ...sshTargetLogFields(target),
-    stateKey: remoteStateKey(target),
-  });
-  return {
-    credential: parsed.credential,
-  };
+  return token;
 });
 
 export const stopRemoteServer = Effect.fn("ssh/tunnel.stopRemoteServer")(function* (
@@ -1512,7 +1591,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
 
   const ensureEnvironment = Effect.fn("ssh/tunnel.ensureEnvironment")(function* (
     target: DesktopSshEnvironmentTarget,
-    requestOptions?: { readonly issuePairingToken?: boolean },
+    requestOptions?: SshEnvironmentEnsureOptions,
   ): Effect.fn.Return<
     DesktopSshEnvironmentBootstrap,
     SshEnvironmentEffectError,
@@ -1521,6 +1600,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     yield* Effect.logInfo("ssh.environment.ensure.start", {
       ...sshTargetLogFields(target),
       issuePairingToken: requestOptions?.issuePairingToken === true,
+      requireOwnerPairing: requestOptions?.requireOwnerPairing === true,
     });
     const baseResolved = yield* resolveSshTarget(target.alias || target.hostname);
     const resolvedTarget: DesktopSshEnvironmentTarget = {
@@ -1547,10 +1627,14 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       ? yield* runWithSshAuth({
           key,
           target: entry.target,
-          operation: (authOptions) => issueRemotePairingToken(entry.target, authOptions, runner),
+          operation: (authOptions) =>
+            issueRemotePairingToken(entry.target, authOptions, runner, {
+              requireOwner: requestOptions.requireOwnerPairing === true,
+            }),
         })
       : null;
     const pairingToken = pairingResult?.credential ?? null;
+    const pairingRole = pairingToken === null ? null : (pairingResult?.role ?? null);
 
     yield* Effect.logInfo("ssh.environment.ensure.succeeded", {
       ...sshTargetLogFields(entry.target),
@@ -1559,12 +1643,14 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       remotePort: entry.remotePort,
       remoteServerKind: entry.remoteServerKind,
       issuedPairingToken: pairingToken !== null,
+      pairingRole,
     });
     return {
       target: entry.target,
       httpBaseUrl: entry.httpBaseUrl,
       wsBaseUrl: entry.wsBaseUrl,
       pairingToken,
+      ...(pairingRole === null ? {} : { pairingRole }),
       remotePort: entry.remotePort,
       ...(entry.remoteServerKind ? { remoteServerKind: entry.remoteServerKind } : {}),
     };

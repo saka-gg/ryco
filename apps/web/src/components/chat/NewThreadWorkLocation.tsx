@@ -56,6 +56,8 @@ export interface NewThreadWorkLocationProps {
   readonly onComposerFocusRequest: (() => void) | undefined;
   readonly onCheckoutPullRequestRequest: ((reference: string) => void) | undefined;
   readonly cwd: string | null;
+  /** The other nodes this project's repository is checked out on ("· also on Mac mini"). */
+  readonly alsoOnLabels?: ReadonlyArray<string> | undefined;
 }
 
 /**
@@ -65,7 +67,8 @@ export interface NewThreadWorkLocationProps {
  *
  * Every bold token is a control. Slots that don't apply are dropped rather
  * than disabled — an existing worktree already has its branch, so it shows no
- * source. The one-click switch into a new worktree and the device the thread
+ * source. A project checked out on other nodes too ends the line with
+ * "· also on Mac mini, Studio". The one-click switch into a new worktree and the device the thread
  * runs on live in `NewThreadContextBar` above the composer; this picker only
  * offers the project root and existing worktrees, and follows that switch.
  *
@@ -83,6 +86,7 @@ export function NewThreadWorkLocation({
   onComposerFocusRequest,
   onCheckoutPullRequestRequest,
   cwd,
+  alsoOnLabels = [],
 }: NewThreadWorkLocationProps) {
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
   const draftThread = useComposerDraftStore((store) =>
@@ -310,6 +314,17 @@ export function NewThreadWorkLocation({
           <span className="px-1 text-muted-foreground">
             as{" "}
             <span className="font-mono text-foreground/85">{draftThread.worktreeBranchName}</span>
+          </span>
+        </FlipItem>
+      ) : null}
+
+      {alsoOnLabels.length > 0 ? (
+        <FlipItem id="also-on">
+          <span
+            className="px-1 text-[12px] text-muted-foreground/80"
+            data-testid="new-thread-also-on"
+          >
+            · also on {alsoOnLabels.join(", ")}
           </span>
         </FlipItem>
       ) : null}

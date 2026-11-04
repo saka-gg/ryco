@@ -849,6 +849,9 @@ describe("PhoneHome", () => {
         expect(sheetRow(label)!.getBoundingClientRect().height).toBeGreaterThanOrEqual(44);
       }
       expect(sheetRow("Remove project")!.className).toContain("text-destructive");
+      // The frozen phone tier gains no cross-node actions (A26).
+      expect(sheetRow("Copy to another node…")).toBeNull();
+      expect(sheetRow("Link a copy that’s already on a node…")).toBeNull();
 
       // Non-destructive round-trip through the shared clipboard handler.
       sheetRow("Copy Project Path")!.click();

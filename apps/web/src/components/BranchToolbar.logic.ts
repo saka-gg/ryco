@@ -1,6 +1,5 @@
 import type { EnvironmentId, RepositoryIdentity, VcsRef, ProjectId } from "@ryco/contracts";
 import { Schema } from "effect";
-import { isGenericLocalEnvironmentLabel, normalizeDisplayLabel } from "../environmentDisplay";
 
 /**
  * Convert a git remote URL (scp-like `git@host:owner/repo.git`, `ssh://`,
@@ -72,26 +71,6 @@ export interface EnvironmentOption {
 
 export const EnvMode = Schema.Literals(["local", "worktree"]);
 export type EnvMode = typeof EnvMode.Type;
-
-export function resolveEnvironmentOptionLabel(input: {
-  isPrimary: boolean;
-  environmentId: EnvironmentId;
-  runtimeLabel?: string | null;
-  savedLabel?: string | null;
-}): string {
-  const runtimeLabel = normalizeDisplayLabel(input.runtimeLabel);
-  const savedLabel = normalizeDisplayLabel(input.savedLabel);
-
-  if (input.isPrimary) {
-    const preferredLocalLabel = [runtimeLabel, savedLabel].find((label) => {
-      if (!label) return false;
-      return !isGenericLocalEnvironmentLabel(label);
-    });
-    return preferredLocalLabel ?? "Device connecting…";
-  }
-
-  return runtimeLabel ?? savedLabel ?? input.environmentId;
-}
 
 export function resolveEffectiveEnvMode(input: {
   activeWorktreePath: string | null;

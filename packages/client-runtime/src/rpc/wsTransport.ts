@@ -30,7 +30,7 @@ import { isTransportConnectionErrorMessage } from "../errors/transportError.ts";
  */
 export type SubscriptionFailureKind = "unsupported" | "response-too-large" | "failed";
 
-interface SubscribeOptions {
+export interface SubscribeOptions {
   readonly retryDelay?: Duration.Input;
   readonly onResubscribe?: () => void;
   /**
@@ -87,6 +87,21 @@ interface TransportSession<Client> {
   readonly clientPromise: Promise<Client>;
   readonly clientScope: Scope.Closeable;
   readonly runtime: ManagedRuntime.ManagedRuntime<RpcClient.Protocol, never>;
+  /** Clients of other groups on this session's socket (`withClient`), by their factory. */
+  readonly groupClients: Map<unknown, Promise<unknown>>;
+}
+
+/** A transport's requests and subscriptions through a client of another RPC group. */
+export interface RpcTransportClientView<Client> {
+  readonly request: <TSuccess>(
+    execute: (client: Client) => Effect.Effect<TSuccess, Error, never>,
+    options?: RequestOptions,
+  ) => Promise<TSuccess>;
+  readonly subscribe: <TValue>(
+    connect: (client: Client) => Stream.Stream<TValue, Error, never>,
+    listener: (value: TValue) => void,
+    options?: SubscribeOptions,
+  ) => () => void;
 }
 
 interface StreamRequestStartInfo {
@@ -188,6 +203,9 @@ export function isSubscriptionStreamDoneError(message: string): boolean {
   );
 }
 
+const mainClientOf = <Client>(session: TransportSession<Client>): Promise<Client> =>
+  session.clientPromise;
+
 class RpcTransport<Client> {
   private readonly url: WsRpcProtocolSocketUrlProvider;
   private readonly socket: SocketService;
@@ -220,8 +238,40 @@ class RpcTransport<Client> {
     this.session = this.createSession();
   }
 
-  async request<TSuccess>(
+  request<TSuccess>(
     execute: (client: Client) => Effect.Effect<TSuccess, Error, never>,
+    options?: RequestOptions,
+  ): Promise<TSuccess> {
+    return this.requestWith(mainClientOf, execute, options);
+  }
+
+  /**
+   * This socket's requests and subscriptions through a client of another RPC
+   * group, for a group whose schemas load on demand rather than with the app's
+   * own client. Each session builds that client the first time it is used and
+   * closes it with the session; the protocol carries both clients' requests.
+   */
+  withClient<GroupClient>(
+    makeClient: Effect.Effect<GroupClient, never, RpcClient.Protocol | Scope.Scope>,
+  ): RpcTransportClientView<GroupClient> {
+    const clientOf = (session: TransportSession<Client>): Promise<GroupClient> => {
+      let client = session.groupClients.get(makeClient) as Promise<GroupClient> | undefined;
+      if (client === undefined) {
+        client = session.runtime.runPromise(Scope.provide(session.clientScope)(makeClient));
+        session.groupClients.set(makeClient, client);
+      }
+      return client;
+    };
+    return {
+      request: (execute, options) => this.requestWith(clientOf, execute, options),
+      subscribe: (connect, listener, options) =>
+        this.subscribeWith(clientOf, connect, listener, options),
+    };
+  }
+
+  private async requestWith<RequestClient, TSuccess>(
+    clientOf: (session: TransportSession<Client>) => Promise<RequestClient>,
+    execute: (client: RequestClient) => Effect.Effect<TSuccess, Error, never>,
     options?: RequestOptions,
   ): Promise<TSuccess> {
     if (this.disposed) {
@@ -231,7 +281,7 @@ class RpcTransport<Client> {
     const signal = options?.signal;
     if (signal?.aborted) throw new RpcRequestAbortedError();
     const session = this.session;
-    const client = await session.clientPromise;
+    const client = await clientOf(session);
     if (signal === undefined) {
       return await session.runtime.runPromise(Effect.suspend(() => execute(client)));
     }
@@ -275,6 +325,15 @@ class RpcTransport<Client> {
 
   subscribe<TValue>(
     connect: (client: Client) => Stream.Stream<TValue, Error, never>,
+    listener: (value: TValue) => void,
+    options?: SubscribeOptions,
+  ): () => void {
+    return this.subscribeWith(mainClientOf, connect, listener, options);
+  }
+
+  private subscribeWith<StreamClient, TValue>(
+    clientOf: (session: TransportSession<Client>) => Promise<StreamClient>,
+    connect: (client: StreamClient) => Stream.Stream<TValue, Error, never>,
     listener: (value: TValue) => void,
     options?: SubscribeOptions,
   ): () => void {
@@ -329,6 +388,7 @@ class RpcTransport<Client> {
         try {
           const runningStream = this.runStreamOnSession(
             session,
+            clientOf,
             connect,
             listener,
             {
@@ -538,12 +598,14 @@ class RpcTransport<Client> {
       runtime,
       clientScope,
       clientPromise: runtime.runPromise(Scope.provide(clientScope)(this.makeClient())),
+      groupClients: new Map(),
     };
   }
 
-  private runStreamOnSession<TValue>(
+  private runStreamOnSession<StreamClient, TValue>(
     session: TransportSession<Client>,
-    connect: (client: Client) => Stream.Stream<TValue, Error, never>,
+    clientOf: (session: TransportSession<Client>) => Promise<StreamClient>,
+    connect: (client: StreamClient) => Stream.Stream<TValue, Error, never>,
     listener: (value: TValue) => void,
     requestStart: {
       readonly tag?: string;
@@ -599,7 +661,7 @@ class RpcTransport<Client> {
       }
     };
     const cancel = session.runtime.runCallback(
-      Effect.promise(() => session.clientPromise).pipe(
+      Effect.promise(() => clientOf(session)).pipe(
         Effect.flatMap((client) =>
           Stream.runForEachArray(connect(client), (values) =>
             Effect.sync(() => {

@@ -16,15 +16,19 @@
  *     event revision makes replayed, duplicated, or reordered deliveries
  *     all harmless — a stale document simply loses the upsert.
  *   - Terminal proposals stay as bounded history; the oldest are pruned.
+ *
+ * Documents are the tolerant wire view: a plan kind this build does not know
+ * is kept as `unsupported`, so it still shows (and can be rejected) instead of
+ * failing the stream.
  */
 import type { ThreadId, ThreadLineage } from "@ryco/contracts";
 import {
   AGENT_CONTROL_QUEUE_RECENT_LIMIT_DEFAULT,
   AGENT_CONTROL_TERMINAL_PROPOSAL_STATUSES,
   type AgentControlCompletionReturn,
-  type AgentControlProposal,
   type AgentControlProposalStatus,
-  type AgentControlProposalStreamEvent,
+  type AgentControlProposalStreamEventView,
+  type AgentControlProposalView,
 } from "@ryco/contracts/agent-control";
 
 import { isDelegatedThreadLineage } from "../threads/threadLineage.ts";
@@ -34,7 +38,7 @@ export interface AgentControlQueueState {
   readonly hydrated: boolean;
   /** Highest observed change revision; informational, not used to drop. */
   readonly revision: number;
-  readonly proposalsById: Readonly<Record<string, AgentControlProposal>>;
+  readonly proposalsById: Readonly<Record<string, AgentControlProposalView>>;
 }
 
 export const EMPTY_AGENT_CONTROL_QUEUE_STATE: AgentControlQueueState = {
@@ -70,16 +74,16 @@ const STATUS_PROGRESSION_RANK: Record<AgentControlProposalStatus, number> = {
   cancelled: 3,
 };
 
-const hasPendingReturns = (proposal: AgentControlProposal) =>
+const hasPendingReturns = (proposal: AgentControlProposalView) =>
   proposal.completionReturns?.some(
     (result) =>
       result.status === "waiting" || result.status === "ready" || result.status === "dispatching",
   ) ?? false;
 
 function mergeCompletionReturns(
-  current: AgentControlProposal["completionReturns"],
-  incoming: AgentControlProposal["completionReturns"],
-): AgentControlProposal["completionReturns"] {
+  current: AgentControlProposalView["completionReturns"],
+  incoming: AgentControlProposalView["completionReturns"],
+): AgentControlProposalView["completionReturns"] {
   if (!incoming?.length) return current;
   const byChild = new Map((current ?? []).map((result) => [result.childThreadId, result]));
   let changed = false;
@@ -100,8 +104,8 @@ function mergeCompletionReturns(
 }
 
 function pruneTerminalHistory(
-  proposalsById: Readonly<Record<string, AgentControlProposal>>,
-): Readonly<Record<string, AgentControlProposal>> {
+  proposalsById: Readonly<Record<string, AgentControlProposalView>>,
+): Readonly<Record<string, AgentControlProposalView>> {
   const terminal = Object.values(proposalsById).filter(
     (proposal) => isTerminalAgentControlStatus(proposal.status) && !hasPendingReturns(proposal),
   );
@@ -120,10 +124,10 @@ function pruneTerminalHistory(
 
 export function applyAgentControlStreamEvent(
   state: AgentControlQueueState,
-  event: AgentControlProposalStreamEvent,
+  event: AgentControlProposalStreamEventView,
 ): AgentControlQueueState {
   if (event.type === "snapshot") {
-    const proposalsById: Record<string, AgentControlProposal> = {};
+    const proposalsById: Record<string, AgentControlProposalView> = {};
     for (const proposal of [...event.queue.active, ...event.queue.recent]) {
       proposalsById[proposal.proposalId] = proposal;
     }
@@ -179,7 +183,7 @@ export function applyAgentControlStreamEvent(
 /** Non-terminal proposals, oldest first — the live queue. */
 export function selectActiveAgentControlProposals(
   state: AgentControlQueueState,
-): ReadonlyArray<AgentControlProposal> {
+): ReadonlyArray<AgentControlProposalView> {
   return Object.values(state.proposalsById)
     .filter(
       (proposal) => !isTerminalAgentControlStatus(proposal.status) || hasPendingReturns(proposal),
@@ -194,7 +198,7 @@ export function selectActiveAgentControlProposals(
 /** Terminal proposals, most recently updated first — the history. */
 export function selectRecentAgentControlProposals(
   state: AgentControlQueueState,
-): ReadonlyArray<AgentControlProposal> {
+): ReadonlyArray<AgentControlProposalView> {
   return Object.values(state.proposalsById)
     .filter(
       (proposal) => isTerminalAgentControlStatus(proposal.status) && !hasPendingReturns(proposal),
@@ -216,14 +220,14 @@ export function selectRecentAgentControlProposals(
  * (`automationSchedules.ts`), which the web shell loads only with the
  * Automations dialog.
  */
-export function isWaitingAutomationRun(proposal: AgentControlProposal): boolean {
+export function isWaitingAutomationRun(proposal: AgentControlProposalView): boolean {
   return proposal.status === "pending-user-approval" && proposal.plan.kind === "automationRun";
 }
 
 /** Runs waiting for approval in the given environments' queues. */
 export function waitingAutomationRunCount(
   queues: Readonly<
-    Record<string, { readonly proposalsById: Readonly<Record<string, AgentControlProposal>> }>
+    Record<string, { readonly proposalsById: Readonly<Record<string, AgentControlProposalView>> }>
   >,
   environmentIds: readonly string[],
 ): number {
@@ -241,7 +245,7 @@ export function waitingAutomationRunCount(
 export function selectAgentControlProposalsForThread(
   state: AgentControlQueueState,
   threadId: ThreadId,
-): ReadonlyArray<AgentControlProposal> {
+): ReadonlyArray<AgentControlProposalView> {
   return [
     ...selectActiveAgentControlProposals(state),
     ...selectRecentAgentControlProposals(state).filter(
@@ -254,9 +258,9 @@ export function selectAgentControlProposalsForThread(
 }
 
 export interface AgentControlThreadActivity {
-  readonly pending: ReadonlyArray<AgentControlProposal>;
+  readonly pending: ReadonlyArray<AgentControlProposalView>;
   /** Latest first, including running actions and terminal history. */
-  readonly activity: ReadonlyArray<AgentControlProposal>;
+  readonly activity: ReadonlyArray<AgentControlProposalView>;
   /** Latest accepted manager, hidden when it is the same thread as `delegatedFromThreadId`. */
   readonly managerThreadId: ThreadId | null;
   /** Creator: server lineage, else the accepted `createThreads` receipt (pre-lineage threads). */
@@ -284,7 +288,7 @@ export function selectAgentControlExternalActivity(
   };
 }
 
-const principalThreadId = (proposal: AgentControlProposal | undefined): ThreadId | null =>
+const principalThreadId = (proposal: AgentControlProposalView | undefined): ThreadId | null =>
   proposal?.principal.kind === "provider-session" ? proposal.principal.threadId : null;
 
 /** Thread presentation only; never grants authority or changes server policy. */
@@ -363,7 +367,7 @@ export function selectAgentControlThreadActivity(
  * proposals; a child created without `returnToOrigin` has none.
  */
 export function selectCompletionReturnsByChildThreadId(
-  proposals: ReadonlyArray<AgentControlProposal>,
+  proposals: ReadonlyArray<AgentControlProposalView>,
   parentThreadId: ThreadId,
 ): ReadonlyMap<ThreadId, AgentControlCompletionReturn> {
   const byChild = new Map<ThreadId, AgentControlCompletionReturn>();

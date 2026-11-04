@@ -270,6 +270,8 @@ const checks: Record<CompatibilityRepairKey, (c: SchemaCatalog) => RepairApplied
   "thread-fork-origin": (c) => columnsUnlessAbsent(c, "thread_forks", ["origin_json"]),
   "projection-thread-triage": (c) =>
     columnsUnlessAbsent(c, "projection_threads", ["hidden_at", "settle_when_idle_at"]),
+  // The table only, as the repair's own guard: its two indexes commit with it. No backfill.
+  "project-imports": (c) => c.has("table", "project_imports"),
 };
 
 /** Of `keys`, the repairs whose effect this database already has, read without writing. */

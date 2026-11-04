@@ -5,6 +5,7 @@ import type {
   ProjectId,
 } from "@ryco/contracts";
 import {
+  supportedAgentControlProposals,
   useAgentControlStore,
   type AgentControlQueueState,
 } from "@ryco/client-runtime/state/agentControl";
@@ -68,13 +69,14 @@ const NO_PROPOSALS: readonly AgentControlProposal[] = [];
 const NO_DISMISSED: ReadonlySet<AgentControlProposalId> = new Set();
 
 /* One array per queue state, so a checkout's proposals keep their identity
-   until its device's queue actually changes. */
+   until its device's queue actually changes. Schedules read plan fields, so a
+   plan this build cannot read is left out. */
 const proposalsByQueue = new WeakMap<AgentControlQueueState, readonly AgentControlProposal[]>();
 function queueProposalsOf(queue: AgentControlQueueState | undefined) {
   if (!queue) return NO_PROPOSALS;
   let proposals = proposalsByQueue.get(queue);
   if (!proposals) {
-    proposals = Object.values(queue.proposalsById);
+    proposals = supportedAgentControlProposals(Object.values(queue.proposalsById));
     proposalsByQueue.set(queue, proposals);
   }
   return proposals;

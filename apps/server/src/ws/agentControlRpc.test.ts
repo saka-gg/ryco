@@ -1,5 +1,6 @@
 import {
   AGENT_CONTROL_WS_METHODS,
+  AgentControlActionPlan,
   AgentControlProposalId,
   AgentControlRequestId,
   ProviderInstanceId,
@@ -7,27 +8,41 @@ import {
   type AgentControlProposal,
   type AgentControlProposalQueue,
   type AgentControlProposalReceipt,
+  type AgentControlProposalStreamEvent,
   type AgentControlRpcError,
   type AuthRpcError,
 } from "@ryco/contracts";
 import { expect, it } from "@effect/vitest";
-import { Effect, Option, Stream } from "effect";
+import { Effect, Option, Schema, Stream } from "effect";
 import { hostedRoleAllows } from "@ryco/shared/rpcAccessPolicy";
 
 import {
   AgentControlDisabledError,
   AgentControlInvalidTransitionError,
+  AgentControlNodeDirectoryError,
   AgentControlProposalExpiredError,
   AgentControlProposalNotFoundError,
   AgentControlSettingsChangeUnsupportedError,
 } from "../agentControl/Errors.ts";
 import {
+  AgentControlNodeDirectory,
+  type AgentControlNodeDirectoryShape,
+  type PublishAgentControlNodeDirectoryInput,
+} from "../agentControl/Services/AgentControlNodeDirectory.ts";
+import {
   toAgentControlProposalReceipt,
+  type AcceptAgentControlProposalRequest,
   type AgentControlProposalServiceShape,
 } from "../agentControl/Services/AgentControlProposalService.ts";
 import { PersistenceSqlError } from "../persistence/Errors.ts";
 import { authorizeRpcPrincipal, type WsRpcAccess } from "../auth/wsAuthorization.ts";
-import { makeAgentControlHandlers, toAgentControlRpcError } from "./agentControlRpc.ts";
+import {
+  isProposalInPlanView,
+  makeAgentControlHandlers,
+  proposalQueueInPlanView,
+  proposalStreamEventInPlanView,
+  toAgentControlRpcError,
+} from "./agentControlRpc.ts";
 import type { WsRpcContext } from "./context.ts";
 import { relayRpcPrincipal, type RpcPrincipal } from "./RpcPrincipal.ts";
 
@@ -86,6 +101,7 @@ const makeService = (
 const makeContext = (
   principal: RpcPrincipal,
   service: AgentControlProposalServiceShape | null = makeService(),
+  nodeDirectory: AgentControlNodeDirectoryShape | null = null,
 ) => {
   const withAccess = <A, E, R>(
     access: WsRpcAccess,
@@ -99,6 +115,8 @@ const makeContext = (
     ownerEffect,
     ownerStreamEffect: ownerEffect,
     agentControlProposals: service === null ? Option.none() : Option.some(service),
+    agentControlNodeDirectory: nodeDirectory === null ? Option.none() : Option.some(nodeDirectory),
+    currentSessionId: principal.scopeId,
   } as unknown as WsRpcContext;
 };
 
@@ -209,6 +227,70 @@ it.effect("lets owner sessions list, read, and decide", () =>
   }),
 );
 
+it.effect("passes the approving client's executor to the decision", () =>
+  Effect.gen(function* () {
+    const accepted: Array<AcceptAgentControlProposalRequest> = [];
+    const service = makeService({
+      accept: (input) =>
+        Effect.sync(() => {
+          accepted.push(input);
+          return toAgentControlProposalReceipt({ ...proposal, status: "approved" });
+        }),
+    });
+    const handlers = makeAgentControlHandlers(makeContext(directOwnerPrincipal, service));
+    const accept = getTestHandler<object, AgentControlProposalReceipt>(
+      handlers,
+      AGENT_CONTROL_WS_METHODS.acceptProposal,
+    );
+    const executeOnClient = { executorId: "00000000-0000-4000-8000-000000000003" };
+    yield* accept({ proposalId, executeOnClient });
+    yield* accept({ proposalId });
+    expect(accepted.map((input) => input.executeOnClient)).toEqual([executeOnClient, undefined]);
+  }),
+);
+
+it.effect("hands an owner's node directory to the directory, keyed by its session", () =>
+  Effect.gen(function* () {
+    const published: Array<PublishAgentControlNodeDirectoryInput> = [];
+    const directory: AgentControlNodeDirectoryShape = {
+      publish: (input) =>
+        Effect.sync(() => {
+          published.push(input);
+          return { accepted: input.nodes.length };
+        }),
+      list: () => Effect.succeed({ nodes: [] }),
+    };
+    const handlers = makeAgentControlHandlers(
+      makeContext(directOwnerPrincipal, makeService(), directory),
+    );
+    const result = yield* getTestHandler<object, { accepted: number }>(
+      handlers,
+      AGENT_CONTROL_WS_METHODS.publishNodeDirectory,
+    )({ nodes: [] });
+    expect(result).toEqual({ accepted: 0 });
+    expect(published).toEqual([{ publisherKey: "session-owner", nodes: [] }]);
+
+    // A directory that is unavailable, or none at all, refuses publishing as unsupported.
+    const unavailable = () =>
+      Effect.fail(
+        new AgentControlNodeDirectoryError({ reason: "unavailable", detail: "unavailable" }),
+      );
+    const unavailableDirectory = AgentControlNodeDirectory.of({
+      publish: unavailable,
+      list: unavailable,
+    });
+    for (const nodeDirectory of [unavailableDirectory, null]) {
+      const refused = yield* Effect.flip(
+        getTestHandler(
+          makeAgentControlHandlers(makeContext(directOwnerPrincipal, makeService(), nodeDirectory)),
+          AGENT_CONTROL_WS_METHODS.publishNodeDirectory,
+        )({ nodes: [] }),
+      );
+      expect(refused).toMatchObject({ _tag: "AgentControlRpcError", code: "unsupported" });
+    }
+  }),
+);
+
 it.effect("streams the queue snapshot to owner sessions", () =>
   Effect.gen(function* () {
     const handlers = makeAgentControlHandlers(makeContext(directOwnerPrincipal));
@@ -231,6 +313,131 @@ it.effect("streams the queue snapshot to owner sessions", () =>
     expect(hostedQueue.revision).toBe(7);
   }),
 );
+
+const decodePlan = Schema.decodeUnknownSync(AgentControlActionPlan);
+
+/** Proposals of the two kinds clients built before them cannot decode. */
+const importProposal: AgentControlProposal = {
+  ...proposal,
+  proposalId: AgentControlProposalId.make("proposal-import"),
+  plan: decodePlan({
+    kind: "importProject",
+    projectId: "2a7c1d3e-7d2c-4e4a-9b1f-4c8da6e50f9b",
+    title: "ryco",
+    destinationPath: "/Users/me/Code/ryco",
+    remoteUrl: "git@github.com:example/ryco.git",
+    branch: null,
+    setup: null,
+    followUpThread: null,
+  }),
+};
+const copyProposal: AgentControlProposal = {
+  ...proposal,
+  proposalId: AgentControlProposalId.make("proposal-copy"),
+  status: "completed",
+  plan: decodePlan({
+    kind: "copyProjectToNode",
+    source: { kind: "repository", remoteUrl: "https://github.com/example/ryco", title: "ryco" },
+    target: { environmentId: "env-mac-mini", label: "Mac mini" },
+    destination: { kind: "default" },
+    bringCommits: false,
+    bringChanges: false,
+    copySettings: true,
+    setup: null,
+    followUpThread: null,
+  }),
+};
+const mixedQueue: AgentControlProposalQueue = {
+  revision: 9,
+  active: [importProposal, proposal],
+  recent: [copyProposal],
+};
+
+const proposalIdsOf = (event: AgentControlProposalStreamEvent | undefined) =>
+  event?.type === "snapshot"
+    ? {
+        active: event.queue.active.map((entry) => entry.proposalId),
+        recent: event.queue.recent.map((entry) => entry.proposalId),
+      }
+    : event?.proposal.proposalId;
+
+it.effect("a legacy subscriber never receives the new kinds", () =>
+  Effect.gen(function* () {
+    const events: ReadonlyArray<AgentControlProposalStreamEvent> = [
+      { version: 1, type: "snapshot", queue: mixedQueue },
+      { version: 1, type: "proposal", revision: 10, proposal: importProposal },
+      { version: 1, type: "proposal", revision: 11, proposal },
+      { version: 1, type: "proposal", revision: 12, proposal: copyProposal },
+    ];
+    const service = makeService({ subscribeQueue: () => Stream.fromIterable(events) });
+    const handlers = makeAgentControlHandlers(makeContext(directOwnerPrincipal, service));
+    const subscribe = getTestStreamHandler<object, AgentControlProposalStreamEvent>(
+      handlers,
+      AGENT_CONTROL_WS_METHODS.subscribeProposals,
+    );
+
+    // A client built before these kinds sends no `planView`.
+    const legacy = Array.from(yield* Stream.runCollect(subscribe({})));
+    expect(legacy.map(proposalIdsOf)).toEqual([{ active: [proposalId], recent: [] }, proposalId]);
+    expect(legacy[0]).toMatchObject({ type: "snapshot", queue: { revision: 9 } });
+
+    const tolerant = Array.from(yield* Stream.runCollect(subscribe({ planView: "tolerant" })));
+    expect(tolerant.map(proposalIdsOf)).toEqual([
+      { active: [importProposal.proposalId, proposalId], recent: [copyProposal.proposalId] },
+      importProposal.proposalId,
+      proposalId,
+      copyProposal.proposalId,
+    ]);
+  }),
+);
+
+it.effect("leaves the new kinds out of legacy queue and proposal reads", () =>
+  Effect.gen(function* () {
+    const service = makeService({
+      getQueue: () => Effect.succeed(mixedQueue),
+      getProposal: (id) =>
+        Effect.succeed(
+          Option.fromNullishOr(
+            [proposal, importProposal, copyProposal].find((entry) => entry.proposalId === id),
+          ),
+        ),
+    });
+    const handlers = makeAgentControlHandlers(makeContext(directOwnerPrincipal, service));
+    const list = getTestHandler<object, AgentControlProposalQueue>(
+      handlers,
+      AGENT_CONTROL_WS_METHODS.listProposals,
+    );
+    const get = getTestHandler<object, { proposal: AgentControlProposal | null }>(
+      handlers,
+      AGENT_CONTROL_WS_METHODS.getProposal,
+    );
+
+    const legacyQueue = yield* list({ recentLimit: 50 });
+    expect(legacyQueue.revision).toBe(9);
+    expect(legacyQueue.active.map((entry) => entry.proposalId)).toEqual([proposalId]);
+    expect(legacyQueue.recent).toEqual([]);
+    expect(yield* list({ planView: "tolerant" })).toBe(mixedQueue);
+
+    expect((yield* get({ proposalId: importProposal.proposalId })).proposal).toBeNull();
+    expect((yield* get({ proposalId: copyProposal.proposalId })).proposal).toBeNull();
+    expect((yield* get({ proposalId })).proposal?.proposalId).toBe(proposalId);
+    expect(
+      (yield* get({ proposalId: copyProposal.proposalId, planView: "tolerant" })).proposal,
+    ).toBe(copyProposal);
+  }),
+);
+
+it("passes a queue of legacy kinds through unchanged", () => {
+  const event: AgentControlProposalStreamEvent = {
+    version: 1,
+    type: "snapshot",
+    queue: emptyQueue,
+  };
+  expect(proposalQueueInPlanView(emptyQueue, undefined)).toBe(emptyQueue);
+  expect(proposalStreamEventInPlanView(event, undefined)).toBe(event);
+  expect(isProposalInPlanView(copyProposal, undefined)).toBe(false);
+  expect(isProposalInPlanView(copyProposal, "tolerant")).toBe(true);
+});
 
 it.effect("reports an unavailable service as a bounded storage error", () =>
   Effect.gen(function* () {

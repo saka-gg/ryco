@@ -28,6 +28,7 @@ import {
   canPreconnectHostedEnvironment,
   createHostedConnectionCoordinator,
   hostedDemandUnblocked,
+  hostedNodeAcquisition,
   isHostedEnvironmentDemanded,
   readHostedDemandReadiness,
   readHostedNodeMutationLease,
@@ -199,6 +200,43 @@ describe("hosted Web connection coordinator", () => {
     expect(scopes.list()).toMatchObject([{ refCount: 1 }]);
     second();
     expect(scopes.list()).toEqual([]);
+  });
+
+  it("never lets the routed environment displace a project copy's hold", async () => {
+    vi.useFakeTimers();
+    let foreground: EnvironmentId | null = null;
+    const test = harness(() => foreground);
+    test.tick();
+    const releaseCopy = test.scopes.retain(environment(1), {
+      type: "project-copy",
+      copyId: "copy-1",
+    });
+    test.tick();
+    const releaseDraft = test.scopes.retain(environment(2), { type: "interactive" });
+    test.tick();
+    const releaseSecondCopy = test.scopes.retain(environment(3), {
+      type: "project-copy",
+      copyId: "copy-1",
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(test.connected).toEqual(new Set([environment(1), environment(2), environment(3)]));
+
+    // The route needs a slot: only the interactive (background) demand yields.
+    foreground = environment(4);
+    test.tick();
+    const releaseView = test.scopes.retain(environment(4), {
+      type: "thread-detail",
+      threadId: thread(4),
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(test.releases).toEqual([environment(2)]);
+    expect(test.connected).toEqual(new Set([environment(1), environment(3), environment(4)]));
+
+    releaseView();
+    releaseSecondCopy();
+    releaseDraft();
+    releaseCopy();
+    test.coordinator.dispose();
   });
 
   it("keeps A warm through a switch to B and back: no release, no connect on the switch back", async () => {
@@ -752,6 +790,39 @@ describe("hosted Web machine catalog", () => {
       expect(readHostedNodeMutationLease(env)).toMatchObject({ environmentId: env }),
     );
     expect(readHostedNodeMutationLease(env)?.snapshotGeneration).toBe(generation);
+    stop();
+  });
+
+  it("acquires a node for a copy: holds its scope and revalidates its lease at each call", async () => {
+    const env = environment(15);
+    const node = ownerNode(env);
+    const stop = startWithCachedShell(node);
+    const sessions = getHostedEnvironmentSessions();
+    modelAcquire(sessions);
+    const acquisition = hostedNodeAcquisition(env);
+    const hold = acquisition.retain({ type: "project-copy", copyId: "copy-1" });
+    expect(hostedWebConnectionScopes.list()).toMatchObject([
+      { environmentId: env, scope: { type: "project-copy", copyId: "copy-1" } },
+    ]);
+    const leased = acquisition.awaitMutationLease!(new AbortController().signal);
+    await vi.waitFor(() => expect(sessions.read(env)).toBeDefined());
+    const { generation } = sessions.read(env)!;
+    sessions.role(env, generation, "owner");
+    establishRecord(sessions, env);
+
+    const isCurrent = await leased;
+    expect(isCurrent()).toBe(true);
+    // A relay drop revokes the lease: the copy must re-acquire before its next write.
+    sessions.transportStatus(env, generation, "reconnecting");
+    expect(isCurrent()).toBe(false);
+    hold.release();
+    expect(hostedWebConnectionScopes.list()).toEqual([]);
+
+    // Waiting for a lease stops when the copy is cancelled.
+    const cancelled = new AbortController();
+    const waiting = hostedNodeAcquisition(environment(16)).awaitMutationLease!(cancelled.signal);
+    cancelled.abort();
+    await expect(waiting).rejects.toThrow("Stopped waiting");
     stop();
   });
 

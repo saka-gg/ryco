@@ -394,6 +394,39 @@ const DESKTOP_ACCOUNT_PROMPT_SOURCES: readonly ForbiddenBundleSource[] = [
   },
 ];
 
+/**
+ * The cross-node project copy RPCs (with the Agent Control reports and node directory only
+ * copy uses), their method names, the schemas only they use and their client. The RPC
+ * client builds them on its socket with the first copy call; boot keeps only the fields an
+ * Agent Control copy plan names (`projectCopyPrimitives.ts`).
+ */
+const PROJECT_COPY_RPC_SOURCES: readonly ForbiddenBundleSource[] = [
+  {
+    pattern: /^packages\/contracts\/src\/(?:projectCopy(?:Rpc)?|agentControlProjectCopy)\.ts$/u,
+    reason: "project copy RPC schemas (the first copy loads them)",
+  },
+  {
+    pattern: /^packages\/contracts\/src\/projectCopyMethods\.ts$/u,
+    reason: "project copy RPC method names (only the copy RPC client names them)",
+  },
+  {
+    pattern: /^packages\/client-runtime\/src\/rpc\/projectCopyRpcClient\.ts$/u,
+    reason: "project copy RPC client (the first copy loads it)",
+  },
+];
+
+/**
+ * The project-nodes dialogs' store loads with the app shell. The command palette's store
+ * (boot) opens the add-project dialog through `addProjectDialogEntry.ts`, which the store
+ * hands its opener as it loads.
+ */
+const PROJECT_NODES_DIALOG_STORE_SOURCES: readonly ForbiddenBundleSource[] = [
+  {
+    pattern: /^apps\/web\/src\/components\/projectNodes\/projectNodesDialogStore\.ts$/u,
+    reason: "project-nodes dialogs' store (loads with the app shell)",
+  },
+];
+
 /** The thread routes (server thread and draft) share their chat graph. */
 const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
   ...HOSTED_RUNTIME_SOURCES,
@@ -462,7 +495,11 @@ const TRACING_EXPORTER_SOURCES: readonly ForbiddenBundleSource[] = [
  * its relaunch confirmation and Base UI's alert dialog, loads on demand from
  * the empty thread view. The shell and the thread routes load the alert dialog
  * as before; their first loads shrank by 0.3 to 2.3 KiB. The cap stays, so the
- * room goes to the contract fields boot decodes.
+ * room goes to the contract fields boot decodes. 525.6 KiB on 2026-11-04 with
+ * cross-node project copy (527.1 before these moves): the project-nodes dialogs'
+ * store, the copy's Agent Control reports and node directory (RPCs and schemas)
+ * and the copy RPC method names load after boot; boot keeps the copy plans it
+ * decodes, the tolerant plan view and the lazy copy client.
  */
 export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
   bootChunk: "main",
@@ -482,6 +519,8 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
         ...PAIRING_SOURCES,
         ...QUOTE_CITATION_SOURCES,
         ...DESKTOP_ACCOUNT_PROMPT_SOURCES,
+        ...PROJECT_COPY_RPC_SOURCES,
+        ...PROJECT_NODES_DIALOG_STORE_SOURCES,
       ],
     },
     {

@@ -93,6 +93,16 @@ export const IsoDateTime = Schema.String;
 export type IsoDateTime = typeof IsoDateTime.Type;
 
 /**
+ * A lowercase random (version 4) UUID, as `crypto.randomUUID()` mints it. Ids
+ * that end up in file names or bind a secret use it, so no other text decodes.
+ */
+export const UuidV4 = Schema.String.check(
+  Schema.isPattern(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/, {
+    message: "Expected a lowercase version 4 UUID",
+  }),
+);
+
+/**
  * What a client decodes in place of a union member a newer node added: the
  * union's tag key (`tag`) and the value this build does not know (`value`),
  * plus the fields the union keeps from every member (see

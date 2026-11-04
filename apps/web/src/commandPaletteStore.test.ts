@@ -3,6 +3,10 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 import { EnvironmentId } from "@ryco/contracts";
 
 import { useCommandPaletteStore } from "./commandPaletteStore";
+import {
+  resetProjectNodesDialogStoreForTests,
+  useProjectNodesDialogStore,
+} from "./components/projectNodes/projectNodesDialogStore";
 
 const initialState = useCommandPaletteStore.getState();
 const state = () => useCommandPaletteStore.getState();
@@ -65,25 +69,39 @@ describe("workspace search mode", () => {
 });
 
 describe("add-project intent", () => {
+  afterEach(() => {
+    resetProjectNodesDialogStoreForTests();
+  });
+
   it("carries a dropped folder's path and environment", () => {
-    state().openAddProject();
     const environmentId = EnvironmentId.make("environment-local");
+    state().openAddProject({ path: "/repo/dropped", environmentId });
     state().openAddProject({ path: "/repo/dropped", environmentId });
     expect(state()).toMatchObject({
       open: true,
       openIntent: { kind: "add-project", requestId: 2, path: "/repo/dropped", environmentId },
     });
+    expect(useProjectNodesDialogStore.getState().addProject.open).toBe(false);
   });
 
-  it("stores neither without a folder", () => {
+  it("opens the add-project dialog without a folder", () => {
+    // Unit tests run on the desktop tier, where the dialog is available.
     state().openAddProject();
-    expect(state().openIntent).toEqual({ kind: "add-project", requestId: 1 });
+    expect(state()).toMatchObject({ open: false, openIntent: null });
+    expect(useProjectNodesDialogStore.getState().addProject).toMatchObject({
+      open: true,
+      request: { environmentId: null, mode: null, projectRef: null },
+    });
   });
 
-  it("ignores a click event passed as the folder", () => {
+  it("ignores a click event passed as the request", () => {
     // Sidebar buttons hand the action to `onClick` as it is.
     const onClick = state().openAddProject as (event: unknown) => void;
     onClick({ type: "click", target: null, nativeEvent: {} });
-    expect(state().openIntent).toEqual({ kind: "add-project", requestId: 1 });
+    expect(state().openIntent).toBeNull();
+    expect(useProjectNodesDialogStore.getState().addProject).toMatchObject({
+      open: true,
+      request: { environmentId: null, mode: null, projectRef: null },
+    });
   });
 });

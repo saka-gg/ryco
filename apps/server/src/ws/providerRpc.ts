@@ -32,6 +32,7 @@ import type { SessionCredentialChange } from "../auth/Services/SessionCredential
 import {
   defineWsHandlers,
   PROVIDER_STATUS_DEBOUNCE_MS,
+  isListedAuthAccessChange,
   toAuthAccessStreamEvent,
   toOpinionatedPluginRpcError,
   type WsRpcContext,
@@ -841,6 +842,7 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
             > = Stream.merge(bootstrapCredentials.streamChanges, sessions.streamChanges);
 
             const liveEvents: Stream.Stream<AuthAccessStreamEvent> = accessChanges.pipe(
+              Stream.filter(isListedAuthAccessChange),
               Stream.mapEffect((change) =>
                 Ref.updateAndGet(revisionRef, (revision) => revision + 1).pipe(
                   Effect.map((revision) =>

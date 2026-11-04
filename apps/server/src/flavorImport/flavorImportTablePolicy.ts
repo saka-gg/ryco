@@ -130,6 +130,9 @@ export const FLAVOR_IMPORT_TABLE_POLICY = {
   managed_worktree_relocations: "clear",
   managed_worktree_editor_pins: "clear",
   project_relocations: "clear",
+  // Cross-node project import jobs: startup recovery signals their processes and deletes their
+  // staging folders, which belong to Ryco's own imports.
+  project_imports: "clear",
 } as const satisfies Readonly<Record<string, FlavorImportTablePolicy>>;
 
 export type FlavorImportTable = keyof typeof FLAVOR_IMPORT_TABLE_POLICY;

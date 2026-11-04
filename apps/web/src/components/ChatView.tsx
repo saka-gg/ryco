@@ -353,7 +353,8 @@ import type { SidebarThreadSummary } from "../types";
 import { markTabSwitchClick, usePerfMark } from "../perf/tabSwitchInstrumentation";
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import { NoActiveThreadState } from "./NoActiveThreadState";
-import { resolveEffectiveEnvMode, resolveEnvironmentOptionLabel } from "./BranchToolbar.logic";
+import { resolveEffectiveEnvMode } from "./BranchToolbar.logic";
+import { resolveEnvironmentOptionLabel } from "../environmentDisplay";
 import {
   dismissProviderStatusNotice,
   isProviderStatusNoticeDismissed,
@@ -1935,6 +1936,15 @@ export default function ChatView(props: ChatViewProps) {
     savedEnvironmentRuntimeById,
   ]);
   const hasMultipleEnvironments = logicalProjectEnvironments.length > 1;
+  // The other nodes this repository is checked out on, for the new-thread
+  // hero's "· also on Mac mini" (the device picker's own names for them).
+  const projectAlsoOnLabels = useMemo(
+    () =>
+      logicalProjectEnvironments
+        .filter((environment) => environment.environmentId !== activeProject?.environmentId)
+        .map((environment) => environment.label),
+    [activeProject?.environmentId, logicalProjectEnvironments],
+  );
   // An unsent "No project" chat needs no project on its device, so it can move
   // to any reachable device whose node supports chats.
   const primaryChatsAvailable = useEnvironmentChatsAvailable(primaryEnvironmentId);
@@ -7630,6 +7640,7 @@ export default function ChatView(props: ChatViewProps) {
                         canCheckoutPullRequestIntoThread ? openPullRequestDialog : undefined
                       }
                       cwd={activeProject?.cwd ?? gitCwd}
+                      alsoOnLabels={projectAlsoOnLabels}
                     />
                   ) : null
                 }

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   deriveLogicalProjectKey,
+  deriveProjectGroupLabel,
   groupWorkspaceLogicalProjects,
   normalizeProjectPathForComparison,
 } from "./logicalProjects.js";
@@ -68,6 +69,35 @@ describe("logical workspace projects", () => {
       EnvironmentId.make("b"),
       EnvironmentId.make("a"),
     ]);
+  });
+
+  it("names a group by the title its checkouts share, else by the repository", () => {
+    const member = (name: string, identity = repositoryIdentity) => ({
+      name,
+      repositoryIdentity: identity,
+    });
+    const shared = [member("ryco"), member("ryco")];
+    expect(deriveProjectGroupLabel({ representative: shared[0]!, members: shared })).toBe("ryco");
+    const renamed = [member("ryco"), member("Ryco app")];
+    expect(deriveProjectGroupLabel({ representative: renamed[0]!, members: renamed })).toBe(
+      "example/ryco",
+    );
+  });
+
+  it("never names a group by the disk path of a path-addressed remote", () => {
+    // What nodes before `canonicalRepositoryPath` sent for `linux-box:/private/tmp/git/demo.git`.
+    const pathIdentity = {
+      ...repositoryIdentity,
+      canonicalKey: "linux-box:/private/tmp/git/demo",
+      displayName: "private/tmp/git/demo",
+      owner: "private",
+      name: "demo",
+    };
+    const members = [
+      { name: "demo", repositoryIdentity: pathIdentity },
+      { name: "demo-copy", repositoryIdentity: pathIdentity },
+    ];
+    expect(deriveProjectGroupLabel({ representative: members[0]!, members })).toBe("demo");
   });
 
   it("fails open into physical projects when one environment has duplicate identities", () => {

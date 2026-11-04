@@ -222,6 +222,10 @@ describe("AgentControlActionPlan", () => {
     expect(() =>
       decodePlan({ kind: "deviceInstall", ...target, artifactPath: "../Test.app" }),
     ).toThrow();
+    // A line terminator must not hide a later `..` segment from the check.
+    for (const artifactPath of ["build\u2028/../../Test.apk", "build\n/../../Test.app"]) {
+      expect(() => decodePlan({ kind: "deviceInstall", ...target, artifactPath })).toThrow();
+    }
     expect(() => decodePlan({ kind: "device.call", method: "tap", payload: {} })).toThrow();
   });
 
@@ -396,6 +400,7 @@ describe("forward compatibility (additive extension)", () => {
       "automationRun",
       "cancelAutomation",
       "changeSettings",
+      "copyProjectToNode",
       "createAutomation",
       "createProject",
       "createThreads",
@@ -413,6 +418,7 @@ describe("forward compatibility (additive extension)", () => {
       "deviceStopRecording",
       "deviceSwipe",
       "deviceTap",
+      "importProject",
       "interruptThread",
       "pullRequestWatch",
       "removeProject",

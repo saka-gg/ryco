@@ -142,7 +142,11 @@ import {
   formatPairingCredentialList,
   formatSessionList,
 } from "./cliAuthFormat.ts";
-import { AuthControlPlane } from "./auth/Services/AuthControlPlane.ts";
+import {
+  AuthControlPlane,
+  OWNER_BOOTSTRAP_PAIRING_SUBJECT,
+  OWNER_PAIRING_LINK_MAX_TTL,
+} from "./auth/Services/AuthControlPlane.ts";
 import { readThreadMessageLimit, toReadThreadResult } from "./agentControl/Mcp/threadTranscript.ts";
 import type { AuthControlPlaneShape } from "./auth/Services/AuthControlPlane.ts";
 import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine.ts";
@@ -1675,6 +1679,13 @@ const sessionRoleFlag = Flag.Literals("role", ["owner", "client"]).pipe(
   Flag.withDefault("owner"),
 );
 
+const pairingRoleFlag = Flag.Literals("role", ["client", "owner"]).pipe(
+  Flag.withDescription(
+    `Role the redeemed session gets. An owner link can last at most ${Duration.toMinutes(OWNER_PAIRING_LINK_MAX_TTL)} minutes.`,
+  ),
+  Flag.withDefault("client"),
+);
+
 const labelFlag = Flag.String("label").pipe(
   Flag.withDescription("Optional human-readable label."),
   Flag.optional,
@@ -1706,20 +1717,21 @@ const PAIRING_QR_NO_NODE_NOTE = "No running node found; pass --base-url to print
 
 const pairingCreateCommand = Command.make("create", {
   ...authLocationFlags,
+  role: pairingRoleFlag,
   ttl: ttlFlag,
   label: labelFlag,
   baseUrl: baseUrlFlag,
   json: jsonFlag,
   qr: qrFlag,
 }).pipe(
-  Command.withDescription("Issue a new client pairing token."),
+  Command.withDescription("Issue a new one-time pairing token (client unless --role owner)."),
   Command.withHandler((flags) =>
     runWithAuthControlPlane(
       flags,
       (authControlPlane, config) =>
         Effect.gen(function* () {
           const issued = yield* authControlPlane.createPairingLink({
-            role: "client",
+            role: flags.role,
             subject: "one-time-token",
             ...(Option.isSome(flags.ttl) ? { ttl: flags.ttl.value } : {}),
             ...(Option.isSome(flags.label) ? { label: flags.label.value } : {}),
@@ -1783,8 +1795,9 @@ const pairingCreateCommand = Command.make("create", {
             `${summary}${formatPairingQrBlock({
               links,
               renderQrCode,
+              // An owner link is capped at OWNER_PAIRING_LINK_MAX_TTL by `createPairingLink`.
               footer: [
-                `One-time client link, valid for ${minutes} minute${minutes === 1 ? "" : "s"}.`,
+                `One-time ${issued.role} link, valid for ${minutes} minute${minutes === 1 ? "" : "s"}.`,
               ],
               // The summary above already printed it as "Pair URL".
               showPairingUrl: false,
@@ -1803,13 +1816,18 @@ const pairingListCommand = Command.make("list", {
   ...authLocationFlags,
   json: jsonFlag,
 }).pipe(
-  Command.withDescription("List active client pairing tokens without revealing their secrets."),
+  Command.withDescription(
+    "List active client and owner pairing tokens without revealing their secrets.",
+  ),
   Command.withHandler((flags) =>
     runWithAuthControlPlane(
       flags,
       (authControlPlane) =>
         Effect.gen(function* () {
-          const pairingLinks = yield* authControlPlane.listPairingLinks({ role: "client" });
+          // The startup owner link belongs to the server's own launch.
+          const pairingLinks = yield* authControlPlane.listPairingLinks({
+            excludeSubjects: [OWNER_BOOTSTRAP_PAIRING_SUBJECT],
+          });
           yield* Console.log(formatPairingCredentialList(pairingLinks, { json: flags.json }));
         }),
       {
@@ -1823,7 +1841,7 @@ const pairingRevokeCommand = Command.make("revoke", {
   ...authLocationFlags,
   id: Argument.String("id").pipe(Argument.withDescription("Pairing credential id to revoke.")),
 }).pipe(
-  Command.withDescription("Revoke an active client pairing token."),
+  Command.withDescription("Revoke an active client or owner pairing token."),
   Command.withHandler((flags) =>
     runWithAuthControlPlane(flags, (authControlPlane) =>
       Effect.gen(function* () {
@@ -1839,7 +1857,7 @@ const pairingRevokeCommand = Command.make("revoke", {
 );
 
 const pairingCommand = Command.make("pairing").pipe(
-  Command.withDescription("Manage one-time client pairing tokens."),
+  Command.withDescription("Manage one-time client and owner pairing tokens."),
   Command.withSubcommands([pairingCreateCommand, pairingListCommand, pairingRevokeCommand]),
 );
 

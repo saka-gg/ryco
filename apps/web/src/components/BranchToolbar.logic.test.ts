@@ -1,11 +1,10 @@
-import { EnvironmentId, type VcsRef } from "@ryco/contracts";
+import type { VcsRef } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 import {
   dedupeRemoteBranchesWithLocalMatches,
   deriveLocalBranchNameFromRemoteRef,
   deriveRepositoryWebUrl,
   normalizeGitRemoteToWebUrl,
-  resolveEnvironmentOptionLabel,
   resolveBranchSelectionTarget,
   resolveDraftEnvModeAfterBranchChange,
   resolveEffectiveEnvMode,
@@ -79,9 +78,6 @@ describe("deriveRepositoryWebUrl", () => {
   });
 });
 
-const localEnvironmentId = EnvironmentId.make("environment-local");
-const remoteEnvironmentId = EnvironmentId.make("environment-remote");
-
 describe("resolveDraftEnvModeAfterBranchChange", () => {
   it("switches to local mode when returning from an existing worktree to the main worktree", () => {
     expect(
@@ -146,41 +142,6 @@ describe("resolveBranchToolbarValue", () => {
         currentGitBranch: "main",
       }),
     ).toBe("main");
-  });
-});
-
-describe("resolveEnvironmentOptionLabel", () => {
-  it("prefers the primary environment's machine label", () => {
-    expect(
-      resolveEnvironmentOptionLabel({
-        isPrimary: true,
-        environmentId: localEnvironmentId,
-        runtimeLabel: "Julius's Mac mini",
-        savedLabel: "Local environment",
-      }),
-    ).toBe("Julius's Mac mini");
-  });
-
-  it("falls back to 'This device' for generic primary labels", () => {
-    expect(
-      resolveEnvironmentOptionLabel({
-        isPrimary: true,
-        environmentId: localEnvironmentId,
-        runtimeLabel: "Local environment",
-        savedLabel: "Local",
-      }),
-    ).toBe("Device connecting…");
-  });
-
-  it("keeps configured labels for non-primary environments", () => {
-    expect(
-      resolveEnvironmentOptionLabel({
-        isPrimary: false,
-        environmentId: remoteEnvironmentId,
-        runtimeLabel: null,
-        savedLabel: "Build box",
-      }),
-    ).toBe("Build box");
   });
 });
 

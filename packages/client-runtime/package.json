@@ -66,6 +66,10 @@
       "types": "./src/connection/index.ts",
       "import": "./src/connection/index.ts"
     },
+    "./connection/desktopSshOwnerPairing": {
+      "types": "./src/connection/desktopSshOwnerPairing.ts",
+      "import": "./src/connection/desktopSshOwnerPairing.ts"
+    },
     "./connection/directRouteIdentity": {
       "types": "./src/connection/directRouteIdentity.ts",
       "import": "./src/connection/directRouteIdentity.ts"
@@ -185,6 +189,14 @@
     "./state/nodeUpdate": {
       "types": "./src/state/nodeUpdate/index.ts",
       "import": "./src/state/nodeUpdate/index.ts"
+    },
+    "./state/nodes": {
+      "types": "./src/state/nodes/index.ts",
+      "import": "./src/state/nodes/index.ts"
+    },
+    "./projectCopy": {
+      "types": "./src/projectCopy/index.ts",
+      "import": "./src/projectCopy/index.ts"
     },
     "./state/providerSignIn": {
       "types": "./src/state/providerSignIn/index.ts",

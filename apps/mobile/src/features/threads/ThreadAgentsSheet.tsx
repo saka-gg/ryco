@@ -12,7 +12,7 @@ import {
 } from "@ryco/client-runtime/state/session/subagentStop";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
-import type { AgentControlProposal } from "@ryco/contracts/agent-control";
+import type { AgentControlProposalView } from "@ryco/contracts/agent-control";
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Alert, Modal, Platform, Pressable, ScrollView, View } from "react-native";
 import { useShallow } from "zustand/react/shallow";
@@ -93,7 +93,7 @@ function useThreadAgentsSource(input: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly thread: Thread | undefined;
-  readonly agentControlProposals: ReadonlyArray<AgentControlProposal>;
+  readonly agentControlProposals: ReadonlyArray<AgentControlProposalView>;
 }): Pick<ThreadAgentsSheetInput, "panel" | "delegatedChildren" | "completionReturns"> {
   const activities = input.thread?.activities;
   // The liveness word, not the session: a session update that keeps it never re-derives.
@@ -347,7 +347,7 @@ export function ThreadAgents(props: {
   /** The screen shows a cached or degraded snapshot (its header reads Offline). */
   readonly offline: boolean;
   /** The chat's Agent Control proposals, which carry its delegated tasks' result returns. */
-  readonly agentControlProposals: ReadonlyArray<AgentControlProposal>;
+  readonly agentControlProposals: ReadonlyArray<AgentControlProposalView>;
   readonly onOpenThread: (threadId: ThreadId) => void;
 }) {
   const source = useThreadAgentsSource(props);

@@ -1,0 +1,35 @@
+#!/bin/sh
+# Fake ssh for the cross-node E2E. With GIT_SSH_COMMAND pointing here and
+# GIT_SSH_VARIANT=simple, git calls `fake-ssh <user@host> <command>`, where the
+# command is `git-upload-pack '<path>'` (or receive-pack). Dropping the host and
+# running the command locally makes `git@fixture.test:/abs/path/origin.git`
+# clone, fetch and push against a bare repository both nodes can see at the same
+# absolute path, without a network or an ssh daemon.
+#
+# Two kinds of host stage failures:
+# - A host named in FAKE_SSH_UNREACHABLE_HOSTS (space-separated) fails the way
+#   ssh fails for a name it cannot resolve. Node B's container names one, so a
+#   remote only node A reaches can be staged.
+# - stall.test: a `git clone` hangs until it is killed (its connection never
+#   answers), so a cancel lands during the clone. Every other command, such as
+#   the import's `ls-remote` check, answers at once. Needs /proc (node B only).
+host=${1#*@}
+shift
+for unreachable in ${FAKE_SSH_UNREACHABLE_HOSTS:-}; do
+  if [ "$host" = "$unreachable" ]; then
+    echo "ssh: Could not resolve hostname $host: Name or service not known" >&2
+    exit 255
+  fi
+done
+if [ "$host" = "stall.test" ]; then
+  # git may run this through `sh -c`, so look a few ancestors up for the clone.
+  pid=$PPID
+  for _ in 1 2 3; do
+    [ -r "/proc/$pid/cmdline" ] || break
+    case " $(tr '\0' ' ' < "/proc/$pid/cmdline") " in
+      *" clone "*) exec sleep 600 ;;
+    esac
+    pid=$(awk '{ print $4 }' "/proc/$pid/stat")
+  done
+fi
+exec sh -c "$1"

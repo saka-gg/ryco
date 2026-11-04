@@ -151,13 +151,14 @@ import type {
   WorktreeSetupSubscribeInput,
 } from "./worktreeSetup.ts";
 import type {
+  AgentControlAcceptProposalInput,
   AgentControlDecideProposalInput,
   AgentControlGetProposalInput,
-  AgentControlGetProposalResult,
+  AgentControlGetProposalResultView,
   AgentControlListProposalsInput,
-  AgentControlProposalQueue,
-  AgentControlProposalReceipt,
-  AgentControlProposalStreamEvent,
+  AgentControlProposalQueueView,
+  AgentControlProposalReceiptView,
+  AgentControlProposalStreamEventView,
   AgentControlExternalIntegrationCreateInput,
   AgentControlExternalIntegrationDeleteResult,
   AgentControlExternalIntegrationIdInput,
@@ -170,7 +171,44 @@ import type {
   AgentControlMcpInstallationListResult,
   AgentControlMcpInstallationMutationResult,
 } from "./agentControl.ts";
+import type {
+  AgentControlPublishNodeDirectoryInput,
+  AgentControlPublishNodeDirectoryResult,
+  AgentControlReportClientExecutionInput,
+  AgentControlReportClientExecutionResult,
+} from "./agentControlProjectCopy.ts";
 import type { FilesystemBrowseInput, FilesystemBrowseResult } from "./filesystem.ts";
+import type {
+  FilesystemSearchDirectoriesInput,
+  FilesystemSearchDirectoriesResult,
+  NodePathHints,
+  NodePathHintsInput,
+  ProjectCancelImportInput,
+  ProjectCheckRemoteAccessInput,
+  ProjectCheckRemoteAccessResult,
+  ProjectDestinationPreview,
+  ProjectDestinationPreviewInput,
+  ProjectDiscardImportInput,
+  ProjectDiscardImportResult,
+  ProjectExportDisposeInput,
+  ProjectExportInspectInput,
+  ProjectExportInspection,
+  ProjectExportReadChunkInput,
+  ProjectExportReadChunkResult,
+  ProjectExportResult,
+  ProjectExportStartInput,
+  ProjectImportSnapshot,
+  ProjectImportStartInput,
+  ProjectListImportsInput,
+  ProjectListImportsResult,
+  ProjectSubscribeImportInput,
+  ProjectTransferAbortInput,
+  ProjectTransferAppendInput,
+  ProjectTransferBeginInput,
+  ProjectTransferCommitInput,
+  ProjectTransferCommitResult,
+  ProjectTransferProgress,
+} from "./projectCopy.ts";
 import type {
   McpListServersInput,
   McpListServersResult,
@@ -279,7 +317,7 @@ import type {
   OrchestrationSubscribeThreadInput,
   OrchestrationThreadStreamItem,
 } from "./orchestration.ts";
-import type { EnvironmentId, ProjectId, ThreadId } from "./baseSchemas.ts";
+import type { AuthSessionId, EnvironmentId, ProjectId, ThreadId } from "./baseSchemas.ts";
 import type {
   DiagnosticsSnapshot,
   DiagnosticsSignalProcessInput,
@@ -289,12 +327,17 @@ import type { StatisticsSnapshot } from "./statistics.ts";
 import type { UsageSummary, UsageSummaryRequest } from "./usage.ts";
 import type {
   AuthBearerBootstrapResult,
+  AuthSessionRole,
   AuthSessionState,
   AuthWebSocketTokenResult,
 } from "./auth.ts";
 import type { AdvertisedEndpoint } from "./remoteAccess.ts";
 import { EditorId } from "./editor.ts";
-import type { ExecutionEnvironmentDescriptor, ScopedThreadRef } from "./environment.ts";
+import type {
+  ExecutionEnvironmentDescriptor,
+  ExecutionEnvironmentPlatformOs,
+  ScopedThreadRef,
+} from "./environment.ts";
 import type { ClientSettings, ServerSettings, ServerSettingsPatch } from "./settings.ts";
 import type {
   DeviceAttachInput,
@@ -447,9 +490,21 @@ export interface DesktopSshEnvironmentBootstrap {
   target: DesktopSshEnvironmentTarget;
   httpBaseUrl: string;
   wsBaseUrl: string;
+  /**
+   * Null when none was requested, or when `requireOwnerPairing` was set and the
+   * remote CLI predates owner pairing.
+   */
   pairingToken: string | null;
+  /** The role `pairingToken` redeems to; absent from desktop builds before owner pairing. */
+  pairingRole?: AuthSessionRole;
   remotePort?: number;
   remoteServerKind?: "external" | "managed";
+}
+
+export interface DesktopSshEnsureEnvironmentOptions {
+  issuePairingToken?: boolean;
+  /** With `issuePairingToken`: an owner token or none, never a client one. */
+  requireOwnerPairing?: boolean;
 }
 
 export interface DesktopSshPasswordPromptRequest {
@@ -605,6 +660,8 @@ export interface DesktopWorkspaceMachineProjection {
   readonly environmentId: EnvironmentId;
   readonly nodeId: string | null;
   readonly label: string;
+  /** As the Hub directory states it; absent when it does not. */
+  readonly platformOs?: ExecutionEnvironmentPlatformOs;
   readonly online: boolean;
   readonly nativeTrust: DesktopWorkspaceNativeTrustState;
   readonly connectionState: "disconnected" | "connecting" | "connected" | "error";
@@ -673,7 +730,8 @@ export type DesktopWorkspaceScopeProjection =
   | { readonly type: "interactive" }
   | { readonly type: "thread-detail"; readonly threadId: ThreadId }
   | { readonly type: "vcs-status"; readonly cwd: string }
-  | { readonly type: "provider-status"; readonly instanceId?: string };
+  | { readonly type: "provider-status"; readonly instanceId?: string }
+  | { readonly type: "project-copy"; readonly copyId: string };
 
 export interface DesktopWorkspaceConnectionCommand {
   readonly action: "connect" | "release";
@@ -1020,7 +1078,7 @@ export interface DesktopBridge {
   discoverSshHosts: () => Promise<readonly DesktopDiscoveredSshHost[]>;
   ensureSshEnvironment: (
     target: DesktopSshEnvironmentTarget,
-    options?: { issuePairingToken?: boolean },
+    options?: DesktopSshEnsureEnvironmentOptions,
   ) => Promise<DesktopSshEnvironmentBootstrap>;
   disconnectSshEnvironment: (target: DesktopSshEnvironmentTarget) => Promise<void>;
   fetchSshEnvironmentDescriptor: (httpBaseUrl: string) => Promise<ExecutionEnvironmentDescriptor>;
@@ -1033,6 +1091,12 @@ export interface DesktopBridge {
     httpBaseUrl: string,
     bearerToken: string,
   ) => Promise<AuthWebSocketTokenResult>;
+  /** Revokes another session through an owner bearer. Absent from older desktop builds. */
+  revokeSshClientSession?: (
+    httpBaseUrl: string,
+    ownerBearerToken: string,
+    sessionId: AuthSessionId,
+  ) => Promise<{ revoked: boolean }>;
   onSshPasswordPrompt: (listener: (request: DesktopSshPasswordPromptRequest) => void) => () => void;
   resolveSshPasswordPrompt: (requestId: string, password: string | null) => Promise<void>;
   getServerExposureState: () => Promise<DesktopServerExposureState>;
@@ -1587,9 +1651,50 @@ export interface EnvironmentApi {
     deleteChatFolder?: (
       input: ProjectsDeleteChatFolderInput,
     ) => Promise<ProjectsDeleteChatFolderResult>;
+    // Cross-node project copy. Absent on transports built without it; call only
+    // when the node advertises `capabilities.projectCopy`.
+    pathHints?: (input: NodePathHintsInput) => Promise<NodePathHints>;
+    previewDestination?: (
+      input: ProjectDestinationPreviewInput,
+    ) => Promise<ProjectDestinationPreview>;
+    checkRemoteAccess?: (
+      input: ProjectCheckRemoteAccessInput,
+    ) => Promise<ProjectCheckRemoteAccessResult>;
+    /** Source side: what a copy would carry, without creating artifacts. */
+    exportInspect?: (input: ProjectExportInspectInput) => Promise<ProjectExportInspection>;
+    exportStart?: (input: ProjectExportStartInput) => Promise<ProjectExportResult>;
+    exportReadChunk?: (input: ProjectExportReadChunkInput) => Promise<ProjectExportReadChunkResult>;
+    exportDispose?: (input: ProjectExportDisposeInput) => Promise<EmptyRpcResult>;
+    /** Destination side: chunked uploads the import claims. */
+    transferBegin?: (input: ProjectTransferBeginInput) => Promise<ProjectTransferProgress>;
+    transferAppend?: (input: ProjectTransferAppendInput) => Promise<ProjectTransferProgress>;
+    transferCommit?: (input: ProjectTransferCommitInput) => Promise<ProjectTransferCommitResult>;
+    transferAbort?: (input: ProjectTransferAbortInput) => Promise<EmptyRpcResult>;
+    importStart?: (input: ProjectImportStartInput) => Promise<ProjectImportSnapshot>;
+    /**
+     * The first snapshot is the current one; an unknown import ends the stream (`onError`, after
+     * `classifyFailure` saw a `ProjectCopyError` with code `not-found`).
+     */
+    subscribeImport?: (
+      input: ProjectSubscribeImportInput,
+      callback: (snapshot: ProjectImportSnapshot) => void,
+      options?: {
+        onResubscribe?: () => void;
+        onError?: () => void;
+        /** Sees the failure that ended the stream, just before `onError`. */
+        classifyFailure?: (error: unknown) => "failed";
+      },
+    ) => () => void;
+    cancelImport?: (input: ProjectCancelImportInput) => Promise<ProjectImportSnapshot>;
+    listImports?: (input: ProjectListImportsInput) => Promise<ProjectListImportsResult>;
+    discardImport?: (input: ProjectDiscardImportInput) => Promise<ProjectDiscardImportResult>;
   };
   filesystem: {
     browse: (input: FilesystemBrowseInput) => Promise<FilesystemBrowseResult>;
+    /** Cross-node project copy; call only when the node advertises `capabilities.projectCopy`. */
+    searchDirectories?: (
+      input: FilesystemSearchDirectoriesInput,
+    ) => Promise<FilesystemSearchDirectoriesResult>;
   };
   sourceControl: {
     lookupRepository: (
@@ -1826,21 +1931,35 @@ export interface EnvironmentApi {
   /** Server-owned worktree notes. Optional so clients can feature-detect older environments. */
   notes?: NotesApi;
   agentControl?: {
-    listProposals: (input: AgentControlListProposalsInput) => Promise<AgentControlProposalQueue>;
-    getProposal: (input: AgentControlGetProposalInput) => Promise<AgentControlGetProposalResult>;
+    // Proposals arrive through the tolerant views: a plan kind this build does not
+    // know decodes as `unsupported`.
+    listProposals: (
+      input: AgentControlListProposalsInput,
+    ) => Promise<AgentControlProposalQueueView>;
+    getProposal: (
+      input: AgentControlGetProposalInput,
+    ) => Promise<AgentControlGetProposalResultView>;
     acceptProposal: (
-      input: AgentControlDecideProposalInput,
-    ) => Promise<AgentControlProposalReceipt>;
+      input: AgentControlAcceptProposalInput,
+    ) => Promise<AgentControlProposalReceiptView>;
     rejectProposal: (
       input: AgentControlDecideProposalInput,
-    ) => Promise<AgentControlProposalReceipt>;
+    ) => Promise<AgentControlProposalReceiptView>;
     subscribeProposals: (
-      callback: (event: AgentControlProposalStreamEvent) => void,
+      callback: (event: AgentControlProposalStreamEventView) => void,
       options?: {
         onResubscribe?: () => void;
         onError?: () => void;
       },
     ) => () => void;
+    /** Cross-node project copy; call only when the node advertises `capabilities.projectCopy`. */
+    publishNodeDirectory?: (
+      input: AgentControlPublishNodeDirectoryInput,
+    ) => Promise<AgentControlPublishNodeDirectoryResult>;
+    /** Reports the outcome of a client-executed proposal this client accepted. */
+    reportClientExecution?: (
+      input: AgentControlReportClientExecutionInput,
+    ) => Promise<AgentControlReportClientExecutionResult>;
     listIntegrations: () => Promise<AgentControlExternalIntegrationListResult>;
     createIntegration: (
       input: AgentControlExternalIntegrationCreateInput,

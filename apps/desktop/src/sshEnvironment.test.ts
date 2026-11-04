@@ -10,6 +10,7 @@ import {
   DesktopSshEnvironmentBridge,
   discoverDesktopSshHosts,
   isSshPasswordPromptCancellation,
+  readEnsureEnvironmentOptions,
 } from "./sshEnvironment.ts";
 import { DESKTOP_SSH_INVOKE_CHANNELS } from "./sshEnvironmentChannels.ts";
 
@@ -41,6 +42,22 @@ describe("sshEnvironment", () => {
     });
     expect(registered.toSorted()).toEqual([...DESKTOP_SSH_INVOKE_CHANNELS].toSorted());
     await bridge.dispose();
+  });
+
+  it("reads ensure options strictly, owner-only only with an issued token", () => {
+    expect(readEnsureEnvironmentOptions(undefined)).toEqual({ issuePairingToken: false });
+    expect(readEnsureEnvironmentOptions({ issuePairingToken: "yes" })).toEqual({
+      issuePairingToken: false,
+    });
+    expect(readEnsureEnvironmentOptions({ issuePairingToken: true })).toEqual({
+      issuePairingToken: true,
+    });
+    expect(
+      readEnsureEnvironmentOptions({ issuePairingToken: true, requireOwnerPairing: true }),
+    ).toEqual({ issuePairingToken: true, requireOwnerPairing: true });
+    expect(readEnsureEnvironmentOptions({ requireOwnerPairing: true })).toEqual({
+      issuePairingToken: false,
+    });
   });
 
   it("treats password prompt timeouts as cancellable authentication prompts", () => {

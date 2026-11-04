@@ -210,6 +210,10 @@
       "types": "./src/gitPointer.ts",
       "import": "./src/gitPointer.ts"
     },
+    "./gitRemoteUrl": {
+      "types": "./src/gitRemoteUrl.ts",
+      "import": "./src/gitRemoteUrl.ts"
+    },
     "./sourceControl": {
       "types": "./src/sourceControl.ts",
       "import": "./src/sourceControl.ts"
@@ -337,6 +341,10 @@
     "./projectKind": {
       "types": "./src/projectKind.ts",
       "import": "./src/projectKind.ts"
+    },
+    "./projectImportOutcome": {
+      "types": "./src/projectImportOutcome.ts",
+      "import": "./src/projectImportOutcome.ts"
     },
     "./directorySlug": {
       "types": "./src/directorySlug.ts",

@@ -94,10 +94,6 @@ const STATUS_UPSTREAM_REFRESH_TIMEOUT = Duration.seconds(5);
 const STATUS_UPSTREAM_REFRESH_FAILURE_COOLDOWN = Duration.seconds(5);
 const STATUS_UPSTREAM_REFRESH_CACHE_CAPACITY = 2_048;
 const STATUS_UPSTREAM_REFRESH_CONCURRENCY = 2;
-const STATUS_UPSTREAM_REFRESH_ENV = Object.freeze({
-  GIT_TERMINAL_PROMPT: "0",
-  SSH_ASKPASS_REQUIRE: "never",
-} satisfies NodeJS.ProcessEnv);
 export const DEFAULT_BASE_BRANCH_CANDIDATES = ["main", "master"] as const;
 const CONFIG_SNAPSHOT_CACHE_CAPACITY = 2_048;
 const CONFIG_SNAPSHOT_CACHE_TTL = Duration.seconds(5);
@@ -1379,7 +1375,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           ],
           {
             allowNonZeroExit: true,
-            env: STATUS_UPSTREAM_REFRESH_ENV,
+            env: GitVcsDriver.NON_INTERACTIVE_GIT_ENV,
             timeoutMs: Duration.toMillis(STATUS_UPSTREAM_REFRESH_TIMEOUT),
           },
         ),

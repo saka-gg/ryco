@@ -15,6 +15,7 @@ import { useWsConnectionStatusForEnvironment } from "../../rpc/wsConnectionState
 import { selectEnvironmentState, useStore } from "../../store";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { useCommandPaletteStore } from "../../commandPaletteStore";
+import { useProjectNodesDialogStore } from "../projectNodes/projectNodesDialogStore";
 import { isLocalOnboardingClient } from "./localOnboarding";
 import {
   addCompletedEnvironment,
@@ -47,6 +48,8 @@ function LocalOnboardingSession({ environmentId }: { environmentId: EnvironmentI
   );
   const settingsOpen = useSettingsDialogStore((state) => state.open);
   const paletteOpen = useCommandPaletteStore((state) => state.open);
+  // "Add project" hands over to the add-project dialog (or the palette on the phone tier).
+  const addProjectOpen = useProjectNodesDialogStore((state) => state.addProject.open);
   const replayRequest = useOnboardingReplayStore((state) => state.requestedFor);
   const [active, setActive] = useState(false);
   const settingsHydrated = useClientSettingsHydrated();
@@ -99,7 +102,7 @@ function LocalOnboardingSession({ environmentId }: { environmentId: EnvironmentI
       projectCount={projectCount}
       ready={ready}
       connectionGeneration={connection.connectedAt}
-      open={!settingsOpen && !paletteOpen}
+      open={!settingsOpen && !paletteOpen && !addProjectOpen}
       onComplete={() => {
         complete();
         setActive(false);

@@ -79,6 +79,12 @@ import {
 import { TerminalHistoryCursorIndex } from "../historyCursorIndex.ts";
 import { createTerminalSpawnEnv } from "../terminalSpawnEnv.ts";
 import {
+  defaultShellResolver,
+  formatShellCandidate,
+  resolveShellCandidates,
+  type ShellCandidate,
+} from "../terminalShell.ts";
+import {
   PtyAdapter,
   PtySpawnError,
   type PtyAdapterShape,
@@ -168,11 +174,6 @@ export interface TerminalProcessTableSnapshotter {
   (
     shellPids: ReadonlyArray<number>,
   ): Effect.Effect<TerminalProcessTableSnapshot, TerminalSubprocessCheckError | Error>;
-}
-
-interface ShellCandidate {
-  shell: string;
-  args?: string[];
 }
 
 interface TerminalStartInput {
@@ -535,121 +536,6 @@ function enforcePendingProcessEventLimits(
     // Keep event count bounded without losing bytes when adjacent output can be merged.
   }
   trimPendingOutputBytesToLimit(session, limits.maxPendingProcessOutputBytes);
-}
-
-function defaultShellResolver(
-  platform: NodeJS.Platform = process.platform,
-  env: NodeJS.ProcessEnv = process.env,
-): string {
-  if (platform === "win32") {
-    return "pwsh.exe";
-  }
-  return env.SHELL ?? "bash";
-}
-
-function normalizeShellCommand(
-  value: string | undefined,
-  platform: NodeJS.Platform = process.platform,
-): string | null {
-  if (!value) return null;
-  const trimmed = value.trim();
-  if (trimmed.length === 0) return null;
-
-  if (platform === "win32") {
-    return trimmed;
-  }
-
-  const firstToken = trimmed.split(/\s+/g)[0]?.trim();
-  if (!firstToken) return null;
-  return firstToken.replace(/^['"]|['"]$/g, "");
-}
-
-function shellCandidateFromCommand(
-  command: string | null,
-  platform: NodeJS.Platform = process.platform,
-): ShellCandidate | null {
-  if (!command || command.length === 0) return null;
-  const shellName =
-    platform === "win32"
-      ? path.win32.basename(command).toLowerCase()
-      : path.basename(command).toLowerCase();
-  if (platform === "win32" && (shellName === "pwsh.exe" || shellName === "powershell.exe")) {
-    return { shell: command, args: ["-NoLogo"] };
-  }
-  if (platform !== "win32" && shellName === "zsh") {
-    return { shell: command, args: ["-o", "nopromptsp"] };
-  }
-  return { shell: command };
-}
-
-function windowsSystemRoot(env: NodeJS.ProcessEnv): string {
-  return env.SystemRoot?.trim() || env.windir?.trim() || "C:\\Windows";
-}
-
-function windowsPowerShellPath(env: NodeJS.ProcessEnv): string {
-  return path.win32.join(
-    windowsSystemRoot(env),
-    "System32",
-    "WindowsPowerShell",
-    "v1.0",
-    "powershell.exe",
-  );
-}
-
-function windowsCmdPath(env: NodeJS.ProcessEnv): string {
-  return path.win32.join(windowsSystemRoot(env), "System32", "cmd.exe");
-}
-
-function formatShellCandidate(candidate: ShellCandidate): string {
-  if (!candidate.args || candidate.args.length === 0) return candidate.shell;
-  return `${candidate.shell} ${candidate.args.join(" ")}`;
-}
-
-function uniqueShellCandidates(candidates: Array<ShellCandidate | null>): ShellCandidate[] {
-  const seen = new Set<string>();
-  const ordered: ShellCandidate[] = [];
-  for (const candidate of candidates) {
-    if (!candidate) continue;
-    const key = formatShellCandidate(candidate);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    ordered.push(candidate);
-  }
-  return ordered;
-}
-
-function resolveShellCandidates(
-  shellResolver: () => string,
-  platform: NodeJS.Platform = process.platform,
-  env: NodeJS.ProcessEnv = process.env,
-): ShellCandidate[] {
-  const requested = shellCandidateFromCommand(
-    normalizeShellCommand(shellResolver(), platform),
-    platform,
-  );
-
-  if (platform === "win32") {
-    return uniqueShellCandidates([
-      requested,
-      shellCandidateFromCommand("pwsh.exe", platform),
-      shellCandidateFromCommand(windowsPowerShellPath(env), platform),
-      shellCandidateFromCommand("powershell.exe", platform),
-      shellCandidateFromCommand(env.ComSpec ?? null, platform),
-      shellCandidateFromCommand(windowsCmdPath(env), platform),
-      shellCandidateFromCommand("cmd.exe", platform),
-    ]);
-  }
-
-  return uniqueShellCandidates([
-    requested,
-    shellCandidateFromCommand(normalizeShellCommand(env.SHELL, platform), platform),
-    shellCandidateFromCommand("/bin/zsh", platform),
-    shellCandidateFromCommand("/bin/bash", platform),
-    shellCandidateFromCommand("/bin/sh", platform),
-    shellCandidateFromCommand("zsh", platform),
-    shellCandidateFromCommand("bash", platform),
-    shellCandidateFromCommand("sh", platform),
-  ]);
 }
 
 function isRetryableShellSpawnError(error: PtySpawnError): boolean {

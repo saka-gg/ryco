@@ -95,6 +95,23 @@ export function resolveProjectPreferenceValue<K extends ProjectPreferenceValueKe
   return inheritedValue(settings, overrides, key);
 }
 
+/**
+ * The registry overrides a project sets for itself, every other key left out: never the initial
+ * model, which names one of this node's provider instances. A copy of the project to another
+ * node carries these.
+ */
+export function projectRegistryOverrides(
+  settings: ServerSettings,
+  projectId: ProjectId,
+): Partial<Pick<ServerSettings, ProjectPreferenceValueKey>> {
+  const stored = settings.projectPreferences[projectId];
+  const overrides: Record<string, unknown> = {};
+  for (const key of PROJECT_PREFERENCE_VALUE_KEYS) {
+    if (stored?.[key] !== undefined) overrides[key] = stored[key];
+  }
+  return overrides;
+}
+
 /** A project override wins; otherwise the node setting of the same name applies. */
 function inheritedValue<K extends ProjectPreferenceValueKey>(
   settings: ServerSettings,

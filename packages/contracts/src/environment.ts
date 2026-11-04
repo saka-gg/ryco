@@ -167,6 +167,19 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    */
   nodeSelfUpdate: Schema.optionalKey(Schema.Boolean),
   /**
+   * Cross-node project copy: `projects.pathHints`, `filesystem.searchDirectories`,
+   * `projects.previewDestination`, `projects.checkRemoteAccess`, `projects.export*`,
+   * `projects.transfer*` and the import job (`projects.importStart`, `subscribeImport`,
+   * `cancelImport`, `listImports`, `discardImport`); in Agent Control,
+   * `agentControl.publishNodeDirectory`, `agentControl.reportClientExecution`,
+   * `acceptProposal`'s `executeOnClient`, the `planView` proposal reads and the
+   * `importProject` / `copyProjectToNode` plans. Absent on older servers: clients
+   * browse folders only, clone through `sourceControl.cloneRepository` and offer no
+   * copy. Clients that have not connected to a node yet treat its support as unknown,
+   * not absent.
+   */
+  projectCopy: Schema.optionalKey(Schema.Boolean),
+  /**
    * `git.runStackedAction` honours `stagedOnly` and `vcs.readLocalChanges` returns
    * `stagedRevision`; absent on older servers, which drop `stagedOnly` and commit every change.
    */

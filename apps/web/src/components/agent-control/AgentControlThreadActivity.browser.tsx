@@ -100,9 +100,15 @@ it("keeps approvals actionable and flags failed activity while its details are c
   await expect.element(screen.getByText("1 needs attention")).toBeVisible();
   await expect.element(screen.getByRole("button", { name: "Approve", exact: true })).toBeVisible();
   await screen.getByRole("button", { name: "Approve", exact: true }).click();
-  expect(onDecide).toHaveBeenCalledWith("proposal-1", "accept");
+  expect(onDecide).toHaveBeenCalledWith(
+    expect.objectContaining({ proposalId: "proposal-1" }),
+    "accept",
+  );
   await screen.getByRole("button", { name: "Reject", exact: true }).click();
-  expect(onDecide).toHaveBeenCalledWith("proposal-1", "reject");
+  expect(onDecide).toHaveBeenCalledWith(
+    expect.objectContaining({ proposalId: "proposal-1" }),
+    "reject",
+  );
 });
 
 it("keeps pending child results and uncertain delivery visible in the compact summary", async () => {

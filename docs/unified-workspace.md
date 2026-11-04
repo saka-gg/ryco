@@ -19,6 +19,8 @@ Projects with the same unambiguous canonical repository identity may be grouped 
 project for presentation. Every physical copy remains visible and independently owns its path,
 worktrees, threads, trust, role, presence, and connection state. Repository identity ambiguity
 keeps copies separate. A logical project key or repository identity is never an RPC target.
+Putting a project on another machine (a copy, or linking a checkout already there) is described in
+[Projects across nodes](features/cross-node-projects.md).
 
 Opening an existing thread navigates directly to its owning machine. Ryco may render cached metadata
 while it acquires that environment; it never silently sends an existing thread mutation to a

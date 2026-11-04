@@ -8,6 +8,7 @@ import { useShallow } from "zustand/react/shallow";
 import { CHAT_PROJECT_LABEL, type DraftId } from "../../composerDraftStore";
 import { selectProjectsAcrossEnvironments, useStore } from "../../store";
 import { createProjectSelectorByRef } from "../../storeSelectors";
+import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { isReducedMotionEffective } from "~/themes/appearancePreferences";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { ProjectSwitcher } from "../ProjectSwitcher";
@@ -69,11 +70,20 @@ export function NewThreadHero({
         selectProjectsAcrossEnvironments(store).filter((project) => !isChatProject(project)).length,
     ),
   );
+  // The selector's footer (add a project, copy this one to another node) is
+  // offered everywhere but the frozen phone tier.
+  const footerActions = usePresentationTier() !== "phone";
   const switchable =
     activeProjectId !== null &&
     activeProjectEnvironmentId !== null &&
     draftId !== undefined &&
-    canSwitchNewThreadProject({ routeKind, envLocked, projectCount, chatsAvailable });
+    canSwitchNewThreadProject({
+      routeKind,
+      envLocked,
+      projectCount,
+      chatsAvailable,
+      footerActions,
+    });
   const canSwitchProject = headline.projectName !== null && switchable;
   const showStartWithoutProject =
     onStartWithoutProject !== undefined &&
@@ -120,6 +130,7 @@ export function NewThreadHero({
                   appearance="headline"
                   draftId={draftId}
                   label={headline.projectName}
+                  openOnRequest
                 />
               ) : (
                 <span className="text-foreground">{headline.projectName}</span>

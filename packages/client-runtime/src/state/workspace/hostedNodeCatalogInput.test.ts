@@ -108,6 +108,7 @@ describe("hosted node catalog input", () => {
       nativeTrust: "not-required",
       requiresNativeVerification: false,
       effectiveRole: "operator",
+      transport: "relay",
       online: true,
       lastSeenAt: 4,
       observedAt: 10,
@@ -115,7 +116,13 @@ describe("hosted node catalog input", () => {
       deliveryUnknown: false,
       revokedAt: null,
     });
-    expect(reconcileWorkspaceMachine(input)).toMatchObject({ canConnect: true, canMutate: true });
+    // Not connected yet: no transport, and copy support unknown rather than absent.
+    expect(reconcileWorkspaceMachine(input)).toMatchObject({
+      canConnect: true,
+      canMutate: true,
+      transport: null,
+      projectCopySupport: "unknown",
+    });
   });
 
   it("passes published capabilities, presence and revocation through", () => {

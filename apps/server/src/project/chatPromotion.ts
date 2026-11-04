@@ -15,7 +15,6 @@
  */
 import { constants as fsConstants } from "node:fs";
 import {
-  access,
   chmod,
   copyFile,
   lstat,
@@ -61,7 +60,6 @@ import {
 import { hasActionableContextHandoff } from "../orchestration/commandInvariants.ts";
 import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { threadShellSettlementInput } from "../orchestration/threadSettlementInput.ts";
-import { expandHomePath } from "../pathExpansion.ts";
 import type {
   ProjectionProject,
   ProjectionProjectRepositoryShape,
@@ -82,12 +80,20 @@ import type { GitVcsDriverShape } from "../vcs/GitVcsDriver.ts";
 import { containsPath, samePath } from "../workspace/checkoutInspection.ts";
 import type { WorkspaceAccessPolicyShape } from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import type { ChatFoldersShape } from "./chatFolders.ts";
-import { canonicalizeWorktreePath, resolveExistingAncestor } from "./worktreeRoot.ts";
+import type { ResolvedCodeRoots } from "./codeRoots.ts";
+import {
+  canonicalChatsRoot,
+  firstFreeDestination,
+  foldPathCase,
+  isDirectoryPath,
+  isWritableDirectory,
+  locateDestination,
+  pathExists,
+} from "./projectDestination.ts";
+import { resolveExistingAncestor } from "./worktreeRoot.ts";
 
 /** The preview's walk stops here; its counts are then lower limits. */
 export const PROMOTION_SCAN_MAX_ENTRIES = 20_000;
-/** `-2` … `-100`; past that the plain name is suggested and judged as taken. */
-const DEFAULT_DESTINATION_MAX_SUFFIX = 100;
 const SCAN_STAT_BATCH = 64;
 const GIT_PROBE_TIMEOUT_MS = 5_000;
 const ACCESS_OPERATION = "chat promotion";
@@ -110,16 +116,6 @@ const errnoCode = (cause: unknown): string | undefined => {
 const describeCause = (cause: unknown): string => {
   const original = unwrapCause(cause);
   return original instanceof Error ? original.message : String(original);
-};
-
-const exists = async (target: string) => {
-  try {
-    await lstat(target);
-    return true;
-  } catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw cause;
-  }
 };
 
 /** Copy a folder's contents into an existing, empty folder. Symlinks are copied, never followed. */
@@ -313,41 +309,32 @@ export async function scanChatFolder(root: string, maxEntries: number): Promise<
 // Destination
 // ---------------------------------------------------------------------------
 
-const isDirectory = (target: string) =>
-  stat(target).then(
-    (entry) => entry.isDirectory(),
-    () => false,
-  );
-
 /**
- * Where a promoted chat goes by default: the workspace access root under `--restrict-to-cwd`,
- * else the "Add project base directory" setting, else `~/Code` when it exists, else home.
+ * Where a promoted chat goes by default: the node's "normal code directory" from the shared code
+ * roots resolver (`codeRoots.ts`). The workspace access root under `--restrict-to-cwd`, else the
+ * "Add project base directory" setting, else the folder holding at least two of `projectRoots`,
+ * else the first existing well-known folder (`~/Code`, `~/Developer`, …), else home. The resolver
+ * loads with the first promotion, off the boot path.
  */
 export const resolvePromotionParent = async (input: {
   readonly workspaceAccessRoot: string | undefined;
   readonly addProjectBaseDirectory: string;
   readonly homeDir: string;
-}): Promise<string> => {
-  if (input.workspaceAccessRoot !== undefined) return path.resolve(input.workspaceAccessRoot);
-  const configured = input.addProjectBaseDirectory.trim();
-  if (configured) {
-    const expanded = expandHomePath(configured);
-    if (path.isAbsolute(expanded)) return path.resolve(expanded);
-  }
-  const code = path.join(input.homeDir, "Code");
-  return (await isDirectory(code)) ? code : input.homeDir;
-};
+  /** The node's live, non-chat project roots; none when the caller cannot read them. */
+  readonly projectRoots?: ReadonlyArray<string>;
+  /** Folders the OS empties (`CodeRootsInput.temporaryDirectories`); the OS's own by default. */
+  readonly temporaryDirectories?: ReadonlyArray<string>;
+}): Promise<string> =>
+  (
+    await (
+      await import("./codeRoots.ts")
+    ).resolveNodeCodeRoots({ ...input, projectRoots: input.projectRoots ?? [] })
+  ).defaultProjectDirectory;
 
-/** `<parent>/<slug>`, or the first free `<slug>-2`, `<slug>-3`, … */
+/** `<parent>/<slug>`, or the first free `<slug>-2`, `<slug>-3`, …; the plain name when none is. */
 export const suggestPromotionDestination = async (parent: string, title: string) => {
-  const slug = directorySlug(title, "project");
-  const base = path.join(parent, slug);
-  if (!(await exists(base).catch(() => true))) return base;
-  for (let suffix = 2; suffix <= DEFAULT_DESTINATION_MAX_SUFFIX; suffix += 1) {
-    const candidate = `${base}-${suffix}`;
-    if (!(await exists(candidate).catch(() => true))) return candidate;
-  }
-  return base;
+  const base = path.join(parent, directorySlug(title, "project"));
+  return (await firstFreeDestination(base)) ?? base;
 };
 
 /** Every verdict but `available`: the destination cannot be promoted to. */
@@ -384,63 +371,51 @@ export const judgePromotionDestination = Effect.fn("judgePromotionDestination")(
   readonly source: string;
   readonly chatsRoot: string | undefined;
   readonly policy: WorkspaceAccessPolicyShape;
+  /** What `~` and `~/` expand to. */
+  readonly homeDir: string;
   /** Storage admission's verdict for a canonical path, or null when it admits the path. */
   readonly fenced: (
     canonical: string,
   ) => Effect.Effect<RefusedDestinationStatus | null, ProjectChatError>;
 }) {
-  const trimmed = input.raw.trim();
-  const expanded = expandHomePath(trimmed);
   const verdict = (
     destination: string,
     status: ProjectChatDestinationStatus,
     canonical: string | null = null,
   ): PromotionDestination => ({ destination, status, canonical });
-  if (
-    !trimmed ||
-    // Filesystem input must not contain control characters.
-    // eslint-disable-next-line no-control-regex
-    /[\x00-\x1f\x7f]/.test(trimmed) ||
-    !path.isAbsolute(expanded) ||
-    (process.platform === "win32" && !/^(?:[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+)/.test(expanded))
-  ) {
-    return verdict(trimmed, "invalid");
-  }
-  const destination = path.resolve(expanded);
-  // A filesystem root has no parent to create it in.
-  if (path.dirname(destination) === destination) return verdict(destination, "invalid");
-  const allowed = (candidate: string) =>
-    input.policy.assertPath({ path: candidate, operation: ACCESS_OPERATION }).pipe(
-      Effect.as(true),
-      Effect.catch(() => Effect.succeed(false)),
-    );
-  if (!(yield* allowed(destination))) return verdict(destination, "access-denied");
-  const leafExists = yield* Effect.promise(() => exists(destination).catch(() => true));
-  const canonical = yield* Effect.promise(() =>
-    canonicalizeWorktreePath(destination).catch(() => null),
-  );
-  if (canonical === null) return verdict(destination, leafExists ? "exists" : "invalid");
-  // A symlinked parent can lead out of the allowed root.
-  if (!(yield* allowed(canonical))) return verdict(destination, "access-denied");
-  if (containsPath(input.source, canonical)) return verdict(destination, "inside-source");
-  if (input.chatsRoot !== undefined && containsPath(input.chatsRoot, canonical)) {
-    return verdict(destination, "inside-chats");
-  }
-  // Before `exists`: another name in the same place would be refused just the same.
-  const fenced = yield* input.fenced(canonical);
-  if (fenced !== null) return verdict(destination, fenced);
-  if (leafExists) return verdict(destination, "exists");
-  const parentUsable = yield* Effect.promise(async () => {
-    const parent = path.dirname(canonical);
-    if (!(await isDirectory(parent))) return false;
-    return access(parent, fsConstants.W_OK | fsConstants.X_OK).then(
-      () => true,
-      () => false,
-    );
+  const located = yield* locateDestination({
+    raw: input.raw,
+    homeDir: input.homeDir,
+    policy: input.policy,
+    operation: ACCESS_OPERATION,
+    excludedRoots: [
+      { root: input.source, reason: "inside-source" as const },
+      ...(input.chatsRoot === undefined
+        ? []
+        : [{ root: input.chatsRoot, reason: "inside-chats" as const }]),
+    ],
+    fenced: input.fenced,
   });
+  switch (located.status) {
+    case "invalid":
+    case "access-denied":
+      return verdict(located.destination, located.status);
+    case "unresolvable":
+      return verdict(located.destination, located.leafExists ? "exists" : "invalid");
+    case "excluded":
+      return verdict(located.destination, located.reason);
+    case "fenced":
+      return verdict(located.destination, located.verdict);
+    case "located":
+      break;
+  }
+  if (located.leafExists) return verdict(located.destination, "exists");
+  const parentUsable = yield* Effect.promise(() =>
+    isWritableDirectory(path.dirname(located.canonical)),
+  );
   return parentUsable
-    ? verdict(destination, "available", canonical)
-    : verdict(destination, "invalid");
+    ? verdict(located.destination, "available", located.canonical)
+    : verdict(located.destination, "invalid");
 });
 
 const destinationErrors: Record<
@@ -565,8 +540,7 @@ export const chatTerminalActivity = (input: {
 // startup recovery must never touch a move this process is still making.
 const relocationLocks = new Set<string>();
 
-const destinationLockKey = (canonical: string) =>
-  `path:${process.platform === "darwin" || process.platform === "win32" ? canonical.toLowerCase() : canonical}`;
+const destinationLockKey = (canonical: string) => `path:${foldPathCase(canonical)}`;
 
 /** Run `effect` holding every key, or `whenHeld` at once when another holder has one of them. */
 const withRelocationLocks = <A, E, R, B, E2, R2>(
@@ -629,6 +603,15 @@ export interface ChatPromotionDependencies {
   readonly policy: WorkspaceAccessPolicyShape;
   readonly config: Pick<ServerConfigShape, "workspaceAccessRoot">;
   readonly settings: Pick<ServerSettingsShape, "getSettings">;
+  /**
+   * The node's code roots (`NodePaths.resolveCodeRoots`): the default parent is its "normal code
+   * directory", the one the add-project and copy dialogs offer. Absent (narrow route tests) or
+   * failing, {@link resolvePromotionParent} answers from the settings alone.
+   */
+  readonly resolveCodeRoots?: () => Effect.Effect<
+    Pick<ResolvedCodeRoots, "defaultProjectDirectory">,
+    ChatPromotionDependencyError
+  >;
   readonly providers: {
     readonly listSessions: () => Effect.Effect<
       ReadonlyArray<Pick<ProviderSession, "threadId" | "status" | "cwd">>
@@ -709,7 +692,7 @@ export const makeChatPromotion = (deps: ChatPromotionDependencies): ChatPromotio
   const canonicalSourceOnDisk = (project: ProjectionProject) =>
     Effect.tryPromise(async () => {
       const source = await realpath(project.workspaceRoot);
-      if (!(await isDirectory(source))) throw new Error("not a directory");
+      if (!(await isDirectoryPath(source))) throw new Error("not a directory");
       return source;
     }).pipe(
       Effect.mapError(() =>
@@ -720,15 +703,7 @@ export const makeChatPromotion = (deps: ChatPromotionDependencies): ChatPromotio
       ),
     );
 
-  const chatsRoot = deps.chatFolders.capability.pipe(
-    Effect.flatMap((capability) =>
-      capability.root === undefined
-        ? Effect.succeed(undefined)
-        : Effect.promise(() =>
-            canonicalizeWorktreePath(capability.root!).catch(() => capability.root),
-          ),
-    ),
-  );
+  const chatsRoot = canonicalChatsRoot(deps.chatFolders);
 
   /** Storage admission's verdict for a destination; see {@link fencedDestinationStatus}. */
   const fencedDestination = (canonical: string) =>
@@ -815,13 +790,19 @@ export const makeChatPromotion = (deps: ChatPromotionDependencies): ChatPromotio
       const settings = yield* deps.settings.getSettings.pipe(
         Effect.mapError(() => promotionError("not-found", "Server settings could not be read.")),
       );
-      const parent = yield* Effect.promise(() =>
+      const settingsParent = Effect.promise(() =>
         resolvePromotionParent({
           workspaceAccessRoot: deps.config.workspaceAccessRoot,
           addProjectBaseDirectory: settings.addProjectBaseDirectory,
           homeDir: homeDir(),
         }),
       );
+      const parent = yield* deps.resolveCodeRoots === undefined
+        ? settingsParent
+        : deps.resolveCodeRoots().pipe(
+            Effect.map((roots) => roots.defaultProjectDirectory),
+            Effect.catch(() => settingsParent),
+          );
       const defaultDestination = yield* Effect.promise(() =>
         suggestPromotionDestination(parent, project.title),
       );
@@ -830,6 +811,7 @@ export const makeChatPromotion = (deps: ChatPromotionDependencies): ChatPromotio
         source,
         chatsRoot: yield* chatsRoot,
         policy: deps.policy,
+        homeDir: homeDir(),
         fenced: fencedDestination,
       });
       // Probes run where the destination will be, so its Git config and device apply.
@@ -1321,6 +1303,7 @@ export const makeChatPromotion = (deps: ChatPromotionDependencies): ChatPromotio
             source,
             chatsRoot: root,
             policy: deps.policy,
+            homeDir: homeDir(),
             fenced: fencedDestination,
           });
           if (judged.status !== "available" || judged.canonical === null) {
@@ -1393,7 +1376,7 @@ export const recoverProjectRelocation = Effect.fn("recoverProjectRelocation")(fu
       .update({ ...row, state, error, updatedAt: now().toISOString() })
       .pipe(Effect.as<ProjectRelocationRecoveryOutcome>(state));
   const [sourceExists, destinationExists] = yield* Effect.tryPromise(() =>
-    Promise.all([exists(row.sourcePath), exists(row.destinationPath)]),
+    Promise.all([pathExists(row.sourcePath), pathExists(row.destinationPath)]),
   );
   const project = Option.getOrNull(yield* deps.projects.getById({ projectId: row.projectId }));
   const live = project !== null && project.deletedAt === null ? project : null;

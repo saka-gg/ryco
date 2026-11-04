@@ -1,5 +1,6 @@
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import {
+  agentControlCardDecisions,
   buildAgentControlProposalCardModel,
   completionReturnPresentation,
   EMPTY_AGENT_CONTROL_QUEUE_STATE,
@@ -18,7 +19,7 @@ import {
 import type { EnvironmentId, ServerConfig, ThreadId } from "@ryco/contracts";
 import type {
   AgentControlCompletionReturn,
-  AgentControlProposal,
+  AgentControlProposalView,
 } from "@ryco/contracts/agent-control";
 import { useRouter } from "@tanstack/react-router";
 import { ChevronDownIcon, ChevronRightIcon } from "lucide-react";
@@ -27,10 +28,16 @@ import { useShallow } from "zustand/react/shallow";
 
 import { useEnvironmentServerConfigSelector } from "../../hooks/useChatsAvailability";
 import { cn } from "../../lib/utils";
+import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { selectDelegatedChildThreadsForThreadRef, useStore, type AppState } from "../../store";
 import { buildThreadRouteHref, buildThreadRouteParams } from "../../threadRoutes";
 import { formatElapsedClockLabel } from "../../timestampFormat";
+import { useAgentControlClientExecutor } from "../agent-control/agentControlClientExecutor";
 import { useAgentControlSyncEnvironmentIds } from "../agent-control/agentControlSyncGate";
+import {
+  AgentControlClientExecutionPreview,
+  AgentControlPlanFacts,
+} from "../agent-control/AgentControlClientExecutionPreview";
 import { AgentControlProposalCard } from "../agent-control/AgentControlProposalCard";
 import { useAgentControlDecisions } from "../agent-control/useAgentControlDecisions";
 import { useAutomationProposalSync } from "../automations/data/useAutomationProposalSync";
@@ -228,7 +235,10 @@ export function DelegationDock(props: DelegationDockProps) {
 }
 
 /** A user decision the server has carried out (not a stale or failed one). */
-function decisionApplied(proposal: AgentControlProposal, decision: "accept" | "reject"): boolean {
+function decisionApplied(
+  proposal: AgentControlProposalView,
+  decision: "accept" | "reject",
+): boolean {
   return decision === "reject"
     ? proposal.status === "rejected"
     : proposal.status !== "rejected" &&
@@ -250,6 +260,7 @@ function DelegationDockContent(props: {
   );
   const getThreadTitle = useMemo(() => (id: ThreadId) => threadShells?.[id]?.title, [threadShells]);
   const decisions = useAgentControlDecisions(environmentId);
+  const clientExecutor = useAgentControlClientExecutor();
   const providers = useEnvironmentServerConfigSelector(environmentId, selectProviders);
 
   const dockChildren = useMemo(
@@ -320,9 +331,9 @@ function DelegationDockContent(props: {
     });
   };
   const titleOf = (id: ThreadId) => getThreadTitle(id) || `thread ${id.slice(0, 8)}…`;
-  const decide = (proposal: AgentControlProposal, decision: "accept" | "reject") => {
+  const decide = (proposal: AgentControlProposalView, decision: "accept" | "reject") => {
     setDecided((current) => ({ ...current, [proposal.proposalId]: decision }));
-    decisions.decide(proposal.proposalId, decision);
+    decisions.decide(proposal, decision);
   };
 
   const summaryParts: ReactNode[] = [];
@@ -539,6 +550,7 @@ function DelegationDockContent(props: {
 
       {selection.pending.map((proposal) => {
         const model = buildAgentControlProposalCardModel(proposal, getThreadTitle);
+        const cardDecisions = agentControlCardDecisions(model, clientExecutor?.canExecute ?? null);
         const danger = model.isDestructive || model.warningLabel !== null;
         const submitting = decisions.submittingIds.includes(proposal.proposalId);
         const error = decisions.decisionErrorsById[proposal.proposalId] ?? null;
@@ -587,16 +599,49 @@ function DelegationDockContent(props: {
               >
                 Reject
               </button>
-              <button
-                type="button"
-                className={cn(PRIMARY_BUTTON, ROW_FOCUS)}
-                disabled={disabled}
-                title={decisions.disabledReason ?? undefined}
-                onClick={() => decide(proposal, "accept")}
-              >
-                Approve
-              </button>
+              {cardDecisions.offersUpdate ? (
+                <button
+                  type="button"
+                  className={cn(GHOST_BUTTON, ROW_FOCUS)}
+                  onClick={() => useSettingsDialogStore.getState().openSettings("updates")}
+                >
+                  Update Ryco
+                </button>
+              ) : null}
+              {cardDecisions.canApprove ? (
+                <button
+                  type="button"
+                  className={cn(PRIMARY_BUTTON, ROW_FOCUS)}
+                  disabled={disabled}
+                  title={decisions.disabledReason ?? undefined}
+                  onClick={() => decide(proposal, "accept")}
+                >
+                  Approve
+                </button>
+              ) : null}
             </div>
+            {cardDecisions.approveUnavailableLabel !== null ? (
+              <p
+                data-testid="delegation-dock-approve-unavailable"
+                className="px-3 pb-1.5 text-[11.5px] text-muted-foreground"
+              >
+                {cardDecisions.approveUnavailableLabel}
+              </p>
+            ) : null}
+            {model.requiresClientExecutor && !detailsOpen ? (
+              // What approving does on the target; Details shows it in full.
+              <AgentControlClientExecutionPreview
+                executor={clientExecutor}
+                environmentId={environmentId}
+                proposal={proposal}
+                enabled={cardDecisions.canApprove}
+                variant="row"
+              />
+            ) : null}
+            {!detailsOpen ? (
+              // The setup command it runs, verbatim; Details shows the whole plan.
+              <AgentControlPlanFacts facts={model.keyFacts} variant="row" />
+            ) : null}
             {error !== null ? (
               <p role="alert" className="px-3 pb-1.5 text-[11.5px] text-destructive-foreground">
                 {error}
@@ -606,6 +651,7 @@ function DelegationDockContent(props: {
               <div className="delegation-dock-rise px-3 pt-2">
                 <AgentControlProposalCard
                   model={model}
+                  proposal={proposal}
                   environmentId={environmentId}
                   getThreadTitle={getThreadTitle}
                   isSubmitting={submitting}

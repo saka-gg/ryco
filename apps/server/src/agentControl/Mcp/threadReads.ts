@@ -56,19 +56,11 @@ import {
   toThreadSummary,
 } from "./threadTranscript.ts";
 import { redactAgentControlSecrets } from "../ProviderInjection.ts";
+import { failTool, ToolFailure } from "./toolFailure.ts";
 
 export { loadMessagePages, MESSAGE_PAGE_LIMITS } from "./threadTranscript.ts";
 
-/** Bounded, presentation-safe tool failure. Never carries internals. */
-export class ToolFailure {
-  readonly _tag = "ToolFailure";
-  readonly reason: string;
-  constructor(reason: string) {
-    this.reason = reason;
-  }
-}
-
-export const failTool = (reason: string) => Effect.fail(new ToolFailure(reason));
+export { failTool, ToolFailure } from "./toolFailure.ts";
 
 /** Decides whether the caller may see a thread; hidden threads read as not found. */
 export type ThreadVisibility = (thread: OrchestrationThreadShell) => boolean;

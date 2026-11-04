@@ -30,6 +30,11 @@ export const isRoutineAgentControlAction = (
         JSON.stringify(plan.after.scripts) === JSON.stringify(plan.before.scripts) &&
         plan.after.customSystemPrompt === plan.before.customSystemPrompt
       );
+    case "importProject":
+    case "copyProjectToNode":
+      // Always the user's decision: a network clone into a new folder, setup commands, and
+      // for a copy, content leaving this node.
+      return false;
     default:
       // Includes `deviceControlConsent`: the user grants routine device input for a task,
       // never the agent itself.

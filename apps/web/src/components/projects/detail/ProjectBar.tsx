@@ -4,6 +4,7 @@ import {
   CheckIcon,
   ChevronDownIcon,
   CopyIcon,
+  CopyPlusIcon,
   EllipsisIcon,
   ExternalLinkIcon,
   GitPullRequestIcon,
@@ -13,6 +14,7 @@ import { useMemo } from "react";
 
 import { PAGE_BAR_CLASS, PAGE_BAR_TRAILING_WCO_INSET_CLASS } from "../../../appChrome";
 import { usePageLeadingInsetClass } from "../../../hooks/usePageLeadingInsetClass";
+import { usePresentationTier } from "../../../hooks/usePresentationTier";
 import { openExternalLink } from "../../../lib/openExternalLink";
 import { cn } from "../../../lib/utils";
 import { buildPullRequestsPageLocation } from "../../../pullRequestsRoute";
@@ -21,6 +23,11 @@ import { RollingText, useTravelDirection } from "../../chat/RollingText";
 import { DeviceIcon } from "../../DeviceIcon";
 import { ProjectFavicon } from "../../ProjectFavicon";
 import { resolveProjectRemoteLink } from "../../sidebar/sidebarProjectRemoteLink";
+import {
+  openCopyProject,
+  preloadCopyProject,
+  preloadProjectNodesDialogs,
+} from "../../projectNodes/projectNodesDialogStore";
 import { parseStatisticsSearch } from "../../statistics/statisticsSearch";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../../ui/menu";
 import { toastManager } from "../../ui/toast";
@@ -136,8 +143,14 @@ function ProjectOverflowMenu() {
     () => parseStatisticsSearch({ environmentIds: [member.environmentId], projectId: member.id }),
     [member.environmentId, member.id],
   );
+  // The frozen phone tier gains no cross-node actions (A26).
+  const crossNode = usePresentationTier() !== "phone";
   return (
-    <Menu>
+    <Menu
+      onOpenChange={(open) => {
+        if (open && crossNode) preloadProjectNodesDialogs();
+      }}
+    >
       <MenuTrigger
         render={<button type="button" aria-label="Project actions" className={ICON_BUTTON_CLASS} />}
       >
@@ -168,6 +181,25 @@ function ProjectOverflowMenu() {
           <CopyIcon className="size-4" />
           Copy path
         </MenuItem>
+        {crossNode ? (
+          <MenuItem
+            onPointerEnter={() =>
+              preloadCopyProject({ environmentId: member.environmentId, projectId: member.id })
+            }
+            onFocus={() =>
+              preloadCopyProject({ environmentId: member.environmentId, projectId: member.id })
+            }
+            onClick={() =>
+              openCopyProject({
+                source: { environmentId: member.environmentId, projectId: member.id },
+                origin: "projects-page",
+              })
+            }
+          >
+            <CopyPlusIcon className="size-4" />
+            Copy to another node…
+          </MenuItem>
+        ) : null}
         {member.repositoryIdentity ? (
           <MenuItem
             onClick={() =>

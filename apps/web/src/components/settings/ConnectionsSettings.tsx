@@ -662,6 +662,10 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
 
   const roleLabel = pairingLink.role === "owner" ? "Owner" : "Client";
   const primaryLabel = pairingLink.label ?? `${roleLabel} link`;
+  // An owner link grants full access to this node. It is created in a
+  // terminal (`ryco auth pairing create --role owner`, `ryco setup`) and stays
+  // there: it is listed only so it can be revoked, never shown or shared again.
+  const canShare = pairingLink.role !== "owner";
   const defaultEndpointCopyOption =
     endpointCopyOptions.find((option) => option.key === defaultEndpointKey) ??
     endpointCopyOptions[0] ??
@@ -762,7 +766,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
               {primaryLabel}
             </h3>
             <Popover>
-              {qrPairingUrl ? (
+              {canShare && qrPairingUrl ? (
                 <>
                   <PopoverTrigger
                     openOnHover
@@ -794,113 +798,119 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
           <p className="text-xs text-muted-foreground" title={expiresAbsolute}>
             {[roleLabel, formatExpiresInLabel(pairingLink.expiresAt, nowMs)].join(" · ")}
           </p>
-          {shareablePairingUrl === null ? (
+          {!canShare ? (
+            <p className="text-[11px] text-muted-foreground/70">
+              Grants full access to this node, so its link is not shown here.
+            </p>
+          ) : shareablePairingUrl === null ? (
             <p className="text-[11px] text-muted-foreground/70">
               Copy the token and pair from another client using this backend&apos;s reachable host.
             </p>
           ) : null}
         </div>
         <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
-          <Dialog open={isRevealDialogOpen} onOpenChange={setIsRevealDialogOpen}>
-            {canCopyToClipboard ? (
-              <>
-                {shareablePairingUrl ? (
-                  <Group aria-label="Copy selected endpoint">
-                    <Button
-                      size="xs"
-                      variant="outline"
-                      className="max-w-56"
-                      title={`Copy pairing URL for: ${defaultEndpointCopyLabel}`}
-                      onClick={handleCopyDefaultLink}
-                    >
-                      <span className="truncate">
-                        Copy pairing URL for: {defaultEndpointCopyLabel}
-                      </span>
-                    </Button>
-                    <GroupSeparator />
-                    <Menu>
-                      <MenuTrigger
-                        render={
-                          <Button
-                            size="icon-xs"
-                            variant="outline"
-                            aria-label="Choose endpoint to copy"
-                          />
-                        }
+          {canShare ? (
+            <Dialog open={isRevealDialogOpen} onOpenChange={setIsRevealDialogOpen}>
+              {canCopyToClipboard ? (
+                <>
+                  {shareablePairingUrl ? (
+                    <Group aria-label="Copy selected endpoint">
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        className="max-w-56"
+                        title={`Copy pairing URL for: ${defaultEndpointCopyLabel}`}
+                        onClick={handleCopyDefaultLink}
                       >
-                        <ChevronDownIcon className="size-3.5" />
-                      </MenuTrigger>
-                      <MenuPopup align="end" className="min-w-60">
-                        {renderGroupedCopyMenuItems()}
-                      </MenuPopup>
-                    </Menu>
-                  </Group>
-                ) : (
-                  <Button size="xs" variant="outline" onClick={handleCopyCode}>
-                    Copy code
+                        <span className="truncate">
+                          Copy pairing URL for: {defaultEndpointCopyLabel}
+                        </span>
+                      </Button>
+                      <GroupSeparator />
+                      <Menu>
+                        <MenuTrigger
+                          render={
+                            <Button
+                              size="icon-xs"
+                              variant="outline"
+                              aria-label="Choose endpoint to copy"
+                            />
+                          }
+                        >
+                          <ChevronDownIcon className="size-3.5" />
+                        </MenuTrigger>
+                        <MenuPopup align="end" className="min-w-60">
+                          {renderGroupedCopyMenuItems()}
+                        </MenuPopup>
+                      </Menu>
+                    </Group>
+                  ) : (
+                    <Button size="xs" variant="outline" onClick={handleCopyCode}>
+                      Copy code
+                    </Button>
+                  )}
+                </>
+              ) : (
+                <DialogTrigger render={<Button size="xs" variant="outline" />}>
+                  {shareablePairingUrl ? "Show link" : "Show code"}
+                </DialogTrigger>
+              )}
+              <DialogPopup className="max-w-md">
+                <DialogHeader>
+                  <DialogTitle>
+                    {shareablePairingUrl
+                      ? isShareableHostedAppPairingUrl
+                        ? "Hosted app pairing link"
+                        : "Pairing link"
+                      : "Pairing code"}
+                  </DialogTitle>
+                  <DialogDescription>
+                    {shareablePairingUrl
+                      ? isShareableHostedAppPairingUrl
+                        ? "Clipboard copy is unavailable here. Open or manually copy this hosted app link on the device you want to connect."
+                        : "Clipboard copy is unavailable here. Open or manually copy this full pairing URL on the device you want to connect."
+                      : "Clipboard copy is unavailable here. Manually copy this code into another client."}
+                  </DialogDescription>
+                </DialogHeader>
+                <DialogPanel className="space-y-4">
+                  <Textarea
+                    readOnly
+                    value={revealValue}
+                    rows={shareablePairingUrl ? 4 : 3}
+                    className="text-xs leading-relaxed"
+                    onFocus={(event) => event.currentTarget.select()}
+                    onClick={(event) => event.currentTarget.select()}
+                  />
+                  {qrPairingUrl ? (
+                    <div className="flex justify-center rounded-xl border border-border/60 bg-muted/30 p-4">
+                      <QRCodeSvg
+                        value={qrPairingUrl}
+                        size={132}
+                        level="M"
+                        marginSize={2}
+                        title="Pairing link — scan to open on another device"
+                      />
+                    </div>
+                  ) : shareablePairingUrl ? (
+                    <p className="text-center text-[11px] text-muted-foreground/70">
+                      No QR for this endpoint. Another device scanning a loopback link would reach
+                      itself.
+                    </p>
+                  ) : null}
+                </DialogPanel>
+                <DialogFooter variant="bare">
+                  <Button variant="outline" onClick={() => setIsRevealDialogOpen(false)}>
+                    Done
                   </Button>
-                )}
-              </>
-            ) : (
-              <DialogTrigger render={<Button size="xs" variant="outline" />}>
-                {shareablePairingUrl ? "Show link" : "Show code"}
-              </DialogTrigger>
-            )}
-            <DialogPopup className="max-w-md">
-              <DialogHeader>
-                <DialogTitle>
-                  {shareablePairingUrl
-                    ? isShareableHostedAppPairingUrl
-                      ? "Hosted app pairing link"
-                      : "Pairing link"
-                    : "Pairing code"}
-                </DialogTitle>
-                <DialogDescription>
-                  {shareablePairingUrl
-                    ? isShareableHostedAppPairingUrl
-                      ? "Clipboard copy is unavailable here. Open or manually copy this hosted app link on the device you want to connect."
-                      : "Clipboard copy is unavailable here. Open or manually copy this full pairing URL on the device you want to connect."
-                    : "Clipboard copy is unavailable here. Manually copy this code into another client."}
-                </DialogDescription>
-              </DialogHeader>
-              <DialogPanel className="space-y-4">
-                <Textarea
-                  readOnly
-                  value={revealValue}
-                  rows={shareablePairingUrl ? 4 : 3}
-                  className="text-xs leading-relaxed"
-                  onFocus={(event) => event.currentTarget.select()}
-                  onClick={(event) => event.currentTarget.select()}
-                />
-                {qrPairingUrl ? (
-                  <div className="flex justify-center rounded-xl border border-border/60 bg-muted/30 p-4">
-                    <QRCodeSvg
-                      value={qrPairingUrl}
-                      size={132}
-                      level="M"
-                      marginSize={2}
-                      title="Pairing link — scan to open on another device"
-                    />
-                  </div>
-                ) : shareablePairingUrl ? (
-                  <p className="text-center text-[11px] text-muted-foreground/70">
-                    No QR for this endpoint. Another device scanning a loopback link would reach
-                    itself.
-                  </p>
-                ) : null}
-              </DialogPanel>
-              <DialogFooter variant="bare">
-                <Button variant="outline" onClick={() => setIsRevealDialogOpen(false)}>
-                  Done
-                </Button>
-                {canCopyToClipboard ? (
-                  <Button variant="outline" size="xs" onClick={handleCopyCode}>
-                    Copy code
-                  </Button>
-                ) : null}
-              </DialogFooter>
-            </DialogPopup>
-          </Dialog>
+                  {canCopyToClipboard ? (
+                    <Button variant="outline" size="xs" onClick={handleCopyCode}>
+                      Copy code
+                    </Button>
+                  ) : null}
+                </DialogFooter>
+              </DialogPopup>
+            </Dialog>
+          ) : null}
           <Button
             size="xs"
             variant="destructive-outline"
@@ -2027,10 +2037,9 @@ function useLocalBackendAccess() {
     setDesktopAdvertisedEndpoints([]);
     setDesktopServerExposureError(null);
   }, [canManageLocalBackend]);
-  const visibleDesktopPairingLinks = useMemo(
-    () => desktopPairingLinks.filter((pairingLink) => pairingLink.role === "client"),
-    [desktopPairingLinks],
-  );
+  // Owner links are listed too, so they can be revoked; their rows never show or
+  // share the link (`canShare`). The node leaves out its startup owner link itself.
+  const visibleDesktopPairingLinks = desktopPairingLinks;
   const tailscaleHttpsEndpoint = useMemo(
     () => desktopAdvertisedEndpoints.find(isTailscaleHttpsEndpoint) ?? null,
     [desktopAdvertisedEndpoints],

@@ -156,6 +156,7 @@ import Migration0099, {
   ensureProjectionThreadTriageColumns,
 } from "./Migrations/099_ProjectionThreadTriage.ts";
 import Migration0100 from "./Migrations/100_EventRetention.ts";
+import Migration0101, { ensureProjectImportsTable } from "./Migrations/101_ProjectImports.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -267,6 +268,7 @@ export const migrationEntries = [
   [98, "ThreadForkOrigin", Migration0098],
   [99, "ProjectionThreadTriage", Migration0099],
   [100, "EventRetention", Migration0100],
+  [101, "ProjectImports", Migration0101],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -677,6 +679,15 @@ export const repairProjectionThreadTriageColumns = Effect.fn("repairProjectionTh
   },
 );
 
+// Cross-node project import jobs: run 101 again as a repair when a later id was recorded first
+// (parallel branches claim the same next id). Development databases that recorded the branch's
+// earlier 94_ProjectImports already have the table: creating it is idempotent.
+export const repairProjectImportsTable = Effect.fn("repairProjectImportsTable")(function* () {
+  if (yield* ensureProjectImportsTable) {
+    yield* Effect.log("Repaired project imports table");
+  }
+});
+
 // Unlike schema checks, the summary backfill scans the entire activity history.
 // Track its successful compatibility repair separately from the divergent
 // numerical migration ledger, and commit the marker with the repaired data.
@@ -877,6 +888,7 @@ const compatibilityRepairs = [
   },
   // 100 again when another branch recorded 100 (or a later id) first; it is idempotent.
   { key: "event-retention", since: 100, run: () => Migration0100 },
+  { key: "project-imports", since: 101, run: () => repairProjectImportsTable() },
 ] as const;
 
 export type CompatibilityRepairKey = (typeof compatibilityRepairs)[number]["key"];

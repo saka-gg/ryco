@@ -11,7 +11,7 @@ import * as HttpServerRequest from "effect/http/HttpServerRequest";
 
 import { ServerConfig, type ServerConfigShape } from "../../config.ts";
 import { isLoopbackHost } from "../../startupAccess.ts";
-import { AuthControlPlane } from "../Services/AuthControlPlane.ts";
+import { AuthControlPlane, OWNER_BOOTSTRAP_PAIRING_SUBJECT } from "../Services/AuthControlPlane.ts";
 import { ServerAuthPolicyLive } from "./ServerAuthPolicy.ts";
 import { BootstrapCredentialService } from "../Services/BootstrapCredentialService.ts";
 import { BootstrapCredentialError } from "../Services/BootstrapCredentialService.ts";
@@ -288,6 +288,7 @@ export const makeServerAuth = Effect.gen(function* () {
           ({
             authenticated: true,
             auth: descriptor,
+            sessionId: session.sessionId,
             role: session.role,
             sessionMethod: session.method,
             ...(session.expiresAt ? { expiresAt: DateTime.toUtc(session.expiresAt) } : {}),
@@ -395,7 +396,7 @@ export const makeServerAuth = Effect.gen(function* () {
     authControlPlane
       .createPairingLink({
         role: input?.role ?? "client",
-        subject: input?.role === "owner" ? "owner-bootstrap" : "one-time-token",
+        subject: input?.role === "owner" ? OWNER_BOOTSTRAP_PAIRING_SUBJECT : "one-time-token",
         ...(input?.label ? { label: input.label } : {}),
       })
       .pipe(
@@ -417,11 +418,11 @@ export const makeServerAuth = Effect.gen(function* () {
         ),
       );
 
+  // Client and owner links alike; the startup owner link is the node's own.
   const listPairingLinks: ServerAuthShape["listPairingLinks"] = () =>
     authControlPlane
       .listPairingLinks({
-        role: "client",
-        excludeSubjects: ["owner-bootstrap"],
+        excludeSubjects: [OWNER_BOOTSTRAP_PAIRING_SUBJECT],
       })
       .pipe(
         Effect.mapError(

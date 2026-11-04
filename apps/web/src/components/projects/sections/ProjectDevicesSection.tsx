@@ -1,18 +1,15 @@
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
-import type { SidebarProjectGroupingMode } from "@ryco/contracts";
+import type { EnvironmentId, SidebarProjectGroupingMode } from "@ryco/contracts";
 import type { UnifiedSettings } from "@ryco/contracts/settings";
-import { ArrowRightIcon } from "lucide-react";
-import { useMemo } from "react";
+import { ArrowRightIcon, CopyPlusIcon } from "lucide-react";
+import { useMemo, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 
-import { useDeviceName } from "../../../deviceName";
-import { isElectron } from "../../../env";
-import { usePrimaryEnvironmentId } from "../../../environments/primary";
-import { useSavedEnvironmentRegistryStore } from "../../../environments/runtime";
-import { isSavedEnvironmentSwitchedOff } from "@ryco/client-runtime/connection";
 import { useSettings, useUpdateSettings } from "../../../hooks/useSettings";
+import { useNodeCatalog } from "../../../environments/nodeCatalog";
+import { usePresentationTier } from "../../../hooks/usePresentationTier";
+import { preloadableLazy, useLazyComponentReady } from "../../../lib/preloadableLazy";
 import { cn } from "../../../lib/utils";
-import { useDesktopWorkspaceState } from "../../../platform/desktopWorkspace";
 import {
   readProjectGroupingChoice,
   withProjectGroupingChoice,
@@ -21,6 +18,13 @@ import {
 import type { SidebarProjectGroupMember } from "../../../sidebarProjectGrouping";
 import { selectSidebarThreadsForProjectRef, useStore } from "../../../store";
 import { DeviceIcon } from "../../DeviceIcon";
+import { hasStoredProjectCopyRecords } from "../../projectNodes/projectCopyStorage";
+import {
+  openCopyProject,
+  preloadCopyProject,
+  useProjectNodesDialogStore,
+} from "../../projectNodes/projectNodesDialogStore";
+import { Button } from "../../ui/button";
 import { RelativeTime } from "../../pullRequests/primitives";
 import { SettingsSelect } from "../../settings/SettingsSelect";
 import { SETTINGS_INSET_CLASS, SettingsBlock, SettingsRow } from "../../settings/settingsLayout";
@@ -30,8 +34,7 @@ import {
 } from "../../sidebar/sidebarProjectGroupingLabels";
 import {
   devicesWithoutProject,
-  formatProjectPath,
-  inferHomeDirectory,
+  displayProjectPath,
   threadActivityTimestamp,
 } from "../projectsModel.logic";
 import { useProjectsPage, useProjectsSelection } from "../ProjectsPageContext";
@@ -117,7 +120,7 @@ function CheckoutRow(props: {
         </span>
         <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
           <span className="truncate font-mono" title={props.member.cwd}>
-            {formatProjectPath(props.member.cwd, inferHomeDirectory(props.member.cwd))}
+            {displayProjectPath(props.member.cwd)}
           </span>
           <span aria-hidden>·</span>
           {presence.status === "online" ? null : (
@@ -178,32 +181,87 @@ function CheckoutRow(props: {
   );
 }
 
-/** Devices this client knows, by environment id, with the labels people recognize. */
-function useKnownDevices(): ReadonlyArray<{
-  readonly environmentId: string;
-  readonly label: string;
-}> {
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const primaryName = useDeviceName();
-  const saved = useSavedEnvironmentRegistryStore((state) => state.byId);
-  const desktop = useDesktopWorkspaceState();
-  return useMemo(() => {
-    const devices: Array<{ environmentId: string; label: string }> = [];
-    if (primaryEnvironmentId)
-      devices.push({ environmentId: primaryEnvironmentId, label: primaryName });
-    // The desktop's own Hub alias is this device again; never list it twice.
-    const localAlias = isElectron ? desktop.localEnvironmentId : null;
-    for (const record of Object.values(saved)) {
-      // Left out while switched off, as in the sidebar.
-      if (record.environmentId !== localAlias && !isSavedEnvironmentSwitchedOff(record))
-        devices.push({ environmentId: record.environmentId, label: record.label });
-    }
-    for (const machine of desktop.machines) {
-      if (machine.environmentId !== localAlias)
-        devices.push({ environmentId: machine.environmentId, label: machine.label });
-    }
-    return devices;
-  }, [desktop.localEnvironmentId, desktop.machines, primaryEnvironmentId, primaryName, saved]);
+/**
+ * The devices that lack the project; each offers "Copy here", which opens the
+ * copy dialog from this checkout with that device picked (not on the phone tier).
+ */
+export function ProjectNotOnBlock(props: {
+  readonly member: Pick<SidebarProjectGroupMember, "environmentId" | "id">;
+  readonly missing: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly label: string;
+  }>;
+  readonly crossNode: boolean;
+}) {
+  if (!props.crossNode) {
+    return (
+      <SettingsBlock className="py-2.5 text-xs text-muted-foreground">
+        Not on {props.missing.map((device) => device.label).join(", ")}
+      </SettingsBlock>
+    );
+  }
+  return (
+    <SettingsBlock
+      className="flex flex-wrap items-center gap-x-3 gap-y-1.5 py-2.5 text-xs text-muted-foreground"
+      data-testid="project-not-on"
+    >
+      <span>Not on</span>
+      {props.missing.map((device) => (
+        <span key={device.environmentId} className="inline-flex items-center gap-1.5">
+          <span className="text-foreground/80">{device.label}</span>
+          <Button
+            size="xs"
+            variant="outline"
+            aria-label={`Copy here: ${device.label}`}
+            onPointerEnter={() =>
+              preloadCopyProject(
+                { environmentId: props.member.environmentId, projectId: props.member.id },
+                device.environmentId,
+              )
+            }
+            onFocus={() =>
+              preloadCopyProject(
+                { environmentId: props.member.environmentId, projectId: props.member.id },
+                device.environmentId,
+              )
+            }
+            onClick={() =>
+              openCopyProject({
+                source: { environmentId: props.member.environmentId, projectId: props.member.id },
+                targetEnvironmentId: device.environmentId,
+                origin: "devices-section",
+              })
+            }
+          >
+            <CopyPlusIcon />
+            Copy here
+          </Button>
+        </span>
+      ))}
+    </SettingsBlock>
+  );
+}
+
+// Through the feature's one lazy entry (see `ProjectNodesDialogs.tsx`).
+const LazyProjectCopiesBlock = preloadableLazy(() =>
+  import("../../projectNodes/ProjectNodesDialogs").then((module) => module.ProjectCopiesBlock),
+);
+
+/**
+ * The project's copies to other nodes (A36(3)). Its code loads only when this
+ * client copied something, kept records of copies, or reaches a node that
+ * can report imports.
+ */
+function ProjectCopiesSlot(props: {
+  readonly members: ReadonlyArray<SidebarProjectGroupMember>;
+  readonly reachesCopyNode: boolean;
+}) {
+  const copiesActive = useProjectNodesDialogStore((state) => state.copiesActive);
+  const [storedRecords] = useState(hasStoredProjectCopyRecords);
+  const wanted = copiesActive || storedRecords || props.reachesCopyNode;
+  const ready = useLazyComponentReady(LazyProjectCopiesBlock, wanted);
+  if (!wanted || !ready) return null;
+  return <LazyProjectCopiesBlock members={props.members} />;
 }
 
 /**
@@ -214,7 +272,7 @@ function useKnownDevices(): ReadonlyArray<{
 export function ProjectDevicesSection({ member }: ProjectSectionProps) {
   const { nav } = useProjectsPage();
   const { snapshot } = useProjectsSelection();
-  const knownDevices = useKnownDevices();
+  const knownDevices = useNodeCatalog();
   // Only a device whose project list has arrived can be said to lack it;
   // one that is offline or still syncing simply is not known yet.
   const syncedEnvironmentIds = useStore(
@@ -233,6 +291,11 @@ export function ProjectDevicesSection({ member }: ProjectSectionProps) {
     ),
   });
   const selectable = snapshot.memberProjects.length > 1;
+  // The frozen phone tier gains no cross-node actions (A26).
+  const crossNode = usePresentationTier() !== "phone";
+  const reachesCopyNode = knownDevices.some(
+    (device) => device.presence === "online" && device.projectCopySupport === "yes",
+  );
 
   const saved = useSavedFlash();
   const groupingMode = useSettings(selectGroupingMode);
@@ -277,9 +340,10 @@ export function ProjectDevicesSection({ member }: ProjectSectionProps) {
         ))}
       </div>
       {missing.length > 0 ? (
-        <SettingsBlock className="py-2.5 text-xs text-muted-foreground">
-          Not on {missing.join(", ")}
-        </SettingsBlock>
+        <ProjectNotOnBlock member={member} missing={missing} crossNode={crossNode} />
+      ) : null}
+      {crossNode ? (
+        <ProjectCopiesSlot members={snapshot.memberProjects} reachesCopyNode={reachesCopyNode} />
       ) : null}
       <SettingsRow
         title="Sidebar grouping"

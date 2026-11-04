@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
+import * as Schema from "effect/Schema";
 import {
+  AgentControlActionPlan,
   AgentControlProposalId,
   AgentControlRequestId,
+  AgentControlRiskTag,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -11,6 +14,7 @@ import {
 } from "@ryco/contracts";
 
 import {
+  agentControlCardDecisions,
   buildAgentControlProposalCardModel,
   completionReturnPresentation,
 } from "./presentation.ts";
@@ -536,6 +540,229 @@ it("says which created thread starts a task's chat", () => {
     }),
   );
   expect(model.detailSections[0]?.lines.join("\n")).toContain("chat of task task-1");
+});
+
+describe("cross-node project cards", () => {
+  const decodePlan = Schema.decodeUnknownSync(AgentControlActionPlan);
+  const followUpThread = {
+    title: "Finish setup",
+    prompt: "Install the toolchain and run the tests.",
+    runtimeMode: "approval-required",
+    envMode: "local",
+  };
+  const importPlan = decodePlan({
+    kind: "importProject",
+    projectId: "2a7c1d3e-7d2c-4e4a-9b1f-4c8da6e50f9b",
+    title: "ryco",
+    destinationPath: "/Users/me/Code/ryco",
+    remoteUrl: "git@github.com:example/ryco.git",
+    branch: "main",
+    setup: { command: "bun install && bun run build", saveAsScript: true },
+    followUpThread: {
+      ...followUpThread,
+      modelSelection: { instanceId: "codex", model: "gpt-5.6" },
+    },
+  });
+  const copyPlan = (overrides: Record<string, unknown> = {}) =>
+    decodePlan({
+      kind: "copyProjectToNode",
+      source: {
+        kind: "project",
+        projectId: "project-1",
+        title: "ryco",
+        expectedUpdatedAt: "2026-10-22T00:00:00.000Z",
+      },
+      target: { environmentId: "env-mac-mini", label: "Mac mini" },
+      destination: { kind: "child-of-default", name: "ryco-copy" },
+      bringCommits: true,
+      bringChanges: true,
+      copySettings: true,
+      setup: { command: "mise install\nbun install", saveAsScript: false },
+      followUpThread: { ...followUpThread, modelSelection: null },
+      ...overrides,
+    });
+  const linesOf = (model: ReturnType<typeof buildAgentControlProposalCardModel>) =>
+    model.detailSections.flatMap((section) => [section.heading, ...section.lines]);
+
+  it("shows an import's repository, folder, verbatim setup command and setup thread", () => {
+    const model = buildAgentControlProposalCardModel(
+      makeProposal({ plan: importPlan, promptSummary: null, riskTags: [] }),
+    );
+    expect(model.actionLabel).toBe("Set up project");
+    expect(model.targetLabel).toBe("ryco");
+    expect(model.runtimeLabel).toBe("approval-required · local");
+    expect(model.summary).toBe(
+      'Clone git@github.com:example/ryco.git into /Users/me/Code/ryco; runs `bun install && bun run build`; starts "Finish setup".',
+    );
+    const lines = linesOf(model);
+    expect(lines).toContain("Repository: git@github.com:example/ryco.git");
+    expect(lines).toContain("Branch: main");
+    expect(lines).toContain("Folder: /Users/me/Code/ryco");
+    // The command is its own line, exactly as it will run.
+    expect(lines).toContain("bun install && bun run build");
+    expect(lines).toContain("Also saved as the project's setup script.");
+    expect(lines).toContain("Model: codex · gpt-5.6");
+    expect(lines).toContain("Prompt: Install the toolchain and run the tests.");
+    expect(lines.join("\n")).toContain("Runs commands: a setup command and an agent thread");
+    expect(model.requiresClientExecutor).toBe(false);
+    expect(model.clientExecutionTarget).toBeNull();
+    // Shown without expanding: where it goes, the branch, the command verbatim, the thread.
+    expect(model.keyFacts).toEqual([
+      { label: "Folder", value: "/Users/me/Code/ryco", format: "path" },
+      { label: "Branch", value: "main", format: "text" },
+      { label: "Runs on this node", value: "bun install && bun run build", format: "code" },
+      { label: "Then starts", value: "Finish setup", format: "text" },
+    ]);
+    // The plan's summary wins over the server's audit-safe one, which leaves the command out.
+    expect(
+      buildAgentControlProposalCardModel(
+        makeProposal({
+          plan: importPlan,
+          promptSummary: "Set up project ryco from a repository on this node",
+        }),
+      ).summary,
+    ).toBe(model.summary);
+    expect(agentControlCardDecisions(model, null)).toEqual({
+      canApprove: true,
+      approveUnavailableLabel: null,
+      offersUpdate: false,
+    });
+  });
+
+  it("shows a copy's source, target, destination, options and cross-node risk", () => {
+    const model = buildAgentControlProposalCardModel(
+      makeProposal({
+        plan: copyPlan(),
+        promptSummary: "Copy ryco to Mac mini",
+        riskTags: ["creates-project", "cross-node", "runs-commands"].map((tag) =>
+          AgentControlRiskTag.make(tag),
+        ),
+      }),
+    );
+    expect(model.actionLabel).toBe("Copy to Mac mini");
+    expect(model.targetLabel).toBe("ryco");
+    // The plan's summary wins over the server's audit-safe one, which says neither what it
+    // brings nor what it runs. A multi-line command is named in it, never cut.
+    expect(model.summary).toBe(
+      buildAgentControlProposalCardModel(makeProposal({ plan: copyPlan(), promptSummary: null }))
+        .summary,
+    );
+    expect(model.summary).toBe(
+      'Copy ryco to ryco-copy in Mac mini\'s code directory, with unpushed commits, uncommitted changes, project settings; runs a setup command (see details); starts "Finish setup".',
+    );
+    expect(model.riskLabels).toEqual(["creates project", "cross node", "runs commands"]);
+    const lines = linesOf(model);
+    expect(lines).toContain("Source: project ryco (project-1) on this node");
+    expect(lines).toContain("Target node: Mac mini (env-mac-mini)");
+    expect(lines).toContain("Destination: child-of-default");
+    expect(lines).toContain("Folder: ryco-copy in Mac mini's code directory");
+    expect(lines).toContain("Unpushed commits: copied");
+    expect(lines).toContain("Uncommitted changes: copied");
+    expect(lines).toContain("mise install\nbun install");
+    expect(lines).toContain("Model: Mac mini's default");
+    expect(lines).toContain(
+      "Cross-node: creates a project on Mac mini, not on the node the agent runs on.",
+    );
+    expect(lines).toContain(
+      "Copies workspace content: unpushed commits and uncommitted changes leave this node.",
+    );
+    expect(model.requiresClientExecutor).toBe(true);
+    expect(model.clientExecutionTarget).toEqual({
+      environmentId: "env-mac-mini",
+      label: "Mac mini",
+    });
+    // What it brings and the command verbatim, next to the folder the approving app resolves.
+    expect(model.keyFacts).toEqual([
+      {
+        label: "Brings",
+        value: "Unpushed commits, uncommitted changes, project settings",
+        format: "text",
+      },
+      { label: "Runs on Mac mini", value: "mise install\nbun install", format: "code" },
+      { label: "Then starts", value: "Finish setup", format: "text" },
+    ]);
+    const onBranch = buildAgentControlProposalCardModel(
+      makeProposal({
+        plan: copyPlan({ branch: "release/1.2", bringCommits: false, bringChanges: false }),
+      }),
+    );
+    expect(onBranch.keyFacts[0]?.value).toBe("Project settings · branch release/1.2");
+    expect(onBranch.summary).toContain("with project settings on branch release/1.2");
+    expect(linesOf(onBranch)).toContain("Branch: release/1.2");
+    expect(lines).toContain("Branch: the project's current branch");
+
+    const plainSummary = buildAgentControlProposalCardModel(
+      makeProposal({
+        plan: copyPlan({
+          source: {
+            kind: "repository",
+            remoteUrl: "https://github.com/example/ryco",
+            title: "ryco",
+          },
+          destination: { kind: "path", path: "~/src/ryco" },
+          bringCommits: false,
+          bringChanges: false,
+          copySettings: false,
+          setup: null,
+          followUpThread: null,
+        }),
+        promptSummary: null,
+      }),
+    );
+    expect(plainSummary.summary).toBe("Copy ryco to ~/src/ryco.");
+    expect(plainSummary.keyFacts).toEqual([
+      { label: "Brings", value: "Only what the remote has", format: "text" },
+      { label: "Setup", value: "No setup command", format: "text" },
+    ]);
+    expect(linesOf(plainSummary)).toContain("Source: repository https://github.com/example/ryco");
+    expect(linesOf(plainSummary)).toContain("Setup command: none");
+    expect(linesOf(plainSummary).join("\n")).not.toContain("Runs commands");
+    expect(
+      linesOf(
+        buildAgentControlProposalCardModel(
+          makeProposal({ plan: copyPlan({ destination: { kind: "default" } }) }),
+        ),
+      ),
+    ).toContain("Folder: a folder named after the source in Mac mini's code directory");
+  });
+
+  it("offers Approve on a client-executed card only when this client can run it", () => {
+    const model = buildAgentControlProposalCardModel(makeProposal({ plan: copyPlan() }));
+    const unavailable = {
+      canApprove: false,
+      approveUnavailableLabel: "Approve in Ryco on a computer connected to Mac mini",
+      offersUpdate: false,
+    };
+    expect(agentControlCardDecisions(model, null)).toEqual(unavailable);
+    expect(agentControlCardDecisions(model, () => false)).toEqual(unavailable);
+    const checked: string[] = [];
+    expect(
+      agentControlCardDecisions(model, (target) => {
+        checked.push(target.environmentId);
+        return true;
+      }).canApprove,
+    ).toBe(true);
+    expect(checked).toEqual(["env-mac-mini"]);
+  });
+
+  it("presents a plan this build cannot read with Reject and Update Ryco only", () => {
+    const model = buildAgentControlProposalCardModel({
+      ...makeProposal({ promptSummary: null }),
+      plan: { kind: "unsupported", originalKind: "mirrorRepository" },
+    });
+    expect(model.actionLabel).toBe("Unsupported request");
+    expect(model.targetLabel).toBe("mirrorRepository");
+    expect(model.unsupportedKind).toBe("mirrorRepository");
+    expect(model.requiresClientExecutor).toBe(false);
+    expect(model.isPending).toBe(true);
+    expect(linesOf(model)).toContain("Request kind: mirrorRepository");
+    // Even a client that could run client-executed plans never approves it.
+    expect(agentControlCardDecisions(model, () => true)).toEqual({
+      canApprove: false,
+      approveUnavailableLabel: "Update Ryco to review this request.",
+      offersUpdate: true,
+    });
+  });
 });
 
 it("names the pull request an agent watches, and the chat it wakes", () => {

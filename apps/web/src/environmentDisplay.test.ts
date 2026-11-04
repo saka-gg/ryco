@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   isGenericLocalEnvironmentLabel,
   normalizeDisplayLabel,
+  resolveEnvironmentOptionLabel,
   resolveProjectEnvironmentLabel,
 } from "./environmentDisplay";
 
@@ -51,6 +52,41 @@ describe("environmentDisplay", () => {
       resolveProjectEnvironmentLabel({
         environmentId: remoteEnvironmentId,
         label: "Build box",
+      }),
+    ).toBe("Build box");
+  });
+});
+
+describe("resolveEnvironmentOptionLabel", () => {
+  it("prefers the primary environment's machine label", () => {
+    expect(
+      resolveEnvironmentOptionLabel({
+        isPrimary: true,
+        environmentId: primaryEnvironmentId,
+        runtimeLabel: "Julius's Mac mini",
+        savedLabel: "Local environment",
+      }),
+    ).toBe("Julius's Mac mini");
+  });
+
+  it("falls back to 'This device' for generic primary labels", () => {
+    expect(
+      resolveEnvironmentOptionLabel({
+        isPrimary: true,
+        environmentId: primaryEnvironmentId,
+        runtimeLabel: "Local environment",
+        savedLabel: "Local",
+      }),
+    ).toBe("Device connecting…");
+  });
+
+  it("keeps configured labels for non-primary environments", () => {
+    expect(
+      resolveEnvironmentOptionLabel({
+        isPrimary: false,
+        environmentId: remoteEnvironmentId,
+        runtimeLabel: null,
+        savedLabel: "Build box",
       }),
     ).toBe("Build box");
   });

@@ -2,11 +2,23 @@ import type { ThreadLifecycleAction } from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId } from "@ryco/contracts";
 import { create } from "zustand";
 
-/** A folder to add straight away, such as one dropped on first-run setup. */
-interface AddProjectFolder {
+import {
+  addProjectDialogAvailable,
+  openAddProjectDialog,
+  type OpenAddProjectOptions,
+} from "./components/projectNodes/addProjectDialogEntry";
+
+/**
+ * What an "Add project" entry point knows: the node, the source or project the
+ * dialog starts from, or a folder to add straight away.
+ */
+export interface OpenAddProjectRequest extends OpenAddProjectOptions {
+  /**
+   * A folder to add straight away, such as one dropped on first-run setup: the
+   * palette adds it without the source list, on `environmentId` (else the
+   * palette's own add-project environment).
+   */
   readonly path?: string;
-  /** Defaults to the palette's own add-project environment. */
-  readonly environmentId?: EnvironmentId;
 }
 
 type CommandPaletteOpenIntent =
@@ -77,8 +89,13 @@ interface CommandPaletteStore {
   setOpen: (open: boolean) => void;
   /** Opens or closes the palette; from a workspace search it shows the command list. */
   toggleOpen: () => void;
-  /** Opens the add-project flow; with a `path`, adds that folder without the source list. */
-  openAddProject: (folder?: AddProjectFolder) => void;
+  /**
+   * Every "Add project" entry point. With a `path` the palette adds that folder
+   * without the source list; otherwise it opens `AddProjectDialog` where it is
+   * available (`addProjectDialogAvailable`), else the palette's add-project
+   * views (the frozen phone tier, and every tier while the dialog is off).
+   */
+  openAddProject: (request?: OpenAddProjectRequest) => void;
   /** Opens straight into the thread picker for a new split pane. */
   openSplitThread: () => void;
   /** Opens straight into the snooze times for the open thread. */
@@ -102,17 +119,30 @@ export const useCommandPaletteStore = create<CommandPaletteStore>((set) => ({
       if (state.open && state.workspaceSearchMode !== null) return { workspaceSearchMode: null };
       return { open: !state.open, ...(state.open ? { openIntent: null } : {}) };
     }),
-  openAddProject: (folder) =>
+  openAddProject: (request) => {
+    // Picked, not spread: buttons pass this as their click handler, event and all.
+    const path = typeof request?.path === "string" && request.path ? request.path : null;
+    if (
+      path === null &&
+      addProjectDialogAvailable() &&
+      openAddProjectDialog({
+        environmentId: request?.environmentId ?? null,
+        mode: request?.mode ?? null,
+        projectRef: request?.projectRef ?? null,
+      })
+    ) {
+      return;
+    }
     set((state) => ({
       open: true,
       workspaceSearchMode: null,
       openIntent: {
         kind: "add-project",
         requestId: (state.openIntent?.requestId ?? 0) + 1,
-        // Picked, not spread: buttons pass this as their click handler, event and all.
-        ...(folder?.path ? { path: folder.path, environmentId: folder.environmentId } : {}),
+        ...(path !== null ? { path, environmentId: request?.environmentId ?? undefined } : {}),
       },
-    })),
+    }));
+  },
   openSplitThread: () =>
     set((state) => ({
       open: true,

@@ -194,6 +194,9 @@ import { AgentControlSessionRegistryLive } from "./agentControl/Layers/AgentCont
 import { AgentControlActionValidatorLive } from "./agentControl/Layers/AgentControlActionValidator.ts";
 import { AgentControlDelegationSlotsLive } from "./agentControl/Layers/AgentControlDelegationSlots.ts";
 import { AgentControlExecutionLive } from "./agentControl/Layers/AgentControlExecution.ts";
+import { AgentControlNodeDirectoryDeferredLive } from "./agentControl/Layers/AgentControlNodeDirectoryDeferred.ts";
+import { ProjectCopyServicesDeferredLive } from "./projectCopy/Layers/ProjectCopyServicesDeferred.ts";
+import { ProjectImportsStartupRecoveryLive } from "./projectCopy/Layers/ProjectImportsStartupRecovery.ts";
 import { AgentControlProjectPlansLive } from "./agentControl/Layers/AgentControlProjectPlans.ts";
 import { AgentControlExternalIntegrationServiceLive } from "./agentControl/Layers/AgentControlExternalIntegration.ts";
 import { AgentControlExternalTopologyLive } from "./agentControl/Layers/AgentControlExternalTopology.ts";
@@ -753,10 +756,21 @@ const RuntimeServicesLive = Layer.mergeAll(
   // Feeds the device manager each thread's running turn and thread removals,
   // which end agent device holds and attachments (the simulator idle grace).
   DeviceThreadLifecycleLive,
+  // Cross-node imports an earlier process left behind: once commands are admitted, staging
+  // folders of imports that never registered are deleted and pending settings replayed.
+  ProjectImportsStartupRecoveryLive.pipe(Layer.provideMerge(ServerRuntimeStartupLive)),
 ).pipe(
+  // Cross-node project copy (node paths, export, transfers, the import job; loaded on first use)
+  // and the node directory owner clients publish, beneath the services: the project copy RPCs and
+  // Agent Control (its tools, validator and execution) share one instance of each. Topmost, so
+  // their layers can use everything provided below.
+  Layer.provideMerge(
+    Layer.mergeAll(ProjectCopyServicesDeferredLive, AgentControlNodeDirectoryDeferredLive),
+  ),
   // Pull request watches, beneath the services: the source-control RPC and Agent Control's
-  // execution share one instance (its read cache and per-chat lock). First in this list, so
-  // the startup it waits on is built with every service below (chat folders, the fork ledger).
+  // execution share one instance (its read cache and per-chat lock). Right below the project
+  // copy layers, so the startup it waits on is built with every service below (chat folders,
+  // the fork ledger).
   Layer.provideMerge(PullRequestWatchLayerLive),
   // Command watches, beneath the services too: Agent Control's tools and the stop RPC share one.
   Layer.provideMerge(CommandWatchLayerLive),

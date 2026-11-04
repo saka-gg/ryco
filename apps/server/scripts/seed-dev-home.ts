@@ -198,6 +198,8 @@ export const SEED_TABLE_POLICY: Readonly<Record<string, SeedTablePolicy>> = {
   project_relocations: "clear",
   thread_forks: "clear",
   session_imports: "clear",
+  // Durable project import jobs: the seeded server would resume them and write checkouts.
+  project_imports: "clear",
   // Task files are not copied.
   local_tasks: "clear",
   local_task_delegations: "clear",

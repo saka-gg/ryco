@@ -7,7 +7,7 @@
 import {
   AGENT_CONTROL_WS_METHODS,
   type AgentControlAutomationRunId,
-  type AgentControlProposal,
+  type AgentControlProposalView,
   type EnvironmentId,
 } from "@ryco/contracts";
 import {
@@ -121,7 +121,7 @@ export function resetNoticedMissedRunsForTests(): void {
   noticeWordsLoad = null;
 }
 
-const NO_PROPOSALS: readonly AgentControlProposal[] = [];
+const NO_PROPOSALS: readonly AgentControlProposalView[] = [];
 const NO_RUNS: readonly MissedAutomationRun[] = [];
 
 type ToastId = ReturnType<typeof toastManager.add>;

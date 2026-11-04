@@ -65,6 +65,7 @@ const FETCH_SSH_ENVIRONMENT_DESCRIPTOR_CHANNEL = "desktop:fetch-ssh-environment-
 const BOOTSTRAP_SSH_BEARER_SESSION_CHANNEL = "desktop:bootstrap-ssh-bearer-session";
 const FETCH_SSH_SESSION_STATE_CHANNEL = "desktop:fetch-ssh-session-state";
 const ISSUE_SSH_WEBSOCKET_TOKEN_CHANNEL = "desktop:issue-ssh-websocket-token";
+const REVOKE_SSH_CLIENT_SESSION_CHANNEL = "desktop:revoke-ssh-client-session";
 const SSH_PASSWORD_PROMPT_CHANNEL = "desktop:ssh-password-prompt";
 const RESOLVE_SSH_PASSWORD_PROMPT_CHANNEL = "desktop:resolve-ssh-password-prompt";
 const GET_SERVER_EXPOSURE_STATE_CHANNEL = "desktop:get-server-exposure-state";
@@ -300,6 +301,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     ipcRenderer.invoke(FETCH_SSH_SESSION_STATE_CHANNEL, httpBaseUrl, bearerToken),
   issueSshWebSocketToken: (httpBaseUrl, bearerToken) =>
     ipcRenderer.invoke(ISSUE_SSH_WEBSOCKET_TOKEN_CHANNEL, httpBaseUrl, bearerToken),
+  revokeSshClientSession: (httpBaseUrl, ownerBearerToken, sessionId) =>
+    ipcRenderer.invoke(REVOKE_SSH_CLIENT_SESSION_CHANNEL, httpBaseUrl, ownerBearerToken, sessionId),
   onSshPasswordPrompt: (listener) => {
     const wrappedListener = (_event: Electron.IpcRendererEvent, request: unknown) => {
       if (typeof request !== "object" || request === null) return;

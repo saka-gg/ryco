@@ -1,4 +1,4 @@
-import type { AgentControlProposalStreamEvent, EnvironmentId } from "@ryco/contracts";
+import type { AgentControlProposalStreamEventView, EnvironmentId } from "@ryco/contracts";
 import { create } from "zustand";
 
 import {
@@ -11,7 +11,7 @@ export interface AgentControlStoreState {
   readonly queueByEnvironmentId: Readonly<Record<string, AgentControlQueueState>>;
   readonly applyStreamEvent: (
     environmentId: EnvironmentId,
-    event: AgentControlProposalStreamEvent,
+    event: AgentControlProposalStreamEventView,
   ) => void;
   readonly clearEnvironment: (environmentId: EnvironmentId) => void;
 }

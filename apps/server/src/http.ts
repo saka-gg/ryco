@@ -34,7 +34,10 @@ import { loadOtlpExporters } from "./observability/OtelEnvironment.ts";
 import { decodeOtlpTraceRecords } from "./observability/TraceRecord.ts";
 import { BrowserTraceCollector } from "./observability/Services/BrowserTraceCollector.ts";
 import { ProjectFaviconResolver } from "./project/Services/ProjectFaviconResolver.ts";
-import { ProjectAvatarStore } from "./project/Services/ProjectAvatarStore.ts";
+import {
+  PROJECT_AVATAR_ID_PATTERN,
+  ProjectAvatarStore,
+} from "./project/Services/ProjectAvatarStore.ts";
 import type { ProjectId } from "@ryco/contracts";
 import {
   hasPrecompressibleAssetExtension,
@@ -812,8 +815,6 @@ const AvatarFormSchema = Schema.Struct({
   avatar: Multipart.SingleFileSchema,
 });
 
-const PROJECT_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
-
 export const projectAvatarUploadRouteLayer = HttpRouter.add(
   "POST",
   "/api/project-avatar/upload",
@@ -823,7 +824,7 @@ export const projectAvatarUploadRouteLayer = HttpRouter.add(
     const url = HttpServerRequest.toURL(request);
     if (Option.isNone(url)) return HttpServerResponse.text("Bad Request", { status: 400 });
     const projectId = url.value.searchParams.get("projectId");
-    if (!projectId || !PROJECT_ID_PATTERN.test(projectId)) {
+    if (!projectId || !PROJECT_AVATAR_ID_PATTERN.test(projectId)) {
       return HttpServerResponse.text("Invalid projectId", { status: 400 });
     }
 
@@ -868,7 +869,7 @@ export const projectAvatarServeRouteLayer = HttpRouter.add(
     const url = HttpServerRequest.toURL(request);
     if (Option.isNone(url)) return HttpServerResponse.text("Bad Request", { status: 400 });
     const projectId = url.value.searchParams.get("projectId");
-    if (!projectId || !PROJECT_ID_PATTERN.test(projectId)) {
+    if (!projectId || !PROJECT_AVATAR_ID_PATTERN.test(projectId)) {
       return HttpServerResponse.text("Invalid projectId", { status: 400 });
     }
 

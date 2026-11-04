@@ -334,3 +334,37 @@ export function isSameFilesystemPath(left: string, right: string): boolean {
   }
   return normalizedLeft === normalizedRight;
 }
+
+/**
+ * The path as people read it: the home directory as `~`, otherwise the full
+ * path. Works for POSIX and Windows separators.
+ */
+export function formatProjectPath(cwd: string, homeDir: string | null | undefined): string {
+  if (homeDir && homeDir.length > 1) {
+    const home = homeDir.replace(/[\\/]+$/u, "");
+    if (cwd === home) return "~";
+    if (cwd.startsWith(`${home}/`) || cwd.startsWith(`${home}\\`)) {
+      return `~${cwd.slice(home.length)}`;
+    }
+  }
+  return cwd;
+}
+
+/**
+ * A path as people read it when its node may not have reported a home directory:
+ * home-relative under `homeDirectory` when given, else under the home its layout
+ * implies (see `inferHomeDirectory`). A trailing separator is dropped.
+ */
+export function displayProjectPath(path: string, homeDirectory?: string | null): string {
+  const normalized = normalizeProjectPathForDispatch(path);
+  return formatProjectPath(normalized, homeDirectory ?? inferHomeDirectory(normalized));
+}
+
+/**
+ * The home directory a path sits under, inferred from the usual layouts
+ * (`/Users/<name>`, `/home/<name>`, `C:\\Users\\<name>`); servers do not report it.
+ */
+export function inferHomeDirectory(cwd: string): string | null {
+  const match = /^(\/Users\/[^/]+|\/home\/[^/]+|[A-Za-z]:\\Users\\[^\\]+)(?=$|[\\/])/u.exec(cwd);
+  return match?.[1] ?? null;
+}

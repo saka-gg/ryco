@@ -1,10 +1,14 @@
 import {
   AGENT_CONTROL_QUEUE_RECENT_LIMIT_MAX,
   type AgentControlProposal,
-  type AgentControlProposalStreamEvent,
+  type AgentControlProposalStreamEventView,
+  type AgentControlProposalView,
   type EnvironmentId,
 } from "@ryco/contracts";
-import { isTerminalAgentControlStatus } from "@ryco/client-runtime/state/agentControl";
+import {
+  isSupportedAgentControlProposal,
+  isTerminalAgentControlStatus,
+} from "@ryco/client-runtime/state/agentControl";
 import { create } from "zustand";
 
 import { readEnvironmentApiForConnection } from "../../../environmentApi";
@@ -56,11 +60,13 @@ function pruned(history: Record<string, AgentControlProposal>): ScheduleProposal
  */
 export function absorbScheduleProposals(
   history: ScheduleProposalHistory,
-  proposals: readonly AgentControlProposal[],
+  proposals: readonly AgentControlProposalView[],
 ): ScheduleProposalHistory {
   let next: Record<string, AgentControlProposal> | null = null;
   for (const proposal of proposals) {
     if (!isTerminalAgentControlStatus(proposal.status)) continue;
+    // A plan this build cannot read is no schedule change.
+    if (!isSupportedAgentControlProposal(proposal)) continue;
     const automationId = scheduleAutomationIdOf(proposal);
     if (automationId === null) continue;
     const current = (next ?? history)[automationId];
@@ -74,8 +80,8 @@ export function absorbScheduleProposals(
 
 /** Every proposal document a queue stream event carries. */
 export function proposalsOfStreamEvent(
-  event: AgentControlProposalStreamEvent,
-): readonly AgentControlProposal[] {
+  event: AgentControlProposalStreamEventView,
+): readonly AgentControlProposalView[] {
   return event.type === "snapshot"
     ? [...event.queue.active, ...event.queue.recent]
     : [event.proposal];
@@ -100,7 +106,7 @@ export const useScheduleProposalHistoryStore = create<ScheduleProposalHistorySta
 
 export function recordScheduleProposals(
   environmentId: EnvironmentId,
-  proposals: readonly AgentControlProposal[],
+  proposals: readonly AgentControlProposalView[],
 ): void {
   const state = useScheduleProposalHistoryStore.getState();
   const current = state.byEnvironment[environmentId] ?? EMPTY_HISTORY;

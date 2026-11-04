@@ -59,29 +59,8 @@ export function projectRepositoryLabel(
   return primary?.ownerRepo ?? identity.displayName ?? null;
 }
 
-/**
- * The path as people read it: the home directory as `~`, otherwise the full
- * path. Works for POSIX and Windows separators.
- */
-export function formatProjectPath(cwd: string, homeDir: string | null | undefined): string {
-  if (homeDir && homeDir.length > 1) {
-    const home = homeDir.replace(/[\\/]+$/u, "");
-    if (cwd === home) return "~";
-    if (cwd.startsWith(`${home}/`) || cwd.startsWith(`${home}\\`)) {
-      return `~${cwd.slice(home.length)}`;
-    }
-  }
-  return cwd;
-}
-
-/**
- * The home directory a path sits under, inferred from the usual layouts
- * (`/Users/<name>`, `/home/<name>`, `C:\\Users\\<name>`); servers do not report it.
- */
-export function inferHomeDirectory(cwd: string): string | null {
-  const match = /^(\/Users\/[^/]+|\/home\/[^/]+|[A-Za-z]:\\Users\\[^\\]+)(?=$|[\\/])/u.exec(cwd);
-  return match?.[1] ?? null;
-}
+// Shared with the sidebar's project menus, so they live with the other path helpers.
+export { displayProjectPath, formatProjectPath, inferHomeDirectory } from "../../lib/projectPaths";
 
 /** The last two path segments (`Code/ryco`), for one-line subtitles. */
 export function projectPathTail(cwd: string): string {
@@ -214,20 +193,22 @@ export function findProjectCheckout(
  * Devices this client knows that do not have the project, by label, so the
  * page can say where it is missing. The primary device reads "This device".
  */
-export function devicesWithoutProject(input: {
-  readonly knownDevices: ReadonlyArray<{ readonly environmentId: string; readonly label: string }>;
+export function devicesWithoutProject<
+  Device extends { readonly environmentId: string; readonly label: string },
+>(input: {
+  readonly knownDevices: ReadonlyArray<Device>;
   readonly projectEnvironmentIds: ReadonlySet<string>;
-}): string[] {
+}): Device[] {
   const seen = new Set<string>();
-  const labels: string[] = [];
+  const devices: Device[] = [];
   for (const device of input.knownDevices) {
     if (input.projectEnvironmentIds.has(device.environmentId) || seen.has(device.environmentId)) {
       continue;
     }
     seen.add(device.environmentId);
-    labels.push(device.label);
+    devices.push(device);
   }
-  return labels;
+  return devices;
 }
 
 /** Direction of travel between two list positions: -1 up, 1 down, 0 none. */

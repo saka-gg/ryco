@@ -3,6 +3,7 @@ import type { EnvironmentApi, EnvironmentId } from "@ryco/contracts";
 import { isUnknownUnionMember } from "@ryco/contracts/base-schemas";
 
 import type { WsRpcClient } from "../rpc/index.ts";
+import { pickProjectCopyCalls } from "../rpc/wsRpcClient.ts";
 
 export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
   return {
@@ -83,8 +84,12 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       promoteChatPreview: rpcClient.projects.promoteChatPreview,
       promoteChat: rpcClient.projects.promoteChat,
       deleteChatFolder: rpcClient.projects.deleteChatFolder,
+      ...pickProjectCopyCalls(rpcClient.projects),
     },
-    filesystem: { browse: rpcClient.filesystem.browse },
+    filesystem: {
+      browse: rpcClient.filesystem.browse,
+      searchDirectories: rpcClient.filesystem.searchDirectories,
+    },
     sourceControl: {
       lookupRepository: rpcClient.sourceControl.lookupRepository,
       searchRepositories: rpcClient.sourceControl.searchRepositories,
@@ -225,6 +230,8 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
             acceptProposal: rpcClient.agentControl.acceptProposal,
             rejectProposal: rpcClient.agentControl.rejectProposal,
             subscribeProposals: rpcClient.agentControl.subscribeProposals,
+            publishNodeDirectory: rpcClient.agentControl.publishNodeDirectory,
+            reportClientExecution: rpcClient.agentControl.reportClientExecution,
             listIntegrations: rpcClient.agentControl.listIntegrations,
             createIntegration: rpcClient.agentControl.createIntegration,
             updateIntegration: rpcClient.agentControl.updateIntegration,

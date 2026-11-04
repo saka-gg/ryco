@@ -115,13 +115,15 @@ import * as RpcGroup from "effect/rpc/RpcGroup";
 import { OpenError, OpenInEditorInput } from "./editor.ts";
 import {
   AGENT_CONTROL_WS_METHODS,
+  AgentControlAcceptProposalInput,
   AgentControlDecideProposalInput,
   AgentControlGetProposalInput,
-  AgentControlGetProposalResult,
+  AgentControlGetProposalResultView,
   AgentControlListProposalsInput,
-  AgentControlProposalQueue,
-  AgentControlProposalReceipt,
-  AgentControlProposalStreamEvent,
+  AgentControlProposalQueueView,
+  AgentControlProposalReceiptView,
+  AgentControlProposalStreamEventView,
+  AgentControlSubscribeProposalsInput,
   AgentControlRpcError,
   AgentControlExternalIntegrationCreateInput,
   AgentControlExternalIntegrationDeleteResult,
@@ -2612,35 +2614,37 @@ export const WsAutomationCommandRpc = Rpc.make(AGENT_CONTROL_WS_METHODS.automati
   error: Schema.Union([AgentControlRpcError, AuthRpcError]),
 });
 
+// The proposal reads, the stream and the decisions answer with the tolerant
+// views, so a plan kind this build does not know arrives as `unsupported`.
 export const WsAgentControlListProposalsRpc = Rpc.make(AGENT_CONTROL_WS_METHODS.listProposals, {
   payload: AgentControlListProposalsInput,
-  success: AgentControlProposalQueue,
+  success: AgentControlProposalQueueView,
   error: Schema.Union([AgentControlRpcError, AuthRpcError]),
 });
 
 export const WsAgentControlGetProposalRpc = Rpc.make(AGENT_CONTROL_WS_METHODS.getProposal, {
   payload: AgentControlGetProposalInput,
-  success: AgentControlGetProposalResult,
+  success: AgentControlGetProposalResultView,
   error: Schema.Union([AgentControlRpcError, AuthRpcError]),
 });
 
 export const WsAgentControlAcceptProposalRpc = Rpc.make(AGENT_CONTROL_WS_METHODS.acceptProposal, {
-  payload: AgentControlDecideProposalInput,
-  success: AgentControlProposalReceipt,
+  payload: AgentControlAcceptProposalInput,
+  success: AgentControlProposalReceiptView,
   error: Schema.Union([AgentControlRpcError, AuthRpcError]),
 });
 
 export const WsAgentControlRejectProposalRpc = Rpc.make(AGENT_CONTROL_WS_METHODS.rejectProposal, {
   payload: AgentControlDecideProposalInput,
-  success: AgentControlProposalReceipt,
+  success: AgentControlProposalReceiptView,
   error: Schema.Union([AgentControlRpcError, AuthRpcError]),
 });
 
 export const WsAgentControlSubscribeProposalsRpc = Rpc.make(
   AGENT_CONTROL_WS_METHODS.subscribeProposals,
   {
-    payload: Schema.Struct({}),
-    success: AgentControlProposalStreamEvent,
+    payload: AgentControlSubscribeProposalsInput,
+    success: AgentControlProposalStreamEventView,
     error: Schema.Union([AgentControlRpcError, AuthRpcError]),
     stream: true,
   },

@@ -33,6 +33,7 @@ import {
   AgentControlProposalNotFoundError,
 } from "../Errors.ts";
 import { agentControlPrincipalScope } from "../principal.ts";
+import { isAgentControlProjectCopyPlan } from "../projectCopyControl.ts";
 import { computeAgentControlPlanDigest } from "../planDigest.ts";
 import { AgentControlPolicy } from "../Services/AgentControlPolicy.ts";
 import { AgentControlProposalEvents } from "../Services/AgentControlProposalEvents.ts";
@@ -167,6 +168,22 @@ const auditMetadataForProposal = (proposal: AgentControlProposal): AgentControlA
           riskClass: proposal.plan.riskClass,
           sensitivePayloadsExcluded: "true",
         };
+      // Identifiers and switches only: never the repository URL, a path, a node label, a title,
+      // the setup command or the follow-up prompt.
+      case "importProject":
+        return { projectId: proposal.plan.projectId };
+      case "copyProjectToNode":
+        return {
+          ...(proposal.plan.source.kind === "project"
+            ? { sourceProjectId: proposal.plan.source.projectId }
+            : {}),
+          targetEnvironmentId: proposal.plan.target.environmentId,
+          bringCommits: String(proposal.plan.bringCommits),
+          bringChanges: String(proposal.plan.bringChanges),
+          copySettings: String(proposal.plan.copySettings),
+          setup: String(proposal.plan.setup !== null),
+          followUpThread: String(proposal.plan.followUpThread !== null),
+        };
       case "deviceControlConsent":
         // What the consent allows runs directly and is never recorded here.
         return {
@@ -285,7 +302,7 @@ const makeAgentControlProposalStore = Effect.gen(function* () {
    * Winner-takes-once transition: validate against the legal table, then
    * compare-and-set. A lost race re-reads and reports the actual state.
    */
-  const transitionTo = (input: {
+  const transitionTo = <E = never>(input: {
     readonly current: AgentControlProposal;
     readonly nextStatus: AgentControlProposalStatus;
     readonly actor: AgentControlTransitionActor;
@@ -294,6 +311,10 @@ const makeAgentControlProposalStore = Effect.gen(function* () {
     readonly eventKind: AgentControlAuditEventKind;
     readonly updatedAt: IsoDateTime;
     readonly extraMetadata?: AgentControlAuditMetadata;
+    /** Joins the transaction after the audit row (see `beginExecution`). */
+    readonly withinTransaction?:
+      | ((updated: AgentControlProposal) => Effect.Effect<void, E>)
+      | undefined;
   }) =>
     Effect.gen(function* () {
       const issue = proposalTransitionIssue({
@@ -351,13 +372,18 @@ const makeAgentControlProposalStore = Effect.gen(function* () {
                         : {
                             outcome: input.result.outcome,
                             errorCode: input.result.error.code,
-                            failureDetail: input.result.error.message.slice(0, 256),
+                            // Cross-node project errors come from git, another node or the
+                            // approving client, and can name URLs and paths: outcome only.
+                            ...(isAgentControlProjectCopyPlan(updated.plan)
+                              ? {}
+                              : { failureDetail: input.result.error.message.slice(0, 256) }),
                             ...(input.result.execution === undefined
                               ? {}
                               : { operationId: input.result.execution.operationId }),
                           },
                   }),
             });
+            if (input.withinTransaction !== undefined) yield* input.withinTransaction(updated);
           }
           return won;
         }),
@@ -619,6 +645,7 @@ const makeAgentControlProposalStore = Effect.gen(function* () {
         result: null,
         eventKind: AGENT_CONTROL_AUDIT_EVENT_KINDS.proposalExecuting,
         updatedAt: input.now,
+        withinTransaction: input.withinTransaction,
       });
     });
 

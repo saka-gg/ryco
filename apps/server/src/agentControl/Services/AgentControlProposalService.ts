@@ -25,6 +25,7 @@
  * @module AgentControlProposalService
  */
 import type {
+  AgentControlClientExecutorId,
   AgentControlProposal,
   AgentControlPrincipal,
   AgentControlRequestId,
@@ -42,11 +43,15 @@ import type {
   SubmitAgentControlProposalInput,
   SubmitAgentControlProposalResult,
 } from "./AgentControlProposalStore.ts";
-import type { AgentControlSettingsChangeUnsupportedError } from "../Errors.ts";
+import type {
+  AgentControlClientExecutionError,
+  AgentControlSettingsChangeUnsupportedError,
+} from "../Errors.ts";
 
 export type AgentControlProposalDecisionError =
   | AgentControlProposalStoreError
-  | AgentControlSettingsChangeUnsupportedError;
+  | AgentControlSettingsChangeUnsupportedError
+  | AgentControlClientExecutionError;
 
 export interface AgentControlQueueLimitsInput {
   /** Capped at `AGENT_CONTROL_QUEUE_ACTIVE_LIMIT_MAX`. */
@@ -58,6 +63,14 @@ export interface AgentControlQueueLimitsInput {
 export interface DecideAgentControlProposalRequest {
   readonly proposalId: AgentControlProposalId;
   readonly decidedAt: IsoDateTime;
+}
+
+export interface AcceptAgentControlProposalRequest extends DecideAgentControlProposalRequest {
+  /**
+   * The approving client's executor, for a client-executed kind
+   * (`AGENT_CONTROL_CLIENT_EXECUTED_PLAN_KINDS`); every other kind ignores it.
+   */
+  readonly executeOnClient?: { readonly executorId: AgentControlClientExecutorId } | undefined;
 }
 
 /** Bounded lifecycle receipt for a proposal; see the contract's docs. */
@@ -104,9 +117,14 @@ export interface AgentControlProposalServiceShape {
     proposalId: AgentControlProposalId,
   ) => Effect.Effect<Option.Option<AgentControlProposal>, AgentControlProposalStoreError>;
 
-  /** Accept a pending proposal (idempotent when it is already approved). */
+  /**
+   * Accept a pending proposal (idempotent when it is already approved). A client-executed kind
+   * requires `executeOnClient` and also answers an `approved` or `executing` proposal with its
+   * receipt: binding the executor is the next step (`AgentControlExecution.beginClientExecution`),
+   * which refuses a different executor.
+   */
   readonly accept: (
-    input: DecideAgentControlProposalRequest,
+    input: AcceptAgentControlProposalRequest,
   ) => Effect.Effect<AgentControlProposalReceipt, AgentControlProposalDecisionError>;
 
   /** Reject a pending proposal (idempotent when it is already rejected). */

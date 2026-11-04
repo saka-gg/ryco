@@ -235,7 +235,7 @@ describe("devicesWithoutProject", () => {
           { environmentId: "c", label: "Linux box" },
         ],
         projectEnvironmentIds: new Set(["a"]),
-      }),
+      }).map((device) => device.label),
     ).toEqual(["Studio", "Linux box"]);
   });
 });

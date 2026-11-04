@@ -47,6 +47,7 @@ import { useMessageQueueStore } from "../messageQueueStore";
 import { render } from "vitest-browser-react";
 
 import { useCommandPaletteStore } from "../commandPaletteStore";
+import { resetProjectNodesDialogStoreForTests } from "./projectNodes/projectNodesDialogStore";
 import {
   useComposerDraftStore,
   DraftId,
@@ -2863,6 +2864,7 @@ export function setupChatViewBrowserSuite() {
       openIntent: null,
       workspaceSearchMode: null,
     });
+    resetProjectNodesDialogStoreForTests();
     useInboxFilterStore.setState({ draft: "", environmentId: null, project: null, status: "all" });
     // A notice left by an earlier test would take this test's Undo key.
     sidebarUndo.dispose();

@@ -2127,6 +2127,86 @@ describe("GeneralSettingsPanel observability", () => {
     expect(fetchMock).toHaveBeenCalled();
   });
 
+  it("lists owner pairing links beside client ones, to revoke but never to share", async () => {
+    window.desktopBridge = createDesktopBridgeStub({
+      serverExposureState: {
+        mode: "network-accessible",
+        endpointUrl: "http://192.168.1.44:3773",
+        advertisedHost: "192.168.1.44",
+        tailscaleServeEnabled: false,
+        tailscaleServePort: 443,
+      },
+    });
+    authAccessHarness.setSnapshot({
+      pairingLinks: [
+        // `ryco setup` and `ryco auth pairing create --role owner` mint these.
+        makePairingLink({
+          id: "pairing-link-owner",
+          credential: "owner-pairing-token",
+          role: "owner",
+          subject: "one-time-token",
+          label: "ryco setup",
+          createdAt: "2036-04-07T00:00:00.000Z",
+          expiresAt: "2036-04-07T00:15:00.000Z",
+        }),
+        makePairingLink({
+          id: "pairing-link-client",
+          credential: "client-pairing-token",
+          role: "client",
+          subject: "one-time-token",
+          label: "Julius iPhone",
+          createdAt: "2036-04-07T00:00:00.000Z",
+          expiresAt: "2036-04-10T00:05:00.000Z",
+        }),
+      ],
+      clientSessions: [],
+    });
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/api/auth/pairing-links/revoke") && method === "POST") {
+        authAccessHarness.emitPairingLinkRemoved("pairing-link-owner");
+        return new Response(JSON.stringify({ revoked: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      throw new Error(`Unhandled fetch ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <ConnectionsSettings />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect.element(page.getByText("ryco setup", { exact: true })).toBeInTheDocument();
+    await expect.element(page.getByText("Julius iPhone", { exact: true })).toBeInTheDocument();
+    await expect
+      .element(page.getByText("Grants full access to this node, so its link is not shown here."))
+      .toBeInTheDocument();
+    // Only the client link offers its URL, code and QR code; both can be revoked.
+    expect(page.getByRole("button", { name: /^Copy pairing URL for:/ }).elements()).toHaveLength(1);
+    expect(page.getByRole("button", { name: "Show QR code" }).elements()).toHaveLength(1);
+    const revokeButtons = page.getByRole("button", { name: "Revoke", exact: true });
+    expect(revokeButtons.elements()).toHaveLength(2);
+
+    await revokeButtons.first().click();
+    await expect.element(page.getByText("ryco setup", { exact: true })).not.toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(
+        ([input, init]) =>
+          String(input).endsWith("/api/auth/pairing-links/revoke") &&
+          String(init?.body).includes("pairing-link-owner"),
+      ),
+    ).toBe(true);
+    await expect.element(page.getByText("Julius iPhone", { exact: true })).toBeInTheDocument();
+  });
+
   it("shows a disabled network access toggle with guidance in desktop builds", async () => {
     const desktopBridge = createDesktopBridgeStub();
     window.desktopBridge = desktopBridge;

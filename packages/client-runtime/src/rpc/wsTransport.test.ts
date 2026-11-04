@@ -1,6 +1,7 @@
 import {
   AGENT_CONTROL_WS_METHODS,
   ORCHESTRATION_WS_METHODS,
+  PROJECT_COPY_WS_METHODS,
   ThreadId,
   WS_METHODS,
 } from "@ryco/contracts";
@@ -8,6 +9,7 @@ import { isUnknownUnionMember, UnknownUnionMember } from "@ryco/contracts/base-s
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { fakeSocketPlatform, type FakeWebSocket } from "../../test/fakeWebSocket.ts";
+import { makeProjectCopyRpcProtocolClient } from "./projectCopyRpcClient.ts";
 import { type RpcRequestAdmission, type WsProtocolLifecycleHandlers } from "./protocol.ts";
 import { resetRequestLatencyStateForTests } from "./requestLatencyState.ts";
 import { resetWsConnectionStateForTests } from "./wsConnectionState.ts";
@@ -425,6 +427,57 @@ describe("WsTransport unary requests", () => {
           .some((message) => message._tag === "Interrupt" && message.requestId === request.id),
       ).toBe(true),
     );
+  });
+});
+
+describe("WsTransport clients of another group", () => {
+  it("carries their requests on the same socket beside the app's own", async () => {
+    const transport = connect(() => "allowed");
+    const copy = transport.withClient(makeProjectCopyRpcProtocolClient);
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    sockets[0]!.open();
+
+    const imports = copy.request((client) => client[PROJECT_COPY_WS_METHODS.listImports]({}));
+    const summary = transport.request((client) =>
+      client[WS_METHODS.serverGetUsageSummary]({
+        contractVersion: 2,
+        endDate: "2026-08-10",
+        timeZone: "UTC",
+      }),
+    );
+    const sent = (tag: string) => sockets[0]!.requests().find((candidate) => candidate.tag === tag);
+    await vi.waitFor(() => {
+      expect(sent(PROJECT_COPY_WS_METHODS.listImports)).toBeDefined();
+      expect(sent(WS_METHODS.serverGetUsageSummary)).toBeDefined();
+    });
+    // A second call reuses the session's copy client.
+    const again = copy.request((client) => client[PROJECT_COPY_WS_METHODS.listImports]({}));
+    await vi.waitFor(() =>
+      expect(
+        sockets[0]!
+          .requests()
+          .filter((request) => request.tag === PROJECT_COPY_WS_METHODS.listImports),
+      ).toHaveLength(2),
+    );
+    expect(sockets).toHaveLength(1);
+
+    for (const request of sockets[0]!
+      .requests()
+      .filter((candidate) => candidate.tag === PROJECT_COPY_WS_METHODS.listImports)) {
+      sockets[0]!.reply({
+        _tag: "Exit",
+        requestId: request.id,
+        exit: { _tag: "Success", value: { imports: [] } },
+      });
+    }
+    await expect(imports).resolves.toEqual({ imports: [] });
+    await expect(again).resolves.toEqual({ imports: [] });
+    sockets[0]!.reply({
+      _tag: "Exit",
+      requestId: sent(WS_METHODS.serverGetUsageSummary)!.id,
+      exit: { _tag: "Failure", cause: [{ _tag: "Die", defect: "summary unavailable" }] },
+    });
+    await expect(summary).rejects.toBeDefined();
   });
 });
 

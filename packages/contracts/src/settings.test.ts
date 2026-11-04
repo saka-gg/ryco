@@ -567,6 +567,11 @@ describe("worktree branch prefix settings", () => {
     "team~",
     "team^",
     "team@{1}",
+    // A line separator must not hide what follows it from the checks.
+    "team\u2028..agents",
+    "team\u2029/.hidden",
+    "team\u2028/x.lock",
+    "team\u2028.",
     "a".repeat(129),
   ])("rejects invalid Git namespace %j", (prefix) => {
     expect(() => decodeServerSettings({ worktreeBranchPrefix: prefix })).toThrow();

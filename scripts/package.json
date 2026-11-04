@@ -5,7 +5,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit --incremental",
     "typecheck:fast": "tsc-rs --noEmit --incremental --tsBuildInfoFile .turbo/tsc-rs.tsbuildinfo",
-    "test": "vp test run"
+    "test": "vp test run",
+    "test:e2e:cross-node": "vp test run --config e2e/cross-node/vitest.config.ts"
   },
   "dependencies": {
     "@effect/platform-node": "catalog:",

@@ -2246,6 +2246,23 @@ label:has(> select#reasoning-effort) select {
   }
 }
 
+/* Cross-node project copy: the finished copy's check pops in, as the mockup's
+   `.enter` (160 ms ease-out, from 4px up at 99%). */
+.project-copy-pop {
+  animation: project-copy-pop 160ms ease-out both;
+}
+@keyframes project-copy-pop {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.99);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .project-copy-pop {
+    animation: none;
+  }
+}
+
 /* Transcript chapters (WorkChapterRow): steps grow in, scroll out of the live
    ticker, settle with a drawn check; the live node breathes and its rail
    carries a travelling highlight. Every loop is transform/opacity only, so the

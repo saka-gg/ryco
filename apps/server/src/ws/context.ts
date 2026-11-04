@@ -18,6 +18,13 @@ import { WorkspaceChangeSummary } from "../workspace/WorkspaceChangeSummary.ts";
 import { SessionImport } from "../imports/SessionImport.ts";
 import { ThreadFork } from "../threadFork/Services/ThreadFork.ts";
 import { AutomationCentre } from "../agentControl/Services/AutomationCentre.ts";
+import { AgentControlNodeDirectory } from "../agentControl/Services/AgentControlNodeDirectory.ts";
+import { AgentControlExecution } from "../agentControl/Services/AgentControlExecution.ts";
+import { GitNetwork } from "../projectCopy/Services/GitNetwork.ts";
+import { NodePaths } from "../projectCopy/Services/NodePaths.ts";
+import { ProjectExport } from "../projectCopy/Services/ProjectExport.ts";
+import { ProjectImports } from "../projectCopy/Services/ProjectImports.ts";
+import { ProjectTransfers } from "../projectCopy/Services/ProjectTransfers.ts";
 import {
   Cause,
   DateTime,
@@ -46,9 +53,9 @@ import {
   type ServerProvider,
   SourceControlProviderError,
   WORKTREE_SETUP_CANCELLED_MESSAGE,
-  WsRpcGroup,
   WorktreeId,
 } from "@ryco/contracts";
+import { WsApplicationRpcGroup } from "@ryco/contracts/project-copy-rpc";
 import { RpcGroup } from "effect/rpc";
 import { issueLinkedDirectAccess } from "../auth/linkedDirectAccess.ts";
 
@@ -170,7 +177,7 @@ import { makeWorktreeSetupTracker } from "../project/Layers/WorktreeSetupTracker
 import { GitActionRunner } from "../git/GitActionRunner.ts";
 
 export { isThreadDetailEvent } from "./context/orchestrationEvents.ts";
-export { toAuthAccessStreamEvent } from "./context/authEvents.ts";
+export { isListedAuthAccessChange, toAuthAccessStreamEvent } from "./context/authEvents.ts";
 export { toOpinionatedPluginRpcError } from "./context/gitErrors.ts";
 export {
   PROVIDER_STATUS_DEBOUNCE_MS,
@@ -245,6 +252,18 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const agentControlExternalInstallations = yield* Effect.serviceOption(
       AgentControlExternalInstallationService,
     );
+    // Optional for the same route-test reason; production provides the cross-node project copy
+    // services and the node directory beneath the runtime services.
+    const projectCopy = {
+      nodePaths: yield* Effect.serviceOption(NodePaths),
+      gitNetwork: yield* Effect.serviceOption(GitNetwork),
+      projectExport: yield* Effect.serviceOption(ProjectExport),
+      projectTransfers: yield* Effect.serviceOption(ProjectTransfers),
+      projectImports: yield* Effect.serviceOption(ProjectImports),
+    };
+    const agentControlNodeDirectory = yield* Effect.serviceOption(AgentControlNodeDirectory);
+    // Binds and settles client-executed proposals (`copyProjectToNode`) for the approving client.
+    const agentControlExecution = yield* Effect.serviceOption(AgentControlExecution);
     const checkpointDiffQuery = yield* CheckpointDiffQuery;
     const keybindings = yield* Keybindings;
     const open = yield* Open;
@@ -1419,6 +1438,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       );
 
     return {
+      principal,
       storageService,
       workspaceLifecycle,
       workspaceChangeSummary,
@@ -1438,6 +1458,9 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       agentControlProposals,
       agentControlExternalIntegrations,
       agentControlExternalInstallations,
+      agentControlNodeDirectory,
+      agentControlExecution,
+      projectCopy,
       checkpointDiffQuery,
       keybindings,
       open,
@@ -1543,7 +1566,8 @@ type EffectSuccess<T> = T extends Effect.Effect<infer A, infer _E, infer _R> ? A
 
 export type WsRpcContext = EffectSuccess<ReturnType<typeof makeWsRpcContext>>;
 
-export type WsRpcHandlers = RpcGroup.HandlersFrom<RpcGroup.Rpcs<typeof WsRpcGroup>>;
+/** The application group's handlers, the copy RPCs' among them. */
+export type WsRpcHandlers = RpcGroup.HandlersFrom<RpcGroup.Rpcs<typeof WsApplicationRpcGroup>>;
 
 export const defineWsHandlers = <const H extends Partial<WsRpcHandlers>>(handlers: H): H =>
   handlers;

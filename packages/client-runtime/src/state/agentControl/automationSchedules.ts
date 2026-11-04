@@ -33,6 +33,7 @@ import {
   type AgentControlProposal,
   type AgentControlProposalId,
   type AgentControlProposalStatus,
+  type AgentControlProposalView,
 } from "@ryco/contracts/agent-control";
 import {
   AUTOMATION_LIMITS,
@@ -61,6 +62,8 @@ import {
 } from "@ryco/shared/automationSchedule";
 import { localDateTime } from "@ryco/shared/automationCalendar";
 import { getModelDisplayName, sameModelSelection } from "@ryco/shared/model";
+
+import { isSupportedAgentControlProposal } from "./proposalView.ts";
 
 // ── Run status ───────────────────────────────────────────────────────
 
@@ -390,13 +393,15 @@ const STATUS_RANK: Readonly<Record<AgentControlProposalStatus, number>> = {
 };
 
 /* One document per proposal id: the furthest along, then the latest written
-   (the snapshot and the queue store can each be a step behind). */
+   (the snapshot and the queue store can each be a step behind). A plan this
+   build cannot read is no schedule change, so it is left out. */
 function mergeProposals(
-  ...sources: ReadonlyArray<ReadonlyArray<AgentControlProposal>>
+  ...sources: ReadonlyArray<ReadonlyArray<AgentControlProposalView>>
 ): AgentControlProposal[] {
   const byId = new Map<string, AgentControlProposal>();
   for (const source of sources) {
     for (const proposal of source) {
+      if (!isSupportedAgentControlProposal(proposal)) continue;
       const current = byId.get(proposal.proposalId);
       if (
         !current ||
@@ -421,7 +426,7 @@ const isPending = (p: ScheduleProposal, nowMs: number | undefined) =>
  * past its deadline no longer counts (the server expires it on its next sweep).
  */
 export function pendingScheduleProposals(
-  proposals: ReadonlyArray<AgentControlProposal>,
+  proposals: ReadonlyArray<AgentControlProposalView>,
   options: { readonly projectId?: ProjectId; readonly nowMs?: number } = {},
 ): ScheduleProposal[] {
   return mergeProposals(proposals)
@@ -439,7 +444,7 @@ export interface ScheduleRowsInput {
   readonly projectId: ProjectId;
   readonly snapshot: AutomationCentreSnapshot;
   /** The environment's Agent Control queue (active and recent proposals). */
-  readonly queueProposals?: ReadonlyArray<AgentControlProposal>;
+  readonly queueProposals?: ReadonlyArray<AgentControlProposalView>;
   /** Proposal ids the user dismissed ("Dismiss" / "Remove"; lapsed or failed) this session. */
   readonly dismissedLapsed?: ReadonlySet<string>;
   readonly nowMs: number;

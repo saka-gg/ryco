@@ -6,6 +6,7 @@ import type {
   AgentControlDeviceControlConsentPlan,
   AgentControlProviderSessionPrincipal,
   AgentControlProposal,
+  EnvironmentId,
   ModelSelection,
   OrchestrationShellSnapshot,
   OrchestrationThreadShell,
@@ -13,7 +14,22 @@ import type {
   ServerProvider,
 } from "@ryco/contracts";
 import { AGENT_CONTROL_CAPABILITIES, ThreadId } from "@ryco/contracts";
+import { isChatProject } from "@ryco/shared/projectKind";
 import { Effect, Layer, Option } from "effect";
+
+import { ServerEnvironment } from "../../environment/Services/ServerEnvironment.ts";
+import { GitNetwork, type GitNetworkShape } from "../../projectCopy/Services/GitNetwork.ts";
+import { NodePaths, type NodePathsShape } from "../../projectCopy/Services/NodePaths.ts";
+import {
+  AgentControlNodeDirectory,
+  type AgentControlNodeDirectoryShape,
+} from "../Services/AgentControlNodeDirectory.ts";
+import {
+  describeProjectDestinationProblem,
+  hasParentDirectorySegment,
+  isAgentControlProjectCopyPlan,
+  type AgentControlProjectCopyPlan,
+} from "../projectCopyControl.ts";
 
 import {
   ProjectionSnapshotQuery,
@@ -365,6 +381,30 @@ const automationDefinitionForPlan = (
           enabled: true,
         };
 
+/**
+ * A follow-up setup thread follows `createThreads`' rules: never a more privileged runtime mode
+ * than the caller's, and isolated in a worktree when the caller is.
+ */
+const validateFollowUpThread = (
+  followUpThread: AgentControlProjectCopyPlan["followUpThread"],
+  origin: { readonly runtimeMode: RuntimeMode; readonly envMode: "local" | "worktree" },
+) => {
+  if (followUpThread === null) return Effect.void;
+  if (
+    runtimeModePrivilegeRank[followUpThread.runtimeMode] >
+    runtimeModePrivilegeRank[origin.runtimeMode]
+  )
+    return fail(
+      "privilege-escalation",
+      "The follow-up thread's runtime mode is more privileged than the caller's.",
+    );
+  if (origin.envMode === "worktree" && followUpThread.envMode !== "worktree")
+    return fail(
+      "worktree-escalation",
+      "A worktree-isolated caller cannot start a follow-up thread in a shared checkout.",
+    );
+  return Effect.void;
+};
 /** An agent's plan never lets a schedule run without asking: only its owner may. */
 const agentPlanRunsUnattended = (
   plan: Extract<
@@ -600,6 +640,13 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
   readonly automations?: AgentControlAutomationShape;
   readonly deviceService?: DeviceServiceShape;
   readonly localTasks?: Pick<LocalTaskServiceShape, "get">;
+  /** `importProject`: the destination folder's verdict on this node. */
+  readonly nodePaths?: Pick<NodePathsShape, "judgeProjectDestination">;
+  /** Both cross-node kinds: which remote URLs may be cloned. */
+  readonly gitNetwork?: Pick<GitNetworkShape, "classifyRemoteUrl" | "sanitizeRemoteUrl">;
+  /** `copyProjectToNode`: the other nodes owner clients published. */
+  readonly nodeDirectory?: Pick<AgentControlNodeDirectoryShape, "list">;
+  readonly thisEnvironmentId?: Effect.Effect<EnvironmentId>;
   /** Whether a chat is a delegated one whose result its delegating chat still waits for. */
   readonly delegatedReturnPending?: (
     threadId: ThreadId,
@@ -740,6 +787,182 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
       ),
     );
 
+  // A clone source: https, ssh or scp-style only (plain http is refused), and already stripped of
+  // credentials, since the plan is stored and shown to every owner client.
+  const validateCloneRemoteUrl = (remoteUrl: string) => {
+    const gitNetwork = deps.gitNetwork;
+    if (gitNetwork === undefined)
+      return fail("invalid-plan", "Repository URLs cannot be checked on this node.");
+    return Effect.try({
+      try: () => ({
+        kind: gitNetwork.classifyRemoteUrl(remoteUrl),
+        sanitized: gitNetwork.sanitizeRemoteUrl(remoteUrl),
+      }),
+      catch: () =>
+        new AgentControlPlanValidationError({
+          reason: "invalid-plan",
+          detail: "Repository URLs cannot be checked on this node.",
+        }),
+    }).pipe(
+      Effect.flatMap(({ kind, sanitized }) =>
+        kind === "http"
+          ? fail(
+              "invalid-plan",
+              "Plain http repositories are not cloned; use the https or ssh URL.",
+            )
+          : kind !== "https" && kind !== "ssh" && kind !== "scp"
+            ? fail(
+                "invalid-plan",
+                "The repository URL must be an https, ssh or scp-style (git@host:owner/repo) remote.",
+              )
+            : sanitized !== remoteUrl
+              ? fail("invalid-plan", "The repository URL must not carry credentials.")
+              : Effect.void,
+      ),
+    );
+  };
+
+  const validateImportProject = (
+    plan: Extract<AgentControlActionPlan, { kind: "importProject" }>,
+    origin: { readonly runtimeMode: RuntimeMode; readonly envMode: "local" | "worktree" },
+    snapshot: OrchestrationShellSnapshot,
+    providers: ReadonlyArray<ServerProvider>,
+  ) =>
+    Effect.gen(function* () {
+      if (snapshot.projects.some((project) => project.id === plan.projectId)) {
+        return yield* fail("project-stale", "The requested project identifier is already in use.");
+      }
+      yield* validateCloneRemoteUrl(plan.remoteUrl);
+      if (deps.nodePaths === undefined) {
+        return yield* fail(
+          "project-unavailable",
+          "Project destinations cannot be checked on this node.",
+        );
+      }
+      // The folder the user approves is the folder the clone lands in: still free, still the
+      // same canonical path, still where turns may run.
+      const judgement = yield* deps.nodePaths
+        .judgeProjectDestination({ path: plan.destinationPath, intent: "create" })
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new AgentControlPlanValidationError({
+                reason: "invalid-plan",
+                detail: error.message,
+              }),
+          ),
+        );
+      if (!judgement.usable) {
+        return yield* fail("invalid-plan", describeProjectDestinationProblem(judgement.preview));
+      }
+      if (judgement.canonicalPath !== plan.destinationPath) {
+        return yield* fail(
+          "project-stale",
+          "The destination folder resolves elsewhere now; propose the import again.",
+        );
+      }
+      yield* validateFollowUpThread(plan.followUpThread, origin);
+      if (plan.followUpThread !== null) {
+        yield* providerForSelection(providers, plan.followUpThread.modelSelection);
+      }
+    });
+
+  const validateCopyProjectToNode = (
+    plan: Extract<AgentControlActionPlan, { kind: "copyProjectToNode" }>,
+    origin: { readonly runtimeMode: RuntimeMode; readonly envMode: "local" | "worktree" },
+    snapshot: OrchestrationShellSnapshot,
+    phase: "submission" | "execution",
+  ) =>
+    Effect.gen(function* () {
+      if (plan.source.kind === "project") {
+        const sourceProjectId = plan.source.projectId;
+        const project = snapshot.projects.find((candidate) => candidate.id === sourceProjectId);
+        if (!project) {
+          return yield* fail("project-unavailable", "The project to copy is unavailable.");
+        }
+        if (isChatProject(project)) {
+          return yield* fail(
+            "invalid-plan",
+            "A chat cannot be copied to another node; turn it into a project first.",
+          );
+        }
+        if (project.updatedAt !== plan.source.expectedUpdatedAt) {
+          return yield* fail(
+            "project-stale",
+            "The project changed after the copy was requested; request it again.",
+          );
+        }
+      } else {
+        yield* validateCloneRemoteUrl(plan.source.remoteUrl);
+        if (plan.bringCommits || plan.bringChanges || plan.copySettings) {
+          return yield* fail(
+            "invalid-plan",
+            "Only a project on this node has commits, changes and settings to bring along.",
+          );
+        }
+      }
+
+      const thisEnvironmentId =
+        deps.thisEnvironmentId === undefined ? null : yield* deps.thisEnvironmentId;
+      const sameNode = `${plan.target.label} is this node; set the repository up here with ryco_propose_project_import instead.`;
+      if (plan.target.environmentId === thisEnvironmentId) {
+        return yield* fail("invalid-plan", sameNode);
+      }
+      if (deps.nodeDirectory === undefined) {
+        return yield* fail("invalid-plan", "This node keeps no directory of other nodes.");
+      }
+      const directory = yield* deps.nodeDirectory.list().pipe(
+        Effect.mapError(
+          (error) =>
+            new AgentControlPlanValidationError({
+              reason: "invalid-plan",
+              detail:
+                error.reason === "unavailable"
+                  ? "This node keeps no directory of other nodes."
+                  : "The node directory could not be read.",
+            }),
+        ),
+      );
+      const entry = directory.nodes.find(
+        (candidate) => candidate.environmentId === plan.target.environmentId,
+      );
+      if (entry === undefined) {
+        return yield* fail(
+          "invalid-plan",
+          `${plan.target.label} is not in this node's directory. Open Ryco on a device connected to that node so it can publish its node list.`,
+        );
+      }
+      if (entry.isThisNode) return yield* fail("invalid-plan", sameNode);
+      if (entry.projectCopySupport === "no") {
+        return yield* fail("invalid-plan", `Update Ryco on ${entry.label} to copy projects there.`);
+      }
+      // The card shows the label the agent named: it must be the directory's when proposed.
+      // A rename before approval does not invalidate the target.
+      if (phase === "submission" && entry.label !== plan.target.label) {
+        return yield* fail(
+          "invalid-plan",
+          "The target's label does not match the node directory; list the nodes again.",
+        );
+      }
+
+      if (plan.destination.kind === "path" && hasParentDirectorySegment(plan.destination.path)) {
+        return yield* fail("invalid-plan", "The destination path must not contain '..'.");
+      }
+      // Its model belongs to the target (null takes the target's default): resolved and shown
+      // by the approving client, then checked by the target.
+      yield* validateFollowUpThread(plan.followUpThread, origin);
+    });
+
+  const validateProjectCopyPlan = (
+    plan: AgentControlProjectCopyPlan,
+    origin: { readonly runtimeMode: RuntimeMode; readonly envMode: "local" | "worktree" },
+    snapshot: OrchestrationShellSnapshot,
+    providers: ReadonlyArray<ServerProvider>,
+    phase: "submission" | "execution",
+  ) =>
+    plan.kind === "importProject"
+      ? validateImportProject(plan, origin, snapshot, providers)
+      : validateCopyProjectToNode(plan, origin, snapshot, phase);
   /**
    * A delegated chat whose result is still awaited never watches a pull request, and no chat
    * makes it watch one: it reports the pull request in its result, and the delegating chat (the
@@ -887,6 +1110,16 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
       } else if (input.plan.kind === "deleteLocalTask") {
         // Tasks are the node's own list, not one project's: no project scope applies.
         yield* validateLocalTaskDelete(input.plan);
+      } else if (isAgentControlProjectCopyPlan(input.plan)) {
+        // A new project here, or any non-chat project of this node copied to another node: no
+        // project scope applies, the user approves the exact folder, source and target.
+        yield* validateProjectCopyPlan(
+          input.plan,
+          { runtimeMode: caller.runtimeMode, envMode: originEnvMode },
+          snapshot,
+          providers,
+          "submission",
+        );
       } else if (input.plan.kind === "workspaceLifecycle") {
         if (!deps.workspaces || input.plan.projectId !== caller.projectId)
           return yield* fail("project-scope", "Workspace control unavailable in caller scope.");
@@ -945,6 +1178,13 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
   const validateExternalSubmission: AgentControlActionValidatorShape["validateExternalSubmission"] =
     (input) =>
       Effect.gen(function* () {
+        // Checked first, so neither kind ever falls through to another kind's checks.
+        if (isAgentControlProjectCopyPlan(input.plan)) {
+          return yield* fail(
+            "privilege-escalation",
+            "External integrations cannot set up or copy projects.",
+          );
+        }
         if (
           input.plan.kind === "createThreads" &&
           input.plan.entries.some((entry) => entry.returnToOrigin)
@@ -1187,6 +1427,15 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
   ) =>
     Effect.gen(function* () {
       if (
+        isAgentControlProjectCopyPlan(proposal.plan) &&
+        proposal.principal.kind !== "provider-session"
+      ) {
+        return yield* fail(
+          "privilege-escalation",
+          "Only an agent thread on this node can set up or copy projects.",
+        );
+      }
+      if (
         proposal.plan.kind === "createThreads" &&
         proposal.plan.entries.some((entry) => entry.returnToOrigin) &&
         (proposal.principal.kind !== "provider-session" ||
@@ -1323,6 +1572,17 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
       }
       if (proposal.plan.kind === "deleteLocalTask") {
         yield* validateLocalTaskDelete(proposal.plan);
+        return;
+      }
+      if (isAgentControlProjectCopyPlan(proposal.plan)) {
+        // Provider-session only (checked above), against the caller's evidence at submission.
+        yield* validateProjectCopyPlan(
+          proposal.plan,
+          { runtimeMode: originRuntimeMode, envMode: originEnvMode },
+          snapshot,
+          providers,
+          "execution",
+        );
         return;
       }
       if (proposal.plan.kind === "worktreeHandoff" && principal.kind === "provider-session") {
@@ -1532,6 +1792,10 @@ const makeAgentControlActionValidator = Effect.gen(function* () {
   const automations = yield* Effect.serviceOption(AgentControlAutomationService);
   const deviceService = yield* Effect.serviceOption(DeviceService);
   const localTasks = yield* Effect.serviceOption(LocalTaskService);
+  const nodePaths = yield* Effect.serviceOption(NodePaths);
+  const gitNetwork = yield* Effect.serviceOption(GitNetwork);
+  const nodeDirectory = yield* Effect.serviceOption(AgentControlNodeDirectory);
+  const serverEnvironment = yield* Effect.serviceOption(ServerEnvironment);
   const completionReturns = yield* Effect.serviceOption(CompletionReturnRepository);
   const settings = yield* Effect.serviceOption(ServerSettingsService);
   const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
@@ -1544,6 +1808,12 @@ const makeAgentControlActionValidator = Effect.gen(function* () {
     ...(Option.isSome(deviceService) ? { deviceService: deviceService.value } : {}),
     ...(Option.isSome(automations) ? { automations: automations.value } : {}),
     ...(Option.isSome(localTasks) ? { localTasks: localTasks.value } : {}),
+    ...(Option.isSome(nodePaths) ? { nodePaths: nodePaths.value } : {}),
+    ...(Option.isSome(gitNetwork) ? { gitNetwork: gitNetwork.value } : {}),
+    ...(Option.isSome(nodeDirectory) ? { nodeDirectory: nodeDirectory.value } : {}),
+    ...(Option.isSome(serverEnvironment)
+      ? { thisEnvironmentId: serverEnvironment.value.getEnvironmentId }
+      : {}),
     ...(Option.isSome(completionReturns)
       ? {
           delegatedReturnPending: (threadId: ThreadId) =>

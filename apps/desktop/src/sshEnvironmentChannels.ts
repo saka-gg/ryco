@@ -7,6 +7,7 @@ export const DESKTOP_SSH_IPC = {
   bootstrapBearerSession: "desktop:bootstrap-ssh-bearer-session",
   fetchSessionState: "desktop:fetch-ssh-session-state",
   issueWebSocketToken: "desktop:issue-ssh-websocket-token",
+  revokeClientSession: "desktop:revoke-ssh-client-session",
   resolvePasswordPrompt: "desktop:resolve-ssh-password-prompt",
 } as const;
 

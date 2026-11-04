@@ -1,5 +1,6 @@
 import { Effect, Layer } from "effect";
-import { WsDeviceRpcGroup, WsHostedRpcGroup } from "@ryco/contracts";
+import { WsDeviceRpcGroup } from "@ryco/contracts";
+import { WsNodeRpcGroup } from "@ryco/contracts/project-copy-rpc";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { RpcSerialization, RpcServer } from "effect/rpc";
 
@@ -101,7 +102,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
         const sessions = yield* SessionCredentialService;
         const session = yield* serverAuth.authenticateWebSocketUpgrade(request);
         const principal = { ...directRpcPrincipal(session), ...directConnectionOf(request) };
-        const rpcWebSocketHttpEffect = yield* RpcServer.toHttpEffectWebsocket(WsHostedRpcGroup, {
+        const rpcWebSocketHttpEffect = yield* RpcServer.toHttpEffectWebsocket(WsNodeRpcGroup, {
           spanPrefix: "ws.rpc",
           spanAttributes: {
             "rpc.transport": "websocket",

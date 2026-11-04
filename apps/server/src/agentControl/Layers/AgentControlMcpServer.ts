@@ -5,6 +5,9 @@ import { withInspectionTools } from "../Mcp/inspectionTools.ts";
 import { withArtifactTools } from "../Mcp/artifactTools.ts";
 import { withDelegationTools } from "../Mcp/delegationTools.ts";
 import { withLocalTaskTools } from "../Mcp/localTaskTools.ts";
+import { AgentControlNodeDirectory } from "../Services/AgentControlNodeDirectory.ts";
+import { GitNetwork } from "../../projectCopy/Services/GitNetwork.ts";
+import { NodePaths } from "../../projectCopy/Services/NodePaths.ts";
 import { withLazyAgentControlTools } from "../Mcp/lazyTools.ts";
 import { PullRequestWatchService } from "../../sourceControl/PullRequestWatchService.ts";
 import { toMcpFollowUpQueue } from "../Mcp/threadTranscript.ts";
@@ -44,6 +47,7 @@ import {
   AGENT_CONTROL_COMMAND_WATCH_MCP_TOOLS,
   AGENT_CONTROL_LINK_PULL_REQUEST_TOOL,
   AGENT_CONTROL_MCP_WAIT_TIMEOUT_MS_MAX,
+  AGENT_CONTROL_PROJECT_COPY_MCP_TOOLS,
   AGENT_CONTROL_QUEUE_MCP_TOOLS,
   AGENT_CONTROL_WORKTREE_MCP_TOOLS,
   AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL,
@@ -116,6 +120,9 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
   const proposalRepository = yield* Effect.serviceOption(AgentControlProposalRepository);
   const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
   const localTasks = yield* Effect.serviceOption(LocalTaskService);
+  const nodeDirectory = yield* Effect.serviceOption(AgentControlNodeDirectory);
+  const nodePaths = yield* Effect.serviceOption(NodePaths);
+  const gitNetwork = yield* Effect.serviceOption(GitNetwork);
   const cliProxy = yield* Effect.serviceOption(CliProxyService);
   const commandWatches = yield* Effect.serviceOption(CommandWatchService);
   const pullRequestWatch = yield* Effect.serviceOption(PullRequestWatchService);
@@ -373,7 +380,39 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
         }),
       ),
   });
-  const tools = withCompleteAgentControlCatalog(secretTools);
+  // Setting projects up on this node from a repository, or on another node: the node directory,
+  // destination suggestions and the two proposals the user approves. Its module loads the first
+  // time a session that may use any of them lists or calls tools, never at boot.
+  const projectCopyCapabilities: ReadonlySet<string> = new Set([
+    AGENT_CONTROL_CAPABILITIES.read,
+    AGENT_CONTROL_CAPABILITIES.readNodes,
+    AGENT_CONTROL_CAPABILITIES.importProject,
+    AGENT_CONTROL_CAPABILITIES.copyProjectToNode,
+  ]);
+  const projectCopyTools = withLazyAgentControlTools(secretTools, {
+    names: Object.values(AGENT_CONTROL_PROJECT_COPY_MCP_TOOLS),
+    writeNames: [
+      AGENT_CONTROL_PROJECT_COPY_MCP_TOOLS.proposeImport,
+      AGENT_CONTROL_PROJECT_COPY_MCP_TOOLS.proposeCopy,
+    ],
+    mayUse: (session) =>
+      session.grantedCapabilities.some((capability) => projectCopyCapabilities.has(capability)),
+    load: () =>
+      import("../Mcp/projectCopyTools.ts").then((module) =>
+        module.withProjectCopyTools(secretTools, {
+          policy,
+          registry,
+          proposals,
+          ...(Option.isSome(validator) ? { validator: validator.value } : {}),
+          projections,
+          ...(Option.isSome(nodeDirectory) ? { nodeDirectory: nodeDirectory.value } : {}),
+          ...(Option.isSome(nodePaths) ? { nodePaths: nodePaths.value } : {}),
+          ...(Option.isSome(gitNetwork) ? { gitNetwork: gitNetwork.value } : {}),
+          mutations: { submit: submitAgentControlMutation, replay: replayedAgentControlMutation },
+        }),
+      ),
+  });
+  const tools = withCompleteAgentControlCatalog(projectCopyTools);
 
   // Start/stop transitions are serialized so a rapid settings flip cannot
   // interleave a start with a teardown. `shuttingDown` latches inside the

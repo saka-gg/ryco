@@ -11,7 +11,7 @@ import {
 import type { ThreadId } from "@ryco/contracts";
 import type {
   AgentControlCompletionReturn,
-  AgentControlProposal,
+  AgentControlProposalView,
 } from "@ryco/contracts/agent-control";
 
 import { formatRelativeTime } from "../../timestampFormat";
@@ -59,7 +59,7 @@ export interface DelegationDockSummary {
 }
 
 export interface DelegationDockLogRow {
-  readonly proposal: AgentControlProposal;
+  readonly proposal: AgentControlProposalView;
   readonly tone: AgentControlStatusTone;
   readonly action: string;
   readonly target: string;
@@ -120,7 +120,7 @@ export function summarizeDelegationDock(
 
 /** The thread's own Agent Control actions, newest first, as one line each. */
 export function buildDelegationDockLog(
-  activity: ReadonlyArray<AgentControlProposal>,
+  activity: ReadonlyArray<AgentControlProposalView>,
   getThreadTitle: (threadId: ThreadId) => string | undefined,
 ): DelegationDockLogRow[] {
   return activity.map((proposal) => {

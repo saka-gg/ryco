@@ -8,9 +8,52 @@ import {
   identitySecretsInService,
   LocalHubIdentityStateError,
   makeLocalHubIdentityStateStore,
+  readActiveHubEnvironmentId,
 } from "./LocalHubIdentityState.ts";
 
 describe("local Hub identity state", () => {
+  it("reads the Hub environment id only while an enrollment is active", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-active-"));
+    const path = join(root, "identity.json");
+    try {
+      // Never enrolled: nothing is read, and no record is created.
+      expect(await readActiveHubEnvironmentId(path)).toBeNull();
+      await expect(readFile(path)).rejects.toThrow();
+
+      const store = await makeLocalHubIdentityStateStore(path);
+      const created = await store.readOrCreate();
+      expect(await readActiveHubEnvironmentId(path)).toBeNull();
+
+      const active = await store.update((state) => ({
+        ...state,
+        revision: state.revision + 1,
+        activeNode: {
+          hubOrigin: "https://hub.example.com",
+          nodeId: `node_${"a".repeat(22)}`,
+          activeKeyId: `nkey_${"b".repeat(22)}`,
+          activeKeySecretName: "node-key.active",
+          cleanupPollingSecretName: null,
+          enrolledAt: 1,
+        },
+      }));
+      expect(await readActiveHubEnvironmentId(path)).toBe(created.environmentId);
+
+      // Leaving: the id is no longer this node's.
+      await store.update((state) => ({
+        ...state,
+        revision: active.revision + 1,
+        pendingTeardown: { secretNames: [], requestedAt: 2 },
+      }));
+      expect(await readActiveHubEnvironmentId(path)).toBeNull();
+
+      // An unreadable record reads as no enrollment.
+      await writeFile(path, "{", { mode: 0o600 });
+      expect(await readActiveHubEnvironmentId(path)).toBeNull();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("creates a stable random EnvironmentId and survives restart", async () => {
     const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-state-"));
     const path = join(root, "nested", "identity.json");

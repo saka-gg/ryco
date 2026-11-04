@@ -22,6 +22,11 @@ import { useSettingsDialogStore } from "../settingsDialogStore";
 import { useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import { useInboxFilterStore } from "./inboxSidebar/inboxFilterStore";
+import { useProjectNodesDialogStore } from "./projectNodes/projectNodesDialogStore";
+import {
+  pinSavedEnvironmentState,
+  unpinSavedEnvironmentStates,
+} from "./projectNodes/projectNodesTestFixtures";
 import {
   setupChatViewBrowserSuite,
   ADD_PROJECT_SUBMENU_PLACEHOLDER,
@@ -53,7 +58,6 @@ import {
   createSnapshotForTargetUser,
   createSnapshotWithSecondaryProject,
   dispatchChatNewShortcut,
-  dispatchInputKey,
   dispatchThreadPinToggleShortcut,
   dispatchedCommandTypes,
   draftIdFromPath,
@@ -62,7 +66,6 @@ import {
   enableChatNewShortcut,
   enableThreadLifecycle,
   fixture,
-  getCommandPaletteLegendEntries,
   materializePromotedDraftThreadViaDomainEvent,
   mountChatView,
   openCommandPaletteFromTrigger,
@@ -87,6 +90,19 @@ import {
 
 // Hoisted per suite: a mock registered from the shared helpers runs after this file's static imports.
 vi.mock("../lib/gitStatusState", () => import("../../test/gitStatusStateMock"));
+
+const addProjectDialog = () => page.getByTestId("add-project-dialog");
+const folderStatus = () => page.getByTestId("folder-picker-status");
+
+/** From the add-project dialog's sources to its folder step; returns the folder field. */
+async function openAddProjectFolderStep() {
+  await addProjectDialog()
+    .getByRole("button", { name: /Open a folder/ })
+    .click();
+  const field = addProjectDialog().getByRole("combobox", { name: /Search folders on/ });
+  await expect.element(field).toBeVisible();
+  return field;
+}
 
 describe("ChatView Navigation (full app)", () => {
   setupChatViewBrowserSuite();
@@ -1248,7 +1264,10 @@ describe("ChatView Navigation (full app)", () => {
     }
   });
 
-  it("adds a project from browse mode with Enter when no directory is highlighted", async () => {
+  // Adding a project: desktop tiers use the add-project dialog (A26); the frozen
+  // phone tier keeps the command palette's add-project views.
+
+  it("adds a typed folder from the palette's Add project item with Enter", async () => {
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,
       snapshot: createSnapshotForTargetUser({
@@ -1311,18 +1330,19 @@ describe("ChatView Navigation (full app)", () => {
       await openCommandPaletteFromTrigger();
 
       await expect.element(palette).toBeInTheDocument();
+      // The palette's own item hands over to the dialog.
       await palette.getByText("Add project", { exact: true }).click();
-      await palette.getByText("Local folder", { exact: true }).click();
+      await expect.element(palette).not.toBeInTheDocument();
+      await expect.element(addProjectDialog()).toBeVisible();
 
-      const browseInput = await waitForCommandPaletteInput(ADD_PROJECT_SUBMENU_PLACEHOLDER);
-      await page.getByPlaceholder(ADD_PROJECT_SUBMENU_PLACEHOLDER).fill("~/Development/");
-      await expect.element(palette.getByText("alpha", { exact: true })).toBeInTheDocument();
-
+      const field = await openAddProjectFolderStep();
       await expect
-        .element(palette.getByRole("button", { name: "Add (Enter)" }))
-        .toBeInTheDocument();
-
-      await dispatchInputKey(browseInput, { key: "Enter" });
+        .element(addProjectDialog().getByRole("option", { name: "Development" }))
+        .toBeVisible();
+      await field.fill("~/Development");
+      await userEvent.keyboard("{Enter}");
+      await expect.element(folderStatus()).toHaveTextContent("~/Development");
+      await userEvent.keyboard("{Enter}");
 
       await vi.waitFor(
         () => {
@@ -1355,6 +1375,9 @@ describe("ChatView Navigation (full app)", () => {
         (path) => UUID_ROUTE_RE.test(path),
         "Route should have changed to a new draft thread after adding a project with Enter.",
       );
+      await expect
+        .element(page.getByTestId("add-project-done"))
+        .toMatchTextContent(/Development is on Studio Mac/);
     } finally {
       await mounted.cleanup();
     }
@@ -1430,35 +1453,13 @@ describe("ChatView Navigation (full app)", () => {
     }
   });
 
-  it("shows clone destination controls after resolving an add project repository", async () => {
+  it("clones a looked-up repository into the folder picked as its parent", async () => {
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,
       snapshot: createSnapshotForTargetUser({
         targetMessageId: "msg-user-command-palette-add-project-remote" as MessageId,
         targetText: "command palette add project remote",
       }),
-      configureFixture: (nextFixture) => {
-        nextFixture.serverConfig = {
-          ...nextFixture.serverConfig,
-          keybindings: [
-            {
-              command: "commandPalette.toggle",
-              shortcut: {
-                key: "k",
-                metaKey: false,
-                ctrlKey: false,
-                shiftKey: false,
-                altKey: false,
-                modKey: true,
-              },
-              whenAst: {
-                type: "not",
-                node: { type: "identifier", name: "terminalFocus" },
-              },
-            },
-          ],
-        };
-      },
       resolveRpc: (body) => {
         if (body._tag === WS_METHODS.filesystemBrowse) {
           return {
@@ -1495,43 +1496,47 @@ describe("ChatView Navigation (full app)", () => {
     });
 
     try {
-      await Promise.all([waitForServerConfigToApply(), waitForCommandPaletteShortcutLabel()]);
-      const palette = page.getByTestId("command-palette");
-      await openCommandPaletteFromTrigger();
+      await waitForServerConfigToApply();
+      useCommandPaletteStore.getState().openAddProject();
+      await expect.element(addProjectDialog()).toBeVisible();
 
-      await expect.element(palette).toBeInTheDocument();
-      await palette.getByText("Add project", { exact: true }).click();
-      await palette.getByText("GitHub repository", { exact: true }).click();
-
-      const repositoryInput = await waitForCommandPaletteInput(
-        "Enter GitHub repository (owner/repo)",
-      );
-      await page.getByPlaceholder("Enter GitHub repository (owner/repo)").fill("openai/codex");
-      await dispatchInputKey(repositoryInput, { key: "Enter" });
+      // One node: the dialog opens on its sources, with the node's ready providers.
+      await addProjectDialog()
+        .getByRole("button", { name: /Clone a repository/ })
+        .click();
+      const sourceMenu = addProjectDialog().getByRole("button", { name: "Clone source: GitHub" });
+      await expect.element(sourceMenu).toBeVisible();
+      // Providers the node can't use yet say so and lead to their setup.
+      await sourceMenu.click();
+      await expect
+        .element(page.getByRole("menuitem", { name: /Forgejo repository.*Setup Required/ }))
+        .toBeVisible();
+      await page.getByRole("menuitem", { name: "GitHub repository" }).click();
+      await addProjectDialog()
+        .getByRole("textbox", { name: "Repository to clone" })
+        .fill("openai/codex");
+      await userEvent.keyboard("{Enter}");
 
       await vi.waitFor(
         () => {
-          const clonePathInput = document.querySelector<HTMLInputElement>(
-            'input[placeholder="Enter path (e.g. ~/projects/my-app)"]',
-          );
-          expect(clonePathInput?.value).toBe("~/");
-          expect(document.body.textContent).toContain("Repository");
-          expect(document.body.textContent).toContain("openai/codex");
-          expect(document.body.textContent).toContain("https://github.com/openai/codex");
-          expect(document.body.textContent).toContain("Select where to clone");
-          expect(document.body.textContent).toContain("Development");
-          expect(document.body.textContent).toContain("Clone");
+          expect(
+            wsRequests.find((request) => request._tag === WS_METHODS.sourceControlLookupRepository),
+          ).toMatchObject({ provider: "github", repository: "openai/codex" });
         },
         { timeout: 8_000, interval: 16 },
       );
+      await expect
+        .element(addProjectDialog().getByText(/Where should/))
+        .toMatchTextContent(/Where should codex go on Studio Mac\? Pick the parent folder\./);
+      await expect
+        .element(folderStatus())
+        .toHaveTextContent("Clones github.com/openai/codex into ~/codex");
 
-      await page
-        .getByPlaceholder("Enter path (e.g. ~/projects/my-app)")
-        .fill("~/Development/codex");
-      const clonePathInput = await waitForCommandPaletteInput(
-        "Enter path (e.g. ~/projects/my-app)",
-      );
-      await dispatchInputKey(clonePathInput, { key: "Enter" });
+      await addProjectDialog().getByRole("option", { name: "Development" }).click();
+      await expect
+        .element(folderStatus())
+        .toHaveTextContent("Clones github.com/openai/codex into ~/Development/codex");
+      await addProjectDialog().getByRole("button", { name: "Clone to Studio Mac" }).click();
 
       await vi.waitFor(
         () => {
@@ -1550,7 +1555,7 @@ describe("ChatView Navigation (full app)", () => {
     }
   });
 
-  it("opens add project browse mode from the sidebar add button", async () => {
+  it("opens the add-project dialog from the sidebar add button", async () => {
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,
       snapshot: createSnapshotForTargetUser({
@@ -1574,12 +1579,11 @@ describe("ChatView Navigation (full app)", () => {
 
       await page.getByTestId("sidebar-add-project-trigger").click();
 
-      const palette = page.getByTestId("command-palette");
-      await expect.element(palette).toBeInTheDocument();
-      await palette.getByText("Local folder", { exact: true }).click();
-
-      const browseInput = await waitForCommandPaletteInput(ADD_PROJECT_SUBMENU_PLACEHOLDER);
-      await expect.element(browseInput).toHaveValue("~/");
+      await expect.element(addProjectDialog()).toBeVisible();
+      await openAddProjectFolderStep();
+      await expect
+        .element(addProjectDialog().getByRole("option", { name: "Development" }))
+        .toBeVisible();
 
       await vi.waitFor(
         () => {
@@ -1597,7 +1601,7 @@ describe("ChatView Navigation (full app)", () => {
     }
   });
 
-  it("starts add project browse mode from the configured base directory", async () => {
+  it("starts add-project browsing from the configured base directory", async () => {
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,
       snapshot: createSnapshotForTargetUser({
@@ -1637,12 +1641,11 @@ describe("ChatView Navigation (full app)", () => {
 
       await page.getByTestId("sidebar-add-project-trigger").click();
 
-      const palette = page.getByTestId("command-palette");
-      await expect.element(palette).toBeInTheDocument();
-      await palette.getByText("Local folder", { exact: true }).click();
-
-      const browseInput = await waitForCommandPaletteInput(ADD_PROJECT_SUBMENU_PLACEHOLDER);
-      await expect.element(browseInput).toHaveValue("~/Development/");
+      await expect.element(addProjectDialog()).toBeVisible();
+      await openAddProjectFolderStep();
+      await expect
+        .element(addProjectDialog().getByRole("option", { name: "codething" }))
+        .toBeVisible();
 
       await vi.waitFor(
         () => {
@@ -1661,7 +1664,7 @@ describe("ChatView Navigation (full app)", () => {
     }
   });
 
-  it("starts restricted browsing at the access root and hides parent navigation there", async () => {
+  it("starts restricted browsing at the access root and offers nothing above it", async () => {
     const workspaceAccessRoot = "/allowed/workspace";
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,
@@ -1696,12 +1699,15 @@ describe("ChatView Navigation (full app)", () => {
       await waitForServerConfigToApply();
       await page.getByTestId("sidebar-add-project-trigger").click();
 
-      const palette = page.getByTestId("command-palette");
-      await palette.getByText("Local folder", { exact: true }).click();
-
-      const browseInput = await waitForCommandPaletteInput(ADD_PROJECT_SUBMENU_PLACEHOLDER);
-      await expect.element(browseInput).toHaveValue(`${workspaceAccessRoot}/`);
-      await expect.element(palette.getByText("..", { exact: true })).not.toBeInTheDocument();
+      await expect.element(addProjectDialog()).toBeVisible();
+      await openAddProjectFolderStep();
+      await expect
+        .element(addProjectDialog().getByRole("option", { name: "project" }))
+        .toBeVisible();
+      // The path starts at the access root: no folder above it to go to.
+      const crumbs = addProjectDialog().getByRole("navigation", { name: "Folder path" });
+      await expect.element(crumbs).toHaveTextContent(workspaceAccessRoot);
+      expect(crumbs.getByRole("button").elements()).toHaveLength(1);
 
       await vi.waitFor(
         () => {
@@ -1720,7 +1726,7 @@ describe("ChatView Navigation (full app)", () => {
     }
   });
 
-  it("shows create-folder affordances for missing project paths", async () => {
+  it("creates a typed folder that does not exist yet when adding it", async () => {
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,
       snapshot: createSnapshotForTargetUser({
@@ -1754,20 +1760,22 @@ describe("ChatView Navigation (full app)", () => {
 
     try {
       await waitForServerConfigToApply();
-      const palette = page.getByTestId("command-palette");
       await page.getByTestId("sidebar-add-project-trigger").click();
 
-      await expect.element(palette).toBeInTheDocument();
-      await palette.getByText("Local folder", { exact: true }).click();
-      const browseInput = await waitForCommandPaletteInput(ADD_PROJECT_SUBMENU_PLACEHOLDER);
-      await page.getByPlaceholder(ADD_PROJECT_SUBMENU_PLACEHOLDER).fill("~/Desktop/fresh-project");
+      await expect.element(addProjectDialog()).toBeVisible();
+      const field = await openAddProjectFolderStep();
+      await field.fill("~/Desktop/fresh-project");
+      await expect
+        .element(addProjectDialog().getByRole("option", { name: "existing" }))
+        .not.toBeInTheDocument();
+      await userEvent.keyboard("{Enter}");
 
       await expect
-        .element(palette.getByRole("button", { name: "Create & Add (Enter)" }))
-        .toBeInTheDocument();
-      await expect.element(palette.getByText("Will create this folder")).not.toBeInTheDocument();
-
-      await dispatchInputKey(browseInput, { key: "Enter" });
+        .element(folderStatus())
+        .toHaveTextContent(
+          "~/Desktop/fresh-project doesn't exist yet; adding the project creates it.",
+        );
+      await addProjectDialog().getByRole("button", { name: "Add project" }).click();
 
       await vi.waitFor(
         () => {
@@ -1801,7 +1809,7 @@ describe("ChatView Navigation (full app)", () => {
     }
   });
 
-  it("does not show create affordances for an existing directory with a trailing slash", async () => {
+  it("does not offer to create a typed folder that exists", async () => {
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,
       snapshot: createSnapshotForTargetUser({
@@ -1819,6 +1827,13 @@ describe("ChatView Navigation (full app)", () => {
                   fullPath: "~/Development/codex/Codex.app",
                 },
               ],
+            };
+          }
+
+          if (body.partialPath === "~/Development/") {
+            return {
+              parentPath: "~/Development/",
+              entries: [{ name: "codex", fullPath: "~/Development/codex" }],
             };
           }
 
@@ -1840,35 +1855,22 @@ describe("ChatView Navigation (full app)", () => {
 
     try {
       await waitForServerConfigToApply();
-      const palette = page.getByTestId("command-palette");
       await page.getByTestId("sidebar-add-project-trigger").click();
 
-      await expect.element(palette).toBeInTheDocument();
-      await palette.getByText("Local folder", { exact: true }).click();
-      const browseInput = await waitForCommandPaletteInput(ADD_PROJECT_SUBMENU_PLACEHOLDER);
-      await page.getByPlaceholder(ADD_PROJECT_SUBMENU_PLACEHOLDER).fill("~/Development/codex/");
-
-      await vi.waitFor(
-        () => {
-          expect(
-            wsRequests.some(
-              (request) =>
-                request._tag === WS_METHODS.filesystemBrowse &&
-                request.partialPath === "~/Development/codex/",
-            ),
-          ).toBe(true);
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-
+      await expect.element(addProjectDialog()).toBeVisible();
+      const field = await openAddProjectFolderStep();
+      // A trailing separator browses into the folder.
+      await field.fill("~/Development/codex/");
+      await userEvent.keyboard("{Enter}");
       await expect
-        .element(palette.getByRole("button", { name: "Add (Enter)" }))
-        .toBeInTheDocument();
-      await expect
-        .element(palette.getByRole("button", { name: "Create & Add (Enter)" }))
-        .not.toBeInTheDocument();
+        .element(addProjectDialog().getByRole("option", { name: "Codex.app" }))
+        .toBeVisible();
 
-      await dispatchInputKey(browseInput, { key: "Enter" });
+      await field.fill("~/Development/codex");
+      await expect.element(addProjectDialog().getByRole("option", { name: "codex" })).toBeVisible();
+      await userEvent.keyboard("{Enter}");
+      await expect.element(folderStatus()).toHaveTextContent("~/Development/codex");
+      await addProjectDialog().getByRole("button", { name: "Add project" }).click();
 
       await vi.waitFor(
         () => {
@@ -1900,7 +1902,7 @@ describe("ChatView Navigation (full app)", () => {
     }
   });
 
-  it("selects an environment before browsing when multiple environments are available", async () => {
+  it("opens on the thread's node when several nodes can take projects, then picks another", async () => {
     const remoteBrowseMock = vi.fn(async ({ partialPath }: { partialPath: string }) => {
       if (partialPath === "~/workspaces/") {
         return {
@@ -1946,6 +1948,7 @@ describe("ChatView Navigation (full app)", () => {
         createdAt: NOW_ISO,
         lastConnectedAt: NOW_ISO,
       });
+      pinSavedEnvironmentState(REMOTE_ENVIRONMENT_ID, { connectionState: "connected", role: null });
       useSavedEnvironmentRuntimeStore.getState().patch(REMOTE_ENVIRONMENT_ID, {
         connectionState: "connected",
         authState: "authenticated",
@@ -1974,16 +1977,25 @@ describe("ChatView Navigation (full app)", () => {
 
       await expect.element(palette).toBeInTheDocument();
       await palette.getByText("Add project", { exact: true }).click();
-      await expect.element(palette.getByText("Environments", { exact: true })).toBeInTheDocument();
+      // The thread's node is preselected; its step pill goes back to pick another.
       await expect
-        .element(palette.getByText("Studio Mac", { exact: true }).first())
-        .toBeInTheDocument();
-      await palette.getByText("Staging", { exact: true }).click();
-      await palette.getByText("Local folder", { exact: true }).click();
+        .element(addProjectDialog().getByText(/What do you want to add on Studio Mac\?/))
+        .toBeVisible();
+      await addProjectDialog().getByRole("button", { name: "Studio Mac" }).click();
+      await expect
+        .element(addProjectDialog().getByText("Which node should the project live on?"))
+        .toBeVisible();
+      await expect
+        .element(addProjectDialog().getByRole("radio", { name: /Studio Mac/ }))
+        .toBeVisible();
+      await addProjectDialog()
+        .getByRole("radio", { name: /Staging/ })
+        .click();
+      const field = await openAddProjectFolderStep();
 
-      const browseInput = await waitForCommandPaletteInput(ADD_PROJECT_SUBMENU_PLACEHOLDER);
-      await expect.element(browseInput).toHaveValue("~/workspaces/");
-
+      await expect
+        .element(addProjectDialog().getByRole("option", { name: "codething" }))
+        .toBeVisible();
       await vi.waitFor(
         () => {
           expect(remoteBrowseMock).toHaveBeenCalledWith({
@@ -1993,21 +2005,10 @@ describe("ChatView Navigation (full app)", () => {
         { timeout: 8_000, interval: 16 },
       );
 
-      await page.getByPlaceholder(ADD_PROJECT_SUBMENU_PLACEHOLDER).fill("~/workspaces/");
-      await vi.waitFor(
-        () => {
-          expect(remoteBrowseMock).toHaveBeenCalledWith({
-            partialPath: "~/workspaces/",
-          });
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-      await expect.element(palette.getByText("codething", { exact: true })).toBeInTheDocument();
-      await expect
-        .element(palette.getByRole("button", { name: "Add (Enter)" }))
-        .toBeInTheDocument();
-
-      await dispatchInputKey(browseInput, { key: "Enter" });
+      await field.fill("~/workspaces");
+      await userEvent.keyboard("{Enter}");
+      await expect.element(folderStatus()).toHaveTextContent("~/workspaces");
+      await addProjectDialog().getByRole("button", { name: "Add project" }).click();
 
       await vi.waitFor(
         () => {
@@ -2029,6 +2030,7 @@ describe("ChatView Navigation (full app)", () => {
         "Route should have changed to a new draft thread after adding a remote project.",
       );
     } finally {
+      unpinSavedEnvironmentStates();
       await mounted.cleanup();
     }
   });
@@ -2079,18 +2081,16 @@ describe("ChatView Navigation (full app)", () => {
 
       await page.getByTestId("sidebar-add-project-trigger").click();
 
-      const palette = page.getByTestId("command-palette");
-      await expect.element(palette).toBeInTheDocument();
-      await palette.getByText("Local folder", { exact: true }).click();
-      const browseInput = palette.getByPlaceholder(ADD_PROJECT_SUBMENU_PLACEHOLDER);
-      await browseInput.fill("~/Applications/access");
+      await expect.element(addProjectDialog()).toBeVisible();
+      await openAddProjectFolderStep();
+      await addProjectDialog().getByRole("option", { name: "Applications" }).click();
 
       const fileManagerLabel = isMacPlatform(navigator.platform)
         ? "Open in Finder"
         : navigator.platform.toLowerCase().startsWith("win")
           ? "Open in Explorer"
           : "Open in Files";
-      await palette.getByRole("button", { name: fileManagerLabel }).click();
+      await addProjectDialog().getByRole("button", { name: fileManagerLabel }).click();
 
       await vi.waitFor(
         () => {
@@ -2137,35 +2137,13 @@ describe("ChatView Navigation (full app)", () => {
     }
   });
 
-  it("adds a project from browse mode with Mod+Enter when a directory is highlighted", async () => {
+  it("adds the folder highlighted with the arrow keys with Enter", async () => {
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,
       snapshot: createSnapshotForTargetUser({
         targetMessageId: "msg-user-command-palette-add-project-mod-enter" as MessageId,
         targetText: "command palette add project mod enter",
       }),
-      configureFixture: (nextFixture) => {
-        nextFixture.serverConfig = {
-          ...nextFixture.serverConfig,
-          keybindings: [
-            {
-              command: "commandPalette.toggle",
-              shortcut: {
-                key: "k",
-                metaKey: false,
-                ctrlKey: false,
-                shiftKey: false,
-                altKey: false,
-                modKey: true,
-              },
-              whenAst: {
-                type: "not",
-                node: { type: "identifier", name: "terminalFocus" },
-              },
-            },
-          ],
-        };
-      },
       resolveRpc: (body) => {
         if (body._tag === WS_METHODS.filesystemBrowse) {
           if (body.partialPath === "~/Development/") {
@@ -2196,39 +2174,19 @@ describe("ChatView Navigation (full app)", () => {
 
     try {
       await waitForServerConfigToApply();
-      await waitForCommandPaletteShortcutLabel();
-      const palette = page.getByTestId("command-palette");
-      await openCommandPaletteFromTrigger();
+      useCommandPaletteStore.getState().openAddProject();
+      await expect.element(addProjectDialog()).toBeVisible();
 
-      await expect.element(palette).toBeInTheDocument();
-      await palette.getByText("Add project", { exact: true }).click();
-      await palette.getByText("Local folder", { exact: true }).click();
+      const field = await openAddProjectFolderStep();
+      await field.fill("~/Development/");
+      await userEvent.keyboard("{Enter}");
+      await expect.element(addProjectDialog().getByRole("option", { name: "alpha" })).toBeVisible();
 
-      const browseInput = await waitForCommandPaletteInput(ADD_PROJECT_SUBMENU_PLACEHOLDER);
-      await page.getByPlaceholder(ADD_PROJECT_SUBMENU_PLACEHOLDER).fill("~/Development/");
-      await expect.element(palette.getByText("alpha", { exact: true })).toBeInTheDocument();
-
-      await dispatchInputKey(browseInput, { key: "ArrowDown" });
-
-      const addButtonLabel = isMacPlatform(navigator.platform)
-        ? "Add (\u2318 Enter)"
-        : "Add (Ctrl Enter)";
-      await vi.waitFor(
-        () => {
-          const legendEntries = getCommandPaletteLegendEntries();
-          expect(legendEntries).toContain("Enter Select");
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-      await expect
-        .element(palette.getByRole("button", { name: addButtonLabel }))
-        .toBeInTheDocument();
-
-      await dispatchInputKey(browseInput, {
-        key: "Enter",
-        metaKey: isMacPlatform(navigator.platform),
-        ctrlKey: !isMacPlatform(navigator.platform),
-      });
+      // The first arrow highlights alpha; Enter selects it, and Enter again adds it.
+      await userEvent.keyboard("{ArrowDown}");
+      await userEvent.keyboard("{Enter}");
+      await expect.element(folderStatus()).toHaveTextContent("~/Development/alpha");
+      await userEvent.keyboard("{Enter}");
 
       await vi.waitFor(
         () => {
@@ -2248,9 +2206,9 @@ describe("ChatView Navigation (full app)", () => {
           expect(dispatchRequest).toMatchObject({
             _tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
             type: "project.create",
-            workspaceRoot: "~/Development",
+            workspaceRoot: "~/Development/alpha",
             projectMetadataDir: ".ryco",
-            title: "Development",
+            title: "alpha",
           });
         },
         { timeout: 8_000, interval: 16 },
@@ -2259,8 +2217,46 @@ describe("ChatView Navigation (full app)", () => {
       await waitForURL(
         mounted.router,
         (path) => UUID_ROUTE_RE.test(path),
-        "Route should have changed to a new draft thread after adding a project with Mod+Enter.",
+        "Route should have changed to a new draft thread after adding the highlighted folder.",
       );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("keeps the palette's add-project views on the phone tier", async () => {
+    const mounted = await mountChatView({
+      viewport: PHONE_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-phone-add-project" as MessageId,
+        targetText: "phone add project",
+      }),
+      initialPath: "/",
+      resolveRpc: (body) => {
+        if (body._tag === WS_METHODS.filesystemBrowse) {
+          return {
+            parentPath: "~/",
+            entries: [{ name: "Development", fullPath: "~/Development" }],
+          };
+        }
+
+        return undefined;
+      },
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(document.documentElement.getAttribute("data-tier")).toBe("phone");
+      });
+      useCommandPaletteStore.getState().openAddProject();
+
+      const palette = page.getByTestId("command-palette");
+      await expect.element(palette).toBeInTheDocument();
+      await palette.getByText("Local folder", { exact: true }).click();
+      const browseInput = await waitForCommandPaletteInput(ADD_PROJECT_SUBMENU_PLACEHOLDER);
+      await expect.element(browseInput).toHaveValue("~/");
+      expect(useProjectNodesDialogStore.getState().addProject.open).toBe(false);
+      expect(document.querySelector('[data-testid="add-project-dialog"]')).toBeNull();
     } finally {
       await mounted.cleanup();
     }

@@ -137,6 +137,7 @@ function ComboboxTrigger({ className, children, ...props }: ComboboxPrimitive.Tr
 
 function ComboboxPopup({
   className,
+  popupClassName,
   children,
   side = "bottom",
   sideOffset = 4,
@@ -150,6 +151,8 @@ function ComboboxPopup({
   alignOffset?: ComboboxPrimitive.Positioner.Props["alignOffset"];
   side?: ComboboxPrimitive.Positioner.Props["side"];
   anchor?: ComboboxPrimitive.Positioner.Props["anchor"];
+  /** Classes for the popup element inside the surface, e.g. a taller `max-h-*`. */
+  popupClassName?: string;
 }) {
   const { chipsRef } = React.useContext(ComboboxContext);
   const anchor = anchorProp ?? chipsRef;
@@ -172,7 +175,10 @@ function ComboboxPopup({
           )}
         >
           <ComboboxPrimitive.Popup
-            className="flex min-w-0 max-h-[min(var(--available-height),23rem)] flex-1 flex-col overflow-hidden text-foreground"
+            className={cn(
+              "flex min-w-0 max-h-[min(var(--available-height),23rem)] flex-1 flex-col overflow-hidden text-foreground",
+              popupClassName,
+            )}
             data-slot="combobox-popup"
             {...props}
           >
@@ -378,6 +384,20 @@ function ComboboxChipRemove(props: ComboboxPrimitive.ChipRemove.Props) {
 
 const useComboboxFilter = ComboboxPrimitive.useFilter;
 
+/**
+ * Moves the highlight of the combobox whose input this is `rows` rows down
+ * (negative: up), exactly as that many arrow key presses would. Base UI keeps
+ * the highlight as an index and has no way to set it, so a list about to drop
+ * rows at or above the highlighted one moves it first; otherwise the highlight
+ * stays at its index and lands on whichever row slides into it.
+ */
+function moveComboboxHighlight(input: HTMLInputElement, rows: number): void {
+  const key = rows < 0 ? "ArrowUp" : "ArrowDown";
+  for (let step = 0; step < Math.abs(rows); step += 1) {
+    input.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+  }
+}
+
 export {
   Combobox,
   ComboboxChipsInput,
@@ -399,4 +419,5 @@ export {
   ComboboxChips,
   ComboboxChip,
   useComboboxFilter,
+  moveComboboxHighlight,
 };

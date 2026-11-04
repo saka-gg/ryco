@@ -165,7 +165,7 @@ ryco project add <path> [--title <title>]
 ryco project remove <project-id-or-path>
 ryco project rename <project-id-or-path> <title>
 
-ryco auth pairing create [--ttl 1h] [--base-url <url>]
+ryco auth pairing create [--role client|owner] [--ttl 1h] [--base-url <url>]   # owner links last at most 15m
 ryco auth pairing list
 ryco auth pairing revoke <id>
 

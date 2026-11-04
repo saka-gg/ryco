@@ -197,6 +197,7 @@ const undoRepairEffect: Record<string, string | ReadonlyArray<string>> = {
   "event-retention": "DROP TABLE statistics_usage_rollups",
   "thread-fork-origin": "ALTER TABLE thread_forks DROP COLUMN origin_json",
   "projection-thread-triage": "ALTER TABLE projection_threads DROP COLUMN settle_when_idle_at",
+  "project-imports": "DROP TABLE project_imports",
 };
 
 it.effect("finds exactly the repair whose effect a database from before the records lacks", () =>

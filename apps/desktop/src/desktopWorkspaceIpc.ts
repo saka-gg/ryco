@@ -6,6 +6,7 @@ import type {
   DesktopWorkspaceStateSummary,
 } from "@ryco/contracts";
 import { EnvironmentId, ThreadId } from "@ryco/contracts";
+import { PROJECT_COPY_ID_PATTERN } from "@ryco/client-runtime/state/nodes";
 import { decodeCachedEnvironmentContent } from "@ryco/client-runtime/state/threads/threadContentCachePolicy";
 import {
   isWorkspaceMetadataSnapshot,
@@ -66,6 +67,11 @@ function parseScope(value: unknown): WorkspaceConnectionScope {
       return scope.instanceId === undefined
         ? { type: scope.type }
         : { type: scope.type, instanceId: scope.instanceId };
+    case "project-copy":
+      if (typeof scope.copyId !== "string" || !PROJECT_COPY_ID_PATTERN.test(scope.copyId)) {
+        throw new Error("Desktop workspace scope is invalid.");
+      }
+      return { type: scope.type, copyId: scope.copyId };
     default:
       throw new Error("Desktop workspace scope is invalid.");
   }
@@ -82,6 +88,7 @@ export function projectDesktopWorkspaceSummary(
       environmentId: machine.environmentId,
       nodeId: machine.nodeId,
       label: machine.label,
+      ...(machine.platform.os === "unknown" ? {} : { platformOs: machine.platform.os }),
       online: machine.presence.online,
       nativeTrust: machine.nativeTrust,
       connectionState: machine.connectionState,

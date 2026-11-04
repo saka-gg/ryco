@@ -17,9 +17,11 @@ import { ContextMenuActionSheetHost } from "./shell/phone/ContextMenuActionSheet
 import { SshPasswordPromptDialog } from "./desktop/SshPasswordPromptDialog";
 import { WorkspaceReviewDialog } from "./worktrees/WorkspaceReviewDialog";
 import { useAutomationsDialogStore } from "./automations/automationsDialogStore";
-import { useProjectImportDialogStore } from "./projectImport/projectImportDialogStore";
+import { useSessionImportDialogStore } from "./sessionImport/sessionImportDialogStore";
 import { usePromoteChatDialogStore } from "./chat/promoteChatDialogStore";
 import { useForkThreadDialogStore } from "./chat/forkThreadDialogStore";
+import { hasStoredProjectCopyRecords } from "./projectNodes/projectCopyStorage";
+import { useProjectNodesDialogStore } from "./projectNodes/projectNodesDialogStore";
 import { ProviderUpdateLaunchNotification } from "./ProviderUpdateLaunchNotification";
 import { MissedAutomationRunsNotice } from "./automations/MissedAutomationRunsNotice";
 import {
@@ -28,12 +30,17 @@ import {
 } from "./WebSocketConnectionSurface";
 import { AnchoredToastProvider, ToastProvider } from "./ui/toast";
 import { getPresentationTier } from "../lib/presentationTier";
-import { preloadableLazy, useLazyComponentReady } from "../lib/preloadableLazy";
+import {
+  preloadableLazy,
+  type PreloadableModule,
+  useLazyComponentReady,
+} from "../lib/preloadableLazy";
 import { pathnameMatchesRoute, preloadRouteChunk } from "../lib/routeChunkPreload";
 import {
   scheduleShellIdlePreloads,
   SHELL_IDLE_PRELOAD_PRIMARY_START_CAP_MS,
 } from "../lib/shellIdlePreload";
+import { scheduleIdleTask } from "../lib/idleTask";
 import { prewarmThreadDetailSubscription } from "../lib/threadDetailPrewarm";
 import { preloadSettingsPage } from "../settingsRoute";
 import { useSettings } from "../hooks/useSettings";
@@ -54,6 +61,7 @@ import {
   useSavedEnvironmentRegistryStore,
 } from "../environments/runtime";
 import { startDesktopWorkspaceBridge } from "../platform/desktopWorkspace";
+import { useNodeDirectoryPublisher } from "../environments/useNodeDirectoryPublisher";
 import { scheduleSettingsSharingStart } from "../settingsSharing/settingsSharingStart";
 import {
   configureClientTracing,
@@ -124,6 +132,10 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
   const ownsThreadAlerts =
     authGateState.status === "authenticated" || authGateState.status === "hosted-static";
   const localTracingAllowed = authGateState.status === "authenticated";
+  // Project copies: Agent Control's node directory and the copies a previous
+  // session left unfinished. Both load their code on demand.
+  useNodeDirectoryPublisher(chatAvailable);
+  useResumeProjectCopies(chatAvailable);
   // The presentation-tier seam lives inside `AppSidebarLayout`: the provider
   // and the route subtree stay mounted identically for both tiers (a tier
   // flip must not remount the workspace); only the sidebar chrome forks.
@@ -156,7 +168,8 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
         {chatAvailable ? <AutomationsDialogMount /> : null}
         {chatAvailable ? <PromoteChatDialogMount /> : null}
         {chatAvailable ? <ForkThreadDialogMount /> : null}
-        {chatAvailable ? <ProjectImportDialogMount /> : null}
+        {chatAvailable ? <ProjectNodesDialogsMount /> : null}
+        {chatAvailable ? <SessionImportDialogMount /> : null}
         {chatAvailable ? <MissedAutomationRunsNotice /> : null}
         {ownsThreadAlerts ? <ThreadAlertsBootstrap /> : null}
         {authGateState.status === "hosted-static" ? <HostedStaticEnvironmentBootstrap /> : null}
@@ -186,21 +199,27 @@ function ChatWidthDocumentSync() {
   return null;
 }
 
+/**
+ * Whether an on-demand surface mounts: from the first time `wanted` turns true,
+ * once its chunk has loaded, and then for good. It mounts once the chunk
+ * resolved, so the first open never commits a Suspense fallback (and never
+ * waits on React's fallback-reveal throttle).
+ */
+function useMountedOnceWanted(component: PreloadableModule, wanted: boolean): boolean {
+  const [hasBeenWanted, setHasBeenWanted] = useState(wanted);
+  if (wanted && !hasBeenWanted) setHasBeenWanted(true);
+  const ready = useLazyComponentReady(component, hasBeenWanted);
+  return hasBeenWanted && ready;
+}
+
 const AutomationsDialog = preloadableLazy(() =>
   import("./automations/dialog/AutomationsDialog").then((module) => module.AutomationsDialog),
 );
 
-/**
- * The Automations dialog loads the first time something opens it, then stays
- * mounted. It mounts once its chunk resolved, so the open never commits a
- * Suspense fallback (and never waits on React's fallback-reveal throttle).
- */
+/** The Automations dialog loads the first time something opens it, then stays mounted. */
 function AutomationsDialogMount() {
   const open = useAutomationsDialogStore((state) => state.open);
-  const [hasOpened, setHasOpened] = useState(open);
-  if (open && !hasOpened) setHasOpened(true);
-  const ready = useLazyComponentReady(AutomationsDialog, hasOpened);
-  if (!hasOpened || !ready) return null;
+  if (!useMountedOnceWanted(AutomationsDialog, open)) return null;
   return <AutomationsDialog />;
 }
 
@@ -211,10 +230,7 @@ const PromoteChatDialog = preloadableLazy(() =>
 /** "Turn into project…" loads the first time a chat asks for it, then stays mounted. */
 function PromoteChatDialogMount() {
   const open = usePromoteChatDialogStore((state) => state.open);
-  const [hasOpened, setHasOpened] = useState(open);
-  if (open && !hasOpened) setHasOpened(true);
-  const ready = useLazyComponentReady(PromoteChatDialog, hasOpened);
-  if (!hasOpened || !ready) return null;
+  if (!useMountedOnceWanted(PromoteChatDialog, open)) return null;
   return <PromoteChatDialog />;
 }
 
@@ -225,25 +241,57 @@ const ForkThreadDialog = preloadableLazy(() =>
 /** "Fork from here" loads the first time a reply asks for it, then stays mounted. */
 function ForkThreadDialogMount() {
   const open = useForkThreadDialogStore((state) => state.open);
-  const [hasOpened, setHasOpened] = useState(open);
-  if (open && !hasOpened) setHasOpened(true);
-  const ready = useLazyComponentReady(ForkThreadDialog, hasOpened);
-  if (!hasOpened || !ready) return null;
+  if (!useMountedOnceWanted(ForkThreadDialog, open)) return null;
   return <ForkThreadDialog />;
 }
 
-const ProjectImportDialog = preloadableLazy(() =>
-  import("./projectImport/ProjectImportDialog").then((module) => module.ProjectImportDialog),
+const ProjectNodesDialogs = preloadableLazy(() =>
+  import("./projectNodes/ProjectNodesDialogs").then((module) => module.ProjectNodesDialogs),
+);
+
+/**
+ * "Add project" and "Copy to another node" load the first time one opens, or
+ * a copy starts (its toasts open the copied project through this surface),
+ * then stay mounted.
+ */
+function ProjectNodesDialogsMount() {
+  const wanted = useProjectNodesDialogStore(
+    (state) => state.addProject.open || state.copyProject.open || state.copiesActive,
+  );
+  if (!useMountedOnceWanted(ProjectNodesDialogs, wanted)) return null;
+  return <ProjectNodesDialogs />;
+}
+
+/**
+ * Picks up the copies a previous session left unfinished, once the app is
+ * idle. The copy runtime loads only when there are stored records.
+ */
+function useResumeProjectCopies(enabled: boolean): void {
+  useEffect(() => {
+    if (!enabled) return;
+    return scheduleIdleTask(resumeStoredProjectCopies, PROJECT_COPY_RESUME_IDLE_TIMEOUT_MS);
+  }, [enabled]);
+}
+
+/** Outside the hook: React Compiler does not lower `import()` expressions. */
+function resumeStoredProjectCopies(): void {
+  if (!hasStoredProjectCopyRecords()) return;
+  void import("./projectNodes/copyRuntime/copyManager")
+    .then((module) => module.resumeProjectCopies())
+    .catch((error: unknown) => console.warn("Resuming project copies failed.", error));
+}
+
+const PROJECT_COPY_RESUME_IDLE_TIMEOUT_MS = 5_000;
+
+const SessionImportDialog = preloadableLazy(() =>
+  import("./sessionImport/SessionImportDialog").then((module) => module.SessionImportDialog),
 );
 
 /** "Import from Codex or Claude Code" loads the first time something opens it, then stays mounted. */
-function ProjectImportDialogMount() {
-  const open = useProjectImportDialogStore((state) => state.open);
-  const [hasOpened, setHasOpened] = useState(open);
-  if (open && !hasOpened) setHasOpened(true);
-  const ready = useLazyComponentReady(ProjectImportDialog, hasOpened);
-  if (!hasOpened || !ready) return null;
-  return <ProjectImportDialog />;
+function SessionImportDialogMount() {
+  const open = useSessionImportDialogStore((state) => state.open);
+  if (!useMountedOnceWanted(SessionImportDialog, open)) return null;
+  return <SessionImportDialog />;
 }
 
 const THREAD_ROUTE_ID = "/_chat/$environmentId/$threadId";

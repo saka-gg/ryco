@@ -40,6 +40,7 @@ import { type WsRpcProtocolClient } from "./protocol.ts";
 import { resetWsReconnectBackoff } from "./wsConnectionState.ts";
 import { type SubscriptionFailureKind, WsTransport } from "./wsTransport.ts";
 import type { DeviceRpcClient } from "./deviceRpcClient.ts";
+import type { ProjectCopyRpcMethods } from "./projectCopyRpcClient.ts";
 import type {
   NodeBrowserFrameRequest,
   NodeBrowserFrameSource,
@@ -203,6 +204,24 @@ export interface WsRpcClient {
     readonly promoteChatPreview: RpcUnaryMethod<typeof WS_METHODS.projectsPromoteChatPreview>;
     readonly promoteChat: RpcUnaryMethod<typeof WS_METHODS.projectsPromoteChat>;
     readonly deleteChatFolder: RpcUnaryMethod<typeof WS_METHODS.projectsDeleteChatFolder>;
+    // Cross-node project copy; nodes advertise them with `capabilities.projectCopy`. Their
+    // RPC client and schemas load with the first call (`createProjectCopyRpcMethods`).
+    readonly pathHints: ProjectCopyRpcMethods["pathHints"];
+    readonly previewDestination: ProjectCopyRpcMethods["previewDestination"];
+    readonly checkRemoteAccess: ProjectCopyRpcMethods["checkRemoteAccess"];
+    readonly exportInspect: ProjectCopyRpcMethods["exportInspect"];
+    readonly exportStart: ProjectCopyRpcMethods["exportStart"];
+    readonly exportReadChunk: ProjectCopyRpcMethods["exportReadChunk"];
+    readonly exportDispose: ProjectCopyRpcMethods["exportDispose"];
+    readonly transferBegin: ProjectCopyRpcMethods["transferBegin"];
+    readonly transferAppend: ProjectCopyRpcMethods["transferAppend"];
+    readonly transferCommit: ProjectCopyRpcMethods["transferCommit"];
+    readonly transferAbort: ProjectCopyRpcMethods["transferAbort"];
+    readonly importStart: ProjectCopyRpcMethods["importStart"];
+    readonly subscribeImport: ProjectCopyRpcMethods["subscribeImport"];
+    readonly cancelImport: ProjectCopyRpcMethods["cancelImport"];
+    readonly listImports: ProjectCopyRpcMethods["listImports"];
+    readonly discardImport: ProjectCopyRpcMethods["discardImport"];
   };
   readonly sessionImport: {
     readonly sources: RpcUnaryMethod<typeof WS_METHODS.sessionImportSources>;
@@ -213,6 +232,8 @@ export interface WsRpcClient {
   };
   readonly filesystem: {
     readonly browse: RpcUnaryMethod<typeof WS_METHODS.filesystemBrowse>;
+    /** Cross-node project copy, loaded like the `projects` copy calls. */
+    readonly searchDirectories: ProjectCopyRpcMethods["searchDirectories"];
   };
   readonly sourceControl: {
     readonly lookupRepository: RpcUnaryMethod<typeof WS_METHODS.sourceControlLookupRepository>;
@@ -668,6 +689,9 @@ export interface WsRpcClient {
     readonly subscribeProposals: RpcStreamMethod<
       typeof AGENT_CONTROL_WS_METHODS.subscribeProposals
     >;
+    /** Cross-node project copy's, loaded like the `projects` copy calls. */
+    readonly publishNodeDirectory: ProjectCopyRpcMethods["publishNodeDirectory"];
+    readonly reportClientExecution: ProjectCopyRpcMethods["reportClientExecution"];
     readonly listIntegrations: RpcUnaryNoArgMethod<
       typeof AGENT_CONTROL_WS_METHODS.listIntegrations
     >;
@@ -693,6 +717,94 @@ export interface WsRpcClient {
   };
 }
 
+/**
+ * The copy calls on `WsRpcClient.projects`, named once: the client builds them
+ * from this list and `createEnvironmentApi` forwards them with it
+ * (`pickProjectCopyCalls`). `filesystem.searchDirectories` is the other one.
+ */
+export const PROJECT_COPY_PROJECT_CALLS = [
+  "pathHints",
+  "previewDestination",
+  "checkRemoteAccess",
+  "exportInspect",
+  "exportStart",
+  "exportReadChunk",
+  "exportDispose",
+  "transferBegin",
+  "transferAppend",
+  "transferCommit",
+  "transferAbort",
+  "importStart",
+  "subscribeImport",
+  "cancelImport",
+  "listImports",
+  "discardImport",
+] as const satisfies ReadonlyArray<keyof ProjectCopyRpcMethods>;
+
+export type ProjectCopyProjectCalls = Pick<
+  ProjectCopyRpcMethods,
+  (typeof PROJECT_COPY_PROJECT_CALLS)[number]
+>;
+
+/** The copy calls of a `projects` API, for an API that forwards them. */
+export const pickProjectCopyCalls = (projects: ProjectCopyProjectCalls): ProjectCopyProjectCalls =>
+  Object.fromEntries(
+    PROJECT_COPY_PROJECT_CALLS.map((name) => [name, projects[name]]),
+  ) as unknown as ProjectCopyProjectCalls;
+
+/**
+ * The copy calls of one connection, with the Agent Control calls only copy
+ * uses (`publishNodeDirectory`, `reportClientExecution`). The first one loads
+ * the copy RPC client (`projectCopyRpcClient.ts`, with
+ * `@ryco/contracts/project-copy-rpc`) and builds it on the connection's socket;
+ * boot never loads either. A failed load fails that call and the next call
+ * loads again.
+ */
+function lazyProjectCopyRpc(transport: WsTransport) {
+  let loading: Promise<ProjectCopyRpcMethods> | null = null;
+  const load = () =>
+    (loading ??= import("./projectCopyRpcClient.ts").then(
+      (module) => module.createProjectCopyRpcMethods(transport),
+      (error: unknown) => {
+        loading = null;
+        throw error;
+      },
+    ));
+  const call = (name: Exclude<keyof ProjectCopyRpcMethods, "subscribeImport">) => (input: never) =>
+    load().then((methods) => (methods[name] as (input: never) => Promise<unknown>)(input));
+  const subscribeImport: ProjectCopyRpcMethods["subscribeImport"] = (input, listener, options) => {
+    let active = true;
+    let unsubscribe: (() => void) | null = null;
+    void load().then(
+      (methods) => {
+        if (active) unsubscribe = methods.subscribeImport(input, listener, options);
+      },
+      () => {
+        if (active) options?.onError?.("failed");
+      },
+    );
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
+  };
+  return {
+    projects: Object.fromEntries(
+      PROJECT_COPY_PROJECT_CALLS.map((name) => [
+        name,
+        name === "subscribeImport" ? subscribeImport : call(name),
+      ]),
+    ) as unknown as ProjectCopyProjectCalls,
+    searchDirectories: call("searchDirectories") as ProjectCopyRpcMethods["searchDirectories"],
+    publishNodeDirectory: call(
+      "publishNodeDirectory",
+    ) as ProjectCopyRpcMethods["publishNodeDirectory"],
+    reportClientExecution: call(
+      "reportClientExecution",
+    ) as ProjectCopyRpcMethods["reportClientExecution"],
+  };
+}
+
 export function createWsRpcClient(
   transport: WsTransport,
   device?: DeviceRpcClient,
@@ -700,6 +812,7 @@ export function createWsRpcClient(
     readonly openNodeBrowserFrameSource?: WsRpcClient["nodeBrowser"]["openFrameSource"];
   },
 ): WsRpcClient {
+  const projectCopy = lazyProjectCopyRpc(transport);
   return {
     dispose: async () => {
       await Promise.all([transport.dispose(), device?.dispose()]);
@@ -770,6 +883,7 @@ export function createWsRpcClient(
         transport.request((client) => client[WS_METHODS.projectsPromoteChat](input)),
       deleteChatFolder: (input) =>
         transport.request((client) => client[WS_METHODS.projectsDeleteChatFolder](input)),
+      ...projectCopy.projects,
     },
     sessionImport: {
       sources: (input) =>
@@ -783,6 +897,7 @@ export function createWsRpcClient(
     },
     filesystem: {
       browse: (input) => transport.request((client) => client[WS_METHODS.filesystemBrowse](input)),
+      searchDirectories: projectCopy.searchDirectories,
     },
     sourceControl: {
       lookupRepository: (input) =>
@@ -1410,21 +1525,29 @@ export function createWsRpcClient(
       setPresence: (input) =>
         transport.request((client) => client[WS_METHODS.pushSetPresence](input)),
     },
+    // The proposal reads always ask for the tolerant plan view: this client decodes
+    // a plan kind it does not know as `unsupported`, so the node sends every kind.
     agentControl: {
       listProposals: (input) =>
-        transport.request((client) => client[AGENT_CONTROL_WS_METHODS.listProposals](input)),
+        transport.request((client) =>
+          client[AGENT_CONTROL_WS_METHODS.listProposals]({ ...input, planView: "tolerant" }),
+        ),
       getProposal: (input) =>
-        transport.request((client) => client[AGENT_CONTROL_WS_METHODS.getProposal](input)),
+        transport.request((client) =>
+          client[AGENT_CONTROL_WS_METHODS.getProposal]({ ...input, planView: "tolerant" }),
+        ),
       acceptProposal: (input) =>
         transport.request((client) => client[AGENT_CONTROL_WS_METHODS.acceptProposal](input)),
       rejectProposal: (input) =>
         transport.request((client) => client[AGENT_CONTROL_WS_METHODS.rejectProposal](input)),
       subscribeProposals: (listener, options) =>
         transport.subscribe(
-          (client) => client[AGENT_CONTROL_WS_METHODS.subscribeProposals]({}),
+          (client) => client[AGENT_CONTROL_WS_METHODS.subscribeProposals]({ planView: "tolerant" }),
           listener,
           { ...options, tag: AGENT_CONTROL_WS_METHODS.subscribeProposals },
         ),
+      publishNodeDirectory: projectCopy.publishNodeDirectory,
+      reportClientExecution: projectCopy.reportClientExecution,
       listIntegrations: () =>
         transport.request((client) => client[AGENT_CONTROL_WS_METHODS.listIntegrations]({})),
       createIntegration: (input) =>

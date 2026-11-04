@@ -319,6 +319,48 @@ describe("hosted draft device switching", () => {
     expect(test.adopt).not.toHaveBeenCalled();
   });
 
+  it("moves straight into a project picked in the selector once the lease arrives", async () => {
+    const test = harness();
+    test.setPreviewProjects(true);
+    test.setProjects([project(target, "repo", "one"), project(target, "repo", "two")]);
+    test.controller.beginProject({
+      draftId,
+      sourceEnvironmentId: source,
+      sourceProjectId: ProjectId.make("repo"),
+      environmentId: target,
+      projectId: ProjectId.make("two"),
+      label: "Target",
+      logicalKey: (value) => value.name,
+    });
+    // The choice is made: no target project picker, even with cached projects.
+    expect(test.controller.getSnapshot()?.phase).toBe("connecting");
+    expect(test.adopt).toHaveBeenCalledWith(target);
+    expect(test.move).not.toHaveBeenCalled();
+    test.waiters[0]!(lease());
+    await settle();
+    expect(test.move).toHaveBeenCalledWith(draftId, project(target, "repo", "two"), "repo");
+    expect(test.controller.getSnapshot()).toBeNull();
+    expect(test.release).toHaveBeenCalledOnce();
+  });
+
+  it("fails a selector pick whose project is gone from the fresh shell", async () => {
+    const test = harness();
+    test.controller.beginProject({
+      draftId,
+      sourceEnvironmentId: source,
+      sourceProjectId: ProjectId.make("pending-chat"),
+      environmentId: target,
+      projectId: ProjectId.make("removed"),
+      label: "Target",
+      logicalKey: (value) => value.name,
+    });
+    test.waiters[0]!(lease());
+    await settle();
+    expect(test.move).not.toHaveBeenCalled();
+    expect(test.moveToChat).not.toHaveBeenCalled();
+    expect(test.controller.getSnapshot()?.phase).toBe("error");
+  });
+
   it("keeps the source draft after failure and allows a successful retry", async () => {
     const test = harness();
     test.begin();

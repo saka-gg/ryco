@@ -11,11 +11,11 @@ import * as Socket from "effect/socket/Socket";
 
 import {
   WS_METHODS,
-  WsRpcGroup,
   type ServerLifecycleStreamEvent,
   type ServerLifecycleStreamWelcomeEvent,
 } from "@ryco/contracts";
 import { UnknownUnionMember } from "@ryco/contracts/base-schemas";
+import { WsApplicationRpcGroup } from "@ryco/contracts/project-copy-rpc";
 
 /**
  * `WsTestClient` is a thin, reusable harness around the websocket RPC client
@@ -379,10 +379,10 @@ export const makeWsTestClientConnector = <Rpcs extends Rpc.Any>(
   };
 };
 
-type WsRpcs = RpcGroup.Rpcs<typeof WsRpcGroup>;
+type WsRpcs = RpcGroup.Rpcs<typeof WsApplicationRpcGroup>;
 
 /**
- * Connected client bound to the production {@link WsRpcGroup}, adding
+ * Connected client bound to the production {@link WsApplicationRpcGroup}, adding
  * websocket-lifecycle conveniences on top of the generic surface.
  */
 export interface WsTestClient extends ConnectedWsTestClient<WsRpcs, RpcClientError.RpcClientError> {
@@ -398,7 +398,7 @@ export interface WsTestClient extends ConnectedWsTestClient<WsRpcs, RpcClientErr
   >;
 }
 
-const wsConnector = makeWsTestClientConnector(WsRpcGroup);
+const wsConnector = makeWsTestClientConnector(WsApplicationRpcGroup);
 
 /**
  * Connects a {@link WsTestClient} to the given websocket URL. The URL is

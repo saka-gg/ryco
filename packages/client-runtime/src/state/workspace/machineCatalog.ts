@@ -1,10 +1,12 @@
 import type {
+  AuthSessionRole,
   EnvironmentConnectionState,
   EnvironmentId,
   ExecutionEnvironmentPlatform,
   RelayEffectiveRole,
 } from "@ryco/contracts";
 
+import type { NodeProjectCopySupport, NodeTransport } from "../nodes/types.js";
 import type {
   WorkspaceClientTier,
   WorkspaceMachineAccessReason,
@@ -23,11 +25,20 @@ export interface WorkspaceMachineCatalogInput {
     readonly nativeClientRequired?: boolean;
     readonly threadSettlement?: boolean;
     readonly threadSnooze?: boolean;
+    /** Absent while the machine has not stated it (not connected yet): unknown, not unsupported. */
+    readonly projectCopy?: boolean;
   };
   readonly clientTier: WorkspaceClientTier;
   readonly nativeTrust: WorkspaceNativeTrustState;
   readonly requiresNativeVerification: boolean;
   readonly effectiveRole: RelayEffectiveRole | null;
+  /**
+   * The role of a direct (non-relay) session. A `client` session cannot add or
+   * copy projects; the relay role (`effectiveRole`) does not apply to it.
+   */
+  readonly directSessionRole?: AuthSessionRole | null;
+  /** How this client reaches the machine when it is connected. */
+  readonly transport?: NodeTransport;
   readonly online: boolean;
   readonly lastSeenAt: number | null;
   readonly observedAt: number;
@@ -38,6 +49,11 @@ export interface WorkspaceMachineCatalogInput {
 }
 
 const UNKNOWN_PLATFORM: ExecutionEnvironmentPlatform = { os: "unknown", arch: "other" };
+
+/** A capability the machine states as support; `unknown` while it has not stated it. */
+export function nodeProjectCopySupport(projectCopy: boolean | undefined): NodeProjectCopySupport {
+  return projectCopy === undefined ? "unknown" : projectCopy ? "yes" : "no";
+}
 
 function uniqueReasons(
   reasons: ReadonlyArray<WorkspaceMachineAccessReason | null>,
@@ -69,7 +85,13 @@ export function reconcileWorkspaceMachine(
         input.nativeTrust === "account-trusted";
   const canReadMetadata = !revoked && !removed && trustedForTier && !identityConflict;
   const canConnect = canReadMetadata && input.online;
-  const canMutate = canConnect && input.effectiveRole !== null && input.effectiveRole !== "viewer";
+  const clientSession = input.directSessionRole === "client";
+  const canMutate =
+    canConnect &&
+    input.effectiveRole !== null &&
+    input.effectiveRole !== "viewer" &&
+    !clientSession;
+  const connectionState = input.connectionState ?? "disconnected";
 
   const accessReasons = uniqueReasons([
     revoked ? "revoked" : null,
@@ -79,7 +101,9 @@ export function reconcileWorkspaceMachine(
     unverified ? "not-verified" : null,
     identityConflict ? "identity-conflict" : null,
     !input.online ? "offline" : null,
-    input.effectiveRole === null ? "role-unknown" : null,
+    clientSession ? "client-session" : null,
+    // A direct client session's limit is its own; it has no relay role to wait for.
+    input.effectiveRole === null && !clientSession ? "role-unknown" : null,
     input.effectiveRole === "viewer" ? "viewer" : null,
   ]);
 
@@ -107,7 +131,9 @@ export function reconcileWorkspaceMachine(
       lastSeenAt: input.lastSeenAt,
       observedAt: input.observedAt,
     },
-    connectionState: input.connectionState ?? "disconnected",
+    connectionState,
+    transport: connectionState === "connected" ? (input.transport ?? null) : null,
+    projectCopySupport: nodeProjectCopySupport(input.capabilities?.projectCopy),
     deliveryUnknown: input.deliveryUnknown ?? false,
     revokedAt: input.revokedAt ?? null,
     removed,

@@ -3,7 +3,8 @@ import type {
   VcsStatusRemoteResult,
   VcsStatusStreamEvent,
 } from "@ryco/contracts";
-import { WS_METHODS } from "@ryco/contracts";
+import { PROJECT_COPY_WS_METHODS, WS_METHODS } from "@ryco/contracts";
+import { AGENT_CONTROL_WS_METHODS } from "@ryco/contracts/agent-control";
 import { GitManagerError } from "@ryco/contracts/git";
 import { Effect, Stream } from "effect";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -337,6 +338,105 @@ it("routes thread forks to the threads.fork wire method", async () => {
   } as Parameters<typeof client.threads.fork>[0];
   await expect(client.threads.fork(input)).resolves.toMatchObject({ threadId: "fork-thread" });
   expect(fork).toHaveBeenCalledWith(input);
+});
+
+it("routes cross-node project copy calls to their wire methods", async () => {
+  const pathHints = vi.fn(() => Effect.succeed({ homeDirectory: "/home/user" }));
+  const searchDirectories = vi.fn(() => Effect.succeed({ matches: [] }));
+  const transferAppend = vi.fn(() => Effect.succeed({ transferId: "t", receivedBytes: 4 }));
+  const publishNodeDirectory = vi.fn(() => Effect.succeed({ accepted: 0 }));
+  const appRequest = vi.fn();
+  // The copy RPCs, with the Agent Control calls only copy uses, ride the same
+  // socket through a client of their own group.
+  const copyView = {
+    request: (invoke: (client: unknown) => Effect.Effect<unknown>) =>
+      Effect.runPromise(
+        invoke({
+          [PROJECT_COPY_WS_METHODS.pathHints]: pathHints,
+          [PROJECT_COPY_WS_METHODS.searchDirectories]: searchDirectories,
+          [PROJECT_COPY_WS_METHODS.transferAppend]: transferAppend,
+          [AGENT_CONTROL_WS_METHODS.publishNodeDirectory]: publishNodeDirectory,
+        }),
+      ),
+    subscribe: vi.fn(() => () => undefined),
+  };
+  const withClient = vi.fn(() => copyView);
+  const transport = { request: appRequest, subscribe: vi.fn(), withClient };
+  const client = createWsRpcClient(transport as unknown as WsTransport);
+  expect(withClient).not.toHaveBeenCalled();
+  await client.projects.pathHints({});
+  await client.filesystem.searchDirectories({ query: "app" });
+  const append = { transferId: "t", offset: 0, dataBase64: "AAAA" } as Parameters<
+    typeof client.projects.transferAppend
+  >[0];
+  await expect(client.projects.transferAppend(append)).resolves.toEqual({
+    transferId: "t",
+    receivedBytes: 4,
+  });
+  await client.agentControl.publishNodeDirectory({ nodes: [] });
+  expect(pathHints).toHaveBeenCalledWith({});
+  expect(searchDirectories).toHaveBeenCalledWith({ query: "app" });
+  expect(transferAppend).toHaveBeenCalledWith(append);
+  expect(publishNodeDirectory).toHaveBeenCalledWith({ nodes: [] });
+
+  const listener = vi.fn();
+  const importId = "00000000-0000-4000-8000-000000000000" as Parameters<
+    typeof client.projects.subscribeImport
+  >[0]["importId"];
+  client.projects.subscribeImport({ importId }, listener);
+  await vi.waitFor(() =>
+    expect(copyView.subscribe).toHaveBeenCalledWith(expect.any(Function), listener, {
+      tag: PROJECT_COPY_WS_METHODS.subscribeImport,
+    }),
+  );
+  // One copy client per connection, built on the first copy call.
+  expect(withClient).toHaveBeenCalledTimes(1);
+  expect(appRequest).not.toHaveBeenCalled();
+  expect(transport.subscribe).not.toHaveBeenCalled();
+});
+
+it("loads the copy RPC client only when a copy call is made, and stops a subscription that ended first", async () => {
+  const withClient = vi.fn(() => ({ request: vi.fn(), subscribe: vi.fn(() => () => undefined) }));
+  const transport = { request: vi.fn(), subscribe: vi.fn(), withClient };
+  const client = createWsRpcClient(transport as unknown as WsTransport);
+  const importId = "00000000-0000-4000-8000-000000000000" as Parameters<
+    typeof client.projects.subscribeImport
+  >[0]["importId"];
+  const unsubscribe = client.projects.subscribeImport({ importId }, vi.fn());
+  unsubscribe();
+  await vi.waitFor(() => expect(withClient).toHaveBeenCalledTimes(1));
+  const view = withClient.mock.results[0]!.value;
+  await Promise.resolve();
+  expect(view.subscribe).not.toHaveBeenCalled();
+});
+
+it("asks for the tolerant plan view on every proposal read", async () => {
+  const listProposals = vi.fn(() => Effect.succeed({ revision: 0, active: [], recent: [] }));
+  const getProposal = vi.fn(() => Effect.succeed({ proposal: null }));
+  const subscribeProposals = vi.fn(() => Effect.void);
+  const methods = {
+    [AGENT_CONTROL_WS_METHODS.listProposals]: listProposals,
+    [AGENT_CONTROL_WS_METHODS.getProposal]: getProposal,
+    [AGENT_CONTROL_WS_METHODS.subscribeProposals]: subscribeProposals,
+  };
+  const transport = {
+    request: (invoke: (client: unknown) => Effect.Effect<unknown>) =>
+      Effect.runPromise(invoke(methods)),
+    subscribe: vi.fn((_invoke: (client: unknown) => unknown) => () => undefined),
+  };
+  const client = createWsRpcClient(transport as unknown as WsTransport);
+  const proposalId = "proposal-1" as Parameters<
+    typeof client.agentControl.getProposal
+  >[0]["proposalId"];
+
+  await client.agentControl.listProposals({ recentLimit: 5 });
+  await client.agentControl.getProposal({ proposalId });
+  client.agentControl.subscribeProposals(() => undefined);
+  transport.subscribe.mock.calls[0]?.[0](methods);
+
+  expect(listProposals).toHaveBeenCalledWith({ recentLimit: 5, planView: "tolerant" });
+  expect(getProposal).toHaveBeenCalledWith({ proposalId, planView: "tolerant" });
+  expect(subscribeProposals).toHaveBeenCalledWith({ planView: "tolerant" });
 });
 
 describe("git stacked actions", () => {

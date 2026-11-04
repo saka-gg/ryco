@@ -279,6 +279,18 @@ export function retainDesktopWorkspaceVcsScope(
   return retainDesktopWorkspaceScope(environmentId, { type: "vcs-status", cwd });
 }
 
+/**
+ * A cross-node project copy holding a Hub machine (`acquireNode`). Desktop
+ * main never preempts a lease, and this one is renewed every 15 s like every
+ * mounted scope, well within half its TTL.
+ */
+export function retainDesktopWorkspaceProjectCopyScope(
+  environmentId: EnvironmentId,
+  copyId: string,
+): () => void {
+  return retainDesktopWorkspaceScope(environmentId, { type: "project-copy", copyId });
+}
+
 export function retainDesktopWorkspaceProviderScope(
   environmentId: EnvironmentId,
   instanceId?: string,

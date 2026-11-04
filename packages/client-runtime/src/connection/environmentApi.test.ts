@@ -65,3 +65,22 @@ describe("environment API lookup", () => {
     expect(legacy?.threads).not.toHaveProperty("fork");
   });
 });
+
+it("exposes the project copy calls of the client", () => {
+  const pathHints = vi.fn();
+  const searchDirectories = vi.fn();
+  const subscribeImport = vi.fn();
+  const base = client();
+  const withProjectCopy = {
+    ...base,
+    projects: { ...base.projects, pathHints, subscribeImport },
+    filesystem: { browse: vi.fn(), searchDirectories },
+  } as unknown as WsRpcClient;
+  const api = createEnvironmentApiLookup({
+    canReadConnections: () => true,
+    readClient: () => withProjectCopy,
+  }).read(EnvironmentId.make("node"));
+  expect(api?.projects.pathHints).toBe(pathHints);
+  expect(api?.projects.subscribeImport).toBe(subscribeImport);
+  expect(api?.filesystem.searchDirectories).toBe(searchDirectories);
+});

@@ -9,10 +9,14 @@ import { ChildProcessSpawner } from "effect/process";
 import { GitCommandError, type SourceControlProviderError } from "@ryco/contracts";
 
 import { ServerConfig } from "../config.ts";
+import {
+  projectDestinationReservationKey,
+  tryReserveProjectDestination,
+} from "../projectCopy/destinationReservation.ts";
 import { makeRestartSensitiveWork, RestartSensitiveWork } from "../updates/restartSensitiveWork.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { WorkspaceAccessPolicyLayer } from "../workspace/Layers/WorkspaceAccessPolicy.ts";
-import { CLONE_CONCURRENCY } from "./gitCloneRun.ts";
+import { CLONE_CONCURRENCY } from "./gitCloneCommon.ts";
 import type * as SourceControlProvider from "./SourceControlProvider.ts";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
 import * as SourceControlRepositoryService from "./SourceControlRepositoryService.ts";
@@ -243,6 +247,102 @@ it.effect("clones a looked-up repository into the requested destination", () =>
                 cloneCalls.push({ cwd: input.cwd, args: input.args });
                 return processOutput();
               }),
+          },
+        }),
+      ),
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("refuses a clone into a destination another clone or import holds", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const parent = yield* fs.makeTempDirectoryScoped({
+      prefix: "ryco-source-control-reserved-",
+    });
+    const destinationPath = `${parent}/ryco`;
+    let cloneCalls = 0;
+    const layer = makeLayer({
+      git: {
+        execute: (input) =>
+          Effect.sync(() => {
+            cloneCalls += 1;
+          }).pipe(Effect.andThen(writeClonedRepository(input)), Effect.as(processOutput())),
+      },
+    });
+    const clone = Effect.gen(function* () {
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+      return yield* service.cloneRepository({
+        provider: "github",
+        repository: "octocat/ryco",
+        destinationPath,
+      });
+    }).pipe(Effect.provide(layer));
+
+    // An import job holds the folder (spelled differently): the clone never starts.
+    const release = tryReserveProjectDestination(
+      yield* projectDestinationReservationKey(`${parent}/./ryco`),
+      "project import test",
+    );
+    assert.isNotNull(release);
+    const error = yield* Effect.flip(clone);
+    assert.strictEqual(error._tag, "SourceControlRepositoryError");
+    assert.match("detail" in error ? error.detail : "", /already running on this node/);
+    assert.strictEqual(cloneCalls, 0);
+
+    // Released, the clone runs and gives the reservation back when it ends. (It left a
+    // repository at the destination, so the next check below is about the reservation only.)
+    release?.();
+    yield* clone;
+    assert.strictEqual(cloneCalls, 1);
+    const again = tryReserveProjectDestination(
+      yield* projectDestinationReservationKey(destinationPath),
+      "after the clone",
+    );
+    assert.isNotNull(again);
+    again?.();
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live("a request that joins a running clone is not refused by its reservation", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const parent = yield* fs.makeTempDirectoryScoped({
+      prefix: "ryco-source-control-reserved-join-",
+    });
+    const destinationPath = `${parent}/ryco`;
+    const release = yield* Deferred.make<void>();
+    let cloneCalls = 0;
+
+    yield* Effect.gen(function* () {
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+      const request = { remoteUrl: CLONE_URLS.url, destinationPath };
+      const first = yield* service.cloneRepository(request).pipe(Effect.forkChild);
+      yield* waitUntil(() => cloneCalls === 1);
+      // The running clone holds the destination: an import into it is refused...
+      const key = yield* projectDestinationReservationKey(destinationPath);
+      assert.isNull(tryReserveProjectDestination(key, "project import test"));
+      // ...but the same request again joins the clone.
+      const second = yield* service.cloneRepository(request).pipe(Effect.forkChild);
+      yield* Deferred.succeed(release, undefined);
+      const [a, b] = [yield* Fiber.join(first), yield* Fiber.join(second)];
+      assert.deepStrictEqual(a, b);
+      assert.strictEqual(cloneCalls, 1);
+      const again = tryReserveProjectDestination(key, "after the clone");
+      assert.isNotNull(again);
+      again?.();
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          git: {
+            execute: (input) =>
+              Effect.sync(() => {
+                cloneCalls += 1;
+              }).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.andThen(writeClonedRepository(input)),
+                Effect.as(processOutput()),
+              ),
           },
         }),
       ),

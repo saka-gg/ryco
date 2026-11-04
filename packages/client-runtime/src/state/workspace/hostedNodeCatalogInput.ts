@@ -65,8 +65,10 @@ export interface HostedNodeCatalogContext {
  * directory capabilities keep current eligibility: repository identity is
  * assumed and the native-client requirement is not. Thread settlement is
  * carried only when the directory states it, so a directory without the flag
- * leaves it unknown rather than unsupported. The session's role wins over the
- * directory's, which may lag a grant change.
+ * leaves it unknown rather than unsupported; no directory states project copy
+ * support yet, so it stays unknown until the node itself is heard from. The
+ * session's role wins over the directory's, which may lag a grant change. A
+ * hosted node is always reached through the relay.
  */
 export function hostedNodeCatalogInput(
   node: HostedHubNode,
@@ -90,6 +92,7 @@ export function hostedNodeCatalogInput(
     nativeTrust: input.nativeTrust,
     requiresNativeVerification: input.requiresNativeVerification,
     effectiveRole: input.session?.effectiveRole ?? node.effectiveRole,
+    transport: "relay",
     // Directory presence is independent of the relay connection state.
     online: node.presence.online,
     lastSeenAt: node.presence.lastHeartbeatAt ?? node.lastAuthenticatedAt,

@@ -60,6 +60,10 @@ It ships as a cross-platform desktop app (macOS, Linux, Windows) and as a local 
 - **Project folders and grouped repositories** — organize local and remote projects in the sidebar
 - **Unified cross-node workspace** — see eligible projects and threads from every machine in one
   Inbox or Projects view, with exact machine provenance and demand-driven connections
+- **Projects across nodes** — copy a project to another machine (clone or send the files, with
+  unpushed commits, uncommitted changes, settings and a setup step), add projects on any node with
+  folder search, and see every node a project is on in the project selector. See
+  [docs/features/cross-node-projects.md](./docs/features/cross-node-projects.md)
 
 ### Integrations & infrastructure
 
@@ -164,6 +168,7 @@ Read [CONTRIBUTING.md](./CONTRIBUTING.md) before opening an issue or PR.
 - [Grok provider guide](./docs/providers/grok.md)
 - [Observability guide](./docs/observability.md)
 - [Source-control providers](./docs/source-control-providers.md)
+- [Projects across nodes](./docs/features/cross-node-projects.md)
 - [Release process](./docs/release.md)
 - [Keybindings](./KEYBINDINGS.md)
 

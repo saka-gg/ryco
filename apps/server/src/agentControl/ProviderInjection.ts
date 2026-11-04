@@ -171,6 +171,10 @@ const grantedCapabilities = [
   AGENT_CONTROL_CAPABILITIES.watchPullRequests,
   AGENT_CONTROL_CAPABILITIES.watchCommands,
   AGENT_CONTROL_CAPABILITIES.requestSecrets,
+  // Cross-node projects: proposals the user approves, and the node directory they target.
+  AGENT_CONTROL_CAPABILITIES.importProject,
+  AGENT_CONTROL_CAPABILITIES.copyProjectToNode,
+  AGENT_CONTROL_CAPABILITIES.readNodes,
 ] as const;
 
 const grantsDeviceControl = (capabilities: ReadonlyArray<string>): boolean =>

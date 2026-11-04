@@ -2,7 +2,7 @@ import { useShallow } from "zustand/react/shallow";
 import { useSettingsTarget, useSettingsEditingScope } from "../../settingsTarget";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { selectProjectsAcrossEnvironments, useStore } from "../../store";
-import { openProjectImportDialog } from "../projectImport/projectImportDialogStore";
+import { openSessionImportDialog } from "../sessionImport/sessionImportDialogStore";
 import { Button } from "../ui/button";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 import { SessionImportPanel } from "./SessionImportPanel";
@@ -29,7 +29,7 @@ export function SessionImportSettings() {
             size="sm"
             variant="outline"
             disabled={!allowed}
-            onClick={() => openProjectImportDialog({ environmentId: target.environmentId })}
+            onClick={() => openSessionImportDialog({ environmentId: target.environmentId })}
           >
             Import projects…
           </Button>

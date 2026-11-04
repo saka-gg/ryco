@@ -303,6 +303,9 @@ it.effect("injects the MCP connection into runtime options, never the environmen
           AGENT_CONTROL_CAPABILITIES.watchPullRequests,
           AGENT_CONTROL_CAPABILITIES.watchCommands,
           AGENT_CONTROL_CAPABILITIES.requestSecrets,
+          AGENT_CONTROL_CAPABILITIES.importProject,
+          AGENT_CONTROL_CAPABILITIES.copyProjectToNode,
+          AGENT_CONTROL_CAPABILITIES.readNodes,
         ],
         injectionMode: "codex-http",
       });

@@ -265,6 +265,11 @@ export type AuthCreatePairingCredentialInput = typeof AuthCreatePairingCredentia
 export const AuthSessionState = Schema.Struct({
   authenticated: Schema.Boolean,
   auth: ServerAuthDescriptor,
+  /**
+   * The presented session's own id, so a client that re-pairs can revoke the
+   * session it replaces. Absent from servers older than owner SSH pairing.
+   */
+  sessionId: Schema.optionalKey(AuthSessionId),
   role: Schema.optionalKey(AuthSessionRole),
   sessionMethod: Schema.optionalKey(ServerAuthSessionMethod),
   expiresAt: Schema.optionalKey(Schema.DateTimeUtc),

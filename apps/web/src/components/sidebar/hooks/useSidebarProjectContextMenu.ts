@@ -2,6 +2,7 @@ import React, { useCallback } from "react";
 import { scopedProjectKey, scopeProjectRef } from "@ryco/client-runtime/scoped";
 import { type ContextMenuItem } from "@ryco/contracts";
 import { readLocalApi } from "../../../localApi";
+import type { CrossNodeProjectActions } from "../../projectNodes/projectNodesDialogStore";
 import type {
   SidebarProjectGroupMember,
   SidebarProjectSnapshot,
@@ -21,6 +22,8 @@ export function useSidebarProjectContextMenu(params: {
   openProjectGroupingDialog: (member: SidebarProjectGroupMember) => void;
   copyPathToClipboard: (value: string, ctx: { path: string }) => void;
   handleRemoveProject: (member: SidebarProjectGroupMember) => Promise<void>;
+  /** Copy and link across nodes; left unset where the menu must not offer them (the phone tier). */
+  crossNodeActions?: CrossNodeProjectActions | undefined;
 }) {
   const {
     project,
@@ -34,6 +37,7 @@ export function useSidebarProjectContextMenu(params: {
     openProjectGroupingDialog,
     copyPathToClipboard,
     handleRemoveProject,
+    crossNodeActions,
   } = params;
 
   // The shared opener: builds the single project action inventory and
@@ -50,6 +54,13 @@ export function useSidebarProjectContextMenu(params: {
         actionHandlers.set("project-overview", () => {
           onOpenOverview();
         });
+        crossNodeActions?.onIntent?.();
+        // A native menu has no hover to listen to: its opening is the copy's intent too.
+        crossNodeActions?.onCopyIntent?.();
+        if (crossNodeActions) {
+          actionHandlers.set("copy-to-node", crossNodeActions.onCopy);
+          actionHandlers.set("link-node-copy", crossNodeActions.onLink);
+        }
         const makeLeaf = (
           action:
             | "settings"
@@ -172,6 +183,12 @@ export function useSidebarProjectContextMenu(params: {
               ]
             : []),
           buildTargetedItem("rename", "Rename project"),
+          ...(crossNodeActions
+            ? [
+                { id: "copy-to-node", label: "Copy to another node…" },
+                { id: "link-node-copy", label: "Link a copy that’s already on a node…" },
+              ]
+            : []),
           buildTargetedItem("grouping", "Project grouping…"),
           buildTargetedItem("copy-path", "Copy Project Path"),
           buildTargetedItem("delete", "Remove project", {
@@ -190,6 +207,7 @@ export function useSidebarProjectContextMenu(params: {
     },
     [
       copyPathToClipboard,
+      crossNodeActions,
       handleRemoveProject,
       jiraProjectOpenUrlByProjectKey,
       onOpenOverview,

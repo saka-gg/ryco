@@ -3,6 +3,7 @@ import "../../index.css";
 import { useAgentControlStore } from "@ryco/client-runtime/state/agentControl";
 import {
   AgentControlProposal,
+  type AgentControlProposalView,
   EnvironmentId,
   EventId,
   MessageId,
@@ -24,6 +25,11 @@ import {
   __setEnvironmentApiOverrideForTests,
 } from "../../environmentApi";
 import { syncServerShellSnapshot, useStore } from "../../store";
+import {
+  AgentControlClientExecutorContext,
+  type AgentControlClientExecutionPreviewState,
+  type AgentControlClientExecutor,
+} from "../agent-control/agentControlClientExecutor";
 import { DelegationDock } from "./DelegationDock";
 
 const fixture = vi.hoisted(() => ({
@@ -134,7 +140,7 @@ const completionReturn = (child: string, status: string) => ({
   updatedAt: "2026-10-01T00:00:05.000Z",
 });
 
-function seedQueue(active: ReadonlyArray<AgentControlProposal>) {
+function seedQueue(active: ReadonlyArray<AgentControlProposalView>) {
   useAgentControlStore.getState().applyStreamEvent(ENV, {
     version: 1,
     type: "snapshot",
@@ -165,6 +171,12 @@ const workers = [
     lineage: delegatedFrom(ThreadId.make("first-worker"), COORDINATOR),
   }),
 ];
+
+/** A client executor that can reach only the "Mac mini" node. */
+const macMiniExecutor: AgentControlClientExecutor = {
+  canExecute: (target) => target.environmentId === "env-mac-mini",
+  approve: vi.fn().mockResolvedValue(undefined),
+};
 
 const rowTitles = () =>
   [...document.querySelectorAll('[data-testid="delegation-dock"] button[aria-expanded] .truncate')]
@@ -278,6 +290,174 @@ describe("DelegationDock", () => {
       seedQueue([{ ...pending, status: "approved", decidedAt: "2026-10-01T00:00:06.000Z" }]);
       await expect.element(page.getByText(/You approved Unlink project/)).toBeVisible();
       await expect.element(page.getByTestId("delegation-dock-approval")).not.toBeInTheDocument();
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("offers only Reject for requests this client cannot approve, and runs copies it can", async () => {
+    seed([shell("coordinator", "Coordinator")]);
+    const pendingFields = { status: "pending-user-approval", decidedAt: null, promptSummary: null };
+    const unsupported: AgentControlProposalView = {
+      ...proposal("future", { ...pendingFields, createdAt: "2026-10-01T00:00:00.000Z" }),
+      plan: { kind: "unsupported", originalKind: "mirrorRepository" },
+    };
+    const copy = proposal("copy", {
+      ...pendingFields,
+      createdAt: "2026-10-01T00:00:01.000Z",
+      plan: {
+        kind: "copyProjectToNode",
+        source: { kind: "repository", remoteUrl: "https://github.com/example/ryco", title: "ryco" },
+        target: { environmentId: "env-mac-mini", label: "Mac mini" },
+        destination: { kind: "default" },
+        bringCommits: false,
+        bringChanges: false,
+        copySettings: false,
+        setup: null,
+        followUpThread: null,
+      },
+    });
+    seedQueue([unsupported, copy]);
+    const mounted = await render(<DelegationDock environmentId={ENV} threadId={COORDINATOR} />);
+    try {
+      const unsupportedRow = page
+        .getByTestId("delegation-dock-approval")
+        .filter({ hasText: "Unsupported request" });
+      await expect.element(unsupportedRow).toMatchTextContent(/mirrorRepository/);
+      await expect.element(page.getByText("Update Ryco to review this request.")).toBeVisible();
+      await expect
+        .element(page.getByText("Approve in Ryco on a computer connected to Mac mini"))
+        .toBeVisible();
+      expect(page.getByRole("button", { name: "Approve", exact: true }).elements()).toHaveLength(0);
+      expect(page.getByRole("button", { name: "Update Ryco" }).elements()).toHaveLength(1);
+      await unsupportedRow.getByRole("button", { name: "Reject", exact: true }).click();
+      expect(fixture.rejectProposal).toHaveBeenCalledWith({ proposalId: "future" });
+    } finally {
+      await mounted.unmount();
+    }
+
+    // A client that can run the copy against its target approves it through its executor.
+    const withExecutor = await render(
+      <AgentControlClientExecutorContext.Provider value={macMiniExecutor}>
+        <DelegationDock environmentId={ENV} threadId={COORDINATOR} />
+      </AgentControlClientExecutorContext.Provider>,
+    );
+    try {
+      expect(page.getByRole("button", { name: "Approve", exact: true }).elements()).toHaveLength(1);
+      await page.getByRole("button", { name: "Approve", exact: true }).click();
+      await expect
+        .poll(() => macMiniExecutor.approve)
+        .toHaveBeenCalledWith({ environmentId: ENV, proposal: copy });
+      expect(fixture.acceptProposal).not.toHaveBeenCalled();
+    } finally {
+      await withExecutor.unmount();
+    }
+  });
+
+  it("shows where a copy lands on its target before Approve, in full behind Details", async () => {
+    seed([shell("coordinator", "Coordinator")]);
+    const copy = proposal("copy", {
+      status: "pending-user-approval",
+      decidedAt: null,
+      promptSummary: null,
+      riskTags: ["creates-project", "cross-node", "runs-commands"],
+      plan: {
+        kind: "copyProjectToNode",
+        source: {
+          kind: "project",
+          projectId: "project-1",
+          title: "ryco",
+          expectedUpdatedAt: "2026-10-01T00:00:00.000Z",
+        },
+        target: { environmentId: "env-mac-mini", label: "Mac mini" },
+        destination: { kind: "default" },
+        bringCommits: false,
+        bringChanges: false,
+        copySettings: true,
+        setup: { command: "bun install", saveAsScript: false },
+        followUpThread: {
+          title: "Finish setting up ryco",
+          prompt: "Install the toolchain and run the tests.",
+          runtimeMode: "approval-required",
+          envMode: "local",
+          modelSelection: null,
+        },
+      },
+    });
+    seedQueue([copy]);
+    let state: AgentControlClientExecutionPreviewState | null = null;
+    const listeners = new Set<() => void>();
+    const show = (next: AgentControlClientExecutionPreviewState) => {
+      state = next;
+      for (const listener of listeners) listener();
+    };
+    const load = vi.fn(() => show({ status: "loading" }));
+    const executor: AgentControlClientExecutor = {
+      canExecute: () => true,
+      approve: vi.fn().mockResolvedValue(undefined),
+      previews: {
+        load,
+        read: () => state,
+        subscribe: (listener) => {
+          listeners.add(listener);
+          return () => {
+            listeners.delete(listener);
+          };
+        },
+      },
+    };
+    const mounted = await render(
+      <AgentControlClientExecutorContext.Provider value={executor}>
+        <DelegationDock environmentId={ENV} threadId={COORDINATOR} />
+      </AgentControlClientExecutorContext.Provider>,
+    );
+    try {
+      await expect.element(page.getByText("Checking Mac mini…")).toBeVisible();
+      expect(load).toHaveBeenCalledWith({ environmentId: ENV, proposal: copy });
+
+      show({
+        status: "ready",
+        preview: {
+          targetLabel: "Mac mini",
+          destination: {
+            path: "/Users/me/Code/ryco",
+            tag: "new folder",
+            note: "Mac mini's code directory.",
+          },
+          followUpModel: "Opus 5.5 · Claude",
+          problem: null,
+        },
+      });
+      const line = page.getByTestId("agent-control-execution-preview");
+      await expect
+        .element(line)
+        .toMatchTextContent(/To\s*\/Users\/me\/Code\/ryco\s*on Mac mini · new folder/);
+      await expect.element(line).toMatchTextContent(/Setup thread: Opus 5\.5 · Claude/);
+      // The command it runs, verbatim, on the row too.
+      await expect
+        .element(page.getByTestId("agent-control-plan-facts"))
+        .toMatchTextContent(/Runs on Mac mini\s*bun install/);
+
+      // Details shows the whole preview in the card, in place of the line: the folder, what it
+      // brings and the command, without expanding the plan.
+      await page.getByRole("button", { name: "Details" }).click();
+      const block = page.getByTestId("agent-control-execution-preview");
+      await expect.element(block).toMatchTextContent(/On Mac mini/);
+      await expect.element(block).toMatchTextContent(/Mac mini's code directory\./);
+      await expect.element(block).toMatchTextContent(/Brings\s*Project settings/);
+      await expect.element(block).toMatchTextContent(/Runs on Mac mini\s*bun install/);
+      await expect.element(block).toMatchTextContent(/Then starts\s*Finish setting up ryco/);
+      expect(block.elements()).toHaveLength(1);
+      // The card's summary says it too, not the server's titles-only text.
+      await expect
+        .element(page.getByText(/^Copy ryco to a folder named after the source/))
+        .toMatchTextContent(/runs `bun install`/);
+      expect(load).toHaveBeenCalledTimes(1);
+
+      await page.getByRole("button", { name: "Approve", exact: true }).click();
+      await expect
+        .poll(() => executor.approve)
+        .toHaveBeenCalledWith({ environmentId: ENV, proposal: copy });
     } finally {
       await mounted.unmount();
     }

@@ -21,6 +21,7 @@ import {
   WorktreeId,
   type AgentControlExecutionReceipt,
   type AgentControlErrorCode,
+  type AgentControlImportProjectPlan,
   type AgentControlOperation,
   type AgentControlOperationState,
   type AgentControlProposal,
@@ -83,11 +84,24 @@ import {
 import { AgentControlOperationStore } from "../Services/AgentControlOperationStore.ts";
 import { AgentControlProposalEvents } from "../Services/AgentControlProposalEvents.ts";
 import { AgentControlProposalStore } from "../Services/AgentControlProposalStore.ts";
+import {
+  agentControlProjectImportId,
+  isAgentControlClientExecutedKind,
+  isPastAgentControlClientExecutionDeadline,
+} from "../projectCopyControl.ts";
+import { ProjectImports } from "../../projectCopy/Services/ProjectImports.ts";
 
 const TARGET_WAIT_TIMEOUT_MS = 60_000;
 /** Minimum spacing of woken target checks: the interval of the poll the waits replaced. */
 const TARGET_WAKE_SPACING_MS = 100;
 const RECOVERY_SCAN_LIMIT = 100;
+/** A restart queues the outcome note of copies and imports that settled this recently. */
+const PROJECT_COPY_WAKE_RECOVERY_MS = 24 * 60 * 60 * 1000;
+const isProjectCopyPlanKind = (kind: string): boolean =>
+  kind === "importProject" || kind === "copyProjectToNode";
+/** How often expired client executions are failed while the node runs. */
+const CLIENT_EXECUTION_SWEEP_INTERVAL = Duration.minutes(1);
+type ProposalWithPlan<P> = AgentControlProposal & { readonly plan: P };
 
 export interface AgentControlExecutionLiveOptions {
   readonly disableBackground?: boolean;
@@ -99,7 +113,9 @@ const isProjectAction = (proposal: AgentControlProposal): boolean =>
   proposal.plan.kind === "createProject" ||
   proposal.plan.kind === "updateProject" ||
   proposal.plan.kind === "removeProject" ||
-  proposal.plan.kind === "workspaceLifecycle";
+  proposal.plan.kind === "workspaceLifecycle" ||
+  proposal.plan.kind === "importProject" ||
+  proposal.plan.kind === "copyProjectToNode";
 
 /** Actions whose failure the agent reads in the node's own words (what to do about it). */
 const explainsFailure = (proposal: AgentControlProposal): boolean =>
@@ -256,19 +272,27 @@ const executionReceipt = (operation: AgentControlOperation): AgentControlExecuti
     : { compensation: operation.state.compensation }),
 });
 
-const completedResult = (operation: AgentControlOperation): AgentControlResultEnvelope => ({
+const completedResult = (
+  operation: AgentControlOperation,
+  /** What the agent reads about the outcome; the action's recorded note when absent. */
+  detail: string | undefined = operation.state.note,
+): AgentControlResultEnvelope => ({
   outcome: "completed",
   createdThreadIds:
-    operation.actionKind === "createThreads" || operation.actionKind === "automationRun"
+    operation.actionKind === "createThreads" ||
+    operation.actionKind === "automationRun" ||
+    operation.actionKind === "importProject"
       ? operation.state.resources.threadIds
       : undefined,
+  // This node's projects only: a cross-node copy reports its project as `remoteProject`.
   createdProjectIds:
-    operation.actionKind === "createProject"
+    operation.actionKind === "createProject" || operation.actionKind === "importProject"
       ? (operation.state.resources.projectIds ?? [])
       : undefined,
   execution: executionReceipt(operation),
-  // What the agent reads about the outcome (a watch's answer), when the action recorded one.
-  ...(operation.state.note === undefined ? {} : { detail: operation.state.note }),
+  // What the agent reads about the outcome (a watch's answer, a project copy's summary), when
+  // there is one.
+  ...(detail === undefined || detail === "" ? {} : { detail }),
   completedAt: new Date().toISOString(),
 });
 
@@ -315,6 +339,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
     const workspaceAccess = yield* WorkspaceAccessPolicy;
     const deviceService = yield* Effect.serviceOption(DeviceService);
     const localTasks = yield* Effect.serviceOption(LocalTaskService);
+    const projectImports = yield* Effect.serviceOption(ProjectImports);
     // Required, not optional: provided beneath the runtime services (`server.ts`), so a layer
     // placed where execution cannot see it fails to compile instead of failing every watch.
     const pullRequestWatches = yield* PullRequestWatchService;
@@ -338,6 +363,8 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
           Effect.mapError((error) => new Error(error.detail)),
         );
     const startup = yield* ServerRuntimeStartup;
+    // Import followers outlive the execution that started them, never the layer.
+    const followerScope = yield* Effect.scope;
 
     /** A heartbeat's run logic, loaded on its first run or recovery (`heartbeatRuns.ts`). */
     const heartbeatRuns = Effect.promise(() => import("../heartbeatRuns.ts"));
@@ -1820,10 +1847,95 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
         return operation;
       });
 
+    // ── importProject and copyProjectToNode (`projectCopyRuns.ts`, loaded on first use) ────
+
+    const projectCopyRuns = yield* Effect.cached(
+      Effect.promise(() => import("../projectCopyRuns.ts")).pipe(
+        Effect.map((module) =>
+          module.makeProjectCopyRuns({
+            proposals,
+            operations,
+            validator,
+            projectImports,
+            followerScope,
+            appendStep,
+            completedResult,
+            failedResult,
+            executionReceipt,
+            boundedCauseMessage,
+            settleProposalFailure,
+            wake: {
+              loadThread,
+              queue: (command) => commandApplication.applyInternal(command),
+              commandIdFor,
+              messageIdFor,
+            },
+          }),
+        ),
+      ),
+    );
+
+    /** Tells the asking agent how a copy or import ended (`projectCopyOutcomeWake.ts`). */
+    const wakeProjectCopyOrigin = (proposal: AgentControlProposal) =>
+      Effect.flatMap(projectCopyRuns, (runs) => runs.wakeOrigin(proposal));
+
+    /**
+     * After a restart: queues the outcome note of copies and imports that settled recently, in
+     * case the node stopped between the settle and the queue add. Notes already queued or sent
+     * are left as they are (their ids are known), so this repeats nothing.
+     */
+    const recoverProjectCopyWakes = Effect.suspend(() =>
+      proposals.listRecent({ limit: RECOVERY_SCAN_LIMIT }),
+    ).pipe(
+      Effect.flatMap((recent) => {
+        const since = Date.now() - PROJECT_COPY_WAKE_RECOVERY_MS;
+        return Effect.forEach(
+          recent.filter(
+            (proposal) =>
+              isProjectCopyPlanKind(proposal.plan.kind) &&
+              (proposal.status === "completed" || proposal.status === "failed") &&
+              Date.parse(proposal.updatedAt) >= since,
+          ),
+          wakeProjectCopyOrigin,
+          { discard: true },
+        );
+      }),
+      Effect.catchCause(() => Effect.void),
+    );
+
+    const beginClientExecution: AgentControlExecutionShape["beginClientExecution"] = (input) =>
+      Effect.flatMap(projectCopyRuns, (runs) => runs.beginClientExecution(input));
+
+    const reportClientExecution: AgentControlExecutionShape["reportClientExecution"] = (input) =>
+      Effect.flatMap(projectCopyRuns, (runs) => runs.reportClientExecution(input));
+
+    /** Fails a client execution whose report deadline passed; a report that won stands. */
+    const failMissedClientExecution = (operation: AgentControlOperation) =>
+      Effect.flatMap(projectCopyRuns, (runs) => runs.failMissedClientExecution(operation));
+
+    const isPastDeadline = isPastAgentControlClientExecutionDeadline;
+
+    const sweepClientExecutions: AgentControlExecutionShape["sweepClientExecutions"] = Effect.gen(
+      function* () {
+        const now = new Date().toISOString();
+        for (const operation of yield* operations.listRecoverable()) {
+          if (isPastDeadline(operation, now)) yield* failMissedClientExecution(operation);
+        }
+      },
+    ).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logError("Agent Control client execution sweep failed", {
+          cause: Cause.hasInterruptsOnly(cause) ? "interrupted" : "failure",
+        }),
+      ),
+    );
+
     const executeApproved: AgentControlExecutionShape["executeApproved"] = (proposalId) =>
       Effect.gen(function* () {
         const found = yield* proposals.getById(proposalId);
         if (Option.isNone(found) || found.value.status !== "approved") return;
+        // The approving client runs it (`beginClientExecution`); this executor never does.
+        if (isAgentControlClientExecutedKind(found.value.plan.kind)) return;
         const executing = yield* proposals.beginExecution({
           proposalId,
           actor: "executor",
@@ -1877,6 +1989,14 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               ? { code: deviceRevalidationErrorCode(validation.cause) }
               : {}),
           });
+          return;
+        }
+
+        if (executing.plan.kind === "importProject") {
+          yield* (yield* projectCopyRuns).startProjectImport(
+            executing as ProposalWithPlan<AgentControlImportProjectPlan>,
+            operation,
+          );
           return;
         }
 
@@ -1977,10 +2097,25 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
     const recoverIncomplete: AgentControlExecutionShape["recoverIncomplete"] = Effect.gen(
       function* () {
         const recoverable = yield* operations.listRecoverable();
+        const now = new Date().toISOString();
         for (let operation of recoverable) {
+          // The approving client may still be copying: its report deadline decides, never this
+          // restart (an update-everything restart must not fail a running copy).
+          if (operation.state.clientExecution !== undefined) {
+            if (isPastDeadline(operation, now)) yield* failMissedClientExecution(operation);
+            continue;
+          }
           const proposalOption = yield* proposals.getById(operation.proposalId);
           if (Option.isNone(proposalOption)) continue;
           const proposal = proposalOption.value;
+          // The import job is the truth: settle from it (or keep following it), never compensate.
+          if (operation.status === "running" && proposal.plan.kind === "importProject") {
+            yield* (yield* projectCopyRuns).followProjectImport(
+              proposal.proposalId,
+              agentControlProjectImportId(operation.operationId),
+            );
+            continue;
+          }
           if (
             operation.status === "running" &&
             (proposal.plan.kind === "createAutomation" ||
@@ -2205,18 +2340,43 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
       yield* Effect.forkScoped(
         startup.awaitCommandReady.pipe(
           Effect.andThen(recoverIncomplete),
+          Effect.andThen(recoverProjectCopyWakes),
           Effect.andThen(scanApproved),
           Effect.andThen(
             Stream.fromSubscription(subscription).pipe(
-              Stream.filter((event) => event.proposal.status === "approved"),
-              Stream.runForEach((event) => executeApproved(event.proposal.proposalId)),
+              Stream.runForEach(({ proposal }) =>
+                proposal.status === "approved"
+                  ? executeApproved(proposal.proposalId)
+                  : isProjectCopyPlanKind(proposal.plan.kind) &&
+                      (proposal.status === "completed" || proposal.status === "failed")
+                    ? wakeProjectCopyOrigin(proposal)
+                    : Effect.void,
+              ),
+            ),
+          ),
+        ),
+      );
+      // Startup recovery fails what expired while the node was down; this fails what expires
+      // while it runs.
+      yield* Effect.forkScoped(
+        startup.awaitCommandReady.pipe(
+          Effect.andThen(
+            Effect.sleep(CLIENT_EXECUTION_SWEEP_INTERVAL).pipe(
+              Effect.andThen(sweepClientExecutions),
+              Effect.forever,
             ),
           ),
         ),
       );
     }
 
-    return { executeApproved, recoverIncomplete } satisfies AgentControlExecutionShape;
+    return {
+      executeApproved,
+      recoverIncomplete,
+      beginClientExecution,
+      reportClientExecution,
+      sweepClientExecutions,
+    } satisfies AgentControlExecutionShape;
   });
 
 export const makeAgentControlExecutionLive = (options?: AgentControlExecutionLiveOptions) =>

@@ -5,6 +5,7 @@ import {
   CONTEXT_HANDOFF_WS_METHODS,
   DEVICE_WS_METHODS,
   ORCHESTRATION_WS_METHODS,
+  PROJECT_COPY_WS_METHODS,
   WS_METHODS,
 } from "@ryco/contracts";
 import { NODE_BROWSER_WS_METHODS } from "@ryco/contracts/node-browser";
@@ -68,6 +69,7 @@ describe("shared RPC access policy", () => {
     expect(new Set(Object.keys(RPC_ACCESS_POLICY))).toEqual(
       new Set([
         ...Object.values(WS_METHODS),
+        ...Object.values(PROJECT_COPY_WS_METHODS),
         ...Object.values(ORCHESTRATION_WS_METHODS),
         ...Object.values(CONTEXT_HANDOFF_WS_METHODS),
         ...Object.values(DEVICE_WS_METHODS),
@@ -235,6 +237,48 @@ describe("shared RPC access policy", () => {
     ]) {
       expect(rpcDeliveryEffectFor(method)).toBe("mutation");
     }
+  });
+
+  it("keeps project copy at the operator tier and never receipted", () => {
+    const reads = [
+      PROJECT_COPY_WS_METHODS.pathHints,
+      PROJECT_COPY_WS_METHODS.exportInspect,
+      PROJECT_COPY_WS_METHODS.searchDirectories,
+      PROJECT_COPY_WS_METHODS.previewDestination,
+      PROJECT_COPY_WS_METHODS.checkRemoteAccess,
+      PROJECT_COPY_WS_METHODS.exportReadChunk,
+      PROJECT_COPY_WS_METHODS.subscribeImport,
+      PROJECT_COPY_WS_METHODS.listImports,
+    ];
+    // Idempotent by client-minted id or offset, so a dropped one is harmless.
+    const idempotentScratch = [
+      PROJECT_COPY_WS_METHODS.exportStart,
+      PROJECT_COPY_WS_METHODS.exportDispose,
+      PROJECT_COPY_WS_METHODS.transferBegin,
+      PROJECT_COPY_WS_METHODS.transferAppend,
+      PROJECT_COPY_WS_METHODS.transferCommit,
+      PROJECT_COPY_WS_METHODS.transferAbort,
+    ];
+    const mutations = [
+      PROJECT_COPY_WS_METHODS.importStart,
+      PROJECT_COPY_WS_METHODS.cancelImport,
+      PROJECT_COPY_WS_METHODS.discardImport,
+    ];
+    for (const method of [...reads, ...idempotentScratch, ...mutations]) {
+      expect(rpcAccessFor(method)).toBe("operator");
+      expect(hostedRoleAllows("viewer", method)).toBe(false);
+      expect(hostedRoleAllows("operator", method)).toBe(true);
+    }
+    for (const method of [...reads, ...idempotentScratch]) {
+      expect(rpcDeliveryEffectFor(method)).toBe("read");
+    }
+    for (const method of mutations) {
+      expect(rpcDeliveryEffectFor(method)).toBe("mutation");
+    }
+    expect(rpcAccessFor(AGENT_CONTROL_WS_METHODS.publishNodeDirectory)).toBe("owner");
+    expect(rpcAccessFor(AGENT_CONTROL_WS_METHODS.reportClientExecution)).toBe("owner");
+    expect(rpcDeliveryEffectFor(AGENT_CONTROL_WS_METHODS.publishNodeDirectory)).toBe("read");
+    expect(rpcDeliveryEffectFor(AGENT_CONTROL_WS_METHODS.reportClientExecution)).toBe("mutation");
   });
 
   it("treats an unclassified method's delivery as uncertain", () => {

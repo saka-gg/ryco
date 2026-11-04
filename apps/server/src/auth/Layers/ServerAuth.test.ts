@@ -13,6 +13,7 @@ import {
   BootstrapCredentialError,
   BootstrapCredentialService,
 } from "../Services/BootstrapCredentialService.ts";
+import { AuthControlPlane } from "../Services/AuthControlPlane.ts";
 import { ServerAuth, type ServerAuthShape } from "../Services/ServerAuth.ts";
 import { SessionCredentialService } from "../Services/SessionCredentialService.ts";
 import { AuthControlPlaneLive } from "./AuthControlPlane.ts";
@@ -347,6 +348,68 @@ it.layer(NodeServices.layer)("ServerAuthLive", (it) => {
 
       expect(verified.role).toBe("owner");
       expect(verified.subject).toBe("owner-bootstrap");
+    }).pipe(Effect.provide(makeServerAuthLayer())),
+  );
+
+  it.effect("lists owner pairing links next to client links, never the startup owner link", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* ServerAuth;
+      const authControlPlane = yield* AuthControlPlane;
+
+      yield* serverAuth.issueStartupPairingUrl("http://127.0.0.1:3773");
+      const owner = yield* authControlPlane.createPairingLink({
+        role: "owner",
+        label: "Desktop SSH",
+      });
+      const client = yield* serverAuth.issuePairingCredential({ label: "Julius iPhone" });
+
+      const listed = yield* serverAuth.listPairingLinks();
+      expect(listed.map((link) => [link.id, link.role]).toSorted()).toEqual(
+        [
+          [owner.id, "owner"],
+          [client.id, "client"],
+        ].toSorted(),
+      );
+    }).pipe(Effect.provide(makeServerAuthLayer())),
+  );
+
+  it.effect("caps owner pairing links at 15 minutes", () =>
+    Effect.gen(function* () {
+      const authControlPlane = yield* AuthControlPlane;
+
+      const tooLong = yield* Effect.flip(
+        authControlPlane.createPairingLink({ role: "owner", ttl: Duration.minutes(16) }),
+      );
+      expect(tooLong.message).toBe("An owner pairing link can last at most 15 minutes.");
+      const atCap = yield* authControlPlane.createPairingLink({
+        role: "owner",
+        ttl: Duration.minutes(15),
+      });
+      expect(atCap.role).toBe("owner");
+      const client = yield* authControlPlane.createPairingLink({ ttl: Duration.hours(1) });
+      expect(client.role).toBe("client");
+    }).pipe(Effect.provide(makeServerAuthLayer())),
+  );
+
+  it.effect("reports the presented session's own id in the session state", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* ServerAuth;
+      const pairing = yield* serverAuth.issuePairingCredential({ label: "Desktop SSH" });
+      const paired = yield* serverAuth.exchangeBootstrapCredentialForBearerSession(
+        pairing.credential,
+        requestMetadata,
+      );
+      const request = makeBearerRequest(paired.sessionToken);
+      const session = yield* serverAuth.authenticateHttpRequest(request);
+
+      const state = yield* serverAuth.getSessionState(request);
+      expect(state).toMatchObject({
+        authenticated: true,
+        role: "client",
+        sessionId: session.sessionId,
+      });
+      const anonymous = yield* serverAuth.getSessionState(makeBearerRequest("not-a-session"));
+      expect(anonymous.sessionId).toBeUndefined();
     }).pipe(Effect.provide(makeServerAuthLayer())),
   );
 

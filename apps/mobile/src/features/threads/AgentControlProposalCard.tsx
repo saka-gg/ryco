@@ -2,23 +2,28 @@ import { useState } from "react";
 import { useNavigation } from "@react-navigation/native";
 import { Pressable, View } from "react-native";
 
-import type { AgentControlProposal, EnvironmentId } from "@ryco/contracts";
+import type { AgentControlProposalView, EnvironmentId } from "@ryco/contracts";
 
 import { AppText as Text } from "../../components/AppText";
 import { ensureEnvironmentApi } from "../../connection/environmentApi";
 import { runThenSettle } from "../../lib/runWhileBusy";
-import { buildAgentControlProposalCardModel } from "../../state/agentControlRuntime";
+import {
+  agentControlCardDecisions,
+  buildAgentControlProposalCardModel,
+} from "../../state/agentControlRuntime";
 import { acceptAgentControlProposal, rejectAgentControlProposal } from "./agentControlActions";
 
 /**
  * Native Agent Control proposal card. Renders the shared presentation
  * model, including the exact immutable plan the user is deciding on, and
  * sends explicit accept/reject decisions through the EnvironmentApi seam.
- * Terminal proposals render their outcome without actions.
+ * Terminal proposals render their outcome without actions. A plan this build
+ * cannot read, and a plan the approving app runs itself (this app has no copy
+ * coordinator), offer Reject only and say where to approve instead.
  */
 export function AgentControlProposalCard(props: {
   readonly environmentId: EnvironmentId;
-  readonly proposal: AgentControlProposal;
+  readonly proposal: AgentControlProposalView;
   /** Cached/degraded threads render the proposal but cannot decide it. */
   readonly disabled?: boolean;
 }) {
@@ -26,8 +31,10 @@ export function AgentControlProposalCard(props: {
   const [pending, setPending] = useState<"accept" | "reject" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const model = buildAgentControlProposalCardModel(props.proposal);
+  const decisions = agentControlCardDecisions(model, null);
 
   const decide = async (decision: "accept" | "reject") => {
+    if (decision === "accept" && !decisions.canApprove) return;
     setPending(decision);
     setError(null);
     await runThenSettle(
@@ -138,13 +145,20 @@ export function AgentControlProposalCard(props: {
       ) : null}
       {model.isPending ? (
         <View className="mt-3 flex-row flex-wrap gap-2">
-          <Pressable
-            disabled={pending !== null || props.disabled === true}
-            onPress={() => void decide("accept")}
-            className="h-11 min-w-28 flex-1 items-center justify-center rounded-full bg-primary px-4 active:opacity-70 disabled:opacity-50"
-          >
-            <Text className="text-sm font-ryco-bold text-primary-foreground">Approve</Text>
-          </Pressable>
+          {decisions.approveUnavailableLabel !== null ? (
+            <Text className="w-full font-sans text-sm text-foreground-muted">
+              {decisions.approveUnavailableLabel}
+            </Text>
+          ) : null}
+          {decisions.canApprove ? (
+            <Pressable
+              disabled={pending !== null || props.disabled === true}
+              onPress={() => void decide("accept")}
+              className="h-11 min-w-28 flex-1 items-center justify-center rounded-full bg-primary px-4 active:opacity-70 disabled:opacity-50"
+            >
+              <Text className="text-sm font-ryco-bold text-primary-foreground">Approve</Text>
+            </Pressable>
+          ) : null}
           <Pressable
             disabled={pending !== null || props.disabled === true}
             onPress={() => void decide("reject")}

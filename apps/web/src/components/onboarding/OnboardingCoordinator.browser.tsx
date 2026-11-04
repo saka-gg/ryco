@@ -15,6 +15,12 @@ import { render } from "vitest-browser-react";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { useCommandPaletteStore } from "../../commandPaletteStore";
 import {
+  closeAddProject,
+  resetProjectNodesDialogStoreForTests,
+  useProjectNodesDialogStore,
+} from "../projectNodes/projectNodesDialogStore";
+import { syncDocumentPresentationTier } from "../../lib/presentationTier";
+import {
   PAIRING_LINK_TARGET_ID,
   useSettingsSearchRevealStore,
 } from "../settings/settingsSearchReveal";
@@ -185,6 +191,7 @@ const provider = (
 function Harness() {
   const settings = useSettingsDialogStore((state) => state.open);
   const palette = useCommandPaletteStore((state) => state.open);
+  const addProject = useProjectNodesDialogStore((state) => state.addProject.open);
   return (
     <>
       <OnboardingReplaySetting />
@@ -194,8 +201,13 @@ function Harness() {
           Close fixture settings
         </button>
       )}
-      {palette && (
-        <button onClick={() => useCommandPaletteStore.getState().setOpen(false)}>
+      {(palette || addProject) && (
+        <button
+          onClick={() => {
+            useCommandPaletteStore.getState().setOpen(false);
+            closeAddProject();
+          }}
+        >
           Close fixture project picker
         </button>
       )}
@@ -258,7 +270,11 @@ beforeEach(async () => {
   useSettingsDialogStore.getState().closeSettings();
   useSettingsSearchRevealStore.setState({ request: null });
   useCommandPaletteStore.getState().setOpen(false);
+  resetProjectNodesDialogStoreForTests();
   await page.viewport(1100, 720);
+  // Keeps the tier signal on this viewport, as the app's root does: entry points
+  // such as "Add project" pick the dialog or the palette by tier.
+  syncDocumentPresentationTier();
 });
 afterEach(async () => {
   await mounted?.unmount();
@@ -375,7 +391,11 @@ describe("local first-run onboarding", () => {
       .toBeVisible();
     await continueButton().click();
     await page.getByRole("button", { name: "Add project", exact: true }).click();
-    expect(useCommandPaletteStore.getState().openIntent?.kind).toBe("add-project");
+    // The add-project dialog starts on this node.
+    expect(useProjectNodesDialogStore.getState().addProject).toMatchObject({
+      open: true,
+      request: { environmentId: fixture.id },
+    });
     expect(fixture.settings.localOnboardingCompletedEnvironmentIds.includes(fixture.id)).toBe(
       false,
     );

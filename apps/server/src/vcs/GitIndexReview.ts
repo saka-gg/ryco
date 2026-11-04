@@ -11,7 +11,7 @@ import {
 } from "@ryco/contracts";
 import { SCRATCH_INDEX_CONFIG_ARGS } from "./GitDurableWrites.ts";
 import { authorizeGitReadWorkspace } from "./GitReadWorkspace.ts";
-import { INTERNAL_PATCH_DIFF_ARGS, type GitVcsDriverShape } from "./GitVcsDriver.ts";
+import { BINARY_PATCH_DIFF_ARGS, type GitVcsDriverShape } from "./GitVcsDriver.ts";
 
 const LIMIT = 2_000_000;
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -163,7 +163,7 @@ export const makeAuthorizedIndexReader = Effect.fn("makeAuthorizedIndexReader")(
       const bytes = yield* readIndex();
       return { ...head, indexIdentity: bytes === null ? "missing" : hash(bytes) };
     });
-  const diffArgs = [...INTERNAL_PATCH_DIFF_ARGS, "--binary", "--full-index", "--no-renames"];
+  const diffArgs = BINARY_PATCH_DIFF_ARGS;
   // Some Git diff paths refresh index stat data even with optional locks disabled.
   // Reads run against a disposable copy, keeping the live index byte-for-byte untouched.
   const copyIndex = Effect.gen(function* () {

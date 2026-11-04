@@ -1,13 +1,20 @@
 import { memo, useState } from "react";
-import type { EnvironmentId, ThreadId } from "@ryco/contracts";
+import type { AgentControlProposalView, EnvironmentId, ThreadId } from "@ryco/contracts";
+import {
+  agentControlCardDecisions,
+  type AgentControlProposalCardModel,
+  type AgentControlStatusTone,
+} from "@ryco/client-runtime/state/agentControl";
 
+import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { formatExpiresInLabel } from "../../timestampFormat";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import type {
-  AgentControlProposalCardModel,
-  AgentControlStatusTone,
-} from "@ryco/client-runtime/state/agentControl";
+import {
+  AgentControlClientExecutionPreview,
+  AgentControlPlanFacts,
+} from "./AgentControlClientExecutionPreview";
+import { useAgentControlClientExecutor } from "./agentControlClientExecutor";
 
 const TONE_BADGE_VARIANT: Record<
   AgentControlStatusTone,
@@ -22,6 +29,11 @@ const TONE_BADGE_VARIANT: Record<
 
 export interface AgentControlProposalCardProps {
   readonly model: AgentControlProposalCardModel;
+  /**
+   * The proposal the model was built from. A pending client-executed one then
+   * shows what approving does on its target (the executor's preview).
+   */
+  readonly proposal?: AgentControlProposalView | undefined;
   readonly environmentId: EnvironmentId;
   readonly getThreadTitle?: (threadId: ThreadId) => string | undefined;
   readonly isSubmitting: boolean;
@@ -39,10 +51,13 @@ export interface AgentControlProposalCardProps {
  * runtime conditions, expiry, and terminal outcome. Shows the audit-safe
  * summary by default; the full plan (including prompt text) renders only
  * after deliberate expansion. Decisions are explicit buttons that disable
- * while a decision is in flight.
+ * while a decision is in flight. A plan this build cannot read, or one this
+ * client cannot run, offers Reject only and says why
+ * (`agentControlCardDecisions`).
  */
 export const AgentControlProposalCard = memo(function AgentControlProposalCard({
   model,
+  proposal,
   environmentId,
   getThreadTitle,
   isSubmitting,
@@ -54,6 +69,8 @@ export const AgentControlProposalCard = memo(function AgentControlProposalCard({
 }: AgentControlProposalCardProps) {
   const [expanded, setExpanded] = useState(false);
   const decisionsDisabled = isSubmitting || disabledReason !== null;
+  const executor = useAgentControlClientExecutor();
+  const cardDecisions = agentControlCardDecisions(model, executor?.canExecute ?? null);
 
   return (
     <div
@@ -98,6 +115,19 @@ export const AgentControlProposalCard = memo(function AgentControlProposalCard({
         {model.summary !== null ? (
           <p className="mt-1 text-sm text-muted-foreground">{model.summary}</p>
         ) : null}
+        {/* What it runs and carries, next to where it lands, without expanding the plan. */}
+        {proposal !== undefined && model.requiresClientExecutor ? (
+          <AgentControlClientExecutionPreview
+            executor={executor}
+            environmentId={environmentId}
+            proposal={proposal}
+            enabled={model.isPending && cardDecisions.canApprove}
+            variant="card"
+            facts={model.keyFacts}
+          />
+        ) : (
+          <AgentControlPlanFacts facts={model.keyFacts} variant="card" />
+        )}
         {model.riskLabels.length > 0 ? (
           <div className="mt-1.5 flex flex-wrap gap-1">
             {model.riskLabels.map((risk) => (
@@ -203,6 +233,14 @@ export const AgentControlProposalCard = memo(function AgentControlProposalCard({
           data-testid="agent-control-proposal-actions"
           className="flex flex-wrap items-center justify-end gap-2 px-3 pt-2 pb-3 sm:px-4"
         >
+          {cardDecisions.approveUnavailableLabel !== null ? (
+            <p
+              data-testid="agent-control-approve-unavailable"
+              className="mr-auto min-w-0 text-xs text-muted-foreground"
+            >
+              {cardDecisions.approveUnavailableLabel}
+            </p>
+          ) : null}
           <Button
             size="sm"
             variant="destructive-outline"
@@ -212,15 +250,27 @@ export const AgentControlProposalCard = memo(function AgentControlProposalCard({
           >
             Reject
           </Button>
-          <Button
-            size="sm"
-            variant="default"
-            disabled={decisionsDisabled}
-            title={disabledReason ?? undefined}
-            onClick={onAccept}
-          >
-            Approve
-          </Button>
+          {cardDecisions.offersUpdate ? (
+            // A plan kind this build cannot read: the way forward is a newer Ryco.
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => useSettingsDialogStore.getState().openSettings("updates")}
+            >
+              Update Ryco
+            </Button>
+          ) : null}
+          {cardDecisions.canApprove ? (
+            <Button
+              size="sm"
+              variant="default"
+              disabled={decisionsDisabled}
+              title={disabledReason ?? undefined}
+              onClick={onAccept}
+            >
+              Approve
+            </Button>
+          ) : null}
         </div>
       ) : (
         <div aria-hidden className="pb-2.5" />

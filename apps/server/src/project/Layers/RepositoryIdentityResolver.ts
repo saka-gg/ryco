@@ -1,6 +1,8 @@
 import type { RepositoryIdentity, RepositoryRemote } from "@ryco/contracts";
 import { Cache, Duration, Effect, Exit, Layer } from "effect";
 import {
+  canonicalRepositoryName,
+  canonicalRepositoryPath,
   detectSourceControlProviderFromGitRemoteUrl,
   normalizeGitRemoteUrl,
 } from "@ryco/shared/git";
@@ -8,42 +10,12 @@ import {
 import { gitCommandDuration, gitCommandsTotal, withMetrics } from "../../observability/Metrics.ts";
 import { READ_ONLY_GIT_ENV } from "../../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../../vcs/VcsProcess.ts";
+import { parseRemoteFetchUrls, pickPrimaryRemote } from "../gitRemoteListing.ts";
 import {
   RepositoryIdentityProbeError,
   RepositoryIdentityResolver,
   type RepositoryIdentityResolverShape,
 } from "../Services/RepositoryIdentityResolver.ts";
-
-function parseRemoteFetchUrls(stdout: string): Map<string, string> {
-  const remotes = new Map<string, string>();
-  for (const line of stdout.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) continue;
-    const match = /^(\S+)\s+(\S+)\s+\((fetch|push)\)$/.exec(trimmed);
-    if (!match) continue;
-    const [, remoteName = "", remoteUrl = "", direction = ""] = match;
-    if (direction !== "fetch" || remoteName.length === 0 || remoteUrl.length === 0) {
-      continue;
-    }
-    remotes.set(remoteName, remoteUrl);
-  }
-  return remotes;
-}
-
-function pickPrimaryRemote(
-  remotes: ReadonlyMap<string, string>,
-): { readonly remoteName: string; readonly remoteUrl: string } | null {
-  for (const preferredRemoteName of ["upstream", "origin"] as const) {
-    const remoteUrl = remotes.get(preferredRemoteName);
-    if (remoteUrl) {
-      return { remoteName: preferredRemoteName, remoteUrl };
-    }
-  }
-
-  const [remoteName, remoteUrl] =
-    [...remotes.entries()].toSorted(([left], [right]) => left.localeCompare(right))[0] ?? [];
-  return remoteName && remoteUrl ? { remoteName, remoteUrl } : null;
-}
 
 function buildRepositoryIdentity(input: {
   readonly remoteName: string;
@@ -53,15 +25,15 @@ function buildRepositoryIdentity(input: {
 }): RepositoryIdentity {
   const canonicalKey = normalizeGitRemoteUrl(input.remoteUrl);
   const sourceControlProvider = detectSourceControlProviderFromGitRemoteUrl(input.remoteUrl);
-  const repositoryPath = canonicalKey.split("/").slice(1).join("/");
-  const repositoryPathSegments = repositoryPath.split("/").filter((segment) => segment.length > 0);
-  const [owner] = repositoryPathSegments;
-  const repositoryName = repositoryPathSegments.at(-1);
+  // A remote addressed by a path on some disk has a name but no owner: its path is a location.
+  const repositoryPath = canonicalRepositoryPath(canonicalKey);
+  const repositoryPathSegments = repositoryPath?.split("/") ?? [];
+  const owner = repositoryPathSegments.length > 1 ? repositoryPathSegments[0] : undefined;
+  const repositoryName = canonicalRepositoryName(canonicalKey);
 
   const remotes = [...input.allRemotes.entries()].map(([name, url]) => {
     const provider = detectSourceControlProviderFromGitRemoteUrl(url);
-    const canonical = normalizeGitRemoteUrl(url);
-    const ownerRepo = canonical.split("/").slice(1).join("/");
+    const ownerRepo = canonicalRepositoryPath(normalizeGitRemoteUrl(url));
     const remote: {
       name: string;
       url: string;

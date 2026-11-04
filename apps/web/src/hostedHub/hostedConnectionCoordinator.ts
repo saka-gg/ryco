@@ -5,6 +5,7 @@ import {
   isHostedEnvironmentConnectBlocked,
   isHostedEnvironmentSessionLive,
   isJoinableHostedEnvironmentSession,
+  nodeMutationLeaseIsCurrent,
   type HostedEnvironmentReconcileRequest,
   type HostedEnvironmentSessionRecord,
   type HostedHubNode,
@@ -32,6 +33,7 @@ import {
   type WorkspaceMetadataCache,
   type WorkspaceMetadataSnapshot,
 } from "@ryco/client-runtime/state/workspace";
+import type { NodeAcquirePorts } from "@ryco/client-runtime/state/nodes";
 import { selectThreadExistsByRef } from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId } from "@ryco/contracts";
 import { useSyncExternalStore } from "react";
@@ -427,18 +429,23 @@ export function readHostedNodeMutationLease(
   return recordMutationLeaseAuthorities.get(environmentId)?.lease(environmentId) ?? null;
 }
 
-export function waitForHostedNodeMutationLease(
+/**
+ * The environment's mutation lease once its session grants one, or null when
+ * `stop` fires first. `stop` receives the finish callback to call with null.
+ */
+function awaitHostedNodeMutationLease(
   environmentId: EnvironmentId,
-  timeoutMs = 30_000,
+  stop: (finish: () => void) => () => void,
 ): Promise<NodeMutationLease | null> {
   const current = readHostedNodeMutationLease(environmentId);
   if (current) return Promise.resolve(current);
   return new Promise((resolve) => {
     let settled = false;
+    let cancelStop: () => void = () => undefined;
     const finish = (lease: NodeMutationLease | null) => {
       if (settled) return;
       settled = true;
-      globalThis.clearTimeout(timer);
+      cancelStop();
       mutationLeaseListeners.delete(onChange);
       resolve(lease);
     };
@@ -447,8 +454,64 @@ export function waitForHostedNodeMutationLease(
       if (lease) finish(lease);
     };
     mutationLeaseListeners.add(onChange);
-    const timer = globalThis.setTimeout(() => finish(null), timeoutMs);
+    const cancel = stop(() => finish(null));
+    if (settled) cancel();
+    else cancelStop = cancel;
   });
+}
+
+export function waitForHostedNodeMutationLease(
+  environmentId: EnvironmentId,
+  timeoutMs = 30_000,
+): Promise<NodeMutationLease | null> {
+  return awaitHostedNodeMutationLease(environmentId, (finish) => {
+    const timer = globalThis.setTimeout(finish, timeoutMs);
+    return () => globalThis.clearTimeout(timer);
+  });
+}
+
+/**
+ * The hosted half of acquiring a node for a cross-node project copy
+ * (`acquireNode`). The copy's scope is retained like a mounted view: it is
+ * never preemptible (only interactive scopes are), so a routed environment
+ * cannot displace it, and it keeps a slot while it is held. Renewing asks the
+ * coordinator for a plan, which syncs every retained scope into a renewed
+ * lease. Writes wait for the node's mutation lease, and the check handed back
+ * revalidates that lease at the instant of each call: a relay renewal or a
+ * new snapshot generation invalidates it, and the copy then re-acquires.
+ *
+ * `follow` (an import that runs on the node by itself) retains an interactive
+ * scope instead: background demand a routed environment may displace, since
+ * the import goes on without this client.
+ */
+export function hostedNodeAcquisition(
+  environmentId: EnvironmentId,
+  purpose: "copy" | "follow" = "copy",
+): Pick<NodeAcquirePorts, "retain" | "awaitMutationLease"> {
+  return {
+    retain: (scope) => ({
+      release: hostedWebConnectionScopes.retain(
+        environmentId,
+        purpose === "follow" ? { type: "interactive" } : scope,
+      ),
+      renew: () => activeCoordinator?.handleReconcileRequest({ reason: "resume" }),
+    }),
+    awaitMutationLease: async (signal) => {
+      const lease = await awaitHostedNodeMutationLease(environmentId, (finish) => {
+        if (signal.aborted) {
+          finish();
+          return () => undefined;
+        }
+        signal.addEventListener("abort", finish, { once: true });
+        return () => signal.removeEventListener("abort", finish);
+      });
+      if (!lease) throw new Error("Stopped waiting for the node to accept changes.");
+      return () => {
+        const current = readHostedNodeMutationLease(environmentId);
+        return current !== null && nodeMutationLeaseIsCurrent(lease, environmentId, current);
+      };
+    },
+  };
 }
 
 function sameEnvironmentIds(
@@ -527,12 +590,16 @@ export function readHostedWorkspaceState(): HostedWorkspaceSnapshot {
   return hostedWorkspaceSnapshot;
 }
 
+export function subscribeHostedWorkspaceState(listener: () => void): () => void {
+  hostedWorkspaceListeners.add(listener);
+  return () => {
+    hostedWorkspaceListeners.delete(listener);
+  };
+}
+
 export function useHostedWorkspaceState(): HostedWorkspaceSnapshot {
   return useSyncExternalStore(
-    (listener) => {
-      hostedWorkspaceListeners.add(listener);
-      return () => hostedWorkspaceListeners.delete(listener);
-    },
+    subscribeHostedWorkspaceState,
     readHostedWorkspaceState,
     readHostedWorkspaceState,
   );

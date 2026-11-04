@@ -250,3 +250,44 @@ export class AgentControlDiagnosticsReadError extends Schema.TaggedError<AgentCo
   "AgentControlDiagnosticsReadError",
   { operation: Schema.String },
 ) {}
+
+/**
+ * A client-executed proposal (`AGENT_CONTROL_CLIENT_EXECUTED_PLAN_KINDS`) refused an accept or
+ * a report: the accept named no executor, another client's executor holds it, it is not (or no
+ * longer) executing, or the report's result does not belong to it. `status` is the proposal's
+ * actual status when that is the conflict. Never names the executor or its hash.
+ */
+export class AgentControlClientExecutionError extends Schema.TaggedError<AgentControlClientExecutionError>()(
+  "AgentControlClientExecutionError",
+  {
+    reason: Schema.Literals([
+      "executor-required",
+      "not-client-executed",
+      "executor-mismatch",
+      "not-executing",
+      "result-mismatch",
+    ]),
+    detail: Schema.String,
+    status: Schema.optional(Schema.String),
+  },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
+/**
+ * The node directory owner clients publish could not be read or stored; `unavailable` when this
+ * node keeps none.
+ */
+export class AgentControlNodeDirectoryError extends Schema.TaggedError<AgentControlNodeDirectoryError>()(
+  "AgentControlNodeDirectoryError",
+  {
+    reason: Schema.Literals(["unavailable", "storage"]),
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}

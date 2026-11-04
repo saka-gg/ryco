@@ -1,35 +1,26 @@
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
 import type { EnvironmentId, ProjectId } from "@ryco/contracts";
-import { MessageCircleDashedIcon } from "lucide-react";
-import { Fragment, useCallback, useMemo, useRef, useState } from "react";
-import { useShallow } from "zustand/react/shallow";
+import { ChevronRightIcon, GitBranchIcon, MessageCircleDashedIcon, SearchIcon } from "lucide-react";
+import { useCallback, useMemo, useRef, useState, type KeyboardEvent } from "react";
 
-import {
-  buildChatDraftTarget,
-  CHAT_PROJECT_LABEL,
-  isPendingChatDraft,
-  useComposerDraftStore,
-  type DraftId,
-} from "../composerDraftStore";
-import { useChatsAvailability } from "../hooks/useChatsAvailability";
-import { useSettings } from "../hooks/useSettings";
-import { excludeChatProjects } from "@ryco/shared/projectKind";
-import { newProjectId } from "../lib/utils";
-import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
-import { selectProjectsAcrossEnvironments, useStore } from "../store";
-import { useHostedWorkspaceState } from "../hostedHub/hostedConnectionCoordinator";
+import { isPendingChatDraft, useComposerDraftStore, type DraftId } from "../composerDraftStore";
+import { hostedDraftTargetController } from "../hooks/useHostedDraftExecutionTarget";
+import { preloadableLazy, useLazyComponentReady, usePreloadWhenIdle } from "../lib/preloadableLazy";
+import { useStore } from "../store";
+import { createProjectSelectorByRef } from "../storeSelectors";
 import { cn } from "~/lib/utils";
+import type {
+  ProjectSelectorIcons,
+  ProjectSelectorKeyHandler,
+  ProjectSelectorList,
+} from "./ProjectSelectorBody";
 import { ProjectFavicon } from "./ProjectFavicon";
 import {
-  Combobox,
-  ComboboxEmpty,
-  ComboboxInput,
-  ComboboxItem,
-  ComboboxList,
-  ComboboxPopup,
-  ComboboxSeparator,
-  ComboboxTrigger,
-} from "./ui/combobox";
+  clearProjectSelectorOpenRequest,
+  isProjectSelectorOpenRequested,
+  useProjectNodesDialogStore,
+} from "./projectNodes/projectNodesDialogStore";
+import { Combobox, ComboboxInput, ComboboxPopup, ComboboxTrigger } from "./ui/combobox";
 
 /**
  * `headline` renders the dotted-underline project name inside the new-thread
@@ -46,18 +37,31 @@ export interface ProjectSwitcherProps {
   readonly draftId: DraftId;
   readonly label: string;
   readonly className?: string;
+  /**
+   * Opens when something asks to show this project in the selector
+   * (`requestProjectSelectorOpen`, the add-project dialog's done step). Only
+   * the new-thread hero's headline instance listens, so one selector opens.
+   */
+  readonly openOnRequest?: boolean;
 }
 
-function projectItemKey(environmentId: EnvironmentId, projectId: ProjectId): string {
-  return `${environmentId}\u0000${projectId}`;
-}
+// The list (logical projects across nodes, node catalog, chips, footer) loads
+// with the first open, or in an idle slot once a switcher is on screen, so the
+// chat route carries only the trigger and the search field.
+const ProjectSelectorBody = preloadableLazy(() =>
+  import("./ProjectSelectorBody").then((module) => module.ProjectSelectorBody),
+);
 
-/** Combobox value of the "No project" entry; never collides with a project key. */
-const NO_PROJECT_ITEM = "\u0000no-project";
-const NO_PROJECT_SEARCH_TERMS = `${CHAT_PROJECT_LABEL} chat without folder`.toLowerCase();
+const NO_LIST: ProjectSelectorList = { items: [], value: null };
+// See `ProjectSelectorIcons`: the chat route already holds these icons.
+const SELECTOR_ICONS: ProjectSelectorIcons = {
+  expand: ChevronRightIcon,
+  branch: GitBranchIcon,
+  noProject: MessageCircleDashedIcon,
+};
 
 /**
- * Retargets the thread being composed at a different project.
+ * Retargets the thread being composed at a different project, on any node.
  *
  * The project is a *field* of this draft, not a navigation target, so this
  * rewrites the current draft in place rather than hopping to the target
@@ -66,9 +70,18 @@ const NO_PROJECT_SEARCH_TERMS = `${CHAT_PROJECT_LABEL} chat without folder`.toLo
  * the composer draft is keyed by draft id and never moves. Only the branch and
  * worktree path are dropped, since they belong to the old repository.
  *
+ * One row per logical project (the same repository on several nodes is one
+ * row) shows every node it is on; its chevron (or →) lists the checkout on
+ * each node, and picking one moves the draft there. In hosted mode a checkout
+ * on another node is reached through the hosted draft-target controller, which
+ * switches the routed node and commits the move under that node's fresh lease.
+ * Node chips and an `@node` word narrow the list to one node; the text matches
+ * names and paths.
+ *
  * Where the draft's node supports chats, "No project" leads the list: it turns
  * the draft into a chat that gets its own folder on first send (and picking a
- * project turns it back).
+ * project turns it back). The footer adds a project or copies this one to
+ * another node (not on the frozen phone tier).
  */
 export function ProjectSwitcher({
   activeProjectId,
@@ -77,122 +90,72 @@ export function ProjectSwitcher({
   draftId,
   label,
   className,
+  openOnRequest = false,
 }: ProjectSwitcherProps) {
-  const moveDraftThreadToProject = useComposerDraftStore((store) => store.moveDraftThreadToProject);
   const isChatDraft = useComposerDraftStore((store) =>
     isPendingChatDraft(store.draftThreadsByThreadKey[draftId]),
   );
-  const chatsAvailability = useChatsAvailability(activeProjectEnvironmentId);
-  // A chat draft keeps its own entry even if the node stopped offering chats.
-  const showNoProject = chatsAvailability.available || isChatDraft;
-  const projectGroupingSettings = useSettings((settings) => ({
-    sidebarProjectGroupingMode: settings.sidebarProjectGroupingMode,
-    sidebarProjectGroupingOverrides: settings.sidebarProjectGroupingOverrides,
-  }));
-  const hosted = useHostedWorkspaceState();
-  const allProjects = useStore(useShallow((store) => selectProjectsAcrossEnvironments(store)));
-  const projects = useMemo(
-    () =>
-      excludeChatProjects(
-        hosted.status === "signed-out"
-          ? allProjects
-          : allProjects.filter((project) => project.environmentId === activeProjectEnvironmentId),
-      ),
-    [activeProjectEnvironmentId, allProjects, hosted.status],
+  const activeProjectRef = useMemo(
+    () => scopeProjectRef(activeProjectEnvironmentId, activeProjectId),
+    [activeProjectEnvironmentId, activeProjectId],
   );
+  const activeProjectSelector = useMemo(
+    () => createProjectSelectorByRef(activeProjectRef),
+    [activeProjectRef],
+  );
+  const activeProject = useStore(activeProjectSelector);
   const [open, setOpen] = useState(false);
+  // "Show in project selector" (the add-project dialog) opens it once, as a
+  // click would; closing it clears the request.
+  const openRequested = useProjectNodesDialogStore(
+    (state) =>
+      openOnRequest &&
+      isProjectSelectorOpenRequested(state.projectSelectorOpenRequest, activeProjectRef),
+  );
+  if (openRequested && !open) setOpen(true);
   const [query, setQuery] = useState("");
+  const [list, setList] = useState(NO_LIST);
+  const [loadFailed, setLoadFailed] = useState<{ readonly retry: () => void } | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const keyHandlerRef = useRef<ProjectSelectorKeyHandler | null>(null);
+  usePreloadWhenIdle(ProjectSelectorBody, true);
+  const bodyReady = useLazyComponentReady(ProjectSelectorBody, open, {
+    onLoadError: (_error, retry) => setLoadFailed({ retry }),
+  });
 
-  const items = useMemo(
-    () => [
-      ...(showNoProject ? [NO_PROJECT_ITEM] : []),
-      ...projects.map((project) => projectItemKey(project.environmentId, project.id)),
-    ],
-    [projects, showNoProject],
-  );
-  const projectByItem = useMemo(
-    () =>
-      new Map(
-        projects.map(
-          (project) => [projectItemKey(project.environmentId, project.id), project] as const,
-        ),
-      ),
-    [projects],
-  );
-  const normalizedQuery = query.trim().toLowerCase();
-  const filteredItems = useMemo(() => {
-    if (normalizedQuery.length === 0) {
-      return items;
-    }
-    return items.filter((item) => {
-      if (item === NO_PROJECT_ITEM) return NO_PROJECT_SEARCH_TERMS.includes(normalizedQuery);
-      const project = projectByItem.get(item);
-      if (!project) return false;
-      return (
-        project.name.toLowerCase().includes(normalizedQuery) ||
-        project.cwd.toLowerCase().includes(normalizedQuery)
-      );
-    });
-  }, [items, normalizedQuery, projectByItem]);
-
-  const handleOpenChange = useCallback((nextOpen: boolean) => {
-    setOpen(nextOpen);
-    if (!nextOpen) {
-      setQuery("");
-    }
-  }, []);
-
-  const selectProject = useCallback(
-    (item: string) => {
-      setOpen(false);
-      setQuery("");
-      if (item === NO_PROJECT_ITEM) {
-        if (!isChatDraft) {
-          moveDraftThreadToProject(
-            draftId,
-            buildChatDraftTarget(activeProjectEnvironmentId, newProjectId()),
-          );
-        }
-        return;
-      }
-      const project = projectByItem.get(item);
-      if (
-        !project ||
-        (!isChatDraft &&
-          project.id === activeProjectId &&
-          project.environmentId === activeProjectEnvironmentId)
-      ) {
-        return;
-      }
-      moveDraftThreadToProject(draftId, {
-        projectRef: scopeProjectRef(project.environmentId, project.id),
-        logicalProjectKey: deriveLogicalProjectKeyFromSettings(project, projectGroupingSettings),
-      });
+  const close = useCallback(() => {
+    setOpen(false);
+    clearProjectSelectorOpenRequest(activeProjectRef);
+    setQuery("");
+    // The next open loads again (see `useLazyComponentReady`).
+    setLoadFailed(null);
+  }, [activeProjectRef]);
+  const handleOpenChange = useCallback(
+    (nextOpen: boolean) => {
+      if (nextOpen) setOpen(true);
+      else close();
     },
-    [
-      activeProjectEnvironmentId,
-      activeProjectId,
-      draftId,
-      isChatDraft,
-      moveDraftThreadToProject,
-      projectByItem,
-      projectGroupingSettings,
-    ],
+    [close],
   );
-
-  const activeItem = isChatDraft
-    ? NO_PROJECT_ITEM
-    : projectItemKey(activeProjectEnvironmentId, activeProjectId);
-  const activeProject = projectByItem.get(activeItem) ?? null;
+  const updateQuery = useCallback((update: (previous: string) => string) => setQuery(update), []);
+  const handleInputKeyDown = useCallback((event: KeyboardEvent<HTMLInputElement>) => {
+    keyHandlerRef.current?.(event);
+  }, []);
+  const preload = useCallback(() => {
+    void ProjectSelectorBody.preload();
+  }, []);
+  const beginHostedProjectMove = useCallback<(typeof hostedDraftTargetController)["beginProject"]>(
+    (input) => hostedDraftTargetController.beginProject(input),
+    [],
+  );
 
   return (
     <Combobox
-      items={items}
-      filteredItems={filteredItems}
+      items={list.items}
+      filteredItems={list.items}
       autoHighlight
       open={open}
-      value={activeItem}
+      value={list.value}
       onOpenChange={handleOpenChange}
     >
       <ComboboxTrigger
@@ -212,6 +175,8 @@ export function ProjectSwitcher({
           className,
         )}
         render={<button type="button" />}
+        onPointerEnter={preload}
+        onFocus={preload}
       >
         {appearance !== "headline" && isChatDraft ? (
           <MessageCircleDashedIcon aria-hidden className="size-3.5 shrink-0 opacity-80" />
@@ -232,90 +197,62 @@ export function ProjectSwitcher({
         anchor={triggerRef}
         align="start"
         side={appearance === "chip" ? "top" : "bottom"}
-        className="w-80 overflow-hidden"
+        className="w-[440px] overflow-hidden rounded-xl font-normal text-[13px] tracking-normal"
+        popupClassName="max-h-[min(var(--available-height),30rem)]"
+        data-testid="project-selector"
       >
-        <div className="border-b p-1">
+        <label className="flex items-center gap-2 border-b px-3 py-[9px] text-muted-foreground">
+          <SearchIcon aria-hidden className="size-3.5 shrink-0" />
           <ComboboxInput
-            className="[&_input]:font-sans rounded-md"
-            inputClassName="ring-0"
-            placeholder="Search projects..."
+            aria-label="Search projects"
+            className="flex-1 rounded-none border-0 bg-transparent shadow-none ring-0 before:hidden has-focus-visible:ring-0 dark:bg-transparent [&_input]:h-6 [&_input]:px-0 [&_input]:font-sans [&_input]:text-[13px] [&_input]:leading-6"
+            placeholder="Search projects or paths · @ to pick a node"
             showTrigger={false}
             size="sm"
+            autoComplete="off"
+            spellCheck={false}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={handleInputKeyDown}
           />
-        </div>
-        <ComboboxEmpty>No projects found.</ComboboxEmpty>
-        <ComboboxList className="max-h-64">
-          {filteredItems.map((item, index) => {
-            if (item === NO_PROJECT_ITEM) {
-              return (
-                <Fragment key={item}>
-                  <ComboboxItem
-                    hideIndicator
-                    index={index}
-                    value={item}
-                    data-testid="project-switcher-no-project"
-                    onClick={() => selectProject(item)}
-                  >
-                    <div className="flex w-full min-w-0 items-center gap-2 py-0.5 text-left">
-                      <MessageCircleDashedIcon
-                        aria-hidden
-                        className="size-4 shrink-0 text-muted-foreground"
-                      />
-                      <span className="flex min-w-0 flex-1 flex-col">
-                        <span
-                          className={cn(
-                            "truncate text-sm",
-                            item === activeItem && "font-medium text-foreground",
-                          )}
-                        >
-                          {CHAT_PROJECT_LABEL}
-                        </span>
-                        <span className="truncate text-muted-foreground text-xs">
-                          A chat in its own folder · turn it into a project later
-                        </span>
-                      </span>
-                    </div>
-                  </ComboboxItem>
-                  {index < filteredItems.length - 1 ? <ComboboxSeparator /> : null}
-                </Fragment>
-              );
-            }
-            const project = projectByItem.get(item);
-            if (!project) return null;
-            return (
-              <ComboboxItem
-                hideIndicator
-                key={item}
-                index={index}
-                value={item}
-                onClick={() => selectProject(item)}
-              >
-                <div className="flex w-full min-w-0 items-center gap-2 py-0.5 text-left">
-                  <ProjectFavicon
-                    environmentId={project.environmentId}
-                    cwd={project.cwd}
-                    projectId={project.id}
-                    customAvatarContentHash={project.customAvatarContentHash ?? null}
-                    className="size-4 shrink-0"
-                  />
-                  <span className="flex min-w-0 flex-1 flex-col">
-                    <span
-                      className={cn(
-                        "truncate text-sm",
-                        item === activeItem && "font-medium text-foreground",
-                      )}
-                    >
-                      {project.name}
-                    </span>
-                    <span className="truncate text-muted-foreground text-xs">{project.cwd}</span>
-                  </span>
-                </div>
-              </ComboboxItem>
-            );
-          })}
-        </ComboboxList>
+        </label>
+        {bodyReady ? (
+          <ProjectSelectorBody
+            activeProjectId={activeProjectId}
+            activeProjectEnvironmentId={activeProjectEnvironmentId}
+            draftId={draftId}
+            isChatDraft={isChatDraft}
+            copyName={activeProject?.name ?? null}
+            query={query}
+            onQueryChange={updateQuery}
+            onListChange={setList}
+            keyHandlerRef={keyHandlerRef}
+            onClose={close}
+            beginHostedProjectMove={beginHostedProjectMove}
+            icons={SELECTOR_ICONS}
+          />
+        ) : (
+          <div className="flex items-center gap-2 px-[18px] py-[18px] text-[12.5px] text-muted-foreground">
+            {loadFailed ? (
+              <>
+                Couldn't load your projects.
+                <button
+                  type="button"
+                  className="rounded-md px-1 font-medium text-foreground underline-offset-4 hover:underline"
+                  onClick={() => {
+                    const { retry } = loadFailed;
+                    setLoadFailed(null);
+                    retry();
+                  }}
+                >
+                  Try again
+                </button>
+              </>
+            ) : (
+              "Loading projects…"
+            )}
+          </div>
+        )}
       </ComboboxPopup>
     </Combobox>
   );

@@ -1,18 +1,66 @@
 import {
+  AGENT_CONTROL_LEGACY_PLAN_KINDS,
   AGENT_CONTROL_WS_METHODS,
   AgentControlProposalStatus,
   AgentControlRpcError,
   AgentControlExternalRpcError,
+  type AgentControlPlanViewMode,
+  type AgentControlProposal,
+  type AgentControlProposalQueue,
+  type AgentControlProposalStreamEvent,
 } from "@ryco/contracts";
 import { Effect, Option, Schema, Stream } from "effect";
 
-import type { AgentControlProposalDecisionError } from "../agentControl/Services/AgentControlProposalService.ts";
+import type { AgentControlNodeDirectoryError } from "../agentControl/Errors.ts";
+import { isAgentControlClientExecutedKind } from "../agentControl/projectCopyControl.ts";
+import type { AgentControlClientExecutionFailure } from "../agentControl/Services/AgentControlExecution.ts";
+import {
+  toAgentControlProposalReceipt,
+  type AgentControlProposalDecisionError,
+} from "../agentControl/Services/AgentControlProposalService.ts";
 import type { AgentControlExternalIntegrationServiceError } from "../agentControl/Services/AgentControlExternalIntegration.ts";
 import type { AgentControlExternalInstallationServiceError } from "../agentControl/Services/AgentControlExternalInstallation.ts";
 import { observeRpcEffect, observeRpcStreamEffect } from "../observability/RpcInstrumentation.ts";
 import { defineWsHandlers, type WsRpcContext } from "./context.ts";
 
 const isProposalStatus = Schema.is(AgentControlProposalStatus);
+
+const LEGACY_PLAN_KINDS: ReadonlySet<string> = new Set(AGENT_CONTROL_LEGACY_PLAN_KINDS);
+
+/**
+ * Whether a proposal reaches a client that asked for `planView`. Clients without
+ * `planView: "tolerant"` decode the closed plan union of the build they shipped
+ * in: one proposal of a kind they do not know fails their whole stream, and
+ * they then clear the environment's approval queue. They only ever see the
+ * kinds in `AGENT_CONTROL_LEGACY_PLAN_KINDS`; the others wait for a newer client.
+ */
+export const isProposalInPlanView = (
+  proposal: AgentControlProposal,
+  planView: AgentControlPlanViewMode | undefined,
+): boolean => planView === "tolerant" || LEGACY_PLAN_KINDS.has(proposal.plan.kind);
+
+/** The queue with the proposals outside `planView` left out; the same queue when none are. */
+export const proposalQueueInPlanView = (
+  queue: AgentControlProposalQueue,
+  planView: AgentControlPlanViewMode | undefined,
+): AgentControlProposalQueue => {
+  if (planView === "tolerant") return queue;
+  const visible = (proposal: AgentControlProposal) => isProposalInPlanView(proposal, planView);
+  if (queue.active.every(visible) && queue.recent.every(visible)) return queue;
+  return { ...queue, active: queue.active.filter(visible), recent: queue.recent.filter(visible) };
+};
+
+/** A stream event as `planView` sees it; null for a proposal event it never sees. */
+export const proposalStreamEventInPlanView = (
+  event: AgentControlProposalStreamEvent,
+  planView: AgentControlPlanViewMode | undefined,
+): AgentControlProposalStreamEvent | null => {
+  if (event.type === "proposal") {
+    return isProposalInPlanView(event.proposal, planView) ? event : null;
+  }
+  const queue = proposalQueueInPlanView(event.queue, planView);
+  return queue === event.queue ? event : { ...event, queue };
+};
 
 /**
  * Map internal lifecycle failures onto the bounded RPC error. A decision
@@ -21,9 +69,20 @@ const isProposalStatus = Schema.is(AgentControlProposalStatus);
  * prompts, storage details — crosses this boundary.
  */
 export const toAgentControlRpcError = (
-  error: AgentControlProposalDecisionError,
+  error: AgentControlProposalDecisionError | AgentControlClientExecutionFailure,
 ): AgentControlRpcError => {
   switch (error._tag) {
+    case "AgentControlClientExecutionError":
+      return new AgentControlRpcError({
+        code:
+          error.reason === "executor-required" || error.reason === "not-client-executed"
+            ? "unsupported"
+            : "conflict",
+        message: error.detail,
+        ...(error.status !== undefined && isProposalStatus(error.status)
+          ? { status: error.status }
+          : {}),
+      });
     case "AgentControlDisabledError":
       return new AgentControlRpcError({
         code: "disabled",
@@ -44,7 +103,9 @@ export const toAgentControlRpcError = (
       return new AgentControlRpcError({
         code: "conflict",
         message: "Decision no longer applies to the proposal's current state.",
-        ...(isProposalStatus(error.from) ? { status: error.from } : {}),
+        ...(error.entity === "proposal" && isProposalStatus(error.from)
+          ? { status: error.from }
+          : {}),
       });
     case "AgentControlDuplicateRequestError":
       return new AgentControlRpcError({
@@ -63,6 +124,19 @@ export const toAgentControlRpcError = (
       });
   }
 };
+
+export const toAgentControlNodeDirectoryRpcError = (
+  error: AgentControlNodeDirectoryError,
+): AgentControlRpcError =>
+  error.reason === "unavailable"
+    ? new AgentControlRpcError({
+        code: "unsupported",
+        message: "This server does not keep a node directory yet.",
+      })
+    : new AgentControlRpcError({
+        code: "storage",
+        message: "The node directory could not be stored.",
+      });
 
 export const toAgentControlExternalRpcError = (
   error: AgentControlExternalIntegrationServiceError,
@@ -143,9 +217,28 @@ export const makeAgentControlHandlers = (ctx: WsRpcContext) => {
     agentControlProposals,
     agentControlExternalIntegrations,
     agentControlExternalInstallations,
+    agentControlNodeDirectory,
+    agentControlExecution,
+    currentSessionId,
     ownerEffect,
     ownerStreamEffect,
   } = ctx;
+
+  const withExecution = <A, E>(
+    use: (
+      execution: Option.Option.Value<typeof agentControlExecution>,
+    ) => Effect.Effect<A, E | AgentControlRpcError>,
+  ) =>
+    Option.match(agentControlExecution, {
+      onNone: () =>
+        Effect.fail(
+          new AgentControlRpcError({
+            code: "unsupported",
+            message: "This server does not run client-executed requests.",
+          }),
+        ),
+      onSome: use,
+    });
 
   const withService = <A, E>(
     use: (
@@ -196,6 +289,8 @@ export const makeAgentControlHandlers = (ctx: WsRpcContext) => {
     });
 
   return defineWsHandlers({
+    // The proposal reads leave out every proposal outside the client's `planView`
+    // (`isProposalInPlanView`); clients that decode the tolerant plan view send "tolerant".
     [AGENT_CONTROL_WS_METHODS.listProposals]: (input) =>
       observeRpcEffect(
         AGENT_CONTROL_WS_METHODS.listProposals,
@@ -204,7 +299,10 @@ export const makeAgentControlHandlers = (ctx: WsRpcContext) => {
           withService((service) =>
             service
               .getQueue({ activeLimit: input.activeLimit, recentLimit: input.recentLimit })
-              .pipe(Effect.mapError(toAgentControlRpcError)),
+              .pipe(
+                Effect.map((queue) => proposalQueueInPlanView(queue, input.planView)),
+                Effect.mapError(toAgentControlRpcError),
+              ),
           ),
         ),
         { "rpc.aggregate": "agent-control", "rpc.operation": "list" },
@@ -216,7 +314,13 @@ export const makeAgentControlHandlers = (ctx: WsRpcContext) => {
           AGENT_CONTROL_WS_METHODS.getProposal,
           withService((service) =>
             service.getProposal(input.proposalId).pipe(
-              Effect.map((proposal) => ({ proposal: Option.getOrNull(proposal) })),
+              Effect.map((found) => ({
+                proposal: Option.getOrNull(
+                  Option.filter(found, (proposal) =>
+                    isProposalInPlanView(proposal, input.planView),
+                  ),
+                ),
+              })),
               Effect.mapError(toAgentControlRpcError),
             ),
           ),
@@ -230,8 +334,33 @@ export const makeAgentControlHandlers = (ctx: WsRpcContext) => {
           AGENT_CONTROL_WS_METHODS.acceptProposal,
           withService((service) =>
             service
-              .accept({ proposalId: input.proposalId, decidedAt: new Date().toISOString() })
-              .pipe(Effect.mapError(toAgentControlRpcError)),
+              .accept({
+                proposalId: input.proposalId,
+                decidedAt: new Date().toISOString(),
+                executeOnClient: input.executeOnClient,
+              })
+              .pipe(
+                Effect.mapError(toAgentControlRpcError),
+                // A client-executed kind is bound to this client's executor in the same request
+                // (A1): approved, then executing with the binding, or the current state again.
+                Effect.flatMap((receipt) => {
+                  const executeOnClient = input.executeOnClient;
+                  return executeOnClient === undefined ||
+                    !isAgentControlClientExecutedKind(receipt.actionKind)
+                    ? Effect.succeed(receipt)
+                    : withExecution((execution) =>
+                        execution
+                          .beginClientExecution({
+                            proposalId: input.proposalId,
+                            executorId: executeOnClient.executorId,
+                          })
+                          .pipe(
+                            Effect.map(toAgentControlProposalReceipt),
+                            Effect.mapError(toAgentControlRpcError),
+                          ),
+                      );
+                }),
+              ),
           ),
         ),
         { "rpc.aggregate": "agent-control", "rpc.operation": "accept" },
@@ -249,18 +378,63 @@ export const makeAgentControlHandlers = (ctx: WsRpcContext) => {
         ),
         { "rpc.aggregate": "agent-control", "rpc.operation": "reject" },
       ),
-    [AGENT_CONTROL_WS_METHODS.subscribeProposals]: (_input) =>
+    [AGENT_CONTROL_WS_METHODS.subscribeProposals]: (input) =>
       observeRpcStreamEffect(
         AGENT_CONTROL_WS_METHODS.subscribeProposals,
         ownerStreamEffect(
           AGENT_CONTROL_WS_METHODS.subscribeProposals,
           withService((service) =>
             Effect.succeed(
-              service.subscribeQueue({}).pipe(Stream.mapError(toAgentControlRpcError)),
+              service.subscribeQueue({}).pipe(
+                Stream.map((event) => proposalStreamEventInPlanView(event, input.planView)),
+                Stream.filter((event) => event !== null),
+                Stream.mapError(toAgentControlRpcError),
+              ),
             ),
           ),
         ),
         { "rpc.aggregate": "agent-control" },
+      ),
+    // Owner clients publish the nodes they hold owner on, keyed by their session: a direct
+    // session's id, or a relay channel's scope, which changes with every reconnect (the directory
+    // bounds how many publishers it keeps).
+    [AGENT_CONTROL_WS_METHODS.publishNodeDirectory]: (input) =>
+      observeRpcEffect(
+        AGENT_CONTROL_WS_METHODS.publishNodeDirectory,
+        ownerEffect(
+          AGENT_CONTROL_WS_METHODS.publishNodeDirectory,
+          Option.match(agentControlNodeDirectory, {
+            onNone: () =>
+              Effect.fail(
+                new AgentControlRpcError({
+                  code: "unsupported",
+                  message: "This server does not keep a node directory yet.",
+                }),
+              ),
+            onSome: (directory) =>
+              directory
+                .publish({ publisherKey: currentSessionId, nodes: input.nodes })
+                .pipe(Effect.mapError(toAgentControlNodeDirectoryRpcError)),
+          }),
+        ),
+        { "rpc.aggregate": "agent-control", "rpc.operation": "publish-node-directory" },
+      ),
+    // The approving client's outcome; only the executor the proposal was accepted with counts.
+    [AGENT_CONTROL_WS_METHODS.reportClientExecution]: (input) =>
+      observeRpcEffect(
+        AGENT_CONTROL_WS_METHODS.reportClientExecution,
+        ownerEffect(
+          AGENT_CONTROL_WS_METHODS.reportClientExecution,
+          withExecution((execution) =>
+            execution
+              .reportClientExecution(input)
+              .pipe(
+                Effect.map(toAgentControlProposalReceipt),
+                Effect.mapError(toAgentControlRpcError),
+              ),
+          ),
+        ),
+        { "rpc.aggregate": "agent-control", "rpc.operation": "report-client-execution" },
       ),
     [AGENT_CONTROL_WS_METHODS.listIntegrations]: () =>
       ownerEffect(

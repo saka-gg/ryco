@@ -20,34 +20,64 @@ export type NodeRole = RelayEffectiveRole | AuthSessionRole | null | undefined;
 
 /**
  * This page's own session role on the primary node, once asked. The desktop
- * app's session is its owner's; a browser asks the node once per page (again
- * only after asking failed) and tells its listeners the answer.
+ * app's session is its owner's. A browser asks the node once per page and
+ * tells its listeners the answer; it asks again only after asking failed, or,
+ * when the node catalog asks (`requestPrimarySessionRole`), after the answer
+ * found the page not signed in yet. A hosted page has no primary session: the
+ * Hub states its role on every node.
  */
 let primarySessionRole: {
   readonly environmentId: EnvironmentId;
   readonly role: AuthSessionRole | null;
+  /** False when the page was not signed in yet: `requestPrimarySessionRole` asks again. */
+  readonly signedIn: boolean;
 } | null = null;
 let primarySessionRequest: Promise<void> | null = null;
+/** Bumped by the test reset, so an answer to an earlier request is dropped. */
+let primarySessionGeneration = 0;
 const primarySessionRoleListeners = new Set<() => void>();
 
-function readPrimarySessionRole(environmentId: EnvironmentId): NodeRole {
+/**
+ * The role on the primary as last answered: null for a session without one
+ * (or before sign-in), undefined until this page knows it. Never asks.
+ */
+export function peekPrimarySessionRole(
+  environmentId: EnvironmentId,
+): AuthSessionRole | null | undefined {
   if (isElectron) return "owner";
-  if (primarySessionRole?.environmentId === environmentId) return primarySessionRole.role;
-  primarySessionRequest ??= fetchSessionState().then(
+  return primarySessionRole?.environmentId === environmentId ? primarySessionRole.role : undefined;
+}
+
+/**
+ * Asks the primary for this page's role, unless a signed-in answer is known or
+ * a request is on its way.
+ */
+export function requestPrimarySessionRole(environmentId: EnvironmentId): void {
+  if (isElectron || isHostedHubMode() || primarySessionRequest !== null) return;
+  if (primarySessionRole?.environmentId === environmentId && primarySessionRole.signedIn) return;
+  const generation = primarySessionGeneration;
+  primarySessionRequest = fetchSessionState().then(
     (session) => {
+      if (generation !== primarySessionGeneration) return;
       primarySessionRequest = null;
       primarySessionRole = {
         environmentId,
         role: session.authenticated ? (session.role ?? null) : null,
+        signedIn: session.authenticated,
       };
       for (const listener of Array.from(primarySessionRoleListeners)) listener();
     },
     () => {
-      // Asked again on the next check, not in a loop.
-      primarySessionRequest = null;
+      // Asked again on the next request, never in a loop.
+      if (generation === primarySessionGeneration) primarySessionRequest = null;
     },
   );
-  return undefined;
+}
+
+function readPrimarySessionRole(environmentId: EnvironmentId): NodeRole {
+  const role = peekPrimarySessionRole(environmentId);
+  if (role === undefined) requestPrimarySessionRole(environmentId);
+  return role;
 }
 
 /** Called once the primary's session role is known. */
@@ -56,6 +86,12 @@ export function subscribePrimarySessionRole(listener: () => void): () => void {
   return () => {
     primarySessionRoleListeners.delete(listener);
   };
+}
+
+export function resetPrimarySessionRoleForTests(): void {
+  primarySessionGeneration += 1;
+  primarySessionRole = null;
+  primarySessionRequest = null;
 }
 
 /**

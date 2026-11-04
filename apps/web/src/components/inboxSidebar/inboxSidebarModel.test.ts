@@ -881,6 +881,8 @@ describe("hosted inbox capability resolution", () => {
       effectiveRole: "owner",
       presence: { online: true, lastSeenAt: 1, observedAt: 1 },
       connectionState: "connected",
+      transport: "relay",
+      projectCopySupport: "unknown",
       deliveryUnknown: false,
       revokedAt: null,
       removed: false,
