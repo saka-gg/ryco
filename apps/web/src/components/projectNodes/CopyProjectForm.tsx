@@ -44,6 +44,7 @@ import { cn } from "~/lib/utils";
 
 import { getGitStatusSnapshot } from "../../lib/gitStatusState";
 import { getCustomModelOptionsByInstance } from "../../modelSelection";
+import { useSettingsDialogStore } from "../../settingsDialogStore";
 import {
   deriveProviderInstanceEntries,
   sortProviderInstanceEntries,
@@ -426,6 +427,7 @@ function useRememberedDestination(
 
 export function CopyProjectForm(props: CopyProjectFormProps) {
   const { request, nodes, members, services } = props;
+  const openSettings = useSettingsDialogStore((state) => state.openSettings);
   const ids = {
     from: useId(),
     to: useId(),
@@ -742,17 +744,22 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
   );
 
   if (noTarget) {
+    const blockedCards = copyDestinationCards(cards);
     return (
       <>
         {header}
         <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-4 pt-1 pb-3.5">
-          <TargetCards
-            cards={cards}
-            value={null}
-            checkingLabel={null}
-            onChange={() => undefined}
-            labelledBy={ids.to}
-          />
+          {/* Only the nodes that can't take it for another reason keep a card (with why). */}
+          {blockedCards.length > 0 ? (
+            <TargetCards
+              cards={blockedCards}
+              value={null}
+              checkingLabel={null}
+              onChange={() => undefined}
+              labelledBy={ids.to}
+            />
+          ) : null}
+          <AlreadyOnLine cards={copyAlreadyOn(cards)} />
           {updateOffers}
           <p className="m-0 text-[13px] text-muted-foreground" data-testid="copy-no-target">
             {copyNoTargetMessage(title, cards)}
@@ -760,6 +767,16 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
         </div>
         <div className="flex items-center gap-2 border-border border-t px-4 py-[11px]">
           <span className="min-w-0 flex-1" />
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              props.onClose();
+              openSettings("devices");
+            }}
+          >
+            Add a node
+          </Button>
           <Button size="sm" variant="outline" onClick={props.onClose}>
             Close
           </Button>

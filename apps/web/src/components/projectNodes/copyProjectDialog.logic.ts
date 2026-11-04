@@ -214,7 +214,9 @@ export function copyNoTargetMessage(title: string, cards: ReadonlyArray<CopyTarg
       reasons.add(asSentence(card.reason));
     }
   }
-  if (reasons.size === 0) return `${title} is already on every online node.`;
+  if (reasons.size === 0) {
+    return `${title} is already on every online node. Add a node to copy it somewhere new.`;
+  }
   return [`No node can take a copy of ${title} right now.`, ...reasons].join(" ");
 }
 

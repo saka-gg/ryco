@@ -144,7 +144,9 @@ describe("From and To", () => {
       nowMs: NOW,
     });
     // Every online node has it.
-    expect(copyNoTargetMessage("ryco", cards)).toBe("ryco is already on every online node.");
+    expect(copyNoTargetMessage("ryco", cards)).toBe(
+      "ryco is already on every online node. Add a node to copy it somewhere new.",
+    );
 
     // The other node runs an older Ryco, or can't be changed from here: not "already on every node".
     const blocked = copyTargetCards({

@@ -38,6 +38,7 @@ import { removeLocalStorageItem, setLocalStorageItem } from "../../hooks/useLoca
 import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
 import { resetProjectAtomsForTests } from "../../rpc/projectAtoms";
 import { defaultQueryClient } from "../../rpc/queryClient";
+import { useSettingsDialogStore } from "../../settingsDialogStore";
 import type { Project } from "../../types";
 import {
   resetProjectCopyManagerForTests,
@@ -713,6 +714,36 @@ describe("CopyProjectDialog", () => {
         );
       await expect.element(radio(/^hetzner-build/u)).toBeDisabled();
     } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("names the nodes that have it when every online node does, and offers to add one", async () => {
+    const { screen, onClose } = await mount({
+      nodes: nodes({ [HETZNER]: { presence: "offline", lastSeenAt: Date.now() - 60_000 } }),
+    });
+    try {
+      await expect
+        .element(page.getByTestId("copy-no-target"))
+        .toHaveTextContent(
+          "ryco is already on every online node. Add a node to copy it somewhere new.",
+        );
+      // The same compact line as the form, paths on hover, instead of a disabled card each.
+      await expect
+        .element(page.getByTestId("copy-already-on").getByTitle("has it · ~/dev/ryco"))
+        .toMatchTextContent("Mac mini");
+      await expect
+        .element(page.getByTestId("copy-already-on"))
+        .toMatchTextContent(/Already on\s*MacBook Pro.*Mac mini/u);
+      await expect.element(radio(/has it/u)).not.toBeInTheDocument();
+      // The offline nodes keep their card and its reason.
+      await expect.element(radio(/^hetzner-build/u)).toBeDisabled();
+
+      await dialog().getByRole("button", { name: "Add a node" }).click();
+      expect(onClose).toHaveBeenCalled();
+      expect(useSettingsDialogStore.getState()).toMatchObject({ open: true, section: "devices" });
+    } finally {
+      useSettingsDialogStore.getState().closeSettings();
       await screen.unmount();
     }
   });
