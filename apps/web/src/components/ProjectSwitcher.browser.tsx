@@ -86,13 +86,19 @@ function setStudioOffline() {
 }
 
 async function renderSelector(
-  options: { readonly openOnRequest?: boolean; readonly activeProjectId?: typeof RYCO_LOCAL } = {},
+  options: {
+    readonly openOnRequest?: boolean;
+    readonly activeProjectId?: typeof RYCO_LOCAL;
+    /** Lays the headline out as the new-thread hero does: centered, as wide as its text. */
+    readonly hero?: boolean;
+    readonly viewportWidth?: number;
+  } = {},
 ) {
-  await page.viewport(1100, 800);
+  await page.viewport(options.viewportWidth ?? 1100, 800);
   const screen = await render(
     <AppAtomRegistryProvider>
-      <div className="p-10">
-        <h1 className="text-2xl">
+      <div className={options.hero ? "flex flex-col items-center p-10" : "p-10"}>
+        <h1 className={options.hero ? "text-balance text-center text-3xl" : "text-2xl"}>
           What should we do in{" "}
           <ProjectSwitcher
             activeProjectId={options.activeProjectId ?? RYCO_LOCAL}
@@ -270,6 +276,31 @@ describe("ProjectSwitcher", () => {
     await userEvent.keyboard("{Escape}");
     await expect.poll(() => document.querySelector('[data-testid="project-selector"]')).toBeNull();
     expect(useProjectNodesDialogStore.getState().projectSelectorOpenRequest).toBeNull();
+  });
+
+  it("centers the headline's popup under the headline and keeps it on screen", async () => {
+    for (const viewportWidth of [1100, 360]) {
+      const screen = await renderSelector({ hero: true, viewportWidth });
+      await openSelector();
+      const popup = page.getByTestId("project-selector").element();
+      const headline = document.querySelector("h1")!.getBoundingClientRect();
+      const headlineCenter = headline.left + headline.width / 2;
+      const popupBox = () => popup.getBoundingClientRect();
+      if (viewportWidth === 1100) {
+        // Centered under the headline, not opened from the project name's start
+        // (which sits right of center).
+        await expect
+          .poll(() => Math.abs(popupBox().left + popupBox().width / 2 - headlineCenter))
+          .toBeLessThanOrEqual(1);
+        // Its own 440 px (the list inside its border), not the (wider) headline's.
+        expect(popupBox().width).toBeGreaterThan(430);
+        expect(popupBox().width).toBeLessThanOrEqual(440);
+      }
+      await expect.poll(() => popupBox().left).toBeGreaterThanOrEqual(0);
+      expect(popupBox().right).toBeLessThanOrEqual(viewportWidth);
+      await userEvent.keyboard("{Escape}");
+      await screen.unmount();
+    }
   });
 
   it("disables an offline node's checkout with the reason", async () => {

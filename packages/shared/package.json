@@ -218,6 +218,10 @@
       "types": "./src/sourceControl.ts",
       "import": "./src/sourceControl.ts"
     },
+    "./sourceControlHost": {
+      "types": "./src/sourceControlHost.ts",
+      "import": "./src/sourceControlHost.ts"
+    },
     "./sourceControlFailure": {
       "types": "./src/sourceControlFailure.ts",
       "import": "./src/sourceControlFailure.ts"

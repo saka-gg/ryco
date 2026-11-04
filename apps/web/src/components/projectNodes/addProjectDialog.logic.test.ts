@@ -9,18 +9,22 @@ import {
   addProjectStepLabels,
   buildAddedProjectNodeRows,
   buildCloneImportInput,
+  buildCloneSourceChips,
   buildCopySources,
   buildLinkImportInput,
   buildRepositorySuggestions,
   cloneFolderName,
   describeCloneDestination,
   describeFolderJoin,
+  detectCloneSourceFromUrl,
   findRepositoryJoin,
   importOverallPercent,
   importProgressSteps,
   isGitRemoteUrlInput,
   resolveAddProjectStart,
+  splitRepositoryLabel,
 } from "./addProjectDialog.logic";
+import type { AddProjectRemoteSourceReadiness } from "./addProjectSources";
 import { describeFolderSelection, type FolderSelectionStatus } from "./folderPicker.logic";
 import { fakeNodeEntry } from "./projectNodesTestFixtures";
 
@@ -319,12 +323,11 @@ describe("status lines", () => {
   it("says where a clone goes, and refuses a folder that exists", () => {
     const available = describeCloneDestination(folderStatus({}), {
       remoteUrl: "git@github.com:sak0a/ryco-hub.git",
-      homeDirectory: "/Users/me",
     });
     expect(available).toMatchObject({
       kind: "clone-destination",
       usable: true,
-      text: "Clones github.com/sak0a/ryco-hub into ~/Code/ryco-hub",
+      text: "Clones github.com/sak0a/ryco-hub here",
     });
 
     const occupied = describeCloneDestination(
@@ -338,18 +341,17 @@ describe("status lines", () => {
           detail: null,
         },
       }),
-      { remoteUrl: "https://github.com/sak0a/ryco-hub", homeDirectory: "/Users/me" },
+      { remoteUrl: "https://github.com/sak0a/ryco-hub" },
     );
     expect(occupied).toMatchObject({
       tone: "caution",
       usable: false,
       suggestedPath: "/Users/me/Code/ryco-hub-2",
-      text: "Clones github.com/sak0a/ryco-hub into ~/Code/ryco-hub: that folder already exists",
+      text: "Clones github.com/sak0a/ryco-hub here, but that folder already exists",
     });
     expect(
       describeCloneDestination(folderStatus({ existingProject: { name: "ryco-hub" } }), {
         remoteUrl: "https://github.com/sak0a/ryco-hub",
-        homeDirectory: "/Users/me",
       }),
     ).toMatchObject({ kind: "clone-destination", usable: false });
   });
@@ -589,5 +591,85 @@ describe("imports", () => {
     ]);
     expect(importOverallPercent(snapshot)).toBe(50);
     expect(importOverallPercent({ ...snapshot, status: "completed" })).toBe(100);
+  });
+});
+
+describe("clone sources", () => {
+  const READINESS: AddProjectRemoteSourceReadiness = {
+    url: { ready: true, hint: null },
+    github: { ready: true, hint: null },
+    gitlab: { ready: true, hint: null },
+    forgejo: { ready: false, hint: "Install the Forgejo CLI." },
+    bitbucket: { ready: false, hint: "Set Bitbucket API token environment variables." },
+    "azure-devops": { ready: false, hint: "Install the Azure CLI." },
+  };
+
+  it("detects a URL's provider from its host", () => {
+    expect(detectCloneSourceFromUrl("git@github.com:openai/codex.git")).toBe("github");
+    expect(detectCloneSourceFromUrl("https://gitlab.example.com/team/app.git")).toBe("gitlab");
+    expect(detectCloneSourceFromUrl("https://codeberg.org/forgejo/forgejo")).toBe("forgejo");
+    expect(detectCloneSourceFromUrl("https://bitbucket.org/team/app.git")).toBe("bitbucket");
+    expect(detectCloneSourceFromUrl("https://dev.azure.com/org/project/_git/app")).toBe(
+      "azure-devops",
+    );
+    expect(detectCloneSourceFromUrl("ssh://git@git.internal:2222/app.git")).toBe("url");
+  });
+
+  it("lists every source in a fixed order and lights the one the field uses", () => {
+    const chips = buildCloneSourceChips({
+      readiness: READINESS,
+      providerSource: "gitlab",
+      typedUrl: null,
+    });
+    expect(chips.map((chip) => chip.source)).toEqual([
+      "github",
+      "gitlab",
+      "forgejo",
+      "bitbucket",
+      "azure-devops",
+      "url",
+    ]);
+    expect(chips.filter((chip) => chip.active).map((chip) => chip.source)).toEqual(["gitlab"]);
+    // A provider the node can't use yet stays listed, with why.
+    expect(chips.find((chip) => chip.source === "forgejo")).toMatchObject({
+      label: "Forgejo",
+      ready: false,
+      hint: "Install the Forgejo CLI.",
+      active: false,
+    });
+  });
+
+  it("lights a typed URL's provider, ready or not, and Git URL for an unknown host", () => {
+    const github = buildCloneSourceChips({
+      readiness: READINESS,
+      providerSource: "gitlab",
+      typedUrl: "git@github.com:openai/codex.git",
+    });
+    expect(github.filter((chip) => chip.active)).toEqual([
+      expect.objectContaining({ source: "github", detected: true }),
+    ]);
+    const bitbucket = buildCloneSourceChips({
+      readiness: READINESS,
+      providerSource: "github",
+      typedUrl: "https://bitbucket.org/team/app.git",
+    });
+    expect(bitbucket.filter((chip) => chip.active)).toEqual([
+      expect.objectContaining({ source: "bitbucket", detected: true, ready: false }),
+    ]);
+    const other = buildCloneSourceChips({
+      readiness: READINESS,
+      providerSource: "github",
+      typedUrl: "ssh://git@git.internal/app.git",
+    });
+    expect(other.filter((chip) => chip.active)).toEqual([
+      expect.objectContaining({ source: "url", detected: false }),
+    ]);
+  });
+
+  it("splits a repository label into its owner and name", () => {
+    expect(splitRepositoryLabel("sak0a/ryco")).toEqual({ owner: "sak0a", name: "ryco" });
+    expect(splitRepositoryLabel("group/sub/app")).toEqual({ owner: "group/sub", name: "app" });
+    expect(splitRepositoryLabel("ryco")).toEqual({ owner: null, name: "ryco" });
+    expect(splitRepositoryLabel("ryco/")).toEqual({ owner: null, name: "ryco/" });
   });
 });

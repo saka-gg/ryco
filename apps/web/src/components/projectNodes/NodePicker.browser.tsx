@@ -90,9 +90,15 @@ describe("NodePicker cards", () => {
       await expect.element(laptop).toBeVisible();
       await expect.element(laptop.getByText("this device")).toBeVisible();
       await expect.element(laptop.getByText("macOS · online")).toBeVisible();
-      await expect
-        .element(laptop.getByText("3 projects · ~/Code, ~/Dropbox/Code/Web"))
-        .toBeVisible();
+      await expect.element(laptop.getByText("3 projects")).toBeVisible();
+      // The code roots give way at their start when the card is narrow.
+      const roots = laptop.element().querySelector<HTMLElement>('[data-slot="node-path"]')!;
+      expect(roots.textContent).toBe("~/Code, ~/Dropbox/Code/Web");
+      expect(getComputedStyle(roots).direction).toBe("rtl");
+      // Presence also shows as a dot on the node's badge.
+      expect(laptop.element().querySelector("[data-presence]")?.getAttribute("data-presence")).toBe(
+        "online",
+      );
       await expect.element(radio(/^Mac mini/).getByText("1 project")).toBeVisible();
 
       // Unavailable nodes stay visible, disabled with their reason.

@@ -333,6 +333,9 @@ function ProviderUpdateLaunchNotificationForEnvironment({
               <ProviderUpdateToastIcon provider={updateProviders[0]!.driver} />
             ) : undefined,
           hideCopyButton: true,
+          // A prompt, not news about something the user did: it waits for an
+          // open dialog or picker rather than covering it.
+          deferWhileOverlayOpen: true,
           onClose: dismissPrompt,
           ...(oneClickProviders.length > 0
             ? {

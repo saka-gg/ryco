@@ -9,17 +9,21 @@ import type { NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
 import type { EnvironmentId } from "@ryco/contracts";
 import { useId, useMemo, useState } from "react";
 
+import { CheckIcon } from "lucide-react";
+
 import { cn } from "~/lib/utils";
 
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { rovingRadioGroup } from "../ui/roving-radio-group";
+import { NodePathText } from "./NodePathText";
 import {
   nodeMachineKind,
   nodeStatusLine,
-  nodeSummaryLine,
+  nodeSummaryParts,
   nodeTone,
   resolveNodePickerAvailability,
   type NodePickerExtrasMap,
+  type NodePresenceTone,
   type NodePickerRequirements,
   type NodeTone,
 } from "./nodePicker.logic";
@@ -222,15 +226,15 @@ export function NodePicker(props: NodePickerProps) {
       onKeyDown={group.onKeyDown}
       data-slot="node-picker"
       data-variant="card"
-      className={cn("grid grid-cols-1 gap-2 sm:grid-cols-2", props.className)}
+      className={cn("grid grid-cols-1 gap-2.5 sm:grid-cols-2", props.className)}
     >
       {rows.map(({ node, extras: nodeExtras, availability }) => {
         const status = nodeStatusLine(node, nowMs);
         // An offline node's presence line already says why; it keeps its summary.
-        const summary =
-          availability.reason !== null && !availability.reasonIsPresence
-            ? availability.reason
-            : nodeSummaryLine(nodeExtras);
+        const reasonInSummary = availability.reason !== null && !availability.reasonIsPresence;
+        const summary = reasonInSummary
+          ? ({ kind: "detail", text: availability.reason } as const)
+          : nodeSummaryParts(nodeExtras);
         const reasonId = `${reasonIdPrefix}-${node.environmentId}`;
         return (
           <button
@@ -239,55 +243,94 @@ export function NodePicker(props: NodePickerProps) {
             title={availability.reason ?? undefined}
             aria-describedby={availability.reason ? reasonId : undefined}
             className={cn(
-              "flex min-w-0 cursor-pointer flex-col gap-1.5 rounded-[10px] border border-border p-3 text-left outline-none",
+              "group/node relative flex min-w-0 cursor-pointer items-start gap-3 rounded-xl border border-border p-3.5 text-left outline-none",
               "transition-[border-color,background-color,box-shadow,opacity] duration-(--app-motion-duration-chip) ease-(--app-motion-ease)",
-              "hover:not-disabled:border-ring hover:not-disabled:bg-accent/60",
+              "hover:not-disabled:border-foreground/20 hover:not-disabled:bg-accent/50",
               "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
               "data-checked:border-primary data-checked:shadow-[0_0_0_1px_var(--primary)]",
-              "disabled:cursor-not-allowed disabled:opacity-50",
+              "disabled:cursor-not-allowed disabled:opacity-55",
             )}
           >
-            <span className="flex min-w-0 items-center gap-2">
+            <span className="relative shrink-0">
               <NodeBadge node={node} size="lg" />
-              <span className="flex min-w-0 flex-col">
-                <span className="flex min-w-0 items-center gap-1.5">
-                  <span className="truncate font-medium text-[13px] text-foreground">
-                    {node.label}
-                  </span>
-                  {node.isThisDevice ? <NodeTag>this device</NodeTag> : null}
-                </span>
-                <span
-                  id={availability.reasonIsPresence ? reasonId : undefined}
-                  className="truncate text-[11.5px] text-muted-foreground"
-                >
-                  {status.os ? `${status.os} · ` : null}
-                  <span
-                    className={cn(
-                      status.tone === "online" && "text-success",
-                      status.tone === "connecting" && "text-warning",
-                    )}
-                  >
-                    {status.presence}
-                  </span>
-                </span>
-              </span>
+              <PresenceDot tone={status.tone} />
             </span>
-            {summary ? (
-              <span
-                id={
-                  availability.reason !== null && !availability.reasonIsPresence
-                    ? reasonId
-                    : undefined
-                }
-                className="truncate text-[11.5px] text-muted-foreground"
-              >
-                {summary}
+            <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <span className="flex min-w-0 items-center gap-1.5 pe-5">
+                <span className="truncate font-medium text-[13.5px] text-foreground leading-5">
+                  {node.label}
+                </span>
+                {node.isThisDevice ? <NodeTag>this device</NodeTag> : null}
               </span>
-            ) : null}
+              <span
+                id={availability.reasonIsPresence ? reasonId : undefined}
+                className="truncate text-[12px] text-muted-foreground"
+              >
+                {status.os ? `${status.os} · ` : null}
+                <span
+                  className={cn(
+                    status.tone === "online" && "text-success-foreground dark:text-success",
+                    status.tone === "connecting" && "text-warning-foreground",
+                  )}
+                >
+                  {status.presence}
+                </span>
+              </span>
+              {summary ? (
+                <span
+                  id={reasonInSummary ? reasonId : undefined}
+                  className="mt-1 flex min-w-0 items-center gap-1.5 text-[11.5px] text-muted-foreground"
+                  data-slot="node-summary"
+                >
+                  {summary.kind === "detail" ? (
+                    <span className="truncate">{summary.text}</span>
+                  ) : (
+                    <>
+                      {summary.projects !== null ? (
+                        <span className="shrink-0">{summary.projects}</span>
+                      ) : null}
+                      {summary.projects !== null && summary.roots !== null ? (
+                        <span aria-hidden className="shrink-0 opacity-50">
+                          ·
+                        </span>
+                      ) : null}
+                      {summary.roots !== null ? (
+                        <NodePathText
+                          path={summary.roots}
+                          className="flex-1 font-mono text-[11px]"
+                        />
+                      ) : null}
+                    </>
+                  )}
+                </span>
+              ) : null}
+            </span>
+            <span
+              aria-hidden
+              className="absolute end-3 top-3 grid size-4 place-items-center rounded-full bg-primary text-primary-foreground opacity-0 transition-opacity duration-(--app-motion-duration-chip) group-data-checked/node:opacity-100"
+            >
+              <CheckIcon className="size-2.5" strokeWidth={3} />
+            </span>
           </button>
         );
       })}
     </div>
+  );
+}
+
+/** A node's presence as a dot on its badge's corner: online, connecting, or offline. */
+function PresenceDot(props: { readonly tone: NodePresenceTone }) {
+  return (
+    <span
+      aria-hidden
+      data-presence={props.tone}
+      className={cn(
+        "absolute -end-0.5 -bottom-0.5 size-2.5 rounded-full ring-2 ring-popover",
+        props.tone === "online" && "bg-success",
+        props.tone === "connecting" && "bg-warning",
+        props.tone === "offline" && "bg-muted-foreground/60",
+      )}
+    />
   );
 }
 

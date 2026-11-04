@@ -35,7 +35,14 @@ import {
 import { normalizeGitRemoteUrl } from "@ryco/shared/git";
 import { excludeChatProjects } from "@ryco/shared/projectKind";
 import { useLocation, useNavigate } from "@tanstack/react-router";
-import { CheckIcon, PlusIcon, XIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  CheckIcon,
+  ChevronRightIcon,
+  FolderOpenIcon,
+  PlusIcon,
+  XIcon,
+} from "lucide-react";
 import {
   Fragment,
   useCallback,
@@ -71,6 +78,7 @@ import {
 } from "../../store";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import type { Project } from "../../types";
+import { AnimatedHeight } from "../AnimatedHeight";
 import { Button } from "../ui/button";
 import { Dialog, DialogClose, DialogPopup, DialogTitle } from "../ui/dialog";
 import { Spinner } from "../ui/spinner";
@@ -133,7 +141,7 @@ export function AddProjectDialog() {
       }}
     >
       <DialogPopup
-        className="max-w-[560px] overflow-hidden"
+        className="max-h-[calc(100dvh-2rem)] max-w-[744px] overflow-hidden"
         showCloseButton={false}
         data-testid="add-project-dialog"
       >
@@ -365,7 +373,6 @@ function AddProjectFlow(props: {
   useNodeConnection(nodeId);
   const supportsProjectCopy = node?.projectCopySupport === "yes";
   const hints = useNodePathHints({ environmentId: nodeId, supported: supportsProjectCopy });
-  const homeDirectory = supportsProjectCopy ? (hints.data?.homeDirectory ?? null) : null;
   const platform = getEnvironmentBrowsePlatform(node?.platformOs);
   const legacyStart = resolveAddProjectInitialPath({
     environmentId: nodeId,
@@ -933,7 +940,7 @@ function AddProjectFlow(props: {
   const describeStatus = useCallback(
     (base: FolderSelectionStatus): FolderSelectionStatus => {
       if (kind === "clone" && clone) {
-        return describeCloneDestination(base, { remoteUrl: clone.remoteUrl, homeDirectory });
+        return describeCloneDestination(base, { remoteUrl: clone.remoteUrl });
       }
       if (kind === "folder" && nodeId !== null) {
         return describeFolderJoin(
@@ -948,7 +955,7 @@ function AddProjectFlow(props: {
       }
       return base;
     },
-    [clone, homeDirectory, kind, nodeId, nodes, projects],
+    [clone, kind, nodeId, nodes, projects],
   );
 
   const writeMethod =
@@ -998,7 +1005,7 @@ function AddProjectFlow(props: {
   if (activeStep === 0 || node === null) {
     body = (
       <>
-        <p className="m-0 text-muted-foreground">Which node should the project live on?</p>
+        <StepLead>Which node should the project live on?</StepLead>
         <div
           onKeyDownCapture={(event) => {
             movedByArrowKeyRef.current = ROVING_KEYS.has(event.key);
@@ -1064,9 +1071,7 @@ function AddProjectFlow(props: {
     );
     footer = (
       <>
-        <Button size="sm" variant="outline" onClick={() => setStep(0)}>
-          Back
-        </Button>
+        <BackButton onClick={() => setStep(0)} />
         <FooterSummary />
         <DialogClose render={<Button size="sm" variant="outline" />}>Cancel</DialogClose>
       </>
@@ -1107,8 +1112,9 @@ function AddProjectFlow(props: {
       : hostedCapabilityCopy(writeCapability, node.label);
     body = (
       <>
-        <p className="m-0 text-muted-foreground">{lead}</p>
+        <StepLead>{lead}</StepLead>
         <FolderPicker
+          size="large"
           key={`${node.environmentId}\u0000${folderKind}`}
           environmentId={node.environmentId}
           nodeLabel={node.label}
@@ -1161,9 +1167,7 @@ function AddProjectFlow(props: {
     );
     footer = (
       <>
-        <Button size="sm" variant="outline" disabled={busy} onClick={() => setStep(1)}>
-          Back
-        </Button>
+        <BackButton disabled={busy} onClick={() => setStep(1)} />
         <FooterSummary>
           {capabilityReason ? (
             capabilityReason
@@ -1171,10 +1175,15 @@ function AddProjectFlow(props: {
             <Button
               size="xs"
               variant="ghost"
-              className="-ms-2 text-muted-foreground"
+              className="text-muted-foreground"
               disabled={pickingNatively || busy}
               onClick={() => void pickNatively()}
             >
+              {pickingNatively ? (
+                <Spinner className="size-3.5" />
+              ) : (
+                <FolderOpenIcon aria-hidden className="size-3.5" />
+              )}
               Open in {getLocalFileManagerName(navigator.platform)}
             </Button>
           ) : null}
@@ -1203,9 +1212,7 @@ function AddProjectFlow(props: {
           if (!busy) setStep(index);
         }}
       />
-      <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-4 py-3.5 text-[13px]">
-        {body}
-      </div>
+      <AddProjectBody animated>{body}</AddProjectBody>
       <AddProjectFooter>{footer}</AddProjectFooter>
     </>
   );
@@ -1222,14 +1229,14 @@ const ADD_PROJECT_TITLE = (
 
 function AddProjectHeader(props: { readonly title: ReactNode; readonly trailing?: ReactNode }) {
   return (
-    <div className="flex items-center gap-2.5 px-4 pt-3.5 pb-3">
+    <div className="flex items-center gap-2.5 px-5 pt-4 pb-3">
       <DialogTitle className="flex min-w-0 flex-1 items-center gap-2 font-sans font-semibold text-[15px] leading-normal">
         {props.title}
       </DialogTitle>
       {props.trailing ?? (
         <DialogClose
           aria-label="Close"
-          render={<Button size="icon-xs" variant="ghost" className="text-muted-foreground" />}
+          render={<Button size="icon-xs" variant="ghost" className="-me-1 text-muted-foreground" />}
         >
           <XIcon />
         </DialogClose>
@@ -1238,11 +1245,55 @@ function AddProjectHeader(props: { readonly title: ReactNode; readonly trailing?
   );
 }
 
-function AddProjectFooter(props: { readonly children: ReactNode }) {
-  return (
-    <div className="flex shrink-0 items-center gap-2 border-border border-t px-4 py-[11px]">
+/**
+ * The dialog's scrolling middle: the header, stepper and footer stay put while it scrolls
+ * within the viewport's height. `animated` eases its height as the steps change.
+ */
+function AddProjectBody(props: {
+  readonly children: ReactNode;
+  readonly animated?: boolean;
+  readonly "data-testid"?: string;
+}) {
+  const content = (
+    <div
+      className="flex flex-col gap-3 px-5 pt-4 pb-5 text-[13px]"
+      data-testid={props["data-testid"]}
+    >
       {props.children}
     </div>
+  );
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain" data-slot="add-project-body">
+      {props.animated ? <AnimatedHeight>{content}</AnimatedHeight> : content}
+    </div>
+  );
+}
+
+/** The question a step asks, above what it offers. */
+function StepLead(props: { readonly children: ReactNode }) {
+  return <p className="m-0 text-[13px] text-muted-foreground">{props.children}</p>;
+}
+
+function AddProjectFooter(props: { readonly children: ReactNode }) {
+  return (
+    <div className="flex shrink-0 items-center gap-2 border-border border-t bg-muted/30 px-5 py-3">
+      {props.children}
+    </div>
+  );
+}
+
+function BackButton(props: { readonly onClick: () => void; readonly disabled?: boolean }) {
+  return (
+    <Button
+      size="sm"
+      variant="ghost"
+      className="-ms-2 text-muted-foreground"
+      disabled={props.disabled}
+      onClick={props.onClick}
+    >
+      <ArrowLeftIcon aria-hidden className="size-3.5" />
+      Back
+    </Button>
   );
 }
 
@@ -1263,7 +1314,7 @@ function AddProjectStepper(props: {
   return (
     <ol
       aria-label="Steps"
-      className="m-0 flex list-none flex-wrap gap-1 border-border border-b px-4 pb-3 text-[12px]"
+      className="m-0 flex list-none flex-wrap items-center gap-1 border-border border-b px-5 pb-3 text-[12px]"
     >
       {props.labels.map((label, index) => {
         const position = index as AddProjectStep;
@@ -1272,29 +1323,29 @@ function AddProjectStepper(props: {
         return (
           <Fragment key={position}>
             {index > 0 ? (
-              <li aria-hidden className="self-center text-muted-foreground opacity-50">
-                ›
+              <li aria-hidden className="flex text-muted-foreground/45">
+                <ChevronRightIcon className="size-3.5" />
               </li>
             ) : null}
-            <li>
+            <li className="min-w-0">
               <button
                 type="button"
                 disabled={!done}
                 aria-current={current ? "step" : undefined}
                 onClick={() => props.onStep(position)}
                 className={cn(
-                  "inline-flex items-center gap-1.5 rounded-full py-[3px] ps-1 pe-2.5 text-muted-foreground outline-none",
-                  "transition-colors duration-(--app-motion-duration-chip) ease-(--app-motion-ease)",
+                  "inline-flex h-7 max-w-[240px] items-center gap-1.5 rounded-full border border-transparent ps-1 pe-2.5 text-muted-foreground outline-none",
+                  "transition-[background-color,border-color,color] duration-(--app-motion-duration-chip) ease-(--app-motion-ease)",
                   "focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default",
-                  current && "bg-foreground/11 text-foreground",
+                  current && "border-border bg-background font-medium text-foreground shadow-xs/5",
                   done && "cursor-pointer text-foreground hover:bg-accent/60",
                 )}
               >
                 <span
                   className={cn(
-                    "grid size-4 place-items-center rounded-full bg-muted text-[10px]",
-                    current && "bg-primary text-primary-foreground",
-                    done && "bg-success text-white",
+                    "grid size-[18px] shrink-0 place-items-center rounded-full border border-border text-[10px] tabular-nums",
+                    current && "border-transparent bg-primary text-primary-foreground",
+                    done && "border-transparent bg-success/16 text-success",
                   )}
                 >
                   {done ? (
@@ -1303,7 +1354,7 @@ function AddProjectStepper(props: {
                     index + 1
                   )}
                 </span>
-                {label}
+                <span className="truncate">{label}</span>
               </button>
             </li>
           </Fragment>
@@ -1335,7 +1386,7 @@ function AddProjectImportProgress(props: {
           )
         }
       />
-      <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-4 py-3.5 text-[13px]">
+      <AddProjectBody>
         <CopyBar percent={percent} />
         <ImportProgressSteps
           snapshot={phase.snapshot}
@@ -1356,13 +1407,11 @@ function AddProjectImportProgress(props: {
             ))}
           </ul>
         ) : null}
-      </div>
+      </AddProjectBody>
       <AddProjectFooter>
         {failed ? (
           <>
-            <Button size="sm" variant="outline" onClick={props.onBack}>
-              Back
-            </Button>
+            <BackButton onClick={props.onBack} />
             <FooterSummary />
             <Button size="sm" onClick={props.onRetry}>
               Try again
@@ -1414,10 +1463,7 @@ function AddProjectDone(props: {
   return (
     <>
       <AddProjectHeader title={ADD_PROJECT_TITLE} />
-      <div
-        className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-4 py-3.5 text-[13px]"
-        data-testid="add-project-done"
-      >
+      <AddProjectBody data-testid="add-project-done">
         <AddedProjectSummary
           name={added.name}
           node={props.node}
@@ -1425,7 +1471,7 @@ function AddProjectDone(props: {
           rows={rows}
           nodes={nodes}
         />
-      </div>
+      </AddProjectBody>
       <AddProjectFooter>
         <FooterSummary />
         <DialogClose render={<Button size="sm" variant="outline" />}>Done</DialogClose>

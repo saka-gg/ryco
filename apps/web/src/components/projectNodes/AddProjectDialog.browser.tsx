@@ -10,6 +10,7 @@ import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { useCommandPaletteStore } from "../../commandPaletteStore";
+import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { __setEnvironmentApiOverrideForTests } from "../../environmentApi";
 import {
   useSavedEnvironmentRegistryStore,
@@ -293,7 +294,7 @@ describe("AddProjectDialog", () => {
       // Code roots come from the node's path hints.
       await expect
         .element(mini, ELEMENT_WAIT)
-        .toMatchTextContent(/0 projects · ~\/Code, ~\/Dropbox\/Code\/Web/);
+        .toMatchTextContent(/0 projects\s*·\s*~\/Code, ~\/Dropbox\/Code\/Web/);
       await expect
         .element(dialog().getByRole("radio", { name: /Gaming PC/ }), ELEMENT_WAIT)
         .toMatchTextContent(/offline (since|for) /);
@@ -336,10 +337,13 @@ describe("AddProjectDialog", () => {
 
       const repository = dialog().getByRole("textbox", { name: "Repository to clone" });
       await repository.fill("git@github.com:openai/codex.git");
-      // A URL clones as typed, whatever provider the field had.
-      await expect
-        .element(dialog().getByRole("button", { name: /Clone source: Git URL/ }), ELEMENT_WAIT)
-        .toBeVisible();
+      // A URL clones as typed, whatever provider the field had; its host lights GitHub
+      // (not set up on this node, which a URL clone doesn't need).
+      const github = dialog()
+        .getByRole("group", { name: "Clone source" })
+        .getByRole("button", { name: /^GitHub/ });
+      await expect.element(github, ELEMENT_WAIT).toHaveAttribute("data-detected", "");
+      await expect.element(github).toHaveAttribute("data-active", "");
       await userEvent.keyboard("{Enter}");
 
       await expect
@@ -347,7 +351,7 @@ describe("AddProjectDialog", () => {
         .toMatchTextContent(/Where should codex go on Mac mini\? Pick the parent folder\./);
       await expect
         .element(page.getByTestId("folder-picker-status"), ELEMENT_WAIT)
-        .toMatchTextContent(/Clones github\.com\/openai\/codex into ~\/Code\/codex/);
+        .toMatchTextContent(/^~\/Code\/codex\s*Clones github\.com\/openai\/codex here$/);
       const clone = dialog().getByRole("button", { name: "Clone to Mac mini" });
       await expect.element(clone, ELEMENT_WAIT).toBeEnabled();
       await clone.click();
@@ -500,6 +504,75 @@ describe("AddProjectDialog", () => {
     }
   });
 
+  it("shows every clone provider by its logo, lights a pasted URL's, and sends one that needs setup to Settings", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: snapshotWith(null),
+    });
+    try {
+      await waitForServerConfigToApply();
+      openAddProject({ environmentId: LOCAL_ENVIRONMENT_ID, mode: "clone" });
+      await expect.element(dialog(), ELEMENT_WAIT).toBeVisible();
+      const sources = dialog().getByRole("group", { name: "Clone source" });
+      const chip = (name: RegExp) => sources.getByRole("button", { name });
+
+      // Every source in one order, ready or not; GitHub, the first ready one, is lit.
+      await expect.element(chip(/^GitHub$/), ELEMENT_WAIT).toHaveAttribute("aria-pressed", "true");
+      await expect.element(chip(/^GitHub$/)).toHaveAttribute("data-active", "");
+      expect(
+        sources
+          .getByRole("button")
+          .elements()
+          .map((element) => element.getAttribute("data-source")),
+      ).toEqual(["github", "gitlab", "forgejo", "bitbucket", "azure-devops", "url"]);
+      for (const element of sources.getByRole("button").elements()) {
+        expect(element.querySelector("svg")).not.toBeNull();
+      }
+      const repository = dialog().getByRole("textbox", { name: "Repository to clone" });
+      await expect
+        .element(repository)
+        .toHaveAttribute("placeholder", "owner/repo on GitHub, or paste a Git URL");
+
+      await chip(/^GitLab$/).click();
+      await expect.element(chip(/^GitLab$/)).toHaveAttribute("aria-pressed", "true");
+      await expect.element(chip(/^GitHub$/)).toHaveAttribute("aria-pressed", "false");
+      await expect
+        .element(repository)
+        .toHaveAttribute("placeholder", "owner/repo on GitLab, or paste a Git URL");
+
+      // A pasted URL lights the provider its host belongs to.
+      await repository.fill("https://bitbucket.org/team/app.git");
+      await expect.element(chip(/^Bitbucket$/)).toHaveAttribute("aria-pressed", "true");
+      await expect.element(chip(/^Bitbucket$/)).toHaveAttribute("data-detected", "");
+      await expect.element(chip(/^GitLab$/)).toHaveAttribute("aria-pressed", "false");
+      await repository.fill("ssh://git@git.internal/app.git");
+      await expect.element(chip(/^Git URL$/)).toHaveAttribute("aria-pressed", "true");
+
+      // A provider the node can't use yet stays visible, says why, and leads to its setup.
+      const forgejo = chip(/^Forgejo: Setup Required$/);
+      await expect.element(forgejo).not.toHaveAttribute("data-ready");
+      expect(forgejo.element().getAttribute("title")).toMatch(/Settings -> Source Control/);
+      await forgejo.click();
+      await expect
+        .element(page.getByText(/isn't set up on this node yet\./))
+        .toMatchTextContent(
+          /Forgejo isn't set up on this node yet\. Provider status unavailable\./,
+        );
+      expect(useProjectNodesDialogStore.getState().addProject.open).toBe(true);
+      await page.getByRole("menuitem", { name: "Set up in Settings…" }).click();
+      await vi.waitFor(() => {
+        expect(useProjectNodesDialogStore.getState().addProject.open).toBe(false);
+        expect(useSettingsDialogStore.getState()).toMatchObject({
+          open: true,
+          section: "source-control",
+        });
+      });
+    } finally {
+      useSettingsDialogStore.getState().closeSettings();
+      await mounted.cleanup();
+    }
+  });
+
   it("cancels a clone the node had not answered yet, once it answers", async () => {
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,
@@ -584,13 +657,13 @@ describe("AddProjectDialog", () => {
       // Without project copy the picker browses from the node's add-project folder.
       await expect
         .element(page.getByTestId("folder-picker-status"), ELEMENT_WAIT)
-        .toMatchTextContent(/Clones github\.com\/sak0a\/ryco into ~\/ryco/);
+        .toMatchTextContent(/^~\/ryco\s*Clones github\.com\/sak0a\/ryco here$/);
       await dialog()
         .getByRole("option", { name: /^Code$/ })
         .click();
       await expect
         .element(page.getByTestId("folder-picker-status"), ELEMENT_WAIT)
-        .toMatchTextContent(/Clones github\.com\/sak0a\/ryco into \/Users\/me\/Code\/ryco/);
+        .toMatchTextContent(/^\/Users\/me\/Code\/ryco\s*Clones github\.com\/sak0a\/ryco here$/);
       await dialog().getByRole("button", { name: "Clone to Mac mini" }).click();
 
       await vi.waitFor(() => {

@@ -209,6 +209,10 @@ export const OPTED_OUT: Readonly<Record<string, Readonly<Record<string, string>>
   "src/components/statistics/limits/useSubscriptionLimits.ts": {
     useSubscriptionLimits: PARITY,
   },
+  "src/components/ui/overlayPresence.ts": {
+    OpenOverlayMarker:
+      "It renders nothing and runs one mount effect, so there is nothing to memoize; it sits in boot.",
+  },
   "src/hooks/useLocalStorage.ts": {
     useLocalStorage: PARITY,
   },

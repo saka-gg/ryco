@@ -54,6 +54,8 @@ async function mount(element: ReactElement, options: { projectCopy?: boolean } =
 }
 
 const status = () => page.getByTestId("folder-picker-status");
+const statusLine = () => page.getByTestId("folder-picker-status-line");
+const statusPath = () => page.getByTestId("folder-picker-status-path");
 const field = () => page.getByRole("combobox", { name: "Search folders on Mac mini" });
 const option = (name: RegExp) => page.getByRole("option", { name });
 
@@ -114,21 +116,60 @@ describe("FolderPicker", () => {
       await expect
         .element(page.getByTestId("selected"))
         .toHaveTextContent("/Users/me/Code/ryco-hub");
-      await expect.element(status()).toHaveTextContent("Git repository on main");
+      await expect.element(statusPath()).toHaveTextContent("~/Code/ryco-hub");
+      await expect.element(statusLine()).toHaveTextContent("Git repository on main");
       await expect.element(status()).toHaveAttribute("data-state", "git-repository");
       expect(fake.previewDestination).toHaveBeenCalledWith({ path: "/Users/me/Code/ryco-hub" });
 
       await option(/^playground/).click();
-      await expect.element(status()).toHaveTextContent("Plain folder (no Git)");
+      await expect.element(statusLine()).toHaveTextContent("Plain folder (no Git)");
 
       await option(/^ryco ryco$/).click();
       await expect
-        .element(status())
+        .element(statusLine())
         .toHaveTextContent("This is already the project ryco on Mac mini.");
       expect(statuses.at(-1)).toMatchObject({ kind: "existing-project", usable: false });
       // One report per distinct status, not one per render.
       const kinds = statuses.map((entry) => entry.kind);
       expect(kinds.filter((kind) => kind === "existing-project")).toHaveLength(1);
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("shows the selection's full path over what it is, and goes up a folder", async () => {
+    const { screen } = await mount(<Harness size="large" className="w-[420px]" />);
+    try {
+      // Nothing selected: the bar asks for a folder and names the keys that pick one.
+      await expect.element(statusPath()).not.toBeInTheDocument();
+      await expect.element(statusLine()).toHaveTextContent("Select a folder.");
+      await expect.element(status()).toMatchTextContent(/move.*open.*select/);
+
+      await option(/^ryco-hub/).click();
+      await expect.element(statusPath()).toHaveTextContent("~/Code/ryco-hub");
+      await expect.element(statusLine()).toHaveTextContent("Git repository on main");
+      const path = statusPath().element().querySelector<HTMLElement>('[data-slot="node-path"]')!;
+      // The full path is the tooltip; a path that doesn't fit gives way at its start.
+      expect(path.title).toBe("/Users/me/Code/ryco-hub");
+      expect(getComputedStyle(path).direction).toBe("rtl");
+
+      // An existing project is marked with its icon and name, in its row and in the bar.
+      await option(/^ryco ryco$/).click();
+      await expect.element(status()).toHaveAttribute("data-state", "existing-project");
+      await expect.element(statusPath()).toHaveTextContent("~/Code/ryco");
+      const badge = option(/^ryco ryco$/)
+        .element()
+        .querySelector('[data-slot="folder-picker-project"]');
+      expect(badge?.textContent).toMatch(/ryco$/);
+      expect(badge?.querySelector("img, svg")).not.toBeNull();
+
+      // Up leaves ~/Code for home; home has nothing above it in the crumbs.
+      const crumbs = page.getByRole("navigation", { name: "Folder path" });
+      await crumbs.getByRole("button", { name: "Up one folder" }).click();
+      await expect
+        .element(crumbs.getByRole("button", { name: "~" }))
+        .toHaveAttribute("aria-current", "location");
+      await expect.element(option(/^Code$/)).toBeVisible();
     } finally {
       await screen.unmount();
     }
@@ -154,7 +195,7 @@ describe("FolderPicker", () => {
       await expect
         .element(page.getByTestId("selected"))
         .toHaveTextContent("/Users/me/Code/ryco-hub");
-      await expect.element(status()).toHaveTextContent("Git repository on main");
+      await expect.element(statusLine()).toHaveTextContent("Git repository on main");
       await userEvent.keyboard("{Enter}");
       expect(onSubmit).toHaveBeenCalledWith("/Users/me/Code/ryco-hub");
 
@@ -191,7 +232,8 @@ describe("FolderPicker", () => {
       await expect.element(option(/^playground/)).toBeVisible();
       await field().fill("tap");
       await expect.element(page.getByText("1 folder on Mac mini")).toBeVisible();
-      const result = option(/~\/Dropbox\/Code\/Web\/homebrew-tap/);
+      // The folder's name leads, with the match marked; its parent folder follows, muted.
+      const result = option(/^homebrew-tap ~\/Dropbox\/Code\/Web/);
       await expect.element(result).toBeVisible();
       await expect.element(result.getByText("tap", { exact: true })).toBeVisible();
       expect(fake.searchDirectories).toHaveBeenCalledWith({ query: "tap", limit: 40 });
@@ -226,7 +268,7 @@ describe("FolderPicker", () => {
         limitReached: false,
       }));
       await field().fill("ryco-hub");
-      await expect.element(option(/^~\/Code\/ryco-hub main$/)).toBeVisible();
+      await expect.element(option(/^ryco-hub ~\/Code main$/)).toBeVisible();
       await expect.element(note).not.toBeInTheDocument();
 
       fake.searchDirectories.mockImplementationOnce(async (input) => ({
@@ -289,7 +331,10 @@ describe("FolderPicker", () => {
       expect(onUseSuggestedPath).toHaveBeenCalledWith("/Users/me/Code/ryco-2");
 
       await option(/^ryco-hub/).click();
-      await expect.element(status()).toHaveTextContent("Creates ~/Code/ryco-hub/ryco");
+      await expect.element(statusPath()).toHaveTextContent("~/Code/ryco-hub/ryco");
+      await expect
+        .element(statusLine())
+        .toHaveTextContent("New folder; it's created for the project.");
       await expect.element(status()).toHaveAttribute("data-tone", "positive");
     } finally {
       await screen.unmount();
@@ -305,7 +350,8 @@ describe("FolderPicker", () => {
     );
     try {
       await expect.element(status()).toHaveAttribute("data-state", "occupied");
-      await expect.element(status().getByText("~/Dropbox/Code/Web already exists.")).toBeVisible();
+      await expect.element(statusPath()).toHaveTextContent("~/Dropbox/Code/Web");
+      await expect.element(status().getByText("This folder already exists.")).toBeVisible();
       await page.getByRole("button", { name: "Use Web-2" }).click();
       expect(onUseSuggestedPath).toHaveBeenLastCalledWith("/Users/me/Dropbox/Code/Web-2");
     } finally {
@@ -322,16 +368,16 @@ describe("FolderPicker", () => {
       />,
     );
     try {
-      const hub = option(/^~\/Code\/ryco-hub same repository main$/);
+      const hub = option(/^ryco-hub ~\/Code same repository main$/);
       await expect.element(hub).toBeVisible();
       await expect.element(hub.getByText("same repository")).toBeVisible();
       await expect
-        .element(option(/^~\/Code\/ryco ryco$/).getByText("same repository"))
+        .element(option(/^ryco ~\/Code ryco$/).getByText("same repository"))
         .not.toBeInTheDocument();
 
       await hub.click();
-      await expect.element(status()).toHaveTextContent("Same repository, on main");
-      await option(/~\/Code\/ryco ryco$/).click();
+      await expect.element(statusLine()).toHaveTextContent("Same repository, on main");
+      await option(/^ryco ~\/Code ryco$/).click();
       await expect.element(status()).toHaveAttribute("data-state", "existing-project");
     } finally {
       await screen.unmount();
@@ -362,7 +408,10 @@ describe("FolderPicker", () => {
 
       await option(/^Web$/).click();
       await expect.element(status()).toHaveAttribute("data-state", "unchecked");
-      await expect.element(status()).toHaveTextContent("/Users/me/Dropbox/Code/Web");
+      await expect.element(statusPath()).toHaveTextContent("/Users/me/Dropbox/Code/Web");
+      await expect
+        .element(statusLine())
+        .toHaveTextContent("Folder on Mac mini; it's checked when you add it.");
       expect(fake.searchDirectories).not.toHaveBeenCalled();
       expect(fake.pathHints).not.toHaveBeenCalled();
       expect(fake.previewDestination).not.toHaveBeenCalled();
@@ -401,7 +450,7 @@ describe("FolderPicker", () => {
         .element(page.getByText("Couldn't search Mac mini: Search budget exceeded"))
         .toBeVisible();
       await page.getByRole("button", { name: "Try again" }).click();
-      await expect.element(option(/~\/Dropbox\/Code\/Web$/)).toBeVisible();
+      await expect.element(option(/^Web ~\/Dropbox\/Code$/)).toBeVisible();
     } finally {
       await screen.unmount();
     }

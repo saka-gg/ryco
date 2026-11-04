@@ -1,8 +1,12 @@
 import "../../index.css";
 
+import { useEffect, useState } from "react";
+import { page, userEvent } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { Dialog, DialogPopup, DialogTitle } from "./dialog";
+import { Popover, PopoverPopup, PopoverTrigger } from "./popover";
 import { ToastProvider, toastManager } from "./toast";
 
 vi.mock("@tanstack/react-router", () => ({
@@ -89,5 +93,65 @@ describe("semantic toast surfaces", () => {
     expect(loadingStyle.getPropertyValue("--app-toast-tone-strength").trim()).toBe("");
     expect(loading!.querySelectorAll(":scope > .liquid-glass-ring")).toHaveLength(0);
     expect(semanticBackgrounds).not.toContain(loadingStyle.backgroundColor);
+  });
+
+  it("holds a deferrable notice while a dialog or picker is open, not an urgent one", async () => {
+    let setDialogOpen: (open: boolean) => void = () => undefined;
+    function Host() {
+      const [dialogOpen, setOpen] = useState(false);
+      useEffect(() => {
+        setDialogOpen = setOpen;
+      }, []);
+      return (
+        <ToastProvider>
+          <Dialog open={dialogOpen} onOpenChange={setOpen}>
+            <DialogPopup>
+              <DialogTitle>Copy ryco to another node</DialogTitle>
+            </DialogPopup>
+          </Dialog>
+          {/* Below the toasts, which would take its clicks. */}
+          <div className="mt-80">
+            <Popover>
+              <PopoverTrigger>Pick a project</PopoverTrigger>
+              <PopoverPopup>Projects</PopoverPopup>
+            </Popover>
+          </div>
+        </ToastProvider>
+      );
+    }
+    mounted = await render(<Host />);
+    const titles = () =>
+      [...document.querySelectorAll('[data-slot="toast-root"]')].map(
+        (root) => root.querySelector('[data-slot="toast-title"]')?.textContent ?? "",
+      );
+
+    setDialogOpen(true);
+    await expect.element(page.getByRole("dialog")).toBeVisible();
+    toastIds.push(
+      toastManager.add({
+        type: "warning",
+        title: "Updates Available: 2 providers",
+        timeout: 0,
+        data: { deferWhileOverlayOpen: true },
+      }),
+      toastManager.add({ type: "error", title: "The copy failed", timeout: 0 }),
+    );
+    // The urgent toast shows over the dialog; the update notice waits.
+    await vi.waitFor(() => expect(titles()).toEqual(["The copy failed"]));
+
+    // Once the dialog has closed, the notice shows.
+    setDialogOpen(false);
+    await vi.waitFor(() =>
+      expect(titles()).toEqual(["The copy failed", "Updates Available: 2 providers"]),
+    );
+
+    // A picker popup holds it too, until it closes.
+    await page.getByRole("button", { name: "Pick a project" }).click();
+    await expect.element(page.getByText("Projects")).toBeVisible();
+    await vi.waitFor(() => expect(titles()).toEqual(["The copy failed"]));
+    await userEvent.keyboard("{Escape}");
+    await vi.waitFor(() =>
+      expect(titles()).toEqual(["The copy failed", "Updates Available: 2 providers"]),
+    );
   });
 });
