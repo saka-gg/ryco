@@ -14,11 +14,11 @@ export const SITE = {
     "Ryco is a small, practical workspace for AI coding agents: a cross-platform desktop app and a local web CLI, with optional Cloud access to every machine you run it on and an iPhone app on the way.",
   repo: "https://github.com/saka-gg/ryco",
   releases: "https://github.com/saka-gg/ryco/releases",
-  discord: "https://discord.gg/jn4EGJjrvv",
+  discord: "https://discord.com",
   cloud: "https://app.ryco.space",
   cloudHost: "app.ryco.space",
   /** Cloud is an invite-only beta: access requests go through the Discord. */
-  cloudRequestAccess: "https://discord.gg/jn4EGJjrvv",
+  cloudRequestAccess: "https://discord.com",
   npx: "npx ryco-cli",
   license: "MIT",
   company: "Ryco Inc.",
