@@ -4,6 +4,8 @@ import { useDesktopUpdateState } from "../rpc/desktopUpdateAtoms";
 import { toastManager } from "../components/ui/toast";
 import { selectUpdatedNotice, UPDATED_NOTICE_SHOWN_KEY } from "./updatedNotice.logic";
 
+const UPDATED_NOTICE_VISIBLE_MS = 5_000;
+
 function readShownVersion(): string | null {
   try {
     return window.localStorage.getItem(UPDATED_NOTICE_SHOWN_KEY);
@@ -33,7 +35,14 @@ export function DesktopUpdatedNotice() {
   useEffect(() => {
     if (version === null || title === null || description === null) return;
     writeShownVersion(version);
-    toastManager.add({ type: "success", title, description });
+    // Timed while shown, so waiting for an open dialog doesn't use it up.
+    toastManager.add({
+      type: "success",
+      title,
+      description,
+      timeout: 0,
+      data: { deferWhileOverlayOpen: true, dismissAfterVisibleMs: UPDATED_NOTICE_VISIBLE_MS },
+    });
   }, [description, title, version]);
 
   return null;

@@ -4,6 +4,7 @@ import { AlertDialog as AlertDialogPrimitive } from "@base-ui/react/alert-dialog
 
 import { cn } from "~/lib/utils";
 import { SolidButtons } from "~/components/ui/button";
+import { OpenOverlayMarker } from "./overlayPresence";
 import {
   DIALOG_MORPH_POPUP_CLASS_NAME,
   DIALOG_MORPH_PROFILE,
@@ -71,6 +72,7 @@ function AlertDialogPopup({
   const popupRef = useSurfaceMorphRef(morph, ref, { profile: DIALOG_MORPH_PROFILE });
   return (
     <AlertDialogPortal>
+      <OpenOverlayMarker />
       <AlertDialogBackdrop />
       <AlertDialogViewport
         className={cn(

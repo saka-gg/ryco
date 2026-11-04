@@ -30,6 +30,7 @@ import { buttonVariants } from "~/components/ui/button";
 import { useComposerDraftStore } from "~/composerDraftStore";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { resolveThreadRouteTarget } from "~/threadRoutes";
+import { useAnyOverlayOpen } from "./overlayPresence";
 import {
   buildVisibleToastLayout,
   shouldHideCollapsedToastContent,
@@ -43,6 +44,14 @@ export type ThreadToastData = {
   tooltipStyle?: boolean;
   onClose?: (() => void) | undefined;
   dismissAfterVisibleMs?: number;
+  /**
+   * A notice that can wait (an update is available, say): it stays out of
+   * sight while a modal dialog or a picker popup is open, rather than covering
+   * it, and shows once none is. Leave it off for errors and for news about
+   * what the user just did. Time it with `dismissAfterVisibleMs`, not
+   * `timeout`, so it does not run out while it waits.
+   */
+  deferWhileOverlayOpen?: boolean;
   hideCopyButton?: boolean;
   secondaryActionProps?: ComponentPropsWithoutRef<"button">;
   secondaryActionVariant?:
@@ -510,9 +519,12 @@ function ToastProvider({ children, position = "top-center", ...props }: ToastPro
 function Toasts({ position = "top-center" }: { position: ToastPosition }) {
   const { toasts } = Toast.useToastManager<ThreadToastData>();
   const activeThreadRef = useActiveThreadRefFromRoute();
+  const overlayOpen = useAnyOverlayOpen();
   const isTop = position.startsWith("top");
-  const visibleToasts = toasts.filter((toast) =>
-    shouldRenderThreadScopedToast(toast.data, activeThreadRef),
+  const visibleToasts = toasts.filter(
+    (toast) =>
+      !(overlayOpen && toast.data?.deferWhileOverlayOpen) &&
+      shouldRenderThreadScopedToast(toast.data, activeThreadRef),
   );
   const visibleToastLayout = buildVisibleToastLayout(visibleToasts);
 

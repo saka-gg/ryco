@@ -5,6 +5,7 @@ import { XIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { Button, SolidButtons } from "~/components/ui/button";
 import { ScrollArea } from "~/components/ui/scroll-area";
+import { OpenOverlayMarker } from "./overlayPresence";
 import {
   DIALOG_MORPH_POPUP_CLASS_NAME,
   DIALOG_MORPH_PROFILE,
@@ -80,6 +81,7 @@ function DialogPopup({
   const popupRef = useSurfaceMorphRef(morph, ref, { profile: DIALOG_MORPH_PROFILE });
   return (
     <DialogPortal>
+      <OpenOverlayMarker />
       <DialogBackdrop />
       <DialogViewport
         className={cn(

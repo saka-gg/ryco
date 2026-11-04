@@ -3,6 +3,7 @@
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 
 import { cn } from "~/lib/utils";
+import { OpenOverlayMarker } from "./overlayPresence";
 import {
   MORPH_SURFACE_ATTRIBUTE,
   POPOVER_MORPH_POPUP_CLASS_NAME,
@@ -83,6 +84,7 @@ function PopoverPopup({
   });
   return (
     <PopoverPrimitive.Portal>
+      {tooltipStyle ? null : <OpenOverlayMarker />}
       <PopoverPrimitive.Positioner
         align={align}
         alignOffset={alignOffset}
