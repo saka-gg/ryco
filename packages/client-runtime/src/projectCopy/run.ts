@@ -28,6 +28,7 @@ import {
   PROJECT_COPY_MAX_ARTIFACT_BYTES,
   PROJECT_COPY_MAX_AVATAR_BYTES,
   PROJECT_COPY_RELAY_MAX_ARTIFACT_BYTES,
+  PROJECT_EXPORT_INSECURE_CHANNEL_REASON,
   PROJECT_IMPORT_TERMINAL_STATUSES,
   ProjectExportId,
   ProjectImportId,
@@ -539,6 +540,15 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
         throw new CopyFailure("export-failed", `The files can't be sent: ${skipped.reason}.`, null);
       }
       if (skipped.kind === "commits-bundle" && skipped.reason === "nothing unpushed") continue;
+      // The source left only the opted-in ignored files out of the patch (A33): the changes
+      // themselves still come along.
+      if (
+        skipped.kind === "changes-patch" &&
+        skipped.reason === PROJECT_EXPORT_INSECURE_CHANNEL_REASON
+      ) {
+        warnings.push(ignoredFilesLeftOutWarning(sourceLabel));
+        continue;
+      }
       warnings.push(SKIPPED_WARNINGS[skipped.kind](skipped.reason));
     }
     const artifacts: ProjectExportArtifact[] = [];

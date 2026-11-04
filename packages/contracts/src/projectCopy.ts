@@ -459,9 +459,15 @@ export const ProjectExportArtifact = Schema.Struct({
 });
 export type ProjectExportArtifact = typeof ProjectExportArtifact.Type;
 
+/**
+ * The `skipped` reason of a changes patch built without the opted-in ignored files because the
+ * caller's connection is not encrypted (A33). The patch itself is still in `artifacts`.
+ */
+export const PROJECT_EXPORT_INSECURE_CHANNEL_REASON = "insecure-channel";
+
 export const ProjectExportSkippedArtifact = Schema.Struct({
   kind: ProjectExportArtifactKind,
-  /** e.g. "nothing unpushed", "over limit", "conflicts", "insecure-channel". */
+  /** e.g. "nothing unpushed", "over limit", "conflicts", `PROJECT_EXPORT_INSECURE_CHANNEL_REASON`. */
   reason: Schema.String,
 });
 export type ProjectExportSkippedArtifact = typeof ProjectExportSkippedArtifact.Type;

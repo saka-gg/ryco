@@ -3,6 +3,7 @@ import {
   PROJECT_COPY_CHUNK_BYTES,
   PROJECT_COPY_DIRECT_CHUNK_BYTES,
   PROJECT_COPY_RELAY_MAX_ARTIFACT_BYTES,
+  PROJECT_EXPORT_INSECURE_CHANNEL_REASON,
   PROJECT_IMPORT_LIST_MAX,
   type ProjectExportArtifactKind,
   type ProjectExportResult,
@@ -987,6 +988,41 @@ describe("startProjectCopy", () => {
       );
       expectReleased(io);
     }
+  });
+
+  it("says only the ignored files stayed behind when the source left them out of the patch (A33)", async () => {
+    const { source, target, io } = setup();
+    // A source on a plaintext channel builds the patch without them and says so in `skipped`.
+    const exportStart = source.api.projects.exportStart!;
+    (source.api.projects as { exportStart: typeof exportStart }).exportStart = async (input) => {
+      const result = await exportStart({
+        ...input,
+        include: { ...input.include, ignoredPaths: [] },
+      });
+      return input.include.ignoredPaths.length === 0
+        ? result
+        : {
+            ...result,
+            skipped: [
+              ...result.skipped,
+              { kind: "changes-patch", reason: PROJECT_EXPORT_INSECURE_CHANNEL_REASON },
+            ],
+          };
+    };
+    const outcome = await startProjectCopy({
+      io,
+      plan: plan({ choices: { ...plan().choices, ignoredPaths: [".env"] } }),
+    }).done;
+
+    expect(outcome.progress).toMatchObject({ phase: "done", error: null });
+    // The changes still came along, from the one export.
+    expect(source.inputs("exportStart")).toHaveLength(1);
+    expect(target.inputs<ProjectImportStartInput>("importStart")[0]?.changes).not.toBeNull();
+    expect(outcome.project?.warnings).toContain(
+      "The ignored files were not copied: they are only sent over an encrypted connection, and the one to MacBook is not.",
+    );
+    expect(outcome.project?.warnings.join("\n")).not.toContain("Uncommitted changes");
+    expectReleased(io);
   });
 
   it("drops the refused patch's transfer when the export made without the ignored files has no patch", async () => {

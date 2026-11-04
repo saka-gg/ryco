@@ -16,6 +16,7 @@ import nodePath from "node:path";
 
 import {
   PROJECT_COPY_MAX_IGNORED_FILE_BYTES,
+  PROJECT_EXPORT_INSECURE_CHANNEL_REASON,
   ProjectCopyError,
   ProjectCopyRelativePath,
   type ProjectExportPushedState,
@@ -64,7 +65,7 @@ export const PROJECT_EXPORT_SKIP_REASON = {
   sparseCheckout: "sparse checkout",
   noChanges: "no changes",
   overLimit: "over limit",
-  insecureChannel: "insecure-channel",
+  insecureChannel: PROJECT_EXPORT_INSECURE_CHANNEL_REASON,
   noCustomAvatar: "no custom avatar",
 } as const;
 
