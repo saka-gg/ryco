@@ -955,6 +955,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         buildVersion: Option.none(),
         outputDir: Option.some("release-test"),
         skipBuild: Option.some(false),
+        prebuiltJs: Option.some(false),
         keepStage: Option.some(false),
         signed: Option.some(false),
         verbose: Option.some(false),
@@ -966,6 +967,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
             ConfigProvider.fromEnv({
               env: {
                 RYCO_DESKTOP_SKIP_BUILD: "true",
+                RYCO_DESKTOP_PREBUILT_JS: "true",
                 RYCO_DESKTOP_KEEP_STAGE: "true",
                 RYCO_DESKTOP_SIGNED: "true",
                 RYCO_DESKTOP_VERBOSE: "true",
@@ -977,6 +979,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       );
 
       assert.equal(resolved.skipBuild, false);
+      assert.equal(resolved.prebuiltJs, false);
       assert.equal(resolved.keepStage, false);
       assert.equal(resolved.signed, false);
       assert.equal(resolved.verbose, false);
@@ -991,6 +994,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     buildVersion: Option.none(),
     outputDir: Option.some("release-test"),
     skipBuild: Option.none(),
+    prebuiltJs: Option.none(),
     keepStage: Option.none(),
     signed: Option.none(),
     verbose: Option.none(),
@@ -999,6 +1003,20 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   });
   const withEnv = (env: Record<string, string>) =>
     Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env })));
+
+  it.effect("reads the prebuilt-JS mode from the environment", () =>
+    Effect.gen(function* () {
+      const off = yield* resolveBuildOptions(archInput("win", Option.some("arm64"))).pipe(
+        withEnv({}),
+      );
+      assert.equal(off.prebuiltJs, false);
+      const on = yield* resolveBuildOptions(archInput("win", Option.some("arm64"))).pipe(
+        withEnv({ RYCO_DESKTOP_PREBUILT_JS: "true" }),
+      );
+      assert.equal(on.prebuiltJs, true);
+      assert.equal(on.skipBuild, false);
+    }),
+  );
 
   it.effect("builds macOS artifacts for Apple Silicon only", () =>
     Effect.gen(function* () {
