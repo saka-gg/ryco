@@ -1,4 +1,4 @@
-import { WS_METHODS } from "@ryco/contracts";
+import { PROJECT_COPY_WS_METHODS } from "@ryco/contracts";
 import {
   PROJECT_COPY_CHUNK_BYTES,
   PROJECT_COPY_DIRECT_CHUNK_BYTES,
@@ -136,12 +136,12 @@ it.effect("checks access before the service and fails unavailable without one", 
         nodePaths: Option.some(nodePaths),
       }),
     );
-    const denied = yield* failureOf(unary(viewer, WS_METHODS.projectsPathHints)({}));
+    const denied = yield* failureOf(unary(viewer, PROJECT_COPY_WS_METHODS.pathHints)({}));
     expect(denied.tag).toBe("AuthRpcError");
     expect(called).toBe(0);
 
     const bare = makeProjectCopyHandlers(makeContext(directOwner, noServices));
-    const missing = yield* failureOf(unary(bare, WS_METHODS.projectsImportStart)({}));
+    const missing = yield* failureOf(unary(bare, PROJECT_COPY_WS_METHODS.importStart)({}));
     expect(missing).toMatchObject({ tag: "ProjectCopyError", code: "unavailable" });
   }),
 );
@@ -158,7 +158,7 @@ it.effect("tells the export how the caller's bytes travel", () =>
     const services = { ...noServices, projectExport: Option.some(exporter) };
     for (const principal of callers()) {
       const handlers = makeProjectCopyHandlers(makeContext(principal, services));
-      yield* unary(handlers, WS_METHODS.projectsExportStart)(exportInput).pipe(Effect.exit);
+      yield* unary(handlers, PROJECT_COPY_WS_METHODS.exportStart)(exportInput).pipe(Effect.exit);
     }
     expect(requests.map((request) => request.channel)).toEqual([
       "encrypted",
@@ -184,7 +184,7 @@ it.effect("tells the export's chunk reads how the caller's bytes travel", () =>
       const handlers = makeProjectCopyHandlers(makeContext(principal, services));
       yield* unary(
         handlers,
-        WS_METHODS.projectsExportReadChunk,
+        PROJECT_COPY_WS_METHODS.exportReadChunk,
       )({ exportId: exportInput.exportId, artifactId: "artifact", offset: 0, length: 1 }).pipe(
         Effect.exit,
       );
@@ -210,7 +210,7 @@ it.effect("tells the destination's transfer begins and appends how the caller's 
       const handlers = makeProjectCopyHandlers(makeContext(principal, services));
       yield* unary(
         handlers,
-        WS_METHODS.projectsTransferBegin,
+        PROJECT_COPY_WS_METHODS.transferBegin,
       )({
         transferId,
         purpose: "changes-patch",
@@ -220,7 +220,7 @@ it.effect("tells the destination's transfer begins and appends how the caller's 
       }).pipe(Effect.exit);
       yield* unary(
         handlers,
-        WS_METHODS.projectsTransferAppend,
+        PROJECT_COPY_WS_METHODS.transferAppend,
       )({ transferId, offset: 0, dataBase64: "AA==" }).pipe(Effect.exit);
     }
     expect(channels).toEqual([
@@ -288,22 +288,22 @@ it.effect("lets only a direct caller move 1 MiB chunks; the relay keeps 160 KiB"
       relayRpcPrincipal("owner", "relay-e2ee", undefined, () => true),
     ]) {
       const handlers = makeProjectCopyHandlers(makeContext(principal, services));
-      yield* unary(handlers, WS_METHODS.projectsExportStart)(exportInput).pipe(Effect.exit);
+      yield* unary(handlers, PROJECT_COPY_WS_METHODS.exportStart)(exportInput).pipe(Effect.exit);
       yield* unary(
         handlers,
-        WS_METHODS.projectsExportReadChunk,
+        PROJECT_COPY_WS_METHODS.exportReadChunk,
       )({ exportId: exportInput.exportId, artifactId: "artifact", offset: 0, length: 1 }).pipe(
         Effect.exit,
       );
       yield* unary(
         handlers,
-        WS_METHODS.projectsTransferBegin,
+        PROJECT_COPY_WS_METHODS.transferBegin,
       )({ transferId, purpose: "changes-patch", byteLength: 1, sha256: "0".repeat(64) }).pipe(
         Effect.exit,
       );
       yield* unary(
         handlers,
-        WS_METHODS.projectsTransferAppend,
+        PROJECT_COPY_WS_METHODS.transferAppend,
       )({ transferId, offset: 0, dataBase64: "AA==" }).pipe(Effect.exit);
     }
     const direct = PROJECT_COPY_DIRECT_CHUNK_BYTES;

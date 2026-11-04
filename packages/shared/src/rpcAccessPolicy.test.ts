@@ -5,6 +5,7 @@ import {
   CONTEXT_HANDOFF_WS_METHODS,
   DEVICE_WS_METHODS,
   ORCHESTRATION_WS_METHODS,
+  PROJECT_COPY_WS_METHODS,
   WS_METHODS,
 } from "@ryco/contracts";
 import { NODE_BROWSER_WS_METHODS } from "@ryco/contracts/node-browser";
@@ -68,6 +69,7 @@ describe("shared RPC access policy", () => {
     expect(new Set(Object.keys(RPC_ACCESS_POLICY))).toEqual(
       new Set([
         ...Object.values(WS_METHODS),
+        ...Object.values(PROJECT_COPY_WS_METHODS),
         ...Object.values(ORCHESTRATION_WS_METHODS),
         ...Object.values(CONTEXT_HANDOFF_WS_METHODS),
         ...Object.values(DEVICE_WS_METHODS),
@@ -239,28 +241,28 @@ describe("shared RPC access policy", () => {
 
   it("keeps project copy at the operator tier and never receipted", () => {
     const reads = [
-      WS_METHODS.projectsPathHints,
-      WS_METHODS.projectsExportInspect,
-      WS_METHODS.filesystemSearchDirectories,
-      WS_METHODS.projectsPreviewDestination,
-      WS_METHODS.projectsCheckRemoteAccess,
-      WS_METHODS.projectsExportReadChunk,
-      WS_METHODS.projectsSubscribeImport,
-      WS_METHODS.projectsListImports,
+      PROJECT_COPY_WS_METHODS.pathHints,
+      PROJECT_COPY_WS_METHODS.exportInspect,
+      PROJECT_COPY_WS_METHODS.searchDirectories,
+      PROJECT_COPY_WS_METHODS.previewDestination,
+      PROJECT_COPY_WS_METHODS.checkRemoteAccess,
+      PROJECT_COPY_WS_METHODS.exportReadChunk,
+      PROJECT_COPY_WS_METHODS.subscribeImport,
+      PROJECT_COPY_WS_METHODS.listImports,
     ];
     // Idempotent by client-minted id or offset, so a dropped one is harmless.
     const idempotentScratch = [
-      WS_METHODS.projectsExportStart,
-      WS_METHODS.projectsExportDispose,
-      WS_METHODS.projectsTransferBegin,
-      WS_METHODS.projectsTransferAppend,
-      WS_METHODS.projectsTransferCommit,
-      WS_METHODS.projectsTransferAbort,
+      PROJECT_COPY_WS_METHODS.exportStart,
+      PROJECT_COPY_WS_METHODS.exportDispose,
+      PROJECT_COPY_WS_METHODS.transferBegin,
+      PROJECT_COPY_WS_METHODS.transferAppend,
+      PROJECT_COPY_WS_METHODS.transferCommit,
+      PROJECT_COPY_WS_METHODS.transferAbort,
     ];
     const mutations = [
-      WS_METHODS.projectsImportStart,
-      WS_METHODS.projectsCancelImport,
-      WS_METHODS.projectsDiscardImport,
+      PROJECT_COPY_WS_METHODS.importStart,
+      PROJECT_COPY_WS_METHODS.cancelImport,
+      PROJECT_COPY_WS_METHODS.discardImport,
     ];
     for (const method of [...reads, ...idempotentScratch, ...mutations]) {
       expect(rpcAccessFor(method)).toBe("operator");

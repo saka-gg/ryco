@@ -5,6 +5,7 @@ import {
   CONTEXT_HANDOFF_WS_METHODS,
   DEVICE_WS_METHODS,
   ORCHESTRATION_WS_METHODS,
+  PROJECT_COPY_WS_METHODS,
   WS_METHODS,
 } from "@ryco/contracts";
 import { NODE_BROWSER_WS_METHODS } from "@ryco/contracts/node-browser";
@@ -15,6 +16,7 @@ describe("RPC access policy", () => {
   it("classifies every public RPC method exactly once and fails closed for unknown methods", () => {
     const contractMethods = new Set([
       ...Object.values(WS_METHODS),
+      ...Object.values(PROJECT_COPY_WS_METHODS),
       ...Object.values(ORCHESTRATION_WS_METHODS),
       ...Object.values(CONTEXT_HANDOFF_WS_METHODS),
       ...Object.values(DEVICE_WS_METHODS),

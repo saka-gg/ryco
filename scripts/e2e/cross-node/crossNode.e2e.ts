@@ -18,6 +18,7 @@ import {
   EnvironmentId,
   ORCHESTRATION_WS_METHODS,
   type OrchestrationProjectShell,
+  PROJECT_COPY_WS_METHODS,
   ProjectId,
   WS_METHODS,
 } from "@ryco/contracts";
@@ -268,7 +269,7 @@ const transferArtifact = async (exportId: ProjectExportId, artifact: ProjectExpo
   const transferId = ProjectTransferId.make(randomUUID());
   const begun = await call(
     `node B transferBegin(${artifact.kind})`,
-    nodeB.client[WS_METHODS.projectsTransferBegin]({
+    nodeB.client[PROJECT_COPY_WS_METHODS.transferBegin]({
       transferId,
       purpose: artifact.kind,
       byteLength: artifact.byteLength,
@@ -288,7 +289,7 @@ const transferArtifact = async (exportId: ProjectExportId, artifact: ProjectExpo
   while (offset < artifact.byteLength) {
     const chunk = await call(
       `node A exportReadChunk(${artifact.kind} @${offset})`,
-      nodeA.client[WS_METHODS.projectsExportReadChunk]({
+      nodeA.client[PROJECT_COPY_WS_METHODS.exportReadChunk]({
         exportId,
         artifactId: artifact.artifactId,
         offset,
@@ -299,7 +300,7 @@ const transferArtifact = async (exportId: ProjectExportId, artifact: ProjectExpo
     expect(chunk.length).toBeGreaterThan(0);
     const progress = await call(
       `node B transferAppend(${artifact.kind} @${offset})`,
-      nodeB.client[WS_METHODS.projectsTransferAppend]({
+      nodeB.client[PROJECT_COPY_WS_METHODS.transferAppend]({
         transferId,
         offset,
         dataBase64: chunk.dataBase64,
@@ -313,12 +314,12 @@ const transferArtifact = async (exportId: ProjectExportId, artifact: ProjectExpo
   if (last === null) throw new Error(`Artifact ${artifact.kind} is empty.`);
   const repeated = await call(
     `node B transferAppend(${artifact.kind} @${last.offset}, repeated)`,
-    nodeB.client[WS_METHODS.projectsTransferAppend]({ transferId, ...last }),
+    nodeB.client[PROJECT_COPY_WS_METHODS.transferAppend]({ transferId, ...last }),
   );
   expect(repeated.receivedBytes).toBe(artifact.byteLength);
   const committed = await call(
     `node B transferCommit(${artifact.kind})`,
-    nodeB.client[WS_METHODS.projectsTransferCommit]({ transferId }),
+    nodeB.client[PROJECT_COPY_WS_METHODS.transferCommit]({ transferId }),
   );
   expect(committed).toEqual({
     transferId,
@@ -353,14 +354,14 @@ const withExportOnA = async <A>(
   const exportId = ProjectExportId.make(randomUUID());
   const exported = await call(
     "node A exportStart",
-    nodeA.client[WS_METHODS.projectsExportStart]({ exportId, projectId, include }),
+    nodeA.client[PROJECT_COPY_WS_METHODS.exportStart]({ exportId, projectId, include }),
   );
   try {
     return await body(exportId, exported);
   } finally {
     await call(
       "node A exportDispose",
-      nodeA.client[WS_METHODS.projectsExportDispose]({ exportId }),
+      nodeA.client[PROJECT_COPY_WS_METHODS.exportDispose]({ exportId }),
     ).catch(() => undefined);
   }
 };
@@ -372,7 +373,7 @@ const followImportOnB = async (
 ): Promise<ProjectImportSnapshot> => {
   const last = await call(
     "node B subscribeImport",
-    harness.nodeB.client[WS_METHODS.projectsSubscribeImport]({ importId }).pipe(
+    harness.nodeB.client[PROJECT_COPY_WS_METHODS.subscribeImport]({ importId }).pipe(
       Stream.takeUntil(
         (snapshot) => until(snapshot) || PROJECT_IMPORT_TERMINAL_STATUSES.includes(snapshot.status),
       ),
@@ -392,12 +393,12 @@ const importOnB = async (input: ProjectImportStartInput): Promise<ProjectImportS
   const { nodeB } = harness;
   const started = await call(
     "node B importStart",
-    nodeB.client[WS_METHODS.projectsImportStart](input),
+    nodeB.client[PROJECT_COPY_WS_METHODS.importStart](input),
   );
   expect(started.importId).toBe(input.importId);
   const repeated = await call(
     "node B importStart (repeated)",
-    nodeB.client[WS_METHODS.projectsImportStart](input),
+    nodeB.client[PROJECT_COPY_WS_METHODS.importStart](input),
   );
   expect(repeated.importId).toBe(input.importId);
   return followImportOnB(input.importId);
@@ -453,7 +454,7 @@ const copyProjectToB = async (input: {
 
   const inspection = await call(
     "node A exportInspect",
-    nodeA.client[WS_METHODS.projectsExportInspect]({ projectId: fixture.projectId }),
+    nodeA.client[PROJECT_COPY_WS_METHODS.exportInspect]({ projectId: fixture.projectId }),
   );
   expect(inspection.repository).toMatchObject({
     isGitRepository: true,
@@ -478,18 +479,18 @@ const copyProjectToB = async (input: {
   });
 
   // Where the dialog would put it on B, and whether B can reach the origin itself.
-  const hints = await call("node B pathHints", nodeB.client[WS_METHODS.projectsPathHints]({}));
+  const hints = await call("node B pathHints", nodeB.client[PROJECT_COPY_WS_METHODS.pathHints]({}));
   expect(hints.defaultProjectDirectory).toBe(CONTAINER_CODE_DIRECTORY);
   const preview = await call(
     "node B previewDestination",
-    nodeB.client[WS_METHODS.projectsPreviewDestination]({
+    nodeB.client[PROJECT_COPY_WS_METHODS.previewDestination]({
       path: `${hints.defaultProjectDirectory}/${input.name}`,
     }),
   );
   expect(preview.state).toBe("available");
   const access = await call(
     "node B checkRemoteAccess",
-    nodeB.client[WS_METHODS.projectsCheckRemoteAccess]({ remoteUrl: fixture.originUrl }),
+    nodeB.client[PROJECT_COPY_WS_METHODS.checkRemoteAccess]({ remoteUrl: fixture.originUrl }),
   );
   expect(access).toMatchObject({ reachable: true, alternateRemoteUrl: null });
 
@@ -604,7 +605,7 @@ const expectCopiedCheckout = async (outcome: CopyOutcome) => {
 const expectListedOnB = async (importId: ProjectImportId, status: ProjectImportStatus) => {
   const listed = await call(
     "node B listImports",
-    harness.nodeB.client[WS_METHODS.projectsListImports]({}),
+    harness.nodeB.client[PROJECT_COPY_WS_METHODS.listImports]({}),
   );
   expect(listed.imports.find((entry) => entry.importId === importId)?.status).toBe(status);
 };
@@ -644,10 +645,16 @@ const planCopyWithCoordinator = async (input: {
   const { nodeA, nodeB } = harness;
   const inspection = await call(
     "node A exportInspect",
-    nodeA.client[WS_METHODS.projectsExportInspect]({ projectId: input.projectId }),
+    nodeA.client[PROJECT_COPY_WS_METHODS.exportInspect]({ projectId: input.projectId }),
   );
-  const hintsA = await call("node A pathHints", nodeA.client[WS_METHODS.projectsPathHints]({}));
-  const hintsB = await call("node B pathHints", nodeB.client[WS_METHODS.projectsPathHints]({}));
+  const hintsA = await call(
+    "node A pathHints",
+    nodeA.client[PROJECT_COPY_WS_METHODS.pathHints]({}),
+  );
+  const hintsB = await call(
+    "node B pathHints",
+    nodeB.client[PROJECT_COPY_WS_METHODS.pathHints]({}),
+  );
   const source: ProjectCopySourceFacts = {
     kind: "inspected",
     environmentId: EnvironmentId.make(nodeA.remote.environmentId),
@@ -669,7 +676,7 @@ const planCopyWithCoordinator = async (input: {
       preview: (previewInput) =>
         call(
           "node B previewDestination",
-          nodeB.client[WS_METHODS.projectsPreviewDestination](previewInput),
+          nodeB.client[PROJECT_COPY_WS_METHODS.previewDestination](previewInput),
         ),
       sourceCanonicalKey: inspection.repository.canonicalKey,
     },
@@ -681,7 +688,7 @@ const planCopyWithCoordinator = async (input: {
     input.checkRemote && cloneRemote !== undefined
       ? await call(
           "node B checkRemoteAccess",
-          nodeB.client[WS_METHODS.projectsCheckRemoteAccess]({ remoteUrl: cloneRemote.url }),
+          nodeB.client[PROJECT_COPY_WS_METHODS.checkRemoteAccess]({ remoteUrl: cloneRemote.url }),
         )
       : null;
   const target: ProjectCopyTargetFacts = {
@@ -833,7 +840,7 @@ describe("cross-node project copy (node A on this machine, node B in Docker)", (
       });
       const inspection = await call(
         "node A exportInspect",
-        nodeA.client[WS_METHODS.projectsExportInspect]({ projectId }),
+        nodeA.client[PROJECT_COPY_WS_METHODS.exportInspect]({ projectId }),
       );
       expect(inspection.settings.relativeRootInRepository).toBe("src");
       expect(inspection.repository).toMatchObject({
@@ -914,14 +921,14 @@ describe("cross-node project copy (node A on this machine, node B in Docker)", (
     // The dialog's remote check: B cannot resolve the origin's host, and no other form works.
     const access = await call(
       "node B checkRemoteAccess",
-      nodeB.client[WS_METHODS.projectsCheckRemoteAccess]({ remoteUrl: lan.originUrl }),
+      nodeB.client[PROJECT_COPY_WS_METHODS.checkRemoteAccess]({ remoteUrl: lan.originUrl }),
     );
     expect(access).toMatchObject({ reachable: false, alternateRemoteUrl: null });
     expect(access.detail).toContain(`Could not resolve hostname ${LAN_ONLY_HOST}`);
 
     const inspection = await call(
       "node A exportInspect",
-      nodeA.client[WS_METHODS.projectsExportInspect]({ projectId: lan.projectId }),
+      nodeA.client[PROJECT_COPY_WS_METHODS.exportInspect]({ projectId: lan.projectId }),
     );
     expect(inspection.repository).toMatchObject({
       branch: lan.branch,
@@ -1028,7 +1035,7 @@ describe("cross-node project copy (node A on this machine, node B in Docker)", (
       const { nodeA, nodeB, fixture } = harness;
       const inspection = await call(
         "node A exportInspect",
-        nodeA.client[WS_METHODS.projectsExportInspect]({ projectId: fixture.projectId }),
+        nodeA.client[PROJECT_COPY_WS_METHODS.exportInspect]({ projectId: fixture.projectId }),
       );
       const canonicalKey = inspection.repository.canonicalKey;
       expect(canonicalKey).not.toBeNull();
@@ -1071,7 +1078,7 @@ describe("cross-node project copy (node A on this machine, node B in Docker)", (
       ]);
       const preview = await call(
         "node B previewDestination",
-        nodeB.client[WS_METHODS.projectsPreviewDestination]({ path: destination }),
+        nodeB.client[PROJECT_COPY_WS_METHODS.previewDestination]({ path: destination }),
       );
       expect(preview).toMatchObject({
         state: "is-git-repository",
@@ -1124,7 +1131,7 @@ describe("cross-node project copy (node A on this machine, node B in Docker)", (
       // Linked once: the folder is now that project's.
       const again = await call(
         "node B previewDestination (after link)",
-        nodeB.client[WS_METHODS.projectsPreviewDestination]({ path: destination }),
+        nodeB.client[PROJECT_COPY_WS_METHODS.previewDestination]({ path: destination }),
       );
       expect(again.existingProjectId).toBe(link.projectId);
     },
@@ -1146,7 +1153,7 @@ describe("cross-node project copy (node A on this machine, node B in Docker)", (
     const staging = stagingPathOf(destination, input.importId);
     const started = await call(
       "node B importStart",
-      nodeB.client[WS_METHODS.projectsImportStart](input),
+      nodeB.client[PROJECT_COPY_WS_METHODS.importStart](input),
     );
     expect(started.importId).toBe(input.importId);
     const cloning = await followImportOnB(
@@ -1160,7 +1167,7 @@ describe("cross-node project copy (node A on this machine, node B in Docker)", (
 
     const cancelled = await call(
       "node B cancelImport",
-      nodeB.client[WS_METHODS.projectsCancelImport]({ importId: input.importId }),
+      nodeB.client[PROJECT_COPY_WS_METHODS.cancelImport]({ importId: input.importId }),
     );
     expect(cancelled.status, describeImport(cancelled)).toBe("cancelled");
     expect(cancelled.error).toMatchObject({ step: "clone", code: "cancelled" });
@@ -1340,7 +1347,7 @@ describe("cross-node project copy (node A on this machine, node B in Docker)", (
         },
       });
       const staging = stagingPathOf(destination, input.importId);
-      await call("node B importStart", nodeB.client[WS_METHODS.projectsImportStart](input));
+      await call("node B importStart", nodeB.client[PROJECT_COPY_WS_METHODS.importStart](input));
       await followImportOnB(
         input.importId,
         (snapshot) => stepStatuses(snapshot).clone === "running",
@@ -1361,7 +1368,7 @@ describe("cross-node project copy (node A on this machine, node B in Docker)", (
         async () => {
           const listed = await call(
             "node B listImports",
-            nodeB.client[WS_METHODS.projectsListImports]({}),
+            nodeB.client[PROJECT_COPY_WS_METHODS.listImports]({}),
           );
           const entry = listed.imports.find((item) => item.importId === input.importId);
           return (
@@ -1384,7 +1391,7 @@ describe("cross-node project copy (node A on this machine, node B in Docker)", (
       // Nothing is left for "Discard leftover".
       const discarded = await call(
         "node B discardImport",
-        nodeB.client[WS_METHODS.projectsDiscardImport]({ importId: input.importId }),
+        nodeB.client[PROJECT_COPY_WS_METHODS.discardImport]({ importId: input.importId }),
       );
       expect(discarded.deleted).toBe(false);
       await expectNoCopyScratch();

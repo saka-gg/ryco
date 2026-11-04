@@ -123,10 +123,6 @@ import {
   AgentControlProposalQueueView,
   AgentControlProposalReceiptView,
   AgentControlProposalStreamEventView,
-  AgentControlPublishNodeDirectoryInput,
-  AgentControlPublishNodeDirectoryResult,
-  AgentControlReportClientExecutionInput,
-  AgentControlReportClientExecutionResult,
   AgentControlSubscribeProposalsInput,
   AgentControlRpcError,
   AgentControlExternalIntegrationCreateInput,
@@ -514,26 +510,6 @@ export const WS_METHODS = {
   projectsWriteFile: "projects.writeFile",
   projectsSubscribeFileChanges: "projects.subscribeFileChanges",
   projectsStageFileReference: "projects.stageFileReference",
-
-  // Cross-node project copy (announced by `capabilities.projectCopy`); their RPCs are
-  // `WsProjectCopyRpcGroup` in `@ryco/contracts/project-copy-rpc`.
-  projectsPathHints: "projects.pathHints",
-  filesystemSearchDirectories: "filesystem.searchDirectories",
-  projectsPreviewDestination: "projects.previewDestination",
-  projectsCheckRemoteAccess: "projects.checkRemoteAccess",
-  projectsExportInspect: "projects.exportInspect",
-  projectsExportStart: "projects.exportStart",
-  projectsExportReadChunk: "projects.exportReadChunk",
-  projectsExportDispose: "projects.exportDispose",
-  projectsTransferBegin: "projects.transferBegin",
-  projectsTransferAppend: "projects.transferAppend",
-  projectsTransferCommit: "projects.transferCommit",
-  projectsTransferAbort: "projects.transferAbort",
-  projectsImportStart: "projects.importStart",
-  projectsSubscribeImport: "projects.subscribeImport",
-  projectsCancelImport: "projects.cancelImport",
-  projectsListImports: "projects.listImports",
-  projectsDiscardImport: "projects.discardImport",
 
   // Chat attachment methods
   chatAttachmentsCreateFileUpload: "chatAttachments.createFileUpload",
@@ -2674,24 +2650,6 @@ export const WsAgentControlSubscribeProposalsRpc = Rpc.make(
   },
 );
 
-export const WsAgentControlReportClientExecutionRpc = Rpc.make(
-  AGENT_CONTROL_WS_METHODS.reportClientExecution,
-  {
-    payload: AgentControlReportClientExecutionInput,
-    success: AgentControlReportClientExecutionResult,
-    error: Schema.Union([AgentControlRpcError, AuthRpcError]),
-  },
-);
-
-export const WsAgentControlPublishNodeDirectoryRpc = Rpc.make(
-  AGENT_CONTROL_WS_METHODS.publishNodeDirectory,
-  {
-    payload: AgentControlPublishNodeDirectoryInput,
-    success: AgentControlPublishNodeDirectoryResult,
-    error: Schema.Union([AgentControlRpcError, AuthRpcError]),
-  },
-);
-
 export const WsAgentControlListIntegrationsRpc = Rpc.make(
   AGENT_CONTROL_WS_METHODS.listIntegrations,
   {
@@ -2995,8 +2953,6 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsAgentControlAcceptProposalRpc
   | typeof WsAgentControlRejectProposalRpc
   | typeof WsAgentControlSubscribeProposalsRpc
-  | typeof WsAgentControlReportClientExecutionRpc
-  | typeof WsAgentControlPublishNodeDirectoryRpc
   | typeof WsAgentControlListIntegrationsRpc
   | typeof WsAgentControlCreateIntegrationRpc
   | typeof WsAgentControlUpdateIntegrationRpc
@@ -3241,8 +3197,6 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsAgentControlAcceptProposalRpc,
   WsAgentControlRejectProposalRpc,
   WsAgentControlSubscribeProposalsRpc,
-  WsAgentControlReportClientExecutionRpc,
-  WsAgentControlPublishNodeDirectoryRpc,
   WsAgentControlListIntegrationsRpc,
   WsAgentControlCreateIntegrationRpc,
   WsAgentControlUpdateIntegrationRpc,

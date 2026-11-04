@@ -6,10 +6,12 @@ import {
   CONTEXT_HANDOFF_WS_METHODS,
   ORCHESTRATION_WS_METHODS,
 } from "@ryco/contracts/orchestration";
+import { PROJECT_COPY_WS_METHODS } from "@ryco/contracts/project-copy-methods";
 import { WS_METHODS } from "@ryco/contracts/rpc";
 
 export type RpcMethod =
   | (typeof WS_METHODS)[keyof typeof WS_METHODS]
+  | (typeof PROJECT_COPY_WS_METHODS)[keyof typeof PROJECT_COPY_WS_METHODS]
   | (typeof ORCHESTRATION_WS_METHODS)[keyof typeof ORCHESTRATION_WS_METHODS]
   | (typeof CONTEXT_HANDOFF_WS_METHODS)[keyof typeof CONTEXT_HANDOFF_WS_METHODS]
   | (typeof DEVICE_WS_METHODS)[keyof typeof DEVICE_WS_METHODS]
@@ -156,23 +158,23 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.projectsWriteFile]: "operator",
   // Cross-node project copy: node paths and folder search like filesystemBrowse, repository
   // content like projectsReadFile, and the import creates a project like projectsAdd.
-  [WS_METHODS.projectsPathHints]: "operator",
-  [WS_METHODS.filesystemSearchDirectories]: "operator",
-  [WS_METHODS.projectsPreviewDestination]: "operator",
-  [WS_METHODS.projectsCheckRemoteAccess]: "operator",
-  [WS_METHODS.projectsExportInspect]: "operator",
-  [WS_METHODS.projectsExportStart]: "operator",
-  [WS_METHODS.projectsExportReadChunk]: "operator",
-  [WS_METHODS.projectsExportDispose]: "operator",
-  [WS_METHODS.projectsTransferBegin]: "operator",
-  [WS_METHODS.projectsTransferAppend]: "operator",
-  [WS_METHODS.projectsTransferCommit]: "operator",
-  [WS_METHODS.projectsTransferAbort]: "operator",
-  [WS_METHODS.projectsImportStart]: "operator",
-  [WS_METHODS.projectsSubscribeImport]: "operator",
-  [WS_METHODS.projectsCancelImport]: "operator",
-  [WS_METHODS.projectsListImports]: "operator",
-  [WS_METHODS.projectsDiscardImport]: "operator",
+  [PROJECT_COPY_WS_METHODS.pathHints]: "operator",
+  [PROJECT_COPY_WS_METHODS.searchDirectories]: "operator",
+  [PROJECT_COPY_WS_METHODS.previewDestination]: "operator",
+  [PROJECT_COPY_WS_METHODS.checkRemoteAccess]: "operator",
+  [PROJECT_COPY_WS_METHODS.exportInspect]: "operator",
+  [PROJECT_COPY_WS_METHODS.exportStart]: "operator",
+  [PROJECT_COPY_WS_METHODS.exportReadChunk]: "operator",
+  [PROJECT_COPY_WS_METHODS.exportDispose]: "operator",
+  [PROJECT_COPY_WS_METHODS.transferBegin]: "operator",
+  [PROJECT_COPY_WS_METHODS.transferAppend]: "operator",
+  [PROJECT_COPY_WS_METHODS.transferCommit]: "operator",
+  [PROJECT_COPY_WS_METHODS.transferAbort]: "operator",
+  [PROJECT_COPY_WS_METHODS.importStart]: "operator",
+  [PROJECT_COPY_WS_METHODS.subscribeImport]: "operator",
+  [PROJECT_COPY_WS_METHODS.cancelImport]: "operator",
+  [PROJECT_COPY_WS_METHODS.listImports]: "operator",
+  [PROJECT_COPY_WS_METHODS.discardImport]: "operator",
   [WS_METHODS.serverCheckOpinionatedPlugins]: "owner",
   [WS_METHODS.serverDiscoverSourceControl]: "owner",
   [WS_METHODS.serverGetAdvertisedEndpoints]: "viewer",
@@ -482,28 +484,28 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.projectsWriteFile]: "mutation",
   // Cross-node project copy. Never `receipted`: only orchestration.dispatchCommand is
   // replayed, so a receipted method a relay drops would be neither tracked nor replayed.
-  [WS_METHODS.projectsPathHints]: "read",
-  [WS_METHODS.filesystemSearchDirectories]: "read",
-  [WS_METHODS.projectsPreviewDestination]: "read",
-  [WS_METHODS.projectsCheckRemoteAccess]: "read",
-  [WS_METHODS.projectsExportInspect]: "read",
-  [WS_METHODS.projectsExportReadChunk]: "read",
-  [WS_METHODS.projectsSubscribeImport]: "read",
-  [WS_METHODS.projectsListImports]: "read",
+  [PROJECT_COPY_WS_METHODS.pathHints]: "read",
+  [PROJECT_COPY_WS_METHODS.searchDirectories]: "read",
+  [PROJECT_COPY_WS_METHODS.previewDestination]: "read",
+  [PROJECT_COPY_WS_METHODS.checkRemoteAccess]: "read",
+  [PROJECT_COPY_WS_METHODS.exportInspect]: "read",
+  [PROJECT_COPY_WS_METHODS.exportReadChunk]: "read",
+  [PROJECT_COPY_WS_METHODS.subscribeImport]: "read",
+  [PROJECT_COPY_WS_METHODS.listImports]: "read",
   // Idempotent by client-minted id/offset; scratch state expires on its own TTL
   // (like providerPrewarmSession and vcsPrefetchWorktreeBase). A copy makes about
   // 1,600 chunk calls, so a dropped one must not leave the session delivery-unknown.
-  [WS_METHODS.projectsExportStart]: "read",
-  [WS_METHODS.projectsExportDispose]: "read",
-  [WS_METHODS.projectsTransferBegin]: "read",
-  [WS_METHODS.projectsTransferAppend]: "read",
-  [WS_METHODS.projectsTransferCommit]: "read",
-  [WS_METHODS.projectsTransferAbort]: "read",
+  [PROJECT_COPY_WS_METHODS.exportStart]: "read",
+  [PROJECT_COPY_WS_METHODS.exportDispose]: "read",
+  [PROJECT_COPY_WS_METHODS.transferBegin]: "read",
+  [PROJECT_COPY_WS_METHODS.transferAppend]: "read",
+  [PROJECT_COPY_WS_METHODS.transferCommit]: "read",
+  [PROJECT_COPY_WS_METHODS.transferAbort]: "read",
   // After a dropped importStart the client reads subscribeImport and resends the same
   // id and input only when the node does not know the import.
-  [WS_METHODS.projectsImportStart]: "mutation",
-  [WS_METHODS.projectsCancelImport]: "mutation",
-  [WS_METHODS.projectsDiscardImport]: "mutation",
+  [PROJECT_COPY_WS_METHODS.importStart]: "mutation",
+  [PROJECT_COPY_WS_METHODS.cancelImport]: "mutation",
+  [PROJECT_COPY_WS_METHODS.discardImport]: "mutation",
   [WS_METHODS.serverCheckOpinionatedPlugins]: "read",
   [WS_METHODS.serverDiscoverSourceControl]: "read",
   [WS_METHODS.serverGetAdvertisedEndpoints]: "read",

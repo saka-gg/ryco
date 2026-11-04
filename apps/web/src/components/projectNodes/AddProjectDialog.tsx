@@ -21,6 +21,7 @@ import type { AcquiredNode, NodeCatalogEntry } from "@ryco/client-runtime/state/
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
 import {
   ORCHESTRATION_WS_METHODS,
+  PROJECT_COPY_WS_METHODS,
   WS_METHODS,
   type EnvironmentId,
   type ScopedProjectRef,
@@ -954,7 +955,7 @@ function AddProjectFlow(props: {
     kind === "folder"
       ? ORCHESTRATION_WS_METHODS.dispatchCommand
       : kind === "link" || importSupported
-        ? WS_METHODS.projectsImportStart
+        ? PROJECT_COPY_WS_METHODS.importStart
         : WS_METHODS.sourceControlCloneRepository;
   const writeCapability = useHostedRpcCapability(writeMethod, nodeId);
 

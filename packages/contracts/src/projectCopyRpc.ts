@@ -1,8 +1,12 @@
 /**
  * The cross-node project copy RPCs: reads and scratch transfers on either node,
  * the durable import job on the destination. A node announces them with
- * `ExecutionEnvironmentCapabilities.projectCopy`; their method names stay in
- * `WS_METHODS`.
+ * `ExecutionEnvironmentCapabilities.projectCopy`; their method names are
+ * `PROJECT_COPY_WS_METHODS` (`@ryco/contracts/project-copy-methods`).
+ *
+ * The group also carries the two Agent Control RPCs only cross-node copy uses:
+ * the client-executed copy's reports and the node directory owner clients
+ * publish (`agentControlProjectCopy.ts`).
  *
  * They are a group of their own so the app's boot never loads their schemas:
  * the server merges `WsProjectCopyRpcGroup` into what it serves (`WsNodeRpcGroup`)
@@ -17,6 +21,13 @@ import * as Schema from "effect/Schema";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
 
+import { AGENT_CONTROL_WS_METHODS, AgentControlRpcError } from "./agentControl.ts";
+import {
+  AgentControlPublishNodeDirectoryInput,
+  AgentControlPublishNodeDirectoryResult,
+  AgentControlReportClientExecutionInput,
+  AgentControlReportClientExecutionResult,
+} from "./agentControlProjectCopy.ts";
 import { AuthRpcError } from "./auth.ts";
 import {
   FilesystemSearchDirectoriesInput,
@@ -50,112 +61,137 @@ import {
   ProjectTransferCommitResult,
   ProjectTransferProgress,
 } from "./projectCopy.ts";
-import { EmptyRpcResult, WS_METHODS, WsHostedRpcGroup, WsRpcGroup } from "./rpc.ts";
+import { PROJECT_COPY_WS_METHODS } from "./projectCopyMethods.ts";
+import { EmptyRpcResult, WsHostedRpcGroup, WsRpcGroup } from "./rpc.ts";
 
 const ProjectCopyRpcError = Schema.Union([ProjectCopyError, AuthRpcError]);
 
-export const WsProjectsPathHintsRpc = Rpc.make(WS_METHODS.projectsPathHints, {
+export const WsProjectsPathHintsRpc = Rpc.make(PROJECT_COPY_WS_METHODS.pathHints, {
   payload: NodePathHintsInput,
   success: NodePathHints,
   error: ProjectCopyRpcError,
 });
 
-export const WsFilesystemSearchDirectoriesRpc = Rpc.make(WS_METHODS.filesystemSearchDirectories, {
-  payload: FilesystemSearchDirectoriesInput,
-  success: FilesystemSearchDirectoriesResult,
-  error: ProjectCopyRpcError,
-});
+export const WsFilesystemSearchDirectoriesRpc = Rpc.make(
+  PROJECT_COPY_WS_METHODS.searchDirectories,
+  {
+    payload: FilesystemSearchDirectoriesInput,
+    success: FilesystemSearchDirectoriesResult,
+    error: ProjectCopyRpcError,
+  },
+);
 
-export const WsProjectsPreviewDestinationRpc = Rpc.make(WS_METHODS.projectsPreviewDestination, {
-  payload: ProjectDestinationPreviewInput,
-  success: ProjectDestinationPreview,
-  error: ProjectCopyRpcError,
-});
+export const WsProjectsPreviewDestinationRpc = Rpc.make(
+  PROJECT_COPY_WS_METHODS.previewDestination,
+  {
+    payload: ProjectDestinationPreviewInput,
+    success: ProjectDestinationPreview,
+    error: ProjectCopyRpcError,
+  },
+);
 
-export const WsProjectsCheckRemoteAccessRpc = Rpc.make(WS_METHODS.projectsCheckRemoteAccess, {
+export const WsProjectsCheckRemoteAccessRpc = Rpc.make(PROJECT_COPY_WS_METHODS.checkRemoteAccess, {
   payload: ProjectCheckRemoteAccessInput,
   success: ProjectCheckRemoteAccessResult,
   error: ProjectCopyRpcError,
 });
 
-export const WsProjectsExportInspectRpc = Rpc.make(WS_METHODS.projectsExportInspect, {
+export const WsProjectsExportInspectRpc = Rpc.make(PROJECT_COPY_WS_METHODS.exportInspect, {
   payload: ProjectExportInspectInput,
   success: ProjectExportInspection,
   error: ProjectCopyRpcError,
 });
 
-export const WsProjectsExportStartRpc = Rpc.make(WS_METHODS.projectsExportStart, {
+export const WsProjectsExportStartRpc = Rpc.make(PROJECT_COPY_WS_METHODS.exportStart, {
   payload: ProjectExportStartInput,
   success: ProjectExportResult,
   error: ProjectCopyRpcError,
 });
 
-export const WsProjectsExportReadChunkRpc = Rpc.make(WS_METHODS.projectsExportReadChunk, {
+export const WsProjectsExportReadChunkRpc = Rpc.make(PROJECT_COPY_WS_METHODS.exportReadChunk, {
   payload: ProjectExportReadChunkInput,
   success: ProjectExportReadChunkResult,
   error: ProjectCopyRpcError,
 });
 
-export const WsProjectsExportDisposeRpc = Rpc.make(WS_METHODS.projectsExportDispose, {
+export const WsProjectsExportDisposeRpc = Rpc.make(PROJECT_COPY_WS_METHODS.exportDispose, {
   payload: ProjectExportDisposeInput,
   success: EmptyRpcResult,
   error: ProjectCopyRpcError,
 });
 
-export const WsProjectsTransferBeginRpc = Rpc.make(WS_METHODS.projectsTransferBegin, {
+export const WsProjectsTransferBeginRpc = Rpc.make(PROJECT_COPY_WS_METHODS.transferBegin, {
   payload: ProjectTransferBeginInput,
   success: ProjectTransferProgress,
   error: ProjectCopyRpcError,
 });
 
-export const WsProjectsTransferAppendRpc = Rpc.make(WS_METHODS.projectsTransferAppend, {
+export const WsProjectsTransferAppendRpc = Rpc.make(PROJECT_COPY_WS_METHODS.transferAppend, {
   payload: ProjectTransferAppendInput,
   success: ProjectTransferProgress,
   error: ProjectCopyRpcError,
 });
 
-export const WsProjectsTransferCommitRpc = Rpc.make(WS_METHODS.projectsTransferCommit, {
+export const WsProjectsTransferCommitRpc = Rpc.make(PROJECT_COPY_WS_METHODS.transferCommit, {
   payload: ProjectTransferCommitInput,
   success: ProjectTransferCommitResult,
   error: ProjectCopyRpcError,
 });
 
-export const WsProjectsTransferAbortRpc = Rpc.make(WS_METHODS.projectsTransferAbort, {
+export const WsProjectsTransferAbortRpc = Rpc.make(PROJECT_COPY_WS_METHODS.transferAbort, {
   payload: ProjectTransferAbortInput,
   success: EmptyRpcResult,
   error: ProjectCopyRpcError,
 });
 
-export const WsProjectsImportStartRpc = Rpc.make(WS_METHODS.projectsImportStart, {
+export const WsProjectsImportStartRpc = Rpc.make(PROJECT_COPY_WS_METHODS.importStart, {
   payload: ProjectImportStartInput,
   success: ProjectImportSnapshot,
   error: ProjectCopyRpcError,
 });
 
-export const WsProjectsSubscribeImportRpc = Rpc.make(WS_METHODS.projectsSubscribeImport, {
+export const WsProjectsSubscribeImportRpc = Rpc.make(PROJECT_COPY_WS_METHODS.subscribeImport, {
   payload: ProjectSubscribeImportInput,
   success: ProjectImportSnapshot,
   error: ProjectCopyRpcError,
   stream: true,
 });
 
-export const WsProjectsCancelImportRpc = Rpc.make(WS_METHODS.projectsCancelImport, {
+export const WsProjectsCancelImportRpc = Rpc.make(PROJECT_COPY_WS_METHODS.cancelImport, {
   payload: ProjectCancelImportInput,
   success: ProjectImportSnapshot,
   error: ProjectCopyRpcError,
 });
 
-export const WsProjectsListImportsRpc = Rpc.make(WS_METHODS.projectsListImports, {
+export const WsProjectsListImportsRpc = Rpc.make(PROJECT_COPY_WS_METHODS.listImports, {
   payload: ProjectListImportsInput,
   success: ProjectListImportsResult,
   error: ProjectCopyRpcError,
 });
 
-export const WsProjectsDiscardImportRpc = Rpc.make(WS_METHODS.projectsDiscardImport, {
+export const WsProjectsDiscardImportRpc = Rpc.make(PROJECT_COPY_WS_METHODS.discardImport, {
   payload: ProjectDiscardImportInput,
   success: ProjectDiscardImportResult,
   error: ProjectCopyRpcError,
 });
+
+export const WsAgentControlReportClientExecutionRpc = Rpc.make(
+  AGENT_CONTROL_WS_METHODS.reportClientExecution,
+  {
+    payload: AgentControlReportClientExecutionInput,
+    success: AgentControlReportClientExecutionResult,
+    error: Schema.Union([AgentControlRpcError, AuthRpcError]),
+  },
+);
+
+export const WsAgentControlPublishNodeDirectoryRpc = Rpc.make(
+  AGENT_CONTROL_WS_METHODS.publishNodeDirectory,
+  {
+    payload: AgentControlPublishNodeDirectoryInput,
+    success: AgentControlPublishNodeDirectoryResult,
+    error: Schema.Union([AgentControlRpcError, AuthRpcError]),
+  },
+);
 
 export const WsProjectCopyRpcGroup = RpcGroup.make(
   WsProjectsPathHintsRpc,
@@ -175,6 +211,8 @@ export const WsProjectCopyRpcGroup = RpcGroup.make(
   WsProjectsCancelImportRpc,
   WsProjectsListImportsRpc,
   WsProjectsDiscardImportRpc,
+  WsAgentControlReportClientExecutionRpc,
+  WsAgentControlPublishNodeDirectoryRpc,
 );
 
 /**

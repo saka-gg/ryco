@@ -20,10 +20,12 @@ import {
   AgentControlProposalView,
   AgentControlProposalStreamEvent,
   AgentControlProposalStreamEventView,
+} from "./agentControl.ts";
+import {
+  AgentControlMcpSuggestProjectDestinationInput,
   AgentControlPublishNodeDirectoryInput,
   AgentControlReportClientExecutionInput,
-} from "./agentControl.ts";
-import { AgentControlMcpSuggestProjectDestinationInput } from "./agentControlProjectCopy.ts";
+} from "./agentControlProjectCopy.ts";
 
 const decodePlan = Schema.decodeUnknownSync(AgentControlActionPlan);
 const decodePlanView = Schema.decodeUnknownSync(AgentControlPlanView);

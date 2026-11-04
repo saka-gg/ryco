@@ -1,4 +1,4 @@
-import { WS_METHODS } from "@ryco/contracts";
+import { PROJECT_COPY_WS_METHODS } from "@ryco/contracts";
 import {
   PROJECT_COPY_CHUNK_BYTES,
   PROJECT_COPY_DIRECT_CHUNK_BYTES,
@@ -84,34 +84,34 @@ export const makeProjectCopyHandlers = (ctx: WsRpcContext) => {
     observeRpcEffect(method, ownerEffect(method, effect), TRACE_ATTRIBUTES);
 
   return defineWsHandlers({
-    [WS_METHODS.projectsPathHints]: (input) =>
+    [PROJECT_COPY_WS_METHODS.pathHints]: (input) =>
       handle(
-        WS_METHODS.projectsPathHints,
+        PROJECT_COPY_WS_METHODS.pathHints,
         nodePaths.pipe(Effect.flatMap((paths) => paths.pathHints(input))),
       ),
-    [WS_METHODS.filesystemSearchDirectories]: (input) =>
+    [PROJECT_COPY_WS_METHODS.searchDirectories]: (input) =>
       handle(
-        WS_METHODS.filesystemSearchDirectories,
+        PROJECT_COPY_WS_METHODS.searchDirectories,
         nodePaths.pipe(Effect.flatMap((paths) => paths.searchDirectories(input))),
       ),
-    [WS_METHODS.projectsPreviewDestination]: (input) =>
+    [PROJECT_COPY_WS_METHODS.previewDestination]: (input) =>
       handle(
-        WS_METHODS.projectsPreviewDestination,
+        PROJECT_COPY_WS_METHODS.previewDestination,
         nodePaths.pipe(Effect.flatMap((paths) => paths.previewDestination(input))),
       ),
-    [WS_METHODS.projectsCheckRemoteAccess]: (input) =>
+    [PROJECT_COPY_WS_METHODS.checkRemoteAccess]: (input) =>
       handle(
-        WS_METHODS.projectsCheckRemoteAccess,
+        PROJECT_COPY_WS_METHODS.checkRemoteAccess,
         gitNetwork.pipe(Effect.flatMap((git) => git.checkRemoteAccess(input))),
       ),
-    [WS_METHODS.projectsExportInspect]: (input) =>
+    [PROJECT_COPY_WS_METHODS.exportInspect]: (input) =>
       handle(
-        WS_METHODS.projectsExportInspect,
+        PROJECT_COPY_WS_METHODS.exportInspect,
         exporter.pipe(Effect.flatMap((source) => source.inspect(input))),
       ),
-    [WS_METHODS.projectsExportStart]: (input) =>
+    [PROJECT_COPY_WS_METHODS.exportStart]: (input) =>
       handle(
-        WS_METHODS.projectsExportStart,
+        PROJECT_COPY_WS_METHODS.exportStart,
         exporter.pipe(
           Effect.flatMap((source) =>
             callerChannel.pipe(
@@ -120,9 +120,9 @@ export const makeProjectCopyHandlers = (ctx: WsRpcContext) => {
           ),
         ),
       ),
-    [WS_METHODS.projectsExportReadChunk]: (input) =>
+    [PROJECT_COPY_WS_METHODS.exportReadChunk]: (input) =>
       handle(
-        WS_METHODS.projectsExportReadChunk,
+        PROJECT_COPY_WS_METHODS.exportReadChunk,
         exporter.pipe(
           Effect.flatMap((source) =>
             callerChannel.pipe(
@@ -131,17 +131,17 @@ export const makeProjectCopyHandlers = (ctx: WsRpcContext) => {
           ),
         ),
       ),
-    [WS_METHODS.projectsExportDispose]: (input) =>
+    [PROJECT_COPY_WS_METHODS.exportDispose]: (input) =>
       handle(
-        WS_METHODS.projectsExportDispose,
+        PROJECT_COPY_WS_METHODS.exportDispose,
         exporter.pipe(
           Effect.flatMap((source) => source.dispose(input)),
           Effect.as({}),
         ),
       ),
-    [WS_METHODS.projectsTransferBegin]: (input) =>
+    [PROJECT_COPY_WS_METHODS.transferBegin]: (input) =>
       handle(
-        WS_METHODS.projectsTransferBegin,
+        PROJECT_COPY_WS_METHODS.transferBegin,
         transfers.pipe(
           Effect.flatMap((uploads) =>
             callerChannel.pipe(
@@ -150,9 +150,9 @@ export const makeProjectCopyHandlers = (ctx: WsRpcContext) => {
           ),
         ),
       ),
-    [WS_METHODS.projectsTransferAppend]: (input) =>
+    [PROJECT_COPY_WS_METHODS.transferAppend]: (input) =>
       handle(
-        WS_METHODS.projectsTransferAppend,
+        PROJECT_COPY_WS_METHODS.transferAppend,
         transfers.pipe(
           Effect.flatMap((uploads) =>
             callerChannel.pipe(
@@ -161,46 +161,46 @@ export const makeProjectCopyHandlers = (ctx: WsRpcContext) => {
           ),
         ),
       ),
-    [WS_METHODS.projectsTransferCommit]: (input) =>
+    [PROJECT_COPY_WS_METHODS.transferCommit]: (input) =>
       handle(
-        WS_METHODS.projectsTransferCommit,
+        PROJECT_COPY_WS_METHODS.transferCommit,
         transfers.pipe(Effect.flatMap((uploads) => uploads.commit(input))),
       ),
-    [WS_METHODS.projectsTransferAbort]: (input) =>
+    [PROJECT_COPY_WS_METHODS.transferAbort]: (input) =>
       handle(
-        WS_METHODS.projectsTransferAbort,
+        PROJECT_COPY_WS_METHODS.transferAbort,
         transfers.pipe(
           Effect.flatMap((uploads) => uploads.abort(input)),
           Effect.as({}),
         ),
       ),
-    [WS_METHODS.projectsImportStart]: (input) =>
+    [PROJECT_COPY_WS_METHODS.importStart]: (input) =>
       handle(
-        WS_METHODS.projectsImportStart,
+        PROJECT_COPY_WS_METHODS.importStart,
         imports.pipe(Effect.flatMap((jobs) => jobs.start(input))),
       ),
-    [WS_METHODS.projectsSubscribeImport]: (input) =>
+    [PROJECT_COPY_WS_METHODS.subscribeImport]: (input) =>
       observeRpcStreamEffect(
-        WS_METHODS.projectsSubscribeImport,
+        PROJECT_COPY_WS_METHODS.subscribeImport,
         ownerStreamEffect(
-          WS_METHODS.projectsSubscribeImport,
+          PROJECT_COPY_WS_METHODS.subscribeImport,
           imports.pipe(Effect.map((jobs) => jobs.subscribe(input))),
         ),
         TRACE_ATTRIBUTES,
       ),
-    [WS_METHODS.projectsCancelImport]: (input) =>
+    [PROJECT_COPY_WS_METHODS.cancelImport]: (input) =>
       handle(
-        WS_METHODS.projectsCancelImport,
+        PROJECT_COPY_WS_METHODS.cancelImport,
         imports.pipe(Effect.flatMap((jobs) => jobs.cancel(input))),
       ),
-    [WS_METHODS.projectsListImports]: (input) =>
+    [PROJECT_COPY_WS_METHODS.listImports]: (input) =>
       handle(
-        WS_METHODS.projectsListImports,
+        PROJECT_COPY_WS_METHODS.listImports,
         imports.pipe(Effect.flatMap((jobs) => jobs.list(input))),
       ),
-    [WS_METHODS.projectsDiscardImport]: (input) =>
+    [PROJECT_COPY_WS_METHODS.discardImport]: (input) =>
       handle(
-        WS_METHODS.projectsDiscardImport,
+        PROJECT_COPY_WS_METHODS.discardImport,
         imports.pipe(Effect.flatMap((jobs) => jobs.discard(input))),
       ),
   });

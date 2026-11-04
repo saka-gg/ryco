@@ -159,10 +159,6 @@ import type {
   AgentControlProposalQueueView,
   AgentControlProposalReceiptView,
   AgentControlProposalStreamEventView,
-  AgentControlPublishNodeDirectoryInput,
-  AgentControlPublishNodeDirectoryResult,
-  AgentControlReportClientExecutionInput,
-  AgentControlReportClientExecutionResult,
   AgentControlExternalIntegrationCreateInput,
   AgentControlExternalIntegrationDeleteResult,
   AgentControlExternalIntegrationIdInput,
@@ -175,6 +171,12 @@ import type {
   AgentControlMcpInstallationListResult,
   AgentControlMcpInstallationMutationResult,
 } from "./agentControl.ts";
+import type {
+  AgentControlPublishNodeDirectoryInput,
+  AgentControlPublishNodeDirectoryResult,
+  AgentControlReportClientExecutionInput,
+  AgentControlReportClientExecutionResult,
+} from "./agentControlProjectCopy.ts";
 import type { FilesystemBrowseInput, FilesystemBrowseResult } from "./filesystem.ts";
 import type {
   FilesystemSearchDirectoriesInput,

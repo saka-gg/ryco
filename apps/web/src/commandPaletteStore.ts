@@ -4,9 +4,9 @@ import { create } from "zustand";
 
 import {
   addProjectDialogAvailable,
-  openAddProject as openAddProjectDialog,
+  openAddProjectDialog,
   type OpenAddProjectOptions,
-} from "./components/projectNodes/projectNodesDialogStore";
+} from "./components/projectNodes/addProjectDialogEntry";
 
 /**
  * What an "Add project" entry point knows: the node, the source or project the
@@ -122,12 +122,15 @@ export const useCommandPaletteStore = create<CommandPaletteStore>((set) => ({
   openAddProject: (request) => {
     // Picked, not spread: buttons pass this as their click handler, event and all.
     const path = typeof request?.path === "string" && request.path ? request.path : null;
-    if (path === null && addProjectDialogAvailable()) {
+    if (
+      path === null &&
+      addProjectDialogAvailable() &&
       openAddProjectDialog({
         environmentId: request?.environmentId ?? null,
         mode: request?.mode ?? null,
         projectRef: request?.projectRef ?? null,
-      });
+      })
+    ) {
       return;
     }
     set((state) => ({

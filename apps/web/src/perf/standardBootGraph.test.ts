@@ -332,11 +332,23 @@ describe("standard build static import graph", () => {
     ).toEqual([]);
   });
 
+  it("keeps the project-nodes dialogs' store out of boot", () => {
+    // The command palette's store opens the add-project dialog through
+    // `addProjectDialogEntry.ts`; the dialogs' store loads with the app shell
+    // and hands that module its opener as it loads.
+    for (const entry of BOOT_GRAPH_ENTRIES) {
+      expect(
+        forbiddenChains(entry, [
+          /^apps\/web\/src\/components\/projectNodes\/projectNodesDialogStore\.ts$/u,
+        ]),
+      ).toEqual([]);
+    }
+  });
+
   it("keeps the project-nodes dialogs, the copy runtime and the coordinator on demand", () => {
-    // The shell imports only the dialogs' store, which boot already carries
-    // through the command palette's store. The dialogs, the copy runtime (its
-    // toasts, node IO and manager), the coordinator and the Agent Control copy
-    // executor load when a dialog opens, a copy runs or a card asks.
+    // The shell imports only the dialogs' store. The dialogs, the copy runtime
+    // (its toasts, node IO and manager), the coordinator and the Agent Control
+    // copy executor load when a dialog opens, a copy runs or a card asks.
     const forbidden = [
       /^packages\/client-runtime\/src\/projectCopy\//u,
       /^apps\/web\/src\/components\/projectNodes\/(?:ProjectNodesDialogs|AddProjectDialog|CopyProjectDialog)\.tsx$/u,
@@ -351,10 +363,12 @@ describe("standard build static import graph", () => {
   });
 
   it("loads the project copy RPCs and their schemas with the first copy", () => {
-    // Their own group (`@ryco/contracts/project-copy-rpc`), which the node serves beside the
-    // app's; the RPC client builds it on the connection's socket the first time a copy calls
-    // one. Boot keeps only the fields an Agent Control copy plan names
-    // (`projectCopyPrimitives.ts`).
+    // Their own group (`@ryco/contracts/project-copy-rpc`, with the two Agent Control RPCs only
+    // copy uses), which the node serves beside the app's; the RPC client builds it on the
+    // connection's socket the first time a copy calls one. Boot keeps only the fields an Agent
+    // Control copy plan names (`projectCopyPrimitives.ts`). `bun run perf:bundle-budget` also
+    // keeps their schemas (`agentControlProjectCopy.ts`) and method names
+    // (`projectCopyMethods.ts`) out of boot, which reaches both only through the package root.
     const forbidden = [
       /^packages\/contracts\/src\/projectCopy(?:Rpc)?\.ts$/u,
       /^packages\/client-runtime\/src\/rpc\/projectCopyRpcClient\.ts$/u,

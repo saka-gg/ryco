@@ -3,7 +3,7 @@ import type {
   VcsStatusRemoteResult,
   VcsStatusStreamEvent,
 } from "@ryco/contracts";
-import { WS_METHODS } from "@ryco/contracts";
+import { PROJECT_COPY_WS_METHODS, WS_METHODS } from "@ryco/contracts";
 import { AGENT_CONTROL_WS_METHODS } from "@ryco/contracts/agent-control";
 import { GitManagerError } from "@ryco/contracts/git";
 import { Effect, Stream } from "effect";
@@ -345,19 +345,17 @@ it("routes cross-node project copy calls to their wire methods", async () => {
   const searchDirectories = vi.fn(() => Effect.succeed({ matches: [] }));
   const transferAppend = vi.fn(() => Effect.succeed({ transferId: "t", receivedBytes: 4 }));
   const publishNodeDirectory = vi.fn(() => Effect.succeed({ accepted: 0 }));
-  const appRequest = vi.fn((invoke: (client: unknown) => Effect.Effect<unknown>) =>
-    Effect.runPromise(
-      invoke({ [AGENT_CONTROL_WS_METHODS.publishNodeDirectory]: publishNodeDirectory }),
-    ),
-  );
-  // The copy RPCs ride the same socket through a client of their own group.
+  const appRequest = vi.fn();
+  // The copy RPCs, with the Agent Control calls only copy uses, ride the same
+  // socket through a client of their own group.
   const copyView = {
     request: (invoke: (client: unknown) => Effect.Effect<unknown>) =>
       Effect.runPromise(
         invoke({
-          [WS_METHODS.projectsPathHints]: pathHints,
-          [WS_METHODS.filesystemSearchDirectories]: searchDirectories,
-          [WS_METHODS.projectsTransferAppend]: transferAppend,
+          [PROJECT_COPY_WS_METHODS.pathHints]: pathHints,
+          [PROJECT_COPY_WS_METHODS.searchDirectories]: searchDirectories,
+          [PROJECT_COPY_WS_METHODS.transferAppend]: transferAppend,
+          [AGENT_CONTROL_WS_METHODS.publishNodeDirectory]: publishNodeDirectory,
         }),
       ),
     subscribe: vi.fn(() => () => undefined),
@@ -388,11 +386,12 @@ it("routes cross-node project copy calls to their wire methods", async () => {
   client.projects.subscribeImport({ importId }, listener);
   await vi.waitFor(() =>
     expect(copyView.subscribe).toHaveBeenCalledWith(expect.any(Function), listener, {
-      tag: WS_METHODS.projectsSubscribeImport,
+      tag: PROJECT_COPY_WS_METHODS.subscribeImport,
     }),
   );
   // One copy client per connection, built on the first copy call.
   expect(withClient).toHaveBeenCalledTimes(1);
+  expect(appRequest).not.toHaveBeenCalled();
   expect(transport.subscribe).not.toHaveBeenCalled();
 });
 

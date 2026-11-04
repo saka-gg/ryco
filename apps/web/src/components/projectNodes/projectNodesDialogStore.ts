@@ -5,10 +5,11 @@
 //          dialogs' surface mounted) and which checkouts it copies (the
 //          sidebar's badge), and carries "Show in project selector" to the
 //          new-thread hero.
-// Layer: Web UI state. The only piece of the project-nodes feature in the boot
-//        bundle: the command palette's store imports it, so it keeps to what
-//        opening the dialogs needs. The shell's copy helpers
-//        (`projectNodesShellActions.ts`), the stored-records check
+// Layer: Web UI state, loaded with the app shell (it stays out of the boot
+//        bundle). What the command palette's store needs to open the
+//        add-project dialog is `addProjectDialogEntry.ts`, which boot carries;
+//        this module hands it `openAddProject` as it loads. The shell's copy
+//        helpers (`projectNodesShellActions.ts`), the stored-records check
 //        (`projectCopyStorage.ts`), the dialogs (`ProjectNodesDialogs.tsx`), the
 //        copy runtime and the Agent Control executor load with the surfaces
 //        that use them.
@@ -16,26 +17,18 @@
 import type { EnvironmentId, ScopedProjectRef } from "@ryco/contracts";
 import { create } from "zustand";
 
-import { getPresentationTier, type PresentationTier } from "../../lib/presentationTier";
+import {
+  provideAddProjectDialogOpener,
+  type AddProjectDialogMode,
+  type OpenAddProjectOptions,
+} from "./addProjectDialogEntry";
 
-/**
- * Whether `openAddProject()` entry points open `AddProjectDialog` instead of the
- * command palette's add-project views. On: the dialog covers everything those
- * views do (A26). The frozen phone tier keeps the palette either way; turning
- * this off sends every tier back to it.
- */
-export const ADD_PROJECT_DIALOG_ENABLED: boolean = true;
-
-/** Where the add-project dialog starts: a folder on the node, a clone, a copy from another node, or linking a checkout. */
-export type AddProjectDialogMode = "folder" | "clone" | "copy" | "link";
-
-export interface OpenAddProjectOptions {
-  /** Preselects the node (skips the node step when it can take projects). */
-  readonly environmentId?: EnvironmentId | null;
-  readonly mode?: AddProjectDialogMode | null;
-  /** The project a `copy` or `link` starts from. */
-  readonly projectRef?: ScopedProjectRef | null;
-}
+export {
+  ADD_PROJECT_DIALOG_ENABLED,
+  addProjectDialogAvailable,
+  type AddProjectDialogMode,
+  type OpenAddProjectOptions,
+} from "./addProjectDialogEntry";
 
 export interface AddProjectDialogRequest {
   readonly environmentId: EnvironmentId | null;
@@ -157,12 +150,6 @@ export function preloadCopyProject(
   );
 }
 
-/** Whether `openAddProject()` entry points open the dialog on `tier` (else the palette's views). */
-export function addProjectDialogAvailable(tier: PresentationTier = getPresentationTier()): boolean {
-  // The frozen phone tier keeps the palette's add-project views (A26).
-  return ADD_PROJECT_DIALOG_ENABLED && tier !== "phone";
-}
-
 /**
  * Opens the add-project dialog. Entry points that must keep the palette on the
  * phone tier (and while the dialog is off) go through
@@ -179,6 +166,8 @@ export function openAddProject(options: OpenAddProjectOptions = {}): void {
     addProject: { open: true, token: state.addProject.token + 1, request },
   }));
 }
+
+provideAddProjectDialogOpener(openAddProject);
 
 export function closeAddProject(): void {
   const { addProject } = useProjectNodesDialogStore.getState();

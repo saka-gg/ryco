@@ -28,7 +28,8 @@ import {
   ProjectTransferId,
 } from "./projectCopy.ts";
 import { WsProjectCopyRpcGroup } from "./projectCopyRpc.ts";
-import { WS_METHODS, WsRpcGroup } from "./rpc.ts";
+import { PROJECT_COPY_WS_METHODS } from "./projectCopyMethods.ts";
+import { WsRpcGroup } from "./rpc.ts";
 
 const importId = "0b8f4c2e-6a1d-4f3b-9c7e-2d5a8b1c4e6f";
 const transferId = "5e9a2b7c-1d3f-4a6e-8b2c-7f1e3d5a9c0b";
@@ -104,30 +105,30 @@ describe("project copy ids and RPC names", () => {
 
   it("registers every project copy method in the RPC group", () => {
     for (const method of [
-      WS_METHODS.projectsPathHints,
-      WS_METHODS.filesystemSearchDirectories,
-      WS_METHODS.projectsPreviewDestination,
-      WS_METHODS.projectsCheckRemoteAccess,
-      WS_METHODS.projectsExportInspect,
-      WS_METHODS.projectsExportStart,
-      WS_METHODS.projectsExportReadChunk,
-      WS_METHODS.projectsExportDispose,
-      WS_METHODS.projectsTransferBegin,
-      WS_METHODS.projectsTransferAppend,
-      WS_METHODS.projectsTransferCommit,
-      WS_METHODS.projectsTransferAbort,
-      WS_METHODS.projectsImportStart,
-      WS_METHODS.projectsSubscribeImport,
-      WS_METHODS.projectsCancelImport,
-      WS_METHODS.projectsListImports,
-      WS_METHODS.projectsDiscardImport,
+      PROJECT_COPY_WS_METHODS.pathHints,
+      PROJECT_COPY_WS_METHODS.searchDirectories,
+      PROJECT_COPY_WS_METHODS.previewDestination,
+      PROJECT_COPY_WS_METHODS.checkRemoteAccess,
+      PROJECT_COPY_WS_METHODS.exportInspect,
+      PROJECT_COPY_WS_METHODS.exportStart,
+      PROJECT_COPY_WS_METHODS.exportReadChunk,
+      PROJECT_COPY_WS_METHODS.exportDispose,
+      PROJECT_COPY_WS_METHODS.transferBegin,
+      PROJECT_COPY_WS_METHODS.transferAppend,
+      PROJECT_COPY_WS_METHODS.transferCommit,
+      PROJECT_COPY_WS_METHODS.transferAbort,
+      PROJECT_COPY_WS_METHODS.importStart,
+      PROJECT_COPY_WS_METHODS.subscribeImport,
+      PROJECT_COPY_WS_METHODS.cancelImport,
+      PROJECT_COPY_WS_METHODS.listImports,
+      PROJECT_COPY_WS_METHODS.discardImport,
     ]) {
       expect(WsProjectCopyRpcGroup.requests.has(method)).toBe(true);
       // Their schemas load with the first copy, never with the app group.
       expect(WsRpcGroup.requests.has(method)).toBe(false);
     }
-    expect(WS_METHODS.projectsSubscribeImport).toBe("projects.subscribeImport");
-    expect(WS_METHODS.filesystemSearchDirectories).toBe("filesystem.searchDirectories");
+    expect(PROJECT_COPY_WS_METHODS.subscribeImport).toBe("projects.subscribeImport");
+    expect(PROJECT_COPY_WS_METHODS.searchDirectories).toBe("filesystem.searchDirectories");
   });
 
   it("keeps the project copy tools out of the shared MCP catalog", () => {

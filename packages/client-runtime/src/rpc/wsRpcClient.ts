@@ -689,12 +689,9 @@ export interface WsRpcClient {
     readonly subscribeProposals: RpcStreamMethod<
       typeof AGENT_CONTROL_WS_METHODS.subscribeProposals
     >;
-    readonly publishNodeDirectory: RpcUnaryMethod<
-      typeof AGENT_CONTROL_WS_METHODS.publishNodeDirectory
-    >;
-    readonly reportClientExecution: RpcUnaryMethod<
-      typeof AGENT_CONTROL_WS_METHODS.reportClientExecution
-    >;
+    /** Cross-node project copy's, loaded like the `projects` copy calls. */
+    readonly publishNodeDirectory: ProjectCopyRpcMethods["publishNodeDirectory"];
+    readonly reportClientExecution: ProjectCopyRpcMethods["reportClientExecution"];
     readonly listIntegrations: RpcUnaryNoArgMethod<
       typeof AGENT_CONTROL_WS_METHODS.listIntegrations
     >;
@@ -756,10 +753,12 @@ export const pickProjectCopyCalls = (projects: ProjectCopyProjectCalls): Project
   ) as unknown as ProjectCopyProjectCalls;
 
 /**
- * The copy calls of one connection. The first one loads the copy RPC client
- * (`projectCopyRpcClient.ts`, with `@ryco/contracts/project-copy-rpc`) and
- * builds it on the connection's socket; boot never loads either. A failed load
- * fails that call and the next call loads again.
+ * The copy calls of one connection, with the Agent Control calls only copy
+ * uses (`publishNodeDirectory`, `reportClientExecution`). The first one loads
+ * the copy RPC client (`projectCopyRpcClient.ts`, with
+ * `@ryco/contracts/project-copy-rpc`) and builds it on the connection's socket;
+ * boot never loads either. A failed load fails that call and the next call
+ * loads again.
  */
 function lazyProjectCopyRpc(transport: WsTransport) {
   let loading: Promise<ProjectCopyRpcMethods> | null = null;
@@ -797,6 +796,12 @@ function lazyProjectCopyRpc(transport: WsTransport) {
       ]),
     ) as unknown as ProjectCopyProjectCalls,
     searchDirectories: call("searchDirectories") as ProjectCopyRpcMethods["searchDirectories"],
+    publishNodeDirectory: call(
+      "publishNodeDirectory",
+    ) as ProjectCopyRpcMethods["publishNodeDirectory"],
+    reportClientExecution: call(
+      "reportClientExecution",
+    ) as ProjectCopyRpcMethods["reportClientExecution"],
   };
 }
 
@@ -1541,12 +1546,8 @@ export function createWsRpcClient(
           listener,
           { ...options, tag: AGENT_CONTROL_WS_METHODS.subscribeProposals },
         ),
-      publishNodeDirectory: (input) =>
-        transport.request((client) => client[AGENT_CONTROL_WS_METHODS.publishNodeDirectory](input)),
-      reportClientExecution: (input) =>
-        transport.request((client) =>
-          client[AGENT_CONTROL_WS_METHODS.reportClientExecution](input),
-        ),
+      publishNodeDirectory: projectCopy.publishNodeDirectory,
+      reportClientExecution: projectCopy.reportClientExecution,
       listIntegrations: () =>
         transport.request((client) => client[AGENT_CONTROL_WS_METHODS.listIntegrations]({})),
       createIntegration: (input) =>

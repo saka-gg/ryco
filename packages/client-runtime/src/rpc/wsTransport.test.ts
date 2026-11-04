@@ -1,6 +1,7 @@
 import {
   AGENT_CONTROL_WS_METHODS,
   ORCHESTRATION_WS_METHODS,
+  PROJECT_COPY_WS_METHODS,
   ThreadId,
   WS_METHODS,
 } from "@ryco/contracts";
@@ -436,7 +437,7 @@ describe("WsTransport clients of another group", () => {
     await vi.waitFor(() => expect(sockets).toHaveLength(1));
     sockets[0]!.open();
 
-    const imports = copy.request((client) => client[WS_METHODS.projectsListImports]({}));
+    const imports = copy.request((client) => client[PROJECT_COPY_WS_METHODS.listImports]({}));
     const summary = transport.request((client) =>
       client[WS_METHODS.serverGetUsageSummary]({
         contractVersion: 2,
@@ -446,21 +447,23 @@ describe("WsTransport clients of another group", () => {
     );
     const sent = (tag: string) => sockets[0]!.requests().find((candidate) => candidate.tag === tag);
     await vi.waitFor(() => {
-      expect(sent(WS_METHODS.projectsListImports)).toBeDefined();
+      expect(sent(PROJECT_COPY_WS_METHODS.listImports)).toBeDefined();
       expect(sent(WS_METHODS.serverGetUsageSummary)).toBeDefined();
     });
     // A second call reuses the session's copy client.
-    const again = copy.request((client) => client[WS_METHODS.projectsListImports]({}));
+    const again = copy.request((client) => client[PROJECT_COPY_WS_METHODS.listImports]({}));
     await vi.waitFor(() =>
       expect(
-        sockets[0]!.requests().filter((request) => request.tag === WS_METHODS.projectsListImports),
+        sockets[0]!
+          .requests()
+          .filter((request) => request.tag === PROJECT_COPY_WS_METHODS.listImports),
       ).toHaveLength(2),
     );
     expect(sockets).toHaveLength(1);
 
     for (const request of sockets[0]!
       .requests()
-      .filter((candidate) => candidate.tag === WS_METHODS.projectsListImports)) {
+      .filter((candidate) => candidate.tag === PROJECT_COPY_WS_METHODS.listImports)) {
       sockets[0]!.reply({
         _tag: "Exit",
         requestId: request.id,

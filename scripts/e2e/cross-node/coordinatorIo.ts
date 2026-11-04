@@ -9,7 +9,11 @@
  */
 import { randomUUID } from "node:crypto";
 
-import { type EnvironmentId, ORCHESTRATION_WS_METHODS, WS_METHODS } from "@ryco/contracts";
+import {
+  type EnvironmentId,
+  ORCHESTRATION_WS_METHODS,
+  PROJECT_COPY_WS_METHODS,
+} from "@ryco/contracts";
 import { Cause, Effect, Exit, Stream } from "effect";
 
 import type { CliRemoteRpcClient } from "../../../apps/server/src/cliRemote/remotes.ts";
@@ -24,21 +28,21 @@ export const projectCopyNodeApi = (client: CliRemoteRpcClient): ProjectCopyNodeA
   const run = <A, E>(effect: Effect.Effect<A, E>) => Effect.runPromise(effect);
   return {
     projects: {
-      pathHints: (input) => run(client[WS_METHODS.projectsPathHints](input)),
-      previewDestination: (input) => run(client[WS_METHODS.projectsPreviewDestination](input)),
-      checkRemoteAccess: (input) => run(client[WS_METHODS.projectsCheckRemoteAccess](input)),
-      exportInspect: (input) => run(client[WS_METHODS.projectsExportInspect](input)),
-      exportStart: (input) => run(client[WS_METHODS.projectsExportStart](input)),
-      exportReadChunk: (input) => run(client[WS_METHODS.projectsExportReadChunk](input)),
-      exportDispose: (input) => run(client[WS_METHODS.projectsExportDispose](input)),
-      transferBegin: (input) => run(client[WS_METHODS.projectsTransferBegin](input)),
-      transferAppend: (input) => run(client[WS_METHODS.projectsTransferAppend](input)),
-      transferCommit: (input) => run(client[WS_METHODS.projectsTransferCommit](input)),
-      transferAbort: (input) => run(client[WS_METHODS.projectsTransferAbort](input)),
-      importStart: (input) => run(client[WS_METHODS.projectsImportStart](input)),
+      pathHints: (input) => run(client[PROJECT_COPY_WS_METHODS.pathHints](input)),
+      previewDestination: (input) => run(client[PROJECT_COPY_WS_METHODS.previewDestination](input)),
+      checkRemoteAccess: (input) => run(client[PROJECT_COPY_WS_METHODS.checkRemoteAccess](input)),
+      exportInspect: (input) => run(client[PROJECT_COPY_WS_METHODS.exportInspect](input)),
+      exportStart: (input) => run(client[PROJECT_COPY_WS_METHODS.exportStart](input)),
+      exportReadChunk: (input) => run(client[PROJECT_COPY_WS_METHODS.exportReadChunk](input)),
+      exportDispose: (input) => run(client[PROJECT_COPY_WS_METHODS.exportDispose](input)),
+      transferBegin: (input) => run(client[PROJECT_COPY_WS_METHODS.transferBegin](input)),
+      transferAppend: (input) => run(client[PROJECT_COPY_WS_METHODS.transferAppend](input)),
+      transferCommit: (input) => run(client[PROJECT_COPY_WS_METHODS.transferCommit](input)),
+      transferAbort: (input) => run(client[PROJECT_COPY_WS_METHODS.transferAbort](input)),
+      importStart: (input) => run(client[PROJECT_COPY_WS_METHODS.importStart](input)),
       subscribeImport: (input, listener, options) =>
         Effect.runCallback(
-          Stream.runForEach(client[WS_METHODS.projectsSubscribeImport](input), (snapshot) =>
+          Stream.runForEach(client[PROJECT_COPY_WS_METHODS.subscribeImport](input), (snapshot) =>
             Effect.sync(() => listener(snapshot)),
           ),
           {
@@ -53,9 +57,9 @@ export const projectCopyNodeApi = (client: CliRemoteRpcClient): ProjectCopyNodeA
             },
           },
         ),
-      cancelImport: (input) => run(client[WS_METHODS.projectsCancelImport](input)),
-      listImports: (input) => run(client[WS_METHODS.projectsListImports](input)),
-      discardImport: (input) => run(client[WS_METHODS.projectsDiscardImport](input)),
+      cancelImport: (input) => run(client[PROJECT_COPY_WS_METHODS.cancelImport](input)),
+      listImports: (input) => run(client[PROJECT_COPY_WS_METHODS.listImports](input)),
+      discardImport: (input) => run(client[PROJECT_COPY_WS_METHODS.discardImport](input)),
     },
     orchestration: {
       dispatchCommand: (command) => run(client[ORCHESTRATION_WS_METHODS.dispatchCommand](command)),

@@ -2,7 +2,7 @@ import {
   AGENT_CONTROL_NODE_DIRECTORY_MAX_ENTRIES,
   AGENT_CONTROL_NODE_DIRECTORY_MAX_PROJECTS,
   AGENT_CONTROL_NODE_DIRECTORY_MAX_PUBLISHED_PROJECTS,
-} from "@ryco/contracts/agent-control";
+} from "@ryco/contracts/agent-control-project-copy";
 import type {
   AgentControlNodeDirectoryEntry,
   AgentControlNodeDirectoryProject,

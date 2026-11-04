@@ -96,6 +96,11 @@
       "import": "./src/agentControl.ts",
       "require": "./src/agentControl.ts"
     },
+    "./agent-control-project-copy": {
+      "types": "./src/agentControlProjectCopy.ts",
+      "import": "./src/agentControlProjectCopy.ts",
+      "require": "./src/agentControlProjectCopy.ts"
+    },
     "./agent-control-mcp": {
       "types": "./src/agentControlMcp.ts",
       "import": "./src/agentControlMcp.ts",
@@ -205,6 +210,11 @@
       "types": "./src/projectCopy.ts",
       "import": "./src/projectCopy.ts",
       "require": "./src/projectCopy.ts"
+    },
+    "./project-copy-methods": {
+      "types": "./src/projectCopyMethods.ts",
+      "import": "./src/projectCopyMethods.ts",
+      "require": "./src/projectCopyMethods.ts"
     },
     "./project-copy-rpc": {
       "types": "./src/projectCopyRpc.ts",
