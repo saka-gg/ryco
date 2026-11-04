@@ -68,7 +68,7 @@ describe("buildAutoSettleRuleModel", () => {
     await expect(changeAutoSettleRuleModel(built, 3, { writeNode, writeDevice })).resolves.toBe(
       "node",
     );
-    expect(writeNode).toHaveBeenCalledWith(STUDIO, { threadAutoSettleAfterDays: 3 });
+    expect(writeNode).toHaveBeenCalledWith(STUDIO, 3);
     expect(writeDevice).not.toHaveBeenCalled();
     expect(autoSettleRuleModelNote(built)).toBe(
       "Set on Studio, so every device lists its tasks the same way.",

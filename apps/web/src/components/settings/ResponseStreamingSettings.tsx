@@ -1,20 +1,12 @@
-import {
-  DEFAULT_UNIFIED_SETTINGS,
-  type ResponseStreamingMode,
-  type ServerSettings,
-} from "@ryco/contracts/settings";
-import type { NodeSettingsConfig } from "@ryco/client-runtime/state/settings/nodeSettingsFanOut";
+import { DEFAULT_UNIFIED_SETTINGS, type ResponseStreamingMode } from "@ryco/contracts/settings";
+import type { NodeSettingsConfig } from "@ryco/client-runtime/state/settings/nodeSettingsTargets";
 
-import { useAppPreferencesLabel } from "../../deviceName";
-import { isElectron } from "../../env";
-import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
+import { useSettings } from "../../hooks/useSettings";
 import { ensureLocalApi, readLocalApi } from "../../localApi";
 import { useServerConfig } from "../../rpc/serverState";
-import { useSettingsTarget } from "../../settingsTarget";
-import { ApplyToAllNodes } from "./ApplyToAllNodes";
-import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayout";
-import { settingsScopeLabel } from "./settingsSections.logic";
+import { SettingsSection } from "./settingsLayout";
 import { SettingsSelect, type SettingsSelectOption } from "./SettingsSelect";
+import { SharedSettingRow, sharedControlLabel } from "./sharedSettings/SharedSettingRow";
 
 const MODE_OPTIONS: ReadonlyArray<SettingsSelectOption<ResponseStreamingMode>> = [
   { value: "paragraph", label: "Paragraphs" },
@@ -29,14 +21,8 @@ const MODE_DESCRIPTIONS: Record<ResponseStreamingMode, string> = {
   token: "Text appears token by token. Slower, and long replies are harder to follow.",
 };
 
-const selectStreamingMode = (settings: ServerSettings): ResponseStreamingMode =>
-  settings.responseStreamingMode;
 const nodeKeepsStreamingModes = (config: NodeSettingsConfig): boolean =>
   config.environment.capabilities.responseStreamingModes === true;
-const formatStreamingMode = (mode: ResponseStreamingMode): string => {
-  const label = MODE_OPTIONS.find((option) => option.value === mode)?.label;
-  return typeof label === "string" ? label : mode;
-};
 
 // An older node reports no mode: it streams whole messages, or tokens if its legacy switch
 // is on, and this client cannot read that switch.
@@ -46,23 +32,13 @@ const UNSUPPORTED_STATUS =
 
 /** Node setting for how assistant text reaches every client while a reply streams. */
 export function ResponseStreamingSettings() {
-  const settings = useSettings();
-  const { updateSettings } = useUpdateSettings();
-  const config = useServerConfig();
-  const supported = config?.environment.capabilities.responseStreamingModes === true;
-  const unsupported = config !== null && !supported;
-  const target = useSettingsTarget();
-  const appLabel = useAppPreferencesLabel();
-  const nodeScopeLabel = settingsScopeLabel("node", {
-    appLabel,
-    nativeClient: isElectron,
-    nodeLabel: target?.nodeLabel ?? null,
-  });
-  const mode = settings.responseStreamingMode;
-
-  const selectMode = (next: ResponseStreamingMode) => {
+  // Token by token asks first: it only exists for backwards compatibility.
+  const selectMode = (
+    next: ResponseStreamingMode,
+    apply: (mode: ResponseStreamingMode) => void,
+  ) => {
     if (next !== "token") {
-      updateSettings({ responseStreamingMode: next });
+      apply(next);
       return;
     }
     void (async () => {
@@ -72,54 +48,40 @@ export function ResponseStreamingSettings() {
           "It is significantly slower than paragraph streaming and makes long replies harder to follow. This mode exists only for backwards compatibility.",
         ].join("\n"),
       );
-      if (confirmed) updateSettings({ responseStreamingMode: "token" });
+      if (confirmed) apply("token");
     })();
   };
 
   return (
     <SettingsSection title="Responses" owner="node">
-      <SettingsRow
-        id="response-streaming"
-        title="Response streaming"
-        description={unsupported ? UNSUPPORTED_DESCRIPTION : MODE_DESCRIPTIONS[mode]}
-        owner="node"
-        scope={nodeScopeLabel}
-        status={
-          unsupported ? (
-            UNSUPPORTED_STATUS
-          ) : supported ? (
-            <ApplyToAllNodes
-              label="response streaming"
-              select={selectStreamingMode}
-              format={formatStreamingMode}
-              patch={{ responseStreamingMode: mode }}
-              supported={nodeKeepsStreamingModes}
-            />
-          ) : undefined
-        }
-        resetAction={
-          supported && mode !== DEFAULT_UNIFIED_SETTINGS.responseStreamingMode ? (
-            <SettingResetButton
-              label="response streaming"
-              onClick={() =>
-                updateSettings({
-                  responseStreamingMode: DEFAULT_UNIFIED_SETTINGS.responseStreamingMode,
-                })
-              }
-            />
-          ) : null
-        }
-        control={
+      <SharedSettingRow
+        settingKey="responseStreamingMode"
+        description={<ResponseStreamingDescription />}
+        knowsSetting={nodeKeepsStreamingModes}
+        unknownSettingStatus={UNSUPPORTED_STATUS}
+        defaultValue={DEFAULT_UNIFIED_SETTINGS.responseStreamingMode}
+        resetLabel="response streaming"
+        render={(control) => (
+          // An older node reports no mode: it streams its own way, so no mode is claimed.
           <SettingsSelect
-            value={unsupported ? "" : mode}
-            onValueChange={selectMode}
+            value={control.known ? control.value : ""}
+            onValueChange={(next) => selectMode(next, control.onChange)}
             options={MODE_OPTIONS}
-            ariaLabel="Response streaming"
+            ariaLabel={sharedControlLabel("Response streaming", control)}
             placeholder="Set by the node"
-            disabled={!supported}
+            disabled={control.disabled || !control.known}
           />
-        }
+        )}
       />
     </SettingsSection>
   );
+}
+
+/** The shown device's mode, described; an older node streams its own way. */
+function ResponseStreamingDescription() {
+  const config = useServerConfig();
+  const mode = useSettings((settings) => settings.responseStreamingMode);
+  if (config !== null && config.environment.capabilities.responseStreamingModes !== true)
+    return UNSUPPORTED_DESCRIPTION;
+  return MODE_DESCRIPTIONS[mode];
 }

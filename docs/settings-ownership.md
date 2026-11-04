@@ -41,26 +41,19 @@ desktop, and native mobile using the shared settings schema. Mobile retains its
 own native screens and the same persistence ownership. The legacy web phone
 presentation remains frozen.
 
-## Applying a node setting to every node
+## Settings shared between nodes
 
-With two or more nodes known, some node defaults offer **Apply to all nodes**:
-auto-settle, New threads, worktree branch prefix and setup, branch names by
-change type, the Git writing style, commit and pull request instructions, pull
-request templates, and response streaming. It is a bulk edit, not a synced
-global: the value shown is written once to every connected node this client may
-change, each through its own connection, and offline nodes keep their value. The
-result names every node left out and why. A row whose value differs on another
-connected node shows **Mixed**, with each node's value in its tooltip; nodes
-that are not connected never count.
-
-Each node's write carries that node's own compare-and-set values, read from its
-own last known config, never the values of the node on screen. Hosted mode asks
-each node's own session whether it may change settings. Project overrides, the
-initial model (provider instances differ per node), providers, MCP, security,
-diagnostics, storage cleanup, paths and execution authority (Agent Control,
-process priority, continue after restart) are never written across nodes.
-`@ryco/client-runtime/state/settings/nodeSettingsFanOut` holds the shared
-mechanism for web and mobile.
+Node settings that make sense on every device are **shared device settings**
+(`docs/shared-device-settings.md`): one edit writes every node this client may
+change now, offline nodes catch up when any Ryco client sees them again, and a
+node can keep its own value. The web settings rows and the mobile app's node
+screens (new-task defaults, auto-settle, storage retention, "Use on every node")
+send the same stamped commands from
+`@ryco/client-runtime/state/settings/sharedDeviceSettings`, and both apps run
+the same runtime (`settingsSharingRuntime`). Project overrides, the initial
+model (provider instances differ per node), providers, MCP, security,
+diagnostics and process priority stay per node. Hosted mode asks each node's
+own session whether it may change settings.
 
 ## A chat's model, effort and speed
 

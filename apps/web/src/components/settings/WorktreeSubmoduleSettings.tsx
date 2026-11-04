@@ -29,6 +29,7 @@ const WORKTREE_SUBMODULE_SETTING: ProjectOverrideSelectSpec<WorktreeSubmodules> 
     };
   },
   patch: worktreeSubmodulesPatch,
+  sharedKey: "worktreeSubmodules",
   unsupportedStatus:
     "This node does not support configurable submodules. Update the node to change this setting.",
   inheritStatus: () => "Use repository configuration when present, otherwise the device default.",

@@ -290,9 +290,29 @@
       "types": "./src/state/settings/projectPreferenceEditing.ts",
       "import": "./src/state/settings/projectPreferenceEditing.ts"
     },
-    "./state/settings/nodeSettingsFanOut": {
-      "types": "./src/state/settings/nodeSettingsFanOut.ts",
-      "import": "./src/state/settings/nodeSettingsFanOut.ts"
+    "./state/settings/nodeSettingsTargets": {
+      "types": "./src/state/settings/nodeSettingsTargets.ts",
+      "import": "./src/state/settings/nodeSettingsTargets.ts"
+    },
+    "./state/settings/settingsSections": {
+      "types": "./src/state/settings/settingsSections.ts",
+      "import": "./src/state/settings/settingsSections.ts"
+    },
+    "./state/settings/settingsSharingClock": {
+      "types": "./src/state/settings/settingsSharingClock.ts",
+      "import": "./src/state/settings/settingsSharingClock.ts"
+    },
+    "./state/settings/settingsSharingRuntime": {
+      "types": "./src/state/settings/settingsSharingRuntime.ts",
+      "import": "./src/state/settings/settingsSharingRuntime.ts"
+    },
+    "./state/settings/sharedDeviceSettings": {
+      "types": "./src/state/settings/sharedDeviceSettings.ts",
+      "import": "./src/state/settings/sharedDeviceSettings.ts"
+    },
+    "./state/settings/sharedDeviceSettingsRunner": {
+      "types": "./src/state/settings/sharedDeviceSettingsRunner.ts",
+      "import": "./src/state/settings/sharedDeviceSettingsRunner.ts"
     },
     "./state/terminal": {
       "types": "./src/state/terminal/index.ts",

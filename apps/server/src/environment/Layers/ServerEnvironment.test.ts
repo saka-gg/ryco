@@ -1,4 +1,5 @@
 import * as nodePath from "node:path";
+import { SETTINGS_SHARING_VERSION } from "@ryco/shared/settingsSharing";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { desktopAppAutomaticUpdateMode } from "@ryco/shared/desktopResourceTelemetry";
@@ -68,6 +69,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(second.capabilities.worktreeSubmoduleSettings).toBe(true);
       expect(second.capabilities.requiredWorktreeBootstrap).toBe(true);
       expect(second.capabilities.nodeAutoSettlement).toBe(true);
+      expect(second.capabilities.settingsSharingVersion).toBe(SETTINGS_SHARING_VERSION);
       expect(second.capabilities.usageLimitRecovery).toBe(true);
       expect(second.capabilities.responseStreamingModes).toBe(true);
       expect(second.capabilities.worktreeNotes).toBe(true);

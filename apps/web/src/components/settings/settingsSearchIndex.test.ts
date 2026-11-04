@@ -1,49 +1,40 @@
 import { EnvironmentId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import type { HostedSettingsRole } from "./settingsSections.logic";
+import type { HostedSettingsRole, SettingsReach } from "./settingsSections.logic";
 import {
+  describeSettingsSearchEntry,
   filterSettingsSearchEntries,
-  settingsSectionListed,
+  settingsSearchEntryDestination,
+  SETTINGS_SEARCH_INDEX,
   type SettingsDesktopCapability,
   type SettingsSearchScope,
 } from "./settingsSearchIndex";
 
-function node(input: {
-  readonly primary?: boolean;
-  readonly connected?: boolean;
-  readonly role?: HostedSettingsRole;
-}): SettingsSearchScope["node"] {
-  const primary = input.primary ?? true;
-  return {
-    target: {
-      environmentId: EnvironmentId.make("environment-local"),
-      nodeLabel: "Studio Mac",
-      serverConfig: null,
-      primary,
-      connected: input.connected ?? true,
-    },
-    isPrimary: primary,
-    nodeRole: input.role === undefined ? "owner" : input.role,
-  };
-}
-
-/** A local browser on its own primary node, unless overridden. */
+/** A local browser on its own primary device, unless overridden. */
 function scope(
-  overrides: Partial<SettingsSearchScope> & {
+  overrides: {
+    readonly hosted?: boolean;
+    readonly desktopComputerUse?: boolean;
+    readonly device?: SettingsReach["device"];
+    readonly localOnboarding?: boolean;
     readonly capabilities?: ReadonlyArray<SettingsDesktopCapability>;
   } = {},
 ): SettingsSearchScope {
-  const { capabilities = [], ...rest } = overrides;
+  const { capabilities = [] } = overrides;
   return {
-    hosted: false,
-    desktopComputerUse: false,
-    localOnboarding: false,
+    reach: {
+      hosted: overrides.hosted ?? false,
+      desktopComputerUse: overrides.desktopComputerUse ?? false,
+      device: overrides.device === undefined ? { gated: false, role: "owner" } : overrides.device,
+    },
+    localOnboarding: overrides.localOnboarding ?? false,
     hasDesktopCapability: (capability) => capabilities.includes(capability),
-    node: node({}),
-    ...rest,
   };
 }
+
+/** A device whose role decides: hosted, or a device other than this app's own. */
+const gated = (role: HostedSettingsRole): SettingsReach["device"] => ({ gated: true, role });
 
 const titles = (query: string, searchScope: SettingsSearchScope) =>
   filterSettingsSearchEntries(query, searchScope).map((entry) => entry.title);
@@ -75,61 +66,68 @@ describe("filterSettingsSearchEntries", () => {
     expect(titles("tour", scope({ localOnboarding: true }))).toEqual(["Welcome tour"]);
   });
 
-  it("gives a hosted viewer only this app's rows and the device's archive", () => {
-    const viewer = scope({ hosted: true, node: node({ role: "viewer" }) });
-    const results = filterSettingsSearchEntries("device", viewer);
+  it("gives a hosted viewer this app's rows and the device's archive, never its settings", () => {
+    const viewer = scope({ hosted: true, device: gated("viewer") });
+    const results = filterSettingsSearchEntries("thread", viewer);
     expect(results.length).toBeGreaterThan(0);
-    expect(results.every((entry) => entry.owner === "client")).toBe(true);
+    expect(
+      results.every((entry) => entry.storage === "app" || entry.storage === "device-read"),
+    ).toBe(true);
     expect(titles("unarchive", viewer)).toEqual(["Archive"]);
-    expect(titles("device name", scope({ hosted: true }))).toEqual(["Device name"]);
-  });
-
-  it("drops device rows with no device, or one this client cannot change", () => {
-    const local = filterSettingsSearchEntries("device", scope());
-    expect(local.some((entry) => entry.owner === "node")).toBe(true);
-    for (const withoutDevice of [
-      scope({ node: { target: null, isPrimary: false, nodeRole: null } }),
-      scope({ node: node({ primary: false, connected: false }) }),
-      scope({ node: node({ primary: false, role: "viewer" }) }),
-    ]) {
-      expect(
-        filterSettingsSearchEntries("device", withoutDevice).filter(
-          (entry) => entry.owner === "node",
-        ),
-      ).toEqual([]);
-    }
-    expect(titles("device name", scope({ node: node({ primary: false }) }))).toEqual([
+    expect(titles("device name", viewer)).toEqual([]);
+    expect(titles("device name", scope({ hosted: true, device: gated("owner") }))).toEqual([
       "Device name",
     ]);
   });
+
+  it("keeps this computer's reach and pairing off the hosted client", () => {
+    expect(titles("pairing link", scope())).toEqual(["Pairing link"]);
+    expect(titles("pairing link", scope({ hosted: true, device: gated("owner") }))).toEqual([]);
+  });
+
+  it("fails closed for device rows while the role is unknown or stale", () => {
+    const local = filterSettingsSearchEntries("device", scope());
+    expect(local.some((entry) => entry.storage === "device")).toBe(true);
+    for (const withoutDevice of [scope({ device: null }), scope({ device: gated(null) })]) {
+      expect(
+        filterSettingsSearchEntries("device", withoutDevice).filter(
+          (entry) => entry.storage === "device" || entry.storage === "device-read",
+        ),
+      ).toEqual([]);
+    }
+    expect(titles("device name", scope({ device: gated("owner") }))).toEqual(["Device name"]);
+  });
 });
 
-describe("settingsSectionListed", () => {
-  it("keeps Connections in this app, and out of it on the hosted client", () => {
-    expect(settingsSectionListed(scope(), "client", "connections")).toBe(true);
-    expect(settingsSectionListed(scope({ hosted: true }), "client", "connections")).toBe(false);
-    expect(settingsSectionListed(scope(), "node", "connections")).toBe(false);
+describe("where a result opens", () => {
+  const target = EnvironmentId.make("remote");
+  const primary = EnvironmentId.make("local");
+
+  it("opens device rows on the device searched, this computer's rows on its own page, on their tab", () => {
+    const entry = (title: string) => SETTINGS_SEARCH_INDEX.find((item) => item.title === title)!;
+    expect(settingsSearchEntryDestination(entry("Worktree root"), { target, primary })).toEqual({
+      section: "projects",
+      environmentId: target,
+      deviceTab: null,
+    });
+    expect(settingsSearchEntryDestination(entry("Network access"), { target, primary })).toEqual({
+      section: "device",
+      environmentId: primary,
+      deviceTab: "access",
+    });
+    expect(settingsSearchEntryDestination(entry("Session code"), { target, primary })).toEqual({
+      section: "device",
+      environmentId: target,
+      deviceTab: "security",
+    });
   });
 
-  it("lists Integrations in this app only on desktops with computer use", () => {
-    expect(settingsSectionListed(scope(), "client", "integrations")).toBe(false);
-    expect(
-      settingsSectionListed(scope({ desktopComputerUse: true }), "client", "integrations"),
-    ).toBe(true);
-    expect(settingsSectionListed(scope(), "node", "integrations")).toBe(true);
-  });
-
-  it("lists device sections only for a device whose role allows them", () => {
-    expect(settingsSectionListed(scope(), "node", "providers")).toBe(true);
-    expect(
-      settingsSectionListed(
-        scope({ node: { target: null, isPrimary: false, nodeRole: "owner" } }),
-        "node",
-        "providers",
-      ),
-    ).toBe(false);
-    const remoteViewer = scope({ node: node({ primary: false, role: "viewer" }) });
-    expect(settingsSectionListed(remoteViewer, "node", "providers")).toBe(false);
-    expect(settingsSectionListed(remoteViewer, "node", "archived")).toBe(true);
+  it("names the place as the nav does", () => {
+    expect(describeSettingsSearchEntry({ section: "projects" })).toBe(
+      "Work › Projects & worktrees",
+    );
+    expect(describeSettingsSearchEntry({ section: "device", part: "security" }, "Studio Mac")).toBe(
+      "Devices › Studio Mac › Security",
+    );
   });
 });

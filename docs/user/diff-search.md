@@ -12,7 +12,7 @@ Click anywhere in the Diff panel, for example on a line of the diff, then press 
 the cursor in the search row. If you selected text on one line of the diff first, it becomes the
 search. Pressing `Cmd+F` again in the search row selects what you typed.
 
-The key is your **Find in current thread** shortcut (**Settings > Keybindings**). Outside the Diff
+The key is your **Find in current thread** shortcut (**Settings > Keyboard**). Outside the Diff
 panel it still finds in the thread.
 
 ## Move between matches

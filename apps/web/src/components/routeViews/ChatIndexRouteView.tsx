@@ -76,7 +76,7 @@ function HostedStaticOnboardingState() {
                 Your saved environments stay in this browser.
               </EmptyDescription>
               <div className="mt-6 flex justify-center">
-                <Button size="sm" onClick={() => openSettings("connections")}>
+                <Button size="sm" onClick={() => openSettings("devices")}>
                   <PlusIcon className="size-4" />
                   Add environment
                 </Button>

@@ -1,62 +1,166 @@
 import { EnvironmentId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { useSettingsDialogStore } from "../../settingsDialogStore";
-import { SETTINGS_SECTION_IDS, SETTINGS_SECTION_LABELS } from "./SettingsPage";
-import { SETTINGS_SEARCH_INDEX } from "./settingsSearchIndex";
 import type { SettingsTarget } from "../../settingsTarget";
+import { SETTINGS_SEARCH_INDEX } from "./settingsSearchIndex";
+import { SETTINGS_SECTION_LABELS, settingsSection } from "./settingsRegistry";
 import {
-  hostedSettingsSectionAllowed,
+  deviceSecurityReachable,
   isNodeSettingsTargetReadOnly,
-  settingsSectionAvailable,
-  settingsSectionInDestination,
+  settingsSectionAppOnly,
+  settingsSectionHasDeviceParts,
+  settingsSectionListed,
   settingsSectionReachable,
-  settingsSectionScope,
+  settingsStorageReachable,
+  type HostedSettingsRole,
+  type SettingsReach,
 } from "./settingsSections.logic";
 
+const ROLES = [
+  "viewer",
+  "operator",
+  "owner",
+  null,
+] as const satisfies ReadonlyArray<HostedSettingsRole>;
+
+function reach(overrides: Partial<SettingsReach> = {}): SettingsReach {
+  return {
+    hosted: false,
+    desktopComputerUse: false,
+    device: { gated: false, role: "owner" },
+    ...overrides,
+  };
+}
+
+describe("who may open which part", () => {
+  it("keeps this app's rows reachable for every reader, hosted or not", () => {
+    for (const role of ROLES) {
+      expect(
+        settingsStorageReachable("app", reach({ hosted: true, device: { gated: true, role } })),
+      ).toBe(true);
+    }
+    expect(settingsStorageReachable("app", reach({ device: null }))).toBe(true);
+  });
+
+  it("gives rows stored on a device to its owner only, where the role decides", () => {
+    expect(settingsStorageReachable("device", reach())).toBe(true);
+    for (const role of ROLES) {
+      expect(settingsStorageReachable("device", reach({ device: { gated: true, role } }))).toBe(
+        role === "owner",
+      );
+    }
+    expect(settingsStorageReachable("device", reach({ device: null }))).toBe(false);
+  });
+
+  it("lets any role read the shown device's archive, and fails closed without one", () => {
+    for (const role of ROLES) {
+      expect(
+        settingsStorageReachable("device-read", reach({ device: { gated: true, role } })),
+      ).toBe(role !== null);
+    }
+  });
+
+  it("keeps this computer's reach off the hosted client, and computer use on the desktop app", () => {
+    expect(settingsStorageReachable("this-computer", reach())).toBe(true);
+    expect(settingsStorageReachable("this-computer", reach({ hosted: true }))).toBe(false);
+    expect(settingsStorageReachable("desktop", reach())).toBe(false);
+    expect(settingsStorageReachable("desktop", reach({ desktopComputerUse: true }))).toBe(true);
+    expect(settingsStorageReachable("hub", reach())).toBe(false);
+    expect(settingsStorageReachable("hub", reach({ hosted: true }))).toBe(true);
+  });
+});
+
+describe("which sections the nav lists", () => {
+  it("lists a section when any part is reachable, so mixed sections stay for a hosted viewer", () => {
+    const viewer = reach({ hosted: true, device: { gated: true, role: "viewer" } });
+    expect(settingsSectionListed("chat", viewer)).toBe(true);
+    expect(settingsSectionListed("inbox", viewer)).toBe(true);
+    expect(settingsSectionListed("providers", viewer)).toBe(false);
+    expect(settingsSectionListed("agent-control", viewer)).toBe(false);
+    expect(settingsSectionListed("appearance", viewer)).toBe(true);
+    expect(settingsSectionListed("updates", viewer)).toBe(true);
+    expect(settingsSectionListed("account", viewer)).toBe(true);
+    expect(settingsSectionListed("account", reach())).toBe(false);
+  });
+
+  it("keeps a remote device's sections outside hosted mode while its role is unknown or not owner", () => {
+    // Offline or connecting (no role yet), or connected without ownership: the device bar's
+    // device must not send the page elsewhere; the page says why its rows do not show.
+    for (const role of ROLES) {
+      const remote = reach({ device: { gated: true, role } });
+      expect(settingsSectionListed("providers", remote)).toBe(true);
+      expect(settingsSectionListed("usage", remote)).toBe(true);
+      expect(settingsSectionListed("agent-control", remote)).toBe(true);
+    }
+    // Still nothing on a device to list before any device is known.
+    expect(settingsSectionListed("providers", reach({ device: null }))).toBe(false);
+    // Hosted, the role decides.
+    expect(
+      settingsSectionListed(
+        "providers",
+        reach({ hosted: true, device: { gated: true, role: null } }),
+      ),
+    ).toBe(false);
+  });
+
+  it("shows the device bar only where a reachable part is stored on a device", () => {
+    expect(settingsSectionHasDeviceParts("projects", reach())).toBe(true);
+    expect(settingsSectionHasDeviceParts("appearance", reach())).toBe(false);
+    expect(settingsSectionHasDeviceParts("device", reach())).toBe(false);
+    expect(
+      settingsSectionHasDeviceParts("chat", reach({ device: { gated: true, role: "viewer" } })),
+    ).toBe(false);
+  });
+
+  it("calls a section This app only when every part is this app's", () => {
+    expect(settingsSectionAppOnly("appearance")).toBe(true);
+    expect(settingsSectionAppOnly("keybindings")).toBe(true);
+    expect(settingsSectionAppOnly("chat")).toBe(false);
+    expect(settingsSectionAppOnly("updates")).toBe(false);
+  });
+});
+
 describe("the Updates section", () => {
-  it("belongs to this app, which reaches every device, never to one node's settings", () => {
-    expect(SETTINGS_SECTION_IDS).toContain("updates");
+  it("lists every device from this app, for every hosted role", () => {
     expect(SETTINGS_SECTION_LABELS.get("updates")).toBe("Updates");
-    expect(settingsSectionScope("updates")).toBe("device");
-    expect(settingsSectionInDestination("updates", "client", false)).toBe(true);
-    expect(settingsSectionInDestination("updates", "client", true)).toBe(true);
-    expect(settingsSectionInDestination("updates", "node", true)).toBe(false);
-    expect(settingsSectionInDestination("updates", "node", false)).toBe(false);
-  });
-
-  it("opens in this app's settings even when a device is named", () => {
-    useSettingsDialogStore.getState().openSettings("updates", EnvironmentId.make("remote-node"));
-    expect(useSettingsDialogStore.getState()).toMatchObject({
-      section: "updates",
-      editingScope: "client",
-    });
-    useSettingsDialogStore.getState().closeSettings();
-  });
-
-  it("is reachable in every build and for every hosted role", () => {
-    // Each device's own owner check decides what may be updated there (the plan
-    // marks the rest skipped), so the section itself is not gated on one role.
-    expect(settingsSectionAvailable("updates", false)).toBe(true);
-    expect(settingsSectionAvailable("updates", true)).toBe(true);
-    expect(settingsSectionReachable("updates", { hosted: false, role: null })).toBe(true);
-    for (const role of ["viewer", "operator", "owner", null] as const) {
-      expect(hostedSettingsSectionAllowed("updates", role)).toBe(true);
-      expect(settingsSectionReachable("updates", { hosted: true, role })).toBe(true);
+    expect(settingsSection("updates").parts).toContain("app");
+    for (const role of ROLES) {
+      expect(
+        settingsSectionListed("updates", reach({ hosted: true, device: { gated: true, role } })),
+      ).toBe(true);
     }
   });
 
   it("is findable by search under this app", () => {
-    const entries = SETTINGS_SEARCH_INDEX.filter((entry) => entry.section === "updates");
-    expect(entries.length).toBeGreaterThan(0);
-    for (const entry of entries) expect(entry.owner).toBe("client");
-    expect(
-      entries.some((entry) =>
-        `${entry.title} ${entry.description} ${entry.keywords ?? ""}`
-          .toLowerCase()
-          .includes("check for updates"),
-      ),
-    ).toBe(true);
+    const entries = SETTINGS_SEARCH_INDEX.filter((entry) => entry.title === "Update everything");
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ section: "updates", storage: "app" });
+    expect(`${entries[0]?.keywords}`).toContain("check for updates");
+  });
+});
+
+describe("the frozen phone tier's gates", () => {
+  it("keeps today's per-section rules, failing closed while the hosted role is unknown", () => {
+    expect(settingsSectionReachable("appearance", { hosted: true, role: null })).toBe(true);
+    expect(settingsSectionReachable("archived", { hosted: true, role: null })).toBe(false);
+    expect(settingsSectionReachable("archived", { hosted: true, role: "viewer" })).toBe(true);
+    expect(settingsSectionReachable("providers", { hosted: true, role: "operator" })).toBe(false);
+    expect(settingsSectionReachable("providers", { hosted: true, role: "owner" })).toBe(true);
+    expect(settingsSectionReachable("connections", { hosted: true, role: "owner" })).toBe(false);
+    expect(settingsSectionReachable("connections", { hosted: false, role: null })).toBe(true);
+    // The Hub account is a Hub page, never a section of the sheet.
+    for (const hosted of [false, true]) {
+      expect(settingsSectionReachable("account", { hosted, role: "owner" })).toBe(false);
+    }
+  });
+
+  it("agrees with the page on a device's Security", () => {
+    for (const role of ROLES) {
+      expect(deviceSecurityReachable({ hosted: true, role })).toBe(
+        settingsSectionReachable("security", { hosted: true, role }),
+      );
+    }
+    expect(deviceSecurityReachable({ hosted: false, role: null })).toBe(true);
   });
 });
 

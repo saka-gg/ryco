@@ -5,6 +5,7 @@ import {
   DEFAULT_STORAGE_RETENTION_POLICY,
   type StorageRetentionPolicy,
 } from "@ryco/contracts/storage";
+import type { NodeSettingsTarget } from "@ryco/client-runtime/state/settings/nodeSettingsTargets";
 import { createStorageManagementController } from "@ryco/client-runtime/state/storage";
 import { formatStorageSize, resolveStorageRetentionPolicy } from "@ryco/shared/storageRetention";
 import { AppText as Text } from "../../components/AppText";
@@ -13,10 +14,18 @@ import { readRpcClient, updateEnvironmentServerSettings } from "../../connection
 import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
 import { SettingsRow } from "./components/SettingsRow";
 import { SettingsSection } from "./components/SettingsSection";
-import { canChangeNodeSettings } from "./nodeSettingsTargets";
+import { canChangeNodeSettings, homeNodeSettingsTargets } from "./nodeSettingsTargets";
+import { mobileSettingsSharing } from "./sharing/mobileSettingsSharing";
+import { saveNodeSharedSetting } from "./sharing/sharedSettingEdits";
 
 export function NodeStorageSettings() {
   const nodes = useHomeEnvironments();
+  const configs = useEnvironmentServerConfigs();
+  // Every node, for the shared retention policy: a node's edit is stamped against all of them.
+  const targets = useMemo(
+    () => homeNodeSettingsTargets({ nodes, configs, write: updateEnvironmentServerSettings }),
+    [configs, nodes],
+  );
   return (
     <>
       {nodes.map((node) => (
@@ -25,6 +34,7 @@ export function NodeStorageSettings() {
           environmentId={node.environmentId}
           label={node.label}
           ready={canChangeNodeSettings(node)}
+          targets={targets}
         />
       ))}
     </>
@@ -35,10 +45,12 @@ function NodeStoragePanel({
   environmentId,
   label,
   ready,
+  targets,
 }: {
   environmentId: EnvironmentId;
   label: string;
   ready: boolean;
+  targets: ReadonlyArray<NodeSettingsTarget>;
 }) {
   const configs = useEnvironmentServerConfigs();
   const settings = configs.get(environmentId)?.settings;
@@ -70,12 +82,19 @@ function NodeStoragePanel({
     controller.invalidatePreview();
     setSelected([]);
     try {
-      await updateEnvironmentServerSettings(
-        environmentId,
-        projectId
-          ? { projectStorageRetention: { [projectId]: next } }
-          : { storageRetention: next! },
-      );
+      // A project's policy stays on its node; the node's policy is a shared setting.
+      if (projectId)
+        await updateEnvironmentServerSettings(environmentId, {
+          projectStorageRetention: { [projectId]: next },
+        });
+      else if (next)
+        await saveNodeSharedSetting({
+          runtime: mobileSettingsSharing,
+          targets,
+          environmentId,
+          key: "storageRetention",
+          value: next,
+        });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not save retention policy.");
     } finally {

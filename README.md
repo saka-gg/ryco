@@ -89,7 +89,7 @@ It ships as a cross-platform desktop app (macOS, Linux, Windows) and as a local 
 > - **OpenCode** — install [OpenCode](https://opencode.ai) and run `opencode auth login`
 > - **Grok** — install [Grok Build](https://docs.x.ai/build/overview) and run `grok login`, or configure `XAI_API_KEY` on the provider instance
 >
-> GitHub Copilot and Cursor are also supported when their provider CLIs/accounts are available on the machine running Ryco. Check **Settings → Providers** for live auth and version status.
+> GitHub Copilot and Cursor are also supported when their provider CLIs/accounts are available on the machine running Ryco. Check **Settings → Providers & models** for live auth and version status.
 
 ### Run without installing
 

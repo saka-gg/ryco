@@ -15,7 +15,7 @@ Monitoring, even with the Option-key shortcut on.
 
 ## Capture shortcut
 
-**Settings → General → Window capture** has an optional global shortcut. It is off by default. When
+**Settings → Chat & composer → Window capture** has an optional global shortcut. It is off by default. When
 on, pressing it in any app captures the frontmost window, brings Ryco forward and attaches the capture
 to the focused chat.
 

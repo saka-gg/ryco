@@ -29,13 +29,17 @@ import {
   XIcon,
 } from "lucide-react";
 
-import { type SettingsSectionId, useSettingsDialogStore } from "../../../settingsDialogStore";
+import { useSettingsDialogStore } from "../../../settingsDialogStore";
 import { isHostedHubMode } from "../../../env";
 import { useHostedHubStore } from "../../../hostedHub/state";
 import {
   hostedSettingsRoleSnapshot,
   settingsSectionReachable,
 } from "../../settings/settingsSections.logic";
+import {
+  resolvePhoneSettingsSection,
+  type PhoneSettingsSectionId,
+} from "../../settings/settingsRegistry";
 import {
   ArchivedThreadsPanel,
   GeneralSettingsPanel,
@@ -47,28 +51,24 @@ import { Sheet, SheetPopup } from "../../ui/sheet";
 import { PhoneAppearanceSettings } from "./PhoneAppearanceSettings";
 
 interface PhoneSettingsItem {
-  id: SettingsSectionId;
+  id: PhoneSettingsSectionId;
   label: string;
   icon: ComponentType<{ className?: string }>;
 }
 
 /**
- * The same section inventory the desktop dialog navigates (labels and order
- * match `SettingsPage`'s `NAV_ITEMS`), split for the phone list into the
- * general group and the progressive-disclosure "Advanced" group. Diagnostics
- * hosts the development-only tier-preview override, which stays gated inside
- * `DiagnosticsSettings` behind `import.meta.env.DEV` — grouping it under
- * Advanced changes reachability, never gating. The registry is mirrored rather
- * than imported so the two surfaces can group and order independently.
+ * The frozen web phone tier's section inventory (AGENTS.md: not extended). It
+ * keeps the sections it shipped with, split for the phone list into the general
+ * group and the progressive-disclosure "Advanced" group. Diagnostics hosts the
+ * development-only tier-preview override, which stays gated inside
+ * `DiagnosticsSettings` behind `import.meta.env.DEV`.
  *
- * THE MIRROR IS CHECKED RATHER THAN TRUSTED. A section added to the desktop
- * dialog and not here is unreachable on every phone-tier presentation — below
- * 768px, on a coarse-pointer device under 500px tall, and in the hosted PWA on
- * a phone — and a programmatic `openSettings(id)` for it falls silently back to
- * the list, because `ALL_ITEMS.find` returns undefined. That is exactly what
- * happened to `security`. {@link PHONE_SETTINGS_SECTION_IDS} is exported so
- * `SettingsPage.test.ts` can assert the two inventories agree, which no
- * "every label in this array is present" test could.
+ * THE INVENTORY IS CHECKED RATHER THAN TRUSTED. The settings page regrouped its
+ * sections; every page section names the phone section a request to open it
+ * lands on (`settingsRegistry.ts`, `phone`), and `SettingsPage.test.ts` asserts
+ * this list is exactly {@link PhoneSettingsSectionId}, so no request falls
+ * silently back to the list because `ALL_ITEMS.find` returns undefined. That is
+ * what once happened to `security`.
  */
 const GENERAL_ITEMS: ReadonlyArray<PhoneSettingsItem> = [
   { id: "account", label: "Account", icon: UserRoundIcon },
@@ -93,7 +93,7 @@ const ADVANCED_ITEMS: ReadonlyArray<PhoneSettingsItem> = [
 const ALL_ITEMS: ReadonlyArray<PhoneSettingsItem> = [...GENERAL_ITEMS, ...ADVANCED_ITEMS];
 
 /** Every section this surface can navigate to, for the mirror check. */
-export const PHONE_SETTINGS_SECTION_IDS: ReadonlyArray<SettingsSectionId> = ALL_ITEMS.map(
+export const PHONE_SETTINGS_SECTION_IDS: ReadonlyArray<PhoneSettingsSectionId> = ALL_ITEMS.map(
   (item) => item.id,
 );
 
@@ -102,14 +102,14 @@ export const PHONE_SETTINGS_GENERAL_LABELS: ReadonlyArray<string> = GENERAL_ITEM
   (item) => item.label,
 );
 
-const SECTIONS_WITH_RESTORE: ReadonlySet<SettingsSectionId> = new Set([
+const SECTIONS_WITH_RESTORE: ReadonlySet<PhoneSettingsSectionId> = new Set([
   "general",
   "providers",
   "appearance",
 ]);
 
 /** The closed-store default; used to detect open-to-section deep links. */
-const DEFAULT_SECTION: SettingsSectionId = "general";
+const DEFAULT_SECTION: PhoneSettingsSectionId = "general";
 
 const LazyAccountSettingsPanel = lazy(() =>
   import("../../settings/AccountSettings").then((module) => ({
@@ -172,7 +172,7 @@ const LazyStatisticsPanel = lazy(() =>
   })),
 );
 
-function SectionPanel({ section }: { section: SettingsSectionId }) {
+function SectionPanel({ section }: { section: PhoneSettingsSectionId }) {
   return (
     <Suspense
       fallback={
@@ -239,7 +239,8 @@ const PHONE_SETTINGS_SURFACE_CLASS_NAME =
  */
 export function PhoneSettingsSurface() {
   const open = useSettingsDialogStore((s) => s.open);
-  const storeSection = useSettingsDialogStore((s) => s.section);
+  // The page's sections and old ids alike open this tier's own section for them.
+  const storeSection = resolvePhoneSettingsSection(useSettingsDialogStore((s) => s.section));
   const closeSettings = useSettingsDialogStore((s) => s.closeSettings);
   const setSection = useSettingsDialogStore((s) => s.setSection);
   const hostedRole = useHostedHubStore((state) => state.effectiveRole);
@@ -248,7 +249,7 @@ export function PhoneSettingsSurface() {
   const hosted = isHostedHubMode();
   const role = hostedSettingsRoleSnapshot(hostedRole, hostedDirectoryStatus, hostedTransportStatus);
   const sectionAllowed = useCallback(
-    (id: SettingsSectionId) => settingsSectionReachable(id, { hosted, role }),
+    (id: PhoneSettingsSectionId) => settingsSectionReachable(id, { hosted, role }),
     [hosted, role],
   );
   const generalItems = GENERAL_ITEMS.filter((item) => sectionAllowed(item.id));
@@ -257,7 +258,7 @@ export function PhoneSettingsSurface() {
   // The list is the resting view; a non-null pushed section renders the
   // full-width section page. The store's `section` value stays canonical —
   // this only tracks whether the section page is on top of the list.
-  const [pushedSection, setPushedSection] = useState<SettingsSectionId | null>(null);
+  const [pushedSection, setPushedSection] = useState<PhoneSettingsSectionId | null>(null);
   const [advancedExpanded, setAdvancedExpanded] = useState(false);
 
   // Deep-link detection without store changes: on close the stored section
@@ -305,8 +306,8 @@ export function PhoneSettingsSurface() {
   // user came from. Deferred a frame so it lands after the popup's own focus
   // handling and after the target view has rendered.
   const sectionHeadingRef = useRef<HTMLHeadingElement | null>(null);
-  const listRowRefs = useRef(new Map<SettingsSectionId, HTMLButtonElement>());
-  const lastPushedSectionRef = useRef<SettingsSectionId | null>(null);
+  const listRowRefs = useRef(new Map<PhoneSettingsSectionId, HTMLButtonElement>());
+  const lastPushedSectionRef = useRef<PhoneSettingsSectionId | null>(null);
   const focusFrameRef = useRef<number | null>(null);
   // The dialog primitive re-captures focus onto the popup when the focused
   // element (the tapped row, or the section's back button) leaves the DOM, on
@@ -350,7 +351,7 @@ export function PhoneSettingsSurface() {
     };
   }, []);
 
-  const pushSection = (id: SettingsSectionId) => {
+  const pushSection = (id: PhoneSettingsSectionId) => {
     setSection(id);
     setPushedSection(id);
     scheduleFocus(() => sectionHeadingRef.current);

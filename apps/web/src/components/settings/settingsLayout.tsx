@@ -1,6 +1,14 @@
 import { useSettingsEditingScope } from "../../settingsTarget";
 import { AlertCircleIcon, InfoIcon, TriangleAlertIcon, Undo2Icon } from "lucide-react";
-import { type ComponentPropsWithoutRef, type ReactNode, useEffect, useRef, useState } from "react";
+import {
+  type ComponentPropsWithoutRef,
+  createContext,
+  type ReactNode,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 import { createVisibilityAwarePoller } from "../../lib/visibilityPolling";
 import { webAppLifecycle } from "../../platform/appLifecycle";
@@ -89,6 +97,81 @@ export function useRelativeLabelTick(instantsMs: ReadonlyArray<number | undefine
   return nowMs;
 }
 
+/** A small label beside a title: where a row is stored, or what a section edits. */
+export function SettingsChip({
+  icon,
+  children,
+  className,
+}: {
+  icon?: ReactNode;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <span
+      data-slot="settings-chip"
+      className={cn(
+        "inline-flex shrink-0 items-center gap-1 rounded-full bg-muted px-1.5 py-px text-[10.5px] font-medium leading-4 text-muted-foreground [&_svg]:size-2.5",
+        className,
+      )}
+    >
+      {icon}
+      {children}
+    </span>
+  );
+}
+
+const SettingsRowChipContext = createContext<ReactNode>(null);
+/**
+ * A chip every row below shows beside its title. The settings page marks rows
+ * stored on a device "Per device" this way, in sections that mix them with
+ * this app's rows.
+ */
+export const SettingsRowChipProvider = SettingsRowChipContext.Provider;
+
+/**
+ * "All devices" while the device the page shows cannot be used (offline, or not this reader's
+ * to change) and another device can: only shared rows show, each writing every device it can
+ * reach now (offline ones catch up). Rows stored on one device wait for that device, so a row
+ * outside a shared row renders nothing, and a section without a shared row hides.
+ */
+const SharedRowsOnlyContext = createContext(false);
+export const SharedRowsOnlyProvider = SharedRowsOnlyContext.Provider;
+const SharedRowContext = createContext(false);
+
+/** Marks a shared row's content: it shows while only shared rows may. */
+export function SharedRowScope({ children }: { readonly children: ReactNode }) {
+  return <SharedRowContext.Provider value={true}>{children}</SharedRowContext.Provider>;
+}
+
+/** Whether only shared rows show now, and whether this place is inside one. */
+export function useSharedRowsOnly(): { readonly only: boolean; readonly inSharedRow: boolean } {
+  return { only: useContext(SharedRowsOnlyContext), inSharedRow: useContext(SharedRowContext) };
+}
+
+/**
+ * Content of a device part that is no settings row of a shared setting (an import, a storage
+ * scan, a list read from the device): not mounted at all while only shared rows show, so it
+ * never reads or acts on the device lending those rows, which the reader did not pick.
+ */
+export function DeviceBound({ children }: { readonly children: ReactNode }) {
+  return useContext(SharedRowsOnlyContext) ? null : children;
+}
+
+/**
+ * While only shared rows show, hides what holds no shared row and is not a settings row (rows
+ * hide themselves): content outside any section, and panels inside a section's card, such as
+ * a device's own lists. Mounted all the same, against the device the shared rows use; content
+ * that reads or acts on the device is wrapped in `DeviceBound` instead.
+ */
+export const SHARED_ROWS_ONLY_CHILDREN_CLASS =
+  "contents [&>*:not(:has([data-shared-setting]))]:hidden [&_[data-slot=settings-card]>*:not([data-shared-setting]):not(:has([data-shared-setting]))]:hidden";
+
+/** The chip rows show here (null for none). */
+export function useSettingsRowChip(): ReactNode {
+  return useContext(SettingsRowChipContext);
+}
+
 export function SettingsSection({
   title,
   description,
@@ -110,12 +193,18 @@ export function SettingsSection({
   children: ReactNode;
 }) {
   const editingScope = useSettingsEditingScope();
+  const sharedRows = useSharedRowsOnly();
   if (owner && editingScope !== "all" && editingScope !== owner) return null;
   return (
     <section
       data-settings-section={title}
       {...sectionProps}
-      className={cn("min-w-0 scroll-mt-6", className)}
+      className={cn(
+        "min-w-0 scroll-mt-6",
+        // While only shared rows show, a section without one hides.
+        sharedRows.only && !sharedRows.inSharedRow && "not-has-[[data-shared-setting]]:hidden",
+        className,
+      )}
     >
       <div className="mb-2.5 flex min-h-7 items-end justify-between gap-3 px-0.5">
         <div className="min-w-0">
@@ -181,12 +270,17 @@ export function SettingsRow({
   className?: string;
 }) {
   const editingScope = useSettingsEditingScope();
+  const chip = useContext(SettingsRowChipContext);
+  const sharedRows = useSharedRowsOnly();
   if (owner && editingScope !== "all" && editingScope !== owner) return null;
+  // A row stored on one device waits for that device while only shared rows show.
+  if (sharedRows.only && !sharedRows.inSharedRow) return null;
   return (
     <div
       id={id}
       data-setting-scope={scope}
       data-slot="settings-row"
+      data-shared-setting={sharedRows.inSharedRow || undefined}
       className={cn(
         // Lays out by its own width, so a row reads the same in a narrow panel.
         "@container/settings-row min-w-0 border-t border-border/60 py-3.5 first:border-t-0",
@@ -198,6 +292,7 @@ export function SettingsRow({
         <div className="min-w-0 flex-1">
           <div className="flex min-h-5 min-w-0 items-center gap-1">
             <h3 className="min-w-0 text-[13px] font-medium leading-5 text-foreground">{title}</h3>
+            {chip}
             {resetAction ? (
               <span className="inline-flex shrink-0 items-center">{resetAction}</span>
             ) : null}

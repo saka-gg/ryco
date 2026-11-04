@@ -63,7 +63,7 @@ of the Ryco home: `~/.ryco/chats`, or `$RYCO_HOME/chats` when `RYCO_HOME` or `--
 another home. Under `--restrict-to-cwd` the default is `<workspace>/.ryco/chats`. Ryco creates the
 chats folder with the first chat.
 
-To use another location, open **Settings → General → Project defaults → Chats folder**, next to
+To use another location, open **Settings → Data & backup → Chats → Chats folder**, next to
 **Worktree root**. Use an absolute path on the node, or `~/` for the node user's home directory.
 The path is on the server's filesystem, also when you edit a remote node from another computer.
 Before saving, the server resolves symlinks and checks that the directory, or its nearest existing
@@ -133,7 +133,7 @@ conversation, so it can be archived before you send anything in it. See
 Archiving a chat hides it from the Chats section. **Move to Trash** keeps the conversation
 recoverable, and the chat's folder and files stay on disk.
 
-To delete a chat permanently, use **Settings → Archive → Trash → Delete permanently**. When no
+To delete a chat permanently, use **Settings → Data & backup → Cleanup suggestions → Delete permanently**. When no
 conversation of the chat is left, including in Trash, Ryco also removes the chat record. The folder
 stays on disk unless you select **Also delete the chat's folder** in the confirmation. That option
 is off by default. If you select it, Ryco deletes the folder and everything in it. It does not move
@@ -168,7 +168,7 @@ The dialog shows a live preview:
 - **Name.** The chat's title is filled in, and the dialog opens with the cursor in this field.
 - **Location.** The default is `<parent>/<folder name>`. The parent is the authorized workspace
   under `--restrict-to-cwd`. Otherwise it is **Add project starts in** (`addProjectBaseDirectory`,
-  under **Settings → General → Projects & threads**), then `~/Code` when it exists, then the home
+  under **Settings → Projects & worktrees**), then `~/Code` when it exists, then the home
   folder. The folder name follows the project name until you edit it. If the name is taken, the
   dialog suggests `-2`, `-3`, and so on. You can pick a folder with the desktop folder picker or
   type a path, which browses as you type.

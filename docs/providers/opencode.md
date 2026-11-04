@@ -11,7 +11,7 @@ own, so the same provider settings work for both.
 | 3.x        | —                                                        | not supported     |
 
 Ryco checks the version before it starts a server or sends a server anything that could change
-it. An older or unknown version shows on the provider's card in **Settings → Providers** with the
+it. An older or unknown version shows on the provider's card in **Settings → Providers & models** with the
 version you need.
 
 ## OpenCode 2 and your data

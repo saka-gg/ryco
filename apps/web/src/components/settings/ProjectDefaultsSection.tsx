@@ -108,7 +108,12 @@ function projectsPageLocationFor(environmentId: string | undefined, projectIds: 
  * This device's defaults for new threads and worktrees. Each project can
  * override them; those overrides live with the project on the projects page.
  */
-export function ProjectDefaultsSection() {
+export function ProjectDefaultsSection({
+  includeChatsFolder = true,
+}: {
+  /** The settings page shows the chats folder under Data & backup. */
+  readonly includeChatsFolder?: boolean;
+} = {}) {
   const config = useServerConfig();
   const target = useSettingsTarget();
   const navigate = useNavigate();
@@ -147,7 +152,7 @@ export function ProjectDefaultsSection() {
         <ProjectPreferenceSettings projectId="" projects={projects} />
       ) : null}
       <WorktreeRootSettings projectId="" projects={projects} />
-      <ChatsFolderSettings />
+      {includeChatsFolder ? <ChatsFolderSettings /> : null}
       <WorktreeSubmoduleSettings projectId="" projects={projects} />
     </SettingsSection>
   );

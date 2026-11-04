@@ -1221,14 +1221,13 @@ describe("ChatView Navigation (full app)", () => {
       const palette = page.getByTestId("command-palette");
       await page.getByPlaceholder("Search commands, projects, and threads...").fill("diff style");
       await expect.element(palette.getByText("Settings", { exact: true })).toBeInTheDocument();
-      await expect.element(palette.getByText("Appearance", { exact: true })).toBeInTheDocument();
+      await expect
+        .element(palette.getByText("Work › Git & pull requests", { exact: true }))
+        .toBeInTheDocument();
       await palette.getByText("Diff style", { exact: true }).click();
 
       await waitForURL(mounted.router, (path) => path === "/settings", "Settings should open.");
-      expect(useSettingsDialogStore.getState()).toMatchObject({
-        section: "appearance",
-        editingScope: "client",
-      });
+      expect(useSettingsDialogStore.getState()).toMatchObject({ section: "source-control" });
       await vi.waitFor(() =>
         expect(document.activeElement?.getAttribute("data-settings-section")).toBe("Diff style"),
       );

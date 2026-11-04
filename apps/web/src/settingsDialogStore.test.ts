@@ -7,13 +7,30 @@ describe("settingsDialogStore", () => {
   beforeEach(() => {
     useSettingsDialogStore.setState({
       open: false,
-      editingScope: "client",
       section: "general",
       targetEnvironmentId: null,
+      deviceView: "all",
     });
   });
 
-  it("keeps an explicit node target until the dialog closes", () => {
+  it("opens a named device's own values, and every device's otherwise", () => {
+    const store = useSettingsDialogStore.getState();
+    store.openSettings("usage", EnvironmentId.make("remote"));
+    expect(useSettingsDialogStore.getState()).toMatchObject({
+      section: "usage",
+      targetEnvironmentId: "remote",
+      deviceView: "device",
+    });
+
+    store.openSettings("usage");
+    expect(useSettingsDialogStore.getState().deviceView).toBe("all");
+
+    store.setDeviceView("device");
+    store.closeSettings();
+    expect(useSettingsDialogStore.getState().deviceView).toBe("all");
+  });
+
+  it("keeps an explicit device until settings close", () => {
     const environmentId = EnvironmentId.make("environment-qa");
 
     useSettingsDialogStore.getState().openSettings("providers", environmentId);
@@ -29,18 +46,31 @@ describe("settingsDialogStore", () => {
     expect(useSettingsDialogStore.getState()).toMatchObject({
       open: false,
       targetEnvironmentId: null,
+      deviceView: "all",
     });
   });
-  it("keeps local appearance separate when switching from a node destination", () => {
-    const store = useSettingsDialogStore.getState();
-    store.openSettings("providers", EnvironmentId.make("remote"));
-    expect(useSettingsDialogStore.getState().editingScope).toBe("node");
-    store.setEditingScope("client");
+
+  it("opens a device's page when only the device is named", () => {
+    const environmentId = EnvironmentId.make("remote");
+    useSettingsDialogStore.getState().openSettings(undefined, environmentId);
     expect(useSettingsDialogStore.getState()).toMatchObject({
-      editingScope: "client",
-      section: "general",
+      section: "device",
+      targetEnvironmentId: environmentId,
     });
-    store.openSettings("appearance");
-    expect(useSettingsDialogStore.getState().editingScope).toBe("client");
+  });
+
+  it("switches the device without leaving the section", () => {
+    const store = useSettingsDialogStore.getState();
+    store.openSettings("projects");
+    store.setTargetEnvironmentId(EnvironmentId.make("remote"));
+    expect(useSettingsDialogStore.getState()).toMatchObject({
+      section: "projects",
+      targetEnvironmentId: "remote",
+    });
+  });
+
+  it("keeps an old id as asked, for the page and the phone tier to redirect", () => {
+    useSettingsDialogStore.getState().openSettings("connections");
+    expect(useSettingsDialogStore.getState().section).toBe("connections");
   });
 });

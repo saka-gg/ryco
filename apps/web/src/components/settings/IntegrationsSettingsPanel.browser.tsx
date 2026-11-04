@@ -1,6 +1,7 @@
 import { EnvironmentId } from "@ryco/contracts";
 import { SettingsEditingScopeProvider, SettingsTargetProvider } from "../../settingsTarget";
 import "../../index.css";
+import type { ReactNode } from "react";
 
 import { page } from "vite-plus/test/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -38,6 +39,8 @@ vi.mock("../../hostedHub/capabilities", () => ({
     allowed: harness.settingsAllowed,
     reason: harness.settingsReason,
   }),
+  readHostedRpcCapability: () => ({ allowed: harness.settingsAllowed }),
+  subscribeHostedRpcCapabilities: () => () => undefined,
 }));
 
 vi.mock("./IntegrationsSettings", () => ({
@@ -57,23 +60,60 @@ vi.mock("./ComputerUseSettings", async () => {
   };
 });
 
-vi.mock("./McpServersSettings", () => ({
-  McpServersSettings: () => <div data-testid="mcp-servers">MCP servers</div>,
-}));
-
 import {
-  IntegrationsSettingsPanel,
-  loadIntegrationsSettingsPanel,
+  AgentControlSettingsPanel,
+  DeviceComputerUseSettings,
+  loadDeviceComputerUseSettings,
 } from "./IntegrationsSettingsPanel";
+import { SharedSettingsSourceProvider } from "./sharedSettings/sharedSettingsSource";
+import {
+  createTestSharedSettings,
+  TestDeviceTarget,
+} from "./sharedSettings/sharedSettingsTestSource";
+
+/** Agent Control on one simulated device, shared-settings rows and all. */
+function renderAgentControl() {
+  const network = createTestSharedSettings([
+    {
+      id: "local",
+      label: "Studio Mac",
+      settings: { agentControl: { enabled: harness.enabled, delegation: harness.delegation } },
+    },
+  ]);
+  render(
+    <SharedSettingsSourceProvider value={network.source}>
+      <TestDeviceTarget network={network} id="local">
+        <AgentControlSettingsPanel />
+      </TestDeviceTarget>
+    </SharedSettingsSourceProvider>,
+  );
+  return network;
+}
+
+const LOCAL_TARGET = {
+  environmentId: EnvironmentId.make("local"),
+  nodeLabel: "Studio Mac",
+  serverConfig: null,
+  primary: true,
+  connected: true,
+};
+
+function OnDevice(props: { readonly target: typeof LOCAL_TARGET; readonly children: ReactNode }) {
+  return (
+    <SettingsEditingScopeProvider value="node">
+      <SettingsTargetProvider value={props.target}>{props.children}</SettingsTargetProvider>
+    </SettingsEditingScopeProvider>
+  );
+}
 
 // Runs before anything else in this file loads the Computer Use chunk: the
-// panel keeps it once loaded.
-describe("loadIntegrationsSettingsPanel", () => {
+// part keeps it once loaded.
+describe("loadDeviceComputerUseSettings", () => {
   afterEach(() => {
     delete window.desktopBridge;
   });
 
-  it("resolves with the desktop Computer Use subsection loaded, so it renders in the first commit", async () => {
+  it("resolves with the desktop Computer Use controls loaded, so they render in the first commit", async () => {
     let releaseChunk = () => undefined as void;
     harness.computerUseChunk = new Promise<void>((resolve) => {
       releaseChunk = resolve;
@@ -84,17 +124,21 @@ describe("loadIntegrationsSettingsPanel", () => {
     });
 
     let settled = false;
-    const loading = loadIntegrationsSettingsPanel().then((panel) => {
+    const loading = loadDeviceComputerUseSettings().then((part) => {
       settled = true;
-      return panel;
+      return part;
     });
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(settled).toBe(false);
 
     releaseChunk();
-    const Panel = await loading;
-    expect(Panel).toBe(IntegrationsSettingsPanel);
-    const mounted = await render(<Panel />);
+    const Part = await loading;
+    expect(Part).toBe(DeviceComputerUseSettings);
+    const mounted = await render(
+      <OnDevice target={LOCAL_TARGET}>
+        <Part />
+      </OnDevice>,
+    );
     // Synchronously after the first commit: no loading state in between.
     expect(mounted.container.querySelector('[data-testid="computer-use"]')).not.toBeNull();
     expect(mounted.container.textContent).not.toContain("Loading device integrations");
@@ -102,33 +146,14 @@ describe("loadIntegrationsSettingsPanel", () => {
   });
 });
 
-describe("IntegrationsSettingsPanel", () => {
+describe("DeviceComputerUseSettings", () => {
   beforeEach(() => {
     delete window.desktopBridge;
-    harness.enabled = false;
-    harness.delegation = { maxDepth: null, maxTasksPerTree: null };
     harness.hosted = false;
-    harness.settingsAllowed = true;
-    harness.settingsReason = null;
-    vi.clearAllMocks();
   });
 
   afterEach(() => {
     delete window.desktopBridge;
-  });
-
-  it("separates MCP servers and only mounts local integrations when available", async () => {
-    const mounted = await render(<IntegrationsSettingsPanel />);
-    await expect.element(page.getByTestId("mcp-servers")).not.toBeInTheDocument();
-    await expect.element(page.getByTestId("computer-use")).not.toBeInTheDocument();
-    await mounted.unmount();
-    Object.defineProperty(window, "desktopBridge", {
-      configurable: true,
-      value: { computerUse: {} },
-    });
-    await render(<IntegrationsSettingsPanel />);
-    await expect.element(page.getByTestId("computer-use")).toBeInTheDocument();
-    await expect.element(page.getByTestId("mcp-servers")).not.toBeInTheDocument();
   });
 
   it.each([false, true])(
@@ -140,49 +165,31 @@ describe("IntegrationsSettingsPanel", () => {
         value: { computerUse: {} },
       });
       await render(
-        <SettingsEditingScopeProvider value="node">
-          <SettingsTargetProvider
-            value={{
-              environmentId: EnvironmentId.make("remote"),
-              nodeLabel: "Build Mac",
-              serverConfig: null,
-              primary: !desktop,
-              connected: true,
-            }}
-          >
-            <IntegrationsSettingsPanel />
-          </SettingsTargetProvider>
-        </SettingsEditingScopeProvider>,
+        <OnDevice
+          target={{
+            ...LOCAL_TARGET,
+            environmentId: EnvironmentId.make("remote"),
+            nodeLabel: "Build Mac",
+            primary: !desktop,
+          }}
+        >
+          <DeviceComputerUseSettings />
+        </OnDevice>,
       );
       await expect.element(page.getByTestId("computer-use")).not.toBeInTheDocument();
-      await expect
-        .element(
-          page.getByText(/To enable screen recording, accessibility, or computer use on Build Mac/),
-        )
-        .toBeVisible();
+      await expect.element(page.getByText(/Build Mac/)).toBeVisible();
     },
   );
 
-  it("exposes native permissions for the named local desktop device", async () => {
-    harness.hosted = false;
+  it("exposes native permissions for this computer in the desktop app", async () => {
     Object.defineProperty(window, "desktopBridge", {
       configurable: true,
       value: { computerUse: {} },
     });
     await render(
-      <SettingsEditingScopeProvider value="node">
-        <SettingsTargetProvider
-          value={{
-            environmentId: EnvironmentId.make("local"),
-            nodeLabel: "Studio Mac",
-            serverConfig: null,
-            primary: true,
-            connected: true,
-          }}
-        >
-          <IntegrationsSettingsPanel />
-        </SettingsTargetProvider>
-      </SettingsEditingScopeProvider>,
+      <OnDevice target={LOCAL_TARGET}>
+        <DeviceComputerUseSettings />
+      </OnDevice>,
     );
     await expect.element(page.getByTestId("computer-use")).toBeVisible();
     await expect
@@ -190,8 +197,31 @@ describe("IntegrationsSettingsPanel", () => {
       .not.toBeInTheDocument();
   });
 
+  it("says where computer use lives when this app has none", async () => {
+    await render(
+      <OnDevice target={LOCAL_TARGET}>
+        <DeviceComputerUseSettings />
+      </OnDevice>,
+    );
+    await expect.element(page.getByTestId("computer-use")).not.toBeInTheDocument();
+    await expect
+      .element(page.getByText("Computer use needs the Ryco desktop app on Studio Mac."))
+      .toBeVisible();
+  });
+});
+
+describe("AgentControlSettingsPanel", () => {
+  beforeEach(() => {
+    harness.enabled = false;
+    harness.delegation = { maxDepth: null, maxTasksPerTree: null };
+    harness.hosted = false;
+    harness.settingsAllowed = true;
+    harness.settingsReason = null;
+    vi.clearAllMocks();
+  });
+
   it("persists the Agent Control feature gate from Settings", async () => {
-    render(<IntegrationsSettingsPanel />);
+    const network = renderAgentControl();
 
     const toggle = page.getByLabelText("Enable Agent Control");
     await expect.element(toggle).not.toBeChecked();
@@ -199,13 +229,15 @@ describe("IntegrationsSettingsPanel", () => {
 
     await toggle.click();
 
-    expect(harness.updateSettings).toHaveBeenCalledWith({ agentControl: { enabled: true } });
+    await expect
+      .poll(() => network.settings("local").agentControl)
+      .toEqual({ enabled: true, delegation: { maxDepth: null, maxTasksPerTree: null } });
   });
 
   it("keeps the toggle disabled when Settings writes are unavailable", async () => {
     harness.settingsAllowed = false;
     harness.settingsReason = "Only an owner can change this setting.";
-    render(<IntegrationsSettingsPanel />);
+    renderAgentControl();
 
     await expect.element(page.getByLabelText("Enable Agent Control")).toBeDisabled();
     await expect.element(page.getByText("Only an owner can change this setting.")).toBeVisible();
@@ -213,7 +245,7 @@ describe("IntegrationsSettingsPanel", () => {
 
   it("separates automatic and external setup when Agent Control is enabled", async () => {
     harness.enabled = true;
-    render(<IntegrationsSettingsPanel />);
+    render(<AgentControlSettingsPanel />);
 
     await expect.element(page.getByTestId("agent-control-installations")).toBeVisible();
     await expect.element(page.getByText("Advanced manual setup")).toBeVisible();
@@ -225,24 +257,35 @@ describe("IntegrationsSettingsPanel", () => {
   it("sets the delegation limits once Agent Control is on, keeping the other limit", async () => {
     harness.enabled = true;
     harness.delegation = { maxDepth: null, maxTasksPerTree: 50 };
-    render(<IntegrationsSettingsPanel />);
+    const network = renderAgentControl();
+
+    // Three rows of one setting, each with its own element id; "Open" reveals the first.
+    await expect.element(page.getByLabelText("How deep tasks can go")).toBeVisible();
+    const ids = Array.from(document.querySelectorAll('[id^="shared-setting-agentControl"]')).map(
+      (element) => element.id,
+    );
+    expect(ids).toEqual([
+      "shared-setting-agentControl",
+      "shared-setting-agentControl-maxDepth",
+      "shared-setting-agentControl-maxTasksPerTree",
+    ]);
 
     await page.getByLabelText("How deep tasks can go").click();
     await page.getByRole("option", { name: "1 level: tasks can't delegate" }).click();
-    // Only the changed limit: a stale device never sends back `enabled` or the other limit.
-    expect(harness.updateSettings).toHaveBeenCalledWith({
-      agentControl: { delegation: { maxDepth: 1 } },
-    });
+    // The other limit and `enabled` stay as the device holds them.
+    await expect
+      .poll(() => network.settings("local").agentControl)
+      .toEqual({ enabled: true, delegation: { maxDepth: 1, maxTasksPerTree: 50 } });
 
     await page.getByLabelText("Tasks per chat").click();
     await page.getByRole("option", { name: "250 tasks" }).click();
-    expect(harness.updateSettings).toHaveBeenLastCalledWith({
-      agentControl: { delegation: { maxTasksPerTree: 250 } },
-    });
+    await expect
+      .poll(() => network.settings("local").agentControl)
+      .toEqual({ enabled: true, delegation: { maxDepth: 1, maxTasksPerTree: 250 } });
   });
 
   it("hides the delegation limits while Agent Control is off", async () => {
-    render(<IntegrationsSettingsPanel />);
+    render(<AgentControlSettingsPanel />);
     await expect.element(page.getByText("Delegation limits")).not.toBeInTheDocument();
   });
 });

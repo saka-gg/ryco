@@ -419,14 +419,14 @@ describe("local first-run onboarding", () => {
     await expect
       .element(page.getByText(`WELCOME TO RYCO · 3 OF ${ONBOARDING_STEPS.length}`))
       .toBeVisible();
-    // Connections shows the Hub section only in the desktop app, and so does the tour.
+    // All devices shows the Hub section only in the desktop app, and so does the tour.
     expect(page.getByRole("button", { name: "Ryco Hub" }).elements()).toHaveLength(0);
     await page.getByRole("button", { name: "Pairing link" }).click();
+    // This computer's own page, where its pairing lives.
     expect(useSettingsDialogStore.getState()).toMatchObject({
       open: true,
-      section: "connections",
-      editingScope: "client",
-      targetEnvironmentId: null,
+      section: "device",
+      targetEnvironmentId: fixture.id,
     });
     expect(useSettingsSearchRevealStore.getState().request?.targetId).toBe(PAIRING_LINK_TARGET_ID);
     expect(fixture.settings.localOnboardingCompletedEnvironmentIds.includes(fixture.id)).toBe(
@@ -453,8 +453,7 @@ describe("local first-run onboarding", () => {
       await page.getByRole("button", { name: "Ryco Hub" }).click();
       expect(useSettingsDialogStore.getState()).toMatchObject({
         open: true,
-        section: "connections",
-        editingScope: "client",
+        section: "devices",
       });
       expect(useSettingsSearchRevealStore.getState().request?.targetId).toBe("Hub");
     } finally {

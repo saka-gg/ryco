@@ -1,4 +1,4 @@
-import type { NodeSettingsTarget } from "@ryco/client-runtime/state/settings/nodeSettingsFanOut";
+import type { NodeSettingsTarget } from "@ryco/client-runtime/state/settings/nodeSettingsTargets";
 import type { EnvironmentId, ServerConfig } from "@ryco/contracts";
 import { WS_METHODS } from "@ryco/contracts/rpc";
 import type { ServerSettingsPatch } from "@ryco/contracts/settings";
@@ -47,9 +47,9 @@ export function nodeSettingsReadOnlyReason(node: NodeAccessRow): string | null {
 }
 
 /**
- * Every node "Apply to all connected nodes" tries, each with its own last
- * known config, whether it is connected and whether this device may change
- * it, and a write through its own connection. Listed once each.
+ * Every node a settings write may go to (shared device settings), each with its
+ * own last known config, whether it is connected and whether this device may
+ * change it, and a write through its own connection. Listed once each.
  */
 export function buildNodeSettingsTargets(input: {
   readonly environmentIds: Iterable<EnvironmentId>;

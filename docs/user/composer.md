@@ -2,7 +2,7 @@
 
 ## Send shortcut
 
-In **Settings > General > Composer controls > Send shortcut**, choose when Enter sends a message
+In **Settings > Keyboard > Keys > Send shortcut**, choose when Enter sends a message
 on web and desktop. `Cmd` below is `Ctrl` on Windows and Linux.
 
 - **Enter**: Enter sends. This is the default.

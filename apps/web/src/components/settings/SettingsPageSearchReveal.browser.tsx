@@ -36,20 +36,20 @@ async function renderSettingsPage() {
 }
 
 beforeEach(() => {
-  useSettingsDialogStore.setState({ open: true, section: "general", editingScope: "client" });
+  useSettingsDialogStore.setState({ open: true, section: "general" });
 });
 
 afterEach(async () => {
   await mounted?.unmount();
   mounted = null;
-  useSettingsDialogStore.setState({ open: false, section: "general", editingScope: "client" });
+  useSettingsDialogStore.setState({ open: false, section: "general" });
   useSettingsSearchRevealStore.setState({ request: null });
   document.body.innerHTML = "";
 });
 
 describe("settings rows the command palette asks for", () => {
   it("reveals a row requested before the page mounted", async () => {
-    useSettingsDialogStore.getState().showSection("client", "appearance");
+    useSettingsDialogStore.getState().setSection("source-control");
     requestSettingsReveal("Diff style");
     await renderSettingsPage();
 
@@ -63,7 +63,7 @@ describe("settings rows the command palette asks for", () => {
     await search.fill("font");
     await expect.element(page.getByText("Interface font")).toBeVisible();
 
-    useSettingsDialogStore.getState().showSection("client", "appearance");
+    useSettingsDialogStore.getState().setSection("source-control");
     requestSettingsReveal("Diff style");
 
     await vi.waitFor(() => expect(revealedSection()).toBe("Diff style"));

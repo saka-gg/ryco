@@ -314,6 +314,10 @@
       "types": "./src/serverSettings.ts",
       "import": "./src/serverSettings.ts"
     },
+    "./settingsSharing": {
+      "types": "./src/settingsSharing.ts",
+      "import": "./src/settingsSharing.ts"
+    },
     "./providerInstanceEnablement": {
       "types": "./src/providerInstanceEnablement.ts",
       "import": "./src/providerInstanceEnablement.ts"

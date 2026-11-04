@@ -10,9 +10,10 @@ import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget
 import { isNodeSettingsTargetReadOnly } from "./settingsSections.logic";
 import { updateEnvironmentServerSettings } from "../../environments/runtime";
 import { ensureLocalApi } from "../../localApi";
-import { ApplyToAllNodes } from "./ApplyToAllNodes";
+import type { ShareableServerSettingKey } from "@ryco/shared/settingsSharing";
 import { SettingsRow } from "./settingsLayout";
 import { SettingsSelect } from "./SettingsSelect";
+import { SharedSettingRow, sharedControlLabel } from "./sharedSettings/SharedSettingRow";
 
 const INHERIT = "inherit";
 
@@ -41,10 +42,10 @@ export interface ProjectOverrideSelectSpec<Value extends string> {
   ) => { readonly node: Value; readonly override: Value | null };
   readonly patch: (projectId: string | null, value: Value | null) => ServerSettingsPatch;
   /**
-   * Offers the node default to every node ("Apply to all nodes"), named this
-   * way in a sentence. A project's override never goes to other nodes.
+   * The node default is this shared device setting: on the settings page its row shows every
+   * device. A project's override stays on its device.
    */
-  readonly applyToAllNodesLabel?: string;
+  readonly sharedKey?: ShareableServerSettingKey;
   readonly unsupportedStatus: string;
   readonly inheritStatus: (node: Value) => string;
   readonly saveFailed: string;
@@ -68,6 +69,8 @@ export function ProjectOverrideSelectSetting<Value extends string>({
   const target = useSettingsTarget();
   const scope = useSettingsEditingScope();
   const environmentId = target?.environmentId ?? config?.environment.environmentId;
+  if (projectId === "" && spec.sharedKey !== undefined)
+    return <SharedDefaultSelect spec={spec} sharedKey={spec.sharedKey} />;
   return (
     <ProjectOverrideSelectEditor
       key={environmentId ?? "disconnected"}
@@ -119,17 +122,6 @@ export function ProjectOverrideSelectEditor<Value extends string>({
     setSaving(false);
   }
 
-  const applyToAllNodes =
-    spec.applyToAllNodesLabel !== undefined && !projectId ? (
-      <ApplyToAllNodes
-        label={spec.applyToAllNodesLabel}
-        select={(settings) => spec.select(settings, "").node}
-        format={(style) => spec.options.find((option) => option.value === style)?.label ?? style}
-        patch={spec.patch(null, node)}
-        supported={(nodeConfig) => spec.supported(nodeConfig.environment.capabilities)}
-        disabled={editingDisabled || saving}
-      />
-    ) : null;
   const options = [
     ...(projectId ? [{ value: INHERIT, label: "Inherit" }] : []),
     ...spec.options.map((option) => ({ value: option.value, label: option.label })),
@@ -155,7 +147,6 @@ export function ProjectOverrideSelectEditor<Value extends string>({
           ) : (
             spec.options.find((option) => option.value === value)?.description
           )}
-          {applyToAllNodes}
         </>
       }
       control={
@@ -168,6 +159,39 @@ export function ProjectOverrideSelectEditor<Value extends string>({
           options={options}
         />
       }
+    />
+  );
+}
+
+/** The device default of a setting shared across devices: one row for every device. */
+function SharedDefaultSelect<Value extends string>({
+  spec,
+  sharedKey,
+}: {
+  readonly spec: ProjectOverrideSelectSpec<Value>;
+  readonly sharedKey: ShareableServerSettingKey;
+}) {
+  return (
+    <SharedSettingRow
+      settingKey={sharedKey}
+      title={spec.title}
+      description={spec.description}
+      knowsSetting={(config) => spec.supported(config.environment.capabilities)}
+      unknownSettingStatus={spec.unsupportedStatus}
+      // Stands in, disabled, until the device's config arrives.
+      defaultValue={spec.select(undefined, "").node as never}
+      render={(control) => (
+        <SettingsSelect
+          ariaLabel={sharedControlLabel(spec.ariaLabel, control)}
+          width={spec.controlWidth ?? "md"}
+          value={String(control.value)}
+          disabled={control.disabled}
+          onValueChange={(next) => {
+            if (spec.isValue(next)) control.onChange(next as never);
+          }}
+          options={spec.options.map((option) => ({ value: option.value, label: option.label }))}
+        />
+      )}
     />
   );
 }

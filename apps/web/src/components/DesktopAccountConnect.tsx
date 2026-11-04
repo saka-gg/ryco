@@ -63,7 +63,7 @@ export function DesktopAccountConnect() {
         </Button>
         <Button
           variant="ghost"
-          onClick={() => useSettingsDialogStore.getState().openSettings("connections")}
+          onClick={() => useSettingsDialogStore.getState().openSettings("devices")}
         >
           Connection settings
         </Button>

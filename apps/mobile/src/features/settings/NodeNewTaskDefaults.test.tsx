@@ -89,6 +89,29 @@ vi.mock("../../connection/environmentApi", () => ({
     hoisted.writes.get(environmentId)!(patch),
 }));
 
+// The phone's sharing runtime, real but with memory storage and no nodes of its own: an edit
+// gets the panel's own targets.
+vi.mock("./sharing/mobileSettingsSharing", async () => {
+  const { createSettingsSharingRuntime } =
+    await import("@ryco/client-runtime/state/settings/settingsSharingRuntime");
+  const store = new Map<string, string>();
+  return {
+    mobileSettingsSharing: createSettingsSharingRuntime({
+      readNamespace: () => ({ kind: "local" }),
+      storage: {
+        getItem: (key) => store.get(key) ?? null,
+        setItem: (key, value) => void store.set(key, value),
+      },
+      generateId: () => "phone",
+      readTargets: () => [],
+      subscribeTargets: () => () => undefined,
+    }),
+    publishSettingsSharingTargets: () => undefined,
+    readSettingsSharingTargets: () => [],
+    readMobileSettingsSharingNamespace: () => ({ kind: "local" }),
+  };
+});
+
 import { NodeNewTaskDefaults } from "./NodeNewTaskDefaults";
 
 type Props = Record<string, unknown> & { readonly children?: ReactNode };
@@ -145,6 +168,8 @@ function addNode(input: {
   readonly node: TestNode;
   readonly role?: "owner" | "viewer";
   readonly connected?: boolean;
+  /** The node shares settings (its `settingsSharingVersion`). */
+  readonly sharing?: boolean;
 }) {
   const connected = input.connected ?? true;
   hoisted.environments.push({
@@ -154,7 +179,14 @@ function addNode(input: {
     connectionState: connected ? "connected" : "offline",
     mutationReady: connected,
   });
-  hoisted.configs.set(STUDIO, testNodeConfig(input.node.settings));
+  hoisted.configs.set(
+    STUDIO,
+    testNodeConfig(input.node.settings, {
+      projectPreferences: true,
+      worktreeSubmoduleSettings: true,
+      ...(input.sharing ? { settingsSharingVersion: 1 } : {}),
+    }),
+  );
   if (connected) hoisted.apis.set(STUDIO, input.node.api);
   hoisted.writes.set(STUDIO, input.node.write);
 }
@@ -230,12 +262,46 @@ describe("the New tasks panel", () => {
     ]);
   });
 
+  it("writes a node default as a stamped shared setting", async () => {
+    const node = testNode();
+    addNode({ node, sharing: true });
+    let tree: ReactNode = await settled();
+
+    (row(tree, "New threads")!.onPress as () => void)();
+    const [, , buttons] = hoisted.alert.mock.calls[0] as [
+      string,
+      string,
+      { text: string; onPress?: () => void }[],
+    ];
+    buttons[1]!.onPress!();
+    tree = await settled();
+
+    // The only node keeps following the shared value, now with the phone's stamp.
+    expect(node.writes).toEqual([
+      {
+        defaultThreadEnvMode: "worktree",
+        settingsSharing: {
+          defaultThreadEnvMode: {
+            mode: "shared",
+            stamp: { at: expect.any(Number), by: "phone~phone" },
+            onlyIfOlderShared: true,
+          },
+        },
+      },
+    ]);
+    expect(node.settings.settingsSharing.defaultThreadEnvMode?.mode).toBe("shared");
+    expect(row(tree, "New threads")).toMatchObject({ value: "New worktree" });
+  });
+
   it("shows a refused write as '<node>: <message>' and the node's values read again", async () => {
     const node = testNode();
     addNode({ node });
     let tree: ReactNode = await settled();
-    // Another device changes the node after this panel read it.
+    // Another device changes the node after this panel read it, and the node refuses this edit.
     node.changeElsewhere({ defaultThreadEnvMode: "worktree" });
+    hoisted.writes.set(STUDIO, async () => {
+      throw new Error("The node refused the value.");
+    });
 
     (row(tree, "New threads")!.onPress as () => void)();
     const [title, , buttons] = hoisted.alert.mock.calls[0] as [
@@ -249,7 +315,7 @@ describe("the New tasks panel", () => {
     tree = await settled();
 
     const alert = elements(tree, "Text").find((element) => element.props.accessibilityRole);
-    expect(textOf(alert)).toBe("Studio: Node preferences changed elsewhere. Reload before saving.");
+    expect(textOf(alert)).toBe("Studio: The node refused the value.");
     expect(row(tree, "New threads")).toMatchObject({ value: "New worktree" });
   });
 
@@ -281,7 +347,7 @@ describe("the New tasks panel", () => {
       expectedProjectPreferences: { [project]: { runSetupScript: false } },
     });
     expect(row(tree, "Worktree setup")).toMatchObject({ detail: "Inherited from node defaults" });
-    expect(row(tree, "Apply to all connected nodes")).toBeUndefined();
+    expect(row(tree, "Use on every node")).toBeUndefined();
   });
 
   it("shows a viewer the values with no control and no runtime mode row", async () => {

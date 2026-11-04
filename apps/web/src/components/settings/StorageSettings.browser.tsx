@@ -15,12 +15,17 @@ const fixtures = vi.hoisted(() => ({
 vi.mock("../../lib/utils", () => ({
   cn: (...values: unknown[]) => values.filter(Boolean).join(" "),
 }));
-vi.mock("../../rpc/serverState", () => ({
-  useServerConfig: () => ({
+vi.mock("../../rpc/serverState", () => {
+  const config = () => ({
     settings: fixtures.settings,
     environment: { environmentId: "fixture-node", capabilities: { storageManagement: true } },
-  }),
-}));
+  });
+  return {
+    useServerConfig: config,
+    usePrimaryServerConfigSelector: (selector: (value: unknown) => unknown) => selector(config()),
+    applySettingsUpdated: vi.fn(),
+  };
+});
 vi.mock("../../settingsTarget", () => ({
   useSettingsEditingScope: () => "node",
   useSettingsTarget: () => ({
@@ -40,6 +45,22 @@ vi.mock("../../environments/runtime", () => {
     updateEnvironmentServerSettings: fixtures.save,
   };
 });
+// The device policy goes through the shared-settings writer (its own tests cover it); here it
+// is a write to the one fixture node.
+vi.mock("./sharedSettings/SharedSettingRow", () => ({
+  useSharedSettingWriter: () => ({
+    save: async (next: unknown) => {
+      await fixtures.save("fixture-node", { storageRetention: next });
+      return {
+        applied: [{ environmentId: "fixture-node", label: "Fixture node" }],
+        notApplied: [],
+      };
+    },
+    status: null,
+  }),
+  saveSharedSetting: async (save: (next: unknown) => Promise<unknown>, next: unknown) =>
+    await save(next),
+}));
 let mounted: Awaited<ReturnType<typeof render>> | null = null;
 let scanned: Record<string, unknown> = {};
 beforeEach(() => {

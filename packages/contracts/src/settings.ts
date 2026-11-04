@@ -15,6 +15,7 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
 import * as Struct from "effect/Struct";
 import {
   EnvironmentId,
+  PositiveInt,
   TrimmedNonEmptyString,
   TrimmedString,
   rejectExcessProperties,
@@ -852,6 +853,84 @@ export const UsagePriceOverrides = Schema.Record(UsageModelId, UsagePriceOverrid
 );
 export type UsagePriceOverrides = typeof UsagePriceOverrides.Type;
 
+// ── Shared device settings ─────────────────────────────────────
+//
+// A shareable node setting is either shared (kept equal across every device that shares it) or
+// overridden on one device. Each device stores, next to the value, the stamp of the write that
+// set it. Which keys are shareable is runtime data (`@ryco/shared/settingsSharing`); see
+// docs/shared-device-settings.md.
+
+/** Longest writer id or setting key a sharing entry accepts. */
+export const SETTINGS_SHARING_ID_MAX_LENGTH = 128;
+/** Most entries a node keeps or a patch carries; far above the shareable key count. */
+export const SETTINGS_SHARING_ENTRY_LIMIT = 200;
+/**
+ * Highest stamp `at` a node accepts: 2^50 ms, about the year 37,600, far past any wall clock
+ * yet well below `Number.MAX_SAFE_INTEGER`, so a client's clock always has room to issue a
+ * later stamp than any it has seen (one stamp at the maximum would otherwise tie every later
+ * one). Clients also ignore stamps far ahead of their own wall clock
+ * (`SETTINGS_SHARING_MAX_CLOCK_LEAD_MS` in client-runtime).
+ */
+export const SETTINGS_SHARING_STAMP_MAX_AT = 2 ** 50;
+
+export const SettingsSharingMode = Schema.Literals(["shared", "override"]);
+export type SettingsSharingMode = typeof SettingsSharingMode.Type;
+
+/**
+ * When a write happened, as a hybrid logical clock: `at` is the writer's clock in ms (never
+ * behind any stamp it has seen), `by` the writer's stable client id. Ordered by `(at, by)`.
+ * A missing entry stands for the zero stamp, which is never written.
+ */
+export const SettingsSharingStamp = Schema.Struct({
+  at: PositiveInt.check(Schema.isLessThanOrEqualTo(SETTINGS_SHARING_STAMP_MAX_AT)),
+  by: TrimmedNonEmptyString.check(Schema.isMaxLength(SETTINGS_SHARING_ID_MAX_LENGTH)),
+});
+export type SettingsSharingStamp = typeof SettingsSharingStamp.Type;
+
+/**
+ * For a setting the node normalizes when it stores it (a path: `~/` expanded, symlinks
+ * resolved), the value as the person wrote it. Other devices are caught up to this value and
+ * normalize it themselves, so `~/w` stays right on a Mac and on Linux. Absent for every other
+ * key, and once the value changes without one.
+ */
+const SettingsSharingWrittenValue = WorktreeRoot;
+
+export const SettingsSharingEntry = Schema.Struct({
+  mode: SettingsSharingMode,
+  stamp: SettingsSharingStamp,
+  written: Schema.optionalKey(SettingsSharingWrittenValue),
+});
+export type SettingsSharingEntry = typeof SettingsSharingEntry.Type;
+
+const SettingsSharingKeyName = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(SETTINGS_SHARING_ID_MAX_LENGTH),
+);
+const settingsSharingEntryLimit = Schema.makeFilter((entries: object) =>
+  Object.keys(entries).length <= SETTINGS_SHARING_ENTRY_LIMIT
+    ? undefined
+    : `At most ${SETTINGS_SHARING_ENTRY_LIMIT} shared setting entries`,
+);
+
+/** Per shareable setting key; an absent key is shared with the zero stamp. */
+export const SettingsSharing = Schema.Record(SettingsSharingKeyName, SettingsSharingEntry).check(
+  settingsSharingEntryLimit,
+);
+export type SettingsSharing = typeof SettingsSharing.Type;
+
+/**
+ * One key's sharing write, applied in the same atomic settings write as the key's value (a
+ * `shared` entry must come with the value). `onlyIfOlderShared` makes it a catch-up: the node
+ * drops the entry and the key's value unless it is in `shared` mode with an older stamp.
+ */
+export const SettingsSharingPatchEntry = Schema.Struct({
+  mode: SettingsSharingMode,
+  stamp: SettingsSharingStamp,
+  onlyIfOlderShared: Schema.optionalKey(Schema.Literal(true)),
+  /** The node records the patch's own value here; see `SettingsSharingEntry.written`. */
+  written: Schema.optionalKey(SettingsSharingWrittenValue),
+});
+export type SettingsSharingPatchEntry = typeof SettingsSharingPatchEntry.Type;
+
 export const ServerSettings = Schema.Struct({
   initialModelSelection: Schema.NullOr(InitialModelSelection).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
@@ -998,6 +1077,10 @@ export const ServerSettings = Schema.Struct({
   usagePriceOverrides: UsagePriceOverrides.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   agentControl: AgentControlSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  // Shared or per-device state of each shareable key. Nodes that advertise the `settingsSharing`
+  // capability keep it; an older node decodes it to the empty default, so read that capability,
+  // never this record, to tell them apart.
+  settingsSharing: SettingsSharing.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 });
 export type ServerSettings = typeof ServerSettings.Type;
 
@@ -1192,6 +1275,13 @@ export const ServerSettingsPatch = Schema.Struct({
   // Per-model replacement; `null` removes the model's entry.
   usagePriceOverrides: Schema.optionalKey(
     Schema.Record(UsageModelId, Schema.NullOr(UsagePriceOverride)),
+  ),
+  // Per-key replacement; `null` removes the entry (shared with the zero stamp). Only shareable
+  // keys are accepted. Never send this key to a node without the `settingsSharing` capability.
+  settingsSharing: Schema.optionalKey(
+    Schema.Record(SettingsSharingKeyName, Schema.NullOr(SettingsSharingPatchEntry)).check(
+      settingsSharingEntryLimit,
+    ),
   ),
 });
 export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;

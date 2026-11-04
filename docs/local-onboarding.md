@@ -3,8 +3,9 @@
 Desktop and browsers connected to a loopback Ryco server offer a short setup flow after the
 current workspace and client settings have loaded. It shows provider discovery and authentication
 status, opens the existing project picker, and introduces tasks, review, and Settings. Its last
-tour entry links to **Settings → Connections** for using Ryco on other devices: **Pairing link**,
-**Connect a computer** (Remote environments), and on Desktop **Ryco Hub**.
+tour entry links to Settings for using Ryco on other devices: **Pairing link** (this computer's
+page under Devices), **Connect a computer** (Remote environments under All devices), and on
+Desktop **Ryco Hub** (All devices).
 
 Use **Provider settings** to configure an instance. Provider authentication uses each provider's
 own sign-in. **Sign in** on a provider's row opens it below the list, and it starts only when you

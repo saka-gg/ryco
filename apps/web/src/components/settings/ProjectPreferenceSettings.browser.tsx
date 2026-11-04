@@ -39,6 +39,8 @@ vi.mock("../chat/ProviderModelPicker", () => ({
 vi.mock("../chat/TraitsPicker", () => ({ TraitsPicker: () => <span>Traits picker</span> }));
 vi.mock("../../rpc/serverState", () => ({
   useServerConfig: () => harness.config,
+  usePrimaryServerConfigSelector: (selector: (config: unknown) => unknown) =>
+    selector(harness.config),
   applySettingsUpdated: vi.fn(),
 }));
 vi.mock("../../settingsTarget", () => ({
@@ -58,16 +60,44 @@ vi.mock("../../store", () => ({
 }));
 vi.mock("../../hostedHub/capabilities", () => ({
   useHostedRpcCapability: () => ({ allowed: harness.canMutate }),
+  readHostedRpcCapability: () => ({ allowed: harness.canMutate }),
+  subscribeHostedRpcCapabilities: () => () => undefined,
 }));
 vi.mock("../../environmentApi", () => ({
   ensureEnvironmentApi: () => ({ server: { getProjectPreferences: harness.read } }),
 }));
-vi.mock("../../environments/runtime", () => ({
-  updateEnvironmentServerSettings: (...args: unknown[]) => harness.update(...args),
-}));
+vi.mock("../../environments/runtime", () => {
+  const emptyStore = Object.assign(
+    (selector: (state: { byId: Record<string, never> }) => unknown) => selector({ byId: {} }),
+    { getState: () => ({ byId: {} }), subscribe: () => () => undefined },
+  );
+  return {
+    updateEnvironmentServerSettings: (...args: unknown[]) => harness.update(...args),
+    readEnvironmentConnection: () => null,
+    subscribeEnvironmentConnections: () => () => undefined,
+    useSavedEnvironmentRegistryStore: emptyStore,
+    useSavedEnvironmentRuntimeStore: emptyStore,
+  };
+});
 vi.mock("../../localApi", () => ({ ensureLocalApi: harness.local }));
-// One node here; writing a default to every node is ApplyToAllNodes.browser.tsx's.
-vi.mock("./ApplyToAllNodes", () => ({ ApplyToAllNodes: () => null }));
+vi.mock("../DeviceIcon", () => ({ DeviceIcon: () => null }));
+// Shared-settings rows know no device besides the settings target here.
+vi.mock("../../environments/settingsSharingTargets", () => ({
+  readSettingsSharingTargets: () => [],
+  subscribeSettingsSharingTargets: () => () => undefined,
+}));
+vi.mock("../../settingsSharing/settingsSharingRuntime", async () => {
+  const { executeSettingsSharingCommand } =
+    await import("@ryco/client-runtime/state/settings/sharedDeviceSettingsRunner");
+  return {
+    nextSettingsSharingEditStamp: () => ({ at: Date.now(), by: "test" }),
+    readSettingsSharingRuntimeRevision: () => 0,
+    readSettingsSharingState: () => ({ attempts: new Map(), cache: {} }),
+    runSettingsSharingCommand: (command: never, extra: never[] = []) =>
+      executeSettingsSharingCommand(extra, command),
+    subscribeSettingsSharingRuntime: () => () => undefined,
+  };
+});
 
 const FIXTURE_PROJECT_CHOICES = [{ id: "p", title: "Fixture project" }];
 
@@ -228,7 +258,7 @@ describe("project inheritance controls", () => {
     expect(page.getByRole("combobox", { name: "Generated branch names" }).elements()).toEqual([]);
     expect(page.getByRole("combobox", { name: "Pull request template" }).elements()).toEqual([]);
   });
-  it("guards a node default with the value the editor showed", async () => {
+  it("writes a node default through the shared-settings row", async () => {
     await render(<ProjectDefaultsSection />);
     await expect.element(page.getByRole("combobox", { name: "Default thread mode" })).toBeEnabled();
     await page.getByRole("combobox", { name: "Default thread mode" }).click();
@@ -238,10 +268,9 @@ describe("project inheritance controls", () => {
       .toEqual([
         [
           "fixture-node",
-          {
-            defaultThreadEnvMode: "worktree",
-            expectedNodePreferences: { defaultThreadEnvMode: "local" },
-          },
+          // A device default is a shared device setting; this node predates sharing, so the
+          // write is a plain edit of it.
+          { defaultThreadEnvMode: "worktree" },
         ],
       ]);
   });
@@ -282,7 +311,7 @@ describe("project inheritance controls", () => {
     harness.update.mockRejectedValue(
       new Error("Project preferences changed elsewhere. Reload before saving."),
     );
-    await render(<ProjectDefaultsSection />);
+    await render(<ProjectPreferenceSettings projectId="p" projects={FIXTURE_PROJECT_CHOICES} />);
     await expect.element(page.getByRole("combobox", { name: "Worktree setup" })).toBeEnabled();
     await page.getByRole("combobox", { name: "Worktree setup" }).click();
     await page.getByRole("option", { name: "Skip setup" }).click();

@@ -8,7 +8,7 @@ on web, desktop, and the mobile app.
 ## Requirements
 
 HTML renders are part of [Agent Control](../agent-control.md). Turn on **Enable Agent Control**
-under **Settings → Integrations**. Ryco then offers two private tools to the provider sessions it
+under **Settings → Agent Control**. Ryco then offers two private tools to the provider sessions it
 starts (Codex, Claude, GitHub Copilot, and Cursor):
 
 - `ryco_html_preview` renders a page in Ryco's own headless browser and returns a screenshot, the

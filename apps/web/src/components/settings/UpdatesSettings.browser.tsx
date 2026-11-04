@@ -23,6 +23,7 @@ const mock = vi.hoisted(() => ({
 
 vi.mock("../../updates/useUpdateEverything", () => ({
   useUpdateEverything: () => mock.controller!,
+  useUpdateEverythingPlan: () => mock.controller!.plan,
   useNodeUpdateState: (environmentId: EnvironmentId) =>
     (mock.nodeUpdates.get(environmentId) as NodeUpdateState | undefined) ?? null,
 }));
@@ -40,7 +41,10 @@ import {
   runState,
   THIS_MAC_DEVICE,
 } from "../updates/updateEverythingTestFixtures";
+import { SettingsEditingScopeProvider, SettingsTargetProvider } from "../../settingsTarget";
 import { UpdatesSettings } from "./UpdatesSettings";
+import { SharedSettingsSourceProvider } from "./sharedSettings/sharedSettingsSource";
+import { createTestSharedSettings } from "./sharedSettings/sharedSettingsTestSource";
 
 function setController(overrides: Partial<UpdateEverythingController> = {}) {
   mock.controller = {
@@ -70,7 +74,7 @@ describe("Settings → Updates", () => {
     document.body.innerHTML = "";
   });
 
-  it("lets each node's owner turn on automatic provider updates", async () => {
+  it("shares automatic updates across devices, with what desktop apps do on their own", async () => {
     const nodeConfig = (
       settings: Partial<ServerConfig["settings"]>,
       supported = true,
@@ -93,52 +97,55 @@ describe("Settings → Updates", () => {
       LINUX_ID,
       nodeConfig({ enableProviderUpdateChecks: false }, true, "install-on-quit"),
     );
-    // Too old to update unattended: no switch at all.
     writeEnvironmentServerConfig(OFFLINE_ID, nodeConfig({}, false));
     setController();
-    mounted = await render(<UpdatesSettings />);
+    const network = createTestSharedSettings([
+      {
+        id: M4_ID,
+        label: "MacBook Pro M4",
+        settings: { automaticUpdates: true },
+        capabilities: { automaticUpdates: true },
+      },
+      {
+        id: THIS_MAC_ID,
+        label: "This Mac",
+        settings: { automaticUpdates: true },
+        capabilities: { automaticUpdates: true },
+      },
+      {
+        id: LINUX_ID,
+        label: "Linux box",
+        settings: { automaticUpdates: false },
+        capabilities: { automaticUpdates: true },
+      },
+    ]);
+    // As the Updates page renders it: inside its app part, whose scope hides device rows.
+    mounted = await render(
+      <SharedSettingsSourceProvider value={network.source}>
+        <SettingsEditingScopeProvider value="client">
+          <SettingsTargetProvider value={null}>
+            <UpdatesSettings />
+          </SettingsTargetProvider>
+        </SettingsEditingScopeProvider>
+      </SharedSettingsSourceProvider>,
+    );
 
     const toggle = (name: string) =>
-      page.getByRole("switch", { name: `Update ${name} automatically`, exact: true });
+      page.getByRole("switch", { name: `Update automatically on ${name}`, exact: true });
+    await expect.element(page.getByText("Differs on 1 of 3")).toBeVisible();
     await expect.element(toggle("MacBook Pro M4")).toBeChecked();
-    await expect.element(toggle("MacBook Pro M4")).toBeEnabled();
-    // Unattended updates act only with provider update checks on: the switch shows the real
-    // value, and can still be turned off.
-    await expect.element(toggle("This Mac")).toBeChecked();
-    await expect.element(toggle("This Mac")).toBeEnabled();
-    await expect
-      .element(
-        page.getByText(
-          "Does nothing while provider update checks are off for this node (General settings).",
-        ),
-      )
-      .toBeVisible();
     await expect.element(toggle("Linux box")).not.toBeChecked();
-    await expect.element(toggle("Linux box")).toBeDisabled();
     await expect
-      .element(
-        page.getByText(
-          "Acts only while provider update checks are on. Turn them on for this node first (General settings).",
-        ),
-      )
+      .element(page.getByText("Acts only on devices whose provider update checks are on."))
       .toBeVisible();
-    expect(toggle("Studio PC").elements()).toHaveLength(0);
     // Desktop app nodes say what the app does with its own updates; CLI nodes say nothing.
     await expect
-      .element(
-        page.getByText(
-          "This desktop app also downloads its own updates in the background. One installs only when you choose Restart.",
-        ),
-      )
+      .element(page.getByText(/One installs only when you choose Restart\./))
       .toBeVisible();
-    await expect
-      .element(
-        page.getByText(
-          "This desktop app also downloads its own updates in the background and installs one when you quit it. It never restarts by itself.",
-        ),
-      )
-      .toBeVisible();
-    expect(page.getByText(/^This desktop app also downloads/).elements()).toHaveLength(2);
+    await expect.element(page.getByText(/installs one when you quit it/)).toBeVisible();
+
+    await page.getByRole("button", { name: "Use “On” everywhere" }).click();
+    await expect.poll(() => network.settings(LINUX_ID).automaticUpdates).toBe(true);
   });
 
   it("lists every device and updates one, all, or checks again", async () => {

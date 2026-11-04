@@ -1,7 +1,7 @@
 # Commit and pull request writing style
 
 Ryco can write commit messages and pull request titles and descriptions for you. **Settings →
-Source Control → Commit & pull request writing** chooses how they read:
+Git & pull requests → Commit & pull request writing** chooses how they read:
 
 - **Repository style** (the default): match the tone, capitalization, length and prefixes of
   the repository's own history. Ryco shows the model up to ten recent commit subjects and up to

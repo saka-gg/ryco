@@ -1,20 +1,17 @@
 import "../../index.css";
 
-import {
-  DEFAULT_SERVER_SETTINGS,
-  EnvironmentId,
-  type ServerChatsCapability,
-  type ServerConfig,
-} from "@ryco/contracts";
-import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
+import type { ServerChatsCapability } from "@ryco/contracts";
 import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
-import { useState } from "react";
 import { render } from "vitest-browser-react";
 
 import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
-import { SettingsTargetProvider } from "../../settingsTarget";
-import { ChatFolderCleanupEditor, ChatsFolderEditor } from "./ChatsFolderSettings";
+import { ChatsFolderSettings } from "./ChatsFolderSettings";
+import { SharedSettingsSourceProvider } from "./sharedSettings/sharedSettingsSource";
+import {
+  createTestSharedSettings,
+  TestDeviceTarget,
+} from "./sharedSettings/sharedSettingsTestSource";
 
 const mockUpdateEnvironmentServerSettings = vi.hoisted(() => vi.fn());
 
@@ -46,76 +43,36 @@ vi.mock("../../environments/runtime", () => ({
   startEnvironmentConnectionService: () => undefined,
   subscribeEnvironmentConnections: () => () => {},
   updateEnvironmentServerSettings: mockUpdateEnvironmentServerSettings,
-  useSavedEnvironmentRegistryStore: (
-    selector: (state: { byId: Record<string, never> }) => unknown,
-  ) => selector({ byId: {} }),
-  useSavedEnvironmentRuntimeStore: (
-    selector: (state: { byId: Record<string, never> }) => unknown,
-  ) => selector({ byId: {} }),
+  useSavedEnvironmentRegistryStore: Object.assign(
+    (selector: (state: { byId: Record<string, never> }) => unknown) => selector({ byId: {} }),
+    { getState: () => ({ byId: {} }), subscribe: () => () => undefined },
+  ),
+  useSavedEnvironmentRuntimeStore: Object.assign(
+    (selector: (state: { byId: Record<string, never> }) => unknown) => selector({ byId: {} }),
+    { getState: () => ({ byId: {} }), subscribe: () => () => undefined },
+  ),
 }));
 
-function baseConfig(chats: ServerChatsCapability | undefined): ServerConfig {
-  return {
-    environment: {
-      environmentId: EnvironmentId.make("environment-remote"),
-      label: "Remote test node",
-      platform: { os: "darwin" as const, arch: "arm64" as const },
-      serverVersion: "0.0.0-test",
-      capabilities: {
-        repositoryIdentity: true,
-        threadSettlement: false,
-      },
-    },
-    auth: {
-      policy: "loopback-browser",
-      bootstrapMethods: ["one-time-token"],
-      sessionMethods: ["browser-session-cookie", "bearer-session-token"],
-      sessionCookieName: "ryco_session",
-    },
-    cwd: "/repo/project",
-    keybindingsConfigPath: "/repo/project/.ryco-keybindings.json",
-    keybindings: [],
-    issues: [],
-    providers: [],
-    availableEditors: [],
-    observability: {
-      logsDirectoryPath: "/repo/project/.ryco/logs",
-      localTracingEnabled: true,
-      otlpTracesEnabled: false,
-      otlpMetricsEnabled: false,
-    },
-    settings: DEFAULT_SERVER_SETTINGS,
-    ...(chats ? { chats } : {}),
-  };
-}
+const NODE = "environment-remote";
 
-function ChatsFolderHarness(props: { readonly chats: ServerChatsCapability | undefined }) {
-  const [config, setConfig] = useState(() => baseConfig(props.chats));
-  mockUpdateEnvironmentServerSettings.mockImplementation(async (_environmentId, patch) => {
-    if (patch.chatsRoot === "relative/chats")
-      throw new Error("Chats folder must be an absolute directory on this node or start with ~/.");
-    setConfig((current) => ({
-      ...current,
-      settings: applyServerSettingsPatch(current.settings, patch),
-    }));
-  });
-  return (
+function renderChats(chats: ServerChatsCapability | undefined) {
+  const network = createTestSharedSettings([
+    { id: NODE, label: "Remote test node", ...(chats ? { extra: { chats } } : {}) },
+  ]);
+  network.device(NODE).reject = (patch) =>
+    patch.chatsRoot === "relative/chats"
+      ? "Chats folder must be an absolute directory on this node or start with ~/."
+      : null;
+  const ui = (
     <AppAtomRegistryProvider>
-      <SettingsTargetProvider
-        value={{
-          environmentId: config.environment.environmentId,
-          nodeLabel: "Remote test node",
-          serverConfig: config,
-          primary: false,
-          connected: true,
-          canManage: true,
-        }}
-      >
-        <ChatsFolderEditor disabled={false} />
-        <ChatFolderCleanupEditor disabled={false} />
-      </SettingsTargetProvider>
+      <SharedSettingsSourceProvider value={network.source}>
+        <TestDeviceTarget network={network} id={NODE}>
+          <ChatsFolderSettings />
+        </TestDeviceTarget>
+      </SharedSettingsSourceProvider>
     </AppAtomRegistryProvider>
   );
+  return { network, ui };
 }
 
 describe("ChatsFolderSettings", () => {
@@ -124,14 +81,13 @@ describe("ChatsFolderSettings", () => {
   afterEach(async () => {
     await mounted?.unmount();
     mounted = null;
-    mockUpdateEnvironmentServerSettings.mockReset();
+
     document.body.innerHTML = "";
   });
 
   it("saves the chats folder to the selected node and explains what moves", async () => {
-    mounted = await render(
-      <ChatsFolderHarness chats={{ available: true, root: "/home/me/.ryco/chats" }} />,
-    );
+    const { network, ui } = renderChats({ available: true, root: "/home/me/.ryco/chats" });
+    mounted = await render(ui);
     await expect.element(page.getByText("Effective: /home/me/.ryco/chats")).toBeVisible();
     await expect
       .element(page.getByText("existing chats stay where they are", { exact: false }))
@@ -139,27 +95,33 @@ describe("ChatsFolderSettings", () => {
     const directory = page.getByRole("textbox", { name: "Chats folder directory" });
     await directory.fill("~/Chats");
     await userEvent.keyboard("{Enter}");
+    // The only device: a shared write, so it keeps following the shared value.
     await expect
-      .poll(() => mockUpdateEnvironmentServerSettings.mock.calls.at(-1))
-      .toEqual(["environment-remote", { chatsRoot: "~/Chats" }]);
+      .poll(() => network.device(NODE).writes.at(-1))
+      .toEqual(
+        expect.objectContaining({
+          chatsRoot: "~/Chats",
+          settingsSharing: {
+            chatsRoot: expect.objectContaining({ mode: "shared", onlyIfOlderShared: true }),
+          },
+        }),
+      );
     await page.getByRole("button", { name: "Reset chats folder to default" }).click();
     await expect
-      .poll(() => mockUpdateEnvironmentServerSettings.mock.calls.at(-1))
-      .toEqual(["environment-remote", { chatsRoot: "" }]);
+      .poll(() => network.device(NODE).writes.at(-1))
+      .toEqual(expect.objectContaining({ chatsRoot: "" }));
   });
 
   it("shows validation errors from the node", async () => {
-    mounted = await render(<ChatsFolderHarness chats={{ available: true }} />);
+    mounted = await render(renderChats({ available: true }).ui);
     await page.getByRole("textbox", { name: "Chats folder directory" }).fill("relative/chats");
     await userEvent.keyboard("{Enter}");
-    await expect.element(page.getByRole("alert")).toMatchTextContent("absolute directory");
+    await expect.element(page.getByRole("status")).toMatchTextContent("absolute directory");
   });
 
   it("explains why chats are unavailable but still lets the user fix the folder", async () => {
     mounted = await render(
-      <ChatsFolderHarness
-        chats={{ available: false, unavailableReason: "inside-git-repository" }}
-      />,
+      renderChats({ available: false, unavailableReason: "inside-git-repository" }).ui,
     );
     await expect
       .element(page.getByTestId("chats-folder-unavailable"))
@@ -170,7 +132,7 @@ describe("ChatsFolderSettings", () => {
   });
 
   it("disables the folder on a node without chat support", async () => {
-    mounted = await render(<ChatsFolderHarness chats={undefined} />);
+    mounted = await render(renderChats(undefined).ui);
     await expect
       .element(page.getByTestId("chats-folder-unavailable"))
       .toMatchTextContent("does not support chats");
@@ -180,7 +142,8 @@ describe("ChatsFolderSettings", () => {
   });
 
   it("removes empty chat folders after 3 idle days by default and saves another choice", async () => {
-    mounted = await render(<ChatsFolderHarness chats={{ available: true }} />);
+    const { network, ui } = renderChats({ available: true });
+    mounted = await render(ui);
     const select = page.getByRole("combobox", { name: "Remove empty chat folders" });
     await expect.element(select).toMatchTextContent("After 3 idle days");
     await expect
@@ -189,17 +152,17 @@ describe("ChatsFolderSettings", () => {
     await select.click();
     await page.getByRole("option", { name: "Never" }).click();
     await expect
-      .poll(() => mockUpdateEnvironmentServerSettings.mock.calls.at(-1))
-      .toEqual(["environment-remote", { chatFolderCleanupAfterDays: null }]);
+      .poll(() => network.device(NODE).writes.at(-1))
+      .toEqual(expect.objectContaining({ chatFolderCleanupAfterDays: null }));
     await expect.element(select).toMatchTextContent("Never");
     await page.getByRole("button", { name: "Reset empty chat folder cleanup to default" }).click();
     await expect
-      .poll(() => mockUpdateEnvironmentServerSettings.mock.calls.at(-1))
-      .toEqual(["environment-remote", { chatFolderCleanupAfterDays: 3 }]);
+      .poll(() => network.device(NODE).writes.at(-1))
+      .toEqual(expect.objectContaining({ chatFolderCleanupAfterDays: 3 }));
   });
 
   it("disables empty chat folder cleanup on a node without chat support", async () => {
-    mounted = await render(<ChatsFolderHarness chats={undefined} />);
+    mounted = await render(renderChats(undefined).ui);
     await expect
       .element(page.getByRole("combobox", { name: "Remove empty chat folders" }))
       .toBeDisabled();

@@ -2,11 +2,7 @@ import {
   nodeAutoSettleRulePatch,
   nodeOwnsAutoSettleRule,
 } from "@ryco/client-runtime/state/settings";
-import {
-  applyNodeSettingsPatch,
-  describeNodeSettingsApplyResult,
-  readNodeSettingsAgreement,
-} from "@ryco/client-runtime/state/settings/nodeSettingsFanOut";
+import { writeNodeSettingsPatches } from "@ryco/client-runtime/state/settings/nodeSettingsTargets";
 import { DEFAULT_SERVER_SETTINGS, EnvironmentId, type ServerConfig } from "@ryco/contracts";
 import { WS_METHODS } from "@ryco/contracts/rpc";
 import type { ServerSettingsPatch } from "@ryco/contracts/settings";
@@ -61,15 +57,18 @@ describe("buildNodeSettingsTargets", () => {
       isConnected: (environmentId) => environmentId !== AWAY,
       write,
     });
-    const result = await applyNodeSettingsPatch(targets, nodeAutoSettleRulePatch(30), {
+    const result = await writeNodeSettingsPatches(targets, () => nodeAutoSettleRulePatch(30), {
       supported: nodeOwnsAutoSettleRule,
     });
 
     expect(write).toHaveBeenCalledTimes(1);
     expect(write).toHaveBeenCalledWith(STUDIO, { threadAutoSettleAfterDays: 30 });
-    expect(describeNodeSettingsApplyResult(result)).toBe(
-      "Applied to Studio. Not changed: Laptop (only its owner can change it), Old box (needs an update), Away (not connected).",
-    );
+    expect(result.applied.map((node) => node.label)).toEqual(["Studio"]);
+    expect(result.notApplied.map((node) => [node.label, node.reason])).toEqual([
+      ["Laptop", "read-only"],
+      ["Old box", "unsupported"],
+      ["Away", "disconnected"],
+    ]);
   });
 
   it("gives each node its own config, so a per-node patch compares that node's values", async () => {
@@ -87,7 +86,7 @@ describe("buildNodeSettingsTargets", () => {
       isConnected: () => true,
       write,
     });
-    await applyNodeSettingsPatch(targets, (nodeConfig) => ({
+    await writeNodeSettingsPatches(targets, (_target, nodeConfig) => ({
       defaultThreadEnvMode: "worktree",
       expectedNodePreferences: { defaultThreadEnvMode: nodeConfig.settings.defaultThreadEnvMode },
     }));
@@ -206,19 +205,20 @@ describe("homeNodeSettingsTargets", () => {
       write,
     });
 
-    expect(readNodeSettingsAgreement(targets, (settings) => settings.defaultThreadEnvMode)).toEqual(
-      {
-        kind: "mixed",
-        values: [
-          { label: "Studio", value: "worktree" },
-          { label: "Laptop", value: "local" },
-        ],
-      },
-    );
-    const result = await applyNodeSettingsPatch(targets, { defaultThreadEnvMode: "local" });
+    // A viewer's node answers, so it counts as connected (its value is known); only the owner
+    // writes.
+    expect(targets.map((target) => [target.label, target.connected, target.canWrite])).toEqual([
+      ["Studio", true, true],
+      ["Laptop", true, false],
+      ["Away", false, false],
+    ]);
+    const result = await writeNodeSettingsPatches(targets, () => ({
+      defaultThreadEnvMode: "local",
+    }));
     expect(write).toHaveBeenCalledTimes(1);
-    expect(describeNodeSettingsApplyResult(result)).toBe(
-      "Applied to Studio. Not changed: Laptop (only its owner can change it), Away (not connected).",
-    );
+    expect(result.notApplied.map((node) => [node.label, node.reason])).toEqual([
+      ["Laptop", "read-only"],
+      ["Away", "disconnected"],
+    ]);
   });
 });
