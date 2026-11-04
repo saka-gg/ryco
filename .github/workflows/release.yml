@@ -15,6 +15,11 @@ on:
         description: "Release version (for example 1.2.3 or v1.2.3)"
         required: false
         type: string
+      dry_run:
+        description: "Dry run: build every artifact, skip Verify and publish nothing"
+        required: false
+        default: false
+        type: boolean
 
 # Every job starts read-only and is granted only what it needs. In particular,
 # id-token: write lets a job mint the OIDC token npm trusted publishing accepts,
@@ -184,7 +189,8 @@ jobs:
   verify:
     name: Verify
     needs: [resolve, ci-status]
-    if: ${{ needs.ci-status.outputs.reuse != 'true' }}
+    # A dry run tests the build pipeline; it publishes nothing, so it needs no gate.
+    if: ${{ needs.ci-status.outputs.reuse != 'true' && github.event.inputs.dry_run != 'true' }}
     # Verification ships nothing, so it may restore caches, but a release run
     # must not seed caches that later runs restore.
     cache-mode: read
@@ -198,6 +204,82 @@ jobs:
       # nightly metadata, Windows manifest merge) before anything is published.
       run-release-smoke: true
 
+  # The platform-independent JS (web client, server bundle with the web client
+  # inside, Electron main and preload) is built once here and shared as
+  # `js-bundle`: every build leg packages it, and publish_cli ships its server
+  # build to npm. The legs do not wait on this job: they run their own setup
+  # in parallel and wait for the artifact only right before packaging, so the
+  # build is off their critical path. What differs per target (native helpers,
+  # the target resource monitor, the packaged app) is still built on the leg.
+  bundle:
+    name: Build JS bundle
+    needs: resolve
+    if: ${{ !failure() && !cancelled() && needs.resolve.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      # Reads the resource monitor from earlier release runs' native caches.
+      actions: read
+    env:
+      # Shipped web bundles compile every module from source instead of reading
+      # React Compiler output from a local transform cache.
+      RYCO_REACT_COMPILER_CACHE: "off"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+          # The build reads only HEAD (for the embedded commit hash).
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup project
+        uses: ./.github/actions/setup-ryco
+        with:
+          install-args: --filter=./ --filter=@ryco/desktop --filter=ryco-cli --filter=@ryco/web --filter=@ryco/scripts
+          bun-cache: none
+          restore-turbo-cache: "false"
+
+      - name: Align package versions to release version
+        run: node scripts/update-release-package-versions.ts "${{ needs.resolve.outputs.version }}"
+
+      # ryco-cli#build also compiles this host's resource monitor, which the
+      # bundle leaves out (each leg builds its target's). Reusing it from the
+      # native cache only saves that compile; a miss builds it from source.
+      - name: Restore native build cache
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RYCO_NATIVE_BUILD_CACHE_DIR: ${{ runner.temp }}/native-builds
+        run: |
+          echo "RYCO_NATIVE_BUILD_CACHE_DIR=$RYCO_NATIVE_BUILD_CACHE_DIR" >> "$GITHUB_ENV"
+          node scripts/ci/native-cache.ts restore \
+            --name native-cache-linux-x64 \
+            --dest "$RYCO_NATIVE_BUILD_CACHE_DIR/artifacts"
+
+      - name: Build JS bundle
+        run: bun run build:desktop:bundle
+
+      # Tarred because artifact zips drop file modes (bin.mjs and the bundled
+      # helper scripts are executable). Paths stay repo-relative so consumers
+      # extract at the checkout root.
+      - name: Pack JS bundle
+        shell: bash
+        run: |
+          tar -cf "$RUNNER_TEMP/js-bundle.tar" \
+            --exclude=apps/server/dist/resource-monitor \
+            apps/server/dist apps/desktop/dist-electron
+
+      - name: Upload JS bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: js-bundle
+          path: ${{ runner.temp }}/js-bundle.tar
+          if-no-files-found: error
+          retention-days: 7
+
   build:
     name: Build ${{ matrix.label }}
     needs: resolve
@@ -206,12 +288,10 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      # Reads native build caches from earlier release runs' artifacts.
+      # Reads native build caches from earlier release runs' artifacts, and
+      # polls this run's artifacts for the JS bundle.
       actions: read
     env:
-      # Shipped web bundles compile every module from source instead of reading
-      # React Compiler output from a local transform cache.
-      RYCO_REACT_COMPILER_CACHE: "off"
       # How a nightly is packaged (docs/release.md, "Ryco Nightly"): `legacy` keeps the stable
       # app's identity (the bridge release), `separate` builds the side-by-side Ryco Nightly app.
       RYCO_DESKTOP_NIGHTLY_IDENTITY: ${{ vars.RYCO_DESKTOP_NIGHTLY_IDENTITY || 'legacy' }}
@@ -229,9 +309,6 @@ jobs:
             platform: linux
             target: AppImage
             arch: x64
-            # This leg's server build (CLI + bundled web client) is what
-            # publish_cli ships to npm.
-            cli-dist: true
           - label: Linux arm64
             runner: ubuntu-24.04-arm
             platform: linux
@@ -259,10 +336,11 @@ jobs:
       - name: Setup project
         uses: ./.github/actions/setup-ryco
         with:
-          # Root tooling plus the workspaces the desktop artifact and CLI build
-          # need. Skipping the rest (mobile) roughly halves the installed files,
-          # which dominates install time on Windows.
-          install-args: --filter=./ --filter=@ryco/desktop --filter=ryco-cli --filter=@ryco/web --filter=@ryco/scripts
+          # Root tooling plus the workspaces that package the desktop artifact.
+          # The JS bundles come prebuilt from the bundle job, so the web and
+          # server build toolchains are not installed here; install time
+          # dominates setup on the Windows arm64 runner.
+          install-args: --filter=./ --filter=@ryco/desktop --filter=@ryco/scripts
           bun-cache: none
           restore-turbo-cache: "false"
 
@@ -368,6 +446,26 @@ jobs:
               \( -name binary -o -name cua-driver \) -exec chmod 755 {} +
           fi
 
+      - name: Wait for JS bundle
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/ci/wait-for-artifact.ts --artifact js-bundle --job "Build JS bundle" --timeout-minutes 20
+
+      - name: Download JS bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: js-bundle
+          path: ${{ runner.temp }}/js-bundle
+
+      # Relative archive path: GNU tar on Windows reads "D:/..." as a remote host.
+      - name: Unpack JS bundle
+        shell: bash
+        run: |
+          cp "$RUNNER_TEMP/js-bundle/js-bundle.tar" js-bundle.tar
+          tar -xf js-bundle.tar
+          rm js-bundle.tar
+
       - name: Build desktop artifact
         shell: bash
         env:
@@ -394,6 +492,7 @@ jobs:
             --target "${{ matrix.target }}"
             --arch "${{ matrix.arch }}"
             --build-version "${{ needs.resolve.outputs.version }}"
+            --prebuilt-js
             --verbose
           )
 
@@ -489,23 +588,6 @@ jobs:
           path: apps/server/dist/resource-monitor
           if-no-files-found: error
 
-      # publish_cli ships this server build (with its bundled web client)
-      # instead of repeating it: same build scripts, release version and runner
-      # image. Tarred because artifact zips drop file modes (bin.mjs and the
-      # bundled helper scripts are executable).
-      - name: Pack CLI build
-        if: ${{ matrix.cli-dist }}
-        shell: bash
-        run: tar -C apps/server -cf "$RUNNER_TEMP/cli-dist.tar" dist
-
-      - name: Upload CLI build
-        if: ${{ matrix.cli-dist }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: cli-dist
-          path: ${{ runner.temp }}/cli-dist.tar
-          if-no-files-found: error
-
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -536,9 +618,11 @@ jobs:
     needs: [resolve, ci-status, verify, build]
     # Publishing requires verification: either verify passed, or it was skipped
     # because CI already passed on this exact commit. Defined once here and
-    # reused by release_draft, so both publish paths share the same gate.
+    # reused by release_draft, so both publish paths share the same gate. A dry
+    # run never publishes.
     if: &publish-gate >-
       ${{ !failure() && !cancelled()
+        && github.event.inputs.dry_run != 'true'
         && needs.resolve.result == 'success'
         && needs.build.result == 'success'
         && (needs.verify.result == 'success'
@@ -570,15 +654,17 @@ jobs:
       - name: Align package versions to release version
         run: node scripts/update-release-package-versions.ts "${{ needs.resolve.outputs.version }}"
 
-      - name: Download CLI build
+      # The bundle job's server build (with its bundled web client), the same
+      # one every desktop artifact packages.
+      - name: Download JS bundle
         uses: actions/download-artifact@v8
         with:
-          name: cli-dist
-          path: ${{ runner.temp }}/cli-dist
+          name: js-bundle
+          path: ${{ runner.temp }}/js-bundle
 
-      - name: Unpack CLI build
+      - name: Unpack server build
         shell: bash
-        run: tar -C apps/server -xf "$RUNNER_TEMP/cli-dist/cli-dist.tar"
+        run: tar -xf "$RUNNER_TEMP/js-bundle/js-bundle.tar" apps/server/dist
 
       - name: Download platform resource monitors
         uses: actions/download-artifact@v8

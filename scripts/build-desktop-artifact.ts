@@ -99,6 +99,7 @@ interface BuildCliInput {
   readonly buildVersion: Option.Option<string>;
   readonly outputDir: Option.Option<string>;
   readonly skipBuild: Option.Option<boolean>;
+  readonly prebuiltJs: Option.Option<boolean>;
   readonly keepStage: Option.Option<boolean>;
   readonly signed: Option.Option<boolean>;
   readonly verbose: Option.Option<boolean>;
@@ -289,6 +290,7 @@ interface ResolvedBuildOptions {
   readonly version: string | undefined;
   readonly outputDir: string;
   readonly skipBuild: boolean;
+  readonly prebuiltJs: boolean;
   readonly keepStage: boolean;
   readonly signed: boolean;
   readonly verbose: boolean;
@@ -353,6 +355,7 @@ const BuildEnvConfig = Config.all({
   version: Config.String("RYCO_DESKTOP_VERSION").pipe(Config.option),
   outputDir: Config.String("RYCO_DESKTOP_OUTPUT_DIR").pipe(Config.option),
   skipBuild: Config.Boolean("RYCO_DESKTOP_SKIP_BUILD").pipe(Config.withDefault(false)),
+  prebuiltJs: Config.Boolean("RYCO_DESKTOP_PREBUILT_JS").pipe(Config.withDefault(false)),
   keepStage: Config.Boolean("RYCO_DESKTOP_KEEP_STAGE").pipe(Config.withDefault(false)),
   signed: Config.Boolean("RYCO_DESKTOP_SIGNED").pipe(Config.withDefault(false)),
   verbose: Config.Boolean("RYCO_DESKTOP_VERBOSE").pipe(Config.withDefault(false)),
@@ -422,6 +425,7 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
   );
 
   const skipBuild = resolveBooleanFlag(input.skipBuild, env.skipBuild);
+  const prebuiltJs = resolveBooleanFlag(input.prebuiltJs, env.prebuiltJs);
   const keepStage = resolveBooleanFlag(input.keepStage, env.keepStage);
   const signed = resolveBooleanFlag(input.signed, env.signed);
   const verbose = resolveBooleanFlag(input.verbose, env.verbose);
@@ -446,6 +450,7 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
     version,
     outputDir,
     skipBuild,
+    prebuiltJs,
     keepStage,
     signed,
     verbose,
@@ -1315,7 +1320,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   };
   const bundledClientEntry = path.join(distDirs.serverDist, "client/index.html");
 
-  if (!options.skipBuild) {
+  if (!options.skipBuild && !options.prebuiltJs) {
     yield* Effect.log("[desktop-artifact] Building desktop/server/web artifacts...");
     yield* runCommand(
       ChildProcess.make({
@@ -1325,6 +1330,22 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
         shell: process.platform === "win32",
       })`bun run build:desktop`,
       { label: "bun run build:desktop", verbose: options.verbose },
+    );
+  } else if (!options.skipBuild) {
+    // The JS bundles (web client, server, Electron main) are platform-independent
+    // and were built once elsewhere; the native helpers are not, so build those
+    // here exactly as `@ryco/desktop#build` would before tsdown.
+    yield* Effect.log(
+      "[desktop-artifact] Using prebuilt desktop/server/web bundles; building native helpers...",
+    );
+    yield* runCommand(
+      ChildProcess.make({
+        cwd: path.join(repoRoot, "apps/desktop"),
+        env: { ...process.env, RYCO_DESKTOP_ARCH: options.arch },
+        // Windows needs shell mode to resolve .cmd shims (e.g. bun.cmd).
+        shell: process.platform === "win32",
+      })`bun run build:native`,
+      { label: "bun run build:native", verbose: options.verbose },
     );
   }
 
@@ -1581,6 +1602,12 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
   skipBuild: Flag.Boolean("skip-build").pipe(
     Flag.withDescription(
       "Skip `bun run build:desktop` and use existing dist artifacts (env: RYCO_DESKTOP_SKIP_BUILD).",
+    ),
+    Flag.optional,
+  ),
+  prebuiltJs: Flag.Boolean("prebuilt-js").pipe(
+    Flag.withDescription(
+      "Use existing dist bundles but still build the native helpers and target resource monitor (env: RYCO_DESKTOP_PREBUILT_JS).",
     ),
     Flag.optional,
   ),
