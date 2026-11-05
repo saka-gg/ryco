@@ -144,7 +144,7 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
   const held = hold ? describeQueueHold(hold) : null;
 
   return (
-    <div className="mb-2 rounded-lg border border-border/60 bg-muted/30 p-1.5">
+    <div className="mx-auto mb-2 w-full min-w-0 max-w-(--chat-composer-max-width) rounded-lg border border-border/60 bg-muted/30 p-1.5">
       {held ? (
         <div className="flex min-w-0 items-center gap-1.5 px-1.5 pb-1 text-[11px]">
           <span className="shrink-0 font-medium uppercase tracking-wide text-muted-foreground">
