@@ -1047,6 +1047,76 @@ describe("CopyProjectDialog", () => {
     }
   });
 
+  it("sends a plain folder's files, with its .env only when picked", async () => {
+    const base = inspection({ changes: 0, ignored: [".env"] });
+    const plainFolder = {
+      ...base,
+      repository: {
+        ...base.repository,
+        isGitRepository: false,
+        branch: null,
+        headOid: null,
+        remotes: [],
+        primaryRemoteName: null,
+        cloneRemoteName: null,
+        canonicalKey: null,
+      },
+      folder: {
+        fileCount: 12,
+        totalBytes: 3 * 1024 * 1024,
+        leftOut: ["node_modules"],
+        skippedReason: null,
+      },
+    } as ProjectExportInspection;
+    const folderConfig = (projectCopyFolders: boolean) =>
+      ({
+        providers: [],
+        settings: DEFAULT_SERVER_SETTINGS,
+        environment: { capabilities: { projectCopy: true, projectCopyFolders } },
+      }) as unknown as ServerConfig;
+
+    const outdated = await mount({
+      sourceInspection: plainFolder,
+      targetConfig: folderConfig(false),
+    });
+    try {
+      await expect
+        .element(page.getByTestId("copy-footer-summary"))
+        .toHaveTextContent("Update Ryco on hetzner-build to copy plain folders here.");
+      await expect.element(primary()).toBeDisabled();
+    } finally {
+      await outdated.screen.unmount();
+    }
+    resetProjectCopyManagerForTests();
+    defaultQueryClient.clear();
+
+    const { screen, fake } = await mount({
+      sourceInspection: plainFolder,
+      targetConfig: folderConfig(true),
+    });
+    try {
+      const method = page.getByTestId("copy-method-folder");
+      await expect.element(method).toMatchTextContent("is a plain folder, not a git repository");
+      await expect.element(method).toMatchTextContent("12 files, 3 MB");
+      await expect.element(method).toMatchTextContent("Leaves out node_modules");
+      await expect.element(radio(/Clone from origin/u)).not.toBeInTheDocument();
+      await editOptions();
+      const optIn = page.getByTestId("copy-ignored-files");
+      await expect.element(optIn).toMatchTextContent("Also send these files");
+      await optIn.getByRole("checkbox").click();
+      await expect
+        .element(page.getByTestId("copy-footer-summary"))
+        .toMatchTextContent("1 .env file");
+      await primary().click();
+      await vi.waitFor(() => expect(fake.runs).toHaveLength(1));
+      const plan = fake.runs[0]!.input.plan;
+      expect(plan?.source).toMatchObject({ kind: "export", plainFolder: true });
+      expect(plan?.choices).toMatchObject({ mode: "send-files", ignoredPaths: [".env"] });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("can't ask an agent when no provider is ready on the destination", async () => {
     const { screen } = await mount({ targetConfig: null });
     try {

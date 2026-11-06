@@ -57,6 +57,8 @@ const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 /** Why an artifact was not built, or what a built patch leaves out. */
 export const PROJECT_EXPORT_SKIP_REASON = {
   notGitRepository: "not a git repository",
+  /** A plain-folder archive asked of a git repository. */
+  gitRepository: "a git repository",
   noCommits: "Repository has no commits yet",
   noRemote: "no remote",
   nothingUnpushed: "nothing unpushed",

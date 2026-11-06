@@ -24,6 +24,7 @@ import {
 } from "@ryco/contracts/project-copy";
 import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
 import { Deferred, Effect, Fiber, Layer, Option, Schema, Stream } from "effect";
+import * as tar from "tar";
 import { TestClock } from "effect/testing";
 import * as SqlClient from "effect/sql/SqlClient";
 
@@ -146,6 +147,8 @@ interface HarnessOptions {
   readonly processes?: ProjectImportProcessControl;
   /** Every node settings write fails, as a full disk would. */
   readonly failSettingsWrites?: boolean;
+  /** The bytes a `folder-archive` claim holds: a real gzipped tar. */
+  readonly folderArchive?: Buffer;
 }
 
 interface HarnessState {
@@ -220,7 +223,9 @@ const makeHarness = (options: HarnessOptions = {}) => {
               existing === undefined &&
               (input.intent === "create"
                 ? state === "available" || state === "exists-empty"
-                : isGit);
+                : input.intent === "folder"
+                  ? exists && fs.statSync(canonical).isDirectory()
+                  : isGit);
             const keyFile = path.join(canonical, ".git", "ryco-test-key");
             return {
               preview: {
@@ -347,7 +352,12 @@ const makeHarness = (options: HarnessOptions = {}) => {
             const directory = path.join(state.transfersDir, input.importId);
             fs.mkdirSync(directory, { recursive: true });
             const file = path.join(directory, claim.transferId);
-            const bytes = claim.purpose === "avatar" ? PNG_1X1 : Buffer.from(claim.purpose);
+            const bytes =
+              claim.purpose === "avatar"
+                ? PNG_1X1
+                : claim.purpose === "folder-archive" && options.folderArchive !== undefined
+                  ? options.folderArchive
+                  : Buffer.from(claim.purpose);
             fs.writeFileSync(file, bytes);
             return {
               ...claim,
@@ -1083,6 +1093,64 @@ describe("ProjectImportsLive", () => {
                   destinationPath: checkout,
                   source: { kind: "existing-checkout", expectedCanonicalKey: CANONICAL_KEY },
                   commits: { transferId: randomUUID() },
+                }),
+              )
+              .pipe(Effect.flip);
+            assert.equal(invalid.code, "invalid");
+          }),
+        );
+      }),
+    ),
+  );
+
+  it.effect("unpacks a plain folder and registers it without any git step", () =>
+    memoryDatabase(
+      Effect.gen(function* () {
+        const source = tempDir("folder-source");
+        fs.writeFileSync(path.join(source, "notes.md"), "notes\n");
+        fs.mkdirSync(path.join(source, "docs"));
+        fs.writeFileSync(path.join(source, "docs", "a.txt"), "a\n");
+        const archive = path.join(tempDir("folder-archive"), "folder.tar.gz");
+        tar.create({ gzip: true, sync: true, file: archive, cwd: source, portable: true }, [
+          "notes.md",
+          "docs",
+        ]);
+        const harness = makeHarness({ folderArchive: fs.readFileSync(archive) });
+        const destination = path.join(tempDir("folder-dest"), "notes");
+        const input = makeInput({
+          destinationPath: destination,
+          source: { kind: "folder-archive", transferId: randomUUID() },
+          checkout: null,
+        });
+        yield* withImports(harness, (imports) =>
+          Effect.gen(function* () {
+            yield* imports.start(input);
+            const done = yield* settled(imports, input.importId);
+            assert.equal(done.status, "completed");
+            assert.equal(stepStatus(done, "clone"), "done");
+            for (const id of ["remotes", "commits", "checkout", "changes"] as const) {
+              assert.equal(stepStatus(done, id), "skipped");
+            }
+            assert.equal(fs.readFileSync(path.join(destination, "docs", "a.txt"), "utf8"), "a\n");
+            const create = harness.state.commands.find(
+              (command) => command.type === "project.create",
+            );
+            assert.equal(
+              create?.type === "project.create" ? create.workspaceRoot : null,
+              canonicalize(destination),
+            );
+            assert.isFalse(
+              harness.state.events.some(
+                (event) => event === "cloned" || event.startsWith("checkout"),
+              ),
+            );
+
+            // A plain folder has no branch, commits or changes to bring.
+            const invalid = yield* imports
+              .start(
+                makeInput({
+                  destinationPath: path.join(path.dirname(destination), "other"),
+                  source: { kind: "folder-archive", transferId: randomUUID() },
                 }),
               )
               .pipe(Effect.flip);

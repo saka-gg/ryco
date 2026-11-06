@@ -321,6 +321,23 @@ describe("judgeProjectDestination", () => {
     expect(judged.preview.resolvedPath).toBe(path.join(home, "Code", "Alias", "App"));
   });
 
+  it("registers an unpacked plain folder, but not a file, a missing path or a registered one", async () => {
+    const folder = path.join(home, "Code", "notes");
+    await mkdir(folder, { recursive: true });
+    await writeFile(path.join(folder, "a.md"), "a\n");
+    await writeFile(path.join(home, "Code", "file.txt"), "x\n");
+    const paths = await makePaths();
+    const judge = (target: string) =>
+      run(paths.judgeProjectDestination({ path: target, intent: "folder" }));
+    expect(await judge(folder)).toMatchObject({ usable: true, projectRoot: folder });
+    expect(await judge(path.join(home, "Code", "file.txt"))).toMatchObject({ usable: false });
+    expect(await judge(path.join(home, "Code", "missing"))).toMatchObject({ usable: false });
+    const registered = await makePaths({ projects: [project("notes", folder)] });
+    expect(
+      await run(registered.judgeProjectDestination({ path: folder, intent: "folder" })),
+    ).toMatchObject({ usable: false, preview: { existingProjectId: "notes" } });
+  });
+
   it("links an unregistered repository but never a registered one", async () => {
     const repo = path.join(home, "Code", "app");
     await repository(repo);

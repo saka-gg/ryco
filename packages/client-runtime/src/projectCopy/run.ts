@@ -526,17 +526,30 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
   /** The artifacts to send, after the export's skipped entries became warnings or failures. */
   const artifactsToSend = (result: ProjectExportResult): ReadonlyArray<ProjectExportArtifact> => {
     if (plan === null) return [];
-    if (!result.repository.isGitRepository) {
+    // The plan was made for what the source was; a folder that became (or stopped being) a
+    // repository since needs a new plan.
+    const plainFolder = plan.source.kind === "export" && plan.source.plainFolder === true;
+    if (result.repository.isGitRepository === plainFolder) {
       throw new CopyFailure(
         "export-failed",
-        "The source is not a git repository. Copying plain folders is not supported yet.",
+        plainFolder
+          ? `${plan.title} is a git repository now; start the copy again.`
+          : `${plan.title} is no longer a git repository; start the copy again.`,
         null,
       );
     }
     const wanted = projectCopyTransferKinds(plan);
     for (const skipped of result.skipped) {
       if (!wanted.has(skipped.kind)) continue;
-      if (skipped.kind === "repository-bundle") {
+      // The source left only the opted-in files out of the folder (A33): the rest still comes.
+      if (
+        skipped.kind === "folder-archive" &&
+        skipped.reason === PROJECT_EXPORT_INSECURE_CHANNEL_REASON
+      ) {
+        warnings.push(envFilesLeftOutWarning(sourceLabel));
+        continue;
+      }
+      if (skipped.kind === "repository-bundle" || skipped.kind === "folder-archive") {
         throw new CopyFailure("export-failed", `The files can't be sent: ${skipped.reason}.`, null);
       }
       if (skipped.kind === "commits-bundle" && skipped.reason === "nothing unpushed") continue;
@@ -556,7 +569,7 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
       if (!wanted.has(kind)) continue;
       const artifact = result.artifacts.find((entry) => entry.kind === kind);
       if (artifact === undefined || artifact.byteLength === 0) {
-        if (kind === "repository-bundle") {
+        if (kind === "repository-bundle" || kind === "folder-archive") {
           throw new CopyFailure(
             "export-failed",
             "The source did not make the files to send.",
@@ -1311,11 +1324,15 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
 }
 
 const ARTIFACT_ORDER: ReadonlyArray<ProjectExportArtifactKind> = [
+  "folder-archive",
   "repository-bundle",
   "commits-bundle",
   "changes-patch",
   "avatar",
 ];
+
+const envFilesLeftOutWarning = (nodeLabel: string) =>
+  `The .env files were not copied: they are only sent over an encrypted connection, and the one to ${nodeLabel} is not.`;
 
 const ignoredFilesLeftOutWarning = (nodeLabel: string) =>
   `The ignored files were not copied: they are only sent over an encrypted connection, and the one to ${nodeLabel} is not.`;
@@ -1325,4 +1342,5 @@ const SKIPPED_WARNINGS: Record<ProjectExportArtifactKind, (reason: string) => st
   "repository-bundle": (reason) => `The files were not sent (${reason}).`,
   "changes-patch": (reason) => `Uncommitted changes were not copied (${reason}).`,
   avatar: (reason) => `The avatar was not copied (${reason}).`,
+  "folder-archive": (reason) => `The files were not sent (${reason}).`,
 };

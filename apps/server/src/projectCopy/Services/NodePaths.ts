@@ -41,10 +41,11 @@ export interface NodeCodeRoots {
 
 /**
  * What the caller means to do at the destination: `create` a repository there (the folder must
- * be missing or empty) or `link` the checkout already there (a git repository no project is
- * rooted at).
+ * be missing or empty), `link` the checkout already there (a git repository no project is
+ * rooted at), or register the `folder` a plain-folder import just unpacked there (any folder no
+ * project is rooted at).
  */
-export type ProjectDestinationIntent = "create" | "link";
+export type ProjectDestinationIntent = "create" | "link" | "folder";
 
 export interface JudgeProjectDestinationInput {
   /** As the caller gave it: absolute, `~` or `~/…`. Anything else is `invalid`, never resolved. */
@@ -65,7 +66,10 @@ export interface JudgeProjectDestinationInput {
 export interface ProjectDestinationJudgement {
   /** The verdict as `projects.previewDestination` reports it. */
   readonly preview: ProjectDestinationPreview;
-  /** Whether `intent` may proceed: `create` on `available` / `exists-empty`, `link` on an unregistered git repository. */
+  /**
+   * Whether `intent` may proceed: `create` on `available` / `exists-empty`, `link` on an
+   * unregistered git repository, `folder` on any unregistered folder.
+   */
   readonly usable: boolean;
   /** The destination with symlinks in its nearest existing ancestor resolved; null unless judged. */
   readonly canonicalPath: string | null;

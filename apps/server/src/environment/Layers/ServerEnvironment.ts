@@ -149,6 +149,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       // Cross-node project copy: path hints, folder search, destination preview, export,
       // transfers, imports, and the Agent Control copy additions (see the capability's doc).
       projectCopy: true,
+      projectCopyFolders: true,
       settingsSharingVersion: SETTINGS_SHARING_VERSION,
       fileAttachments: { maxUploadBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES },
     },

@@ -2,7 +2,7 @@
 // Purpose: The form of "Copy <project> to another node": From (the project's
 //          checkouts; one line when there is one), To (node cards, and an
 //          "Already on" line for the nodes that have it), How (clone from origin
-//          or send the files), the folder on the destination with its picker,
+//          or send the files; a plain folder only sends its files), the folder on the destination with its picker,
 //          the options (unpushed commits, uncommitted changes and ignored files,
 //          settings, the setup command, a setup agent; folded into the footer's
 //          one-line summary until Edit) and the footer that starts the copy.
@@ -14,6 +14,7 @@
 import {
   buildProjectCopyRunPlan,
   formatCopyMegabytes,
+  projectCopyFolderSupportOf,
   projectCopyFollowUpDefaults,
   type ProjectCopyOptionsPlan,
   type ProjectCopyTargetFacts,
@@ -27,7 +28,10 @@ import {
   type ProjectId,
   type ServerConfig,
 } from "@ryco/contracts";
-import { PROJECT_COPY_SETUP_COMMAND_MAX_CHARS } from "@ryco/contracts/project-copy";
+import {
+  PROJECT_COPY_SETUP_COMMAND_MAX_CHARS,
+  type ProjectExportFolder,
+} from "@ryco/contracts/project-copy";
 import { displayRemoteUrl } from "@ryco/shared/gitRemoteUrl";
 import { createModelSelection } from "@ryco/shared/model";
 import {
@@ -521,6 +525,10 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
     manualParent: manualPath,
   });
 
+  // The target's config: its agents for the setup agent, and whether it unpacks plain folders.
+  const target = useCopyTargetConfig(services, targetId, targetHold.status === "held");
+  const targetConfig = target.config;
+
   /* ── Options ── */
   const [choices, setChoices] = useState<CopyUserChoices>(DEFAULT_COPY_USER_CHOICES);
   // Folded into the footer's summary until Edit, so the form fits a short window.
@@ -530,6 +538,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
     label: targetLabel,
     platformOs: catalogPlatformOs(targetNode?.platformOs ?? null),
     projectCopySupport: targetHold.status === "failed" ? "unknown" : targetSupport,
+    folderCopySupport: projectCopyFolderSupportOf(targetConfig),
     transport: targetNode?.transport ?? targetHold.transport,
     remoteAccess: null,
     destination: destination.suggestion,
@@ -551,6 +560,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
     source.facts && targetNode ? planCopyOptions(source.facts, targetFacts, choices) : null;
   const mode = options?.choices.mode ?? "clone";
   const inspection = source.facts?.kind === "inspected" ? source.facts.inspection : null;
+  const plainFolder = inspection !== null && !inspection.repository.isGitRepository;
 
   /* ── Setup ── */
   const prefill = options?.setup.command ?? null;
@@ -560,8 +570,6 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
   const command = setupCommand ?? prefill ?? "";
 
   /* ── Setup agent ── */
-  const target = useCopyTargetConfig(services, targetId, targetHold.status === "held");
-  const targetConfig = target.config;
   const followUpDefaults = projectCopyFollowUpDefaults({
     title,
     targetLabel,
@@ -707,6 +715,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
           bringsChanges: plan.choices.mode !== "link" && plan.choices.bringChanges,
           copiesSettings: plan.choices.copySettings,
           followUp: plan.followUpThread !== null,
+          ...(plainFolder ? { plainFolder: true } : {}),
         },
       });
     } catch (cause) {
@@ -721,7 +730,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
     .filter((card) => card.state === "outdated")
     .map((card) => <NodeUpdateOffer key={card.node.environmentId} node={card.node} />);
   const header = (
-    <div className="flex items-center gap-2.5 py-3.5 ps-4 pe-12">
+    <div className="flex items-center gap-2.5 ps-5 pe-12 pt-4 pb-3">
       <DialogTitle className="flex min-w-0 flex-1 items-center gap-2 font-semibold text-[15px] leading-tight">
         <CopyIcon aria-hidden className="size-[15px] shrink-0" />
         <span>Copy</span>
@@ -748,7 +757,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
     return (
       <>
         {header}
-        <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-4 pt-1 pb-3.5">
+        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-5 pt-1 pb-4">
           {/* Only the nodes that can't take it for another reason keep a card (with why). */}
           {blockedCards.length > 0 ? (
             <TargetCards
@@ -765,7 +774,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
             {copyNoTargetMessage(title, cards)}
           </p>
         </div>
-        <div className="flex items-center gap-2 border-border border-t px-4 py-[11px]">
+        <div className="flex shrink-0 items-center gap-2 border-border border-t bg-muted/30 px-5 py-3">
           <span className="min-w-0 flex-1" />
           <Button
             size="sm"
@@ -803,7 +812,9 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
               : mode === "clone" && options.choices.bringCommits
                 ? unpushedCount
                 : 0,
-          ignoredFiles: options.choices.bringChanges ? options.choices.ignoredPaths.length : 0,
+          ignoredFiles:
+            options.choices.bringChanges || plainFolder ? options.choices.ignoredPaths.length : 0,
+          ...(plainFolder ? { ignoredFileNoun: ".env file" } : {}),
           copySettings: options.choices.copySettings,
           setupCommand: runSetup ? command : null,
           followUp: followUpEnabled,
@@ -836,7 +847,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
     <>
       {header}
       <div
-        className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-4 pt-0.5 pb-3.5"
+        className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-5 pt-1 pb-4"
         data-testid="copy-project-form"
       >
         {props.notice ? (
@@ -883,6 +894,8 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
         <CopyField label="How" labelId={ids.how}>
           <MethodChoice
             options={options}
+            folder={inspection?.folder ?? null}
+            plainFolder={plainFolder}
             mode={mode}
             sourceLabel={sourceLabel}
             targetLabel={targetLabel}
@@ -986,6 +999,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
                 options={options}
                 mode={mode}
                 inspection={inspection}
+                plainFolder={plainFolder}
                 relayedLabels={[
                   ...(source.facts?.kind === "inspected" && source.facts.transport === "relay"
                     ? [sourceLabel]
@@ -1076,7 +1090,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
           </span>
         ))}
       </div>
-      <div className="flex items-center gap-2 border-border border-t px-4 py-[11px]">
+      <div className="flex shrink-0 items-center gap-2 border-border border-t bg-muted/30 px-5 py-3">
         <span className="flex min-w-0 flex-1 items-center gap-1">
           <span
             className={cn(
@@ -1135,6 +1149,9 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
 
 function MethodChoice(props: {
   readonly options: ProjectCopyOptionsPlan | null;
+  /** The source is not a git repository: its files are all a copy can send. */
+  readonly plainFolder: boolean;
+  readonly folder: ProjectExportFolder | null;
   readonly mode: "clone" | "send-files" | "link";
   readonly sourceLabel: string;
   readonly targetLabel: string;
@@ -1159,6 +1176,17 @@ function MethodChoice(props: {
     value: props.mode === "link" ? null : props.mode,
     onChange: (value) => props.onChange(value as "clone" | "send-files"),
   });
+  if (props.plainFolder) {
+    return (
+      <PlainFolderMethod
+        available={sendFiles?.available === true}
+        reason={sendFiles?.reason ?? null}
+        folder={props.folder}
+        sourceLabel={props.sourceLabel}
+        title={props.title}
+      />
+    );
+  }
   if (props.mode === "link") {
     return (
       <div
@@ -1237,6 +1265,58 @@ function MethodChoice(props: {
   );
 }
 
+/** The one way a plain folder travels: its files, node to node. */
+function PlainFolderMethod(props: {
+  readonly available: boolean;
+  readonly reason: string | null;
+  readonly folder: ProjectExportFolder | null;
+  readonly sourceLabel: string;
+  readonly title: string;
+}) {
+  const { folder } = props;
+  const leftOut = folder ? folderLeftOutText(folder.leftOut) : null;
+  return (
+    <div
+      className={cn(
+        "flex items-start gap-[9px] rounded-[9px] border p-2.5 text-[12px]",
+        props.available
+          ? "border-primary shadow-[0_0_0_1px_var(--primary)]"
+          : "border-border text-muted-foreground",
+      )}
+      data-testid="copy-method-folder"
+    >
+      <FolderIcon aria-hidden className="mt-0.5 size-3.5 shrink-0" />
+      <span className="min-w-0">
+        <span className="mb-0.5 block font-medium text-[12.5px]">
+          Send the files from {props.sourceLabel}
+        </span>
+        <span className="block text-[11.5px] text-muted-foreground">
+          {props.title} is a plain folder, not a git repository, so its files are sent node to node
+          {folder && props.available
+            ? ` · ${plural(folder.fileCount, "file")}, ${formatCopyMegabytes(folder.totalBytes)}.`
+            : "."}
+          {leftOut ? ` ${leftOut}` : null}
+        </span>
+        {!props.available && props.reason ? (
+          <span className="mt-1 flex items-center gap-1.5 text-[11.5px] text-warning">
+            <TriangleAlertIcon aria-hidden className="size-3 shrink-0" />
+            {props.reason}
+          </span>
+        ) : null}
+      </span>
+    </div>
+  );
+}
+
+/** "Leaves out node_modules and .venv: …" for the left-out folders a walk found. */
+function folderLeftOutText(leftOut: ReadonlyArray<string>): string | null {
+  const names = [...new Set(leftOut.map((entry) => entry.slice(entry.lastIndexOf("/") + 1)))];
+  if (names.length === 0) return null;
+  const shown = names.slice(0, 3);
+  const more = names.length - shown.length;
+  return `Leaves out ${shown.join(", ")}${more > 0 ? ` and ${more} more` : ""}: setup recreates them.`;
+}
+
 /* ───────── Options ───────── */
 
 function CopyOptions(props: {
@@ -1248,6 +1328,7 @@ function CopyOptions(props: {
         { kind: "inspected" }
       >["inspection"]
     | null;
+  readonly plainFolder: boolean;
   /** The copy's nodes reached through the Hub: either one leaves ignored files out (A33). */
   readonly relayedLabels: ReadonlyArray<string>;
   readonly choices: CopyUserChoices;
@@ -1258,7 +1339,22 @@ function CopyOptions(props: {
   const set = (patch: Partial<CopyUserChoices>) =>
     props.onChoices((current) => ({ ...current, ...patch }));
   const rows: ReactNode[] = [];
-  if (mode !== "link") {
+  const optInPicker = (lead: string) => (
+    <OptInFiles
+      key="ignored"
+      lead={lead}
+      nested={!props.plainFolder}
+      options={options}
+      relayedLabels={props.relayedLabels}
+      onChoices={props.onChoices}
+    />
+  );
+  if (props.plainFolder) {
+    // A plain folder has no commits or changes: only the files named like secrets to pick.
+    if (options.ignoredCandidates.length > 0) {
+      rows.push(optInPicker("Also send these files (they're never copied unless you pick them):"));
+    }
+  } else if (mode !== "link") {
     const unpushed = options.bringCommits.unpushedCommitCount;
     const changeCount = inspection
       ? inspection.workingTree.trackedChangeCount + inspection.workingTree.untrackedCount
@@ -1322,51 +1418,7 @@ function CopyOptions(props: {
         );
         if (options.choices.bringChanges && options.ignoredCandidates.length > 0) {
           rows.push(
-            <div
-              key="ignored"
-              className="ms-[27px] flex flex-col rounded-lg border border-border px-2 py-1"
-              data-testid="copy-ignored-files"
-            >
-              <span className="py-1 text-[11.5px] text-muted-foreground">
-                Also bring ignored files (they're never copied unless you pick them):
-              </span>
-              {options.ignoredCandidates.map((candidate) => (
-                <CheckRow
-                  key={candidate.path}
-                  checked={options.choices.ignoredPaths.includes(candidate.path)}
-                  onChange={(next) =>
-                    props.onChoices((current) => ({
-                      ...current,
-                      ignoredPaths: next
-                        ? [...current.ignoredPaths, candidate.path]
-                        : current.ignoredPaths.filter((path) => path !== candidate.path),
-                    }))
-                  }
-                >
-                  <span className="font-mono text-[11.5px]">{candidate.path}</span>{" "}
-                  <span className="text-muted-foreground">
-                    ({formatFileSize(candidate.byteLength)})
-                  </span>
-                </CheckRow>
-              ))}
-              {props.relayedLabels.length > 0 ? (
-                <span className="py-1 text-[11.5px] text-warning" data-testid="copy-insecure-note">
-                  {props.relayedLabels.length === 1
-                    ? `${props.relayedLabels[0]} is reached through the Hub. If that connection isn't`
-                    : `${props.relayedLabels.join(" and ")} are reached through the Hub. If those connections aren't`}{" "}
-                  end-to-end encrypted, these files are left out: they are only sent over an
-                  encrypted connection.
-                </span>
-              ) : (
-                <span
-                  className="py-1 text-[11.5px] text-muted-foreground"
-                  data-testid="copy-encryption-note"
-                >
-                  These files are only sent over an encrypted connection (HTTPS, Tailscale or this
-                  computer). Over an unencrypted one they are left out.
-                </span>
-              )}
-            </div>,
+            optInPicker("Also bring ignored files (they're never copied unless you pick them):"),
           );
         }
       }
@@ -1387,6 +1439,63 @@ function CopyOptions(props: {
     </CheckRow>,
   );
   return <>{rows}</>;
+}
+
+/** The opt-in files (`.env`, …): picked one by one, sent only over an encrypted connection. */
+function OptInFiles(props: {
+  readonly lead: string;
+  /** Under the "Bring the changes" row it belongs to, indented like its hint. */
+  readonly nested: boolean;
+  readonly options: ProjectCopyOptionsPlan;
+  readonly relayedLabels: ReadonlyArray<string>;
+  readonly onChoices: (update: (current: CopyUserChoices) => CopyUserChoices) => void;
+}) {
+  const { options } = props;
+  return (
+    <div
+      className={cn(
+        "flex flex-col rounded-lg border border-border px-2 py-1",
+        props.nested && "ms-[27px]",
+      )}
+      data-testid="copy-ignored-files"
+    >
+      <span className="py-1 text-[11.5px] text-muted-foreground">{props.lead}</span>
+      {options.ignoredCandidates.map((candidate) => (
+        <CheckRow
+          key={candidate.path}
+          checked={options.choices.ignoredPaths.includes(candidate.path)}
+          onChange={(next) =>
+            props.onChoices((current) => ({
+              ...current,
+              ignoredPaths: next
+                ? [...current.ignoredPaths, candidate.path]
+                : current.ignoredPaths.filter((path) => path !== candidate.path),
+            }))
+          }
+        >
+          <span className="font-mono text-[11.5px]">{candidate.path}</span>{" "}
+          <span className="text-muted-foreground">({formatFileSize(candidate.byteLength)})</span>
+        </CheckRow>
+      ))}
+      {props.relayedLabels.length > 0 ? (
+        <span className="py-1 text-[11.5px] text-warning" data-testid="copy-insecure-note">
+          {props.relayedLabels.length === 1
+            ? `${props.relayedLabels[0]} is reached through the Hub. If that connection isn't`
+            : `${props.relayedLabels.join(" and ")} are reached through the Hub. If those connections aren't`}{" "}
+          end-to-end encrypted, these files are left out: they are only sent over an encrypted
+          connection.
+        </span>
+      ) : (
+        <span
+          className="py-1 text-[11.5px] text-muted-foreground"
+          data-testid="copy-encryption-note"
+        >
+          These files are only sent over an encrypted connection (HTTPS, Tailscale or this
+          computer). Over an unencrypted one they are left out.
+        </span>
+      )}
+    </div>
+  );
 }
 
 /* ───────── Setup agent ───────── */

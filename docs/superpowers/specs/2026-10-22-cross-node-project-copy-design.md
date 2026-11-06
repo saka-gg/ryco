@@ -201,6 +201,19 @@ Repository bundle: `git bundle create <f> --all`. Patch: a temporary index seede
 settings + avatar and `repository.isGitRepository = false` (the UI then offers a repository bundle only
 for git repos; non-git folders are refused in v1 with a clear reason).
 
+Plain folders (2026-11-06): a non-git project now travels as its files. `exportInspect` reports
+`folder` (file count, raw bytes, left-out folders); `exportStart` with `include.folderFiles` builds a
+`folder-archive` (gzipped tar, written with the `tar` package from the walk's own list) that leaves
+out dependency and cache folders (`PROJECT_COPY_FOLDER_LEFT_OUT_NAMES`), the project's metadata
+folder and OS litter, and carries `.env*` files only when opted in (same encrypted-channel rule as
+ignored files). The destination imports a `folder-archive` source: it unpacks into the staging
+directory under the `clone` step (no absolute paths, no `..`, no writes through symlinks, no hard
+links or special files, bounded bytes and entries), skips the git steps and registers the folder
+(`judgeProjectDestination` intent `folder`). Nodes advertise `capabilities.projectCopyFolders`.
+Agent Control copies of a repository stay clone-only; a plain folder is sent as its files when the
+plan keeps `bringChanges` (which carries the copy-content risk tag), never with `.env` files, and
+the approving client's preview names what it sends.
+
 ### Transfer — on the destination node
 
 ```ts

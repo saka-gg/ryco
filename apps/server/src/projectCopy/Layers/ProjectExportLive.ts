@@ -92,6 +92,7 @@ import {
   mayCarryIgnoredFiles,
   type ProjectCopyCallerChannel,
 } from "../callerChannel.ts";
+import { buildFolderArchive, type FolderScan, scanFolder } from "../exportFolder.ts";
 import { sha256File } from "../fileSha256.ts";
 import { PROJECT_EXPORTS_DIRECTORY } from "../projectCopyStartup.ts";
 import { GitNetwork } from "../Services/GitNetwork.ts";
@@ -114,6 +115,7 @@ const ARTIFACT_FILE_NAMES: Record<ProjectExportArtifactKind, string> = {
   "repository-bundle": "repository.bundle",
   "changes-patch": "changes.patch",
   avatar: "avatar.png",
+  "folder-archive": "folder.tar.gz",
 };
 const PATCH_WORK_DIRECTORY = "patch-work";
 
@@ -137,6 +139,10 @@ interface ExportSource {
   readonly facts: ExportRepositoryFacts | null;
   readonly pushed: ExportPushedState | null;
   readonly scan: ExportWorkingTreeScan | null;
+  /** The walk of a plain folder; null for a git repository. */
+  readonly folderScan: FolderScan | null;
+  /** The folder the export reads: the project root or one of its worktrees. */
+  readonly checkout: string;
   readonly repository: ProjectExportRepository;
   readonly pushedState: ProjectExportPushedState;
   readonly workingTree: ProjectExportWorkingTree;
@@ -294,8 +300,13 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
             concurrency: "unbounded",
           })
         : [null, null];
+      const projectMetadataDir = project.projectMetadataDir ?? DEFAULT_PROJECT_METADATA_DIR;
+      // A plain folder travels as its files: walked once here, packed from the same list.
+      const folderScan = facts
+        ? null
+        : yield* scanFolder({ root: checkout, metadataDir: projectMetadataDir });
       const ignoredCandidates: ReadonlyArray<ProjectExportIgnoredCandidate> =
-        facts && scan ? yield* readIgnoredCandidates(facts, scan) : [];
+        facts && scan ? yield* readIgnoredCandidates(facts, scan) : (folderScan?.candidates ?? []);
       // The project's own overrides of node settings. What stays behind, and why, is on
       // `ProjectCopyOverrides`: the initial model and the worktree root only hold on this node.
       const overrides = yield* serverSettings.getSettings.pipe(
@@ -342,6 +353,8 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
         facts,
         pushed,
         scan,
+        folderScan,
+        checkout,
         repository,
         pushedState: pushed?.state ?? {
           headOnRemote: false,
@@ -360,7 +373,7 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
           scripts: project.scripts,
           customSystemPrompt: project.customSystemPrompt ?? null,
           preferredRemoteName: project.preferredRemoteName ?? null,
-          projectMetadataDir: project.projectMetadataDir ?? DEFAULT_PROJECT_METADATA_DIR,
+          projectMetadataDir,
           hasCustomAvatar: (project.customAvatarContentHash ?? null) !== null,
           overrides,
           relativeRootInRepository: facts?.relativeRoot ?? "",
@@ -440,6 +453,7 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
         pushedState: source.pushedState,
         workingTree: source.workingTree,
         settings: source.settings,
+        ...(source.folderScan === null ? {} : { folder: source.folderScan.folder }),
         estimates: yield* estimateArtifacts(input.projectId, source),
       };
     },
@@ -491,7 +505,12 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
       // The Hub or the network could read them over an unencrypted connection (amendment 33).
       const ignoredPaths = mayCarryIgnoredFiles(channel) ? requestedIgnored : [];
       if (ignoredPaths.length < requestedIgnored.length) {
-        skipped.push(skippedOf("changes-patch", PROJECT_EXPORT_SKIP_REASON.insecureChannel));
+        skipped.push(
+          skippedOf(
+            source.folderScan === null ? "changes-patch" : "folder-archive",
+            PROJECT_EXPORT_SKIP_REASON.insecureChannel,
+          ),
+        );
       }
 
       yield* removeQuietly(directory);
@@ -531,7 +550,25 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
           );
         } else notGit("repository-bundle");
       }
-      if (input.include.workingTreeChanges || ignoredPaths.length > 0) {
+      if (input.include.folderFiles === true) {
+        const folderScan = source.folderScan;
+        if (folderScan === null) {
+          skipped.push(skippedOf("folder-archive", PROJECT_EXPORT_SKIP_REASON.gitRepository));
+        } else if (folderScan.folder.skippedReason !== null) {
+          skipped.push(skippedOf("folder-archive", folderScan.folder.skippedReason));
+        } else {
+          yield* buildFolderArchive({
+            root: source.checkout,
+            scan: folderScan,
+            includePaths: ignoredPaths,
+            file: fileOf("folder-archive"),
+          });
+          yield* collect("folder-archive", { built: true, skipped: [] }, ignoredPaths.length > 0);
+        }
+      }
+      // A plain folder's opted-in files travel in its archive, not in a patch.
+      const patchIgnoredPaths = source.folderScan === null ? ignoredPaths : [];
+      if (input.include.workingTreeChanges || patchIgnoredPaths.length > 0) {
         if (facts && scan) {
           const workDirectory = nodePath.join(directory, PATCH_WORK_DIRECTORY);
           const patch = yield* buildChangesPatch({
@@ -574,6 +611,7 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
       pushedState: built.source.pushedState,
       workingTree: built.source.workingTree,
       settings: built.source.settings,
+      ...(built.source.folderScan === null ? {} : { folder: built.source.folderScan.folder }),
       artifacts: built.artifacts.map((file) => file.artifact),
       skipped: built.skipped,
       expiresAt: isoAt(expiresAtMs),

@@ -365,6 +365,8 @@ export interface CopyOptionsSummaryInput {
   readonly commits: number;
   /** Ignored files picked to come along. */
   readonly ignoredFiles: number;
+  /** What those files are called: "ignored file" in a repository, ".env file" in a plain folder. */
+  readonly ignoredFileNoun?: string;
   readonly copySettings: boolean;
   /** The setup command that runs afterwards; null when none does. */
   readonly setupCommand: string | null;
@@ -396,7 +398,9 @@ export function copyOptionsSummary(input: CopyOptionsSummaryInput): ReadonlyArra
   if (input.mode !== "link") {
     if (input.changes > 0) parts.push([plain(plural(input.changes, "uncommitted change"))]);
     if (input.commits > 0) parts.push([plain(plural(input.commits, "unpushed commit"))]);
-    if (input.ignoredFiles > 0) parts.push([plain(plural(input.ignoredFiles, "ignored file"))]);
+    if (input.ignoredFiles > 0) {
+      parts.push([plain(plural(input.ignoredFiles, input.ignoredFileNoun ?? "ignored file"))]);
+    }
   }
   if (input.copySettings) parts.push([plain("settings")]);
   if (input.setupCommand !== null && input.setupCommand.trim().length > 0) {
@@ -484,6 +488,8 @@ export interface CopyProgressContext {
   readonly bringsChanges: boolean;
   readonly copiesSettings: boolean;
   readonly followUp: boolean;
+  /** A plain folder: its files are unpacked, no git steps run. */
+  readonly plainFolder?: boolean;
 }
 
 const STEP_WEIGHTS: Partial<
@@ -563,7 +569,7 @@ function plannedImportSteps(context: CopyProgressContext): ProjectImportStepId[]
     "preflight",
     "clone",
     ...(context.bringsCommits ? ["commits" as const] : []),
-    "checkout",
+    ...(context.plainFolder === true ? [] : ["checkout" as const]),
     ...(context.bringsChanges ? ["changes" as const] : []),
     "register",
     ...(context.copiesSettings ? ["settings" as const] : []),

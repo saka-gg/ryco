@@ -497,7 +497,11 @@ either kind.
   `bringCommits` and `bringChanges` default to false; changes on the source's own branch never come
   along). `setup: {}` takes the project's worktree setup script as it is when the request
   is made; `setup: { command }` names one. `followUpThread` starts an agent on the target after
-  setup; without a `modelSelection` it uses the target's default model.
+  setup; without a `modelSelection` it uses the target's default model. A project that is a plain
+  folder (not a git repository) has no remote: its files are sent node to node instead, without
+  dependency folders such as `node_modules` and without `.env` files. `bringChanges` must stay true
+  for that (it is what sends them), `branch` does not apply, and the approval card names the files
+  it sends. Both nodes need a Ryco version with `capabilities.projectCopyFolders`.
 
 After proposing, the agent ends its turn. When the request completes or fails, Ryco queues a short
 note in the agent's chat (its follow-up queue, like `ryco_send_message`): it starts the agent's next

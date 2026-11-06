@@ -63,6 +63,7 @@ describe("pre-auth server environment descriptor", () => {
       "nodeSelfUpdate",
       "projectContentSearch",
       "projectCopy",
+      "projectCopyFolders",
       "projectFileWatch",
       "projectIcons",
       "projectPreferences",
