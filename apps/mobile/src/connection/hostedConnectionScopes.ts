@@ -7,9 +7,10 @@ import { UNIFIED_WORKSPACE_SCOPE_LEASE_TTL_MS } from "@ryco/client-runtime/state
  * This intentionally mirrors the small refcounted shape used by t3code's
  * mobile background-activity scopes, but the vocabulary is Ryco's. A scope is
  * retained by the mounted surface that consumes it and released by that
- * surface's cleanup; inbox rendering and prefetch never create one.
+ * surface's cleanup. Home discovery uses one disposable background scope.
  */
 export type MobileHostedConnectionScope =
+  | { readonly type: "workspace-discovery" }
   | { readonly type: "thread-detail"; readonly threadId: ThreadId }
   /** A mounted thread terminal: thread work, demanded exactly like a mounted thread detail. */
   | { readonly type: "terminal"; readonly threadId: ThreadId }
@@ -46,6 +47,8 @@ export interface MobileHostedScopeLeaseStore {
 
 function stableScopeKey(environmentId: EnvironmentId, scope: MobileHostedConnectionScope): string {
   switch (scope.type) {
+    case "workspace-discovery":
+      return JSON.stringify([environmentId, scope.type]);
     case "thread-detail":
     case "terminal":
       return JSON.stringify([environmentId, scope.type, scope.threadId]);

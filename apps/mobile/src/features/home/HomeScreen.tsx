@@ -44,6 +44,7 @@ import { createHomeModeState, reduceHomeModeState, type HomeMode } from "./homeM
 import { createHomeScrollMemory, homeListFilterKey } from "./homeScrollMemory";
 import { useAutoSettleRuleHandOver } from "./useAutoSettleRuleHandOver";
 import { useInboxSource } from "./useInboxSource";
+import { useHostedWorkspaceDiscovery } from "./useHostedWorkspaceDiscovery";
 import { NeedsVerificationSection } from "./NeedsVerificationSection";
 import { QueuedTasksSection } from "../newTask/QueuedTasksSection";
 
@@ -60,6 +61,7 @@ export function HomeScreen() {
   const [stabilizeInboxSections] = useState(createInboxSectionStabilizer);
   const iconColor = useThemeColor("--color-icon");
   const isFocused = useIsFocused();
+  useHostedWorkspaceDiscovery(isFocused);
   useDirectoryPresenceDemand(isFocused);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const clockStaleRef = useRef(false);

@@ -74,6 +74,35 @@ routes; the custom scheme remains for verified-email and reset links.
      background -> foreground transition re-drives reconnect for any connection
      whose heartbeat went stale while iOS suspended the socket.
 
+## Paid Apple Developer team
+
+Set `RYCO_IOS_APPLE_TEAM_ID` and `RYCO_EAS_PROJECT_ID` in the repo-root
+`.env.local`, and set `RYCO_IOS_PERSONAL_TEAM=0` to use the full native
+capabilities. Set the same values in the project's EAS `development`, `preview`,
+and `production` environments: local ignored env files are not uploaded to EAS.
+Keep account identifiers and private signing files out of the public config.
+
+Use the EAS CLI version required by `eas.json`. For API-key authentication, set
+`EXPO_ASC_API_KEY_PATH`, `EXPO_ASC_KEY_ID`, and `EXPO_ASC_ISSUER_ID` locally.
+The key path points to a private `.p8` file outside the repository.
+
+All build profiles inherit Bun and Node versions from `build.base` in `eas.json`.
+Keep Bun aligned with the root `packageManager` and Node within the root
+`engines.node` range; older EAS image defaults may not understand the Bun lockfile.
+
+Each variant has three signing targets: the app, `RycoNotificationService`, and
+`RycoWidgets`. The app and widget extension must both be assigned to
+`group.<variant bundle identifier>` in Apple's developer portal before their
+provisioning profiles are generated. API-key authentication can synchronize the
+App Groups capability but currently skips assigning its group identifier; check
+that assignment in the portal when configuring credentials.
+
+For a physical-device development build, register the iPhone with `eas device:create`,
+configure credentials with `eas credentials:configure-build --platform ios --profile development`,
+then build with `eas build --platform ios --profile development`. After installing
+the development client, use `bun run --cwd apps/mobile dev:client` for daily
+JavaScript/TypeScript changes; rebuild the client after native changes.
+
 ## Over-the-air updates
 
 An over-the-air update is JavaScript the app runs next to its E2EE keys, so the
