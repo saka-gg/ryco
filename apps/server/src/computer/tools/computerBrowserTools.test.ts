@@ -928,6 +928,26 @@ describe("browser id ergonomics", () => {
     });
   });
 
+  it("names the bound browser's process for app approval of target-only calls", async () => {
+    const backend = new FakeComputerBackend({
+      browser: (call) =>
+        call.name === "get_browser_state"
+          ? bindingResult([{ tab_id: "tab-a", active: true }])
+          : { structuredContent: { status: "ok" } },
+    });
+    const authorizeAction = vi.fn(async () => true);
+    const { call } = await setup({ backend, authorizeAction });
+    await call("computer_browser_state", { pid: 4242 });
+    await call("computer_browser_navigate", { target_id: "bt-1", url: "https://example.com/" });
+    expect(authorizeAction).toHaveBeenLastCalledWith(
+      "computer_browser_navigate",
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      { windowIds: [], pids: [4242], apps: [] },
+    );
+  });
+
   it("refuses an ambiguous target with its tab listing and dispatches nothing", async () => {
     const backend = new FakeComputerBackend({
       browser: (call) =>

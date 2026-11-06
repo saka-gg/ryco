@@ -101,6 +101,7 @@ import {
   type ComputerForegroundAuthorization,
 } from "../computerVisibleUse.ts";
 import { PROVIDERS_WITHOUT_APPROVAL_GATE } from "./approvalGate.ts";
+import { assertForegroundNotBlocked } from "../foregroundEscapeStop.ts";
 import {
   collectComputerApprovalTargets,
   type ComputerApprovalTargets,
@@ -2718,6 +2719,7 @@ export function makeAgentGatewayComputerTools(
                 COMPUTER_FOREGROUND_NOT_REQUESTED_CODE,
               );
             }
+            assertForegroundNotBlocked(authorization);
           }
           return withLaunchGuidance(
             await manager.launchApp(
@@ -3677,6 +3679,7 @@ export function makeAgentGatewayComputerTools(
               COMPUTER_FOREGROUND_NOT_REQUESTED_CODE,
             );
           }
+          assertForegroundNotBlocked(authorization);
         }
         const result = await manager.launchApp(
           context.callerThreadId,

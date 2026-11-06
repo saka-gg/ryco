@@ -52,6 +52,10 @@ Status: implemented on `computer-use/3-easy-setup` (stacked on phase 1, restacke
   stays excluded by the driver.
 - `ComputerApprovalGate.requestApp` decides in this order: always allowed → allowed for this
   chat → denied in this turn → ask. Concurrent calls for the same chat and app share one dialog.
+- Browser tools name the real browser: a bound target remembers the process it was bound
+  from, and Chrome, Brave and Edge use one canonical identity
+  (`@ryco/shared/computerBrowserIdentity`) shared with legacy app denial. Launching the
+  driver's isolated browser asks nothing; its first action asks for it by name.
 - Dialog: "Allow Ryco to use Safari?" with **Always allow**, **Allow for this chat**,
   **Don't allow**. Don't allow refuses that app for the rest of the turn. A target that cannot be
   named asks "Allow Ryco to use your Mac in this chat?" without Always allow.
@@ -75,8 +79,11 @@ Status: implemented on `computer-use/3-easy-setup` (stacked on phase 1, restacke
 - With Input Monitoring granted, the Escape listener is required and behaves as today.
 - Without it, the desktop does not start the listener, reports the listener as ready to the
   driver host and omits the Input Monitoring grant from permission checks, so the server does not
-  list it as missing. Escape and the "your own input pauses foreground work" pause are then
-  unavailable; settings says so.
+  list it as missing. Escape is then unavailable; settings says so.
+- Foreground takeover still requires Input Monitoring (user decision). The desktop reports the
+  grant and listener state with `state`; the server's foreground authorization
+  (`computerForegroundEscapeStopBlock`) refuses with `foreground_needs_input_monitoring` when
+  the grant is missing, unknown or the listener failed, in every foreground gate.
 
 ## Out of scope
 

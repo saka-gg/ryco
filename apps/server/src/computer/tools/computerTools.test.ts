@@ -1,4 +1,5 @@
 // Adapted from Synara v0.9.1; see docs/licenses/synara-computer-use.txt.
+import { computerForegroundEscapeStopBlock } from "../computerVisibleUse.ts";
 import { setTimeout as waitForComputer } from "node:timers/promises";
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -3768,6 +3769,37 @@ describe("computer never-raise gate", () => {
         error: { code: "foreground_not_requested", effect: "not-dispatched" },
       });
       expect(backend.callsFor("raiseWindow")).toEqual([]);
+    } finally {
+      await manager.dispose();
+    }
+  });
+
+  it("refuses a visible non-macOS launch the user asked for without the Escape stop", async () => {
+    const backend = new FakeComputerBackend();
+    const blocked = async () => ({
+      userRequestedVisibleUse: true,
+      blocked: computerForegroundEscapeStopBlock(undefined)!,
+    });
+    const { call, manager } = await setup(
+      backend,
+      vi.fn(async () => true),
+      blocked,
+    );
+    try {
+      const refused = await call("computer_launch_app", {
+        app: "TextEdit",
+        hidden: false,
+        wait_for_window: false,
+      });
+      expect(refused.isError).toBe(true);
+      expect(JSON.stringify(resultJson(refused))).toContain("foreground_needs_input_monitoring");
+      const batched = await call("computer_run", {
+        steps: [{ type: "launch_app", app: "TextEdit", hidden: false, wait_for_window: false }],
+      });
+      expect(resultJson(batched)).toMatchObject({
+        steps: [{ ok: false, error: { code: "foreground_needs_input_monitoring" } }],
+      });
+      expect(backend.callsFor("launchApp")).toEqual([]);
     } finally {
       await manager.dispose();
     }

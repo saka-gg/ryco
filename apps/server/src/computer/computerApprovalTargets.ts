@@ -23,16 +23,6 @@ export const COMPUTER_APPROVAL_UNNAMED_APP: ComputerApprovalApp = {
   canAlwaysAllow: false,
 };
 /**
- * Browser tools act on a browser the driver bound, which they name by an opaque target id.
- * Its key is the normal key of its name, so an "Always allow" answer round-trips the file.
- */
-export const COMPUTER_APPROVAL_BROWSER_APP: ComputerApprovalApp = {
-  key: computerAppApprovalKey("the browser"),
-  name: "the browser",
-  canAlwaysAllow: true,
-};
-
-/**
  * Collects target ids from a call's arguments: the call itself, drag endpoints and every
  * step of a batch. Element refs resolve to the window they were observed in.
  */
@@ -68,14 +58,20 @@ export function collectComputerApprovalTargets(
 }
 
 /**
+ * Whether a call names nothing it acts on. A browser call like that only launches the
+ * driver's own isolated browser (no page, no user profile), so it asks nothing; the first
+ * action in that browser asks for it by name.
+ */
+export function computerApprovalTargetsEmpty(targets: ComputerApprovalTargets): boolean {
+  return targets.windowIds.length === 0 && targets.pids.length === 0 && targets.apps.length === 0;
+}
+
+/**
  * The apps one call needs approval for, deduplicated. A denylisted app is refused here,
  * before any dialog, with the same error the manager gives at dispatch. A call that names
  * nothing (a coordinate on whatever window is there) asks for the unnamed target.
  */
-export function computerApprovalAppsFor(
-  resolved: ComputerApprovalAppNames,
-  options: { readonly browser?: boolean } = {},
-): ComputerApprovalApp[] {
+export function computerApprovalAppsFor(resolved: ComputerApprovalAppNames): ComputerApprovalApp[] {
   const apps = new Map<string, ComputerApprovalApp>();
   for (const raw of resolved.names) {
     const name = computerAppDisplayName(raw);
@@ -85,11 +81,7 @@ export function computerApprovalAppsFor(
     if (denied) throw new ComputerDenylistError(denied.app, denied.matched);
     if (!apps.has(key)) apps.set(key, { key, name, canAlwaysAllow: true });
   }
-  if (resolved.unresolved || apps.size === 0) {
-    const fallback = options.browser
-      ? COMPUTER_APPROVAL_BROWSER_APP
-      : COMPUTER_APPROVAL_UNNAMED_APP;
-    apps.set(fallback.key, fallback);
-  }
+  if (resolved.unresolved || apps.size === 0)
+    apps.set(COMPUTER_APPROVAL_UNNAMED_APP.key, COMPUTER_APPROVAL_UNNAMED_APP);
   return [...apps.values()];
 }

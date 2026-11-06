@@ -4,6 +4,11 @@ import { dirname, join } from "node:path";
 
 import type { ComputerApprovedApp } from "@ryco/contracts";
 
+import {
+  COMPUTER_BROWSER_IDENTITIES,
+  computerBrowserForAppIdentity,
+} from "./computerBrowserIdentity.ts";
+
 /**
  * Apps the user chose "Always allow" for. The file sits next to the Computer audit log: the
  * backend reads and adds entries (only after a native dialog answer), the desktop lists and
@@ -17,8 +22,13 @@ export function computerAppApprovalsPath(stateDir: string): string {
   return join(stateDir, COMPUTER_APP_APPROVALS_FILE);
 }
 
-/** The display name of an app identity: a path names its bundle, `.app` is dropped. */
+/**
+ * The display name of an app identity: a path names its bundle, `.app` is dropped, and a
+ * browser is named by its canonical identity ("com.google.Chrome" is "Google Chrome").
+ */
 export function computerAppDisplayName(raw: string): string {
+  const browser = computerBrowserForAppIdentity(raw);
+  if (browser) return COMPUTER_BROWSER_IDENTITIES[browser].name;
   let name = raw.trim();
   if (name.includes("/")) name = name.replace(/\/+$/, "").split("/").pop() ?? name;
   if (name.toLowerCase().endsWith(".app")) name = name.slice(0, -4);

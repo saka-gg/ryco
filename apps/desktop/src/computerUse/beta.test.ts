@@ -337,6 +337,13 @@ it.skipIf(process.platform !== "darwin")(
     // The backend never sees the optional grant as missing.
     expect(await host.checkPermissions()).toEqual({ accessibility: true, screenRecording: true });
     expect(runtime.state().setup).toEqual({ missing: [], escapeStop: false, staleGrant: false });
+    // The backend refuses foreground use from this report.
+    expect(await runtime.request({ operation: "state" })).toMatchObject({
+      escapeStop: {
+        granted: false,
+        listener: { ready: false, error: "input-monitoring-required" },
+      },
+    });
   },
 );
 it.skipIf(process.platform !== "darwin")(

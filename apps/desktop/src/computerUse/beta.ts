@@ -489,7 +489,13 @@ export class DesktopComputerBeta {
   async request(raw: unknown): Promise<unknown> {
     const input = record(raw);
     const operation = textArg(input, "operation");
-    if (operation === "state") return { ...this.state(), visibleThreads: [...this.visible] };
+    if (operation === "state")
+      return {
+        ...this.state(),
+        visibleThreads: [...this.visible],
+        // The backend decides foreground use from this: it needs the Escape stop.
+        escapeStop: { granted: this.escapeStop(), listener: this.monitor.state },
+      };
     const threadId = textArg(input, "threadId", 256);
     const turnId = textArg(input, "turnId", 256);
     const key = taskKey({ threadId, turnId });

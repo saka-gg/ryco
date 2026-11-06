@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  COMPUTER_APPROVAL_BROWSER_APP,
   COMPUTER_APPROVAL_UNNAMED_APP,
   collectComputerApprovalTargets,
   computerApprovalAppsFor,
+  computerApprovalTargetsEmpty,
 } from "./computerApprovalTargets.ts";
 import { ComputerDenylistError } from "./computerDenylist.ts";
 
@@ -55,9 +55,24 @@ describe("computerApprovalAppsFor", () => {
       { key: "safari", name: "Safari", canAlwaysAllow: true },
       COMPUTER_APPROVAL_UNNAMED_APP,
     ]);
-    expect(computerApprovalAppsFor({ names: [], unresolved: false }, { browser: true })).toEqual([
-      COMPUTER_APPROVAL_BROWSER_APP,
+  });
+
+  it("names a browser by its canonical identity, so its app and browser routes share an approval", () => {
+    expect(
+      computerApprovalAppsFor({
+        names: ["Google Chrome", "com.google.Chrome", "/Applications/Microsoft Edge.app", "brave"],
+        unresolved: false,
+      }),
+    ).toEqual([
+      { key: "google chrome", name: "Google Chrome", canAlwaysAllow: true },
+      { key: "microsoft edge", name: "Microsoft Edge", canAlwaysAllow: true },
+      { key: "brave browser", name: "Brave Browser", canAlwaysAllow: true },
     ]);
+  });
+
+  it("treats a call that names nothing as empty", () => {
+    expect(computerApprovalTargetsEmpty({ windowIds: [], pids: [], apps: [] })).toBe(true);
+    expect(computerApprovalTargetsEmpty({ windowIds: [], pids: [4], apps: [] })).toBe(false);
   });
 
   it("refuses a denylisted app before any dialog", () => {

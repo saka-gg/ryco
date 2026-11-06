@@ -27,7 +27,14 @@ import {
   type ComputerAppAnswer,
 } from "../../computer/ComputerApprovalGate.ts";
 import {
+  COMPUTER_FOREGROUND_NOT_AUTHORIZED,
+  computerForegroundEscapeStopBlock,
+  type ComputerEscapeStopState,
+  type ComputerForegroundAuthorization,
+} from "../../computer/computerVisibleUse.ts";
+import {
   computerApprovalAppsFor,
+  computerApprovalTargetsEmpty,
   type ComputerApprovalTargets,
 } from "../../computer/computerApprovalTargets.ts";
 import {
@@ -202,10 +209,10 @@ export function withComputerBetaTools(
     }
     if (task.plan.runtimeMode === "full-access") return true;
     // Per-app approval, decided here; the desktop only shows the dialog.
-    const apps = computerApprovalAppsFor(
-      await manager.approvalAppNames(targets ?? { windowIds: [], pids: [], apps: [] }),
-      { browser: name.startsWith("computer_browser_") },
-    );
+    const named = targets ?? { windowIds: [], pids: [], apps: [] };
+    // Launching the driver's isolated browser touches no app yet; its first action asks.
+    if (name === "computer_browser_prepare" && computerApprovalTargetsEmpty(named)) return true;
+    const apps = computerApprovalAppsFor(await manager.approvalAppNames(named));
     for (const app of apps) {
       const allowed = await computerApprovalGate.requestApp({
         threadId,
@@ -231,9 +238,17 @@ export function withComputerBetaTools(
     await Effect.runPromise(context.assertCallerTurnActive());
     return true;
   };
-  const resolveForegroundAuthorization = async (context: ToolContext) => ({
-    userRequestedVisibleUse: active.get(context.callerThreadId)?.plan.foregroundAuthorized === true,
-  });
+  // Visible use needs the user's request and, on top, the Escape stop (Input Monitoring).
+  // The desktop reports the grant and its listener; the rule is decided here.
+  const resolveForegroundAuthorization = async (
+    context: ToolContext,
+  ): Promise<ComputerForegroundAuthorization> => {
+    if (active.get(context.callerThreadId)?.plan.foregroundAuthorized !== true)
+      return COMPUTER_FOREGROUND_NOT_AUTHORIZED;
+    const state = await post({ operation: "state" }).catch(() => undefined);
+    const blocked = computerForegroundEscapeStopBlock(readEscapeStopState(state?.escapeStop));
+    return { userRequestedVisibleUse: true, ...(blocked ? { blocked } : {}) };
+  };
   // The caller thread's worktree, else its project root: the one boundary for
   // browser file transfer and native image/file paste.
   const resolveWorkspaceRoot = (context: ToolContext): Effect.Effect<string | null> =>
@@ -391,6 +406,16 @@ export function withComputerBetaTools(
       await manager.dispose();
     },
   };
+}
+
+/** The desktop's report of its Escape stop; anything malformed reads as unknown. */
+export function readEscapeStopState(value: unknown): ComputerEscapeStopState | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const { granted, listener } = value as Record<string, unknown>;
+  if (typeof granted !== "boolean" || !listener || typeof listener !== "object") return undefined;
+  const { ready, error } = listener as Record<string, unknown>;
+  if (typeof ready !== "boolean") return undefined;
+  return { granted, listener: { ready, ...(typeof error === "string" ? { error } : {}) } };
 }
 
 /**

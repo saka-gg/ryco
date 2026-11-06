@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { ComputerSpaceBroker, ComputerSpaceError } from "./ComputerSpaceBroker.ts";
 import { ComputerControlState } from "./ComputerControlState.ts";
 import { computerApprovalGate } from "./ComputerApprovalGate.ts";
+import { assertForegroundNotBlocked } from "./foregroundEscapeStop.ts";
 import type {
   ComputerApprovalAppNames,
   ComputerApprovalTargets,
@@ -1267,6 +1268,7 @@ export class ComputerManager {
         COMPUTER_FOREGROUND_NOT_REQUESTED_CODE,
       );
     }
+    assertForegroundNotBlocked(authorization);
     const lastInput = this.lastUserDesktopInputAt;
     if (lastInput !== undefined && this.now() - lastInput < COMPUTER_USER_INTERACTION_QUIET_MS) {
       throw new CuaActionError(

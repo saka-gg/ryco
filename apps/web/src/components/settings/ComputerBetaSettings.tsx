@@ -34,7 +34,7 @@ const PERMISSIONS = [
   {
     kind: "inputMonitoring",
     label: "Input Monitoring",
-    detail: "Optional. Lets the Escape key stop an agent.",
+    detail: "Optional. Lets the Escape key stop an agent and allows foreground takeover.",
     optional: true,
   },
 ] as const satisfies ReadonlyArray<{
@@ -245,7 +245,8 @@ function ComputerBetaSettingsPanel({ api }: { api: ComputerBetaApi }) {
         </ul>
         {setup && !setup.escapeStop ? (
           <p className="mt-2 text-xs text-muted-foreground">
-            Without Input Monitoring, stop an agent with Stop in chat or in the menu bar.
+            Without Input Monitoring, agents stay in the background. Stop them with Stop in chat or
+            in the menu bar.
           </p>
         ) : null}
       </SettingsRow>

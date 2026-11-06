@@ -71,3 +71,27 @@ describe("computer app approvals", () => {
     expect(await readComputerAppApprovals(file)).toEqual([]);
   });
 });
+
+describe("browser identities", () => {
+  it("names every alias of a browser by its canonical name", () => {
+    for (const alias of [
+      "Google Chrome",
+      "chrome",
+      "/Applications/Google Chrome.app",
+      "com.google.Chrome",
+    ])
+      expect(computerAppDisplayName(alias)).toBe("Google Chrome");
+    expect(computerAppApprovalKey("com.microsoft.edgemac")).toBe("microsoft edge");
+    expect(computerAppApprovalKey("brave-browser")).toBe("brave browser");
+    expect(computerAppDisplayName("Safari")).toBe("Safari");
+  });
+
+  it("keeps one always-allowed entry per browser, whichever alias added it", async () => {
+    const file = await path();
+    await addComputerAppApproval(file, "com.google.Chrome");
+    await addComputerAppApproval(file, "Google Chrome");
+    expect(await readComputerAppApprovals(file)).toEqual([
+      expect.objectContaining({ key: "google chrome", name: "Google Chrome" }),
+    ]);
+  });
+});

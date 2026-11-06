@@ -153,11 +153,7 @@ it("turns on with one button, including Agent Control, and never sends a task", 
   await view.getByRole("button", { name: "Turn on Input Monitoring" }).click();
   expect(f.setupPermission).toHaveBeenLastCalledWith("inputMonitoring");
   await expect
-    .element(
-      view.getByText(
-        "Without Input Monitoring, stop an agent with Stop in chat or in the menu bar.",
-      ),
-    )
+    .element(view.getByText(/Without Input Monitoring, agents stay in the background/))
     .toBeVisible();
 });
 

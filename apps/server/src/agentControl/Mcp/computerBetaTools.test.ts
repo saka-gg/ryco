@@ -86,9 +86,12 @@ function fixture(
     registry: { getTurnAuthority: () => Effect.sync(() => current) } as never,
     projections: { getThreadCheckpointContext } as never,
   });
-  const stage = (runtimeMode: "full-access" | "approval-required" = "full-access") => {
+  const stage = (
+    runtimeMode: "full-access" | "approval-required" = "full-access",
+    text = "Inspect Calculator",
+  ) => {
     stageComputerTurn(session.threadId, {
-      text: "Inspect Calculator",
+      text,
       intent: { mode: "request", generation: "epoch:0" },
       runtimeMode,
       label: "Calculator",
@@ -354,6 +357,115 @@ it("asks once per app, stores Always allow for the desktop to list, and refuses 
     expect(refused.isError).toBe(true);
     expect(JSON.stringify(refused.content)).toContain("denylist");
     expect(consents()).toHaveLength(1);
+  } finally {
+    await runtime.dispose();
+  }
+});
+
+it.each([
+  ["Input Monitoring is not granted", { granted: false, listener: { ready: true } }, true],
+  [
+    "the listener failed",
+    { granted: true, listener: { ready: false, error: "input_monitor_unavailable" } },
+    true,
+  ],
+  ["no report came back", undefined, true],
+  [
+    "the listener starts on demand",
+    { granted: true, listener: { ready: false, error: "input_monitor_idle" } },
+    false,
+  ],
+  ["the listener is ready", { granted: true, listener: { ready: true } }, false],
+] as const)(
+  "foreground use the user asked for needs the Escape stop: %s",
+  async (_label, escapeStop, refused) => {
+    const runtime = fixture();
+    vi.spyOn(CuaComputerBackend.prototype, "missingPermissions").mockResolvedValue([]);
+    vi.spyOn(ComputerManager.prototype, "recordComputerAudit").mockImplementation(() => undefined);
+    const raise = vi
+      .spyOn(CuaComputerBackend.prototype, "raiseWindow")
+      .mockRejectedValue(new Error("no driver"));
+    runtime.fetcher.mockImplementation(async (_url, options) => {
+      const body = JSON.parse(String(options.body)) as Record<string, unknown>;
+      runtime.requests.push(body);
+      return Response.json(
+        body.operation === "state"
+          ? { visibleThreads: [], ...(escapeStop ? { escapeStop } : {}) }
+          : { ready: true },
+      );
+    });
+    try {
+      runtime.stage("full-access", "Show me the Calculator window.");
+      const result = await Effect.runPromise(
+        runtime.tools.callTool(session, "computer_activate_window", { window_id: "w1" }),
+      );
+      const text = JSON.stringify(result.content);
+      if (refused) {
+        expect(result.isError).toBe(true);
+        expect(text).toContain("foreground_needs_input_monitoring");
+        expect(text).toContain("Settings → Computer Use");
+        expect(raise).not.toHaveBeenCalled();
+      } else {
+        expect(text).not.toContain("foreground_needs_input_monitoring");
+      }
+    } finally {
+      await runtime.dispose();
+    }
+  },
+);
+it("does not ask the desktop about the Escape stop for background-only turns", async () => {
+  const runtime = fixture();
+  vi.spyOn(CuaComputerBackend.prototype, "missingPermissions").mockResolvedValue([]);
+  vi.spyOn(ComputerManager.prototype, "recordComputerAudit").mockImplementation(() => undefined);
+  try {
+    runtime.stage();
+    const result = await Effect.runPromise(
+      runtime.tools.callTool(session, "computer_activate_window", { window_id: "w1" }),
+    );
+    expect(JSON.stringify(result.content)).toContain("foreground_not_requested");
+    expect(runtime.requests.some((request) => request.operation === "state")).toBe(false);
+  } finally {
+    await runtime.dispose();
+  }
+});
+it("asks nothing to launch the isolated browser, then names the real browser", async () => {
+  const runtime = fixture();
+  vi.spyOn(CuaComputerBackend.prototype, "missingPermissions").mockResolvedValue([]);
+  vi.spyOn(ComputerManager.prototype, "recordComputerAudit").mockImplementation(() => undefined);
+  const names = vi
+    .spyOn(ComputerManager.prototype, "approvalAppNames")
+    .mockResolvedValue({ names: ["Google Chrome"], unresolved: false });
+  runtime.fetcher.mockImplementation(async (_url, options) => {
+    const body = JSON.parse(String(options.body)) as Record<string, unknown>;
+    runtime.requests.push(body);
+    return Response.json(
+      body.operation === "consent"
+        ? { approved: false, outcome: "decline", retryable: false }
+        : { ready: true },
+    );
+  });
+  const consents = () => runtime.requests.filter((request) => request.operation === "consent");
+  try {
+    runtime.stage("approval-required");
+    await Effect.runPromise(
+      runtime.tools.callTool(session, "computer_browser_prepare", {
+        allow_launch: true,
+        profile: { mode: "isolated_new" },
+      }),
+    );
+    expect(consents()).toEqual([]);
+    await Effect.runPromise(
+      runtime.tools.callTool(session, "computer_browser_prepare", {
+        pid: 4242,
+        allow_launch: false,
+      }),
+    );
+    expect(names).toHaveBeenLastCalledWith({ windowIds: [], pids: [4242], apps: [] });
+    expect(consents()).toEqual([
+      expect.objectContaining({
+        app: { key: "google chrome", name: "Google Chrome", canAlwaysAllow: true },
+      }),
+    ]);
   } finally {
     await runtime.dispose();
   }

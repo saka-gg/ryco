@@ -27,6 +27,7 @@ import {
   withComputerCallContext,
 } from "./computerCallContext.ts";
 import { withComputerTask } from "./computerTaskContext.ts";
+import { computerForegroundEscapeStopBlock } from "./computerVisibleUse.ts";
 import { FakeComputerBackend } from "./FakeComputerBackend.ts";
 import type { FrameSink } from "@ryco/shared/frameTransport";
 
@@ -4513,6 +4514,47 @@ describe("ComputerManager foreground containment", () => {
         await expect(manager.click("other-thread", { x: 100, y: 100 })).resolves.toMatchObject({
           action: "computer_click",
         });
+      } finally {
+        await manager.dispose();
+      }
+    },
+  );
+
+  it.each(["activate", "activate-and-restore", "foreground-input", "menu"])(
+    "refuses %s that the user asked for when the Escape stop is missing",
+    async (route) => {
+      const backend = new FakeComputerBackend();
+      const manager = new ComputerManager({ backend, actionSettleMs: 0 });
+      const input = vi.fn(async () => "typed");
+      const authorization = {
+        ...VISIBLE_USE_AUTHORIZED,
+        blocked: computerForegroundEscapeStopBlock({ granted: false, listener: { ready: true } })!,
+      };
+      try {
+        const call =
+          route === "activate"
+            ? manager.activateWindow("blocked-thread", "fake-calculator", authorization)
+            : route === "activate-and-restore"
+              ? manager.foregroundWithRestore(
+                  "blocked-thread",
+                  "fake-calculator",
+                  undefined,
+                  authorization,
+                )
+              : route === "menu"
+                ? manager.invokeMenu(
+                    "blocked-thread",
+                    { windowId: "fake-calculator" },
+                    ["File"],
+                    authorization,
+                  )
+                : manager.withForegroundRestore("blocked-thread", input, authorization);
+        await expect(call).rejects.toMatchObject({
+          code: "foreground_needs_input_monitoring",
+          effect: "not-dispatched",
+        });
+        expect(backend.calls).toEqual([]);
+        expect(input).not.toHaveBeenCalled();
       } finally {
         await manager.dispose();
       }
