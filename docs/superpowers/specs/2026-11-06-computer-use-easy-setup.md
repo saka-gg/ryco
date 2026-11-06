@@ -39,6 +39,10 @@ Status: implemented on `computer-use/3-easy-setup` (stacked on phase 1, restacke
   Agent Control off or missing permissions send the message without Computer Use. Missing setup
   shows one toast per session pointing to Settings. Explicit `/computer-use` keeps today's
   blocking errors.
+- The desktop's `prepare` decides about permissions, after refreshing them. The renderer never
+  gates a send on the cached `getState`: its permissions read as unknown until a first check, so
+  the first chat after a desktop start went without Computer tools
+  (`resolveComputerSendIntent`).
 - The global switch is **Use in every chat**. Generations and Stop semantics in `beta.ts` are
   unchanged: changing the switch invalidates queued work.
 

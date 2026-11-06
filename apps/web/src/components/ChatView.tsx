@@ -16,6 +16,7 @@ import { useLocalComputerEnvironmentId } from "../computerUse/localComputer";
 import {
   computerUseSendBlocker,
   isExternalOpenCodeInstance,
+  resolveComputerSendIntent,
 } from "../computerUse/computerUseSend.logic";
 import { noteComputerSetupMissingOnce } from "../computerUse/computerSetupNotice";
 import { parseComputerInvocation } from "@ryco/shared/computerInvocation";
@@ -5960,38 +5961,32 @@ export default function ChatView(props: ChatViewProps) {
     }
     if (localComputer) {
       try {
-        const computerState = await computer.getState();
         // On by default: every chat from this Mac may use the computer without the command,
         // and such a send never waits on Computer Use; `/computer-use` reports what blocks it.
-        const byDefault = !computerInvocation && computerState.preferences.defaultEnabled;
-        let blocked = false;
-        if (computerInvocation || byDefault) {
-          if (!api?.server)
-            throw new Error(
-              "Local desktop settings are unavailable. Reconnect before sending this task.",
-            );
-          const settings = await api.server.getSettings();
-          const blocker = computerUseSendBlocker({
-            provider: ctxSelectedProvider,
-            agentControlEnabled: settings.agentControl.enabled,
-            externalOpenCode: isExternalOpenCodeInstance(
-              ctxSelectedProvider,
-              settings.providerInstances[ctxSelectedModelSelection.instanceId]?.config ?? null,
-            ),
-          });
-          if (blocker && computerInvocation) throw new Error(blocker);
-          blocked = blocker !== null;
-          if (!blocked && byDefault && computerState.setup.missing.length > 0) {
-            blocked = true;
-            noteComputerSetupMissingOnce();
-          }
-        }
-        if (!blocked) {
-          const intent = await computer.prepare(activeThread.id, computerInvocation !== null);
-          // A permission check may yield to an edited draft or changed selection.
-          if (promptRef.current !== promptForSend) return;
-          if (intent) settingsSnapshot.computerUse = intent;
-        }
+        const resolution = await resolveComputerSendIntent({
+          threadId: activeThread.id,
+          explicit: computerInvocation !== null,
+          computer,
+          readBlocker: async () => {
+            if (!api?.server)
+              throw new Error(
+                "Local desktop settings are unavailable. Reconnect before sending this task.",
+              );
+            const settings = await api.server.getSettings();
+            return computerUseSendBlocker({
+              provider: ctxSelectedProvider,
+              agentControlEnabled: settings.agentControl.enabled,
+              externalOpenCode: isExternalOpenCodeInstance(
+                ctxSelectedProvider,
+                settings.providerInstances[ctxSelectedModelSelection.instanceId]?.config ?? null,
+              ),
+            });
+          },
+        });
+        // A permission check may yield to an edited draft or changed selection.
+        if (resolution.prepared && promptRef.current !== promptForSend) return;
+        if (resolution.setupMissing) noteComputerSetupMissingOnce();
+        if (resolution.intent) settingsSnapshot.computerUse = resolution.intent;
       } catch (error) {
         // A default send goes without Computer Use; only `/computer-use` waits on it.
         if (computerInvocation) {
