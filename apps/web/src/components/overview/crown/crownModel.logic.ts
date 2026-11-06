@@ -2,6 +2,7 @@ import { isChatProject } from "@ryco/shared/projectKind";
 
 import { formatCount } from "~/lib/formatCount";
 
+import { isPullOnlyShip } from "../../GitActionsControl.logic";
 import { getOverviewSummary } from "../overviewSummary.logic";
 import type {
   OverviewLayoutProps,
@@ -70,7 +71,9 @@ export interface CrownRailSummary {
   /**
    * The Ship button: `count` is the commits a push would publish (the face's
    * "to push" headline); `steps` and `label` what a click runs; `ready` lights
-   * the icon while a click would ship.
+   * the icon while a click would ship. `landing` marks a click (or the run in
+   * progress) that only pulls; the rocket then turns nose-down and the badge
+   * counts the `incoming` commits.
    */
   readonly ship: {
     readonly count: number;
@@ -79,6 +82,8 @@ export interface CrownRailSummary {
     readonly disabledReason: string | null;
     readonly phase: CrownShipPhase;
     readonly ready: boolean;
+    readonly landing: boolean;
+    readonly incoming: number;
     /** The run in progress: its step count and the running step's index (-1 while arming). */
     readonly runSteps: number;
     readonly activeIndex: number;
@@ -218,6 +223,7 @@ type CrownShipSummaryInput = Pick<
 
 function crownShipSummary(
   count: number,
+  incoming: number,
   ship: CrownShipSummaryInput | undefined,
 ): CrownRailSummary["ship"] {
   const steps = ship?.steps.length ?? 0;
@@ -230,6 +236,8 @@ function crownShipSummary(
     disabledReason: ship?.disabledReason ?? null,
     phase,
     ready: steps > 0 && phase === "idle",
+    landing: isPullOnlyShip(phase === "idle" ? (ship?.steps ?? []) : runSteps),
+    incoming,
     runSteps: runSteps.length,
     activeIndex: ship?.activeStep ? runSteps.indexOf(ship.activeStep) : -1,
   };
@@ -347,7 +355,11 @@ export function buildCrownRailSummary(
       conflict: prState !== null && layout.pullRequest?.hasMergeConflicts === true,
     },
     notes: { filled: input.notesFilled === true },
-    ship: crownShipSummary(shipCount, input.isGitRepo ? input.ship : undefined),
+    ship: crownShipSummary(
+      shipCount,
+      input.isGitRepo ? (layout.changes?.behindCount ?? 0) : 0,
+      input.isGitRepo ? input.ship : undefined,
+    ),
   };
 }
 
@@ -396,10 +408,11 @@ export function crownRailItemDescription(
     case "notes":
       return summary.notes.filled ? "Has notes" : null;
     case "ship": {
-      const { phase, steps, label, disabledReason } = summary.ship;
+      const { phase, steps, label, disabledReason, landing, incoming } = summary.ship;
       if (phase === "arming") return "Starting, click again to cancel";
-      if (phase === "running") return "Shipping";
-      if (steps > 0 && label) return label;
+      if (phase === "running") return landing ? "Pulling" : "Shipping";
+      if (steps > 0 && label)
+        return landing && incoming > 0 ? `${label}, ${incoming} incoming` : label;
       return disabledReason ?? "Nothing to ship";
     }
     case "project":

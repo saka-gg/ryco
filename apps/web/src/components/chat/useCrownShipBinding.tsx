@@ -11,6 +11,7 @@ import { formatCount } from "~/lib/formatCount";
 import { randomUUID } from "~/lib/utils";
 import {
   type GitShipStep,
+  isPullOnlyShip,
   resolvePullAvailability,
   resolveShipPlan,
 } from "../GitActionsControl.logic";
@@ -143,7 +144,7 @@ export function useCrownShipBinding(input: GitActionRunnerInput & { readonly ena
     }
     if (plan.steps.length === 0) return;
     // The waiting notice belongs to the Ship button (the branch section), whatever runs last.
-    const kind: GitActionNoticeKind = plan.steps.every((step) => step === "pull") ? "pull" : "push";
+    const kind: GitActionNoticeKind = isPullOnlyShip(plan.steps) ? "pull" : "push";
     const reporter = createGitActionReporter({
       id: randomUUID(),
       kind,

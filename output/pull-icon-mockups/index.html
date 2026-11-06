@@ -1,0 +1,133 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+:root{--rail:#0d0d0e;--info-c:var(--info,#3b82f6);--teal:#2dd4bf}
+body{font-family:var(--font-sans);color:var(--foreground);margin:0}
+.wrap{display:grid;grid-template-columns:repeat(auto-fill,minmax(228px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px;display:flex;flex-direction:column;gap:12px}
+.card.rec{border-color:color-mix(in srgb,var(--info-c) 60%,var(--border))}
+.hd{display:flex;align-items:center;gap:8px}
+.hd b{font-size:14px}
+.tag{font-size:10.5px;font-weight:600;padding:2px 7px;border-radius:99px;background:color-mix(in srgb,var(--info-c) 18%,transparent);color:var(--info-c)}
+.desc{font-size:12.5px;line-height:1.45;color:var(--muted-foreground);margin:0;min-height:54px}
+.stage{background:#18181b;border-radius:calc(var(--radius) - 2px);padding:16px;display:flex;justify-content:flex-end;align-items:flex-end;gap:10px;position:relative}
+.rail{width:46px;background:var(--rail);border-radius:24px;padding:5px 0;display:flex;flex-direction:column;align-items:center;gap:2px;box-shadow:0 0 0 1px rgba(255,255,255,.06)}
+.sep{width:20px;height:1px;margin:2px 0;background:rgba(255,255,255,.09)}
+.btn{position:relative;width:36px;height:36px;border-radius:50%;display:grid;place-items:center;color:#a1a1aa}
+.btn>*{grid-area:1/1}
+.btn.hl{background:rgba(255,255,255,.11)}
+svg.g{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+svg.sm{width:12px;height:12px}
+.badge{justify-self:end;align-self:end;min-width:15px;height:15px;margin:0 -3px -2px 0;padding:0 3px;border-radius:8px;background:#222226;box-shadow:0 0 0 2px var(--rail);color:#fafafa;font:600 9px/15px var(--font-mono);text-align:center;box-sizing:border-box}
+.badge.info{background:var(--info-c);color:#fff}
+.badge.teal{background:var(--teal);color:#042f2e}
+.badge.dim{background:#2a2a2f;color:#d4d4d8}
+.ring{width:100%;height:100%;border-radius:50%}
+.breathe-info{animation:bi 1.8s ease-in-out infinite}
+.breathe-teal{animation:bt 2.4s ease-in-out infinite}
+@keyframes bi{0%,100%{box-shadow:0 0 0 1.5px color-mix(in srgb,var(--info-c) 70%,transparent)}50%{box-shadow:0 0 0 4px transparent}}
+@keyframes bt{0%,100%{box-shadow:0 0 0 1.5px rgba(45,212,191,.65)}50%{box-shadow:0 0 0 4px transparent}}
+.c-info{color:var(--info-c)} .c-teal{color:var(--teal)}
+.tip{position:absolute;right:68px;bottom:18px;background:#232326;color:#fafafa;font-size:11.5px;padding:5px 9px;border-radius:8px;white-space:nowrap;box-shadow:0 4px 14px rgba(0,0,0,.35)}
+.tip span{color:#a1a1aa}
+.states{display:flex;justify-content:space-between;gap:6px}
+.st{display:flex;flex-direction:column;align-items:center;gap:5px;flex:1}
+.st .chip{background:var(--rail);border-radius:50%;padding:5px;zoom:1.45}
+.st small{font-size:10.5px;color:var(--muted-foreground)}
+/* landing rocket */
+.land{transform:rotate(135deg)}
+.bob{animation:bob 2.4s ease-in-out infinite}
+@keyframes bob{0%,100%{transform:translateY(-1.5px)}50%{transform:translateY(1.5px)}}
+.bob .land{display:block}
+/* arrow drop */
+.drop{animation:drop 1.8s cubic-bezier(.5,0,.3,1) infinite}
+@keyframes drop{0%,100%{transform:translateY(-2.5px)}55%{transform:translateY(0)}}
+/* dish waves */
+.wave{animation:wave 1.8s ease-in-out infinite}
+.wave.w2{animation-delay:.3s}
+@keyframes wave{0%,100%{opacity:.25}50%{opacity:1}}
+/* running arc */
+.arc{width:32px;height:32px;transform:rotate(-90deg)}
+.arc .track{stroke:rgba(255,255,255,.1)}
+.arc .run{stroke-dasharray:20 78.5;animation:spin 1.1s linear infinite;transform-origin:16px 16px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.pick{margin-top:auto;font:inherit;font-size:12px;font-weight:600;padding:7px 10px;border-radius:calc(var(--radius) - 2px);border:1px solid var(--border);background:var(--secondary);color:var(--secondary-foreground);cursor:pointer}
+.pick:hover{background:var(--accent-surface,var(--secondary))}
+.rec .pick{background:var(--primary);color:var(--primary-foreground);border-color:transparent}
+.ref{font-size:12px;color:var(--muted-foreground);margin:0 0 12px}
+.ref code{font-family:var(--font-mono);font-size:11.5px}
+</style></head><body>
+<svg width="0" height="0" style="position:absolute">
+ <symbol id="rocket" viewBox="0 0 24 24"><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09"/><path d="M9 12a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.4 22.4 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 .05 5 .05"/></symbol>
+ <symbol id="adl" viewBox="0 0 24 24"><path d="M19 21H5"/><g class="drop"><path d="M12 17V3"/><path d="m6 11 6 6 6-6"/></g></symbol>
+ <symbol id="adl-static" viewBox="0 0 24 24"><path d="M19 21H5"/><path d="M12 17V3"/><path d="m6 11 6 6 6-6"/></symbol>
+ <symbol id="cloud" viewBox="0 0 24 24"><path d="M4.393 15.269A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.436 8.284"/><g class="drop"><path d="M12 13v8l-4-4"/><path d="m12 21 4-4"/></g></symbol>
+ <symbol id="dish" viewBox="0 0 24 24"><path d="M2.824 10.459a8 8 0 0010.717 10.717c.558-.276.623-1.012.183-1.452l-9.448-9.448c-.44-.44-1.176-.375-1.452.183"/><path d="m9 15 4-4"/><path class="wave" d="M18 12a6 6 0 00-6-6"/><path class="wave w2" d="M22 12A10 10 0 0012 2"/></symbol>
+ <symbol id="diff" viewBox="0 0 24 24"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"/><path d="M9 10h6"/><path d="M12 13V7"/><path d="M9 17h6"/></symbol>
+ <symbol id="pr" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" x2="6" y1="9" y2="21"/></symbol>
+ <symbol id="bot" viewBox="0 0 24 24"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></symbol>
+ <symbol id="note" viewBox="0 0 24 24"><path d="M13.4 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7.4"/><path d="M2 6h4"/><path d="M2 10h4"/><path d="M2 14h4"/><path d="M2 18h4"/><path d="M21.378 5.626a1 1 0 1 0-3.004-3.004l-5.01 5.012a2 2 0 0 0-.506.854l-.837 2.87a.5.5 0 0 0 .62.62l2.87-.837a2 2 0 0 0 .854-.506z"/></symbol>
+ <symbol id="down" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></symbol>
+</svg>
+
+<p class="ref">State shown: the branch is <b>3 commits behind</b>, nothing to commit, nothing to push, so Ship's plan is just <code>["pull"]</code>. Today the rail still shows the rocket with a blue "1" badge, same as a real ship.</p>
+<div class="wrap" id="wrap"></div>
+
+<script>
+const ic=(id,cls="g")=>`<svg class="${cls}"><use href="#${id}"/></svg>`;
+const ring=c=>`<i class="ring breathe-${c}"></i>`;
+const arc=c=>`<svg class="arc" viewBox="0 0 32 32"><circle class="track" cx="16" cy="16" r="12.5" fill="none" stroke-width="2"/><circle class="run" cx="16" cy="16" r="12.5" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round"/></svg>`;
+const T='var(--teal)', I='var(--info-c)';
+const opts=[
+ {key:"landing",name:"Landing rocket",rec:true,
+  desc:"Same rocket, turned nose-down and bobbing gently. Ship stays one button; launch = push, landing = pull. Teal so it isn't confused with a real ship.",
+  idle:`${ring("teal")}<span class="bob c-teal">${ic("rocket","g land")}</span><b class="badge teal">3</b>`,
+  run:`${arc(T)}<span class="c-teal">${ic("rocket","g sm land")}</span>`,
+  tip:`Pull <span>· 3 incoming</span>`},
+ {key:"arrow",name:"Arrow to line",
+  desc:"Plain download arrow dropping onto a line. Easiest to read at 16 px, but it loses the Ship identity.",
+  idle:`${ring("teal")}<span class="c-teal">${ic("adl")}</span><b class="badge teal">3</b>`,
+  run:`${arc(T)}<span class="c-teal">${ic("adl-static","g sm")}</span>`,
+  tip:`Pull <span>· 3 incoming</span>`},
+ {key:"cloud",name:"Cloud download",
+  desc:"Arrow drops out of a cloud: says \"from the remote\". Good if fetch-only (no counts known yet) shares this icon too.",
+  idle:`${ring("teal")}<span class="c-teal">${ic("cloud")}</span><b class="badge teal">3</b>`,
+  run:`${arc(T)}<span class="c-teal">${ic("cloud","g sm")}</span>`,
+  tip:`Pull <span>· 3 incoming</span>`},
+ {key:"dish",name:"Satellite dish",
+  desc:"Receiving signal, the waves pulse. Playful and fits the rocket theme, but less obvious that a click pulls.",
+  idle:`<span class="c-teal">${ic("dish")}</span><b class="badge teal">3</b>`,
+  run:`${arc(T)}<span class="c-teal">${ic("dish","g sm")}</span>`,
+  tip:`Pull <span>· 3 incoming</span>`},
+ {key:"rocket-chip",name:"Rocket + incoming chip",
+  desc:"Rocket stays as it is but dimmed (nothing to launch). The badge turns into a teal ↓3 chip that says why the button is lit.",
+  idle:`<span style="color:#71717a">${ic("rocket")}</span><b class="badge teal" style="display:flex;align-items:center;gap:1px;padding:0 3px 0 2px"><svg class="g" style="width:8px;height:8px;stroke-width:3"><use href="#down"/></svg>3</b>`,
+  run:`${arc(T)}<span class="c-teal">${ic("rocket","g sm")}</span>`,
+  tip:`Pull <span>· 3 incoming</span>`},
+];
+const ship=`${ring("info")}<span class="c-info">${ic("rocket")}</span><b class="badge info">3</b>`;
+document.getElementById("wrap").innerHTML=opts.map(o=>`
+ <div class="card ${o.rec?"rec":""}">
+  <div class="hd"><b>${o.name}</b>${o.rec?'<span class="tag">Recommended</span>':""}</div>
+  <p class="desc">${o.desc}</p>
+  <div class="stage">
+   <div class="tip">${o.tip}</div>
+   <div class="rail">
+    <div class="btn">${ic("diff")}</div>
+    <div class="btn">${ic("bot")}</div>
+    <div class="btn">${ic("pr")}</div>
+    <div class="sep"></div>
+    <div class="btn">${ic("note")}</div>
+    <div class="btn hl">${o.idle}</div>
+   </div>
+  </div>
+  <div class="states">
+   <div class="st"><div class="chip"><div class="btn">${o.idle}</div></div><small>Pull only</small></div>
+   <div class="st"><div class="chip"><div class="btn c-teal">${o.run}</div></div><small>Pulling</small></div>
+   <div class="st"><div class="chip"><div class="btn">${ship}</div></div><small>Can ship (today)</small></div>
+  </div>
+  <button class="pick" data-k="${o.name}">Use ${o.name}</button>
+ </div>`).join("");
+document.querySelectorAll(".pick").forEach(b=>b.addEventListener("click",()=>window.ryco?.send?.(`Go with the "${b.dataset.k}" option for the pull-only Ship icon.`)));
+</script>
+</body></html>

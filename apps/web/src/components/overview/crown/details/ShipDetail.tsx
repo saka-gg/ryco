@@ -15,7 +15,7 @@ import { useState } from "react";
 
 import { cn } from "~/lib/utils";
 
-import type { GitShipStep } from "../../../GitActionsControl.logic";
+import { type GitShipStep, isPullOnlyShip } from "../../../GitActionsControl.logic";
 import { Button } from "../../../ui/button";
 import type { OverviewLayoutProps } from "../../overviewTypes";
 import type { CrownShipBinding } from "../crownTypes";
@@ -217,7 +217,9 @@ export function ShipDetail({
               ship.phase === "arming"
                 ? "Starting…"
                 : ship.phase === "running"
-                  ? "Shipping"
+                  ? isPullOnlyShip(steps)
+                    ? "Pulling"
+                    : "Shipping"
                   : "One click will"
             }
             count={steps.length}

@@ -222,9 +222,38 @@ describe("buildCrownRailSummary", () => {
       ship: { ...ship, phase: "running", runSteps: ship.steps, activeStep: "push" },
     });
     assert.deepInclude(running.ship, { ready: false, runSteps: 3, activeIndex: 1 });
+    assert.equal(idle.ship.landing, false);
     // Outside a git repository the binding is ignored.
     const noGit = buildCrownRailSummary(makeLayout(), { isGitRepo: false, ship });
     assert.equal(noGit.ship.steps, 0);
+  });
+
+  it("lands the rocket when Ship only pulls, counting the incoming commits", () => {
+    const pullOnly = {
+      steps: ["pull"] as const,
+      label: "Pull",
+      disabledReason: null,
+      phase: "idle" as const,
+      runSteps: [] as const,
+      activeStep: null,
+    };
+    const behind = makeLayout({ changes: makeChanges({ behindCount: 3 }) });
+    const idle = buildCrownRailSummary(behind, { ...GIT, ship: pullOnly });
+    assert.deepInclude(idle.ship, { landing: true, incoming: 3, ready: true });
+    // A run keeps landing while it is the pull-only run, even as the plan empties.
+    const running = buildCrownRailSummary(behind, {
+      ...GIT,
+      ship: { ...pullOnly, steps: [], phase: "running", runSteps: ["pull"], activeStep: "pull" },
+    });
+    assert.equal(running.ship.landing, true);
+    // A pull in front of a push still ships.
+    const pullThenPush = buildCrownRailSummary(behind, {
+      ...GIT,
+      ship: { ...pullOnly, steps: ["pull", "push"], label: "Pull & push" },
+    });
+    assert.equal(pullThenPush.ship.landing, false);
+    const nothing = buildCrownRailSummary(behind, { ...GIT, ship: { ...pullOnly, steps: [] } });
+    assert.equal(nothing.ship.landing, false);
   });
 
   it("draws the Ship ring with done, current and queued steps", () => {
@@ -397,6 +426,12 @@ describe("crownRailItemDescription", () => {
     assert.equal(describeShip(base), "Push & create PR");
     assert.equal(describeShip({ ...base, phase: "arming" }), "Starting, click again to cancel");
     assert.equal(describeShip({ ...base, phase: "running" }), "Shipping");
+    const pullOnly = { ...base, steps: ["pull"] as const, label: "Pull" };
+    assert.equal(describeShip(pullOnly), "Pull");
+    assert.equal(
+      describeShip({ ...pullOnly, phase: "running", runSteps: ["pull"], activeStep: "pull" }),
+      "Pulling",
+    );
     assert.equal(
       describeShip({ ...base, steps: [], disabledReason: "Branch has diverged" }),
       "Branch has diverged",

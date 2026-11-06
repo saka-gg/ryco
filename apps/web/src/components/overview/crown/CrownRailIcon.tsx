@@ -23,6 +23,7 @@ export function crownRailIconState(
     case "ship":
       return {
         "data-ready": summary.ship.ready ? "true" : undefined,
+        "data-landing": summary.ship.landing ? "true" : undefined,
         "data-phase": summary.ship.phase === "idle" ? undefined : summary.ship.phase,
       };
     default:
@@ -82,7 +83,7 @@ export function CrownRailIcon(props: {
     case "planArc":
       return <PlanArc pct={summary.plan.pct} />;
     case "ship": {
-      const { phase, steps, runSteps, activeIndex } = summary.ship;
+      const { phase, steps, runSteps, activeIndex, landing, incoming } = summary.ship;
       // Running (or waiting out the grace): one arc per step around a small rocket.
       if (phase !== "idle") {
         return (
@@ -93,11 +94,26 @@ export function CrownRailIcon(props: {
               radius={12.5}
               className="crown-rail-ring"
             />
-            <Icon aria-hidden="true" className="crown-ship-glyph" />
+            <Icon
+              aria-hidden="true"
+              className={landing ? "crown-ship-glyph crown-ship-nose-down" : "crown-ship-glyph"}
+            />
           </>
         );
       }
       if (steps === 0) return <CircleCheckIcon aria-hidden="true" className="crown-rail-glyph" />;
+      // Only a pull to run: the rocket lands, and the badge counts what comes in.
+      if (landing) {
+        return (
+          <>
+            <i aria-hidden="true" className="crown-ship-ring" />
+            <span aria-hidden="true" className="crown-ship-landing">
+              <Icon className="crown-rail-glyph crown-ship-nose-down" />
+            </span>
+            <CrownBadge value={incoming > 0 ? incoming : steps} variant="landing" />
+          </>
+        );
+      }
       return (
         <>
           <i aria-hidden="true" className="crown-ship-ring" />

@@ -90,6 +90,12 @@
   color: var(--info-foreground);
 }
 
+/* Ship only pulls: the rocket lands in teal, so it never reads as a push. */
+.crown-rail-btn[data-nav-key="ship"][data-landing="true"] {
+  --crown-ship-tone: var(--crown-landing);
+  color: var(--crown-landing);
+}
+
 /* Ship: a ring breathes while a click would ship; while it runs, the ring shows one arc per step. */
 .crown-ship-ring {
   width: 100%;
@@ -103,7 +109,7 @@
   animation-play-state: var(--app-motion-activity-play-state, running);
 }
 
-.crown-rail-btn[data-phase] {
+.crown-rail-btn[data-phase]:not([data-landing="true"]) {
   color: var(--info-foreground);
 }
 
@@ -112,13 +118,36 @@
   height: 12px;
 }
 
+/* Lucide's rocket climbs to the upper right; turned 135deg it points straight down. */
+.crown-ship-nose-down {
+  rotate: 135deg;
+}
+
+/* The landing rocket bobs, slower than the ship ring breathes. */
+.crown-ship-landing {
+  display: grid;
+  place-items: center;
+  animation: crown-ship-land 2.4s ease-in-out infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+
+@keyframes crown-ship-land {
+  0%,
+  100% {
+    translate: 0 -1.5px;
+  }
+  50% {
+    translate: 0 1.5px;
+  }
+}
+
 @keyframes crown-ship-breathe {
   0%,
   100% {
-    box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--info) 70%, transparent);
+    box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--crown-ship-tone, var(--info)) 70%, transparent);
   }
   50% {
-    box-shadow: 0 0 0 4px color-mix(in srgb, var(--info) 0%, transparent);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--crown-ship-tone, var(--info)) 0%, transparent);
   }
 }
 
@@ -172,7 +201,7 @@
 
 /* The Ship step running now. */
 .crown-ring-seg[data-s="current"] {
-  stroke: var(--info);
+  stroke: var(--crown-ship-tone, var(--info));
   animation: crown-segpulse 1.4s ease-in-out infinite;
   animation-play-state: var(--app-motion-activity-play-state, running);
 }
@@ -277,6 +306,11 @@
 .crown-badge[data-variant="info"] {
   background: var(--info);
   color: #fff;
+}
+
+.crown-badge[data-variant="landing"] {
+  background: var(--crown-landing);
+  color: var(--crown-landing-ink);
 }
 
 .crown-badge[data-variant="note"] {
