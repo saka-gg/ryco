@@ -513,7 +513,8 @@ jobs:
               echo "macOS signing enabled."
               args+=(--signed)
             else
-              echo "macOS signing disabled (missing one or more Apple signing secrets)."
+              echo "::error::macOS releases require all Apple signing and notarization secrets."
+              exit 1
             fi
           elif [[ "${{ matrix.platform }}" == "win" ]]; then
             if has_all \
@@ -751,18 +752,11 @@ jobs:
         shell: bash
         run: |
           cat > release-assets/release-body.md <<'EOF'
-          ## macOS unsigned install
+          ## macOS install
 
-          Ryco for macOS is currently unsigned and not notarized. Apple requires a paid Developer ID account for notarization, so macOS may say the app is damaged even when the GitHub download is valid.
+          Download the `.dmg`, open it, and drag Ryco to `/Applications`.
 
-          To install it, download the `.dmg`, open it, and run `Install Ryco.command`. The helper copies Ryco to `/Applications`, removes the quarantine flag from that installed app, and opens it.
-
-          Manual fallback after dragging Ryco to `/Applications`:
-
-          ```bash
-          xattr -dr com.apple.quarantine /Applications/Ryco.app
-          open /Applications/Ryco.app
-          ```
+          Official macOS releases are signed with Developer ID and notarized by Apple.
           EOF
 
       # A rerun, or an earlier failed run for the same version, leaves a draft

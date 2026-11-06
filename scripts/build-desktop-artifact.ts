@@ -913,17 +913,9 @@ export function createMacUnsignedInstallReadme(productName: string): string {
   return `Ryco unsigned macOS install
 ============================
 
-This macOS build is unsigned and not notarized. Apple requires a paid Developer ID account for notarization. Because Ryco does not currently use that paid account, macOS may say the app is damaged even when the download is valid.
+This macOS build is unsigned and not notarized because Developer ID signing was disabled for this build. macOS may say the app is damaged even when the download is valid.
 
-If you downloaded Ryco from the official GitHub release, use Install Ryco.command from this DMG. It copies ${appName} to /Applications, removes the com.apple.quarantine flag from that installed app, and opens it.
-
-Manual fallback:
-
-1. Drag ${appName} to /Applications.
-2. Run:
-
-   xattr -dr com.apple.quarantine "/Applications/${appName}"
-   open "/Applications/${appName}"
+For a build you trust, use Install Ryco.command from this DMG. It copies ${appName} to /Applications, removes the com.apple.quarantine flag from that installed app, and opens it.
 
 Only use this workaround for builds downloaded from:
 https://github.com/sak0a/ryco/releases
@@ -1018,7 +1010,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       { from: "apps/desktop/resources/computer-use-licenses", to: "computer-use-licenses" },
     ],
   };
-  if (!signed && localSigningIdentity) buildConfig.forceCodeSigning = true;
+  if (signed || localSigningIdentity) buildConfig.forceCodeSigning = true;
   const updateChannel = resolveDesktopUpdateChannel(version);
   const publishConfig = resolveGitHubPublishConfig(updateChannel);
   if (publishConfig) {

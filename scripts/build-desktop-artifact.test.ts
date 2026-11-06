@@ -566,6 +566,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         );
         assert.equal((signed.mac as Record<string, unknown>).identity, undefined);
         assert.equal((signed.mac as Record<string, unknown>).hardenedRuntime, undefined);
+        assert.equal(signed.forceCodeSigning, true);
       }),
   );
 
@@ -849,8 +850,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   it("explains the unsigned macOS install fallback without promising notarization", () => {
     const readme = createMacUnsignedInstallReadme("Ryco");
     assert.ok(readme.includes("unsigned and not notarized"));
-    assert.ok(readme.includes("Apple requires a paid Developer ID account"));
-    assert.ok(readme.includes('xattr -dr com.apple.quarantine "/Applications/Ryco.app"'));
+    assert.ok(readme.includes("Developer ID signing was disabled for this build"));
     assert.ok(readme.includes("https://github.com/sak0a/ryco/releases"));
   });
 

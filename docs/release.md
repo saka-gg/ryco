@@ -26,7 +26,7 @@ This document covers the unified release workflow for stable and nightly desktop
 - Publishes the CLI package (`apps/server`, npm package `ryco-cli`) with OIDC trusted publishing from the same workflow file:
   - stable releases publish npm dist-tag `latest`
   - nightly releases publish npm dist-tag `nightly`
-- Signing is optional and auto-detected per platform from secrets.
+- macOS signing and notarization are required; Windows signing is auto-detected from secrets.
 
 The Windows x64 job defaults to `windows-2025`. To use a prepared self-hosted
 Windows x64 runner, set the repository Actions variable `WINDOWS_X64_RUNNER` to
@@ -254,10 +254,18 @@ Checklist:
    - `APPLE_API_ISSUER`: Issuer ID
 8. Re-run a tag release and confirm macOS artifacts are signed/notarized.
 
+Official macOS release builds fail when any of these secrets are missing. Local
+unsigned builds remain available without `--signed`; explicitly signed builds
+require a valid signing identity instead of silently producing unsigned output.
+
 Notes:
 
 - `APPLE_API_KEY` is stored as raw key text in secrets.
 - The workflow writes it to a temporary `AuthKey_<id>.p8` file at runtime.
+- For local signed builds, import the Developer ID identity into Keychain and
+  set `APPLE_API_KEY` (the private `.p8` file path), `APPLE_API_KEY_ID`, and
+  `APPLE_API_ISSUER` in the repo-root `.env.local`. Load that file explicitly:
+  `bun --env-file=.env.local run dist:mac --signed`.
 
 ## 3) Azure Trusted Signing setup (Windows)
 
@@ -321,5 +329,6 @@ Electron runtime and architecture; a successful load under development Bun or No
 - Windows build unsigned when expected signed:
   - Check all Azure ATS and auth secrets are populated and non-empty.
 - Build fails with signing error:
-  - Retry with secrets removed to confirm unsigned path still works.
+  - For a local unsigned diagnostic build, omit `--signed`. Official macOS
+    releases require the signing secrets and cannot fall back to unsigned output.
   - Re-check certificate/profile names and tenant/client credentials.

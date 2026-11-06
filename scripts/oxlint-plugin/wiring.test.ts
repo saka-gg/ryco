@@ -31,19 +31,26 @@ describe("ryco oxlint plugin wiring", () => {
     );
 
     // Node runs the TypeScript plugin with type stripping, as the lint step in CI does.
-    const result = spawnSync(process.execPath, [vpBin, "lint", unexplained, explained], {
-      cwd: repoRoot,
-      encoding: "utf8",
-    });
+    const result = spawnSync(
+      process.execPath,
+      [vpBin, "lint", "--format=unix", unexplained, explained],
+      {
+        cwd: repoRoot,
+        encoding: "utf8",
+      },
+    );
     const output = `${result.stdout}${result.stderr}`;
 
     expect(output).not.toContain("Failed to parse oxlint configuration file");
-    // The report format depends on where lint runs (GitHub Actions gets `::error file=...`
-    // annotations), so look for the rule and the file on one line rather than for one layout.
+    // Pin the report format: direct runs, Turbo and GitHub Actions otherwise
+    // choose different layouts. Unix reports keep the rule and file on one line.
     const reports = output
       .split("\n")
       .filter((line) => line.includes("ryco(require-suppression-reason)"));
-    expect(reports.some((line) => line.includes(`${unexplained}`))).toBe(true);
+    expect(
+      reports.some((line) => line.includes(`${unexplained}`)),
+      output,
+    ).toBe(true);
     expect(output).not.toContain(explained);
     expect(result.status).toBe(1);
   });

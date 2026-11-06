@@ -30,7 +30,7 @@ export function useHostedAppLifecycle(): void {
       subscribe: (listener) => hostedHubStore.subscribe(listener),
       wake: () => getMobileHostedConnectionCoordinator().reconnectRetainedAfterForeground(),
     });
-    return bindConnectivityRecovery({
+    const stop = bindConnectivityRecovery({
       lifecycle: mobileAppLifecycle,
       suspend: (reason) => hostedHubController.suspendBrowser(reason),
       releaseBackground: () =>
@@ -42,5 +42,13 @@ export function useHostedAppLifecycle(): void {
         getMobileHostedConnectionCoordinator().cancelPendingRecovery();
       },
     });
+    // Effect cleanup cancels pending recovery, including during Fast Refresh.
+    // A remount in an already-revalidated foreground needs to unpause the
+    // planner without waiting for another native foreground event. The wake
+    // still waits for the authoritative access check if it has not settled.
+    if (mobileAppLifecycle.isForeground() && mobileAppLifecycle.isOnline()) {
+      retainedWake.begin()();
+    }
+    return stop;
   }, [recoverable]);
 }

@@ -216,6 +216,8 @@ function scopeDemand(
   scope: MobileHostedConnectionScope,
 ): ConnectionDemandLeaseInput {
   switch (scope.type) {
+    case "workspace-discovery":
+      return { environmentId, scope: { type: "interactive" }, preemptible: true };
     case "thread-detail":
     // A terminal is mounted thread work: it counts toward the warm set as the
     // thread's own view does, with no retention policy of its own.

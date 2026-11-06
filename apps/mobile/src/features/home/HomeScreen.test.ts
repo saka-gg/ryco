@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 const navigationMock = vi.hoisted(() => ({ setOptions: vi.fn(), navigate: vi.fn() }));
 const dispatchMock = vi.hoisted(() => vi.fn());
 const directoryDemandMock = vi.hoisted(() => vi.fn());
+const workspaceDiscoveryMock = vi.hoisted(() => vi.fn());
 
 vi.mock("react-native", () => ({
   Pressable: "Pressable",
@@ -71,6 +72,9 @@ vi.mock("../../hostedHub/state", () => ({
 vi.mock("../../hostedHub/directoryDemand", () => ({
   useDirectoryPresenceDemand: directoryDemandMock,
 }));
+vi.mock("./useHostedWorkspaceDiscovery", () => ({
+  useHostedWorkspaceDiscovery: workspaceDiscoveryMock,
+}));
 vi.mock("../../state/homeData", () => ({
   useListedEnvironmentsWorkspaceData: () => ({ projects: [], worktrees: [], threads: [] }),
 }));
@@ -106,11 +110,13 @@ describe("C1 Home header", () => {
     navigationMock.navigate.mockClear();
     dispatchMock.mockClear();
     directoryDemandMock.mockClear();
+    workspaceDiscoveryMock.mockClear();
   });
 
-  it("holds directory presence demand while focused", () => {
+  it("holds directory presence and workspace discovery demand while focused", () => {
     HomeScreen();
     expect(directoryDemandMock).toHaveBeenCalledWith(true);
+    expect(workspaceDiscoveryMock).toHaveBeenCalledWith(true);
   });
 
   it("labels the initial workspace Inbox and registers both header sides", () => {

@@ -1,36 +1,42 @@
 {
   "cli": {
-    "version": ">= 18.4.0",
+    "version": ">= 27.4.1",
     "appVersionSource": "remote",
     "promptToConfigurePushNotifications": false
   },
   "build": {
-    "development": {
+    "base": {
+      "node": "24.13.1",
+      "bun": "1.4.3",
       "corepack": true,
       "env": {
-        "APP_VARIANT": "development",
         "NODE_OPTIONS": "--max-old-space-size=4096"
+      }
+    },
+    "development": {
+      "extends": "base",
+      "env": {
+        "APP_VARIANT": "development"
       },
       "channel": "development",
+      "environment": "development",
       "developmentClient": true,
       "distribution": "internal"
     },
     "preview": {
-      "corepack": true,
+      "extends": "base",
       "env": {
-        "APP_VARIANT": "preview",
-        "NODE_OPTIONS": "--max-old-space-size=4096"
+        "APP_VARIANT": "preview"
       },
       "channel": "preview",
       "environment": "preview",
       "distribution": "internal"
     },
     "preview:dev": {
-      "corepack": true,
+      "extends": "base",
       "env": {
         "APP_VARIANT": "preview",
-        "MOBILE_VERSION_POLICY": "fingerprint",
-        "NODE_OPTIONS": "--max-old-space-size=4096"
+        "MOBILE_VERSION_POLICY": "fingerprint"
       },
       "channel": "preview",
       "environment": "preview",
@@ -41,10 +47,9 @@
       }
     },
     "production": {
-      "corepack": true,
+      "extends": "base",
       "env": {
-        "APP_VARIANT": "production",
-        "NODE_OPTIONS": "--max-old-space-size=4096"
+        "APP_VARIANT": "production"
       },
       "channel": "production",
       "environment": "production",

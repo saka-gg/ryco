@@ -289,6 +289,24 @@ afterEach(async () => {
 });
 
 describe("mobile hosted connection coordinator", () => {
+  it("discovers five workspaces without selecting a node and stays within the shared connection bound", async () => {
+    for (const node of nodes) {
+      const release = scopes.retain(node.environmentId, { type: "workspace-discovery" });
+      await flush();
+      await vi.advanceTimersByTimeAsync(MOBILE_HOSTED_WAKE_STAGGER_MS);
+      await flush();
+      expect(live.has(node.environmentId)).toBe(true);
+      establish(node.environmentId);
+      expect(hostedHubStore.getState().selectedNode).toBeNull();
+      release();
+      await flush();
+    }
+    expect(connects.map((call) => call.environmentId)).toEqual(
+      nodes.map((node) => node.environmentId),
+    );
+    expect(peak).toBeLessThanOrEqual(MAX_MOBILE_HOSTED_CONNECTIONS);
+  });
+
   it("re-selects a warm node without a lifecycle call, ready in the same tick", async () => {
     await coordinator.acquireNode(nodeA.id);
     await coordinator.acquireNode(nodeB.id);
