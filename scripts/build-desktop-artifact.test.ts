@@ -178,12 +178,15 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     assert.equal(resolveElectronBuilderDebugEnv("existing", false), "existing");
     assert.equal(
       resolveElectronBuilderDebugEnv(undefined, true),
-      "electron-builder,electron-builder:*",
+      "electron-builder,electron-builder:*,electron-osx-sign*,electron-notarize*",
     );
-    assert.equal(resolveElectronBuilderDebugEnv("", true), "electron-builder,electron-builder:*");
+    assert.equal(
+      resolveElectronBuilderDebugEnv("", true),
+      "electron-builder,electron-builder:*,electron-osx-sign*,electron-notarize*",
+    );
     assert.equal(
       resolveElectronBuilderDebugEnv("existing", true),
-      "existing,electron-builder,electron-builder:*",
+      "existing,electron-builder,electron-builder:*,electron-osx-sign*,electron-notarize*",
     );
   });
 

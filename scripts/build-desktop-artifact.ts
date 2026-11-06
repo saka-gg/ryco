@@ -191,9 +191,13 @@ export function resolveElectronBuilderDebugEnv(
   verbose: boolean,
 ): string | undefined {
   if (!verbose) return currentDebug;
+  // Code signing and notarization run inside electron-builder but log under
+  // their own namespaces; with them a release log shows how long each takes
+  // (on macOS they are most of the build).
+  const namespaces = "electron-builder,electron-builder:*,electron-osx-sign*,electron-notarize*";
   return currentDebug === undefined || currentDebug === ""
-    ? "electron-builder,electron-builder:*"
-    : `${currentDebug},electron-builder,electron-builder:*`;
+    ? namespaces
+    : `${currentDebug},${namespaces}`;
 }
 
 const spawnAndCollectOutput = Effect.fn("spawnAndCollectOutput")(function* (
