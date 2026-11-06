@@ -27,6 +27,11 @@ const DRAFT_ID = "draft-branch-toolbar" as NonNullable<
 >;
 
 vi.mock("../workspacePanelPreload", () => ({ loadThreadTerminalDrawer }));
+// The execution target label's module reaches the draft and environment stores;
+// the toolbar only needs its text here.
+vi.mock("./chat/ExecutionTargetSelect", () => ({
+  ExecutionTargetLabel: ({ label }: { label: string }) => <span>{label}</span>,
+}));
 vi.mock("../store", () => ({
   useStore: (selector: (state: unknown) => unknown) => selector({}),
 }));
