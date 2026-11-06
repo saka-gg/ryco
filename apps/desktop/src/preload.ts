@@ -184,6 +184,10 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     getState: () => ipcRenderer.invoke("desktop:computer-use:beta-state"),
     checkPermissions: () => ipcRenderer.invoke("desktop:computer-use:beta-check"),
     setup: () => ipcRenderer.invoke("desktop:computer-use:beta-setup"),
+    turnOn: () => ipcRenderer.invoke("desktop:computer-use:beta-turn-on"),
+    setupPermission: (permission) =>
+      ipcRenderer.invoke("desktop:computer-use:beta-setup-permission", permission),
+    revokeApp: (key) => ipcRenderer.invoke("desktop:computer-use:beta-revoke-app", key),
     setPreferences: (value) => ipcRenderer.invoke("desktop:computer-use:beta-preferences", value),
     prepare: (threadId, explicit) =>
       ipcRenderer.invoke("desktop:computer-use:beta-prepare", { threadId, explicit }),

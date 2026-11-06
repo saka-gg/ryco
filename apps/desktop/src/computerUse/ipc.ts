@@ -21,9 +21,16 @@ export function registerComputerUseIpc(
     });
   };
   handle("beta-history", (input) => runtime.beta.readHistory(input));
-  handle("beta-state", () => runtime.beta.state());
+  handle("beta-state", () => runtime.beta.currentState());
   handle("beta-check", () => runtime.beta.check());
   handle("beta-setup", () => runtime.beta.setup());
+  handle("beta-turn-on", () => runtime.beta.turnOn());
+  handle("beta-setup-permission", (input) => {
+    if (input !== "accessibility" && input !== "screenRecording" && input !== "inputMonitoring")
+      throw new Error("Unknown Computer permission.");
+    return runtime.beta.setupPermission(input);
+  });
+  handle("beta-revoke-app", (input) => runtime.beta.revokeApp(input));
   handle("beta-preferences", (input) => runtime.beta.update(input));
   const threadInput = (input: unknown) => {
     const value = input as { threadId?: unknown; explicit?: unknown; visible?: unknown };
