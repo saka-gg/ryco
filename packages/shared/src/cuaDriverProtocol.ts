@@ -498,3 +498,46 @@ export const CUA_BROWSER_MUTATION_TOOLS = new Set([
   "browser_download",
   "browser_pointer",
 ]);
+
+const CUA_EXACT_SEMANTIC_ELEMENT_TOOLS = new Set([
+  "set_value",
+  "select_text",
+  "click",
+  "double_click",
+  "right_click",
+  "type_text",
+  "scroll",
+]);
+const CUA_NATIVE_TARGET_TOOLS = new Set([
+  "click",
+  "drag",
+  "scroll",
+  "type_text",
+  "type_text_chars",
+  "press_key",
+  "hotkey",
+  "set_value",
+  "select_text",
+  "bring_to_front",
+]);
+
+/**
+ * Whether the patched driver admits this call under its *concurrent* exact
+ * semantic lease (one per `(pid, window_id)`), rather than the process-wide
+ * exclusive input lease. Mirrors `uses_stable_space_membership` plus the
+ * native-target tool list in the driver's `sdk_adapter.rs` (native revision
+ * 40); a call this returns false for is refused while any other input runs.
+ */
+export function cuaUsesConcurrentInputLease(name: string, args: unknown): boolean {
+  if (!CUA_NATIVE_TARGET_TOOLS.has(name)) return false;
+  const input =
+    args && typeof args === "object" && !Array.isArray(args)
+      ? (args as Record<string, unknown>)
+      : {};
+  if (input.delivery_mode === "foreground") return false;
+  if (name === "type_text" && input.semantic_only === true) return true;
+  return (
+    CUA_EXACT_SEMANTIC_ELEMENT_TOOLS.has(name) &&
+    (input.element_token !== undefined || input.element_index !== undefined)
+  );
+}
