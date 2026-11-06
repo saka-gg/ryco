@@ -1,4 +1,5 @@
 // Adapted from Synara v0.9.1; see docs/licenses/synara-computer-use.txt.
+import { ComputerDenylistError } from "../computerDenylist.ts";
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -244,6 +245,24 @@ describe("computer_browser_* gateway tools", () => {
     });
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain("denied");
+    expect(backend.callsFor("browser.browser_type")).toHaveLength(0);
+  });
+
+  it("refuses a denylisted browser app with its code, before any dialog", async () => {
+    const { backend, call } = await setup({
+      authorizeAction: async () => {
+        throw new ComputerDenylistError("1Password", "app name 1password");
+      },
+    });
+    const result = await call("computer_browser_type", {
+      target_id: "t",
+      tab_id: "tab",
+      ref: "p1:0",
+      text: "hello",
+    });
+    // Browser refusals are typed results, not tool errors.
+    expect(result.structuredContent).toMatchObject({ status: "refused" });
+    expect(textOf(result)).toContain("computer_denylist_refused");
     expect(backend.callsFor("browser.browser_type")).toHaveLength(0);
   });
 
@@ -907,6 +926,26 @@ describe("browser id ergonomics", () => {
     expect(backend.callsFor("browser.browser_navigate")[0]?.args[0]).toMatchObject({
       tab_id: "tab-b",
     });
+  });
+
+  it("names the bound browser's process for app approval of target-only calls", async () => {
+    const backend = new FakeComputerBackend({
+      browser: (call) =>
+        call.name === "get_browser_state"
+          ? bindingResult([{ tab_id: "tab-a", active: true }])
+          : { structuredContent: { status: "ok" } },
+    });
+    const authorizeAction = vi.fn(async () => true);
+    const { call } = await setup({ backend, authorizeAction });
+    await call("computer_browser_state", { pid: 4242 });
+    await call("computer_browser_navigate", { target_id: "bt-1", url: "https://example.com/" });
+    expect(authorizeAction).toHaveBeenLastCalledWith(
+      "computer_browser_navigate",
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      { windowIds: [], pids: [4242], apps: [] },
+    );
   });
 
   it("refuses an ambiguous target with its tab listing and dispatches nothing", async () => {

@@ -10,7 +10,9 @@ export function permissionStatusPresentation(
 ): { readonly label: string; readonly tone: PermissionTone } {
   if (status === "granted") return { label: "Granted", tone: "success" };
   if (status === "restricted") return { label: "Restricted", tone: "error" };
-  if (status === "denied") return { label: "Not granted", tone: "error" };
+  // macOS has not asked yet ("not-determined"): to the user that is still not granted.
+  if (status === "denied" || status === "not-determined")
+    return { label: "Not granted", tone: "error" };
   if (status === "not_required") return { label: "Not required", tone: "neutral" };
   return { label: checked ? "Could not check" : "Not checked", tone: "neutral" };
 }

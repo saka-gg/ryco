@@ -35,6 +35,12 @@ import { COMPUTER_BROWSER_DRIVER_NAMES } from "@ryco/contracts";
 import { ComputerBackendError, type ComputerBrowserCallResult } from "../ComputerBackend.ts";
 import { CuaActionError } from "../CuaComputerBackend.ts";
 import { isComputerApprovalRefusal } from "../ComputerApprovalGate.ts";
+import { ComputerDenylistError } from "../computerDenylist.ts";
+import { assertForegroundNotBlocked } from "../foregroundEscapeStop.ts";
+import {
+  collectComputerApprovalTargets,
+  type ComputerApprovalTargets,
+} from "../computerApprovalTargets.ts";
 import type { ComputerManager } from "../ComputerManager.ts";
 import { withModelDesktopObservation } from "../modelDesktopObservation.ts";
 import {
@@ -82,6 +88,8 @@ export interface AgentGatewayComputerBrowserToolsOptions {
     args: Record<string, unknown>,
     context: ToolContext,
     signal: AbortSignal,
+    /** What the call targets, for per-app approval. */
+    targets?: ComputerApprovalTargets,
   ) => Promise<boolean>;
   /** Visible browser launches need the same user-authored request as native raises. */
   readonly resolveForegroundAuthorization?: (
@@ -434,6 +442,7 @@ export function makeAgentGatewayComputerBrowserTools(
         COMPUTER_FOREGROUND_NOT_REQUESTED_CODE,
       );
     }
+    assertForegroundNotBlocked(authorization);
   };
 
   /**
@@ -446,6 +455,42 @@ export function makeAgentGatewayComputerBrowserTools(
    * no guessing, and the driver stays authoritative for everything else.
    */
   const knownTargets = new Map<string, Map<string, readonly BrowserTabRecord[]>>();
+  /**
+   * Target → the browser process it was bound from, per caller thread, so app approval can
+   * name the real browser ("Google Chrome") for calls that only carry a target id.
+   */
+  const targetPids = new Map<string, Map<string, number>>();
+  const rememberTargetPid = (
+    threadId: string,
+    args: Record<string, unknown>,
+    structured: Record<string, unknown> | undefined,
+  ): void => {
+    const targetId = typeof structured?.target_id === "string" ? structured.target_id : undefined;
+    const raw = typeof args.pid === "number" ? args.pid : structured?.pid;
+    if (targetId === undefined || typeof raw !== "number" || !Number.isSafeInteger(raw) || raw <= 0)
+      return;
+    const byTarget = targetPids.get(threadId) ?? new Map<string, number>();
+    targetPids.delete(threadId);
+    targetPids.set(threadId, byTarget);
+    while (targetPids.size > KNOWN_THREADS_MAX) targetPids.delete(targetPids.keys().next().value!);
+    byTarget.delete(targetId);
+    byTarget.set(targetId, raw);
+    while (byTarget.size > KNOWN_TARGETS_PER_THREAD) byTarget.delete(byTarget.keys().next().value!);
+  };
+  /** What one browser call acts on, with a bound target resolved to its browser process. */
+  const approvalTargets = (
+    threadId: string,
+    args: Record<string, unknown>,
+  ): ComputerApprovalTargets => {
+    const targets = collectComputerApprovalTargets(args);
+    const pid =
+      typeof args.target_id === "string"
+        ? targetPids.get(threadId)?.get(args.target_id)
+        : undefined;
+    return pid === undefined || targets.pids.includes(pid)
+      ? targets
+      : { ...targets, pids: [...targets.pids, pid] };
+  };
 
   const rememberTargetTabs = (
     threadId: string,
@@ -605,12 +650,21 @@ export function makeAgentGatewayComputerBrowserTools(
               audit({ effect: "refused", code: "approval_unavailable" });
               return approvalUnavailableResult(name);
             }
-            const approved = await options.authorizeAction(
-              name,
-              effectiveArgs,
-              context,
-              abortSignal,
-            );
+            let approved: boolean;
+            try {
+              approved = await options.authorizeAction(
+                name,
+                effectiveArgs,
+                context,
+                abortSignal,
+                approvalTargets(context.callerThreadId, effectiveArgs),
+              );
+            } catch (error) {
+              // A denylisted app is refused before any dialog, like the native tools do.
+              if (!(error instanceof ComputerDenylistError)) throw error;
+              audit({ effect: "refused", code: error.code });
+              return browserRefusalResult({ code: error.code, message: error.message });
+            }
             if (!approved) {
               audit({ effect: "refused", code: "approval_denied" });
               return mcpToolResultError(
@@ -648,6 +702,7 @@ export function makeAgentGatewayComputerBrowserTools(
               ? (result.structuredContent as Record<string, unknown>)
               : undefined;
           rememberTargetTabs(context.callerThreadId, structured);
+          rememberTargetPid(context.callerThreadId, effectiveArgs, structured);
           audit(computerBrowserEffect(name, boundedArgs, result));
           return browserResultToMcp(augmentBrowserResult(name, effectiveArgs, result));
         },

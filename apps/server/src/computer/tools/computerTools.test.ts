@@ -1,4 +1,5 @@
 // Adapted from Synara v0.9.1; see docs/licenses/synara-computer-use.txt.
+import { computerForegroundEscapeStopBlock } from "../computerVisibleUse.ts";
 import { setTimeout as waitForComputer } from "node:timers/promises";
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -2883,6 +2884,7 @@ describe("agent gateway computer tools", () => {
       expect.objectContaining({ delivery_mode: "foreground" }),
       expect.anything(),
       expect.anything(),
+      expect.objectContaining({ windowIds: ["fake-terminal"] }),
     );
     expect(result.isError).not.toBe(true);
     expect(raised).toEqual(["fake-terminal"]);
@@ -3670,6 +3672,7 @@ describe("computer never-raise gate", () => {
         expect.objectContaining({ delivery_mode: "foreground" }),
         expect.anything(),
         expect.anything(),
+        expect.anything(),
       );
       const batch = resultJson(
         await call("computer_run", {
@@ -3771,6 +3774,37 @@ describe("computer never-raise gate", () => {
     }
   });
 
+  it("refuses a visible non-macOS launch the user asked for without the Escape stop", async () => {
+    const backend = new FakeComputerBackend();
+    const blocked = async () => ({
+      userRequestedVisibleUse: true,
+      blocked: computerForegroundEscapeStopBlock(undefined)!,
+    });
+    const { call, manager } = await setup(
+      backend,
+      vi.fn(async () => true),
+      blocked,
+    );
+    try {
+      const refused = await call("computer_launch_app", {
+        app: "TextEdit",
+        hidden: false,
+        wait_for_window: false,
+      });
+      expect(refused.isError).toBe(true);
+      expect(JSON.stringify(resultJson(refused))).toContain("foreground_needs_input_monitoring");
+      const batched = await call("computer_run", {
+        steps: [{ type: "launch_app", app: "TextEdit", hidden: false, wait_for_window: false }],
+      });
+      expect(resultJson(batched)).toMatchObject({
+        steps: [{ ok: false, error: { code: "foreground_needs_input_monitoring" } }],
+      });
+      expect(backend.callsFor("launchApp")).toEqual([]);
+    } finally {
+      await manager.dispose();
+    }
+  });
+
   it("launches macOS apps in the background without hiding or raising them", async () => {
     const backend = new FakeComputerBackend({ agentDialect: "macos" });
     const { call, manager } = await setup(
@@ -3864,6 +3898,7 @@ describe("computer_activate_window foreground restore", () => {
       expect(approval).toHaveBeenCalledWith(
         "computer_activate_window",
         expect.objectContaining({ delivery_mode: "foreground" }),
+        expect.anything(),
         expect.anything(),
         expect.anything(),
       );
@@ -5178,6 +5213,7 @@ describe("multi-app driving", () => {
           expect.objectContaining({ window_id: "fake-calculator" }),
           expect.anything(),
           expect.anything(),
+          { windowIds: ["fake-calculator"], pids: [], apps: [] },
         );
         expect(backend.callsFor("setWindowFrame").map((entry) => entry.args)).toEqual([
           ["fake-calculator", { x: 300, y: 200, width: 500, height: 400 }],

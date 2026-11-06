@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { ComputerTaskMessage as OrchestrationMessage } from "./computerVisibleUse.ts";
 
 import {
+  computerForegroundEscapeStopBlock,
   computerForegroundAuthorizationForMessages,
   latestUserAuthoredMessage,
   messageRequestsVisibleUse,
@@ -382,5 +383,39 @@ describe("computerForegroundAuthorizationForMessages", () => {
         .userRequestedVisibleUse,
     ).toBe(false);
     expect(computerForegroundAuthorizationForMessages([]).userRequestedVisibleUse).toBe(false);
+  });
+});
+
+describe("computerForegroundEscapeStopBlock", () => {
+  it("allows foreground use only with Input Monitoring and a listener that has not failed", () => {
+    expect(
+      computerForegroundEscapeStopBlock({ granted: true, listener: { ready: true } }),
+    ).toBeUndefined();
+    expect(
+      computerForegroundEscapeStopBlock({
+        granted: true,
+        listener: { ready: false, error: "input_monitor_idle" },
+      }),
+    ).toBeUndefined();
+    expect(
+      computerForegroundEscapeStopBlock({
+        granted: true,
+        listener: { ready: false, error: "input_monitor_starting" },
+      }),
+    ).toBeUndefined();
+  });
+
+  it("names the fix when Input Monitoring is missing, unknown or its listener failed", () => {
+    for (const state of [
+      undefined,
+      { granted: false, listener: { ready: true } },
+      { granted: true, listener: { ready: false, error: "input-monitoring-required" } },
+      { granted: true, listener: { ready: false } },
+    ]) {
+      expect(computerForegroundEscapeStopBlock(state)).toMatchObject({
+        code: "foreground_needs_input_monitoring",
+        message: expect.stringContaining("Settings → Computer Use"),
+      });
+    }
   });
 });

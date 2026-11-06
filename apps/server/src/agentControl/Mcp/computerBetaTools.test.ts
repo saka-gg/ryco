@@ -8,7 +8,14 @@ import {
   ThreadId,
   TurnId,
 } from "@ryco/contracts";
-import { readComputerConsentReply, withComputerBetaTools } from "./computerBetaTools.ts";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  readComputerAppConsentReply,
+  readComputerConsentReply,
+  withComputerBetaTools,
+} from "./computerBetaTools.ts";
 import {
   stageComputerTurn,
   retireComputerTurn,
@@ -40,7 +47,9 @@ const base: AgentControlMcpTools = {
   isWriteTool: () => false,
   callTool: () => Effect.succeed({ content: [] }),
 };
+const stateDirs: string[] = [];
 afterEach(() => {
+  for (const directory of stateDirs.splice(0)) rmSync(directory, { recursive: true, force: true });
   stageComputerTurn(session.threadId, undefined);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -51,6 +60,8 @@ function fixture(
 ) {
   let current = Option.some(authority);
   const requests: Record<string, unknown>[] = [];
+  const stateDir = mkdtempSync(join(tmpdir(), "ryco-computer-beta-test-"));
+  stateDirs.push(stateDir);
   vi.spyOn(CuaComputerBackend.prototype, "dispose").mockResolvedValue();
   vi.spyOn(CuaComputerBackend.prototype, "endTask").mockResolvedValue();
   const fetcher = vi.fn(async (_url: unknown, options: RequestInit) => {
@@ -64,7 +75,7 @@ function fixture(
       token: "a".repeat(43),
       native: { endpoint: "/tmp/not-a-live-computer.sock", capability: "private" },
     },
-    stateDir: "/tmp/ryco-computer-beta-test",
+    stateDir,
     policy: {
       isEnabled: Effect.succeed(true),
       delegationLimits: Effect.succeed(NO_DELEGATION_LIMITS),
@@ -75,9 +86,12 @@ function fixture(
     registry: { getTurnAuthority: () => Effect.sync(() => current) } as never,
     projections: { getThreadCheckpointContext } as never,
   });
-  const stage = (runtimeMode: "full-access" | "approval-required" = "full-access") => {
+  const stage = (
+    runtimeMode: "full-access" | "approval-required" = "full-access",
+    text = "Inspect Calculator",
+  ) => {
     stageComputerTurn(session.threadId, {
-      text: "Inspect Calculator",
+      text,
       intent: { mode: "request", generation: "epoch:0" },
       runtimeMode,
       label: "Calculator",
@@ -86,6 +100,7 @@ function fixture(
   };
   return {
     ...runtime,
+    stateDir,
     requests,
     fetcher,
     stage,
@@ -255,16 +270,202 @@ it("returns an open consent dialog to the agent as approval_pending without nati
     expect(JSON.parse(text?.type === "text" ? text.text : "{}")).toMatchObject({
       error: { code: "approval_pending", effect: "not-dispatched", retryable: true },
     });
+    // A key press without a window names no app, so it asks about the Mac for this chat.
     expect(runtime.requests).toContainEqual({
       operation: "consent",
       threadId: session.threadId,
       turnId: "turn",
-      clipboard: false,
+      app: { key: "\u0000mac", name: "your Mac", canAlwaysAllow: false },
     });
     expect(pressKey).not.toHaveBeenCalled();
     expect(audit).toHaveBeenCalledWith(
       expect.objectContaining({ effect: "refused", code: "approval_pending" }),
     );
+  } finally {
+    await runtime.dispose();
+  }
+});
+
+it.each([
+  [
+    "Always allow",
+    { approved: true, outcome: "accept", retryable: false, scope: "always" },
+    "always",
+  ],
+  [
+    "Allow for this chat",
+    { approved: true, outcome: "accept", retryable: false, scope: "chat" },
+    "chat",
+  ],
+  ["Don't allow", { approved: false, outcome: "decline", retryable: false }, "deny"],
+  ["a stopped task", { approved: false, outcome: "stopped", retryable: false }, "deny"],
+] as const)("reads an app answer: %s", (_label, reply, answer) => {
+  expect(readComputerAppConsentReply(reply)).toBe(answer);
+});
+it("fails closed on an app accept without a scope and passes refusals on", () => {
+  expect(() =>
+    readComputerAppConsentReply({ approved: true, outcome: "accept", retryable: false }),
+  ).toThrow(expect.objectContaining({ code: "approval_unavailable" }));
+  expect(() =>
+    readComputerAppConsentReply({ approved: false, outcome: "pending", retryable: true }),
+  ).toThrow(expect.objectContaining({ code: "approval_pending" }));
+});
+it("asks once per app, stores Always allow for the desktop to list, and refuses denylisted apps without asking", async () => {
+  const runtime = fixture();
+  vi.spyOn(CuaComputerBackend.prototype, "missingPermissions").mockResolvedValue([]);
+  vi.spyOn(CuaComputerBackend.prototype, "pressKey").mockRejectedValue(new Error("no driver"));
+  vi.spyOn(ComputerManager.prototype, "recordComputerAudit").mockImplementation(() => undefined);
+  const names = vi
+    .spyOn(ComputerManager.prototype, "approvalAppNames")
+    .mockResolvedValue({ names: ["Safari"], unresolved: false });
+  runtime.fetcher.mockImplementation(async (_url, options) => {
+    const body = JSON.parse(String(options.body)) as Record<string, unknown>;
+    runtime.requests.push(body);
+    return Response.json(
+      body.operation === "consent"
+        ? { approved: true, outcome: "accept", retryable: false, scope: "always" }
+        : { ready: true },
+    );
+  });
+  const consents = () => runtime.requests.filter((request) => request.operation === "consent");
+  try {
+    runtime.stage("approval-required");
+    await Effect.runPromise(
+      runtime.tools.callTool(session, "computer_press_key", { key: "enter", window_id: "w1" }),
+    );
+    expect(names).toHaveBeenCalledWith({ windowIds: ["w1"], pids: [], apps: [] });
+    expect(consents()).toEqual([
+      {
+        operation: "consent",
+        threadId: session.threadId,
+        turnId: "turn",
+        app: { key: "safari", name: "Safari", canAlwaysAllow: true },
+      },
+    ]);
+    expect(
+      JSON.parse(readFileSync(join(runtime.stateDir, "computer-app-approvals.json"), "utf8")).apps,
+    ).toEqual([expect.objectContaining({ key: "safari", name: "Safari" })]);
+    await Effect.runPromise(
+      runtime.tools.callTool(session, "computer_press_key", { key: "tab", window_id: "w1" }),
+    );
+    expect(consents()).toHaveLength(1);
+
+    names.mockResolvedValue({ names: ["System Settings"], unresolved: false });
+    const refused = await Effect.runPromise(
+      runtime.tools.callTool(session, "computer_press_key", { key: "tab", window_id: "w2" }),
+    );
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.content)).toContain("denylist");
+    expect(consents()).toHaveLength(1);
+  } finally {
+    await runtime.dispose();
+  }
+});
+
+it.each([
+  ["Input Monitoring is not granted", { granted: false, listener: { ready: true } }, true],
+  [
+    "the listener failed",
+    { granted: true, listener: { ready: false, error: "input_monitor_unavailable" } },
+    true,
+  ],
+  ["no report came back", undefined, true],
+  [
+    "the listener starts on demand",
+    { granted: true, listener: { ready: false, error: "input_monitor_idle" } },
+    false,
+  ],
+  ["the listener is ready", { granted: true, listener: { ready: true } }, false],
+] as const)(
+  "foreground use the user asked for needs the Escape stop: %s",
+  async (_label, escapeStop, refused) => {
+    const runtime = fixture();
+    vi.spyOn(CuaComputerBackend.prototype, "missingPermissions").mockResolvedValue([]);
+    vi.spyOn(ComputerManager.prototype, "recordComputerAudit").mockImplementation(() => undefined);
+    const raise = vi
+      .spyOn(CuaComputerBackend.prototype, "raiseWindow")
+      .mockRejectedValue(new Error("no driver"));
+    runtime.fetcher.mockImplementation(async (_url, options) => {
+      const body = JSON.parse(String(options.body)) as Record<string, unknown>;
+      runtime.requests.push(body);
+      return Response.json(
+        body.operation === "state"
+          ? { visibleThreads: [], ...(escapeStop ? { escapeStop } : {}) }
+          : { ready: true },
+      );
+    });
+    try {
+      runtime.stage("full-access", "Show me the Calculator window.");
+      const result = await Effect.runPromise(
+        runtime.tools.callTool(session, "computer_activate_window", { window_id: "w1" }),
+      );
+      const text = JSON.stringify(result.content);
+      if (refused) {
+        expect(result.isError).toBe(true);
+        expect(text).toContain("foreground_needs_input_monitoring");
+        expect(text).toContain("Settings → Computer Use");
+        expect(raise).not.toHaveBeenCalled();
+      } else {
+        expect(text).not.toContain("foreground_needs_input_monitoring");
+      }
+    } finally {
+      await runtime.dispose();
+    }
+  },
+);
+it("does not ask the desktop about the Escape stop for background-only turns", async () => {
+  const runtime = fixture();
+  vi.spyOn(CuaComputerBackend.prototype, "missingPermissions").mockResolvedValue([]);
+  vi.spyOn(ComputerManager.prototype, "recordComputerAudit").mockImplementation(() => undefined);
+  try {
+    runtime.stage();
+    const result = await Effect.runPromise(
+      runtime.tools.callTool(session, "computer_activate_window", { window_id: "w1" }),
+    );
+    expect(JSON.stringify(result.content)).toContain("foreground_not_requested");
+    expect(runtime.requests.some((request) => request.operation === "state")).toBe(false);
+  } finally {
+    await runtime.dispose();
+  }
+});
+it("asks nothing to launch the isolated browser, then names the real browser", async () => {
+  const runtime = fixture();
+  vi.spyOn(CuaComputerBackend.prototype, "missingPermissions").mockResolvedValue([]);
+  vi.spyOn(ComputerManager.prototype, "recordComputerAudit").mockImplementation(() => undefined);
+  const names = vi
+    .spyOn(ComputerManager.prototype, "approvalAppNames")
+    .mockResolvedValue({ names: ["Google Chrome"], unresolved: false });
+  runtime.fetcher.mockImplementation(async (_url, options) => {
+    const body = JSON.parse(String(options.body)) as Record<string, unknown>;
+    runtime.requests.push(body);
+    return Response.json(
+      body.operation === "consent"
+        ? { approved: false, outcome: "decline", retryable: false }
+        : { ready: true },
+    );
+  });
+  const consents = () => runtime.requests.filter((request) => request.operation === "consent");
+  try {
+    runtime.stage("approval-required");
+    await Effect.runPromise(
+      runtime.tools.callTool(session, "computer_browser_prepare", {
+        allow_launch: true,
+        profile: { mode: "isolated_new" },
+      }),
+    );
+    expect(consents()).toEqual([]);
+    await Effect.runPromise(
+      runtime.tools.callTool(session, "computer_browser_prepare", {
+        pid: 4242,
+        allow_launch: false,
+      }),
+    );
+    expect(names).toHaveBeenLastCalledWith({ windowIds: [], pids: [4242], apps: [] });
+    expect(consents()).toEqual([
+      expect.objectContaining({
+        app: { key: "google chrome", name: "Google Chrome", canAlwaysAllow: true },
+      }),
+    ]);
   } finally {
     await runtime.dispose();
   }

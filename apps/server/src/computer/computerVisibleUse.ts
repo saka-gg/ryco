@@ -37,6 +37,47 @@ export interface ComputerTaskMessage {
 export interface ComputerForegroundAuthorization {
   /** The user explicitly requested or confirmed visible use for the current task. */
   readonly userRequestedVisibleUse: boolean;
+  /**
+   * Requested, but the desktop cannot take the foreground safely right now: without
+   * Input Monitoring there is no Escape stop and the user's own input does not pause the
+   * agent. Every foreground gate refuses with this before dispatch.
+   */
+  readonly blocked?: { readonly code: string; readonly message: string };
+}
+
+/** Refusal code: foreground use needs Input Monitoring (the Escape stop) and it is missing. */
+export const COMPUTER_FOREGROUND_NEEDS_INPUT_MONITORING_CODE = "foreground_needs_input_monitoring";
+
+/** What the desktop reports about its Escape and human-input listener. */
+export interface ComputerEscapeStopState {
+  /** Input Monitoring is granted to the app. */
+  readonly granted: boolean;
+  readonly listener: { readonly ready: boolean; readonly error?: string | undefined };
+}
+
+/** Listener states that are not failures: it starts on demand before the next input. */
+const LISTENER_ON_DEMAND = new Set(["input_monitor_idle", "input_monitor_starting"]);
+
+/**
+ * Foreground takeover needs the Escape stop: Input Monitoring granted and a listener that
+ * has not failed. Background use needs neither. Unknown state blocks.
+ */
+export function computerForegroundEscapeStopBlock(
+  state: ComputerEscapeStopState | undefined,
+): ComputerForegroundAuthorization["blocked"] {
+  if (state?.granted !== true)
+    return {
+      code: COMPUTER_FOREGROUND_NEEDS_INPUT_MONITORING_CODE,
+      message:
+        'Foreground use needs Input Monitoring, so the user can stop you with Escape and their own input pauses your work. No input was sent. Keep working in the background, or ask the user to turn on Input Monitoring ("Stop with Escape") in Settings → Computer Use.',
+    };
+  if (!state.listener.ready && !LISTENER_ON_DEMAND.has(state.listener.error ?? ""))
+    return {
+      code: COMPUTER_FOREGROUND_NEEDS_INPUT_MONITORING_CODE,
+      message:
+        'The Escape listener is not running, so foreground use is paused. No input was sent. Keep working in the background, or ask the user to check Input Monitoring ("Stop with Escape") in Settings → Computer Use.',
+    };
+  return undefined;
 }
 
 export interface ComputerForegroundContext {

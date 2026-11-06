@@ -8,6 +8,34 @@ interface PendingApproval {
   readonly settle: (decision: ProviderApprovalDecision) => void;
 }
 
+/** The app one Computer action targets, as the approval dialog names it. */
+export interface ComputerApprovalApp {
+  /** Normalized app name (`computerAppApprovalKey`). */
+  readonly key: string;
+  readonly name: string;
+  /** False for a target that cannot be named; it can only be allowed for one chat. */
+  readonly canAlwaysAllow: boolean;
+}
+
+/** The user's answer to one app dialog. Refusals (expired, unshown, pending) are thrown instead. */
+export type ComputerAppAnswer = "always" | "chat" | "deny";
+
+/** The persisted "Always allow" list; the gate only reads it and adds to it. */
+export interface ComputerAlwaysAllowedApps {
+  has(key: string): Promise<boolean>;
+  add(app: ComputerApprovalApp): Promise<void>;
+}
+
+interface AppDialog {
+  readonly threadId: string;
+  readonly turnId: string;
+  readonly answer: Promise<ComputerAppAnswer>;
+  cancelled: boolean;
+}
+
+/** Threads whose chat approvals are remembered; the oldest are forgotten first. */
+export const COMPUTER_APP_APPROVAL_THREAD_LIMIT = 256;
+
 interface TaskApproval {
   readonly turnId: string;
   granted?: boolean;
@@ -126,16 +154,39 @@ export function computerApprovalRefusalPayload(error: ComputerApprovalRefusal) {
 export class ComputerApprovalGate {
   private readonly pending = new Map<string, PendingApproval>();
   private readonly tasks = new Map<string, TaskApproval>();
+  /** "Allow for this chat" answers, per thread. */
+  private readonly chatApps = new Map<string, Set<string>>();
+  /** "Don't allow" answers, which last for the turn that got them. */
+  private readonly deniedApps = new Map<string, { turnId: string; keys: Set<string> }>();
+  /**
+   * One open app dialog per thread, turn and app; later calls join it. Stop marks it
+   * cancelled, so its late answer records nothing.
+   */
+  private readonly appDialogs = new Map<string, AppDialog>();
 
   cancelThread(threadId: string, turnId?: string): void {
     const task = this.tasks.get(threadId);
     if (turnId === undefined || task?.turnId === turnId) this.tasks.delete(threadId);
+    const denied = this.deniedApps.get(threadId);
+    if (turnId === undefined || denied?.turnId === turnId) this.deniedApps.delete(threadId);
+    for (const [key, dialog] of this.appDialogs) {
+      if (dialog.threadId !== threadId || (turnId !== undefined && dialog.turnId !== turnId))
+        continue;
+      dialog.cancelled = true;
+      this.appDialogs.delete(key);
+    }
     for (const [id, pending] of this.pending) {
       if (pending.threadId !== threadId || (turnId !== undefined && pending.turnId !== turnId))
         continue;
       this.pending.delete(id);
       pending.settle("cancel");
     }
+  }
+
+  /** A removed thread drops its chat approvals too. */
+  forgetThread(threadId: string): void {
+    this.cancelThread(threadId);
+    this.chatApps.delete(threadId);
   }
 
   /**
@@ -156,6 +207,84 @@ export class ComputerApprovalGate {
     for (const task of this.tasks.values()) {
       if (task.granted === true) delete task.granted;
     }
+    // "Allow for this chat" is consent given before the interruption too.
+    // "Always allow" is the user's standing choice and stays. An app dialog still
+    // open stays as well: its answer postdates the interruption.
+    this.chatApps.clear();
+  }
+
+  /**
+   * Per-app approval for one mutating Computer action, like Codex: an app the user always
+   * allows, or allowed for this chat, runs without asking; one they refused in this turn is
+   * refused again; anything else asks once, and concurrent calls for the same app share that
+   * dialog. Refusals that are not the user's answer (expired, still open, not shown) propagate
+   * from `present` and record nothing.
+   */
+  async requestApp(input: {
+    threadId: string;
+    turnId: string;
+    app: ComputerApprovalApp;
+    signal: AbortSignal;
+    alwaysAllowed: ComputerAlwaysAllowedApps;
+    /** Shows the dialog; it bounds its own wait, since the dialog outlives any one call. */
+    present: () => Promise<ComputerAppAnswer>;
+  }): Promise<boolean> {
+    const { threadId, turnId, app, signal } = input;
+    signal.throwIfAborted();
+    if (app.canAlwaysAllow && (await input.alwaysAllowed.has(app.key))) return true;
+    signal.throwIfAborted();
+    if (this.chatApps.get(threadId)?.has(app.key)) return true;
+    const denied = this.deniedApps.get(threadId);
+    if (denied?.turnId === turnId && denied.keys.has(app.key)) return false;
+    const dialogKey = JSON.stringify([threadId, turnId, app.key]);
+    let dialog = this.appDialogs.get(dialogKey)?.answer;
+    if (!dialog) {
+      let current!: AppDialog;
+      const answer = (async () => {
+        // The dialog outlives the call that opened it, so it is not tied to that call's signal.
+        const answer = await input.present();
+        if (current.cancelled) return "deny" as const;
+        if (answer === "always" && app.canAlwaysAllow) await input.alwaysAllowed.add(app);
+        if (answer === "always" || answer === "chat") this.allowForChat(threadId, app.key);
+        else this.denyForTurn(threadId, turnId, app.key);
+        return answer;
+      })();
+      current = { threadId, turnId, answer, cancelled: false };
+      dialog = answer;
+      this.appDialogs.set(dialogKey, current);
+      const clear = () => {
+        if (this.appDialogs.get(dialogKey) === current) this.appDialogs.delete(dialogKey);
+      };
+      void answer.then(clear, clear);
+    }
+    let cancel: (() => void) | undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      cancel = () => reject(signal.reason);
+      signal.addEventListener("abort", cancel, { once: true });
+    });
+    try {
+      const answer = await Promise.race([dialog, aborted]);
+      signal.throwIfAborted();
+      return answer !== "deny";
+    } finally {
+      if (cancel) signal.removeEventListener("abort", cancel);
+    }
+  }
+
+  private allowForChat(threadId: string, key: string): void {
+    const apps = this.chatApps.get(threadId) ?? new Set<string>();
+    this.chatApps.delete(threadId);
+    this.chatApps.set(threadId, apps.add(key));
+    while (this.chatApps.size > COMPUTER_APP_APPROVAL_THREAD_LIMIT)
+      this.chatApps.delete(this.chatApps.keys().next().value!);
+  }
+
+  private denyForTurn(threadId: string, turnId: string, key: string): void {
+    const denied = this.deniedApps.get(threadId);
+    if (denied?.turnId === turnId) denied.keys.add(key);
+    else this.deniedApps.set(threadId, { turnId, keys: new Set([key]) });
+    while (this.deniedApps.size > COMPUTER_APP_APPROVAL_THREAD_LIMIT)
+      this.deniedApps.delete(this.deniedApps.keys().next().value!);
   }
 
   /** One consent for routine actions in the exact active turn, never a provider-wide grant. */

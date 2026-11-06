@@ -1,3 +1,4 @@
+import { computerBrowserForAppIdentity } from "@ryco/shared/computerBrowserIdentity";
 import type {
   ComputerBrowser,
   ComputerUsePolicy,
@@ -14,22 +15,8 @@ export function browserForApp(id: string): ComputerBrowser | null {
       ? browser
       : null;
   }
-  const leaf = id
-    .replaceAll("\\", "/")
-    .split("/")
-    .pop()
-    ?.replace(/\.(app|exe)$/iu, "")
-    .toLowerCase();
-  if (
-    leaf === "google chrome" ||
-    leaf === "chrome" ||
-    leaf === "google-chrome" ||
-    leaf === "google-chrome-stable"
-  )
-    return "chrome";
-  if (leaf === "brave browser" || leaf === "brave" || leaf === "brave-browser") return "brave";
-  if (leaf === "microsoft edge" || leaf === "msedge" || leaf === "microsoft-edge") return "edge";
-  return null;
+  // The same canonical identities per-app approval keys on.
+  return computerBrowserForAppIdentity(id);
 }
 
 /**

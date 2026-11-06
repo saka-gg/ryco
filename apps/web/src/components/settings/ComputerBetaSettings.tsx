@@ -1,6 +1,12 @@
 import type { ComputerGetAuditHistoryResult } from "@ryco/contracts";
-import { useEffect, useState } from "react";
-import type { ComputerBetaPreferences, ComputerBetaState } from "@ryco/contracts";
+import { useCallback, useEffect, useState } from "react";
+import type {
+  ComputerBetaPreferences,
+  ComputerBetaState,
+  DesktopAppSnapPermissionKind,
+} from "@ryco/contracts";
+import { useLocalComputerEnvironmentId } from "../../computerUse/localComputer";
+import { readEnvironmentApi } from "../../environmentApi";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
@@ -12,14 +18,75 @@ import { SettingsSelect } from "./SettingsSelect";
 /** Distinct from the system cursor and from each other on light and dark windows. */
 const CURSOR_SWATCHES = ["#e8794a", "#f43f5e", "#a855f7", "#3b82f6", "#14b8a6", "#22c55e"] as const;
 
+const PERMISSIONS = [
+  {
+    kind: "accessibility",
+    label: "Accessibility",
+    detail: "Click, type and read apps.",
+    optional: false,
+  },
+  {
+    kind: "screenRecording",
+    label: "Screen Recording",
+    detail: "See app windows.",
+    optional: false,
+  },
+  {
+    kind: "inputMonitoring",
+    label: "Input Monitoring",
+    detail: "Optional. Lets the Escape key stop an agent and allows foreground takeover.",
+    optional: true,
+  },
+] as const satisfies ReadonlyArray<{
+  kind: DesktopAppSnapPermissionKind;
+  label: string;
+  detail: string;
+  optional: boolean;
+}>;
+
+/** Agent Control on this Mac's own server; Computer Use's tools come through it. */
+function useLocalAgentControl() {
+  const environmentId = useLocalComputerEnvironmentId();
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const server = () => (environmentId ? readEnvironmentApi(environmentId)?.server : undefined);
+  const refresh = useCallback(() => {
+    const api = environmentId ? readEnvironmentApi(environmentId)?.server : undefined;
+    if (!api) return;
+    void api
+      .getSettings()
+      .then((settings) => setEnabled(settings.agentControl.enabled))
+      .catch(() => undefined);
+  }, [environmentId]);
+  useEffect(() => {
+    refresh();
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [refresh]);
+  const enable = async () => {
+    const api = server();
+    if (!api)
+      throw new Error("This Mac's Ryco server is not connected. Reconnect, then try again.");
+    const settings = await api.updateSettings({ agentControl: { enabled: true } });
+    setEnabled(settings.agentControl.enabled);
+  };
+  return { enabled, enable };
+}
+
+type ComputerBetaApi = NonNullable<NonNullable<typeof window.desktopBridge>["computerBeta"]>;
+
+/** Only the desktop app on a Mac can drive this Mac; elsewhere the section is absent. */
 export function ComputerBetaSettings() {
   const api = window.desktopBridge?.computerBeta;
+  return api ? <ComputerBetaSettingsPanel api={api} /> : null;
+}
+
+function ComputerBetaSettingsPanel({ api }: { api: ComputerBetaApi }) {
   const [state, setState] = useState<ComputerBetaState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [history, setHistory] = useState<ComputerGetAuditHistoryResult | null>(null);
+  const agentControl = useLocalAgentControl();
   useEffect(() => {
-    if (!api) return;
     let mounted = true;
     const refresh = () => {
       void api
@@ -45,7 +112,7 @@ export function ComputerBetaSettings() {
       window.removeEventListener("focus", refresh);
     };
   }, [api]);
-  if (!api || state?.supported === false) return null;
+  if (state?.supported === false) return null;
   const run = async (operation: () => Promise<ComputerBetaState>) => {
     setBusy(true);
     setError(null);
@@ -60,72 +127,171 @@ export function ComputerBetaSettings() {
   const change = (patch: Partial<ComputerBetaPreferences>) => {
     if (state) void run(() => api.setPreferences({ ...state.preferences, ...patch }));
   };
-  const permissions = [
-    ["Accessibility", "accessibilityPermission"],
-    ["Input Monitoring", "inputMonitoringPermission"],
-    ["Screen Recording", "screenRecordingPermission"],
-  ] as const;
+  const turnOn = () =>
+    void run(async () => {
+      if (agentControl.enabled !== true) await agentControl.enable();
+      return api.turnOn();
+    });
+  const setup = state?.setup;
+  const granted = setup !== undefined && setup.missing.length === 0;
+  const on = granted && state?.preferences.defaultEnabled === true;
+  const restartApp = window.desktopBridge?.restartApp;
   return (
     <SettingsSection
       title="Computer Use"
-      description={
-        <>
-          Use Mac apps and an isolated browser from chat. Start one task with{" "}
-          <code className="font-mono text-foreground">/computer-use</code>, or turn it on by
-          default. Requires Agent Control and a supported provider.
-        </>
-      }
+      description="Let agents use your Mac's apps and a browser from any chat."
       headerAction={
         <Badge size="sm" variant="outline">
           Beta
         </Badge>
       }
     >
-      <SettingsRow
-        title="Use by default"
-        description="Start every new task with Computer Use available."
-        control={
-          <Switch
-            aria-label="Enable Computer by default"
-            disabled={busy || !state}
-            checked={state?.preferences.defaultEnabled ?? false}
-            onCheckedChange={(value) => change({ defaultEnabled: !!value })}
-          />
-        }
-      />
+      {granted ? (
+        <SettingsRow
+          title="Use in every chat"
+          description={
+            on ? (
+              <>Agents can use the computer in any chat. Apps ask once before an agent uses them.</>
+            ) : (
+              <>
+                Off. Start a single task with{" "}
+                <code className="font-mono text-foreground">/computer-use</code>.
+                {agentControl.enabled === false
+                  ? " Turning it on also turns on Agent Control."
+                  : null}
+              </>
+            )
+          }
+          control={
+            <Switch
+              aria-label="Use Computer Use in every chat"
+              disabled={busy || !state}
+              checked={on}
+              onCheckedChange={(value) => (value ? turnOn() : change({ defaultEnabled: false }))}
+            />
+          }
+        />
+      ) : (
+        <SettingsRow
+          title={state?.preferences.defaultEnabled ? "Setup isn't finished" : "Computer Use is off"}
+          description={
+            agentControl.enabled === false
+              ? "Asks macOS for two permissions and turns on Agent Control, which gives agents Ryco's private tools."
+              : "Asks macOS for two permissions. Ryco checks each one when you come back."
+          }
+          control={
+            <Button size="sm" disabled={busy || !state} onClick={turnOn}>
+              {state?.preferences.defaultEnabled ? "Continue setup" : "Turn on Computer Use"}
+            </Button>
+          }
+        />
+      )}
+      {(on || state?.preferences.defaultEnabled) && agentControl.enabled === false ? (
+        <SettingsBlock>
+          <SettingsNotice
+            tone="warning"
+            action={
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={busy}
+                onClick={() =>
+                  void agentControl.enable().catch((cause: unknown) => {
+                    setError(cause instanceof Error ? cause.message : "Could not turn it on.");
+                  })
+                }
+              >
+                Turn on Agent Control
+              </Button>
+            }
+          >
+            Agent Control is off, so agents can't use the computer.
+          </SettingsNotice>
+        </SettingsBlock>
+      ) : null}
       <SettingsRow
         title="Mac permissions"
-        description="Grant access to this Ryco app in System Settings. Setup checks each grant again when you return, and never sends your prompt."
-        control={
-          <>
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={busy}
-              onClick={() => void run(() => api.checkPermissions())}
-            >
-              Check permissions
-            </Button>
-            <Button size="xs" disabled={busy} onClick={() => void run(() => api.setup())}>
-              Set up Computer
-            </Button>
-          </>
-        }
+        description={`Granted to ${state?.permissions.appDisplayName || "Ryco"} in System Settings → Privacy & Security.`}
       >
-        <ul className="grid gap-2 sm:grid-cols-3">
-          {permissions.map(([label, key]) => (
-            <li
-              key={key}
-              className="flex items-center justify-between gap-2 rounded-[min(var(--radius-md),0.5rem)] bg-muted/50 px-2.5 py-2 text-xs"
-            >
-              <span className="truncate text-foreground">{label}</span>
-              <PermissionStatusBadge
-                status={state?.permissions[key]}
-                checked={state?.permissions[key] !== undefined}
-              />
-            </li>
-          ))}
+        <ul className="grid gap-2">
+          {PERMISSIONS.map((permission) => {
+            const status = state?.permissions[`${permission.kind}Permission`];
+            return (
+              <li
+                key={permission.kind}
+                className="flex items-center justify-between gap-3 rounded-[min(var(--radius-md),0.5rem)] bg-muted/50 px-2.5 py-2 text-xs"
+              >
+                <span className="min-w-0">
+                  <span className="block truncate text-foreground">{permission.label}</span>
+                  <span className="block truncate text-muted-foreground">{permission.detail}</span>
+                </span>
+                <span className="flex shrink-0 items-center gap-2">
+                  <PermissionStatusBadge status={status} checked={status !== undefined} />
+                  {state && status !== "granted" ? (
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      disabled={busy}
+                      aria-label={`${permission.optional ? "Turn on" : "Fix"} ${permission.label}`}
+                      onClick={() => void run(() => api.setupPermission(permission.kind))}
+                    >
+                      {permission.optional ? "Turn on" : "Fix"}
+                    </Button>
+                  ) : null}
+                </span>
+              </li>
+            );
+          })}
         </ul>
+        {setup && !setup.escapeStop ? (
+          <p className="mt-2 text-xs text-muted-foreground">
+            Without Input Monitoring, agents stay in the background. Stop them with Stop in chat or
+            in the menu bar.
+          </p>
+        ) : null}
+      </SettingsRow>
+      {setup?.staleGrant ? (
+        <SettingsBlock>
+          <SettingsNotice
+            tone="warning"
+            title="macOS may still list an older Ryco"
+            action={
+              restartApp ? (
+                <Button size="xs" variant="outline" onClick={() => void restartApp()}>
+                  Quit & Reopen
+                </Button>
+              ) : undefined
+            }
+          >
+            In System Settings, select Ryco under each missing permission, remove it with −, add it
+            again, then quit and reopen Ryco.
+          </SettingsNotice>
+        </SettingsBlock>
+      ) : null}
+      <SettingsRow
+        title="Always allowed apps"
+        description="Agents use these apps without asking. Other apps ask the first time."
+      >
+        {state?.approvedApps.length ? (
+          <ul className="divide-y divide-border/60 rounded-[min(var(--radius-md),0.5rem)] bg-muted/40 text-xs">
+            {state.approvedApps.map((app) => (
+              <li key={app.key} className="flex items-center justify-between gap-3 px-3 py-1.5">
+                <span className="truncate text-foreground first-letter:uppercase">{app.name}</span>
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  disabled={busy}
+                  aria-label={`Remove ${app.name}`}
+                  onClick={() => void run(() => api.revokeApp(app.key))}
+                >
+                  Remove
+                </Button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-xs text-muted-foreground">None yet.</p>
+        )}
       </SettingsRow>
       <SettingsRow
         title="Show preview automatically"
@@ -224,8 +390,9 @@ export function ComputerBetaSettings() {
         ) : null}
       </SettingsRow>
       <SettingsBlock className="text-xs leading-relaxed text-muted-foreground">
-        Escape interrupts the current action and requires a fresh observation. Stop in chat ends the
-        task. Your own input pauses foreground work.
+        {setup?.escapeStop
+          ? "Escape interrupts the current action. Stop in chat or the menu bar ends the task. Your own input pauses foreground work."
+          : "Stop in chat or the menu bar ends the task."}
       </SettingsBlock>
       {error || state?.error ? (
         <SettingsBlock>

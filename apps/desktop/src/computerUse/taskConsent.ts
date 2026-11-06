@@ -20,25 +20,39 @@ export const COMPUTER_CONSENT_UNSHOWN_RETRIES = 2;
 /** Dialogs open or waiting to be shown, across all tasks. */
 export const COMPUTER_CONSENT_OPEN_LIMIT = 8;
 
-export type ComputerConsentKind = "task" | "clipboard";
+export type ComputerConsentKind = "app" | "clipboard";
+/** The app an approval dialog names. The server owns what its answer means. */
+export interface ComputerConsentApp {
+  readonly key: string;
+  readonly name: string;
+  /** False for a target that cannot be named; its dialog offers no "Always allow". */
+  readonly canAlwaysAllow: boolean;
+}
+export type ComputerConsentRequest =
+  | { readonly kind: "clipboard" }
+  | { readonly kind: "app"; readonly app: ComputerConsentApp };
+/** What came of one dialog: "accept" allows (an app for this chat), "always" always allows an app. */
+export type ComputerConsentShown = "always" | "accept" | "decline" | "unavailable";
 /**
  * Shows one dialog and reports what came of it. `onShown` is called once the dialog is on
  * screen, which is when its lifetime starts. A dialog closed by our signal reports "decline"
  * (Electron's cancel).
  */
 export type ComputerConsentPrompt = (
-  kind: ComputerConsentKind,
+  request: ComputerConsentRequest,
   signal: AbortSignal,
   onShown: () => void,
-) => Promise<"accept" | "decline" | "unavailable" | "busy">;
+) => Promise<ComputerConsentShown | "busy">;
 /** Presents one dialog right away; it calls `onShown` just before the dialog appears. */
 export type ComputerConsentPresenter = (
-  kind: ComputerConsentKind,
+  request: ComputerConsentRequest,
   signal: AbortSignal,
   onShown: () => void,
-) => Promise<"accept" | "decline" | "unavailable">;
+) => Promise<ComputerConsentShown>;
 
 type Unshown = "unavailable" | "busy";
+/** Distinct apps one turn may ask about; beyond it requests are refused as busy. */
+export const COMPUTER_CONSENT_APPS_PER_TASK = 32;
 
 /**
  * Shows consent dialogs one at a time, across every task. macOS holds a second sheet on the
@@ -55,7 +69,7 @@ export class ComputerConsentSheets {
     this.#present = present;
   }
 
-  readonly prompt: ComputerConsentPrompt = async (kind, signal, onShown) => {
+  readonly prompt: ComputerConsentPrompt = async (request, signal, onShown) => {
     if (this.#open >= COMPUTER_CONSENT_OPEN_LIMIT) return "busy";
     this.#open += 1;
     const previous = this.#tail;
@@ -68,7 +82,7 @@ export class ComputerConsentSheets {
     this.#tail = previous.then(() => turn);
     try {
       if (!(await settlesBeforeAbort(previous, signal))) return "decline";
-      return await this.#present(kind, signal, onShown);
+      return await this.#present(request, signal, onShown);
     } finally {
       this.#open -= 1;
       release();
@@ -76,29 +90,32 @@ export class ComputerConsentSheets {
   };
 }
 
+interface ConsentSlot {
+  expired: number;
+  /** Dialogs in a row that never reached the user, and why the last one did not. */
+  unshown: { count: number; last: Unshown };
+  /** The one app dialog every request for this app joins. */
+  pending?: Promise<ComputerConsentReply> | undefined;
+  /** The user's answer to a dialog whose requests had all stopped waiting. */
+  unclaimed?: ComputerConsentReply | undefined;
+}
+
 /**
- * Consent for one Computer task (one thread turn), owned by the desktop.
+ * The dialogs of one Computer task (one thread turn), owned by the desktop.
  *
- * Routine actions share one dialog and one answer for the turn; every clipboard
- * request asks on its own. Only an explicit Cancel binds the turn. A dialog nobody
- * answered, a full prompt queue or a missing window refuses only the call that
- * asked. After an expiry the agent may ask once more, and after a few dialogs in a
- * row that could not be shown the turn stops asking. Nothing here approves
- * without an Allow click.
+ * It only presents: the server decides what an answer means (per-app approval in
+ * `ComputerApprovalGate`), so this keeps no grants. Each app has one dialog that every
+ * request for that app joins; every clipboard request asks on its own. A dialog nobody
+ * answered, a full prompt queue or a missing window refuses only the call that asked.
+ * After an expiry the agent may ask once more for that app, and after a few dialogs in a
+ * row that could not be shown it stops asking. An answer that lands after its requests
+ * stopped waiting is handed to the next request for that app. Nothing here approves
+ * without a click.
  */
 export class ComputerTaskConsent {
   readonly #prompt: ComputerConsentPrompt;
   readonly #taskSignal: AbortSignal;
-  #granted = false;
-  #declined = false;
-  readonly #expired: Record<ComputerConsentKind, number> = { task: 0, clipboard: 0 };
-  /** Dialogs in a row that never reached the user, and why the last one did not. */
-  readonly #unshown: Record<ComputerConsentKind, { count: number; last: Unshown }> = {
-    task: { count: 0, last: "unavailable" },
-    clipboard: { count: 0, last: "unavailable" },
-  };
-  /** The one routine dialog every routine request of this turn joins. */
-  #pending: Promise<ComputerConsentReply> | undefined;
+  readonly #slots = new Map<string, ConsentSlot>();
 
   constructor(prompt: ComputerConsentPrompt, taskSignal: AbortSignal) {
     this.#prompt = prompt;
@@ -106,44 +123,72 @@ export class ComputerTaskConsent {
   }
 
   /**
-   * Lock, sleep, session switch, listener loss: a granted consent must be asked
-   * again. An open dialog survives (its answer postdates the interruption); a
-   * decline stays a decline.
+   * Lock, sleep or a session switch: an answer given before it must not approve an action
+   * after it, so answers no request collected yet are dropped. A dialog still open stays:
+   * its answer postdates the interruption.
    */
-  revokeGrant(): void {
-    this.#granted = false;
+  discardUnclaimedAnswers(): void {
+    for (const slot of this.#slots.values()) slot.unclaimed = undefined;
   }
 
-  async request(kind: ComputerConsentKind): Promise<ComputerConsentReply> {
+  #slot(key: string): ConsentSlot | undefined {
+    let slot = this.#slots.get(key);
+    if (slot) return slot;
+    if (this.#slots.size > COMPUTER_CONSENT_APPS_PER_TASK) return undefined;
+    slot = { expired: 0, unshown: { count: 0, last: "unavailable" } };
+    this.#slots.set(key, slot);
+    return slot;
+  }
+
+  async request(request: ComputerConsentRequest): Promise<ComputerConsentReply> {
     if (this.#taskSignal.aborted) return reply("stopped", false);
-    // A routine Cancel also refuses clipboard access for the rest of the turn.
-    if (this.#declined) return reply("decline", false);
-    if (kind === "task" && this.#granted) return reply("accept", false);
-    if (this.#expired[kind] > COMPUTER_CONSENT_RE_REQUESTS) return reply("expired", false);
-    const unshown = this.#unshown[kind];
-    if (unshown.count > COMPUTER_CONSENT_UNSHOWN_RETRIES) return reply(unshown.last, false);
-    return kind === "task" ? this.#waitForRoutineDialog() : this.#open("clipboard");
+    const slot = this.#slot(request.kind === "app" ? `app:${request.app.key}` : "clipboard");
+    if (!slot) return reply("busy", false);
+    if (slot.unclaimed) {
+      const answer = slot.unclaimed;
+      slot.unclaimed = undefined;
+      return answer;
+    }
+    if (slot.expired > COMPUTER_CONSENT_RE_REQUESTS) return reply("expired", false);
+    if (slot.unshown.count > COMPUTER_CONSENT_UNSHOWN_RETRIES)
+      return reply(slot.unshown.last, false);
+    return request.kind === "app"
+      ? this.#waitForAppDialog(request, slot)
+      : this.#open(request, slot);
   }
 
-  /** Joins the open routine dialog, or opens it, and waits one request's share of it. */
-  async #waitForRoutineDialog(): Promise<ComputerConsentReply> {
-    let dialog = this.#pending;
+  /** Joins the open dialog for this app, or opens it, and waits one request's share of it. */
+  async #waitForAppDialog(
+    request: ComputerConsentRequest,
+    slot: ConsentSlot,
+  ): Promise<ComputerConsentReply> {
+    let dialog = slot.pending;
     if (!dialog) {
-      const opened = this.#open("task");
-      const clear = () => {
-        if (this.#pending === opened) this.#pending = undefined;
-      };
-      void opened.then(clear, clear);
-      this.#pending = opened;
+      const opened = this.#open(request, slot);
+      slot.pending = opened;
       dialog = opened;
+      void opened.then(
+        (answer) => {
+          if (slot.pending !== opened) return;
+          slot.pending = undefined;
+          // Kept for the next request; a request that is still waiting takes it below.
+          if (answer.outcome === "accept" || answer.outcome === "decline") slot.unclaimed = answer;
+        },
+        () => {
+          if (slot.pending === opened) slot.pending = undefined;
+        },
+      );
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const waited = new Promise<ComputerConsentReply>((resolve) => {
-      timer = setTimeout(() => resolve(reply("pending", true)), COMPUTER_CONSENT_WAIT_MS);
+    const waited = new Promise<"waited">((resolve) => {
+      timer = setTimeout(() => resolve("waited"), COMPUTER_CONSENT_WAIT_MS);
     });
     try {
       // The dialog stays open past this request; the next request joins it.
-      return await Promise.race([dialog, waited]);
+      const answer = await Promise.race([dialog, waited]);
+      if (answer === "waited") return reply("pending", true);
+      if (slot.unclaimed === answer) slot.unclaimed = undefined;
+      return answer;
     } finally {
       clearTimeout(timer);
     }
@@ -154,7 +199,7 @@ export class ComputerTaskConsent {
    * retry verdict is taken here, once per dialog, so concurrent dialogs each
    * report their own count rather than whatever a later one left behind.
    */
-  async #open(kind: ComputerConsentKind): Promise<ComputerConsentReply> {
+  async #open(request: ComputerConsentRequest, slot: ConsentSlot): Promise<ComputerConsentReply> {
     const expiry = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const expireAfter = (ms: number) => {
@@ -162,21 +207,21 @@ export class ComputerTaskConsent {
     };
     // A clipboard dialog belongs to one bridge request, so its deadline runs
     // from the request, whether or not it has reached the screen yet.
-    if (kind === "clipboard") expireAfter(COMPUTER_CONSENT_WAIT_MS);
+    if (request.kind === "clipboard") expireAfter(COMPUTER_CONSENT_WAIT_MS);
     let shown = false;
     const onShown = () => {
       if (shown) return;
       shown = true;
-      this.#unshown[kind].count = 0;
-      // A routine dialog's five minutes start when the user can see it, not
+      slot.unshown.count = 0;
+      // An app dialog's five minutes start when the user can see it, not
       // while it waits behind another sheet.
-      if (kind === "task") expireAfter(COMPUTER_CONSENT_EXPIRY_MS);
+      if (request.kind === "app") expireAfter(COMPUTER_CONSENT_EXPIRY_MS);
     };
     try {
       let result: Awaited<ReturnType<ComputerConsentPrompt>>;
       try {
         result = await this.#prompt(
-          kind,
+          request,
           AbortSignal.any([this.#taskSignal, expiry.signal]),
           onShown,
         );
@@ -185,27 +230,23 @@ export class ComputerTaskConsent {
       }
       if (this.#taskSignal.aborted) return reply("stopped", false);
       // An Allow click wins even when it lands on the deadline.
-      if (result === "accept") {
-        if (kind === "task") this.#granted = true;
-        return reply("accept", false);
+      if (result === "accept" || result === "always") {
+        if (request.kind !== "app") return reply("accept", false);
+        const always = result === "always" && request.app.canAlwaysAllow;
+        return { ...reply("accept", false), scope: always ? "always" : "chat" };
       }
       if (result === "decline") {
-        if (!expiry.signal.aborted) {
-          // A clipboard Cancel refuses only that clipboard request.
-          if (kind === "task") this.#declined = true;
-          return reply("decline", false);
-        }
+        if (!expiry.signal.aborted) return reply("decline", false);
         if (shown) {
-          this.#expired[kind] += 1;
-          return reply("expired", this.#expired[kind] <= COMPUTER_CONSENT_RE_REQUESTS);
+          slot.expired += 1;
+          return reply("expired", slot.expired <= COMPUTER_CONSENT_RE_REQUESTS);
         }
         // Its request ran out while another sheet still held the window.
         result = "busy";
       }
-      const unshown = this.#unshown[kind];
-      unshown.count += 1;
-      unshown.last = result;
-      return reply(result, unshown.count <= COMPUTER_CONSENT_UNSHOWN_RETRIES);
+      slot.unshown.count += 1;
+      slot.unshown.last = result;
+      return reply(result, slot.unshown.count <= COMPUTER_CONSENT_UNSHOWN_RETRIES);
     } finally {
       clearTimeout(timer);
     }

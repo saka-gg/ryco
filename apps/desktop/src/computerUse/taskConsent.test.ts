@@ -3,26 +3,37 @@ import * as Schema from "effect/Schema";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  COMPUTER_CONSENT_APPS_PER_TASK,
   COMPUTER_CONSENT_EXPIRY_MS,
   COMPUTER_CONSENT_OPEN_LIMIT,
   COMPUTER_CONSENT_WAIT_MS,
   ComputerConsentSheets,
   ComputerTaskConsent,
-  type ComputerConsentKind,
   type ComputerConsentPresenter,
   type ComputerConsentPrompt,
+  type ComputerConsentRequest,
 } from "./taskConsent.ts";
 
 type Shown = Awaited<ReturnType<ComputerConsentPrompt>>;
 
 interface Dialog {
-  readonly kind: ComputerConsentKind;
+  readonly request: ComputerConsentRequest;
   readonly signal: AbortSignal;
   answer(result: Shown): void;
 }
 
+type Target = "Safari" | "Notes" | "unnamed" | "clipboard";
+const requestFor = (target: Target): ComputerConsentRequest =>
+  target === "clipboard"
+    ? { kind: "clipboard" }
+    : target === "unnamed"
+      ? { kind: "app", app: { key: "\u0000mac", name: "your Mac", canAlwaysAllow: false } }
+      : { kind: "app", app: { key: target.toLowerCase(), name: target, canAlwaysAllow: true } };
+
 const PENDING = { approved: false, outcome: "pending", retryable: true };
 const ACCEPT = { approved: true, outcome: "accept", retryable: false };
+const CHAT = { ...ACCEPT, scope: "chat" };
+const ALWAYS = { ...ACCEPT, scope: "always" };
 const DECLINE = { approved: false, outcome: "decline", retryable: false };
 
 /**
@@ -32,11 +43,11 @@ const DECLINE = { approved: false, outcome: "decline", retryable: false };
  */
 function scriptedDialogs() {
   const dialogs: Dialog[] = [];
-  const show = (kind: ComputerConsentKind, signal: AbortSignal, onShown: () => void) =>
+  const show = (request: ComputerConsentRequest, signal: AbortSignal, onShown: () => void) =>
     new Promise<Shown>((resolve) => {
       onShown();
       signal.addEventListener("abort", () => resolve("decline"), { once: true });
-      dialogs.push({ kind, signal, answer: resolve });
+      dialogs.push({ request, signal, answer: resolve });
     });
   return { dialogs, show };
 }
@@ -54,7 +65,7 @@ function fixture() {
   const { dialogs, show } = scriptedDialogs();
   const prompt = vi.fn<ComputerConsentPrompt>(show);
   const consent = new ComputerTaskConsent(prompt, controller.signal);
-  const request = (kind: ComputerConsentKind = "task") => decoded(consent.request(kind));
+  const request = (target: Target = "Safari") => decoded(consent.request(requestFor(target)));
   return { controller, dialogs, prompt, consent, request };
 }
 
@@ -68,7 +79,7 @@ function sheetsFixture() {
     const consent = new ComputerTaskConsent(sheets.prompt, controller.signal);
     return {
       controller,
-      request: (kind: ComputerConsentKind = "task") => decoded(consent.request(kind)),
+      request: (target: Target = "Safari") => decoded(consent.request(requestFor(target))),
     };
   };
   return { dialogs, present, sheets, task };
@@ -82,39 +93,81 @@ describe("ComputerTaskConsent", () => {
     vi.useRealTimers();
   });
 
-  it("shares one routine dialog between concurrent requests and keeps the accept for the turn", async () => {
+  it("shares one dialog per app between concurrent requests and keeps no grant itself", async () => {
     const { dialogs, prompt, request } = fixture();
     const first = request();
     const second = request();
     expect(prompt).toHaveBeenCalledTimes(1);
-    expect(dialogs[0]!.kind).toBe("task");
+    expect(dialogs[0]!.request).toEqual(requestFor("Safari"));
     dialogs[0]!.answer("accept");
-    expect(await first).toEqual(ACCEPT);
-    expect(await second).toEqual(ACCEPT);
-    expect(await request()).toEqual(ACCEPT);
-    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(await first).toEqual(CHAT);
+    expect(await second).toEqual(CHAT);
+    // The backend remembers the answer; a later request asks the desktop again.
+    const later = request();
+    expect(prompt).toHaveBeenCalledTimes(2);
+    dialogs[1]!.answer("always");
+    expect(await later).toEqual(ALWAYS);
   });
 
-  it("binds the turn on a routine Cancel and refuses clipboard access without another dialog", async () => {
+  it("asks separately for each app", async () => {
+    const { dialogs, prompt, request } = fixture();
+    const safari = request("Safari");
+    const notes = request("Notes");
+    expect(prompt).toHaveBeenCalledTimes(2);
+    dialogs[1]!.answer("decline");
+    dialogs[0]!.answer("always");
+    expect(await notes).toEqual(DECLINE);
+    expect(await safari).toEqual(ALWAYS);
+  });
+
+  it("never reports Always allow for a target it could not name", async () => {
+    const { dialogs, request } = fixture();
+    const unnamed = request("unnamed");
+    dialogs[0]!.answer("always");
+    expect(await unnamed).toEqual(CHAT);
+  });
+
+  it("keeps an answer that lands after every request stopped waiting for the next request", async () => {
     const { dialogs, prompt, request } = fixture();
     const first = request();
-    dialogs[0]!.answer("decline");
-    expect(await first).toEqual(DECLINE);
-    expect(await request()).toEqual(DECLINE);
-    expect(await request("clipboard")).toEqual(DECLINE);
+    await vi.advanceTimersByTimeAsync(COMPUTER_CONSENT_WAIT_MS);
+    expect(await first).toEqual(PENDING);
+    dialogs[0]!.answer("always");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await request()).toEqual(ALWAYS);
     expect(prompt).toHaveBeenCalledTimes(1);
+    // Claimed once: the next request opens a new dialog.
+    void request();
+    expect(prompt).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops an uncollected answer after a desktop interruption but keeps an open dialog", async () => {
+    const { consent, dialogs, prompt, request } = fixture();
+    const first = request();
+    await vi.advanceTimersByTimeAsync(COMPUTER_CONSENT_WAIT_MS);
+    expect(await first).toEqual(PENDING);
+    dialogs[0]!.answer("always");
+    await vi.advanceTimersByTimeAsync(0);
+    consent.discardUnclaimedAnswers();
+    // The answer predates the lock: the next request asks again.
+    const next = request();
+    expect(prompt).toHaveBeenCalledTimes(2);
+    // A dialog still open across the interruption counts when answered.
+    consent.discardUnclaimedAnswers();
+    dialogs[1]!.answer("accept");
+    expect(await next).toEqual(CHAT);
   });
 
   it("refuses only the clipboard request whose dialog was cancelled", async () => {
     const { dialogs, prompt, request } = fixture();
     const clipboard = request("clipboard");
-    expect(dialogs[0]!.kind).toBe("clipboard");
+    expect(dialogs[0]!.request.kind).toBe("clipboard");
     dialogs[0]!.answer("decline");
     expect(await clipboard).toEqual(DECLINE);
-    const routine = request();
+    const app = request();
     dialogs[1]!.answer("accept");
-    expect(await routine).toEqual(ACCEPT);
-    // A clipboard request is never covered by the routine accept.
+    expect(await app).toEqual(CHAT);
+    // A clipboard request is never covered by an app answer, nor carries a scope.
     const again = request("clipboard");
     expect(prompt).toHaveBeenCalledTimes(3);
     dialogs[2]!.answer("accept");
@@ -157,31 +210,11 @@ describe("ComputerTaskConsent", () => {
     expect(dialogs[1]!.signal.aborted).toBe(true);
     expect(await lastWaiter).toEqual({ approved: false, outcome: "expired", retryable: false });
 
-    // The turn stops asking: no third dialog.
+    // The turn stops asking about this app: no third dialog. Another app still asks.
     expect(await request()).toEqual({ approved: false, outcome: "expired", retryable: false });
     expect(prompt).toHaveBeenCalledTimes(2);
-  });
-
-  it("counts an Allow given while a lock or listener restart revoked consent", async () => {
-    const { consent, dialogs, prompt, request } = fixture();
-    const first = request();
-    consent.revokeGrant();
-    dialogs[0]!.answer("accept");
-    expect(await first).toEqual(ACCEPT);
-    expect(await request()).toEqual(ACCEPT);
-    expect(prompt).toHaveBeenCalledTimes(1);
-  });
-
-  it("asks again after an interruption revoked an accepted consent", async () => {
-    const { consent, dialogs, prompt, request } = fixture();
-    const first = request();
-    dialogs[0]!.answer("accept");
-    expect(await first).toEqual(ACCEPT);
-    consent.revokeGrant();
-    const second = request();
-    expect(prompt).toHaveBeenCalledTimes(2);
-    dialogs[1]!.answer("accept");
-    expect(await second).toEqual(ACCEPT);
+    void request("Notes");
+    expect(prompt).toHaveBeenCalledTimes(3);
   });
 
   it("does not bind the turn when no dialog could be shown", async () => {
@@ -194,7 +227,7 @@ describe("ComputerTaskConsent", () => {
     expect(await busy).toEqual({ approved: false, outcome: "busy", retryable: true });
     const accepted = request();
     dialogs[2]!.answer("accept");
-    expect(await accepted).toEqual(ACCEPT);
+    expect(await accepted).toEqual(CHAT);
   });
 
   it("stops asking after three dialogs in a row could not be shown", async () => {
@@ -206,14 +239,15 @@ describe("ComputerTaskConsent", () => {
       outcome: "unavailable",
       retryable,
     });
-    expect(await decoded(consent.request("task"))).toEqual(unavailable(true));
-    expect(await decoded(consent.request("task"))).toEqual(unavailable(true));
-    expect(await decoded(consent.request("task"))).toEqual(unavailable(false));
+    const safari = () => decoded(consent.request(requestFor("Safari")));
+    expect(await safari()).toEqual(unavailable(true));
+    expect(await safari()).toEqual(unavailable(true));
+    expect(await safari()).toEqual(unavailable(false));
     // The agent was told to stop; asking again does not even try.
-    expect(await decoded(consent.request("task"))).toEqual(unavailable(false));
+    expect(await safari()).toEqual(unavailable(false));
     expect(prompt).toHaveBeenCalledTimes(3);
     // Clipboard consent keeps its own count.
-    expect(await decoded(consent.request("clipboard"))).toEqual(unavailable(true));
+    expect(await decoded(consent.request(requestFor("clipboard")))).toEqual(unavailable(true));
     expect(prompt).toHaveBeenCalledTimes(4);
   });
 
@@ -255,12 +289,12 @@ describe("ComputerTaskConsent", () => {
       .mockRejectedValueOnce(new Error("window closed"))
       .mockResolvedValueOnce("accept");
     const consent = new ComputerTaskConsent(prompt, controller.signal);
-    expect(await consent.request("task")).toEqual({
+    expect(await consent.request(requestFor("Safari"))).toEqual({
       approved: false,
       outcome: "unavailable",
       retryable: true,
     });
-    expect(await consent.request("task")).toEqual(ACCEPT);
+    expect(await consent.request(requestFor("Safari"))).toEqual(CHAT);
   });
 
   it("closes an open dialog when the task stops and refuses later requests", async () => {
@@ -281,9 +315,26 @@ describe("ComputerTaskConsent", () => {
   it("an Allow on a stopped task does not approve", async () => {
     const { controller, dialogs, request } = fixture();
     const first = request();
-    dialogs[0]!.answer("accept");
+    dialogs[0]!.answer("always");
     controller.abort();
     expect(await first).toEqual({ approved: false, outcome: "stopped", retryable: false });
+  });
+
+  it("refuses requests for more apps than one turn may ask about", async () => {
+    const controller = new AbortController();
+    const prompt = vi.fn<ComputerConsentPrompt>(async () => "decline");
+    const consent = new ComputerTaskConsent(prompt, controller.signal);
+    for (let index = 0; index <= COMPUTER_CONSENT_APPS_PER_TASK; index += 1)
+      await consent.request({
+        kind: "app",
+        app: { key: `app-${index}`, name: `App ${index}`, canAlwaysAllow: true },
+      });
+    expect(
+      await consent.request({
+        kind: "app",
+        app: { key: "one-more", name: "One more", canAlwaysAllow: true },
+      }),
+    ).toEqual({ approved: false, outcome: "busy", retryable: false });
   });
 
   it("closes a clipboard dialog after one request's wait and counts its expiry separately", async () => {
@@ -301,11 +352,11 @@ describe("ComputerTaskConsent", () => {
       retryable: false,
     });
     expect(prompt).toHaveBeenCalledTimes(2);
-    // Routine consent still has its own dialog and its own re-request.
-    const routine = request();
+    // App approval still has its own dialog and its own re-request.
+    const app = request();
     expect(prompt).toHaveBeenCalledTimes(3);
     dialogs[2]!.answer("accept");
-    expect(await routine).toEqual(ACCEPT);
+    expect(await app).toEqual(CHAT);
   });
 });
 
@@ -333,7 +384,7 @@ describe("ComputerConsentSheets", () => {
     await vi.advanceTimersByTimeAsync(4 * 60_000);
     const answered = first.request();
     dialogs[0]!.answer("accept");
-    expect(await answered).toEqual(ACCEPT);
+    expect(await answered).toEqual(CHAT);
     await vi.advanceTimersByTimeAsync(0);
     expect(present).toHaveBeenCalledTimes(2);
     expect(dialogs[1]!.signal.aborted).toBe(false);
@@ -345,7 +396,7 @@ describe("ComputerConsentSheets", () => {
     expect(await waiting).toEqual(PENDING);
     const late = second.request();
     dialogs[1]!.answer("accept");
-    expect(await late).toEqual(ACCEPT);
+    expect(await late).toEqual(CHAT);
   });
 
   it("reports a clipboard dialog that never reached the screen as busy, not expired", async () => {
@@ -391,11 +442,11 @@ describe("ComputerConsentSheets", () => {
     // The first sheet is still on screen, so the third must keep waiting.
     expect(present).toHaveBeenCalledTimes(1);
     dialogs[0]!.answer("accept");
-    expect(await shown).toEqual(ACCEPT);
+    expect(await shown).toEqual(CHAT);
     await vi.advanceTimersByTimeAsync(0);
     expect(present).toHaveBeenCalledTimes(2);
     dialogs[1]!.answer("accept");
-    expect(await behind).toEqual(ACCEPT);
+    expect(await behind).toEqual(CHAT);
   });
 
   it("refuses a dialog beyond the open limit without queueing it", async () => {
