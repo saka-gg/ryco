@@ -20,6 +20,8 @@ import { EscapeKillSwitchMonitor } from "../escapeKillSwitchMonitor.ts";
 import { registerComputerDesktopLifecycle } from "../computerDesktopLifecycle.ts";
 import { macPrivacySettingsUrl, resolveMacAppBundle } from "../macAppBundle.ts";
 import { record, textArg } from "./native.ts";
+import type { ComputerActivityIndicator } from "./activityIndicator.ts";
+import { appNameForPid } from "./processAppName.ts";
 import {
   ComputerConsentSheets,
   ComputerTaskConsent,
@@ -47,6 +49,8 @@ interface Task {
 }
 const taskKey = (task: { threadId: string; turnId: string }) =>
   JSON.stringify([task.threadId, task.turnId]);
+const INDICATOR_PREFIX = "cua:";
+const indicatorKey = (threadId: string) => `${INDICATOR_PREFIX}${threadId}`;
 
 /** Desktop ownership and presentation only. Tool authority remains server-owned. */
 export class DesktopComputerBeta {
@@ -56,6 +60,7 @@ export class DesktopComputerBeta {
   private readonly tap: ComputerFrameTap;
   private readonly hostOptions: ConstructorParameters<typeof CuaDriverHost>[0];
   private readonly getWindow: () => BrowserWindow | null;
+  private readonly indicator: ComputerActivityIndicator | undefined;
   private readonly settingsPath: string;
   private readonly auditLogPath: string;
   private preferences: ComputerBetaPreferences = defaults;
@@ -85,8 +90,11 @@ export class DesktopComputerBeta {
     auditLogPath?: string;
     resourcesDir: string;
     getWindow(): BrowserWindow | null;
+    /** The shared menu-bar status; it names the app each task uses, never the action. */
+    indicator?: ComputerActivityIndicator;
   }) {
     this.getWindow = options.getWindow;
+    this.indicator = options.indicator;
     this.settingsPath = join(options.stateDir, "computer-beta.json");
     this.auditLogPath = options.auditLogPath ?? join(options.stateDir, "computer-audit.jsonl");
     try {
@@ -204,6 +212,7 @@ export class DesktopComputerBeta {
             targetId: `cua:${target.pid}:${target.windowId}`,
             label: target.task.label ?? "Computer",
           });
+          this.noteActivity(target);
           if (this.visible.has(target.task.threadId)) this.tap.update(target);
           else void this.tap.stop().catch(() => undefined);
         },
@@ -213,10 +222,14 @@ export class DesktopComputerBeta {
             this.target.task.turnId === task.turnId
           )
             this.target = undefined;
+          // The status is per thread: a newer turn of the same thread keeps it.
+          if (![...this.tasks.values()].some((live) => live.threadId === task.threadId))
+            this.indicator?.end(indicatorKey(task.threadId));
           await this.tap.endTask(task);
         },
         stop: async () => {
           this.target = undefined;
+          this.indicator?.endAll(INDICATOR_PREFIX);
           await this.tap.stop();
         },
         dispose: () => this.tap.dispose(),
@@ -284,6 +297,17 @@ export class DesktopComputerBeta {
     const window = this.getWindow();
     if (!this.closed && window && !window.isDestroyed())
       window.webContents.send("desktop:computer-beta:update", update);
+  }
+  /** Names the target's app in the menu-bar status while its task is still live. */
+  private noteActivity(target: CuaPreviewTarget): void {
+    const indicator = this.indicator;
+    const turnId = target.task.turnId;
+    if (!indicator || !turnId) return;
+    const key = taskKey({ threadId: target.task.threadId, turnId });
+    void appNameForPid(target.pid).then((app) => {
+      if (this.closed || !this.tasks.has(key)) return;
+      indicator.touch(indicatorKey(target.task.threadId), app ?? "an app", "background");
+    });
   }
   private publishState(): void {
     if (this.permissions && this.monitor) this.send({ type: "state", state: this.state() });
@@ -357,6 +381,7 @@ export class DesktopComputerBeta {
       this.send({ type: "ended", threadId: task.threadId, turnId: task.turnId });
     }
     this.tasks.clear();
+    this.indicator?.endAll(INDICATOR_PREFIX);
     void this.host.stop().catch((error: unknown) => {
       this.error = error instanceof Error ? error.message : "Computer stop failed.";
       this.publishState();

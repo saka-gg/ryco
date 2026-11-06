@@ -9,6 +9,13 @@ import {
   type BrowserDiagnosticsRead,
 } from "./browserDiagnostics.ts";
 
+export const BROWSER_NAMES = {
+  ryco: "Ryco Browser",
+  chrome: "Google Chrome",
+  brave: "Brave Browser",
+  edge: "Microsoft Edge",
+} as const satisfies Record<ComputerBrowser, string>;
+
 export interface BrowserTab {
   id: string;
   title: string;
@@ -513,6 +520,7 @@ export class BrowserComputerDriver {
       context.claim(`browser:${browser}:${tab.id}`);
       await context.activity({
         target: browser,
+        app: BROWSER_NAMES[browser],
         mode: visible ? "foreground" : "background",
         action,
       });
@@ -544,6 +552,7 @@ export class BrowserComputerDriver {
     context.check();
     await context.activity({
       target: target.title ? `${browser} — ${target.title}`.slice(0, 512) : browser,
+      app: BROWSER_NAMES[browser],
       mode: visible ? "foreground" : "background",
       action: action === "observe" ? "find_elements" : action,
     });

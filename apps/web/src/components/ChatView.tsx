@@ -5972,7 +5972,7 @@ export default function ChatView(props: ChatViewProps) {
           const settings = await api.server.getSettings();
           if (!settings.agentControl.enabled)
             throw new Error(
-              "Enable Private Agent Control in Settings → Integrations before sending this task.",
+              "Enable Private Agent Control in Settings → Agent Control before sending this task.",
             );
           const instance = settings.providerInstances[ctxSelectedModelSelection.instanceId];
           if (
