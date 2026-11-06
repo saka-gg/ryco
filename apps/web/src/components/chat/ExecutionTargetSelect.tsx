@@ -19,7 +19,35 @@ export interface ExecutionTargetSelectProps {
   readonly appearance?: "ghost" | "pill";
 }
 
-/** The device ("execution machine") a thread runs on. */
+/**
+ * The device a started thread runs on. It is bound to that machine, so this is
+ * a plain label under the composer, not a choice.
+ */
+export function ExecutionTargetLabel({
+  environmentId,
+  label,
+  className,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly label: string;
+  readonly className?: string;
+}) {
+  return (
+    <span
+      className={cn(
+        "inline-flex h-7 min-w-0 shrink items-center gap-1 px-[calc(--spacing(2)-1px)] font-medium text-muted-foreground/70 text-sm sm:h-6 sm:text-xs",
+        className,
+      )}
+      title="Existing threads stay on their owning machine"
+      data-testid="thread-execution-machine"
+    >
+      <DeviceIcon environmentId={environmentId} label={label} className="size-3 shrink-0" />
+      <span className="truncate">{label}</span>
+    </span>
+  );
+}
+
+/** Choose the device ("execution machine") a new thread runs on. */
 export function ExecutionTargetSelect({
   targets,
   selectedEnvironmentId,

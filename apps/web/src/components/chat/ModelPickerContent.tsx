@@ -32,7 +32,8 @@ import {
 } from "react";
 import { ChevronDownIcon, SearchIcon } from "lucide-react";
 import { ModelListRow } from "./ModelListRow";
-import { ModelPickerSidebar } from "./ModelPickerSidebar";
+import { ModelPickerTabs } from "./ModelPickerTabs";
+import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { buildModelPickerSearchText, scoreModelPickerSearch } from "./modelPickerSearch";
 import { Combobox, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList } from "../ui/combobox";
 import {
@@ -170,6 +171,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
 
   const handleSelectInstance = useCallback(
     (instanceId: ProviderInstanceId | "favorites") => {
+      // A search spans every instance; opening a tab returns to its list.
+      setSearchQuery("");
       setRequestedInstanceId(instanceId);
       window.requestAnimationFrame(() => {
         focusSearchInput();
@@ -177,6 +180,13 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     },
     [focusSearchInput],
   );
+
+  const openSettings = useSettingsDialogStore((store) => store.openSettings);
+  const onRequestClose = props.onRequestClose;
+  const openProviderSettings = useCallback(() => {
+    onRequestClose?.();
+    openSettings("providers");
+  }, [onRequestClose, openSettings]);
 
   usePaneEffect(() => {
     focusSearchInput();
@@ -344,7 +354,9 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     [setupInstanceEntries, matchesLockedProvider, props.lockedProvider],
   );
   const showLockedInstanceSidebar = isLocked && lockedInstanceEntries.length > 1;
-  const showSidebar = !isSearching && (!isLocked || showLockedInstanceSidebar);
+  // The tabs stay while searching so the search field does not jump; a search
+  // spans every instance, so no tab reads as open meanwhile.
+  const showTabs = !isLocked || showLockedInstanceSidebar;
   const sidebarInstanceEntries = showLockedInstanceSidebar
     ? lockedInstanceEntries
     : setupInstanceEntries;
@@ -812,8 +824,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     <div
       className={cn(
         "relative flex min-h-0 overflow-hidden",
-        hasTuning ? "h-72 w-full" : "h-screen max-h-96 w-screen max-w-100",
-        isLocked && !showLockedInstanceSidebar ? "flex-col" : "flex-row",
+        hasTuning ? "h-72 w-full" : "h-screen max-h-96 w-screen max-w-80",
+        "flex-col",
       )}
     >
       {/* Locked provider header (only shown in locked mode) */}
@@ -824,13 +836,13 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
         </div>
       )}
 
-      {/* Sidebar (only in unlocked mode) */}
-      {showSidebar && (
-        <ModelPickerSidebar
-          selectedInstanceId={selectedInstanceId}
+      {showTabs && (
+        <ModelPickerTabs
+          selectedInstanceId={isSearching ? null : selectedInstanceId}
           onSelectInstance={handleSelectInstance}
           instanceEntries={sidebarInstanceEntries}
           showFavorites={!isLocked}
+          onAddProviders={isLocked ? undefined : openProviderSettings}
         />
       )}
 
@@ -863,21 +875,19 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
           handleModelSelect(target.slug, target.instanceId, target.favorite, pointerPick);
         }}
       >
-        <div
-          className={cn(
-            "flex min-h-0 flex-1 flex-col overflow-hidden",
-            isLocked && !showLockedInstanceSidebar ? "min-w-0" : showSidebar && "border-l",
-          )}
-        >
-          {/* Search bar */}
-          <div className="border-b px-3 py-2">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          {/* Search: no field chrome, just the magnifier and a hairline under it.
+              The magnifier lines up with the favorites star above it. */}
+          {/* A label, so a click anywhere on the row lands in the field. */}
+          <label className="flex h-9 shrink-0 cursor-text items-center gap-2 border-b ps-[13px] pe-3">
+            <SearchIcon className="size-3.5 shrink-0 text-muted-foreground/55" aria-hidden />
             <ComboboxInput
               ref={searchInputRef}
-              className="[&_input]:font-sans rounded-md"
+              className="[&_input]:font-sans h-full border-0 bg-transparent shadow-none ring-0 before:hidden has-focus-visible:ring-0 dark:bg-transparent *:data-[slot=combobox-input]:h-full *:data-[slot=combobox-input]:px-0 *:data-[slot=combobox-input]:text-[13px] *:data-[slot=combobox-input]:placeholder:text-muted-foreground/55"
               inputClassName="border-0 shadow-none ring-0 focus-visible:ring-0"
               placeholder="Search models..."
+              aria-label="Search models"
               showTrigger={false}
-              startAddon={<SearchIcon className="size-4 shrink-0 text-muted-foreground/50" />}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               onKeyDown={(e) => {
@@ -914,14 +924,11 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
               onTouchStart={(e) => e.stopPropagation()}
               size="sm"
             />
-          </div>
+          </label>
 
           {/* Model list */}
-          <div
-            ref={listRegionRef}
-            className="relative min-h-0 flex-1 before:pointer-events-none before:absolute before:inset-0 before:bg-muted/40"
-          >
-            <ComboboxList className="model-picker-list size-full divide-y px-2 py-1">
+          <div ref={listRegionRef} className="relative min-h-0 flex-1">
+            <ComboboxList className="model-picker-list flex size-full flex-col gap-px p-1">
               {filteredModelKeys.map((modelKey, index) => {
                 if (modelKey === legacyFold?.key) {
                   return (
@@ -932,25 +939,28 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                       value={modelKey}
                       aria-expanded={legacyFold.expanded}
                       data-model-picker-legacy-section=""
-                      contentClassName="flex w-full items-center gap-2"
-                      className="w-full cursor-pointer rounded px-3 py-2 transition-colors data-highlighted:bg-muted"
+                      contentClassName="flex w-full min-w-0 items-center gap-2"
+                      // The model rows' geometry; the chevron takes the star's column.
+                      className="group min-h-8 w-full cursor-pointer rounded-md py-1 ps-2 pe-1 text-muted-foreground transition-colors data-highlighted:bg-muted data-highlighted:text-foreground"
                     >
-                      <div className="min-w-0 flex-1 text-left text-xs leading-snug">
-                        <div>Legacy models</div>
-                        <div className="mt-0.5 text-muted-foreground/70">
-                          {legacyFold.legacyCount === 1
-                            ? "1 model"
-                            : `${legacyFold.legacyCount} models`}
-                        </div>
-                      </div>
-                      {/* The trigger's chevron, turned: an icon new to this chunk would
-                          split the shared lucide chunks and cost the chat route a file. */}
-                      <ChevronDownIcon
-                        className={cn(
-                          "size-4 shrink-0 text-muted-foreground transition-transform",
-                          !legacyFold.expanded && "-rotate-90",
-                        )}
-                      />
+                      <span className="min-w-0 flex-1 truncate text-left text-[13px] leading-snug">
+                        Legacy models
+                      </span>
+                      <span className="shrink-0 text-xs tabular-nums text-muted-foreground/70">
+                        {legacyFold.legacyCount === 1
+                          ? "1 model"
+                          : `${legacyFold.legacyCount} models`}
+                      </span>
+                      <span className="inline-flex size-5 shrink-0 items-center justify-center">
+                        {/* The trigger's chevron, turned: an icon new to this chunk would
+                            split the shared lucide chunks and cost the chat route a file. */}
+                        <ChevronDownIcon
+                          className={cn(
+                            "size-3.5 transition-transform",
+                            !legacyFold.expanded && "-rotate-90",
+                          )}
+                        />
+                      </span>
                     </ComboboxItem>
                   );
                 }
@@ -971,7 +981,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                     value={modelKey}
                     effortLabel={row.effortLabel}
                     isFavorite={row.isFavorite}
-                    showProvider={!isLocked || showLockedInstanceSidebar}
+                    showProvider={isSearching || selectedInstanceId === "favorites"}
                     preferShortName={!isLocked}
                     useTriggerLabel={isLocked && !showLockedInstanceSidebar}
                     jumpLabel={modelJumpLabelByKey.get(modelKey) ?? null}
@@ -1007,7 +1017,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       {hasTuning ? (
         <div
           data-morph-surface=""
-          className="selection-glass-surface relative flex w-screen max-w-100 flex-col max-h-(--available-height) overflow-hidden rounded-lg border text-popover-foreground"
+          className="selection-glass-surface relative flex w-screen max-w-80 flex-col max-h-(--available-height) overflow-hidden rounded-lg border text-popover-foreground"
         >
           {pickerBody}
           <div className="border-t" data-slot="model-picker-tuning">

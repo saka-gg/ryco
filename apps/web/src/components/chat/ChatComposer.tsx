@@ -454,7 +454,7 @@ export interface ChatComposerProps {
   executionTargets: ReadonlyArray<ComposerExecutionTarget>;
   executionTargetLocked: boolean;
   onExecutionTargetChange: (environmentId: EnvironmentId) => void;
-  /** The device is shown above the composer (new-thread surface), not in the footer. */
+  /** The device is shown outside the composer (pill above, or label under), not in the footer. */
   executionTargetHoisted?: boolean;
 
   /**

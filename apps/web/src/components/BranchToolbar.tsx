@@ -17,6 +17,7 @@ import { BranchToolbarBranchSelector } from "./BranchToolbarBranchSelector";
 import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSelector";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
 import { ProjectSwitcher } from "./ProjectSwitcher";
+import { ExecutionTargetLabel } from "./chat/ExecutionTargetSelect";
 import { RollingText } from "./chat/RollingText";
 import { TERMINAL_RUNNING_TONE, TerminalRunningDot } from "./ThreadTerminalStatus";
 import { formatTerminalRunningLine } from "./ThreadTerminalStatus.logic";
@@ -63,7 +64,21 @@ interface BranchToolbarProps {
    * worktree's branch once it exists.
    */
   worktreeLaunch?: { readonly branch: string | null };
+  /**
+   * The machine a started thread is bound to. It sits here, under the
+   * composer, as a plain label instead of a locked selector in the footer.
+   */
+  device?: ThreadDevice | undefined;
 }
+
+export interface ThreadDevice {
+  readonly environmentId: EnvironmentId;
+  readonly label: string;
+}
+
+/** The row under the composer; a thread outside git renders just its device. */
+export const COMPOSER_TOOLBAR_ROW_CLASS_NAME =
+  "mx-auto flex w-full max-w-(--chat-composer-max-width) items-center gap-1 px-2.5 pb-3 pt-1 sm:px-3";
 
 // The static twins of the toolbar's ghost `xs` controls, so a locked label
 // takes exactly the place of the control it replaces.
@@ -89,6 +104,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   terminalCount,
   runningTerminalCount,
   worktreeLaunch,
+  device,
 }: BranchToolbarProps) {
   const threadRef = useMemo(
     () => scopeThreadRef(environmentId, threadId),
@@ -116,8 +132,9 @@ export const BranchToolbar = memo(function BranchToolbar({
   const hasServerThread = serverThread !== undefined;
   const hasActiveThread = hasServerThread || draftThread !== null;
 
+  // A bound thread's device label already names the environment.
   const showEnvironmentPicker = Boolean(
-    availableEnvironments && availableEnvironments.length > 1 && onEnvironmentChange,
+    !device && availableEnvironments && availableEnvironments.length > 1 && onEnvironmentChange,
   );
   // Only an unlocked draft can still choose where it runs: a server thread, or
   // one with messages or a live session, is already bound to its checkout.
@@ -144,7 +161,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   if (!hasActiveThread || !activeProject) return null;
 
   return (
-    <div className="mx-auto flex w-full max-w-(--chat-composer-max-width) items-center gap-1 px-2.5 pb-3 pt-1 sm:px-3">
+    <div className={COMPOSER_TOOLBAR_ROW_CLASS_NAME}>
       {contextControlsHoisted ? null : (
         <div className="flex min-w-0 shrink items-center gap-0.5">
           {/* A started thread already names its project in the header breadcrumb;
@@ -157,6 +174,10 @@ export const BranchToolbar = memo(function BranchToolbar({
               draftId={draftId}
               label={activeProject.name}
             />
+          ) : null}
+
+          {device ? (
+            <ExecutionTargetLabel environmentId={device.environmentId} label={device.label} />
           ) : null}
 
           {showEnvironmentPicker && availableEnvironments && onEnvironmentChange && (
