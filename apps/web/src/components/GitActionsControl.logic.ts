@@ -451,6 +451,11 @@ export function resolveQuickAction(
 /** One step the crown's Ship button runs, in order. */
 export type GitShipStep = "pull" | "commit" | "push" | "pr";
 
+/** Ship only brings commits in (a pull, nothing to commit, push or open): the rocket lands. */
+export function isPullOnlyShip(steps: ReadonlyArray<GitShipStep>): boolean {
+  return steps.length > 0 && steps.every((step) => step === "pull");
+}
+
 /**
  * What one click of the crown's Ship button does: every step still needed to
  * get the branch out, run back to back. It is the quick action plus a pull in

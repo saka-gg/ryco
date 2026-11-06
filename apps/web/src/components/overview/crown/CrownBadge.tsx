@@ -13,7 +13,7 @@ function badgeRank(text: string): number {
  */
 export function CrownBadge(props: {
   readonly value: string | number;
-  readonly variant?: "default" | "info" | "note";
+  readonly variant?: "default" | "info" | "note" | "landing";
 }) {
   const text = props.value === 0 || props.value === "" ? "" : String(props.value);
   const [shown, setShown] = useState(text);

@@ -31,4 +31,7 @@ export const ISLAND_DARK_TOKEN_STYLE = {
   "--crown-merged": "#c084fc",
   "--crown-note": "#eccb6b",
   "--crown-note-ink": "#1a1406",
+  /* Ship when it only pulls: the landing rocket. */
+  "--crown-landing": "#2dd4bf",
+  "--crown-landing-ink": "#042f2e",
 } as CSSProperties;
