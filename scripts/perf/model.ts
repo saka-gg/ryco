@@ -454,8 +454,11 @@ const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
  * on its first open; 753 KiB and 151 files once the quote citation parser
  * left boot (the route shares it with the shell, so a thread open loads it as
  * before). 752 KiB on 2026-10-31 once the alert dialog left boot (likewise).
+ * 766 KiB on 2026-11-06: Computer Use in every chat and MCP approval requests
+ * in Codex chats (link questions with an Open link button) brought the route
+ * to 765.1 KiB.
  */
-const CHAT_ROUTE_GZIP_BUDGET = 765 * KIB;
+const CHAT_ROUTE_GZIP_BUDGET = 766 * KIB;
 /**
  * 156 since removing AI Focus on 2026-10-29: the same 44 KiB of shared lucide
  * icons regrouped by importing entry set into six `icons` chunks instead of
