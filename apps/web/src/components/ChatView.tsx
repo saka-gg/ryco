@@ -12,7 +12,12 @@ import {
 } from "@ryco/client-runtime/state/user-input";
 import type { PendingUserInput } from "@ryco/client-runtime/state/session";
 import { ResumeFallbackHandoffIcon } from "./chat/ContextHandoffMarkerRow";
-import { readPrimaryEnvironmentTarget } from "../environments/primary/target";
+import { useLocalComputerEnvironmentId } from "../computerUse/localComputer";
+import {
+  computerUseSendBlocker,
+  isExternalOpenCodeInstance,
+} from "../computerUse/computerUseSend.logic";
+import { noteComputerSetupMissingOnce } from "../computerUse/computerSetupNotice";
 import { parseComputerInvocation } from "@ryco/shared/computerInvocation";
 import { BackgroundBrowserPreview } from "../browser/BackgroundBrowserPreview";
 import type { ProviderOptionSelection } from "@ryco/contracts";
@@ -1766,9 +1771,7 @@ export default function ChatView(props: ChatViewProps) {
   // drive the environment picker in BranchToolbar.
   const allProjects = useStore(useShallow(selectProjectsAcrossEnvironments));
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const localComputerEnvironmentId =
-    desktopWorkspace.localEnvironmentId ??
-    (readPrimaryEnvironmentTarget()?.source === "desktop-managed" ? primaryEnvironmentId : null);
+  const localComputerEnvironmentId = useLocalComputerEnvironmentId();
   const savedEnvironmentRegistry = useSavedEnvironmentRegistryStore((s) => s.byId);
   const savedEnvironmentRuntimeById = useSavedEnvironmentRuntimeStore((s) => s.byId);
   const activeSavedEnvironmentRecord =
@@ -5958,46 +5961,48 @@ export default function ChatView(props: ChatViewProps) {
     if (localComputer) {
       try {
         const computerState = await computer.getState();
-        if (computerInvocation || computerState.preferences.defaultEnabled) {
-          if (
-            !["codex", "claudeAgent", "cursor", "copilot", "opencode"].includes(ctxSelectedProvider)
-          )
-            throw new Error(
-              "This provider does not support Computer Use. Select Codex, Claude, Cursor, Copilot or managed OpenCode.",
-            );
+        // On by default: every chat from this Mac may use the computer without the command,
+        // and such a send never waits on Computer Use; `/computer-use` reports what blocks it.
+        const byDefault = !computerInvocation && computerState.preferences.defaultEnabled;
+        let blocked = false;
+        if (computerInvocation || byDefault) {
           if (!api?.server)
             throw new Error(
               "Local desktop settings are unavailable. Reconnect before sending this task.",
             );
           const settings = await api.server.getSettings();
-          if (!settings.agentControl.enabled)
-            throw new Error(
-              "Enable Private Agent Control in Settings → Agent Control before sending this task.",
-            );
-          const instance = settings.providerInstances[ctxSelectedModelSelection.instanceId];
-          if (
-            ctxSelectedProvider === "opencode" &&
-            instance &&
-            instance.config !== null &&
-            typeof instance.config === "object" &&
-            "serverUrl" in instance.config &&
-            instance.config.serverUrl
-          )
-            throw new Error(
-              "Computer Use requires managed OpenCode. An external OpenCode server cannot receive local desktop access.",
-            );
+          const blocker = computerUseSendBlocker({
+            provider: ctxSelectedProvider,
+            agentControlEnabled: settings.agentControl.enabled,
+            externalOpenCode: isExternalOpenCodeInstance(
+              ctxSelectedProvider,
+              settings.providerInstances[ctxSelectedModelSelection.instanceId]?.config ?? null,
+            ),
+          });
+          if (blocker && computerInvocation) throw new Error(blocker);
+          blocked = blocker !== null;
+          if (!blocked && byDefault && computerState.setup.missing.length > 0) {
+            blocked = true;
+            noteComputerSetupMissingOnce();
+          }
         }
-        const intent = await computer.prepare(activeThread.id, computerInvocation !== null);
-        // A permission check may yield to an edited draft or changed selection.
-        if (promptRef.current !== promptForSend) return;
-        if (intent) settingsSnapshot.computerUse = intent;
+        if (!blocked) {
+          const intent = await computer.prepare(activeThread.id, computerInvocation !== null);
+          // A permission check may yield to an edited draft or changed selection.
+          if (promptRef.current !== promptForSend) return;
+          if (intent) settingsSnapshot.computerUse = intent;
+        }
       } catch (error) {
-        toastManager.add({
-          type: "warning",
-          title: "Computer Use setup",
-          description: error instanceof Error ? error.message : "Complete setup, then send again.",
-        });
-        return;
+        // A default send goes without Computer Use; only `/computer-use` waits on it.
+        if (computerInvocation) {
+          toastManager.add({
+            type: "warning",
+            title: "Computer Use setup",
+            description:
+              error instanceof Error ? error.message : "Complete setup, then send again.",
+          });
+          return;
+        }
       }
     }
     if (!canSendModelSelection(composerSnapshot.selectedModelSelection)) {

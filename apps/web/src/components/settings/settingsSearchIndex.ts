@@ -81,6 +81,16 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     section: "device",
     storage: "desktop",
     part: "computer-use",
+    title: "Computer Use",
+    description: "Turn on, Mac permissions and apps agents may always use.",
+    keywords:
+      "turn on accessibility screen recording input monitoring escape always allow apps approval",
+    desktopCapability: "computerUse",
+  },
+  {
+    section: "device",
+    storage: "desktop",
+    part: "computer-use",
     title: "Browser Use",
     description: "Pair browsers and manage agent access to local tabs.",
     keywords: "chrome brave edge browser extension",

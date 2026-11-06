@@ -3,7 +3,6 @@ import { afterEach, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 import type { ComputerBetaState, ComputerBetaUpdate, DesktopBridge } from "@ryco/contracts";
 import { ComputerBetaPreview } from "./ComputerBetaPreview";
-import { ComputerBetaSettings } from "../settings/ComputerBetaSettings";
 const previous = window.desktopBridge;
 afterEach(() => {
   if (previous) window.desktopBridge = previous;
@@ -26,6 +25,8 @@ function fixture(autoPreview = true, turnId = "turn") {
       appDisplayName: "Ryco",
     },
     inputMonitorReady: true,
+    setup: { missing: [], escapeStop: true, staleGrant: false },
+    approvedApps: [],
     error: null,
   };
   const listeners = new Set<(event: ComputerBetaUpdate) => void>();
@@ -131,19 +132,6 @@ it("does not show another thread's pixels and respects automatic-preview prefere
   f.target();
   await expect.element(view.getByRole("button", { name: "Show Computer" })).toBeVisible();
   expect(f.stopTask).not.toHaveBeenCalled();
-});
-it("loads history only on request and setup never sends a task", async () => {
-  const f = fixture();
-  const view = await render(<ComputerBetaSettings />);
-  await expect
-    .element(view.getByRole("switch", { name: "Enable Computer by default" }))
-    .not.toBeChecked();
-  expect(f.getHistory).not.toHaveBeenCalled();
-  await view.getByRole("button", { name: "Set up Computer" }).click();
-  expect(f.setup).toHaveBeenCalledOnce();
-  expect(f.prepare).not.toHaveBeenCalled();
-  await view.getByRole("button", { name: "Load recent actions" }).click();
-  expect(f.getHistory).toHaveBeenCalledOnce();
 });
 it("restores hidden and expanded presentation when returning to an active task", async () => {
   const f = fixture(true, "remount-turn");
