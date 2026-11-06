@@ -41,6 +41,18 @@ import {
   cuaActionDiagnosticMessage,
   parseCuaActionDiagnostics,
 } from "@ryco/shared/cuaActionDiagnostics";
+import {
+  ComputerLaneScheduler,
+  computerExclusiveLane,
+  computerKeyedLane,
+  type ComputerLaneClaim,
+} from "@ryco/shared/computerLanes";
+import {
+  cuaBrowserLaneResource,
+  cuaCursorLaneResource,
+  cuaHostLaneClaims,
+  cuaLanesAreExclusive,
+} from "./cuaDriverLanes.ts";
 
 interface TaskCursor {
   task: CuaComputerTask;
@@ -68,6 +80,14 @@ interface ControlledTarget {
   browserTabId?: string;
 }
 
+/** One mutating driver call between dispatch and its settled reply. */
+interface InputCall {
+  readonly task: CuaComputerTask | undefined;
+  readonly browser: boolean;
+  /** Held the whole desktop (foreground or desktop-changing input). */
+  readonly exclusive: boolean;
+}
+
 interface Generation {
   nativeInputEpoch: number;
   browserInputControl: boolean;
@@ -78,9 +98,16 @@ interface Generation {
   didExit: boolean;
   retired: boolean;
   cancellationReady: boolean;
+  /**
+   * Native input may still be live: set on every mutating dispatch, cleared
+   * only when no input call is outstanding and no cleanup is pending.
+   */
   inputInFlight: boolean;
-  /** Exact task owning input that has not yet acknowledged its release. */
-  inputTask: CuaComputerTask | undefined;
+  /**
+   * Mutating calls dispatched and not yet settled. Exact semantic writes on
+   * different windows overlap, so this is a set rather than one owner.
+   */
+  inputCalls: Map<AbortController, InputCall>;
   browserInputInFlight: boolean;
   /** Stays set once any action tool was dispatched to this generation, so a
    * driver that wedges before ever receiving input stays distinguishable
@@ -143,6 +170,10 @@ interface Generation {
   taskCursors: Map<string, TaskCursor>;
   /** Single-use cleanup receipts, scoped to the task and this live driver. */
   clipboardRestores: Map<string, string>;
+  /** The native input drain in progress, shared by concurrent callers. */
+  interrupting?: Promise<void> | undefined;
+  /** The control connection being opened, shared by concurrent browser calls. */
+  controlSessionOpening?: Promise<void> | undefined;
   retirement?: Promise<void>;
 }
 
@@ -446,7 +477,21 @@ export class CuaDriverHost {
    * advertised capabilities to the driver actually running.
    */
   private observedNativeRevision: number | undefined;
-  private operations: Promise<void> = Promise.resolve();
+  /**
+   * Driver work runs in lanes (`cuaDriverLanes.ts`): reads overlap with
+   * everything but whole-desktop work, exact semantic writes overlap per
+   * window, other input takes the driver's process-wide gate alone. Waits are
+   * unbounded here: callers bound them with their own connection timeout.
+   */
+  private readonly lanes = new ComputerLaneScheduler({ limit: 1024 });
+  /** Every operation admitted to the lanes and not yet settled. */
+  private readonly activeOperations = new Set<Promise<unknown>>();
+  /**
+   * The latest native input drain. Mutations wait for it right before they
+   * dispatch, so a task-scoped Stop does not have to cancel other tasks'
+   * queued input: it runs after the drain, on the reopened input epoch.
+   */
+  private nativeInputBarrier: Promise<void> = Promise.resolve();
   private stopping: Promise<void> = Promise.resolve();
   /** Serializes live cursor-style pushes so two rapid changes cannot race. */
   private cursorStyleUpdates: Promise<void> = Promise.resolve();
@@ -589,6 +634,49 @@ export class CuaDriverHost {
 
   get isInputMonitorRequested(): boolean {
     return this.inputMonitorRequested;
+  }
+
+  /** Driver calls waiting for a lane (diagnostics and tests). */
+  get waitingOperations(): number {
+    return this.lanes.waitingCount;
+  }
+
+  /**
+   * Run driver work in its lanes, tracked so stop and interrupt can wait for
+   * everything admitted before them. A wait that is aborted or refused never
+   * reaches the driver and answers with `cancelled()`.
+   */
+  private inLanes<A>(
+    claims: readonly ComputerLaneClaim[],
+    signal: AbortSignal | undefined,
+    work: () => Promise<A>,
+    cancelled: () => A,
+  ): Promise<A> {
+    const operation = (async (): Promise<A> => {
+      let hold;
+      try {
+        hold = await this.lanes.acquire(claims, { signal });
+      } catch {
+        return cancelled();
+      }
+      try {
+        return await work();
+      } finally {
+        hold.release();
+      }
+    })();
+    const tracked = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.activeOperations.add(tracked);
+    void tracked.finally(() => this.activeOperations.delete(tracked));
+    return operation;
+  }
+
+  /** Settles once every operation admitted so far has settled. */
+  private admittedOperations(): Promise<void> {
+    return Promise.all(this.activeOperations).then(() => undefined);
   }
 
   async listen(): Promise<string> {
@@ -787,48 +875,48 @@ export class CuaDriverHost {
         if (target.threadId === task.threadId) this.browserTargets.delete(key);
       }
       const endTask = task;
-      const previousEnd = this.operations;
-      const endOperation = (async () => {
-        await previousEnd;
-        await this.stopping;
-        const generation = this.generation;
-        const label = browserSessionLabel(endTask.threadId);
-        if (
-          this.closed ||
-          !generation ||
-          generation.retired ||
-          generation.didExit ||
-          !generation.controlSocket ||
-          generation.controlSocket.destroyed ||
-          // Nothing was ever dispatched under this label — no session exists
-          // to end and none needs reviving later.
-          (!generation.liveBrowserSessions.has(label) &&
-            !generation.endedBrowserSessions.has(label))
-        )
-          return;
-        try {
-          await cuaRequest<CuaReply>(
-            generation.socket,
-            {
-              method: "call",
-              name: "end_session",
-              args: { session: label },
-              session_id: generation.controlSession,
-            },
-            { timeoutMs: 5_000 },
-          );
-          // Even a failed end marks the label ended for revival: the
-          // transport EOF will finish whatever the explicit call could not,
-          // and reviving an already-gone session is a no-op either way.
-          generation.liveBrowserSessions.delete(label);
-          generation.endedBrowserSessions.add(label);
-        } catch {
-          generation.liveBrowserSessions.delete(label);
-          generation.endedBrowserSessions.add(label);
-        }
-      })();
-      this.operations = endOperation.then(
-        () => undefined,
+      const stoppingBeforeEnd = this.stopping;
+      const endOperation = this.inLanes(
+        computerKeyedLane(cuaBrowserLaneResource(endTask.threadId)),
+        undefined,
+        async () => {
+          await stoppingBeforeEnd;
+          const generation = this.generation;
+          const label = browserSessionLabel(endTask.threadId);
+          if (
+            this.closed ||
+            !generation ||
+            generation.retired ||
+            generation.didExit ||
+            !generation.controlSocket ||
+            generation.controlSocket.destroyed ||
+            // Nothing was ever dispatched under this label — no session exists
+            // to end and none needs reviving later.
+            (!generation.liveBrowserSessions.has(label) &&
+              !generation.endedBrowserSessions.has(label))
+          )
+            return;
+          try {
+            await cuaRequest<CuaReply>(
+              generation.socket,
+              {
+                method: "call",
+                name: "end_session",
+                args: { session: label },
+                session_id: generation.controlSession,
+              },
+              { timeoutMs: 5_000 },
+            );
+            // Even a failed end marks the label ended for revival: the
+            // transport EOF will finish whatever the explicit call could not,
+            // and reviving an already-gone session is a no-op either way.
+            generation.liveBrowserSessions.delete(label);
+            generation.endedBrowserSessions.add(label);
+          } catch {
+            generation.liveBrowserSessions.delete(label);
+            generation.endedBrowserSessions.add(label);
+          }
+        },
         () => undefined,
       );
       await endOperation;
@@ -982,225 +1070,249 @@ export class CuaDriverHost {
       }
     }
     if (this.desktopPauses.size > 0) return this.desktopPauseReply();
-    // Observations and input share one native session. A pane capture must not
-    // race input or turn a harmless concurrent read into a driver restart.
-    const previous = this.operations;
+    // Observations and input share one native session, but not one queue:
+    // each call waits only for work its lanes conflict with (reads for
+    // whole-desktop work, input for the driver's input gate or its window).
+    const foregroundDelivery = request.deliveryMode === "foreground";
+    const browserMutation =
+      CUA_BROWSER_MUTATION_TOOLS.has(name) &&
+      (process.platform !== "linux" || !linuxBrowserCallIsReadOnly(name, request.args));
+    const claims = cuaHostLaneClaims({
+      name,
+      args: request.args,
+      threadId: task?.threadId,
+      foreground: foregroundDelivery,
+      browserMutation,
+    });
     const stopping = this.stopping;
     const epoch = this.epoch;
-    const operation = (async (): Promise<CuaReply> => {
-      await previous;
-      await stopping;
-      if (this.closed || this.suspended || connection.destroyed || epoch !== this.epoch)
-        return {
-          ok: false,
-          error: "Cancelled before dispatch.",
-          effect: "not-dispatched",
-        } as const;
-      if (this.desktopPauses.size > 0) return this.desktopPauseReply();
-      if (process.platform === "linux" && CUA_BROWSER_TOOLS.has(name)) {
-        // Capability comes only from the embedded child handshake. A cold
-        // browser call must not trust model arguments or a configured path as
-        // evidence that this Linux artifact implements input cancellation.
-        const generation = await this.ensureSpawned();
-        if (
-          this.closed ||
-          this.suspended ||
-          connection.destroyed ||
-          epoch !== this.epoch ||
-          generation.retired ||
-          generation.didExit
-        )
-          return { ok: false, error: "Cancelled before dispatch.", effect: "not-dispatched" };
-        const refusal = linuxCuaAdmissionRefusal(
-          name,
-          request.args,
-          request.deliveryMode,
-          generation.browserInputControl,
-        );
-        if (refusal) return refusal;
-      }
-      if (!this.inputMonitorAvailable(name, request.args))
-        return this.inputMonitorUnavailableReply();
-      if (
-        (CUA_ACTION_TOOLS.has(name) || CUA_BROWSER_MUTATION_TOOLS.has(name)) &&
-        this.nativeInputCleanupPending
-      ) {
-        await this.interruptNativeInput(this.nativeInputCleanupPending);
-        if (epoch !== this.epoch || connection.destroyed)
+    const laneWait = new AbortController();
+    const abandonLaneWait = () => laneWait.abort();
+    connection.once("close", abandonLaneWait);
+    const operation = this.inLanes(
+      claims,
+      laneWait.signal,
+      async (): Promise<CuaReply> => {
+        connection.removeListener("close", abandonLaneWait);
+        await stopping;
+        if (this.closed || this.suspended || connection.destroyed || epoch !== this.epoch)
           return {
             ok: false,
-            error: "Cancelled while waiting for native input cleanup.",
-            effect: "not-dispatched",
-          };
-      }
-      // A physical Escape's cooldown: mutating dispatch is refused with the
-      // desktop-pause dialect until the deadline lapses — checked at dispatch
-      // time, so a call queued past the window runs and one admitted inside
-      // it is refused. Reads are never gated: the generation stays live and
-      // observation flows through the whole cooldown.
-      if (
-        this.inputInterruptCooldownUntil > this.now() &&
-        (CUA_ACTION_TOOLS.has(name) || CUA_BROWSER_MUTATION_TOOLS.has(name))
-      )
-        return this.inputInterruptedReply();
-      if (taskStopped()) {
-        return this.taskStoppedReply();
-      }
-      if (name === "check_permissions" && this.options.checkPermissions) {
-        // AppSnap's short-lived helper avoids the embedded daemon's TCC cache.
-        // This remains an authenticated, read-only host operation: prompt args
-        // from tools never reach the permission request path.
-        const check = this.options.checkPermissions;
-        const cancelled = () =>
-          this.closed ||
-          this.suspended ||
-          connection.destroyed ||
-          epoch !== this.epoch ||
-          taskStopped();
-        let permissions = await this.checkPermissions(connection, check, false, task);
-        if (!permissions || cancelled())
-          return {
-            ok: false,
-            error: "Cancelled before permission check completed.",
+            error: "Cancelled before dispatch.",
             effect: "not-dispatched",
           } as const;
-        if (this.permissions && permissionsChanged(this.permissions, permissions)) {
-          // A single helper probe can read TCC mid-transition and report a
-          // phantom change the next probe reverts. Arming on it deadlocks the
-          // desktop: every action runs check_permissions first, so a flapping
-          // helper re-arms the gate after each observation clears it. Only a
-          // confirmed second read counts as a real change.
-          const confirmed = await this.checkPermissions(connection, check, true, task);
-          if (!confirmed || cancelled())
+        if (this.desktopPauses.size > 0) return this.desktopPauseReply();
+        if (process.platform === "linux" && CUA_BROWSER_TOOLS.has(name)) {
+          // Capability comes only from the embedded child handshake. A cold
+          // browser call must not trust model arguments or a configured path as
+          // evidence that this Linux artifact implements input cancellation.
+          const generation = await this.ensureSpawned();
+          if (
+            this.closed ||
+            this.suspended ||
+            connection.destroyed ||
+            epoch !== this.epoch ||
+            generation.retired ||
+            generation.didExit
+          )
+            return { ok: false, error: "Cancelled before dispatch.", effect: "not-dispatched" };
+          const refusal = linuxCuaAdmissionRefusal(
+            name,
+            request.args,
+            request.deliveryMode,
+            generation.browserInputControl,
+          );
+          if (refusal) return refusal;
+        }
+        if (!this.inputMonitorAvailable(name, request.args))
+          return this.inputMonitorUnavailableReply();
+        if (
+          (CUA_ACTION_TOOLS.has(name) || CUA_BROWSER_MUTATION_TOOLS.has(name)) &&
+          this.nativeInputCleanupPending
+        ) {
+          await this.interruptNativeInput(this.nativeInputCleanupPending);
+          if (epoch !== this.epoch || connection.destroyed)
+            return {
+              ok: false,
+              error: "Cancelled while waiting for native input cleanup.",
+              effect: "not-dispatched",
+            };
+        }
+        // A physical Escape's cooldown: mutating dispatch is refused with the
+        // desktop-pause dialect until the deadline lapses — checked at dispatch
+        // time, so a call queued past the window runs and one admitted inside
+        // it is refused. Reads are never gated: the generation stays live and
+        // observation flows through the whole cooldown.
+        if (
+          this.inputInterruptCooldownUntil > this.now() &&
+          (CUA_ACTION_TOOLS.has(name) || CUA_BROWSER_MUTATION_TOOLS.has(name))
+        )
+          return this.inputInterruptedReply();
+        if (taskStopped()) {
+          return this.taskStoppedReply();
+        }
+        if (name === "check_permissions" && this.options.checkPermissions) {
+          // AppSnap's short-lived helper avoids the embedded daemon's TCC cache.
+          // This remains an authenticated, read-only host operation: prompt args
+          // from tools never reach the permission request path.
+          const check = this.options.checkPermissions;
+          const cancelled = () =>
+            this.closed ||
+            this.suspended ||
+            connection.destroyed ||
+            epoch !== this.epoch ||
+            taskStopped();
+          let permissions = await this.checkPermissions(connection, check, false, task);
+          if (!permissions || cancelled())
             return {
               ok: false,
               error: "Cancelled before permission check completed.",
               effect: "not-dispatched",
             } as const;
-          permissions = confirmed;
-        }
-        if (this.permissions && permissionsChanged(this.permissions, permissions)) {
-          this.epoch += 1;
-          this.desktopEpoch += 1;
-          this.desktopObservationRequired = true;
-          this.browserObservationRequired = true;
-          log(
-            `permission state changed accessibility ${this.permissions.accessibility} -> ${permissions.accessibility}, ` +
-              `screen_recording ${this.permissions.screenRecording} -> ${permissions.screenRecording}; requiring fresh desktop observation`,
-          );
-          // Already inside the operation queue: stop() would wait for itself.
-          // Retire directly, preserving its native cleanup acknowledgement.
-          if (this.generation) await this.retire(this.generation);
-        }
-        this.permissions = permissions;
-        if (
-          permissions.accessibility &&
-          permissions.screenRecording &&
-          permissions.inputMonitoring !== false
-        )
-          this.warm();
-        const monitor = this.inputMonitorRequested ? this.options.inputMonitorState?.() : undefined;
-        return {
-          ok: true,
-          result: {
-            structuredContent: {
-              accessibility: permissions.accessibility,
-              screen_recording: permissions.screenRecording,
-              ...(permissions.inputMonitoring !== undefined
-                ? { input_monitoring: permissions.inputMonitoring }
-                : {}),
-              ...(monitor
-                ? {
-                    input_monitor_ready: monitor.ready,
-                    ...(monitor.error ? { input_monitor_error: monitor.error } : {}),
-                  }
-                : {}),
-              source: {
-                attribution: "host",
-                host_bundle_id: this.options.bundleId,
-                probe: "appsnap-permission-helper",
+          if (this.permissions && permissionsChanged(this.permissions, permissions)) {
+            // A single helper probe can read TCC mid-transition and report a
+            // phantom change the next probe reverts. Arming on it deadlocks the
+            // desktop: every action runs check_permissions first, so a flapping
+            // helper re-arms the gate after each observation clears it. Only a
+            // confirmed second read counts as a real change.
+            const confirmed = await this.checkPermissions(connection, check, true, task);
+            if (!confirmed || cancelled())
+              return {
+                ok: false,
+                error: "Cancelled before permission check completed.",
+                effect: "not-dispatched",
+              } as const;
+            permissions = confirmed;
+          }
+          if (this.permissions && permissionsChanged(this.permissions, permissions)) {
+            this.epoch += 1;
+            this.desktopEpoch += 1;
+            this.desktopObservationRequired = true;
+            this.browserObservationRequired = true;
+            log(
+              `permission state changed accessibility ${this.permissions.accessibility} -> ${permissions.accessibility}, ` +
+                `screen_recording ${this.permissions.screenRecording} -> ${permissions.screenRecording}; requiring fresh desktop observation`,
+            );
+            // Already admitted to a lane: stop() would wait for itself.
+            // Retire directly, preserving its native cleanup acknowledgement.
+            // Calls of other tasks running in other lanes fail with the
+            // generation (input as dispatched-unknown): a grant change ends
+            // every session, as before.
+            if (this.generation) await this.retire(this.generation);
+          }
+          this.permissions = permissions;
+          if (
+            permissions.accessibility &&
+            permissions.screenRecording &&
+            permissions.inputMonitoring !== false
+          )
+            this.warm();
+          const monitor = this.inputMonitorRequested
+            ? this.options.inputMonitorState?.()
+            : undefined;
+          return {
+            ok: true,
+            result: {
+              structuredContent: {
+                accessibility: permissions.accessibility,
+                screen_recording: permissions.screenRecording,
+                ...(permissions.inputMonitoring !== undefined
+                  ? { input_monitoring: permissions.inputMonitoring }
+                  : {}),
+                ...(monitor
+                  ? {
+                      input_monitor_ready: monitor.ready,
+                      ...(monitor.error ? { input_monitor_error: monitor.error } : {}),
+                    }
+                  : {}),
+                source: {
+                  attribution: "host",
+                  host_bundle_id: this.options.bundleId,
+                  probe: "appsnap-permission-helper",
+                },
               },
             },
-          },
-        };
-      }
-      const browserRecoverySetup = this.isIsolatedBrowserSetup(name, request.args);
-      const browserRecoveryObserved = this.hasBrowserRecoveryObservation(request.args, task);
-      // Launching names an app, not anything on screen, so a stale view cannot
-      // misdirect it. Gating it left a task that starts by opening an app
-      // stuck after every lock or sleep: the app had no window to observe.
-      if (
-        (this.desktopObservationRequired &&
-          ((CUA_ACTION_TOOLS.has(name) && name !== "launch_app") ||
-            name === "check_input_ready")) ||
-        (this.browserObservationRequired &&
-          CUA_BROWSER_MUTATION_TOOLS.has(name) &&
-          !browserRecoverySetup &&
-          !browserRecoveryObserved) ||
-        ((this.takeoverTargets.has(task ? cuaComputerTaskKey(task) : "anonymous") ||
-          (!task && this.takeoverTargets.size > 0)) &&
-          (CUA_ACTION_TOOLS.has(name) ||
-            (CUA_BROWSER_MUTATION_TOOLS.has(name) &&
-              !browserRecoverySetup &&
-              !browserRecoveryObserved) ||
-            name === "check_input_ready"))
-      ) {
-        log(`refused ${name}: fresh desktop observation still required`);
-        return this.desktopPauseReply();
-      }
-      if (
-        task &&
-        (request.modelObservation === true ||
-          CUA_ACTION_TOOLS.has(name) ||
-          CUA_BROWSER_TOOLS.has(name))
-      )
-        this.frameTapTask = task;
-      const reply = await this.call(
-        name,
-        request.args,
-        connection,
-        request.modelObservation === true,
-        task,
-        request.deliveryMode === "foreground",
-      );
-      // Frame tap updates carry no frames through this queue: they only point
-      // the dedicated helper channel at the task's window target.
-      if (
-        task &&
-        !this.endedFrameTasks.has(cuaComputerTaskKey(task)) &&
-        !taskStopped() &&
-        epoch === this.epoch &&
-        !connection.destroyed &&
-        reply.ok &&
-        !reply.result?.isError &&
-        reply.result?.structuredContent?.effect !== "refused" &&
-        reply.result?.structuredContent?.status !== "refused" &&
-        (request.modelObservation === true ||
-          CUA_ACTION_TOOLS.has(name) ||
-          CUA_BROWSER_TOOLS.has(name))
-      ) {
-        const target = this.frameTapTarget(task, request.args);
-        if (target) {
-          try {
-            this.options.frameTap?.update(target);
-          } catch (error) {
-            log(`computer frame tap update failed: ${String(error)}`);
-          }
-        } else if (name === "launch_app") {
-          // launch_app carries no window (bundle/name only), so the tap would
-          // otherwise sit out the whole cold start until the first
-          // window-attributed call. Resolve the launched app's main window
-          // off the reply path: the agent's launch already returned.
-          void this.primeTapAfterLaunch(task, request.args, connection, epoch).catch(
-            (error: unknown) => log(`computer frame tap launch prime failed: ${String(error)}`),
-          );
+          };
         }
-      }
-      return reply;
-    })();
-    this.operations = operation.then(
-      () => undefined,
-      () => undefined,
+        const browserRecoverySetup = this.isIsolatedBrowserSetup(name, request.args);
+        const browserRecoveryObserved = this.hasBrowserRecoveryObservation(request.args, task);
+        // Launching names an app, not anything on screen, so a stale view cannot
+        // misdirect it. Gating it left a task that starts by opening an app
+        // stuck after every lock or sleep: the app had no window to observe.
+        if (
+          (this.desktopObservationRequired &&
+            ((CUA_ACTION_TOOLS.has(name) && name !== "launch_app") ||
+              name === "check_input_ready")) ||
+          (this.browserObservationRequired &&
+            CUA_BROWSER_MUTATION_TOOLS.has(name) &&
+            !browserRecoverySetup &&
+            !browserRecoveryObserved) ||
+          ((this.takeoverTargets.has(task ? cuaComputerTaskKey(task) : "anonymous") ||
+            (!task && this.takeoverTargets.size > 0)) &&
+            (CUA_ACTION_TOOLS.has(name) ||
+              (CUA_BROWSER_MUTATION_TOOLS.has(name) &&
+                !browserRecoverySetup &&
+                !browserRecoveryObserved) ||
+              name === "check_input_ready"))
+        ) {
+          log(`refused ${name}: fresh desktop observation still required`);
+          return this.desktopPauseReply();
+        }
+        if (
+          task &&
+          (request.modelObservation === true ||
+            CUA_ACTION_TOOLS.has(name) ||
+            CUA_BROWSER_TOOLS.has(name))
+        )
+          this.frameTapTask = task;
+        const reply = await this.call(
+          name,
+          request.args,
+          connection,
+          request.modelObservation === true,
+          task,
+          foregroundDelivery,
+          cuaLanesAreExclusive(claims),
+        );
+        // Frame tap updates carry no frames through this queue: they only point
+        // the dedicated helper channel at the task's window target.
+        if (
+          task &&
+          !this.endedFrameTasks.has(cuaComputerTaskKey(task)) &&
+          !taskStopped() &&
+          epoch === this.epoch &&
+          !connection.destroyed &&
+          reply.ok &&
+          !reply.result?.isError &&
+          reply.result?.structuredContent?.effect !== "refused" &&
+          reply.result?.structuredContent?.status !== "refused" &&
+          (request.modelObservation === true ||
+            CUA_ACTION_TOOLS.has(name) ||
+            CUA_BROWSER_TOOLS.has(name))
+        ) {
+          const target = this.frameTapTarget(task, request.args);
+          if (target) {
+            try {
+              this.options.frameTap?.update(target);
+            } catch (error) {
+              log(`computer frame tap update failed: ${String(error)}`);
+            }
+          } else if (name === "launch_app") {
+            // launch_app carries no window (bundle/name only), so the tap would
+            // otherwise sit out the whole cold start until the first
+            // window-attributed call. Resolve the launched app's main window
+            // off the reply path: the agent's launch already returned.
+            void this.primeTapAfterLaunch(task, request.args, connection, epoch).catch(
+              (error: unknown) => log(`computer frame tap launch prime failed: ${String(error)}`),
+            );
+          }
+        }
+        return reply;
+      },
+      (): CuaReply => {
+        connection.removeListener("close", abandonLaneWait);
+        return { ok: false, error: "Cancelled before dispatch.", effect: "not-dispatched" };
+      },
     );
     return operation;
   }
@@ -1316,9 +1428,11 @@ export class CuaDriverHost {
     modelObservation: boolean,
     task?: CuaComputerTask,
     foregroundDelivery = false,
+    exclusiveLane = false,
   ): Promise<CuaReply> {
     let generation: Generation | undefined;
     let dispatched = false;
+    let ownsForegroundInput = false;
     let clipboardPreservationDispatched = false;
     let cursorEnabled: boolean | undefined;
     const admittedEpoch = this.epoch;
@@ -1351,12 +1465,15 @@ export class CuaDriverHost {
       const alreadyInterrupted = callCancel.signal.aborted;
       callCancel.abort();
       if (mutation && dispatched && !alreadyInterrupted) {
-        // Closing a socket does not stop a native input loop. Fence queued
-        // work immediately and keep subsequent admission behind the real
-        // native drain, just as an explicit Stop does.
-        void this.interruptInput().catch((error: unknown) =>
-          log(`disconnected input cleanup failed: ${String(error)}`),
-        );
+        // Closing a socket does not stop a native input loop. Keep subsequent
+        // admission behind the real native drain, just as an explicit Stop
+        // does: whole-desktop input fences everything, background input only
+        // its own task (other tasks' queued work runs after the drain).
+        void (
+          exclusiveLane || ownsForegroundInput || !task
+            ? this.interruptInput()
+            : this.interruptTaskInput(task)
+        ).catch((error: unknown) => log(`disconnected input cleanup failed: ${String(error)}`));
       }
     };
     connection.once("close", abort);
@@ -1434,6 +1551,12 @@ export class CuaDriverHost {
           // session can still own retained accessibility refs across turns.
           cursorEnabled = await this.setTaskCursorEnabled(generation, agentLabel, true);
         }
+        // Input waits for the latest native drain (a task Stop or Escape) so
+        // it dispatches on the reopened input epoch instead of being refused.
+        // A global interrupt also waits for every admitted call, this one
+        // included, and aborts it: the abort must end this wait, or the
+        // interrupt and this call would wait for each other forever.
+        if (mutation) await this.untilInputBarrierOrCancelled(callCancel.signal);
         // Session setup can await I/O. Stop must win even if it arrived after
         // the initial dispatch guard and before the native request is sent.
         if (admittedEpoch !== this.epoch || connection.destroyed || callCancel.signal.aborted) {
@@ -1458,19 +1581,28 @@ export class CuaDriverHost {
               this.controlledTargets.delete(this.controlledTargets.keys().next().value!);
           }
         }
-        if (mutation) {
-          this.activeInputTaskKey = task ? cuaComputerTaskKey(task) : "anonymous";
-          this.activeForegroundInput =
-            foregroundDelivery ||
+        // Foreground input runs alone (whole-desktop lane), so one owner is
+        // exact; background input never collides with physical input.
+        if (
+          mutation &&
+          (foregroundDelivery ||
             (args as Record<string, unknown>).delivery_mode === "foreground" ||
-            name === "bring_to_front";
+            name === "bring_to_front")
+        ) {
+          this.activeInputTaskKey = task ? cuaComputerTaskKey(task) : "anonymous";
+          this.activeForegroundInput = true;
+          ownsForegroundInput = true;
         }
         dispatched = true;
         if (label) generation.liveBrowserSessions.add(label);
         if (mutation) {
           generation.inputInFlight = true;
-          generation.browserInputInFlight = isBrowser;
-          generation.inputTask = task;
+          generation.inputCalls.set(callCancel, {
+            task,
+            browser: isBrowser,
+            exclusive: exclusiveLane || ownsForegroundInput,
+          });
+          generation.browserInputInFlight ||= isBrowser;
         }
         generation.inputEverDispatched ||= generation.inputInFlight;
         const clipboardArgs = args as Record<string, unknown>;
@@ -1516,10 +1648,9 @@ export class CuaDriverHost {
           generation.inputInFlight = true;
           generation.browserInputInFlight ||= isBrowser;
           this.nativeInputCleanupPending = generation;
-        } else if (mutation && this.nativeInputCleanupPending !== generation) {
-          generation.inputInFlight = false;
-          generation.browserInputInFlight = false;
-          generation.inputTask = undefined;
+        } else if (mutation) {
+          generation.inputCalls.delete(callCancel);
+          if (this.nativeInputCleanupPending !== generation) this.settleInputState(generation);
         }
         if (isDriverSessionDeath(attemptReply)) {
           if (isBrowser && label) {
@@ -1558,14 +1689,20 @@ export class CuaDriverHost {
             "focus_restore_failed")
       ) {
         // Input may already have landed. Preserve that uncertain result, but
-        // fence queued work and automatic observations after losing user focus.
-        // Only a fresh model observation may reopen admission; never replay.
-        this.desktopObservationRequired = true;
-        this.epoch += 1;
-        this.desktopEpoch += 1;
+        // fence this task's input and stale observations after losing user
+        // focus. Only a fresh model observation of its target may reopen it;
+        // never replay. Background input of other tasks addresses exact
+        // pids/windows that the driver re-verifies before every post, so it
+        // keeps running. Whole-desktop input, or a task without a known
+        // target, still fences everyone as before.
         const key = task ? cuaComputerTaskKey(task) : "anonymous";
         const target = this.controlledTargets.get(key);
+        this.desktopEpoch += 1;
         if (target) this.takeoverTargets.set(key, { ...target });
+        if (!target || exclusiveLane || ownsForegroundInput) {
+          this.desktopObservationRequired = true;
+          this.epoch += 1;
+        }
       }
       if (
         admittedDesktopEpoch !== this.desktopEpoch &&
@@ -1682,7 +1819,7 @@ export class CuaDriverHost {
         effect: dispatched && mutation ? "dispatched-unknown" : "not-dispatched",
       };
     } finally {
-      if (mutation) {
+      if (ownsForegroundInput) {
         this.activeForegroundInput = false;
         this.activeInputTaskKey = undefined;
       }
@@ -1695,77 +1832,80 @@ export class CuaDriverHost {
   private restoreClipboard(token: string, task: CuaComputerTask | undefined): Promise<CuaReply> {
     const generation = this.generation;
     const owner = task ? cuaComputerTaskKey(task) : "anonymous";
-    const previous = this.operations;
     const stopping = this.stopping;
-    const operation = (async (): Promise<CuaReply> => {
-      await previous;
-      await stopping;
-      if (
-        !generation ||
-        this.generation !== generation ||
-        generation.retired ||
-        generation.didExit ||
-        generation.clipboardRestores.get(token) !== owner
-      )
-        return {
-          ok: false,
-          error: "No saved clipboard belongs to this task in the live driver.",
-          effect: "not-dispatched",
-        };
-      if (this.nativeInputCleanupPending === generation) {
-        try {
-          await this.interruptNativeInput(generation);
-        } catch (error) {
-          return { ok: false, error: String(error), effect: "not-dispatched" };
-        }
-      }
-      if (
-        this.generation !== generation ||
-        generation.retired ||
-        generation.didExit ||
-        this.nativeInputCleanupPending === generation
-      )
-        return {
-          ok: false,
-          error: "Clipboard cleanup requires the original live driver with native input drained.",
-          effect: "not-dispatched",
-        };
-      try {
-        // Cleanup survives Stop but cannot rearm input, revive a task session,
-        // or spawn a replacement. Native code also checks the saved token and
-        // clipboard change counter before restoring any bytes.
-        const reply = await cuaRequest<CuaReply>(
-          generation.socket,
-          {
-            method: "call",
-            name: "clipboard_write",
-            args: { restore_token: token, session: generation.session },
-          },
-          { timeoutMs: 5_000, mutation: true },
-        );
-        // A transport loss or native error can leave the snapshot available.
-        // Consume the host receipt only after native confirms a terminal
-        // restore decision, including skipping a newer human clipboard copy.
+    // The clipboard is whole-desktop state: restore runs alone.
+    return this.inLanes(
+      computerExclusiveLane(),
+      undefined,
+      async (): Promise<CuaReply> => {
+        await stopping;
         if (
-          reply.ok &&
-          !reply.result?.isError &&
-          typeof reply.result?.structuredContent?.clipboard_restored === "boolean"
+          !generation ||
+          this.generation !== generation ||
+          generation.retired ||
+          generation.didExit ||
+          generation.clipboardRestores.get(token) !== owner
         )
-          generation.clipboardRestores.delete(token);
-        return reply;
-      } catch (error) {
-        return {
-          ok: false,
-          error: String(error),
-          effect: error instanceof CuaTransportError ? error.effect : "dispatched-unknown",
-        };
-      }
-    })();
-    this.operations = operation.then(
-      () => undefined,
-      () => undefined,
+          return {
+            ok: false,
+            error: "No saved clipboard belongs to this task in the live driver.",
+            effect: "not-dispatched",
+          };
+        if (this.nativeInputCleanupPending === generation) {
+          try {
+            await this.interruptNativeInput(generation);
+          } catch (error) {
+            return { ok: false, error: String(error), effect: "not-dispatched" };
+          }
+        }
+        if (
+          this.generation !== generation ||
+          generation.retired ||
+          generation.didExit ||
+          this.nativeInputCleanupPending === generation
+        )
+          return {
+            ok: false,
+            error: "Clipboard cleanup requires the original live driver with native input drained.",
+            effect: "not-dispatched",
+          };
+        try {
+          // Cleanup survives Stop but cannot rearm input, revive a task session,
+          // or spawn a replacement. Native code also checks the saved token and
+          // clipboard change counter before restoring any bytes.
+          const reply = await cuaRequest<CuaReply>(
+            generation.socket,
+            {
+              method: "call",
+              name: "clipboard_write",
+              args: { restore_token: token, session: generation.session },
+            },
+            { timeoutMs: 5_000, mutation: true },
+          );
+          // A transport loss or native error can leave the snapshot available.
+          // Consume the host receipt only after native confirms a terminal
+          // restore decision, including skipping a newer human clipboard copy.
+          if (
+            reply.ok &&
+            !reply.result?.isError &&
+            typeof reply.result?.structuredContent?.clipboard_restored === "boolean"
+          )
+            generation.clipboardRestores.delete(token);
+          return reply;
+        } catch (error) {
+          return {
+            ok: false,
+            error: String(error),
+            effect: error instanceof CuaTransportError ? error.effect : "dispatched-unknown",
+          };
+        }
+      },
+      (): CuaReply => ({
+        ok: false,
+        error: "Computer host is closed.",
+        effect: "not-dispatched",
+      }),
     );
-    return operation;
   }
 
   /** A single bounded read after mint/first action, never periodic polling.
@@ -1857,21 +1997,24 @@ export class CuaDriverHost {
     task: CuaComputerTask,
     allTurns = task.turnId === undefined,
   ): Promise<void> {
-    const previous = this.operations;
-    const operation = (async () => {
-      await previous;
-      const generation = this.generation;
-      if (!generation || generation.retired || generation.didExit) return;
-      for (const [label, cursor] of generation.taskCursors) {
-        if (
-          cursor.task.threadId === task.threadId &&
-          (allTurns || cursor.task.turnId === task.turnId)
-        )
-          await this.endCursorSession(generation, label);
-      }
-    })();
-    this.operations = operation.catch(() => undefined);
-    await operation;
+    // Waits only for this thread's own calls (they hold its cursor lane
+    // shared), never for another task's long-running native action.
+    await this.inLanes(
+      computerKeyedLane(cuaCursorLaneResource(task.threadId)),
+      undefined,
+      async () => {
+        const generation = this.generation;
+        if (!generation || generation.retired || generation.didExit) return;
+        for (const [label, cursor] of generation.taskCursors) {
+          if (
+            cursor.task.threadId === task.threadId &&
+            (allTurns || cursor.task.turnId === task.turnId)
+          )
+            await this.endCursorSession(generation, label);
+        }
+      },
+      () => undefined,
+    );
   }
 
   private async endTask(
@@ -1953,8 +2096,20 @@ export class CuaDriverHost {
    * re-arms it, and the just-reaped labels sit in `endedBrowserSessions`
    * waiting for revival.
    */
-  private async ensureControlSession(generation: Generation): Promise<void> {
-    if (generation.controlSocket && !generation.controlSocket.destroyed) return;
+  private ensureControlSession(generation: Generation): Promise<void> {
+    if (generation.controlSocket && !generation.controlSocket.destroyed) return Promise.resolve();
+    // Browser calls of different threads run in parallel lanes: they share
+    // one opening instead of each beginning (and orphaning) its own socket.
+    if (generation.controlSessionOpening) return generation.controlSessionOpening;
+    const opening = this.openControlSession(generation).finally(() => {
+      if (generation.controlSessionOpening === opening)
+        generation.controlSessionOpening = undefined;
+    });
+    generation.controlSessionOpening = opening;
+    return opening;
+  }
+
+  private async openControlSession(generation: Generation): Promise<void> {
     // The dead connection's EOF already reaped its owned sessions on the
     // driver side; mirror that here so callers revive instead of dispatching
     // into a capability namespace the driver no longer holds.
@@ -2120,7 +2275,7 @@ export class CuaDriverHost {
         retired: false,
         cancellationReady: false,
         inputInFlight: false,
-        inputTask: undefined,
+        inputCalls: new Map(),
         browserInputInFlight: false,
         inputEverDispatched: false,
         controlSession: `synara-transport-${randomUUID()}`,
@@ -2535,7 +2690,7 @@ export class CuaDriverHost {
     // clear-void into a visible stale-read refusal.
     this.desktopEpoch += 1;
     for (const cancel of this.pendingPermissionChecks.keys()) cancel();
-    const admitted = this.operations;
+    const admitted = this.admittedOperations();
     const frameTapStopped = this.options.frameTap?.stop();
     // Any shield still up belongs to an excursion this stop interrupts: drop
     // it (and its helper) in parallel with the driver retire, same discipline.
@@ -2570,7 +2725,7 @@ export class CuaDriverHost {
     this.epoch += 1;
     this.desktopEpoch += 1;
     for (const cancel of this.pendingPermissionChecks.keys()) cancel();
-    const admitted = this.operations;
+    const admitted = this.admittedOperations();
     const frameTapStopped = this.options.frameTap?.stop();
     const shieldStopped = this.options.shield?.stop();
     // Same discipline as stop(): the interrupt caller sees failures through
@@ -2593,10 +2748,80 @@ export class CuaDriverHost {
       () => undefined,
       () => undefined,
     );
+    this.nativeInputBarrier = this.stopping;
     return interrupting;
   }
 
-  private async interruptNativeInput(generation: Generation): Promise<void> {
+  /**
+   * Stop one task's background input without fencing the other tasks.
+   *
+   * The driver's input gate is process-wide, so the native drain still
+   * interrupts whatever other input is in flight right now (concurrent
+   * semantic writes on other windows): those tasks must observe their own
+   * target again. Queued work of other tasks is not cancelled; its input
+   * waits for the drain and dispatches on the reopened epoch. Previews,
+   * shields and permission checks of other tasks keep running. Whole-desktop
+   * input never comes here: it uses {@link interruptInput}.
+   */
+  private interruptTaskInput(task: CuaComputerTask): Promise<void> {
+    const generation = this.generation;
+    if (!generation || generation.retired || generation.didExit) return Promise.resolve();
+    const stoppedKey = cuaComputerTaskKey(task);
+    for (const call of generation.inputCalls.values()) {
+      const key = call.task ? cuaComputerTaskKey(call.task) : "anonymous";
+      if (key === stoppedKey) continue;
+      const target = this.controlledTargets.get(key);
+      if (target) {
+        this.takeoverTargets.set(key, { ...target });
+      } else {
+        this.desktopObservationRequired = true;
+        this.browserObservationRequired = true;
+      }
+    }
+    const draining = this.nativeInputBarrier.then(() => this.interruptNativeInput(generation));
+    this.nativeInputBarrier = draining.then(
+      () => undefined,
+      (error: unknown) => log(`task input interrupt failed: ${String(error)}`),
+    );
+    return draining;
+  }
+
+  /** The latest native drain, or the call's cancellation, whichever comes first. */
+  private untilInputBarrierOrCancelled(signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const done = () => {
+        signal.removeEventListener("abort", done);
+        resolve();
+      };
+      signal.addEventListener("abort", done, { once: true });
+      void this.nativeInputBarrier.then(done, done);
+    });
+  }
+
+  /** Clears the input-in-flight marks once no mutating call is outstanding. */
+  private settleInputState(generation: Generation): void {
+    if (generation.inputCalls.size > 0) {
+      generation.browserInputInFlight = [...generation.inputCalls.values()].some(
+        (call) => call.browser,
+      );
+      return;
+    }
+    generation.inputInFlight = false;
+    generation.browserInputInFlight = false;
+  }
+
+  /** One native drain per generation at a time; concurrent callers share it. */
+  private interruptNativeInput(generation: Generation): Promise<void> {
+    if (generation.interrupting) return generation.interrupting;
+    const interrupting = this.drainNativeInput(generation).finally(() => {
+      if (generation.interrupting === interrupting) generation.interrupting = undefined;
+    });
+    generation.interrupting = interrupting;
+    return interrupting;
+  }
+
+  private async drainNativeInput(generation: Generation): Promise<void> {
     if (generation.retired || generation.didExit) return;
     // The upstream Linux driver has no macOS native input gate. Preserve its
     // existing transport stop; this branch makes no native cleanup claim.
@@ -2637,9 +2862,8 @@ export class CuaDriverHost {
         "Cua Driver has not confirmed input interruption and cleanup. Input remains paused; a later attempt will recheck the native drain.",
       );
     }
-    generation.inputInFlight = false;
-    generation.browserInputInFlight = false;
-    generation.inputTask = undefined;
+    generation.inputCalls.clear();
+    this.settleInputState(generation);
     if (this.nativeInputCleanupPending === generation) this.nativeInputCleanupPending = undefined;
   }
 
@@ -2774,7 +2998,7 @@ export class CuaDriverHost {
     await this.stopTaskInput(task);
   }
 
-  private async stopTaskInput(task: CuaComputerTask): Promise<"task" | "generation"> {
+  private async stopTaskInput(task: CuaComputerTask): Promise<"task" | "input" | "generation"> {
     const key = cuaComputerTaskKey(task);
     const matches = (candidate: CuaComputerTask) =>
       candidate.threadId === task.threadId &&
@@ -2798,19 +3022,31 @@ export class CuaDriverHost {
     for (const [cancel, owner] of this.activeTaskCalls) {
       if (stoppedKeys.has(owner)) cancel.abort();
     }
-    // Native input is serialized but shares one cancellation gate. Once
-    // this task dispatched input, stopping it must drain that generation
-    // and fence queued siblings too. Idle/queued tasks and observations
+    // Native input shares one process-wide cancellation gate. Once this task
+    // dispatched input, stopping it must drain that gate. Whole-desktop input
+    // (foreground, clipboard, gestures) also fences every queued sibling, as
+    // before; background input fences only its own task, and other tasks'
+    // queued input runs after the drain. Idle/queued tasks and observations
     // need only their own revocation; they must not interrupt another task.
     // A thread-wide Stop matches its admitted/known turns. It must not
     // interrupt another thread just because the caller omitted a turn id.
-    const scope =
-      this.generation?.inputInFlight &&
-      this.generation.inputTask !== undefined &&
-      matches(this.generation.inputTask)
-        ? "generation"
-        : "task";
-    const interrupted = scope === "generation" ? this.interruptInput() : Promise.resolve();
+    const ownInput = this.generation?.inputInFlight
+      ? [...this.generation.inputCalls.values()].filter(
+          (call) => call.task !== undefined && matches(call.task),
+        )
+      : [];
+    const scope: "task" | "input" | "generation" =
+      ownInput.length === 0
+        ? "task"
+        : ownInput.some((call) => call.exclusive)
+          ? "generation"
+          : "input";
+    const interrupted =
+      scope === "generation"
+        ? this.interruptInput()
+        : scope === "input"
+          ? this.interruptTaskInput(ownInput[0]!.task!)
+          : Promise.resolve();
     await Promise.all([interrupted, this.endTask(task, task.turnId === undefined, false)]);
     log(
       JSON.stringify({

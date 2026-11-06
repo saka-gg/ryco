@@ -322,6 +322,18 @@ export async function foregroundCollision(
   await waitForEvent(f, "interrupt-ack");
 }
 
+/** Wait until `count` driver calls queue for a lane behind running work. */
+export async function waitForQueuedOperations(
+  f: Awaited<ReturnType<typeof fixture>>,
+  count: number,
+): Promise<void> {
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    if (f.host.waitingOperations >= count) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for ${count} queued driver calls`);
+}
+
 /** Wait for a real driver event (its `count`-th); a missed barrier must fail the test. */
 export async function waitForEvent(
   f: Awaited<ReturnType<typeof fixture>>,
