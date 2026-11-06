@@ -604,6 +604,7 @@
     },
     "./computerAuditFile": "./src/computerAuditFile.ts",
     "./computerAuditHistory": "./src/computerAuditHistory.ts",
+    "./computerAppApprovals": "./src/computerAppApprovals.ts",
     "./regularFile": "./src/regularFile.ts",
     "./pairingQr": {
       "types": "./src/pairingQr.ts",

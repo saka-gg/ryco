@@ -22,7 +22,25 @@ import {
   ComputerApprovalPendingError,
   ComputerApprovalQueueFullError,
   ComputerApprovalUnavailableError,
+  computerApprovalGate,
+  type ComputerAlwaysAllowedApps,
+  type ComputerAppAnswer,
 } from "../../computer/ComputerApprovalGate.ts";
+import {
+  computerApprovalAppsFor,
+  type ComputerApprovalTargets,
+} from "../../computer/computerApprovalTargets.ts";
+import {
+  addComputerAppApproval,
+  computerAppApprovalsPath,
+  readComputerAppApprovals,
+} from "@ryco/shared/computerAppApprovals";
+
+/**
+ * One app-dialog bridge request. The desktop answers within its own 30 s wait (then reports
+ * `pending`), so this only bounds a wedged desktop.
+ */
+const COMPUTER_APP_CONSENT_REQUEST_TIMEOUT_MS = 60_000;
 import type { AgentControlMcpTools, AgentControlMcpToolResult } from "./tools.ts";
 import type { AgentControlPolicyShape } from "../Services/AgentControlPolicy.ts";
 import type { AgentControlSessionRegistryShape } from "../Services/AgentControlSessionRegistry.ts";
@@ -77,6 +95,8 @@ export function withComputerBetaTools(
   const end = (threadId: string, turnId: string) => {
     if (active.get(threadId)?.turnId !== turnId) return;
     active.delete(threadId);
+    // The turn's "Don't allow" answers and open app dialogs end with it.
+    computerApprovalGate.cancelThread(threadId, turnId);
     void manager.releaseDesktopControl(threadId, turnId).catch(() => undefined);
     void post({ operation: "end", threadId, turnId }).catch(() => undefined);
   };
@@ -152,27 +172,64 @@ export function withComputerBetaTools(
     eventQueue.push({ threadId, turnId: task.turnId, event });
     void publishEvents();
   });
+  const approvalsPath = computerAppApprovalsPath(deps.stateDir);
+  const alwaysAllowed: ComputerAlwaysAllowedApps = {
+    has: async (key) =>
+      (await readComputerAppApprovals(approvalsPath)).some((app) => app.key === key),
+    add: async (app) => {
+      await addComputerAppApproval(approvalsPath, app.name);
+    },
+  };
   const authorizeAction = async (
     name: string,
     _args: Record<string, unknown>,
     context: ToolContext,
     signal: AbortSignal,
+    targets?: ComputerApprovalTargets,
   ) => {
     const task = active.get(context.callerThreadId);
     if (!task || task.turnId !== context.callerTurnId) return false;
-    const clipboard = name.includes("clipboard");
-    if (!clipboard && task.plan.runtimeMode === "full-access") return true;
-    const response = await post(
-      {
-        operation: "consent",
-        threadId: context.callerThreadId,
-        turnId: context.callerTurnId,
-        clipboard,
-      },
-      signal,
+    const threadId = context.callerThreadId;
+    const turnId = task.turnId;
+    // Clipboard access keeps its own dialog for every call.
+    if (name.includes("clipboard")) {
+      const response = await post(
+        { operation: "consent", threadId, turnId, clipboard: true },
+        signal,
+      );
+      await Effect.runPromise(context.assertCallerTurnActive());
+      return readComputerConsentReply(response);
+    }
+    if (task.plan.runtimeMode === "full-access") return true;
+    // Per-app approval, decided here; the desktop only shows the dialog.
+    const apps = computerApprovalAppsFor(
+      await manager.approvalAppNames(targets ?? { windowIds: [], pids: [], apps: [] }),
+      { browser: name.startsWith("computer_browser_") },
     );
+    for (const app of apps) {
+      const allowed = await computerApprovalGate.requestApp({
+        threadId,
+        turnId,
+        app,
+        signal,
+        alwaysAllowed,
+        present: async () =>
+          readComputerAppConsentReply(
+            await post(
+              {
+                operation: "consent",
+                threadId,
+                turnId,
+                app: { key: app.key, name: app.name, canAlwaysAllow: app.canAlwaysAllow },
+              },
+              AbortSignal.timeout(COMPUTER_APP_CONSENT_REQUEST_TIMEOUT_MS),
+            ),
+          ),
+      });
+      if (!allowed) return false;
+    }
     await Effect.runPromise(context.assertCallerTurnActive());
-    return readComputerConsentReply(response);
+    return true;
   };
   const resolveForegroundAuthorization = async (context: ToolContext) => ({
     userRequestedVisibleUse: active.get(context.callerThreadId)?.plan.foregroundAuthorized === true,
@@ -334,6 +391,20 @@ export function withComputerBetaTools(
       await manager.dispose();
     },
   };
+}
+
+/**
+ * The server's reading of the desktop's reply to an app dialog: the user's answer, or a
+ * refusal that is not an answer (still open, expired, not shown), thrown as for any consent.
+ */
+export function readComputerAppConsentReply(response: unknown): ComputerAppAnswer {
+  const decoded = Schema.decodeUnknownOption(ComputerConsentReply)(response);
+  if (Option.isSome(decoded) && decoded.value.outcome === "accept" && decoded.value.approved) {
+    const scope = decoded.value.scope;
+    if (scope === "always" || scope === "chat") return scope;
+    throw new ComputerApprovalUnavailableError();
+  }
+  return readComputerConsentReply(response) ? "chat" : "deny";
 }
 
 /**

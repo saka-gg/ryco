@@ -25,9 +25,32 @@ export const ComputerConsentReply = Schema.Struct({
    * expiry, or the last of the few dialogs in a row that could not be shown.
    */
   retryable: Schema.Boolean,
+  /** How long an accepted app approval lasts; only app approvals carry it. */
+  scope: Schema.optionalKey(Schema.Literals(["always", "chat"])),
 });
 export type ComputerConsentReply = typeof ComputerConsentReply.Type;
+/** An app the user chose "Always allow" for; stored by the server, listed in settings. */
+export interface ComputerApprovedApp {
+  /** Normalized app name, the approval key. */
+  key: string;
+  name: string;
+  allowedAt: string;
+}
+/** A required macOS permission for Computer Use; Input Monitoring is optional. */
+export type ComputerSetupPermission = "accessibility" | "screenRecording";
+export interface ComputerBetaSetup {
+  /** Required permissions that are not granted yet. */
+  missing: readonly ComputerSetupPermission[];
+  /** Input Monitoring is granted, so physical Escape stops an agent. */
+  escapeStop: boolean;
+  /**
+   * Required grants were all seen on an earlier build and one is missing now: macOS may still
+   * list the old build, which needs removing and adding again.
+   */
+  staleGrant: boolean;
+}
 export interface ComputerBetaPreferences {
+  /** Computer Use is available in every chat from this Mac without `/computer-use`. */
   defaultEnabled: boolean;
   autoPreview: boolean;
   previewSize: "compact" | "large";
@@ -39,6 +62,8 @@ export interface ComputerBetaState {
   permissions: DesktopAppSnapState;
   preferences: ComputerBetaPreferences;
   inputMonitorReady: boolean;
+  setup: ComputerBetaSetup;
+  approvedApps: readonly ComputerApprovedApp[];
   error: string | null;
 }
 export type ComputerBetaUpdate =

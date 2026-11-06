@@ -101,6 +101,10 @@ import {
   type ComputerForegroundAuthorization,
 } from "../computerVisibleUse.ts";
 import { PROVIDERS_WITHOUT_APPROVAL_GATE } from "./approvalGate.ts";
+import {
+  collectComputerApprovalTargets,
+  type ComputerApprovalTargets,
+} from "../computerApprovalTargets.ts";
 export { computerToolInstructions } from "./computerGuidance.ts";
 import {
   COMPUTER_HELP_INDEX,
@@ -342,6 +346,8 @@ export interface AgentGatewayComputerToolsOptions {
     args: Record<string, unknown>,
     context: ToolContext,
     signal: AbortSignal,
+    /** What the call targets, for per-app approval. */
+    targets?: ComputerApprovalTargets,
   ) => Promise<boolean>;
   /**
    * Called when a tool call failed because the OS is withholding a privacy
@@ -1908,6 +1914,12 @@ export function makeAgentGatewayComputerTools(
                   : args,
                 context,
                 abortSignal,
+                collectComputerApprovalTargets(
+                  args,
+                  (ref) =>
+                    elementRefTables.get(context.callerThreadId)?.entries.get(ref)?.windowId ??
+                    undefined,
+                ),
               );
             } catch (error) {
               // A dialog that is still open, expired or could not be shown refuses

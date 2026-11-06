@@ -1006,6 +1006,17 @@ export interface DesktopBridge {
     getState(): Promise<ComputerBetaState>;
     checkPermissions(): Promise<ComputerBetaState>;
     setup(): Promise<ComputerBetaState>;
+    /**
+     * Turns Computer Use on for every chat and guides the missing required permissions. Agent
+     * Control is a server setting, so the caller turns it on.
+     */
+    turnOn(): Promise<ComputerBetaState>;
+    /** Guides one permission pane; Input Monitoring is the optional Escape stop. */
+    setupPermission(
+      permission: "accessibility" | "screenRecording" | "inputMonitoring",
+    ): Promise<ComputerBetaState>;
+    /** Removes an app from the always-allowed list. */
+    revokeApp(key: string): Promise<ComputerBetaState>;
     setPreferences(preferences: ComputerBetaPreferences): Promise<ComputerBetaState>;
     prepare(threadId: string, explicit: boolean): Promise<ComputerTurnIntent | null>;
     setPreview(threadId: string, visible: boolean): Promise<void>;

@@ -35,6 +35,11 @@ import { COMPUTER_BROWSER_DRIVER_NAMES } from "@ryco/contracts";
 import { ComputerBackendError, type ComputerBrowserCallResult } from "../ComputerBackend.ts";
 import { CuaActionError } from "../CuaComputerBackend.ts";
 import { isComputerApprovalRefusal } from "../ComputerApprovalGate.ts";
+import { ComputerDenylistError } from "../computerDenylist.ts";
+import {
+  collectComputerApprovalTargets,
+  type ComputerApprovalTargets,
+} from "../computerApprovalTargets.ts";
 import type { ComputerManager } from "../ComputerManager.ts";
 import { withModelDesktopObservation } from "../modelDesktopObservation.ts";
 import {
@@ -82,6 +87,8 @@ export interface AgentGatewayComputerBrowserToolsOptions {
     args: Record<string, unknown>,
     context: ToolContext,
     signal: AbortSignal,
+    /** What the call targets, for per-app approval. */
+    targets?: ComputerApprovalTargets,
   ) => Promise<boolean>;
   /** Visible browser launches need the same user-authored request as native raises. */
   readonly resolveForegroundAuthorization?: (
@@ -605,12 +612,21 @@ export function makeAgentGatewayComputerBrowserTools(
               audit({ effect: "refused", code: "approval_unavailable" });
               return approvalUnavailableResult(name);
             }
-            const approved = await options.authorizeAction(
-              name,
-              effectiveArgs,
-              context,
-              abortSignal,
-            );
+            let approved: boolean;
+            try {
+              approved = await options.authorizeAction(
+                name,
+                effectiveArgs,
+                context,
+                abortSignal,
+                collectComputerApprovalTargets(effectiveArgs),
+              );
+            } catch (error) {
+              // A denylisted app is refused before any dialog, like the native tools do.
+              if (!(error instanceof ComputerDenylistError)) throw error;
+              audit({ effect: "refused", code: error.code });
+              return browserRefusalResult({ code: error.code, message: error.message });
+            }
             if (!approved) {
               audit({ effect: "refused", code: "approval_denied" });
               return mcpToolResultError(

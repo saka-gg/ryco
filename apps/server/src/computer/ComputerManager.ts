@@ -5,6 +5,10 @@ import { randomUUID } from "node:crypto";
 import { ComputerSpaceBroker, ComputerSpaceError } from "./ComputerSpaceBroker.ts";
 import { ComputerControlState } from "./ComputerControlState.ts";
 import { computerApprovalGate } from "./ComputerApprovalGate.ts";
+import type {
+  ComputerApprovalAppNames,
+  ComputerApprovalTargets,
+} from "./computerApprovalTargets.ts";
 import { currentComputerTask } from "./computerTaskContext.ts";
 import { CursorActivity } from "./cursorActivity.ts";
 import { waitForWindow } from "./waitForWindow.ts";
@@ -881,6 +885,45 @@ export class ComputerManager {
     return apps;
   }
 
+  /**
+   * The app names a call's targets belong to, for per-app approval before dispatch. Windows
+   * resolve through the last listing (a fresh one only on a miss), pids and app identities
+   * through the cached running-app inventory. It reads; it never claims the desktop.
+   */
+  async approvalAppNames(targets: ComputerApprovalTargets): Promise<ComputerApprovalAppNames> {
+    const names: string[] = [];
+    let unresolved = false;
+    let windows: ReadonlyMap<string, ComputerWindow> = this.lastKnownWindows;
+    if (targets.windowIds.some((id) => !windows.has(id))) {
+      this.engageBackend();
+      windows = new Map((await this.readWindows()).map((window) => [window.id, window]));
+    }
+    const pidsToName = [...targets.pids];
+    for (const id of targets.windowIds) {
+      const window = windows.get(id);
+      const name = window?.appName?.trim();
+      if (name) names.push(name);
+      else if (window?.pid !== undefined) pidsToName.push(window.pid);
+      else unresolved = true;
+    }
+    const running =
+      pidsToName.length > 0 || targets.apps.length > 0 ? await this.runningAppsForDenylist() : [];
+    for (const pid of pidsToName) {
+      const owner = running.find((app) => app.pid === pid);
+      if (owner?.name) names.push(owner.name);
+      else unresolved = true;
+    }
+    for (const app of targets.apps) {
+      const lower = app.toLowerCase();
+      const owner = running.find(
+        (candidate) =>
+          candidate.name.toLowerCase() === lower || candidate.bundleId?.toLowerCase() === lower,
+      );
+      names.push(owner?.name ?? app);
+    }
+    return { names, unresolved };
+  }
+
   /** How a listed window's owning app matches the denylist, or nothing. */
   private async deniedMatchForWindow(
     window: ComputerWindow,
@@ -1381,7 +1424,7 @@ export class ComputerManager {
           // refuses input until a fresh model observation lands; revoking
           // the standing grants here adds the re-auth half — the next
           // mutating call republishes its prompt instead of riding the
-          // pre-interruption "Allow Computer for this task" answer.
+          // pre-interruption "Allow for this chat" answers.
           computerApprovalGate.revokeTaskGrants();
         }
       });
@@ -4935,7 +4978,7 @@ export class ComputerManager {
     // Cancel first, synchronously, before the suspend below can yield: removal
     // revokes authority, and a prompt admitted a millisecond earlier must
     // settle now rather than at the gate's timeout.
-    computerApprovalGate.cancelThread(threadId);
+    computerApprovalGate.forgetThread(threadId);
     this.suspendedThreads.add(threadId);
     // A rejected stop (e.g. preview cleanup failing inside the release) must
     // not skip removal — a removed thread that keeps its lease can reappear
