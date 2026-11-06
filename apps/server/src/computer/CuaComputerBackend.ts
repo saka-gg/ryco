@@ -321,6 +321,8 @@ export class CuaComputerBackend implements ComputerBackend {
       (this.hostPlatform ?? process.platform) === "darwin" && (this.driverNativeRevision ?? 0) >= 36
     );
   }
+  /** The host keeps one frame tap per visible task. */
+  readonly perTaskPreview = true;
   readonly computerId = DEFAULT_COMPUTER_ID;
   // The AXPress/meta-key dialect is macOS semantics; Windows and Linux
   // drivers speak the generic desktop dialect (press, ctrl+chords). The
