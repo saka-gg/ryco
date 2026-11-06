@@ -53,6 +53,48 @@ function tapTargetKey(target: CuaPreviewTarget): string {
 }
 
 /**
+ * Splits the tap socket's byte stream into length-prefixed (u32 LE) JPEG
+ * frames. Chunks wait unjoined until their frame is complete, so a frame
+ * split across many socket reads is copied once, not once per read (Synara
+ * #2021). A zero or oversized length is malformed and stops the reader.
+ */
+export function createFrameReader(
+  onFrame: (jpeg: Buffer) => void,
+  onMalformed: () => void,
+): ((chunk: Buffer) => void) & { reset(): void } {
+  let chunks: Buffer[] = [];
+  let buffered = 0;
+  let stopped = false;
+  const reset = () => {
+    chunks = [];
+    buffered = 0;
+  };
+  const read = (chunk: Buffer) => {
+    if (stopped) return;
+    chunks.push(chunk);
+    buffered += chunk.length;
+    for (;;) {
+      if (buffered < 4) return;
+      if (chunks[0]!.length < 4) chunks = [Buffer.concat(chunks, buffered)];
+      const length = chunks[0]!.readUInt32LE(0);
+      if (length === 0 || length > FRAME_TAP_MAX_FRAME_BYTES) {
+        stopped = true;
+        reset();
+        onMalformed();
+        return;
+      }
+      if (buffered < 4 + length) return;
+      const joined = chunks.length === 1 ? chunks[0]! : Buffer.concat(chunks, buffered);
+      const rest = joined.subarray(4 + length);
+      chunks = rest.length > 0 ? [rest] : [];
+      buffered = rest.length;
+      onFrame(joined.subarray(4, 4 + length));
+    }
+  };
+  return Object.assign(read, { reset });
+}
+
+/**
  * One task, one target, one helper process. Frames travel helper -> unix
  * socket -> renderer; they never enter the driver request path or its
  * operation queue. A dead tap stays dead for its target: update() for the
@@ -263,23 +305,13 @@ export class ComputerFrameTap implements ComputerFrameTapHost {
     }
     state.connection = socket;
     socket.on("error", () => undefined);
-    let pending: Buffer<ArrayBufferLike> = Buffer.alloc(0);
-    socket.on("data", (chunk: Buffer) => {
-      pending = pending.length > 0 ? Buffer.concat([pending, chunk]) : chunk;
-      for (;;) {
-        if (pending.length < 4) return;
-        const length = pending.readUInt32LE(0);
-        if (length === 0 || length > FRAME_TAP_MAX_FRAME_BYTES) {
-          this.kill(state, new Error("Computer frame tap sent a malformed frame."));
-          return;
-        }
-        if (pending.length < 4 + length) return;
-        const jpeg = pending.subarray(4, 4 + length);
-        pending = pending.subarray(4 + length);
-        this.deliver(state, jpeg);
-      }
-    });
+    const read = createFrameReader(
+      (jpeg) => this.deliver(state, jpeg),
+      () => this.kill(state, new Error("Computer frame tap sent a malformed frame.")),
+    );
+    socket.on("data", read);
     socket.once("close", () => {
+      read.reset();
       if (state.connection === socket) state.connection = undefined;
     });
   }

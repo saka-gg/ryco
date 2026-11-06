@@ -22,19 +22,14 @@ import { ComputerNativeHelper } from "./helper.ts";
 import { ComputerPermissionMonitor } from "./permissions.ts";
 import { createMacPermissionDiagnostic } from "./macPermissionDiagnostic.ts";
 import { NativeComputerDriver, record } from "./native.ts";
-import { BrowserComputerDriver, type BrowserTransport } from "./browser.ts";
+import { BROWSER_NAMES, BrowserComputerDriver, type BrowserTransport } from "./browser.ts";
 import { BrowserUploadStore, settleBrowserUpload } from "./browserUploads.ts";
 import { EmbeddedComputerBrowser } from "./embeddedBrowser.ts";
 import { ExternalComputerBrowser } from "./externalBrowser.ts";
 import { ComputerUseOverlay } from "./overlay.ts";
+import { ComputerActivityIndicator } from "./activityIndicator.ts";
 import { openBrowserExtensions } from "./browserSetup.ts";
 
-const BROWSER_NAMES = {
-  ryco: "Ryco Browser",
-  chrome: "Google Chrome",
-  brave: "Brave Browser",
-  edge: "Microsoft Edge",
-} as const;
 function equalSecret(actual: string, expected: string): boolean {
   const a = Buffer.from(actual);
   const b = Buffer.from(expected);
@@ -54,6 +49,8 @@ export class DesktopComputerUseRuntime {
   });
   private readonly native: NativeComputerDriver;
   private readonly overlay: ComputerUseOverlay;
+  /** One menu-bar status for every Computer Use session, whichever runtime drives it. */
+  private readonly indicator = new ComputerActivityIndicator({ onStop: () => this.stop() });
   private readonly policyController: ComputerPolicyController;
   private token = randomBytes(32).toString("base64url");
   private readonly pairings = new Map<ComputerBrowser, string>();
@@ -87,6 +84,7 @@ export class DesktopComputerUseRuntime {
       ...(options.auditLogPath ? { auditLogPath: options.auditLogPath } : {}),
       resourcesDir: dirname(options.helperPath),
       getWindow: options.getWindow,
+      indicator: this.indicator,
     });
     const policyPath = join(options.stateDir, "computer-use-policy.json");
     let policy = DEFAULT_COMPUTER_POLICY;
@@ -130,6 +128,7 @@ export class DesktopComputerUseRuntime {
         this.activity = null;
         this.publish();
       },
+      this.indicator,
     );
     this.policyController = new ComputerPolicyController({
       policy,
@@ -462,6 +461,7 @@ export class DesktopComputerUseRuntime {
     this.stop();
     void this.beta.dispose();
     this.overlay.dispose();
+    this.indicator.dispose();
     this.embedded.dispose();
     this.uploads?.dispose();
     this.sockets.close();

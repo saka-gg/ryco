@@ -25,6 +25,8 @@ export type ComputerUseApp = typeof ComputerUseApp.Type;
 export const ComputerUseActivity = Schema.Struct({
   threadId: Schema.String,
   target: boundedText,
+  /** The app (or browser) being used, for status text that names no window or action. */
+  app: Schema.optionalKey(boundedText),
   mode: Schema.Literals(["background", "foreground"]),
   action: boundedText,
   x: Schema.optionalKey(Schema.Number),

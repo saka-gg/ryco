@@ -138,7 +138,7 @@ export class NativeComputerDriver {
           "Background launch is unavailable on this platform. Request foreground explicitly.",
         );
       context.claim(`app:${appId}`);
-      await context.activity({ target: app.name, mode, action });
+      await context.activity({ target: app.name, app: app.name, mode, action });
       return result(await this.helper.call("launch_app", { app: appId, mode }, context.signal));
     }
     const windows = await this.helper.call("list_windows", {}, context.signal);
@@ -236,6 +236,7 @@ export class NativeComputerDriver {
         : app.name;
     await context.activity({
       target,
+      app: app.name,
       mode: action === "activate" ? "foreground" : mode,
       action: action === "observe" && args.screenshot === false ? "find_elements" : action,
       ...(typeof input.x === "number" && typeof input.y === "number"
@@ -246,6 +247,7 @@ export class NativeComputerDriver {
       for (const fraction of [0, 0.5, 1])
         await context.activity({
           target,
+          app: app.name,
           mode,
           action,
           x:
