@@ -15,7 +15,7 @@ import {
 import type { CuaPreviewTarget } from "@ryco/shared/cuaDriverProtocol";
 import { DesktopAppSnapManager } from "../appSnapManager.ts";
 import { CuaDriverHost } from "../cuaDriverHost.ts";
-import { ComputerFrameTap } from "../computerFrameTap.ts";
+import { ComputerFrameTapPool } from "../computerFrameTap.ts";
 import { EscapeKillSwitchMonitor } from "../escapeKillSwitchMonitor.ts";
 import { registerComputerDesktopLifecycle } from "../computerDesktopLifecycle.ts";
 import { macPrivacySettingsUrl, resolveMacAppBundle } from "../macAppBundle.ts";
@@ -57,7 +57,7 @@ export class DesktopComputerBeta {
   readonly host: CuaDriverHost;
   private readonly permissions: DesktopAppSnapManager;
   private readonly monitor: EscapeKillSwitchMonitor;
-  private readonly tap: ComputerFrameTap;
+  private readonly taps: ComputerFrameTapPool;
   private readonly hostOptions: ConstructorParameters<typeof CuaDriverHost>[0];
   private readonly getWindow: () => BrowserWindow | null;
   private readonly indicator: ComputerActivityIndicator | undefined;
@@ -69,10 +69,7 @@ export class DesktopComputerBeta {
   private readonly tasks = new Map<string, Task>();
   private readonly endedTasks = new Set<string>();
   private readonly visible = new Set<string>();
-  private target: CuaPreviewTarget | undefined;
   private endpoint = "";
-  private lastNativeFrameAt = 0;
-  private targetChangedAt = 0;
   private readonly previewTargets = new Map<
     string,
     { turnId: string; targetId: string; label: string }
@@ -123,21 +120,12 @@ export class DesktopComputerBeta {
         void shell.openExternal(macPrivacySettingsUrl(pane));
       },
     });
-    this.tap = new ComputerFrameTap({
+    this.taps = new ComputerFrameTapPool({
       helperPath,
-      send: (_channel, frame) => {
-        const target = this.target;
-        if (
-          !target ||
-          !this.visible.has(target.task.threadId) ||
-          target.windowId !== frame.windowId ||
-          frame.task.threadId !== target.task.threadId ||
-          frame.task.turnId !== target.task.turnId
-        )
-          return;
+      // The pool only forwards frames of a visible thread's current target.
+      onFrame: (frame, target) => {
         const turnId = target.task.turnId;
         if (!turnId || !this.tasks.has(taskKey({ threadId: target.task.threadId, turnId }))) return;
-        this.lastNativeFrameAt = Date.now();
         this.send({
           type: "frame",
           threadId: target.task.threadId,
@@ -148,12 +136,13 @@ export class DesktopComputerBeta {
           bytes: frame.jpeg,
         });
       },
-      onError: (error) => {
-        if (this.target?.task.turnId)
+      onError: (threadId, error) => {
+        const turnId = this.taps.target(threadId)?.task.turnId;
+        if (turnId)
           this.send({
             type: "error",
-            threadId: this.target.task.threadId,
-            turnId: this.target.task.turnId,
+            threadId,
+            turnId,
             message: error instanceof Error ? error.message : "Preview unavailable.",
           });
       },
@@ -202,8 +191,7 @@ export class DesktopComputerBeta {
         this.preferences.cursorColor ? { fill: this.preferences.cursorColor } : null,
       frameTap: {
         update: (target) => {
-          this.target = target;
-          this.targetChangedAt = Date.now();
+          this.taps.setTarget(target);
           if (!target.task.turnId) return;
           this.send({
             type: "target",
@@ -213,26 +201,18 @@ export class DesktopComputerBeta {
             label: target.task.label ?? "Computer",
           });
           this.noteActivity(target);
-          if (this.visible.has(target.task.threadId)) this.tap.update(target);
-          else void this.tap.stop().catch(() => undefined);
         },
         endTask: async (task) => {
-          if (
-            this.target?.task.threadId === task.threadId &&
-            this.target.task.turnId === task.turnId
-          )
-            this.target = undefined;
           // The status is per thread: a newer turn of the same thread keeps it.
           if (![...this.tasks.values()].some((live) => live.threadId === task.threadId))
             this.indicator?.end(indicatorKey(task.threadId));
-          await this.tap.endTask(task);
+          await this.taps.endTask(task);
         },
         stop: async () => {
-          this.target = undefined;
           this.indicator?.endAll(INDICATOR_PREFIX);
-          await this.tap.stop();
+          await this.taps.stopAll();
         },
-        dispose: () => this.tap.dispose(),
+        dispose: () => this.taps.dispose(),
       },
     };
     this.host = new CuaDriverHost(this.hostOptions);
@@ -358,10 +338,7 @@ export class DesktopComputerBeta {
   preview(threadId: string, visible: boolean): void {
     if (visible) this.visible.add(threadId);
     else this.visible.delete(threadId);
-    if (this.target?.task.threadId === threadId) {
-      if (visible) this.tap.update(this.target);
-      else void this.tap.stop();
-    }
+    this.taps.setVisible(threadId, visible);
   }
   async stopTask(threadId: string): Promise<void> {
     this.generations.set(threadId, (this.generations.get(threadId) ?? 0) + 1);
@@ -442,12 +419,11 @@ export class DesktopComputerBeta {
     if (operation === "frame") {
       if (this.visible.has(threadId)) {
         const targetId = textArg(input, "targetId");
-        if (typeof input.startedAt !== "number" || input.startedAt < this.targetChangedAt)
+        if (typeof input.startedAt !== "number" || input.startedAt < this.taps.changedAt(threadId))
           return { visible: true };
-        if (this.target && targetId !== `cua:${this.target.pid}:${this.target.windowId}`) {
-          this.target = undefined;
-          await this.tap.stop();
-        }
+        const target = this.taps.target(threadId);
+        if (target && targetId !== `cua:${target.pid}:${target.windowId}`)
+          await this.taps.clear(threadId);
         if (this.previewTargets.get(threadId)?.targetId !== targetId)
           this.send({
             type: "target",
@@ -457,10 +433,9 @@ export class DesktopComputerBeta {
             label: targetId.startsWith("browser:") ? "Browser" : "Computer",
           });
         if (
-          this.target?.task.threadId === threadId &&
-          this.target.task.turnId === turnId &&
-          targetId === `cua:${this.target.pid}:${this.target.windowId}` &&
-          Date.now() - this.lastNativeFrameAt < 1500
+          target?.task.turnId === turnId &&
+          targetId === `cua:${target.pid}:${target.windowId}` &&
+          Date.now() - this.taps.frameAt(threadId) < 1500
         )
           return { visible: true };
         const data = textArg(input, "data", 6 * 1024 * 1024);

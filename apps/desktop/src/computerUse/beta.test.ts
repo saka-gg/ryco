@@ -50,10 +50,21 @@ vi.mock("../escapeKillSwitchMonitor.ts", () => ({
   },
 }));
 vi.mock("../computerFrameTap.ts", () => ({
-  ComputerFrameTap: class {
-    update() {}
-    async stop() {}
+  ComputerFrameTapPool: class {
+    target() {
+      return undefined;
+    }
+    changedAt() {
+      return 0;
+    }
+    frameAt() {
+      return 0;
+    }
+    setTarget() {}
+    setVisible() {}
+    async clear() {}
     async endTask() {}
+    async stopAll() {}
     async dispose() {}
   },
 }));
