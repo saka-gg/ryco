@@ -1,5 +1,14 @@
 import { CodexOptionalQuestions, readCodexOptionalQuestions } from "../codexOptionalQuestions.ts";
 import {
+  answerCodexElicitation,
+  autoAcceptInRuntimeMode,
+  CODEX_ELICITATION_CANCEL,
+  CODEX_ELICITATION_TIMEOUT_MS,
+  type CodexElicitationPlan,
+  type CodexElicitationResponse,
+  planCodexElicitation,
+} from "../codexMcpElicitation.ts";
+import {
   ApprovalRequestId,
   type AgentTokenMode,
   DEFAULT_MODEL,
@@ -154,6 +163,8 @@ export interface CodexSessionRuntimeOptions {
   readonly collabChildInterruptTimeout?: Duration.Input;
   /** Lowers `codex app-server` (and everything it starts); undefined spawns it unchanged. */
   readonly processPriority?: AgentProcessPriorityShape | undefined;
+  /** How long an MCP elicitation waits for an answer before Ryco answers `cancel`. */
+  readonly elicitationTimeout?: Duration.Input;
 }
 
 /**
@@ -398,6 +409,16 @@ interface ApprovalCorrelation {
   readonly requestKind: ProviderRequestKind;
   readonly turnId: TurnId | undefined;
   readonly itemId: ProviderItemId | undefined;
+}
+
+/** An MCP elicitation shown as a question; the server keeps the request and builds the answer. */
+interface PendingElicitation {
+  readonly requestId: ApprovalRequestId;
+  /** Codex's JSON-RPC id for the request, which `serverRequest/resolved` names. */
+  readonly jsonRpcId: string;
+  readonly turnId: TurnId | undefined;
+  readonly plan: Exclude<CodexElicitationPlan, { kind: "unsupported" }>;
+  readonly response: Deferred.Deferred<CodexElicitationResponse>;
 }
 
 interface PendingUserInput {
@@ -1393,6 +1414,9 @@ export const makeCodexSessionRuntime = (
     const approvalCorrelationsRef = yield* Ref.make(new Map<string, ApprovalCorrelation>());
     const optionalQuestions = new CodexOptionalQuestions();
     const pendingUserInputsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingUserInput>());
+    const pendingElicitationsRef = yield* Ref.make(
+      new Map<ApprovalRequestId, PendingElicitation>(),
+    );
     const collabReceiverTurnsRef = yield* Ref.make(new Map<string, TurnId>());
     const collabChildAgentsRef = yield* Ref.make(new Map<string, CollabChildAgentState>());
     /** Child provider-thread id → its currently running provider turn id. */
@@ -1535,6 +1559,51 @@ export const makeCodexSessionRuntime = (
           ),
         ),
       );
+
+    /**
+     * Ends one open elicitation exactly once: answers Codex and closes the question. Returns false
+     * when another path (answer, timeout, close, Codex resolving it) already ended it.
+     */
+    const finishElicitation = (
+      requestId: ApprovalRequestId,
+      response: CodexElicitationResponse,
+      answers: ProviderUserInputAnswers,
+    ) =>
+      Effect.gen(function* () {
+        const pending = yield* Ref.modify(pendingElicitationsRef, (current) => {
+          const found = current.get(requestId);
+          if (!found) return [undefined, current] as const;
+          const next = new Map(current);
+          next.delete(requestId);
+          return [found, next] as const;
+        });
+        if (!pending) return false;
+        yield* Deferred.succeed(pending.response, response);
+        yield* emitEvent({
+          kind: "notification",
+          threadId: options.threadId,
+          method: "mcpServer/elicitation/request/answered",
+          requestId: pending.requestId,
+          ...(pending.turnId ? { turnId: pending.turnId } : {}),
+          payload: {
+            answers,
+            action: response.action,
+            // Cancel is never a user's answer: timeout, close, turn end or Codex giving up.
+            ...(response.action === "cancel" ? { cancelled: true } : {}),
+          },
+        });
+        return true;
+      });
+
+    const settlePendingElicitations = Ref.get(pendingElicitationsRef).pipe(
+      Effect.flatMap((pending) =>
+        Effect.forEach(
+          Array.from(pending.keys()),
+          (requestId) => finishElicitation(requestId, CODEX_ELICITATION_CANCEL, {}),
+          { discard: true },
+        ),
+      ),
+    );
 
     /**
      * Registers v2 collab children and re-emits their notifications as
@@ -2020,6 +2089,30 @@ export const makeCodexSessionRuntime = (
               return next;
             });
           }
+          // Codex gave up on an elicitation still on screen (turn interrupted, the MCP server
+          // stopped waiting): close the question. One Ryco already answered is no longer listed.
+          const openElicitation = Array.from(
+            (yield* Ref.get(pendingElicitationsRef)).values(),
+          ).find((pending) => pending.jsonRpcId === rawRequestId);
+          if (openElicitation) {
+            yield* finishElicitation(openElicitation.requestId, CODEX_ELICITATION_CANCEL, {});
+            yield* Ref.set(collabReceiverTurnsRef, collabReceiverTurns);
+            return;
+          }
+        }
+
+        // A finished turn waits for nothing: close its elicitations even if Codex sent no
+        // `serverRequest/resolved` for them.
+        if (notification.method === "turn/completed" && !foreignConversation) {
+          const completedTurnId = notification.params.turn.id;
+          const stale = Array.from((yield* Ref.get(pendingElicitationsRef)).values()).filter(
+            (pending) => pending.turnId === completedTurnId,
+          );
+          yield* Effect.forEach(
+            stale,
+            (pending) => finishElicitation(pending.requestId, CODEX_ELICITATION_CANCEL, {}),
+            { discard: true },
+          );
         }
 
         yield* Ref.set(collabReceiverTurnsRef, collabReceiverTurns);
@@ -2268,6 +2361,74 @@ export const makeCodexSessionRuntime = (
       }),
     );
 
+    yield* client.handleServerRequest("mcpServer/elicitation/request", (payload, context) =>
+      Effect.gen(function* () {
+        const plan = planCodexElicitation(payload);
+        if (plan.kind === "unsupported") {
+          yield* Effect.logWarning("codex.elicitation.unsupported", {
+            serverName: payload.serverName,
+            mode: payload.mode,
+            reason: plan.reason,
+          });
+          return CODEX_ELICITATION_CANCEL;
+        }
+        const autoAnswer = autoAcceptInRuntimeMode(plan, options.runtimeMode);
+        if (autoAnswer) {
+          yield* Effect.logInfo("codex.elicitation.auto-accepted", {
+            serverName: payload.serverName,
+            runtimeMode: options.runtimeMode,
+          });
+          return autoAnswer;
+        }
+        if (yield* Ref.get(closedRef)) return CODEX_ELICITATION_CANCEL;
+
+        const requestId = ApprovalRequestId.make(yield* Effect.sync(() => crypto.randomUUID()));
+        const turnId = payload.turnId
+          ? TurnId.make(payload.turnId)
+          : (yield* Ref.get(sessionRef)).activeTurnId;
+        const response = yield* Deferred.make<CodexElicitationResponse>();
+        yield* Ref.update(pendingElicitationsRef, (current) => {
+          const next = new Map(current);
+          next.set(requestId, {
+            requestId,
+            jsonRpcId: String(context.requestId),
+            turnId,
+            plan,
+            response,
+          });
+          return next;
+        });
+
+        // A close that ran between the check above and the registration found nothing to settle.
+        if (yield* Ref.get(closedRef)) {
+          yield* finishElicitation(requestId, CODEX_ELICITATION_CANCEL, {});
+          return CODEX_ELICITATION_CANCEL;
+        }
+
+        yield* emitEvent({
+          kind: "request",
+          threadId: options.threadId,
+          method: "mcpServer/elicitation/request",
+          requestId,
+          ...(turnId ? { turnId } : {}),
+          payload: {
+            questions: plan.questions,
+            serverName: payload.serverName,
+            mode: payload.mode,
+          },
+        });
+
+        // Never hold the Codex turn forever: no answer in time answers `cancel`.
+        yield* finishElicitation(requestId, CODEX_ELICITATION_CANCEL, {}).pipe(
+          Effect.delay(options.elicitationTimeout ?? Duration.millis(CODEX_ELICITATION_TIMEOUT_MS)),
+          Effect.forkIn(runtimeScope),
+        );
+        return yield* Deferred.await(response).pipe(
+          Effect.onInterrupt(() => finishElicitation(requestId, CODEX_ELICITATION_CANCEL, {})),
+        );
+      }),
+    );
+
     yield* client.handleUnknownServerRequest((method) =>
       Effect.fail(CodexErrors.CodexAppServerRequestError.methodNotFound(method)),
     );
@@ -2453,6 +2614,7 @@ export const makeCodexSessionRuntime = (
       deviceTurnActive = false;
       yield* settlePendingApprovals("cancel");
       yield* settlePendingUserInputs({});
+      yield* settlePendingElicitations;
       yield* updateSession(sessionRef, {
         status: "closed",
         activeTurnId: undefined,
@@ -2733,6 +2895,20 @@ export const makeCodexSessionRuntime = (
                 return yield* new CodexErrors.CodexAppServerProtocolParseError({
                   detail: "Optional answer returned a different turn",
                 });
+            }
+            return;
+          }
+          const elicitation = (yield* Ref.get(pendingElicitationsRef)).get(requestId);
+          if (elicitation) {
+            const answer = answerCodexElicitation(elicitation.plan, answers);
+            if (!answer.ok) {
+              return yield* new CodexSessionRuntimeInvalidUserInputAnswersError({
+                questionId: answer.questionId,
+              });
+            }
+            const finished = yield* finishElicitation(requestId, answer.response, answers);
+            if (!finished) {
+              return yield* new CodexSessionRuntimePendingUserInputNotFoundError({ requestId });
             }
             return;
           }

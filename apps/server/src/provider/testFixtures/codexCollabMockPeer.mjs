@@ -29,6 +29,21 @@ rl.on("line", (line) => {
     return;
   }
   const { id, method } = message;
+  // Ryco's answer to a request this peer sent (`serverRequests`): echo it back as an agent
+  // message delta, which the runtime emits as an event the test can await.
+  if (method === undefined && id !== undefined) {
+    write({
+      jsonrpc: "2.0",
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: script.rootThreadId,
+        turnId: script.turnIds?.[0] ?? fixture.responses.turnStart.turn.id,
+        itemId: "peer-received-response",
+        delta: JSON.stringify(message),
+      },
+    });
+    return;
+  }
   if (script.recordRequests) {
     NodeFS.appendFileSync(`${process.env.RYCO_CODEX_COLLAB_SCRIPT}.requests`, `${method}\n`);
   }
@@ -131,6 +146,22 @@ rl.on("line", (line) => {
     }
     for (const notification of script.notifications) {
       write({ jsonrpc: "2.0", method: notification.method, params: notification.params });
+    }
+    // Requests the peer makes of Ryco (approvals, elicitations), each optionally resolved by the
+    // peer itself later, the way Codex sends `serverRequest/resolved` when it stops waiting.
+    for (const request of script.serverRequests ?? []) {
+      write({ jsonrpc: "2.0", id: request.id, method: request.method, params: request.params });
+      if (request.resolveAfterMs !== undefined) {
+        setTimeout(
+          () =>
+            write({
+              jsonrpc: "2.0",
+              method: "serverRequest/resolved",
+              params: { threadId: rootThreadId, requestId: request.id },
+            }),
+          request.resolveAfterMs,
+        );
+      }
     }
     if (script.holdTurnOpen !== true) {
       write({

@@ -15,8 +15,11 @@ import {
   decodeOptionalPayload,
   encodeOptionalPayload,
   runHandler,
+  type ServerRequestContext,
 } from "./_internal/shared.ts";
 import { makeChildStdio, makeTerminationError } from "./_internal/stdio.ts";
+
+export type { ServerRequestContext } from "./_internal/shared.ts";
 
 export interface CodexAppServerClientOptions {
   readonly onTermination?: CodexProtocol.CodexAppServerPatchedProtocolOptions["onTermination"];
@@ -53,6 +56,7 @@ export interface CodexAppServerClientShape {
     method: M,
     handler: (
       payload: CodexRpc.ServerRequestParamsByMethod[M],
+      context: ServerRequestContext,
     ) => Effect.Effect<CodexRpc.ServerRequestResponsesByMethod[M], CodexError.CodexAppServerError>,
   ) => Effect.Effect<void>;
   readonly handleServerNotification: <M extends CodexRpc.ServerNotificationMethod>(
@@ -82,6 +86,7 @@ export class CodexAppServerClient extends Context.Service<
 
 type ServerRequestHandler = (
   payload: unknown,
+  context: ServerRequestContext,
 ) => Effect.Effect<unknown, CodexError.CodexAppServerError>;
 type ServerNotificationHandler = (
   payload: unknown,
@@ -190,7 +195,9 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
       const handler = requestHandlers.get(method);
 
       return decodeOptionalPayload(method, payloadSchema, request.params).pipe(
-        Effect.flatMap((decoded) => runHandler(handler, decoded, method)),
+        Effect.flatMap((decoded) =>
+          runHandler(handler, decoded, method, { requestId: request.id }),
+        ),
         Effect.flatMap((result) => encodeOptionalPayload(method, responseSchema, result)),
       );
     }

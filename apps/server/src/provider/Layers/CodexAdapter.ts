@@ -1048,6 +1048,22 @@ function mapToRuntimeEvents(
   }
 
   if (event.kind === "request") {
+    if (event.method === "mcpServer/elicitation/request") {
+      // The runtime already turned the elicitation into questions (`codexMcpElicitation.ts`).
+      const payload = readPayload(
+        Schema.Struct({ questions: Schema.Array(UserInputQuestion) }),
+        event.payload,
+      );
+      return payload && payload.questions.length > 0 && event.requestId
+        ? [
+            {
+              ...runtimeEventBase(event, canonicalThreadId),
+              type: "user-input.requested",
+              payload: { questions: payload.questions },
+            },
+          ]
+        : [];
+    }
     if (event.method === "item/tool/requestUserInput") {
       const payload =
         readPayload(EffectCodexSchema.ServerRequest__ToolRequestUserInputParams, event.payload) ??
@@ -1602,6 +1618,28 @@ function mapToRuntimeEvents(
         },
       },
     ];
+  }
+
+  if (event.method === "mcpServer/elicitation/request/answered") {
+    const payload = readPayload(
+      Schema.Struct({
+        answers: Schema.Record(Schema.String, Schema.Unknown),
+        cancelled: Schema.optional(Schema.Boolean),
+      }),
+      event.payload,
+    );
+    return payload && event.requestId
+      ? [
+          {
+            ...runtimeEventBase(event, canonicalThreadId),
+            type: "user-input.resolved",
+            payload: {
+              answers: payload.answers,
+              ...(payload.cancelled ? { cancelled: true } : {}),
+            },
+          },
+        ]
+      : [];
   }
 
   if (event.method === "item/tool/requestUserInput/answered") {

@@ -591,3 +591,53 @@ describe("runtimeEventToActivities credential-named tool parameters", () => {
     expect(redacted).not.toContain("live-key");
   });
 });
+
+describe("runtimeEventToActivities MCP elicitation", () => {
+  it("projects a Codex elicitation as a blocking question and its cancellation", () => {
+    const question = {
+      id: "decision",
+      header: "Codex Computer Use",
+      question: 'Allow Computer Use to use "TextEdit"?',
+      options: [
+        { label: "Allow for this chat", description: "Don't ask again in this chat" },
+        { label: "Deny", description: "Don't allow it" },
+      ],
+      multiSelect: false,
+    };
+    const scope = {
+      ...base,
+      runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+      turnId: TurnId.make("turn-1"),
+      requestId: RuntimeRequestId.make("req-elicitation"),
+    };
+    const [requested] = runtimeEventToActivities({
+      ...scope,
+      type: "user-input.requested",
+      eventId: EventId.make("evt-elicitation"),
+      payload: { questions: [question] },
+    } satisfies ProviderRuntimeEvent);
+    expect(requested).toMatchObject({
+      kind: "user-input.requested",
+      summary: "User input requested",
+      turnId: "turn-1",
+      payload: {
+        runtimeSessionId: "runtime-1",
+        requestId: "req-elicitation",
+        questions: [question],
+      },
+    });
+    expect((requested?.payload as Record<string, unknown>).nonBlocking).toBeUndefined();
+
+    const [cancelled] = runtimeEventToActivities({
+      ...scope,
+      type: "user-input.resolved",
+      eventId: EventId.make("evt-elicitation-cancelled"),
+      payload: { answers: {}, cancelled: true },
+    } satisfies ProviderRuntimeEvent);
+    expect(cancelled).toMatchObject({
+      kind: "user-input.resolved",
+      summary: "Question cancelled",
+      payload: { requestId: "req-elicitation", answers: {}, cancelled: true },
+    });
+  });
+});
