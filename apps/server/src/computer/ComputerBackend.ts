@@ -719,6 +719,12 @@ export interface ComputerBackend {
   readonly focusNeutralSemanticText?: boolean;
   /** Exact targets are revalidated and background input never falls back to global input. */
   readonly exactTargetBackgroundInput?: boolean;
+  /**
+   * The desktop preview is drawn per task (each conversation sees its own
+   * target), so several conversations owning apps at once never makes it
+   * unavailable. Absent means one shared preview.
+   */
+  readonly perTaskPreview?: boolean;
   typeText(
     text: string,
     windowId?: string,

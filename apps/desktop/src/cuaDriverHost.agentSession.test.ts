@@ -430,7 +430,7 @@ describe("task-owned user stop", () => {
     },
   );
 
-  it("drains matching native input and reports that queued siblings share the generation fence", async () => {
+  it("drains matching background input and runs queued sibling input after the drain", async () => {
     const f = await fixture();
     const active = cuaRequest<CuaReply>(f.endpoint, {
       method: "call",
@@ -446,21 +446,17 @@ describe("task-owned user stop", () => {
       task: sibling,
       args: { key: "enter" },
     });
+    // The driver gate is process-wide, so the drain is too, but background
+    // input fences only its own task: the sibling's queued key is not
+    // cancelled, it dispatches on the reopened input epoch.
     await expect(cuaRequest(f.endpoint, { method: "stop", task })).resolves.toMatchObject({
       ok: true,
-      result: { stop_scope: "generation" },
+      result: { stop_scope: "input" },
     });
     await expect(active).resolves.toMatchObject({ ok: false, effect: "dispatched-unknown" });
-    await expect(queued).resolves.toMatchObject({ ok: false, effect: "not-dispatched" });
-    await expect(
-      cuaRequest(f.endpoint, {
-        method: "call",
-        name: "press_key",
-        task: sibling,
-        args: { key: "enter" },
-      }),
-    ).resolves.toMatchObject({ ok: true });
+    await expect(queued).resolves.toMatchObject({ ok: true });
     const events = (await f.events()).map((row) => row.event);
+    expect(events).toContain("interrupt-ack");
     expect(events.indexOf("interrupt-ack")).toBeLessThan(events.indexOf("key"));
     expect(events.filter((event) => event === "start")).toHaveLength(1);
     expect(events).not.toContain("effect");
@@ -568,7 +564,7 @@ describe("task-owned user stop", () => {
     await waitForEvent(f, "list-windows-replied");
     await expect(cuaRequest(f.endpoint, { method: "stop", task })).resolves.toMatchObject({
       ok: true,
-      result: { stop_scope: "generation" },
+      result: { stop_scope: "input" },
     });
     await expect(active).resolves.toMatchObject({ ok: false, effect: "dispatched-unknown" });
     const events = (await f.events()).map((row) => row.event);
@@ -588,7 +584,7 @@ describe("task-owned user stop", () => {
     await waitForEvent(f, "dispatch");
     await expect(
       cuaRequest(f.endpoint, { method: "stop", task: { threadId: task.threadId } }),
-    ).resolves.toMatchObject({ ok: true, result: { stop_scope: "generation" } });
+    ).resolves.toMatchObject({ ok: true, result: { stop_scope: "input" } });
     await expect(active).resolves.toMatchObject({ ok: false, effect: "dispatched-unknown" });
     const events = (await f.events()).map((row) => row.event);
     expect(events).toContain("interrupt-ack");

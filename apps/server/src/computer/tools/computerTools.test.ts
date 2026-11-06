@@ -103,8 +103,9 @@ async function setup(
   resolveWorkspaceRoot?: AgentGatewayComputerToolsOptions["resolveWorkspaceRoot"],
 ) {
   // A zero settle delay: these tests assert on what the post-action capture
-  // does, not on how long the desktop is given to repaint.
-  const manager = new ComputerManager({ backend, actionSettleMs: 0 });
+  // does, not on how long the desktop is given to repaint. No lease wait: a
+  // conflicting claim refuses at once here; the wait has its own tests.
+  const manager = new ComputerManager({ backend, actionSettleMs: 0, leaseWaitMs: 0 });
   const browserTools = manager.supportsBrowser
     ? makeAgentGatewayComputerBrowserTools({
         manager,
@@ -2327,7 +2328,7 @@ describe("agent gateway computer tools", () => {
     expect(resultJson(blocked)).toMatchObject({
       error: {
         code: "computer_controlled_by_other_thread",
-        retryable: false,
+        retryable: true,
         message: expect.stringContaining("another conversation"),
       },
     });
@@ -6341,5 +6342,110 @@ describe("computer_help", () => {
     expect(notes).not.toContain("set_window_minimized");
     expect(notes).toContain("never replay it");
     expect(notes).toContain("delivery.effect");
+  });
+});
+
+describe("computer tool lanes", () => {
+  function laneBackend() {
+    const windows = ["w-a", "w-b"].map((id, index) => ({
+      id,
+      title: id,
+      appName: index === 0 ? "Editor A" : "Editor B",
+      pid: index === 0 ? 110 : 220,
+      bounds: { x: index * 400, y: 0, width: 360, height: 300 },
+      focused: false,
+      minimized: false,
+      visible: true,
+    }));
+    return Object.assign(new FakeComputerBackend({ windows }), {
+      exactTargetBackgroundInput: true,
+      focusNeutralSemanticText: true,
+      agentDialect: "macos" as const,
+    });
+  }
+
+  function recordLanes(manager: ComputerManager): unknown[] {
+    const lanes: unknown[] = [];
+    const original = manager.withAgentActivity.bind(manager);
+    vi.spyOn(manager, "withAgentActivity").mockImplementation(((
+      threadId: string,
+      action: () => Promise<unknown>,
+      signal?: AbortSignal,
+      turnId?: string,
+      lane?: unknown,
+    ) => {
+      lanes.push(lane);
+      return original(threadId, action, signal, turnId, lane as never);
+    }) as never);
+    return lanes;
+  }
+
+  it("schedules observation as reads and exact background input in its app's lane", async () => {
+    const { manager, call } = await setup(laneBackend());
+    const lanes = recordLanes(manager);
+    expect((await call("computer_list_windows", {})).isError).not.toBe(true);
+    expect(
+      (
+        await call("computer_press_key", {
+          key: "enter",
+          window_id: "w-a",
+          include_screenshot: false,
+        })
+      ).isError,
+    ).not.toBe(true);
+    expect(
+      (
+        await call("computer_type_text", {
+          text: "hi",
+          window_id: "w-b",
+          include_screenshot: false,
+        })
+      ).isError,
+    ).not.toBe(true);
+    // No exact window: the whole desktop, as before.
+    await call("computer_press_key", { key: "enter", include_screenshot: false });
+    // The clipboard is whole-desktop even for a read.
+    await call("computer_read_clipboard", {});
+    expect(lanes).toEqual([
+      { kind: "read" },
+      { kind: "app", pid: 110 },
+      { kind: "app", pid: 220 },
+      { kind: "exclusive" },
+      { kind: "exclusive" },
+    ]);
+  });
+
+  it("lets a second conversation's input wait for the app and then land after the owner's turn", async () => {
+    const backend = laneBackend();
+    const manager = new ComputerManager({ backend, actionSettleMs: 0 });
+    const tools = makeAgentGatewayComputerTools({
+      manager,
+      resolveForegroundAuthorization: async () => ({ userRequestedVisibleUse: true }),
+    });
+    const tool = tools.find((entry) => entry.definition.name === "computer_press_key")!;
+    const press = (threadId: string) =>
+      Effect.runPromise(
+        tool.handler(
+          { key: "enter", window_id: "w-a", include_screenshot: false },
+          makeContext(undefined, threadId),
+        ),
+      );
+    try {
+      await manager.listWindows();
+      expect((await press("owner")).isError).not.toBe(true);
+      let settled = false;
+      const waiting = press("other").then((result) => {
+        settled = true;
+        return result;
+      });
+      for (let index = 0; index < 20; index += 1) await Promise.resolve();
+      expect(settled).toBe(false);
+      expect(backend.callsFor("pressKey")).toHaveLength(1);
+      await manager.releaseDesktopControl("owner");
+      expect((await waiting).isError).not.toBe(true);
+      expect(backend.callsFor("pressKey")).toHaveLength(2);
+    } finally {
+      await manager.dispose();
+    }
   });
 });

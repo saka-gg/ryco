@@ -1,4 +1,5 @@
 // Adapted from Synara v0.9.1; see docs/licenses/synara-computer-use.txt.
+import { AsyncLocalStorage } from "node:async_hooks";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { ComputerSpaceBroker, ComputerSpaceError } from "./ComputerSpaceBroker.ts";
@@ -46,6 +47,14 @@ import {
 } from "@ryco/contracts";
 import { encodeComputerFrame } from "@ryco/shared/computerFrame";
 import { FrameTransport, type FrameSink } from "@ryco/shared/frameTransport";
+import {
+  computerAppLane,
+  computerExclusiveLane,
+  computerLanesCover,
+  computerReadLane,
+  computerWindowLane,
+  type ComputerLaneClaim,
+} from "@ryco/shared/computerLanes";
 
 import {
   DesktopOperationQueue,
@@ -136,6 +145,142 @@ export const COMPUTER_FRAME_SOCKET_BUDGET_BYTES = 2 * 1024 * 1024;
  * leaves a long-running model's legitimate thinking time undisturbed.
  */
 export const COMPUTER_LEASE_IDLE_MS = 300_000;
+
+/**
+ * How long a conflicting claim waits for another conversation's lease (an app,
+ * a window, or the whole desktop) before it gives up. Waiters queue FIFO per
+ * target and hold no operation lane while they wait, so the owner keeps
+ * working. Stop, a revoked turn or shutdown end the wait at once.
+ */
+export const COMPUTER_LEASE_WAIT_MS = 45_000;
+
+/**
+ * Which lane one agent tool call runs in (see `@ryco/shared/computerLanes`):
+ * observation runs beside everything except whole-desktop work, background
+ * input to one app runs beside other apps, and everything else holds the
+ * whole desktop. A string is a scoped key (`runScoped`).
+ */
+export type ComputerAgentLane =
+  | { readonly kind: "read" }
+  | { readonly kind: "exclusive" }
+  | { readonly kind: "app"; readonly pid: number }
+  | { readonly kind: "scoped"; readonly key: string };
+
+/** Pure observation tools: they read the desktop and send no input. */
+const COMPUTER_READ_LANE_TOOLS: ReadonlySet<string> = new Set([
+  "computer_get_state",
+  "computer_screenshot",
+  "computer_get_accessibility_tree",
+  "computer_list_windows",
+  "computer_list_apps",
+  "computer_get_screen_size",
+  "computer_verify_state",
+  "computer_zoom",
+  "computer_get_cursor_position",
+  "computer_wait",
+  "computer_help",
+]);
+
+/**
+ * Plain single-target input that, delivered in the background to an exact
+ * window, touches only that window's application. Drag, paste and clipboard,
+ * launch, window frame/visibility, kill, menus, batches and Space tools stay
+ * whole-desktop.
+ */
+const COMPUTER_APP_LANE_TOOLS: ReadonlySet<string> = new Set([
+  "computer_click",
+  "computer_move_cursor",
+  "computer_scroll",
+  "computer_type_text",
+  "computer_press_key",
+  "computer_set_value",
+  "computer_select_text",
+  "computer_perform_action",
+]);
+
+/** The pid a Cua window id (`cua:<pid>:<window>`) names, if it names one. */
+function pidFromWindowId(windowId: string): number | undefined {
+  const match = /^cua:(\d+):/.exec(windowId);
+  const pid = match ? Number(match[1]) : Number.NaN;
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
+}
+
+/** The application an operation's held lanes reserve exclusively, if any. */
+function heldAppLanePid(claims: readonly ComputerLaneClaim[] | undefined): number | undefined {
+  if (!claims) return undefined;
+  for (const claim of claims) {
+    if (claim.mode !== "exclusive") continue;
+    const match = /^app:(\d+)$/.exec(claim.resource);
+    if (match) return Number(match[1]);
+  }
+  return undefined;
+}
+
+/**
+ * Inside an application's lane the resolved target must be that application:
+ * a window that now belongs to another process is refused before dispatch.
+ */
+function assertScheduledApp(scheduledPid: number | undefined, pid: number | undefined): void {
+  if (scheduledPid === undefined || pid === scheduledPid) return;
+  throw new ComputerTargetError({
+    code: "computer_target_invalid",
+    message:
+      "The target changed: the window no longer belongs to the application this call was " +
+      "scheduled for; nothing was sent. Observe again with computer_get_state.",
+  });
+}
+
+/** A one-shot deadline for a lease wait; `expired` flips when it fires. */
+function leaseDeadline(ms: number): {
+  expired: boolean;
+  readonly promise: Promise<void>;
+  cancel(): void;
+} {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = {
+    expired: false,
+    promise: undefined as unknown as Promise<void>,
+    cancel: () => {
+      if (timer !== undefined) clearTimeout(timer);
+      timer = undefined;
+    },
+  };
+  deadline.promise = new Promise<void>((resolve) => {
+    timer = setTimeout(() => {
+      deadline.expired = true;
+      resolve();
+    }, ms);
+  });
+  return deadline;
+}
+
+/**
+ * Sleep until a lease changes, the conflicting lease would go stale, or the
+ * wait's deadline passes; rejects with the signal's reason on abort.
+ */
+function sleepForLease(
+  changed: Promise<void>,
+  deadline: Promise<void>,
+  expiryDelayMs: number | undefined,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (signal?.aborted) return Promise.reject(signal.reason);
+  return new Promise<void>((resolve, reject) => {
+    let expiry: ReturnType<typeof setTimeout> | undefined;
+    const finish = (error?: unknown) => {
+      if (expiry !== undefined) clearTimeout(expiry);
+      signal?.removeEventListener("abort", onAbort);
+      if (error === undefined) resolve();
+      else reject(error);
+    };
+    const onAbort = () => finish(signal?.reason ?? new Error("The lease wait was cancelled."));
+    signal?.addEventListener("abort", onAbort, { once: true });
+    // A few ms past the idle limit, so the re-check sees the lease as stale.
+    if (expiryDelayMs !== undefined) expiry = setTimeout(() => finish(), expiryDelayMs + 5);
+    void changed.then(() => finish());
+    void deadline.then(() => finish());
+  });
+}
 
 /**
  * How long the enable path waits for in-flight stops and the durable
@@ -283,6 +428,47 @@ interface BackgroundLease extends DesktopLease {
   readonly target: BackgroundControlTarget;
 }
 
+/** What a lease claim needs: the whole desktop, or one app/window target. */
+type LeaseScope =
+  | { readonly kind: "desktop" }
+  | { readonly kind: "target"; readonly target: BackgroundControlTarget };
+
+interface LeaseWaiter {
+  readonly owner: string;
+  scope: LeaseScope;
+}
+
+/** The live lease a claim conflicts with. */
+interface LeaseConflict {
+  readonly targetOnly: boolean;
+  /** The contested app or window, for the timeout message. */
+  readonly label?: string;
+  /** When the conflicting lease goes stale, if nothing of its owner is in flight. */
+  readonly expiresAtMs?: number;
+}
+
+function leaseChangeSignal(): { readonly promise: Promise<void>; readonly fire: () => void } {
+  let fire = () => {};
+  const promise = new Promise<void>((resolve) => {
+    fire = resolve;
+  });
+  return { promise, fire };
+}
+
+/** Whether two background targets touch the same app keyboard or window. */
+function backgroundTargetsConflict(
+  a: BackgroundControlTarget,
+  b: BackgroundControlTarget,
+): boolean {
+  if (a.key === b.key) return true;
+  return a.pid !== undefined && a.pid === b.pid && (!a.windowId || !b.windowId);
+}
+
+function leaseScopesConflict(a: LeaseScope, b: LeaseScope): boolean {
+  if (a.kind === "desktop" || b.kind === "desktop") return true;
+  return backgroundTargetsConflict(a.target, b.target);
+}
+
 export interface ComputerManagerOptions {
   readonly backend: ComputerBackend;
   readonly controlStatePath?: string;
@@ -296,6 +482,8 @@ export interface ComputerManagerOptions {
   /** Injected for tests; the lease is the only clock-dependent state here. */
   readonly now?: () => number;
   readonly leaseIdleMs?: number;
+  /** How long a conflicting lease claim waits; defaults to `COMPUTER_LEASE_WAIT_MS`. */
+  readonly leaseWaitMs?: number;
   /** Injected for tests, so action-screenshot tests do not sleep for real. */
   readonly actionSettleMs?: number;
   /** Injected for tests, so window-churn tests do not wait out the real window. */
@@ -350,25 +538,44 @@ export type ComputerActionObservation =
   | { readonly targetWindowClosed: true };
 
 /**
- * Refusal raised when another thread owns the desktop. It extends
- * `ComputerBackendError` so every existing catch site keeps classifying it,
- * and explicitly discourages immediate retries: time spent repeating the
- * same refusal cannot free the other conversation's desktop lease.
+ * Refusal raised when another conversation kept an application, a window or
+ * the whole desktop for longer than a conflicting claim may wait
+ * (`COMPUTER_LEASE_WAIT_MS`). It extends `ComputerBackendError` so every
+ * existing catch site keeps classifying it. Nothing was sent, and the call is
+ * retryable: the other conversation keeps its lease only until its turn ends.
+ * The message names the contested app or window when it is known, never the
+ * other conversation (thread labels do not cross conversations).
  */
 export class ComputerLeaseError extends ComputerBackendError {
   readonly code = "computer_controlled_by_other_thread";
+  /** How long the refused claim waited before giving up. */
+  readonly waitedMs: number;
 
-  constructor(targetOnly = false) {
+  constructor(
+    input: {
+      /** An app or window lease, rather than the whole desktop. */
+      readonly targetOnly?: boolean;
+      /** The contested app or window, when known (e.g. "Safari"). */
+      readonly target?: string;
+      readonly waitedMs?: number;
+    } = {},
+  ) {
+    const waitedMs = Math.max(0, input.waitedMs ?? 0);
+    const subject = input.target
+      ? `${JSON.stringify(input.target)} is`
+      : input.targetOnly
+        ? "This application or window is"
+        : "The shared pointer and focused keyboard are";
+    const waited = waitedMs > 0 ? `waited ${Math.round(waitedMs / 1000)} s and ` : "";
     super(
-      (targetOnly
-        ? "This application or window is controlled by another conversation; "
-        : "The shared pointer and focused keyboard are controlled by another conversation; ") +
-        "no input was sent. Do not retry this blocked action or switch tools to bypass " +
-        "the lease. Wait until that conversation's turn ends. Reading the desktop still " +
-        "works. Background actions on independently owned applications remain available.",
-      { retryable: false },
+      `${subject} being used by another conversation; ${waited}no input was sent. ` +
+        "That conversation keeps it until its turn ends. Retry later, or work on another " +
+        "application meanwhile; reading the desktop still works. Do not switch tools to " +
+        "bypass the lease.",
+      { retryable: true },
     );
     this.name = "ComputerLeaseError";
+    this.waitedMs = waitedMs;
   }
 }
 
@@ -416,6 +623,18 @@ export class ComputerManager {
   private readonly backendUnsubscribe?: () => void;
   private readonly now: () => number;
   private readonly leaseIdleMs: number;
+  private readonly leaseWaitMs: number;
+  /**
+   * The thread whose agent tool call (`withAgentActivity`) is running in this
+   * async context. Only such calls wait for another conversation's lease:
+   * their turn's Stop and revocation end the wait. A bare manager call keeps
+   * the immediate refusal.
+   */
+  private readonly agentCallOwner = new AsyncLocalStorage<string>();
+  /** Claims waiting for another conversation's lease, oldest first. */
+  private readonly leaseWaiters: LeaseWaiter[] = [];
+  /** Resolved (and replaced) whenever a lease is released, evicted or a waiter leaves. */
+  private leaseChange = leaseChangeSignal();
   private readonly actionSettleMs: number;
   private readonly windowsPublishDebounceMs: number;
   private readonly measureScrollTravel: (
@@ -1113,6 +1332,7 @@ export class ComputerManager {
     this.computerId = options.backend.computerId;
     this.now = options.now ?? Date.now;
     this.leaseIdleMs = options.leaseIdleMs ?? COMPUTER_LEASE_IDLE_MS;
+    this.leaseWaitMs = Math.max(0, options.leaseWaitMs ?? COMPUTER_LEASE_WAIT_MS);
     this.actionSettleMs =
       options.actionSettleMs ?? cuaActionSettleMsOverride() ?? COMPUTER_ACTION_SETTLE_MS;
     this.windowsPublishDebounceMs =
@@ -3629,9 +3849,13 @@ export class ComputerManager {
     action: () => Promise<A>,
     signal?: AbortSignal,
     turnId?: string,
-    operationKey?: string,
+    lane?: string | ComputerAgentLane,
   ): Promise<A> {
     assertDesktopOperationAdmission();
+    // A deferred desktop-lease release found by a call that ran in a narrower
+    // lane: releasing takes the whole desktop, which that lane cannot widen
+    // to, so it runs once the lane is given back.
+    let pendingRelease: { readonly owner: string; readonly turnId: string | undefined } | undefined;
     let authority = this.authorityRevocations.get(threadId);
     if (authority?.signal.aborted) {
       // A revoked broadcast must not poison later calls: mint fresh so a
@@ -3670,7 +3894,9 @@ export class ComputerManager {
       this.agentCallsInFlight.set(owner, depth);
       if (depth === 1) this.publishCached(owner);
       try {
-        return await withDesktopOperationSignal(controller.signal, action);
+        return await this.agentCallOwner.run(owner, () =>
+          withDesktopOperationSignal(controller.signal, action),
+        );
       } finally {
         live.delete(controller);
         if (live.size === 0) this.activeAuthorities.delete(threadId);
@@ -3678,6 +3904,8 @@ export class ComputerManager {
         if (remaining === 0) {
           this.agentCallsInFlight.delete(owner);
           this.releaseBackgroundControl(owner, undefined, true);
+          // An idle owner's leases can now go stale: waiters re-check expiry.
+          this.notifyLeaseChange();
           if (
             this.lease?.threadId !== owner &&
             ![...this.backgroundLeases.values()].some((lease) => lease.threadId === owner)
@@ -3690,11 +3918,13 @@ export class ComputerManager {
             // the turn it was requested for — and an anonymous request only
             // while the lease is still anonymous. A renewed lease drops it
             // rather than letting a dead turn's intent kill live work.
-            const stillMatches =
-              requestedTurnId === undefined
-                ? this.lease.turnId === undefined
-                : this.lease.turnId === requestedTurnId;
-            if (stillMatches) {
+            const stillMatches = this.deferredReleaseMatches(this.lease, requestedTurnId);
+            if (
+              stillMatches &&
+              !computerLanesCover(this.operations.currentLanes() ?? [], computerExclusiveLane())
+            ) {
+              pendingRelease = { owner, turnId: requestedTurnId };
+            } else if (stillMatches) {
               await withoutDesktopCancellation(() =>
                 this.releaseDesktopControl(owner, requestedTurnId),
               );
@@ -3713,11 +3943,87 @@ export class ComputerManager {
     };
     // Entered around the queue handoff so a call's total covers its wait for
     // the desktop, not just the work after it wins.
-    return this.withComputerCall(() =>
-      operationKey
-        ? this.operations.runScoped(operationKey, execute, admissionSignal)
-        : this.operations.run(execute, admissionSignal),
-    );
+    const claims =
+      lane === undefined
+        ? computerExclusiveLane()
+        : typeof lane === "string"
+          ? undefined
+          : lane.kind === "read"
+            ? computerReadLane()
+            : lane.kind === "app"
+              ? computerAppLane(lane.pid)
+              : lane.kind === "exclusive"
+                ? computerExclusiveLane()
+                : undefined;
+    const scopedKey =
+      typeof lane === "string" ? lane : lane?.kind === "scoped" ? lane.key : undefined;
+    const result = await this.withComputerCall(() =>
+      scopedKey !== undefined
+        ? this.operations.runScoped(scopedKey, execute, admissionSignal)
+        : this.operations.runLanes(claims ?? computerExclusiveLane(), execute, admissionSignal),
+    ).finally(async () => {
+      if (pendingRelease) await this.runDeferredDesktopRelease(pendingRelease);
+    });
+    return result;
+  }
+
+  private deferredReleaseMatches(
+    lease: DesktopLease,
+    requestedTurnId: string | undefined,
+  ): boolean {
+    return requestedTurnId === undefined
+      ? lease.turnId === undefined
+      : lease.turnId === requestedTurnId;
+  }
+
+  /**
+   * The deferred desktop-lease release of a call that ran in a narrower lane,
+   * run after that lane is released. The turn checks repeat: another call of
+   * the same thread may have renewed or already released the lease meanwhile,
+   * and a call still in flight defers it again to its own end.
+   */
+  private async runDeferredDesktopRelease(pending: {
+    readonly owner: string;
+    readonly turnId: string | undefined;
+  }): Promise<void> {
+    const lease = this.lease;
+    if (lease?.threadId !== pending.owner || !lease.releaseRequested) return;
+    if (lease.releaseRequestedTurnId !== pending.turnId) return;
+    if (!this.deferredReleaseMatches(lease, pending.turnId)) return;
+    await withoutDesktopCancellation(() =>
+      this.releaseDesktopControl(pending.owner, pending.turnId),
+    ).catch(() => undefined);
+  }
+
+  /**
+   * The lane an agent tool call runs in. Observation tools read beside
+   * everything but whole-desktop work. Plain single-target input delivered in
+   * the background to an exact window of a known application runs in that
+   * application's lane, beside other applications. Everything else — and
+   * anything this cannot prove — holds the whole desktop, as before.
+   *
+   * The inner input wrappers re-resolve the target inside the lane and refuse
+   * (nothing sent) when the window no longer belongs to the scheduled app.
+   */
+  agentToolLane(input: {
+    readonly tool: string;
+    readonly windowId?: string | undefined;
+    readonly foreground: boolean;
+  }): ComputerAgentLane {
+    if (COMPUTER_READ_LANE_TOOLS.has(input.tool)) return { kind: "read" };
+    if (input.foreground || !input.windowId || !COMPUTER_APP_LANE_TOOLS.has(input.tool))
+      return { kind: "exclusive" };
+    // The same gate the input wrappers apply before they choose a background
+    // route; without it they fall back to whole-desktop control.
+    if (this.backend.exactTargetBackgroundInput !== true) return { kind: "exclusive" };
+    // Without focus-neutral text, typing takes the desktop's keyboard.
+    if (input.tool === "computer_type_text" && !this.supportsFocusNeutralSemanticText)
+      return { kind: "exclusive" };
+    const pid = this.lastKnownWindows.get(input.windowId)?.pid ?? pidFromWindowId(input.windowId);
+    if (pid !== undefined && Number.isSafeInteger(pid) && pid > 0) return { kind: "app", pid };
+    // A semantic text write keeps its window-scoped lane when the app is unknown.
+    if (input.tool === "computer_type_text") return { kind: "scoped", key: input.windowId };
+    return { kind: "exclusive" };
   }
 
   /**
@@ -3908,13 +4214,23 @@ export class ComputerManager {
     assertDesktopOperationAdmission();
     const owner = agentThreadId(threadId);
     if (owner === undefined) this.lastUserDesktopInputAt = this.now();
-    // Process-scoped native input and its observation remain one exclusive
-    // queue transaction. Only logical ownership is narrower than the desktop.
-    return this.operations.run(async () => {
+    // Process-scoped native input and its observation remain one queue
+    // transaction: the whole desktop, or — inside an agent call scheduled in
+    // this application's lane — that lane, which then must be the target's.
+    const scheduledPid = heldAppLanePid(this.operations.currentLanes());
+    const body = async (): Promise<A> => {
       this.assertControlAuthority(owner);
       this.assertInputNotPaused(owner);
-      const target = await resolve();
-      assertDesktopOperationActive();
+      const target = await this.awaitLeaseTurn(
+        owner,
+        async () => {
+          const resolved = await resolve();
+          assertDesktopOperationActive();
+          assertScheduledApp(scheduledPid, resolved.pid);
+          return resolved;
+        },
+        (resolved): LeaseScope => ({ kind: "target", target: resolved }),
+      );
       this.claimBackgroundControl(owner, target);
       this.engageBackend();
       try {
@@ -3923,7 +4239,174 @@ export class ComputerManager {
         this.recordInputPause(owner, error);
         throw error;
       }
-    });
+    };
+    return scheduledPid !== undefined
+      ? this.operations.runLanes(computerAppLane(scheduledPid), body)
+      : this.operations.run(body);
+  }
+
+  /**
+   * Wait for this claim's turn at another conversation's lease, then hand back
+   * the freshly prepared target. Runs at the claim site: after authorization
+   * (no approval repeats) and before dispatch (nothing was sent).
+   *
+   * Waiters queue FIFO: a claim proceeds only when no live lease of another
+   * conversation conflicts with it and no earlier waiter for a conflicting
+   * target still waits — unless that waiter is waiting for this very owner,
+   * which is ahead of it. While waiting the operation gives back its lane
+   * (`yieldLanes`), so the owner can still act on the contested app; once the
+   * lane is back the target is prepared (resolved) and checked again. Every
+   * lease release or eviction wakes the waiters, and so does the conflicting
+   * lease's idle-expiry time. The wait ends with a retryable
+   * `ComputerLeaseError` after `leaseWaitMs`, and at once on the operation's
+   * signal (Stop, revoked turn, shutdown).
+   */
+  private async awaitLeaseTurn<T>(
+    owner: string | undefined,
+    prepare: () => Promise<T>,
+    scopeOf: (prepared: T) => LeaseScope,
+  ): Promise<T> {
+    let prepared = await prepare();
+    if (owner === undefined) return prepared;
+    let waiter: LeaseWaiter | undefined;
+    let deadline: { expired: boolean; readonly promise: Promise<void>; cancel(): void } | undefined;
+    try {
+      for (;;) {
+        const scope = scopeOf(prepared);
+        const conflict = this.leaseConflict(owner, scope, waiter);
+        if (!conflict) return prepared;
+        if (!this.mayWaitForLease(owner) || deadline?.expired) {
+          throw new ComputerLeaseError({
+            targetOnly: conflict.targetOnly,
+            ...(conflict.label ? { target: conflict.label } : {}),
+            waitedMs: deadline ? this.leaseWaitMs : 0,
+          });
+        }
+        if (waiter) waiter.scope = scope;
+        else {
+          waiter = { owner, scope };
+          this.leaseWaiters.push(waiter);
+          deadline = leaseDeadline(this.leaseWaitMs);
+        }
+        const changed = this.leaseChange.promise;
+        const signal = desktopOperationSignal();
+        const until = deadline!.promise;
+        await this.operations.yieldLanes(() =>
+          sleepForLease(changed, until, this.expiryDelay(conflict), signal),
+        );
+        assertDesktopOperationActive();
+        // The desktop may have changed while this claim held no lane.
+        this.assertControlAuthority(owner);
+        this.assertInputNotPaused(owner);
+        prepared = await prepare();
+      }
+    } finally {
+      deadline?.cancel();
+      if (waiter) {
+        const index = this.leaseWaiters.indexOf(waiter);
+        if (index >= 0) this.leaseWaiters.splice(index, 1);
+        // Later waiters may have been queued only behind this one.
+        this.notifyLeaseChange();
+      }
+    }
+  }
+
+  /** Only an agent tool call of this owner waits; see `agentCallOwner`. */
+  private mayWaitForLease(owner: string): boolean {
+    return this.leaseWaitMs > 0 && this.agentCallOwner.getStore() === owner;
+  }
+
+  private expiryDelay(conflict: LeaseConflict): number | undefined {
+    return conflict.expiresAtMs === undefined
+      ? undefined
+      : Math.max(0, conflict.expiresAtMs - this.now());
+  }
+
+  /** Wakes every lease waiter to re-check; the one notify point for lease changes. */
+  private notifyLeaseChange(): void {
+    const current = this.leaseChange;
+    this.leaseChange = leaseChangeSignal();
+    current.fire();
+  }
+
+  /** Drop idle background leases, the crash backstop, and wake waiters. */
+  private evictStaleBackgroundLeases(now: number): void {
+    let evicted = false;
+    for (const [key, lease] of this.backgroundLeases) {
+      if (!this.isLeaseStale(lease, now)) continue;
+      this.backgroundLeases.delete(key);
+      this.clearEvictedBackgroundOwner(lease.threadId);
+      evicted = true;
+    }
+    if (evicted) this.notifyLeaseChange();
+  }
+
+  /** Live leases of other conversations that `scope` cannot run beside. */
+  private conflictingLeases(owner: string, scope: LeaseScope, now: number): DesktopLease[] {
+    const found: DesktopLease[] = [];
+    const desktop = this.lease;
+    if (desktop && desktop.threadId !== owner && !this.isLeaseStale(desktop, now))
+      found.push(desktop);
+    for (const lease of this.backgroundLeases.values()) {
+      if (lease.threadId === owner || this.isLeaseStale(lease, now)) continue;
+      if (scope.kind === "target" && !backgroundTargetsConflict(scope.target, lease.target))
+        continue;
+      found.push(lease);
+    }
+    return found;
+  }
+
+  private leaseConflict(
+    owner: string,
+    scope: LeaseScope,
+    waiter: LeaseWaiter | undefined,
+  ): LeaseConflict | undefined {
+    const now = this.now();
+    this.evictStaleBackgroundLeases(now);
+    const targetOnly = scope.kind === "target";
+    const label = scope.kind === "target" ? this.backgroundTargetLabel(scope.target) : undefined;
+    const held = this.conflictingLeases(owner, scope, now);
+    if (held.length > 0) {
+      const expiries = held.map((lease) =>
+        (this.agentCallsInFlight.get(lease.threadId) ?? 0) === 0
+          ? lease.lastActivityMs + this.leaseIdleMs
+          : undefined,
+      );
+      const expiresAtMs = expiries.every((value) => value !== undefined)
+        ? Math.max(...expiries)
+        : undefined;
+      return {
+        // A target claim blocked by the desktop lease is blocked by the pointer.
+        targetOnly: targetOnly && held.every((lease) => lease !== this.lease),
+        ...(label ? { label } : {}),
+        ...(expiresAtMs !== undefined ? { expiresAtMs } : {}),
+      };
+    }
+    for (const earlier of this.leaseWaiters) {
+      if (earlier === waiter) break;
+      if (earlier.owner === owner || !leaseScopesConflict(earlier.scope, scope)) continue;
+      // A waiter blocked by this owner's own lease is behind this owner.
+      if (
+        this.conflictingLeases(earlier.owner, earlier.scope, now).some(
+          (lease) => lease.threadId === owner,
+        )
+      )
+        continue;
+      return { targetOnly, ...(label ? { label } : {}) };
+    }
+    return undefined;
+  }
+
+  /** The app (or window) name a lease timeout may show; never a conversation. */
+  private backgroundTargetLabel(target: BackgroundControlTarget): string | undefined {
+    const byWindow = target.windowId ? this.lastKnownWindows.get(target.windowId) : undefined;
+    if (byWindow?.appName) return byWindow.appName;
+    if (target.pid !== undefined) {
+      for (const window of this.lastKnownWindows.values())
+        if (window.pid === target.pid && window.appName) return window.appName;
+    }
+    if (byWindow?.title) return byWindow.title;
+    return undefined;
   }
 
   private claimBackgroundControl(owner: string | undefined, target: BackgroundControlTarget): void {
@@ -3935,17 +4418,14 @@ export class ComputerManager {
     if (this.lease && this.isLeaseStale(this.lease, now)) {
       this.authorityTurns.delete(this.lease.threadId);
       this.lease = null;
+      this.notifyLeaseChange();
     }
+    this.evictStaleBackgroundLeases(now);
     for (const [key, lease] of this.backgroundLeases) {
-      if (this.isLeaseStale(lease, now)) {
-        this.backgroundLeases.delete(key);
-        this.clearEvictedBackgroundOwner(lease.threadId);
-        continue;
-      }
       const sameProcess = target.pid !== undefined && target.pid === lease.target.pid;
       const conflict =
         target.key === key || (sameProcess && (!target.windowId || !lease.target.windowId));
-      if (conflict && lease.threadId !== owner) throw new ComputerLeaseError(true);
+      if (conflict && lease.threadId !== owner) throw new ComputerLeaseError({ targetOnly: true });
     }
     const claiming = currentComputerTask();
     const turnId =
@@ -4004,7 +4484,10 @@ export class ComputerManager {
       const state = this.threads.get(owner);
       if (state) state.paneSurfaced = false;
     }
-    if (changed) this.publishOwnershipCached();
+    if (changed) {
+      this.notifyLeaseChange();
+      this.publishOwnershipCached();
+    }
   }
 
   private withBackgroundWindowControl<A>(
@@ -4019,16 +4502,27 @@ export class ComputerManager {
     // stamp it so a foreground excursion cannot raise a window into the middle
     // of their interaction.
     if (owner === undefined) this.lastUserDesktopInputAt = this.now();
-    return this.operations.runScoped(windowId, async () => {
+    // Inside an agent call scheduled in an application's lane, the window
+    // must belong to that application; the window lane nests under it.
+    const scheduledPid = heldAppLanePid(this.operations.currentLanes());
+    const body = async (): Promise<A> => {
       this.assertControlAuthority(owner);
       this.assertInputNotPaused(owner);
-      const target = await this.resolveWindowTarget(threadId, windowId);
-      assertDesktopOperationActive();
-      this.claimBackgroundControl(owner, {
-        key: `window:${windowId}`,
-        windowId,
-        ...(target.pid !== undefined ? { pid: target.pid } : {}),
-      });
+      const claim = await this.awaitLeaseTurn(
+        owner,
+        async (): Promise<BackgroundControlTarget> => {
+          const target = await this.resolveWindowTarget(threadId, windowId);
+          assertDesktopOperationActive();
+          assertScheduledApp(scheduledPid, target.pid);
+          return {
+            key: `window:${windowId}`,
+            windowId,
+            ...(target.pid !== undefined ? { pid: target.pid } : {}),
+          };
+        },
+        (target): LeaseScope => ({ kind: "target", target }),
+      );
+      this.claimBackgroundControl(owner, claim);
       this.engageBackend();
       try {
         return await this.withComputerCall(action);
@@ -4036,7 +4530,10 @@ export class ComputerManager {
         this.recordInputPause(owner, error);
         throw error;
       }
-    });
+    };
+    return scheduledPid !== undefined
+      ? this.operations.runLanes(computerWindowLane(windowId, scheduledPid), body)
+      : this.operations.runScoped(windowId, body);
   }
 
   /**
@@ -4066,8 +4563,11 @@ export class ComputerManager {
     // of their interaction. Stamped before the queue so a queued agent call
     // sees the interaction that preceded it.
     if (owner === undefined) this.lastUserDesktopInputAt = this.now();
+    // A call that will not wait is refused before the queue, so it is not
+    // parked behind the owner's own in-flight work only to be refused.
     if (
       owner &&
+      !this.mayWaitForLease(owner) &&
       this.lease &&
       this.lease.threadId !== owner &&
       !this.isLeaseStale(this.lease, this.now())
@@ -4080,6 +4580,12 @@ export class ComputerManager {
       // lease, clear focus, or announce itself — all of which claimDesktopControl
       // would otherwise do ahead of a refusal that sends nothing.
       this.assertInputNotPaused(owner);
+      // Another conversation's lease is waited out here, holding no lane.
+      await this.awaitLeaseTurn(
+        owner,
+        async (): Promise<LeaseScope> => ({ kind: "desktop" }),
+        (scope) => scope,
+      );
       // Admission belongs before the lease claim: even clearFocusWindow and
       // cursor setup may cold-start a native process. A refused foreground
       // call must not start it, take the lease, or publish a driving session.
@@ -4159,11 +4665,9 @@ export class ComputerManager {
     this.preActionWindowIds =
       this.lastKnownWindowIds ?? (await this.readWindows().then(windowIdSet, () => undefined));
     const now = this.now();
-    for (const [key, lease] of this.backgroundLeases) {
-      if (this.isLeaseStale(lease, now)) {
-        this.backgroundLeases.delete(key);
-        this.clearEvictedBackgroundOwner(lease.threadId);
-      } else if (lease.threadId !== owner) throw new ComputerLeaseError();
+    this.evictStaleBackgroundLeases(now);
+    for (const lease of this.backgroundLeases.values()) {
+      if (lease.threadId !== owner) throw new ComputerLeaseError();
     }
     const held = this.lease;
     const heldStale = held !== null && this.isLeaseStale(held, now);
@@ -4205,6 +4709,7 @@ export class ComputerManager {
         : {}),
     };
     if (heldStale) {
+      this.notifyLeaseChange();
       this.recordLeaseLifecycle("stale-reclaimed", held, {
         idleMs: now - held.lastActivityMs,
         nextThreadId: owner,
@@ -4343,6 +4848,7 @@ export class ComputerManager {
       await this.backend.clearFocusWindow?.();
       this.recordLeaseLifecycle("released", this.lease);
       this.lease = null;
+      this.notifyLeaseChange();
       // The released turn is no longer this thread's authority: a later
       // turnId-less caller must claim anonymously, not inherit a stale
       // stamp a duplicate release could still match.
@@ -5276,7 +5782,11 @@ export class ComputerManager {
       ...(this.activity && this.lease?.threadId === threadId ? { activity: this.activity } : {}),
       ...(state.inputPause ? { inputPause: state.inputPause } : {}),
       controlledByOtherThread: this.lease !== null && this.lease.threadId !== threadId,
-      ...(backgroundOwners.size > 1 ? { sharedPreviewUnavailable: true } : {}),
+      // A backend that previews per task shows each conversation its own
+      // preview; only a shared one is unavailable while several own apps.
+      ...(backgroundOwners.size > 1 && this.backend.perTaskPreview !== true
+        ? { sharedPreviewUnavailable: true }
+        : {}),
       ...(controlOwner
         ? {
             controlOwnerThreadId: ThreadId.make(controlOwner),

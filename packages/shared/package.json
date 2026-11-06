@@ -562,6 +562,10 @@
       "types": "./src/cuaActionDiagnostics.ts",
       "import": "./src/cuaActionDiagnostics.ts"
     },
+    "./computerLanes": {
+      "types": "./src/computerLanes.ts",
+      "import": "./src/computerLanes.ts"
+    },
     "./cuaDriverProtocol": {
       "types": "./src/cuaDriverProtocol.ts",
       "import": "./src/cuaDriverProtocol.ts"

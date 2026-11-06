@@ -15,7 +15,12 @@ import {
   type ComputerBackendActionResult,
 } from "./ComputerBackend.ts";
 import { computerApprovalGate } from "./ComputerApprovalGate.ts";
-import { COMPUTER_CONTROL_ENABLE_TIMEOUT_MS, ComputerManager } from "./ComputerManager.ts";
+import {
+  COMPUTER_CONTROL_ENABLE_TIMEOUT_MS,
+  COMPUTER_LEASE_WAIT_MS,
+  ComputerManager,
+  type ComputerAgentLane,
+} from "./ComputerManager.ts";
 import {
   ComputerCallContext,
   ComputerCallTiming,
@@ -447,6 +452,502 @@ describe("ComputerManager background task ownership", () => {
       const reads = backend.callsFor("listWindows").length;
       expect(manager.observedAppNames()).toEqual(["Editor B", "Editor A"]);
       expect(backend.callsFor("listWindows")).toHaveLength(reads);
+    } finally {
+      await manager.dispose();
+    }
+  });
+});
+
+/** Lets queued promise continuations run without advancing any timer. */
+async function flushMicrotasks(rounds = 20): Promise<void> {
+  for (let index = 0; index < rounds; index += 1) await Promise.resolve();
+}
+
+/** A press on the fake that parks until released, per call. */
+function parkedPresses(backend: FakeComputerBackend) {
+  const parked: Array<{ readonly windowId: string | undefined; readonly finish: () => void }> = [];
+  const started: string[] = [];
+  vi.spyOn(backend, "pressKey").mockImplementation((async (_key: string, windowId?: string) => {
+    started.push(windowId ?? "");
+    const gate = deferred();
+    parked.push({ windowId, finish: gate.resolve });
+    await gate.promise;
+    return {};
+  }) as never);
+  return { parked, started };
+}
+
+describe("ComputerManager parallel lanes", () => {
+  const APP_A: ComputerAgentLane = { kind: "app", pid: 110 };
+  const APP_B: ComputerAgentLane = { kind: "app", pid: 220 };
+  const READ: ComputerAgentLane = { kind: "read" };
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("schedules reads, background input on a known app, and everything else", async () => {
+    const backend = backgroundTargetBackend();
+    const manager = new ComputerManager({ backend, actionSettleMs: 0 });
+    try {
+      await manager.listWindows();
+      const lane = (tool: string, windowId?: string, foreground = false) =>
+        manager.agentToolLane({ tool, windowId, foreground });
+      expect(lane("computer_get_state")).toEqual(READ);
+      expect(lane("computer_screenshot", "editor-a")).toEqual(READ);
+      expect(lane("computer_press_key", "editor-a")).toEqual(APP_A);
+      expect(lane("computer_type_text", "editor-b")).toEqual(APP_B);
+      expect(lane("computer_click", "editor-a-other")).toEqual(APP_A);
+      // Cua window ids carry their pid when the window is not cached yet.
+      expect(lane("computer_set_value", "cua:4242:7")).toEqual({ kind: "app", pid: 4242 });
+      // Foreground, whole-desktop tools, unknown targets and no window: exclusive.
+      expect(lane("computer_press_key", "editor-a", true)).toEqual({ kind: "exclusive" });
+      for (const tool of [
+        "computer_drag",
+        "computer_paste",
+        "computer_read_clipboard",
+        "computer_write_clipboard",
+        "computer_launch_app",
+        "computer_activate_window",
+        "computer_invoke_menu",
+        "computer_set_window_frame",
+        "computer_kill_app",
+        "computer_run",
+        "computer_spaces",
+      ])
+        expect(lane(tool, "editor-a")).toEqual({ kind: "exclusive" });
+      expect(lane("computer_click")).toEqual({ kind: "exclusive" });
+      expect(lane("computer_click", "unknown-window")).toEqual({ kind: "exclusive" });
+      // Semantic text on an unknown app keeps its window-scoped lane.
+      expect(lane("computer_type_text", "unknown-window")).toEqual({
+        kind: "scoped",
+        key: "unknown-window",
+      });
+      // A backend that cannot prove background targets never gets an app lane.
+      Object.assign(backend, { exactTargetBackgroundInput: false });
+      expect(lane("computer_press_key", "editor-a")).toEqual({ kind: "exclusive" });
+    } finally {
+      await manager.dispose();
+    }
+  });
+
+  it("runs another conversation's reads while a background action is in flight", async () => {
+    const backend = backgroundTargetBackend();
+    const { parked, started } = parkedPresses(backend);
+    const manager = new ComputerManager({ backend, actionSettleMs: 0 });
+    try {
+      await manager.listWindows();
+      const active = manager.withAgentActivity(
+        "a",
+        () => manager.pressKey("a", "enter", "editor-a"),
+        undefined,
+        "turn-a",
+        APP_A,
+      );
+      await vi.waitFor(() => expect(started).toEqual(["editor-a"]));
+      await expect(
+        manager.withAgentActivity(
+          "b",
+          () => manager.getState({ windowId: "editor-b" }),
+          undefined,
+          "turn-b",
+          READ,
+        ),
+      ).resolves.toMatchObject({ computerId: backend.computerId });
+      await expect(
+        manager.withAgentActivity("b", () => manager.listWindows(), undefined, "turn-b", READ),
+      ).resolves.toMatchObject({ computerId: backend.computerId });
+      parked[0]!.finish();
+      await active;
+    } finally {
+      for (const entry of parked) entry.finish();
+      await manager.dispose();
+    }
+  });
+
+  it("overlaps different apps across conversations and keeps one app's calls in order", async () => {
+    const backend = backgroundTargetBackend();
+    const { parked, started } = parkedPresses(backend);
+    const manager = new ComputerManager({ backend, actionSettleMs: 0 });
+    try {
+      await manager.listWindows();
+      const first = manager.withAgentActivity(
+        "a",
+        () => manager.pressKey("a", "enter", "editor-a"),
+        undefined,
+        "turn-a",
+        APP_A,
+      );
+      await vi.waitFor(() => expect(started).toEqual(["editor-a"]));
+      const other = manager.withAgentActivity(
+        "b",
+        () => manager.pressKey("b", "enter", "editor-b"),
+        undefined,
+        "turn-b",
+        APP_B,
+      );
+      // B's app does not wait for A's in-flight input.
+      await vi.waitFor(() => expect(started).toEqual(["editor-a", "editor-b"]));
+      const second = manager.withAgentActivity(
+        "a",
+        () => manager.pressKey("a", "tab", "editor-a-other"),
+        undefined,
+        "turn-a",
+        APP_A,
+      );
+      await flushMicrotasks();
+      // The same app's next call waits for the first one.
+      expect(started).toEqual(["editor-a", "editor-b"]);
+      parked[1]!.finish();
+      await other;
+      expect(started).toEqual(["editor-a", "editor-b"]);
+      parked[0]!.finish();
+      await first;
+      await vi.waitFor(() => expect(started).toEqual(["editor-a", "editor-b", "editor-a-other"]));
+      parked[2]!.finish();
+      await second;
+    } finally {
+      for (const entry of parked) entry.finish();
+      await manager.dispose();
+    }
+  });
+
+  it("keeps whole-desktop work exclusive against app lanes and later reads", async () => {
+    const backend = backgroundTargetBackend();
+    const { parked, started } = parkedPresses(backend);
+    const manager = new ComputerManager({ backend, actionSettleMs: 0 });
+    const order: string[] = [];
+    try {
+      await manager.listWindows();
+      const background = manager.withAgentActivity(
+        "a",
+        () => manager.pressKey("a", "enter", "editor-a"),
+        undefined,
+        "turn-a",
+        APP_A,
+      );
+      await vi.waitFor(() => expect(started).toEqual(["editor-a"]));
+      const exclusive = manager.withAgentActivity(
+        "b",
+        async () => {
+          order.push("exclusive");
+          return manager.listWindows();
+        },
+        undefined,
+        "turn-b",
+        { kind: "exclusive" },
+      );
+      const read = manager.withAgentActivity(
+        "c",
+        async () => {
+          order.push("read");
+          return manager.listWindows();
+        },
+        undefined,
+        "turn-c",
+        READ,
+      );
+      const otherApp = manager.withAgentActivity(
+        "c",
+        async () => {
+          order.push("other-app");
+        },
+        undefined,
+        "turn-c",
+        APP_B,
+      );
+      await flushMicrotasks();
+      // The exclusive call waits for the in-flight app work; the read and the
+      // other app queued behind it wait for the exclusive call (FIFO).
+      expect(order).toEqual([]);
+      parked[0]!.finish();
+      await Promise.all([background, exclusive, read, otherApp]);
+      expect(order[0]).toBe("exclusive");
+      expect(order.slice(1).toSorted()).toEqual(["other-app", "read"]);
+    } finally {
+      for (const entry of parked) entry.finish();
+      await manager.dispose();
+    }
+  });
+
+  it("refuses a target that belongs to another app than the scheduled lane, sending nothing", async () => {
+    const backend = backgroundTargetBackend();
+    const manager = new ComputerManager({ backend, actionSettleMs: 0 });
+    try {
+      await manager.listWindows();
+      await expect(
+        manager.withAgentActivity(
+          "a",
+          () => manager.pressKey("a", "enter", "editor-a"),
+          undefined,
+          "turn-a",
+          APP_B,
+        ),
+      ).rejects.toMatchObject({
+        code: "computer_target_invalid",
+        message: expect.stringContaining("nothing was sent"),
+      });
+      await expect(
+        manager.withAgentActivity(
+          "a",
+          () => manager.setValue("a", { windowId: "editor-a", role: "AXTextArea" }, "x"),
+          undefined,
+          "turn-a",
+          APP_B,
+        ),
+      ).rejects.toMatchObject({ code: "computer_target_invalid" });
+      // Whole-desktop input cannot widen out of an app lane either.
+      await expect(
+        manager.withAgentActivity(
+          "a",
+          () => manager.writeClipboard("a", "x"),
+          undefined,
+          "turn-a",
+          APP_A,
+        ),
+      ).rejects.toThrow("cannot switch targets");
+      expect(backend.callsFor("pressKey")).toHaveLength(0);
+      expect(backend.callsFor("setValue")).toHaveLength(0);
+      expect(backend.callsFor("writeClipboard")).toHaveLength(0);
+    } finally {
+      await manager.dispose();
+    }
+  });
+
+  it("waits for another conversation's app until its turn ends, FIFO, holding no lane", async () => {
+    const backend = backgroundTargetBackend();
+    const press = vi.spyOn(backend, "pressKey");
+    const manager = new ComputerManager({ backend, actionSettleMs: 0 });
+    const done: string[] = [];
+    try {
+      await manager.listWindows();
+      await manager.withAgentActivity(
+        "a",
+        () => manager.pressKey("a", "enter", "editor-a"),
+        undefined,
+        "turn-a",
+        APP_A,
+      );
+      const waitB = manager
+        .withAgentActivity(
+          "b",
+          () => manager.pressKey("b", "b", "editor-a"),
+          undefined,
+          "turn-b",
+          APP_A,
+        )
+        .then(() => done.push("b"));
+      await flushMicrotasks();
+      const waitC = manager
+        .withAgentActivity(
+          "c",
+          () => manager.pressKey("c", "c", "editor-a-other"),
+          undefined,
+          "turn-c",
+          APP_A,
+        )
+        .then(() => done.push("c"));
+      await flushMicrotasks();
+      expect(press).toHaveBeenCalledTimes(1);
+      // The waiters hold no lane: the owner keeps working on the contested app.
+      await manager.withAgentActivity(
+        "a",
+        () => manager.pressKey("a", "tab", "editor-a"),
+        undefined,
+        "turn-a",
+        APP_A,
+      );
+      expect(press).toHaveBeenCalledTimes(2);
+      await manager.releaseDesktopControl("a", "turn-a");
+      await vi.waitFor(() => expect(done).toEqual(["b"]));
+      // C queued behind B and now waits for B's turn to end.
+      await flushMicrotasks();
+      expect(done).toEqual(["b"]);
+      await manager.releaseDesktopControl("b", "turn-b");
+      await Promise.all([waitB, waitC]);
+      expect(done).toEqual(["b", "c"]);
+      expect(press.mock.calls.map((call) => call[0])).toEqual(["enter", "tab", "b", "c"]);
+    } finally {
+      await manager.dispose();
+    }
+  });
+
+  it("gives up after the lease wait with a retryable refusal naming the app", async () => {
+    const backend = backgroundTargetBackend();
+    const manager = new ComputerManager({ backend, actionSettleMs: 0 });
+    try {
+      await manager.listWindows();
+      await manager.withAgentActivity(
+        "a",
+        () => manager.pressKey("a", "enter", "editor-a"),
+        undefined,
+        "turn-a",
+        APP_A,
+      );
+      vi.useFakeTimers();
+      const blocked = manager.withAgentActivity(
+        "b",
+        () => manager.pressKey("b", "enter", "editor-a"),
+        undefined,
+        "turn-b",
+        APP_A,
+      );
+      const refused = expect(blocked).rejects.toMatchObject({
+        code: "computer_controlled_by_other_thread",
+        retryable: true,
+        waitedMs: COMPUTER_LEASE_WAIT_MS,
+        message: expect.stringMatching(
+          /^"Editor A" is being used by another conversation; waited 45 s and no input was sent\./,
+        ),
+      });
+      await vi.advanceTimersByTimeAsync(COMPUTER_LEASE_WAIT_MS - 1_000);
+      expect(backend.callsFor("pressKey")).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await refused;
+      expect(backend.callsFor("pressKey")).toHaveLength(1);
+      vi.useRealTimers();
+      // The timed-out waiter left the queue: a later claim is not behind it.
+      await manager.releaseDesktopControl("a", "turn-a");
+      await manager.withAgentActivity(
+        "b",
+        () => manager.pressKey("b", "enter", "editor-a"),
+        undefined,
+        "turn-b",
+        APP_A,
+      );
+      expect(backend.callsFor("pressKey")).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+      await manager.dispose();
+    }
+  });
+
+  it("ends a lease wait at once on abort, and on a revoked thread, sending nothing", async () => {
+    const backend = backgroundTargetBackend();
+    const manager = new ComputerManager({ backend, actionSettleMs: 0 });
+    try {
+      await manager.listWindows();
+      await manager.withAgentActivity(
+        "a",
+        () => manager.pressKey("a", "enter", "editor-a"),
+        undefined,
+        "turn-a",
+        APP_A,
+      );
+      const stop = new AbortController();
+      const aborted = manager.withAgentActivity(
+        "b",
+        () => manager.pressKey("b", "enter", "editor-a"),
+        stop.signal,
+        "turn-b",
+        APP_A,
+      );
+      const abortedExpectation = expect(aborted).rejects.toBeDefined();
+      await flushMicrotasks();
+      stop.abort(new Error("stopped by the user"));
+      await abortedExpectation;
+      const revoked = manager.withAgentActivity(
+        "c",
+        () => manager.pressKey("c", "enter", "editor-a"),
+        undefined,
+        "turn-c",
+        APP_A,
+      );
+      const revokedExpectation = expect(revoked).rejects.toBeDefined();
+      await flushMicrotasks();
+      await manager.setControlEnabled("c", false);
+      await revokedExpectation;
+      // Neither waiter dispatched, even after the owner lets go.
+      await manager.releaseDesktopControl("a", "turn-a");
+      await flushMicrotasks();
+      expect(backend.callsFor("pressKey")).toHaveLength(1);
+      // And neither still blocks the queue.
+      await manager.withAgentActivity(
+        "d",
+        () => manager.pressKey("d", "enter", "editor-a"),
+        undefined,
+        "turn-d",
+        APP_A,
+      );
+      expect(backend.callsFor("pressKey")).toHaveLength(2);
+    } finally {
+      await manager.dispose();
+    }
+  });
+
+  it("waits for the desktop lease in whole-desktop work, then proceeds after the release", async () => {
+    const backend = backgroundTargetBackend();
+    const manager = new ComputerManager({ backend, actionSettleMs: 0 });
+    try {
+      await manager.withAgentActivity(
+        "a",
+        () => manager.writeClipboard("a", "mine"),
+        undefined,
+        "turn-a",
+      );
+      let written = false;
+      const waiting = manager
+        .withAgentActivity("b", () => manager.writeClipboard("b", "theirs"), undefined, "turn-b")
+        .then(() => {
+          written = true;
+        });
+      await flushMicrotasks();
+      expect(written).toBe(false);
+      // The waiter gave the whole desktop back: reads still run meanwhile.
+      await manager.withAgentActivity("a", () => manager.listWindows(), undefined, "turn-a", READ);
+      await manager.releaseDesktopControl("a", "turn-a");
+      await waiting;
+      expect(backend.callsFor("writeClipboard")).toHaveLength(2);
+    } finally {
+      await manager.dispose();
+    }
+  });
+
+  it("runs a deferred desktop-lease release after a read-lane call ends", async () => {
+    const backend = backgroundTargetBackend();
+    const manager = new ComputerManager({ backend, actionSettleMs: 0, leaseWaitMs: 0 });
+    const finish = deferred();
+    const started = deferred();
+    try {
+      await manager.withAgentActivity(
+        "a",
+        () => manager.writeClipboard("a", "mine"),
+        undefined,
+        "turn-a",
+      );
+      const reading = manager.withAgentActivity(
+        "a",
+        async () => {
+          started.resolve();
+          await finish.promise;
+          return manager.listWindows();
+        },
+        undefined,
+        "turn-a",
+        READ,
+      );
+      await started.promise;
+      // In flight: the release is deferred to the read's end.
+      await manager.releaseDesktopControl("a", "turn-a");
+      expect((await manager.getThreadState("b")).controlledByOtherThread).toBe(true);
+      finish.resolve();
+      await reading;
+      expect((await manager.getThreadState("b")).controlledByOtherThread).toBe(false);
+      // No wait needed (leaseWaitMs 0 would refuse at once otherwise).
+      await manager.writeClipboard("b", "theirs");
+    } finally {
+      finish.resolve();
+      await manager.dispose();
+    }
+  });
+
+  it("does not report a shared preview as unavailable on a per-task preview backend", async () => {
+    const backend = Object.assign(backgroundTargetBackend(), { perTaskPreview: true });
+    const manager = new ComputerManager({ backend, actionSettleMs: 0 });
+    try {
+      await manager.click("a", { windowId: "editor-a", x: 20, y: 50 });
+      await manager.click("b", { windowId: "editor-b", x: 420, y: 50 });
+      expect((await manager.getThreadState("b")).sharedPreviewUnavailable).toBeUndefined();
     } finally {
       await manager.dispose();
     }
@@ -1913,8 +2414,10 @@ describe("ComputerManager and FakeComputerBackend", () => {
     await manager.click("thread-a", { x: 10, y: 10 });
     await expect(manager.click("thread-b", { x: 20, y: 20 })).rejects.toMatchObject({
       code: "computer_controlled_by_other_thread",
-      retryable: false,
-      message: expect.stringMatching(/another conversation; no input was sent\. Do not retry/),
+      retryable: true,
+      message: expect.stringMatching(
+        /^The shared pointer and focused keyboard are being used by another conversation; no input was sent\. .*Retry later/,
+      ),
     });
 
     // Watching is safe while someone else drives, so nothing read-only is gated
@@ -2117,8 +2620,8 @@ describe("ComputerManager and FakeComputerBackend", () => {
       );
       await expect(manager.typeText("thread-b", "blocked text")).rejects.toMatchObject({
         code: "computer_controlled_by_other_thread",
-        retryable: false,
-        message: expect.stringContaining("Do not retry"),
+        retryable: true,
+        message: expect.stringContaining("Retry later"),
       });
       nowMs = 2_000;
       await manager.withAgentActivity(

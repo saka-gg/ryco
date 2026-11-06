@@ -52,6 +52,66 @@ function tapTargetKey(target: CuaPreviewTarget): string {
   return `${cuaComputerTaskKey(target.task)}:${target.pid}:${target.windowId}`;
 }
 
+/** Whether ending `ended` covers `candidate`; without a turnId it covers every turn of the thread. */
+function taskEndCovers(ended: CuaComputerTask, candidate: CuaComputerTask): boolean {
+  return (
+    candidate.threadId === ended.threadId &&
+    (ended.turnId === undefined || candidate.turnId === ended.turnId)
+  );
+}
+
+/** The task formally ended; its failure memory ends with it. */
+function forgetDeadTargets(deadTargets: Set<string>, task: CuaComputerTask): void {
+  const deadPrefix =
+    task.turnId === undefined
+      ? `[${JSON.stringify(task.threadId)},`
+      : `${cuaComputerTaskKey(task)}:`;
+  for (const key of deadTargets) {
+    if (key.startsWith(deadPrefix)) deadTargets.delete(key);
+  }
+}
+
+/** A private (0700) directory for tap sockets, created on first use. */
+class FrameSocketDirectory {
+  private directory: string | undefined;
+  private pending: Promise<string> | undefined;
+
+  get(): Promise<string> {
+    if (this.directory) return Promise.resolve(this.directory);
+    if (!this.pending) {
+      const pending = (async () => {
+        const directory = await mkdtemp(join(tmpdir(), "synara-frames-"));
+        await chmod(directory, 0o700);
+        this.directory = directory;
+        return directory;
+      })();
+      this.pending = pending;
+      pending.catch(() => {
+        if (this.pending === pending) this.pending = undefined;
+      });
+    }
+    return this.pending;
+  }
+
+  async remove(): Promise<void> {
+    const directory = this.directory;
+    this.directory = undefined;
+    this.pending = undefined;
+    if (directory) await rm(directory, { recursive: true, force: true });
+  }
+}
+
+interface ComputerFrameTapOptions {
+  helperPath: string;
+  send: (channel: string, frame: ComputerPreviewFrame) => void;
+  onError: (error: unknown) => void;
+  spawn?: typeof spawn;
+  /** Shared by a pool's taps; a tap given one never removes it. */
+  socketDirectory?: FrameSocketDirectory;
+  /** Shared by a pool's taps so dead-target memory outlives one thread's tap. */
+  deadTargets?: Set<string>;
+}
+
 /**
  * Splits the tap socket's byte stream into length-prefixed (u32 LE) JPEG
  * frames. Chunks wait unjoined until their frame is complete, so a frame
@@ -108,23 +168,16 @@ export class ComputerFrameTap implements ComputerFrameTapHost {
   private revision = 0;
   private appliedRevision = -1;
   private sequence = 0;
-  private directory: string | undefined;
-  private directoryPromise: Promise<string> | undefined;
-  private readonly deadTargets = new Set<string>();
+  private readonly directory: FrameSocketDirectory;
+  private readonly ownsDirectory: boolean;
+  private readonly deadTargets: Set<string>;
 
-  private readonly options: {
-    helperPath: string;
-    send: (channel: string, frame: ComputerPreviewFrame) => void;
-    onError: (error: unknown) => void;
-    spawn?: typeof spawn;
-  };
-  constructor(options: {
-    helperPath: string;
-    send: (channel: string, frame: ComputerPreviewFrame) => void;
-    onError: (error: unknown) => void;
-    spawn?: typeof spawn;
-  }) {
+  private readonly options: ComputerFrameTapOptions;
+  constructor(options: ComputerFrameTapOptions) {
     this.options = options;
+    this.ownsDirectory = !options.socketDirectory;
+    this.directory = options.socketDirectory ?? new FrameSocketDirectory();
+    this.deadTargets = options.deadTargets ?? new Set<string>();
   }
 
   update(target: CuaPreviewTarget): void {
@@ -135,20 +188,10 @@ export class ComputerFrameTap implements ComputerFrameTapHost {
   }
 
   async endTask(task: CuaComputerTask): Promise<void> {
-    const matches = (candidate: CuaComputerTask) =>
-      candidate.threadId === task.threadId &&
-      (task.turnId === undefined || candidate.turnId === task.turnId);
+    const matches = (candidate: CuaComputerTask) => taskEndCovers(task, candidate);
     if (this.desired && !matches(this.desired.task)) return;
     if (!this.desired && this.active && !matches(this.active.task)) return;
-    // The task formally ended; its failure memory ends with it. Without a
-    // turnId the end covers every turn of the thread.
-    const deadPrefix =
-      task.turnId === undefined
-        ? `[${JSON.stringify(task.threadId)},`
-        : `${cuaComputerTaskKey(task)}:`;
-    for (const key of this.deadTargets) {
-      if (key.startsWith(deadPrefix)) this.deadTargets.delete(key);
-    }
+    forgetDeadTargets(this.deadTargets, task);
     await this.stop();
   }
 
@@ -160,10 +203,7 @@ export class ComputerFrameTap implements ComputerFrameTapHost {
 
   async dispose(): Promise<void> {
     await this.stop();
-    const directory = this.directory;
-    this.directory = undefined;
-    this.directoryPromise = undefined;
-    if (directory) await rm(directory, { recursive: true, force: true });
+    if (this.ownsDirectory) await this.directory.remove();
   }
 
   private reconcile(): Promise<void> {
@@ -213,25 +253,8 @@ export class ComputerFrameTap implements ComputerFrameTapHost {
     }
   }
 
-  private async socketDirectory(): Promise<string> {
-    if (this.directory) return this.directory;
-    if (!this.directoryPromise) {
-      const pending = (async () => {
-        const directory = await mkdtemp(join(tmpdir(), "synara-frames-"));
-        await chmod(directory, 0o700);
-        this.directory = directory;
-        return directory;
-      })();
-      this.directoryPromise = pending;
-      pending.catch(() => {
-        if (this.directoryPromise === pending) this.directoryPromise = undefined;
-      });
-    }
-    return this.directoryPromise;
-  }
-
   private async start(target: CuaPreviewTarget): Promise<ActiveTap> {
-    const directory = await this.socketDirectory();
+    const directory = await this.directory.get();
     const socketPath = join(directory, `tap-${randomUUID().slice(0, 8)}.sock`);
     let state: ActiveTap | undefined;
     const server = createServer((socket) => {
@@ -377,5 +400,269 @@ export class ComputerFrameTap implements ComputerFrameTapHost {
       }
       await rm(state.socketPath, { force: true });
     }
+  }
+}
+
+/** At most this many live frame-tap helper processes run at once, across all threads. */
+export const COMPUTER_FRAME_TAP_MAX_CONCURRENT = 4;
+/** Threads whose latest target the pool remembers; the oldest idle ones are forgotten first. */
+const MAX_REMEMBERED_THREADS = 256;
+
+export interface ComputerFrameTapPoolOptions {
+  helperPath: string;
+  /** Frames of the thread's current target only, while its preview is visible. */
+  onFrame: (frame: ComputerPreviewFrame, target: CuaPreviewTarget) => void;
+  /** Errors of one thread's tap, reported for that thread only. */
+  onError: (threadId: string, error: unknown) => void;
+  spawn?: typeof spawn;
+  now?: () => number;
+}
+
+interface PoolThread {
+  target: CuaPreviewTarget;
+  /** Pool-wide order of target updates: the smallest is the least recently updated. */
+  touched: number;
+  changedAt: number;
+  frameAt: number;
+}
+
+interface PoolSlot {
+  tap: ComputerFrameTap;
+  /** A slot waits unstarted while retiring helpers still hold the process budget. */
+  started: boolean;
+}
+
+/**
+ * One live tap per visible thread, each on that thread's own latest target,
+ * with at most COMPUTER_FRAME_TAP_MAX_CONCURRENT helper processes (live plus
+ * still retiring). When a newly visible or newly acting thread needs a tap
+ * and none is free, it evicts the least recently updated tap; the evicted
+ * thread falls back to still frames and only gets a tap back when one frees
+ * up or its preview is shown again, so a crowd of busy threads never trades
+ * helpers on every action. Hidden threads hold no tap.
+ */
+export class ComputerFrameTapPool {
+  private readonly threads = new Map<string, PoolThread>();
+  private readonly visible = new Set<string>();
+  private readonly evicted = new Set<string>();
+  private readonly slots = new Map<string, PoolSlot>();
+  private readonly retiring = new Set<Promise<void>>();
+  private readonly directory = new FrameSocketDirectory();
+  private readonly deadTargets = new Set<string>();
+  private touches = 0;
+  private sequence = 0;
+  private disposed = false;
+
+  private readonly options: ComputerFrameTapPoolOptions;
+  constructor(options: ComputerFrameTapPoolOptions) {
+    this.options = options;
+  }
+
+  /** The thread's latest target, live or not. */
+  target(threadId: string): CuaPreviewTarget | undefined {
+    return this.threads.get(threadId)?.target;
+  }
+
+  /** When the thread's target last changed; 0 when it has none. */
+  changedAt(threadId: string): number {
+    return this.threads.get(threadId)?.changedAt ?? 0;
+  }
+
+  /** When the thread's live tap last delivered a frame of its current target; 0 when never. */
+  frameAt(threadId: string): number {
+    return this.threads.get(threadId)?.frameAt ?? 0;
+  }
+
+  /** Threads that hold a tap slot (started or waiting for the process budget). */
+  activeThreads(): string[] {
+    return [...this.slots.keys()];
+  }
+
+  setTarget(target: CuaPreviewTarget): void {
+    if (this.disposed) return;
+    const threadId = target.task.threadId;
+    const previous = this.threads.get(threadId);
+    this.touches += 1;
+    // Re-insert so Map order stays least-recently-updated first.
+    this.threads.delete(threadId);
+    this.threads.set(threadId, {
+      target,
+      touched: this.touches,
+      changedAt: this.now(),
+      frameAt:
+        previous && tapTargetKey(previous.target) === tapTargetKey(target) ? previous.frameAt : 0,
+    });
+    this.forgetIdleThreads();
+    if (!this.visible.has(threadId)) return;
+    const slot = this.slots.get(threadId);
+    if (slot) {
+      if (slot.started) slot.tap.update(target);
+    } else this.claim(threadId);
+    this.pump();
+  }
+
+  setVisible(threadId: string, visible: boolean): void {
+    if (this.disposed || this.visible.has(threadId) === visible) return;
+    if (visible) {
+      this.visible.add(threadId);
+      // Showing a preview is a fresh demand: it may evict even after an earlier eviction.
+      this.evicted.delete(threadId);
+      if (this.threads.has(threadId)) this.claim(threadId);
+      this.pump();
+      return;
+    }
+    this.visible.delete(threadId);
+    this.evicted.delete(threadId);
+    this.releaseInBackground(threadId);
+    this.fill();
+  }
+
+  /** Forget the thread's target (it moved to a non-native surface) and stop its tap. */
+  async clear(threadId: string): Promise<void> {
+    this.threads.delete(threadId);
+    this.evicted.delete(threadId);
+    const released = this.release(threadId);
+    this.fill();
+    await released;
+  }
+
+  /** End one task (or every turn of its thread without a turnId); other threads keep their taps. */
+  async endTask(task: CuaComputerTask): Promise<void> {
+    forgetDeadTargets(this.deadTargets, task);
+    const thread = this.threads.get(task.threadId);
+    if (!thread || !taskEndCovers(task, thread.target.task)) return;
+    await this.clear(task.threadId);
+  }
+
+  async stopAll(): Promise<void> {
+    this.threads.clear();
+    this.evicted.clear();
+    const releases = [...this.slots.keys()].map((threadId) => this.release(threadId));
+    const earlier = [...this.retiring];
+    await Promise.all([...releases, ...earlier]);
+  }
+
+  async dispose(): Promise<void> {
+    this.disposed = true;
+    this.visible.clear();
+    await this.stopAll();
+    await this.directory.remove();
+  }
+
+  /** Give the visible thread a slot, evicting the least recently updated tap when allowed. */
+  private claim(threadId: string): void {
+    if (this.slots.has(threadId)) return;
+    if (this.slots.size >= COMPUTER_FRAME_TAP_MAX_CONCURRENT) {
+      if (this.evicted.has(threadId)) return;
+      const victim = this.leastRecentlyUpdatedSlot();
+      if (!victim) return;
+      this.evicted.add(victim);
+      this.releaseInBackground(victim);
+    }
+    this.evicted.delete(threadId);
+    this.slots.set(threadId, { tap: this.createTap(threadId), started: false });
+  }
+
+  /** Free slots go to waiting visible threads, most recently updated first; never evicts. */
+  private fill(): void {
+    if (this.disposed) return;
+    const waiting = [...this.threads.keys()]
+      .filter((threadId) => this.visible.has(threadId) && !this.slots.has(threadId))
+      .toReversed();
+    for (const threadId of waiting) {
+      if (this.slots.size >= COMPUTER_FRAME_TAP_MAX_CONCURRENT) break;
+      this.evicted.delete(threadId);
+      this.slots.set(threadId, { tap: this.createTap(threadId), started: false });
+    }
+    this.pump();
+  }
+
+  /** Start waiting slots while live plus retiring helpers stay within the budget. */
+  private pump(): void {
+    if (this.disposed) return;
+    let processes = this.retiring.size;
+    for (const slot of this.slots.values()) if (slot.started) processes += 1;
+    for (const [threadId, slot] of this.slots) {
+      if (slot.started) continue;
+      if (processes >= COMPUTER_FRAME_TAP_MAX_CONCURRENT) return;
+      const thread = this.threads.get(threadId);
+      if (!thread) continue;
+      slot.started = true;
+      processes += 1;
+      slot.tap.update(thread.target);
+    }
+  }
+
+  private leastRecentlyUpdatedSlot(): string | undefined {
+    let victim: string | undefined;
+    let oldest = Number.POSITIVE_INFINITY;
+    for (const threadId of this.slots.keys()) {
+      const touched = this.threads.get(threadId)?.touched ?? 0;
+      if (touched < oldest) {
+        oldest = touched;
+        victim = threadId;
+      }
+    }
+    return victim;
+  }
+
+  private createTap(threadId: string): ComputerFrameTap {
+    const tap: ComputerFrameTap = new ComputerFrameTap({
+      helperPath: this.options.helperPath,
+      socketDirectory: this.directory,
+      deadTargets: this.deadTargets,
+      ...(this.options.spawn ? { spawn: this.options.spawn } : {}),
+      onError: (error) => this.options.onError(threadId, error),
+      send: (_channel, frame) => {
+        const thread = this.threads.get(threadId);
+        if (
+          this.slots.get(threadId)?.tap !== tap ||
+          !this.visible.has(threadId) ||
+          !thread ||
+          frame.targetKey !== tapTargetKey(thread.target)
+        )
+          return;
+        thread.frameAt = this.now();
+        this.sequence += 1;
+        this.options.onFrame({ ...frame, seq: this.sequence }, thread.target);
+      },
+    });
+    return tap;
+  }
+
+  /** Stop the thread's tap; the returned promise rejects when its helper would not stop. */
+  private release(threadId: string): Promise<void> {
+    const slot = this.slots.get(threadId);
+    if (!slot) return Promise.resolve();
+    this.slots.delete(threadId);
+    const disposed = slot.tap.dispose();
+    if (!slot.started) return disposed;
+    const settled: Promise<void> = disposed
+      .catch(() => undefined)
+      .finally(() => {
+        this.retiring.delete(settled);
+        this.pump();
+      });
+    this.retiring.add(settled);
+    return disposed;
+  }
+
+  private releaseInBackground(threadId: string): void {
+    void this.release(threadId).catch((error: unknown) => this.options.onError(threadId, error));
+  }
+
+  /** Bound remembered targets: forget the least recently updated threads without a slot. */
+  private forgetIdleThreads(): void {
+    if (this.threads.size <= MAX_REMEMBERED_THREADS) return;
+    for (const threadId of this.threads.keys()) {
+      if (this.threads.size <= MAX_REMEMBERED_THREADS) return;
+      if (this.slots.has(threadId) || this.visible.has(threadId)) continue;
+      this.threads.delete(threadId);
+      this.evicted.delete(threadId);
+    }
+  }
+
+  private now(): number {
+    return (this.options.now ?? Date.now)();
   }
 }

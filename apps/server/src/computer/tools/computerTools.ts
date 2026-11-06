@@ -1781,6 +1781,33 @@ export function makeAgentGatewayComputerTools(
     return `${toolName}${stable(rest)}`;
   };
 
+  /**
+   * The exact window an input call names, read the way its handler reads it,
+   * for lane scheduling only (`ComputerManager.agentToolLane`). Arguments that
+   * do not parse schedule whole-desktop and fail in the handler as before;
+   * the manager re-resolves the target inside the lane either way.
+   */
+  const laneWindowId = (
+    name: string,
+    args: Record<string, unknown>,
+    context: ToolContext,
+  ): string | undefined => {
+    try {
+      const target =
+        name === "computer_select_text"
+          ? resolveTarget(readSelectTextTarget(args), context.callerThreadId)
+          : readTarget(args, context);
+      if (target.windowId) return target.windowId;
+      // A scroll without a point aims at the window of the frame it measures in.
+      if (name === "computer_scroll" && !hasTargetFields(target))
+        return frames.resolve(context.callerThreadId, readScreenshotTarget(args).screenshotId)
+          .windowId;
+    } catch {
+      // Unparseable here means unparseable in the handler too.
+    }
+    return undefined;
+  };
+
   const handle =
     (
       name: string,
@@ -2002,12 +2029,14 @@ export function makeAgentGatewayComputerTools(
                   },
                   abortSignal,
                   context.callerTurnId ?? undefined,
-                  name === "computer_type_text" &&
-                    args.delivery_mode !== "foreground" &&
-                    manager.supportsFocusNeutralSemanticText &&
-                    readWindowIdArg(args) !== undefined
-                    ? readWindowIdArg(args)
-                    : undefined,
+                  manager.agentToolLane({
+                    tool: name,
+                    windowId: laneWindowId(name, args, context),
+                    foreground:
+                      args.delivery_mode === "foreground" ||
+                      name === "computer_activate_window" ||
+                      name === "computer_invoke_menu",
+                  }),
                 );
           // The effect is final here: the delivered verdict rode the result
           // for dispatch-capable backends, and anything else is the honest
@@ -3509,6 +3538,7 @@ export function makeAgentGatewayComputerTools(
                 },
                 desktopOperationSignal(),
                 context.callerTurnId ?? undefined,
+                { kind: "read" },
               ),
             target,
             durationMs,
@@ -3535,6 +3565,7 @@ export function makeAgentGatewayComputerTools(
             },
             desktopOperationSignal(),
             context.callerTurnId ?? undefined,
+            { kind: "read" },
           );
           return deliverScreenshot(context.callerThreadId, result, screenshot, windowId);
         }
@@ -3553,6 +3584,7 @@ export function makeAgentGatewayComputerTools(
             },
             desktopOperationSignal(),
             context.callerTurnId ?? undefined,
+            { kind: "read" },
           );
           return { computerId: manager.computerId, ...verdict };
         }
