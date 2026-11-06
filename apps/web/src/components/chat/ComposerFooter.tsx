@@ -498,7 +498,10 @@ export interface ComposerFooterProps {
   selectedExecutionEnvironmentId?: EnvironmentId;
   executionTargetLocked?: boolean;
   onExecutionTargetChange?: (environmentId: EnvironmentId) => void;
-  /** The new-thread surface shows the device as a pill above the composer instead. */
+  /**
+   * The device is shown outside the composer: as a pill above it on the
+   * new-thread surface, or as a label under it once the thread is bound.
+   */
   executionTargetHoisted?: boolean;
 
   // Model picker
@@ -611,8 +614,12 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
     <div
       data-chat-composer-footer="true"
       data-chat-composer-footer-compact={props.isFooterCompact ? "true" : "false"}
+      // Every control rests on the same bottom edge, 8px above the border:
+      // the 24px selectors are not centered against the 32px round send
+      // button, which would float them 4px higher. The left inset puts the
+      // first icon (4px inside its trigger) on the prompt text's left edge.
       className={cn(
-        "flex min-w-0 flex-nowrap items-center justify-between gap-1.5 overflow-visible px-2 pb-2 sm:px-2.5 sm:pb-2.5",
+        "flex min-w-0 flex-nowrap items-end justify-between gap-1.5 overflow-visible px-2 pb-2 sm:pl-3",
         props.isFooterCompact ? "gap-1.5" : "sm:gap-0",
         // The flag is only set on the phone tier; the tier-keyed hide keeps
         // the footer's primary actions from doubling the absolute mobile

@@ -373,9 +373,18 @@ function getModelPickerListText() {
 }
 
 function getVisibleModelNames() {
-  return Array.from(getModelPickerListElement().querySelectorAll<HTMLDivElement>("div.font-medium"))
+  return Array.from(
+    getModelPickerListElement().querySelectorAll<HTMLElement>("[data-model-picker-model-name]"),
+  )
     .map((element) => element.textContent?.replace(/New$/u, "").trim() ?? "")
     .filter((text) => text.length > 0);
+}
+
+function getSelectedPickerTab() {
+  return (
+    document.querySelector<HTMLElement>("[data-model-picker-tab-selected]")?.dataset
+      .modelPickerProvider ?? null
+  );
 }
 
 function getSidebarProviderOrder() {
@@ -1072,14 +1081,15 @@ describe("ProviderModelPicker", () => {
           document.querySelector<HTMLElement>('[data-model-picker-provider="codex_personal"]')
             ?.dataset.providerAccentColor,
         ).toBe("#dc2626");
-        expect(getModelPickerListText()).toContain("Codex Work");
+        // The open tab names the instance; its rows no longer repeat it.
+        expect(getSelectedPickerTab()).toBe("codex");
         expect(getVisibleModelNames()).toEqual(["GPT Work"]);
       });
 
       await page.getByRole("button", { name: "Codex Personal" }).click();
 
       await vi.waitFor(() => {
-        expect(getModelPickerListText()).toContain("Codex Personal");
+        expect(getSelectedPickerTab()).toBe("codex_personal");
         expect(getVisibleModelNames()).toEqual(["GPT Personal"]);
       });
     } finally {
@@ -1295,7 +1305,7 @@ describe("ProviderModelPicker", () => {
     }
   });
 
-  it("hides the provider sidebar while searching", async () => {
+  it("keeps the provider tabs while searching, with none open", async () => {
     const mounted = await mountPicker({
       activeInstanceId: CLAUDE_INSTANCE_ID,
       model: "claude-opus-4-6",
@@ -1307,12 +1317,14 @@ describe("ProviderModelPicker", () => {
 
       await vi.waitFor(() => {
         expect(getSidebarProviderOrder().length).toBeGreaterThan(0);
+        expect(getSelectedPickerTab()).toBe("claudeAgent");
       });
 
       await page.getByPlaceholder("Search models...").fill("cla");
 
       await vi.waitFor(() => {
-        expect(getSidebarProviderOrder()).toEqual([]);
+        expect(getSidebarProviderOrder().length).toBeGreaterThan(0);
+        expect(getSelectedPickerTab()).toBeNull();
       });
     } finally {
       await mounted.cleanup();
@@ -1489,7 +1501,14 @@ describe("ProviderModelPicker", () => {
 
       await vi.waitFor(() => {
         const listText = getModelPickerListText();
-        expect(listText).toContain("OpenCode · GitHub Copilot");
+        // Mixed results mark each row's instance; the name is its tooltip.
+        expect(
+          Array.from(
+            getModelPickerListElement().querySelectorAll<HTMLElement>(
+              "[data-model-picker-row-provider]",
+            ),
+          ).map((element) => element.dataset.modelPickerRowProvider),
+        ).toContain("OpenCode · GitHub Copilot");
         expect(listText).toContain("Claude");
         expect(listText).not.toContain("OpenCodeClaude Opus 4.6");
       });
@@ -1567,7 +1586,9 @@ describe("ProviderModelPicker", () => {
 
       await vi.waitFor(async () => {
         const favoritedModelRows = Array.from(
-          getModelPickerListElement().querySelectorAll<HTMLDivElement>("div.font-medium"),
+          getModelPickerListElement().querySelectorAll<HTMLElement>(
+            "[data-model-picker-model-name]",
+          ),
         ).filter((element) => element.textContent?.trim() === "Claude Opus 4.6");
         expect(favoritedModelRows.length).toBe(1);
       });
@@ -2219,7 +2240,12 @@ describe("ProviderModelPicker legacy models", () => {
         expect(getVisibleModelNames()).toEqual(expandedOrder);
       });
 
-      await page.getByRole("option").filter({ hasText: "Claude Sonnet 4.6" }).click();
+      // The name, not the row's center: the star button sits there in the unstyled test DOM.
+      await page
+        .getByRole("option")
+        .filter({ hasText: "Claude Sonnet 4.6" })
+        .getByText("Claude Sonnet 4.6", { exact: true })
+        .click();
       expect(mounted.onInstanceModelChange).toHaveBeenCalledWith(
         CLAUDE_INSTANCE_ID,
         "claude-sonnet-4-6",

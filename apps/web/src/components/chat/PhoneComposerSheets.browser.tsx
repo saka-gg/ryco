@@ -415,7 +415,7 @@ describe("phone model and session-policy sheets", () => {
 
     // The desktop two-pane popover is not what opened.
     expect(document.querySelector(".model-picker-list")).toBeNull();
-    expect(document.querySelector("[data-model-picker-sidebar]")).toBeNull();
+    expect(document.querySelector("[data-model-picker-tabs]")).toBeNull();
 
     // The audit found the `⌘N` shortcut hints rendering under `pointer: coarse`.
     // The phone presentation renders none at all — verified falsifiable by

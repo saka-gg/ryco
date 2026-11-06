@@ -244,7 +244,8 @@ import {
   COLLAPSED_APP_SIDEBAR_CHROME_INSET_CLASS,
 } from "../appChrome";
 import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../rightPanelLayout";
-import { BranchToolbar } from "./BranchToolbar";
+import { BranchToolbar, COMPOSER_TOOLBAR_ROW_CLASS_NAME, type ThreadDevice } from "./BranchToolbar";
+import { ExecutionTargetLabel } from "./chat/ExecutionTargetSelect";
 import {
   hasOpenDialogShortcutTarget,
   isDialogShortcutTarget,
@@ -3558,9 +3559,19 @@ export default function ChatView(props: ChatViewProps) {
     envLocked || routeKind === "server" || isSendBusy || hostedDraftTarget.pending !== null;
   // An empty thread shows its context as pills above the composer: the
   // new-worktree switch (git projects only) and the device, which then leaves
-  // the composer footer so it is offered once.
+  // the composer footer so it is offered once. A thread bound to its machine
+  // has nothing left to choose: the device moves under the composer as a label.
   const showNewThreadContextBar = showNewThreadComposerSpacer && showNewThreadSurface;
-  const executionTargetHoisted = showNewThreadContextBar && executionTargets.length > 0;
+  const executionTargetBound = envLocked || routeKind === "server";
+  const threadDevice = useMemo<ThreadDevice | undefined>(() => {
+    if (showNewThreadContextBar || !executionTargetBound || executionTargets.length === 0) {
+      return undefined;
+    }
+    const target = executionTargets.find((entry) => entry.environmentId === environmentId);
+    return { environmentId, label: target?.label ?? "No verified machine" };
+  }, [environmentId, executionTargetBound, executionTargets, showNewThreadContextBar]);
+  const executionTargetHoisted =
+    executionTargets.length > 0 && (showNewThreadContextBar || executionTargetBound);
   const executionTargetMachine =
     hostedWorkspace.status === "signed-out"
       ? desktopExecutionMachines.find((machine) => machine.environmentId === environmentId)
@@ -8008,9 +8019,18 @@ export default function ChatView(props: ChatViewProps) {
                   onToggleTerminal={toggleTerminalVisibility}
                   terminalCount={terminalState.terminalIds.length}
                   runningTerminalCount={terminalState.runningTerminalIds.length}
+                  device={threadDevice}
                 />
               </div>
             )}
+            {!isGitRepo && threadDevice ? (
+              <div className={COMPOSER_TOOLBAR_ROW_CLASS_NAME}>
+                <ExecutionTargetLabel
+                  environmentId={threadDevice.environmentId}
+                  label={threadDevice.label}
+                />
+              </div>
+            ) : null}
           </div>
 
           {/* Balances the empty-thread messages region above so the hero and
