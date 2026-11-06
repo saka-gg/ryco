@@ -29,6 +29,11 @@ export interface AgentControlClientExecutionPreview {
     /** How the folder was chosen, e.g. "Mac mini's code directory."; null when nothing to add. */
     readonly note: string | null;
   } | null;
+  /**
+   * What the copy sends when the plan's own words would mislead (a plain folder's files rather
+   * than uncommitted changes); absent otherwise.
+   */
+  readonly sends?: string;
   /** The setup thread's model on the target; null when the request starts no thread. */
   readonly followUpModel: string | null;
   /** Why approving would fail now. Approving says the same and changes nothing. */

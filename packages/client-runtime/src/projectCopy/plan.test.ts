@@ -964,3 +964,150 @@ describe("setup and follow-up defaults (A18, A19)", () => {
     });
   });
 });
+
+describe("plain folders", () => {
+  const folderInspection = (
+    folder: ProjectExportInspection["folder"] | null = {
+      fileCount: 12,
+      totalBytes: 3 * MIB,
+      leftOut: ["node_modules"],
+      skippedReason: null,
+    },
+  ): ProjectExportInspection => {
+    const base = inspection({ unpushed: 0, changes: 0 });
+    return {
+      ...base,
+      repository: {
+        ...base.repository,
+        rootPath: "/Users/ada/Notes",
+        isGitRepository: false,
+        branch: null,
+        headOid: null,
+        remotes: [],
+        primaryRemoteName: null,
+        cloneRemoteName: null,
+        canonicalKey: null,
+      },
+      pushedState: { headOnRemote: false, upstreamBranch: null, unpushedCommitCount: 0 },
+      // Null: a source that predates plain-folder copies reports none.
+      ...(folder === null || folder === undefined ? {} : { folder }),
+    };
+  };
+  const folderTarget = (overrides: Partial<ProjectCopyTargetFacts> = {}) =>
+    target({ folderCopySupport: "yes", remoteAccess: null, ...overrides });
+
+  it("sends the files, the only way a plain folder travels", () => {
+    const options = planProjectCopyOptions(
+      planning(inspectedSource(folderInspection()), folderTarget()),
+      { ignoredPaths: [".env", "secrets.txt"] },
+    );
+    expect(options.blockedReason).toBeNull();
+    expect(options.defaultMode).toBe("send-files");
+    expect(options.modes.clone).toMatchObject({ available: false });
+    expect(options.modes.sendFiles).toMatchObject({ available: true, estimatedBytes: 3 * MIB });
+    // The opt-in files come with the folder, never a name it does not have.
+    expect(options.choices.ignoredPaths).toEqual([".env"]);
+    expect(options.ignoredCandidates).toEqual([{ path: ".env", byteLength: 40 }]);
+    expect(options.notes).toEqual([]);
+  });
+
+  it("waits for the target's answer and names the node that needs an update", () => {
+    const facts = (source: ProjectExportInspection, targetFacts: ProjectCopyTargetFacts) =>
+      planProjectCopyOptions(planning(inspectedSource(source), targetFacts)).blockedReason;
+    expect(facts(folderInspection(), folderTarget({ folderCopySupport: "unknown" }))).toBe(
+      "Checking Mac mini…",
+    );
+    expect(facts(folderInspection(), folderTarget({ folderCopySupport: "no" }))).toBe(
+      "Update Ryco on Mac mini to copy plain folders here.",
+    );
+    expect(facts(folderInspection(null), folderTarget())).toBe(
+      "Update Ryco on MacBook to copy plain folders.",
+    );
+  });
+
+  it("refuses a folder too large to send", () => {
+    const tooMany = planProjectCopyOptions(
+      planning(
+        inspectedSource(
+          folderInspection({
+            fileCount: 200_001,
+            totalBytes: MIB,
+            leftOut: [],
+            skippedReason: "over limit",
+          }),
+        ),
+        folderTarget(),
+      ),
+    );
+    expect(tooMany.blockedReason).toMatch(/^Too many files to copy/);
+    const relayed = planProjectCopyOptions(
+      planning(inspectedSource(folderInspection(), "relay"), folderTarget()),
+    );
+    expect(relayed.blockedReason).toBeNull();
+    const big = planProjectCopyOptions(
+      planning(
+        inspectedSource(
+          folderInspection({
+            fileCount: 1,
+            totalBytes: PROJECT_COPY_RELAY_MAX_ARTIFACT_BYTES + 1,
+            leftOut: [],
+            skippedReason: null,
+          }),
+          "relay",
+        ),
+        folderTarget(),
+      ),
+    );
+    expect(big.blockedReason).toMatch(/^Too large to send through the Hub/);
+  });
+
+  it("exports a folder archive and imports it as a plain folder", () => {
+    const facts = planning(inspectedSource(folderInspection()), folderTarget());
+    const built = buildProjectCopyRunPlan({
+      planning: facts,
+      options: planProjectCopyOptions(facts, { ignoredPaths: [".env"] }),
+      target: { environmentId: TARGET, pathSeparator: "/" },
+      setup: null,
+      followUpThread: null,
+      origin: { kind: "user", sourceLabel: "MacBook", proposalId: null },
+    });
+    if (!built.ok) throw new Error(built.reason);
+    expect(built.plan.source).toMatchObject({ kind: "export", plainFolder: true });
+    expect(built.plan.sendFilesFallback).toBe(false);
+    expect(projectCopyExportInclude(built.plan)).toEqual({
+      commits: false,
+      workingTreeChanges: false,
+      ignoredPaths: [".env"],
+      wholeRepository: false,
+      avatar: true,
+      folderFiles: true,
+    });
+    const exported = folderInspection();
+    const transferId = ProjectTransferId.make("00000000-0000-4000-8000-000000000009");
+    const { input } = buildProjectImportStartInput({
+      plan: built.plan,
+      importId: ProjectImportId.make("00000000-0000-4000-8000-000000000002"),
+      projectId: "new-project" as ProjectId,
+      exportResult: {
+        exportId: "00000000-0000-4000-8000-000000000001" as ProjectExportResult["exportId"],
+        repository: exported.repository,
+        pushedState: exported.pushedState,
+        workingTree: exported.workingTree,
+        settings: exported.settings,
+        artifacts: [],
+        skipped: [],
+        expiresAt: "2026-10-22T12:00:00.000Z",
+      },
+      transfers: { "folder-archive": transferId },
+    });
+    expect(input).toMatchObject({
+      source: { kind: "folder-archive", transferId },
+      remotes: [],
+      commits: null,
+      checkout: null,
+      changes: null,
+      relativeRootInRepository: "",
+      settings: { preferredRemoteName: null, scripts: [setupScript] },
+    });
+  });
+});

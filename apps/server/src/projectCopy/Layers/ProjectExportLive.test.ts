@@ -40,6 +40,7 @@ import { SourceControlProviderRegistry } from "../../sourceControl/SourceControl
 import * as GitVcsDriver from "../../vcs/GitVcsDriver.ts";
 import { GitNetworkError } from "../Errors.ts";
 import { PROJECT_EXPORT_SKIP_REASON } from "../exportGit.ts";
+import { extractFolderArchive } from "../importFolder.ts";
 import { withProcessEnv, writeFakeSsh } from "../projectCopyGit.fixtures.ts";
 import { GitNetwork, type GitNetworkShape, type GitRemoteRef } from "../Services/GitNetwork.ts";
 import type { ProjectCopyCallerChannel } from "../callerChannel.ts";
@@ -1112,6 +1113,83 @@ describe("ProjectExportLive", () => {
       }),
     ).pipe(Effect.provide(harness.layer));
   });
+
+  it.effect(
+    "packs a plain folder without its dependencies or unpicked secrets, and it unpacks whole",
+    () => {
+      const harness = makeHarness();
+      return withFixtureRoot((root) =>
+        Effect.gen(function* () {
+          const folder = path.join(root, "plain");
+          write(path.join(folder, "notes.md"), "notes\n");
+          write(path.join(folder, "docs", "a.txt"), "a\n");
+          write(path.join(folder, "node_modules", "x", "index.js"), "x\n");
+          write(path.join(folder, ".ryco", "state.json"), "{}\n");
+          write(path.join(folder, ".DS_Store"), "litter");
+          write(path.join(folder, ".env"), "SECRET=1\n");
+          write(path.join(folder, ".env.local"), "LOCAL=1\n");
+          write(path.join(folder, ".env.example"), "SECRET=\n");
+          fs.mkdirSync(path.join(folder, "empty"));
+          fs.symlinkSync("notes.md", path.join(folder, "link.md"));
+          write(path.join(folder, "run.sh"), "#!/bin/sh\n");
+          fs.chmodSync(path.join(folder, "run.sh"), 0o755);
+          const project = harness.addProject(folder);
+          const exporter = yield* ProjectExport;
+
+          const inspection = yield* exporter.inspect({ projectId: project.id });
+          expect(inspection.repository.isGitRepository).toBe(false);
+          expect(inspection.folder).toEqual({
+            fileCount: 4,
+            totalBytes: "notes\n".length + "a\n".length + "SECRET=\n".length + 10,
+            leftOut: [".ryco", "node_modules"],
+            skippedReason: null,
+          });
+          expect(inspection.workingTree.ignoredCandidates).toEqual([
+            { path: ".env", byteLength: "SECRET=1\n".length },
+            { path: ".env.local", byteLength: "LOCAL=1\n".length },
+          ]);
+
+          const input = startInput(project.id, {
+            include: { folderFiles: true, ignoredPaths: [".env"] },
+          });
+          const result = yield* exporter.start({ input, channel: "encrypted" });
+          expect(result.skipped).toEqual([]);
+          const archive = artifactOf(result, "folder-archive");
+          expect(archive.carriesIgnoredFiles).toBe(true);
+          const bytes = yield* readArtifact(input.exportId, archive);
+
+          const archiveFile = path.join(root, "folder.tar.gz");
+          fs.writeFileSync(archiveFile, bytes);
+          const dest = path.join(root, "dest");
+          fs.mkdirSync(dest);
+          const unpacked = yield* extractFolderArchive({
+            archivePath: archiveFile,
+            directory: dest,
+          });
+          expect(unpacked).toMatchObject({ fileCount: 5, skippedEntries: 0 });
+          expect(fs.readFileSync(path.join(dest, "docs", "a.txt"), "utf8")).toBe("a\n");
+          expect(fs.readFileSync(path.join(dest, ".env"), "utf8")).toBe("SECRET=1\n");
+          expect(fs.readFileSync(path.join(dest, ".env.example"), "utf8")).toBe("SECRET=\n");
+          expect(fs.readlinkSync(path.join(dest, "link.md"))).toBe("notes.md");
+          expect(fs.statSync(path.join(dest, "empty")).isDirectory()).toBe(true);
+          expect(fs.statSync(path.join(dest, "run.sh")).mode & 0o100).toBe(0o100);
+          for (const leftOut of ["node_modules", ".ryco", ".env.local", ".DS_Store"]) {
+            expect(fs.existsSync(path.join(dest, leftOut)), leftOut).toBe(false);
+          }
+
+          // Over an unencrypted connection the picked secret stays behind, the rest still goes.
+          const plain = startInput(project.id, {
+            include: { folderFiles: true, ignoredPaths: [".env"] },
+          });
+          const insecure = yield* exporter.start({ input: plain, channel: "unencrypted" });
+          expect(insecure.skipped).toEqual([
+            { kind: "folder-archive", reason: PROJECT_EXPORT_SKIP_REASON.insecureChannel },
+          ]);
+          expect(artifactOf(insecure, "folder-archive").carriesIgnoredFiles).toBeUndefined();
+        }),
+      ).pipe(Effect.provide(harness.layer));
+    },
+  );
 
   it.effect("exports the project's own overrides and leaves node-local ones behind", () => {
     const harness = makeHarness();

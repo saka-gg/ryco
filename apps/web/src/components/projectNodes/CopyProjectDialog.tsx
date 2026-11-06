@@ -140,7 +140,7 @@ export function CopyProjectDialogView(props: CopyProjectDialogViewProps) {
       }}
     >
       <DialogPopup
-        className="max-w-[560px]"
+        className="max-h-[calc(100dvh-2rem)] max-w-[744px] overflow-hidden"
         data-testid="copy-project-dialog"
         showCloseButton={!progressShown}
       >

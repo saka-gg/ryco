@@ -523,10 +523,12 @@ export const makeNodePaths = (deps: NodePathsDependencies): NodePathsShape => {
     const usable =
       input.intent === "create"
         ? createUsable
-        : state === "is-git-repository" &&
-          existingProject === undefined &&
-          (relative === "" ||
-            (yield* Effect.promise(() => isFolderInside(canonical, projectRoot))));
+        : input.intent === "folder"
+          ? leaf.kind === "directory" && existingProject === undefined && relative === ""
+          : state === "is-git-repository" &&
+            existingProject === undefined &&
+            (relative === "" ||
+              (yield* Effect.promise(() => isFolderInside(canonical, projectRoot))));
     return judgement({
       state,
       detail: existingProject === undefined ? detail : (detail ?? EXISTING_PROJECT_DETAIL),

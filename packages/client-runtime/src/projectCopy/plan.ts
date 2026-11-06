@@ -414,12 +414,30 @@ export interface ProjectCopyTargetFacts {
   readonly label: string;
   readonly platformOs: ExecutionEnvironmentPlatformOs | null;
   readonly projectCopySupport: ProjectCopySupport;
+  /**
+   * Whether the target unpacks plain-folder copies (`capabilities.projectCopyFolders`); only a
+   * plain-folder source asks. Absent counts as `unknown`.
+   */
+  readonly folderCopySupport?: ProjectCopySupport;
   /** Null until the target was acquired. */
   readonly transport: ProjectCopyTransport | null;
   /** `projects.checkRemoteAccess` for the clone remote; null until checked. */
   readonly remoteAccess: ProjectCheckRemoteAccessResult | null;
   /** Null until a destination was chosen and previewed. */
   readonly destination: CopyDestinationSuggestion | null;
+}
+
+/**
+ * Whether a target unpacks plain-folder copies, from its config: `unknown` until it is read.
+ */
+export function projectCopyFolderSupportOf(
+  config: Pick<ServerConfig, "environment"> | null,
+): ProjectCopySupport {
+  // Partial configs (test doubles, a node mid-handshake) may lack the descriptor.
+  const capabilities = (config as Partial<Pick<ServerConfig, "environment">> | null)?.environment
+    ?.capabilities;
+  if (capabilities === undefined) return "unknown";
+  return capabilities.projectCopyFolders === true ? "yes" : "no";
 }
 
 export interface ProjectCopyPlanningInput {
@@ -492,6 +510,12 @@ export const relayTooLargeMessage = (bytes: number): string =>
 
 const directTooLargeMessage = (bytes: number): string =>
   `Too large to copy (${formatCopyMegabytes(bytes)}).`;
+
+/** Why a plain folder can't be sent, from its export's `skippedReason`. */
+const folderTooLargeMessage = (reason: string): string =>
+  reason === "over limit"
+    ? "Too many files to copy. Copy a smaller folder, or make it a git repository and push it."
+    : sentenceCase(reason);
 
 const updateRycoOn = (label: string, what: string): string => `Update Ryco on ${label} to ${what}.`;
 
@@ -611,6 +635,9 @@ export function planProjectCopyOptions(
     inspected?.inspection.estimates.find((entry) => entry.kind === kind) ?? null;
   const estimatedBytes = (kind: ProjectExportArtifactKind) => estimate(kind)?.estimatedBytes ?? 0;
   const notes: string[] = [];
+  // A folder that is not a git repository travels as its files (send-files), nothing else.
+  const plainFolder = inspected !== null && !inspected.inspection.repository.isGitRepository;
+  const folder = plainFolder ? (inspected.inspection.folder ?? null) : null;
 
   // ── Whole-copy blockers ──
   let blockedReason: string | null = null;
@@ -618,22 +645,27 @@ export function planProjectCopyOptions(
     blockedReason = updateRycoOn(target.label, "copy projects here");
   } else if (target.projectCopySupport === "unknown") {
     blockedReason = `Checking ${target.label}…`;
-  } else if (inspected !== null && !inspected.inspection.repository.isGitRepository) {
-    blockedReason = `${title} is not a git repository. Copying plain folders is not supported yet.`;
+  } else if (plainFolder && folder === null) {
+    blockedReason = updateRycoOn(inspected.label, "copy plain folders");
+  } else if (plainFolder && target.folderCopySupport === "no") {
+    blockedReason = updateRycoOn(target.label, "copy plain folders here");
+  } else if (plainFolder && target.folderCopySupport !== "yes") {
+    blockedReason = `Checking ${target.label}…`;
   }
 
   // ── Clone from origin ──
   const cloneRemote = cloneRemoteOf(source);
   const cloneKind = cloneRemote ? classifyRemoteUrl(cloneRemote.url) : null;
-  const cloneUnavailableReason =
-    cloneRemote === null || cloneKind === null
+  const cloneUnavailableReason = plainFolder
+    ? `${title} is a plain folder, not a git repository.`
+    : cloneRemote === null || cloneKind === null
       ? `${title} has no remote.`
       : cloneKind === "http"
         ? "Plain http remotes are not cloned; send the files instead."
         : !isCloneableRemoteKind(cloneKind)
           ? "Its remote can only be reached from the source; send the files instead."
           : null;
-  if (cloneRemote === null && source.kind !== "repository") {
+  if (cloneRemote === null && source.kind !== "repository" && !plainFolder) {
     notes.push(`${title} has no remote, so the copy shows as a separate project.`);
   }
   const clone = {
@@ -649,8 +681,13 @@ export function planProjectCopyOptions(
 
   // ── Send files (repository bundle) ──
   const bundleEstimate = estimate("repository-bundle");
-  const sendFilesReason =
-    inspected === null
+  const sendFilesReason = plainFolder
+    ? folder === null
+      ? updateRycoOn(inspected.label, "copy plain folders")
+      : folder.skippedReason !== null
+        ? folderTooLargeMessage(folder.skippedReason)
+        : sizeLimit(folder.totalBytes)
+    : inspected === null
       ? source.kind === "legacy"
         ? updateRycoOn(source.label, "send files")
         : "There are no files to send."
@@ -662,7 +699,7 @@ export function planProjectCopyOptions(
   const sendFiles = {
     available: sendFilesReason === null,
     reason: sendFilesReason,
-    estimatedBytes: bundleEstimate?.estimatedBytes ?? 0,
+    estimatedBytes: plainFolder ? (folder?.totalBytes ?? 0) : (bundleEstimate?.estimatedBytes ?? 0),
   };
 
   // ── Link an existing checkout (A27) ──
@@ -696,7 +733,11 @@ export function planProjectCopyOptions(
           : false;
   const mode: ProjectCopyMode | null = modeAvailable(requested.mode) ? requested.mode : defaultMode;
   if (mode === null) {
-    blockedReason ??= clone.reason ?? sendFiles.reason ?? `${title} can't be copied.`;
+    blockedReason ??=
+      (plainFolder ? sendFiles.reason : null) ??
+      clone.reason ??
+      sendFiles.reason ??
+      `${title} can't be copied.`;
   }
 
   // ── Bring unpushed commits ──
@@ -705,8 +746,9 @@ export function planProjectCopyOptions(
   const commitsEstimate = estimate("commits-bundle");
   const unpushedCommitCount = pushedState?.unpushedCommitCount ?? 0;
   // Whether a commits bundle exists at all, whatever the mode.
-  const commitsBaseReason =
-    source.kind === "legacy"
+  const commitsBaseReason = plainFolder
+    ? "A plain folder has no commits."
+    : source.kind === "legacy"
       ? updateRycoOn(source.label, "bring unpushed commits")
       : inspected === null
         ? null
@@ -731,8 +773,9 @@ export function planProjectCopyOptions(
   const changesNeedCommits = mode === "clone" && pushedState !== null && !pushedState.headOnRemote;
   const changesBytes =
     estimatedBytes("changes-patch") + (changesNeedCommits ? estimatedBytes("commits-bundle") : 0);
-  const changesReason =
-    source.kind === "legacy"
+  const changesReason = plainFolder
+    ? "Included in the files sent."
+    : source.kind === "legacy"
       ? updateRycoOn(source.label, "bring uncommitted changes")
       : inspected === null
         ? null
@@ -778,7 +821,9 @@ export function planProjectCopyOptions(
   const bringCommits = commitsAvailable && (commitsForced || (requested.bringCommits ?? true));
   const candidates = workingTree?.ignoredCandidates ?? [];
   const candidatePaths = new Set(candidates.map((candidate) => candidate.path));
-  const ignoredPaths = bringChanges
+  // A plain folder's opt-in files come with its files; a repository's in the changes patch.
+  const ignoredCarrier = plainFolder ? sendFiles.available && mode === "send-files" : bringChanges;
+  const ignoredPaths = ignoredCarrier
     ? (requested.ignoredPaths ?? [])
         .filter((path) => candidatePaths.has(path))
         .slice(0, PROJECT_COPY_MAX_IGNORED_PATHS)
@@ -834,7 +879,7 @@ export function planProjectCopyOptions(
       reason: changesReason,
       estimatedBytes: estimatedBytes("changes-patch"),
     },
-    ignoredCandidates: changesAvailable ? candidates : [],
+    ignoredCandidates: (plainFolder ? sendFiles.available : changesAvailable) ? candidates : [],
     copySettings,
     copyAvatar: {
       available: avatarAvailable,
@@ -924,6 +969,8 @@ export type ProjectCopyRunSource =
       readonly label: string;
       readonly projectId: ProjectId;
       readonly checkoutPath: string | null;
+      /** Not a git repository: its files travel as a `folder-archive` (send-files only). */
+      readonly plainFolder?: boolean;
     }
   /** Cloned from a remote with no export: an old source (A23) or an agent's repository URL. */
   | {
@@ -1057,6 +1104,7 @@ export function buildProjectCopyRunPlan(input: {
       label: source.label,
       projectId: source.inspection.projectId,
       checkoutPath: source.checkoutPath,
+      ...(source.inspection.repository.isGitRepository ? {} : { plainFolder: true }),
     };
   } else {
     const remote = cloneRemoteOf(source);
@@ -1122,6 +1170,16 @@ export function projectCopyPlanWithSendFiles(plan: ProjectCopyRunPlan): ProjectC
 export function projectCopyExportInclude(plan: ProjectCopyRunPlan): ProjectExportInclude | null {
   if (plan.source.kind !== "export") return null;
   const { choices } = plan;
+  if (plan.source.plainFolder === true) {
+    return {
+      commits: false,
+      workingTreeChanges: false,
+      ignoredPaths: choices.ignoredPaths,
+      wholeRepository: false,
+      avatar: choices.copyAvatar,
+      folderFiles: true,
+    };
+  }
   const changes = choices.mode !== "link" && choices.bringChanges;
   return {
     commits: choices.mode === "clone" && choices.bringCommits,
@@ -1141,6 +1199,7 @@ export function projectCopyTransferKinds(
   if (include === null) return kinds;
   if (include.commits) kinds.add("commits-bundle");
   if (include.wholeRepository) kinds.add("repository-bundle");
+  if (include.folderFiles === true) kinds.add("folder-archive");
   if (include.workingTreeChanges) kinds.add("changes-patch");
   if (include.avatar) kinds.add("avatar");
   return kinds;
@@ -1153,6 +1212,49 @@ export class ProjectCopyPlanError extends Error {
     super(message);
     this.name = "ProjectCopyPlanError";
   }
+}
+
+/** The import of a plain folder: its files unpacked, no git, the source's settings. */
+function plainFolderImportInput(input: {
+  readonly plan: ProjectCopyRunPlan;
+  readonly common: Pick<
+    ProjectImportStartInput,
+    "importId" | "projectId" | "title" | "destinationPath" | "setup" | "followUpThread" | "origin"
+  >;
+  readonly exportResult: ProjectExportResult;
+  readonly transfers: Partial<Record<ProjectExportArtifactKind, ProjectTransferId>>;
+}): { readonly input: ProjectImportStartInput; readonly warnings: ReadonlyArray<string> } {
+  const { plan, exportResult } = input;
+  const transferId = input.transfers["folder-archive"];
+  if (plan.choices.mode !== "send-files" || transferId === undefined) {
+    throw new ProjectCopyPlanError("The folder's files were not sent.");
+  }
+  const { settings } = exportResult;
+  const candidate: ProjectImportStartInput = {
+    ...input.common,
+    source: { kind: "folder-archive", transferId },
+    remotes: [],
+    commits: null,
+    checkout: null,
+    changes: null,
+    relativeRootInRepository: "",
+    recurseSubmodules: false,
+    usesLfs: false,
+    settings: plan.choices.copySettings
+      ? {
+          scripts: settings.scripts.slice(0, PROJECT_COPY_MAX_SCRIPTS),
+          customSystemPrompt: settings.customSystemPrompt,
+          preferredRemoteName: null,
+          projectMetadataDir: settings.projectMetadataDir,
+          overrides: settings.overrides,
+        }
+      : null,
+    avatarTransferId: input.transfers.avatar ?? null,
+  };
+  if (!isValidImportStartInput(candidate)) {
+    throw new ProjectCopyPlanError("The copy request is not valid for the destination.");
+  }
+  return { input: candidate, warnings: [] };
 }
 
 /**
@@ -1208,6 +1310,9 @@ export function buildProjectImportStartInput(input: {
   } else {
     if (exportResult === null) throw new ProjectCopyPlanError("The source export is missing.");
     const { repository, pushedState, settings } = exportResult;
+    if (!repository.isGitRepository) {
+      return plainFolderImportInput({ plan, common, exportResult, transfers });
+    }
     // The remote the source measured its pushed state against: the commits bundle builds on it.
     const cloneRemote =
       repository.remotes.find((remote) => remote.name === repository.cloneRemoteName) ?? null;

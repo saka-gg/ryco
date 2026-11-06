@@ -49,6 +49,7 @@ import {
   Fiber,
   Layer,
   Option,
+  Schedule,
   Schema,
   Semaphore,
   Stream,
@@ -72,6 +73,7 @@ import {
   tryReserveProjectDestination,
 } from "../destinationReservation.ts";
 import type { ProjectImportStepError } from "../Errors.ts";
+import { extractFolderArchive } from "../importFolder.ts";
 import { PROJECT_IMPORT_SETTLED_RETENTION_MS } from "../projectCopyStartup.ts";
 import { startProjectImportFollowUp } from "../projectImportFollowUp.ts";
 import {
@@ -118,6 +120,15 @@ import { NodePaths } from "../Services/NodePaths.ts";
 
 /** Output and clone progress are published, and subscribers get a snapshot, at most this often. */
 const DEFAULT_SNAPSHOT_THROTTLE_MS = 1_000;
+/** The git steps a plain-folder import skips. */
+const NON_FOLDER_STEPS = [
+  "remotes",
+  "commits",
+  "checkout",
+  "changes",
+  "submodules",
+  "lfs",
+] as const satisfies ReadonlyArray<ProjectImportStepId>;
 const SETUP_SCRIPT_NAME = "Setup";
 
 export interface ProjectImportsLiveOptions {
@@ -292,6 +303,9 @@ const scriptsWithSetup = (
 const transferClaims = (input: ProjectImportStartInput): Array<ProjectTransferClaim> => [
   ...(input.source.kind === "repository-bundle"
     ? [{ transferId: input.source.transferId, purpose: "repository-bundle" as const }]
+    : []),
+  ...(input.source.kind === "folder-archive"
+    ? [{ transferId: input.source.transferId, purpose: "folder-archive" as const }]
     : []),
   ...(input.commits === null
     ? []
@@ -1061,6 +1075,63 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
         return repositoryRoot;
       });
 
+    /** A plain folder: unpacked into the staging directory under the `clone` step, no git. */
+    const folderSteps = (job: ActiveJob) =>
+      Effect.gen(function* () {
+        yield* runStep(
+          job,
+          "clone",
+          Effect.gen(function* () {
+            const archivePath = claimedPath(job, "folder-archive");
+            if (archivePath === null) {
+              return yield* failWith("transfer-missing", "The folder's files are missing.");
+            }
+            const stagingPath = yield* createStaging(job);
+            // The unpack reports from outside the fiber; subscribers see it once per interval.
+            let percent: number | null = null;
+            const showProgress = Effect.suspend(() => {
+              if (percent === null) return Effect.void;
+              job.snapshot = withImportStep(
+                job.snapshot,
+                "clone",
+                { progressPercent: percent, detail: "Unpacking the files" },
+                new Date().toISOString(),
+              );
+              return SubscriptionRef.set(job.ref, job.snapshot);
+            });
+            const progressTicker = showProgress.pipe(
+              Effect.repeat(Schedule.spaced(throttleMs)),
+              Effect.andThen(Effect.never),
+            );
+            const unpacked = yield* extractFolderArchive({
+              archivePath,
+              directory: stagingPath,
+              onProgress: (next) => {
+                percent = next;
+              },
+            }).pipe(
+              Effect.raceFirst(progressTicker),
+              Effect.mapError(
+                (error) =>
+                  new ImportJobFailure({
+                    code: "clone-failed",
+                    message: boundImportText(error.message, "The folder could not be unpacked."),
+                  }),
+              ),
+            );
+            if (unpacked.skippedEntries > 0) {
+              yield* warn(
+                job,
+                `${unpacked.skippedEntries} ${unpacked.skippedEntries === 1 ? "entry" : "entries"} of the folder could not be unpacked safely and were left out.`,
+              );
+            }
+            return unpacked;
+          }),
+          (unpacked) => `${unpacked.fileCount} ${unpacked.fileCount === 1 ? "file" : "files"}`,
+        );
+        for (const id of NON_FOLDER_STEPS) yield* skipStep(job, id, "Plain folder");
+      });
+
     /** Changes never stop the job: a patch that does not apply is kept for a manual apply. */
     const changesStep = (job: ActiveJob, repositoryRoot: string) =>
       Effect.gen(function* () {
@@ -1182,14 +1253,14 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
         );
       });
 
-    /** Judges the published (or linked) checkout and adds it as the project. */
+    /** Judges the published (or linked) checkout, or the unpacked folder, and adds it. */
     const addProject = (job: ActiveJob) =>
       Effect.gen(function* () {
         const input = job.input;
         const final = yield* nodePaths
           .judgeProjectDestination({
             path: job.destination,
-            intent: "link",
+            intent: input.source.kind === "folder-archive" ? "folder" : "link",
             relativeRootInRepository: input.relativeRootInRepository,
           })
           .pipe(
@@ -1198,7 +1269,11 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
             ),
           );
         if (!final.usable || final.projectRoot === null) {
-          const refusal = destinationRefusal(input, final.preview, true);
+          const refusal = destinationRefusal(
+            input,
+            final.preview,
+            input.source.kind !== "folder-archive",
+          );
           return yield* failWith("register-failed", refusal.message);
         }
         const projectRoot = final.projectRoot;
@@ -1415,7 +1490,9 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
         yield* Effect.interruptible(
           Effect.gen(function* () {
             yield* preflight(job);
-            if (linking) {
+            if (job.input.source.kind === "folder-archive") {
+              yield* folderSteps(job);
+            } else if (linking) {
               for (const id of [
                 "clone",
                 "remotes",
@@ -1486,7 +1563,19 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
         ? Effect.fail(
             copyError("invalid", "Linking an existing checkout cannot bring commits or changes."),
           )
-        : Effect.void;
+        : input.source.kind === "folder-archive" &&
+            (input.commits !== null ||
+              input.changes !== null ||
+              input.checkout !== null ||
+              input.remotes.length > 0 ||
+              input.relativeRootInRepository !== "")
+          ? Effect.fail(
+              copyError(
+                "invalid",
+                "A plain folder has no commits, changes, branch, remotes or subfolder root.",
+              ),
+            )
+          : Effect.void;
 
     const checkLinkTarget = (
       input: ProjectImportStartInput,

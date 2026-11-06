@@ -34,7 +34,8 @@ import { displayProjectPath } from "../../lib/projectPaths";
 import { NodeBadge } from "./NodePicker";
 import { NODE_LABEL_CELL, NodePathText, useNodeLabelColumn } from "./NodePathText";
 
-const FOOTER_CLASS = "flex items-center gap-2 border-border border-t px-4 py-[11px]";
+const FOOTER_CLASS =
+  "flex shrink-0 items-center gap-2 border-border border-t bg-muted/30 px-5 py-3";
 const SUMMARY_CLASS = "min-w-0 flex-1 truncate text-[12px] text-muted-foreground";
 
 export interface CopyProjectProgressProps {
@@ -56,7 +57,7 @@ export function CopyProjectProgress(props: CopyProjectProgressProps) {
   if (entry === null) {
     return (
       <>
-        <div className="flex items-center gap-2.5 py-3.5 ps-4 pe-4">
+        <div className="flex items-center gap-2.5 px-5 pt-4 pb-3">
           <DialogTitle className="flex min-w-0 flex-1 items-center gap-2 font-semibold text-[15px] leading-tight">
             <CopyIcon aria-hidden className="size-[15px] shrink-0" />
             <span className="truncate">
@@ -64,7 +65,7 @@ export function CopyProjectProgress(props: CopyProjectProgressProps) {
             </span>
           </DialogTitle>
         </div>
-        <div className="flex items-center gap-2 px-4 pb-4 text-[12.5px] text-muted-foreground">
+        <div className="flex items-center gap-2 px-5 pb-5 text-[12.5px] text-muted-foreground">
           <CopyRingSpinner />
           Starting…
         </div>
@@ -83,14 +84,14 @@ export function CopyProjectProgress(props: CopyProjectProgressProps) {
     case "failed":
       return (
         <>
-          <div className="flex items-center gap-2.5 py-3.5 ps-4 pe-12">
+          <div className="flex items-center gap-2.5 ps-5 pe-12 pt-4 pb-3">
             <DialogTitle className="flex min-w-0 flex-1 items-center gap-2 font-semibold text-[15px] leading-tight">
               <TriangleAlertIcon aria-hidden className="size-[15px] shrink-0 text-destructive" />
               <span className="truncate">{view.title}</span>
             </DialogTitle>
           </div>
           <div
-            className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-4 pb-3.5"
+            className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-5 pb-4"
             data-testid="copy-project-failed"
           >
             <p className="m-0 rounded-lg bg-destructive/8 px-2.5 py-2 text-[12.5px] text-destructive-foreground">
@@ -122,7 +123,7 @@ export function CopyProjectProgress(props: CopyProjectProgressProps) {
       const percent = copyOverallPercent(steps, entry.progress);
       return (
         <>
-          <div className="flex items-center gap-2.5 py-3.5 ps-4 pe-4">
+          <div className="flex items-center gap-2.5 px-5 pt-4 pb-3">
             <DialogTitle className="flex min-w-0 flex-1 items-center gap-2 font-semibold text-[15px] leading-tight">
               <CopyIcon aria-hidden className="size-[15px] shrink-0" />
               <span className="truncate">
@@ -132,7 +133,7 @@ export function CopyProjectProgress(props: CopyProjectProgressProps) {
             <span className="text-[11.5px] text-muted-foreground tabular-nums">{percent}%</span>
           </div>
           <div
-            className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-4 pb-3.5"
+            className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-5 pb-4"
             data-testid="copy-project-progress"
           >
             <CopyBar percent={percent} label={`Copying ${copy.title}`} />
@@ -202,7 +203,7 @@ function DoneView(props: CopyProjectProgressProps & { readonly entry: ProjectCop
     <>
       <div className="h-11" aria-hidden />
       <div
-        className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-4 pb-3.5"
+        className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-5 pb-4"
         data-testid="copy-project-done"
       >
         <div className="flex flex-col items-center gap-1.5 pt-1.5 pb-1 text-center">

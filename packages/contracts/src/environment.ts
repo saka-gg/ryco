@@ -180,6 +180,12 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    */
   projectCopy: Schema.optionalKey(Schema.Boolean),
   /**
+   * Project copy of plain (non-git) folders: `projects.exportInspect` reports `folder`,
+   * `projects.exportStart` honours `include.folderFiles`, transfers take a `folder-archive` and
+   * `projects.importStart` takes a `folder-archive` source. Absent on older servers.
+   */
+  projectCopyFolders: Schema.optionalKey(Schema.Boolean),
+  /**
    * `git.runStackedAction` honours `stagedOnly` and `vcs.readLocalChanges` returns
    * `stagedRevision`; absent on older servers, which drop `stagedOnly` and commit every change.
    */

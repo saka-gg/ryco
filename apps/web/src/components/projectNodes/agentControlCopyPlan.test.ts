@@ -451,6 +451,61 @@ describe("planAgentControlCopy", () => {
   });
 });
 
+describe("planAgentControlCopy for a plain folder", () => {
+  const base = inspection();
+  const folderInspection: ProjectExportInspection = {
+    ...base,
+    repository: {
+      ...base.repository,
+      isGitRepository: false,
+      branch: null,
+      headOid: null,
+      remotes: [],
+      primaryRemoteName: null,
+      cloneRemoteName: null,
+      canonicalKey: null,
+    },
+    pushedState: { headOnRemote: false, upstreamBranch: null, unpushedCommitCount: 0 },
+    folder: { fileCount: 12, totalBytes: 3 * MIB, leftOut: ["node_modules"], skippedReason: null },
+  };
+  const folderFacts = (overrides: Partial<AgentControlCopyFacts> = {}) =>
+    facts({
+      inspection: folderInspection,
+      remoteAccess: null,
+      targetFolderCopySupport: "yes",
+      plan: copyPlan({ bringChanges: true }),
+      ...overrides,
+    });
+
+  it("sends the folder's files, without its .env files, and says so on the card", () => {
+    const resolution = planAgentControlCopy(folderFacts());
+    if (!resolution.ok) throw new Error(resolution.preview.problem ?? "not ok");
+    expect(resolution.runPlan.source).toMatchObject({ kind: "export", plainFolder: true });
+    expect(resolution.runPlan.choices).toMatchObject({ mode: "send-files", ignoredPaths: [] });
+    expect(resolution.preview.sends).toBe(
+      "Its files: 12 files, 3 MB (a plain folder, not a git repository; .env files stay behind)",
+    );
+    expect(
+      sameAgentControlCopyPreview(resolution.preview, { ...resolution.preview, sends: "other" }),
+    ).toBe(false);
+  });
+
+  it("refuses a request that leaves the files behind or names a branch", () => {
+    const withoutFiles = planAgentControlCopy(folderFacts({ plan: copyPlan() }));
+    expect(withoutFiles.ok).toBe(false);
+    expect(withoutFiles.preview.problem).toMatch(/plain folder.*leaves behind/u);
+    const branch = planAgentControlCopy(
+      folderFacts({ plan: copyPlan({ bringChanges: true, branch: "main" }) }),
+    );
+    expect(branch.preview.problem).toMatch(/has no branch main/u);
+  });
+
+  it("asks for an update when the target can't unpack plain folders", () => {
+    const outdated = planAgentControlCopy(folderFacts({ targetFolderCopySupport: "no" }));
+    expect(outdated.preview.problem).toBe("Update Ryco on Mac mini to copy plain folders here.");
+  });
+});
+
 describe("agentControlSetupMismatch", () => {
   it("passes only the approved command, as the target reads it", () => {
     const approved = { command: "bun install", saveAsScript: true };

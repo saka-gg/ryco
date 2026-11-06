@@ -13,9 +13,11 @@
 import {
   buildProjectCopyRunPlan,
   copyDestinationCandidate,
+  formatCopyMegabytes,
   judgeCopyDestination,
   nodePathBasename,
   planProjectCopyOptions,
+  projectCopyFolderSupportOf,
   projectCopySourceCanonicalKey,
   repositoryFolderName,
   resolveCopyDestination,
@@ -82,6 +84,8 @@ export interface AgentControlCopyFacts {
   readonly destination: CopyDestinationSuggestion | null;
   /** The target's server config, for the setup thread's default model. */
   readonly targetConfig: Pick<ServerConfig, "providers" | "settings"> | null;
+  /** Whether the target unpacks plain folders, from its config; absent counts as unknown. */
+  readonly targetFolderCopySupport?: ProjectCopySupport;
 }
 
 export type AgentControlCopyResolution =
@@ -183,14 +187,16 @@ export async function resolveAgentControlCopyDestination(input: {
 /**
  * The plan's options as copy choices. Ignored files are never opted in (an
  * agent can't ask for them); the avatar is part of the project settings. A
- * checkout of the same repository at the destination is linked (A27).
+ * checkout of the same repository at the destination is linked (A27); a plain
+ * folder sends its files, the only way it travels.
  */
 export function agentControlCopyRequestedChoices(
   plan: AgentControlCopyProjectToNodePlan,
   destination: CopyDestinationSuggestion | null,
+  plainFolder = false,
 ): Partial<ProjectCopyChoices> {
   return {
-    mode: destination?.status === "link" ? "link" : "clone",
+    mode: plainFolder ? "send-files" : destination?.status === "link" ? "link" : "clone",
     bringCommits: plan.bringCommits,
     bringChanges: plan.bringChanges,
     ignoredPaths: [],
@@ -199,7 +205,10 @@ export function agentControlCopyRequestedChoices(
   };
 }
 
-/** An agent's copy only clones; sending the files is the copy dialog's to offer. */
+/**
+ * An agent's copy of a repository only clones; sending a repository's files is the copy
+ * dialog's to offer. A plain folder is the exception: its files are all it has.
+ */
 const sendFilesInstead = (reason: string): string =>
   /send the files/iu.test(reason)
     ? `${reason} Copy it from the Projects page to do that.`
@@ -224,6 +233,19 @@ export function agentControlCopyOptionsProblem(input: {
   const { plan, options, inspection, targetLabel } = input;
   if (options.blockedReason !== null) return options.blockedReason;
   const { choices, modes } = options;
+  if (inspection !== null && !inspection.repository.isGitRepository) {
+    // `bringChanges` is what sends a plain folder's files: it carries the copy-content risk tag.
+    if (!plan.bringChanges) {
+      return `${plan.source.title} is a plain folder, not a git repository: a copy sends its files, which this request leaves behind.`;
+    }
+    if (plan.branch != null) {
+      return `${plan.source.title} is a plain folder, not a git repository: it has no branch ${plan.branch}.`;
+    }
+    if (plan.copySettings && !choices.copySettings) {
+      return cantBring("the project settings", options.copySettings.reason);
+    }
+    return null;
+  }
   if (choices.mode === "send-files") {
     return sendFilesInstead(modes.clone.reason ?? `${targetLabel} can't clone it.`);
   }
@@ -344,6 +366,23 @@ function destinationPreview(
   }
 }
 
+/** The plain folder an inspection describes; undefined for a git repository or no inspection. */
+function plainFolderOf(
+  inspection: ProjectExportInspection | null,
+): ProjectExportInspection["folder"] | null | undefined {
+  if (inspection === null || inspection.repository.isGitRepository) return undefined;
+  return inspection.folder ?? null;
+}
+
+/** "Its files: 12 files, 3 MB (a plain folder, without .env files)". */
+function plainFolderSendsLabel(folder: ProjectExportInspection["folder"] | null): string {
+  const what =
+    folder == null
+      ? "Its files"
+      : `Its files: ${folder.fileCount} ${folder.fileCount === 1 ? "file" : "files"}, ${formatCopyMegabytes(folder.totalBytes)}`;
+  return `${what} (a plain folder, not a git repository; .env files stay behind)`;
+}
+
 /**
  * The run plan for a `copyProjectToNode` proposal and the preview its card
  * shows, from what the executor read on the two nodes. Fails, with the
@@ -375,14 +414,16 @@ export function planAgentControlCopy(facts: AgentControlCopyFacts): AgentControl
       label: target.label,
       platformOs: target.platformOs,
       projectCopySupport: target.projectCopySupport,
+      folderCopySupport: facts.targetFolderCopySupport ?? "unknown",
       transport: target.transport,
       remoteAccess: facts.remoteAccess,
       destination: facts.destination,
     } satisfies ProjectCopyTargetFacts,
   };
+  const folder = plainFolderOf(facts.inspection);
   const options = planProjectCopyOptions(
     planning,
-    agentControlCopyRequestedChoices(plan, facts.destination),
+    agentControlCopyRequestedChoices(plan, facts.destination, folder !== undefined),
   );
 
   let problem =
@@ -416,7 +457,12 @@ export function planAgentControlCopy(facts: AgentControlCopyFacts): AgentControl
       else problem ??= `The setup thread's title or prompt is too long for ${target.label}.`;
     }
   }
-  const resolved = { ...preview, followUpModel, problem };
+  const resolved = {
+    ...preview,
+    followUpModel,
+    problem,
+    ...(folder === undefined ? {} : { sends: plainFolderSendsLabel(folder) }),
+  };
   if (problem !== null) return { ok: false, preview: resolved };
 
   const built = buildProjectCopyRunPlan({
@@ -449,6 +495,7 @@ export function sameAgentControlCopyPreview(
     left.targetLabel === right.targetLabel &&
     left.followUpModel === right.followUpModel &&
     left.problem === right.problem &&
+    left.sends === right.sends &&
     left.destination?.path === right.destination?.path &&
     left.destination?.tag === right.destination?.tag
   );
@@ -562,5 +609,6 @@ export async function resolveAgentControlCopy(input: {
     remoteAccess,
     destination,
     targetConfig,
+    targetFolderCopySupport: projectCopyFolderSupportOf(targetConfig),
   });
 }

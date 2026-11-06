@@ -304,6 +304,11 @@ export const ProjectExportArtifactKind = Schema.Literals([
   "repository-bundle",
   "changes-patch",
   "avatar",
+  /**
+   * A gzipped tar of a plain (non-git) folder. Only exported for `include.folderFiles` and only
+   * imported through a `folder-archive` source, so nodes that predate it never see one.
+   */
+  "folder-archive",
 ]);
 export type ProjectExportArtifactKind = typeof ProjectExportArtifactKind.Type;
 
@@ -389,11 +394,59 @@ export const ProjectExportSettings = Schema.Struct({
 });
 export type ProjectExportSettings = typeof ProjectExportSettings.Type;
 
+/**
+ * What a copy of a plain (non-git) folder would send: its files, minus dependency and cache
+ * folders (`PROJECT_COPY_FOLDER_LEFT_OUT_NAMES`), the project's metadata folder and the
+ * opt-in files (`.env*`, `*.local`, listed as `workingTree.ignoredCandidates`). Present only for
+ * a plain folder on a node that copies them: an absent field means the node can't.
+ */
+export const ProjectExportFolder = Schema.Struct({
+  fileCount: NonNegativeInt,
+  /** Raw bytes of the files; the archive is compressed, so usually smaller. */
+  totalBytes: NonNegativeInt,
+  /** Left-out folders found at the walk, relative and slash-separated (at most 20). */
+  leftOut: Schema.Array(Schema.String),
+  /** Set when the folder can't be sent, e.g. "over limit" (too many files or bytes). */
+  skippedReason: Schema.NullOr(Schema.String),
+});
+export type ProjectExportFolder = typeof ProjectExportFolder.Type;
+
+/** Folder names a plain-folder copy never carries: dependencies and caches a setup recreates. */
+export const PROJECT_COPY_FOLDER_LEFT_OUT_NAMES: ReadonlyArray<string> = [
+  "node_modules",
+  "bower_components",
+  ".venv",
+  "venv",
+  "__pycache__",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  ".tox",
+  ".gradle",
+  ".next",
+  ".nuxt",
+  ".svelte-kit",
+  ".turbo",
+  ".parcel-cache",
+];
+/** File names a plain-folder copy never carries: the OS's own litter. */
+export const PROJECT_COPY_FOLDER_LEFT_OUT_FILE_NAMES: ReadonlyArray<string> = [
+  ".DS_Store",
+  "Thumbs.db",
+  "desktop.ini",
+];
+/** A plain-folder copy carries at most this many files. */
+export const PROJECT_COPY_FOLDER_MAX_FILES = 200_000;
+/** And at most this many raw bytes: the source stops counting there, the destination unpacking. */
+export const PROJECT_COPY_FOLDER_MAX_BYTES = 4 * PROJECT_COPY_MAX_ARTIFACT_BYTES;
+
 const projectExportSourceFields = {
   repository: ProjectExportRepository,
   pushedState: ProjectExportPushedState,
   workingTree: ProjectExportWorkingTree,
   settings: ProjectExportSettings,
+  /** Absent on nodes that predate plain-folder copies, and for git repositories. */
+  folder: Schema.optionalKey(ProjectExportFolder),
 };
 
 export const ProjectExportInspectInput = Schema.Struct({
@@ -431,6 +484,11 @@ export const ProjectExportInclude = Schema.Struct({
   /** Branches, tags and remote-tracking refs, for a repository without a usable remote. */
   wholeRepository: Schema.Boolean,
   avatar: Schema.Boolean,
+  /**
+   * A `folder-archive` of a plain folder (with the opted-in `ignoredPaths`). Send it only to a
+   * source whose inspection has `folder`: older nodes refuse the key.
+   */
+  folderFiles: Schema.optionalKey(Schema.Boolean),
 }).pipe(rejectExcessProperties);
 export type ProjectExportInclude = typeof ProjectExportInclude.Type;
 
@@ -594,6 +652,15 @@ export const ProjectImportSource = Schema.Union([
   /** A fresh repository fetched from a committed `repository-bundle` transfer. */
   Schema.Struct({
     kind: Schema.Literal("repository-bundle"),
+    transferId: ProjectTransferId,
+  }).pipe(rejectExcessProperties),
+  /**
+   * A plain folder unpacked from a committed `folder-archive` transfer: no git steps run and
+   * the project is registered without a repository. Only for nodes with
+   * `capabilities.projectCopyFolders`.
+   */
+  Schema.Struct({
+    kind: Schema.Literal("folder-archive"),
     transferId: ProjectTransferId,
   }).pipe(rejectExcessProperties),
   /**

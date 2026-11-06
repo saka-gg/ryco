@@ -155,6 +155,7 @@ export function AgentControlClientExecutionPreview(props: {
             </span>
           </p>
         ) : null}
+        {preview.sends !== undefined ? <p className="truncate">Sends: {preview.sends}</p> : null}
         {preview.followUpModel !== null ? (
           <p className="truncate">Setup thread: {preview.followUpModel}</p>
         ) : null}
@@ -208,6 +209,12 @@ export function AgentControlClientExecutionPreview(props: {
               </>
             ) : null}
             <PlanFactRows facts={facts} />
+            {state.preview.sends !== undefined ? (
+              <>
+                <dt className="text-muted-foreground">Sends</dt>
+                <dd className="min-w-0 text-foreground">{state.preview.sends}</dd>
+              </>
+            ) : null}
             {state.preview.followUpModel !== null ? (
               <>
                 <dt className="text-muted-foreground">Setup thread</dt>
