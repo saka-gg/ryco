@@ -505,8 +505,38 @@ jobs:
             return 0
           }
 
+          # The public log must not show the signing identity: the certificate's
+          # name, team id and fingerprint are not secrets, so GitHub would print
+          # them wherever electron-builder, codesign or notarytool echo them.
+          # Read them from the .p12 and mask them before anything can print one.
+          mask_mac_signing_identity() {
+            local p12="$RUNNER_TEMP/mac-signing-identity.p12" pem subject value
+            printf '%s' "$CSC_LINK" | base64 --decode > "$p12" 2>/dev/null || { rm -f "$p12"; return 0; }
+            pem="$(openssl pkcs12 -in "$p12" -nokeys -clcerts -passin env:CSC_KEY_PASSWORD 2>/dev/null ||
+              openssl pkcs12 -legacy -in "$p12" -nokeys -clcerts -passin env:CSC_KEY_PASSWORD 2>/dev/null || true)"
+            rm -f "$p12"
+            [[ -n "$pem" ]] || { echo "::warning::Could not read the macOS signing certificate to mask its identity."; return 0; }
+            subject="$(printf '%s' "$pem" | openssl x509 -noout -subject -nameopt multiline,utf8 2>/dev/null || true)"
+            while IFS= read -r value; do
+              value="${value#*= }"
+              [[ -n "$value" ]] && echo "::add-mask::$value"
+            done < <(printf '%s\n' "$subject" | grep -E '^ +(commonName|organizationName|organizationalUnitName|userId) *=')
+            while IFS= read -r value; do
+              value="${value#*=}"
+              [[ -n "$value" ]] || continue
+              echo "::add-mask::$value"
+              echo "::add-mask::${value//:/}"
+            done < <(printf '%s' "$pem" | openssl x509 -noout -fingerprint -sha1 2>/dev/null
+              printf '%s' "$pem" | openssl x509 -noout -fingerprint -sha256 2>/dev/null)
+            # The person's name alone, as "Developer ID Application: <name> (<team>)" also prints it.
+            value="$(printf '%s\n' "$subject" | sed -n 's/^ *commonName *= *[^:]*: *\(.*\) ([A-Z0-9]*)$/\1/p')"
+            [[ -n "$value" ]] && echo "::add-mask::$value"
+            return 0
+          }
+
           if [[ "${{ matrix.platform }}" == "mac" ]]; then
             if has_all "$CSC_LINK" "$CSC_KEY_PASSWORD" "$APPLE_API_KEY" "$APPLE_API_KEY_ID" "$APPLE_API_ISSUER"; then
+              mask_mac_signing_identity
               key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
               printf '%s' "$APPLE_API_KEY" > "$key_path"
               export APPLE_API_KEY="$key_path"
