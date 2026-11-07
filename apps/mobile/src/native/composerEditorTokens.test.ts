@@ -5,7 +5,7 @@ import { composerEditorTokenChips, skillLabelsByName } from "./composerEditorTok
 
 describe("composerEditorTokenChips", () => {
   it("labels skills, threads and files", () => {
-    const text = 'use $pdf on @"src/a.ts" and @thread:abc and @thread:gone ';
+    const text = "use $pdf on @src/a.ts and @thread:abc and @thread:gone ";
     const chips = composerEditorTokenChips({
       tokens: collectComposerInlineTokens(text),
       skillLabels: skillLabelsByName([{ name: "pdf", displayName: "PDF tools" }]),

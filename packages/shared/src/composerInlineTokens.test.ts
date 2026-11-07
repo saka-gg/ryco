@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import {
-  collectComposerInlineTokens,
-  formatComposerMentionSource,
-} from "./composerInlineTokens.ts";
+import { collectComposerInlineTokens } from "./composerInlineTokens.ts";
 
 describe("collectComposerInlineTokens", () => {
   it("collects file links, mentions, and skills with source ranges", () => {
@@ -85,17 +82,14 @@ describe("collectComposerInlineTokens", () => {
     expect(collectComposerInlineTokens("Read [docs](https://example.com) first")).toEqual([]);
   });
 
-  it.each(["@expo/ui", "@jane/foo.js", "@scope/pkg/sub/path"])(
-    "keeps scoped package reference %s as plain text",
-    (reference) => {
-      expect(collectComposerInlineTokens(`Install ${reference} next`)).toEqual([]);
+  it.each(["src/a.ts", "expo/ui", "scope/pkg/sub/path"])(
+    "reads the bare nested path @%s as a mention, like the web composer",
+    (path) => {
+      expect(collectComposerInlineTokens(`Inspect @${path} next`)).toMatchObject([
+        { type: "mention", value: path, source: `@${path}` },
+      ]);
     },
   );
-
-  it("keeps scoped package references plain across incomplete input and IME whitespace", () => {
-    expect(collectComposerInlineTokens("Install @expo/ui")).toEqual([]);
-    expect(collectComposerInlineTokens("入力 @expo/ui　を追加")).toEqual([]);
-  });
 
   it("keeps bare non-scoped file paths as mentions", () => {
     expect(collectComposerInlineTokens("Inspect @README.md next")).toEqual([
@@ -154,24 +148,5 @@ describe("collectComposerInlineTokens", () => {
     expect(collectComposerInlineTokens(" [[".repeat(40_000))).toEqual([]);
     const { user, system } = process.threadCpuUsage(started);
     expect((user + system) / 1_000).toBeLessThan(1_000);
-  });
-});
-
-describe("formatComposerMentionSource", () => {
-  it("writes mentions that read back as the same path", () => {
-    for (const path of [
-      "package.json",
-      "src/a.ts",
-      "docs/my notes.md",
-      'say "hi".md',
-      "C:\\x\\y",
-    ]) {
-      const source = formatComposerMentionSource(path);
-      expect(collectComposerInlineTokens(`${source} `)).toMatchObject([
-        { type: "mention", value: path, source },
-      ]);
-    }
-    expect(formatComposerMentionSource("package.json")).toBe("@package.json");
-    expect(formatComposerMentionSource("src/a.ts")).toBe('@"src/a.ts"');
   });
 });

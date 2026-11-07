@@ -36,9 +36,6 @@ const FILE_LINK_TOKEN_REGEX = new RegExp(
 );
 const URI_SCHEME_REGEX = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 const WINDOWS_DRIVE_PATH_REGEX = /^[A-Za-z]:[\\/]/;
-// Autocomplete emits canonical file links, so ambiguous bare @scope/package text stays a package.
-const SCOPED_PACKAGE_REFERENCE_REGEX =
-  /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*(?:\/[^\s@"]+)*$/;
 
 function collectMentionTokens(text: string): ComposerInlineToken[] {
   const matches: ComposerInlineToken[] = [];
@@ -76,9 +73,9 @@ function collectMentionTokens(text: string): ComposerInlineToken[] {
     const prefix = match[1] ?? "";
     const quotedPath = match[2];
     const path = quotedPath !== undefined ? quotedPath.replace(/\\(.)/g, "$1") : (match[3] ?? "");
-    if (!path || (quotedPath === undefined && SCOPED_PACKAGE_REFERENCE_REGEX.test(path))) {
-      continue;
-    }
+    // Ryco writes file mentions as bare `@dir/file` (serializeComposerMentionPath), and the
+    // web composer and the node read them that way, so a bare path is always a mention.
+    if (!path) continue;
     const start = (match.index ?? 0) + prefix.length;
     const end = start + fullMatch.length - prefix.length;
     matches.push({
@@ -91,18 +88,6 @@ function collectMentionTokens(text: string): ComposerInlineToken[] {
   }
 
   return matches;
-}
-
-/**
- * The `@` mention source for a workspace path that reads back as that path's
- * chip: bare when it can be, quoted when it has spaces or quotes, or when a
- * bare `@dir/file` would read as a scoped package (`@scope/name`).
- */
-export function formatComposerMentionSource(path: string): string {
-  if (/^[^\s@"\\]+$/.test(path) && !SCOPED_PACKAGE_REFERENCE_REGEX.test(path)) {
-    return `@${path}`;
-  }
-  return `@"${path.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
 
 export function collectComposerInlineTokens(

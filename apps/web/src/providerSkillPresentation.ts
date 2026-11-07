@@ -1,14 +1,8 @@
 import type { ServerProviderSkill } from "@ryco/contracts";
 
-export { formatProviderSkillDisplayName } from "@ryco/shared/composerCommandSearch";
+import { titleCaseWords } from "@ryco/shared/composerCommandSearch";
 
-function titleCaseWords(value: string): string {
-  return value
-    .split(/[\s:_-]+/)
-    .filter((segment) => segment.length > 0)
-    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
-    .join(" ");
-}
+export { formatProviderSkillDisplayName } from "@ryco/shared/composerCommandSearch";
 
 function normalizePathSeparators(pathValue: string): string {
   return pathValue.replaceAll("\\", "/");

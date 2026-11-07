@@ -24,7 +24,8 @@ export type SlashCommandSearchItem =
       readonly description: string;
     };
 
-function titleCaseWords(value: string): string {
+/** `review-follow-up` / `scope_name` → `Review Follow Up` / `Scope Name`. */
+export function titleCaseWords(value: string): string {
   return value
     .split(/[\s:_-]+/)
     .filter((segment) => segment.length > 0)

@@ -6,6 +6,7 @@
 import {
   formatThreadMentionPath,
   replaceTextRange,
+  serializeComposerMentionPath,
   type ComposerTrigger,
 } from "@ryco/client-runtime/state/composer";
 import type {
@@ -19,7 +20,6 @@ import {
   searchProviderSkills,
   searchSlashCommandItems,
 } from "@ryco/shared/composerCommandSearch";
-import { formatComposerMentionSource } from "@ryco/shared/composerInlineTokens";
 
 export type ComposerBuiltInCommand = "model" | "plan" | "default" | "btw";
 
@@ -252,7 +252,8 @@ export interface ComposerCommandSelection {
 function insertionFor(item: ComposerCommandItem): string | null {
   switch (item.type) {
     case "path":
-      return `${formatComposerMentionSource(item.path)} `;
+      // The web composer's serializer, so both clients write the same mention.
+      return `@${serializeComposerMentionPath(item.path)} `;
     case "thread":
       return `@${formatThreadMentionPath(item.threadId)} `;
     case "skill":
