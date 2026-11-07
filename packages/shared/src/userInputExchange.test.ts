@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   answerUserInputQuestions,
   createUserInputExchangePairing,
+  isHttpLink,
+  parseUserInputQuestions,
   readUserInputLifecycleRecord,
   type UserInputLifecycleRecord,
 } from "./userInputExchange.ts";
@@ -126,5 +128,30 @@ describe("user input exchanges", () => {
     pair(requested("ask-old", "req", [question("old")]), "old");
     pair(requested("ask-bad", "req", [{ id: "bad" }]), "bad");
     expect(pair(resolved("answer", "req"), "a")).toBe(null);
+  });
+});
+
+describe("question links", () => {
+  const withLink = (link: unknown) => ({
+    questions: [
+      {
+        id: "decision",
+        header: "billing",
+        question: "Sign in",
+        options: [{ label: "Continue", description: "I opened the link" }],
+        link,
+      },
+    ],
+  });
+
+  it("keeps only http(s) links, which a client may offer to open", () => {
+    expect(parseUserInputQuestions(withLink("https://example.com/a"))?.[0]?.link).toBe(
+      "https://example.com/a",
+    );
+    for (const link of ["javascript:alert(1)", "file:///etc/passwd", "nope", 42, undefined]) {
+      expect(parseUserInputQuestions(withLink(link))?.[0]).not.toHaveProperty("link");
+    }
+    expect(isHttpLink("http://localhost:3000/x")).toBe(true);
+    expect(isHttpLink("mailto:a@b.c")).toBe(false);
   });
 });

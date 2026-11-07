@@ -23,6 +23,7 @@ const computerUseParams = {
     connector_id: "computer-use",
     connector_name: "Computer Use",
     persist: ["session", "always"],
+    tool_params: { app: "com.apple.TextEdit" },
     tool_params_display: [{ name: "app", display_name: "App", value: "TextEdit" }],
   },
 };
@@ -167,7 +168,7 @@ it.live("rejects an invalid form answer and keeps the question open", () =>
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
-it.live("full access answers a tool-call approval without asking", () =>
+it.live("full access allows a Computer Use app for this chat without asking", () =>
   Effect.gen(function* () {
     const { response, events } = yield* startHarness({
       name: "full-access",
@@ -177,7 +178,10 @@ it.live("full access answers a tool-call approval without asking", () =>
       ],
     });
     const answer = yield* response;
-    assert.deepEqual(answer, { id: 3, result: { action: "accept" } });
+    assert.deepEqual(answer, {
+      id: 3,
+      result: { action: "accept", _meta: { persist: "session" } },
+    });
     const shown = (yield* events).filter((event) => event.method.startsWith("mcpServer/"));
     assert.deepEqual(shown, []);
   }).pipe(Effect.provide(NodeServices.layer)),

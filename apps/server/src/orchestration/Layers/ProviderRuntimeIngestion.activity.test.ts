@@ -626,7 +626,7 @@ describe("runtimeEventToActivities MCP elicitation", () => {
         questions: [question],
       },
     });
-    expect((requested?.payload as Record<string, unknown>).nonBlocking).toBeUndefined();
+    expect(requested?.payload).not.toHaveProperty("nonBlocking");
 
     const [cancelled] = runtimeEventToActivities({
       ...scope,

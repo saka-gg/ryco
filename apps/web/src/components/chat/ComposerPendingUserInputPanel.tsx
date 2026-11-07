@@ -7,8 +7,11 @@ import {
   type PendingUserInputDraftAnswer,
 } from "../../pendingUserInput";
 import { shouldIgnoreGlobalNavigationShortcut } from "../../keybindings";
-import { CheckIcon } from "lucide-react";
+import { CheckIcon, ExternalLinkIcon } from "lucide-react";
+import { isHttpLink } from "@ryco/shared/userInputExchange";
 import { cn } from "~/lib/utils";
+import { openExternalLink } from "../../lib/openExternalLink";
+import { Button } from "../ui/button";
 
 interface PendingUserInputPanelProps {
   pendingUserInputs: PendingUserInput[];
@@ -129,6 +132,10 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   if (!activeQuestion) {
     return null;
   }
+  const link =
+    activeQuestion.link !== undefined && isHttpLink(activeQuestion.link)
+      ? activeQuestion.link
+      : null;
 
   return (
     <div className="px-4 py-3 sm:px-5">
@@ -151,6 +158,18 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
         </p>
       ) : null}
       <p className="mt-1.5 text-sm text-foreground/90">{activeQuestion.question}</p>
+      {link ? (
+        // Opens only on a press: in the default browser on desktop, a new tab on the web.
+        <Button
+          size="sm"
+          variant="outline"
+          className="mt-2"
+          onClick={() => openExternalLink(link, "Unable to open link")}
+        >
+          <ExternalLinkIcon aria-hidden />
+          Open link
+        </Button>
+      ) : null}
       {activeQuestion.multiSelect ? (
         <p className="mt-1 text-xs text-muted-foreground/65">Select one or more options.</p>
       ) : null}

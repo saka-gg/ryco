@@ -1,5 +1,6 @@
 import type { ProviderUserInputAnswers, RuntimeMode, UserInputQuestion } from "@ryco/contracts";
 import * as Schema from "effect/Schema";
+import { isHttpLink } from "@ryco/shared/userInputExchange";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 /**
@@ -74,8 +75,8 @@ export type CodexElicitationPlan =
       readonly questions: ReadonlyArray<UserInputQuestion>;
       readonly offersSession: boolean;
       readonly offersAlways: boolean;
-      /** Full access may answer it without asking (see `autoAcceptInRuntimeMode`). */
-      readonly toolCallApproval: boolean;
+      /** How full access answers it without asking (see `autoAcceptInRuntimeMode`). */
+      readonly fullAccess: "ask" | "accept-once" | "accept-for-chat";
     }
   | {
       readonly kind: "form";
@@ -341,6 +342,9 @@ export function planCodexElicitation(params: CodexElicitationParams): CodexElici
   if (params.mode === "url") {
     const url = readText(params.url);
     if (!url) return { kind: "unsupported", reason: "URL request without a URL" };
+    // Only a link a browser opens safely is offered; anything else is answered `cancel`.
+    if (!isHttpLink(url))
+      return { kind: "unsupported", reason: "URL request without an http(s) link" };
     return {
       kind: "url",
       questions: [
@@ -353,6 +357,7 @@ export function planCodexElicitation(params: CodexElicitationParams): CodexElici
             option(ELICITATION_LABELS.deny, "Don't open it"),
           ],
           multiSelect: false,
+          link: url,
         },
       ],
     };
@@ -363,19 +368,32 @@ export function planCodexElicitation(params: CodexElicitationParams): CodexElici
     const offersSession = persistOffers(meta, "session");
     const offersAlways = persistOffers(meta, "always");
     const subtitle = readText(meta?.subtitle);
+    const computerUse = meta?.connector_id === COMPUTER_USE_CONNECTOR_ID;
+    const toolCall =
+      meta?.codex_approval_kind === "mcp_tool_call" && meta.codex_requires_user_input !== true;
+    // Computer Use asks again on its next action after a one-time allow, so it offers only the
+    // remembered choices, like Ryco's own Computer Use (unless it offers none).
+    const offersOnce = !computerUse || (!offersSession && !offersAlways);
     return {
       kind: "approval",
       offersSession,
       offersAlways,
-      toolCallApproval:
-        meta?.codex_approval_kind === "mcp_tool_call" && meta.codex_requires_user_input !== true,
+      fullAccess: !toolCall
+        ? "ask"
+        : computerUse
+          ? // An app approval, like Ryco's own Computer Use skips in full access; anything else
+            // it asks for (recording computer audio) always asks.
+            isComputerUseAppApproval(meta)
+            ? "accept-for-chat"
+            : "ask"
+          : "accept-once",
       questions: [
         {
           id: ELICITATION_APPROVAL_QUESTION_ID,
           header,
           question: joinPrompt([message, subtitle, ...displayParamLines(meta, message)]),
           options: [
-            option(ELICITATION_LABELS.allowOnce, "Ask again next time"),
+            ...(offersOnce ? [option(ELICITATION_LABELS.allowOnce, "Ask again next time")] : []),
             ...(offersSession
               ? [option(ELICITATION_LABELS.allowForChat, "Don't ask again in this chat")]
               : []),
@@ -397,17 +415,31 @@ export function planCodexElicitation(params: CodexElicitationParams): CodexElici
   return planForm(record, header, message);
 }
 
+function isComputerUseAppApproval(meta: Record<string, unknown> | undefined): boolean {
+  return readText(readRecord(meta?.tool_params)?.app) !== undefined;
+}
+
 /**
  * Full access answers approval-style tool-call elicitations itself, like Codex's own
- * `approvalPolicy: "never"` and Ryco's own Computer Use; anything that asks for data always asks.
+ * `approvalPolicy: "never"` and Ryco's own Computer Use: Computer Use app approvals for this
+ * chat (never a lasting "always" grant), other tool calls once. Anything that asks for data or
+ * a link always asks.
  */
 export function autoAcceptInRuntimeMode(
   plan: CodexElicitationPlan,
   runtimeMode: RuntimeMode,
 ): CodexElicitationResponse | undefined {
-  return runtimeMode === "full-access" && plan.kind === "approval" && plan.toolCallApproval
-    ? { action: "accept" }
-    : undefined;
+  if (runtimeMode !== "full-access" || plan.kind !== "approval") return undefined;
+  switch (plan.fullAccess) {
+    case "ask":
+      return undefined;
+    case "accept-once":
+      return { action: "accept" };
+    case "accept-for-chat":
+      return plan.offersSession
+        ? { action: "accept", _meta: { persist: "session" } }
+        : { action: "accept" };
+  }
 }
 
 export const CODEX_ELICITATION_CANCEL: CodexElicitationResponse = { action: "cancel" };

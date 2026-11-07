@@ -54,13 +54,18 @@ the server turns them into the MCP response. A pure module,
   `connector_id: "computer-use"`, else the connector name, else the MCP server name. Text: the
   message, the warning subtitle when present, and up to three display params that the message does
   not already name. Options: `Allow once`, then `Allow for this chat` / `Always allow` when
-  `persist` offers them, then `Deny`. Typed text counts as Deny.
+  `persist` offers them, then `Deny`. Typed text counts as Deny. Computer Use gets no
+  `Allow once` (user decision): after a one-time allow it asks again on its very next action. It
+  keeps `Allow once` only when it offers nothing to remember.
 - **Form** (fields): one question per field. Boolean → Yes/No, enums → options (multi-select for
   arrays), strings and numbers → typed answer. Optional fields add `Skip`; every question has
   `Decline`, which declines the whole request. The server validates numbers, integer, min/max and
   length; a bad answer fails the respond command and the question stays open.
-- **URL**: one question with the message and the link. `Continue` accepts (the user opens the link
-  themselves; Ryco never opens it), `Deny` declines.
+- **URL**: one question with the message and the link, which also rides on the question as
+  `link` (new optional `UserInputQuestion` field; older clients ignore it). Clients show
+  **Open link**, which opens it only when pressed: desktop through the existing `openExternal`
+  path (default browser, http(s) only), the web in a new tab. `Continue` accepts, `Deny` declines.
+  Only http(s) links are offered; any other URL is answered `cancel` (user decision).
 - Anything Ryco cannot render (an `openai/form` schema that is not a typed object schema) is
   answered `cancel` at once and logged.
 
@@ -78,10 +83,17 @@ the server turns them into the MCP response. A pure module,
 Ryco does not answer Codex approvals itself; Codex's approval policy decides whether it asks. In
 full access Codex runs with `approvalPolicy: "never"` and never asks for its own tool calls, and
 Ryco's own Computer Use skips its per-app approval. To match, **full access auto-accepts only
-approval-style elicitations with `codex_approval_kind: "mcp_tool_call"`** (once, nothing
-remembered), unless `_meta.codex_requires_user_input` is set. Forms that ask for data, URL
-requests, plugin install suggestions, browser sign-in and approvals of unknown kind always ask,
-in every mode.
+approval-style elicitations with `codex_approval_kind: "mcp_tool_call"`**, unless
+`_meta.codex_requires_user_input` is set (user decision):
+
+- Computer Use app approvals (`tool_params.app`): accepted like **Allow for this chat**
+  (`persist: "session"`), never a lasting `always` grant.
+- Other Computer Use requests (recording computer audio): always ask, like Ryco's own clipboard
+  consent, which asks even in full access.
+- Other tool-call approvals: accepted once, nothing remembered.
+
+Forms that ask for data, URL requests, plugin install suggestions, browser sign-in and approvals of
+unknown kind always ask, in every mode.
 
 ## Tests
 

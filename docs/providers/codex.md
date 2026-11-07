@@ -242,21 +242,25 @@ Ryco shows each request as a question in the chat, on every client that can answ
 
 - **Approvals.** A request with nothing to fill in, such as OpenAI's Computer Use asking
   `Allow Computer Use to use "TextEdit"?`, shows the server (**Codex Computer Use** for OpenAI's
-  plugin, otherwise the MCP server's name), the message, and **Allow once**, **Allow for this chat**
-  and **Always allow** when the server offers them, and **Deny**. A typed answer counts as Deny.
+  plugin, otherwise the MCP server's name), the message, **Allow for this chat** and **Always
+  allow** when the server offers them, and **Deny**. Other servers also get **Allow once**; Computer
+  Use does not, because it would ask again on its very next action. A typed answer counts as Deny.
 - **Forms.** One question per field: Yes/No, a list of choices, or a typed answer for text and
   numbers. Optional fields can be skipped, and **Decline** on any question declines the request.
   A number or length that does not fit is refused and the question stays open.
-- **Links.** The message and the link. Ryco never opens it; open it yourself, then choose
-  **Continue**, or **Deny**.
+- **Links.** The message, the link and **Open link**, which opens it in your default browser (a
+  new tab on the web) only when you press it. Then choose **Continue**, or **Deny**. Only http(s)
+  links are shown; any other link is answered `cancel`.
 
 A question nobody answers within 15 minutes is answered `cancel`, as is every open one when its turn
 ends, the session stops or Codex stops waiting for it; the card then goes away. A request Ryco cannot show is
 answered `cancel` at once.
 
-Full access answers MCP tool-call approvals (`codex_approval_kind: mcp_tool_call`) itself, once,
-without remembering anything: Codex skips its own tool approvals in full access, and so does Ryco's
-own Computer Use. Requests for data, links, plugin installs, sign-ins and approvals of any other kind
+Full access answers MCP tool-call approvals (`codex_approval_kind: mcp_tool_call`) itself, since
+Codex skips its own tool approvals in full access and Ryco's own Computer Use skips its app
+approval: a Computer Use app approval as **Allow for this chat** (never a lasting Always allow),
+other tool calls once. Requests for data, links, plugin installs, sign-ins, Computer Use requests
+that are not about an app (such as recording computer audio) and approvals of any other kind
 always ask. Design: `docs/superpowers/specs/2026-11-06-codex-mcp-elicitation.md`.
 
 ## Optional questions while Codex works
