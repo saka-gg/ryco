@@ -2212,7 +2212,11 @@ export function ThreadDetailScreen(props: {
       });
     }
 
-    const threadBusy = currentThread.latestTurn?.state === "running";
+    // A notification reply queues behind approvals still waiting: the turn they belong to is not
+    // over, even where its row already reads completed (a provider that ends the message first).
+    const threadBusy =
+      currentThread.latestTurn?.state === "running" ||
+      (notificationReply && pendingApprovals.length > 0);
     // Wave 3a: the socket opens one RTT before the live shell snapshot lands,
     // and until it does `threadBusy` is read from a CACHED latestTurn — the
     // same window wave 2's review closed for the outbox drain. A send inside
