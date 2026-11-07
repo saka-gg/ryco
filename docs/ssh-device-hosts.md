@@ -106,7 +106,7 @@ Ryco tests exercise routing collisions, single startup, malformed/mismatched pro
 SSH argument quoting, disconnect rejection, stale discovery and results, independent
 streams, and boot cleanup with fake devices and in-memory stdio. They do not establish
 real Linux-to-Mac SSH, Xcode session access, simulator streaming, or gesture fidelity.
-Android adapters and simulator testing controls remain separate work.
+Android emulator support is described in [android-emulator.md](android-emulator.md); simulator testing controls on SSH hosts remain separate work.
 
 Integration points shared with other device work are `DeviceBackend`, `DeviceManager`,
 the device schemas, `DeviceService` construction, the Simulator picker, CLI entrypoint

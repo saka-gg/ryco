@@ -162,7 +162,7 @@ describe("Android simulator pane", () => {
     expect(mocks.api.pressButton).toHaveBeenCalledWith({ udid: android.udid, button: "recents" });
     await expect
       .element(page.getByRole("button", { name: "Record screen", exact: true }))
-      .toBeDisabled();
+      .toBeEnabled();
     await page.getByLabelText("Pixel screen").click();
     const point = mocks.api.tap.mock.calls.at(-1)?.[0];
     expect(point.udid).toBe(android.udid);

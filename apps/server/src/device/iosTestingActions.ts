@@ -11,6 +11,38 @@ function invalid(message: string): never {
   throw new DeviceRpcError({ code: "invalid-input", message, retryable: false });
 }
 
+function validatePushPayload(text: string): void {
+  if (new TextEncoder().encode(text).byteLength > 4096) {
+    invalid("Push payload must be at most 4096 UTF-8 bytes.");
+  }
+  let payload: unknown;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    invalid("Push payload must be valid JSON.");
+  }
+  if (
+    typeof payload !== "object" ||
+    payload === null ||
+    Array.isArray(payload) ||
+    !("aps" in payload) ||
+    typeof payload.aps !== "object" ||
+    payload.aps === null ||
+    Array.isArray(payload.aps)
+  ) {
+    invalid("Push payload must be a JSON object containing an aps object.");
+  }
+}
+
+/**
+ * The checks every platform shares, past the schema: what an agent can fix in
+ * its own arguments. Whether a platform supports the action is its backend's call.
+ */
+export function validateDeviceTestingInput(input: DeviceTestingInput): void {
+  if (!Schema.is(DeviceTestingInput)(input)) invalid("Invalid simulator testing action.");
+  if (input.action.type === "push") validatePushPayload(input.action.payload);
+}
+
 /** Pure validation/planning, before discovery or execution. No shell interpolation. */
 export function planIosTestingAction(input: DeviceTestingInput): readonly TestingCommand[] {
   if (!Schema.is(DeviceTestingInput)(input)) invalid("Invalid simulator testing action.");
@@ -41,28 +73,15 @@ export function planIosTestingAction(input: DeviceTestingInput): readonly Testin
         },
       ];
     case "push": {
-      if (new TextEncoder().encode(action.payload).byteLength > 4096) {
-        invalid("Push payload must be at most 4096 UTF-8 bytes.");
-      }
-      let payload: unknown;
-      try {
-        payload = JSON.parse(action.payload);
-      } catch {
-        invalid("Push payload must be valid JSON.");
-      }
-      if (
-        typeof payload !== "object" ||
-        payload === null ||
-        Array.isArray(payload) ||
-        !("aps" in payload) ||
-        typeof payload.aps !== "object" ||
-        payload.aps === null ||
-        Array.isArray(payload.aps)
-      ) {
-        invalid("Push payload must be a JSON object containing an aps object.");
-      }
+      validatePushPayload(action.payload);
       return [{ label: "push", args: ["push", udid, action.bundleId, "-"], stdin: action.payload }];
     }
+    case "orientation":
+      return invalid(
+        "Orientation is an Android emulator setting; rotate an iOS simulator with the rotate button.",
+      );
+    case "network":
+      return invalid("Network on/off is an Android emulator setting.");
     case "preset":
       switch (action.value) {
         case "dark":

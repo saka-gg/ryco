@@ -22,6 +22,10 @@ export type DeviceCall = Exclude<
   | "suspendTesting"
   // Local simulators only; kept out of the device host protocol.
   | "readLogs"
+  // Optional, synchronous or local-only: a remote host keeps the defaults.
+  | "previewMode"
+  | "uprightFrames"
+  | "requestKeyframe"
 >;
 export type DeviceArgs<K extends DeviceCall> = Parameters<DeviceBackend[K]>;
 export type DeviceResult<K extends DeviceCall> = Awaited<ReturnType<DeviceBackend[K]>>;

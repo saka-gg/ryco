@@ -415,6 +415,24 @@ export class HostDeviceBackend extends ForwardingDeviceBackend {
       : null;
   }
 
+  uprightFrames(udid: string): boolean {
+    const route = this.devices.get(udid);
+    const backend = route ? (this.backends.get(udid) ?? route.host.backend) : null;
+    return backend?.uprightFrames?.(route!.nativeUdid) ?? false;
+  }
+
+  previewMode(udid: string): "video" | "screenshots" | null {
+    const route = this.devices.get(udid);
+    const backend = route ? (this.backends.get(udid) ?? route.host.backend) : null;
+    return backend?.previewMode?.(route!.nativeUdid) ?? null;
+  }
+
+  async requestKeyframe(udid: string): Promise<boolean> {
+    const route = this.devices.get(udid);
+    const backend = route ? (this.backends.get(udid) ?? route.host.backend) : null;
+    return (await backend?.requestKeyframe?.(route!.nativeUdid)) ?? false;
+  }
+
   async attachStream(udid: string, listener: DeviceFrameListener): Promise<void> {
     const route = this.resolve(udid);
     await route.backend.attachStream(route.nativeUdid, (frame) => {

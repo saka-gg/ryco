@@ -278,6 +278,37 @@ describe("DeviceManager keyframe resync", () => {
     expect(backend.hasStream(DEVICE_A)).toBe(true);
   });
 
+  it("asks a backend that can for a keyframe in place, and publishes its preview mode", async () => {
+    class InPlaceBackend extends FakeDeviceBackend {
+      readonly keyframeRequests: string[] = [];
+      async requestKeyframe(udid: string): Promise<boolean> {
+        this.keyframeRequests.push(udid);
+        return true;
+      }
+      previewMode(): "video" | "screenshots" | null {
+        return "video";
+      }
+    }
+    const backend = new InPlaceBackend();
+    const { manager } = makeManager(backend);
+    await backend.boot(DEVICE_A);
+    await manager.attach(THREAD_A, DEVICE_A);
+    manager.subscribeFrames(DEVICE_A, {
+      send: () => undefined,
+      bufferedAmount: () => 0,
+      isOpen: () => true,
+    });
+    await waitForStream(backend, DEVICE_A, true);
+
+    await manager.requestKeyframe(DEVICE_A);
+
+    expect(backend.keyframeRequests).toEqual([DEVICE_A]);
+    expect(backend.callsOfKind("attachStream")).toHaveLength(1);
+    expect(backend.callsOfKind("detachStream")).toHaveLength(0);
+    const listed = await manager.list();
+    expect(listed.devices.find((device) => device.udid === DEVICE_A)?.preview).toBe("video");
+  });
+
   it("does not restart the stream on a plain re-attach", async () => {
     const { backend, manager } = makeManager();
     await backend.boot(DEVICE_A);
@@ -1456,6 +1487,63 @@ describe("DeviceManager orientation", () => {
       "portrait-upside-down",
     ]);
     expect(manager.orientationOf(DEVICE_A)).toBe("portrait-upside-down");
+  });
+
+  it("turns agent points read off the upright screen back into portrait input points", async () => {
+    const { backend, manager } = makeManager();
+    await backend.boot(DEVICE_A);
+    await manager.attach(THREAD_A, DEVICE_A);
+    const { pointWidth: width, pointHeight: height } = backend.geometry(DEVICE_A)!;
+    const cases = [
+      ["portrait", { x: 10, y: 20 }],
+      // Measured on iOS 27 Safari: Tabs at (780,32) of 874x402 is hit at (370,780).
+      ["landscape-left", { x: width - 20, y: 10 }],
+      ["landscape-right", { x: 20, y: height - 10 }],
+      ["portrait-upside-down", { x: width - 10, y: height - 20 }],
+    ] as const;
+    for (const [orientation, expected] of cases) {
+      await manager.setOrientation(DEVICE_A, orientation);
+      await manager.tapUpright(DEVICE_A, 10, 20);
+      expect(backend.callsOfKind("tap").at(-1)).toMatchObject(expected);
+    }
+    await manager.setOrientation(DEVICE_A, "landscape-left");
+    await manager.swipeUpright(DEVICE_A, {
+      fromX: 10,
+      fromY: 20,
+      toX: 30,
+      toY: 40,
+      durationMs: 100,
+    });
+    expect(backend.callsOfKind("swipe").at(-1)?.gesture).toEqual({
+      fromX: width - 20,
+      fromY: 10,
+      toX: width - 40,
+      toY: 30,
+      durationMs: 100,
+    });
+    // The pane's own taps are already in input points.
+    await manager.tap(DEVICE_A, 10, 20);
+    expect(backend.callsOfKind("tap").at(-1)).toMatchObject({ x: 10, y: 20 });
+  });
+
+  it("leaves rotation to a backend whose frames turn with the device", async () => {
+    class UprightBackend extends FakeDeviceBackend {
+      uprightFrames(): boolean {
+        return true;
+      }
+    }
+    const backend = new UprightBackend();
+    const { manager } = makeManager(backend);
+    await backend.boot(DEVICE_A);
+    await manager.attach(THREAD_A, DEVICE_A);
+
+    await manager.pressButton(DEVICE_A, "rotate");
+    await manager.setOrientation(DEVICE_A, "landscape-right");
+    await manager.tapUpright(DEVICE_A, 10, 20);
+
+    expect(backend.callsOfKind("pressButton").map((call) => call.button)).toEqual(["rotate"]);
+    expect(manager.orientationOf(DEVICE_A)).toBe("portrait");
+    expect(backend.callsOfKind("tap").at(-1)).toMatchObject({ x: 10, y: 20 });
   });
 
   it("forgets the orientation when the device shuts down", async () => {

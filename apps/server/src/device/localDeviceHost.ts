@@ -1,5 +1,5 @@
 import { runProcess } from "../processRunner.ts";
-import { AndroidEmulatorBackend } from "./AndroidEmulatorBackend.ts";
+import { LazyAndroidEmulatorBackend } from "./LazyAndroidEmulatorBackend.ts";
 import { PlatformDeviceBackend } from "./PlatformDeviceBackend.ts";
 import { IosSimulatorBackend } from "./IosSimulatorBackend.ts";
 import type { DeviceHostBackend } from "./HostDeviceBackend.ts";
@@ -25,7 +25,7 @@ export function localDeviceHost(platform: NodeJS.Platform = process.platform): D
   const run = shareDeviceHelperBuilds(runProcess);
   // Keep one Android adapter: SDK failures, transport identities and ownership
   // must stay pinned across discovery and sequential calls on all factory instances.
-  const android = new AndroidEmulatorBackend({ platform });
+  const android = new LazyAndroidEmulatorBackend({ platform });
   const makeBackend = () =>
     new PlatformDeviceBackend(new IosSimulatorBackend({ platform, run }), android);
   return {

@@ -14,16 +14,24 @@ export interface DevicePoint {
 
 /**
  * The device's point size for a frame of `frameWidth × frameHeight` pixels: Android emulators
- * take pixels; iOS simulators take points, from the device's geometry or the usual scale (2 for
- * tablets, 3 for phones) when it is unknown.
+ * take display pixels (the geometry, turned to the frame's orientation, since streamed video
+ * can be smaller than the display; the frame itself without one); iOS simulators take points,
+ * from the device's geometry or the usual scale (2 for tablets, 3 for phones) when it is unknown.
  */
 export function devicePointSize(
   device: Pick<DeviceDescriptor, "platform" | "geometry"> | null | undefined,
   frameWidth: number,
   frameHeight: number,
 ): { readonly pointWidth: number; readonly pointHeight: number } {
-  if (device?.platform === "android-emulator")
-    return { pointWidth: frameWidth, pointHeight: frameHeight };
+  if (device?.platform === "android-emulator") {
+    const geometry = device.geometry;
+    if (!geometry) return { pointWidth: frameWidth, pointHeight: frameHeight };
+    // A rotation can reach the frames before the next descriptor does.
+    const turned = geometry.pointWidth > geometry.pointHeight !== frameWidth > frameHeight;
+    return turned
+      ? { pointWidth: geometry.pointHeight, pointHeight: geometry.pointWidth }
+      : { pointWidth: geometry.pointWidth, pointHeight: geometry.pointHeight };
+  }
   const scale = device?.geometry?.scale ?? (frameWidth > 1_400 ? 2 : 3);
   return {
     pointWidth: device?.geometry?.pointWidth ?? frameWidth / scale,

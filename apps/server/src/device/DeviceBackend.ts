@@ -199,6 +199,27 @@ export interface DeviceBackend {
    */
   geometry(udid: string): DeviceGeometry | null;
 
+  /**
+   * How a pane should preview this device, once its stream has started:
+   * H.264 on the frame socket, or screenshots when the backend could not
+   * stream. Null (or absent) keeps the platform default.
+   */
+  previewMode?(udid: string): "video" | "screenshots" | null;
+
+  /**
+   * True when frames, screenshots, the tree and input all turn with the
+   * device (Android): the pane then keeps the chassis upright and agent
+   * points need no mapping. Absent or false: frames stay in the device's
+   * natural orientation (iOS), and the manager tracks the turn.
+   */
+  uprightFrames?(udid: string): boolean;
+
+  /**
+   * Ask the running stream for fresh codec parameters and a keyframe. True
+   * when the backend did; false (or absent) restarts the stream instead.
+   */
+  requestKeyframe?(udid: string): Promise<boolean>;
+
   attachStream(udid: string, onFrame: DeviceFrameListener): Promise<void>;
   detachStream(udid: string): Promise<void>;
 

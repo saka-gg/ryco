@@ -952,12 +952,12 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                 service.manager.requestOpenPane(plan.threadId, plan.udid, "agent-tool");
                 return;
               case "deviceTap": {
-                await service.manager.tap(plan.udid, plan.x, plan.y);
+                await service.manager.tapUpright(plan.udid, plan.x, plan.y);
                 service.manager.requestOpenPane(plan.threadId, plan.udid, "agent-tool");
                 return;
               }
               case "deviceSwipe":
-                await service.manager.swipe(plan.udid, {
+                await service.manager.swipeUpright(plan.udid, {
                   fromX: plan.fromX,
                   fromY: plan.fromY,
                   toX: plan.toX,

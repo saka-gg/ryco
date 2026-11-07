@@ -310,9 +310,11 @@ export default function SimulatorPanel(props: {
 
   // Without WebCodecs (a plain-HTTP origin, an old browser) the panel samples
   // screenshots instead of streaming H.264, the way the hosted relay does.
+  // Android streams video once its backend says scrcpy runs (`preview`); until
+  // then, and on a node without it, the pane polls screenshots as before.
   const useNativeVideo =
     Boolean(client?.openFrameSource) &&
-    attached?.platform !== "android-emulator" &&
+    (attached?.platform !== "android-emulator" || attached.preview === "video") &&
     deviceVideoDecodingSupported();
   const lastInputErrorAt = useRef(0);
   const onInputError = useCallback((inputError: { readonly message: string }) => {
@@ -758,7 +760,7 @@ export default function SimulatorPanel(props: {
           active={recording.kind !== "idle"}
           disabled={
             !attached ||
-            attached.platform === "android-emulator" ||
+            attached.host?.transport === "ssh" ||
             recording.kind === "starting" ||
             recording.kind === "stopping"
           }

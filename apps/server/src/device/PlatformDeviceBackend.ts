@@ -188,6 +188,18 @@ export class PlatformDeviceBackend implements DeviceBackend {
     return this.target(args[0]).geometry(...args);
   }
 
+  uprightFrames(udid: string): boolean {
+    return this.target(udid).uprightFrames?.(udid) ?? false;
+  }
+
+  previewMode(udid: string): "video" | "screenshots" | null {
+    return this.target(udid).previewMode?.(udid) ?? null;
+  }
+
+  async requestKeyframe(udid: string): Promise<boolean> {
+    return (await this.target(udid).requestKeyframe?.(udid)) ?? false;
+  }
+
   attachStream(
     ...args: Parameters<DeviceBackend["attachStream"]>
   ): ReturnType<DeviceBackend["attachStream"]> {
