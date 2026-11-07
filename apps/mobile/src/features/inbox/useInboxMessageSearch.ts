@@ -36,10 +36,8 @@ export function useInboxMessageSearch(
   const [state, setState] = useState<InboxMessageSearchState>(IDLE);
   // Runs the debounced node searches for the current query and drops a superseded answer.
   useEffect(() => {
-    if (searchQuery === null || environmentKey.length === 0) {
-      setState(IDLE);
-      return;
-    }
+    // No search: the hook answers no matches below; the last answer is dropped on the next one.
+    if (searchQuery === null || environmentKey.length === 0) return;
     let cancelled = false;
     const timer = setTimeout(() => {
       const searches = environmentKey.split("\n").map((id) => {
@@ -66,5 +64,7 @@ export function useInboxMessageSearch(
       clearTimeout(timer);
     };
   }, [environmentKey, searchQuery]);
-  return searchQuery !== null && state.query !== null ? state.matches : NO_MATCHES;
+  return searchQuery !== null && environmentKey.length > 0 && state.query !== null
+    ? state.matches
+    : NO_MATCHES;
 }
