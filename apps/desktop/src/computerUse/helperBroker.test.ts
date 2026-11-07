@@ -188,7 +188,8 @@ describe.skipIf(process.platform === "win32")("ComputerUseHelperBroker", () => {
     const first = broker.spawn(NODE, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
     const second = broker.spawn(
       NODE,
-      ["-e", "setInterval(() => {}, 1000)", "--socket", "/x.sock"],
+      // "--" ends Node's own options: without it Node rejects --socket and exits 9.
+      ["-e", "setInterval(() => {}, 1000)", "--", "--socket", "/x.sock"],
       {
         stdio: ["ignore", "ignore", "pipe"],
         proxySocket: "/x.sock",

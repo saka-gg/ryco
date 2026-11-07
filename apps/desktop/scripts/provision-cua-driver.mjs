@@ -53,13 +53,26 @@ const artifact = option("--artifact-dir") ?? process.env.RYCO_CUA_ARTIFACT_DIR;
 const signIdentity = option("--sign-identity") ?? process.env.RYCO_CUA_SIGN_IDENTITY;
 /** Stable signing identifier so macOS TCC remembers the driver across rebuilds. */
 const CUA_DRIVER_SIGN_IDENTIFIER = "com.laurinfrank.ryco.cua.driver";
+/**
+ * The upstream paths the driver build reads. Since 0.39 the driver links the
+ * shared `cua-telemetry` crate from libs/cua (only its config reader; Ryco
+ * turns telemetry off), which inherits libs/cua's workspace manifest and embeds
+ * two JSON files from elsewhere in the repository at build time.
+ */
+const CUA_SOURCE_PATHS = [
+  "libs/cua-driver",
+  "libs/cua/Cargo.toml",
+  "libs/cua/crates/cua-telemetry",
+  "libs/cua/crates/cua-teleport/src/ux/targets.json",
+  "libs/images/sandbox-images.json",
+];
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const patchPath = fileURLToPath(
-  new URL("../patches/cua-driver/0001-synara-native.patch", import.meta.url),
+  new URL("../patches/cua-driver/0001-ryco-native.patch", import.meta.url),
 );
 const patch = await readFile(patchPath);
 const linuxPatchPath = fileURLToPath(
-  new URL("../patches/cua-driver/0002-synara-linux-browser.patch", import.meta.url),
+  new URL("../patches/cua-driver/0002-ryco-linux-browser.patch", import.meta.url),
 );
 if (!targets[platform] || (platform === "darwin" && process.platform !== "darwin"))
   throw new Error(
@@ -71,7 +84,7 @@ if (!targets[platform] || (platform === "darwin" && process.platform !== "darwin
 assertDesktopBuildArch(arch, platform);
 if (option("--archive"))
   throw new Error(
-    "The upstream binary lacks Synara's native patch. Use --source-checkout or --artifact-dir instead.",
+    "The upstream binary lacks Ryco's native patch. Use --source-checkout or --artifact-dir instead.",
   );
 if (digest(patch) !== release.patchSha256) throw new Error("Cua native patch checksum mismatch.");
 if (platform === "linux") {
@@ -101,7 +114,7 @@ if (!(option("--artifact-dir") ?? process.env.RYCO_CUA_ARTIFACT_DIR) && platform
     process.exit(1);
   }
 }
-const temporary = await mkdtemp(join(tmpdir(), "synara-cua-package-"));
+const temporary = await mkdtemp(join(tmpdir(), "ryco-cua-package-"));
 const environment = {
   ...process.env,
   CUA_DRIVER_RS_TELEMETRY_ENABLED: "0",
@@ -217,7 +230,14 @@ try {
     if (commit !== release.source) throw new Error("Cua source commit mismatch.");
     const archive = join(temporary, "source.tar");
     // Ignore local checkout edits; only the pinned commit enters the build.
-    run("git", ["-C", source, "archive", `--output=${archive}`, release.source, "libs/cua-driver"]);
+    run("git", [
+      "-C",
+      source,
+      "archive",
+      `--output=${archive}`,
+      release.source,
+      ...CUA_SOURCE_PATHS,
+    ]);
     const build = join(temporary, "build");
     await mkdir(build);
     run("tar", ["-xf", archive, "-C", build]);

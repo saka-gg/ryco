@@ -526,7 +526,7 @@ const CUA_NATIVE_TARGET_TOOLS = new Set([
  * semantic lease (one per `(pid, window_id)`), rather than the process-wide
  * exclusive input lease. Mirrors `uses_stable_space_membership` plus the
  * native-target tool list in the driver's `sdk_adapter.rs` (native revision
- * 40); a call this returns false for is refused while any other input runs.
+ * 41); a call this returns false for is refused while any other input runs.
  */
 export function cuaUsesConcurrentInputLease(name: string, args: unknown): boolean {
   if (!CUA_NATIVE_TARGET_TOOLS.has(name)) return false;

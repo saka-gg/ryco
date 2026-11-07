@@ -1,7 +1,7 @@
 // Adapted from Synara v0.9.1; see docs/licenses/synara-computer-use.txt.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createConnection } from "node:net";
-import { CuaDriverHost } from "./cuaDriverHost.ts";
+import { CuaDriverHost, driverInheritedEnv } from "./cuaDriverHost.ts";
 import { cuaHostProcessIsAlive } from "./cuaRuntimeOwnership.ts";
 import type { ComputerInputMonitorState } from "./escapeKillSwitchMonitor.ts";
 import {
@@ -21,7 +21,7 @@ import {
 afterEach(cleanupFixtures);
 
 describe("Cua macOS host retirement", () => {
-  it("starts the compact cursor once per generation and owns the observation budget", async () => {
+  it("starts the compact cursor once per generation and leaves the observation bound to the driver", async () => {
     const f = await fixture();
     for (let i = 0; i < 2; i++) {
       const reply = await cuaRequest<CuaReply>(f.endpoint, {
@@ -34,7 +34,7 @@ describe("Cua macOS host retirement", () => {
     }
     const events = (await f.events()).map((row) => row.event);
     expect(events.filter((event) => event === "motion-100-0")).toHaveLength(1);
-    expect(events.filter((event) => event === "observation-budget-100")).toHaveLength(2);
+    expect(events.filter((event) => event === "observation-budget-default")).toHaveLength(2);
   });
 
   it.each(["stop", "suspend", "pauseDesktop"] as const)(
@@ -744,7 +744,7 @@ describe("Cua macOS host retirement", () => {
         "start",
         "motion-100-0",
         "key",
-        "observation-budget-100",
+        "observation-budget-default",
         "cancel",
         "cleanup-ack",
       ]);
@@ -843,6 +843,21 @@ describe("Cua macOS host retirement", () => {
       }),
     ).resolves.toMatchObject({ ok: true });
     expect((await f.events()).some((event) => event.event === "start")).toBe(true);
+  });
+});
+
+describe("driver environment", () => {
+  it("drops inherited driver switches and keeps everything else", () => {
+    expect(
+      driverInheritedEnv({
+        PATH: "/usr/bin",
+        HOME: "/Users/someone",
+        CUA_DRIVER_FAST_PATH: "1",
+        CUA_DRIVER_ALLOW_BRIEF_FOREGROUND: "1",
+        SYNARA_CUA_BACKGROUND_OBSERVATION_MS: "350",
+        CUA_HOME: "/tmp/cua",
+      }),
+    ).toEqual({ PATH: "/usr/bin", HOME: "/Users/someone", CUA_HOME: "/tmp/cua" });
   });
 });
 

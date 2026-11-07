@@ -1090,11 +1090,12 @@ describe("Cua native boundary", () => {
     const write = f.calls.find((call) => call.name === "set_value");
     expect(write?.args).toMatchObject({
       element_token: "web-token",
-      element_index: 2,
       value: "seed-typed",
       pid: 10,
       window_id: 20,
     });
+    // 0.40 refuses element_index on set_value; the token alone addresses it.
+    expect(write?.args).not.toHaveProperty("element_index");
     // The independent re-read saw the DOM value land.
     expect(result).toMatchObject({ verified: "confirmed", effect: "verified" });
     const reads = f.calls.filter((call) => call.name === "get_window_state");
