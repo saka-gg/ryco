@@ -53,6 +53,17 @@ in `apps/web/src/deviceWorkspace/workspaceMiniPlayerStore.ts`, `workspaceMiniPla
 (`apps/web/src/components/device/DevicePanel.tsx`) in
 `apps/web/src/components/device/DevicePicker.tsx`.
 
+The device setup, Tools drawer and SSH host settings follow upstream at commit `6577c6b6`, under
+the same copyright and license: the three setup steps and per-platform status
+(`apps/web/src/components/device/DeviceSetup.tsx`) in `DeviceSetupWizard.tsx`; the drawer's
+control set, platform filtering and read-back after each action
+(`apps/web/src/components/device/DeviceToolsPanel.tsx`, `apps/server/src/device/DeviceActions.ts`)
+in `DeviceToolsDrawer.tsx`, `apps/server/src/device/iosDeviceDetail.ts` and
+`apps/server/src/device/android/androidDetail.ts` (including the Android animation-scale Reduce
+Motion and `dumpsys window` focus reading); and the host list with Test connection
+(`apps/web/src/components/settings/DeviceSourcesSettings.tsx`, `DeviceHostEditor.tsx`) in
+`apps/web/src/components/settings/DeviceHostsSettings.tsx`.
+
 ### MIT License
 
 Copyright (c) 2026 T3 Tools Inc.
@@ -156,6 +167,14 @@ is licensed under the Apache License, Version 2.0, reproduced below.
 - `apps/server/native/device-helper/Sources/FrameStream.swift` adopts serve-sim's low-latency
   encoder specification (`H264Encoder.swift`) and its bitrate scaling (`StreamBitrate.swift`,
   0.1 bits per pixel between 6 and 30 Mbps) for Ryco's own H.264 capture.
+- `apps/server/native/device-helper/Sources/SimSettings.c` follows
+  `packages/serve-sim/Sources/SimAXSettings/sim-ax-settings.m`: a tool run inside the simulator
+  through `simctl spawn` that calls libAccessibility's `_AXS*` setters, MediaAccessibility's
+  display-filter preferences and UIKit's `UIViewGlassLegibilitySetting` to read and change Reduce
+  Motion, Reduce Transparency, Button Shapes, VoiceOver, color filters and Liquid Glass. Ryco's
+  version resolves every symbol at run time and reports a missing one as unsupported, prints its
+  status after a change, and is built from source by the helper's `build.sh`; no serve-sim binary
+  is used.
 
 ### Apache License 2.0
 

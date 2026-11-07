@@ -190,6 +190,16 @@ function handleRead(
         (active) => active.describeUi(request.input.udid),
         "Failed to read the simulator accessibility tree.",
       ).pipe(Effect.map((result) => ({ type: "describe-ui" as const, result })));
+    case "detail":
+      return invoke(
+        manager,
+        (active) =>
+          active.detail(
+            request.input.udid,
+            request.input.bundleId === undefined ? {} : { bundleId: request.input.bundleId },
+          ),
+        "Failed to read the device's settings.",
+      ).pipe(Effect.map((result) => ({ type: "detail" as const, result })));
   }
 }
 
@@ -197,6 +207,13 @@ function handleLifecycle(
   manager: DeviceManager | undefined,
   request: DeviceLifecycleRequest,
 ): Effect.Effect<DeviceLifecycleResponse, DeviceRpcError> {
+  // Test connection works whether or not this node drives devices itself.
+  if (request.type === "probe-host") {
+    return attempt(
+      async () => (await import("../device/deviceHostProbe.ts")).probeDeviceHost(request.input),
+      "Could not test the SSH device host.",
+    ).pipe(Effect.map((result) => ({ type: "probe-host" as const, result })));
+  }
   // "Use simulators" off: nothing new starts. Shutdown and detach still free devices.
   if (
     (request.type === "boot" || request.type === "attach") &&

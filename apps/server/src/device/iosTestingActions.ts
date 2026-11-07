@@ -3,9 +3,22 @@ import { Schema } from "effect";
 
 interface TestingCommand {
   readonly label: string;
+  /**
+   * `simctl` arguments, or with `simSettings` the arguments of Ryco's own
+   * `ryco-sim-settings` tool, which the backend runs inside the simulator.
+   */
   readonly args: readonly string[];
   readonly stdin?: string;
+  readonly simSettings?: true;
 }
+
+/** `ryco-sim-settings` keys for the switches `simctl ui` does not cover. */
+const SIM_SETTINGS_KEYS = {
+  "reduce-motion": "reduce-motion",
+  "reduce-transparency": "reduce-transparency",
+  "show-borders": "show-borders",
+  voiceover: "voiceover",
+} as const;
 
 function invalid(message: string): never {
   throw new DeviceRpcError({ code: "invalid-input", message, retryable: false });
@@ -82,6 +95,27 @@ export function planIosTestingAction(input: DeviceTestingInput): readonly Testin
       );
     case "network":
       return invalid("Network on/off is an Android emulator setting.");
+    case "accessibility":
+      if (action.setting === "increase-contrast") {
+        return [ui("increase_contrast", action.value ? "enabled" : "disabled")];
+      }
+      return [
+        {
+          label: action.setting,
+          args: ["set", SIM_SETTINGS_KEYS[action.setting], action.value ? "on" : "off"],
+          simSettings: true,
+        },
+      ];
+    case "liquid-glass":
+      return [
+        { label: "Liquid Glass", args: ["set", "liquid-glass", action.value], simSettings: true },
+      ];
+    case "color-filter":
+      return [
+        { label: "color filter", args: ["set", "color-filter", action.value], simSettings: true },
+      ];
+    case "terminate-app":
+      return [{ label: "terminate", args: ["terminate", udid, action.bundleId] }];
     case "preset":
       switch (action.value) {
         case "dark":

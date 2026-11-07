@@ -12,7 +12,9 @@ import { homedir } from "node:os";
 import * as path from "node:path";
 
 import { makeBootOwnershipStore, NULL_BOOT_OWNERSHIP } from "../bootOwnership.ts";
-import { HostDeviceBackend } from "../HostDeviceBackend.ts";
+import { DEVICE_SSH_HOST_LIMIT, type DeviceSshHost } from "@ryco/contracts";
+
+import { HostDeviceBackend, type DeviceHostBackend } from "../HostDeviceBackend.ts";
 import { readDeviceHostConfig, sshDeviceHostId } from "../deviceHostConfig.ts";
 import { DeviceManager } from "../DeviceManager.ts";
 import { localDeviceHost } from "../localDeviceHost.ts";
@@ -43,6 +45,29 @@ function defaultBootOwnershipPath(): string {
   return path.join(stateDir, "device-boot-ownership.json");
 }
 
+/**
+ * Routing entries for SSH hosts, deduplicated by identity and capped. Only a
+ * node with a configured SSH host loads its backend and the host protocol.
+ */
+async function sshHostEntries(
+  configs: readonly { readonly config: DeviceSshHost; readonly source: "settings" | "file" }[],
+): Promise<DeviceHostBackend[]> {
+  if (configs.length === 0) return [];
+  const { SshDeviceBackend } = await import("../SshDeviceBackend.ts");
+  const seen = new Set<string>();
+  const entries: DeviceHostBackend[] = [];
+  for (const { config, source } of configs) {
+    const id = sshDeviceHostId(config);
+    if (seen.has(id) || entries.length >= DEVICE_SSH_HOST_LIMIT) continue;
+    seen.add(id);
+    entries.push({
+      host: { id, name: config.name, transport: "ssh", source },
+      backend: new SshDeviceBackend(config),
+    });
+  }
+  return entries;
+}
+
 export function makeDeviceServiceLayer(
   options: DeviceServiceLiveOptions = {},
 ): Layer.Layer<DeviceService> {
@@ -54,19 +79,26 @@ export function makeDeviceServiceLayer(
         readDeviceHostConfig(options.hostsFile ?? process.env.RYCO_DEVICE_HOSTS_FILE),
       );
       const supported = ["darwin", "linux", "win32"].includes(platform) || hosts.length > 0;
-      // Only nodes with a configured SSH device host load its backend and the
-      // host protocol; every other boot skips that code.
-      const sshHosts =
-        hosts.length === 0
-          ? []
-          : yield* Effect.promise(async () => {
-              const { SshDeviceBackend } = await import("../SshDeviceBackend.ts");
-              return hosts.map((config) => ({
-                host: { id: sshDeviceHostId(config), name: config.name, transport: "ssh" as const },
-                backend: new SshDeviceBackend(config),
-              }));
-            });
+      const sshHosts = yield* Effect.promise(() =>
+        sshHostEntries(hosts.map((config) => ({ config, source: "file" as const }))),
+      );
       const backend = new HostDeviceBackend([localDeviceHost(platform), ...sshHosts]);
+      // Settings hosts join the file's; the file's win a tie, being the same destination.
+      let configuring: Promise<void> = Promise.resolve();
+      const configureSshHosts = (settingsHosts: readonly DeviceSshHost[]) => {
+        const next = configuring.then(async () => {
+          const fileIds = new Set(hosts.map(sshDeviceHostId));
+          const entries = await sshHostEntries([
+            ...hosts.map((config) => ({ config, source: "file" as const })),
+            ...settingsHosts
+              .filter((config) => !fileIds.has(sshDeviceHostId(config)))
+              .map((config) => ({ config, source: "settings" as const })),
+          ]);
+          await backend.setRemoteHosts(entries);
+        });
+        configuring = next.catch(() => undefined);
+        return next;
+      };
       // Local boots are recovered here; SSH workers recover their own boots on the Mac.
       const bootOwnership = supported
         ? makeBootOwnershipStore(options.bootOwnershipPath ?? defaultBootOwnershipPath())
@@ -101,7 +133,7 @@ export function makeDeviceServiceLayer(
           await manager.dispose();
         }),
       );
-      return { supported, manager } satisfies DeviceServiceShape;
+      return { supported, manager, configureSshHosts } satisfies DeviceServiceShape;
     }),
   );
 }

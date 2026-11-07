@@ -1,18 +1,15 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { DEVICE_SSH_HOST_LIMIT, DeviceSshHost } from "@ryco/contracts";
 import { Schema } from "effect";
 import { DeviceBackendError } from "./DeviceBackend.ts";
 
-/** Node-owner managed configuration. Never accepted from a browser or agent tool. */
-export const SshDeviceHostConfig = Schema.Struct({
-  name: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128)),
-  target: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_][A-Za-z0-9_.@:-]{0,255}$/)),
-  port: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 }))),
-  identityFile: Schema.optional(Schema.String.check(Schema.isPattern(/^\/[^\0\r\n]{1,1023}$/))),
-  /** Absolute executable path on the Mac; no shell command strings. */
-  executable: Schema.String.check(Schema.isPattern(/^\/[^\0\r\n]{1,1023}$/)),
-});
-export type SshDeviceHostConfig = typeof SshDeviceHostConfig.Type;
+/**
+ * Node-owner managed configuration: the node's settings (owner-only) or the
+ * RYCO_DEVICE_HOSTS_FILE. Never accepted from an agent tool.
+ */
+export const SshDeviceHostConfig = DeviceSshHost;
+export type SshDeviceHostConfig = DeviceSshHost;
 export function sshDeviceHostId(config: SshDeviceHostConfig): string {
   return createHash("sha256")
     .update(
@@ -34,7 +31,7 @@ export async function readDeviceHostConfig(
     const text = await readFile(filePath, "utf8");
     if (text.length > 64 * 1024) throw new Error("oversized");
     const hosts = Schema.decodeUnknownSync(
-      Schema.Array(SshDeviceHostConfig).check(Schema.isMaxLength(16)),
+      Schema.Array(SshDeviceHostConfig).check(Schema.isMaxLength(DEVICE_SSH_HOST_LIMIT)),
     )(JSON.parse(text));
     if (new Set(hosts.map(sshDeviceHostId)).size !== hosts.length) throw new Error("duplicate");
     return hosts;

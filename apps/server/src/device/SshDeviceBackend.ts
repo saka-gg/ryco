@@ -23,7 +23,15 @@ import {
   type DeviceHostOperation,
 } from "./deviceHostProtocol.ts";
 
-export function deviceHostSshArgs(config: SshDeviceHostConfig): string[] {
+/**
+ * The SSH arguments for a host: batch authentication, strict host keys, no
+ * forwarding. The remote command is fixed: the worker, or (Test connection)
+ * the executable's version.
+ */
+export function deviceHostSshArgs(
+  config: SshDeviceHostConfig,
+  remote: typeof DEVICE_HOST_WORKER_ARG | "--version" = DEVICE_HOST_WORKER_ARG,
+): string[] {
   Schema.decodeUnknownSync(SshDeviceHostConfig)(config);
   const target = {
     alias: config.target,
@@ -49,7 +57,7 @@ export function deviceHostSshArgs(config: SshDeviceHostConfig): string[] {
     "ForwardX11=no",
     ...(config.identityFile ? ["-i", config.identityFile] : []),
     buildSshHostSpec(target),
-    `exec ${quote(config.executable)} ${DEVICE_HOST_WORKER_ARG}`,
+    `exec ${quote(config.executable)} ${remote}`,
   ];
 }
 

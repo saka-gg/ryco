@@ -65,6 +65,7 @@ import { ContextHandoffInspectionLive } from "./orchestration/Layers/ContextHand
 import { DeviceServiceLive } from "./device/Layers/DeviceService.ts";
 import { DeviceToolAccessLive } from "./device/Layers/DeviceToolAccess.ts";
 import { DeviceThreadLifecycleLive } from "./device/Layers/DeviceThreadLifecycle.ts";
+import { DeviceHostSettingsLive } from "./device/Layers/DeviceHostSettings.ts";
 import { deviceFrameRouteLayer } from "./device/deviceFrameRoute.ts";
 import { nodeBrowserFrameRouteLayer } from "./nodeBrowser/nodeBrowserRoute.ts";
 import { NodeBrowserLive } from "./nodeBrowser/NodeBrowser.ts";
@@ -761,6 +762,8 @@ const RuntimeServicesLive = Layer.mergeAll(
   // Feeds the device manager each thread's running turn and thread removals,
   // which end agent device holds and attachments (the simulator idle grace).
   DeviceThreadLifecycleLive,
+  // SSH device hosts from the node's settings, applied without a restart.
+  DeviceHostSettingsLive,
   // Cross-node imports an earlier process left behind: once commands are admitted, staging
   // folders of imports that never registered are deleted and pending settings replayed.
   ProjectImportsStartupRecoveryLive.pipe(Layer.provideMerge(ServerRuntimeStartupLive)),

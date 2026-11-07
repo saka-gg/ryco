@@ -3,6 +3,7 @@ import type {
   DeviceDescriptor,
   DeviceHardwareButton,
   DeviceOrientation,
+  DeviceUiFrame,
   EnvironmentId,
   ThreadDeviceAttachment,
 } from "@ryco/contracts";
@@ -102,6 +103,11 @@ export interface DeviceViewerProps {
   readonly overlay?: ReactNode;
   /** Rendered under the rail. */
   readonly children?: ReactNode;
+  /**
+   * Accessibility element frames, in device points, outlined over the live
+   * screen (the Tools drawer's overlay). They turn with the device.
+   */
+  readonly uiFrames?: readonly DeviceUiFrame[] | null;
 }
 
 export function DeviceViewer(props: DeviceViewerProps) {
@@ -391,6 +397,12 @@ export function DeviceViewer(props: DeviceViewerProps) {
               ) : null}
             </div>
           ) : null}
+          {props.uiFrames && props.uiFrames.length > 0 && dimensions ? (
+            <UiFrameOverlay
+              frames={props.uiFrames}
+              {...devicePointSize(device, dimensions.width, dimensions.height)}
+            />
+          ) : null}
         </DeviceScreen>
         {props.overlay}
       </div>
@@ -450,6 +462,16 @@ export function DeviceViewer(props: DeviceViewerProps) {
             />
           </>
         )}
+        {device.platform === "android-emulator" ? (
+          // The emulator turns itself (frames, input and tree turn with it).
+          <Control
+            icon={RotateCwIcon}
+            label="Rotate"
+            compact={floating}
+            disabled={disabled}
+            onClick={() => pressButton("rotate")}
+          />
+        ) : null}
         {iosRotation ? (
           <>
             <Control
@@ -504,5 +526,37 @@ export function DeviceViewer(props: DeviceViewerProps) {
       </div>
       {props.children}
     </div>
+  );
+}
+
+/** Element outlines over the screen, scaled from device points to the screen box. */
+function UiFrameOverlay(props: {
+  readonly frames: readonly DeviceUiFrame[];
+  readonly pointWidth: number;
+  readonly pointHeight: number;
+}) {
+  return (
+    <svg
+      aria-hidden
+      data-ui-frame-overlay
+      className="pointer-events-none absolute inset-0 h-full w-full"
+      viewBox={`0 0 ${props.pointWidth} ${props.pointHeight}`}
+      preserveAspectRatio="none"
+    >
+      {props.frames.map((frame) => (
+        <rect
+          // The frames are distinct (see `flattenUiFrames`), so their box names them.
+          key={`${frame.x},${frame.y},${frame.width},${frame.height}`}
+          x={frame.x}
+          y={frame.y}
+          width={frame.width}
+          height={frame.height}
+          fill="rgb(56 189 248 / 0.08)"
+          stroke="rgb(56 189 248 / 0.9)"
+          strokeWidth={1}
+          vectorEffect="non-scaling-stroke"
+        />
+      ))}
+    </svg>
   );
 }

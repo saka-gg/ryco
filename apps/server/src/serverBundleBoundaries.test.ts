@@ -757,6 +757,11 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // use. 7.185 MB once the node directory's store moved behind import() (-6 KB). 7.177 MB
     // after main's settings redesign (+9 KB) once the copy's MCP tools and export stopped
     // statically importing boot modules, whose sharing split boot code into extra chunks (-18 KB).
+    // 7.205 MB on 2026-11-06 with the device setup and Tools drawer (+14.9 KB from 7.190 MB): the
+    // device RPC contract every boot decodes (each platform's availability, the detail read-back,
+    // SSH host settings and Test connection), host routing that applies SSH hosts without a
+    // restart and waits for this node's first availability answer, and the iOS backend's new
+    // testing actions. The iOS and Android read-back and the SSH probe load through import().
     // 7.212 MB on 2026-11-07 for the simulator program's merge train: the device tools,
     // live input, device tabs, relay video and setup on top of Computer Use measured 7.209 MB.
     expect(bytes).toBeLessThan(7_212_000);

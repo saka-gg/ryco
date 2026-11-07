@@ -12,8 +12,24 @@ requirements. The SSH account needs access to that Mac's simulator session. No r
 package installation happens automatically. The executable must also find its Node
 runtime in the non-interactive SSH environment.
 
-Create a node-local JSON file and start Ryco with `RYCO_DEVICE_HOSTS_FILE` pointing to
-its absolute path:
+Add hosts in **Settings → this device → Simulators → Device hosts over SSH**: a name, the SSH
+destination (`target`: an SSH config alias or `user@hostname`), an optional port and key file (an
+absolute path on the coding node), and the absolute path of `ryco` on the Mac. **Test connection**
+runs only `ryco --version` on the Mac with the device host's SSH options, so it starts no worker,
+takes no ownership lock and installs nothing; it reports which check failed (SSH, the executable,
+or a version that differs from the node's). Hosts are saved in the node's settings
+(`deviceHosts`, owner-only, never in Agent Control's settings allowlist) and apply without a
+restart: an added host connects on the next device list, a renamed one keeps its connection and
+device selections, and a removed one is invalidated like a disconnect, then closed, so its worker
+on the Mac releases its boots.
+
+Establish SSH access and trust the Mac's host key with your normal SSH client first. Ryco uses
+batch authentication, strict host-key checking, and the coding node's SSH configuration and key
+agent. It disables agent/X11 forwarding and configured port forwards. The configuration contains
+paths, not private key material. Up to 16 SSH hosts and 256 devices across all hosts are
+supported. Removing a host does not uninstall Ryco on the Mac.
+
+A node-local JSON file named by `RYCO_DEVICE_HOSTS_FILE` still works, read at startup:
 
 ```json
 [
@@ -25,14 +41,8 @@ its absolute path:
 ]
 ```
 
-`target` can be an SSH config alias or `user@hostname`. Optional `port` and
-`identityFile` (an absolute path on the coding node) override SSH defaults. Establish
-SSH access and trust the Mac's host key with your normal SSH client first. Ryco uses
-batch authentication, strict host-key checking, and the coding node's SSH configuration
-and key agent. It disables agent/X11 forwarding and configured port forwards. The
-configuration contains paths, not private key material. Up to 16 SSH hosts and 256
-devices across all hosts are supported. Restart the coding node after adding, editing,
-or removing hosts. Removing a host does not uninstall Ryco on the Mac.
+Its hosts are listed in Settings as read-only ("From RYCO_DEVICE_HOSTS_FILE"); edit the file and
+restart the node to change them. A host in both places is the same destination and counts once.
 
 Host identity is a fingerprint of the SSH target, port, key path and executable path.
 Renaming a host preserves device selections; changing its destination gives it new

@@ -3,6 +3,27 @@
 How simulators and emulators show up in a chat: device tabs in the workspace panel, a floating
 window over the chat, and what happens when an agent opens a device.
 
+## First-run setup
+
+The first time the device panel opens on a node, it shows three steps instead of the picker:
+
+1. **Use simulators**: the "Use simulators" switch (`devicesEnabled`).
+2. **Platform checks**: iOS and Android checked on their own, with exactly what is missing
+   (Xcode, its license, a runtime, a simulator for that runtime; the Android SDK, Platform-Tools,
+   the Emulator, the command-line tools, an AVD) and **Check again**. One missing platform does
+   not block the other.
+3. **Agent access**: the "Agents can use simulators" switch (`agentDevicesEnabled`).
+
+**Finish** or **Skip setup** saves `deviceOnboardingCompleted` on the node, so the steps show once
+per node. A chat that already shows a device keeps showing it. Opening the panel or walking the
+steps boots, builds and installs nothing: the checks only read what is installed. Only the node's
+owner (on the Hub, with a mutation-ready connection) can change the switches or finish. With Use
+simulators off after setup, the panel says so and offers **Turn on**.
+
+While the node's first availability answer is still coming, the panel shows "Checking simulator
+support…". A later slow answer (a simulator booting) reports the node's previous answer instead of
+flashing "Simulator helper could not start".
+
 ## Device tabs
 
 Open the workspace panel's **+** and choose **Device**, or press the simulator shortcut. The

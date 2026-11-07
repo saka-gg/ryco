@@ -9,6 +9,7 @@
  * @module device/android/androidTesting
  */
 import type {
+  DeviceColorFilter,
   DeviceTestingAction,
   DeviceTestingInput,
   DeviceTestingPermission,
@@ -47,6 +48,24 @@ export const ANDROID_FONT_SCALE: Record<DeviceTestingTextSize, string> = {
   "accessibility-extra-large": "1.8",
   "accessibility-extra-extra-large": "1.9",
   "accessibility-extra-extra-extra-large": "2.0",
+};
+
+/** The three animation scales Reduce Motion zeroes, as Developer options does. */
+export const ANDROID_ANIMATION_SCALES = [
+  "animator_duration_scale",
+  "transition_animation_scale",
+  "window_animation_scale",
+] as const;
+
+/**
+ * Color correction (`accessibility_display_daltonizer`) for each color filter:
+ * 0 is monochromacy, 11 protanomaly, 12 deuteranomaly, 13 tritanomaly.
+ */
+export const ANDROID_DALTONIZER: Record<Exclude<DeviceColorFilter, "none">, string> = {
+  grayscale: "0",
+  "red-green": "11",
+  "green-red": "12",
+  "blue-yellow": "13",
 };
 
 /** `Surface.ROTATION_*` for each orientation. */
@@ -146,6 +165,60 @@ function plan(action: DeviceTestingAction, apiLevel: number): AndroidTestingStep
         { kind: "shell", args: ["svc", "data", verb] },
       ];
     }
+    case "accessibility":
+      switch (action.setting) {
+        case "reduce-motion":
+          return ANDROID_ANIMATION_SCALES.map((key) => ({
+            kind: "shell" as const,
+            args: ["settings", "put", "global", key, action.value ? "0" : "1"],
+          }));
+        case "increase-contrast":
+          // Android's nearest switch: High contrast text.
+          return [
+            {
+              kind: "shell",
+              args: [
+                "settings",
+                "put",
+                "secure",
+                "high_text_contrast_enabled",
+                action.value ? "1" : "0",
+              ],
+            },
+          ];
+        default:
+          throw new DeviceBackendError(
+            "Android emulators support Reduce Motion and Increase Contrast only.",
+          );
+      }
+    case "color-filter":
+      return action.value === "none"
+        ? [
+            {
+              kind: "shell",
+              args: ["settings", "put", "secure", "accessibility_display_daltonizer_enabled", "0"],
+            },
+          ]
+        : [
+            {
+              kind: "shell",
+              args: [
+                "settings",
+                "put",
+                "secure",
+                "accessibility_display_daltonizer",
+                ANDROID_DALTONIZER[action.value],
+              ],
+            },
+            {
+              kind: "shell",
+              args: ["settings", "put", "secure", "accessibility_display_daltonizer_enabled", "1"],
+            },
+          ];
+    case "liquid-glass":
+      throw new DeviceBackendError("Liquid Glass is an iOS setting.");
+    case "terminate-app":
+      return [{ kind: "shell", args: ["am", "force-stop", action.bundleId] }];
     case "preset":
       switch (action.value) {
         case "dark":

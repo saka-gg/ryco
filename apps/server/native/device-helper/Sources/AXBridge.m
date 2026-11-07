@@ -195,7 +195,19 @@ static id RycoJSONValue(id value) {
     return nil;
   }
 
-  return [self serializeElement:element depth:0 maxDepth:maxDepth];
+  NSDictionary *root = [self serializeElement:element depth:0 maxDepth:maxDepth];
+  // The frontmost app's process, so the server can name its bundle (the
+  // Tools drawer's foreground app). Absent when the translation has none.
+  SEL pidSelector = NSSelectorFromString(@"pid");
+  if ([translation respondsToSelector:pidSelector]) {
+    int pid = ((int (*)(id, SEL))objc_msgSend)(translation, pidSelector);
+    if (pid > 0) {
+      NSMutableDictionary *withPid = [root mutableCopy];
+      withPid[@"pid"] = @(pid);
+      return withPid;
+    }
+  }
+  return root;
 }
 
 - (NSDictionary *)serializeElement:(id)element depth:(NSInteger)depth maxDepth:(NSInteger)maxDepth {

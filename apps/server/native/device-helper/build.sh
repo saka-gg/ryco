@@ -113,6 +113,27 @@ xcrun swiftc \
   -o "$TMP_BINARY"
 
 chmod +x "$TMP_BINARY"
+
+# ryco-sim-settings runs inside a simulator (`simctl spawn`), so it is built for
+# the simulator SDK. It only backs the Tools drawer's accessibility switches:
+# a failed build leaves those unavailable rather than failing the helper.
+SIM_TOOL="$OUT_DIR/ryco-sim-settings"
+SIM_TMP="$(mktemp "${OUT_DIR}/.ryco-sim-settings.XXXXXX")"
+trap 'rm -f "$TMP_BINARY" "$SIM_TMP"' EXIT
+if SIM_SDK="$(xcrun --sdk iphonesimulator --show-sdk-path 2>/dev/null)" &&
+  xcrun --sdk iphonesimulator clang \
+    -O2 \
+    -target "$(uname -m)-apple-ios15.0-simulator" \
+    -isysroot "$SIM_SDK" \
+    -framework CoreFoundation \
+    "$SOURCE_DIR/Sources/SimSettings.c" \
+    -o "$SIM_TMP"; then
+  chmod +x "$SIM_TMP"
+  mv -f "$SIM_TMP" "$SIM_TOOL"
+else
+  echo "warning: ryco-sim-settings did not build; the Tools drawer's accessibility switches are unavailable" >&2
+fi
+
 mv -f "$TMP_BINARY" "$OUT_BINARY"
 trap - EXIT
 

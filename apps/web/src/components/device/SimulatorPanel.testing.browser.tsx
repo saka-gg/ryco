@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   testing: vi.fn<() => Promise<void>>(),
   list: vi.fn(),
   getThreadState: vi.fn(),
+  detail: vi.fn(),
 }));
 const hub = create(() => ({
   selectedNode: { environmentId: "simulator-env" },
@@ -60,10 +61,26 @@ vi.mock("../../environmentApi", () => ({
       list: mocks.list,
       getThreadState: mocks.getThreadState,
       keyEvent: mocks.keyEvent,
+      detail: mocks.detail,
+      describeUi: vi.fn(),
+      launchApp: vi.fn(),
+      openUrl: vi.fn(),
     },
   }),
 }));
 vi.mock("../../environments/runtime", () => ({ readEnvironmentConnection: () => undefined }));
+// Setup is done on this node; the wizard has its own tests.
+vi.mock("./NodeDeviceSetup", () => ({
+  useNodeDeviceSettings: () => ({
+    target: null,
+    canManage: true,
+    showSetup: false,
+    devicesOff: false,
+    dismiss: () => {},
+  }),
+  NodeDeviceSetup: () => null,
+  TurnOnDevicesButton: () => null,
+}));
 vi.mock("./useDeviceVideoStream", () => ({
   deviceVideoDecodingSupported: () => true,
   useDeviceVideoStream: () => ({
@@ -114,6 +131,14 @@ beforeEach(() => {
   mocks.streamInput.mockReset();
   mocks.keyEvent.mockReset().mockResolvedValue(undefined);
   mocks.testing.mockReset().mockResolvedValue(undefined);
+  mocks.detail.mockReset().mockResolvedValue({
+    udid: device.udid,
+    platform: "ios-simulator",
+    capturedAt: new Date().toISOString(),
+    foregroundApp: null,
+    settings: { appearance: "light" },
+    controls: ["appearance", "presets"],
+  });
   // Keep panel refresh pending so only the real store's explicit connection
   // transitions below publish readiness; cached snapshots remain in place.
   mocks.list.mockReset().mockImplementation(() => new Promise(() => {}));
@@ -155,12 +180,11 @@ describe("SimulatorPanel testing readiness", () => {
     const screen = await render(
       <SimulatorPanel environmentId={environmentId} threadId={threadId} />,
     );
+    await screen.getByRole("button", { name: "Tools", exact: true }).click();
     await expect
-      .element(screen.getByText("Simulator testing controls are unavailable on SSH hosts."))
+      .element(screen.getByText("Tools are unavailable for devices on SSH hosts."))
       .toBeVisible();
-    await expect
-      .element(screen.getByText("Simulator testing", { exact: true }))
-      .not.toBeInTheDocument();
+    expect(mocks.detail).not.toHaveBeenCalled();
     expect(mocks.testing).not.toHaveBeenCalled();
   });
 
@@ -168,13 +192,12 @@ describe("SimulatorPanel testing readiness", () => {
     const screen = await render(
       <SimulatorPanel environmentId={environmentId} threadId={threadId} />,
     );
-    await screen.getByText("Simulator testing", { exact: true }).click();
-    const dark = screen.getByRole("button", { name: "Dark mode", exact: true });
+    await screen.getByRole("button", { name: "Tools", exact: true }).click();
+    const dark = screen.getByRole("button", { name: "Dark", exact: true });
     await expect.element(dark).toBeEnabled();
     const store = useDeviceStateStore.getState();
     const previousGeneration = store.environmentById[environmentId]!.generation;
     const generation = store.beginConnection(environmentId);
-    await screen.getByText("Simulator testing", { exact: true }).click();
     await expect.element(dark).toBeDisabled();
     expect(useDeviceStateStore.getState().environmentById[environmentId]!.devices).toEqual([
       device,
@@ -201,8 +224,8 @@ describe("SimulatorPanel testing readiness", () => {
     const screen = await render(
       <SimulatorPanel environmentId={environmentId} threadId={threadId} />,
     );
-    await screen.getByText("Simulator testing", { exact: true }).click();
-    const dark = screen.getByRole("button", { name: "Dark mode", exact: true });
+    await screen.getByRole("button", { name: "Tools", exact: true }).click();
+    const dark = screen.getByRole("button", { name: "Dark", exact: true });
     await expect.element(dark).toBeEnabled();
     hub.setState({ transportStatus: "connecting" });
     await expect.element(dark).toBeDisabled();

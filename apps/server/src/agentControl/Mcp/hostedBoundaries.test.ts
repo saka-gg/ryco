@@ -54,6 +54,7 @@ describe("pre-auth server environment descriptor", () => {
       "crossRepositoryChangeRequests",
       "desktopAppUpdates",
       "deviceSettings",
+      "deviceSetup",
       "environmentIcon",
       "fileAttachments",
       "filesRevert",

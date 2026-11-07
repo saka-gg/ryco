@@ -3,10 +3,12 @@ import type {
   DeviceDescriptor,
   DeviceGeometry,
   DeviceHostSummary,
+  DevicePlatformAvailability,
 } from "@ryco/contracts";
 import {
   DeviceBackendError,
   type DeviceBackend,
+  type DeviceBackendDetail,
   type DeviceDiscovery,
   type DeviceFrameListener,
   type DeviceLogQuery,
@@ -58,7 +60,6 @@ export class HostDeviceBackend extends ForwardingDeviceBackend {
   private readonly devices = new Map<string, { host: DeviceHostBackend; nativeUdid: string }>();
   private readonly backends = new Map<string, DeviceBackend>();
   private readonly listeners = new Set<(udids: readonly string[]) => void>();
-  private readonly unsubscribe: (() => void)[] = [];
   private disposed = false;
   private testingSuspensions = 0;
   private readonly deviceTestingSuspensions = new Map<string, number>();
@@ -75,31 +76,105 @@ export class HostDeviceBackend extends ForwardingDeviceBackend {
   private readonly mutationEpochs = new Map<DeviceHostBackend, number>();
   private readonly mutations = new Map<DeviceHostBackend, number>();
   private readonly generations = new Map<DeviceHostBackend, number>();
+  /** Each host's last answer, so a slow probe reports it rather than an outage. */
+  private readonly lastAvailability = new Map<DeviceHostBackend, DeviceAvailability>();
+  private readonly hostUnsubscribes = new Map<DeviceHostBackend, () => void>();
 
-  private readonly hosts: readonly DeviceHostBackend[];
+  private hosts: readonly DeviceHostBackend[];
   constructor(hosts: readonly DeviceHostBackend[]) {
     super();
     this.hosts = hosts;
     if (new Set(hosts.map(({ host }) => host.id)).size !== hosts.length) {
       throw new DeviceBackendError("Duplicate device host identity");
     }
-    for (const entry of hosts) {
-      this.summaries.set(entry.host.id, { ...entry.host, status: "unknown" });
-      const stop = entry.backend.onDisconnect?.(() => {
-        this.summaries.set(entry.host.id, {
-          ...entry.host,
-          status: "disconnected",
-          availability: "SSH device host disconnected. Refresh to reconnect.",
-        });
-        this.inventories.delete(entry);
-        this.discoveries.delete(entry);
-        this.probes.delete(entry);
-        this.generations.set(entry, (this.generations.get(entry) ?? 0) + 1);
-        const ids = [...this.devices].filter(([, value]) => value.host === entry).map(([id]) => id);
-        for (const id of ids) this.devices.delete(id);
-        for (const listener of this.listeners) listener(ids);
+    for (const entry of hosts) this.register(entry);
+  }
+
+  private register(entry: DeviceHostBackend): void {
+    this.summaries.set(entry.host.id, { ...entry.host, status: "unknown" });
+    const stop = entry.backend.onDisconnect?.(() => this.invalidate(entry, "disconnected"));
+    if (stop) this.hostUnsubscribes.set(entry, stop);
+  }
+
+  /**
+   * Drop a host's routes and cached answers under a new generation, and tell
+   * the manager which devices went with it (their attachments and boots end).
+   */
+  private invalidate(entry: DeviceHostBackend, reason: "disconnected" | "removed"): void {
+    if (reason === "disconnected") {
+      this.summaries.set(entry.host.id, {
+        ...entry.host,
+        status: "disconnected",
+        availability: "SSH device host disconnected. Refresh to reconnect.",
       });
-      if (stop) this.unsubscribe.push(stop);
+    } else {
+      this.summaries.delete(entry.host.id);
+    }
+    this.inventories.delete(entry);
+    this.discoveries.delete(entry);
+    this.probes.delete(entry);
+    this.lastAvailability.delete(entry);
+    this.generations.set(entry, (this.generations.get(entry) ?? 0) + 1);
+    const ids = [...this.devices].filter(([, value]) => value.host === entry).map(([id]) => id);
+    for (const id of ids) this.devices.delete(id);
+    for (const listener of this.listeners) listener(ids);
+  }
+
+  /**
+   * Replace the SSH hosts without a restart. A host whose destination is
+   * unchanged (same identity) keeps its connection and devices, renamed if
+   * need be; a removed one is invalidated like a disconnect, then closed, so
+   * its worker on the Mac releases its boots. The local host never changes.
+   */
+  async setRemoteHosts(remote: readonly DeviceHostBackend[]): Promise<void> {
+    if (this.disposed) throw new DeviceBackendError("Device hosts disposed");
+    if (new Set(remote.map(({ host }) => host.id)).size !== remote.length) {
+      throw new DeviceBackendError("Duplicate device host identity");
+    }
+    const next = new Map(remote.map((entry) => [entry.host.id, entry]));
+    const kept: DeviceHostBackend[] = [];
+    const removed: DeviceHostBackend[] = [];
+    for (const entry of this.hosts) {
+      if (entry.host.transport === "local") {
+        kept.push(entry);
+        continue;
+      }
+      const replacement = next.get(entry.host.id);
+      if (!replacement) {
+        removed.push(entry);
+        continue;
+      }
+      next.delete(entry.host.id);
+      if (replacement.host.name !== entry.host.name) {
+        // Same destination under a new name: device selections survive.
+        (entry as { host: DeviceHostSummary }).host = {
+          ...entry.host,
+          name: replacement.host.name,
+        };
+        const summary = this.summaries.get(entry.host.id);
+        if (summary) this.summaries.set(entry.host.id, { ...summary, name: replacement.host.name });
+      }
+      // The unused replacement was never connected.
+      void replacement.backend.dispose().catch(() => undefined);
+      kept.push(entry);
+    }
+    for (const entry of next.values()) {
+      this.register(entry);
+      kept.push(entry);
+    }
+    this.hosts = kept;
+    for (const entry of removed) {
+      this.hostUnsubscribes.get(entry)?.();
+      this.hostUnsubscribes.delete(entry);
+      this.invalidate(entry, "removed");
+      const instances = new Set([entry.backend]);
+      for (const [udid, backend] of this.backends) {
+        if (udid.startsWith(`ssh:${entry.host.id}:`)) {
+          instances.add(backend);
+          this.backends.delete(udid);
+        }
+      }
+      await Promise.allSettled([...instances].map((backend) => backend.dispose()));
     }
   }
 
@@ -132,6 +207,7 @@ export class HostDeviceBackend extends ForwardingDeviceBackend {
           message: "Device host generation changed. Refresh devices.",
         };
       }
+      this.lastAvailability.set(entry, availability);
       this.summaries.set(entry.host.id, {
         ...entry.host,
         status: availability.kind === "available" ? "available" : "setup-required",
@@ -149,7 +225,15 @@ export class HostDeviceBackend extends ForwardingDeviceBackend {
   override async availability(): Promise<DeviceAvailability> {
     if (this.disposed) throw new DeviceBackendError("Device hosts disposed");
     const statuses = await Promise.all(
-      this.hosts.map((entry) => boundedHostWait(this.probe(entry))),
+      this.hosts.map(async (entry) => {
+        const work = this.probe(entry);
+        const known = this.lastAvailability.get(entry);
+        // This node's first answer is worth waiting for: cut short, a first
+        // open would say the helper is unavailable while it is only checking.
+        if (known === undefined && entry.host.transport === "local") return await work;
+        // A slow probe (a simulator booting) reports the host's last answer.
+        return (await boundedHostWait(work)) ?? known;
+      }),
     );
     return (
       statuses.find((s) => s?.kind === "available") ??
@@ -161,6 +245,26 @@ export class HostDeviceBackend extends ForwardingDeviceBackend {
           }
         : { kind: "unsupported-platform", platform: process.platform })
     );
+  }
+
+  /** This node's own platforms, each on its own; SSH hosts report through their summaries. */
+  async platformAvailability(): Promise<readonly DevicePlatformAvailability[]> {
+    const local = this.hosts.find((entry) => entry.host.transport === "local");
+    return (await local?.backend.platformAvailability?.()) ?? [];
+  }
+
+  async detail(
+    udid: string,
+    options?: { readonly bundleId?: string | undefined },
+  ): Promise<DeviceBackendDetail> {
+    const { backend, nativeUdid, host } = this.resolve(udid);
+    if (host.host.transport === "ssh" || !backend.detail)
+      throw new DeviceBackendError("Device settings cannot be read on SSH hosts.");
+    const generation = this.generations.get(host) ?? 0;
+    const result = await backend.detail(nativeUdid, options);
+    if (this.disposed || generation !== (this.generations.get(host) ?? 0))
+      throw new DeviceBackendError("Stale device host operation");
+    return result;
   }
 
   /** Single flight per host; only a complete current-generation result replaces routes. */
@@ -442,7 +546,8 @@ export class HostDeviceBackend extends ForwardingDeviceBackend {
 
   async dispose(): Promise<void> {
     this.disposed = true;
-    for (const stop of this.unsubscribe) stop();
+    for (const stop of this.hostUnsubscribes.values()) stop();
+    this.hostUnsubscribes.clear();
     this.listeners.clear();
     await Promise.allSettled(
       [...new Set([...this.backends.values(), ...this.hosts.map((h) => h.backend)])].map((b) =>

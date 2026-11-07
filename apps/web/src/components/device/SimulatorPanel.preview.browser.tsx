@@ -63,6 +63,17 @@ vi.mock("../../environmentApi", () => ({
   }),
 }));
 vi.mock("../../environments/runtime", () => ({ readEnvironmentConnection: () => undefined }));
+vi.mock("./NodeDeviceSetup", () => ({
+  useNodeDeviceSettings: () => ({
+    target: null,
+    canManage: true,
+    showSetup: false,
+    devicesOff: false,
+    dismiss: () => {},
+  }),
+  NodeDeviceSetup: () => null,
+  TurnOnDevicesButton: () => null,
+}));
 vi.mock("./useDeviceVideoStream", () => ({
   deviceVideoDecodingSupported: () => true,
   useDeviceVideoStream: () => ({

@@ -464,7 +464,9 @@ const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
  * groups regrouped once more (+1.6 KiB of icons the route does not use).
  * 769 KiB on 2026-11-07 with device tool rows on top (2.1 KiB of labels and argument
  * reading, plus the phone icon regrouping the shared lucide chunks).
- * 771 KiB on 2026-11-06 once both landed together (the two raises add up).
+ * 771 KiB on 2026-11-06 once both landed together (the two raises add up):
+ * the route measured 767.6 KiB with both, and 770.2 KiB with the device setup
+ * and Tools drawer, whose panel code still loads lazily with the device chunk.
  * 772 KiB on 2026-11-07 for the simulator program's merge train: Computer Use,
  * device tool rows, device tabs and the 3D toggle together measured 771.1 KiB.
  */
@@ -516,6 +518,11 @@ const TRACING_EXPORTER_SOURCES: readonly ForbiddenBundleSource[] = [
  * 2026-11-06 (526 before; boot 525.9 → 526.1 KiB): the simulator's paste and
  * rotation input RPCs, whose schemas the boot RPC client carries, and their
  * two client methods. The live input protocol itself loads with the pane.
+ * 528 KiB on 2026-11-06 (boot 526.3 → 527.3 KiB): the device setup and Tools
+ * drawer contract (each platform's availability, the device detail read-back,
+ * SSH host settings and Test connection, the new testing actions), whose
+ * schemas the boot RPC client and settings decoder carry. The wizard, drawer
+ * and host editor load with the device panel and the settings page.
  */
 export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
   bootChunk: "main",
@@ -524,7 +531,7 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       name: "boot",
       chunk: "main",
       beyondBoot: false,
-      maxGzipBytes: 527 * KIB,
+      maxGzipBytes: 528 * KIB,
       forbiddenSources: [
         ...HOSTED_RUNTIME_SOURCES,
         ...MARKDOWN_SOURCES,

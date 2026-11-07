@@ -49,6 +49,10 @@ import {
 } from "@ryco/shared/deviceHelperCache";
 
 import { planIosTestingAction } from "./iosTestingActions.ts";
+import type { DeviceBackendDetail } from "./DeviceBackend.ts";
+
+/** Built by `build.sh` next to the helper; runs inside a simulator. */
+const SIM_SETTINGS_TOOL_NAME = "ryco-sim-settings";
 
 import { runProcess, type ProcessRunResult } from "../processRunner.ts";
 import {
@@ -358,6 +362,11 @@ export class IosSimulatorBackend implements DeviceBackend {
   private readonly testingLifecycles = new Map<string, { generation: number; pending: number }>();
 
   private readonly allTestingLifecycle = { generation: 0, pending: 0 };
+  /** The last location Ryco set per device, or null once cleared; see `testing`. */
+  private readonly appliedLocations = new Map<
+    string,
+    { readonly latitude: number; readonly longitude: number } | null
+  >();
 
   suspendTesting(udid?: string): () => void {
     const state =
@@ -452,17 +461,31 @@ export class IosSimulatorBackend implements DeviceBackend {
     });
 
     const devices = licenseAccepted ? await this.listDevicesUnchecked() : [];
-    const runtimeInstalled = hasBootableIosRuntime(devices);
+    const hasSimulator = hasBootableIosRuntime(devices);
+    // A runtime with no simulator is a different fix from no runtime at all.
+    const runtimeInstalled =
+      hasSimulator || (licenseAccepted && (await this.iosRuntimeInstalled()));
     steps.push({
       id: "install-ios-runtime",
       label: "Install an iOS simulator runtime",
       done: runtimeInstalled,
-      detail: runtimeInstalled ? undefined : "xcodebuild -downloadPlatform iOS",
+      detail: runtimeInstalled
+        ? undefined
+        : "Install one in Xcode › Settings › Components, or run: xcodebuild -downloadPlatform iOS",
     });
+    if (runtimeInstalled && !hasSimulator) {
+      steps.push({
+        id: "create-ios-simulator",
+        label: "Create an iOS simulator",
+        done: false,
+        detail:
+          'A runtime is installed but no simulator uses it. Add one in Xcode › Window › Devices and Simulators, or run: xcrun simctl create "iPhone" "iPhone 17"',
+      });
+    }
 
     // The helper is only built at first attach, so this step reports the cache
     // rather than forcing a compile during a routine availability probe.
-    const helperBuilt = runtimeInstalled ? await this.cachedHelperPath().then(Boolean) : false;
+    const helperBuilt = hasSimulator ? await this.cachedHelperPath().then(Boolean) : false;
     steps.push({
       id: "build-device-helper",
       label: "Build the Ryco device helper",
@@ -563,6 +586,7 @@ export class IosSimulatorBackend implements DeviceBackend {
 
   async boot(udid: string): Promise<DeviceDescriptor> {
     const finish = this.suspendTesting(udid);
+    this.appliedLocations.delete(udid);
     try {
       const result = await this.simctl(["boot", udid], { timeoutMs: BOOT_TIMEOUT_MS });
       // Booting an already-booted device is success, not failure: the pane and an
@@ -582,6 +606,7 @@ export class IosSimulatorBackend implements DeviceBackend {
 
   async shutdown(udid: string): Promise<void> {
     const finish = this.suspendTesting(udid);
+    this.appliedLocations.delete(udid);
     try {
       await this.stopRecordingForLifecycle(udid);
       await this.detachStream(udid);
@@ -620,6 +645,9 @@ export class IosSimulatorBackend implements DeviceBackend {
 
   async testing(input: DeviceTestingInput): Promise<void> {
     const commands = planIosTestingAction(input);
+    const simSettings = commands.some((command) => command.simSettings)
+      ? await this.simSettingsTool()
+      : null;
     const assertCurrent = this.testingGuard(input.udid);
     assertCurrent();
     // Never boot or attach implicitly: testing must not acquire boot ownership.
@@ -629,8 +657,31 @@ export class IosSimulatorBackend implements DeviceBackend {
     }
     for (const command of commands) {
       assertCurrent();
-      const result = await this.simctl(command.args, { stdin: command.stdin, assertCurrent });
+      const args =
+        command.simSettings && simSettings
+          ? ["spawn", input.udid, simSettings, ...command.args]
+          : command.args;
+      const result = await this.simctl(args, { stdin: command.stdin, assertCurrent });
       assertCurrent();
+      if (result.code === 69 && command.simSettings) {
+        throw new DeviceBackendError(`This simulator runtime does not support ${command.label}.`);
+      }
+      if (
+        result.code !== 0 &&
+        input.action.type === "terminate-app" &&
+        /found nothing to terminate|not running/iu.test(result.stderr)
+      ) {
+        throw new DeviceBackendError(`${input.action.bundleId} is not running.`);
+      }
+      if (
+        result.code !== 0 &&
+        input.action.type === "push" &&
+        /not authorized/iu.test(result.stderr)
+      ) {
+        throw new DeviceBackendError(
+          `${input.action.bundleId} has not allowed notifications. Allow them in the app, then send the push again.`,
+        );
+      }
       if (result.timedOut || result.code !== 0) {
         // Do not echo subprocess output: it can contain the supplied push payload.
         throw new DeviceBackendError(
@@ -638,6 +689,80 @@ export class IosSimulatorBackend implements DeviceBackend {
         );
       }
     }
+    // Simulators cannot report their simulated location, so the drawer shows
+    // the last one Ryco set, labelled as such.
+    if (input.action.type === "location") {
+      this.appliedLocations.set(input.udid, {
+        latitude: input.action.latitude,
+        longitude: input.action.longitude,
+      });
+    } else if (input.action.type === "clear-location") {
+      this.appliedLocations.set(input.udid, null);
+    }
+  }
+
+  /**
+   * Ryco's `ryco-sim-settings`, built beside the helper from its sources. It
+   * exists once a device has been attached, which the drawer requires; this
+   * never builds anything.
+   */
+  private async simSettingsTool(): Promise<string> {
+    const helper = await this.cachedHelperPath();
+    const tool = helper ? path.join(path.dirname(helper), SIM_SETTINGS_TOOL_NAME) : null;
+    const exists =
+      tool !== null &&
+      (await stat(tool).then(
+        () => true,
+        () => false,
+      ));
+    if (!exists || tool === null) {
+      throw new DeviceBackendError(
+        "The simulator settings tool was not built with this Xcode. Accessibility switches other than Increase Contrast are unavailable.",
+      );
+    }
+    return tool;
+  }
+
+  /** The drawer's read-back: settings, the foreground app and its permissions. */
+  async detail(
+    udid: string,
+    options: { readonly bundleId?: string | undefined } = {},
+  ): Promise<DeviceBackendDetail> {
+    // Loaded here so the read-back stays off the server's boot graph.
+    const { readIosDeviceDetail } = await import("./iosDeviceDetail.ts");
+    return readIosDeviceDetail(
+      {
+        simctl: (args) => this.simctl(args),
+        simSettingsTool: () => this.simSettingsTool(),
+        foregroundPid: async () => {
+          // Only a helper already bound to this device: a read never attaches.
+          if (this.helper?.attachedDevice?.udid !== udid) return null;
+          const result = await this.serializeHelper(async () =>
+            this.helperRequest(this.helper!, HELPER_METHODS.describeUi, { maxDepth: 0 }),
+          );
+          const tree = (result as { tree?: { pid?: unknown; label?: unknown } } | null)?.tree;
+          return {
+            pid: typeof tree?.pid === "number" ? tree.pid : null,
+            label: typeof tree?.label === "string" ? tree.label : null,
+          };
+        },
+        appliedLocation: this.appliedLocations.has(udid)
+          ? (this.appliedLocations.get(udid) ?? null)
+          : undefined,
+        dataDirectory: path.join(
+          homedir(),
+          "Library",
+          "Developer",
+          "CoreSimulator",
+          "Devices",
+          udid,
+          "data",
+        ),
+        run: this.run,
+      },
+      udid,
+      options.bundleId,
+    );
   }
 
   async readLogs(udid: string, query: DeviceLogQuery): Promise<DeviceLogResult> {
@@ -1247,6 +1372,25 @@ export class IosSimulatorBackend implements DeviceBackend {
       // A timeout may still be progressing on the device; a refusal will not.
       { retryable: result.timedOut },
     );
+  }
+
+  /** Whether any available iOS runtime is installed, simulator or not. */
+  private async iosRuntimeInstalled(): Promise<boolean> {
+    const result = await this.simctl(["list", "runtimes", "--json"]).catch(() => null);
+    if (!result || result.code !== 0) return false;
+    try {
+      const parsed = JSON.parse(result.stdout) as {
+        runtimes?: readonly { platform?: unknown; isAvailable?: unknown; name?: unknown }[];
+      };
+      return (parsed.runtimes ?? []).some(
+        (runtime) =>
+          runtime.isAvailable === true &&
+          (runtime.platform === "iOS" ||
+            (typeof runtime.name === "string" && runtime.name.startsWith("iOS"))),
+      );
+    } catch {
+      return false;
+    }
   }
 
   private async listDevicesUnchecked(

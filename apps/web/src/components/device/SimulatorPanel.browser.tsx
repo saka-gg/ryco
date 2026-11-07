@@ -59,6 +59,17 @@ vi.mock("./useDeviceVideoStream", () => ({
   useDeviceVideoStream: mocks.nativeVideo,
 }));
 vi.mock("../ui/toast", () => ({ toastManager: { add: mocks.toast } }));
+vi.mock("./NodeDeviceSetup", () => ({
+  useNodeDeviceSettings: () => ({
+    target: null,
+    canManage: true,
+    showSetup: false,
+    devicesOff: false,
+    dismiss: () => {},
+  }),
+  NodeDeviceSetup: () => null,
+  TurnOnDevicesButton: () => null,
+}));
 
 const environmentId = EnvironmentId.make("android-browser-test");
 const threadId = ThreadId.make("android-thread");
@@ -154,14 +165,17 @@ describe("Android simulator pane", () => {
     await expect.poll(() => document.querySelector("canvas")?.width).toBe(200);
     expect(document.querySelector('[data-device-kind="androidPhone"] canvas')).not.toBeNull();
     expect(screenGeometry("androidPhone", 200, 400).insetXPct).toBeLessThan(10);
-    await expect
-      .element(page.getByText("Simulator testing", { exact: true }))
-      .not.toBeInTheDocument();
     expect(mocks.nativeVideo.mock.calls.at(-1)?.[0].udid).toBeNull();
     await page.getByRole("button", { name: "Back", exact: true }).click();
     expect(mocks.api.pressButton).toHaveBeenCalledWith({ udid: android.udid, button: "back" });
     await page.getByRole("button", { name: "Recents", exact: true }).click();
     expect(mocks.api.pressButton).toHaveBeenCalledWith({ udid: android.udid, button: "recents" });
+    // The emulator turns itself; iOS's left/right pair is not offered.
+    await page.getByRole("button", { name: "Rotate", exact: true }).click();
+    expect(mocks.api.pressButton).toHaveBeenCalledWith({ udid: android.udid, button: "rotate" });
+    await expect
+      .element(page.getByRole("button", { name: "Rotate left", exact: true }))
+      .not.toBeInTheDocument();
     await expect
       .element(page.getByRole("button", { name: "Record screen", exact: true }))
       .toBeEnabled();

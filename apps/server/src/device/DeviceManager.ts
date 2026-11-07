@@ -50,6 +50,7 @@ import {
   type DeviceStartRecordingResult,
   type DeviceStopRecordingResult,
   type DeviceUiNode,
+  type DeviceDetail,
   type DeviceUiPoint,
   type ThreadDeviceAttachment,
   type ThreadDeviceState,
@@ -452,12 +453,41 @@ export class DeviceManager {
   }
 
   async list(options: { readonly includeShutdown?: boolean } = {}): Promise<DeviceListResult> {
-    const availability = await this.backend.availability();
+    const [availability, platforms] = await Promise.all([
+      this.backend.availability(),
+      this.backend.platformAvailability?.().catch(() => undefined),
+    ]);
     const devices = await this.discover(availability, options);
     return {
       devices,
       availability,
+      ...(platforms && platforms.length > 0 ? { platforms } : {}),
       ...(this.backend.hostSummaries ? { hosts: this.backend.hostSummaries() } : {}),
+    };
+  }
+
+  /**
+   * The Tools drawer's read-back for one device: read live each time, so a
+   * control shows what the device reports after a change.
+   */
+  async detail(udid: string, options: { readonly bundleId?: string } = {}): Promise<DeviceDetail> {
+    const backend = this.backend;
+    if (!backend.detail) throw new DeviceBackendError("This node cannot read device settings.");
+    const result = await this.withDeviceAction(udid, () =>
+      backend.detail!(udid, { bundleId: options.bundleId }),
+    );
+    const platform = udid.startsWith("android:") ? "android-emulator" : "ios-simulator";
+    return {
+      ...result,
+      udid,
+      platform,
+      capturedAt: new Date(this.now()).toISOString(),
+      settings:
+        // Android reports its rotation itself; an iOS simulator's is the turn
+        // Ryco made, which the chassis shows too.
+        platform === "ios-simulator"
+          ? { ...result.settings, orientation: this.orientationOf(udid) }
+          : result.settings,
     };
   }
 

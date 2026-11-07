@@ -60,6 +60,8 @@ const SERVER_SETTING_HOMES = {
   lowerAgentProcessPriority: "device",
   devicesEnabled: "device",
   agentDevicesEnabled: "device",
+  deviceOnboardingCompleted: "device",
+  deviceHosts: "device",
   continueThreadsAfterRestart: "projects",
   autoResumeLimitedThreads: "usage",
   snoozeLimitedThreads: "usage",
