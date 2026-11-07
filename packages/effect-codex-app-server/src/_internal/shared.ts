@@ -86,16 +86,28 @@ export const decodeNotificationPayload = <A, I>(
     ),
   );
 
+/** What a server-request handler learns besides its params. */
+export interface ServerRequestContext {
+  /** The JSON-RPC id Codex gave the request; `serverRequest/resolved` names it. */
+  readonly requestId: string | number;
+}
+
 export const runHandler = Effect.fnUntraced(function* <A, B>(
-  handler: ((payload: A) => Effect.Effect<B, CodexError.CodexAppServerError>) | undefined,
+  handler:
+    | ((
+        payload: A,
+        context: ServerRequestContext,
+      ) => Effect.Effect<B, CodexError.CodexAppServerError>)
+    | undefined,
   payload: A,
   method: string,
+  context: ServerRequestContext,
 ) {
   if (!handler) {
     return yield* CodexError.CodexAppServerRequestError.methodNotFound(method);
   }
 
-  return yield* handler(payload).pipe(
+  return yield* handler(payload, context).pipe(
     Effect.mapError((error) => CodexError.normalizeToRequestError(error)),
   );
 });

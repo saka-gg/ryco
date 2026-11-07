@@ -40,6 +40,16 @@ The floating preview follows the exact window or browser tab, uses a native JPEG
 
 Settings include automatic preview, preview size, cursor color and on-demand, paginated local activity history. Typed values and clipboard contents are omitted. The desktop and backend share the same bounded, sanitized audit reader.
 
+### OpenAI's Computer Use in Codex chats
+
+Codex chats load your `~/.codex/config.toml`. With the ChatGPT/Codex desktop app installed, that
+brings OpenAI's own Computer Use, which Codex models often prefer. It is a separate tool with its own
+helper app, permissions and cursor; Ryco neither hides nor controls it. When it asks to use an app,
+Ryco shows its request in the chat (**Codex Computer Use**: Allow for this chat, Always allow,
+Deny). Full access allows the app for that chat without asking, like Ryco's own Computer Use, and
+never grants Always allow on your behalf; see [Codex: Questions from MCP servers](providers/codex.md#questions-from-mcp-servers-computer-use-and-others).
+Other providers use Ryco's Computer Use.
+
 ## Build and validation
 
 `bun run build:desktop` builds the Swift helper and provisions the verified Cua artifact on macOS. Source builds require the Rust version pinned in `packages/shared/src/cuaDriverRelease.json`; install it with `rustup toolchain install 1.97.1`. The build selects that toolchain without changing your default. `RYCO_CUA_ARTIFACT_DIR` can point to an existing checksum/provenance-verified artifact. Explicit artifacts fail verification if stale. Managed cached artifacts are verified on reuse and rebuilt from the pinned source when missing or invalid. Distribution packages stage and sign both native executables.

@@ -14,6 +14,16 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
 }
 
+/** Whether a question's link is an http(s) URL, the only kind a client may open. */
+export function isHttpLink(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
 /** The questions of a `user-input.requested` payload; null when none is usable. */
 export function parseUserInputQuestions(
   payload: Record<string, unknown> | null,
@@ -53,13 +63,17 @@ export function parseUserInputQuestions(
       if (options.length === 0 && payload?.nonBlocking !== true) {
         return null;
       }
-      return {
+      const parsedQuestion: { -readonly [K in keyof UserInputQuestion]: UserInputQuestion[K] } = {
         id: question.id,
         header: question.header,
         question: question.question,
         options,
         multiSelect: question.multiSelect === true,
       };
+      if (typeof question.link === "string" && isHttpLink(question.link)) {
+        parsedQuestion.link = question.link;
+      }
+      return parsedQuestion;
     })
     .filter((question): question is UserInputQuestion => question !== null);
   return parsed.length > 0 ? parsed : null;

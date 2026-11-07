@@ -525,6 +525,11 @@ export const UserInputQuestion = Schema.Struct({
   multiSelect: Schema.optional(Schema.Boolean).pipe(
     Schema.withConstructorDefault(Effect.succeed(false)),
   ),
+  /**
+   * An http(s) link the question is about (an MCP URL elicitation). Clients offer an "Open link"
+   * button that opens it only when pressed; older clients ignore it.
+   */
+  link: Schema.optional(Schema.String.check(Schema.isPattern(/^https?:\/\/\S+$/i))),
 });
 export type UserInputQuestion = typeof UserInputQuestion.Type;
 

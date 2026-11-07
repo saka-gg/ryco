@@ -54,6 +54,7 @@ export const SERVER_PURE_TEST_FILES = [
   "src/project/worktreeCheckoutPaths.test.ts",
   "src/provider/claudeCacheObservation.test.ts",
   "src/provider/cliVersion.test.ts",
+  "src/provider/codexMcpElicitation.test.ts",
   "src/provider/codexOptionalQuestions.test.ts",
   "src/provider/contextCompactionPolicy.test.ts",
   "src/provider/goalMode.test.ts",

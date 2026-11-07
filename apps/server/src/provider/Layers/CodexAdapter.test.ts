@@ -2061,6 +2061,71 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       }),
   );
 
+  it.effect("maps MCP elicitations to canonical user-input events, cancelled ones included", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 3)).pipe(
+        Effect.forkChild,
+      );
+      const question = {
+        id: "decision",
+        header: "Codex Computer Use",
+        question: 'Allow Computer Use to use "TextEdit"?',
+        options: [
+          { label: "Allow once", description: "Ask again next time" },
+          { label: "Deny", description: "Don't allow it" },
+        ],
+        multiSelect: false,
+      };
+      const base = {
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: new Date().toISOString(),
+        turnId: asTurnId("turn-1"),
+        requestId: ApprovalRequestId.make("req-elicitation-1"),
+      };
+      yield* runtime.emit({
+        ...base,
+        id: asEventId("evt-elicitation-requested"),
+        kind: "request",
+        method: "mcpServer/elicitation/request",
+        payload: { questions: [question], serverName: "node_repl", mode: "form" },
+      } satisfies ProviderEvent);
+      yield* runtime.emit({
+        ...base,
+        id: asEventId("evt-elicitation-answered"),
+        kind: "notification",
+        method: "mcpServer/elicitation/request/answered",
+        payload: { answers: { decision: "Allow once" }, action: "accept" },
+      } satisfies ProviderEvent);
+      yield* runtime.emit({
+        ...base,
+        id: asEventId("evt-elicitation-cancelled"),
+        kind: "notification",
+        method: "mcpServer/elicitation/request/answered",
+        requestId: ApprovalRequestId.make("req-elicitation-2"),
+        payload: { answers: {}, action: "cancel", cancelled: true },
+      } satisfies ProviderEvent);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.equal(events[0]?.type, "user-input.requested");
+      if (events[0]?.type === "user-input.requested") {
+        assert.equal(events[0].requestId, "req-elicitation-1");
+        assert.equal(events[0].payload.nonBlocking, undefined);
+        assert.deepEqual(events[0].payload.questions, [question]);
+      }
+      assert.equal(events[1]?.type, "user-input.resolved");
+      if (events[1]?.type === "user-input.resolved") {
+        assert.deepEqual(events[1].payload, { answers: { decision: "Allow once" } });
+      }
+      assert.equal(events[2]?.type, "user-input.resolved");
+      if (events[2]?.type === "user-input.resolved") {
+        assert.equal(events[2].requestId, "req-elicitation-2");
+        assert.deepEqual(events[2].payload, { answers: {}, cancelled: true });
+      }
+    }),
+  );
+
   it.effect("unwraps Codex token usage payloads for context window events", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
