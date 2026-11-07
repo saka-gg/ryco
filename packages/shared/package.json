@@ -58,6 +58,10 @@
       "types": "./src/htmlRenderToolPresentation.ts",
       "import": "./src/htmlRenderToolPresentation.ts"
     },
+    "./computerToolPresentation": {
+      "types": "./src/computerToolPresentation.ts",
+      "import": "./src/computerToolPresentation.ts"
+    },
     "./deviceToolPresentation": {
       "types": "./src/deviceToolPresentation.ts",
       "import": "./src/deviceToolPresentation.ts"

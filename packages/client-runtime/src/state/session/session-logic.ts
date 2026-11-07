@@ -3,6 +3,7 @@ import {
   ApprovalResponseState,
 } from "@ryco/contracts/approval-responses";
 import * as Schema from "effect/Schema";
+import type { ComputerToolIdentity } from "@ryco/shared/computerToolPresentation";
 import type { DeviceToolIdentity } from "@ryco/shared/deviceToolPresentation";
 import { extractToolContentText, extractToolResultText } from "@ryco/shared/toolOutput";
 import {
@@ -144,6 +145,11 @@ export interface WorkLogEntry {
    * tools; `@ryco/shared/deviceToolPresentation` decides and labels it.
    */
   deviceTool?: DeviceToolIdentity;
+  /**
+   * Name, server and arguments of a tool call that may be one of Ryco's Computer
+   * Use tools; `@ryco/shared/computerToolPresentation` decides and labels it.
+   */
+  computerTool?: ComputerToolIdentity;
   /**
    * Approval lifecycle row (request, response, resolution). The pending
    * approval card owns this interaction; transcripts that narrate the agent's
@@ -1124,6 +1130,12 @@ function toDerivedWorkLogEntry(
   if (deviceTool) {
     entry.deviceTool = deviceTool;
   }
+  const computerTool = activity.kind.startsWith("tool.")
+    ? extractToolIdentity(payload, "computer")
+    : null;
+  if (computerTool) {
+    entry.computerTool = computerTool;
+  }
   if (toolCallId) {
     entry.toolCallId = toolCallId;
     const startedAt = startedAtByToolCallId.get(toolCallId);
@@ -1364,6 +1376,10 @@ function mergeDerivedWorkLogEntries(
     next.deviceTool && (next.deviceTool.input || !previous.deviceTool?.input)
       ? next.deviceTool
       : (previous.deviceTool ?? next.deviceTool);
+  const computerTool =
+    next.computerTool && (next.computerTool.input || !previous.computerTool?.input)
+      ? next.computerTool
+      : (previous.computerTool ?? next.computerTool);
   const itemType = next.itemType ?? previous.itemType;
   const requestKind = next.requestKind ?? previous.requestKind;
   const collapseKey = next.collapseKey ?? previous.collapseKey;
@@ -1390,6 +1406,7 @@ function mergeDerivedWorkLogEntries(
     ...(changedFileStats.length > 0 ? { changedFileStats } : {}),
     ...(toolTitle ? { toolTitle } : {}),
     ...(deviceTool ? { deviceTool } : {}),
+    ...(computerTool ? { computerTool } : {}),
     ...(itemType ? { itemType } : {}),
     ...(requestKind ? { requestKind } : {}),
     ...(collapseKey ? { collapseKey } : {}),
@@ -1680,6 +1697,14 @@ function extractToolTitle(payload: Record<string, unknown> | null): string | nul
 function extractDeviceToolIdentity(
   payload: Record<string, unknown> | null,
 ): DeviceToolIdentity | null {
+  return extractToolIdentity(payload, "device");
+}
+
+/** Name, server and arguments of a tool call whose server or name mentions `keyword`. */
+function extractToolIdentity(
+  payload: Record<string, unknown> | null,
+  keyword: string,
+): DeviceToolIdentity | null {
   const data = asRecord(payload?.data);
   const item = asRecord(data?.item);
   const itemTool = asTrimmedString(item?.tool);
@@ -1689,7 +1714,7 @@ function extractDeviceToolIdentity(
     asTrimmedString(data?.tool) ??
     asTrimmedString(payload?.title);
   const server = itemTool ? asTrimmedString(item?.server) : null;
-  if (!name || !`${server ?? ""}${name}`.toLowerCase().includes("device")) {
+  if (!name || !`${server ?? ""}${name}`.toLowerCase().includes(keyword)) {
     return null;
   }
   const input =

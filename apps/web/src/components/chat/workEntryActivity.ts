@@ -3,9 +3,14 @@
 //          expanded Activity card, from the fields the work log already carries.
 // Layer: Web chat presentation helpers
 // Exports: formatWorkEntryStatusLabel, formatWorkEntryElapsed, workEntryActivityMeta,
-//          deviceWorkEntryPresentation
+//          deviceWorkEntryPresentation, computerWorkEntryPresentation,
+//          rycoToolWorkEntryPresentation
 //          (the status rule itself, resolveWorkEntryStatus, is shared from client-runtime)
 
+import {
+  computerToolPresentation,
+  type ComputerToolPresentation,
+} from "@ryco/shared/computerToolPresentation";
 import {
   deviceToolPresentation,
   type DeviceToolPresentation,
@@ -26,6 +31,22 @@ export function deviceWorkEntryPresentation(
   return entry.deviceTool
     ? deviceToolPresentation(entry.deviceTool, resolveWorkEntryStatus(entry))
     : null;
+}
+
+/** The verb and target of a Computer Use row ("Clicked \"Senden\""), or null when it is none. */
+export function computerWorkEntryPresentation(
+  entry: WorkEntryStatusInput & Pick<WorkLogEntry, "computerTool">,
+): ComputerToolPresentation | null {
+  return entry.computerTool
+    ? computerToolPresentation(entry.computerTool, resolveWorkEntryStatus(entry))
+    : null;
+}
+
+/** A device or Computer Use row read as plain words instead of its raw tool name. */
+export function rycoToolWorkEntryPresentation(
+  entry: WorkEntryStatusInput & Pick<WorkLogEntry, "deviceTool" | "computerTool">,
+): DeviceToolPresentation | ComputerToolPresentation | null {
+  return deviceWorkEntryPresentation(entry) ?? computerWorkEntryPresentation(entry);
 }
 
 export function formatWorkEntryStatusLabel(status: WorkEntryStatus): string {
