@@ -50,6 +50,7 @@ import {
   PencilIcon,
   RotateCcwIcon,
   SearchIcon,
+  MonitorIcon,
   SmartphoneIcon,
   TerminalIcon,
   Undo2Icon,
@@ -170,7 +171,9 @@ import {
   resolveWorkEntryStatus,
 } from "@ryco/client-runtime/state/session";
 import {
+  computerWorkEntryPresentation,
   deviceWorkEntryPresentation,
+  rycoToolWorkEntryPresentation,
   formatWorkEntryElapsed,
   formatWorkEntryStatusLabel,
   workEntryActivityMeta,
@@ -3090,6 +3093,7 @@ function commandWorkEntryIcon(workEntry: TimelineWorkEntry): LucideIcon {
 function workEntryIcon(workEntry: TimelineWorkEntry): LucideIcon {
   if (isErroredWorkEntry(workEntry)) return CircleAlertIcon;
   if (deviceWorkEntryPresentation(workEntry)) return SmartphoneIcon;
+  if (computerWorkEntryPresentation(workEntry)) return MonitorIcon;
   if (workEntry.requestKind === "command") return commandWorkEntryIcon(workEntry);
   if (workEntry.requestKind === "file-read") return SearchIcon;
   if (workEntry.requestKind === "file-change") return PencilIcon;
@@ -3130,8 +3134,8 @@ function capitalizePhrase(value: string): string {
 }
 
 function toolWorkEntryHeading(workEntry: TimelineWorkEntry): string {
-  const device = deviceWorkEntryPresentation(workEntry);
-  if (device) return device.label;
+  const rycoTool = rycoToolWorkEntryPresentation(workEntry);
+  if (rycoTool) return rycoTool.label;
   if (!workEntry.toolTitle) {
     return capitalizePhrase(normalizeCompactToolLabel(workEntry.label));
   }
@@ -3219,8 +3223,9 @@ const WorkEntryRowContent = memo(function WorkEntryRowContent(props: {
   const isErrored = isErroredWorkEntry(workEntry);
   const EntryIcon = workEntryIcon(workEntry);
   const rawCommand = workEntryRawCommand(workEntry);
-  // A device call reads as its action ("Tapped @e5"), not as its raw arguments.
-  const deviceLabel = deviceWorkEntryPresentation(workEntry)?.label;
+  // A device or Computer Use call reads as its action ("Tapped @e5", "Clicked
+  // \"Senden\""), not as its raw MCP name and arguments.
+  const deviceLabel = rycoToolWorkEntryPresentation(workEntry)?.label;
   // A command row always has something to say after the verb, falling back to
   // the humanized target when there is no preview of its own.
   const displayText =
