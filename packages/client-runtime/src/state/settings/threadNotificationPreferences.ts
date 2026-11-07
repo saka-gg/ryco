@@ -60,6 +60,29 @@ export interface ThreadAlertCopy {
   readonly sound: ThreadAlertSound;
 }
 
+/** Every thread alert kind, in the order settings list them. */
+export const THREAD_ALERT_KINDS: ReadonlyArray<ThreadNotificationKind> = [
+  "approval",
+  "input",
+  "plan-ready",
+  "completed",
+  "failed",
+  "stopped",
+];
+
+/**
+ * The alert kinds a person wants: every kind but the ones they muted, in
+ * {@link THREAD_ALERT_KINDS} order. A client's own alerts and the kinds its device registers for
+ * push both read it, so the two never disagree.
+ */
+export function wantedThreadAlertKinds(
+  muted: ReadonlyArray<ThreadNotificationKind> | undefined,
+): ReadonlyArray<ThreadNotificationKind> {
+  if (muted === undefined || muted.length === 0) return THREAD_ALERT_KINDS;
+  const mutedKinds = new Set(muted);
+  return THREAD_ALERT_KINDS.filter((kind) => !mutedKinds.has(kind));
+}
+
 /** Titles follow the inbox's state labels, so an alert and its row say the same. */
 export const THREAD_ALERT_COPY: Readonly<Record<ThreadNotificationKind, ThreadAlertCopy>> = {
   approval: { title: "Needs approval", toastType: "warning", sound: "attention" },

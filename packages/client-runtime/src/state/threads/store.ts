@@ -573,6 +573,9 @@ function mapThreadSummary(
     latestUserMessageAt: thread.latestUserMessageAt,
     latestCompletedTurnAt: thread.latestCompletedTurnAt,
     hasPendingApprovals: thread.hasPendingApprovals,
+    ...(thread.pendingApprovalRequestId === undefined
+      ? {}
+      : { pendingApprovalRequestId: thread.pendingApprovalRequestId }),
     hasPendingUserInput: thread.hasPendingUserInput,
     hasActionableProposedPlan: thread.hasActionableProposedPlan,
     backgroundLiveness: thread.backgroundLiveness ?? null,
@@ -827,6 +830,7 @@ function sidebarThreadSummariesEqual(
     left.latestUserMessageAt === right.latestUserMessageAt &&
     left.latestCompletedTurnAt === right.latestCompletedTurnAt &&
     left.hasPendingApprovals === right.hasPendingApprovals &&
+    left.pendingApprovalRequestId === right.pendingApprovalRequestId &&
     left.hasPendingUserInput === right.hasPendingUserInput &&
     left.hasActionableProposedPlan === right.hasActionableProposedPlan &&
     (left.backgroundLiveness ?? null) === (right.backgroundLiveness ?? null) &&

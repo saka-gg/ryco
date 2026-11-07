@@ -22,6 +22,7 @@ import {
   type OrchestrationArchivedThreadStub,
   OrchestrationThread,
   OrchestrationThreadHistoryError,
+  ApprovalRequestId,
   WorktreePullRequestLink,
   ProjectScript,
   TurnId,
@@ -154,6 +155,8 @@ const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
     followUpQueueSummary: Schema.NullOr(Schema.fromJsonString(ThreadFollowUpQueueShell)),
     // Active command watches; null while none is.
     commandWatchCount: Schema.NullOr(PositiveInt),
+    // The newest waiting approval; null while none waits.
+    pendingApprovalRequestId: Schema.NullOr(ApprovalRequestId),
   }),
 );
 const ProjectionThreadShellDbRowSchema = ProjectionThreadDbRowSchema.mapFields(
@@ -185,6 +188,9 @@ const pullRequestWatchShellField = (
   const shell = pullRequestWatchShellAt(summary, nowMs);
   return shell === null ? {} : { pullRequestWatches: shell };
 };
+/** A thread shell's `pendingApprovalRequestId` key: left out while no approval waits. */
+const pendingApprovalRequestIdField = (requestId: ApprovalRequestId | null) =>
+  requestId === null ? {} : { pendingApprovalRequestId: requestId };
 /** A thread shell's `commandWatchCount` key: left out while none is active. */
 const commandWatchCountField = (count: typeof PositiveInt.Type | null) =>
   count === null ? {} : { commandWatchCount: count };
@@ -944,6 +950,17 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
     SELECT command_rows.active_count FROM projection_thread_command_watches command_rows
     WHERE command_rows.thread_id = projection_threads.thread_id AND command_rows.active_count > 0
   )`;
+  // The newest approval still waiting, which a thread alert names. Only threads whose shell
+  // counts one look it up (a primary-key prefix scan); NULL for every other row.
+  const pendingApprovalRequestIdColumn = sql`(
+    CASE WHEN projection_threads.pending_approval_count > 0 THEN (
+      SELECT approval_rows.request_id FROM projection_pending_approvals approval_rows
+      WHERE approval_rows.thread_id = projection_threads.thread_id
+        AND approval_rows.status = 'pending'
+      ORDER BY approval_rows.created_at DESC, approval_rows.request_id DESC
+      LIMIT 1
+    ) END
+  )`;
   // One primary-key lookup per thread row; NULL for threads that never watched.
   const pullRequestWatchSummaryColumn = sql`(
     SELECT watch_rows.summary_json FROM projection_thread_pull_request_watches watch_rows
@@ -1016,7 +1033,8 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
     lineage_source_turn_id AS "lineageSourceTurnId",
     ${pullRequestWatchSummaryColumn} AS "pullRequestWatches",
     ${followUpQueueSummaryColumn} AS "followUpQueueSummary",
-    ${commandWatchCountColumn} AS "commandWatchCount"
+    ${commandWatchCountColumn} AS "commandWatchCount",
+    ${pendingApprovalRequestIdColumn} AS "pendingApprovalRequestId"
   `;
 
   // Every row, deleted ones included: the command read model and the full snapshot need them.
@@ -1862,7 +1880,8 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
           lineage_source_turn_id AS "lineageSourceTurnId",
           ${pullRequestWatchSummaryColumn} AS "pullRequestWatches",
           ${followUpQueueSummaryColumn} AS "followUpQueueSummary",
-          ${commandWatchCountColumn} AS "commandWatchCount"
+          ${commandWatchCountColumn} AS "commandWatchCount",
+          ${pendingApprovalRequestIdColumn} AS "pendingApprovalRequestId"
         FROM projection_threads
         WHERE thread_id = ${threadId}
           AND deleted_at IS NULL
@@ -3685,6 +3704,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
                     latestUserMessageAt: row.latestUserMessageAt,
                     latestCompletedTurnAt: row.latestCompletedTurnAt,
                     hasPendingApprovals: row.pendingApprovalCount > 0,
+                    ...pendingApprovalRequestIdField(row.pendingApprovalRequestId),
                     hasPendingUserInput: row.pendingUserInputCount > 0,
                     hasActionableProposedPlan: row.hasActionableProposedPlan > 0,
                     backgroundLiveness: threadBackgroundLiveness.getThreadBackgroundLiveness(
@@ -4120,6 +4140,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
             latestUserMessageAt: threadRow.value.latestUserMessageAt,
             latestCompletedTurnAt: threadRow.value.latestCompletedTurnAt,
             hasPendingApprovals: threadRow.value.pendingApprovalCount > 0,
+            ...pendingApprovalRequestIdField(threadRow.value.pendingApprovalRequestId),
             hasPendingUserInput: threadRow.value.pendingUserInputCount > 0,
             hasActionableProposedPlan: threadRow.value.hasActionableProposedPlan > 0,
             backgroundLiveness: threadBackgroundLiveness.getThreadBackgroundLiveness(

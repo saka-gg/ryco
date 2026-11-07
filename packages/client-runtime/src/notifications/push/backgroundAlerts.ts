@@ -11,6 +11,7 @@ import type { NativePushEnvironment, NativePushPlatform } from "@ryco/contracts/
 import { HostedHubApiError, type HostedHubApi } from "../../authorization/api.ts";
 import { nativePushHubSupport, type NativePushHubSupport } from "../../authorization/nativePush.ts";
 import type { WsRpcClient } from "../../rpc/wsRpcClient.ts";
+import { wantedThreadAlertKinds } from "../../state/settings/threadNotificationPreferences.ts";
 import {
   HUB_PUSH_CAPABILITY_RECHECK_MS,
   HUB_PUSH_CAPABILITY_RETRY_MS,
@@ -22,7 +23,6 @@ import {
   hubRegistrationFailure,
   initialBackgroundAlertsSnapshot,
   isBackgroundPushConfirmed,
-  wantedAlertKinds,
   type BackgroundAlertsHubStatus,
   type BackgroundAlertsSnapshot,
   type BackgroundAlertsSupport,
@@ -88,13 +88,13 @@ export interface BackgroundAlertsPorts {
   };
   readonly preferences: {
     /**
-     * `enabled`: background alerts and thread alerts are both on. `kinds`: the alerts the person
-     * wants (`wantedAlertKinds`); every kind when absent. None wanted counts as off.
+     * `enabled`: background alerts and thread alerts are both on. `mutedKinds`: the alerts the
+     * person turned off (`wantedThreadAlertKinds`); none when absent. All muted counts as off.
      */
     readonly read: () => {
       readonly enabled: boolean;
       readonly sound: boolean;
-      readonly kinds?: ReadonlyArray<PushAlertKind>;
+      readonly mutedKinds?: ReadonlyArray<PushAlertKind>;
       /** The agent Live Activity is on, so it may take push updates. */
       readonly liveActivity?: boolean;
     };
@@ -629,7 +629,7 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
 
   const reconcileOnce = async () => {
     const read = ports.preferences.read();
-    const wantedKinds = wantedAlertKinds(read.kinds);
+    const wantedKinds = wantedThreadAlertKinds(read.mutedKinds);
     // No kind wanted is off: a node registration needs at least one.
     const preferences = { ...read, enabled: read.enabled && wantedKinds.length > 0 };
     const account = ports.account.read();

@@ -106,7 +106,9 @@ function harness(
   let preferences: {
     enabled: boolean;
     sound: boolean;
-    kinds?: ReadonlyArray<"approval" | "input" | "plan-ready" | "completed" | "failed" | "stopped">;
+    mutedKinds?: ReadonlyArray<
+      "approval" | "input" | "plan-ready" | "completed" | "failed" | "stopped"
+    >;
     liveActivity?: boolean;
   } = { enabled: options.enabled ?? true, sound: false };
   let liveActivityToken: string | null = null;
@@ -378,7 +380,7 @@ describe("background alerts on a Hub that sends push", () => {
     const test = harness();
     const node = fakeConnection("env-a");
     test.setConnections([node]);
-    test.setPreferences({ kinds: ["failed", "approval", "approval"] });
+    test.setPreferences({ mutedKinds: ["input", "plan-ready", "completed", "stopped", "stopped"] });
     test.alerts.start();
     await settle();
     expect(node.push.registerDevice).toHaveBeenLastCalledWith({
@@ -388,14 +390,16 @@ describe("background alerts on a Hub that sends push", () => {
       sound: false,
     });
 
-    test.setPreferences({ kinds: ["approval", "failed", "completed"] });
+    test.setPreferences({ mutedKinds: ["input", "plan-ready", "stopped"] });
     await settle();
     expect(node.push.registerDevice).toHaveBeenCalledTimes(2);
     expect(node.push.registerDevice).toHaveBeenLastCalledWith(
       expect.objectContaining({ kinds: ["approval", "completed", "failed"] }),
     );
 
-    test.setPreferences({ kinds: [] });
+    test.setPreferences({
+      mutedKinds: ["approval", "input", "plan-ready", "completed", "failed", "stopped"],
+    });
     await settle();
     expect(test.alerts.getSnapshot().enabled).toBe(false);
     expect(node.push.unregisterDevice).toHaveBeenCalled();

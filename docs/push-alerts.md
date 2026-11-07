@@ -84,13 +84,17 @@ The payload is compact JSON, at most a few hundred bytes:
   "e": "env_…",
   "th": "…",
   "tu": "…",
+  "rq": "…",
   "q": 1793234112000,
   "at": 1793234112000
 }
 ```
 
 `k` is the kind, `t` the thread title (at most 120 characters), `e` the node's Hub environment id, `th`
-and `tu` the thread and turn, `q` the signal's sequence and `at` when it was sealed.
+and `tu` the thread and turn, `q` the signal's sequence and `at` when it was sealed. An approval also
+carries `rq`, the request id of the newest approval waiting (the shell's `pendingApprovalRequestId`,
+at most 160 characters; left out when longer, and by older nodes). A newer approval in the same turn
+seals a new alert with its own `rq`, which replaces the older one on the lock screen.
 
 To seal to the device key `R`:
 
@@ -209,10 +213,16 @@ result. Each action needs an unlocked phone and opens Ryco: answering needs a li
 connection with a current shell, which a suspended app does not have, so nothing is answered from
 the background. The response becomes a pending action for that thread, and the thread's screen
 carries it out with its own approval and send handlers once its connection is ready for mutations.
-An approval is answered only when exactly one open approval of the alert's turn waits (the opened
-payload's `tu`); otherwise, or after two minutes without a ready connection, the screen says why and
-the person answers there. A reply that finds no ready connection within 15 seconds goes to the
-outbox like any message typed offline. Links never start an action.
+Approve and Deny answer only the approval the alert names (a local alert's `requestId`, the opened
+payload's `rq`), once the thread's live detail has loaded: never another approval of the same turn,
+and nothing at all from an alert that names none. When that approval was answered meanwhile, or two
+minutes pass without a ready connection, the screen says why and the person answers there.
+
+Reply is a message of its own: it never declines waiting approvals and never touches a queued message
+being edited. When the thread waits on a question, Reply answers it if its text can be the answer (one
+question without options); a question with options is answered on its card, and the reply is not
+sent. Otherwise a reply that finds no ready connection within 15 seconds goes to the outbox like any
+message typed offline, unless the composer is closed. Links never start an action.
 
 Tapping an alert, also the one that launched the app, opens its thread once; an alert for the thread
 on screen does not show while the app is in front.

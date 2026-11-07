@@ -107,7 +107,10 @@ describe.skipIf(!swiftcAvailable)("the extension's Swift opener", () => {
           readonly t: string;
           readonly th: string;
           readonly tu: string | null;
+          readonly rq?: string;
         };
+        // Only an approval names its request.
+        const requestId = plaintext.k === "approval" ? (plaintext.rq ?? null) : null;
         expect(opened.publicKey).toBe(vector.recipientPublicKey);
         expect(opened.associatedData).toBe(vector.associatedData);
         expect(opened.plaintext).toBe(vector.plaintext);
@@ -122,6 +125,7 @@ describe.skipIf(!swiftcAvailable)("the extension's Swift opener", () => {
           threadIdentifier: `${vector.environmentId}/${plaintext.th}`,
           url: `ryco-dev://threads/${vector.environmentId}/${plaintext.th}`,
           turnId: plaintext.tu,
+          requestId,
           categoryIdentifier: notificationCategoryForKind(plaintext.k),
         });
         expect(opened.alertRejects).toEqual({
@@ -142,6 +146,7 @@ describe.skipIf(!swiftcAvailable)("the extension's Swift opener", () => {
             threadId: plaintext.th,
             kind: plaintext.k,
             ...(plaintext.tu === null ? {} : { turnId: plaintext.tu }),
+            ...(requestId === null ? {} : { requestId }),
           },
           url: `ryco-dev://threads/${vector.environmentId}/${plaintext.th}`,
         });

@@ -1,4 +1,5 @@
 import type {
+  ApprovalRequestId,
   ChatAttachmentHandoff,
   ChatHtmlRenderMetadata,
   EnvironmentId,
@@ -347,6 +348,8 @@ export interface SidebarThreadSummary {
   /** Stable inbox recency across streaming updates and subsequent turns. */
   latestCompletedTurnAt?: string | null | undefined;
   hasPendingApprovals: boolean;
+  /** The newest approval still waiting; absent while none does, and from older servers. */
+  pendingApprovalRequestId?: ApprovalRequestId;
   /**
    * Native background work alive after the turn settles: "working" while
    * subagents/workflows run, "monitoring" when watch loops are the only

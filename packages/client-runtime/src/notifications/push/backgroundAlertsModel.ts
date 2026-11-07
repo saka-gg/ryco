@@ -5,6 +5,7 @@ import { HostedHubApiError } from "../../authorization/api.ts";
 import type { NativePushHubSupport } from "../../authorization/nativePush.ts";
 import { isUnsupportedRpcError } from "../../errors/transportError.ts";
 import { isAuthRpcError } from "../../rpc/wsTransport.ts";
+import { THREAD_ALERT_KINDS } from "../../state/settings/threadNotificationPreferences.ts";
 
 /**
  * Background alerts (`docs/push-alerts.md`): the node seals an alert to this
@@ -14,26 +15,7 @@ import { isAuthRpcError } from "../../rpc/wsTransport.ts";
  */
 
 /** Every kind the app's own alerts know; the node drops action kinds for a viewer. */
-export const BACKGROUND_ALERT_KINDS: ReadonlyArray<PushAlertKind> = [
-  "approval",
-  "input",
-  "plan-ready",
-  "completed",
-  "failed",
-  "stopped",
-];
-
-/**
- * The kinds to ask for, in {@link BACKGROUND_ALERT_KINDS} order and without repeats; every kind
- * when `kinds` is absent.
- */
-export function wantedAlertKinds(
-  kinds: ReadonlyArray<PushAlertKind> | undefined,
-): ReadonlyArray<PushAlertKind> {
-  if (kinds === undefined) return BACKGROUND_ALERT_KINDS;
-  const wanted = new Set(kinds);
-  return BACKGROUND_ALERT_KINDS.filter((kind) => wanted.has(kind));
-}
+export const BACKGROUND_ALERT_KINDS: ReadonlyArray<PushAlertKind> = THREAD_ALERT_KINDS;
 
 /** The node holds `foreground` for 45 seconds; the app repeats it well inside that. */
 export const PUSH_PRESENCE_REFRESH_MS = 30_000;

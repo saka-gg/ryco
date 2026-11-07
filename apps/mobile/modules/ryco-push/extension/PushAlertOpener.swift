@@ -10,8 +10,10 @@ struct PushAlert: Equatable {
   let body: String
   let environmentId: String
   let threadId: String
-  /// The turn it is about; a notification action is bound to it.
+  /// The turn it is about.
   let turnId: String?
+  /// An approval alert's approval (`rq`): Approve or Deny on the alert answers this one only.
+  let requestId: String?
   /// Its actions (`src/notifications/notificationActionsModel.ts`).
   let categoryIdentifier: String
   /// Alerts stack per thread: `<environment>/<thread>`.
@@ -33,6 +35,8 @@ enum PushAlertOpener {
   /// A payload sealed longer ago than this is stale: the thread moved on.
   static let maxAgeMilliseconds: Int64 = 2 * 60 * 60 * 1000
   private static let maxTitleLength = 120
+  /// `PUSH_ALERT_REQUEST_ID_MAX_LENGTH`; a longer id is left out.
+  private static let maxRequestIdLength = 160
 
   /// One line per kind. Must equal `THREAD_ALERT_COPY` in
   /// `@ryco/client-runtime/state/settings`; `pushSealOpener.test.ts` checks it.
@@ -129,6 +133,9 @@ enum PushAlertOpener {
       environmentId: envelope.environmentId,
       threadId: threadId,
       turnId: nonEmptyString(payload["tu"]),
+      requestId: kind == "approval"
+        ? nonEmptyString(payload["rq"]).flatMap { $0.count <= maxRequestIdLength ? $0 : nil }
+        : nil,
       categoryIdentifier: category,
       threadIdentifier: "\(envelope.environmentId)/\(threadId)",
       url: appScheme.flatMap { threadLink(scheme: $0, environmentId: envelope.environmentId, threadId: threadId) }
@@ -151,6 +158,7 @@ enum PushAlertOpener {
       "environmentId": alert.environmentId, "threadId": alert.threadId, "kind": alert.kind,
     ]
     if let turnId = alert.turnId { body["turnId"] = turnId }
+    if let requestId = alert.requestId { body["requestId"] = requestId }
     userInfo["body"] = body
     if let url = alert.url { userInfo["url"] = url }
     return userInfo

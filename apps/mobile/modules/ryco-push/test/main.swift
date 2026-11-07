@@ -150,6 +150,7 @@ for vector in document["vectors"] as! [[String: Any]] {
         "threadIdentifier": $0.threadIdentifier,
         "url": $0.url as Any,
         "turnId": $0.turnId as Any,
+        "requestId": $0.requestId as Any,
         "categoryIdentifier": $0.categoryIdentifier,
       ]
     } as Any,

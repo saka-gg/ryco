@@ -18,6 +18,8 @@ const SafeCounter = Schema.Number.check(
 
 /** Longest thread title a sealed payload carries, in UTF-16 code units. */
 export const PUSH_ALERT_TITLE_MAX_LENGTH = 120;
+/** Longest approval request id a sealed payload carries; a longer one is left out. */
+export const PUSH_ALERT_REQUEST_ID_MAX_LENGTH = 160;
 
 /**
  * The opened payload. Short keys keep the sealed blob small: APNs caps the
@@ -32,6 +34,14 @@ export const PushAlertPlaintext = Schema.Struct({
   e: TrimmedNonEmptyString,
   th: TrimmedNonEmptyString,
   tu: Schema.NullOr(TrimmedNonEmptyString),
+  /**
+   * An approval alert's request: an Approve or Deny tapped on the alert answers this approval
+   * only. Left out of other kinds, from older nodes, and when longer than
+   * {@link PUSH_ALERT_REQUEST_ID_MAX_LENGTH}.
+   */
+  rq: Schema.optionalKey(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(PUSH_ALERT_REQUEST_ID_MAX_LENGTH)),
+  ),
   /** The signal's sequence; also bound into the seal's associated data. */
   q: SafeCounter,
   /** When the node sealed it, epoch milliseconds. */

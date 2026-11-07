@@ -1,4 +1,4 @@
-import { EnvironmentId, ProjectId, ThreadId, TurnId } from "@ryco/contracts";
+import { ApprovalRequestId, EnvironmentId, ProjectId, ThreadId, TurnId } from "@ryco/contracts";
 import { isThreadSnoozed } from "@ryco/shared/threadSnooze";
 import { describe, expect, it } from "vite-plus/test";
 import { createThreadNotificationProjector } from "./threadNotifications.ts";
@@ -61,6 +61,9 @@ function fixture(initial: SidebarThreadSummary = thread()) {
       projector.observe({ generation, sequence, thread: next, nowMs }),
   };
 }
+
+const completedOnly = (event: { readonly approvalRequestId: string | null } | null) =>
+  event === null ? null : { approvalRequestId: event.approvalRequestId };
 
 describe("thread notification projection", () => {
   it("accepts distinct thread changes in one envelope while rejecting duplicate rows and older envelopes", () => {
@@ -238,6 +241,25 @@ describe("thread notification projection", () => {
       nowMs,
     });
     expect(test.projector.isCurrent(second)).toBe(false);
+  });
+
+  it("names the approval it announces and announces a newer one in the same turn", () => {
+    const test = fixture();
+    const asking = (requestId: string) =>
+      thread({
+        hasPendingApprovals: true,
+        pendingApprovalRequestId: ApprovalRequestId.make(requestId),
+      });
+    const first = test.observe(asking("approval-a"), 2)!;
+    expect(first.approvalRequestId).toBe("approval-a");
+    // A second approval while the first still waits, or one that replaced it within one update.
+    const second = test.observe(asking("approval-b"), 3)!;
+    expect(second).toMatchObject({ kind: "approval", approvalRequestId: "approval-b" });
+    expect(test.projector.isCurrent(first)).toBe(false);
+    expect(test.observe(asking("approval-b"), 4)).toBeNull();
+    // A node that names no approval: one alert per waiting phase, as before.
+    expect(test.observe(thread({ hasPendingApprovals: true }), 5)?.approvalRequestId).toBeNull();
+    expect(completedOnly(test.observe(completed(), 6))).toEqual({ approvalRequestId: null });
   });
 
   it("announces a ready plan without also announcing the same completion", () => {
