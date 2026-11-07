@@ -4,6 +4,8 @@ import { useCallback } from "react";
 import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts/base-schemas";
 
 import { markThreadVisible } from "../../notifications/visibleThread";
+import { selectSidebarThreadSummaryByRef, useStore } from "../../state/threadsRuntime";
+import { recordRecentThreadShortcut } from "../shortcuts/appShortcutsRuntime";
 import { ThreadDetailScreen } from "./ThreadDetailScreen";
 
 /**
@@ -30,10 +32,17 @@ export function ThreadRouteScreen(props: ThreadRouteScreenProps) {
   useFocusEffect(
     useCallback(() => {
       if (!environmentIdRaw || !threadIdRaw) return undefined;
-      return markThreadVisible({
+      const ref = {
         environmentId: EnvironmentId.make(environmentIdRaw),
         threadId: ThreadId.make(threadIdRaw),
+      };
+      // The thread leads the recent threads on the app icon's quick actions.
+      recordRecentThreadShortcut({
+        environmentId: environmentIdRaw,
+        threadId: threadIdRaw,
+        title: selectSidebarThreadSummaryByRef(useStore.getState(), ref)?.title ?? "",
       });
+      return markThreadVisible(ref);
     }, [environmentIdRaw, threadIdRaw]),
   );
 
