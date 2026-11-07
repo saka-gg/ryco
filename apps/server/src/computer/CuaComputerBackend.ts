@@ -339,6 +339,17 @@ export class CuaComputerBackend implements ComputerBackend {
   get agentDialect(): "macos" | "linux" {
     return (this.hostPlatform ?? process.platform) === "darwin" ? "macos" : "linux";
   }
+  /**
+   * The screenshot size cap for one read. Cua 0.40 on macOS folds the legacy
+   * `max_dimension` into its own 1366 px default (the tighter wins), so an
+   * explicit `max_image_dimension` is what actually delivers the requested
+   * size there. The Linux driver knows only `max_dimension`.
+   */
+  private imageCap(maxDimension: number): Record<string, number> {
+    return this.agentDialect === "linux"
+      ? { max_dimension: maxDimension }
+      : { max_dimension: maxDimension, max_image_dimension: maxDimension };
+  }
   private readonly endpoint: string | undefined;
   private readonly capability: string | undefined;
   private windows: readonly ComputerWindow[] = [];
@@ -1232,7 +1243,7 @@ export class CuaComputerBackend implements ComputerBackend {
         window_id,
         include_accessibility_tree: false,
         include_screenshot: true,
-        max_dimension: request.maxDimension ?? 1536,
+        ...this.imageCap(request.maxDimension ?? 1536),
       });
       this.assertObservedWindow(result, pid, window_id);
       const image = { ...this.screenshot(result), windowId: window.id };
@@ -1307,7 +1318,7 @@ export class CuaComputerBackend implements ComputerBackend {
         pid,
         window_id,
         include_screenshot: wantsPixels,
-        max_dimension: 1536,
+        ...this.imageCap(1536),
         include_accessibility_tree: options.includeTree === true,
         ...(options.includeTree === true ? CUA_STRUCTURED_TREE : {}),
         max_elements: 1024,
@@ -1367,7 +1378,11 @@ export class CuaComputerBackend implements ComputerBackend {
       activationPoint: null,
       onScreen: window.visible,
       windowId: window.id,
-      truncated: data.elements_complete !== true,
+      // Cua 0.40 reports a real `truncated` flag from its tree walk;
+      // `elements_complete` is hard-coded false there, which made every tree
+      // look cut short and every label wait give up at once.
+      truncated:
+        typeof data.truncated === "boolean" ? data.truncated : data.elements_complete !== true,
       children,
     };
     this.recentTrees.delete(options.windowId);
@@ -2651,12 +2666,12 @@ export class CuaComputerBackend implements ComputerBackend {
         "not-dispatched",
         "invalid_geometry",
       );
-    // The driver crops in "screenshot pixels" — the pixel space of its own
-    // get_window_state capture for this exact window, which is the window's
-    // display backing factor, not necessarily the main display's. Read that
-    // scale from a fresh capture-only state call (no max_dimension, so the
-    // returned image is the driver's native-resolution space) rather than
-    // assuming the desktop scale applies.
+    // Since Cua 0.40 the driver crops in the pixels of the screenshot it last
+    // delivered for this window and maps them to native pixels itself (the
+    // snapshot's resize ratio). So the region goes out in delivered pixels:
+    // points × (delivered width ÷ window width), read from a fresh capture of
+    // this exact window. Native-pixel coordinates (the backing scale) would be
+    // multiplied twice and crop the wrong area on any capped Retina capture.
     let state: CuaToolResult;
     try {
       state = await this.call("get_window_state", {
@@ -2679,10 +2694,7 @@ export class CuaComputerBackend implements ComputerBackend {
         "not-dispatched",
         "stale_target",
       );
-    const reportedScale = number(stateData.screenshot_scale);
-    const fallback = this.screenshot(state, freshBounds);
-    const scale =
-      Number.isFinite(reportedScale) && reportedScale > 0 ? reportedScale : (fallback.scale ?? 0);
+    const scale = this.screenshot(state, freshBounds).scale ?? 0;
     if (!(scale > 0))
       throw new CuaActionError(
         "Cua could not establish the window's screenshot scale.",
@@ -2876,7 +2888,7 @@ export class CuaComputerBackend implements ComputerBackend {
         // A pane still is not a model observation: leave the window's pixel
         // frame and element tokens to the model's own reads.
         display_only: true,
-        max_dimension: 1536,
+        ...this.imageCap(1536),
       },
       false,
       false,

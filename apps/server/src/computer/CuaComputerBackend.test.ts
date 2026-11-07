@@ -46,6 +46,7 @@ function fixture(options?: {
   let bounds = { x: -300, y: 20, width: 200, height: 100 };
   let live = true;
   let elements: Record<string, unknown>[] = [];
+  let windowStateExtra: Record<string, unknown> = {};
   let failure: Error | undefined;
   let nativeRefusal = false;
   let desktopPaused = false;
@@ -196,6 +197,7 @@ function fixture(options?: {
           screenshot_frame_valid: captureFrameValid,
           screenshot_frame_freshness: captureFrameFreshness,
           elements,
+          ...windowStateExtra,
         },
         content: [
           {
@@ -250,6 +252,9 @@ function fixture(options?: {
   });
   return {
     backend,
+    setWindowStateExtra: (value: Record<string, unknown>) => {
+      windowStateExtra = value;
+    },
     setElements: (value: Record<string, unknown>[]) => {
       elements = value;
     },
@@ -4411,6 +4416,36 @@ describe("Cua workstream-C speed flags", () => {
     const f = fixture();
     await f.backend.getState({ windowId: "cua:10:20", includeTree: true });
     expect(windowStateArgs(f)).toMatchObject({ tree_format: "elements" });
+    await f.backend.dispose();
+  });
+
+  it("asks Cua 0.40 on macOS for the full screenshot size, and only max_dimension on Linux", async () => {
+    // 0.40 folds max_dimension into its 1366 px default; only max_image_dimension overrides it.
+    const mac = fixture();
+    await mac.backend.getState({ windowId: "cua:10:20", includeScreenshot: true });
+    expect(windowStateArgs(mac)).toMatchObject({ max_dimension: 1536, max_image_dimension: 1536 });
+    await mac.backend.dispose();
+    const linux = fixture({ hostPlatform: "linux" });
+    await linux.backend.getState({ windowId: "cua:10:20", includeScreenshot: true });
+    expect(windowStateArgs(linux)).not.toHaveProperty("max_image_dimension");
+    await linux.backend.dispose();
+  });
+
+  it("reads the walk's own truncated flag instead of the hard-coded elements_complete", async () => {
+    const f = fixture();
+    f.setWindowStateExtra({ truncated: false, elements_complete: false });
+    expect(
+      (await f.backend.getState({ windowId: "cua:10:20", includeTree: true })).root?.truncated,
+    ).toBe(false);
+    f.setWindowStateExtra({ truncated: true });
+    expect(
+      (await f.backend.getState({ windowId: "cua:10:20", includeTree: true })).root?.truncated,
+    ).toBe(true);
+    // An older driver without the flag stays conservative.
+    f.setWindowStateExtra({});
+    expect(
+      (await f.backend.getState({ windowId: "cua:10:20", includeTree: true })).root?.truncated,
+    ).toBe(true);
     await f.backend.dispose();
   });
 
