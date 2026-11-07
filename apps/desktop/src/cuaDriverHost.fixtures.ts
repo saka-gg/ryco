@@ -190,7 +190,7 @@ net.createServer(s=>{
       if(r.expected_input_epoch!==inputEpoch) { reply({isError:true,structuredContent:{effect:'refused',code:'input_admission_closed'}}); return; }
       write('permitted-native:'+r.name); reply({});
     }
-    else if(r.name==='press_key') { if(!options.unpatched&&r.expected_input_epoch!==inputEpoch) { reply({isError:true,structuredContent:{effect:'refused',code:'input_admission_closed'}}); return; } write('key'); write('observation-budget-'+process.env.SYNARA_CUA_FOREGROUND_OBSERVATION_MS); reply(options.actionResult??{}); }
+    else if(r.name==='press_key') { if(!options.unpatched&&r.expected_input_epoch!==inputEpoch) { reply({isError:true,structuredContent:{effect:'refused',code:'input_admission_closed'}}); return; } write('key'); write('observation-budget-'+(process.env.CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS??'default')); reply(options.actionResult??{}); }
     else if(options.clipboardPreservation&&r.name==='clipboard_write') {
       write('clipboard:'+JSON.stringify(r.args));
       const restoring=typeof r.args.restore_token==='string';

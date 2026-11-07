@@ -69,6 +69,19 @@ interface TaskRequest {
 // Keep the marker through ordinary model turns, with a native expiry backstop
 // if task-end cleanup cannot reach the overlay. This wait does not repaint.
 export const CUA_CURSOR_IDLE_HIDE_MS = 60_000;
+/**
+ * The app's environment minus the driver's own settings. The embedded driver
+ * reads many `CUA_DRIVER_*` switches (fast path, brief foreground drags,
+ * observation bounds, key gaps); a value left in the user's shell must not
+ * change how Ryco's driver delivers input. The host sets the ones it needs.
+ */
+export function driverInheritedEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(env).filter(
+      ([key]) => !key.startsWith("CUA_DRIVER_") && !key.startsWith("SYNARA_CUA_"),
+    ),
+  );
+}
 /** A raw ENOENT names a path, not a remedy; source builds stage the driver themselves. */
 const CUA_DRIVER_MISSING_MESSAGE =
   "Cua Driver is not bundled. Run the provisioning script (`node apps/desktop/scripts/provision-cua-driver.mjs`, needs the pinned Rust toolchain) in this checkout, then relaunch Ryco.";
@@ -2225,30 +2238,34 @@ export class CuaDriverHost {
           "--socket",
           endpoint,
           ...(expectsPatched
-            ? ["--compact-cursor", "--idle-hide-ms", String(CUA_CURSOR_IDLE_HIDE_MS)]
+            ? [
+                "--compact-cursor",
+                // The user's standalone ~/.cua-driver/config.json (motion,
+                // badges, halo, float) must not restyle Ryco's cursor.
+                "--cursor-ignore-saved-config",
+                "--idle-hide-ms",
+                String(CUA_CURSOR_IDLE_HIDE_MS),
+              ]
             : []),
         ],
         {
           stdio: ["pipe", "ignore", "pipe"],
           env: {
-            ...process.env,
+            ...driverInheritedEnv(process.env),
             CUA_DRIVER_EMBEDDED: "1",
             CUA_DRIVER_HOST_BUNDLE_ID: this.options.bundleId,
             CUA_DRIVER_PERMISSION_MODE: "standard",
             CUA_DRIVER_RS_TELEMETRY_ENABLED: "0",
+            // Since 0.39 the driver also honours the cross-tool opt-out.
+            DO_NOT_TRACK: "1",
             // Upgrade lifecycle belongs to the app, not the managed driver —
             // the self-update check is an upstream network call plus a stderr
             // banner on every spawn.
             CUA_DRIVER_RS_UPDATE_CHECK: "0",
-            // Owned by the GUI host, not supplied through public tool arguments.
-            // The native driver applies this only after foreground input cleanup.
-            SYNARA_CUA_FOREGROUND_OBSERVATION_MS: "100",
-            // The detector watches for windows/foreground changes the action
-            // spawned — typically within ~200ms — not for the target's own
-            // content. 350ms keeps the wildcard focus-steal suppressor armed
-            // past the typical case while saving ~650ms per background action
-            // over the default one-second window.
-            SYNARA_CUA_BACKGROUND_OBSERVATION_MS: "350",
+            // No post-action observation bound: since 0.30 the driver's action
+            // result waits at most 300 ms for a window change and keeps the
+            // focus-steal guard armed for the rest of its one-second window
+            // in the background, so a shorter bound would only shorten that guard.
             CUA_DRIVER_PARENT_LIVENESS_STDIN: "1",
             CUA_DRIVER_EMBEDDED_HOST_PID: String(process.pid),
             CUA_DRIVER_RS_HOME: join(this.directory, "state"),
