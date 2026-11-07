@@ -16,7 +16,7 @@ import { useThemeColor } from "../../lib/useThemeColor";
 import { DICTATION_LEVEL_SAMPLES, formatDictationElapsed } from "./dictationModel";
 import type { ComposerDictation } from "./useComposerDictation";
 
-// The composer's dictation UI, after t3code's ComposerDictationControl: the
+// The composer's dictation UI (attribution in NOTICE.md): the
 // toolbar row turns into cancel · level meter + elapsed time · confirm while
 // listening, and the mic answers a tap (start, then confirm or cancel) or a
 // hold (talk while pressed, release to finish).
