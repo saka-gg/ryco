@@ -680,6 +680,27 @@ describe("ryco_device consent", () => {
     expect(h.backend.callsOfKind("tap")).toHaveLength(1);
   });
 
+  it("keeps the task's consent in a provider turn carrying it on, and drives the device there", async () => {
+    const h = await harness();
+    h.setStatus(
+      pendingProposalId(await h.call({ action: "tap", udid: UDID, x: 1, y: 1 }))!,
+      "completed",
+    );
+    expect((await h.call({ action: "tap", udid: UDID, x: 1, y: 1 })).isError).toBeUndefined();
+
+    // A Claude wake turn after a background task: its own turn, the user's task.
+    h.state.authorities = [
+      { ...authorityFor("wake-1"), openedBy: "provider", taskTurnId: TurnId.make("turn-1") },
+    ];
+    const woken = await h.call({ action: "tap", udid: UDID, x: 2, y: 2 });
+    expect(woken.isError).toBeUndefined();
+    expect(h.submitted).toHaveLength(1);
+    expect(h.backend.callsOfKind("tap")).toEqual([
+      { kind: "tap", udid: UDID, x: 1, y: 1 },
+      { kind: "tap", udid: UDID, x: 2, y: 2 },
+    ]);
+  });
+
   it("skips the consent in full-access threads", async () => {
     const h = await harness({ runtimeMode: "full-access" });
     const tapped = await h.call({ action: "tap", udid: UDID, label: "Continue" });

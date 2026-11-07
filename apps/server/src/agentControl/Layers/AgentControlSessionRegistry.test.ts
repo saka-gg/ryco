@@ -10,6 +10,10 @@ import { Context, Effect, Exit, Layer, Option, Redacted, Scope } from "effect";
 
 import * as SqlClient from "effect/sql/SqlClient";
 
+import {
+  computerTurnPlanForAuthority,
+  stageComputerTurn,
+} from "../../computer/computerTurnLifecycle.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { AgentControlPolicyLive } from "./AgentControlPolicy.ts";
@@ -341,6 +345,63 @@ enabledLayer("AgentControlSessionRegistry", (it) => {
       assert.isTrue(Option.isNone(yield* registry.getTurnAuthority(lease.sessionId)));
       yield* registry.revokeAll("runtime-teardown");
     }),
+  );
+
+  it.effect(
+    "binds a provider turn with the user's task, but never the user's Computer Use request",
+    () =>
+      Effect.gen(function* () {
+        const registry = yield* AgentControlSessionRegistry;
+        yield* registry.publishEndpoint(ENDPOINT);
+        const lease = yield* issue();
+        const userTurn = TurnId.make("user-turn");
+        const wakeTurn = TurnId.make("wake-turn");
+        const firstWake = TurnId.make("first-wake");
+
+        // A provider turn before any user turn is its own task.
+        const early = yield* registry.bindTurnAuthority({
+          sessionId: lease.sessionId,
+          turnId: firstWake,
+          openedBy: "provider",
+        });
+        assert.strictEqual(early.taskTurnId, firstWake);
+        yield* registry.retireTurnAuthority({ threadId: threadA, turnId: firstWake });
+
+        stageComputerTurn(threadA, {
+          intent: { mode: "request", generation: "generation-1" },
+          text: "open the settings",
+          runtimeMode: "full-access",
+          label: "Thread A",
+        });
+        const user = yield* registry.bindTurnAuthority({
+          sessionId: lease.sessionId,
+          turnId: userTurn,
+        });
+        assert.strictEqual(user.openedBy, "user");
+        assert.strictEqual(user.taskTurnId, userTurn);
+        assert.isDefined(computerTurnPlanForAuthority(threadA, userTurn));
+        yield* registry.retireTurnAuthority({ threadId: threadA, turnId: userTurn });
+
+        const wake = yield* registry.bindTurnAuthority({
+          sessionId: lease.sessionId,
+          turnId: wakeTurn,
+          openedBy: "provider",
+        });
+        assert.strictEqual(wake.turnId, wakeTurn);
+        assert.strictEqual(wake.openedBy, "provider");
+        assert.strictEqual(wake.taskTurnId, userTurn);
+        assert.strictEqual(
+          Option.getOrThrow(yield* registry.getTurnAuthority(lease.sessionId)).turnId,
+          wakeTurn,
+        );
+        assert.isUndefined(computerTurnPlanForAuthority(threadA, wakeTurn));
+
+        // Retired like any turn when it ends.
+        yield* registry.retireTurnAuthority({ threadId: threadA, turnId: wakeTurn });
+        assert.isTrue(Option.isNone(yield* registry.getTurnAuthority(lease.sessionId)));
+        stageComputerTurn(threadA, undefined);
+        yield* registry.revokeAll("runtime-teardown");
+      }),
   );
 });
 

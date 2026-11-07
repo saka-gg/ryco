@@ -17,7 +17,7 @@ import {
   type AgentControlTurnAuthority,
 } from "../Services/AgentControlSessionRegistry.ts";
 import { AgentControlPolicy } from "../Services/AgentControlPolicy.ts";
-import { AGENT_CONTROL_CAPABILITIES } from "@ryco/contracts";
+import { AGENT_CONTROL_CAPABILITIES, type TurnId } from "@ryco/contracts";
 import * as SqlClient from "effect/sql/SqlClient";
 
 /**
@@ -41,6 +41,8 @@ interface RegistrySession {
   readonly record: AgentControlSessionRecord;
   readonly inFlight: Set<AgentControlInFlightRequest>;
   turnAuthority: AgentControlTurnAuthority | null;
+  /** The newest user-opened turn; a provider turn carries on its task. */
+  lastUserTurnId: TurnId | null;
 }
 
 interface RegistryBootstrap {
@@ -159,6 +161,7 @@ const makeAgentControlSessionRegistry = Effect.gen(function* () {
           },
           inFlight: new Set(),
           turnAuthority: null,
+          lastUserTurnId: null,
         };
         sessionsByDigest.set(digest, session);
         sessionsById.set(session.record.sessionId, session);
@@ -290,15 +293,23 @@ const makeAgentControlSessionRegistry = Effect.gen(function* () {
       if (session === undefined) {
         return Effect.fail(new AgentControlTurnAuthorityError({ reason: "session-unknown" }));
       }
+      const openedBy = input.openedBy ?? "user";
       const authority: AgentControlTurnAuthority = {
         sessionId: session.record.sessionId,
         threadId: session.record.threadId,
         turnId: input.turnId,
         boundAt: new Date().toISOString(),
+        openedBy,
+        taskTurnId:
+          openedBy === "provider" ? (session.lastUserTurnId ?? input.turnId) : input.turnId,
       };
       const previous = session.turnAuthority;
       session.turnAuthority = authority;
-      bindComputerTurn(session.record.threadId, input.turnId);
+      if (openedBy === "user") {
+        session.lastUserTurnId = input.turnId;
+        // Only a user turn may carry the user's staged Computer Use request.
+        bindComputerTurn(session.record.threadId, input.turnId);
+      }
       if (previous !== null && previous.turnId !== authority.turnId) {
         retireComputerTurn(session.record.threadId, previous.turnId);
         abortRequests(session, (request) => request.turnId === previous.turnId);
