@@ -1,6 +1,6 @@
 # Desktop Computer Use beta
 
-Ryco's macOS Computer Use beta ports Synara 0.9.1's Cua runtime, native input mechanics, isolated browser tools, and view-only chat preview. The source is pinned to Cua 0.28.2 with native revision 40, updated from Synara 1.0.4 (Synara PR #1915). Attribution and MIT licenses are in `docs/licenses/`.
+Ryco's macOS Computer Use beta ports Synara 0.9.1's Cua runtime, native input mechanics, isolated browser tools, and view-only chat preview. The source is pinned to Cua 0.40.1 with Ryco's native revision 41: Synara 1.0.4's revision 40 patch (Synara PR #1915), ported by Ryco onto 0.40.1 (see `apps/desktop/patches/cua-driver/README.md`). Attribution and MIT licenses are in `docs/licenses/`.
 
 [Window capture](window-capture.md) into the composer runs the same native helper with its own pending store. It shares the macOS grants but does not need this beta turned on.
 
