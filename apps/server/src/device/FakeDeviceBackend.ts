@@ -19,6 +19,7 @@ import type {
   DeviceHardwareButton,
   DeviceInstallAppResult,
   DeviceLaunchAppResult,
+  DeviceOrientation,
   DeviceScreenshotResult,
   DeviceStartRecordingResult,
   DeviceStopRecordingResult,
@@ -34,6 +35,7 @@ import {
   type DeviceLogResult,
   type DeviceStreamFrame,
   type DeviceSwipeGesture,
+  type DeviceTouchPhase,
 } from "./DeviceBackend.ts";
 
 export interface FakeDeviceSeed {
@@ -56,6 +58,19 @@ export type FakeDeviceCall =
   | { readonly kind: "typeText"; readonly udid: string; readonly text: string }
   | { readonly kind: "keyEvent"; readonly udid: string; readonly event: DeviceKeyEvent }
   | { readonly kind: "pressButton"; readonly udid: string; readonly button: DeviceHardwareButton }
+  | {
+      readonly kind: "touch";
+      readonly udid: string;
+      readonly phase: DeviceTouchPhase;
+      readonly x: number;
+      readonly y: number;
+    }
+  | {
+      readonly kind: "setOrientation";
+      readonly udid: string;
+      readonly orientation: DeviceOrientation;
+    }
+  | { readonly kind: "paste"; readonly udid: string; readonly text: string }
   | { readonly kind: "screenshot"; readonly udid: string }
   | { readonly kind: "startRecording"; readonly udid: string }
   | { readonly kind: "stopRecording"; readonly udid: string }
@@ -336,6 +351,21 @@ export class FakeDeviceBackend implements DeviceBackend {
 
   async pressButton(udid: string, button: DeviceHardwareButton): Promise<void> {
     this.record({ kind: "pressButton", udid, button });
+    this.requireBooted(udid);
+  }
+
+  async touch(udid: string, phase: DeviceTouchPhase, x: number, y: number): Promise<void> {
+    this.record({ kind: "touch", udid, phase, x, y });
+    this.requireBooted(udid);
+  }
+
+  async paste(udid: string, text: string): Promise<void> {
+    this.record({ kind: "paste", udid, text });
+    this.requireBooted(udid);
+  }
+
+  async setOrientation(udid: string, orientation: DeviceOrientation): Promise<void> {
+    this.record({ kind: "setOrientation", udid, orientation });
     this.requireBooted(udid);
   }
 

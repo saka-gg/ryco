@@ -398,7 +398,7 @@ export const DeviceScreen = memo(function DeviceScreen({
   pixelHeight,
   className,
   buttonsDisabled,
-  landscape = false,
+  rotationDegrees = 0,
   onPressButton,
 }: {
   children: ReactNode;
@@ -408,11 +408,13 @@ export const DeviceScreen = memo(function DeviceScreen({
   className?: string;
   buttonsDisabled?: boolean;
   /**
-   * Turn the whole device a quarter turn. The guest keeps rendering portrait —
-   * CoreSimulator has no orientation API — so this rotates the assembled
-   * device, buttons and all, rather than re-deriving a landscape chassis.
+   * Turn the whole device, clockwise in degrees (a multiple of 90). The guest
+   * keeps drawing into its portrait framebuffer with the interface turned
+   * inside it, so this rotates the assembled device, screen and buttons
+   * together, as a person turning a phone would, rather than re-deriving a
+   * landscape chassis.
    */
-  landscape?: boolean;
+  rotationDegrees?: number;
   onPressButton?: ((button: DeviceHardwareButton) => void) | undefined;
 }) {
   const geo = useMemo(
@@ -423,6 +425,7 @@ export const DeviceScreen = memo(function DeviceScreen({
     () => nubHitRects(kind, pixelWidth, pixelHeight),
     [kind, pixelWidth, pixelHeight],
   );
+  const landscape = Math.abs(rotationDegrees % 180) === 90;
   const screenStyle = useMemo<CSSProperties>(
     () => ({
       left: `${geo.insetXPct}%`,
@@ -447,7 +450,8 @@ export const DeviceScreen = memo(function DeviceScreen({
       )}
     >
       <div
-        className="relative"
+        data-device-rotation={rotationDegrees}
+        className="relative transition-transform duration-300 ease-out motion-reduce:transition-none"
         style={{
           // Turned, the device's height runs across the pane, so the fit is
           // measured against the transposed axis; without this the rotated
@@ -456,7 +460,7 @@ export const DeviceScreen = memo(function DeviceScreen({
             ? `min(100cqw, calc(100cqh / ${geo.aspect}))`
             : `min(100cqh, calc(100cqw / ${geo.aspect}))`,
           aspectRatio: geo.aspect,
-          ...(landscape ? { transform: "rotate(90deg)" } : {}),
+          transform: `rotate(${rotationDegrees}deg)`,
         }}
       >
         <DeviceSilhouette

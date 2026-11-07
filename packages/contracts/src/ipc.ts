@@ -357,6 +357,8 @@ import type {
   DeviceOpenUrlInput,
   DeviceTestingInput,
   DevicePressButtonInput,
+  DeviceSetOrientationInput,
+  DevicePasteInput,
   DeviceScreenshotInput,
   DeviceScreenshotResult,
   DeviceScrollToElementInput,
@@ -1598,6 +1600,8 @@ export interface EnvironmentApi {
     typeText: (input: DeviceTypeTextInput) => Promise<void>;
     keyEvent: (input: DeviceKeyEventInput) => Promise<void>;
     pressButton: (input: DevicePressButtonInput) => Promise<void>;
+    setOrientation?: (input: DeviceSetOrientationInput) => Promise<void>;
+    paste?: (input: DevicePasteInput) => Promise<void>;
     scrollToElement: (input: DeviceScrollToElementInput) => Promise<DeviceScrollToElementResult>;
     installApp: (input: DeviceInstallAppInput) => Promise<DeviceInstallAppResult>;
     launchApp: (input: DeviceLaunchAppInput) => Promise<DeviceLaunchAppResult>;

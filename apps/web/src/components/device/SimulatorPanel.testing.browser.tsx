@@ -64,7 +64,13 @@ vi.mock("../../environmentApi", () => ({
 }));
 vi.mock("../../environments/runtime", () => ({ readEnvironmentConnection: () => undefined }));
 vi.mock("./useDeviceVideoStream", () => ({
-  useDeviceVideoStream: () => ({ status: "idle", error: null, dimensions: null }),
+  deviceVideoDecodingSupported: () => true,
+  useDeviceVideoStream: () => ({
+    status: "idle",
+    error: null,
+    dimensions: null,
+    input: { ready: false, send: () => false },
+  }),
 }));
 vi.mock("./useDeviceScreenshotStream", () => ({
   useDeviceScreenshotStream: (input: unknown) => {

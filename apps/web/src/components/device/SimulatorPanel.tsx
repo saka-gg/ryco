@@ -6,11 +6,12 @@ import { DEVICE_WS_METHODS } from "@ryco/contracts";
 import type {
   DeviceDescriptor,
   DeviceHardwareButton,
-  DeviceKeyModifier,
+  DeviceOrientation,
   DeviceUdid,
   EnvironmentId,
   ThreadId,
 } from "@ryco/contracts";
+import { ROTATE_LEFT, ROTATE_RIGHT } from "@ryco/shared/deviceOrientation";
 import {
   ArrowLeftIcon,
   PanelsTopLeftIcon,
@@ -24,20 +25,14 @@ import {
   PlayIcon,
   PowerIcon,
   RefreshCwIcon,
+  RotateCcwIcon,
+  RotateCwIcon,
   SmartphoneIcon,
   UnplugIcon,
   Volume1Icon,
   Volume2Icon,
 } from "lucide-react";
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type KeyboardEvent,
-  type PointerEvent,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { isHostedHubMode } from "../../env";
 import { readEnvironmentApi } from "../../environmentApi";
@@ -45,13 +40,12 @@ import { readEnvironmentConnection } from "../../environments/runtime";
 import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 import { toastManager } from "../ui/toast";
-import {
-  canvasPointToDevicePoint,
-  deviceHidUsageForKey,
-  type DevicePoint,
-} from "./deviceFrameGate";
-import { useDeviceVideoStream } from "./useDeviceVideoStream";
+import { canvasPointToDevicePoint, type DevicePoint } from "./deviceFrameGate";
+import { clientPointToLayoutPoint, DEVICE_ORIENTATION_ROTATION } from "./deviceTouchGeometry";
+import { deviceVideoDecodingSupported, useDeviceVideoStream } from "./useDeviceVideoStream";
 import { useDeviceScreenshotStream } from "./useDeviceScreenshotStream";
+import { useDeviceTouchInput, type DeviceTouchFallback } from "./useDeviceTouchInput";
+import { useDeviceKeyboardInput } from "./useDeviceKeyboardInput";
 import { devicePointSize } from "@ryco/client-runtime/state/device/devicePoint";
 
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
@@ -80,14 +74,27 @@ function attachLabel(device: DeviceDescriptor, phase: string | null | undefined)
   return "Connecting…";
 }
 
-function modifiers(event: KeyboardEvent): DeviceKeyModifier[] {
-  const result: DeviceKeyModifier[] = [];
-  if (event.metaKey) result.push("command");
-  if (event.shiftKey) result.push("shift");
-  if (event.altKey) result.push("option");
-  if (event.ctrlKey) result.push("control");
-  return result;
+/**
+ * The chassis angle for an orientation, continued from the previous angle so
+ * a quarter turn animates as a quarter turn (landscape-left to upside-down is
+ * -90° to -180°, not -90° back round to +180°).
+ */
+function useContinuousRotation(orientation: DeviceOrientation): number {
+  const [rotation, setRotation] = useState(() => ({
+    orientation,
+    angle: DEVICE_ORIENTATION_ROTATION[orientation],
+  }));
+  if (rotation.orientation === orientation) return rotation.angle;
+  const target = DEVICE_ORIENTATION_ROTATION[orientation];
+  const delta = ((((target - rotation.angle) % 360) + 540) % 360) - 180;
+  const next = { orientation, angle: rotation.angle + delta };
+  // Derived from the orientation during render, not in an effect.
+  setRotation(next);
+  return next.angle;
 }
+
+/** Shows one toast per burst of live-input failures rather than one per event. */
+const INPUT_ERROR_TOAST_INTERVAL_MS = 3_000;
 
 function SetupState(props: {
   readonly availability: NonNullable<
@@ -301,19 +308,38 @@ export default function SimulatorPanel(props: {
     [api, applySnapshot, bootLimit, environmentId, generation, run, threadId],
   );
 
+  // Without WebCodecs (a plain-HTTP origin, an old browser) the panel samples
+  // screenshots instead of streaming H.264, the way the hosted relay does.
   const useNativeVideo =
-    Boolean(client?.openFrameSource) && attached?.platform !== "android-emulator";
+    Boolean(client?.openFrameSource) &&
+    attached?.platform !== "android-emulator" &&
+    deviceVideoDecodingSupported();
+  const lastInputErrorAt = useRef(0);
+  const onInputError = useCallback((inputError: { readonly message: string }) => {
+    const now = performance.now();
+    if (now - lastInputErrorAt.current < INPUT_ERROR_TOAST_INTERVAL_MS) return;
+    lastInputErrorAt.current = now;
+    toastManager.add({
+      type: "error",
+      title: "Simulator input failed",
+      description: inputError.message || "The input could not be delivered.",
+    });
+  }, []);
   const nativeVideo = useDeviceVideoStream({
     canvasRef,
     udid: useNativeVideo && attached?.state === "booted" ? attached.udid : null,
     ...(client?.openFrameSource ? { openFrameSource: client.openFrameSource } : {}),
+    onInputError,
   });
+  const orientation: DeviceOrientation = attached?.orientation ?? "portrait";
+  const rotationDegrees = useContinuousRotation(orientation);
   const hostedVideo = useDeviceScreenshotStream({
     canvasRef,
     udid: attached?.state === "booted" ? attached.udid : null,
     enabled: !useNativeVideo,
     hosted: isHostedHubMode(),
     screenshot: api ? (input) => api.screenshot(input) : null,
+    orientation,
   });
   const videoStatus = useNativeVideo ? nativeVideo.status : hostedVideo.status;
   const videoError = useNativeVideo ? nativeVideo.error : hostedVideo.error;
@@ -321,151 +347,86 @@ export default function SimulatorPanel(props: {
   const { noteInteraction } = hostedVideo;
   const previewPaused = videoStatus === "paused-by-other-preview" || videoStatus === "paused-idle";
 
-  const pressRef = useRef<{ readonly point: DevicePoint | null; readonly at: number } | null>(null);
-  const pointFromEvent = useCallback(
-    (event: PointerEvent<HTMLCanvasElement>): DevicePoint | null => {
+  const toDevicePoint = useCallback(
+    (clientX: number, clientY: number): DevicePoint | null => {
       const canvas = canvasRef.current;
       if (!canvas || !dimensions) return null;
-      const rect = canvas.getBoundingClientRect();
+      const local = clientPointToLayoutPoint(
+        {
+          rect: canvas.getBoundingClientRect(),
+          layoutWidth: canvas.clientWidth,
+          layoutHeight: canvas.clientHeight,
+          rotationDegrees,
+        },
+        clientX,
+        clientY,
+      );
+      if (!local) return null;
       return canvasPointToDevicePoint(
         {
           frameWidth: dimensions.width,
           frameHeight: dimensions.height,
-          displayWidth: rect.width,
-          displayHeight: rect.height,
+          displayWidth: canvas.clientWidth,
+          displayHeight: canvas.clientHeight,
           ...devicePointSize(attached, dimensions.width, dimensions.height),
         },
-        event.clientX - rect.left,
-        event.clientY - rect.top,
+        local.x,
+        local.y,
       );
     },
-    [attached, dimensions],
+    [attached, dimensions, rotationDegrees],
   );
-  const pointerDown = useCallback(
-    (event: PointerEvent<HTMLCanvasElement>) => {
-      event.currentTarget.focus();
-      event.currentTarget.setPointerCapture(event.pointerId);
-      pressRef.current = { point: pointFromEvent(event), at: performance.now() };
-    },
-    [pointFromEvent],
-  );
-  const pointerUp = useCallback(
-    (event: PointerEvent<HTMLCanvasElement>) => {
-      const press = pressRef.current;
-      pressRef.current = null;
-      if (!press || !attached || !api) return;
-      const to = pointFromEvent(event);
-      if (!press.point || !to) return;
-      const distance = Math.hypot(to.x - press.point.x, to.y - press.point.y);
-      const request =
-        distance <= 8
-          ? api.tap({ udid: attached.udid, x: to.x, y: to.y })
-          : api.swipe({
-              udid: attached.udid,
-              fromX: press.point.x,
-              fromY: press.point.y,
-              toX: to.x,
-              toY: to.y,
-              durationMs: Math.max(16, Math.round(performance.now() - press.at)),
-            });
-      void request.catch((error) =>
-        toastManager.add({
-          type: "error",
-          title: "Simulator input failed",
-          description: errorMessage(error, "The input could not be delivered."),
-        }),
-      );
-    },
-    [api, attached, pointFromEvent],
-  );
-
-  const keyboardTail = useRef<Promise<void>>(Promise.resolve());
-  const keyboardScope = useRef<{ active: boolean; pending: number } | null>(null);
-  useEffect(() => {
-    const scope = { active: true, pending: 0 };
-    keyboardTail.current = Promise.resolve();
-    keyboardScope.current = scope;
-    return () => {
-      scope.active = false;
-    };
-  }, [api, generation, threadKey, attached?.udid]);
-
-  // Keys whose press found the preview paused. They only resume it: the frame on
-  // screen is stale, so neither the press nor its release may act on the device.
-  const resumingKeys = useRef(new Set<string>());
-  const noteKeyInteraction = (event: KeyboardEvent) => {
-    if (!event.repeat) {
-      if (previewPaused) resumingKeys.current.add(event.code);
-      else resumingKeys.current.delete(event.code);
-    }
-    noteInteraction();
-  };
-
-  const keyEvent = useCallback(
-    (event: KeyboardEvent<HTMLCanvasElement>, direction: "down" | "up") => {
-      if (!attached || !api) return;
-      if (event.metaKey || event.ctrlKey) return;
-      const text =
-        attached.platform === "android-emulator" && event.key.length === 1 ? event.key : null;
-      const keyCode = deviceHidUsageForKey(event.key);
-      if (text === null && keyCode === null) return;
-      event.preventDefault();
-      if (resumingKeys.current.has(event.code)) {
-        if (direction === "up") resumingKeys.current.delete(event.code);
-        return;
-      }
-      if (attached.platform !== "android-emulator") {
+  const touchFallback = useMemo<DeviceTouchFallback | null>(() => {
+    if (!attached || !api) return null;
+    const report = (error: unknown) =>
+      toastManager.add({
+        type: "error",
+        title: "Simulator input failed",
+        description: errorMessage(error, "The input could not be delivered."),
+      });
+    return {
+      tap: (point) => void api.tap({ udid: attached.udid, ...point }).catch(report),
+      swipe: (from, to, durationMs) =>
         void api
-          .keyEvent({
+          .swipe({
             udid: attached.udid,
-            keyCode: keyCode!,
-            modifiers: modifiers(event),
-            direction,
+            fromX: from.x,
+            fromY: from.y,
+            toX: to.x,
+            toY: to.y,
+            durationMs,
           })
-          .catch(() => undefined);
-        return;
-      }
-      // Android emits complete key presses, so key-up has no work to queue.
-      if (direction === "up") return;
-      const scope = keyboardScope.current;
-      if (!scope?.active || scope.pending >= 64) return;
-      scope.pending++;
-      const udid = attached.udid;
-      const keyModifiers = modifiers(event);
-      keyboardTail.current = keyboardTail.current
-        .then(async () => {
-          const state = useDeviceStateStore.getState();
-          if (
-            !scope?.active ||
-            !environmentId ||
-            !threadKey ||
-            state.environmentById[environmentId]?.generation !== generation ||
-            state.environmentById[environmentId]?.status !== "connected" ||
-            state.threadByKey[threadKey]?.attachedDeviceUdid !== udid ||
-            readEnvironmentApi(environmentId)?.device !== api
-          )
-            return;
-          await (text !== null
-            ? api.typeText({ udid, text })
-            : api.keyEvent({ udid, keyCode: keyCode!, modifiers: keyModifiers, direction }));
-        })
-        .catch((error) => {
-          if (scope?.active) {
-            // A failed target must not replay the queued suffix onto a new device.
-            // Reattachment or a new connection creates a fresh input scope.
-            scope.active = false;
-            toastManager.add({
-              type: "error",
-              title: "Android keyboard input failed",
-              description: errorMessage(error, "The input could not be delivered."),
-            });
-          }
-        })
-        .finally(() => {
-          scope.pending--;
-        });
+          .catch(report),
+    };
+  }, [api, attached]);
+  const liveInput = useNativeVideo ? nativeVideo.input : null;
+  const touch = useDeviceTouchInput({
+    toDevicePoint,
+    live: liveInput,
+    fallback: touchFallback,
+  });
+  const keyboard = useDeviceKeyboardInput({
+    api,
+    attached,
+    environmentId,
+    threadKey,
+    generation,
+    live: liveInput,
+    previewPaused,
+    noteInteraction,
+  });
+
+  const rotate = useCallback(
+    (direction: "left" | "right") => {
+      if (!attached || !api?.setOrientation) return;
+      const next = (direction === "left" ? ROTATE_LEFT : ROTATE_RIGHT)[orientation];
+      const setOrientation = api.setOrientation;
+      void run(
+        () => setOrientation({ udid: attached.udid, orientation: next }),
+        "Could not rotate the simulator",
+      );
     },
-    [api, attached, environmentId, generation, threadKey],
+    [api, attached, orientation, run],
   );
 
   const pressButton = useCallback(
@@ -566,7 +527,7 @@ export default function SimulatorPanel(props: {
     <div
       className="flex min-h-0 flex-1 flex-col bg-background"
       onPointerDownCapture={() => noteInteraction()}
-      onKeyDownCapture={noteKeyInteraction}
+      onKeyDownCapture={keyboard.noteKeyInteraction}
     >
       <div className="flex min-h-11 shrink-0 items-center gap-2 border-b border-border/60 px-3">
         <SmartphoneIcon className="size-4 text-muted-foreground" />
@@ -661,6 +622,7 @@ export default function SimulatorPanel(props: {
           pixelWidth={frameWidth}
           pixelHeight={frameHeight}
           buttonsDisabled={!attached || busy}
+          rotationDegrees={rotationDegrees}
           onPressButton={pressButton}
         >
           {attached ? (
@@ -670,13 +632,14 @@ export default function SimulatorPanel(props: {
                 tabIndex={0}
                 aria-label={`${attached.name} screen`}
                 className="h-full w-full touch-none object-cover outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-400"
-                onPointerDown={pointerDown}
-                onPointerUp={pointerUp}
-                onPointerCancel={() => {
-                  pressRef.current = null;
-                }}
-                onKeyDown={(event) => keyEvent(event, "down")}
-                onKeyUp={(event) => keyEvent(event, "up")}
+                onPointerDown={touch.onPointerDown}
+                onPointerMove={touch.onPointerMove}
+                onPointerUp={touch.onPointerUp}
+                onPointerCancel={touch.onPointerCancel}
+                onLostPointerCapture={touch.onLostPointerCapture}
+                onKeyDown={keyboard.onKeyDown}
+                onKeyUp={keyboard.onKeyUp}
+                onPaste={keyboard.onPaste}
               />
               {videoStatus === "paused-by-other-preview" || videoStatus === "paused-idle" ? (
                 // Covers the frozen frame so a tap cannot land on a screen that has moved on.
@@ -762,6 +725,22 @@ export default function SimulatorPanel(props: {
           disabled={!attached || busy}
           onClick={() => pressButton("volume-up")}
         />
+        {attached?.platform === "ios-simulator" && api.setOrientation ? (
+          <>
+            <Control
+              icon={RotateCcwIcon}
+              label="Rotate left"
+              disabled={busy || attached.state !== "booted"}
+              onClick={() => rotate("left")}
+            />
+            <Control
+              icon={RotateCwIcon}
+              label="Rotate right"
+              disabled={busy || attached.state !== "booted"}
+              onClick={() => rotate("right")}
+            />
+          </>
+        ) : null}
         <span className="mx-1 h-5 w-px bg-border" />
         <Control
           icon={CameraIcon}

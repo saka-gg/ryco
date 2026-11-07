@@ -296,6 +296,18 @@ function handleInput(
         },
         "Failed to scroll to the element.",
       ).pipe(Effect.map((result) => ({ type: "scroll-to-element" as const, result })));
+    case "paste":
+      return invoke(
+        manager,
+        (active) => active.paste(request.input.udid, request.input.text),
+        "Failed to paste into the simulator.",
+      ).pipe(Effect.as({ type: "paste" as const }));
+    case "set-orientation":
+      return invoke(
+        manager,
+        (active) => active.setOrientation(request.input.udid, request.input.orientation),
+        "Failed to rotate the simulator.",
+      ).pipe(Effect.as({ type: "set-orientation" as const }));
   }
 }
 

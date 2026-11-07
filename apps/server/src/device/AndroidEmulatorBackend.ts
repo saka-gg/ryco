@@ -482,6 +482,15 @@ export class AndroidEmulatorBackend implements DeviceBackend {
       throw new DeviceBackendError("This HID key is not supported by Android input.");
     if (event.direction === "down") await this.keyboard(udid, ["input", "keyevent", String(code)]);
   }
+  async paste(udid: string, text: string): Promise<void> {
+    await this.typeText(udid, text);
+  }
+  async touch(): Promise<void> {
+    throw new DeviceBackendError("Live touch is not available for Android emulators yet.");
+  }
+  async setOrientation(): Promise<void> {
+    throw new DeviceBackendError("Rotating Android emulators is not supported yet.");
+  }
   async pressButton(udid: string, button: DeviceHardwareButton): Promise<void> {
     const code = (
       { home: 3, back: 4, recents: 187, lock: 26, "volume-up": 24, "volume-down": 25 } as Partial<

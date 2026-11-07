@@ -154,8 +154,10 @@ input through the guest's `dtuhidd` service. Older CoreSimulators keep Simulator
 legacy Indigo messages. There is no fallback from `dtuhidd` to Indigo: on Xcode 27.0 the
 guest dropped Indigo button and key events while the send still reported success (Synara's
 finding; the Xcode 27.1 qualification in the helper's HEADER.md did not reproduce it), and an
-Indigo send cannot confirm delivery. Keystrokes are mapped through the simulator's own
-keyboard layout, so on a German simulator "z" types "y". The server
+Indigo send cannot confirm delivery. Keystrokes are HID key positions, read with the simulator's own
+keyboard layout: text the helper types (agent `type_text`) assumes US positions, so on a
+German simulator "z" types "y". The pane sends the person's own key positions instead (see
+"Pane input, paste and rotation"). The server
 logs the transport once (`[device] iOS Simulator input goes through dtuhid on this Xcode`).
 
 `dtuhidd` starts on demand, so the first input after a boot can wait up to 9 seconds. When
@@ -176,6 +178,37 @@ Long text is typed in chunks of 120 characters, in order, with no other input to
 device in between. A failure stops at the chunk that failed; the chunks before it were
 delivered. If that was not the first chunk, the error starts with "Typed the first N of M
 characters" and says not to replay the text whole: send only the part that is missing.
+
+## Pane input, paste and rotation
+
+The pane streams input over its frame socket (`/ws/device-frames`) instead of one RPC per
+event (`@ryco/shared/deviceLiveInput`, `apps/server/src/device/deviceInputSession.ts`):
+
+- A finger is sent as touch down, moves and up while the pointer moves, so drags scroll
+  live and a held press is a long press. Moves are coalesced to one per display frame in the
+  browser, and a move still waiting behind a slower injection on the server is replaced by
+  the newer one. Leaving the screen, losing pointer capture, the window losing focus or the
+  socket closing lifts the finger where it was.
+- Keys go out by physical position (`KeyboardEvent.code`), modifiers included, as a
+  hardware keyboard and Simulator.app send them, so the simulator's own layout decides the
+  character: a German simulator types "z" and "@" where a German keyboard does. Command
+  chords stay with the host.
+- Paste puts the text on the simulator's pasteboard and presses Command-V. Any Unicode lands
+  exactly, whatever the layout, and iOS asks "Allow Paste" as it does for Simulator.app's
+  own paste.
+- Only owner sessions may send input on the socket, as with the input RPC. The server says
+  so when the socket opens; a client that hears nothing (an older server) keeps using the
+  tap, swipe and key RPCs. A gesture is fenced to the boot it started on, and a failed phase
+  is reported once and never replayed.
+
+Rotation sends the GraphicsServices orientation event Simulator.app sends, to the guest's
+`PurpleWorkspacePort`; it works on a headless boot (adapted from serve-sim). The framebuffer
+stays portrait and the guest turns its interface inside it, so video, touch coordinates and
+the accessibility tree stay in portrait device space and the pane turns the whole chassis.
+An app or iPhone that does not support an orientation keeps its interface where it was, as
+on a real device. The orientation is published on the device descriptor and forgotten when
+the device boots or shuts down. The agents' `rotate` button turns the device a quarter turn
+counterclockwise.
 
 To qualify a new Xcode or runtime, build and probe the helper, then run the smoke against a
 simulator created for the run. `--probe` must report `"hid": "ok"` and the expected

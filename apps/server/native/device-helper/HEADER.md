@@ -63,6 +63,7 @@ On start the helper emits `{"jsonrpc":"2.0","method":"ready","params":{"protocol
 | `stream.stats`   | –                                                       | as above, plus `running: true` while streaming                            |
 | `tap`            | `x`, `y`, `holdMs?` (80)                                | `{ok}`                                                                    |
 | `touch`          | `phase` (`down`\|`move`\|`up`), `x`, `y`                | `{ok}`                                                                    |
+| `orientation`    | `orientation`                                           | `{ok, orientation}`                                                       |
 | `swipe` / `drag` | `startX`, `startY`, `endX`, `endY`, `durationMs?` (250) | `{ok}`                                                                    |
 | `key`            | `usage` (USB HID), `phase?` (`down`\|`up`; omit to tap) | `{ok}`                                                                    |
 | `text`           | `text`                                                  | `{ok, characters, skipped}`                                               |
@@ -82,10 +83,14 @@ not fatal. `--probe` reports the transport `attach` will use as a top-level
 
 Buttons: `home`, `lock`, `side`, `siri`, `volume-up`, `volume-down`.
 
-**Rotation is not a HID button.** The simulator exposes no rotation button over
-Indigo, so orientation changes are not part of this protocol; drive them at the
-UI level (`xcrun simctl` / the device's own controls). Documented here because
-the absence is a deliberate choice, not an oversight.
+**Rotation is not a HID button.** `orientation` (`orientation`: `portrait`,
+`landscape-left`, `portrait-upside-down`, `landscape-right`) sends the
+GraphicsServices orientation event Simulator.app itself sends, to the guest's
+`PurpleWorkspacePort` (resolved with `-[SimDevice lookup:error:]`). The port is
+wired on a headless boot, so Simulator.app need not run. The framebuffer stays
+portrait: the guest draws its turned interface into it, and touch coordinates
+stay in portrait device space, so the viewer turns the whole device. Adapted
+from serve-sim (Apache-2.0), which follows idb; see `Sources/Orientation.swift`.
 
 ### Input transports
 

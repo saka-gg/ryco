@@ -1418,3 +1418,77 @@ describe("DeviceManager scrolling through a virtualized list", () => {
     expect(error?.message).toMatch(/Fake Toggle|Continue|Deep Row/);
   });
 });
+
+describe("DeviceManager orientation", () => {
+  it("turns the device and publishes the orientation on its descriptor", async () => {
+    const { backend, manager } = makeManager();
+    await backend.boot(DEVICE_A);
+    await manager.attach(THREAD_A, DEVICE_A);
+
+    await manager.setOrientation(DEVICE_A, "landscape-left");
+
+    expect(backend.callsOfKind("setOrientation")).toMatchObject([
+      { udid: DEVICE_A, orientation: "landscape-left" },
+    ]);
+    const state = await manager.getThreadState(THREAD_A);
+    expect(state.devices.find((device) => device.udid === DEVICE_A)?.orientation).toBe(
+      "landscape-left",
+    );
+
+    // Portrait is the default and is not written out.
+    await manager.setOrientation(DEVICE_A, "portrait");
+    const portrait = await manager.getThreadState(THREAD_A);
+    expect(portrait.devices.find((device) => device.udid === DEVICE_A)).not.toHaveProperty(
+      "orientation",
+    );
+  });
+
+  it("turns the rotate button into a counterclockwise quarter turn", async () => {
+    const { backend, manager } = makeManager();
+    await backend.boot(DEVICE_A);
+
+    await manager.pressButton(DEVICE_A, "rotate");
+    await manager.pressButton(DEVICE_A, "rotate");
+
+    expect(backend.callsOfKind("pressButton")).toHaveLength(0);
+    expect(backend.callsOfKind("setOrientation").map((call) => call.orientation)).toEqual([
+      "landscape-left",
+      "portrait-upside-down",
+    ]);
+    expect(manager.orientationOf(DEVICE_A)).toBe("portrait-upside-down");
+  });
+
+  it("forgets the orientation when the device shuts down", async () => {
+    const { backend, manager } = makeManager();
+    await manager.boot(DEVICE_A);
+    await manager.setOrientation(DEVICE_A, "landscape-right");
+
+    await manager.shutdown(DEVICE_A);
+
+    expect(manager.orientationOf(DEVICE_A)).toBe("portrait");
+    expect(backend.callsOfKind("setOrientation")).toHaveLength(1);
+  });
+
+  it("keeps the old orientation when the backend refuses the turn", async () => {
+    const { backend, manager } = makeManager();
+    await backend.boot(DEVICE_A);
+    backend.failNext("setOrientation", new DeviceBackendError("no port"));
+
+    await expect(manager.setOrientation(DEVICE_A, "landscape-left")).rejects.toThrow("no port");
+    expect(manager.orientationOf(DEVICE_A)).toBe("portrait");
+  });
+});
+
+describe("DeviceManager input fence", () => {
+  it("stays current until the device's lifecycle changes", async () => {
+    const { manager } = makeManager();
+    await manager.boot(DEVICE_A);
+    const current = manager.inputFence(DEVICE_A);
+    expect(current()).toBe(true);
+
+    await manager.shutdown(DEVICE_A);
+
+    expect(current()).toBe(false);
+    expect(manager.inputFence(DEVICE_A)()).toBe(true);
+  });
+});

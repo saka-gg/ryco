@@ -53,7 +53,10 @@ vi.mock("../../environments/runtime", () => ({
     client: { device: { openFrameSource: mocks.openFrameSource } },
   }),
 }));
-vi.mock("./useDeviceVideoStream", () => ({ useDeviceVideoStream: mocks.nativeVideo }));
+vi.mock("./useDeviceVideoStream", () => ({
+  deviceVideoDecodingSupported: () => true,
+  useDeviceVideoStream: mocks.nativeVideo,
+}));
 vi.mock("../ui/toast", () => ({ toastManager: { add: mocks.toast } }));
 
 const environmentId = EnvironmentId.make("android-browser-test");
@@ -121,7 +124,12 @@ beforeEach(() => {
     mocks.api.pressButton,
   ])
     method.mockResolvedValue(undefined);
-  mocks.nativeVideo.mockReturnValue({ status: "idle", error: null, dimensions: null });
+  mocks.nativeVideo.mockReturnValue({
+    status: "idle",
+    error: null,
+    dimensions: null,
+    input: { ready: false, send: () => false },
+  });
   const image = document.createElement("canvas");
   image.width = 200;
   image.height = 400;
@@ -256,5 +264,119 @@ describe("Android simulator pane", () => {
     await page.getByRole("combobox").selectOptions("IOS-1");
     await expect.poll(() => mocks.api.attach.mock.calls.length).toBe(1);
     expect(mocks.api.attach).toHaveBeenCalledWith({ threadId, udid: "IOS-1" });
+  });
+});
+
+describe("iOS simulator pane live input", () => {
+  const ios: DeviceDescriptor = {
+    platform: "ios-simulator",
+    udid: "IOS-LIVE",
+    name: "iPhone",
+    runtime: "iOS",
+    state: "booted",
+    bootSource: "user",
+    geometry: { pointWidth: 402, pointHeight: 874, scale: 3 },
+  };
+  let sent: unknown[] = [];
+
+  beforeEach(() => {
+    sent = [];
+    snapshot = { ...snapshot, devices: [ios], attachedDeviceUdid: ios.udid };
+    useDeviceStateStore
+      .getState()
+      .applyInventory(environmentId, generation, snapshot.devices, snapshot.availability);
+    updateAttachment(ios.udid);
+    mocks.nativeVideo.mockReturnValue({
+      status: "streaming",
+      error: null,
+      dimensions: { width: 1206, height: 2622 },
+      input: {
+        ready: true,
+        send: (message: unknown) => {
+          sent.push(message);
+          return true;
+        },
+      },
+    });
+  });
+
+  function pointer(type: string, canvas: HTMLCanvasElement, fx: number, fy: number) {
+    const rect = canvas.getBoundingClientRect();
+    canvas.dispatchEvent(
+      new PointerEvent(type, {
+        bubbles: true,
+        isPrimary: true,
+        pointerId: 7,
+        button: 0,
+        clientX: rect.left + rect.width * fx,
+        clientY: rect.top + rect.height * fy,
+      }),
+    );
+  }
+
+  it("streams a touch while the pointer moves instead of on release", async () => {
+    await mount();
+    const canvas = await vi.waitFor(() => {
+      const element = document.querySelector<HTMLCanvasElement>(
+        'canvas[aria-label="iPhone screen"]',
+      );
+      if (!element) throw new Error("no canvas yet");
+      return element;
+    });
+    pointer("pointerdown", canvas, 0.5, 0.8);
+    pointer("pointermove", canvas, 0.5, 0.6);
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    expect(sent).toMatchObject([
+      { type: "device.touch", phase: "down" },
+      { type: "device.touch", phase: "move" },
+    ]);
+    const down = sent[0] as { x: number; y: number };
+    expect(down.x).toBeCloseTo(201, -1);
+    expect(down.y).toBeCloseTo(699, -1);
+    // Off the screen the finger lifts where it last was.
+    pointer("pointermove", canvas, 0.5, 1.5);
+    expect(sent.at(-1)).toMatchObject({ type: "device.touch", phase: "up" });
+    pointer("pointerup", canvas, 0.5, 1.5);
+    expect(sent).toHaveLength(3);
+    expect(mocks.api.tap).not.toHaveBeenCalled();
+    expect(mocks.api.swipe).not.toHaveBeenCalled();
+  });
+
+  it("sends keys by physical position and pastes through the device", async () => {
+    await mount();
+    const canvas = await vi.waitFor(() => {
+      const element = document.querySelector<HTMLCanvasElement>(
+        'canvas[aria-label="iPhone screen"]',
+      );
+      if (!element) throw new Error("no canvas yet");
+      return element;
+    });
+    // A German keyboard's Z key reports code KeyY: the device gets that position.
+    canvas.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyY", bubbles: true }));
+    canvas.dispatchEvent(new KeyboardEvent("keyup", { key: "z", code: "KeyY", bubbles: true }));
+    expect(sent).toEqual([
+      { type: "device.key", usage: 0x1c, phase: "down" },
+      { type: "device.key", usage: 0x1c, phase: "up" },
+    ]);
+    const data = new DataTransfer();
+    data.setData("text/plain", "Grüße ✓");
+    canvas.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true }));
+    expect(sent.at(-1)).toEqual({ type: "device.paste", text: "Grüße ✓", group: 1, final: true });
+    expect(mocks.api.keyEvent).not.toHaveBeenCalled();
+  });
+
+  it("turns the chassis with the device's orientation", async () => {
+    snapshot = { ...snapshot, devices: [{ ...ios, orientation: "landscape-left" }] };
+    useDeviceStateStore
+      .getState()
+      .applyInventory(environmentId, generation, snapshot.devices, snapshot.availability);
+    updateAttachment(ios.udid);
+    await mount();
+    await expect
+      .poll(() =>
+        document.querySelector("[data-device-rotation]")?.getAttribute("data-device-rotation"),
+      )
+      .toBe("-90");
   });
 });

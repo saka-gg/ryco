@@ -104,6 +104,22 @@ export const DeviceHostSummary = Schema.Struct({
 });
 export type DeviceHostSummary = typeof DeviceHostSummary.Type;
 
+/**
+ * Which way the device is turned, named after Simulator.app's Rotate Left (⌘←)
+ * and Rotate Right (⌘→): `landscape-left` is a quarter turn counterclockwise.
+ *
+ * Video frames, input coordinates and the accessibility tree stay in portrait
+ * device space whatever the orientation (the guest draws its rotated interface
+ * into the same portrait framebuffer), so a viewer turns the whole device.
+ */
+export const DeviceOrientation = Schema.Literals([
+  "portrait",
+  "landscape-left",
+  "portrait-upside-down",
+  "landscape-right",
+]);
+export type DeviceOrientation = typeof DeviceOrientation.Type;
+
 export const DeviceDescriptor = Schema.Struct({
   host: Schema.optional(DeviceHostSummary),
   nativeUdid: Schema.optional(DeviceUdid),
@@ -139,6 +155,11 @@ export const DeviceDescriptor = Schema.Struct({
       scale: Schema.Finite.check(Schema.isGreaterThan(0)),
     }),
   ),
+  /**
+   * The orientation Ryco last turned the device to. Absent means portrait, or
+   * a backend that cannot turn its devices. A boot resets it to portrait.
+   */
+  orientation: Schema.optional(DeviceOrientation),
 });
 export type DeviceDescriptor = typeof DeviceDescriptor.Type;
 
@@ -447,6 +468,22 @@ export const DevicePressButtonInput = Schema.Struct({
 });
 export type DevicePressButtonInput = typeof DevicePressButtonInput.Type;
 
+/** The most one paste may carry. */
+export const DEVICE_PASTE_MAX_LENGTH = 16_384;
+
+/** Paste text where the device's focus is, independent of its keyboard layout. */
+export const DevicePasteInput = Schema.Struct({
+  udid: DeviceUdid,
+  text: Schema.String.check(Schema.isMaxLength(DEVICE_PASTE_MAX_LENGTH)),
+});
+export type DevicePasteInput = typeof DevicePasteInput.Type;
+
+export const DeviceSetOrientationInput = Schema.Struct({
+  udid: DeviceUdid,
+  orientation: DeviceOrientation,
+});
+export type DeviceSetOrientationInput = typeof DeviceSetOrientationInput.Type;
+
 // ── App lifecycle ────────────────────────────────────────────────────
 
 export const DeviceBundleId = TrimmedNonEmptyString.check(Schema.isMaxLength(256));
@@ -752,6 +789,8 @@ export const DeviceInputRequest = Schema.Union([
   Schema.Struct({ type: Schema.Literal("key-event"), input: DeviceKeyEventInput }),
   Schema.Struct({ type: Schema.Literal("press-button"), input: DevicePressButtonInput }),
   Schema.Struct({ type: Schema.Literal("scroll-to-element"), input: DeviceScrollToElementInput }),
+  Schema.Struct({ type: Schema.Literal("set-orientation"), input: DeviceSetOrientationInput }),
+  Schema.Struct({ type: Schema.Literal("paste"), input: DevicePasteInput }),
 ]);
 export type DeviceInputRequest = typeof DeviceInputRequest.Type;
 
@@ -765,6 +804,8 @@ export const DeviceInputResponse = Schema.Union([
     type: Schema.Literal("scroll-to-element"),
     result: DeviceScrollToElementResult,
   }),
+  Schema.Struct({ type: Schema.Literal("set-orientation") }),
+  Schema.Struct({ type: Schema.Literal("paste") }),
 ]);
 export type DeviceInputResponse = typeof DeviceInputResponse.Type;
 

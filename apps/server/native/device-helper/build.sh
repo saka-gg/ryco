@@ -107,6 +107,7 @@ xcrun swiftc \
   "$SOURCE_DIR/Sources/CapabilityProbe.swift" \
   "$SOURCE_DIR/Sources/CoreSimulatorBridge.swift" \
   "$SOURCE_DIR/Sources/FrameStream.swift" \
+  "$SOURCE_DIR/Sources/Orientation.swift" \
   "$SOURCE_DIR/Sources/Screenshot.swift" \
   "$SOURCE_DIR/Sources/main.swift" \
   -o "$TMP_BINARY"

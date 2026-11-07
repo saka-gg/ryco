@@ -506,9 +506,10 @@ const TRACING_EXPORTER_SOURCES: readonly ForbiddenBundleSource[] = [
  * cross-node project copy (527.1 before these moves): the project-nodes dialogs'
  * store, the copy's Agent Control reports and node directory (RPCs and schemas)
  * and the copy RPC method names load after boot; boot keeps the copy plans it
- * decodes, the tolerant plan view and the lazy copy client.
- * 527 KiB on 2026-11-07: the device tools' settings and two-tool contracts on
- * top of Computer Use measured 526.2 KiB.
+ * decodes, the tolerant plan view and the lazy copy client. 527 KiB on
+ * 2026-11-06 (526 before; boot 525.9 → 526.1 KiB): the simulator's paste and
+ * rotation input RPCs, whose schemas the boot RPC client carries, and their
+ * two client methods. The live input protocol itself loads with the pane.
  */
 export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
   bootChunk: "main",

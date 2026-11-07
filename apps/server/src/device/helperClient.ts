@@ -45,6 +45,7 @@ export const HELPER_METHODS = {
   streamStats: "stream.stats",
   tap: "tap",
   touch: "touch",
+  orientation: "orientation",
   swipe: "swipe",
   key: "key",
   text: "text",

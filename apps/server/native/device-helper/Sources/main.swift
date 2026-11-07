@@ -299,6 +299,12 @@ final class HelperSession {
     }
   }
 
+  /// The attached device, re-attached first if it was rebooted since.
+  func requireCurrentDevice() throws -> SimulatorDevice {
+    try verifyBootSession()
+    return try requireDevice()
+  }
+
   func requireAccessibility() throws -> RycoAXBridge {
     guard let accessibility else {
       throw RPCError(.notAttached, "accessibility translation is unavailable for this simulator")
@@ -457,6 +463,17 @@ func handle(method: String, params: Params, session: HelperSession) throws -> An
       hid.sendTouch(x: touchX, y: touchY, down: phase != "up")
     }
     return ["ok": true]
+
+  case "orientation":
+    let name = try params.string("orientation")
+    guard let orientation = DeviceOrientation(rawValue: name) else {
+      throw RPCError(
+        .invalidParams,
+        "orientation must be one of "
+          + DeviceOrientation.allCases.map(\.rawValue).joined(separator: ", "))
+    }
+    try sendDeviceOrientation(orientation, to: try session.requireCurrentDevice())
+    return ["ok": true, "orientation": orientation.rawValue]
 
   case "swipe", "drag":
     let hid = try session.requireHID()

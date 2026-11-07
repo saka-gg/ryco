@@ -1,4 +1,4 @@
-import type { DeviceScreenshotResult, DeviceUdid } from "@ryco/contracts";
+import type { DeviceOrientation, DeviceScreenshotResult, DeviceUdid } from "@ryco/contracts";
 import {
   createHostedPreviewSampler,
   type HostedPreviewSampler,
@@ -20,6 +20,46 @@ function decodeBase64(value: string): Uint8Array {
   const bytes = new Uint8Array(decoded.length);
   for (let index = 0; index < decoded.length; index += 1) bytes[index] = decoded.charCodeAt(index);
   return bytes;
+}
+
+/**
+ * Draw a screenshot into the canvas in the device's portrait framebuffer
+ * space. simctl turns a screenshot of a turned device upright, while the pane
+ * turns the whole chassis with the portrait picture inside it (as the H.264
+ * stream delivers it), so the screenshot is turned back first.
+ */
+export function drawDeviceScreenshot(
+  canvas: HTMLCanvasElement,
+  bitmap: ImageBitmap,
+  orientation: DeviceOrientation,
+): boolean {
+  const sideways = orientation === "landscape-left" || orientation === "landscape-right";
+  const turned = sideways ? bitmap.width > bitmap.height : orientation === "portrait-upside-down";
+  const width = turned && sideways ? bitmap.height : bitmap.width;
+  const height = turned && sideways ? bitmap.width : bitmap.height;
+  const resized = canvas.width !== width || canvas.height !== height;
+  if (resized) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  const context = canvas.getContext("2d");
+  if (!context) return resized;
+  context.save();
+  if (turned) {
+    if (orientation === "landscape-left") {
+      context.translate(width, 0);
+      context.rotate(Math.PI / 2);
+    } else if (orientation === "landscape-right") {
+      context.translate(0, height);
+      context.rotate(-Math.PI / 2);
+    } else {
+      context.translate(width, height);
+      context.rotate(Math.PI);
+    }
+  }
+  context.drawImage(bitmap, 0, 0);
+  context.restore();
+  return resized;
 }
 
 function decodeBase64BlobPart(value: string): ArrayBuffer {
@@ -51,6 +91,8 @@ export function useDeviceScreenshotStream(input: {
   /** Whether the preview runs over the hosted relay and so shares the tab's lease. */
   readonly hosted: boolean;
   readonly screenshot: ((input: { udid: DeviceUdid }) => Promise<DeviceScreenshotResult>) | null;
+  /** How the device is turned; screenshots are drawn back into portrait. */
+  readonly orientation?: DeviceOrientation;
 }): {
   readonly status: HostedPreviewStatus;
   readonly error: string | null;
@@ -58,6 +100,10 @@ export function useDeviceScreenshotStream(input: {
   readonly noteInteraction: () => void;
 } {
   const { canvasRef, enabled, hosted, screenshot, udid } = input;
+  const orientationRef = useRef<DeviceOrientation>(input.orientation ?? "portrait");
+  useEffect(() => {
+    orientationRef.current = input.orientation ?? "portrait";
+  }, [input.orientation]);
   const ownerId = useId();
   const samplerRef = useRef<HostedPreviewSampler | null>(null);
   const screenshotRef = useRef(screenshot);
@@ -86,12 +132,9 @@ export function useDeviceScreenshotStream(input: {
         if (!isCurrent()) return false;
         const canvas = canvasRef.current;
         if (!canvas) return false;
-        if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
-          canvas.width = bitmap.width;
-          canvas.height = bitmap.height;
-          setDimensions({ width: bitmap.width, height: bitmap.height });
+        if (drawDeviceScreenshot(canvas, bitmap, orientationRef.current)) {
+          setDimensions({ width: canvas.width, height: canvas.height });
         }
-        canvas.getContext("2d")?.drawImage(bitmap, 0, 0);
         return true;
       } finally {
         bitmap.close();

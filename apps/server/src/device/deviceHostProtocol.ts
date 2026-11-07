@@ -65,6 +65,23 @@ export const deviceHostOperations = {
     output: Schema.Void,
   },
   pressButton: { input: Schema.Tuple([C.DeviceUdid, C.DeviceHardwareButton]), output: Schema.Void },
+  touch: {
+    input: Schema.Tuple([
+      C.DeviceUdid,
+      Schema.Literals(["down", "move", "up"]),
+      Schema.Finite,
+      Schema.Finite,
+    ]),
+    output: Schema.Void,
+  },
+  paste: {
+    input: Schema.Tuple([C.DeviceUdid, C.DevicePasteInput.fields.text]),
+    output: Schema.Void,
+  },
+  setOrientation: {
+    input: Schema.Tuple([C.DeviceUdid, C.DeviceOrientation]),
+    output: Schema.Void,
+  },
   screenshot: {
     input: Schema.Tuple([
       C.DeviceUdid,
