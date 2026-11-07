@@ -12,6 +12,7 @@ const RESTORABLE_SETTINGS = {
   claudeResumeReview: "Claude resume review",
   chatWidth: "Chat width",
   openChatTabs: "Open chat tabs",
+  deviceAutoShowFloating: "Float devices agents open",
   gitStatusPollIntervalMs: "Remote Git status",
   sourceControlRefreshMode: "PR & workflow updates",
   responseStreamingMode: "Response streaming",

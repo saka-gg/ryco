@@ -3,9 +3,11 @@
  *
  * State the manager owns, and why it owns it rather than the backend:
  *
- * - Attachment is per thread (one device per thread, mirroring
- *   `ThreadBrowserState`). A thread's `ThreadDeviceState` is versioned and
- *   pushed on `device.event` so panes can drop stale snapshots.
+ * - Attachment is per thread. A thread may attach several devices, one per
+ *   device tab, up to `DEVICE_THREAD_ATTACHMENT_LIMIT`; the most recent one is
+ *   what an agent or Agent Control means by "the attached device". A thread's
+ *   `ThreadDeviceState` is versioned and pushed on `device.event` so panes can
+ *   drop stale snapshots.
  * - Boot source. The backend cannot tell who booted a device, so the manager
  *   records the devices it booted itself. Only those are ever auto-shut-down;
  *   anything the user started (pane picker, Simulator.app) outlives us.
@@ -29,6 +31,7 @@
 import { NULL_BOOT_OWNERSHIP, processIsAlive, type BootOwnershipStore } from "./bootOwnership.ts";
 import {
   DEVICE_RYCO_BOOT_LIMIT,
+  DEVICE_THREAD_ATTACHMENT_LIMIT,
   ThreadId,
   type DeviceAttachPhase,
   type DeviceAvailability,
@@ -48,6 +51,7 @@ import {
   type DeviceStopRecordingResult,
   type DeviceUiNode,
   type DeviceUiPoint,
+  type ThreadDeviceAttachment,
   type ThreadDeviceState,
 } from "@ryco/contracts";
 
@@ -158,29 +162,44 @@ export interface DeviceManagerOptions {
   readonly now?: () => number;
 }
 
-interface ThreadAttachment {
-  version: number;
-  attachedDeviceUdid: string | null;
+/** One device a thread has attached. */
+interface DeviceAttachmentEntry {
   /** Set by every attach. Agent attachments are metadata: they never keep a device booted. */
-  attachmentSource: DeviceAttachmentSource;
-  /** Devices this thread's agent used, per provider turn, held until that turn stops being active. */
-  readonly agentDevicesByTurn: Map<string, Set<string>>;
-  agentActiveCount: number;
-  lastError: string | null;
+  source: DeviceAttachmentSource;
   /** Non-null while the attachment is still coming up. */
   attachPhase: DeviceAttachPhase | null;
+  lastError: string | null;
   /**
    * Identifies the attach attempt currently in flight. A retry loop that finds
-   * a different token has been superseded — the user picked another device, or
-   * detached — and stops without touching the newer attempt's state.
+   * a different token (or no entry) has been superseded — the device was
+   * attached again, detached, or shut down — and stops without touching the
+   * newer attempt's state. Unique across the manager, so an entry removed and
+   * added again never reuses one.
    */
   attachToken: number;
+}
+
+interface ThreadAttachment {
+  version: number;
   /**
-   * Device this thread has already asked the pane to open for. An agent driving
+   * Attached devices, oldest first: insertion order is attachment order, and
+   * attaching a device again moves it to the end. The last is the thread's
+   * most recent attachment.
+   */
+  readonly devices: Map<string, DeviceAttachmentEntry>;
+  /** Devices this thread's agent used, per provider turn, held until that turn stops being active. */
+  readonly agentDevicesByTurn: Map<string, Set<string>>;
+  /** Devices an agent action of this thread is driving right now, with a count per device. */
+  readonly agentDevicesInUse: Map<string, number>;
+  agentActiveCount: number;
+  /** A failure that belongs to the thread rather than to one attachment. */
+  lastError: string | null;
+  /**
+   * Devices this thread has already asked the pane to open for. An agent driving
    * a device calls a tool every few seconds, so the second and later requests
    * would be pure noise; this is what makes them a no-op.
    */
-  paneSurfacedUdid: string | null;
+  readonly paneSurfaced: Set<string>;
 }
 
 export class DeviceManager {
@@ -232,6 +251,9 @@ export class DeviceManager {
   private readonly bootRevisions = new Map<string, number>();
   private nextBootRevision = 0;
   private readonly boots = new Map<string, Promise<DeviceBootResult>>();
+  /** Threads a boot in flight was started for, so their panes can say it is starting. */
+  private readonly bootThreads = new Map<string, Set<string>>();
+  private nextAttachToken = 0;
   private readonly unsubscribeDisconnect: (() => void) | undefined;
   private readonly recording = new Set<string>();
   private readonly listeners = new Set<DeviceEventListener>();
@@ -269,11 +291,9 @@ export class DeviceManager {
         this.clearIdleTimer(udid);
       }
       for (const [threadId, attachment] of this.threads) {
-        if (!attachment.attachedDeviceUdid || !udids.includes(attachment.attachedDeviceUdid))
-          continue;
-        attachment.attachedDeviceUdid = null;
-        attachment.attachToken += 1;
-        attachment.attachPhase = null;
+        let lost = false;
+        for (const udid of udids) lost = attachment.devices.delete(udid) || lost;
+        if (!lost) continue;
         attachment.lastError =
           "Device host disconnected. Refresh devices and select the device again.";
         void this.publish(threadId).catch(() => undefined);
@@ -474,8 +494,13 @@ export class DeviceManager {
   /** Exact thread attachments for cross-thread Agent Control isolation checks. */
   attachedThreadIds(udid: string): readonly string[] {
     return [...this.threads.entries()]
-      .filter(([, attachment]) => attachment.attachedDeviceUdid === udid)
+      .filter(([, attachment]) => attachment.devices.has(udid))
       .map(([threadId]) => threadId);
+  }
+
+  /** Whether a thread has this device attached, among however many it has. */
+  isAttached(threadId: string, udid: string): boolean {
+    return this.threads.get(threadId)?.devices.has(udid) ?? false;
   }
 
   /**
@@ -552,15 +577,57 @@ export class DeviceManager {
     return this.recoveryShutdowns.get(udid);
   }
 
-  boot(udid: string): Promise<DeviceBootResult> {
+  /**
+   * Boot a device, or join the boot already in flight. `threadId` names the
+   * thread the boot is for, so that thread's panes say the device is starting;
+   * a boot an agent of the thread drives, or one for a device the thread has
+   * attached, shows there without it.
+   */
+  boot(udid: string, options: { readonly threadId?: string } = {}): Promise<DeviceBootResult> {
     if (this.disposed) return Promise.reject(new DeviceBackendError("Device manager disposed"));
+    if (options.threadId !== undefined) {
+      const threads = this.bootThreads.get(udid) ?? new Set<string>();
+      threads.add(options.threadId);
+      this.bootThreads.set(udid, threads);
+    }
     const existing = this.boots.get(udid);
-    if (existing) return existing;
+    if (existing) {
+      if (options.threadId !== undefined) void this.publish(options.threadId).catch(() => {});
+      return existing;
+    }
     const boot = this.bootDevice(udid).finally(() => {
       this.boots.delete(udid);
+      // The boot is over either way: every pane that said it was starting stops saying so.
+      const threads = this.threadsStarting(udid);
+      this.bootThreads.delete(udid);
+      if (!this.disposed) {
+        for (const threadId of threads) void this.publish(threadId).catch(() => undefined);
+      }
     });
     this.boots.set(udid, boot);
+    if (!this.disposed) {
+      for (const threadId of this.threadsStarting(udid)) {
+        void this.publish(threadId).catch(() => undefined);
+      }
+    }
     return boot;
+  }
+
+  /** Threads whose panes show a boot of this device as theirs. */
+  private threadsStarting(udid: string): ReadonlySet<string> {
+    const threads = new Set(this.bootThreads.get(udid));
+    for (const [threadId, attachment] of this.threads) {
+      if (this.threadRelatesToDevice(attachment, udid)) threads.add(threadId);
+    }
+    return threads;
+  }
+
+  private threadRelatesToDevice(attachment: ThreadAttachment, udid: string): boolean {
+    if (attachment.devices.has(udid) || attachment.agentDevicesInUse.has(udid)) return true;
+    for (const devices of attachment.agentDevicesByTurn.values()) {
+      if (devices.has(udid)) return true;
+    }
+    return false;
   }
 
   private async bootDevice(udid: string): Promise<DeviceBootResult> {
@@ -665,7 +732,12 @@ export class DeviceManager {
     // A thread that attaches while simctl shuts the device down keeps its
     // attachment: its `attach` waits for this shutdown and boots the device again.
     const attachTokens = onlyIfIdle
-      ? new Map(Array.from(this.threads, ([threadId, entry]) => [threadId, entry.attachToken]))
+      ? new Map(
+          Array.from(this.threads, ([threadId, entry]) => [
+            threadId,
+            entry.devices.get(udid)?.attachToken,
+          ]),
+        )
       : null;
     await this.backend.shutdown(udid);
     this.rycoBooted.delete(udid);
@@ -675,16 +747,16 @@ export class DeviceManager {
     // Any thread watching this device loses its attachment rather than pointing
     // at a shut-down simulator.
     for (const [threadId, attachment] of this.threads) {
-      if (attachment.attachedDeviceUdid !== udid) continue;
-      if (attachTokens !== null && attachTokens.get(threadId) !== attachment.attachToken) continue;
-      attachment.attachedDeviceUdid = null;
-      attachment.attachPhase = null;
+      const entry = attachment.devices.get(udid);
+      if (!entry) continue;
+      if (attachTokens !== null && attachTokens.get(threadId) !== entry.attachToken) continue;
+      // Removing the entry also stops a retry loop still waiting on this
+      // device's display: it is not coming, and the loop would otherwise time
+      // out into a misleading error.
+      attachment.devices.delete(udid);
       // The pane no longer shows this device, so the agent's next use of it,
       // once it is booted again, must attach and surface it again.
-      if (attachment.paneSurfacedUdid === udid) attachment.paneSurfacedUdid = null;
-      // Stops a retry loop still waiting on this device's display: it is not
-      // coming, and the loop would otherwise time out into a misleading error.
-      attachment.attachToken += 1;
+      attachment.paneSurfaced.delete(udid);
       await this.publish(threadId);
     }
     await this.publishAllThreads();
@@ -696,6 +768,10 @@ export class DeviceManager {
   /**
    * Point a thread at a device and bring its stream up.
    *
+   * A thread may attach several devices, one per device tab: attaching another
+   * leaves the ones already attached alone, and attaching one again makes it
+   * the most recent. Past `DEVICE_THREAD_ATTACHMENT_LIMIT` the attach refuses.
+   *
    * Resolves as soon as the attachment is recorded, not when the picture
    * arrives: a cold boot publishes its display seconds after reporting itself
    * booted, and holding the RPC open for that left the picker on "Choose a
@@ -704,7 +780,8 @@ export class DeviceManager {
    * it was told to show from the first frame of the interaction.
    *
    * `source` says who chose the device. A person's attachment keeps a
-   * Ryco-owned device up; an agent's is metadata and lets it idle out.
+   * Ryco-owned device up; an agent's is metadata and lets it idle out. An
+   * agent's new attachment also asks the thread's clients to show the device.
    */
   async attach(
     threadId: string,
@@ -713,45 +790,52 @@ export class DeviceManager {
   ): Promise<ThreadDeviceState> {
     this.assertNotDisposed();
     if (source === "user") this.removedThreads.delete(threadId);
+    const existing = this.threads.get(threadId)?.devices;
+    if (existing && !existing.has(udid) && existing.size >= DEVICE_THREAD_ATTACHMENT_LIMIT) {
+      throw new DeviceBackendError(
+        `This chat already has ${DEVICE_THREAD_ATTACHMENT_LIMIT} devices open. Close one first.`,
+      );
+    }
     const recoveryShutdown = this.claimRecoveredDevice(udid);
     if (recoveryShutdown) {
       await recoveryShutdown.catch(() => undefined);
-      const result = await this.boot(udid);
+      const result = await this.boot(udid, { threadId });
       if (result.kind !== "booted") throw new DeviceBackendError("Device boot limit reached");
       this.assertNotDisposed();
     }
     const attachment = this.threadState(threadId);
-    const previous = attachment.attachedDeviceUdid;
-    // Cleared before releasing: `releaseDevice` asks whether anyone still holds
-    // the device, and this thread must no longer count as a holder.
-    attachment.attachedDeviceUdid = udid;
-    // Never a downgrade: an agent attaching the device a person already picked
-    // (an approved Agent Control attach, say) leaves it theirs.
-    attachment.attachmentSource =
-      previous === udid && attachment.attachmentSource === "user" ? "user" : source;
+    const previous = attachment.devices.get(udid);
+    const entry: DeviceAttachmentEntry = {
+      // Never a downgrade: an agent attaching the device a person already
+      // picked (an approved Agent Control attach, say) leaves it theirs.
+      source: previous?.source === "user" ? "user" : source,
+      attachPhase: "connecting",
+      lastError: null,
+      attachToken: ++this.nextAttachToken,
+    };
+    // Re-inserted so the device becomes the thread's most recent attachment.
+    attachment.devices.delete(udid);
+    attachment.devices.set(udid, entry);
     attachment.lastError = null;
-    attachment.attachPhase = "connecting";
-    const token = (attachment.attachToken += 1);
+    const token = entry.attachToken;
     this.clearIdleTimer(udid);
+    if (source === "agent" && previous === undefined && !attachment.paneSurfaced.has(udid)) {
+      this.requestOpenPane(threadId, udid, "agent-tool");
+    }
     try {
       // Counted as an in-flight call until an idle shutdown already handed to
       // the backend is waited out, so even an agent attachment, which holds
       // nothing by itself, aborts that shutdown or gets the device booted again.
       this.beginDeviceAction(udid);
       try {
-        if (previous !== null && previous !== udid) await this.releaseDevice(previous, "switched");
         await this.waitForIdleShutdown(udid);
       } catch (error) {
         // The device could not be brought back (the boot cap, say): the thread
         // must not keep pointing at a shut-down simulator.
-        if (
-          !this.disposed &&
-          attachment.attachToken === token &&
-          this.threads.get(threadId) === attachment
-        ) {
-          attachment.attachedDeviceUdid = null;
-          attachment.attachPhase = null;
-          attachment.attachToken += 1;
+        if (!this.disposed && this.currentAttachment(threadId, udid, token)) {
+          attachment.devices.delete(udid);
+          // Not shown after all: the agent's next use of it may surface it again.
+          if (previous === undefined) attachment.paneSurfaced.delete(udid);
           attachment.lastError = errorMessage(error);
           await this.publish(threadId).catch(() => undefined);
         }
@@ -761,12 +845,12 @@ export class DeviceManager {
       }
       this.assertNotDisposed();
       // Superseded while waiting: the newer attach or detach owns the state.
-      if (attachment.attachToken !== token) return await this.snapshot(threadId);
+      if (!this.currentAttachment(threadId, udid, token)) return await this.snapshot(threadId);
 
-      // Already streaming (another thread is watching the same device): there is
-      // nothing to wait for, so the phase clears without a round trip.
+      // Already streaming (another thread or tab is watching the same device):
+      // there is nothing to wait for, so the phase clears without a round trip.
       if (this.streams.get(udid)?.active) {
-        attachment.attachPhase = null;
+        entry.attachPhase = null;
         return await this.publish(threadId);
       }
 
@@ -777,6 +861,16 @@ export class DeviceManager {
       // A person's attachment cancels the grace; an agent's may start it.
       this.updateIdleTimer(udid);
     }
+  }
+
+  /** The thread's attachment of this device, if it is still the attempt `token` started. */
+  private currentAttachment(
+    threadId: string,
+    udid: string,
+    token: number,
+  ): DeviceAttachmentEntry | undefined {
+    const entry = this.threads.get(threadId)?.devices.get(udid);
+    return entry?.attachToken === token ? entry : undefined;
   }
 
   /**
@@ -793,23 +887,24 @@ export class DeviceManager {
     let sawTransientFailure = false;
 
     while (!this.disposed) {
-      const attachment = this.threads.get(threadId);
-      // Superseded or gone: another attach owns this thread's state now.
-      if (!attachment || attachment.attachToken !== token) return;
+      // Superseded or gone: another attach owns this attachment's state now.
+      if (!this.currentAttachment(threadId, udid, token)) return;
 
       try {
         const started = await this.startStream(udid);
-        if (!started || attachment.attachToken !== token || this.disposed) return;
-        if (attachment.attachPhase === null && attachment.lastError === null) return;
-        attachment.attachPhase = null;
-        attachment.lastError = null;
+        const entry = this.currentAttachment(threadId, udid, token);
+        if (!started || !entry || this.disposed) return;
+        if (entry.attachPhase === null && entry.lastError === null) return;
+        entry.attachPhase = null;
+        entry.lastError = null;
         await this.publish(threadId);
         return;
       } catch (error) {
-        if (attachment.attachToken !== token || this.disposed) return;
+        const entry = this.currentAttachment(threadId, udid, token);
+        if (!entry || this.disposed) return;
         if (!isTransientAttachFailure(error)) {
-          attachment.attachPhase = null;
-          attachment.lastError = errorMessage(error);
+          entry.attachPhase = null;
+          entry.lastError = errorMessage(error);
           await this.publish(threadId);
           return;
         }
@@ -818,8 +913,8 @@ export class DeviceManager {
         const phase: DeviceAttachPhase = /is not booted/iu.test(errorMessage(error))
           ? "booting"
           : "waiting-for-display";
-        if (attachment.attachPhase !== phase) {
-          attachment.attachPhase = phase;
+        if (entry.attachPhase !== phase) {
+          entry.attachPhase = phase;
           await this.publish(threadId);
         }
         sawTransientFailure = true;
@@ -829,28 +924,25 @@ export class DeviceManager {
       await this.delay(this.attachRetryMs);
     }
 
-    const attachment = this.threads.get(threadId);
-    if (!attachment || attachment.attachToken !== token) return;
-    attachment.attachPhase = null;
+    const entry = this.currentAttachment(threadId, udid, token);
+    if (!entry) return;
+    entry.attachPhase = null;
     // Only the display-wait deadline gets the tailored message; a disposal or a
     // shutdown mid-wait is not the user's problem to act on.
-    if (sawTransientFailure && !this.disposed) attachment.lastError = DISPLAY_TIMEOUT_MESSAGE;
+    if (sawTransientFailure && !this.disposed) entry.lastError = DISPLAY_TIMEOUT_MESSAGE;
     await this.publish(threadId);
   }
 
   /**
-   * Point a thread at the device its agent is driving, unless the user already
-   * pointed it somewhere else.
+   * Attach the device an agent is driving to its thread, unless it already is.
    *
    * Auto-opening the pane is only useful if there is something to watch: before
    * this, an agent's launch opened a pane still asking the user to pick a
    * simulator, so they stared at a black phone while the agent worked. The
-   * attachment is what makes `ThreadDeviceState.attachedDeviceUdid` non-null,
-   * and the pane's existing logic starts the stream from there.
+   * attachment is what gives the thread's clients a device to stream.
    *
-   * Never steals: a thread already attached to a different device keeps it,
-   * because that attachment reflects a deliberate choice by the user and the
-   * agent's device is still reachable through the picker. Idempotent, so
+   * Never steals: the thread's other attachments, the user's included, stay
+   * as they are, and the agent's device opens beside them. Idempotent, so
    * repeated launches on the same device cost nothing.
    *
    * The attachment is the agent's, so it never keeps the device booted: the
@@ -859,33 +951,37 @@ export class DeviceManager {
    */
   async ensureThreadAttached(threadId: string, udid: string): Promise<void> {
     if (this.removedThreads.has(threadId)) return;
-    const attached = this.threadState(threadId).attachedDeviceUdid;
-    if (attached === udid) return;
-    if (attached !== null) return;
+    if (this.threadState(threadId).devices.has(udid)) return;
     await this.attach(threadId, udid, "agent");
   }
 
-  async detach(threadId: string): Promise<ThreadDeviceState> {
-    return await this.detachThread(threadId, "detached");
+  /** Detach one device from the thread, or every device it has attached. */
+  async detach(threadId: string, udid?: string): Promise<ThreadDeviceState> {
+    return await this.detachThread(threadId, "detached", udid);
   }
 
   private async detachThread(
     threadId: string,
     reason: "detached" | "removed",
+    only?: string,
   ): Promise<ThreadDeviceState> {
     const attachment = this.threadState(threadId);
-    const udid = attachment.attachedDeviceUdid;
-    attachment.attachedDeviceUdid = null;
-    attachment.attachPhase = null;
-    // Abandons any attach still retrying in the background, so it cannot
-    // resurrect a phase or an error on a thread that is no longer watching.
-    attachment.attachToken += 1;
-    if (udid !== null) await this.releaseDevice(udid, reason);
+    // Removing the entries also abandons any attach still retrying in the
+    // background, so it cannot resurrect a phase or an error on a thread that
+    // is no longer watching.
+    const released =
+      only === undefined
+        ? [...attachment.devices.keys()]
+        : attachment.devices.has(only)
+          ? [only]
+          : [];
+    for (const udid of released) attachment.devices.delete(udid);
+    for (const udid of released) await this.releaseDevice(udid, reason);
     return await this.publish(threadId);
   }
 
   /**
-   * Thread archive, trash or deletion is terminal for its attachment and its
+   * Thread archive, trash or deletion is terminal for its attachments and its
    * agent's holds; treat it as a detach and let the grace decide the rest.
    * Unlike a detach, it leaves a recording running while a person on another
    * thread still watches the device (see `releaseDevice`).
@@ -1326,6 +1422,7 @@ export class DeviceManager {
       this.clearIdleTimer(udid);
       this.beginDeviceAction(udid);
       held = this.recordAgentUse(threadId, udid);
+      attachment.agentDevicesInUse.set(udid, (attachment.agentDevicesInUse.get(udid) ?? 0) + 1);
     }
     // Captured before any wait: overlapping calls may already be counted.
     const becameActive = attachment.agentActiveCount === 0;
@@ -1341,6 +1438,9 @@ export class DeviceManager {
     } finally {
       attachment.agentActiveCount = Math.max(0, attachment.agentActiveCount - 1);
       if (udid !== undefined) {
+        const inUse = (attachment.agentDevicesInUse.get(udid) ?? 1) - 1;
+        if (inUse > 0) attachment.agentDevicesInUse.set(udid, inUse);
+        else attachment.agentDevicesInUse.delete(udid);
         this.endDeviceAction(udid);
         // A call admitted just before the projection reported its turn joins it.
         if (!held && (deviceUse?.joinLateTurn ?? true)) this.recordAgentUse(threadId, udid);
@@ -1414,9 +1514,9 @@ export class DeviceManager {
     return true;
   }
 
-  /** Auto-open the pane when an agent puts an app on a device. */
+  /** Ask the thread's clients to show a device an agent opened or put an app on. */
   requestOpenPane(threadId: string, udid: string, reason: DeviceOpenPaneReason): void {
-    this.threadState(threadId).paneSurfacedUdid = udid;
+    this.threadState(threadId).paneSurfaced.add(udid);
     const event: DeviceEvent = {
       type: "device.open-pane-requested",
       threadId: ThreadId.make(threadId),
@@ -1457,9 +1557,12 @@ export class DeviceManager {
   ): Promise<void> {
     // Agent work that outlived its thread's archive, trash or deletion surfaces nothing.
     if (this.removedThreads.has(threadId)) return;
-    if (this.threadState(threadId).paneSurfacedUdid === udid) return;
+    const attachment = this.threadState(threadId);
+    if (attachment.paneSurfaced.has(udid)) return;
+    // A new agent attachment surfaces itself; one already there (the user's,
+    // say) is surfaced here.
     await this.ensureThreadAttached(threadId, udid).catch(() => undefined);
-    this.requestOpenPane(threadId, udid, reason);
+    if (!attachment.paneSurfaced.has(udid)) this.requestOpenPane(threadId, udid, reason);
   }
 
   /**
@@ -1473,7 +1576,7 @@ export class DeviceManager {
     reason: DeviceOpenPaneReason,
   ): void {
     const attachment = this.threadState(threadId);
-    if (attachment.attachedDeviceUdid !== udid || attachment.paneSurfacedUdid === udid) return;
+    if (!attachment.devices.has(udid) || attachment.paneSurfaced.has(udid)) return;
     this.requestOpenPane(threadId, udid, reason);
   }
 
@@ -1539,14 +1642,12 @@ export class DeviceManager {
     if (!attachment) {
       attachment = {
         version: 0,
-        attachedDeviceUdid: null,
-        attachmentSource: "user",
+        devices: new Map(),
         agentDevicesByTurn: new Map(),
+        agentDevicesInUse: new Map(),
         agentActiveCount: 0,
         lastError: null,
-        attachPhase: null,
-        attachToken: 0,
-        paneSurfacedUdid: null,
+        paneSurfaced: new Set(),
       };
       this.threads.set(threadId, attachment);
     }
@@ -1582,7 +1683,7 @@ export class DeviceManager {
 
   private isAttachedAnywhere(udid: string): boolean {
     for (const [, attachment] of this.threads) {
-      if (attachment.attachedDeviceUdid === udid) return true;
+      if (attachment.devices.has(udid)) return true;
     }
     return false;
   }
@@ -1590,9 +1691,7 @@ export class DeviceManager {
   /** Whether a thread still has this device attached because a person chose it. */
   private isAttachedByPerson(udid: string): boolean {
     for (const [, attachment] of this.threads) {
-      if (attachment.attachedDeviceUdid === udid && attachment.attachmentSource === "user") {
-        return true;
-      }
+      if (attachment.devices.get(udid)?.source === "user") return true;
     }
     return false;
   }
@@ -1609,14 +1708,10 @@ export class DeviceManager {
   private async clearStreamStartupState(udid: string): Promise<void> {
     const cleared: string[] = [];
     for (const [threadId, attachment] of this.threads) {
-      if (
-        attachment.attachedDeviceUdid !== udid ||
-        (attachment.lastError === null && attachment.attachPhase === null)
-      ) {
-        continue;
-      }
-      attachment.lastError = null;
-      attachment.attachPhase = null;
+      const entry = attachment.devices.get(udid);
+      if (!entry || (entry.lastError === null && entry.attachPhase === null)) continue;
+      entry.lastError = null;
+      entry.attachPhase = null;
       cleared.push(threadId);
     }
     for (const threadId of cleared) await this.publish(threadId);
@@ -1715,53 +1810,29 @@ export class DeviceManager {
 
   /**
    * A thread stopped pointing at this device. Stop the stream if nobody else
-   * needs it, and either shut the device down or let the idle grace decide if
-   * Ryco booted it.
+   * needs it, and let the idle grace decide whether a Ryco-owned device shuts
+   * down: closing a device's tab leaves the device running for a while, since
+   * coming back to a device you just closed is common and booting it again
+   * costs a minute. User-booted devices are never touched.
    *
-   * A switch shuts down immediately rather than waiting out the idle window.
-   * The cap is three Ryco-booted devices, and each one costs a couple of GB
-   * of RAM, so trying three simulators in a row filled every slot with devices
-   * nobody was looking at and made the fourth pick prompt for a shutdown the
-   * user had effectively already asked for. A plain detach still uses the idle
-   * timer, because coming back to a device you just closed is common and
-   * re-booting it costs a minute.
-   *
-   * User-booted devices are never touched by either path.
-   *
-   * A detach or a switch stops the device's recording: who started it is not
-   * tracked, and the leaving pane may be the only one that knows about it.
-   * Removing a thread (archive, trash, delete) is not a device action, so it
-   * leaves the recording running while a person on another thread still
-   * watches the device; that person's own detach stops it later. With only
-   * agent attachments left it stops, or it would keep the device up for good.
+   * A detach stops the device's recording: who started it is not tracked, and
+   * the leaving pane may be the only one that knows about it. Removing a thread
+   * (archive, trash, delete) is not a device action, so it leaves the
+   * recording running while a person on another thread still watches the
+   * device; that person's own detach stops it later. With only agent
+   * attachments left it stops, or it would keep the device up for good.
    */
   private async releaseDevice(
     udid: string,
-    reason: "detached" | "switched" | "removed" = "detached",
+    reason: "detached" | "removed" = "detached",
   ): Promise<void> {
     if (reason !== "removed" || !this.isAttachedByPerson(udid)) {
       await this.stopRecordingIfActive(udid).catch(() => undefined);
     }
-    const attachedElsewhere = this.isAttachedAnywhere(udid);
-    if (!attachedElsewhere && this.transport.deviceSubscriberCount(udid) === 0) {
+    if (!this.isAttachedAnywhere(udid) && this.transport.deviceSubscriberCount(udid) === 0) {
       await this.stopStream(udid).catch(() => undefined);
     }
     if (!this.rycoBooted.has(udid)) return;
-    // Viewers are ignored here: the switching pane closes the old device's
-    // frame socket only after this attach resolves, so counting it would turn
-    // every switch into a ten-minute grace and refill the cap, the failure
-    // described above. Every other consumer still blocks the switch shutdown.
-    if (
-      reason === "switched" &&
-      !attachedElsewhere &&
-      !this.isDeviceBusy(udid, { countViewers: false })
-    ) {
-      this.clearIdleTimer(udid);
-      // Failure here is not the switch's problem: the new device is already
-      // attached, and the idle sweep at quit still cleans this one up.
-      await this.shutdown(udid).catch(() => undefined);
-      return;
-    }
     this.updateIdleTimer(udid);
   }
 
@@ -1786,20 +1857,17 @@ export class DeviceManager {
   /**
    * Whether anything still needs this device up. Agent attachments are
    * metadata: they do not keep a simulator alive after work ends; the agent's
-   * hold for its running turn does that. `countViewers: false` is only for the
-   * device-switch path (see `releaseDevice`).
+   * hold for its running turn does that.
    */
-  private isDeviceBusy(udid: string, options: { readonly countViewers?: boolean } = {}): boolean {
+  private isDeviceBusy(udid: string): boolean {
     if (this.boots.has(udid) || this.recording.has(udid) || this.activeDeviceActions.has(udid)) {
       return true;
     }
-    if ((options.countViewers ?? true) && this.transport.deviceSubscriberCount(udid) > 0) {
+    if (this.transport.deviceSubscriberCount(udid) > 0) {
       return true;
     }
     for (const attachment of this.threads.values()) {
-      if (attachment.attachedDeviceUdid === udid && attachment.attachmentSource === "user") {
-        return true;
-      }
+      if (attachment.devices.get(udid)?.source === "user") return true;
       for (const devices of attachment.agentDevicesByTurn.values()) {
         if (devices.has(udid)) return true;
       }
@@ -1930,16 +1998,32 @@ export class DeviceManager {
     const attachment = this.threadState(threadId);
     const availability = await this.backend.availability();
     const devices = await this.discover(availability, { includeShutdown: true });
+    const attachments = Array.from(attachment.devices, ([udid, entry]): ThreadDeviceAttachment => ({
+      udid: udid as ThreadDeviceAttachment["udid"],
+      source: entry.source,
+      attachPhase: entry.attachPhase,
+      lastError: entry.lastError,
+    }));
+    const latest = attachments.at(-1) ?? null;
+    const starting = [...this.boots.keys()].filter(
+      (udid) =>
+        this.bootThreads.get(udid)?.has(threadId) === true ||
+        this.threadRelatesToDevice(attachment, udid),
+    );
     return {
       ...(this.backend.hostSummaries ? { hosts: this.backend.hostSummaries() } : {}),
       threadId: threadId as ThreadDeviceState["threadId"],
       version: attachment.version,
-      attachedDeviceUdid: attachment.attachedDeviceUdid as ThreadDeviceState["attachedDeviceUdid"],
+      attachedDeviceUdid: latest?.udid ?? null,
+      attachments,
+      ...(starting.length > 0
+        ? { startingDeviceUdids: starting as ThreadDeviceAttachment["udid"][] }
+        : {}),
       devices,
       agentActive: attachment.agentActiveCount > 0,
       availability,
-      lastError: attachment.lastError,
-      attachPhase: attachment.attachPhase,
+      lastError: latest?.lastError ?? attachment.lastError,
+      attachPhase: latest?.attachPhase ?? null,
     };
   }
 

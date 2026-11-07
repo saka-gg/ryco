@@ -403,6 +403,7 @@ import {
   LazyPullRequestThreadDialog,
   LazySideChatPanel,
 } from "./chat/chatViewLazySurfaces";
+import { WorkspaceMiniPlayerHost } from "../deviceWorkspace/WorkspaceMiniPlayerHost";
 import { notifySurfaceLoadFailure } from "./ui/surfaceLoadFailure";
 import { LazyLinkedWorktreeItemDialog } from "./worktrees/lazyWorktreeDialogs";
 import { usePostPushWorkflowWatch } from "./chat/usePostPushWorkflowWatch";
@@ -7495,6 +7496,16 @@ export default function ChatView(props: ChatViewProps) {
       <div className="flex min-h-0 min-w-0 flex-1">
         {/* Chat column */}
         <div ref={chatColumnRef} className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+          {/* A device (or other workspace content) floating over the chat. */}
+          {presentationTier !== "phone" ? (
+            <WorkspaceMiniPlayerHost
+              environmentId={activeThread.environmentId}
+              threadId={activeThread.id}
+              containerRef={chatColumnRef}
+              composerRef={composerOverlayRef}
+              onOpenDevicePanel={onOpenSimulatorPanel}
+            />
+          ) : null}
           {/* Messages Wrapper. Stays `flex-1` even while empty so the absolutely
               positioned children below (search bar, scroll pill) keep a
               full-height containing block. */}

@@ -9,6 +9,7 @@ import {
   type ThreadDeviceState,
 } from "@ryco/contracts";
 import { useDeviceStateStore } from "@ryco/client-runtime/state/device";
+import { useDeviceTabsStore } from "../../deviceWorkspace/deviceTabsStore";
 import SimulatorPanel from "./SimulatorPanel";
 
 const mocks = vi.hoisted(() => ({
@@ -106,6 +107,7 @@ const snapshot: ThreadDeviceState = {
 };
 
 beforeEach(() => {
+  useDeviceTabsStore.setState({ byThreadKey: {} });
   mocks.hosted = false;
   mocks.previewStatus = "streaming";
   mocks.noteInteraction.mockReset();
@@ -298,10 +300,10 @@ describe("SimulatorPanel hosted preview pause", () => {
     const screen = await mountSized();
     await expect.element(screen.getByLabelText("iPhone screen")).toBeVisible();
     expect(mocks.noteInteraction).not.toHaveBeenCalled();
-    await screen.getByRole("button", { name: "Refresh simulators", exact: true }).click();
+    await screen.getByRole("button", { name: "Screenshot", exact: true }).click();
     expect(mocks.noteInteraction).toHaveBeenCalledTimes(1);
     document
-      .querySelector("select")!
+      .querySelector('[aria-label="Screenshot"]')!
       .dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
     expect(mocks.noteInteraction).toHaveBeenCalledTimes(2);
   });

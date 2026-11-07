@@ -1758,12 +1758,8 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
     Effect.gen(function* () {
       const input = yield* decodeArgs(AgentControlMcpReadDeviceContentInput, args);
       const { service } = yield* deviceContext(session);
-      const state = yield* devicePromise(
-        () => service.manager.getThreadState(session.threadId),
-        "Device content read failed.",
-      );
-      if (state.attachedDeviceUdid !== input.udid) {
-        return yield* failTool("Device content is limited to this thread's current attachment.");
+      if (!service.manager.isAttached(session.threadId, input.udid)) {
+        return yield* failTool("Device content is limited to this thread's attached devices.");
       }
       return { service, udid: input.udid };
     });

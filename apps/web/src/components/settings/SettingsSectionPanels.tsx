@@ -31,6 +31,7 @@ import { DesktopConversationCacheRow } from "./DesktopConversationCacheRow";
 import { DesktopKeepAwakeRow } from "./DesktopKeepAwakeRow";
 import { DeviceIdentitySettings } from "./DeviceIdentitySettings";
 import { OpenChatTabsSetting } from "./OpenChatTabsSetting";
+import { DeviceAutoShowFloatingSetting } from "./DeviceAutoShowFloatingSetting";
 import { ProjectDefaultsSection } from "./ProjectDefaultsSection";
 import { QuitShortcutSetting } from "./QuitShortcutSetting";
 import { ResponseStreamingSettings } from "./ResponseStreamingSettings";
@@ -420,6 +421,9 @@ function SectionBody({
           <AppPart>
             <SettingsSection title="Tabs">
               <OpenChatTabsSetting />
+            </SettingsSection>
+            <SettingsSection title="Devices">
+              <DeviceAutoShowFloatingSetting />
             </SettingsSection>
             <WindowCaptureSettings scope={appLabel} />
           </AppPart>

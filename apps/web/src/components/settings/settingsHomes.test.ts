@@ -30,6 +30,7 @@ const CLIENT_SETTING_HOMES = {
   claudeResumeReview: "chat",
   chatWidth: "appearance",
   openChatTabs: "chat",
+  deviceAutoShowFloating: "chat",
   // The model picker and the sidebar's own menus keep these.
   favorites: null,
   providerModelPreferences: null,

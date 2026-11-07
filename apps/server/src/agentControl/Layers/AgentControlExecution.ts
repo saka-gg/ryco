@@ -888,7 +888,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                 const result = await service.manager.holdForAgentTurn(
                   plan.threadId,
                   plan.udid,
-                  () => service.manager.boot(plan.udid),
+                  () => service.manager.boot(plan.udid, { threadId: plan.threadId }),
                 );
                 if (result.kind === "boot-limit-reached") {
                   throw new AgentControlDeviceExecutionError(
@@ -904,10 +904,15 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                 await service.manager.holdForAgentTurn(plan.threadId, plan.udid, () =>
                   service.manager.attach(plan.threadId, plan.udid, "agent"),
                 );
-                service.manager.requestOpenPane(plan.threadId, plan.udid, "agent-tool");
+                // A new attachment surfaces itself; this covers one already there.
+                service.manager.surfaceAttachedDeviceForAgent(
+                  plan.threadId,
+                  plan.udid,
+                  "agent-tool",
+                );
                 return;
               case "deviceDetach":
-                await service.manager.detach(plan.threadId);
+                await service.manager.detach(plan.threadId, plan.udid);
                 return;
               case "deviceInstall": {
                 const projects = await Effect.runPromise(readProjectShells(projections));

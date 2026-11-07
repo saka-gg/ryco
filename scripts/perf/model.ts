@@ -457,8 +457,14 @@ const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
  * 766 KiB on 2026-11-06: Computer Use in every chat and MCP approval requests
  * in Codex chats (link questions with an Open link button) brought the route
  * to 765.1 KiB.
+ * 768 KiB on 2026-11-06 (765 before; route 763.2 → 766.9 KiB): device tabs in
+ * the workspace strip, the per-thread device tab and floating window stores,
+ * and the agent auto-show (+2.1 KiB; the device panel, picker, viewer and
+ * floating window all load lazily from one chunk), and the shared lucide
+ * groups regrouped once more (+1.6 KiB of icons the route does not use).
  * 769 KiB on 2026-11-07 with device tool rows on top (2.1 KiB of labels and argument
  * reading, plus the phone icon regrouping the shared lucide chunks).
+ * 771 KiB on 2026-11-06 once both landed together (the two raises add up).
  * 772 KiB on 2026-11-07 for the simulator program's merge train: Computer Use,
  * device tool rows, device tabs and the 3D toggle together measured 771.1 KiB.
  */

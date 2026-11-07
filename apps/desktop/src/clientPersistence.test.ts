@@ -63,6 +63,7 @@ const clientSettings: ClientSettings = {
   claudeResumeReview: false,
   chatWidth: "comfortable",
   openChatTabs: true,
+  deviceAutoShowFloating: true,
   favorites: [],
   providerModelPreferences: {},
   sidebarProjectGroupingMode: "repository_path",
