@@ -42,6 +42,9 @@ import { useDeviceKeyboardInput } from "./useDeviceKeyboardInput";
 import { DeviceScreen } from "./DeviceFrame";
 import { Control, errorMessage } from "./deviceControls";
 import { deviceFrameMetrics } from "./deviceFrameMetrics";
+import { DeviceView3D } from "./DeviceView3D";
+import { deviceTurn3d } from "./scene3d/deviceTurn";
+import { webglSupported } from "./webglSupport";
 
 /*
  * One live, interactive device: the chassis with its streamed screen, touch,
@@ -53,9 +56,34 @@ import { deviceFrameMetrics } from "./deviceFrameMetrics";
  * that floats.
  *
  * Slots keep later work out of this file: `rail` adds controls to the rail
- * (the Tools drawer's toggle, a 3D view switch), `overlay` draws over the
- * screen area, and `children` renders below the rail (a drawer).
+ * (the Tools drawer's toggle), `overlay` draws over the screen area, and
+ * `children` renders below the rail (a drawer).
+ *
+ * The panel can also show the device as a 3D body (`view3d`). The 2D screen
+ * stays mounted underneath, hidden, and keeps decoding: the 3D view draws its
+ * canvas as the screen texture, and turning 3D off (or losing WebGL) shows the
+ * 2D screen again at once.
  */
+
+/** A cube, drawn inline so no lucide icon joins the shared icon chunks. Paths follow lucide (ISC). */
+function CubeGlyph(props: { readonly className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      className={props.className}
+    >
+      <path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z" />
+      <path d="m3.3 7 8.7 5 8.7-5" />
+      <path d="M12 22V12" />
+    </svg>
+  );
+}
 
 function attachLabel(device: DeviceDescriptor, phase: string | null | undefined): string {
   if (phase === "waiting-for-display") return "Waiting for the display…";
@@ -108,6 +136,10 @@ export interface DeviceViewerProps {
    * screen (the Tools drawer's overlay). They turn with the device.
    */
   readonly uiFrames?: readonly DeviceUiFrame[] | null;
+  /** Whether this tab asked for the 3D view; it shows only while 3D can run. */
+  readonly view3d?: boolean;
+  /** Offers the 3D toggle (the panel); the floating window has none. */
+  readonly onView3dChange?: (on: boolean) => void;
 }
 
 export function DeviceViewer(props: DeviceViewerProps) {
@@ -165,10 +197,17 @@ export function DeviceViewer(props: DeviceViewerProps) {
     });
   }, []);
   const booted = device.state === "booted";
+  // Filled in by the 3D view while it is mounted.
+  const frameListenerRef = useRef<(() => void) | null>(null);
+  const framePointRef = useRef<
+    ((clientX: number, clientY: number) => { x: number; y: number } | null) | null
+  >(null);
+  const onFrame = useCallback(() => frameListenerRef.current?.(), []);
   const nativeVideo = useDeviceVideoStream({
     canvasRef,
     udid: useNativeVideo && booted ? device.udid : null,
     ...(client?.openFrameSource ? { openFrameSource: client.openFrameSource } : {}),
+    onFrame,
     onInputError,
   });
   useEffect(() => {
@@ -190,8 +229,37 @@ export function DeviceViewer(props: DeviceViewerProps) {
   const { noteInteraction } = hostedVideo;
   const previewPaused = videoStatus === "paused-by-other-preview" || videoStatus === "paused-idle";
 
+  // Why the 3D view cannot run now, or null when it can.
+  const [view3dFailure, setView3dFailure] = useState<string | null>(null);
+  const uiFramesOn = props.uiFrames !== null && props.uiFrames !== undefined;
+  const view3dUnavailable = !useNativeVideo
+    ? "3D needs the live video stream; this view samples screenshots"
+    : !webglSupported()
+      ? "3D needs WebGL, which this browser does not offer"
+      : uiFramesOn
+        ? "Turn off element frames in Tools to use 3D"
+        : view3dFailure;
+  const view3dActive =
+    props.view3d === true &&
+    props.onView3dChange !== undefined &&
+    view3dUnavailable === null &&
+    videoStatus === "streaming" &&
+    dimensions !== null;
+  /** The toggle reads as on while 3D is asked for and could run (it may still be connecting). */
+  const view3dShown = props.view3d === true && view3dUnavailable === null;
+  const onView3dUnavailable = useCallback((reason: string) => setView3dFailure(reason), []);
+
   const toDevicePoint = useCallback(
     (clientX: number, clientY: number): DevicePoint | null => {
+      if (view3dActive) {
+        const frame = framePointRef.current?.(clientX, clientY);
+        if (!frame || !dimensions) return null;
+        const size = devicePointSize(device, dimensions.width, dimensions.height);
+        return {
+          x: Math.round(frame.x * size.pointWidth),
+          y: Math.round(frame.y * size.pointHeight),
+        };
+      }
       const canvas = canvasRef.current;
       if (!canvas || !dimensions) return null;
       const local = clientPointToLayoutPoint(
@@ -217,7 +285,7 @@ export function DeviceViewer(props: DeviceViewerProps) {
         local.y,
       );
     },
-    [device, dimensions, rotationDegrees],
+    [device, dimensions, rotationDegrees, view3dActive],
   );
   const touchFallback = useMemo<DeviceTouchFallback | null>(() => {
     if (!api) return null;
@@ -329,6 +397,13 @@ export function DeviceViewer(props: DeviceViewerProps) {
   }, [api, device.udid, recording]);
 
   const frame = deviceFrameMetrics(device, dimensions);
+  const turn3d = deviceTurn3d(rotationDegrees, dimensions);
+  const aspect3d =
+    frame.pixelWidth && frame.pixelHeight
+      ? frame.pixelWidth / frame.pixelHeight
+      : dimensions
+        ? dimensions.width / dimensions.height
+        : 0;
   const disabled = !api || busy || !booted;
   const iosRotation = device.platform === "ios-simulator" && api?.setOrientation !== undefined;
 
@@ -341,7 +416,7 @@ export function DeviceViewer(props: DeviceViewerProps) {
     >
       <div className="relative flex min-h-0 flex-1">
         <DeviceScreen
-          className={cn("min-h-0 w-full flex-1", floating && "p-2")}
+          className={cn("min-h-0 w-full flex-1", floating && "p-2", view3dActive && "invisible")}
           kind={frame.kind}
           pixelWidth={frame.pixelWidth}
           pixelHeight={frame.pixelHeight}
@@ -404,6 +479,23 @@ export function DeviceViewer(props: DeviceViewerProps) {
             />
           ) : null}
         </DeviceScreen>
+        {view3dActive ? (
+          <DeviceView3D
+            source={canvasRef}
+            kind={frame.kind}
+            aspect={aspect3d}
+            name={device.name}
+            turn={turn3d}
+            frameListenerRef={frameListenerRef}
+            framePointRef={framePointRef}
+            touch={touch}
+            onKeyDown={keyboard.onKeyDown}
+            onKeyUp={keyboard.onKeyUp}
+            onPaste={keyboard.onPaste}
+            label={device.name}
+            onUnavailable={onView3dUnavailable}
+          />
+        ) : null}
         {props.overlay}
       </div>
 
@@ -517,6 +609,19 @@ export function DeviceViewer(props: DeviceViewerProps) {
             onClick={toggleRecording}
           />
         )}
+        {props.onView3dChange ? (
+          <Control
+            icon={CubeGlyph}
+            label={view3dShown ? "Show 2D view" : "3D view"}
+            title={view3dUnavailable ?? (view3dShown ? "Show 2D view" : "3D view")}
+            pressed={view3dShown}
+            disabled={view3dUnavailable !== null || !booted}
+            onClick={() => {
+              const next = !props.view3d;
+              props.onView3dChange?.(next);
+            }}
+          />
+        ) : null}
         {props.rail ? (
           <>
             <span className="mx-1 h-5 w-px bg-border" />

@@ -17,6 +17,11 @@ export interface DeviceTab {
   readonly udid: string | null;
   /** A name the user gave the tab; null shows the device's own name. */
   readonly title: string | null;
+  /**
+   * The tab shows its device as a 3D body; absent is the 2D view. Set by the
+   * device panel (`setDeviceTabView3d`, which loads with it), read as `=== true`.
+   */
+  readonly view3d?: true;
 }
 
 export interface ThreadDeviceTabs {

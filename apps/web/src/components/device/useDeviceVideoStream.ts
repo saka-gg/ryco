@@ -44,6 +44,12 @@ export function useDeviceVideoStream(input: {
     udid: DeviceUdid,
     handlers: DeviceFrameSourceHandlers,
   ) => DeviceFrameSource;
+  /**
+   * Called after each decoded frame is painted on the canvas (the 3D view
+   * uploads it as its screen texture). Read through a ref: changing it does
+   * not reopen the stream.
+   */
+  readonly onFrame?: () => void;
   /** Live input the server could not deliver. */
   readonly onInputError?: (error: {
     readonly input: DeviceLiveInputKind;
@@ -67,9 +73,11 @@ export function useDeviceVideoStream(input: {
   const generationRef = useRef(0);
   const sendRef = useRef<(message: DeviceLiveInput) => boolean>(() => false);
   const onInputErrorRef = useRef(input.onInputError);
+  const onFrameRef = useRef(input.onFrame);
   useEffect(() => {
     onInputErrorRef.current = input.onInputError;
-  }, [input.onInputError]);
+    onFrameRef.current = input.onFrame;
+  }, [input.onInputError, input.onFrame]);
 
   useEffect(() => {
     if (!udid || !openFrameSource) {
@@ -104,6 +112,7 @@ export function useDeviceVideoStream(input: {
           canvas.height = videoFrame.displayHeight;
         }
         canvas.getContext("2d")?.drawImage(videoFrame as VideoFrame, 0, 0);
+        onFrameRef.current?.();
       },
       requestResync: () => void source?.requestResync(),
       onStatus: (next, message) => {

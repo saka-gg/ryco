@@ -19,74 +19,18 @@ import { memo, useId, useMemo, type CSSProperties, type ReactNode } from "react"
 
 import { cn } from "~/lib/utils";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import {
+  CHASSIS_SPECS,
+  chassisEdge,
+  squirclePath,
+  type ChassisNub,
+  type DeviceKind,
+} from "./deviceChassis";
 
-export type DeviceKind = "iPhone" | "androidPhone" | "iPad";
+export type { DeviceKind } from "./deviceChassis";
 
-type Nub = {
-  side: "left" | "right" | "top";
-  /** Offset along the edge in device pixels. Negative on `top` measures from the right. */
-  at: number;
-  len: number;
-  name: string;
-};
-
-type DeviceSpec = {
-  pixelW: number;
-  pixelH: number;
-  screenRadius: number;
-  /** The three concentric band widths, outermost first. */
-  frame: number;
-  silver: number;
-  grey: number;
-  /** How far the side buttons protrude past the outer band. */
-  nubProtrude: number;
-  nubs: Nub[];
-};
-
-const DEVICE_SPECS: Record<DeviceKind, DeviceSpec> = {
-  iPhone: {
-    pixelW: 1206,
-    pixelH: 2622,
-    screenRadius: 186,
-    frame: 34,
-    silver: 8,
-    grey: 12,
-    nubProtrude: 27,
-    nubs: [
-      { side: "left", at: 507, len: 102, name: "action" },
-      { side: "left", at: 690, len: 192, name: "volumeUp" },
-      { side: "left", at: 927, len: 192, name: "volumeDown" },
-      { side: "right", at: 813, len: 303, name: "power" },
-    ],
-  },
-  androidPhone: {
-    pixelW: 1080,
-    pixelH: 2400,
-    screenRadius: 100,
-    frame: 22,
-    silver: 6,
-    grey: 8,
-    nubProtrude: 18,
-    nubs: [
-      { side: "right", at: 480, len: 130, name: "power" },
-      { side: "right", at: 670, len: 240, name: "volumeRocker" },
-    ],
-  },
-  iPad: {
-    pixelW: 1668,
-    pixelH: 2420,
-    screenRadius: 58,
-    frame: 64,
-    silver: 12,
-    grey: 16,
-    nubProtrude: 20,
-    nubs: [
-      { side: "right", at: 202, len: 104, name: "volumeUp" },
-      { side: "right", at: 328, len: 104, name: "volumeDown" },
-      { side: "top", at: -148, len: 126, name: "power" },
-    ],
-  },
-};
+type Nub = ChassisNub;
+const DEVICE_SPECS = CHASSIS_SPECS;
 
 const SHADOW: CSSProperties = {
   filter: "drop-shadow(0 2px 6px rgb(0 0 0 / 0.2)) drop-shadow(0 12px 32px rgb(0 0 0 / 0.25))",
@@ -126,7 +70,7 @@ function metrics(kind: DeviceKind, pixelW?: number, pixelH?: number) {
   const drawingScale = Math.max(1, spec.pixelW / rawW, spec.pixelH / rawH);
   const screenW = rawW * drawingScale;
   const screenH = rawH * drawingScale;
-  const edge = spec.frame + spec.silver + spec.grey;
+  const edge = chassisEdge(spec);
   const margin = edge + spec.nubProtrude;
   return {
     spec,
@@ -152,50 +96,6 @@ export function screenGeometry(kind: DeviceKind = "iPhone", pixelW?: number, pix
     // Percentage radii on both axes, so the corners stay circular under any aspect.
     screenBorderRadius: `${(100 * spec.screenRadius) / screenW}% / ${(100 * spec.screenRadius) / screenH}%`,
   };
-}
-
-/**
- * Continuous ("squircle") rounded rectangle. Each corner is three cubic Béziers
- * rather than an arc — that curvature ramp is what makes it read as an Apple
- * device instead of a rounded rect. The magic numbers are fixed multiples of the
- * corner radius and are not derivable from anything simpler.
- */
-function squirclePath(x: number, y: number, w: number, h: number, radius: number): string {
-  const r = Math.min(radius, Math.min(w, h) / 3.06);
-  const c1 = 1.528665 * r;
-  const c2 = 1.088311 * r;
-  const c3 = 0.868407 * r;
-  const c4 = 0.631494 * r;
-  const c5 = 0.372375 * r;
-  const c6 = 0.16906 * r;
-  const c7 = 0.066987 * r;
-
-  const right = x + w;
-  const bottom = y + h;
-  const n = (v: number) => +v.toFixed(3);
-  const C = (a: number, b: number, c: number, d: number, e: number, f: number) =>
-    `C${n(a)} ${n(b)} ${n(c)} ${n(d)} ${n(e)} ${n(f)}`;
-
-  return [
-    `M${n(x + c1)} ${n(y)}`,
-    `L${n(right - c1)} ${n(y)}`,
-    C(right - c2, y, right - c3, y, right - c4, y + c7),
-    C(right - c5, y + c6, right - c6, y + c5, right - c7, y + c4),
-    C(right, y + c3, right, y + c2, right, y + c1),
-    `L${n(right)} ${n(bottom - c1)}`,
-    C(right, bottom - c2, right, bottom - c3, right - c7, bottom - c4),
-    C(right - c6, bottom - c5, right - c5, bottom - c6, right - c4, bottom - c7),
-    C(right - c3, bottom, right - c2, bottom, right - c1, bottom),
-    `L${n(x + c1)} ${n(bottom)}`,
-    C(x + c2, bottom, x + c3, bottom, x + c4, bottom - c7),
-    C(x + c5, bottom - c6, x + c6, bottom - c5, x + c7, bottom - c4),
-    C(x, bottom - c3, x, bottom - c2, x, bottom - c1),
-    `L${n(x)} ${n(y + c1)}`,
-    C(x, y + c2, x, y + c3, x + c7, y + c4),
-    C(x + c6, y + c5, x + c5, y + c6, x + c4, y + c7),
-    C(x + c3, y, x + c2, y, x + c1, y),
-    "Z",
-  ].join("");
 }
 
 function framePaths(kind: DeviceKind, pixelW?: number, pixelH?: number) {

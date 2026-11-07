@@ -64,6 +64,18 @@ Motion and `dumpsys window` focus reading); and the host list with Test connecti
 (`apps/web/src/components/settings/DeviceSourcesSettings.tsx`, `DeviceHostEditor.tsx`) in
 `apps/web/src/components/settings/DeviceHostsSettings.tsx`.
 
+The device panel's 3D view follows upstream's procedural device path at commit `6577c6b6`, under
+the same copyright and license, without its device models (`apps/web/src/components/device/models`,
+which upstream marks as having no redistribution license): the extruded body with glass and metal
+materials and the live stream canvas as its screen texture
+(`packages/client-runtime/src/device/phoneScene.ts`, `shapeProfile.ts`, `phoneViewer.ts`), the
+render-on-change scheduler (`renderScheduler.ts`), spring-damped rotation and framing
+(`deviceMotion.ts`, `deviceFraming.ts`), view snapping (`deviceViewSnap.ts`), press-on-screen to
+touch and press-off-screen to orbit (`phoneInteraction.ts`,
+`apps/web/src/components/device/DevicePhoneViewport.tsx`, `mountDeviceViewer.ts`) and trackpad
+orbit and pinch (`apps/web/src/components/device/phoneTrackpad.ts`), in
+`apps/web/src/components/device/scene3d/` and `DeviceView3D.tsx`.
+
 ### MIT License
 
 Copyright (c) 2026 T3 Tools Inc.
@@ -129,6 +141,18 @@ The OpenCode 2 client and mappings in `apps/server/src/provider/openCodeV2Client
 The streaming Markdown block splitter and block renderer in `apps/web/src/markdown-blocks.ts` and
 their tests are adapted from Synara's `apps/web/src/components/chat/streamingMarkdownBlocks.ts` at
 commit `bba7dcb8c9d46512e8abac2510dff80a7782b98e` (#1963), under the same license.
+
+The device panel's 3D view follows upstream's procedural device path at commit `6577c6b6`, under
+the same copyright and license, without its device models (`apps/web/src/components/device/models`,
+which upstream marks as having no redistribution license): the extruded body with glass and metal
+materials and the live stream canvas as its screen texture
+(`packages/client-runtime/src/device/phoneScene.ts`, `shapeProfile.ts`, `phoneViewer.ts`), the
+render-on-change scheduler (`renderScheduler.ts`), spring-damped rotation and framing
+(`deviceMotion.ts`, `deviceFraming.ts`), view snapping (`deviceViewSnap.ts`), press-on-screen to
+touch and press-off-screen to orbit (`phoneInteraction.ts`,
+`apps/web/src/components/device/DevicePhoneViewport.tsx`, `mountDeviceViewer.ts`) and trackpad
+orbit and pinch (`apps/web/src/components/device/phoneTrackpad.ts`), in
+`apps/web/src/components/device/scene3d/` and `DeviceView3D.tsx`.
 
 ### MIT License
 

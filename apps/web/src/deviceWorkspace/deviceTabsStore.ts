@@ -83,6 +83,11 @@ interface DeviceTabsState {
   readonly rename: (threadKey: string, tabId: string, title: string | null) => void;
   readonly activate: (threadKey: string, tabId: string) => void;
   readonly close: (threadKey: string, tabId: string) => void;
+  /** Any other transition, for those that load with the device panel rather than the shell. */
+  readonly apply: (
+    threadKey: string,
+    transition: (state: ThreadDeviceTabs) => ThreadDeviceTabs,
+  ) => void;
 }
 
 export const useDeviceTabsStore = create<DeviceTabsState>((set, get) => {
@@ -110,6 +115,7 @@ export const useDeviceTabsStore = create<DeviceTabsState>((set, get) => {
       update(threadKey, (state) => renameDeviceTab(state, tabId, title)),
     activate: (threadKey, tabId) => update(threadKey, (state) => activateDeviceTab(state, tabId)),
     close: (threadKey, tabId) => update(threadKey, (state) => closeDeviceTab(state, tabId)),
+    apply: update,
   };
 });
 

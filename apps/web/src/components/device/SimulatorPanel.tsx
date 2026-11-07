@@ -22,6 +22,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { readEnvironmentApi } from "../../environmentApi";
 import { activeDeviceTab } from "../../deviceWorkspace/deviceTabs.logic";
 import { selectThreadDeviceTabs, useDeviceTabsStore } from "../../deviceWorkspace/deviceTabsStore";
+import { setDeviceTabView3d } from "../../deviceWorkspace/deviceTabView3d.logic";
 import {
   adoptableUdids,
   floatWorkspaceDevice,
@@ -443,6 +444,12 @@ export default function SimulatorPanel(props: {
           variant="panel"
           generation={generation}
           uiFrames={showTools ? uiFrames : null}
+          view3d={activeTab.view3d === true}
+          onView3dChange={(on) =>
+            useDeviceTabsStore
+              .getState()
+              .apply(threadKey, (state) => setDeviceTabView3d(state, activeTab.id, on))
+          }
           rail={
             <>
               <Control
