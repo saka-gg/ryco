@@ -12,7 +12,7 @@ import {
 } from "@ryco/client-runtime/state/user-input";
 import type { PendingUserInput } from "@ryco/client-runtime/state/session";
 import { ResumeFallbackHandoffIcon } from "./chat/ContextHandoffMarkerRow";
-import { useLocalComputerEnvironmentId } from "../computerUse/localComputer";
+import { useIsLocalComputerEnvironment } from "../computerUse/localComputer";
 import {
   computerUseSendBlocker,
   isExternalOpenCodeInstance,
@@ -1773,7 +1773,7 @@ export default function ChatView(props: ChatViewProps) {
   // drive the environment picker in BranchToolbar.
   const allProjects = useStore(useShallow(selectProjectsAcrossEnvironments));
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const localComputerEnvironmentId = useLocalComputerEnvironmentId();
+  const isLocalComputerEnvironment = useIsLocalComputerEnvironment();
   const savedEnvironmentRegistry = useSavedEnvironmentRegistryStore((s) => s.byId);
   const savedEnvironmentRuntimeById = useSavedEnvironmentRuntimeStore((s) => s.byId);
   const activeSavedEnvironmentRecord =
@@ -5952,7 +5952,7 @@ export default function ChatView(props: ChatViewProps) {
     const computerInvocation = parseComputerInvocation(promptForSend);
     if (computerInvocation && !computerInvocation.prompt) return;
     const computer = window.desktopBridge?.computerBeta;
-    const localComputer = computer && activeThread.environmentId === localComputerEnvironmentId;
+    const localComputer = computer && isLocalComputerEnvironment(activeThread.environmentId);
     if (computerInvocation && !localComputer) {
       toastManager.add({
         type: "warning",
@@ -7022,7 +7022,7 @@ export default function ChatView(props: ChatViewProps) {
   );
   const computerBetaPreviewReady = useLazyComponentReady(
     LazyComputerBetaPreview,
-    renderCrownRail && activeThread?.environmentId === localComputerEnvironmentId,
+    renderCrownRail && isLocalComputerEnvironment(activeThread?.environmentId),
     {
       onLoadError: (error, retry) => notifySurfaceLoadFailure("computer preview", error, retry),
     },
@@ -7253,7 +7253,7 @@ export default function ChatView(props: ChatViewProps) {
   }
 
   const workspacePreview =
-    !isPhoneTier && activeThread.environmentId === localComputerEnvironmentId ? (
+    !isPhoneTier && isLocalComputerEnvironment(activeThread.environmentId) ? (
       <>
         {computerBetaPreviewReady ? (
           <LazyComputerBetaPreview key={activeThread.id} threadId={activeThread.id} inline />
@@ -8133,7 +8133,7 @@ export default function ChatView(props: ChatViewProps) {
                 chatProject={chatProjectHeaderTarget}
                 // The crown's Servers open in the Browser panel on this desktop's own backend.
                 onOpenBrowserPanel={
-                  !isPhoneTier && activeThread.environmentId === localComputerEnvironmentId
+                  !isPhoneTier && isLocalComputerEnvironment(activeThread.environmentId)
                     ? onOpenBrowserPanel
                     : null
                 }
