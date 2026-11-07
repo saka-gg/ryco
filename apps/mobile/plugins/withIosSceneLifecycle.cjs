@@ -80,7 +80,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     else {
       return nil
     }
-    return URL(string: "\(scheme)://\(path)")
+    return URL(string: scheme + "://" + path)
   }
 
   func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
@@ -106,7 +106,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
   }
 }`;
 
-module.exports = function withIosSceneLifecycle(config) {
+function withIosSceneLifecycle(config) {
   config = withInfoPlist(config, (nextConfig) => {
     nextConfig.modResults.UIApplicationSceneManifest = {
       UIApplicationSupportsMultipleScenes: false,
@@ -134,4 +134,7 @@ module.exports = function withIosSceneLifecycle(config) {
 
     return nextConfig;
   });
-};
+}
+
+module.exports = withIosSceneLifecycle;
+module.exports.SCENE_DELEGATE = SCENE_DELEGATE;
