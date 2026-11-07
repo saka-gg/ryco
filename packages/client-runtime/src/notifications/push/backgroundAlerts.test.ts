@@ -103,7 +103,11 @@ function harness(
     readonly earlierInstallKey?: PushKey | null;
   } = {},
 ) {
-  let preferences = { enabled: options.enabled ?? true, sound: false };
+  let preferences: {
+    enabled: boolean;
+    sound: boolean;
+    kinds?: ReadonlyArray<"approval" | "input" | "plan-ready" | "completed" | "failed" | "stopped">;
+  } = { enabled: options.enabled ?? true, sound: false };
   let account: BackgroundAlertsAccount = options.account ?? {
     status: "signed-in",
     accountId: ACCOUNT,
@@ -354,6 +358,33 @@ describe("background alerts on a Hub that sends push", () => {
     await settle();
     expect(node.push.registerDevice).toHaveBeenCalledTimes(2);
     expect(test.hub.registerNativePush).toHaveBeenCalledTimes(1);
+  });
+
+  it("ask only for the kinds the person wants, register again when they change, and count none as off", async () => {
+    const test = harness();
+    const node = fakeConnection("env-a");
+    test.setConnections([node]);
+    test.setPreferences({ kinds: ["failed", "approval", "approval"] });
+    test.alerts.start();
+    await settle();
+    expect(node.push.registerDevice).toHaveBeenLastCalledWith({
+      keyId: KEY.keyId,
+      publicKey: KEY.publicKey,
+      kinds: ["approval", "failed"],
+      sound: false,
+    });
+
+    test.setPreferences({ kinds: ["approval", "failed", "completed"] });
+    await settle();
+    expect(node.push.registerDevice).toHaveBeenCalledTimes(2);
+    expect(node.push.registerDevice).toHaveBeenLastCalledWith(
+      expect.objectContaining({ kinds: ["approval", "completed", "failed"] }),
+    );
+
+    test.setPreferences({ kinds: [] });
+    await settle();
+    expect(test.alerts.getSnapshot().enabled).toBe(false);
+    expect(node.push.unregisterDevice).toHaveBeenCalled();
   });
 
   it("are not confirmed until the node's Hub took a signal, nor for a kind a viewer never gets", async () => {

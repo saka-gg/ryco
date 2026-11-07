@@ -211,6 +211,7 @@ describe("MVP route config", () => {
         "SettingsDiagnostics",
         "SettingsHub",
         "SettingsInbox",
+        "SettingsNotifications",
         "SettingsProviderAccounts",
         "SettingsStatistics",
         "SettingsNodeSecurity",
@@ -221,6 +222,7 @@ describe("MVP route config", () => {
     expect(MVP_SETTINGS_SHEET_ROUTES.SettingsHub.linking).toBe("hub");
     expect(MVP_SETTINGS_SHEET_ROUTES.SettingsWorkspace.linking).toBe("workspace");
     expect(MVP_SETTINGS_SHEET_ROUTES.SettingsInbox.linking).toBe("inbox");
+    expect(MVP_SETTINGS_SHEET_ROUTES.SettingsNotifications.linking).toBe("notifications");
     expect(MVP_SETTINGS_SHEET_ROUTES.SettingsAppearance.linking).toBe("appearance");
     expect(MVP_SETTINGS_SHEET_ROUTES.SettingsProviderAccounts.linking).toBe("provider-accounts");
     expect(MVP_SETTINGS_SHEET_ROUTES.SettingsDiagnostics.linking).toBe("diagnostics");

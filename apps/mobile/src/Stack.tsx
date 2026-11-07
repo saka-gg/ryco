@@ -49,6 +49,7 @@ import {
   SettingsDiagnosticsRouteScreen,
   SettingsHubRouteScreen,
   SettingsInboxRouteScreen,
+  SettingsNotificationsRouteScreen,
   SettingsProviderAccountsRouteScreen,
   SettingsRouteScreen,
   SettingsStatisticsRouteScreen,
@@ -213,6 +214,11 @@ const SettingsSheetStack = createNativeStackNavigator({
       screen: SettingsInboxRouteScreen,
       linking: MVP_SETTINGS_SHEET_ROUTES.SettingsInbox.linking,
       options: settingsRouteOptions("SettingsInbox", SETTINGS_SECTION_TITLES.inbox),
+    }),
+    SettingsNotifications: createNativeStackScreen({
+      screen: SettingsNotificationsRouteScreen,
+      linking: MVP_SETTINGS_SHEET_ROUTES.SettingsNotifications.linking,
+      options: settingsRouteOptions("SettingsNotifications", SETTINGS_SECTION_TITLES.notifications),
     }),
     SettingsAccount: createNativeStackScreen({
       screen: HostedAccountRouteScreen,

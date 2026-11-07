@@ -1,5 +1,6 @@
 import { updatePreferences, usePreferences } from "../../state/preferencesStore";
 import { rycoWidgetsNative } from "../../widgets/rycoWidgetsNative";
+import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 
 export const LIVE_ACTIVITY_DETAIL =
@@ -16,12 +17,15 @@ export function LiveActivitySettings() {
   const allowed = native.activitiesEnabled();
   const on = preferences.liveActivitiesEnabled === true;
   return (
-    <SettingsSwitchRow
-      label="Live Activity"
-      detail={allowed ? LIVE_ACTIVITY_DETAIL : "Allow Live Activities for Ryco in iOS Settings."}
-      value={on && allowed}
-      disabled={!allowed && !on}
-      onValueChange={(liveActivitiesEnabled) => updatePreferences({ liveActivitiesEnabled })}
-    />
+    <SettingsSection title="Lock Screen">
+      <SettingsSwitchRow
+        first
+        label="Live Activity"
+        detail={allowed ? LIVE_ACTIVITY_DETAIL : "Allow Live Activities for Ryco in iOS Settings."}
+        value={on && allowed}
+        disabled={!allowed && !on}
+        onValueChange={(liveActivitiesEnabled) => updatePreferences({ liveActivitiesEnabled })}
+      />
+    </SettingsSection>
   );
 }

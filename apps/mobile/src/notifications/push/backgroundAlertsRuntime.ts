@@ -18,6 +18,7 @@ import { mobileKV } from "../../platform/kv";
 import { createMobileConnectionRegistry } from "../../runtime/bootstrap";
 import { getPreferencesSnapshot, subscribePreferences } from "../../state/preferencesStore";
 import { readThreadAlertPermission } from "../threadAlerts";
+import { wantedThreadAlertKinds } from "../threadAlerts.logic";
 import { backgroundAlertsSupport } from "./backgroundAlertsModel";
 import { ensureMobilePushKeyCustody, readMobileRycoPush } from "./pushKeyCustody";
 import { createPushKeyStore } from "./pushKeyStore";
@@ -99,6 +100,8 @@ function createMobileBackgroundAlerts(): BackgroundAlerts {
         return {
           enabled: preferences.threadAlerts === true && preferences.backgroundAlerts === true,
           sound: preferences.threadAlertSound === true,
+          // The node sends only these (`effectivePushKinds`).
+          kinds: wantedThreadAlertKinds(preferences),
         };
       },
       subscribe: subscribePreferences,

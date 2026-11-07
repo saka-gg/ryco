@@ -242,6 +242,7 @@ import {
 } from "./editFromHere";
 import { executeSendTurn } from "./executeSendTurn";
 import { PendingApprovalCard } from "./PendingApprovalCard";
+import { useNotificationThreadAction } from "../../notifications/useNotificationThreadAction";
 import { PendingUserInputCard } from "./PendingUserInputCard";
 import {
   resolveOptionalAnswerRoute,
@@ -2548,6 +2549,24 @@ export function ThreadDetailScreen(props: {
         onOpenThread={openThread}
       />
     );
+  // An Approve, Deny or Reply tapped on this thread's notification, carried out by the same
+  // handlers as the cards and the composer once the connection is ready for them.
+  useNotificationThreadAction({
+    threadRef: scopeThreadRef(environmentId, threadId),
+    threadLoaded: thread !== undefined && thread !== null,
+    ready: (environmentRow?.mutationReady ?? false) && !cachedView.promptsDisabled,
+    pendingApprovals,
+    respond: (approval, decision) =>
+      respondToThreadApproval({
+        api: ensureEnvironmentApi(environmentId),
+        threadId,
+        requestId: approval.requestId,
+        decision,
+        approvalIdentity: approval.approvalIdentity,
+      }),
+    send: (text) => onSend(text, []),
+    refuse: setSendError,
+  });
   const visibleError = sendError ?? thread?.error ?? null;
   // A restart release is an interruption, not a thread error (`thread.error` leaves it
   // out): a quiet line once the thread's own activities can tell whether the node

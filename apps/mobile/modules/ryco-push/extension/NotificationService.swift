@@ -59,6 +59,8 @@ final class NotificationService: UNNotificationServiceExtension {
     mutable.title = alert.title
     mutable.body = alert.body
     mutable.threadIdentifier = alert.threadIdentifier
+    // Approve / Deny, or Reply / Open; the app registered the categories.
+    mutable.categoryIdentifier = alert.categoryIdentifier
     if !record.sound { mutable.sound = nil }
     mutable.userInfo = PushAlertOpener.userInfo(content.userInfo, alert: alert)
     return mutable

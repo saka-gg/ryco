@@ -102,6 +102,7 @@ export function ThreadAlertsBridge() {
       alertsModule.createExpoThreadAlertsPlatform({
         isEnvironmentLive: (environmentId) =>
           driver.supervisor.read(environmentId)?.shellSnapshotReadiness.read() != null,
+        readVisibleThread,
       }),
     );
     return () => alerts.stop();

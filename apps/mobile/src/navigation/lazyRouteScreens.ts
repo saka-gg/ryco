@@ -185,6 +185,13 @@ export const SettingsInboxRouteScreen = lazyScreen(
       require("../features/settings/SettingsInboxRouteScreen") as typeof import("../features/settings/SettingsInboxRouteScreen")
     ).SettingsInboxRouteScreen,
 );
+export const SettingsNotificationsRouteScreen = lazyScreen(
+  "SettingsNotificationsRouteScreen",
+  () =>
+    (
+      require("../features/settings/SettingsNotificationsRouteScreen") as typeof import("../features/settings/SettingsNotificationsRouteScreen")
+    ).SettingsNotificationsRouteScreen,
+);
 export const SettingsRouteScreen = lazyScreen(
   "SettingsRouteScreen",
   () =>

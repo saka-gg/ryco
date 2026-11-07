@@ -24,6 +24,11 @@ vi.mock("react-native", () => ({}));
 
 import type { Preferences } from "../state/preferencesStore";
 import type { MobileThreadAlert } from "./threadAlerts.logic";
+import type { NotificationRoute } from "./notificationActionsModel";
+import {
+  readPendingNotificationAction,
+  resetPendingNotificationActionsForTests,
+} from "./pendingNotificationAction";
 import {
   startMobileThreadAlerts,
   type MobileThreadAlertsDeps,
@@ -113,7 +118,7 @@ function harness(
   let appActive = true;
   let ready: Promise<void> = Promise.resolve();
   const presented: MobileThreadAlert[] = [];
-  const openedListeners = new Set<(data: unknown) => void>();
+  const openedListeners = new Set<(route: NotificationRoute) => void>();
   const stopForeground = vi.fn();
   const platform: MobileThreadAlertsPlatform = {
     isAppActive: () => appActive,
@@ -184,9 +189,11 @@ function harness(
       });
       return () => release();
     },
-    /** The user opens a notification carrying `data`. */
-    open: (data: unknown) => {
-      for (const listener of Array.from(openedListeners)) listener(data);
+    /** The user opens a notification for `threadId`, or taps one of its actions. */
+    open: (threadId: string, action: NotificationRoute["action"] = null) => {
+      for (const listener of Array.from(openedListeners)) {
+        listener({ ref: ref(threadId), action, responseKey: `${threadId}:${Math.random()}` });
+      }
     },
   };
 }
@@ -207,6 +214,8 @@ describe("mobile thread alerts", () => {
         body: "Thread b",
         sound: false,
         ref: ref("b"),
+        kind: "completed",
+        turnId: "turn-1",
       },
     ]);
   });
@@ -273,23 +282,42 @@ describe("mobile thread alerts", () => {
     const test = harness();
     const alerts = test.start();
 
-    test.open({ environmentId: env, threadId: "thread-b" });
-    expect(test.platform.openThread).toHaveBeenCalledWith({
-      environmentId: env,
-      threadId: ThreadId.make("thread-b"),
-    });
+    test.open("thread-b");
+    expect(test.platform.openThread).toHaveBeenCalledWith(ref("thread-b"));
 
     test.setPreferences({ threadAlerts: false });
-    test.open({ environmentId: env, threadId: "thread-c" });
-    test.open({ url: "https://example.com" });
+    test.open("thread-c");
     expect(vi.mocked(test.platform.openThread).mock.calls).toEqual([
-      [{ environmentId: env, threadId: ThreadId.make("thread-b") }],
-      [{ environmentId: env, threadId: ThreadId.make("thread-c") }],
+      [ref("thread-b")],
+      [ref("thread-c")],
     ]);
 
     alerts.stop();
-    test.open({ environmentId: env, threadId: "thread-d" });
+    test.open("thread-d");
     expect(test.platform.openThread).toHaveBeenCalledTimes(2);
+  });
+
+  it("opens the thread of a tapped action and leaves the action for its screen", () => {
+    resetPendingNotificationActionsForTests();
+    const test = harness();
+    test.start();
+    test.open("thread-e", { kind: "approve", turnId: "turn-1" });
+    expect(test.platform.openThread).toHaveBeenCalledWith(ref("thread-e"));
+    expect(readPendingNotificationAction(ref("thread-e"), Date.now())?.action).toEqual({
+      kind: "approve",
+      turnId: "turn-1",
+    });
+    expect(readPendingNotificationAction(ref("thread-b"), Date.now())).toBeNull();
+  });
+
+  it("posts only the kinds the person wants", async () => {
+    const test = harness({ threads: [shell("b"), shell("c")] });
+    test.setPreferences({ threadAlerts: true, mutedAlertKinds: ["completed"] });
+    test.start();
+    test.accept(finished("b"));
+    test.accept(shell("c", { hasPendingApprovals: true }));
+    await test.settle();
+    expect(test.presented.map((alert) => alert.kind)).toEqual(["approval"]);
   });
 
   it("leaves background alerts to push where it is confirmed, and only those", async () => {

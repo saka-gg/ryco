@@ -149,6 +149,8 @@ for vector in document["vectors"] as! [[String: Any]] {
         "threadId": $0.threadId,
         "threadIdentifier": $0.threadIdentifier,
         "url": $0.url as Any,
+        "turnId": $0.turnId as Any,
+        "categoryIdentifier": $0.categoryIdentifier,
       ]
     } as Any,
     "alertRejects": [
@@ -179,7 +181,10 @@ for vector in document["vectors"] as! [[String: Any]] {
   ])
 }
 
-let output: [String: Any] = ["vectors": report, "kindTitles": PushAlertOpener.kindTitles]
+let output: [String: Any] = [
+  "vectors": report, "kindTitles": PushAlertOpener.kindTitles,
+  "kindCategories": PushAlertOpener.kindCategories,
+]
 print(
   String(
     decoding: try JSONSerialization.data(withJSONObject: output, options: [.sortedKeys]),

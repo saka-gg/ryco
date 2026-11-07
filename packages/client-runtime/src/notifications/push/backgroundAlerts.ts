@@ -12,7 +12,6 @@ import { HostedHubApiError, type HostedHubApi } from "../../authorization/api.ts
 import { nativePushHubSupport, type NativePushHubSupport } from "../../authorization/nativePush.ts";
 import type { WsRpcClient } from "../../rpc/wsRpcClient.ts";
 import {
-  BACKGROUND_ALERT_KINDS,
   HUB_PUSH_CAPABILITY_RECHECK_MS,
   HUB_PUSH_CAPABILITY_RETRY_MS,
   NODE_PUSH_RETRY_MS,
@@ -23,6 +22,7 @@ import {
   hubRegistrationFailure,
   initialBackgroundAlertsSnapshot,
   isBackgroundPushConfirmed,
+  wantedAlertKinds,
   type BackgroundAlertsHubStatus,
   type BackgroundAlertsSnapshot,
   type BackgroundAlertsSupport,
@@ -87,8 +87,15 @@ export interface BackgroundAlertsPorts {
     readonly apnsEnvironment: NativePushEnvironment;
   };
   readonly preferences: {
-    /** `enabled`: background alerts and thread alerts are both on. */
-    readonly read: () => { readonly enabled: boolean; readonly sound: boolean };
+    /**
+     * `enabled`: background alerts and thread alerts are both on. `kinds`: the alerts the person
+     * wants (`wantedAlertKinds`); every kind when absent. None wanted counts as off.
+     */
+    readonly read: () => {
+      readonly enabled: boolean;
+      readonly sound: boolean;
+      readonly kinds?: ReadonlyArray<PushAlertKind>;
+    };
     readonly subscribe: (listener: () => void) => () => void;
   };
   readonly account: {
@@ -162,6 +169,8 @@ interface NodeAttempt {
   readonly ready: object;
   readonly keyId: PushKey["keyId"];
   readonly sound: boolean;
+  /** The kinds it asked for, in `BACKGROUND_ALERT_KINDS` order. */
+  readonly kinds: string;
   readonly state: EnvironmentPushState;
   /** When it ran, or null once a presence tick or a foreground asked for it again. */
   readonly at: number | null;
@@ -522,7 +531,12 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
     attempt.at === null ||
     (attempt.state.status === "failed" && ports.now() - attempt.at >= NODE_PUSH_RETRY_MS);
 
-  const registerNodes = async (sound: boolean, pushKey: PushKey) => {
+  const registerNodes = async (
+    sound: boolean,
+    kinds: ReadonlyArray<PushAlertKind>,
+    pushKey: PushKey,
+  ) => {
+    const kindsKey = kinds.join(",");
     const connections = ports.connections.list();
     for (const connection of connections) {
       if (!connection.viaHub) continue;
@@ -533,6 +547,7 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
         previous?.connection === connection &&
         previous.ready === ready &&
         previous.sound === sound &&
+        previous.kinds === kindsKey &&
         previous.keyId === pushKey.keyId;
       if (same && !attemptDue(previous)) continue;
       // Asking a registered node again only refreshes what it reports.
@@ -547,7 +562,7 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
           await connection.push.registerDevice({
             keyId: pushKey.keyId,
             publicKey: pushKey.publicKey,
-            kinds: BACKGROUND_ALERT_KINDS,
+            kinds,
             sound,
           }),
         );
@@ -563,6 +578,7 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
         ready,
         keyId: pushKey.keyId,
         sound,
+        kinds: kindsKey,
         state,
         at: ports.now(),
         // Known for this connect; a reconnect may reach an updated (or older) node.
@@ -587,7 +603,10 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
   };
 
   const reconcileOnce = async () => {
-    const preferences = ports.preferences.read();
+    const read = ports.preferences.read();
+    const wantedKinds = wantedAlertKinds(read.kinds);
+    // No kind wanted is off: a node registration needs at least one.
+    const preferences = { ...read, enabled: read.enabled && wantedKinds.length > 0 };
     const account = ports.account.read();
     publish({ enabled: preferences.enabled });
     if (ports.support !== "supported" || account.status === "pending") return;
@@ -697,7 +716,7 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
     // The new registration overtakes a removal still owed from turning off.
     await setHubRemovalOwed(null);
     setHub("registered");
-    await registerNodes(preferences.sound, key);
+    await registerNodes(preferences.sound, wantedKinds, key);
   };
 
   const reconcile = async (): Promise<void> => {

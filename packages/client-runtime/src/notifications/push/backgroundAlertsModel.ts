@@ -23,6 +23,18 @@ export const BACKGROUND_ALERT_KINDS: ReadonlyArray<PushAlertKind> = [
   "stopped",
 ];
 
+/**
+ * The kinds to ask for, in {@link BACKGROUND_ALERT_KINDS} order and without repeats; every kind
+ * when `kinds` is absent.
+ */
+export function wantedAlertKinds(
+  kinds: ReadonlyArray<PushAlertKind> | undefined,
+): ReadonlyArray<PushAlertKind> {
+  if (kinds === undefined) return BACKGROUND_ALERT_KINDS;
+  const wanted = new Set(kinds);
+  return BACKGROUND_ALERT_KINDS.filter((kind) => wanted.has(kind));
+}
+
 /** The node holds `foreground` for 45 seconds; the app repeats it well inside that. */
 export const PUSH_PRESENCE_REFRESH_MS = 30_000;
 /** A Hub without push is asked again at most this often, on a foreground or a settings visit. */

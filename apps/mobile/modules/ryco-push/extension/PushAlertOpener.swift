@@ -10,6 +10,10 @@ struct PushAlert: Equatable {
   let body: String
   let environmentId: String
   let threadId: String
+  /// The turn it is about; a notification action is bound to it.
+  let turnId: String?
+  /// Its actions (`src/notifications/notificationActionsModel.ts`).
+  let categoryIdentifier: String
   /// Alerts stack per thread: `<environment>/<thread>`.
   let threadIdentifier: String
   /// The thread's deep link, when the app's scheme is known.
@@ -32,6 +36,17 @@ enum PushAlertOpener {
 
   /// One line per kind. Must equal `THREAD_ALERT_COPY` in
   /// `@ryco/client-runtime/state/settings`; `pushSealOpener.test.ts` checks it.
+  /// The actions each kind offers. Must equal `notificationCategoryForKind` in
+  /// `src/notifications/notificationActionsModel.ts`; the app registers them.
+  static let kindCategories: [String: String] = [
+    "approval": "ryco.approval",
+    "input": "ryco.answer",
+    "plan-ready": "ryco.answer",
+    "completed": "ryco.result",
+    "failed": "ryco.result",
+    "stopped": "ryco.result",
+  ]
+
   static let kindTitles: [String: String] = [
     "approval": "Needs approval",
     "input": "Needs your answer",
@@ -97,6 +112,7 @@ enum PushAlertOpener {
       exactInteger(payload["v"]) == 1,
       let kind = payload["k"] as? String,
       let title = kindTitles[kind],
+      let category = kindCategories[kind],
       let threadTitle = payload["t"] as? String,
       payload["e"] as? String == envelope.environmentId,
       exactInteger(payload["q"]) == envelope.sequence,
@@ -112,6 +128,8 @@ enum PushAlertOpener {
       body: String(threadTitle.prefix(maxTitleLength)),
       environmentId: envelope.environmentId,
       threadId: threadId,
+      turnId: nonEmptyString(payload["tu"]),
+      categoryIdentifier: category,
       threadIdentifier: "\(envelope.environmentId)/\(threadId)",
       url: appScheme.flatMap { threadLink(scheme: $0, environmentId: envelope.environmentId, threadId: threadId) }
     )
@@ -129,7 +147,11 @@ enum PushAlertOpener {
     userInfo.removeValue(forKey: "body")
     userInfo.removeValue(forKey: "url")
     guard let alert else { return userInfo }
-    userInfo["body"] = ["environmentId": alert.environmentId, "threadId": alert.threadId]
+    var body: [String: Any] = [
+      "environmentId": alert.environmentId, "threadId": alert.threadId, "kind": alert.kind,
+    ]
+    if let turnId = alert.turnId { body["turnId"] = turnId }
+    userInfo["body"] = body
     if let url = alert.url { userInfo["url"] = url }
     return userInfo
   }
