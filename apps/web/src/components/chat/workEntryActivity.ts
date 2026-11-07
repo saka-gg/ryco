@@ -2,9 +2,14 @@
 // Purpose: Derives the status + timing a tool-call row reports inline and in its
 //          expanded Activity card, from the fields the work log already carries.
 // Layer: Web chat presentation helpers
-// Exports: formatWorkEntryStatusLabel, formatWorkEntryElapsed, workEntryActivityMeta
+// Exports: formatWorkEntryStatusLabel, formatWorkEntryElapsed, workEntryActivityMeta,
+//          deviceWorkEntryPresentation
 //          (the status rule itself, resolveWorkEntryStatus, is shared from client-runtime)
 
+import {
+  deviceToolPresentation,
+  type DeviceToolPresentation,
+} from "@ryco/shared/deviceToolPresentation";
 import {
   formatDuration,
   resolveWorkEntryStatus,
@@ -13,6 +18,15 @@ import {
 } from "../../session-logic";
 
 type WorkEntryStatusInput = Pick<WorkLogEntry, "completed" | "exitCode" | "tone">;
+
+/** The verb and target of a device tool row ("Tapped @e5"), or null when it is no device call. */
+export function deviceWorkEntryPresentation(
+  entry: WorkEntryStatusInput & Pick<WorkLogEntry, "deviceTool">,
+): DeviceToolPresentation | null {
+  return entry.deviceTool
+    ? deviceToolPresentation(entry.deviceTool, resolveWorkEntryStatus(entry))
+    : null;
+}
 
 export function formatWorkEntryStatusLabel(status: WorkEntryStatus): string {
   switch (status) {

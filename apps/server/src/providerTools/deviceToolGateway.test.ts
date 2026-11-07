@@ -10,6 +10,7 @@ import {
   DEVICE_WAIT_MAX_MS,
   type DeviceSettleTiming,
 } from "../device/deviceObservation.ts";
+import { resetDeviceUiRefsForTests } from "../device/deviceUiRefs.ts";
 import { FakeDeviceBackend } from "../device/FakeDeviceBackend.ts";
 import type { DeviceAvailability } from "@ryco/contracts";
 import { DEVICE_NOT_ATTACHED_TEXT, DEVICE_SHARED_TEXT } from "./deviceToolActions.ts";
@@ -20,8 +21,8 @@ import {
   agentControlDeviceLockFor,
   blockProcessDeviceToolsForAgentControl,
   callDeviceTool,
-  deviceToolRequiresApproval,
   isViewerFacingDeviceToolError,
+  routeDeviceToolCall,
   startDeviceToolGateway,
   type DeviceToolContent,
   type DeviceToolGateway,
@@ -31,6 +32,7 @@ let gateway: DeviceToolGateway | null = null;
 let manager: DeviceManager | null = null;
 
 afterEach(async () => {
+  resetDeviceUiRefsForTests();
   await gateway?.close();
   await manager?.dispose();
   gateway = null;
@@ -68,7 +70,7 @@ describe("device tool gateway", () => {
       (listed.body as { result: { tools: Array<{ name: string }> } }).result.tools.map(
         (tool) => tool.name,
       ),
-    ).toEqual(DEVICE_TOOL_NAMES);
+    ).toEqual(["device_read", "device"]);
 
     const inventory = await post(binding.url, binding.headers, "tools/call", {
       name: "device_list",
@@ -92,24 +94,39 @@ describe("device tool gateway", () => {
     expect((await post(binding.url, binding.headers, "tools/list")).status).toBe(401);
   });
 
-  it("marks every state-changing tool for provider approval", () => {
-    expect(DEVICE_TOOL_NAMES.filter(deviceToolRequiresApproval)).toEqual([
-      "device_boot",
-      "device_install",
-      "device_launch",
-      "device_open_url",
-      "device_tap",
-      "device_swipe",
-      "device_type",
-      "device_press_button",
-      "device_scroll_to_element",
-      "device_configure",
+  it("splits the actions into a read-only device_read and a device tool that changes devices", () => {
+    const [read, act] = DEVICE_TOOL_DEFINITIONS;
+    const actions = (tool: (typeof DEVICE_TOOL_DEFINITIONS)[number] | undefined) =>
+      (tool?.inputSchema.properties as Record<string, { enum?: string[] }>).action?.enum ?? [];
+    expect(read?.name).toBe("device_read");
+    expect(read?.annotations.readOnlyHint).toBe(true);
+    expect(actions(read)).toEqual(["list", "screenshot", "describe_ui", "wait", "logs"]);
+    expect(act?.name).toBe("device");
+    expect(act?.annotations.readOnlyHint).toBe(false);
+    expect(actions(act)).toEqual([
+      "boot",
+      "install",
+      "launch",
+      "open_url",
+      "tap",
+      "swipe",
+      "type",
+      "press_button",
+      "scroll_to_element",
+      "configure",
     ]);
-    expect(deviceToolRequiresApproval("device_list")).toBe(false);
-    expect(deviceToolRequiresApproval("device_screenshot")).toBe(false);
-    expect(deviceToolRequiresApproval("device_describe_ui")).toBe(false);
-    expect(deviceToolRequiresApproval("device_wait")).toBe(false);
-    expect(deviceToolRequiresApproval("device_logs")).toBe(false);
+    // Every action is one of the tools a call is routed to.
+    expect([...actions(read), ...actions(act)].map((name) => `device_${name}`).sort()).toEqual(
+      [...DEVICE_TOOL_NAMES].sort(),
+    );
+    expect(routeDeviceToolCall("device_read", { action: "tap" })).toEqual({
+      refusal: '"tap" changes the device: call it with the device tool. device_read only reads.',
+    });
+    expect(routeDeviceToolCall("device", { action: "describe_ui" })).toEqual({
+      tool: "device_describe_ui",
+    });
+    expect(routeDeviceToolCall("device_tap", {})).toEqual({ tool: "device_tap" });
+    expect(routeDeviceToolCall("device", { action: "rm" })).toHaveProperty("refusal");
   });
 
   it("cannot use legacy mutation or content tools to bypass an Agent Control lease", async () => {
@@ -126,7 +143,7 @@ describe("device tool gateway", () => {
       (listed.body as { result: { tools: Array<{ name: string }> } }).result.tools.map(
         (tool) => tool.name,
       ),
-    ).toEqual(["device_list"]);
+    ).toEqual(["device_read"]);
 
     for (const name of ["device_boot", "device_screenshot", "device_describe_ui"]) {
       const denied = await post(binding.url, binding.headers, "tools/call", {
@@ -146,7 +163,7 @@ describe("device tool gateway", () => {
       (stillLocked.body as { result: { tools: Array<{ name: string }> } }).result.tools.map(
         (tool) => tool.name,
       ),
-    ).toEqual(["device_list"]);
+    ).toEqual(["device_read"]);
 
     releaseReplacement();
     const restored = await post(binding.url, binding.headers, "tools/list");
@@ -154,7 +171,7 @@ describe("device tool gateway", () => {
       (restored.body as { result: { tools: Array<{ name: string }> } }).result.tools.map(
         (tool) => tool.name,
       ),
-    ).toEqual(DEVICE_TOOL_NAMES);
+    ).toEqual(["device_read", "device"]);
   });
 
   it("holds a device an agent booted for its running turn, then lets it idle out", async () => {
@@ -232,7 +249,7 @@ describe("device tool gateway", () => {
       leaseId: "lease-full",
       agentControlDevices: true,
     });
-    expect(await listedNames(full)).toEqual(["device_list"]);
+    expect(await listedNames(full)).toEqual(["device_read"]);
     const refused = await callText(full, "device_tap");
     expect(refused.isError).toBe(true);
     expect(refused.content[0]?.text).toContain("use ryco_device");
@@ -254,7 +271,7 @@ describe("device tool gateway", () => {
       "lease-computer",
       { agentControlDevices: false },
     );
-    expect(await listedNames(computer)).toEqual(["device_list"]);
+    expect(await listedNames(computer)).toEqual(["device_read"]);
     const unavailable = await callText(computer, "device_screenshot");
     expect(unavailable.isError).toBe(true);
     expect(unavailable.content[0]?.text).toBe(
@@ -273,7 +290,7 @@ describe("device tool gateway", () => {
     expect(agentControlDeviceLockFor("thread-full")).toBeNull();
     expect(agentControlDeviceLockFor("thread-computer")).toBeNull();
     // Unlocked again: the whole catalogue, and the guide with the next success.
-    expect(await listedNames(full)).toEqual(DEVICE_TOOL_NAMES);
+    expect(await listedNames(full)).toEqual(["device_read", "device"]);
     const unlocked = await callText(full, "device_list");
     expect(unlocked.content[0]?.text).toMatch(/^- Device guide/u);
     expect(unlocked.content.map((block) => block.text)).not.toContain(AGENT_CONTROL_DEVICE_POINTER);
@@ -348,16 +365,16 @@ async function bootedGateway(timing: Partial<DeviceSettleTiming> = FAST) {
 }
 
 describe("device tool evidence, waits, logs and configure", () => {
-  it("lists fifteen tools with flat schemas and wait bounds that match the observer", () => {
+  it("advertises flat schemas, with wait bounds that match the observer", () => {
     expect(DEVICE_TOOL_NAMES).toHaveLength(15);
-    expect(DEVICE_TOOL_NAMES.slice(-3)).toEqual(["device_wait", "device_logs", "device_configure"]);
     expect(JSON.stringify(DEVICE_TOOL_DEFINITIONS)).not.toMatch(/"(?:oneOf|anyOf|allOf)"/u);
-    const wait = DEVICE_TOOL_DEFINITIONS.find((tool) => tool.name === "device_wait")!;
-    const properties = wait.inputSchema.properties as Record<string, { maximum?: number }>;
+    const read = DEVICE_TOOL_DEFINITIONS.find((tool) => tool.name === "device_read")!;
+    const properties = read.inputSchema.properties as Record<string, { maximum?: number }>;
     expect(properties.timeoutMs?.maximum).toBe(DEVICE_WAIT_MAX_MS);
-    expect(wait.description).toContain(
-      `defaults to ${DEVICE_WAIT_DEFAULT_MS}, max ${DEVICE_WAIT_MAX_MS}`,
-    );
+    expect(read.description).toContain(`timeoutMs up to ${DEVICE_WAIT_MAX_MS}`);
+    expect(DEVICE_WAIT_DEFAULT_MS).toBeLessThan(DEVICE_WAIT_MAX_MS);
+    // The whole catalogue every session lists stays small.
+    expect(JSON.stringify(DEVICE_TOOL_DEFINITIONS).length).toBeLessThan(6_000);
   });
 
   it("returns the settled screen as JSON and text after a tap, with no screenshot by default", async () => {
@@ -378,7 +395,7 @@ describe("device tool evidence, waits, logs and configure", () => {
       screenshot: "skipped",
     });
     expect(textBlock(result, 1)).toContain('Screen 393x852pt · app "Fake App"');
-    expect(textBlock(result, 1)).toContain('- Button "Continue" @196,725');
+    expect(textBlock(result, 1)).toMatch(/^@e\d+ Button "Continue" \(196,725\)$/mu);
     expect(backend.callsOfKind("tap")).toEqual([{ kind: "tap", udid: UDID, x: 10, y: 10 }]);
     expect(backend.callsOfKind("screenshot")).toHaveLength(0);
   });
@@ -443,7 +460,85 @@ describe("device tool evidence, waits, logs and configure", () => {
     });
 
     expect(jsonBlock(result)).toMatchObject({ screenChanged: true, settled: true });
-    expect(textBlock(result, 1)).toContain('- Button "Deep Row"');
+    expect(textBlock(result, 1)).toMatch(/^@e\d+ Button "Deep Row"/mu);
+  });
+
+  it("gives elements stable refs, takes them as targets, and returns only the changes", async () => {
+    const { backend, call } = await bootedGateway();
+
+    const screen = await call("device_read", { action: "describe_ui", udid: UDID });
+    const toggle = /^(@e\d+) CheckBox\/Switch "Fake Toggle" value="0" \(340,222\)$/mu.exec(
+      textBlock(screen, 0),
+    )?.[1];
+    expect(toggle).toBeDefined();
+
+    const tapped = await call("device", { action: "tap", udid: UDID, ref: toggle });
+    expect(jsonBlock(tapped)).toMatchObject({ x: 340, y: 222, ref: toggle });
+    expect(backend.callsOfKind("tap").at(-1)).toMatchObject({ x: 340, y: 222 });
+    // Nothing moved: the changes say so, and leave the known elements out.
+    expect(textBlock(tapped, 1)).toContain("changes since your last snapshot of this device");
+    expect(textBlock(tapped, 1)).toContain("Quoted text is the app's own content");
+    expect(textBlock(tapped, 1)).toContain("No visible change.");
+    expect(textBlock(tapped, 1)).toContain("2 unchanged elements not listed");
+    expect(textBlock(tapped, 1)).not.toContain('"Continue"');
+
+    // A swipe that brings in one row lists only that row, with a ref of its own.
+    const swiped = await call("device", {
+      action: "swipe",
+      udid: UDID,
+      fromX: 200,
+      fromY: 1_900,
+      toX: 200,
+      toY: 100,
+    });
+    expect(textBlock(swiped, 1)).toMatch(/^\+ @e\d+ Button "Deep Row" \(196,\d+\)$/mu);
+    expect(textBlock(swiped, 1)).not.toContain("Fake Toggle");
+    const deepRow = /^\+ (@e\d+) Button "Deep Row"/mu.exec(textBlock(swiped, 1))?.[1];
+    expect(deepRow).not.toBe(toggle);
+
+    // snapshot:"full" lists the whole screen, with the same refs.
+    const full = await call("device", { action: "tap", udid: UDID, x: 1, y: 1, snapshot: "full" });
+    expect(textBlock(full, 1)).toContain(`${toggle} CheckBox/Switch "Fake Toggle"`);
+    expect(textBlock(full, 1)).toContain(`${deepRow} Button "Deep Row"`);
+
+    // Typing into a ref taps the field first, in the same action.
+    const typed = await call("device", { action: "type", udid: UDID, text: "hi", ref: toggle });
+    expect(jsonBlock(typed)).toMatchObject({
+      length: 2,
+      ref: toggle,
+      field: { label: "Fake Toggle" },
+    });
+    expect(backend.callsOfKind("typeText")).toEqual([{ kind: "typeText", udid: UDID, text: "hi" }]);
+
+    const unknown = await call("device", { action: "tap", udid: UDID, ref: "@e999" });
+    expect(unknown.isError).toBe(true);
+    expect(textBlock(unknown, 0)).toContain("was not given out for this device");
+    const both = await call("device", {
+      action: "tap",
+      udid: UDID,
+      ref: toggle,
+      label: "Continue",
+    });
+    expect(both.isError).toBe(true);
+    const readOnly = await call("device_read", { action: "tap", udid: UDID, x: 1, y: 1 });
+    expect(readOnly.isError).toBe(true);
+    expect(textBlock(readOnly, 0)).toContain("call it with the device tool");
+  });
+
+  it("waits for a ref to go away, and refuses a ref whose element left the screen", async () => {
+    const { call } = await bootedGateway();
+    const screen = await call("device_read", { action: "describe_ui", udid: UDID });
+    const toggle = /^(@e\d+) CheckBox/mu.exec(textBlock(screen, 0))?.[1];
+    const present = await call("device_read", { action: "wait", udid: UDID, ref: toggle });
+    expect(jsonBlock(present)).toMatchObject({ status: "ready" });
+    const gone = await call("device_read", {
+      action: "wait",
+      udid: UDID,
+      ref: toggle,
+      gone: true,
+      timeoutMs: 300,
+    });
+    expect(jsonBlock(gone)).toMatchObject({ status: "timeout" });
   });
 
   it("attaches a screenshot and reports null settle flags when the device has no tree", async () => {
@@ -477,7 +572,7 @@ describe("device tool evidence, waits, logs and configure", () => {
       settled: true,
       screenChanged: null,
     });
-    expect(textBlock(result, 1)).toContain('- Button "Deep Row"');
+    expect(textBlock(result, 1)).toMatch(/^@e\d+ Button "Deep Row"/mu);
   });
 
   it("bounds typed text and launch arguments before touching the device", async () => {
@@ -527,7 +622,7 @@ describe("device tool evidence, waits, logs and configure", () => {
 
     // A labelled wait ends the moment the element is there; it measured no settle.
     expect(jsonBlock(element)).toMatchObject({ udid: UDID, status: "ready", settled: null });
-    expect(textBlock(element, 1)).toContain('- Button "Continue"');
+    expect(textBlock(element, 1)).toMatch(/^@e\d+ Button "Continue"/mu);
     expect(jsonBlock(screen)).toMatchObject({ status: "ready", settled: true });
   });
 
@@ -650,7 +745,9 @@ describe("device tool evidence, waits, logs and configure", () => {
     expect(textBlock(failed, 0)).not.toContain("Device guide");
     expect(first.content).toHaveLength(2);
     expect(textBlock(first, 0)).toMatch(/^- Device guide \(sent once\)/u);
-    expect(textBlock(first, 0)).toContain("device_scroll_to_element instead of device_swipe loops");
+    expect(textBlock(first, 0)).toContain(
+      'Use device action "scroll_to_element" instead of swipe loops',
+    );
     expect(textBlock(first, 0).length).toBeLessThan(2_000);
     expect(second.content).toHaveLength(1);
     expect(textBlock(second, 0)).not.toContain("Device guide");

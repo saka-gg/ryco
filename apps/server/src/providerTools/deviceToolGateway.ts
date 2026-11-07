@@ -7,9 +7,16 @@
  * Each binding belongs to one Ryco thread and is accepted only while that
  * provider reports an active turn.
  *
- * What each tool does lives in `deviceToolActions.ts`, loaded with the first
+ * Two tools are advertised, `device` and `device_read`, each with an
+ * `action` (`deviceToolDefinitions.ts`); an action runs the internal tool of
+ * the same job (`device_tap`, ...), which older sessions may still call by
+ * name. What each does lives in `deviceToolActions.ts`, loaded with the first
  * call; inputs return the settled screen as evidence, and the first
- * successful result of a binding carries the driving guide.
+ * successful result each agent of a binding gets carries the driving guide.
+ *
+ * The "Use simulators" and "Agents can use simulators" settings
+ * (`deviceToolAccess.ts`) decide whether a session gets the tools at all, and
+ * a call made after either was turned off is refused.
  */
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -18,6 +25,7 @@ import { DeviceRpcError } from "@ryco/contracts";
 import { Schema } from "effect";
 
 import type { DeviceManager } from "../device/DeviceManager.ts";
+import { agentDeviceRefusal, deviceToolAccess } from "./deviceToolAccess.ts";
 import type { DeviceSettleTiming, DeviceToolContent } from "../device/deviceObservation.ts";
 
 export type { DeviceToolContent } from "../device/deviceObservation.ts";
@@ -59,18 +67,44 @@ export const DEVICE_TOOL_NAMES = [
 
 export type DeviceToolName = (typeof DEVICE_TOOL_NAMES)[number];
 
-const APPROVAL_REQUIRED = new Set<DeviceToolName>([
-  "device_boot",
-  "device_install",
-  "device_launch",
-  "device_open_url",
-  "device_tap",
-  "device_swipe",
-  "device_type",
-  "device_press_button",
-  "device_scroll_to_element",
-  "device_configure",
+/**
+ * The advertised tools; their actions name the tools above without the
+ * `device_` prefix. `device_read` runs only read-only actions (it carries the
+ * read-only annotation that lets providers skip asking), `device` runs any.
+ * Kept here, not loaded with the catalogue, so a call is routed without it.
+ */
+const DEVICE_TOOL = "device";
+const DEVICE_READ_TOOL = "device_read";
+const READ_ONLY_TOOLS = new Set<DeviceToolName>([
+  "device_list",
+  "device_screenshot",
+  "device_describe_ui",
+  "device_wait",
+  "device_logs",
 ]);
+
+/** The internal tool a `tools/call` runs, or a refusal for the agent. */
+export function routeDeviceToolCall(
+  name: string,
+  args: Readonly<Record<string, unknown>>,
+): { readonly tool: DeviceToolName } | { readonly refusal: string } {
+  if (name === DEVICE_TOOL || name === DEVICE_READ_TOOL) {
+    const action = args.action;
+    const tool = typeof action === "string" ? `device_${action}` : "";
+    if (!DEVICE_TOOL_NAMES.includes(tool as DeviceToolName)) {
+      return { refusal: `Argument "action" must be one of the ${name} tool's actions.` };
+    }
+    if (name === DEVICE_READ_TOOL && !READ_ONLY_TOOLS.has(tool as DeviceToolName)) {
+      return {
+        refusal: `${JSON.stringify(action)} changes the device: call it with the ${DEVICE_TOOL} tool. ${DEVICE_READ_TOOL} only reads.`,
+      };
+    }
+    return { tool: tool as DeviceToolName };
+  }
+  // Sessions started before the catalogue had two tools still call the old ones.
+  if (DEVICE_TOOL_NAMES.includes(name as DeviceToolName)) return { tool: name as DeviceToolName };
+  return { refusal: "Unknown device tool." };
+}
 
 const AGENT_CONTROL_SAFE_LEGACY_TOOLS = new Set<DeviceToolName>(["device_list"]);
 
@@ -123,10 +157,6 @@ export function blockProcessDeviceToolsForAgentControl(
 /** The Agent Control lease holding this thread's gateway tools, if any. */
 export function agentControlDeviceLockFor(threadId: string): AgentControlDeviceLock | null {
   return agentControlLocksByThread.get(threadId) ?? null;
-}
-
-export function deviceToolRequiresApproval(name: string): boolean {
-  return APPROVAL_REQUIRED.has(name as DeviceToolName);
 }
 
 const isDeviceRpcError = Schema.is(DeviceRpcError);
@@ -203,6 +233,11 @@ export interface DeviceToolCallInput {
   readonly maxImageBase64Chars?: number | undefined;
   /** Tests shrink the settle windows. */
   readonly timing?: Partial<DeviceSettleTiming> | undefined;
+  /**
+   * Who reads the result: one agent of one session. Screens come back as the changes since
+   * the last screen this reader was shown; defaults to the thread.
+   */
+  readonly observerKey?: string | undefined;
 }
 
 /**
@@ -247,10 +282,12 @@ export async function callDeviceTool(
 }
 
 interface BindingRecord {
+  readonly token: string;
   readonly threadId: string;
   readonly isTurnActive: () => boolean;
-  /** Set once the driving guide went out with a successful result. */
-  guided: boolean;
+  readonly agentKeyFor: ((toolUseId: string | undefined) => string | undefined) | undefined;
+  /** Agents (`MAIN_AGENT` or a provider's subagent id) the driving guide already went to. */
+  readonly guidedAgents: Set<string>;
   /** Running `tools/call`s by JSON-RPC id, so `notifications/cancelled` can stop one. */
   readonly inFlight: Map<string, AbortController>;
 }
@@ -262,6 +299,30 @@ function requestKey(id: unknown): string | null {
   return null;
 }
 
+/** The session's own agent, when the provider names no subagent for a call. */
+const MAIN_AGENT = "main";
+/** Agents of one binding that got the guide; a long session with many subagents forgets the oldest. */
+const MAX_GUIDED_AGENTS = 64;
+
+/** Claude Code names the tool_use behind each MCP call here. */
+function toolUseIdOf(params: JsonRecord): string | undefined {
+  const meta = params._meta;
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return undefined;
+  const id = (meta as JsonRecord)["claudecode/toolUseId"];
+  return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
+export interface DeviceToolBindingInput {
+  readonly threadId: string;
+  readonly isTurnActive: () => boolean;
+  /**
+   * Which agent made a call, from the provider's tool_use id (Claude: its PreToolUse hook
+   * saw the subagent's id). Undefined, or a call without one, counts as the session's own
+   * agent. Each agent gets the driving guide once and its own screen diffs.
+   */
+  readonly agentKeyFor?: ((toolUseId: string | undefined) => string | undefined) | undefined;
+}
+
 export interface DeviceToolBinding {
   readonly url: string;
   readonly headers: Readonly<Record<string, string>>;
@@ -269,10 +330,7 @@ export interface DeviceToolBinding {
 }
 
 export interface DeviceToolGateway {
-  readonly createBinding: (input: {
-    readonly threadId: string;
-    readonly isTurnActive: () => boolean;
-  }) => DeviceToolBinding;
+  readonly createBinding: (input: DeviceToolBindingInput) => DeviceToolBinding;
   readonly close: () => Promise<void>;
 }
 
@@ -282,11 +340,37 @@ export function installProcessDeviceToolGateway(gateway: DeviceToolGateway | nul
   processGateway = gateway;
 }
 
-export function createProcessDeviceToolBinding(input: {
-  readonly threadId: string;
-  readonly isTurnActive: () => boolean;
-}): DeviceToolBinding | null {
-  return processGateway?.createBinding(input) ?? null;
+/** Live bindings by thread, so first-turn instructions know a session has device tools. */
+const bindingsByThread = new Map<string, number>();
+
+/**
+ * A device tool binding for a provider session starting now, or null when the node has no
+ * gateway or agents may not use its devices ("Use simulators" or "Agents can use
+ * simulators" off): such a session gets no device tools and no device instructions.
+ */
+export function createProcessDeviceToolBinding(
+  input: DeviceToolBindingInput,
+): DeviceToolBinding | null {
+  if (processGateway === null || agentDeviceRefusal(deviceToolAccess()) !== null) return null;
+  const binding = processGateway.createBinding(input);
+  bindingsByThread.set(input.threadId, (bindingsByThread.get(input.threadId) ?? 0) + 1);
+  let disposed = false;
+  return {
+    ...binding,
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      const count = (bindingsByThread.get(input.threadId) ?? 1) - 1;
+      if (count > 0) bindingsByThread.set(input.threadId, count);
+      else bindingsByThread.delete(input.threadId);
+      binding.dispose();
+    },
+  };
+}
+
+/** Whether a provider session of this thread holds device tools. */
+export function threadHasDeviceTools(threadId: string): boolean {
+  return bindingsByThread.has(threadId);
 }
 
 function json(response: ServerResponse, status: number, value: unknown): void {
@@ -390,12 +474,11 @@ export async function startDeviceToolGateway(
       }
       if (method === "ping") return json(response, 200, mcpSuccess(id, {}));
       if (method === "tools/list") {
-        const { DEVICE_TOOL_DEFINITIONS } = await loadDefinitions();
+        const { DEVICE_TOOL_DEFINITIONS, DEVICE_LIST_ONLY_TOOL_DEFINITIONS } =
+          await loadDefinitions();
         const tools =
           agentControlDeviceLockFor(binding.threadId) !== null
-            ? DEVICE_TOOL_DEFINITIONS.filter((tool) =>
-                AGENT_CONTROL_SAFE_LEGACY_TOOLS.has(tool.name),
-              )
+            ? DEVICE_LIST_ONLY_TOOL_DEFINITIONS
             : DEVICE_TOOL_DEFINITIONS;
         return json(response, 200, mcpSuccess(id, { tools }));
       }
@@ -421,35 +504,33 @@ export async function startDeviceToolGateway(
 
       const params = asRecord(message.params ?? {});
       const name = params.name;
-      if (typeof name !== "string" || !DEVICE_TOOL_NAMES.includes(name as DeviceToolName)) {
+      if (typeof name !== "string") {
         return json(response, 200, mcpError(id, -32602, "Unknown device tool."));
       }
-      const lock = agentControlDeviceLockFor(binding.threadId);
-      if (lock !== null && !AGENT_CONTROL_SAFE_LEGACY_TOOLS.has(name as DeviceToolName)) {
-        return json(
-          response,
-          200,
-          mcpSuccess(id, {
-            isError: true,
-            content: [{ type: "text", text: agentControlRefusal(lock) }],
-          }),
-        );
-      }
+      const refuse = (text: string) =>
+        json(response, 200, mcpSuccess(id, { isError: true, content: [{ type: "text", text }] }));
       let args: JsonRecord;
       try {
         args = asRecord(params.arguments ?? {});
       } catch (error) {
-        return json(
-          response,
-          200,
-          mcpSuccess(id, {
-            isError: true,
-            content: [
-              { type: "text", text: error instanceof Error ? error.message : String(error) },
-            ],
-          }),
-        );
+        return refuse(error instanceof Error ? error.message : String(error));
       }
+      const route = routeDeviceToolCall(name, args);
+      if ("refusal" in route) {
+        if (route.refusal === "Unknown device tool.") {
+          return json(response, 200, mcpError(id, -32602, route.refusal));
+        }
+        return refuse(route.refusal);
+      }
+      const tool = route.tool;
+      // Turned off since this session started: nothing reaches a device.
+      const accessRefusal = agentDeviceRefusal(deviceToolAccess());
+      if (accessRefusal !== null) return refuse(accessRefusal);
+      const lock = agentControlDeviceLockFor(binding.threadId);
+      if (lock !== null && !AGENT_CONTROL_SAFE_LEGACY_TOOLS.has(tool)) {
+        return refuse(agentControlRefusal(lock));
+      }
+      const agentKey = binding.agentKeyFor?.(toolUseIdOf(params)) ?? MAIN_AGENT;
       // A provider that drops the request (Stop, a crash, its own timeout) or
       // cancels it, or the gateway closing, must not leave a settle loop
       // polling the device after nobody is listening.
@@ -465,10 +546,11 @@ export async function startDeviceToolGateway(
         const result = await callDeviceTool({
           manager,
           threadId: binding.threadId,
-          name: name as DeviceToolName,
+          name: tool,
           args,
           signal: controller.signal,
           timing: options.timing,
+          observerKey: `${binding.token}:${agentKey}`,
         });
         let content = result.content;
         const lockAfter = agentControlDeviceLockFor(binding.threadId);
@@ -478,9 +560,13 @@ export async function startDeviceToolGateway(
           if (lockAfter.agentControlDevices && result.isError !== true) {
             content = [...content, { type: "text", text: AGENT_CONTROL_DEVICE_POINTER }];
           }
-        } else if (result.isError !== true && !binding.guided) {
+        } else if (result.isError !== true && !binding.guidedAgents.has(agentKey)) {
           // Claimed before the await, so concurrent first calls send it once.
-          binding.guided = true;
+          binding.guidedAgents.add(agentKey);
+          if (binding.guidedAgents.size > MAX_GUIDED_AGENTS) {
+            const oldest = binding.guidedAgents.values().next();
+            if (oldest.done !== true) binding.guidedAgents.delete(oldest.value);
+          }
           const guidance = await loadGuidance().catch(() => null);
           if (guidance !== null) {
             content = [
@@ -520,9 +606,16 @@ export async function startDeviceToolGateway(
   });
 
   return {
-    createBinding: ({ threadId, isTurnActive }) => {
+    createBinding: ({ threadId, isTurnActive, agentKeyFor }) => {
       const token = randomUUID();
-      bindings.set(token, { threadId, isTurnActive, guided: false, inFlight: new Map() });
+      bindings.set(token, {
+        token,
+        threadId,
+        isTurnActive,
+        agentKeyFor,
+        guidedAgents: new Set(),
+        inFlight: new Map(),
+      });
       return {
         url: baseUrl,
         headers: { Authorization: `Bearer ${token}` },

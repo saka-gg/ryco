@@ -1749,7 +1749,21 @@ function areWorkLogEntriesUnchanged(previous: WorkLogEntry, next: WorkLogEntry):
       previous.exitCode === next.exitCode &&
       previous.startedAt === next.startedAt &&
       previous.lastActivityAt === next.lastActivityAt &&
+      areDeviceToolsUnchanged(previous.deviceTool, next.deviceTool) &&
       areAgentSpawnsUnchanged(previous.agentSpawn, next.agentSpawn))
+  );
+}
+
+// Arguments come straight from the activity payload, so their identity tracks the activity's.
+function areDeviceToolsUnchanged(
+  previous: WorkLogEntry["deviceTool"],
+  next: WorkLogEntry["deviceTool"],
+): boolean {
+  return (
+    previous === next ||
+    (previous?.name === next?.name &&
+      previous?.server === next?.server &&
+      previous?.input === next?.input)
   );
 }
 

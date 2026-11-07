@@ -24,6 +24,7 @@ import {
   DeviceTestingInput,
   DeviceTypeTextInput,
   type DeviceLaunchAppResult,
+  type DeviceUiNode,
   type DeviceOpenPaneReason,
 } from "@ryco/contracts";
 import { Schema } from "effect";
@@ -38,7 +39,6 @@ import {
   deviceActionContent,
   deviceEvidenceContent,
   evidenceScreenshotMode,
-  formatUiSnapshot,
   inlineDeviceScreenshot,
   observe,
   waitFor,
@@ -46,11 +46,24 @@ import {
   type DeviceObservation,
   type DeviceToolContent,
 } from "../device/deviceObservation.ts";
-import { clippedElementText } from "../device/deviceUiSnapshot.ts";
+import {
+  deviceUiRefTable,
+  lastShownSnapshot,
+  normalizeRef,
+  rememberShownSnapshot,
+} from "../device/deviceUiRefs.ts";
+import {
+  buildUiSnapshot,
+  clippedElementText,
+  renderUiSnapshot,
+  renderUiSnapshotChanges,
+} from "../device/deviceUiSnapshot.ts";
 import { planIosTestingAction } from "../device/iosTestingActions.ts";
 import {
   DeviceUiTargetError,
   readTapRequest,
+  type DeviceUiRefTarget,
+  type DeviceUiTarget,
   type DeviceUiTargetMatch,
 } from "../device/uiTreeTargeting.ts";
 import {
@@ -235,9 +248,57 @@ function readSetting(udid: string, args: JsonRecord): DeviceTestingInput {
   return input;
 }
 
-/** The tap's shape (label or x/y, not both); a mistake there is an argument error. */
-function readTap(args: JsonRecord): ReturnType<typeof readTapRequest> {
+/** The ref argument resolved against this thread's ref table of the device. */
+function refArg(args: JsonRecord, threadId: string, udid: string): DeviceUiRefTarget | undefined {
+  if (args.ref === undefined) return undefined;
+  const raw = stringArg(args, "ref")!;
+  if (normalizeRef(raw) === null) {
+    throw new DeviceToolArgumentError(
+      'Argument "ref" must be an element ref from a snapshot, like @e5.',
+    );
+  }
+  const resolved = deviceUiRefTable(threadId, udid).resolve(raw);
+  if (resolved === null) {
+    throw new DeviceToolArgumentError(
+      `Ref ${raw} was not given out for this device: read the screen (describe_ui) and use a ref from it.`,
+    );
+  }
+  return resolved;
+}
+
+/** A ref or label target (scroll, wait, type into); a mistake there is an argument error. */
+function readElementTarget(
+  args: JsonRecord,
+  ref: DeviceUiRefTarget | undefined,
+  options: { readonly required: boolean },
+): DeviceUiTarget | undefined {
+  const label = optionalStringArg(args, "label");
+  const role = optionalStringArg(args, "role");
+  if (ref !== undefined) {
+    if (label !== undefined || role !== undefined) {
+      throw new DeviceToolArgumentError("Pass either ref or label (with optional role), not both.");
+    }
+    return { label: ref.name, ref };
+  }
+  if (role !== undefined && label === undefined) {
+    throw new DeviceToolArgumentError('Argument "role" only narrows a label; pass label too.');
+  }
+  if (label === undefined) {
+    if (options.required) {
+      throw new DeviceToolArgumentError("Pass ref (from the snapshot) or label.");
+    }
+    return undefined;
+  }
+  return { label, role };
+}
+
+/** The tap's shape (ref, label or x/y, one of them); a mistake there is an argument error. */
+function readTap(
+  args: JsonRecord,
+  ref: DeviceUiRefTarget | undefined,
+): ReturnType<typeof readTapRequest> {
   const input = {
+    ...(ref !== undefined ? { ref } : {}),
     ...(args.x !== undefined ? { x: numberArg(args, "x") } : {}),
     ...(args.y !== undefined ? { y: numberArg(args, "y") } : {}),
     ...(args.label !== undefined ? { label: stringArg(args, "label") } : {}),
@@ -291,6 +352,22 @@ export async function runDeviceTool(
   };
   const observeArg = booleanArg(args, "observe");
   const screenshotArg = booleanArg(args, "screenshot");
+  const snapshotArg = enumArg(args, "snapshot", ["diff", "full"] as const) ?? "diff";
+  const observerKey = input.observerKey ?? threadId;
+  const ref = () => refArg(args, threadId, udid());
+
+  /**
+   * The screen as this reader gets it: elements carry the thread's stable refs, and with
+   * `snapshot: "diff"` only what changed since the last screen the reader was shown,
+   * unless most of it changed. Every screen sent becomes the reader's new baseline.
+   */
+  const formatScreen = (root: DeviceUiNode, mode: "diff" | "full" = snapshotArg): string => {
+    const snapshot = buildUiSnapshot(root, deviceUiRefTable(threadId, udid()));
+    const previous = mode === "diff" ? lastShownSnapshot(observerKey, udid()) : null;
+    const changes = previous === null ? null : renderUiSnapshotChanges(previous, snapshot);
+    rememberShownSnapshot(observerKey, udid(), snapshot);
+    return changes ?? renderUiSnapshot(snapshot);
+  };
 
   const maxImageBase64Chars = input.maxImageBase64Chars ?? DEVICE_GATEWAY_IMAGE_MAX_BASE64_CHARS;
 
@@ -301,6 +378,7 @@ export async function runDeviceTool(
     const content = await deviceEvidenceContent(manager, udid(), observation, fields, {
       screenshot: evidenceScreenshotMode(screenshotArg),
       maxImageBase64Chars,
+      formatScreen,
     });
     signal?.throwIfAborted();
     return content;
@@ -404,7 +482,7 @@ export async function runDeviceTool(
       );
     }
     case "device_tap": {
-      const request = readTap(args);
+      const request = readTap(args, ref());
       if (request.kind === "point") {
         return observed(
           () => manager.tap(udid(), request.x, request.y),
@@ -426,6 +504,7 @@ export async function runDeviceTool(
             udid: udid(),
             x: tapped.point.x,
             y: tapped.point.y,
+            ...(request.target.ref === undefined ? {} : { ref: request.target.ref.name }),
             element: {
               role: tapped.node.role,
               subrole: tapped.node.subrole,
@@ -461,9 +540,34 @@ export async function runDeviceTool(
         args.text,
         `Argument "text" must be a string of at most ${DEVICE_TOOL_BOUNDS.textMaxLength} characters.`,
       );
+      // With a ref or label, the field is tapped (scrolled to if needed) first, in one action.
+      const field = readElementTarget(args, ref(), { required: false });
+      let focused: DeviceUiTargetMatch | null = null;
       return observed(
-        () => manager.typeText(udid(), text),
-        () => ({ udid: udid(), length: text.length }),
+        async () => {
+          if (field !== undefined) {
+            focused = await manager.tapElement(udid(), field, { guard: stepGuard });
+            stepGuard();
+          }
+          await manager.typeText(udid(), text);
+        },
+        () => {
+          const target = focused as DeviceUiTargetMatch | null;
+          return {
+            udid: udid(),
+            length: text.length,
+            ...(target === null
+              ? {}
+              : {
+                  ...(field?.ref === undefined ? {} : { ref: field.ref.name }),
+                  field: {
+                    role: target.node.role,
+                    subrole: target.node.subrole,
+                    label: clippedElementText(target.node).label,
+                  },
+                }),
+          };
+        },
       );
     }
     case "device_press_button": {
@@ -512,7 +616,8 @@ export async function runDeviceTool(
       const tree = await manager.describeUi(udid());
       await surface();
       if (format === "compact") {
-        return [{ type: "text", text: formatUiSnapshot(tree.root) }];
+        // Asked for the screen: always all of it, and the reader's new baseline.
+        return [{ type: "text", text: formatScreen(tree.root, "full") }];
       }
       const text = JSON.stringify(tree, null, 2);
       // Measured as it travels: escaped inside the result's JSON, in UTF-8.
@@ -522,10 +627,7 @@ export async function runDeviceTool(
       return [{ type: "text", text }];
     }
     case "device_scroll_to_element": {
-      const target = {
-        label: stringArg(args, "label")!,
-        ...(args.role !== undefined ? { role: stringArg(args, "role") } : {}),
-      };
+      const target = readElementTarget(args, ref(), { required: true })!;
       const maxScrolls = boundedInteger(
         args,
         "maxSwipes",
@@ -543,21 +645,18 @@ export async function runDeviceTool(
           frame: match.node.frame,
         },
         tapPoint: match.point,
+        ...(target.ref === undefined ? {} : { ref: target.ref.name }),
       };
       if (observeArg === false) return await unobserved(fields);
       const settled = await waitForSettle(manager, udid(), { signal, timing, treeKnown: true });
       return await evidence({ ...settled, changed: null }, fields);
     }
     case "device_wait": {
-      const label = optionalStringArg(args, "label");
-      const role = optionalStringArg(args, "role");
-      if (role !== undefined && label === undefined) {
-        throw new DeviceToolArgumentError('Argument "role" only narrows a label; pass label too.');
-      }
+      const target = readElementTarget(args, ref(), { required: false });
       const gone = booleanArg(args, "gone");
       const timeoutMs =
         boundedInteger(args, "timeoutMs", 0, DEVICE_WAIT_MAX_MS) ?? DEVICE_WAIT_DEFAULT_MS;
-      if (label === undefined) {
+      if (target === undefined) {
         const settled = await waitForSettle(manager, udid(), {
           signal,
           timing,
@@ -568,12 +667,7 @@ export async function runDeviceTool(
           settled.settled === null ? "unavailable" : settled.settled ? "ready" : "timeout";
         return await evidence({ ...settled, changed: null }, { udid: udid(), status });
       }
-      const outcome = await waitFor(
-        manager,
-        udid(),
-        { label, role },
-        { gone, timeoutMs, signal, timing },
-      );
+      const outcome = await waitFor(manager, udid(), target, { gone, timeoutMs, signal, timing });
       await surface();
       return await evidence(
         {

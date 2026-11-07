@@ -23,6 +23,12 @@ The provider replay test helpers in `apps/server/src/provider/testUtils/replay/`
 upstream's replay testkit at commit `91992bd5d464d6a01b2a5c1e7926e68ad09ea40e`, under the same
 copyright and license.
 
+The device tool routing rules (`apps/server/src/providerTools/deviceToolRouting.ts`), their
+delivery to Claude native subagents through a SubagentStart hook, and the device routing eval in
+`evals/device-routing/` adapt upstream's device instructions
+(`packages/provider-core/src/server/orchestrationInstructions.ts`) and its `evals/mcp-tool-use`
+device cases at commit `6577c6b6`, under the same copyright and license.
+
 ### MIT License
 
 Copyright (c) 2026 T3 Tools Inc.

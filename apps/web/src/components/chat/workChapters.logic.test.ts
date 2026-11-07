@@ -52,6 +52,28 @@ describe("deriveChapterStepDisplay", () => {
     expect(settled.meta).toEqual({ type: "text", text: "6.0s", failed: false });
   });
 
+  it("labels a device tool call by its action instead of the generic tool title", () => {
+    const tap = {
+      itemType: "mcp_tool_call",
+      toolTitle: "MCP tool call",
+      detail: 'mcp__ryco_device__device: {"action":"tap","ref":"@e5"}',
+      deviceTool: { name: "mcp__ryco_device__device", input: { action: "tap", ref: "@e5" } },
+    } as const;
+    expect(deriveChapterStepDisplay(entry({ ...running, ...tap }), undefined)).toMatchObject({
+      kind: "tool",
+      status: "running",
+      verb: "Tapping",
+      target: "@e5",
+    });
+    expect(deriveChapterStepDisplay(entry({ ...done, ...tap }), undefined)).toMatchObject({
+      verb: "Tapped",
+      target: "@e5",
+    });
+    expect(
+      deriveChapterStepDisplay(entry({ ...done, ...tap, tone: "error" }), undefined),
+    ).toMatchObject({ status: "failed", verb: "Tap", target: "@e5" });
+  });
+
   it("labels a command from its normalized form, not the shell wrapper", () => {
     const display = deriveChapterStepDisplay(
       entry({

@@ -63,6 +63,7 @@ import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner
 import * as SourceControlDiscovery from "./sourceControl/SourceControlDiscovery.ts";
 import { ContextHandoffInspectionLive } from "./orchestration/Layers/ContextHandoffInspection.ts";
 import { DeviceServiceLive } from "./device/Layers/DeviceService.ts";
+import { DeviceToolAccessLive } from "./device/Layers/DeviceToolAccess.ts";
 import { DeviceThreadLifecycleLive } from "./device/Layers/DeviceThreadLifecycle.ts";
 import { deviceFrameRouteLayer } from "./device/deviceFrameRoute.ts";
 import { nodeBrowserFrameRouteLayer } from "./nodeBrowser/nodeBrowserRoute.ts";
@@ -594,7 +595,11 @@ const RuntimeCoreBaseDependenciesLive = RuntimeFeatureLayerLive.pipe(
   // Remote-refreshable provider model metadata (bundled fallback), and the CPU priority agent
   // CLIs run at (the `lowerAgentProcessPriority` setting; every agent driver requires it).
   // Provided at the same level as the event loggers so driver `create()` sees them.
-  Layer.provideMerge(Layer.mergeAll(ModelManifest.layer, AgentProcessPriorityLive)),
+  // With the "Use simulators" / "Agents can use simulators" settings as the device tool gateway
+  // reads them when a provider session starts and at each call.
+  Layer.provideMerge(
+    Layer.mergeAll(ModelManifest.layer, AgentProcessPriorityLive, DeviceToolAccessLive),
+  ),
   // `OpenCodeDriver.create()` yields `OpenCodeRuntime`; previously the old
   // `ProviderRegistryLive` pulled `OpenCodeRuntimeLive` in for itself, but
   // the rewritten registry reads snapshots off the instance registry and

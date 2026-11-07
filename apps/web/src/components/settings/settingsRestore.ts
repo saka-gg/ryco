@@ -17,6 +17,8 @@ const RESTORABLE_SETTINGS = {
   responseStreamingMode: "Response streaming",
   enableProviderUpdateChecks: "Provider update checks",
   lowerAgentProcessPriority: "Lower agent CPU priority",
+  devicesEnabled: "Use simulators",
+  agentDevicesEnabled: "Agents can use simulators",
   continueThreadsAfterRestart: "Continue after restart",
   autoResumeLimitedThreads: "Auto-resume limited threads",
   snoozeLimitedThreads: "Snooze limited threads",

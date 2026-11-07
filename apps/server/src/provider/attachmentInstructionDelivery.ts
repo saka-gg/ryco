@@ -5,25 +5,34 @@
  * The instructions describe a session-wide capability, so they belong in the
  * session's system or developer instructions (Claude `systemPrompt.append`,
  * Codex collaboration-mode developer instructions). Adapters without such a
- * channel get them once, prefixed to the first turn of each runtime session.
+ * channel get them once, prefixed to the first turn of each runtime session, with
+ * the device routing rules when that session has Ryco's device tools.
  * A native command (`/compact`, `/init`, custom commands) is never prefixed:
  * provider CLIs only treat input that starts with `/` as a command.
  *
  * @module attachmentInstructionDelivery
  */
 import { ASSISTANT_ATTACHMENT_INSTRUCTIONS } from "../assistantAttachments.ts";
+import { DEVICE_ROUTING_INSTRUCTIONS } from "../providerTools/deviceToolRouting.ts";
 
 /** Input a provider CLI parses as a native slash command; it must reach the provider verbatim. */
 export function isSlashCommandInput(input: string | undefined): boolean {
   return input?.trimStart().startsWith("/") ?? false;
 }
 
-/** The first-turn input carrying the attachment instructions ahead of the user's text. */
-export function withAttachmentInstructions(input: string | undefined): string {
-  const text = input ?? "";
-  return text.length > 0
-    ? `${ASSISTANT_ATTACHMENT_INSTRUCTIONS}\n\n${text}`
+/**
+ * The first-turn input carrying the attachment instructions (and, while the session has
+ * Ryco's device tools, the device routing rules) ahead of the user's text.
+ */
+export function withAttachmentInstructions(
+  input: string | undefined,
+  options: { readonly deviceTools?: boolean } = {},
+): string {
+  const instructions = options.deviceTools
+    ? `${ASSISTANT_ATTACHMENT_INSTRUCTIONS}\n\n${DEVICE_ROUTING_INSTRUCTIONS}`
     : ASSISTANT_ATTACHMENT_INSTRUCTIONS;
+  const text = input ?? "";
+  return text.length > 0 ? `${instructions}\n\n${text}` : instructions;
 }
 
 const MAX_TRACKED_THREADS = 4_096;

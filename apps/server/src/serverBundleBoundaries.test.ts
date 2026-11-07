@@ -757,7 +757,9 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // use. 7.185 MB once the node directory's store moved behind import() (-6 KB). 7.177 MB
     // after main's settings redesign (+9 KB) once the copy's MCP tools and export stopped
     // statically importing boot modules, whose sharing split boot code into extra chunks (-18 KB).
-    expect(bytes).toBeLessThan(7_191_000);
+    // 7.212 MB on 2026-11-07 for the simulator program's merge train: the device tools,
+    // live input, device tabs, relay video and setup on top of Computer Use measured 7.209 MB.
+    expect(bytes).toBeLessThan(7_212_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.

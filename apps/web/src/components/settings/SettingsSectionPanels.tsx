@@ -38,6 +38,7 @@ import { SessionImportSettings } from "./SessionImportSettings";
 import {
   AboutSettings,
   AgentProcessPrioritySettings,
+  SimulatorSettings,
   ArchivedThreadsPanel,
   DefaultEditorSetting,
   DesktopUpdateTrackSettings,
@@ -650,6 +651,7 @@ const DEVICE_TAB_CHUNKS: Readonly<Record<SettingsDevicePartId, ReadonlyArray<Pre
     access: [LazyConnectionsSettings],
     security: [LazyNodeSecuritySettings],
     "computer-use": [LazyDeviceComputerUseSettings],
+    simulators: [],
     power: [],
   };
 
@@ -730,6 +732,9 @@ export function SettingsDevicePage({
           </SettingsTargetProvider>
         </SettingsEditingScopeProvider>
       );
+      break;
+    case "simulators":
+      body = ownerPart(<SimulatorSettings />);
       break;
     case "power":
       body = (

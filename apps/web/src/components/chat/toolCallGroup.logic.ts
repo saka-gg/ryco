@@ -7,6 +7,7 @@
 //          ToolCallGroupSummary, isSummarizableToolCallEntry,
 //          classifyToolCallSummaryCategory, summarizeToolCallGroup
 
+import { resolveDeviceTool } from "@ryco/shared/deviceToolPresentation";
 import type { WorkLogEntry } from "../../session-logic";
 import {
   deriveReadableCommandDisplay,
@@ -22,6 +23,7 @@ export type ToolCallSummaryCategory =
   | "read"
   | "search"
   | "agent"
+  | "device"
   | "tool"
   | "other";
 
@@ -66,6 +68,9 @@ function classifyCommandVerb(verb: string): ToolCallSummaryCategory {
 }
 
 export function classifyToolCallSummaryCategory(entry: WorkLogEntry): ToolCallSummaryCategory {
+  if (entry.deviceTool && resolveDeviceTool(entry.deviceTool)) {
+    return "device";
+  }
   if (
     entry.requestKind === "file-change" ||
     entry.itemType === "file_change" ||
@@ -124,6 +129,7 @@ const CATEGORY_ORDER: ReadonlyArray<ToolCallSummaryCategory> = [
   "read",
   "search",
   "agent",
+  "device",
   "tool",
   "other",
 ];
@@ -144,6 +150,8 @@ function summaryPartLabel(
       return `Searched ${count} ${pluralize(count, "file")}`;
     case "agent":
       return `Ran ${count} agent ${pluralize(count, "task")}`;
+    case "device":
+      return `Used the device ${count === 1 ? "once" : `${count} times`}`;
     case "tool":
       return `Used ${count} ${pluralize(count, "tool")}`;
     case "other":

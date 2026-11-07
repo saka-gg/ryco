@@ -225,6 +225,22 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   {
     section: "device",
     storage: "device",
+    part: "simulators",
+    title: "Use simulators",
+    description: "Run iOS Simulators and Android Emulators from Ryco.",
+    keywords: "devices ios simulator android emulator xcode phone app preview",
+  },
+  {
+    section: "device",
+    storage: "device",
+    part: "simulators",
+    title: "Agents can use simulators",
+    description: "Give agents the device tools to read and drive simulators.",
+    keywords: "devices ios simulator android emulator agent tools mcp tap screenshot",
+  },
+  {
+    section: "device",
+    storage: "device",
     part: "power",
     title: "Lower agent CPU priority",
     description: "Run agents and their tests and builds at a lower CPU priority.",

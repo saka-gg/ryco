@@ -965,6 +965,13 @@ export const ServerSettings = Schema.Struct({
   continueThreadsAfterRestart: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
+  // Simulators and emulators on this node: "Use simulators" (the device pane and agent device
+  // tools) and "Agents can use simulators" (the agent device tools only). Both default on, so
+  // nodes keep their behaviour. Read when an agent session starts; a session started while on
+  // is refused at its next device call once either is turned off. Node-scoped; never part of
+  // Agent Control's settings allowlist (an agent must not grant itself device access).
+  devicesEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  agentDevicesEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   // Usage limits: when a provider usage limit stops a thread, resume it at the reported
   // reset and/or snooze it until then. Both off by default; limits are account-wide.
   autoResumeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
@@ -1194,6 +1201,8 @@ export const ServerSettingsPatch = Schema.Struct({
   automaticUpdates: Schema.optionalKey(Schema.Boolean),
   lowerAgentProcessPriority: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterRestart: Schema.optionalKey(Schema.Boolean),
+  devicesEnabled: Schema.optionalKey(Schema.Boolean),
+  agentDevicesEnabled: Schema.optionalKey(Schema.Boolean),
   autoResumeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   snoozeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   storageRetention: Schema.optionalKey(StorageRetentionPolicyInput),

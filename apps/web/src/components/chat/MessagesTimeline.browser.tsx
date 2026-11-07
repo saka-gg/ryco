@@ -1362,6 +1362,48 @@ describe("MessagesTimeline", () => {
     }
   });
 
+  it("shows a device tool call with a device icon and its action", async () => {
+    const screen = await render(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "device-tap-entry",
+            kind: "work",
+            createdAt: "2026-04-13T12:00:00.000Z",
+            entry: {
+              id: "device-tap",
+              createdAt: "2026-04-13T12:00:00.000Z",
+              label: "MCP tool call",
+              toolTitle: "MCP tool call",
+              detail: 'mcp__ryco_device__device: {"action":"tap","ref":"@e5","label":"Sign in"}',
+              itemType: "mcp_tool_call",
+              deviceTool: {
+                name: "mcp__ryco_device__device",
+                input: { action: "tap", ref: "@e5", label: "Sign in" },
+              },
+              output: "settled: true",
+              completed: true,
+              tone: "tool",
+            },
+          },
+        ]}
+      />,
+    );
+
+    try {
+      const row = document.querySelector<HTMLElement>("[data-tool-entry-kind='expandable']");
+      const icon = row?.querySelector<HTMLElement>("[data-work-entry-icon='true']");
+      const label = row?.querySelector<HTMLElement>("[data-work-entry-display-text='true']");
+
+      expect(icon?.querySelector(".lucide-smartphone")).not.toBeNull();
+      expect(label?.textContent).toMatch(/^Tapped @e5 "Sign in"/);
+      expect(label?.textContent).not.toContain("mcp__ryco_device__device");
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("shows a runtime notice's body with its line breaks and no empty-output note", async () => {
     const body = "Usage: 42% of the weekly limit\n  Resets Monday 09:00";
     const screen = await render(

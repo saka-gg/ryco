@@ -42,6 +42,9 @@ export const SERVER_SETTING_SHARING = {
   automaticUpdates: "shareable",
   lowerAgentProcessPriority: "device-only",
   continueThreadsAfterRestart: "shareable",
+  // The simulators and emulators of this machine.
+  devicesEnabled: "device-only",
+  agentDevicesEnabled: "device-only",
   autoResumeLimitedThreads: "shareable",
   snoozeLimitedThreads: "shareable",
   storageRetention: "shareable",

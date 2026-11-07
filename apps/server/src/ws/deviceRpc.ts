@@ -24,6 +24,7 @@ import { DeviceBackendError } from "../device/DeviceBackend.ts";
 import type { DeviceServiceShape } from "../device/Services/DeviceService.ts";
 import { readTapRequest } from "../device/uiTreeTargeting.ts";
 import { observeRpcEffect, observeRpcStream } from "../observability/RpcInstrumentation.ts";
+import { deviceToolAccess } from "../providerTools/deviceToolAccess.ts";
 
 const DEVICE_EVENT_BUFFER_CAPACITY = 128;
 const DEVICE_ERROR_MESSAGE_LIMIT = 2_048;
@@ -192,6 +193,20 @@ function handleLifecycle(
   manager: DeviceManager | undefined,
   request: DeviceLifecycleRequest,
 ): Effect.Effect<DeviceLifecycleResponse, DeviceRpcError> {
+  // "Use simulators" off: nothing new starts. Shutdown and detach still free devices.
+  if (
+    (request.type === "boot" || request.type === "attach") &&
+    !deviceToolAccess().devicesEnabled
+  ) {
+    return Effect.fail(
+      new DeviceRpcError({
+        code: "setup-required",
+        message:
+          "Simulators are turned off on this node. Turn on Use simulators in Settings, on this device's Simulators tab.",
+        retryable: false,
+      }),
+    );
+  }
   switch (request.type) {
     case "boot":
       return invoke(

@@ -53,6 +53,7 @@ describe("pre-auth server environment descriptor", () => {
       "conversationRevert",
       "crossRepositoryChangeRequests",
       "desktopAppUpdates",
+      "deviceSettings",
       "environmentIcon",
       "fileAttachments",
       "filesRevert",

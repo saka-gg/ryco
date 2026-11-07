@@ -1884,6 +1884,113 @@ describe("deriveWorkLogEntries", () => {
     expect(entry?.output).toBe("no results found");
   });
 
+  it("carries a device tool call's name, server and arguments", () => {
+    const [codex, claude, opencode, other] = deriveWorkLogEntries(
+      [
+        makeActivity({
+          id: "codex-device",
+          createdAt: "2026-02-23T00:00:01.000Z",
+          kind: "tool.completed",
+          summary: "Tool call",
+          payload: {
+            itemType: "mcp_tool_call",
+            data: {
+              item: {
+                type: "mcpToolCall",
+                tool: "device",
+                server: "ryco_device",
+                arguments: { action: "tap", ref: "@e5" },
+              },
+            },
+          },
+        }),
+        makeActivity({
+          id: "claude-device",
+          createdAt: "2026-02-23T00:00:02.000Z",
+          kind: "tool.completed",
+          summary: "MCP tool call",
+          payload: {
+            itemType: "mcp_tool_call",
+            title: "MCP tool call",
+            data: {
+              toolName: "mcp__ryco_device__device_read",
+              input: { action: "screenshot" },
+            },
+          },
+        }),
+        makeActivity({
+          id: "opencode-device",
+          createdAt: "2026-02-23T00:00:03.000Z",
+          kind: "tool.completed",
+          summary: "ryco_device_s1_device",
+          payload: { itemType: "dynamic_tool_call", title: "ryco_device_s1_device", data: {} },
+        }),
+        makeActivity({
+          id: "other-tool",
+          createdAt: "2026-02-23T00:00:04.000Z",
+          kind: "tool.completed",
+          summary: "Tool call",
+          payload: {
+            itemType: "mcp_tool_call",
+            data: { toolName: "mcp__context7__search", input: { query: "abc" } },
+          },
+        }),
+      ],
+      undefined,
+    );
+
+    expect(codex?.deviceTool).toEqual({
+      name: "device",
+      server: "ryco_device",
+      input: { action: "tap", ref: "@e5" },
+    });
+    expect(claude?.deviceTool).toEqual({
+      name: "mcp__ryco_device__device_read",
+      input: { action: "screenshot" },
+    });
+    expect(opencode?.deviceTool).toEqual({ name: "ryco_device_s1_device" });
+    expect(other?.deviceTool).toBeUndefined();
+  });
+
+  it("keeps a device call's arguments when its completion names only the tool", () => {
+    const entries = deriveWorkLogEntries(
+      [
+        makeActivity({
+          id: "device-start",
+          createdAt: "2026-02-23T00:00:01.000Z",
+          kind: "tool.updated",
+          summary: "Tool call",
+          payload: {
+            itemType: "mcp_tool_call",
+            data: {
+              toolCallId: "device-1",
+              toolName: "mcp__ryco_device__device",
+              input: { action: "type", text: "hello" },
+            },
+          },
+        }),
+        makeActivity({
+          id: "device-done",
+          createdAt: "2026-02-23T00:00:02.000Z",
+          kind: "tool.completed",
+          summary: "Tool call",
+          payload: {
+            itemType: "mcp_tool_call",
+            data: { toolCallId: "device-1", toolName: "mcp__ryco_device__device" },
+          },
+        }),
+      ],
+      undefined,
+    );
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.completed).toBe(true);
+    expect(entries[0]?.deviceTool).toEqual({
+      name: "mcp__ryco_device__device",
+      input: { action: "type", text: "hello" },
+    });
+  });
+
   it("does not fall back to the truncated detail field for output", () => {
     // detail is a 180-char-truncated heading-equivalent — never use it as output.
     const activities: OrchestrationThreadActivity[] = [

@@ -1082,7 +1082,9 @@ export class DeviceManager {
     } catch (error) {
       // Only absence means "keep scrolling". An ambiguous label is a real
       // answer the caller must resolve, so it propagates immediately.
-      if (error instanceof DeviceUiTargetError && error.notFound) return null;
+      // A ref names an element the agent saw; it is never searched for by scrolling.
+      if (error instanceof DeviceUiTargetError && error.notFound && target.ref === undefined)
+        return null;
       throw error;
     }
   }

@@ -62,6 +62,7 @@ import {
 } from "../CodexDeveloperInstructions.ts";
 import { appendProjectCustomSystemPrompt } from "../ProjectCustomSystemPrompt.ts";
 import { ASSISTANT_ATTACHMENT_INSTRUCTIONS } from "../../assistantAttachments.ts";
+import { DEVICE_ROUTING_INSTRUCTIONS } from "../../providerTools/deviceToolRouting.ts";
 import { isSlashCommandInput } from "../attachmentInstructionDelivery.ts";
 import { isMissingConversationError } from "../resumeFailure.ts";
 import { providerStartupPhaseTimeoutDetail } from "../providerOperationPolicy.ts";
@@ -2652,7 +2653,11 @@ export const makeCodexSessionRuntime = (
             ...(options.agentControl
               ? { hostContextInstructions: options.agentControl.instructions }
               : {}),
-            attachmentInstructions: ASSISTANT_ATTACHMENT_INSTRUCTIONS,
+            // The device routing rules ride the same developer channel while this session
+            // has the device tools.
+            attachmentInstructions: deviceToolBinding
+              ? `${ASSISTANT_ATTACHMENT_INSTRUCTIONS}\n\n${DEVICE_ROUTING_INSTRUCTIONS}`
+              : ASSISTANT_ATTACHMENT_INSTRUCTIONS,
           });
           // A compaction waiting for its turn would take this turn's `turn/started` as its own.
           const turnId = yield* compaction.sendingTurn(
