@@ -136,6 +136,8 @@ const BACKGROUND_USE_PATTERNS: readonly RegExp[] = [
   /\b(?:do not|don['’]t|never|not|avoid|without|stop)\b[^.!?\n]{0,100}\b(?:show|watch|visible|foreground|front|focus|raise|screen|desktop)\b/i,
   /\b(?:keep|stay|remain|work|run|use)\b[^.!?\n]{0,60}\b(?:background|hidden|invisible)\b/i,
   /\bbackground[- ]only\b/i,
+  /\bin the background\b/i,
+  /\b(?:im hintergrund|nicht (?:in den )?vordergrund)\b/i,
   /\b(?:non|senza|evita|smetti di)\b[^.!?\n]{0,100}\b(?:mostrare|mostrarmi|primo piano|schermo|focus)\b/i,
   /\b(?:lavora|resta|rimani|mantieni)\b[^.!?\n]{0,60}\b(?:background|nascost[ao])\b/i,
 ];
@@ -241,8 +243,15 @@ function confirmsStructuredVisibleUse(
   return false;
 }
 
+/** Whether a reply only continues the current task ("continue", "retry"). Pure. */
+export function isRoutineComputerContinuation(text: string): boolean {
+  return isRoutineContinuation({ text });
+}
+
 /** Only a whole, scope-preserving reply may carry earlier consent into this turn. */
-function isRoutineContinuation(message: ComputerTaskMessage): boolean {
+function isRoutineContinuation(
+  message: Pick<ComputerTaskMessage, "text" | "attachments" | "skills" | "mentions">,
+): boolean {
   if (message.attachments?.length || message.skills?.length || message.mentions?.length)
     return false;
   return /^(?:(?:ok(?:ay)?|yes|s[iì])[, ]+)?(?:please[, ]+)?(?:continue(?: (?:working|with (?:the |this |our )?(?:same |current )?(?:task|work|plan)))?|keep (?:going|working)|carry on|go (?:on|ahead)|proceed(?: with (?:the |this |our )?(?:same |current )?(?:task|work|plan))?|(?:try|retry)(?: (?:again|that|it|the same step))?|continua(?: pure)?|prosegui|procedi|vai|riprova)(?:[, ]+(?:please|per favore))?[.!]*$/iu.test(
@@ -267,30 +276,37 @@ export function latestUserAuthoredMessage(
   return undefined;
 }
 
+/** Whether one message text asks to keep the work out of sight. Pure. */
+export function messageRequestsBackgroundOnly(text: string): boolean {
+  const request = unquotedRequest(text);
+  return BACKGROUND_USE_PATTERNS.some((pattern) => pattern.test(request));
+}
+
 /**
- * Reconstruct this task's grant, stopping at the first human scope change.
- * Routine continuations preserve an explicit grant; they cannot create one.
- * A new task, refusal or nonhuman/imported turn is a barrier, so a later
- * "continue" cannot recover consent from an unrelated historical task.
+ * This task's grant. A task a person typed on this Mac may come to the front
+ * when background control is not enough: that is what they asked the agent
+ * to get done, and the Escape stop (Input Monitoring) plus the pause on their
+ * own input keep them in charge. It stays in the background when the task
+ * says so ("in the background", "don't show it"), and automation- or
+ * agent-dispatched turns never raise anything.
+ *
+ * Routine continuations ("continue", "retry") and answers to a question card
+ * carry the task they continue, so an earlier background-only request still
+ * holds after them.
  */
 export function computerForegroundAuthorizationForMessages(
   messages: readonly ComputerTaskMessage[],
-  context: ComputerForegroundContext = {},
+  _context: ComputerForegroundContext = {},
 ): ComputerForegroundAuthorization {
+  let sawHumanMessage = false;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]!;
     if (message.role !== "user") continue;
     if (!isLocalHumanMessage(message)) return COMPUTER_FOREGROUND_NOT_AUTHORIZED;
-    if (message.source === "async-user-input") {
-      return { userRequestedVisibleUse: confirmsStructuredVisibleUse(messages, index, context) };
-    }
-    if (
-      messageRequestsVisibleUse(message.text, context) ||
-      confirmsVisibleUse(message, messages[index - 1], context)
-    ) {
-      return { userRequestedVisibleUse: true };
-    }
-    if (!isRoutineContinuation(message)) return COMPUTER_FOREGROUND_NOT_AUTHORIZED;
+    sawHumanMessage = true;
+    if (message.source === "async-user-input") continue;
+    if (messageRequestsBackgroundOnly(message.text)) return COMPUTER_FOREGROUND_NOT_AUTHORIZED;
+    if (!isRoutineContinuation(message)) return { userRequestedVisibleUse: true };
   }
-  return COMPUTER_FOREGROUND_NOT_AUTHORIZED;
+  return sawHumanMessage ? { userRequestedVisibleUse: true } : COMPUTER_FOREGROUND_NOT_AUTHORIZED;
 }

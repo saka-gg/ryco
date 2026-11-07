@@ -16,24 +16,29 @@ const stage = (text: string, generation = "epoch:0") =>
     runtimeMode: "full-access",
     label: "Task",
   });
-it("keeps an explicit visible-use request through a routine human continuation only", () => {
-  stage("/computer-use Show me the browser window");
-  expect(computerTurnPlan(thread)?.visibleIntentText).toBe("Show me the browser window");
-  stage("/computer-use continue working");
-  expect(computerTurnPlan(thread)?.visibleIntentText).toBe("Show me the browser window");
+it("keeps a background-only task in the background through routine continuations", () => {
   stage("/computer-use Find a receipt in the background");
-  expect(computerTurnPlan(thread)?.visibleIntentText).toBeUndefined();
+  expect(computerTurnPlan(thread)?.foregroundAuthorized).toBe(false);
   stage("/computer-use continue");
-  expect(computerTurnPlan(thread)?.visibleIntentText).toBeUndefined();
+  expect(computerTurnPlan(thread)?.foregroundAuthorized).toBe(false);
+  expect(computerTurnPlan(thread)?.taskText).toBe("Find a receipt in the background");
+  stage("/computer-use Now open Spark and write the mail");
+  expect(computerTurnPlan(thread)?.foregroundAuthorized).toBe(true);
+  stage("continue");
+  expect(computerTurnPlan(thread)?.foregroundAuthorized).toBe(true);
 });
-it("does not carry visible consent across Stop, an ordinary coding task, or a restart", () => {
-  stage("Show me the browser window");
+it("lets an ordinary human task come to the front when it has to", () => {
+  stage("Open Chrome and search Amazon for iphone duo");
+  expect(computerTurnPlan(thread)?.foregroundAuthorized).toBe(true);
+});
+it("does not carry a background-only request across Stop or a restart", () => {
+  stage("Find a receipt in the background");
   stage("continue", "new-epoch:0");
-  expect(computerTurnPlan(thread)?.visibleIntentText).toBeUndefined();
-  stage("Show me the browser window");
+  expect(computerTurnPlan(thread)?.taskText).toBe("continue");
+  stage("Find a receipt in the background");
   stageComputerTurn(thread, undefined);
   stage("continue");
-  expect(computerTurnPlan(thread)?.visibleIntentText).toBeUndefined();
+  expect(computerTurnPlan(thread)?.taskText).toBe("continue");
 });
 it("retirement preserves exact task identity and unsubscribes", () => {
   const seen: string[][] = [];

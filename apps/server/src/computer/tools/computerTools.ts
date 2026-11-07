@@ -148,7 +148,7 @@ export const COMPUTER_CONTROL_FIRST_MUTATION_DISCLOSURE =
   "Computer control ON for this turn: the agent is driving the desktop and the user can switch it off in Settings.";
 
 const COMPUTER_TOOL_REFRESH_GUIDANCE =
-  "Computer routing reminder: observe with computer_get_state and exact window_id before acting; prefer element refs; computer_invoke_menu activates the app, so only with visible-use consent. Use coordinates only for controls absent from elements. computer_type_text with window_id alone inserts the whole string into the focused field; never spell text through computer_press_key. Background text is focus-neutral only when Cua proves one writable Accessibility target. Foreground delivery requires the user's visible-use authorization; never replay uncertain delivery; off-Space pixels are not live.";
+  'Computer routing reminder: observe with computer_get_state and exact window_id before acting; prefer element refs; computer_invoke_menu activates the app. Use coordinates only for controls absent from elements. computer_type_text with window_id alone inserts the whole string into the focused field; never spell text through computer_press_key. Background text is focus-neutral only when Cua proves one writable Accessibility target. When background input does not reach the app, activate the window and use delivery_mode:"foreground" instead of asking; never replay uncertain delivery; off-Space pixels are not live.';
 
 /**
  * Attached to every null-window launch result, always rather than on
@@ -1856,7 +1856,7 @@ export function makeAgentGatewayComputerTools(
         try: async (abortSignal) => {
           if (name === "computer_invoke_menu" && args.delivery_mode === "background") {
             throw new ToolInputError(
-              "computer_invoke_menu requires foreground delivery and explicit visible-use authorization; it cannot preserve background focus.",
+              "computer_invoke_menu requires foreground delivery; it cannot preserve background focus.",
             );
           }
           // Fresh screenshots and alternating failed techniques must not
@@ -2229,7 +2229,7 @@ export function makeAgentGatewayComputerTools(
             enum: name === "computer_invoke_menu" ? ["foreground"] : ["background", "foreground"],
             description:
               name === "computer_invoke_menu"
-                ? "This menu route is always foreground and requires the user's explicit visible-use request."
+                ? "This menu route is always foreground; it is refused when the task asked to stay in the background."
                 : "Background by default. Foreground requires the user's own task to ask to see the screen. Never replay uncertain input.",
           },
         },
@@ -4036,7 +4036,7 @@ export function makeAgentGatewayComputerTools(
       actionEntry(
         "computer_invoke_menu",
         "Invoke menu item",
-        'Invoke an exact menu-bar path, e.g. ["File", "Save"]. This native route activates the app: it requires the user\'s explicit visible-use request, like computer_activate_window, even in computer_run. Name window_id or app/pid (for an app with no windows). One to six levels; missing or disabled items refuse. Observe afterwards; dispatch does not prove the command succeeded.',
+        'Invoke an exact menu-bar path, e.g. ["File", "Save"]. This native route activates the app, like computer_activate_window, even in computer_run; refused when the task asked to stay in the background. Name window_id or app/pid (for an app with no windows). One to six levels; missing or disabled items refuse. Observe afterwards; dispatch does not prove the command succeeded.',
         {
           type: "object",
           properties: {
@@ -4491,7 +4491,7 @@ export function makeAgentGatewayComputerTools(
     actionEntry(
       "computer_activate_window",
       "Activate window",
-      "Bring a window into view and aim the agent keyboard at it — only when the user's own task text asked to see the screen; otherwise refused with foreground_not_requested (naming an app is not asking to see it). Ordinary background targeting does not activate a window. A desktop that cannot raise the window refuses. It returns no screenshot; observe with computer_screenshot or computer_get_state when needed.",
+      "Bring a window into view and aim the agent keyboard at it. Use it when background input does not reach the app; refused with foreground_not_requested only when the task asked to stay in the background or did not come from the user. Ordinary background targeting does not activate a window. A desktop that cannot raise the window refuses. It returns no screenshot; observe with computer_screenshot or computer_get_state when needed.",
       {
         type: "object",
         properties: {

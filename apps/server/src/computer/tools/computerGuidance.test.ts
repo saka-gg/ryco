@@ -54,14 +54,15 @@ describe("computer guidance", () => {
     }
   });
 
-  it("separates nonactivating launch from hiding and accepts direct visibility confirmation", () => {
+  it("separates nonactivating launch from hiding and switches to the foreground on its own", () => {
     const notes = computerToolInstructions();
     expect(notes).toContain("launch_app opens without activation");
     expect(notes).toContain("hidden:true explicitly hides the app");
-    expect(notes).toContain("direct confirmation of a visibility question");
+    expect(notes).toContain("switch to the foreground on your own");
+    expect(notes).toContain("never ask the user for it");
     expect(notes).not.toContain("pixel fallback can briefly take keyboard focus");
     expect(notes).not.toContain("launch_app hidden:false");
-    expect(COMPUTER_HELP_SECTIONS.foreground).toContain("direct affirmative reply");
+    expect(COMPUTER_HELP_SECTIONS.foreground).toContain("finish in the foreground without asking");
   });
 
   it("keeps the browser chapter on the CDP route", () => {
