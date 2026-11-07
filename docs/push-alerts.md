@@ -150,7 +150,8 @@ The Hub sends an `alert` push (`apns-priority: 10`, `apns-collapse-id` from the 
 
 The extension reads `ryco`, opens `s` with the push key and the associated data from `e`, `q` and
 `n`, and checks that the payload's `e` and `q` match. It then shows the thread title, a line for the
-kind, and stacks alerts per thread (`threadIdentifier` `<environment>/<thread>`). On any failure, or
+kind, stacks alerts per thread (`threadIdentifier` `<environment>/<thread>`), and sets the kind's
+category, so the alert offers the same actions as the app's own (below). On any failure, or
 past its time limit, the generic text stays and a tap opens the app: the extension also drops the
 Hub's own `body` and `url`, so only an opened payload can name the thread a tap opens.
 
@@ -195,6 +196,29 @@ Once each has answered, or after 30 days (when nodes drop a registration nobody 
 public key is forgotten. With no node registration left, no node signals the Hub for that
 enrollment, so the Hub's leftover registration for it gets nothing to deliver. The app cannot remove
 that Hub registration itself: it is keyed by the earlier installation's enrollment and session.
+
+## Kinds and actions
+
+Settings → Notifications lists the six kinds; a kind turned off is left out of the app's own alerts
+and of the `kinds` the device registers, so the node never seals it. With every kind off,
+background alerts count as off.
+
+Every alert has a category (`src/notifications/notificationActionsModel.ts`, and the extension's
+`kindCategories`): **Approve / Deny** on an approval, **Reply / Open** on a question, a plan, or a
+result. Each action needs an unlocked phone and opens Ryco: answering needs a live, authorized
+connection with a current shell, which a suspended app does not have, so nothing is answered from
+the background. The response becomes a pending action for that thread, and the thread's screen
+carries it out with its own approval and send handlers once its connection is ready for mutations.
+An approval is answered only when exactly one open approval of the alert's turn waits (the opened
+payload's `tu`); otherwise, or after two minutes without a ready connection, the screen says why and
+the person answers there. A reply that finds no ready connection within 15 seconds goes to the
+outbox like any message typed offline. Links never start an action.
+
+Tapping an alert, also the one that launched the app, opens its thread once; an alert for the thread
+on screen does not show while the app is in front.
+
+The agent Live Activity can take push updates through the same Hub registration: see
+[Live Activity push updates](./live-activity-push.md).
 
 ## Versions
 
