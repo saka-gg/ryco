@@ -484,8 +484,10 @@ const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
  * and Tools drawer, whose panel code still loads lazily with the device chunk.
  * 772 KiB on 2026-11-07 for the simulator program's merge train: Computer Use,
  * device tool rows, device tabs and the 3D toggle together measured 771.1 KiB.
+ * 773 KiB on 2026-11-07 for plain-words Computer Use rows in the work log
+ * (computerToolPresentation, about 0.3 KiB gzip).
  */
-const CHAT_ROUTE_GZIP_BUDGET = 772 * KIB;
+const CHAT_ROUTE_GZIP_BUDGET = 773 * KIB;
 /**
  * 156 since removing AI Focus on 2026-10-29: the same 44 KiB of shared lucide
  * icons regrouped by importing entry set into six `icons` chunks instead of
