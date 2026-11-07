@@ -3,7 +3,7 @@ import * as Linking from "expo-linking";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { StatusBar } from "react-native";
-import { DarkTheme, DefaultTheme } from "@react-navigation/native";
+import { DarkTheme, DefaultTheme, getStateFromPath } from "@react-navigation/native";
 
 import { applyResolvedAppColorScheme, resolveAppColorScheme } from "./lib/appScheme";
 
@@ -21,6 +21,7 @@ import { AppProviders } from "./providers/AppProviders";
 import { FatalRenderErrorBoundary } from "./diagnostics/FatalRenderErrorBoundary";
 import { useHostedAppLifecycle } from "./hostedHub/useHostedAppLifecycle";
 import { noteMobileClientInteraction } from "./runtime/clientInteraction";
+import { rewriteIncomingSharePath } from "./features/sharing/incomingShareModel";
 import { AppAccessGate } from "./features/access/AppAccessGate";
 import {
   isAppAccessDecided,
@@ -49,6 +50,9 @@ const appLinking = {
   // which addresses the launcher, not app navigation. Without this filter it
   // falls through to the NotFound wildcard on every dev launch.
   filter: (url: string) => !url.includes("expo-development-client"),
+  // The share extension opens <scheme>://expo-sharing: New Task takes the share.
+  getStateFromPath: (path: string, options?: Parameters<typeof getStateFromPath>[1]) =>
+    getStateFromPath(rewriteIncomingSharePath(path), options),
 };
 
 /**
@@ -104,7 +108,7 @@ export default function App() {
 
 // B2 app root: B1's provider stack (gesture/atom-registry/safe-area/keyboard) +
 // the connection-registry context + appearance preferences, then the full
-// navigation shell. Cloud auth, incoming-share, and the showcase rig are stripped.
+// navigation shell. Cloud auth and the showcase rig are stripped.
 function AppRoot() {
   // Resolved via the single scheme seam, not the raw system scheme — dark today,
   // preference-overridable later (§4). Re-assert on mount so Fast Refresh keeps it.

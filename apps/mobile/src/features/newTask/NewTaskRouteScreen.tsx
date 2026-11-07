@@ -80,6 +80,8 @@ import {
   planMobilePromptLink,
 } from "./promptLinkModel";
 import { useNewTaskRepository } from "./useNewTaskRepository";
+import { takeIncomingShare } from "../sharing/incomingShare";
+import { mergeIncomingShareText } from "../sharing/incomingShareModel";
 import {
   newTaskAttachmentSendBlock,
   newTaskDraftImages,
@@ -98,6 +100,8 @@ type NewTaskRouteScreenProps = StaticScreenProps<{
   readonly pr?: string | string[];
   readonly provider?: string | string[];
   readonly model?: string | string[];
+  /** `incoming`: what another app shared through the share extension becomes this draft. */
+  readonly share?: string | string[];
 }>;
 
 function firstParam(value: string | string[] | undefined): string | null {
@@ -699,6 +703,28 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
     },
     [],
   );
+
+  // Text and files shared from another app (share extension): the user picks
+  // the machine and project here. Shared text follows what is already typed.
+  const shareParam = firstParam(props.route.params?.share);
+  useEffect(() => {
+    if (shareParam !== "incoming") return;
+    navigation.setParams({ share: undefined } as never);
+    void takeIncomingShare()
+      .then((draft) => {
+        if (!draft) return;
+        if (draft.text) setPrompt((current) => mergeIncomingShareText(current, draft.text));
+        if (draft.attachments.length > 0) {
+          setAttachments((current) => [...current, ...draft.attachments]);
+        }
+        setFailure(null);
+        if (draft.warnings.length > 0) {
+          Alert.alert("Some shared content was skipped", draft.warnings.join("\n"));
+        }
+      })
+      .catch(() => setAttachmentError("The shared content could not be read."));
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- runs once per hand-off; the setters are stable.
+  }, [shareParam]);
 
   const removeAttachment = (id: string) => {
     composerFileUploadEngine.release(id);
