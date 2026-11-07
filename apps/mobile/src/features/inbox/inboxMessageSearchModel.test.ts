@@ -2,6 +2,7 @@ import type { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  isRelatedSearchQuery,
   mergeInboxMessageMatches,
   messageSearchQuery,
   splitSnippet,
@@ -19,6 +20,12 @@ describe("inbox message search", () => {
   it("searches only from two characters, trimmed", () => {
     expect(messageSearchQuery(" a ")).toBeNull();
     expect(messageSearchQuery("  flaky ")).toBe("flaky");
+  });
+
+  it("keeps an answer up only while the same text is refined", () => {
+    expect(isRelatedSearchQuery("flak", "flaky")).toBe(true);
+    expect(isRelatedSearchQuery("Flaky", "fla")).toBe(true);
+    expect(isRelatedSearchQuery("flaky", "deploy")).toBe(false);
   });
 
   it("keeps the newest match per thread across nodes", () => {

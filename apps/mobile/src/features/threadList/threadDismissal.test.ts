@@ -58,6 +58,23 @@ describe("thread dismissal", () => {
     },
   );
 
+  it("tells the rows when the command succeeded, and never restores them itself", async () => {
+    const restore = vi.fn();
+    const committed = vi.fn();
+    const unregister = registerThreadDismissal("env:thread", () => ({
+      finished: Promise.resolve(),
+      restore,
+      committed,
+    }));
+    try {
+      await withThreadDismissal("env:thread", async () => true, Boolean);
+      expect(committed).toHaveBeenCalledOnce();
+      expect(restore).not.toHaveBeenCalled();
+    } finally {
+      unregister();
+    }
+  });
+
   it("runs the command at once when no row shows the thread", async () => {
     const command = vi.fn(async () => "done");
     expect(await withThreadDismissal("env:other", command, () => true)).toBe("done");

@@ -171,6 +171,13 @@ interface ThreadSwipeableProps {
   readonly resetKey?: string;
 }
 
+/**
+ * After a successful command the row's list update normally unmounts it. A row
+ * still mounted this long after is still listed (or pooled for reuse): it comes
+ * back, so it can never stay an invisible gap.
+ */
+export const DISMISSED_ROW_RESTORE_MS = 1_200;
+
 const DISMISS_TIMING = {
   duration: 220,
   easing: Easing.out(Easing.cubic),
@@ -196,6 +203,7 @@ export function ThreadSwipeable(props: ThreadSwipeableProps) {
   const dismissalRef = useRef<{ finished: Promise<void>; restore: () => void } | null>(null);
   const pendingDismissRef = useRef<{ id: number; resolve: () => void } | null>(null);
   const dismissalIdRef = useRef(0);
+  const restoreTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeTranslationRef = useRef<SharedValue<number> | null>(null);
   const content = useMemo(
     () => ({ resetKey: props.resetKey, threadKey: props.threadKey }),
@@ -213,6 +221,10 @@ export function ThreadSwipeable(props: ThreadSwipeableProps) {
 
   const restoreRow = useCallback(() => {
     if (!mountedRef.current) return;
+    if (restoreTimerRef.current !== null) {
+      clearTimeout(restoreTimerRef.current);
+      restoreTimerRef.current = null;
+    }
     dismissalRef.current = null;
     // RN-to-UI jobs run in order, so this also resets a queued dismissal.
     runOnUI((methods: SwipeableMethods | null) => {
@@ -244,6 +256,7 @@ export function ThreadSwipeable(props: ThreadSwipeableProps) {
       cancelAnimation(actionOpacity);
       cancelAnimation(fallbackTranslation);
       if (activeTranslationRef.current) cancelAnimation(activeTranslationRef.current);
+      if (restoreTimerRef.current !== null) clearTimeout(restoreTimerRef.current);
       finishDismiss();
     };
   }, [actionOpacity, collapse, fallbackTranslation, finishDismiss]);
@@ -291,6 +304,13 @@ export function ThreadSwipeable(props: ThreadSwipeableProps) {
           finished,
           restore: () => {
             if (dismissalRef.current === dismissal) restoreRow();
+          },
+          committed: () => {
+            if (dismissalRef.current !== dismissal) return;
+            restoreTimerRef.current = setTimeout(() => {
+              restoreTimerRef.current = null;
+              if (dismissalRef.current === dismissal) restoreRow();
+            }, DISMISSED_ROW_RESTORE_MS);
           },
         };
         dismissalRef.current = dismissal;

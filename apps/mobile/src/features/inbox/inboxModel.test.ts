@@ -9,7 +9,12 @@ import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { EnvironmentId } from "@ryco/contracts";
 import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuation";
 
-import { buildInboxSections, resolveInboxEmptyState, type InboxEnvironment } from "./inboxModel";
+import {
+  canChangeThreadsOn,
+  buildInboxSections,
+  resolveInboxEmptyState,
+  type InboxEnvironment,
+} from "./inboxModel";
 
 const NODE_A = "node-a" as EnvironmentId;
 const NODE_B = "node-b" as EnvironmentId;
@@ -245,6 +250,21 @@ describe("Inbox model", () => {
       running: false,
       offline: false,
     });
+  });
+
+  it("allows changes only on a connected, current, writable machine that is not stale", () => {
+    const ready = {
+      environmentId: NODE_A,
+      label: "A",
+      connectionState: "connected" as const,
+      mutationReady: true,
+      shellCurrent: true,
+    };
+    expect(canChangeThreadsOn(ready)).toBe(true);
+    expect(canChangeThreadsOn({ ...ready, mutationReady: false })).toBe(false);
+    expect(canChangeThreadsOn({ ...ready, shellCurrent: false })).toBe(false);
+    expect(canChangeThreadsOn({ ...ready, connectionState: "offline" })).toBe(false);
+    expect(canChangeThreadsOn({ ...ready, stale: true })).toBe(false);
   });
 
   it("scopes by node and excludes archived tasks", () => {

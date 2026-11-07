@@ -3,7 +3,7 @@ import { MenuView, type NativeActionEvent } from "@react-native-menu/menu";
 import { useNavigation } from "@react-navigation/native";
 import type { EnvironmentId } from "@ryco/contracts";
 import { memo, useMemo, useState } from "react";
-import { Alert, Pressable, ScrollView, TextInput, useWindowDimensions, View } from "react-native";
+import { Pressable, ScrollView, TextInput, useWindowDimensions, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
@@ -14,9 +14,9 @@ import { newCommandId } from "../../lib/ids";
 import { relativeTime } from "../../lib/time";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { openThread } from "../../navigation/openThread";
-import { sidebarUndo } from "../../state/sidebarUndo";
 import { useInboxSource } from "../home/useInboxSource";
-import { withThreadDismissal } from "../threadList/threadDismissal";
+import { canChangeThreadsOn } from "../inbox/inboxModel";
+import { dispatchThreadListCommand } from "../threadList/threadListCommands";
 import {
   SwipeableScrollGateProvider,
   ThreadSwipeable,
@@ -41,21 +41,10 @@ type ArchivedListItem =
 /** Brings an archived thread back to the Inbox; the row animates out first. */
 export function restoreArchivedThread(row: ArchivedThreadRow): void {
   if (!row.canRestore) return;
-  void withThreadDismissal(
-    row.key,
-    async () => {
-      await sidebarUndo.dispatch(
-        { environmentId: row.environmentId, threadId: row.threadId },
-        { type: "thread.unarchive", threadId: row.threadId, commandId: newCommandId() },
-      );
-      return true;
-    },
-    Boolean,
-  ).catch((error: unknown) =>
-    Alert.alert(
-      "Could not restore task",
-      error instanceof Error ? error.message : "The request failed.",
-    ),
+  dispatchThreadListCommand(
+    row,
+    { type: "thread.unarchive", threadId: row.threadId, commandId: newCommandId() },
+    { dismiss: true, failureTitle: "Could not restore task" },
   );
 }
 

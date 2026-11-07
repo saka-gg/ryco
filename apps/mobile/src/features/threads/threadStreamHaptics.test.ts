@@ -2,6 +2,7 @@ import type { TimelineEntry } from "@ryco/client-runtime/state/session";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 vi.mock("expo-haptics", () => ({ selectionAsync: vi.fn(async () => {}) }));
+vi.mock("@react-navigation/native", () => ({ useIsFocused: () => true }));
 
 import { latestStreamingAssistantMessage, shouldTickStreamHaptic } from "./threadStreamHaptics";
 

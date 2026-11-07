@@ -10,12 +10,14 @@ import type {
   SidebarThreadOrStub,
   SidebarThreadSummary,
   SidebarWorktreeSummary,
+  ThreadInboxEnvironment,
   ThreadInboxMutationBlocker,
 } from "@ryco/client-runtime/state/threads";
 import {
   buildThreadInbox,
   resolveThreadHideAvailability,
   resolveThreadLifecycleAvailability,
+  threadInboxConnectionBlocker,
 } from "@ryco/client-runtime/state/threads";
 import {
   followUpQueueBadgeOf,
@@ -247,6 +249,29 @@ function timestamp(thread: SidebarThreadSummary): string {
   return thread.updatedAt ?? thread.latestUserMessageAt ?? thread.createdAt;
 }
 
+/** A listed machine as the shared inbox model (and its mutation readiness) reads it. */
+export function toThreadInboxEnvironment(environment: InboxEnvironment): ThreadInboxEnvironment {
+  return {
+    environmentId: environment.environmentId,
+    label: environment.label,
+    threadSettlementSupported: environment.threadSettlementSupported ?? false,
+    threadSnoozeSupported: environment.threadSnoozeSupported ?? false,
+    threadTriageSupported: environment.threadTriageSupported ?? false,
+    autoSettleAfterDays: environment.autoSettleAfterDays,
+    connected: environment.connectionState === "connected",
+    mutationReady: environment.mutationReady ?? false,
+    shellCurrent: environment.shellCurrent ?? false,
+  };
+}
+
+/** Whether a change (archive, restore) can reach this machine now, by the shared rule. */
+export function canChangeThreadsOn(environment: InboxEnvironment): boolean {
+  return (
+    environment.stale !== true &&
+    threadInboxConnectionBlocker(toThreadInboxEnvironment(environment)) === null
+  );
+}
+
 export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxSection> {
   const environmentById = new Map(
     input.environments.map((environment) => [environment.environmentId, environment] as const),
@@ -262,17 +287,7 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
     projects: input.projects,
     worktrees: input.worktrees,
     threads: input.threads,
-    environments: input.environments.map((environment) => ({
-      environmentId: environment.environmentId,
-      label: environment.label,
-      threadSettlementSupported: environment.threadSettlementSupported ?? false,
-      threadSnoozeSupported: environment.threadSnoozeSupported ?? false,
-      threadTriageSupported: environment.threadTriageSupported ?? false,
-      autoSettleAfterDays: environment.autoSettleAfterDays,
-      connected: environment.connectionState === "connected",
-      mutationReady: environment.mutationReady ?? false,
-      shellCurrent: environment.shellCurrent ?? false,
-    })),
+    environments: input.environments.map(toThreadInboxEnvironment),
     localQueuedThreadKeys: input.localQueuedThreadIds,
     deliveryUnknownThreadKeys: deliveryUnknown,
     pinnedThreadKeys: input.pinnedThreadKeys,
@@ -368,6 +383,7 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
       canSettle: entry.lifecycle.eligibility.canSettle || entry.lifecycle.settleFiles === true,
       pinned: entry.pinned,
       messageMatch: messageMatchFor(entry.key),
+      // Archive's own rule: the shared connection rule plus a conversation and no running turn.
       canArchive:
         environment?.stale !== true && resolveThreadLifecycleAvailability(entry).archive.enabled,
       settlementBlocker: entry.lifecycle.settlementBlocker,

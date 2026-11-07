@@ -27,6 +27,7 @@ import { InboxThreadRow as ThreadRow } from "./InboxThreadRow";
 import {
   buildInboxRowMenuActions,
   buildInboxSnoozeMenuActions,
+  inboxRowResetKey,
   resolveSnoozeMenuPresets,
   snoozeMenuPresetsFromKey,
   snoozeMenuPresetsKey,
@@ -112,7 +113,7 @@ export const InboxThreadMenuRow = memo(function InboxThreadMenuRow(props: {
       containerStyle={INBOX_ROW_CONTAINER_STYLE}
       fullSwipeWidth={width - 32}
       threadKey={row.key}
-      resetKey={`${row.key}:${row.attentionState}:${row.snoozedUntil ?? ""}:${row.pinned}`}
+      resetKey={inboxRowResetKey(row)}
       leadingAction={swipe.leading}
       primaryAction={swipe.primary}
       secondaryAction={swipe.secondary}

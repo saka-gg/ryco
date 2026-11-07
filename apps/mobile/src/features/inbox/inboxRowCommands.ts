@@ -1,12 +1,9 @@
-import type { SidebarActionCommand } from "@ryco/client-runtime/state/threads";
 import { resolveSnoozePresets } from "@ryco/shared/threadSnooze";
-import { Alert } from "react-native";
 
 import { copyTextWithHaptic } from "../../lib/copyTextWithHaptic";
 import { newCommandId } from "../../lib/ids";
-import { sidebarUndo } from "../../state/sidebarUndo";
 import { changeThreadPin } from "../../state/threadPins";
-import { withThreadDismissal } from "../threadList/threadDismissal";
+import { dispatchThreadListCommand } from "../threadList/threadListCommands";
 import { requestCustomSnooze } from "./customSnoozeModel";
 import type { InboxThreadRow } from "./inboxModel";
 import {
@@ -17,33 +14,9 @@ import {
   UNPIN_TASK_ACTION_ID,
 } from "./inboxRowActions";
 
-/**
- * Sends one row command through the shared Undo history. A command that takes
- * the row out of where it is listed (archive, settle, snooze, hide) lets the
- * row animate out first and brings it back when the command fails.
- */
-function dispatchRowCommand(
-  row: InboxThreadRow,
-  command: SidebarActionCommand,
-  options: { readonly dismiss: boolean; readonly failureTitle: string },
-): void {
-  const target = { environmentId: row.environmentId, threadId: row.threadId };
-  const send = async () => {
-    await sidebarUndo.dispatch(target, command);
-    return true;
-  };
-  void (options.dismiss ? withThreadDismissal(row.key, send, Boolean) : send()).catch(
-    (error: unknown) =>
-      Alert.alert(
-        options.failureTitle,
-        error instanceof Error ? error.message : "The request failed.",
-      ),
-  );
-}
-
 export function archiveInboxRow(row: InboxThreadRow): void {
   if (!row.canArchive) return;
-  dispatchRowCommand(
+  dispatchThreadListCommand(
     row,
     { type: "thread.archive", threadId: row.threadId, commandId: newCommandId() },
     { dismiss: true, failureTitle: "Could not archive task" },
@@ -53,7 +26,7 @@ export function archiveInboxRow(row: InboxThreadRow): void {
 /** Snoozes the row's thread until `until`, or wakes it with null. */
 export function snoozeInboxRow(row: InboxThreadRow, until: string | null): void {
   if (!(until ? row.canSnooze : row.canUnsnooze)) return;
-  dispatchRowCommand(
+  dispatchThreadListCommand(
     row,
     until
       ? {
@@ -88,7 +61,7 @@ export function runInboxRowAction(row: InboxThreadRow, event: string): void {
   }
   if (event === "settle" || event === "unsettle") {
     if (!row.mutationEnabled || !row.canSettle) return;
-    dispatchRowCommand(
+    dispatchThreadListCommand(
       row,
       event === "settle"
         ? { type: "thread.settle", threadId: row.threadId, commandId: newCommandId() }
@@ -104,7 +77,7 @@ export function runInboxRowAction(row: InboxThreadRow, event: string): void {
   }
   if (event === "hide" || event === "unhide") {
     if (!row.hideActionEnabled) return;
-    dispatchRowCommand(
+    dispatchThreadListCommand(
       row,
       {
         type: event === "hide" ? "thread.hide" : "thread.unhide",

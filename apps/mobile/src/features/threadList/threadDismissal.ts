@@ -2,11 +2,14 @@
  * Rows that animate out before a command that removes their thread from the
  * list runs (archive, snooze, settle, hide). Every visible copy of the thread
  * registers its own dismissal; the command waits until each has finished, and a
- * command that fails or throws restores them.
+ * command that fails or throws restores them. A command that succeeds tells
+ * them so: a row the list still shows afterwards (a hidden thread that needs
+ * the person stays in Active) or shows again (Undo) must come back.
  */
 interface ThreadDismissal {
   readonly finished: Promise<void>;
   readonly restore: () => void;
+  readonly committed?: () => void;
 }
 
 const rows = new Map<string, Set<() => ThreadDismissal>>();
@@ -34,6 +37,7 @@ export async function withThreadDismissal<T>(
     committed = succeeded(result);
     return result;
   } finally {
-    if (!committed) dismissals.forEach(({ restore }) => restore());
+    if (committed) dismissals.forEach((dismissal) => dismissal.committed?.());
+    else dismissals.forEach(({ restore }) => restore());
   }
 }

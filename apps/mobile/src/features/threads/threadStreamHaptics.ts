@@ -1,4 +1,5 @@
 import type { TimelineEntry } from "@ryco/client-runtime/state/session";
+import { useIsFocused } from "@react-navigation/native";
 import * as Haptics from "expo-haptics";
 import { useEffect, useRef } from "react";
 
@@ -45,13 +46,15 @@ export function shouldTickStreamHaptic(input: {
 /**
  * Ticks a light selection haptic as the open thread's reply streams in. The
  * first timeline it sees only seeds the mark, so opening a thread mid-stream
- * is silent; turning the setting off stops it at once.
+ * is silent; turning the setting off stops it at once. A thread screen covered
+ * by another (a sheet, a pushed thread) stays silent.
  */
 export function useThreadStreamHaptics(
   threadKey: string,
   timeline: ReadonlyArray<TimelineEntry> | undefined,
   enabled: boolean,
 ): void {
+  const focused = useIsFocused();
   const state = useRef<{
     threadKey: string;
     seeded: boolean;
@@ -70,6 +73,7 @@ export function useThreadStreamHaptics(
     const now = Date.now();
     const tick =
       enabled &&
+      focused &&
       mark.seeded &&
       shouldTickStreamHaptic({ previous: mark.previous, latest, lastTickAt: mark.lastTickAt, now });
     mark.seeded = true;
@@ -77,5 +81,5 @@ export function useThreadStreamHaptics(
     if (!tick) return;
     mark.lastTickAt = now;
     void Haptics.selectionAsync();
-  }, [enabled, threadKey, timeline]);
+  }, [enabled, focused, threadKey, timeline]);
 }

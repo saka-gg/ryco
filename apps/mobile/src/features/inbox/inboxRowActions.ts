@@ -106,3 +106,20 @@ export function buildInboxRowMenuActions(
   });
   return actions;
 }
+
+/**
+ * Changes whenever a row command lands on the thread (its section, snooze, hide
+ * or settle-when-idle state, pin), so a row dismissed for that command comes
+ * back at once when the list still shows it. ThreadSwipeable's timed restore
+ * covers anything this misses.
+ */
+export function inboxRowResetKey(row: InboxThreadRow): string {
+  return [
+    row.key,
+    row.attentionState,
+    row.snoozedUntil ?? "",
+    row.hiddenByUser === true ? "hidden" : "",
+    row.filed === true ? "filed" : "",
+    row.pinned ? "pinned" : "",
+  ].join("\u0000");
+}

@@ -2,6 +2,7 @@ import * as Linking from "expo-linking";
 import * as QuickActions from "expo-quick-actions";
 import { Platform } from "react-native";
 
+import { forgetReceivedURL, readLaunchURL } from "../../lib/launchUrl";
 import { mobileKV } from "../../platform/kv";
 import {
   buildShortcutActions,
@@ -138,10 +139,13 @@ export const shortcutAwareLinking = {
       launchAction = { id: QuickActions.initial.id, at: Date.now() };
       return initial;
     }
-    return Linking.getInitialURL();
+    return readLaunchURL({ consume: true });
   },
   subscribe(listener: (url: string) => void): () => void {
-    const links = Linking.addEventListener("url", ({ url }) => listener(url));
+    const links = Linking.addEventListener("url", ({ url }) => {
+      forgetReceivedURL();
+      listener(url);
+    });
     if (!deliversActionsToJs) return () => links.remove();
     const actions = QuickActions.addListener((action) => {
       const echo =

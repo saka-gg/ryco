@@ -6,6 +6,8 @@ export const INBOX_MESSAGE_SEARCH_MIN_LENGTH = 2;
 export const INBOX_MESSAGE_SEARCH_DEBOUNCE_MS = 200;
 /** Matches asked of each node per query. */
 export const INBOX_MESSAGE_SEARCH_LIMIT = 20;
+/** A machine that has not answered by then adds nothing to this query. */
+export const INBOX_MESSAGE_SEARCH_TIMEOUT_MS = 8_000;
 
 /** The message a search found in one thread, shown under its row and opened at. */
 export interface InboxMessageMatch {
@@ -22,6 +24,17 @@ export interface EnvironmentMessageSearchResult {
     readonly snippet: string;
     readonly timestamp: string;
   }>;
+}
+
+/**
+ * Whether the answer to `previous` may stay up while `next` runs: only while
+ * the person refines the same text (types on, or deletes back), so a fresh
+ * search never flashes another search's threads.
+ */
+export function isRelatedSearchQuery(previous: string, next: string): boolean {
+  const before = previous.toLocaleLowerCase();
+  const after = next.toLocaleLowerCase();
+  return after.startsWith(before) || before.startsWith(after);
 }
 
 /** The query a node search runs for what the person typed, or null for none. */

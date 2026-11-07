@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import type { InboxSection, InboxThreadRow } from "./inboxModel";
 import { createInboxSectionStabilizer, stabilizeInboxSections } from "./inboxModel";
 import {
+  inboxRowResetKey,
   buildInboxRowMenuActions,
   resolveSnoozeMenuPresets,
   snoozeMenuPresetsFromKey,
@@ -157,5 +158,24 @@ describe("inbox row menu", () => {
         presets,
       ).at(-3),
     ).toEqual({ id: "unhide", title: "Show in Inbox", attributes: { disabled: false } });
+  });
+});
+
+describe("inbox row reset key", () => {
+  it("changes with every state a row command lands on", () => {
+    const base = row("a");
+    const key = inboxRowResetKey(base);
+    expect(inboxRowResetKey(row("a"))).toBe(key);
+    for (const changed of [
+      row("a", { attentionState: "settled" }),
+      row("a", { snoozedUntil: "2026-11-08T09:00:00.000Z" }),
+      // Hidden while it needs the person: still Active, but the hide landed.
+      row("a", { hiddenByUser: true }),
+      // Settled while working: still Active until the work ends.
+      row("a", { filed: true }),
+      row("a", { pinned: true }),
+    ]) {
+      expect(inboxRowResetKey(changed)).not.toBe(key);
+    }
   });
 });

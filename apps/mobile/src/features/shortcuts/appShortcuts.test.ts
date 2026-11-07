@@ -1,9 +1,22 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 
+const links = vi.hoisted(() => ({
+  registered: null as string | null,
+  clear: vi.fn(),
+  urlListeners: [] as Array<(event: { url: string }) => void>,
+}));
 vi.mock("expo-linking", () => ({
   createURL: (path: string) => `ryco-dev://${path}`,
   getInitialURL: async () => null,
-  addEventListener: () => ({ remove: () => {} }),
+  getLinkingURL: () => links.registered,
+  clearInitialURL: () => {
+    links.clear();
+    links.registered = null;
+  },
+  addEventListener: (_type: string, listener: (event: { url: string }) => void) => {
+    links.urlListeners.push(listener);
+    return { remove: () => {} };
+  },
 }));
 vi.mock("expo-quick-actions", () => ({
   initial: undefined,
@@ -22,7 +35,7 @@ import {
   withRecentThreadShortcut,
   type RecentThreadShortcut,
 } from "./appShortcuts";
-import { createRecentThreadShortcuts } from "./appShortcutsRuntime";
+import { createRecentThreadShortcuts, shortcutAwareLinking } from "./appShortcutsRuntime";
 
 const thread = (threadId: string, title = threadId): RecentThreadShortcut => ({
   environmentId: "env:a",
@@ -123,5 +136,23 @@ describe("recent thread shortcuts", () => {
     await recents.saved();
     expect(save).not.toHaveBeenCalled();
     expect(publish).toHaveBeenLastCalledWith([thread("a")]);
+  });
+});
+
+describe("shortcut-aware linking on iOS", () => {
+  it("opens a cold-launch quick action the scene delivered, once", async () => {
+    links.registered = "ryco-dev://threads/env%3Aa/t1";
+    expect(await shortcutAwareLinking.getInitialURL()).toBe("ryco-dev://threads/env%3Aa/t1");
+    // A navigator that mounts again does not replay it.
+    expect(await shortcutAwareLinking.getInitialURL()).toBeNull();
+  });
+
+  it("forgets a link it delivered while running", () => {
+    const received: string[] = [];
+    shortcutAwareLinking.subscribe((url) => received.push(url));
+    links.registered = "ryco-dev://tasks/new";
+    links.urlListeners.at(-1)!({ url: "ryco-dev://tasks/new" });
+    expect(received).toEqual(["ryco-dev://tasks/new"]);
+    expect(links.registered).toBeNull();
   });
 });
