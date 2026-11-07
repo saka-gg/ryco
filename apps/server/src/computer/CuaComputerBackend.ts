@@ -255,7 +255,7 @@ function cuaKey(value: string): string {
   const key = value.toLowerCase();
   if (key === "insert" || key === "ins")
     throw new CuaActionError(
-      "Cua 0.28.2 has no Insert key mapping on macOS.",
+      "The Cua driver has no Insert key mapping on macOS.",
       "not-dispatched",
       "unsupported_operation",
     );
@@ -2045,7 +2045,7 @@ export class CuaComputerBackend implements ComputerBackend {
   ): Promise<ComputerBackendActionResult> {
     const result = await this.inputDispatch(
       "set_value",
-      { element_token: field.token, element_index: field.index, value },
+      { element_token: field.token, value },
       windowId,
       undefined,
       undefined,
@@ -2863,6 +2863,9 @@ export class CuaComputerBackend implements ComputerBackend {
         window_id,
         include_screenshot: true,
         include_accessibility_tree: false,
+        // A pane still is not a model observation: leave the window's pixel
+        // frame and element tokens to the model's own reads.
+        display_only: true,
         max_dimension: 1536,
       },
       false,
