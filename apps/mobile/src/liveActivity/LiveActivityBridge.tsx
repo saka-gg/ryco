@@ -4,8 +4,6 @@ import { AppState } from "react-native";
 import { runWhenIdle } from "../navigation/idlePrewarm";
 import { usePreferences } from "../state/preferencesStore";
 import type { AgentWidgetRuntime } from "../widgets/agentWidgetTimeline";
-import { rycoWidgetsNative } from "../widgets/rycoWidgetsNative";
-import { AGENT_WIDGET_KIND } from "../widgets/widgetKinds";
 import type { LiveActivityRuntime } from "./liveActivityRuntime";
 
 type MobileLiveActivityModule = typeof import("./mobileLiveActivity");
@@ -17,6 +15,8 @@ const loadEndLiveActivities = (): Promise<typeof import("./endLiveActivities")> 
   import("./endLiveActivities");
 const loadLiveActivityPush = (): Promise<typeof import("./liveActivityPush")> =>
   import("./liveActivityPush");
+const loadAgentWidgetInstalled = (): Promise<typeof import("../widgets/agentWidgetInstalled")> =>
+  import("../widgets/agentWidgetInstalled");
 
 /**
  * Whether the agent widget is on a Home or Lock Screen: asked once the app is idle and again on
@@ -25,14 +25,12 @@ const loadLiveActivityPush = (): Promise<typeof import("./liveActivityPush")> =>
 function useAgentWidgetInstalled(): boolean {
   const [installed, setInstalled] = useState(false);
   useEffect(() => {
-    const native = rycoWidgetsNative();
-    if (native?.installedWidgetKinds === undefined) return;
-    const read = native.installedWidgetKinds;
     let active = true;
     const check = () => {
-      void read()
-        .then((kinds) => {
-          if (active) setInstalled(kinds.includes(AGENT_WIDGET_KIND));
+      void loadAgentWidgetInstalled()
+        .then(({ isAgentWidgetInstalled }) => isAgentWidgetInstalled())
+        .then((installed) => {
+          if (active) setInstalled(installed);
         })
         .catch(() => undefined);
     };

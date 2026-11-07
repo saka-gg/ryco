@@ -2553,7 +2553,8 @@ export function ThreadDetailScreen(props: {
   // handlers as the cards and the composer once the connection is ready for them.
   useNotificationThreadAction({
     threadRef: scopeThreadRef(environmentId, threadId),
-    threadLoaded: thread !== undefined && thread !== null,
+    // The thread's detail (its activities, where approvals live), not just its shell row.
+    threadLoaded: thread !== undefined && thread !== null && threadDetailLoaded,
     ready: (environmentRow?.mutationReady ?? false) && !cachedView.promptsDisabled,
     pendingApprovals,
     respond: (approval, decision) =>
