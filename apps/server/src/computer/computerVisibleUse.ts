@@ -22,20 +22,20 @@ export interface ComputerTaskMessage {
 /**
  * Whether one computer task may move a window in front of the user.
  *
- * The never-raise default is the containment the Helium incident demanded: a
- * task that said "use Helium" was never asked to *show* Helium, yet the run
- * raised it, then ran twenty-one foreground excursions through it while the
- * user was typing. Raising is therefore opt-in per task, and the opt-in is the
- * user's own request or direct confirmation — not the model's judgment, not
- * the approval mode, not `full-access`.
+ * Background first: input goes to the target window without raising it. When
+ * that does not reach the app, a task the user typed may come to the front,
+ * because getting it done is what they asked for; the Escape stop and the
+ * pause on their own input keep them in charge (the Helium incident: twenty-one
+ * excursions while the user was typing, which the input pause now stops). A
+ * task that asks to stay in the background, and any automation- or
+ * agent-dispatched turn, never raises anything.
  *
- * The answer is reconstructed from durable human messages in this task.
- * Explicit consent survives a chain of routine continuations; a new task,
- * stop, background request, imported history or nonhuman dispatch ends it.
- * There is no thread-wide grant that a later unrelated turn can inherit.
+ * Reconstructed from durable human messages in this task: routine
+ * continuations and short answers keep the task's scope; a new request starts
+ * a new one.
  */
 export interface ComputerForegroundAuthorization {
-  /** The user explicitly requested or confirmed visible use for the current task. */
+  /** This task may come to the foreground (a human task that did not ask to stay in the background). */
   readonly userRequestedVisibleUse: boolean;
   /**
    * Requested, but the desktop cannot take the foreground safely right now: without
@@ -181,16 +181,6 @@ function isAffirmativeReply(text: string): boolean {
   );
 }
 
-function asksVisibleUsePermission(text: string, context: ComputerForegroundContext): boolean {
-  const question = unquotedRequest(text).trim();
-  // Take only the final, standalone permission question. General task
-  // approval ("continue?") and statements about visible use do not qualify.
-  const action = question.match(
-    /(?:^|[.!?]\s+)(?:can i|may i|shall i|do you want me to|would you like me to|is it (?:ok(?:ay)?|alright) (?:if i|to)|posso|vuoi che)\s+([^?]*\?)$/iu,
-  )?.[1];
-  return action !== undefined && messageRequestsVisibleUse(action, context);
-}
-
 function isLocalHumanMessage(message: ComputerTaskMessage): boolean {
   return (
     message.role === "user" &&
@@ -200,52 +190,9 @@ function isLocalHumanMessage(message: ComputerTaskMessage): boolean {
   );
 }
 
-function isLocalAssistantMessage(
-  message: ComputerTaskMessage | undefined,
-): message is ComputerTaskMessage {
-  return message?.role === "assistant" && message.source === "native" && !message.streaming;
-}
-
-/** A short affirmative answers one direct visibility question, never quoted page text. */
-function confirmsVisibleUse(
-  reply: ComputerTaskMessage,
-  preceding: ComputerTaskMessage | undefined,
-  context: ComputerForegroundContext,
-): boolean {
-  return (
-    isLocalAssistantMessage(preceding) &&
-    isAffirmativeReply(reply.text) &&
-    asksVisibleUsePermission(preceding.text, context)
-  );
-}
-
-/** The persisted answer names its exact response message; generated question text is not consent. */
-function confirmsStructuredVisibleUse(
-  messages: readonly ComputerTaskMessage[],
-  replyIndex: number,
-  context: ComputerForegroundContext,
-): boolean {
-  const reply = messages[replyIndex]!;
-  for (let index = replyIndex - 1; index >= 0; index -= 1) {
-    const question = messages[index]!;
-    // Answering a stale card from an earlier user task must not grant the new task visibility.
-    if (question.role === "user") return false;
-    const input = question.asyncUserInput;
-    if (input?.response?.messageId !== reply.id) continue;
-    return (
-      isLocalAssistantMessage(question) &&
-      input.questions.length === 1 &&
-      input.response.answers.length === 1 &&
-      isAffirmativeReply(input.response.answers[0]!) &&
-      asksVisibleUsePermission(input.questions[0]!.title, context)
-    );
-  }
-  return false;
-}
-
 /** Whether a reply only continues the current task ("continue", "retry"). Pure. */
 export function isRoutineComputerContinuation(text: string): boolean {
-  return isRoutineContinuation({ text });
+  return isRoutineContinuation({ text }) || isAffirmativeReply(text);
 }
 
 /** Only a whole, scope-preserving reply may carry earlier consent into this turn. */
@@ -306,7 +253,9 @@ export function computerForegroundAuthorizationForMessages(
     sawHumanMessage = true;
     if (message.source === "async-user-input") continue;
     if (messageRequestsBackgroundOnly(message.text)) return COMPUTER_FOREGROUND_NOT_AUTHORIZED;
-    if (!isRoutineContinuation(message)) return { userRequestedVisibleUse: true };
+    // "yes" / "ok" answers the agent's question about the same task: it keeps that task's scope.
+    if (!isRoutineContinuation(message) && !isAffirmativeReply(message.text))
+      return { userRequestedVisibleUse: true };
   }
   return sawHumanMessage ? { userRequestedVisibleUse: true } : COMPUTER_FOREGROUND_NOT_AUTHORIZED;
 }

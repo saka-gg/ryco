@@ -658,7 +658,7 @@ export class CuaComputerBackend implements ComputerBackend {
       if (code === "same_pid_keyboard_ambiguity") {
         message +=
           " Inspect computer_get_state for this exact window_id, then use computer_type_text with an observed ref (or label and role), or computer_set_value to replace the field. " +
-          "These semantic writes do not send keydown/keyup events. Do not retry physical keys or activate the app without the user's visible-use request.";
+          'These semantic writes do not send keydown/keyup events. Do not retry physical keys in the background; if the app needs real keys, repeat the call with delivery_mode:"foreground".';
       }
       if (refused && ["stale_element_token", "stale_geometry", "stale_target"].includes(code)) {
         message +=
@@ -2315,7 +2315,7 @@ export class CuaComputerBackend implements ComputerBackend {
     if (linux && options?.hidden !== false)
       throw new CuaActionError(
         "This Linux driver cannot guarantee a hidden app launch. Use an already open app, " +
-          "or request a visible launch only when the user's task asks to see the app.",
+          "or request a visible launch.",
         "not-dispatched",
         "unsupported_operation",
       );

@@ -436,8 +436,8 @@ export function makeAgentGatewayComputerBrowserTools(
       .catch(() => COMPUTER_FOREGROUND_NOT_AUTHORIZED);
     if (authorization?.userRequestedVisibleUse !== true) {
       throw new CuaActionError(
-        "The user's task did not ask for a visible browser. Keep windowed false " +
-          "to work in the background, or ask the user to confirm they want to watch.",
+        "This task asked to stay in the background, or did not come from the user, so the browser stays headless. " +
+          "Keep windowed false and work in the background.",
         "not-dispatched",
         COMPUTER_FOREGROUND_NOT_REQUESTED_CODE,
       );
@@ -794,7 +794,7 @@ export function makeAgentGatewayComputerBrowserTools(
     entry(
       "computer_browser_prepare",
       "Prepare browser",
-      `Prepare driver-owned isolated Chromium (profile.mode "isolated_new" or "isolated_named", allow_launch:true), headless by default. Or detect an existing endpoint with pid (+ window_id), allow_launch:false and no strategy. Linux control requires the verified driver and packaged host's confirmed direct-X11 Escape listener; only owned isolated headless targets support mutation. Wayland/XWayland and standalone hosts permit reads/passive prepare only. Linux refuses visible launch and personal-profile control. On macOS, windowed:true needs the user's request to watch; otherwise foreground_not_requested. Prefer "isolated_named" to preserve a profile across restarts; "isolated_new" starts empty. Use prepared_pid with computer_browser_state. Existing-profile attachment needs a consent grant this embedding cannot host (browser_consent_required).`,
+      `Prepare driver-owned isolated Chromium (profile.mode "isolated_new" or "isolated_named", allow_launch:true), headless by default. Or detect an existing endpoint with pid (+ window_id), allow_launch:false and no strategy. Linux control requires the verified driver and packaged host's confirmed direct-X11 Escape listener; only owned isolated headless targets support mutation. Wayland/XWayland and standalone hosts permit reads/passive prepare only. Linux refuses visible launch and personal-profile control. On macOS, windowed:true opens a visible window; refused with foreground_not_requested when the task asked to stay in the background. Prefer "isolated_named" to preserve a profile across restarts; "isolated_new" starts empty. Use prepared_pid with computer_browser_state. Existing-profile attachment needs a consent grant this embedding cannot host (browser_consent_required).`,
       {
         type: "object",
         properties: {
@@ -810,7 +810,7 @@ export function makeAgentGatewayComputerBrowserTools(
           windowed: {
             type: "boolean",
             description:
-              "Default false: isolated headless. Linux requires a verified driver and confirmed direct-X11 Escape listener, and refuses true. On macOS, true opens a window only when the user asks to watch; full access is insufficient.",
+              "Default false: isolated headless. Linux requires a verified driver and confirmed direct-X11 Escape listener, and refuses true. On macOS, true opens a visible window; refused when the task asked to stay in the background.",
           },
           profile: {
             type: "object",
