@@ -3,6 +3,7 @@ import {
   ApprovalResponseState,
 } from "@ryco/contracts/approval-responses";
 import * as Schema from "effect/Schema";
+import type { DeviceToolIdentity } from "@ryco/shared/deviceToolPresentation";
 import { extractToolContentText, extractToolResultText } from "@ryco/shared/toolOutput";
 import {
   CHANGED_FILE_NESTED_KEYS,
@@ -138,6 +139,11 @@ export interface WorkLogEntry {
   taskId?: string;
   /** Agent role (subagent_type) for labeled timeline rows. */
   agentRole?: string;
+  /**
+   * Name, server and arguments of a tool call that may be one of Ryco's device
+   * tools; `@ryco/shared/deviceToolPresentation` decides and labels it.
+   */
+  deviceTool?: DeviceToolIdentity;
   /**
    * Approval lifecycle row (request, response, resolution). The pending
    * approval card owns this interaction; transcripts that narrate the agent's
@@ -1114,6 +1120,10 @@ function toDerivedWorkLogEntry(
   if (requestKind) {
     entry.requestKind = requestKind;
   }
+  const deviceTool = activity.kind.startsWith("tool.") ? extractDeviceToolIdentity(payload) : null;
+  if (deviceTool) {
+    entry.deviceTool = deviceTool;
+  }
   if (toolCallId) {
     entry.toolCallId = toolCallId;
     const startedAt = startedAtByToolCallId.get(toolCallId);
@@ -1349,6 +1359,11 @@ function mergeDerivedWorkLogEntries(
   const command = next.command ?? previous.command;
   const rawCommand = next.rawCommand ?? previous.rawCommand;
   const toolTitle = next.toolTitle ?? previous.toolTitle;
+  // A later event may name the tool without its arguments (or not at all): keep the fuller one.
+  const deviceTool =
+    next.deviceTool && (next.deviceTool.input || !previous.deviceTool?.input)
+      ? next.deviceTool
+      : (previous.deviceTool ?? next.deviceTool);
   const itemType = next.itemType ?? previous.itemType;
   const requestKind = next.requestKind ?? previous.requestKind;
   const collapseKey = next.collapseKey ?? previous.collapseKey;
@@ -1374,6 +1389,7 @@ function mergeDerivedWorkLogEntries(
     ...(changedFiles.length > 0 ? { changedFiles } : {}),
     ...(changedFileStats.length > 0 ? { changedFileStats } : {}),
     ...(toolTitle ? { toolTitle } : {}),
+    ...(deviceTool ? { deviceTool } : {}),
     ...(itemType ? { itemType } : {}),
     ...(requestKind ? { requestKind } : {}),
     ...(collapseKey ? { collapseKey } : {}),
@@ -1654,6 +1670,34 @@ function extractToolCommand(payload: Record<string, unknown> | null): {
 
 function extractToolTitle(payload: Record<string, unknown> | null): string | null {
   return asTrimmedString(payload?.title);
+}
+
+/**
+ * A tool call's name, server and arguments when its name mentions a device:
+ * Claude's `toolName`/`input`, Codex's MCP `item`, OpenCode's `tool`/`state`,
+ * ACP's `rawInput`, else the title (Copilot, OpenCode and ACP name the tool there).
+ */
+function extractDeviceToolIdentity(
+  payload: Record<string, unknown> | null,
+): DeviceToolIdentity | null {
+  const data = asRecord(payload?.data);
+  const item = asRecord(data?.item);
+  const itemTool = asTrimmedString(item?.tool);
+  const name =
+    asTrimmedString(data?.toolName) ??
+    itemTool ??
+    asTrimmedString(data?.tool) ??
+    asTrimmedString(payload?.title);
+  const server = itemTool ? asTrimmedString(item?.server) : null;
+  if (!name || !`${server ?? ""}${name}`.toLowerCase().includes("device")) {
+    return null;
+  }
+  const input =
+    asRecord(data?.input) ??
+    asRecord(item?.arguments) ??
+    asRecord(data?.rawInput) ??
+    asRecord(asRecord(data?.state)?.input);
+  return { name, ...(server ? { server } : {}), ...(input ? { input } : {}) };
 }
 
 function extractToolCallId(payload: Record<string, unknown> | null): string | null {

@@ -592,9 +592,27 @@ describe("ClaudeAdapterLive", () => {
         type: "http",
         url: "http://127.0.0.1:46000/device",
         headers: { Authorization: "Bearer device-token" },
-        alwaysLoad: true,
       });
       assert.isDefined(servers?.ryco);
+      // The device tools are deferred behind tool search; the routing rules are always there,
+      // and native subagents get them through SubagentStart.
+      const options = harness.getLastCreateQueryInput()?.options;
+      const systemPrompt = options?.systemPrompt as { append?: string } | undefined;
+      assert.include(systemPrompt?.append ?? "", "<ryco_devices>");
+      const subagentStart = options?.hooks?.SubagentStart?.[0]?.hooks[0];
+      assert.isDefined(subagentStart);
+      const started = (yield* Effect.promise(() =>
+        subagentStart!(
+          {
+            hook_event_name: "SubagentStart",
+            agent_id: "a1",
+            agent_type: "general-purpose",
+          } as never,
+          undefined,
+          { signal: new AbortController().signal },
+        ),
+      )) as { hookSpecificOutput?: { additionalContext?: string } };
+      assert.include(started.hookSpecificOutput?.additionalContext ?? "", "<ryco_devices>");
       yield* adapter.stopSession(THREAD_ID);
       assert.strictEqual(dispose.mock.calls.length, 1);
     }).pipe(

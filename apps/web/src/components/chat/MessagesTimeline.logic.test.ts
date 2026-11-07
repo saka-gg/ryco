@@ -999,6 +999,46 @@ describe("deriveMessagesTimelineRows", () => {
     );
   });
 
+  it("counts device tool calls as their own category in a recap", () => {
+    const deviceEntry = (index: number, action: string) => ({
+      id: `work-entry-${index}`,
+      kind: "work" as const,
+      createdAt: `2026-01-01T00:00:0${index}Z`,
+      entry: makeWorkEntry({
+        id: `work-${index}`,
+        createdAt: `2026-01-01T00:00:0${index}Z`,
+        itemType: "mcp_tool_call",
+        deviceTool: { name: "mcp__ryco_device__device", input: { action } },
+      }),
+    });
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        {
+          id: "work-entry-1",
+          kind: "work" as const,
+          createdAt: "2026-01-01T00:00:01Z",
+          entry: makeWorkEntry({
+            id: "work-1",
+            createdAt: "2026-01-01T00:00:01Z",
+            command: "bun typecheck",
+          }),
+        },
+        deviceEntry(2, "tap"),
+        deviceEntry(3, "type"),
+        deviceEntry(4, "screenshot"),
+      ],
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+
+    const toggle = rows.find((row) => row.kind === "work-toggle");
+    expect(toggle?.kind === "work-toggle" ? toggle.summary?.label : null).toBe(
+      "Ran 1 command, Used the device 3 times",
+    );
+  });
+
   it("uses authoritative timing and a stopped label for an interrupted turn", () => {
     const turnId = TurnId.make("turn-interrupted");
     const rows = deriveMessagesTimelineRows({

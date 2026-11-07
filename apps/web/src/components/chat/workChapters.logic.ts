@@ -24,6 +24,7 @@ import {
   type WorkEntryStatus,
 } from "@ryco/client-runtime/state/session";
 import { classifyToolCallSummaryCategory } from "./toolCallGroup.logic";
+import { deviceWorkEntryPresentation } from "./workEntryActivity";
 
 /** Rows the live chapter keeps on screen; older steps scroll out the top. */
 export const CHAPTER_TICKER_WINDOW = 3;
@@ -220,6 +221,7 @@ export function classifyChapterStep(entry: WorkLogEntry): ChapterStepKind {
       return "search";
     case "agent":
       return "agent";
+    case "device":
     case "tool":
     case "other":
       return "tool";
@@ -398,6 +400,17 @@ export function deriveChapterStepDisplay(
         meta,
       };
     default: {
+      const device = deviceWorkEntryPresentation(entry);
+      if (device) {
+        return {
+          kind,
+          status,
+          verb: device.verb,
+          target: device.target,
+          targetIsCode: false,
+          meta,
+        };
+      }
       const heading = capitalize(
         (entry.toolTitle ?? entry.label).replace(/\s+(?:complete|completed)\s*$/i, ""),
       );

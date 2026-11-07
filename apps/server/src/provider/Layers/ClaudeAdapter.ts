@@ -189,6 +189,7 @@ import {
 } from "../claudeTranscriptPresence.ts";
 import { formatProjectCustomSystemPrompt } from "../ProjectCustomSystemPrompt.ts";
 import { ASSISTANT_ATTACHMENT_INSTRUCTIONS } from "../../assistantAttachments.ts";
+import { DEVICE_ROUTING_INSTRUCTIONS } from "../../providerTools/deviceToolRouting.ts";
 import { isSlashCommandInput } from "../attachmentInstructionDelivery.ts";
 import { providerStartupPhaseTimeoutDetail } from "../providerOperationPolicy.ts";
 import {
@@ -791,6 +792,20 @@ function getEffectiveClaudeAgentEffort(
 ): ClaudeSdkEffort | null {
   const normalized = normalizeClaudeCliEffort(effort, model);
   return normalized ? (normalized as ClaudeSdkEffort) : null;
+}
+
+/** The device tool gateway's MCP server name in Claude sessions (tools are `mcp__ryco_device__*`). */
+const CLAUDE_DEVICE_TOOL_SERVER = "ryco_device";
+
+/** Insertion-ordered map that forgets its oldest entries past `max`. */
+function rememberBounded<V>(map: Map<string, V>, key: string, value: V, max: number): void {
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > max) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
 }
 
 function readTokenReductionInstructions(tokenMode: AgentTokenMode) {
@@ -5992,9 +6007,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     const contextRef = yield* Ref.make<ClaudeSessionContext | undefined>(undefined);
     let deviceToolContext: ClaudeSessionContext | undefined;
+    // Which subagent made each device tool call, as its PreToolUse hook saw it: the gateway
+    // gives every agent the driving guide once and screen diffs of its own.
+    const deviceToolCallers = new Map<string, string>();
     const deviceToolBinding = createProcessDeviceToolBinding({
       threadId,
       isTurnActive: () => deviceToolContext?.turnState !== undefined && !deviceToolContext.stopped,
+      agentKeyFor: (toolUseId) =>
+        toolUseId === undefined ? undefined : deviceToolCallers.get(toolUseId),
     });
 
     /**
@@ -6372,6 +6392,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       } satisfies HookJSONOutput;
     };
 
+    const deviceToolCallerHook: HookCallback = async (hookInput) => {
+      if (!("tool_name" in hookInput) || !("tool_use_id" in hookInput)) return {};
+      const agentId = "agent_id" in hookInput ? hookInput.agent_id : undefined;
+      if (
+        typeof agentId === "string" &&
+        typeof hookInput.tool_use_id === "string" &&
+        hookInput.tool_name.startsWith(`mcp__${CLAUDE_DEVICE_TOOL_SERVER}__`)
+      ) {
+        rememberBounded(deviceToolCallers, hookInput.tool_use_id, agentId, 256);
+      }
+      return {};
+    };
+    // Native subagents start with their own system prompt: the device routing rules go with them.
+    const deviceRoutingSubagentHook: HookCallback = async () => ({
+      hookSpecificOutput: {
+        hookEventName: "SubagentStart",
+        additionalContext: DEVICE_ROUTING_INSTRUCTIONS,
+      },
+    });
+
     const claudeBinaryPath = claudeSettings.binaryPath;
     // Claude Code forces thinking display to "omitted" in SDK sessions unless
     // the display is set explicitly on the command line. Ryco renders the
@@ -6428,6 +6468,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const customSystemPrompt = formatProjectCustomSystemPrompt(input.customSystemPrompt);
     const appendSystemPrompt = [
       ASSISTANT_ATTACHMENT_INSTRUCTIONS,
+      deviceToolBinding ? DEVICE_ROUTING_INSTRUCTIONS : undefined,
       tokenReductionInstructions,
       customSystemPrompt,
     ]
@@ -6445,11 +6486,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const mcpServers = {
       ...(deviceToolBinding
         ? {
-            ryco_device: {
+            // Deferred behind tool search where Claude Code offers it: a session that never
+            // touches a device pays only for the routing rules, not the catalogue.
+            [CLAUDE_DEVICE_TOOL_SERVER]: {
               type: "http" as const,
               url: deviceToolBinding.url,
               headers: { ...deviceToolBinding.headers },
-              alwaysLoad: true,
             },
           }
         : {}),
@@ -6503,7 +6545,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ...(newSessionId ? { sessionId: newSessionId } : {}),
       includePartialMessages: true,
       canUseTool,
-      hooks: { PreToolUse: [{ hooks: [subagentMessageHook] }] },
+      hooks: {
+        PreToolUse: [
+          { hooks: [subagentMessageHook] },
+          ...(deviceToolBinding ? [{ hooks: [deviceToolCallerHook] }] : []),
+        ],
+        ...(deviceToolBinding ? { SubagentStart: [{ hooks: [deviceRoutingSubagentHook] }] } : {}),
+      },
       ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
       env: sessionEnvironment,
       ...(input.cwd ? { additionalDirectories: [input.cwd] } : {}),

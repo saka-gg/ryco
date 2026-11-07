@@ -268,6 +268,71 @@ function projectAcpContent(value: unknown): Record<string, unknown> | undefined 
   return summary ? { content: summary } : undefined;
 }
 
+/** Argument keys of Ryco's device tools that rows name; everything else stays out. */
+const DEVICE_TOOL_INPUT_KEYS = [
+  "action",
+  "udid",
+  "ref",
+  "label",
+  "role",
+  "x",
+  "y",
+  "fromX",
+  "fromY",
+  "toX",
+  "toY",
+  "text",
+  "bundleId",
+  "url",
+  "appPath",
+  "button",
+  "format",
+  "gone",
+] as const;
+const DEVICE_TOOL_TEXT_MAX = 200;
+const DEVICE_TOOL_NAMES = /^(?:device|device_read|device_[a-z_]+|ryco_device)$/u;
+
+/** A call of Ryco's device tools, by server or tool name in any provider's shape. */
+function isDeviceToolCall(payload: Record<string, unknown>, data: Record<string, unknown>) {
+  const item = asRecord(data.item);
+  const names = [data.toolName, data.tool, item?.tool, item?.server, payload.title]
+    .map(asTrimmedString)
+    .filter((name): name is string => name !== null);
+  return names.some(
+    (name) =>
+      /ryco[-_]device/u.test(name) || (name !== payload.title && DEVICE_TOOL_NAMES.test(name)),
+  );
+}
+
+/**
+ * The few arguments a device tool row shows (action, target, typed text clipped), for providers
+ * whose projection would otherwise drop them (Copilot sends them flat, OpenCode and ACP as
+ * dynamic tool calls). Claude and Codex keep theirs in `input` / `item.arguments`.
+ */
+function projectDeviceToolInput(data: Record<string, unknown>): Record<string, unknown> | null {
+  const source =
+    asRecord(data.input) ??
+    asRecord(asRecord(data.item)?.arguments) ??
+    asRecord(data.rawInput) ??
+    asRecord(asRecord(data.state)?.input) ??
+    asRecord(data.arguments) ??
+    data;
+  const input: Record<string, unknown> = {};
+  for (const key of DEVICE_TOOL_INPUT_KEYS) {
+    const value = source[key];
+    if (typeof value === "number" || typeof value === "boolean") input[key] = value;
+    else if (typeof value === "string") input[key] = value.slice(0, DEVICE_TOOL_TEXT_MAX);
+  }
+  const setting = asRecord(source.setting);
+  if (setting) {
+    input.setting = {
+      ...(typeof setting.type === "string" ? { type: setting.type } : {}),
+      ...(typeof setting.value === "string" ? { value: setting.value } : {}),
+    };
+  }
+  return Object.keys(input).length > 0 ? input : null;
+}
+
 /**
  * Projects provider-specific tool data to the fields shared clients consume.
  * The result is safe to persist for cumulative streaming updates: unbounded
@@ -289,12 +354,18 @@ export function projectActivityPayload(
       ? { ...payload, status: itemStatus }
       : payload;
 
+  const deviceInput = isDeviceToolCall(payload, data) ? projectDeviceToolInput(data) : null;
+
   if (payload.itemType === "mcp_tool_call") {
+    const projected = projectMcpToolCallData(data);
     return {
       ...activity,
       payload: {
         ...projectedPayload,
-        data: projectMcpToolCallData(data),
+        data:
+          deviceInput !== null && !("input" in projected) && asRecord(data.item) === null
+            ? { ...projected, input: deviceInput }
+            : projected,
       },
     };
   }
@@ -320,6 +391,11 @@ export function projectActivityPayload(
   }
   if ("kind" in data) {
     projectedData.kind = data.kind;
+  }
+  if (deviceInput !== null) {
+    projectedData.input = deviceInput;
+    const toolName = asTrimmedString(data.toolName) ?? asTrimmedString(data.tool);
+    if (toolName !== null) projectedData.toolName = toolName;
   }
 
   const rawOutput =

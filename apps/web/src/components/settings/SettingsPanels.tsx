@@ -484,6 +484,71 @@ export function AgentProcessPrioritySettings() {
   );
 }
 
+/**
+ * Simulators and emulators on the device: whether Ryco uses them at all, and whether agents get
+ * the device tools. A device page's Simulators tab on the settings page.
+ */
+export function SimulatorSettings() {
+  const settings = useSettings();
+  const { updateSettings } = useUpdateSettings();
+  const serverConfig = useServerConfig();
+  const supported = serverConfig?.environment.capabilities.deviceSettings === true;
+  const settingsTarget = useSettingsTarget();
+  const editingScope = useSettingsEditingScope();
+  // An older node would drop the keys, and client-only editing or an unreachable or read-only
+  // node cannot change them.
+  const disabled = !supported || isNodeSettingsTargetReadOnly(editingScope, settingsTarget);
+  const nodeScopeLabel = useGeneralScopeLabels().node;
+  const status = supported
+    ? undefined
+    : "This node does not support these settings. Update the node to change them.";
+  const resetFor = (key: "devicesEnabled" | "agentDevicesEnabled", label: string) =>
+    !disabled && settings[key] !== DEFAULT_UNIFIED_SETTINGS[key] ? (
+      <SettingResetButton
+        label={label}
+        onClick={() => updateSettings({ [key]: DEFAULT_UNIFIED_SETTINGS[key] })}
+      />
+    ) : null;
+  return (
+    <SettingsSection title="Simulators" owner="node">
+      <SettingsRow
+        title="Use simulators"
+        description="Run iOS Simulators and Android Emulators from Ryco: the device pane in chats, and the device tools agents use. Off stops new boots and attaches; running devices keep running until you shut them down."
+        owner="node"
+        scope={nodeScopeLabel}
+        status={status}
+        resetAction={resetFor("devicesEnabled", "use simulators")}
+        control={
+          <Switch
+            checked={settings.devicesEnabled}
+            disabled={disabled}
+            onCheckedChange={(checked) => updateSettings({ devicesEnabled: Boolean(checked) })}
+            aria-label="Use simulators"
+          />
+        }
+      />
+      <SettingsRow
+        title="Agents can use simulators"
+        description="Give agents Ryco's device tools to read the screen, tap, type and launch apps on simulators. Applies to agent sessions started after the change; a running session is refused at its next device call once this is off."
+        owner="node"
+        scope={nodeScopeLabel}
+        status={
+          status ?? (settings.devicesEnabled ? undefined : "Off while Use simulators is off.")
+        }
+        resetAction={resetFor("agentDevicesEnabled", "agents can use simulators")}
+        control={
+          <Switch
+            checked={settings.devicesEnabled && settings.agentDevicesEnabled}
+            disabled={disabled || !settings.devicesEnabled}
+            onCheckedChange={(checked) => updateSettings({ agentDevicesEnabled: Boolean(checked) })}
+            aria-label="Agents can use simulators"
+          />
+        }
+      />
+    </SettingsSection>
+  );
+}
+
 /** New threads and worktree defaults stored on the device. Projects & worktrees on the settings page. */
 export function ProjectsAndThreadsSettings() {
   const isPhoneTier = usePresentationTier() === "phone";

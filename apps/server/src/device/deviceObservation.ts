@@ -545,6 +545,11 @@ export interface DeviceEvidenceOptions {
   readonly screenshot: "always" | "no-tree" | "never";
   /** Largest base64 image this transport can carry beside the text blocks. */
   readonly maxImageBase64Chars: number;
+  /**
+   * The screen as text for this reader (refs, and only the changes when it saw the screen
+   * before); defaults to a full snapshot with refs numbered for it alone.
+   */
+  readonly formatScreen?: ((root: DeviceUiNode) => string) | undefined;
 }
 
 /** `screenshot: true` → always, `false` → never, absent → only when there is no tree. */
@@ -597,7 +602,9 @@ export async function deviceEvidenceContent(
   };
   return [
     { type: "text", text: JSON.stringify(metadata, null, 2) },
-    ...(root === null ? [] : [{ type: "text" as const, text: formatUiSnapshot(root) }]),
+    ...(root === null
+      ? []
+      : [{ type: "text" as const, text: (options.formatScreen ?? formatUiSnapshot)(root) }]),
     ...(image === null ? [] : [image]),
   ];
 }

@@ -47,6 +47,7 @@ export const SETTINGS_DEVICE_PARTS = [
   { id: "access", title: "Access", storage: "this-computer" },
   { id: "security", title: "Security", storage: "device" },
   { id: "computer-use", title: "Computer use", storage: "desktop" },
+  { id: "simulators", title: "Simulators", storage: "device" },
   { id: "power", title: "Power", storage: "device" },
 ] as const satisfies ReadonlyArray<{
   readonly id: string;

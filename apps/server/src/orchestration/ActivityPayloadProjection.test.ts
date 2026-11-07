@@ -187,3 +187,66 @@ describe("withoutHtmlRenderToolMarkup for a call that names no tool", () => {
     expect(withoutHtmlRenderToolMarkup(item)).toBe(item);
   });
 });
+
+describe("device tool arguments", () => {
+  const activity = (payload: Record<string, unknown>): OrchestrationThreadActivity => ({
+    id: EventId.make("event"),
+    createdAt: "2026-11-06T00:00:00.000Z",
+    tone: "tool",
+    kind: "tool.started",
+    summary: "Tool",
+    turnId: null,
+    payload,
+  });
+
+  it("keeps the row's arguments of an OpenCode device call and nothing else", () => {
+    const projected = projectActivityPayload(
+      activity({
+        itemType: "dynamic_tool_call",
+        title: "ryco_device_abc_device",
+        data: {
+          tool: "ryco_device_abc_device",
+          state: {
+            input: { action: "tap", udid: "U", ref: "@e5", secret: "x", text: "y".repeat(500) },
+          },
+        },
+      }),
+    ).payload as { data: { input: Record<string, unknown>; toolName: string } };
+    expect(projected.data.toolName).toBe("ryco_device_abc_device");
+    expect(projected.data.input).toEqual({
+      action: "tap",
+      udid: "U",
+      ref: "@e5",
+      text: "y".repeat(200),
+    });
+  });
+
+  it("keeps flat Copilot device arguments, and leaves other tools alone", () => {
+    const copilot = projectActivityPayload(
+      activity({
+        itemType: "mcp_tool_call",
+        title: "ryco_device-device",
+        data: {
+          action: "type",
+          udid: "U",
+          text: "hello",
+          setting: { type: "appearance", value: "dark" },
+        },
+      }),
+    ).payload as { data: { input?: Record<string, unknown> } };
+    expect(copilot.data.input).toEqual({
+      action: "type",
+      udid: "U",
+      text: "hello",
+      setting: { type: "appearance", value: "dark" },
+    });
+    const other = projectActivityPayload(
+      activity({
+        itemType: "dynamic_tool_call",
+        title: "search",
+        data: { tool: "search", text: "q" },
+      }),
+    ).payload as { data: Record<string, unknown> };
+    expect(other.data.input).toBeUndefined();
+  });
+});

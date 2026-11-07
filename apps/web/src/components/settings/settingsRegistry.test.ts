@@ -8,12 +8,13 @@ import {
 } from "./settingsRegistry";
 
 describe("a device page's tabs", () => {
-  it("are Overview, Access, Security, Computer use and Power, in that order", () => {
+  it("are Overview, Access, Security, Computer use, Simulators and Power, in that order", () => {
     expect(SETTINGS_DEVICE_PARTS.map((part) => part.title)).toEqual([
       "Overview",
       "Access",
       "Security",
       "Computer use",
+      "Simulators",
       "Power",
     ]);
   });

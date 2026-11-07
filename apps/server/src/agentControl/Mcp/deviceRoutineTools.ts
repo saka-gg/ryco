@@ -37,8 +37,12 @@ import { Effect, Option, Schema } from "effect";
 import type { DeviceSettleTiming } from "../../device/deviceObservation.ts";
 import type { DeviceServiceShape } from "../../device/Services/DeviceService.ts";
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { agentDeviceRefusal } from "../../providerTools/deviceToolAccess.ts";
 import { attachmentFenceRefusal } from "../../providerTools/deviceToolActions.ts";
-import { DEVICE_TOOL_DEFINITIONS } from "../../providerTools/deviceToolDefinitions.ts";
+import {
+  DEVICE_ACTION_DEFINITIONS,
+  mergedActionProperties,
+} from "../../providerTools/deviceToolDefinitions.ts";
 import {
   AGENT_CONTROL_DEVICE_TOOL,
   callDeviceTool,
@@ -116,11 +120,10 @@ const NEEDS_CONSENT = new Set<RycoDeviceAction>([
  * One flat schema: every argument of the mapped gateway tools, which also
  * enforce them per action. Providers handle flat schemas best (no oneOf).
  */
-const ACTION_PROPERTIES: Record<string, unknown> = Object.assign(
-  {},
-  ...DEVICE_TOOL_DEFINITIONS.filter((definition) =>
+const ACTION_PROPERTIES: Record<string, unknown> = mergedActionProperties(
+  DEVICE_ACTION_DEFINITIONS.filter((definition) =>
     (Object.values(ACTION_TOOL) as ReadonlyArray<DeviceToolName>).includes(definition.name),
-  ).map((definition) => definition.inputSchema.properties as Record<string, unknown>),
+  ),
 );
 const ARGUMENT_NAMES = new Set(Object.keys(ACTION_PROPERTIES));
 
@@ -390,6 +393,9 @@ export function withDeviceRoutineTools(
           new DeviceToolFailure("Simulator or emulator device control is unavailable."),
         );
       // Never a device another thread also watches, and never one this thread lacks.
+      // "Use simulators" / "Agents can use simulators" off: nothing reaches a device.
+      const accessRefusal = agentDeviceRefusal();
+      if (accessRefusal !== null) return yield* Effect.fail(new DeviceToolFailure(accessRefusal));
       // The shared core checks again right before every input ("require-attached").
       const refusal = attachmentFenceRefusal(manager, session.threadId, input.udid);
       if (refusal !== null) return yield* Effect.fail(new DeviceToolFailure(refusal));
@@ -464,6 +470,7 @@ export function withDeviceRoutineTools(
             args: { udid: input.udid, ...input.rest },
             signal,
             attachment: "require-attached",
+            observerKey: `agent-control:${session.sessionId}`,
             maxImageBase64Chars: deps.maxImageBase64Chars,
             timing: deps.timing,
           }),

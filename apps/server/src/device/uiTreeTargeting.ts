@@ -91,8 +91,23 @@ export function isTargetable(node: DeviceUiNode): boolean {
 
 /** What the caller asked for. At least a label; role narrows an ambiguous one. */
 export interface DeviceUiTarget {
+  /** The label to match, or for a ref target the ref itself (`@e5`), which messages name. */
   readonly label: string;
   readonly role?: string | undefined;
+  /**
+   * A snapshot ref (`deviceUiRefs.ts`): matched by element identity instead of by label,
+   * so an unlabeled field or one of several equal labels can be named exactly.
+   */
+  readonly ref?: DeviceUiRefTarget | undefined;
+}
+
+export interface DeviceUiRefTarget {
+  /** As the agent wrote it, normalised: `@e5`. */
+  readonly name: string;
+  /** `elementIdentities` key of the element the ref was given to. */
+  readonly key: string;
+  /** How the snapshot showed it, for messages: `Button "Sign in"`. */
+  readonly description: string;
 }
 
 export interface DeviceUiTargetMatch {
@@ -141,6 +156,47 @@ export function flattenUiTree(root: DeviceUiNode): DeviceUiNode[] {
     for (const child of node.children) walk(child);
   };
   walk(root);
+  return out;
+}
+
+/** Roles that are scaffolding unless they carry their own text. */
+const CONTAINER_ROLES = new Set(["Group", "ScrollArea", "Window", "Application", "Unknown"]);
+
+const hasText = (value: string | null): value is string =>
+  value !== null && value.trim().length > 0;
+
+/** Nodes worth a snapshot line, and a ref: they can be tapped and say something. */
+export function isReportable(node: DeviceUiNode): boolean {
+  if (!isTargetable(node)) return false;
+  const text = hasText(node.label) || hasText(node.value);
+  if (CONTAINER_ROLES.has(node.role)) return text && node.role !== "Application";
+  return text;
+}
+
+export interface DeviceUiElementIdentity {
+  readonly node: DeviceUiNode;
+  /**
+   * Role, subrole and label (never the value, so typing into a field keeps its ref), plus
+   * which one it is among equal elements in document order.
+   */
+  readonly key: string;
+}
+
+/**
+ * Every reportable element below the root (on and off screen) with its identity. Equal
+ * identities (a list of "Delete" buttons) are told apart by position in document order, so
+ * a ref to the third of them names the third one on the current screen.
+ */
+export function elementIdentities(root: DeviceUiNode): DeviceUiElementIdentity[] {
+  const seen = new Map<string, number>();
+  const out: DeviceUiElementIdentity[] = [];
+  for (const node of flattenUiTree(root)) {
+    if (node === root || !isReportable(node)) continue;
+    const base = [node.role, node.subrole ?? "", node.label ?? ""].join("\u001f");
+    const occurrence = seen.get(base) ?? 0;
+    seen.set(base, occurrence + 1);
+    out.push({ node, key: `${base}\u001f${occurrence}` });
+  }
   return out;
 }
 
@@ -205,6 +261,7 @@ function describe(node: DeviceUiNode): string {
  * one on screen is the one meant.
  */
 export function findTarget(root: DeviceUiNode, target: DeviceUiTarget): DeviceUiTargetMatch {
+  if (target.ref !== undefined) return findRefTarget(root, target.ref);
   const wanted = normalize(target.label);
   if (wanted.length === 0) {
     throw new DeviceUiTargetError("A tap target needs a non-empty label.");
@@ -244,6 +301,27 @@ export function findTarget(root: DeviceUiNode, target: DeviceUiTarget): DeviceUi
 
   const node = candidates[0] as DeviceUiNode;
   return { point: tapPointForNode(node), node, onScreen: visible.length > 0 };
+}
+
+/**
+ * The element a ref names. A ref is never guessed at: an element that left the screen (or
+ * the tree) fails with `notFound`, and callers do not scroll looking for it.
+ */
+function findRefTarget(root: DeviceUiNode, ref: DeviceUiRefTarget): DeviceUiTargetMatch {
+  const found = elementIdentities(root).find((identity) => identity.key === ref.key);
+  if (found === undefined) {
+    throw new DeviceUiTargetError(
+      `${ref.name} (${ref.description}) is not on this screen any more. ` +
+        "Use a ref from the latest snapshot, or a label.",
+      labelledNodes(root).slice(0, MAX_REPORTED_CANDIDATES).map(describe),
+      true,
+    );
+  }
+  return {
+    point: tapPointForNode(found.node),
+    node: found.node,
+    onScreen: isOnScreen(found.node, root),
+  };
 }
 
 /**
@@ -332,8 +410,17 @@ export function readTapRequest(input: {
   readonly y?: number | undefined;
   readonly label?: string | undefined;
   readonly role?: string | undefined;
+  readonly ref?: DeviceUiRefTarget | undefined;
 }): DeviceTapRequest {
   const hasPoint = input.x !== undefined && input.y !== undefined;
+  if (input.ref !== undefined) {
+    if (hasPoint || input.label !== undefined || input.role !== undefined) {
+      throw new DeviceUiTargetError(
+        "A tap takes one target: ref alone, label (with optional role), or x and y.",
+      );
+    }
+    return { kind: "element", target: { label: input.ref.name, ref: input.ref } };
+  }
   if (input.label !== undefined) {
     if (hasPoint) {
       throw new DeviceUiTargetError(

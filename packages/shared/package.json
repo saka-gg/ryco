@@ -58,6 +58,10 @@
       "types": "./src/htmlRenderToolPresentation.ts",
       "import": "./src/htmlRenderToolPresentation.ts"
     },
+    "./deviceToolPresentation": {
+      "types": "./src/deviceToolPresentation.ts",
+      "import": "./src/deviceToolPresentation.ts"
+    },
     "./themePalettes": {
       "types": "./src/themePalettes.ts",
       "import": "./src/themePalettes.ts"

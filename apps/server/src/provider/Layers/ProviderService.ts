@@ -18,6 +18,7 @@ import {
   makeAttachmentInstructionTracker,
   withAttachmentInstructions,
 } from "../attachmentInstructionDelivery.ts";
+import { threadHasDeviceTools } from "../../providerTools/deviceToolGateway.ts";
 import {
   ModelSelection,
   NonNegativeInt,
@@ -1818,7 +1819,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         attachmentInstructionTracker.needs(input.threadId, runtimeSessionId);
       const turn = yield* submitTurn(
         routed,
-        prefixInstructions ? { ...input, input: withAttachmentInstructions(input.input) } : input,
+        prefixInstructions
+          ? {
+              ...input,
+              input: withAttachmentInstructions(input.input, {
+                deviceTools: threadHasDeviceTools(input.threadId),
+              }),
+            }
+          : input,
       );
       if (prefixInstructions) {
         attachmentInstructionTracker.markDelivered(input.threadId, runtimeSessionId);

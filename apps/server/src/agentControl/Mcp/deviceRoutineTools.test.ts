@@ -719,7 +719,7 @@ describe("ryco_device results", () => {
     const first = await h.call({ action: "describe", udid: UDID });
     const guide = texts(first)[0]!;
     expect(isGuide(guide)).toBe(true);
-    expect(guide).toContain('ryco_device action "type" enters up to 4096 characters');
+    expect(guide).toContain('ryco_device action "type" types into the focused field');
     expect(guide).toContain("Start with ryco_list_devices");
     expect(guide).toContain(
       'ryco_wait_for_control_request with its proposalId (waitFor "terminal")',

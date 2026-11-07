@@ -511,7 +511,7 @@ describe("deviceEvidenceContent", () => {
       screenPoints: { width: 402, height: 874 },
       screenshot: "skipped",
     });
-    expect((content[1] as { text: string }).text).toContain('- Button "Continue"');
+    expect((content[1] as { text: string }).text).toMatch(/^@e\d+ Button "Continue"/mu);
     expect(reader.screenshotCalls).toBe(0);
   });
 

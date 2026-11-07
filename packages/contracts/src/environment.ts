@@ -211,6 +211,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    */
   agentProcessPriority: Schema.optionalKey(Schema.Boolean),
   /**
+   * The node honours `devicesEnabled` and `agentDevicesEnabled` (simulator support and agent
+   * device tools on or off); absent on older servers, which drop the keys.
+   */
+  deviceSettings: Schema.optionalKey(Schema.Boolean),
+  /**
    * The node honours `automaticUpdates` (unattended provider CLI updates in a quiet window, and an
    * npm or pnpm CLI service node's own updates) and answers `server.noteClientInteraction`; absent
    * on older servers, which drop the key.

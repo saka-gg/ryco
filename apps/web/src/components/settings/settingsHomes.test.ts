@@ -57,6 +57,8 @@ const SERVER_SETTING_HOMES = {
   enableProviderUpdateChecks: "updates",
   automaticUpdates: "updates",
   lowerAgentProcessPriority: "device",
+  devicesEnabled: "device",
+  agentDevicesEnabled: "device",
   continueThreadsAfterRestart: "projects",
   autoResumeLimitedThreads: "usage",
   snoozeLimitedThreads: "usage",

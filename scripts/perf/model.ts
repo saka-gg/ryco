@@ -457,8 +457,12 @@ const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
  * 766 KiB on 2026-11-06: Computer Use in every chat and MCP approval requests
  * in Codex chats (link questions with an Open link button) brought the route
  * to 765.1 KiB.
+ * 769 KiB on 2026-11-07 with device tool rows on top (2.1 KiB of labels and argument
+ * reading, plus the phone icon regrouping the shared lucide chunks).
+ * 772 KiB on 2026-11-07 for the simulator program's merge train: Computer Use,
+ * device tool rows, device tabs and the 3D toggle together measured 771.1 KiB.
  */
-const CHAT_ROUTE_GZIP_BUDGET = 766 * KIB;
+const CHAT_ROUTE_GZIP_BUDGET = 772 * KIB;
 /**
  * 156 since removing AI Focus on 2026-10-29: the same 44 KiB of shared lucide
  * icons regrouped by importing entry set into six `icons` chunks instead of
@@ -503,6 +507,8 @@ const TRACING_EXPORTER_SOURCES: readonly ForbiddenBundleSource[] = [
  * store, the copy's Agent Control reports and node directory (RPCs and schemas)
  * and the copy RPC method names load after boot; boot keeps the copy plans it
  * decodes, the tolerant plan view and the lazy copy client.
+ * 527 KiB on 2026-11-07: the device tools' settings and two-tool contracts on
+ * top of Computer Use measured 526.2 KiB.
  */
 export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
   bootChunk: "main",
@@ -511,7 +517,7 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       name: "boot",
       chunk: "main",
       beyondBoot: false,
-      maxGzipBytes: 526 * KIB,
+      maxGzipBytes: 527 * KIB,
       forbiddenSources: [
         ...HOSTED_RUNTIME_SOURCES,
         ...MARKDOWN_SOURCES,

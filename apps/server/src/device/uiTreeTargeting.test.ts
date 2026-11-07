@@ -4,6 +4,7 @@ import type { DeviceUiNode } from "@ryco/contracts";
 
 import {
   DeviceUiTargetError,
+  elementIdentities,
   findTarget,
   isTargetable,
   normalizeUiNode,
@@ -407,5 +408,52 @@ describe("nodes a tap cannot land on", () => {
     expect(isTargetable(pinned)).toBe(true);
     const screen = node({ role: "Application", children: [pinned] });
     expect(resolveTapTarget(screen, { label: "Pinned" }).point).toEqual({ x: 40, y: 300 });
+  });
+});
+
+describe("ref targets", () => {
+  const button = (label: string, y: number): DeviceUiNode => ({
+    role: "Button",
+    subrole: null,
+    label,
+    value: null,
+    frame: { x: 0, y, width: 100, height: 40 },
+    activationPoint: null,
+    children: [],
+  });
+  const root = (children: DeviceUiNode[]): DeviceUiNode => ({
+    role: "Application",
+    subrole: null,
+    label: "App",
+    value: null,
+    frame: { x: 0, y: 0, width: 400, height: 800 },
+    activationPoint: null,
+    children,
+  });
+
+  it("tells equal elements apart by position and finds the one a ref names", () => {
+    const tree = root([button("Delete", 100), button("Delete", 200), button("Save", 300)]);
+    const identities = elementIdentities(tree);
+    expect(new Set(identities.map((identity) => identity.key)).size).toBe(3);
+    const second = identities[1]!;
+    const match = findTarget(tree, {
+      label: "@e2",
+      ref: { name: "@e2", key: second.key, description: 'Button "Delete"' },
+    });
+    expect(match.point).toEqual({ x: 50, y: 220 });
+  });
+
+  it("fails a ref whose element is gone instead of guessing", () => {
+    const tree = root([button("Save", 300)]);
+    expect(() =>
+      findTarget(tree, {
+        label: "@e4",
+        ref: {
+          name: "@e4",
+          key: "Button\u001f\u001fDelete\u001f0",
+          description: 'Button "Delete"',
+        },
+      }),
+    ).toThrow(/@e4 \(Button "Delete"\) is not on this screen any more/u);
   });
 });
