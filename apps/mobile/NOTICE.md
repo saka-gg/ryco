@@ -39,7 +39,10 @@ autocomplete menu (`src/features/threads/composerCommandMenuModel.ts`,
 (`src/components/ComposerAttachMenu.tsx` and `pickComposerDocuments` in
 `src/lib/composerFiles.ts`, from upstream's `ComposerAttachmentButton.tsx` and
 `composerImages.ts`), and the share-extension display-name config plugin
-(`plugins/withShareExtensionDisplayName.cjs`, verbatim).
+(`plugins/withShareExtensionDisplayName.cjs`, verbatim), and the dictation
+controls (`src/features/dictation/ComposerDictationControls.tsx`, after upstream's
+`voice-input/ComposerDictationControl.tsx` and `voiceInputMetering.ts`; Ryco
+recognizes speech on the device instead of transcribing on a server).
 
 `pingdotgg/t3code` is Copyright (c) 2026 T3 Tools Inc. and licensed under the MIT
 License; that notice is retained below as required. The four vendored native

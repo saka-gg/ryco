@@ -25,6 +25,12 @@ import { ComposerEditor, type ComposerEditorHandle } from "../../native/Composer
 import type { PendingComposerHandoff } from "./contextHandoffModel";
 import { PendingContextHandoffChip, PendingForkHandoffChip } from "./PendingContextHandoffChip";
 import { ComposerCommandPopover } from "./ComposerCommandPopover";
+import {
+  ComposerDictationBar,
+  ComposerDictationButton,
+  ComposerDictationError,
+} from "../dictation/ComposerDictationControls";
+import { useComposerDictation } from "../dictation/useComposerDictation";
 import type { ComposerCommandAction } from "./composerCommandMenuModel";
 import { useComposerCommandMenu, type ComposerCommandMenuContext } from "./useComposerCommandMenu";
 
@@ -120,6 +126,18 @@ export function ThreadComposer(props: {
     !props.sendBlock;
 
   const modelMenuRef = useRef<AnchoredMenuHandle>(null);
+  // Dictation and the command menu share the draft's caret: speech lands where it is.
+  const [dictationSelection, setDictationSelection] = useState({ start: 0, end: 0 });
+  const dictation = useComposerDictation({
+    text,
+    selection: dictationSelection,
+    onChangeText: setText,
+    onChangeSelection: (selection) => {
+      setDictationSelection(selection);
+      commandMenu.onSelectionChange(selection);
+    },
+  });
+  const dictating = dictation.active;
   const policyEditable = !(props.policyDisabled ?? false);
   const commandMenu = useComposerCommandMenu({
     text,
@@ -131,7 +149,7 @@ export function ThreadComposer(props: {
         policyEditable && policyModel?.mode !== undefined && policyModel?.mode !== null,
       sideChat: props.onOpenSideChat !== undefined,
     },
-    enabled: !props.disabled && !sending,
+    enabled: !props.disabled && !sending && !dictating,
     onAction: (action: ComposerCommandAction) => {
       switch (action.kind) {
         case "interaction-mode":
@@ -148,7 +166,7 @@ export function ThreadComposer(props: {
   });
 
   const send = async () => {
-    if (!canSend) return;
+    if (!canSend || dictating) return;
     const value = text;
     await runWhileBusy(setSending, async () => {
       const result = await props.onSend(value, props.attachments);
@@ -170,6 +188,7 @@ export function ThreadComposer(props: {
           {visibleAttachmentError}
         </Text>
       ) : null}
+      <ComposerDictationError dictation={dictation} />
       {props.pendingHandoff?.kind === "fork" ? (
         <PendingForkHandoffChip />
       ) : props.pendingHandoff?.kind === "model-change" ? (
@@ -193,7 +212,11 @@ export function ThreadComposer(props: {
           style={{ paddingHorizontal: 6, paddingVertical: 6 }}
         >
           <View className="gap-1">
-            {policyModel ? (
+            {dictating ? (
+              <View className="px-0.5">
+                <ComposerDictationBar dictation={dictation} />
+              </View>
+            ) : policyModel ? (
               <ComposerToolbarRow paddingTop={2} paddingBottom={2} paddingHorizontal={2}>
                 {modelPicker && props.modelSelection ? (
                   <ComposerModelMenu
@@ -302,7 +325,10 @@ export function ThreadComposer(props: {
                 skills={commandMenu.skills}
                 threadTitles={commandMenu.threadTitles}
                 selection={commandMenu.selection}
-                onSelectionChange={commandMenu.onSelectionChange}
+                onSelectionChange={(selection) => {
+                  setDictationSelection(selection);
+                  commandMenu.onSelectionChange(selection);
+                }}
                 onChangeText={(nextText) => {
                   if (text.length === 0 && nextText.length > 0) props.onComposerIntent?.();
                   setText(nextText);
@@ -310,14 +336,18 @@ export function ThreadComposer(props: {
                 onFocus={props.onComposerIntent}
                 placeholder={props.placeholder ?? "Message"}
                 multiline
-                editable={!props.disabled && !sending}
+                editable={!props.disabled && !sending && !dictating}
                 contentInsetVertical={10}
                 style={{ minHeight: 44, maxHeight: 128, flex: 1 }}
                 onPasteImages={(uris) => void pasteImages(uris)}
                 onSubmit={() => void send()}
               />
+              <ComposerDictationButton
+                dictation={dictation}
+                disabled={props.disabled === true || sending}
+              />
               <Pressable
-                disabled={!canSend}
+                disabled={!canSend || dictating}
                 onPress={() => void send()}
                 accessibilityRole="button"
                 accessibilityLabel="Send"
