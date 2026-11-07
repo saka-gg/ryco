@@ -1,4 +1,4 @@
-import { useImperativeHandle, useRef, useState, type Ref } from "react";
+import { useImperativeHandle, useLayoutEffect, useRef, useState, type Ref } from "react";
 import { useKeyboardState } from "react-native-keyboard-controller";
 import type { ModelSelection, RuntimeMode, ProviderInteractionMode } from "@ryco/contracts";
 import type { FastModeNotice } from "@ryco/client-runtime/state/session";
@@ -21,7 +21,11 @@ import type { ComposerAttachmentSource, DraftComposerAttachment } from "../../li
 import type { ChatFileUploadRecord } from "../../state/composerFileUpload";
 import { runWhileBusy } from "../../lib/runWhileBusy";
 import { useThemeColor } from "../../lib/useThemeColor";
-import { ComposerEditor, type ComposerEditorHandle } from "../../native/ComposerEditor";
+import {
+  ComposerEditor,
+  type ComposerEditorHandle,
+  type ComposerEditorSelection,
+} from "../../native/ComposerEditor";
 import type { PendingComposerHandoff } from "./contextHandoffModel";
 import { PendingContextHandoffChip, PendingForkHandoffChip } from "./PendingContextHandoffChip";
 import { ComposerCommandPopover } from "./ComposerCommandPopover";
@@ -127,15 +131,13 @@ export function ThreadComposer(props: {
 
   const modelMenuRef = useRef<AnchoredMenuHandle>(null);
   // Dictation and the command menu share the draft's caret: speech lands where it is.
-  const [dictationSelection, setDictationSelection] = useState({ start: 0, end: 0 });
+  // Dictation lands at the command menu's caret, read when listening starts.
+  const caretRef = useRef<ComposerEditorSelection>({ start: 0, end: 0 });
   const dictation = useComposerDictation({
     text,
-    selection: dictationSelection,
+    readSelection: () => caretRef.current,
     onChangeText: setText,
-    onChangeSelection: (selection) => {
-      setDictationSelection(selection);
-      commandMenu.onSelectionChange(selection);
-    },
+    onChangeSelection: (selection) => commandMenu.onSelectionChange(selection),
   });
   const dictating = dictation.active;
   const policyEditable = !(props.policyDisabled ?? false);
@@ -163,6 +165,9 @@ export function ThreadComposer(props: {
           return;
       }
     },
+  });
+  useLayoutEffect(() => {
+    caretRef.current = commandMenu.selection;
   });
 
   const send = async () => {
@@ -325,10 +330,7 @@ export function ThreadComposer(props: {
                 skills={commandMenu.skills}
                 threadTitles={commandMenu.threadTitles}
                 selection={commandMenu.selection}
-                onSelectionChange={(selection) => {
-                  setDictationSelection(selection);
-                  commandMenu.onSelectionChange(selection);
-                }}
+                onSelectionChange={commandMenu.onSelectionChange}
                 onChangeText={(nextText) => {
                   if (text.length === 0 && nextText.length > 0) props.onComposerIntent?.();
                   setText(nextText);

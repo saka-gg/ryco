@@ -1,4 +1,4 @@
-import { memo, useRef } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, Text as SystemText, View } from "react-native";
 import Animated, {
   Easing,
@@ -93,10 +93,25 @@ function DictationRoundButton(props: {
   );
 }
 
+/**
+ * Seconds since `startedAt`, ticking in this component only, so the composer
+ * around the bar does not re-render with the timer.
+ */
+function useElapsedSeconds(startedAt: number | null): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (startedAt === null) return;
+    const timer = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(timer);
+  }, [startedAt]);
+  return startedAt === null ? 0 : Math.max(0, (now - startedAt) / 1000);
+}
+
 /** Cancel · level meter and elapsed time · confirm, in place of the composer's toolbar row. */
 export function ComposerDictationBar(props: { readonly dictation: ComposerDictation }) {
   const { dictation } = props;
   const listening = dictation.state.phase === "listening";
+  const elapsedSeconds = useElapsedSeconds(dictation.startedAt);
   return (
     <Animated.View
       entering={FadeIn.duration(180)}
@@ -112,7 +127,7 @@ export function ComposerDictationBar(props: { readonly dictation: ComposerDictat
         accessible
         accessibilityLabel={
           listening
-            ? `Listening, ${formatDictationElapsed(dictation.elapsedSeconds)}`
+            ? `Listening, ${formatDictationElapsed(elapsedSeconds)}`
             : dictation.state.phase === "finishing"
               ? "Finishing dictation"
               : "Preparing dictation"
@@ -132,7 +147,7 @@ export function ComposerDictationBar(props: { readonly dictation: ComposerDictat
           // DM Sans has no tabular figures; the system font keeps the timer still.
           style={{ fontVariant: ["tabular-nums"], minWidth: 30 }}
         >
-          {listening ? formatDictationElapsed(dictation.elapsedSeconds) : "…"}
+          {listening ? formatDictationElapsed(elapsedSeconds) : "…"}
         </SystemText>
       </View>
       <DictationRoundButton

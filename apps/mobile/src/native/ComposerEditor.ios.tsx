@@ -57,6 +57,7 @@ interface NativeComposerEditorProps extends ViewProps {
   readonly controlledDocumentJson: string;
   readonly themeJson: string;
   readonly placeholder: string;
+  readonly textAccessibilityLabel?: string;
   readonly fontFamily: string;
   readonly fontSize: number;
   readonly lineHeight: number;
@@ -213,6 +214,7 @@ export function ComposerEditor({
       controlledDocumentJson={controlledDocumentJson}
       themeJson={themeJson}
       placeholder={props.placeholder ?? ""}
+      textAccessibilityLabel={props.accessibilityLabel ?? props.placeholder}
       fontFamily={
         typeof resolvedTextStyle.fontFamily === "string" ? resolvedTextStyle.fontFamily : fontFamily
       }

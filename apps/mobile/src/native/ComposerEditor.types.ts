@@ -23,6 +23,8 @@ export interface ComposerEditorProps {
   readonly threadTitles?: ReadonlyMap<string, string>;
   readonly selection?: ComposerEditorSelection;
   readonly placeholder?: string;
+  /** What screen readers call the field (the placeholder disappears once there is text). */
+  readonly accessibilityLabel?: string;
   readonly autoFocus?: boolean;
   readonly editable?: boolean;
   readonly scrollEnabled?: boolean;

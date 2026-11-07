@@ -20,11 +20,16 @@ import type {
   ThreadId,
 } from "@ryco/contracts";
 import { useEffect, useState, useSyncExternalStore } from "react";
+import { useShallow } from "zustand/react/shallow";
 
 import { readEnvironmentApi } from "../../connection/environmentApi";
 import type { ComposerEditorSelection } from "../../native/ComposerEditor";
 import { useProjectListEntries, useProjectSearchEntries } from "../../rpc/useProjectFiles";
-import { useHomeWorkspaceData } from "../../state/homeData";
+import {
+  selectSidebarThreadsAcrossEnvironments,
+  useStore,
+  type SidebarThreadOrStub,
+} from "../../state/threadsRuntime";
 import {
   buildComposerCommandItems,
   resolveComposerCommandSelection,
@@ -36,6 +41,11 @@ import {
 /** Top-level workspace rows a bare `@` lists before the user types a name. */
 const BARE_MENTION_MAX_ENTRIES = 30;
 const EMPTY_ENTRIES: ReadonlyArray<ProjectEntry> = [];
+const EMPTY_SKILLS: ServerProvider["skills"] = [];
+const EMPTY_SLASH_COMMANDS: ServerProvider["slashCommands"] = [];
+const NO_THREADS: ReadonlyArray<SidebarThreadOrStub> = [];
+const NO_THREAD_TITLES: ReadonlyMap<string, string> = new Map();
+const THREAD_MENTION_MARKER = "@thread:";
 
 export interface ComposerCommandMenuContext {
   readonly environmentId: EnvironmentId;
@@ -69,16 +79,15 @@ export function useComposerCommandMenu(input: {
   readonly onAction: (action: ComposerCommandAction) => void;
 }): ComposerCommandMenu {
   const { text, context } = input;
-  const [rawSelection, setSelection] = useState<ComposerEditorSelection>(() => ({
-    start: text.length,
-    end: text.length,
-  }));
-  // A draft replaced from outside (a queued message pulled back, a send that
-  // cleared it) can leave the caret past its end.
-  const selection = {
-    start: Math.min(rawSelection.start, text.length),
-    end: Math.min(rawSelection.end, text.length),
-  };
+  // Until the editor reports a caret (it does once focused), the caret is at
+  // the end of the draft, also for one filled from outside (a share, a link).
+  const [reportedSelection, setSelection] = useState<ComposerEditorSelection | null>(null);
+  const selection = reportedSelection
+    ? {
+        start: Math.min(reportedSelection.start, text.length),
+        end: Math.min(reportedSelection.end, text.length),
+      }
+    : { start: text.length, end: text.length };
 
   const trigger =
     input.enabled && context && selection.start === selection.end
@@ -117,7 +126,10 @@ export function useComposerCommandMenu(input: {
     projectCommandsKey ? readProjectProviderCommands(projectCommandsKey) : undefined,
   );
   const commands = mergeProjectProviderCommands(
-    { skills: provider?.skills ?? [], slashCommands: provider?.slashCommands ?? [] },
+    {
+      skills: provider?.skills ?? EMPTY_SKILLS,
+      slashCommands: provider?.slashCommands ?? EMPTY_SLASH_COMMANDS,
+    },
     projectCommands,
   );
 
@@ -142,9 +154,18 @@ export function useComposerCommandMenu(input: {
           .slice(0, BARE_MENTION_MAX_ENTRIES)
       : (search.data?.entries ?? EMPTY_ENTRIES);
 
-  const { threads: allThreads } = useHomeWorkspaceData();
+  // Threads matter only while `@` is open or the draft mentions one; otherwise
+  // the composer does not follow the thread list at all.
+  const mentionsThread = text.includes(THREAD_MENTION_MARKER);
+  const allThreads = useStore(
+    useShallow((state) =>
+      wantsPaths || mentionsThread ? selectSidebarThreadsAcrossEnvironments(state) : NO_THREADS,
+    ),
+  );
   const threads = allThreads.filter((thread) => thread.environmentId === environmentId);
-  const threadTitles = new Map(threads.map((thread) => [String(thread.id), thread.title]));
+  const threadTitles = mentionsThread
+    ? new Map(threads.map((thread) => [String(thread.id), thread.title]))
+    : NO_THREAD_TITLES;
 
   const items = buildComposerCommandItems({
     trigger,

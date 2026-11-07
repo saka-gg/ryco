@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useLayoutEffect, useRef } from "react";
 import { useKeyboardState } from "react-native-keyboard-controller";
 import { ComposerAccessMenu } from "../threads/ComposerAccessMenu";
 import { buildSessionPolicyModel } from "../threads/sessionPolicyModel";
@@ -27,7 +27,11 @@ import { ProviderIcon } from "../../components/ProviderIcon";
 import type { AnchoredMenuHandle } from "../../components/AnchoredMenu";
 import { ComposerAttachMenu } from "../../components/ComposerAttachMenu";
 import type { ComposerAttachmentSource, DraftComposerAttachment } from "../../lib/composerFiles";
-import { ComposerEditor, type ComposerEditorHandle } from "../../native/ComposerEditor";
+import {
+  ComposerEditor,
+  type ComposerEditorHandle,
+  type ComposerEditorSelection,
+} from "../../native/ComposerEditor";
 import type { ChatFileUploadRecord } from "../../state/composerFileUpload";
 import { ComposerCommandPopover } from "../threads/ComposerCommandPopover";
 import {
@@ -106,15 +110,13 @@ export function NewTaskComposer(props: {
   const restoreFocus = () => {
     if (keyboardVisible) promptRef.current?.focus();
   };
-  const [dictationSelection, setDictationSelection] = useState({ start: 0, end: 0 });
+  // Dictation lands at the command menu's caret, read when listening starts.
+  const caretRef = useRef<ComposerEditorSelection>({ start: 0, end: 0 });
   const dictation = useComposerDictation({
     text: props.prompt,
-    selection: dictationSelection,
+    readSelection: () => caretRef.current,
     onChangeText: props.onChangePrompt,
-    onChangeSelection: (selection) => {
-      setDictationSelection(selection);
-      commandMenu.onSelectionChange(selection);
-    },
+    onChangeSelection: (selection) => commandMenu.onSelectionChange(selection),
   });
   const commandMenu = useComposerCommandMenu({
     text: props.prompt,
@@ -130,6 +132,9 @@ export function NewTaskComposer(props: {
       if (action.kind === "interaction-mode") props.onChangeInteractionMode(action.mode);
       else if (action.kind === "open-model-picker") modelMenuRef.current?.open();
     },
+  });
+  useLayoutEffect(() => {
+    caretRef.current = commandMenu.selection;
   });
 
   return (
@@ -272,11 +277,9 @@ export function NewTaskComposer(props: {
               skills={commandMenu.skills}
               threadTitles={commandMenu.threadTitles}
               selection={commandMenu.selection}
-              onSelectionChange={(selection) => {
-                setDictationSelection(selection);
-                commandMenu.onSelectionChange(selection);
-              }}
+              onSelectionChange={commandMenu.onSelectionChange}
               placeholder="What should we do?"
+              accessibilityLabel="Task prompt"
               multiline
               editable={!props.busy && !dictation.active}
               contentInsetVertical={12}
