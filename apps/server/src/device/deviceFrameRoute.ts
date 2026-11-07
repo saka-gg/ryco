@@ -3,8 +3,14 @@
  *
  * H.264 frames use a dedicated socket so a slow decoder can never queue video
  * ahead of chat, lifecycle, or input RPC traffic. `DeviceFrameTransport` owns
- * the bounded queue and keyframe-aligned dropping policy; this route only
- * adapts Effect's socket to that sink and accepts resync requests.
+ * the bounded queue and keyframe-aligned dropping policy; this route adapts
+ * Effect's socket to that sink and accepts resync requests.
+ *
+ * It also carries the pane's live input (`@ryco/shared/deviceLiveInput`):
+ * touch phases, keys and pasted text, handed to a `DeviceInputSession`. Only
+ * owner sessions may send it, the same rule as the device input RPC; the
+ * socket says which on open with a `device.input.ready` message, and other
+ * sessions' input messages are ignored.
  */
 import {
   DEVICE_FRAME_RESYNC_MESSAGE,
@@ -15,10 +21,19 @@ import { DeviceUdid } from "@ryco/contracts";
 import { Effect, Layer, Option } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 
+import {
+  DEVICE_INPUT_ERROR_MESSAGE,
+  DEVICE_INPUT_READY_MESSAGE,
+  decodeDeviceLiveInput,
+} from "@ryco/shared/deviceLiveInput";
+
 import { respondToAuthError } from "../auth/http.ts";
 import { ServerAuth } from "../auth/Services/ServerAuth.ts";
 import { SessionCredentialService } from "../auth/Services/SessionCredentialService.ts";
+import { authorizeRpcPrincipal } from "../auth/wsAuthorization.ts";
+import { directRpcPrincipal } from "../ws/RpcPrincipal.ts";
 import { DeviceService } from "./Services/DeviceService.ts";
+import { createDeviceInputSession } from "./deviceInputSession.ts";
 import type { DeviceFrameSink } from "./deviceFrameTransport.ts";
 
 /** A resync request is a few dozen bytes; anything larger is not one. */
@@ -96,34 +111,66 @@ export const deviceFrameRouteLayer = Layer.effectDiscard(
           return HttpServerResponse.text("Missing or invalid udid", { status: 400 });
         }
 
+        // Decided once, at upgrade, like the RPC sockets' principal: a session
+        // ending closes this socket (below), so it cannot outlive its role.
+        const canDrive = yield* authorizeRpcPrincipal(
+          directRpcPrincipal(session),
+          "owner",
+          "device live input",
+        ).pipe(
+          Effect.as(true),
+          Effect.orElseSucceed(() => false),
+        );
+
         const socket = yield* request.upgrade;
         const writer = yield* socket.writer;
         let open = true;
+        const sendText = (message: unknown) => {
+          if (!open) return;
+          void Effect.runPromise(writer.write(JSON.stringify(message))).catch(() => undefined);
+        };
         const sink = makeDeviceFrameSink({
           send: (bytes) => Effect.runPromise(writer.write(bytes)).catch(() => undefined),
           isOpen: () => open,
         });
         const unsubscribe = deviceService.manager.subscribeFrames(udid, sink);
+        const input = canDrive
+          ? createDeviceInputSession({
+              udid,
+              target: deviceService.manager,
+              report: (kind, message) =>
+                sendText({ type: DEVICE_INPUT_ERROR_MESSAGE, input: kind, message }),
+            })
+          : null;
         yield* Effect.addFinalizer(() =>
           Effect.sync(() => {
             open = false;
             unsubscribe();
+            // Lifts a finger still down and releases held keys.
+            void input?.close();
           }),
         );
 
         // Decoder errors and sequence gaps request fresh codec parameters plus
-        // an IDR on this same stream. Unknown messages are deliberately ignored.
+        // an IDR on this same stream. Live input goes to the input session.
+        // Unknown messages are deliberately ignored.
         const { pull } = yield* socket.reader;
-        const readResyncRequests = pull.pipe(
+        sendText({ type: DEVICE_INPUT_READY_MESSAGE, input: canDrive });
+        const readClientMessages = pull.pipe(
           Effect.flatMap((messages) =>
             Effect.sync(() => {
               for (const message of messages) {
-                if (decodeResyncRequest(message) === null) continue;
-                Effect.runFork(
-                  Effect.promise(() =>
-                    deviceService.manager.requestKeyframe(udid).catch(() => undefined),
-                  ),
-                );
+                if (decodeResyncRequest(message) !== null) {
+                  Effect.runFork(
+                    Effect.promise(() =>
+                      deviceService.manager.requestKeyframe(udid).catch(() => undefined),
+                    ),
+                  );
+                  continue;
+                }
+                if (!input) continue;
+                const live = decodeDeviceLiveInput(message);
+                if (live) input.push(live);
               }
             }),
           ),
@@ -131,7 +178,7 @@ export const deviceFrameRouteLayer = Layer.effectDiscard(
         );
         // The stream ends with its session, like the RPC sockets.
         return yield* Effect.raceFirst(
-          readResyncRequests,
+          readClientMessages,
           sessions
             .awaitEnd({ sessionId: session.sessionId, chainId: session.chainId })
             .pipe(Effect.as(HttpServerResponse.empty())),

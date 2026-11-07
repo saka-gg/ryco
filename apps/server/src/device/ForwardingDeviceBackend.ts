@@ -73,6 +73,17 @@ export abstract class ForwardingDeviceBackend implements DeviceBackend {
   keyEvent(udid: string, event: DeviceKeyEvent): ReturnType<DeviceBackend["keyEvent"]> {
     return this.call("keyEvent", [udid, event]);
   }
+  touch(...args: Parameters<DeviceBackend["touch"]>): ReturnType<DeviceBackend["touch"]> {
+    return this.call("touch", args);
+  }
+  paste(...args: Parameters<DeviceBackend["paste"]>): ReturnType<DeviceBackend["paste"]> {
+    return this.call("paste", args);
+  }
+  setOrientation(
+    ...args: Parameters<DeviceBackend["setOrientation"]>
+  ): ReturnType<DeviceBackend["setOrientation"]> {
+    return this.call("setOrientation", args);
+  }
   pressButton(
     udid: string,
     button: DeviceHardwareButton,

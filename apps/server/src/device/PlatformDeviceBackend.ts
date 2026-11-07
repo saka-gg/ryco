@@ -146,6 +146,20 @@ export class PlatformDeviceBackend implements DeviceBackend {
     return this.target(args[0]).pressButton(...args);
   }
 
+  touch(...args: Parameters<DeviceBackend["touch"]>): ReturnType<DeviceBackend["touch"]> {
+    return this.target(args[0]).touch(...args);
+  }
+
+  paste(...args: Parameters<DeviceBackend["paste"]>): ReturnType<DeviceBackend["paste"]> {
+    return this.target(args[0]).paste(...args);
+  }
+
+  setOrientation(
+    ...args: Parameters<DeviceBackend["setOrientation"]>
+  ): ReturnType<DeviceBackend["setOrientation"]> {
+    return this.target(args[0]).setOrientation(...args);
+  }
+
   screenshot(
     ...args: Parameters<DeviceBackend["screenshot"]>
   ): ReturnType<DeviceBackend["screenshot"]> {

@@ -17,6 +17,8 @@ import {
   type DeviceOpenUrlInput,
   type DeviceTestingInput,
   type DevicePressButtonInput,
+  type DeviceSetOrientationInput,
+  type DevicePasteInput,
   type DeviceScreenshotInput,
   type DeviceScreenshotResult,
   type DeviceScrollToElementInput,
@@ -72,6 +74,8 @@ export interface DeviceRpcClient {
   readonly typeText: (input: DeviceTypeTextInput) => Promise<void>;
   readonly keyEvent: (input: DeviceKeyEventInput) => Promise<void>;
   readonly pressButton: (input: DevicePressButtonInput) => Promise<void>;
+  readonly setOrientation: (input: DeviceSetOrientationInput) => Promise<void>;
+  readonly paste: (input: DevicePasteInput) => Promise<void>;
   readonly scrollToElement: (
     input: DeviceScrollToElementInput,
   ) => Promise<DeviceScrollToElementResult>;
@@ -380,6 +384,20 @@ export function createDeviceRpcClient(
       );
       if (response.type !== "press-button") {
         unexpectedResponse("press-button", response.type);
+      }
+    },
+    paste: async (input) => {
+      const response = await transport.request((client) =>
+        client[DEVICE_WS_METHODS.input]({ type: "paste", input }),
+      );
+      if (response.type !== "paste") unexpectedResponse("paste", response.type);
+    },
+    setOrientation: async (input) => {
+      const response = await transport.request((client) =>
+        client[DEVICE_WS_METHODS.input]({ type: "set-orientation", input }),
+      );
+      if (response.type !== "set-orientation") {
+        unexpectedResponse("set-orientation", response.type);
       }
     },
     scrollToElement: async (input) => {

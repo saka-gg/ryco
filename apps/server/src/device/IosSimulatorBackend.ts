@@ -33,6 +33,7 @@ import type {
   DeviceInstallAppResult,
   DeviceKeyModifier,
   DeviceLaunchAppResult,
+  DeviceOrientation,
   DeviceScreenshotResult,
   DeviceSetupStep,
   DeviceStartRecordingResult,
@@ -59,6 +60,7 @@ import {
   type DeviceLogQuery,
   type DeviceLogResult,
   type DeviceSwipeGesture,
+  type DeviceTouchPhase,
 } from "./DeviceBackend.ts";
 import { readDeviceTypeCatalogue, type DeviceTypeCatalogue } from "./deviceTypeCatalogue.ts";
 import {
@@ -878,6 +880,62 @@ export class IosSimulatorBackend implements DeviceBackend {
     });
   }
 
+  /**
+   * One phase of the pane's live touch. A move the helper says it sent nothing
+   * of is retried like any other injection (`injectInput`); a partial failure
+   * surfaces, and the caller ends the gesture instead of replaying it.
+   */
+  async touch(udid: string, phase: DeviceTouchPhase, x: number, y: number): Promise<void> {
+    await this.serializeHelper(() =>
+      this.injectInput(udid, HELPER_METHODS.touch, (helper) => ({
+        phase,
+        ...helper.normalize(x, y),
+      })),
+    );
+  }
+
+  /**
+   * Paste `text` where the device's focus is: put it on the device's
+   * pasteboard, then press Command-V.
+   *
+   * Typing it key by key would go through US key positions, and the guest
+   * reads keys with its own hardware layout (a German simulator types "z" for
+   * "y" and "„" for "@"); the pasteboard carries any Unicode exactly and
+   * lands in one step. simctl reads stdin in the process locale, so UTF-8 is
+   * set explicitly. Like any paste it replaces the device's pasteboard.
+   */
+  async paste(udid: string, text: string): Promise<void> {
+    await this.serializeHelper(async () => {
+      const copied = await this.simctl(["pbcopy", udid], {
+        stdin: text,
+        env: { LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8" },
+      });
+      if (copied.code !== 0) throw this.simctlError("pbcopy", copied);
+      const press = (usage: number, phase: "down" | "up") =>
+        this.injectInput(udid, HELPER_METHODS.key, () => ({ usage, phase }));
+      await press(HID_COMMAND_USAGE, "down");
+      try {
+        await press(HID_V_USAGE, "down");
+        await press(HID_V_USAGE, "up");
+      } finally {
+        await press(HID_COMMAND_USAGE, "up").catch(() => undefined);
+      }
+    });
+  }
+
+  /**
+   * Turn the device with the GraphicsServices orientation event Simulator.app
+   * itself sends (see the helper's Orientation.swift). It works on a headless
+   * boot; the framebuffer stays portrait and the guest turns its interface.
+   */
+  async setOrientation(udid: string, orientation: DeviceOrientation): Promise<void> {
+    await this.serializeHelper(async () => {
+      await this.helperRequest(await this.attachedHelper(udid), HELPER_METHODS.orientation, {
+        orientation,
+      });
+    });
+  }
+
   async pressButton(udid: string, button: DeviceHardwareButton): Promise<void> {
     if (button === "back" || button === "recents") {
       throw new DeviceBackendError(
@@ -885,16 +943,9 @@ export class IosSimulatorBackend implements DeviceBackend {
       );
     }
     if (button === "rotate") {
-      // Rotation is a Simulator.app window command, not a HID button: there is
-      // no HID usage for it and no simctl equivalent. Simulator.app posts a
-      // Purple event through a category it compiles into its own executable,
-      // and that port is not wired on a headless boot — calling it there is a
-      // silent no-op (docs/device-pane-spec.md has the full probe). Refused
-      // explicitly rather than pretending to work; the pane ships no rotate
-      // control for the same reason, and this keeps the agent tool honest.
-      throw new DeviceBackendError(
-        "Rotating a headless simulator is not supported; rotate the device from inside the app or use Simulator.app.",
-      );
+      // Rotation is not a HID button. The manager turns `rotate` into
+      // `setOrientation`, since only it knows the current orientation.
+      throw new DeviceBackendError("Rotate the device with setOrientation.");
     }
     await this.assertCapability("hid");
     await this.serializeHelper(() =>
@@ -1159,12 +1210,14 @@ export class IosSimulatorBackend implements DeviceBackend {
       readonly timeoutMs?: number;
       readonly stdin?: string | undefined;
       readonly assertCurrent?: () => void;
+      readonly env?: NodeJS.ProcessEnv;
     } = {},
   ): Promise<ProcessRunResult> {
     if (this.osPlatform !== "darwin") {
       throw new DeviceBackendError("iOS simulators are only available on macOS");
     }
-    const env = await this.toolchainEnv();
+    const toolchain = await this.toolchainEnv();
+    const env = options.env ? { ...(toolchain ?? this.processEnv), ...options.env } : toolchain;
     options.assertCurrent?.();
     return await this.run("xcrun", ["simctl", ...args], {
       timeoutMs: options.timeoutMs ?? SIMCTL_TIMEOUT_MS,
@@ -1647,6 +1700,10 @@ export function isStaleDescriptorError(error: unknown): boolean {
 }
 
 /** USB HID keyboard usage codes for the modifiers the contract exposes. */
+/** Left GUI (Command) and V, for the paste chord. */
+const HID_COMMAND_USAGE = 0xe3;
+const HID_V_USAGE = 0x19;
+
 const HID_MODIFIER_USAGES: Partial<Record<DeviceKeyModifier, number>> = {
   control: 0xe0,
   shift: 0xe1,

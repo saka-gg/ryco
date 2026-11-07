@@ -430,6 +430,14 @@
       "types": "./src/deviceFrame.ts",
       "import": "./src/deviceFrame.ts"
     },
+    "./deviceOrientation": {
+      "types": "./src/deviceOrientation.ts",
+      "import": "./src/deviceOrientation.ts"
+    },
+    "./deviceLiveInput": {
+      "types": "./src/deviceLiveInput.ts",
+      "import": "./src/deviceLiveInput.ts"
+    },
     "./nodeBrowserFrame": {
       "types": "./src/nodeBrowserFrame.ts",
       "import": "./src/nodeBrowserFrame.ts"

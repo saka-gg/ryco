@@ -41,6 +41,7 @@ import {
   type DeviceLaunchAppResult,
   type DeviceListResult,
   type DeviceOpenPaneReason,
+  type DeviceOrientation,
   type DeviceTestingInput,
   type DeviceScreenshotResult,
   type DeviceStartRecordingResult,
@@ -57,7 +58,10 @@ import {
   type DeviceLogQuery,
   type DeviceLogResult,
   type DeviceSwipeGesture,
+  type DeviceTouchPhase,
 } from "./DeviceBackend.ts";
+import { ROTATE_LEFT } from "@ryco/shared/deviceOrientation";
+
 import { DeviceFrameTransport, type DeviceFrameSink } from "./deviceFrameTransport.ts";
 import {
   DeviceUiTargetError,
@@ -222,6 +226,8 @@ export class DeviceManager {
     }
   >();
   private readonly deviceGenerations = new Map<string, number>();
+  /** Devices Ryco turned away from portrait. A boot or shutdown forgets it. */
+  private readonly orientations = new Map<string, DeviceOrientation>();
   private readonly bootRevisions = new Map<string, number>();
   private nextBootRevision = 0;
   private readonly boots = new Map<string, Promise<DeviceBootResult>>();
@@ -607,6 +613,8 @@ export class DeviceManager {
     await this.recordBootOwnership();
     // A device booted for a new purpose is no longer idle-condemned.
     this.clearIdleTimer(udid);
+    // A fresh boot starts in portrait.
+    this.orientations.delete(udid);
     await this.publishAllThreads();
     return { kind: "booted", device: { ...device, bootSource: "ryco" } };
   }
@@ -1121,7 +1129,49 @@ export class DeviceManager {
   }
 
   async pressButton(udid: string, button: DeviceHardwareButton): Promise<void> {
+    // Rotation is a turn from the current orientation, which only the manager
+    // knows. A quarter turn counterclockwise, like Simulator.app's toolbar.
+    if (button === "rotate") {
+      await this.setOrientation(udid, ROTATE_LEFT[this.orientationOf(udid)]);
+      return;
+    }
     await this.withDeviceAction(udid, () => this.backend.pressButton(udid, button));
+  }
+
+  async paste(udid: string, text: string): Promise<void> {
+    await this.withDeviceAction(udid, () => this.backend.paste(udid, text));
+  }
+
+  /** One phase of a live touch from the pane, in device points. */
+  async touch(udid: string, phase: DeviceTouchPhase, x: number, y: number): Promise<void> {
+    await this.withDeviceAction(udid, () => this.backend.touch(udid, phase, x, y));
+  }
+
+  /**
+   * Turn the device, and tell every open pane so its chassis follows. The
+   * orientation is remembered until the device next boots or shuts down.
+   */
+  async setOrientation(udid: string, orientation: DeviceOrientation): Promise<void> {
+    const assertCurrent = this.operationGuard(udid);
+    await this.withDeviceAction(udid, () => this.backend.setOrientation(udid, orientation));
+    assertCurrent();
+    if (orientation === "portrait") this.orientations.delete(udid);
+    else this.orientations.set(udid, orientation);
+    await this.publishAllThreads();
+  }
+
+  orientationOf(udid: string): DeviceOrientation {
+    return this.orientations.get(udid) ?? "portrait";
+  }
+
+  /**
+   * A check that turns false once the device is shut down, rebooted or its
+   * host disconnects, or the manager is disposed. A live gesture takes one
+   * when it starts so its later phases cannot land on a newer boot.
+   */
+  inputFence(udid: string): () => boolean {
+    const generation = this.deviceGenerations.get(udid) ?? 0;
+    return () => !this.disposed && generation === (this.deviceGenerations.get(udid) ?? 0);
   }
 
   async install(udid: string, appPath: string): Promise<DeviceInstallAppResult> {
@@ -1456,8 +1506,20 @@ export class DeviceManager {
   private describe(device: DeviceDescriptor): DeviceDescriptor {
     const bootSource = this.rycoBooted.has(device.udid) ? "ryco" : device.bootSource;
     const geometry = this.backend.geometry(device.udid) ?? device.geometry;
-    if (bootSource === device.bootSource && geometry === device.geometry) return device;
-    return { ...device, bootSource, ...(geometry ? { geometry } : {}) };
+    const orientation = this.orientations.get(device.udid);
+    if (
+      bootSource === device.bootSource &&
+      geometry === device.geometry &&
+      orientation === device.orientation
+    ) {
+      return device;
+    }
+    return {
+      ...device,
+      bootSource,
+      ...(geometry ? { geometry } : {}),
+      ...(orientation ? { orientation } : {}),
+    };
   }
 
   private isAttachedAnywhere(udid: string): boolean {
@@ -1790,6 +1852,7 @@ export class DeviceManager {
 
   private bumpDeviceGeneration(udid: string): void {
     this.deviceGenerations.set(udid, (this.deviceGenerations.get(udid) ?? 0) + 1);
+    this.orientations.delete(udid);
   }
 
   private clearIdleTimer(udid: string): void {

@@ -331,18 +331,37 @@ final class FrameStream {
   var droppedSocketFrames: Int { writer.droppedFrames }
 
   private func startSessionOnQueue(width: Int, height: Int) throws {
-    var created: VTCompressionSession?
-    let status = VTCompressionSessionCreate(
-      allocator: kCFAllocatorDefault,
-      width: Int32(width),
-      height: Int32(height),
-      codecType: kCMVideoCodecType_H264,
-      encoderSpecification: nil,
-      imageBufferAttributes: nil,
-      compressedDataAllocator: nil,
-      outputCallback: nil,
-      refcon: nil,
-      compressionSessionOut: &created)
+    // Low-latency rate control (from serve-sim's H264Encoder, Apache-2.0; see
+    // THIRD_PARTY_NOTICES.md) also makes VideoToolbox write a bitstream that
+    // tells the decoder it may output each frame at once. Without it the SPS
+    // carries no reorder limit, so Chrome's decoder keeps a level-sized DPB
+    // (14 frames at this resolution) before it emits anything: a still screen
+    // never painted, and every animation ended ~230 ms late with its last
+    // frames stuck until the screen next changed. Hardware that refuses the
+    // specification falls back to the default encoder.
+    func create(_ specification: CFDictionary?) -> (OSStatus, VTCompressionSession?) {
+      var created: VTCompressionSession?
+      let status = VTCompressionSessionCreate(
+        allocator: kCFAllocatorDefault,
+        width: Int32(width),
+        height: Int32(height),
+        codecType: kCMVideoCodecType_H264,
+        encoderSpecification: specification,
+        imageBufferAttributes: nil,
+        compressedDataAllocator: nil,
+        outputCallback: nil,
+        refcon: nil,
+        compressionSessionOut: &created)
+      return (status, created)
+    }
+    let lowLatency: NSDictionary = [
+      kVTVideoEncoderSpecification_EnableLowLatencyRateControl: kCFBooleanTrue!
+    ]
+    var (status, created) = create(lowLatency)
+    if status != noErr || created == nil {
+      logDiagnostic("low-latency H.264 encoder unavailable (\(status)); using the default")
+      (status, created) = create(nil)
+    }
     guard status == noErr, let session = created else {
       throw SimulatorError.displayUnavailable("VTCompressionSessionCreate failed (\(status))")
     }
@@ -360,6 +379,9 @@ final class FrameStream {
       value: keyframeIntervalSeconds as CFNumber)
     VTSessionSetProperty(
       session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: 60 as CFNumber)
+    VTSessionSetProperty(
+      session, key: kVTCompressionPropertyKey_AverageBitRate,
+      value: streamAverageBitRate(width: width, height: height) as CFNumber)
     VTCompressionSessionPrepareToEncodeFrames(session)
 
     self.session = session
@@ -551,4 +573,20 @@ final class FrameStream {
     defer { stateLock.unlock() }
     return operation()
   }
+}
+
+/// Average bitrate for the live stream, scaled with the pixel rate.
+///
+/// From serve-sim's `StreamBitrate` (Apache-2.0; see THIRD_PARTY_NOTICES.md).
+/// Low-latency rate control without a target starves a full-resolution phone
+/// screen: frames turn blocky under motion and the encoder sheds frame rate.
+/// 0.1 bits per pixel at 60 fps is ~19 Mbps for a 1206x2622 iPhone; static UI
+/// encodes far below it, since only screen changes are encoded at all. The cap
+/// bounds iPad-sized screens.
+func streamAverageBitRate(width: Int, height: Int, fps: Int = 60) -> Int {
+  let minimum = 6_000_000
+  let maximum = 30_000_000
+  guard width > 0, height > 0, fps > 0 else { return minimum }
+  let target = Int(Double(width * height * fps) * 0.1)
+  return min(max(target, minimum), maximum)
 }

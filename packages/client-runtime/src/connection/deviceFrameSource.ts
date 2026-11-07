@@ -21,10 +21,22 @@ export interface DeviceFrameSourceHandlers {
     reason: DeviceFrameSourceResetReason,
     detail: { readonly generation: number; readonly retryInMs: number | null },
   ) => void;
+  /**
+   * A text message from the server on the current socket. Video is binary;
+   * text carries the live input protocol (`@ryco/shared/deviceLiveInput`),
+   * which the pane decodes, so the protocol stays out of this boot-time module.
+   */
+  readonly onText?: (text: string, generation: number) => void;
 }
 
 export interface DeviceFrameSource {
   readonly requestResync: () => boolean;
+  /**
+   * Send one text message (live input) in order with the ones before it, on
+   * the current socket. False when no socket is open, in which case nothing
+   * was sent. Whether the server accepts input is the caller's to track.
+   */
+  readonly sendText: (text: string) => boolean;
   readonly close: () => void;
 }
 
@@ -140,6 +152,10 @@ export function createDeviceFrameSource(options: {
       }) as (event: never) => void);
       socket.addEventListener("message", ((event: { data: unknown }) => {
         if (closed || socketGeneration !== generation) return;
+        if (typeof event.data === "string") {
+          options.handlers.onText?.(event.data, socketGeneration);
+          return;
+        }
         const bytes = frameBytes(event.data);
         if (!bytes) return;
         const result = decodeDeviceFrame(bytes);
@@ -182,6 +198,15 @@ export function createDeviceFrameSource(options: {
         return false;
       }
       return sendResync();
+    },
+    sendText: (text) => {
+      if (closed || !socketOpen || !currentSocket) return false;
+      try {
+        currentSocket.send(text);
+        return true;
+      } catch {
+        return false;
+      }
     },
     close: () => {
       if (closed) return;

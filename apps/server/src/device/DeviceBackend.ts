@@ -1,3 +1,5 @@
+export type DeviceTouchPhase = "down" | "move" | "up";
+
 /**
  * DeviceBackend - platform abstraction behind the device pane.
  *
@@ -20,6 +22,7 @@ import type {
   DeviceInstallAppResult,
   DeviceKeyModifier,
   DeviceLaunchAppResult,
+  DeviceOrientation,
   DevicePlatform,
   DeviceTestingInput,
   DeviceScreenshotResult,
@@ -165,6 +168,19 @@ export interface DeviceBackend {
   typeText(udid: string, text: string): Promise<void>;
   keyEvent(udid: string, event: DeviceKeyEvent): Promise<void>;
   pressButton(udid: string, button: DeviceHardwareButton): Promise<void>;
+  /**
+   * One phase of a live touch, in device points: the pane streams a finger
+   * as down, moves, then up, so a drag scrolls while it moves and a held
+   * press is a long press. Backends without live touch reject it.
+   */
+  touch(udid: string, phase: DeviceTouchPhase, x: number, y: number): Promise<void>;
+  /**
+   * Paste text where the device's focus is. Unlike `typeText` it does not
+   * depend on the guest's keyboard layout where the backend can avoid that.
+   */
+  paste(udid: string, text: string): Promise<void>;
+  /** Turn the device. Backends that cannot reject it. */
+  setOrientation(udid: string, orientation: DeviceOrientation): Promise<void>;
 
   /** `save` writes the PNG beside recordings and reports its path. */
   screenshot(udid: string, options?: { readonly save?: boolean }): Promise<DeviceScreenshotResult>;

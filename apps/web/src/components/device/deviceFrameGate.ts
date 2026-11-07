@@ -97,3 +97,65 @@ export function deviceHidUsageForKey(key: string): number | null {
   }
   return named[key] ?? null;
 }
+
+/**
+ * USB HID keyboard usage (page 7) for a physical key, by `KeyboardEvent.code`.
+ *
+ * Positions, not characters: the guest reads them with its own hardware
+ * keyboard layout, as it does a real keyboard and Simulator.app, so a German
+ * simulator types "z" for the key a German keyboard labels Z and "@" for
+ * Option-L. Mapping characters instead would assume a US guest layout.
+ * Caps Lock is left out: browsers report it as a toggle, not a key press.
+ */
+const HID_USAGE_BY_CODE: Readonly<Record<string, number>> = (() => {
+  const table: Record<string, number> = {
+    Enter: 0x28,
+    NumpadEnter: 0x58,
+    Escape: 0x29,
+    Backspace: 0x2a,
+    Tab: 0x2b,
+    Space: 0x2c,
+    Minus: 0x2d,
+    Equal: 0x2e,
+    BracketLeft: 0x2f,
+    BracketRight: 0x30,
+    Backslash: 0x31,
+    IntlHash: 0x32,
+    Semicolon: 0x33,
+    Quote: 0x34,
+    Backquote: 0x35,
+    Comma: 0x36,
+    Period: 0x37,
+    Slash: 0x38,
+    Insert: 0x49,
+    Home: 0x4a,
+    PageUp: 0x4b,
+    Delete: 0x4c,
+    End: 0x4d,
+    PageDown: 0x4e,
+    ArrowRight: 0x4f,
+    ArrowLeft: 0x50,
+    ArrowDown: 0x51,
+    ArrowUp: 0x52,
+    IntlBackslash: 0x64,
+    IntlRo: 0x87,
+    IntlYen: 0x89,
+    ControlLeft: 0xe0,
+    ShiftLeft: 0xe1,
+    AltLeft: 0xe2,
+    ControlRight: 0xe4,
+    ShiftRight: 0xe5,
+    AltRight: 0xe6,
+  };
+  for (let index = 0; index < 26; index += 1) {
+    table[`Key${String.fromCharCode(65 + index)}`] = 0x04 + index;
+  }
+  for (let digit = 1; digit <= 9; digit += 1) table[`Digit${digit}`] = 0x1e + digit - 1;
+  table.Digit0 = 0x27;
+  for (let index = 1; index <= 12; index += 1) table[`F${index}`] = 0x3a + index - 1;
+  return table;
+})();
+
+export function deviceHidUsageForCode(code: string): number | null {
+  return HID_USAGE_BY_CODE[code] ?? null;
+}
