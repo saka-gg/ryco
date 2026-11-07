@@ -1319,7 +1319,10 @@ export class CuaDriverHost {
           const target = this.frameTapTarget(task, request.args);
           if (target) {
             try {
-              this.options.frameTap?.update(target);
+              const args = request.args as Record<string, unknown> | null | undefined;
+              this.options.frameTap?.update(target, {
+                foreground: foregroundDelivery || args?.delivery_mode === "foreground",
+              });
             } catch (error) {
               log(`computer frame tap update failed: ${String(error)}`);
             }

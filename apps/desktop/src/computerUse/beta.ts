@@ -280,7 +280,7 @@ export class DesktopComputerBeta {
       cursorStyle: () =>
         this.preferences.cursorColor ? { fill: this.preferences.cursorColor } : null,
       frameTap: {
-        update: (target) => {
+        update: (target, delivery) => {
           this.taps.setTarget(target);
           if (!target.task.turnId) return;
           this.send({
@@ -290,7 +290,7 @@ export class DesktopComputerBeta {
             targetId: `cua:${target.pid}:${target.windowId}`,
             label: target.task.label ?? "Computer",
           });
-          this.noteActivity(target);
+          this.noteActivity(target, delivery?.foreground === true);
         },
         endTask: async (task) => {
           // The status is per thread: a newer turn of the same thread keeps it.
@@ -326,6 +326,19 @@ export class DesktopComputerBeta {
   async start(): Promise<void> {
     if (process.platform === "darwin") this.endpoint = await this.host.listen();
     await this.refreshApprovedApps();
+    if (process.platform === "darwin" && this.preferences.defaultEnabled) this.prewarm();
+  }
+  /**
+   * On in every chat: the first send should not pay for a cold helper. One permission check
+   * starts Ryco Computer Use and records a complete report; with Input Monitoring granted the
+   * Escape listener starts too, disarmed until a task needs it.
+   */
+  private prewarm(): void {
+    void this.check()
+      .then(() => {
+        if (!this.closed && this.escapeStop()) this.monitor.start();
+      })
+      .catch(() => undefined);
   }
   binding() {
     this.stop();
@@ -359,16 +372,57 @@ export class DesktopComputerBeta {
     const permissions = this.permissions.getState();
     return REQUIRED_PERMISSIONS.filter((key) => permissions[`${key}Permission`] !== "granted");
   }
+  /**
+   * The required permissions a completed check reported as not granted. A check that timed out
+   * or failed leaves a permission unknown, which is not a missing grant.
+   */
+  private reportedMissingPermissions(): ComputerSetupPermission[] {
+    const permissions = this.permissions.getState();
+    return REQUIRED_PERMISSIONS.filter((key) => {
+      const value = permissions[`${key}Permission`];
+      return value !== undefined && value !== "unknown" && value !== "granted";
+    });
+  }
+  /**
+   * What blocks a default send: a missing grant a check reported. A permission left unknown
+   * (a cold helper start, a timed-out probe) counts as its last reported answer in this session,
+   * else as granted once a build of this bundle had every grant; the host still checks the
+   * grants before each action.
+   */
+  private blockingPermissions(): ComputerSetupPermission[] {
+    const permissions = this.permissions.getState();
+    const grantedBefore =
+      this.grantedBuild !== null &&
+      (this.grantedBundleId ?? this.grantBundleId) === this.grantBundleId;
+    return REQUIRED_PERMISSIONS.filter((key) => {
+      const value = permissions[`${key}Permission`];
+      if (value !== undefined && value !== "unknown") return value !== "granted";
+      const last = this.lastReported.get(key);
+      return last !== undefined ? last !== "granted" : !grantedBefore;
+    });
+  }
+  /** Each required permission's last answer from a completed check in this session. */
+  private readonly lastReported = new Map<ComputerSetupPermission, "granted" | "missing">();
+  private noteReportedPermissions(): void {
+    const permissions = this.permissions.getState();
+    for (const key of REQUIRED_PERMISSIONS) {
+      const value = permissions[`${key}Permission`];
+      if (value !== undefined && value !== "unknown")
+        this.lastReported.set(key, value === "granted" ? "granted" : "missing");
+    }
+  }
   private setupState(): ComputerBetaSetup {
     const missing = this.missingPermissions();
-    const moved = missing.length > 0 && this.movedToHelper();
+    // Only a completed check that reports a grant missing explains it; unknown is not missing.
+    const reported = this.reportedMissingPermissions().length > 0;
+    const moved = reported && this.movedToHelper();
     return {
       missing,
       escapeStop: this.escapeStop(),
       // A move to Ryco Computer Use is not an old build in the list: it says so instead.
       staleGrant:
         !moved &&
-        missing.length > 0 &&
+        reported &&
         this.grantedBuild !== null &&
         this.grantedBuild !== this.build &&
         (this.grantedBundleId ?? this.grantBundleId) === this.grantBundleId,
@@ -475,14 +529,18 @@ export class DesktopComputerBeta {
       window.webContents.send("desktop:computer-beta:update", update);
   }
   /** Names the target's app in the menu-bar status while its task is still live. */
-  private noteActivity(target: CuaPreviewTarget): void {
+  private noteActivity(target: CuaPreviewTarget, foreground: boolean): void {
     const indicator = this.indicator;
     const turnId = target.task.turnId;
     if (!indicator || !turnId) return;
     const key = taskKey({ threadId: target.task.threadId, turnId });
     void appNameForPid(target.pid).then((app) => {
       if (this.closed || !this.tasks.has(key)) return;
-      indicator.touch(indicatorKey(target.task.threadId), app ?? "an app", "background");
+      indicator.touch(
+        indicatorKey(target.task.threadId),
+        app ?? "an app",
+        foreground ? "foreground" : "background",
+      );
     });
   }
   private publishState(): void {
@@ -490,6 +548,7 @@ export class DesktopComputerBeta {
   }
   async check(): Promise<ComputerBetaState> {
     await Promise.all([this.permissions.refreshState(PERMISSIONS), this.refreshApprovedApps()]);
+    this.noteReportedPermissions();
     this.noteGrantedBuild();
     return this.state();
   }
@@ -545,11 +604,11 @@ export class DesktopComputerBeta {
       throw new Error("Computer Use beta is available on macOS desktop.");
     }
     await this.check();
-    if (this.missingPermissions().length > 0) {
-      if (!explicit) {
-        this.noticeMove();
-        return null;
-      }
+    if (!explicit && this.blockingPermissions().length > 0) {
+      this.noticeMove();
+      return null;
+    }
+    if (explicit && this.missingPermissions().length > 0) {
       const moved = this.setupState().movedToHelper;
       await this.setup();
       throw new Error(
@@ -565,9 +624,14 @@ export class DesktopComputerBeta {
       );
     }
     if (this.escapeStop()) {
+      // A default send never waits for the listener: it starts now, and each action still
+      // waits for it (the host fences input until it is ready). Only `/computer-use` reports it.
+      if (!explicit) {
+        void this.monitor.activate(true).catch(() => undefined);
+        return { mode: "chat", generation: this.generation(threadId) };
+      }
       await this.monitor.activate(true);
       if (!this.monitor.state.ready) {
-        if (!explicit) return null;
         throw new Error(
           "The Escape listener is not ready. Check Computer Use in Settings and send again.",
         );
@@ -619,9 +683,7 @@ export class DesktopComputerBeta {
     const turnId = textArg(input, "turnId", 256);
     const key = taskKey({ threadId, turnId });
     if (operation === "end") {
-      this.endedTasks.add(key);
-      while (this.endedTasks.size > 256)
-        this.endedTasks.delete(this.endedTasks.values().next().value!);
+      this.noteEnded(key);
       if (!this.tasks.has(key)) return { ended: true };
     }
     if (operation === "begin") {
@@ -633,6 +695,13 @@ export class DesktopComputerBeta {
       )
         throw new Error("Computer task expired or was stopped. Send a new request to resume.");
       if (!this.tasks.has(key)) {
+        // A newer turn of the thread replaces the one before it, which would otherwise stay
+        // until the task limit (and keep its menu-bar entry).
+        const replaced = [...this.tasks].filter(([, live]) => live.threadId === threadId);
+        for (const [replacedKey, live] of replaced) {
+          this.noteEnded(replacedKey);
+          this.endTask(replacedKey, live);
+        }
         if (this.tasks.size >= 64) throw new Error("Too many active Computer tasks.");
         const controller = new AbortController();
         this.tasks.set(key, {
@@ -642,6 +711,7 @@ export class DesktopComputerBeta {
           consent: new ComputerTaskConsent(this.consentSheets.prompt, controller.signal),
         });
         this.send({ type: "target", threadId, turnId, targetId: "pending", label: "Computer" });
+        for (const [, live] of replaced) await this.stopEndedTask(live);
       }
       return { ready: true };
     }
@@ -649,10 +719,8 @@ export class DesktopComputerBeta {
     if (!task || task.controller.signal.aborted)
       throw new Error("Computer task is no longer active.");
     if (operation === "end") {
-      task.controller.abort();
-      this.tasks.delete(key);
-      await this.host.stopTaskByUser({ threadId, turnId });
-      this.send({ type: "ended", threadId, turnId });
+      this.endTask(key, task);
+      await this.stopEndedTask(task);
       return { ended: true };
     }
     if (operation === "consent") {
@@ -707,6 +775,20 @@ export class DesktopComputerBeta {
       return { visible: this.visible.has(threadId) };
     }
     throw new Error("Unknown Computer request.");
+  }
+  private noteEnded(key: string): void {
+    this.endedTasks.add(key);
+    while (this.endedTasks.size > 256)
+      this.endedTasks.delete(this.endedTasks.values().next().value!);
+  }
+  /** Retires a task at once; `stopEndedTask` then stops its input and tells the renderer. */
+  private endTask(key: string, task: Task): void {
+    task.controller.abort();
+    this.tasks.delete(key);
+  }
+  private async stopEndedTask(task: Task): Promise<void> {
+    await this.host.stopTaskByUser({ threadId: task.threadId, turnId: task.turnId });
+    this.send({ type: "ended", threadId: task.threadId, turnId: task.turnId });
   }
   /** One dialog on the Ryco window; the backend decides what its answer means. */
   private async showConsent(

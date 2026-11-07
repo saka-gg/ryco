@@ -29,7 +29,8 @@ export interface ComputerPreviewFrame {
 }
 
 export interface ComputerFrameTapHost {
-  update(target: CuaPreviewTarget): void;
+  /** `foreground`: the action that pointed here was delivered in the foreground. */
+  update(target: CuaPreviewTarget, delivery?: { readonly foreground: boolean }): void;
   endTask(task: CuaComputerTask): Promise<void>;
   stop(): Promise<void>;
   dispose(): Promise<void>;

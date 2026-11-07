@@ -23,7 +23,7 @@ type FakeChildProcess = ChildProcess.ChildProcessWithoutNullStreams & {
   stderr: PassThrough;
 };
 
-function createFakeChildProcess(): FakeChildProcess {
+function createFakeChildProcess(options: { readonly spawned?: boolean } = {}): FakeChildProcess {
   const child = new EventEmitter() as FakeChildProcess;
   Object.assign(child, {
     stdin: new PassThrough(),
@@ -31,6 +31,8 @@ function createFakeChildProcess(): FakeChildProcess {
     stderr: new PassThrough(),
     kill: vi.fn(() => true),
   });
+  // Like Node's: the program runs on a later tick. A child of a cold helper app runs later still.
+  if (options.spawned !== false) process.nextTick(() => child.emit("spawn"));
   return child;
 }
 
@@ -53,11 +55,11 @@ afterEach(() => {
 });
 
 describe("AppSnap permission probe freshness", () => {
-  function fixture() {
+  function fixture(options: { readonly spawned?: boolean } = {}) {
     const children: FakeChildProcess[] = [];
     const onState = vi.fn();
     const spawn = vi.fn(() => {
-      const child = createFakeChildProcess();
+      const child = createFakeChildProcess(options);
       children.push(child);
       return child;
     });
@@ -171,6 +173,37 @@ describe("AppSnap permission probe freshness", () => {
       await flushPromises();
       f.reply(1, { accessibility: "granted" });
       expect(await recovery).toMatchObject({ accessibilityPermission: "granted" });
+    } finally {
+      f.manager.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("counts the check's deadline from its spawn, not from a cold helper start", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const f = fixture({ spawned: false });
+    try {
+      const check = f.manager.refreshState(["accessibility"]);
+      await flushPromises();
+      // Ryco Computer Use is still starting: no timeout, no unknown grant.
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(f.children[0]!.kill).not.toHaveBeenCalled();
+      f.children[0]!.emit("spawn");
+      await vi.advanceTimersByTimeAsync(9_000);
+      f.reply(0, { accessibility: "granted" });
+      expect(await check).toMatchObject({ accessibilityPermission: "granted" });
+      // The program ran but never answered: its own deadline still ends the check.
+      const stalled = f.manager.refreshState(["accessibility"], { force: true });
+      await flushPromises();
+      f.children[1]!.emit("spawn");
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(await stalled).toMatchObject({ accessibilityPermission: "unknown" });
+      expect(f.children[1]!.kill).toHaveBeenCalled();
+      // A start that never resolves is backstopped.
+      const neverStarted = f.manager.refreshState(["accessibility"], { force: true });
+      await flushPromises();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(await neverStarted).toMatchObject({ accessibilityPermission: "unknown" });
     } finally {
       f.manager.dispose();
       vi.useRealTimers();
