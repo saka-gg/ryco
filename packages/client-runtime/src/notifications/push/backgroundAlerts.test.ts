@@ -107,7 +107,10 @@ function harness(
     enabled: boolean;
     sound: boolean;
     kinds?: ReadonlyArray<"approval" | "input" | "plan-ready" | "completed" | "failed" | "stopped">;
+    liveActivity?: boolean;
   } = { enabled: options.enabled ?? true, sound: false };
+  let liveActivityToken: string | null = null;
+  const liveActivityListeners = new Set<() => void>();
   let account: BackgroundAlertsAccount = options.account ?? {
     status: "signed-in",
     accountId: ACCOUNT,
@@ -187,6 +190,13 @@ function harness(
       },
     },
     pushKey,
+    liveActivity: {
+      readToken: () => liveActivityToken,
+      subscribe: (listener) => {
+        liveActivityListeners.add(listener);
+        return () => liveActivityListeners.delete(listener);
+      },
+    },
     hubRemoval,
     earlierInstallKey,
     notifications,
@@ -226,6 +236,10 @@ function harness(
     setPreferences: (next: Partial<typeof preferences>) => {
       preferences = { ...preferences, ...next };
       for (const listener of preferenceListeners) listener();
+    },
+    setLiveActivityToken: (next: string | null) => {
+      liveActivityToken = next;
+      for (const listener of liveActivityListeners) listener();
     },
     setAccount: (next: BackgroundAlertsAccount) => {
       account = next;
@@ -385,6 +399,55 @@ describe("background alerts on a Hub that sends push", () => {
     await settle();
     expect(test.alerts.getSnapshot().enabled).toBe(false);
     expect(node.push.unregisterDevice).toHaveBeenCalled();
+  });
+
+  it("hand a Hub that takes Live Activity updates the card's token, and tell the nodes", async () => {
+    const LA_TOKEN = "ab".repeat(40);
+    const test = harness({ capability: { ...CAPABILITY, liveActivities: true } });
+    const node = fakeConnection("env-a");
+    test.setConnections([node]);
+    test.setPreferences({ liveActivity: true });
+    test.alerts.start();
+    await settle();
+    // On, but no card yet: the device registers as before, and new cards may ask for a token.
+    expect(test.alerts.getSnapshot().liveActivityUpdates).toBe(true);
+    expect(test.hub.registerNativePush).toHaveBeenLastCalledWith(
+      expect.not.objectContaining({ liveActivityToken: expect.anything() }),
+    );
+    expect(node.push.registerDevice).toHaveBeenLastCalledWith(
+      expect.not.objectContaining({ liveActivity: true }),
+    );
+
+    test.setLiveActivityToken(LA_TOKEN);
+    await settle();
+    expect(test.hub.registerNativePush).toHaveBeenLastCalledWith(
+      expect.objectContaining({ token: TOKEN, liveActivityToken: LA_TOKEN }),
+    );
+    expect(node.push.registerDevice).toHaveBeenLastCalledWith(
+      expect.objectContaining({ liveActivity: true }),
+    );
+
+    // The card ended: the next registration drops its token.
+    test.setLiveActivityToken(null);
+    await settle();
+    expect(test.hub.registerNativePush).toHaveBeenCalledTimes(3);
+    expect(test.hub.registerNativePush).toHaveBeenLastCalledWith(
+      expect.not.objectContaining({ liveActivityToken: expect.anything() }),
+    );
+  });
+
+  it("never send a Live Activity token to a Hub that does not take one", async () => {
+    const test = harness();
+    test.setConnections([fakeConnection("env-a")]);
+    test.setPreferences({ liveActivity: true });
+    test.setLiveActivityToken("cd".repeat(40));
+    test.alerts.start();
+    await settle();
+    expect(test.alerts.getSnapshot().liveActivityUpdates).toBe(false);
+    expect(test.hub.registerNativePush).toHaveBeenCalledTimes(1);
+    expect(test.hub.registerNativePush).toHaveBeenLastCalledWith(
+      expect.not.objectContaining({ liveActivityToken: expect.anything() }),
+    );
   });
 
   it("are not confirmed until the node's Hub took a signal, nor for a kind a viewer never gets", async () => {

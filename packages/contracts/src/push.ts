@@ -48,6 +48,11 @@ export const PushRegisterDeviceInput = Schema.Struct({
   kinds: Schema.Array(PushAlertKind).check(Schema.isMinLength(1), Schema.isMaxLength(6)),
   /** Play the alert sound. */
   sound: Schema.Boolean,
+  /**
+   * The device's agent Live Activity takes push updates through the Hub: the node may count this
+   * device in its activity signals (`docs/live-activity-push.md`). Older nodes ignore it.
+   */
+  liveActivity: Schema.optional(Schema.Boolean),
 });
 export type PushRegisterDeviceInput = typeof PushRegisterDeviceInput.Type;
 

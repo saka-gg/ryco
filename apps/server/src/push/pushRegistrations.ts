@@ -44,6 +44,11 @@ export const PushRegistration = Schema.Struct({
   role: Schema.Literals(["viewer", "operator", "owner"]),
   kinds: Schema.Array(PushAlertKind),
   sound: Schema.Boolean,
+  /**
+   * The device's agent Live Activity takes push updates through the Hub, so a later activity
+   * signal counts it (`docs/live-activity-push.md`). Absent: it does not.
+   */
+  liveActivity: Schema.optionalKey(Schema.Boolean),
   /** 32 random bytes, base64url: keys this device's collapse ids. */
   collapseSalt: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{43}$/u)),
   createdAt: IsoMillis,
@@ -130,6 +135,7 @@ export function registerPushDevice(
     role: device.role,
     kinds: Array.from(new Set(device.input.kinds)),
     sound: device.input.sound,
+    ...(device.input.liveActivity === true ? { liveActivity: true } : {}),
     collapseSalt: sameKey ? previous.collapseSalt : device.newSalt,
     createdAt: sameKey ? previous.createdAt : device.nowMs,
     refreshedAt: device.nowMs,

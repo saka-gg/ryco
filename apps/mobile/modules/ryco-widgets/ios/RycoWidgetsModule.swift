@@ -9,9 +9,15 @@ import WidgetKit
 /// writes it into the App Group and asks WidgetKit to reload that kind. The
 /// widget extension renders what it finds there and never reaches a node.
 ///
-/// The Live Activity is local only: started, updated and ended from the app,
-/// with no push token (`pushType: nil`), so nothing about it leaves the device.
+/// The Live Activity is started, updated and ended from the app. Only when the
+/// app asks for push updates (its Hub advertises them, `docs/live-activity-push.md`)
+/// is it requested with `pushType: .token`; its update tokens then reach
+/// JavaScript as `onAgentActivityPushToken`, and a push update carries counts
+/// only. Otherwise (`pushType: nil`) nothing about it leaves the device.
 public final class RycoWidgetsModule: Module {
+  /// One observer per card: its update tokens, until it ends. Main actor only.
+  @MainActor private var tokenObservers: [String: Task<Void, Never>] = [:]
+
   /// The extension the config plugin embeds; without it nothing would read a timeline.
   private static let extensionName = "RycoWidgets.appex"
   /// Far above any timeline the app writes; anything bigger is a bug, not a widget.
@@ -19,6 +25,18 @@ public final class RycoWidgetsModule: Module {
 
   public func definition() -> ModuleDefinition {
     Name("RycoWidgets")
+
+    Events("onAgentActivityPushToken")
+
+    /// The widget kinds on the person's Home and Lock Screens, so the app feeds only those.
+    AsyncFunction("installedWidgetKinds") { () async -> [String] in
+      await withCheckedContinuation { continuation in
+        WidgetCenter.shared.getCurrentConfigurations { result in
+          let kinds = (try? result.get())?.map(\.kind) ?? []
+          continuation.resume(returning: Array(Set(kinds)).sorted())
+        }
+      }
+    }
 
     Function("isAvailable") { () -> Bool in
       Self.store() != nil && Self.extensionEmbedded()
@@ -44,16 +62,36 @@ public final class RycoWidgetsModule: Module {
       Self.extensionEmbedded() && ActivityAuthorizationInfo().areActivitiesEnabled
     }
 
-    AsyncFunction("startAgentActivity") { (stateJson: String, staleDateMs: Double) throws -> String in
+    AsyncFunction("startAgentActivity") {
+      (stateJson: String, staleDateMs: Double, pushUpdates: Bool?) throws -> String in
       guard Self.extensionEmbedded() else { throw WidgetsModuleError.unavailable }
       let content = ActivityContent(
         state: try Self.decodeState(stateJson), staleDate: Self.date(staleDateMs))
+      let attributes = AgentActivityAttributes(v: 1)
+      if pushUpdates == true {
+        // A build or device that cannot take push updates refuses the token; the card then
+        // starts local only, as before.
+        if let activity = try? Activity.request(
+          attributes: attributes, content: content, pushType: .token)
+        {
+          Task { @MainActor in self.observePushTokens(activity) }
+          return activity.id
+        }
+      }
       do {
-        return try Activity.request(
-          attributes: AgentActivityAttributes(v: 1), content: content, pushType: nil
-        ).id
+        return try Activity.request(attributes: attributes, content: content, pushType: nil).id
       } catch {
         throw WidgetsModuleError.activityRefused
+      }
+    }
+
+    /// Follows the update tokens of the cards still showing (one an earlier launch left).
+    Function("observeAgentActivityPushTokens") { () -> Void in
+      Task { @MainActor in
+        for activity in Activity<AgentActivityAttributes>.activities
+        where activity.activityState == .active || activity.activityState == .stale {
+          self.observePushTokens(activity)
+        }
       }
     }
 
@@ -107,6 +145,38 @@ public final class RycoWidgetsModule: Module {
           return card
         }
     }
+  }
+
+  /// Sends each update token of `activity` (hex) to JavaScript, the current one first, and an
+  /// empty one once the card ends: its token is then worthless.
+  @MainActor private func observePushTokens(_ activity: Activity<AgentActivityAttributes>) {
+    let id = activity.id
+    guard tokenObservers[id] == nil else { return }
+    tokenObservers[id] = Task { [weak self] in
+      await withTaskGroup(of: Void.self) { group in
+        group.addTask { [weak self] in
+          for await token in activity.pushTokenUpdates {
+            self?.sendEvent(
+              "onAgentActivityPushToken", ["id": id, "token": Self.hex(token)])
+          }
+        }
+        group.addTask { [weak self] in
+          for await state in activity.activityStateUpdates
+          where state == .ended || state == .dismissed {
+            self?.sendEvent("onAgentActivityPushToken", ["id": id, "token": ""])
+            break
+          }
+        }
+        // The card's end finishes the state stream; the token stream goes with it.
+        await group.next()
+        group.cancelAll()
+      }
+      await MainActor.run { self?.tokenObservers[id] = nil }
+    }
+  }
+
+  private static func hex(_ data: Data) -> String {
+    data.map { String(format: "%02x", $0) }.joined()
   }
 
   private static func agentActivity(_ id: String) -> Activity<AgentActivityAttributes>? {

@@ -9,7 +9,9 @@ import {
   AGENT_ACTIVITY_STALE_AFTER_MS,
   AGENT_ACTIVITY_STATE_BUDGET_BYTES,
   agentActivityContentState,
+  agentActivityModelName,
   agentActivityShownKey,
+  agentActivityStatus,
   agentActivityThreads,
   decideAgentActivity,
   encodeAgentActivityState,
@@ -39,7 +41,9 @@ const RUNNING = summary({ running: 1 }, [
     threadId: "t1",
     title: "Fix the flaky test",
     projectName: "ryco",
+    modelName: "Opus 5.5",
     phase: "running",
+    sinceMs: null,
   },
 ]);
 const SETTLED = summary({ done: 1 }, [{ ...RUNNING.rows[0]!, phase: "done" }]);
@@ -202,7 +206,9 @@ describe("the Live Activity state", () => {
       threadId: `thread-${index}-${"t".repeat(30)}`,
       title: emoji,
       projectName: "🧪".repeat(24),
+      modelName: "m".repeat(24),
       phase: "approval" as const,
+      sinceMs: NOW,
     }));
     const json = encodeAgentActivityState(
       agentActivityContentState(summary({ needsYou: 5 }, rows), LINKS, NOW),
@@ -220,9 +226,11 @@ describe("the Live Activity state", () => {
       key: `k${index}`,
       environmentId: "env",
       threadId: `t${index}`,
-      title: "x".repeat(680),
+      title: "x".repeat(660),
       projectName: null,
+      modelName: null,
       phase: "running" as const,
+      sinceMs: null,
     }));
     const state = agentActivityContentState(summary({ running: 5 }, rows), LINKS, NOW);
     const whole = new TextEncoder().encode(JSON.stringify(state)).length;
@@ -242,7 +250,9 @@ describe("the Live Activity state", () => {
       threadId: `t${index}`,
       title: "x".repeat(2_000),
       projectName: null,
+      modelName: null,
       phase: "running" as const,
+      sinceMs: null,
     }));
     const json = encodeAgentActivityState(
       agentActivityContentState(summary({ running: 5 }, rows), LINKS, NOW),
@@ -348,6 +358,30 @@ describe("the Inbox rows the summary takes", () => {
     expect(threads.map((entry) => entry.delegated)).toEqual([false, false, true]);
   });
 
+  it("knows when a running turn started and which model it uses", () => {
+    const sections: InboxSection[] = [{ key: "active", title: "Active", rows: [row({})] }];
+    const startedAt = new Date(NOW - 120_000).toISOString();
+    const [entry] = agentActivityThreads({
+      sections,
+      threads: [
+        thread("t1", {
+          modelSelection: { instanceId: "codex", model: "gpt-5.6-sol" },
+          latestTurn: {
+            turnId: "turn",
+            state: "running",
+            requestedAt: new Date(NOW - 130_000).toISOString(),
+            startedAt,
+            completedAt: null,
+            assistantMessageId: null,
+          },
+        }),
+      ],
+      environments: [environment],
+      modelNameOf: (summary) => summary.modelSelection?.model ?? null,
+    });
+    expect(entry).toMatchObject({ turnStartedAtMs: NOW - 120_000, modelName: "gpt-5.6-sol" });
+  });
+
   it("is not live on a machine that is offline, cached or not current yet", () => {
     const sections: InboxSection[] = [{ key: "active", title: "Active", rows: [row({})] }];
     for (const other of [
@@ -362,5 +396,49 @@ describe("the Inbox rows the summary takes", () => {
       });
       expect(entry!.live).toBe(false);
     }
+  });
+});
+
+describe("what a row says", () => {
+  it("names each phase in the Inbox's words", () => {
+    expect(agentActivityStatus("approval")).toBe("Needs approval");
+    expect(agentActivityStatus("input")).toBe("Needs your answer");
+    expect(agentActivityStatus("plan")).toBe("Plan ready");
+    expect(agentActivityStatus("running")).toBe("Working");
+    expect(agentActivityStatus("failed")).toBe("Failed");
+  });
+
+  it("carries the model, the status and the time into the card", () => {
+    const state = agentActivityContentState(RUNNING, LINKS, NOW);
+    expect(state.rows[0]).toMatchObject({
+      model: "Opus 5.5",
+      status: "Working",
+      since: null,
+      phase: "running",
+    });
+  });
+
+  it("names the model as its machine's catalog does, else by its slug", () => {
+    const configs = new Map([
+      [
+        "env",
+        {
+          providers: [
+            {
+              instanceId: "claude",
+              models: [{ slug: "claude-opus-5-5", name: "Claude Opus 5.5", shortName: "Opus 5.5" }],
+            },
+          ],
+        },
+      ],
+    ]) as never;
+    const named = (instanceId: string, model: string) =>
+      agentActivityModelName(
+        { environmentId: "env" as EnvironmentId, modelSelection: { instanceId, model } as never },
+        configs,
+      );
+    expect(named("claude", "claude-opus-5-5")).toBe("Opus 5.5");
+    expect(named("claude", "claude-haiku-5-5")).toBe("claude-haiku-5-5");
+    expect(agentActivityModelName({ environmentId: "env" as EnvironmentId }, configs)).toBeNull();
   });
 });

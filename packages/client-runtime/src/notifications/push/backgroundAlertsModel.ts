@@ -97,12 +97,24 @@ export interface BackgroundAlertsSnapshot {
   readonly hub: BackgroundAlertsHubStatus;
   readonly device: BackgroundAlertsDeviceStatus;
   readonly environments: ReadonlyMap<EnvironmentId, EnvironmentPushState>;
+  /**
+   * The Hub took this device's registration and sends Live Activity push updates, and the
+   * Live Activity is on: a new card asks for an update token (`docs/live-activity-push.md`).
+   */
+  readonly liveActivityUpdates: boolean;
 }
 
 export function initialBackgroundAlertsSnapshot(
   support: BackgroundAlertsSupport,
 ): BackgroundAlertsSnapshot {
-  return { enabled: false, support, hub: "unknown", device: "idle", environments: new Map() };
+  return {
+    enabled: false,
+    support,
+    hub: "unknown",
+    device: "idle",
+    environments: new Map(),
+    liveActivityUpdates: false,
+  };
 }
 
 export function environmentPushStateFromStatus(status: PushDeviceStatus): EnvironmentPushState {

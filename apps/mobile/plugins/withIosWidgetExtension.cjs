@@ -36,6 +36,8 @@ const MODULE_DIR = path.join(__dirname, "..", "modules", "ryco-widgets");
  */
 const EXTENSION_SOURCES = [
   path.join(MODULE_DIR, "extension", "AgentActivityWidget.swift"),
+  path.join(MODULE_DIR, "extension", "AgentGlance.swift"),
+  path.join(MODULE_DIR, "extension", "AgentWidget.swift"),
   path.join(MODULE_DIR, "extension", "RycoWidgetsBundle.swift"),
   path.join(MODULE_DIR, "extension", "SubscriptionUsageContent.swift"),
   path.join(MODULE_DIR, "extension", "SubscriptionUsageWidget.swift"),

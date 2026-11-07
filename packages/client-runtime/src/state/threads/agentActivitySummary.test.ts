@@ -154,4 +154,33 @@ describe("summarizeAgentActivity", () => {
     expect(Array.from(emoji?.title ?? "")).toHaveLength(48);
     expect(emoji?.title).toBe(`${"x".repeat(46)}🚀…`);
   });
+
+  it("names the model and says since when each row is in its phase", () => {
+    const running = thread({
+      title: "Running",
+      modelName: "  GPT-5.6 Sol  ",
+      turnStartedAtMs: NOW - 90_000,
+    });
+    const waiting = thread({
+      title: "Waiting",
+      state: "needs-input",
+      attention: "approval",
+      updatedAtMs: NOW - 30_000,
+    });
+    const done = thread({
+      title: "Done",
+      state: "idle",
+      unseen: true,
+      finishedAtMs: NOW - 60_000,
+      modelName: "",
+    });
+    const rows = summarizeAgentActivity([running, waiting, done], NOW).rows;
+    expect(rows.map((row) => [row.title, row.modelName, row.sinceMs])).toEqual([
+      ["Waiting", null, NOW - 30_000],
+      ["Done", null, NOW - 60_000],
+      ["Running", "GPT-5.6 Sol", NOW - 90_000],
+    ]);
+    // A client that does not know when the turn started shows no time.
+    expect(summarizeAgentActivity([thread()], NOW).rows[0]?.sinceMs).toBeNull();
+  });
 });

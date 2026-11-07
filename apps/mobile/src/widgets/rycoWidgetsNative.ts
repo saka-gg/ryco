@@ -10,8 +10,25 @@ export interface RycoWidgetsNativeModule {
   readonly clear: (kind: string) => Promise<void>;
   /** The build has the extension and iOS allows Live Activities for Ryco. */
   readonly activitiesEnabled: () => boolean;
-  /** Starts the agent Live Activity (local, no push token); resolves to its id. */
-  readonly startAgentActivity: (stateJson: string, staleDateMs: number) => Promise<string>;
+  /**
+   * Starts the agent Live Activity; resolves to its id. `pushUpdates` asks for an update token
+   * (`pushType: .token`), only when the Hub sends Live Activity updates; a card that cannot get
+   * one starts local only.
+   */
+  readonly startAgentActivity: (
+    stateJson: string,
+    staleDateMs: number,
+    pushUpdates?: boolean,
+  ) => Promise<string>;
+  /** The widget kinds on the Home and Lock Screens; absent from binaries older than it. */
+  readonly installedWidgetKinds?: () => Promise<ReadonlyArray<string>>;
+  /** Follows the update tokens of the cards still showing; absent from older binaries. */
+  readonly observeAgentActivityPushTokens?: () => void;
+  /** `onAgentActivityPushToken`: a card's update token (hex), or "" once the card ended. */
+  readonly addListener?: (
+    event: "onAgentActivityPushToken",
+    listener: (event: { readonly id: string; readonly token: string }) => void,
+  ) => { readonly remove: () => void };
   readonly updateAgentActivity: (
     id: string,
     stateJson: string,

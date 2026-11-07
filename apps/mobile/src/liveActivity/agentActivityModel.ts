@@ -1,4 +1,5 @@
 import {
+  type AgentActivityPhase,
   deriveThreadActivityStatus,
   isArchivedThreadStub,
   isDelegatedThreadLineage,
@@ -7,6 +8,9 @@ import {
   type SidebarThreadOrStub,
   type SidebarThreadSummary,
 } from "@ryco/client-runtime/state/threads";
+
+import type { ServerConfig } from "@ryco/contracts";
+import { getModelDisplayName } from "@ryco/shared/model";
 
 import type { InboxEnvironment, InboxSection } from "../features/inbox/inboxModel";
 
@@ -33,17 +37,30 @@ export const AGENT_ACTIVITY_MAX_STATE_BYTES = 4096;
  */
 export const AGENT_ACTIVITY_STATE_BUDGET_BYTES = 3584;
 
-/** `modules/ryco-widgets/ios/AgentActivityAttributes.swift` `ContentState`. */
+/** One thread on the card. */
+export interface AgentActivityContentRow {
+  readonly title: string;
+  readonly project: string | null;
+  /** The model it works with; absent from states of earlier app versions. */
+  readonly model: string | null;
+  readonly phase: AgentActivityPhase;
+  /** What the row says about it: "Working", "Needs approval", … */
+  readonly status: string;
+  /** Since when, epoch ms: the card counts up from it. Null when unknown. */
+  readonly since: number | null;
+  readonly url: string;
+}
+
+/**
+ * `modules/ryco-widgets/ios/AgentActivityContentState.swift`. `origin` is `local` for the app's
+ * own updates; `remote` is reserved for push updates through the Hub, which carry counts only
+ * and never a title (`docs/live-activity-push.md`).
+ */
 export interface AgentActivityContentState {
   readonly v: 1;
   readonly origin: "local";
   readonly counts: AgentActivitySummary["counts"];
-  readonly rows: ReadonlyArray<{
-    readonly title: string;
-    readonly project: string | null;
-    readonly phase: string;
-    readonly url: string;
-  }>;
+  readonly rows: ReadonlyArray<AgentActivityContentRow>;
   /** What the card opens: the Inbox. */
   readonly url: string;
   readonly updatedAt: number;
@@ -108,6 +125,26 @@ export function agentActivityShownKey(state: AgentActivityContentState): string 
   return JSON.stringify({ counts: state.counts, rows: state.rows });
 }
 
+/** What a row says about its thread; the Swift views fall back to the same words. */
+export function agentActivityStatus(phase: AgentActivityPhase): string {
+  switch (phase) {
+    case "approval":
+      return "Needs approval";
+    case "input":
+      return "Needs your answer";
+    case "plan":
+      return "Plan ready";
+    case "running":
+      return "Working";
+    case "connecting":
+      return "Connecting";
+    case "failed":
+      return "Failed";
+    case "done":
+      return "Done";
+  }
+}
+
 export function agentActivityContentState(
   summary: AgentActivitySummary,
   links: AgentActivityLinks,
@@ -120,7 +157,10 @@ export function agentActivityContentState(
     rows: summary.rows.map((row) => ({
       title: row.title,
       project: row.projectName,
+      model: row.modelName,
       phase: row.phase,
+      status: agentActivityStatus(row.phase),
+      since: row.sinceMs,
       url: links.thread(row.environmentId, row.threadId),
     })),
     url: links.inbox,
@@ -208,6 +248,23 @@ export function decideAgentActivity(
     : { kind: "noop" };
 }
 
+/**
+ * The model a thread works with, as its machine's catalog names it (the short name when there is
+ * one), else its slug; null without a model.
+ */
+export function agentActivityModelName(
+  thread: Pick<SidebarThreadSummary, "environmentId" | "modelSelection">,
+  configs: ReadonlyMap<string, ServerConfig>,
+): string | null {
+  const selection = thread.modelSelection;
+  if (!selection) return null;
+  const model = configs
+    .get(thread.environmentId)
+    ?.providers.find((provider) => provider.instanceId === selection.instanceId)
+    ?.models.find((candidate) => candidate.slug === selection.model);
+  return model ? getModelDisplayName(model, { preferShortName: true }) : selection.model;
+}
+
 function attentionOf(thread: Parameters<typeof deriveThreadActivityStatus>[0]) {
   const status = deriveThreadActivityStatus(thread);
   return status === "approval"
@@ -219,8 +276,8 @@ function attentionOf(thread: Parameters<typeof deriveThreadActivityStatus>[0]) {
         : null;
 }
 
-function finishedAtMs(completedAt: string | null | undefined): number | null {
-  const ms = completedAt ? Date.parse(completedAt) : NaN;
+function epochMs(iso: string | null | undefined): number | null {
+  const ms = iso ? Date.parse(iso) : NaN;
   return Number.isFinite(ms) ? ms : null;
 }
 
@@ -233,6 +290,8 @@ export function agentActivityThreads(input: {
   readonly sections: ReadonlyArray<InboxSection>;
   readonly threads: ReadonlyArray<SidebarThreadOrStub>;
   readonly environments: ReadonlyArray<InboxEnvironment>;
+  /** The model a thread works with, as people read it; null when unknown. */
+  readonly modelNameOf?: (thread: SidebarThreadSummary) => string | null;
 }): AgentActivityThread[] {
   const threadsByKey = new Map<string, SidebarThreadSummary>(
     input.threads.flatMap((thread) =>
@@ -270,9 +329,12 @@ export function agentActivityThreads(input: {
           unseen: true,
           delegated: isDelegatedThreadLineage(thread.lineage),
           finishedAtMs:
+            thread.latestTurn?.state === "running" ? null : epochMs(thread.latestTurn?.completedAt),
+          turnStartedAtMs:
             thread.latestTurn?.state === "running"
-              ? null
-              : finishedAtMs(thread.latestTurn?.completedAt),
+              ? epochMs(thread.latestTurn.startedAt ?? thread.latestTurn.requestedAt)
+              : null,
+          modelName: input.modelNameOf?.(thread) ?? null,
           updatedAtMs: Number.isFinite(updatedAtMs) ? updatedAtMs : 0,
         },
       ];

@@ -23,6 +23,7 @@ export const AGENT_ACTIVITY_RECENT_RESULT_MS = 15 * 60_000;
 export const AGENT_ACTIVITY_MAX_ROWS = 5;
 export const AGENT_ACTIVITY_TITLE_MAX = 48;
 export const AGENT_ACTIVITY_PROJECT_MAX = 24;
+export const AGENT_ACTIVITY_MODEL_MAX = 24;
 
 export type AgentActivityPhase =
   | "approval"
@@ -43,6 +44,10 @@ export interface AgentActivityThread extends ThreadAttentionRow {
   readonly live: boolean;
   /** When its latest turn ended, or null while one runs or none ran. */
   readonly finishedAtMs: number | null;
+  /** When its running turn started, or null when none runs (or the client does not know). */
+  readonly turnStartedAtMs?: number | null;
+  /** The model it works with, as people read it; null when unknown. */
+  readonly modelName?: string | null;
   /** Newest first among equals. */
   readonly updatedAtMs: number;
 }
@@ -53,7 +58,13 @@ export interface AgentActivityRow {
   readonly threadId: string;
   readonly title: string;
   readonly projectName: string | null;
+  readonly modelName: string | null;
   readonly phase: AgentActivityPhase;
+  /**
+   * Since when it is in this phase, epoch ms, for an elapsed time: the running turn's start, the
+   * last change of a thread that waits on the person, or when a result came. Null when unknown.
+   */
+  readonly sinceMs: number | null;
 }
 
 export interface AgentActivitySummary {
@@ -100,6 +111,15 @@ function phaseOf(thread: AgentActivityThread, nowMs: number): AgentActivityPhase
 }
 
 const NEEDS_YOU: ReadonlySet<AgentActivityPhase> = new Set(["approval", "input", "plan"]);
+
+function sinceOf(thread: AgentActivityThread, phase: AgentActivityPhase): number | null {
+  const known = (value: number | null | undefined) =>
+    value !== null && value !== undefined && Number.isFinite(value) && value > 0 ? value : null;
+  if (phase === "running" || phase === "connecting") return known(thread.turnStartedAtMs);
+  if (phase === "failed" || phase === "done") return known(thread.finishedAtMs);
+  // Nothing streams while a thread waits on the person: its last change is when it began to wait.
+  return known(thread.updatedAtMs);
+}
 const RUNNING: ReadonlySet<AgentActivityPhase> = new Set(["running", "connecting"]);
 
 /** Attention first (approval, input, plan, failed, done, as the Inbox orders it), then running. */
@@ -153,7 +173,12 @@ export function summarizeAgentActivity(
           thread.projectName === null
             ? null
             : truncate(thread.projectName, AGENT_ACTIVITY_PROJECT_MAX),
+        modelName:
+          thread.modelName === null || thread.modelName === undefined || !thread.modelName.trim()
+            ? null
+            : truncate(thread.modelName, AGENT_ACTIVITY_MODEL_MAX),
         phase,
+        sinceMs: sinceOf(thread, phase),
       },
       candidate:
         reason === null ? null : { key: thread.key, reason, recencyMs: thread.updatedAtMs },

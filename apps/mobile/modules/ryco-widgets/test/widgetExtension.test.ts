@@ -136,7 +136,9 @@ function activityState(title: string): string {
           threadId: id("thread", index),
           title,
           projectName: "🧪".repeat(24),
+          modelName: "m".repeat(24),
           phase: "running" as const,
+          sinceMs: NOW,
         })),
         settled: false,
       },
@@ -280,9 +282,16 @@ describe.skipIf(!swiftcAvailable)("the widget extension's Swift", () => {
       execFileSync("xcrun", ["swiftc", "-o", binary, ...ACTIVITY_STATE_SOURCES], { stdio: "pipe" });
       const longest = activityState("🧪".repeat(48));
       // Slashes cost one byte each in this JSON and two in Swift's.
-      const slashes = activityState("/".repeat(400));
+      const slashes = activityState("/".repeat(320));
       const states = join(directory, "states.json");
-      writeFileSync(states, JSON.stringify([longest, slashes]));
+      // A push update through the Hub: counts only (`LiveActivityRemoteContentState`).
+      const remote = JSON.stringify({
+        v: 1,
+        origin: "remote",
+        counts: { running: 2, needsYou: 1, failed: 0, done: 0 },
+        updatedAt: NOW,
+      });
+      writeFileSync(states, JSON.stringify([longest, slashes, remote]));
       const output = JSON.parse(execFileSync(binary, [states], { encoding: "utf8" })) as {
         readonly maxBytes: number;
         readonly states: ReadonlyArray<Record<string, number>>;
@@ -292,7 +301,9 @@ describe.skipIf(!swiftcAvailable)("the widget extension's Swift", () => {
         expect(Buffer.byteLength(json)).toBeLessThanOrEqual(AGENT_ACTIVITY_STATE_BUDGET_BYTES);
         expect((JSON.parse(json) as { rows: unknown[] }).rows).toHaveLength(5);
       }
-      const [fits, trimmed] = output.states;
+      const [fits, trimmed, pushed] = output.states;
+      // The extension reads the Hub's counts-only state: no rows, the counts kept.
+      expect(pushed).toMatchObject({ rows: 0, fittedRows: 0, fittedRunning: 2 });
       // The app's margin covers Swift's encoding of its longest rows: nothing is trimmed.
       expect(fits).toMatchObject({ rows: 5, fittedRows: 5 });
       expect(fits!.swiftBytes).toBeGreaterThan(Buffer.byteLength(longest));
