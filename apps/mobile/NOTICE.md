@@ -30,6 +30,13 @@ brand marks, cloud plane, showcase rig, and asset-runtime dependencies removed.
 Attribution is kept here (not as in-file headers) so the T3 identifiers do not
 re-enter `src`.
 
+The composer round (2026-11) ports further upstream modules from `pingdotgg/t3code`
+at commit `e455200077`, adapted to Ryco's shared trigger and ranking logic: the
+autocomplete menu (`src/features/threads/composerCommandMenuModel.ts`,
+`useComposerCommandMenu.ts` and `ComposerCommandPopover.tsx`, from upstream's
+`use-composer-command-menu.ts`, `composerSlashSkillSearch.ts` and
+`ComposerCommandPopover.tsx`).
+
 `pingdotgg/t3code` is Copyright (c) 2026 T3 Tools Inc. and licensed under the MIT
 License; that notice is retained below as required. The four vendored native
 modules under `modules/*` carry their own `LICENSE` / `UPSTREAM.md` notices

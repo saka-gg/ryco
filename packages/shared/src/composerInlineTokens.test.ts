@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { collectComposerInlineTokens } from "./composerInlineTokens.ts";
+import {
+  collectComposerInlineTokens,
+  formatComposerMentionSource,
+} from "./composerInlineTokens.ts";
 
 describe("collectComposerInlineTokens", () => {
   it("collects file links, mentions, and skills with source ranges", () => {
@@ -151,5 +154,24 @@ describe("collectComposerInlineTokens", () => {
     expect(collectComposerInlineTokens(" [[".repeat(40_000))).toEqual([]);
     const { user, system } = process.threadCpuUsage(started);
     expect((user + system) / 1_000).toBeLessThan(1_000);
+  });
+});
+
+describe("formatComposerMentionSource", () => {
+  it("writes mentions that read back as the same path", () => {
+    for (const path of [
+      "package.json",
+      "src/a.ts",
+      "docs/my notes.md",
+      'say "hi".md',
+      "C:\\x\\y",
+    ]) {
+      const source = formatComposerMentionSource(path);
+      expect(collectComposerInlineTokens(`${source} `)).toMatchObject([
+        { type: "mention", value: path, source },
+      ]);
+    }
+    expect(formatComposerMentionSource("package.json")).toBe("@package.json");
+    expect(formatComposerMentionSource("src/a.ts")).toBe('@"src/a.ts"');
   });
 });

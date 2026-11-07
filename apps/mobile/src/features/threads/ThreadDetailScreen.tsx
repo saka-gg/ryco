@@ -275,6 +275,7 @@ import { buildModelPickerModel, listModelPickerEntries } from "./modelPickerMode
 import { buildSessionPolicyModel, resolveSessionPolicySelection } from "./sessionPolicyModel";
 import { ThreadActionsSheet } from "./ThreadActionsSheet";
 import { ThreadAgents } from "./ThreadAgentsSheet";
+import { useThreadWorkspaceRoot } from "../files/useThreadWorkspaceRoot";
 import { ThreadComposer } from "./ThreadComposer";
 import { SideChatCard } from "./SideChatCard";
 import { deriveThreadCachedView } from "./threadCachedViewModel";
@@ -851,6 +852,7 @@ export function ThreadDetailScreen(props: {
     () => (thread ? findThreadWorktree(thread, worktrees) : null),
     [thread, worktrees],
   );
+  const workspaceRoot = useThreadWorkspaceRoot({ thread, worktree, project });
   const environmentRow =
     environments.find((environment) => environment.environmentId === environmentId) ?? null;
   const nodeLabel = environmentRow?.label ?? null;
@@ -2958,6 +2960,13 @@ export function ThreadDetailScreen(props: {
             );
         }}
         pendingHandoff={pendingHandoff}
+        commandMenuContext={{
+          environmentId,
+          workspaceRoot,
+          serverConfig,
+          providerInstanceId: selectedModelSelection?.instanceId ?? null,
+          currentThreadId: threadId,
+        }}
         onComposerIntent={() =>
           void prewarmThreadProviderSession({
             environmentId,

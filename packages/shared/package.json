@@ -314,6 +314,10 @@
       "types": "./src/turnFinalization.ts",
       "import": "./src/turnFinalization.ts"
     },
+    "./composerCommandSearch": {
+      "types": "./src/composerCommandSearch.ts",
+      "import": "./src/composerCommandSearch.ts"
+    },
     "./composerInlineTokens": {
       "types": "./src/composerInlineTokens.ts",
       "import": "./src/composerInlineTokens.ts"

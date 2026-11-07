@@ -1,5 +1,7 @@
 import type { ServerProviderSkill } from "@ryco/contracts";
 
+export { formatProviderSkillDisplayName } from "@ryco/shared/composerCommandSearch";
+
 function titleCaseWords(value: string): string {
   return value
     .split(/[\s:_-]+/)
@@ -10,16 +12,6 @@ function titleCaseWords(value: string): string {
 
 function normalizePathSeparators(pathValue: string): string {
   return pathValue.replaceAll("\\", "/");
-}
-
-export function formatProviderSkillDisplayName(
-  skill: Pick<ServerProviderSkill, "name" | "displayName">,
-): string {
-  const displayName = skill.displayName?.trim();
-  if (displayName) {
-    return displayName;
-  }
-  return titleCaseWords(skill.name);
 }
 
 export function formatProviderSkillInstallSource(

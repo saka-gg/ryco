@@ -93,6 +93,18 @@ function collectMentionTokens(text: string): ComposerInlineToken[] {
   return matches;
 }
 
+/**
+ * The `@` mention source for a workspace path that reads back as that path's
+ * chip: bare when it can be, quoted when it has spaces or quotes, or when a
+ * bare `@dir/file` would read as a scoped package (`@scope/name`).
+ */
+export function formatComposerMentionSource(path: string): string {
+  if (/^[^\s@"\\]+$/.test(path) && !SCOPED_PACKAGE_REFERENCE_REGEX.test(path)) {
+    return `@${path}`;
+  }
+  return `@"${path.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+}
+
 export function collectComposerInlineTokens(
   text: string,
   options: CollectComposerInlineTokensOptions = {},

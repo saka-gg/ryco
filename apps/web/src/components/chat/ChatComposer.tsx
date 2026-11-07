@@ -61,6 +61,7 @@ import {
   latestClaudeCacheObservation,
   mergeProjectProviderCommands,
   projectProviderCommandsKey,
+  projectProviderCommandsSupported,
   PROMPT_STASH_MAX_ENTRIES,
   buildPromptHistoryEntries,
   composerTargetKey,
@@ -581,9 +582,6 @@ function useSetPromptFromTraits(input: {
 // Component
 // --------------------------------------------------------------------------
 
-const selectProjectProviderCommandsSupported = (config: ServerConfig | null): boolean =>
-  config?.environment.capabilities.providerProjectCommands === true;
-
 const selectLiveThreadModelSelectionSupported = (config: ServerConfig | null): boolean =>
   config?.environment.capabilities.liveThreadModelSelection === true;
 
@@ -870,7 +868,7 @@ export const ChatComposer = memo(
     // or `$` here (the snapshot was probed outside any project) and merged into its lists.
     const projectCommandsSupported = useEnvironmentServerConfigSelector(
       environmentId,
-      selectProjectProviderCommandsSupported,
+      projectProviderCommandsSupported,
     );
     const projectCommandsKey =
       gitCwd && selectedInstanceId

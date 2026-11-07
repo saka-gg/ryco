@@ -19,6 +19,8 @@ export interface ComposerEditorProps {
   readonly skills?: ReadonlyArray<
     Pick<ServerProviderSkill, "name" | "displayName" | "shortDescription" | "description">
   >;
+  /** Titles of threads the draft mentions (`@thread:<id>`), by thread id, for their chips. */
+  readonly threadTitles?: ReadonlyMap<string, string>;
   readonly selection?: ComposerEditorSelection;
   readonly placeholder?: string;
   readonly autoFocus?: boolean;

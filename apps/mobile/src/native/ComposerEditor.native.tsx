@@ -25,6 +25,7 @@ import {
   type ComposerNativeEventSnapshot,
 } from "./composerEditorRevision";
 import type { ComposerEditorProps, ComposerEditorSelection } from "./ComposerEditor.types";
+import { composerEditorTokenChips, skillLabelsByName } from "./composerEditorTokens";
 
 const NATIVE_MODULE_NAME = "RycoComposerEditor";
 const EMPTY_SKILLS: NonNullable<ComposerEditorProps["skills"]> = [];
@@ -75,11 +76,6 @@ interface NativeComposerEditorProps extends ViewProps {
 
 const NativeView = requireNativeView<NativeComposerEditorProps>(NATIVE_MODULE_NAME);
 
-function basename(path: string): string {
-  const separator = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  return separator >= 0 ? path.slice(separator + 1) : path;
-}
-
 function fileIconUri(path: string): string {
   return Image.resolveAssetSource(markdownFileIconSource(resolveMarkdownFileIcon(path))).uri;
 }
@@ -87,6 +83,7 @@ function fileIconUri(path: string): string {
 export function ComposerEditor({
   ref,
   skills = EMPTY_SKILLS,
+  threadTitles,
   selection,
   style,
   textStyle,
@@ -129,29 +126,16 @@ export function ComposerEditor({
     [],
   );
 
-  const skillLabels = useMemo(
-    () => new Map(skills.map((skill) => [skill.name, skill.displayName?.trim() || skill.name])),
-    [skills],
-  );
+  const skillLabels = useMemo(() => skillLabelsByName(skills), [skills]);
   const tokensJson = useMemo(() => {
     const tokens = collectComposerInlineTokens(props.value, {
       preserveTrailingFrom: confirmedTokensRef.current,
     });
     confirmedTokensRef.current = tokens;
     return JSON.stringify(
-      tokens.map((token) => ({
-        type: token.type,
-        source: token.source,
-        start: token.start,
-        end: token.end,
-        label:
-          token.type === "skill"
-            ? (skillLabels.get(token.value) ?? token.value)
-            : basename(token.value),
-        iconUri: token.type === "mention" ? fileIconUri(token.value) : null,
-      })),
+      composerEditorTokenChips({ tokens, skillLabels, threadTitles, fileIconUri }),
     );
-  }, [props.value, skillLabels]);
+  }, [props.value, skillLabels, threadTitles]);
   const includesNativeEvent = nativeEventSequence !== previousRenderedEventSequenceRef.current;
   const controlledEventCount = includesNativeEvent
     ? resolveComposerControlledEventCount(
