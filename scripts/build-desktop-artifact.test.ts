@@ -179,12 +179,15 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     assert.equal(resolveElectronBuilderDebugEnv("existing", false), "existing");
     assert.equal(
       resolveElectronBuilderDebugEnv(undefined, true),
-      "electron-builder,electron-builder:*",
+      "electron-builder,electron-builder:*,electron-osx-sign*,electron-notarize*",
     );
-    assert.equal(resolveElectronBuilderDebugEnv("", true), "electron-builder,electron-builder:*");
+    assert.equal(
+      resolveElectronBuilderDebugEnv("", true),
+      "electron-builder,electron-builder:*,electron-osx-sign*,electron-notarize*",
+    );
     assert.equal(
       resolveElectronBuilderDebugEnv("existing", true),
-      "existing,electron-builder,electron-builder:*",
+      "existing,electron-builder,electron-builder:*,electron-osx-sign*,electron-notarize*",
     );
   });
 
@@ -589,6 +592,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           identity: "-",
           hardenedRuntime: false,
           strictVerify: true,
+          signIgnore: ["\\.pak$"],
           binaries: [
             "Contents/Resources/ryco-computer-ui-helper",
             "Contents/Resources/cua-driver/cua-driver",
@@ -607,6 +611,21 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           undefined,
         );
         assert.equal((signed.mac as Record<string, unknown>).identity, undefined);
+        const signIgnore = (signed.mac as { signIgnore: string[] }).signIgnore.map(
+          (pattern) => new RegExp(pattern),
+        );
+        const skipped = (file: string) => signIgnore.some((pattern) => pattern.test(file));
+        assert.isTrue(
+          skipped(
+            "Ryco.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Resources/de.lproj/locale.pak",
+          ),
+        );
+        assert.isFalse(
+          skipped(
+            "Ryco.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework",
+          ),
+        );
+        assert.isFalse(skipped("Ryco.app/Contents/Resources/ryco-window-material.node"));
         assert.equal((signed.mac as Record<string, unknown>).hardenedRuntime, undefined);
         assert.equal(signed.forceCodeSigning, true);
       }),

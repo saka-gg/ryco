@@ -196,9 +196,13 @@ export function resolveElectronBuilderDebugEnv(
   verbose: boolean,
 ): string | undefined {
   if (!verbose) return currentDebug;
+  // Code signing and notarization run inside electron-builder but log under
+  // their own namespaces; with them a release log shows how long each takes
+  // (on macOS they are most of the build).
+  const namespaces = "electron-builder,electron-builder:*,electron-osx-sign*,electron-notarize*";
   return currentDebug === undefined || currentDebug === ""
-    ? "electron-builder,electron-builder:*"
-    : `${currentDebug},electron-builder,electron-builder:*`;
+    ? namespaces
+    : `${currentDebug},${namespaces}`;
 }
 
 const spawnAndCollectOutput = Effect.fn("spawnAndCollectOutput")(function* (
@@ -1102,6 +1106,13 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
           }
         : {}),
       strictVerify: true,
+      // @electron/osx-sign runs codesign on every file that looks binary, and
+      // Chromium's .pak resources (one locale.pak per language and gender
+      // variant, each reached again through the framework's Versions/Current
+      // symlinks) were 669 of 771 codesign calls, about 2.5 minutes of a
+      // release. They are data, not code: the framework's own signature seals
+      // them through its CodeResources, so they need no signature of their own.
+      signIgnore: ["\\.pak$"],
       binaries: [
         "Contents/Resources/ryco-computer-ui-helper",
         "Contents/Resources/cua-driver/cua-driver",

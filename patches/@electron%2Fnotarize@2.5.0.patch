@@ -1,0 +1,39 @@
+diff --git a/lib/staple.js b/lib/staple.js
+index 47dbd85b2fc279d999b57f47fb8171e1cc674436..2c930023e36610f8ff4b39a086bb9164cb3ba000 100644
+--- a/lib/staple.js
++++ b/lib/staple.js
+@@ -42,15 +42,26 @@ const spawn_1 = require("./spawn");
+ const d = (0, debug_1.default)('electron-notarize:staple');
+ function stapleApp(opts) {
+     return __awaiter(this, void 0, void 0, function* () {
+-        d('attempting to staple app:', opts.appPath);
+-        const result = yield (0, spawn_1.spawn)('xcrun', ['stapler', 'staple', '-v', path.basename(opts.appPath)], {
+-            cwd: path.dirname(opts.appPath),
+-        });
+-        if (result.code !== 0) {
+-            throw new Error(`Failed to staple your application with code: ${result.code}\n\n${result.output}`);
++        // Ryco: stapling downloads the ticket from Apple's CloudKit endpoint, which
++        // intermittently drops connections from CI runners (code 68) or does not have
++        // a fresh ticket yet (code 65). Notarization has already succeeded by then,
++        // so retry the download instead of failing the whole build.
++        const attempts = 5;
++        for (let attempt = 1;; attempt++) {
++            d('attempting to staple app:', opts.appPath, 'attempt', attempt);
++            const result = yield (0, spawn_1.spawn)('xcrun', ['stapler', 'staple', '-v', path.basename(opts.appPath)], {
++                cwd: path.dirname(opts.appPath),
++            });
++            if (result.code === 0) {
++                d('staple succeeded');
++                return;
++            }
++            if (attempt >= attempts) {
++                throw new Error(`Failed to staple your application with code: ${result.code}\n\n${result.output}`);
++            }
++            console.warn(`Stapling failed with code ${result.code} (attempt ${attempt} of ${attempts}); retrying.`);
++            yield new Promise((resolve) => setTimeout(resolve, attempt * 10000));
+         }
+-        d('staple succeeded');
+-        return;
+     });
+ }
+ exports.stapleApp = stapleApp;
