@@ -216,6 +216,12 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    */
   deviceSettings: Schema.optionalKey(Schema.Boolean),
   /**
+   * The node honours `deviceOnboardingCompleted` and `deviceHosts` (SSH device hosts applied
+   * without a restart), answers `probe-host` and the `detail` device read, and reports each
+   * platform's availability; absent on older servers.
+   */
+  deviceSetup: Schema.optionalKey(Schema.Boolean),
+  /**
    * The node honours `automaticUpdates` (unattended provider CLI updates in a quiet window, and an
    * npm or pnpm CLI service node's own updates) and answers `server.noteClientInteraction`; absent
    * on older servers, which drop the key.

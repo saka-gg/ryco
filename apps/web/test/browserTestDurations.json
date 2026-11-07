@@ -126,7 +126,6 @@
   "src/components/device/SimulatorPanel.browser.tsx": 1.22,
   "src/components/device/SimulatorPanel.preview.browser.tsx": 2.23,
   "src/components/device/SimulatorPanel.testing.browser.tsx": 1.39,
-  "src/components/device/SimulatorTestingDrawer.browser.tsx": 1.07,
   "src/components/hostedHub/E2eeAccountGrantIsolation.browser.tsx": 0.41,
   "src/components/hostedHub/E2eeCodecParity.browser.tsx": 0.27,
   "src/components/hostedHub/E2eeCrossRuntimeCoverage.browser.tsx": 0.2,

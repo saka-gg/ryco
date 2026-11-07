@@ -20,6 +20,7 @@ import {
   TrimmedString,
   rejectExcessProperties,
 } from "./baseSchemas.ts";
+import { DEVICE_SSH_HOST_LIMIT, DeviceSshHost } from "./device.ts";
 import { EditorId } from "./editor.ts";
 import { EnvironmentMachineKind, EnvironmentMachineHint } from "./environment.ts";
 import {
@@ -975,6 +976,16 @@ export const ServerSettings = Schema.Struct({
   // Agent Control's settings allowlist (an agent must not grant itself device access).
   devicesEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   agentDevicesEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  // The device pane's first-run setup (consent, platform checks, agent access) is done or
+  // skipped. Node-scoped, like the two switches it sets.
+  deviceOnboardingCompleted: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // Macs whose simulators this node drives over SSH, edited in Settings and applied without a
+  // restart. Hosts from RYCO_DEVICE_HOSTS_FILE are read as well, read-only. Node-scoped and
+  // owner-only; never part of Agent Control's settings allowlist (an agent must not point the
+  // node at another machine).
+  deviceHosts: Schema.Array(DeviceSshHost)
+    .check(Schema.isMaxLength(DEVICE_SSH_HOST_LIMIT))
+    .pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   // Usage limits: when a provider usage limit stops a thread, resume it at the reported
   // reset and/or snooze it until then. Both off by default; limits are account-wide.
   autoResumeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
@@ -1206,6 +1217,10 @@ export const ServerSettingsPatch = Schema.Struct({
   continueThreadsAfterRestart: Schema.optionalKey(Schema.Boolean),
   devicesEnabled: Schema.optionalKey(Schema.Boolean),
   agentDevicesEnabled: Schema.optionalKey(Schema.Boolean),
+  deviceOnboardingCompleted: Schema.optionalKey(Schema.Boolean),
+  deviceHosts: Schema.optionalKey(
+    Schema.Array(DeviceSshHost).check(Schema.isMaxLength(DEVICE_SSH_HOST_LIMIT)),
+  ),
   autoResumeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   snoozeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   storageRetention: Schema.optionalKey(StorageRetentionPolicyInput),

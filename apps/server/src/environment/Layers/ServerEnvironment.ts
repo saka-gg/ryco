@@ -142,6 +142,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       workingTreeComparison: true,
       agentProcessPriority: true,
       deviceSettings: true,
+      deviceSetup: true,
       automaticUpdates: true,
       ...(desktopAppUpdates === null ? {} : { desktopAppUpdates }),
       usagePriceOverrides: true,

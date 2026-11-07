@@ -2,6 +2,7 @@ import { Schema } from "effect";
 import { useServerConfig } from "../../rpc/serverState";
 import { ProjectDefaultsSection } from "./ProjectDefaultsSection";
 import { StorageSettings } from "./StorageSettings";
+import { DeviceHostsSettings } from "./DeviceHostsSettings";
 import { DeviceIdentitySettings } from "./DeviceIdentitySettings";
 import { SessionImportSettings } from "./SessionImportSettings";
 import { useAppPreferencesLabel } from "../../deviceName";
@@ -510,42 +511,47 @@ export function SimulatorSettings() {
       />
     ) : null;
   return (
-    <SettingsSection title="Simulators" owner="node">
-      <SettingsRow
-        title="Use simulators"
-        description="Run iOS Simulators and Android Emulators from Ryco: the device pane in chats, and the device tools agents use. Off stops new boots and attaches; running devices keep running until you shut them down."
-        owner="node"
-        scope={nodeScopeLabel}
-        status={status}
-        resetAction={resetFor("devicesEnabled", "use simulators")}
-        control={
-          <Switch
-            checked={settings.devicesEnabled}
-            disabled={disabled}
-            onCheckedChange={(checked) => updateSettings({ devicesEnabled: Boolean(checked) })}
-            aria-label="Use simulators"
-          />
-        }
-      />
-      <SettingsRow
-        title="Agents can use simulators"
-        description="Give agents Ryco's device tools to read the screen, tap, type and launch apps on simulators. Applies to agent sessions started after the change; a running session is refused at its next device call once this is off."
-        owner="node"
-        scope={nodeScopeLabel}
-        status={
-          status ?? (settings.devicesEnabled ? undefined : "Off while Use simulators is off.")
-        }
-        resetAction={resetFor("agentDevicesEnabled", "agents can use simulators")}
-        control={
-          <Switch
-            checked={settings.devicesEnabled && settings.agentDevicesEnabled}
-            disabled={disabled || !settings.devicesEnabled}
-            onCheckedChange={(checked) => updateSettings({ agentDevicesEnabled: Boolean(checked) })}
-            aria-label="Agents can use simulators"
-          />
-        }
-      />
-    </SettingsSection>
+    <>
+      <SettingsSection title="Simulators" owner="node">
+        <SettingsRow
+          title="Use simulators"
+          description="Run iOS Simulators and Android Emulators from Ryco: the device pane in chats, and the device tools agents use. Off stops new boots and attaches; running devices keep running until you shut them down."
+          owner="node"
+          scope={nodeScopeLabel}
+          status={status}
+          resetAction={resetFor("devicesEnabled", "use simulators")}
+          control={
+            <Switch
+              checked={settings.devicesEnabled}
+              disabled={disabled}
+              onCheckedChange={(checked) => updateSettings({ devicesEnabled: Boolean(checked) })}
+              aria-label="Use simulators"
+            />
+          }
+        />
+        <SettingsRow
+          title="Agents can use simulators"
+          description="Give agents Ryco's device tools to read the screen, tap, type and launch apps on simulators. Applies to agent sessions started after the change; a running session is refused at its next device call once this is off."
+          owner="node"
+          scope={nodeScopeLabel}
+          status={
+            status ?? (settings.devicesEnabled ? undefined : "Off while Use simulators is off.")
+          }
+          resetAction={resetFor("agentDevicesEnabled", "agents can use simulators")}
+          control={
+            <Switch
+              checked={settings.devicesEnabled && settings.agentDevicesEnabled}
+              disabled={disabled || !settings.devicesEnabled}
+              onCheckedChange={(checked) =>
+                updateSettings({ agentDevicesEnabled: Boolean(checked) })
+              }
+              aria-label="Agents can use simulators"
+            />
+          }
+        />
+      </SettingsSection>
+      <DeviceHostsSettings />
+    </>
   );
 }
 

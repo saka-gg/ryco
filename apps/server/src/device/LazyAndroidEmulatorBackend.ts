@@ -51,6 +51,7 @@ export class LazyAndroidEmulatorBackend implements DeviceBackend {
   readonly install = this.forward("install");
   readonly launch = this.forward("launch");
   readonly testing = this.forward("testing");
+  readonly detail = this.forward("detail");
   readonly readLogs = this.forward("readLogs");
   readonly openUrl = this.forward("openUrl");
   readonly tap = this.forward("tap");

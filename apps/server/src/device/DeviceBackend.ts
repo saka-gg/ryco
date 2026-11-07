@@ -14,7 +14,9 @@ export type DeviceTouchPhase = "down" | "move" | "up";
  */
 import type {
   DeviceAvailability,
+  DeviceDetail,
   DeviceGeometry,
+  DevicePlatformAvailability,
   DeviceHostSummary,
   DeviceDescribeUiResult,
   DeviceDescriptor,
@@ -121,6 +123,9 @@ export interface DeviceLogResult {
   readonly note: string;
 }
 
+/** A device's read-back as a backend reports it; the manager adds identity and time. */
+export type DeviceBackendDetail = Omit<DeviceDetail, "udid" | "platform" | "capturedAt">;
+
 export interface DeviceDiscovery {
   readonly devices: readonly DeviceDescriptor[];
   /** Fresh, complete discovery for this target's host, including shutdown devices. */
@@ -140,6 +145,22 @@ export interface DeviceBackend {
    * to call on every list; backends cache their own probes.
    */
   availability(): Promise<DeviceAvailability>;
+
+  /**
+   * Each platform's availability on its own, where the backend knows more
+   * than one. Absent: `availability` is the only answer.
+   */
+  platformAvailability?(): Promise<readonly DevicePlatformAvailability[]>;
+
+  /**
+   * The Tools drawer's read-back: settings as the device reports them, its
+   * foreground app and that app's permissions. Local devices only; never
+   * boots, attaches or builds anything.
+   */
+  detail?(
+    udid: string,
+    options?: { readonly bundleId?: string | undefined },
+  ): Promise<DeviceBackendDetail>;
 
   /**
    * Discovered devices. `bootSource` is always reported as `"user"` here: the

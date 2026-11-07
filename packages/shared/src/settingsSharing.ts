@@ -45,6 +45,8 @@ export const SERVER_SETTING_SHARING = {
   // The simulators and emulators of this machine.
   devicesEnabled: "device-only",
   agentDevicesEnabled: "device-only",
+  deviceOnboardingCompleted: "device-only",
+  deviceHosts: "device-only",
   autoResumeLimitedThreads: "shareable",
   snoozeLimitedThreads: "shareable",
   storageRetention: "shareable",

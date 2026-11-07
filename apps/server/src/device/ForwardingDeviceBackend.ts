@@ -23,6 +23,8 @@ export type DeviceCall = Exclude<
   | "suspendTesting"
   // Local simulators only; kept out of the device host protocol.
   | "readLogs"
+  | "detail"
+  | "platformAvailability"
   // Optional, synchronous or local-only: a remote host keeps the defaults.
   | "previewMode"
   | "uprightFrames"

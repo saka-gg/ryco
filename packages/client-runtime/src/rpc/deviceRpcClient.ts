@@ -6,6 +6,10 @@ import {
   type DeviceDescribeUiInput,
   type DeviceDescribeUiResult,
   type DeviceDetachInput,
+  type DeviceDetail,
+  type DeviceDetailInput,
+  type DeviceHostProbeInput,
+  type DeviceHostProbeResult,
   type DeviceEvent,
   type DeviceInstallAppInput,
   type DeviceInstallAppResult,
@@ -71,6 +75,10 @@ export interface DeviceRpcClient {
   readonly getThreadState: (input: DeviceThreadInput) => Promise<ThreadDeviceState>;
   readonly screenshot: (input: DeviceScreenshotInput) => Promise<DeviceScreenshotResult>;
   readonly describeUi: (input: DeviceDescribeUiInput) => Promise<DeviceDescribeUiResult>;
+  /** Settings as the device reports them now (the Tools drawer's read-back). */
+  readonly detail: (input: DeviceDetailInput) => Promise<DeviceDetail>;
+  /** Owner-only: Test connection for an SSH device host. */
+  readonly probeHost: (input: DeviceHostProbeInput) => Promise<DeviceHostProbeResult>;
   readonly boot: (input: DeviceBootInput) => Promise<DeviceBootResult>;
   readonly shutdown: (input: DeviceShutdownInput) => Promise<void>;
   readonly attach: (input: DeviceAttachInput) => Promise<ThreadDeviceState>;
@@ -336,6 +344,22 @@ export function createDeviceRpcClient(
       return response.type === "describe-ui"
         ? response.result
         : unexpectedResponse("describe-ui", response.type);
+    },
+    detail: async (input) => {
+      const response = await transport.request((client) =>
+        client[DEVICE_WS_METHODS.read]({ type: "detail", input }),
+      );
+      return response.type === "detail"
+        ? response.result
+        : unexpectedResponse("detail", response.type);
+    },
+    probeHost: async (input) => {
+      const response = await transport.request((client) =>
+        client[DEVICE_WS_METHODS.lifecycle]({ type: "probe-host", input }),
+      );
+      return response.type === "probe-host"
+        ? response.result
+        : unexpectedResponse("probe-host", response.type);
     },
     boot: async (input) => {
       const response = await transport.request((client) =>

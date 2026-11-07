@@ -1,7 +1,13 @@
 /** Routes platform operations through one manager, boot budget and authorization surface. */
-import type { DeviceAvailability, DeviceDescriptor } from "@ryco/contracts";
+import type {
+  DeviceAvailability,
+  DeviceDescriptor,
+  DevicePlatformAvailability,
+} from "@ryco/contracts";
 import {
+  DeviceBackendError,
   type DeviceBackend,
+  type DeviceBackendDetail,
   type DeviceDiscovery,
   type DeviceListOptions,
 } from "./DeviceBackend.ts";
@@ -36,6 +42,26 @@ export class PlatformDeviceBackend implements DeviceBackend {
     const steps = states.flatMap((state) => (state.kind === "setup-required" ? state.steps : []));
     if (steps.length) return { kind: "setup-required", steps };
     return states[0]!;
+  }
+
+  async platformAvailability(): Promise<readonly DevicePlatformAvailability[]> {
+    const [ios, android] = await Promise.all([
+      this.ios.availability(),
+      this.android.availability(),
+    ]);
+    return [
+      { platform: "ios-simulator", availability: ios },
+      { platform: "android-emulator", availability: android },
+    ];
+  }
+
+  detail(udid: string, options?: { readonly bundleId?: string | undefined }) {
+    const backend = this.target(udid);
+    if (!backend.detail)
+      return Promise.reject<DeviceBackendDetail>(
+        new DeviceBackendError("This device cannot report its settings."),
+      );
+    return backend.detail(udid, options);
   }
 
   async discoverDevices(): Promise<DeviceDiscovery> {

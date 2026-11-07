@@ -7,6 +7,7 @@
  *
  * @module device/android/androidRuntime
  */
+export * from "./androidDetail.ts";
 export * from "./androidLogs.ts";
 export * from "./androidTesting.ts";
 export * from "./androidUiHelper.ts";

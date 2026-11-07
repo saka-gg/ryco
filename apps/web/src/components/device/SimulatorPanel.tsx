@@ -5,6 +5,7 @@ import { DEVICE_WS_METHODS } from "@ryco/contracts";
 import type {
   DeviceAvailability,
   DeviceDescriptor,
+  DeviceUiFrame,
   EnvironmentId,
   ThreadId,
 } from "@ryco/contracts";
@@ -14,6 +15,7 @@ import {
   PictureInPicture2Icon,
   PlayIcon,
   PowerIcon,
+  SlidersHorizontalIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
@@ -38,7 +40,8 @@ import { DevicePicker } from "./DevicePicker";
 import { startingBannerText } from "./devicePicker.logic";
 import { Control, errorMessage } from "./deviceControls";
 import { DeviceViewer } from "./DeviceViewer";
-import { SimulatorTestingDrawer } from "./SimulatorTestingDrawer";
+import { DeviceToolsDrawer, type DeviceToolsApi } from "./DeviceToolsDrawer";
+import { NodeDeviceSetup, TurnOnDevicesButton, useNodeDeviceSettings } from "./NodeDeviceSetup";
 import { threadAttachments } from "./threadAttachments";
 import { useDeviceRuntime } from "./useDeviceRuntime";
 
@@ -168,6 +171,9 @@ export default function SimulatorPanel(props: {
     floatingDeviceUdid(state.byThreadKey, threadKey),
   );
   const [busy, setBusy] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const [uiFrames, setUiFrames] = useState<readonly DeviceUiFrame[] | null>(null);
+  const nodeDevices = useNodeDeviceSettings(environmentId);
   const [pendingUdid, setPendingUdid] = useState<string | null>(null);
   const [bootLimit, setBootLimit] = useState<{
     readonly requested: DeviceDescriptor;
@@ -328,6 +334,21 @@ export default function SimulatorPanel(props: {
     );
   }
 
+  // First run: consent, each platform's checks and agent access, once per node.
+  // A thread that already shows devices goes on showing them.
+  if (nodeDevices.showSetup && deviceTabs.tabs.every((tab) => tab.udid === null)) {
+    return <NodeDeviceSetup state={nodeDevices} list={() => api.list({ includeShutdown: true })} />;
+  }
+  if (nodeDevices.devicesOff) {
+    return (
+      <PanelMessage
+        title="Simulators are off on this node"
+        detail="Turn on Use simulators to open devices here and give agents the device tools."
+        action={nodeDevices.canManage ? <TurnOnDevicesButton state={nodeDevices} /> : undefined}
+      />
+    );
+  }
+
   const availability = environmentState?.availability ?? null;
   // A helper that stops answering for a moment (the host probe times out while
   // a simulator boots) must not blank a device that is already on screen.
@@ -398,30 +419,21 @@ export default function SimulatorPanel(props: {
     );
   } else {
     const thread = { environmentId, threadId };
+    const remote = tabDevice.host?.transport === "ssh";
+    const detail = api.detail;
+    const toolsApi: DeviceToolsApi | null = detail
+      ? {
+          detail,
+          testing: (input) => api.testing(input),
+          launchApp: (input) => api.launchApp(input),
+          openUrl: (input) => api.openUrl(input),
+          describeUi: (input) => api.describeUi(input),
+          ...(api.setOrientation ? { setOrientation: api.setOrientation } : {}),
+        }
+      : null;
+    const showTools = toolsOpen && tabDevice.state === "booted";
     body = (
       <>
-        {tabDevice.host?.transport === "ssh" ? (
-          <div
-            role="status"
-            className="border-b border-border/60 px-3 py-2 text-xs text-muted-foreground"
-          >
-            Simulator testing controls are unavailable on SSH hosts.
-          </div>
-        ) : tabDevice.platform === "ios-simulator" ? (
-          <SimulatorTestingDrawer
-            key={`${threadKey}:${tabDevice.udid}:${generation}`}
-            udid={tabDevice.udid}
-            disabled={
-              busy ||
-              environmentState?.status !== "connected" ||
-              !testingMutationReady ||
-              tabDevice.state !== "booted" ||
-              tabAttachment === null ||
-              tabAttachment.attachPhase !== null
-            }
-            testing={(input) => api.testing(input)}
-          />
-        ) : null}
         <DeviceViewer
           key={tabDevice.udid}
           environmentId={environmentId}
@@ -430,8 +442,16 @@ export default function SimulatorPanel(props: {
           attachment={tabAttachment}
           variant="panel"
           generation={generation}
+          uiFrames={showTools ? uiFrames : null}
           rail={
             <>
+              <Control
+                icon={SlidersHorizontalIcon}
+                label={toolsOpen ? "Hide tools" : "Tools"}
+                active={toolsOpen}
+                disabled={tabDevice.state !== "booted"}
+                onClick={() => setToolsOpen((open) => !open)}
+              />
               <Control
                 icon={PictureInPicture2Icon}
                 label="Float device over chat"
@@ -450,7 +470,30 @@ export default function SimulatorPanel(props: {
               />
             </>
           }
-        />
+        >
+          {showTools ? (
+            remote ? (
+              <ToolsNote text="Tools are unavailable for devices on SSH hosts." />
+            ) : toolsApi ? (
+              <DeviceToolsDrawer
+                key={`${threadKey}:${tabDevice.udid}:${generation}`}
+                udid={tabDevice.udid}
+                platform={tabDevice.platform}
+                canChange={
+                  !busy &&
+                  environmentState?.status === "connected" &&
+                  testingMutationReady &&
+                  tabAttachment !== null &&
+                  tabAttachment.attachPhase === null
+                }
+                api={toolsApi}
+                onFramesChange={setUiFrames}
+              />
+            ) : (
+              <ToolsNote text="Update this node to use the Tools drawer." />
+            )
+          ) : null}
+        </DeviceViewer>
       </>
     );
   }
@@ -526,6 +569,17 @@ export default function SimulatorPanel(props: {
           </div>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function ToolsNote(props: { readonly text: string }) {
+  return (
+    <div
+      role="status"
+      className="border-t border-border/60 px-3 py-2 text-xs text-muted-foreground"
+    >
+      {props.text}
     </div>
   );
 }

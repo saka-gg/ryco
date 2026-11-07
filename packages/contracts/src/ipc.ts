@@ -358,6 +358,10 @@ import type {
   DeviceTestingInput,
   DevicePressButtonInput,
   DeviceSetOrientationInput,
+  DeviceDetail,
+  DeviceDetailInput,
+  DeviceHostProbeInput,
+  DeviceHostProbeResult,
   DevicePasteInput,
   DeviceScreenshotInput,
   DeviceScreenshotResult,
@@ -1591,6 +1595,10 @@ export interface EnvironmentApi {
     getThreadState: (input: DeviceThreadInput) => Promise<ThreadDeviceState>;
     screenshot: (input: DeviceScreenshotInput) => Promise<DeviceScreenshotResult>;
     describeUi: (input: DeviceDescribeUiInput) => Promise<DeviceDescribeUiResult>;
+    /** Only for nodes that advertise `deviceSetup`. */
+    detail?: (input: DeviceDetailInput) => Promise<DeviceDetail>;
+    /** Owner-only; only for nodes that advertise `deviceSetup`. */
+    probeHost?: (input: DeviceHostProbeInput) => Promise<DeviceHostProbeResult>;
     boot: (input: DeviceBootInput) => Promise<DeviceBootResult>;
     shutdown: (input: DeviceShutdownInput) => Promise<void>;
     attach: (input: DeviceAttachInput) => Promise<ThreadDeviceState>;

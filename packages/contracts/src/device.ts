@@ -101,6 +101,8 @@ export const DeviceHostSummary = Schema.Struct({
     Schema.Literals(["unknown", "available", "setup-required", "disconnected"]),
   ),
   availability: Schema.optional(Schema.String.check(Schema.isMaxLength(2048))),
+  /** Where an SSH host is configured: Settings, or the read-only RYCO_DEVICE_HOSTS_FILE. */
+  source: Schema.optional(Schema.Literals(["settings", "file"])),
 });
 export type DeviceHostSummary = typeof DeviceHostSummary.Type;
 
@@ -187,6 +189,8 @@ export const DeviceSetupStepId = Schema.Literals([
   "accept-xcode-license",
   "select-xcode-command-line-tools",
   "install-ios-runtime",
+  /** A runtime is installed but no simulator uses it. */
+  "create-ios-simulator",
   "build-device-helper",
 ]);
 export type DeviceSetupStepId = typeof DeviceSetupStepId.Type;
@@ -285,6 +289,16 @@ export const DeviceAvailability = Schema.Union([
   }),
 ]);
 export type DeviceAvailability = typeof DeviceAvailability.Type;
+
+/**
+ * One platform's availability on its own. A node reports both platforms, so a
+ * working iOS setup does not hide what Android still needs, or the reverse.
+ */
+export const DevicePlatformAvailability = Schema.Struct({
+  platform: DevicePlatform,
+  availability: DeviceAvailability,
+});
+export type DevicePlatformAvailability = typeof DevicePlatformAvailability.Type;
 
 /** The capabilities each device operation depends on, for precise failures. */
 export const DEVICE_CAPABILITY_LABELS: Record<DeviceCapabilityId, string> = {
@@ -399,6 +413,11 @@ export const DeviceListResult = Schema.Struct({
   hosts: Schema.optional(Schema.Array(DeviceHostSummary).check(Schema.isMaxLength(17))),
   devices: Schema.Array(DeviceDescriptor).check(Schema.isMaxLength(256)),
   availability: DeviceAvailability,
+  /**
+   * This node's platforms, each on its own (`availability` is the combined
+   * answer). Absent on older servers.
+   */
+  platforms: Schema.optional(Schema.Array(DevicePlatformAvailability).check(Schema.isMaxLength(2))),
 });
 export type DeviceListResult = typeof DeviceListResult.Type;
 
@@ -623,6 +642,28 @@ export type DeviceTestingPermission = typeof DeviceTestingPermission.Type;
 const DeviceTestingBundleId = DeviceBundleId.check(
   Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
 );
+
+/** Accessibility switches the Tools drawer turns on and off. */
+export const DeviceAccessibilitySetting = Schema.Literals([
+  "reduce-motion",
+  "increase-contrast",
+  "reduce-transparency",
+  "show-borders",
+  "voiceover",
+]);
+export type DeviceAccessibilitySetting = typeof DeviceAccessibilitySetting.Type;
+
+export const DeviceColorFilter = Schema.Literals([
+  "none",
+  "grayscale",
+  "red-green",
+  "green-red",
+  "blue-yellow",
+]);
+export type DeviceColorFilter = typeof DeviceColorFilter.Type;
+
+export const DeviceLiquidGlass = Schema.Literals(["clear", "tinted"]);
+export type DeviceLiquidGlass = typeof DeviceLiquidGlass.Type;
 export const DeviceTestingAction = Schema.Union([
   Schema.Struct({ type: Schema.Literal("appearance"), value: Schema.Literals(["light", "dark"]) }),
   Schema.Struct({ type: Schema.Literal("text-size"), value: DeviceTestingTextSize }),
@@ -655,6 +696,18 @@ export const DeviceTestingAction = Schema.Union([
   }),
   /** Android emulators: Wi-Fi and mobile data together, on or off. */
   Schema.Struct({ type: Schema.Literal("network"), value: Schema.Literals(["on", "off"]) }),
+  /** One accessibility switch. Android has Reduce Motion only (animation scales). */
+  Schema.Struct({
+    type: Schema.Literal("accessibility"),
+    setting: DeviceAccessibilitySetting,
+    value: Schema.Boolean,
+  }),
+  /** iOS 26 and later: Liquid Glass clear or tinted. */
+  Schema.Struct({ type: Schema.Literal("liquid-glass"), value: DeviceLiquidGlass }),
+  /** iOS: the Color Filters accessibility setting. */
+  Schema.Struct({ type: Schema.Literal("color-filter"), value: DeviceColorFilter }),
+  /** Stop a running app. */
+  Schema.Struct({ type: Schema.Literal("terminate-app"), bundleId: DeviceTestingBundleId }),
 ]);
 export type DeviceTestingAction = typeof DeviceTestingAction.Type;
 export const DeviceTestingInput = Schema.Struct({
@@ -662,6 +715,144 @@ export const DeviceTestingInput = Schema.Struct({
   action: DeviceTestingAction,
 });
 export type DeviceTestingInput = typeof DeviceTestingInput.Type;
+
+// ── Device detail (the Tools drawer's read-back) ─────────────────────
+
+/** The Tools drawer controls; a device's detail lists the ones it supports. */
+export const DeviceToolControl = Schema.Literals([
+  "foreground-app",
+  "terminate-app",
+  "launch-app",
+  "open-url",
+  "appearance",
+  "text-size",
+  "orientation",
+  "liquid-glass",
+  "color-filter",
+  "network",
+  "reduce-motion",
+  "increase-contrast",
+  "reduce-transparency",
+  "show-borders",
+  "voiceover",
+  "location",
+  "clear-location",
+  "permission",
+  "push",
+  "presets",
+]);
+export type DeviceToolControl = typeof DeviceToolControl.Type;
+
+export const DeviceDetailInput = Schema.Struct({
+  udid: DeviceUdid,
+  /** Whose permissions to read; the foreground app when absent. */
+  bundleId: Schema.optional(DeviceTestingBundleId),
+});
+export type DeviceDetailInput = typeof DeviceDetailInput.Type;
+
+/**
+ * Settings as the device reports them now. A key is absent when the device
+ * could not be read for it, never filled in from what Ryco last applied.
+ */
+export const DeviceDetailSettings = Schema.Struct({
+  appearance: Schema.optional(Schema.Literals(["light", "dark"])),
+  /** iOS: the content size category. Android: the nearest one to `fontScale`. */
+  textSize: Schema.optional(DeviceTestingTextSize),
+  /** Android's font scale, e.g. 1.15. */
+  fontScale: Schema.optional(Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: 10 }))),
+  orientation: Schema.optional(DeviceOrientation),
+  liquidGlass: Schema.optional(DeviceLiquidGlass),
+  colorFilter: Schema.optional(DeviceColorFilter),
+  network: Schema.optional(Schema.Literals(["on", "off"])),
+  reduceMotion: Schema.optional(Schema.Boolean),
+  increaseContrast: Schema.optional(Schema.Boolean),
+  reduceTransparency: Schema.optional(Schema.Boolean),
+  showBorders: Schema.optional(Schema.Boolean),
+  voiceOver: Schema.optional(Schema.Boolean),
+  /**
+   * The simulated location. `device` was read from the device; `applied` is
+   * the last one Ryco set, for a simulator that cannot report it. Null: none.
+   */
+  location: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        latitude: Schema.Finite.check(Schema.isBetween({ minimum: -90, maximum: 90 })),
+        longitude: Schema.Finite.check(Schema.isBetween({ minimum: -180, maximum: 180 })),
+        source: Schema.Literals(["device", "applied"]),
+      }),
+    ),
+  ),
+});
+export type DeviceDetailSettings = typeof DeviceDetailSettings.Type;
+
+export const DevicePermissionState = Schema.Literals([
+  "granted",
+  "denied",
+  "limited",
+  "not-determined",
+]);
+export type DevicePermissionState = typeof DevicePermissionState.Type;
+
+export const DeviceDetail = Schema.Struct({
+  udid: DeviceUdid,
+  platform: DevicePlatform,
+  capturedAt: IsoDateTime,
+  /** The app in front; null on the home screen; absent when it cannot be told. */
+  foregroundApp: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        bundleId: DeviceBundleId,
+        name: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
+      }),
+    ),
+  ),
+  settings: DeviceDetailSettings,
+  /** Permission states of `bundleId` (the input's, else the foreground app's). */
+  permissions: Schema.optional(
+    Schema.Struct({
+      bundleId: DeviceBundleId,
+      states: Schema.Array(
+        Schema.Struct({ service: DeviceTestingPermission, state: DevicePermissionState }),
+      ).check(Schema.isMaxLength(16)),
+    }),
+  ),
+  /** The drawer controls this device supports. */
+  controls: Schema.Array(DeviceToolControl).check(Schema.isMaxLength(32)),
+});
+export type DeviceDetail = typeof DeviceDetail.Type;
+
+// ── SSH device hosts ─────────────────────────────────────────────────
+
+/** A Mac reached over SSH, as the node owner configured it. */
+export const DeviceSshHost = Schema.Struct({
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+  /** An SSH config alias or `user@hostname`. */
+  target: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_][A-Za-z0-9_.@:-]{0,255}$/)),
+  port: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 }))),
+  /** Absolute path on the coding node. */
+  identityFile: Schema.optional(Schema.String.check(Schema.isPattern(/^\/[^\0\r\n]{1,1023}$/))),
+  /** Absolute path of `ryco` on the Mac; no shell command strings. */
+  executable: Schema.String.check(Schema.isPattern(/^\/[^\0\r\n]{1,1023}$/)),
+});
+export type DeviceSshHost = typeof DeviceSshHost.Type;
+
+export const DEVICE_SSH_HOST_LIMIT = 16;
+
+export const DeviceHostProbeInput = DeviceSshHost;
+export type DeviceHostProbeInput = typeof DeviceHostProbeInput.Type;
+
+/**
+ * What Test connection found. `stage` names the first check that failed, or
+ * `ok` when SSH connected and the Mac runs this node's Ryco version.
+ */
+export const DeviceHostProbeResult = Schema.Struct({
+  stage: Schema.Literals(["ssh", "executable", "version", "ok"]),
+  message: TrimmedNonEmptyString.check(Schema.isMaxLength(DEVICE_MESSAGE_MAX_LENGTH)),
+  localVersion: TrimmedNonEmptyString.check(Schema.isMaxLength(64)),
+  remoteVersion: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(64))),
+  elapsedMs: NonNegativeInt,
+});
+export type DeviceHostProbeResult = typeof DeviceHostProbeResult.Type;
 
 // ── Read tools ───────────────────────────────────────────────────────
 
@@ -833,6 +1024,7 @@ export const DeviceReadRequest = Schema.Union([
   Schema.Struct({ type: Schema.Literal("get-thread-state"), input: DeviceThreadInput }),
   Schema.Struct({ type: Schema.Literal("screenshot"), input: DeviceScreenshotInput }),
   Schema.Struct({ type: Schema.Literal("describe-ui"), input: DeviceDescribeUiInput }),
+  Schema.Struct({ type: Schema.Literal("detail"), input: DeviceDetailInput }),
 ]);
 export type DeviceReadRequest = typeof DeviceReadRequest.Type;
 
@@ -841,6 +1033,7 @@ export const DeviceReadResponse = Schema.Union([
   Schema.Struct({ type: Schema.Literal("get-thread-state"), result: ThreadDeviceState }),
   Schema.Struct({ type: Schema.Literal("screenshot"), result: DeviceScreenshotResult }),
   Schema.Struct({ type: Schema.Literal("describe-ui"), result: DeviceDescribeUiResult }),
+  Schema.Struct({ type: Schema.Literal("detail"), result: DeviceDetail }),
 ]);
 export type DeviceReadResponse = typeof DeviceReadResponse.Type;
 
@@ -849,6 +1042,8 @@ export const DeviceLifecycleRequest = Schema.Union([
   Schema.Struct({ type: Schema.Literal("shutdown"), input: DeviceShutdownInput }),
   Schema.Struct({ type: Schema.Literal("attach"), input: DeviceAttachInput }),
   Schema.Struct({ type: Schema.Literal("detach"), input: DeviceDetachInput }),
+  /** Owner-only: it opens an SSH connection to the given destination. */
+  Schema.Struct({ type: Schema.Literal("probe-host"), input: DeviceHostProbeInput }),
 ]);
 export type DeviceLifecycleRequest = typeof DeviceLifecycleRequest.Type;
 
@@ -857,6 +1052,7 @@ export const DeviceLifecycleResponse = Schema.Union([
   Schema.Struct({ type: Schema.Literal("shutdown") }),
   Schema.Struct({ type: Schema.Literal("attach"), result: ThreadDeviceState }),
   Schema.Struct({ type: Schema.Literal("detach"), result: ThreadDeviceState }),
+  Schema.Struct({ type: Schema.Literal("probe-host"), result: DeviceHostProbeResult }),
 ]);
 export type DeviceLifecycleResponse = typeof DeviceLifecycleResponse.Type;
 

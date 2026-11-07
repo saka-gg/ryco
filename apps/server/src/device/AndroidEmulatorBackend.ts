@@ -37,6 +37,7 @@ import type {
 import {
   DeviceBackendError,
   type DeviceBackend,
+  type DeviceBackendDetail,
   type DeviceFrameListener,
   type DeviceKeyEvent,
   type DeviceListOptions,
@@ -53,6 +54,7 @@ import {
 } from "./android/androidSdk.ts";
 import type * as AndroidRuntimeModule from "./android/androidRuntime.ts";
 import type {
+  AndroidDetailOutputs,
   AndroidUiHelperBuild,
   AndroidUiHelperSession,
   ScrcpyHost,
@@ -270,6 +272,11 @@ export class AndroidEmulatorBackend implements DeviceBackend {
   private readonly env: NodeJS.ProcessEnv;
   private readonly geometries = new Map<string, DeviceGeometry>();
   private readonly previews = new Map<string, "video" | "screenshots">();
+  /** The last location Ryco set per emulator; see `testing`. */
+  private readonly appliedLocations = new Map<
+    string,
+    { readonly latitude: number; readonly longitude: number }
+  >();
   private readonly runtimes = new Map<string, DeviceRuntime>();
   private readonly boots = new Map<string, Promise<DeviceDescriptor>>();
   private readonly starting = new Set<{ stop(): void }>();
@@ -944,15 +951,16 @@ export class AndroidEmulatorBackend implements DeviceBackend {
 
   async pressButton(udid: string, button: DeviceHardwareButton): Promise<void> {
     if (button === "rotate") {
-      await this.input(udid, async (runtime, control, lib) => {
-        if (control) {
-          control.send(lib.encodeEmpty(lib.ScrcpyControlType.rotateDevice));
-          return;
-        }
-        // Without the channel: step the locked rotation by a quarter turn.
+      await this.input(udid, async (runtime, _control, lib) => {
+        // A quarter turn from the display's actual rotation, then locked there.
+        // scrcpy's rotate message only writes `user_rotation`, which does
+        // nothing while auto-rotate is on (the emulator's default).
         const current =
           Number(
-            (await this.shellIn(runtime, ["settings", "get", "system", "user_rotation"])).trim(),
+            lib.defaultDisplayRotation(
+              await this.shellIn(runtime, ["dumpsys", "window", "displays"]),
+            ) ??
+              (await this.shellIn(runtime, ["settings", "get", "system", "user_rotation"])).trim(),
           ) || 0;
         await this.shellIn(runtime, ["settings", "put", "system", "accelerometer_rotation", "0"]);
         await this.shellIn(runtime, [
@@ -1263,6 +1271,8 @@ export class AndroidEmulatorBackend implements DeviceBackend {
     return () => {};
   }
   async testing(input: DeviceTestingInput): Promise<void> {
+    if (input.action.type === "terminate-app" && !PACKAGE.test(input.action.bundleId))
+      throw new DeviceBackendError("Invalid Android package name.");
     const lib = await loadAndroid();
     const runtime = await this.runtime(input.udid);
     const steps = lib.planAndroidTestingAction(input, await this.apiLevel(runtime));
@@ -1304,6 +1314,52 @@ export class AndroidEmulatorBackend implements DeviceBackend {
           );
       }
     }
+    // The emulator reports a location only once an app asks for one, so the
+    // drawer shows the last one Ryco set, labelled as such.
+    if (input.action.type === "location")
+      this.appliedLocations.set(input.udid, {
+        latitude: input.action.latitude,
+        longitude: input.action.longitude,
+      });
+  }
+
+  /** The Tools drawer's read-back: each setting as the emulator reports it now. */
+  async detail(
+    udid: string,
+    options: { readonly bundleId?: string | undefined } = {},
+  ): Promise<DeviceBackendDetail> {
+    const lib = await loadAndroid();
+    const runtime = await this.runtime(udid);
+    const read = (args: readonly string[]) => this.shellIn(runtime, args, 10_000).catch(() => null);
+    const keys = Object.keys(lib.ANDROID_DETAIL_READS) as (keyof typeof lib.ANDROID_DETAIL_READS)[];
+    const values = await Promise.all(keys.map((key) => read(lib.ANDROID_DETAIL_READS[key])));
+    const outputs = Object.fromEntries(
+      keys.map((key, index) => [key, values[index] ?? null]),
+    ) as AndroidDetailOutputs;
+    const foreground = lib.parseForegroundPackage(outputs.window);
+    // The launcher is the home screen, not an app the drawer acts on.
+    const foregroundApp =
+      foreground && !/launcher/iu.test(foreground) ? { bundleId: foreground } : null;
+    const target = options.bundleId ?? foregroundApp?.bundleId;
+    const packageDump =
+      target && PACKAGE.test(target) ? await read(["dumpsys", "package", target]) : null;
+    return {
+      // Without the window dump the app in front is unknown, not the home screen.
+      ...(outputs.window === null ? {} : { foregroundApp }),
+      settings: lib.parseAndroidSettings(
+        outputs,
+        this.appliedLocations.has(udid) ? (this.appliedLocations.get(udid) ?? null) : undefined,
+      ),
+      ...(target && packageDump
+        ? {
+            permissions: {
+              bundleId: target,
+              states: lib.parseAndroidPermissions(packageDump, await this.apiLevel(runtime)),
+            },
+          }
+        : {}),
+      controls: lib.ANDROID_DETAIL_CONTROLS,
+    };
   }
 
   // ── Logs ────────────────────────────────────────────────────────────
@@ -1522,6 +1578,7 @@ export class AndroidEmulatorBackend implements DeviceBackend {
 
   async shutdown(udid: string): Promise<void> {
     this.cancelKeyboard(udid);
+    this.appliedLocations.delete(udid);
     await this.closeRuntime(udid);
     const current = (await this.running()).get(this.name(udid));
     if (current) await this.run(this.tool("adb"), ["-t", current.transportId, "emu", "kill"]);

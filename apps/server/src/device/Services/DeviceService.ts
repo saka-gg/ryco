@@ -1,3 +1,4 @@
+import type { DeviceSshHost } from "@ryco/contracts";
 import { Context } from "effect";
 
 import type { DeviceManager } from "../DeviceManager.ts";
@@ -9,6 +10,11 @@ export interface DeviceServiceShape {
    */
   readonly supported: boolean;
   readonly manager: DeviceManager;
+  /**
+   * Apply the SSH device hosts from the node's settings, beside the
+   * read-only ones from RYCO_DEVICE_HOSTS_FILE, without a restart.
+   */
+  readonly configureSshHosts?: (hosts: readonly DeviceSshHost[]) => Promise<void>;
 }
 
 export class DeviceService extends Context.Service<DeviceService, DeviceServiceShape>()(

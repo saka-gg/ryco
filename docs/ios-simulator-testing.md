@@ -1,26 +1,54 @@
-# iOS simulator testing drawer
+# Device Tools drawer
 
-Open **Simulator testing** under the simulator picker after attaching a booted iOS
-simulator. The drawer is scrollable and leaves room for the live screen and existing
-capture, recording, hardware-button, detach and shutdown controls.
+Open **Tools** (the sliders button) in a device's toolbar once a booted simulator or emulator is
+attached. The drawer sits under the toolbar and scrolls; the live screen stays above it.
 
-- Apply light/dark appearance or any of the standard and accessibility Dynamic Type sizes.
-- Reapply **Dark mode**, **Large text**, **Dark + large text**, or **Light + default text**
-  on any selected simulator. Large text means `accessibility-large`; default means `large`.
-  These built-in presets change only the named appearance/text settings. They do not save
-  or restore previous device settings, and a failed multi-step preset can partially apply.
-- Set latitude/longitude (including zero) or clear simulated location.
-- Grant, revoke or reset one supported permission for an explicit app bundle ID.
-  Reset prompts on the app's next access; permission changes can terminate the app.
-- Send a JSON push payload containing an `aps` object to an explicit bundle ID.
-  Payloads are limited to 4,096 UTF-8 bytes and sent through stdin, with no temporary files.
-  This tests local app notification handling, not APNs registration or network delivery.
+Every control shows the value the device reports, read through the viewer-safe `device.read`
+`detail` request (a WebSocket RPC, never an HTTP response, so nothing is cached). The drawer reads
+on open, on **Refresh**, and after each change, so a control always shows the device's real value
+rather than the choice that was sent. A value the device cannot report reads "Not reported"
+instead of a guess. Changes go through the existing owner-only `device.app` RPC; without owner
+access (or, on the Hub, before the machine is mutation-ready) the drawer only reads.
 
-Controls show choices to apply, not live device settings. Nothing is applied on drawer
-open or reconnect. Notification permission must be requested/allowed in the app; camera
-and notification permission overrides are not offered by this drawer. Runtime-specific
-failures are displayed and can be retried. The drawer does not retain bundle IDs, locations
-or push payloads across target/thread/connection-generation changes.
+Only the controls a device supports are shown (the detail lists them):
+
+| Group         | iOS Simulator                                                                                                                         | Android Emulator                                                                  |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| App           | App in front (with name), Terminate, Relaunch, Open URL, Launch by bundle ID                                                          | Same, by package                                                                  |
+| Device        | Appearance, Text size, Orientation, Liquid Glass (clear/tinted), Color filter                                                         | Appearance, Text size (font scale), Orientation, Color correction, Network on/off |
+| Accessibility | Reduce Motion, Increase Contrast, Reduce Transparency, Show Borders (Button Shapes), VoiceOver                                        | Reduce Motion (animation scales), Increase Contrast (high-contrast text)          |
+| Overlay       | Element frames from the accessibility tree, drawn over the live screen                                                                | Same                                                                              |
+| Location      | Presets, coordinates, Clear                                                                                                           | Presets, coordinates                                                              |
+| Permissions   | Grant, revoke, reset for the app in front or a named bundle; states read from the simulator's TCC database (location is not readable) | Grant, revoke, reset; states from `dumpsys package`                               |
+| Push          | Alert text to the app in front, or a JSON payload (4,096 UTF-8 bytes, `aps` required)                                                 | —                                                                                 |
+| Presets       | Dark, Large text, Dark + large, Standard                                                                                              | Same                                                                              |
+
+How each value is read:
+
+- iOS: `simctl ui` for appearance, content size and Increase Contrast; Ryco's own
+  `ryco-sim-settings` for Reduce Motion, Reduce Transparency, Show Borders, VoiceOver, color
+  filters and Liquid Glass; the frontmost app's process from the device helper's accessibility
+  translation, named through `launchctl list`; the orientation Ryco turned the device to.
+- Android: `cmd uimode night`, `settings get` (font scale, animation scales, Wi-Fi, high-contrast
+  text, color correction), the built-in display's rotation from `dumpsys window displays`, the
+  focused package from `dumpsys window`.
+- Location: simulators do not report their simulated location, and an emulator reports one only
+  once an app asks, so the drawer shows the last location Ryco set, labelled "last set by Ryco".
+
+`ryco-sim-settings` (`apps/server/native/device-helper/Sources/SimSettings.c`) is built by the
+helper's `build.sh` with the simulator SDK, beside the helper, from Ryco's own source; it runs
+inside the simulator through `simctl spawn`. It calls the same libAccessibility and
+MediaAccessibility setters the Settings app uses, so running apps update live. A runtime that lacks
+a symbol reports that setting as unsupported. Nothing reads or writes these settings until the
+drawer is used, and the drawer never builds or installs anything: it needs a device that was
+already attached.
+
+The overlay re-reads the tree every two seconds while it is on and outlines up to 400 distinct
+element frames; the frames turn with the device.
+
+The drawer replaces the earlier "Simulator testing" drawer. Agents' `device_configure` tool keeps
+its existing actions; the new drawer actions (accessibility switches, Liquid Glass, color filter,
+terminate) are not offered to agents.
 
 ## Agents
 

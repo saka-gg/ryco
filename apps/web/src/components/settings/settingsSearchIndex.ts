@@ -241,6 +241,14 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   {
     section: "device",
     storage: "device",
+    part: "simulators",
+    title: "Device hosts over SSH",
+    description: "Drive the simulators of other Macs over SSH, with Test connection.",
+    keywords: "devices ssh remote mac simulator host test connection ryco version",
+  },
+  {
+    section: "device",
+    storage: "device",
     part: "power",
     title: "Lower agent CPU priority",
     description: "Run agents and their tests and builds at a lower CPU priority.",
