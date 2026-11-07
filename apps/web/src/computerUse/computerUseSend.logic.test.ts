@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   computerUseSendBlocker,
+  DEFAULT_COMPUTER_SEND_DEADLINE_MS,
   isExternalOpenCodeInstance,
   resolveComputerSendIntent,
 } from "./computerUseSend.logic";
@@ -70,7 +71,7 @@ describe("resolveComputerSendIntent", () => {
       computer,
       readBlocker: noBlocker,
     });
-    expect(resolution).toEqual({ intent, prepared: true, setupMissing: false });
+    expect(resolution).toEqual({ intent, prepared: false, setupMissing: false });
     expect(computer.prepare).toHaveBeenCalledWith("thread-1", false);
   });
 
@@ -82,7 +83,7 @@ describe("resolveComputerSendIntent", () => {
       computer,
       readBlocker: noBlocker,
     });
-    expect(resolution).toEqual({ intent: null, prepared: true, setupMissing: true });
+    expect(resolution).toEqual({ intent: null, prepared: false, setupMissing: true });
   });
 
   it("asks nothing when Use in every chat is off", async () => {
@@ -130,5 +131,97 @@ describe("resolveComputerSendIntent", () => {
         readBlocker: noBlocker,
       }),
     ).rejects.toThrow("Complete Computer Use setup");
+  });
+
+  it("sends a default message without Computer Use once its short deadline passes", async () => {
+    vi.useFakeTimers();
+    try {
+      const { computer } = fakeDesktop({ defaultEnabled: true, granted: true });
+      computer.prepare.mockImplementation(() => new Promise(() => {}));
+      const resolution = resolveComputerSendIntent({
+        threadId: "thread-1",
+        explicit: false,
+        computer,
+        readBlocker: noBlocker,
+      });
+      await vi.advanceTimersByTimeAsync(DEFAULT_COMPUTER_SEND_DEADLINE_MS);
+      await expect(resolution).resolves.toEqual({
+        intent: null,
+        prepared: false,
+        setupMissing: false,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds every step of a default send, settings read included", async () => {
+    vi.useFakeTimers();
+    try {
+      const { computer } = fakeDesktop({ defaultEnabled: true, granted: true });
+      const resolution = resolveComputerSendIntent({
+        threadId: "thread-1",
+        explicit: false,
+        computer,
+        readBlocker: () => new Promise(() => {}),
+        deadlineMs: 200,
+      });
+      await vi.advanceTimersByTimeAsync(200);
+      await expect(resolution).resolves.toMatchObject({ intent: null, prepared: false });
+      expect(computer.prepare).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never fails a default send for Computer Use", async () => {
+    const { computer } = fakeDesktop({ defaultEnabled: true, granted: true });
+    computer.prepare.mockRejectedValue(new Error("desktop gone"));
+    await expect(
+      resolveComputerSendIntent({
+        threadId: "thread-1",
+        explicit: false,
+        computer,
+        readBlocker: noBlocker,
+      }),
+    ).resolves.toEqual({ intent: null, prepared: false, setupMissing: false });
+    await expect(
+      resolveComputerSendIntent({
+        threadId: "thread-1",
+        explicit: false,
+        computer,
+        readBlocker: async () => {
+          throw new Error("settings unavailable");
+        },
+      }),
+    ).resolves.toEqual({ intent: null, prepared: false, setupMissing: false });
+  });
+
+  it("lets an explicit task wait past the default deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const { computer, intent } = fakeDesktop({ defaultEnabled: true, granted: true });
+      let finishSetup = (_value: ComputerTurnIntent) => {};
+      computer.prepare.mockImplementation(
+        () =>
+          new Promise<ComputerTurnIntent>((resolve) => {
+            finishSetup = resolve;
+          }),
+      );
+      const resolution = resolveComputerSendIntent({
+        threadId: "thread-1",
+        explicit: true,
+        computer,
+        readBlocker: noBlocker,
+      });
+      await vi.advanceTimersByTimeAsync(DEFAULT_COMPUTER_SEND_DEADLINE_MS * 4);
+      finishSetup({ ...intent, mode: "request" });
+      await expect(resolution).resolves.toMatchObject({
+        intent: { mode: "request" },
+        prepared: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

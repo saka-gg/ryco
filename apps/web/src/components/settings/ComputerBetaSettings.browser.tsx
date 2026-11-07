@@ -91,11 +91,12 @@ function fixture(options: {
   }));
   const restartApp = vi.fn(async () => {});
   const setup = vi.fn(async () => state);
+  const checkPermissions = vi.fn(async () => state);
   window.desktopBridge = {
     restartApp,
     computerBeta: {
       getState: async () => state,
-      checkPermissions: async () => state,
+      checkPermissions,
       setPreferences,
       setup,
       turnOn,
@@ -126,6 +127,7 @@ function fixture(options: {
   } as unknown as EnvironmentApi);
   return {
     turnOn,
+    checkPermissions,
     setup,
     setPreferences,
     setupPermission,
@@ -194,6 +196,15 @@ it("shows Computer Use on with live permission badges and a per-app list to revo
   expect(f.getHistory).not.toHaveBeenCalled();
   await view.getByRole("button", { name: "Load recent actions" }).click();
   expect(f.getHistory).toHaveBeenCalledOnce();
+});
+
+it("checks the permissions when it opens", async () => {
+  const f = fixture({ defaultEnabled: true });
+  const view = await render(<ComputerBetaSettings />);
+  await vi.waitFor(() => expect(f.checkPermissions).toHaveBeenCalledOnce());
+  await expect
+    .element(view.getByRole("switch", { name: "Use Computer Use in every chat" }))
+    .toBeChecked();
 });
 
 it("explains a stale grant after an update and offers Quit & Reopen", async () => {

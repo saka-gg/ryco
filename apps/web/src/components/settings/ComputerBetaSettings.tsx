@@ -88,10 +88,12 @@ function ComputerBetaSettingsPanel({ api }: { api: ComputerBetaApi }) {
   const agentControl = useLocalAgentControl();
   useEffect(() => {
     let mounted = true;
+    let checked = false;
     const refresh = () => {
       void api
         .checkPermissions()
         .then((value) => {
+          checked = true;
           if (mounted) setState(value);
         })
         .catch(() => undefined);
@@ -99,12 +101,15 @@ function ComputerBetaSettingsPanel({ api }: { api: ComputerBetaApi }) {
     void api
       .getState()
       .then((value) => {
-        if (mounted) setState(value);
+        if (mounted && !checked) setState(value);
       })
       .catch(() => undefined);
     const unsubscribe = api.onUpdate((event) => {
       if (event.type === "state") setState(event.state);
     });
+    // The cached state may predate any check (after an update, nothing read the grants yet):
+    // opening the panel reads them, so it never shows a stale-grant hint from unknown grants.
+    refresh();
     window.addEventListener("focus", refresh);
     return () => {
       mounted = false;

@@ -5984,7 +5984,8 @@ export default function ChatView(props: ChatViewProps) {
             });
           },
         });
-        // A permission check may yield to an edited draft or changed selection.
+        // `/computer-use` may wait on setup: a draft edited meanwhile stays a draft. A default
+        // send waited at most a moment and goes out as sent.
         if (resolution.prepared && promptRef.current !== promptForSend) return;
         if (resolution.setupMissing) noteComputerSetupMissingOnce();
         if (resolution.intent) settingsSnapshot.computerUse = resolution.intent;
@@ -6000,6 +6001,8 @@ export default function ChatView(props: ChatViewProps) {
           return;
         }
       }
+      // Another send of this thread may have started while this one waited.
+      if (threadSendsInFlight.has(routeThreadKey)) return;
     }
     if (!canSendModelSelection(composerSnapshot.selectedModelSelection)) {
       notifySelectionBecameIneligible();
