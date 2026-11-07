@@ -850,6 +850,24 @@ describe("thread inbox", () => {
     // A regular project still matches by its own name, never by the chat label.
     expect(search("alpha")).toEqual([regular.id]);
   });
+
+  it("keeps threads a message search found, within the other filters", () => {
+    const found = makeThread(environmentA, "found-thread", { title: "Fix the build" });
+    const other = makeThread(environmentA, "other-thread", { title: "Write docs" });
+    const elsewhere = makeThread(environmentB, "elsewhere-thread", { title: "Ship it" });
+    const keys = new Set(
+      [found, elsewhere].map((thread) =>
+        scopedThreadKey({ environmentId: thread.environmentId, threadId: thread.id }),
+      ),
+    );
+    const inbox = buildThreadInbox(
+      baseInput({
+        threads: [found, other, elsewhere],
+        filters: { text: "flaky test", textMatchedKeys: keys, environmentIds: [environmentA] },
+      }),
+    );
+    expect(inbox.active.map((entry) => entry.thread?.id)).toEqual([found.id]);
+  });
 });
 
 describe("inbox search by pull request", () => {

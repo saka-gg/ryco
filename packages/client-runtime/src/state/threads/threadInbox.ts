@@ -88,6 +88,11 @@ export interface ThreadInboxFilters {
   readonly projectKeys?: ReadonlyArray<string> | undefined;
   readonly worktreeKeys?: ReadonlyArray<string> | undefined;
   readonly text?: string | undefined;
+  /**
+   * Thread keys the text found elsewhere (a message search on the node): they
+   * pass the text filter whatever their title says. The other filters still apply.
+   */
+  readonly textMatchedKeys?: ReadonlySet<string> | undefined;
 }
 
 export type ThreadInboxMutationBlocker =
@@ -563,6 +568,7 @@ function filterEntry(entry: ThreadInboxEntry, filters: ThreadInboxFilters | unde
 
   const text = filters.text?.trim().toLocaleLowerCase();
   if (!text) return true;
+  if (filters.textMatchedKeys?.has(entry.key)) return true;
   return [
     entry.title,
     entry.environment.label,

@@ -7,7 +7,7 @@ import { DeviceIdentitySettings } from "./DeviceIdentitySettings";
 import { SessionImportSettings } from "./SessionImportSettings";
 import { useAppPreferencesLabel } from "../../deviceName";
 import { settingsRestorePlan } from "./settingsRestore";
-import { selectArchivedSettingsGroups } from "./archivedSettings";
+import { selectArchivedThreadGroups } from "@ryco/client-runtime/state/threads/archivedThreadGroups";
 import { OnboardingReplaySetting } from "../onboarding/OnboardingReplaySetting";
 import { SourceControlPreferences } from "./SourceControlPreferences";
 import { ComposerSettings } from "./ComposerSettings";
@@ -1002,7 +1002,7 @@ export function ArchivedThreadsPanel({
   const threads = useStore(useShallow(selectThreadShellsAcrossEnvironments));
   const { unarchiveThread, confirmAndDeleteThread } = useThreadActions();
   const archivedGroups = useMemo(
-    () => selectArchivedSettingsGroups(projects, threads, target?.environmentId),
+    () => selectArchivedThreadGroups(projects, threads, target?.environmentId),
     [projects, threads, target?.environmentId],
   );
 
