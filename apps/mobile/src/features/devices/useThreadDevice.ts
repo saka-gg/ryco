@@ -50,5 +50,5 @@ export function useThreadDevice(environmentId: EnvironmentId, threadId: ThreadId
     (state) => state.threadByKey[scopedThreadKey(scopeThreadRef(environmentId, threadId))],
   );
   const preview = useMemo(() => threadDevicePreview(threadState), [threadState]);
-  return { api, preview };
+  return { api, preview, threadState: threadState ?? null };
 }

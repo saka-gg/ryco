@@ -2,7 +2,7 @@
  * The workspace tools that can occupy the regular-width inspector column.
  * Exactly one is shown at a time: the focused route's own tool.
  */
-export type ThreadWorkspaceInspectorKind = "files" | "terminal";
+export type ThreadWorkspaceInspectorKind = "files" | "terminal" | "device";
 
 export interface OwnedThreadWorkspaceInspector<T> {
   readonly owner: symbol;

@@ -122,6 +122,9 @@ const rootConfig = {
       // generates it, its CSP pins the inline script's hash, and a test compares
       // it to a fresh build byte for byte.
       "apps/mobile/src/features/terminal/renderer/terminal-renderer.html",
+      // The device viewer's document, generated and hash-pinned the same way
+      // (`apps/mobile/scripts/build-device-stream-renderer.mts`).
+      "apps/mobile/src/features/devices/stream/renderer/device-stream.html",
       // Reports, mockups and screenshots committed as finished artifacts. Several
       // are generated or minified HTML; formatting them is noise, and an
       // unformatted one failed Format, which also skipped Lint and Typecheck in CI.

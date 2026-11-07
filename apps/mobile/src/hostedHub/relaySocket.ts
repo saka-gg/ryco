@@ -5,6 +5,7 @@ import {
   type HostedRelaySocketCallbacks,
   type RelayE2eeProvider,
   type RelaySocket,
+  type RelayFrameTunnelPeer,
 } from "@ryco/client-runtime/relay";
 import {
   EARLY_RELAY_SOCKET_TICKET_WAIT_MS,
@@ -494,6 +495,11 @@ export class MobileHostedRelaySocket {
     // the channel is unaffected and the caller may submit again — look like a
     // failure originating here.
     this.#engine.send(Uint8Array.from(bytes));
+  }
+
+  /** See `HostedRelayEngine.bindFrameTunnel`; device video for hosted viewers rides this. */
+  bindFrameTunnel(peer: RelayFrameTunnelPeer): ((bytes: Uint8Array) => boolean) | null {
+    return this.#engine.bindFrameTunnel(peer);
   }
 
   close(code = 1000, reason = ""): void {

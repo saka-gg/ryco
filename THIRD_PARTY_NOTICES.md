@@ -35,8 +35,14 @@ The simulator pane's live input follows upstream's device stream at commit
 touches streamed as down, move and up while the pointer moves
 (`apps/web/src/components/device/useDeviceTouchInput.ts`), chunked paste
 (`useDeviceKeyboardInput.ts`, `packages/shared/src/deviceLiveInput.ts`), and the decode-queue
-guard and stall watchdog in `packages/client-runtime/src/deviceVideo/decoder.ts` (used by
-`apps/web/src/components/device/useDeviceVideoStream.ts`).
+guard and stall watchdog in `packages/client-runtime/src/deviceVideo/decoder.ts` (shared by
+`apps/web/src/components/device/useDeviceVideoStream.ts` and the phone's device viewer).
+
+The phone's device viewer follows upstream's mobile device preview at commit `6577c6b6`
+(`apps/mobile/src/features/devices/DeviceStreamWebView.tsx`, `device-stream.browser.ts`,
+`DevicePreviewRouteScreen.tsx`): H.264 decoded with WebCodecs inside a WebView, touches reported
+from the page in normalized frame coordinates, a device picker, and the iPad side panel
+(`apps/mobile/src/features/devices/`), under the same copyright and license.
 
 The device workspace follows upstream at the same commit, under the same copyright and license:
 the floating window's store, layout and drag and resize model

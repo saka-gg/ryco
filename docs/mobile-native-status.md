@@ -50,12 +50,21 @@ work is load-bearing.
   terminal counts toward the hosted warm set as a mounted thread view does. Terminal content is
   memory-only on the device.
 - The agent's device (`threads/:environmentId/:threadId/device`): while a thread's agent has an iOS
-  simulator or Android emulator attached, a pill above the composer names it and opens a
-  full-screen viewer. Frames are paced PNG screenshots over the connection's main socket, through
-  the sampler and one-preview lease web's hosted preview uses (`@ryco/client-runtime/state/device`),
-  paused when the screen or app is not in front. The node's owner can tap, swipe and press Home
-  (the node's device input rule and the shared mutation readiness); everyone else watches. A
-  grabber at the top hides the controls; shake-to-show needs a motion sensor module and a new build.
+  simulator or Android emulator attached, a pill above the composer names it and opens the viewer,
+  full screen on a phone and in the workspace inspector beside the thread on a regular-width iPad.
+  The picture is live H.264 video with live touch (drag, scroll, long press) wherever the
+  connection can stream it: the node's frame socket on a direct connection, the relay channel's
+  frame tunnel ([relay frame tunnel](./relay-frame-tunnel.md)) on a hosted one. React Native keeps
+  the connection; a generated, network-denied WebView document
+  (`apps/mobile/scripts/build-device-stream-renderer.mts`) only decodes with WebCodecs (the
+  decoder web's pane uses, `@ryco/client-runtime/deviceVideo`) and reports touches. Without video
+  (an older node, a WebView without WebCodecs) the viewer falls back to paced screenshots, JPEG
+  where the node encodes it, through the sampler and one-preview lease web's hosted preview uses.
+  Either way the stream stops when the screen or app is not in front. A picker chooses among the
+  node's booted devices when there are several. The node's owner drives (live touch, Home, and
+  Back/Recents on Android, Rotate on iOS; the node's device input rule and the shared mutation
+  readiness); everyone else watches. A grabber at the top hides the controls; shake-to-show needs
+  a motion sensor module and a new build.
 - Since 2026-08-16: Expo/React Native upgrades, deterministic-clock E2EE pairing tests, queued
   messages steering into active turns (`8244e7b92`), and the shared Agent Control queue state
   with proposal approval surfaces (`caf8af36c`, `022d2430c`).

@@ -5,6 +5,7 @@ import {
   createEnvironmentConnectionSupervisor,
   createSavedSessionRenewal,
   isSavedEnvironmentAwaitingRepair,
+  createDeviceFrameSource,
   isSavedEnvironmentCredentialRejection,
   SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE,
   SavedEnvironmentConnectionCancelledError,
@@ -296,53 +297,61 @@ export function createMobileEnvironmentDriver(
     },
   ): WsRpcClient {
     catalog.runtimeStore.getState().ensure(environmentId);
-    const transport = new WsTransport(
-      async (signal) => {
-        const record = catalog.get(environmentId);
-        if (!record) throw new Error(`Saved environment ${environmentId} not found.`);
-        // The bearer is re-read on every attempt, never carried over from the
-        // pre-connect session check: a concurrent renewal may have superseded
-        // it, and the node revokes the whole pairing when it is shown a
-        // superseded bearer.
-        return remoteApi.resolveRemoteWebSocketConnectionUrl({
-          wsBaseUrl: record.wsBaseUrl,
-          httpBaseUrl: record.httpBaseUrl,
-          bearerToken: await savedSessionRenewal.readBearerToken(environmentId),
-          ...(signal === undefined ? {} : { signal }),
-        });
+    const resolveSocketUrl = async (signal?: AbortSignal) => {
+      const record = catalog.get(environmentId);
+      if (!record) throw new Error(`Saved environment ${environmentId} not found.`);
+      // The bearer is re-read on every attempt, never carried over from the
+      // pre-connect session check: a concurrent renewal may have superseded
+      // it, and the node revokes the whole pairing when it is shown a
+      // superseded bearer.
+      return remoteApi.resolveRemoteWebSocketConnectionUrl({
+        wsBaseUrl: record.wsBaseUrl,
+        httpBaseUrl: record.httpBaseUrl,
+        bearerToken: await savedSessionRenewal.readBearerToken(environmentId),
+        ...(signal === undefined ? {} : { signal }),
+      });
+    };
+    const transport = new WsTransport((signal) => resolveSocketUrl(signal), {
+      getConnectionLabel: () => catalog.get(environmentId)?.label ?? null,
+      getEnvironmentId: () => environmentId,
+      persistentReconnect: true,
+      // A token request that never answers would otherwise hold this
+      // attempt until a resume or online event; the deadline aborts it and
+      // lets the reconnect schedule try again. Direct connections only —
+      // the hosted relay owns its own attempt lifecycle.
+      urlProviderTimeoutMs: WS_URL_PROVIDER_TIMEOUT_MS,
+      // A rejected bearer is not an outage the backoff can wait out.
+      isTerminalUrlError: isSavedEnvironmentCredentialRejection,
+      onTerminalUrlError: owner.onCredentialRejected,
+      onAttempt: () => {
+        if (owner.speaksForEnvironment()) setRuntimeConnecting(environmentId);
       },
-      {
-        getConnectionLabel: () => catalog.get(environmentId)?.label ?? null,
-        getEnvironmentId: () => environmentId,
-        persistentReconnect: true,
-        // A token request that never answers would otherwise hold this
-        // attempt until a resume or online event; the deadline aborts it and
-        // lets the reconnect schedule try again. Direct connections only —
-        // the hosted relay owns its own attempt lifecycle.
-        urlProviderTimeoutMs: WS_URL_PROVIDER_TIMEOUT_MS,
-        // A rejected bearer is not an outage the backoff can wait out.
-        isTerminalUrlError: isSavedEnvironmentCredentialRejection,
-        onTerminalUrlError: owner.onCredentialRejected,
-        onAttempt: () => {
-          if (owner.speaksForEnvironment()) setRuntimeConnecting(environmentId);
-        },
-        onOpen: () => {
-          if (owner.speaksForEnvironment()) setRuntimeConnected(environmentId);
-        },
-        onError: (message) => {
-          if (owner.speaksForEnvironment()) setRuntimeError(environmentId, new Error(message));
-        },
-        onClose: (details, context) => {
-          if (!context.intentional && owner.speaksForEnvironment()) {
-            setRuntimeDisconnected(environmentId, details.reason);
-          }
-        },
+      onOpen: () => {
+        if (owner.speaksForEnvironment()) setRuntimeConnected(environmentId);
       },
-    );
-    // Device previews and input share the application socket, as on the hosted relay.
+      onError: (message) => {
+        if (owner.speaksForEnvironment()) setRuntimeError(environmentId, new Error(message));
+      },
+      onClose: (details, context) => {
+        if (!context.intentional && owner.speaksForEnvironment()) {
+          setRuntimeDisconnected(environmentId, details.reason);
+        }
+      },
+    });
+    // Device control shares the application socket; video and live input get
+    // the node's frame socket, each attempt with a fresh socket token.
     return createWsRpcClient(
       transport,
-      createDeviceRpcClient(transport, { manageTransport: false }),
+      createDeviceRpcClient(transport, {
+        manageTransport: false,
+        openFrameSource: (udid, handlers) =>
+          createDeviceFrameSource({
+            udid,
+            handlers,
+            socket: { webSocketConstructor: (url) => new WebSocket(url) },
+            resolveUrl: () => resolveSocketUrl(),
+          }),
+      }),
     );
   }
 

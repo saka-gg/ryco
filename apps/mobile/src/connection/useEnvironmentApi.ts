@@ -4,6 +4,7 @@ import { useCallback, useMemo, useSyncExternalStore } from "react";
 import {
   readEnvironmentApi,
   readEnvironmentApiAvailability,
+  readRpcClient,
   subscribeEnvironmentApis,
 } from "./environmentApi";
 
@@ -46,4 +47,18 @@ export function useEnvironmentsWithApi(): ReadonlySet<EnvironmentId> {
       ),
     [availability],
   );
+}
+
+/**
+ * The environment's live device RPC client, which the typed `EnvironmentApi`
+ * facade omits parts of: its frame source (`openFrameSource`) is what streams a
+ * device's video and live input. Re-read like `useEnvironmentApi`.
+ */
+export function useDeviceRpcClient(environmentId: EnvironmentId | null) {
+  const read = useCallback(
+    () =>
+      environmentId === null ? undefined : (readRpcClient(environmentId)?.device ?? undefined),
+    [environmentId],
+  );
+  return useSyncExternalStore(subscribeEnvironmentApis, read, read);
 }
