@@ -20,6 +20,7 @@ import type { AgentControlProposalId, AgentControlProposalStatus } from "@ryco/c
 
 export interface DeviceConsentKey {
   readonly threadId: string;
+  /** The task's user turn (`taskTurnId ?? turnId`), shared by provider turns that carry it on. */
   readonly turnId: string;
   readonly runtimeSessionId: string;
   readonly udid: string;

@@ -321,9 +321,10 @@ export function withDeviceRoutineTools(
       // Such agents can already drive simulators from a shell (simctl, adb).
       if (thread.value.runtimeMode === "full-access") return { kind: "granted" } as const;
 
+      // Keyed on the user's task: a provider ("wake") turn carrying it on is not asked again.
       const key: DeviceConsentKey = {
         threadId: session.threadId,
-        turnId: authority.turnId,
+        turnId: authority.taskTurnId ?? authority.turnId,
         runtimeSessionId: session.runtimeSessionId,
         udid,
       };

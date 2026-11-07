@@ -292,7 +292,8 @@ const CLAUDE_STARTUP_INITIALIZE_TIMEOUT_MS = 30_000;
 
 /**
  * Who opened a turn. Anything but "prompt" is a provider turn: Claude started it without a
- * prompt (a background "wake"), so it has no prompt UUID and no Agent Control binding.
+ * prompt (a background "wake"), so it has no prompt UUID. It still holds exact-turn Agent
+ * Control authority (bound as a provider turn), so the agent can keep acting on the user's task.
  */
 type ClaudeTurnOpener = "prompt" | "wake-signal" | "assistant-output";
 
@@ -3952,8 +3953,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   /**
    * Opens a provider turn: one Claude started without a prompt, either at its turn-start signal
-   * ("wake-signal") or, when no signal opened one, at its first root assistant output. Never
-   * bound to Agent Control authority; exact-turn binding stays prompt-only.
+   * ("wake-signal") or, when no signal opened one, at its first root assistant output. It binds
+   * Agent Control authority as a provider turn: the same turn-bound tools as a prompt turn (they
+   * end with it), but never the user's staged Computer Use request.
    */
   const startProviderTurn = Effect.fn("startProviderTurn")(function* (
     context: ClaudeSessionContext,
@@ -3974,6 +3976,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       activeTurnId: turnId,
       updatedAt: startedAt,
     };
+    // Bound with the install: `completeTurn` retires it whichever way the turn ends.
+    if (context.agentControl) {
+      yield* context.agentControl.bindTurn(turnId, "provider").pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("failed to bind Agent Control provider-turn authority", {
+            threadId: context.session.threadId,
+            turnId,
+            cause,
+          }),
+        ),
+      );
+      // Ended while binding: its retire already ran, so retire the late binding too.
+      if (context.turnState !== turnState) yield* context.agentControl.retireTurn(turnId);
+    }
     const turnStartedStamp = yield* makeEventStamp();
     yield* offerRuntimeEventForContext(context, {
       type: "turn.started",

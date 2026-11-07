@@ -11006,7 +11006,7 @@ describe("ClaudeAdapterLive provider wake turns", () => {
     );
   });
 
-  it.effect("never binds Agent Control authority to a provider wake turn", () => {
+  it.effect("binds Agent Control authority to a provider wake turn and retires it", () => {
     const state = makeAgentControlBridge();
     const harness = makeHarness({ agentControl: state.bridge });
     harness.query.mcpStatuses = [{ name: "ryco", status: "connected" }];
@@ -11024,9 +11024,20 @@ describe("ClaudeAdapterLive provider wake turns", () => {
         lifecycleFor(log, wakeTurnId).map((event) => event.type),
         ["turn.started", "turn.completed"],
       );
+      // The wake turn holds the same turn-bound tools as the prompt turn, as a provider turn.
       assert.deepEqual(
-        state.bindTurnAuthority.mock.calls.map(([input]) => String(input.turnId)),
-        [String(promptTurn.turnId)],
+        state.bindTurnAuthority.mock.calls.map(([input]) => [
+          String(input.turnId),
+          input.openedBy ?? "user",
+        ]),
+        [
+          [String(promptTurn.turnId), "user"],
+          [String(wakeTurnId), "provider"],
+        ],
+      );
+      assert.include(
+        state.retireTurnAuthority.mock.calls.map(([input]) => String(input.turnId)),
+        String(wakeTurnId),
       );
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
