@@ -31,6 +31,7 @@ import {
   createMacUnsignedInstallReadme,
   createMacUnsignedInstallScript,
   createBuildConfig,
+  resolveComputerUseHelperIdentity,
   createElectronBuilderInvocation,
   createStagePatchedDependencies,
   formatCommandFailureMessage,
@@ -480,6 +481,47 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }),
   );
 
+  it.effect("ships Ryco Computer Use as its own flavor-named bundle in Contents/Helpers", () =>
+    Effect.gen(function* () {
+      const stable = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "0.1.37",
+        true,
+        false,
+        undefined,
+        undefined,
+      );
+      assert.deepStrictEqual(stable.extraFiles, [
+        {
+          from: "apps/desktop/computer-use-app/Ryco Computer Use.app",
+          to: "Helpers/Ryco Computer Use.app",
+        },
+      ]);
+      // The bundle is sealed by osx-sign as nested code, never packed into app.asar.
+      assert.ok(DESKTOP_BUILD_FILES.includes("!apps/desktop/computer-use-app/**"));
+      const nightly = "0.1.38-nightly.20261101.4";
+      assert.deepStrictEqual(resolveComputerUseHelperIdentity(nightly, "separate"), {
+        name: "Ryco Nightly Computer Use",
+        bundleId: "com.laurinfrank.ryco.nightly.computer-use",
+      });
+      assert.deepStrictEqual(resolveComputerUseHelperIdentity("0.1.37"), {
+        name: "Ryco Computer Use",
+        bundleId: "com.laurinfrank.ryco.computer-use",
+      });
+      const linux = yield* createBuildConfig(
+        "linux",
+        "AppImage",
+        "0.1.37",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      assert.equal(linux.extraFiles, undefined);
+    }),
+  );
+
   it.effect("points Linux electron-builder config at the generated icon directory", () =>
     Effect.gen(function* () {
       const config = yield* createBuildConfig(
@@ -673,6 +715,9 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   it("excludes the bundled GitHub Copilot CLI from desktop artifacts", () => {
     assert.deepStrictEqual(DESKTOP_BUILD_FILES, [
       "**/*",
+      "!apps/desktop/computer-use-app/**",
+      "!apps/desktop/resources/ryco-computer-use-app",
+      "!apps/desktop/prod-resources/ryco-computer-use-app",
       "!apps/desktop/resources/ryco-desktop-security-helper",
       "!apps/desktop/prod-resources/ryco-desktop-security-helper",
       "!apps/desktop/resources/ryco-window-material.node",

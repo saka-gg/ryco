@@ -1,5 +1,10 @@
 #!/usr/bin/env node
 import { fileURLToPath } from "node:url";
+import {
+  COMPUTER_USE_HELPER_CONTENTS_DIRECTORY,
+  computerUseHelperAppIdentity,
+  type ComputerUseHelperAppIdentity,
+} from "@ryco/shared/computerUseHelperApp";
 import { findLocalMacSigningIdentity } from "@ryco/shared/macLocalSigning";
 
 import rootPackageJson from "../package.json" with { type: "json" };
@@ -815,8 +820,26 @@ export function resolveDesktopProductName(
     : (desktopPackageJson.productName ?? "Ryco");
 }
 
+/** Ryco Computer Use for this build: the helper app macOS gives Computer Use's grants to. */
+export function resolveComputerUseHelperIdentity(
+  version: string,
+  nightlyIdentity: DesktopNightlyIdentityMode = "legacy",
+): ComputerUseHelperAppIdentity {
+  return computerUseHelperAppIdentity({
+    bundleId: rycoDesktopFlavorIdentity(resolveDesktopBuildFlavor(version, nightlyIdentity)).appId,
+    productName: resolveDesktopProductName(version, nightlyIdentity),
+  });
+}
+
+/** Where the stage keeps the assembled helper bundle before electron-builder copies it. */
+export const COMPUTER_USE_HELPER_STAGE_DIR = "apps/desktop/computer-use-app";
+
 export const DESKTOP_BUILD_FILES = [
   "**/*",
+  // Ryco Computer Use ships as its own bundle in Contents/Helpers (extraFiles).
+  `!${COMPUTER_USE_HELPER_STAGE_DIR}/**`,
+  "!apps/desktop/resources/ryco-computer-use-app",
+  "!apps/desktop/prod-resources/ryco-computer-use-app",
   "!apps/desktop/resources/ryco-desktop-security-helper",
   "!apps/desktop/prod-resources/ryco-desktop-security-helper",
   "!apps/desktop/resources/ryco-window-material.node",
@@ -1044,6 +1067,15 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       {
         from: "apps/server/dist/device-helper",
         to: "device-helper",
+      },
+    ];
+    const computerUseHelper = resolveComputerUseHelperIdentity(version, nightlyIdentity);
+    // Its own signed bundle: osx-sign signs nested apps inside out with Ryco's identity, so the
+    // helper keeps a stable Developer ID identity (and its macOS grants) across updates.
+    buildConfig.extraFiles = [
+      {
+        from: `${COMPUTER_USE_HELPER_STAGE_DIR}/${computerUseHelper.name}.app`,
+        to: `${COMPUTER_USE_HELPER_CONTENTS_DIRECTORY}/${computerUseHelper.name}.app`,
       },
     ];
     buildConfig.mac = {
@@ -1397,6 +1429,40 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     },
     options.verbose,
   );
+  if (options.platform === "mac") {
+    const helper = resolveComputerUseHelperIdentity(appVersion, nightlyIdentity);
+    const helperExecutable = path.join(stageResourcesDir, "ryco-computer-use-app");
+    if (!(yield* fs.exists(helperExecutable))) {
+      return yield* new BuildScriptError({
+        message: `Missing Ryco Computer Use at ${helperExecutable}. Run 'bun run build:desktop' first.`,
+      });
+    }
+    yield* runCommand(
+      ChildProcess.make(
+        process.execPath,
+        [
+          path.join(repoRoot, "apps/desktop/scripts/build-computer-use-app.mjs"),
+          "assemble",
+          "--executable",
+          helperExecutable,
+          "--output-directory",
+          path.join(stageAppDir, COMPUTER_USE_HELPER_STAGE_DIR),
+          "--name",
+          helper.name,
+          "--bundle-id",
+          helper.bundleId,
+          "--version",
+          appVersion,
+          "--icon",
+          path.join(stageResourcesDir, "icon.icns"),
+          // electron-builder signs it with the release identity.
+          "--no-sign",
+        ],
+        { cwd: repoRoot, stdout: "inherit", stderr: "inherit" },
+      ),
+      { label: "Assemble Ryco Computer Use", verbose: options.verbose },
+    );
+  }
   const macUnsignedInstallAssets =
     options.platform === "mac" && !options.signed
       ? resolveMacUnsignedInstallAssetPaths(stageResourcesDir, path)

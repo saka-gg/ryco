@@ -8,13 +8,19 @@ Ryco's macOS Computer Use beta ports Synara 0.9.1's Cua runtime, native input me
 
 1. In **Settings → Computer Use**, choose **Turn on Computer Use**. It turns on Agent Control for this Mac if it is off (Computer Use's tools come through it), makes Computer Use available in every chat, and walks you through the two macOS permissions it needs: Accessibility, then Screen Recording. Grant them yourself in System Settings; Ryco notices each grant and moves on. Setup never sends a prompt.
 2. Optional: turn on **Input Monitoring** in the same list. It adds the physical **Escape** stop and allows foreground takeover. Without it, agents work only in the background, and **Stop** in chat and **Stop computer use** in the menu bar still end a task.
-3. Each permission shows a live badge and a **Fix** button that opens setup for that one pane. If macOS still lists an older Ryco build after an update or rebuild, settings says so: remove Ryco from the list with −, add it again, then use **Quit & Reopen**.
+3. Each permission shows a live badge and a **Fix** button that opens setup for that one pane. If macOS still lists an older build after an update or rebuild, settings says so: remove it from the list with −, add it again, then use **Quit & Reopen**.
+
+The permissions belong to **Ryco Computer Use**, a small helper app inside Ryco with the Ryco icon (see below), so System Settings lists it, not Ryco. If you allowed Ryco itself before, Ryco says once that Computer Use now runs as Ryco Computer Use and opens its setup when you choose **Set up**; settings shows the same note until it is allowed. You can then remove Ryco from those lists.
 
 After that, any chat from this Mac can use the computer; you don't need a command. `/computer-use` followed by a task still works, also when **Use in every chat** is off. A chat that cannot use the computer (unsupported provider, external OpenCode, Agent Control off, setup not finished) is sent without it; a `/computer-use` task reports what blocks it instead. Turning Computer Use off leaves Agent Control on for its other uses.
 
 Use **Stop** in the preview to end Computer authority for the task. Hiding the preview only stops its capture subscription. With Input Monitoring, physical **Escape** interrupts the current input and requires a fresh observation before another action.
 
-The bundle macOS grants these permissions to is decided in one place (`apps/desktop/src/computerUse/permissionTarget.ts`): today the Ryco app itself.
+The bundle macOS grants these permissions to is decided in one place (`apps/desktop/src/computerUse/permissionTarget.ts`): Ryco Computer Use when the build carries it, otherwise Ryco itself.
+
+### Ryco Computer Use
+
+Like OpenAI's Codex Computer Use and Cursor's Cursor Computer Use, Computer Use runs in its own signed app: **Ryco Computer Use** (**Ryco Nightly Computer Use**, **Ryco Computer Use (Dev)** for dev builds), bundle id `<Ryco's bundle id>.computer-use`, in `Ryco.app/Contents/Helpers`. It has no Dock icon and no window. Ryco starts it through LaunchServices when something needs the grants (a permission check, the Escape listener, the Cua driver, a window capture) and closes it 30 seconds after its last program ends, or when Ryco quits or crashes. It is not a login item. The Cua driver and Ryco's Swift helper run as its children, so macOS attributes their Accessibility, Screen Recording and Input Monitoring use to it. It serves only the Ryco app it belongs to (checked by code signature and path), starts only Ryco's own helpers, and relays Ryco's connections to the driver, which accepts host commands only from its parent. Releases sign it with Ryco's Developer ID, so its grants survive updates; ad hoc builds keep the caveat below. `bun run dev:desktop` builds it and keeps one copy beside the dev launcher. If the bundle is missing, Computer Use runs under Ryco as before; `RYCO_COMPUTER_USE_HELPER_APP=0` forces that for diagnosis. The design is in `docs/superpowers/specs/2026-11-07-computer-use-helper-app.md`.
 
 Codex, Claude, Cursor and Copilot use their private session MCP integration. Managed OpenCode Computer tasks launch a dedicated server process; externally configured OpenCode servers and Grok are unavailable. Remote environments and hosted/mobile clients do not acquire control of the local desktop.
 
@@ -52,7 +58,7 @@ Other providers use Ryco's Computer Use.
 
 ## Build and validation
 
-`bun run build:desktop` builds the Swift helper and provisions the verified Cua artifact on macOS. Source builds require the Rust version pinned in `packages/shared/src/cuaDriverRelease.json`; install it with `rustup toolchain install 1.97.1`. The build selects that toolchain without changing your default. `RYCO_CUA_ARTIFACT_DIR` can point to an existing checksum/provenance-verified artifact. Explicit artifacts fail verification if stale. Managed cached artifacts are verified on reuse and rebuilt from the pinned source when missing or invalid. Distribution packages stage and sign both native executables.
+`bun run build:desktop` builds the Swift helpers (including Ryco Computer Use) and provisions the verified Cua artifact on macOS. Source builds require the Rust version pinned in `packages/shared/src/cuaDriverRelease.json`; install it with `rustup toolchain install 1.97.1`. The build selects that toolchain without changing your default. `RYCO_CUA_ARTIFACT_DIR` can point to an existing checksum/provenance-verified artifact. Explicit artifacts fail verification if stale. Managed cached artifacts are verified on reuse and rebuilt from the pinned source when missing or invalid. Distribution packages stage and sign both native executables.
 
 Automated host, backend, tool, queue-authority, packaging and browser tests do not prove live macOS TCC behavior. Qualify permissions, Escape, background input and focus restoration using the exact signed app build and disposable targets. Never treat imported upstream results as Ryco qualification.
 

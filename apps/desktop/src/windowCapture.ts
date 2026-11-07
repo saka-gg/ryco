@@ -29,7 +29,8 @@ import { isAppSnapShortcut } from "@ryco/shared/appSnapShortcut";
 import type { IpcMain, WebContents } from "electron";
 
 import { DesktopAppSnapManager, type DesktopAppSnapManagerOptions } from "./appSnapManager.ts";
-import { macPrivacySettingsUrl, resolveMacAppBundle } from "./macAppBundle.ts";
+import { asNodeSpawn, sharedComputerUseGrantRuntime } from "./computerUse/permissionTarget.ts";
+import { macPrivacySettingsUrl } from "./macAppBundle.ts";
 import { WINDOW_CAPTURE_IPC } from "./windowCaptureChannels.ts";
 
 const PREFERENCES_VERSION = 1;
@@ -70,6 +71,8 @@ export interface DesktopWindowCaptureOptions {
   readonly excludedBundleId: string;
   readonly appDisplayName: string;
   readonly appBundlePath?: string | undefined;
+  /** Starts the helper as a child of the app holding the grants (Ryco Computer Use). */
+  readonly spawn?: DesktopAppSnapManagerOptions["spawn"];
   readonly shortcutRegistry: NonNullable<DesktopAppSnapManagerOptions["shortcutRegistry"]>;
   readonly openSettingsPane: (pane: DesktopAppSnapSettingsPane) => void;
   /** Pushes an event to the renderer; dropped while no window can take it. */
@@ -213,6 +216,7 @@ export class DesktopWindowCapture {
       excludedBundleId: options.excludedBundleId,
       appDisplayName: options.appDisplayName,
       ...(options.appBundlePath ? { appBundlePath: options.appBundlePath } : {}),
+      ...(options.spawn ? { spawn: options.spawn } : {}),
       shortcutRegistry: options.shortcutRegistry,
       openSettingsPane: options.openSettingsPane,
       onState: (state) => {
@@ -514,19 +518,28 @@ export function createDesktopWindowCapture(input: {
   readonly resourcesDir: string;
   readonly executablePath: string;
   readonly appDisplayName: string;
+  readonly isPackaged: boolean;
   readonly shortcutRegistry: DesktopWindowCaptureOptions["shortcutRegistry"];
   readonly openExternal: (url: string) => void;
   readonly send: DesktopWindowCaptureOptions["send"];
   readonly revealWindow: DesktopWindowCaptureOptions["revealWindow"];
 }): DesktopWindowCapture {
-  const { bundlePath, bundleId } = resolveMacAppBundle(input.executablePath, process.platform);
+  // Capture needs Screen Recording, the grant Computer Use has: both use the same helper app.
+  const { target, spawn } = sharedComputerUseGrantRuntime({
+    executablePath: input.executablePath,
+    platform: process.platform,
+    appName: input.appDisplayName,
+    isPackaged: input.isPackaged,
+  });
+  const nodeSpawn = asNodeSpawn(spawn);
   return new DesktopWindowCapture({
     platform: process.platform,
     helperPath: Path.join(input.resourcesDir, "ryco-computer-ui-helper"),
     stateDir: input.stateDir,
-    excludedBundleId: bundleId,
-    appDisplayName: input.appDisplayName,
-    appBundlePath: bundlePath,
+    excludedBundleId: target.hostBundleId,
+    appDisplayName: target.displayName,
+    appBundlePath: target.bundlePath,
+    ...(nodeSpawn ? { spawn: nodeSpawn } : {}),
     shortcutRegistry: input.shortcutRegistry,
     openSettingsPane: (pane) => input.openExternal(macPrivacySettingsUrl(pane)),
     send: input.send,

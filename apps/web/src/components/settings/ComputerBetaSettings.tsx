@@ -186,6 +186,27 @@ function ComputerBetaSettingsPanel({ api }: { api: ComputerBetaApi }) {
           }
         />
       )}
+      {setup?.movedToHelper ? (
+        <SettingsBlock>
+          <SettingsNotice
+            tone="warning"
+            title={`Computer Use now runs as ${state?.permissions.appDisplayName || "Ryco Computer Use"}`}
+            action={
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={busy || !state}
+                onClick={() => void run(() => api.setup())}
+              >
+                Set up
+              </Button>
+            }
+          >
+            It is its own app in System Settings. Allow it once; you can remove Ryco from those
+            lists.
+          </SettingsNotice>
+        </SettingsBlock>
+      ) : null}
       {(on || state?.preferences.defaultEnabled) && agentControl.enabled === false ? (
         <SettingsBlock>
           <SettingsNotice
@@ -254,7 +275,7 @@ function ComputerBetaSettingsPanel({ api }: { api: ComputerBetaApi }) {
         <SettingsBlock>
           <SettingsNotice
             tone="warning"
-            title="macOS may still list an older Ryco"
+            title={`macOS may still list an older ${state?.permissions.appDisplayName || "Ryco"}`}
             action={
               restartApp ? (
                 <Button size="xs" variant="outline" onClick={() => void restartApp()}>
@@ -263,8 +284,8 @@ function ComputerBetaSettingsPanel({ api }: { api: ComputerBetaApi }) {
               ) : undefined
             }
           >
-            In System Settings, select Ryco under each missing permission, remove it with −, add it
-            again, then quit and reopen Ryco.
+            In System Settings, select {state?.permissions.appDisplayName || "Ryco"} under each
+            missing permission, remove it with −, add it again, then quit and reopen Ryco.
           </SettingsNotice>
         </SettingsBlock>
       ) : null}

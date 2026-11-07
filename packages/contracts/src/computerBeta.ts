@@ -48,6 +48,11 @@ export interface ComputerBetaSetup {
    * list the old build, which needs removing and adding again.
    */
   staleGrant: boolean;
+  /**
+   * Computer Use moved to its own helper app (Ryco Computer Use) and the grants Ryco had do not
+   * carry over: the helper needs allowing once.
+   */
+  movedToHelper?: boolean;
 }
 export interface ComputerBetaPreferences {
   /** Computer Use is available in every chat from this Mac without `/computer-use`. */

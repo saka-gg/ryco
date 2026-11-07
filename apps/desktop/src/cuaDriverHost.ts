@@ -33,6 +33,7 @@ import {
   sweepOwnedCuaRuntimeDirectories,
 } from "./cuaRuntimeOwnership.ts";
 import type { ComputerShieldHost } from "./computerShield.ts";
+import type { ComputerUseSpawn } from "./computerUse/helperBroker.ts";
 import type {
   ComputerInputMonitorState,
   PhysicalComputerInput,
@@ -518,6 +519,12 @@ export class CuaDriverHost {
     normalizeOverview?: (result: CuaToolResult) => CuaToolResult;
     frameTap?: ComputerFrameTapHost;
     /**
+     * Starts the driver as a child of Ryco Computer Use, the app holding the macOS grants
+     * (`computerUse/helperBroker.ts`). It relays `proxySocket` because the driver trusts
+     * host-only requests only from its parent. Absent: the driver is Ryco's own child.
+     */
+    spawn?: ComputerUseSpawn;
+    /**
      * Mirrors whether a live driver generation could dispatch input — the
      * window during which the physical Escape monitor must be listening.
      * The desktop wires this to the helper's `arm`/`disarm` commands.
@@ -578,6 +585,12 @@ export class CuaDriverHost {
     startupTimeoutMs?: number;
     normalizeOverview?: (result: CuaToolResult) => CuaToolResult;
     frameTap?: ComputerFrameTapHost;
+    /**
+     * Starts the driver as a child of Ryco Computer Use, the app holding the macOS grants
+     * (`computerUse/helperBroker.ts`). It relays `proxySocket` because the driver trusts
+     * host-only requests only from its parent. Absent: the driver is Ryco's own child.
+     */
+    spawn?: ComputerUseSpawn;
     /**
      * Mirrors whether a live driver generation could dispatch input — the
      * window during which the physical Escape monitor must be listening.
@@ -2160,6 +2173,21 @@ export class CuaDriverHost {
     // keep the dead socket referenced only until the next check notices it.
   }
 
+  /** The driver process: Ryco's own child, or Ryco Computer Use's with its socket relayed. */
+  private spawnDriver(
+    command: string,
+    args: string[],
+    options: { stdio: ["pipe", "ignore", "pipe"]; env: NodeJS.ProcessEnv },
+  ): ChildProcess {
+    const viaHelper = this.options.spawn;
+    if (!viaHelper) return spawn(command, args, options);
+    const endpoint = args[args.indexOf("--socket") + 1];
+    return viaHelper(command, args, {
+      ...options,
+      ...(endpoint ? { proxySocket: endpoint } : {}),
+    }) as unknown as ChildProcess;
+  }
+
   /**
    * Spawn plus the validated handshake — the warmable half of startup. The
    * returned generation has no session yet: `openSession` runs that half on
@@ -2189,7 +2217,7 @@ export class CuaDriverHost {
       // Idle compact cursors sleep without repainting; model latency must not
       // make the only agent indicator disappear. Upstream cannot parse these flags.
       const expectsPatched = this.options.nativeRevision !== null;
-      const child = spawn(
+      const child = this.spawnDriver(
         this.options.binaryPath,
         [
           "serve",
