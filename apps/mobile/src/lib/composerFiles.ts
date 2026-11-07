@@ -2,6 +2,7 @@ import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
+  PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
 } from "@ryco/contracts/orchestration";
 
 import {
@@ -9,6 +10,7 @@ import {
   loadImagePicker,
   type DraftComposerImageAttachment,
 } from "./composerImages";
+import { isCameraCaptureAvailable } from "./cameraAvailability";
 import { uuidv4 } from "./uuid";
 
 /**
@@ -213,4 +215,182 @@ export async function pickComposerAttachments(input: {
     files: nextFiles,
     error,
   };
+}
+
+/** Where the composer's attach menu takes attachments from. */
+export type ComposerAttachmentSource = "library" | "camera" | "files";
+
+/** The draft's count and total-bytes budget, and the node's streaming file limit. */
+export interface ComposerAttachmentBudget {
+  readonly existingCount: number;
+  readonly existingTotalBytes: number;
+  /** Null when the node cannot take streamed files: only images can be attached then. */
+  readonly fileUploadMaxBytes: number | null;
+}
+
+/** Image types every provider reads inline; anything else is sent as a file. */
+const INLINE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
+/**
+ * How a file picked in the Files app is attached: a small common image goes
+ * inline like a photo (with a preview), anything else streams as a file, and
+ * without streaming support only inline images can be attached.
+ */
+export function classifyPickedDocument(input: {
+  readonly name: string;
+  readonly mimeType: string;
+  readonly sizeBytes: number;
+  readonly fileUploadMaxBytes: number | null;
+}): "image" | "file" | { readonly error: string } {
+  const mimeType = input.mimeType.toLowerCase();
+  const inlineImage =
+    INLINE_IMAGE_MIME_TYPES.has(mimeType) &&
+    input.sizeBytes > 0 &&
+    input.sizeBytes <= PROVIDER_SEND_TURN_MAX_IMAGE_BYTES;
+  if (inlineImage) return "image";
+  if (input.fileUploadMaxBytes !== null) return "file";
+  return {
+    error: `'${input.name}' can't be attached: this machine only takes images in messages. Update Ryco on it to send files.`,
+  };
+}
+
+function attachmentLimitError(): string {
+  return `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files per message.`;
+}
+
+/**
+ * Files from the Files app (iCloud Drive, On My iPhone, other providers). The
+ * picker copies each one into the app's cache, which the upload reads later.
+ */
+export async function pickComposerDocuments(
+  input: ComposerAttachmentBudget,
+): Promise<PickComposerAttachmentsResult> {
+  const remainingSlots = PROVIDER_SEND_TURN_MAX_ATTACHMENTS - input.existingCount;
+  if (remainingSlots <= 0) return { images: [], files: [], error: attachmentLimitError() };
+
+  let result: Awaited<ReturnType<typeof import("expo-document-picker").getDocumentAsync>>;
+  try {
+    const { getDocumentAsync } = await import("expo-document-picker");
+    result = await getDocumentAsync({ multiple: true, copyToCacheDirectory: true });
+  } catch (error) {
+    return {
+      images: [],
+      files: [],
+      error: error instanceof Error ? error.message : "Could not open the file picker.",
+    };
+  }
+  if (result.canceled) return { images: [], files: [], error: null };
+
+  const images: DraftComposerImageAttachment[] = [];
+  const files: DraftComposerFileAttachment[] = [];
+  let totalBytes = input.existingTotalBytes;
+  let error: string | null = null;
+  for (const asset of result.assets) {
+    if (images.length + files.length >= remainingSlots) {
+      error = attachmentLimitError();
+      break;
+    }
+    const name = asset.name.trim() || "file";
+    const mimeType = asset.mimeType?.trim() || "application/octet-stream";
+    const sizeBytes = asset.size ?? 0;
+    const kind = classifyPickedDocument({
+      name,
+      mimeType,
+      sizeBytes,
+      fileUploadMaxBytes: input.fileUploadMaxBytes,
+    });
+    if (typeof kind === "object") {
+      error = kind.error;
+      continue;
+    }
+    if (kind === "image") {
+      try {
+        const { File } = await import("expo-file-system");
+        const base64 = await new File(asset.uri).base64();
+        const image = draftImageAttachmentFromPickerAsset({
+          mimeType,
+          fileName: name,
+          base64,
+          fileSize: sizeBytes,
+          uri: asset.uri,
+        });
+        if (image.error) error = image.error;
+        if (image.attachment) {
+          images.push(image.attachment);
+          totalBytes += image.attachment.sizeBytes;
+        }
+      } catch {
+        error = `Failed to read '${name}'.`;
+      }
+      continue;
+    }
+    const file = resolveComposerFileAttachment({
+      name,
+      mimeType,
+      sizeBytes,
+      readUri: asset.uri,
+      fileUploadMaxBytes: input.fileUploadMaxBytes as number,
+      existingCount: input.existingCount + images.length + files.length,
+      existingTotalBytes: totalBytes,
+    });
+    if (file.error) error = file.error;
+    if (file.attachment) {
+      files.push(file.attachment);
+      totalBytes += file.attachment.sizeBytes;
+    }
+  }
+  return { images, files, error };
+}
+
+/** One photo from the camera, attached inline like a library photo. */
+export async function captureComposerPhoto(
+  input: Pick<ComposerAttachmentBudget, "existingCount">,
+): Promise<PickComposerAttachmentsResult> {
+  if (input.existingCount >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
+    return { images: [], files: [], error: attachmentLimitError() };
+  }
+  if (!isCameraCaptureAvailable()) {
+    return { images: [], files: [], error: "This device has no camera." };
+  }
+  try {
+    const imagePicker = await loadImagePicker();
+    const permission = await imagePicker.requestCameraPermissionsAsync();
+    if (!permission.granted) {
+      return { images: [], files: [], error: "Allow camera access to take a photo." };
+    }
+    const result = await imagePicker.launchCameraAsync({
+      mediaTypes: ["images"],
+      base64: true,
+      quality: 0.8,
+    });
+    if (result.canceled) return { images: [], files: [], error: null };
+    const images: DraftComposerImageAttachment[] = [];
+    let error: string | null = null;
+    for (const asset of result.assets) {
+      const image = draftImageAttachmentFromPickerAsset({
+        ...asset,
+        fileName: asset.fileName ?? "photo.jpg",
+      });
+      if (image.error) error = image.error;
+      if (image.attachment) images.push(image.attachment);
+    }
+    return { images, files: [], error };
+  } catch {
+    return { images: [], files: [], error: "The camera is not available on this device." };
+  }
+}
+
+/** Opens the source the user chose in the attach menu. */
+export function pickComposerAttachmentsFrom(
+  source: ComposerAttachmentSource,
+  budget: ComposerAttachmentBudget,
+): Promise<PickComposerAttachmentsResult> {
+  switch (source) {
+    case "library":
+      return pickComposerAttachments(budget);
+    case "camera":
+      return captureComposerPhoto(budget);
+    case "files":
+      return pickComposerDocuments(budget);
+  }
 }

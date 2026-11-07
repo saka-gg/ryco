@@ -2,12 +2,13 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 // expo-image-picker / expo-crypto are native RN modules; the pure gate logic is
 // tested without loading the native runtime.
+vi.mock("./cameraAvailability", () => ({ isCameraCaptureAvailable: () => true }));
 vi.mock("expo-crypto", () => ({
   randomUUID: () => "generated-id",
   getRandomBytes: (length: number) => new Uint8Array(length),
 }));
 
-import { resolveComposerFileAttachment } from "./composerFiles";
+import { classifyPickedDocument, resolveComposerFileAttachment } from "./composerFiles";
 
 function baseInput(overrides?: Partial<Parameters<typeof resolveComposerFileAttachment>[0]>) {
   return {
@@ -78,5 +79,27 @@ describe("resolveComposerFileAttachment", () => {
     );
     expect(result.attachment).toBeNull();
     expect(result.error).toContain("50MB");
+  });
+});
+
+describe("classifyPickedDocument", () => {
+  const base = { name: "x", sizeBytes: 1024, fileUploadMaxBytes: 50 * 1024 * 1024 };
+
+  it("inlines small common images and streams everything else", () => {
+    expect(classifyPickedDocument({ ...base, mimeType: "image/PNG" })).toBe("image");
+    expect(classifyPickedDocument({ ...base, mimeType: "image/heic" })).toBe("file");
+    expect(classifyPickedDocument({ ...base, mimeType: "application/pdf" })).toBe("file");
+    expect(
+      classifyPickedDocument({ ...base, mimeType: "image/jpeg", sizeBytes: 11 * 1024 * 1024 }),
+    ).toBe("file");
+  });
+
+  it("refuses non-images when the node cannot take streamed files", () => {
+    expect(
+      classifyPickedDocument({ ...base, mimeType: "application/pdf", fileUploadMaxBytes: null }),
+    ).toMatchObject({ error: expect.stringContaining("only takes images") });
+    expect(
+      classifyPickedDocument({ ...base, mimeType: "image/png", fileUploadMaxBytes: null }),
+    ).toBe("image");
   });
 });

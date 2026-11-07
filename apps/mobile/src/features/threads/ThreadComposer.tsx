@@ -16,7 +16,8 @@ import { ComposerToolbarButton, ComposerToolbarRow } from "../../components/Comp
 import type { AnchoredMenuHandle } from "../../components/AnchoredMenu";
 import { GlassSurface } from "../../components/GlassSurface";
 import { ProviderIcon } from "../../components/ProviderIcon";
-import type { DraftComposerAttachment } from "../../lib/composerFiles";
+import { ComposerAttachMenu } from "../../components/ComposerAttachMenu";
+import type { ComposerAttachmentSource, DraftComposerAttachment } from "../../lib/composerFiles";
 import type { ChatFileUploadRecord } from "../../state/composerFileUpload";
 import { runWhileBusy } from "../../lib/runWhileBusy";
 import { useThemeColor } from "../../lib/useThemeColor";
@@ -51,7 +52,7 @@ export function ThreadComposer(props: {
   ) => boolean | void | Promise<boolean | void>;
   readonly attachments: ReadonlyArray<DraftComposerAttachment>;
   readonly onRemoveAttachment: (attachmentId: string) => void;
-  readonly onPickAttachments: () => void | Promise<void>;
+  readonly onPickAttachments: (source: ComposerAttachmentSource) => void | Promise<void>;
   readonly onPasteImages: (uris: ReadonlyArray<string>) => void | Promise<void>;
   readonly onRetryFileUpload?: (attachmentId: string) => void;
   readonly onReattachFile?: (attachmentId: string) => void;
@@ -273,20 +274,28 @@ export function ThreadComposer(props: {
               />
             </View>
             <View className="flex-row items-end gap-1">
-              <Pressable
-                disabled={sending || props.disabled}
-                onPress={() => void props.onPickAttachments()}
-                accessibilityRole="button"
-                accessibilityLabel="Attach files"
-                className="h-11 w-11 items-center justify-center rounded-full active:bg-subtle-strong disabled:opacity-40"
+              <ComposerAttachMenu
+                disabled={sending || (props.disabled ?? false)}
+                onPick={(source) => void props.onPickAttachments(source)}
+                onClose={restoreFocus}
               >
-                <SymbolView
-                  name="paperclip"
-                  size={18}
-                  tintColor={iconColor as string}
-                  type="monochrome"
-                />
-              </Pressable>
+                {(open) => (
+                  <Pressable
+                    disabled={sending || props.disabled}
+                    onPress={open}
+                    accessibilityRole="button"
+                    accessibilityLabel="Attach files"
+                    className="h-11 w-11 items-center justify-center rounded-full active:bg-subtle-strong disabled:opacity-40"
+                  >
+                    <SymbolView
+                      name="paperclip"
+                      size={18}
+                      tintColor={iconColor as string}
+                      type="monochrome"
+                    />
+                  </Pressable>
+                )}
+              </ComposerAttachMenu>
               <ComposerEditor
                 ref={editorRef}
                 value={text}

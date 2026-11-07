@@ -35,7 +35,11 @@ at commit `e455200077`, adapted to Ryco's shared trigger and ranking logic: the
 autocomplete menu (`src/features/threads/composerCommandMenuModel.ts`,
 `useComposerCommandMenu.ts` and `ComposerCommandPopover.tsx`, from upstream's
 `use-composer-command-menu.ts`, `composerSlashSkillSearch.ts` and
-`ComposerCommandPopover.tsx`).
+`ComposerCommandPopover.tsx`), the attach menu and Files-app picking
+(`src/components/ComposerAttachMenu.tsx` and `pickComposerDocuments` in
+`src/lib/composerFiles.ts`, from upstream's `ComposerAttachmentButton.tsx` and
+`composerImages.ts`), and the share-extension display-name config plugin
+(`plugins/withShareExtensionDisplayName.cjs`, verbatim).
 
 `pingdotgg/t3code` is Copyright (c) 2026 T3 Tools Inc. and licensed under the MIT
 License; that notice is retained below as required. The four vendored native
