@@ -39,6 +39,7 @@ export interface BundleClosureReport {
   readonly name: string;
   readonly chunk: string | null;
   readonly beyondBoot: boolean;
+  readonly beyondChunk?: string;
   readonly size: ClosureSize | null;
   readonly maxGzipBytes: number | null;
 }
@@ -92,12 +93,23 @@ export function checkBundleBudgets(
       continue;
     }
     const closure = staticClosure(graph, chunk);
-    const measured = budget.beyondBoot ? [...closure].filter((file) => !boot.has(file)) : closure;
+    const outer = budget.beyondChunk ? findChunk(graph, budget.beyondChunk) : null;
+    if (budget.beyondChunk && !outer) {
+      violations.push({
+        closure: budget.name,
+        message: `No '${budget.beyondChunk}-*.js' chunk was emitted to measure beyond; update the bundle budget policy if it was renamed or merged.`,
+      });
+    }
+    const loaded = outer ? staticClosure(graph, outer) : null;
+    const measured = [...closure].filter(
+      (file) => !(budget.beyondBoot && boot.has(file)) && !loaded?.has(file),
+    );
     const size = closureSize(graph, measured);
     closures.push({
       name: budget.name,
       chunk,
       beyondBoot: budget.beyondBoot,
+      ...(budget.beyondChunk ? { beyondChunk: budget.beyondChunk } : {}),
       size,
       maxGzipBytes: budget.maxGzipBytes,
     });
@@ -239,7 +251,11 @@ export function formatBundleBudgetReport(report: BundleBudgetReport): string {
     "| --- | --- | ---: | ---: | ---: | ---: |",
   ];
   for (const closure of report.closures) {
-    const scope = closure.beyondBoot ? " (beyond boot)" : "";
+    const scope = closure.beyondChunk
+      ? ` (beyond ${closure.beyondBoot ? "boot and " : ""}${closure.beyondChunk})`
+      : closure.beyondBoot
+        ? " (beyond boot)"
+        : "";
     lines.push(
       `| ${closure.name}${scope} | ${closure.chunk ? `\`${closure.chunk}\`` : "missing"} | ${closure.size?.files ?? "-"} | ${closure.size ? formatKib(closure.size.rawBytes) : "-"} | ${closure.size ? formatKib(closure.size.gzipBytes) : "-"} | ${closure.maxGzipBytes === null ? "-" : formatKib(closure.maxGzipBytes)} |`,
     );

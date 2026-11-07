@@ -211,6 +211,71 @@ describe("bundle budgets", () => {
     );
   });
 
+  it("measures a closure beyond the surface that imports it", () => {
+    withDist(
+      {
+        "main-AAAAAAAA.js": {
+          code: 'import"./runtime-BBBBBBBB.js";import("./Panel-CCCCCCCC.js");',
+          sources: ["../../src/main.tsx"],
+        },
+        "runtime-BBBBBBBB.js": { code: "export const r = 1;" },
+        "Panel-CCCCCCCC.js": {
+          code: 'import"./runtime-BBBBBBBB.js";import"./panelShared-DDDDDDDD.js";import("./View3d-EEEEEEEE.js");',
+          sources: ["../../src/components/Panel.tsx"],
+        },
+        "panelShared-DDDDDDDD.js": { code: "export const p = 1;" },
+        "View3d-EEEEEEEE.js": {
+          code: 'import"./panelShared-DDDDDDDD.js";import"./Panel-CCCCCCCC.js";',
+          sources: ["../../../../node_modules/three/build/three.core.js"],
+        },
+      },
+      (distDir) => {
+        const report = checkBundleBudgets(distDir, {
+          bootChunk: "main",
+          closures: [
+            {
+              name: "3D",
+              chunk: "View3d",
+              beyondBoot: true,
+              beyondChunk: "Panel",
+              maxGzipBytes: 10_000,
+              maxFiles: 1,
+              forbiddenSources: [],
+            },
+            {
+              name: "Panel",
+              chunk: "Panel",
+              beyondBoot: true,
+              maxGzipBytes: null,
+              forbiddenSources: [{ pattern: /^node_modules\/three\//u, reason: "three.js" }],
+            },
+          ],
+        });
+        assert.deepStrictEqual(report.violations, []);
+        // Only the 3D chunk itself: the panel and its shared chunk are already loaded.
+        assert.equal(report.closures[0]?.size?.files, 1);
+        assert.match(formatBundleBudgetReport(report), /3D \(beyond boot and Panel\)/u);
+        const missing = checkBundleBudgets(distDir, {
+          bootChunk: "main",
+          closures: [
+            {
+              name: "3D",
+              chunk: "View3d",
+              beyondBoot: true,
+              beyondChunk: "Gone",
+              maxGzipBytes: null,
+              forbiddenSources: [],
+            },
+          ],
+        });
+        assert.match(
+          missing.violations[0]!.message,
+          /No 'Gone-\*\.js' chunk was emitted to measure beyond/u,
+        );
+      },
+    );
+  });
+
   it("keeps the WebAssembly engine out of the diff highlight worker", () => {
     const [workerRule] = DEFAULT_BUNDLE_BUDGET_POLICY.chunks ?? [];
     assert.isDefined(workerRule);

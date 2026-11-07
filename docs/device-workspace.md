@@ -44,6 +44,33 @@ Tabs are kept per chat across reloads, so a closed tab stays closed.
 While a device is starting, for this chat (from its picker, by its agent, or attached to it),
 every client viewing the chat shows "Starting <device>… this can take a minute."
 
+## 3D view
+
+**3D view** (the cube in a device tab's toolbar) shows the live device as a 3D body: an iPhone
+with its Dynamic Island or notch and rear camera, an iPad, or a generic Android phone with a
+punch-hole camera. The bodies are built in code from the same chassis numbers as the 2D frame
+(bezel, screen corner, side buttons) and the device's own screen size; no vendor artwork or
+models are used. The choice is kept per tab across reloads.
+
+- **Press on the screen** to touch it: taps, drags and scrolls go over the same live input as the
+  2D view. **Drag outside the screen** (or Alt-drag anywhere) to turn the device; it settles at
+  the front, either side or the back, keeping a turn you left within each view's range.
+- **Trackpad:** two-finger scroll turns the device; pinch (Ctrl-scroll with a mouse) zooms.
+- **Front**, **Side**, **Back** and **Restore 3D view** over the view jump to a view; Restore
+  also resets the zoom.
+- Rotating the device turns the body. An iOS simulator keeps its picture on the turned body, as
+  the 2D view does; an Android emulator sends its picture upright, and the body lies on its side.
+
+3D is unavailable (the button says why) without WebGL, while the pane samples screenshots
+instead of streaming video (no WebCodecs, the hosted relay, an Android emulator without scrcpy),
+and while the Tools drawer's element frames are on. The tab then shows the 2D view, and returns
+to 3D once it can. The floating window is always 2D.
+
+three.js loads only when a tab first turns 3D on, as its own chunk (`deviceViewer3d`, budgeted in
+`scripts/perf/model.ts`). The view renders only when something changes (a new frame, motion, a
+resize), uses a low-power WebGL context, draws the video decoder's canvas as its screen texture,
+and releases the context and every GPU resource when the tab closes or switches.
+
 ## Floating device over chat
 
 **Float device over chat** in a device's toolbar (or its tab's menu) moves the live,

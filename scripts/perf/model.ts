@@ -200,6 +200,12 @@ export interface BundleClosureBudget {
    * server speaks HTTP/1.1, so a phase's files queue on six connections.
    */
   readonly maxFiles?: number;
+  /**
+   * Measure only what loads beyond this chunk's static closure too (and
+   * boot's, with `beyondBoot`): the cost of a dynamic import made from a
+   * surface that is already open, such as the device panel's 3D view.
+   */
+  readonly beyondChunk?: string;
   readonly forbiddenSources: readonly ForbiddenBundleSource[];
 }
 
@@ -427,8 +433,17 @@ const PROJECT_NODES_DIALOG_STORE_SOURCES: readonly ForbiddenBundleSource[] = [
   },
 ];
 
+/** three.js: only the device panel's 3D view loads it, with its own dynamic import. */
+const THREE_SOURCES: readonly ForbiddenBundleSource[] = [
+  {
+    pattern: /^node_modules\/three\//u,
+    reason: "three.js (the device 3D view loads it on demand)",
+  },
+];
+
 /** The thread routes (server thread and draft) share their chat graph. */
 const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
+  ...THREE_SOURCES,
   ...HOSTED_RUNTIME_SOURCES,
   ...DIFF_RENDERER_SOURCES,
   ...CHAT_DEFERRED_SOURCES,
@@ -544,6 +559,7 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
         ...DESKTOP_ACCOUNT_PROMPT_SOURCES,
         ...PROJECT_COPY_RPC_SOURCES,
         ...PROJECT_NODES_DIALOG_STORE_SOURCES,
+        ...THREE_SOURCES,
       ],
     },
     {
@@ -568,6 +584,7 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
         ...PULL_REQUESTS_POPOVER_SOURCES,
         ...RELAY_WIRE_SCHEMA_SOURCES,
         ...PAIRING_SOURCES,
+        ...THREE_SOURCES,
       ],
     },
     {
@@ -601,6 +618,29 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       beyondBoot: true,
       maxGzipBytes: null,
       forbiddenSources: HOSTED_RUNTIME_SOURCES,
+    },
+    {
+      // The device panel's 3D view: three.js with the procedural device body,
+      // loaded by its own dynamic import once a tab turns 3D on. 146.4 KiB
+      // gzip on 2026-11-07 (three 0.187: the WebGL renderer with its shader
+      // library, physical materials, extruded shapes and the room
+      // environment). Measured beyond the device panel, which it imports the
+      // shared chassis numbers from.
+      name: "Device 3D view",
+      chunk: "deviceViewer3d",
+      beyondBoot: true,
+      beyondChunk: "SimulatorPanel",
+      maxGzipBytes: 150 * KIB,
+      maxFiles: 1,
+      forbiddenSources: HOSTED_RUNTIME_SOURCES,
+    },
+    {
+      // The device panel itself must not carry three.js statically.
+      name: "Device panel",
+      chunk: "SimulatorPanel",
+      beyondBoot: true,
+      maxGzipBytes: null,
+      forbiddenSources: [...HOSTED_RUNTIME_SOURCES, ...THREE_SOURCES],
     },
   ],
   chunks: [
