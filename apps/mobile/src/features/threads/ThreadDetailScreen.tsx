@@ -2557,14 +2557,17 @@ export function ThreadDetailScreen(props: {
     threadLoaded: thread !== undefined && thread !== null && threadDetailLoaded,
     ready: (environmentRow?.mutationReady ?? false) && !cachedView.promptsDisabled,
     pendingApprovals,
-    respond: (approval, decision) =>
-      respondToThreadApproval({
+    respond: (approval, decision) => {
+      // An earlier refusal no longer applies once this one is carried out.
+      setSendError(null);
+      return respondToThreadApproval({
         api: ensureEnvironmentApi(environmentId),
         threadId,
         requestId: approval.requestId,
         decision,
         approvalIdentity: approval.approvalIdentity,
-      }),
+      });
+    },
     send: (text) => onSend(text, []),
     refuse: setSendError,
   });
