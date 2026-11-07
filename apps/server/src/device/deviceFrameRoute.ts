@@ -3,8 +3,9 @@
  *
  * H.264 frames use a dedicated socket so a slow decoder can never queue video
  * ahead of chat, lifecycle, or input RPC traffic. `DeviceFrameTransport` owns
- * the bounded queue and keyframe-aligned dropping policy; this route adapts
- * Effect's socket to that sink and accepts resync requests.
+ * the bounded queue and keyframe-aligned dropping policy; `deviceFrameViewer`
+ * owns the socket's protocol, which a stream tunnelled through a relay channel
+ * shares; this route authenticates the upgrade and adapts Effect's socket.
  *
  * It also carries the pane's live input (`@ryco/shared/deviceLiveInput`):
  * touch phases, keys and pasted text, handed to a `DeviceInputSession`. Only
@@ -12,20 +13,10 @@
  * socket says which on open with a `device.input.ready` message, and other
  * sessions' input messages are ignored.
  */
-import {
-  DEVICE_FRAME_RESYNC_MESSAGE,
-  DEVICE_FRAME_WS_PATH,
-  DEVICE_FRAME_WS_UDID_PARAM,
-} from "@ryco/shared/deviceFrame";
+import { DEVICE_FRAME_WS_PATH, DEVICE_FRAME_WS_UDID_PARAM } from "@ryco/shared/deviceFrame";
 import { DeviceUdid } from "@ryco/contracts";
 import { Effect, Layer, Option } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
-
-import {
-  DEVICE_INPUT_ERROR_MESSAGE,
-  DEVICE_INPUT_READY_MESSAGE,
-  decodeDeviceLiveInput,
-} from "@ryco/shared/deviceLiveInput";
 
 import { respondToAuthError } from "../auth/http.ts";
 import { ServerAuth } from "../auth/Services/ServerAuth.ts";
@@ -33,26 +24,10 @@ import { SessionCredentialService } from "../auth/Services/SessionCredentialServ
 import { authorizeRpcPrincipal } from "../auth/wsAuthorization.ts";
 import { directRpcPrincipal } from "../ws/RpcPrincipal.ts";
 import { DeviceService } from "./Services/DeviceService.ts";
-import { createDeviceInputSession } from "./deviceInputSession.ts";
 import type { DeviceFrameSink } from "./deviceFrameTransport.ts";
+import { openDeviceFrameViewer } from "./deviceFrameViewer.ts";
 
-/** A resync request is a few dozen bytes; anything larger is not one. */
-const MAX_CLIENT_MESSAGE_BYTES = 1_024;
-
-export function decodeResyncRequest(message: string | Uint8Array): "resync" | null {
-  const text = typeof message === "string" ? message : Buffer.from(message).toString("utf8");
-  if (text.length > MAX_CLIENT_MESSAGE_BYTES) return null;
-  try {
-    const parsed: unknown = JSON.parse(text);
-    return typeof parsed === "object" &&
-      parsed !== null &&
-      (parsed as { type?: unknown }).type === DEVICE_FRAME_RESYNC_MESSAGE
-      ? "resync"
-      : null;
-  } catch {
-    return null;
-  }
-}
+export { decodeResyncRequest } from "./deviceFrameViewer.ts";
 
 /**
  * Wrap a socket writer and account for bytes handed off but not yet settled.
@@ -124,54 +99,31 @@ export const deviceFrameRouteLayer = Layer.effectDiscard(
 
         const socket = yield* request.upgrade;
         const writer = yield* socket.writer;
+        const { pull } = yield* socket.reader;
         let open = true;
-        const sendText = (message: unknown) => {
-          if (!open) return;
-          void Effect.runPromise(writer.write(JSON.stringify(message))).catch(() => undefined);
-        };
-        const sink = makeDeviceFrameSink({
-          send: (bytes) => Effect.runPromise(writer.write(bytes)).catch(() => undefined),
-          isOpen: () => open,
+        const viewer = openDeviceFrameViewer({
+          udid,
+          canDrive,
+          sink: makeDeviceFrameSink({
+            send: (bytes) => Effect.runPromise(writer.write(bytes)).catch(() => undefined),
+            isOpen: () => open,
+          }),
+          sendText: (text) => {
+            void Effect.runPromise(writer.write(text)).catch(() => undefined);
+          },
+          target: deviceService.manager,
         });
-        const unsubscribe = deviceService.manager.subscribeFrames(udid, sink);
-        const input = canDrive
-          ? createDeviceInputSession({
-              udid,
-              target: deviceService.manager,
-              report: (kind, message) =>
-                sendText({ type: DEVICE_INPUT_ERROR_MESSAGE, input: kind, message }),
-            })
-          : null;
         yield* Effect.addFinalizer(() =>
           Effect.sync(() => {
             open = false;
-            unsubscribe();
-            // Lifts a finger still down and releases held keys.
-            void input?.close();
+            viewer.close();
           }),
         );
 
-        // Decoder errors and sequence gaps request fresh codec parameters plus
-        // an IDR on this same stream. Live input goes to the input session.
-        // Unknown messages are deliberately ignored.
-        const { pull } = yield* socket.reader;
-        sendText({ type: DEVICE_INPUT_READY_MESSAGE, input: canDrive });
         const readClientMessages = pull.pipe(
           Effect.flatMap((messages) =>
             Effect.sync(() => {
-              for (const message of messages) {
-                if (decodeResyncRequest(message) !== null) {
-                  Effect.runFork(
-                    Effect.promise(() =>
-                      deviceService.manager.requestKeyframe(udid).catch(() => undefined),
-                    ),
-                  );
-                  continue;
-                }
-                if (!input) continue;
-                const live = decodeDeviceLiveInput(message);
-                if (live) input.push(live);
-              }
+              for (const message of messages) viewer.receive(message);
             }),
           ),
           Effect.forever,

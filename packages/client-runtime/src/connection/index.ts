@@ -1,6 +1,7 @@
 export * from "./connection.ts";
 export * from "./connectivityRecovery.ts";
 export * from "./deviceFrameSource.ts";
+export * from "./hostedDeviceFrameSource.ts";
 export * from "./catalog.ts";
 export * from "./environmentRoutes.ts";
 export * from "./environmentRouteUpgrader.ts";

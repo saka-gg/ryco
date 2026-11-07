@@ -1,5 +1,6 @@
 import type { HostedHubNode } from "@ryco/client-runtime/authorization";
 import type { HostedEnvironmentSessions } from "@ryco/client-runtime/authorization/hostedEnvironmentSessions";
+import { hostedDeviceFrameSources } from "@ryco/client-runtime/connection";
 import { createKnownEnvironment } from "@ryco/client-runtime/knownEnvironment";
 import { bindHostedGitActionDelivery, createDeviceRpcClient } from "@ryco/client-runtime/rpc";
 import type { EnvironmentId } from "@ryco/contracts";
@@ -140,8 +141,20 @@ export function createHostedEnvironmentConnection(
     getConnectionLabel: () => node.label,
     getEnvironmentId: () => environmentId,
   });
+  // Device video and live input ride the relay channel's frame tunnel; see
+  // `hostedDeviceFrameSources`. Screenshots stay the fallback.
   const client = dispatchReplay.wrap(
-    createWsRpcClient(transport, createDeviceRpcClient(transport, { manageTransport: false })),
+    createWsRpcClient(
+      transport,
+      createDeviceRpcClient(transport, {
+        manageTransport: false,
+        openFrameSource: hostedDeviceFrameSources({
+          channel: () => factory.currentFrameTunnelChannel(),
+          readiness: hostedEnvironmentResumeReadiness(sessions, environmentId, generation),
+        }),
+        frameSourceNeedsRelayTunnel: true,
+      }),
+    ),
   );
   const connection = createEnvironmentConnection({
     kind: "primary",

@@ -82,6 +82,10 @@
       "types": "./src/connection/nodeBrowserFrameSource.ts",
       "import": "./src/connection/nodeBrowserFrameSource.ts"
     },
+    "./deviceVideo": {
+      "types": "./src/deviceVideo/index.ts",
+      "import": "./src/deviceVideo/index.ts"
+    },
     "./connection/hubLinkedRoutes": {
       "types": "./src/connection/hubLinkedRoutes.ts",
       "import": "./src/connection/hubLinkedRoutes.ts"

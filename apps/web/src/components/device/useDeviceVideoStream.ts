@@ -1,8 +1,12 @@
-// Adapted from Synara v0.7.2 (MIT); the decode-queue guard and stall watchdog
-// follow t3code's device stream (MIT). See THIRD_PARTY_NOTICES.md.
+// The decoder is shared with the phone's device viewer
+// (`@ryco/client-runtime/deviceVideo`); this hook owns the canvas and the socket.
 import type { DeviceFrameSource, DeviceFrameSourceHandlers } from "@ryco/client-runtime/connection";
+import {
+  createDeviceVideoDecoder,
+  deviceWebCodecs,
+  type DeviceVideoDecoder,
+} from "@ryco/client-runtime/deviceVideo";
 import type { DeviceUdid } from "@ryco/contracts";
-import type { DeviceFrame } from "@ryco/shared/deviceFrame";
 import {
   DEVICE_INPUT_ERROR_MESSAGE,
   decodeDeviceLiveInputServerMessage,
@@ -11,52 +15,17 @@ import {
 } from "@ryco/shared/deviceLiveInput";
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 
-import { createDeviceFrameGateState, stepDeviceFrameGate } from "./deviceFrameGate";
-
+export {
+  DEVICE_DECODE_QUEUE_LIMIT,
+  DEVICE_DECODE_STALL_MS,
+  DEVICE_FIRST_FRAME_TIMEOUT_MS,
+} from "@ryco/client-runtime/deviceVideo";
 export type { DeviceVideoStatus } from "@ryco/client-runtime/state/device/previewSampler";
 import type { DeviceVideoStatus } from "@ryco/client-runtime/state/device/previewSampler";
 
-function avcCodecString(payload: Uint8Array): string | null {
-  for (let offset = 0; offset + 7 < payload.byteLength; offset += 1) {
-    const long =
-      payload[offset] === 0 &&
-      payload[offset + 1] === 0 &&
-      payload[offset + 2] === 0 &&
-      payload[offset + 3] === 1;
-    const short = payload[offset] === 0 && payload[offset + 1] === 0 && payload[offset + 2] === 1;
-    if (!long && !short) continue;
-    const nal = offset + (long ? 4 : 3);
-    if (((payload[nal] ?? 0) & 0x1f) !== 7) continue;
-    return `avc1.${[payload[nal + 1], payload[nal + 2], payload[nal + 3]]
-      .map((value) => (value ?? 0).toString(16).padStart(2, "0"))
-      .join("")}`;
-  }
-  return null;
-}
-
-/**
- * Frames the decoder may hold before the stream is treated as behind. A
- * healthy low-latency decoder holds at most one; a backlog this deep means the
- * picture lags the device, and catching up frame by frame only adds latency.
- */
-export const DEVICE_DECODE_QUEUE_LIMIT = 8;
-/**
- * How long the decoder may sit on queued frames without painting one, and how
- * long an open stream may go without a first picture, before a fresh codec
- * configuration and keyframe are requested. A still screen sends nothing, so
- * silence alone is not a stall: only unanswered work is.
- */
-export const DEVICE_DECODE_STALL_MS = 2_000;
-export const DEVICE_FIRST_FRAME_TIMEOUT_MS = 3_000;
-/** Each unanswered first-frame request doubles the wait, up to this. */
-const DEVICE_FIRST_FRAME_TIMEOUT_MAX_MS = 30_000;
-
 /** Whether this browser can decode the native H.264 stream. */
 export function deviceVideoDecodingSupported(): boolean {
-  return (
-    typeof globalThis.VideoDecoder === "function" &&
-    typeof globalThis.EncodedVideoChunk === "function"
-  );
+  return deviceWebCodecs() !== null;
 }
 
 /**
@@ -108,180 +77,57 @@ export function useDeviceVideoStream(input: {
       setError(null);
       return;
     }
-    if (!deviceVideoDecodingSupported()) {
+    const codecs = deviceWebCodecs();
+    if (codecs === null) {
       setStatus("unsupported");
       return;
     }
 
     const generation = ++generationRef.current;
-    let gate = createDeviceFrameGateState();
-    let decoder: VideoDecoder | null = null;
     let source: DeviceFrameSource | null = null;
-    let parameterSets: Uint8Array | null = null;
-    let painted = false;
-    let firstFrameTimeoutMs = DEVICE_FIRST_FRAME_TIMEOUT_MS;
     /** Whether the current socket was cleared for input; read by `send`. */
     let inputSocketReady = false;
+    const current = () => generation === generationRef.current;
     sendRef.current = (message) =>
       current() && inputSocketReady && (source?.sendText(JSON.stringify(message)) ?? false);
-    /** When the decoder last painted, or was last handed work while idle. */
-    let progressAt = performance.now();
-    const current = () => generation === generationRef.current;
-    setStatus("connecting");
-    setError(null);
+    const decoder: DeviceVideoDecoder = createDeviceVideoDecoder({
+      udid,
+      codecs,
+      paint: (videoFrame) => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        if (
+          canvas.width !== videoFrame.displayWidth ||
+          canvas.height !== videoFrame.displayHeight
+        ) {
+          canvas.width = videoFrame.displayWidth;
+          canvas.height = videoFrame.displayHeight;
+        }
+        canvas.getContext("2d")?.drawImage(videoFrame as VideoFrame, 0, 0);
+      },
+      requestResync: () => void source?.requestResync(),
+      onStatus: (next, message) => {
+        if (!current()) return;
+        setStatus(next);
+        if (next === "streaming" || message !== null) setError(message);
+      },
+      onDimensions: (width, height) => {
+        if (current()) setDimensions({ width, height });
+      },
+      now: () => performance.now(),
+    });
 
-    // Ask for a fresh configuration and keyframe when work goes unanswered:
-    // no first picture on an open stream, or a decoder holding frames without
-    // painting any. Resync requests are rate-limited by the source.
-    const watchdog = setInterval(() => {
-      if (!current() || !source) return;
-      const now = performance.now();
-      if (!painted && now - progressAt >= firstFrameTimeoutMs) {
-        // Each resync restarts the capture, so a stream that never paints
-        // (a decoder that cannot handle it) is asked less and less often.
-        progressAt = now;
-        firstFrameTimeoutMs = Math.min(firstFrameTimeoutMs * 2, DEVICE_FIRST_FRAME_TIMEOUT_MAX_MS);
-        source.requestResync();
-        return;
-      }
-      if (decoder && decoder.decodeQueueSize > 0 && now - progressAt >= DEVICE_DECODE_STALL_MS) {
-        progressAt = now;
-        restart();
-      }
-    }, 500);
-
-    const closeDecoder = () => {
-      parameterSets = null;
-      try {
-        if (decoder?.state !== "closed") decoder?.close();
-      } catch {
-        // An errored decoder can already be closed.
-      }
-      decoder = null;
-    };
-    const fail = (message: string) => {
-      if (!current()) return;
-      closeDecoder();
-      gate = createDeviceFrameGateState();
-      setError(message);
-      setStatus("error");
-    };
-    /**
-     * Drop the decoder and its backlog and wait for a fresh configuration and
-     * keyframe. The canvas keeps the last picture meanwhile, so a viewer sees
-     * a brief hold rather than a spinner.
-     */
-    const restart = () => {
-      closeDecoder();
-      gate = createDeviceFrameGateState();
-      // Until a fresh keyframe paints, the first-frame watchdog owns the
-      // retry: a resync inside the source's cooldown is dropped, and without
-      // a decoder nothing else would ask again.
-      painted = false;
-      progressAt = performance.now();
-      source?.requestResync();
-    };
-    const configure = (frame: DeviceFrame) => {
-      const codec = avcCodecString(frame.payload);
-      if (!codec) {
-        fail("The simulator sent video parameters Ryco could not read.");
-        source?.requestResync();
-        return;
-      }
-      closeDecoder();
-      const next = new VideoDecoder({
-        output: (videoFrame) => {
-          try {
-            if (!current()) return;
-            const canvas = canvasRef.current;
-            if (!canvas) return;
-            if (
-              canvas.width !== videoFrame.displayWidth ||
-              canvas.height !== videoFrame.displayHeight
-            ) {
-              canvas.width = videoFrame.displayWidth;
-              canvas.height = videoFrame.displayHeight;
-              setDimensions({ width: videoFrame.displayWidth, height: videoFrame.displayHeight });
-            }
-            canvas.getContext("2d")?.drawImage(videoFrame, 0, 0);
-            painted = true;
-            firstFrameTimeoutMs = DEVICE_FIRST_FRAME_TIMEOUT_MS;
-            progressAt = performance.now();
-            setStatus("streaming");
-            setError(null);
-          } finally {
-            videoFrame.close();
-          }
-        },
-        error: (decoderError) => {
-          fail(decoderError.message || "The simulator video decoder failed.");
-          source?.requestResync();
-        },
-      });
-      try {
-        next.configure({ codec, optimizeForLatency: true });
-        decoder = next;
-        parameterSets = frame.payload.slice();
-      } catch (configureError) {
-        fail(
-          configureError instanceof Error ? configureError.message : "Video decoder setup failed.",
-        );
-      }
-    };
-    const decode = (frame: DeviceFrame, keyframe: boolean) => {
-      if (!decoder || decoder.state !== "configured") return;
-      if (decoder.decodeQueueSize > DEVICE_DECODE_QUEUE_LIMIT) {
-        restart();
-        return;
-      }
-      if (decoder.decodeQueueSize === 0) progressAt = performance.now();
-      let data = frame.payload;
-      if (keyframe && parameterSets) {
-        const combined = new Uint8Array(parameterSets.byteLength + data.byteLength);
-        combined.set(parameterSets);
-        combined.set(data, parameterSets.byteLength);
-        data = combined;
-        parameterSets = null;
-      }
-      try {
-        decoder.decode(
-          new EncodedVideoChunk({
-            type: keyframe ? "key" : "delta",
-            timestamp: Math.round(frame.header.timestampMs * 1_000),
-            data,
-          }),
-        );
-      } catch (decodeError) {
-        fail(
-          decodeError instanceof Error
-            ? decodeError.message
-            : "A simulator frame could not be decoded.",
-        );
-        source?.requestResync();
-      }
-    };
-    const onFrame = (frame: DeviceFrame) => {
-      if (!current()) return;
-      const step = stepDeviceFrameGate(gate, frame.header, udid);
-      gate = step.state;
-      if (step.requestKeyframe) source?.requestResync();
-      if (step.action.kind === "configure") configure(frame);
-      if (step.action.kind === "decode") decode(frame, step.action.keyframe);
-    };
     source = openFrameSource(udid, {
-      onFrame,
+      onFrame: (frame) => {
+        if (current()) decoder.push(frame);
+      },
       onReset: (reason) => {
         if (!current()) return;
-        closeDecoder();
-        gate = createDeviceFrameGateState();
-        if (reason === "decode-failed") setError("The simulator sent a malformed frame.");
+        decoder.reset(reason);
         if (reason !== "decode-failed") {
           inputSocketReady = false;
           setInputReady({ udid, ready: false });
         }
-        painted = false;
-        progressAt = performance.now();
-        setStatus("recovering");
       },
       // The server says whether this socket may drive the device after each
       // (re)connect; a socket that ends takes the permission with it, and an
@@ -301,10 +147,9 @@ export function useDeviceVideoStream(input: {
 
     return () => {
       generationRef.current += 1;
-      clearInterval(watchdog);
       sendRef.current = () => false;
       source?.close();
-      closeDecoder();
+      decoder.close();
     };
   }, [canvasRef, openFrameSource, udid]);
 

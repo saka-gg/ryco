@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DeviceEvent } from "@ryco/contracts";
+import { RELAY_FRAME_TUNNEL_VERSION } from "@ryco/shared/relayFrameTunnel";
 
 import type { BootOwnershipStore } from "./bootOwnership.ts";
 import { DeviceBackendError } from "./DeviceBackend.ts";
@@ -8,6 +9,7 @@ import { DEVICE_THREAD_ATTACHMENT_LIMIT } from "@ryco/contracts";
 import {
   DEVICE_IDLE_SHUTDOWN_MS,
   DEVICE_OPEN_PANE_REQUEST_HOLD_MS,
+  DEVICE_RELAY_FRAME_TUNNEL_VERSION,
   DeviceManager,
 } from "./DeviceManager.ts";
 import { FakeDeviceBackend } from "./FakeDeviceBackend.ts";
@@ -102,6 +104,19 @@ async function settleAttach(manager: DeviceManager, threadId: string): Promise<v
 }
 
 describe("DeviceManager attachment", () => {
+  it("advertises the relay frame tunnel on every thread state", async () => {
+    expect(DEVICE_RELAY_FRAME_TUNNEL_VERSION).toBe(RELAY_FRAME_TUNNEL_VERSION);
+    const { backend, manager } = makeManager();
+    await backend.boot(DEVICE_A);
+
+    expect((await manager.getThreadState(THREAD_A)).relayFrameTunnel).toBe(
+      RELAY_FRAME_TUNNEL_VERSION,
+    );
+    expect((await manager.attach(THREAD_A, DEVICE_A)).relayFrameTunnel).toBe(
+      RELAY_FRAME_TUNNEL_VERSION,
+    );
+  });
+
   it("attaches a thread to one device and streams it", async () => {
     const { backend, manager, events } = makeManager();
     await backend.boot(DEVICE_A);

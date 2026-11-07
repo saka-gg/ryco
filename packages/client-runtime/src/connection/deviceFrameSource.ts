@@ -13,7 +13,23 @@ export const DEVICE_FRAME_RECONNECT_BASE_MS = 500;
 export const DEVICE_FRAME_RECONNECT_MAX_MS = 5_000;
 export const DEVICE_FRAME_RESYNC_COOLDOWN_MS = 1_000;
 
-export type DeviceFrameSourceResetReason = "closed" | "error" | "decode-failed";
+/**
+ * `unavailable` is terminal: this connection cannot carry the stream at all (a
+ * hosted relay channel without the frame tunnel), so the source stops and the
+ * viewer falls back to screenshots.
+ */
+export type DeviceFrameSourceResetReason = "closed" | "error" | "decode-failed" | "unavailable";
+
+/**
+ * Thrown by a socket constructor that can never open on this connection; the
+ * source reports `unavailable` and stops instead of retrying.
+ */
+export class DeviceFrameSourceUnavailableError extends Error {
+  constructor(message = "This connection cannot stream device frames.") {
+    super(message);
+    this.name = "DeviceFrameSourceUnavailableError";
+  }
+}
 
 export interface DeviceFrameSourceHandlers {
   readonly onFrame: (frame: DeviceFrame, generation: number) => void;
@@ -170,8 +186,12 @@ export function createDeviceFrameSource(options: {
       }) as (event: never) => void);
       socket.addEventListener("close", (() => end("closed")) as (event: never) => void);
       socket.addEventListener("error", (() => end("error")) as (event: never) => void);
-    } catch {
+    } catch (error) {
       if (closed || socketGeneration !== generation) return;
+      if (error instanceof DeviceFrameSourceUnavailableError) {
+        options.handlers.onReset("unavailable", { generation: socketGeneration, retryInMs: null });
+        return;
+      }
       const retryInMs = Math.min(
         reconnectMaxMs,
         reconnectBaseMs * 2 ** Math.min(reconnectAttempt, 10),

@@ -35,7 +35,8 @@ The simulator pane's live input follows upstream's device stream at commit
 touches streamed as down, move and up while the pointer moves
 (`apps/web/src/components/device/useDeviceTouchInput.ts`), chunked paste
 (`useDeviceKeyboardInput.ts`, `packages/shared/src/deviceLiveInput.ts`), and the decode-queue
-guard and stall watchdog in `apps/web/src/components/device/useDeviceVideoStream.ts`.
+guard and stall watchdog in `packages/client-runtime/src/deviceVideo/decoder.ts` (used by
+`apps/web/src/components/device/useDeviceVideoStream.ts`).
 
 The device workspace follows upstream at the same commit, under the same copyright and license:
 the floating window's store, layout and drag and resize model

@@ -77,6 +77,7 @@ export const SHARED_PURE_TEST_FILES = [
   "src/relayE2eeTranscripts.test.ts",
   "src/relayE2eeVerificationDisplay.test.ts",
   "src/relayE2eeWire.test.ts",
+  "src/relayFrameTunnel.test.ts",
   "src/relayMessageChunks.test.ts",
   "src/relayPayloadCompression.test.ts",
   "src/rpcAccessPolicy.test.ts",

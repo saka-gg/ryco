@@ -62,6 +62,7 @@ import {
   type DeviceKeyEvent,
   type DeviceLogQuery,
   type DeviceLogResult,
+  type DeviceScreenshotOptions,
   type DeviceSwipeGesture,
   type DeviceTouchPhase,
 } from "./DeviceBackend.ts";
@@ -77,6 +78,15 @@ import {
   type DeviceUiTarget,
   type DeviceUiTargetMatch,
 } from "./uiTreeTargeting.ts";
+
+/**
+ * The relay frame tunnel version this node speaks, advertised on every thread
+ * state (`ThreadDeviceState.relayFrameTunnel`). `RELAY_FRAME_TUNNEL_VERSION` of
+ * `@ryco/shared/relayFrameTunnel`, which a test holds this to. Not imported:
+ * the manager is on the boot path, and the tunnel's codec loads only with a
+ * channel's first tunnel message.
+ */
+export const DEVICE_RELAY_FRAME_TUNNEL_VERSION = 1;
 
 /**
  * How long a Ryco-booted device stays up after its last consumer settles: no
@@ -1353,7 +1363,7 @@ export class DeviceManager {
 
   async screenshot(
     udid: string,
-    options: { readonly save?: boolean } = {},
+    options: DeviceScreenshotOptions = {},
   ): Promise<DeviceScreenshotResult> {
     return await this.withDeviceAction(udid, () => this.backend.screenshot(udid, options));
   }
@@ -2024,6 +2034,11 @@ export class DeviceManager {
       availability,
       lastError: latest?.lastError ?? attachment.lastError,
       attachPhase: latest?.attachPhase ?? null,
+      // Every stream this manager serves can be tunnelled through an
+      // end-to-end encrypted relay channel (`hubConnector/relayFrameTunnelHost`).
+      ...(availability.kind === "unsupported-platform"
+        ? {}
+        : { relayFrameTunnel: DEVICE_RELAY_FRAME_TUNNEL_VERSION }),
     };
   }
 

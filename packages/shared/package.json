@@ -430,6 +430,10 @@
       "types": "./src/deviceFrame.ts",
       "import": "./src/deviceFrame.ts"
     },
+    "./relayFrameTunnel": {
+      "types": "./src/relayFrameTunnel.ts",
+      "import": "./src/relayFrameTunnel.ts"
+    },
     "./deviceOrientation": {
       "types": "./src/deviceOrientation.ts",
       "import": "./src/deviceOrientation.ts"

@@ -105,6 +105,20 @@ export interface HostedRelaySocketCallbacks {
   onRole(role: RelayEffectiveRole | null): void;
   onFailure(failure: HostedRelayFailure): void;
 }
+/**
+ * `RELAY_FRAME_TUNNEL_MAGIC` of `@ryco/shared/relayFrameTunnel`, repeated here
+ * so the boot-time engine does not load the tunnel codec, which arrives with
+ * the first device viewer. `relayFrameTunnel.test.ts` pins the two together.
+ */
+export const RELAY_ENGINE_FRAME_TUNNEL_MAGIC = 0xfe;
+const RELAY_FRAME_TUNNEL_MAGIC = RELAY_ENGINE_FRAME_TUNNEL_MAGIC;
+
+/** What a bound relay frame tunnel offers the engine (`HostedRelayEngine.bindFrameTunnel`). */
+export interface RelayFrameTunnelPeer {
+  receive(bytes: Uint8Array): void;
+  close(): void;
+}
+
 export interface RelayEngineEvents {
   onOpen(): void;
   onData(bytes: Uint8Array): void;
@@ -565,6 +579,8 @@ export class HostedRelayEngine {
   #inflatingBytes = 0;
   /** At least one outbound message carried the compression advertisement. */
   #advertisedCompression = false;
+  /** The bound relay frame tunnel (`bindFrameTunnel`), which receives its inbound messages. */
+  #frameTunnel: RelayFrameTunnelPeer | null = null;
   /** A §10 close attempt is in flight, or its phase opened. Never both at once. */
   #e2eeClosing = false;
   /** The application asked for the close; it stands until one attempt opens a phase. */
@@ -648,6 +664,36 @@ export class HostedRelayEngine {
       // Every sink copies what it keeps, so the advertised copy is ours to wipe.
       if (outbound !== payload) outbound.fill(0);
     }
+  }
+
+  /**
+   * Bind the relay frame tunnel (`@ryco/shared/relayFrameTunnel`) to this
+   * channel: `peer` receives every authenticated tunnel message and is closed
+   * with the channel, and the returned function sends one tunnel message as an
+   * encrypted record, false when the channel would not take it. Only an
+   * accepted channel locked `e2ee` carries the tunnel (a legacy channel is
+   * plaintext to the Hub), and only one tunnel binds; `null` otherwise.
+   *
+   * Tunnel messages skip the compression advertisement: it is JSON whitespace,
+   * and only JSON RPC messages may carry it.
+   */
+  bindFrameTunnel(peer: RelayFrameTunnelPeer): ((bytes: Uint8Array) => boolean) | null {
+    if (this.#closed || !this.#accepted || this.#mode !== "e2ee" || this.#frameTunnel !== null) {
+      return null;
+    }
+    this.#frameTunnel = peer;
+    return (bytes) => {
+      const channel = this.#e2ee;
+      if (this.#closed || this.#frameTunnel !== peer || this.#mode !== "e2ee" || !channel) {
+        return false;
+      }
+      try {
+        return channel.submit(bytes);
+      } catch {
+        this.#failE2ee(relayE2eeFailure("fatal_post_key"));
+        return false;
+      }
+    };
   }
 
   /**
@@ -1414,6 +1460,13 @@ export class HostedRelayEngine {
       this.#failE2ee(relayE2eeFailure("fatal_post_key"));
       return;
     }
+    // `@ryco/shared/relayFrameTunnel`: authenticated tunnel messages go to the
+    // bound tunnel, never to the RPC parser. One for a tunnel this channel no
+    // longer has is a stream's last frame racing its close.
+    if (this.#mode === "e2ee" && delivered[0] === RELAY_FRAME_TUNNEL_MAGIC) {
+      if (!this.#closed) this.#frameTunnel?.receive(delivered);
+      return;
+    }
     if (this.#mode === "e2ee" && isCompressedRelayPayload(delivered)) {
       const inflated = await this.#inflate(delivered);
       if (inflated === undefined) return;
@@ -1590,6 +1643,9 @@ export class HostedRelayEngine {
     this.#outboundReservations.clear();
     this.#outboundReservedBytes = 0;
     this.#inboundQueuedBytes = 0;
+    const tunnel = this.#frameTunnel;
+    this.#frameTunnel = null;
+    tunnel?.close();
     this.options.callbacks.onRole(null);
     if (code === 1000 && !this.#reported) this.options.callbacks.onSessionStatus("closed");
     try {

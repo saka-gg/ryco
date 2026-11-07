@@ -2485,3 +2485,47 @@ describe("relay failures through the attempt factory", () => {
     expect(lifecycle.shouldReconnect?.()).toBe(false);
   });
 });
+
+describe("HostedRelayEngine frame tunnel", () => {
+  const tunnelMessage = Uint8Array.of(0xfe, 1, 4, 0, 0, 0, 1, 42);
+
+  it("routes authenticated tunnel messages to the bound tunnel and sends without the advertisement", async () => {
+    const { provider, calls } = stubProvider();
+    const { engine, socket, events } = create(callbacks(), realTimers(), provider);
+    authenticate(socket);
+    const received: Uint8Array[] = [];
+    const peer = { receive: (bytes: Uint8Array) => received.push(bytes.slice()), close: vi.fn() };
+    const send = engine.bindFrameTunnel(peer);
+    expect(send).not.toBeNull();
+    expect(engine.bindFrameTunnel({ receive: vi.fn(), close: vi.fn() })).toBeNull();
+
+    expect(send?.(tunnelMessage)).toBe(true);
+    expect(calls.emitted.at(-1)).toEqual(tunnelMessage);
+
+    deliverData(socket, 0, advertisedPayload(tunnelMessage));
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+    expect(received[0]).toEqual(tunnelMessage);
+    expect(events.onData).not.toHaveBeenCalled();
+
+    engine.close();
+    expect(peer.close).toHaveBeenCalledOnce();
+    expect(send?.(tunnelMessage)).toBe(false);
+  });
+
+  it("never binds a legacy channel", () => {
+    const { provider } = stubProvider({}, "legacy");
+    const { engine, socket } = create(callbacks(), realTimers(), provider);
+    authenticate(socket);
+    expect(engine.bindFrameTunnel({ receive: vi.fn(), close: vi.fn() })).toBeNull();
+  });
+
+  it("drops a tunnel message when no tunnel is bound", async () => {
+    const { provider, calls } = stubProvider();
+    const { socket, events } = create(callbacks(), realTimers(), provider);
+    authenticate(socket);
+    deliverData(socket, 0, advertisedPayload(tunnelMessage));
+    await vi.waitFor(() => expect(calls.intercepted).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(events.onData).not.toHaveBeenCalled();
+  });
+});

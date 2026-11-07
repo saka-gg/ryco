@@ -369,6 +369,16 @@ export const ThreadDeviceState = Schema.Struct({
   agentActive: Schema.Boolean,
   availability: DeviceAvailability,
   lastError: Schema.NullOr(Schema.String.check(Schema.isMaxLength(DEVICE_MESSAGE_MAX_LENGTH))),
+  /**
+   * The highest relay frame tunnel version this node speaks
+   * (`@ryco/shared/relayFrameTunnel`): a hosted client on an end-to-end
+   * encrypted relay channel may then stream video and live input through the
+   * channel instead of polling screenshots. Absent on older nodes, which must
+   * never be sent a tunnel message.
+   */
+  relayFrameTunnel: Schema.optional(
+    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 255 })),
+  ),
 });
 export type ThreadDeviceState = typeof ThreadDeviceState.Type;
 
@@ -669,6 +679,13 @@ export const DeviceScreenshotInput = Schema.Struct({
    * Agents leave it unset: they want the bytes, not a file on the user's disk.
    */
   save: Schema.optional(Schema.Boolean),
+  /**
+   * The image format. PNG when absent. Hosted previews ask for JPEG, several
+   * times smaller, so the paced sampler can refresh faster within its bandwidth
+   * cap. A backend that cannot encode JPEG answers PNG, and an older node
+   * ignores the field, so callers read `mimeType` rather than assume.
+   */
+  format: Schema.optional(Schema.Literals(["png", "jpeg"])),
 });
 export type DeviceScreenshotInput = typeof DeviceScreenshotInput.Type;
 
@@ -681,7 +698,7 @@ const DevicePixelDimension = Schema.Int.check(Schema.isBetween({ minimum: 1, max
 export const DeviceScreenshotResult = Schema.Struct({
   udid: DeviceUdid,
   name: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
-  mimeType: Schema.Literal("image/png"),
+  mimeType: Schema.Literals(["image/png", "image/jpeg"]),
   width: DevicePixelDimension,
   height: DevicePixelDimension,
   sizeBytes: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 32 * 1024 * 1024 })),

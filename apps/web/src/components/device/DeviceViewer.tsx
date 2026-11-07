@@ -8,6 +8,7 @@ import type {
 } from "@ryco/contracts";
 import { ROTATE_LEFT, ROTATE_RIGHT } from "@ryco/shared/deviceOrientation";
 import { devicePointSize } from "@ryco/client-runtime/state/device/devicePoint";
+import { deviceVideoStreamAvailable, useDeviceStateStore } from "@ryco/client-runtime/state/device";
 import {
   ArrowLeftIcon,
   CameraIcon,
@@ -23,7 +24,7 @@ import {
   Volume1Icon,
   Volume2Icon,
 } from "lucide-react";
-import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { isHostedHubMode } from "../../env";
 import { readEnvironmentApi } from "../../environmentApi";
@@ -134,10 +135,18 @@ export function DeviceViewer(props: DeviceViewerProps) {
   // screenshots instead of streaming H.264, the way the hosted relay does.
   // Android streams video once its backend says scrcpy runs (`preview`); until
   // then, and on a node without it, the viewer polls screenshots as before.
+  // A hosted client streams through the relay frame tunnel once the node
+  // advertises it (`deviceVideoStreamAvailable`).
+  // A connection that turns out unable to stream (a hosted relay channel that
+  // fell back to the legacy format) falls back to screenshots for that device.
+  const [videoUnavailableUdid, setVideoUnavailableUdid] = useState<string | null>(null);
+  const relayFrameTunnel = useDeviceStateStore(
+    (state) => state.threadByKey[threadKey]?.relayFrameTunnel,
+  );
   const useNativeVideo =
-    Boolean(client?.openFrameSource) &&
-    (device.platform !== "android-emulator" || device.preview === "video") &&
-    deviceVideoDecodingSupported();
+    deviceVideoStreamAvailable(client, { relayFrameTunnel }, device) &&
+    deviceVideoDecodingSupported() &&
+    videoUnavailableUdid !== device.udid;
   const lastInputErrorAt = useRef(0);
   const onInputError = useCallback((inputError: { readonly message: string }) => {
     const now = performance.now();
@@ -156,6 +165,9 @@ export function DeviceViewer(props: DeviceViewerProps) {
     ...(client?.openFrameSource ? { openFrameSource: client.openFrameSource } : {}),
     onInputError,
   });
+  useEffect(() => {
+    if (nativeVideo.status === "unsupported") setVideoUnavailableUdid(device.udid);
+  }, [device.udid, nativeVideo.status]);
   const orientation: DeviceOrientation = device.orientation ?? "portrait";
   const rotationDegrees = useContinuousRotation(orientation);
   const hostedVideo = useDeviceScreenshotStream({
