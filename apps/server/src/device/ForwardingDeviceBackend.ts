@@ -5,6 +5,7 @@ import type {
   DeviceListOptions,
   DeviceLogQuery,
   DeviceLogResult,
+  DeviceScreenshotOptions,
   DeviceSwipeGesture,
   DeviceKeyEvent,
 } from "./DeviceBackend.ts";
@@ -96,7 +97,7 @@ export abstract class ForwardingDeviceBackend implements DeviceBackend {
   }
   screenshot(
     udid: string,
-    options?: { readonly save?: boolean },
+    options?: DeviceScreenshotOptions,
   ): ReturnType<DeviceBackend["screenshot"]> {
     return this.call("screenshot", [udid, options]);
   }

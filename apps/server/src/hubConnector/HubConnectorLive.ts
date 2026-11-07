@@ -61,6 +61,12 @@ import {
 import { makeNodeE2eeSessionDirectory } from "./NodeE2eeSessionDirectory.ts";
 import { relayChannelAuthority, relayChannelPrincipal } from "./relayChannelAuthority.ts";
 import {
+  makeLazyRelayFrameTunnel,
+  relayFrameTunnelCanDrive,
+  withRelayFrameTunnel,
+} from "./relayFrameTunnelChannel.ts";
+import { DeviceService } from "../device/Services/DeviceService.ts";
+import {
   channelDeviceLinks,
   linkedAccessCloseReaction,
   linkedAccessOpenNarrowing,
@@ -742,6 +748,30 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
             void runPromise(Effect.logDebug("relay E2EE channel terminated", value));
           },
         });
+        // Device frame streams tunnelled through this channel; the host and the
+        // device viewer load with the first tunnel message.
+        const frameTunnel = makeLazyRelayFrameTunnel(
+          async () => {
+            const [{ makeRelayFrameTunnelHost }, devices] = await Promise.all([
+              import("./relayFrameTunnelHost.ts"),
+              runPromise(Effect.serviceOption(DeviceService)),
+            ]);
+            return makeRelayFrameTunnelHost({
+              emit: (bytes) => e2ee.emit(bytes),
+              // The device input RPC's rule, read from the principal this
+              // channel's device RPCs use.
+              canDrive: relayFrameTunnelCanDrive(relayRpcPrincipal(effectiveRole, channelId)),
+              devices: Option.getOrNull(devices),
+            });
+          },
+          {
+            onError: (error) => {
+              void runPromise(
+                Effect.logWarning("relay frame tunnel failed", { error: String(error) }),
+              );
+            },
+          },
+        );
         const scope = await runPromise(Scope.make("sequential"));
         try {
           const session = await runPromise(
@@ -772,7 +802,12 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
                 },
                 // §4.3: discrimination on the reassembled, prelude-stripped
                 // payload, and the only path to the RPC parser.
-                interceptor: nodeE2eeRpcInterceptor(e2ee),
+                // Tunnelled frame streams are claimed here, on `e2ee` channels
+                // only, before the parser and the compressor's inbound filter.
+                interceptor: withRelayFrameTunnel(nodeE2eeRpcInterceptor(e2ee), {
+                  endToEndEncrypted: () => e2ee.mode() === "e2ee",
+                  tunnel: frameTunnel,
+                }),
                 // The channel-fatal verdict has already emitted its §11 record
                 // and asked for the close by the time this runs; nothing further
                 // is owed here.
@@ -798,7 +833,11 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
               supportsChunkedMessages: session.supportsChunkedMessages,
               incompleteReassembly: session.incompleteReassembly,
             },
-            release: () => runPromise(Scope.close(scope, Exit.void)),
+            release: () => {
+              // Lifts held touches and keys before the runtime goes.
+              frameTunnel.close();
+              return runPromise(Scope.close(scope, Exit.void));
+            },
           });
           return {
             ...relaySession,
@@ -810,6 +849,7 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
               ),
           };
         } catch (error: unknown) {
+          frameTunnel.close();
           e2ee.dispose();
           await runPromise(Scope.close(scope, Exit.void));
           throw error;

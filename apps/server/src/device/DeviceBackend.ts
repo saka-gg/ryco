@@ -30,6 +30,11 @@ import type {
   DeviceStopRecordingResult,
 } from "@ryco/contracts";
 
+export interface DeviceScreenshotOptions {
+  readonly save?: boolean;
+  readonly format?: "png" | "jpeg";
+}
+
 /**
  * One encoded video frame as the backend produces it. `sequence` is owned by
  * the backend (per device, monotonic) so the transport can detect gaps without
@@ -182,8 +187,12 @@ export interface DeviceBackend {
   /** Turn the device. Backends that cannot reject it. */
   setOrientation(udid: string, orientation: DeviceOrientation): Promise<void>;
 
-  /** `save` writes the PNG beside recordings and reports its path. */
-  screenshot(udid: string, options?: { readonly save?: boolean }): Promise<DeviceScreenshotResult>;
+  /**
+   * `save` writes the PNG beside recordings and reports its path. `format`
+   * asks for JPEG; a backend that cannot encode it answers PNG, so callers
+   * read `mimeType`.
+   */
+  screenshot(udid: string, options?: DeviceScreenshotOptions): Promise<DeviceScreenshotResult>;
   startRecording(udid: string): Promise<DeviceStartRecordingResult>;
   stopRecording(udid: string): Promise<DeviceStopRecordingResult>;
   describeUi(udid: string): Promise<DeviceDescribeUiResult>;

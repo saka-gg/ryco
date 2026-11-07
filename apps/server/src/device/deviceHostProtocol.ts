@@ -85,7 +85,13 @@ export const deviceHostOperations = {
   screenshot: {
     input: Schema.Tuple([
       C.DeviceUdid,
-      Schema.UndefinedOr(Schema.Struct({ save: Schema.optional(Schema.Boolean) })),
+      // An older host ignores `format` and answers PNG, which `mimeType` says.
+      Schema.UndefinedOr(
+        Schema.Struct({
+          save: Schema.optional(Schema.Boolean),
+          format: Schema.optional(Schema.Literals(["png", "jpeg"])),
+        }),
+      ),
     ]),
     output: C.DeviceScreenshotResult,
   },

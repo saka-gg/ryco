@@ -10,6 +10,7 @@ import {
   type RelayE2eeProvider,
   type RelayPayloadInflater,
   type RelaySocket,
+  type RelayFrameTunnelPeer,
 } from "@ryco/client-runtime/relay";
 
 import { HUB_SESSION_PATH } from "@ryco/contracts/hub-session";
@@ -293,6 +294,11 @@ export class BrowserHostedRelaySocket extends EventTarget {
       throw sendException(error);
     }
   }
+  /** See `HostedRelayEngine.bindFrameTunnel`; device video for hosted viewers rides this. */
+  bindFrameTunnel(peer: RelayFrameTunnelPeer): ((bytes: Uint8Array) => boolean) | null {
+    return this.#engine.bindFrameTunnel(peer);
+  }
+
   close(code = 1000, reason = "") {
     if (this.#state === WebSocket.CLOSED || this.#state === WebSocket.CLOSING) return;
     this.#state = WebSocket.CLOSING;

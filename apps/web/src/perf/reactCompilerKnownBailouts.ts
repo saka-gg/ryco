@@ -51,7 +51,6 @@ export const KNOWN_BAILOUTS: Readonly<Record<string, ReadonlyArray<string>>> = {
   "src/components/device/SimulatorPanel.tsx": ["SimulatorPanel"],
   "src/components/device/SimulatorTestingDrawer.tsx": ["SimulatorTestingDrawer"],
   "src/components/device/useDeviceScreenshotStream.ts": ["useDeviceScreenshotStream"],
-  "src/components/device/useDeviceVideoStream.ts": ["useDeviceVideoStream"],
   "src/components/hostedHub/HostedNativeAuthorizationRoute.tsx": ["HostedNativeAuthorizationRoute"],
   "src/components/hostedHub/HostedNodeEnrollment.tsx": ["HostedNodeEnrollmentFlow"],
   "src/components/hostedHub/HostedNodeRevokeDialog.tsx": ["HostedNodeRevokeDialog"],

@@ -12,8 +12,13 @@ import {
 } from "./previewSampler.ts";
 
 describe("hosted screenshot fallback backpressure", () => {
-  it("keeps tiny responses at the 750ms floor", () => {
-    expect(hostedScreenshotDelayMs(1)).toBe(750);
+  it("keeps tiny responses at the 250ms floor", () => {
+    expect(hostedScreenshotDelayMs(1)).toBe(250);
+  });
+
+  it("refreshes a JPEG iPhone frame several times a second within the cap", () => {
+    // ~180 KB of base64: the byte target spaces it at about a third of a second.
+    expect(hostedScreenshotDelayMs(180_000)).toBe(344);
   });
 
   it("paces the capacity assessment's measured full-PNG payloads", () => {
@@ -103,7 +108,7 @@ describe("hosted preview sampler", () => {
     expect(preview.screenshot).toHaveBeenCalledTimes(1);
     expect(preview.statuses).toEqual(["connecting", "streaming"]);
 
-    await vi.advanceTimersByTimeAsync(749);
+    await vi.advanceTimersByTimeAsync(249);
     expect(preview.screenshot).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(preview.screenshot).toHaveBeenCalledTimes(2);
@@ -255,7 +260,7 @@ describe("hosted preview sampler", () => {
     const calls = first.screenshot.mock.calls.length;
     expect(calls).toBeGreaterThan(100);
     expect(second.screenshot.mock.calls.length).toBe(calls);
-    await vi.advanceTimersByTimeAsync(1_500);
+    await vi.advanceTimersByTimeAsync(500);
     expect(first.screenshot.mock.calls.length).toBe(calls + 2);
 
     // Interaction reports are ignored rather than creating a lease.

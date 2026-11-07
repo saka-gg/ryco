@@ -10,7 +10,10 @@
  *   decode into garbage, so once a subscriber falls behind it stays in a
  *   dropping state until the next keyframe, then resumes cleanly.
  * - A subscriber that is behind on the socket itself (`bufferedAmount` above
- *   the budget) is not written to at all.
+ *   its budget) is not written to at all, and its queue drains in order, only
+ *   while the backlog stays within that budget. A sink that can tell when its
+ *   backlog shrank (`onDrain`) has its queue flushed then, rather than with the
+ *   next published frame, so a still screen cannot leave frames stuck.
  *
  * New subscribers are primed with the cached codec-config and the most recent
  * keyframe, so a pane opened mid-stream decodes its first frame rather than
@@ -34,6 +37,17 @@ export interface DeviceFrameSink {
   readonly bufferedAmount: () => number;
   /** False once the connection is gone; the subscriber is then dropped. */
   readonly isOpen: () => boolean;
+  /**
+   * This sink's backlog budget in bytes, when it differs from the transport's
+   * socket budget: a relay tunnel stream's acknowledgement window, say.
+   */
+  readonly budgetBytes?: number;
+  /**
+   * Register a listener the sink calls whenever its backlog shrank, so queued
+   * frames go out without waiting for the next published one. Returns the
+   * unregister function, which the transport calls when the subscriber leaves.
+   */
+  readonly onDrain?: (listener: () => void) => () => void;
 }
 
 export interface DeviceFrameSubscriberStats {
@@ -47,8 +61,10 @@ interface Subscriber {
   readonly id: string;
   readonly deviceId: string;
   readonly sink: DeviceFrameSink;
+  readonly budgetBytes: number;
   readonly queue: Uint8Array[];
   queuedBytes: number;
+  removeDrainListener: (() => void) | null;
   awaitingKeyframe: boolean;
   sent: number;
   dropped: number;
@@ -95,8 +111,10 @@ export class DeviceFrameTransport {
       id: `device-frame-subscriber:${this.nextSubscriberId++}`,
       deviceId,
       sink,
+      budgetBytes: sink.budgetBytes ?? this.socketBudgetBytes,
       queue: [],
       queuedBytes: 0,
+      removeDrainListener: null,
       // Priming below clears this when a keyframe is available; otherwise the
       // subscriber correctly waits for the encoder's next one.
       awaitingKeyframe: true,
@@ -110,9 +128,18 @@ export class DeviceFrameTransport {
       this.subscribersByDevice.set(deviceId, deviceSubscribers);
     }
     deviceSubscribers.add(subscriber);
+    subscriber.removeDrainListener =
+      sink.onDrain?.(() => {
+        if (this.subscribers.get(subscriber.id) !== subscriber) return;
+        if (!subscriber.sink.isOpen()) {
+          this.removeSubscriber(subscriber);
+          return;
+        }
+        this.flush(subscriber);
+      }) ?? null;
 
     const config = this.codecConfig.get(deviceId);
-    if (config) this.deliver(subscriber, config);
+    if (config) this.deliver(subscriber, config, true);
     const keyframe = this.latestKeyframe.get(deviceId);
     if (keyframe) {
       subscriber.awaitingKeyframe = false;
@@ -151,7 +178,7 @@ export class DeviceFrameTransport {
       }
       // Codec config is never dropped: without it nothing downstream decodes.
       if (frame.codecConfig) {
-        this.deliver(subscriber, encoded);
+        this.deliver(subscriber, encoded, true);
         continue;
       }
       if (subscriber.awaitingKeyframe) {
@@ -188,42 +215,56 @@ export class DeviceFrameTransport {
   // ── Internals ──────────────────────────────────────────────────────
 
   /**
-   * Write when the socket has room, otherwise queue; a full queue discards the
-   * whole backlog and waits for the next keyframe rather than shipping frames
-   * whose references are already gone.
+   * Write when the socket has room and nothing older is waiting, otherwise
+   * queue; a full queue discards the whole backlog and waits for the next
+   * keyframe rather than shipping frames whose references are already gone.
    */
-  private deliver(subscriber: Subscriber, encoded: Uint8Array): void {
+  private deliver(subscriber: Subscriber, encoded: Uint8Array, codecConfig = false): void {
     if (!subscriber.sink.isOpen()) {
       this.removeSubscriber(subscriber);
       return;
     }
 
-    if (subscriber.sink.bufferedAmount() <= this.socketBudgetBytes) {
-      this.flush(subscriber);
+    this.flush(subscriber);
+    if (
+      subscriber.queue.length === 0 &&
+      subscriber.sink.bufferedAmount() <= subscriber.budgetBytes
+    ) {
       subscriber.sink.send(encoded);
       subscriber.sent += 1;
       return;
     }
 
     if (subscriber.queue.length >= this.queueLimit) {
-      subscriber.dropped += subscriber.queue.length + 1;
+      subscriber.dropped += subscriber.queue.length + (codecConfig ? 0 : 1);
       subscriber.queue.length = 0;
       subscriber.queuedBytes = 0;
       subscriber.awaitingKeyframe = true;
-      return;
+      // Codec config survives the purge: the keyframe the subscriber now
+      // waits for decodes only with it.
+      if (!codecConfig) return;
     }
     subscriber.queue.push(encoded);
     subscriber.queuedBytes += encoded.byteLength;
   }
 
+  /**
+   * Send queued frames in order while the backlog stays within budget. Each
+   * send may grow the backlog (a sink that counts in-flight bytes), so the
+   * budget is read again before every frame; the rest waits for a drain.
+   */
   private flush(subscriber: Subscriber): void {
-    if (subscriber.queue.length === 0) return;
-    for (const queued of subscriber.queue) {
+    // Shifted one at a time, so a sink that drains re-entrantly from `send`
+    // or closes (its removal clears the queue) leaves nothing inconsistent.
+    while (
+      subscriber.queue.length > 0 &&
+      subscriber.sink.bufferedAmount() <= subscriber.budgetBytes
+    ) {
+      const queued = subscriber.queue.shift()!;
+      subscriber.queuedBytes -= queued.byteLength;
       subscriber.sink.send(queued);
       subscriber.sent += 1;
     }
-    subscriber.queue.length = 0;
-    subscriber.queuedBytes = 0;
   }
 
   private removeSubscriber(subscriber: Subscriber): void {
@@ -235,5 +276,7 @@ export class DeviceFrameTransport {
     }
     subscriber.queue.length = 0;
     subscriber.queuedBytes = 0;
+    subscriber.removeDrainListener?.();
+    subscriber.removeDrainListener = null;
   }
 }

@@ -176,7 +176,11 @@ function handleRead(
     case "screenshot":
       return invoke(
         manager,
-        (active) => active.screenshot(request.input.udid, { save: request.input.save ?? false }),
+        (active) =>
+          active.screenshot(request.input.udid, {
+            save: request.input.save ?? false,
+            ...(request.input.format === undefined ? {} : { format: request.input.format }),
+          }),
         "Failed to capture a screenshot.",
         "screenshot",
       ).pipe(Effect.map((result) => ({ type: "screenshot" as const, result })));

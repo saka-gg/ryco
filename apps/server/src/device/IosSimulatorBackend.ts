@@ -59,6 +59,7 @@ import {
   type DeviceListOptions,
   type DeviceLogQuery,
   type DeviceLogResult,
+  type DeviceScreenshotOptions,
   type DeviceSwipeGesture,
   type DeviceTouchPhase,
 } from "./DeviceBackend.ts";
@@ -662,28 +663,39 @@ export class IosSimulatorBackend implements DeviceBackend {
 
   async screenshot(
     udid: string,
-    options: { readonly save?: boolean } = {},
+    options: DeviceScreenshotOptions = {},
   ): Promise<DeviceScreenshotResult> {
     // Captured to a temp file either way, because `simctl io screenshot` only
     // writes to a path. When the caller wants it kept, it is moved next to the
-    // recordings afterwards rather than captured somewhere different.
+    // recordings afterwards rather than captured somewhere different. A kept
+    // capture stays PNG; JPEG is for previews that only want the bytes small.
+    const jpeg = options.format === "jpeg" && options.save !== true;
     const directory = await mkdtemp(path.join(tmpdir(), "ryco-device-"));
-    const file = path.join(directory, "screenshot.png");
+    const file = path.join(directory, jpeg ? "screenshot.jpg" : "screenshot.png");
     try {
-      const result = await this.simctl(["io", udid, "screenshot", file]);
+      const result = await this.simctl([
+        "io",
+        udid,
+        "screenshot",
+        ...(jpeg ? ["--type=jpeg"] : []),
+        file,
+      ]);
       if (result.code !== 0) throw this.simctlError("screenshot", result);
       const info = await stat(file);
       if (info.size > MAX_SCREENSHOT_BYTES) {
         throw new DeviceBackendError("Screenshot exceeded the maximum supported size");
       }
       const bytes = await readFile(file);
-      const dimensions = readPngDimensions(bytes);
+      // The JPEG reader loads with the first JPEG capture: hosted previews only.
+      const dimensions = jpeg
+        ? (await import("../jpegHeader.ts")).jpegDimensions(bytes)
+        : readPngDimensions(bytes);
       const savedPath = options.save === true ? await this.saveScreenshotFile(udid, bytes) : null;
       return {
         ...(savedPath ? { path: savedPath } : {}),
         udid,
-        name: `simulator-${udid}.png`,
-        mimeType: "image/png",
+        name: `simulator-${udid}.${jpeg ? "jpg" : "png"}`,
+        mimeType: jpeg ? "image/jpeg" : "image/png",
         width: dimensions?.width ?? 1,
         height: dimensions?.height ?? 1,
         sizeBytes: bytes.byteLength,

@@ -90,7 +90,9 @@ export function useDeviceScreenshotStream(input: {
   readonly enabled: boolean;
   /** Whether the preview runs over the hosted relay and so shares the tab's lease. */
   readonly hosted: boolean;
-  readonly screenshot: ((input: { udid: DeviceUdid }) => Promise<DeviceScreenshotResult>) | null;
+  readonly screenshot:
+    | ((input: { udid: DeviceUdid; format?: "png" | "jpeg" }) => Promise<DeviceScreenshotResult>)
+    | null;
   /** How the device is turned; screenshots are drawn back into portrait. */
   readonly orientation?: DeviceOrientation;
 }): {
@@ -150,8 +152,10 @@ export function useDeviceScreenshotStream(input: {
       hosted,
       screenshot: () => {
         const capture = screenshotRef.current;
+        // Hosted samples go over the relay: JPEG, several times smaller than
+        // PNG, so the paced sampler refreshes faster within the same cap.
         return capture
-          ? capture({ udid })
+          ? capture(hosted ? { udid, format: "jpeg" } : { udid })
           : Promise.reject(new Error("The simulator preview is unavailable."));
       },
       paint,

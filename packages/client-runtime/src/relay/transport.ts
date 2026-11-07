@@ -25,6 +25,7 @@ import type {
   HostedServerAuthenticatedRelayInput,
 } from "../authorization/types.ts";
 import { HostedReconnectPolicy } from "./reconnectPolicy.ts";
+import type { RelayFrameTunnelPeer } from "./relayEngine.ts";
 
 /**
  * How long an attempt the Hub will authenticate itself stays usable between `nextUrl` and
@@ -449,6 +450,17 @@ export interface HostedGitActionStartOwner {
   readonly ownsGitActionStarts: () => boolean;
 }
 
+/** A relay socket that can carry the device frame tunnel (the web and mobile relay sockets). */
+export interface HostedFrameTunnelSocket {
+  bindFrameTunnel(peer: RelayFrameTunnelPeer): ((bytes: Uint8Array) => boolean) | null;
+}
+
+/** See `HostedRelayAttemptFactory.currentFrameTunnelChannel`. */
+export interface HostedFrameTunnelChannel {
+  readonly socket: object;
+  readonly bind: (peer: RelayFrameTunnelPeer) => ((bytes: Uint8Array) => boolean) | null;
+}
+
 export class HostedRelayAttemptFactory {
   readonly #binding: HostedRelayAttemptBinding;
   readonly #reconnect = new HostedReconnectPolicy();
@@ -847,6 +859,35 @@ export class HostedRelayAttemptFactory {
       }
       throw error;
     }
+  }
+
+  /**
+   * The relay channel of the current attempt, for the device frame tunnel
+   * (`@ryco/shared/relayFrameTunnel`): `socket` identifies the channel and
+   * `bind` binds a tunnel to it (`HostedRelayEngine.bindFrameTunnel`). `null`
+   * while no current attempt holds a relay socket: a direct route's socket is
+   * an ordinary node socket, and a replaced or disposed attempt carries no
+   * new streams. Readiness to stream is the caller's to check.
+   */
+  currentFrameTunnelChannel(): HostedFrameTunnelChannel | null {
+    const socket = this.#activeSocket as Partial<HostedFrameTunnelSocket> | null;
+    const generation = this.#activeGeneration;
+    if (
+      this.#disposed ||
+      socket === null ||
+      typeof socket !== "object" ||
+      this.#activeRouteKey !== "relay" ||
+      generation === null ||
+      !this.#binding.isCurrent(generation) ||
+      typeof socket.bindFrameTunnel !== "function"
+    ) {
+      return null;
+    }
+    const bind = socket.bindFrameTunnel.bind(socket);
+    return {
+      socket,
+      bind: (peer) => (this.#activeSocket === socket && !this.#disposed ? bind(peer) : null),
+    };
   }
 
   lifecycleHandlers(

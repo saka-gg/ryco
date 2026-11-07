@@ -61,6 +61,12 @@ export interface DeviceRpcClient {
     udid: DeviceAttachInput["udid"],
     handlers: DeviceFrameSourceHandlers,
   ) => DeviceFrameSource;
+  /**
+   * The frame source rides the hosted relay channel's frame tunnel, which a
+   * node offers only when its `ThreadDeviceState.relayFrameTunnel` says so;
+   * see `deviceVideoStreamAvailable`. Absent on direct connections.
+   */
+  readonly frameSourceNeedsRelayTunnel?: true;
   readonly list: (input?: DeviceListInput) => Promise<DeviceListResult>;
   readonly getThreadState: (input: DeviceThreadInput) => Promise<ThreadDeviceState>;
   readonly screenshot: (input: DeviceScreenshotInput) => Promise<DeviceScreenshotResult>;
@@ -284,6 +290,8 @@ export function createDeviceRpcClient(
   transport: DeviceRpcTransport,
   options?: {
     readonly openFrameSource?: DeviceRpcClient["openFrameSource"];
+    /** See `DeviceRpcClient.frameSourceNeedsRelayTunnel`. */
+    readonly frameSourceNeedsRelayTunnel?: boolean;
     /** A hosted device client borrows the main transport; its parent owns lifecycle. */
     readonly manageTransport?: boolean;
   },
@@ -294,6 +302,9 @@ export function createDeviceRpcClient(
     reconnect: () => (manageTransport ? transport.reconnect() : Promise.resolve()),
     isHeartbeatFresh: () => transport.isHeartbeatFresh(),
     ...(options?.openFrameSource ? { openFrameSource: options.openFrameSource } : {}),
+    ...(options?.openFrameSource && options.frameSourceNeedsRelayTunnel
+      ? { frameSourceNeedsRelayTunnel: true as const }
+      : {}),
     list: async (input = {}) => {
       const response = await transport.request((client) =>
         client[DEVICE_WS_METHODS.read]({ type: "list", input }),

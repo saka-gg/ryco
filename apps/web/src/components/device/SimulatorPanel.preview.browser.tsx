@@ -119,10 +119,10 @@ const settle = () =>
   new Promise<void>((resolve) =>
     requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
   );
-/** Captures are at least one sampling interval apart. */
+/** Captures are at least one sampling interval (250 ms hosted) apart. */
 const expectPaced = () => {
   const gaps = captureTimes.slice(1).map((time, index) => time - captureTimes[index]!);
-  expect(Math.min(...gaps)).toBeGreaterThanOrEqual(750);
+  expect(Math.min(...gaps)).toBeGreaterThanOrEqual(250);
 };
 /** Runs timers that are due now until `predicate` holds. */
 const pollWhileDue = (predicate: () => boolean) =>

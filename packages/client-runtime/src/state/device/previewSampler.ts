@@ -25,7 +25,13 @@ export type DeviceVideoStatus =
   | "recovering"
   | "error";
 
-const HOSTED_SCREENSHOT_INTERVAL_MS = 750;
+/**
+ * The shortest spacing between hosted samples. Hosted samples are JPEG where the
+ * node can encode it (an iPhone frame is ~150–250 KB base64 against ~3 MB of
+ * PNG), so the byte target below, not this floor, usually sets the pace; a
+ * PNG frame still waits out its own size.
+ */
+const HOSTED_SCREENSHOT_INTERVAL_MS = 250;
 const HOSTED_SCREENSHOT_TARGET_BYTES_PER_SECOND = 512 * 1024;
 const HOSTED_SCREENSHOT_MAX_INTERVAL_MS = 15_000;
 /** A preview without pointer or keyboard interaction for this long stops sampling. */

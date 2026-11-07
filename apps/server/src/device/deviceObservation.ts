@@ -33,7 +33,10 @@ import { DeviceUiTargetError, findTarget, type DeviceUiTarget } from "./uiTreeTa
 
 export interface DeviceObservationReader {
   describeUi(udid: string): Promise<DeviceDescribeUiResult>;
-  screenshot(udid: string, options?: { readonly save?: boolean }): Promise<DeviceScreenshotResult>;
+  screenshot(
+    udid: string,
+    options?: { readonly save?: boolean; readonly format?: "png" | "jpeg" },
+  ): Promise<DeviceScreenshotResult>;
 }
 
 /**

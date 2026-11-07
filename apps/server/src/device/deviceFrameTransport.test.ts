@@ -262,3 +262,105 @@ describe("device frame transport backpressure", () => {
     expect(slow.received.length).toBeLessThan(fast.received.length);
   });
 });
+
+/** A sink with its own budget that reports when its backlog shrank. */
+class DrainingSink extends RecordingSink {
+  readonly listeners = new Set<() => void>();
+  readonly budgetBytes: number;
+  constructor(budgetBytes: number) {
+    super();
+    this.budgetBytes = budgetBytes;
+  }
+  onDrain = (listener: () => void): (() => void) => {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  };
+  drain(buffered: number): void {
+    this.buffered = buffered;
+    for (const listener of [...this.listeners]) listener();
+  }
+}
+
+describe("device frame transport per-sink budget and drain", () => {
+  it("holds a sink to its own budget rather than the transport's", () => {
+    const transport = new DeviceFrameTransport({ queueLimit: 4, socketBudgetBytes: 1_000_000 });
+    const sink = new DrainingSink(100);
+    transport.subscribe(DEVICE, sink);
+    transport.publish(DEVICE, frame({ sequence: 1, keyframe: true }));
+
+    sink.buffered = 101;
+    transport.publish(DEVICE, frame({ sequence: 2 }));
+
+    expect(sink.sequences).toEqual([1]);
+    expect(transport.statsFor(DEVICE)[0]?.queued).toBe(1);
+  });
+
+  it("flushes queued frames when the sink drains, without another frame", () => {
+    const transport = new DeviceFrameTransport({ queueLimit: 4 });
+    const sink = new DrainingSink(100);
+    transport.subscribe(DEVICE, sink);
+    transport.publish(DEVICE, frame({ sequence: 1, keyframe: true }));
+    sink.buffered = 1_000;
+    transport.publish(DEVICE, frame({ sequence: 2 }));
+    transport.publish(DEVICE, frame({ sequence: 3 }));
+
+    // A still screen publishes nothing more; the drain alone must deliver.
+    sink.drain(0);
+
+    expect(sink.sequences).toEqual([1, 2, 3]);
+    expect(transport.statsFor(DEVICE)[0]?.queued).toBe(0);
+  });
+
+  it("drains only while the backlog stays within budget", () => {
+    const transport = new DeviceFrameTransport({ queueLimit: 4 });
+    const sink = new DrainingSink(100);
+    // Each send grows the backlog, like a window of unacknowledged bytes.
+    sink.send = (bytes) => {
+      sink.received.push(bytes);
+      sink.buffered += 60;
+    };
+    transport.subscribe(DEVICE, sink);
+    transport.publish(DEVICE, frame({ sequence: 1, keyframe: true }));
+    sink.buffered = 1_000;
+    for (let sequence = 2; sequence <= 4; sequence += 1) {
+      transport.publish(DEVICE, frame({ sequence }));
+    }
+
+    sink.drain(0);
+    expect(sink.sequences).toEqual([1, 2, 3]);
+    // A new frame never overtakes the one still queued ahead of it.
+    transport.publish(DEVICE, frame({ sequence: 5 }));
+    expect(sink.sequences).toEqual([1, 2, 3]);
+
+    sink.drain(0);
+    expect(sink.sequences).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it("keeps codec config through a queue overflow", () => {
+    const transport = new DeviceFrameTransport({ queueLimit: 2 });
+    const sink = new DrainingSink(100);
+    transport.subscribe(DEVICE, sink);
+    transport.publish(DEVICE, frame({ sequence: 1, keyframe: true }));
+    sink.buffered = 1_000;
+    transport.publish(DEVICE, frame({ sequence: 2 }));
+    transport.publish(DEVICE, frame({ sequence: 3 }));
+    transport.publish(DEVICE, frame({ sequence: 4, codecConfig: true }));
+    transport.publish(DEVICE, frame({ sequence: 5 }));
+
+    sink.drain(0);
+    transport.publish(DEVICE, frame({ sequence: 6, keyframe: true }));
+
+    expect(sink.sequences).toEqual([1, 4, 6]);
+  });
+
+  it("unregisters the drain listener when the subscriber leaves", () => {
+    const transport = new DeviceFrameTransport();
+    const sink = new DrainingSink(100);
+    const unsubscribe = transport.subscribe(DEVICE, sink);
+    expect(sink.listeners.size).toBe(1);
+
+    unsubscribe();
+
+    expect(sink.listeners.size).toBe(0);
+  });
+});

@@ -260,6 +260,7 @@ describe("saving a screenshot", () => {
   /** A backend whose `simctl io screenshot` writes a real PNG to the given path. */
   async function makeScreenshotBackend() {
     const directory = await mkdtemp(path.join(tmpdir(), "ryco-screenshot-test-"));
+    const captures: (readonly string[])[] = [];
     const backend = new IosSimulatorBackend({
       platform: "darwin",
       recordingDirectory: directory,
@@ -269,14 +270,47 @@ describe("saving a screenshot", () => {
           return successfulProcessResult(recordingDeviceList);
         }
         if (command === "xcrun" && args.includes("screenshot")) {
+          captures.push(args);
           // `simctl io <udid> screenshot <path>`: the path is the last argument.
-          await writeFile(args.at(-1)!, SCREENSHOT_PNG);
+          await writeFile(
+            args.at(-1)!,
+            args.includes("--type=jpeg") ? SCREENSHOT_JPEG : SCREENSHOT_PNG,
+          );
         }
         return successfulProcessResult();
       },
     });
-    return { backend, directory };
+    return { backend, directory, captures };
   }
+
+  /** A JPEG header down to its start-of-frame segment: 32 wide, 16 high. */
+  const SCREENSHOT_JPEG = Buffer.from([
+    0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x10, 0x00, 0x20, 0x03, 0x01, 0x22, 0x00, 0x02,
+    0x11, 0x01, 0x03, 0x11, 0x01, 0xff, 0xd9,
+  ]);
+
+  it("captures JPEG for a caller that asks for it and reads its dimensions", async () => {
+    const { backend, captures } = await makeScreenshotBackend();
+
+    const shot = await backend.screenshot(RECORDING_DEVICE, { format: "jpeg" });
+
+    expect(captures.at(-1)).toContain("--type=jpeg");
+    expect(captures.at(-1)?.at(-1)).toMatch(/\.jpg$/u);
+    expect(shot.mimeType).toBe("image/jpeg");
+    expect(shot.name).toMatch(/\.jpg$/u);
+    expect([shot.width, shot.height]).toEqual([32, 16]);
+    expect(Buffer.from(shot.bytesBase64, "base64")).toEqual(SCREENSHOT_JPEG);
+  });
+
+  it("keeps a saved capture PNG even when JPEG was asked for", async () => {
+    const { backend, captures } = await makeScreenshotBackend();
+
+    const shot = await backend.screenshot(RECORDING_DEVICE, { save: true, format: "jpeg" });
+
+    expect(captures.at(-1)).not.toContain("--type=jpeg");
+    expect(shot.mimeType).toBe("image/png");
+    expect(shot.path).toMatch(/\.png$/u);
+  });
 
   it("writes the PNG beside the recordings and reports its path", async () => {
     const { backend, directory } = await makeScreenshotBackend();
