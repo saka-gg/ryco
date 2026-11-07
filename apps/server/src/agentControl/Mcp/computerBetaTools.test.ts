@@ -418,7 +418,7 @@ it("does not ask the desktop about the Escape stop for background-only turns", a
   vi.spyOn(CuaComputerBackend.prototype, "missingPermissions").mockResolvedValue([]);
   vi.spyOn(ComputerManager.prototype, "recordComputerAudit").mockImplementation(() => undefined);
   try {
-    runtime.stage();
+    runtime.stage("full-access", "Inspect Calculator in the background");
     const result = await Effect.runPromise(
       runtime.tools.callTool(session, "computer_activate_window", { window_id: "w1" }),
     );

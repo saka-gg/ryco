@@ -402,16 +402,16 @@ describe("agent gateway computer tools", () => {
       }),
     );
     const notes = computerToolInstructions();
-    expect(notes).toContain("the user's visible-use request or direct confirmation");
+    expect(notes).toContain("switch to the foreground on your own");
     expect(notes).not.toContain("without bringing it to the front");
     expect(windowIdDescription(byName, "computer_click")).toContain(
       "Exact window for label or x/y targeting",
     );
     expect(windowIdDescription(byName, "computer_type_text")).toContain("does not activate it");
-    // The activate tool no longer promises consent-covered foreground: the
-    // user's own task text is the authorization, and the description says so.
+    // The activate tool is the fallback when background input does not reach
+    // the app; only a background-only or non-human task refuses it.
     expect(byName.get("computer_activate_window")?.definition.description).toContain(
-      "only when the user's own task text asked to see the screen",
+      "Use it when background input does not reach the app",
     );
     expect(byName.get("computer_list_windows")?.definition.description).not.toContain(
       "into view automatically",
@@ -3694,7 +3694,7 @@ describe("computer never-raise gate", () => {
     }
   });
 
-  it("refuses activate without the user's task-text authorization, and raises nothing", async () => {
+  it("refuses activate for a background-only or non-human task, and raises nothing", async () => {
     const backend = new FakeComputerBackend();
     const approval = vi.fn(async () => true);
     const { call, manager } = await setup(backend, approval, refusing);
@@ -3704,7 +3704,7 @@ describe("computer never-raise gate", () => {
       const payload = resultJson(refused) as { error: string; effect: string; message: string };
       expect(payload.error).toBe("foreground_not_requested");
       expect(payload.effect).toBe("not-dispatched");
-      expect(payload.message).toContain("did not ask");
+      expect(payload.message).toContain("asked to stay in the background");
       expect(backend.callsFor("raiseWindow")).toEqual([]);
       expect(backend.callsFor("focusWindow")).toEqual([]);
     } finally {
@@ -6202,7 +6202,7 @@ describe("computer_help", () => {
       expect(menus.text).toContain("On macOS");
       expect(menus.text).toContain("act on an element ref first");
       // Menus activate the app, so background tasks must not be sent there first.
-      expect(menus.text).toContain("only when the user asked to see the screen");
+      expect(menus.text).toContain("background input does not reach the app");
       expect(menus.text.indexOf("element ref")).toBeLessThan(
         menus.text.indexOf("computer_invoke_menu"),
       );

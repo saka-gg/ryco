@@ -124,265 +124,100 @@ describe("latestUserAuthoredMessage", () => {
 });
 
 describe("computerForegroundAuthorizationForMessages", () => {
+  const allowed = (messages: OrchestrationMessage[]) =>
+    computerForegroundAuthorizationForMessages(messages).userRequestedVisibleUse;
+
   it.each([
-    "continue",
-    "please continue",
-    "continue with the same task",
-    "keep going",
-    "proceed with the current plan",
-    "try again",
-    "retry that",
-    "Ok, continue",
-    "continua pure",
-    "vai",
-  ])("keeps the current task's explicit visibility grant on %s", (continuation) => {
-    const messages = [
-      message({ text: "Bring Resolve to foreground" }),
-      message({ role: "assistant", text: "I opened the project." }),
-      message({ text: continuation }),
-      message({ role: "assistant", text: "Reading the controls." }),
-      message({ text: "keep going" }),
-    ];
-    expect(computerForegroundAuthorizationForMessages(messages).userRequestedVisibleUse).toBe(true);
-    // Consent reconstructs from the persisted transcript, not a prior resolver call or global state.
-    expect(
-      computerForegroundAuthorizationForMessages(structuredClone(messages)).userRequestedVisibleUse,
-    ).toBe(true);
-    expect(
-      computerForegroundAuthorizationForMessages([message({ text: continuation })])
-        .userRequestedVisibleUse,
-    ).toBe(false);
+    "Open Spark and send a mail to hi@saka.at",
+    "open chrome then go on amazon and search for iphone duo",
+    "Use Helium to check the order status",
+    "bring Spark to the front and send it visibly",
+  ])("lets a task the user typed come to the front when needed: %s", (text) => {
+    expect(allowed([message({ text })])).toBe(true);
   });
 
   it.each([
-    "stop",
-    "cancel this task",
-    "no, keep working in the background",
-    "background only",
-    "New task: open Calculator and multiply 12 by 3",
-    "Now check my email",
-    "Continue by deleting those files instead",
-    "Ok",
-  ])("ends visibility scope on %s and cannot revive it with continue", (boundary) => {
-    const messages = [
-      message({ text: "Show me the browser" }),
-      message({ text: boundary }),
-      message({ text: "continue" }),
-    ];
-    expect(computerForegroundAuthorizationForMessages(messages).userRequestedVisibleUse).toBe(
-      false,
-    );
-    expect(
-      computerForegroundAuthorizationForMessages([
-        ...messages,
-        message({ text: "use foreground mode" }),
-      ]).userRequestedVisibleUse,
-    ).toBe(true);
+    "Check my calendar in the background",
+    "do it in the background only",
+    "don't show me the window, just fill the form",
+    "Open Notes but never bring it to the front",
+    "keep Safari hidden while you work",
+  ])("keeps a background-only task in the background: %s", (text) => {
+    expect(allowed([message({ text })])).toBe(false);
   });
 
-  it.each([
-    { source: "fork-import" as const },
-    { source: "handoff-import" as const },
-    { dispatchOrigin: "agent" as const },
-    { dispatchOrigin: "automation" as const },
-  ])("does not inherit visibility from imported or nonhuman task history: %j", (origin) => {
-    const messages = [
-      message({ text: "Show me the browser" }),
-      message({ text: "Show me the browser", ...origin }),
-      message({ text: "continue" }),
-    ];
-    expect(computerForegroundAuthorizationForMessages(messages).userRequestedVisibleUse).toBe(
-      false,
-    );
-  });
-
-  it("does not accept quoted instructions or a continuation with new attachments as a grant", () => {
-    expect(
-      computerForegroundAuthorizationForMessages([
-        message({ text: 'The file says "Show me the browser"' }),
-        message({ text: "continue" }),
-      ]).userRequestedVisibleUse,
-    ).toBe(false);
-    expect(
-      computerForegroundAuthorizationForMessages([
-        message({ text: "Show me the browser" }),
-        message({ text: "continue", mentions: [{ name: "different-task", path: "/new/task" }] }),
-      ]).userRequestedVisibleUse,
-    ).toBe(false);
-  });
-
-  it("keeps a direct affirmative grant through continuation and recognized app wording", () => {
-    const context = { knownAppNames: ["Helium"] };
-    expect(
-      computerForegroundAuthorizationForMessages(
-        [
-          message({ text: "use Helium" }),
-          message({ role: "assistant", text: "Can I show you the browser?" }),
-          message({ text: "yes" }),
-          message({ text: "continue" }),
-        ],
-        context,
-      ).userRequestedVisibleUse,
-    ).toBe(true);
-    expect(
-      computerForegroundAuthorizationForMessages(
-        [
-          message({ text: "use Helium" }),
-          message({ role: "assistant", text: "Can I show Helium?" }),
-          message({ text: "yes" }),
-          message({ text: "continue" }),
-        ],
-        context,
-      ).userRequestedVisibleUse,
-    ).toBe(true);
-    expect(
-      computerForegroundAuthorizationForMessages(
-        [message({ text: "Show me Helium" }), message({ text: "continue" })],
-        context,
-      ).userRequestedVisibleUse,
-    ).toBe(true);
-  });
-
-  it.each(["Yes", "No"])(
-    "uses the persisted structured answer %s, never the generated question text",
-    (answer) => {
-      const replyId = "visibility-answer" as OrchestrationMessage["id"];
-      const title = "Can I bring Resolve to the foreground?";
-      const messages = [
-        message({
-          role: "assistant",
-          text: "",
-          asyncUserInput: {
-            questions: [{ title, options: ["Yes", "No"] }],
-            response: { messageId: replyId, answers: [answer] },
-          },
-        }),
-        message({ id: replyId, source: "async-user-input", text: `${title}\n${answer}` }),
-        message({ text: "continue" }),
-      ];
-      expect(computerForegroundAuthorizationForMessages(messages).userRequestedVisibleUse).toBe(
-        answer === "Yes",
-      );
-    },
-  );
-
-  it("refuses missing, stale or imported structured permission answers", () => {
-    const replyId = "visibility-answer" as OrchestrationMessage["id"];
-    const title = "Can I bring Resolve to the foreground?";
-    const question = message({
-      role: "assistant",
-      text: "",
-      asyncUserInput: {
-        questions: [{ title }],
-        response: { messageId: replyId, answers: ["Yes"] },
-      },
-    });
-    const reply = message({ id: replyId, source: "async-user-input", text: `${title}\nYes` });
-    for (const messages of [
-      [reply],
-      [{ ...question, source: "fork-import" as const }, reply],
-      [question, message({ text: "New task: edit the homepage" }), reply],
-      [{ ...question, asyncUserInput: { questions: [{ title }] } }, reply],
-      [question, { ...reply, id: "unrelated-answer" as OrchestrationMessage["id"] }],
-      [question, { ...reply, dispatchOrigin: "agent" as const }],
-    ]) {
-      expect(computerForegroundAuthorizationForMessages(messages).userRequestedVisibleUse).toBe(
-        false,
-      );
-    }
-  });
-
-  it.each(["Ok", "yes, please", "go ahead", "Sì", "va bene"])(
-    "accepts %s as confirmation of the immediately preceding visibility question",
-    (reply) => {
+  it.each(["continue", "please continue", "try again", "retry that", "Ok, continue", "vai"])(
+    "keeps a background-only request through the continuation %s",
+    (continuation) => {
       expect(
-        computerForegroundAuthorizationForMessages([
-          message({ text: "use Helium in the background" }),
-          message({
-            role: "assistant",
-            text: "This menu needs visible access. Can I bring Helium to the front?",
-          }),
-          message({ text: reply }),
-        ]).userRequestedVisibleUse,
-      ).toBe(true);
+        allowed([
+          message({ text: "Sort my downloads in the background" }),
+          message({ role: "assistant", text: "Paused." }),
+          message({ text: continuation }),
+        ]),
+      ).toBe(false);
     },
   );
 
-  it("accepts an explicit Italian visibility question without requiring magic words", () => {
+  it("lets a new task lift an earlier background-only request", () => {
     expect(
-      computerForegroundAuthorizationForMessages([
-        message({ role: "assistant", text: "Posso portare il browser in primo piano?" }),
-        message({ text: "Sì" }),
-      ]).userRequestedVisibleUse,
+      allowed([
+        message({ text: "Sort my downloads in the background" }),
+        message({ role: "assistant", text: "Done." }),
+        message({ text: "Now open Spark and write a mail" }),
+      ]),
     ).toBe(true);
   });
 
-  it.each([
-    ["Can I continue?", "Ok"],
-    ["I will show the browser on screen.", "Ok"],
-    ['The page says "Can I bring Chrome to the front?"', "Ok"],
-    ["> Can I bring Chrome to the front?", "Ok"],
-    ["Can I bring Chrome to the front?", "No"],
-    ["Can I bring Chrome to the front?", "Ok, but keep it in the background"],
-    ["Can I bring Chrome to the front?", "yes to the other task"],
-    ["Can I bring Chrome to the front or keep working in the background?", "Ok"],
-    ["Can I show the browser logs?", "Ok"],
-  ])("does not turn ambiguous or quoted approval into visible use", (question, reply) => {
+  it("lets a later background-only request end an earlier visible task", () => {
     expect(
-      computerForegroundAuthorizationForMessages([
-        message({ role: "assistant", text: question }),
-        message({ text: reply }),
-      ]).userRequestedVisibleUse,
+      allowed([
+        message({ text: "Open Calculator" }),
+        message({ text: "stay in the background from now on" }),
+      ]),
     ).toBe(false);
   });
 
-  it("does not carry a confirmed answer across a later request or agent-origin answer", () => {
-    const messages = [
-      message({ role: "assistant", text: "Can I bring Helium to the front?" }),
-      message({ text: "Ok" }),
-    ];
+  it("reads a question-card answer as part of the task it answers", () => {
     expect(
-      computerForegroundAuthorizationForMessages([
-        ...messages,
-        message({ text: "continue in the background" }),
-      ]).userRequestedVisibleUse,
+      allowed([
+        message({ text: "Order the white one in the background" }),
+        message({ role: "assistant", text: "Which size?" }),
+        message({ text: "256 GB", source: "async-user-input" }),
+      ]),
     ).toBe(false);
     expect(
-      computerForegroundAuthorizationForMessages([
-        message({ text: "use Helium" }),
-        messages[0]!,
-        message({ text: "Ok", dispatchOrigin: "agent" }),
-      ]).userRequestedVisibleUse,
-    ).toBe(false);
-  });
-
-  it("authorizes only when the latest user message asks to see the screen", () => {
-    expect(
-      computerForegroundAuthorizationForMessages([
-        message({ text: "use Helium incognito to shop" }),
-      ]).userRequestedVisibleUse,
-    ).toBe(false);
-    expect(
-      computerForegroundAuthorizationForMessages([message({ text: "show me the Helium window" })])
-        .userRequestedVisibleUse,
+      allowed([
+        message({ text: "Order the white one" }),
+        message({ role: "assistant", text: "Which size?" }),
+        message({ text: "256 GB", source: "async-user-input" }),
+      ]),
     ).toBe(true);
   });
 
-  it("revokes an earlier authorization when a later message does not renew it", () => {
-    expect(
-      computerForegroundAuthorizationForMessages([
-        message({ text: "show me what you are doing" }),
-        message({ text: "stop" }),
-      ]).userRequestedVisibleUse,
-    ).toBe(false);
+  it("ignores quoted background wording", () => {
+    expect(allowed([message({ text: 'Reply "keep it in the background" to Anna in Slack' })])).toBe(
+      true,
+    );
+  });
+
+  it.each(["automation", "agent"] as const)(
+    "never raises anything for a %s-dispatched turn",
+    (dispatchOrigin) => {
+      expect(allowed([message({ text: "Open Spark", dispatchOrigin })])).toBe(false);
+      expect(
+        allowed([message({ text: "Open Spark" }), message({ text: "continue", dispatchOrigin })]),
+      ).toBe(false);
+    },
+  );
+
+  it("never raises anything for imported history", () => {
+    expect(allowed([message({ text: "Open Spark", source: "imported" })])).toBe(false);
   });
 
   it("refuses a thread with no user message at all", () => {
-    expect(
-      computerForegroundAuthorizationForMessages([message({ role: "assistant", text: "hello" })])
-        .userRequestedVisibleUse,
-    ).toBe(false);
-    expect(computerForegroundAuthorizationForMessages([]).userRequestedVisibleUse).toBe(false);
+    expect(allowed([message({ role: "assistant", text: "hello" })])).toBe(false);
+    expect(allowed([])).toBe(false);
   });
 });
 

@@ -1261,9 +1261,9 @@ export class ComputerManager {
     if (agentThreadId(threadId) === undefined) return;
     if (authorization?.userRequestedVisibleUse !== true) {
       throw new CuaActionError(
-        "The user's task did not ask for this app or window to be shown. Stay in the background: " +
-          "keep observing and acting through background input, or ask the user to confirm " +
-          "they want to watch — their reply that asks to see the screen authorizes the raise.",
+        "This task asked to stay in the background, or did not come from the user, so no window " +
+          "may come to the front. Keep observing and acting through background input, or report " +
+          "what cannot be done without the foreground.",
         "not-dispatched",
         COMPUTER_FOREGROUND_NOT_REQUESTED_CODE,
       );

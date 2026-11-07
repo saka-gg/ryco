@@ -1,7 +1,7 @@
 import { parseComputerInvocation } from "@ryco/shared/computerInvocation";
 import {
   computerForegroundAuthorizationForMessages,
-  messageRequestsVisibleUse,
+  isRoutineComputerContinuation,
 } from "./computerVisibleUse.ts";
 import type { ComputerTurnIntent, RuntimeMode } from "@ryco/contracts";
 
@@ -10,7 +10,8 @@ export interface ComputerTurnPlan {
   readonly text: string;
   readonly runtimeMode: RuntimeMode;
   readonly label: string;
-  readonly visibleIntentText?: string;
+  /** The words of the task this turn belongs to; a routine continuation keeps the earlier one. */
+  readonly taskText?: string;
   readonly foregroundAuthorized?: boolean;
   readonly createdAt?: string;
   readonly previousAssistantText?: string;
@@ -27,7 +28,7 @@ export function stageComputerTurn(threadId: string, plan: ComputerTurnPlan | und
   if (plan) {
     const text = parseComputerInvocation(plan.text)?.prompt ?? plan.text;
     const priorText =
-      prior?.intent.generation === plan.intent.generation ? prior.visibleIntentText : undefined;
+      prior?.intent.generation === plan.intent.generation ? prior.taskText : undefined;
     const authorized = computerForegroundAuthorizationForMessages([
       ...(priorText
         ? [
@@ -56,13 +57,7 @@ export function stageComputerTurn(threadId: string, plan: ComputerTurnPlan | und
     plans.set(threadId, {
       ...plan,
       foregroundAuthorized: authorized,
-      ...(authorized
-        ? {
-            visibleIntentText: messageRequestsVisibleUse(text)
-              ? text
-              : (priorText ?? plan.previousAssistantText ?? text),
-          }
-        : {}),
+      taskText: priorText !== undefined && isRoutineComputerContinuation(text) ? priorText : text,
     });
   }
   while (plans.size > 256) plans.delete(plans.keys().next().value!);

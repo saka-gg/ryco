@@ -4405,6 +4405,22 @@ describe("Cua workstream-C speed flags", () => {
     await f.backend.dispose();
   });
 
+  it("asks Cua for the structured elements whenever it walks the tree", async () => {
+    // Cua 0.40 returns only a Markdown tree by default; without
+    // tree_format:"elements" every read came back with no addressable rows.
+    const f = fixture();
+    await f.backend.getState({ windowId: "cua:10:20", includeTree: true });
+    expect(windowStateArgs(f)).toMatchObject({ tree_format: "elements" });
+    await f.backend.dispose();
+  });
+
+  it("leaves tree_format off a pixel-only read", async () => {
+    const f = fixture();
+    await f.backend.getState({ windowId: "cua:10:20", includeScreenshot: true });
+    expect(windowStateArgs(f)).not.toHaveProperty("tree_format");
+    await f.backend.dispose();
+  });
+
   it("keeps the capture arguments a pixel read needs", async () => {
     const f = fixture();
     await f.backend.getState({

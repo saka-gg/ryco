@@ -145,6 +145,14 @@ function missingComputerPermissions(
     missing.push("inputMonitoring");
   return missing;
 }
+/**
+ * Since Cua 0.40 `get_window_state` answers with one compact Markdown tree
+ * unless asked otherwise, and leaves `elements` empty. Ryco targets by the
+ * structured rows (frames, element tokens, actions), so every read that walks
+ * the tree asks for them; without them nothing is addressable and input falls
+ * back to raw events that background apps ignore.
+ */
+export const CUA_STRUCTURED_TREE = { tree_format: "elements" } as const;
 function optionalRect(value: unknown): ComputerRect | undefined {
   const r = record(value);
   const out = {
@@ -1301,6 +1309,7 @@ export class CuaComputerBackend implements ComputerBackend {
         include_screenshot: wantsPixels,
         max_dimension: 1536,
         include_accessibility_tree: options.includeTree === true,
+        ...(options.includeTree === true ? CUA_STRUCTURED_TREE : {}),
         max_elements: 1024,
         max_depth: 25,
       });
@@ -2075,6 +2084,7 @@ export class CuaComputerBackend implements ComputerBackend {
       window_id,
       include_screenshot: false,
       include_accessibility_tree: true,
+      ...CUA_STRUCTURED_TREE,
       max_elements: 1024,
       max_depth: 25,
     });
