@@ -11,6 +11,13 @@ import {
 import { DeviceManager } from "./DeviceManager.ts";
 import { FakeDeviceBackend } from "./FakeDeviceBackend.ts";
 import { PlatformDeviceBackend } from "./PlatformDeviceBackend.ts";
+import type { ScrcpyServerArtifact } from "./android/scrcpyServer.ts";
+import {
+  fakeChild,
+  mediaPacket,
+  sessionPacket,
+  startFakeScrcpyServer,
+} from "./android/scrcpyTestServer.ts";
 
 const UDID = "android:Pixel_Test";
 const PNG = Buffer.from(
@@ -51,6 +58,8 @@ function fixture(initiallyRunning = true) {
     return { stop, exited: (): boolean => false };
   });
   const backend = new AndroidEmulatorBackend({
+    scrcpy: null,
+    uiHelper: null,
     env: {},
     home: "/nonexistent-android-test",
     run,
@@ -97,6 +106,8 @@ describe("Android SDK adapter", () => {
   it("reports missing tooling as actionable setup, on supported hosts", async () => {
     const run = vi.fn<AndroidCommand>().mockRejectedValue(new Error("ENOENT"));
     const backend = new AndroidEmulatorBackend({
+      scrcpy: null,
+      uiHelper: null,
       platform: "linux",
       env: { ANDROID_HOME: "/sdk with spaces" },
       run,
@@ -118,10 +129,15 @@ describe("Android SDK adapter", () => {
     expect(await f.backend.listDevices({ includeShutdown: true })).toHaveLength(2);
     expect(f.run.mock.calls.some(([, args]) => args.includes("physical-device"))).toBe(false);
     f.run.mockImplementation(async () => Buffer.alloc(0));
-    expect(await f.backend.availability()).toMatchObject({
-      kind: "setup-required",
-      steps: [{ id: "create-android-avd" }],
-    });
+    const availability = await f.backend.availability();
+    expect(availability.kind).toBe("setup-required");
+    expect(availability.kind === "setup-required" ? availability.steps : []).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "install-android-platform-tools", done: true }),
+        expect.objectContaining({ id: "install-android-cmdline-tools", done: false }),
+        expect.objectContaining({ id: "create-android-avd", done: false }),
+      ]),
+    );
   });
   it("rejects offline and duplicate instances rather than choosing an ambiguous target", async () => {
     const f = fixture();
@@ -230,10 +246,10 @@ describe("Android SDK adapter", () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
-  it("does not stop user boots on dispose and refuses unsupported features", async () => {
+  it("does not stop user boots on dispose, and says why a tree read failed", async () => {
     const f = fixture();
-    await expect(f.backend.startRecording(UDID)).rejects.toThrow("not supported");
-    await expect(f.backend.describeUi(UDID)).rejects.toThrow("not supported");
+    // Without the resident reader the tree comes from uiautomator, which printed nothing here.
+    await expect(f.backend.describeUi(UDID)).rejects.toThrow("accessibility tree is unavailable");
     await f.backend.dispose();
     expect(f.stop).not.toHaveBeenCalled();
     await expect(f.backend.tap(UDID, 1, 2)).rejects.toThrow("disposed");
@@ -339,18 +355,27 @@ function deferred() {
 }
 
 describe("Android keyboard sequencing", () => {
-  it("rejects iOS testing through the platform router without invoking SDK tools", async () => {
+  it("routes testing to Android as adb settings, refusing what Android lacks", async () => {
     const f = fixture();
     const router = new PlatformDeviceBackend(new FakeDeviceBackend(), f.backend);
-    const resume = router.suspendTesting(UDID);
+    await router.testing({ udid: UDID, action: { type: "appearance", value: "dark" } });
+    expect(f.run.mock.calls.at(-1)?.[1]).toEqual([
+      "-t",
+      "1",
+      "shell",
+      "'cmd' 'uimode' 'night' 'yes'",
+    ]);
+    await router.testing({
+      udid: UDID,
+      action: { type: "location", latitude: 52.5, longitude: 13.4 },
+    });
+    expect(f.run.mock.calls.at(-1)?.[1]).toEqual(["-t", "1", "emu", "geo", "fix", "13.4", "52.5"]);
     await expect(
-      router.testing({ udid: UDID, action: { type: "appearance", value: "dark" } }),
-    ).rejects.toThrow("require an iOS simulator");
-    resume();
-    await expect(
-      router.testing({ udid: UDID, action: { type: "appearance", value: "dark" } }),
-    ).rejects.toThrow("require an iOS simulator");
-    expect(f.run).not.toHaveBeenCalled();
+      router.testing({
+        udid: UDID,
+        action: { type: "push", bundleId: "com.example.app", payload: '{"aps":{}}' },
+      }),
+    ).rejects.toThrow("Firebase");
   });
   it("pins transport between sequential RPCs until explicit detach", async () => {
     const f = fixture();
@@ -447,5 +472,111 @@ describe("Android keyboard sequencing", () => {
     response.resolve();
     expect((await results).map((r) => r.status)).toEqual(["fulfilled", "rejected"]);
     expect(inputs).toEqual(["'input' 'text' 'a'"]);
+  });
+});
+
+describe("Android scrcpy channel", () => {
+  async function scrcpyFixture(options: {
+    readonly video: boolean;
+    readonly artifact?: "ok" | "offline";
+  }) {
+    const server = await startFakeScrcpyServer({
+      video: options.video,
+      initialVideo: Buffer.concat([
+        sessionPacket(758, 1600),
+        mediaPacket({ config: true, pts: 0n, data: [0, 0, 0, 1, 0x67, 0x42, 0xc0, 0x32] }),
+        mediaPacket({ key: true, pts: 16_000n, data: [0, 0, 0, 1, 0x65] }),
+      ]),
+    });
+    const base = fixture();
+    const run = base.run.getMockImplementation()!;
+    base.run.mockImplementation(async (command, args, timeout) => {
+      if (args.includes("forward") && args.includes("tcp:0"))
+        return Buffer.from(`${server.port}\n`);
+      if (args.at(-1) === "'wm' 'size'") return Buffer.from("Physical size: 1080x2280\n");
+      return run(command, args, timeout);
+    });
+    const spawned: string[][] = [];
+    const artifact = {
+      resolve: async () => {
+        if (options.artifact === "offline") throw new Error("offline");
+        return "/cache/scrcpy-server-v5.0.1";
+      },
+    } as unknown as ScrcpyServerArtifact;
+    const backend = new AndroidEmulatorBackend({
+      env: {},
+      home: "/nonexistent-android-test",
+      run: base.run,
+      start: base.start,
+      delay: async () => {},
+      scrcpy: artifact,
+      uiHelper: null,
+      spawnProcess: (_command, args) => {
+        spawned.push([...args]);
+        return fakeChild();
+      },
+    });
+    return { backend, run: base.run, server, spawned };
+  }
+
+  it("sends input over one control socket instead of a process per event", async () => {
+    const f = await scrcpyFixture({ video: false });
+    await f.backend.tap(UDID, 100, 200);
+    await f.backend.touch(UDID, "down", 10, 20);
+    await f.backend.touch(UDID, "move", 10, 400);
+    await f.backend.touch(UDID, "up", 10, 400);
+    await f.backend.keyEvent(UDID, { keyCode: 4, direction: "down", modifiers: ["shift"] });
+    await f.backend.pressButton(UDID, "back");
+    await vi.waitFor(() => expect(f.server.control().byteLength).toBe(32 * 5 + 14 + 28));
+    const control = f.server.control();
+    expect([control[0], control[1], control.readInt32BE(10), control.readInt32BE(14)]).toEqual([
+      2, 0, 100, 200,
+    ]);
+    expect([control[64 + 1], control[96 + 1], control[128 + 1]]).toEqual([0, 2, 1]);
+    // A with Shift: keycode 29, META_SHIFT_ON | META_SHIFT_LEFT_ON.
+    expect([control[160], control.readInt32BE(162), control.readInt32BE(170)]).toEqual([
+      0, 29, 0x41,
+    ]);
+    expect(f.run.mock.calls.some(([, args]) => args.at(-1)?.startsWith("'input'"))).toBe(false);
+    expect(f.spawned).toHaveLength(1);
+    expect(f.run.mock.calls.some(([, args]) => args.includes("push"))).toBe(true);
+    await f.backend.dispose();
+    await f.server.close();
+  });
+
+  it("streams H.264 frames with codec config and keyframes, and reports video", async () => {
+    const f = await scrcpyFixture({ video: true });
+    const frames: Array<{ keyframe: boolean; codecConfig: boolean; timestampMs: number }> = [];
+    await f.backend.attachStream(UDID, (frame) => frames.push(frame));
+    await vi.waitFor(() => expect(frames).toHaveLength(2));
+    expect(frames).toMatchObject([
+      { codecConfig: true, keyframe: false },
+      { codecConfig: false, keyframe: true, timestampMs: 16 },
+    ]);
+    expect(f.backend.previewMode(UDID)).toBe("video");
+    expect(f.backend.geometry(UDID)).toEqual({ pointWidth: 1080, pointHeight: 2280, scale: 1 });
+    f.server.sendVideo(sessionPacket(1600, 758));
+    await vi.waitFor(() =>
+      expect(f.backend.geometry(UDID)).toEqual({ pointWidth: 2280, pointHeight: 1080, scale: 1 }),
+    );
+    expect(await f.backend.requestKeyframe(UDID)).toBe(true);
+    await vi.waitFor(() => expect(f.server.control().at(-1)).toBe(17));
+    await f.backend.detachStream(UDID);
+    expect(await f.backend.requestKeyframe(UDID)).toBe(false);
+    // A reloaded pane reopens video only while the descriptor still says so.
+    expect(f.backend.previewMode(UDID)).toBe("video");
+    await f.backend.dispose();
+    await f.server.close();
+  });
+
+  it("falls back to screenshots and adb input when scrcpy cannot be fetched", async () => {
+    const f = await scrcpyFixture({ video: true, artifact: "offline" });
+    await f.backend.attachStream(UDID, () => undefined);
+    expect(f.backend.previewMode(UDID)).toBe("screenshots");
+    await f.backend.tap(UDID, 5, 6);
+    expect(f.run.mock.calls.at(-1)?.[1]).toEqual(["-t", "1", "shell", "'input' 'tap' '5' '6'"]);
+    await expect(f.backend.touch(UDID, "down", 1, 1)).rejects.toThrow("Live touch needs");
+    await f.backend.dispose();
+    await f.server.close();
   });
 });

@@ -87,6 +87,8 @@ const SETTING_TYPES = [
   "permission",
   "push",
   "preset",
+  "orientation",
+  "network",
 ] as const satisfies readonly DeviceTestingAction["type"][];
 const SETTING_VALUES = [
   ...new Set([
@@ -96,6 +98,12 @@ const SETTING_VALUES = [
     "large-text",
     "dark-large-text",
     "standard",
+    "portrait",
+    "landscape-left",
+    "portrait-upside-down",
+    "landscape-right",
+    "on",
+    "off",
   ]),
 ];
 
@@ -314,10 +322,10 @@ function actionTool(
 const READ_ACTIONS = DEVICE_ACTION_DEFINITIONS.filter((definition) => definition.readOnly);
 const WRITE_ACTIONS = DEVICE_ACTION_DEFINITIONS.filter((definition) => !definition.readOnly);
 
-const READ_DESCRIPTION = `Read Ryco's iOS simulators and Android emulators. Actions: list (devices and udids; call first), describe_ui (the screen as text: one line per element with its @eN ref, role, quoted label, value and (x,y) tap point; format "tree" for the raw tree), screenshot, wait (until a ref or label appears, gone:true disappears, or with neither until the screen settles; timeoutMs up to ${DEVICE_TOOL_BOUNDS.waitMaxMs}), logs (an app's unified log and crash reports by bundleId; iOS on this node).`;
+const READ_DESCRIPTION = `Read Ryco's iOS simulators and Android emulators. Actions: list (devices and udids; call first), describe_ui (the screen as text: one line per element with its @eN ref, role, quoted label, value and (x,y) tap point; format "tree" for the raw tree), screenshot, wait (until a ref or label appears, gone:true disappears, or with neither until the screen settles; timeoutMs up to ${DEVICE_TOOL_BOUNDS.waitMaxMs}), logs (an app's log and crash reports by bundleId: unified log on iOS, logcat on Android).`;
 
 const DEVICE_DESCRIPTION =
-  "Drive Ryco's iOS simulators and Android emulators. Actions: tap (ref, label with optional role, or x,y device points), type (text into the focused field; pass ref or label to tap the field first), swipe, press_button, scroll_to_element (ref or label), launch (bundleId), open_url, boot, install (absolute appPath of a built .app or .apk; Ryco never builds), configure (iOS simulator setting: appearance, text-size, location, permission, push, preset). Inputs wait for the screen to settle and return settled, screenChanged and the screen as text, by default only what changed since your last snapshot. Read the screen, list devices, wait and read logs with device_read.";
+  "Drive Ryco's iOS simulators and Android emulators. Actions: tap (ref, label with optional role, or x,y points as the screenshot and screen text show them, upright even when the device is turned), type (text into the focused field; pass ref or label to tap the field first), swipe, press_button, scroll_to_element (ref or label), launch (bundleId), open_url, boot, install (absolute appPath of a built .app or .apk; Ryco never builds), configure (appearance, text-size, location, permission, preset; push and clear-location on iOS; orientation and network on/off on Android). Inputs wait for the screen to settle and return settled, screenChanged and the screen as text, by default only what changed since your last snapshot. Read the screen, list devices, wait and read logs with device_read.";
 
 export const DEVICE_TOOL_DEFINITIONS: readonly DeviceToolDefinition[] = [
   actionTool(DEVICE_READ_TOOL, READ_DESCRIPTION, READ_ACTIONS, {

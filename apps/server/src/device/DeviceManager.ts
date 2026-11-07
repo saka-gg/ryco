@@ -47,6 +47,7 @@ import {
   type DeviceStartRecordingResult,
   type DeviceStopRecordingResult,
   type DeviceUiNode,
+  type DeviceUiPoint,
   type ThreadDeviceState,
 } from "@ryco/contracts";
 
@@ -966,8 +967,54 @@ export class DeviceManager {
   // down before simctl runs (a keyframe request finds it inactive), and
   // `stopRecording` only runs for a recording, which keeps the device busy.
 
+  /** A tap from the pane, in the device's input points. */
   async tap(udid: string, x: number, y: number): Promise<void> {
     await this.withDeviceAction(udid, () => this.backend.tap(udid, x, y));
+  }
+
+  /**
+   * A point as screenshots and the accessibility tree show it (upright), in
+   * the points the device's input takes.
+   *
+   * A turned iOS simulator draws its screenshots and reports its tree upright,
+   * but its touch digitizer stays in portrait points, so a point an agent read
+   * off either would miss (or fall outside the portrait bounds) unless turned
+   * back. Measured on iOS 27: in landscape-left Safari's Tabs button is at
+   * (780,32) on the 874x402 screen and is hit at (370,780) of 402x874, the
+   * inverse of the chassis rotation the pane draws (`deviceTouchGeometry`).
+   * Backends whose frames turn with the device (Android) need no mapping.
+   */
+  toInputPoint(udid: string, point: DeviceUiPoint): DeviceUiPoint {
+    const orientation = this.orientationOf(udid);
+    const geometry = this.backend.geometry(udid);
+    if (orientation === "portrait" || geometry === null) return point;
+    const { pointWidth: width, pointHeight: height } = geometry;
+    switch (orientation) {
+      case "landscape-left":
+        return { x: width - point.y, y: point.x };
+      case "landscape-right":
+        return { x: point.y, y: height - point.x };
+      case "portrait-upside-down":
+        return { x: width - point.x, y: height - point.y };
+    }
+  }
+
+  private toInputGesture(udid: string, gesture: DeviceSwipeGesture): DeviceSwipeGesture {
+    const from = this.toInputPoint(udid, { x: gesture.fromX, y: gesture.fromY });
+    const to = this.toInputPoint(udid, { x: gesture.toX, y: gesture.toY });
+    return { fromX: from.x, fromY: from.y, toX: to.x, toY: to.y, durationMs: gesture.durationMs };
+  }
+
+  /** An agent's tap at a point it read off a screenshot or the tree (upright). */
+  async tapUpright(udid: string, x: number, y: number): Promise<void> {
+    const point = this.toInputPoint(udid, { x, y });
+    await this.withDeviceAction(udid, () => this.backend.tap(udid, point.x, point.y));
+  }
+
+  /** An agent's swipe between upright points. */
+  async swipeUpright(udid: string, gesture: DeviceSwipeGesture): Promise<void> {
+    const turned = this.toInputGesture(udid, gesture);
+    await this.withDeviceAction(udid, () => this.backend.swipe(udid, turned));
   }
 
   /**
@@ -985,7 +1032,8 @@ export class DeviceManager {
     const assertCurrent = this.operationGuard(udid, options.guard);
     const match = await this.scrollToElement(udid, target, options);
     assertCurrent();
-    await this.withDeviceAction(udid, () => this.backend.tap(udid, match.point.x, match.point.y));
+    const point = this.toInputPoint(udid, match.point);
+    await this.withDeviceAction(udid, () => this.backend.tap(udid, point.x, point.y));
     return match;
   }
 
@@ -1024,7 +1072,9 @@ export class DeviceManager {
 
       const positionBefore = match === null ? null : match.node.frame.y;
       assertCurrent();
-      await this.withDeviceAction(udid, () => this.backend.swipe(udid, step));
+      // Planned on the upright tree; the device takes it turned back.
+      const turned = this.toInputGesture(udid, step);
+      await this.withDeviceAction(udid, () => this.backend.swipe(udid, turned));
       assertCurrent();
       tree = await this.describeUi(udid);
       assertCurrent();
@@ -1131,7 +1181,9 @@ export class DeviceManager {
   async pressButton(udid: string, button: DeviceHardwareButton): Promise<void> {
     // Rotation is a turn from the current orientation, which only the manager
     // knows. A quarter turn counterclockwise, like Simulator.app's toolbar.
-    if (button === "rotate") {
+    // A backend whose frames turn with the device (Android) rotates itself:
+    // nothing here tracks its orientation (see `setOrientation`).
+    if (button === "rotate" && !this.backend.uprightFrames?.(udid)) {
       await this.setOrientation(udid, ROTATE_LEFT[this.orientationOf(udid)]);
       return;
     }
@@ -1155,7 +1207,10 @@ export class DeviceManager {
     const assertCurrent = this.operationGuard(udid);
     await this.withDeviceAction(udid, () => this.backend.setOrientation(udid, orientation));
     assertCurrent();
-    if (orientation === "portrait") this.orientations.delete(udid);
+    // The recorded orientation turns the pane's chassis and maps agent points.
+    // Frames that already turn with the device (Android) need neither.
+    if (orientation === "portrait" || this.backend.uprightFrames?.(udid))
+      this.orientations.delete(udid);
     else this.orientations.set(udid, orientation);
     await this.publishAllThreads();
   }
@@ -1506,10 +1561,12 @@ export class DeviceManager {
   private describe(device: DeviceDescriptor): DeviceDescriptor {
     const bootSource = this.rycoBooted.has(device.udid) ? "ryco" : device.bootSource;
     const geometry = this.backend.geometry(device.udid) ?? device.geometry;
+    const preview = this.backend.previewMode?.(device.udid) ?? device.preview ?? null;
     const orientation = this.orientations.get(device.udid);
     if (
       bootSource === device.bootSource &&
       geometry === device.geometry &&
+      preview === (device.preview ?? null) &&
       orientation === device.orientation
     ) {
       return device;
@@ -1518,6 +1575,7 @@ export class DeviceManager {
       ...device,
       bootSource,
       ...(geometry ? { geometry } : {}),
+      ...(preview ? { preview } : {}),
       ...(orientation ? { orientation } : {}),
     };
   }
@@ -1577,6 +1635,12 @@ export class DeviceManager {
    */
   async requestKeyframe(udid: string): Promise<void> {
     if (!this.streams.get(udid)?.active || this.disposed) return;
+    // A backend that can ask its encoder (Android's scrcpy) skips the restart.
+    // Its cached frames are already stale, so late viewers wait for the new IDR.
+    if (this.backend.requestKeyframe) {
+      this.transport.resetDevice(udid);
+      if (await this.backend.requestKeyframe(udid).catch(() => false)) return;
+    }
     await this.stopStream(udid);
     if (this.disposed || this.transport.deviceSubscriberCount(udid) === 0) return;
     await this.startStream(udid);

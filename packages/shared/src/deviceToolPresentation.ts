@@ -224,6 +224,10 @@ function settingTarget(setting: Readonly<Record<string, unknown>>): string | nul
       return "a push notification";
     case "preset":
       return value ? `${words(value).toLowerCase()} preset` : "a preset";
+    case "orientation":
+      return value ? `${words(value).toLowerCase()} orientation` : "orientation";
+    case "network":
+      return value ? `network ${value}` : "network";
     default:
       return type;
   }

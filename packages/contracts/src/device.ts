@@ -156,6 +156,13 @@ export const DeviceDescriptor = Schema.Struct({
     }),
   ),
   /**
+   * How a pane previews the device once its stream has started: H.264 video
+   * on the frame socket, or screenshots when the backend could not stream it
+   * (an Android emulator without scrcpy). Absent: the platform's default,
+   * video for iOS and screenshots for Android.
+   */
+  preview: Schema.optional(Schema.Literals(["video", "screenshots"])),
+  /**
    * The orientation Ryco last turned the device to. Absent means portrait, or
    * a backend that cannot turn its devices. A boot resets it to portrait.
    */
@@ -174,6 +181,7 @@ export type DeviceState = DeviceDescriptor;
 export const DeviceSetupStepId = Schema.Literals([
   "install-android-platform-tools",
   "install-android-emulator",
+  "install-android-cmdline-tools",
   "create-android-avd",
   "install-xcode",
   "accept-xcode-license",
@@ -558,7 +566,10 @@ export const DeviceTestingPermission = Schema.Literals([
 ]);
 export type DeviceTestingPermission = typeof DeviceTestingPermission.Type;
 
-const DeviceTestingBundleId = DeviceBundleId.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9.-]*$/));
+// Underscores for Android package names.
+const DeviceTestingBundleId = DeviceBundleId.check(
+  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+);
 export const DeviceTestingAction = Schema.Union([
   Schema.Struct({ type: Schema.Literal("appearance"), value: Schema.Literals(["light", "dark"]) }),
   Schema.Struct({ type: Schema.Literal("text-size"), value: DeviceTestingTextSize }),
@@ -584,6 +595,13 @@ export const DeviceTestingAction = Schema.Union([
     type: Schema.Literal("preset"),
     value: Schema.Literals(["dark", "large-text", "dark-large-text", "standard"]),
   }),
+  /** Android emulators: lock the screen to one orientation. */
+  Schema.Struct({
+    type: Schema.Literal("orientation"),
+    value: DeviceOrientation,
+  }),
+  /** Android emulators: Wi-Fi and mobile data together, on or off. */
+  Schema.Struct({ type: Schema.Literal("network"), value: Schema.Literals(["on", "off"]) }),
 ]);
 export type DeviceTestingAction = typeof DeviceTestingAction.Type;
 export const DeviceTestingInput = Schema.Struct({

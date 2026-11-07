@@ -58,7 +58,7 @@ import {
   renderUiSnapshot,
   renderUiSnapshotChanges,
 } from "../device/deviceUiSnapshot.ts";
-import { planIosTestingAction } from "../device/iosTestingActions.ts";
+import { validateDeviceTestingInput } from "../device/iosTestingActions.ts";
 import {
   DeviceUiTargetError,
   readTapRequest,
@@ -82,7 +82,8 @@ type JsonRecord = Record<string, unknown>;
 const LOG_DEFAULT_SECONDS = 300;
 const LOG_DEFAULT_LIMIT = 100;
 /** Reverse-DNS bundle ids only: they reach simctl as an argument. */
-const LOG_BUNDLE_ID = /^[A-Za-z0-9][A-Za-z0-9.-]{0,255}$/u;
+// Android package names may hold underscores.
+const LOG_BUNDLE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/u;
 /**
  * A JSON tree past this many bytes, as it travels (escaped, UTF-8, inside the
  * result's JSON), cannot ride beside its metadata in Agent Control's 512 KiB
@@ -239,7 +240,7 @@ function readSetting(udid: string, args: JsonRecord): DeviceTestingInput {
   // aps object), run here too so a malformed payload is the agent's mistake
   // to fix and never a device failure on the pane.
   try {
-    planIosTestingAction(input);
+    validateDeviceTestingInput(input);
   } catch (error) {
     throw new DeviceToolArgumentError(
       `Argument "setting" is not a valid setting: ${error instanceof Error ? error.message : String(error)}`,
@@ -485,7 +486,7 @@ export async function runDeviceTool(
       const request = readTap(args, ref());
       if (request.kind === "point") {
         return observed(
-          () => manager.tap(udid(), request.x, request.y),
+          () => manager.tapUpright(udid(), request.x, request.y),
           () => ({ udid: udid(), x: request.x, y: request.y }),
         );
       }
@@ -530,7 +531,7 @@ export async function runDeviceTool(
           ) ?? 300,
       };
       return observed(
-        () => manager.swipe(udid(), gesture),
+        () => manager.swipeUpright(udid(), gesture),
         () => ({ udid: udid(), ...gesture }),
       );
     }

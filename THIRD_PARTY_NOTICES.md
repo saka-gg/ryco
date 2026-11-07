@@ -347,3 +347,15 @@ is licensed under the Apache License, Version 2.0, reproduced below.
    See the License for the specific language governing permissions and
    limitations under the License.
 ```
+
+## Genymobile/scrcpy
+
+Ryco's Android emulator video and input use the unmodified `scrcpy-server` jar from
+[`Genymobile/scrcpy`](https://github.com/Genymobile/scrcpy) release v5.0.1. Ryco does not
+redistribute it: the server downloads the release asset on first use, verifies its SHA-256
+(`apps/server/src/device/android/scrcpyServer.ts`) and caches it under the Ryco home. The client
+side of scrcpy's wire protocol in `apps/server/src/device/android/scrcpyProtocol.ts` follows the
+upstream protocol documentation (`doc/develop.md`) and `ControlMessageReader.java` at that tag.
+scrcpy is Copyright (C) 2018 Genymobile and Copyright (C) 2018-2026 Romain Vimont, and is
+licensed under the Apache License, Version 2.0. The license text is reproduced under
+EvanBacon/serve-sim above.
