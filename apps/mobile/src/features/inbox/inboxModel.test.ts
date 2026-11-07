@@ -200,6 +200,53 @@ describe("Inbox model", () => {
     });
   });
 
+  it("lists this device's pinned threads first, in their own section", () => {
+    const sections = buildInboxSections({
+      projects: [project(NODE_A, "a", "A")],
+      worktrees: [],
+      environments: [{ environmentId: NODE_A, label: "A", connectionState: "connected" }],
+      threads: [thread(NODE_A, "plain", "a"), thread(NODE_A, "pinned", "a")],
+      pinnedThreadKeys: ["node-a:pinned"],
+    });
+    expect(sections.map((section) => section.key)).toEqual(["pinned", "active"]);
+    expect(sections[0]?.rows.map((row) => [row.threadId, row.pinned])).toEqual([["pinned", true]]);
+    expect(sections[1]?.rows.map((row) => [row.threadId, row.pinned])).toEqual([["plain", false]]);
+  });
+
+  it("allows Archive only for a connected node's thread with a conversation and no turn running", () => {
+    const rows = buildInboxSections({
+      projects: [project(NODE_A, "a", "A"), project(NODE_B, "b", "B")],
+      worktrees: [],
+      environments: [
+        {
+          environmentId: NODE_A,
+          label: "A",
+          connectionState: "connected",
+          mutationReady: true,
+          shellCurrent: true,
+        },
+        { environmentId: NODE_B, label: "B", connectionState: "offline" },
+      ],
+      threads: [
+        thread(NODE_A, "done", "a", {
+          latestUserMessageAt: "2026-07-26T08:30:00.000Z",
+          latestTurn: { state: "completed", completedAt: "2026-07-26T08:40:00.000Z" } as never,
+        }),
+        thread(NODE_A, "running", "a", {
+          latestUserMessageAt: "2026-07-26T08:30:00.000Z",
+          latestTurn: { state: "running" } as never,
+          session: { status: "running", activeTurnId: "turn" } as never,
+        }),
+        thread(NODE_B, "offline", "b", { latestUserMessageAt: "2026-07-26T08:30:00.000Z" }),
+      ],
+    }).flatMap((section) => section.rows);
+    expect(Object.fromEntries(rows.map((row) => [row.threadId, row.canArchive]))).toEqual({
+      done: true,
+      running: false,
+      offline: false,
+    });
+  });
+
   it("scopes by node and excludes archived tasks", () => {
     const sections = buildInboxSections({
       projects: [project(NODE_A, "a", "A"), project(NODE_B, "b", "B")],

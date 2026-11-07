@@ -31,6 +31,8 @@ function row(key: string, overrides: Partial<InboxThreadRow> = {}): InboxThreadR
     providerLabel: null,
     attentionState: "active",
     canSettle: true,
+    pinned: false,
+    canArchive: true,
     settlementBlocker: null,
     mutationEnabled: true,
     mutationBlocker: null,
@@ -108,14 +110,17 @@ describe("inbox row menu", () => {
     ).not.toContain("evening");
   });
 
-  it("lists settle first, then the snooze presets and Custom…, gated by the row", () => {
+  it("lists pin and settle first, then the snooze presets and Custom…, gated by the row", () => {
     const presets = [{ id: "hour", label: "In 1 hour" }];
     expect(buildInboxRowMenuActions(row("a", { canSnooze: false }), presets)).toEqual([
+      // Pins live on this device, so Pin is never disabled.
+      { id: "pin", title: "Pin task", attributes: { disabled: false } },
       { id: "settle", title: "Settle task", attributes: { disabled: false } },
       { id: "hour", title: "In 1 hour", attributes: { disabled: true } },
       { id: "snooze-custom", title: "Custom…", attributes: { disabled: true } },
       // A node without the Hidden shelf leaves Hide disabled.
       { id: "hide", title: "Hide task", attributes: { disabled: true } },
+      { id: "archive", title: "Archive task", attributes: { disabled: false } },
       // Copying the ID reads nothing from the node, so it is never disabled.
       { id: "copy-id", title: "Copy task ID", attributes: { disabled: false } },
     ]);
@@ -125,28 +130,32 @@ describe("inbox row menu", () => {
           attentionState: "settled",
           snoozedUntil: "2026-10-13T09:00:00.000Z",
           canUnsnooze: true,
+          pinned: true,
+          canArchive: false,
         }),
         presets,
       ),
     ).toEqual([
+      { id: "unpin", title: "Unpin task", attributes: { disabled: false } },
       { id: "unsettle", title: "Move to Active", attributes: { disabled: false } },
       { id: "unsnooze", title: "Unsnooze", attributes: { disabled: false } },
       { id: "hide", title: "Hide task", attributes: { disabled: true } },
+      { id: "archive", title: "Archive task", attributes: { disabled: true } },
       { id: "copy-id", title: "Copy task ID", attributes: { disabled: false } },
     ]);
   });
 
   it("hides a task, and shows one the person hid in the Inbox again", () => {
     const presets = [{ id: "hour", label: "In 1 hour" }];
-    // Hide comes right before Copy task ID, which ends the menu.
-    expect(buildInboxRowMenuActions(row("a", { hideActionEnabled: true }), presets).at(-2)).toEqual(
+    // Hide comes right before Archive and Copy task ID, which end the menu.
+    expect(buildInboxRowMenuActions(row("a", { hideActionEnabled: true }), presets).at(-3)).toEqual(
       { id: "hide", title: "Hide task", attributes: { disabled: false } },
     );
     expect(
       buildInboxRowMenuActions(
         row("a", { attentionState: "hidden", hiddenByUser: true, hideActionEnabled: true }),
         presets,
-      ).at(-2),
+      ).at(-3),
     ).toEqual({ id: "unhide", title: "Show in Inbox", attributes: { disabled: false } });
   });
 });

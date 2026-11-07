@@ -292,6 +292,8 @@ export const MVP_SETTINGS_SHEET_ROUTES = {
     ...SETTINGS_PUSH,
   },
   SettingsInbox: { linking: "inbox", headerAction: "back", ...SETTINGS_PUSH },
+  /** Archived tasks across machines; Restore brings one back to the Inbox. */
+  SettingsArchived: { linking: "archived", headerAction: "back", ...SETTINGS_PUSH },
   // Hosted Hub account. Account management stays nested; voluntary sign-in
   // opens the full-screen root Access route rather than a dismissible sheet.
   SettingsAccount: { linking: "account", headerAction: "back", ...SETTINGS_PUSH },

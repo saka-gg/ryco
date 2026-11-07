@@ -1,6 +1,7 @@
 import {
   createSidebarUndoHistory,
   sidebarUndoThreadRevision,
+  type SidebarUndoLocalContext,
   type SidebarUndoNotice,
 } from "@ryco/client-runtime/state/threads";
 import { resolveHostedRpcCapability } from "@ryco/client-runtime/authorization";
@@ -63,8 +64,29 @@ export function readMobileSidebarUndoContext(target: ScopedThreadRef) {
         .threadSidebarUndo === true,
   };
 }
+/** Local pin state needs no connection: only the thread's cached ordering fields. */
+export function readMobileSidebarUndoLocalContext(
+  target: ScopedThreadRef,
+): SidebarUndoLocalContext | null {
+  const state = useStore.getState();
+  const thread = selectSidebarThreadSummaryByRef(state, target);
+  const project = thread
+    ? selectProjectByRef(state, {
+        environmentId: target.environmentId,
+        projectId: thread.projectId,
+      })
+    : null;
+  if (!thread || !project) return null;
+  return {
+    threadRevision: sidebarUndoThreadRevision(thread),
+    parentRevision: project,
+    threadTitle: thread.title,
+    subscribe: useStore.subscribe,
+  };
+}
 export const sidebarUndo = createSidebarUndoHistory({
   readContext: readMobileSidebarUndoContext,
+  readLocalContext: readMobileSidebarUndoLocalContext,
   newCommandId,
   changed: (next) => {
     notices = next;

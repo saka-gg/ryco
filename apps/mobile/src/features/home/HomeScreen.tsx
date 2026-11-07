@@ -25,6 +25,8 @@ import { openThread as openThreadOverSheets } from "../../navigation/openThread"
 import { resolveHomeGroupingMode } from "../../state/homeGrouping";
 import { usePreferences } from "../../state/preferencesStore";
 import { markSnoozeWokeSeen } from "../../state/snoozeWokeSeen";
+import { useThreadPins } from "../../state/threadPins";
+import { pinnedThreadKeyList } from "@ryco/client-runtime/state/threads/threadPins";
 import { useStore } from "../../state/threadsRuntime";
 import {
   buildInboxSections,
@@ -37,6 +39,8 @@ import {
 import { CustomSnoozeSheetHost } from "../inbox/CustomSnoozeSheet";
 import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
 import { InboxScreen } from "../inbox/InboxScreen";
+import { useInboxMessageSearch } from "../inbox/useInboxMessageSearch";
+import { countArchivedThreads } from "../archive/archivedThreadsModel";
 import { buildProjectRows, type ProjectListRow } from "../projects/projectsModel";
 import { ProjectsScreen } from "../projects/ProjectsScreen";
 import { buildHomeChromeModel } from "./homeChromeModel";
@@ -96,6 +100,23 @@ export function HomeScreen() {
     wokeSeenAtByThreadKey: wokeSeen,
   } = useInboxSource(nowMs);
   const preferences = usePreferences();
+  const pins = useThreadPins();
+  const searchEnvironmentIds = useMemo(
+    () =>
+      home.mode === "inbox"
+        ? environments
+            .filter(
+              (environment) =>
+                environment.connectionState === "connected" &&
+                (home.nodeScopeByMode.inbox === null ||
+                  environment.environmentId === home.nodeScopeByMode.inbox),
+            )
+            .map((environment) => environment.environmentId)
+        : [],
+    [environments, home.mode, home.nodeScopeByMode.inbox],
+  );
+  const messageMatches = useInboxMessageSearch(home.queryByMode.inbox, searchEnvironmentIds);
+  const pinnedThreadKeys = useMemo(() => pinnedThreadKeyList(pins), [pins]);
   useAutoSettleRuleHandOver(environments, preferences.sidebarAutoSettleAfterDays);
   const groupingMode = resolveHomeGroupingMode(preferences.projectGroupingEnabled);
 
@@ -122,11 +143,15 @@ export function HomeScreen() {
               autoSettleAfterDays: preferences.sidebarAutoSettleAfterDays,
               nowMs,
               wokeSeenAtByThreadKey: wokeSeen,
+              pinnedThreadKeys,
+              messageMatches,
             }),
           )
         : NO_INBOX_SECTIONS,
     [
       wokeSeen,
+      pinnedThreadKeys,
+      messageMatches,
       environments,
       home.mode,
       home.nodeScopeByMode.inbox,
@@ -235,15 +260,23 @@ export function HomeScreen() {
   // A row tap pushes the thread; a thread jump (Command-1…9) can come while a
   // sheet covers Home or a thread is open, and closes or replaces those.
   const openThread = useCallback(
-    (thread: { readonly environmentId: EnvironmentId; readonly threadId: ThreadId }) =>
-      openThreadOverSheets(navigation, thread),
+    (thread: {
+      readonly environmentId: EnvironmentId;
+      readonly threadId: ThreadId;
+      readonly messageId?: string | undefined;
+    }) => openThreadOverSheets(navigation, thread),
     [navigation],
   );
   const openInboxThread = useCallback(
     (row: InboxThreadRow) => {
       // Opening a woken thread clears its "Woke" mark.
       if (row.wokeAt) markSnoozeWokeSeen(row.key, row.wokeAt);
-      openThread(row);
+      // A message search hit opens the thread at the message it found.
+      openThread({
+        environmentId: row.environmentId,
+        threadId: row.threadId,
+        messageId: row.messageMatch?.messageId,
+      });
     },
     [openThread],
   );
@@ -277,6 +310,14 @@ export function HomeScreen() {
     () => threads.filter((thread) => thread.archivedAt === null).length,
     [threads],
   );
+  const archivedCount = useMemo(
+    () => countArchivedThreads(threads, home.nodeScopeByMode.inbox),
+    [home.nodeScopeByMode.inbox, threads],
+  );
+  const openArchived = useCallback(
+    () => navigation.navigate("SettingsSheet", { screen: "SettingsArchived" }),
+    [navigation],
+  );
   const inboxEmptyState = resolveInboxEmptyState({
     environmentCount: environments.length,
     projectCount,
@@ -302,6 +343,8 @@ export function HomeScreen() {
               onScrollOffset={recordInboxScrollOffset}
               onOpenThread={openInboxThread}
               onEmptyAction={handleInboxEmptyAction}
+              archivedCount={archivedCount}
+              onOpenArchived={openArchived}
             />
           ) : (
             <ProjectsScreen

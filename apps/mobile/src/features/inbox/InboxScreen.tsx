@@ -1,12 +1,9 @@
-import { sidebarUndo } from "../../state/sidebarUndo";
-import { resolveSnoozePresets } from "@ryco/shared/threadSnooze";
-import { newCommandId } from "../../lib/ids";
 import { MenuView, type NativeActionEvent } from "@react-native-menu/menu";
 import { LegendList, type LegendListRenderItemProps } from "@legendapp/list/react-native";
 import { memo, useCallback, useMemo, useState } from "react";
 import {
-  Alert,
   Pressable,
+  useWindowDimensions,
   View,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
@@ -23,12 +20,9 @@ import {
   type InboxListItem,
 } from "./inboxListModel";
 import { InboxThreadRow as ThreadRow } from "./InboxThreadRow";
-import { requestCustomSnooze } from "./customSnoozeModel";
-import { copyTextWithHaptic } from "../../lib/copyTextWithHaptic";
 import {
   buildInboxRowMenuActions,
-  COPY_TASK_ID_ACTION_ID,
-  CUSTOM_SNOOZE_ACTION_ID,
+  buildInboxSnoozeMenuActions,
   resolveSnoozeMenuPresets,
   snoozeMenuPresetsFromKey,
   snoozeMenuPresetsKey,
@@ -42,6 +36,14 @@ import {
   type HardwareKeyboardCommand,
 } from "../keyboard/hardwareKeyboardCommands";
 import { WorkspaceConnectionStatus } from "../home/WorkspaceConnectionStatus";
+import { useThemeColor } from "../../lib/useThemeColor";
+import {
+  SwipeableScrollGateProvider,
+  ThreadSwipeable,
+  useSwipeableScrollGate,
+  type ThreadSwipeAction,
+} from "../threadList/ThreadSwipeable";
+import { archiveInboxRow, runInboxRowAction, setInboxRowPinned } from "./inboxRowCommands";
 
 const EMPTY_COPY: Readonly<
   Record<
@@ -72,107 +74,12 @@ const EMPTY_COPY: Readonly<
   },
 };
 
-function dispatchRowMenuAction(row: InboxThreadRow, event: string): void {
-  if (event === COPY_TASK_ID_ACTION_ID) {
-    copyTextWithHaptic(row.threadId, { target: "task ID" });
-    return;
-  }
-  if (event === "settle" || event === "unsettle") {
-    if (!row.mutationEnabled || !row.canSettle) return;
-    void (async () => {
-      try {
-        const command =
-          event === "settle"
-            ? {
-                type: "thread.settle" as const,
-                threadId: row.threadId,
-                commandId: newCommandId(),
-              }
-            : {
-                type: "thread.unsettle" as const,
-                threadId: row.threadId,
-                commandId: newCommandId(),
-                reason: "user" as const,
-              };
-        await sidebarUndo.dispatch(
-          { environmentId: row.environmentId, threadId: row.threadId },
-          command,
-        );
-      } catch (error) {
-        Alert.alert(
-          "Could not update task",
-          error instanceof Error ? error.message : "The request failed.",
-        );
-      }
-    })();
-    return;
-  }
-  if (event === "hide" || event === "unhide") {
-    if (!row.hideActionEnabled) return;
-    void (async () => {
-      try {
-        await sidebarUndo.dispatch(
-          { environmentId: row.environmentId, threadId: row.threadId },
-          {
-            type: event === "hide" ? "thread.hide" : "thread.unhide",
-            threadId: row.threadId,
-            commandId: newCommandId(),
-          },
-        );
-      } catch (error) {
-        Alert.alert(
-          "Could not update task",
-          error instanceof Error ? error.message : "The request failed.",
-        );
-      }
-    })();
-    return;
-  }
-  if (event === CUSTOM_SNOOZE_ACTION_ID) {
-    if (!row.canSnooze) return;
-    void requestCustomSnooze().then((until) => {
-      if (until) dispatchRowSnooze(row, until);
-    });
-    return;
-  }
-  // The snooze instant is resolved at press time, not from the rendered list.
-  const until =
-    event === "unsnooze"
-      ? null
-      : resolveSnoozePresets(new Date()).find((preset) => preset.id === event)?.snoozedUntil;
-  if (until === undefined) return;
-  dispatchRowSnooze(row, until);
-}
-
-/** Snoozes the row's thread until `until`, or wakes it with null. */
-function dispatchRowSnooze(row: InboxThreadRow, until: string | null): void {
-  if (!(until ? row.canSnooze : row.canUnsnooze)) return;
-  void (async () => {
-    try {
-      await sidebarUndo.dispatch(
-        { environmentId: row.environmentId, threadId: row.threadId },
-        until
-          ? {
-              type: "thread.snooze",
-              threadId: row.threadId,
-              commandId: newCommandId(),
-              snoozedUntil: until,
-            }
-          : { type: "thread.unsnooze", threadId: row.threadId, commandId: newCommandId() },
-      );
-    } catch (error) {
-      Alert.alert(
-        "Could not update snooze",
-        error instanceof Error ? error.message : "The request failed.",
-      );
-    }
-  })();
-}
-
 /**
- * One inbox row with its long-press menu. Memoized on the row object, which
- * `stabilizeInboxSections` keeps identical while its content is unchanged, so
- * a live event re-renders only the rows it actually touched.
+ * One inbox row with its long-press menu and swipe actions: swipe left to
+ * archive (a full swipe archives at once) or snooze, right to pin or unpin.
+ * Memoized on the row object, which `stabilizeInboxSections` keeps identical
+ * while its content is unchanged, so a live event re-renders only the rows it
+ * actually touched.
  */
 export const InboxThreadMenuRow = memo(function InboxThreadMenuRow(props: {
   readonly row: InboxThreadRow;
@@ -180,21 +87,93 @@ export const InboxThreadMenuRow = memo(function InboxThreadMenuRow(props: {
   readonly onOpenThread: (row: InboxThreadRow) => void;
 }) {
   const { row, snoozeMenuPresets, onOpenThread } = props;
+  const { width } = useWindowDimensions();
+  const background = useThemeColor("--color-screen");
   const actions = useMemo(
     () => buildInboxRowMenuActions(row, snoozeMenuPresets),
     [row, snoozeMenuPresets],
   );
   const onPressAction = useCallback(
-    ({ nativeEvent }: NativeActionEvent) => dispatchRowMenuAction(row, nativeEvent.event),
+    ({ nativeEvent }: NativeActionEvent) => runInboxRowAction(row, nativeEvent.event),
     [row],
   );
   const onPress = useCallback(() => onOpenThread(row), [onOpenThread, row]);
+  const swipe = useMemo(
+    () => buildInboxSwipeActions(row, snoozeMenuPresets),
+    [row, snoozeMenuPresets],
+  );
   return (
-    <MenuView shouldOpenOnLongPress actions={actions} onPressAction={onPressAction}>
-      <ThreadRow row={row} onPress={onPress} />
-    </MenuView>
+    <ThreadSwipeable
+      backgroundColor={background}
+      containerStyle={INBOX_ROW_CONTAINER_STYLE}
+      fullSwipeWidth={width - 32}
+      threadKey={row.key}
+      resetKey={`${row.key}:${row.attentionState}:${row.snoozedUntil ?? ""}:${row.pinned}`}
+      leadingAction={swipe.leading}
+      primaryAction={swipe.primary}
+      secondaryAction={swipe.secondary}
+    >
+      <MenuView shouldOpenOnLongPress actions={actions} onPressAction={onPressAction}>
+        <ThreadRow row={row} onPress={onPress} />
+      </MenuView>
+    </ThreadSwipeable>
   );
 });
+
+const INBOX_ROW_CONTAINER_STYLE = { marginHorizontal: 16, marginBottom: 8, borderRadius: 16 };
+
+/** What a row's swipes offer: Pin or Unpin, Archive, and Snooze's presets. */
+export function buildInboxSwipeActions(
+  row: InboxThreadRow,
+  presets: ReadonlyArray<InboxSnoozeMenuPreset>,
+): {
+  readonly leading: ThreadSwipeAction;
+  readonly primary: ThreadSwipeAction | null;
+  readonly secondary: ThreadSwipeAction | null;
+} {
+  return {
+    leading: row.pinned
+      ? {
+          accessibilityLabel: `Unpin ${row.title}`,
+          icon: "pin.slash",
+          label: "Unpin",
+          tone: "accent",
+          onPress: () => setInboxRowPinned(row, false),
+        }
+      : {
+          accessibilityLabel: `Pin ${row.title}`,
+          icon: "pin",
+          label: "Pin",
+          tone: "accent",
+          onPress: () => setInboxRowPinned(row, true),
+        },
+    primary: row.canArchive
+      ? {
+          accessibilityLabel: `Archive ${row.title}`,
+          icon: "archivebox",
+          label: "Archive",
+          tone: "primary",
+          onPress: () => archiveInboxRow(row),
+        }
+      : null,
+    // A snoozed row wakes from its long-press menu; the swipe only snoozes.
+    secondary:
+      row.canSnooze === true && !row.snoozedUntil
+        ? {
+            accessibilityLabel: `Choose when to snooze ${row.title}`,
+            icon: "clock",
+            label: "Snooze",
+            tone: "secondary",
+            menu: {
+              actions: buildInboxSnoozeMenuActions(row, presets),
+              onPressAction: (event) => runInboxRowAction(row, event),
+              title: "Snooze until",
+            },
+            onPress: () => undefined,
+          }
+        : null,
+  };
+}
 
 function inboxListItemKey(item: InboxListItem): string {
   return item.key;
@@ -215,6 +194,9 @@ export const InboxScreen = memo(function InboxScreen(props: {
   readonly onOpenThread: (row: InboxThreadRow) => void;
   readonly onEmptyAction: (state: Exclude<InboxEmptyState, null>) => void;
   readonly onScrollOffset?: (offset: number) => void;
+  /** Archived tasks on the machines in view; the list ends with a link to them. */
+  readonly archivedCount?: number;
+  readonly onOpenArchived?: () => void;
 }) {
   const { nowMs, onOpenThread, onScrollOffset } = props;
   const [snoozedOpen, setSnoozedOpen] = useState(false);
@@ -253,6 +235,7 @@ export const InboxScreen = memo(function InboxScreen(props: {
     [snoozePresetsKey],
   );
 
+  const mutedColor = useThemeColor("--color-icon-muted");
   const renderItem = useCallback(
     ({ item }: LegendListRenderItemProps<InboxListItem>) => {
       if (item.kind === "section") {
@@ -288,9 +271,14 @@ export const InboxScreen = memo(function InboxScreen(props: {
           );
         }
         return (
-          <Text className="px-5 pt-5 pb-2 text-sm font-ryco-medium text-foreground-muted">
-            {item.title} · {item.count}
-          </Text>
+          <View className="flex-row items-center gap-1.5 px-5 pt-5 pb-2">
+            {item.sectionKey === "pinned" ? (
+              <SymbolView name="pin.fill" size={11} tintColor={mutedColor} type="monochrome" />
+            ) : null}
+            <Text className="text-sm font-ryco-medium text-foreground-muted">
+              {item.title} · {item.count}
+            </Text>
+          </View>
         );
       }
       if (item.kind === "show-more") {
@@ -314,43 +302,62 @@ export const InboxScreen = memo(function InboxScreen(props: {
         />
       );
     },
-    [onOpenThread, snoozeMenuPresets],
+    [mutedColor, onOpenThread, snoozeMenuPresets],
   );
   const onScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) =>
       onScrollOffset?.(event.nativeEvent.contentOffset.y),
     [onScrollOffset],
   );
+  const { swipeEnabled, scrollGateHandlers } = useSwipeableScrollGate({ onScroll });
 
   return (
-    <LegendList
-      key={props.filterKey}
-      data={data}
-      renderItem={renderItem}
-      keyExtractor={inboxListItemKey}
-      recycleItems
-      maintainVisibleContentPosition
-      initialScrollOffset={props.initialScrollOffset}
-      onScroll={onScroll}
-      scrollEventThrottle={32}
-      keyboardDismissMode="on-drag"
-      keyboardShouldPersistTaps="handled"
-      contentInsetAdjustmentBehavior="never"
-      contentContainerStyle={{ paddingBottom: HOME_LIST_PADDING_BOTTOM }}
-      ListHeaderComponent={<WorkspaceConnectionStatus />}
-      ListEmptyComponent={
-        empty ? (
-          <View className="px-2 py-12">
-            <EmptyState
-              variant="plain"
-              title={empty.title}
-              detail={empty.detail}
-              actionLabel={empty.actionLabel}
-              onAction={() => props.onEmptyAction(props.emptyState!)}
-            />
-          </View>
-        ) : null
-      }
-    />
+    <SwipeableScrollGateProvider enabled={swipeEnabled}>
+      <LegendList
+        key={props.filterKey}
+        data={data}
+        renderItem={renderItem}
+        keyExtractor={inboxListItemKey}
+        recycleItems
+        maintainVisibleContentPosition
+        initialScrollOffset={props.initialScrollOffset}
+        {...scrollGateHandlers}
+        scrollEventThrottle={32}
+        keyboardDismissMode="on-drag"
+        keyboardShouldPersistTaps="handled"
+        contentInsetAdjustmentBehavior="never"
+        contentContainerStyle={{ paddingBottom: HOME_LIST_PADDING_BOTTOM }}
+        ListHeaderComponent={<WorkspaceConnectionStatus />}
+        ListFooterComponent={
+          props.archivedCount && props.onOpenArchived && data.length > 0 ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Archived, ${props.archivedCount} tasks`}
+              className="min-h-11 flex-row items-center gap-2 px-5 pt-4 pb-2 active:opacity-70"
+              onPress={props.onOpenArchived}
+            >
+              <SymbolView name="archivebox" size={13} tintColor={mutedColor} type="monochrome" />
+              <Text className="text-sm font-ryco-medium text-foreground-muted">Archived</Text>
+              <Text className="ml-auto rounded-full bg-subtle px-2 py-0.5 font-mono text-2xs text-foreground-tertiary">
+                {props.archivedCount}
+              </Text>
+            </Pressable>
+          ) : null
+        }
+        ListEmptyComponent={
+          empty ? (
+            <View className="px-2 py-12">
+              <EmptyState
+                variant="plain"
+                title={empty.title}
+                detail={empty.detail}
+                actionLabel={empty.actionLabel}
+                onAction={() => props.onEmptyAction(props.emptyState!)}
+              />
+            </View>
+          ) : null
+        }
+      />
+    </SwipeableScrollGateProvider>
   );
 });
