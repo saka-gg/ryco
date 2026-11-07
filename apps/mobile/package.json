@@ -25,6 +25,8 @@
     "config:prod": "APP_VARIANT=production expo config",
     "build:terminal-renderer": "node scripts/build-terminal-renderer.mts",
     "check:terminal-renderer": "node scripts/build-terminal-renderer.mts --check",
+    "build:device-stream-renderer": "node scripts/build-device-stream-renderer.mts",
+    "check:device-stream-renderer": "node scripts/build-device-stream-renderer.mts --check",
     "test": "vp test run",
     "typecheck": "tsc --noEmit --incremental",
     "typecheck:fast": "tsc-rs --noEmit --incremental --tsBuildInfoFile .turbo/tsc-rs.tsbuildinfo"

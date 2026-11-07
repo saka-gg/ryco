@@ -1,5 +1,6 @@
 import {
   createEnvironmentConnection,
+  hostedDeviceFrameSources,
   type EnvironmentConnection,
   type EnvironmentConnectionSupervisor,
   type OrchestrationHandlers,
@@ -163,8 +164,19 @@ export function createHostedEnvironmentConnection(
     getEnvironmentId: () => environmentId,
   });
   // Device previews and input borrow the relay socket; its lifecycle owner manages it.
+  // Video and live input ride the relay channel's frame tunnel (`hostedDeviceFrameSources`).
   const client = dispatchReplay.wrap(
-    createWsRpcClient(transport, createDeviceRpcClient(transport, { manageTransport: false })),
+    createWsRpcClient(
+      transport,
+      createDeviceRpcClient(transport, {
+        manageTransport: false,
+        openFrameSource: hostedDeviceFrameSources({
+          channel: () => attemptFactory.currentFrameTunnelChannel(),
+          readiness: hostedEnvironmentResumeReadiness(sessions, environmentId, generation),
+        }),
+        frameSourceNeedsRelayTunnel: true,
+      }),
+    ),
   );
 
   // The node is reached only through the relay, so the "target" is the Hub's

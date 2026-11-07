@@ -11,7 +11,16 @@ import {
   createNativeStackScreen,
   type NativeStackNavigationOptions,
 } from "@react-navigation/native-stack";
-import { DynamicColorIOS, Platform, Pressable, ScrollView, StyleSheet } from "react-native";
+import {
+  Dimensions,
+  DynamicColorIOS,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+} from "react-native";
+
+import { deriveLayout, deriveThreadWorkspaceInspectorPaneLayout } from "./lib/layout";
 import { useResolveClassNames } from "uniwind";
 
 import { AppText as Text } from "./components/AppText";
@@ -280,6 +289,15 @@ function platformPresentationOptions(descriptor: MvpRouteDescriptor): NativeStac
   return options;
 }
 
+/** Whether the window is wide enough for the workspace inspector (`ThreadWorkspaceLayout`). */
+function workspaceInspectorSupported(): boolean {
+  const { width, height } = Dimensions.get("window");
+  return deriveThreadWorkspaceInspectorPaneLayout({
+    layout: deriveLayout({ width, height }),
+    viewportWidth: width,
+  }).supported;
+}
+
 function routeOptions(
   name: keyof typeof MVP_ROOT_ROUTES,
   extras: AppScreenOptions = {},
@@ -447,7 +465,13 @@ export const ROOT_STACK_SCREENS = {
   ThreadDevice: createNativeStackScreen({
     screen: ThreadDeviceRouteScreen,
     linking: MVP_ROOT_ROUTES.ThreadDevice.linking,
-    options: routeOptions("ThreadDevice", { title: "Device" }),
+    // A regular-width window shows the device in the workspace inspector beside
+    // the thread, so the route is a card there, like Terminal; a full-screen
+    // modal would cover the inspector column.
+    options: () =>
+      workspaceInspectorSupported()
+        ? routeOptions("ThreadTerminal", { title: "Device" })
+        : routeOptions("ThreadDevice", { title: "Device" }),
   }),
   ThreadTerminal: createNativeStackScreen({
     screen: ThreadTerminalRouteScreen,

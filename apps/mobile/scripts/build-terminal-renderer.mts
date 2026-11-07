@@ -12,12 +12,17 @@
  * leave a stale renderer behind. Regenerate with
  * `bun run --cwd apps/mobile build:terminal-renderer`.
  */
-import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { build } from "vite-plus";
+
+import {
+  bundleInlineRendererScript,
+  escapeInlineScript,
+  escapeInlineStyle,
+  inlineScriptHash,
+} from "./inlineRendererBundle.mts";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const mobileDir = resolve(scriptDir, "..");
@@ -50,58 +55,22 @@ async function packageVersion(name: string): Promise<string> {
   return (JSON.parse(await readFile(packagePath, "utf8")) as { version: string }).version;
 }
 
-function escapeInlineScript(script: string): string {
-  return script.replaceAll(/<\/script/giu, "<\\/script");
-}
-
-function escapeInlineStyle(style: string): string {
-  return style.replaceAll(/<\/style/giu, "<\\/style");
-}
-
-async function bundleRendererScript(): Promise<string> {
-  const result = await build({
-    configFile: false,
-    envFile: false,
-    logLevel: "silent",
-    root: sourceDir,
-    mode: "production",
-    define: { "process.env.NODE_ENV": JSON.stringify("production") },
-    build: {
-      write: false,
-      emptyOutDir: false,
-      copyPublicDir: false,
-      minify: true,
-      sourcemap: false,
-      reportCompressedSize: false,
-      target: "es2020",
-      lib: {
-        entry: join(sourceDir, "terminalRenderer.ts"),
-        formats: ["iife"],
-        name: "RycoTerminalRenderer",
-        fileName: () => "renderer.js",
-      },
-    },
-  });
-  const outputs = Array.isArray(result) ? result : [result];
-  for (const output of outputs) {
-    if (!("output" in output)) continue;
-    for (const chunk of output.output) {
-      if (chunk.type === "chunk" && chunk.isEntry) return chunk.code.trim();
-    }
-  }
-  throw new Error("The terminal renderer bundle produced no entry chunk.");
-}
-
 /** The generated document, built in memory. */
 export async function buildTerminalRendererDocument(): Promise<string> {
-  const script = escapeInlineScript(await bundleRendererScript());
+  const script = escapeInlineScript(
+    await bundleInlineRendererScript({
+      root: sourceDir,
+      entry: join(sourceDir, "terminalRenderer.ts"),
+      name: "RycoTerminalRenderer",
+    }),
+  );
   const xtermCssPath = require.resolve("@xterm/xterm/css/xterm.css", { paths: [mobileDir] });
   const style = escapeInlineStyle(
     `${(await readFile(xtermCssPath, "utf8")).trim()}\n${(
       await readFile(join(sourceDir, "terminalRenderer.css"), "utf8")
     ).trim()}`,
   );
-  const digest = createHash("sha256").update(script, "utf8").digest("base64");
+  const digest = inlineScriptHash(script);
   const [xtermVersion, fitVersion] = await Promise.all([
     packageVersion("@xterm/xterm"),
     packageVersion("@xterm/addon-fit"),
