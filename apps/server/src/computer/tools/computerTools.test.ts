@@ -3667,9 +3667,11 @@ describe("computer never-raise gate", () => {
           effect: "not-dispatched",
         });
       }
-      expect(approval).toHaveBeenCalledWith(
+      // Refused before the app approval dialog: no "Allow Ryco to use…?" for a call that
+      // could never run.
+      expect(approval).not.toHaveBeenCalledWith(
         "computer_invoke_menu",
-        expect.objectContaining({ delivery_mode: "foreground" }),
+        expect.anything(),
         expect.anything(),
         expect.anything(),
         expect.anything(),

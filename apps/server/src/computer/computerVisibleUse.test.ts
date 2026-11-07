@@ -159,6 +159,20 @@ describe("computerForegroundAuthorizationForMessages", () => {
     },
   );
 
+  it.each(["yes", "Ok", "sure", "go ahead"])(
+    "keeps a background-only request when the user answers %s",
+    (answer) => {
+      expect(
+        allowed([
+          message({ text: "Archive the newsletters in Spark, in the background please" }),
+          message({ role: "assistant", text: "Should I archive all 12?" }),
+          message({ text: answer }),
+          message({ text: "continue" }),
+        ]),
+      ).toBe(false);
+    },
+  );
+
   it("lets a new task lift an earlier background-only request", () => {
     expect(
       allowed([

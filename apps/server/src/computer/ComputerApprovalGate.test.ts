@@ -482,13 +482,16 @@ describe("ComputerApprovalGate per-app approval", () => {
     expect(await Promise.all([first, second])).toEqual([true, true]);
   });
 
-  it("never stores an unnamed target as always allowed", async () => {
-    const { ask, alwaysAllowed, present } = harness(["always"]);
+  it("never stores an unnamed target as always allowed, and keeps it to the turn", async () => {
+    const { ask, alwaysAllowed, present } = harness(["always", "chat"]);
     expect(await ask(unnamed)).toBe(true);
     expect(alwaysAllowed.keys.size).toBe(0);
-    // It still counts for this chat.
-    expect(await ask(unnamed, { turnId: "next" })).toBe(true);
+    // It counts for the rest of this turn...
+    expect(await ask(unnamed)).toBe(true);
     expect(present).toHaveBeenCalledTimes(1);
+    // ...but a later turn asks again: one answer must not open every app to window-less calls.
+    expect(await ask(unnamed, { turnId: "next" })).toBe(true);
+    expect(present).toHaveBeenCalledTimes(2);
   });
 
   it("clears chat approvals after a desktop interruption but keeps Always allow", async () => {

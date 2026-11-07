@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { ComputerSpaceBroker, ComputerSpaceError } from "./ComputerSpaceBroker.ts";
 import { ComputerControlState } from "./ComputerControlState.ts";
 import { computerApprovalGate } from "./ComputerApprovalGate.ts";
-import { assertForegroundNotBlocked } from "./foregroundEscapeStop.ts";
+import { assertForegroundNotBlocked, foregroundNotRequestedError } from "./foregroundEscapeStop.ts";
 import type {
   ComputerApprovalAppNames,
   ComputerApprovalTargets,
@@ -1259,15 +1259,7 @@ export class ComputerManager {
     authorization: ComputerForegroundAuthorization | undefined,
   ): void {
     if (agentThreadId(threadId) === undefined) return;
-    if (authorization?.userRequestedVisibleUse !== true) {
-      throw new CuaActionError(
-        "This task asked to stay in the background, or did not come from the user, so no window " +
-          "may come to the front. Keep observing and acting through background input, or report " +
-          "what cannot be done without the foreground.",
-        "not-dispatched",
-        COMPUTER_FOREGROUND_NOT_REQUESTED_CODE,
-      );
-    }
+    if (authorization?.userRequestedVisibleUse !== true) throw foregroundNotRequestedError();
     assertForegroundNotBlocked(authorization);
     const lastInput = this.lastUserDesktopInputAt;
     if (lastInput !== undefined && this.now() - lastInput < COMPUTER_USER_INTERACTION_QUIET_MS) {
@@ -2663,7 +2655,11 @@ export class ComputerManager {
           windowId,
         );
       },
-      () => this.assertForegroundAllowed(threadId, authorization),
+      () => {
+        this.assertForegroundAllowed(threadId, authorization);
+        this.spaceBroker.assertForegroundAllowed(agentThreadId(threadId));
+      },
+      { releaseAfter: true },
     );
   }
 
@@ -2788,7 +2784,11 @@ export class ComputerManager {
           if (shieldId !== undefined) await this.releaseActivationShield(shieldId);
         }
       },
-      () => this.assertForegroundAllowed(threadId, authorization),
+      () => {
+        this.assertForegroundAllowed(threadId, authorization);
+        this.spaceBroker.assertForegroundAllowed(agentThreadId(threadId));
+      },
+      { releaseAfter: true },
     );
   }
 
@@ -2866,6 +2866,7 @@ export class ComputerManager {
         this.assertForegroundAllowed(threadId, authorization);
         this.spaceBroker.assertForegroundAllowed(agentThreadId(threadId));
       },
+      { releaseAfter: true },
     );
   }
 
@@ -4600,6 +4601,7 @@ export class ComputerManager {
     threadId: string | undefined,
     action: () => Promise<A>,
     beforeClaim?: () => void,
+    options: { readonly releaseAfter?: boolean } = {},
   ): Promise<A> {
     assertDesktopOperationAdmission();
     const owner = agentThreadId(threadId);
@@ -4643,8 +4645,26 @@ export class ComputerManager {
       } catch (error) {
         this.recordInputPause(owner, error);
         throw error;
+      } finally {
+        if (options.releaseAfter && owner) await this.endForegroundExcursionLease(owner);
       }
     });
+  }
+
+  /**
+   * A foreground excursion holds the whole desktop only while the window is
+   * raised. Once the previous window is back, other conversations' background
+   * work must not wait for this turn to end: drop the desktop lease (the
+   * turn's authority stays), and the next desktop-wide call claims it again.
+   */
+  private async endForegroundExcursionLease(owner: string): Promise<void> {
+    const lease = this.lease;
+    if (lease?.threadId !== owner || lease.releaseRequested) return;
+    await this.backend.clearFocusWindow?.().catch(() => undefined);
+    if (this.lease !== lease) return;
+    this.recordLeaseLifecycle("released", lease);
+    this.lease = null;
+    this.notifyLeaseChange();
   }
 
   private async refreshInputPause(
@@ -5142,7 +5162,11 @@ export class ComputerManager {
       // input — the raise the covering list waits on may fail, and an
       // unranked window list cannot even prove what covers what — so the
       // point refuses while any window that could intercept it is denied.
-      if (agentThreadId(threadId) !== undefined) {
+      // Background delivery posts the event to the target window's process,
+      // never to the screen point, so whatever covers that point cannot take
+      // it: a password manager over a background mail window is no reason to
+      // refuse the mail window.
+      if (agentThreadId(threadId) !== undefined && !this.canUseBackgroundTarget()) {
         const suspects =
           occlusion.covering.length > 0
             ? occlusion.covering

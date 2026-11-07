@@ -1,6 +1,7 @@
 // Adapted from Synara v0.9.1; see docs/licenses/synara-computer-use.txt.
 import { randomUUID } from "node:crypto";
 import type { ProviderApprovalDecision } from "@ryco/contracts";
+import { COMPUTER_APPROVAL_UNNAMED_APP } from "./computerApprovalTargets.ts";
 
 interface PendingApproval {
   readonly threadId: string;
@@ -156,6 +157,12 @@ export class ComputerApprovalGate {
   private readonly tasks = new Map<string, TaskApproval>();
   /** "Allow for this chat" answers, per thread. */
   private readonly chatApps = new Map<string, Set<string>>();
+  /**
+   * Approvals of the unnamed target ("your Mac": a call that names no app). They last
+   * for the turn that got them only: kept for the chat, one answer would let every later
+   * window-less call reach any app without that app's own prompt.
+   */
+  private readonly turnUnnamed = new Map<string, string>();
   /** "Don't allow" answers, which last for the turn that got them. */
   private readonly deniedApps = new Map<string, { turnId: string; keys: Set<string> }>();
   /**
@@ -169,6 +176,8 @@ export class ComputerApprovalGate {
     if (turnId === undefined || task?.turnId === turnId) this.tasks.delete(threadId);
     const denied = this.deniedApps.get(threadId);
     if (turnId === undefined || denied?.turnId === turnId) this.deniedApps.delete(threadId);
+    if (turnId === undefined || this.turnUnnamed.get(threadId) === turnId)
+      this.turnUnnamed.delete(threadId);
     for (const [key, dialog] of this.appDialogs) {
       if (dialog.threadId !== threadId || (turnId !== undefined && dialog.turnId !== turnId))
         continue;
@@ -211,6 +220,7 @@ export class ComputerApprovalGate {
     // "Always allow" is the user's standing choice and stays. An app dialog still
     // open stays as well: its answer postdates the interruption.
     this.chatApps.clear();
+    this.turnUnnamed.clear();
   }
 
   /**
@@ -233,7 +243,13 @@ export class ComputerApprovalGate {
     signal.throwIfAborted();
     if (app.canAlwaysAllow && (await input.alwaysAllowed.has(app.key))) return true;
     signal.throwIfAborted();
-    if (this.chatApps.get(threadId)?.has(app.key)) return true;
+    const unnamed = app.key === COMPUTER_APPROVAL_UNNAMED_APP.key;
+    if (
+      unnamed
+        ? this.turnUnnamed.get(threadId) === turnId
+        : this.chatApps.get(threadId)?.has(app.key)
+    )
+      return true;
     const denied = this.deniedApps.get(threadId);
     if (denied?.turnId === turnId && denied.keys.has(app.key)) return false;
     const dialogKey = JSON.stringify([threadId, turnId, app.key]);
@@ -245,8 +261,10 @@ export class ComputerApprovalGate {
         const answer = await input.present();
         if (current.cancelled) return "deny" as const;
         if (answer === "always" && app.canAlwaysAllow) await input.alwaysAllowed.add(app);
-        if (answer === "always" || answer === "chat") this.allowForChat(threadId, app.key);
-        else this.denyForTurn(threadId, turnId, app.key);
+        if (answer === "always" || answer === "chat") {
+          if (unnamed) this.allowUnnamedForTurn(threadId, turnId);
+          else this.allowForChat(threadId, app.key);
+        } else this.denyForTurn(threadId, turnId, app.key);
         return answer;
       })();
       current = { threadId, turnId, answer, cancelled: false };
@@ -277,6 +295,13 @@ export class ComputerApprovalGate {
     this.chatApps.set(threadId, apps.add(key));
     while (this.chatApps.size > COMPUTER_APP_APPROVAL_THREAD_LIMIT)
       this.chatApps.delete(this.chatApps.keys().next().value!);
+  }
+
+  private allowUnnamedForTurn(threadId: string, turnId: string): void {
+    this.turnUnnamed.delete(threadId);
+    this.turnUnnamed.set(threadId, turnId);
+    while (this.turnUnnamed.size > COMPUTER_APP_APPROVAL_THREAD_LIMIT)
+      this.turnUnnamed.delete(this.turnUnnamed.keys().next().value!);
   }
 
   private denyForTurn(threadId: string, turnId: string, key: string): void {

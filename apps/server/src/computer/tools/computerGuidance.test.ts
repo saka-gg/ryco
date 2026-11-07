@@ -62,7 +62,7 @@ describe("computer guidance", () => {
     expect(notes).toContain("never ask the user for it");
     expect(notes).not.toContain("pixel fallback can briefly take keyboard focus");
     expect(notes).not.toContain("launch_app hidden:false");
-    expect(COMPUTER_HELP_SECTIONS.foreground).toContain("finish in the foreground without asking");
+    expect(COMPUTER_HELP_SECTIONS.foreground).toContain("repeat that call with delivery_mode");
   });
 
   it("keeps the browser chapter on the CDP route", () => {

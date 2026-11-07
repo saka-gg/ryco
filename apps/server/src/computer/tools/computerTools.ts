@@ -101,7 +101,7 @@ import {
   type ComputerForegroundAuthorization,
 } from "../computerVisibleUse.ts";
 import { PROVIDERS_WITHOUT_APPROVAL_GATE } from "./approvalGate.ts";
-import { assertForegroundNotBlocked } from "../foregroundEscapeStop.ts";
+import { assertForegroundNotBlocked, foregroundGateRefusal } from "../foregroundEscapeStop.ts";
 import {
   collectComputerApprovalTargets,
   type ComputerApprovalTargets,
@@ -148,7 +148,7 @@ export const COMPUTER_CONTROL_FIRST_MUTATION_DISCLOSURE =
   "Computer control ON for this turn: the agent is driving the desktop and the user can switch it off in Settings.";
 
 const COMPUTER_TOOL_REFRESH_GUIDANCE =
-  'Computer routing reminder: observe with computer_get_state and exact window_id before acting; prefer element refs; computer_invoke_menu activates the app. Use coordinates only for controls absent from elements. computer_type_text with window_id alone inserts the whole string into the focused field; never spell text through computer_press_key. Background text is focus-neutral only when Cua proves one writable Accessibility target. When background input does not reach the app, activate the window and use delivery_mode:"foreground" instead of asking; never replay uncertain delivery; off-Space pixels are not live.';
+  'Computer routing reminder: observe with computer_get_state and exact window_id before acting; prefer element refs; computer_invoke_menu activates the app. Use coordinates only for controls absent from elements. computer_type_text with window_id alone inserts the whole string into the focused field; never spell text through computer_press_key. Background text is focus-neutral only when Cua proves one writable Accessibility target. When background input does not reach the app, repeat the call with delivery_mode:"foreground" instead of asking; never replay uncertain delivery; off-Space pixels are not live.';
 
 /**
  * Attached to every null-window launch result, always rather than on
@@ -166,7 +166,7 @@ function withLaunchGuidance(result: ComputerLaunchAppResult) {
     return {
       ...result,
       toolGuidance:
-        "The app changed desktop focus during launch despite the background request. Do not relaunch or continue input from the previous observation. Read fresh state and respect the user's visible-use permission." +
+        "The app changed desktop focus during launch despite the background request. Do not relaunch or continue input from the previous observation. Read fresh state before acting." +
         (result.window === null ? ` ${LAUNCH_NULL_WINDOW_GUIDANCE}` : ""),
     };
   }
@@ -1891,6 +1891,22 @@ export function makeAgentGatewayComputerTools(
               };
             }
           }
+          // A foreground call the task may not make is refused before the app approval
+          // dialog: asking "Allow Ryco to use X?" only to refuse afterwards helps no one.
+          if (
+            args.delivery_mode === "foreground" ||
+            name === "computer_activate_window" ||
+            name === "computer_invoke_menu"
+          ) {
+            const refusal = foregroundGateRefusal(await foregroundAuthorization(context));
+            if (refusal) {
+              audit(computerAuditErrorOutcome(refusal));
+              return {
+                result: { ...mcpToolResultJson(cuaActionErrorPayload(refusal)), isError: true },
+                signal: undefined,
+              };
+            }
+          }
           if (
             computerToolRequiresApproval(name) &&
             (options.authorizeAction !== undefined ||
@@ -2230,7 +2246,7 @@ export function makeAgentGatewayComputerTools(
             description:
               name === "computer_invoke_menu"
                 ? "This menu route is always foreground; it is refused when the task asked to stay in the background."
-                : "Background by default. Foreground requires the user's own task to ask to see the screen. Never replay uncertain input.",
+                : 'Background by default; "foreground" when background input did not reach the app. Never replay uncertain input.',
           },
         },
       },
@@ -2712,9 +2728,8 @@ export function makeAgentGatewayComputerTools(
             const authorization = await foregroundAuthorization(context);
             if (!authorization.userRequestedVisibleUse) {
               throw new CuaActionError(
-                "The user's task did not ask for this app to be shown; launching it visibly " +
-                  "would take their screen. Keep the launch in the background, or ask " +
-                  "the user to confirm they want to watch.",
+                "This task asked to stay in the background, or did not come from the user, so it may not " +
+                  "launch visibly. Keep the launch in the background.",
                 "not-dispatched",
                 COMPUTER_FOREGROUND_NOT_REQUESTED_CODE,
               );
@@ -3672,9 +3687,8 @@ export function makeAgentGatewayComputerTools(
           const authorization = await foregroundAuthorization(context);
           if (!authorization.userRequestedVisibleUse) {
             throw new CuaActionError(
-              "The user's task did not ask for this app to be shown; launching it visibly " +
-                "would take their screen. Keep the launch in the background, or ask " +
-                "the user to confirm they want to watch.",
+              "This task asked to stay in the background, or did not come from the user, so it may not " +
+                "launch visibly. Keep the launch in the background.",
               "not-dispatched",
               COMPUTER_FOREGROUND_NOT_REQUESTED_CODE,
             );
