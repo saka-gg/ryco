@@ -1,22 +1,17 @@
 import Constants from "expo-constants";
-import {
-  clearSharedPayloads,
-  getResolvedSharedPayloadsAsync,
-  getSharedPayloads,
-  type ResolvedSharePayload,
-  type SharePayload,
-} from "expo-sharing";
+import { clearSharedPayloads, getSharedPayloads, type SharePayload } from "expo-sharing";
 import { Platform } from "react-native";
 
 import { uuidv4 } from "../../lib/uuid";
 import {
   buildIncomingShareDraft,
+  INCOMING_SHARE_COPY_DIRECTORY,
+  isIncomingShareCopyUri,
   isShareFileUriUnderOwnedRoots,
   type IncomingShareDraft,
 } from "./incomingShareModel";
 
 const APP_GROUP_UNAVAILABLE = "ERR_FAILED_TO_RESOLVE_APP_GROUP_ID";
-const OWNED_SHARE_DIRECTORY = "incoming-shares";
 
 /** Personal Team builds have no share extension (app.config.ts), and so no App Group to read. */
 function receivesShares(): boolean {
@@ -31,15 +26,6 @@ function readPayloads(): ReadonlyArray<SharePayload> {
       typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
     if (code === APP_GROUP_UNAVAILABLE) return [];
     throw error;
-  }
-}
-
-async function resolvedPayloads(): Promise<ReadonlyArray<ResolvedSharePayload>> {
-  try {
-    return await getResolvedSharedPayloadsAsync();
-  } catch {
-    // The raw payloads still point at readable copies.
-    return [];
   }
 }
 
@@ -83,7 +69,6 @@ export function takeIncomingShare(): Promise<IncomingShareDraft | null> {
       if (payloads.length === 0) return null;
       const draft = await buildIncomingShareDraft({
         payloads,
-        resolvedPayloads: await resolvedPayloads(),
         files: {
           readBase64: async (uri) => {
             const { File } = await import("expo-file-system");
@@ -95,7 +80,7 @@ export function takeIncomingShare(): Promise<IncomingShareDraft | null> {
           },
           copyToOwned: async (uri, name) => {
             const { Directory, File, Paths } = await import("expo-file-system");
-            const directory = new Directory(Paths.cache, OWNED_SHARE_DIRECTORY, uuidv4());
+            const directory = new Directory(Paths.cache, INCOMING_SHARE_COPY_DIRECTORY, uuidv4());
             directory.create({ intermediates: true, idempotent: true });
             const target = new File(directory, name);
             new File(uri).copy(target);
@@ -112,4 +97,23 @@ export function takeIncomingShare(): Promise<IncomingShareDraft | null> {
     }
   })();
   return taking;
+}
+
+/**
+ * Deletes the app's own copy of a shared file once the draft no longer needs
+ * it (removed, sent, or the draft closed). Other files are left alone.
+ */
+export async function releaseIncomingShareCopy(uri: string): Promise<void> {
+  if (!isIncomingShareCopyUri(uri)) return;
+  try {
+    const { File, Paths } = await import("expo-file-system");
+    if (!isShareFileUriUnderOwnedRoots(uri, [Paths.cache.uri])) return;
+    const file = new File(uri);
+    const directory = file.parentDirectory;
+    if (file.exists) file.delete();
+    // Each copy has its own directory (copyToOwned): drop it with the file.
+    if (directory.exists && directory.list().length === 0) directory.delete();
+  } catch {
+    // The OS clears the cache directory eventually.
+  }
 }

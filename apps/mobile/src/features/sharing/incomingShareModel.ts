@@ -6,9 +6,9 @@
 import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
-  PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
 } from "@ryco/contracts/orchestration";
 
+import { attachesInline } from "../../lib/composerAttachmentBudget";
 import type { DraftComposerAttachment } from "../../lib/composerFiles";
 
 /** The fields of an expo-sharing payload this model reads. */
@@ -16,14 +16,6 @@ export interface IncomingSharePayload {
   readonly value: string;
   readonly shareType: "text" | "url" | "audio" | "image" | "video" | "file";
   readonly mimeType?: string | undefined;
-}
-
-/** expo-sharing's resolved details for a shared file, when it has them. */
-export interface IncomingShareResolvedPayload extends IncomingSharePayload {
-  readonly contentUri: string | null;
-  readonly contentMimeType: string | null;
-  readonly originalName: string | null;
-  readonly contentSize: number | null;
 }
 
 /** File access, injected so the model stays testable off the device. */
@@ -41,8 +33,15 @@ export interface IncomingShareDraft {
   readonly warnings: ReadonlyArray<string>;
 }
 
-const INLINE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const FILE_SHARE_TYPES = new Set(["image", "audio", "video", "file"]);
+
+/** Where the app keeps its copies of shared files, inside its cache directory. */
+export const INCOMING_SHARE_COPY_DIRECTORY = "incoming-shares";
+
+/** Whether a file is one of the app's copies of a shared file. */
+export function isIncomingShareCopyUri(uri: string): boolean {
+  return uri.startsWith("file:") && uri.includes(`/${INCOMING_SHARE_COPY_DIRECTORY}/`);
+}
 
 /** Shared text and links, each once, in the order they came. */
 export function incomingShareText(payloads: ReadonlyArray<IncomingSharePayload>): string {
@@ -105,43 +104,26 @@ export function isShareFileUriUnderOwnedRoots(
   });
 }
 
-function resolvedFor(
-  payload: IncomingSharePayload,
-  index: number,
-  resolved: ReadonlyArray<IncomingShareResolvedPayload>,
-  used: Set<number>,
-): IncomingShareResolvedPayload | undefined {
-  const matches = (candidate: IncomingShareResolvedPayload | undefined, at: number) =>
-    candidate !== undefined &&
-    !used.has(at) &&
-    candidate.shareType === payload.shareType &&
-    candidate.value === payload.value;
-  const at = matches(resolved[index], index)
-    ? index
-    : resolved.findIndex((candidate, candidateIndex) => matches(candidate, candidateIndex));
-  if (at < 0) return undefined;
-  used.add(at);
-  return resolved[at];
-}
-
 function formatMegabytes(bytes: number): string {
   return `${Math.round(bytes / (1024 * 1024))} MB`;
 }
 
+/**
+ * The draft for a share. Only the payloads' own file copies are read: links
+ * are never fetched from the phone (expo-sharing's resolver would GET each
+ * one, spending one-time links and waiting on slow hosts).
+ */
 export async function buildIncomingShareDraft(input: {
   readonly payloads: ReadonlyArray<IncomingSharePayload>;
-  readonly resolvedPayloads: ReadonlyArray<IncomingShareResolvedPayload>;
   readonly files: IncomingShareFileAccess;
 }): Promise<IncomingShareDraft> {
   const attachments: DraftComposerAttachment[] = [];
   const warnings: string[] = [];
-  const used = new Set<number>();
   let warnedLimit = false;
 
   for (const [index, payload] of input.payloads.entries()) {
     if (!FILE_SHARE_TYPES.has(payload.shareType)) continue;
-    const resolved = resolvedFor(payload, index, input.resolvedPayloads, used);
-    const uri = resolved?.contentUri ?? payload.value;
+    const uri = payload.value;
     if (attachments.length >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
       if (!warnedLimit) {
         warnings.push(
@@ -152,21 +134,16 @@ export async function buildIncomingShareDraft(input: {
       continue;
     }
     const mimeType = (
-      resolved?.contentMimeType ??
-      payload.mimeType ??
-      (payload.shareType === "image" ? "image/png" : "application/octet-stream")
+      payload.mimeType ?? (payload.shareType === "image" ? "image/png" : "application/octet-stream")
     ).toLowerCase();
-    const name = resolved?.originalName?.trim() || fallbackShareName(uri, index, mimeType);
+    const name = fallbackShareName(uri, index, mimeType);
     try {
-      const sizeBytes = resolved?.contentSize ?? (await input.files.readSize(uri));
+      const sizeBytes = await input.files.readSize(uri);
       if (sizeBytes === null || sizeBytes <= 0) {
         warnings.push(`'${name}' is empty or could not be read.`);
         continue;
       }
-      if (
-        INLINE_IMAGE_MIME_TYPES.has(mimeType) &&
-        sizeBytes <= PROVIDER_SEND_TURN_MAX_IMAGE_BYTES
-      ) {
+      if (attachesInline(mimeType, sizeBytes)) {
         const dataUrl = `data:${mimeType};base64,${await input.files.readBase64(uri)}`;
         attachments.push({
           type: "image",

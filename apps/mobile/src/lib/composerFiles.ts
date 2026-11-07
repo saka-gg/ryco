@@ -1,15 +1,15 @@
-import {
-  PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES,
-  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
-  PROVIDER_SEND_TURN_MAX_FILE_BYTES,
-  PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
-} from "@ryco/contracts/orchestration";
+import { PROVIDER_SEND_TURN_MAX_ATTACHMENTS } from "@ryco/contracts/orchestration";
 
 import {
   draftImageAttachmentFromPickerAsset,
   loadImagePicker,
   type DraftComposerImageAttachment,
 } from "./composerImages";
+import {
+  attachesInline,
+  attachmentCountLimitMessage,
+  composerAttachmentBudgetError,
+} from "./composerAttachmentBudget";
 import { uuidv4 } from "./uuid";
 
 /**
@@ -37,13 +37,6 @@ export function isDraftComposerFileAttachment(
   return attachment.type === "file";
 }
 
-function formatUploadSizeLimitLabel(maxBytes: number): string {
-  const streamingLimit = Math.min(maxBytes, PROVIDER_SEND_TURN_MAX_FILE_BYTES);
-  return streamingLimit % (1024 * 1024) === 0
-    ? `${Math.round(streamingLimit / (1024 * 1024))}MB`
-    : `${Math.round(streamingLimit / 1024)}KB`;
-}
-
 /**
  * Pure gate for one picked non-image file, mirroring the web composer's
  * streaming limits: the capability ceiling (already min-ed with the provider
@@ -69,24 +62,15 @@ export function resolveComposerFileAttachment(input: {
       error: `'${name}' has an unsafe filename. Rename it without path separators or control characters.`,
     };
   }
-  if (input.sizeBytes <= 0 || input.sizeBytes > input.fileUploadMaxBytes) {
-    return {
-      attachment: null,
-      error: `'${name}' must be non-empty and no larger than the ${formatUploadSizeLimitLabel(input.fileUploadMaxBytes)} attachment limit.`,
-    };
-  }
-  if (input.existingCount >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
-    return {
-      attachment: null,
-      error: `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files per message.`,
-    };
-  }
-  if (input.existingTotalBytes + input.sizeBytes > PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES) {
-    return {
-      attachment: null,
-      error: "Attachments can total at most 50MB per message.",
-    };
-  }
+  const error = composerAttachmentBudgetError({
+    kind: "file",
+    name,
+    sizeBytes: input.sizeBytes,
+    fileUploadMaxBytes: input.fileUploadMaxBytes,
+    existingCount: input.existingCount,
+    existingTotalBytes: input.existingTotalBytes,
+  });
+  if (error) return { attachment: null, error };
   return {
     attachment: {
       type: "file",
@@ -128,7 +112,7 @@ export async function pickComposerAttachments(input: {
     return {
       images: [],
       files: [],
-      error: `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files per message.`,
+      error: attachmentCountLimitMessage(),
     };
   }
 
@@ -227,9 +211,6 @@ export interface ComposerAttachmentBudget {
   readonly fileUploadMaxBytes: number | null;
 }
 
-/** Image types every provider reads inline; anything else is sent as a file. */
-const INLINE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
-
 /**
  * How a file picked in the Files app is attached: a small common image goes
  * inline like a photo (with a preview), anything else streams as a file, and
@@ -241,20 +222,11 @@ export function classifyPickedDocument(input: {
   readonly sizeBytes: number;
   readonly fileUploadMaxBytes: number | null;
 }): "image" | "file" | { readonly error: string } {
-  const mimeType = input.mimeType.toLowerCase();
-  const inlineImage =
-    INLINE_IMAGE_MIME_TYPES.has(mimeType) &&
-    input.sizeBytes > 0 &&
-    input.sizeBytes <= PROVIDER_SEND_TURN_MAX_IMAGE_BYTES;
-  if (inlineImage) return "image";
+  if (attachesInline(input.mimeType, input.sizeBytes)) return "image";
   if (input.fileUploadMaxBytes !== null) return "file";
   return {
     error: `'${input.name}' can't be attached: this machine only takes images in messages. Update Ryco on it to send files.`,
   };
-}
-
-function attachmentLimitError(): string {
-  return `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files per message.`;
 }
 
 /**
@@ -265,7 +237,7 @@ export async function pickComposerDocuments(
   input: ComposerAttachmentBudget,
 ): Promise<PickComposerAttachmentsResult> {
   const remainingSlots = PROVIDER_SEND_TURN_MAX_ATTACHMENTS - input.existingCount;
-  if (remainingSlots <= 0) return { images: [], files: [], error: attachmentLimitError() };
+  if (remainingSlots <= 0) return { images: [], files: [], error: attachmentCountLimitMessage() };
 
   let result: Awaited<ReturnType<typeof import("expo-document-picker").getDocumentAsync>>;
   try {
@@ -286,7 +258,7 @@ export async function pickComposerDocuments(
   let error: string | null = null;
   for (const asset of result.assets) {
     if (images.length + files.length >= remainingSlots) {
-      error = attachmentLimitError();
+      error = attachmentCountLimitMessage();
       break;
     }
     const name = asset.name.trim() || "file";
@@ -346,7 +318,7 @@ export async function captureComposerPhoto(
   input: Pick<ComposerAttachmentBudget, "existingCount">,
 ): Promise<PickComposerAttachmentsResult> {
   if (input.existingCount >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
-    return { images: [], files: [], error: attachmentLimitError() };
+    return { images: [], files: [], error: attachmentCountLimitMessage() };
   }
   // Loaded here, not at the top: the native-module lookup has no place in the
   // pure attachment gates this file also holds.

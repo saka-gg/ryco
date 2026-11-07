@@ -50,7 +50,6 @@ describe("buildIncomingShareDraft", () => {
         { shareType: "image", value: "file:///tmp/a.png", mimeType: "image/png" },
         { shareType: "file", value: "file:///tmp/report.pdf", mimeType: "application/pdf" },
       ],
-      resolvedPayloads: [],
       files: access,
     });
     expect(draft.text).toBe("Summarize");
@@ -77,24 +76,28 @@ describe("buildIncomingShareDraft", () => {
     expect(access.copied).toEqual(["file:///tmp/report.pdf"]);
   });
 
-  it("uses resolved names and sizes and sends HEIC photos as files", async () => {
+  it("names files from their own copy and sends HEIC photos as files", async () => {
     const draft = await buildIncomingShareDraft({
-      payloads: [{ shareType: "image", value: "file:///tmp/IMG.HEIC" }],
-      resolvedPayloads: [
-        {
-          shareType: "image",
-          value: "file:///tmp/IMG.HEIC",
-          contentUri: "file:///tmp/IMG.HEIC",
-          contentMimeType: "image/heic",
-          originalName: "Holiday.heic",
-          contentSize: 4096,
-        },
-      ],
-      files: files({}),
+      payloads: [{ shareType: "image", value: "file:///tmp/Holiday.heic", mimeType: "image/heic" }],
+      files: files({ "file:///tmp/Holiday.heic": 4096 }),
     });
     expect(draft.attachments).toMatchObject([
       { type: "file", name: "Holiday.heic", sizeBytes: 4096 },
     ]);
+  });
+
+  it("never reads a shared link as a file", async () => {
+    const access = files({});
+    const draft = await buildIncomingShareDraft({
+      payloads: [{ shareType: "url", value: "https://example.com/one-time-invite" }],
+      files: access,
+    });
+    expect(draft).toEqual({
+      text: "https://example.com/one-time-invite",
+      attachments: [],
+      warnings: [],
+    });
+    expect(access.copied).toEqual([]);
   });
 
   it("warns about unreadable, oversized and surplus items", async () => {
@@ -112,7 +115,6 @@ describe("buildIncomingShareDraft", () => {
     for (let index = 0; index < 9; index += 1) sizes[`file:///tmp/f${index}.txt`] = 10;
     const draft = await buildIncomingShareDraft({
       payloads,
-      resolvedPayloads: [],
       files: files(sizes),
     });
     expect(draft.attachments).toHaveLength(8);

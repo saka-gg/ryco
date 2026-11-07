@@ -11,6 +11,7 @@ import {
 
 import type { DraftComposerAttachment, DraftComposerFileAttachment } from "../../lib/composerFiles";
 import type { DraftComposerImageAttachment } from "../../lib/composerImages";
+import { composerAttachmentBudgetError } from "../../lib/composerAttachmentBudget";
 
 export const NEW_TASK_QUEUED_FILES_BLOCK =
   "Files can only go with a task its machine takes now. Remove them, or start the task once the machine is back.";
@@ -75,4 +76,44 @@ export function newTaskDraftImages(
   return attachments.filter(
     (attachment): attachment is DraftComposerImageAttachment => attachment.type === "image",
   );
+}
+
+/**
+ * Lets attachments from outside the pickers (the share extension) into the
+ * draft under the same budget a picked file meets: the draft's count and total
+ * size, each kind's limit, and streamed files only for a node that takes them.
+ */
+export function admitDraftAttachments(input: {
+  readonly existing: ReadonlyArray<DraftComposerAttachment>;
+  readonly incoming: ReadonlyArray<DraftComposerAttachment>;
+  readonly fileUploadMaxBytes: number | null;
+}): {
+  readonly accepted: ReadonlyArray<DraftComposerAttachment>;
+  readonly rejected: ReadonlyArray<DraftComposerAttachment>;
+  readonly warnings: ReadonlyArray<string>;
+} {
+  const accepted: DraftComposerAttachment[] = [];
+  const rejected: DraftComposerAttachment[] = [];
+  const warnings: string[] = [];
+  let count = input.existing.length;
+  let totalBytes = input.existing.reduce((total, attachment) => total + attachment.sizeBytes, 0);
+  for (const attachment of input.incoming) {
+    const error = composerAttachmentBudgetError({
+      kind: attachment.type,
+      name: attachment.name,
+      sizeBytes: attachment.sizeBytes,
+      fileUploadMaxBytes: input.fileUploadMaxBytes,
+      existingCount: count,
+      existingTotalBytes: totalBytes,
+    });
+    if (error) {
+      rejected.push(attachment);
+      if (!warnings.includes(error)) warnings.push(error);
+      continue;
+    }
+    accepted.push(attachment);
+    count += 1;
+    totalBytes += attachment.sizeBytes;
+  }
+  return { accepted, rejected, warnings };
 }

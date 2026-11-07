@@ -80,9 +80,10 @@ import {
   planMobilePromptLink,
 } from "./promptLinkModel";
 import { useNewTaskRepository } from "./useNewTaskRepository";
-import { takeIncomingShare } from "../sharing/incomingShare";
+import { releaseIncomingShareCopy, takeIncomingShare } from "../sharing/incomingShare";
 import { mergeIncomingShareText } from "../sharing/incomingShareModel";
 import {
+  admitDraftAttachments,
   newTaskAttachmentSendBlock,
   newTaskDraftImages,
   toNewTaskDispatchAttachments,
@@ -698,7 +699,9 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
   useEffect(
     () => () => {
       for (const attachment of attachmentsRef.current) {
-        if (attachment.type === "file") composerFileUploadEngine.release(attachment.id);
+        if (attachment.type !== "file") continue;
+        composerFileUploadEngine.release(attachment.id);
+        void releaseIncomingShareCopy(attachment.readUri);
       }
     },
     [],
@@ -706,28 +709,40 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
 
   // Text and files shared from another app (share extension): the user picks
   // the machine and project here. Shared text follows what is already typed.
+  // It waits for the draft's machine: shared files must fit its upload limit.
   const shareParam = firstParam(props.route.params?.share);
   useEffect(() => {
-    if (shareParam !== "incoming") return;
+    if (shareParam !== "incoming" || environmentId === null) return;
     navigation.setParams({ share: undefined } as never);
     void takeIncomingShare()
       .then((draft) => {
         if (!draft) return;
         if (draft.text) setPrompt((current) => mergeIncomingShareText(current, draft.text));
-        if (draft.attachments.length > 0) {
-          setAttachments((current) => [...current, ...draft.attachments]);
+        const admitted = admitDraftAttachments({
+          existing: attachmentsRef.current,
+          incoming: draft.attachments,
+          fileUploadMaxBytes,
+        });
+        for (const attachment of admitted.rejected) {
+          if (attachment.type === "file") void releaseIncomingShareCopy(attachment.readUri);
+        }
+        if (admitted.accepted.length > 0) {
+          setAttachments((current) => [...current, ...admitted.accepted]);
         }
         setFailure(null);
-        if (draft.warnings.length > 0) {
-          Alert.alert("Some shared content was skipped", draft.warnings.join("\n"));
+        const warnings = [...draft.warnings, ...admitted.warnings];
+        if (warnings.length > 0) {
+          Alert.alert("Some shared content was skipped", warnings.join("\n"));
         }
       })
       .catch(() => setAttachmentError("The shared content could not be read."));
-    // oxlint-disable-next-line react-hooks/exhaustive-deps -- runs once per hand-off; the setters are stable.
-  }, [shareParam]);
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- runs once per hand-off, once the draft has a machine.
+  }, [shareParam, environmentId]);
 
   const removeAttachment = (id: string) => {
     composerFileUploadEngine.release(id);
+    const removed = attachments.find((attachment) => attachment.id === id);
+    if (removed?.type === "file") void releaseIncomingShareCopy(removed.readUri);
     setAttachments((current) => current.filter((attachment) => attachment.id !== id));
     resetAttempt();
   };
