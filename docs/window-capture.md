@@ -39,8 +39,9 @@ over, so choose another one.
 
 ## Permissions and Computer Use
 
-Window capture runs the same signed helper as the Computer Use beta, inside the same app, so a
-Screen Recording or Input Monitoring grant given through either setup serves both. Window capture
+Window capture runs the same signed helper as the Computer Use beta, as a child of the same
+helper app, **Ryco Computer Use**, so macOS lists that app, not Ryco, and a Screen Recording or
+Input Monitoring grant given through either setup serves both. Window capture
 does not need Computer Use turned on. Startup never prompts: with a saved shortcut Ryco only checks
 its grants, and it asks for nothing until you choose **Set up**.
 

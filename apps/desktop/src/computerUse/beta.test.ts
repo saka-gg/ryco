@@ -37,6 +37,10 @@ vi.mock("electron", () => ({
   app: { getPath: () => "/usr/bin/ryco", getName: () => "Ryco", getVersion: () => mocks.version },
   dialog: { showMessageBox: mocks.showMessageBox },
   shell: { openExternal: vi.fn() },
+  systemPreferences: {
+    isTrustedAccessibilityClient: () => false,
+    getMediaAccessStatus: () => "denied",
+  },
   powerMonitor: { on: vi.fn(), removeListener: vi.fn(), getSystemIdleState: () => "active" },
 }));
 vi.mock("../appSnapManager.ts", () => ({
@@ -114,7 +118,11 @@ afterEach(async () => {
   mocks.monitorState = { ready: true };
   mocks.version = "1.0.0";
 });
-async function fixture(isDestroyed: () => boolean = () => false, reuseDirectory = false) {
+async function fixture(
+  isDestroyed: () => boolean = () => false,
+  reuseDirectory = false,
+  extra: Partial<ConstructorParameters<typeof DesktopComputerBeta>[0]> = {},
+) {
   if (!reuseDirectory || !directory) directory = await mkdtemp(join(tmpdir(), "ryco-beta-test-"));
   await mkdir(join(directory, "cua-driver"), { recursive: true });
   await writeFile(join(directory, "cua-driver", "cua-driver"), "fixture");
@@ -123,6 +131,7 @@ async function fixture(isDestroyed: () => boolean = () => false, reuseDirectory 
     resourcesDir: directory,
     getWindow: () =>
       ({ isDestroyed, webContents: { send: mocks.send } }) as unknown as BrowserWindow,
+    ...extra,
   });
   await beta.start();
   return beta;
@@ -336,7 +345,12 @@ it.skipIf(process.platform !== "darwin")(
     expect(mocks.monitorArmed).toHaveBeenLastCalledWith(false);
     // The backend never sees the optional grant as missing.
     expect(await host.checkPermissions()).toEqual({ accessibility: true, screenRecording: true });
-    expect(runtime.state().setup).toEqual({ missing: [], escapeStop: false, staleGrant: false });
+    expect(runtime.state().setup).toEqual({
+      missing: [],
+      escapeStop: false,
+      staleGrant: false,
+      movedToHelper: false,
+    });
     // The backend refuses foreground use from this report.
     expect(await runtime.request({ operation: "state" })).toMatchObject({
       escapeStop: {
@@ -405,11 +419,81 @@ it.skipIf(process.platform !== "darwin")(
       missing: ["accessibility"],
       escapeStop: true,
       staleGrant: true,
+      movedToHelper: false,
     });
     await runtime.dispose();
     mocks.version = "1.0.0";
     runtime = await fixture(undefined, true);
     expect((await runtime.check()).setup.staleGrant).toBe(false);
+  },
+);
+const helperGrants = {
+  target: {
+    bundlePath: "/Applications/Ryco.app/Contents/Helpers/Ryco Computer Use.app",
+    bundleId: "com.laurinfrank.ryco.computer-use",
+    displayName: "Ryco Computer Use",
+    hostBundleId: "com.laurinfrank.ryco",
+    helper: {
+      bundlePath: "/Applications/Ryco.app/Contents/Helpers/Ryco Computer Use.app",
+      bundleId: "com.laurinfrank.ryco.computer-use",
+      displayName: "Ryco Computer Use",
+      version: "1.0.0",
+    },
+  },
+  spawn: undefined,
+};
+it.skipIf(process.platform !== "darwin")(
+  "tells a user whose grants were on Ryco once that Ryco Computer Use needs allowing",
+  async () => {
+    mocks.permissions.accessibilityPermission = "denied";
+    const runtime = await fixture(undefined, false, {
+      grants: helperGrants,
+      hostHadGrants: () => true,
+    });
+    runtime.update({ ...runtime.state().preferences, defaultEnabled: true });
+    expect((await runtime.check()).setup).toMatchObject({ movedToHelper: true, staleGrant: false });
+    // A default send goes without Computer Use, but not silently: one dialog, never again.
+    expect(await runtime.prepare("thread", false)).toBeNull();
+    expect(await runtime.prepare("thread", false)).toBeNull();
+    await vi.waitFor(() => expect(mocks.startPermissionSetup).toHaveBeenCalled());
+    expect(mocks.showMessageBox).toHaveBeenCalledOnce();
+    expect(mocks.showMessageBox.mock.calls[0]).toMatchObject([
+      {},
+      { message: expect.stringContaining("now runs as its own app") },
+    ]);
+    await expect(runtime.prepare("thread", true)).rejects.toThrow("now runs as its own app");
+    const saved = JSON.parse(await readFile(join(directory!, "computer-setup.json"), "utf8"));
+    expect(saved.moveNoticeShown).toBe(true);
+    await runtime.dispose();
+    // The notice stays shown across restarts.
+    mocks.showMessageBox.mockClear();
+    const again = await fixture(undefined, true, {
+      grants: helperGrants,
+      hostHadGrants: () => true,
+    });
+    expect(await again.prepare("thread", false)).toBeNull();
+    expect(mocks.showMessageBox).not.toHaveBeenCalled();
+  },
+);
+it.skipIf(process.platform !== "darwin")(
+  "treats a full grant recorded before the helper as Ryco's, and the helper's own as current",
+  async () => {
+    directory = await mkdtemp(join(tmpdir(), "ryco-beta-test-"));
+    await writeFile(join(directory, "computer-setup.json"), JSON.stringify({ grantedBuild: "x" }));
+    mocks.permissions.accessibilityPermission = "denied";
+    let runtime = await fixture(undefined, true, {
+      grants: helperGrants,
+      hostHadGrants: () => false,
+    });
+    expect((await runtime.check()).setup).toMatchObject({ movedToHelper: true, staleGrant: false });
+    mocks.permissions.accessibilityPermission = "granted";
+    await runtime.check();
+    const saved = JSON.parse(await readFile(join(directory, "computer-setup.json"), "utf8"));
+    expect(saved.grantedBundleId).toBe("com.laurinfrank.ryco.computer-use");
+    await runtime.dispose();
+    mocks.permissions.accessibilityPermission = "denied";
+    runtime = await fixture(undefined, true, { grants: helperGrants, hostHadGrants: () => true });
+    expect((await runtime.check()).setup.movedToHelper).toBe(false);
   },
 );
 it.skipIf(process.platform !== "darwin")(

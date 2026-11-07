@@ -1,6 +1,12 @@
+import { computerUseHelperAppIdentity } from "../../../packages/shared/src/computerUseHelperApp.ts";
 import { findLocalMacSigningIdentity } from "../../../packages/shared/src/macLocalSigning.ts";
 // This file mostly exists because we want dev mode to say "Ryco (Dev)" instead of "electron"
 
+import {
+  assembleComputerUseApp,
+  computerUseAppDigest,
+  defaultComputerUseAppExecutablePath,
+} from "./build-computer-use-app.mjs";
 import { writeMacAppBootstrap, writeMacLaunchConfiguration } from "./mac-launcher-bootstrap.mjs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -208,6 +214,43 @@ function readJson(path) {
   }
 }
 
+/**
+ * Ryco Computer Use beside the wrapper: one stable copy per bundle id, so LaunchServices and
+ * System Settings never find a second copy in another worktree. It may start programs only from
+ * this checkout's resources, which its signed Info.plist names. Missing executable (a build
+ * without native helpers): Computer Use runs under the wrapper, as before.
+ */
+function ensureComputerUseHelperApp(runtimeDir, hostAppPath, iconPath, signingIdentity) {
+  const executable = defaultComputerUseAppExecutablePath;
+  if (!existsSync(executable)) {
+    console.warn(
+      "[desktop-launcher] Ryco Computer Use is not built; Computer Use runs under the dev app.",
+    );
+    return;
+  }
+  const options = {
+    executable,
+    outputDirectory: runtimeDir,
+    identity: computerUseHelperAppIdentity({
+      bundleId: APP_BUNDLE_ID,
+      productName: APP_DISPLAY_NAME,
+    }),
+    version: createRequire(import.meta.url)("../package.json").version,
+    iconPath,
+    resourcesDirectory: join(desktopDir, "resources"),
+    // The helper serves only this wrapper, never another process that found the bundle.
+    hostPath: hostAppPath,
+    signingIdentity,
+  };
+  const stampPath = join(runtimeDir, "computer-use-app.json");
+  const digest = computerUseAppDigest(options);
+  const bundlePath = join(runtimeDir, `${options.identity.name}.app`);
+  if (existsSync(bundlePath) && readJson(stampPath)?.digest === digest) return;
+  assembleComputerUseApp(options);
+  runChecked(MAC_LAUNCH_SERVICES_REGISTER, ["-f", bundlePath]);
+  writeFileSync(stampPath, `${JSON.stringify({ digest }, null, 2)}\n`);
+}
+
 function buildMacLauncher(electronBinaryPath) {
   const sourceAppBundlePath = resolve(electronBinaryPath, "../../..");
   // Launch Services does not resolve protocol handlers from temporary
@@ -239,6 +282,7 @@ function buildMacLauncher(electronBinaryPath) {
   };
 
   writeMacLaunchConfiguration(runtimeDir, bootstrapEnvironment, desktopMainPath);
+  ensureComputerUseHelperApp(runtimeDir, targetAppBundlePath, iconPath, signingIdentity);
   const currentMetadata = readJson(metadataPath);
   if (
     existsSync(targetBinaryPath) &&

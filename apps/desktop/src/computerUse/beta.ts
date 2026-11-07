@@ -8,7 +8,7 @@ import { ComputerGetAuditHistoryInput } from "@ryco/contracts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { readFileSync, writeFileSync, mkdirSync, renameSync, existsSync, statSync } from "node:fs";
-import { app, dialog, powerMonitor, shell, type BrowserWindow } from "electron";
+import { app, dialog, powerMonitor, shell, systemPreferences, type BrowserWindow } from "electron";
 import * as Schema from "effect/Schema";
 import {
   ComputerEvent,
@@ -27,8 +27,13 @@ import { CuaDriverHost } from "../cuaDriverHost.ts";
 import { ComputerFrameTapPool } from "../computerFrameTap.ts";
 import { EscapeKillSwitchMonitor } from "../escapeKillSwitchMonitor.ts";
 import { registerComputerDesktopLifecycle } from "../computerDesktopLifecycle.ts";
-import { macPrivacySettingsUrl, resolveMacAppBundle } from "../macAppBundle.ts";
-import { resolveComputerUsePermissionTarget } from "./permissionTarget.ts";
+import { macPrivacySettingsUrl } from "../macAppBundle.ts";
+import {
+  asNodeSpawn,
+  sharedComputerUseGrantRuntime,
+  type ComputerUseGrantRuntime,
+} from "./permissionTarget.ts";
+import { COMPUTER_USE_HELPER_EXECUTABLE } from "@ryco/shared/computerUseHelperApp";
 import { record, textArg } from "./native.ts";
 import type { ComputerActivityIndicator } from "./activityIndicator.ts";
 import { appNameForPid } from "./processAppName.ts";
@@ -85,7 +90,14 @@ export class DesktopComputerBeta {
   private approvedApps: readonly ComputerApprovedApp[] = [];
   /** The build that last had every required grant; a different build missing one is stale. */
   private grantedBuild: string | null = null;
+  /** The bundle that had them. Another bundle now holding the grants means Computer Use moved. */
+  private grantedBundleId: string | null = null;
+  /** The one-time "Computer Use moved to Ryco Computer Use" dialog was shown. */
+  private moveNoticeShown = false;
   private readonly build: string;
+  private readonly grantBundleId: string;
+  private readonly helperApp: boolean;
+  private readonly hostHadGrants: () => boolean;
   private preferences: ComputerBetaPreferences = defaults;
   private epoch = randomUUID();
   private readonly generations = new Map<string, number>();
@@ -112,6 +124,10 @@ export class DesktopComputerBeta {
     getWindow(): BrowserWindow | null;
     /** The shared menu-bar status; it names the app each task uses, never the action. */
     indicator?: ComputerActivityIndicator;
+    /** Who holds the grants and how programs that need them start (tests inject it). */
+    grants?: ComputerUseGrantRuntime;
+    /** Ryco itself still has a grant from before Ryco Computer Use (tests inject it). */
+    hostHadGrants?: () => boolean;
   }) {
     this.getWindow = options.getWindow;
     this.indicator = options.indicator;
@@ -128,25 +144,52 @@ export class DesktopComputerBeta {
       /* Missing or invalid preferences retain disabled defaults. */
     }
     try {
-      const saved = JSON.parse(readFileSync(this.setupPath, "utf8")) as { grantedBuild?: unknown };
+      const saved = JSON.parse(readFileSync(this.setupPath, "utf8")) as {
+        grantedBuild?: unknown;
+        grantedBundleId?: unknown;
+        moveNoticeShown?: unknown;
+      };
       if (typeof saved.grantedBuild === "string") this.grantedBuild = saved.grantedBuild;
+      if (typeof saved.grantedBundleId === "string") this.grantedBundleId = saved.grantedBundleId;
+      this.moveNoticeShown = saved.moveNoticeShown === true;
     } catch {
       /* No build has had every grant yet. */
     }
     const executablePath = app.getPath("exe");
-    this.build = buildIdentity(executablePath, app.getVersion());
-    const { bundleId } = resolveMacAppBundle(executablePath, process.platform);
-    const target = resolveComputerUsePermissionTarget({
-      executablePath,
-      platform: process.platform,
-      appName: app.getName(),
-    });
+    const grants =
+      options.grants ??
+      sharedComputerUseGrantRuntime({
+        executablePath,
+        platform: process.platform,
+        appName: app.getName(),
+        isPackaged: app.isPackaged,
+      });
+    const target = grants.target;
+    // Every program that needs the grants starts as a child of the bundle that holds them.
+    const spawn = asNodeSpawn(grants.spawn);
+    this.grantBundleId = target.bundleId;
+    this.helperApp = target.helper !== undefined;
+    this.hostHadGrants =
+      options.hostHadGrants ??
+      (() =>
+        process.platform === "darwin" &&
+        (systemPreferences.isTrustedAccessibilityClient(false) ||
+          systemPreferences.getMediaAccessStatus("screen") === "granted"));
+    // The grants follow the code identity of the bundle that holds them.
+    this.build = buildIdentity(
+      target.helper && target.bundlePath
+        ? join(target.bundlePath, "Contents", "MacOS", COMPUTER_USE_HELPER_EXECUTABLE)
+        : executablePath,
+      target.helper?.version ?? app.getVersion(),
+    );
     const helperPath = join(options.resourcesDir, "ryco-computer-ui-helper");
     this.permissions = new DesktopAppSnapManager({
       platform: process.platform,
       helperPath,
+      ...(spawn ? { spawn } : {}),
       captureDirectory: join(options.stateDir, "computer-captures"),
-      excludedBundleId: bundleId,
+      // Ryco's own windows, not the helper's: Ryco is never a capture target.
+      excludedBundleId: target.hostBundleId,
       appDisplayName: target.displayName,
       ...(target.bundlePath ? { appBundlePath: target.bundlePath } : {}),
       onState: () => this.publishState(),
@@ -161,6 +204,7 @@ export class DesktopComputerBeta {
     });
     this.taps = new ComputerFrameTapPool({
       helperPath,
+      ...(spawn ? { spawn } : {}),
       // The pool only forwards frames of a visible thread's current target.
       onFrame: (frame, target) => {
         const turnId = target.task.turnId;
@@ -188,6 +232,7 @@ export class DesktopComputerBeta {
     });
     this.monitor = new EscapeKillSwitchMonitor({
       helperPath,
+      ...(spawn ? { spawn } : {}),
       onEscape: () => {
         this.host.emergencyStopInput();
       },
@@ -206,7 +251,9 @@ export class DesktopComputerBeta {
     });
     this.hostOptions = {
       binaryPath: join(options.resourcesDir, "cua-driver", "cua-driver"),
-      bundleId,
+      // Advisory for the driver's permission report: the bundle that holds the grants.
+      bundleId: target.bundleId,
+      ...(grants.spawn ? { spawn: grants.spawn } : {}),
       capability: randomBytes(32).toString("base64url"),
       setup: async () => {
         await this.setup();
@@ -314,22 +361,88 @@ export class DesktopComputerBeta {
   }
   private setupState(): ComputerBetaSetup {
     const missing = this.missingPermissions();
+    const moved = missing.length > 0 && this.movedToHelper();
     return {
       missing,
       escapeStop: this.escapeStop(),
+      // A move to Ryco Computer Use is not an old build in the list: it says so instead.
       staleGrant:
-        missing.length > 0 && this.grantedBuild !== null && this.grantedBuild !== this.build,
+        !moved &&
+        missing.length > 0 &&
+        this.grantedBuild !== null &&
+        this.grantedBuild !== this.build &&
+        (this.grantedBundleId ?? this.grantBundleId) === this.grantBundleId,
+      movedToHelper: moved,
     };
+  }
+  /**
+   * Computer Use had its grants on another bundle (Ryco itself, before Ryco Computer Use): the
+   * user granted it once and must allow the helper app once more.
+   */
+  private movedToHelper(): boolean {
+    if (!this.helperApp) return false;
+    if (this.grantedBuild !== null)
+      // Files from before the helper recorded no bundle: those grants belonged to Ryco.
+      return (this.grantedBundleId ?? "") !== this.grantBundleId;
+    // Asked once: these read Ryco's own grants, which only the user changes.
+    if (this.hostGrantsSeen === undefined)
+      try {
+        this.hostGrantsSeen = this.hostHadGrants();
+      } catch {
+        this.hostGrantsSeen = false;
+      }
+    return this.hostGrantsSeen;
+  }
+  private hostGrantsSeen: boolean | undefined;
+  private saveSetup(): void {
+    try {
+      writeAtomically(
+        this.setupPath,
+        JSON.stringify({
+          grantedBuild: this.grantedBuild,
+          grantedBundleId: this.grantedBundleId,
+          moveNoticeShown: this.moveNoticeShown,
+        }),
+      );
+    } catch {
+      /* Only the stale-grant and move hints depend on it. */
+    }
+  }
+  /**
+   * Once, the first time Computer Use would run after it moved: one line and a way to set it up.
+   * Never blocks the send that triggered it.
+   */
+  private noticeMove(): void {
+    if (this.moveNoticeShown || !this.setupState().movedToHelper) return;
+    const owner = this.getWindow();
+    if (!owner || owner.isDestroyed()) return;
+    this.moveNoticeShown = true;
+    this.saveSetup();
+    const name = this.permissions.getState().appDisplayName || "Ryco Computer Use";
+    void dialog
+      .showMessageBox(owner, {
+        type: "info",
+        title: "Computer Use",
+        message: `Computer Use now runs as its own app, ${name}.`,
+        detail: `Allow ${name} once in System Settings and your agents can use the computer again. You can remove Ryco from those lists.`,
+        buttons: ["Later", "Set up"],
+        defaultId: 1,
+        cancelId: 0,
+        noLink: true,
+      })
+      .then((response) => (response.response === 1 ? this.setup() : undefined))
+      .catch(() => undefined);
   }
   /** Remembers the build that had every required grant, to explain a later stale grant. */
   private noteGrantedBuild(): void {
-    if (this.missingPermissions().length > 0 || this.grantedBuild === this.build) return;
+    if (
+      this.missingPermissions().length > 0 ||
+      (this.grantedBuild === this.build && this.grantedBundleId === this.grantBundleId)
+    )
+      return;
     this.grantedBuild = this.build;
-    try {
-      writeAtomically(this.setupPath, JSON.stringify({ grantedBuild: this.build }));
-    } catch {
-      /* Only the stale-grant hint depends on it. */
-    }
+    this.grantedBundleId = this.grantBundleId;
+    this.saveSetup();
   }
   private async refreshApprovedApps(): Promise<void> {
     this.approvedApps = await readComputerAppApprovals(this.approvalsPath);
@@ -433,10 +546,16 @@ export class DesktopComputerBeta {
     }
     await this.check();
     if (this.missingPermissions().length > 0) {
-      if (!explicit) return null;
+      if (!explicit) {
+        this.noticeMove();
+        return null;
+      }
+      const moved = this.setupState().movedToHelper;
       await this.setup();
       throw new Error(
-        "Complete Computer Use setup, then send your task again. Your prompt has not been sent.",
+        moved
+          ? `Computer Use now runs as its own app, ${this.permissions.getState().appDisplayName}. Allow it in System Settings, then send your task again. Your prompt has not been sent.`
+          : "Complete Computer Use setup, then send your task again. Your prompt has not been sent.",
       );
     }
     if (!existsSync(this.hostOptions.binaryPath)) {

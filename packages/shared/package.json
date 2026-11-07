@@ -586,6 +586,10 @@
       "types": "./src/cuaDriverProtocol.ts",
       "import": "./src/cuaDriverProtocol.ts"
     },
+    "./computerUseHelperApp": {
+      "types": "./src/computerUseHelperApp.ts",
+      "import": "./src/computerUseHelperApp.ts"
+    },
     "./desktopFlavor": {
       "types": "./src/desktopFlavor.ts",
       "import": "./src/desktopFlavor.ts"

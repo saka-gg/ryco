@@ -5799,6 +5799,7 @@ async function loadDesktopWindowCapture(): Promise<void> {
       resourcesDir: app.isPackaged ? process.resourcesPath : Path.join(__dirname, "../resources"),
       executablePath: app.getPath("exe"),
       appDisplayName: app.getName(),
+      isPackaged: app.isPackaged,
       shortcutRegistry: globalShortcut,
       openExternal: (url) => void shell.openExternal(url),
       send: (channel, payload) => {

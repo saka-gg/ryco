@@ -31,6 +31,8 @@ function fixture(options: {
   defaultEnabled?: boolean;
   agentControl?: boolean;
   staleGrant?: boolean;
+  movedToHelper?: boolean;
+  appDisplayName?: string;
   approvedApps?: ComputerBetaState["approvedApps"];
 }) {
   const permissions = {
@@ -51,7 +53,7 @@ function fixture(options: {
       inputMonitoringPermission: permissions.inputMonitoring,
       screenRecordingPermission: permissions.screenRecording,
       message: null,
-      appDisplayName: "Ryco",
+      appDisplayName: options.appDisplayName ?? "Ryco",
     },
     inputMonitorReady: true,
     setup: {
@@ -60,6 +62,7 @@ function fixture(options: {
       ),
       escapeStop: permissions.inputMonitoring === "granted",
       staleGrant: options.staleGrant ?? false,
+      ...(options.movedToHelper ? { movedToHelper: true } : {}),
     },
     approvedApps: options.approvedApps ?? [],
     error: null,
@@ -87,13 +90,14 @@ function fixture(options: {
     status: "available" as const,
   }));
   const restartApp = vi.fn(async () => {});
+  const setup = vi.fn(async () => state);
   window.desktopBridge = {
     restartApp,
     computerBeta: {
       getState: async () => state,
       checkPermissions: async () => state,
       setPreferences,
-      setup: async () => state,
+      setup,
       turnOn,
       setupPermission,
       revokeApp,
@@ -122,6 +126,7 @@ function fixture(options: {
   } as unknown as EnvironmentApi);
   return {
     turnOn,
+    setup,
     setPreferences,
     setupPermission,
     revokeApp,
@@ -197,6 +202,23 @@ it("explains a stale grant after an update and offers Quit & Reopen", async () =
   await expect.element(view.getByText("macOS may still list an older Ryco")).toBeVisible();
   await view.getByRole("button", { name: "Quit & Reopen" }).click();
   expect(f.restartApp).toHaveBeenCalledOnce();
+});
+
+it("explains once that Computer Use moved to its own helper app", async () => {
+  const f = fixture({
+    defaultEnabled: true,
+    accessibility: "denied",
+    movedToHelper: true,
+    appDisplayName: "Ryco Computer Use",
+  });
+  const view = await render(<ComputerBetaSettings />);
+  await expect.element(view.getByText("Computer Use now runs as Ryco Computer Use")).toBeVisible();
+  await expect.element(view.getByText(/Granted to Ryco Computer Use/)).toBeVisible();
+  await expect.element(view.getByText(/may still list an older/)).not.toBeInTheDocument();
+  await view.getByRole("button", { name: "Set up" }).click();
+  // It guides the permissions only; it does not turn Computer Use on for every chat.
+  expect(f.setup).toHaveBeenCalledOnce();
+  expect(f.turnOn).not.toHaveBeenCalled();
 });
 
 it("warns when Agent Control was turned off after setup", async () => {
