@@ -339,8 +339,13 @@ export function createThreadWorktreeResolver(
   return (thread) => resolveWorktree({ thread, ...index });
 }
 
-function connectionBlocker(
-  environment: ThreadInboxEnvironment,
+/**
+ * Why a change cannot reach the thread's node now, or null: it must be
+ * connected, its shell current and mutations allowed for this client. Archive,
+ * restore and every other lifecycle change share it.
+ */
+export function threadInboxConnectionBlocker(
+  environment: Pick<ThreadInboxEnvironment, "connected" | "shellCurrent" | "mutationReady">,
 ): ThreadInboxConnectionBlocker | null {
   if (!environment.connected) return "disconnected";
   if (!environment.shellCurrent) return "shell-stale";
@@ -354,7 +359,7 @@ function capabilityBlocker(
   support: ThreadCapabilitySupport | undefined,
 ): ThreadInboxMutationBlocker | null {
   if (support === false) return "unsupported";
-  const blocker = connectionBlocker(environment);
+  const blocker = threadInboxConnectionBlocker(environment);
   if (blocker !== null) return blocker;
   // Connected, but the node's own capabilities have not arrived yet.
   if (support !== true) return "shell-stale";
@@ -848,7 +853,7 @@ function availability<Blocker extends string>(
 function archiveBlocker(entry: ThreadInboxEntry): ThreadArchiveBlocker | null {
   // A draft has sent nothing yet.
   if (entry.thread === null) return "no-conversation";
-  const blocker = connectionBlocker(entry.environment);
+  const blocker = threadInboxConnectionBlocker(entry.environment);
   if (blocker !== null) return blocker;
   if (!threadHasConversation(entry.thread)) return "no-conversation";
   if (isThreadArchiveBlockedByTurn(entry.thread)) return "turn-running";

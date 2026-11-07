@@ -20,6 +20,7 @@ import {
   resolveThreadReferenceCopyTarget,
   resolveThreadWorkspacePullRequestLink,
   scopedInboxWorktreeKey,
+  threadInboxConnectionBlocker,
   type BuildThreadInboxInput,
   type ThreadInboxDraftSummary,
   type ThreadInboxEnvironment,
@@ -867,6 +868,16 @@ describe("thread inbox", () => {
       }),
     );
     expect(inbox.active.map((entry) => entry.thread?.id)).toEqual([found.id]);
+  });
+});
+
+describe("thread inbox connection rule", () => {
+  it("blocks a change until the node is connected, current and writable", () => {
+    const ready = { connected: true, shellCurrent: true, mutationReady: true };
+    expect(threadInboxConnectionBlocker(ready)).toBeNull();
+    expect(threadInboxConnectionBlocker({ ...ready, connected: false })).toBe("disconnected");
+    expect(threadInboxConnectionBlocker({ ...ready, shellCurrent: false })).toBe("shell-stale");
+    expect(threadInboxConnectionBlocker({ ...ready, mutationReady: false })).toBe("read-only");
   });
 });
 

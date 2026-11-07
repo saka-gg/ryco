@@ -1,8 +1,7 @@
 import {
   createSidebarUndoHistory,
-  sidebarUndoThreadRevision,
+  createSidebarUndoLocalContextReader,
   type SidebarUndoNotice,
-  type SidebarUndoLocalContext,
 } from "@ryco/client-runtime/state/threads";
 import { type ScopedThreadRef } from "@ryco/contracts";
 import { readEnvironmentApi } from "./environmentApi";
@@ -85,26 +84,12 @@ export function presentSidebarUndoNotices(notices: readonly SidebarUndoNotice[])
   }
 }
 
-export function readSidebarUndoLocalContext(
-  target: ScopedThreadRef,
-): SidebarUndoLocalContext | null {
-  const state = useStore.getState();
-  // An archived stub has a revision of its own (see `sidebarUndoThreadRevision`).
-  const thread = selectSidebarThreadSummaryByRef(state, target);
-  const project = thread
-    ? selectProjectByRef(state, {
-        environmentId: target.environmentId,
-        projectId: thread.projectId,
-      })
-    : null;
-  if (!thread || !project) return null;
-  return {
-    threadRevision: sidebarUndoThreadRevision(thread),
-    parentRevision: project,
-    threadTitle: thread.title,
-    subscribe: useStore.subscribe,
-  };
-}
+export const readSidebarUndoLocalContext = createSidebarUndoLocalContextReader({
+  getState: () => useStore.getState(),
+  subscribe: (listener) => useStore.subscribe(listener),
+  selectThread: selectSidebarThreadSummaryByRef,
+  selectProject: selectProjectByRef,
+});
 
 export function readSidebarUndoContext(target: ScopedThreadRef) {
   const connection = readEnvironmentConnection(target.environmentId);

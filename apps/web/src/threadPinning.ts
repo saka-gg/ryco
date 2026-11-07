@@ -42,7 +42,7 @@ export function resolveThreadPinCommandPresentation(input: {
 }
 
 const defaultDependencies: ThreadPinChangeDependencies = {
-  isPinned: (threadKey) => useUiStateStore.getState().pinnedThreadKeys[threadKey] === true,
+  isPinned: (threadKey) => uiStatePinStore.isPinned(threadKey),
   setPinned: (threadKey, pinned) => {
     const target = parseScopedThreadKey(threadKey);
     if (!target) return;
