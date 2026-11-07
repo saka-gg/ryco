@@ -112,9 +112,12 @@ export function LiveActivityBridge() {
     setLiveActivity(runtime);
     return () => {
       active = false;
-      stopPush?.();
       setLiveActivity(null);
-      void runtime?.stop();
+      // The cards end first, while the token listener still hears their tokens go; push stops
+      // after, and forgets whatever token is left.
+      void Promise.resolve(runtime?.stop())
+        .catch(() => undefined)
+        .finally(() => stopPush?.());
     };
   }, [loaded, touched]);
 

@@ -1,7 +1,7 @@
 import { EnvironmentId, ThreadId } from "@ryco/contracts/base-schemas";
 import type { ScopedThreadRef } from "@ryco/contracts";
 import { scopedThreadKey } from "@ryco/client-runtime/scoped";
-import { threadNotificationTag } from "@ryco/client-runtime/state/settings";
+import { threadNotificationTag, wantedThreadAlertKinds } from "@ryco/client-runtime/state/settings";
 import type {
   ThreadNotificationCandidate,
   ThreadNotificationKind,
@@ -14,7 +14,6 @@ import {
   threadAlertLinkPath,
   threadAlertModeOf,
   threadAlertRefOf,
-  wantedThreadAlertKinds,
 } from "./threadAlerts.logic";
 
 const ref = (threadId: string): ScopedThreadRef => ({
@@ -35,6 +34,7 @@ function candidate(
       kind,
       title: "Fix the login form",
       turnId: null,
+      approvalRequestId: null,
       sequence: 1,
       generation: {},
     },
@@ -86,6 +86,7 @@ describe("planMobileThreadAlert", () => {
         ref: ref("thread-b"),
         kind,
         turnId: null,
+        approvalRequestId: null,
       });
     }
   });
@@ -101,13 +102,13 @@ describe("planMobileThreadAlert", () => {
       });
     expect(plan(["approval", "completed"])).not.toBeNull();
     expect(plan(["approval"])).toBeNull();
-    expect(wantedThreadAlertKinds({ mutedAlertKinds: ["completed", "stopped"] })).toEqual([
+    expect(wantedThreadAlertKinds(["completed", "stopped"])).toEqual([
       "approval",
       "input",
       "plan-ready",
       "failed",
     ]);
-    expect(wantedThreadAlertKinds({})).toHaveLength(6);
+    expect(wantedThreadAlertKinds(undefined)).toHaveLength(6);
   });
 
   it("keeps a stopped turn quiet while the app is in front, where it is your own Stop", () => {

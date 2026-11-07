@@ -22,6 +22,16 @@ export function setLiveActivityPushToken(activityId: string, token: string): voi
   emit();
 }
 
+/**
+ * Forgets every token: push updates stop with the cards (sign-out ends them all), and the token
+ * listener goes with them, so a card's end would never clear its token. The next start reads the
+ * tokens of cards still on screen again.
+ */
+export function clearLiveActivityPushTokens(): void {
+  tokens.clear();
+  emit();
+}
+
 /** The newest card's token, or null while no card takes push updates. */
 export function readLiveActivityPushToken(): string | null {
   return current;

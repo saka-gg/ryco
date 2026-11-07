@@ -1,4 +1,4 @@
-import type { PendingApproval } from "@ryco/client-runtime/state/session";
+import type { PendingApproval, PendingUserInput } from "@ryco/client-runtime/state/session";
 import type { ProviderApprovalDecision, ScopedThreadRef } from "@ryco/contracts";
 import { useEffect, useRef, useState } from "react";
 
@@ -17,20 +17,39 @@ import {
 const RECHECK_MS = 1_000;
 
 /**
+ * Runs `run` and reports any failure through `onError`, including one thrown before `run`'s
+ * promise exists (`ensureEnvironmentApi` throws synchronously without a connection): the action
+ * was already taken off the pending list, so a lost failure would be a silent no-op.
+ */
+function settle(run: () => Promise<unknown>, onError: () => void): void {
+  void Promise.resolve()
+    .then(run)
+    .catch(() => onError());
+}
+
+/**
  * Carries out an action tapped on this thread's notification (Approve, Deny, Reply) with the
  * screen's own handlers, once `decideNotificationThreadAction` says it may: the same calls, the
- * same readiness and the same errors as the buttons and the composer. Runs each action once.
+ * same readiness and the same errors as the cards and the composer. Runs each action once.
  */
 export function useNotificationThreadAction(input: {
   readonly threadRef: ScopedThreadRef;
+  /** The thread's live (not cached) detail is loaded. */
   readonly threadLoaded: boolean;
   /** Ready for mutations, with live (not cached) prompts. */
   readonly ready: boolean;
   readonly pendingApprovals: ReadonlyArray<PendingApproval>;
+  readonly pendingUserInputs: ReadonlyArray<PendingUserInput>;
+  readonly composerDisabled: boolean;
+  readonly editingQueuedMessage: boolean;
   readonly respond: (
     approval: Extract<NotificationThreadActionStep, { kind: "respond" }>["approval"],
     decision: ProviderApprovalDecision,
   ) => Promise<void>;
+  readonly answer: (
+    step: Extract<NotificationThreadActionStep, { kind: "answer" }>,
+  ) => Promise<void>;
+  /** Sends a reply as a message of its own: never declines approvals, never edits the queue. */
   readonly send: (text: string) => Promise<boolean>;
   readonly refuse: (message: string) => void;
 }): void {
@@ -54,6 +73,11 @@ export function useNotificationThreadAction(input: {
       threadLoaded: current.threadLoaded,
       ready: current.ready,
       pendingApprovals: current.pendingApprovals,
+      pendingUserInputs: current.pendingUserInputs,
+      composer: {
+        disabled: current.composerDisabled,
+        editingQueuedMessage: current.editingQueuedMessage,
+      },
     });
     if (step.kind === "wait") {
       const timer = setTimeout(() => setTick((value) => value + 1), RECHECK_MS);
@@ -66,14 +90,22 @@ export function useNotificationThreadAction(input: {
         current.refuse(step.message);
         return;
       case "respond":
-        void current.respond(step.approval, step.decision).catch(() => {
-          latest.current.refuse("The decision could not be delivered. Answer here.");
-        });
+        settle(
+          () => current.respond(step.approval, step.decision),
+          () => latest.current.refuse("The decision could not be delivered. Answer here."),
+        );
+        return;
+      case "answer":
+        settle(
+          () => current.answer(step),
+          () => latest.current.refuse("The answer could not be delivered. Answer here."),
+        );
         return;
       case "send":
-        void current.send(step.text).catch(() => {
-          latest.current.refuse("The reply was not sent.");
-        });
+        settle(
+          () => current.send(step.text),
+          () => latest.current.refuse("The reply was not sent."),
+        );
         return;
     }
   }, [
@@ -84,5 +116,8 @@ export function useNotificationThreadAction(input: {
     input.threadLoaded,
     input.ready,
     input.pendingApprovals,
+    input.pendingUserInputs,
+    input.composerDisabled,
+    input.editingQueuedMessage,
   ]);
 }

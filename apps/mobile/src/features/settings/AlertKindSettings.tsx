@@ -1,6 +1,6 @@
+import { wantedThreadAlertKinds } from "@ryco/client-runtime/state/settings";
 import type { PushAlertKind } from "@ryco/contracts/push";
 
-import { wantedThreadAlertKinds } from "../../notifications/threadAlerts.logic";
 import { updatePreferences, usePreferences } from "../../state/preferencesStore";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
@@ -25,7 +25,7 @@ export const ALERT_KIND_ROWS: ReadonlyArray<{
  */
 export function AlertKindSettings() {
   const preferences = usePreferences();
-  const wanted = new Set(wantedThreadAlertKinds(preferences));
+  const wanted = new Set(wantedThreadAlertKinds(preferences.mutedAlertKinds));
   const setKind = (kind: PushAlertKind, on: boolean) => {
     const muted = new Set(preferences.mutedAlertKinds ?? []);
     if (on) muted.delete(kind);

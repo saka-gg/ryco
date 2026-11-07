@@ -1,5 +1,5 @@
 import { ScopedThreadRef } from "@ryco/contracts/environment";
-import { PushAlertKind } from "@ryco/contracts/push";
+import type { PushAlertKind } from "@ryco/contracts/push";
 import { scopedThreadKey } from "@ryco/client-runtime/scoped";
 import {
   hasThreadSystemNotifications,
@@ -27,14 +27,6 @@ export function threadAlertModeOf(
   });
 }
 
-/** The alert kinds the person wants, in their settings order; every kind until one is muted. */
-export function wantedThreadAlertKinds(
-  preferences: Pick<Preferences, "mutedAlertKinds">,
-): ReadonlyArray<PushAlertKind> {
-  const muted = new Set(preferences.mutedAlertKinds ?? []);
-  return PushAlertKind.literals.filter((kind) => !muted.has(kind));
-}
-
 /** A local notification for one thread. */
 export interface MobileThreadAlert {
   /** The thread's notification tag: a newer alert replaces the one before. */
@@ -44,8 +36,10 @@ export interface MobileThreadAlert {
   readonly sound: boolean;
   readonly ref: ScopedThreadRef;
   readonly kind: PushAlertKind;
-  /** The turn it is about, which a notification action is bound to. */
+  /** The turn it is about. */
   readonly turnId: string | null;
+  /** An approval alert's approval: Approve or Deny on the alert answers this one only. */
+  readonly approvalRequestId: string | null;
 }
 
 /**
@@ -85,6 +79,7 @@ export function planMobileThreadAlert(input: {
     ref: event.ref,
     kind: event.kind,
     turnId: event.turnId,
+    approvalRequestId: event.kind === "approval" ? event.approvalRequestId : null,
   };
 }
 

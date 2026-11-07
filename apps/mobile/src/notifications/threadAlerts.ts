@@ -1,5 +1,6 @@
 import type { EnvironmentId, ScopedThreadRef } from "@ryco/contracts";
 import type { PushAlertKind } from "@ryco/contracts/push";
+import { wantedThreadAlertKinds } from "@ryco/client-runtime/state/settings";
 import {
   startThreadNotificationFeed,
   type SidebarThreadOrStub,
@@ -19,13 +20,15 @@ import {
   notificationRouteOf,
   type NotificationRoute,
 } from "./notificationActionsModel";
-import { setPendingNotificationAction } from "./pendingNotificationAction";
+import {
+  clearPendingNotificationActions,
+  setPendingNotificationAction,
+} from "./pendingNotificationAction";
 import {
   planMobileThreadAlert,
   presentsInForeground,
   threadAlertLinkPath,
   threadAlertModeOf,
-  wantedThreadAlertKinds,
   type MobileThreadAlert,
 } from "./threadAlerts.logic";
 
@@ -138,6 +141,8 @@ export function createExpoThreadAlertsPlatform(
             threadId: alert.ref.threadId,
             kind: alert.kind,
             ...(alert.turnId === null ? {} : { turnId: alert.turnId }),
+            // The approval an Approve or Deny on this alert answers, and no other.
+            ...(alert.approvalRequestId === null ? {} : { requestId: alert.approvalRequestId }),
           },
         },
         trigger: Platform.OS === "android" ? { channelId: THREAD_ALERT_CHANNEL_ID } : null,
@@ -233,7 +238,7 @@ export function startMobileThreadAlerts(
     const alert = planMobileThreadAlert({
       candidate,
       mode: threadAlertModeOf(preferences),
-      wantedKinds: wantedThreadAlertKinds(preferences),
+      wantedKinds: wantedThreadAlertKinds(preferences.mutedAlertKinds),
       appActive,
       visibleThread: deps.readVisibleThread(),
       pushCovers:
@@ -295,6 +300,8 @@ export function startMobileThreadAlerts(
       stopForeground();
       feed?.stop();
       feed = null;
+      // Signed out or locked: what was tapped for this session never runs in the next one.
+      clearPendingNotificationActions();
     },
   };
 }

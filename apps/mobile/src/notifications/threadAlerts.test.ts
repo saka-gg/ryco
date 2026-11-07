@@ -1,4 +1,5 @@
 import {
+  ApprovalRequestId,
   EnvironmentId,
   ProjectId,
   ProviderInstanceId,
@@ -216,7 +217,32 @@ describe("mobile thread alerts", () => {
         ref: ref("b"),
         kind: "completed",
         turnId: "turn-1",
+        approvalRequestId: null,
       },
+    ]);
+  });
+
+  it("names the approval an alert is about, and alerts again for a newer one in the same turn", async () => {
+    const test = harness({ threads: [shell("b")] });
+    test.start();
+    const asking = (requestId: string) =>
+      shell("b", {
+        hasPendingApprovals: true,
+        pendingApprovalRequestId: ApprovalRequestId.make(requestId),
+      });
+    test.accept(asking("approval-a"));
+    await test.settle();
+    // Answered elsewhere and asked again within one update: still a new approval.
+    test.accept(asking("approval-b"));
+    await test.settle();
+    // The same approval seen again stays quiet.
+    test.accept(asking("approval-b"));
+    await test.settle();
+    expect(
+      test.presented.map((alert) => [alert.kind, alert.turnId, alert.approvalRequestId]),
+    ).toEqual([
+      ["approval", "turn-1", "approval-a"],
+      ["approval", "turn-1", "approval-b"],
     ]);
   });
 
@@ -300,14 +326,18 @@ describe("mobile thread alerts", () => {
   it("opens the thread of a tapped action and leaves the action for its screen", () => {
     resetPendingNotificationActionsForTests();
     const test = harness();
-    test.start();
-    test.open("thread-e", { kind: "approve", turnId: "turn-1" });
+    const alerts = test.start();
+    test.open("thread-e", { kind: "approve", turnId: "turn-1", requestId: "approval-a" });
     expect(test.platform.openThread).toHaveBeenCalledWith(ref("thread-e"));
     expect(readPendingNotificationAction(ref("thread-e"), Date.now())?.action).toEqual({
       kind: "approve",
       turnId: "turn-1",
+      requestId: "approval-a",
     });
     expect(readPendingNotificationAction(ref("thread-b"), Date.now())).toBeNull();
+    // Signed out or locked: the tap does not carry over to the next session.
+    alerts.stop();
+    expect(readPendingNotificationAction(ref("thread-e"), Date.now())).toBeNull();
   });
 
   it("posts only the kinds the person wants", async () => {

@@ -75,6 +75,16 @@ export function usePendingNotificationActionVersion(): number {
   );
 }
 
+/**
+ * Drops every pending action: thread alerts stop when the workspace locks or its account signs
+ * out, and a tap meant for that session must not run in the next one.
+ */
+export function clearPendingNotificationActions(): void {
+  if (pending.size === 0) return;
+  pending.clear();
+  emit();
+}
+
 /** Test seam. */
 export function resetPendingNotificationActionsForTests(): void {
   pending.clear();

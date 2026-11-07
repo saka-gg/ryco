@@ -16,13 +16,12 @@ import {
 } from "@ryco/client-runtime/state/user-input";
 
 import { AppText as Text } from "../../components/AppText";
-import { ensureEnvironmentApi } from "../../connection/environmentApi";
 import { runWhileBusy } from "../../lib/runWhileBusy";
 import {
   deliverPendingUserInputAnswer,
   pendingUserInputCardView,
 } from "./pendingUserInputCardModel";
-import { respondToThreadUserInput } from "./sessionActions";
+import { answerThreadUserInput } from "./threadRequestAnswers";
 
 // §3-16: drafts live in the runtime's question draft store (shared with web), so they outlive
 // the card; answer assembly and validation come from the runtime user-input helpers.
@@ -79,12 +78,11 @@ export function PendingUserInputCard(props: {
   });
 
   const respond = (submittedAnswers: Record<string, string | string[]>) =>
-    respondToThreadUserInput({
-      api: ensureEnvironmentApi(props.environmentId),
+    answerThreadUserInput({
+      environmentId: props.environmentId,
       threadId: props.threadId,
-      requestId: props.userInput.requestId,
+      userInput: props.userInput,
       answers: submittedAnswers,
-      userInputIdentity: props.userInput.userInputIdentity,
     });
 
   const submit = async (dismiss = false) => {

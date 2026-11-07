@@ -1,6 +1,6 @@
 import type { ScopedThreadRef } from "@ryco/contracts";
 import type { PushAlertKind } from "@ryco/contracts/push";
-import type { PendingApproval } from "@ryco/client-runtime/state/session";
+import type { PendingApproval, PendingUserInput } from "@ryco/client-runtime/state/session";
 import type { ProviderApprovalDecision } from "@ryco/contracts";
 
 import { threadAlertRefOf } from "./threadAlerts.logic";
@@ -115,7 +115,15 @@ export const NOTIFICATION_CATEGORIES: ReadonlyArray<{
 
 /** What a response asks the thread to do. */
 export type NotificationThreadAction =
-  | { readonly kind: "approve" | "deny"; readonly turnId: string | null }
+  | {
+      readonly kind: "approve" | "deny";
+      readonly turnId: string | null;
+      /**
+       * The approval the alert announced (local `requestId`, a sealed push's `rq`). Null from a
+       * node that does not name it: then nothing is answered from the alert.
+       */
+      readonly requestId: string | null;
+    }
   | { readonly kind: "reply"; readonly text: string };
 
 /** A notification response, decoded: the thread it names and what to do there. */
@@ -140,11 +148,14 @@ export interface NotificationResponseLike {
   };
 }
 
-/** The turn an alert's data names: a local alert's `turnId`, an opened push's `tu`. */
-function turnIdOf(data: unknown): string | null {
+/**
+ * A string field of an alert's data: `turnId` (a local alert's turn, an opened push's `tu`) or
+ * `requestId` (its approval, a push's `rq`).
+ */
+function dataStringOf(data: unknown, key: "turnId" | "requestId"): string | null {
   if (typeof data !== "object" || data === null) return null;
-  const turnId = (data as { readonly turnId?: unknown }).turnId;
-  return typeof turnId === "string" && turnId.length > 0 ? turnId : null;
+  const value = (data as Readonly<Record<string, unknown>>)[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 /**
@@ -165,11 +176,14 @@ export function notificationRouteOf(response: NotificationResponseLike): Notific
     case NOTIFICATION_ACTION_IDS.open:
       return route(null);
     case NOTIFICATION_ACTION_IDS.approve:
-    case NOTIFICATION_ACTION_IDS.deny:
+    case NOTIFICATION_ACTION_IDS.deny: {
+      const data = response.notification.request.content.data;
       return route({
         kind: response.actionIdentifier === NOTIFICATION_ACTION_IDS.approve ? "approve" : "deny",
-        turnId: turnIdOf(response.notification.request.content.data),
+        turnId: dataStringOf(data, "turnId"),
+        requestId: dataStringOf(data, "requestId"),
       });
+    }
     case NOTIFICATION_ACTION_IDS.reply: {
       const text = response.userText?.trim() ?? "";
       return route(text.length > 0 ? { kind: "reply", text } : null);
@@ -194,75 +208,136 @@ export type NotificationThreadActionStep =
       readonly approval: Pick<PendingApproval, "requestId" | "approvalIdentity">;
       readonly decision: ProviderApprovalDecision;
     }
+  /** A reply that answers the thread's waiting question with its text. */
+  | {
+      readonly kind: "answer";
+      readonly userInput: Pick<PendingUserInput, "requestId" | "userInputIdentity">;
+      readonly answers: Readonly<Record<string, string>>;
+    }
   | { readonly kind: "send"; readonly text: string }
   /** It cannot be carried out; the screen says why and the person answers there. */
   | { readonly kind: "refuse"; readonly message: string };
 
-/** An approval this device may still answer: not on its way, not settled. */
-function isOpenApproval(approval: PendingApproval): boolean {
+/** A request this device may still answer: not on its way, not settled. */
+function isOpenRequest(request: Pick<PendingApproval, "responseState">): boolean {
   return (
-    approval.responseState === undefined ||
-    approval.responseState === "retryable" ||
-    approval.responseState === "invalidated"
+    request.responseState === undefined ||
+    request.responseState === "retryable" ||
+    request.responseState === "invalidated"
   );
+}
+
+/**
+ * The question's one answer field when a reply's text can be its answer: a single question with
+ * no options to pick from. Anything with options needs its card.
+ */
+function freeTextQuestionIdOf(userInput: PendingUserInput): string | null {
+  const [question, ...rest] = userInput.questions;
+  return question !== undefined && rest.length === 0 && question.options.length === 0
+    ? question.id
+    : null;
 }
 
 /**
  * What the thread screen does with a pending action now.
  *
- * - An approval waits for a connection ready for mutations with live (not cached) prompts, then
- *   answers the one approval the alert announced: the open approval of the alert's turn, and only
- *   when there is exactly one. None (answered elsewhere meanwhile) or several (which one?) is
- *   refused, and the person chooses on screen. It never answers an approval it cannot tell apart.
- * - A reply waits for the thread and a ready connection, and after a short grace is sent anyway:
- *   the composer's own send then queues it in the outbox, as it would anything typed offline.
- * - Past {@link NOTIFICATION_ACTION_TTL_MS} from the tap an approval is refused, so a phone that
- *   reconnects much later never answers a question the person may no longer mean.
+ * - An approval waits for a connection ready for mutations and the thread's live (not cached)
+ *   detail, then answers the one approval the alert announced, by its request id, and no other:
+ *   one answered elsewhere meanwhile is refused even when a newer one waits, and an alert that
+ *   names no approval (an older node) answers nothing. The person then chooses on screen.
+ * - A reply to a thread whose question waits answers that question when its text can be the
+ *   answer (one question, no options); a question with options is answered on its card. Either
+ *   way the reply never queues behind the question it was meant to answer.
+ * - Any other reply waits for the thread and a ready connection, and after a short grace is sent
+ *   anyway: the send then queues it in the outbox, as it would anything typed offline. It never
+ *   goes while the composer is closed, nor over a queued message being edited here.
+ * - Past {@link NOTIFICATION_ACTION_TTL_MS} from the tap it gives up, so a phone that reconnects
+ *   much later never answers a question the person may no longer mean.
  */
 export function decideNotificationThreadAction(input: {
   readonly pending: PendingThreadAction;
   readonly nowMs: number;
-  /** The thread's row is loaded. */
+  /** The thread's live detail is loaded: its activities, where approvals and questions live. */
   readonly threadLoaded: boolean;
   /** The connection is ready for mutations and the prompts on screen are live. */
   readonly ready: boolean;
   readonly pendingApprovals: ReadonlyArray<PendingApproval>;
+  /** The questions the thread waits on (blocking ones). */
+  readonly pendingUserInputs: ReadonlyArray<PendingUserInput>;
+  readonly composer: {
+    /** The composer takes no message now (`composerDisabled`). */
+    readonly disabled: boolean;
+    /** A queued message is being edited: a send would replace it. */
+    readonly editingQueuedMessage: boolean;
+  };
 }): NotificationThreadActionStep {
   const { pending, nowMs } = input;
-  const elapsed = nowMs - pending.at;
+  const timedOut = nowMs - pending.at >= NOTIFICATION_ACTION_TTL_MS;
+  const waitOr = (message: string): NotificationThreadActionStep =>
+    timedOut ? { kind: "refuse", message } : { kind: "wait" };
   const action = pending.action;
   if (action.kind === "reply") {
-    if (!input.threadLoaded) {
-      return elapsed >= NOTIFICATION_ACTION_TTL_MS
-        ? { kind: "refuse", message: "The reply was not sent: this thread did not load." }
-        : { kind: "wait" };
+    if (!input.threadLoaded) return waitOr("The reply was not sent: this thread did not load.");
+    const question = input.pendingUserInputs.find(isOpenRequest);
+    if (question !== undefined) {
+      const questionId = freeTextQuestionIdOf(question);
+      if (questionId === null) {
+        return {
+          kind: "refuse",
+          message: "The reply was not sent: this question needs a choice. Answer it here.",
+        };
+      }
+      if (!input.ready) {
+        return waitOr(
+          "The reply was not sent: Ryco could not reach this machine in time. Answer here.",
+        );
+      }
+      return {
+        kind: "answer",
+        userInput: { requestId: question.requestId, userInputIdentity: question.userInputIdentity },
+        answers: { [questionId]: action.text },
+      };
     }
-    return input.ready || elapsed >= NOTIFICATION_REPLY_GRACE_MS
+    if (input.composer.editingQueuedMessage) {
+      return {
+        kind: "refuse",
+        message: "The reply was not sent: a queued message is being edited here.",
+      };
+    }
+    if (input.composer.disabled) {
+      return waitOr("The reply was not sent: this thread takes no messages right now.");
+    }
+    return input.ready || nowMs - pending.at >= NOTIFICATION_REPLY_GRACE_MS
       ? { kind: "send", text: action.text }
       : { kind: "wait" };
   }
   const verb = action.kind === "approve" ? "approve" : "deny";
   if (!input.threadLoaded || !input.ready) {
-    return elapsed >= NOTIFICATION_ACTION_TTL_MS
-      ? {
-          kind: "refuse",
-          message: `Ryco could not reach this machine in time to ${verb}. Answer here once it is connected.`,
-        }
-      : { kind: "wait" };
+    return waitOr(
+      `Ryco could not reach this machine in time to ${verb}. Answer here once it is connected.`,
+    );
   }
-  const open = input.pendingApprovals.filter(isOpenApproval);
-  const ofTurn =
-    action.turnId === null
-      ? open
-      : open.filter(
-          (approval) => approval.turnId === undefined || approval.turnId === action.turnId,
-        );
-  const approval = ofTurn[0];
+  const open = input.pendingApprovals.filter(isOpenRequest);
+  if (action.requestId === null) {
+    return open.length === 0
+      ? { kind: "refuse", message: "That approval was already answered." }
+      : { kind: "refuse", message: "This alert does not say which approval it was. Choose here." };
+  }
+  const approval = open.find(
+    (candidate) =>
+      candidate.requestId === action.requestId &&
+      (action.turnId === null ||
+        candidate.turnId === undefined ||
+        candidate.turnId === action.turnId),
+  );
   if (approval === undefined) {
-    return { kind: "refuse", message: "That approval was already answered." };
-  }
-  if (ofTurn.length > 1) {
-    return { kind: "refuse", message: "Several approvals wait in this thread. Choose one here." };
+    return {
+      kind: "refuse",
+      message:
+        open.length === 0
+          ? "That approval was already answered."
+          : "That approval was already answered. Another one waits here.",
+    };
   }
   return {
     kind: "respond",

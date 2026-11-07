@@ -1,6 +1,6 @@
 import { getPreferencesSnapshot, subscribePreferences } from "../state/preferencesStore";
 import { rycoWidgetsNative } from "../widgets/rycoWidgetsNative";
-import { setLiveActivityPushToken } from "./liveActivityTokenStore";
+import { clearLiveActivityPushTokens, setLiveActivityPushToken } from "./liveActivityTokenStore";
 
 const loadBackgroundAlerts = () => import("../notifications/push/backgroundAlertsRuntime");
 
@@ -44,6 +44,8 @@ export function startMobileLiveActivityPush(input: {
     unsubscribePreferences();
     unsubscribeAlerts?.();
     subscription?.remove();
+    // No listener hears a card end from here on: a token kept now would go with a later sign-in.
+    clearLiveActivityPushTokens();
     input.setAvailable(false);
   };
 }

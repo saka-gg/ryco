@@ -1,5 +1,5 @@
 import { ApprovalRequestId, EnvironmentId, ThreadId, TurnId } from "@ryco/contracts";
-import type { PendingApproval } from "@ryco/client-runtime/state/session";
+import type { PendingApproval, PendingUserInput } from "@ryco/client-runtime/state/session";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -20,7 +20,7 @@ const threadId = ThreadId.make("thread-a");
 
 function response(
   actionIdentifier: string,
-  data: unknown = { environmentId, threadId, kind: "approval", turnId: "turn-1" },
+  data: unknown = { environmentId, threadId, kind: "approval", turnId: "turn-1", requestId: "a" },
   userText?: string,
 ): NotificationResponseLike {
   return {
@@ -40,8 +40,35 @@ function approval(id: string, overrides: Partial<PendingApproval> = {}): Pending
   };
 }
 
+function question(
+  id: string,
+  questions: PendingUserInput["questions"],
+  overrides: Partial<PendingUserInput> = {},
+): PendingUserInput {
+  return {
+    requestId: ApprovalRequestId.make(id),
+    createdAt: "2026-11-07T10:00:00.000Z",
+    turnId: TurnId.make("turn-1"),
+    questions,
+    ...overrides,
+  };
+}
+
+const freeText = [{ id: "q1", header: "Name", question: "What should it be called?", options: [] }];
+const withOptions = [
+  {
+    id: "q1",
+    header: "Pick",
+    question: "Which one?",
+    options: [{ label: "A", description: "The first" }],
+  },
+];
+
 const T = 1_000_000;
-const approve: PendingThreadAction = { action: { kind: "approve", turnId: "turn-1" }, at: T };
+const approve: PendingThreadAction = {
+  action: { kind: "approve", turnId: "turn-1", requestId: "a" },
+  at: T,
+};
 
 describe("notification categories", () => {
   it("give every kind a category, and approvals Approve and Deny behind an unlocked phone", () => {
@@ -81,15 +108,16 @@ describe("notificationRouteOf", () => {
     expect(notificationRouteOf(response(NOTIFICATION_ACTION_IDS.open))?.action).toBeNull();
   });
 
-  it("binds Approve and Deny to the alert's turn", () => {
+  it("binds Approve and Deny to the alert's approval and turn", () => {
     expect(notificationRouteOf(response(NOTIFICATION_ACTION_IDS.approve))?.action).toEqual({
       kind: "approve",
       turnId: "turn-1",
+      requestId: "a",
     });
     expect(
       notificationRouteOf(response(NOTIFICATION_ACTION_IDS.deny, { environmentId, threadId }))
         ?.action,
-    ).toEqual({ kind: "deny", turnId: null });
+    ).toEqual({ kind: "deny", turnId: null, requestId: null });
   });
 
   it("sends a reply's text, and only opens for an empty one", () => {
@@ -110,9 +138,15 @@ describe("notificationRouteOf", () => {
 });
 
 describe("decideNotificationThreadAction", () => {
-  const base = { nowMs: T + 1_000, threadLoaded: true, ready: true };
+  const base = {
+    nowMs: T + 1_000,
+    threadLoaded: true,
+    ready: true,
+    pendingUserInputs: [] as ReadonlyArray<PendingUserInput>,
+    composer: { disabled: false, editingQueuedMessage: false },
+  };
 
-  it("waits for a ready connection, then answers the one approval of the alert's turn", () => {
+  it("waits for a ready connection, then answers exactly the approval the alert named", () => {
     expect(
       decideNotificationThreadAction({
         ...base,
@@ -125,7 +159,8 @@ describe("decideNotificationThreadAction", () => {
       decideNotificationThreadAction({
         ...base,
         pending: approve,
-        pendingApprovals: [approval("a"), approval("other", { turnId: TurnId.make("turn-0") })],
+        // Another approval waiting beside it does not matter: the alert named "a".
+        pendingApprovals: [approval("b"), approval("a")],
       }),
     ).toEqual({
       kind: "respond",
@@ -135,16 +170,51 @@ describe("decideNotificationThreadAction", () => {
     expect(
       decideNotificationThreadAction({
         ...base,
-        pending: { action: { kind: "deny", turnId: null }, at: T },
+        pending: { action: { kind: "deny", turnId: null, requestId: "a" }, at: T },
         pendingApprovals: [approval("a")],
       }),
     ).toMatchObject({ kind: "respond", decision: "decline" });
   });
 
-  it("refuses when the approval was answered, is on its way, or cannot be told apart", () => {
+  it("never answers a newer approval of the same turn from an older alert", () => {
+    // Approval "a" was answered on another device; the agent then asked "b" in the same turn.
+    expect(
+      decideNotificationThreadAction({
+        ...base,
+        pending: approve,
+        pendingApprovals: [approval("b")],
+      }),
+    ).toEqual({
+      kind: "refuse",
+      message: "That approval was already answered. Another one waits here.",
+    });
+    // The same id in another turn (a restarted provider counting again) is not the same approval.
+    expect(
+      decideNotificationThreadAction({
+        ...base,
+        pending: approve,
+        pendingApprovals: [approval("a", { turnId: TurnId.make("turn-2") })],
+      }),
+    ).toMatchObject({ kind: "refuse" });
+  });
+
+  it("answers nothing from an alert that names no approval", () => {
+    expect(
+      decideNotificationThreadAction({
+        ...base,
+        pending: { action: { kind: "approve", turnId: "turn-1", requestId: null }, at: T },
+        pendingApprovals: [approval("a")],
+      }),
+    ).toEqual({
+      kind: "refuse",
+      message: "This alert does not say which approval it was. Choose here.",
+    });
+  });
+
+  it("refuses when the approval was answered or is on its way", () => {
     expect(
       decideNotificationThreadAction({ ...base, pending: approve, pendingApprovals: [] }),
-    ).toMatchObject({ kind: "refuse", message: "That approval was already answered." });
+    ).toEqual({ kind: "refuse", message: "That approval was already answered." });
     expect(
       decideNotificationThreadAction({
         ...base,
@@ -152,13 +222,6 @@ describe("decideNotificationThreadAction", () => {
         pendingApprovals: [approval("a", { responseState: "submitting" })],
       }),
     ).toMatchObject({ kind: "refuse" });
-    expect(
-      decideNotificationThreadAction({
-        ...base,
-        pending: approve,
-        pendingApprovals: [approval("a"), approval("b")],
-      }),
-    ).toMatchObject({ kind: "refuse", message: expect.stringContaining("Several approvals") });
   });
 
   it("gives up on an approval the machine did not become ready for in time", () => {
@@ -171,10 +234,19 @@ describe("decideNotificationThreadAction", () => {
         pendingApprovals: [approval("a")],
       }),
     ).toMatchObject({ kind: "refuse" });
+    expect(
+      decideNotificationThreadAction({
+        ...base,
+        threadLoaded: false,
+        pending: approve,
+        pendingApprovals: [approval("a")],
+      }),
+    ).toEqual({ kind: "wait" });
   });
 
+  const reply: PendingThreadAction = { action: { kind: "reply", text: "go on" }, at: T };
+
   it("sends a reply once ready, or after the grace through the outbox", () => {
-    const reply: PendingThreadAction = { action: { kind: "reply", text: "go on" }, at: T };
     expect(
       decideNotificationThreadAction({
         ...base,
@@ -185,6 +257,14 @@ describe("decideNotificationThreadAction", () => {
     ).toEqual({ kind: "wait" });
     expect(
       decideNotificationThreadAction({ ...base, pending: reply, pendingApprovals: [] }),
+    ).toEqual({ kind: "send", text: "go on" });
+    // Approvals waiting do not change it: the reply never answers them.
+    expect(
+      decideNotificationThreadAction({
+        ...base,
+        pending: reply,
+        pendingApprovals: [approval("a")],
+      }),
     ).toEqual({ kind: "send", text: "go on" });
     expect(
       decideNotificationThreadAction({
@@ -199,6 +279,80 @@ describe("decideNotificationThreadAction", () => {
       decideNotificationThreadAction({
         ...base,
         threadLoaded: false,
+        nowMs: T + NOTIFICATION_ACTION_TTL_MS,
+        pending: reply,
+        pendingApprovals: [],
+      }),
+    ).toMatchObject({ kind: "refuse" });
+  });
+
+  it("answers a waiting free-text question with the reply instead of queuing behind it", () => {
+    const waiting = question("q", freeText, { userInputIdentity: undefined });
+    expect(
+      decideNotificationThreadAction({
+        ...base,
+        pending: reply,
+        pendingApprovals: [],
+        pendingUserInputs: [waiting],
+      }),
+    ).toEqual({
+      kind: "answer",
+      userInput: { requestId: "q", userInputIdentity: undefined },
+      answers: { q1: "go on" },
+    });
+    // An answer needs the live connection: no grace, no outbox.
+    expect(
+      decideNotificationThreadAction({
+        ...base,
+        ready: false,
+        nowMs: T + NOTIFICATION_REPLY_GRACE_MS,
+        pending: reply,
+        pendingApprovals: [],
+        pendingUserInputs: [waiting],
+      }),
+    ).toEqual({ kind: "wait" });
+  });
+
+  it("leaves a question with options, or several questions, to its card", () => {
+    for (const questions of [withOptions, [...freeText, { ...freeText[0]!, id: "q2" }]]) {
+      expect(
+        decideNotificationThreadAction({
+          ...base,
+          pending: reply,
+          pendingApprovals: [],
+          pendingUserInputs: [question("q", questions)],
+        }),
+      ).toEqual({
+        kind: "refuse",
+        message: "The reply was not sent: this question needs a choice. Answer it here.",
+      });
+    }
+  });
+
+  it("never sends over a queued message being edited, nor while the composer is closed", () => {
+    expect(
+      decideNotificationThreadAction({
+        ...base,
+        composer: { disabled: false, editingQueuedMessage: true },
+        pending: reply,
+        pendingApprovals: [],
+      }),
+    ).toMatchObject({ kind: "refuse" });
+    // Closed past the grace: it still waits, and gives up at the limit.
+    expect(
+      decideNotificationThreadAction({
+        ...base,
+        ready: false,
+        composer: { disabled: true, editingQueuedMessage: false },
+        nowMs: T + NOTIFICATION_REPLY_GRACE_MS,
+        pending: reply,
+        pendingApprovals: [],
+      }),
+    ).toEqual({ kind: "wait" });
+    expect(
+      decideNotificationThreadAction({
+        ...base,
+        composer: { disabled: true, editingQueuedMessage: false },
         nowMs: T + NOTIFICATION_ACTION_TTL_MS,
         pending: reply,
         pendingApprovals: [],
