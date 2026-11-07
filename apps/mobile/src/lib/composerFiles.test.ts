@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 // expo-image-picker / expo-crypto are native RN modules; the pure gate logic is
 // tested without loading the native runtime.
-vi.mock("./cameraAvailability", () => ({ isCameraCaptureAvailable: () => true }));
 vi.mock("expo-crypto", () => ({
   randomUUID: () => "generated-id",
   getRandomBytes: (length: number) => new Uint8Array(length),

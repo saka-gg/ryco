@@ -10,7 +10,6 @@ import {
   loadImagePicker,
   type DraftComposerImageAttachment,
 } from "./composerImages";
-import { isCameraCaptureAvailable } from "./cameraAvailability";
 import { uuidv4 } from "./uuid";
 
 /**
@@ -349,6 +348,9 @@ export async function captureComposerPhoto(
   if (input.existingCount >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
     return { images: [], files: [], error: attachmentLimitError() };
   }
+  // Loaded here, not at the top: the native-module lookup has no place in the
+  // pure attachment gates this file also holds.
+  const { isCameraCaptureAvailable } = await import("./cameraAvailability");
   if (!isCameraCaptureAvailable()) {
     return { images: [], files: [], error: "This device has no camera." };
   }
