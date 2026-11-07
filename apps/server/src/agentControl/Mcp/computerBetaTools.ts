@@ -342,6 +342,10 @@ export function withComputerBetaTools(
                       ),
                 ),
               );
+          // A newer turn of the thread replaces the one before it: that turn ends here, so the
+          // desktop does not keep its task (and menu-bar entry) until the task limit.
+          const previous = active.get(session.threadId);
+          if (previous && previous.turnId !== turnId) end(session.threadId, previous.turnId);
           active.set(session.threadId, { turnId, plan });
           yield* Effect.tryPromise((signal) =>
             post(
