@@ -51,6 +51,10 @@ const CAPTURE_WINDOW_TIMEOUT_MS = 20_000;
 // Permission checks run through the serialized command queue, so a wedged
 // helper must be killed rather than stall every queued read behind it.
 const PERMISSION_COMMAND_TIMEOUT_MS = 10_000;
+// That deadline counts from the helper's spawn. Before it, Ryco Computer Use may still be
+// starting (restart backoff, LaunchServices, its hello), which bounds itself; this only
+// backstops a start that never resolves.
+const HELPER_START_TIMEOUT_MS = 60_000;
 const GUIDE_GRANT_WATCH_MAX_MS = 10 * 60 * 1000;
 const MAX_MACOS_WINDOW_ID = 0xffff_ffff;
 // Late helper answers to timed-out or interrupted picker requests are dropped
@@ -58,6 +62,29 @@ const MAX_MACOS_WINDOW_ID = 0xffff_ffff;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 type AppSnapHelperProcess = ChildProcess.ChildProcessByStdio<Writable | null, Readable, Readable>;
+
+/**
+ * A short-lived helper command's deadline, counted from the moment its program runs (`spawn`),
+ * so a cold start of Ryco Computer Use is not counted as a slow check.
+ */
+function helperCommandDeadline(
+  child: AppSnapHelperProcess,
+  timeoutMs: number,
+  onTimeout: () => void,
+): { clear(): void } {
+  let timer = setTimeout(onTimeout, HELPER_START_TIMEOUT_MS);
+  const started = () => {
+    clearTimeout(timer);
+    timer = setTimeout(onTimeout, timeoutMs);
+  };
+  child.once("spawn", started);
+  return {
+    clear: () => {
+      clearTimeout(timer);
+      child.removeListener("spawn", started);
+    },
+  };
+}
 type AppSnapPermissionCommand =
   | "--check-permissions"
   | "--request-permissions"
@@ -1962,7 +1989,7 @@ export class DesktopAppSnapManager {
       const finish = (ok: boolean, message?: string) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timeout);
+        timeout.clear();
         outputLines.close();
         if (this.#permissionProcess === child) this.#permissionProcess = null;
         if (this.#disposed || !current()) {
@@ -1986,10 +2013,10 @@ export class DesktopAppSnapManager {
         }
         resolve(ok);
       };
-      const timeout = setTimeout(() => {
+      const timeout = helperCommandDeadline(child, PERMISSION_COMMAND_TIMEOUT_MS, () => {
         finish(false, "Checking macOS permissions timed out. Try Set up again.");
         child.kill();
-      }, PERMISSION_COMMAND_TIMEOUT_MS);
+      });
       const outputLines = this.#wireHelperOutput(child, (message) => {
         if (settled || !current()) return;
         if (message.type === "permissions") {
@@ -2052,21 +2079,21 @@ export class DesktopAppSnapManager {
         return;
       }
       let released = false;
-      const timeout = setTimeout(() => {
+      const timeout = helperCommandDeadline(child, PERMISSION_COMMAND_TIMEOUT_MS, () => {
         child.kill();
         resolve(false);
-      }, PERMISSION_COMMAND_TIMEOUT_MS);
+      });
       this.#wireHelperOutput(child, (message) => {
         if (message.type === "release-held-input" && message.released === true) {
           released = true;
         }
       });
       child.once("error", () => {
-        clearTimeout(timeout);
+        timeout.clear();
         resolve(false);
       });
       child.once("close", () => {
-        clearTimeout(timeout);
+        timeout.clear();
         resolve(released);
       });
     });

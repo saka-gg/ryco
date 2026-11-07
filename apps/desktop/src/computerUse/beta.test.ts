@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => ({
   startPermissionSetup: vi.fn(async (_kinds: readonly string[]) => {}),
   monitorActivate: vi.fn(async () => {}),
   monitorArmed: vi.fn((_armed: boolean) => {}),
+  monitorStart: vi.fn(() => {}),
+  refreshState: vi.fn(async () => {}),
   monitorState: { ready: true } as { ready: boolean; error?: string },
   hostOptions: undefined as
     | undefined
@@ -18,6 +20,12 @@ const mocks = vi.hoisted(() => ({
         activateInputMonitor(): Promise<void>;
         onInputMonitorArmedChange(armed: boolean): void;
         checkPermissions(): Promise<Record<string, boolean>>;
+        frameTap: {
+          update(
+            target: { task: { threadId: string; turnId?: string }; pid: number; windowId: number },
+            delivery?: { foreground: boolean },
+          ): void;
+        };
       },
   version: "1.0.0",
   permissions: {
@@ -49,6 +57,7 @@ vi.mock("../appSnapManager.ts", () => ({
       return mocks.permissions;
     }
     async refreshState() {
+      await mocks.refreshState();
       return mocks.permissions;
     }
     async startPermissionSetup(kinds: readonly string[]) {
@@ -67,6 +76,7 @@ vi.mock("../escapeKillSwitchMonitor.ts", () => ({
     }
     activate = mocks.monitorActivate;
     setArmed = mocks.monitorArmed;
+    start = mocks.monitorStart;
     dispose() {}
   },
 }));
@@ -105,6 +115,7 @@ vi.mock("../cuaDriverHost.ts", () => ({
   },
 }));
 import { DesktopComputerBeta } from "./beta.ts";
+import type { ComputerActivityIndicator } from "./activityIndicator.ts";
 import { readBundleIdentifier } from "../macAppBundle.ts";
 let directory: string | undefined;
 let beta: DesktopComputerBeta | undefined;
@@ -376,6 +387,135 @@ it.skipIf(process.platform !== "darwin")(
       inputMonitoring: true,
       screenRecording: true,
     });
+  },
+);
+it.skipIf(process.platform !== "darwin")(
+  "never holds a default send for the Escape listener, and starts it in the background",
+  async () => {
+    mocks.monitorState = { ready: false, error: "input_monitor_starting" };
+    mocks.monitorActivate.mockImplementation(() => new Promise<void>(() => {}));
+    const runtime = await fixture();
+    runtime.update({ ...runtime.state().preferences, defaultEnabled: true });
+    expect(await runtime.prepare("thread", false)).toMatchObject({ mode: "chat" });
+    expect(mocks.monitorActivate).toHaveBeenCalledWith(true);
+    mocks.monitorActivate.mockImplementation(async () => {});
+    mocks.monitorState = { ready: false, error: "event_tap_disabled" };
+    expect(await runtime.prepare("thread", false)).toMatchObject({ mode: "chat" });
+    // `/computer-use` still reports the listener that blocks it.
+    await expect(runtime.prepare("thread", true)).rejects.toThrow("Escape listener");
+  },
+);
+it.skipIf(process.platform !== "darwin")(
+  "warms the helper and the Escape listener at start when Computer Use is on",
+  async () => {
+    let runtime = await fixture();
+    expect(mocks.refreshState).not.toHaveBeenCalled();
+    runtime.update({ ...runtime.state().preferences, defaultEnabled: true });
+    await runtime.dispose();
+    runtime = await fixture(undefined, true);
+    await vi.waitFor(() => expect(mocks.monitorStart).toHaveBeenCalledOnce());
+    expect(mocks.refreshState).toHaveBeenCalled();
+  },
+);
+it.skipIf(process.platform !== "darwin")(
+  "does not count a permission a check could not read as missing for a default send",
+  async () => {
+    const runtime = await fixture();
+    runtime.update({ ...runtime.state().preferences, defaultEnabled: true });
+    expect(await runtime.prepare("thread", false)).toMatchObject({ mode: "chat" });
+    // A cold helper start timed the next probe out: the last complete report holds.
+    mocks.permissions.accessibilityPermission = "unknown";
+    mocks.permissions.screenRecordingPermission = "unknown";
+    mocks.permissions.inputMonitoringPermission = "unknown";
+    expect(await runtime.prepare("thread", false)).toMatchObject({ mode: "chat" });
+    expect(runtime.state().setup).toMatchObject({ staleGrant: false, movedToHelper: false });
+    // A completed check that reports it missing does block.
+    mocks.permissions.accessibilityPermission = "denied";
+    expect(await runtime.prepare("thread", false)).toBeNull();
+    mocks.permissions.accessibilityPermission = "unknown";
+    expect(await runtime.prepare("thread", false)).toBeNull();
+  },
+);
+it.skipIf(process.platform !== "darwin")(
+  "after a restart, falls back to the build that had every grant while permissions are unknown",
+  async () => {
+    let runtime = await fixture();
+    await runtime.check();
+    runtime.update({ ...runtime.state().preferences, defaultEnabled: true });
+    await runtime.dispose();
+    mocks.version = "1.0.1";
+    mocks.permissions.accessibilityPermission = "unknown";
+    mocks.permissions.screenRecordingPermission = "unknown";
+    runtime = await fixture(undefined, true);
+    expect(await runtime.prepare("thread", false)).toMatchObject({ mode: "chat" });
+    // An update with grants not read yet is no stale grant.
+    expect((await runtime.check()).setup.staleGrant).toBe(false);
+  },
+);
+it.skipIf(process.platform !== "darwin")(
+  "names foreground-delivered work as foreground in the menu-bar status",
+  async () => {
+    const indicator = { touch: vi.fn(), end: vi.fn(), endAll: vi.fn() };
+    const runtime = await fixture(undefined, false, {
+      indicator: indicator as unknown as ComputerActivityIndicator,
+    });
+    const intent = await runtime.prepare("thread", true);
+    await runtime.request({ operation: "begin", threadId: "thread", turnId: "turn", intent });
+    const target = { task: { threadId: "thread", turnId: "turn" }, pid: process.pid, windowId: 1 };
+    mocks.hostOptions!.frameTap.update(target, { foreground: true });
+    await vi.waitFor(() =>
+      expect(indicator.touch).toHaveBeenCalledWith("cua:thread", expect.any(String), "foreground"),
+    );
+    mocks.hostOptions!.frameTap.update(target);
+    await vi.waitFor(() =>
+      expect(indicator.touch).toHaveBeenLastCalledWith(
+        "cua:thread",
+        expect.any(String),
+        "background",
+      ),
+    );
+  },
+);
+it.skipIf(process.platform !== "darwin")(
+  "ends the thread's older turn when a newer one begins",
+  async () => {
+    const runtime = await fixture();
+    const intent = await runtime.prepare("thread", true);
+    await runtime.request({ operation: "begin", threadId: "thread", turnId: "turn-1", intent });
+    await runtime.request({
+      operation: "begin",
+      threadId: "other",
+      turnId: "turn-1",
+      intent: await runtime.prepare("other", true),
+    });
+    mocks.send.mockClear();
+    await runtime.request({ operation: "begin", threadId: "thread", turnId: "turn-2", intent });
+    expect(mocks.stopTask).toHaveBeenCalledWith({ threadId: "thread", turnId: "turn-1" });
+    expect(mocks.stopTask).not.toHaveBeenCalledWith({ threadId: "other", turnId: "turn-1" });
+    expect(mocks.send).toHaveBeenCalledWith("desktop:computer-beta:update", {
+      type: "ended",
+      threadId: "thread",
+      turnId: "turn-1",
+    });
+    await expect(
+      runtime.request({
+        operation: "consent",
+        threadId: "thread",
+        turnId: "turn-1",
+        clipboard: true,
+      }),
+    ).rejects.toThrow("no longer active");
+    await expect(
+      runtime.request({ operation: "begin", threadId: "thread", turnId: "turn-1", intent }),
+    ).rejects.toThrow("expired");
+    expect(
+      await runtime.request({
+        operation: "consent",
+        threadId: "other",
+        turnId: "turn-1",
+        clipboard: true,
+      }),
+    ).toMatchObject({ approved: true });
   },
 );
 it.skipIf(process.platform !== "darwin")(

@@ -89,14 +89,16 @@ function fixture(
   const stage = (
     runtimeMode: "full-access" | "approval-required" = "full-access",
     text = "Inspect Calculator",
+    turnId: TurnId = authority.turnId,
   ) => {
+    current = Option.some({ ...authority, turnId });
     stageComputerTurn(session.threadId, {
       text,
       intent: { mode: "request", generation: "epoch:0" },
       runtimeMode,
       label: "Calculator",
     });
-    bindComputerTurn(session.threadId, authority.turnId);
+    bindComputerTurn(session.threadId, turnId);
   };
   return {
     ...runtime,
@@ -125,6 +127,32 @@ it("advertises native tools only on enabled turns with a computer capability", a
         runtime.tools.descriptorsFor({ ...session, grantedCapabilities: [] }),
       ),
     ).toEqual([]);
+  } finally {
+    await runtime.dispose();
+  }
+});
+it("ends the thread's previous turn when a newer turn begins", async () => {
+  const runtime = fixture();
+  try {
+    runtime.stage();
+    await Effect.runPromise(runtime.tools.callTool(session, "computer_help", {}));
+    runtime.stage("full-access", "Inspect Calculator again", TurnId.make("turn-2"));
+    await Effect.runPromise(runtime.tools.callTool(session, "computer_help", {}));
+    await vi.waitFor(() =>
+      expect(runtime.requests).toContainEqual({
+        operation: "end",
+        threadId: session.threadId,
+        turnId: "turn",
+      }),
+    );
+    expect(runtime.requests.filter((request) => request.operation === "begin")).toEqual([
+      expect.objectContaining({ turnId: "turn" }),
+      expect.objectContaining({ turnId: "turn-2" }),
+    ]);
+    // The new turn stays live: nothing ended it.
+    expect(runtime.requests).not.toContainEqual(
+      expect.objectContaining({ operation: "end", turnId: "turn-2" }),
+    );
   } finally {
     await runtime.dispose();
   }
