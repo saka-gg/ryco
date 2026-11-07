@@ -32,18 +32,27 @@ export function ThreadRouteScreen(props: ThreadRouteScreenProps) {
   useFocusEffect(
     useCallback(() => {
       if (!environmentIdRaw || !threadIdRaw) return undefined;
-      const ref = {
+      return markThreadVisible({
         environmentId: EnvironmentId.make(environmentIdRaw),
         threadId: ThreadId.make(threadIdRaw),
-      };
-      // The thread leads the recent threads on the app icon's quick actions.
-      recordRecentThreadShortcut({
-        environmentId: environmentIdRaw,
-        threadId: threadIdRaw,
-        title: selectSidebarThreadSummaryByRef(useStore.getState(), ref)?.title ?? "",
       });
-      return markThreadVisible(ref);
     }, [environmentIdRaw, threadIdRaw]),
+  );
+  // The thread leads the recent threads on the app icon's quick actions, under its current
+  // title: a new task's title arrives after it opens.
+  const title = useStore((state) =>
+    environmentIdRaw && threadIdRaw
+      ? (selectSidebarThreadSummaryByRef(state, {
+          environmentId: EnvironmentId.make(environmentIdRaw),
+          threadId: ThreadId.make(threadIdRaw),
+        })?.title ?? "")
+      : "",
+  );
+  useFocusEffect(
+    useCallback(() => {
+      if (!environmentIdRaw || !threadIdRaw) return;
+      recordRecentThreadShortcut({ environmentId: environmentIdRaw, threadId: threadIdRaw, title });
+    }, [environmentIdRaw, threadIdRaw, title]),
   );
 
   if (!environmentIdRaw || !threadIdRaw) return null;

@@ -1,5 +1,6 @@
 import * as Linking from "expo-linking";
 import * as QuickActions from "expo-quick-actions";
+import { Platform } from "react-native";
 
 import { mobileKV } from "../../platform/kv";
 import {
@@ -116,6 +117,13 @@ let launchAction: { readonly id: string; readonly at: number } | null = null;
 let launchActionConsumed = false;
 
 /**
+ * iOS delivers quick actions to the scene delegate, which opens their app path
+ * as a URL in the app's own scheme (plugins/withIosSceneLifecycle.cjs): they
+ * arrive here as ordinary deep links. Android delivers them to the module.
+ */
+const deliversActionsToJs = Platform.OS === "android";
+
+/**
  * The navigation container's deep-link source with quick actions in it: an
  * action opens its app path through the same linking config as a `ryco://`
  * link, both from a cold start and while the app runs.
@@ -123,7 +131,8 @@ let launchActionConsumed = false;
 export const shortcutAwareLinking = {
   async getInitialURL(): Promise<string | null> {
     // The launch action opens once; a remounted navigator must not replay it.
-    const initial = launchActionConsumed ? null : shortcutUrl(QuickActions.initial);
+    const initial =
+      launchActionConsumed || !deliversActionsToJs ? null : shortcutUrl(QuickActions.initial);
     launchActionConsumed = true;
     if (initial !== null && QuickActions.initial) {
       launchAction = { id: QuickActions.initial.id, at: Date.now() };
@@ -133,6 +142,7 @@ export const shortcutAwareLinking = {
   },
   subscribe(listener: (url: string) => void): () => void {
     const links = Linking.addEventListener("url", ({ url }) => listener(url));
+    if (!deliversActionsToJs) return () => links.remove();
     const actions = QuickActions.addListener((action) => {
       const echo =
         launchAction !== null &&

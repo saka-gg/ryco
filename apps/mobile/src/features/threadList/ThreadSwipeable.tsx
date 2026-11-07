@@ -493,11 +493,12 @@ const TONE_CLASS: Record<ThreadSwipeActionTone, string> = {
   secondary: "bg-subtle-strong",
   accent: "bg-accent",
 };
-const TONE_FOREGROUND: Record<ThreadSwipeActionTone, `--color-${string}`> = {
+const TONE_FOREGROUND: Record<Exclude<ThreadSwipeActionTone, "accent">, `--color-${string}`> = {
   primary: "--color-primary-foreground",
   secondary: "--color-foreground",
-  accent: "--color-primary-foreground",
 };
+/** The accent is a mid blue in both themes; white reads on it in either. */
+const ACCENT_FOREGROUND = "#ffffff";
 
 function SwipeActionButton(props: {
   readonly action: ThreadSwipeAction;
@@ -520,7 +521,10 @@ function SwipeActionButton(props: {
   const threshold = props.fullSwipeThreshold ?? Number.MAX_SAFE_INTEGER;
   const sign = side === "trailing" ? -1 : 1;
   const circleSize = SWIPE_ACTION_CIRCLE_SIZE;
-  const foreground = useThemeColor(TONE_FOREGROUND[action.tone]);
+  const themed = useThemeColor(
+    action.tone === "accent" ? "--color-primary-foreground" : TONE_FOREGROUND[action.tone],
+  );
+  const foreground = action.tone === "accent" ? ACCENT_FOREGROUND : themed;
   const actionStyle = useAnimatedStyle(() => {
     const reveal = Math.max(sign * translation.value, 0);
     const entryProgress = interpolate(

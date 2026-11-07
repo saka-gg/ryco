@@ -186,7 +186,7 @@ import {
 import { useThreadStreamHaptics } from "./threadStreamHaptics";
 import { FloatingThreadControl } from "./FloatingThreadControl";
 import { ImageGalleryProvider } from "./ImageGalleryModal";
-import { isFollowingLatest } from "./floatingThreadControlModel";
+import { FLOATING_CONTROL_CLEARANCE, isFollowingLatest } from "./floatingThreadControlModel";
 import { markSnoozeWokeSeen } from "../../state/snoozeWokeSeen";
 import {
   useWsConnectionStatusForEnvironment,
@@ -2464,10 +2464,13 @@ export function ThreadDetailScreen(props: {
   // Anchoring to the message a link opened this thread at (a fork's link back to its reply):
   // load the history around it if needed, then scroll to it once and highlight it briefly.
   const listRef = useRef<LegendListRef>(null);
-  const runningSince =
-    runningTurnId !== null
-      ? (thread?.latestTurn?.startedAt ?? thread?.latestTurn?.requestedAt ?? null)
-      : null;
+  // Running as the header says it (a turn or the session runs), gated like the "Working…" fold.
+  const agentRunning =
+    !cachedView.headerForcedOffline &&
+    (thread?.latestTurn?.state === "running" || thread?.session?.status === "running");
+  const runningSince = agentRunning
+    ? (thread?.latestTurn?.startedAt ?? thread?.latestTurn?.requestedAt ?? "")
+    : null;
   // Whether the reader follows the end of the feed; set only when it changes.
   const [followingLatest, setFollowingLatest] = useState(true);
   const onFeedScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -2728,6 +2731,12 @@ export function ThreadDetailScreen(props: {
               keyboardShouldPersistTaps="handled"
               contentInsetAdjustmentBehavior="never"
               contentContainerStyle={{ paddingVertical: 10 }}
+              // Room under the newest message for the floating Working pill.
+              ListFooterComponent={
+                runningSince !== null ? (
+                  <View style={{ height: FLOATING_CONTROL_CLEARANCE }} />
+                ) : null
+              }
               onStartReached={loadOlderMessages}
               onStartReachedThreshold={0.35}
               onScroll={onFeedScroll}

@@ -1,6 +1,10 @@
 import { MenuView, type NativeActionEvent } from "@react-native-menu/menu";
-import { LegendList, type LegendListRenderItemProps } from "@legendapp/list/react-native";
-import { memo, useCallback, useMemo, useState } from "react";
+import {
+  LegendList,
+  type LegendListRef,
+  type LegendListRenderItemProps,
+} from "@legendapp/list/react-native";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Pressable,
   useWindowDimensions,
@@ -304,16 +308,31 @@ export const InboxScreen = memo(function InboxScreen(props: {
     },
     [mutedColor, onOpenThread, snoozeMenuPresets],
   );
+  const listRef = useRef<LegendListRef>(null);
+  const offsetRef = useRef(props.initialScrollOffset ?? 0);
   const onScroll = useCallback(
-    (event: NativeSyntheticEvent<NativeScrollEvent>) =>
-      onScrollOffset?.(event.nativeEvent.contentOffset.y),
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      offsetRef.current = event.nativeEvent.contentOffset.y;
+      onScrollOffset?.(event.nativeEvent.contentOffset.y);
+    },
     [onScrollOffset],
   );
+  // A newly pinned thread lands above the rows in view; from the top of the list, show it.
+  const pinnedCount = props.sections.find((section) => section.key === "pinned")?.rows.length ?? 0;
+  const previousPinnedCount = useRef(pinnedCount);
+  useEffect(() => {
+    const grew = pinnedCount > previousPinnedCount.current;
+    previousPinnedCount.current = pinnedCount;
+    if (grew && offsetRef.current < 160) {
+      void listRef.current?.scrollToOffset({ offset: 0, animated: true });
+    }
+  }, [pinnedCount]);
   const { swipeEnabled, scrollGateHandlers } = useSwipeableScrollGate({ onScroll });
 
   return (
     <SwipeableScrollGateProvider enabled={swipeEnabled}>
       <LegendList
+        ref={listRef}
         key={props.filterKey}
         data={data}
         renderItem={renderItem}

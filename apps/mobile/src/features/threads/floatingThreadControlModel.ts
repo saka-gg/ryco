@@ -8,6 +8,9 @@ export type FloatingThreadControl =
   | { readonly kind: "working"; readonly label: string; readonly accessibilityLabel: string }
   | { readonly kind: "jump"; readonly label: string; readonly accessibilityLabel: string };
 
+/** Space the feed keeps under its newest message while the pill floats there. */
+export const FLOATING_CONTROL_CLEARANCE = 52;
+
 /** Further than this from the end, the reader is reading back, not following along. */
 export const FOLLOWING_DISTANCE = 160;
 

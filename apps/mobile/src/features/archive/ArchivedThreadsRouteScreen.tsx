@@ -209,57 +209,59 @@ export function ArchivedThreadsRouteScreen() {
   const { swipeEnabled, scrollGateHandlers } = useSwipeableScrollGate();
   const filtered = query.trim().length > 0 || environmentId !== null;
 
+  const header = (
+    <View className="gap-2 px-4 pt-3 pb-1">
+      <View className="h-11 flex-row items-center gap-2 rounded-xl bg-card px-3">
+        <SymbolView name="magnifyingglass" size={15} tintColor={iconColor} type="monochrome" />
+        <TextInput
+          value={query}
+          onChangeText={setQuery}
+          placeholder="Search archived tasks"
+          placeholderTextColor={placeholderColor as string}
+          accessibilityLabel="Search archived tasks"
+          autoCorrect={false}
+          clearButtonMode="while-editing"
+          returnKeyType="search"
+          className="min-w-0 flex-1 font-sans text-[16px] text-foreground"
+        />
+      </View>
+      {showMachines ? (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+          <View className="flex-row gap-2 py-1">
+            {[null, ...archivedEnvironments.map((environment) => environment.environmentId)].map(
+              (id) => {
+                const selected = environmentId === id;
+                const label =
+                  id === null
+                    ? "All machines"
+                    : (archivedEnvironments.find((environment) => environment.environmentId === id)
+                        ?.label ?? "Machine");
+                return (
+                  <Pressable
+                    key={id ?? "all"}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected }}
+                    onPress={() => setEnvironmentId(id)}
+                    className={`h-8 flex-row items-center gap-1.5 rounded-full px-3 ${selected ? "bg-primary" : "bg-card"}`}
+                  >
+                    {id === null ? null : <DeviceIcon environmentId={id} size={12} />}
+                    <Text
+                      className={`text-xs font-ryco-medium ${selected ? "text-primary-foreground" : "text-foreground-muted"}`}
+                    >
+                      {label}
+                    </Text>
+                  </Pressable>
+                );
+              },
+            )}
+          </View>
+        </ScrollView>
+      ) : null}
+    </View>
+  );
+
   return (
     <View className="flex-1 bg-screen">
-      <View className="gap-2 px-4 pt-3 pb-1">
-        <View className="h-11 flex-row items-center gap-2 rounded-xl bg-card px-3">
-          <SymbolView name="magnifyingglass" size={15} tintColor={iconColor} type="monochrome" />
-          <TextInput
-            value={query}
-            onChangeText={setQuery}
-            placeholder="Search archived tasks"
-            placeholderTextColor={placeholderColor as string}
-            accessibilityLabel="Search archived tasks"
-            autoCorrect={false}
-            clearButtonMode="while-editing"
-            returnKeyType="search"
-            className="min-w-0 flex-1 font-sans text-[16px] text-foreground"
-          />
-        </View>
-        {showMachines ? (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-            <View className="flex-row gap-2 py-1">
-              {[null, ...archivedEnvironments.map((environment) => environment.environmentId)].map(
-                (id) => {
-                  const selected = environmentId === id;
-                  const label =
-                    id === null
-                      ? "All machines"
-                      : (archivedEnvironments.find(
-                          (environment) => environment.environmentId === id,
-                        )?.label ?? "Machine");
-                  return (
-                    <Pressable
-                      key={id ?? "all"}
-                      accessibilityRole="button"
-                      accessibilityState={{ selected }}
-                      onPress={() => setEnvironmentId(id)}
-                      className={`h-8 flex-row items-center gap-1.5 rounded-full px-3 ${selected ? "bg-primary" : "bg-card"}`}
-                    >
-                      {id === null ? null : <DeviceIcon environmentId={id} size={12} />}
-                      <Text
-                        className={`text-xs font-ryco-medium ${selected ? "text-primary-foreground" : "text-foreground-muted"}`}
-                      >
-                        {label}
-                      </Text>
-                    </Pressable>
-                  );
-                },
-              )}
-            </View>
-          </ScrollView>
-        ) : null}
-      </View>
       <SwipeableScrollGateProvider enabled={swipeEnabled}>
         <LegendList
           data={data}
@@ -270,7 +272,9 @@ export function ArchivedThreadsRouteScreen() {
           keyboardShouldPersistTaps="handled"
           {...scrollGateHandlers}
           scrollEventThrottle={32}
+          contentInsetAdjustmentBehavior="automatic"
           contentContainerStyle={{ paddingBottom: 40 }}
+          ListHeaderComponent={header}
           ListEmptyComponent={
             <View className="px-2 py-12">
               <EmptyState
