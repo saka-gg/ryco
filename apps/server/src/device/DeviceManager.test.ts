@@ -4,6 +4,7 @@ import type { DeviceEvent } from "@ryco/contracts";
 
 import type { BootOwnershipStore } from "./bootOwnership.ts";
 import { DeviceBackendError } from "./DeviceBackend.ts";
+import { DEVICE_THREAD_ATTACHMENT_LIMIT } from "@ryco/contracts";
 import {
   DEVICE_IDLE_SHUTDOWN_MS,
   DEVICE_OPEN_PANE_REQUEST_HOLD_MS,
@@ -139,7 +140,7 @@ describe("DeviceManager attachment", () => {
     expect(third.version).toBeGreaterThan(second.version);
   });
 
-  it("replaces the previous device when a thread attaches to another one", async () => {
+  it("keeps the first device attached when a thread attaches another one", async () => {
     const { backend, manager } = makeManager();
     await backend.boot(DEVICE_A);
     await backend.boot(DEVICE_B);
@@ -147,9 +148,74 @@ describe("DeviceManager attachment", () => {
     await manager.attach(THREAD_A, DEVICE_A);
     const state = await manager.attach(THREAD_A, DEVICE_B);
 
+    // Each device has its own tab; the newest is what agents mean by "the" device.
     expect(state.attachedDeviceUdid).toBe(DEVICE_B);
-    expect(backend.hasStream(DEVICE_A)).toBe(false);
+    expect(state.attachments?.map((entry) => entry.udid)).toEqual([DEVICE_A, DEVICE_B]);
+    expect(manager.isAttached(THREAD_A, DEVICE_A)).toBe(true);
     expect(backend.hasStream(DEVICE_B)).toBe(true);
+  });
+
+  it("makes a device attached again the most recent one", async () => {
+    const { backend, manager } = makeManager();
+    await backend.boot(DEVICE_A);
+    await backend.boot(DEVICE_B);
+    await manager.attach(THREAD_A, DEVICE_A);
+    await manager.attach(THREAD_A, DEVICE_B);
+
+    const state = await manager.attach(THREAD_A, DEVICE_A);
+
+    expect(state.attachedDeviceUdid).toBe(DEVICE_A);
+    expect(state.attachments?.map((entry) => entry.udid)).toEqual([DEVICE_B, DEVICE_A]);
+  });
+
+  it("detaches one device and leaves the thread's others attached", async () => {
+    const { backend, manager } = makeManager();
+    await backend.boot(DEVICE_A);
+    await backend.boot(DEVICE_B);
+    await manager.attach(THREAD_A, DEVICE_A);
+    await manager.attach(THREAD_A, DEVICE_B);
+
+    const state = await manager.detach(THREAD_A, DEVICE_B);
+
+    expect(state.attachments?.map((entry) => entry.udid)).toEqual([DEVICE_A]);
+    expect(state.attachedDeviceUdid).toBe(DEVICE_A);
+    // Closing a tab stops watching; the device itself keeps running.
+    expect(backend.callsOfKind("shutdown")).toHaveLength(0);
+  });
+
+  it("detaches every device when no device is named", async () => {
+    const { backend, manager } = makeManager();
+    await backend.boot(DEVICE_A);
+    await backend.boot(DEVICE_B);
+    await manager.attach(THREAD_A, DEVICE_A);
+    await manager.attach(THREAD_A, DEVICE_B);
+
+    const state = await manager.detach(THREAD_A);
+
+    expect(state.attachments).toEqual([]);
+    expect(state.attachedDeviceUdid).toBeNull();
+  });
+
+  it("refuses an attachment past the per-thread limit", async () => {
+    const backend = new FakeDeviceBackend({
+      devices: Array.from({ length: DEVICE_THREAD_ATTACHMENT_LIMIT + 1 }, (_, index) => ({
+        udid: `FAKE-1${String(index).padStart(3, "0")}`,
+        name: `Device ${index}`,
+        runtime: "iOS 27.0",
+      })),
+    });
+    const { manager } = makeManager(backend);
+    const udids = (await manager.list({ includeShutdown: true })).devices.map(
+      (device) => device.udid,
+    );
+    for (const udid of udids) await backend.boot(udid);
+    for (const udid of udids.slice(0, DEVICE_THREAD_ATTACHMENT_LIMIT)) {
+      await manager.attach(THREAD_A, udid);
+    }
+
+    await expect(manager.attach(THREAD_A, udids.at(-1)!)).rejects.toThrow(/Close one first/u);
+    // Attaching one it already has is not a new attachment.
+    await expect(manager.attach(THREAD_A, udids[0]!)).resolves.toBeDefined();
   });
 
   it("keeps the stream alive while another thread is still attached", async () => {
@@ -598,8 +664,16 @@ describe("DeviceManager idle shutdown", () => {
   });
 });
 
-describe("DeviceManager device switching", () => {
-  it("frees the old slot immediately when a thread switches devices", async () => {
+describe("DeviceManager several devices per thread", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("leaves an earlier Ryco-booted device running when a thread attaches another", async () => {
     const { backend, manager } = makeManager();
     await manager.boot(DEVICE_A);
     await manager.boot(DEVICE_B);
@@ -607,36 +681,38 @@ describe("DeviceManager device switching", () => {
 
     await manager.attach(THREAD_A, DEVICE_B);
 
-    // Not after the idle window: the cap is three, and filling every slot with
-    // simulators nobody is watching is what made the fourth pick prompt.
+    // Switching tabs keeps both devices running: each is a person's attachment.
+    await vi.advanceTimersByTimeAsync(DEVICE_IDLE_SHUTDOWN_MS + 1);
+    expect(backend.callsOfKind("shutdown")).toHaveLength(0);
+  });
+
+  it("lets a closed tab's Ryco-booted device idle out", async () => {
+    const { backend, manager } = makeManager();
+    await manager.boot(DEVICE_A);
+    await manager.boot(DEVICE_B);
+    await manager.attach(THREAD_A, DEVICE_A);
+    await manager.attach(THREAD_A, DEVICE_B);
+
+    await manager.detach(THREAD_A, DEVICE_A);
+    // Not at once: coming back to a device just closed is common.
+    expect(backend.callsOfKind("shutdown")).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(DEVICE_IDLE_SHUTDOWN_MS + 1);
+
     expect(backend.callsOfKind("shutdown").map((call) => call.udid)).toEqual([DEVICE_A]);
   });
 
-  it("leaves a user-booted device running when a thread switches away from it", async () => {
-    const { backend, manager } = makeManager();
-    backend.bootExternally(DEVICE_A);
-    await manager.boot(DEVICE_B);
-    await manager.attach(THREAD_A, DEVICE_A);
-
-    await manager.attach(THREAD_A, DEVICE_B);
-
-    // The user started this one; it outlives the session either way.
-    expect(backend.callsOfKind("shutdown")).toHaveLength(0);
-  });
-
-  it("keeps a device another thread is still watching booted", async () => {
-    const { backend, manager } = makeManager();
+  it("drops only the shut-down device from a thread watching several", async () => {
+    const { manager } = makeManager();
     await manager.boot(DEVICE_A);
     await manager.boot(DEVICE_B);
     await manager.attach(THREAD_A, DEVICE_A);
-    await manager.attach(THREAD_B, DEVICE_A);
-
     await manager.attach(THREAD_A, DEVICE_B);
 
-    // The other thread retains both its boot and its independent stream.
-    expect(backend.callsOfKind("shutdown")).toHaveLength(0);
-    await waitForStream(backend, DEVICE_B, true);
-    await waitForStream(backend, DEVICE_A, true);
+    await manager.shutdown(DEVICE_B);
+
+    const state = await manager.getThreadState(THREAD_A);
+    expect(state.attachments?.map((entry) => entry.udid)).toEqual([DEVICE_A]);
+    expect(state.attachedDeviceUdid).toBe(DEVICE_A);
   });
 
   it("streams devices independently for different threads", async () => {
@@ -653,22 +729,53 @@ describe("DeviceManager device switching", () => {
     await waitForStream(backend, DEVICE_A, true);
   });
 
-  it("frees the slot for the next boot rather than refusing it", async () => {
-    const { backend, manager } = makeManager();
-    // At the cap, with every slot held by this one thread's history.
-    await manager.boot(DEVICE_A);
-    await manager.attach(THREAD_A, DEVICE_A);
-    await manager.boot(DEVICE_B);
-    await manager.attach(THREAD_A, DEVICE_B);
-    await manager.boot(DEVICE_C);
-    await manager.attach(THREAD_A, DEVICE_C);
+  it("says a device is starting on the thread whose pane booted it", async () => {
+    const backend = new FakeDeviceBackend();
+    const gate = deferred();
+    const boot = backend.boot.bind(backend);
+    backend.boot = async (udid) => {
+      await gate.promise;
+      return await boot(udid);
+    };
+    const { manager, events } = makeManager(backend);
+    await manager.attach(THREAD_B, DEVICE_C).catch(() => undefined);
 
-    const fourth = await manager.boot(DEVICE_D);
+    const booting = manager.boot(DEVICE_A, { threadId: THREAD_A });
+    await vi.waitFor(() => {
+      const latest = events
+        .filter((event) => event.type === "device.thread-state")
+        .map((event) => event.state)
+        .findLast((state) => state.threadId === THREAD_A);
+      expect(latest?.startingDeviceUdids).toEqual([DEVICE_A]);
+    });
+    expect((await manager.getThreadState(THREAD_B)).startingDeviceUdids).toBeUndefined();
 
-    // Two slots were released by the switches, so trying a fourth simulator in
-    // a row just works instead of prompting for a shutdown.
-    expect(fourth.kind).toBe("booted");
-    expect(backend.callsOfKind("shutdown").map((call) => call.udid)).toEqual([DEVICE_A, DEVICE_B]);
+    gate.resolve();
+    await booting;
+    await vi.waitFor(async () =>
+      expect((await manager.getThreadState(THREAD_A)).startingDeviceUdids).toBeUndefined(),
+    );
+  });
+
+  it("says a device is starting on the thread whose agent is booting it", async () => {
+    const backend = new FakeDeviceBackend();
+    const gate = deferred();
+    const boot = backend.boot.bind(backend);
+    backend.boot = async (udid) => {
+      await gate.promise;
+      return await boot(udid);
+    };
+    const { manager } = makeManager(backend);
+
+    const call = manager.withAgentActivity(THREAD_A, () => manager.boot(DEVICE_A), {
+      udid: DEVICE_A,
+    });
+    await vi.waitFor(async () =>
+      expect((await manager.getThreadState(THREAD_A)).startingDeviceUdids).toEqual([DEVICE_A]),
+    );
+
+    gate.resolve();
+    await call;
   });
 });
 
@@ -1084,18 +1191,38 @@ describe("DeviceManager agent auto-attach", () => {
     expect(backend.hasStream(DEVICE_A)).toBe(true);
   });
 
-  it("never steals a thread already attached to a different device", async () => {
-    const { backend, manager } = makeManager();
+  it("opens the agent's device beside the user's, never in place of it", async () => {
+    const { backend, manager, events } = makeManager();
     await backend.boot(DEVICE_A);
     await backend.boot(DEVICE_B);
     await manager.attach(THREAD_A, DEVICE_B);
 
     await manager.ensureThreadAttached(THREAD_A, DEVICE_A);
 
-    // The existing attachment reflects a deliberate user choice; the agent's
-    // device stays reachable through the picker.
-    expect((await manager.getThreadState(THREAD_A)).attachedDeviceUdid).toBe(DEVICE_B);
-    expect(backend.hasStream(DEVICE_A)).toBe(false);
+    const state = await manager.getThreadState(THREAD_A);
+    expect(state.attachments).toEqual([
+      expect.objectContaining({ udid: DEVICE_B, source: "user" }),
+      expect.objectContaining({ udid: DEVICE_A, source: "agent" }),
+    ]);
+    // A new agent attachment asks the thread's clients to show it.
+    expect(events).toContainEqual({
+      type: "device.open-pane-requested",
+      threadId: THREAD_A,
+      udid: DEVICE_A,
+      reason: "agent-tool",
+    });
+  });
+
+  it("does not ask clients to show a device the user already has attached", async () => {
+    const { backend, manager, events } = makeManager();
+    await backend.boot(DEVICE_A);
+    await manager.attach(THREAD_A, DEVICE_A);
+
+    await manager.attach(THREAD_A, DEVICE_A, "agent");
+
+    expect(events.some((event) => event.type === "device.open-pane-requested")).toBe(false);
+    const state = await manager.getThreadState(THREAD_A);
+    expect(state.attachments?.[0]?.source).toBe("user");
   });
 
   it("is idempotent when the thread already watches that device", async () => {

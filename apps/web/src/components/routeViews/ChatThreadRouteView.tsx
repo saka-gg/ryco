@@ -42,6 +42,7 @@ import {
 } from "../../storeSelectors";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../../threadRoutes";
 import { buildOpenSimulatorSearch } from "../../workspaceRouteSearch";
+import { showAgentOpenedDevice } from "../../deviceWorkspace/deviceWorkspaceActions";
 import { useWorkspacePanelPreloadScheduling } from "../../workspacePanelPreload";
 import ChatView from "../ChatView";
 import { threadHasStarted } from "../ChatView.logic";
@@ -148,6 +149,7 @@ export function ChatThreadRouteView({
     currentThreadKey ? state.pendingOpenByThreadKey[currentThreadKey] : undefined,
   );
   const consumeDeviceOpenRequest = useDeviceStateStore((state) => state.consumeOpenRequest);
+  const deviceAutoShowFloating = useSettings((settings) => settings.deviceAutoShowFloating);
   const appSidebarCollapsed = useAppSidebarCollapsed();
   // Maximizing only means anything for the inline split — the sheet and the
   // phone work surface already cover the viewport.
@@ -180,12 +182,28 @@ export function ChatThreadRouteView({
   useEffect(() => {
     if (!threadRef || !pendingDeviceOpenRequest || presentationTier === "phone") return;
     consumeDeviceOpenRequest(threadRef.environmentId, threadRef.threadId);
+    const shown = showAgentOpenedDevice({
+      thread: { environmentId: threadRef.environmentId, threadId: threadRef.threadId },
+      udid: pendingDeviceOpenRequest.udid,
+      floating: deviceAutoShowFloating,
+      devicePanelVisible: rightPanelOpen && rightPanelMode === "simulator",
+    });
+    if (shown !== "tab") return;
     void navigate({
       to: "/$environmentId/$threadId",
       params: buildThreadRouteParams(threadRef),
       search: (previous) => buildOpenSimulatorSearch(previous),
     });
-  }, [consumeDeviceOpenRequest, navigate, pendingDeviceOpenRequest, presentationTier, threadRef]);
+  }, [
+    consumeDeviceOpenRequest,
+    deviceAutoShowFloating,
+    navigate,
+    pendingDeviceOpenRequest,
+    presentationTier,
+    rightPanelMode,
+    rightPanelOpen,
+    threadRef,
+  ]);
   const navigateThreadSearch = useCallback(
     (update: RightPanelSearchUpdate) => {
       if (!threadRef) {

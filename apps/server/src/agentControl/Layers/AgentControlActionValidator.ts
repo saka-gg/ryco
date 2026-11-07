@@ -304,13 +304,9 @@ const validateDevicePlanCurrentState = (
       );
     }
 
+    // A thread may attach several devices: attaching another opens it beside the rest.
+    const attachedHere = input.deviceService.manager.isAttached(plan.threadId, plan.udid);
     if (plan.kind === "deviceAttach") {
-      if (threadState.attachedDeviceUdid !== null && threadState.attachedDeviceUdid !== plan.udid) {
-        return yield* fail(
-          "thread-stale",
-          "The thread already has a different deliberate device attachment.",
-        );
-      }
       if (device.state !== "booted") {
         return yield* fail("thread-unavailable", "Only a booted device can be attached.");
       }
@@ -322,7 +318,7 @@ const validateDevicePlanCurrentState = (
       }
       return;
     }
-    if (threadState.attachedDeviceUdid !== plan.udid) {
+    if (!attachedHere) {
       return yield* fail(
         "thread-stale",
         "The approved device is no longer attached to the originating thread.",

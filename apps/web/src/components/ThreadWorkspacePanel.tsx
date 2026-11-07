@@ -94,7 +94,20 @@ import type { WorkspacePullRequestsView } from "./worktrees/WorkspacePullRequest
 import { WorkspacePullRequestsPopoverOnDemand } from "./worktrees/WorkspacePullRequestsPopoverOnDemand";
 import { preloadWorkspacePullRequestsPopover } from "./worktrees/lazyWorktreeDialogs";
 import { formatLiveAgentCount, LiveAgentCountBadge } from "./LiveAgentCountBadge";
-import { buildTabs, type WorkspaceTab } from "../threadWorkspaceTabs";
+import {
+  buildTabs,
+  deviceWorkspaceTabKey,
+  expandDeviceTabs,
+  workspaceDeviceTabId,
+  type WorkspaceTab,
+} from "../threadWorkspaceTabs";
+import { useDeviceStateStore } from "@ryco/client-runtime/state/device";
+import { activeDeviceTab } from "../deviceWorkspace/deviceTabs.logic";
+import { selectThreadDeviceTabs, useDeviceTabsStore } from "../deviceWorkspace/deviceTabsStore";
+import {
+  closeWorkspaceDeviceTab,
+  floatWorkspaceDevice,
+} from "../deviceWorkspace/deviceWorkspaceActions";
 import { readEnvironmentApi } from "../environmentApi";
 import { shortcutLabelForCommand } from "../keybindings";
 import type { TerminalContextSelection } from "../lib/terminalContext";
@@ -122,7 +135,11 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import ChatMarkdown from "./ChatMarkdown";
 import { DiffPanelLoadingState, type DiffPanelMode } from "./DiffPanelShell";
 import { prepareThreadTerminal, resolveThreadTerminalLaunch } from "../terminalPrepare";
-import type { PreloadableModule } from "../lib/preloadableLazy";
+import {
+  preloadableLazy,
+  useLazyComponentReady,
+  type PreloadableModule,
+} from "../lib/preloadableLazy";
 import {
   LazyDiffPanel as DiffPanel,
   LazyPreviewPanel as PreviewPanel,
@@ -133,6 +150,11 @@ import {
   useWorkspacePanelChunkReady,
   workspacePanelLoadingLabel,
 } from "../workspacePanelPreload";
+
+// From the device panel's chunk; see `SimulatorPanel.tsx`.
+const DeviceTabMenu = preloadableLazy(() =>
+  import("./device/SimulatorPanel").then((module) => module.DeviceTabMenu),
+);
 
 /**
  * Mounts a code-split surface once its chunk has resolved and shows the
@@ -202,7 +224,7 @@ function TabIcon(props: { tab: WorkspaceTab; active: boolean }) {
   }
   if (props.tab.key === "browser") return <GlobeIcon className={className} />;
   if (props.tab.key === "pullRequest") return <GitPullRequestIcon className={className} />;
-  if (props.tab.key === "simulator") {
+  if (props.tab.mode === "simulator") {
     return <SmartphoneIcon className={className} />;
   }
   if (props.tab.key === "agents") {
@@ -781,6 +803,8 @@ function WorkspaceLauncher(props: {
   /** The thread's change request, when it has one (desktop only). */
   pullRequestNumber: number | null;
   showSimulator: boolean;
+  /** Opens another device tab, on the picker. */
+  onOpenDevice: () => void;
   isPhoneSurface: boolean;
   liveAgentCount: number;
   onOpenSideChat: () => void;
@@ -789,11 +813,6 @@ function WorkspaceLauncher(props: {
   const filesTab: WorkspaceTab = { key: "files", label: "Files", mode: "files" };
   const reviewTab: WorkspaceTab = { key: "review", label: "Review", mode: "review" };
   const terminalTab: WorkspaceTab = { key: "terminal", label: "Terminal", mode: "terminal" };
-  const simulatorTab: WorkspaceTab = {
-    key: "simulator",
-    label: "Simulator",
-    mode: "simulator",
-  };
   const agentsTab: WorkspaceTab = { key: "agents", label: "Agents", mode: "agents" };
   const filesShortcutLabel = useMemo(
     () => shortcutLabelForCommand(keybindings, "workspace.files"),
@@ -878,13 +897,13 @@ function WorkspaceLauncher(props: {
       ) : null}
       {props.showSimulator ? (
         <LauncherCard
-          label="Simulator"
-          description="Run and control an iOS app"
+          label="Device"
+          description="Run and control a simulator or emulator"
           icon={SmartphoneIcon}
           shortcutLabel={simulatorShortcutLabel}
           compact={compact}
           onIntent={() => preloadWorkspacePanel("simulator", { intent: true })}
-          onClick={() => props.onSelectTab(simulatorTab)}
+          onClick={props.onOpenDevice}
         />
       ) : null}
       {props.showAgents ? (
@@ -1027,6 +1046,26 @@ export default function ThreadWorkspacePanel(props: {
     useMemo(() => createThreadStructureSelectorByRef(workspaceThreadRef), [workspaceThreadRef]),
   );
   const agentSessionLive = isThreadAgentSessionLive(activeThread?.session);
+  // The thread's device tabs, one per device it watches, named after their devices.
+  const workspaceThreadKey = workspaceThreadRef ? scopedThreadKey(workspaceThreadRef) : null;
+  const deviceTabs = useDeviceTabsStore((state) =>
+    selectThreadDeviceTabs(state.byThreadKey, workspaceThreadKey),
+  );
+  const deviceInventory = useDeviceStateStore((state) =>
+    workspaceThreadRef
+      ? state.environmentById[workspaceThreadRef.environmentId]?.devices
+      : undefined,
+  );
+  const [renamingTabKey, setRenamingTabKey] = useState<string | null>(null);
+  const [deviceTabMenu, setDeviceTabMenu] = useState<{
+    readonly tab: WorkspaceTab;
+    readonly x: number;
+    readonly y: number;
+  } | null>(null);
+  const dismissDeviceTabMenu = useCallback(() => setDeviceTabMenu(null), []);
+  const deviceTabMenuReady = useLazyComponentReady(DeviceTabMenu, deviceTabMenu !== null, {
+    onLoadError: () => setDeviceTabMenu(null),
+  });
   const subagents = useMemo(
     () =>
       deriveThreadSubagents(activeThread?.activities ?? [], {
@@ -1150,6 +1189,13 @@ export default function ThreadWorkspacePanel(props: {
       render: renderKey && renderTitle ? { renderKey, title: renderTitle } : null,
     });
     // The web phone tier is frozen; native mobile owns future phone surfaces.
+    if (!isPhoneSurface) {
+      return expandDeviceTabs(
+        built,
+        deviceTabs.tabs,
+        (udid) => deviceInventory?.find((device) => device.udid === udid)?.name,
+      );
+    }
     return isPhoneSurface
       ? built.filter(
           (tab) =>
@@ -1163,6 +1209,8 @@ export default function ThreadWorkspacePanel(props: {
       : built;
   }, [
     agentKey,
+    deviceInventory,
+    deviceTabs.tabs,
     isPhoneSurface,
     openedPanelModes,
     props.openedAgentKeys,
@@ -1184,7 +1232,9 @@ export default function ThreadWorkspacePanel(props: {
             activeMode === "artifacts" ||
             activeMode === "render")
         ? null
-        : activeMode;
+        : activeMode === "simulator" && deviceTabs.tabs.length > 0
+          ? deviceWorkspaceTabKey(activeDeviceTab(deviceTabs)?.id ?? "")
+          : activeMode;
 
   const navigateSearch = useCallback(
     (buildSearch: (previous: Record<string, unknown>) => Record<string, unknown>) => {
@@ -1255,10 +1305,19 @@ export default function ThreadWorkspacePanel(props: {
         navigateSearch((previous) => buildOpenRenderSearch(previous, tab.renderKey));
         return;
       }
+      const deviceTabId = workspaceDeviceTabId(tab);
+      if (deviceTabId && workspaceThreadKey) {
+        useDeviceTabsStore.getState().activate(workspaceThreadKey, deviceTabId);
+      }
       navigateSearch((previous) => buildOpenRightPanelTabSearch(previous, tab.mode));
     },
-    [activeMode, navigateSearch],
+    [activeMode, navigateSearch, workspaceThreadKey],
   );
+  /** "+ → Device": another device tab, on the picker. */
+  const openDevicePicker = useCallback(() => {
+    if (workspaceThreadKey) useDeviceTabsStore.getState().openPicker(workspaceThreadKey);
+    navigateSearch((previous) => buildOpenRightPanelTabSearch(previous, "simulator"));
+  }, [navigateSearch, workspaceThreadKey]);
   const openLauncher = useCallback(() => {
     navigateSearch((previous) => buildOpenWorkspaceSearch(previous));
   }, [navigateSearch]);
@@ -1279,12 +1338,34 @@ export default function ThreadWorkspacePanel(props: {
   );
   const closeTab = useCallback(
     (tab: WorkspaceTab) => {
+      // A device tab closes alone while the thread has others; the device keeps running.
+      const deviceTabId = workspaceDeviceTabId(tab);
+      if (deviceTabId && workspaceThreadRef) {
+        const remaining = closeWorkspaceDeviceTab(
+          {
+            environmentId: workspaceThreadRef.environmentId,
+            threadId: workspaceThreadRef.threadId as ThreadId,
+          },
+          deviceTabId,
+        );
+        if (remaining > 0) return;
+      }
       onClosePanelTab({
         mode: tab.mode,
         ...(tab.mode === "agent" ? { agentKey: tab.agentKey } : {}),
       });
     },
-    [onClosePanelTab],
+    [onClosePanelTab, workspaceThreadRef],
+  );
+  const commitRename = useCallback(
+    (tab: WorkspaceTab, title: string | null) => {
+      setRenamingTabKey(null);
+      const deviceTabId = workspaceDeviceTabId(tab);
+      if (deviceTabId && workspaceThreadKey) {
+        useDeviceTabsStore.getState().rename(workspaceThreadKey, deviceTabId, title);
+      }
+    },
+    [workspaceThreadKey],
   );
   const onTabKeyDown = useCallback(
     (tab: WorkspaceTab, event: KeyboardEvent<HTMLButtonElement>) => {
@@ -1411,6 +1492,9 @@ export default function ThreadWorkspacePanel(props: {
         >
           {tabs.map((tab) => {
             const active = activeTabKey === tab.key;
+            const deviceTabId = workspaceDeviceTabId(tab);
+            const deviceTab = deviceTabId !== undefined;
+            const renaming = deviceTab && renamingTabKey === tab.key;
             return (
               <div
                 key={tab.key}
@@ -1435,26 +1519,60 @@ export default function ThreadWorkspacePanel(props: {
                     isPhoneSurface ? "pl-3 pr-1.5" : "pl-2.5 pr-1",
                   )}
                   onClick={() => selectTab(tab)}
+                  onDoubleClick={deviceTab ? () => setRenamingTabKey(tab.key) : undefined}
+                  onContextMenu={
+                    deviceTab
+                      ? (event) => {
+                          event.preventDefault();
+                          setDeviceTabMenu({ tab, x: event.clientX, y: event.clientY });
+                        }
+                      : undefined
+                  }
                   onPointerEnter={() => preloadWorkspacePanel(tab.mode, { intent: true })}
                   onFocus={() => preloadWorkspacePanel(tab.mode, { intent: true })}
                   onKeyDown={(event) => onTabKeyDown(tab, event)}
                 >
                   <TabIcon tab={tab} active={active} />
-                  <span
-                    className={cn(
-                      "max-w-32 truncate",
-                      tab.mode === "agent" &&
-                        resolveSidebarStatusTextClassName(statusBucket(tab.status)),
-                    )}
-                    style={
-                      tab.mode === "agent"
-                        ? resolveSidebarStatusTextStyle(tab.label, { durationSeconds: 2.2 })
-                        : undefined
-                    }
-                  >
-                    {tab.label}
-                  </span>
+                  {renaming ? null : (
+                    <span
+                      className={cn(
+                        "max-w-32 truncate",
+                        tab.mode === "agent" &&
+                          resolveSidebarStatusTextClassName(statusBucket(tab.status)),
+                      )}
+                      style={
+                        tab.mode === "agent"
+                          ? resolveSidebarStatusTextStyle(tab.label, { durationSeconds: 2.2 })
+                          : undefined
+                      }
+                    >
+                      {tab.label}
+                    </span>
+                  )}
                 </button>
+                {renaming ? (
+                  <input
+                    aria-label="Tab name"
+                    defaultValue={tab.label}
+                    // oxlint-disable-next-line jsx-a11y/no-autofocus -- renaming starts on demand
+                    autoFocus
+                    maxLength={64}
+                    className="-ml-0.5 mr-1 h-6 w-28 min-w-0 rounded bg-background px-1 text-sm outline-none ring-1 ring-ring"
+                    onFocus={(event) => event.currentTarget.select()}
+                    onBlur={(event) => {
+                      // Escape already ended the rename; its blur is not a commit.
+                      if (event.currentTarget.dataset.cancelled === "true") return;
+                      commitRename(tab, event.currentTarget.value);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") commitRename(tab, event.currentTarget.value);
+                      if (event.key === "Escape") {
+                        event.currentTarget.dataset.cancelled = "true";
+                        setRenamingTabKey(null);
+                      }
+                    }}
+                  />
+                ) : null}
                 {tab.mode === "pullRequest" && pullRequestSwitcherEnabled ? (
                   <Tooltip>
                     <TooltipTrigger
@@ -1505,6 +1623,34 @@ export default function ThreadWorkspacePanel(props: {
               </div>
             );
           })}
+          {deviceTabMenu && workspaceThreadRef && deviceTabMenuReady ? (
+            <DeviceTabMenu
+              x={deviceTabMenu.x}
+              y={deviceTabMenu.y}
+              canFloat={
+                deviceTabs.tabs.find(
+                  (entry) => entry.id === workspaceDeviceTabId(deviceTabMenu.tab),
+                )?.udid != null
+              }
+              onRename={() => setRenamingTabKey(deviceTabMenu.tab.key)}
+              onFloat={() => {
+                const udid = deviceTabs.tabs.find(
+                  (entry) => entry.id === workspaceDeviceTabId(deviceTabMenu.tab),
+                )?.udid;
+                if (udid) {
+                  floatWorkspaceDevice(
+                    {
+                      environmentId: workspaceThreadRef.environmentId,
+                      threadId: workspaceThreadRef.threadId as ThreadId,
+                    },
+                    udid,
+                  );
+                }
+              }}
+              onCloseTab={() => closeTab(deviceTabMenu.tab)}
+              onDismiss={dismissDeviceTabMenu}
+            />
+          ) : null}
           {/* Portaled: renders nothing in the tab list itself. */}
           {!isPhoneSurface && threadChangeRequest.worktree !== null ? (
             <WorkspacePullRequestsPopoverOnDemand
@@ -1712,6 +1858,7 @@ export default function ThreadWorkspacePanel(props: {
               tabs={tabs}
               activeThread={activeThread}
               onSelectTab={selectTab}
+              onOpenDevice={openDevicePicker}
               showAgents={!isPhoneSurface}
               pullRequestNumber={isPhoneSurface ? null : threadChangeRequest.number}
               showSimulator={

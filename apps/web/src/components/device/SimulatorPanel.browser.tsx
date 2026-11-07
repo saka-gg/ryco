@@ -9,6 +9,7 @@ import {
   type ThreadDeviceState,
 } from "@ryco/contracts";
 import { useDeviceStateStore } from "@ryco/client-runtime/state/device";
+import { useDeviceTabsStore } from "../../deviceWorkspace/deviceTabsStore";
 import { screenGeometry } from "./DeviceFrame";
 import SimulatorPanel from "./SimulatorPanel";
 
@@ -91,6 +92,7 @@ function sendKey(key: string) {
 beforeEach(() => {
   vi.clearAllMocks();
   useDeviceStateStore.setState({ environmentById: {}, threadByKey: {} });
+  useDeviceTabsStore.setState({ byThreadKey: {} });
   generation = useDeviceStateStore.getState().beginConnection(environmentId);
   snapshot = {
     threadId,
@@ -230,8 +232,10 @@ describe("Android simulator pane", () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(mocks.api.typeText).toHaveBeenCalledTimes(1);
     expect(mocks.api.keyEvent).not.toHaveBeenCalled();
+    // The tab stays; it attaches its device again while it is in view.
+    const attaches = mocks.api.attach.mock.calls.length;
     updateAttachment(null);
-    await expect.element(page.getByRole("combobox")).toBeVisible();
+    await expect.poll(() => mocks.api.attach.mock.calls.length).toBe(attaches + 1);
     updateAttachment(android.udid);
     await expect.element(page.getByLabelText("Pixel screen")).toBeVisible();
     sendKey("d");
@@ -253,17 +257,15 @@ describe("Android simulator pane", () => {
       .applyInventory(environmentId, generation, snapshot.devices, snapshot.availability);
     updateAttachment(null);
     await mount();
-    await expect.element(page.getByText(/Choose a simulator to/)).toBeVisible();
-    expect(document.querySelector('[data-device-kind="iPhone"] svg')).not.toBeNull();
+    await expect.element(page.getByText("Choose a device")).toBeVisible();
+    await expect.element(page.getByRole("region", { name: "iOS Simulators" })).toBeVisible();
     expect(screenGeometry("iPhone", 200, 400).insetXPct).toBeLessThan(10);
-    expect(
-      document.querySelector<HTMLButtonElement>(
-        '[data-device-kind="iPhone"] button[aria-label="Volume up"]',
-      )?.disabled,
-    ).toBe(true);
-    await page.getByRole("combobox").selectOptions("IOS-1");
+    await page.getByRole("button", { name: "Open iPhone" }).click();
     await expect.poll(() => mocks.api.attach.mock.calls.length).toBe(1);
     expect(mocks.api.attach).toHaveBeenCalledWith({ threadId, udid: "IOS-1" });
+    // The picker tab became the device's tab.
+    await expect.element(page.getByLabelText("iPhone screen")).toBeVisible();
+    expect(document.querySelector('[data-device-kind="iPhone"] svg')).not.toBeNull();
   });
 });
 

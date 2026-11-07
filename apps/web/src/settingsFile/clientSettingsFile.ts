@@ -63,6 +63,7 @@ export const CLIENT_SETTINGS_FILE_SCOPE = {
   claudeResumeReview: true,
   chatWidth: true,
   openChatTabs: true,
+  deviceAutoShowFloating: true,
   favorites: false,
   providerModelPreferences: false,
   sidebarProjectGroupingMode: true,

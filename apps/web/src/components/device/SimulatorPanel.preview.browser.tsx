@@ -9,6 +9,7 @@ import {
   type ThreadDeviceState,
 } from "@ryco/contracts";
 import { useDeviceStateStore } from "@ryco/client-runtime/state/device";
+import { useDeviceTabsStore } from "../../deviceWorkspace/deviceTabsStore";
 import SimulatorPanel from "./SimulatorPanel";
 import { HOSTED_PREVIEW_IDLE_PAUSE_MS } from "./useDeviceScreenshotStream";
 import { resetHostedPreviewLeaseForTests } from "./hostedPreviewLease";
@@ -133,6 +134,7 @@ const pollWhileDue = (predicate: () => boolean) =>
     .toBe(true);
 
 beforeEach(() => {
+  useDeviceTabsStore.setState({ byThreadKey: {} });
   mocks.hosted = true;
   const png = pngBase64();
   captureTimes.length = 0;

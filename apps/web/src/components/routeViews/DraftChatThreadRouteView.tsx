@@ -25,6 +25,8 @@ import { useStore } from "../../store";
 import { createThreadSelectorAcrossEnvironments } from "../../storeSelectors";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { buildOpenSimulatorSearch } from "../../workspaceRouteSearch";
+import { showAgentOpenedDevice } from "../../deviceWorkspace/deviceWorkspaceActions";
+import { useSettings } from "../../hooks/useSettings";
 import { useWorkspacePanelPreloadScheduling } from "../../workspacePanelPreload";
 import ChatView from "../ChatView";
 import { threadIsPromotedAndPersisted } from "../ChatView.logic";
@@ -106,6 +108,7 @@ export function DraftChatThreadRouteView({
     canonicalThreadKey ? state.pendingOpenByThreadKey[canonicalThreadKey] : undefined,
   );
   const consumeDeviceOpenRequest = useDeviceStateStore((state) => state.consumeOpenRequest);
+  const deviceAutoShowFloating = useSettings((settings) => settings.deviceAutoShowFloating);
   const appSidebarCollapsed = useAppSidebarCollapsed();
   // Maximizing only means anything for the inline split — the sheet and the
   // phone work surface already cover the viewport.
@@ -118,6 +121,16 @@ export function DraftChatThreadRouteView({
   useEffect(() => {
     if (!canonicalThreadRef || !pendingDeviceOpenRequest || presentationTier === "phone") return;
     consumeDeviceOpenRequest(canonicalThreadRef.environmentId, canonicalThreadRef.threadId);
+    const shown = showAgentOpenedDevice({
+      thread: {
+        environmentId: canonicalThreadRef.environmentId,
+        threadId: canonicalThreadRef.threadId,
+      },
+      udid: pendingDeviceOpenRequest.udid,
+      floating: deviceAutoShowFloating,
+      devicePanelVisible: rightPanelOpen && rightPanelMode === "simulator",
+    });
+    if (shown !== "tab") return;
     void navigate({
       to: "/draft/$draftId",
       params: { draftId },
@@ -126,10 +139,13 @@ export function DraftChatThreadRouteView({
   }, [
     canonicalThreadRef,
     consumeDeviceOpenRequest,
+    deviceAutoShowFloating,
     draftId,
     navigate,
     pendingDeviceOpenRequest,
     presentationTier,
+    rightPanelMode,
+    rightPanelOpen,
   ]);
   const navigateDraftSearch = useCallback(
     (update: RightPanelSearchUpdate) => {

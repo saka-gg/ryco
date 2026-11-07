@@ -211,7 +211,11 @@ function handleLifecycle(
     case "boot":
       return invoke(
         manager,
-        (active) => active.boot(request.input.udid),
+        (active) =>
+          active.boot(
+            request.input.udid,
+            request.input.threadId === undefined ? {} : { threadId: request.input.threadId },
+          ),
         "Failed to boot the simulator.",
       ).pipe(Effect.map((result) => ({ type: "boot" as const, result })));
     case "shutdown":
@@ -230,7 +234,7 @@ function handleLifecycle(
     case "detach":
       return invoke(
         manager,
-        (active) => active.detach(request.input.threadId),
+        (active) => active.detach(request.input.threadId, request.input.udid),
         "Failed to detach the simulator.",
       ).pipe(Effect.map((result) => ({ type: "detach" as const, result })));
   }

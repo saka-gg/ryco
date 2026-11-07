@@ -659,22 +659,7 @@ describe("DeviceManager idle release edge cases", () => {
   });
 });
 
-describe("DeviceManager idle release on a device switch", () => {
-  it("shuts the old device down at once although its frame socket is still open", async () => {
-    // The pane closes the old device's frame socket only after the attach
-    // resolves; counting that viewer would turn every switch into a grace.
-    const { backend, manager } = makeManager();
-    await manager.boot(DEVICE_A);
-    await manager.boot(DEVICE_B);
-    await manager.attach(THREAD_A, DEVICE_A);
-    const unsubscribe = manager.subscribeFrames(DEVICE_A, SINK);
-
-    await manager.attach(THREAD_A, DEVICE_B);
-
-    expect(shutdowns(backend)).toEqual([DEVICE_A]);
-    unsubscribe();
-  });
-
+describe("DeviceManager idle release with several devices per thread", () => {
   it("keeps the old device up while an agent call is still using it", async () => {
     const { backend, manager } = makeManager();
     await manager.boot(DEVICE_A);

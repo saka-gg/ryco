@@ -315,17 +315,52 @@ export const DeviceAttachPhase = Schema.Literals([
 ]);
 export type DeviceAttachPhase = typeof DeviceAttachPhase.Type;
 
+/** Most devices one thread may have attached (one per device tab). */
+export const DEVICE_THREAD_ATTACHMENT_LIMIT = 8;
+
+/**
+ * One device a thread has attached. A thread may watch several devices, each
+ * in its own tab; each attachment comes up, and fails, on its own.
+ */
+export const ThreadDeviceAttachment = Schema.Struct({
+  udid: DeviceUdid,
+  /** Who chose the device: a person's choice keeps a Ryco-owned device running. */
+  source: Schema.Literals(["user", "agent"]),
+  attachPhase: Schema.NullOr(DeviceAttachPhase),
+  lastError: Schema.NullOr(Schema.String.check(Schema.isMaxLength(DEVICE_MESSAGE_MAX_LENGTH))),
+});
+export type ThreadDeviceAttachment = typeof ThreadDeviceAttachment.Type;
+
 export const ThreadDeviceState = Schema.Struct({
   hosts: Schema.optional(Schema.Array(DeviceHostSummary).check(Schema.isMaxLength(17))),
   threadId: ThreadId,
   /** Monotonic per thread; lets the pane drop out-of-order pushes. */
   version: NonNegativeInt,
+  /**
+   * The thread's most recently attached device: what agents and Agent Control
+   * mean by "the attached device" when they name none. Always the last entry
+   * of `attachments`.
+   */
   attachedDeviceUdid: Schema.NullOr(DeviceUdid),
   /**
-   * Set while the attachment is still coming up, null once it is streaming or
-   * has failed. Non-null with `attachedDeviceUdid` already set is the normal
-   * case: the thread's intent is recorded first so the pane can name the device
-   * it is waiting on.
+   * Every device the thread has attached, oldest first. Optional so a server
+   * from before several devices per thread still validates; absent means
+   * `attachedDeviceUdid` is the only one.
+   */
+  attachments: Schema.optional(
+    Schema.Array(ThreadDeviceAttachment).check(Schema.isMaxLength(DEVICE_THREAD_ATTACHMENT_LIMIT)),
+  ),
+  /**
+   * Devices booting for this thread: started from its pane, by its agent, or
+   * attached to it. Lets every client of the thread say a device is starting,
+   * whoever started it. Absent when none is.
+   */
+  startingDeviceUdids: Schema.optional(Schema.Array(DeviceUdid).check(Schema.isMaxLength(16))),
+  /**
+   * The most recent attachment's phase: set while it is still coming up, null
+   * once it is streaming or has failed. Non-null with `attachedDeviceUdid`
+   * already set is the normal case: the thread's intent is recorded first so
+   * the pane can name the device it is waiting on.
    */
   attachPhase: Schema.optional(Schema.NullOr(DeviceAttachPhase)),
   /** Devices the pane may show: booted devices plus anything Ryco is booting. */
@@ -357,7 +392,11 @@ export const DeviceListResult = Schema.Struct({
 });
 export type DeviceListResult = typeof DeviceListResult.Type;
 
-export const DeviceBootInput = DeviceTargetInput;
+export const DeviceBootInput = Schema.Struct({
+  udid: DeviceUdid,
+  /** The thread the boot is for, so its panes on every client say the device is starting. */
+  threadId: Schema.optional(ThreadId),
+});
 export type DeviceBootInput = typeof DeviceBootInput.Type;
 
 /**
@@ -383,7 +422,11 @@ export const DeviceAttachInput = Schema.Struct({
 });
 export type DeviceAttachInput = typeof DeviceAttachInput.Type;
 
-export const DeviceDetachInput = Schema.Struct({ threadId: ThreadId });
+/** Without a udid, every device the thread has attached is detached. */
+export const DeviceDetachInput = Schema.Struct({
+  threadId: ThreadId,
+  udid: Schema.optional(DeviceUdid),
+});
 export type DeviceDetachInput = typeof DeviceDetachInput.Type;
 
 export const DeviceThreadInput = Schema.Struct({ threadId: ThreadId });

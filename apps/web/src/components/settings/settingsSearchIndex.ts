@@ -426,6 +426,14 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     keywords: "tabs tab strip header browser open chats threads",
   },
   {
+    section: "chat",
+    storage: "app",
+    title: "Float devices agents open",
+    description:
+      "Show a simulator an agent starts or opens in a small window over the chat. Off opens it as a tab in the workspace panel.",
+    keywords: "simulator emulator device floating mini player picture in picture agent auto show",
+  },
+  {
     section: "appearance",
     storage: "app",
     title: "Color mode",

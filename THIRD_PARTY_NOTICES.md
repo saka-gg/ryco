@@ -37,6 +37,15 @@ touches streamed as down, move and up while the pointer moves
 (`useDeviceKeyboardInput.ts`, `packages/shared/src/deviceLiveInput.ts`), and the decode-queue
 guard and stall watchdog in `apps/web/src/components/device/useDeviceVideoStream.ts`.
 
+The device workspace follows upstream at the same commit, under the same copyright and license:
+the floating window's store, layout and drag and resize model
+(`apps/web/src/previewMiniPlayerStore.ts`,
+`apps/web/src/components/preview/previewMiniPlayerLayout.ts` and `ThreadPreviewMiniPlayer.tsx`)
+in `apps/web/src/deviceWorkspace/workspaceMiniPlayerStore.ts`, `workspaceMiniPlayerLayout.ts` and
+`WorkspaceMiniPlayerFrame.tsx`; and the grouped Start/Open device list
+(`apps/web/src/components/device/DevicePanel.tsx`) in
+`apps/web/src/components/device/DevicePicker.tsx`.
+
 ### MIT License
 
 Copyright (c) 2026 T3 Tools Inc.
