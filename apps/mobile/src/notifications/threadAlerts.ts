@@ -72,24 +72,23 @@ let threadAlertCategories: Promise<void> | null = null;
  * across launches; the push extension sets the same identifiers on the alerts it opens.
  */
 function ensureThreadAlertCategories(): Promise<void> {
-  threadAlertCategories ??= Promise.all(
-    NOTIFICATION_CATEGORIES.map((category) =>
-      Notifications.setNotificationCategoryAsync(
+  threadAlertCategories ??= (async () => {
+    // One at a time: each call reads iOS's category set and writes it back with its own, so
+    // calls in parallel keep only the last one.
+    for (const category of NOTIFICATION_CATEGORIES) {
+      await Notifications.setNotificationCategoryAsync(
         category.identifier,
         category.actions.map((action) => ({
           ...action,
           options: { ...action.options },
           ...(action.textInput ? { textInput: { ...action.textInput } } : {}),
         })),
-      ),
-    ),
-  ).then(
-    () => undefined,
-    (error: unknown) => {
-      threadAlertCategories = null;
-      throw error;
-    },
-  );
+      );
+    }
+  })().catch((error: unknown) => {
+    threadAlertCategories = null;
+    throw error;
+  });
   return threadAlertCategories;
 }
 
