@@ -31,6 +31,7 @@ import {
   resumableCopyRecord,
   type CopyUserChoices,
 } from "@ryco/client-runtime/projectCopy/form";
+import { copyParentFolderOf } from "@ryco/client-runtime/projectCopy/destinationMemory";
 import { catalogPlatformOs } from "@ryco/client-runtime/state/nodes";
 import type { EnvironmentId, ProjectId } from "@ryco/contracts";
 import { displayProjectPath } from "@ryco/shared/projectPaths";
@@ -54,6 +55,7 @@ import {
   copyStartLabel,
 } from "./copyProjectScreenModel";
 import {
+  copyDestinationMemory,
   discardProjectCopy,
   readProjectCopyRecord,
   startManagedProjectCopy,
@@ -181,6 +183,8 @@ function CopyProjectForm(props: {
   const [resumeRecord] = useState(() =>
     props.resumeCopyId ? readProjectCopyRecord(props.resumeCopyId) : null,
   );
+  // Where this checkout was copied to last time (a small synchronous read).
+  const remembered = sourceRow ? copyDestinationMemory.read(sourceRow.ref) : null;
 
   useLayoutEffect(() => {
     navigation.setOptions({ title: `Copy ${title}` });
@@ -193,7 +197,11 @@ function CopyProjectForm(props: {
   const pickedCard = cards.find((card) => card.node.environmentId === pickedTargetId);
   const targetId = pickedCard?.selectable
     ? pickedCard.node.environmentId
-    : initialCopyTarget(cards, requestedCopyTarget(props.targetEnvironmentId, resumeRecord));
+    : initialCopyTarget(
+        cards,
+        requestedCopyTarget(props.targetEnvironmentId, resumeRecord),
+        remembered?.targetEnvironmentId ?? null,
+      );
   const targetNode = cards.find((card) => card.node.environmentId === targetId)?.node ?? null;
   const targetLabel = targetNode?.label ?? "the destination";
   const targetHold = useHeldNode(targetId);
@@ -205,7 +213,9 @@ function CopyProjectForm(props: {
     readonly path: string;
   } | null>(null);
   const [folderDraft, setFolderDraft] = useState<string | null>(null);
-  const manualPath = manualParent && manualParent.targetId === targetId ? manualParent.path : null;
+  // The parent picked last time on this destination, until the user picks one now.
+  const parentFolder = copyParentFolderOf({ targetId, picked: manualParent, remembered });
+  const manualPath = parentFolder.path;
   const destination = useCopyDestination({
     environmentId: targetId,
     supported: targetSupport === "yes",
@@ -338,6 +348,12 @@ function CopyProjectForm(props: {
     }).then(
       (copy) => {
         if (resumeRecord !== null && resume === null) discardProjectCopy(resumeRecord.copyId);
+        if (sourceRow) {
+          copyDestinationMemory.remember(sourceRow.ref, {
+            targetEnvironmentId: targetId,
+            parentPath: manualPath,
+          });
+        }
         props.onStarted({
           copyId: copy.copyId,
           title,
@@ -376,6 +392,7 @@ function CopyProjectForm(props: {
   const note = copyFolderNote({
     suggestion,
     manual: manualPath !== null,
+    remembered: parentFolder.remembered,
     sourceLabel,
     targetLabel,
     targetHome: destination.hints?.homeDirectory ?? null,

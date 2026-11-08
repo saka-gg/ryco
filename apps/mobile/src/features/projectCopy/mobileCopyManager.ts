@@ -8,6 +8,12 @@ import {
 } from "@ryco/client-runtime/projectCopy/manager";
 import type { ProjectCopyView } from "@ryco/client-runtime/projectCopy/progressView";
 import type { ProjectCopyJobRecord } from "@ryco/client-runtime/projectCopy";
+import {
+  COPY_DESTINATIONS_STORAGE_KEY,
+  createCopyDestinationMemory,
+  RememberedCopyDestinations,
+} from "@ryco/client-runtime/projectCopy/destinationMemory";
+import * as Schema from "effect/Schema";
 import Storage from "expo-sqlite/kv-store";
 import { useSyncExternalStore } from "react";
 import { useStore as useZustandStore } from "zustand";
@@ -38,6 +44,25 @@ function readJson(key: string): unknown {
 function writeJson(key: string, value: unknown): void {
   Storage.setItemSync(key, JSON.stringify(value));
 }
+
+/**
+ * Where each checkout was last copied to (the destination and a parent folder
+ * the user picked), so the copy screen preselects it and a stopped copy
+ * resumes into the same folder.
+ */
+export const copyDestinationMemory = createCopyDestinationMemory({
+  read: () => {
+    const raw = Storage.getItemSync(COPY_DESTINATIONS_STORAGE_KEY);
+    return raw === null
+      ? null
+      : Schema.decodeSync(Schema.fromJsonString(RememberedCopyDestinations))(raw);
+  },
+  write: (entries) =>
+    Storage.setItemSync(
+      COPY_DESTINATIONS_STORAGE_KEY,
+      Schema.encodeSync(Schema.fromJsonString(RememberedCopyDestinations))(entries),
+    ),
+});
 
 /** The copy that tells the user how it goes outside the copy screen, with what tapping it does. */
 export interface ProjectCopyNotice {

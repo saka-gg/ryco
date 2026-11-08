@@ -113,6 +113,7 @@ import {
   requestedCopyTarget,
   resumableCopyRecord,
 } from "@ryco/client-runtime/projectCopy/form";
+import { copyParentFolderOf } from "@ryco/client-runtime/projectCopy/destinationMemory";
 import {
   DEFAULT_COPY_USER_CHOICES,
   planCopyOptions,
@@ -522,10 +523,8 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
   } | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   // The parent picked last time on this destination, until the user picks one now.
-  const rememberedParent =
-    remembered?.targetEnvironmentId === targetId ? remembered.parentPath : null;
-  const manualPath =
-    manualParent && manualParent.targetId === targetId ? manualParent.path : rememberedParent;
+  const parentFolder = copyParentFolderOf({ targetId, picked: manualParent, remembered });
+  const manualPath = parentFolder.path;
   const destination = useCopyDestination({
     environmentId: targetId,
     supported: targetSupport === "yes",
@@ -828,7 +827,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
   const note = copyFolderNote({
     suggestion: checking ? null : suggestion,
     manual: manualPath !== null,
-    remembered: manualPath !== null && manualPath === rememberedParent,
+    remembered: parentFolder.remembered,
     sourceLabel,
     targetLabel,
     targetHome: destination.hints?.homeDirectory ?? null,

@@ -492,6 +492,10 @@
       "types": "./src/projectCopy/nodeIo.ts",
       "import": "./src/projectCopy/nodeIo.ts"
     },
+    "./projectCopy/destinationMemory": {
+      "types": "./src/projectCopy/destinationMemory.ts",
+      "import": "./src/projectCopy/destinationMemory.ts"
+    },
     "./projectCopy/form": {
       "types": "./src/projectCopy/form.ts",
       "import": "./src/projectCopy/form.ts"
