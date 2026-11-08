@@ -22,6 +22,13 @@ import {
   useProjectCopyEntry,
 } from "./mobileCopyManager";
 
+/** The sheet's title verb: a clone or link the add-project sheet started reads as such. */
+function progressTitleVerb(action: "copy" | "clone" | "link"): string {
+  if (action === "clone") return "Clone";
+  if (action === "link") return "Link";
+  return "Copy";
+}
+
 /** A copy the form started, with what its progress list needs to word its steps. */
 export interface StartedCopy {
   readonly copyId: string;
@@ -78,9 +85,10 @@ export function CopyProgressView(props: {
   const title = props.started?.title ?? entry?.title ?? "Project";
   const targetLabel = props.started?.targetLabel ?? entry?.targetLabel ?? "the destination";
 
+  const verb = progressTitleVerb(entry?.action ?? "copy");
   useLayoutEffect(() => {
-    navigation.setOptions({ title: `Copy ${title}` });
-  }, [navigation, title]);
+    navigation.setOptions({ title: `${verb} ${title}` });
+  }, [navigation, title, verb]);
 
   // Closing (swipe or the close button) hands the copy to the notice.
   useLayoutEffect(
