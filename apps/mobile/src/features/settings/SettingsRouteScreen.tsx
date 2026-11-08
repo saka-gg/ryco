@@ -3,42 +3,36 @@ import {
   SETTINGS_GROUP_TITLES,
   SETTINGS_SECTION_TITLES,
 } from "@ryco/client-runtime/state/settings/settingsSections";
-import { useLayoutEffect } from "react";
 import { ScrollView } from "react-native";
 
-import { NavigationHeaderButton } from "../../components/NavigationHeaderButton";
 import { useHostedHubStore } from "../../hostedHub/state";
+import { MAIN_TABS } from "../../navigation/tabs/mainTabsModel";
+import { openMainTab } from "../../navigation/tabs/openMainTab";
+import {
+  TabLargeTitle,
+  useLargeTitleCollapse,
+  useTabStackHeader,
+} from "../../navigation/tabs/TabScreenChrome";
 import { exactNodeRouteParams } from "../e2ee/exactNodeRouteModel";
 import { SettingsRow } from "./components/SettingsRow";
 import { SettingsSection } from "./components/SettingsSection";
-import { openMachinesFromSettings } from "./openMachinesFromSettings";
 
-export function SettingsRouteScreen() {
+/** The Settings tab: the list of settings pages, each pushed above the tabs. */
+export function SettingsTabScreen() {
   const navigation = useNavigation();
   const selectedNode = useHostedHubStore((state) => state.selectedNode);
-
-  useLayoutEffect(() => {
-    navigation.setOptions({
-      headerLeft: () => (
-        <NavigationHeaderButton
-          action="close"
-          accessibilityLabel="Close Settings"
-          onPress={() => {
-            const parent = navigation.getParent();
-            if (parent?.canGoBack()) parent.goBack();
-            else parent?.dispatch(StackActions.replace("Home"));
-          }}
-        />
-      ),
-    });
-  }, [navigation]);
+  const { collapsed, onScroll } = useLargeTitleCollapse();
+  useTabStackHeader({ title: collapsed ? MAIN_TABS.Settings.title : "" });
 
   return (
     <ScrollView
       contentInsetAdjustmentBehavior="automatic"
       className="flex-1 bg-screen"
       contentContainerStyle={{ paddingTop: 4, paddingBottom: 40 }}
+      onScroll={onScroll}
+      scrollEventThrottle={16}
     >
+      <TabLargeTitle title={MAIN_TABS.Settings.title} />
       {/* Grouped and named as the web's settings (`settingsSections`) where a screen matches. */}
       <SettingsSection title={SETTINGS_GROUP_TITLES.you}>
         <SettingsRow
@@ -79,8 +73,8 @@ export function SettingsRouteScreen() {
         <SettingsRow
           first
           label={SETTINGS_SECTION_TITLES.usage}
-          value="Usage, activity, limits"
-          onPress={() => navigation.navigate("SettingsStatistics" as never)}
+          value="In the Usage tab"
+          onPress={() => openMainTab(navigation, "Usage")}
         />
         <SettingsRow
           label="Provider accounts"
@@ -100,7 +94,7 @@ export function SettingsRouteScreen() {
               );
               return;
             }
-            openMachinesFromSettings(navigation);
+            navigation.navigate("Connections");
           }}
         />
       </SettingsSection>

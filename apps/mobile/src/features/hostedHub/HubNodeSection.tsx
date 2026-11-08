@@ -576,10 +576,7 @@ export function HubNodeSection(props: { readonly query?: string } = {}) {
           nodeId: node.id,
           acquireNode: acquireMobileHostedNode,
           openSecurity: () =>
-            navigation.navigate("SettingsSheet", {
-              screen: "SettingsNodeSecurity",
-              params: exactNodeRouteParams(node),
-            }),
+            navigation.navigate("SettingsNodeSecurity", exactNodeRouteParams(node)),
         }),
     },
     // Sign-in uses the same full-screen native identity surface as the root gate.

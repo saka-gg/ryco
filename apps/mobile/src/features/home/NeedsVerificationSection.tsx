@@ -34,11 +34,7 @@ export function NeedsVerificationSection() {
             void acquireBeforeNodeSecurity({
               nodeId: row.nodeId,
               acquireNode: acquireMobileHostedNode,
-              openSecurity: () =>
-                navigation.navigate("SettingsSheet", {
-                  screen: "SettingsNodeSecurity",
-                  params: row.route,
-                }),
+              openSecurity: () => navigation.navigate("SettingsNodeSecurity", row.route),
             });
           }}
           className={`min-h-14 flex-row items-center gap-3 px-4 py-3 active:opacity-70 ${index > 0 ? "border-t border-warning-border" : ""}`}

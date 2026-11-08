@@ -13,7 +13,6 @@ import { ScrollView } from "react-native";
 import { SettingsRow } from "./components/SettingsRow";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
-import { openMachinesFromSettings } from "./openMachinesFromSettings";
 
 export function SettingsWorkspaceRouteScreen() {
   const navigation = useNavigation();
@@ -31,7 +30,7 @@ export function SettingsWorkspaceRouteScreen() {
           first
           label="Preferred machine"
           value="Last ready"
-          onPress={() => openMachinesFromSettings(navigation)}
+          onPress={() => navigation.navigate("Connections")}
         />
         <SettingsRow label="Project and worktree" value="Current context" />
       </SettingsSection>

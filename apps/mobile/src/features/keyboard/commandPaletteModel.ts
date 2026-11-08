@@ -20,7 +20,7 @@ import type { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";
 import { excludeChatProjects } from "@ryco/shared/projectKind";
 
 import type { AppSymbolName } from "../../components/AppSymbol";
-import type { MVP_SETTINGS_SHEET_ROUTES } from "../../navigation/mvpRouteConfig";
+import type { MvpSettingsRouteName } from "../../navigation/mvpRouteConfig";
 import { threadJumpIndex, type HardwareKeyboardCommand } from "./hardwareKeyboardCommands";
 
 /** A thread screen's own tools, offered while the open thread has them. */
@@ -29,17 +29,21 @@ export type CommandPaletteThreadCommand = Extract<
   "files" | "terminal" | "review"
 >;
 
-/** The settings screens the palette opens directly; none of them takes params. */
-export type CommandPaletteSettingsScreen = Extract<
-  keyof typeof MVP_SETTINGS_SHEET_ROUTES,
+/**
+ * The settings screens the palette opens directly; none of them takes params.
+ * `Settings` and `Usage` are tabs, the others pages of the Settings tab.
+ */
+export type CommandPaletteSettingsScreen =
   | "Settings"
-  | "SettingsAppearance"
-  | "SettingsWorkspace"
-  | "SettingsProviderAccounts"
-  | "SettingsInbox"
-  | "SettingsNotifications"
-  | "SettingsStatistics"
->;
+  | "Usage"
+  | Extract<
+      MvpSettingsRouteName,
+      | "SettingsAppearance"
+      | "SettingsWorkspace"
+      | "SettingsProviderAccounts"
+      | "SettingsInbox"
+      | "SettingsNotifications"
+    >;
 
 /** What choosing an item does; the palette screen maps each to navigation. */
 export type CommandPaletteIntent =
@@ -122,7 +126,7 @@ const SETTINGS_ACTIONS: ReadonlyArray<{
     searchTerms: ["alerts", "notifications", "live activity", "approval"],
   },
   {
-    screen: "SettingsStatistics",
+    screen: "Usage",
     title: SETTINGS_SECTION_TITLES.usage,
     icon: "chart.bar.xaxis",
     searchTerms: ["statistics", "usage", "limits", "cost"],

@@ -11,11 +11,13 @@ import {
   statisticsTabParam,
 } from "../features/settings/statistics/statisticsRoute";
 import {
+  MVP_ALL_ROOT_ROUTES,
   MVP_ROOT_ROUTES,
-  MVP_SETTINGS_SHEET_ROUTES,
+  MVP_SETTINGS_ROUTES,
   WORKSPACE_OVERLAY_ROUTE_NAMES,
-  type MvpRootRouteName,
+  type MvpAnyRootRouteName,
 } from "./mvpRouteConfig";
+import { MAIN_TAB_NAMES, MAIN_TABS, rewriteLegacyTabPath } from "./tabs/mainTabsModel";
 
 interface ParsedRoute {
   readonly name: string;
@@ -23,7 +25,7 @@ interface ParsedRoute {
   readonly state?: { readonly routes: readonly ParsedRoute[] };
 }
 
-/** React Navigation's own link parser, as the app's linking config runs it. */
+/** React Navigation's own link parser, over the app's linking tree (tabs nested in Home). */
 function parseLink(path: string): ParsedRoute | undefined {
   const mobileRequire = createRequire(new URL("../../package.json", import.meta.url));
   const nativeRequire = createRequire(mobileRequire.resolve("@react-navigation/native"));
@@ -33,13 +35,13 @@ function parseLink(path: string): ParsedRoute | undefined {
       config: unknown,
     ): { readonly routes: readonly ParsedRoute[] } | undefined;
   };
-  const screens = Object.fromEntries(
-    Object.entries(MVP_SETTINGS_SHEET_ROUTES).map(([name, route]) => [name, route.linking]),
+  const tabs = Object.fromEntries(MAIN_TAB_NAMES.map((name) => [name, MAIN_TABS[name].linking]));
+  const screens: Record<string, unknown> = Object.fromEntries(
+    Object.entries(MVP_ALL_ROOT_ROUTES).map(([name, route]) => [name, route.linking]),
   );
-  const state = getStateFromPath(path, {
-    screens: { SettingsSheet: { path: MVP_ROOT_ROUTES.SettingsSheet.linking, screens } },
-  });
-  return state?.routes[0]?.state?.routes[0];
+  screens.Home = { path: MVP_ROOT_ROUTES.Home.linking, screens: tabs };
+  const state = getStateFromPath(rewriteLegacyTabPath(path), { screens });
+  return state?.routes.at(-1);
 }
 
 describe("MVP route config", () => {
@@ -58,7 +60,7 @@ describe("MVP route config", () => {
         "ProjectPullRequestFile",
         "ProjectPullRequests",
         "ProjectSourceControl",
-        "SettingsSheet",
+        "Search",
         "Thread",
         "ThreadFile",
         "ThreadFiles",
@@ -113,7 +115,7 @@ describe("MVP route config", () => {
     );
     expect(MVP_ROOT_ROUTES.Connections.linking).toBe("connections");
     expect(MVP_ROOT_ROUTES.ConnectionsNew.linking).toBe("connections/new");
-    expect(MVP_ROOT_ROUTES.SettingsSheet.linking).toBe("settings");
+    expect(MVP_ROOT_ROUTES.Search.linking).toBe("search");
     expect(MVP_ROOT_ROUTES.Access.linking).toBe("account/access");
     // NotFound is the sanctioned deep-link catch-all.
     expect(MVP_ROOT_ROUTES.NotFound.linking).toBe("*");
@@ -123,7 +125,7 @@ describe("MVP route config", () => {
     // A flat Thread route is required for the iOS-26 shared-header morph; the
     // nested settings routes are the only nested tree.
     expect("Thread" in MVP_ROOT_ROUTES).toBe(true);
-    expect("Thread" in MVP_SETTINGS_SHEET_ROUTES).toBe(false);
+    expect("Thread" in MVP_SETTINGS_ROUTES).toBe(false);
   });
 
   it("presents New Task as an expandable iOS sheet with an explicit close action", () => {
@@ -147,7 +149,7 @@ describe("MVP route config", () => {
   });
 
   it("marks every sheet/overlay route so it is excluded from the workspace pathname", () => {
-    const overlays = new Set<MvpRootRouteName>(WORKSPACE_OVERLAY_ROUTE_NAMES);
+    const overlays = new Set<MvpAnyRootRouteName>(WORKSPACE_OVERLAY_ROUTE_NAMES);
     // Sheets over the workspace.
     for (const overlay of [
       "Connections",
@@ -155,7 +157,6 @@ describe("MVP route config", () => {
       "AddProject",
       "ThreadReviewComment",
       "NewTask",
-      "SettingsSheet",
       "ThreadDevice",
     ] as const) {
       expect(overlays.has(overlay)).toBe(true);
@@ -171,22 +172,46 @@ describe("MVP route config", () => {
       "ThreadFiles",
       "ThreadFile",
       "ThreadTerminal",
+      "Search",
+      "SettingsHub",
+      "SettingsNodeSecurity",
       "NotFound",
     ] as const) {
       expect(overlays.has(workspace)).toBe(false);
     }
   });
 
-  it("presents Settings as a compact expandable iOS sheet", () => {
-    expect(MVP_ROOT_ROUTES.SettingsSheet.overlay).toBe(true);
-    expect(MVP_ROOT_ROUTES.SettingsSheet.ios).toEqual({
-      presentation: "formSheet",
-      sheetAllowedDetents: [0.78, 0.94],
-      sheetGrabberVisible: true,
+  it("lists the main tabs in the decided order, with links and icons", () => {
+    expect(MAIN_TAB_NAMES).toEqual(["Chats", "Tasks", "PullRequests", "Usage", "Settings"]);
+    expect(MAIN_TAB_NAMES.map((name) => MAIN_TABS[name].linking)).toEqual([
+      "",
+      "tasks",
+      "pull-requests",
+      "usage",
+      "settings",
+    ]);
+    for (const name of MAIN_TAB_NAMES) {
+      expect(MAIN_TABS[name].sfSymbol, name).not.toBe("");
+      expect(MAIN_TABS[name].label, name).not.toBe("");
+    }
+  });
+
+  it("opens each tab from its link, and the root at Chats", () => {
+    for (const name of MAIN_TAB_NAMES) {
+      const route = parseLink(MAIN_TABS[name].linking);
+      expect(route?.name, name).toBe("Home");
+      expect(route?.state?.routes[0]?.name, name).toBe(name);
+    }
+    // "tasks/new" stays New Task, beside the Tasks tab's "tasks".
+    expect(parseLink("tasks/new")?.name).toBe("NewTask");
+  });
+
+  it("opens Settings pages as pushes above the tabs, at their old links", () => {
+    expect(parseLink("settings/hub")?.name).toBe("SettingsHub");
+    expect(parseLink("settings/node-security/env/node")).toMatchObject({
+      name: "SettingsNodeSecurity",
+      params: { environmentId: "env", nodeId: "node" },
     });
-    // Android keeps the card: a nested stack inside an Android form sheet is
-    // unverified and there is no Android QA yet.
-    expect(MVP_ROOT_ROUTES.SettingsSheet.android.presentation).toBe("card");
   });
 
   it("presents Add Project as a workspace overlay and Project as a push", () => {
@@ -200,10 +225,9 @@ describe("MVP route config", () => {
     expect(MVP_ROOT_ROUTES.ConnectionsNew.android.presentation).toBe("card");
   });
 
-  it("nests the MVP settings sub-routes with their linking paths", () => {
-    expect(Object.keys(MVP_SETTINGS_SHEET_ROUTES).toSorted()).toEqual(
+  it("lists the Settings tab's pages with their linking paths", () => {
+    expect(Object.keys(MVP_SETTINGS_ROUTES).toSorted()).toEqual(
       [
-        "Settings",
         "SettingsAccount",
         "SettingsAbout",
         "SettingsArchived",
@@ -214,67 +238,60 @@ describe("MVP route config", () => {
         "SettingsInbox",
         "SettingsNotifications",
         "SettingsProviderAccounts",
-        "SettingsStatistics",
         "SettingsNodeSecurity",
         "SettingsNodeVerification",
         "SettingsWorkspace",
       ].toSorted(),
     );
-    expect(MVP_SETTINGS_SHEET_ROUTES.SettingsHub.linking).toBe("hub");
-    expect(MVP_SETTINGS_SHEET_ROUTES.SettingsWorkspace.linking).toBe("workspace");
-    expect(MVP_SETTINGS_SHEET_ROUTES.SettingsInbox.linking).toBe("inbox");
-    expect(MVP_SETTINGS_SHEET_ROUTES.SettingsArchived.linking).toBe("archived");
-    expect(MVP_SETTINGS_SHEET_ROUTES.SettingsNotifications.linking).toBe("notifications");
-    expect(MVP_SETTINGS_SHEET_ROUTES.SettingsAppearance.linking).toBe("appearance");
-    expect(MVP_SETTINGS_SHEET_ROUTES.SettingsProviderAccounts.linking).toBe("provider-accounts");
-    expect(MVP_SETTINGS_SHEET_ROUTES.SettingsDiagnostics.linking).toBe("diagnostics");
-    // The hosted Hub account is the ONLY route the hosted plane adds, and it is
-    // nested: the root route set above is unchanged by hosted mode.
-    expect(MVP_SETTINGS_SHEET_ROUTES.SettingsAccount.linking).toBe("account");
-    expect("HostedSignIn" in MVP_ROOT_ROUTES).toBe(false);
-    expect("SettingsAccount" in MVP_ROOT_ROUTES).toBe(false);
+    expect(MVP_SETTINGS_ROUTES.SettingsHub.linking).toBe("settings/hub");
+    expect(MVP_SETTINGS_ROUTES.SettingsWorkspace.linking).toBe("settings/workspace");
+    expect(MVP_SETTINGS_ROUTES.SettingsInbox.linking).toBe("settings/inbox");
+    expect(MVP_SETTINGS_ROUTES.SettingsArchived.linking).toBe("settings/archived");
+    expect(MVP_SETTINGS_ROUTES.SettingsNotifications.linking).toBe("settings/notifications");
+    expect(MVP_SETTINGS_ROUTES.SettingsAppearance.linking).toBe("settings/appearance");
+    expect(MVP_SETTINGS_ROUTES.SettingsProviderAccounts.linking).toBe("settings/provider-accounts");
+    expect(MVP_SETTINGS_ROUTES.SettingsDiagnostics.linking).toBe("settings/diagnostics");
+    expect(MVP_SETTINGS_ROUTES.SettingsAccount.linking).toBe("settings/account");
+    expect("HostedSignIn" in MVP_ALL_ROOT_ROUTES).toBe(false);
   });
 
-  it("nests the relay-E2EE trust routes and gives each an explicit presentation", () => {
+  it("pushes the relay-E2EE trust routes on both platforms", () => {
     // docs/relay-e2ee-protocol.md §13.1.1 / §13.2: the security surface and the
-    // ceremony. Both are NESTED, so the root route set is unchanged by E2EE, and
-    // both are pushes on both platforms — §13.1.1 forbids an indication that
-    // "dismisses into a verified-looking state", and a swipe-away sheet is the
-    // closest thing this navigator has to one.
-    expect(MVP_SETTINGS_SHEET_ROUTES.SettingsNodeSecurity.linking).toBe(
-      "node-security/:environmentId/:nodeId",
+    // ceremony are pushes — §13.1.1 forbids an indication that "dismisses into
+    // a verified-looking state", and a swipe-away sheet is the closest thing
+    // this navigator has to one.
+    expect(MVP_SETTINGS_ROUTES.SettingsNodeSecurity.linking).toBe(
+      "settings/node-security/:environmentId/:nodeId",
     );
-    expect(MVP_SETTINGS_SHEET_ROUTES.SettingsNodeVerification.linking).toBe(
-      "node-verification/:environmentId/:nodeId",
+    expect(MVP_SETTINGS_ROUTES.SettingsNodeVerification.linking).toBe(
+      "settings/node-verification/:environmentId/:nodeId",
     );
-    expect("SettingsNodeSecurity" in MVP_ROOT_ROUTES).toBe(false);
-    expect("SettingsNodeVerification" in MVP_ROOT_ROUTES).toBe(false);
     for (const name of ["SettingsNodeSecurity", "SettingsNodeVerification"] as const) {
-      expect(MVP_SETTINGS_SHEET_ROUTES[name].ios.presentation).toBe("card");
-      expect(MVP_SETTINGS_SHEET_ROUTES[name].android.presentation).toBe("card");
+      expect(MVP_SETTINGS_ROUTES[name].ios.presentation).toBe("card");
+      expect(MVP_SETTINGS_ROUTES[name].android.presentation).toBe("card");
+      expect(MVP_SETTINGS_ROUTES[name].overlay).toBe(false);
     }
   });
 
-  it("opens Statistics on the tab a link names, such as a Limits widget's tap", () => {
-    expect(statisticsLinkPath("limits")).toBe("settings/statistics?tab=limits");
+  it("opens Usage on the view a link names, such as a Limits widget's tap", () => {
+    expect(statisticsLinkPath("limits")).toBe("usage?tab=limits");
     const route = parseLink(statisticsLinkPath("limits"));
-    expect(route).toMatchObject({ name: "SettingsStatistics", params: { tab: "limits" } });
-    expect(statisticsTabParam(route?.params?.tab as string | undefined)).toBe("limits");
+    expect(route?.state?.routes[0]).toMatchObject({ name: "Usage", params: { tab: "limits" } });
+    // A widget an earlier build wrote still opens the same view.
+    const legacy = parseLink("settings/statistics?tab=limits");
+    expect(legacy?.state?.routes[0]).toMatchObject({ name: "Usage", params: { tab: "limits" } });
+    expect(rewriteLegacyTabPath("/settings/statistics")).toBe("/usage");
+    expect(rewriteLegacyTabPath("settings/hub")).toBe("settings/hub");
     expect(statisticsTabParam(["activity", "usage"])).toBe("activity");
     // An unknown or missing tab leaves the screen on its default.
     expect(statisticsTabParam("billing")).toBeNull();
     expect(statisticsTabParam(undefined)).toBeNull();
   });
 
-  it("gives every nested settings route both platform decisions", () => {
-    for (const [name, descriptor] of Object.entries(MVP_SETTINGS_SHEET_ROUTES)) {
-      expect(descriptor.ios.presentation, `ios presentation for ${name}`).toBeDefined();
-      expect(descriptor.android.presentation, `android presentation for ${name}`).toBeDefined();
-    }
-  });
-
   it("gives every visible native header an explicit navigation action", () => {
-    for (const [name, descriptor] of Object.entries(MVP_ROOT_ROUTES)) {
+    for (const [name, descriptor] of Object.entries(MVP_ALL_ROOT_ROUTES) as ReadonlyArray<
+      [string, { readonly headerPreset: string; readonly headerAction: string }]
+    >) {
       if (descriptor.headerPreset === "none" || name === "Home") {
         expect(descriptor.headerAction, name).toBe("none");
       } else {
@@ -284,14 +301,13 @@ describe("MVP route config", () => {
 
     expect(MVP_ROOT_ROUTES.AddProject.headerAction).toBe("close");
     expect(MVP_ROOT_ROUTES.ConnectionsNew.headerAction).toBe("back");
-    expect(MVP_SETTINGS_SHEET_ROUTES.Settings.headerAction).toBe("none");
-    for (const [name, descriptor] of Object.entries(MVP_SETTINGS_SHEET_ROUTES)) {
-      if (name !== "Settings") expect(descriptor.headerAction, name).toBe("back");
+    for (const [name, descriptor] of Object.entries(MVP_SETTINGS_ROUTES)) {
+      expect(descriptor.headerAction, name).toBe("back");
     }
   });
 
-  it("keeps every nested settings linking path distinct", () => {
-    const paths = Object.values(MVP_SETTINGS_SHEET_ROUTES).map((route) => route.linking);
+  it("keeps every root linking path distinct", () => {
+    const paths = Object.values(MVP_ALL_ROOT_ROUTES).map((route) => route.linking);
     expect(new Set(paths).size).toBe(paths.length);
   });
 });
@@ -306,37 +322,35 @@ describe("MVP route config", () => {
  * calls mean the type checker does not close the gap either, so it is closed
  * here, over the source.
  */
-describe("the settings navigator matches the settings route table", () => {
+describe("the root navigator matches the route table", () => {
   const SRC = join(import.meta.dirname, "..");
   const stack = readFileSync(join(SRC, "Stack.tsx"), "utf8");
 
-  function registeredSettingsScreens(): readonly string[] {
+  function registeredRootScreens(): readonly string[] {
     const block = stack.slice(
-      stack.indexOf("const SettingsSheetStack = createNativeStackNavigator({"),
-      stack.indexOf("export const WORKSPACE_OVERLAY_ROUTES"),
+      stack.indexOf("export const ROOT_STACK_SCREENS = {"),
+      stack.indexOf("export const RootStack = createNativeStackNavigator({"),
     );
-    return [...block.matchAll(/^ {4}(\w+): createNativeStackScreen\(\{$/gmu)].map(
+    return [...block.matchAll(/^ {2}(\w+): createNativeStackScreen\(\{$/gmu)].map(
       (match) => match[1]!,
     );
   }
 
   it("registers exactly the routes the table declares", () => {
-    expect(registeredSettingsScreens().toSorted()).toEqual(
-      Object.keys(MVP_SETTINGS_SHEET_ROUTES).toSorted(),
-    );
+    expect(registeredRootScreens().toSorted()).toEqual(Object.keys(MVP_ALL_ROOT_ROUTES).toSorted());
   });
 
   it("applies each descriptor's platform presentation rather than a hand-written option", () => {
     // Otherwise the `ios`/`android` fields are a constant the tests above assert
     // about and the navigator ignores, and §13.1.1's "no sheet that dismisses
     // into a verified-looking state" holds only by accident.
-    for (const name of Object.keys(MVP_SETTINGS_SHEET_ROUTES)) {
-      expect(stack, name).toContain(`settingsRouteOptions("${name}",`);
-      expect(stack, name).toContain(`MVP_SETTINGS_SHEET_ROUTES.${name}.linking`);
+    for (const name of Object.keys(MVP_SETTINGS_ROUTES)) {
+      expect(stack, name).toContain(`routeOptions("${name}",`);
+      expect(stack, name).toContain(`MVP_SETTINGS_ROUTES.${name}.linking`);
     }
   });
 
-  it("reaches the §13.1.1 security surface from the settings screen", () => {
+  it("reaches the §13.1.1 security surface from the Settings tab", () => {
     const settings = readFileSync(
       join(SRC, "features", "settings", "SettingsRouteScreen.tsx"),
       "utf8",
@@ -359,10 +373,7 @@ describe("the settings navigator matches the settings route table", () => {
         "features/review/ReviewCommentComposerSheet.tsx",
         'accessibilityLabel="Cancel review comment"',
       ],
-      SettingsSheet: [
-        "features/settings/SettingsRouteScreen.tsx",
-        'accessibilityLabel="Close Settings"',
-      ],
+      Search: ["features/search/GlobalSearchRouteScreen.tsx", ">Cancel</Text>"],
     } as const;
 
     for (const [name, [path, marker]] of Object.entries(dismissalControls)) {

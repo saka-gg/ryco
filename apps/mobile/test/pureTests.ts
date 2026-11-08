@@ -36,7 +36,6 @@ export const MOBILE_PURE_TEST_FILES = [
   "src/features/files/threadFilesModel.test.ts",
   "src/features/home/homeChromeModel.test.ts",
   "src/features/home/homeEnvironmentModel.test.ts",
-  "src/features/home/homeMode.test.ts",
   "src/features/home/homeScrollMemory.test.ts",
   "src/features/home/nativeNodeEligibilityModel.test.ts",
   "src/features/home/nativeWorkspaceCatalogModel.test.ts",

@@ -26,7 +26,6 @@ import { useResolveClassNames } from "uniwind";
 import { AppText as Text } from "./components/AppText";
 import { NavigationHeaderButton } from "./components/NavigationHeaderButton";
 import { HardwareKeyboardCommandProvider } from "./features/keyboard/HardwareKeyboardCommandProvider";
-import { HomeRouteScreen } from "./features/home/HomeRouteScreen";
 import { ThreadWorkspaceLayout } from "./features/workspace/ThreadWorkspaceLayout";
 import {
   AddProjectRouteScreen,
@@ -51,8 +50,7 @@ import {
   SettingsInboxRouteScreen,
   SettingsNotificationsRouteScreen,
   SettingsProviderAccountsRouteScreen,
-  SettingsRouteScreen,
-  SettingsStatisticsRouteScreen,
+  GlobalSearchRouteScreen,
   ArchivedThreadsRouteScreen,
   SettingsWorkspaceRouteScreen,
   SourceControlRouteScreen,
@@ -63,13 +61,15 @@ import {
   ThreadDeviceRouteScreen,
 } from "./navigation/lazyRouteScreens";
 import {
+  MVP_ALL_ROOT_ROUTES,
   MVP_ROOT_ROUTES,
-  MVP_SETTINGS_SHEET_ROUTES,
+  MVP_SETTINGS_ROUTES,
   WORKSPACE_OVERLAY_ROUTE_NAMES,
   type HeaderPreset,
+  type MvpAnyRootRouteName,
   type MvpRouteDescriptor,
-  type MvpSettingsRouteDescriptor,
 } from "./navigation/mvpRouteConfig";
+import { MainTabs } from "./navigation/tabs/MainTabs";
 import { NATIVE_LIQUID_GLASS_SUPPORTED } from "./native/native-glass";
 import { nativeHeaderScrollEdgeEffects } from "./native/StackHeader";
 import { useThreadOutboxDrain } from "./state/use-thread-outbox-drain";
@@ -129,145 +129,6 @@ const SHEET_SOLID_HEADER_OPTIONS: AppScreenOptions = {
   unstable_navigationItemStyle: undefined,
 };
 
-/**
- * Map a nested settings descriptor to the active platform's native-stack
- * options, exactly as `platformPresentationOptions` does for the root routes.
- *
- * It exists because the descriptors did not reach the navigator: every screen
- * below hand-wrote its `options`, so `MVP_SETTINGS_SHEET_ROUTES`'s per-platform
- * presentation was a constant two tests asserted about and nothing consumed.
- * `docs/relay-e2ee-protocol.md` §13.1.1 forbids an indication that "dismisses
- * into a verified-looking state", and a swipe-away sheet is the nearest thing
- * this navigator has to one — a property worth more than the fact that nobody
- * has set a presentation yet.
- */
-function settingsRouteOptions(
-  name: keyof typeof MVP_SETTINGS_SHEET_ROUTES,
-  title: string,
-): AppScreenOptions {
-  // Widened to the declared descriptor: the table is `as const`, so the literal
-  // type of a route that is a plain push carries no sheet fields at all and the
-  // shape below would stop compiling the moment one of them is set.
-  const descriptor: MvpSettingsRouteDescriptor = MVP_SETTINGS_SHEET_ROUTES[name];
-  const platform = Platform.OS === "android" ? descriptor.android : descriptor.ios;
-  const options: AppScreenOptions = { title };
-  if (platform.presentation !== "card") options.presentation = platform.presentation;
-  if (platform.sheetAllowedDetents) options.sheetAllowedDetents = [...platform.sheetAllowedDetents];
-  if (platform.sheetGrabberVisible !== undefined) {
-    options.sheetGrabberVisible = platform.sheetGrabberVisible;
-  }
-  if (platform.headerShown !== undefined) options.headerShown = platform.headerShown;
-  return options;
-}
-
-// Expandable Settings sheet stack. Routine node switching and pairing live in the
-// Nodes Home mode; Settings owns account, defaults, appearance, storage, and
-// About without duplicating the connection browser.
-const SettingsSheetStack = createNativeStackNavigator({
-  initialRouteName: "Settings",
-  screenOptions: ({ navigation, route }) => ({
-    ...SHEET_SOLID_HEADER_OPTIONS,
-    unstable_navigationItemStyle: undefined,
-    headerLeft:
-      MVP_SETTINGS_SHEET_ROUTES[route.name as keyof typeof MVP_SETTINGS_SHEET_ROUTES]
-        ?.headerAction === "back"
-        ? () => (
-            <NavigationHeaderButton
-              action="back"
-              onPress={() => {
-                if (navigation.canGoBack()) {
-                  navigation.goBack();
-                  return;
-                }
-                navigation.dispatch(StackActions.replace("Settings"));
-              }}
-            />
-          )
-        : undefined,
-  }),
-  screens: {
-    Settings: createNativeStackScreen({
-      screen: SettingsRouteScreen,
-      linking: MVP_SETTINGS_SHEET_ROUTES.Settings.linking,
-      options: settingsRouteOptions("Settings", "Settings"),
-    }),
-    SettingsHub: createNativeStackScreen({
-      screen: SettingsHubRouteScreen,
-      linking: MVP_SETTINGS_SHEET_ROUTES.SettingsHub.linking,
-      options: settingsRouteOptions("SettingsHub", "Hub"),
-    }),
-    SettingsWorkspace: createNativeStackScreen({
-      screen: SettingsWorkspaceRouteScreen,
-      linking: MVP_SETTINGS_SHEET_ROUTES.SettingsWorkspace.linking,
-      options: settingsRouteOptions("SettingsWorkspace", "Workspace defaults"),
-    }),
-    SettingsStatistics: createNativeStackScreen({
-      screen: SettingsStatisticsRouteScreen,
-      linking: MVP_SETTINGS_SHEET_ROUTES.SettingsStatistics.linking,
-      options: settingsRouteOptions("SettingsStatistics", SETTINGS_SECTION_TITLES.usage),
-    }),
-    SettingsProviderAccounts: createNativeStackScreen({
-      screen: SettingsProviderAccountsRouteScreen,
-      linking: MVP_SETTINGS_SHEET_ROUTES.SettingsProviderAccounts.linking,
-      options: settingsRouteOptions("SettingsProviderAccounts", "Provider accounts"),
-    }),
-    SettingsInbox: createNativeStackScreen({
-      screen: SettingsInboxRouteScreen,
-      linking: MVP_SETTINGS_SHEET_ROUTES.SettingsInbox.linking,
-      options: settingsRouteOptions("SettingsInbox", SETTINGS_SECTION_TITLES.inbox),
-    }),
-    SettingsArchived: createNativeStackScreen({
-      screen: ArchivedThreadsRouteScreen,
-      linking: MVP_SETTINGS_SHEET_ROUTES.SettingsArchived.linking,
-      options: settingsRouteOptions("SettingsArchived", "Archived tasks"),
-    }),
-    SettingsNotifications: createNativeStackScreen({
-      screen: SettingsNotificationsRouteScreen,
-      linking: MVP_SETTINGS_SHEET_ROUTES.SettingsNotifications.linking,
-      options: settingsRouteOptions("SettingsNotifications", SETTINGS_SECTION_TITLES.notifications),
-    }),
-    SettingsAccount: createNativeStackScreen({
-      screen: HostedAccountRouteScreen,
-      linking: MVP_SETTINGS_SHEET_ROUTES.SettingsAccount.linking,
-      options: settingsRouteOptions("SettingsAccount", "Hub Account"),
-    }),
-    // docs/relay-e2ee-protocol.md §13.1.1's security UI and §13.2's ceremony.
-    // Both are pushes on both platforms (see `mvpRouteConfig.ts`): §13.1.1
-    // forbids an indication that dismisses into a verified-looking state, and a
-    // swipe-away sheet is the nearest thing this navigator has to one.
-    SettingsNodeSecurity: createNativeStackScreen({
-      screen: E2eeNodeSecurityRouteScreen,
-      linking: MVP_SETTINGS_SHEET_ROUTES.SettingsNodeSecurity.linking,
-      options: settingsRouteOptions("SettingsNodeSecurity", "Node security"),
-    }),
-    SettingsNodeVerification: createNativeStackScreen({
-      screen: E2eeNodeVerificationRouteScreen,
-      linking: MVP_SETTINGS_SHEET_ROUTES.SettingsNodeVerification.linking,
-      options: settingsRouteOptions("SettingsNodeVerification", "Verify node"),
-    }),
-    SettingsAppearance: createNativeStackScreen({
-      screen: SettingsAppearanceRouteScreen,
-      linking: MVP_SETTINGS_SHEET_ROUTES.SettingsAppearance.linking,
-      options: settingsRouteOptions("SettingsAppearance", "Appearance"),
-    }),
-    SettingsClientStorage: createNativeStackScreen({
-      screen: SettingsClientStorageRouteScreen,
-      linking: MVP_SETTINGS_SHEET_ROUTES.SettingsClientStorage.linking,
-      options: settingsRouteOptions("SettingsClientStorage", "Client Storage"),
-    }),
-    SettingsDiagnostics: createNativeStackScreen({
-      screen: SettingsDiagnosticsRouteScreen,
-      linking: MVP_SETTINGS_SHEET_ROUTES.SettingsDiagnostics.linking,
-      options: settingsRouteOptions("SettingsDiagnostics", "Diagnostics"),
-    }),
-    SettingsAbout: createNativeStackScreen({
-      screen: SettingsAboutRouteScreen,
-      linking: MVP_SETTINGS_SHEET_ROUTES.SettingsAbout.linking,
-      options: settingsRouteOptions("SettingsAbout", "About"),
-    }),
-  },
-});
-
 // Routes presented as sheets/overlays ON TOP of the workspace. They must not
 // influence the adaptive workspace pathname: opening Settings/Connections over
 // Home should not change the active thread. Derived from the pure route config.
@@ -310,11 +171,8 @@ function workspaceInspectorSupported(): boolean {
   }).supported;
 }
 
-function routeOptions(
-  name: keyof typeof MVP_ROOT_ROUTES,
-  extras: AppScreenOptions = {},
-): AppScreenOptions {
-  const descriptor = MVP_ROOT_ROUTES[name];
+function routeOptions(name: MvpAnyRootRouteName, extras: AppScreenOptions = {}): AppScreenOptions {
+  const descriptor: MvpRouteDescriptor = MVP_ALL_ROOT_ROUTES[name];
   return {
     ...headerPresetOptions(descriptor.headerPreset),
     ...platformPresentationOptions(descriptor),
@@ -402,12 +260,13 @@ export const ROOT_STACK_SCREENS = {
     options: routeOptions("Access", { gestureEnabled: true }),
   }),
   Home: createNativeStackScreen({
-    screen: HomeRouteScreen,
+    screen: MainTabs,
     linking: MVP_ROOT_ROUTES.Home.linking,
+    // The tab in front sets the header's title and buttons (`useTabStackHeader`).
     options: routeOptions("Home", {
       contentStyle: { backgroundColor: "transparent" },
       headerBackVisible: false,
-      title: "Inbox",
+      title: "",
     }),
   }),
   AddProject: createNativeStackScreen({
@@ -500,10 +359,80 @@ export const ROOT_STACK_SCREENS = {
     linking: MVP_ROOT_ROUTES.ConnectionsNew.linking,
     options: routeOptions("ConnectionsNew", { title: "Add a machine" }),
   }),
-  SettingsSheet: createNativeStackScreen({
-    screen: SettingsSheetStack,
-    linking: MVP_ROOT_ROUTES.SettingsSheet.linking,
-    options: routeOptions("SettingsSheet", { gestureEnabled: true, headerShown: false }),
+  Search: createNativeStackScreen({
+    screen: GlobalSearchRouteScreen,
+    linking: MVP_ROOT_ROUTES.Search.linking,
+    // The field takes the place of the header; the list fades in under it.
+    options: routeOptions("Search", { animation: "fade", headerShown: false }),
+  }),
+  SettingsHub: createNativeStackScreen({
+    screen: SettingsHubRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsHub.linking,
+    options: routeOptions("SettingsHub", { title: "Hub" }),
+  }),
+  SettingsWorkspace: createNativeStackScreen({
+    screen: SettingsWorkspaceRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsWorkspace.linking,
+    options: routeOptions("SettingsWorkspace", { title: "Workspace defaults" }),
+  }),
+  SettingsProviderAccounts: createNativeStackScreen({
+    screen: SettingsProviderAccountsRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsProviderAccounts.linking,
+    options: routeOptions("SettingsProviderAccounts", { title: "Provider accounts" }),
+  }),
+  SettingsInbox: createNativeStackScreen({
+    screen: SettingsInboxRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsInbox.linking,
+    options: routeOptions("SettingsInbox", { title: SETTINGS_SECTION_TITLES.inbox }),
+  }),
+  SettingsArchived: createNativeStackScreen({
+    screen: ArchivedThreadsRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsArchived.linking,
+    options: routeOptions("SettingsArchived", { title: "Archived tasks" }),
+  }),
+  SettingsNotifications: createNativeStackScreen({
+    screen: SettingsNotificationsRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsNotifications.linking,
+    options: routeOptions("SettingsNotifications", {
+      title: SETTINGS_SECTION_TITLES.notifications,
+    }),
+  }),
+  SettingsAccount: createNativeStackScreen({
+    screen: HostedAccountRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsAccount.linking,
+    options: routeOptions("SettingsAccount", { title: "Hub Account" }),
+  }),
+  // docs/relay-e2ee-protocol.md §13.1.1's security UI and §13.2's ceremony.
+  // Both are pushes on both platforms (see `mvpRouteConfig.ts`).
+  SettingsNodeSecurity: createNativeStackScreen({
+    screen: E2eeNodeSecurityRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsNodeSecurity.linking,
+    options: routeOptions("SettingsNodeSecurity", { title: "Node security" }),
+  }),
+  SettingsNodeVerification: createNativeStackScreen({
+    screen: E2eeNodeVerificationRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsNodeVerification.linking,
+    options: routeOptions("SettingsNodeVerification", { title: "Verify node" }),
+  }),
+  SettingsAppearance: createNativeStackScreen({
+    screen: SettingsAppearanceRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsAppearance.linking,
+    options: routeOptions("SettingsAppearance", { title: "Appearance" }),
+  }),
+  SettingsClientStorage: createNativeStackScreen({
+    screen: SettingsClientStorageRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsClientStorage.linking,
+    options: routeOptions("SettingsClientStorage", { title: "Client Storage" }),
+  }),
+  SettingsDiagnostics: createNativeStackScreen({
+    screen: SettingsDiagnosticsRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsDiagnostics.linking,
+    options: routeOptions("SettingsDiagnostics", { title: "Diagnostics" }),
+  }),
+  SettingsAbout: createNativeStackScreen({
+    screen: SettingsAboutRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsAbout.linking,
+    options: routeOptions("SettingsAbout", { title: "About" }),
   }),
   NotFound: createNativeStackScreen({
     screen: NotFoundScreen,
@@ -517,7 +446,9 @@ export const RootStack = createNativeStackNavigator({
   screenOptions: ({ navigation, route }) => ({
     headerShown: false,
     headerLeft: (() => {
-      const action = MVP_ROOT_ROUTES[route.name as keyof typeof MVP_ROOT_ROUTES]?.headerAction;
+      const action = (
+        MVP_ALL_ROOT_ROUTES[route.name as MvpAnyRootRouteName] as MvpRouteDescriptor | undefined
+      )?.headerAction;
       if (action === undefined || action === "none") return undefined;
       return () => (
         <NavigationHeaderButton

@@ -17,6 +17,7 @@ import { GlassSurface } from "../../components/GlassSurface";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { KeyboardCommands } from "../../native/KeyboardCommands";
 import { openProject, openThread } from "../../navigation/openThread";
+import { openMainTab } from "../../navigation/tabs/openMainTab";
 import { useListedEnvironmentsWorkspaceData } from "../../state/homeData";
 import { useHomeEnvironments } from "../home/useHomeEnvironments";
 import {
@@ -167,7 +168,11 @@ export function CommandPalette(props: {
           navigation.navigate("Connections");
           return;
         case "settings":
-          navigation.navigate("SettingsSheet", { screen: intent.screen });
+          if (intent.screen === "Settings" || intent.screen === "Usage") {
+            openMainTab(navigation, intent.screen);
+          } else {
+            navigation.navigate(intent.screen);
+          }
           return;
         case "command":
           onCommand(intent.command);

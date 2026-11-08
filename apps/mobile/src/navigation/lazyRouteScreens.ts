@@ -178,13 +178,6 @@ export const ArchivedThreadsRouteScreen = lazyScreen(
       require("../features/archive/ArchivedThreadsRouteScreen") as typeof import("../features/archive/ArchivedThreadsRouteScreen")
     ).ArchivedThreadsRouteScreen,
 );
-export const SettingsStatisticsRouteScreen = lazyScreen(
-  "SettingsStatisticsRouteScreen",
-  () =>
-    (
-      require("../features/settings/SettingsStatisticsRouteScreen") as typeof import("../features/settings/SettingsStatisticsRouteScreen")
-    ).SettingsStatisticsRouteScreen,
-);
 export const SettingsInboxRouteScreen = lazyScreen(
   "SettingsInboxRouteScreen",
   () =>
@@ -199,12 +192,40 @@ export const SettingsNotificationsRouteScreen = lazyScreen(
       require("../features/settings/SettingsNotificationsRouteScreen") as typeof import("../features/settings/SettingsNotificationsRouteScreen")
     ).SettingsNotificationsRouteScreen,
 );
-export const SettingsRouteScreen = lazyScreen(
-  "SettingsRouteScreen",
+// The main tabs other than Chats, which loads with the app. A tab mounts on its first visit.
+export const SettingsTabScreen = lazyScreen(
+  "SettingsTabScreen",
   () =>
     (
       require("../features/settings/SettingsRouteScreen") as typeof import("../features/settings/SettingsRouteScreen")
-    ).SettingsRouteScreen,
+    ).SettingsTabScreen,
+);
+export const UsageTabScreen = lazyScreen(
+  "UsageTabScreen",
+  () =>
+    (
+      require("../features/usage/UsageTabScreen") as typeof import("../features/usage/UsageTabScreen")
+    ).UsageTabScreen,
+);
+export const TasksTabScreen = lazyScreen(
+  "TasksTabScreen",
+  () =>
+    (require("./tabs/TasksTabPlaceholder") as typeof import("./tabs/TasksTabPlaceholder"))
+      .TasksTabScreen,
+);
+export const PullRequestsTabScreen = lazyScreen(
+  "PullRequestsTabScreen",
+  () =>
+    (
+      require("./tabs/PullRequestsTabPlaceholder") as typeof import("./tabs/PullRequestsTabPlaceholder")
+    ).PullRequestsTabScreen,
+);
+export const GlobalSearchRouteScreen = lazyScreen(
+  "GlobalSearchRouteScreen",
+  () =>
+    (
+      require("../features/search/GlobalSearchRouteScreen") as typeof import("../features/search/GlobalSearchRouteScreen")
+    ).GlobalSearchRouteScreen,
 );
 export const SettingsWorkspaceRouteScreen = lazyScreen(
   "SettingsWorkspaceRouteScreen",
