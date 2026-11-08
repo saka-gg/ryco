@@ -21,6 +21,8 @@ import {
   PullRequestNodeOfflineError,
   refreshPullRequestReads,
   resetPullRequestAtomsForTests,
+  setPullRequestReadStore,
+  type PullRequestReadStore,
 } from "./pullRequestAtoms";
 
 const ENV = "env-a" as EnvironmentId;
@@ -61,6 +63,7 @@ const PATCH = [
 
 beforeEach(() => {
   resetPullRequestAtomsForTests();
+  setPullRequestReadStore(null);
   mocks.clients.clear();
 });
 
@@ -143,6 +146,59 @@ describe("pull request reads", () => {
     expect(state.data).toBeNull();
     expect(state.error).toBeInstanceOf(PullRequestNodeOfflineError);
     release();
+  });
+
+  it("keeps each live read and answers from it while the node is offline", async () => {
+    const saved = new Map<string, unknown>();
+    const store: PullRequestReadStore = {
+      save: (kind, environmentId, key, data) => saved.set(`${kind}|${environmentId}|${key}`, data),
+      load: async (kind, environmentId, key) =>
+        saved.get(`${kind}|${environmentId}|${key}`) ?? null,
+    };
+    setPullRequestReadStore(store);
+    const input = {
+      environmentId: ENV,
+      cwd: CWD,
+      state: "open",
+      limit: PULL_REQUESTS_LIST_LIMIT,
+    } as const;
+    setSourceControl(ENV, { listChangeRequests: vi.fn(async () => [row(1)]) });
+    const live = pullRequestListQuery.watch(input);
+    await flush();
+    live();
+    expect(saved.size).toBe(1);
+
+    // The node goes away; a fresh cache reads again and gets the kept copy.
+    resetPullRequestAtomsForTests();
+    mocks.clients.clear();
+    const offline = pullRequestListQuery.watch(input);
+    await flush();
+    const state = pullRequestListQuery.getSnapshot(pullRequestListQuery.keyOf(input));
+    expect(state.data).toEqual([row(1)]);
+    expect(state.error).toBeNull();
+    offline();
+
+    // An error the node answered with is shown, not covered by the kept copy.
+    resetPullRequestAtomsForTests();
+    const refused = Object.assign(new Error("Bad credentials"), {
+      _tag: "SourceControlProviderError",
+    });
+    setSourceControl(ENV, { listChangeRequests: vi.fn(async () => Promise.reject(refused)) });
+    const answered = pullRequestListQuery.watch(input);
+    await flush();
+    await flush();
+    expect(pullRequestListQuery.getSnapshot(pullRequestListQuery.keyOf(input)).error).toBe(refused);
+    answered();
+    mocks.clients.clear();
+
+    // Nothing kept for a pull request: the offline error stays.
+    const detail = { environmentId: ENV, cwd: CWD, number: 9 };
+    const releaseDetail = pullRequestDetailQuery.watch(detail);
+    await flush();
+    expect(
+      pullRequestDetailQuery.getSnapshot(pullRequestDetailQuery.keyOf(detail)).error,
+    ).toBeInstanceOf(PullRequestNodeOfflineError);
+    releaseDetail();
   });
 
   it("has no key until the checkout and number are known", () => {

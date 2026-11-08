@@ -241,6 +241,11 @@
       "import": "./src/rpc.ts",
       "require": "./src/rpc.ts"
     },
+    "./source-control": {
+      "types": "./src/sourceControl.ts",
+      "import": "./src/sourceControl.ts",
+      "require": "./src/sourceControl.ts"
+    },
     "./storage": {
       "types": "./src/storage.ts",
       "import": "./src/storage.ts",

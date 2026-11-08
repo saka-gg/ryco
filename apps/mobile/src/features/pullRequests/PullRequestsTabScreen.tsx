@@ -293,6 +293,7 @@ export function PullRequestsListScreen(props: PullRequestsListScreenProps) {
     filters: pullRequestTabListFilters(filters),
     failingOnly: filters.failingOnly,
     hideDrafts: filters.hideDrafts,
+    offline: choice !== null && !choice.connected,
   });
   const { screen } = list;
   const capabilities = derivePullRequestsCapabilities(provider);

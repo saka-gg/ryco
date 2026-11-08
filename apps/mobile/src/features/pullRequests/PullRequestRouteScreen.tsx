@@ -589,7 +589,20 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
   const number = parsePullRequestNumberParam(props.route.params.number);
   const checkout = usePullRequestCheckout(environmentId, projectId);
   const provider = useSourceControlProvider(environmentId, checkout.cwd);
-  const pullRequest = usePullRequest({ environmentId, cwd: checkout.cwd, number, provider });
+  const environments = useHomeEnvironments();
+  const environment = environments.find((entry) => entry.environmentId === environmentId);
+  // A pull request read while the node is away is the copy kept on this phone.
+  const offline =
+    environment !== undefined &&
+    environment.connectionState !== "connected" &&
+    environment.connectionState !== "read-only";
+  const pullRequest = usePullRequest({
+    environmentId,
+    cwd: checkout.cwd,
+    number,
+    provider,
+    offline,
+  });
   const [tab, setTab] = useState<PullRequestDetailTab>("conversation");
   const diff = usePullRequestDiff({
     environmentId,
@@ -634,8 +647,6 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
       ? selectProjectByRef(state, scopeProjectRef(environmentId, projectId))
       : undefined,
   );
-  const environments = useHomeEnvironments();
-  const environment = environments.find((entry) => entry.environmentId === environmentId);
   const actions = usePullRequestActions({
     environmentId,
     cwd: checkout.cwd,
@@ -713,6 +724,14 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
   };
   const listHeader = (
     <View className="gap-3 pb-2">
+      {offline && detail !== null ? (
+        <View className="mx-4 mt-2 flex-row items-center gap-2 rounded-xl bg-subtle px-3 py-2.5">
+          <SymbolView name="wifi.slash" size={14} tintColor={mutedIcon} />
+          <Text className="min-w-0 flex-1 text-xs text-foreground-muted">
+            {environment.label} is offline. This is the copy saved on this phone.
+          </Text>
+        </View>
+      ) : null}
       {header ? (
         <Header
           header={header}

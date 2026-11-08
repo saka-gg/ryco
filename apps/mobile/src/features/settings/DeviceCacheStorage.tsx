@@ -65,7 +65,7 @@ export function DeviceCacheStorage() {
     showConfirmDialog({
       title: `Clear cache for ${row.label}?`,
       message:
-        "Removes this device’s downloaded task summaries, project images, file previews, and diffs from this phone. Originals, drafts, and queued messages stay intact. Connected devices can download fresh data as you use the app.",
+        "Removes this device’s downloaded task summaries, saved pull requests, project images, file previews, and diffs from this phone. Originals, drafts, and queued messages stay intact. Connected devices can download fresh data as you use the app.",
       confirmText: "Clear cache",
       destructive: true,
       onConfirm: () => {

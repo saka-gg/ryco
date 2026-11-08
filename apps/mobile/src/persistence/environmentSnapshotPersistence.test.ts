@@ -73,6 +73,7 @@ function createFakeSnapshotDb() {
     { schemaVersion: number; payload: string; updatedAt: number }
   >();
   let roster: { schemaVersion: number; payload: string } | null = null;
+  const pullRequestReads = new Map<string, { schemaVersion: number; payload: string }>();
   const db: SnapshotDb = {
     loadEnvironmentSnapshot: async (environmentId) => {
       const row = snapshots.get(environmentId);
@@ -98,6 +99,9 @@ function createFakeSnapshotDb() {
     },
     removeEnvironmentSnapshot: async (environmentId) => {
       snapshots.delete(environmentId);
+      for (const key of pullRequestReads.keys()) {
+        if (key.startsWith(`${environmentId}\u0000`)) pullRequestReads.delete(key);
+      }
     },
     listEnvironmentSnapshotStats: async () =>
       [...snapshots.entries()].map(([environmentId, row]) => ({
@@ -111,10 +115,23 @@ function createFakeSnapshotDb() {
     },
     clearAll: async () => {
       snapshots.clear();
+      pullRequestReads.clear();
       roster = null;
     },
+    loadPullRequestRead: async (environmentId, key) =>
+      pullRequestReads.get(`${environmentId}\u0000${key}`) ?? null,
+    savePullRequestRead: async (input) => {
+      pullRequestReads.set(`${input.environmentId}\u0000${input.key}`, {
+        schemaVersion: input.schemaVersion,
+        payload: input.payload,
+      });
+    },
+    pullRequestReadBytes: async () => 0,
+    clearPullRequestReads: async () => {
+      pullRequestReads.clear();
+    },
   };
-  return { db, snapshots, getRoster: () => roster };
+  return { db, snapshots, pullRequestReads, getRoster: () => roster };
 }
 
 function wireSnapshot(projectId: string): OrchestrationShellSnapshot {
@@ -1141,6 +1158,31 @@ describe("environment snapshot persistence", () => {
       expect(storedContent(snapshots, first)?.["thread-1"]?.messages[0]?.text).toBe("secret one");
       expect(storedContent(snapshots, second)?.["thread-2"]?.messages[0]?.text).toBe("secret two");
       expect(storedContent(snapshots, dormant)).toBeUndefined();
+      runtime.dispose();
+    });
+
+    it("removes saved pull requests when the setting is turned off, and with an environment's row", async () => {
+      const { db, pullRequestReads } = createFakeSnapshotDb();
+      const first = env("persist-pr-purge-1");
+      const setting = createFakeContentSetting(true);
+      const runtime = contentRuntime(db, setting.setting);
+      const save = (environmentId: string, key: string) =>
+        db.savePullRequestRead({
+          environmentId,
+          key,
+          schemaVersion: 1,
+          payload: "{}",
+          updatedAt: 1,
+          keep: 40,
+        });
+      await save(first, "detail-1");
+      await save("other", "detail-2");
+      await runtime.purgeEnvironment(first);
+      expect([...pullRequestReads.keys()]).toEqual(["other\u0000detail-2"]);
+
+      setting.set(false);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(pullRequestReads.size).toBe(0);
       runtime.dispose();
     });
 
