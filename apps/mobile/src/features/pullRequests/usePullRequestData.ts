@@ -112,8 +112,12 @@ export function usePullRequestList(input: {
   readonly cwd: string | null;
   readonly provider: SourceControlProviderInfo | null;
   readonly filters: PullRequestListFilters;
+  readonly failingOnly?: boolean | undefined;
+  readonly hideDrafts?: boolean | undefined;
 }): PullRequestListData {
   const { environmentId, cwd, provider, filters } = input;
+  const failingOnly = input.failingOnly === true;
+  const hideDrafts = input.hideDrafts === true;
   const reads = pullRequestListReadInputs({
     checkoutKnown: environmentId !== null && cwd !== null,
     provider,
@@ -140,8 +144,9 @@ export function usePullRequestList(input: {
         reads: { state, authored, reviewRequested },
         provider,
         filters,
+        narrow: { failingOnly, hideDrafts },
       }),
-    [authored, filters, provider, reviewRequested, state],
+    [authored, failingOnly, filters, hideDrafts, provider, reviewRequested, state],
   );
   return {
     screen,
