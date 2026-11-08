@@ -2,11 +2,7 @@ import { LOCAL_TASK_MAX_FILES, PROVIDER_SEND_TURN_MAX_IMAGE_BYTES } from "@ryco/
 import { RELAY_MAX_RPC_MESSAGE_BYTES } from "@ryco/contracts/relay";
 import { describe, expect, it } from "vite-plus/test";
 
-import {
-  planTaskFileAdds,
-  sanitizeTaskFileName,
-  TASK_FILE_INLINE_MAX_BYTES,
-} from "./taskFiles.logic";
+import { planTaskFileAdds, sanitizeTaskFileName, TASK_FILE_INLINE_MAX_BYTES } from "./files.ts";
 
 /** A file that reports `size` bytes without holding them. */
 function sized(name: string, type: string, size: number): File {

@@ -1,16 +1,23 @@
+import { LOCAL_TASK_MAX_FILE_TOTAL_BYTES, LOCAL_TASK_MAX_FILES } from "@ryco/contracts/local-tasks";
 import {
-  LOCAL_TASK_MAX_FILE_TOTAL_BYTES,
-  LOCAL_TASK_MAX_FILES,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
-} from "@ryco/contracts";
+} from "@ryco/contracts/orchestration";
 import { RELAY_MAX_RPC_MESSAGE_BYTES } from "@ryco/contracts/relay-constants";
 
 /**
- * The pure half of adding files to a task: which files it can take, under
- * what names, and how large a file can be on each connection. `taskFiles.ts`
- * does the reads and uploads.
+ * The pure half of adding files to a task, on every client: which files it
+ * can take, under what names, and how large a file can be on each
+ * connection. Each client does the reads and uploads.
  */
+
+/** What the rules read of a picked file: a DOM `File` fits, and so does a phone's pick. */
+export interface TaskFileSource {
+  readonly name: string;
+  /** The MIME type, possibly with parameters. */
+  readonly type: string;
+  readonly size: number;
+}
 
 /** Room in an inline add's message for everything but the file: the RPC envelope, the name, the E2EE framing. */
 const INLINE_MESSAGE_RESERVE_BYTES = 64 * 1024;
@@ -37,15 +44,15 @@ export function sanitizeTaskFileName(name: string, type: "image" | "file"): stri
   return cleaned.length > 0 ? cleaned : type;
 }
 
-function taskFileMimeType(file: Pick<File, "type">): string {
+function taskFileMimeType(file: Pick<TaskFileSource, "type">): string {
   const mimeType = file.type.split(";", 1)[0]!.trim();
   return mimeType.length <= 100 && MIME_TYPE_PATTERN.test(mimeType) ? mimeType : FALLBACK_MIME_TYPE;
 }
 
 const megabytes = (bytes: number) => `${Math.round(bytes / (1024 * 1024))}MB`;
 
-export interface TaskFileCandidate {
-  readonly file: File;
+export interface TaskFileCandidate<F extends TaskFileSource = TaskFileSource> {
+  readonly file: F;
   readonly name: string;
   readonly mimeType: string;
   readonly type: "image" | "file";
@@ -57,16 +64,16 @@ export interface TaskFileCandidate {
  * goes inline), more files than a message carries, or more bytes than it
  * holds altogether (counting what the task holds and what is on its way).
  */
-export function planTaskFileAdds(input: {
-  readonly files: ReadonlyArray<File>;
+export function planTaskFileAdds<F extends TaskFileSource>(input: {
+  readonly files: ReadonlyArray<F>;
   readonly heldCount: number;
   readonly heldBytes: number;
   /** The node's streaming limit for files, when uploads stream. */
   readonly streamingMaxBytes: number | null;
   /** The most one file can be when it goes inline (`TASK_FILE_INLINE_MAX_BYTES`), when it does. */
   readonly inlineMaxBytes: number | null;
-}): { readonly accepted: ReadonlyArray<TaskFileCandidate>; readonly error: string | null } {
-  const accepted: TaskFileCandidate[] = [];
+}): { readonly accepted: ReadonlyArray<TaskFileCandidate<F>>; readonly error: string | null } {
+  const accepted: TaskFileCandidate<F>[] = [];
   let count = input.heldCount;
   let bytes = input.heldBytes;
   let error: string | null = null;

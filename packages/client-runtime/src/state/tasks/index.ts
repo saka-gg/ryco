@@ -1,4 +1,5 @@
 export * from "./due.ts";
+export * from "./files.ts";
 export * from "./links.ts";
 export * from "./logic.ts";
 export * from "./messages.ts";
