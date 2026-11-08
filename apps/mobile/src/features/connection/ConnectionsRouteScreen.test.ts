@@ -272,7 +272,7 @@ describe("Machines — direct plane", () => {
       buttons(tree)
         .map((button) => button.label)
         .filter((label) => label !== "Pair directly"),
-    ).toEqual(["Switch on", "Rename", "Forget"]);
+    ).toEqual(["Switch on", "Rename", "Access", "Forget"]);
     buttons(tree)
       .find((button) => button.label === "Switch on")
       ?.press();
@@ -288,6 +288,16 @@ describe("Machines — direct plane", () => {
 });
 
 describe("Machines — hosted mode absent", () => {
+  it("opens a machine's access screen from its row", () => {
+    const tree = ConnectionsRouteScreen();
+    buttons(tree)
+      .find((button) => button.label === "Access")
+      ?.press();
+    expect(navigationMock.navigate).toHaveBeenCalledWith("MachineAccess", {
+      environmentId: "env-1",
+    });
+  });
+
   it("keeps direct actions isolated from the unavailable Hub section", () => {
     const tree = ConnectionsRouteScreen();
     expect(texts(tree)).toContain("Studio Mac");
@@ -300,6 +310,7 @@ describe("Machines — hosted mode absent", () => {
       "Disconnect",
       "Switch off",
       "Rename",
+      "Access",
       "Forget",
     ]);
     expect(texts(tree)).toContain("Hub nodes unavailable");

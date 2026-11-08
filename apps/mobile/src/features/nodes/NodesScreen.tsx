@@ -144,7 +144,11 @@ export function NodesScreen(props: {
     const isConnected = row.runtime.connectionState === "connected";
     const needsRepair = row.runtime.authState === "requires-auth";
     const disabled = busy !== null;
-    return directNodeActions({
+    const access: NodeRowAction = {
+      label: "Access",
+      onPress: () => navigation.navigate("MachineAccess", { environmentId: id }),
+    };
+    const rowActions = directNodeActions({
       connectionState: row.runtime.connectionState,
       needsRepair,
       selected: activeEnvironmentId === id,
@@ -215,6 +219,12 @@ export function NodesScreen(props: {
           };
       }
     });
+    // Pairing links, clients and reach; the screen explains what a client pairing cannot do.
+    // It goes before Forget, which stays last as the one destructive action.
+    const forgetAt = rowActions.findIndex((action) => action.destructive === true);
+    return forgetAt === -1
+      ? [...rowActions, access]
+      : [...rowActions.slice(0, forgetAt), access, ...rowActions.slice(forgetAt)];
   };
 
   const saveRename = () => {

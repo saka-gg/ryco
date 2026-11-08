@@ -97,6 +97,8 @@ export interface HubNodeSectionActions {
   readonly openNodeSecurity?: (node: HostedHubNode) => unknown;
   readonly addDirectAccess?: (node: HostedHubNode) => unknown;
   readonly removeDirectAccess?: (node: HostedHubNode) => unknown;
+  /** The machine access screen: pairing links, clients, reach, and Hub revocation. */
+  readonly openAccess?: (node: HostedHubNode) => unknown;
 }
 
 /** Linked direct access as the rows show it (`hostedHub/linkedDirectAccessState.ts`). */
@@ -117,6 +119,7 @@ export interface HubNodeRowModel {
   readonly rename?: (() => void) | undefined;
   /** "Add direct access" or "Remove direct access", when either applies. */
   readonly directAccess?: { readonly label: string; readonly onPress: () => void } | undefined;
+  readonly access?: (() => void) | undefined;
   readonly label: string;
   /** Bounded presence/role summary. Never an id, token, ticket, or raw error. */
   readonly detail: string;
@@ -359,6 +362,7 @@ export function deriveHubNodeSectionModel(input: {
             ? () => actions.renameNode?.(node)
             : undefined,
         directAccess,
+        access: actions.openAccess ? () => void actions.openAccess?.(node) : undefined,
         label: node.label,
         detail: [trustDetail, rowDetail(node, input.hostFreeze?.nowMs), directDetail]
           .filter((part): part is string => part !== null)
@@ -477,6 +481,7 @@ export function HubNodeSectionView(props: { readonly model: HubNodeSectionModel 
               actions={[
                 ...(row.rename ? [{ label: "Rename", onPress: row.rename }] : []),
                 ...(row.directAccess ? [row.directAccess] : []),
+                ...(row.access ? [{ label: "Access", onPress: row.access }] : []),
               ]}
             />
           ))}
@@ -568,6 +573,8 @@ export function HubNodeSection(props: { readonly query?: string } = {}) {
       selectNode: acquireMobileHostedNode,
       addDirectAccess: addMobileDirectAccessLazily,
       removeDirectAccess: removeMobileDirectAccessLazily,
+      openAccess: (node) =>
+        navigation.navigate("MachineAccess", { environmentId: node.environmentId }),
       returnToDirectory: () => hostedHubController.returnToDirectory(),
       refreshDirectory: () => hostedHubController.refreshDirectory(),
       retrySelectedNode: () => hostedHubController.retrySelectedNode(),

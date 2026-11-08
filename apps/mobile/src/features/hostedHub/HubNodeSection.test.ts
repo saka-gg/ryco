@@ -425,6 +425,20 @@ describe("Hub node actions", () => {
     expect(readOnly.rows.every((row) => row.rename === undefined)).toBe(true);
   });
 
+  it("opens any listed node's access screen, which explains what this account may do", () => {
+    const openAccess = vi.fn();
+    const viewer = state({ nodes: [node({ effectiveRole: "viewer" })] });
+    const model = deriveHubNodeSectionModel({
+      state: viewer,
+      available: true,
+      e2eeStatus: "unavailable",
+      actions: { ...hostedMock.controller, openAccess },
+      onSignIn: vi.fn(),
+    });
+    model.rows[0]?.access?.();
+    expect(openAccess).toHaveBeenCalledWith(viewer.nodes[0]);
+  });
+
   it("selects an enabled node through the controller", () => {
     const row = model().rows[0];
     expect(row?.disabled).toBe(false);
