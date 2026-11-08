@@ -15,6 +15,7 @@ import {
   useHostedHubStore,
 } from "../../hostedHub/state";
 import { useMobileE2eeChannelStatus } from "../e2ee/useMobileE2eeSession";
+import { EncryptedDevicesSection } from "../machineAccess/EncryptedDevicesSection";
 import { useMobileNativeE2eeEnrollmentStatus } from "../e2ee/useMobileNativeE2eeEnrollment";
 import { SettingsRow } from "../settings/components/SettingsRow";
 import { SettingsSection } from "../settings/components/SettingsSection";
@@ -245,6 +246,8 @@ export function HostedAccountRouteScreen() {
                   />
                 ))
               : null}
+
+            {management.available ? <EncryptedDevicesSection /> : null}
 
             {view.rows.length > 0 ? (
               <SettingsSection title={readMobileDeviceLabel()}>

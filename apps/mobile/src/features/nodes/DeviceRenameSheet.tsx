@@ -8,13 +8,19 @@ export function DeviceRenameSheet(props: {
   readonly label: string;
   readonly onClose: () => void;
   readonly onSave: (label: string) => Promise<void>;
+  /** Copy for a rename that is not a machine's, such as an encrypted device's. */
+  readonly title?: string;
+  readonly description?: string;
+  readonly failureMessage?: string;
+  readonly maxLength?: number;
 }) {
+  const maxLength = props.maxLength ?? 100;
   const [draft, setDraft] = useState(props.label);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const color = useThemeColor("--color-foreground") as string;
   const name = draft.trim();
-  const canSave = !saving && name.length > 0 && name.length <= 100 && name !== props.label;
+  const canSave = !saving && name.length > 0 && name.length <= maxLength && name !== props.label;
   const save = async () => {
     if (!canSave) return;
     setSaving(true);
@@ -24,7 +30,8 @@ export function DeviceRenameSheet(props: {
       props.onClose();
     } catch {
       setError(
-        "Could not rename the device. Check your connection and owner access, then try again.",
+        props.failureMessage ??
+          "Could not rename the device. Check your connection and owner access, then try again.",
       );
       setSaving(false);
     }
@@ -39,17 +46,19 @@ export function DeviceRenameSheet(props: {
       }}
     >
       <View className="flex-1 gap-5 bg-screen px-5 pt-5">
-        <Text className="text-lg font-ryco-bold text-foreground">Rename {props.label}</Text>
+        <Text className="text-lg font-ryco-bold text-foreground">
+          {props.title ?? `Rename ${props.label}`}
+        </Text>
         <Text className="font-sans text-base text-foreground-muted">
-          This name is shown to everyone who can access the device. Its projects and conversations
-          stay in place.
+          {props.description ??
+            "This name is shown to everyone who can access the device. Its projects and conversations stay in place."}
         </Text>
         <TextInput
           autoFocus
           accessibilityLabel="Device name"
           value={draft}
           onChangeText={setDraft}
-          maxLength={100}
+          maxLength={maxLength}
           editable={!saving}
           style={{ color }}
           className="min-h-14 rounded-2xl border border-border bg-card px-4 py-3 font-sans text-base"
