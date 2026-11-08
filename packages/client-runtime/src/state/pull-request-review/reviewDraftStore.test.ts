@@ -8,9 +8,11 @@ import {
   isReviewDraftCommentOutdated,
   REVIEW_DRAFT_STORAGE_KEY,
   reviewDraftKey,
+  reviewDraftKeyEnvironment,
   selectOutdatedReviewDraftComments,
   selectReviewDraft,
   type ReviewDraftStorage,
+  whenReviewDraftsHydrated,
 } from "./reviewDraftStore.ts";
 
 const key = reviewDraftKey({ environmentId: "env-1", cwd: "/repo", number: 7 });
@@ -322,5 +324,62 @@ describe("review draft persistence", () => {
     const store = makeStore();
     store.getState().setSummary(key, "Hi");
     expect(selectReviewDraft(store.getState(), key).summary).toBe("Hi");
+  });
+});
+
+describe("clearing drafts", () => {
+  const other = reviewDraftKey({ environmentId: "env-2", cwd: "/repo", number: 7 });
+  const comment = { path: "a.ts", line: 1, side: "right" as const, body: "x", headSha: "h1" };
+
+  it("reads the environment back from a key", () => {
+    expect(reviewDraftKeyEnvironment(key)).toBe("env-1");
+    expect(reviewDraftKeyEnvironment("not json")).toBeNull();
+  });
+
+  it("removes one environment's drafts from memory and storage, then all", async () => {
+    const { storage, values } = memoryStorage();
+    const store = makeStore({ storage });
+    await whenReviewDraftsHydrated(store);
+    store.getState().addComment(key, comment);
+    store.getState().addComment(other, comment);
+    store.getState().clearEnvironment("env-1");
+    expect(Object.keys(store.getState().draftsByKey)).toEqual([other]);
+    expect(values.get(REVIEW_DRAFT_STORAGE_KEY)).not.toContain("env-1");
+    expect(values.get(REVIEW_DRAFT_STORAGE_KEY)).toContain("env-2");
+    store.getState().clearAll();
+    expect(store.getState().draftsByKey).toEqual({});
+  });
+
+  it("waits for stored drafts before a clear, so they do not come back", async () => {
+    let release: (value: string | null) => void = () => undefined;
+    const stored = JSON.stringify({
+      state: {
+        draftsByKey: {
+          [key]: { comments: [], summary: "kept?", event: null, headSha: null, updatedAt: 5 },
+        },
+      },
+      version: 1,
+    });
+    const values = new Map<string, string>();
+    const store = makeStore({
+      storage: {
+        getItem: () =>
+          new Promise<string | null>((resolve) => {
+            release = resolve;
+          }),
+        setItem: (name, value) => {
+          values.set(name, value);
+        },
+        removeItem: (name) => {
+          values.delete(name);
+        },
+      },
+    });
+    const hydrated = whenReviewDraftsHydrated(store);
+    release(stored);
+    await hydrated;
+    expect(selectReviewDraft(store.getState(), key).summary).toBe("kept?");
+    store.getState().clearEnvironment("env-1");
+    expect(selectReviewDraft(store.getState(), key)).toBe(EMPTY_REVIEW_DRAFT);
   });
 });

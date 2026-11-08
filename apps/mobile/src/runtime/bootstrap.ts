@@ -24,6 +24,7 @@ import {
 } from "@ryco/client-runtime/connection";
 import { forgetEnvironmentsServerState } from "@ryco/client-runtime/rpc";
 import type { EnvironmentId } from "@ryco/contracts";
+import { registerEnvironmentDevicePurge } from "../persistence/environmentDevicePurge";
 import { mobileRuntimeStartupBarrier } from "./startupBarrier";
 
 type Catalog = ReturnType<typeof createMobileSavedEnvironmentCatalog>;
@@ -123,6 +124,13 @@ export function initializeMobileRuntime(): MobileConnectionRegistry {
   if (!initialized) {
     initialized = true;
     initializeWsConnectionState();
+    // Pull request drafts and the PRs tab's place leave with a node's cached
+    // content; loaded only when a purge runs.
+    registerEnvironmentDevicePurge((environmentId) =>
+      import("../features/pullRequests/pullRequestDeviceData").then((module) =>
+        module.clearPullRequestDeviceData(environmentId),
+      ),
+    );
     // Wave 2: hydrate the snapshot cache (cached node roster + per-environment
     // projections) before the hosted lifecycle can attempt a connection.
     // Catalog hydration must land first or the orphan check would misread

@@ -33,6 +33,10 @@ import {
   pullRequestReviewEvent,
   type PullRequestActions,
 } from "./pullRequestActionsModel";
+import {
+  describeOutdatedDraftComments,
+  splitDraftCommentsByHead,
+} from "./pullRequestFileReviewModel";
 import { usePullRequestReviewDrafts } from "./pullRequestReviewDrafts";
 
 export type PullRequestActionKind = "review" | "merge" | "update-branch";
@@ -55,6 +59,11 @@ export interface PullRequestActionsControl extends PullRequestActions {
   readonly notice: string | null;
   /** The review draft's key; null until the node, checkout and number are known. */
   readonly draftKey: string | null;
+  /**
+   * The head a review is written against and sent for; draft comments written
+   * on another head are outdated and are not sent.
+   */
+  readonly headSha: string | null;
   /** The verdict a review sends for the one picked in the draft. */
   readonly reviewEventFor: (chosen: ChangeRequestReviewEvent | null) => ChangeRequestReviewEvent;
   readonly setMethod: (method: SourceControlChangeRequestMergeMethod) => void;
@@ -259,6 +268,7 @@ export function usePullRequestActions(input: {
     error,
     notice,
     draftKey,
+    headSha: detail?.headSha ?? null,
     reviewEventFor,
     setMethod,
     deleteBranch,
@@ -271,8 +281,10 @@ export function usePullRequestActions(input: {
 
 export interface PullRequestReviewDraftControl {
   readonly summary: string;
-  /** Line comments in the draft; they are sent with the review. */
+  /** Line comments written on the current head; they are sent with the review. */
   readonly comments: number;
+  /** Why some comments are not sent (written on older commits); null when all are. */
+  readonly outdatedNote: string | null;
   /** The verdict the review sends: the draft's pick where the rules allow it. */
   readonly event: ChangeRequestReviewEvent;
   readonly setSummary: (summary: string) => void;
@@ -285,7 +297,10 @@ export interface PullRequestReviewDraftControl {
  * draft, so a keystroke re-renders the sheet and nothing behind it.
  */
 export function usePullRequestReviewDraft(
-  control: Pick<PullRequestActionsControl, "draftKey" | "reviewEventFor" | "submitReview">,
+  control: Pick<
+    PullRequestActionsControl,
+    "draftKey" | "headSha" | "reviewEventFor" | "submitReview"
+  >,
 ): PullRequestReviewDraftControl {
   const { draftKey } = control;
   const draft = usePullRequestReviewDrafts((state) =>
@@ -293,9 +308,11 @@ export function usePullRequestReviewDraft(
   );
   const setDraftSummary = usePullRequestReviewDrafts((state) => state.setSummary);
   const setDraftEvent = usePullRequestReviewDrafts((state) => state.setEvent);
+  const byHead = splitDraftCommentsByHead(draft.comments, control.headSha);
   return {
     summary: draft.summary,
-    comments: draft.comments.length,
+    comments: byHead.current,
+    outdatedNote: describeOutdatedDraftComments(byHead.outdated),
     event: control.reviewEventFor(draft.event),
     setSummary: (summary) => {
       if (draftKey !== null) setDraftSummary(draftKey, summary);

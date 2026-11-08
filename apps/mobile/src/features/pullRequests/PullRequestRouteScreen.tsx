@@ -435,6 +435,8 @@ function FileRow(props: {
   readonly row: PullRequestFileRow;
   readonly viewedState: ViewedFileState | null;
   readonly pending: boolean;
+  /** False when this session may not mark files (read-only node or role): the box only shows. */
+  readonly canToggle: boolean;
   readonly onPress: (path: string) => void;
   readonly onToggleViewed: (path: string, viewed: boolean) => void;
 }) {
@@ -484,14 +486,21 @@ function FileRow(props: {
         <Pressable
           accessibilityRole="checkbox"
           accessibilityLabel="Viewed"
-          accessibilityState={{ checked: viewed, busy: props.pending }}
-          disabled={props.pending}
+          accessibilityState={{
+            checked: viewed,
+            busy: props.pending,
+            disabled: !props.canToggle,
+          }}
+          disabled={props.pending || !props.canToggle}
           hitSlop={6}
           onPress={() => {
             void Haptics.selectionAsync();
             props.onToggleViewed(row.path, !viewed);
           }}
-          className="w-12 items-center justify-center self-stretch active:opacity-60"
+          className={cn(
+            "w-12 items-center justify-center self-stretch active:opacity-60",
+            !props.canToggle && "opacity-50",
+          )}
         >
           <SymbolView
             name={(viewed ? "checkmark.circle.fill" : "circle") as never}
@@ -769,6 +778,7 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
                       : null
                   }
                   pending={filesViewed.pendingPaths.has(item.row.path)}
+                  canToggle={filesViewed.canMark}
                   onPress={openFile}
                   onToggleViewed={(path, next) => void filesViewed.setViewed(path, next)}
                 />

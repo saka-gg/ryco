@@ -78,6 +78,7 @@ vi.mock("./usePullRequestFilesViewed", () => ({
     pendingPaths: new Set(),
     isLoading: false,
     refresh: async () => undefined,
+    canMark: true,
     setViewed: async () => undefined,
   }),
 }));

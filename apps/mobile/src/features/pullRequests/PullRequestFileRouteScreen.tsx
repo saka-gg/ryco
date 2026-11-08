@@ -174,9 +174,10 @@ export function PullRequestFileRouteScreen(props: PullRequestFileRouteProps) {
             path,
             rows: parsed.rows,
             drafts: draft.comments,
+            headSha: detail?.headSha ?? null,
             threads: threads ?? [],
           }),
-    [draft.comments, parsed, path, threads],
+    [detail?.headSha, draft.comments, parsed, path, threads],
   );
 
   const theme: ReviewDiffTheme = useColorScheme() === "light" ? "light" : "dark";
@@ -277,13 +278,15 @@ export function PullRequestFileRouteScreen(props: PullRequestFileRouteProps) {
   };
 
   const progress = derivePullRequestReviewProgress(paths, filesViewed.data);
+  // Marking needs a node that takes changes; otherwise the bar only moves on.
+  const marks = progress.supported && filesViewed.canMark;
   const viewedState = progress.supported ? (progress.stateByPath.get(path) ?? "unviewed") : null;
   const viewed = viewedState === "viewed";
   const position = paths.indexOf(path) + 1;
   const nextToReview = nextUnviewedPath(paths, progress.stateByPath, path);
   const markViewedAndContinue = () => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    if (progress.supported && !viewed) void filesViewed.setViewed(path, true);
+    if (marks && !viewed) void filesViewed.setViewed(path, true);
     if (nextToReview !== null) openSibling(nextToReview);
     else navigation.goBack();
   };
@@ -382,8 +385,9 @@ export function PullRequestFileRouteScreen(props: PullRequestFileRouteProps) {
                 accessibilityState={{
                   checked: viewed,
                   busy: filesViewed.pendingPaths.has(path),
+                  disabled: !filesViewed.canMark,
                 }}
-                disabled={filesViewed.pendingPaths.has(path)}
+                disabled={filesViewed.pendingPaths.has(path) || !filesViewed.canMark}
                 onPress={() => {
                   void Haptics.selectionAsync();
                   void filesViewed.setViewed(path, !viewed);
@@ -391,6 +395,7 @@ export function PullRequestFileRouteScreen(props: PullRequestFileRouteProps) {
                 className={cn(
                   "flex-row items-center gap-1 rounded-full px-2.5 py-1 active:opacity-70",
                   viewed ? "bg-success-bg" : "bg-subtle",
+                  !filesViewed.canMark && "opacity-50",
                 )}
               >
                 <SymbolView
@@ -532,10 +537,10 @@ export function PullRequestFileRouteScreen(props: PullRequestFileRouteProps) {
               >
                 <Text className="text-sm font-ryco-bold text-primary-foreground">
                   {nextToReview === null
-                    ? progress.supported && !viewed
+                    ? marks && !viewed
                       ? "Viewed · Finish"
                       : "Finish"
-                    : progress.supported && !viewed
+                    : marks && !viewed
                       ? "Viewed · Next"
                       : "Next file"}
                 </Text>

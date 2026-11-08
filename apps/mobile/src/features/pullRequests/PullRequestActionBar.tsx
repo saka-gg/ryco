@@ -8,6 +8,7 @@ import * as Haptics from "expo-haptics";
 import { useState } from "react";
 import { Alert, Modal, Pressable, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useShallow } from "zustand/react/shallow";
 
 import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
@@ -16,6 +17,10 @@ import { cn } from "../../lib/cn";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { MergeSheet, ReviewSheet } from "./PullRequestActionsPanel";
 import { pullRequestActionBarModel } from "./pullRequestActionBarModel";
+import {
+  describeOutdatedDraftComments,
+  splitDraftCommentsByHead,
+} from "./pullRequestFileReviewModel";
 import { usePullRequestReviewDrafts } from "./pullRequestReviewDrafts";
 import {
   shownPullRequestActionSheet,
@@ -81,8 +86,15 @@ export function PullRequestActionBar(props: {
   const barTint = useThemeColor("--color-glass-surface") as string;
   const [openedSheet, setSheet] = useState<PullRequestActionSheet | null>(null);
   const draftKey = control.draftKey;
-  const draftComments = usePullRequestReviewDrafts((state) =>
-    draftKey === null ? 0 : selectReviewDraft(state, draftKey).comments.length,
+  const draftComments = usePullRequestReviewDrafts(
+    useShallow((state) => {
+      const comments = draftKey === null ? [] : selectReviewDraft(state, draftKey).comments;
+      const byHead = splitDraftCommentsByHead(comments, control.headSha);
+      return {
+        current: byHead.current,
+        outdatedNote: describeOutdatedDraftComments(byHead.outdated),
+      };
+    }),
   );
   const sheet = shownPullRequestActionSheet(openedSheet, control);
   if (sheet !== openedSheet) setSheet(sheet);
@@ -95,9 +107,14 @@ export function PullRequestActionBar(props: {
   const approve = () =>
     Alert.alert(
       `Approve #${props.number}?`,
-      draftComments > 0
-        ? `Sends an approving review with your ${draftComments} line ${draftComments === 1 ? "comment" : "comments"}.`
-        : "Sends an approving review.",
+      [
+        draftComments.current > 0
+          ? `Sends an approving review with your ${draftComments.current} line ${draftComments.current === 1 ? "comment" : "comments"}.`
+          : "Sends an approving review.",
+        draftComments.outdatedNote,
+      ]
+        .filter((line) => line !== null)
+        .join(" "),
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -162,8 +179,8 @@ export function PullRequestActionBar(props: {
               label={
                 control.pending === "review"
                   ? "Sending…"
-                  : draftComments > 0
-                    ? `Review · ${draftComments}`
+                  : draftComments.current > 0
+                    ? `Review · ${draftComments.current}`
                     : "Review"
               }
               tone="secondary"

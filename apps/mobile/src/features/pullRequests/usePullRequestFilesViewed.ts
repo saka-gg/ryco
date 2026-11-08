@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from "react";
 
 import { readRpcClient } from "../../connection/environmentApi";
 import { mobileAppLifecycle } from "../../platform/appLifecycle";
+import { useHomeEnvironments } from "../home/useHomeEnvironments";
+import { canMarkPullRequestFilesViewed } from "./pullRequestActionsModel";
 
 type Controller = ReturnType<typeof createPullRequestReviewController>;
 export type PullRequestFilesViewedSnapshot = ReturnType<Controller["getSnapshot"]>;
@@ -24,6 +26,12 @@ function sourceControl(environmentId: EnvironmentId) {
 }
 
 export interface PullRequestFilesViewed extends PullRequestFilesViewedSnapshot {
+  /**
+   * Whether this session may mark files now: the node takes changes and the
+   * session's role allows it. When false the boxes show the state read-only
+   * and `setViewed` does nothing, instead of sending a change the node refuses.
+   */
+  readonly canMark: boolean;
   readonly refresh: () => Promise<void>;
   readonly setViewed: (path: string, viewed: boolean) => Promise<void>;
 }
@@ -42,6 +50,11 @@ export function usePullRequestFilesViewed(input: {
   readonly active: boolean;
 }): PullRequestFilesViewed {
   const { environmentId, cwd, number, headSha, active } = input;
+  const environment = useHomeEnvironments().find((entry) => entry.environmentId === environmentId);
+  const canMark = canMarkPullRequestFilesViewed({
+    mutationReady: environment?.mutationReady === true,
+    role: environment?.role,
+  });
   const key = JSON.stringify([environmentId, cwd, number, headSha, active]);
   const current = useRef<{ key: string; controller: Controller } | null>(null);
   const [state, setState] = useState<{
@@ -85,10 +98,11 @@ export function usePullRequestFilesViewed(input: {
 
   return {
     ...(state?.key === key ? state.snapshot : EMPTY),
+    canMark,
     refresh: () =>
       current.current?.key === key ? current.current.controller.refresh() : Promise.resolve(),
     setViewed: (path, viewed) =>
-      current.current?.key === key
+      canMark && current.current?.key === key
         ? current.current.controller.setViewed(path, viewed)
         : Promise.resolve(),
   };

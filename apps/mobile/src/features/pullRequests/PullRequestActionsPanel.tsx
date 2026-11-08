@@ -123,6 +123,9 @@ export function ReviewSheet(props: {
           this review.
         </Text>
       ) : null}
+      {draft.outdatedNote !== null ? (
+        <Text className="text-sm text-foreground-muted">{draft.outdatedNote}</Text>
+      ) : null}
       {review.authorNote ? (
         <Text className="text-xs text-foreground-muted">{review.authorNote}</Text>
       ) : null}

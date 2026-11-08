@@ -77,3 +77,16 @@ export function usePullRequestTabStateLoaded(): boolean {
     () => loaded,
   );
 }
+
+/**
+ * Back to the defaults, on the device too: the saved state names a repository,
+ * so it goes with the cached content of the machines it came from.
+ */
+export function resetPullRequestTabState(): void {
+  loaded = true;
+  if (current !== DEFAULT_PULL_REQUEST_TAB_STATE) {
+    current = DEFAULT_PULL_REQUEST_TAB_STATE;
+    emit();
+  }
+  void mobileKV.removeItem(PULL_REQUEST_TAB_STATE_KEY).catch(() => undefined);
+}

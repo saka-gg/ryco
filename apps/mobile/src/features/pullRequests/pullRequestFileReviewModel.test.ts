@@ -5,7 +5,9 @@ import { describe, expect, it } from "vitest";
 import type { PullRequestDiffRow } from "./pullRequestDiffModel";
 import {
   derivePullRequestReviewProgress,
+  describeOutdatedDraftComments,
   interleavePullRequestFileComments,
+  splitDraftCommentsByHead,
   nextUnviewedPath,
   pullRequestDiffRowAnchor,
 } from "./pullRequestFileReviewModel";
@@ -85,7 +87,13 @@ describe("diff comments", () => {
     const items = interleavePullRequestFileComments({
       path: "a.ts",
       rows,
-      drafts: [draft("d-new", 2, "right"), draft("d-old", 2, "left"), draft("gone", 40, "right")],
+      drafts: [
+        draft("d-new", 2, "right"),
+        draft("d-old", 2, "left"),
+        draft("gone", 40, "right"),
+        { ...draft("older-head", 1, "right"), headSha: "before" },
+      ],
+      headSha: "abc",
       threads: [thread, { ...thread, id: "elsewhere", path: "b.ts" }],
     });
     expect(items.map((item) => item.key)).toEqual([
@@ -96,7 +104,39 @@ describe("diff comments", () => {
       "row:3",
       "thread:t1",
       "draft:d-new",
+      // Line 1 is shown, but this comment's numbers refer to another head.
       "draft:gone",
+      "draft:older-head",
     ]);
+  });
+});
+
+describe("outdated draft comments", () => {
+  const comment = (id: string, path: string, line: number, headSha: string) =>
+    ({
+      id,
+      path,
+      subjectType: "line",
+      line,
+      side: "right",
+      body: id,
+      headSha,
+      createdAt: 0,
+    }) satisfies ReviewDraftComment;
+
+  it("counts only comments on the reviewed head and names the others", () => {
+    const comments = [
+      comment("a", "src/app.ts", 12, "new"),
+      comment("b", "src/login.ts", 4, "old"),
+      comment("c", "src/x.ts", 1, "old"),
+    ];
+    const split = splitDraftCommentsByHead(comments, "new");
+    expect(split.current).toBe(1);
+    expect(describeOutdatedDraftComments(split.outdated)).toBe(
+      "2 comments were written on older commits (login.ts:4, x.ts:1) and stay in your draft without being sent.",
+    );
+    expect(describeOutdatedDraftComments([])).toBeNull();
+    // Without a known head nothing counts as outdated.
+    expect(splitDraftCommentsByHead(comments, null).current).toBe(3);
   });
 });

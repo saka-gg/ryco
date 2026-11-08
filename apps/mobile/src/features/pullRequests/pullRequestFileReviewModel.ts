@@ -1,6 +1,7 @@
-import type {
-  ReviewDraftComment,
-  ViewedFileState,
+import {
+  isReviewDraftCommentOutdated,
+  type ReviewDraftComment,
+  type ViewedFileState,
 } from "@ryco/client-runtime/state/pull-request-review";
 import type {
   ChangeRequestDiffSide,
@@ -91,12 +92,16 @@ function anchorKey(side: ChangeRequestDiffSide, line: number): string {
 /**
  * The diff's rows with comments placed under the line they belong to: the
  * host's threads first, then the viewer's drafts. Comments whose line is not
- * in the rows shown (outdated, or past a cut-off excerpt) come at the end.
+ * in the rows shown (past a cut-off excerpt) come at the end, and so do drafts
+ * written on another head: their line numbers refer to other commits, so
+ * placing them by number would put them under the wrong line.
  */
 export function interleavePullRequestFileComments(input: {
   readonly path: string;
   readonly rows: ReadonlyArray<PullRequestDiffRow>;
   readonly drafts: ReadonlyArray<ReviewDraftComment>;
+  /** The head the rows show; drafts written on another one are not placed. */
+  readonly headSha: string | null;
   readonly threads: ReadonlyArray<ChangeRequestReviewThread>;
 }): ReadonlyArray<PullRequestFileDiffItem> {
   const byAnchor = new Map<string, PullRequestFileDiffItem[]>();
@@ -130,11 +135,12 @@ export function interleavePullRequestFileComments(input: {
   }
   for (const comment of input.drafts) {
     if (comment.path !== input.path) continue;
-    place(comment.side ?? "right", comment.subjectType === "file" ? null : (comment.line ?? null), {
-      kind: "draft",
-      key: `draft:${comment.id}`,
-      comment,
-    });
+    const outdated = isReviewDraftCommentOutdated(comment, input.headSha);
+    place(
+      comment.side ?? "right",
+      comment.subjectType === "file" || outdated ? null : (comment.line ?? null),
+      { kind: "draft", key: `draft:${comment.id}`, comment },
+    );
   }
   const items: PullRequestFileDiffItem[] = [];
   input.rows.forEach((row, index) => {
@@ -150,4 +156,44 @@ export function interleavePullRequestFileComments(input: {
   });
   items.push(...unplaced);
   return items;
+}
+
+export interface PullRequestDraftCommentsByHead {
+  /** Written on the head being reviewed; sent with the review. */
+  readonly current: number;
+  /** Written on older commits: kept in the draft, not sent. */
+  readonly outdated: ReadonlyArray<ReviewDraftComment>;
+}
+
+/** The draft's line comments split by whether the review would send them. */
+export function splitDraftCommentsByHead(
+  comments: ReadonlyArray<ReviewDraftComment>,
+  headSha: string | null,
+): PullRequestDraftCommentsByHead {
+  const outdated = comments.filter((comment) => isReviewDraftCommentOutdated(comment, headSha));
+  return { current: comments.length - outdated.length, outdated };
+}
+
+/** "app.ts:12, login.ts:4 and 2 more": where the outdated comments were written. */
+export function describeDraftCommentPlaces(
+  comments: ReadonlyArray<ReviewDraftComment>,
+  shown = 3,
+): string {
+  const places = comments.map((comment) => {
+    const name = comment.path.slice(comment.path.lastIndexOf("/") + 1);
+    return comment.subjectType === "file" || comment.line === undefined
+      ? name
+      : `${name}:${comment.line}`;
+  });
+  if (places.length <= shown) return places.join(", ");
+  return `${places.slice(0, shown).join(", ")} and ${places.length - shown} more`;
+}
+
+/** The sentence the review sheet and Approve show about outdated comments; null when none. */
+export function describeOutdatedDraftComments(
+  outdated: ReadonlyArray<ReviewDraftComment>,
+): string | null {
+  if (outdated.length === 0) return null;
+  const one = outdated.length === 1;
+  return `${one ? "1 comment was" : `${outdated.length} comments were`} written on older commits (${describeDraftCommentPlaces(outdated)}) and ${one ? "stays" : "stay"} in your draft without being sent.`;
 }
