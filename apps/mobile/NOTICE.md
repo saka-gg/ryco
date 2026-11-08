@@ -30,6 +30,19 @@ brand marks, cloud plane, showcase rig, and asset-runtime dependencies removed.
 Attribution is kept here (not as in-file headers) so the T3 identifiers do not
 re-enter `src`.
 
+The 2026-11 everyday-handling round ported further modules from the same
+upstream (at `e455200077`), adapted to Ryco's runtime and re-themed the same
+way: the thread row swipe actions and their dismissal animation
+(`src/features/threadList/ThreadSwipeable.tsx`, `threadSwipeModel.ts`,
+`threadDismissal.ts`; upstream `features/home/thread-swipe-actions.tsx`,
+`thread-dismissal.ts`), the swipe-to-dismiss Undo toast behavior
+(`src/components/SidebarUndoNoticeHost.tsx`; upstream `components/ui/Toast.tsx`,
+`features/home/ThreadUndoNotice.tsx`), the home-screen quick actions
+(`src/features/shortcuts/*`; upstream `features/shortcuts/appShortcuts.ts`,
+`appShortcutsRuntime.ts`), and the streaming-reply haptics
+(`src/features/threads/threadStreamHaptics.ts`; upstream
+`features/threads/threadStreamHaptics.ts`).
+
 `pingdotgg/t3code` is Copyright (c) 2026 T3 Tools Inc. and licensed under the MIT
 License; that notice is retained below as required. The four vendored native
 modules under `modules/*` carry their own `LICENSE` / `UPSTREAM.md` notices

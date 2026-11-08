@@ -43,10 +43,19 @@ function selectOverSheets(
  */
 export function openThread(
   navigation: RootNavigation,
-  thread: { readonly environmentId: EnvironmentId; readonly threadId: ThreadId },
+  thread: {
+    readonly environmentId: EnvironmentId;
+    readonly threadId: ThreadId;
+    /** Opens the thread scrolled to this message (a message search hit). */
+    readonly messageId?: string | undefined;
+  },
 ): void {
   useStore.getState().setActiveEnvironmentId(thread.environmentId);
-  const params = { environmentId: thread.environmentId, threadId: thread.threadId };
+  const params = {
+    environmentId: thread.environmentId,
+    threadId: thread.threadId,
+    ...(thread.messageId ? { messageId: thread.messageId } : {}),
+  };
   selectOverSheets(navigation, { name: "Thread", params }, () =>
     navigation.navigate("Thread", params),
   );

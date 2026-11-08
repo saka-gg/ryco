@@ -10,6 +10,7 @@ import { ChangeRequestBadge } from "../../components/ChangeRequestBadge";
 import { FollowUpQueueMark } from "../../components/FollowUpQueueMark";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { relativeTime } from "../../lib/time";
+import { splitSnippet } from "./inboxMessageSearchModel";
 import type { InboxThreadRow as InboxThreadRowModel, InboxThreadState } from "./inboxModel";
 
 function statusDotClassName(state: InboxThreadState): string {
@@ -75,6 +76,7 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
     row.followUpQueue?.title,
     row.changeRequest?.accessibilityLabel,
     row.providerLabel ? `Provider: ${row.providerLabel}` : null,
+    row.messageMatch ? `Message match: ${row.messageMatch.snippet}` : null,
   ]
     .filter(Boolean)
     .join(", ");
@@ -85,7 +87,7 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
       accessibilityLabel={accessibilityLabel}
       onPress={props.onPress}
       onLongPress={props.onLongPress}
-      className="mx-4 mb-2 gap-2 rounded-2xl bg-card px-3.5 py-3 active:bg-card-alt"
+      className="gap-2 rounded-2xl bg-card px-3.5 py-3 active:bg-card-alt"
     >
       <View className="flex-row items-start gap-2">
         <View
@@ -106,6 +108,9 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
           {relativeTime(row.updatedAt)}
         </Text>
       </View>
+      {row.messageMatch ? (
+        <MessageMatchExcerpt snippet={row.messageMatch.snippet} query={row.messageMatch.query} />
+      ) : null}
       <View className="flex-row items-center gap-1.5">
         {row.isChat ? (
           <View className="h-4 w-4 items-center justify-center">
@@ -174,3 +179,29 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
     </Pressable>
   );
 });
+
+/** The matched message under a searched row, its query words in bold. */
+function MessageMatchExcerpt(props: { readonly snippet: string; readonly query: string }) {
+  const iconColor = useThemeColor("--color-icon-subtle");
+  return (
+    <View className="flex-row items-start gap-1.5" accessibilityLabel={`Message: ${props.snippet}`}>
+      <View className="h-4 w-4 items-center justify-center pt-0.5">
+        <IconMessage size={12} strokeWidth={1.75} color={iconColor as string} />
+      </View>
+      <Text className="min-w-0 flex-1 text-xs text-foreground-muted" numberOfLines={2}>
+        {splitSnippet(props.snippet, props.query).map((part) => (
+          <Text
+            key={part.start}
+            className={
+              part.highlighted
+                ? "font-ryco-bold text-xs text-foreground"
+                : "text-xs text-foreground-muted"
+            }
+          >
+            {part.text}
+          </Text>
+        ))}
+      </Text>
+    </View>
+  );
+}

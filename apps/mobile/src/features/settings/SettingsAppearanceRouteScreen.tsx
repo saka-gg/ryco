@@ -7,6 +7,11 @@ import { useAppearancePreferences } from "./appearance/AppearancePreferencesProv
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 import { Pressable } from "react-native";
+import {
+  isStreamHapticsEnabled,
+  updatePreferences,
+  usePreferences,
+} from "../../state/preferencesStore";
 
 function Stepper(props: {
   readonly label: string;
@@ -46,6 +51,7 @@ function Stepper(props: {
 export function SettingsAppearanceRouteScreen() {
   const { appearance, isReady, setBaseFontSize, setCodeFontSize, setCodeWordBreak } =
     useAppearancePreferences();
+  const preferences = usePreferences();
 
   if (!isReady) return <LoadingScreen message="Loading appearance…" />;
 
@@ -80,6 +86,15 @@ export function SettingsAppearanceRouteScreen() {
           label="Wrap long code lines"
           value={appearance.codeWordBreak}
           onValueChange={setCodeWordBreak}
+        />
+      </SettingsSection>
+      <SettingsSection title="Feel">
+        <SettingsSwitchRow
+          first
+          label="Haptics while a reply streams"
+          detail="A light tick as the agent writes in the task you have open."
+          value={isStreamHapticsEnabled(preferences)}
+          onValueChange={(streamHaptics) => updatePreferences({ streamHaptics })}
         />
       </SettingsSection>
     </ScrollView>

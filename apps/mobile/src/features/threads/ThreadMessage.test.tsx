@@ -88,6 +88,9 @@ vi.mock("../../native/SelectableMarkdownText", () => ({
 }));
 vi.mock("./ThreadHtmlRender", () => ({ ThreadHtmlRender: "ThreadHtmlRender" }));
 vi.mock("./HtmlRenderCards", () => ({ HtmlRenderCards: "HtmlRenderCards" }));
+vi.mock("./ImageGalleryModal", () => ({
+  useImageGallery: () => ({ open: () => {}, modal: null }),
+}));
 
 import { ThreadMessage } from "./ThreadMessage";
 import { EDIT_FROM_HERE_COPY, UNDO_FILE_CHANGES_COPY } from "@ryco/client-runtime/state/session";
@@ -427,7 +430,7 @@ describe("ThreadMessage attachment rows", () => {
     expect(findPressables(tree)).toHaveLength(0);
   });
 
-  it("renders an image attachment without a pressable row", () => {
+  it("renders an image attachment that opens the full-screen gallery", () => {
     const tree = renderMessage([
       {
         type: "image",
@@ -438,7 +441,12 @@ describe("ThreadMessage attachment rows", () => {
         previewUrl: "http://node.local/attachments/att-2",
       },
     ]);
-    expect(findPressables(tree)).toHaveLength(0);
+    const pressables = findPressables(tree);
+    expect(pressables).toHaveLength(1);
+    expect(pressables[0]!.props).toMatchObject({
+      accessibilityRole: "imagebutton",
+      accessibilityLabel: "shot.png, open full screen",
+    });
   });
 
   it("reserves an aspect-ratio slot for an image with probed dimensions", () => {

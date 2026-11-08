@@ -4,6 +4,8 @@ import { useCallback } from "react";
 import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts/base-schemas";
 
 import { markThreadVisible } from "../../notifications/visibleThread";
+import { selectSidebarThreadSummaryByRef, useStore } from "../../state/threadsRuntime";
+import { recordRecentThreadShortcut } from "../shortcuts/appShortcutsRuntime";
 import { ThreadDetailScreen } from "./ThreadDetailScreen";
 
 /**
@@ -35,6 +37,22 @@ export function ThreadRouteScreen(props: ThreadRouteScreenProps) {
         threadId: ThreadId.make(threadIdRaw),
       });
     }, [environmentIdRaw, threadIdRaw]),
+  );
+  // The thread leads the recent threads on the app icon's quick actions, under its current
+  // title: a new task's title arrives after it opens.
+  const title = useStore((state) =>
+    environmentIdRaw && threadIdRaw
+      ? (selectSidebarThreadSummaryByRef(state, {
+          environmentId: EnvironmentId.make(environmentIdRaw),
+          threadId: ThreadId.make(threadIdRaw),
+        })?.title ?? "")
+      : "",
+  );
+  useFocusEffect(
+    useCallback(() => {
+      if (!environmentIdRaw || !threadIdRaw) return;
+      recordRecentThreadShortcut({ environmentId: environmentIdRaw, threadId: threadIdRaw, title });
+    }, [environmentIdRaw, threadIdRaw, title]),
   );
 
   if (!environmentIdRaw || !threadIdRaw) return null;

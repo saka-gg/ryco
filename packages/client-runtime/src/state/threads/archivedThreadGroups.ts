@@ -1,11 +1,11 @@
 import { isChatProject, type ProjectKindCarrier } from "@ryco/shared/projectKind";
 
-interface ArchivedSettingsProject extends ProjectKindCarrier {
+interface ArchivedThreadGroupProject extends ProjectKindCarrier {
   readonly id: string;
   readonly environmentId: string;
 }
 
-interface ArchivedSettingsThread {
+interface ArchivedThreadGroupThread {
   readonly id: string;
   readonly projectId: string;
   readonly environmentId: string;
@@ -14,14 +14,16 @@ interface ArchivedSettingsThread {
 }
 
 /**
+ * The archive as web's Settings and the phone's Archived screen list it.
+ *
  * One section of the archive: a project's archived threads, or a node's
  * archived "No project" chats. A chat's project is its folder, not something
  * to name, so every chat of a node shares one "No project" section instead of
  * one section per chat titled like the chat.
  */
-export type ArchivedSettingsGroup<
-  P extends ArchivedSettingsProject,
-  T extends ArchivedSettingsThread,
+export type ArchivedThreadGroup<
+  P extends ArchivedThreadGroupProject,
+  T extends ArchivedThreadGroupThread,
 > =
   | {
       readonly kind: "project";
@@ -39,7 +41,7 @@ export type ArchivedSettingsGroup<
 /** Project IDs can collide across nodes; both halves of the reference must match. */
 const projectKey = (environmentId: string, projectId: string) => `${environmentId}:${projectId}`;
 
-const newestArchivedFirst = (left: ArchivedSettingsThread, right: ArchivedSettingsThread) =>
+const newestArchivedFirst = (left: ArchivedThreadGroupThread, right: ArchivedThreadGroupThread) =>
   (right.archivedAt ?? right.createdAt).localeCompare(left.archivedAt ?? left.createdAt) ||
   right.id.localeCompare(left.id);
 
@@ -48,14 +50,14 @@ const newestArchivedFirst = (left: ArchivedSettingsThread, right: ArchivedSettin
  * their usual order, then each node's "No project" chats (where the sidebar
  * lists chats too). `environmentId` limits the archive to one node.
  */
-export function selectArchivedSettingsGroups<
-  P extends ArchivedSettingsProject,
-  T extends ArchivedSettingsThread,
+export function selectArchivedThreadGroups<
+  P extends ArchivedThreadGroupProject,
+  T extends ArchivedThreadGroupThread,
 >(
   projects: readonly P[],
   threads: readonly T[],
   environmentId?: string,
-): Array<ArchivedSettingsGroup<P, T>> {
+): Array<ArchivedThreadGroup<P, T>> {
   const archivedByProject = new Map<string, T[]>();
   for (const thread of threads) {
     if (thread.archivedAt === null) continue;
@@ -66,7 +68,7 @@ export function selectArchivedSettingsGroups<
     else archivedByProject.set(key, [thread]);
   }
 
-  const projectGroups: Array<ArchivedSettingsGroup<P, T>> = [];
+  const projectGroups: Array<ArchivedThreadGroup<P, T>> = [];
   const chatThreadsByEnvironment = new Map<P["environmentId"], T[]>();
   for (const project of projects) {
     if (environmentId !== undefined && project.environmentId !== environmentId) continue;
@@ -88,7 +90,7 @@ export function selectArchivedSettingsGroups<
 
   const chatGroups = Array.from(
     chatThreadsByEnvironment,
-    ([chatEnvironmentId, chatThreads]): ArchivedSettingsGroup<P, T> => ({
+    ([chatEnvironmentId, chatThreads]): ArchivedThreadGroup<P, T> => ({
       kind: "no-project",
       key: `no-project:${chatEnvironmentId}`,
       environmentId: chatEnvironmentId,

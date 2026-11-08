@@ -1,5 +1,10 @@
 import { Debouncer } from "@tanstack/react-pacer";
 import { create } from "zustand";
+import {
+  pinnedThreadKeyList,
+  sanitizePinnedThreadKeys,
+  setThreadKeyPinned,
+} from "@ryco/client-runtime/state/threads/threadPins";
 
 import { isHostedHubMode } from "./env";
 
@@ -489,9 +494,7 @@ export function readPersistedState(): UiState {
 function sanitizePersistedPinnedThreadKeys(
   value: PersistedUiState["pinnedThreadKeys"],
 ): Record<string, boolean> {
-  return Object.fromEntries(
-    uniqueNonEmptyStrings(value ?? []).map((threadKey) => [threadKey, true]),
-  );
+  return sanitizePinnedThreadKeys(value ?? []);
 }
 
 function sanitizePersistedThreadChangedFilesExpanded(
@@ -584,9 +587,7 @@ export function persistState(state: UiState): void {
           ]
         : [];
     });
-    const pinnedThreadKeys = Object.entries(state.pinnedThreadKeys).flatMap(
-      ([threadKey, pinned]) => (pinned ? [threadKey] : []),
-    );
+    const pinnedThreadKeys = pinnedThreadKeyList(state.pinnedThreadKeys);
     const threadChangedFilesExpandedById = Object.fromEntries(
       Object.entries(state.threadChangedFilesExpandedById).flatMap(([threadId, turns]) => {
         const nextTurns = Object.fromEntries(
@@ -1034,26 +1035,10 @@ export function markThreadUnread(
 }
 
 export function setThreadPinned(state: UiState, threadId: string, pinned: boolean): UiState {
-  if ((state.pinnedThreadKeys[threadId] === true) === pinned) {
-    return state;
-  }
-
-  if (!pinned) {
-    const nextPinnedThreadKeys = { ...state.pinnedThreadKeys };
-    delete nextPinnedThreadKeys[threadId];
-    return {
-      ...state,
-      pinnedThreadKeys: nextPinnedThreadKeys,
-    };
-  }
-
-  return {
-    ...state,
-    pinnedThreadKeys: {
-      ...state.pinnedThreadKeys,
-      [threadId]: true,
-    },
-  };
+  const pinnedThreadKeys = setThreadKeyPinned(state.pinnedThreadKeys, threadId, pinned);
+  return pinnedThreadKeys === state.pinnedThreadKeys
+    ? state
+    : { ...state, pinnedThreadKeys: { ...pinnedThreadKeys } };
 }
 
 export function toggleThreadPinned(state: UiState, threadId: string): UiState {

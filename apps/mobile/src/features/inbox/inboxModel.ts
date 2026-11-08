@@ -10,11 +10,14 @@ import type {
   SidebarThreadOrStub,
   SidebarThreadSummary,
   SidebarWorktreeSummary,
+  ThreadInboxEnvironment,
   ThreadInboxMutationBlocker,
 } from "@ryco/client-runtime/state/threads";
 import {
   buildThreadInbox,
   resolveThreadHideAvailability,
+  resolveThreadLifecycleAvailability,
+  threadInboxConnectionBlocker,
 } from "@ryco/client-runtime/state/threads";
 import {
   followUpQueueBadgeOf,
@@ -33,6 +36,7 @@ import {
   providerDisplayLabel,
 } from "../../lib/providerDisplay";
 import { type NodeTrust } from "../home/nodeTrustModel";
+import type { InboxMessageMatch } from "./inboxMessageSearchModel";
 
 export type InboxThreadState =
   | "needs-input"
@@ -134,14 +138,20 @@ export interface InboxThreadRow {
   readonly canSnooze?: boolean;
   readonly canUnsnooze?: boolean;
   readonly canSettle: boolean;
+  /** Pinned on this device: the row leads the Inbox in the Pinned section. */
+  readonly pinned: boolean;
+  /** Archive can run now: a connected node and no turn running (`resolveThreadLifecycleAvailability`). */
+  readonly canArchive: boolean;
+  /** The message the search found in this thread, with the words to highlight; null otherwise. */
+  readonly messageMatch?: (InboxMessageMatch & { readonly query: string }) | null;
   readonly settlementBlocker: ThreadSettlementBlocker | null;
   readonly mutationEnabled: boolean;
   readonly mutationBlocker: ThreadInboxMutationBlocker | null;
 }
 
 export interface InboxSection {
-  readonly key: "active" | "settled" | "snoozed" | "hidden";
-  readonly title: "Active" | "Settled" | "Snoozed" | "Hidden";
+  readonly key: "pinned" | "active" | "settled" | "snoozed" | "hidden";
+  readonly title: "Pinned" | "Active" | "Settled" | "Snoozed" | "Hidden";
   readonly rows: ReadonlyArray<InboxThreadRow>;
 }
 
@@ -160,6 +170,8 @@ export interface BuildInboxInput {
   readonly nowMs?: number;
   /** When this device last saw each thread after it woke from snooze, by scoped key. */
   readonly wokeSeenAtByThreadKey?: Readonly<Record<string, string>>;
+  /** What the nodes' message search found for `query`, by scoped key (`useInboxMessageSearch`). */
+  readonly messageMatches?: ReadonlyMap<string, InboxMessageMatch>;
 }
 
 function scopedKey(environmentId: EnvironmentId, id: string): string {
@@ -237,6 +249,29 @@ function timestamp(thread: SidebarThreadSummary): string {
   return thread.updatedAt ?? thread.latestUserMessageAt ?? thread.createdAt;
 }
 
+/** A listed machine as the shared inbox model (and its mutation readiness) reads it. */
+export function toThreadInboxEnvironment(environment: InboxEnvironment): ThreadInboxEnvironment {
+  return {
+    environmentId: environment.environmentId,
+    label: environment.label,
+    threadSettlementSupported: environment.threadSettlementSupported ?? false,
+    threadSnoozeSupported: environment.threadSnoozeSupported ?? false,
+    threadTriageSupported: environment.threadTriageSupported ?? false,
+    autoSettleAfterDays: environment.autoSettleAfterDays,
+    connected: environment.connectionState === "connected",
+    mutationReady: environment.mutationReady ?? false,
+    shellCurrent: environment.shellCurrent ?? false,
+  };
+}
+
+/** Whether a change (archive, restore) can reach this machine now, by the shared rule. */
+export function canChangeThreadsOn(environment: InboxEnvironment): boolean {
+  return (
+    environment.stale !== true &&
+    threadInboxConnectionBlocker(toThreadInboxEnvironment(environment)) === null
+  );
+}
+
 export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxSection> {
   const environmentById = new Map(
     input.environments.map((environment) => [environment.environmentId, environment] as const),
@@ -252,17 +287,7 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
     projects: input.projects,
     worktrees: input.worktrees,
     threads: input.threads,
-    environments: input.environments.map((environment) => ({
-      environmentId: environment.environmentId,
-      label: environment.label,
-      threadSettlementSupported: environment.threadSettlementSupported ?? false,
-      threadSnoozeSupported: environment.threadSnoozeSupported ?? false,
-      threadTriageSupported: environment.threadTriageSupported ?? false,
-      autoSettleAfterDays: environment.autoSettleAfterDays,
-      connected: environment.connectionState === "connected",
-      mutationReady: environment.mutationReady ?? false,
-      shellCurrent: environment.shellCurrent ?? false,
-    })),
+    environments: input.environments.map(toThreadInboxEnvironment),
     localQueuedThreadKeys: input.localQueuedThreadIds,
     deliveryUnknownThreadKeys: deliveryUnknown,
     pinnedThreadKeys: input.pinnedThreadKeys,
@@ -270,10 +295,18 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
     filters: {
       ...(input.nodeScope ? { environmentIds: [input.nodeScope] } : {}),
       text: input.query,
+      ...(input.messageMatches && input.messageMatches.size > 0
+        ? { textMatchedKeys: new Set(input.messageMatches.keys()) }
+        : {}),
     },
     nowMs,
   });
 
+  const searchedText = input.query?.trim() ?? "";
+  const messageMatchFor = (key: string) => {
+    const match = searchedText.length > 0 ? input.messageMatches?.get(key) : undefined;
+    return match ? { ...match, query: searchedText } : null;
+  };
   const toRow = (entry: (typeof inbox.active)[number]): InboxThreadRow => {
     const thread = entry.thread!;
     const environment = environmentById.get(thread.environmentId);
@@ -348,18 +381,26 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
         environment.connectionState === "connected",
       // A working task files: the node settles it when the work ends.
       canSettle: entry.lifecycle.eligibility.canSettle || entry.lifecycle.settleFiles === true,
+      pinned: entry.pinned,
+      messageMatch: messageMatchFor(entry.key),
+      // Archive's own rule: the shared connection rule plus a conversation and no running turn.
+      canArchive:
+        environment?.stale !== true && resolveThreadLifecycleAvailability(entry).archive.enabled,
       settlementBlocker: entry.lifecycle.settlementBlocker,
       mutationEnabled: entry.mutationEnabled,
       mutationBlocker: entry.mutationBlocker,
     };
   };
 
-  const active = inbox.active.map(toRow);
+  // Pinned threads lead Active (`buildThreadInbox`); the phone lists them on their own.
+  const pinned = inbox.active.filter((entry) => entry.pinned).map(toRow);
+  const active = inbox.active.filter((entry) => !entry.pinned).map(toRow);
   const settled = inbox.settled.map(toRow);
   const snoozed = inbox.snoozed.map(toRow);
   const hidden = inbox.hidden.map(toRow);
 
   const sections: InboxSection[] = [];
+  if (pinned.length > 0) sections.push({ key: "pinned", title: "Pinned", rows: pinned });
   if (active.length > 0) sections.push({ key: "active", title: "Active", rows: active });
   if (snoozed.length > 0) sections.push({ key: "snoozed", title: "Snoozed", rows: snoozed });
   if (settled.length > 0) sections.push({ key: "settled", title: "Settled", rows: settled });

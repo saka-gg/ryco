@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { selectArchivedSettingsGroups } from "./archivedSettings";
+import { selectArchivedThreadGroups } from "./archivedThreadGroups.ts";
 
 describe("node settings archive", () => {
   const projects = ["local", "remote"].map((environmentId) => ({
@@ -14,7 +14,7 @@ describe("node settings archive", () => {
     archivedAt: "2026-01-02",
   }));
   it("shows only the selected node even when IDs collide", () => {
-    expect(selectArchivedSettingsGroups(projects, threads, "remote")).toEqual([
+    expect(selectArchivedThreadGroups(projects, threads, "remote")).toEqual([
       {
         kind: "project",
         key: "project:remote:same-project",
@@ -22,10 +22,10 @@ describe("node settings archive", () => {
         threads: [threads[1]],
       },
     ]);
-    expect(selectArchivedSettingsGroups(projects, threads, "missing")).toEqual([]);
+    expect(selectArchivedThreadGroups(projects, threads, "missing")).toEqual([]);
   });
   it("keeps each node's archive separate in the legacy combined view", () => {
-    expect(selectArchivedSettingsGroups(projects, threads)).toEqual([
+    expect(selectArchivedThreadGroups(projects, threads)).toEqual([
       {
         kind: "project",
         key: "project:local:same-project",
@@ -68,7 +68,7 @@ describe("archived chats", () => {
   ];
 
   it("gathers a node's chats under one No project section after its projects", () => {
-    const groups = selectArchivedSettingsGroups(projects, threads, "local");
+    const groups = selectArchivedThreadGroups(projects, threads, "local");
     expect(groups.map((group) => [group.kind, group.key])).toEqual([
       ["project", "project:local:project"],
       ["project", "project:local:legacy"],
@@ -81,7 +81,7 @@ describe("archived chats", () => {
   });
 
   it("never names a section after a chat", () => {
-    const groups = selectArchivedSettingsGroups(projects, threads);
+    const groups = selectArchivedThreadGroups(projects, threads);
     const projectIds = groups.flatMap((group) =>
       group.kind === "project" ? [group.project.id] : [],
     );
@@ -98,7 +98,7 @@ describe("archived chats", () => {
 
   it("omits the No project section when no chat is archived", () => {
     expect(
-      selectArchivedSettingsGroups(projects, [thread("active-chat", "trip", null)], "local"),
+      selectArchivedThreadGroups(projects, [thread("active-chat", "trip", null)], "local"),
     ).toEqual([]);
   });
 });
