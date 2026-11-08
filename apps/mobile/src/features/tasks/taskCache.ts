@@ -10,6 +10,7 @@ import {
   isPreferencesHydrated,
   isThreadContentCacheEnabled,
   subscribePreferences,
+  whenPreferencesHydrated,
 } from "../../state/preferencesStore";
 import { onTaskCachePurge, TASK_CACHE_INDEX_KEY, TASK_CACHE_KEY_PREFIX } from "./taskCacheKeys";
 import { decodeTaskCache, encodeTaskCache } from "./taskCacheModel";
@@ -29,7 +30,22 @@ const WRITE_DELAY_MS = 2_000;
 
 const timers = new Map<EnvironmentId, ReturnType<typeof setTimeout>>();
 const writtenFrom = new Map<EnvironmentId, Readonly<Record<string, LocalTask>>>();
+/** The read time of the copy each machine's list was filled from, until a live read replaces it. */
+const hydratedAt = new Map<EnvironmentId, number>();
 let installed = false;
+
+/**
+ * The machine's tasks on screen are this device's copy, not a read in this
+ * session: possibly cut short (`TASK_CACHE_MAX_TASKS`), so a task missing from
+ * it is unknown rather than deleted.
+ */
+export function isOfflineTaskCopy(environmentId: EnvironmentId): boolean {
+  const at = hydratedAt.get(environmentId);
+  return (
+    at !== undefined &&
+    selectLocalTasksEnvironment(useLocalTasksStore.getState(), environmentId).readAt === at
+  );
+}
 
 async function readIndex(): Promise<string[]> {
   try {
@@ -88,6 +104,9 @@ function forget(environmentId: EnvironmentId): void {
   if (timer) clearTimeout(timer);
   timers.delete(environmentId);
   writtenFrom.delete(environmentId);
+  // Like the threads' offline state: a list shown from the removed copy goes with it; a live one stays.
+  if (isOfflineTaskCopy(environmentId)) useLocalTasksStore.getState().clear(environmentId);
+  hydratedAt.delete(environmentId);
 }
 
 /** Starts writing copies as task lists are read; idempotent. */
@@ -116,6 +135,8 @@ export function installTaskCache(): void {
  * (offline, or before its first read lands). A live read replaces it.
  */
 export async function hydrateTaskCache(environmentId: EnvironmentId): Promise<void> {
+  // At a cold start the setting is still loading: wait for it rather than show nothing.
+  await whenPreferencesHydrated();
   if (!enabled()) return;
   const before = selectLocalTasksEnvironment(useLocalTasksStore.getState(), environmentId);
   if (before.readAt !== null) return;
@@ -128,6 +149,7 @@ export async function hydrateTaskCache(environmentId: EnvironmentId): Promise<vo
     since: now.writeEpoch,
     readAt: stored.readAt,
   });
+  hydratedAt.set(environmentId, stored.readAt);
   writtenFrom.set(
     environmentId,
     selectLocalTasksEnvironment(useLocalTasksStore.getState(), environmentId).tasks,

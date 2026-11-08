@@ -29,21 +29,25 @@ function projectsOf(
 export function CaptureSession(props: { readonly request: TaskCaptureRequest }) {
   const { request } = props;
   const machines = useTaskMachines();
-  // Hub machines connect while the sheet is open, so they can take the task.
+  const tabState = useTasksTabState();
+  // A task made from a chat or pull request goes to that machine or nowhere: its link points there.
+  const required = request.link ? (request.environmentId ?? null) : null;
+  const [initial] = useState(() =>
+    resolveCaptureMachine(
+      machines,
+      [request.environmentId, tabState.environmentId, tabState.captureEnvironmentId],
+      required,
+    ),
+  );
+  const [environmentId, setEnvironmentId] = useState<EnvironmentId | null>(() =>
+    initial === null || initial === "unavailable" ? null : initial.environmentId,
+  );
+  // Hub machines connect while the sheet is open, the chosen one first, so they can take the task.
   useRetainLocalTasks(
     machines.map((machine) => machine.environmentId),
-    { demand: true },
+    { demand: true, priority: environmentId === null ? [] : [environmentId] },
   );
-  const connected = machines.filter((machine) => machine.connected);
-  const tabState = useTasksTabState();
-  const [environmentId, setEnvironmentId] = useState<EnvironmentId | null>(
-    () =>
-      resolveCaptureMachine(machines, [
-        request.environmentId,
-        tabState.environmentId,
-        tabState.captureEnvironmentId,
-      ])?.environmentId ?? null,
-  );
+  const reachable = machines.filter((machine) => machine.reachable);
   const allProjects = useStore(useShallow(selectProjectsAcrossEnvironments));
   const projects = projectsOf(allProjects, environmentId);
   const [projectId, setProjectId] = useState<ProjectId | null>(() =>
@@ -61,14 +65,23 @@ export function CaptureSession(props: { readonly request: TaskCaptureRequest }) 
   );
 
   const noMachine = environmentId === null;
+  const requiredLabel =
+    machines.find((machine) => machine.environmentId === required)?.label ?? "Its machine";
   useEffect(() => {
     if (!noMachine) return;
     closeTaskCapture();
+    if (initial === "unavailable") {
+      Alert.alert(
+        `${requiredLabel} can't take tasks right now`,
+        "A task made here belongs on the chat's machine, which is offline or isn't yours. Try again once it's connected.",
+      );
+      return;
+    }
     Alert.alert(
       "No machine to add it to",
       "Tasks live on your machines. Connect one you own to add a task.",
     );
-  }, [noMachine]);
+  }, [initial, noMachine, requiredLabel]);
   if (environmentId === null) return null;
 
   const changeMachine = (next: EnvironmentId) => {
@@ -94,7 +107,7 @@ export function CaptureSession(props: { readonly request: TaskCaptureRequest }) 
   };
   return (
     <TaskCaptureSheet
-      machines={connected}
+      machines={reachable}
       environmentId={environmentId}
       onMachineChange={changeMachine}
       projects={projects.map((project) => ({ projectId: project.id, name: project.name }))}

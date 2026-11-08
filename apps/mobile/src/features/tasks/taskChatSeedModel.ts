@@ -15,6 +15,8 @@ export interface TaskChatSeed {
   readonly branch: string;
   /** The branch it starts from; empty for the project's current one. */
   readonly baseBranch: string;
+  /** The branches the task's earlier starts asked for (`nextFreeTaskBranch` moves past them). */
+  readonly startBranches: ReadonlyArray<string>;
 }
 
 /** The phone sends a turn that creates its worktree from a branch; no PR or issue worktrees. */
@@ -47,5 +49,6 @@ export function taskChatSeed(
     }),
     branch: placement.worktreeBranchName ?? "",
     baseBranch: placement.baseBranch ?? "",
+    startBranches,
   };
 }

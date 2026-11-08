@@ -38,7 +38,7 @@ export function useTaskSearch(query: string): TaskSearch {
     let loading = false;
     const searched = machines.map((machine) => {
       const environment = byEnvironment[machine.environmentId];
-      if (!environment || environment.readAt === null) loading = machine.connected || loading;
+      if (!environment || environment.readAt === null) loading = machine.reachable || loading;
       return {
         environmentId: machine.environmentId,
         label: machine.label,

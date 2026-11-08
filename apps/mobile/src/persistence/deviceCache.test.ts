@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   pullRequests: vi.fn(),
   clearPullRequests: vi.fn(),
   savedPullRequests: vi.fn(),
+  taskBytes: vi.fn(),
 }));
 vi.mock("./environmentSnapshotPersistence", () => ({
   listEnvironmentCacheStorage: mocks.snapshots,
@@ -34,6 +35,9 @@ vi.mock("@ryco/client-runtime/connection", () => ({
   projectIconCacheBytes: mocks.icons,
   clearProjectIconCache: mocks.clearIcons,
 }));
+vi.mock("../features/tasks/taskCacheKeys", () => ({
+  readTaskCacheBytes: mocks.taskBytes,
+}));
 import { clearDeviceCache, readDeviceCacheUsage } from "./deviceCache";
 const device = "device-a" as EnvironmentId;
 beforeEach(() => {
@@ -44,6 +48,7 @@ beforeEach(() => {
   mocks.icons.mockReturnValue(10);
   mocks.pullRequests.mockReturnValue(5);
   mocks.savedPullRequests.mockResolvedValue(0);
+  mocks.taskBytes.mockResolvedValue(0);
 });
 it("accounts for each category and includes snapshots from devices no longer in the catalog", async () => {
   mocks.snapshots.mockResolvedValue([
@@ -62,6 +67,15 @@ it("accounts for each category and includes snapshots from devices no longer in 
       projects: 1,
       totalBytes: 205,
     },
+  ]);
+});
+it("counts a device's task list copy with its conversations", async () => {
+  mocks.snapshots.mockResolvedValue([
+    { environmentId: device, payloadBytes: 100, threads: 2, projects: 1 },
+  ]);
+  mocks.taskBytes.mockResolvedValue(12);
+  expect(await readDeviceCacheUsage([])).toMatchObject([
+    { environmentId: device, snapshotBytes: 112, totalBytes: 217 },
   ]);
 });
 it("clears only the selected device and its own image source cache", async () => {

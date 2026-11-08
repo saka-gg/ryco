@@ -36,17 +36,32 @@ describe("deriveTaskMachines", () => {
       forbidden: { [REFUSED]: true },
     });
     expect(machines).toEqual([
-      { environmentId: MAC, label: "MacBook", connected: true },
-      { environmentId: MINI, label: "Mac mini", connected: false },
+      { environmentId: MAC, label: "MacBook", connected: true, reachable: true },
+      { environmentId: MINI, label: "Mac mini", connected: false, reachable: false },
+    ]);
+  });
+
+  it("counts a Hub machine online but not connected now as reachable", () => {
+    const machines = deriveTaskMachines({
+      environments: [{ environmentId: MINI, label: "Mac mini", connectionState: "offline" }],
+      supported: new Map(),
+      forbidden: {},
+      reachable: new Set([MINI]),
+    });
+    expect(machines).toEqual([
+      { environmentId: MINI, label: "Mac mini", connected: false, reachable: true },
     ]);
   });
 });
 
 describe("machine filter and capture machine", () => {
   const machines = [
-    { environmentId: MINI, label: "Mac mini", connected: false },
-    { environmentId: MAC, label: "MacBook", connected: true },
+    { environmentId: MINI, label: "Mac mini", connected: false, reachable: false },
+    { environmentId: MAC, label: "MacBook", connected: true, reachable: true },
+    { environmentId: SHARED, label: "Studio", connected: false, reachable: true },
   ];
+  const idOf = (machine: ReturnType<typeof resolveCaptureMachine>) =>
+    machine === null || machine === "unavailable" ? machine : machine.environmentId;
 
   it("filters to the machine picked last while it is listed, else shows every machine", () => {
     expect(resolveTaskMachineFilter(machines, MINI)?.environmentId).toBe(MINI);
@@ -54,10 +69,17 @@ describe("machine filter and capture machine", () => {
     expect(resolveTaskMachineFilter(machines, null)).toBeNull();
   });
 
-  it("adds new tasks to the first connected machine asked for", () => {
-    expect(resolveCaptureMachine(machines, [MINI, MAC])?.environmentId).toBe(MAC);
-    expect(resolveCaptureMachine(machines, [null, undefined])?.environmentId).toBe(MAC);
+  it("adds new tasks to the first reachable machine asked for", () => {
+    expect(idOf(resolveCaptureMachine(machines, [MINI, MAC]))).toBe(MAC);
+    expect(idOf(resolveCaptureMachine(machines, [MINI, SHARED]))).toBe(SHARED);
+    expect(idOf(resolveCaptureMachine(machines, [null, undefined]))).toBe(MAC);
     expect(resolveCaptureMachine([machines[0]!], [MINI])).toBeNull();
+  });
+
+  it("never sends a chat's or pull request's task to another machine", () => {
+    expect(idOf(resolveCaptureMachine(machines, [MINI, MAC], MINI))).toBe("unavailable");
+    expect(idOf(resolveCaptureMachine(machines, [MAC], "env-not-mine"))).toBe("unavailable");
+    expect(idOf(resolveCaptureMachine(machines, [MAC], SHARED))).toBe(SHARED);
   });
 
   it("starts a new task in the asked, filtered or last used project the machine still has", () => {

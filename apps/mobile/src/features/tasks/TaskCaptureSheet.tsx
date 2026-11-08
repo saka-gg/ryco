@@ -71,7 +71,7 @@ function CaptureChip(props: {
  * links and files.
  */
 export function TaskCaptureSheet(props: {
-  /** Machines that can take a new task (connected ones). */
+  /** Machines that can take a new task (reachable ones). */
   readonly machines: ReadonlyArray<TaskMachine>;
   readonly environmentId: EnvironmentId;
   readonly onMachineChange: (environmentId: EnvironmentId) => void;
@@ -89,6 +89,7 @@ export function TaskCaptureSheet(props: {
   readonly onClose: () => void;
 }) {
   const inputRef = useRef<TextInput>(null);
+  const closingRef = useRef(false);
   const [text, setText] = useState("");
   const [dueAt, setDueAt] = useState<string | null>(null);
   const [priority, setPriority] = useState<TaskPriority>("normal");
@@ -111,6 +112,8 @@ export function TaskCaptureSheet(props: {
   const canAdd = parsed.title.length > 0;
 
   const add = (openDetails: boolean) => {
+    // Details closes the sheet: a second tap (or Return) before it is gone adds nothing more.
+    if (closingRef.current) return;
     const lines = openDetails ? [] : splitPastedTaskLines(text);
     const links = props.link ? [props.link.link] : [];
     const inputs: TaskCaptureInput[] = (lines.length > 1 ? lines : [text]).flatMap((line) => {
@@ -130,6 +133,7 @@ export function TaskCaptureSheet(props: {
     });
     if (inputs.length === 0) return;
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    if (openDetails) closingRef.current = true;
     props.onAdd(inputs, { openDetails });
     if (openDetails) return;
     setAdded((count) => count + inputs.length);

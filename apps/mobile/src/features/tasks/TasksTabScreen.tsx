@@ -57,6 +57,7 @@ import {
   type TaskMachine,
 } from "./tasksMachinesModel";
 import { TaskUndoToast } from "./TaskUndoToast";
+import { rereadTaskMachines } from "./taskConnectionDemand";
 import { useTaskMachines, useTasksAcrossMachines } from "./useMachineTasks";
 import { updateTasksTabState, useTasksTabState, useTasksTabStateLoaded } from "./useTasksTabState";
 
@@ -145,7 +146,7 @@ function ScopePicker(props: {
         ...props.machines.map((machine) => ({
           id: `machine:${machine.environmentId}`,
           title: machine.label,
-          ...(machine.connected ? {} : { subtitle: "Offline" }),
+          ...(machine.reachable ? {} : { subtitle: "Offline" }),
           state:
             machine.environmentId === props.machine?.environmentId
               ? ("on" as const)
@@ -319,8 +320,11 @@ export function TasksTabScreen() {
   const machines = useTaskMachines();
   // Hub machines are asked for only while the tab is in front.
   const focused = useIsFocused();
-  const slices = useTasksAcrossMachines(machines, { demand: focused });
   const filterMachine = resolveTaskMachineFilter(machines, tabState.environmentId);
+  const slices = useTasksAcrossMachines(machines, {
+    demand: focused,
+    priority: filterMachine === null ? [] : [filterMachine.environmentId],
+  });
   const filterSlice =
     filterMachine === null
       ? null
@@ -362,7 +366,7 @@ export function TasksTabScreen() {
       {
         environmentId: slice.machine.environmentId,
         machineLabel: showMachine ? slice.machine.label : null,
-        offline: !slice.machine.connected,
+        offline: !slice.machine.reachable,
         nowMs,
         // Filtered to one project, its name on every row says nothing.
         projectNames: new Map(
@@ -445,6 +449,8 @@ export function TasksTabScreen() {
   };
   const refresh = () => {
     setRefreshing(true);
+    // Hub machines not connected now are read once more, one at a time.
+    rereadTaskMachines();
     void Promise.all(
       slices
         .filter((slice) => slice.machine.connected)
@@ -529,8 +535,8 @@ export function TasksTabScreen() {
   };
 
   const visibleSlices = filterSlice === null ? slices : [filterSlice];
-  const offlineMachines = visibleSlices.filter((slice) => !slice.machine.connected);
-  const anyConnected = machines.some((machine) => machine.connected);
+  const offlineMachines = visibleSlices.filter((slice) => !slice.machine.reachable);
+  const anyConnected = machines.some((machine) => machine.reachable);
   const firstRead = visibleSlices.every((slice) => slice.environment.readAt === null);
   const readError =
     visibleSlices.find((slice) => slice.environment.status === "error" && slice.environment.error)
@@ -607,7 +613,7 @@ export function TasksTabScreen() {
     </View>
   );
 
-  const loading = firstRead && visibleSlices.some((slice) => slice.machine.connected);
+  const loading = firstRead && visibleSlices.some((slice) => slice.machine.reachable);
   const empty =
     machines.length === 0 ? (
       <EmptyState

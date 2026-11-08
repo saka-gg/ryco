@@ -132,6 +132,7 @@ export const CLIENT_RUNTIME_PURE_TEST_FILES = [
   "src/state/side-chat/index.test.ts",
   "src/state/singleFlightReader.test.ts",
   "src/state/storage/storage.test.ts",
+  "src/state/tasks/branches.test.ts",
   "src/state/tasks/due.test.ts",
   "src/state/tasks/links.test.ts",
   "src/state/tasks/logic.test.ts",

@@ -24,3 +24,12 @@ export function purgeTaskCache(environmentId: EnvironmentId): void {
   for (const listener of purgeListeners) listener(environmentId);
   void mobileKV.removeItem(TASK_CACHE_KEY_PREFIX + environmentId).catch(() => undefined);
 }
+
+/** The bytes one machine's copy takes on the device (Settings' cache usage). */
+export async function readTaskCacheBytes(environmentId: EnvironmentId): Promise<number> {
+  try {
+    return (await mobileKV.getItem(TASK_CACHE_KEY_PREFIX + environmentId))?.length ?? 0;
+  } catch {
+    return 0;
+  }
+}

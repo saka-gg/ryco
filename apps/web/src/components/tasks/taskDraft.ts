@@ -4,20 +4,17 @@ import {
   refreshLocalTasks,
   selectLocalTasksEnvironment,
   selectTaskView,
-  taskBranchSlug,
   taskStartFailed,
   useLocalTasksStore,
   type LocalTaskView,
-  localRefNames,
+  nextFreeTaskBranch,
   taskDraftPlacement,
   taskSourceControlContext,
   taskSourceControlLinks,
-  taskWorktreeBranch,
   type TaskDraftPlacement,
 } from "@ryco/client-runtime/state/tasks";
 import type {
   ComposerSourceControlContext,
-  EnvironmentApi,
   EnvironmentId,
   LocalTaskLink,
   ScopedProjectRef,
@@ -108,15 +105,6 @@ async function readSourceControlContexts(
   return contexts.filter((context) => context !== null);
 }
 
-/** Branches that already carry the task's slug; none when the check fails (the node then refuses a clash). */
-async function readTaskRefNames(api: EnvironmentApi, cwd: string, title: string) {
-  const result = await settleWithin(
-    () => api.vcs.listRefs({ cwd, query: `task/${taskBranchSlug(title)}`, limit: 100 }),
-    BACKGROUND_READ_TIMEOUT_MS,
-  );
-  return result ? localRefNames(result.refs) : [];
-}
-
 /**
  * What a fresh task draft gains once it is open, without holding it up: the
  * linked pull requests' and issues' detail as attached context, and a branch
@@ -153,12 +141,12 @@ async function completeTaskDraft(input: {
       },
     ),
     seededBranch && api
-      ? readTaskRefNames(api, input.cwd, input.title).then((refNames) => {
-          const next = taskWorktreeBranch({
-            title: input.title,
-            startBranches: input.startBranches,
-            existingRefNames: refNames,
-          });
+      ? nextFreeTaskBranch(api.vcs, {
+          cwd: input.cwd,
+          title: input.title,
+          startBranches: input.startBranches,
+          timeoutMs: BACKGROUND_READ_TIMEOUT_MS,
+        }).then((next) => {
           const draft = unsentTaskDraft(draftId, taskId);
           if (next === seededBranch || draft?.worktreeBranchName !== seededBranch) return;
           useComposerDraftStore

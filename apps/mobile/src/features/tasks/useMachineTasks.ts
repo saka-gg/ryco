@@ -12,8 +12,6 @@ import { excludeChatProjects } from "@ryco/shared/projectKind";
 import { useEffect, useMemo } from "react";
 import { useShallow } from "zustand/react/shallow";
 
-import { mobileHostedConnectionScopes } from "../../connection/hostedConnectionScopes";
-import { useHostedHubStore } from "../../hostedHub/state";
 import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
 import {
   fullThreadEntry,
@@ -23,6 +21,12 @@ import {
   type Project,
 } from "../../state/threadsRuntime";
 import { useHomeEnvironments } from "../home/useHomeEnvironments";
+import { useHostedDemandCandidates } from "../home/useHostedDemandCandidates";
+import {
+  registerTaskConnectionDemand,
+  setTaskDemandHub,
+  useReachableTaskMachines,
+} from "./taskConnectionDemand";
 import { deriveTaskMachines, type TaskMachine } from "./tasksMachinesModel";
 import { retainMobileLocalTasks } from "./tasksRuntime";
 
@@ -31,29 +35,30 @@ export function useTaskMachines(): ReadonlyArray<TaskMachine> {
   const environments = useHomeEnvironments();
   const configs = useEnvironmentServerConfigs();
   const forbidden = useLocalTasksStore((state) => state.forbidden);
+  const reachable = useReachableTaskMachines();
   return useMemo(() => {
     const supported = new Map<EnvironmentId, boolean>();
     for (const [environmentId, config] of configs)
       supported.set(environmentId, config.environment.capabilities.localTasks === true);
-    return deriveTaskMachines({ environments, supported, forbidden });
-  }, [configs, environments, forbidden]);
+    return deriveTaskMachines({ environments, supported, forbidden, reachable });
+  }, [configs, environments, forbidden, reachable]);
 }
 
 /**
- * Keeps each machine's tasks live while mounted. With `demand`, a machine
- * reached through the Hub is also asked for: its relay connection opens on
- * demand within the bounded warm set (pre-emptible, below thread work), so a
- * visible Tasks surface reads every machine's list and follows its changes.
+ * Keeps each machine's tasks live while mounted. With `demand`, the machines
+ * reached through the Hub are asked for too (`taskConnectionDemand.ts`): within
+ * the bounded warm set the first few stay connected and follow the change
+ * feed, the rest are read one at a time, and an offline one is never asked
+ * for. `priority` machines (the one picked, a capture's, the one a sheet
+ * edits) come first.
  */
 export function useRetainLocalTasks(
   environmentIds: ReadonlyArray<EnvironmentId>,
-  options?: { readonly demand?: boolean },
+  options?: { readonly demand?: boolean; readonly priority?: ReadonlyArray<EnvironmentId> },
 ): void {
   const key = environmentIds.join("\u0000");
+  const priorityKey = (options?.priority ?? []).join("\u0000");
   const demand = options?.demand === true;
-  const hostedKey = useHostedHubStore(
-    useShallow((state) => state.nodes.map((node) => node.environmentId as string)),
-  ).join("\u0000");
   useEffect(() => {
     if (key.length === 0) return undefined;
     const releases = key.split("\u0000").map((id) => retainMobileLocalTasks(id as EnvironmentId));
@@ -61,19 +66,16 @@ export function useRetainLocalTasks(
       for (const release of releases) release();
     };
   }, [key]);
+  const hub = useHostedDemandCandidates();
   useEffect(() => {
-    if (!demand || key.length === 0 || hostedKey.length === 0) return undefined;
-    const hosted = new Set(hostedKey.split("\u0000"));
-    const releases = key
-      .split("\u0000")
-      .filter((id) => hosted.has(id))
-      .map((id) =>
-        mobileHostedConnectionScopes.retain(id as EnvironmentId, { type: "local-tasks" }),
-      );
-    return () => {
-      for (const release of releases) release();
-    };
-  }, [demand, hostedKey, key]);
+    if (demand) setTaskDemandHub(hub);
+  }, [demand, hub]);
+  useEffect(() => {
+    if (!demand || key.length === 0) return undefined;
+    const ids = (joined: string) =>
+      joined.length === 0 ? [] : (joined.split("\u0000") as EnvironmentId[]);
+    return registerTaskConnectionDemand(ids(key), ids(priorityKey));
+  }, [demand, key, priorityKey]);
 }
 
 /** Every task of one machine's list as shown (open first, then done), from its store slice. */
@@ -109,7 +111,8 @@ const NO_SUMMARIES: ThreadSummaries = {};
 
 /** One machine's tasks, kept live while mounted, with what their rows need. */
 export function useMachineTasks(environmentId: EnvironmentId | null): MachineTasks {
-  useRetainLocalTasks(environmentId === null ? [] : [environmentId], { demand: true });
+  const ids = environmentId === null ? [] : [environmentId];
+  useRetainLocalTasks(ids, { demand: true, priority: ids });
   const environment = useLocalTasksStore((state) =>
     environmentId === null
       ? selectLocalTasksEnvironment(state, "" as EnvironmentId)
@@ -152,7 +155,7 @@ export interface MachineTaskSlice {
  */
 export function useTasksAcrossMachines(
   machines: ReadonlyArray<TaskMachine>,
-  options?: { readonly demand?: boolean },
+  options?: { readonly demand?: boolean; readonly priority?: ReadonlyArray<EnvironmentId> },
 ): ReadonlyArray<MachineTaskSlice> {
   useRetainLocalTasks(
     machines.map((machine) => machine.environmentId),

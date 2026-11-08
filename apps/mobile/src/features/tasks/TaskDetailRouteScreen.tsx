@@ -204,8 +204,9 @@ export function TaskDetailRouteScreen(props: TaskDetailRouteScreenProps) {
   const taskId = props.route.params.taskId;
   const { environment, projects, getSummary, summaries } = useMachineTasks(environmentId);
   // A machine that is offline (or no longer listed) shows its task as last read, unchangeable.
+  // A Hub machine waiting for its connection is editable: the sheet asks for it, and saves wait.
   const machine = useTaskMachines().find((candidate) => candidate.environmentId === environmentId);
-  const readOnly = !(machine?.connected ?? false);
+  const readOnly = !(machine?.reachable ?? false);
   const task = useLocalTasksStore((state) => selectTaskView(state, environmentId, taskId));
   const pendingFiles = useTaskFileUploadsStore(useShallow((state) => state.byTask[taskId] ?? []));
   const fileUploadMaxBytes = useComposerFileUploadMaxBytes(environmentId);

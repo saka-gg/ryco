@@ -277,6 +277,49 @@ describe("update", () => {
   });
 });
 
+describe("connection on its way", () => {
+  it("shows the change at once and sends it once the connection arrives", async () => {
+    store().applyTask(ENV, task("a"));
+    const updateLocalTask = vi
+      .fn<(input: LocalTaskUpdateInput) => Promise<LocalTask>>()
+      .mockImplementation(async (input) => updated(input));
+    const connection = deferred<LocalTasksApi | null>();
+    const errors: unknown[] = [];
+    const writer = createLocalTaskWriter({
+      api: () => connection.promise,
+      environmentId: ENV,
+      onError: (cause) => errors.push(cause),
+    });
+
+    writer.update("a", { title: "Renamed" });
+    expect(view("a")?.title).toBe("Renamed");
+    await flushMicrotasks();
+    expect(updateLocalTask).not.toHaveBeenCalled();
+
+    connection.resolve({ updateLocalTask });
+    await flushMicrotasks();
+    expect(updateLocalTask).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: "a", title: "Renamed", expectedRevision: 1 }),
+    );
+    expect(errors).toEqual([]);
+  });
+
+  it("rolls back and reports when no connection came", async () => {
+    store().applyTask(ENV, task("a"));
+    const errors: unknown[] = [];
+    const writer = createLocalTaskWriter({
+      api: async () => null,
+      environmentId: ENV,
+      onError: (cause) => errors.push(cause),
+    });
+
+    writer.update("a", { title: "Renamed" });
+    await flushMicrotasks();
+    expect(view("a")?.title).toBe("Task a");
+    expect(errors).toHaveLength(1);
+  });
+});
+
 describe("create", () => {
   it("shows the task at once and queues its saves behind the creation", async () => {
     const created = deferred<LocalTask>();

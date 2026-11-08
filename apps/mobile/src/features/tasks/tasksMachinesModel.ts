@@ -14,7 +14,14 @@ export interface TaskMachineEnvironment {
 export interface TaskMachine {
   readonly environmentId: EnvironmentId;
   readonly label: string;
+  /** Connected now: its list follows the change feed. */
   readonly connected: boolean;
+  /**
+   * Its tasks can change: connected, or a Hub machine the Hub lists online
+   * whose connection slot went to another machine (a write to it waits for
+   * its connection). Not reachable means offline: shown as last read, read-only.
+   */
+  readonly reachable: boolean;
 }
 
 /**
@@ -28,17 +35,21 @@ export function deriveTaskMachines(input: {
   /** `capabilities.localTasks` by machine; absent while its config is unknown. */
   readonly supported: ReadonlyMap<EnvironmentId, boolean>;
   readonly forbidden: Readonly<Record<string, true>>;
+  /** Hub machines online and connectable, connected or not (`taskConnectionDemand.ts`). */
+  readonly reachable?: ReadonlySet<EnvironmentId>;
 }): ReadonlyArray<TaskMachine> {
   const machines: TaskMachine[] = [];
   for (const environment of input.environments) {
     if (environment.role !== undefined && environment.role !== "owner") continue;
     if (input.supported.get(environment.environmentId) === false) continue;
     if (environment.environmentId in input.forbidden) continue;
+    const connected =
+      environment.connectionState === "connected" || environment.connectionState === "read-only";
     machines.push({
       environmentId: environment.environmentId,
       label: environment.label,
-      connected:
-        environment.connectionState === "connected" || environment.connectionState === "read-only",
+      connected,
+      reachable: connected || (input.reachable?.has(environment.environmentId) ?? false),
     });
   }
   return machines;
@@ -58,18 +69,24 @@ export function resolveTaskMachineFilter(
 /**
  * The machine a new task goes to: the one asked for (a chat's, a pull
  * request's), else the one the list is filtered to, else the one used last,
- * else the first connected one. Only a connected machine takes a new task.
+ * else the first reachable one. Only a reachable machine takes a new task.
+ * A machine asked for that is not reachable gives `unavailable` instead of
+ * another machine: a task made from a chat or pull request belongs with it.
  */
 export function resolveCaptureMachine(
   machines: ReadonlyArray<TaskMachine>,
   preferred: ReadonlyArray<string | null | undefined>,
-): TaskMachine | null {
-  const connected = machines.filter((machine) => machine.connected);
+  required?: string | null,
+): TaskMachine | "unavailable" | null {
+  const reachable = machines.filter((machine) => machine.reachable);
+  if (required) {
+    return reachable.find((machine) => machine.environmentId === required) ?? "unavailable";
+  }
   for (const environmentId of preferred) {
-    const match = connected.find((machine) => machine.environmentId === environmentId);
+    const match = reachable.find((machine) => machine.environmentId === environmentId);
     if (match) return match;
   }
-  return connected[0] ?? null;
+  return reachable[0] ?? null;
 }
 
 /**

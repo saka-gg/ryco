@@ -6,6 +6,7 @@ import {
   clearCheckpointDiffCacheForEnvironment,
 } from "../rpc/checkpointDiffAtoms";
 import { clearPullRequestCache, pullRequestCacheBytes } from "../rpc/pullRequestAtoms";
+import { readTaskCacheBytes } from "../features/tasks/taskCacheKeys";
 import {
   clearEnvironmentSnapshotCache,
   listEnvironmentCacheStorage,
@@ -38,6 +39,13 @@ export async function readDeviceCacheUsage(
       ),
     ),
   );
+  const taskBytes = new Map(
+    await Promise.all(
+      [...byId.keys()].map(
+        async (environmentId) => [environmentId, await readTaskCacheBytes(environmentId)] as const,
+      ),
+    ),
+  );
   return [...byId]
     .map(([environmentId, label]) => {
       const snapshot = snapshots.find((item) => item.environmentId === environmentId);
@@ -47,9 +55,12 @@ export async function readDeviceCacheUsage(
         previews.files +
         checkpointDiffCacheBytes(environmentId) +
         pullRequestCacheBytes(environmentId);
-      // Saved pull requests live beside the snapshot and are cleared with it.
+      // Saved pull requests and the machine's task list copy live beside the
+      // snapshot and are cleared with it.
       const snapshotBytes =
-        (snapshot?.payloadBytes ?? 0) + (savedPullRequests.get(environmentId) ?? 0);
+        (snapshot?.payloadBytes ?? 0) +
+        (savedPullRequests.get(environmentId) ?? 0) +
+        (taskBytes.get(environmentId) ?? 0);
       return {
         environmentId,
         label,

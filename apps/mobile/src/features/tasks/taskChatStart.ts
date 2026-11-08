@@ -8,6 +8,7 @@ import {
 import { hasErrorTag } from "@ryco/client-runtime/rpc";
 import type { EnvironmentId, LocalTaskDelegateInput } from "@ryco/contracts";
 
+import { isOfflineTaskCopy } from "./taskCache";
 import { TaskChatStartError } from "./taskChatStartError";
 import { whenTaskFilesSent } from "./taskFileUploads";
 import { mobileLocalTaskWriter, retainMobileLocalTasks } from "./tasksRuntime";
@@ -33,8 +34,10 @@ async function requireStartableTask(environmentId: EnvironmentId, taskId: string
   if (!readTask(environmentId, taskId)) await refreshLocalTasks(environmentId);
   const task = readTask(environmentId, taskId);
   if (!task) {
+    // Only a read in this session says it is gone: the device's copy may have been cut short.
     const read =
-      selectLocalTasksEnvironment(useLocalTasksStore.getState(), environmentId).readAt !== null;
+      selectLocalTasksEnvironment(useLocalTasksStore.getState(), environmentId).readAt !== null &&
+      !isOfflineTaskCopy(environmentId);
     throw new TaskChatStartError(
       read
         ? "The task was deleted. Unlink it to start this as a plain chat."

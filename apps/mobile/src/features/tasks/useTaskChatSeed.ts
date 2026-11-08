@@ -1,7 +1,12 @@
-import { selectTaskView, useLocalTasksStore } from "@ryco/client-runtime/state/tasks";
+import {
+  nextFreeTaskBranch,
+  selectTaskView,
+  useLocalTasksStore,
+} from "@ryco/client-runtime/state/tasks";
 import type { EnvironmentId, ProjectId } from "@ryco/contracts";
 import { useMemo } from "react";
 
+import { readEnvironmentApi } from "../../connection/environmentApi";
 import { selectEnvironmentState, useStore } from "../../state/threadsRuntime";
 import { taskChatSeed, type TaskChatSeed } from "./taskChatSeedModel";
 import { useRetainLocalTasks } from "./useMachineTasks";
@@ -52,4 +57,22 @@ export function keepsTaskLink(
     target.environmentId === link.environmentId &&
     (link.projectId === null || target.projectId === link.projectId)
   );
+}
+
+/**
+ * The seeded branch moved past the branches that exist in `cwd` already (a
+ * worktree on a taken branch fails); null when the machine can't be asked.
+ */
+export function nextFreeTaskChatBranch(
+  environmentId: EnvironmentId,
+  cwd: string,
+  seed: Pick<TaskChatSeed, "title" | "startBranches">,
+): Promise<string | null> {
+  const api = readEnvironmentApi(environmentId);
+  if (!api) return Promise.resolve(null);
+  return nextFreeTaskBranch(api.vcs, {
+    cwd,
+    title: seed.title,
+    startBranches: seed.startBranches,
+  });
 }

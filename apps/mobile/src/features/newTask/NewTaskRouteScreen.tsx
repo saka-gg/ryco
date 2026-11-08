@@ -80,7 +80,12 @@ import {
   planMobilePromptLink,
 } from "./promptLinkModel";
 import { useNewTaskRepository } from "./useNewTaskRepository";
-import { keepsTaskLink, useTaskChatSeed, type NewTaskTaskLink } from "../tasks/useTaskChatSeed";
+import {
+  keepsTaskLink,
+  nextFreeTaskChatBranch,
+  useTaskChatSeed,
+  type NewTaskTaskLink,
+} from "../tasks/useTaskChatSeed";
 import { releaseIncomingShareCopy, takeIncomingShare } from "../sharing/incomingShare";
 import { mergeIncomingShareText } from "../sharing/incomingShareModel";
 import {
@@ -376,6 +381,24 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
     : "default";
 
   const repository = useNewTaskRepository(environmentId, project?.cwd ?? null);
+
+  // A task's branch may exist in the project already (an earlier chat, a manual
+  // checkout): move past it, like the desktop does, while the field still holds
+  // the name filled in for it. Checked once per project.
+  const checkedTaskBranch = useRef<string | null>(null);
+  const taskCwd =
+    taskLink !== null && worktreeSelection.kind === "new" ? (project?.cwd ?? null) : null;
+  useEffect(() => {
+    if (taskSeed === null || environmentId === null || taskCwd === null) return;
+    const seeded = newBranch;
+    if (seeded.length === 0 || !seeded.startsWith("task/")) return;
+    const key = JSON.stringify([environmentId, taskCwd, taskSeed.taskId]);
+    if (checkedTaskBranch.current === key) return;
+    checkedTaskBranch.current = key;
+    void nextFreeTaskChatBranch(environmentId, taskCwd, taskSeed).then((next) => {
+      if (next !== null) setNewBranch((current) => (current === seeded ? next : current));
+    });
+  }, [environmentId, newBranch, taskCwd, taskSeed]);
 
   let draftProjectTitle = newProjectTitle.trim() || "New project";
   try {
