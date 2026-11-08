@@ -106,6 +106,10 @@ import { NodeBadge } from "./NodePicker";
 import { NODE_LABEL_CELL, NodePathText, useNodeLabelColumn } from "./NodePathText";
 import type { CopyProjectDialogRequest } from "./projectNodesDialogStore";
 import {
+  copyDestinationUsable,
+  copyFormBlockedReason,
+} from "@ryco/client-runtime/projectCopy/form";
+import {
   DEFAULT_COPY_USER_CHOICES,
   planCopyOptions,
   useCopyDestination,
@@ -614,30 +618,31 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
   });
 
   const suggestion = destination.suggestion;
-  const destinationUsable =
-    suggestion !== null &&
-    suggestion.status !== "blocked" &&
-    suggestion.status !== "existing-project";
+  const destinationUsable = copyDestinationUsable(suggestion);
   const setupInvalid = runSetup && command.trim().length === 0;
   const followUpInvalid =
     followUpEnabled && (modelSelection === null || prompt.trim().length === 0);
   // A node not connected yet is checked once held (A23); a known one reads right away.
   const checking =
     targetNode !== null && targetHold.status !== "failed" && targetSupport === "unknown";
-  const blockedReason =
-    sourceRow === null
-      ? `Every checkout of ${title} is offline.`
-      : (source.error ??
-        (targetHold.status === "failed" ? targetHold.error : null) ??
-        (source.facts === null ? `Checking ${sourceLabel}…` : null) ??
-        options?.blockedReason ??
-        destination.error ??
-        (suggestion === null && targetSupport === "yes" ? `Checking ${targetLabel}…` : null) ??
-        capReason ??
-        (setupInvalid ? "Enter the setup command, or turn setup off." : null) ??
-        (followUpInvalid
-          ? (followUpDefaults.unavailableReason ?? "Write what the agent should do.")
-          : null));
+  const blockedReason = copyFormBlockedReason({
+    title,
+    sourceLabel,
+    targetLabel,
+    hasSource: sourceRow !== null,
+    sourceError: source.error,
+    sourceChecked: source.facts !== null,
+    targetHoldError: targetHold.status === "failed" ? targetHold.error : null,
+    targetSupport,
+    options,
+    destination: suggestion,
+    destinationError: destination.error,
+    capReason,
+    setupInvalid,
+    followUpProblem: followUpInvalid
+      ? (followUpDefaults.unavailableReason ?? "Write what the agent should do.")
+      : null,
+  });
   const canStart =
     options !== null &&
     blockedReason === null &&

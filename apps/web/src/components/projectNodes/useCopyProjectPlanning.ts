@@ -34,11 +34,11 @@ import {
   type ServerConfig,
 } from "@ryco/contracts";
 import type { NodePathHints, ProjectCheckRemoteAccessResult } from "@ryco/contracts/project-copy";
+import { legacyCopyProject, legacySourceHints } from "@ryco/client-runtime/projectCopy/form";
 import { useEffect, useMemo, useState } from "react";
 
 import { acquireNode } from "../../environments/acquireNode";
 import type { Project } from "../../types";
-import { inferHomeDirectory } from "../projects/projectsModel.logic";
 import { startManagedProjectCopy } from "./copyRuntime/copyManager";
 import { createWebProjectCopyIo } from "./copyRuntime/webProjectCopyIo";
 import {
@@ -163,29 +163,6 @@ export function useHeldNode(
 }
 
 /* ───────── The source ───────── */
-
-/** A source without project copy, from what the client knows of the project (A23). */
-export function legacyCopyProject(project: Project): ProjectCopyLegacyProject {
-  return {
-    title: project.name,
-    workspaceRoot: project.cwd,
-    repositoryIdentity: project.repositoryIdentity ?? null,
-    scripts: project.scripts,
-    customSystemPrompt: project.customSystemPrompt ?? null,
-    preferredRemoteName: project.preferredRemoteName ?? null,
-    projectMetadataDir: project.projectMetadataDir ?? DEFAULT_PROJECT_METADATA_DIR,
-    hasCustomAvatar: (project.customAvatarContentHash ?? null) !== null,
-  };
-}
-
-/** Where a legacy source lives: its home inferred from the usual layouts, its separator from the path. */
-function legacySourceHints(
-  project: Project,
-): Pick<NodePathHints, "homeDirectory" | "pathSeparator"> | null {
-  const separator = project.cwd.includes("\\") || /^[A-Za-z]:/u.test(project.cwd) ? "\\" : "/";
-  const home = inferHomeDirectory(project.cwd);
-  return home === null ? null : { homeDirectory: home, pathSeparator: separator };
-}
 
 export interface CopySourceState {
   /** Null while the source is checked (connecting, inspecting) or when it failed. */
@@ -401,52 +378,9 @@ export function useCopyTargetConfig(
   return { config: read.data, loading: read.isFetching || (environmentId !== null && !held) };
 }
 
-/* ───────── Options ───────── */
-
-/** What the user changed; unset fields follow the coordinator's defaults. */
-export interface CopyUserChoices {
-  readonly mode: ProjectCopyChoices["mode"] | null;
-  readonly bringCommits: boolean | null;
-  readonly bringChanges: boolean | null;
-  readonly ignoredPaths: ReadonlyArray<string>;
-  readonly copySettings: boolean | null;
-}
-
-export const DEFAULT_COPY_USER_CHOICES: CopyUserChoices = {
-  mode: null,
-  bringCommits: null,
-  bringChanges: null,
-  ignoredPaths: [],
-  copySettings: null,
-};
-
-/**
- * The coordinator's options for the facts and the user's choices. Linking an
- * existing checkout of the same repository wins over a copy (A27); sending the
- * files brings the uncommitted changes with them, as the mockup shows.
- */
-export function planCopyOptions(
-  source: ProjectCopySourceFacts,
-  target: ProjectCopyTargetFacts,
-  choices: CopyUserChoices,
-): ProjectCopyOptionsPlan {
-  const requested = (
-    mode: ProjectCopyChoices["mode"] | undefined,
-  ): Partial<ProjectCopyChoices> => ({
-    ...(mode ? { mode } : {}),
-    bringCommits: choices.bringCommits ?? true,
-    bringChanges: mode === "send-files" ? true : (choices.bringChanges ?? true),
-    ignoredPaths: choices.ignoredPaths,
-    copySettings: choices.copySettings ?? true,
-    copyAvatar: choices.copySettings ?? true,
-  });
-  const linking = target.destination?.status === "link";
-  const first = planProjectCopyOptions(
-    { source, target },
-    requested(linking ? "link" : (choices.mode ?? undefined)),
-  );
-  if (first.choices.mode === "send-files" && !first.choices.bringChanges) {
-    return planProjectCopyOptions({ source, target }, requested("send-files"));
-  }
-  return first;
-}
+export {
+  DEFAULT_COPY_USER_CHOICES,
+  legacyCopyProject,
+  planCopyOptions,
+  type CopyUserChoices,
+} from "@ryco/client-runtime/projectCopy/form";

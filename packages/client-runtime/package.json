@@ -487,6 +487,10 @@
     "./projectCopy/nodeIo": {
       "types": "./src/projectCopy/nodeIo.ts",
       "import": "./src/projectCopy/nodeIo.ts"
+    },
+    "./projectCopy/form": {
+      "types": "./src/projectCopy/form.ts",
+      "import": "./src/projectCopy/form.ts"
     }
   },
   "scripts": {
