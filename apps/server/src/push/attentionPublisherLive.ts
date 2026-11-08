@@ -8,7 +8,7 @@
  *
  * @module push/attentionPublisherLive
  */
-import { mapThreadShellSummary } from "@ryco/client-runtime/state/threads";
+import { mapThreadShellSummary, mapWorktreeShellSummary } from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId } from "@ryco/contracts";
 import { isThreadSnoozed } from "@ryco/shared/threadSnooze";
 import { Effect, Option, Stream } from "effect";
@@ -18,7 +18,7 @@ import type { HubIdentityRuntimeShape } from "../hubConnector/HubIdentityRuntime
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { startAttentionPublisher } from "./attentionPublisher.ts";
-import { makeAttentionSignalSender } from "./attentionSignalHttp.ts";
+import { makeActivitySignalSender, makeAttentionSignalSender } from "./attentionSignalHttp.ts";
 import type { NodePushRegistryShape } from "./NodePushRegistry.ts";
 
 /** Runs in the connector's scope; does nothing without a shell or an engine. */
@@ -37,6 +37,12 @@ export const startNodeAttentionPublisher = (input: {
     const abort = new AbortController();
     const run = <A, E>(effect: Effect.Effect<A, E>) =>
       Effect.runPromise(effect, { signal: abort.signal });
+    const sender = {
+      hubOrigin: input.hubOrigin,
+      identity: input.identity,
+      connector: input.connector,
+      signal: abort.signal,
+    };
     const publisher = yield* Effect.acquireRelease(
       Effect.sync(() =>
         startAttentionPublisher({
@@ -47,12 +53,17 @@ export const startNodeAttentionPublisher = (input: {
           isConnectorOnline: () => input.connector.status().state === "online",
           readShell: async () => {
             const snapshot = await run(shell.getShellSnapshot());
+            // The environment id is set by the publisher; rows only need their own fields.
+            const environmentId = "" as EnvironmentId;
             return {
               sequence: snapshot.snapshotSequence,
-              // The environment id is set by the publisher; rows only need their own fields.
               threads: snapshot.threads.map((thread) =>
-                mapThreadShellSummary(thread, "" as EnvironmentId),
+                mapThreadShellSummary(thread, environmentId),
               ),
+              worktrees: (snapshot.worktrees ?? []).map((worktree) =>
+                mapWorktreeShellSummary(worktree, environmentId),
+              ),
+              autoSettleAfterDays: snapshot.settlementPolicy?.autoSettleAfterDays,
             };
           },
           readThread: async (environmentId, threadId) => {
@@ -69,12 +80,9 @@ export const startNodeAttentionPublisher = (input: {
           setHubDelivery: (delivery) => {
             void run(push.setHubDelivery(delivery));
           },
-          send: makeAttentionSignalSender({
-            hubOrigin: input.hubOrigin,
-            identity: input.identity,
-            connector: input.connector,
-            signal: abort.signal,
-          }),
+          send: makeAttentionSignalSender(sender),
+          sendActivity: makeActivitySignalSender(sender),
+          onRegistrationsChanged: push.onChange,
           now: Date.now,
           setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
           clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),

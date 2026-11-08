@@ -1,0 +1,389 @@
+import type { SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
+import { EnvironmentId, ProjectId, ThreadId, TurnId } from "@ryco/contracts";
+import type { PushActivityEntryStatus, PushActivitySignalInput } from "@ryco/contracts/push-hub";
+import { isThreadSnoozed } from "@ryco/shared/threadSnooze";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+
+import {
+  ATTENTION_UNSUPPORTED_BACKOFF_MS,
+  type ActivitySendOutcome,
+  startAttentionPublisher,
+} from "./attentionPublisher.ts";
+import {
+  ACTIVITY_FOREGROUND_RECHECK_MS,
+  ACTIVITY_MIN_INTERVAL_MS,
+  ACTIVITY_REFRESH_MS,
+  countNodeAgentActivity,
+  planActivityRecipients,
+} from "./liveActivityCounts.ts";
+import type { PushRegistration } from "./pushRegistrations.ts";
+
+const HUB_ENVIRONMENT = EnvironmentId.make("env_hubEnvironment000000");
+const NOW = Date.parse("2026-10-28T12:00:00.000Z");
+const PHONE = "enr_phone000000000000000000";
+const TABLET = "enr_tablet00000000000000000";
+
+function thread(id: string, patch: Partial<SidebarThreadSummary> = {}): SidebarThreadSummary {
+  return {
+    id: ThreadId.make(id),
+    environmentId: HUB_ENVIRONMENT,
+    projectId: ProjectId.make("project"),
+    title: `Secret title ${id}`,
+    interactionMode: "default",
+    session: null,
+    createdAt: "2026-10-28T10:00:00.000Z",
+    updatedAt: "2026-10-28T11:59:00.000Z",
+    archivedAt: null,
+    latestTurn: {
+      turnId: TurnId.make(`turn-${id}`),
+      state: "running",
+      requestedAt: "2026-10-28T11:58:00.000Z",
+      startedAt: "2026-10-28T11:58:00.000Z",
+      completedAt: null,
+      assistantMessageId: null,
+    },
+    branch: null,
+    worktreePath: null,
+    latestUserMessageAt: null,
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    hasActionableProposedPlan: false,
+    ...patch,
+  };
+}
+
+const finished = (id: string, completedAt: string, patch: Partial<SidebarThreadSummary> = {}) =>
+  thread(id, {
+    latestTurn: { ...thread(id).latestTurn!, state: "completed", completedAt },
+    ...patch,
+  });
+
+function registration(enrollmentId: string, patch: Partial<PushRegistration> = {}) {
+  return {
+    enrollmentId,
+    keyId: "AAAAAAAAAAAAAAAAAAAAAA",
+    publicKey: "A".repeat(43),
+    role: "owner",
+    kinds: ["approval"],
+    sound: true,
+    liveActivity: true,
+    collapseSalt: "s".repeat(43),
+    createdAt: 0,
+    refreshedAt: 0,
+    ...patch,
+  } satisfies PushRegistration;
+}
+
+const count = (threads: ReadonlyArray<SidebarThreadSummary>, nowMs = NOW) =>
+  countNodeAgentActivity({
+    environmentId: HUB_ENVIRONMENT,
+    threads,
+    worktrees: [],
+    autoSettleAfterDays: undefined,
+    nowMs,
+  });
+
+describe("countNodeAgentActivity", () => {
+  it("counts running, waiting and recent results by the card's rule", () => {
+    const result = count([
+      thread("a"),
+      thread("b", { hasPendingApprovals: true }),
+      finished("c", "2026-10-28T11:55:00.000Z"),
+      finished("d", "2026-10-28T11:30:00.000Z"),
+    ]);
+    // d ended 30 minutes ago: past the 15-minute result window.
+    expect(result.counts).toEqual({ running: 1, needsYou: 1, failed: 0, done: 1 });
+    // c ages out 15 minutes after it ended.
+    expect(result.nextChangeAtMs).toBe(Date.parse("2026-10-28T12:10:00.000Z") + 1);
+  });
+
+  it("never counts settled, snoozed, archived or rows read under another id", () => {
+    const result = count([
+      finished("a", "2026-10-28T11:58:00.000Z", {
+        settledOverride: "settled",
+        settledAt: "2026-10-28T11:59:00.000Z",
+      }),
+      finished("b", "2026-10-28T11:58:00.000Z", {
+        snoozedAt: "2026-10-28T11:59:00.000Z",
+        snoozedUntil: "2026-10-28T13:00:00.000Z",
+      }),
+      thread("c", { archivedAt: "2026-10-28T11:00:00.000Z" }),
+      // The shell's rows carry no environment id; they are this node's all the same.
+      thread("d", { environmentId: "" as EnvironmentId }),
+    ]);
+    expect(result.counts).toEqual({ running: 1, needsYou: 0, failed: 0, done: 0 });
+    // Nothing counted ages out; the snooze wakes at 13:00.
+    expect(result.nextChangeAtMs).toBe(Date.parse("2026-10-28T13:00:00.000Z"));
+  });
+});
+
+describe("planActivityRecipients", () => {
+  const counts = { running: 1, needsYou: 0, failed: 0, done: 0 };
+  const zero = { running: 0, needsYou: 0, failed: 0, done: 0 };
+  const plan = (input: Partial<Parameters<typeof planActivityRecipients>[0]>) =>
+    planActivityRecipients({
+      registrations: [registration(PHONE)],
+      isForeground: () => false,
+      sent: new Map(),
+      counts,
+      nowMs: NOW,
+      ...input,
+    }).flat();
+
+  it("signals only Live Activity devices not in front", () => {
+    expect(
+      plan({
+        registrations: [
+          registration(PHONE),
+          registration(TABLET),
+          registration("enr_nolive0000000000000000", { liveActivity: false }),
+        ],
+        isForeground: (id) => id === TABLET,
+      }),
+    ).toEqual([PHONE]);
+  });
+
+  it("sends changes, ends once, refreshes held counts and never starts with zero", () => {
+    const sent = (patch: object) =>
+      new Map([[PHONE, { counts, atMs: NOW, held: true, resend: false, ...patch }]]);
+    expect(plan({ sent: sent({}) })).toEqual([]);
+    expect(plan({ sent: sent({}), counts: zero })).toEqual([PHONE]);
+    expect(plan({ sent: sent({ counts: zero }), counts: zero })).toEqual([]);
+    expect(plan({ counts: zero })).toEqual([]);
+    expect(plan({ sent: sent({ resend: true }) })).toEqual([PHONE]);
+    expect(plan({ sent: sent({}), nowMs: NOW + ACTIVITY_REFRESH_MS })).toEqual([PHONE]);
+    // Nothing held (no card took pushes): unchanged counts are not refreshed.
+    expect(plan({ sent: sent({ held: false }), nowMs: NOW + ACTIVITY_REFRESH_MS })).toEqual([]);
+  });
+
+  it("splits more than 32 devices over several signals", () => {
+    const registrations = Array.from({ length: 40 }, (_, index) =>
+      registration(`enr_device${String(index).padStart(17, "0")}`),
+    );
+    const chunks = planActivityRecipients({
+      registrations,
+      isForeground: () => false,
+      sent: new Map(),
+      counts,
+      nowMs: NOW,
+    });
+    expect(chunks.map((chunk) => chunk.length)).toEqual([32, 8]);
+  });
+});
+
+function harness(
+  options: {
+    readonly threads?: ReadonlyArray<SidebarThreadSummary>;
+    readonly registrations?: ReadonlyArray<PushRegistration>;
+    readonly status?: (enrollmentId: string) => PushActivityEntryStatus;
+    readonly outcome?: () => ActivitySendOutcome | null;
+  } = {},
+) {
+  const rows = new Map(
+    (options.threads ?? [thread("a")]).map((row) => [row.id as string, row] as const),
+  );
+  let registrations = options.registrations ?? [registration(PHONE)];
+  let foreground = new Set<string>();
+  let listener: (() => void) | null = null;
+  let sequence = 1_000;
+  const activity: Array<Omit<PushActivitySignalInput, "proof">> = [];
+  const removed: string[][] = [];
+  const publisher = startAttentionPublisher({
+    environmentId: async () => HUB_ENVIRONMENT,
+    isConnectorOnline: () => true,
+    readShell: async () => ({ sequence: 1, threads: [...rows.values()] }),
+    readThread: async (_environmentId, threadId) => rows.get(threadId) ?? null,
+    isSnoozed: isThreadSnoozed,
+    registrations: async () => registrations,
+    foregroundEnrollments: async () => foreground,
+    reserveSequence: async () => sequence++,
+    removeEnrollments: async (enrollmentIds) => void removed.push([...enrollmentIds]),
+    setHubDelivery: () => undefined,
+    send: async (signal) => ({
+      kind: "delivered",
+      result: { protocolVersion: 1, sequence: signal.sequence, results: [] },
+    }),
+    sendActivity: async (signal) => {
+      activity.push(signal);
+      return (
+        options.outcome?.() ?? {
+          kind: "delivered",
+          result: {
+            protocolVersion: 1,
+            sequence: signal.sequence,
+            results: signal.activities.map((entry) => ({
+              enrollmentId: entry.enrollmentId,
+              status: options.status?.(entry.enrollmentId) ?? "accepted",
+            })),
+          },
+        }
+      );
+    },
+    onRegistrationsChanged: (next) => {
+      listener = next;
+      return () => {
+        listener = null;
+      };
+    },
+    now: () => Date.now(),
+    setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+    clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+    reportFailure: () => undefined,
+  });
+  return {
+    publisher,
+    activity,
+    removed,
+    change: (row: SidebarThreadSummary, at: number) => {
+      rows.set(row.id, row);
+      publisher.threadChanged(row.id, at);
+    },
+    remove: (id: string, at: number) => {
+      rows.delete(id);
+      publisher.threadRemoved(ThreadId.make(id), at);
+    },
+    setRegistrations: (next: ReadonlyArray<PushRegistration>) => {
+      registrations = next;
+      listener?.();
+    },
+    setForeground: (next: ReadonlySet<string>) => {
+      foreground = new Set(next);
+      listener?.();
+    },
+    hasListener: () => listener !== null,
+  };
+}
+
+describe("attention publisher: Live Activity counts", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("signals counts only, once, and the end when they reach zero", async () => {
+    const test = harness();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(test.activity).toHaveLength(1);
+    const signal = test.activity[0]!;
+    expect(signal).toEqual({
+      sequence: 1_000,
+      issuedAt: NOW,
+      activities: [
+        { enrollmentId: PHONE, counts: { running: 1, needsYou: 0, failed: 0, done: 0 } },
+      ],
+    });
+    // Counts only: no title, thread id or anything else of the thread.
+    expect(JSON.stringify(signal)).not.toMatch(/Secret|thread|turn-|project/u);
+
+    // The same counts again send nothing.
+    test.change(thread("a", { updatedAt: "2026-10-28T12:00:01.000Z" }), 2);
+    await vi.advanceTimersByTimeAsync(ACTIVITY_MIN_INTERVAL_MS * 2);
+    expect(test.activity).toHaveLength(1);
+
+    // An approval: sent, no sooner than the minimum interval after the last signal.
+    test.change(thread("a", { hasPendingApprovals: true }), 3);
+    await vi.advanceTimersByTimeAsync(ACTIVITY_MIN_INTERVAL_MS);
+    expect(test.activity.at(-1)!.activities[0]!.counts).toEqual({
+      running: 0,
+      needsYou: 1,
+      failed: 0,
+      done: 0,
+    });
+    expect(test.activity.at(-1)!.sequence).toBeGreaterThan(signal.sequence);
+
+    // Deleted: zero counts end the card, once.
+    test.remove("a", 4);
+    await vi.advanceTimersByTimeAsync(ACTIVITY_MIN_INTERVAL_MS);
+    const sentBefore = test.activity.length;
+    expect(test.activity.at(-1)!.activities[0]!.counts).toEqual({
+      running: 0,
+      needsYou: 0,
+      failed: 0,
+      done: 0,
+    });
+    await vi.advanceTimersByTimeAsync(ACTIVITY_REFRESH_MS * 2);
+    expect(test.activity).toHaveLength(sentBefore);
+    await test.publisher.stop();
+    expect(test.hasListener()).toBe(false);
+  });
+
+  it("coalesces a burst of changes into one signal with the latest counts", async () => {
+    const test = harness({ threads: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(test.activity).toHaveLength(0);
+    test.change(thread("a"), 2);
+    await vi.advanceTimersByTimeAsync(200);
+    test.change(thread("b"), 3);
+    await vi.advanceTimersByTimeAsync(200);
+    test.change(thread("c"), 4);
+    await vi.advanceTimersByTimeAsync(ACTIVITY_MIN_INTERVAL_MS);
+    // The first change went out at once; the next two became one.
+    expect(test.activity.map((signal) => signal.activities[0]!.counts.running)).toEqual([1, 3]);
+    await test.publisher.stop();
+  });
+
+  it("refreshes held counts before the Hub's stale window while work runs", async () => {
+    const test = harness();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(test.activity).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(ACTIVITY_REFRESH_MS);
+    expect(test.activity).toHaveLength(2);
+    expect(test.activity[1]!.activities[0]!.counts.running).toBe(1);
+    await test.publisher.stop();
+  });
+
+  it("sends nothing for a device in front and catches it up once it leaves", async () => {
+    const test = harness({ threads: [] });
+    test.setForeground(new Set([PHONE]));
+    await vi.advanceTimersByTimeAsync(0);
+    test.change(thread("a", { hasPendingApprovals: true }), 2);
+    await vi.advanceTimersByTimeAsync(ACTIVITY_FOREGROUND_RECHECK_MS);
+    expect(test.activity).toHaveLength(0);
+    test.setForeground(new Set());
+    await vi.advanceTimersByTimeAsync(ACTIVITY_MIN_INTERVAL_MS);
+    expect(test.activity).toHaveLength(1);
+    expect(test.activity[0]!.activities[0]!.counts.needsYou).toBe(1);
+    await test.publisher.stop();
+  });
+
+  it("starts counting for a device that registers with Live Activity", async () => {
+    const test = harness({ registrations: [] });
+    await vi.advanceTimersByTimeAsync(ACTIVITY_REFRESH_MS);
+    expect(test.activity).toHaveLength(0);
+    test.setRegistrations([registration(PHONE)]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(test.activity).toHaveLength(1);
+    await test.publisher.stop();
+  });
+
+  it("forgets a device the Hub does not authorize and backs off an older Hub", async () => {
+    const unauthorized = harness({
+      registrations: [registration(PHONE), registration(TABLET)],
+      status: (id) => (id === TABLET ? "not-authorized" : "accepted"),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(unauthorized.removed).toEqual([[TABLET]]);
+    await unauthorized.publisher.stop();
+
+    const older = harness({ outcome: () => ({ kind: "unsupported" }) });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(older.activity).toHaveLength(1);
+    older.change(thread("a", { hasPendingApprovals: true }), 2);
+    await vi.advanceTimersByTimeAsync(ACTIVITY_REFRESH_MS * 3);
+    expect(older.activity).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(ATTENTION_UNSUPPORTED_BACKOFF_MS);
+    expect(older.activity.length).toBeGreaterThan(1);
+    await older.publisher.stop();
+  });
+
+  it("does not refresh counts the Hub kept nothing of", async () => {
+    const test = harness({ status: () => "no-token" });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(ACTIVITY_REFRESH_MS * 2);
+    expect(test.activity).toHaveLength(1);
+    await test.publisher.stop();
+  });
+});

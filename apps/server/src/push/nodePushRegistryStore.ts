@@ -62,6 +62,16 @@ export const makeNodePushRegistry = (options: {
     let state: PushRegistrationState | null = null;
     let hubDelivery: PushHubDelivery = "offline";
     const foregroundUntil = new Map<string, number>();
+    const listeners = new Set<() => void>();
+    const notify = Effect.sync(() => {
+      for (const listener of listeners) {
+        try {
+          listener();
+        } catch {
+          // A listener's own failure never fails the device's call.
+        }
+      }
+    });
 
     const load = Effect.gen(function* () {
       if (state !== null) return state;
@@ -109,7 +119,10 @@ export const makeNodePushRegistry = (options: {
             nowMs: now(),
           });
           return { state: next, value: toStatus(find(next, device.enrollmentId), hubDelivery) };
-        }).pipe(Effect.orDie),
+        }).pipe(
+          Effect.tap(() => notify),
+          Effect.orDie,
+        ),
       unregister: (device, input) =>
         update((current) => {
           const result = unregisterPushDevice(current, {
@@ -119,15 +132,19 @@ export const makeNodePushRegistry = (options: {
             publicKey: input.publicKey,
           });
           return { state: result.state, value: { removed: result.removed } };
-        }).pipe(Effect.orDie),
+        }).pipe(
+          Effect.tap((result) => (result.removed ? notify : Effect.void)),
+          Effect.orDie,
+        ),
       setPresence: (device, presence) =>
         Effect.sync(() => {
           if (presence === "foreground") {
             foregroundUntil.set(device.enrollmentId, now() + PUSH_FOREGROUND_HOLD_MS);
-          } else {
-            foregroundUntil.delete(device.enrollmentId);
+            return false;
           }
+          return foregroundUntil.delete(device.enrollmentId);
         }).pipe(
+          Effect.tap((left) => (left ? notify : Effect.void)),
           // Read, never written: a presence tick must not rewrite the registration file.
           Effect.andThen(lock.withPermits(1)(load)),
           Effect.map((current) =>
@@ -175,6 +192,12 @@ export const makeNodePushRegistry = (options: {
         Effect.sync(() => {
           hubDelivery = delivery;
         }),
+      onChange: (listener) => {
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      },
     };
     return service;
   });
