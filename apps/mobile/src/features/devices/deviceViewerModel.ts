@@ -51,18 +51,30 @@ export function threadDevicePreview(
 }
 
 /**
+ * Whether this session may call a device method now, by the node's own access rule for it
+ * (lifecycle, input, apps and recording are the owner's) and the environment's shared mutation
+ * readiness.
+ */
+export function deviceMethodAllowed(
+  environment: Pick<InboxEnvironment, "mutationReady" | "role"> | undefined,
+  method: (typeof DEVICE_WS_METHODS)[keyof typeof DEVICE_WS_METHODS],
+): boolean {
+  return (
+    environment !== undefined &&
+    environment.mutationReady === true &&
+    environment.role !== undefined &&
+    nodeRoleAllows(environment.role, method)
+  );
+}
+
+/**
  * Whether this session may drive the device, by the node's own rule for device input (the
  * owner) and the environment's shared mutation readiness. Others watch only.
  */
 export function deviceDriveAllowed(
   environment: Pick<InboxEnvironment, "mutationReady" | "role"> | undefined,
 ): boolean {
-  return (
-    environment !== undefined &&
-    environment.mutationReady === true &&
-    environment.role !== undefined &&
-    nodeRoleAllows(environment.role, DEVICE_WS_METHODS.input)
-  );
+  return deviceMethodAllowed(environment, DEVICE_WS_METHODS.input);
 }
 
 /** A press shorter than this many device points is a tap; a longer one is a swipe (as on web). */

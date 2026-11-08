@@ -53,6 +53,9 @@ import {
   GlobalSearchRouteScreen,
   ArchivedThreadsRouteScreen,
   SettingsWorkspaceRouteScreen,
+  ProjectNotesRouteScreen,
+  ThreadScriptsRouteScreen,
+  ThreadDevicesRouteScreen,
   SourceControlBranchesRouteScreen,
   SourceControlChangesRouteScreen,
   SourceControlCommitRouteScreen,
@@ -318,6 +321,11 @@ export const ROOT_STACK_SCREENS = {
     linking: MVP_ROOT_ROUTES.ProjectPublish.linking,
     options: routeOptions("ProjectPublish", { title: "Publish", gestureEnabled: true }),
   }),
+  ProjectNotes: createNativeStackScreen({
+    screen: ProjectNotesRouteScreen,
+    linking: MVP_ROOT_ROUTES.ProjectNotes.linking,
+    options: routeOptions("ProjectNotes", { title: "Notes" }),
+  }),
   ProjectPullRequests: createNativeStackScreen({
     screen: PullRequestsRouteScreen,
     linking: MVP_ROOT_ROUTES.ProjectPullRequests.linking,
@@ -382,6 +390,16 @@ export const ROOT_STACK_SCREENS = {
     screen: ThreadFileSearchRouteScreen,
     linking: MVP_ROOT_ROUTES.ThreadFileSearch.linking,
     options: routeOptions("ThreadFileSearch", { title: "Find in files" }),
+  }),
+  ThreadScripts: createNativeStackScreen({
+    screen: ThreadScriptsRouteScreen,
+    linking: MVP_ROOT_ROUTES.ThreadScripts.linking,
+    options: routeOptions("ThreadScripts", { title: "Run script", gestureEnabled: true }),
+  }),
+  ThreadDevices: createNativeStackScreen({
+    screen: ThreadDevicesRouteScreen,
+    linking: MVP_ROOT_ROUTES.ThreadDevices.linking,
+    options: routeOptions("ThreadDevices", { title: "Devices", gestureEnabled: true }),
   }),
   ThreadDevice: createNativeStackScreen({
     screen: ThreadDeviceRouteScreen,

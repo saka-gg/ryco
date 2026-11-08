@@ -1,9 +1,11 @@
 import type { StaticScreenProps } from "@react-navigation/native";
-import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { scopedThreadKey, scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { resolveThreadTerminalLaunch } from "@ryco/client-runtime/state/terminal";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import { useCallback, useEffect, useMemo } from "react";
 
 import { useHomeWorkspaceData } from "../../state/homeData";
+import { useTerminalStateStore } from "../../state/terminalStateStore";
 import {
   selectEnvironmentState,
   selectProjectByRef,
@@ -68,8 +70,25 @@ function ResolvedThreadTerminalRoute(props: {
     () => (thread ? findThreadWorktree(thread, worktrees) : null),
     [thread, worktrees],
   );
-  const cwd = useThreadWorkspaceRoot({ thread, worktree, project });
-  const worktreePath = worktree?.worktreePath ?? thread?.worktreePath ?? null;
+  const workspaceRoot = useThreadWorkspaceRoot({ thread, worktree, project });
+  const threadWorktreePath = worktree?.worktreePath ?? thread?.worktreePath ?? null;
+  const projectCwd = project?.cwd ?? null;
+  // Where the thread's shells start, resolved exactly like the desktop: the node relaunches a
+  // live shell (and wipes its history) when an open names another cwd or environment, and a
+  // shell's reported launch context wins over the thread's current worktree.
+  const launchContext = useTerminalStateStore(
+    (state) =>
+      state.terminalLaunchContextByThreadKey[
+        scopedThreadKey(scopeThreadRef(environmentId, threadId))
+      ] ?? null,
+  );
+  const launch = useMemo(
+    () => resolveThreadTerminalLaunch({ projectCwd, threadWorktreePath, launchContext }),
+    [launchContext, projectCwd, threadWorktreePath],
+  );
+  const cwd = launch ? launch.cwd : workspaceRoot;
+  const worktreePath = launch ? launch.worktreePath : threadWorktreePath;
+  const runtimeEnv = launch ? launch.runtimeEnv : null;
   const { inspector } = useThreadWorkspaceLayout();
 
   const renderInspector = useCallback(
@@ -79,9 +98,10 @@ function ResolvedThreadTerminalRoute(props: {
         threadId={threadId}
         cwd={cwd}
         worktreePath={worktreePath}
+        runtimeEnv={runtimeEnv}
       />
     ),
-    [cwd, environmentId, threadId, worktreePath],
+    [cwd, environmentId, runtimeEnv, threadId, worktreePath],
   );
   useRegisterThreadWorkspaceInspector(
     "terminal",
@@ -100,6 +120,7 @@ function ResolvedThreadTerminalRoute(props: {
       threadId={threadId}
       cwd={cwd}
       worktreePath={worktreePath}
+      runtimeEnv={runtimeEnv}
     />
   );
 }

@@ -151,6 +151,11 @@
       "import": "./src/device.ts",
       "require": "./src/device.ts"
     },
+    "./notes": {
+      "types": "./src/notes.ts",
+      "import": "./src/notes.ts",
+      "require": "./src/notes.ts"
+    },
     "./node-browser": {
       "types": "./src/nodeBrowser.ts",
       "import": "./src/nodeBrowser.ts",

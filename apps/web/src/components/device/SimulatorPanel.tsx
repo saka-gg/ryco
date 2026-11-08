@@ -1,6 +1,14 @@
 // The interaction model is adapted from Synara v0.7.2 (MIT); see THIRD_PARTY_NOTICES.md.
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { useDeviceStateStore } from "@ryco/client-runtime/state/device";
+import {
+  bootAndAttachDevice,
+  DEVICE_SETUP_POLL_MS,
+  deviceSetupBlocked,
+  devicesNeedSetupPoll,
+  startingBannerText,
+  threadAttachments,
+} from "@ryco/client-runtime/state/device/picker";
 import { DEVICE_WS_METHODS } from "@ryco/contracts";
 import type {
   DeviceAvailability,
@@ -38,15 +46,11 @@ import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 import { toastManager } from "../ui/toast";
 import { DevicePicker } from "./DevicePicker";
-import { startingBannerText } from "./devicePicker.logic";
 import { Control, errorMessage } from "./deviceControls";
 import { DeviceViewer } from "./DeviceViewer";
 import { DeviceToolsDrawer, type DeviceToolsApi } from "./DeviceToolsDrawer";
 import { NodeDeviceSetup, TurnOnDevicesButton, useNodeDeviceSettings } from "./NodeDeviceSetup";
-import { threadAttachments } from "./threadAttachments";
 import { useDeviceRuntime } from "./useDeviceRuntime";
-
-const SETUP_POLL_MS = 5_000;
 
 function SetupState(props: { readonly availability: DeviceAvailability | null }) {
   const availability = props.availability;
@@ -113,16 +117,6 @@ function SetupState(props: { readonly availability: DeviceAvailability | null })
         </div>
       </div>
     </div>
-  );
-}
-
-function isSetupBlocked(availability: DeviceAvailability | null | undefined): boolean {
-  return (
-    !availability ||
-    availability.kind === "unsupported-platform" ||
-    availability.kind === "helper-unavailable" ||
-    (availability.kind === "setup-required" &&
-      availability.steps.some((step) => !step.done && step.id !== "build-device-helper"))
   );
 }
 
@@ -197,13 +191,11 @@ export default function SimulatorPanel(props: {
     applySnapshot(environmentId, generation, snapshot);
   }, [api, applyInventory, applySnapshot, environmentId, generation, threadId]);
 
-  const needsSetupPoll =
-    environmentState?.availability?.kind === "setup-required" ||
-    environmentState?.availability?.kind === "helper-unavailable";
+  const needsSetupPoll = devicesNeedSetupPoll(environmentState?.availability);
   useEffect(() => {
     void refresh().catch(() => undefined);
     if (!needsSetupPoll) return;
-    const timer = setInterval(() => void refresh().catch(() => undefined), SETUP_POLL_MS);
+    const timer = setInterval(() => void refresh().catch(() => undefined), DEVICE_SETUP_POLL_MS);
     return () => clearInterval(timer);
   }, [needsSetupPoll, refresh]);
 
@@ -249,14 +241,16 @@ export default function SimulatorPanel(props: {
   const bootAndAttach = useCallback(
     async (device: DeviceDescriptor): Promise<boolean> => {
       if (!api || !threadId || !environmentId) return false;
-      if (device.state === "shutdown") {
-        const result = await api.boot({ udid: device.udid, threadId });
-        if (result.kind === "boot-limit-reached") {
-          setBootLimit({ requested: device, candidates: result.rycoBooted, limit: result.limit });
-          return false;
-        }
+      const outcome = await bootAndAttachDevice(api, threadId, device);
+      if (outcome.kind === "boot-limit") {
+        setBootLimit({
+          requested: outcome.requested,
+          candidates: outcome.candidates,
+          limit: outcome.limit,
+        });
+        return false;
       }
-      applySnapshot(environmentId, generation, await api.attach({ threadId, udid: device.udid }));
+      applySnapshot(environmentId, generation, outcome.state);
       return true;
     },
     [api, applySnapshot, environmentId, generation, threadId],
@@ -355,7 +349,7 @@ export default function SimulatorPanel(props: {
   // a simulator boots) must not blank a device that is already on screen.
   const transientHelperOutage =
     availability?.kind === "helper-unavailable" && tabDevice?.state === "booted";
-  if (isSetupBlocked(availability) && !transientHelperOutage) {
+  if (deviceSetupBlocked(availability) && !transientHelperOutage) {
     return <SetupState availability={availability} />;
   }
 

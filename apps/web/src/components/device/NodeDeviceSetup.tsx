@@ -1,3 +1,4 @@
+import { nodeDeviceSettingsGate } from "@ryco/client-runtime/state/device/picker";
 import type { DeviceListResult, EnvironmentId } from "@ryco/contracts";
 import { useState, type ReactNode } from "react";
 
@@ -34,15 +35,12 @@ export function useNodeDeviceSettings(
 ): NodeDeviceSettingsState {
   const { target } = useEnvironmentSettingsTarget(environmentId);
   const [dismissed, setDismissed] = useState(false);
-  const config = target?.serverConfig ?? null;
-  const supported = config?.environment.capabilities.deviceSetup === true;
-  const settings = config?.settings;
-  const completed = dismissed || settings?.deviceOnboardingCompleted !== false;
+  const { showSetup, devicesOff } = nodeDeviceSettingsGate(target?.serverConfig, dismissed);
   return {
     target,
     canManage: target?.canManage === true,
-    showSetup: supported && settings !== undefined && !completed,
-    devicesOff: supported && completed && settings?.devicesEnabled === false,
+    showSetup,
+    devicesOff,
     dismiss: () => setDismissed(true),
   };
 }

@@ -366,6 +366,14 @@
       "types": "./src/state/device/previewLease.ts",
       "import": "./src/state/device/previewLease.ts"
     },
+    "./state/device/threadAttachments": {
+      "types": "./src/state/device/threadAttachments.ts",
+      "import": "./src/state/device/threadAttachments.ts"
+    },
+    "./state/device/picker": {
+      "types": "./src/state/device/picker.ts",
+      "import": "./src/state/device/picker.ts"
+    },
     "./state/device/devicePoint": {
       "types": "./src/state/device/devicePoint.ts",
       "import": "./src/state/device/devicePoint.ts"

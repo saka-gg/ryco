@@ -30,6 +30,8 @@ import IconCircleXFilled from "@tabler/icons-react-native/IconCircleXFilled";
 import IconClipboardList from "@tabler/icons-react-native/IconClipboardList";
 import IconCopy from "@tabler/icons-react-native/IconCopy";
 import IconDeviceDesktop from "@tabler/icons-react-native/IconDeviceDesktop";
+import IconDeviceMobile from "@tabler/icons-react-native/IconDeviceMobile";
+import IconDeviceTablet from "@tabler/icons-react-native/IconDeviceTablet";
 import IconDots from "@tabler/icons-react-native/IconDots";
 import IconDotsCircleHorizontal from "@tabler/icons-react-native/IconDotsCircleHorizontal";
 import IconEdit from "@tabler/icons-react-native/IconEdit";
@@ -129,6 +131,8 @@ const ANDROID_ICON_BY_SF_SYMBOL: Partial<Record<SFSymbol, Icon>> = {
   globe: IconWorld,
   hammer: IconHammer,
   "info.circle": IconInfoCircle,
+  ipad: IconDeviceTablet,
+  iphone: IconDeviceMobile,
   link: IconLink,
   "line.3.horizontal.decrease": IconFilter,
   "line.3.horizontal.decrease.circle": IconFilter,

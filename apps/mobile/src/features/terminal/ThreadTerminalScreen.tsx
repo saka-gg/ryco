@@ -64,6 +64,7 @@ export function ThreadTerminalScreen(props: {
   readonly threadId: ThreadId;
   readonly cwd: string | null;
   readonly worktreePath: string | null;
+  readonly runtimeEnv: Readonly<Record<string, string>> | null;
 }) {
   const { appearance } = useAppearancePreferences();
   const insets = useSafeAreaInsets();
@@ -75,6 +76,7 @@ export function ThreadTerminalScreen(props: {
     threadId: props.threadId,
     cwd: props.cwd,
     worktreePath: props.worktreePath,
+    runtimeEnv: props.runtimeEnv,
     fontSize: appearance.terminalFontSize,
   });
   const [renameDraft, setRenameDraft] = useState<string | null>(null);
