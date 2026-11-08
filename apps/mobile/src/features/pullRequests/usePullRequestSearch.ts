@@ -1,14 +1,9 @@
 import type { EnvironmentId, ProjectId } from "@ryco/contracts";
-import { useShallow } from "zustand/react/shallow";
 
-import { selectProjectsAcrossEnvironments, useStore } from "../../state/threadsRuntime";
-import { useHomeEnvironments } from "../home/useHomeEnvironments";
 import { pullRequestTabListFilters, type PullRequestListItemModel } from "./pullRequestListModel";
-import {
-  derivePullRequestRepositoryChoices,
-  resolvePullRequestRepositoryChoice,
-} from "./pullRequestRepositoriesModel";
+import { resolvePullRequestRepositoryChoice } from "./pullRequestRepositoriesModel";
 import { usePullRequestList, useSourceControlProvider } from "./usePullRequestData";
+import { usePullRequestRepositoryChoices } from "./usePullRequestRepositoryChoices";
 import { usePullRequestTabState } from "./usePullRequestTabState";
 
 /**
@@ -20,7 +15,7 @@ export interface PullRequestSearchResult {
   readonly key: string;
   readonly number: number;
   readonly title: string;
-  /** "acme/app · merged". */
+  /** "acme/app · merged", with the machine when the repository is on several: "acme/app · Mac mini · merged". */
   readonly subtitle: string;
   readonly route: {
     readonly name: "ProjectPullRequest";
@@ -50,23 +45,8 @@ const STATE_WORD: Readonly<Record<string, string>> = {
 export const PULL_REQUEST_SEARCH_LIMIT = 20;
 
 export function usePullRequestSearch(query: string): PullRequestSearch {
-  const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
-  const environments = useHomeEnvironments();
+  const choices = usePullRequestRepositoryChoices();
   const tabState = usePullRequestTabState();
-  const connected = new Set(
-    environments
-      .filter(
-        (environment) =>
-          environment.connectionState === "connected" ||
-          environment.connectionState === "read-only",
-      )
-      .map((environment) => environment.environmentId),
-  );
-  const choices = derivePullRequestRepositoryChoices({
-    projects,
-    connected,
-    environmentLabels: new Map(),
-  });
   const choice = resolvePullRequestRepositoryChoice(choices, tabState.repositoryKey);
   const environmentId = choice?.environmentId ?? null;
   const cwd = choice?.cwd ?? null;
@@ -83,14 +63,19 @@ export function usePullRequestSearch(query: string): PullRequestSearch {
   }
   if (trimmed.length === 0) return { results: [], loading: false, unavailable: null };
   const results = pullRequestSearchResults(list.screen.items, {
-    label: choice.label,
+    label:
+      choice.machines > 1 && choice.environmentLabel !== null
+        ? `${choice.label} · ${choice.environmentLabel}`
+        : choice.label,
     environmentId: choice.environmentId,
     projectId: choice.projectId,
   });
   return {
     results,
     loading: list.screen.status === "loading",
-    unavailable: choice.connected ? null : "The machine with this repository is offline.",
+    unavailable: choice.connected
+      ? null
+      : `${choice.environmentLabel ?? "The machine with this repository"} is offline.`,
   };
 }
 

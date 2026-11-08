@@ -5,7 +5,10 @@ import { isChatProject, type ProjectKindCarrier } from "@ryco/shared/projectKind
  * The PRs tab's repository picker: one choice per repository (its remote's
  * canonical key), however many checkouts of it the reader's machines have.
  * Each choice reads through one representative checkout, preferring a node
- * that is connected now, then the repository's own root over a worktree.
+ * that can act now (connected, takes changes, the session's role is not a
+ * viewer), then one that is connected (read-only), then the repository's own
+ * root over a worktree. A read-only machine would hide Review, Approve and
+ * Merge even though another machine with the same repository could act.
  */
 
 export interface PullRequestRepositoryProject extends ProjectKindCarrier {
@@ -31,8 +34,12 @@ export interface PullRequestRepositoryChoice {
   readonly environmentLabel: string | null;
   /** Checkouts of this repository across every machine. */
   readonly checkouts: number;
+  /** Machines with a checkout of this repository. */
+  readonly machines: number;
   /** Whether the representative checkout's machine is connected now. */
   readonly connected: boolean;
+  /** Whether that machine takes changes from this session now (not read-only). */
+  readonly canAct: boolean;
 }
 
 function repositoryLabel(project: PullRequestRepositoryProject): string {
@@ -51,7 +58,11 @@ function compareCheckouts(
   left: PullRequestRepositoryProject,
   right: PullRequestRepositoryProject,
   connected: ReadonlySet<EnvironmentId>,
+  acting: ReadonlySet<EnvironmentId>,
 ): number {
+  const leftActing = acting.has(left.environmentId) ? 0 : 1;
+  const rightActing = acting.has(right.environmentId) ? 0 : 1;
+  if (leftActing !== rightActing) return leftActing - rightActing;
   const leftConnected = connected.has(left.environmentId) ? 0 : 1;
   const rightConnected = connected.has(right.environmentId) ? 0 : 1;
   if (leftConnected !== rightConnected) return leftConnected - rightConnected;
@@ -67,7 +78,10 @@ function compareCheckouts(
 
 export function derivePullRequestRepositoryChoices(input: {
   readonly projects: ReadonlyArray<PullRequestRepositoryProject>;
+  /** Machines connected now, read-only ones included. */
   readonly connected: ReadonlySet<EnvironmentId>;
+  /** Machines that take changes from this session now; a subset of `connected`. */
+  readonly acting: ReadonlySet<EnvironmentId>;
   readonly environmentLabels: ReadonlyMap<EnvironmentId, string>;
 }): ReadonlyArray<PullRequestRepositoryChoice> {
   const byKey = new Map<string, PullRequestRepositoryProject[]>();
@@ -82,7 +96,7 @@ export function derivePullRequestRepositoryChoices(input: {
   const choices: PullRequestRepositoryChoice[] = [];
   for (const [key, checkouts] of byKey) {
     const best = checkouts.toSorted((left, right) =>
-      compareCheckouts(left, right, input.connected),
+      compareCheckouts(left, right, input.connected, input.acting),
     )[0];
     if (best === undefined) continue;
     choices.push({
@@ -94,7 +108,9 @@ export function derivePullRequestRepositoryChoices(input: {
       cwd: best.cwd,
       environmentLabel: input.environmentLabels.get(best.environmentId) ?? null,
       checkouts: checkouts.length,
+      machines: new Set(checkouts.map((checkout) => checkout.environmentId)).size,
       connected: input.connected.has(best.environmentId),
+      canAct: input.acting.has(best.environmentId),
     });
   }
   return choices.toSorted(
@@ -106,7 +122,8 @@ export function derivePullRequestRepositoryChoices(input: {
 
 /**
  * The choice to show: the one the reader picked last while it still exists,
- * else the first connected repository, else the first one.
+ * else the first repository whose machine can act, else the first connected
+ * one, else the first one.
  */
 export function resolvePullRequestRepositoryChoice(
   choices: ReadonlyArray<PullRequestRepositoryChoice>,
@@ -116,5 +133,27 @@ export function resolvePullRequestRepositoryChoice(
     const saved = choices.find((choice) => choice.key === savedKey);
     if (saved) return saved;
   }
-  return choices.find((choice) => choice.connected) ?? choices[0] ?? null;
+  return (
+    choices.find((choice) => choice.canAct) ??
+    choices.find((choice) => choice.connected) ??
+    choices[0] ??
+    null
+  );
+}
+
+/**
+ * The picker's subtitle for a choice: the machine it reads through and acts
+ * on, whenever more than one machine could (the repository is on several, or
+ * the reader has several), and "read only" when that machine will not take
+ * changes from this session. Null when there is nothing to say.
+ */
+export function pullRequestRepositoryMachineNote(
+  choice: PullRequestRepositoryChoice,
+  machinesWithRepositories: number,
+): string | null {
+  const readOnly = choice.connected && !choice.canAct;
+  const several = choice.machines > 1 || machinesWithRepositories > 1;
+  if (choice.environmentLabel === null) return readOnly ? "Read only" : null;
+  if (readOnly) return `${choice.environmentLabel} · read only`;
+  return several ? choice.environmentLabel : null;
 }

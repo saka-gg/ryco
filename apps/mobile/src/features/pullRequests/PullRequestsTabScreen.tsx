@@ -32,7 +32,7 @@ import {
   type PullRequestTabFilters,
 } from "./pullRequestListModel";
 import {
-  derivePullRequestRepositoryChoices,
+  pullRequestRepositoryMachineNote,
   resolvePullRequestRepositoryChoice,
   type PullRequestRepositoryChoice,
 } from "./pullRequestRepositoriesModel";
@@ -44,41 +44,14 @@ import {
 import { selectPullRequestRepository } from "./pullRequestTabStateModel";
 import { usePullRequestList, useSourceControlProvider } from "./usePullRequestData";
 import {
+  readablePullRequestConnection,
+  usePullRequestRepositoryChoices,
+} from "./usePullRequestRepositoryChoices";
+import {
   updatePullRequestTabState,
   usePullRequestTabState,
   usePullRequestTabStateLoaded,
 } from "./usePullRequestTabState";
-
-function readableConnection(state: string): boolean {
-  return state === "connected" || state === "read-only";
-}
-
-function useRepositoryChoices(): ReadonlyArray<PullRequestRepositoryChoice> {
-  const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
-  const environments = useHomeEnvironments();
-  const connectedKey = environments
-    .filter((environment) => readableConnection(environment.connectionState))
-    .map((environment) => environment.environmentId)
-    .join("\u0000");
-  const labelsKey = environments
-    .map((environment) => `${environment.environmentId}\u0001${environment.label}`)
-    .join("\u0000");
-  return useMemo(() => {
-    const connected = new Set(
-      connectedKey.length > 0 ? (connectedKey.split("\u0000") as EnvironmentId[]) : [],
-    );
-    const labels = new Map<EnvironmentId, string>();
-    for (const entry of labelsKey.length > 0 ? labelsKey.split("\u0000") : []) {
-      const [id, label] = entry.split("\u0001");
-      if (id && label) labels.set(id as EnvironmentId, label);
-    }
-    return derivePullRequestRepositoryChoices({
-      projects,
-      connected,
-      environmentLabels: labels,
-    });
-  }, [connectedKey, labelsKey, projects]);
-}
 
 function HeaderIconButton(props: {
   readonly symbol: string;
@@ -112,12 +85,15 @@ function RepositoryPicker(props: {
 }) {
   const icon = useThemeColor("--color-icon-muted") as string;
   const machines = new Set(props.choices.map((choice) => choice.environmentId)).size;
-  const actions = props.choices.map((choice) => ({
-    id: choice.key,
-    title: choice.label,
-    ...(machines > 1 && choice.environmentLabel ? { subtitle: choice.environmentLabel } : {}),
-    state: choice.key === props.selected?.key ? ("on" as const) : ("off" as const),
-  }));
+  const actions = props.choices.map((choice) => {
+    const note = pullRequestRepositoryMachineNote(choice, machines);
+    return {
+      id: choice.key,
+      title: choice.label,
+      ...(note !== null ? { subtitle: note } : {}),
+      state: choice.key === props.selected?.key ? ("on" as const) : ("off" as const),
+    };
+  });
   const onPressAction = (event: NativeActionEvent) => props.onSelect(event.nativeEvent.event);
   return (
     <MenuView title="Repository" actions={actions} onPressAction={onPressAction}>
@@ -255,7 +231,7 @@ export interface PullRequestsListScreenProps {
 export function PullRequestsListScreen(props: PullRequestsListScreenProps) {
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
-  const choices = useRepositoryChoices();
+  const choices = usePullRequestRepositoryChoices();
   const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
   const environments = useHomeEnvironments();
   const tabState = usePullRequestTabState();
@@ -289,10 +265,17 @@ export function PullRequestsListScreen(props: PullRequestsListScreenProps) {
             cwd: fixedProject.cwd,
             environmentLabel: null,
             checkouts: 1,
+            machines: 1,
             connected: environments.some(
               (environment) =>
                 environment.environmentId === fixedProject.environmentId &&
-                readableConnection(environment.connectionState),
+                readablePullRequestConnection(environment.connectionState),
+            ),
+            canAct: environments.some(
+              (environment) =>
+                environment.environmentId === fixedProject.environmentId &&
+                environment.mutationReady &&
+                environment.role !== "viewer",
             ),
           };
   const environmentId = choice?.environmentId ?? null;
@@ -365,6 +348,7 @@ export function PullRequestsListScreen(props: PullRequestsListScreenProps) {
   };
 
   const offline = choice !== null && !choice.connected;
+  const readOnly = choice !== null && choice.connected && !choice.canAct;
   const header = (
     <View
       className="gap-3 pb-2"
@@ -416,6 +400,14 @@ export function PullRequestsListScreen(props: PullRequestsListScreenProps) {
           <Text className="min-w-0 flex-1 text-xs text-foreground-muted">
             {machine?.label ?? "This machine"} is offline.
             {screen.status === "ready" ? " These are the last pull requests read." : ""}
+          </Text>
+        </View>
+      ) : null}
+      {readOnly && machine?.role === "viewer" ? (
+        <View className="mx-4 flex-row items-center gap-2 rounded-xl bg-subtle px-3 py-2.5">
+          <SymbolView name="eye" size={14} tintColor={mutedIcon} />
+          <Text className="min-w-0 flex-1 text-xs text-foreground-muted">
+            You can read pull requests on {machine.label}, but not review or merge them there.
           </Text>
         </View>
       ) : null}
