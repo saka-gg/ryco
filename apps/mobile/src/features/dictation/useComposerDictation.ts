@@ -13,6 +13,7 @@ import {
   EMPTY_DICTATION_TRANSCRIPT,
   normalizeDictationVolume,
   pushDictationLevel,
+  dictationLocaleCandidates,
   resolveDictationLocale,
   type DictationAnchor,
   type DictationState,
@@ -53,15 +54,19 @@ function releaseAudioSession(): void {
   }
 }
 
-function preferredLocales(): string[] {
-  const locales: string[] = [];
+function appLocale(): string | null {
   try {
-    locales.push(Intl.DateTimeFormat().resolvedOptions().locale);
+    return Intl.DateTimeFormat().resolvedOptions().locale;
   } catch {
-    // Fall through to English below.
+    return null;
   }
-  locales.push("en-US");
-  return locales;
+}
+
+/** Ryco's patch adds these to iOS's answer (patches/expo-speech-recognition@57.1.1.patch). */
+interface DictationLocales {
+  readonly locales: ReadonlyArray<string>;
+  readonly onDeviceLocales?: ReadonlyArray<string>;
+  readonly preferredLanguages?: ReadonlyArray<string>;
 }
 
 /**
@@ -171,11 +176,15 @@ export function useComposerDictation(input: {
         }
         const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
         if (!permission.granted) return failCurrent("not-allowed");
-        if (!ExpoSpeechRecognitionModule.supportsOnDeviceRecognition()) {
-          return failCurrent("service-not-allowed");
-        }
-        const { locales } = await ExpoSpeechRecognitionModule.getSupportedLocales({});
-        const lang = resolveDictationLocale(preferredLocales(), locales);
+        // Ask per locale: the app's own locale (en_DE for this English-only app
+        // on a German phone) has no recognizer, so a locale-less check says no.
+        const answer: DictationLocales = await ExpoSpeechRecognitionModule.getSupportedLocales({});
+        const onDevice = answer.onDeviceLocales ?? [];
+        if (onDevice.length === 0) return failCurrent("service-not-allowed");
+        const lang = resolveDictationLocale(
+          dictationLocaleCandidates(answer.preferredLanguages, appLocale()),
+          onDevice,
+        );
         if (!lang) return failCurrent("language-not-supported");
         if (!current()) return;
         const selection = latest.current.readSelection();

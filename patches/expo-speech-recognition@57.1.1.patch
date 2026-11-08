@@ -1,3 +1,29 @@
+diff --git a/ios/ExpoSpeechRecognitionModule.swift b/ios/ExpoSpeechRecognitionModule.swift
+index 9dc9082..ed488c7 100644
+--- a/ios/ExpoSpeechRecognitionModule.swift
++++ b/ios/ExpoSpeechRecognitionModule.swift
+@@ -393,12 +393,21 @@ public class ExpoSpeechRecognitionModule: Module {
+     AsyncFunction("getSupportedLocales") { (options: GetSupportedLocaleOptions, promise: Promise) in
+       let supportedLocales = SFSpeechRecognizer.supportedLocales().map { $0.identifier }.sorted()
+       let installedLocales = supportedLocales
++      // Ryco: the locales whose recognizer has an on-device model right now, and the
++      // person's preferred languages (Settings > Language & Region). SFSpeechRecognizer()
++      // without a locale uses the app's locale, which for an English-only app on a
++      // German phone is en_DE: no recognizer, so it can't answer for the device.
++      let onDeviceLocales = supportedLocales.filter { identifier in
++        SFSpeechRecognizer(locale: Locale(identifier: identifier))?.supportsOnDeviceRecognition ?? false
++      }
+ 
+       // Return as an object
+       promise.resolve([
+         "locales": supportedLocales,
+         // On iOS, the installed locales are the same as the supported locales
+         "installedLocales": installedLocales,
++        "onDeviceLocales": onDeviceLocales,
++        "preferredLanguages": Locale.preferredLanguages,
+       ])
+     }
+ 
 diff --git a/ios/ExpoSpeechRecognizer.swift b/ios/ExpoSpeechRecognizer.swift
 index b27842501f72e1a5a9382636397cbef30d5a2b30..74e2200a123fca0fe033be2062f6530f0c595205 100644
 --- a/ios/ExpoSpeechRecognizer.swift
