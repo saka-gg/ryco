@@ -5,19 +5,39 @@ import {
   TasksTabScreen,
   UsageTabScreen,
 } from "../lazyRouteScreens";
-import { MAIN_TABS, type MainTabName } from "./mainTabsModel";
+import type { PlatformIconIOS } from "react-native-screens";
+
+import { MAIN_TABS, type MainTabIcon, type MainTabName } from "./mainTabsModel";
 import {
   createNativeTabScreen,
   createNativeTabsNavigator,
   type NativeTabOptions,
 } from "./NativeTabsNavigator";
 
+// t3code's pull request glyph (MIT, see NOTICE.md), drawn as a template so it tints like a symbol.
+const PULL_REQUEST_ICON = require("../../../assets/icons/pull-request.png");
+
+function iosIcon(icon: MainTabIcon): PlatformIconIOS {
+  return icon.type === "sfSymbol"
+    ? { type: "sfSymbol", name: icon.name }
+    : { type: "templateSource", templateSource: PULL_REQUEST_ICON };
+}
+
 function tabOptions(name: MainTabName): NativeTabOptions {
-  const tab = MAIN_TABS[name];
+  const tab: {
+    readonly label: string;
+    readonly icon: MainTabIcon;
+    readonly selectedIcon?: MainTabIcon;
+  } = MAIN_TABS[name];
   return {
     tabBarLabel: tab.label,
-    sfSymbol: tab.sfSymbol,
-    selectedSfSymbol: tab.selectedSfSymbol,
+    iosIcon: iosIcon(tab.icon),
+    iosSelectedIcon: tab.selectedIcon ? iosIcon(tab.selectedIcon) : undefined,
+    // The one image icon Android can draw; SF Symbols there need drawables (follow-up).
+    androidIcon:
+      tab.icon.type === "template"
+        ? { type: "imageSource", imageSource: PULL_REQUEST_ICON }
+        : undefined,
   };
 }
 

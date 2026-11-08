@@ -191,9 +191,21 @@ describe("MVP route config", () => {
       "settings",
     ]);
     for (const name of MAIN_TAB_NAMES) {
-      expect(MAIN_TABS[name].sfSymbol, name).not.toBe("");
+      expect(MAIN_TABS[name].icon.type, name).toMatch(/^(sfSymbol|template)$/);
       expect(MAIN_TABS[name].label, name).not.toBe("");
     }
+  });
+
+  it("uses t3code's tab icons, filled while selected where a filled glyph exists", () => {
+    expect(MAIN_TAB_NAMES.map((name) => MAIN_TABS[name].icon)).toEqual([
+      { type: "sfSymbol", name: "text.bubble" },
+      { type: "sfSymbol", name: "checklist" },
+      { type: "template", asset: "pullRequest" },
+      { type: "sfSymbol", name: "chart.bar.xaxis" },
+      { type: "sfSymbol", name: "gearshape" },
+    ]);
+    expect(MAIN_TABS.Chats.selectedIcon).toEqual({ type: "sfSymbol", name: "text.bubble.fill" });
+    expect(MAIN_TABS.Settings.selectedIcon).toEqual({ type: "sfSymbol", name: "gearshape.fill" });
   });
 
   it("opens each tab from its link, and the root at Chats", () => {

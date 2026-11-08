@@ -20,7 +20,13 @@ import type { NativeStackNavigationOptions } from "@react-navigation/native-stac
 import { useLayoutEffect, useState } from "react";
 import { Platform, type NativeSyntheticEvent } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
-import { Tabs, type TabSelectedEvent, type TabSelectionRejectedEvent } from "react-native-screens";
+import {
+  Tabs,
+  type PlatformIconAndroid,
+  type PlatformIconIOS,
+  type TabSelectedEvent,
+  type TabSelectionRejectedEvent,
+} from "react-native-screens";
 
 import { useThemeColor } from "../../lib/useThemeColor";
 
@@ -43,11 +49,13 @@ const FORWARDED_HEADER_RESET: Record<keyof NativeTabStackHeaderOptions, undefine
 };
 
 export interface NativeTabOptions {
-  /** The word under the tab's icon. */
+  /** The tab's name for VoiceOver; the bar shows icons only. */
   readonly tabBarLabel?: string;
-  /** SF Symbols for the iOS tab bar item. */
-  readonly sfSymbol?: string;
-  readonly selectedSfSymbol?: string;
+  /** The iOS tab bar item's icon, and its selected icon (the same when absent). */
+  readonly iosIcon?: PlatformIconIOS;
+  readonly iosSelectedIcon?: PlatformIconIOS;
+  /** The Android item's icon: only image sources, since SF Symbols are iOS only. */
+  readonly androidIcon?: PlatformIconAndroid;
   readonly badgeValue?: string;
   /** Header of the hosting stack screen while this tab is in front. */
   readonly stackHeader?: NativeTabStackHeaderOptions;
@@ -111,7 +119,8 @@ function NativeTabsNavigator({
   });
   // The stack route that hosts the tabs.
   const hostNavigation = useNavigation();
-  const tintColor = useThemeColor("--color-foreground");
+  // The selected item's tint, as t3code's bar: the theme's primary (white in dark, black in light).
+  const tintColor = useThemeColor("--color-primary");
   const focusedRoute = state.routes[state.index]!;
   const focusedHeader = descriptors[focusedRoute.key]?.options.stackHeader;
 
@@ -177,15 +186,16 @@ function NativeTabsNavigator({
               tabBarItemAccessibilityLabel={label}
               tabBarItemTestID={`tab-${route.name}`}
               specialEffects={{ repeatedTabSelection: { popToRoot: true, scrollToTop: true } }}
+              android={
+                Platform.OS === "android" && options.androidIcon
+                  ? { icon: options.androidIcon }
+                  : undefined
+              }
               ios={
                 Platform.OS === "ios"
                   ? {
-                      icon: options.sfSymbol
-                        ? { type: "sfSymbol", name: options.sfSymbol }
-                        : undefined,
-                      selectedIcon: options.selectedSfSymbol
-                        ? { type: "sfSymbol", name: options.selectedSfSymbol }
-                        : undefined,
+                      icon: options.iosIcon,
+                      selectedIcon: options.iosSelectedIcon,
                       // Each tab's scroll view adjusts for the header and tab bar itself.
                       overrideScrollViewContentInsetAdjustmentBehavior: false,
                     }

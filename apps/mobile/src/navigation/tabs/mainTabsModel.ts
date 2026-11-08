@@ -7,6 +7,15 @@ export const MAIN_TAB_NAMES = ["Chats", "Tasks", "PullRequests", "Usage", "Setti
 
 export type MainTabName = (typeof MAIN_TAB_NAMES)[number];
 
+/**
+ * A tab bar icon: an SF Symbol, or one of the app's template images (tinted
+ * like a symbol), named here and resolved to its asset in `MainTabs.tsx` so
+ * this table stays free of React Native.
+ */
+export type MainTabIcon =
+  | { readonly type: "sfSymbol"; readonly name: string }
+  | { readonly type: "template"; readonly asset: "pullRequest" };
+
 export interface MainTabDescriptor {
   /** Linking path relative to the app root; Chats is the root itself. */
   readonly linking: string;
@@ -14,46 +23,48 @@ export interface MainTabDescriptor {
   readonly label: string;
   /** The tab's large title at the top of its screen. */
   readonly title: string;
-  /** SF Symbol shown in the iOS tab bar, and when selected. */
-  readonly sfSymbol: string;
-  readonly selectedSfSymbol: string;
+  /** The tab bar icon, and the one it shows while selected (the same when absent). */
+  readonly icon: MainTabIcon;
+  readonly selectedIcon?: MainTabIcon;
 }
 
+const symbol = (name: string): MainTabIcon => ({ type: "sfSymbol", name });
+
+// Icons follow t3code's phone tab bar (`navigation-tabs.ts`, `WorkspaceNativeTabs.ios.tsx`):
+// `text.bubble`, its pull request template image and `chart.bar.xaxis`, with `gearshape`.
+// Tasks has no t3code counterpart: `checklist` is a line glyph of the same weight.
 export const MAIN_TABS = {
   Chats: {
     linking: "",
     label: "Chats",
     title: "Chats",
-    sfSymbol: "bubble.left.and.text.bubble.right",
-    selectedSfSymbol: "bubble.left.and.text.bubble.right.fill",
+    icon: symbol("text.bubble"),
+    selectedIcon: symbol("text.bubble.fill"),
   },
   Tasks: {
     linking: "tasks",
     label: "Tasks",
     title: "Tasks",
-    sfSymbol: "checkmark.circle",
-    selectedSfSymbol: "checkmark.circle.fill",
+    icon: symbol("checklist"),
   },
   PullRequests: {
     linking: "pull-requests",
     label: "Pull requests",
     title: "Pull requests",
-    sfSymbol: "arrow.triangle.pull",
-    selectedSfSymbol: "arrow.triangle.pull",
+    icon: { type: "template", asset: "pullRequest" },
   },
   Usage: {
     linking: "usage",
     label: "Usage",
     title: "Usage",
-    sfSymbol: "chart.bar",
-    selectedSfSymbol: "chart.bar.fill",
+    icon: symbol("chart.bar.xaxis"),
   },
   Settings: {
     linking: "settings",
     label: "Settings",
     title: "Settings",
-    sfSymbol: "gearshape",
-    selectedSfSymbol: "gearshape.fill",
+    icon: symbol("gearshape"),
+    selectedIcon: symbol("gearshape.fill"),
   },
 } as const satisfies Record<MainTabName, MainTabDescriptor>;
 

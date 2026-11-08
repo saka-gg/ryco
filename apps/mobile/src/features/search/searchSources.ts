@@ -33,5 +33,9 @@ export const AVAILABLE_SEARCH_SCOPES: ReadonlySet<SearchScope> = new Set<SearchS
  */
 export function useSearchSources(input: SearchSourceInput): ReadonlyArray<SearchGroup> {
   const threads = useThreadSearch(input);
+  // PRs mount point, once the PRs round (#1138) is on main: add "pullRequests" to
+  // AVAILABLE_SEARCH_SCOPES, then
+  //   const prs = usePullRequestSearch(input.scopes.has("pullRequests") ? (input.query ?? "") : "");
+  //   return [...threads, pullRequestSearchGroup(prs, (route) => navigation.navigate(route.name, route.params))];
   return threads;
 }
