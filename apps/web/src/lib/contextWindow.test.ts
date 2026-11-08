@@ -5,7 +5,6 @@ import {
   createInitialContextWindowUsage,
   deriveContextWindowUsage,
   deriveLatestContextWindowSnapshot,
-  formatContextWindowTokens,
   parseContextWindowTokenLimit,
 } from "./contextWindow";
 
@@ -48,13 +47,6 @@ describe("contextWindow", () => {
     ]);
 
     expect(snapshot).toBeNull();
-  });
-
-  it("formats compact token counts", () => {
-    expect(formatContextWindowTokens(999)).toBe("999");
-    expect(formatContextWindowTokens(1400)).toBe("1.4k");
-    expect(formatContextWindowTokens(14_000)).toBe("14k");
-    expect(formatContextWindowTokens(258_000)).toBe("258k");
   });
 
   it("parses configured context window limits", () => {

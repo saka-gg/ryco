@@ -21,3 +21,4 @@ export * from "./threadArtifacts.ts";
 export * from "./checkpointRevert.ts";
 export * from "./commandLabel.ts";
 export * from "./userInputExchange.ts";
+export * from "./toolCallGroup.ts";

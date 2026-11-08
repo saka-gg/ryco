@@ -1,19 +1,17 @@
-// FILE: toolCallGroup.logic.ts
+// FILE: toolCallGroup.ts
 // Purpose: Summarizes a settled run of tool-call work entries into one compact
 //          label ("Ran 2 commands, Edited 2 files, Searched 3 files") for the
 //          collapsed tool-group disclosure in the transcript.
-// Layer: Web chat presentation helpers
+// Layer: Shared client presentation logic (web, desktop and mobile)
 // Exports: MIN_COLLAPSIBLE_TOOL_GROUP_SIZE, ToolCallSummaryCategory,
 //          ToolCallGroupSummary, isSummarizableToolCallEntry,
 //          classifyToolCallSummaryCategory, summarizeToolCallGroup
 
 import { resolveComputerTool } from "@ryco/shared/computerToolPresentation";
 import { resolveDeviceTool } from "@ryco/shared/deviceToolPresentation";
-import type { WorkLogEntry } from "../../session-logic";
-import {
-  deriveReadableCommandDisplay,
-  resolveWorkEntryStatus,
-} from "@ryco/client-runtime/state/session";
+import { deriveReadableCommandDisplay } from "./commandLabel.ts";
+import { resolveWorkEntryStatus } from "./liveWorkSteps.ts";
+import type { WorkLogEntry } from "./session-logic.ts";
 
 // A single tool row collapses into nothing useful; only runs of 2+ fold.
 export const MIN_COLLAPSIBLE_TOOL_GROUP_SIZE = 2;

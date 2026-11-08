@@ -23,7 +23,8 @@ import { ArrowUpRightIcon } from "lucide-react";
 import { type ReactNode, useMemo, useState } from "react";
 
 import { cn } from "~/lib/utils";
-import { type ContextWindowUsage, formatContextWindowTokens } from "~/lib/contextWindow";
+import { formatTokenCount } from "@ryco/shared/tokenCount";
+import type { ContextWindowUsage } from "~/lib/contextWindow";
 import { useQuery } from "~/rpc/queryClient";
 import { formatRelativeTimeLabel } from "~/timestampFormat";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
@@ -169,11 +170,11 @@ function PromptCacheSection(props: {
     <div className="mt-2.5 space-y-1 border-t border-border/60 pt-2 leading-tight">
       <SectionLabel>Prompt cache</SectionLabel>
       <div className="whitespace-nowrap text-xs font-medium text-foreground">
-        {formatContextWindowTokens(observation.cacheReadInputTokens)} read
+        {formatTokenCount(observation.cacheReadInputTokens)} read
         <span className="mx-1">⋅</span>
-        {formatContextWindowTokens(observation.cacheWriteInputTokens)} written
+        {formatTokenCount(observation.cacheWriteInputTokens)} written
         <span className="mx-1">⋅</span>
-        {formatContextWindowTokens(observation.directInputTokens)} uncached
+        {formatTokenCount(observation.directInputTokens)} uncached
       </div>
       <div className="text-xs text-muted-foreground">
         Last request {formatRelativeTimeLabel(observation.observedAt, props.now)}
@@ -354,13 +355,13 @@ function ContextWindowDetails(
           <div className="whitespace-nowrap text-xs font-medium text-foreground">
             <span>{usedPercentage}</span>
             <span className="mx-1">⋅</span>
-            <span>{formatContextWindowTokens(usage.usedTokens)}</span>
+            <span>{formatTokenCount(usage.usedTokens)}</span>
             <span>/</span>
-            <span>{formatContextWindowTokens(usage.maxTokens ?? null)} context used</span>
+            <span>{formatTokenCount(usage.maxTokens ?? null)} context used</span>
           </div>
         ) : (
           <div className="whitespace-nowrap text-xs font-medium text-foreground">
-            {formatContextWindowTokens(usage.usedTokens)} context used
+            {formatTokenCount(usage.usedTokens)} context used
           </div>
         )}
         <MeterBar
@@ -371,7 +372,7 @@ function ContextWindowDetails(
         {(usage.totalProcessedTokens ?? null) !== null &&
         (usage.totalProcessedTokens ?? 0) > usage.usedTokens ? (
           <div className="text-xs text-muted-foreground">
-            Total processed: {formatContextWindowTokens(usage.totalProcessedTokens ?? null)} tokens
+            Total processed: {formatTokenCount(usage.totalProcessedTokens ?? null)} tokens
           </div>
         ) : null}
         {usage.compactsAutomatically ? (
@@ -473,7 +474,7 @@ export function ContextWindowMeter(props: ContextWindowMeterProps) {
             aria-label={
               usage.maxTokens !== null && usedPercentage
                 ? `Context window ${usedPercentage} used`
-                : `Context window ${formatContextWindowTokens(usage.usedTokens)} tokens used`
+                : `Context window ${formatTokenCount(usage.usedTokens)} tokens used`
             }
           >
             <span className="relative flex h-6 w-6 items-center justify-center">
@@ -511,7 +512,7 @@ export function ContextWindowMeter(props: ContextWindowMeterProps) {
               >
                 {usage.usedPercentage !== null
                   ? Math.round(usage.usedPercentage)
-                  : formatContextWindowTokens(usage.usedTokens)}
+                  : formatTokenCount(usage.usedTokens)}
               </span>
             </span>
           </button>

@@ -21,9 +21,9 @@ import {
   reasoningEntryText,
   reasoningTail,
   resolveWorkEntryStatus,
+  classifyToolCallSummaryCategory,
   type WorkEntryStatus,
 } from "@ryco/client-runtime/state/session";
-import { classifyToolCallSummaryCategory } from "./toolCallGroup.logic";
 import { rycoToolWorkEntryPresentation } from "./workEntryActivity";
 
 /** Rows the live chapter keeps on screen; older steps scroll out the top. */
