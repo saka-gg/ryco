@@ -74,6 +74,13 @@ export const NewTaskRouteScreen = lazyScreen(
       require("../features/newTask/NewTaskRouteScreen") as typeof import("../features/newTask/NewTaskRouteScreen")
     ).NewTaskRouteScreen,
 );
+export const TaskDetailRouteScreen = lazyScreen(
+  "TaskDetailRouteScreen",
+  () =>
+    (
+      require("../features/tasks/TaskDetailRouteScreen") as typeof import("../features/tasks/TaskDetailRouteScreen")
+    ).TaskDetailRouteScreen,
+);
 export const AddProjectRouteScreen = lazyScreen(
   "AddProjectRouteScreen",
   () =>

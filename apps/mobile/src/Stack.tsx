@@ -54,6 +54,7 @@ import {
   ArchivedThreadsRouteScreen,
   SettingsWorkspaceRouteScreen,
   SourceControlRouteScreen,
+  TaskDetailRouteScreen,
   ThreadFileRouteScreen,
   ThreadFilesRouteScreen,
   ThreadRouteScreen,
@@ -306,6 +307,11 @@ export const ROOT_STACK_SCREENS = {
     screen: NewTaskRouteScreen,
     linking: MVP_ROOT_ROUTES.NewTask.linking,
     options: routeOptions("NewTask", { title: "New Task" }),
+  }),
+  TaskDetail: createNativeStackScreen({
+    screen: TaskDetailRouteScreen,
+    linking: MVP_ROOT_ROUTES.TaskDetail.linking,
+    options: routeOptions("TaskDetail", { title: "Task" }),
   }),
   Thread: createNativeStackScreen({
     screen: ThreadRouteScreen,
