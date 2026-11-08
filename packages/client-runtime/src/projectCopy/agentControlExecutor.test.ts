@@ -1,12 +1,7 @@
-import type { ProjectCopyJobRecord } from "@ryco/client-runtime/projectCopy";
+import type { ProjectCopyJobRecord } from "./index.ts";
+import type { AcquiredNode, NodeCatalogEntry, NodeCatalogSnapshot } from "../state/nodes/index.ts";
 import type {
-  AcquiredNode,
-  NodeCatalogEntry,
-  NodeCatalogSnapshot,
-} from "@ryco/client-runtime/state/nodes";
-import {
-  AgentControlRpcError,
-  type AgentControlCopyProjectToNodePlan,
+  AgentControlCopyProjectToNodePlan,
   AgentControlProposalId,
   AgentControlProposalReceiptView,
   AgentControlProposalStatus,
@@ -17,6 +12,7 @@ import {
   ServerConfig,
   ServerProvider,
 } from "@ryco/contracts";
+import { AgentControlRpcError } from "@ryco/contracts/agent-control";
 import type {
   NodePathHints,
   ProjectDestinationPreview,
@@ -24,17 +20,12 @@ import type {
 } from "@ryco/contracts/project-copy";
 import { describe, expect, it, vi, type Mock } from "vite-plus/test";
 
-vi.mock("../../environments/nodeCatalog", () => ({
-  readNodeCatalogSnapshot: () => ({ nodes: [], ownerEnvironmentIds: new Set() }),
-  subscribeNodeCatalog: () => () => undefined,
-}));
-
-import type { AgentControlClientExecutionPreviewState } from "../agent-control/agentControlClientExecutor";
 import {
   rebuildAgentControlCopyPlanWith,
   startAgentControlCopyExecutor,
+  type AgentControlClientExecutionPreviewState,
   type AgentControlCopyExecutorDeps,
-} from "./agentControlCopyExecutor";
+} from "./agentControlExecutor.ts";
 
 const LAPTOP = "env-laptop" as EnvironmentId;
 const MINI = "env-mini" as EnvironmentId;
@@ -245,7 +236,7 @@ function harness(overrides: Partial<AgentControlCopyExecutorDeps> = {}) {
     }),
     getProposal: vi.fn(async () => ({ proposal: proposals.get(PROPOSAL) ?? null })),
   };
-  const deps: Partial<AgentControlCopyExecutorDeps> = {
+  const deps: AgentControlCopyExecutorDeps = {
     readCatalog: () => catalog,
     subscribeCatalog: (listener) => {
       catalogListener = listener;

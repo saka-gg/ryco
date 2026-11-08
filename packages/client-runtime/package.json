@@ -491,6 +491,14 @@
     "./projectCopy/form": {
       "types": "./src/projectCopy/form.ts",
       "import": "./src/projectCopy/form.ts"
+    },
+    "./projectCopy/agentControlPlan": {
+      "types": "./src/projectCopy/agentControlPlan.ts",
+      "import": "./src/projectCopy/agentControlPlan.ts"
+    },
+    "./projectCopy/agentControlExecutor": {
+      "types": "./src/projectCopy/agentControlExecutor.ts",
+      "import": "./src/projectCopy/agentControlExecutor.ts"
     }
   },
   "scripts": {

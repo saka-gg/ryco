@@ -108,6 +108,7 @@ import type { CopyProjectDialogRequest } from "./projectNodesDialogStore";
 import {
   copyDestinationUsable,
   copyFormBlockedReason,
+  copyProgressContextOf,
 } from "@ryco/client-runtime/projectCopy/form";
 import {
   DEFAULT_COPY_USER_CHOICES,
@@ -702,26 +703,13 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
         title,
         targetEnvironmentId: targetId,
         targetLabel,
-        context: {
-          sourceLabel: plan.source.kind === "export" ? plan.source.label : null,
+        context: copyProgressContextOf({
+          plan,
+          options,
+          inspection,
           targetLabel,
-          mode: plan.choices.mode,
-          remoteUrl: plan.choices.mode === "clone" ? options.modes.clone.remoteUrl : null,
-          branch:
-            inspection && !inspection.repository.isDetached ? inspection.repository.branch : null,
-          destinationPath: plan.destinationPath,
           targetHome: destination.hints.homeDirectory,
-          changeCount: inspection
-            ? inspection.workingTree.trackedChangeCount + inspection.workingTree.untrackedCount
-            : 0,
-          setupCommand: plan.setup?.command ?? null,
-          uploads: plan.source.kind === "export" && options.plannedBytes > 0,
-          bringsCommits: plan.choices.mode === "clone" && plan.choices.bringCommits,
-          bringsChanges: plan.choices.mode !== "link" && plan.choices.bringChanges,
-          copiesSettings: plan.choices.copySettings,
-          followUp: plan.followUpThread !== null,
-          ...(plainFolder ? { plainFolder: true } : {}),
-        },
+        }),
       });
     } catch (cause) {
       setStartError(cause instanceof Error ? cause.message : "The copy did not start.");

@@ -7,17 +7,19 @@
 // Layer: Client runtime, pure.
 
 import { DEFAULT_PROJECT_METADATA_DIR } from "@ryco/contracts/orchestration";
-import type { NodePathHints } from "@ryco/contracts/project-copy";
+import type { NodePathHints, ProjectExportInspection } from "@ryco/contracts/project-copy";
 import { inferHomeDirectory } from "@ryco/shared/projectPaths";
 
 import type { NodeProjectCopySupport } from "../state/nodes/types.ts";
 import type { Project } from "../state/threads/types.ts";
+import type { CopyProgressContext } from "./dialog.ts";
 import {
   planProjectCopyOptions,
   type CopyDestinationSuggestion,
   type ProjectCopyChoices,
   type ProjectCopyLegacyProject,
   type ProjectCopyOptionsPlan,
+  type ProjectCopyRunPlan,
   type ProjectCopySourceFacts,
   type ProjectCopyTargetFacts,
 } from "./plan.ts";
@@ -142,4 +144,36 @@ export function copyFormBlockedReason(input: CopyFormReadinessInput): string | n
     (input.setupInvalid ? "Enter the setup command, or turn setup off." : null) ??
     input.followUpProblem
   );
+}
+
+/** What a started copy's progress list needs to word its steps, from the plan the form built. */
+export function copyProgressContextOf(input: {
+  readonly plan: ProjectCopyRunPlan;
+  readonly options: ProjectCopyOptionsPlan;
+  /** The source's inspection; null for a source that predates project copy. */
+  readonly inspection: ProjectExportInspection | null;
+  readonly targetLabel: string;
+  readonly targetHome: string | null;
+}): CopyProgressContext {
+  const { plan, options, inspection } = input;
+  const plainFolder = inspection !== null && !inspection.repository.isGitRepository;
+  return {
+    sourceLabel: plan.source.kind === "export" ? plan.source.label : null,
+    targetLabel: input.targetLabel,
+    mode: plan.choices.mode,
+    remoteUrl: plan.choices.mode === "clone" ? options.modes.clone.remoteUrl : null,
+    branch: inspection && !inspection.repository.isDetached ? inspection.repository.branch : null,
+    destinationPath: plan.destinationPath,
+    targetHome: input.targetHome,
+    changeCount: inspection
+      ? inspection.workingTree.trackedChangeCount + inspection.workingTree.untrackedCount
+      : 0,
+    setupCommand: plan.setup?.command ?? null,
+    uploads: plan.source.kind === "export" && options.plannedBytes > 0,
+    bringsCommits: plan.choices.mode === "clone" && plan.choices.bringCommits,
+    bringsChanges: plan.choices.mode !== "link" && plan.choices.bringChanges,
+    copiesSettings: plan.choices.copySettings,
+    followUp: plan.followUpThread !== null,
+    ...(plainFolder ? { plainFolder: true } : {}),
+  };
 }

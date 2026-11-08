@@ -6,76 +6,20 @@ import type {
 } from "@ryco/contracts";
 import type { AgentControlClientExecutionCheck } from "@ryco/client-runtime/state/agentControl";
 
-import type { AgentControlCopyExecutorSource } from "../projectNodes/agentControlCopyExecutor";
+import type {
+  AgentControlClientExecutionInput,
+  AgentControlClientExecutionPreviewState,
+  AgentControlClientExecutor,
+  AgentControlCopyExecutorSource,
+} from "@ryco/client-runtime/projectCopy/agentControlExecutor";
 
-/** One client-executed proposal of the node `environmentId` (the agent's node). */
-export interface AgentControlClientExecutionInput {
-  readonly environmentId: EnvironmentId;
-  readonly proposal: AgentControlProposalView;
-}
-
-/**
- * What approving a client-executed proposal would do on its target, resolved
- * there before approval: the plan names the target's "default" folder and its
- * "default" model, this names the folder and the model.
- */
-export interface AgentControlClientExecutionPreview {
-  readonly targetLabel: string;
-  /** The folder on the target; null when it could not be resolved. */
-  readonly destination: {
-    readonly path: string;
-    /** "new folder", "empty folder", "renamed, folder exists" or "existing checkout". */
-    readonly tag: string;
-    /** How the folder was chosen, e.g. "Mac mini's code directory."; null when nothing to add. */
-    readonly note: string | null;
-  } | null;
-  /**
-   * What the copy sends when the plan's own words would mislead (a plain folder's files rather
-   * than uncommitted changes); absent otherwise.
-   */
-  readonly sends?: string;
-  /** The setup thread's model on the target; null when the request starts no thread. */
-  readonly followUpModel: string | null;
-  /** Why approving would fail now. Approving says the same and changes nothing. */
-  readonly problem: string | null;
-}
-
-export type AgentControlClientExecutionPreviewState =
-  | { readonly status: "loading" }
-  | { readonly status: "ready"; readonly preview: AgentControlClientExecutionPreview };
-
-/** Previews shared by every card of a proposal, resolved once each. */
-export interface AgentControlClientExecutionPreviews {
-  /** Starts resolving the proposal's preview, unless it has one or one is on its way. */
-  readonly load: (input: AgentControlClientExecutionInput) => void;
-  /** Null until `load` was called for it (or after it was dropped to be resolved again). */
-  readonly read: (
-    proposalId: AgentControlProposalId,
-  ) => AgentControlClientExecutionPreviewState | null;
-  readonly subscribe: (listener: () => void) => () => void;
-}
-
-/**
- * Runs client-executed Agent Control proposals (`copyProjectToNode`) from this
- * client: it accepts with `executeOnClient` and then runs the copy against the
- * target. Without one (mobile-like) every such card shows "Approve in Ryco on
- * a computer connected to <target>" in place of Approve.
- */
-export interface AgentControlClientExecutor {
-  /** Whether this client can run a client-executed plan against `target` now. */
-  readonly canExecute: AgentControlClientExecutionCheck;
-  /**
-   * Approves the proposal and runs it here. Rejects with an `Error` whose
-   * message the card shows.
-   */
-  readonly approve: (input: AgentControlClientExecutionInput) => Promise<void>;
-  /**
-   * What approving would do on the target, for the card to show before
-   * Approve. Approving refuses when it would do something other than the
-   * preview the card last showed.
-   */
-  readonly previews?: AgentControlClientExecutionPreviews;
-}
+export type {
+  AgentControlClientExecutionInput,
+  AgentControlClientExecutionPreview,
+  AgentControlClientExecutionPreviewState,
+  AgentControlClientExecutionPreviews,
+  AgentControlClientExecutor,
+} from "@ryco/client-runtime/projectCopy/agentControlExecutor";
 
 /** Overrides the app's executor below it (tests and previews); null keeps the app's. */
 export const AgentControlClientExecutorContext = createContext<AgentControlClientExecutor | null>(
