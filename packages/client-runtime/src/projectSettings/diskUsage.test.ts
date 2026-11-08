@@ -1,13 +1,7 @@
 import { WorktreeId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import {
-  diskSizeText,
-  diskText,
-  formatDiskSize,
-  readingTotal,
-  sumDiskSizes,
-} from "./projectDiskUsage.logic";
+import { diskSizeText, diskText, formatDiskSize, readingTotal, sumDiskSizes } from "./diskUsage.ts";
 
 const usage = (worktreeId: string, bytes: number | null, partial = false) => ({
   worktreeId: WorktreeId.make(worktreeId),

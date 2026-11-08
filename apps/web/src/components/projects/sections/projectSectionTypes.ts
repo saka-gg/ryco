@@ -23,42 +23,8 @@ export function projectSectionId(section: ProjectSection): string {
   return `project-section-${section}`;
 }
 
-export const PROJECT_SECTION_LABELS: Record<ProjectSection, string> = {
-  devices: "Devices",
-  location: "Location",
-  repository: "Repository",
-  workspaces: "Workspaces",
-  defaults: "New threads",
-  actions: "Actions",
-  instructions: "Agent instructions",
-  automations: "Automations",
-  integrations: "Jira & Bitbucket",
-  danger: "Danger zone",
-};
-
-/**
- * How the section navigation groups the page: the project itself, how agents
- * work in it, what it connects to, and removal on its own.
- */
-export const PROJECT_SECTION_GROUPS: ReadonlyArray<{
-  readonly label: string | null;
-  readonly sections: readonly ProjectSection[];
-}> = [
-  { label: "Project", sections: ["devices", "location", "repository", "workspaces"] },
-  { label: "Agents", sections: ["defaults", "actions", "instructions", "automations"] },
-  { label: "Integrations", sections: ["integrations"] },
-  { label: null, sections: ["danger"] },
-];
-
-/**
- * Which sections a checkout shows. Node-owned settings (new-thread defaults,
- * the Atlassian link) need the device owner; everyone else never sees an
- * editor they cannot use.
- */
-export function visibleProjectSections(input: {
-  readonly canManageNode: boolean;
-}): readonly ProjectSection[] {
-  return PROJECT_SECTION_GROUPS.flatMap((group) => group.sections).filter(
-    (section) => input.canManageNode || (section !== "defaults" && section !== "integrations"),
-  );
-}
+export {
+  PROJECT_SECTION_GROUPS,
+  PROJECT_SECTION_LABELS,
+  visibleProjectSections,
+} from "@ryco/client-runtime/projectSettings/sections";

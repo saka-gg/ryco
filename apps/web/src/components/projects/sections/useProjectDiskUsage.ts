@@ -7,8 +7,8 @@ import { useShallow } from "zustand/react/shallow";
 import { useHostedRpcCapability } from "../../../hostedHub/capabilities";
 import { selectSidebarWorktreesForProjectRef, useStore } from "../../../store";
 import { readLifecycleApi, useWorkspaceLifecycleChanges } from "../../../workspaceLifecycle";
-import type { DiskUsageReading } from "./projectDiskUsage.logic";
-import { workspaceInspectionSignature } from "./projectWorkspaces.logic";
+import type { DiskUsageReading } from "@ryco/client-runtime/projectSettings/diskUsage";
+import { workspaceInspectionSignature } from "@ryco/client-runtime/projectSettings/workspaces";
 
 /**
  * "Measure again", per checkout: every reader of that checkout (the settings

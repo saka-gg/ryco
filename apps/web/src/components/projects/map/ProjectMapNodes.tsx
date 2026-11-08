@@ -28,7 +28,7 @@ import {
   formatDiskSize,
   LOWER_BOUND_NOTE,
   type DiskSize,
-} from "../sections/projectDiskUsage.logic";
+} from "@ryco/client-runtime/projectSettings/diskUsage";
 import { nextRunLabel } from "./projectMapModel";
 
 /** Ports are where wires plug in: the n8n read of "this connects to that". */

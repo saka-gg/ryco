@@ -10,22 +10,13 @@ import {
   type WorkspaceReviewAction,
 } from "@ryco/client-runtime/state/lifecycle";
 
-export { isWorkspaceReviewAction, type WorkspaceReviewAction };
+import {
+  PROJECT_SECTIONS,
+  type ProjectSection,
+} from "@ryco/client-runtime/projectSettings/sections";
 
-/** Every section of a project's page, in page order. */
-export const PROJECT_SECTIONS = [
-  "devices",
-  "location",
-  "repository",
-  "workspaces",
-  "defaults",
-  "actions",
-  "instructions",
-  "automations",
-  "integrations",
-  "danger",
-] as const;
-export type ProjectSection = (typeof PROJECT_SECTIONS)[number];
+export { isWorkspaceReviewAction, type WorkspaceReviewAction };
+export { PROJECT_SECTIONS, type ProjectSection };
 
 /** Map: the project across its devices (canvas). Settings: the one-scroll editor. */
 export type ProjectsView = "map" | "settings";

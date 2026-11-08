@@ -84,8 +84,8 @@ import {
   diskText,
   diskUsageMeasuring,
   sumDiskSizes,
-} from "../sections/projectDiskUsage.logic";
-import { availableWorkspaceActions } from "../sections/projectWorkspaces.logic";
+} from "@ryco/client-runtime/projectSettings/diskUsage";
+import { availableWorkspaceActions } from "@ryco/client-runtime/projectSettings/workspaces";
 import { useProjectEditAccess } from "../sections/useProjectEditAccess";
 import { WorkspaceReview } from "../sections/WorkspaceReview";
 import { nextRunLabel } from "./projectMapModel";

@@ -1,14 +1,20 @@
-import type {
-  AtlassianConnectionId,
-  AtlassianConnectionSummary,
-  EnvironmentId,
-  ProjectId,
-  RepositoryIdentity,
-} from "@ryco/contracts";
+import {
+  ATLASSIAN_DEFAULT_BRANCH_TEMPLATE as DEFAULT_BRANCH_TEMPLATE,
+  ATLASSIAN_DEFAULT_SUMMARY_TEMPLATE as DEFAULT_SUMMARY_TEMPLATE,
+  ATLASSIAN_NONE_VALUE,
+  atlassianConnectionsFor,
+  bitbucketRemoteSuggestion,
+  buildJiraProjectUnlinkInput,
+  buildProjectAtlassianLinkSaveInput,
+  isJiraLinked,
+  nullableAtlassianConnectionId,
+  projectAtlassianLinkFields,
+  splitAtlassianProjectKeys,
+} from "@ryco/client-runtime/projectSettings/atlassianLink";
+import type { EnvironmentId, ProjectId, RepositoryIdentity } from "@ryco/contracts";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { readEnvironmentConnection } from "../../environments/runtime";
-import { buildJiraProjectUnlinkInput } from "../../lib/atlassianProjectLinks";
 import { useMutation, useQueryClient } from "../../rpc/queryClient";
 import {
   invalidateAtlassian,
@@ -18,46 +24,12 @@ import {
 import { invalidateWorkItems } from "../../rpc/useWorkItems";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 
-/** The select value for "no connection". */
-export const ATLASSIAN_NONE_VALUE = "Not configured";
-
-const DEFAULT_BRANCH_TEMPLATE = "{issueKey}-{titleSlug}";
-const DEFAULT_SUMMARY_TEMPLATE = "{issueKey}: {summary}";
-
-function atlassianConnectionValue(value: AtlassianConnectionId | null | undefined): string {
-  return value ?? ATLASSIAN_NONE_VALUE;
-}
-
-export function nullableAtlassianConnectionId(value: string): AtlassianConnectionId | null {
-  return value === ATLASSIAN_NONE_VALUE || value.trim().length === 0
-    ? null
-    : (value as AtlassianConnectionId);
-}
-
-export function splitAtlassianProjectKeys(value: string): string[] {
-  return value
-    .split(/[,\s]+/u)
-    .map((part) => part.trim().toUpperCase())
-    .filter(Boolean);
-}
-
-/** A Bitbucket remote names its workspace and repository; offer them as defaults. */
-export function bitbucketRemoteSuggestion(
-  repositoryIdentity: RepositoryIdentity | null | undefined,
-): { workspace: string; repoSlug: string } {
-  if (repositoryIdentity?.provider?.toLowerCase() !== "bitbucket") {
-    return { workspace: "", repoSlug: "" };
-  }
-  return {
-    workspace: repositoryIdentity.owner ?? "",
-    repoSlug: repositoryIdentity.name ?? "",
-  };
-}
-
-function connectionProductFilter(product: "jira" | "bitbucket") {
-  return (connection: AtlassianConnectionSummary) =>
-    connection.status === "connected" && connection.products.includes(product);
-}
+export {
+  ATLASSIAN_NONE_VALUE,
+  bitbucketRemoteSuggestion,
+  nullableAtlassianConnectionId,
+  splitAtlassianProjectKeys,
+};
 
 /**
  * The project's Jira and Bitbucket link as an editable form: seeded from the
@@ -95,11 +67,11 @@ export function useProjectAtlassianLinkForm(input: {
   const connectionsQuery = useAtlassianConnections({ environmentId, enabled: client !== null });
 
   const jiraConnections = useMemo(
-    () => (connectionsQuery.data ?? []).filter(connectionProductFilter("jira")),
+    () => atlassianConnectionsFor(connectionsQuery.data, "jira"),
     [connectionsQuery.data],
   );
   const bitbucketConnections = useMemo(
-    () => (connectionsQuery.data ?? []).filter(connectionProductFilter("bitbucket")),
+    () => atlassianConnectionsFor(connectionsQuery.data, "bitbucket"),
     [connectionsQuery.data],
   );
 
@@ -111,25 +83,23 @@ export function useProjectAtlassianLinkForm(input: {
       dirtyRef.current = false;
     }
     if (dirtyRef.current) return;
-    const link = projectLinkQuery.data;
-    const remote = bitbucketRemoteSuggestion(repositoryIdentity);
-    setJiraConnectionValue(
-      atlassianConnectionValue(link?.jiraConnectionId ?? jiraConnections[0]?.connectionId),
-    );
-    setBitbucketConnectionValue(
-      atlassianConnectionValue(
-        link?.bitbucketConnectionId ?? bitbucketConnections[0]?.connectionId,
-      ),
-    );
-    setJiraProjectKeys(link?.jiraProjectKeys.join(", ") ?? "");
-    setBitbucketWorkspace(link?.bitbucketWorkspace ?? remote.workspace);
-    setBitbucketRepoSlug(link?.bitbucketRepoSlug ?? remote.repoSlug);
-    setDefaultIssueTypeName(link?.defaultIssueTypeName ?? "");
-    setBranchNameTemplate(link?.branchNameTemplate ?? DEFAULT_BRANCH_TEMPLATE);
-    setCommitMessageTemplate(link?.commitMessageTemplate ?? DEFAULT_SUMMARY_TEMPLATE);
-    setPullRequestTitleTemplate(link?.pullRequestTitleTemplate ?? DEFAULT_SUMMARY_TEMPLATE);
-    setSmartLinkingEnabled(link?.smartLinkingEnabled ?? true);
-    setAutoAttachWorkItems(link?.autoAttachWorkItems ?? true);
+    const seeded = projectAtlassianLinkFields({
+      link: projectLinkQuery.data,
+      jiraConnections,
+      bitbucketConnections,
+      repositoryIdentity,
+    });
+    setJiraConnectionValue(seeded.jiraConnectionValue);
+    setBitbucketConnectionValue(seeded.bitbucketConnectionValue);
+    setJiraProjectKeys(seeded.jiraProjectKeys);
+    setBitbucketWorkspace(seeded.bitbucketWorkspace);
+    setBitbucketRepoSlug(seeded.bitbucketRepoSlug);
+    setDefaultIssueTypeName(seeded.defaultIssueTypeName);
+    setBranchNameTemplate(seeded.branchNameTemplate);
+    setCommitMessageTemplate(seeded.commitMessageTemplate);
+    setPullRequestTitleTemplate(seeded.pullRequestTitleTemplate);
+    setSmartLinkingEnabled(seeded.smartLinkingEnabled);
+    setAutoAttachWorkItems(seeded.autoAttachWorkItems);
   }, [
     bitbucketConnections,
     environmentId,
@@ -157,28 +127,25 @@ export function useProjectAtlassianLinkForm(input: {
   const saveMutation = useMutation({
     mutationFn: async () => {
       if (!client || projectId === null) throw new Error("Project connection is unavailable.");
-      const branchTemplate = branchNameTemplate.trim();
-      const commitTemplate = commitMessageTemplate.trim();
-      const prTemplate = pullRequestTitleTemplate.trim();
-      if (!branchTemplate || !commitTemplate || !prTemplate) {
-        throw new Error("Branch, commit, and pull request templates cannot be empty.");
-      }
-      return client.atlassian.saveProjectLink({
-        projectId,
-        jiraConnectionId: nullableAtlassianConnectionId(jiraConnectionValue),
-        bitbucketConnectionId: nullableAtlassianConnectionId(bitbucketConnectionValue),
-        jiraCloudId: projectLinkQuery.data?.jiraCloudId ?? null,
-        jiraSiteUrl: null,
-        jiraProjectKeys: splitAtlassianProjectKeys(jiraProjectKeys),
-        bitbucketWorkspace: bitbucketWorkspace.trim() || null,
-        bitbucketRepoSlug: bitbucketRepoSlug.trim() || null,
-        defaultIssueTypeName: defaultIssueTypeName.trim() || null,
-        branchNameTemplate: branchTemplate,
-        commitMessageTemplate: commitTemplate,
-        pullRequestTitleTemplate: prTemplate,
-        smartLinkingEnabled,
-        autoAttachWorkItems,
-      });
+      return client.atlassian.saveProjectLink(
+        buildProjectAtlassianLinkSaveInput({
+          projectId,
+          existing: projectLinkQuery.data,
+          fields: {
+            jiraConnectionValue,
+            bitbucketConnectionValue,
+            jiraProjectKeys,
+            bitbucketWorkspace,
+            bitbucketRepoSlug,
+            defaultIssueTypeName,
+            branchNameTemplate,
+            commitMessageTemplate,
+            pullRequestTitleTemplate,
+            smartLinkingEnabled,
+            autoAttachWorkItems,
+          },
+        }),
+      );
     },
     onSuccess: () => {
       dirtyRef.current = false;
@@ -243,10 +210,7 @@ export function useProjectAtlassianLinkForm(input: {
     hasConnections: jiraConnections.length > 0 || bitbucketConnections.length > 0,
     jiraConnections,
     bitbucketConnections,
-    jiraLinked:
-      projectLinkQuery.data?.jiraConnectionId !== null &&
-      projectLinkQuery.data?.jiraConnectionId !== undefined &&
-      projectLinkQuery.data.jiraProjectKeys.length > 0,
+    jiraLinked: isJiraLinked(projectLinkQuery.data),
     selectedJiraConnectionId,
     selectedJiraSiteUrl:
       selectedJiraConnection?.baseUrl ?? projectLinkQuery.data?.jiraSiteUrl ?? "",

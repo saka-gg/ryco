@@ -230,6 +230,38 @@
       "types": "./src/projectCopy/index.ts",
       "import": "./src/projectCopy/index.ts"
     },
+    "./projectSettings/atlassianLink": {
+      "types": "./src/projectSettings/atlassianLink.ts",
+      "import": "./src/projectSettings/atlassianLink.ts"
+    },
+    "./projectSettings/diskUsage": {
+      "types": "./src/projectSettings/diskUsage.ts",
+      "import": "./src/projectSettings/diskUsage.ts"
+    },
+    "./projectSettings/removal": {
+      "types": "./src/projectSettings/removal.ts",
+      "import": "./src/projectSettings/removal.ts"
+    },
+    "./projectSettings/remotes": {
+      "types": "./src/projectSettings/remotes.ts",
+      "import": "./src/projectSettings/remotes.ts"
+    },
+    "./projectSettings/scripts": {
+      "types": "./src/projectSettings/scripts.ts",
+      "import": "./src/projectSettings/scripts.ts"
+    },
+    "./projectSettings/sections": {
+      "types": "./src/projectSettings/sections.ts",
+      "import": "./src/projectSettings/sections.ts"
+    },
+    "./projectSettings/workspaceReview": {
+      "types": "./src/projectSettings/workspaceReview.ts",
+      "import": "./src/projectSettings/workspaceReview.ts"
+    },
+    "./projectSettings/workspaces": {
+      "types": "./src/projectSettings/workspaces.ts",
+      "import": "./src/projectSettings/workspaces.ts"
+    },
     "./state/providerSignIn": {
       "types": "./src/state/providerSignIn/index.ts",
       "import": "./src/state/providerSignIn/index.ts"

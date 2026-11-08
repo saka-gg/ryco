@@ -47,12 +47,12 @@ import { projectCheckoutKey } from "../../../projectCheckouts.logic";
 import {
   unlistedWorkspaces,
   workspaceInspectionSignature,
-} from "../sections/projectWorkspaces.logic";
+} from "@ryco/client-runtime/projectSettings/workspaces";
 import {
   useProjectWorkspaceInspection,
   type WorkspaceInspection,
 } from "../sections/useProjectWorkspaceInspection";
-import type { DiskUsageReading } from "../sections/projectDiskUsage.logic";
+import type { DiskUsageReading } from "@ryco/client-runtime/projectSettings/diskUsage";
 import { useCheckoutDiskUsage } from "../sections/useProjectDiskUsage";
 import { useProjectEditAccess, type ProjectEditAccess } from "../sections/useProjectEditAccess";
 import { useEnvironmentPresence } from "../useEnvironmentPresence";

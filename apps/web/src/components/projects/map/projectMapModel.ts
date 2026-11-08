@@ -22,8 +22,8 @@ import {
   findWorkspaceSummary,
   workspaceFacts,
   type WorkspaceFact,
-} from "../sections/projectWorkspaces.logic";
-import { diskSizeOf, type DiskSize } from "../sections/projectDiskUsage.logic";
+} from "@ryco/client-runtime/projectSettings/workspaces";
+import { diskSizeOf, type DiskSize } from "@ryco/client-runtime/projectSettings/diskUsage";
 import type {
   MapAutomation,
   MapThread,

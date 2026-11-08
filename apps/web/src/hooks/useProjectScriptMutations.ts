@@ -1,3 +1,8 @@
+import {
+  withAddedProjectScript,
+  withoutProjectScript,
+  withUpdatedProjectScript,
+} from "@ryco/client-runtime/projectSettings/scripts";
 import { scopedScriptCommand } from "@ryco/client-runtime/state/settings";
 import type { EnvironmentId, KeybindingCommand, ProjectScript } from "@ryco/contracts";
 import { useCallback } from "react";
@@ -7,7 +12,7 @@ import type { NewProjectScriptInput } from "../components/ProjectScriptDialog";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { decodeProjectScriptKeybindingRule } from "../lib/projectScriptKeybindings";
 import { updateProjectMeta } from "../projectMutations";
-import { commandForProjectScript, nextProjectScriptId } from "../projectScripts";
+import { commandForProjectScript } from "../projectScripts";
 import type { Project } from "../types";
 
 export interface ProjectScriptMutations {
@@ -55,30 +60,11 @@ export function useProjectScriptMutations(
   const saveProjectScript = useCallback(
     async (input: NewProjectScriptInput) => {
       if (!project) return;
-      const nextId = nextProjectScriptId(
-        input.name,
-        project.scripts.map((script) => script.id),
-      );
-      const nextScript: ProjectScript = {
-        id: nextId,
-        name: input.name,
-        command: input.command,
-        icon: input.icon,
-        runOnWorktreeCreate: input.runOnWorktreeCreate,
-      };
-      const nextScripts = input.runOnWorktreeCreate
-        ? [
-            ...project.scripts.map((script) =>
-              script.runOnWorktreeCreate ? { ...script, runOnWorktreeCreate: false } : script,
-            ),
-            nextScript,
-          ]
-        : [...project.scripts, nextScript];
-
+      const next = withAddedProjectScript(project.scripts, input);
       await persist({
-        nextScripts,
+        nextScripts: next.scripts,
         keybinding: input.keybinding,
-        keybindingCommand: commandForProjectScript(nextId),
+        keybindingCommand: commandForProjectScript(next.scriptId),
       });
     },
     [persist, project],
@@ -87,28 +73,8 @@ export function useProjectScriptMutations(
   const updateProjectScript = useCallback(
     async (scriptId: string, input: NewProjectScriptInput) => {
       if (!project) return;
-      const existingScript = project.scripts.find((script) => script.id === scriptId);
-      if (!existingScript) {
-        throw new Error("Script not found.");
-      }
-
-      const updatedScript: ProjectScript = {
-        ...existingScript,
-        name: input.name,
-        command: input.command,
-        icon: input.icon,
-        runOnWorktreeCreate: input.runOnWorktreeCreate,
-      };
-      const nextScripts = project.scripts.map((script) =>
-        script.id === scriptId
-          ? updatedScript
-          : input.runOnWorktreeCreate
-            ? { ...script, runOnWorktreeCreate: false }
-            : script,
-      );
-
       await persist({
-        nextScripts,
+        nextScripts: withUpdatedProjectScript(project.scripts, scriptId, input),
         keybinding: input.keybinding,
         keybindingCommand: commandForProjectScript(scriptId),
       });
@@ -119,7 +85,7 @@ export function useProjectScriptMutations(
   const deleteProjectScript = useCallback(
     async (scriptId: string) => {
       if (!project) return;
-      const nextScripts = project.scripts.filter((script) => script.id !== scriptId);
+      const nextScripts = withoutProjectScript(project.scripts, scriptId);
       const deletedName = project.scripts.find((s) => s.id === scriptId)?.name;
 
       try {

@@ -30,7 +30,7 @@ import {
   diskUsageMeasuring,
   sumDiskSizes,
   type DiskSize,
-} from "../sections/projectDiskUsage.logic";
+} from "@ryco/client-runtime/projectSettings/diskUsage";
 import {
   automationIdle,
   buildProjectMap,

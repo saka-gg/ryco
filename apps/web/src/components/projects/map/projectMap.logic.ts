@@ -10,8 +10,8 @@
  *   │  └─ automation (schedules the device runs) below its workspaces
  */
 import type { InboxGlyphKind } from "../../inboxSidebar/inboxRowPresentation";
-import type { DiskSize } from "../sections/projectDiskUsage.logic";
-import type { WorkspaceFact } from "../sections/projectWorkspaces.logic";
+import type { DiskSize } from "@ryco/client-runtime/projectSettings/diskUsage";
+import type { WorkspaceFact } from "@ryco/client-runtime/projectSettings/workspaces";
 
 export type MapPresenceStatus = "online" | "connecting" | "offline" | "unknown";
 

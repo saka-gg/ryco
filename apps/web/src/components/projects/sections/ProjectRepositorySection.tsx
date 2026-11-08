@@ -1,3 +1,4 @@
+import { projectRemoteChoices } from "@ryco/client-runtime/projectSettings/remotes";
 import { ExternalLinkIcon, GitBranchIcon } from "lucide-react";
 import { useState, type KeyboardEvent } from "react";
 
@@ -48,12 +49,7 @@ export function ProjectRepositorySection({ member, canEdit, canManageNode }: Pro
   const projects = useEnvironmentProjectChoices(member.environmentId);
   const identity = member.repositoryIdentity ?? null;
   const remotes = identity?.remotes ?? [];
-  const autoRemoteName = identity?.locator.remoteName ?? null;
-  const preferred =
-    member.preferredRemoteName &&
-    remotes.some((remote) => remote.name === member.preferredRemoteName)
-      ? member.preferredRemoteName
-      : null;
+  const { autoRemoteName, preferred } = projectRemoteChoices(member);
   const gitStatus = useGitStatus(
     { environmentId: member.environmentId, cwd: member.cwd },
     { enabled: identity === null },

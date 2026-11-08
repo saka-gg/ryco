@@ -1,6 +1,8 @@
 import {
   isWorkspaceReviewAction,
+  recreatedCheckout,
   WORKSPACE_LIFECYCLE_ACTION_LABELS,
+  workspaceLifecycleIncompleteTitle,
   type WorkspaceActionId,
   type WorkspaceReviewAction,
 } from "@ryco/client-runtime/state/lifecycle";
@@ -102,9 +104,7 @@ export function buildWorkspaceLocation(input: {
   });
 }
 
-/** Whether a run recreated the workspace's checkout (Restore does when it was removed). */
-export const recreatedCheckout = (result: WorkspaceLifecycleResult): boolean =>
-  result.steps.some((step) => step.id === "recreate-checkout" && step.status === "done");
+export { recreatedCheckout };
 
 export function announceWorkspaceLifecycleResult(
   target: WorkspaceLifecycleTarget,
@@ -157,10 +157,7 @@ export function announceWorkspaceLifecycleResult(
   toastManager.add(
     stackedThreadToast({
       type: result.outcome === "partial" ? "warning" : "error",
-      title:
-        result.outcome === "partial"
-          ? `${WORKSPACE_LIFECYCLE_ACTION_LABELS[target.action]} partly completed`
-          : `${WORKSPACE_LIFECYCLE_ACTION_LABELS[target.action]} did not run`,
+      title: workspaceLifecycleIncompleteTitle(target.action, result.outcome),
       description: failedStep ? `${result.message}\n\n${failedStep.detail}` : result.message,
       actionProps: { children: "Retry", onClick: retry },
     }),
