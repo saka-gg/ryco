@@ -10,9 +10,12 @@ import { DEFAULT_PROJECT_METADATA_DIR } from "@ryco/contracts/orchestration";
 import type { NodePathHints, ProjectExportInspection } from "@ryco/contracts/project-copy";
 import { inferHomeDirectory } from "@ryco/shared/projectPaths";
 
+import type { EnvironmentId, ScopedProjectRef } from "@ryco/contracts";
+
 import type { NodeProjectCopySupport } from "../state/nodes/types.ts";
 import type { Project } from "../state/threads/types.ts";
 import type { CopyProgressContext } from "./dialog.ts";
+import type { ProjectCopyJobRecord } from "./jobRecord.ts";
 import {
   planProjectCopyOptions,
   type CopyDestinationSuggestion,
@@ -102,6 +105,39 @@ export function copyDestinationUsable(suggestion: CopyDestinationSuggestion | nu
     suggestion.status !== "blocked" &&
     suggestion.status !== "existing-project"
   );
+}
+
+/**
+ * The stopped copy a start goes on with: only the same checkout to the same
+ * node. Any other choice starts a new copy, and the caller discards the stopped
+ * one (it cleans up what already reached its node).
+ */
+export function resumableCopyRecord(
+  record: ProjectCopyJobRecord | null,
+  start: {
+    readonly sourceRef: ScopedProjectRef | null;
+    readonly targetEnvironmentId: EnvironmentId | null;
+  },
+): ProjectCopyJobRecord | null {
+  if (record === null || start.sourceRef === null) return null;
+  return record.targetEnvironmentId === start.targetEnvironmentId &&
+    record.sourceEnvironmentId === start.sourceRef.environmentId &&
+    record.sourceProjectId === start.sourceRef.projectId
+    ? record
+    : null;
+}
+
+/** The node a copy form starts on: the one asked for, else the stopped copy's own. */
+export function requestedCopyTarget(
+  requested: EnvironmentId | null,
+  resume: ProjectCopyJobRecord | null,
+): EnvironmentId | null {
+  return requested ?? resume?.targetEnvironmentId ?? null;
+}
+
+/** The note a form shows over a stopped copy it was opened to resume. */
+export function copyResumeNotice(targetLabel: string): string {
+  return `This copy stopped when Ryco closed during the upload. Start it again to send the rest; what already reached ${targetLabel} is not sent again.`;
 }
 
 export interface CopyFormReadinessInput {

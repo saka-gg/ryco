@@ -2,7 +2,7 @@ import type { ProjectCopyJobRecord } from "@ryco/client-runtime/projectCopy";
 import type { EnvironmentId, ProjectId } from "@ryco/contracts";
 import { describe, expect, it } from "vitest";
 
-import { copyNoticeLinkPath, copyNoticeTone } from "./copyNoticeModel";
+import { copyNoticeLinkPath, copyNoticeTone, copyResumeLink } from "./copyNoticeModel";
 
 const MINI = "env-mini" as EnvironmentId;
 const LAPTOP = "env-laptop" as EnvironmentId;
@@ -67,5 +67,20 @@ describe("copyNoticeTone", () => {
         view: { title: "A copy stopped", description: "Resume sends the rest." },
       }).symbol,
     ).toBe("pause.circle");
+  });
+});
+
+describe("copyResumeLink", () => {
+  it("opens the stopped copy's checkout with its destination preselected", () => {
+    expect(
+      copyResumeLink({
+        source: { environmentId: MINI, projectId: NOTES },
+        targetEnvironmentId: LAPTOP,
+        resumeCopyId: "copy-stopped",
+      }),
+    ).toEqual([
+      `projects/${MINI}/${NOTES}/copy`,
+      { resumeCopyId: "copy-stopped", targetEnvironmentId: LAPTOP },
+    ]);
   });
 });

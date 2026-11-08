@@ -4,6 +4,7 @@ export * from "./capabilities.ts";
 export * from "./deliveryNotice.ts";
 export * from "./environment.ts";
 export * from "./hostedEnvironmentSessions.ts";
+export * from "./hostedMutationLeases.ts";
 export * from "./logging.ts";
 export * from "./nativeHandoff.ts";
 export * from "./nativePush.ts";

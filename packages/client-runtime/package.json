@@ -118,6 +118,10 @@
       "types": "./src/authorization/hostedStores.ts",
       "import": "./src/authorization/hostedStores.ts"
     },
+    "./authorization/hostedMutationLeases": {
+      "types": "./src/authorization/hostedMutationLeases.ts",
+      "import": "./src/authorization/hostedMutationLeases.ts"
+    },
     "./authorization/nodeMutationLease": {
       "types": "./src/authorization/nodeMutationLease.ts",
       "import": "./src/authorization/nodeMutationLease.ts"

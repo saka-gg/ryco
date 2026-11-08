@@ -24,8 +24,11 @@ import {
   copyDestinationUsable,
   copyFormBlockedReason,
   copyProgressContextOf,
+  copyResumeNotice,
   DEFAULT_COPY_USER_CHOICES,
   planCopyOptions,
+  requestedCopyTarget,
+  resumableCopyRecord,
   type CopyUserChoices,
 } from "@ryco/client-runtime/projectCopy/form";
 import { catalogPlatformOs } from "@ryco/client-runtime/state/nodes";
@@ -190,7 +193,7 @@ function CopyProjectForm(props: {
   const pickedCard = cards.find((card) => card.node.environmentId === pickedTargetId);
   const targetId = pickedCard?.selectable
     ? pickedCard.node.environmentId
-    : initialCopyTarget(cards, props.targetEnvironmentId);
+    : initialCopyTarget(cards, requestedCopyTarget(props.targetEnvironmentId, resumeRecord));
   const targetNode = cards.find((card) => card.node.environmentId === targetId)?.node ?? null;
   const targetLabel = targetNode?.label ?? "the destination";
   const targetHold = useHeldNode(targetId);
@@ -316,15 +319,10 @@ function CopyProjectForm(props: {
     }
     setStarting(true);
     setStartError(null);
-    // A stopped copy goes on only with what it was: the same checkout to the same machine.
-    const resume =
-      resumeRecord !== null &&
-      sourceRow !== null &&
-      resumeRecord.targetEnvironmentId === targetId &&
-      resumeRecord.sourceEnvironmentId === sourceRow.ref.environmentId &&
-      resumeRecord.sourceProjectId === sourceRow.ref.projectId
-        ? resumeRecord
-        : null;
+    const resume = resumableCopyRecord(resumeRecord, {
+      sourceRef: sourceRow?.ref ?? null,
+      targetEnvironmentId: targetId,
+    });
     const context: CopyProgressContext = copyProgressContextOf({
       plan: built.plan,
       options,
@@ -411,6 +409,15 @@ function CopyProjectForm(props: {
       {props.notice ? (
         <View className="mx-5 mt-4">
           <ErrorBanner message={props.notice} />
+        </View>
+      ) : resumeRecord !== null ? (
+        <View className="mx-5 mt-4 rounded-xl bg-subtle p-3">
+          <Text className="font-sans text-sm text-foreground-muted">
+            {copyResumeNotice(
+              nodes.find((node) => node.environmentId === resumeRecord.targetEnvironmentId)
+                ?.label ?? "the destination",
+            )}
+          </Text>
         </View>
       ) : null}
 

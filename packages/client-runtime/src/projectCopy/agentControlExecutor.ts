@@ -189,6 +189,48 @@ export const AGENT_CONTROL_COPY_ACCEPT_RETRY_DELAY_MS = 1_000;
 /** Accepts sent with one executor before approving gives up (the node may still have bound it). */
 const ACCEPT_ATTEMPTS = 4;
 
+/**
+ * The executor's node reads over a client's live APIs: a node's server config
+ * as its connection reported it, else read from the acquired node; its Agent
+ * Control API; and one proposal followed on the node's own proposal stream
+ * (its own subscription, for the moments approving waits, so a client's
+ * shared proposal store stays out of the executor).
+ */
+export function agentControlCopyNodeReads(reads: {
+  readonly readEnvironmentApi: (environmentId: EnvironmentId) => EnvironmentApi | null | undefined;
+  readonly readCachedServerConfig: (
+    environmentId: EnvironmentId,
+  ) => ServerConfig | null | undefined;
+}): Pick<
+  AgentControlCopyExecutorDeps,
+  "readServerConfig" | "readAgentControlApi" | "followProposal"
+> {
+  return {
+    readServerConfig: async (environmentId, node) => {
+      const cached = reads.readCachedServerConfig(environmentId);
+      if (cached) return cached;
+      const getConfig = node.api.server?.getConfig;
+      return getConfig ? getConfig().catch(() => null) : null;
+    },
+    readAgentControlApi: (environmentId) => reads.readEnvironmentApi(environmentId)?.agentControl,
+    followProposal: (environmentId, proposalId, onProposal) => {
+      const subscribe = reads.readEnvironmentApi(environmentId)?.agentControl?.subscribeProposals;
+      if (!subscribe) return () => undefined;
+      return subscribe((event) => {
+        const proposal =
+          event.type === "snapshot"
+            ? [...event.queue.active, ...event.queue.recent].find(
+                (entry) => entry.proposalId === proposalId,
+              )
+            : event.proposal.proposalId === proposalId
+              ? event.proposal
+              : undefined;
+        if (proposal) onProposal(proposal);
+      });
+    },
+  };
+}
+
 // ── Shared rules ──
 
 const isPlatformOs = Schema.is(ExecutionEnvironmentPlatformOs);

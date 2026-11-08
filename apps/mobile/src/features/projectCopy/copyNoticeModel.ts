@@ -1,5 +1,8 @@
 import type { ProjectCopyJobRecord } from "@ryco/client-runtime/projectCopy";
-import type { ProjectCopyEntry } from "@ryco/client-runtime/projectCopy/manager";
+import type {
+  ProjectCopyEntry,
+  ProjectCopyResumeRequest,
+} from "@ryco/client-runtime/projectCopy/manager";
 
 import type { SFSymbol } from "../../components/AppSymbol";
 import type { ProjectCopyNotice } from "./mobileCopyManager";
@@ -21,6 +24,20 @@ export function copyNoticeLinkPath(
   const projectId = entry?.project?.projectId ?? record?.projectId ?? null;
   const environmentId = entry?.targetEnvironmentId ?? record?.targetEnvironmentId ?? null;
   return projectId && environmentId ? `projects/${environmentId}/${projectId}/copy` : null;
+}
+
+/**
+ * The interrupted notice's Resume: the copy screen on the stopped copy's
+ * checkout, its destination preselected, so starting again goes on with what
+ * already reached that machine instead of copying somewhere else.
+ */
+export function copyResumeLink(
+  request: ProjectCopyResumeRequest,
+): readonly [path: string, query: Record<string, string>] {
+  return [
+    `projects/${request.source.environmentId}/${request.source.projectId}/copy`,
+    { resumeCopyId: request.resumeCopyId, targetEnvironmentId: request.targetEnvironmentId },
+  ];
 }
 
 export interface CopyNoticeTone {

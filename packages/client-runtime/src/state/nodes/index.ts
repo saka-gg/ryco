@@ -3,5 +3,6 @@
 // acquiring a node for a cross-node copy; and publishing it to Agent Control's node directory.
 export * from "../workspace/nodeCatalog.js";
 export * from "./acquire.js";
+export * from "./directoryFacts.js";
 export * from "./directoryPublisher.js";
 export * from "./types.js";

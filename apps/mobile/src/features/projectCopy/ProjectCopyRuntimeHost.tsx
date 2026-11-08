@@ -8,7 +8,7 @@ import { SymbolView } from "../../components/AppSymbol";
 import { AppText } from "../../components/AppText";
 import { GlassSurface } from "../../components/GlassSurface";
 import { useThemeColor } from "../../lib/useThemeColor";
-import { copyNoticeLinkPath, copyNoticeTone } from "./copyNoticeModel";
+import { copyNoticeLinkPath, copyNoticeTone, copyResumeLink } from "./copyNoticeModel";
 import {
   dismissProjectCopyNotice,
   readProjectCopyEntry,
@@ -60,10 +60,7 @@ export function ProjectCopyRuntimeHost() {
         );
         if (path !== null) openPath(path, { copyId });
       },
-      openStopped: (request) =>
-        openPath(`projects/${request.environmentId}/${request.projectId}/copy`, {
-          resumeCopyId: request.copyId,
-        }),
+      openStopped: (request) => openPath(...copyResumeLink(request)),
     });
     const stopViewer = registerProjectCopyViewer((ref) =>
       openPath(`projects/${ref.environmentId}/${ref.projectId}`),

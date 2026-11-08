@@ -1,11 +1,18 @@
 import { describe, expect, it } from "vite-plus/test";
 
+import type { EnvironmentId, ProjectId } from "@ryco/contracts";
+import type { ProjectImportId } from "@ryco/contracts/project-copy";
+
 import {
   copyDestinationUsable,
   copyFormBlockedReason,
+  copyResumeNotice,
   legacySourceHints,
+  requestedCopyTarget,
+  resumableCopyRecord,
   type CopyFormReadinessInput,
 } from "./form.ts";
+import { createProjectCopyJobRecord } from "./jobRecord.ts";
 import type { CopyDestinationSuggestion } from "./plan.ts";
 
 const READY: CopyFormReadinessInput = {
@@ -78,5 +85,53 @@ describe("legacySourceHints", () => {
       pathSeparator: "\\",
     });
     expect(legacySourceHints({ cwd: "/srv/notes" })).toBeNull();
+  });
+});
+
+describe("resuming a stopped copy", () => {
+  const MINI = "env-mini" as EnvironmentId;
+  const LAPTOP = "env-laptop" as EnvironmentId;
+  const SERVER = "env-server" as EnvironmentId;
+  const NOTES = "project-notes" as ProjectId;
+  const stopped = createProjectCopyJobRecord({
+    copyId: "copy-stopped",
+    at: 1_000,
+    sourceEnvironmentId: MINI,
+    sourceProjectId: NOTES,
+    targetEnvironmentId: LAPTOP,
+    projectId: "project-new" as ProjectId,
+    importId: "import-1" as ProjectImportId,
+  });
+  const source = { environmentId: MINI, projectId: NOTES };
+
+  it("goes on only with the same checkout to the same node", () => {
+    expect(resumableCopyRecord(stopped, { sourceRef: source, targetEnvironmentId: LAPTOP })).toBe(
+      stopped,
+    );
+    expect(
+      resumableCopyRecord(stopped, { sourceRef: source, targetEnvironmentId: SERVER }),
+    ).toBeNull();
+    expect(
+      resumableCopyRecord(stopped, {
+        sourceRef: { environmentId: SERVER, projectId: NOTES },
+        targetEnvironmentId: LAPTOP,
+      }),
+    ).toBeNull();
+    expect(
+      resumableCopyRecord(stopped, { sourceRef: null, targetEnvironmentId: LAPTOP }),
+    ).toBeNull();
+    expect(
+      resumableCopyRecord(null, { sourceRef: source, targetEnvironmentId: LAPTOP }),
+    ).toBeNull();
+  });
+
+  it("starts the form on the stopped copy's node unless another was asked for", () => {
+    expect(requestedCopyTarget(null, stopped)).toBe(LAPTOP);
+    expect(requestedCopyTarget(SERVER, stopped)).toBe(SERVER);
+    expect(requestedCopyTarget(null, null)).toBeNull();
+  });
+
+  it("says what is not sent again", () => {
+    expect(copyResumeNotice("Laptop")).toContain("what already reached Laptop is not sent again");
   });
 });

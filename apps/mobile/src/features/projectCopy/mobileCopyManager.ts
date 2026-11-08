@@ -2,12 +2,12 @@ import {
   createInMemoryProjectCopyClaims,
   createProjectCopyManager,
   type ProjectCopyEntry,
+  type ProjectCopyResumeRequest,
   type ProjectCopyRuntime,
   type ProjectCopyStoreState,
 } from "@ryco/client-runtime/projectCopy/manager";
 import type { ProjectCopyView } from "@ryco/client-runtime/projectCopy/progressView";
 import type { ProjectCopyJobRecord } from "@ryco/client-runtime/projectCopy";
-import type { ScopedProjectRef } from "@ryco/contracts";
 import Storage from "expo-sqlite/kv-store";
 import { useSyncExternalStore } from "react";
 import { useStore as useZustandStore } from "zustand";
@@ -78,12 +78,12 @@ export function dismissProjectCopyNotice(): void {
 
 /** Opens the copy screen on a copy (the notice's tap target); the root host registers it. */
 let openCopyScreen: ((copyId: string) => void) | null = null;
-let openStoppedCopy: ((request: ScopedProjectRef & { readonly copyId: string }) => void) | null =
-  null;
+let openStoppedCopy: ((request: ProjectCopyResumeRequest) => void) | null = null;
 
 export function registerProjectCopyNavigation(input: {
   readonly openCopy: (copyId: string) => void;
-  readonly openStopped: (request: ScopedProjectRef & { readonly copyId: string }) => void;
+  /** Opens the copy screen on a stopped copy, on its own checkout and destination. */
+  readonly openStopped: (request: ProjectCopyResumeRequest) => void;
 }): () => void {
   openCopyScreen = input.openCopy;
   openStoppedCopy = input.openStopped;
@@ -172,8 +172,7 @@ const manager = createProjectCopyManager({
       if (notice?.copyId === copyId) setNotice(null);
     },
   },
-  openInterruptedCopy: (request) =>
-    openStoppedCopy?.({ ...request.source, copyId: request.resumeCopyId }),
+  openInterruptedCopy: (request) => openStoppedCopy?.(request),
   uuid: uuidv4,
 });
 

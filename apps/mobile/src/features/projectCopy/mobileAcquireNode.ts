@@ -1,4 +1,10 @@
 import {
+  createHostedMutationLeases,
+  getHostedEnvironmentSessions,
+  hostedHubStore,
+  hostedSessionMutationReadiness,
+} from "@ryco/client-runtime/authorization";
+import {
   createEnvironmentApi,
   isSavedEnvironmentSwitchedOff,
 } from "@ryco/client-runtime/connection";
@@ -31,9 +37,11 @@ import { readMobileNodeCatalog } from "./mobileNodeCatalog";
  * then goes through the connection acquired: a replaced connection fails the
  * call before it is sent, and the copy acquires again and resumes.
  *
- * The phone's Hub sessions carry no separate mutation lease: like every other
- * write the phone makes, a copy writes only to a node the catalog says it may
- * change (an owner session), and the node checks each call again.
+ * A Hub machine also waits for its session's mutation lease, as the hosted web
+ * does: an owner session that is adoptable (its own fresh relay attempt and
+ * accepted snapshot) and whose shell the phone holds. Every call revalidates
+ * it; a renewed, downgraded or interrupted session fails the call and the copy
+ * acquires again.
  */
 
 const NO_HOLD = { release: () => undefined } as const;
@@ -49,6 +57,32 @@ const CONNECTIONS: NodeConnectionRegistry<EnvironmentConnection> = {
   subscribe: (listener) => registry().driver.supervisor.subscribe(listener),
   apiOf: (_environmentId, connection) => createEnvironmentApi(connection.client),
 };
+
+/** Each Hub session's mutation lease, read from the shared session records. */
+const HOSTED_MUTATION_LEASES = createHostedMutationLeases({
+  readAll: () => {
+    const hub = hostedHubStore.getState();
+    return getHostedEnvironmentSessions()
+      .list()
+      .map((record) => {
+        const connection = CONNECTIONS.read(record.environmentId);
+        const shellReady =
+          connection?.knownEnvironment.source === "hub-hosted" &&
+          connection.shellSnapshotReadiness.read() !== null;
+        return hostedSessionMutationReadiness(record, hub, shellReady);
+      });
+  },
+  subscribe: (listener) => {
+    const unsubscribes = [
+      getHostedEnvironmentSessions().subscribe(listener),
+      hostedHubStore.subscribe(listener),
+      CONNECTIONS.subscribe(listener),
+    ];
+    return () => {
+      for (const unsubscribe of unsubscribes) unsubscribe();
+    };
+  },
+});
 
 /** Calls `listener` whenever a node's connection is registered, replaced or removed. */
 export function subscribeMobileNodeConnections(listener: () => void): () => void {
@@ -125,6 +159,13 @@ export async function acquireMobileNode(
           copyId: scope.copyId,
         }),
       }),
+      // Following an import reads only; a copy and an owner's follow wait for the lease.
+      ...(purpose === "copy" || owner
+        ? {
+            awaitMutationLease: (signal: AbortSignal) =>
+              HOSTED_MUTATION_LEASES.await(environmentId, signal),
+          }
+        : {}),
       connect: (signal) => awaitBootstrappedNodeConnection(CONNECTIONS, environmentId, signal),
       timeoutMessage: timeoutMessageFor(environmentId),
     };

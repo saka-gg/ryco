@@ -2,23 +2,18 @@ import { resolveHostedRpcCapability } from "@ryco/client-runtime/authorization";
 import { createEnvironmentApi } from "@ryco/client-runtime/connection";
 import {
   nodeDirectoryEntries,
+  readNodeDirectoryFacts,
   selectNodeDirectoryTargets,
   startNodeDirectoryPublisher,
-  type NodeDirectoryNodeFacts,
+  subscribeNodeDirectoryProjects,
 } from "@ryco/client-runtime/state/nodes";
 import { AGENT_CONTROL_WS_METHODS } from "@ryco/contracts/agent-control";
 import type { EnvironmentId } from "@ryco/contracts";
 import type { NodePathHints } from "@ryco/contracts/project-copy";
-import { isChatProject } from "@ryco/shared/projectKind";
 
 import { getMobileHostedConnectionCoordinator } from "../../connection/hostedConnectionCoordinator";
 import { createMobileConnectionRegistry } from "../../runtime/bootstrap";
-import {
-  selectEnvironmentState,
-  selectProjectsAcrossEnvironments,
-  selectProjectsForEnvironment,
-  useStore,
-} from "../../state/threadsRuntime";
+import { useStore } from "../../state/threadsRuntime";
 import { subscribeMobileNodeConnections } from "./mobileAcquireNode";
 import { readMobileNodeCatalog, subscribeMobileNodeCatalog } from "./mobileNodeCatalog";
 
@@ -61,21 +56,12 @@ function connectionFor(environmentId: EnvironmentId) {
   return connection && publish ? { connection, publish } : null;
 }
 
-function readFacts(environmentId: EnvironmentId): NodeDirectoryNodeFacts {
-  const state = useStore.getState();
-  // Projects are known once the node's shell snapshot arrived (live or cached).
-  const projects = selectEnvironmentState(state, environmentId).bootstrapComplete
-    ? selectProjectsForEnvironment(state, environmentId).flatMap((project) => {
-        const key = project.repositoryIdentity?.canonicalKey;
-        return isChatProject(project) || !key
-          ? []
-          : [{ repositoryCanonicalKey: key, path: project.cwd }];
-      })
-    : null;
-  return {
-    defaultProjectDirectory: pathHints.get(environmentId)?.defaultProjectDirectory ?? null,
-    projects,
-  };
+function readFacts(environmentId: EnvironmentId) {
+  return readNodeDirectoryFacts(
+    useStore.getState(),
+    environmentId,
+    pathHints.get(environmentId)?.defaultProjectDirectory ?? null,
+  );
 }
 
 /** Reads the code directory of every owned machine that has none yet (once per connection). */
@@ -112,16 +98,6 @@ function readMissingPathHints(): void {
   }
 }
 
-function subscribeProjects(listener: () => void): () => void {
-  let projects = selectProjectsAcrossEnvironments(useStore.getState());
-  return useStore.subscribe((state) => {
-    const next = selectProjectsAcrossEnvironments(state);
-    if (next === projects) return;
-    projects = next;
-    listener();
-  });
-}
-
 function subscribeSources(listener: () => void): () => void {
   const onNodes = () => {
     readMissingPathHints();
@@ -131,7 +107,7 @@ function subscribeSources(listener: () => void): () => void {
   const unsubscribes = [
     subscribeMobileNodeCatalog(onNodes),
     subscribeMobileNodeConnections(onNodes),
-    subscribeProjects(listener),
+    subscribeNodeDirectoryProjects(useStore, listener),
   ];
   readMissingPathHints();
   return () => {

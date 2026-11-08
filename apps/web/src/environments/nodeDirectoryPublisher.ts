@@ -1,13 +1,14 @@
 import {
   nodeDirectoryEntries,
+  readNodeDirectoryFacts as readStoreNodeFacts,
   selectNodeDirectoryTargets,
   startNodeDirectoryPublisher as startPublisher,
+  subscribeNodeDirectoryProjects,
   type NodeDirectoryNodeFacts,
 } from "@ryco/client-runtime/state/nodes";
 import { AGENT_CONTROL_WS_METHODS } from "@ryco/contracts/agent-control";
 import type { EnvironmentId } from "@ryco/contracts";
 import type { NodePathHints } from "@ryco/contracts/project-copy";
-import { isChatProject } from "@ryco/shared/projectKind";
 
 import {
   nodePathHintsQueryKey,
@@ -17,12 +18,7 @@ import { isHostedHubMode } from "../env";
 import { readEnvironmentApiForConnection } from "../environmentApi";
 import { readHostedRpcCapability, subscribeHostedRpcCapabilities } from "../hostedHub/capabilities";
 import { defaultQueryClient } from "../rpc/queryClient";
-import {
-  selectEnvironmentState,
-  selectProjectsAcrossEnvironments,
-  selectProjectsForEnvironment,
-  useStore,
-} from "../store";
+import { useStore } from "../store";
 import { readNodeCatalogSnapshot, subscribeNodeCatalog } from "./nodeCatalog";
 import { readEnvironmentConnection, subscribeEnvironmentConnections } from "./runtime";
 
@@ -59,17 +55,11 @@ export function readNodeDirectoryFacts(environmentId: EnvironmentId): NodeDirect
   const hints = defaultQueryClient.getQueryData<NodePathHints>(
     nodePathHintsQueryKey(environmentId),
   );
-  const state = useStore.getState();
-  // Projects are known once the node's shell snapshot arrived (live or cached).
-  const projects = selectEnvironmentState(state, environmentId).bootstrapComplete
-    ? selectProjectsForEnvironment(state, environmentId).flatMap((project) => {
-        const key = project.repositoryIdentity?.canonicalKey;
-        return isChatProject(project) || !key
-          ? []
-          : [{ repositoryCanonicalKey: key, path: project.cwd }];
-      })
-    : null;
-  return { defaultProjectDirectory: hints?.defaultProjectDirectory ?? null, projects };
+  return readStoreNodeFacts(
+    useStore.getState(),
+    environmentId,
+    hints?.defaultProjectDirectory ?? null,
+  );
 }
 
 /**
@@ -111,23 +101,12 @@ function followNodePathHints(listener: () => void): () => void {
   };
 }
 
-/** Calls `listener` only when the store's projects change, not on every store update. */
-function subscribeProjects(listener: () => void): () => void {
-  let projects = selectProjectsAcrossEnvironments(useStore.getState());
-  return useStore.subscribe((state) => {
-    const next = selectProjectsAcrossEnvironments(state);
-    if (next === projects) return;
-    projects = next;
-    listener();
-  });
-}
-
 function subscribeSources(listener: () => void): () => void {
   const unsubscribes = [
     subscribeNodeCatalog(listener),
     subscribeEnvironmentConnections(listener),
     subscribeHostedRpcCapabilities(listener),
-    subscribeProjects(listener),
+    subscribeNodeDirectoryProjects(useStore, listener),
     followNodePathHints(listener),
   ];
   return () => {

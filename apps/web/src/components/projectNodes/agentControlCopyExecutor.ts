@@ -12,6 +12,7 @@
 import {
   AGENT_CONTROL_COPY_ACCEPT_RETRY_DELAY_MS,
   AGENT_CONTROL_COPY_EXECUTING_TIMEOUT_MS,
+  agentControlCopyNodeReads,
   rebuildAgentControlCopyPlanWith,
   startAgentControlCopyExecutor as startSharedAgentControlCopyExecutor,
   type AgentControlCopyExecutorDeps,
@@ -46,32 +47,12 @@ function appDeps(): AgentControlCopyExecutorDeps {
         copyId,
         purpose: "follow",
       }),
-    readServerConfig: async (environmentId, node) => {
-      const cached = readNodeServerConfig(environmentId);
-      if (cached) return cached;
-      const getConfig = node.api.server?.getConfig;
-      return getConfig ? getConfig().catch(() => null) : null;
-    },
+    ...agentControlCopyNodeReads({
+      readEnvironmentApi,
+      readCachedServerConfig: readNodeServerConfig,
+    }),
     readProjectUpdatedAt: (environmentId, projectId) =>
       selectProjectByRef(useStore.getState(), { environmentId, projectId })?.updatedAt ?? null,
-    readAgentControlApi: (environmentId) => readEnvironmentApi(environmentId)?.agentControl,
-    // Its own subscription, for the moments approving waits: the app's shared
-    // proposal store stays out of this chunk (and the app shell's file count).
-    followProposal: (environmentId, proposalId, onProposal) => {
-      const subscribe = readEnvironmentApi(environmentId)?.agentControl?.subscribeProposals;
-      if (!subscribe) return () => undefined;
-      return subscribe((event) => {
-        const proposal =
-          event.type === "snapshot"
-            ? [...event.queue.active, ...event.queue.recent].find(
-                (entry) => entry.proposalId === proposalId,
-              )
-            : event.proposal.proposalId === proposalId
-              ? event.proposal
-              : undefined;
-        if (proposal) onProposal(proposal);
-      });
-    },
     startCopy: async (options) =>
       (await import("./copyRuntime/copyManager")).startManagedProjectCopy(options),
     holdCopyStart: async (context) =>

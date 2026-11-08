@@ -109,6 +109,9 @@ import {
   copyDestinationUsable,
   copyFormBlockedReason,
   copyProgressContextOf,
+  copyResumeNotice,
+  requestedCopyTarget,
+  resumableCopyRecord,
 } from "@ryco/client-runtime/projectCopy/form";
 import {
   DEFAULT_COPY_USER_CHOICES,
@@ -503,7 +506,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
     ? pickedCard.node.environmentId
     : initialCopyTarget(
         cards,
-        request.targetEnvironmentId,
+        requestedCopyTarget(request.targetEnvironmentId, resumeRecord),
         remembered?.targetEnvironmentId ?? null,
       );
   const targetCard = cards.find((card) => card.node.environmentId === targetId) ?? null;
@@ -678,15 +681,10 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
     }
     setStarting(true);
     setStartError(null);
-    // The stopped copy goes on only with what it was: the same checkout to the same node.
-    const resume =
-      resumeRecord !== null &&
-      sourceRow !== null &&
-      resumeRecord.targetEnvironmentId === targetId &&
-      resumeRecord.sourceEnvironmentId === sourceRow.ref.environmentId &&
-      resumeRecord.sourceProjectId === sourceRow.ref.projectId
-        ? resumeRecord
-        : null;
+    const resume = resumableCopyRecord(resumeRecord, {
+      sourceRef: sourceRow?.ref ?? null,
+      targetEnvironmentId: targetId,
+    });
     try {
       const started = await services.startCopy(built.plan, sourceRow?.ref ?? null, resume);
       // A stopped copy this one replaces cleans up what it sent.
@@ -853,9 +851,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
             className="m-0 rounded-lg bg-muted px-2.5 py-2 text-[12px] text-muted-foreground"
             data-testid="copy-resume-notice"
           >
-            This copy stopped when Ryco closed during the upload. Start it again to send the rest;
-            what already reached {nodeLabelOf(nodes)(resumeRecord.targetEnvironmentId)} is not sent
-            again.
+            {copyResumeNotice(nodeLabelOf(nodes)(resumeRecord.targetEnvironmentId))}
           </p>
         ) : null}
         <CopyField label="From" labelId={ids.from}>
