@@ -122,6 +122,82 @@ export interface NodeAcquirePorts {
   readonly timeoutMessage?: () => string;
 }
 
+/**
+ * Where a client keeps its live node connections: the one a node has now (if
+ * any), notice when that changes, and the API over a given connection.
+ */
+export interface NodeConnectionRegistry<
+  C extends { readonly ensureBootstrapped: () => Promise<void> },
+> {
+  readonly read: (environmentId: EnvironmentId) => C | null | undefined;
+  /** Calls `listener` whenever a connection is registered, replaced or removed. */
+  readonly subscribe: (listener: () => void) => () => void;
+  readonly apiOf: (environmentId: EnvironmentId, connection: C) => EnvironmentApi | undefined;
+}
+
+/** How long a failed bootstrap is left before it is asked again, unless the connection changes first. */
+const BOOTSTRAP_RETRY_MS = 1_000;
+
+/**
+ * Resolves on the next change to the registered connections, after `maxWaitMs`
+ * when given, or when `signal` aborts.
+ */
+function nextConnectionChange(
+  subscribe: (listener: () => void) => () => void,
+  signal: AbortSignal,
+  maxWaitMs?: number,
+): Promise<void> {
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let unsubscribe: () => void = () => undefined;
+    const done = () => {
+      unsubscribe();
+      signal.removeEventListener("abort", done);
+      if (timer !== null) globalThis.clearTimeout(timer);
+      resolve();
+    };
+    unsubscribe = subscribe(done);
+    signal.addEventListener("abort", done, { once: true });
+    if (maxWaitMs !== undefined) timer = globalThis.setTimeout(done, maxWaitMs);
+  });
+}
+
+/**
+ * The node's registered connection once it is bootstrapped: the `connect` port
+ * of {@link NodeAcquirePorts} over a client's connection registry. A
+ * connection replaced while it bootstraps is never handed out, and one whose
+ * bootstrap fails is asked again: its lifecycle owner reconnects it or
+ * registers a new one, within the acquisition's budget.
+ */
+export async function awaitBootstrappedNodeConnection<
+  C extends { readonly ensureBootstrapped: () => Promise<void> },
+>(
+  registry: NodeConnectionRegistry<C>,
+  environmentId: EnvironmentId,
+  signal: AbortSignal,
+): Promise<NodeAcquireConnection> {
+  while (!signal.aborted) {
+    const connection = registry.read(environmentId);
+    if (!connection) {
+      await nextConnectionChange(registry.subscribe, signal);
+      continue;
+    }
+    const bootstrapped = await connection.ensureBootstrapped().then(
+      () => true,
+      () => false,
+    );
+    if (registry.read(environmentId) !== connection) continue;
+    if (!bootstrapped) {
+      await nextConnectionChange(registry.subscribe, signal, BOOTSTRAP_RETRY_MS);
+      continue;
+    }
+    const api = registry.apiOf(environmentId, connection);
+    if (!api) throw new Error("The device's connection has no API.");
+    return { api, isCurrent: () => registry.read(environmentId) === connection };
+  }
+  throw new Error("Stopped waiting for the device to connect.");
+}
+
 export interface NodeAcquireTimers {
   readonly setTimeout: (callback: () => void, delayMs: number) => unknown;
   readonly clearTimeout: (timer: unknown) => void;

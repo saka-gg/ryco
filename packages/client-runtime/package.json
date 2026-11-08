@@ -483,6 +483,10 @@
     "./projectCopy/manager": {
       "types": "./src/projectCopy/manager.ts",
       "import": "./src/projectCopy/manager.ts"
+    },
+    "./projectCopy/nodeIo": {
+      "types": "./src/projectCopy/nodeIo.ts",
+      "import": "./src/projectCopy/nodeIo.ts"
     }
   },
   "scripts": {
