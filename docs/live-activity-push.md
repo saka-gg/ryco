@@ -78,8 +78,9 @@ The token rides on the device's own push registration, `PUT /api/native/push/reg
 ## The node's half
 
 The device tells each node, in `push.registerDevice`, that its card takes push updates
-(`liveActivity: true`, whenever the app's Live Activity switch is on). The node keeps the flag with
-the registration (`hub-push.json`); older nodes ignore it.
+(`liveActivity: true`, while the app's Live Activity switch is on and its Hub advertises
+`liveActivities`). The node keeps the flag with the registration (`hub-push.json`); older nodes
+ignore it.
 
 The node signals counts with `POST /api/node/attention/activity` and a fresh node proof
 (`PushActivitySignalInput`):
@@ -93,16 +94,20 @@ The node signals counts with `POST /api/node/attention/activity` and a fresh nod
   rule as the card (`summarizeAgentActivity` over the node's threads as its Inbox lists them, with
   the node's own settlement rule): a result counts for 15 minutes; snoozed, settled, hidden and
   archived threads never. The four counts are all that leaves the node.
-- The same sequence counter as the attention signal, the same proof, the same retry (once, after
-  five seconds) and 404 back-off (an hour) rules; each route backs off on its own.
+- The same sequence counter and proof as the attention signal, and the same 404 back-off (an
+  hour); each route backs off on its own. A failed or refused activity signal is not retried
+  inside the pass (that would hold up the alerts behind it): the next pass waits 5 seconds, then
+  twice as long after each further failure, up to 4 minutes, and carries the latest counts.
 - Nothing for a device in front: presence holds as for alerts, and the app updates its own card.
   Once the device leaves the front, the node sends its counts again.
 - The counts ride the attention passes: the rows a pass reads are counted after it. An entry goes
   out when its counts changed since the Hub last took them, at most one signal per 5 seconds (the
-  latest counts win), and once when they reach zero (the end). A device that never heard counts
-  above zero hears nothing about zero.
+  latest counts win), and once when they reach zero (the end). A device the node has told
+  nothing since it started hears its counts once, zero included: after a node restart the Hub may
+  still hold counts from before it, and that zero lets it end the card.
 - **Refresh.** While any count is above zero, unchanged counts the Hub holds are sent again every
   4 minutes, so the node never drops out of the Hub's 10-minute stale window while work runs.
+  With every count at zero there is no refresh and no timer.
 - The node also counts again when a result ages out of its 15 minutes or a snooze wakes, without
   any thread changing.
 
@@ -114,6 +119,8 @@ The answer (`PushActivitySignalResult`) has a status per entry:
 | `no-token`       | The device shows no card that takes pushes; nothing kept | Remembers them, but does not refresh |
 | `not-authorized` | The enrollment is gone or no longer reaches this node    | Forgets the device                   |
 | `rate-limited`   | The Hub refused this entry for now                       | Sends it again on the next pass      |
+
+A status the node does not know (from a newer Hub) counts as `rate-limited`.
 
 A card only starts while Ryco is in front, so a device answered `no-token` hears the counts again
 once it leaves the front with a card.
@@ -162,6 +169,10 @@ The end, once all four counts are zero or every node dropped out:
 - `dismissal-date` is 15 minutes on with a final state (the card shows its results as long as the
   app's own end does), or 15 seconds on without one.
 - After an end the token is spent: drop it, send nothing more, and wait for the next registration.
+- A registered token means a card shows, so zero ends it also when the Hub never saw counts above
+  zero for it (after a Hub restart). Such a card first waits 5 minutes, the nodes' refresh plus a
+  margin, so a node still running elsewhere can report before the card ends.
+- Keep one state per card token: the same card registered under two accounts gets one sum.
 
 ## Errors and limits
 

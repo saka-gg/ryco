@@ -9,10 +9,15 @@
  *
  * @module push/attentionSignalHttp
  */
-import { RELAY_PROTOCOL_MAJOR, RELAY_PROTOCOL_MINOR } from "@ryco/contracts/relay";
+import {
+  NativeE2eeEnrollmentId,
+  RELAY_PROTOCOL_MAJOR,
+  RELAY_PROTOCOL_MINOR,
+} from "@ryco/contracts/relay";
 import {
   PUSH_ACTIVITY_SIGNAL_PATH,
   PUSH_ATTENTION_SIGNAL_PATH,
+  PushActivityEntryStatus,
   PushActivitySignalResult,
   PushAttentionSignalResult,
   type PushActivitySignalInput,
@@ -124,9 +129,41 @@ export function makeAttentionSignalSender(
   return makeHubSignalSender(deps, PUSH_ATTENTION_SIGNAL_PATH, PushAttentionSignalResult);
 }
 
-/** Live Activity counts (`docs/live-activity-push.md`): the same proof and answer rules. */
+/**
+ * The activity answer as read: an entry status this node does not know (from a newer Hub) is
+ * kept as a string rather than failing the whole answer.
+ */
+const LenientActivitySignalResult = Schema.Struct({
+  ...PushActivitySignalResult.fields,
+  results: Schema.Array(
+    Schema.Struct({
+      enrollmentId: NativeE2eeEnrollmentId,
+      status: Schema.String,
+    }),
+  ),
+});
+const isKnownActivityStatus = Schema.is(PushActivityEntryStatus);
+
+/**
+ * Live Activity counts (`docs/live-activity-push.md`): the same proof and answer rules. An
+ * unknown entry status reads as `rate-limited`: the node sends that entry again later.
+ */
 export function makeActivitySignalSender(
   deps: HubSignalSenderDeps,
 ): (signal: Omit<PushActivitySignalInput, "proof">) => Promise<ActivitySendOutcome> {
-  return makeHubSignalSender(deps, PUSH_ACTIVITY_SIGNAL_PATH, PushActivitySignalResult);
+  const send = makeHubSignalSender(deps, PUSH_ACTIVITY_SIGNAL_PATH, LenientActivitySignalResult);
+  return async (signal) => {
+    const outcome = await send(signal);
+    if (outcome.kind !== "delivered") return outcome;
+    return {
+      kind: "delivered",
+      result: {
+        ...outcome.result,
+        results: outcome.result.results.map((entry) => ({
+          enrollmentId: entry.enrollmentId,
+          status: isKnownActivityStatus(entry.status) ? entry.status : "rate-limited",
+        })),
+      },
+    };
+  };
 }

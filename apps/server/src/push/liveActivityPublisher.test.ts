@@ -1,10 +1,13 @@
 import type { SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
 import { EnvironmentId, ProjectId, ThreadId, TurnId } from "@ryco/contracts";
 import type { PushActivityEntryStatus, PushActivitySignalInput } from "@ryco/contracts/push-hub";
+import { e2eeX25519KeyPair } from "@ryco/shared/relayE2eeKeys";
 import { isThreadSnoozed } from "@ryco/shared/threadSnooze";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
+  ATTENTION_COALESCE_MS,
+  ATTENTION_READ_DEBOUNCE_MS,
   ATTENTION_UNSUPPORTED_BACKOFF_MS,
   type ActivitySendOutcome,
   startAttentionPublisher,
@@ -22,6 +25,7 @@ const HUB_ENVIRONMENT = EnvironmentId.make("env_hubEnvironment000000");
 const NOW = Date.parse("2026-10-28T12:00:00.000Z");
 const PHONE = "enr_phone000000000000000000";
 const TABLET = "enr_tablet00000000000000000";
+const deviceKey = e2eeX25519KeyPair();
 
 function thread(id: string, patch: Partial<SidebarThreadSummary> = {}): SidebarThreadSummary {
   return {
@@ -62,7 +66,7 @@ function registration(enrollmentId: string, patch: Partial<PushRegistration> = {
   return {
     enrollmentId,
     keyId: "AAAAAAAAAAAAAAAAAAAAAA",
-    publicKey: "A".repeat(43),
+    publicKey: Buffer.from(deviceKey.publicKey).toString("base64url"),
     role: "owner",
     kinds: ["approval"],
     sound: true,
@@ -130,28 +134,35 @@ describe("planActivityRecipients", () => {
       ...input,
     }).flat();
 
-  it("signals only Live Activity devices not in front", () => {
+  it("signals only the devices not in front", () => {
     expect(
       plan({
-        registrations: [
-          registration(PHONE),
-          registration(TABLET),
-          registration("enr_nolive0000000000000000", { liveActivity: false }),
-        ],
+        registrations: [registration(PHONE), registration(TABLET)],
         isForeground: (id) => id === TABLET,
       }),
     ).toEqual([PHONE]);
   });
 
-  it("sends changes, ends once, refreshes held counts and never starts with zero", () => {
+  it("sends changes, ends once, refreshes held counts, and tells a new device even zero", () => {
     const sent = (patch: object) =>
       new Map([[PHONE, { counts, atMs: NOW, held: true, resend: false, ...patch }]]);
     expect(plan({ sent: sent({}) })).toEqual([]);
     expect(plan({ sent: sent({}), counts: zero })).toEqual([PHONE]);
     expect(plan({ sent: sent({ counts: zero }), counts: zero })).toEqual([]);
-    expect(plan({ counts: zero })).toEqual([]);
+    // Told nothing since this node started: it hears its counts once, zero included, so a Hub
+    // still holding what the node sent before a restart can end the card.
+    expect(plan({ counts: zero })).toEqual([PHONE]);
     expect(plan({ sent: sent({ resend: true }) })).toEqual([PHONE]);
     expect(plan({ sent: sent({}), nowMs: NOW + ACTIVITY_REFRESH_MS })).toEqual([PHONE]);
+    // A pass on the refresh timer a little early still refreshes.
+    expect(
+      plan({ sent: sent({}), nowMs: NOW + ACTIVITY_REFRESH_MS - ACTIVITY_MIN_INTERVAL_MS }),
+    ).toEqual([PHONE]);
+    expect(plan({ sent: sent({}), nowMs: NOW + ACTIVITY_REFRESH_MS / 2 })).toEqual([]);
+    // Zero counts the Hub took are never refreshed.
+    expect(
+      plan({ sent: sent({ counts: zero }), counts: zero, nowMs: NOW + ACTIVITY_REFRESH_MS }),
+    ).toEqual([]);
     // Nothing held (no card took pushes): unchanged counts are not refreshed.
     expect(plan({ sent: sent({ held: false }), nowMs: NOW + ACTIVITY_REFRESH_MS })).toEqual([]);
   });
@@ -187,11 +198,16 @@ function harness(
   let listener: (() => void) | null = null;
   let sequence = 1_000;
   const activity: Array<Omit<PushActivitySignalInput, "proof">> = [];
+  const alerts: number[] = [];
+  let shellReads = 0;
   const removed: string[][] = [];
   const publisher = startAttentionPublisher({
     environmentId: async () => HUB_ENVIRONMENT,
     isConnectorOnline: () => true,
-    readShell: async () => ({ sequence: 1, threads: [...rows.values()] }),
+    readShell: async () => {
+      shellReads += 1;
+      return { sequence: 1, threads: [...rows.values()] };
+    },
     readThread: async (_environmentId, threadId) => rows.get(threadId) ?? null,
     isSnoozed: isThreadSnoozed,
     registrations: async () => registrations,
@@ -199,10 +215,13 @@ function harness(
     reserveSequence: async () => sequence++,
     removeEnrollments: async (enrollmentIds) => void removed.push([...enrollmentIds]),
     setHubDelivery: () => undefined,
-    send: async (signal) => ({
-      kind: "delivered",
-      result: { protocolVersion: 1, sequence: signal.sequence, results: [] },
-    }),
+    send: async (signal) => {
+      alerts.push(Date.now());
+      return {
+        kind: "delivered",
+        result: { protocolVersion: 1, sequence: signal.sequence, results: [] },
+      };
+    },
     sendActivity: async (signal) => {
       activity.push(signal);
       return (
@@ -233,6 +252,8 @@ function harness(
   return {
     publisher,
     activity,
+    alerts,
+    shellReads: () => shellReads,
     removed,
     change: (row: SidebarThreadSummary, at: number) => {
       rows.set(row.id, row);
@@ -313,15 +334,16 @@ describe("attention publisher: Live Activity counts", () => {
   it("coalesces a burst of changes into one signal with the latest counts", async () => {
     const test = harness({ threads: [] });
     await vi.advanceTimersByTimeAsync(0);
-    expect(test.activity).toHaveLength(0);
+    // On start the device hears the node's counts once, zero included.
+    expect(test.activity.map((signal) => signal.activities[0]!.counts.running)).toEqual([0]);
     test.change(thread("a"), 2);
     await vi.advanceTimersByTimeAsync(200);
     test.change(thread("b"), 3);
     await vi.advanceTimersByTimeAsync(200);
     test.change(thread("c"), 4);
-    await vi.advanceTimersByTimeAsync(ACTIVITY_MIN_INTERVAL_MS);
-    // The first change went out at once; the next two became one.
-    expect(test.activity.map((signal) => signal.activities[0]!.counts.running)).toEqual([1, 3]);
+    await vi.advanceTimersByTimeAsync(ACTIVITY_MIN_INTERVAL_MS * 2);
+    // The three changes inside the minimum interval became one signal with the latest counts.
+    expect(test.activity.map((signal) => signal.activities[0]!.counts.running)).toEqual([0, 3]);
     await test.publisher.stop();
   });
 
@@ -383,6 +405,60 @@ describe("attention publisher: Live Activity counts", () => {
     const test = harness({ status: () => "no-token" });
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(ACTIVITY_REFRESH_MS * 2);
+    expect(test.activity).toHaveLength(1);
+    await test.publisher.stop();
+  });
+
+  it("backs a failing activity route off on its own, without holding up alerts", async () => {
+    let failing = true;
+    const test = harness({ outcome: () => (failing ? { kind: "failed" } : null) });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(test.activity).toHaveLength(1);
+    // A streaming turn: a change every second for a minute.
+    for (let second = 1; second <= 60; second += 1) {
+      test.change(thread("a", { updatedAt: new Date(NOW + second * 1_000).toISOString() }), second);
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    // One attempt per pass, then 5 s, 10 s, 20 s, 40 s apart: never a POST per batch.
+    expect(test.activity.length).toBeLessThanOrEqual(5);
+    // An alert in the middle of the failures still goes out on its own schedule.
+    const before = test.alerts.length;
+    test.change(
+      thread("a", {
+        hasPendingApprovals: true,
+        updatedAt: new Date(NOW + 61_000).toISOString(),
+      }),
+      100,
+    );
+    await vi.advanceTimersByTimeAsync(ATTENTION_COALESCE_MS + ATTENTION_READ_DEBOUNCE_MS + 50);
+    expect(test.alerts.length).toBe(before + 1);
+    // Once the Hub answers again, the latest counts go out and the back-off resets.
+    failing = false;
+    await vi.advanceTimersByTimeAsync(ACTIVITY_REFRESH_MS);
+    expect(test.activity.at(-1)!.activities[0]!.counts.needsYou).toBe(1);
+    await test.publisher.stop();
+  });
+
+  it("tells the Hub zero once after a restart, so it can end a card the node left running", async () => {
+    // A fresh process knows nothing it sent before: zero counts still go to the device once.
+    const test = harness({ threads: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(test.activity).toHaveLength(1);
+    expect(test.activity[0]!.activities[0]!.counts).toEqual({
+      running: 0,
+      needsYou: 0,
+      failed: 0,
+      done: 0,
+    });
+    await test.publisher.stop();
+  });
+
+  it("does no refresh passes while every count is zero", async () => {
+    const test = harness({ threads: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    const reads = test.shellReads();
+    await vi.advanceTimersByTimeAsync(ACTIVITY_REFRESH_MS * 5);
+    expect(test.shellReads()).toBe(reads);
     expect(test.activity).toHaveLength(1);
     await test.publisher.stop();
   });

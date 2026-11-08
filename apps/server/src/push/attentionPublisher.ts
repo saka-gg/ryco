@@ -23,8 +23,9 @@
  *   the route (404) is not asked again for an hour.
  * - Live Activity counts (`docs/live-activity-push.md`) ride the same passes: the rows each
  *   pass read are kept, and after it the node counts them and signals the devices whose card
- *   takes push updates, on the same sequence counter, proof, retry and back-off rules, at most
- *   once per {@link ACTIVITY_MIN_INTERVAL_MS}.
+ *   takes push updates, on the same sequence counter and proof, at most once per
+ *   {@link ACTIVITY_MIN_INTERVAL_MS}. A failed activity signal is never retried inside the
+ *   queue the alerts share: later passes back off on their own timer.
  *
  * @module push/attentionPublisher
  */
@@ -41,7 +42,6 @@ import type { PushAlertKind, PushHubDelivery } from "@ryco/contracts/push";
 import {
   PUSH_ALERT_REQUEST_ID_MAX_LENGTH,
   PUSH_ALERT_TITLE_MAX_LENGTH,
-  PUSH_ATTENTION_MAX_DELIVERIES,
   type PushActivitySignalInput,
   type PushActivitySignalResult,
   type PushAlertPlaintext,
@@ -60,11 +60,13 @@ import {
   ACTIVITY_FOREGROUND_RECHECK_MS,
   ACTIVITY_MIN_INTERVAL_MS,
   ACTIVITY_REFRESH_MS,
+  activityCountsZero,
   countNodeAgentActivity,
   planActivityRecipients,
   type SentActivity,
 } from "./liveActivityCounts.ts";
 import { effectivePushKinds, type PushRegistration } from "./pushRegistrations.ts";
+import { chunkForSignals } from "./pushSignalChunks.ts";
 
 export const ATTENTION_READ_DEBOUNCE_MS = 150;
 export const ATTENTION_COALESCE_MS = 1_000;
@@ -179,11 +181,7 @@ export function planAttentionRecipients(input: {
       if (kinds.has(candidate.kind)) recipients.push({ registration, candidate });
     }
   }
-  const chunks: AttentionRecipient[][] = [];
-  for (let index = 0; index < recipients.length; index += PUSH_ATTENTION_MAX_DELIVERIES) {
-    chunks.push(recipients.slice(index, index + PUSH_ATTENTION_MAX_DELIVERIES));
-  }
-  return chunks;
+  return chunkForSignals(recipients);
 }
 
 /** Seals each recipient's payload, bound to this signal's sequence. */
@@ -255,6 +253,9 @@ export function startAttentionPublisher(deps: AttentionPublisherDeps): Attention
   let activityDueAt: number | null = null;
   let lastActivitySignalAt = Number.NEGATIVE_INFINITY;
   let activityUnsupportedUntil = 0;
+  /** After a failed or refused activity signal: no pass before this, the wait growing. */
+  let activityRetryAt = 0;
+  let activityBackoffMs = 0;
 
   const enqueue = (work: () => Promise<void>) => {
     chain = chain.then(work).catch((error: unknown) => {
@@ -358,7 +359,11 @@ export function startAttentionPublisher(deps: AttentionPublisherDeps): Attention
    */
   function scheduleActivity(delayMs: number) {
     if (stopped || deps.sendActivity === undefined) return;
-    const dueAt = Math.max(deps.now() + delayMs, lastActivitySignalAt + ACTIVITY_MIN_INTERVAL_MS);
+    const dueAt = Math.max(
+      deps.now() + delayMs,
+      lastActivitySignalAt + ACTIVITY_MIN_INTERVAL_MS,
+      activityRetryAt,
+    );
     if (activityDueAt !== null && activityDueAt <= dueAt) return;
     if (activityTimer !== null) deps.clearTimeout(activityTimer);
     activityDueAt = dueAt;
@@ -515,56 +520,75 @@ export function startAttentionPublisher(deps: AttentionPublisherDeps): Attention
     let limited = false;
     for (const enrollmentIds of chunks) {
       if (stopped) return;
+      if (!deps.isConnectorOnline()) break;
       const sequence = await deps.reserveSequence();
       const issuedAt = deps.now();
       lastActivitySignalAt = issuedAt;
-      const result = await sendWithRetry(
-        () =>
-          sendActivity({
-            sequence,
-            issuedAt,
-            activities: enrollmentIds.map((enrollmentId) => ({
-              enrollmentId:
-                enrollmentId as PushActivitySignalInput["activities"][number]["enrollmentId"],
-              counts: activity.counts,
-            })),
-          }),
-        () => {
-          activityUnsupportedUntil = deps.now() + ATTENTION_UNSUPPORTED_BACKOFF_MS;
-        },
-      );
-      if (result === null) continue;
-      for (const entry of result.results) {
+      // One attempt per pass: a failure backs off on its own timer instead of holding the queue
+      // the alerts share; the first retry comes after ATTENTION_RETRY_DELAY_MS, later ones wait
+      // longer, up to the refresh.
+      const outcome = await sendActivity({
+        sequence,
+        issuedAt,
+        activities: enrollmentIds.map((enrollmentId) => ({
+          enrollmentId:
+            enrollmentId as PushActivitySignalInput["activities"][number]["enrollmentId"],
+          counts: activity.counts,
+        })),
+      });
+      if (stopped) return;
+      if (outcome.kind === "unsupported") {
+        activityUnsupportedUntil = deps.now() + ATTENTION_UNSUPPORTED_BACKOFF_MS;
+        break;
+      }
+      if (outcome.kind !== "delivered") {
+        activityBackoffMs = Math.min(
+          Math.max(ATTENTION_RETRY_DELAY_MS, activityBackoffMs * 2),
+          ACTIVITY_REFRESH_MS,
+        );
+        activityRetryAt = deps.now() + activityBackoffMs;
+        deps.reportFailure(
+          "A Live Activity signal could not reach the Hub; it is sent again later.",
+        );
+        scheduleActivity(activityBackoffMs);
+        return;
+      }
+      activityBackoffMs = 0;
+      activityRetryAt = 0;
+      for (const entry of outcome.result.results) {
         if (entry.status === "accepted" || entry.status === "no-token") {
           sentActivity.set(entry.enrollmentId, {
             counts: activity.counts,
-            atMs: issuedAt,
+            // The pass's own time, so the next pass on the refresh timer finds it due.
+            atMs: nowMs,
             held: entry.status === "accepted",
             resend: false,
           });
-        } else if (entry.status === "rate-limited") {
+        } else if (entry.status === "not-authorized") {
+          sentActivity.delete(entry.enrollmentId);
+        } else {
+          // Rate-limited, or a status this node does not know yet: send it again later.
           limited = true;
           const previous = sentActivity.get(entry.enrollmentId);
           if (previous !== undefined) {
             sentActivity.set(entry.enrollmentId, { ...previous, resend: true });
           }
-        } else {
-          sentActivity.delete(entry.enrollmentId);
         }
       }
-      await forgetUnauthorized(result.results);
+      await forgetUnauthorized(outcome.result.results);
     }
     if (stopped) return;
     const nextAt = [
       activity.nextChangeAtMs,
       anyForeground ? nowMs + ACTIVITY_FOREGROUND_RECHECK_MS : null,
       limited ? nowMs + ACTIVITY_FOREGROUND_RECHECK_MS : null,
-      nowMs + ACTIVITY_REFRESH_MS,
+      // Only work in progress needs the refresh: zero counts the Hub took stay true.
+      activityCountsZero(activity.counts) ? null : nowMs + ACTIVITY_REFRESH_MS,
     ].reduce<number>(
       (earliest, at) => (at !== null && at < earliest ? at : earliest),
       Number.POSITIVE_INFINITY,
     );
-    scheduleActivity(Math.max(0, nextAt - deps.now()));
+    if (Number.isFinite(nextAt)) scheduleActivity(Math.max(0, nextAt - deps.now()));
   };
 
   enqueue(baseline);

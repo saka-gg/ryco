@@ -121,4 +121,35 @@ describe("attention signal over HTTPS", () => {
     expect(requests[0]!.url).toBe("https://hub.example/api/node/attention/activity");
     expect(requests[0]!.body).toMatchObject({ sequence: 43, proof: { nodeId: "node_1" } });
   });
+
+  it("reads an entry status from a newer Hub as rate-limited instead of failing the answer", async () => {
+    const send = makeActivitySignalSender(
+      senderDeps(
+        () =>
+          json(200, {
+            protocolVersion: 1,
+            sequence: 44,
+            results: [
+              { enrollmentId: "enr_device00000000000000000", status: "accepted" },
+              { enrollmentId: "enr_other000000000000000000", status: "postponed" },
+            ],
+          }),
+        [],
+      ),
+    );
+    const outcome = await send({
+      sequence: 44,
+      issuedAt: 1_000,
+      activities: [
+        {
+          enrollmentId: "enr_device00000000000000000" as never,
+          counts: { running: 1, needsYou: 0, failed: 0, done: 0 },
+        },
+      ],
+    });
+    expect(outcome).toMatchObject({
+      kind: "delivered",
+      result: { results: [{ status: "accepted" }, { status: "rate-limited" }] },
+    });
+  });
 });
