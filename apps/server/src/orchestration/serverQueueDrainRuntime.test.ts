@@ -288,30 +288,39 @@ describe("ServerQueueDrain: Claude resume review", () => {
     }),
   );
 
-  it.effect("never asks about a slash command, or a message queued with the review off", () =>
-    Effect.gen(function* () {
-      const asked: string[] = [];
-      const h = yield* harness(
-        [
-          entry("compact", { text: "  /compact" }),
-          entry("no-review", { claudeResumeReview: "skip" }),
-        ],
-        [],
-        {
-          claudeResumeReview: () =>
-            Effect.sync(() => {
-              asked.push("asked");
-              return review;
-            }),
-        },
-      );
-      h.state.session = { providerName: "claudeAgent", providerInstanceId: CLAUDE };
-      yield* h.drain.drainThread(threadId);
-      h.state.startStates.set("compact", "bound");
-      yield* h.drain.drainThread(threadId);
-      assert.deepEqual(h.sent(), ["compact", "no-review"]);
-      assert.deepEqual(asked, []);
-    }),
+  it.effect(
+    "never asks about a slash command, a message queued with the review off, or an agent's or automation's message",
+    () =>
+      Effect.gen(function* () {
+        const asked: string[] = [];
+        const h = yield* harness(
+          [
+            entry("compact", { text: "  /compact" }),
+            entry("no-review", { claudeResumeReview: "skip" }),
+            entry("from-agent", { author: "agent" }),
+            entry("from-automation", { author: "automation" }),
+          ],
+          [],
+          {
+            claudeResumeReview: () =>
+              Effect.sync(() => {
+                asked.push("asked");
+                return review;
+              }),
+          },
+        );
+        h.state.session = { providerName: "claudeAgent", providerInstanceId: CLAUDE };
+        yield* h.drain.drainThread(threadId);
+        h.state.startStates.set("compact", "bound");
+        yield* h.drain.drainThread(threadId);
+        h.state.startStates.set("no-review", "bound");
+        yield* h.drain.drainThread(threadId);
+        h.state.startStates.set("from-agent", "bound");
+        yield* h.drain.drainThread(threadId);
+        assert.deepEqual(h.sent(), ["compact", "no-review", "from-agent", "from-automation"]);
+        assert.equal(h.state.hold, null);
+        assert.deepEqual(asked, []);
+      }),
   );
 
   it.effect("holds the queue after the review could not be read a few times in a row", () =>
