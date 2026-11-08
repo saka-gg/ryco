@@ -3,17 +3,23 @@ import { View } from "react-native";
 
 import { AppText as Text } from "../../../components/AppText";
 
-export function SettingsSection(props: { readonly title?: string; readonly children: ReactNode }) {
+/** A grouped card of settings rows with a quiet header above and an optional note below. */
+export function SettingsSection(props: {
+  readonly title?: string;
+  readonly footer?: string;
+  readonly children: ReactNode;
+}) {
   return (
-    <View className="mt-6">
+    <View className="mt-6 gap-2 px-4">
       {props.title ? (
-        <Text className="px-5 pb-2.5 text-sm font-ryco-medium text-foreground-muted">
+        <Text className="px-2 text-[13px] font-ryco-medium text-foreground-muted">
           {props.title}
         </Text>
       ) : null}
-      <View className="mx-5 overflow-hidden rounded-2xl border border-border bg-card">
-        {props.children}
-      </View>
+      <View className="overflow-hidden rounded-[22px] bg-card">{props.children}</View>
+      {props.footer ? (
+        <Text className="px-2 text-xs leading-4 text-foreground-muted">{props.footer}</Text>
+      ) : null}
     </View>
   );
 }

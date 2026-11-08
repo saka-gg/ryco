@@ -1,28 +1,68 @@
 import { StackActions, useNavigation } from "@react-navigation/native";
-import {
-  SETTINGS_GROUP_TITLES,
-  SETTINGS_SECTION_TITLES,
-} from "@ryco/client-runtime/state/settings/settingsSections";
+import Constants from "expo-constants";
+import { useMemo, useSyncExternalStore } from "react";
 import { ScrollView } from "react-native";
 
+import { readCachedMobileHubProfile, subscribeMobileHubProfile } from "../../hostedHub/hubProfile";
 import { useHostedHubStore } from "../../hostedHub/state";
 import { MAIN_TABS } from "../../navigation/tabs/mainTabsModel";
-import { openMainTab } from "../../navigation/tabs/openMainTab";
 import {
   TabLargeTitle,
   useLargeTitleCollapse,
   useTabStackHeader,
 } from "../../navigation/tabs/TabScreenChrome";
+import { readMobileHostedConfig } from "../../platform/config";
 import { exactNodeRouteParams } from "../e2ee/exactNodeRouteModel";
+import { useHomeEnvironments } from "../home/useHomeEnvironments";
 import { SettingsRow } from "./components/SettingsRow";
 import { SettingsSection } from "./components/SettingsSection";
+import {
+  buildSettingsSections,
+  buildSettingsSummary,
+  settingsSummaryHub,
+  type SettingsListTarget,
+} from "./settingsListModel";
 
-/** The Settings tab: the list of settings pages, each pushed above the tabs. */
+/**
+ * The Settings tab, after t3code's phone Settings: who and what this phone is
+ * connected to at the top, then the settings pages in calm groups, the rarely
+ * used ones last. Each page pushes above the tabs.
+ */
 export function SettingsTabScreen() {
   const navigation = useNavigation();
   const selectedNode = useHostedHubStore((state) => state.selectedNode);
+  const environments = useHomeEnvironments();
+  // Follows the saved Hub profile: the tab stays mounted while Hub and account changes it.
+  const cachedHub = useSyncExternalStore(subscribeMobileHubProfile, readCachedMobileHubProfile);
+  const buildHubOrigin = useMemo(() => readMobileHostedConfig()?.hubOrigin ?? null, []);
+  const hub = settingsSummaryHub(cachedHub, buildHubOrigin);
+  const summary = buildSettingsSummary({
+    hub,
+    machines: {
+      total: environments.length,
+      connected: environments.filter((environment) => environment.connectionState === "connected")
+        .length,
+    },
+  });
+  const sections = useMemo(
+    () => buildSettingsSections({ version: Constants.expoConfig?.version ?? null }),
+    [],
+  );
   const { collapsed, onScroll } = useLargeTitleCollapse();
   useTabStackHeader({ title: collapsed ? MAIN_TABS.Settings.title : "" });
+
+  const open = (target: SettingsListTarget) => {
+    if (target === "Connections") {
+      navigation.navigate("Connections");
+    } else if (target === "NodeSecurity") {
+      // Without a selected Hub node there is no node to inspect: Machines lists them.
+      if (selectedNode) {
+        navigation.dispatch(
+          StackActions.push("SettingsNodeSecurity", exactNodeRouteParams(selectedNode)),
+        );
+      } else navigation.navigate("Connections");
+    } else navigation.navigate(target as never);
+  };
 
   return (
     <ScrollView
@@ -33,83 +73,35 @@ export function SettingsTabScreen() {
       scrollEventThrottle={16}
     >
       <TabLargeTitle title={MAIN_TABS.Settings.title} />
-      {/* Grouped and named as the web's settings (`settingsSections`) where a screen matches. */}
-      <SettingsSection title={SETTINGS_GROUP_TITLES.you}>
+      <SettingsSection>
         <SettingsRow
           first
-          label="Hub and account"
-          onPress={() => navigation.navigate("SettingsHub" as never)}
+          icon="person.crop.circle"
+          label={summary.hubLabel}
+          detail={summary.hubDetail ?? undefined}
+          onPress={() => open("SettingsHub")}
         />
         <SettingsRow
-          label={SETTINGS_SECTION_TITLES.appearance}
-          value="Text and code"
-          onPress={() => navigation.navigate("SettingsAppearance" as never)}
-        />
-        <SettingsRow
-          label={SETTINGS_SECTION_TITLES.notifications}
-          value="Alerts, Live Activity"
-          onPress={() => navigation.navigate("SettingsNotifications" as never)}
+          icon="desktopcomputer"
+          label="Machines"
+          value={summary.machinesValue}
+          onPress={() => open("Connections")}
         />
       </SettingsSection>
-
-      <SettingsSection title={SETTINGS_GROUP_TITLES.work}>
-        <SettingsRow
-          first
-          label={SETTINGS_SECTION_TITLES.inbox}
-          onPress={() => navigation.navigate("SettingsInbox" as never)}
-        />
-        <SettingsRow
-          label="Archived tasks"
-          onPress={() => navigation.navigate("SettingsArchived" as never)}
-        />
-        <SettingsRow
-          label="Defaults"
-          value="Per node"
-          onPress={() => navigation.navigate("SettingsWorkspace" as never)}
-        />
-      </SettingsSection>
-
-      <SettingsSection title={SETTINGS_GROUP_TITLES.agents}>
-        <SettingsRow
-          first
-          label={SETTINGS_SECTION_TITLES.usage}
-          value="In the Usage tab"
-          onPress={() => openMainTab(navigation, "Usage")}
-        />
-        <SettingsRow
-          label="Provider accounts"
-          onPress={() => navigation.navigate("SettingsProviderAccounts" as never)}
-        />
-      </SettingsSection>
-
-      <SettingsSection title={SETTINGS_GROUP_TITLES.devices}>
-        <SettingsRow
-          first
-          label="Node security"
-          value="Advanced"
-          onPress={() => {
-            if (selectedNode) {
-              navigation.dispatch(
-                StackActions.push("SettingsNodeSecurity", exactNodeRouteParams(selectedNode)),
-              );
-              return;
-            }
-            navigation.navigate("Connections");
-          }}
-        />
-      </SettingsSection>
-
-      <SettingsSection title={SETTINGS_GROUP_TITLES.system}>
-        <SettingsRow
-          first
-          label="Storage & cache"
-          onPress={() => navigation.navigate("SettingsClientStorage" as never)}
-        />
-        <SettingsRow
-          label={SETTINGS_SECTION_TITLES.about}
-          onPress={() => navigation.navigate("SettingsAbout" as never)}
-        />
-      </SettingsSection>
+      {sections.map((section) => (
+        <SettingsSection key={section.key} title={section.title}>
+          {section.rows.map((row, index) => (
+            <SettingsRow
+              key={row.id}
+              first={index === 0}
+              icon={row.icon}
+              label={row.label}
+              value={row.value}
+              onPress={() => open(row.id)}
+            />
+          ))}
+        </SettingsSection>
+      ))}
     </ScrollView>
   );
 }
