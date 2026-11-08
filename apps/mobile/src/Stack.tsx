@@ -56,6 +56,13 @@ import {
   ProjectNotesRouteScreen,
   ThreadScriptsRouteScreen,
   ThreadDevicesRouteScreen,
+  ProjectExplorerRouteScreen,
+  ProjectIssueRouteScreen,
+  ProjectNewIssueRouteScreen,
+  ProjectWorkflowRunRouteScreen,
+  ProjectWorkItemRouteScreen,
+  ThreadServersRouteScreen,
+  ThreadBrowserRouteScreen,
   SourceControlBranchesRouteScreen,
   SourceControlChangesRouteScreen,
   SourceControlCommitRouteScreen,
@@ -326,6 +333,31 @@ export const ROOT_STACK_SCREENS = {
     linking: MVP_ROOT_ROUTES.ProjectNotes.linking,
     options: routeOptions("ProjectNotes", { title: "Notes" }),
   }),
+  ProjectExplorer: createNativeStackScreen({
+    screen: ProjectExplorerRouteScreen,
+    linking: MVP_ROOT_ROUTES.ProjectExplorer.linking,
+    options: routeOptions("ProjectExplorer", { title: "Explorer" }),
+  }),
+  ProjectNewIssue: createNativeStackScreen({
+    screen: ProjectNewIssueRouteScreen,
+    linking: MVP_ROOT_ROUTES.ProjectNewIssue.linking,
+    options: routeOptions("ProjectNewIssue", { title: "New issue", gestureEnabled: true }),
+  }),
+  ProjectIssue: createNativeStackScreen({
+    screen: ProjectIssueRouteScreen,
+    linking: MVP_ROOT_ROUTES.ProjectIssue.linking,
+    options: routeOptions("ProjectIssue", { title: "Issue" }),
+  }),
+  ProjectWorkflowRun: createNativeStackScreen({
+    screen: ProjectWorkflowRunRouteScreen,
+    linking: MVP_ROOT_ROUTES.ProjectWorkflowRun.linking,
+    options: routeOptions("ProjectWorkflowRun", { title: "Run" }),
+  }),
+  ProjectWorkItem: createNativeStackScreen({
+    screen: ProjectWorkItemRouteScreen,
+    linking: MVP_ROOT_ROUTES.ProjectWorkItem.linking,
+    options: routeOptions("ProjectWorkItem", { title: "Work item" }),
+  }),
   ProjectPullRequests: createNativeStackScreen({
     screen: PullRequestsRouteScreen,
     linking: MVP_ROOT_ROUTES.ProjectPullRequests.linking,
@@ -400,6 +432,17 @@ export const ROOT_STACK_SCREENS = {
     screen: ThreadDevicesRouteScreen,
     linking: MVP_ROOT_ROUTES.ThreadDevices.linking,
     options: routeOptions("ThreadDevices", { title: "Devices", gestureEnabled: true }),
+  }),
+  ThreadServers: createNativeStackScreen({
+    screen: ThreadServersRouteScreen,
+    linking: MVP_ROOT_ROUTES.ThreadServers.linking,
+    options: routeOptions("ThreadServers", { title: "Servers", gestureEnabled: true }),
+  }),
+  ThreadBrowser: createNativeStackScreen({
+    screen: ThreadBrowserRouteScreen,
+    linking: MVP_ROOT_ROUTES.ThreadBrowser.linking,
+    // The title is the tab's, which the screen sets.
+    options: routeOptions("ThreadBrowser", { title: "Preview" }),
   }),
   ThreadDevice: createNativeStackScreen({
     screen: ThreadDeviceRouteScreen,

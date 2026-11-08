@@ -8,7 +8,7 @@ import {
   useSourceControlIssueList,
   useSourceControlIssueSearch,
 } from "~/rpc/useSourceControl";
-import { searchSourceControlSummaries } from "./composerSourceControlContextSearch";
+import { searchSourceControlSummaries } from "@ryco/shared/sourceControlSearch";
 import { ContextPickerList } from "./ContextPickerList";
 import { ContextPickerTabs } from "./ContextPickerTabs";
 import { WindowCapturePicker } from "./WindowCapturePicker";

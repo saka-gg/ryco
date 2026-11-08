@@ -7,6 +7,7 @@ import { switchSavedEnvironment } from "@ryco/client-runtime/connection/savedEnv
 import { forgetEnvironmentServerConfig } from "@ryco/client-runtime/rpc";
 
 import { useStore } from "../state/threadsRuntime";
+import { clearProjectExplorerStateForEnvironment } from "../rpc/projectExplorerAtoms";
 import { clearProjectFilesStateForEnvironment } from "../rpc/projectFilesAtoms";
 import { clearPullRequestStateForEnvironment } from "../rpc/pullRequestAtoms";
 import { purgeEnvironmentSnapshot } from "../persistence/environmentSnapshotPersistence";
@@ -167,11 +168,12 @@ export function createEnvironmentActions(deps: EnvironmentActionsDeps) {
     // must not outlive the environment it belongs to (wave 2, plan step 5).
     purgeEnvironmentSnapshot(environmentId);
     // Keyed-query caches are not part of the threads store: the workspace
-    // listings, file contents and pull requests this node handed us are
+    // listings, file contents, pull requests and explorer reads this node handed us are
     // memory-only and scoped to its environment id, so forgetting the node drops
     // them here or not at all.
     clearProjectFilesStateForEnvironment(environmentId);
     clearPullRequestStateForEnvironment(environmentId);
+    clearProjectExplorerStateForEnvironment(environmentId);
     clearProjectIconCache(environmentId);
     await registry.catalog.removeBearerToken(environmentId);
     // The owner forgetting a node also forgets its §13 trust state — the pin, the

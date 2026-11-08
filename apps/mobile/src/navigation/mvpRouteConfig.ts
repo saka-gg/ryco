@@ -140,6 +140,49 @@ export const MVP_ROOT_ROUTES = {
     ios: { presentation: "card" },
     android: { presentation: "card" },
   },
+  /** Issues, Actions runs and Jira items of a project's repository. */
+  ProjectExplorer: {
+    linking: `${PROJECT}/explorer`,
+    overlay: false,
+    headerPreset: "glass",
+    headerAction: "back",
+    ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
+  /** A new issue; before ProjectIssue so `issues/new` is not read as a number. */
+  ProjectNewIssue: {
+    linking: `${PROJECT}/issues/new`,
+    overlay: true,
+    headerPreset: "sheet-solid",
+    headerAction: "close",
+    ios: { presentation: "formSheet", sheetAllowedDetents: [0.8, 0.95], sheetGrabberVisible: true },
+    android: { presentation: "card" },
+  },
+  ProjectIssue: {
+    linking: `${PROJECT}/issues/:number`,
+    overlay: false,
+    headerPreset: "glass",
+    headerAction: "back",
+    ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
+  /** One Actions run: jobs, steps and logs. */
+  ProjectWorkflowRun: {
+    linking: `${PROJECT}/actions/:runId`,
+    overlay: false,
+    headerPreset: "glass",
+    headerAction: "back",
+    ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
+  ProjectWorkItem: {
+    linking: `${PROJECT}/work-items/:key`,
+    overlay: false,
+    headerPreset: "glass",
+    headerAction: "back",
+    ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
   /** One repository's pull requests: the list a project's checkout reads through. */
   ProjectPullRequests: {
     linking: `${PROJECT}/pull-requests`,
@@ -294,6 +337,27 @@ export const MVP_ROOT_ROUTES = {
     headerPreset: "sheet-solid",
     headerAction: "close",
     ios: { presentation: "formSheet", sheetAllowedDetents: [0.6, 0.95], sheetGrabberVisible: true },
+    android: { presentation: "card" },
+  },
+  /** The dev servers the thread started: preview or stop them, or preview any address. */
+  ThreadServers: {
+    linking: `${THREAD}/servers`,
+    overlay: true,
+    headerPreset: "sheet-solid",
+    headerAction: "close",
+    ios: { presentation: "formSheet", sheetAllowedDetents: [0.6, 0.95], sheetGrabberVisible: true },
+    android: { presentation: "card" },
+  },
+  /**
+   * A page in the machine's browser, shown as a refreshed still with tap, scroll
+   * and typing. A solid header: the page must not slide under it.
+   */
+  ThreadBrowser: {
+    linking: `${THREAD}/preview`,
+    overlay: false,
+    headerPreset: "solid",
+    headerAction: "back",
+    ios: { presentation: "card" },
     android: { presentation: "card" },
   },
   /**

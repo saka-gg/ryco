@@ -37,7 +37,7 @@ import { selectSidebarWorktreesForProjectRef, useStore } from "~/store";
 import { cn } from "~/lib/utils";
 import type { WsRpcClient } from "@ryco/client-runtime/rpc";
 import type { SidebarWorktreeSummary } from "~/types";
-import { workItemStateLabel } from "~/lib/workItemState";
+import { workItemStateLabel } from "@ryco/shared/workItemState";
 import { AtlassianJiraIcon } from "../Icons";
 import { JiraProjectPicker } from "../atlassian/JiraProjectPicker";
 import { Badge } from "../ui/badge";

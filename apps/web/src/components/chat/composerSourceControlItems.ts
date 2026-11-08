@@ -1,7 +1,7 @@
 import type { ChangeRequest, SourceControlIssueSummary } from "@ryco/contracts";
+import { searchSourceControlSummaries } from "@ryco/shared/sourceControlSearch";
 import {
   scopeSourceControlQuery,
-  searchSourceControlSummaries,
   type SourceControlScope,
 } from "./composerSourceControlContextSearch";
 import type { ComposerCommandItem } from "./ComposerCommandMenu";

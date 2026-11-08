@@ -87,10 +87,4 @@ export function useProjectBrowserTabs(project: string) {
 export function projectBrowserKey(environmentId: string | null, cwd: string | null): string {
   return JSON.stringify([environmentId, cwd]);
 }
-export function normalizeBrowserUrl(value: string): string {
-  const raw = value.trim();
-  const url = new URL(/^[a-z][a-z\d+.-]*:\/\//iu.test(raw) ? raw : `http://${raw}`);
-  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || !url.hostname)
-    throw new Error("Enter an HTTP(S) URL without embedded credentials.");
-  return url.href;
-}
+export { normalizeBrowserUrl } from "@ryco/shared/browserUrl";

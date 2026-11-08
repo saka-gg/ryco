@@ -143,6 +143,55 @@ export const ThreadDevicesRouteScreen = lazyScreen(
       require("../features/devices/ThreadDevicesRouteScreen") as typeof import("../features/devices/ThreadDevicesRouteScreen")
     ).ThreadDevicesRouteScreen,
 );
+export const ProjectExplorerRouteScreen = lazyScreen(
+  "ProjectExplorerRouteScreen",
+  () =>
+    (
+      require("../features/projectExplorer/ProjectExplorerRouteScreen") as typeof import("../features/projectExplorer/ProjectExplorerRouteScreen")
+    ).ProjectExplorerRouteScreen,
+);
+export const ProjectIssueRouteScreen = lazyScreen(
+  "ProjectIssueRouteScreen",
+  () =>
+    (
+      require("../features/projectExplorer/ProjectIssueRouteScreen") as typeof import("../features/projectExplorer/ProjectIssueRouteScreen")
+    ).ProjectIssueRouteScreen,
+);
+export const ProjectNewIssueRouteScreen = lazyScreen(
+  "ProjectNewIssueRouteScreen",
+  () =>
+    (
+      require("../features/projectExplorer/ProjectNewIssueRouteScreen") as typeof import("../features/projectExplorer/ProjectNewIssueRouteScreen")
+    ).ProjectNewIssueRouteScreen,
+);
+export const ProjectWorkflowRunRouteScreen = lazyScreen(
+  "ProjectWorkflowRunRouteScreen",
+  () =>
+    (
+      require("../features/projectExplorer/ProjectWorkflowRunRouteScreen") as typeof import("../features/projectExplorer/ProjectWorkflowRunRouteScreen")
+    ).ProjectWorkflowRunRouteScreen,
+);
+export const ProjectWorkItemRouteScreen = lazyScreen(
+  "ProjectWorkItemRouteScreen",
+  () =>
+    (
+      require("../features/projectExplorer/ProjectWorkItemRouteScreen") as typeof import("../features/projectExplorer/ProjectWorkItemRouteScreen")
+    ).ProjectWorkItemRouteScreen,
+);
+export const ThreadServersRouteScreen = lazyScreen(
+  "ThreadServersRouteScreen",
+  () =>
+    (
+      require("../features/browser/ThreadServersRouteScreen") as typeof import("../features/browser/ThreadServersRouteScreen")
+    ).ThreadServersRouteScreen,
+);
+export const ThreadBrowserRouteScreen = lazyScreen(
+  "ThreadBrowserRouteScreen",
+  () =>
+    (
+      require("../features/browser/ThreadBrowserRouteScreen") as typeof import("../features/browser/ThreadBrowserRouteScreen")
+    ).ThreadBrowserRouteScreen,
+);
 export const SourceControlBranchesRouteScreen = lazyScreen(
   "SourceControlBranchesRouteScreen",
   () =>

@@ -7,7 +7,7 @@ import {
   useSourceControlIssueList,
   useSourceControlIssueSearch,
 } from "~/rpc/useSourceControl";
-import { searchSourceControlSummaries } from "../chat/composerSourceControlContextSearch";
+import { searchSourceControlSummaries } from "@ryco/shared/sourceControlSearch";
 import { NewIssueDialog } from "../issues/NewIssueDialog";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";

@@ -224,7 +224,6 @@ export const WEB_PURE_TEST_FILES = [
   "src/lib/turnDiffTree.test.ts",
   "src/lib/utils.test.ts",
   "src/lib/workItemLocalLinks.test.ts",
-  "src/lib/workItemState.test.ts",
   "src/markdown-images.test.ts",
   "src/markdown-links.test.ts",
   "src/mcpServers.test.ts",

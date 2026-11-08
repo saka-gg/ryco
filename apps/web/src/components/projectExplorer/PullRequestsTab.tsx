@@ -7,7 +7,7 @@ import {
   useSourceControlChangeRequestList,
   useSourceControlChangeRequestSearch,
 } from "~/rpc/useSourceControl";
-import { searchSourceControlSummaries } from "../chat/composerSourceControlContextSearch";
+import { searchSourceControlSummaries } from "@ryco/shared/sourceControlSearch";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { cn } from "~/lib/utils";
