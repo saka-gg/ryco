@@ -13,9 +13,10 @@
  * Holds this module records: `restart` for every queue left by an earlier process (never sent
  * without a Resume), `error` when a sent entry's start failed or the decider kept refusing its
  * head, `stalled` when a sent entry's start neither bound nor failed for a long time, and
- * `review` when sending the head would resume a large Claude conversation whose prompt cache has
- * likely expired (the composer's resume review, `assessClaudeCacheResume`): the person's Resume
- * answers it, and the head goes.
+ * `review` when sending a person's queued head would resume a large Claude conversation whose
+ * prompt cache has likely expired (the composer's resume review, `assessClaudeCacheResume`): the
+ * person's Resume answers it, and the head goes. An agent's or an automation's head is never
+ * reviewed: nobody may be watching the chat it wakes.
  *
  * It imports no value from a module the server's boot graph loads (only `effect`, which is split
  * already): everything else comes in through `ServerQueueDrainDeps`. Importing one would split
@@ -306,7 +307,9 @@ export const makeServerQueueDrain = (deps: ServerQueueDrainDeps) =>
      * next pass asks again, and after a few failed reads the queue holds instead). Only a native
      * resume of the thread's own Claude session is reviewed (another instance takes a context
      * handoff), never a slash command, and never a person's message queued from a device where
-     * they turned the review off. A Resume answers for the cache observation the hold was
+     * they turned the review off. Only a person's message is reviewed: an agent's or an
+     * automation's goes to a chat nobody may be watching, and its sender already chose to wake
+     * it, so holding it would only stall the work until someone happens to look. A Resume answers for the cache observation the hold was
      * recorded for: its review hold is gone again (the queue is unheld here), so that cold cache
      * is not asked about again, whichever follow-up is at the head now.
      */
@@ -323,7 +326,8 @@ export const makeServerQueueDrain = (deps: ServerQueueDrainDeps) =>
           session?.providerName !== "claudeAgent" ||
           session.providerInstanceId !== target.instanceId ||
           head.text.trim().startsWith("/") ||
-          (head.author === "user" && head.claudeResumeReview === "skip")
+          head.author !== "user" ||
+          head.claudeResumeReview === "skip"
         ) {
           return false;
         }
