@@ -41,6 +41,18 @@ export interface SettingsSummary {
   readonly machinesValue: string;
 }
 
+/**
+ * The Hub the summary names: the saved profile (cached, `undefined` before storage was read, null
+ * once cleared), else the Hub this build is configured for.
+ */
+export function settingsSummaryHub(
+  cached: { readonly label: string; readonly origin: string } | null | undefined,
+  buildHubOrigin: string | null,
+): { readonly label: string; readonly origin: string } | null {
+  if (cached) return cached;
+  return buildHubOrigin ? { label: "Ryco Hub", origin: buildHubOrigin } : null;
+}
+
 export function buildSettingsSummary(input: {
   readonly hub: { readonly label: string; readonly origin: string } | null;
   readonly machines: { readonly total: number; readonly connected: number };

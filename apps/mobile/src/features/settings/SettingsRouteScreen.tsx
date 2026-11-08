@@ -1,9 +1,9 @@
 import { StackActions, useNavigation } from "@react-navigation/native";
 import Constants from "expo-constants";
-import { useMemo } from "react";
+import { useMemo, useSyncExternalStore } from "react";
 import { ScrollView } from "react-native";
 
-import { readCachedMobileHubProfile } from "../../hostedHub/hubProfile";
+import { readCachedMobileHubProfile, subscribeMobileHubProfile } from "../../hostedHub/hubProfile";
 import { useHostedHubStore } from "../../hostedHub/state";
 import { MAIN_TABS } from "../../navigation/tabs/mainTabsModel";
 import {
@@ -19,15 +19,9 @@ import { SettingsSection } from "./components/SettingsSection";
 import {
   buildSettingsSections,
   buildSettingsSummary,
+  settingsSummaryHub,
   type SettingsListTarget,
 } from "./settingsListModel";
-
-function hubForSummary(): { readonly label: string; readonly origin: string } | null {
-  const cached = readCachedMobileHubProfile();
-  if (cached) return cached;
-  const config = readMobileHostedConfig();
-  return config ? { label: "Ryco Hub", origin: config.hubOrigin } : null;
-}
 
 /**
  * The Settings tab, after t3code's phone Settings: who and what this phone is
@@ -38,7 +32,10 @@ export function SettingsTabScreen() {
   const navigation = useNavigation();
   const selectedNode = useHostedHubStore((state) => state.selectedNode);
   const environments = useHomeEnvironments();
-  const hub = useMemo(() => hubForSummary(), []);
+  // Follows the saved Hub profile: the tab stays mounted while Hub and account changes it.
+  const cachedHub = useSyncExternalStore(subscribeMobileHubProfile, readCachedMobileHubProfile);
+  const buildHubOrigin = useMemo(() => readMobileHostedConfig()?.hubOrigin ?? null, []);
+  const hub = settingsSummaryHub(cachedHub, buildHubOrigin);
   const summary = buildSettingsSummary({
     hub,
     machines: {

@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import { MVP_SETTINGS_ROUTES } from "../../navigation/mvpRouteConfig";
-import { buildSettingsSections, buildSettingsSummary } from "./settingsListModel";
+import {
+  buildSettingsSections,
+  buildSettingsSummary,
+  settingsSummaryHub,
+} from "./settingsListModel";
 
 describe("Settings list", () => {
   const sections = buildSettingsSections({ version: "0.4.0" });
@@ -60,5 +64,17 @@ describe("Settings summary", () => {
     expect(
       buildSettingsSummary({ hub: null, machines: { total: 2, connected: 2 } }).machinesValue,
     ).toBe("2 online");
+  });
+});
+
+describe("settingsSummaryHub", () => {
+  it("prefers the saved profile and falls back to the build's Hub", () => {
+    const saved = { label: "Work Hub", origin: "https://work.example.com" };
+    expect(settingsSummaryHub(saved, "https://hub.example.com")).toBe(saved);
+    expect(settingsSummaryHub(undefined, "https://hub.example.com")).toEqual({
+      label: "Ryco Hub",
+      origin: "https://hub.example.com",
+    });
+    expect(settingsSummaryHub(null, null)).toBeNull();
   });
 });
