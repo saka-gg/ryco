@@ -217,8 +217,9 @@ export const UsageTabScreen = lazyScreen(
 export const TasksTabScreen = lazyScreen(
   "TasksTabScreen",
   () =>
-    (require("./tabs/TasksTabPlaceholder") as typeof import("./tabs/TasksTabPlaceholder"))
-      .TasksTabScreen,
+    (
+      require("../features/tasks/TasksTabScreen") as typeof import("../features/tasks/TasksTabScreen")
+    ).TasksTabScreen,
 );
 // The PRs tab draws its own header (`stackHeader: { headerShown: false }` in
 // `navigation/tabs/MainTabs.tsx`).
