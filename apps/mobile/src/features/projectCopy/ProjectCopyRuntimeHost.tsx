@@ -1,14 +1,13 @@
 import * as Linking from "expo-linking";
 import { useEffect, useState } from "react";
 import { Pressable, View } from "react-native";
-import Animated, { FadeInDown, FadeOut, ReduceMotion } from "react-native-reanimated";
+import Animated, { FadeInUp, FadeOut, ReduceMotion } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { SymbolView } from "../../components/AppSymbol";
 import { AppText } from "../../components/AppText";
 import { GlassSurface } from "../../components/GlassSurface";
 import { useThemeColor } from "../../lib/useThemeColor";
-import { HOME_TOOLBAR_HEIGHT, HOME_TOOLBAR_INSET } from "../home/homeChromeModel";
 import { copyNoticeLinkPath, copyNoticeTone } from "./copyNoticeModel";
 import {
   dismissProjectCopyNotice,
@@ -95,11 +94,12 @@ function ProjectCopyNoticeHost() {
     <View
       pointerEvents="box-none"
       className="absolute left-4 right-4"
-      style={{ bottom: insets.bottom + HOME_TOOLBAR_INSET + HOME_TOOLBAR_HEIGHT + 8 }}
+      // A banner under the status bar: every screen's bottom holds a toolbar or a composer.
+      style={{ top: insets.top + 6 }}
     >
       <Animated.View
         key={`${notice.copyId}:${notice.kind}`}
-        entering={FadeInDown.duration(220).reduceMotion(ReduceMotion.System)}
+        entering={FadeInUp.duration(220).reduceMotion(ReduceMotion.System)}
         exiting={FadeOut.duration(100).reduceMotion(ReduceMotion.System)}
       >
         <GlassSurface radius={28} style={{ borderRadius: 28 }}>

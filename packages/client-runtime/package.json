@@ -499,6 +499,10 @@
     "./projectCopy/agentControlExecutor": {
       "types": "./src/projectCopy/agentControlExecutor.ts",
       "import": "./src/projectCopy/agentControlExecutor.ts"
+    },
+    "./projectCopy/addProject": {
+      "types": "./src/projectCopy/addProject.ts",
+      "import": "./src/projectCopy/addProject.ts"
     }
   },
   "scripts": {
