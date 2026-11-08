@@ -29,7 +29,7 @@ import {
   getBrowseLeafPathSegment,
   hasTrailingPathSeparator,
   normalizeProjectPathForDispatch,
-} from "../../lib/projectPaths";
+} from "@ryco/shared/projectPaths";
 import type { SidebarThreadSummary } from "../../types";
 import { formatBytes } from "../settings/DiagnosticsSettings.logic";
 

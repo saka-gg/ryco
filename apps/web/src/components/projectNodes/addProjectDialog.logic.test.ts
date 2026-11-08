@@ -25,7 +25,10 @@ import {
   splitRepositoryLabel,
 } from "./addProjectDialog.logic";
 import type { AddProjectRemoteSourceReadiness } from "./addProjectSources";
-import { describeFolderSelection, type FolderSelectionStatus } from "./folderPicker.logic";
+import {
+  describeFolderSelection,
+  type FolderSelectionStatus,
+} from "@ryco/client-runtime/projectCopy/folderPicker";
 import { fakeNodeEntry } from "./projectNodesTestFixtures";
 
 const LAPTOP = EnvironmentId.make("env-laptop");

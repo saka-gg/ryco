@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import type { DraftId } from "../../../composerDraftStore";
-import { normalizeProjectPathForComparison } from "../../../lib/projectPaths";
+import { normalizeProjectPathForComparison } from "@ryco/shared/projectPaths";
 import {
   isArchivedThreadStub,
   isUnarchivedThreadEntry,

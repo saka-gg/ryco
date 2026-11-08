@@ -10,7 +10,7 @@ import {
 import { DeviceIcon } from "../DeviceIcon";
 import { AtlassianJiraIcon } from "../Icons";
 import type { CrossNodeProjectActions } from "../projectNodes/projectNodesDialogStore";
-import { displayProjectPath } from "../../lib/projectPaths";
+import { displayProjectPath } from "@ryco/shared/projectPaths";
 import { scopedProjectKey, scopeProjectRef } from "@ryco/client-runtime/scoped";
 import { MenuGroup, MenuItem, MenuSeparator } from "../ui/menu";
 import type {

@@ -60,7 +60,7 @@ import type {
   AgentControlClientExecutor,
 } from "../agent-control/agentControlClientExecutor";
 import type { AgentControlCopyResolution } from "./agentControlCopyPlan";
-import { isAgentControlNodeAnswer } from "./copyRuntime/agentControlReports";
+import { isAgentControlNodeAnswer } from "@ryco/client-runtime/projectCopy/agentControlReports";
 import type {
   AgentControlCopyStartHold,
   ManagedProjectCopy,

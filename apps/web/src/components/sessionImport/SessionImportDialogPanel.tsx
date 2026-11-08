@@ -34,7 +34,7 @@ import {
 import { ChevronRightIcon, SearchIcon } from "lucide-react";
 
 import { useEvent } from "../../hooks/useEvent";
-import { inferProjectTitleFromPath } from "../../lib/projectPaths";
+import { inferProjectTitleFromPath } from "@ryco/shared/projectPaths";
 import { cn } from "../../lib/utils";
 import { SettingsNotice } from "../settings/settingsLayout";
 import { SettingsSelect } from "../settings/SettingsSelect";

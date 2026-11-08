@@ -1,4 +1,4 @@
-// FILE: copyProjectDialog.logic.ts
+// FILE: dialog.ts
 // Purpose: What the "Copy <project> to another node" dialog shows, pure: the
 //          From rows (the project's checkouts across nodes), the To cards, the
 //          folder note and tag, the footer summary, the progress step list and
@@ -8,13 +8,10 @@
 //        progress types and the import snapshot. The dialog and the Copies
 //        block render these; the coordinator decides what is possible.
 
-import type {
-  CopyDestinationSuggestion,
-  ProjectCopyJobRecord,
-  ProjectCopyMode,
-  ProjectCopyProgress,
-} from "@ryco/client-runtime/projectCopy";
-import type { NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
+import type { ProjectCopyJobRecord } from "./jobRecord.ts";
+import type { CopyDestinationSuggestion, ProjectCopyMode } from "./plan.ts";
+import type { ProjectCopyProgress } from "./run.ts";
+import type { NodeCatalogEntry } from "../state/nodes/index.ts";
 import type { EnvironmentId, ProjectId, ScopedProjectRef, VcsStatusResult } from "@ryco/contracts";
 import type {
   ProjectImportSnapshot,
@@ -30,9 +27,9 @@ import {
   lastOutputLine,
   projectCopyView,
   type ProjectCopyThroughput,
-} from "./copyRuntime/projectCopyProgress.logic";
-import { displayProjectPath } from "../../lib/projectPaths";
-import { describeNodePresence, nodeOsLabel } from "./nodePicker.logic";
+} from "./progressView.ts";
+import { displayProjectPath } from "@ryco/shared/projectPaths";
+import { describeNodePresence, nodeOsLabel } from "./nodePicker.ts";
 
 /** Text with its paths and commands marked, so the view sets them in mono. */
 export interface CopyTextSegment {

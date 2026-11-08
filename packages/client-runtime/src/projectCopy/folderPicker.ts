@@ -1,4 +1,4 @@
-// FILE: folderPicker.logic.ts
+// FILE: folderPicker.ts
 // Purpose: The folder picker's path model on a node of any platform (breadcrumbs, places,
 //          joining a child folder), the note under search results, and the
 //          status line that says what the selected folder is and whether it can be used for the
@@ -12,7 +12,7 @@ import type {
   ProjectDestinationState,
 } from "@ryco/contracts/project-copy";
 
-import { joinNodePath } from "@ryco/client-runtime/projectCopy";
+import { joinNodePath } from "./plan.ts";
 
 import {
   formatProjectPath,
@@ -20,7 +20,7 @@ import {
   inferProjectTitleFromPath,
   isSameFilesystemPath,
   normalizeProjectPathForDispatch,
-} from "../../lib/projectPaths";
+} from "@ryco/shared/projectPaths";
 
 /**
  * What the picked folder is for:

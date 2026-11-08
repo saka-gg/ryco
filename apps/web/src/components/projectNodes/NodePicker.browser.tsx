@@ -9,7 +9,7 @@ import { page, userEvent } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 
 import { NodePicker, type NodePickerProps } from "./NodePicker";
-import type { NodePickerExtrasMap } from "./nodePicker.logic";
+import type { NodePickerExtrasMap } from "@ryco/client-runtime/projectCopy/nodePicker";
 import { fakeNodeEntry, FAKE_PATH_HINTS } from "./projectNodesTestFixtures";
 
 const NOW = Date.parse("2026-10-22T12:00:00Z");

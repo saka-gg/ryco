@@ -210,7 +210,6 @@ export const WEB_PURE_TEST_FILES = [
   "src/lib/modelPricing.test.ts",
   "src/lib/perf/ticker.test.ts",
   "src/lib/preloadableLazy.test.tsx",
-  "src/lib/projectPaths.test.ts",
   "src/lib/projectScriptKeybindings.test.ts",
   "src/lib/shortcutCapture.test.ts",
   "src/lib/terminalFenceSource.test.ts",

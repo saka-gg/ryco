@@ -38,9 +38,9 @@ import {
   type CopyProgressContext,
   type NodeImportReport,
   type ProjectCopyRow,
-} from "./copyProjectDialog.logic";
+} from "@ryco/client-runtime/projectCopy/dialog";
 import { CopyBar, CopyProgressStepList } from "./copyProjectDialogParts";
-import { displayProjectPath } from "../../lib/projectPaths";
+import { displayProjectPath } from "@ryco/shared/projectPaths";
 import { useNodeRead } from "./nodePathQueries";
 import { NodeBadge } from "./NodePicker";
 

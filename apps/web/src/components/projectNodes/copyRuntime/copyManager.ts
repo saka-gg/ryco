@@ -67,7 +67,7 @@ import {
   deliverAgentControlReport,
   type AgentControlReportBody,
   type AgentControlReportDelivery,
-} from "./agentControlReports";
+} from "@ryco/client-runtime/projectCopy/agentControlReports";
 import {
   copyThroughput,
   nextCopyByteSamples,
@@ -77,7 +77,7 @@ import {
   type ProjectCopyByteSample,
   type ProjectCopyLabels,
   type ProjectCopyThroughput,
-} from "./projectCopyProgress.logic";
+} from "@ryco/client-runtime/projectCopy/progressView";
 import {
   dismissProjectCopyToast,
   showProjectCopyInterruptedToast,

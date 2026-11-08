@@ -459,7 +459,27 @@
       "import": "./src/state/pull-request-review/index.ts"
     },
     "./state/storage": "./src/state/storage/index.ts",
-    "./state/lifecycle": "./src/state/lifecycle/index.ts"
+    "./state/lifecycle": "./src/state/lifecycle/index.ts",
+    "./projectCopy/progressView": {
+      "types": "./src/projectCopy/progressView.ts",
+      "import": "./src/projectCopy/progressView.ts"
+    },
+    "./projectCopy/agentControlReports": {
+      "types": "./src/projectCopy/agentControlReports.ts",
+      "import": "./src/projectCopy/agentControlReports.ts"
+    },
+    "./projectCopy/dialog": {
+      "types": "./src/projectCopy/dialog.ts",
+      "import": "./src/projectCopy/dialog.ts"
+    },
+    "./projectCopy/nodePicker": {
+      "types": "./src/projectCopy/nodePicker.ts",
+      "import": "./src/projectCopy/nodePicker.ts"
+    },
+    "./projectCopy/folderPicker": {
+      "types": "./src/projectCopy/folderPicker.ts",
+      "import": "./src/projectCopy/folderPicker.ts"
+    }
   },
   "scripts": {
     "typecheck": "effect-tsgo tsrs --noEmit --incremental && effect-tsgo tsrs --noEmit --incremental -p tsconfig.test.json",

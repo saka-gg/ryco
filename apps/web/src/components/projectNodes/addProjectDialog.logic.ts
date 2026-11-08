@@ -29,7 +29,7 @@ import { isChatProject } from "@ryco/shared/projectKind";
 import { detectSourceControlProviderFromRemoteUrl } from "@ryco/shared/sourceControlHost";
 import * as Schema from "effect/Schema";
 
-import { inferProjectTitleFromPath, isSameFilesystemPath } from "../../lib/projectPaths";
+import { inferProjectTitleFromPath, isSameFilesystemPath } from "@ryco/shared/projectPaths";
 import type { Project } from "../../types";
 import {
   remoteProjectSourceLabel,
@@ -37,10 +37,13 @@ import {
   type AddProjectRemoteSourceReadiness,
 } from "./addProjectSources";
 import type { AddProjectDialogMode, AddProjectDialogRequest } from "./projectNodesDialogStore";
-import type { CopyProgressStep } from "./copyProjectDialog.logic";
-import { lastOutputLine, projectImportStepLabel } from "./copyRuntime/projectCopyProgress.logic";
-import type { FolderSelectionStatus } from "./folderPicker.logic";
-import { resolveNodePickerAvailability } from "./nodePicker.logic";
+import type { CopyProgressStep } from "@ryco/client-runtime/projectCopy/dialog";
+import {
+  lastOutputLine,
+  projectImportStepLabel,
+} from "@ryco/client-runtime/projectCopy/progressView";
+import type { FolderSelectionStatus } from "@ryco/client-runtime/projectCopy/folderPicker";
+import { resolveNodePickerAvailability } from "@ryco/client-runtime/projectCopy/nodePicker";
 
 /** What the project is added from: a folder on the node, a clone, a copy, or a checkout to link. */
 export type AddProjectSourceKind = AddProjectDialogMode;

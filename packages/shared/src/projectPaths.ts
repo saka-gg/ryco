@@ -3,8 +3,11 @@ import {
   isUncPath,
   isWindowsAbsolutePath,
   isWindowsDrivePath,
-} from "@ryco/shared/path";
-import { isWindowsPlatform } from "./utils";
+} from "./path.ts";
+
+function isWindowsPlatform(platform: string): boolean {
+  return /^win(dows)?/i.test(platform);
+}
 
 function isRootPath(value: string): boolean {
   return value === "/" || value === "\\" || /^[a-zA-Z]:[/\\]?$/.test(value);
@@ -100,10 +103,8 @@ function splitAbsolutePath(value: string): {
   return null;
 }
 
-export function isFilesystemBrowseQuery(
-  value: string,
-  platform = typeof navigator === "undefined" ? "" : navigator.platform,
-): boolean {
+/** `platform` is the browsing client's (`navigator.platform` in a browser); Windows paths need a Windows one. */
+export function isFilesystemBrowseQuery(value: string, platform = ""): boolean {
   const allowWindowsPaths = isWindowsPlatform(platform);
   return (
     value.startsWith("./") ||

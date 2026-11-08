@@ -92,7 +92,7 @@ import {
   type CopyProgressContext,
   type CopySourceRow,
   type CopyTargetCard,
-} from "./copyProjectDialog.logic";
+} from "@ryco/client-runtime/projectCopy/dialog";
 import {
   CopyCheckoutMetaLine,
   CopyField,
@@ -101,7 +101,7 @@ import {
   CopySegments,
 } from "./copyProjectDialogParts";
 import { FolderPicker } from "./FolderPicker";
-import { displayProjectPath } from "../../lib/projectPaths";
+import { displayProjectPath } from "@ryco/shared/projectPaths";
 import { NodeBadge } from "./NodePicker";
 import { NODE_LABEL_CELL, NodePathText, useNodeLabelColumn } from "./NodePathText";
 import type { CopyProjectDialogRequest } from "./projectNodesDialogStore";

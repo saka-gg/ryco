@@ -14,7 +14,7 @@ import type {
   CopyCheckoutMeta,
   CopyProgressStep,
   CopyTextSegment,
-} from "./copyProjectDialog.logic";
+} from "@ryco/client-runtime/projectCopy/dialog";
 
 export function CopySectionLabel(props: {
   readonly children: ReactNode;

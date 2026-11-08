@@ -19,7 +19,7 @@ import {
   resolveInitialProjectBrowsePath,
   splitPathAtSeparators,
   splitPathForDisplay,
-} from "./projectPaths";
+} from "./projectPaths.ts";
 
 describe("projectPaths", () => {
   it("normalizes trailing separators for dispatch and comparison", () => {
