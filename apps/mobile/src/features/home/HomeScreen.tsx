@@ -32,14 +32,14 @@ import {
   type InboxEmptyState,
   type InboxThreadRow,
 } from "../inbox/inboxModel";
-import { nestDelegatedInboxRows } from "../inbox/inboxDelegationModel";
+import { buildChatsListing } from "../inbox/inboxDelegationModel";
 import { CustomSnoozeSheetHost } from "../inbox/CustomSnoozeSheet";
 import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
 import { InboxScreen } from "../inbox/InboxScreen";
 import { countArchivedThreads } from "../archive/archivedThreadsModel";
 import { buildProjectRows, type ProjectListRow } from "../projects/projectsModel";
 import { ProjectsScreen } from "../projects/ProjectsScreen";
-import { buildChatsFilterChips, buildChatsSections, type ChatsFilter } from "./chatsListModel";
+import type { ChatsFilter } from "./chatsListModel";
 import { chatsHasScope, chatsListKey, createChatsState, reduceChatsState } from "./chatsState";
 import { createHomeScrollMemory } from "./homeScrollMemory";
 import { useAutoSettleRuleHandOver } from "./useAutoSettleRuleHandOver";
@@ -123,30 +123,26 @@ export function HomeScreen() {
     () =>
       byProject
         ? []
-        : nestDelegatedInboxRows(
-            stabilizeInboxSections(
-              buildInboxSections({
-                projects,
-                worktrees,
-                threads,
-                environments,
-                nodeScope: chats.nodeScope,
-                projectScope: chats.projectScope,
-                localQueuedThreadIds,
-                autoSettleAfterDays: preferences.sidebarAutoSettleAfterDays,
-                nowMs,
-                wokeSeenAtByThreadKey: wokeSeen,
-                pinnedThreadKeys,
-              }),
-            ),
-            lineageByKey,
+        : stabilizeInboxSections(
+            buildInboxSections({
+              projects,
+              worktrees,
+              threads,
+              environments,
+              nodeScope: chats.nodeScope,
+              projectScope: chats.projectScope,
+              localQueuedThreadIds,
+              autoSettleAfterDays: preferences.sidebarAutoSettleAfterDays,
+              nowMs,
+              wokeSeenAtByThreadKey: wokeSeen,
+              pinnedThreadKeys,
+            }),
           ),
     [
       byProject,
       chats.nodeScope,
       chats.projectScope,
       environments,
-      lineageByKey,
       localQueuedThreadIds,
       nowMs,
       pinnedThreadKeys,
@@ -158,13 +154,10 @@ export function HomeScreen() {
       worktrees,
     ],
   );
-  const listedSections = useMemo(
-    () => buildChatsSections(inboxSections, chats.filter),
-    [chats.filter, inboxSections],
-  );
-  const chips = useMemo(
-    () => buildChatsFilterChips(inboxSections, chats.filter),
-    [chats.filter, inboxSections],
+  // Chip counts and filtering read the unfolded rows; children fold after the filter.
+  const { sections: listedSections, chips } = useMemo(
+    () => buildChatsListing(inboxSections, chats.filter, lineageByKey),
+    [chats.filter, inboxSections, lineageByKey],
   );
   const projectRows = useMemo(
     () =>
@@ -371,6 +364,8 @@ export function HomeScreen() {
         />
       ) : (
         <InboxScreen
+          // A fresh list per chip and scope: its shelves start as that chip wants (Done open).
+          key={listKey}
           filterKey={listKey}
           sections={listedSections}
           emptyState={inboxEmptyState}

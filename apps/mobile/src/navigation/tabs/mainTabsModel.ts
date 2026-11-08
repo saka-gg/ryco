@@ -68,6 +68,19 @@ export const MAIN_TABS = {
   },
 } as const satisfies Record<MainTabName, MainTabDescriptor>;
 
+/**
+ * The text under a tab bar item. The bar is icons only (a user decision), but an item with no
+ * icon on its platform would be blank: Android cannot draw SF Symbols, so there the tabs without
+ * an image icon show their name instead.
+ */
+export function tabBarItemTitle(input: {
+  readonly platform: "ios" | "android" | (string & {});
+  readonly hasPlatformIcon: boolean;
+  readonly label: string;
+}): string {
+  return input.platform === "android" && !input.hasPlatformIcon ? input.label : "";
+}
+
 export function isMainTabName(value: string): value is MainTabName {
   return (MAIN_TAB_NAMES as readonly string[]).includes(value);
 }

@@ -2,7 +2,11 @@ import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import type { ThreadLineage } from "@ryco/contracts/orchestration";
 import { describe, expect, it } from "vite-plus/test";
 
-import { nestDelegatedInboxRows, summarizeDelegatedGroup } from "./inboxDelegationModel";
+import {
+  buildChatsListing,
+  nestDelegatedInboxRows,
+  summarizeDelegatedGroup,
+} from "./inboxDelegationModel";
 import type { InboxSection, InboxThreadRow, InboxThreadState } from "./inboxModel";
 
 const ENV = "env" as EnvironmentId;
@@ -107,5 +111,40 @@ describe("summarizeDelegatedGroup", () => {
     expect(summarizeDelegatedGroup([row("a", "needs-input")]).text).toBe(
       "1 delegated · 1 needs you",
     );
+  });
+});
+
+describe("buildChatsListing", () => {
+  // A resting parent with two working delegated children (the review's case).
+  const sections: InboxSection[] = [
+    {
+      key: "active",
+      title: "Active",
+      rows: [
+        row("parent", "idle"),
+        row("a", "working", { lineage: lineage("parent") }),
+        row("b", "working", { lineage: lineage("parent") }),
+      ],
+    },
+  ];
+
+  it("counts and lists working children under Working although their parent rests", () => {
+    const listing = buildChatsListing(sections, "working", new Map());
+    expect(listing.chips.find((chip) => chip.filter === "working")?.count).toBe(2);
+    expect(keysOf(listing.sections)).toEqual([
+      [
+        "working",
+        [
+          ["a", []],
+          ["b", []],
+        ],
+      ],
+    ]);
+  });
+
+  it("folds them under the parent in All, keeping the Working count", () => {
+    const listing = buildChatsListing(sections, "all", new Map());
+    expect(listing.chips.find((chip) => chip.filter === "working")?.count).toBe(2);
+    expect(keysOf(listing.sections)).toEqual([["recent", [["parent", ["a", "b"]]]]]);
   });
 });

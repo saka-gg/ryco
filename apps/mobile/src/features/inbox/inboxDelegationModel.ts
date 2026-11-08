@@ -6,7 +6,13 @@ import {
 } from "@ryco/client-runtime/state/threads";
 import type { ThreadLineage } from "@ryco/contracts/orchestration";
 
-import { chatsAttentionOf } from "../home/chatsListModel";
+import {
+  buildChatsFilterChips,
+  buildChatsSections,
+  chatsAttentionOf,
+  type ChatsFilter,
+  type ChatsFilterChip,
+} from "../home/chatsListModel";
 import type { InboxSection, InboxThreadRow } from "./inboxModel";
 
 // Delegated threads in Chats: a chat's delegated tasks fold under it instead
@@ -112,4 +118,24 @@ export function summarizeDelegatedGroup(
     children.length,
   );
   return { total: children.length, needsYou, working, done, text };
+}
+
+/**
+ * What Chats shows for a chip: the chip's sections with delegated children folded, and the
+ * chips' counts. Both read the unfolded rows, and the folding runs after the chip's filter: a
+ * working child of a resting parent still counts under Working and is listed there (on its own,
+ * since its parent is not), instead of disappearing under a parent the chip leaves out.
+ */
+export function buildChatsListing(
+  sections: ReadonlyArray<InboxSection>,
+  filter: ChatsFilter,
+  lineageByKey: ReadonlyMap<string, ThreadLineage | null | undefined>,
+): {
+  readonly sections: ReadonlyArray<InboxSection>;
+  readonly chips: ReadonlyArray<ChatsFilterChip>;
+} {
+  return {
+    sections: nestDelegatedInboxRows(buildChatsSections(sections, filter), lineageByKey),
+    chips: buildChatsFilterChips(sections, filter),
+  };
 }

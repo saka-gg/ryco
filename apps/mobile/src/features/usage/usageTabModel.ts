@@ -5,7 +5,7 @@
 import type { StatRange } from "@ryco/client-runtime/usage";
 
 import type { InboxEnvironment } from "../inbox/inboxModel";
-import type { StatisticsTab } from "../settings/statistics/statisticsRoute";
+import { statisticsTabParam, type StatisticsTab } from "../settings/statistics/statisticsRoute";
 
 /** What the Usage tab shows: subscription limits, recorded usage, or work activity. */
 export type UsageView = StatisticsTab;
@@ -206,4 +206,20 @@ export function usageContentState(input: {
   if (input.loading) return { kind: "loading", label: LOADING_LABEL[input.view] };
   if (notices.length > 0) return { kind: "failed", notices };
   return { kind: "empty", ...EMPTY[input.view] };
+}
+
+/** Route params a link gives the Usage tab (`usage?tab=limits`). */
+export type UsageLinkParams = { readonly tab?: string | string[] } | undefined;
+
+/**
+ * The view a link asks to open now, or null. Each link navigation hands the tab a new params
+ * object, so a link is followed once per navigation: the same `usage?tab=limits` link opens Limits
+ * again after the person switched to another view by hand. Re-renders keep the params object.
+ */
+export function linkedUsageViewToOpen(
+  followedParams: UsageLinkParams,
+  params: UsageLinkParams,
+): UsageView | null {
+  if (params === followedParams) return null;
+  return statisticsTabParam(params?.tab);
 }

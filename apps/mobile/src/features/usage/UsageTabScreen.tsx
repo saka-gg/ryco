@@ -38,6 +38,7 @@ import {
   ALL_DEVICES,
   DEFAULT_USAGE_RANGE,
   DEFAULT_USAGE_VIEW,
+  linkedUsageViewToOpen,
   USAGE_RANGE_OPTIONS,
   USAGE_VIEW_OPTIONS,
   scopeUsageEnvironments,
@@ -70,13 +71,16 @@ export function UsageTabScreen(
   >,
 ) {
   const environments = useHomeEnvironments();
-  const linkedView = statisticsTabParam(props.route.params?.tab);
-  const [view, setView] = useState<UsageView>(linkedView ?? DEFAULT_USAGE_VIEW);
-  // A link that names a view opens it, also while Usage is already open.
-  const [followedView, setFollowedView] = useState(linkedView);
-  if (linkedView !== followedView) {
-    setFollowedView(linkedView);
-    if (linkedView !== null) setView(linkedView);
+  const params = props.route.params;
+  const [view, setView] = useState<UsageView>(
+    () => statisticsTabParam(params?.tab) ?? DEFAULT_USAGE_VIEW,
+  );
+  // A link that names a view opens it, also while Usage is already open, once per navigation.
+  const [followedParams, setFollowedParams] = useState(params);
+  if (params !== followedParams) {
+    const linked = linkedUsageViewToOpen(followedParams, params);
+    setFollowedParams(params);
+    if (linked !== null) setView(linked);
   }
   const [range, setRange] = useState<StatRange>(DEFAULT_USAGE_RANGE);
   const [device, setDevice] = useState(ALL_DEVICES);

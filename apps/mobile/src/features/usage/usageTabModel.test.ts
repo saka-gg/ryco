@@ -10,6 +10,7 @@ import {
   usageContentState,
   usageDeviceMenu,
   usageViewHasRange,
+  linkedUsageViewToOpen,
 } from "./usageTabModel";
 
 function device(
@@ -170,5 +171,21 @@ describe("usageContentState", () => {
     expect(
       usageContentState({ ...base, nodes: [{ environmentId: "mac", label: "Mac" }] }),
     ).toMatchObject({ kind: "empty", title: "No limits yet" });
+  });
+});
+
+describe("linkedUsageViewToOpen", () => {
+  it("follows each link navigation once, also when it names the same view again", () => {
+    const first = { tab: "limits" };
+    expect(linkedUsageViewToOpen(undefined, first)).toBe("limits");
+    // A re-render keeps the params object: the person's own switch stays.
+    expect(linkedUsageViewToOpen(first, first)).toBeNull();
+    // The same link tapped again is a new navigation with a new params object.
+    expect(linkedUsageViewToOpen(first, { tab: "limits" })).toBe("limits");
+  });
+
+  it("ignores a navigation that names no known view", () => {
+    expect(linkedUsageViewToOpen(undefined, { tab: "billing" })).toBeNull();
+    expect(linkedUsageViewToOpen({ tab: "limits" }, undefined)).toBeNull();
   });
 });

@@ -29,6 +29,7 @@ import {
 } from "react-native-screens";
 
 import { useThemeColor } from "../../lib/useThemeColor";
+import { tabBarItemTitle } from "./mainTabsModel";
 
 /**
  * The header of the stack screen that hosts the tabs, as the tab in front
@@ -179,8 +180,16 @@ function NativeTabsNavigator({
             <Tabs.Screen
               key={route.key}
               screenKey={route.key}
-              // Icons only (a user decision); the label stays for VoiceOver.
-              title=""
+              // Icons only (a user decision); the label stays for VoiceOver, and shows on
+              // Android for tabs it has no icon for.
+              title={tabBarItemTitle({
+                platform: Platform.OS,
+                hasPlatformIcon:
+                  Platform.OS === "android"
+                    ? options.androidIcon !== undefined
+                    : options.iosIcon !== undefined,
+                label,
+              })}
               accessibilityLabel={label}
               badgeValue={options.badgeValue}
               tabBarItemAccessibilityLabel={label}

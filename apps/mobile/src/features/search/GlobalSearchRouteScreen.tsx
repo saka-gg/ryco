@@ -9,6 +9,7 @@ import { ChipBar } from "../../components/ChipBar";
 import { EmptyState } from "../../components/EmptyState";
 import { HighlightedText } from "../../components/HighlightedText";
 import { useThemeColor } from "../../lib/useThemeColor";
+import { goBackOrHome } from "../../navigation/goBackOrHome";
 import {
   buildSearchSections,
   SEARCH_SCOPE_CHIP_LABELS,
@@ -42,9 +43,8 @@ export function GlobalSearchRouteScreen() {
   const empty = searchEmptyState({ query, sections });
   const placeholderColor = useThemeColor("--color-foreground-muted");
   const textColor = useThemeColor("--color-foreground");
-  const close = () => {
-    if (navigation.canGoBack()) navigation.goBack();
-  };
+  // A cold ryco://search link has nothing beneath: Cancel then opens the tabs.
+  const close = () => goBackOrHome(navigation);
 
   return (
     <View className="flex-1 bg-screen" style={{ paddingTop: insets.top + 6 }}>

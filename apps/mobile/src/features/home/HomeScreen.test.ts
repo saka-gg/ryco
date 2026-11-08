@@ -185,6 +185,14 @@ describe("Chats", () => {
     expect(navigationMock.navigate).toHaveBeenCalledWith("Connections");
   });
 
+  it("keys the list by chip and scope, so the Done chip opens with its shelf open", () => {
+    const list = findByType(HomeScreen(), "InboxScreen") as ReactElement<{
+      settledStartsOpen: boolean;
+    }>;
+    expect(list.key).toBe(JSON.stringify(["all", null, null]));
+    expect(list.props.settledStartsOpen).toBe(false);
+  });
+
   it("selects a status chip and starts a New task from the floating button", () => {
     const root = HomeScreen();
     const chips = findByType(root, "ChipBar") as ReactElement<{

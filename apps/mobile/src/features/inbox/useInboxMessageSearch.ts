@@ -8,6 +8,7 @@ import {
   INBOX_MESSAGE_SEARCH_TIMEOUT_MS,
   isRelatedSearchQuery,
   mergeInboxMessageMatches,
+  messageSearchInFlight,
   messageSearchQuery,
   type EnvironmentMessageSearchResult,
   type InboxMessageMatch,
@@ -19,9 +20,38 @@ interface InboxMessageSearchState {
   /** The query the answers belong to. */
   readonly query: string | null;
   readonly answers: ReadonlyArray<EnvironmentMessageSearchResult>;
+  /** Machines that answered, failed or timed out for `query`. */
+  readonly settled: ReadonlyArray<EnvironmentId>;
 }
 
-const IDLE: InboxMessageSearchState = { query: null, answers: [] };
+const IDLE: InboxMessageSearchState = { query: null, answers: [], settled: [] };
+
+/** One machine's search ended for `query`, with its results or without (failure, timeout). */
+function settle(
+  previous: InboxMessageSearchState,
+  query: string,
+  environmentId: EnvironmentId,
+  results: EnvironmentMessageSearchResult["results"] | null,
+): InboxMessageSearchState {
+  const same = previous.query === query;
+  const answers = same
+    ? previous.answers.filter((answer) => answer.environmentId !== environmentId)
+    : [];
+  return {
+    query,
+    answers: results === null ? answers : [...answers, { environmentId, results }],
+    settled: [
+      ...(same ? previous.settled.filter((id) => id !== environmentId) : []),
+      environmentId,
+    ],
+  };
+}
+
+export interface InboxMessageSearch {
+  readonly matches: ReadonlyMap<string, InboxMessageMatch>;
+  /** A machine has not answered this query yet (Search shows it as searching). */
+  readonly searching: boolean;
+}
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -49,7 +79,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 export function useInboxMessageSearch(
   query: string,
   environmentIds: ReadonlyArray<EnvironmentId>,
-): ReadonlyMap<string, InboxMessageMatch> {
+): InboxMessageSearch {
   const searchQuery = messageSearchQuery(query);
   const environmentKey = environmentIds.join("\n");
   const [state, setState] = useState<InboxMessageSearchState>(IDLE);
@@ -61,7 +91,11 @@ export function useInboxMessageSearch(
       for (const id of environmentKey.split("\n")) {
         const environmentId = id as EnvironmentId;
         const api = readEnvironmentApi(environmentId);
-        if (!api) continue;
+        if (!api) {
+          // No live client: it will never answer, so it is not waited on.
+          setState((previous) => settle(previous, searchQuery, environmentId, null));
+          continue;
+        }
         withTimeout(
           api.orchestration.searchThreadMessages({
             query: searchQuery,
@@ -70,18 +104,13 @@ export function useInboxMessageSearch(
           INBOX_MESSAGE_SEARCH_TIMEOUT_MS,
         ).then(
           (results) => {
-            if (cancelled) return;
-            setState((previous) => ({
-              query: searchQuery,
-              answers: [
-                ...(previous.query === searchQuery
-                  ? previous.answers.filter((answer) => answer.environmentId !== environmentId)
-                  : []),
-                { environmentId, results },
-              ],
-            }));
+            if (!cancelled)
+              setState((previous) => settle(previous, searchQuery, environmentId, results));
           },
-          () => undefined,
+          () => {
+            if (!cancelled)
+              setState((previous) => settle(previous, searchQuery, environmentId, null));
+          },
         );
       }
     }, INBOX_MESSAGE_SEARCH_DEBOUNCE_MS);
@@ -91,10 +120,18 @@ export function useInboxMessageSearch(
     };
   }, [environmentKey, searchQuery]);
   const matches = useMemo(() => mergeInboxMessageMatches(state.answers), [state.answers]);
-  return searchQuery !== null &&
+  const showMatches =
+    searchQuery !== null &&
     environmentKey.length > 0 &&
     state.query !== null &&
-    isRelatedSearchQuery(state.query, searchQuery)
-    ? matches
-    : NO_MATCHES;
+    isRelatedSearchQuery(state.query, searchQuery);
+  return {
+    matches: showMatches ? matches : NO_MATCHES,
+    searching: messageSearchInFlight({
+      query: searchQuery,
+      environmentIds: environmentIds as ReadonlyArray<string>,
+      settledQuery: state.query,
+      settledEnvironmentIds: state.settled,
+    }),
+  };
 }

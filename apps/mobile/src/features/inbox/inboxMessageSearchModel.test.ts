@@ -6,6 +6,7 @@ import {
   mergeInboxMessageMatches,
   messageSearchQuery,
   splitSnippet,
+  messageSearchInFlight,
 } from "./inboxMessageSearchModel";
 
 const env = (id: string) => id as EnvironmentId;
@@ -64,5 +65,51 @@ describe("inbox message search", () => {
     expect(splitSnippet("nothing here", "zzz")).toEqual([
       { text: "nothing here", highlighted: false, start: 0 },
     ]);
+  });
+});
+
+describe("messageSearchInFlight", () => {
+  const base = { query: "redirect", environmentIds: ["mac", "pi"] };
+
+  it("waits until every machine settled for this exact query", () => {
+    expect(messageSearchInFlight({ ...base, settledQuery: null, settledEnvironmentIds: [] })).toBe(
+      true,
+    );
+    expect(
+      messageSearchInFlight({ ...base, settledQuery: "redirect", settledEnvironmentIds: ["mac"] }),
+    ).toBe(true);
+    expect(
+      messageSearchInFlight({
+        ...base,
+        settledQuery: "redirec",
+        settledEnvironmentIds: ["mac", "pi"],
+      }),
+    ).toBe(true);
+    expect(
+      messageSearchInFlight({
+        ...base,
+        settledQuery: "redirect",
+        settledEnvironmentIds: ["pi", "mac"],
+      }),
+    ).toBe(false);
+  });
+
+  it("waits on nothing without a query or a machine", () => {
+    expect(
+      messageSearchInFlight({
+        query: null,
+        environmentIds: ["mac"],
+        settledQuery: null,
+        settledEnvironmentIds: [],
+      }),
+    ).toBe(false);
+    expect(
+      messageSearchInFlight({
+        query: "x",
+        environmentIds: [],
+        settledQuery: null,
+        settledEnvironmentIds: [],
+      }),
+    ).toBe(false);
   });
 });

@@ -17,7 +17,12 @@ import {
   WORKSPACE_OVERLAY_ROUTE_NAMES,
   type MvpAnyRootRouteName,
 } from "./mvpRouteConfig";
-import { MAIN_TAB_NAMES, MAIN_TABS, rewriteLegacyTabPath } from "./tabs/mainTabsModel";
+import {
+  MAIN_TAB_NAMES,
+  MAIN_TABS,
+  rewriteLegacyTabPath,
+  tabBarItemTitle,
+} from "./tabs/mainTabsModel";
 
 interface ParsedRoute {
   readonly name: string;
@@ -206,6 +211,14 @@ describe("MVP route config", () => {
     ]);
     expect(MAIN_TABS.Chats.selectedIcon).toEqual({ type: "sfSymbol", name: "text.bubble.fill" });
     expect(MAIN_TABS.Settings.selectedIcon).toEqual({ type: "sfSymbol", name: "gearshape.fill" });
+  });
+
+  it("shows icons only, but names an Android tab it has no icon for", () => {
+    expect(tabBarItemTitle({ platform: "ios", hasPlatformIcon: true, label: "Chats" })).toBe("");
+    expect(tabBarItemTitle({ platform: "android", hasPlatformIcon: true, label: "PRs" })).toBe("");
+    expect(tabBarItemTitle({ platform: "android", hasPlatformIcon: false, label: "Chats" })).toBe(
+      "Chats",
+    );
   });
 
   it("opens each tab from its link, and the root at Chats", () => {

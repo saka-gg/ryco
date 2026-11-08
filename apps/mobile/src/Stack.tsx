@@ -69,6 +69,7 @@ import {
   type MvpAnyRootRouteName,
   type MvpRouteDescriptor,
 } from "./navigation/mvpRouteConfig";
+import { goBackOrHome } from "./navigation/goBackOrHome";
 import { MainTabs } from "./navigation/tabs/MainTabs";
 import { NATIVE_LIQUID_GLASS_SUPPORTED } from "./native/native-glass";
 import { nativeHeaderScrollEdgeEffects } from "./native/StackHeader";
@@ -451,16 +452,7 @@ export const RootStack = createNativeStackNavigator({
       )?.headerAction;
       if (action === undefined || action === "none") return undefined;
       return () => (
-        <NavigationHeaderButton
-          action={action}
-          onPress={() => {
-            if (navigation.canGoBack()) {
-              navigation.goBack();
-              return;
-            }
-            navigation.dispatch(StackActions.replace("Home"));
-          }}
-        />
+        <NavigationHeaderButton action={action} onPress={() => goBackOrHome(navigation)} />
       );
     })(),
   }),

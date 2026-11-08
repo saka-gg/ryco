@@ -49,7 +49,10 @@ export const useThreadSearch: SearchSourceHook = ({ query, scopes }) => {
         : [],
     [environments, messagesOn],
   );
-  const messageMatches = useInboxMessageSearch(query ?? "", connectedIds);
+  const { matches: messageMatches, searching: messagesSearching } = useInboxMessageSearch(
+    query ?? "",
+    connectedIds,
+  );
 
   return useMemo((): ReadonlyArray<SearchGroup> => {
     if (query === null) return [];
@@ -103,7 +106,8 @@ export const useThreadSearch: SearchSourceHook = ({ query, scopes }) => {
           }),
         );
       }
-      groups.push({ scope: "messages", loading: false, results });
+      // Still loading while a machine has not answered: Search says so instead of "No results".
+      groups.push({ scope: "messages", loading: messagesSearching, results });
     }
     return groups;
   }, [
@@ -112,6 +116,7 @@ export const useThreadSearch: SearchSourceHook = ({ query, scopes }) => {
     localQueuedThreadIds,
     messageMatches,
     messagesOn,
+    messagesSearching,
     navigation,
     nowMs,
     pins,
