@@ -59,6 +59,7 @@ export function ProjectDetailScreen(props: {
 }) {
   const navigation = useNavigation();
   const primaryForeground = useThemeColor("--color-primary-foreground");
+  const iconColor = useThemeColor("--color-icon");
   const { projects, worktrees, threads } = useHomeWorkspaceData();
   const environments = useHomeEnvironments();
   const detail = useMemo(
@@ -387,6 +388,25 @@ export function ProjectDetailScreen(props: {
             <Text className="text-sm font-ryco-bold text-foreground">Notes</Text>
           </Pressable>
         </View>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Copy this project to another machine"
+          onPress={() =>
+            navigation.navigate("CopyProject", {
+              environmentId: props.environmentId,
+              projectId: props.projectId,
+            })
+          }
+          className="h-12 flex-row items-center justify-center gap-2 rounded-full bg-card px-4 active:bg-card-alt"
+        >
+          <SymbolView
+            name="square.on.square"
+            size={16}
+            tintColor={iconColor as string}
+            type="monochrome"
+          />
+          <Text className="text-sm font-ryco-bold text-foreground">Copy to another machine</Text>
+        </Pressable>
 
         <View className="gap-3">
           <Text className="px-1 text-sm font-ryco-bold text-foreground-muted">Worktrees</Text>

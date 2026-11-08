@@ -12,6 +12,7 @@ import { DarkTheme, DefaultTheme, getStateFromPath } from "@react-navigation/nat
 import { applyResolvedAppColorScheme, resolveAppColorScheme } from "./lib/appScheme";
 
 import { SidebarUndoNoticeHost } from "./components/SidebarUndoNoticeHost";
+import { ProjectCopyRuntimeHost } from "./features/projectCopy/ProjectCopyRuntimeHost";
 import { ConfirmDialogHost } from "./components/ConfirmDialogHost";
 import { OverlayPortalHost } from "./components/OverlayPortal";
 import {
@@ -156,6 +157,8 @@ function AppRoot() {
             <ConfirmDialogHost />
             <SidebarUndoNoticeHost />
             <TaskCaptureHost />
+            {/* Copies to other machines run on after their screen closes. */}
+            <ProjectCopyRuntimeHost />
           </BlurTargetView>
           {/* Anchored-menu overlays render here — in-window, so the keyboard
               stays up while a dropdown is open. */}

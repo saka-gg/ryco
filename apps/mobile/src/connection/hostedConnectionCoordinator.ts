@@ -236,7 +236,10 @@ function scopeDemand(
     case "node-pairing":
     // A Tasks surface wants every machine's list but never at the cost of thread work.
     case "local-tasks":
+    case "project-copy-follow":
       return { environmentId, scope: { type: "interactive" }, preemptible: true };
+    case "project-copy":
+      return { environmentId, scope: { type: "project-copy", copyId: scope.copyId } };
   }
 }
 

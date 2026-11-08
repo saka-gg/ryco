@@ -67,6 +67,18 @@ export const MVP_ROOT_ROUTES = {
     },
     android: { presentation: "card" },
   },
+  CopyProject: {
+    linking: `${PROJECT}/copy`,
+    overlay: true,
+    headerPreset: "sheet-solid",
+    headerAction: "close",
+    ios: {
+      presentation: "formSheet",
+      sheetAllowedDetents: [0.95],
+      sheetGrabberVisible: true,
+    },
+    android: { presentation: "card" },
+  },
   Project: {
     linking: PROJECT,
     overlay: false,
