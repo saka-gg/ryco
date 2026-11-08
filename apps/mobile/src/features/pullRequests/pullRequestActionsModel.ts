@@ -243,3 +243,39 @@ export function canMarkPullRequestFilesViewed(input: {
       nodeRoleAllows(input.role, WS_METHODS.sourceControlSetChangeRequestFileViewed))
   );
 }
+
+export interface PullRequestEdits {
+  /** Title and description. */
+  readonly edit: boolean;
+  readonly reviewers: boolean;
+  readonly labels: boolean;
+  /** A conversation comment (`addChangeRequestComment`). */
+  readonly comment: boolean;
+}
+
+const NO_EDITS: PullRequestEdits = { edit: false, reviewers: false, labels: false, comment: false };
+
+/**
+ * What the viewer may change besides review and merge: the host must take the
+ * edit, the viewer's account must be allowed to update the pull request, and
+ * the session's role on the node must allow the call. Readiness to send is
+ * checked when sending, like every other change.
+ */
+export function derivePullRequestEdits(input: {
+  readonly detail: SourceControlChangeRequestDetail | null;
+  readonly viewer: ChangeRequestViewerCapabilities | null;
+  readonly capabilities: ChangeRequestHostCapabilities;
+  readonly role: NodeSessionRole | undefined;
+}): PullRequestEdits {
+  const { detail, viewer, capabilities, role } = input;
+  if (detail === null) return NO_EDITS;
+  const roleAllows = (method: string) => role === undefined || nodeRoleAllows(role, method);
+  const update =
+    viewer?.canUpdate === true && roleAllows(WS_METHODS.sourceControlUpdateChangeRequest);
+  return {
+    edit: update && capabilities.lifecycle.has("edit"),
+    reviewers: update && capabilities.lifecycle.has("reviewers"),
+    labels: update && capabilities.lifecycle.has("labels"),
+    comment: capabilities.comment && roleAllows(WS_METHODS.sourceControlAddChangeRequestComment),
+  };
+}

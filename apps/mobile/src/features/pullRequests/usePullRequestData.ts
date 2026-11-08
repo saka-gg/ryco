@@ -189,6 +189,8 @@ export interface PullRequestData extends PullRequestDetailData {
   /** Null until the detail loads. */
   readonly nextAction: ChangeRequestNextAction | null;
   readonly refresh: () => void;
+  /** Reads the detail (head, checks, readiness) again, without the activity. Stable. */
+  readonly refreshDetail: () => Promise<unknown>;
 }
 
 export function usePullRequest(input: PullRequestReadInput): PullRequestData {
@@ -215,6 +217,7 @@ export function usePullRequest(input: PullRequestReadInput): PullRequestData {
       void detail.refetch();
       if (capabilities.activity) void activity.refetch();
     },
+    refreshDetail: detail.refetch,
   };
 }
 

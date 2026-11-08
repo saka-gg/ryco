@@ -1,3 +1,5 @@
+import type { ChangeRequestChecksOverall } from "@ryco/client-runtime/state/pull-request-review";
+
 import type { PullRequestCheckCounts } from "./pullRequestListModel";
 
 export type CheckRingSegmentKind = "passed" | "failed" | "running";
@@ -57,4 +59,9 @@ export function shortCheckCounts(counts: PullRequestCheckCounts): string {
   if (counts.failed > 0) parts.push(`${counts.failed} failing`);
   if (counts.running > 0) parts.push(`${counts.running} running`);
   return parts.join(" · ");
+}
+
+/** How often an open pull request on screen is read again: sooner while checks run. */
+export function pullRequestLiveChecksIntervalMs(overall: ChangeRequestChecksOverall): number {
+  return overall === "pending" || overall === "none" ? 45_000 : 60_000;
 }

@@ -13,6 +13,7 @@ import {
 import type { ChangeRequestHostCapabilities } from "@ryco/shared/changeRequestHostCapabilities";
 import type {
   ChangeRequestReviewEvent,
+  ChangeRequestUpdateAction,
   ChangeRequestViewerCapabilities,
   EnvironmentId,
   SourceControlChangeRequestDetail,
@@ -28,10 +29,12 @@ import {
   buildPullRequestMergeInput,
   buildPullRequestUpdateBranchInput,
   derivePullRequestActions,
+  derivePullRequestEdits,
   describePullRequestActionError,
   PULL_REQUEST_NOT_READY,
   pullRequestReviewEvent,
   type PullRequestActions,
+  type PullRequestEdits,
 } from "./pullRequestActionsModel";
 import {
   describeOutdatedDraftComments,
@@ -39,7 +42,7 @@ import {
 } from "./pullRequestFileReviewModel";
 import { usePullRequestReviewDrafts } from "./pullRequestReviewDrafts";
 
-export type PullRequestActionKind = "review" | "merge" | "update-branch";
+export type PullRequestActionKind = "review" | "merge" | "update-branch" | "update" | "comment";
 
 const CONNECTION_CHANGED = "The connection changed. Reconnect and try again.";
 
@@ -74,6 +77,16 @@ export interface PullRequestActionsControl extends PullRequestActions {
   readonly submitReview: (draft: ReviewDraft, onDone: () => void) => void;
   readonly runMerge: (onDone: () => void) => void;
   readonly runUpdateBranch: () => void;
+  /** Title, description, reviewers and labels the viewer may change, and commenting. */
+  readonly edits: PullRequestEdits;
+  /** Sends one lifecycle edit (title/body, reviewers, labels). */
+  readonly runUpdate: (
+    action: ChangeRequestUpdateAction,
+    notice: string,
+    onDone: () => void,
+  ) => void;
+  /** Posts a conversation comment. */
+  readonly addComment: (body: string, onDone: () => void) => void;
 }
 
 type RpcClient = NonNullable<ReturnType<typeof readRpcClient>>;
@@ -262,6 +275,47 @@ export function usePullRequestActions(input: {
     );
   };
 
+  const edits = derivePullRequestEdits({
+    detail,
+    viewer: input.viewer,
+    capabilities,
+    role: input.role,
+  });
+
+  const runUpdate = (action: ChangeRequestUpdateAction, done: string, onDone: () => void) => {
+    if (cwd === null || number === null) return;
+    const request = { cwd, reference: String(number), action };
+    send(
+      "update",
+      (client) => client.sourceControl.updateChangeRequest(request),
+      (result) =>
+        resolveChangeRequestRefreshScope({
+          kind: "update",
+          action,
+          previous: detail,
+          next: result.detail,
+        }),
+      () => {
+        setNotice(done);
+        onDone();
+      },
+    );
+  };
+
+  const addComment = (body: string, onDone: () => void) => {
+    if (cwd === null || number === null || !edits.comment) return;
+    const request = { cwd, reference: String(number), body };
+    send(
+      "comment",
+      (client) => client.sourceControl.addChangeRequestComment(request),
+      () => resolveChangeRequestRefreshScope({ kind: "comment" }),
+      () => {
+        setNotice("Comment posted.");
+        onDone();
+      },
+    );
+  };
+
   return {
     ...actions,
     pending,
@@ -276,6 +330,9 @@ export function usePullRequestActions(input: {
     submitReview,
     runMerge,
     runUpdateBranch,
+    edits,
+    runUpdate,
+    addComment,
   };
 }
 

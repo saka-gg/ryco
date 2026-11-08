@@ -90,6 +90,9 @@ function control(overrides: Partial<PullRequestActionsControl> = {}): PullReques
     submitReview: () => undefined,
     runMerge: () => undefined,
     runUpdateBranch: () => undefined,
+    edits: { edit: false, reviewers: false, labels: false, comment: false },
+    runUpdate: () => undefined,
+    addComment: () => undefined,
     ...overrides,
   };
 }
