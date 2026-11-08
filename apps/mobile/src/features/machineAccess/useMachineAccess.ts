@@ -140,7 +140,15 @@ export function useDirectAccessOperations(environmentId: EnvironmentId): DirectA
   );
 }
 
-/** Now, ticking once a second while a code or a link's expiry is on screen. */
-export function useNowMs(): number {
-  return useSyncExternalStore(secondClock.subscribe, secondClock.read, secondClock.read);
+/**
+ * Now, from the app's once-a-second clock, rounded down to `granularityMs`: a
+ * list whose labels read in minutes re-renders only when the rounded value
+ * changes, while a code's countdown passes 1000.
+ */
+export function useNowMs(granularityMs: number = 1000): number {
+  const read = useCallback(
+    () => Math.floor(secondClock.read() / granularityMs) * granularityMs,
+    [granularityMs],
+  );
+  return useSyncExternalStore(secondClock.subscribe, read, read);
 }

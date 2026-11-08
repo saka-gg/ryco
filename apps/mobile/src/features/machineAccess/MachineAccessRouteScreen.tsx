@@ -81,14 +81,18 @@ function confirmThen(copy: ConfirmCopy, run: () => void): void {
 export function MachineAccessRouteScreen(props: MachineAccessRouteProps) {
   const environmentIdRaw = firstParam(props.route.params.environmentId);
   const environmentId = EnvironmentId.make(environmentIdRaw ?? "");
-  const nowMs = useNowMs();
+  // Link expiry and "last connected" read in minutes; a link that expires
+  // between ticks drops out at most this late, and the node removes it anyway.
+  const nowMs = useNowMs(15_000);
   const { rows } = useSavedEnvironments();
-  const hub = useHostedHubStore((state) => state);
+  const hubNodes = useHostedHubStore((state) => state.nodes);
+  const hubAccountStatus = useHostedHubStore((state) => state.accountStatus);
+  const hubAccount = useHostedHubStore((state) => state.account);
   const serverConfigs = useEnvironmentServerConfigs();
   const operations = useDirectAccessOperations(environmentId);
 
   const direct = rows.find((row) => row.record.environmentId === environmentId) ?? null;
-  const hubNode = hub.nodes.find((node) => node.environmentId === environmentId) ?? null;
+  const hubNode = hubNodes.find((node) => node.environmentId === environmentId) ?? null;
   const header = machineAccessHeader({
     directLabel: direct === null ? null : direct.record.label,
     directRole: direct === null ? null : direct.runtime.role,
@@ -118,8 +122,8 @@ export function MachineAccessRouteScreen(props: MachineAccessRouteProps) {
       ? null
       : deriveHubRevokeAvailability({
           node: hubNode,
-          signedIn: hub.accountStatus === "authenticated",
-          accountRole: hub.account === null ? null : hub.account.role,
+          signedIn: hubAccountStatus === "authenticated",
+          accountRole: hubAccount === null ? null : hubAccount.role,
         });
 
   const [busyKey, setBusyKey] = useState<string | null>(null);
