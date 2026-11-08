@@ -74,8 +74,8 @@ const EMPTY_COPY: Readonly<
   },
   "clear-filter": {
     title: "Nothing matches",
-    detail: "Change the search or return to all machines.",
-    actionLabel: "Clear filters",
+    detail: "No chats for this filter, machine or project.",
+    actionLabel: "Show all chats",
   },
 };
 
