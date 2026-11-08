@@ -8,6 +8,12 @@ import {
   taskStartFailed,
   useLocalTasksStore,
   type LocalTaskView,
+  localRefNames,
+  taskDraftPlacement,
+  taskSourceControlContext,
+  taskSourceControlLinks,
+  taskWorktreeBranch,
+  type TaskDraftPlacement,
 } from "@ryco/client-runtime/state/tasks";
 import type {
   ComposerSourceControlContext,
@@ -28,14 +34,6 @@ import {
 } from "~/rpc/useSourceControl";
 
 import { toastManager } from "../ui/toast";
-import {
-  localRefNames,
-  taskDraftPlacement,
-  taskSourceControlContext,
-  taskSourceControlLinks,
-  taskWorktreeBranch,
-  type TaskDraftPlacement,
-} from "./taskDraft.logic";
 import { whenTaskFilesSent } from "./taskFiles";
 import { localTaskWriterFor, retainLocalTasksFor } from "./useLocalTasks";
 

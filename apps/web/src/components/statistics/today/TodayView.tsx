@@ -10,6 +10,7 @@ import {
   selectOpenTaskViews,
   useLocalTasksStore,
   type LocalTaskView,
+  dueDayDiff,
 } from "@ryco/client-runtime/state/tasks";
 import { calendarDateInZone, currentTimeZone } from "@ryco/client-runtime/usage";
 import { WS_METHODS, type EnvironmentId, type ThreadId } from "@ryco/contracts";
@@ -24,7 +25,6 @@ import { formatDayLabel } from "~/lib/statisticsFormat";
 import { selectEnvironmentState, useStore } from "~/store";
 import { buildThreadRouteParams } from "~/threadRoutes";
 
-import { dueDayDiff } from "../../tasks/taskDue.logic";
 import { useLocalTasksSync } from "../../tasks/useLocalTasks";
 import { tasksAvailable, useTasksEnvironment } from "../../tasks/useTasksEnvironment";
 import type { StatisticsSearch } from "../statisticsSearch";

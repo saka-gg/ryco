@@ -14,7 +14,7 @@ import {
 import { TaskNotes } from "./TaskNotes";
 import { TaskStartButton } from "./TaskStartButton";
 import { TasksView } from "./TasksView";
-import { dueAtForDay } from "./taskDue.logic";
+import { dueAtForDay } from "@ryco/client-runtime/state/tasks";
 import { TASK_COMPLETE_SETTLE_MS } from "./taskListSettle.logic";
 import type {
   TaskChatOption,

@@ -3,8 +3,11 @@ import { CalendarIcon, PlusIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { TaskProjectIcon } from "./TaskRowMeta";
-import { dueLabel } from "./taskDue.logic";
-import { parseTaskQuickAdd, splitPastedTaskLines } from "./taskQuickAdd.logic";
+import {
+  dueLabel,
+  parseTaskQuickAdd,
+  splitPastedTaskLines,
+} from "@ryco/client-runtime/state/tasks";
 import { TASK_CHIP_CLASS, TASK_CHIP_LABEL_CLASS, TASK_TITLE_MAX_LENGTH } from "./tasksUi";
 import type { TaskProjectOption, TaskQuickAddInput, TasksViewHandlers } from "./tasksViewModel";
 

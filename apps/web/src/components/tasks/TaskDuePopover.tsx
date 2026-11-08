@@ -3,7 +3,12 @@ import { useRef, useState } from "react";
 
 import { CalendarGrid } from "../automations/pickers/CalendarGrid";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
-import { dueAtDayStart, dueAtForDay, dueLabel, dueQuickPicks } from "./taskDue.logic";
+import {
+  dueAtDayStart,
+  dueAtForDay,
+  dueLabel,
+  dueQuickPicks,
+} from "@ryco/client-runtime/state/tasks";
 import { TASK_CHIP_CLASS } from "./tasksUi";
 
 /**

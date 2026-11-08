@@ -1,4 +1,4 @@
-import { taskLinkKey } from "@ryco/client-runtime/state/tasks";
+import { taskLinkKey, describeTaskLink, taskLinkLabelIn } from "@ryco/client-runtime/state/tasks";
 import { XIcon } from "lucide-react";
 
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
@@ -8,7 +8,6 @@ import { TaskFileAddChip, TaskFileChips } from "./TaskFileChips";
 import { TaskLinkIcon } from "./TaskLinkIcon";
 import { TaskLinkPopover } from "./TaskLinkPopover";
 import { TaskProjectIcon } from "./TaskRowMeta";
-import { describeTaskLink, taskLinkLabelIn } from "./taskLinks.logic";
 import {
   TASK_CHIP_CLASS,
   TASK_CHIP_LABEL_CLASS,

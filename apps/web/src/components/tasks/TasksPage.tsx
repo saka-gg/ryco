@@ -14,6 +14,9 @@ import {
   type LocalTaskChat,
   type LocalTaskView,
   type LocalTasksEnvironmentState,
+  projectRepositoryKey,
+  taskDraftPlacement,
+  taskStartHint,
 } from "@ryco/client-runtime/state/tasks";
 import { fullThreadEntry, type SidebarThreadOrStub } from "@ryco/client-runtime/state/threads";
 import {
@@ -55,7 +58,6 @@ import { orderItemsByPreferredIds } from "../Sidebar.logic";
 import { Button } from "../ui/button";
 import { toastManager } from "../ui/toast";
 import { openTaskDraft } from "./taskDraft";
-import { projectRepositoryKey, taskDraftPlacement, taskStartHint } from "./taskDraft.logic";
 import {
   addTaskFiles,
   cancelPendingTaskFile,

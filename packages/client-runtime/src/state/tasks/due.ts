@@ -7,7 +7,7 @@ import {
 } from "@ryco/shared/automationSchedule";
 
 /**
- * Due dates on the Tasks page are whole days: `dueAt` is the ISO instant of
+ * Due dates of tasks are whole days, on every client: `dueAt` is the ISO instant of
  * the due day's local midnight, and every label counts calendar days from
  * today, so a task due "Tomorrow" says so all of today.
  */
@@ -84,4 +84,18 @@ export function dueQuickPicks(nowMs: number): ReadonlyArray<DueQuickPick> {
     { label: "Tomorrow", dayMs: addDays(today, 1) },
     { label: "Next week", dayMs: nextWeekdayDayStart(nowMs, 1) },
   ];
+}
+
+/**
+ * The part of a task list a due date files an open task under: `today` for
+ * today and anything overdue (it still needs doing today), `upcoming` for a
+ * later day, `none` without a (readable) due date.
+ */
+export type TaskDueBucket = "today" | "upcoming" | "none";
+
+export function taskDueBucket(dueAt: string | null, nowMs: number): TaskDueBucket {
+  if (dueAt === null) return "none";
+  const diff = dueDayDiff(dueAt, nowMs);
+  if (diff === null) return "none";
+  return diff <= 0 ? "today" : "upcoming";
 }

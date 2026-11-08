@@ -27,7 +27,7 @@ import { useSourceControlChangeRequestList } from "../rpc/useSourceControl";
 import { useGitStatus } from "../lib/gitStatusState";
 import { newCommandId } from "../lib/utils";
 import { cn } from "../lib/utils";
-import { parsePullRequestReference } from "../pullRequestReference";
+import { parsePullRequestReference } from "@ryco/shared/pullRequestReference";
 import { getSourceControlPresentation } from "../sourceControlPresentation";
 import { useStore } from "../store";
 import { createProjectSelectorByRef, createThreadStructureSelectorByRef } from "../storeSelectors";

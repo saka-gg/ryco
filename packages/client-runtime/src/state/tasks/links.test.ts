@@ -15,7 +15,7 @@ import {
   taskLinkFromSource,
   taskLinkLabel,
   taskLinkLabelIn,
-} from "./taskLinks.logic";
+} from "./links.ts";
 
 const encodes = Schema.is(LocalTaskLink);
 
