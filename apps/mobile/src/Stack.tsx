@@ -35,6 +35,7 @@ import {
   E2eeNodeSecurityRouteScreen,
   E2eeNodeVerificationRouteScreen,
   HostedAccountRouteScreen,
+  MachineAccessRouteScreen,
   NativeIdentityScreen,
   NewTaskRouteScreen,
   ProjectRouteScreen,
@@ -629,6 +630,11 @@ export const ROOT_STACK_SCREENS = {
     screen: SettingsAboutRouteScreen,
     linking: MVP_SETTINGS_ROUTES.SettingsAbout.linking,
     options: routeOptions("SettingsAbout", { title: "About" }),
+  }),
+  MachineAccess: createNativeStackScreen({
+    screen: MachineAccessRouteScreen,
+    linking: MVP_ROOT_ROUTES.MachineAccess.linking,
+    options: routeOptions("MachineAccess", { title: "Machine access" }),
   }),
   NotFound: createNativeStackScreen({
     screen: NotFoundScreen,

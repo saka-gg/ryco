@@ -462,6 +462,19 @@ export const MVP_ROOT_ROUTES = {
     android: { presentation: "card" },
   },
   /**
+   * One machine's access: pairing links, paired clients, network exposure and
+   * Hub revocation. Pushed from a machine's row in the Machines sheet, like
+   * ConnectionsNew, so it floats over the workspace too.
+   */
+  MachineAccess: {
+    linking: "machines/:environmentId/access",
+    overlay: true,
+    headerPreset: "glass",
+    headerAction: "back",
+    ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
+  /**
    * One search across chats, message text, pull requests and tasks, opened
    * from a tab's search button. A screen of its own rather than an overlay: a
    * result pushes above it, and back returns to the results.
