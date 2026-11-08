@@ -186,6 +186,7 @@ export function PullRequestFileRouteScreen(props: PullRequestFileRouteProps) {
   const foregroundColor = String(useThemeColor("--color-foreground"));
   const successColor = String(useThemeColor("--color-success"));
   const mutedIconColor = String(useThemeColor("--color-icon-muted"));
+  const barTint = String(useThemeColor("--color-glass-surface"));
   const [highlight, setHighlight] = useState<HighlightedSides | null>(null);
   const [surfaceHeight, setSurfaceHeight] = useState(0);
 
@@ -512,7 +513,7 @@ export function PullRequestFileRouteScreen(props: PullRequestFileRouteProps) {
           className="absolute inset-x-0 bottom-0 px-3"
           style={{ paddingBottom: Math.max(insets.bottom, 12) }}
         >
-          <GlassSurface radius={30} style={{ padding: 6 }}>
+          <GlassSurface radius={30} tintColor={barTint} style={{ padding: 6 }}>
             <View className="flex-row items-center gap-2">
               <View className="min-w-0 flex-1 pl-3">
                 <Text className="text-xs font-ryco-bold text-foreground">

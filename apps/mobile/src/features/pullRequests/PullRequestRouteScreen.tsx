@@ -5,6 +5,7 @@ import { EnvironmentId, ProjectId } from "@ryco/contracts/base-schemas";
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
 import {
   reviewDraftKey,
+  splitFilePath,
   type ViewedFileState,
 } from "@ryco/client-runtime/state/pull-request-review";
 import * as Haptics from "expo-haptics";
@@ -455,13 +456,18 @@ function FileRow(props: {
         <View className="min-w-0 flex-1">
           <Text
             className={cn(
-              "font-mono text-xs",
+              "font-mono text-sm",
               viewed ? "text-foreground-muted" : "text-foreground",
             )}
-            numberOfLines={2}
+            numberOfLines={1}
           >
-            {row.path}
+            {splitFilePath(row.path).name}
           </Text>
+          {splitFilePath(row.path).directory ? (
+            <Text className="font-mono text-2xs text-foreground-tertiary" numberOfLines={1}>
+              {splitFilePath(row.path).directory}
+            </Text>
+          ) : null}
           {row.previousPath ? (
             <Text className="font-mono text-2xs text-foreground-tertiary" numberOfLines={1}>
               from {row.previousPath}
@@ -485,7 +491,7 @@ function FileRow(props: {
             void Haptics.selectionAsync();
             props.onToggleViewed(row.path, !viewed);
           }}
-          className="h-full w-12 items-center justify-center active:opacity-60"
+          className="w-12 items-center justify-center self-stretch active:opacity-60"
         >
           <SymbolView
             name={(viewed ? "checkmark.circle.fill" : "circle") as never}

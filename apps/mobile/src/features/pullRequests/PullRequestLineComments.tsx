@@ -70,7 +70,7 @@ function LineCommentForm(props: {
   const ready = body.trim().length > 0;
   return (
     <View className="flex-1 bg-screen">
-      <View className="flex-row items-center gap-3 px-4 pb-2 pt-4">
+      <View className="flex-row items-center gap-3 px-4 pb-2 pt-6">
         <Pressable
           accessibilityRole="button"
           onPress={props.onClose}
@@ -97,7 +97,12 @@ function LineCommentForm(props: {
         contentContainerStyle={{ padding: 16, gap: 14, paddingBottom: 40 }}
       >
         <View className="gap-1.5 rounded-xl bg-card px-3 py-2.5">
-          <Text className="font-mono text-2xs text-foreground-muted" numberOfLines={1}>
+          <Text
+            className="font-mono text-2xs text-foreground-muted"
+            numberOfLines={1}
+            // The line number is the part that matters; a long path gives way at its start.
+            ellipsizeMode="head"
+          >
             {props.path}
             {line !== null ? `:${line}` : ""}
             {side === "left" ? " (removed line)" : ""}
