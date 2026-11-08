@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vite-plus/test";
 
+import { EnvironmentId, ProjectId, ThreadId, TurnId } from "@ryco/contracts";
+
 import {
   AGENT_ACTIVITY_RECENT_RESULT_MS,
+  agentActivityThreadFields,
+  liveThreadRowState,
   summarizeAgentActivity,
   type AgentActivityThread,
 } from "./agentActivitySummary.ts";
+import type { SidebarThreadSummary } from "./types.ts";
 
 const NOW = Date.parse("2026-10-31T12:00:00.000Z");
 
@@ -182,5 +187,63 @@ describe("summarizeAgentActivity", () => {
     ]);
     // A client that does not know when the turn started shows no time.
     expect(summarizeAgentActivity([thread()], NOW).rows[0]?.sinceMs).toBeNull();
+  });
+});
+
+describe("the shared thread → activity row fields", () => {
+  const summary = (patch: Partial<SidebarThreadSummary> = {}): SidebarThreadSummary => ({
+    id: ThreadId.make("t"),
+    environmentId: EnvironmentId.make("env"),
+    projectId: ProjectId.make("p"),
+    title: "T",
+    interactionMode: "default",
+    session: null,
+    createdAt: "2026-10-31T10:00:00.000Z",
+    updatedAt: "2026-10-31T11:00:00.000Z",
+    archivedAt: null,
+    latestTurn: {
+      turnId: TurnId.make("turn"),
+      state: "running",
+      requestedAt: "2026-10-31T10:59:00.000Z",
+      startedAt: "2026-10-31T10:59:30.000Z",
+      completedAt: null,
+      assistantMessageId: null,
+    },
+    branch: null,
+    worktreePath: null,
+    latestUserMessageAt: null,
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    hasActionableProposedPlan: false,
+    ...patch,
+  });
+  const ended = (state: "completed" | "error") =>
+    summary({
+      latestTurn: {
+        ...summary().latestTurn!,
+        state,
+        completedAt: "2026-10-31T11:00:00.000Z",
+      },
+    });
+
+  it("maps the row state a connected machine shows", () => {
+    expect(liveThreadRowState(summary())).toBe("working");
+    expect(liveThreadRowState(summary({ hasPendingApprovals: true }))).toBe("needs-input");
+    expect(liveThreadRowState(ended("completed"))).toBe("idle");
+  });
+
+  it("reads attention, lineage and turn times from the thread", () => {
+    expect(agentActivityThreadFields(summary({ hasPendingUserInput: true }))).toEqual({
+      attention: "input",
+      delegated: false,
+      finishedAtMs: null,
+      turnStartedAtMs: Date.parse("2026-10-31T10:59:30.000Z"),
+      updatedAtMs: Date.parse("2026-10-31T11:00:00.000Z"),
+    });
+    expect(agentActivityThreadFields(ended("completed"))).toMatchObject({
+      attention: null,
+      finishedAtMs: Date.parse("2026-10-31T11:00:00.000Z"),
+      turnStartedAtMs: null,
+    });
   });
 });

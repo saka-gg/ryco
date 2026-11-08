@@ -10,12 +10,19 @@
  * Rows are taken only from live machines: a cached or offline machine's state
  * is not current, so it never counts as running or waiting.
  */
+import { applicableUsageLimit } from "@ryco/shared/usageLimit";
+
 import {
   compareThreadAttention,
   resolveThreadAttentionReason,
   type ThreadAttentionCandidate,
   type ThreadAttentionRow,
+  type ThreadAttentionRowState,
 } from "./threadAttention.ts";
+import { deriveThreadActivityStatus } from "./threadActivityStatus.ts";
+import { isThreadFailed } from "./threadFailure.ts";
+import { isDelegatedThreadLineage } from "./threadLineage.ts";
+import type { SidebarThreadSummary } from "./types.ts";
 
 /** How long an unseen result stays on the glance after its turn ended. */
 export const AGENT_ACTIVITY_RECENT_RESULT_MS = 15 * 60_000;
@@ -77,6 +84,61 @@ export interface AgentActivitySummary {
   readonly rows: ReadonlyArray<AgentActivityRow>;
   /** Nothing runs and nothing waits on the user: only results, if anything. */
   readonly settled: boolean;
+}
+
+/**
+ * A thread's row state as its own, connected and current machine sees it: what the phone's Inbox
+ * row shows once the machine-level states (offline, delivery check, reconnecting) are ruled out.
+ * The phone's rows and the node's own counts both start from it.
+ */
+export function liveThreadRowState(thread: SidebarThreadSummary): ThreadAttentionRowState {
+  const activity = deriveThreadActivityStatus(thread);
+  if (activity === "approval" || activity === "input" || activity === "plan-ready") {
+    return "needs-input";
+  }
+  if (activity === "working") return "working";
+  if (activity === "connecting") return "connecting";
+  // A usage limit outranks the generic error it ended in (the web's and the phone's rule).
+  if (applicableUsageLimit(thread) !== null) return "limited";
+  // A restart release is an interruption, not a failure.
+  if (isThreadFailed(thread)) return "error";
+  return "idle";
+}
+
+const epochMs = (iso: string | null | undefined): number | null => {
+  const ms = iso ? Date.parse(iso) : Number.NaN;
+  return Number.isFinite(ms) ? ms : null;
+};
+
+/**
+ * The fields of an {@link AgentActivityThread} that come from the thread itself, the same for
+ * every surface that builds one: what it waits on, whether it is a delegated child, and when its
+ * turn started or ended.
+ */
+export function agentActivityThreadFields(
+  thread: SidebarThreadSummary,
+): Pick<
+  AgentActivityThread,
+  "attention" | "delegated" | "finishedAtMs" | "turnStartedAtMs" | "updatedAtMs"
+> {
+  const status = deriveThreadActivityStatus(thread);
+  const running = thread.latestTurn?.state === "running";
+  return {
+    attention:
+      status === "approval"
+        ? "approval"
+        : status === "input"
+          ? "input"
+          : status === "plan-ready"
+            ? "plan"
+            : null,
+    delegated: isDelegatedThreadLineage(thread.lineage),
+    finishedAtMs: running ? null : epochMs(thread.latestTurn?.completedAt),
+    turnStartedAtMs: running
+      ? epochMs(thread.latestTurn?.startedAt ?? thread.latestTurn?.requestedAt)
+      : null,
+    updatedAtMs: epochMs(thread.updatedAt) ?? 0,
+  };
 }
 
 /** Shortened by whole characters, so an emoji is never cut in half. */

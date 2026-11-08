@@ -57,6 +57,12 @@ export interface NodePushRegistryShape {
   /** Forgets every registration (the node left its Hub). The sequence keeps growing. */
   readonly clear: Effect.Effect<void>;
   readonly setHubDelivery: (delivery: PushHubDelivery) => Effect.Effect<void>;
+  /**
+   * Calls `listener` after a registration or a device's presence changed (registered,
+   * removed, or left the front), so the Live Activity counts can follow at once. Returns the
+   * unsubscribe.
+   */
+  readonly onChange: (listener: () => void) => () => void;
 }
 
 export class NodePushRegistry extends Context.Service<NodePushRegistry, NodePushRegistryShape>()(

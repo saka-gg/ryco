@@ -1,8 +1,7 @@
 import {
   type AgentActivityPhase,
-  deriveThreadActivityStatus,
+  agentActivityThreadFields,
   isArchivedThreadStub,
-  isDelegatedThreadLineage,
   type AgentActivitySummary,
   type AgentActivityThread,
   type SidebarThreadOrStub,
@@ -265,22 +264,6 @@ export function agentActivityModelName(
   return model ? getModelDisplayName(model, { preferShortName: true }) : selection.model;
 }
 
-function attentionOf(thread: Parameters<typeof deriveThreadActivityStatus>[0]) {
-  const status = deriveThreadActivityStatus(thread);
-  return status === "approval"
-    ? "approval"
-    : status === "input"
-      ? "input"
-      : status === "plan-ready"
-        ? "plan"
-        : null;
-}
-
-function epochMs(iso: string | null | undefined): number | null {
-  const ms = iso ? Date.parse(iso) : NaN;
-  return Number.isFinite(ms) ? ms : null;
-}
-
 /**
  * The Inbox's rows as `summarizeAgentActivity` takes them: the same row state and resting rule
  * the Inbox shows, and live only on a machine that is connected with a current shell. The phone
@@ -317,6 +300,7 @@ export function agentActivityThreads(input: {
       const updatedAtMs = Date.parse(row.updatedAt);
       return [
         {
+          ...agentActivityThreadFields(thread),
           key: row.key,
           environmentId: row.environmentId,
           threadId: row.threadId,
@@ -324,17 +308,10 @@ export function agentActivityThreads(input: {
           projectName: row.isChat ? null : row.projectLabel,
           live,
           state: row.state,
-          attention: attentionOf(thread),
           resting: row.attentionState !== "active",
           unseen: true,
-          delegated: isDelegatedThreadLineage(thread.lineage),
-          finishedAtMs:
-            thread.latestTurn?.state === "running" ? null : epochMs(thread.latestTurn?.completedAt),
-          turnStartedAtMs:
-            thread.latestTurn?.state === "running"
-              ? epochMs(thread.latestTurn.startedAt ?? thread.latestTurn.requestedAt)
-              : null,
           modelName: input.modelNameOf?.(thread) ?? null,
+          // The row's own time: a settled row shows when it settled.
           updatedAtMs: Number.isFinite(updatedAtMs) ? updatedAtMs : 0,
         },
       ];

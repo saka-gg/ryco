@@ -5,8 +5,8 @@ starts, updates and ends it while it runs, and once iOS suspends the app the car
 date" at its stale date. Push updates keep it current while the app is suspended or closed: the
 Hub sends `liveactivity` pushes to the card's update token.
 
-This page is the protocol and what the Hub must do. The app side and the contracts are in this
-repository; the Hub's sender is not. Background alerts, which this builds on, are in
+This page is the protocol and what the Hub must do. The app side, the node's counts and the
+contracts are in this repository; the Hub's sender is not. Background alerts, which this builds on, are in
 [push alerts](./push-alerts.md).
 
 ## The one rule
@@ -37,7 +37,7 @@ pushed state, also not hashed or truncated.
 | Part   | Does                                                                                                    | Never                                  |
 | ------ | ------------------------------------------------------------------------------------------------------- | -------------------------------------- |
 | Device | Requests the card with `pushType: .token`, hands its update token to the Hub with its push registration | Starts a card from a push              |
-| Node   | Counts its threads per registered device and signals the Hub (reserved, below)                          | Sends titles or thread ids to the Hub  |
+| Node   | Counts its threads per registered device and signals the Hub (below)                                    | Sends titles or thread ids to the Hub  |
 | Hub    | Keeps the token, sums the counts across the account's nodes, sends `liveactivity` update and end pushes | Stores or forwards anything but counts |
 
 There is no push-to-start: a card only ever starts while Ryco is in front, so it never appears
@@ -75,14 +75,15 @@ The token rides on the device's own push registration, `PUT /api/native/push/reg
 - Keep it with the device registration's lifetime: sign-out, a revoked enrollment, or an account
   that lost access to its nodes drops it, exactly like the device token.
 
-## The node's half (reserved)
+## The node's half
 
 The device tells each node, in `push.registerDevice`, that its card takes push updates
-(`liveActivity: true`). The node keeps the flag with the registration (`hub-push.json`); older
-nodes ignore it.
+(`liveActivity: true`, while the app's Live Activity switch is on and its Hub advertises
+`liveActivities`). The node keeps the flag with the registration (`hub-push.json`); older nodes
+ignore it.
 
-The node does not send counts yet. When it does, it is `POST /api/node/attention/activity` with a
-fresh node proof (`PushActivitySignalInput`):
+The node signals counts with `POST /api/node/attention/activity` and a fresh node proof
+(`PushActivitySignalInput`):
 
 ```json
 { "proof": { … }, "sequence": 1793234112001, "issuedAt": 1793234112001,
@@ -90,11 +91,39 @@ fresh node proof (`PushActivitySignalInput`):
 ```
 
 - One entry per registration with `liveActivity`, at most 32 per signal, with the same counting
-  rule as the card (`summarizeAgentActivity`: live threads only, a result counts for 15 minutes,
-  snoozed and settled threads never).
-- The same sequence counter as the attention signal, the same proof, retry and 404 back-off rules.
+  rule as the card (`summarizeAgentActivity` over the node's threads as its Inbox lists them, with
+  the node's own settlement rule): a result counts for 15 minutes; snoozed, settled, hidden and
+  archived threads never. The four counts are all that leaves the node.
+- The same sequence counter and proof as the attention signal, and the same 404 back-off (an
+  hour); each route backs off on its own. A failed or refused activity signal is not retried
+  inside the pass (that would hold up the alerts behind it): the next pass waits 5 seconds, then
+  twice as long after each further failure, up to 4 minutes, and carries the latest counts.
 - Nothing for a device in front: presence holds as for alerts, and the app updates its own card.
-- Only when the counts changed for that device, coalesced with the attention pass.
+  Once the device leaves the front, the node sends its counts again.
+- The counts ride the attention passes: the rows a pass reads are counted after it. An entry goes
+  out when its counts changed since the Hub last took them, at most one signal per 5 seconds (the
+  latest counts win), and once when they reach zero (the end). A device the node has told
+  nothing since it started hears its counts once, zero included: after a node restart the Hub may
+  still hold counts from before it, and that zero lets it end the card.
+- **Refresh.** While any count is above zero, unchanged counts the Hub holds are sent again every
+  4 minutes, so the node never drops out of the Hub's 10-minute stale window while work runs.
+  With every count at zero there is no refresh and no timer.
+- The node also counts again when a result ages out of its 15 minutes or a snooze wakes, without
+  any thread changing.
+
+The answer (`PushActivitySignalResult`) has a status per entry:
+
+| Status           | Meaning                                                  | Node does                            |
+| ---------------- | -------------------------------------------------------- | ------------------------------------ |
+| `accepted`       | The Hub holds these counts for the device                | Remembers them; refreshes as above   |
+| `no-token`       | The device shows no card that takes pushes; nothing kept | Remembers them, but does not refresh |
+| `not-authorized` | The enrollment is gone or no longer reaches this node    | Forgets the device                   |
+| `rate-limited`   | The Hub refused this entry for now                       | Sends it again on the next pass      |
+
+A status the node does not know (from a newer Hub) counts as `rate-limited`.
+
+A card only starts while Ryco is in front, so a device answered `no-token` hears the counts again
+once it leaves the front with a card.
 
 The Hub must check every entry like an attention delivery: the enrollment is active, its account
 still reaches this node, and that device registered a Live Activity token.
@@ -125,7 +154,9 @@ apns-expiration: <now + 10 minutes>
   goes at **5**. iOS budgets priority-10 Live Activity pushes per app; a Hub that spends them on
   routine counts gets throttled.
 - Coalesce: at most one update per device per 15 seconds, the latest counts winning; never send
-  counts equal to the last ones sent.
+  counts equal to the last ones sent, except to move the stale date: when a node refreshes counts
+  above zero and the last update is 5 minutes old or more, the same counts go again (priority 5),
+  so a card whose work simply keeps running never reads "Out of date".
 - An `alert` inside the update is not used: background alerts already announce what needs the
   person, sealed and with the thread's title.
 
@@ -138,6 +169,10 @@ The end, once all four counts are zero or every node dropped out:
 - `dismissal-date` is 15 minutes on with a final state (the card shows its results as long as the
   app's own end does), or 15 seconds on without one.
 - After an end the token is spent: drop it, send nothing more, and wait for the next registration.
+- A registered token means a card shows, so zero ends it also when the Hub never saw counts above
+  zero for it (after a Hub restart). Such a card first waits 5 minutes, the nodes' refresh plus a
+  margin, so a node still running elsewhere can report before the card ends.
+- Keep one state per card token: the same card registered under two accounts gets one sum.
 
 ## Errors and limits
 
@@ -156,6 +191,7 @@ Updates are perishable like alerts: no backlog; only the latest counts matter.
 | ---------------------------------- | ---------------------------------------------------------------------------- |
 | Hub without `liveActivities`       | No token is requested or sent; cards are local, "Out of date" when suspended |
 | Hub with it, node without counts   | The token is registered; nothing is sent until a node signals                |
+| Node with counts, older Hub        | The activity route answers 404; the node asks again after an hour            |
 | Older app, newer Hub               | Never sends a token; nothing changes                                         |
 | Build without push (Personal Team) | No token; the card is local                                                  |
 

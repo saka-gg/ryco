@@ -21,13 +21,20 @@
  *   persisted before it is sent. A failed send is retried once with the same
  *   sequence and payload, then dropped: alerts are perishable. A Hub without
  *   the route (404) is not asked again for an hour.
+ * - Live Activity counts (`docs/live-activity-push.md`) ride the same passes: the rows each
+ *   pass read are kept, and after it the node counts them and signals the devices whose card
+ *   takes push updates, on the same sequence counter and proof, at most once per
+ *   {@link ACTIVITY_MIN_INTERVAL_MS}. A failed activity signal is never retried inside the
+ *   queue the alerts share: later passes back off on their own timer.
  *
  * @module push/attentionPublisher
  */
 import {
   createThreadNotificationProjector,
+  isArchivedThreadStub,
   type SidebarThreadOrStub,
   type SidebarThreadSummary,
+  type SidebarWorktreeSummary,
   type ThreadNotificationEvent,
 } from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
@@ -35,33 +42,49 @@ import type { PushAlertKind, PushHubDelivery } from "@ryco/contracts/push";
 import {
   PUSH_ALERT_REQUEST_ID_MAX_LENGTH,
   PUSH_ALERT_TITLE_MAX_LENGTH,
-  PUSH_ATTENTION_MAX_DELIVERIES,
+  type PushActivitySignalInput,
+  type PushActivitySignalResult,
   type PushAlertPlaintext,
   type PushAttentionDelivery,
   type PushAttentionSignalInput,
   type PushAttentionSignalResult,
 } from "@ryco/contracts/push-hub";
+import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
 import {
   pushCollapseIdBytes,
   pushSealAssociatedData,
   sealPushPayload,
 } from "@ryco/shared/pushSeal";
 
+import {
+  ACTIVITY_FOREGROUND_RECHECK_MS,
+  ACTIVITY_MIN_INTERVAL_MS,
+  ACTIVITY_REFRESH_MS,
+  activityCountsZero,
+  countNodeAgentActivity,
+  planActivityRecipients,
+  type SentActivity,
+} from "./liveActivityCounts.ts";
 import { effectivePushKinds, type PushRegistration } from "./pushRegistrations.ts";
+import { chunkForSignals } from "./pushSignalChunks.ts";
 
 export const ATTENTION_READ_DEBOUNCE_MS = 150;
 export const ATTENTION_COALESCE_MS = 1_000;
 export const ATTENTION_RETRY_DELAY_MS = 5_000;
 export const ATTENTION_UNSUPPORTED_BACKOFF_MS = 60 * 60 * 1_000;
 
-export type AttentionSendOutcome =
-  | { readonly kind: "delivered"; readonly result: PushAttentionSignalResult }
-  /** The Hub has no attention route (an older Hub). */
+/** How one node-proof signal to the Hub went. */
+export type HubSignalOutcome<Result> =
+  | { readonly kind: "delivered"; readonly result: Result }
+  /** The Hub has no such route (an older Hub). */
   | { readonly kind: "unsupported" }
   /** The Hub refused the node itself; asking again won't help. */
   | { readonly kind: "refused" }
   /** Network failure, timeout or a server error: worth one retry. */
   | { readonly kind: "failed" };
+
+export type AttentionSendOutcome = HubSignalOutcome<PushAttentionSignalResult>;
+export type ActivitySendOutcome = HubSignalOutcome<PushActivitySignalResult>;
 
 export interface AttentionPublisherDeps {
   /** The node's Hub environment id: the id devices know it by. */
@@ -70,6 +93,10 @@ export interface AttentionPublisherDeps {
   readonly readShell: () => Promise<{
     readonly sequence: number;
     readonly threads: ReadonlyArray<SidebarThreadOrStub>;
+    /** The node's workspaces, for its Inbox rule; read again on each activity refresh. */
+    readonly worktrees?: ReadonlyArray<SidebarWorktreeSummary> | undefined;
+    /** The node's own automatic settlement rule. */
+    readonly autoSettleAfterDays?: SidebarAutoSettleAfterDays | undefined;
   }>;
   /** The thread's current row, mapped as the shell stream maps it; null once it is gone. */
   readonly readThread: (
@@ -85,6 +112,12 @@ export interface AttentionPublisherDeps {
   readonly setHubDelivery: (delivery: PushHubDelivery) => void;
   /** Adds a fresh node proof and posts the signal. */
   readonly send: (signal: Omit<PushAttentionSignalInput, "proof">) => Promise<AttentionSendOutcome>;
+  /** Adds a fresh node proof and posts an activity signal; absent: no Live Activity counts. */
+  readonly sendActivity?:
+    | ((signal: Omit<PushActivitySignalInput, "proof">) => Promise<ActivitySendOutcome>)
+    | undefined;
+  /** Calls back after a registration or a device's presence changed; returns the unsubscribe. */
+  readonly onRegistrationsChanged?: ((listener: () => void) => () => void) | undefined;
   readonly now: () => number;
   readonly setTimeout: (callback: () => void, delayMs: number) => unknown;
   readonly clearTimeout: (handle: unknown) => void;
@@ -148,11 +181,7 @@ export function planAttentionRecipients(input: {
       if (kinds.has(candidate.kind)) recipients.push({ registration, candidate });
     }
   }
-  const chunks: AttentionRecipient[][] = [];
-  for (let index = 0; index < recipients.length; index += PUSH_ATTENTION_MAX_DELIVERIES) {
-    chunks.push(recipients.slice(index, index + PUSH_ATTENTION_MAX_DELIVERIES));
-  }
-  return chunks;
+  return chunkForSignals(recipients);
 }
 
 /** Seals each recipient's payload, bound to this signal's sequence. */
@@ -214,17 +243,46 @@ export function startAttentionPublisher(deps: AttentionPublisherDeps): Attention
   let flushTimer: unknown = null;
   let chain: Promise<void> = Promise.resolve();
 
+  // Live Activity counts: the rows the passes read, and what the Hub holds per device.
+  const rows = new Map<ThreadId, SidebarThreadSummary>();
+  let worktrees: ReadonlyArray<SidebarWorktreeSummary> = [];
+  let autoSettleAfterDays: SidebarAutoSettleAfterDays | undefined;
+  let shellReadAt = 0;
+  const sentActivity = new Map<string, SentActivity>();
+  let activityTimer: unknown = null;
+  let activityDueAt: number | null = null;
+  let lastActivitySignalAt = Number.NEGATIVE_INFINITY;
+  let activityUnsupportedUntil = 0;
+  /** After a failed or refused activity signal: no pass before this, the wait growing. */
+  let activityRetryAt = 0;
+  let activityBackoffMs = 0;
+
   const enqueue = (work: () => Promise<void>) => {
     chain = chain.then(work).catch((error: unknown) => {
       deps.reportFailure("Push alert work failed.", error);
     });
   };
 
+  const readShell = async () => {
+    const shell = await deps.readShell();
+    shellReadAt = deps.now();
+    worktrees = shell.worktrees ?? [];
+    autoSettleAfterDays = shell.autoSettleAfterDays;
+    return shell;
+  };
+
+  const keepRows = (threads: ReadonlyArray<SidebarThreadOrStub>) => {
+    rows.clear();
+    for (const thread of threads) {
+      if (!isArchivedThreadStub(thread)) rows.set(thread.id, thread);
+    }
+  };
+
   const baseline = async () => {
     const id = await deps.environmentId();
     if (stopped || id === null) return;
     environmentId = id as EnvironmentId;
-    const shell = await deps.readShell();
+    const shell = await readShell();
     if (stopped) return;
     projector.baseline({
       environmentId,
@@ -233,7 +291,9 @@ export function startAttentionPublisher(deps: AttentionPublisherDeps): Attention
       threads: shell.threads.map((thread) => ({ ...thread, environmentId: environmentId! })),
       nowMs: deps.now(),
     });
+    keepRows(shell.threads);
     baselined = true;
+    scheduleActivity(0);
   };
 
   const readDirty = async () => {
@@ -252,11 +312,16 @@ export function startAttentionPublisher(deps: AttentionPublisherDeps): Attention
           threadId,
         });
         pending.delete(threadId);
+        rows.delete(threadId);
         continue;
       }
       const thread = await deps.readThread(environmentId, threadId);
       if (stopped) return;
-      if (thread === null) continue;
+      if (thread === null) {
+        rows.delete(threadId);
+        continue;
+      }
+      rows.set(threadId, thread);
       const candidate = projector.observe({
         generation: GENERATION,
         sequence: change.sequence,
@@ -268,6 +333,7 @@ export function startAttentionPublisher(deps: AttentionPublisherDeps): Attention
         scheduleFlush();
       }
     }
+    if (batch.length > 0) scheduleActivity(0);
   };
 
   const scheduleRead = () => {
@@ -286,34 +352,65 @@ export function startAttentionPublisher(deps: AttentionPublisherDeps): Attention
     }, ATTENTION_COALESCE_MS);
   };
 
-  const sendWithRetry = async (signal: Omit<PushAttentionSignalInput, "proof">) => {
+  /**
+   * Runs an activity pass `delayMs` from now, but never sooner than
+   * {@link ACTIVITY_MIN_INTERVAL_MS} after the last activity signal; an earlier
+   * request replaces a later one.
+   */
+  function scheduleActivity(delayMs: number) {
+    if (stopped || deps.sendActivity === undefined) return;
+    const dueAt = Math.max(
+      deps.now() + delayMs,
+      lastActivitySignalAt + ACTIVITY_MIN_INTERVAL_MS,
+      activityRetryAt,
+    );
+    if (activityDueAt !== null && activityDueAt <= dueAt) return;
+    if (activityTimer !== null) deps.clearTimeout(activityTimer);
+    activityDueAt = dueAt;
+    activityTimer = deps.setTimeout(
+      () => {
+        activityTimer = null;
+        activityDueAt = null;
+        enqueue(flushActivity);
+      },
+      Math.max(0, dueAt - deps.now()),
+    );
+  }
+
+  /** Sends one signal, retried once on failure; null when it was not delivered. */
+  const sendWithRetry = async <Result>(
+    send: () => Promise<HubSignalOutcome<Result>>,
+    onUnsupported: () => void,
+  ): Promise<Result | null> => {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       if (stopped || !deps.isConnectorOnline()) {
         deps.setHubDelivery("offline");
-        return;
+        return null;
       }
-      const outcome = await deps.send(signal);
-      if (outcome.kind === "delivered") {
-        deps.setHubDelivery("available");
-        const unauthorized = outcome.result.results
-          .filter((result) => result.status === "not-authorized")
-          .map((result) => result.enrollmentId as string);
-        if (unauthorized.length > 0) await deps.removeEnrollments(unauthorized);
-        return;
-      }
+      const outcome = await send();
+      if (outcome.kind === "delivered") return outcome.result;
       if (outcome.kind === "unsupported") {
-        unsupportedUntil = deps.now() + ATTENTION_UNSUPPORTED_BACKOFF_MS;
-        deps.setHubDelivery("hub-unsupported");
-        return;
+        onUnsupported();
+        return null;
       }
-      if (outcome.kind === "refused") return;
+      if (outcome.kind === "refused") return null;
       if (attempt === 0) {
         await new Promise<void>((resolve) => {
           deps.setTimeout(resolve, ATTENTION_RETRY_DELAY_MS);
         });
       }
     }
-    deps.reportFailure("A push alert signal could not reach the Hub; it was dropped.");
+    deps.reportFailure("A push signal could not reach the Hub; it was dropped.");
+    return null;
+  };
+
+  const forgetUnauthorized = async (
+    results: ReadonlyArray<{ readonly enrollmentId: string; readonly status: string }>,
+  ) => {
+    const unauthorized = results
+      .filter((result) => result.status === "not-authorized")
+      .map((result) => result.enrollmentId);
+    if (unauthorized.length > 0) await deps.removeEnrollments(unauthorized);
   };
 
   const flush = async () => {
@@ -342,15 +439,162 @@ export function startAttentionPublisher(deps: AttentionPublisherDeps): Attention
       if (stopped) return;
       const sequence = await deps.reserveSequence();
       const issuedAt = deps.now();
-      await sendWithRetry({
+      const signal = {
         sequence,
         issuedAt,
         deliveries: sealAttentionDeliveries({ environmentId, sequence, issuedAt, recipients }),
-      });
+      };
+      const result = await sendWithRetry(
+        () => deps.send(signal),
+        () => {
+          unsupportedUntil = deps.now() + ATTENTION_UNSUPPORTED_BACKOFF_MS;
+          deps.setHubDelivery("hub-unsupported");
+        },
+      );
+      if (result === null) continue;
+      deps.setHubDelivery("available");
+      await forgetUnauthorized(result.results);
     }
   };
 
+  /**
+   * One Live Activity pass: count this node's threads and signal each device whose counts the
+   * Hub must hear, then plan the next pass (a result ageing out, a device leaving the front, the
+   * refresh before the Hub's stale window).
+   */
+  const flushActivity = async () => {
+    const sendActivity = deps.sendActivity;
+    if (stopped || sendActivity === undefined || !baselined || environmentId === null) return;
+    const registrations = (await deps.registrations()).filter(
+      (registration) => registration.liveActivity === true,
+    );
+    if (stopped) return;
+    const wanted = new Set(registrations.map((registration) => registration.enrollmentId));
+    for (const enrollmentId of sentActivity.keys()) {
+      if (!wanted.has(enrollmentId)) sentActivity.delete(enrollmentId);
+    }
+    // Nothing to count for: the next registration's own pass starts again.
+    if (registrations.length === 0) return;
+    // Back off without forgetting the cadence: the refresh comes round again.
+    if (!deps.isConnectorOnline() || deps.now() < activityUnsupportedUntil) {
+      scheduleActivity(ACTIVITY_REFRESH_MS);
+      return;
+    }
+    // Workspaces change rarely; read them again with each refresh.
+    if (deps.now() - shellReadAt >= ACTIVITY_REFRESH_MS) {
+      const shell = await readShell();
+      if (stopped) return;
+      keepRows(shell.threads);
+    }
+    const nowMs = deps.now();
+    const foreground = await deps.foregroundEnrollments(nowMs);
+    if (stopped) return;
+    let anyForeground = false;
+    for (const registration of registrations) {
+      if (!foreground.has(registration.enrollmentId)) continue;
+      anyForeground = true;
+      // The app updates its own card in front; once it leaves, the Hub hears the counts again.
+      const previous = sentActivity.get(registration.enrollmentId);
+      if (previous !== undefined) {
+        sentActivity.set(registration.enrollmentId, { ...previous, resend: true });
+      }
+    }
+    if (registrations.every((registration) => foreground.has(registration.enrollmentId))) {
+      scheduleActivity(ACTIVITY_FOREGROUND_RECHECK_MS);
+      return;
+    }
+    const activity = countNodeAgentActivity({
+      environmentId,
+      threads: rows.values(),
+      worktrees,
+      autoSettleAfterDays,
+      nowMs,
+    });
+    const chunks = planActivityRecipients({
+      registrations,
+      isForeground: (enrollmentId) => foreground.has(enrollmentId),
+      sent: sentActivity,
+      counts: activity.counts,
+      nowMs,
+    });
+    let limited = false;
+    for (const enrollmentIds of chunks) {
+      if (stopped) return;
+      if (!deps.isConnectorOnline()) break;
+      const sequence = await deps.reserveSequence();
+      const issuedAt = deps.now();
+      lastActivitySignalAt = issuedAt;
+      // One attempt per pass: a failure backs off on its own timer instead of holding the queue
+      // the alerts share; the first retry comes after ATTENTION_RETRY_DELAY_MS, later ones wait
+      // longer, up to the refresh.
+      const outcome = await sendActivity({
+        sequence,
+        issuedAt,
+        activities: enrollmentIds.map((enrollmentId) => ({
+          enrollmentId:
+            enrollmentId as PushActivitySignalInput["activities"][number]["enrollmentId"],
+          counts: activity.counts,
+        })),
+      });
+      if (stopped) return;
+      if (outcome.kind === "unsupported") {
+        activityUnsupportedUntil = deps.now() + ATTENTION_UNSUPPORTED_BACKOFF_MS;
+        break;
+      }
+      if (outcome.kind !== "delivered") {
+        activityBackoffMs = Math.min(
+          Math.max(ATTENTION_RETRY_DELAY_MS, activityBackoffMs * 2),
+          ACTIVITY_REFRESH_MS,
+        );
+        activityRetryAt = deps.now() + activityBackoffMs;
+        deps.reportFailure(
+          "A Live Activity signal could not reach the Hub; it is sent again later.",
+        );
+        scheduleActivity(activityBackoffMs);
+        return;
+      }
+      activityBackoffMs = 0;
+      activityRetryAt = 0;
+      for (const entry of outcome.result.results) {
+        if (entry.status === "accepted" || entry.status === "no-token") {
+          sentActivity.set(entry.enrollmentId, {
+            counts: activity.counts,
+            // The pass's own time, so the next pass on the refresh timer finds it due.
+            atMs: nowMs,
+            held: entry.status === "accepted",
+            resend: false,
+          });
+        } else if (entry.status === "not-authorized") {
+          sentActivity.delete(entry.enrollmentId);
+        } else {
+          // Rate-limited, or a status this node does not know yet: send it again later.
+          limited = true;
+          const previous = sentActivity.get(entry.enrollmentId);
+          if (previous !== undefined) {
+            sentActivity.set(entry.enrollmentId, { ...previous, resend: true });
+          }
+        }
+      }
+      await forgetUnauthorized(outcome.result.results);
+    }
+    if (stopped) return;
+    const nextAt = [
+      activity.nextChangeAtMs,
+      anyForeground ? nowMs + ACTIVITY_FOREGROUND_RECHECK_MS : null,
+      limited ? nowMs + ACTIVITY_FOREGROUND_RECHECK_MS : null,
+      // Only work in progress needs the refresh: zero counts the Hub took stay true.
+      activityCountsZero(activity.counts) ? null : nowMs + ACTIVITY_REFRESH_MS,
+    ].reduce<number>(
+      (earliest, at) => (at !== null && at < earliest ? at : earliest),
+      Number.POSITIVE_INFINITY,
+    );
+    if (Number.isFinite(nextAt)) scheduleActivity(Math.max(0, nextAt - deps.now()));
+  };
+
   enqueue(baseline);
+  const unsubscribe = deps.onRegistrationsChanged?.(() => {
+    if (baselined) scheduleActivity(0);
+  });
 
   return {
     threadChanged: (threadId, sequence) => {
@@ -368,12 +612,17 @@ export function startAttentionPublisher(deps: AttentionPublisherDeps): Attention
     },
     stop: async () => {
       stopped = true;
+      unsubscribe?.();
       if (readTimer !== null) deps.clearTimeout(readTimer);
       if (flushTimer !== null) deps.clearTimeout(flushTimer);
+      if (activityTimer !== null) deps.clearTimeout(activityTimer);
       readTimer = null;
       flushTimer = null;
+      activityTimer = null;
       dirty.clear();
       pending.clear();
+      rows.clear();
+      sentActivity.clear();
       projector.reset();
       await chain;
     },

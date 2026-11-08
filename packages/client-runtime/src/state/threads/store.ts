@@ -410,7 +410,8 @@ function mapProject(
   };
 }
 
-function mapWorktree(
+/** A worktree shell row as the sidebar and the Inbox read it. */
+export function mapWorktreeShellSummary(
   worktree: OrchestrationWorktreeShell,
   environmentId: EnvironmentId,
 ): SidebarWorktreeSummary {
@@ -2344,7 +2345,7 @@ function syncEnvironmentShellSnapshot(
     return previous !== undefined && plainDataEqual(previous, mapped) ? previous : mapped;
   });
   const nextWorktrees = (snapshot.worktrees ?? []).map((worktree) => {
-    const mapped = mapWorktree(worktree, environmentId);
+    const mapped = mapWorktreeShellSummary(worktree, environmentId);
     const previous = ownValue(state.worktreeById, mapped.id);
     return previous !== undefined &&
       sidebarWorktreesEqual(previous, mapped) &&
@@ -3360,7 +3361,7 @@ function applyEnvironmentOrchestrationEvent(
     case "worktree.created":
       return upsertWorktreeState(
         state,
-        mapWorktree(
+        mapWorktreeShellSummary(
           {
             worktreeId: event.payload.worktreeId,
             projectId: event.payload.projectId,
@@ -3579,10 +3580,10 @@ function applyEnvironmentShellEvent(
     case "thread-upserted":
       return writeThreadShellState(state, mapThreadShell(event.thread, environmentId), owned);
     case "worktree-upserted":
-      return upsertWorktreeState(state, mapWorktree(event.worktree, environmentId));
+      return upsertWorktreeState(state, mapWorktreeShellSummary(event.worktree, environmentId));
     case "worktree-relocated":
       return retargetCheckoutState(
-        upsertWorktreeState(state, mapWorktree(event.worktree, environmentId)),
+        upsertWorktreeState(state, mapWorktreeShellSummary(event.worktree, environmentId)),
         {
           projectId: event.worktree.projectId,
           worktreeId: event.worktree.worktreeId,
@@ -4251,7 +4252,9 @@ export function projectThreadReadCacheShell(
   return {
     capturedAt,
     projects: snapshot.projects.map((project) => mapProject(project, environmentId)),
-    worktrees: (snapshot.worktrees ?? []).map((worktree) => mapWorktree(worktree, environmentId)),
+    worktrees: (snapshot.worktrees ?? []).map((worktree) =>
+      mapWorktreeShellSummary(worktree, environmentId),
+    ),
     threads: snapshot.threads.map((thread) => {
       const mapped = mapThreadShell(thread, environmentId);
       return {

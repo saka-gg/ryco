@@ -178,26 +178,58 @@ export const LiveActivityRemoteContentState = Schema.Struct({
 });
 export type LiveActivityRemoteContentState = typeof LiveActivityRemoteContentState.Type;
 
-// --- Node → Hub: `POST /api/node/attention/activity` (reserved) ------------------------
+// --- Node → Hub: `POST /api/node/attention/activity` ----------------------------------
 
 /**
- * Reserved for the node's half of Live Activity push updates: per enrollment that registered
- * with `liveActivity`, how many of this node's threads run, need the person, or just ended. The
- * Hub sums them across the account's nodes into one {@link LiveActivityRemoteContentState}. Not
- * sent yet; see `docs/live-activity-push.md`.
+ * The node's half of Live Activity push updates: per enrollment that registered with
+ * `liveActivity`, how many of this node's threads run, need the person, or just ended. The Hub
+ * sums them across the account's nodes into one {@link LiveActivityRemoteContentState}
+ * (`docs/live-activity-push.md`).
  */
 export const PUSH_ACTIVITY_SIGNAL_PATH = "/api/node/attention/activity";
+
+export const PushActivityCounts = LiveActivityRemoteContentState.fields.counts;
+export type PushActivityCounts = typeof PushActivityCounts.Type;
+
+export const PushActivityEntry = Schema.Struct({
+  enrollmentId: NativeE2eeEnrollmentId,
+  counts: PushActivityCounts,
+});
+export type PushActivityEntry = typeof PushActivityEntry.Type;
 
 export const PushActivitySignalInput = Schema.Struct({
   proof: NodeHubProof,
   /** The same sequence as the attention signal's: one counter for both. */
   sequence: SafeCounter,
   issuedAt: SafeCounter,
-  activities: Schema.Array(
-    Schema.Struct({
-      enrollmentId: NativeE2eeEnrollmentId,
-      counts: LiveActivityRemoteContentState.fields.counts,
-    }),
-  ).check(Schema.isMinLength(1), Schema.isMaxLength(PUSH_ATTENTION_MAX_DELIVERIES)),
+  activities: Schema.Array(PushActivityEntry).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(PUSH_ATTENTION_MAX_DELIVERIES),
+  ),
 });
 export type PushActivitySignalInput = typeof PushActivitySignalInput.Type;
+
+/**
+ * What the Hub did with one entry: `accepted` (it holds these counts for the device and sends
+ * the sum when it changes), `no-token` (the device shows no card that takes pushes; nothing is
+ * kept), `not-authorized` (the node forgets the device), `rate-limited` (try again later).
+ */
+export const PushActivityEntryStatus = Schema.Literals([
+  "accepted",
+  "no-token",
+  "not-authorized",
+  "rate-limited",
+]);
+export type PushActivityEntryStatus = typeof PushActivityEntryStatus.Type;
+
+export const PushActivitySignalResult = Schema.Struct({
+  protocolVersion: Schema.Literal(1),
+  sequence: SafeCounter,
+  results: Schema.Array(
+    Schema.Struct({
+      enrollmentId: NativeE2eeEnrollmentId,
+      status: PushActivityEntryStatus,
+    }),
+  ).check(Schema.isMaxLength(PUSH_ATTENTION_MAX_DELIVERIES)),
+});
+export type PushActivitySignalResult = typeof PushActivitySignalResult.Type;

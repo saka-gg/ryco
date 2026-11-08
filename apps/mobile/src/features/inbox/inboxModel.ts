@@ -1,10 +1,5 @@
 import type { ThreadCapabilitySupport } from "@ryco/client-runtime/rpc";
-import {
-  applicableUsageLimit,
-  deriveThreadActivityStatus,
-  deriveUsageLimitStatus,
-  isThreadFailed,
-} from "@ryco/client-runtime/state/threads";
+import { deriveUsageLimitStatus, liveThreadRowState } from "@ryco/client-runtime/state/threads";
 import type {
   Project,
   SidebarThreadOrStub,
@@ -187,9 +182,10 @@ function threadState(
   // present as live activity (or as actionable), whatever the cached fields
   // claim. Sourced from Hub presence via the environment row, not WS status.
   if (environment?.stale) return "offline";
-  const activity = deriveThreadActivityStatus(thread);
-  if (activity === "approval" || activity === "input" || activity === "plan-ready")
-    return "needs-input";
+  // The row as its own machine sees it (shared with the node's Live Activity counts); a request
+  // outranks every machine-level state below.
+  const live = liveThreadRowState(thread);
+  if (live === "needs-input") return live;
   if (
     environment?.deliveryUnknown === true ||
     deliveryUnknownThreadIds.has(scopedKey(thread.environmentId, thread.id))
@@ -197,15 +193,8 @@ function threadState(
     return "delivery-unknown";
   }
   if (environment?.connectionState === "offline") return "offline";
-  if (activity === "working") return "working";
-  if (activity === "connecting") return "connecting";
-  // Same predicate as web: a usage limit outranks the generic error it ended in, before and
-  // after its reset (the row's words tell the two apart), so the state never reads the clock.
-  if (applicableUsageLimit(thread) !== null) return "limited";
-  // Same rule as web: a restart release is an interruption, not a failure.
-  if (isThreadFailed(thread)) return "error";
-  if (environment?.connectionState === "reconnecting") return "reconnecting";
-  return "idle";
+  if (live === "idle" && environment?.connectionState === "reconnecting") return "reconnecting";
+  return live;
 }
 
 function statusLabel(state: InboxThreadState): string {

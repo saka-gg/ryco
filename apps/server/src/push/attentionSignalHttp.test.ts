@@ -2,7 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import type { HubConnector } from "../hubConnector/HubConnector.ts";
 import type { HubIdentityRuntimeShape } from "../hubConnector/HubIdentityRuntime.ts";
-import { makeAttentionSignalSender } from "./attentionSignalHttp.ts";
+import { makeActivitySignalSender, makeAttentionSignalSender } from "./attentionSignalHttp.ts";
 
 const proof = () => ({
   type: "auth" as const,
@@ -14,9 +14,11 @@ const proof = () => ({
   signature: new Uint8Array(64).fill(2),
 });
 
-function sender(respond: (body: unknown) => Response) {
-  const requests: Array<{ url: string; body: unknown }> = [];
-  const send = makeAttentionSignalSender({
+function senderDeps(
+  respond: (body: unknown) => Response,
+  requests: Array<{ url: string; body: unknown }>,
+) {
+  return {
     hubOrigin: "https://hub.example",
     identity: {
       createRelayAuthenticationFrame: async () => proof(),
@@ -30,8 +32,12 @@ function sender(respond: (body: unknown) => Response) {
       requests.push({ url, body });
       return respond(body);
     }) as unknown as typeof fetch,
-  });
-  return { send, requests };
+  };
+}
+
+function sender(respond: (body: unknown) => Response) {
+  const requests: Array<{ url: string; body: unknown }> = [];
+  return { send: makeAttentionSignalSender(senderDeps(respond, requests)), requests };
 }
 
 const signal = {
@@ -83,5 +89,67 @@ describe("attention signal over HTTPS", () => {
         )
       ).kind,
     ).toBe("failed");
+  });
+
+  it("posts Live Activity counts to their own route and reads their statuses", async () => {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const send = makeActivitySignalSender(
+      senderDeps(
+        () =>
+          json(200, {
+            protocolVersion: 1,
+            sequence: 43,
+            results: [{ enrollmentId: "enr_device00000000000000000", status: "no-token" }],
+          }),
+        requests,
+      ),
+    );
+    const outcome = await send({
+      sequence: 43,
+      issuedAt: 1_000,
+      activities: [
+        {
+          enrollmentId: "enr_device00000000000000000" as never,
+          counts: { running: 1, needsYou: 0, failed: 0, done: 0 },
+        },
+      ],
+    });
+    expect(outcome).toMatchObject({
+      kind: "delivered",
+      result: { results: [{ status: "no-token" }] },
+    });
+    expect(requests[0]!.url).toBe("https://hub.example/api/node/attention/activity");
+    expect(requests[0]!.body).toMatchObject({ sequence: 43, proof: { nodeId: "node_1" } });
+  });
+
+  it("reads an entry status from a newer Hub as rate-limited instead of failing the answer", async () => {
+    const send = makeActivitySignalSender(
+      senderDeps(
+        () =>
+          json(200, {
+            protocolVersion: 1,
+            sequence: 44,
+            results: [
+              { enrollmentId: "enr_device00000000000000000", status: "accepted" },
+              { enrollmentId: "enr_other000000000000000000", status: "postponed" },
+            ],
+          }),
+        [],
+      ),
+    );
+    const outcome = await send({
+      sequence: 44,
+      issuedAt: 1_000,
+      activities: [
+        {
+          enrollmentId: "enr_device00000000000000000" as never,
+          counts: { running: 1, needsYou: 0, failed: 0, done: 0 },
+        },
+      ],
+    });
+    expect(outcome).toMatchObject({
+      kind: "delivered",
+      result: { results: [{ status: "accepted" }, { status: "rate-limited" }] },
+    });
   });
 });
