@@ -28,6 +28,7 @@ import {
   type TabSelectionRejectedEvent,
 } from "react-native-screens";
 
+import { resolveAppColorScheme } from "../../lib/appScheme";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { tabBarItemTitle } from "./mainTabsModel";
 
@@ -164,7 +165,9 @@ function NativeTabsNavigator({
         }: NativeSyntheticEvent<TabSelectionRejectedEvent>) =>
           setProvenance(nativeEvent.provenance)
         }
-        colorScheme="inherit"
+        // The app's own scheme (always dark today), not the system's: inheriting drew a light
+        // glass bar over the dark app on a phone set to light mode.
+        colorScheme={resolveAppColorScheme()}
         ios={{
           // A tab bar on every width: iPad shows it floating at the top.
           tabBarControllerMode: "tabBar",
