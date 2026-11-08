@@ -4,6 +4,9 @@ import type { AgentControlCompletionReturn } from "@ryco/contracts/agent-control
 
 import {
   resolveDelegatedTaskStatus,
+  delegatedTasksReturnedWords,
+  delegatedTasksStateWords,
+  delegatedTasksSummaryText,
   summarizeDelegatedTasks,
   type DelegatedTaskState,
   type DelegatedTaskSummaryInput,
@@ -121,5 +124,24 @@ describe("summarizeDelegatedTasks", () => {
         task({ result: null }),
       ]),
     ).toMatchObject({ returned: 1, returning: 2, done: 2, working: 1 });
+  });
+});
+
+describe("delegated tasks words", () => {
+  const summary = { working: 2, needsYou: 1, failed: 0, done: 1, returned: 1, returning: 3 };
+
+  it("words a parent's folded line and leaves zero counts out", () => {
+    expect(delegatedTasksStateWords(summary)).toBe("2 working · 1 needs you · 1 done");
+    expect(delegatedTasksSummaryText(summary, 4)).toBe(
+      "4 delegated · 2 working · 1 needs you · 1 done",
+    );
+    const idle = { working: 0, needsYou: 0, failed: 0, done: 0, returned: 0, returning: 0 };
+    expect(delegatedTasksStateWords(idle)).toBeNull();
+    expect(delegatedTasksSummaryText(idle, 2)).toBe("2 delegated");
+  });
+
+  it("counts returns only among tasks whose result comes back", () => {
+    expect(delegatedTasksReturnedWords(summary)).toBe("1 of 3 returned");
+    expect(delegatedTasksReturnedWords({ ...summary, returning: 0 })).toBeNull();
   });
 });

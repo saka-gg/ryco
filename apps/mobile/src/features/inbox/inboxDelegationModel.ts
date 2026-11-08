@@ -1,4 +1,5 @@
 import {
+  delegatedTasksSummaryText,
   planDelegatedNesting,
   type DelegatedNestingItem,
   type DelegatedNestingUrgency,
@@ -105,9 +106,10 @@ export function summarizeDelegatedGroup(
     else if (attention === "working") working += 1;
     else done += 1;
   }
-  const parts = [`${children.length} delegated`];
-  if (needsYou > 0) parts.push(`${needsYou} need${needsYou === 1 ? "s" : ""} you`);
-  if (working > 0) parts.push(`${working} working`);
-  if (done > 0) parts.push(`${done} done`);
-  return { total: children.length, needsYou, working, done, text: parts.join(" · ") };
+  // Worded by the shared rule, so a chat's context names its children's state alike.
+  const text = delegatedTasksSummaryText(
+    { working, needsYou, failed: 0, done, returned: 0, returning: 0 },
+    children.length,
+  );
+  return { total: children.length, needsYou, working, done, text };
 }

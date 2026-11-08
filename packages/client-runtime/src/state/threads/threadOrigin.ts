@@ -1,26 +1,25 @@
-import {
-  completionReturnPresentation,
-  type AgentControlStatusTone,
-} from "@ryco/client-runtime/state/agentControl";
-import {
-  DELEGATED_THREAD_RELATIONSHIP,
-  FORKED_THREAD_RELATIONSHIP,
-  type ThreadAvailability,
-} from "@ryco/client-runtime/state/threads";
 import type { ThreadId } from "@ryco/contracts";
 import type { AgentControlCompletionReturn } from "@ryco/contracts/agent-control";
 import type { ThreadLineage } from "@ryco/contracts/orchestration";
+import { FORKED_THREAD_RELATIONSHIP } from "@ryco/shared/threadFork";
 
-// The way back from a child thread to the thread it came from, at the top of the thread screen:
-// web's delegation dock origin line ("Delegated from …", with the child's own result return), as
-// one compact link. Forks name their source the same way; their timeline divider keeps the detail.
+import {
+  completionReturnPresentation,
+  type AgentControlStatusTone,
+} from "../agentControl/presentation.ts";
+import type { ThreadAvailability } from "./store.ts";
+import { DELEGATED_THREAD_RELATIONSHIP } from "./threadLineage.ts";
+
+// Where a child thread came from, for a thread screen's context: web's delegation dock origin line
+// ("Delegated from …", with the child's own result return to its parent). Forks name their source
+// the same way. Shared so every client words it alike.
 
 export interface ThreadOriginResult {
   readonly text: string;
   readonly tone: AgentControlStatusTone;
 }
 
-export interface ThreadOriginBreadcrumbModel {
+export interface ThreadOriginSummary {
   readonly kind: "delegated" | "forked";
   /** "From" or "Forked from", before the parent's title. */
   readonly lead: string;
@@ -55,7 +54,7 @@ export function threadOriginResult(
 }
 
 /** Null for a thread nothing delegated or forked (a root, or a relationship this app does not know). */
-export function buildThreadOriginBreadcrumbModel(input: {
+export function buildThreadOriginSummary(input: {
   readonly lineage: ThreadLineage | null | undefined;
   /** The parent's title as this device knows it. */
   readonly parentTitle: string | null | undefined;
@@ -63,7 +62,7 @@ export function buildThreadOriginBreadcrumbModel(input: {
   readonly parentAvailability: ThreadAvailability;
   /** This child's result return to its parent (`findCompletionReturnForChild`). */
   readonly ownReturn: AgentControlCompletionReturn | null;
-}): ThreadOriginBreadcrumbModel | null {
+}): ThreadOriginSummary | null {
   const { lineage } = input;
   if (lineage === null || lineage === undefined) return null;
   const kind =

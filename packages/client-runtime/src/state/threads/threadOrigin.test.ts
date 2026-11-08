@@ -4,10 +4,7 @@ import type { ThreadId } from "@ryco/contracts";
 import type { AgentControlCompletionReturn } from "@ryco/contracts/agent-control";
 import type { ThreadLineage } from "@ryco/contracts/orchestration";
 
-import {
-  buildThreadOriginBreadcrumbModel,
-  threadOriginResult,
-} from "./threadOriginBreadcrumbModel";
+import { buildThreadOriginSummary, threadOriginResult } from "./threadOrigin.ts";
 
 const PARENT = "parent" as ThreadId;
 
@@ -19,8 +16,8 @@ function returnWith(status: AgentControlCompletionReturn["status"]): AgentContro
   return { status } as AgentControlCompletionReturn;
 }
 
-function build(overrides: Partial<Parameters<typeof buildThreadOriginBreadcrumbModel>[0]> = {}) {
-  return buildThreadOriginBreadcrumbModel({
+function build(overrides: Partial<Parameters<typeof buildThreadOriginSummary>[0]> = {}) {
+  return buildThreadOriginSummary({
     lineage: lineage("delegated"),
     parentTitle: "Fix login redirect loop",
     parentAvailability: "available",

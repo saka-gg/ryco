@@ -130,3 +130,28 @@ export function summarizeDelegatedTasks(
   }
   return { working, needsYou, failed, done, returned, returning };
 }
+
+/**
+ * The delegated tasks' state words, in the dock's order: "2 working · 1 needs you · 1 failed ·
+ * 3 done". Zero counts are left out; null when every count is zero.
+ */
+export function delegatedTasksStateWords(summary: DelegatedTasksSummary): string | null {
+  const words = [
+    summary.working > 0 ? `${summary.working} working` : null,
+    summary.needsYou > 0 ? `${summary.needsYou} needs you` : null,
+    summary.failed > 0 ? `${summary.failed} failed` : null,
+    summary.done > 0 ? `${summary.done} done` : null,
+  ].filter((word): word is string => word !== null);
+  return words.length > 0 ? words.join(" · ") : null;
+}
+
+/** "3 delegated · 2 working · 1 done": a parent's folded line (phone Chats, a chat's context). */
+export function delegatedTasksSummaryText(summary: DelegatedTasksSummary, total: number): string {
+  const state = delegatedTasksStateWords(summary);
+  return state ? `${total} delegated · ${state}` : `${total} delegated`;
+}
+
+/** "2 of 3 returned", counting only tasks whose result returns here; null when none does. */
+export function delegatedTasksReturnedWords(summary: DelegatedTasksSummary): string | null {
+  return summary.returning > 0 ? `${summary.returned} of ${summary.returning} returned` : null;
+}
