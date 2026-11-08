@@ -136,6 +136,8 @@ function PickerSheet(props: {
   readonly loadError: string | null;
   readonly initial: ReadonlyArray<string>;
   readonly searchPlaceholder: string;
+  /** What an empty list means here. */
+  readonly emptyText: string;
   readonly control: PullRequestActionsControl;
   readonly onSave: (chosen: ReadonlyArray<string>) => void;
   readonly onClose: () => void;
@@ -201,6 +203,11 @@ function PickerSheet(props: {
         ) : null}
         {props.loadError ? (
           <Text className="px-5 py-6 text-sm text-foreground-muted">{props.loadError}</Text>
+        ) : null}
+        {props.items !== null && items.length === 0 ? (
+          <Text className="px-5 py-6 text-sm text-foreground-muted">
+            {needle.length > 0 ? "Nothing matches the search." : props.emptyText}
+          </Text>
         ) : null}
         <View className="mx-4 overflow-hidden rounded-2xl bg-card">
           {items.map((item, index) => {
@@ -274,6 +281,7 @@ function ReviewersSheet(props: SheetProps) {
       loadError={people.error}
       initial={initial}
       searchPlaceholder="Search people"
+      emptyText="Nobody else can review pull requests in this repository."
       control={props.control}
       onSave={(chosen) => {
         const edit = pullRequestListEdit(initial, chosen);
@@ -299,6 +307,7 @@ function LabelsSheet(props: SheetProps) {
       loadError={labels.error}
       initial={initial}
       searchPlaceholder="Search labels"
+      emptyText="This repository has no labels yet."
       control={props.control}
       onSave={(chosen) => {
         const edit = pullRequestListEdit(initial, chosen);
