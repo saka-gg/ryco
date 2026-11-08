@@ -622,6 +622,80 @@ export function inboxDraftThreadSummary(draft: ThreadInboxDraftSummary): Sidebar
   };
 }
 
+/** One thread's place in the inbox, before anything a list or an action needs. */
+export interface ThreadInboxPlacement {
+  /** The settlement policy's input, for eligibility and timing. */
+  readonly policyInput: ThreadSettlementInput;
+  /** Excluded threads are not listed at all. */
+  readonly classification: ThreadSettlementClassification | "snoozed" | "hidden";
+  /** Snoozed and still asleep. */
+  readonly snoozed: boolean;
+  /** Settled while it worked: listed as settled until the node settles it. */
+  readonly filed: boolean;
+}
+
+/**
+ * Where one thread sits in the inbox: the settlement policy, then snooze, the Hidden shelf and
+ * filing. The inbox lists by it; a surface that only needs the rule (the node's Live Activity
+ * counts) uses it without building the whole inbox.
+ */
+export function placeThreadInInbox(input: {
+  readonly thread: SidebarThreadSummary;
+  readonly worktree: SidebarWorktreeSummary | null;
+  readonly environment: Pick<
+    ThreadInboxEnvironment,
+    "threadSettlementSupported" | "autoSettleAfterDays"
+  >;
+  readonly pinned: boolean;
+  readonly hasLocalQueuedMessage: boolean;
+  readonly deliveryUnknown: boolean;
+  /** This client's rule, for an environment that states none of its own. */
+  readonly clientAutoSettleAfterDays: SidebarAutoSettleAfterDays;
+  readonly nowMs: number;
+}): ThreadInboxPlacement {
+  const { thread } = input;
+  const policyInput = settlementInput({
+    thread,
+    worktree: input.worktree,
+    environment: input.environment,
+    pinned: input.pinned,
+    hasLocalQueuedMessage: input.hasLocalQueuedMessage,
+    deliveryUnknown: input.deliveryUnknown,
+    // Each node's threads by its own rule; time boundaries use this client's clock.
+    autoSettleAfterDays:
+      input.environment.autoSettleAfterDays === undefined
+        ? input.clientAutoSettleAfterDays
+        : input.environment.autoSettleAfterDays,
+    nowMs: input.nowMs,
+  });
+  const classification = classifyThreadSettlement(policyInput);
+  if (classification === "excluded") {
+    return { policyInput, classification, snoozed: false, filed: false };
+  }
+  const snoozed =
+    isThreadSnoozed(thread, input.nowMs) &&
+    !policyInput.hasLocalQueuedMessage &&
+    !policyInput.deliveryUnknown;
+  // Settled while it worked: listed as settled until the node settles it, unless it needs
+  // the person meanwhile.
+  const filed =
+    thread.settleWhenIdleAt != null &&
+    classification === "active" &&
+    !threadNeedsAttention(thread, thread.settleWhenIdleAt);
+  return {
+    policyInput,
+    classification: isThreadOnHiddenShelf(thread)
+      ? "hidden"
+      : snoozed
+        ? "snoozed"
+        : filed
+          ? "settled"
+          : classification,
+    snoozed,
+    filed,
+  };
+}
+
 export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel {
   const pinnedKeys = toKeySet(input.pinnedThreadKeys);
   const localQueueKeys = toKeySet(input.localQueuedThreadKeys);
@@ -666,7 +740,7 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
       ) ?? null;
     const worktree = resolveWorktree({ thread, worktreeByKey, worktreesByProjectKey });
     const pinned = pinnedKeys.has(key);
-    const policyInput = settlementInput({
+    const placement = placeThreadInInbox({
       thread,
       worktree,
       environment,
@@ -674,13 +748,10 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
       // The node's own follow-up queue counts like this device's.
       hasLocalQueuedMessage: localQueueKeys.has(key) || thread.followUpQueueSummary !== undefined,
       deliveryUnknown: deliveryUnknownKeys.has(key),
-      // Each node's threads by its own rule; time boundaries use this client's clock.
-      autoSettleAfterDays:
-        environment.autoSettleAfterDays === undefined
-          ? clientAutoSettleAfterDays
-          : environment.autoSettleAfterDays,
+      clientAutoSettleAfterDays,
       nowMs: input.nowMs,
     });
+    const { policyInput, snoozed, filed } = placement;
     const nextEvaluationAtMs = getNextThreadSettlementEvaluationAtMs(policyInput);
     if (
       nextEvaluationAtMs !== null &&
@@ -688,26 +759,15 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
     ) {
       nextSettlementEvaluationAtMs = nextEvaluationAtMs;
     }
-    const classification = classifyThreadSettlement(policyInput);
-    if (classification === "excluded") {
+    if (placement.classification === "excluded") {
       excludedCount += 1;
       continue;
     }
-    const snoozed =
-      isThreadSnoozed(thread, input.nowMs) &&
-      !policyInput.hasLocalQueuedMessage &&
-      !policyInput.deliveryUnknown;
+    const classification = placement.classification;
     if (snoozed) {
       const wake = Date.parse(thread.snoozedUntil!);
       nextSettlementEvaluationAtMs = Math.min(nextSettlementEvaluationAtMs ?? wake, wake);
     }
-    const hidden = isThreadOnHiddenShelf(thread);
-    // Settled while it worked: listed as settled until the node settles it, unless it needs
-    // the person meanwhile.
-    const filed =
-      thread.settleWhenIdleAt != null &&
-      classification === "active" &&
-      !threadNeedsAttention(thread, thread.settleWhenIdleAt);
     const eligibility = canSettleThread(policyInput);
     const snoozeEligibility = canSnoozeThread(policyInput);
     const blocker = mutationBlocker(environment, false);
@@ -722,13 +782,7 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
       worktree,
       environment,
       lifecycle: {
-        classification: hidden
-          ? "hidden"
-          : snoozed
-            ? "snoozed"
-            : filed
-              ? "settled"
-              : classification,
+        classification,
         ...(filed ? { filed } : {}),
         ...(environment.threadTriageSupported === true && canFileThreadForSettlement(policyInput)
           ? { settleFiles: true }

@@ -13,8 +13,9 @@ import {
   AGENT_ACTIVITY_RECENT_RESULT_MS,
   type AgentActivityThread,
   agentActivityThreadFields,
-  buildThreadInbox,
+  createThreadWorktreeResolver,
   liveThreadRowState,
+  placeThreadInInbox,
   type SidebarThreadSummary,
   type SidebarWorktreeSummary,
   summarizeAgentActivity,
@@ -22,6 +23,7 @@ import {
 import type { EnvironmentId } from "@ryco/contracts";
 import type { PushActivityCounts } from "@ryco/contracts/push-hub";
 import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
+import { resolveAutoSettleAfterDays } from "@ryco/shared/threadSettlement";
 
 import type { PushRegistration } from "./pushRegistrations.ts";
 import { chunkForSignals } from "./pushSignalChunks.ts";
@@ -67,64 +69,61 @@ export function countNodeAgentActivity(input: {
   readonly autoSettleAfterDays: SidebarAutoSettleAfterDays | undefined;
   readonly nowMs: number;
 }): NodeAgentActivity {
-  const inbox = buildThreadInbox({
-    projects: [],
-    // One machine: every row is this node's, whatever id it was read with.
-    worktrees: input.worktrees.map((worktree) =>
-      worktree.environmentId === input.environmentId
-        ? worktree
-        : { ...worktree, environmentId: input.environmentId },
-    ),
-    threads: Array.from(input.threads, (thread) =>
-      thread.environmentId === input.environmentId
-        ? thread
-        : { ...thread, environmentId: input.environmentId },
-    ),
-    environments: [
-      {
-        environmentId: input.environmentId,
-        label: "",
-        threadSettlementSupported: true,
-        threadSnoozeSupported: true,
-        threadTriageSupported: true,
-        autoSettleAfterDays: input.autoSettleAfterDays,
-        connected: true,
-        mutationReady: true,
-        shellCurrent: true,
-      },
-    ],
-    nowMs: input.nowMs,
-  });
-  let nextChangeAtMs = inbox.nextSettlementEvaluationAtMs;
+  // One machine: every row is this node's, whatever id it was read with.
+  const own = <T extends { readonly environmentId: EnvironmentId }>(row: T): T =>
+    row.environmentId === input.environmentId
+      ? row
+      : { ...row, environmentId: input.environmentId };
+  const worktreeOf = createThreadWorktreeResolver(input.worktrees.map(own));
+  const environment = {
+    threadSettlementSupported: true,
+    autoSettleAfterDays: input.autoSettleAfterDays,
+  } as const;
+  const clientAutoSettleAfterDays = resolveAutoSettleAfterDays(undefined);
+  let nextChangeAtMs: number | null = null;
   const later = (atMs: number) => {
     if (atMs > input.nowMs && (nextChangeAtMs === null || atMs < nextChangeAtMs)) {
       nextChangeAtMs = atMs;
     }
   };
-  // Only Active rows can count: settled, snoozed and hidden ones rest.
-  const threads = inbox.active.flatMap((entry): AgentActivityThread[] => {
-    const thread = entry.thread;
-    if (thread === null) return [];
+  const threads: AgentActivityThread[] = [];
+  for (const row of input.threads) {
+    const thread = own(row);
+    // The Inbox's own placement rule, without building the whole Inbox. Automatic settlement
+    // (days without activity) never reaches a thread that counts: those run, wait, or ended
+    // within the last 15 minutes.
+    const placement = placeThreadInInbox({
+      thread,
+      worktree: worktreeOf(thread),
+      environment,
+      pinned: false,
+      // The node's own follow-up queue counts as the phone's Inbox counts it.
+      hasLocalQueuedMessage: thread.followUpQueueSummary !== undefined,
+      deliveryUnknown: false,
+      clientAutoSettleAfterDays,
+      nowMs: input.nowMs,
+    });
+    if (placement.snoozed) later(Date.parse(thread.snoozedUntil ?? ""));
+    // Only Active rows can count: settled, snoozed, hidden and archived ones rest.
+    if (placement.classification !== "active") continue;
     const fields = agentActivityThreadFields(thread);
     if (fields.finishedAtMs !== null) {
       later(fields.finishedAtMs + AGENT_ACTIVITY_RECENT_RESULT_MS + 1);
     }
-    return [
-      {
-        ...fields,
-        key: entry.key,
-        environmentId: thread.environmentId,
-        threadId: thread.id,
-        title: "",
-        projectName: null,
-        live: true,
-        state: liveThreadRowState(thread),
-        resting: false,
-        // As on the phone: no record of which results were seen, so one counts for its window.
-        unseen: true,
-      },
-    ];
-  });
+    threads.push({
+      ...fields,
+      key: `${thread.environmentId}:${thread.id}`,
+      environmentId: thread.environmentId,
+      threadId: thread.id,
+      title: "",
+      projectName: null,
+      live: true,
+      state: liveThreadRowState(thread),
+      resting: false,
+      // As on the phone: no record of which results were seen, so one counts for its window.
+      unseen: true,
+    });
+  }
   const { counts } = summarizeAgentActivity(threads, input.nowMs);
   return { counts, nextChangeAtMs };
 }
