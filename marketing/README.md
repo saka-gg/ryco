@@ -73,7 +73,7 @@ bun run dev        # http://localhost:5174
 ## Build and checks
 
 ```bash
-bunx tsc --noEmit && bunx vite build
+bun run build      # effect-tsgo tsrs --noEmit && vite build
 node scripts/errcheck.mjs   # loads / and /changelog with motion on, reports console errors
 MOTION=off node scripts/shoot.mjs   # settled (reduced-motion) captures into screenshots/
 ```

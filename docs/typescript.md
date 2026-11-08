@@ -18,7 +18,9 @@ The binary ships in the `@effect/tsgo-<platform>` package; nothing is patched in
 root; package scripts find `effect-tsgo` on the root `node_modules/.bin`. Each
 release bundles one tsrs build and the TypeScript version it tracks
 (`effect-tsgo tsrs --version`), so upgrading `@effect/tsgo` upgrades the
-checker. Suggestion-level Effect diagnostics are hidden in CLI runs
+checker. `marketing/`, a separate project with its own lockfile, pins its own
+`@effect/tsgo` and runs the same `effect-tsgo tsrs --noEmit` in its `typecheck`
+and `build` scripts; keep the two pins aligned. Suggestion-level Effect diagnostics are hidden in CLI runs
 (`includeSuggestionsInTsc: false`) to keep the gate actionable; errors and
 configured warnings still fail it.
 

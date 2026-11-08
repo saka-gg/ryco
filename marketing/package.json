@@ -7,9 +7,9 @@
   "scripts": {
     "dev": "vite",
     "assets:optimize": "bun scripts/optimize-assets.mjs",
-    "build": "tsc -b && vite build",
+    "build": "effect-tsgo tsrs --noEmit && vite build",
     "preview": "vite preview --port 4173",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "effect-tsgo tsrs --noEmit"
   },
   "dependencies": {
     "gsap": "^3.15.0",
@@ -20,13 +20,13 @@
     "react-router-dom": "^7.18.3"
   },
   "devDependencies": {
+    "@effect/tsgo": "0.67.5",
     "@tailwindcss/vite": "^4.3.3",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
     "@vitejs/plugin-react": "^6.1.1",
     "playwright": "^1.63.0",
     "tailwindcss": "^4.3.3",
-    "typescript": "~7.0.2",
     "vite": "^8.2.2"
   },
   "overrides": {
