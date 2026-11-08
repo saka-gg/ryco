@@ -1,8 +1,13 @@
+import {
+  buildProjectAvatarSetCommand,
+  buildProjectDeleteCommand,
+  buildProjectMetaUpdateCommand,
+  type ProjectMetaPatch,
+} from "@ryco/client-runtime/projectSettings/commands";
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
 import type {
   EnvironmentId,
   ProjectId,
-  ProjectScript,
   RepositoryIdentity,
   SidebarProjectGroupingMode,
 } from "@ryco/contracts";
@@ -37,35 +42,16 @@ function requireProjectApi(environmentId: EnvironmentId) {
   return api;
 }
 
-export interface ProjectMetaPatch {
-  readonly title?: string;
-  readonly workspaceRoot?: string;
-  /** Null clears the prompt. */
-  readonly customSystemPrompt?: string | null;
-  /** Null returns to auto-detecting the primary remote. */
-  readonly preferredRemoteName?: string | null;
-  readonly scripts?: ReadonlyArray<ProjectScript>;
-}
+export type { ProjectMetaPatch };
 
 /** One `project.meta.update` carrying only the fields given. */
 export async function updateProjectMeta(
   project: ProjectCheckoutRef,
   patch: ProjectMetaPatch,
 ): Promise<void> {
-  await requireProjectApi(project.environmentId).orchestration.dispatchCommand({
-    type: "project.meta.update",
-    commandId: newCommandId(),
-    projectId: project.id,
-    ...(patch.title !== undefined ? { title: patch.title } : {}),
-    ...(patch.workspaceRoot !== undefined ? { workspaceRoot: patch.workspaceRoot } : {}),
-    ...(patch.customSystemPrompt !== undefined
-      ? { customSystemPrompt: patch.customSystemPrompt }
-      : {}),
-    ...(patch.preferredRemoteName !== undefined
-      ? { preferredRemoteName: patch.preferredRemoteName }
-      : {}),
-    ...(patch.scripts !== undefined ? { scripts: [...patch.scripts] } : {}),
-  });
+  await requireProjectApi(project.environmentId).orchestration.dispatchCommand(
+    buildProjectMetaUpdateCommand({ commandId: newCommandId(), projectId: project.id, patch }),
+  );
 }
 
 // ── Project image ──────────────────────────────────────────────────────
@@ -99,23 +85,21 @@ export async function uploadProjectAvatar(
     throw new Error(text || `Upload failed: ${response.status}`);
   }
   const { contentHash } = (await response.json()) as { contentHash: string };
-  await api.orchestration.dispatchCommand({
-    type: "project.avatar.set",
-    commandId: newCommandId(),
-    projectId: project.id,
-    contentHash,
-  });
+  await api.orchestration.dispatchCommand(
+    buildProjectAvatarSetCommand({ commandId: newCommandId(), projectId: project.id, contentHash }),
+  );
   return contentHash;
 }
 
 /** Back to the auto-detected favicon. */
 export async function removeProjectAvatar(project: ProjectCheckoutRef): Promise<void> {
-  await requireProjectApi(project.environmentId).orchestration.dispatchCommand({
-    type: "project.avatar.set",
-    commandId: newCommandId(),
-    projectId: project.id,
-    contentHash: null,
-  });
+  await requireProjectApi(project.environmentId).orchestration.dispatchCommand(
+    buildProjectAvatarSetCommand({
+      commandId: newCommandId(),
+      projectId: project.id,
+      contentHash: null,
+    }),
+  );
 }
 
 // ── Remote ─────────────────────────────────────────────────────────────
@@ -162,12 +146,13 @@ export async function removeProjectCheckout(
   const projectDraftThread = draftStore.getDraftThreadByProjectRef(projectRef);
   if (projectDraftThread) draftStore.clearDraftThread(projectDraftThread.draftId);
   draftStore.clearProjectDraftThreadId(projectRef);
-  await requireProjectApi(project.environmentId).orchestration.dispatchCommand({
-    type: "project.delete",
-    commandId: newCommandId(),
-    projectId: project.id,
-    ...(options.force === true ? { force: true } : {}),
-  });
+  await requireProjectApi(project.environmentId).orchestration.dispatchCommand(
+    buildProjectDeleteCommand({
+      commandId: newCommandId(),
+      projectId: project.id,
+      force: options.force === true,
+    }),
+  );
 }
 
 export { describeProjectRemoval } from "@ryco/client-runtime/projectSettings/removal";

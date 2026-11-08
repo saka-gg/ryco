@@ -234,6 +234,10 @@
       "types": "./src/projectSettings/atlassianLink.ts",
       "import": "./src/projectSettings/atlassianLink.ts"
     },
+    "./projectSettings/commands": {
+      "types": "./src/projectSettings/commands.ts",
+      "import": "./src/projectSettings/commands.ts"
+    },
     "./projectSettings/diskUsage": {
       "types": "./src/projectSettings/diskUsage.ts",
       "import": "./src/projectSettings/diskUsage.ts"
@@ -257,6 +261,10 @@
     "./projectSettings/workspaceReview": {
       "types": "./src/projectSettings/workspaceReview.ts",
       "import": "./src/projectSettings/workspaceReview.ts"
+    },
+    "./projectSettings/workspaceActions": {
+      "types": "./src/projectSettings/workspaceActions.ts",
+      "import": "./src/projectSettings/workspaceActions.ts"
     },
     "./projectSettings/workspaces": {
       "types": "./src/projectSettings/workspaces.ts",
