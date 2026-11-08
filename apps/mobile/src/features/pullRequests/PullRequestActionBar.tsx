@@ -74,6 +74,7 @@ export function PullRequestActionBar(props: {
   const { control } = props;
   const insets = useSafeAreaInsets();
   const icon = useThemeColor("--color-primary-foreground") as string;
+  const barTint = useThemeColor("--color-glass-surface") as string;
   const [openedSheet, setSheet] = useState<PullRequestActionSheet | null>(null);
   const sheet = shownPullRequestActionSheet(openedSheet, control);
   if (sheet !== openedSheet) setSheet(sheet);
@@ -135,7 +136,7 @@ export function PullRequestActionBar(props: {
           {control.blockedReason}
         </Text>
       ) : null}
-      <GlassSurface radius={30} style={{ padding: 6 }}>
+      <GlassSurface radius={30} tintColor={barTint} style={{ padding: 6 }}>
         <View className="flex-row items-center gap-1.5">
           {bar.review ? (
             <BarButton

@@ -109,7 +109,7 @@ export function PullRequestFilterSheet(props: {
       onRequestClose={props.onClose}
     >
       <View className="flex-1 bg-screen">
-        <View className="flex-row items-center gap-3 px-4 pb-2 pt-4">
+        <View className="flex-row items-center gap-3 px-4 pb-2 pt-6">
           <Pressable
             accessibilityRole="button"
             disabled={active === 0}
