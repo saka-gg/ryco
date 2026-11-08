@@ -21,7 +21,6 @@ vi.mock("./components/SettingsSection", () => ({ SettingsSection: "SettingsSecti
 vi.mock("./NodeStorageSettings", () => ({ NodeStorageSettings: "NodeStorageSettings" }));
 vi.mock("./NodeNewTaskDefaults", () => ({ NodeNewTaskDefaults: "NodeNewTaskDefaults" }));
 vi.mock("./updates/NodeUpdatesSettings", () => ({ NodeUpdatesSettings: "NodeUpdatesSettings" }));
-vi.mock("./openMachinesFromSettings", () => ({ openMachinesFromSettings: vi.fn() }));
 import { SettingsWorkspaceRouteScreen } from "./SettingsWorkspaceRouteScreen";
 
 function findRow(node: unknown, label: string): Record<string, unknown> | undefined {

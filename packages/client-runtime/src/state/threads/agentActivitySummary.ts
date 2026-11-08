@@ -31,6 +31,7 @@ export const AGENT_ACTIVITY_MAX_ROWS = 5;
 export const AGENT_ACTIVITY_TITLE_MAX = 48;
 export const AGENT_ACTIVITY_PROJECT_MAX = 24;
 export const AGENT_ACTIVITY_MODEL_MAX = 24;
+export const AGENT_ACTIVITY_PARENT_MAX = 32;
 
 export type AgentActivityPhase =
   | "approval"
@@ -55,6 +56,8 @@ export interface AgentActivityThread extends ThreadAttentionRow {
   readonly turnStartedAtMs?: number | null;
   /** The model it works with, as people read it; null when unknown. */
   readonly modelName?: string | null;
+  /** A delegated thread's parent, by title (`delegatedParentTitle`); null otherwise. */
+  readonly parentTitle?: string | null;
   /** Newest first among equals. */
   readonly updatedAtMs: number;
 }
@@ -66,6 +69,8 @@ export interface AgentActivityRow {
   readonly title: string;
   readonly projectName: string | null;
   readonly modelName: string | null;
+  /** The thread that delegated this one, by title, when it was delegated; absent otherwise. */
+  readonly parentTitle?: string | null;
   readonly phase: AgentActivityPhase;
   /**
    * Since when it is in this phase, epoch ms, for an elapsed time: the running turn's start, the
@@ -139,6 +144,11 @@ export function agentActivityThreadFields(
       : null,
     updatedAtMs: epochMs(thread.updatedAt) ?? 0,
   };
+}
+
+/** Trimmed and shortened, or null when nothing is left. */
+function optionalText(text: string | null | undefined, max: number): string | null {
+  return text === null || text === undefined || !text.trim() ? null : truncate(text, max);
 }
 
 /** Shortened by whole characters, so an emoji is never cut in half. */
@@ -235,10 +245,8 @@ export function summarizeAgentActivity(
           thread.projectName === null
             ? null
             : truncate(thread.projectName, AGENT_ACTIVITY_PROJECT_MAX),
-        modelName:
-          thread.modelName === null || thread.modelName === undefined || !thread.modelName.trim()
-            ? null
-            : truncate(thread.modelName, AGENT_ACTIVITY_MODEL_MAX),
+        modelName: optionalText(thread.modelName, AGENT_ACTIVITY_MODEL_MAX),
+        parentTitle: optionalText(thread.parentTitle, AGENT_ACTIVITY_PARENT_MAX),
         phase,
         sinceMs: sinceOf(thread, phase),
       },

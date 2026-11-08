@@ -106,3 +106,20 @@ export function splitSnippet(snippet: string, query: string): ReadonlyArray<Snip
   }
   return parts;
 }
+
+/**
+ * Whether the message search for `query` is still waiting on a machine: every listed machine
+ * must have answered, failed or timed out for this exact query (`settledEnvironmentIds`, kept
+ * for `settledQuery`). Before the debounce fires nothing has settled, so that counts as waiting.
+ */
+export function messageSearchInFlight(input: {
+  readonly query: string | null;
+  readonly environmentIds: ReadonlyArray<string>;
+  readonly settledQuery: string | null;
+  readonly settledEnvironmentIds: ReadonlyArray<string>;
+}): boolean {
+  if (input.query === null || input.environmentIds.length === 0) return false;
+  if (input.settledQuery !== input.query) return true;
+  const settled = new Set(input.settledEnvironmentIds);
+  return input.environmentIds.some((id) => !settled.has(id));
+}

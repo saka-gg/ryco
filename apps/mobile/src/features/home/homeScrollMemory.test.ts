@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { createHomeScrollMemory, homeListFilterKey } from "./homeScrollMemory";
+import { createHomeScrollMemory } from "./homeScrollMemory";
 
 describe("Home scroll memory", () => {
-  const unfiltered = homeListFilterKey("", null);
+  const unfiltered = JSON.stringify(["all", null, null]);
 
   it("restores each mode's position when its list remounts", () => {
     const memory = createHomeScrollMemory();
@@ -19,8 +19,8 @@ describe("Home scroll memory", () => {
     memory.record("inbox", unfiltered, 418);
     memory.record("projects", unfiltered, 230);
 
-    expect(memory.offsetFor("projects", homeListFilterKey("node", null))).toBe(0);
-    expect(memory.offsetFor("inbox", homeListFilterKey("", "node-a"))).toBe(0);
+    expect(memory.offsetFor("projects", JSON.stringify(["all", "node", null]))).toBe(0);
+    expect(memory.offsetFor("inbox", JSON.stringify(["all", "node-a", null]))).toBe(0);
     expect(memory.offsetFor("inbox", unfiltered)).toBe(418);
   });
 

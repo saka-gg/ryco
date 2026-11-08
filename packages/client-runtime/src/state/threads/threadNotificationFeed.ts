@@ -1,4 +1,5 @@
 import type { EnvironmentId } from "@ryco/contracts";
+import type { ThreadLineage } from "@ryco/contracts/orchestration";
 
 import type { EnvironmentConnection } from "../../connection/connection.ts";
 import type {
@@ -6,7 +7,7 @@ import type {
   ShellAcceptance,
 } from "../../connection/supervision.ts";
 import { mapThreadShellSummary } from "./store.ts";
-import { isDelegatedThreadLineage } from "./threadLineage.ts";
+import { delegatedParentTitle, isDelegatedThreadLineage } from "./threadLineage.ts";
 import {
   createThreadNotificationProjector,
   type ThreadNotificationEvent,
@@ -24,6 +25,13 @@ export interface ThreadNotificationCandidate {
   readonly event: ThreadNotificationEvent;
   /** The thread was delegated by another thread, which receives its result. */
   readonly delegated: boolean;
+  /** That delegating thread's title, when this device knows it: the alert names it. */
+  readonly parentTitle: string | null;
+}
+
+interface PendingCandidate {
+  readonly event: ThreadNotificationEvent;
+  readonly lineage: ThreadLineage | null | undefined;
 }
 
 export interface ThreadNotificationFeed {
@@ -68,7 +76,7 @@ export function startThreadNotificationFeed(input: {
     isSnoozed: input.isSnoozed,
   });
   const tracked = new Map<EnvironmentId, TrackedConnection>();
-  let pending: ThreadNotificationCandidate[] = [];
+  let pending: PendingCandidate[] = [];
   let stopped = false;
 
   const rebaseline = (environmentId: EnvironmentId) => {
@@ -120,14 +128,32 @@ export function startThreadNotificationFeed(input: {
     }
   };
 
+  // Read once the batch committed, so the parent's title is the store's current one.
+  const parentTitleOf = (
+    environmentId: EnvironmentId,
+    lineage: ThreadLineage | null | undefined,
+  ): string | null =>
+    isDelegatedThreadLineage(lineage)
+      ? delegatedParentTitle(
+          lineage,
+          (threadId) =>
+            input.readEnvironmentThreads(environmentId).find((thread) => thread.id === threadId)
+              ?.title,
+        )
+      : null;
+
   const deliver = () => {
     const candidates = pending;
     pending = [];
-    for (const candidate of candidates) {
+    for (const { event, lineage } of candidates) {
       if (stopped) return;
-      if (!projector.isCurrent(candidate.event)) continue;
+      if (!projector.isCurrent(event)) continue;
       try {
-        input.onCandidate(candidate);
+        input.onCandidate({
+          event,
+          delegated: isDelegatedThreadLineage(lineage),
+          parentTitle: parentTitleOf(event.ref.environmentId, lineage),
+        });
       } catch (error) {
         console.warn("Thread notification delivery failed", {
           error: error instanceof Error ? error.message : String(error),
@@ -163,7 +189,7 @@ export function startThreadNotificationFeed(input: {
       const thread = mapThreadShellSummary(event.thread, environmentId);
       const candidate = projector.observe({ generation, sequence: event.sequence, thread, nowMs });
       if (candidate !== null) {
-        pending.push({ event: candidate, delegated: isDelegatedThreadLineage(thread.lineage) });
+        pending.push({ event: candidate, lineage: thread.lineage });
       }
     }
     // Shell batches commit inside store mutation barriers; nothing reaches

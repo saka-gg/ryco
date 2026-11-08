@@ -198,7 +198,9 @@ export function useStatisticsData(
   tab: StatisticsTab,
   range: StatRange,
 ) {
-  const [revision, setRevision] = useState(0);
+  // A refresh asks again; an explicit one (`fresh`) also bypasses the nodes' caches.
+  const [request, setRequest] = useState({ revision: 0, fresh: false });
+  const revision = request.revision;
   // Only connection/selection changes invalidate a request, not unrelated live config pushes.
   const key = JSON.stringify(
     environments.map(({ environmentId, label, connectionState, role }) => ({
@@ -218,7 +220,7 @@ export function useStatisticsData(
   const loads = useRef(new SupersedingLoads());
   const handledRevision = useRef(revision);
   useEffect(() => {
-    const fresh = revision !== handledRevision.current;
+    const fresh = request.fresh && revision !== handledRevision.current;
     handledRevision.current = revision;
     loads.current.run(
       // A device whose request already answered (another device changed) is not asked again.
@@ -234,7 +236,7 @@ export function useStatisticsData(
         setAnswers((previous) => new Map(previous).set(environment.environmentId, answer));
       },
     );
-  }, [range, revision, selected, tab]);
+  }, [range, request.fresh, revision, selected, tab]);
 
   const view = useMemo(
     () => deriveStatisticsView(selected, answers, tab, range, revision),
@@ -244,7 +246,10 @@ export function useStatisticsData(
     nodes: view.nodes,
     loading: view.loading,
     refreshing: view.refreshing,
-    refresh: () => setRevision((value) => value + 1),
+    /** Ask every selected device again, bypassing caches: a person asked for it. */
+    refresh: () => setRequest((previous) => ({ revision: previous.revision + 1, fresh: true })),
+    /** Ask every selected device again on the app's own account, such as on coming back. */
+    reload: () => setRequest((previous) => ({ revision: previous.revision + 1, fresh: false })),
     usage: view.usage,
   };
 }

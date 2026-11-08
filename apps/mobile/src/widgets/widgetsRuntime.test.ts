@@ -85,7 +85,7 @@ function harness(initialConfigs: ReadonlyMap<EnvironmentId, ServerConfig>, activ
         return () => appListeners.delete(listener);
       },
     },
-    url: "ryco-dev://settings/statistics?tab=limits",
+    url: "ryco-dev://usage?tab=limits",
     now: () => Date.now(),
     onError: () => undefined,
   };

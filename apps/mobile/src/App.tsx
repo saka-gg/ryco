@@ -26,6 +26,7 @@ import { FatalRenderErrorBoundary } from "./diagnostics/FatalRenderErrorBoundary
 import { useHostedAppLifecycle } from "./hostedHub/useHostedAppLifecycle";
 import { noteMobileClientInteraction } from "./runtime/clientInteraction";
 import { rewriteIncomingSharePath } from "./features/sharing/incomingShareModel";
+import { rewriteLegacyTabPath } from "./navigation/tabs/mainTabsModel";
 import { AppAccessGate } from "./features/access/AppAccessGate";
 import {
   isAppAccessDecided,
@@ -57,9 +58,10 @@ const appLinking = {
   // Home-screen quick actions arrive as app paths through the same config.
   getInitialURL: shortcutAwareLinking.getInitialURL,
   subscribe: shortcutAwareLinking.subscribe,
-  // The share extension opens <scheme>://expo-sharing: New Task takes the share.
+  // The share extension opens <scheme>://expo-sharing: New Task takes the share. Links an
+  // earlier build wrote for a screen that is a tab now open that tab.
   getStateFromPath: (path: string, options?: Parameters<typeof getStateFromPath>[1]) =>
-    getStateFromPath(rewriteIncomingSharePath(path), options),
+    getStateFromPath(rewriteLegacyTabPath(rewriteIncomingSharePath(path)), options),
 };
 
 /**

@@ -15,18 +15,31 @@ type RootNavigation = Omit<NavigationProp<ReactNavigation.RootParamList>, "getSt
   getState(): NavigationState | undefined;
 };
 
+/**
+ * The app's root stack. A tab's screen holds the tab navigator, whose state
+ * names tabs, not the screens and sheets above them.
+ */
+function rootNavigationOf(navigation: RootNavigation): RootNavigation {
+  let root = navigation;
+  for (let parent = root.getParent(); parent !== undefined; parent = root.getParent()) {
+    root = parent as RootNavigation;
+  }
+  return root;
+}
+
 function selectOverSheets(
-  navigation: RootNavigation,
+  from: RootNavigation,
   route: WorkspaceSelectionRoute,
-  navigate: () => void,
+  navigate: (navigation: RootNavigation) => void,
 ): void {
+  const navigation = rootNavigationOf(from);
   const selection = resolveWorkspaceSelection({
     state: navigation.getState(),
     overlayRouteNames: OVERLAY_ROUTE_NAMES,
     route,
   });
   if (selection.type === "navigate") {
-    navigate();
+    navigate(navigation);
   } else if (selection.type === "reset") {
     // Routes without a key get a fresh one, so a replaced thread mounts anew.
     navigation.dispatch(
@@ -56,8 +69,8 @@ export function openThread(
     threadId: thread.threadId,
     ...(thread.messageId ? { messageId: thread.messageId } : {}),
   };
-  selectOverSheets(navigation, { name: "Thread", params }, () =>
-    navigation.navigate("Thread", params),
+  selectOverSheets(navigation, { name: "Thread", params }, (root) =>
+    root.navigate("Thread", params),
   );
 }
 
@@ -67,7 +80,7 @@ export function openProject(
   project: { readonly environmentId: EnvironmentId; readonly projectId: ProjectId },
 ): void {
   const params = { environmentId: project.environmentId, projectId: project.projectId };
-  selectOverSheets(navigation, { name: "Project", params }, () =>
-    navigation.navigate("Project", params),
+  selectOverSheets(navigation, { name: "Project", params }, (root) =>
+    root.navigate("Project", params),
   );
 }

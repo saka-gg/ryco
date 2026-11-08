@@ -2,7 +2,15 @@ import { describe, expect, it } from "vite-plus/test";
 
 import type { AgentControlCompletionReturn } from "@ryco/contracts/agent-control";
 
-import { resolveDelegatedTaskStatus, type DelegatedTaskState } from "./delegatedTaskStatus.ts";
+import {
+  resolveDelegatedTaskStatus,
+  delegatedTasksReturnedWords,
+  delegatedTasksStateWords,
+  delegatedTasksSummaryText,
+  summarizeDelegatedTasks,
+  type DelegatedTaskState,
+  type DelegatedTaskSummaryInput,
+} from "./delegatedTaskStatus.ts";
 import type { SidebarThreadSummary } from "./types.ts";
 
 type ChildTurns = Pick<SidebarThreadSummary, "latestTurn" | "latestCompletedTurnAt">;
@@ -82,5 +90,58 @@ describe("resolveDelegatedTaskStatus", () => {
     expect(status(FINISHED_EARLIER, "idle", returnWith("delivered")).failed).toBe(false);
     expect(status(FINISHED_EARLIER, "idle", returnWith("waiting")).failed).toBe(false);
     expect(status(FINISHED_EARLIER, "idle").failed).toBe(false);
+  });
+});
+
+describe("summarizeDelegatedTasks", () => {
+  const task = (overrides: Partial<DelegatedTaskSummaryInput>): DelegatedTaskSummaryInput => ({
+    state: "idle",
+    tone: "done",
+    failed: false,
+    result: null,
+    ...overrides,
+  });
+
+  it("counts work, answers, failures and finished tasks once each", () => {
+    expect(
+      summarizeDelegatedTasks([
+        task({ state: "working", tone: "working" }),
+        task({ state: "needs-input", tone: "attention" }),
+        task({ state: "error", tone: "danger", failed: true }),
+        // A finished task whose return failed counts as failed, not done.
+        task({ failed: true, result: { delivered: false } }),
+        task({}),
+        task({ tone: "muted" }),
+      ]),
+    ).toEqual({ working: 1, needsYou: 1, failed: 2, done: 1, returned: 0, returning: 1 });
+  });
+
+  it("counts only tasks that return toward N of M returned", () => {
+    expect(
+      summarizeDelegatedTasks([
+        task({ result: { delivered: true } }),
+        task({ state: "working", tone: "working", result: { delivered: false } }),
+        task({ result: null }),
+      ]),
+    ).toMatchObject({ returned: 1, returning: 2, done: 2, working: 1 });
+  });
+});
+
+describe("delegated tasks words", () => {
+  const summary = { working: 2, needsYou: 1, failed: 0, done: 1, returned: 1, returning: 3 };
+
+  it("words a parent's folded line and leaves zero counts out", () => {
+    expect(delegatedTasksStateWords(summary)).toBe("2 working · 1 needs you · 1 done");
+    expect(delegatedTasksSummaryText(summary, 4)).toBe(
+      "4 delegated · 2 working · 1 needs you · 1 done",
+    );
+    const idle = { working: 0, needsYou: 0, failed: 0, done: 0, returned: 0, returning: 0 };
+    expect(delegatedTasksStateWords(idle)).toBeNull();
+    expect(delegatedTasksSummaryText(idle, 2)).toBe("2 delegated");
+  });
+
+  it("counts returns only among tasks whose result comes back", () => {
+    expect(delegatedTasksReturnedWords(summary)).toBe("1 of 3 returned");
+    expect(delegatedTasksReturnedWords({ ...summary, returning: 0 })).toBeNull();
   });
 });

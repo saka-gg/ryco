@@ -382,6 +382,45 @@ describe("the Inbox rows the summary takes", () => {
     expect(entry).toMatchObject({ turnStartedAtMs: NOW - 120_000, modelName: "gpt-5.6-sol" });
   });
 
+  it("names the thread a delegated row works for, archived or not", () => {
+    const delegated = (parentThreadId: string) => ({
+      lineage: { parentThreadId, rootThreadId: parentThreadId, relationship: "delegated" },
+    });
+    const sections: InboxSection[] = [
+      {
+        key: "active",
+        title: "Active",
+        rows: [
+          row({}),
+          row({ key: "env:t2", threadId: "t2" as ThreadId }),
+          row({ key: "env:t3", threadId: "t3" as ThreadId }),
+        ],
+      },
+    ];
+    const threads = agentActivityThreads({
+      sections,
+      threads: [
+        thread("t1", delegated("parent")),
+        thread("t2", delegated("archived")),
+        thread("t3", delegated("gone")),
+        thread("parent", { title: "Fix login redirect loop" }),
+        {
+          shellDetail: "archived-stub",
+          id: "archived",
+          environmentId: "env",
+          title: "Old plan",
+          lineage: null,
+        } as never,
+      ],
+      environments: [environment],
+    });
+    expect(threads.map((entry) => entry.parentTitle)).toEqual([
+      "Fix login redirect loop",
+      "Old plan",
+      null,
+    ]);
+  });
+
   it("is not live on a machine that is offline, cached or not current yet", () => {
     const sections: InboxSection[] = [{ key: "active", title: "Active", rows: [row({})] }];
     for (const other of [
@@ -416,6 +455,18 @@ describe("what a row says", () => {
       since: null,
       phase: "running",
     });
+  });
+
+  it("puts the thread a delegated row works for on its second line, in the project's place", () => {
+    const child = summary({ running: 1 }, [
+      { ...RUNNING.rows[0]!, parentTitle: "Fix login redirect loop" },
+      { ...RUNNING.rows[0]!, key: "env:t2", threadId: "t2", parentTitle: null },
+    ]);
+    const state = agentActivityContentState(child, LINKS, NOW);
+    expect(state.rows.map((row) => [row.project, row.model])).toEqual([
+      ["from Fix login redirect loop", "Opus 5.5"],
+      ["ryco", "Opus 5.5"],
+    ]);
   });
 
   it("names the model as its machine's catalog does, else by its slug", () => {

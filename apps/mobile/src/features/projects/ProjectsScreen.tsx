@@ -2,13 +2,14 @@ import { IconGitFork, IconMessages } from "../../components/icons";
 import { ProjectFavicon } from "../../components/ProjectFavicon";
 import { LegendList, type LegendListRenderItemProps } from "@legendapp/list/react-native";
 import { DeviceIcon } from "../../components/DeviceIcon";
-import { Pressable, View } from "react-native";
+import type { ReactElement } from "react";
+import { Pressable, View, type NativeScrollEvent, type NativeSyntheticEvent } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
 import { EmptyState } from "../../components/EmptyState";
 import { useThemeColor } from "../../lib/useThemeColor";
-import { HOME_LIST_PADDING_BOTTOM } from "../home/homeChromeModel";
+import { listBottomPadding } from "../home/homeChromeModel";
 import {
   projectMachineStatusLabel,
   projectRowAccessibilityLabel,
@@ -123,6 +124,14 @@ export function ProjectsScreen(props: {
   readonly onOpenProject?: (row: ProjectListRow) => void;
   readonly onAddMachine: () => void;
   readonly onScrollOffset?: (offset: number) => void;
+  /** Every scroll event, for a tab's collapsing large title. */
+  readonly onScroll?: (event: NativeSyntheticEvent<NativeScrollEvent>) => void;
+  /** Rendered first, scrolling with the list: a tab's large title and chips. */
+  readonly listHeader?: ReactElement;
+  /** The list scrolls under the glass header and tab bar; these keep its ends clear. */
+  readonly contentInsets?: { readonly top: number; readonly bottom: number };
+  /** The Add project button above the list; on by default. */
+  readonly showAddProject?: boolean;
 }) {
   const primaryForeground = useThemeColor("--color-primary-foreground");
   const renderItem = ({ item }: LegendListRenderItemProps<ProjectListRow>) => (
@@ -141,31 +150,40 @@ export function ProjectsScreen(props: {
       recycleItems
       maintainVisibleContentPosition
       initialScrollOffset={props.initialScrollOffset}
-      onScroll={(event) => props.onScrollOffset?.(event.nativeEvent.contentOffset.y)}
+      onScroll={(event) => {
+        props.onScrollOffset?.(event.nativeEvent.contentOffset.y);
+        props.onScroll?.(event);
+      }}
       scrollEventThrottle={32}
       keyboardDismissMode="on-drag"
       keyboardShouldPersistTaps="handled"
       contentInsetAdjustmentBehavior="never"
-      contentContainerStyle={{ paddingBottom: HOME_LIST_PADDING_BOTTOM }}
+      contentContainerStyle={{
+        paddingTop: props.contentInsets?.top ?? 0,
+        paddingBottom: listBottomPadding(props.contentInsets),
+      }}
       ListHeaderComponent={
-        props.hasMachines && props.rows.length > 0 ? (
-          <View className="px-4 pt-3 pb-3">
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Add project"
-              onPress={props.onAddProject}
-              className="h-12 flex-row items-center justify-center gap-2 rounded-full bg-primary px-5 active:opacity-80"
-            >
-              <SymbolView
-                name="plus"
-                size={17}
-                tintColor={primaryForeground as string}
-                type="monochrome"
-              />
-              <Text className="text-sm font-ryco-bold text-primary-foreground">Add project</Text>
-            </Pressable>
-          </View>
-        ) : null
+        <View>
+          {props.listHeader}
+          {props.showAddProject !== false && props.hasMachines && props.rows.length > 0 ? (
+            <View className="px-4 pt-3 pb-3">
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Add project"
+                onPress={props.onAddProject}
+                className="h-12 flex-row items-center justify-center gap-2 rounded-full bg-primary px-5 active:opacity-80"
+              >
+                <SymbolView
+                  name="plus"
+                  size={17}
+                  tintColor={primaryForeground as string}
+                  type="monochrome"
+                />
+                <Text className="text-sm font-ryco-bold text-primary-foreground">Add project</Text>
+              </Pressable>
+            </View>
+          ) : null}
+        </View>
       }
       ListEmptyComponent={
         <View className="px-2 py-14">

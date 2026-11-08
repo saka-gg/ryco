@@ -39,7 +39,7 @@ export function startMobileWidgets(): WidgetsRuntime | null {
         return () => subscription.remove();
       },
     },
-    url: Linking.createURL("settings/statistics", { queryParams: { tab: "limits" } }),
+    url: Linking.createURL("usage", { queryParams: { tab: "limits" } }),
   });
 }
 

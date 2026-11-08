@@ -52,6 +52,11 @@ export function isWorkspaceDeepLink(value: string): boolean {
       path.startsWith("threads/") ||
       path.startsWith("projects/") ||
       path === "tasks/new" ||
+      // The main tabs (`mainTabsModel.ts`) and Search.
+      path === "tasks" ||
+      path === "pull-requests" ||
+      path === "usage" ||
+      path === "search" ||
       path === "settings" ||
       path.startsWith("settings/")
     );

@@ -43,6 +43,10 @@ export const MVP_ROOT_ROUTES = {
     ios: { presentation: "card" },
     android: { presentation: "card" },
   },
+  /**
+   * The main tabs (`tabs/mainTabsModel.ts`): Chats, Tasks, PRs, Usage and
+   * Settings. Every other screen pushes or floats above them.
+   */
   Home: {
     linking: "",
     overlay: false,
@@ -228,20 +232,18 @@ export const MVP_ROOT_ROUTES = {
     ios: { presentation: "card" },
     android: { presentation: "card" },
   },
-  SettingsSheet: {
-    linking: "settings",
-    // Floats over the workspace: opening Settings from the Home header must not
-    // change which thread the workspace is on (see WORKSPACE_OVERLAY_ROUTES).
-    overlay: true,
+  /**
+   * One search across chats, message text, pull requests and tasks, opened
+   * from a tab's search button. A screen of its own rather than an overlay: a
+   * result pushes above it, and back returns to the results.
+   */
+  Search: {
+    linking: "search",
+    overlay: false,
     headerPreset: "none",
     headerAction: "none",
-    // Start compact; the native grabber expands longer settings screens.
-    ios: {
-      presentation: "formSheet",
-      sheetAllowedDetents: [0.78, 0.94],
-      sheetGrabberVisible: true,
-    },
-    android: { presentation: "card" },
+    ios: { presentation: "card" },
+    android: { presentation: "card", headerShown: false },
   },
   NotFound: {
     // Deep-link catch-all — the one sanctioned route not in the spec's table.
@@ -257,87 +259,72 @@ export const MVP_ROOT_ROUTES = {
 export type MvpRootRouteName = keyof typeof MVP_ROOT_ROUTES;
 
 /**
- * A nested settings route.
+ * A page of Settings, pushed above the tabs from the Settings tab.
  *
- * The per-platform presentation is REQUIRED rather than inferred. Every route in
- * this stack is a push today, and writing that down is what makes the next route
- * that should not be one an explicit decision instead of a default nobody
- * noticed — the same reason `MvpRouteDescriptor` carries both platforms.
+ * Each one is a push on both platforms deliberately, not a sheet:
+ * `docs/relay-e2ee-protocol.md` §13.1.1 forbids an indication that "dismisses
+ * into a verified-looking state", and a sheet the owner swipes away is the
+ * nearest thing this navigator has to one. Writing the presentation down for
+ * every page makes the next page that should not be a push an explicit
+ * decision instead of a default nobody noticed.
  */
-export interface MvpSettingsRouteDescriptor {
-  readonly linking: string;
-  /** Settings itself installs a parent-stack close action; every pushed child
-   *  has an explicit Back button, including non-swipeable security screens. */
-  readonly headerAction: "back" | "none";
-  readonly ios: RoutePlatformPresentation;
-  readonly android: RoutePlatformPresentation;
-}
-
-/** A push inside the settings stack, which is what every route here is. */
-const SETTINGS_PUSH = {
+const SETTINGS_PAGE = {
+  overlay: false,
+  headerPreset: "sheet-solid",
+  headerAction: "back",
   ios: { presentation: "card" },
   android: { presentation: "card" },
-} as const satisfies Pick<MvpSettingsRouteDescriptor, "ios" | "android">;
+} as const satisfies Omit<MvpRouteDescriptor, "linking">;
 
-// Nested routes inside the Settings sheet.
-export const MVP_SETTINGS_SHEET_ROUTES = {
-  Settings: { linking: "", headerAction: "none", ...SETTINGS_PUSH },
-  SettingsHub: { linking: "hub", headerAction: "back", ...SETTINGS_PUSH },
-  SettingsWorkspace: { linking: "workspace", headerAction: "back", ...SETTINGS_PUSH },
-  SettingsStatistics: { linking: "statistics", headerAction: "back", ...SETTINGS_PUSH },
+const SETTINGS = "settings";
+
+// The Settings tab's pages. Their links keep the `settings/…` paths they had
+// when Settings was a sheet, so saved links still open them.
+export const MVP_SETTINGS_ROUTES = {
+  SettingsHub: { linking: `${SETTINGS}/hub`, ...SETTINGS_PAGE },
+  SettingsWorkspace: { linking: `${SETTINGS}/workspace`, ...SETTINGS_PAGE },
   /** Each connected machine's provider instances; a sign-in opens a sheet of its own. */
-  SettingsProviderAccounts: {
-    linking: "provider-accounts",
-    headerAction: "back",
-    ...SETTINGS_PUSH,
-  },
-  SettingsInbox: { linking: "inbox", headerAction: "back", ...SETTINGS_PUSH },
-  /** Archived tasks across machines; Restore brings one back to the Inbox. */
-  SettingsArchived: { linking: "archived", headerAction: "back", ...SETTINGS_PUSH },
+  SettingsProviderAccounts: { linking: `${SETTINGS}/provider-accounts`, ...SETTINGS_PAGE },
+  SettingsInbox: { linking: `${SETTINGS}/inbox`, ...SETTINGS_PAGE },
+  /** Archived tasks across machines; Restore brings one back to Chats. */
+  SettingsArchived: { linking: `${SETTINGS}/archived`, ...SETTINGS_PAGE },
   /** Thread alerts, which kinds alert, and the Live Activity. */
-  SettingsNotifications: { linking: "notifications", headerAction: "back", ...SETTINGS_PUSH },
-  // Hosted Hub account. Account management stays nested; voluntary sign-in
-  // opens the full-screen root Access route rather than a dismissible sheet.
-  SettingsAccount: { linking: "account", headerAction: "back", ...SETTINGS_PUSH },
+  SettingsNotifications: { linking: `${SETTINGS}/notifications`, ...SETTINGS_PAGE },
+  // Hosted Hub account. Voluntary sign-in opens the full-screen root Access
+  // route rather than a dismissible sheet.
+  SettingsAccount: { linking: `${SETTINGS}/account`, ...SETTINGS_PAGE },
   /**
    * The `docs/relay-e2ee-protocol.md` §13.1.1 security surface: the persistent
    * indication that this device has verified no node on this Hub, the channel's
    * §12.2 label, the §13.2.1 resolutions, and the §11.4 local diagnostics.
-   *
-   * Nested for the same reason `SettingsAccount` is, and a PUSH on both
-   * platforms deliberately: §13.1.1 requires an indication that "MUST NOT be
-   * presented as a transient banner that dismisses into a verified-looking
-   * state", and a sheet the owner swipes away is the closest thing this
-   * navigator has to one.
    */
   SettingsNodeSecurity: {
-    linking: "node-security/:environmentId/:nodeId",
-    headerAction: "back",
-    ...SETTINGS_PUSH,
+    linking: `${SETTINGS}/node-security/:environmentId/:nodeId`,
+    ...SETTINGS_PAGE,
   },
   /**
    * The §13.2 ceremony and §13.3's re-verification UI: the enrollment
    * fingerprint, the §13.4 safety number, and the one action that mints an owner
-   * verification decision. A push on both platforms so the comparison cannot be
-   * dismissed by a downward swipe mid-ceremony.
+   * verification decision. A push so the comparison cannot be dismissed by a
+   * downward swipe mid-ceremony.
    */
   SettingsNodeVerification: {
-    linking: "node-verification/:environmentId/:nodeId",
-    headerAction: "back",
-    ...SETTINGS_PUSH,
+    linking: `${SETTINGS}/node-verification/:environmentId/:nodeId`,
+    ...SETTINGS_PAGE,
   },
-  SettingsAppearance: { linking: "appearance", headerAction: "back", ...SETTINGS_PUSH },
-  SettingsClientStorage: {
-    linking: "client-storage",
-    headerAction: "back",
-    ...SETTINGS_PUSH,
-  },
-  SettingsAbout: { linking: "about", headerAction: "back", ...SETTINGS_PUSH },
-  SettingsDiagnostics: { linking: "diagnostics", headerAction: "back", ...SETTINGS_PUSH },
-} as const satisfies Record<string, MvpSettingsRouteDescriptor>;
+  SettingsAppearance: { linking: `${SETTINGS}/appearance`, ...SETTINGS_PAGE },
+  SettingsClientStorage: { linking: `${SETTINGS}/client-storage`, ...SETTINGS_PAGE },
+  SettingsAbout: { linking: `${SETTINGS}/about`, ...SETTINGS_PAGE },
+  SettingsDiagnostics: { linking: `${SETTINGS}/diagnostics`, ...SETTINGS_PAGE },
+} as const satisfies Record<string, MvpRouteDescriptor>;
 
-export type MvpSettingsRouteName = keyof typeof MVP_SETTINGS_SHEET_ROUTES;
+export type MvpSettingsRouteName = keyof typeof MVP_SETTINGS_ROUTES;
 
-export const WORKSPACE_OVERLAY_ROUTE_NAMES: readonly MvpRootRouteName[] = (
-  Object.keys(MVP_ROOT_ROUTES) as MvpRootRouteName[]
-).filter((name) => MVP_ROOT_ROUTES[name].overlay);
+/** Every root route: the screens above, then the Settings tab's pages. */
+export const MVP_ALL_ROOT_ROUTES = { ...MVP_ROOT_ROUTES, ...MVP_SETTINGS_ROUTES } as const;
+
+export type MvpAnyRootRouteName = keyof typeof MVP_ALL_ROOT_ROUTES;
+
+export const WORKSPACE_OVERLAY_ROUTE_NAMES: readonly MvpAnyRootRouteName[] = (
+  Object.keys(MVP_ALL_ROOT_ROUTES) as MvpAnyRootRouteName[]
+).filter((name) => MVP_ALL_ROOT_ROUTES[name].overlay);

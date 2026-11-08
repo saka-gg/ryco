@@ -13,8 +13,7 @@ const hoisted = vi.hoisted(() => ({
   clearMobileHostedSessionToken: vi.fn(async () => undefined),
   invalidateMobileHostedRuntime: vi.fn(),
   ensureMobileHostedSession: vi.fn(async () => undefined),
-  parentDispatch: vi.fn(),
-  stackReplace: vi.fn((name: string) => ({ type: "STACK_REPLACE", payload: { name } })),
+  navigate: vi.fn(),
   order: [] as string[],
   mountEffects: [] as (() => void)[],
 }));
@@ -31,11 +30,7 @@ vi.mock("react", async (importOriginal) => {
   };
 });
 vi.mock("@react-navigation/native", () => ({
-  StackActions: { replace: hoisted.stackReplace },
-  useNavigation: () => ({
-    navigate: () => undefined,
-    getParent: () => ({ dispatch: hoisted.parentDispatch }),
-  }),
+  useNavigation: () => ({ navigate: hoisted.navigate }),
 }));
 vi.mock("expo-sqlite/kv-store", () => ({
   default: { getItem: async () => null, setItem: async () => {}, removeItem: async () => {} },
@@ -166,17 +161,13 @@ describe("Hub domain change", () => {
 });
 
 describe("Hub settings navigation", () => {
-  it("replaces the Settings root with Machines instead of navigating underneath it", () => {
+  it("pushes Machines above the Settings page", () => {
     const row = findPropsByLabel(SettingsHubRouteScreen(), "SettingsRow", "Machines");
 
     expect(typeof row?.onPress).toBe("function");
     if (typeof row?.onPress !== "function") throw new Error("Machines row is not actionable");
     row.onPress();
 
-    expect(hoisted.stackReplace).toHaveBeenCalledWith("Connections");
-    expect(hoisted.parentDispatch).toHaveBeenCalledWith({
-      type: "STACK_REPLACE",
-      payload: { name: "Connections" },
-    });
+    expect(hoisted.navigate).toHaveBeenCalledWith("Connections");
   });
 });

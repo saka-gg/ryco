@@ -84,3 +84,74 @@ export function resolveDelegatedTaskStatus(input: {
         completionReturnPresentation(input.completionReturn.status).tone === "danger"),
   };
 }
+
+/** What a parent's summary reads of one delegated task (web's dock child, the phone's sheet row). */
+export interface DelegatedTaskSummaryInput {
+  readonly state: DelegatedTaskState;
+  readonly tone: DelegatedTaskTone;
+  /** The shared failure rule (`resolveDelegatedTaskStatus`). */
+  readonly failed: boolean;
+  /** Null when the task was created without a result return. */
+  readonly result: { readonly delivered: boolean } | null;
+}
+
+/** A parent's delegated tasks in counts: the dock's summary line and the phone's agents entry. */
+export interface DelegatedTasksSummary {
+  readonly working: number;
+  readonly needsYou: number;
+  /** Tasks in error, or whose result return is blocked, failed or uncertain. */
+  readonly failed: number;
+  /** Tasks resting after a finished turn, and not failed. */
+  readonly done: number;
+  /** Tasks whose result reached the parent. */
+  readonly returned: number;
+  /** Tasks whose result returns to the parent; "N of M returned" counts only these. */
+  readonly returning: number;
+}
+
+export function summarizeDelegatedTasks(
+  tasks: ReadonlyArray<DelegatedTaskSummaryInput>,
+): DelegatedTasksSummary {
+  let working = 0;
+  let needsYou = 0;
+  let failed = 0;
+  let done = 0;
+  let returned = 0;
+  let returning = 0;
+  for (const task of tasks) {
+    if (task.state === "working") working += 1;
+    if (task.state === "needs-input") needsYou += 1;
+    if (task.failed) failed += 1;
+    else if (task.tone === "done") done += 1;
+    if (task.result !== null) {
+      returning += 1;
+      if (task.result.delivered) returned += 1;
+    }
+  }
+  return { working, needsYou, failed, done, returned, returning };
+}
+
+/**
+ * The delegated tasks' state words, in the dock's order: "2 working · 1 needs you · 1 failed ·
+ * 3 done". Zero counts are left out; null when every count is zero.
+ */
+export function delegatedTasksStateWords(summary: DelegatedTasksSummary): string | null {
+  const words = [
+    summary.working > 0 ? `${summary.working} working` : null,
+    summary.needsYou > 0 ? `${summary.needsYou} needs you` : null,
+    summary.failed > 0 ? `${summary.failed} failed` : null,
+    summary.done > 0 ? `${summary.done} done` : null,
+  ].filter((word): word is string => word !== null);
+  return words.length > 0 ? words.join(" · ") : null;
+}
+
+/** "3 delegated · 2 working · 1 done": a parent's folded line (phone Chats, a chat's context). */
+export function delegatedTasksSummaryText(summary: DelegatedTasksSummary, total: number): string {
+  const state = delegatedTasksStateWords(summary);
+  return state ? `${total} delegated · ${state}` : `${total} delegated`;
+}
+
+/** "2 of 3 returned", counting only tasks whose result returns here; null when none does. */
+export function delegatedTasksReturnedWords(summary: DelegatedTasksSummary): string | null {
+  return summary.returning > 0 ? `${summary.returned} of ${summary.returning} returned` : null;
+}

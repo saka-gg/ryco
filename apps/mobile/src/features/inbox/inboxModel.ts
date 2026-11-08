@@ -10,6 +10,7 @@ import type {
 } from "@ryco/client-runtime/state/threads";
 import {
   buildThreadInbox,
+  delegatedParentTitle,
   resolveThreadHideAvailability,
   resolveThreadLifecycleAvailability,
   threadInboxConnectionBlocker,
@@ -20,6 +21,7 @@ import {
 } from "@ryco/client-runtime/state/message-queue/queueBadge";
 import { CHAT_WORKSPACE_LABEL, projectDisplayLabel } from "@ryco/client-runtime/state/composer";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
+import type { ThreadLineage } from "@ryco/contracts/orchestration";
 import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
 import { isChatProject } from "@ryco/shared/projectKind";
 import type { ThreadSettlementBlocker } from "@ryco/shared/threadSettlement";
@@ -139,14 +141,44 @@ export interface InboxThreadRow {
   readonly canArchive: boolean;
   /** The message the search found in this thread, with the words to highlight; null otherwise. */
   readonly messageMatch?: (InboxMessageMatch & { readonly query: string }) | null;
+  /** Server-owned provenance: set on a thread created on behalf of another (`ThreadLineage`). */
+  readonly lineage?: ThreadLineage | null;
+  /**
+   * The delegating thread's title, on a delegated child whose parent this
+   * phone knows: the row names it ("from …") wherever the child shows alone.
+   */
+  readonly parentTitle?: string | null;
+  /** Delegated children folded under this row in Chats (`nestDelegatedInboxRows`). */
+  readonly delegatedChildren?: ReadonlyArray<InboxThreadRow>;
   readonly settlementBlocker: ThreadSettlementBlocker | null;
   readonly mutationEnabled: boolean;
   readonly mutationBlocker: ThreadInboxMutationBlocker | null;
 }
 
 export interface InboxSection {
-  readonly key: "pinned" | "active" | "settled" | "snoozed" | "hidden";
-  readonly title: "Pinned" | "Active" | "Settled" | "Snoozed" | "Hidden";
+  /**
+   * `buildInboxSections` lists Pinned, Active, Snoozed, Settled and Hidden;
+   * Chats splits Active by what it needs (`chatsListModel.ts`).
+   */
+  readonly key:
+    | "pinned"
+    | "active"
+    | "needs-you"
+    | "working"
+    | "recent"
+    | "settled"
+    | "snoozed"
+    | "hidden";
+  readonly title:
+    | "Pinned"
+    | "Active"
+    | "Needs you"
+    | "Working"
+    | "Recent"
+    | "Settled"
+    | "Done"
+    | "Snoozed"
+    | "Hidden";
   readonly rows: ReadonlyArray<InboxThreadRow>;
 }
 
@@ -157,6 +189,8 @@ export interface BuildInboxInput {
   readonly threads: ReadonlyArray<SidebarThreadOrStub>;
   readonly environments: ReadonlyArray<InboxEnvironment>;
   readonly nodeScope?: EnvironmentId | null;
+  /** Only this project's threads (`scopedProjectKey`); null or absent lists every project. */
+  readonly projectScope?: string | null;
   readonly query?: string;
   readonly deliveryUnknownThreadIds?: ReadonlySet<string>;
   readonly localQueuedThreadIds?: ReadonlySet<string>;
@@ -283,6 +317,7 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
     autoSettleAfterDays: input.autoSettleAfterDays,
     filters: {
       ...(input.nodeScope ? { environmentIds: [input.nodeScope] } : {}),
+      ...(input.projectScope ? { projectKeys: [input.projectScope] } : {}),
       text: input.query,
       ...(input.messageMatches && input.messageMatches.size > 0
         ? { textMatchedKeys: new Set(input.messageMatches.keys()) }
@@ -290,6 +325,16 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
     },
     nowMs,
   });
+
+  const titleByThreadKey = new Map(
+    input.threads.map(
+      (thread) => [scopedKey(thread.environmentId, thread.id), thread.title] as const,
+    ),
+  );
+  const parentTitleOf = (thread: SidebarThreadSummary): string | null =>
+    delegatedParentTitle(thread.lineage, (parentId) =>
+      titleByThreadKey.get(scopedKey(thread.environmentId, parentId)),
+    );
 
   const searchedText = input.query?.trim() ?? "";
   const messageMatchFor = (key: string) => {
@@ -372,6 +417,8 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
       canSettle: entry.lifecycle.eligibility.canSettle || entry.lifecycle.settleFiles === true,
       pinned: entry.pinned,
       messageMatch: messageMatchFor(entry.key),
+      lineage: thread.lineage ?? null,
+      parentTitle: parentTitleOf(thread),
       // Archive's own rule: the shared connection rule plus a conversation and no running turn.
       canArchive:
         environment?.stale !== true && resolveThreadLifecycleAvailability(entry).archive.enabled,

@@ -9,6 +9,7 @@ import type { InboxThreadRow as InboxThreadRowModel } from "./inboxModel";
 
 vi.mock("react-native", () => ({ Pressable: "Pressable", View: "View" }));
 vi.mock("../../components/AppText", () => ({ AppText: "Text" }));
+vi.mock("../../components/AppSymbol", () => ({ SymbolView: "SymbolView" }));
 vi.mock("../../components/icons", () => ({
   IconFolder: "IconFolder",
   IconGitBranch: "IconGitBranch",

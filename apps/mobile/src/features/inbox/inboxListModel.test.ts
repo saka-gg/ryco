@@ -124,3 +124,43 @@ describe("mobile Inbox Hidden shelf", () => {
     expect(open.filter((item) => item.kind === "thread")).toHaveLength(3);
   });
 });
+
+describe("delegated groups in the list", () => {
+  const child = { key: "child", title: "Child", state: "working" } as InboxThreadRow;
+  const host = {
+    key: "host",
+    title: "Host",
+    delegatedChildren: [child],
+  } as unknown as InboxThreadRow;
+  const sections: InboxSection[] = [{ key: "recent", title: "Recent", rows: [host] }];
+
+  it("folds a parent's children into one summary line", () => {
+    const items = flattenInboxSections({
+      sections,
+      settledOpen: false,
+      settledVisibleCount: MOBILE_SETTLED_PAGE_SIZE,
+    });
+    expect(items.map((item) => item.key)).toEqual(["section:recent", "host", "delegated:host"]);
+    expect(items[2]).toMatchObject({
+      kind: "delegated-group",
+      summary: "1 delegated · 1 working",
+      expanded: false,
+    });
+  });
+
+  it("lists the children nested once the group is open", () => {
+    const items = flattenInboxSections({
+      sections,
+      settledOpen: false,
+      settledVisibleCount: MOBILE_SETTLED_PAGE_SIZE,
+      openDelegatedHostKeys: new Set(["host"]),
+    });
+    expect(items.map((item) => item.key)).toEqual([
+      "section:recent",
+      "host",
+      "delegated:host",
+      "child",
+    ]);
+    expect(items[3]).toMatchObject({ kind: "thread", nested: true });
+  });
+});

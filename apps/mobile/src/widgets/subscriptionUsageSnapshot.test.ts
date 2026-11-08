@@ -18,7 +18,7 @@ import {
 
 const NOW = Date.parse("2026-10-31T10:00:00Z");
 const NOW_SECONDS = NOW / 1000;
-const URL = "ryco-dev://settings/statistics?tab=limits";
+const URL = "ryco-dev://usage?tab=limits";
 const HUB_URL = "https://hub.private.example.test:8317";
 const EMAIL = ["alice", "example.com"].join("@");
 
