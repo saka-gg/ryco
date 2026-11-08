@@ -88,6 +88,13 @@ The tab bar (round 2, 2026-11) uses the same upstream's tab icon choices at `ade
 template image, copied verbatim as `assets/icons/pull-request.png` (with `@2x` and `@3x`)
 from upstream's `apps/mobile/assets/icons/`.
 
+The Settings tab list (round 2, 2026-11) follows the layout of the same upstream's phone
+Settings (`features/settings/SettingsRouteScreen.tsx`, `components/SettingsRow.tsx`,
+`components/ui/ListRowLayout.tsx`, `ListSection.tsx`), rewritten for Ryco's pages rather than
+copied: grouped cards with quiet headers, one plain leading symbol per row, the value on the
+right with a chevron, and the rarely used pages in an untitled group at the bottom
+(`src/features/settings/SettingsRouteScreen.tsx`, `settingsListModel.ts`, `components/*`).
+
 `pingdotgg/t3code` is Copyright (c) 2026 T3 Tools Inc. and licensed under the MIT
 License; that notice is retained below as required. The four vendored native
 modules under `modules/*` carry their own `LICENSE` / `UPSTREAM.md` notices

@@ -1,0 +1,64 @@
+import { describe, expect, it } from "vite-plus/test";
+
+import { MVP_SETTINGS_ROUTES } from "../../navigation/mvpRouteConfig";
+import { buildSettingsSections, buildSettingsSummary } from "./settingsListModel";
+
+describe("Settings list", () => {
+  const sections = buildSettingsSections({ version: "0.4.0" });
+  const ids = new Set(sections.flatMap((section) => section.rows.map((row) => row.id)));
+
+  it("keeps every settings page reachable from the list or from the page that owns it", () => {
+    // The account page opens from Hub and account (the summary card); the verification
+    // ceremony from Node security.
+    const reachedElsewhere = new Set(["SettingsAccount", "SettingsNodeVerification"]);
+    for (const route of Object.keys(MVP_SETTINGS_ROUTES)) {
+      if (reachedElsewhere.has(route)) continue;
+      const id = route === "SettingsNodeSecurity" ? "NodeSecurity" : route;
+      if (route === "SettingsHub") continue; // the summary card
+      expect(ids.has(id as never), route).toBe(true);
+    }
+  });
+
+  it("drops the Usage row now that Usage is a tab, and lists no page twice", () => {
+    const all = sections.flatMap((section) => section.rows.map((row) => row.id));
+    expect(new Set(all).size).toBe(all.length);
+    expect(all.some((id) => /usage|statistics/i.test(id))).toBe(false);
+  });
+
+  it("gives every row an icon and puts the rarely used pages last", () => {
+    for (const section of sections) {
+      for (const row of section.rows) expect(row.icon, row.id).not.toBe("");
+    }
+    expect(sections.at(-1)?.rows.map((row) => row.id)).toEqual([
+      "SettingsArchived",
+      "SettingsClientStorage",
+      "SettingsDiagnostics",
+      "SettingsAbout",
+    ]);
+    expect(sections.at(-1)?.rows.at(-1)?.value).toBe("0.4.0");
+  });
+});
+
+describe("Settings summary", () => {
+  it("names the Hub by host and counts the machines online", () => {
+    expect(
+      buildSettingsSummary({
+        hub: { label: "Ryco Hub", origin: "https://hub.example.com" },
+        machines: { total: 3, connected: 2 },
+      }),
+    ).toEqual({
+      hubLabel: "Ryco Hub",
+      hubDetail: "hub.example.com",
+      machinesValue: "2 of 3 online",
+    });
+    expect(buildSettingsSummary({ hub: null, machines: { total: 0, connected: 0 } })).toMatchObject(
+      {
+        hubLabel: "No Hub",
+        machinesValue: "None",
+      },
+    );
+    expect(
+      buildSettingsSummary({ hub: null, machines: { total: 2, connected: 2 } }).machinesValue,
+    ).toBe("2 online");
+  });
+});
