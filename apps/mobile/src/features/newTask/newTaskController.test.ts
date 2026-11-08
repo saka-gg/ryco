@@ -17,6 +17,7 @@ import {
   type NewTaskControllerDeps,
   type NewTaskStableIds,
 } from "./newTaskController";
+import { TaskChatStartError } from "../tasks/taskChatStartError";
 
 const ids: NewTaskStableIds = {
   projectId: ProjectId.make("project-new"),
@@ -528,5 +529,103 @@ describe("New Task controller", () => {
     expect(result.deliveryUncertain).toBe(true);
     expect(result.attempt.threadReady).toBe(true);
     expect(result.attempt.prompt).toBe("Do not lose this");
+  });
+});
+
+describe("New Task controller for a task's chat", () => {
+  const taskAttempt = (worktree: "local" | "new") =>
+    createNewTaskAttempt({
+      environmentId,
+      prompt: "Ship the follow-up\n\nLinked:\n- Branch feature/x",
+      project: { kind: "existing", projectId: existingProjectId, workspaceRoot: "/code/ryco" },
+      worktree:
+        worktree === "local"
+          ? { kind: "local" }
+          : {
+              kind: "new",
+              branch: "task/ship-follow-up",
+              baseBranch: "feature/x",
+              fetchOrigin: false,
+            },
+      createdAt,
+      ids,
+      localTaskId: "task-1",
+    });
+
+  it("sends the first turn as the task's and everything else as before", async () => {
+    const delegated: Array<{ taskId: string; type: string }> = [];
+    const runtime = deps({
+      delegate: async (taskId, command) => {
+        delegated.push({ taskId, type: command.type });
+      },
+    });
+    const result = await runNewTaskAttempt(taskAttempt("local"), runtime);
+
+    expect(result.ok).toBe(true);
+    expect(runtime.commands.map((command) => command.type)).toEqual(["thread.create"]);
+    expect(delegated).toEqual([{ taskId: "task-1", type: "thread.turn.start" }]);
+  });
+
+  it("creates the worktree inside the task's turn start", async () => {
+    const delegate = vi.fn(async () => undefined);
+    const runtime = deps({ delegate });
+    const result = await runNewTaskAttempt(taskAttempt("new"), runtime);
+
+    expect(result.ok).toBe(true);
+    expect(runtime.commands).toEqual([]);
+    expect(delegate).toHaveBeenCalledWith(
+      "task-1",
+      expect.objectContaining({
+        type: "thread.turn.start",
+        bootstrap: expect.objectContaining({
+          prepareWorktree: expect.objectContaining({
+            branch: "task/ship-follow-up",
+            baseBranch: "feature/x",
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("shows why a start was refused here, and retries one the machine recorded under its id", async () => {
+    const refusedHere = await runNewTaskAttempt(
+      taskAttempt("new"),
+      deps({
+        delegate: async () => {
+          throw new TaskChatStartError("The task is done.", false);
+        },
+      }),
+    );
+    expect(refusedHere).toMatchObject({
+      ok: false,
+      step: "worktree",
+      message: "The task is done.",
+      deliveryUncertain: false,
+    });
+
+    const recordedFailed = await runNewTaskAttempt(
+      taskAttempt("new"),
+      deps({
+        delegate: async () => {
+          throw new TaskChatStartError("Provider unavailable.", true);
+        },
+      }),
+    );
+    expect(recordedFailed).toMatchObject({
+      ok: false,
+      message: "Provider unavailable.",
+      deliveryUncertain: true,
+    });
+    if (recordedFailed.ok) throw new Error("expected a failure");
+    const retry = prepareNewTaskRetry(recordedFailed.attempt, recordedFailed, () =>
+      CommandId.make("command-fresh"),
+    );
+    expect(retry.ids.turnCommandId).toBe(ids.turnCommandId);
+    expect(retry.localTaskId).toBe("task-1");
+  });
+
+  it("refuses a task's chat where it cannot be sent as the task's", async () => {
+    const result = await runNewTaskAttempt(taskAttempt("local"), deps());
+    expect(result).toMatchObject({ ok: false, step: "turn", deliveryUncertain: false });
   });
 });
