@@ -57,6 +57,8 @@ export interface Preferences {
    * again" turns it off. Unset means on.
    */
   readonly claudeResumeReview?: boolean;
+  /** A light haptic tick as an open thread's reply streams in. Unset means on. */
+  readonly streamHaptics?: boolean;
 }
 
 export function sanitizePreferences(parsed: Preferences): Preferences {
@@ -79,6 +81,7 @@ export function sanitizePreferences(parsed: Preferences): Preferences {
     backgroundAlerts?: boolean;
     mutedAlertKinds?: ReadonlyArray<PushAlertKind>;
     claudeResumeReview?: boolean;
+    streamHaptics?: boolean;
   } = {};
 
   if (typeof parsed.liveActivitiesEnabled === "boolean") {
@@ -129,6 +132,9 @@ export function sanitizePreferences(parsed: Preferences): Preferences {
   }
   if (typeof parsed.backgroundAlerts === "boolean") {
     preferences.backgroundAlerts = parsed.backgroundAlerts;
+  }
+  if (typeof parsed.streamHaptics === "boolean") {
+    preferences.streamHaptics = parsed.streamHaptics;
   }
   if (Array.isArray(parsed.mutedAlertKinds)) {
     const isKind = Schema.is(PushAlertKind);
@@ -236,6 +242,11 @@ export function isThreadContentCacheEnabled(preferences: Preferences = state.pre
  */
 export function isClaudeResumeReviewEnabled(preferences: Preferences = state.preferences): boolean {
   return preferences.claudeResumeReview !== false;
+}
+
+/** Whether an open thread ticks a haptic as its reply streams. On unless turned off. */
+export function isStreamHapticsEnabled(preferences: Preferences = state.preferences): boolean {
+  return preferences.streamHaptics !== false;
 }
 
 export function subscribePreferences(listener: Listener): () => void {

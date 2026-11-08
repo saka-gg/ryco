@@ -82,17 +82,14 @@ describe("collectComposerInlineTokens", () => {
     expect(collectComposerInlineTokens("Read [docs](https://example.com) first")).toEqual([]);
   });
 
-  it.each(["@expo/ui", "@jane/foo.js", "@scope/pkg/sub/path"])(
-    "keeps scoped package reference %s as plain text",
-    (reference) => {
-      expect(collectComposerInlineTokens(`Install ${reference} next`)).toEqual([]);
+  it.each(["src/a.ts", "expo/ui", "scope/pkg/sub/path"])(
+    "reads the bare nested path @%s as a mention, like the web composer",
+    (path) => {
+      expect(collectComposerInlineTokens(`Inspect @${path} next`)).toMatchObject([
+        { type: "mention", value: path, source: `@${path}` },
+      ]);
     },
   );
-
-  it("keeps scoped package references plain across incomplete input and IME whitespace", () => {
-    expect(collectComposerInlineTokens("Install @expo/ui")).toEqual([]);
-    expect(collectComposerInlineTokens("入力 @expo/ui　を追加")).toEqual([]);
-  });
 
   it("keeps bare non-scoped file paths as mentions", () => {
     expect(collectComposerInlineTokens("Inspect @README.md next")).toEqual([

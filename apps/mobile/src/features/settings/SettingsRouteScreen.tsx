@@ -65,6 +65,10 @@ export function SettingsRouteScreen() {
           onPress={() => navigation.navigate("SettingsInbox" as never)}
         />
         <SettingsRow
+          label="Archived tasks"
+          onPress={() => navigation.navigate("SettingsArchived" as never)}
+        />
+        <SettingsRow
           label="Defaults"
           value="Per node"
           onPress={() => navigation.navigate("SettingsWorkspace" as never)}

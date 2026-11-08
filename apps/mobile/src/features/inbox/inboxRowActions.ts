@@ -46,9 +46,28 @@ export const COPY_TASK_ID_ACTION_ID = "copy-id";
 /** The menu action that asks for a date and time or a duration (`CustomSnoozeSheet`). */
 export const CUSTOM_SNOOZE_ACTION_ID = "snooze-custom";
 
+export const PIN_TASK_ACTION_ID = "pin";
+export const UNPIN_TASK_ACTION_ID = "unpin";
+export const ARCHIVE_TASK_ACTION_ID = "archive";
+
+/** The snooze presets and "Custom…", as the swipe Snooze button lists them. */
+export function buildInboxSnoozeMenuActions(
+  row: InboxThreadRow,
+  presets: ReadonlyArray<InboxSnoozeMenuPreset>,
+): InboxRowMenuAction[] {
+  return [
+    ...presets.map((preset) => ({
+      id: preset.id,
+      title: preset.label,
+      attributes: { disabled: !row.canSnooze },
+    })),
+    { id: CUSTOM_SNOOZE_ACTION_ID, title: "Custom…", attributes: { disabled: !row.canSnooze } },
+  ];
+}
+
 /**
- * The long-press menu of one inbox row: settle/unsettle, then snooze (the
- * presets and "Custom…") or unsnooze.
+ * The long-press menu of one inbox row: pin/unpin, settle/unsettle, then snooze
+ * (the presets and "Custom…") or unsnooze, hide, archive and copy the ID.
  */
 export function buildInboxRowMenuActions(
   row: InboxThreadRow,
@@ -56,29 +75,29 @@ export function buildInboxRowMenuActions(
 ): InboxRowMenuAction[] {
   const actions: InboxRowMenuAction[] = row.snoozedUntil
     ? [{ id: "unsnooze", title: "Unsnooze", attributes: { disabled: !row.canUnsnooze } }]
-    : [
-        ...presets.map((preset) => ({
-          id: preset.id,
-          title: preset.label,
-          attributes: { disabled: !row.canSnooze },
-        })),
-        {
-          id: CUSTOM_SNOOZE_ACTION_ID,
-          title: "Custom…",
-          attributes: { disabled: !row.canSnooze },
-        },
-      ];
+    : buildInboxSnoozeMenuActions(row, presets);
   actions.unshift({
     id: row.attentionState === "settled" ? "unsettle" : "settle",
     title: row.attentionState === "settled" ? "Move to Active" : "Settle task",
     attributes: { disabled: !row.mutationEnabled || !row.canSettle },
   });
+  // Pins live on this device, so they work offline too.
+  actions.unshift(
+    row.pinned
+      ? { id: UNPIN_TASK_ACTION_ID, title: "Unpin task", attributes: { disabled: false } }
+      : { id: PIN_TASK_ACTION_ID, title: "Pin task", attributes: { disabled: false } },
+  );
   // Hide keeps a task out of the Inbox until it needs the person.
   actions.push(
     row.hiddenByUser === true
       ? { id: "unhide", title: "Show in Inbox", attributes: { disabled: !row.hideActionEnabled } }
       : { id: "hide", title: "Hide task", attributes: { disabled: !row.hideActionEnabled } },
   );
+  actions.push({
+    id: ARCHIVE_TASK_ACTION_ID,
+    title: "Archive task",
+    attributes: { disabled: !row.canArchive },
+  });
   // Reads nothing from the node, so it works offline too.
   actions.push({
     id: COPY_TASK_ID_ACTION_ID,
@@ -86,4 +105,21 @@ export function buildInboxRowMenuActions(
     attributes: { disabled: false },
   });
   return actions;
+}
+
+/**
+ * Changes whenever a row command lands on the thread (its section, snooze, hide
+ * or settle-when-idle state, pin), so a row dismissed for that command comes
+ * back at once when the list still shows it. ThreadSwipeable's timed restore
+ * covers anything this misses.
+ */
+export function inboxRowResetKey(row: InboxThreadRow): string {
+  return [
+    row.key,
+    row.attentionState,
+    row.snoozedUntil ?? "",
+    row.hiddenByUser === true ? "hidden" : "",
+    row.filed === true ? "filed" : "",
+    row.pinned ? "pinned" : "",
+  ].join("\u0000");
 }

@@ -206,6 +206,7 @@ describe("MVP route config", () => {
         "Settings",
         "SettingsAccount",
         "SettingsAbout",
+        "SettingsArchived",
         "SettingsAppearance",
         "SettingsClientStorage",
         "SettingsDiagnostics",
@@ -222,6 +223,7 @@ describe("MVP route config", () => {
     expect(MVP_SETTINGS_SHEET_ROUTES.SettingsHub.linking).toBe("hub");
     expect(MVP_SETTINGS_SHEET_ROUTES.SettingsWorkspace.linking).toBe("workspace");
     expect(MVP_SETTINGS_SHEET_ROUTES.SettingsInbox.linking).toBe("inbox");
+    expect(MVP_SETTINGS_SHEET_ROUTES.SettingsArchived.linking).toBe("archived");
     expect(MVP_SETTINGS_SHEET_ROUTES.SettingsNotifications.linking).toBe("notifications");
     expect(MVP_SETTINGS_SHEET_ROUTES.SettingsAppearance.linking).toBe("appearance");
     expect(MVP_SETTINGS_SHEET_ROUTES.SettingsProviderAccounts.linking).toBe("provider-accounts");

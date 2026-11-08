@@ -30,10 +30,17 @@ import { AppText as Text } from "../../components/AppText";
 import { EmptyState } from "../../components/EmptyState";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import {
-  pickComposerImages,
-  toUploadChatImageAttachments,
-  type DraftComposerImageAttachment,
-} from "../../lib/composerImages";
+  pickComposerAttachmentsFrom,
+  readComposerFileBytes,
+  type ComposerAttachmentSource,
+  type DraftComposerAttachment,
+  type DraftComposerFileAttachment,
+} from "../../lib/composerFiles";
+import {
+  composerFileUploadEngine,
+  useComposerFileUploadMaxBytes,
+  useComposerFileUploadRecords,
+} from "../../state/composerFileUpload";
 import { newCommandId, newMessageId, newProjectId, newThreadId } from "../../lib/ids";
 import { buildModelOptions } from "../../lib/modelOptions";
 import { useThemeColor } from "../../lib/useThemeColor";
@@ -73,6 +80,14 @@ import {
   planMobilePromptLink,
 } from "./promptLinkModel";
 import { useNewTaskRepository } from "./useNewTaskRepository";
+import { releaseIncomingShareCopy, takeIncomingShare } from "../sharing/incomingShare";
+import { mergeIncomingShareText } from "../sharing/incomingShareModel";
+import {
+  admitDraftAttachments,
+  newTaskAttachmentSendBlock,
+  newTaskDraftImages,
+  toNewTaskDispatchAttachments,
+} from "./newTaskAttachments";
 
 type NewTaskRouteScreenProps = StaticScreenProps<{
   readonly environmentId?: string;
@@ -86,6 +101,8 @@ type NewTaskRouteScreenProps = StaticScreenProps<{
   readonly pr?: string | string[];
   readonly provider?: string | string[];
   readonly model?: string | string[];
+  /** `incoming`: what another app shared through the share extension becomes this draft. */
+  readonly share?: string | string[];
 }>;
 
 function firstParam(value: string | string[] | undefined): string | null {
@@ -176,9 +193,12 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
   const [newBranch, setNewBranch] = useState(restored?.newBranch ?? "");
   const [baseBranch, setBaseBranch] = useState(restored?.baseBranch ?? "");
   const [prompt, setPrompt] = useState(restored?.prompt ?? "");
-  const [attachments, setAttachments] = useState<ReadonlyArray<DraftComposerImageAttachment>>(
+  const [attachments, setAttachments] = useState<ReadonlyArray<DraftComposerAttachment>>(
     restored?.attachments ?? [],
   );
+  // The thread this task creates. Files upload for it before the task starts,
+  // so the id is chosen with the draft and the attempt reuses it.
+  const [draftThreadId] = useState(newThreadId);
   const [modelSelection, setModelSelection] = useState<ModelSelection>(
     restored?.modelSelection ?? defaults.modelSelection,
   );
@@ -198,6 +218,8 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
   const serverConfigs = useEnvironmentServerConfigs();
   const serverConfig = environmentId ? serverConfigs.get(environmentId) : null;
   const tokenModeReady = serverConfig !== null && serverConfig !== undefined;
+  const fileUploadMaxBytes = useComposerFileUploadMaxBytes(environmentId);
+  const fileUploadRecords = useComposerFileUploadRecords();
   const tokenMode = serverConfig?.settings.defaultAgentTokenMode ?? DEFAULT_AGENT_TOKEN_MODE;
 
   useEffect(() => {
@@ -501,14 +523,25 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
     prompt.trim().length > 0 &&
     (project !== undefined || newProjectPath.trim().length > 0) &&
     (worktreeSelection.kind !== "new" || newBranch.trim().length > 0);
-  const canSend = draftComplete && (connected ? tokenModeReady && preferencesReady : queueing);
-  const sendDisabledReason = connected
-    ? !tokenModeReady || !preferencesReady
-      ? "Loading node settings"
-      : null
-    : queueing || environments.some((candidate) => candidate.connectionState === "connected")
-      ? null
-      : "No verified machine available";
+  const attachmentSendBlock = newTaskAttachmentSendBlock({
+    attachments,
+    getRecord: (id) => fileUploadRecords.get(id) ?? null,
+    queueing,
+    nowMs: Date.now(),
+  });
+  const canSend =
+    draftComplete &&
+    attachmentSendBlock === null &&
+    (connected ? tokenModeReady && preferencesReady : queueing);
+  const sendDisabledReason = attachmentSendBlock
+    ? attachmentSendBlock
+    : connected
+      ? !tokenModeReady || !preferencesReady
+        ? "Loading node settings"
+        : null
+      : queueing || environments.some((candidate) => candidate.connectionState === "connected")
+        ? null
+        : "No verified machine available";
   const queueNotice = queueing
     ? `${environment.label} is not connected. The task starts when it is back.`
     : null;
@@ -543,7 +576,11 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
     return createNewTaskAttempt({
       environmentId: environment.environmentId,
       prompt,
-      attachments: toUploadChatImageAttachments(attachments),
+      attachments: toNewTaskDispatchAttachments({
+        attachments,
+        getRecord: composerFileUploadEngine.get,
+        nowMs: Date.now(),
+      }),
       project: projectContext,
       worktree: worktreeContext,
       modelSelection,
@@ -554,7 +591,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
       ids: {
         projectId: newProjectId(),
         projectCommandId: newCommandId(),
-        threadId: newThreadId(),
+        threadId: draftThreadId,
         threadCommandId: newCommandId(),
         attachCommandId: newCommandId(),
         turnCommandId: newCommandId(),
@@ -592,7 +629,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
       newBranch,
       baseBranch,
       prompt,
-      attachments,
+      attachments: newTaskDraftImages(attachments),
       modelSelection,
       runtimeMode,
       interactionMode: selectedInteractionMode,
@@ -611,14 +648,103 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
     );
   };
 
-  const pickAttachments = async () => {
+  const enqueueFileUpload = (
+    file: DraftComposerFileAttachment,
+    uploadEnvironmentId: EnvironmentId,
+  ) =>
+    composerFileUploadEngine.enqueue({
+      attachmentId: file.id,
+      threadId: draftThreadId,
+      environmentId: uploadEnvironmentId,
+      name: file.name,
+      mimeType: file.mimeType,
+      sizeBytes: file.sizeBytes,
+      readBytes: () => readComposerFileBytes(file.readUri),
+    });
+
+  const pickAttachments = async (source: ComposerAttachmentSource) => {
     setAttachmentError(null);
-    const result = await pickComposerImages({ existingCount: attachments.length });
-    if (result.images.length > 0) {
-      setAttachments((current) => [...current, ...result.images]);
+    const result = await pickComposerAttachmentsFrom(source, {
+      existingCount: attachments.length,
+      existingTotalBytes: attachments.reduce(
+        (total, attachment) => total + attachment.sizeBytes,
+        0,
+      ),
+      fileUploadMaxBytes,
+    });
+    if (result.images.length > 0 || result.files.length > 0) {
+      setAttachments((current) => [...current, ...result.images, ...result.files]);
       resetAttempt();
     }
     if (result.error) setAttachmentError(result.error);
+  };
+
+  // A file uploads to the machine the task goes to: a new file, or the draft
+  // moved to another machine, uploads it there.
+  useEffect(() => {
+    if (!environmentId) return;
+    for (const attachment of attachments) {
+      if (attachment.type !== "file") continue;
+      if (composerFileUploadEngine.get(attachment.id)?.environmentId === environmentId) continue;
+      composerFileUploadEngine.release(attachment.id);
+      enqueueFileUpload(attachment, environmentId);
+    }
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- enqueueFileUpload only reads the draft's fixed thread id.
+  }, [attachments, environmentId]);
+  // The started task carries its files' tokens; a closed draft drops its uploads.
+  const attachmentsRef = useRef(attachments);
+  useEffect(() => {
+    attachmentsRef.current = attachments;
+  }, [attachments]);
+  useEffect(
+    () => () => {
+      for (const attachment of attachmentsRef.current) {
+        if (attachment.type !== "file") continue;
+        composerFileUploadEngine.release(attachment.id);
+        void releaseIncomingShareCopy(attachment.readUri);
+      }
+    },
+    [],
+  );
+
+  // Text and files shared from another app (share extension): the user picks
+  // the machine and project here. Shared text follows what is already typed.
+  // It waits for the draft's machine: shared files must fit its upload limit.
+  const shareParam = firstParam(props.route.params?.share);
+  useEffect(() => {
+    if (shareParam !== "incoming" || environmentId === null) return;
+    navigation.setParams({ share: undefined } as never);
+    void takeIncomingShare()
+      .then((draft) => {
+        if (!draft) return;
+        if (draft.text) setPrompt((current) => mergeIncomingShareText(current, draft.text));
+        const admitted = admitDraftAttachments({
+          existing: attachmentsRef.current,
+          incoming: draft.attachments,
+          fileUploadMaxBytes,
+        });
+        for (const attachment of admitted.rejected) {
+          if (attachment.type === "file") void releaseIncomingShareCopy(attachment.readUri);
+        }
+        if (admitted.accepted.length > 0) {
+          setAttachments((current) => [...current, ...admitted.accepted]);
+        }
+        setFailure(null);
+        const warnings = [...draft.warnings, ...admitted.warnings];
+        if (warnings.length > 0) {
+          Alert.alert("Some shared content was skipped", warnings.join("\n"));
+        }
+      })
+      .catch(() => setAttachmentError("The shared content could not be read."));
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- runs once per hand-off, once the draft has a machine.
+  }, [shareParam, environmentId]);
+
+  const removeAttachment = (id: string) => {
+    composerFileUploadEngine.release(id);
+    const removed = attachments.find((attachment) => attachment.id === id);
+    if (removed?.type === "file") void releaseIncomingShareCopy(removed.readUri);
+    setAttachments((current) => current.filter((attachment) => attachment.id !== id));
+    resetAttempt();
   };
 
   if (environments.length === 0) {
@@ -756,11 +882,21 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
               setPrompt(value);
               resetAttempt();
             }}
-            onRemoveAttachment={(id) => {
-              setAttachments((current) => current.filter((attachment) => attachment.id !== id));
-              resetAttempt();
-            }}
-            onPickAttachments={() => void pickAttachments()}
+            onRemoveAttachment={removeAttachment}
+            onPickAttachments={(source) => void pickAttachments(source)}
+            fileUploadRecords={fileUploadRecords}
+            onRetryFileUpload={(id) => composerFileUploadEngine.retry(id)}
+            commandMenuContext={
+              environmentId
+                ? {
+                    environmentId,
+                    workspaceRoot: project?.cwd ?? null,
+                    serverConfig: serverConfig ?? null,
+                    providerInstanceId: modelSelection.instanceId,
+                    currentThreadId: null,
+                  }
+                : null
+            }
             onOpenWorkspace={() => setWorkspacePickerVisible(true)}
             onSelectEnvironment={selectEnvironment}
             modelOptions={modelOptions}

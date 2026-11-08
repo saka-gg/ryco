@@ -34,7 +34,14 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import { Alert, Pressable, ScrollView, View } from "react-native";
+import {
+  Alert,
+  Pressable,
+  ScrollView,
+  View,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
+} from "react-native";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 
 import type { HostedDeliveryNotice } from "@ryco/client-runtime/authorization";
@@ -153,10 +160,14 @@ import {
 } from "../../connection/threadDetail";
 import { useEnvironmentApi } from "../../connection/useEnvironmentApi";
 import { useThreadConnectionRetarget } from "../../connection/useThreadConnectionRetarget";
-import type { DraftComposerAttachment, DraftComposerFileAttachment } from "../../lib/composerFiles";
+import type {
+  ComposerAttachmentSource,
+  DraftComposerAttachment,
+  DraftComposerFileAttachment,
+} from "../../lib/composerFiles";
 import {
   isDraftComposerFileAttachment,
-  pickComposerAttachments,
+  pickComposerAttachmentsFrom,
   readComposerFileBytes,
 } from "../../lib/composerFiles";
 import { convertPastedImagesToAttachments } from "../../lib/composerImages";
@@ -171,7 +182,15 @@ import { useAgentControlSync } from "../../state/agentControlSync";
 import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
 import { useHomeWorkspaceData } from "../../state/homeData";
 import { useMessageQueueStore } from "../../state/messageQueueStore";
-import { isClaudeResumeReviewEnabled, usePreferences } from "../../state/preferencesStore";
+import {
+  isClaudeResumeReviewEnabled,
+  isStreamHapticsEnabled,
+  usePreferences,
+} from "../../state/preferencesStore";
+import { useThreadStreamHaptics } from "./threadStreamHaptics";
+import { FloatingThreadControl } from "./FloatingThreadControl";
+import { ImageGalleryProvider } from "./ImageGalleryModal";
+import { FLOATING_CONTROL_CLEARANCE, isFollowingLatest } from "./floatingThreadControlModel";
 import { markSnoozeWokeSeen } from "../../state/snoozeWokeSeen";
 import {
   useWsConnectionStatusForEnvironment,
@@ -277,6 +296,7 @@ import { buildModelPickerModel, listModelPickerEntries } from "./modelPickerMode
 import { buildSessionPolicyModel, resolveSessionPolicySelection } from "./sessionPolicyModel";
 import { ThreadActionsSheet } from "./ThreadActionsSheet";
 import { ThreadAgents } from "./ThreadAgentsSheet";
+import { useThreadWorkspaceRoot } from "../files/useThreadWorkspaceRoot";
 import { ThreadComposer } from "./ThreadComposer";
 import { SideChatCard } from "./SideChatCard";
 import { deriveThreadCachedView } from "./threadCachedViewModel";
@@ -617,6 +637,11 @@ export function ThreadDetailScreen(props: {
   );
 
   const built = useThreadTimeline(environmentId, threadId);
+  useThreadStreamHaptics(
+    `${environmentId}:${threadId}`,
+    built?.timeline,
+    isStreamHapticsEnabled(preferences),
+  );
   // A task sent from New Task opens here before the node shows it: the launch
   // carries it (setup stages, failure, Retry, Edit task) until the thread has
   // messages of its own.
@@ -858,6 +883,7 @@ export function ThreadDetailScreen(props: {
     () => (thread ? findThreadWorktree(thread, worktrees) : null),
     [thread, worktrees],
   );
+  const workspaceRoot = useThreadWorkspaceRoot({ thread, worktree, project });
   const environmentRow =
     environments.find((environment) => environment.environmentId === environmentId) ?? null;
   const nodeLabel = environmentRow?.label ?? null;
@@ -1752,25 +1778,28 @@ export function ThreadDetailScreen(props: {
     [environmentId, threadId],
   );
 
-  const pickAttachments = useCallback(async () => {
-    setAttachmentError(null);
-    const existingTotalBytes = attachments.reduce((total, attachment) => {
-      if (attachment.type === "file" && attachment.uploadState === "needsReattach") return total;
-      return total + attachment.sizeBytes;
-    }, 0);
-    const result = await pickComposerAttachments({
-      existingCount: attachments.length,
-      existingTotalBytes,
-      fileUploadMaxBytes,
-    });
-    setAttachmentError(result.error);
-    if (result.images.length > 0 || result.files.length > 0) {
-      setAttachments((current) => [...current, ...result.images, ...result.files]);
-    }
-    for (const file of result.files) {
-      enqueueFileUpload(file);
-    }
-  }, [attachments, enqueueFileUpload, fileUploadMaxBytes]);
+  const pickAttachments = useCallback(
+    async (source: ComposerAttachmentSource) => {
+      setAttachmentError(null);
+      const existingTotalBytes = attachments.reduce((total, attachment) => {
+        if (attachment.type === "file" && attachment.uploadState === "needsReattach") return total;
+        return total + attachment.sizeBytes;
+      }, 0);
+      const result = await pickComposerAttachmentsFrom(source, {
+        existingCount: attachments.length,
+        existingTotalBytes,
+        fileUploadMaxBytes,
+      });
+      setAttachmentError(result.error);
+      if (result.images.length > 0 || result.files.length > 0) {
+        setAttachments((current) => [...current, ...result.images, ...result.files]);
+      }
+      for (const file of result.files) {
+        enqueueFileUpload(file);
+      }
+    },
+    [attachments, enqueueFileUpload, fileUploadMaxBytes],
+  );
 
   // Rewinds to before a sent message (keeping the files or not). Its prompt and attachments
   // wait for the composer (`takeReturnedSentMessages`) once the node has rewound the thread.
@@ -1939,7 +1968,7 @@ export function ThreadDetailScreen(props: {
     (attachmentId: string) => {
       composerFileUploadEngine.release(attachmentId);
       setAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId));
-      void pickAttachments();
+      void pickAttachments("files");
     },
     [pickAttachments],
   );
@@ -2464,6 +2493,28 @@ export function ThreadDetailScreen(props: {
   // Anchoring to the message a link opened this thread at (a fork's link back to its reply):
   // load the history around it if needed, then scroll to it once and highlight it briefly.
   const listRef = useRef<LegendListRef>(null);
+  // Running as the header says it (a turn or the session runs), gated like the "Working…" fold.
+  const agentRunning =
+    !cachedView.headerForcedOffline &&
+    (thread?.latestTurn?.state === "running" || thread?.session?.status === "running");
+  const runningSince = agentRunning
+    ? (thread?.latestTurn?.startedAt ?? thread?.latestTurn?.requestedAt ?? "")
+    : null;
+  // Whether the reader follows the end of the feed; set only when it changes.
+  const [followingLatest, setFollowingLatest] = useState(true);
+  const onFeedScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, layoutMeasurement, contentSize } = event.nativeEvent;
+    const next = isFollowingLatest({
+      offsetY: contentOffset.y,
+      viewportHeight: layoutMeasurement.height,
+      contentHeight: contentSize.height,
+    });
+    if (next !== followingLatest) setFollowingLatest(next);
+  };
+  const jumpToLatest = () => {
+    void listRef.current?.scrollToEnd({ animated: true });
+  };
+
   const [messageAnchor, setMessageAnchor] = useState<{
     readonly messageId: MessageId;
     readonly index: number;
@@ -2715,85 +2766,102 @@ export function ThreadDetailScreen(props: {
 
       {/* One full-screen view for every page in the feed: it outlives the row that opened it. */}
       <HtmlRenderFullScreenProvider>
-        <LegendList
-          ref={listRef}
-          data={listRows}
-          renderItem={renderItem}
-          keyExtractor={(row) => row.id}
-          alignItemsAtEnd
-          initialScrollAtEnd
-          maintainScrollAtEnd={{
-            animated: true,
-            on: { dataChange: true, itemLayout: true },
-          }}
-          maintainVisibleContentPosition
-          keyboardDismissMode="interactive"
-          keyboardShouldPersistTaps="handled"
-          contentInsetAdjustmentBehavior="never"
-          contentContainerStyle={{ paddingVertical: 10 }}
-          onStartReached={loadOlderMessages}
-          onStartReachedThreshold={0.35}
-          ListHeaderComponent={
-            messageHistory?.hasMoreBefore || messageHistoryLoad?.status === "loading" ? (
-              <Pressable
-                accessibilityRole="button"
-                disabled={messageHistoryLoad?.status === "loading"}
-                onPress={loadOlderMessages}
-                className="items-center px-4 py-3"
-              >
-                <Text className="text-xs text-muted-foreground">
-                  {messageHistoryLoad?.status === "loading"
-                    ? "Loading earlier history…"
-                    : messageHistoryLoad?.status === "error"
-                      ? "Retry earlier history"
-                      : "Load earlier history"}
-                </Text>
-              </Pressable>
-            ) : null
-          }
-          ListEmptyComponent={
-            launchView ? (
-              <NewTaskLaunchCard
-                view={launchView}
-                onRetry={() => {
-                  let deps: ReturnType<typeof createNewTaskLaunchDeps>;
-                  try {
-                    deps = createNewTaskLaunchDeps(environmentId);
-                  } catch {
-                    // The machine is away: wait in the outbox and start once it is back.
-                    requeueNewTaskLaunch(launchKey);
-                    return;
-                  }
-                  retryNewTaskLaunch(launchKey, deps);
-                }}
-                onEdit={() => {
-                  // Held from the tap on: the outbox must not start it under the edit.
-                  setNewTaskLaunchEditing(launchKey, true);
-                  navigation.dispatch(
-                    StackActions.replace("NewTask", { editLaunchKey: launchKey }),
-                  );
-                }}
-                onRemove={() => {
-                  if (discardNewTaskLaunch(launchKey) && navigation.canGoBack())
-                    navigation.goBack();
-                }}
-              />
-            ) : (
-              <View className="px-4 py-16">
-                <EmptyState
-                  variant="plain"
-                  title={built ? (thread?.title ?? "Task") : "Loading task"}
-                  detail={
-                    cachedView.emptyStateDetail ??
-                    (built
-                      ? "No messages yet. Send one to get started."
-                      : "Syncing the conversation from the node.")
-                  }
-                />
-              </View>
-            )
-          }
-        />
+        <ImageGalleryProvider>
+          <View className="min-h-0 flex-1">
+            <LegendList
+              ref={listRef}
+              data={listRows}
+              renderItem={renderItem}
+              keyExtractor={(row) => row.id}
+              alignItemsAtEnd
+              initialScrollAtEnd
+              maintainScrollAtEnd={{
+                animated: true,
+                on: { dataChange: true, itemLayout: true },
+              }}
+              maintainVisibleContentPosition
+              keyboardDismissMode="interactive"
+              keyboardShouldPersistTaps="handled"
+              contentInsetAdjustmentBehavior="never"
+              contentContainerStyle={{ paddingVertical: 10 }}
+              // Room under the newest message for the floating Working pill.
+              ListFooterComponent={
+                runningSince !== null ? (
+                  <View style={{ height: FLOATING_CONTROL_CLEARANCE }} />
+                ) : null
+              }
+              onStartReached={loadOlderMessages}
+              onStartReachedThreshold={0.35}
+              onScroll={onFeedScroll}
+              scrollEventThrottle={64}
+              ListHeaderComponent={
+                messageHistory?.hasMoreBefore || messageHistoryLoad?.status === "loading" ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    disabled={messageHistoryLoad?.status === "loading"}
+                    onPress={loadOlderMessages}
+                    className="items-center px-4 py-3"
+                  >
+                    <Text className="text-xs text-muted-foreground">
+                      {messageHistoryLoad?.status === "loading"
+                        ? "Loading earlier history…"
+                        : messageHistoryLoad?.status === "error"
+                          ? "Retry earlier history"
+                          : "Load earlier history"}
+                    </Text>
+                  </Pressable>
+                ) : null
+              }
+              ListEmptyComponent={
+                launchView ? (
+                  <NewTaskLaunchCard
+                    view={launchView}
+                    onRetry={() => {
+                      let deps: ReturnType<typeof createNewTaskLaunchDeps>;
+                      try {
+                        deps = createNewTaskLaunchDeps(environmentId);
+                      } catch {
+                        // The machine is away: wait in the outbox and start once it is back.
+                        requeueNewTaskLaunch(launchKey);
+                        return;
+                      }
+                      retryNewTaskLaunch(launchKey, deps);
+                    }}
+                    onEdit={() => {
+                      // Held from the tap on: the outbox must not start it under the edit.
+                      setNewTaskLaunchEditing(launchKey, true);
+                      navigation.dispatch(
+                        StackActions.replace("NewTask", { editLaunchKey: launchKey }),
+                      );
+                    }}
+                    onRemove={() => {
+                      if (discardNewTaskLaunch(launchKey) && navigation.canGoBack())
+                        navigation.goBack();
+                    }}
+                  />
+                ) : (
+                  <View className="px-4 py-16">
+                    <EmptyState
+                      variant="plain"
+                      title={built ? (thread?.title ?? "Task") : "Loading task"}
+                      detail={
+                        cachedView.emptyStateDetail ??
+                        (built
+                          ? "No messages yet. Send one to get started."
+                          : "Syncing the conversation from the node.")
+                      }
+                    />
+                  </View>
+                )
+              }
+            />
+            <FloatingThreadControl
+              runningSince={runningSince}
+              followingLatest={followingLatest}
+              onJumpToLatest={jumpToLatest}
+            />
+          </View>
+        </ImageGalleryProvider>
       </HtmlRenderFullScreenProvider>
 
       {hasPrompts ? (
@@ -2961,7 +3029,7 @@ export function ThreadDetailScreen(props: {
         onSend={onSend}
         attachments={attachments}
         onRemoveAttachment={removeAttachment}
-        onPickAttachments={() => void pickAttachments()}
+        onPickAttachments={(source) => void pickAttachments(source)}
         onPasteImages={(uris) => void pasteImages(uris)}
         onRetryFileUpload={retryFileUpload}
         onReattachFile={reattachFile}
@@ -3002,6 +3070,13 @@ export function ThreadDetailScreen(props: {
             );
         }}
         pendingHandoff={pendingHandoff}
+        commandMenuContext={{
+          environmentId,
+          workspaceRoot,
+          serverConfig,
+          providerInstanceId: selectedModelSelection?.instanceId ?? null,
+          currentThreadId: threadId,
+        }}
         onComposerIntent={() =>
           void prewarmThreadProviderSession({
             environmentId,

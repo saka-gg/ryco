@@ -230,6 +230,10 @@
       "types": "./src/state/threads/index.ts",
       "import": "./src/state/threads/index.ts"
     },
+    "./state/threads/archivedThreadGroups": {
+      "types": "./src/state/threads/archivedThreadGroups.ts",
+      "import": "./src/state/threads/archivedThreadGroups.ts"
+    },
     "./state/threads/carriedFork": {
       "types": "./src/state/threads/carriedFork.ts",
       "import": "./src/state/threads/carriedFork.ts"
@@ -257,6 +261,10 @@
     "./state/threads/threadContentCachePolicy": {
       "types": "./src/state/threads/threadContentCachePolicy.ts",
       "import": "./src/state/threads/threadContentCachePolicy.ts"
+    },
+    "./state/threads/threadPins": {
+      "types": "./src/state/threads/threadPins.ts",
+      "import": "./src/state/threads/threadPins.ts"
     },
     "./state/session": {
       "types": "./src/state/session/index.ts",

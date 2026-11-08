@@ -99,11 +99,25 @@ export interface RevokeAgentControlLeasesInput {
 }
 
 /** One session's currently bound exact-turn write authority. */
+/**
+ * Who opened a turn: the user (a prompt Ryco sent) or the provider itself (a Claude
+ * "wake" turn after a background task finished, with no new prompt).
+ */
+export type AgentControlTurnOpener = "user" | "provider";
+
 export interface AgentControlTurnAuthority {
   readonly sessionId: string;
   readonly threadId: ThreadId;
   readonly turnId: TurnId;
   readonly boundAt: string;
+  /** Absent means "user". */
+  readonly openedBy?: AgentControlTurnOpener;
+  /**
+   * The user turn whose task this turn carries on: the turn itself for a user turn, the
+   * session's last user turn for a provider turn. Per-task consents key on it, so a wake
+   * turn finishing the user's task is not asked again. Absent means `turnId`.
+   */
+  readonly taskTurnId?: TurnId;
 }
 
 export interface RetireAgentControlTurnAuthorityInput {
@@ -186,10 +200,14 @@ export interface AgentControlSessionRegistryShape {
    * Bind write authority to the exact running turn. At most one authority
    * per session; binding again replaces it. Proposal-backed mutation tools
    * must present this exact authority while creating their immutable plan.
+   * A provider-opened turn gets the same authority but never the user's
+   * staged Computer Use request, which only a user turn may carry.
    */
   readonly bindTurnAuthority: (input: {
     readonly sessionId: string;
     readonly turnId: TurnId;
+    /** Defaults to "user". */
+    readonly openedBy?: AgentControlTurnOpener;
   }) => Effect.Effect<AgentControlTurnAuthority, AgentControlTurnAuthorityError>;
 
   /**

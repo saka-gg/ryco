@@ -30,6 +30,35 @@ brand marks, cloud plane, showcase rig, and asset-runtime dependencies removed.
 Attribution is kept here (not as in-file headers) so the T3 identifiers do not
 re-enter `src`.
 
+The 2026-11 everyday-handling round ported further modules from the same
+upstream (at `e455200077`), adapted to Ryco's runtime and re-themed the same
+way: the thread row swipe actions and their dismissal animation
+(`src/features/threadList/ThreadSwipeable.tsx`, `threadSwipeModel.ts`,
+`threadDismissal.ts`; upstream `features/home/thread-swipe-actions.tsx`,
+`thread-dismissal.ts`), the swipe-to-dismiss Undo toast behavior
+(`src/components/SidebarUndoNoticeHost.tsx`; upstream `components/ui/Toast.tsx`,
+`features/home/ThreadUndoNotice.tsx`), the home-screen quick actions
+(`src/features/shortcuts/*`; upstream `features/shortcuts/appShortcuts.ts`,
+`appShortcutsRuntime.ts`), and the streaming-reply haptics
+(`src/features/threads/threadStreamHaptics.ts`; upstream
+`features/threads/threadStreamHaptics.ts`).
+
+The composer round (2026-11) ports further upstream modules from `pingdotgg/t3code`
+at commit `e455200077`, adapted to Ryco's shared trigger and ranking logic: the
+autocomplete menu (`src/features/threads/composerCommandMenuModel.ts`,
+`useComposerCommandMenu.ts` and `ComposerCommandPopover.tsx`, from upstream's
+`use-composer-command-menu.ts`, `composerSlashSkillSearch.ts` and
+`ComposerCommandPopover.tsx`), the attach menu and Files-app picking
+(`src/components/ComposerAttachMenu.tsx` and `pickComposerDocuments` in
+`src/lib/composerFiles.ts`, from upstream's `ComposerAttachmentButton.tsx` and
+`composerImages.ts`), and the share-extension display-name config plugin
+(`plugins/withShareExtensionDisplayName.cjs`, verbatim), and the dictation
+controls (`src/features/dictation/ComposerDictationControls.tsx`, after upstream's
+`voice-input/ComposerDictationControl.tsx` and `voiceInputMetering.ts`; Ryco
+recognizes speech on the device instead of transcribing on a server), and the
+incoming-share model (`src/features/sharing/incomingShareModel.ts`, after upstream's
+`sharing/incoming-share-model.ts` and `incoming-share-native.ts`).
+
 The notification and Live Activity work ports mechanisms and numbers from the same
 upstream at a later commit (`e4552000`), rewritten for Ryco rather than copied: the
 foreground rule that keeps an alert for the thread on screen quiet and the

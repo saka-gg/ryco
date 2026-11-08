@@ -37,6 +37,8 @@ vi.mock("./uuid", () => ({
 }));
 
 import {
+  draftImageAttachmentFromPickerAsset,
+  sniffImageMimeTypeFromBase64,
   convertPastedImagesToAttachments,
   isOwnedPastedImageUri,
   toUploadChatImageAttachments,
@@ -120,5 +122,50 @@ describe("native pasted image cleanup", () => {
     expect(files.get(rejected)?.deleted).toBe(true);
     expect(files.get(overflow)?.deleted).toBe(true);
     expect(files.get(userOwned)?.deleted).toBe(false);
+  });
+});
+
+describe("draftImageAttachmentFromPickerAsset", () => {
+  // The first bytes of a JPEG (FF D8 FF E0 …) and of a PNG signature.
+  const JPEG_BASE64 = "/9j/4AAQSkZJRg==";
+  const PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUg==";
+
+  it("describes the payload, not the picked file", () => {
+    // iOS's picker re-encodes a PNG as JPEG for base64 but reports the PNG's size and type.
+    const { attachment, error } = draftImageAttachmentFromPickerAsset({
+      uri: "file:///picked/screenshot.png",
+      fileName: "screenshot.png",
+      mimeType: "image/png",
+      fileSize: 999_999,
+      base64: JPEG_BASE64,
+    });
+    expect(error).toBeNull();
+    expect(attachment).toMatchObject({
+      name: "screenshot.jpg",
+      mimeType: "image/jpeg",
+      sizeBytes: 10,
+      dataUrl: `data:image/jpeg;base64,${JPEG_BASE64}`,
+    });
+  });
+
+  it("keeps a matching type and drops whitespace from the payload", () => {
+    const { attachment } = draftImageAttachmentFromPickerAsset({
+      uri: "file:///a.png",
+      fileName: "a.png",
+      mimeType: "image/png",
+      base64: `${PNG_BASE64.slice(0, 8)}\n${PNG_BASE64.slice(8)}`,
+    });
+    expect(attachment).toMatchObject({
+      name: "a.png",
+      mimeType: "image/png",
+      sizeBytes: 16,
+      dataUrl: `data:image/png;base64,${PNG_BASE64}`,
+    });
+  });
+
+  it("recognizes common image signatures", () => {
+    expect(sniffImageMimeTypeFromBase64(JPEG_BASE64)).toBe("image/jpeg");
+    expect(sniffImageMimeTypeFromBase64(PNG_BASE64)).toBe("image/png");
+    expect(sniffImageMimeTypeFromBase64("AAAA")).toBeNull();
   });
 });

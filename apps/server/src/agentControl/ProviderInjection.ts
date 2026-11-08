@@ -14,6 +14,7 @@ import type * as EffectAcpSchema from "effect-acp/schema";
 import type {
   AgentControlLeaseRevocationReason,
   AgentControlSessionRegistryShape,
+  AgentControlTurnOpener,
 } from "./Services/AgentControlSessionRegistry.ts";
 import { blockProcessDeviceToolsForAgentControl } from "../providerTools/deviceToolGateway.ts";
 import { AGENT_CONTROL_HTML_RENDER_INSTRUCTIONS } from "./htmlRenderInstructions.ts";
@@ -123,7 +124,8 @@ export interface AgentControlRuntimeLease {
   readonly sessionId: string;
   readonly injectionMode: AgentControlInjectionMode;
   readonly hostContext: string;
-  readonly bindTurn: (turnId: TurnId) => Effect.Effect<void>;
+  /** `openedBy` defaults to "user"; see `bindTurnAuthority`. */
+  readonly bindTurn: (turnId: TurnId, openedBy?: AgentControlTurnOpener) => Effect.Effect<void>;
   readonly retireTurn: (turnId?: TurnId) => Effect.Effect<void>;
   readonly revoke: (reason: AgentControlLeaseRevocationReason) => Effect.Effect<void>;
   readonly addScopeFinalizer: (scope: Scope.Closeable) => Effect.Effect<void>;
@@ -201,8 +203,14 @@ const lifecycle = (input: {
     sessionId: input.sessionId,
     injectionMode: input.injectionMode,
     hostContext: agentControlHostContext(true),
-    bindTurn: (turnId) =>
-      input.bridge.bindTurnAuthority({ sessionId: input.sessionId, turnId }).pipe(Effect.ignore),
+    bindTurn: (turnId, openedBy) =>
+      input.bridge
+        .bindTurnAuthority({
+          sessionId: input.sessionId,
+          turnId,
+          ...(openedBy === undefined ? {} : { openedBy }),
+        })
+        .pipe(Effect.ignore),
     retireTurn: (turnId) =>
       input.bridge
         .retireTurnAuthority({

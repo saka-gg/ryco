@@ -5,6 +5,7 @@ import {
 } from "@react-navigation/native-stack";
 import { Image } from "expo-image";
 import * as Linking from "expo-linking";
+import { readLaunchURL } from "../../lib/launchUrl";
 import { useEffect, useRef, useState } from "react";
 import { View } from "react-native";
 
@@ -121,7 +122,8 @@ export function AppAccessGate(props: {
         pendingWorkspaceLink.current = url;
       }
     };
-    void Linking.getInitialURL().then(capture);
+    // Only looks: the navigator consumes the launch URL once it mounts.
+    void readLaunchURL({ consume: false }).then(capture);
     const subscription = Linking.addEventListener("url", (event) => capture(event.url));
     return () => {
       active = false;

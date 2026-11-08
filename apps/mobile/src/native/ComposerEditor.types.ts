@@ -19,8 +19,12 @@ export interface ComposerEditorProps {
   readonly skills?: ReadonlyArray<
     Pick<ServerProviderSkill, "name" | "displayName" | "shortDescription" | "description">
   >;
+  /** Titles of threads the draft mentions (`@thread:<id>`), by thread id, for their chips. */
+  readonly threadTitles?: ReadonlyMap<string, string>;
   readonly selection?: ComposerEditorSelection;
   readonly placeholder?: string;
+  /** What screen readers call the field (the placeholder disappears once there is text). */
+  readonly accessibilityLabel?: string;
   readonly autoFocus?: boolean;
   readonly editable?: boolean;
   readonly scrollEnabled?: boolean;

@@ -9,7 +9,12 @@ import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { EnvironmentId } from "@ryco/contracts";
 import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuation";
 
-import { buildInboxSections, resolveInboxEmptyState, type InboxEnvironment } from "./inboxModel";
+import {
+  canChangeThreadsOn,
+  buildInboxSections,
+  resolveInboxEmptyState,
+  type InboxEnvironment,
+} from "./inboxModel";
 
 const NODE_A = "node-a" as EnvironmentId;
 const NODE_B = "node-b" as EnvironmentId;
@@ -198,6 +203,68 @@ describe("Inbox model", () => {
       providerDriver: "cursor",
       providerLabel: "Cursor",
     });
+  });
+
+  it("lists this device's pinned threads first, in their own section", () => {
+    const sections = buildInboxSections({
+      projects: [project(NODE_A, "a", "A")],
+      worktrees: [],
+      environments: [{ environmentId: NODE_A, label: "A", connectionState: "connected" }],
+      threads: [thread(NODE_A, "plain", "a"), thread(NODE_A, "pinned", "a")],
+      pinnedThreadKeys: ["node-a:pinned"],
+    });
+    expect(sections.map((section) => section.key)).toEqual(["pinned", "active"]);
+    expect(sections[0]?.rows.map((row) => [row.threadId, row.pinned])).toEqual([["pinned", true]]);
+    expect(sections[1]?.rows.map((row) => [row.threadId, row.pinned])).toEqual([["plain", false]]);
+  });
+
+  it("allows Archive only for a connected node's thread with a conversation and no turn running", () => {
+    const rows = buildInboxSections({
+      projects: [project(NODE_A, "a", "A"), project(NODE_B, "b", "B")],
+      worktrees: [],
+      environments: [
+        {
+          environmentId: NODE_A,
+          label: "A",
+          connectionState: "connected",
+          mutationReady: true,
+          shellCurrent: true,
+        },
+        { environmentId: NODE_B, label: "B", connectionState: "offline" },
+      ],
+      threads: [
+        thread(NODE_A, "done", "a", {
+          latestUserMessageAt: "2026-07-26T08:30:00.000Z",
+          latestTurn: { state: "completed", completedAt: "2026-07-26T08:40:00.000Z" } as never,
+        }),
+        thread(NODE_A, "running", "a", {
+          latestUserMessageAt: "2026-07-26T08:30:00.000Z",
+          latestTurn: { state: "running" } as never,
+          session: { status: "running", activeTurnId: "turn" } as never,
+        }),
+        thread(NODE_B, "offline", "b", { latestUserMessageAt: "2026-07-26T08:30:00.000Z" }),
+      ],
+    }).flatMap((section) => section.rows);
+    expect(Object.fromEntries(rows.map((row) => [row.threadId, row.canArchive]))).toEqual({
+      done: true,
+      running: false,
+      offline: false,
+    });
+  });
+
+  it("allows changes only on a connected, current, writable machine that is not stale", () => {
+    const ready = {
+      environmentId: NODE_A,
+      label: "A",
+      connectionState: "connected" as const,
+      mutationReady: true,
+      shellCurrent: true,
+    };
+    expect(canChangeThreadsOn(ready)).toBe(true);
+    expect(canChangeThreadsOn({ ...ready, mutationReady: false })).toBe(false);
+    expect(canChangeThreadsOn({ ...ready, shellCurrent: false })).toBe(false);
+    expect(canChangeThreadsOn({ ...ready, connectionState: "offline" })).toBe(false);
+    expect(canChangeThreadsOn({ ...ready, stale: true })).toBe(false);
   });
 
   it("scopes by node and excludes archived tasks", () => {

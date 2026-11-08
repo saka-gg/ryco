@@ -2,6 +2,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import type { ReactElement } from "react";
 import type { InboxSection, InboxThreadRow } from "./inboxModel";
 
+const baseRow = {
+  key: "node:task",
+  environmentId: "node",
+  threadId: "task",
+  title: "Task",
+  attentionState: "active",
+  mutationEnabled: true,
+  canSettle: true,
+  canSnooze: true,
+  canArchive: true,
+  pinned: false,
+} as unknown as InboxThreadRow;
+
 const rpc = vi.hoisted(() => ({
   dispatch: vi.fn(),
   lookup: vi.fn(),
@@ -25,7 +38,16 @@ vi.mock("react-native", () => ({
   Alert: { alert: rpc.alert },
   Pressable: "Pressable",
   View: "View",
+  useWindowDimensions: () => ({ width: 390, height: 844 }),
 }));
+vi.mock("../../lib/useThemeColor", () => ({ useThemeColor: () => "#000" }));
+vi.mock("../threadList/ThreadSwipeable", () => ({
+  ThreadSwipeable: "ThreadSwipeable",
+  SwipeableScrollGateProvider: "SwipeableScrollGateProvider",
+  useSwipeableScrollGate: () => ({ swipeEnabled: true, scrollGateHandlers: {} }),
+}));
+const pins = vi.hoisted(() => ({ change: vi.fn() }));
+vi.mock("../../state/threadPins", () => ({ changeThreadPin: pins.change }));
 vi.mock("@react-native-menu/menu", () => ({ MenuView: "MenuView" }));
 vi.mock("@legendapp/list/react-native", () => ({ LegendList: "LegendList" }));
 vi.mock("../../state/sidebarUndo", () => ({
@@ -62,26 +84,52 @@ type MenuProps = {
   onPressAction: (event: { nativeEvent: { event: string } }) => void;
 };
 function menu(overrides: Partial<InboxThreadRow> = {}): MenuProps {
-  const row = {
-    key: "node:task",
-    environmentId: "node",
-    threadId: "task",
-    attentionState: "active",
-    mutationEnabled: true,
-    canSettle: true,
-    canSnooze: true,
-    ...overrides,
-  } as InboxThreadRow;
-  const list = render(InboxScreen, {
-    sections: [],
-    emptyState: null,
-    nowMs: Date.UTC(2026, 9, 12, 9),
-    onOpenThread: vi.fn(),
-    onEmptyAction: vi.fn(),
-  }) as ReactElement<{ renderItem: (props: unknown) => ReactElement }>;
-  const menuRow = list.props.renderItem({ item: { kind: "thread", row } });
+  const row = { ...baseRow, ...overrides } as InboxThreadRow;
+  const menuRow = listOf(
+    render(InboxScreen, {
+      sections: [],
+      emptyState: null,
+      nowMs: Date.UTC(2026, 9, 12, 9),
+      onOpenThread: vi.fn(),
+      onEmptyAction: vi.fn(),
+    }),
+  ).props.renderItem({ item: { kind: "thread", row } });
   expect(menuRow.type).toBe(InboxThreadMenuRow);
-  return (render(InboxThreadMenuRow, menuRow.props) as ReactElement<MenuProps>).props;
+  return menuOf((render(InboxThreadMenuRow, menuRow.props) as ReactElement<SwipeProps>).props);
+}
+
+type SwipeProps = {
+  leadingAction: { label: string; onPress: () => void };
+  primaryAction: { label: string; onPress: () => void } | null;
+  secondaryAction: {
+    label: string;
+    menu: { actions: { id: string }[]; onPressAction: (event: string) => void };
+  } | null;
+  children: ReactElement<MenuProps>;
+};
+
+/** The swipeable row InboxThreadMenuRow renders for `row`. */
+function swipeableOf(row: InboxThreadRow): SwipeProps {
+  const element = render(InboxThreadMenuRow, {
+    row,
+    snoozeMenuPresets: [{ id: "hour", label: "In 1 hour" }],
+    onOpenThread: vi.fn(),
+  }) as ReactElement<SwipeProps>;
+  expect(element.type).toBe("ThreadSwipeable");
+  return element.props;
+}
+
+function menuOf(swipe: SwipeProps): MenuProps {
+  return swipe.children.props;
+}
+
+/** The LegendList inside the scroll gate provider. */
+function listOf(element: ReactElement): ReactElement<{
+  renderItem: (props: unknown) => ReactElement;
+}> {
+  return (element as ReactElement<{ children: ReactElement }>).props.children as ReactElement<{
+    renderItem: (props: unknown) => ReactElement;
+  }>;
 }
 
 afterEach(() => {
@@ -96,11 +144,11 @@ beforeEach(() => {
 
 it.each(["active", "settled"] as const)(
   "dispatches the %s row action to its own machine",
-  (attentionState) => {
+  async (attentionState) => {
     const props = menu({ attentionState });
     const action = attentionState === "settled" ? "unsettle" : "settle";
     props.onPressAction({ nativeEvent: { event: action } });
-    expect(rpc.lookup).toHaveBeenCalledWith("node");
+    await vi.waitFor(() => expect(rpc.lookup).toHaveBeenCalledWith("node"));
     expect(rpc.dispatch).toHaveBeenCalledWith({
       type: `thread.${action}`,
       threadId: "task",
@@ -122,21 +170,23 @@ describe("inbox settlement action guards", () => {
       expect(rpc.dispatch).not.toHaveBeenCalled();
     },
   );
-  it("reports a connection lost between rendering and the tap", () => {
+  it("reports a connection lost between rendering and the tap", async () => {
     rpc.lookup.mockImplementationOnce(() => {
       throw new Error("Disconnected");
     });
     menu().onPressAction({ nativeEvent: { event: "settle" } });
-    expect(rpc.alert).toHaveBeenCalledWith("Could not update task", "Disconnected");
+    await vi.waitFor(() =>
+      expect(rpc.alert).toHaveBeenCalledWith("Could not update task", "Disconnected"),
+    );
   });
 });
 
 describe("inbox snooze menu", () => {
   it("offers three hours and a custom time after the presets", () => {
     const ids = menu().actions.map((action) => action.id);
-    expect(ids.slice(0, 3)).toEqual(["settle", "hour", "three-hours"]);
-    // Custom… closes the snooze choices; Hide follows them and Copy task ID ends the menu.
-    expect(ids.slice(-3)).toEqual(["snooze-custom", "hide", "copy-id"]);
+    expect(ids.slice(0, 4)).toEqual(["pin", "settle", "hour", "three-hours"]);
+    // Custom… closes the snooze choices; Hide and Archive follow, Copy task ID ends the menu.
+    expect(ids.slice(-4)).toEqual(["snooze-custom", "hide", "archive", "copy-id"]);
   });
 
   it("copies the task's ID from the menu", () => {
@@ -167,6 +217,51 @@ describe("inbox snooze menu", () => {
     menu({ canSnooze: false }).onPressAction({ nativeEvent: { event: "snooze-custom" } });
     expect(rpc.customSnooze).toHaveBeenCalledTimes(1);
     expect(rpc.dispatch).not.toHaveBeenCalled();
+  });
+});
+
+describe("inbox swipe actions", () => {
+  it("archives on the primary swipe action", async () => {
+    swipeableOf(baseRow).primaryAction!.onPress();
+    await vi.waitFor(() =>
+      expect(rpc.dispatch).toHaveBeenCalledWith({
+        type: "thread.archive",
+        threadId: "task",
+        commandId: "command",
+      }),
+    );
+  });
+
+  it("offers no archive while it cannot run, and no snooze on a snoozed row", () => {
+    const swipe = swipeableOf({
+      ...baseRow,
+      canArchive: false,
+      snoozedUntil: "2026-10-14T08:30:00.000Z",
+    });
+    expect(swipe.primaryAction).toBeNull();
+    expect(swipe.secondaryAction).toBeNull();
+  });
+
+  it("snoozes from the swipe menu", async () => {
+    const snooze = swipeableOf(baseRow).secondaryAction!;
+    expect(snooze.menu.actions.map((action) => action.id)).toEqual(["hour", "snooze-custom"]);
+    snooze.menu.onPressAction("hour");
+    await vi.waitFor(() =>
+      expect(rpc.dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "thread.snooze", threadId: "task" }),
+      ),
+    );
+  });
+
+  it("pins and unpins from the leading swipe and the menu", () => {
+    const pin = swipeableOf(baseRow).leadingAction;
+    expect(pin.label).toBe("Pin");
+    pin.onPress();
+    expect(pins.change).toHaveBeenLastCalledWith("node:task", true);
+    const pinned = { ...baseRow, pinned: true } as InboxThreadRow;
+    expect(swipeableOf(pinned).leadingAction.label).toBe("Unpin");
+    menu({ pinned: true }).onPressAction({ nativeEvent: { event: "unpin" } });
+    expect(pins.change).toHaveBeenLastCalledWith("node:task", false);
   });
 });
 

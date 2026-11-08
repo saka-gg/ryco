@@ -11,6 +11,7 @@ import type { ComposerEditorProps } from "./ComposerEditor.types";
 export function ComposerEditor({
   ref,
   skills: _skills,
+  threadTitles: _threadTitles,
   selection,
   onPasteImages,
   style,

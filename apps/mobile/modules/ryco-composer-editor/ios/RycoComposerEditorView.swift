@@ -442,6 +442,11 @@ public final class RycoComposerEditorView: ExpoView, UITextViewDelegate {
     applyControlledDocument(force: true)
   }
 
+  /** What VoiceOver reads for the text view itself (the host view is not an element). */
+  func setTextAccessibilityLabel(_ label: String?) {
+    textView.accessibilityLabel = label
+  }
+
   func setPlaceholder(_ placeholder: String) {
     placeholderLabel.text = placeholder
     setNeedsLayout()

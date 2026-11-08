@@ -1,8 +1,8 @@
 import { appMotion } from "../lib/motion";
 import type { MenuAction, MenuComponentProps } from "@react-native-menu/menu";
 import { BlurView } from "expo-blur";
-import type { ReactNode } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import type { ReactNode, Ref } from "react";
+import { useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type { ColorValue, StyleProp, TextStyle, ViewStyle } from "react-native";
 import {
   BackHandler,
@@ -54,7 +54,13 @@ type OverlayFrame = {
   readonly height: number;
 };
 
+/** Opens the menu from code, e.g. the composer's `/model` command. */
+export interface AnchoredMenuHandle {
+  readonly open: () => void;
+}
+
 export type AnchoredMenuProps = {
+  readonly ref?: Ref<AnchoredMenuHandle>;
   readonly actions: readonly MenuAction[];
   readonly title?: string;
   readonly headerAction?: MenuAction;
@@ -118,7 +124,7 @@ function MenuBackdrop({ dark }: { readonly dark: boolean }) {
 }
 
 /** In-window dropdown for composer controls. Opening it preserves keyboard focus. */
-export function AnchoredMenu(props: AnchoredMenuProps) {
+export function AnchoredMenu({ ref, ...props }: AnchoredMenuProps) {
   const { onClose, onPressAction, closeOnSelect = true } = props;
   const insets = useSafeAreaInsets();
   const [query, setQuery] = useState("");
@@ -250,6 +256,7 @@ export function AnchoredMenu(props: AnchoredMenuProps) {
       setPath(initial ? [initial] : []);
     });
   };
+  useImperativeHandle(ref, () => ({ open: handleOpen }));
 
   const menuOpen = anchor !== null;
   useEffect(() => {
