@@ -29,6 +29,7 @@ const register = (
     role: "viewer" | "operator" | "owner";
     newSalt: string;
     nowMs: number;
+    liveActivity: boolean;
   }> = {},
 ) =>
   registerPushDevice(state, {
@@ -40,6 +41,7 @@ const register = (
       publicKey: PUBLIC,
       kinds: ["approval", "completed", "completed"],
       sound: true,
+      ...(overrides.liveActivity === undefined ? {} : { liveActivity: overrides.liveActivity }),
     },
     newSalt: overrides.newSalt ?? SALT_1,
     nowMs: overrides.nowMs ?? 1_000,
@@ -63,6 +65,16 @@ describe("push registrations", () => {
       collapseSalt: SALT_2,
       createdAt: 3_000,
     });
+  });
+
+  it("keeps whether the device's Live Activity takes push updates, as last registered", () => {
+    const on = register(undefined, { liveActivity: true });
+    expect(on.registrations[0]?.liveActivity).toBe(true);
+    const off = register(on, { liveActivity: false, nowMs: 2_000 });
+    expect(off.registrations[0]).not.toHaveProperty("liveActivity");
+    // An older app sends nothing: the state file reads back the same.
+    expect(register().registrations[0]).not.toHaveProperty("liveActivity");
+    expect(decodePushRegistrationState(encodePushRegistrationState(on))).toEqual(on);
   });
 
   it("never sends action alerts to a viewer", () => {

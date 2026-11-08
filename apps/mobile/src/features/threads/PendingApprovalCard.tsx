@@ -9,9 +9,8 @@ import {
 } from "@ryco/client-runtime/state/session";
 
 import { AppText as Text } from "../../components/AppText";
-import { ensureEnvironmentApi } from "../../connection/environmentApi";
 import { runThenSettle } from "../../lib/runWhileBusy";
-import { respondToThreadApproval } from "./sessionActions";
+import { answerThreadApproval } from "./threadRequestAnswers";
 
 const REQUEST_KIND_LABEL: Record<PendingApproval["requestKind"], string> = {
   command: "Run command",
@@ -37,16 +36,14 @@ export function PendingApprovalCard(props: {
     await runThenSettle(
       async () => {
         try {
-          await respondToThreadApproval({
-            api: ensureEnvironmentApi(props.environmentId),
+          await answerThreadApproval({
+            environmentId: props.environmentId,
             threadId: props.threadId,
-            requestId: props.approval.requestId,
+            approval: props.approval,
             decision,
-            approvalIdentity: props.approval.approvalIdentity,
           });
         } catch {
-          // `ensureEnvironmentApi` throws synchronously without a connection, and
-          // the RPC itself can reject; without this catch the `void respond(...)`
+          // No connection, or the RPC rejected; without this catch the `void respond(...)`
           // press handler turned both into a silent unhandled rejection. Bounded
           // copy: the raw message is an internal string the user cannot act on.
           setError("The decision could not be delivered. Reconnect and try again.");

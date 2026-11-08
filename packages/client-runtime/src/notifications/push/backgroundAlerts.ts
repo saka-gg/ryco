@@ -11,8 +11,8 @@ import type { NativePushEnvironment, NativePushPlatform } from "@ryco/contracts/
 import { HostedHubApiError, type HostedHubApi } from "../../authorization/api.ts";
 import { nativePushHubSupport, type NativePushHubSupport } from "../../authorization/nativePush.ts";
 import type { WsRpcClient } from "../../rpc/wsRpcClient.ts";
+import { wantedThreadAlertKinds } from "../../state/settings/threadNotificationPreferences.ts";
 import {
-  BACKGROUND_ALERT_KINDS,
   HUB_PUSH_CAPABILITY_RECHECK_MS,
   HUB_PUSH_CAPABILITY_RETRY_MS,
   NODE_PUSH_RETRY_MS,
@@ -87,8 +87,17 @@ export interface BackgroundAlertsPorts {
     readonly apnsEnvironment: NativePushEnvironment;
   };
   readonly preferences: {
-    /** `enabled`: background alerts and thread alerts are both on. */
-    readonly read: () => { readonly enabled: boolean; readonly sound: boolean };
+    /**
+     * `enabled`: background alerts and thread alerts are both on. `mutedKinds`: the alerts the
+     * person turned off (`wantedThreadAlertKinds`); none when absent. All muted counts as off.
+     */
+    readonly read: () => {
+      readonly enabled: boolean;
+      readonly sound: boolean;
+      readonly mutedKinds?: ReadonlyArray<PushAlertKind>;
+      /** The agent Live Activity is on, so it may take push updates. */
+      readonly liveActivity?: boolean;
+    };
     readonly subscribe: (listener: () => void) => () => void;
   };
   readonly account: {
@@ -104,6 +113,14 @@ export interface BackgroundAlertsPorts {
     readonly subscribe: (listener: () => void) => () => void;
   };
   readonly pushKey: PushKeyStore;
+  /**
+   * The update token of the agent Live Activity on screen (hex), or null while none shows. Only
+   * a Hub whose capability says `liveActivities` gets it, with the device's own registration.
+   */
+  readonly liveActivity?: {
+    readonly readToken: () => string | null;
+    readonly subscribe: (listener: () => void) => () => void;
+  };
   /**
    * Survives a restart: the account whose Hub registration this device turned
    * off but could not remove yet. Kept until the Hub confirms the removal.
@@ -153,6 +170,8 @@ export interface BackgroundAlerts {
 interface CapabilityCheck {
   readonly accountId: string;
   readonly support: NativePushHubSupport | "unreachable";
+  /** The Hub sends Live Activity push updates. */
+  readonly liveActivities: boolean;
   readonly checkedAt: number;
 }
 
@@ -162,6 +181,10 @@ interface NodeAttempt {
   readonly ready: object;
   readonly keyId: PushKey["keyId"];
   readonly sound: boolean;
+  /** The kinds it asked for, in `BACKGROUND_ALERT_KINDS` order. */
+  readonly kinds: string;
+  /** It was told the Live Activity takes push updates. */
+  readonly liveActivity: boolean;
   readonly state: EnvironmentPushState;
   /** When it ran, or null once a presence tick or a foreground asked for it again. */
   readonly at: number | null;
@@ -238,7 +261,8 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
       next.enabled === snapshot.enabled &&
       next.hub === snapshot.hub &&
       next.device === snapshot.device &&
-      next.environments === snapshot.environments
+      next.environments === snapshot.environments &&
+      next.liveActivityUpdates === snapshot.liveActivityUpdates
     ) {
       return;
     }
@@ -253,7 +277,9 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
     publish({ environments });
   };
 
-  const setHub = (hub: BackgroundAlertsHubStatus) => publish({ hub });
+  // Push updates hold only while the Hub holds this device's registration.
+  const setHub = (hub: BackgroundAlertsHubStatus) =>
+    publish(hub === "registered" ? { hub } : { hub, liveActivityUpdates: false });
 
   const isLive = (attempt: NodeAttempt) => attempt.connection.readReady() === attempt.ready;
 
@@ -323,13 +349,16 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
     capabilityInFlight ??= (async () => {
       setHub("checking");
       let support: CapabilityCheck["support"];
+      let liveActivities = false;
       try {
-        support = nativePushHubSupport(await ports.hub().getNativePushCapability(), ports.build);
+        const read = await ports.hub().getNativePushCapability();
+        support = nativePushHubSupport(read, ports.build);
+        liveActivities = read?.liveActivities === true;
       } catch (error) {
         report("Reading the Hub's push capability failed", error);
         support = "unreachable";
       }
-      capability = { accountId, support, checkedAt: ports.now() };
+      capability = { accountId, support, liveActivities, checkedAt: ports.now() };
       setHub(support);
     })().finally(() => {
       capabilityInFlight = null;
@@ -522,7 +551,13 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
     attempt.at === null ||
     (attempt.state.status === "failed" && ports.now() - attempt.at >= NODE_PUSH_RETRY_MS);
 
-  const registerNodes = async (sound: boolean, pushKey: PushKey) => {
+  const registerNodes = async (
+    sound: boolean,
+    kinds: ReadonlyArray<PushAlertKind>,
+    liveActivity: boolean,
+    pushKey: PushKey,
+  ) => {
+    const kindsKey = kinds.join(",");
     const connections = ports.connections.list();
     for (const connection of connections) {
       if (!connection.viaHub) continue;
@@ -533,6 +568,8 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
         previous?.connection === connection &&
         previous.ready === ready &&
         previous.sound === sound &&
+        previous.kinds === kindsKey &&
+        previous.liveActivity === liveActivity &&
         previous.keyId === pushKey.keyId;
       if (same && !attemptDue(previous)) continue;
       // Asking a registered node again only refreshes what it reports.
@@ -547,8 +584,10 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
           await connection.push.registerDevice({
             keyId: pushKey.keyId,
             publicKey: pushKey.publicKey,
-            kinds: BACKGROUND_ALERT_KINDS,
+            kinds,
             sound,
+            // Only when on: an older node then sees the payload it always did.
+            ...(liveActivity ? { liveActivity: true } : {}),
           }),
         );
       } catch (error) {
@@ -563,6 +602,8 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
         ready,
         keyId: pushKey.keyId,
         sound,
+        kinds: kindsKey,
+        liveActivity,
         state,
         at: ports.now(),
         // Known for this connect; a reconnect may reach an updated (or older) node.
@@ -587,7 +628,10 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
   };
 
   const reconcileOnce = async () => {
-    const preferences = ports.preferences.read();
+    const read = ports.preferences.read();
+    const wantedKinds = wantedThreadAlertKinds(read.mutedKinds);
+    // No kind wanted is off: a node registration needs at least one.
+    const preferences = { ...read, enabled: read.enabled && wantedKinds.length > 0 };
     const account = ports.account.read();
     publish({ enabled: preferences.enabled });
     if (ports.support !== "supported" || account.status === "pending") return;
@@ -671,7 +715,13 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
     }
     publish({ device: "ready" });
 
-    const registration = `${account.accountId}\n${account.enrollmentId}\n${token}`;
+    // The Live Activity's token rides on the device's own registration, to a Hub that takes it.
+    const liveActivityUpdates =
+      capability?.liveActivities === true && preferences.liveActivity === true;
+    const liveActivityToken = liveActivityUpdates
+      ? (ports.liveActivity?.readToken() ?? null)
+      : null;
+    const registration = `${account.accountId}\n${account.enrollmentId}\n${token}\n${liveActivityToken ?? ""}`;
     if (hubRegistration !== registration) {
       if (ports.now() < hubRetryAt) return;
       setHub("registering");
@@ -681,6 +731,7 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
           token,
           environment: ports.build.apnsEnvironment,
           topic: ports.build.topic,
+          ...(liveActivityToken === null ? {} : { liveActivityToken }),
         });
         hubRegistration = registration;
       } catch (error) {
@@ -688,7 +739,12 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
         if (status === "failed") report("Registering for push with the Hub failed", error);
         hubRetryAt = ports.now() + HUB_PUSH_CAPABILITY_RETRY_MS;
         if (status === "hub-unsupported" || status === "topic-unsupported") {
-          capability = { accountId: account.accountId, support: status, checkedAt: ports.now() };
+          capability = {
+            accountId: account.accountId,
+            support: status,
+            liveActivities: false,
+            checkedAt: ports.now(),
+          };
         }
         setHub(status);
         return;
@@ -697,7 +753,8 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
     // The new registration overtakes a removal still owed from turning off.
     await setHubRemovalOwed(null);
     setHub("registered");
-    await registerNodes(preferences.sound, key);
+    publish({ liveActivityUpdates });
+    await registerNodes(preferences.sound, wantedKinds, liveActivityToken !== null, key);
   };
 
   const reconcile = async (): Promise<void> => {
@@ -773,6 +830,7 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
           request();
         }),
         ports.account.subscribe(request),
+        ...(ports.liveActivity ? [ports.liveActivity.subscribe(request)] : []),
         ports.connections.subscribe(() => {
           followConnections();
           request();

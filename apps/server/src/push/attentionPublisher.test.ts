@@ -1,5 +1,5 @@
 import type { SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
-import { EnvironmentId, ProjectId, ThreadId, TurnId } from "@ryco/contracts";
+import { ApprovalRequestId, EnvironmentId, ProjectId, ThreadId, TurnId } from "@ryco/contracts";
 import type { PushAttentionSignalInput } from "@ryco/contracts/push-hub";
 import { openPushPayload, pushSealAssociatedData } from "@ryco/shared/pushSeal";
 import { e2eeX25519KeyPair } from "@ryco/shared/relayE2eeKeys";
@@ -174,6 +174,42 @@ describe("attention publisher", () => {
       q: signal.sequence,
     });
     expect(test.delivery).toContain("available");
+    await test.publisher.stop();
+  });
+
+  it("names an approval alert's request, so the phone answers that approval only", async () => {
+    const test = harness();
+    await vi.advanceTimersByTimeAsync(0);
+    await test.update(
+      summary({
+        hasPendingApprovals: true,
+        pendingApprovalRequestId: ApprovalRequestId.make("approval-a"),
+      }),
+      2,
+    );
+    await test.settle();
+    expect(open(test.sent[0]!)).toMatchObject({ k: "approval", tu: "turn-1", rq: "approval-a" });
+    // A newer approval in the same turn gets its own alert, with its own request.
+    await test.update(
+      summary({
+        hasPendingApprovals: true,
+        pendingApprovalRequestId: ApprovalRequestId.make("approval-b"),
+      }),
+      3,
+    );
+    await test.settle();
+    expect(test.sent).toHaveLength(2);
+    expect(open(test.sent[1]!)).toMatchObject({ k: "approval", rq: "approval-b" });
+    // An id too long to seal is left out: the phone then answers nothing from the alert.
+    await test.update(
+      summary({
+        hasPendingApprovals: true,
+        pendingApprovalRequestId: ApprovalRequestId.make("x".repeat(200)),
+      }),
+      4,
+    );
+    await test.settle();
+    expect(open(test.sent[2]!)).not.toHaveProperty("rq");
     await test.publisher.stop();
   });
 

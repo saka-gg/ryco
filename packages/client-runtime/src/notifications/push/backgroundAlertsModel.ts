@@ -5,6 +5,7 @@ import { HostedHubApiError } from "../../authorization/api.ts";
 import type { NativePushHubSupport } from "../../authorization/nativePush.ts";
 import { isUnsupportedRpcError } from "../../errors/transportError.ts";
 import { isAuthRpcError } from "../../rpc/wsTransport.ts";
+import { THREAD_ALERT_KINDS } from "../../state/settings/threadNotificationPreferences.ts";
 
 /**
  * Background alerts (`docs/push-alerts.md`): the node seals an alert to this
@@ -14,14 +15,7 @@ import { isAuthRpcError } from "../../rpc/wsTransport.ts";
  */
 
 /** Every kind the app's own alerts know; the node drops action kinds for a viewer. */
-export const BACKGROUND_ALERT_KINDS: ReadonlyArray<PushAlertKind> = [
-  "approval",
-  "input",
-  "plan-ready",
-  "completed",
-  "failed",
-  "stopped",
-];
+export const BACKGROUND_ALERT_KINDS: ReadonlyArray<PushAlertKind> = THREAD_ALERT_KINDS;
 
 /** The node holds `foreground` for 45 seconds; the app repeats it well inside that. */
 export const PUSH_PRESENCE_REFRESH_MS = 30_000;
@@ -85,12 +79,24 @@ export interface BackgroundAlertsSnapshot {
   readonly hub: BackgroundAlertsHubStatus;
   readonly device: BackgroundAlertsDeviceStatus;
   readonly environments: ReadonlyMap<EnvironmentId, EnvironmentPushState>;
+  /**
+   * The Hub took this device's registration and sends Live Activity push updates, and the
+   * Live Activity is on: a new card asks for an update token (`docs/live-activity-push.md`).
+   */
+  readonly liveActivityUpdates: boolean;
 }
 
 export function initialBackgroundAlertsSnapshot(
   support: BackgroundAlertsSupport,
 ): BackgroundAlertsSnapshot {
-  return { enabled: false, support, hub: "unknown", device: "idle", environments: new Map() };
+  return {
+    enabled: false,
+    support,
+    hub: "unknown",
+    device: "idle",
+    environments: new Map(),
+    liveActivityUpdates: false,
+  };
 }
 
 export function environmentPushStateFromStatus(status: PushDeviceStatus): EnvironmentPushState {

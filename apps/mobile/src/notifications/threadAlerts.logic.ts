@@ -1,4 +1,5 @@
 import { ScopedThreadRef } from "@ryco/contracts/environment";
+import type { PushAlertKind } from "@ryco/contracts/push";
 import { scopedThreadKey } from "@ryco/client-runtime/scoped";
 import {
   hasThreadSystemNotifications,
@@ -34,6 +35,11 @@ export interface MobileThreadAlert {
   readonly body: string;
   readonly sound: boolean;
   readonly ref: ScopedThreadRef;
+  readonly kind: PushAlertKind;
+  /** The turn it is about. */
+  readonly turnId: string | null;
+  /** An approval alert's approval: Approve or Deny on the alert answers this one only. */
+  readonly approvalRequestId: string | null;
 }
 
 /**
@@ -49,9 +55,12 @@ export function planMobileThreadAlert(input: {
   readonly appActive: boolean;
   readonly visibleThread: ScopedThreadRef | null;
   readonly pushCovers?: boolean;
+  /** The kinds the person wants (`wantedThreadAlertKinds`); every kind when absent. */
+  readonly wantedKinds?: ReadonlyArray<PushAlertKind>;
 }): MobileThreadAlert | null {
   const { event, delegated } = input.candidate;
   if (!input.appActive && input.pushCovers === true) return null;
+  if (input.wantedKinds !== undefined && !input.wantedKinds.includes(event.kind)) return null;
   const plan = planThreadAlert({
     mode: input.mode,
     toasts: hasThreadSystemNotifications(input.mode),
@@ -68,6 +77,9 @@ export function planMobileThreadAlert(input: {
     body: event.title,
     sound: plan.sound,
     ref: event.ref,
+    kind: event.kind,
+    turnId: event.turnId,
+    approvalRequestId: event.kind === "approval" ? event.approvalRequestId : null,
   };
 }
 
@@ -95,8 +107,17 @@ export function presentsInForeground(input: {
   readonly remote: boolean;
   readonly data: unknown;
   readonly isEnvironmentLive: (environmentId: ScopedThreadRef["environmentId"]) => boolean;
+  /** The thread on screen; an alert for it never shows (the plan above leaves it out, a push may race). */
+  readonly visibleThread?: ScopedThreadRef | null;
 }): boolean {
-  if (!input.remote) return true;
   const ref = threadAlertRefOf(input.data);
+  if (
+    ref !== null &&
+    input.visibleThread != null &&
+    scopedThreadKey(ref) === scopedThreadKey(input.visibleThread)
+  ) {
+    return false;
+  }
+  if (!input.remote) return true;
   return ref === null || !input.isEnvironmentLive(ref.environmentId);
 }

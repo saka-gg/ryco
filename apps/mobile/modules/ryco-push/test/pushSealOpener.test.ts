@@ -7,6 +7,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { THREAD_ALERT_COPY } from "@ryco/client-runtime/state/settings";
+import { PushAlertKind } from "@ryco/contracts/push";
+
+import { notificationCategoryForKind } from "../../../src/notifications/notificationActionsModel";
 import { describe, expect, it } from "vite-plus/test";
 
 /**
@@ -40,7 +43,7 @@ interface HarnessVector {
   readonly associatedData: string;
   readonly plaintext: string | null;
   readonly rejects: Readonly<Record<string, boolean>>;
-  readonly alert: Readonly<Record<string, string>> | null;
+  readonly alert: Readonly<Record<string, string | null>> | null;
   readonly alertRejects: Readonly<Record<string, boolean>>;
   readonly userInfo: Readonly<Record<string, unknown>>;
   readonly userInfoWhenUnopened: Readonly<Record<string, unknown>>;
@@ -54,6 +57,10 @@ const vectors = (
 
 const expectedKindTitles = Object.fromEntries(
   Object.entries(THREAD_ALERT_COPY).map(([kind, copy]) => [kind, copy.title]),
+);
+
+const expectedKindCategories = Object.fromEntries(
+  PushAlertKind.literals.map((kind) => [kind, notificationCategoryForKind(kind)]),
 );
 
 const swiftcAvailable =
@@ -84,9 +91,12 @@ describe.skipIf(!swiftcAvailable)("the extension's Swift opener", () => {
       const output = JSON.parse(execFileSync(binary, [VECTORS_PATH], { encoding: "utf8" })) as {
         readonly vectors: ReadonlyArray<HarnessVector>;
         readonly kindTitles: Readonly<Record<string, string>>;
+        readonly kindCategories: Readonly<Record<string, string>>;
       };
 
       expect(output.kindTitles).toEqual(expectedKindTitles);
+      // The extension's categories are the ones the app registers.
+      expect(output.kindCategories).toEqual(expectedKindCategories);
       expect(output.vectors.map((vector) => vector.name)).toEqual(
         vectors.map((vector) => vector.name),
       );
@@ -96,7 +106,11 @@ describe.skipIf(!swiftcAvailable)("the extension's Swift opener", () => {
           readonly k: keyof typeof THREAD_ALERT_COPY;
           readonly t: string;
           readonly th: string;
+          readonly tu: string | null;
+          readonly rq?: string;
         };
+        // Only an approval names its request.
+        const requestId = plaintext.k === "approval" ? (plaintext.rq ?? null) : null;
         expect(opened.publicKey).toBe(vector.recipientPublicKey);
         expect(opened.associatedData).toBe(vector.associatedData);
         expect(opened.plaintext).toBe(vector.plaintext);
@@ -110,6 +124,9 @@ describe.skipIf(!swiftcAvailable)("the extension's Swift opener", () => {
           threadId: plaintext.th,
           threadIdentifier: `${vector.environmentId}/${plaintext.th}`,
           url: `ryco-dev://threads/${vector.environmentId}/${plaintext.th}`,
+          turnId: plaintext.tu,
+          requestId,
+          categoryIdentifier: notificationCategoryForKind(plaintext.k),
         });
         expect(opened.alertRejects).toEqual({
           stale: true,
@@ -124,7 +141,13 @@ describe.skipIf(!swiftcAvailable)("the extension's Swift opener", () => {
         // `body` and `url` never reach the app, opened or not.
         expect(opened.userInfo).toEqual({
           keys: ["aps", "body", "url"],
-          body: { environmentId: vector.environmentId, threadId: plaintext.th },
+          body: {
+            environmentId: vector.environmentId,
+            threadId: plaintext.th,
+            kind: plaintext.k,
+            ...(plaintext.tu === null ? {} : { turnId: plaintext.tu }),
+            ...(requestId === null ? {} : { requestId }),
+          },
           url: `ryco-dev://threads/${vector.environmentId}/${plaintext.th}`,
         });
         expect(opened.userInfoWhenUnopened).toEqual({ keys: ["aps"] });

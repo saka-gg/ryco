@@ -218,6 +218,8 @@ describe("the extension target", () => {
         "AgentActivityAttributes.swift in Sources",
         "AgentActivityContentState.swift in Sources",
         "AgentActivityWidget.swift in Sources",
+        "AgentGlance.swift in Sources",
+        "AgentWidget.swift in Sources",
         "RycoWidgetsBundle.swift in Sources",
         "SubscriptionUsageContent.swift in Sources",
         "SubscriptionUsageWidget.swift in Sources",

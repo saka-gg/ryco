@@ -1394,6 +1394,12 @@ export const OrchestrationThreadShell = Schema.Struct({
   /** Last successful turn that is no longer active; absent on older servers. */
   latestCompletedTurnAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   hasPendingApprovals: Schema.Boolean,
+  /**
+   * The newest approval still waiting: present only while one does. A thread alert names it, so
+   * an action tapped on the alert answers that approval and no other, and a second approval in
+   * the same turn alerts on its own. Absent from older servers.
+   */
+  pendingApprovalRequestId: Schema.optionalKey(ApprovalRequestId),
   hasPendingUserInput: Schema.Boolean,
   hasActionableProposedPlan: Schema.Boolean,
   /**

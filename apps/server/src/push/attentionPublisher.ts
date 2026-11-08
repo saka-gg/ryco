@@ -33,6 +33,7 @@ import {
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import type { PushAlertKind, PushHubDelivery } from "@ryco/contracts/push";
 import {
+  PUSH_ALERT_REQUEST_ID_MAX_LENGTH,
   PUSH_ALERT_TITLE_MAX_LENGTH,
   PUSH_ATTENTION_MAX_DELIVERIES,
   type PushAlertPlaintext,
@@ -110,6 +111,20 @@ function truncateTitle(title: string): string {
     : `${trimmed.slice(0, PUSH_ALERT_TITLE_MAX_LENGTH - 1)}…`;
 }
 
+/**
+ * An approval alert's `rq`: the approval an Approve or Deny on it answers. Left out when the
+ * row names none (an older projection) or the id is too long to seal; the phone then answers
+ * nothing from the alert and the person chooses on screen.
+ */
+function sealedApprovalRequestIdField(
+  candidate: ThreadNotificationEvent,
+): Pick<PushAlertPlaintext, "rq"> {
+  const requestId = candidate.kind === "approval" ? candidate.approvalRequestId : null;
+  return requestId !== null && requestId.length <= PUSH_ALERT_REQUEST_ID_MAX_LENGTH
+    ? { rq: requestId }
+    : {};
+}
+
 /** One alert for one device. */
 export interface AttentionRecipient {
   readonly registration: PushRegistration;
@@ -155,6 +170,7 @@ export function sealAttentionDeliveries(input: {
       e: input.environmentId,
       th: candidate.ref.threadId,
       tu: candidate.turnId,
+      ...sealedApprovalRequestIdField(candidate),
       q: input.sequence,
       at: input.issuedAt,
     };

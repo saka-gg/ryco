@@ -32,6 +32,22 @@
       "collapseSalt": "cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3",
       "threadId": "thread-2",
       "collapseId": "l2Efgea1gjXhuu47cqc1AA"
+    },
+    {
+      "name": "approval-request-id",
+      "recipientSecretKey": "01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3da",
+      "recipientPublicKey": "c8feca81be196cdf2cadeabf13c4903d7632dce4955aa68b6e5d9adef54e2616",
+      "ephemeralSecretKey": "92ebb4ce361272322924691505a891556cabc24e368a6f1105ff9daf973fa32a",
+      "environmentId": "env_n0de-HubEnvironment00",
+      "sequence": 418,
+      "enrollmentId": "enr_Device0000000000000000",
+      "associatedData": "7279636f2d707573682d76310a656e765f6e3064652d487562456e7669726f6e6d656e7430300a3431380a656e725f44657669636530303030303030303030303030303030",
+      "plaintext": "{\"v\":1,\"k\":\"approval\",\"t\":\"Run the migration\",\"e\":\"env_n0de-HubEnvironment00\",\"th\":\"thread-1\",\"tu\":\"turn-8\",\"rq\":\"approval-request-42\",\"q\":418,\"at\":1793234112000}",
+      "sealed": "AWdXFWrgiKy_qXoHDvC5siUckczOPgiy77jHTEc8XNc_9ihjr518-DPWU375MGM-gN3DJaRAj4WdmyZLI8vB0vQbOYK82aFoO_ajRqeZbEbgkhBDHLR7w5eGn3IH10IJXzHABeKsa-OzUCk3WUfYEGktyxFSGLvnWo2ctl1132iWBKl0cwfuMLERL631wBpaOrNTLzf1RraOalqUh6LSeMABFtW7zg6qvCFOnaI2CQ9JW9l2dWJvRylsUTBEfTKAlbFx-sz4H_MOUyMYl8yaY5c1jQ",
+      "keyId": "DEQhCHjLCTVmDnk--WkGOQ",
+      "collapseSalt": "c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2",
+      "threadId": "thread-1",
+      "collapseId": "-YdpUtCCx5ISjSv_9SkYjQ"
     }
   ]
 }

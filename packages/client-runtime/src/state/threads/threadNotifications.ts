@@ -22,6 +22,11 @@ export interface ThreadNotificationEvent {
   readonly kind: ThreadNotificationKind;
   readonly title: string;
   readonly turnId: TurnId | null;
+  /**
+   * An approval alert's approval (the newest waiting, `pendingApprovalRequestId`): an action
+   * tapped on the alert answers this one only. Null for other kinds and from older nodes.
+   */
+  readonly approvalRequestId: string | null;
   readonly sequence: number;
   /** Opaque lifecycle token; revalidate with isCurrent immediately before delivery. */
   readonly generation: object;
@@ -85,12 +90,16 @@ function describe(
       if (terminal === "interrupted") kind = "stopped";
     }
   }
+  // An approval alert is about one approval: a newer one waiting in the same turn alerts on its
+  // own, even when the earlier one still waits or was answered within the same update.
+  const approvalRequestId = kind === "approval" ? (thread.pendingApprovalRequestId ?? null) : null;
   return {
     kind,
     terminalKey,
     suppressed,
     quiet,
-    fingerprint: JSON.stringify([kind, thread.latestTurn?.turnId ?? null]),
+    approvalRequestId,
+    fingerprint: JSON.stringify([kind, thread.latestTurn?.turnId ?? null, approvalRequestId]),
   };
 }
 
@@ -201,6 +210,7 @@ export function createThreadNotificationProjector(input: ThreadNotificationProje
         kind: next.kind,
         title: thread.title,
         turnId: thread.latestTurn?.turnId ?? null,
+        approvalRequestId: next.approvalRequestId,
         sequence,
         generation,
       });

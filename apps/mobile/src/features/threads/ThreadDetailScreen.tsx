@@ -234,6 +234,7 @@ import {
   selectSubscribedClaudeReviewState,
   selectThreadByRef,
   selectThreadDetailLoaded,
+  selectThreadLiveDetailLoaded,
   selectWorkingDelegatedDescendants,
   useStore,
 } from "../../state/threadsRuntime";
@@ -261,6 +262,7 @@ import {
 } from "./editFromHere";
 import { executeSendTurn } from "./executeSendTurn";
 import { PendingApprovalCard } from "./PendingApprovalCard";
+import { useNotificationThreadAction } from "../../notifications/useNotificationThreadAction";
 import { PendingUserInputCard } from "./PendingUserInputCard";
 import {
   resolveOptionalAnswerRoute,
@@ -274,12 +276,12 @@ import {
   compactThreadNow,
   interruptThreadTurn,
   renameThread,
-  respondToThreadApproval,
   setThreadArchived,
   setThreadSettled,
   setThreadInteractionMode,
   setThreadRuntimeMode,
 } from "./sessionActions";
+import { answerThreadApproval, answerThreadUserInput } from "./threadRequestAnswers";
 import { useThreadChecks } from "./useThreadChecks";
 import { buildThreadTimelineRows, toggleFold, type TurnHtmlRender } from "./threadActivityFold";
 import { HtmlRenderFullScreenProvider } from "./HtmlRenderFullScreen";
@@ -670,6 +672,11 @@ export function ThreadDetailScreen(props: {
   );
   const threadDetailLoaded = useStore((state) =>
     selectThreadDetailLoaded(state, scopeThreadRef(environmentId, threadId)),
+  );
+  // Live detail only: a read-cache hydration at launch does not count, so a notification action
+  // never reads approvals or questions the node has not confirmed yet.
+  const threadLiveDetailLoaded = useStore((state) =>
+    selectThreadLiveDetailLoaded(state, scopeThreadRef(environmentId, threadId)),
   );
   const queuesByThreadKey = useMessageQueueStore((state) => state.queuesByThreadKey);
   const outboxMessages = useSyncExternalStore(
@@ -2103,9 +2110,21 @@ export function ThreadDetailScreen(props: {
   const onSend = async (
     text: string,
     attachments: ReadonlyArray<DraftComposerAttachment>,
+    options: {
+      /**
+       * A Reply tapped on a notification: a message of its own. It never edits a queued entry,
+       * never declines waiting approvals, and leaves the composer's attachments alone.
+       */
+      readonly notificationReply?: boolean;
+    } = {},
   ): Promise<boolean> => {
+    const notificationReply = options.notificationReply === true;
     setSendError(null);
-    const sideQuestion = parseSideQuestionCommand(text);
+    if (notificationReply && (activeServerQueueEdit !== null || savingServerQueueEdit !== null)) {
+      setSendError("The reply was not sent: a queued message is being edited here.");
+      return false;
+    }
+    const sideQuestion = notificationReply ? null : parseSideQuestionCommand(text);
     if (sideQuestion !== null) {
       if (attachments.length > 0) {
         setSendError("Side questions accept text only. Remove attachments first.");
@@ -2222,7 +2241,11 @@ export function ThreadDetailScreen(props: {
       });
     }
 
-    const threadBusy = currentThread.latestTurn?.state === "running";
+    // A notification reply queues behind approvals still waiting: the turn they belong to is not
+    // over, even where its row already reads completed (a provider that ends the message first).
+    const threadBusy =
+      currentThread.latestTurn?.state === "running" ||
+      (notificationReply && pendingApprovals.length > 0);
     // Wave 3a: the socket opens one RTT before the live shell snapshot lands,
     // and until it does `threadBusy` is read from a CACHED latestTurn — the
     // same window wave 2's review closed for the outbox drain. A send inside
@@ -2253,6 +2276,8 @@ export function ThreadDetailScreen(props: {
     // behind them as before.
     const approvalsAtSend = pendingApprovals;
     const redirectApprovals = async (message: QueuedThreadMessage) => {
+      // A notification reply answers no approval: it queues behind them.
+      if (notificationReply) return "queue" as const;
       const redirect = resolveApprovalRedirect({
         approvals: approvalsAtSend,
         runtimeSessionId: currentThread.session?.runtimeSessionId,
@@ -2278,13 +2303,7 @@ export function ThreadDetailScreen(props: {
         const outcome = await declineApprovalsForRedirect({
           redirect,
           decline: (approval) =>
-            respondToThreadApproval({
-              api: ensureEnvironmentApi(environmentId),
-              threadId,
-              requestId: approval.requestId,
-              decision: "decline",
-              approvalIdentity: approval.approvalIdentity,
-            }),
+            answerThreadApproval({ environmentId, threadId, approval, decision: "decline" }),
           source: pendingApprovalSourceFromStore(
             useStore,
             (state) =>
@@ -2412,8 +2431,9 @@ export function ThreadDetailScreen(props: {
         },
       );
       // The composer clears its own text on success; the attachment rows live
-      // here, so a delivered turn (dispatch or safe enqueue) clears them too.
-      if (sent !== false) {
+      // here, so a delivered turn (dispatch or safe enqueue) clears them too. A notification
+      // reply did not carry them.
+      if (sent !== false && !notificationReply) {
         setAttachments([]);
         setAttachmentError(null);
       }
@@ -2599,6 +2619,30 @@ export function ThreadDetailScreen(props: {
         onOpenThread={openThread}
       />
     );
+  // An Approve, Deny or Reply tapped on this thread's notification, carried out by the same
+  // handlers as the cards and the composer once the connection is ready for them.
+  useNotificationThreadAction({
+    threadRef: scopeThreadRef(environmentId, threadId),
+    // The thread's live detail (its activities, where approvals and questions live), not its
+    // shell row or what a read cache restored at launch.
+    threadLoaded: thread !== undefined && thread !== null && threadLiveDetailLoaded,
+    ready: (environmentRow?.mutationReady ?? false) && !cachedView.promptsDisabled,
+    pendingApprovals,
+    pendingUserInputs,
+    composerDisabled: cachedView.composerDisabled,
+    editingQueuedMessage: activeServerQueueEdit !== null || savingServerQueueEdit !== null,
+    respond: async (approval, decision) => {
+      // An earlier refusal no longer applies once this one is carried out.
+      setSendError(null);
+      await answerThreadApproval({ environmentId, threadId, approval, decision });
+    },
+    answer: async ({ userInput, answers }) => {
+      setSendError(null);
+      await answerThreadUserInput({ environmentId, threadId, userInput, answers });
+    },
+    send: (text) => onSend(text, [], { notificationReply: true }),
+    refuse: setSendError,
+  });
   const visibleError = sendError ?? thread?.error ?? null;
   // A restart release is an interruption, not a thread error (`thread.error` leaves it
   // out): a quiet line once the thread's own activities can tell whether the node

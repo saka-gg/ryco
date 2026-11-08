@@ -23,6 +23,10 @@ vi.mock("./components/SettingsSwitchRow", () => ({
   ),
 }));
 
+vi.mock("./components/SettingsSection", () => ({
+  SettingsSection: (props: { readonly children: unknown }) => <>{props.children}</>,
+}));
+
 import { LIVE_ACTIVITY_DETAIL, LiveActivitySettings } from "./LiveActivitySettings";
 
 describe("the Live Activity switch", () => {

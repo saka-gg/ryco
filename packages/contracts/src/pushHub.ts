@@ -18,6 +18,8 @@ const SafeCounter = Schema.Number.check(
 
 /** Longest thread title a sealed payload carries, in UTF-16 code units. */
 export const PUSH_ALERT_TITLE_MAX_LENGTH = 120;
+/** Longest approval request id a sealed payload carries; a longer one is left out. */
+export const PUSH_ALERT_REQUEST_ID_MAX_LENGTH = 160;
 
 /**
  * The opened payload. Short keys keep the sealed blob small: APNs caps the
@@ -32,6 +34,14 @@ export const PushAlertPlaintext = Schema.Struct({
   e: TrimmedNonEmptyString,
   th: TrimmedNonEmptyString,
   tu: Schema.NullOr(TrimmedNonEmptyString),
+  /**
+   * An approval alert's request: an Approve or Deny tapped on the alert answers this approval
+   * only. Left out of other kinds, from older nodes, and when longer than
+   * {@link PUSH_ALERT_REQUEST_ID_MAX_LENGTH}.
+   */
+  rq: Schema.optionalKey(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(PUSH_ALERT_REQUEST_ID_MAX_LENGTH)),
+  ),
   /** The signal's sequence; also bound into the seal's associated data. */
   q: SafeCounter,
   /** When the node sealed it, epoch milliseconds. */
@@ -121,6 +131,11 @@ export const NativePushCapability = Schema.Struct({
   platforms: Schema.Array(NativePushPlatform),
   /** Bundle identifiers the Hub can send to; a build with another one gets no push. */
   topics: Schema.Array(NativePushTopic),
+  /**
+   * The Hub takes Live Activity update tokens and sends `liveactivity` pushes with counts only
+   * (`docs/live-activity-push.md`). Absent from Hubs without them.
+   */
+  liveActivities: Schema.optional(Schema.Boolean),
 });
 export type NativePushCapability = typeof NativePushCapability.Type;
 
@@ -134,5 +149,55 @@ export const NativePushRegistrationInput = Schema.Struct({
   token: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64,200}$/u)),
   environment: NativePushEnvironment,
   topic: NativePushTopic,
+  /**
+   * The update token of this device's agent Live Activity, hex, while one shows. Sent only to a
+   * Hub whose capability says `liveActivities`; a registration without it drops the earlier one.
+   */
+  liveActivityToken: Schema.optional(Schema.String.check(Schema.isPattern(/^[0-9a-f]{64,512}$/u))),
 });
 export type NativePushRegistrationInput = typeof NativePushRegistrationInput.Type;
+
+// --- Hub → device: Live Activity push updates (`docs/live-activity-push.md`) -----------
+
+/**
+ * The content state a Live Activity push update carries: counts only, never a title, project or
+ * thread link, because the Hub cannot read thread content (`modules/ryco-widgets/ios/
+ * AgentActivityContentState.swift` decodes it; `rows` and `url` stay absent).
+ */
+export const LiveActivityRemoteContentState = Schema.Struct({
+  v: Schema.Literal(1),
+  origin: Schema.Literal("remote"),
+  counts: Schema.Struct({
+    running: SafeCounter,
+    needsYou: SafeCounter,
+    failed: SafeCounter,
+    done: SafeCounter,
+  }),
+  /** When the Hub built it, epoch ms. */
+  updatedAt: SafeCounter,
+});
+export type LiveActivityRemoteContentState = typeof LiveActivityRemoteContentState.Type;
+
+// --- Node → Hub: `POST /api/node/attention/activity` (reserved) ------------------------
+
+/**
+ * Reserved for the node's half of Live Activity push updates: per enrollment that registered
+ * with `liveActivity`, how many of this node's threads run, need the person, or just ended. The
+ * Hub sums them across the account's nodes into one {@link LiveActivityRemoteContentState}. Not
+ * sent yet; see `docs/live-activity-push.md`.
+ */
+export const PUSH_ACTIVITY_SIGNAL_PATH = "/api/node/attention/activity";
+
+export const PushActivitySignalInput = Schema.Struct({
+  proof: NodeHubProof,
+  /** The same sequence as the attention signal's: one counter for both. */
+  sequence: SafeCounter,
+  issuedAt: SafeCounter,
+  activities: Schema.Array(
+    Schema.Struct({
+      enrollmentId: NativeE2eeEnrollmentId,
+      counts: LiveActivityRemoteContentState.fields.counts,
+    }),
+  ).check(Schema.isMinLength(1), Schema.isMaxLength(PUSH_ATTENTION_MAX_DELIVERIES)),
+});
+export type PushActivitySignalInput = typeof PushActivitySignalInput.Type;

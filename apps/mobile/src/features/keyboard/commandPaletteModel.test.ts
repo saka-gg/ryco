@@ -94,6 +94,7 @@ describe("command palette sources", () => {
       "action:settings:SettingsWorkspace",
       "action:settings:SettingsProviderAccounts",
       "action:settings:SettingsInbox",
+      "action:settings:SettingsNotifications",
       "action:settings:SettingsStatistics",
       "# Recent Threads",
       "thread:node:newest",

@@ -37,6 +37,7 @@ export type CommandPaletteSettingsScreen = Extract<
   | "SettingsWorkspace"
   | "SettingsProviderAccounts"
   | "SettingsInbox"
+  | "SettingsNotifications"
   | "SettingsStatistics"
 >;
 
@@ -113,6 +114,12 @@ const SETTINGS_ACTIONS: ReadonlyArray<{
     title: SETTINGS_SECTION_TITLES.inbox,
     icon: "tray",
     searchTerms: ["settle", "snooze", "inbox"],
+  },
+  {
+    screen: "SettingsNotifications",
+    title: SETTINGS_SECTION_TITLES.notifications,
+    icon: "bell",
+    searchTerms: ["alerts", "notifications", "live activity", "approval"],
   },
   {
     screen: "SettingsStatistics",

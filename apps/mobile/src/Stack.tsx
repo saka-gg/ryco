@@ -49,6 +49,7 @@ import {
   SettingsDiagnosticsRouteScreen,
   SettingsHubRouteScreen,
   SettingsInboxRouteScreen,
+  SettingsNotificationsRouteScreen,
   SettingsProviderAccountsRouteScreen,
   SettingsRouteScreen,
   SettingsStatisticsRouteScreen,
@@ -219,6 +220,11 @@ const SettingsSheetStack = createNativeStackNavigator({
       screen: ArchivedThreadsRouteScreen,
       linking: MVP_SETTINGS_SHEET_ROUTES.SettingsArchived.linking,
       options: settingsRouteOptions("SettingsArchived", "Archived tasks"),
+    }),
+    SettingsNotifications: createNativeStackScreen({
+      screen: SettingsNotificationsRouteScreen,
+      linking: MVP_SETTINGS_SHEET_ROUTES.SettingsNotifications.linking,
+      options: settingsRouteOptions("SettingsNotifications", SETTINGS_SECTION_TITLES.notifications),
     }),
     SettingsAccount: createNativeStackScreen({
       screen: HostedAccountRouteScreen,

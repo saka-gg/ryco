@@ -59,6 +59,19 @@ recognizes speech on the device instead of transcribing on a server), and the
 incoming-share model (`src/features/sharing/incomingShareModel.ts`, after upstream's
 `sharing/incoming-share-model.ts` and `incoming-share-native.ts`).
 
+The notification and Live Activity work ports mechanisms and numbers from the same
+upstream at a later commit (`e4552000`), rewritten for Ryco rather than copied: the
+foreground rule that keeps an alert for the thread on screen quiet and the
+once-per-response tap routing including the response that launched the app
+(`src/notifications/threadAlerts.ts`, `threadAlerts.logic.ts`, from upstream's
+`foregroundNotificationBehavior.ts` / `notificationResponseConsumer.ts`); the agent
+card's row content (project, model, phase, status), its lead-row order and phase
+tints (`modules/ryco-widgets/extension/AgentActivityWidget.swift`,
+`AgentGlance.swift`, from upstream's `widgets/AgentActivity.tsx` and the relay's
+aggregate row); and the Live Activity push timings documented in
+`docs/live-activity-push.md` (ten-minute stale date, end dismissal windows, from
+upstream's relay APNs client).
+
 `pingdotgg/t3code` is Copyright (c) 2026 T3 Tools Inc. and licensed under the MIT
 License; that notice is retained below as required. The four vendored native
 modules under `modules/*` carry their own `LICENSE` / `UPSTREAM.md` notices

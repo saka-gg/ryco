@@ -14,6 +14,10 @@ import {
   subscribeMobileNativeE2eeEnrollment,
 } from "../../hostedHub/e2eeEnrollment";
 import { readMobileNativePlatform, readMobilePushBuild } from "../../platform/config";
+import {
+  readLiveActivityPushToken,
+  subscribeLiveActivityPushToken,
+} from "../../liveActivity/liveActivityTokenStore";
 import { mobileKV } from "../../platform/kv";
 import { createMobileConnectionRegistry } from "../../runtime/bootstrap";
 import { getPreferencesSnapshot, subscribePreferences } from "../../state/preferencesStore";
@@ -99,6 +103,9 @@ function createMobileBackgroundAlerts(): BackgroundAlerts {
         return {
           enabled: preferences.threadAlerts === true && preferences.backgroundAlerts === true,
           sound: preferences.threadAlertSound === true,
+          // The node sends only the rest (`effectivePushKinds`).
+          mutedKinds: preferences.mutedAlertKinds,
+          liveActivity: preferences.liveActivitiesEnabled === true,
         };
       },
       subscribe: subscribePreferences,
@@ -120,6 +127,10 @@ function createMobileBackgroundAlerts(): BackgroundAlerts {
       subscribe: (listener) => supervisor().subscribe(listener),
     },
     pushKey,
+    liveActivity: {
+      readToken: readLiveActivityPushToken,
+      subscribe: subscribeLiveActivityPushToken,
+    },
     hubRemoval: createHubRemovalMarker(mobileKV),
     earlierInstallKey: createEarlierInstallKeyMemo(mobileKV),
     notifications: { readPermission: readThreadAlertPermission, readDeviceToken },

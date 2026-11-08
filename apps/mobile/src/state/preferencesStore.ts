@@ -1,5 +1,6 @@
 import * as Schema from "effect/Schema";
 import { ModelFavorite } from "@ryco/contracts/settings";
+import { PushAlertKind } from "@ryco/contracts/push";
 import { uniqueModelFavorites } from "@ryco/client-runtime/state/composer";
 import { useSyncExternalStore } from "react";
 import {
@@ -47,6 +48,11 @@ export interface Preferences {
    */
   readonly backgroundAlerts?: boolean;
   /**
+   * Alert kinds the person turned off, for this device's own alerts and for background alerts
+   * alike. Unset means every kind; a kind added later starts on.
+   */
+  readonly mutedAlertKinds?: ReadonlyArray<PushAlertKind>;
+  /**
    * Review a send that resumes a large, idle Claude conversation first; "Don't ask
    * again" turns it off. Unset means on.
    */
@@ -73,6 +79,7 @@ export function sanitizePreferences(parsed: Preferences): Preferences {
     threadAlerts?: boolean;
     threadAlertSound?: boolean;
     backgroundAlerts?: boolean;
+    mutedAlertKinds?: ReadonlyArray<PushAlertKind>;
     claudeResumeReview?: boolean;
     streamHaptics?: boolean;
   } = {};
@@ -128,6 +135,10 @@ export function sanitizePreferences(parsed: Preferences): Preferences {
   }
   if (typeof parsed.streamHaptics === "boolean") {
     preferences.streamHaptics = parsed.streamHaptics;
+  }
+  if (Array.isArray(parsed.mutedAlertKinds)) {
+    const isKind = Schema.is(PushAlertKind);
+    preferences.mutedAlertKinds = [...new Set(parsed.mutedAlertKinds.filter(isKind))];
   }
   if (typeof parsed.claudeResumeReview === "boolean") {
     preferences.claudeResumeReview = parsed.claudeResumeReview;

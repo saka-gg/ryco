@@ -1,5 +1,6 @@
 import type { EnvironmentId, ScopedThreadRef } from "@ryco/contracts";
 import type { PushAlertKind } from "@ryco/contracts/push";
+import { wantedThreadAlertKinds } from "@ryco/client-runtime/state/settings";
 import {
   startThreadNotificationFeed,
   type SidebarThreadOrStub,
@@ -14,11 +15,20 @@ import { AppState, Platform } from "react-native";
 
 import type { Preferences } from "../state/preferencesStore";
 import {
+  NOTIFICATION_CATEGORIES,
+  notificationCategoryForKind,
+  notificationRouteOf,
+  type NotificationRoute,
+} from "./notificationActionsModel";
+import {
+  clearPendingNotificationActions,
+  setPendingNotificationAction,
+} from "./pendingNotificationAction";
+import {
   planMobileThreadAlert,
   presentsInForeground,
   threadAlertLinkPath,
   threadAlertModeOf,
-  threadAlertRefOf,
   type MobileThreadAlert,
 } from "./threadAlerts.logic";
 
@@ -47,14 +57,43 @@ export interface MobileThreadAlertsPlatform {
   readonly present: (alert: MobileThreadAlert) => Promise<void>;
   /** Shows alerts while the app is in front; the returned function stops that. */
   readonly presentInForeground: () => () => void;
-  /** Calls back with the data of each notification the user opens, the one that launched the app included. */
-  readonly subscribeOpened: (listener: (data: unknown) => void) => () => void;
+  /**
+   * Calls back once with each notification response that names a thread: a tap or one of its
+   * actions, the one that launched the app included.
+   */
+  readonly subscribeOpened: (listener: (route: NotificationRoute) => void) => () => void;
   readonly openThread: (ref: ScopedThreadRef) => void;
 }
 
 const THREAD_ALERT_CHANNEL_ID = "thread-alerts";
 
 let threadAlertChannel: Promise<void> | null = null;
+let threadAlertCategories: Promise<void> | null = null;
+
+/**
+ * Registers the alert categories and their actions (`notificationActionsModel.ts`). iOS keeps them
+ * across launches; the push extension sets the same identifiers on the alerts it opens.
+ */
+function ensureThreadAlertCategories(): Promise<void> {
+  threadAlertCategories ??= (async () => {
+    // One at a time: each call reads iOS's category set and writes it back with its own, so
+    // calls in parallel keep only the last one.
+    for (const category of NOTIFICATION_CATEGORIES) {
+      await Notifications.setNotificationCategoryAsync(
+        category.identifier,
+        category.actions.map((action) => ({
+          ...action,
+          options: { ...action.options },
+          ...(action.textInput ? { textInput: { ...action.textInput } } : {}),
+        })),
+      );
+    }
+  })().catch((error: unknown) => {
+    threadAlertCategories = null;
+    throw error;
+  });
+  return threadAlertCategories;
+}
 
 /** Android posts through a channel, which must exist before it may ask to notify. */
 function ensureThreadAlertChannel(): Promise<void> {
@@ -76,12 +115,18 @@ export function createExpoThreadAlertsPlatform(
   options: {
     /** The app holds a live connection to this machine. */
     readonly isEnvironmentLive?: (environmentId: EnvironmentId) => boolean;
+    /** The thread on screen: an alert for it stays quiet while the app is in front. */
+    readonly readVisibleThread?: () => ScopedThreadRef | null;
   } = {},
 ): MobileThreadAlertsPlatform {
-  let lastOpened: string | null = null;
+  /** Responses already routed: the one that launched the app also arrives as an event. */
+  const routed = new Set<string>();
   return {
     isAppActive: () => AppState.currentState === "active",
-    prepare: ensureThreadAlertChannel,
+    prepare: () =>
+      Promise.all([ensureThreadAlertChannel(), ensureThreadAlertCategories()]).then(
+        () => undefined,
+      ),
     present: async (alert) => {
       await Notifications.scheduleNotificationAsync({
         identifier: alert.identifier,
@@ -90,7 +135,15 @@ export function createExpoThreadAlertsPlatform(
           body: alert.body,
           // Always set: left out, the default sound plays.
           sound: alert.sound,
-          data: { environmentId: alert.ref.environmentId, threadId: alert.ref.threadId },
+          categoryIdentifier: notificationCategoryForKind(alert.kind),
+          data: {
+            environmentId: alert.ref.environmentId,
+            threadId: alert.ref.threadId,
+            kind: alert.kind,
+            ...(alert.turnId === null ? {} : { turnId: alert.turnId }),
+            // The approval an Approve or Deny on this alert answers, and no other.
+            ...(alert.approvalRequestId === null ? {} : { requestId: alert.approvalRequestId }),
+          },
         },
         trigger: Platform.OS === "android" ? { channelId: THREAD_ALERT_CHANNEL_ID } : null,
       });
@@ -109,6 +162,7 @@ export function createExpoThreadAlertsPlatform(
               (trigger as { readonly type?: unknown }).type === "push",
             data: notification.request.content.data,
             isEnvironmentLive: options.isEnvironmentLive ?? (() => false),
+            visibleThread: options.readVisibleThread?.() ?? null,
           });
           return {
             shouldShowBanner: show,
@@ -122,13 +176,12 @@ export function createExpoThreadAlertsPlatform(
     },
     subscribeOpened: (listener) => {
       const open = (response: Notifications.NotificationResponse | null) => {
-        if (response?.actionIdentifier !== Notifications.DEFAULT_ACTION_IDENTIFIER) return;
-        // The response that launched the app can also arrive as an event.
-        const key = `${response.notification.request.identifier}:${response.notification.date}`;
-        if (key === lastOpened) return;
-        lastOpened = key;
+        if (response === null) return;
+        const route = notificationRouteOf(response);
+        if (route === null || routed.has(route.responseKey)) return;
+        routed.add(route.responseKey);
         Notifications.clearLastNotificationResponse();
-        listener(response.notification.request.content.data);
+        listener(route);
       };
       open(Notifications.getLastNotificationResponse());
       const subscription = Notifications.addNotificationResponseReceivedListener(open);
@@ -181,9 +234,11 @@ export function startMobileThreadAlerts(
 
   const deliver = (candidate: ThreadNotificationCandidate) => {
     const appActive = platform.isAppActive();
+    const preferences = deps.readPreferences();
     const alert = planMobileThreadAlert({
       candidate,
-      mode: threadAlertModeOf(deps.readPreferences()),
+      mode: threadAlertModeOf(preferences),
+      wantedKinds: wantedThreadAlertKinds(preferences.mutedAlertKinds),
       appActive,
       visibleThread: deps.readVisibleThread(),
       pushCovers:
@@ -221,10 +276,17 @@ export function startMobileThreadAlerts(
     });
   };
 
+  // The categories also serve the alerts push brings while Ryco is closed.
+  void platform.prepare().catch((error: unknown) => {
+    console.warn("Thread alert actions were not registered", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
   const stopForeground = platform.presentInForeground();
-  const unsubscribeOpened = platform.subscribeOpened((data) => {
-    const ref = threadAlertRefOf(data);
-    if (ref !== null) platform.openThread(ref);
+  const unsubscribeOpened = platform.subscribeOpened((route) => {
+    // The thread's screen carries the action out once its connection is ready for it.
+    if (route.action !== null) setPendingNotificationAction(route.ref, route.action, Date.now());
+    platform.openThread(route.ref);
   });
   const unsubscribePreferences = deps.subscribePreferences(syncPreferences);
   syncPreferences();
@@ -238,6 +300,8 @@ export function startMobileThreadAlerts(
       stopForeground();
       feed?.stop();
       feed = null;
+      // Signed out or locked: what was tapped for this session never runs in the next one.
+      clearPendingNotificationActions();
     },
   };
 }

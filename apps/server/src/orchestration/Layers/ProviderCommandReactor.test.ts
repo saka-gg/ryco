@@ -6375,6 +6375,10 @@ describe("ProviderCommandReactor", () => {
       await harness.respond("approval-in-flight");
       await waitFor(() => harness.respondToRequest.mock.calls.length === 1);
       expect((await harness.readShell()).threads[0]?.hasPendingApprovals).toBe(true);
+      // The shell names the waiting approval: a thread alert's actions answer that one only.
+      expect((await harness.readShell()).threads[0]?.pendingApprovalRequestId).toBe(
+        "approval-safety",
+      );
     } finally {
       release?.();
       await harness.drain();
@@ -6417,6 +6421,7 @@ describe("ProviderCommandReactor", () => {
       "decline",
     ]);
     expect((await harness.readShell()).threads[0]?.hasPendingApprovals).toBe(false);
+    expect((await harness.readShell()).threads[0]).not.toHaveProperty("pendingApprovalRequestId");
     await expect(
       harness.activity("late-failure", "provider.approval.respond.failed", {
         approvalIdentity: harness.identity,

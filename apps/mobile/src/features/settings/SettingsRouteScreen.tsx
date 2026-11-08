@@ -51,6 +51,11 @@ export function SettingsRouteScreen() {
           value="Text and code"
           onPress={() => navigation.navigate("SettingsAppearance" as never)}
         />
+        <SettingsRow
+          label={SETTINGS_SECTION_TITLES.notifications}
+          value="Alerts, Live Activity"
+          onPress={() => navigation.navigate("SettingsNotifications" as never)}
+        />
       </SettingsSection>
 
       <SettingsSection title={SETTINGS_GROUP_TITLES.work}>

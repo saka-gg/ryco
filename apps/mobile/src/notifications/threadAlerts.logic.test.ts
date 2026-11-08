@@ -1,7 +1,7 @@
 import { EnvironmentId, ThreadId } from "@ryco/contracts/base-schemas";
 import type { ScopedThreadRef } from "@ryco/contracts";
 import { scopedThreadKey } from "@ryco/client-runtime/scoped";
-import { threadNotificationTag } from "@ryco/client-runtime/state/settings";
+import { threadNotificationTag, wantedThreadAlertKinds } from "@ryco/client-runtime/state/settings";
 import type {
   ThreadNotificationCandidate,
   ThreadNotificationKind,
@@ -34,6 +34,7 @@ function candidate(
       kind,
       title: "Fix the login form",
       turnId: null,
+      approvalRequestId: null,
       sequence: 1,
       generation: {},
     },
@@ -83,8 +84,31 @@ describe("planMobileThreadAlert", () => {
         body: "Fix the login form",
         sound: false,
         ref: ref("thread-b"),
+        kind,
+        turnId: null,
+        approvalRequestId: null,
       });
     }
+  });
+
+  it("leaves out a kind the person muted", () => {
+    const plan = (wantedKinds: ReadonlyArray<ThreadNotificationKind>) =>
+      planMobileThreadAlert({
+        candidate: candidate("completed"),
+        mode: "notifications",
+        ...quietScreen,
+        appActive: true,
+        wantedKinds,
+      });
+    expect(plan(["approval", "completed"])).not.toBeNull();
+    expect(plan(["approval"])).toBeNull();
+    expect(wantedThreadAlertKinds(["completed", "stopped"])).toEqual([
+      "approval",
+      "input",
+      "plan-ready",
+      "failed",
+    ]);
+    expect(wantedThreadAlertKinds(undefined)).toHaveLength(6);
   });
 
   it("keeps a stopped turn quiet while the app is in front, where it is your own Stop", () => {
@@ -240,5 +264,15 @@ describe("background push and the app's own alerts", () => {
     // The app's own alerts, and a push it could not open, show as before.
     expect(presentsInForeground({ remote: false, data, isEnvironmentLive: live })).toBe(true);
     expect(presentsInForeground({ remote: true, data: {}, isEnvironmentLive: live })).toBe(true);
+  });
+
+  it("never shows an alert for the thread on screen, local or pushed", () => {
+    const data = ref("thread-b");
+    const shown = (remote: boolean, visibleThread: ScopedThreadRef | null) =>
+      presentsInForeground({ remote, data, isEnvironmentLive: () => false, visibleThread });
+    expect(shown(false, ref("thread-b"))).toBe(false);
+    expect(shown(true, ref("thread-b"))).toBe(false);
+    expect(shown(false, ref("thread-c"))).toBe(true);
+    expect(shown(true, null)).toBe(true);
   });
 });

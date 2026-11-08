@@ -29,6 +29,11 @@ export interface LiveActivityRuntimeDeps {
     readonly isActive: () => boolean;
     readonly subscribe: (listener: (active: boolean) => void) => () => void;
   };
+  /**
+   * Whether a new card asks for push updates (`docs/live-activity-push.md`): the Hub sends them
+   * and this device registered for push. Off when absent.
+   */
+  readonly pushUpdates?: () => boolean;
   readonly now?: () => number;
   readonly onError?: (error: unknown) => void;
 }
@@ -130,10 +135,12 @@ export function startLiveActivityRuntime(deps: LiveActivityRuntimeDeps): LiveAct
           // An ended card shows its results for up to 15 minutes, and iOS lists it no more:
           // without this, work that starts again meanwhile would put a second card beside it.
           await deps.native.dismissAgentActivities(true);
-          const id = await deps.native.startAgentActivity(
-            encodeAgentActivityState(decision.state),
-            decision.staleAtMs,
-          );
+          const json = encodeAgentActivityState(decision.state);
+          // Older binaries take two arguments: the third goes only when push updates are on.
+          const id =
+            deps.pushUpdates?.() === true
+              ? await deps.native.startAgentActivity(json, decision.staleAtMs, true)
+              : await deps.native.startAgentActivity(json, decision.staleAtMs);
           cards = [
             {
               id,
