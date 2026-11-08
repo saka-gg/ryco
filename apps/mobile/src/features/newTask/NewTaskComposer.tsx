@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useLayoutEffect, useRef } from "react";
 import { useKeyboardState } from "react-native-keyboard-controller";
 import { ComposerAccessMenu } from "../threads/ComposerAccessMenu";
 import { buildSessionPolicyModel } from "../threads/sessionPolicyModel";
@@ -13,7 +13,7 @@ import type {
   ProviderInteractionMode,
   ServerProvider,
 } from "@ryco/contracts";
-import { Pressable, TextInput, View } from "react-native";
+import { Pressable, View } from "react-native";
 import { IconGitBranch, IconGitFork } from "../../components/icons";
 
 import { AppText as Text } from "../../components/AppText";
@@ -24,7 +24,26 @@ import { DeviceIcon } from "../../components/DeviceIcon";
 import { GlassSurface } from "../../components/GlassSurface";
 import { ProjectFavicon } from "../../components/ProjectFavicon";
 import { ProviderIcon } from "../../components/ProviderIcon";
-import type { DraftComposerImageAttachment } from "../../lib/composerImages";
+import type { AnchoredMenuHandle } from "../../components/AnchoredMenu";
+import { ComposerAttachMenu } from "../../components/ComposerAttachMenu";
+import type { ComposerAttachmentSource, DraftComposerAttachment } from "../../lib/composerFiles";
+import {
+  ComposerEditor,
+  type ComposerEditorHandle,
+  type ComposerEditorSelection,
+} from "../../native/ComposerEditor";
+import type { ChatFileUploadRecord } from "../../state/composerFileUpload";
+import { ComposerCommandPopover } from "../threads/ComposerCommandPopover";
+import {
+  ComposerDictationBar,
+  ComposerDictationButton,
+  ComposerDictationError,
+} from "../dictation/ComposerDictationControls";
+import { useComposerDictation } from "../dictation/useComposerDictation";
+import {
+  useComposerCommandMenu,
+  type ComposerCommandMenuContext,
+} from "../threads/useComposerCommandMenu";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { runtimeModeConfig } from "../threads/sessionPolicyPresentation";
 import { ComposerModelMenu } from "../threads/ComposerModelMenu";
@@ -43,7 +62,11 @@ export function NewTaskComposer(props: {
   ) => void;
   readonly customAvatarContentHash?: string | null;
   readonly prompt: string;
-  readonly attachments: ReadonlyArray<DraftComposerImageAttachment>;
+  readonly attachments: ReadonlyArray<DraftComposerAttachment>;
+  readonly fileUploadRecords?: ReadonlyMap<string, ChatFileUploadRecord>;
+  readonly onRetryFileUpload?: (attachmentId: string) => void;
+  /** Where `/`, `$` and `@` look things up; null until a machine is chosen. */
+  readonly commandMenuContext: ComposerCommandMenuContext | null;
   readonly machineLabel: string;
   readonly locationLabel: string;
   readonly branchLabel: string | null;
@@ -65,7 +88,7 @@ export function NewTaskComposer(props: {
   readonly queueNotice?: string | null;
   readonly onChangePrompt: (prompt: string) => void;
   readonly onRemoveAttachment: (id: string) => void;
-  readonly onPickAttachments: () => void;
+  readonly onPickAttachments: (source: ComposerAttachmentSource) => void;
   readonly onOpenWorkspace: () => void;
   readonly onSelectEnvironment: (environmentId: EnvironmentId) => void;
   readonly modelOptions: ReadonlyArray<ModelOption>;
@@ -76,14 +99,43 @@ export function NewTaskComposer(props: {
   readonly onChangeRuntimeMode: (mode: RuntimeMode) => void;
   readonly onSend: () => void;
 }) {
-  const promptRef = useRef<TextInput>(null);
+  const promptRef = useRef<ComposerEditorHandle>(null);
+  const modelMenuRef = useRef<AnchoredMenuHandle>(null);
   const keyboardVisible = useKeyboardState((state) => state.isVisible);
   const placeholderColor = useThemeColor("--color-foreground-muted");
-  const textColor = useThemeColor("--color-foreground");
   const iconColor = useThemeColor("--color-icon");
   const warningColor = useThemeColor("--color-warning");
   const accessColor = useThemeColor("--color-access-caution");
   const policy = runtimeModeConfig[props.runtimeMode];
+  const restoreFocus = () => {
+    if (keyboardVisible) promptRef.current?.focus();
+  };
+  // Dictation lands at the command menu's caret, read when listening starts.
+  const caretRef = useRef<ComposerEditorSelection>({ start: 0, end: 0 });
+  const dictation = useComposerDictation({
+    text: props.prompt,
+    readSelection: () => caretRef.current,
+    onChangeText: props.onChangePrompt,
+    onChangeSelection: (selection) => commandMenu.onSelectionChange(selection),
+  });
+  const commandMenu = useComposerCommandMenu({
+    text: props.prompt,
+    onChangeText: props.onChangePrompt,
+    context: props.commandMenuContext,
+    offers: {
+      model: !props.busy,
+      interactionMode: !props.busy && props.interactionModeSupported,
+      sideChat: false,
+    },
+    enabled: !props.busy && !dictation.active,
+    onAction: (action) => {
+      if (action.kind === "interaction-mode") props.onChangeInteractionMode(action.mode);
+      else if (action.kind === "open-model-picker") modelMenuRef.current?.open();
+    },
+  });
+  useLayoutEffect(() => {
+    caretRef.current = commandMenu.selection;
+  });
 
   return (
     <View className="gap-3">
@@ -205,109 +257,148 @@ export function NewTaskComposer(props: {
           </Text>
         ) : null}
 
-        <GlassSurface radius={26} style={{ padding: 8 }}>
-          <TextInput
-            ref={promptRef}
-            accessibilityLabel="Task prompt"
-            multiline
-            value={props.prompt}
-            editable={!props.busy}
-            onChangeText={props.onChangePrompt}
-            placeholder="What should we do?"
-            placeholderTextColor={placeholderColor as string}
-            className="min-h-24 max-h-36 px-3 py-3 font-sans text-[18px] leading-normal"
-            style={{ color: textColor as string, textAlignVertical: "top" }}
-          />
-          <View className="px-2">
-            <ComposerAttachmentStrip
-              attachments={props.attachments}
-              onRemove={props.onRemoveAttachment}
-              imageSize={58}
-              imageBorderRadius={13}
+        <View>
+          {commandMenu.trigger &&
+          (commandMenu.items.length > 0 || commandMenu.trigger.kind === "path") ? (
+            <View className="absolute inset-x-0 bottom-full z-10 mb-2">
+              <ComposerCommandPopover
+                items={commandMenu.items}
+                triggerKind={commandMenu.trigger.kind}
+                isLoading={commandMenu.isLoading}
+                onSelect={commandMenu.onSelect}
+              />
+            </View>
+          ) : null}
+          <GlassSurface radius={26} style={{ padding: 8 }}>
+            <ComposerEditor
+              ref={promptRef}
+              value={props.prompt}
+              onChangeText={props.onChangePrompt}
+              skills={commandMenu.skills}
+              threadTitles={commandMenu.threadTitles}
+              selection={commandMenu.selection}
+              onSelectionChange={commandMenu.onSelectionChange}
+              placeholder="What should we do?"
+              accessibilityLabel="Task prompt"
+              multiline
+              editable={!props.busy && !dictation.active}
+              contentInsetVertical={12}
+              style={{ minHeight: 96, maxHeight: 144, marginHorizontal: 12 }}
+              textStyle={{ fontSize: 18, lineHeight: 26 }}
             />
-          </View>
-          <ComposerToolbarRow paddingHorizontal={0} paddingBottom={0} paddingTop={6}>
-            <ComposerToolbarButton
-              icon="plus"
-              accessibilityLabel="Attach images"
-              showChevron={false}
-              disabled={props.busy}
-              onPress={props.onPickAttachments}
-            />
-            <ComposerModelMenu
-              model={buildModelPickerModelFromOptions({
-                modelOptions: props.modelOptions,
-                providers: props.providers,
-                currentSelection: props.modelSelection,
-              })}
-              selection={props.modelSelection}
-              disabled={props.busy}
-              onSelect={props.onSelectModel}
-              onClose={() => {
-                if (keyboardVisible) promptRef.current?.focus();
-              }}
-            >
-              {(open, settings) => (
-                <ComposerToolbarButton
-                  iconNode={<ProviderIcon provider={props.modelProviderDriver} size={14} />}
-                  label={props.modelLabel}
-                  suffixLabel={settings.reasoningLabel ?? undefined}
-                  suffixIcon={settings.fastEnabled ? "bolt.fill" : undefined}
-                  suffixIconColor={warningColor as string}
-                  accessibilityLabel={[`Model: ${props.modelLabel}`, settings.accessibilitySuffix]
-                    .filter(Boolean)
-                    .join(", ")}
-                  className="min-w-0 max-w-full flex-1"
+            <View className="px-2">
+              <ComposerAttachmentStrip
+                attachments={props.attachments}
+                onRemove={props.onRemoveAttachment}
+                fileUploadRecords={props.fileUploadRecords}
+                onRetryFileUpload={props.onRetryFileUpload}
+                imageSize={58}
+                imageBorderRadius={13}
+              />
+            </View>
+            {dictation.active ? (
+              <View className="pt-1.5">
+                <ComposerDictationBar dictation={dictation} />
+              </View>
+            ) : (
+              <ComposerToolbarRow paddingHorizontal={0} paddingBottom={0} paddingTop={6}>
+                <ComposerAttachMenu
                   disabled={props.busy}
-                  onPress={open}
-                />
-              )}
-            </ComposerModelMenu>
-            <ComposerAccessMenu
-              model={buildSessionPolicyModel({
-                runtimeMode: props.runtimeMode,
-                interactionMode: props.interactionMode,
-                interactionModeSupported: props.interactionModeSupported,
-                askModeSupported: props.askModeSupported,
-                autoModeUnavailableReason: props.autoModeUnavailableReason,
-              })}
-              disabled={props.busy}
-              onSelectRuntimeMode={props.onChangeRuntimeMode}
-              onSelectInteractionMode={props.onChangeInteractionMode}
-              onClose={() => {
-                if (keyboardVisible) promptRef.current?.focus();
-              }}
-            >
-              {(open) => (
-                <ComposerToolbarButton
-                  onPress={open}
-                  iconNode={
-                    <SymbolView
-                      name={policy.icon}
-                      size={17}
-                      tintColor={policy.tone === "caution" ? accessColor : iconColor}
-                      type="monochrome"
+                  onPick={props.onPickAttachments}
+                  onClose={restoreFocus}
+                >
+                  {(open) => (
+                    <ComposerToolbarButton
+                      icon="plus"
+                      accessibilityLabel="Attach files"
+                      showChevron={false}
+                      disabled={props.busy}
+                      onPress={open}
                     />
-                  }
-                  accessibilityLabel={`Access: ${policy.label}`}
-                  showChevron={false}
-                  active={policy.tone === "caution"}
+                  )}
+                </ComposerAttachMenu>
+                <ComposerModelMenu
+                  ref={modelMenuRef}
+                  model={buildModelPickerModelFromOptions({
+                    modelOptions: props.modelOptions,
+                    providers: props.providers,
+                    currentSelection: props.modelSelection,
+                  })}
+                  selection={props.modelSelection}
                   disabled={props.busy}
+                  onSelect={props.onSelectModel}
+                  onClose={() => {
+                    if (keyboardVisible) promptRef.current?.focus();
+                  }}
+                >
+                  {(open, settings) => (
+                    <ComposerToolbarButton
+                      iconNode={<ProviderIcon provider={props.modelProviderDriver} size={14} />}
+                      label={props.modelLabel}
+                      suffixLabel={settings.reasoningLabel ?? undefined}
+                      suffixIcon={settings.fastEnabled ? "bolt.fill" : undefined}
+                      suffixIconColor={warningColor as string}
+                      accessibilityLabel={[
+                        `Model: ${props.modelLabel}`,
+                        settings.accessibilitySuffix,
+                      ]
+                        .filter(Boolean)
+                        .join(", ")}
+                      className="min-w-0 max-w-full flex-1"
+                      disabled={props.busy}
+                      onPress={open}
+                    />
+                  )}
+                </ComposerModelMenu>
+                <ComposerAccessMenu
+                  model={buildSessionPolicyModel({
+                    runtimeMode: props.runtimeMode,
+                    interactionMode: props.interactionMode,
+                    interactionModeSupported: props.interactionModeSupported,
+                    askModeSupported: props.askModeSupported,
+                    autoModeUnavailableReason: props.autoModeUnavailableReason,
+                  })}
+                  disabled={props.busy}
+                  onSelectRuntimeMode={props.onChangeRuntimeMode}
+                  onSelectInteractionMode={props.onChangeInteractionMode}
+                  onClose={() => {
+                    if (keyboardVisible) promptRef.current?.focus();
+                  }}
+                >
+                  {(open) => (
+                    <ComposerToolbarButton
+                      onPress={open}
+                      iconNode={
+                        <SymbolView
+                          name={policy.icon}
+                          size={17}
+                          tintColor={policy.tone === "caution" ? accessColor : iconColor}
+                          type="monochrome"
+                        />
+                      }
+                      accessibilityLabel={`Access: ${policy.label}`}
+                      showChevron={false}
+                      active={policy.tone === "caution"}
+                      disabled={props.busy}
+                    />
+                  )}
+                </ComposerAccessMenu>
+                <ComposerDictationButton dictation={dictation} disabled={props.busy} />
+                <ComposerToolbarButton
+                  icon={props.busy ? "ellipsis" : "arrow.up"}
+                  accessibilityLabel={
+                    props.busy ? "Starting task" : props.queueNotice ? "Queue task" : "Start task"
+                  }
+                  showChevron={false}
+                  variant="primary"
+                  disabled={!props.canSend || props.busy}
+                  onPress={props.onSend}
                 />
-              )}
-            </ComposerAccessMenu>
-            <ComposerToolbarButton
-              icon={props.busy ? "ellipsis" : "arrow.up"}
-              accessibilityLabel={
-                props.busy ? "Starting task" : props.queueNotice ? "Queue task" : "Start task"
-              }
-              showChevron={false}
-              variant="primary"
-              disabled={!props.canSend || props.busy}
-              onPress={props.onSend}
-            />
-          </ComposerToolbarRow>
-        </GlassSurface>
+              </ComposerToolbarRow>
+            )}
+          </GlassSurface>
+        </View>
+        <ComposerDictationError dictation={dictation} />
         {!props.canSend && props.sendDisabledReason ? (
           <Text className="px-3 text-sm text-danger-foreground">{props.sendDisabledReason}</Text>
         ) : props.queueNotice ? (

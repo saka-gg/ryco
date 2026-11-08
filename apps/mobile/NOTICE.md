@@ -43,6 +43,22 @@ way: the thread row swipe actions and their dismissal animation
 (`src/features/threads/threadStreamHaptics.ts`; upstream
 `features/threads/threadStreamHaptics.ts`).
 
+The composer round (2026-11) ports further upstream modules from `pingdotgg/t3code`
+at commit `e455200077`, adapted to Ryco's shared trigger and ranking logic: the
+autocomplete menu (`src/features/threads/composerCommandMenuModel.ts`,
+`useComposerCommandMenu.ts` and `ComposerCommandPopover.tsx`, from upstream's
+`use-composer-command-menu.ts`, `composerSlashSkillSearch.ts` and
+`ComposerCommandPopover.tsx`), the attach menu and Files-app picking
+(`src/components/ComposerAttachMenu.tsx` and `pickComposerDocuments` in
+`src/lib/composerFiles.ts`, from upstream's `ComposerAttachmentButton.tsx` and
+`composerImages.ts`), and the share-extension display-name config plugin
+(`plugins/withShareExtensionDisplayName.cjs`, verbatim), and the dictation
+controls (`src/features/dictation/ComposerDictationControls.tsx`, after upstream's
+`voice-input/ComposerDictationControl.tsx` and `voiceInputMetering.ts`; Ryco
+recognizes speech on the device instead of transcribing on a server), and the
+incoming-share model (`src/features/sharing/incomingShareModel.ts`, after upstream's
+`sharing/incoming-share-model.ts` and `incoming-share-native.ts`).
+
 `pingdotgg/t3code` is Copyright (c) 2026 T3 Tools Inc. and licensed under the MIT
 License; that notice is retained below as required. The four vendored native
 modules under `modules/*` carry their own `LICENSE` / `UPSTREAM.md` notices

@@ -24,9 +24,11 @@ import {
 import { buildScopedSourceControlComposerItems } from "./composerSourceControlItems";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
 import { type ComposerMenuEmptyState, resolveComposerPathMenuEmptyState } from "./composerPathMenu";
-import { searchSlashCommandItems } from "./composerSlashCommandSearch";
-import { formatProviderSkillDisplayName } from "../../providerSkillPresentation";
-import { searchProviderSkills } from "../../providerSkillSearch";
+import {
+  formatProviderSkillDisplayName,
+  searchProviderSkills,
+  searchSlashCommandItems,
+} from "@ryco/shared/composerCommandSearch";
 import { basenameOfPath } from "../../pathEntry";
 import { randomUUID } from "~/lib/utils";
 import { toastManager } from "../ui/toast";

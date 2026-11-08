@@ -14,6 +14,9 @@ public class RycoComposerEditorModule: Module {
       Prop("placeholder") { (view: RycoComposerEditorView, placeholder: String) in
         view.setPlaceholder(placeholder)
       }
+      Prop("textAccessibilityLabel") { (view: RycoComposerEditorView, label: String?) in
+        view.setTextAccessibilityLabel(label)
+      }
       Prop("fontFamily") { (view: RycoComposerEditorView, fontFamily: String) in
         view.setFontFamily(fontFamily)
       }

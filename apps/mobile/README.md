@@ -49,7 +49,8 @@ routes; the custom scheme remains for verified-email and reset links.
    the dev client into the Simulator. A physical device can use a free Apple
    Personal Team — set `RYCO_IOS_PERSONAL_TEAM=1` and
    `RYCO_IOS_PERSONAL_TEAM_BUNDLE_ID`. This omits associated-domain
-   entitlements but still supports Hub sign-in through
+   entitlements and the share, widget and notification extensions (no App
+   Group or extension signing) but still supports Hub sign-in through
    `ryco-dev://hosted/complete`; no paid Apple Developer membership is required
    for development.
 3. **Start Metro** (if not already running): `bun run --cwd apps/mobile dev:client`.

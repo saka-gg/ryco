@@ -1,0 +1,18 @@
+diff --git a/ios/ExpoSpeechRecognizer.swift b/ios/ExpoSpeechRecognizer.swift
+index b27842501f72e1a5a9382636397cbef30d5a2b30..74e2200a123fca0fe033be2062f6530f0c595205 100644
+--- a/ios/ExpoSpeechRecognizer.swift
++++ b/ios/ExpoSpeechRecognizer.swift
+@@ -585,9 +585,10 @@ actor ExpoSpeechRecognizer: ObservableObject {
+     // These won't get emitted to the user, however
+     request.shouldReportPartialResults = options.interimResults || !options.continuous
+ 
+-    if recognizer.supportsOnDeviceRecognition {
+-      request.requiresOnDeviceRecognition = options.requiresOnDeviceRecognition
+-    }
++    // Ryco: an app that asks for on-device recognition must never fall back to
++    // Apple's servers. Set it unconditionally, so a recognizer without an
++    // on-device model fails the task instead of sending the audio away.
++    request.requiresOnDeviceRecognition = options.requiresOnDeviceRecognition
+ 
+     if let taskHint = options.iosTaskHint {
+       request.taskHint = taskHint.sfSpeechRecognitionTaskHint

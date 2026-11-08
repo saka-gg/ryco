@@ -3,6 +3,7 @@ import type {
   ProviderInstanceId,
   ProviderProjectCommands,
   ProviderProjectCommandsInput,
+  ServerConfig,
   ServerProviderSkill,
   ServerProviderSlashCommand,
 } from "@ryco/contracts";
@@ -35,6 +36,13 @@ const listeners = new Set<() => void>();
 const notify = () => {
   for (const listener of listeners) listener();
 };
+
+/** Whether the node reads a directory's own skills and slash commands (`readProjectProviderCommands`). */
+export function projectProviderCommandsSupported(
+  config: Pick<ServerConfig, "environment"> | null | undefined,
+): boolean {
+  return config?.environment.capabilities.providerProjectCommands === true;
+}
 
 export function projectProviderCommandsKey(input: {
   readonly environmentId: string;

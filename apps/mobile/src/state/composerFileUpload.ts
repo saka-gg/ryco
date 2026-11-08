@@ -105,16 +105,16 @@ export function useComposerFileUploadRecords(): ReadonlyMap<string, ChatFileUplo
  * server predates file uploads OR the environment has no direct HTTP base
  * (hosted-relay primaries keep the legacy attach paths).
  */
-export function useComposerFileUploadMaxBytes(environmentId: EnvironmentId): number | null {
+export function useComposerFileUploadMaxBytes(environmentId: EnvironmentId | null): number | null {
   const catalog = createMobileConnectionRegistry().catalog;
   const httpBaseUrl = useSyncExternalStore(
     catalog.registryStore.subscribe,
-    () => catalog.get(environmentId)?.httpBaseUrl ?? null,
+    () => (environmentId ? (catalog.get(environmentId)?.httpBaseUrl ?? null) : null),
     () => null,
   );
   const savedDescriptor = useSyncExternalStore(
     catalog.runtimeStore.subscribe,
-    () => catalog.getRuntime(environmentId).descriptor,
+    () => (environmentId ? catalog.getRuntime(environmentId).descriptor : null),
     () => null,
   );
   const primaryDescriptor = usePrimaryEnvironmentDescriptor();

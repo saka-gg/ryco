@@ -168,6 +168,10 @@ class RycoComposerEditorView(context: Context, appContext: AppContext) : ExpoVie
     }
   }
 
+  fun setTextAccessibilityLabel(label: String?) {
+    editor.contentDescription = label
+  }
+
   fun setPlaceholder(placeholder: String) {
     editor.hint = placeholder
   }

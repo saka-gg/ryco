@@ -34,10 +34,43 @@ export async function loadImagePicker() {
   }
 }
 
+/** Leading base64 of each image format's magic bytes. */
+const IMAGE_BASE64_SIGNATURES: ReadonlyArray<readonly [prefix: string, mimeType: string]> = [
+  ["/9j/", "image/jpeg"],
+  ["iVBORw0KGgo", "image/png"],
+  ["R0lGOD", "image/gif"],
+  ["UklGR", "image/webp"],
+];
+
+/** The image type the bytes themselves are, from their magic number; null when unknown. */
+export function sniffImageMimeTypeFromBase64(base64: string): string | null {
+  return IMAGE_BASE64_SIGNATURES.find(([prefix]) => base64.startsWith(prefix))?.[1] ?? null;
+}
+
+const IMAGE_EXTENSIONS: Readonly<Record<string, string>> = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/gif": "gif",
+  "image/webp": "webp",
+};
+
+function renameForMimeType(name: string, mimeType: string): string {
+  const extension = IMAGE_EXTENSIONS[mimeType];
+  if (!extension) return name;
+  const dot = name.lastIndexOf(".");
+  return `${dot > 0 ? name.slice(0, dot) : name}.${extension}`;
+}
+
 /**
- * Converts one picked library asset into a draft image attachment (inline
- * base64 dataUrl + local preview uri). Shared by the images-only picker and
- * the mixed image/file picker.
+ * Converts one picked asset into a draft image attachment (inline base64
+ * dataUrl + local preview uri). Shared by the photo pickers, the camera and
+ * Files-app images.
+ *
+ * The attachment describes the base64 it sends, never the picked file: the
+ * node rejects a payload whose decoded size differs from `sizeBytes`. iOS's
+ * image picker re-encodes every image as JPEG for `base64` while `fileSize`
+ * and `mimeType` still describe the original file (a PNG, or a JPEG of another
+ * size), so both are taken from the payload itself.
  */
 export function draftImageAttachmentFromPickerAsset(asset: {
   readonly mimeType?: string | undefined;
@@ -49,15 +82,15 @@ export function draftImageAttachmentFromPickerAsset(asset: {
   readonly attachment: DraftComposerImageAttachment | null;
   readonly error: string | null;
 } {
-  const mimeType = asset.mimeType?.toLowerCase();
-  if (!mimeType?.startsWith("image/")) {
+  const declaredMimeType = asset.mimeType?.toLowerCase();
+  if (!declaredMimeType?.startsWith("image/")) {
     return {
       attachment: null,
       error: `Unsupported file type for '${asset.fileName ?? "image"}'.`,
     };
   }
 
-  const base64 = asset.base64;
+  const base64 = asset.base64?.replace(/\s+/g, "");
   if (!base64) {
     return {
       attachment: null,
@@ -65,7 +98,7 @@ export function draftImageAttachmentFromPickerAsset(asset: {
     };
   }
 
-  const sizeBytes = asset.fileSize ?? estimateBase64ByteSize(base64);
+  const sizeBytes = estimateBase64ByteSize(base64);
   if (sizeBytes <= 0 || sizeBytes > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
     return {
       attachment: null,
@@ -73,11 +106,13 @@ export function draftImageAttachmentFromPickerAsset(asset: {
     };
   }
 
+  const mimeType = sniffImageMimeTypeFromBase64(base64) ?? declaredMimeType;
+  const name = asset.fileName ?? "image";
   return {
     attachment: {
       id: uuidv4(),
       type: "image",
-      name: asset.fileName ?? "image",
+      name: mimeType === declaredMimeType ? name : renameForMimeType(name, mimeType),
       mimeType,
       sizeBytes,
       dataUrl: `data:${mimeType};base64,${base64}`,
@@ -210,7 +245,7 @@ export async function convertPastedImagesToAttachments(input: {
       if (sizeBytes <= 0 || sizeBytes > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
         continue;
       }
-      const mimeType = mimeTypeFromUri(uri);
+      const mimeType = sniffImageMimeTypeFromBase64(base64) ?? mimeTypeFromUri(uri);
       results.push({
         id: uuidv4(),
         type: "image",

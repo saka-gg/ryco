@@ -96,12 +96,23 @@ function readPersistedLaunch(value: unknown): NewTaskLaunch | null {
     fromOutbox: true,
     draft: {
       ...stored.draft,
-      // The images went out with the attempt; the draft shows them again.
-      attachments: stored.attempt.attachments.map((attachment, index) => ({
-        ...attachment,
-        id: `${stored.key}:attachment-${index}`,
-        previewUri: attachment.dataUrl,
-      })),
+      // The images went out with the attempt; the draft shows them again. A
+      // streamed file's bytes are not kept, so an edited task attaches it again.
+      attachments: stored.attempt.attachments.flatMap((attachment, index) =>
+        attachment.type === "image" && attachment.dataUrl
+          ? [
+              {
+                type: "image" as const,
+                name: attachment.name,
+                mimeType: attachment.mimeType,
+                sizeBytes: attachment.sizeBytes,
+                dataUrl: attachment.dataUrl,
+                id: `${stored.key}:attachment-${index}`,
+                previewUri: attachment.dataUrl,
+              },
+            ]
+          : [],
+      ),
     },
   };
   if (launch.status === "queued" || launch.status === "failed") return launch;

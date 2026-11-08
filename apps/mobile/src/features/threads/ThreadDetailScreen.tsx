@@ -160,10 +160,14 @@ import {
 } from "../../connection/threadDetail";
 import { useEnvironmentApi } from "../../connection/useEnvironmentApi";
 import { useThreadConnectionRetarget } from "../../connection/useThreadConnectionRetarget";
-import type { DraftComposerAttachment, DraftComposerFileAttachment } from "../../lib/composerFiles";
+import type {
+  ComposerAttachmentSource,
+  DraftComposerAttachment,
+  DraftComposerFileAttachment,
+} from "../../lib/composerFiles";
 import {
   isDraftComposerFileAttachment,
-  pickComposerAttachments,
+  pickComposerAttachmentsFrom,
   readComposerFileBytes,
 } from "../../lib/composerFiles";
 import { convertPastedImagesToAttachments } from "../../lib/composerImages";
@@ -290,6 +294,7 @@ import { buildModelPickerModel, listModelPickerEntries } from "./modelPickerMode
 import { buildSessionPolicyModel, resolveSessionPolicySelection } from "./sessionPolicyModel";
 import { ThreadActionsSheet } from "./ThreadActionsSheet";
 import { ThreadAgents } from "./ThreadAgentsSheet";
+import { useThreadWorkspaceRoot } from "../files/useThreadWorkspaceRoot";
 import { ThreadComposer } from "./ThreadComposer";
 import { SideChatCard } from "./SideChatCard";
 import { deriveThreadCachedView } from "./threadCachedViewModel";
@@ -871,6 +876,7 @@ export function ThreadDetailScreen(props: {
     () => (thread ? findThreadWorktree(thread, worktrees) : null),
     [thread, worktrees],
   );
+  const workspaceRoot = useThreadWorkspaceRoot({ thread, worktree, project });
   const environmentRow =
     environments.find((environment) => environment.environmentId === environmentId) ?? null;
   const nodeLabel = environmentRow?.label ?? null;
@@ -1765,25 +1771,28 @@ export function ThreadDetailScreen(props: {
     [environmentId, threadId],
   );
 
-  const pickAttachments = useCallback(async () => {
-    setAttachmentError(null);
-    const existingTotalBytes = attachments.reduce((total, attachment) => {
-      if (attachment.type === "file" && attachment.uploadState === "needsReattach") return total;
-      return total + attachment.sizeBytes;
-    }, 0);
-    const result = await pickComposerAttachments({
-      existingCount: attachments.length,
-      existingTotalBytes,
-      fileUploadMaxBytes,
-    });
-    setAttachmentError(result.error);
-    if (result.images.length > 0 || result.files.length > 0) {
-      setAttachments((current) => [...current, ...result.images, ...result.files]);
-    }
-    for (const file of result.files) {
-      enqueueFileUpload(file);
-    }
-  }, [attachments, enqueueFileUpload, fileUploadMaxBytes]);
+  const pickAttachments = useCallback(
+    async (source: ComposerAttachmentSource) => {
+      setAttachmentError(null);
+      const existingTotalBytes = attachments.reduce((total, attachment) => {
+        if (attachment.type === "file" && attachment.uploadState === "needsReattach") return total;
+        return total + attachment.sizeBytes;
+      }, 0);
+      const result = await pickComposerAttachmentsFrom(source, {
+        existingCount: attachments.length,
+        existingTotalBytes,
+        fileUploadMaxBytes,
+      });
+      setAttachmentError(result.error);
+      if (result.images.length > 0 || result.files.length > 0) {
+        setAttachments((current) => [...current, ...result.images, ...result.files]);
+      }
+      for (const file of result.files) {
+        enqueueFileUpload(file);
+      }
+    },
+    [attachments, enqueueFileUpload, fileUploadMaxBytes],
+  );
 
   // Rewinds to before a sent message (keeping the files or not). Its prompt and attachments
   // wait for the composer (`takeReturnedSentMessages`) once the node has rewound the thread.
@@ -1952,7 +1961,7 @@ export function ThreadDetailScreen(props: {
     (attachmentId: string) => {
       composerFileUploadEngine.release(attachmentId);
       setAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId));
-      void pickAttachments();
+      void pickAttachments("files");
     },
     [pickAttachments],
   );
@@ -2976,7 +2985,7 @@ export function ThreadDetailScreen(props: {
         onSend={onSend}
         attachments={attachments}
         onRemoveAttachment={removeAttachment}
-        onPickAttachments={() => void pickAttachments()}
+        onPickAttachments={(source) => void pickAttachments(source)}
         onPasteImages={(uris) => void pasteImages(uris)}
         onRetryFileUpload={retryFileUpload}
         onReattachFile={reattachFile}
@@ -3017,6 +3026,13 @@ export function ThreadDetailScreen(props: {
             );
         }}
         pendingHandoff={pendingHandoff}
+        commandMenuContext={{
+          environmentId,
+          workspaceRoot,
+          serverConfig,
+          providerInstanceId: selectedModelSelection?.instanceId ?? null,
+          currentThreadId: threadId,
+        }}
         onComposerIntent={() =>
           void prewarmThreadProviderSession({
             environmentId,

@@ -10,10 +10,11 @@ import {
 
 // Ryco public mobile scaffold (B1). The upstream hosted-auth vendor plane and
 // managed-cloud plane, its EAS project/owner, upstream bundle IDs/schemes, brand
-// assets, the default telemetry endpoint, share extension, and the
-// camera-showcase rig are all stripped per the design spec's strip list.
+// assets, the default telemetry endpoint, and the camera-showcase rig are all
+// stripped per the design spec's strip list.
 // Home-screen quick actions came back through expo-quick-actions (src/features/shortcuts).
-// Widgets came back as Ryco's own Swift extension (plugins/withIosWidgetExtension.cjs). Direct-node bearer pairing is one auth plane; the hosted plane
+// Widgets came back as Ryco's own Swift extension (plugins/withIosWidgetExtension.cjs),
+// the share extension as expo-sharing's (sharingPlugin below). Direct-node bearer pairing is one auth plane; the hosted plane
 // uses a system-browser public-client handoff and defaults to Ryco Cloud.
 const repoEnv = loadMobileEnv();
 Object.assign(process.env, repoEnv);
@@ -154,6 +155,30 @@ if (hostedHubBaseUrl) {
   }
 }
 
+// Share text, links, images and files from other apps into a new task draft
+// (src/features/sharing). Personal Teams cannot sign the App Group or the
+// extension target, so the iOS extension is off there; the app then reads no
+// shares (createIncomingSharePayloadReader). Android sharing is not wired yet.
+const sharingPlugin: NonNullable<ExpoConfig["plugins"]>[number] = [
+  "expo-sharing",
+  {
+    ios: {
+      enabled: !isIosPersonalTeamBuild,
+      extensionBundleIdentifier: `${iosBundleIdentifier}.sharing`,
+      // The widgets extension already uses this group (withIosWidgetExtension.cjs).
+      appGroupId: `group.${iosBundleIdentifier}`,
+      activationRule: {
+        supportsText: true,
+        supportsWebUrlWithMaxCount: 1,
+        supportsImageWithMaxCount: 8,
+        supportsMovieWithMaxCount: 8,
+        supportsFileWithMaxCount: 8,
+      },
+    },
+    android: { enabled: false },
+  },
+];
+
 const config: ExpoConfig = {
   name: variant.appName,
   slug: "ryco-mobile",
@@ -288,7 +313,8 @@ const config: ExpoConfig = {
     [
       "expo-camera",
       {
-        cameraPermission: "Allow Ryco to access your camera so you can scan pairing QR codes.",
+        cameraPermission:
+          "Allow Ryco to use your camera to scan pairing QR codes and to take photos you attach to a message.",
         barcodeScannerEnabled: true,
         recordAudioAndroid: false,
       },
@@ -315,6 +341,21 @@ const config: ExpoConfig = {
         },
       },
     ],
+    [
+      "expo-speech-recognition",
+      {
+        // Dictation runs on the device only (SFSpeechRecognizer with
+        // requiresOnDeviceRecognition); no audio leaves the phone.
+        microphonePermission: "Allow Ryco to use the microphone to dictate messages.",
+        speechRecognitionPermission:
+          "Allow Ryco to turn your speech into text on this device while you dictate a message.",
+      },
+    ],
+    // withShareExtensionDisplayName must come before expo-sharing: mods run in
+    // reverse order, so it edits the extension after expo-sharing created it.
+    ...(isIosPersonalTeamBuild
+      ? [sharingPlugin]
+      : ["./plugins/withShareExtensionDisplayName.cjs", sharingPlugin]),
     "./plugins/withIosCocoaPodsUuidCache.cjs",
     "./plugins/withIosSceneLifecycle.cjs",
     // Personal Team builds strip APNs and cannot sign an extension, its

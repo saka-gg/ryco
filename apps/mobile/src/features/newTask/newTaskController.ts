@@ -8,6 +8,7 @@ import {
   buildTurnStartCommand,
   composeOutgoingPrompt,
   type SendTurnBootstrap,
+  type SendTurnDispatchAttachment,
 } from "@ryco/client-runtime/state/composer";
 import { isDefiniteDispatchFailure } from "@ryco/client-runtime/rpc";
 import type { Project, SidebarThreadOrStub } from "@ryco/client-runtime/state/threads";
@@ -27,7 +28,6 @@ import {
   type ModelSelection,
   type ProviderInteractionMode,
   type RuntimeMode,
-  type UploadChatImageAttachment,
 } from "@ryco/contracts/orchestration";
 import { ProviderInstanceId } from "@ryco/contracts/provider-instance";
 
@@ -189,7 +189,8 @@ export interface NewTaskStableIds {
 export interface NewTaskAttempt {
   readonly environmentId: EnvironmentId;
   readonly prompt: string;
-  readonly attachments: ReadonlyArray<UploadChatImageAttachment>;
+  /** Photos inline, files by the token of their upload for this task's thread. */
+  readonly attachments: ReadonlyArray<SendTurnDispatchAttachment>;
   readonly project: NewTaskProjectContext;
   readonly worktree: NewTaskWorktreeContext;
   readonly modelSelection: ModelSelection;
@@ -244,7 +245,7 @@ export interface NewTaskControllerDeps {
 export function createNewTaskAttempt(input: {
   readonly environmentId: EnvironmentId;
   readonly prompt: string;
-  readonly attachments?: ReadonlyArray<UploadChatImageAttachment>;
+  readonly attachments?: ReadonlyArray<SendTurnDispatchAttachment>;
   readonly project: NewTaskProjectContext;
   readonly worktree: NewTaskWorktreeContext;
   readonly modelSelection?: ModelSelection;

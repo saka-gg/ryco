@@ -17,8 +17,8 @@ import {
   type ModelPickerModel,
 } from "./modelPickerModel";
 import { ComposerModelOptions } from "./ComposerModelOptions";
-import type { ReactNode } from "react";
-import { AnchoredMenu } from "../../components/AnchoredMenu";
+import type { ReactNode, Ref } from "react";
+import { AnchoredMenu, type AnchoredMenuHandle } from "../../components/AnchoredMenu";
 import { ProviderIcon } from "../../components/ProviderIcon";
 
 // Model keys are `instance:slug` and instance ids start with a letter, so a
@@ -26,7 +26,11 @@ import { ProviderIcon } from "../../components/ProviderIcon";
 const LEGACY_SUBMENU_PREFIX = "#legacy:";
 const UPDATE_NOTICE_PREFIX = "#update:";
 
-export function ComposerModelMenu(props: {
+export function ComposerModelMenu({
+  ref,
+  ...props
+}: {
+  readonly ref?: Ref<AnchoredMenuHandle>;
   readonly model: ModelPickerModel;
   readonly selection: ModelSelection;
   readonly disabled: boolean;
@@ -163,6 +167,7 @@ export function ComposerModelMenu(props: {
   });
   return (
     <AnchoredMenu
+      ref={ref}
       title="Provider"
       actions={actions}
       initialSubmenuId={`provider:${props.selection.instanceId}`}
