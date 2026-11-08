@@ -1,6 +1,8 @@
 "use strict";
 
-// Expo replaces the empty signing team with appleTeamId. Reverse-ordered mods run after extension creation.
+// Sets the display name and, when ios.appleTeamId is configured, the signing team of
+// expo-sharing's share extension (expo-sharing leaves its team empty, so a device build
+// for a paid team fails to sign). Reverse-ordered mods run after extension creation.
 
 const fs = require("fs");
 const path = require("path");
@@ -51,7 +53,7 @@ function withDisplayNamePlist(config, displayName) {
   ]);
 }
 
-function withExtensionDisplayNameBuildSetting(config, displayName) {
+function withExtensionBuildSettings(config, displayName) {
   return withXcodeProject(config, (cfg) => {
     const objects = cfg.modResults.hash.project.objects;
     const targetEntry = findByName(objects.PBXNativeTarget, TARGET_NAME);
@@ -67,12 +69,22 @@ function withExtensionDisplayNameBuildSetting(config, displayName) {
     if (!configurationList) {
       throw new Error(`Could not find build configurations for ${TARGET_NAME}.`);
     }
+    const appleTeamId = cfg.ios?.appleTeamId?.trim();
     const buildConfigurations = stripComments(objects.XCBuildConfiguration);
     for (const reference of configurationList.buildConfigurations ?? []) {
       const buildConfiguration = buildConfigurations[reference.value];
       if (buildConfiguration?.buildSettings) {
         buildConfiguration.buildSettings.INFOPLIST_KEY_CFBundleDisplayName = `"${displayName}"`;
+        if (appleTeamId) {
+          buildConfiguration.buildSettings.DEVELOPMENT_TEAM = appleTeamId;
+        }
       }
+    }
+    if (appleTeamId) {
+      cfg.modResults.addTargetAttribute("DevelopmentTeam", appleTeamId, {
+        uuid: targetEntry[0],
+        pbxNativeTarget: target,
+      });
     }
     return cfg;
   });
@@ -80,8 +92,5 @@ function withExtensionDisplayNameBuildSetting(config, displayName) {
 
 module.exports = function withShareExtensionDisplayName(config) {
   const displayName = config.name;
-  return withExtensionDisplayNameBuildSetting(
-    withDisplayNamePlist(config, displayName),
-    displayName,
-  );
+  return withExtensionBuildSettings(withDisplayNamePlist(config, displayName), displayName);
 };
