@@ -13,8 +13,7 @@ import {
   EMPTY_DICTATION_TRANSCRIPT,
   normalizeDictationVolume,
   pushDictationLevel,
-  dictationLocaleCandidates,
-  resolveDictationLocale,
+  chooseDictationLocale,
   type DictationAnchor,
   type DictationState,
 } from "./dictationModel";
@@ -60,13 +59,6 @@ function appLocale(): string | null {
   } catch {
     return null;
   }
-}
-
-/** Ryco's patch adds these to iOS's answer (patches/expo-speech-recognition@57.1.1.patch). */
-interface DictationLocales {
-  readonly locales: ReadonlyArray<string>;
-  readonly onDeviceLocales?: ReadonlyArray<string>;
-  readonly preferredLanguages?: ReadonlyArray<string>;
 }
 
 /**
@@ -176,16 +168,12 @@ export function useComposerDictation(input: {
         }
         const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
         if (!permission.granted) return failCurrent("not-allowed");
-        // Ask per locale: the app's own locale (en_DE for this English-only app
-        // on a German phone) has no recognizer, so a locale-less check says no.
-        const answer: DictationLocales = await ExpoSpeechRecognitionModule.getSupportedLocales({});
-        const onDevice = answer.onDeviceLocales ?? [];
-        if (onDevice.length === 0) return failCurrent("service-not-allowed");
-        const lang = resolveDictationLocale(
-          dictationLocaleCandidates(answer.preferredLanguages, appLocale()),
-          onDevice,
+        const choice = chooseDictationLocale(
+          await ExpoSpeechRecognitionModule.getSupportedLocales({}),
+          appLocale(),
         );
-        if (!lang) return failCurrent("language-not-supported");
+        if (!choice.ok) return failCurrent(choice.code);
+        const lang = choice.lang;
         if (!current()) return;
         const selection = latest.current.readSelection();
         anchor.current = { text: latest.current.text, start: selection.start, end: selection.end };

@@ -134,6 +134,33 @@ export function dictationLocaleCandidates(
   return [...new Set(candidates)];
 }
 
+/** iOS's answer, with the fields Ryco's patch adds (patches/expo-speech-recognition@57.1.1.patch). */
+export interface DictationLocaleAnswer {
+  readonly locales: ReadonlyArray<string>;
+  readonly onDeviceLocales?: ReadonlyArray<string>;
+  readonly preferredLanguages?: ReadonlyArray<string>;
+}
+
+/**
+ * The locale to dictate in, or the error to show. Asks per locale: the app's own
+ * locale (en_DE for this English-only app on a German phone) has no recognizer,
+ * so a locale-less "supports on-device?" check always says no.
+ */
+export function chooseDictationLocale(
+  answer: DictationLocaleAnswer,
+  appLocale: string | null,
+):
+  | { readonly ok: true; readonly lang: string }
+  | { readonly ok: false; readonly code: "service-not-allowed" | "language-not-supported" } {
+  const onDevice = answer.onDeviceLocales ?? [];
+  if (onDevice.length === 0) return { ok: false, code: "service-not-allowed" };
+  const lang = resolveDictationLocale(
+    dictationLocaleCandidates(answer.preferredLanguages, appLocale),
+    onDevice,
+  );
+  return lang ? { ok: true, lang } : { ok: false, code: "language-not-supported" };
+}
+
 /**
  * What a recognizer error means for the user, or null when it only ends the
  * session (the user cancelled, or nothing was said).

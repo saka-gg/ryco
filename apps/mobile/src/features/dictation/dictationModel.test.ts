@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   applyDictationResult,
+  chooseDictationLocale,
   composeDictationDraft,
   describeDictationError,
   DICTATION_LEVEL_SAMPLES,
@@ -85,6 +86,31 @@ describe("resolveDictationLocale", () => {
     expect(resolveDictationLocale(["de-CH"], supported)).toBe("de-CH");
     expect(resolveDictationLocale(["de"], supported)).toBe("de-DE");
     expect(resolveDictationLocale(["en-GB"], supported)).toBe("en-GB");
+  });
+});
+
+describe("chooseDictationLocale", () => {
+  it("needs an on-device locale and follows the system languages", () => {
+    expect(chooseDictationLocale({ locales: ["en-US"] }, null)).toEqual({
+      ok: false,
+      code: "service-not-allowed",
+    });
+    expect(
+      chooseDictationLocale(
+        {
+          locales: [],
+          onDeviceLocales: ["de-DE", "en-US"],
+          preferredLanguages: ["de-DE", "en-DE"],
+        },
+        "en-DE",
+      ),
+    ).toEqual({ ok: true, lang: "de-DE" });
+    expect(
+      chooseDictationLocale(
+        { locales: [], onDeviceLocales: ["ja-JP"], preferredLanguages: ["de-DE"] },
+        "en-DE",
+      ),
+    ).toEqual({ ok: false, code: "language-not-supported" });
   });
 });
 
