@@ -73,6 +73,8 @@ function readPersistedLaunch(value: unknown): NewTaskLaunch | null {
   }
   if (!isRecord(draft.worktree) || !WORKTREE_KINDS.has(String(draft.worktree.kind))) return null;
   if (!Array.isArray(attempt.attachments)) return null;
+  // A task's chat goes out as the task's: a malformed task id must not turn it into a plain chat.
+  if (attempt.localTaskId !== undefined && !nonEmptyString(attempt.localTaskId)) return null;
   for (const id of [
     "projectId",
     "projectCommandId",

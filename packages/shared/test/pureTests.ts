@@ -60,6 +60,7 @@ export const SHARED_PURE_TEST_FILES = [
   "src/projectKind.test.ts",
   "src/projectPreferencePatching.test.ts",
   "src/providerCapabilities.test.ts",
+  "src/pullRequestReference.test.ts",
   "src/relayCodec.test.ts",
   "src/relayE2eeAttackerRelay.test.ts",
   "src/relayE2eeCapabilityVerify.test.ts",

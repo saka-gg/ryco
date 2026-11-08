@@ -10,7 +10,7 @@ import {
   selectThreadExistsByRef,
   useStore,
 } from "../../state/threadsRuntime";
-import { delegateTaskChatStart } from "../tasks/taskChatStart";
+import { delegateTaskChatStart, preflightTaskChatStart } from "../tasks/taskChatStart";
 import type { NewTaskLaunchDeps } from "./newTaskLaunch";
 
 async function waitForAuthoritative(read: () => boolean, label: string): Promise<void> {
@@ -48,6 +48,7 @@ export function createNewTaskLaunchDeps(environmentId: EnvironmentId): NewTaskLa
     controller: {
       dispatch: (command) => api.orchestration.dispatchCommand(command),
       delegate: (taskId, command) => delegateTaskChatStart(environmentId, taskId, command),
+      preflightTask: (taskId) => preflightTaskChatStart(environmentId, taskId),
       threadStarted: (threadId) => isNewTaskThreadStarted(environmentId, threadId),
       waitForProject: (projectId) =>
         waitForAuthoritative(

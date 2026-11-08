@@ -248,6 +248,32 @@ describe("New Task outbox", () => {
     expect(readNewTaskLaunch(inMemory)?.attempt.prompt).toBe("Task a");
   });
 
+  it("keeps a task's chat the task's across a restart, and drops a malformed task id", async () => {
+    const key = newTaskLaunchKey(away, ThreadId.make("thread-a"));
+    const forTask = {
+      key,
+      attempt: { ...attempt(away, "a", "2026-10-30T08:00:00.000Z"), localTaskId: "task-1" },
+      draft: draft(away, "Task a"),
+      status: "queued",
+      failure: null,
+      queuedAt: "2026-10-30T08:00:00.000Z",
+    };
+    const malformed = {
+      ...forTask,
+      key: newTaskLaunchKey(away, ThreadId.make("thread-b")),
+      attempt: { ...attempt(away, "b", "2026-10-30T08:00:00.000Z"), localTaskId: 7 },
+    };
+    const storage = memoryKv({
+      [STORAGE_KEY]: JSON.stringify({ version: 1, launches: [forTask, malformed] }),
+    });
+    const persistence = createNewTaskOutboxPersistence(storage.kv);
+    disposers.push(persistence.dispose);
+    await persistence.hydrate();
+
+    expect(Object.keys(useNewTaskLaunchStore.getState().launchesByKey)).toEqual([key]);
+    expect(readNewTaskLaunch(key)?.attempt.localTaskId).toBe("task-1");
+  });
+
   it("ignores a stored outbox from another version", async () => {
     const storage = memoryKv({
       [STORAGE_KEY]: JSON.stringify({ version: 2, launches: [{ anything: true }] }),

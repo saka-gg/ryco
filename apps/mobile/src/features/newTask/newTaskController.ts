@@ -237,6 +237,11 @@ export interface NewTaskControllerDeps {
   /** Sends a task chat's first turn as the task's (`server.delegateLocalTask`). */
   readonly delegate?: (taskId: string, command: TurnStartCommand) => Promise<unknown>;
   /**
+   * Checks a task can still take a chat (not deleted, not done), sending
+   * nothing, before the project, thread or worktree are created for it.
+   */
+  readonly preflightTask?: (taskId: string) => Promise<void>;
+  /**
    * Whether the node shows this thread with its first turn under way. A turn
    * start that prepares a worktree is not answered from a command receipt:
    * sent again after it went through, the node would set the worktree up a
@@ -435,6 +440,16 @@ export async function runNewTaskAttempt(
   deps: NewTaskControllerDeps,
 ): Promise<NewTaskRunResult> {
   let next = attempt;
+
+  // A task's chat checks its task before anything is created for it. Once its
+  // turn went out (a retry after a lost reply) the node's receipt decides instead.
+  if (next.localTaskId !== undefined && !next.turnStarted && deps.preflightTask) {
+    try {
+      await deps.preflightTask(next.localTaskId);
+    } catch (error) {
+      return invalid(next, next.projectReady ? "turn" : "project", error);
+    }
+  }
 
   if (!next.projectReady) {
     let workspaceRoot: string;

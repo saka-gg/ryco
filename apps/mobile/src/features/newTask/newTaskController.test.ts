@@ -624,6 +624,22 @@ describe("New Task controller for a task's chat", () => {
     expect(retry.localTaskId).toBe("task-1");
   });
 
+  it("checks the task before creating anything for its chat", async () => {
+    const runtime = deps({
+      delegate: async () => undefined,
+      preflightTask: async () => {
+        throw new TaskChatStartError("The task was deleted.", false);
+      },
+    });
+    const result = await runNewTaskAttempt(taskAttempt("local"), runtime);
+    expect(result).toMatchObject({
+      ok: false,
+      message: "The task was deleted.",
+      deliveryUncertain: false,
+    });
+    expect(runtime.commands).toEqual([]);
+  });
+
   it("refuses a task's chat where it cannot be sent as the task's", async () => {
     const result = await runNewTaskAttempt(taskAttempt("local"), deps());
     expect(result).toMatchObject({ ok: false, step: "turn", deliveryUncertain: false });

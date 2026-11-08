@@ -227,9 +227,14 @@ export function TaskDetailRouteScreen(props: TaskDetailRouteScreenProps) {
   useEffect(() => {
     if (nodeNotes !== undefined && !editingNotes.current) setNotes(nodeNotes);
   }, [nodeNotes]);
+  // Notes still waiting for their save go out when the sheet closes.
+  const pendingNotes = useRef<(() => void) | null>(null);
+  const pendingTitle = useRef<(() => void) | null>(null);
   useEffect(
     () => () => {
       if (notesTimer.current) clearTimeout(notesTimer.current);
+      pendingNotes.current?.();
+      pendingTitle.current?.();
     },
     [],
   );
@@ -263,6 +268,7 @@ export function TaskDetailRouteScreen(props: TaskDetailRouteScreenProps) {
 
   const saveTitle = () => {
     editingTitle.current = false;
+    pendingTitle.current = null;
     const next = titleToSave(title, task.title);
     if (next === null) setTitle(task.title);
     else updateTask(environmentId, taskId, { title: next });
@@ -270,12 +276,14 @@ export function TaskDetailRouteScreen(props: TaskDetailRouteScreenProps) {
   const flushNotes = (value: string) => {
     if (notesTimer.current) clearTimeout(notesTimer.current);
     notesTimer.current = null;
+    pendingNotes.current = null;
     if (value !== task.notes) updateTask(environmentId, taskId, { notes: value });
   };
   const changeNotes = (value: string) => {
     editingNotes.current = true;
     setNotes(value);
     if (notesTimer.current) clearTimeout(notesTimer.current);
+    pendingNotes.current = () => flushNotes(value);
     notesTimer.current = setTimeout(() => flushNotes(value), NOTES_SAVE_DELAY_MS);
   };
   const setLinks = (next: ReadonlyArray<LocalTaskLink>) => {
@@ -336,7 +344,12 @@ export function TaskDetailRouteScreen(props: TaskDetailRouteScreenProps) {
           void mobileLocalTaskWriter(environmentId).removeFile(taskId, fileId as never),
       },
     ]);
-  const start = () => startTaskChat(navigation, environmentId, task, { replace: true });
+  const start = () => {
+    // A tap on Start doesn't blur the fields: what was typed saves before the chat is seeded.
+    if (editingTitle.current) saveTitle();
+    flushNotes(notes);
+    startTaskChat(navigation, environmentId, task, { replace: true });
+  };
   const latestChat = chats.find((chat) => chat.openable && chat.tone !== "gone");
 
   const projectActions: MenuAction[] = [
@@ -394,7 +407,12 @@ export function TaskDetailRouteScreen(props: TaskDetailRouteScreenProps) {
             value={title}
             onChangeText={(value) => {
               editingTitle.current = true;
-              setTitle(value.replace(/\n/g, " "));
+              const typed = value.replace(/\n/g, " ");
+              setTitle(typed);
+              pendingTitle.current = () => {
+                const next = titleToSave(typed, task.title);
+                if (next !== null) updateTask(environmentId, taskId, { title: next });
+              };
             }}
             onBlur={saveTitle}
             onSubmitEditing={saveTitle}

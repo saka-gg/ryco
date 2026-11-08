@@ -295,6 +295,8 @@ export function TasksTabScreen() {
   // Rows checked (or unchecked) that have not moved yet: task id -> shown checked.
   const [settling, setSettling] = useState<ReadonlyMap<string, boolean>>(new Map());
   const settleTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  // The writes of checks still settling: leaving the screen sends them at once.
+  const settleWrites = useRef(new Map<string, () => void>());
   const { swipeEnabled, scrollGateHandlers } = useSwipeableScrollGate();
   const card = useThemeColor("--color-card") as string;
   const mutedIcon = useThemeColor("--color-icon-muted") as string;
@@ -305,9 +307,12 @@ export function TasksTabScreen() {
   useEffect(() => {
     const timer = setInterval(() => setNowMs(Date.now()), 60_000);
     const timers = settleTimers.current;
+    const writes = settleWrites.current;
     return () => {
       clearInterval(timer);
       for (const pending of timers.values()) clearTimeout(pending);
+      for (const write of writes.values()) write();
+      writes.clear();
     };
   }, []);
 
@@ -332,6 +337,11 @@ export function TasksTabScreen() {
     setSettling((current) => new Map(current).set(row.taskId, next));
     const pending = settleTimers.current.get(row.taskId);
     if (pending) clearTimeout(pending);
+    const write = () => {
+      settleWrites.current.delete(row.taskId);
+      if (next !== row.done) setTaskDone(environmentId, row, next);
+    };
+    settleWrites.current.set(row.taskId, write);
     settleTimers.current.set(
       row.taskId,
       setTimeout(() => {
@@ -342,7 +352,7 @@ export function TasksTabScreen() {
           copy.delete(row.taskId);
           return copy;
         });
-        if (next !== row.done) setTaskDone(environmentId, row, next);
+        write();
       }, CHECK_SETTLE_MS),
     );
   };
