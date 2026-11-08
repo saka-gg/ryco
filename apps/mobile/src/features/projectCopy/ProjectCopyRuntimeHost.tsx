@@ -20,6 +20,7 @@ import {
   useProjectCopyNotice,
 } from "./mobileCopyManager";
 import { useMobileNodeCatalog, usePublishMobileNodeCatalog } from "./mobileNodeCatalog";
+import { startMobileNodeDirectoryPublisher } from "./mobileNodeDirectoryPublisher";
 
 /** How long a finished copy's notice stays before it goes by itself. */
 const RESULT_NOTICE_MS = 8_000;
@@ -30,7 +31,7 @@ function openPath(path: string, queryParams?: Record<string, string>): void {
 
 /**
  * Keeps the phone's copies running outside the copy screen: publishes the
- * node catalog, picks up copies a previous launch left (and reports what
+ * node catalog (and the node directory agents copy with), picks up copies a previous launch left (and reports what
  * Agent Control copies owe), lets the copy manager open the copy screen and a
  * copied project, and shows the one copy notice. Mounted once, at the root.
  */
@@ -47,6 +48,9 @@ export function ProjectCopyRuntimeHost() {
       console.warn("Resuming project copies failed.", error);
     });
   }, [hasNodes, resumed]);
+
+  // Agents on the machines this phone owns learn which machines they may copy to.
+  useEffect(() => startMobileNodeDirectoryPublisher(), []);
 
   useEffect(() => {
     const stopNavigation = registerProjectCopyNavigation({

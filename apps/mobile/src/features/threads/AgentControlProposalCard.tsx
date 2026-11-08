@@ -7,19 +7,43 @@ import type { AgentControlProposalView, EnvironmentId, ThreadId } from "@ryco/co
 import { AppText as Text } from "../../components/AppText";
 import { ensureEnvironmentApi } from "../../connection/environmentApi";
 import { runThenSettle } from "../../lib/runWhileBusy";
+import { buildAgentControlProposalCardModel } from "../../state/agentControlRuntime";
 import {
-  agentControlCardDecisions,
-  buildAgentControlProposalCardModel,
-} from "../../state/agentControlRuntime";
+  AgentControlCopyPreview,
+  useAgentControlCopyApproval,
+} from "../projectCopy/AgentControlCopyApproval";
 import { acceptAgentControlProposal, rejectAgentControlProposal } from "./agentControlActions";
+
+/**
+ * Sends the decision: a proposal this phone runs itself (a copy) is approved
+ * by running it here, every other one through the node's accept / reject.
+ */
+async function submitDecision(input: {
+  readonly decision: "accept" | "reject";
+  readonly environmentId: EnvironmentId;
+  readonly proposalId: AgentControlProposalView["proposalId"];
+  readonly approveHere: (() => Promise<void>) | null;
+}): Promise<void> {
+  if (input.decision === "accept" && input.approveHere) {
+    await input.approveHere();
+    return;
+  }
+  const api = ensureEnvironmentApi(input.environmentId);
+  if (input.decision === "accept") {
+    await acceptAgentControlProposal({ api, proposalId: input.proposalId });
+    return;
+  }
+  await rejectAgentControlProposal({ api, proposalId: input.proposalId });
+}
 
 /**
  * Native Agent Control proposal card. Renders the shared presentation
  * model, including the exact immutable plan the user is deciding on, and
  * sends explicit accept/reject decisions through the EnvironmentApi seam.
  * Terminal proposals render their outcome without actions. A plan this build
- * cannot read, and a plan the approving app runs itself (this app has no copy
- * coordinator), offer Reject only and say where to approve instead.
+ * cannot read offers Reject only; a copy to another machine is approved and
+ * run from the phone when it can reach the target
+ * (`projectCopy/AgentControlCopyApproval`).
  */
 export function AgentControlProposalCard(props: {
   readonly environmentId: EnvironmentId;
@@ -33,7 +57,12 @@ export function AgentControlProposalCard(props: {
   const [pending, setPending] = useState<"accept" | "reject" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const model = buildAgentControlProposalCardModel(props.proposal);
-  const decisions = agentControlCardDecisions(model, null);
+  const copy = useAgentControlCopyApproval({
+    environmentId: props.environmentId,
+    proposal: props.proposal,
+    model,
+  });
+  const decisions = copy.decisions;
   const openThread = (threadId: ThreadId) =>
     props.onOpenThread
       ? props.onOpenThread(threadId)
@@ -46,12 +75,12 @@ export function AgentControlProposalCard(props: {
     await runThenSettle(
       async () => {
         try {
-          const api = ensureEnvironmentApi(props.environmentId);
-          if (decision === "accept") {
-            await acceptAgentControlProposal({ api, proposalId: props.proposal.proposalId });
-          } else {
-            await rejectAgentControlProposal({ api, proposalId: props.proposal.proposalId });
-          }
+          await submitDecision({
+            decision,
+            environmentId: props.environmentId,
+            proposalId: props.proposal.proposalId,
+            approveHere: copy.approve,
+          });
         } catch (cause) {
           // Stale/conflicting decisions land here; the queue subscription
           // delivers the authoritative proposal state alongside this message.
@@ -91,6 +120,14 @@ export function AgentControlProposalCard(props: {
         <Text className="mt-1 font-sans text-sm text-foreground-muted" numberOfLines={3}>
           {model.summary}
         </Text>
+      ) : null}
+      {model.requiresClientExecutor ? (
+        <AgentControlCopyPreview
+          executor={copy.executor}
+          environmentId={props.environmentId}
+          proposal={props.proposal}
+          enabled={model.isPending && decisions.canApprove}
+        />
       ) : null}
       {model.outcomeLabel !== null ? (
         <Text className="mt-1 font-mono text-sm text-foreground-muted" numberOfLines={3}>

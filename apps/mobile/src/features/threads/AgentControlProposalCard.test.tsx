@@ -22,6 +22,25 @@ vi.mock("./agentControlActions", () => ({
   acceptAgentControlProposal: vi.fn(async () => {}),
   rejectAgentControlProposal: vi.fn(async () => {}),
 }));
+const copyExecution = vi.hoisted(() => ({
+  canExecute: false,
+  approve: vi.fn(async () => {}),
+}));
+vi.mock("../projectCopy/AgentControlCopyApproval", async () => {
+  const { agentControlCardDecisions } = await import("@ryco/client-runtime/state/agentControl");
+  return {
+    AgentControlCopyPreview: "AgentControlCopyPreview",
+    useAgentControlCopyApproval: (input: {
+      readonly model: Parameters<typeof agentControlCardDecisions>[0] & {
+        readonly requiresClientExecutor: boolean;
+      };
+    }) => ({
+      decisions: agentControlCardDecisions(input.model, () => copyExecution.canExecute),
+      approve: input.model.requiresClientExecutor ? copyExecution.approve : null,
+      executor: {},
+    }),
+  };
+});
 import { AgentControlProposalCard } from "./AgentControlProposalCard";
 import { acceptAgentControlProposal } from "./agentControlActions";
 
@@ -76,24 +95,41 @@ it("native cards offer only Reject for a request this build cannot read", () => 
   expect(labels).not.toContain("Approve");
 });
 
-it("native cards send a client-executed copy to a computer connected to its target", () => {
-  const tree = render(
-    Schema.decodeUnknownSync(AgentControlActionPlan)({
-      kind: "copyProjectToNode",
-      source: { kind: "repository", remoteUrl: "https://github.com/example/ryco", title: "ryco" },
-      target: { environmentId: "env-mac-mini", label: "Mac mini" },
-      destination: { kind: "default" },
-      bringCommits: false,
-      bringChanges: false,
-      copySettings: false,
-      setup: null,
-      followUpThread: null,
-    }),
-  );
+const COPY_PLAN = {
+  kind: "copyProjectToNode",
+  source: { kind: "repository", remoteUrl: "https://github.com/example/ryco", title: "ryco" },
+  target: { environmentId: "env-mac-mini", label: "Mac mini" },
+  destination: { kind: "default" },
+  bringCommits: false,
+  bringChanges: false,
+  copySettings: false,
+  setup: null,
+  followUpThread: null,
+};
+
+it("native cards say where to approve a copy whose target this phone can't reach", () => {
+  copyExecution.canExecute = false;
+  const tree = render(Schema.decodeUnknownSync(AgentControlActionPlan)(COPY_PLAN));
   const labels = texts(tree);
   expect(labels).toContain("Approve in Ryco on a computer connected to Mac mini");
   expect(labels).toContain("Reject");
   expect(labels).not.toContain("Approve");
+  expect(acceptAgentControlProposal).not.toHaveBeenCalled();
+});
+
+it("native cards approve a copy here when this phone reaches its target", async () => {
+  copyExecution.canExecute = true;
+  const tree = render(Schema.decodeUnknownSync(AgentControlActionPlan)(COPY_PLAN));
+  const labels = texts(tree);
+  expect(labels).toContain("Approve");
+  expect(tree.some((entry) => entry.type === "AgentControlCopyPreview")).toBe(true);
+  const approve = tree.find(
+    (entry) =>
+      entry.type === "Pressable" &&
+      elements(entry.props.children).some((child) => child.props.children === "Approve"),
+  );
+  await (approve?.props.onPress as () => Promise<void>)();
+  await vi.waitFor(() => expect(copyExecution.approve).toHaveBeenCalledTimes(1));
   expect(acceptAgentControlProposal).not.toHaveBeenCalled();
 });
 
