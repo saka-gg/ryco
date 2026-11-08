@@ -52,6 +52,8 @@ import {
   isVideoFileAttachment,
   readAttachmentDimensions,
 } from "./threadAttachmentModel";
+import { useImageGallery } from "./ImageGalleryModal";
+import { messageImageGallery } from "./messageImageGallery";
 import { threadMessagePresentation } from "./threadPresentation";
 
 const sentTimeFormatter = new Intl.DateTimeFormat(undefined, {
@@ -76,23 +78,31 @@ async function shareAttachmentFile(previewUrl: string): Promise<void> {
 function ImageAttachment(props: {
   readonly attachment: ChatImageAttachment;
   readonly previewUrl: string;
+  readonly onOpen: () => void;
 }) {
   const dimensions = readAttachmentDimensions(props.attachment);
   return (
-    <Image
-      source={{ uri: props.previewUrl }}
-      style={
-        dimensions
-          ? {
-              width: IMAGE_ATTACHMENT_SLOT_WIDTH,
-              aspectRatio: dimensions.width / dimensions.height,
-            }
-          : undefined
-      }
-      className={dimensions ? "rounded-2xl bg-subtle" : "h-36 w-36 rounded-2xl bg-subtle"}
-      resizeMode="cover"
-      accessibilityLabel={props.attachment.name}
-    />
+    <Pressable
+      accessibilityRole="imagebutton"
+      accessibilityLabel={`${props.attachment.name}, open full screen`}
+      onPress={props.onOpen}
+      className="active:opacity-80"
+    >
+      <Image
+        source={{ uri: props.previewUrl }}
+        style={
+          dimensions
+            ? {
+                width: IMAGE_ATTACHMENT_SLOT_WIDTH,
+                aspectRatio: dimensions.width / dimensions.height,
+              }
+            : undefined
+        }
+        className={dimensions ? "rounded-2xl bg-subtle" : "h-36 w-36 rounded-2xl bg-subtle"}
+        resizeMode="cover"
+        accessibilityLabel={props.attachment.name}
+      />
+    </Pressable>
   );
 }
 
@@ -307,6 +317,8 @@ export function ThreadMessage(props: {
     (sentContexts ? quoteCitationsToPlainText(sentContexts.visibleText) : props.message.text) ||
     (props.message.streaming ? "…" : "");
   const attachments = props.message.attachments ?? [];
+  const galleryImages = messageImageGallery(props.message.attachments);
+  const gallery = useImageGallery();
   const hasVideoPlaybackSource = (
     attachment: ChatFileAttachment | ChatImageAttachment | ChatUnknownAttachment,
   ): attachment is ChatFileAttachment =>
@@ -458,6 +470,7 @@ export function ThreadMessage(props: {
             ))}
           </View>
         ) : null}
+        {gallery.modal}
         {stripAttachments.length > 0 ? (
           <ScrollView horizontal showsHorizontalScrollIndicator={false} className="mt-2 grow-0">
             <View className="flex-row gap-2">
@@ -467,6 +480,12 @@ export function ThreadMessage(props: {
                     key={attachment.id}
                     attachment={attachment}
                     previewUrl={attachment.previewUrl}
+                    onOpen={() =>
+                      gallery.open(
+                        galleryImages,
+                        galleryImages.findIndex((image) => image.id === attachment.id),
+                      )
+                    }
                   />
                 ) : isChatFileAttachment(attachment) && attachment.previewUrl ? (
                   <Pressable

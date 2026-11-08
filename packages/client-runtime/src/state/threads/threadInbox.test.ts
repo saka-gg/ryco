@@ -20,6 +20,7 @@ import {
   resolveThreadReferenceCopyTarget,
   resolveThreadWorkspacePullRequestLink,
   scopedInboxWorktreeKey,
+  threadInboxConnectionBlocker,
   type BuildThreadInboxInput,
   type ThreadInboxDraftSummary,
   type ThreadInboxEnvironment,
@@ -849,6 +850,34 @@ describe("thread inbox", () => {
     expect(search("  No Proj ")).toEqual([chat.id]);
     // A regular project still matches by its own name, never by the chat label.
     expect(search("alpha")).toEqual([regular.id]);
+  });
+
+  it("keeps threads a message search found, within the other filters", () => {
+    const found = makeThread(environmentA, "found-thread", { title: "Fix the build" });
+    const other = makeThread(environmentA, "other-thread", { title: "Write docs" });
+    const elsewhere = makeThread(environmentB, "elsewhere-thread", { title: "Ship it" });
+    const keys = new Set(
+      [found, elsewhere].map((thread) =>
+        scopedThreadKey({ environmentId: thread.environmentId, threadId: thread.id }),
+      ),
+    );
+    const inbox = buildThreadInbox(
+      baseInput({
+        threads: [found, other, elsewhere],
+        filters: { text: "flaky test", textMatchedKeys: keys, environmentIds: [environmentA] },
+      }),
+    );
+    expect(inbox.active.map((entry) => entry.thread?.id)).toEqual([found.id]);
+  });
+});
+
+describe("thread inbox connection rule", () => {
+  it("blocks a change until the node is connected, current and writable", () => {
+    const ready = { connected: true, shellCurrent: true, mutationReady: true };
+    expect(threadInboxConnectionBlocker(ready)).toBeNull();
+    expect(threadInboxConnectionBlocker({ ...ready, connected: false })).toBe("disconnected");
+    expect(threadInboxConnectionBlocker({ ...ready, shellCurrent: false })).toBe("shell-stale");
+    expect(threadInboxConnectionBlocker({ ...ready, mutationReady: false })).toBe("read-only");
   });
 });
 

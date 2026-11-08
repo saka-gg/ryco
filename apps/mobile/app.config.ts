@@ -10,8 +10,9 @@ import {
 
 // Ryco public mobile scaffold (B1). The upstream hosted-auth vendor plane and
 // managed-cloud plane, its EAS project/owner, upstream bundle IDs/schemes, brand
-// assets, the default telemetry endpoint, quick actions, and the
-// camera-showcase rig are all stripped per the design spec's strip list.
+// assets, the default telemetry endpoint, and the camera-showcase rig are all
+// stripped per the design spec's strip list.
+// Home-screen quick actions came back through expo-quick-actions (src/features/shortcuts).
 // Widgets came back as Ryco's own Swift extension (plugins/withIosWidgetExtension.cjs),
 // the share extension as expo-sharing's (sharingPlugin below). Direct-node bearer pairing is one auth plane; the hosted plane
 // uses a system-browser public-client handoff and defaults to Ryco Cloud.
@@ -306,6 +307,8 @@ const config: ExpoConfig = {
       },
     ],
     "expo-web-browser",
+    // Home-screen quick actions (src/features/shortcuts/appShortcuts.ts); iOS uses SF Symbols.
+    "expo-quick-actions",
     "expo-video",
     [
       "expo-camera",

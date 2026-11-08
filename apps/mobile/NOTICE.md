@@ -30,6 +30,19 @@ brand marks, cloud plane, showcase rig, and asset-runtime dependencies removed.
 Attribution is kept here (not as in-file headers) so the T3 identifiers do not
 re-enter `src`.
 
+The 2026-11 everyday-handling round ported further modules from the same
+upstream (at `e455200077`), adapted to Ryco's runtime and re-themed the same
+way: the thread row swipe actions and their dismissal animation
+(`src/features/threadList/ThreadSwipeable.tsx`, `threadSwipeModel.ts`,
+`threadDismissal.ts`; upstream `features/home/thread-swipe-actions.tsx`,
+`thread-dismissal.ts`), the swipe-to-dismiss Undo toast behavior
+(`src/components/SidebarUndoNoticeHost.tsx`; upstream `components/ui/Toast.tsx`,
+`features/home/ThreadUndoNotice.tsx`), the home-screen quick actions
+(`src/features/shortcuts/*`; upstream `features/shortcuts/appShortcuts.ts`,
+`appShortcutsRuntime.ts`), and the streaming-reply haptics
+(`src/features/threads/threadStreamHaptics.ts`; upstream
+`features/threads/threadStreamHaptics.ts`).
+
 The composer round (2026-11) ports further upstream modules from `pingdotgg/t3code`
 at commit `e455200077`, adapted to Ryco's shared trigger and ranking logic: the
 autocomplete menu (`src/features/threads/composerCommandMenuModel.ts`,

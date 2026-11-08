@@ -1,10 +1,18 @@
 import { parseScopedThreadKey } from "@ryco/client-runtime/scoped";
+import {
+  applyThreadPin,
+  requestThreadPinChange as requestSharedThreadPinChange,
+  toggleThreadPin as toggleSharedThreadPin,
+  type ThreadPinChangeDependencies,
+  type ThreadPinChangeResult,
+  type ThreadPinStore,
+} from "@ryco/client-runtime/state/threads/threadPins";
 import { sidebarUndo } from "./sidebarUndo";
 import { stackedThreadToast, toastManager } from "./components/ui/toast";
 import { readLocalApi } from "./localApi";
 import { useUiStateStore } from "./uiStateStore";
 
-export type ThreadPinChangeResult = "changed" | "unchanged" | "cancelled";
+export type { ThreadPinChangeResult };
 
 export interface ThreadPinCommandPresentation {
   readonly disabled: boolean;
@@ -33,83 +41,43 @@ export function resolveThreadPinCommandPresentation(input: {
   };
 }
 
-interface ThreadPinDependencies {
-  readonly isPinned: (threadKey: string) => boolean;
-  readonly setPinned: (threadKey: string, pinned: boolean) => void;
-  readonly confirm: (message: string) => Promise<boolean>;
-}
-
-const defaultDependencies: ThreadPinDependencies = {
-  isPinned: (threadKey) => useUiStateStore.getState().pinnedThreadKeys[threadKey] === true,
+const defaultDependencies: ThreadPinChangeDependencies = {
+  isPinned: (threadKey) => uiStatePinStore.isPinned(threadKey),
   setPinned: (threadKey, pinned) => {
     const target = parseScopedThreadKey(threadKey);
     if (!target) return;
-    if (pinned) {
-      sidebarUndo.supersede(target);
-      useUiStateStore.getState().setThreadPinned(threadKey, true);
-    } else {
-      sidebarUndo.unpin(target, {
-        read: () => useUiStateStore.getState().pinnedThreadKeys[threadKey] === true,
-        write: (next) => useUiStateStore.getState().setThreadPinned(threadKey, next),
-        subscribe: (listener) => useUiStateStore.subscribe(listener),
-      });
-    }
+    applyThreadPin({ target, threadKey, pinned }, uiStatePinStore, sidebarUndo);
   },
   confirm: async (message) => {
     const localApi = readLocalApi();
     return localApi ? localApi.dialogs.confirm(message) : window.confirm(message);
   },
-};
-
-export async function requestThreadPinChange(
-  input: {
-    readonly threadKey: string;
-    readonly threadTitle: string;
-    readonly pinned: boolean;
-    readonly confirmUnpin: boolean;
-  },
-  dependencies: ThreadPinDependencies = defaultDependencies,
-): Promise<ThreadPinChangeResult> {
-  if (dependencies.isPinned(input.threadKey) === input.pinned) {
-    return "unchanged";
-  }
-  if (
-    !input.pinned &&
-    input.confirmUnpin &&
-    !(await dependencies.confirm(
-      `Unpin "${input.threadTitle}"?\nIt will return to its normal position in the thread list.`,
-    ))
-  ) {
-    return "cancelled";
-  }
-  try {
-    dependencies.setPinned(input.threadKey, input.pinned);
-  } catch (error) {
+  failed: (error) =>
     toastManager.add(
       stackedThreadToast({
         type: "error",
         title: "Could not update pin",
         description: error instanceof Error ? error.message : "The request failed.",
       }),
-    );
-    return "unchanged";
-  }
-  return "changed";
+    ),
+};
+
+const uiStatePinStore: ThreadPinStore = {
+  isPinned: (threadKey) => useUiStateStore.getState().pinnedThreadKeys[threadKey] === true,
+  setPinned: (threadKey, pinned) => useUiStateStore.getState().setThreadPinned(threadKey, pinned),
+  subscribe: (listener) => useUiStateStore.subscribe(listener),
+};
+
+export function requestThreadPinChange(
+  input: Parameters<typeof requestSharedThreadPinChange>[0],
+  dependencies: ThreadPinChangeDependencies = defaultDependencies,
+): Promise<ThreadPinChangeResult> {
+  return requestSharedThreadPinChange(input, { ...defaultDependencies, ...dependencies });
 }
 
 export function toggleThreadPin(
-  input: {
-    readonly threadKey: string;
-    readonly threadTitle: string;
-    readonly confirmUnpin: boolean;
-  },
-  dependencies: ThreadPinDependencies = defaultDependencies,
+  input: Parameters<typeof toggleSharedThreadPin>[0],
+  dependencies: ThreadPinChangeDependencies = defaultDependencies,
 ): Promise<ThreadPinChangeResult> {
-  return requestThreadPinChange(
-    {
-      ...input,
-      pinned: !dependencies.isPinned(input.threadKey),
-    },
-    dependencies,
-  );
+  return toggleSharedThreadPin(input, { ...defaultDependencies, ...dependencies });
 }

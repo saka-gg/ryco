@@ -1,6 +1,6 @@
 import {
   createSidebarUndoHistory,
-  sidebarUndoThreadRevision,
+  createSidebarUndoLocalContextReader,
   type SidebarUndoNotice,
 } from "@ryco/client-runtime/state/threads";
 import { resolveHostedRpcCapability } from "@ryco/client-runtime/authorization";
@@ -11,7 +11,7 @@ import { readEnvironmentApi } from "../connection/environmentApi";
 import { createMobileConnectionRegistry } from "../runtime/bootstrap";
 import { getMobileHostedConnectionCoordinator } from "../connection/hostedConnectionCoordinator";
 import { readEnvironmentServerConfig } from "./environmentServerConfigs";
-import { selectSidebarThreadSummaryByRef, selectProjectByRef, useStore } from "./threadsRuntime";
+import { selectProjectByRef, selectSidebarThreadSummaryByRef, useStore } from "./threadsRuntime";
 import { newCommandId } from "../lib/ids";
 
 let notices: readonly SidebarUndoNotice[] = [];
@@ -25,21 +25,20 @@ export const sidebarUndoNotices = {
     };
   },
 };
+/** Local pin state needs no connection: only the thread's cached ordering fields. */
+export const readMobileSidebarUndoLocalContext = createSidebarUndoLocalContextReader({
+  getState: () => useStore.getState(),
+  subscribe: (listener) => useStore.subscribe(listener),
+  selectThread: selectSidebarThreadSummaryByRef,
+  selectProject: selectProjectByRef,
+});
 export function readMobileSidebarUndoContext(target: ScopedThreadRef) {
   const registry = createMobileConnectionRegistry();
   const connection = registry.driver.supervisor.read(target.environmentId);
   const generation = connection?.shellSnapshotReadiness.read();
   const api = readEnvironmentApi(target.environmentId);
-  const state = useStore.getState();
-  // An archived stub has a revision of its own (see `sidebarUndoThreadRevision`).
-  const thread = selectSidebarThreadSummaryByRef(state, target);
-  const project = thread
-    ? selectProjectByRef(state, {
-        environmentId: target.environmentId,
-        projectId: thread.projectId,
-      })
-    : null;
-  if (!connection || !generation || !api || !thread || !project) return null;
+  const local = readMobileSidebarUndoLocalContext(target);
+  if (!connection || !generation || !api || !local) return null;
   if (connection.knownEnvironment.source === "hub-hosted") {
     const record = getMobileHostedConnectionCoordinator().read(target.environmentId);
     const capability = resolveHostedRpcCapability({
@@ -55,9 +54,9 @@ export function readMobileSidebarUndoContext(target: ScopedThreadRef) {
   return {
     generation,
     api,
-    threadRevision: sidebarUndoThreadRevision(thread),
-    parentRevision: project,
-    threadTitle: thread.title,
+    threadRevision: local.threadRevision,
+    parentRevision: local.parentRevision,
+    threadTitle: local.threadTitle,
     supported:
       readEnvironmentServerConfig(target.environmentId)?.environment.capabilities
         .threadSidebarUndo === true,
@@ -65,6 +64,7 @@ export function readMobileSidebarUndoContext(target: ScopedThreadRef) {
 }
 export const sidebarUndo = createSidebarUndoHistory({
   readContext: readMobileSidebarUndoContext,
+  readLocalContext: readMobileSidebarUndoLocalContext,
   newCommandId,
   changed: (next) => {
     notices = next;

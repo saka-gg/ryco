@@ -47,6 +47,8 @@ vi.mock("react-native-keyboard-controller", () => ({
 vi.mock("../../components/HomeModeControl", () => ({ HomeModeControl: "HomeModeControl" }));
 vi.mock("../../components/NodeScopeControl", () => ({ NodeScopeControl: "NodeScopeControl" }));
 vi.mock("../inbox/InboxScreen", () => ({ InboxScreen: "InboxScreen" }));
+vi.mock("../inbox/useInboxMessageSearch", () => ({ useInboxMessageSearch: () => new Map() }));
+vi.mock("../../state/threadPins", () => ({ useThreadPins: () => ({}) }));
 vi.mock("../projects/ProjectsScreen", () => ({ ProjectsScreen: "ProjectsScreen" }));
 vi.mock("./NeedsVerificationSection", () => ({
   NeedsVerificationSection: "NeedsVerificationSection",

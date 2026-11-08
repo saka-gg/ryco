@@ -139,6 +139,7 @@ export const CLIENT_RUNTIME_PURE_TEST_FILES = [
   "src/state/terminal/cleanup.test.ts",
   "src/state/terminal/reconciliation.test.ts",
   "src/state/terminal/store.test.ts",
+  "src/state/threads/archivedThreadGroups.test.ts",
   "src/state/threads/archivedThreadStubs.test.ts",
   "src/state/threads/cacheHydration.test.ts",
   "src/state/threads/readCache.test.ts",

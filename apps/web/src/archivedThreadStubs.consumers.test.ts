@@ -25,7 +25,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { buildThreadActionItems } from "./components/CommandPalette.logic";
 import { toMapThread } from "./components/projects/map/projectMapModel";
-import { selectArchivedSettingsGroups } from "./components/settings/archivedSettings";
+import { selectArchivedThreadGroups } from "@ryco/client-runtime/state/threads/archivedThreadGroups";
 import { composeSidebarTree } from "./components/sidebar/hooks/useSidebarTree";
 import { resolveWorktreeOpenTarget } from "./components/sidebar/hooks/useSidebarWorktreeActions";
 import { adaptProjectForSidebarTree } from "./components/sidebar/sidebarTreeAdapters";
@@ -146,7 +146,7 @@ function projectSnapshot(): SidebarProjectSnapshot {
 
 describe("archived stubs in web consumers", () => {
   it("fills the archive panel from stubs: title, archive and creation times", () => {
-    const groups = selectArchivedSettingsGroups(
+    const groups = selectArchivedThreadGroups(
       [{ id: projectId, environmentId, name: "Project", cwd: "/repo/project" } as never],
       shells,
     );

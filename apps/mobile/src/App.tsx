@@ -1,5 +1,9 @@
 import { BlurTargetView } from "expo-blur";
 import * as Linking from "expo-linking";
+import {
+  installAppShortcuts,
+  shortcutAwareLinking,
+} from "./features/shortcuts/appShortcutsRuntime";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { StatusBar } from "react-native";
@@ -50,6 +54,9 @@ const appLinking = {
   // which addresses the launcher, not app navigation. Without this filter it
   // falls through to the NotFound wildcard on every dev launch.
   filter: (url: string) => !url.includes("expo-development-client"),
+  // Home-screen quick actions arrive as app paths through the same config.
+  getInitialURL: shortcutAwareLinking.getInitialURL,
+  subscribe: shortcutAwareLinking.subscribe,
   // The share extension opens <scheme>://expo-sharing: New Task takes the share.
   getStateFromPath: (path: string, options?: Parameters<typeof getStateFromPath>[1]) =>
     getStateFromPath(rewriteIncomingSharePath(path), options),
@@ -115,6 +122,8 @@ function AppRoot() {
   applyResolvedAppColorScheme();
   const colorScheme = resolveAppColorScheme();
   const statusBarBg = useThemeColor("--color-status-bar");
+  // Puts New task and the recent threads on the app icon's quick actions.
+  useEffect(() => installAppShortcuts(), []);
 
   return (
     <AppProviders>
