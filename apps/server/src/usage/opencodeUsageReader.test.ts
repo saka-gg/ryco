@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off
 import { mkdtemp, mkdir, readFile, writeFile, symlink, rm, stat, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

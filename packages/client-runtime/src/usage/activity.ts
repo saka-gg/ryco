@@ -1,4 +1,3 @@
-// @effect-diagnostics globalDate:off
 import type { StatisticsDailyBucket, StatisticsSnapshot } from "@ryco/contracts";
 
 export type StatRange = "7d" | "30d" | "90d" | "all";

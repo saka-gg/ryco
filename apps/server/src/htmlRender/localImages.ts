@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off - realpath containment and no-follow reads need node:fs.
 /**
  * localImages - Inlines the local images an agent's HTML page names by
  * absolute path as data URIs, so the stored page is self-contained.

@@ -11,18 +11,16 @@ import { existsSync, readFileSync } from "node:fs";
 import { delimiter, join, relative } from "node:path";
 import { parseArgs } from "node:util";
 
-const TYPE_MODES = ["full", "fast", "none"] as const;
 const TEST_MODES = ["related", "affected", "none"] as const;
 
 export const USAGE = `Usage: bun run check:changed [options]
 
 Format, lint, typecheck (Turbo-cached) and run the tests the change affects.
 
-  --types=full|fast|none          full: TS7 + Effect (default); fast: tsc-rs pre-check
   --tests=related|affected|none   related: Vitest's import graph plus tests that read sources
                                   from disk (default); affected: every test of every affected
                                   package
-  --no-fmt, --no-lint             skip the format check or lint
+  --no-fmt, --no-lint, --no-types skip the format check, lint or typecheck
   --base <ref>                    diff base (default: merge-base with origin/main)
   -h, --help                      show this help
 
@@ -33,7 +31,7 @@ export interface Options {
   readonly base: string | undefined;
   readonly fmt: boolean;
   readonly lint: boolean;
-  readonly types: (typeof TYPE_MODES)[number];
+  readonly types: boolean;
   readonly tests: (typeof TEST_MODES)[number];
 }
 
@@ -56,7 +54,7 @@ export function parseOptions(argv: readonly string[]): Options {
       base: { type: "string" },
       fmt: { type: "boolean", default: true },
       lint: { type: "boolean", default: true },
-      types: { type: "string", default: "full" },
+      types: { type: "boolean", default: true },
       tests: { type: "string", default: "related" },
     },
   });
@@ -64,7 +62,7 @@ export function parseOptions(argv: readonly string[]): Options {
     base: values.base,
     fmt: values.fmt,
     lint: values.lint,
-    types: oneOf("types", values.types, TYPE_MODES),
+    types: values.types,
     tests: oneOf("tests", values.tests, TEST_MODES),
   };
 }
@@ -229,12 +227,11 @@ function main(): void {
     const skip = [...(options.fmt ? [] : ["--no-fmt"]), ...(options.lint ? [] : ["--no-lint"])];
     results.push(run("format and lint", "vp", ["check", "--quiet", ...skip], env));
   }
-  if (options.types !== "none") {
+  if (options.types) {
     // Not --affected: Turbo's cache already skips every package whose inputs were checked before,
     // and its hashes also cover inputs outside a package's directory (the server checks
     // scripts/lib), which --affected's package-membership diff misses.
-    const task = options.types === "fast" ? "typecheck:fast" : "typecheck";
-    const args = ["run", task, "--continue", "--output-logs=errors-only"];
+    const args = ["run", "typecheck", "--continue", "--output-logs=errors-only"];
     results.push(run("typecheck", "turbo", args, env));
   }
 

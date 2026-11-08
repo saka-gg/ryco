@@ -1,4 +1,3 @@
-// @effect-diagnostics globalDate:off
 import type { EnvironmentId } from "@ryco/contracts";
 import type { DailyRecapRequest, DailyRecapSnapshot } from "@ryco/contracts/daily-recap";
 

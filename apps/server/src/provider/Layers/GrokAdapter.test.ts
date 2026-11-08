@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off
 import * as path from "node:path";
 import * as os from "node:os";
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";

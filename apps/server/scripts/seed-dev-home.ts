@@ -30,7 +30,6 @@
  * Never reads ~/.ryco/userdata. Exit codes: 0 seeded, or skipped because the home already has a
  * database; 3 skipped on purpose (the reason is printed); 1 failure.
  */
-// @effect-diagnostics nodeBuiltinImport:off
 import * as NodeCrypto from "node:crypto";
 import * as NodeFs from "node:fs";
 import * as NodeOS from "node:os";

@@ -1,5 +1,5 @@
-import { createSideChatStore } from "@ryco/client-runtime/state/side-chat";
+import { createSideChatStore, type SideChatStore } from "@ryco/client-runtime/state/side-chat";
 
-export const useSideChatStore = createSideChatStore();
+export const useSideChatStore: SideChatStore = createSideChatStore();
 
-export const sideChatStore = useSideChatStore;
+export const sideChatStore: SideChatStore = useSideChatStore;

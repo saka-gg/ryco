@@ -1,4 +1,3 @@
-// @effect-diagnostics globalDate:off
 import type { UsageImportedMetric, UsageProviderKind } from "@ryco/contracts";
 import { USAGE_PROVIDERS } from "./providers.ts";
 import type { MergedUsageBucket, MergedUsageSummary } from "./merge.ts";

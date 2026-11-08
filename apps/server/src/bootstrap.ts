@@ -7,7 +7,7 @@ import { Data, Effect, Option, Predicate, Result, Schema } from "effect";
 import { decodeJsonResult } from "@ryco/shared/schemaJson";
 import { applyShellEnvironment, pickShellEnvironment } from "@ryco/shared/shellEnvironment";
 
-class BootstrapError extends Data.TaggedError("BootstrapError")<{
+export class BootstrapError extends Data.TaggedError("BootstrapError")<{
   readonly message: string;
   readonly cause?: unknown;
 }> {}

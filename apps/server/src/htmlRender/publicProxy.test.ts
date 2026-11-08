@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off - raw sockets speak SOCKS5 and DNS to the proxy.
 import * as NodeDgram from "node:dgram";
 import * as NodeDnsPromises from "node:dns/promises";
 import * as NodeNet from "node:net";

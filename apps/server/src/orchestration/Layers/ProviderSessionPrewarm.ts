@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off
 import { stat } from "node:fs/promises";
 
 import {

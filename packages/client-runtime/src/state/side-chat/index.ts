@@ -187,3 +187,5 @@ export function createSideChatStore() {
     };
   });
 }
+
+export type SideChatStore = ReturnType<typeof createSideChatStore>;

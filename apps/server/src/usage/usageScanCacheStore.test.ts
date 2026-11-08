@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off
 import * as FS from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

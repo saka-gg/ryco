@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off - Effect has no ZIP reader, positional reads, or inflate stream.
 /**
  * Safe, file-backed extraction of an already verified ZIP archive.
  *

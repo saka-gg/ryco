@@ -18,6 +18,9 @@ import {
 // uses a system-browser public-client handoff and defaults to Ryco Cloud.
 const repoEnv = loadMobileEnv();
 Object.assign(process.env, repoEnv);
+// Expo's TypeScript setup would otherwise install `typescript` on every start; the repo
+// typechecks with tsrs through @effect/tsgo and installs no `typescript` package.
+process.env.EXPO_NO_TYPESCRIPT_SETUP = "1";
 
 const APP_VARIANT = resolveAppVariant(repoEnv.APP_VARIANT);
 const mobileRuntimeVersionPolicy = process.env.MOBILE_VERSION_POLICY ?? "fingerprint";

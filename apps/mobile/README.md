@@ -24,7 +24,7 @@ These run without driving the Simulator:
 
 ```sh
 bun install --frozen-lockfile
-bun run --cwd apps/mobile typecheck        # tsc --noEmit
+bun run --cwd apps/mobile typecheck        # effect-tsgo tsrs --noEmit
 bun run --cwd apps/mobile test             # vp test run (NEVER `bun test`)
 bun run --cwd apps/mobile bundle:check     # production iOS + Android bundles (CI's Mobile bundle job)
 cd apps/mobile && APP_VARIANT=development ./node_modules/.bin/expo config  # config resolves

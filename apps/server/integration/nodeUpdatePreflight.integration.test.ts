@@ -3,7 +3,6 @@
  * --database <copy>` loads the whole server graph, migrates the copy, and reports on stdout
  * without listening or creating the node's own state.
  */
-// @effect-diagnostics nodeBuiltinImport:off
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";

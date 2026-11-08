@@ -1,5 +1,3 @@
-// @effect-diagnostics globalDate:off
-// @effect-diagnostics nodeBuiltinImport:off
 import { createHash } from "node:crypto";
 
 import {

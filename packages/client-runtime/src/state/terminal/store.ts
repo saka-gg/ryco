@@ -1009,3 +1009,5 @@ export function createTerminalStateStore(options?: {
     ),
   );
 }
+
+export type TerminalStateStore = ReturnType<typeof createTerminalStateStore>;

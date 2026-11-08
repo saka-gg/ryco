@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off - An independent implementation of the construction, from Node's crypto.
 import {
   createCipheriv,
   createPrivateKey,

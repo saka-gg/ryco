@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off - Effect has no OS release probe.
 /**
  * nodeBrowserRuntime - Browser tabs that run on the node and stream to its
  * clients. One headless shell (Ryco's pinned build, `PreviewBrowser`) starts

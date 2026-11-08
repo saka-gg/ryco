@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off - links, renames, directory flushes and a JSON journal next to the database, which Effect's FileSystem does not offer.
 /**
  * databaseRestoreSwap - `ryco db restore <file> --replace`: makes a checked backup the database
  * in use, and keeps everything it replaces.

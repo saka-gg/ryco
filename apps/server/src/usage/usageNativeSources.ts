@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off
 import * as OS from "node:os";
 import { resolveOpenCodeUsagePaths } from "./usageProtectedPaths.ts";
 

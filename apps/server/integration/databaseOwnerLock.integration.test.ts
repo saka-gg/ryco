@@ -5,7 +5,6 @@
  * next to the running server, and a killed server's lock is reclaimed by the
  * next one.
  */
-// @effect-diagnostics nodeBuiltinImport:off
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeNet from "node:net";

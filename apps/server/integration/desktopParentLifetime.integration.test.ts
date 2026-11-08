@@ -4,7 +4,6 @@
  * watchdog ends it when a finalizer hangs. Each case runs a real backend
  * process (fixtures/desktopParentLifetimeBackend.ts) on a real pipe.
  */
-// @effect-diagnostics nodeBuiltinImport:off
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";

@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";

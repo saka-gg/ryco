@@ -1,4 +1,7 @@
-import { createTerminalStateStore } from "@ryco/client-runtime/state/terminal";
+import {
+  createTerminalStateStore,
+  type TerminalStateStore,
+} from "@ryco/client-runtime/state/terminal";
 
 import { isHostedHubMode } from "./env";
 import { resolveStorage } from "./lib/storage";
@@ -14,7 +17,7 @@ const webTerminalStorage = resolveStorage(
   typeof window !== "undefined" && !isHostedHubMode() ? window.localStorage : undefined,
 );
 
-export const useTerminalStateStore = createTerminalStateStore({
+export const useTerminalStateStore: TerminalStateStore = createTerminalStateStore({
   storage: {
     getItem: (name) => webTerminalStorage.getItem(name) as string | null | Promise<string | null>,
     // Bind the synchronous localStorage writes directly so persist middleware

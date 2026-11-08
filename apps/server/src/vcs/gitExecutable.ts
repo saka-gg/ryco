@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off - one `xcrun` child and `access` checks, outside any Effect service.
 /**
  * gitExecutable - which binary Ryco spawns for `git`.
  *

@@ -22,7 +22,7 @@ describe("check:changed", () => {
       base: undefined,
       fmt: true,
       lint: true,
-      types: "full",
+      types: true,
       tests: "related",
     });
     expect(
@@ -31,11 +31,10 @@ describe("check:changed", () => {
         "origin/main",
         "--no-fmt",
         "--no-lint",
-        "--types=fast",
+        "--no-types",
         "--tests=none",
       ]),
-    ).toEqual({ base: "origin/main", fmt: false, lint: false, types: "fast", tests: "none" });
-    expect(() => parseOptions(["--types=slow"])).toThrow("--types must be one of");
+    ).toEqual({ base: "origin/main", fmt: false, lint: false, types: false, tests: "none" });
     expect(() => parseOptions(["--tests", "everything"])).toThrow("--tests must be one of");
     expect(() => parseOptions(["--fast"])).toThrow();
   });
@@ -56,7 +55,7 @@ describe("check:changed", () => {
     expect(bad.stderr).toMatch(/^check:changed: Unknown option '--fast'/u);
     expect(bad.stderr).toContain(USAGE);
     expect(bad.stderr).not.toMatch(/^\s+at /mu);
-    expect(cli("--types=slow").stderr).toMatch(/^check:changed: --types must be one of/u);
+    expect(cli("--tests=slow").stderr).toMatch(/^check:changed: --tests must be one of/u);
   });
 
   it("selects related tests for code changes and escalates files tests read from disk", () => {

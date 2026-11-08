@@ -7,8 +7,7 @@
     "dev": "vp dev",
     "build": "vp build",
     "preview": "vp preview",
-    "typecheck": "tsc --noEmit",
-    "typecheck:fast": "tsc-rs --noEmit --composite false --declaration false --incremental --tsBuildInfoFile .turbo/tsc-rs.tsbuildinfo",
+    "typecheck": "effect-tsgo tsrs --noEmit",
     "test": "vp test run --config vitest.config.ts --passWithNoTests",
     "test:browser": "vp test run --config vitest.browser.config.ts",
     "test:browser:install": "playwright install --with-deps chromium"
@@ -73,7 +72,6 @@
     "oxc-transform-react": "0.152.0",
     "playwright": "^1.63.0",
     "tailwindcss": "^4.3.3",
-    "typescript": "catalog:",
     "unified": "^11.0.5",
     "vite": "catalog:",
     "vite-plus": "catalog:",

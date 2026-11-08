@@ -2696,3 +2696,7 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
     finalizePromotedDraftThreadsByRef,
   };
 }
+
+export type ComposerDraftStoreBundle<TImage extends ComposerDraftImage> = ReturnType<
+  typeof createComposerDraftStore<TImage>
+>;

@@ -5,14 +5,13 @@
 - Use the Bun version pinned in `package.json` and install with `bun install --frozen-lockfile`.
 - Validation must be proportional to the size and risk of the change. For small and medium
   changes:
-  - Iterate with `bun run check`: format check, lint errors and `typecheck:fast` (tsc-rs) for every
-    package, Turbo-cached, so it takes seconds. Fix formatting with `bun fmt`, not `vp check --fix`
-    (its lint autofixes can change semantics).
-  - Finish with `bun run check:changed`. It adds `bun typecheck`, the authoritative TS7 + Effect
-    gate (`typecheck:fast` is only a pre-check and loses when the two disagree), and the tests the
-    change affects: those Vitest's import graph links to it, plus each affected package's tests that
-    read sources from disk. The change is everything since the merge-base with `origin/main`,
-    uncommitted and untracked files included.
+  - Iterate with `bun run check`: format check, lint errors and `bun typecheck` (tsrs with Effect's
+    diagnostics, the same gate CI runs) for every package, Turbo-cached, so it takes seconds. Fix
+    formatting with `bun fmt`, not `vp check --fix` (its lint autofixes can change semantics).
+  - Finish with `bun run check:changed`. It reruns those checks (cached) and adds the tests the
+    change affects: those Vitest's import graph links to it, plus each affected package's tests
+    that read sources from disk. The change is everything since the merge-base with
+    `origin/main`, uncommitted and untracked files included.
   - Add `--tests=affected` (every test of each affected package) after changing shared test
     helpers, setup, timing, concurrency, retry or lifecycle code, or when the selection looks too
     narrow; fixture, snapshot, lockfile, patch and root Vitest config changes escalate on their own.
@@ -55,8 +54,9 @@
 
 ## TypeScript
 
-Typechecking uses the native **TS7** compiler patched by `@effect/tsgo`, so `bun typecheck`
-enforces both TypeScript and Effect-specific diagnostics in one pass. See
+Every package typechecks with `effect-tsgo tsrs --noEmit` from `@effect/tsgo`: **tsrs**, the Rust
+TypeScript 7 checker, with Effect's diagnostics built in, so `bun typecheck` enforces both
+TypeScript and Effect-specific diagnostics in one pass. There is no `typescript` package to run. See
 [docs/typescript.md](docs/typescript.md) for the toolchain details.
 
 ## Project Snapshot

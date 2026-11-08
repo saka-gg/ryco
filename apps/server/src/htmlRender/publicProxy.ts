@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off - Effect has no SOCKS proxy or address block list.
 /**
  * publicProxy - The SOCKS5 proxy every HTML preview browser connection goes
  * through. It only reaches public addresses, so an agent's page can never

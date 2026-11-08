@@ -1,6 +1,4 @@
 // Provider-native metadata only. Never query parts, credentials, or message content.
-// @effect-diagnostics nodeBuiltinImport:off
-// @effect-diagnostics globalDate:off
 import * as FS from "node:fs/promises";
 import * as Path from "node:path";
 import { DatabaseSync } from "node:sqlite";

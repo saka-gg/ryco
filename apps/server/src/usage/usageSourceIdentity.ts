@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off
 import { createHash } from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";

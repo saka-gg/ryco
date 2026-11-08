@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off - plain local servers stand in for LAN services.
 import * as NodeDgram from "node:dgram";
 import * as NodeHttp from "node:http";
 import * as NodeURL from "node:url";

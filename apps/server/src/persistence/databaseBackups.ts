@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off - snapshots need clonefile/reflink copies, statfs, hard links, fsync and zstd streams, which Effect's FileSystem does not offer.
 /**
  * Backups of the SQLite database taken before an upgrade changes it.
  *
