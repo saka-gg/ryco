@@ -1,4 +1,4 @@
-import { MenuView, type NativeActionEvent } from "@react-native-menu/menu";
+import { MenuView, type MenuAction, type NativeActionEvent } from "@react-native-menu/menu";
 import type {
   PullRequestRowSpine,
   StackFootPartTone,
@@ -26,11 +26,11 @@ import { readinessTextClass } from "./PullRequestParts";
 
 export type PullRequestRowAction = "open-host" | "copy-link" | "copy-branch";
 
-const ROW_ACTIONS = [
+const ROW_ACTIONS: MenuAction[] = [
   { id: "open-host", title: "Open on the host", image: "safari" },
   { id: "copy-link", title: "Copy link", image: "link" },
   { id: "copy-branch", title: "Copy branch name", image: "arrow.triangle.branch" },
-] as const;
+];
 
 /** The glyph column's width: the stack spine runs down its middle. */
 const GLYPH_COLUMN = 24;
@@ -82,7 +82,7 @@ export const PullRequestTabRow = memo(function PullRequestTabRow(props: {
     <MenuView
       shouldOpenOnLongPress
       title={`#${row.number}`}
-      actions={ROW_ACTIONS.map((action) => ({ ...action }))}
+      actions={ROW_ACTIONS}
       onPressAction={onPressAction}
     >
       <Pressable

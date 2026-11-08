@@ -251,16 +251,21 @@ const REVIEW: Readonly<Record<string, PullRequestRowReview>> = {
   review_required: "review-required",
 };
 
-function checkCounts(entry: ChangeRequest): PullRequestCheckCounts | null {
-  const summary = summarizeChangeRequestChecks(entry.checkRollup);
+/** The ring's counts from a checks summary; null when there are no checks. */
+export function pullRequestCheckCounts(
+  summary: ReturnType<typeof summarizeChangeRequestChecks>,
+): PullRequestCheckCounts | null {
   if (summary.counts.total === 0) return null;
-  const groups = summary.groups;
   return {
     total: summary.counts.total,
     passed: summary.counts.success + summary.counts.neutral + summary.counts.skipped,
-    failed: groups.attention.length,
-    running: groups.running.length,
+    failed: summary.groups.attention.length,
+    running: summary.groups.running.length,
   };
+}
+
+function checkCounts(entry: ChangeRequest): PullRequestCheckCounts | null {
+  return pullRequestCheckCounts(summarizeChangeRequestChecks(entry.checkRollup));
 }
 
 function toRow(
