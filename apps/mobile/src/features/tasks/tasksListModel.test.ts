@@ -1,5 +1,5 @@
 import { dueAtForDay, type LocalTaskView } from "@ryco/client-runtime/state/tasks";
-import { CommandId, MessageId, ProjectId, ThreadId } from "@ryco/contracts";
+import { CommandId, EnvironmentId, MessageId, ProjectId, ThreadId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -41,7 +41,13 @@ function task(taskId: string, overrides: Partial<LocalTaskView> = {}): LocalTask
   };
 }
 
+const MAC = EnvironmentId.make("env-mac");
+const MINI = EnvironmentId.make("env-mini");
+
 const context: TaskRowContext = {
+  environmentId: MAC,
+  machineLabel: null,
+  offline: false,
   nowMs: NOW,
   projectNames: new Map([[RYCO, "ryco"]]),
   getSummary: () => undefined,
@@ -62,18 +68,23 @@ function delegation(threadId: string, status: LocalTaskView["delegations"][numbe
   };
 }
 
+/** Tasks of one machine, as the merged list takes them. */
+const on = (...tasks: LocalTaskView[]) =>
+  tasks.map((subject) => ({ environmentId: MAC, task: subject }));
+const contextOf = () => context;
+
 describe("buildTaskSections", () => {
   it("files overdue and today under Today, then Upcoming, No date and Done, with counts", () => {
     const sections = buildTaskSections(
-      [
+      on(
         task("late", { dueAt: day(-2) }),
         task("today", { dueAt: day(0) }),
         task("friday", { dueAt: day(5) }),
         task("someday"),
         task("done", { state: "done", status: "done" }),
-      ],
-      { projectId: null, query: "" },
-      context,
+      ),
+      { environmentId: null, projectId: null, query: "" },
+      contextOf,
     );
     expect(sections.map((section) => [section.key, section.count])).toEqual([
       ["today", 2],
@@ -86,13 +97,13 @@ describe("buildTaskSections", () => {
 
   it("sorts a day's tasks by priority, then newest first", () => {
     const sections = buildTaskSections(
-      [
+      on(
         task("normal-old", { dueAt: day(0), createdAt: "2026-10-01T00:00:00.000Z" }),
         task("normal-new", { dueAt: day(0), createdAt: "2026-10-12T00:00:00.000Z" }),
         task("urgent", { dueAt: day(0), priority: "urgent" }),
-      ],
-      { projectId: null, query: "" },
-      context,
+      ),
+      { environmentId: null, projectId: null, query: "" },
+      contextOf,
     );
     expect(sections[0]!.rows.map((row) => row.taskId)).toEqual([
       "urgent",
@@ -103,13 +114,13 @@ describe("buildTaskSections", () => {
 
   it("offers Start on what is due now, and Chat wherever a task has one", () => {
     const sections = buildTaskSections(
-      [
+      on(
         task("today", { dueAt: day(0) }),
         task("later", { dueAt: day(3) }),
         task("later-chat", { dueAt: day(3), delegations: [delegation("c", "running")] }),
-      ],
-      { projectId: null, query: "" },
-      context,
+      ),
+      { environmentId: null, projectId: null, query: "" },
+      contextOf,
     );
     const actions = Object.fromEntries(
       sections.flatMap((section) =>
@@ -121,13 +132,13 @@ describe("buildTaskSections", () => {
 
   it("leaves out other projects' tasks and those the search does not match", () => {
     const sections = buildTaskSections(
-      [
+      on(
         task("a", { projectId: RYCO, title: "Fix the login loop" }),
         task("b", { projectId: RYCO, title: "Write docs" }),
         task("c", { title: "Fix the login loop elsewhere" }),
-      ],
-      { projectId: RYCO, query: "login" },
-      context,
+      ),
+      { environmentId: null, projectId: RYCO, query: "login" },
+      contextOf,
     );
     expect(sections.flatMap((section) => section.rows.map((row) => row.taskId))).toEqual(["a"]);
   });
@@ -240,6 +251,44 @@ describe("taskMatchesQuery", () => {
     expect(taskMatchesQuery(subject, "push hub")).toBe(true);
     expect(taskMatchesQuery(subject, "#42 activity")).toBe(true);
     expect(taskMatchesQuery(subject, "push android")).toBe(false);
+  });
+});
+
+describe("buildTaskSections across machines", () => {
+  it("merges every machine's tasks, names the machine and keeps offline ones read-only", () => {
+    const sections = buildTaskSections(
+      [
+        { environmentId: MAC, task: task("a", { dueAt: day(0) }) },
+        { environmentId: MINI, task: task("a", { dueAt: day(0), title: "Same id elsewhere" }) },
+      ],
+      { environmentId: null, projectId: null, query: "" },
+      (environmentId) =>
+        environmentId === MAC
+          ? { ...context, machineLabel: "MacBook" }
+          : { ...context, environmentId: MINI, machineLabel: "Mac mini", offline: true },
+    );
+    const rows = sections[0]!.rows;
+    expect(rows.map((row) => row.key)).toEqual(["env-mac:a", "env-mini:a"]);
+    expect(rows[0]).toMatchObject({ meta: "MacBook · due today", chatAction: { kind: "start" } });
+    expect(rows[1]).toMatchObject({
+      offline: true,
+      meta: "Mac mini · offline · due today",
+      chatAction: null,
+    });
+  });
+
+  it("filters to one machine", () => {
+    const sections = buildTaskSections(
+      [
+        { environmentId: MAC, task: task("a") },
+        { environmentId: MINI, task: task("b") },
+      ],
+      { environmentId: MINI, projectId: null, query: "" },
+      (environmentId) => ({ ...context, environmentId }),
+    );
+    expect(sections.flatMap((section) => section.rows.map((row) => row.key))).toEqual([
+      "env-mini:b",
+    ]);
   });
 });
 

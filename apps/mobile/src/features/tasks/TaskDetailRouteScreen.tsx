@@ -53,7 +53,7 @@ import { TaskDuePicker } from "./TaskDuePicker";
 import { TaskCheckbox } from "./TaskRow";
 import { TASK_PRIORITY_LABELS, type TaskPriority } from "./tasksListModel";
 import { mobileLocalTaskWriter } from "./tasksRuntime";
-import { useMachineTasks } from "./useMachineTasks";
+import { useMachineTasks, useTaskMachines } from "./useMachineTasks";
 
 type TaskDetailRouteScreenProps = StaticScreenProps<{
   readonly environmentId: string;
@@ -203,6 +203,9 @@ export function TaskDetailRouteScreen(props: TaskDetailRouteScreenProps) {
   const environmentId = EnvironmentId.make(props.route.params.environmentId);
   const taskId = props.route.params.taskId;
   const { environment, projects, getSummary, summaries } = useMachineTasks(environmentId);
+  // A machine that is offline (or no longer listed) shows its task as last read, unchangeable.
+  const machine = useTaskMachines().find((candidate) => candidate.environmentId === environmentId);
+  const readOnly = !(machine?.connected ?? false);
   const task = useLocalTasksStore((state) => selectTaskView(state, environmentId, taskId));
   const pendingFiles = useTaskFileUploadsStore(useShallow((state) => state.byTask[taskId] ?? []));
   const fileUploadMaxBytes = useComposerFileUploadMaxBytes(environmentId);
@@ -400,10 +403,12 @@ export function TaskDetailRouteScreen(props: TaskDetailRouteScreenProps) {
               checked={done}
               title={task.title}
               size={26}
+              disabled={readOnly}
               onToggle={() => setTaskDone(environmentId, task, !done)}
             />
           </View>
           <TextInput
+            editable={!readOnly}
             value={title}
             onChangeText={(value) => {
               editingTitle.current = true;
@@ -437,6 +442,7 @@ export function TaskDetailRouteScreen(props: TaskDetailRouteScreenProps) {
 
       <View className="min-h-24 rounded-2xl bg-card px-4 py-3">
         <TextInput
+          editable={!readOnly}
           value={notes}
           onChangeText={changeNotes}
           onBlur={() => {
@@ -465,7 +471,7 @@ export function TaskDetailRouteScreen(props: TaskDetailRouteScreenProps) {
               <SymbolView name="bubble.left.fill" size={15} tintColor={primaryForeground} />
               <Text className="text-[15px] font-ryco-bold text-primary-foreground">Open chat</Text>
             </Pressable>
-            {done ? null : (
+            {done || readOnly ? null : (
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Start another chat"
@@ -477,7 +483,7 @@ export function TaskDetailRouteScreen(props: TaskDetailRouteScreenProps) {
               </Pressable>
             )}
           </View>
-        ) : done ? null : (
+        ) : done || readOnly ? null : (
           <Pressable
             accessibilityRole="button"
             accessibilityHint="Opens a new chat with this task as its message"
@@ -488,7 +494,15 @@ export function TaskDetailRouteScreen(props: TaskDetailRouteScreenProps) {
             <Text className="text-[15px] font-ryco-bold text-primary-foreground">Start chat</Text>
           </Pressable>
         )}
-        {done ? (
+        {readOnly ? (
+          <View className="flex-row items-center gap-2 rounded-xl bg-subtle px-3 py-2.5">
+            <SymbolView name="wifi.slash" size={14} tintColor={icon} />
+            <Text className="min-w-0 flex-1 text-xs text-foreground-muted">
+              {machine?.label ?? "Its machine"} is offline. This is the task as last read; it can
+              change once the machine is back.
+            </Text>
+          </View>
+        ) : done ? (
           <Text className="px-1 text-xs text-foreground-muted">
             Reopen the task to start a chat for it.
           </Text>
@@ -500,82 +514,88 @@ export function TaskDetailRouteScreen(props: TaskDetailRouteScreenProps) {
         ) : null}
       </View>
 
-      <Group title="Details">
-        <View className="gap-2 px-4 py-3">
-          <Text className="text-[15px] text-foreground">Priority</Text>
-          <View accessibilityRole="radiogroup" className="flex-row rounded-xl bg-subtle p-0.5">
-            {PRIORITIES.map((value) => {
-              const selected = task.priority === value;
-              return (
-                <Pressable
-                  key={value}
-                  accessibilityRole="radio"
-                  accessibilityState={{ selected }}
-                  onPress={() => {
-                    if (selected) return;
-                    void Haptics.selectionAsync();
-                    updateTask(environmentId, taskId, { priority: value });
-                  }}
-                  className={cn(
-                    "h-8 flex-1 items-center justify-center rounded-[10px]",
-                    selected && "bg-card",
-                  )}
-                >
-                  <Text
+      <View pointerEvents={readOnly ? "none" : "auto"} className={cn(readOnly && "opacity-50")}>
+        <Group title="Details">
+          <View className="gap-2 px-4 py-3">
+            <Text className="text-[15px] text-foreground">Priority</Text>
+            <View accessibilityRole="radiogroup" className="flex-row rounded-xl bg-subtle p-0.5">
+              {PRIORITIES.map((value) => {
+                const selected = task.priority === value;
+                return (
+                  <Pressable
+                    key={value}
+                    accessibilityRole="radio"
+                    accessibilityState={{ selected }}
+                    onPress={() => {
+                      if (selected) return;
+                      void Haptics.selectionAsync();
+                      updateTask(environmentId, taskId, { priority: value });
+                    }}
                     className={cn(
-                      "text-[13px]",
-                      selected ? "font-ryco-bold" : "text-foreground-muted",
-                      selected && value === "urgent" && "text-danger-foreground",
-                      selected && value === "high" && "text-warning",
-                      selected && (value === "normal" || value === "low") && "text-foreground",
+                      "h-8 flex-1 items-center justify-center rounded-[10px]",
+                      selected && "bg-card",
                     )}
                   >
-                    {TASK_PRIORITY_LABELS[value]}
-                  </Text>
-                </Pressable>
-              );
-            })}
+                    <Text
+                      className={cn(
+                        "text-[13px]",
+                        selected ? "font-ryco-bold" : "text-foreground-muted",
+                        selected && value === "urgent" && "text-danger-foreground",
+                        selected && value === "high" && "text-warning",
+                        selected && (value === "normal" || value === "low") && "text-foreground",
+                      )}
+                    >
+                      {TASK_PRIORITY_LABELS[value]}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
           </View>
-        </View>
-        <Row
-          symbol="calendar"
-          label="Due"
-          value={task.dueAt === null ? "None" : (dueLabel(task.dueAt, nowMs) ?? "None")}
-          onPress={() => {
-            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-            setDueOpen((open) => !open);
-          }}
-          accessory={
-            <SymbolView name={dueOpen ? "chevron.up" : "chevron.down"} size={11} tintColor={icon} />
-          }
-        />
-        {dueOpen ? (
-          <TaskDuePicker
-            dueAt={task.dueAt}
-            nowMs={nowMs}
-            onChange={(dueAt) => updateTask(environmentId, taskId, { dueAt })}
-          />
-        ) : null}
-        <MenuView
-          title="Project"
-          actions={projectActions}
-          onPressAction={(event: NativeActionEvent) => {
-            const id = event.nativeEvent.event;
-            if (projectLocked) return;
-            updateTask(environmentId, taskId, {
-              projectId: id.length > 0 ? (id as ProjectId) : null,
-            });
-          }}
-        >
           <Row
-            symbol="folder"
-            label="Project"
-            value={project?.name ?? "None"}
-            disabled={projectLocked}
-            detail={projectLocked ? "Fixed: the task’s chats run in it." : null}
+            symbol="calendar"
+            label="Due"
+            value={task.dueAt === null ? "None" : (dueLabel(task.dueAt, nowMs) ?? "None")}
+            onPress={() => {
+              LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+              setDueOpen((open) => !open);
+            }}
+            accessory={
+              <SymbolView
+                name={dueOpen ? "chevron.up" : "chevron.down"}
+                size={11}
+                tintColor={icon}
+              />
+            }
           />
-        </MenuView>
-      </Group>
+          {dueOpen ? (
+            <TaskDuePicker
+              dueAt={task.dueAt}
+              nowMs={nowMs}
+              onChange={(dueAt) => updateTask(environmentId, taskId, { dueAt })}
+            />
+          ) : null}
+          <MenuView
+            title="Project"
+            actions={projectActions}
+            onPressAction={(event: NativeActionEvent) => {
+              const id = event.nativeEvent.event;
+              if (projectLocked) return;
+              updateTask(environmentId, taskId, {
+                projectId: id.length > 0 ? (id as ProjectId) : null,
+              });
+            }}
+          >
+            <Row
+              symbol="folder"
+              label="Project"
+              value={project?.name ?? "None"}
+              disabled={projectLocked}
+              detail={projectLocked ? "Fixed: the task’s chats run in it." : null}
+            />
+          </MenuView>
+        </Group>
+      </View>
 
       {chats.length > 0 ? (
         <Group title={chats.length === 1 ? "Chat" : `Chats · ${chats.length}`}>
@@ -597,99 +617,104 @@ export function TaskDetailRouteScreen(props: TaskDetailRouteScreenProps) {
         </Group>
       ) : null}
 
-      <Group title="Links">
-        {links.length === 0 ? (
-          <Text className="px-4 py-3 text-[15px] text-foreground-tertiary">
-            Pull requests, issues, branches, chats and pages this task is about.
-          </Text>
-        ) : (
-          links.map((link, index) => (
+      <View
+        pointerEvents={readOnly ? "none" : "auto"}
+        className={cn("gap-5", readOnly && "opacity-50")}
+      >
+        <Group title="Links">
+          {links.length === 0 ? (
+            <Text className="px-4 py-3 text-[15px] text-foreground-tertiary">
+              Pull requests, issues, branches, chats and pages this task is about.
+            </Text>
+          ) : (
+            links.map((link, index) => (
+              <Row
+                key={link.key}
+                first={index === 0}
+                symbol={LINK_SYMBOLS[link.kind] ?? "link"}
+                label={link.label}
+                detail={link.detail === link.label ? null : link.detail}
+                {...(link.target === null
+                  ? {}
+                  : {
+                      onPress: () => {
+                        const target = link.target;
+                        if (target?.kind === "url") openWebLink(target.url);
+                        else if (target?.kind === "thread")
+                          openTaskChat(navigation, environmentId, target.threadId);
+                      },
+                    })}
+                accessory={
+                  <RemoveButton
+                    label={`Remove ${link.label}`}
+                    onPress={() => setLinks(task.links.filter((_, at) => at !== link.index))}
+                  />
+                }
+              />
+            ))
+          )}
+          <MenuView title="Link" actions={linkActions} onPressAction={onLinkAction}>
+            <AddButton label="Add link" />
+          </MenuView>
+        </Group>
+
+        <Group title="Files">
+          {task.files.length === 0 && pendingFiles.length === 0 ? (
+            <Text className="px-4 py-3 text-[15px] text-foreground-tertiary">
+              Every chat started from the task gets these files.
+            </Text>
+          ) : null}
+          {task.files.map((file, index) => (
             <Row
-              key={link.key}
+              key={file.fileId}
               first={index === 0}
-              symbol={LINK_SYMBOLS[link.kind] ?? "link"}
-              label={link.label}
-              detail={link.detail === link.label ? null : link.detail}
-              {...(link.target === null
-                ? {}
-                : {
-                    onPress: () => {
-                      const target = link.target;
-                      if (target?.kind === "url") openWebLink(target.url);
-                      else if (target?.kind === "thread")
-                        openTaskChat(navigation, environmentId, target.threadId);
-                    },
-                  })}
+              symbol={file.type === "image" ? "photo" : "doc"}
+              label={file.name}
+              detail={formatBytes(file.sizeBytes)}
               accessory={
                 <RemoveButton
-                  label={`Remove ${link.label}`}
-                  onPress={() => setLinks(task.links.filter((_, at) => at !== link.index))}
+                  label={`Remove ${file.name}`}
+                  onPress={() => removeFile(file.fileId, file.name)}
                 />
               }
             />
-          ))
-        )}
-        <MenuView title="Link" actions={linkActions} onPressAction={onLinkAction}>
-          <AddButton label="Add link" />
-        </MenuView>
-      </Group>
+          ))}
+          {pendingFiles.map((file, index) => (
+            <Row
+              key={file.key}
+              first={task.files.length === 0 && index === 0}
+              symbol={file.error ? "exclamationmark.triangle" : "arrow.up.circle"}
+              label={file.name}
+              detail={file.error ?? `Uploading… ${Math.round(file.progress * 100)}%`}
+              {...(file.error
+                ? {
+                    accessory: (
+                      <RemoveButton
+                        label={`Dismiss ${file.name}`}
+                        onPress={() => dismissPendingTaskFile(taskId, file.key)}
+                      />
+                    ),
+                  }
+                : {})}
+            />
+          ))}
+          <ComposerAttachMenu disabled={false} onPick={pickFiles} onClose={() => undefined}>
+            {(open) => <AddButton label="Add photos or files" onPress={open} />}
+          </ComposerAttachMenu>
+        </Group>
 
-      <Group title="Files">
-        {task.files.length === 0 && pendingFiles.length === 0 ? (
-          <Text className="px-4 py-3 text-[15px] text-foreground-tertiary">
-            Every chat started from the task gets these files.
-          </Text>
-        ) : null}
-        {task.files.map((file, index) => (
-          <Row
-            key={file.fileId}
-            first={index === 0}
-            symbol={file.type === "image" ? "photo" : "doc"}
-            label={file.name}
-            detail={formatBytes(file.sizeBytes)}
-            accessory={
-              <RemoveButton
-                label={`Remove ${file.name}`}
-                onPress={() => removeFile(file.fileId, file.name)}
-              />
-            }
-          />
-        ))}
-        {pendingFiles.map((file, index) => (
-          <Row
-            key={file.key}
-            first={task.files.length === 0 && index === 0}
-            symbol={file.error ? "exclamationmark.triangle" : "arrow.up.circle"}
-            label={file.name}
-            detail={file.error ?? `Uploading… ${Math.round(file.progress * 100)}%`}
-            {...(file.error
-              ? {
-                  accessory: (
-                    <RemoveButton
-                      label={`Dismiss ${file.name}`}
-                      onPress={() => dismissPendingTaskFile(taskId, file.key)}
-                    />
-                  ),
-                }
-              : {})}
-          />
-        ))}
-        <ComposerAttachMenu disabled={false} onPick={pickFiles} onClose={() => undefined}>
-          {(open) => <AddButton label="Add photos or files" onPress={open} />}
-        </ComposerAttachMenu>
-      </Group>
-
-      <Pressable
-        accessibilityRole="button"
-        onPress={() => {
-          void confirmDeleteTask(environmentId, task).then((deleted) => {
-            if (deleted) navigation.goBack();
-          });
-        }}
-        className="h-12 items-center justify-center rounded-2xl bg-card active:bg-subtle"
-      >
-        <Text className="text-[15px] font-ryco-medium text-danger-foreground">Delete task</Text>
-      </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => {
+            void confirmDeleteTask(environmentId, task).then((deleted) => {
+              if (deleted) navigation.goBack();
+            });
+          }}
+          className="h-12 items-center justify-center rounded-2xl bg-card active:bg-subtle"
+        >
+          <Text className="text-[15px] font-ryco-medium text-danger-foreground">Delete task</Text>
+        </Pressable>
+      </View>
     </ScrollView>
   );
 }

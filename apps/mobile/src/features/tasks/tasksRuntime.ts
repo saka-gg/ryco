@@ -17,13 +17,15 @@ import { subscribeAppStateResume } from "../../connection/appStateResume";
 import { readEnvironmentApi } from "../../connection/environmentApi";
 import { createMobileConnectionRegistry } from "../../runtime/bootstrap";
 import { useStore } from "../../state/threadsRuntime";
+import { hydrateTaskCache, installTaskCache } from "./taskCache";
 
 /**
  * The phone's side of a node's tasks: the shared task sync
  * (`retainConnectedLocalTasks`, the same the web Tasks page uses) bound to
  * the phone's connection supervisor and thread store, and one task writer per
  * machine. Tasks live in memory only (`useLocalTasksStore`): titles, notes and
- * links are the node's content and never reach the phone's storage.
+ * links are the node's content; the only copy on the device is the offline
+ * one `taskCache.ts` keeps under the "keep recent conversations" setting.
  */
 
 /** Coming back to the foreground re-reads the tasks, at most once per 15 s. */
@@ -44,8 +46,14 @@ function mobileConnections(): LocalTasksConnections {
   return connections;
 }
 
-/** Keeps a machine's tasks live until the returned release is called. */
+/**
+ * Keeps a machine's tasks live until the returned release is called. Until
+ * its first read lands (or while it is offline) its last copy on this device
+ * shows, read-only (`taskCache.ts`).
+ */
 export function retainMobileLocalTasks(environmentId: EnvironmentId): () => void {
+  installTaskCache();
+  void hydrateTaskCache(environmentId).catch(() => undefined);
   return retainConnectedLocalTasks(environmentId, {
     connections: mobileConnections(),
     threads: useStore,

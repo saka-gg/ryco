@@ -33,6 +33,8 @@ export function addTasks(
       dueAt: input.dueAt,
       projectId: input.projectId,
     });
+    // Creating takes no links; they follow as the task's first save, queued behind it.
+    if (input.links.length > 0) writer.update(taskId, { links: [...input.links] });
     return taskId;
   });
 }

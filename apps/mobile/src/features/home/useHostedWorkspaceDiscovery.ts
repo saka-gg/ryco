@@ -11,8 +11,13 @@ import { selectShellCurrentByEnvironmentId } from "./homeEnvironmentModel";
 import { workspaceEligibleEnvironmentIds } from "./nativeNodeEligibilityModel";
 import { useAuthoritativeNodeTrust } from "./useAuthoritativeNodeTrust";
 
+// A Tasks surface's pre-emptible task reads are not thread work: discovery keeps running beside them.
 const hasMountedWork = () =>
-  mobileHostedConnectionScopes.list().some((entry) => entry.scope.type !== "workspace-discovery");
+  mobileHostedConnectionScopes
+    .list()
+    .some(
+      (entry) => entry.scope.type !== "workspace-discovery" && entry.scope.type !== "local-tasks",
+    );
 const retainDiscovery = (
   environmentId: Parameters<typeof mobileHostedConnectionScopes.retain>[0],
 ) => mobileHostedConnectionScopes.retain(environmentId, { type: "workspace-discovery" });

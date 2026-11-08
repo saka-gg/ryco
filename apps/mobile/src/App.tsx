@@ -28,6 +28,7 @@ import { noteMobileClientInteraction } from "./runtime/clientInteraction";
 import { rewriteIncomingSharePath } from "./features/sharing/incomingShareModel";
 import { rewriteLegacyTabPath } from "./navigation/tabs/mainTabsModel";
 import { AppAccessGate } from "./features/access/AppAccessGate";
+import { TaskCaptureHost } from "./features/tasks/TaskCaptureHost";
 import {
   isAppAccessDecided,
   shouldHideLaunchSplash,
@@ -154,6 +155,7 @@ function AppRoot() {
             />
             <ConfirmDialogHost />
             <SidebarUndoNoticeHost />
+            <TaskCaptureHost />
           </BlurTargetView>
           {/* Anchored-menu overlays render here — in-window, so the keyboard
               stays up while a dropdown is open. */}

@@ -37,6 +37,8 @@ export function TaskCheckbox(props: {
   readonly title: string;
   readonly onToggle: () => void;
   readonly size?: number;
+  /** The task's machine is offline: the box shows but doesn't toggle. */
+  readonly disabled?: boolean;
 }) {
   const size = props.size ?? 22;
   const success = useThemeColor("--color-success") as string;
@@ -64,9 +66,10 @@ export function TaskCheckbox(props: {
   return (
     <Pressable
       accessibilityRole="checkbox"
-      accessibilityState={{ checked: props.checked }}
+      accessibilityState={{ checked: props.checked, disabled: props.disabled === true }}
       accessibilityLabel={props.checked ? `Reopen ${props.title}` : `Complete ${props.title}`}
       hitSlop={10}
+      disabled={props.disabled === true}
       onPress={toggle}
     >
       <Animated.View
@@ -141,10 +144,12 @@ export function PriorityMark(props: { readonly mark: "urgent" | "high" }) {
   );
 }
 
-/** The row's meta line: the project, then the due day in its tone. */
+/** The row's meta line: the machine (when several show), the project, "Offline", then the due day in its tone. */
 function MetaLine(props: { readonly row: TaskRowModel }) {
   const { row } = props;
-  if (row.projectName === null && row.dueLabel === null) return null;
+  const place = [row.machineLabel, row.projectName, row.offline ? "Offline" : null].filter(
+    (part): part is string => part !== null,
+  );
   const due =
     row.dueLabel === null || row.done
       ? null
@@ -153,10 +158,11 @@ function MetaLine(props: { readonly row: TaskRowModel }) {
         : row.dueLabel === "Today" || row.dueLabel === "Tomorrow"
           ? `Due ${row.dueLabel.toLowerCase()}`
           : `Due ${row.dueLabel}`;
+  if (place.length === 0 && due === null) return null;
   return (
     <Text className="text-xs text-foreground-muted" numberOfLines={1}>
-      {row.projectName}
-      {row.projectName !== null && due !== null ? " · " : null}
+      {place.join(" · ")}
+      {place.length > 0 && due !== null ? " · " : null}
       {due !== null && row.dueTone !== null ? (
         <Text className={DUE_TONE_CLASS[row.dueTone]}>{due}</Text>
       ) : null}
@@ -180,6 +186,7 @@ export function TaskRow(props: TaskRowProps) {
   const chatWord = row.chatWord;
   const label = [
     row.title,
+    row.offline ? "offline, read-only" : null,
     row.priorityMark === "urgent" ? "urgent" : row.priorityMark === "high" ? "high priority" : null,
     row.meta,
     chatWord ? TASK_CHAT_WORDS[chatWord] : null,
@@ -187,11 +194,13 @@ export function TaskRow(props: TaskRowProps) {
     .filter(Boolean)
     .join(", ");
   return (
-    <View className="flex-row items-start gap-3 bg-card pl-4">
+    // An offline machine's task shows as last read, greyed, and can't change.
+    <View className={cn("flex-row items-start gap-3 bg-card pl-4", row.offline && "opacity-50")}>
       <View className="pt-[13px]">
         <TaskCheckbox
           checked={props.checked}
           title={row.title}
+          disabled={row.offline}
           onToggle={() => props.onToggle(row)}
         />
       </View>

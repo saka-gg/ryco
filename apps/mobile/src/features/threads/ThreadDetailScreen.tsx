@@ -295,6 +295,8 @@ import {
 import { buildModelPickerModel, listModelPickerEntries } from "./modelPickerModel";
 import { buildSessionPolicyModel, resolveSessionPolicySelection } from "./sessionPolicyModel";
 import { ThreadActionsSheet } from "./ThreadActionsSheet";
+import { openTaskCapture } from "../tasks/taskCaptureStore";
+
 import { ThreadAgents } from "./ThreadAgentsSheet";
 import { useThreadWorkspaceRoot } from "../files/useThreadWorkspaceRoot";
 import { ThreadComposer } from "./ThreadComposer";
@@ -334,6 +336,9 @@ import {
   resolveOpenThreadNavigation,
   type ThreadListRow,
 } from "./threadTimelineList";
+
+/** How long the page-sheet actions take to close before another sheet can open. */
+const TASK_CAPTURE_AFTER_SHEET_MS = 450;
 
 const NO_FORKABLE_MESSAGES: ReadonlySet<MessageId> = new Set();
 const NO_PENDING_APPROVALS: PendingApproval[] = [];
@@ -3194,6 +3199,29 @@ export function ThreadDetailScreen(props: {
                     projectId: thread.projectId,
                     number: String(headerModel.pullRequestNumber),
                   });
+                }
+              : undefined
+          }
+          onAddTask={
+            thread
+              ? () => {
+                  setActionsVisible(false);
+                  // The actions sheet finishes closing before the capture sheet opens over it.
+                  setTimeout(
+                    () =>
+                      openTaskCapture({
+                        environmentId,
+                        projectId: thread.projectId,
+                        link: { kind: "thread", threadId },
+                        linkLabel: `Chat: ${headerModel.title}`,
+                        openDetails: (taskEnvironmentId, taskId) =>
+                          navigation.navigate("TaskDetail", {
+                            environmentId: taskEnvironmentId,
+                            taskId,
+                          }),
+                      }),
+                    TASK_CAPTURE_AFTER_SHEET_MS,
+                  );
                 }
               : undefined
           }

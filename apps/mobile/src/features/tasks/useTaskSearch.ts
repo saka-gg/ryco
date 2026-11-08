@@ -26,7 +26,9 @@ export interface TaskSearch {
 export function useTaskSearch(query: string): TaskSearch {
   const machines = useTaskMachines();
   const active = query.trim().length > 0;
-  useRetainLocalTasks(active ? machines.map((machine) => machine.environmentId) : []);
+  useRetainLocalTasks(active ? machines.map((machine) => machine.environmentId) : [], {
+    demand: active,
+  });
   const byEnvironment = useLocalTasksStore((state) => state.byEnvironment);
   const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
   return useMemo(() => {

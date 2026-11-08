@@ -44,32 +44,91 @@ export function deriveTaskMachines(input: {
   return machines;
 }
 
-/** The machine the tab shows: the one picked last while it qualifies, else the first connected. */
-export function resolveTaskMachine(
+/**
+ * The machine the list is filtered to: the one picked last while it is still
+ * listed; null shows every machine's tasks merged.
+ */
+export function resolveTaskMachineFilter(
   machines: ReadonlyArray<TaskMachine>,
   savedEnvironmentId: string | null,
 ): TaskMachine | null {
-  return (
-    machines.find((machine) => machine.environmentId === savedEnvironmentId) ??
-    machines.find((machine) => machine.connected) ??
-    machines[0] ??
-    null
-  );
+  return machines.find((machine) => machine.environmentId === savedEnvironmentId) ?? null;
+}
+
+/**
+ * The machine a new task goes to: the one asked for (a chat's, a pull
+ * request's), else the one the list is filtered to, else the one used last,
+ * else the first connected one. Only a connected machine takes a new task.
+ */
+export function resolveCaptureMachine(
+  machines: ReadonlyArray<TaskMachine>,
+  preferred: ReadonlyArray<string | null | undefined>,
+): TaskMachine | null {
+  const connected = machines.filter((machine) => machine.connected);
+  for (const environmentId of preferred) {
+    const match = connected.find((machine) => machine.environmentId === environmentId);
+    if (match) return match;
+  }
+  return connected[0] ?? null;
+}
+
+/**
+ * The project a new task on `environmentId` starts in: the one asked for, else
+ * the list's project filter on that machine, else the last one used there
+ * while the machine still has it; null for none.
+ */
+export function resolveCaptureProject(
+  state: TasksTabState,
+  environmentId: string,
+  projects: ReadonlyArray<{ readonly id: ProjectId }>,
+  requested?: string | null,
+): ProjectId | null {
+  const has = (projectId: string | null | undefined) =>
+    projectId ? (projects.find((project) => project.id === projectId)?.id ?? null) : null;
+  if (requested !== undefined) return has(requested);
+  if (state.environmentId === environmentId && state.projectId !== null)
+    return has(state.projectId);
+  return has(state.captureProjectIds[environmentId]);
+}
+
+/** Remembers where a task was just added, so the next one starts there. */
+export function rememberCapture(
+  state: TasksTabState,
+  environmentId: string,
+  projectId: string | null,
+): TasksTabState {
+  if (
+    state.captureEnvironmentId === environmentId &&
+    (state.captureProjectIds[environmentId] ?? null) === projectId
+  )
+    return state;
+  return {
+    ...state,
+    captureEnvironmentId: environmentId,
+    captureProjectIds: { ...state.captureProjectIds, [environmentId]: projectId },
+  };
 }
 
 /** What the tab remembers on the device: ids only, never task content. */
 export interface TasksTabState {
+  /** The machine filter; null for every machine. */
   readonly environmentId: string | null;
   /** The project filter; null for every project. */
   readonly projectId: string | null;
   /** Completed tasks are listed in full rather than the latest few. */
   readonly showAllDone: boolean;
+  /** The machine the last new task went to. */
+  readonly captureEnvironmentId: string | null;
+  /** The project the last new task on each machine went to. */
+  readonly captureProjectIds: Readonly<Record<string, string | null>>;
 }
 
 export const DEFAULT_TASKS_TAB_STATE: TasksTabState = {
   environmentId: null,
   projectId: null,
   showAllDone: false,
+  captureEnvironmentId: null,
+  captureProjectIds: {},
 };
 
 export const TASKS_TAB_STATE_KEY = "ryco.tasks.tab.v1";
@@ -85,17 +144,41 @@ function id(value: unknown): string | null {
 export function sanitizeTasksTabState(raw: unknown): TasksTabState {
   if (raw === null || typeof raw !== "object") return DEFAULT_TASKS_TAB_STATE;
   const value = raw as Record<string, unknown>;
+  const captureProjectIds: Record<string, string | null> = {};
+  const rawProjects = value.captureProjectIds;
+  if (rawProjects !== null && typeof rawProjects === "object") {
+    for (const [environmentId, projectId] of Object.entries(rawProjects).slice(0, 64)) {
+      if (id(environmentId) !== null) captureProjectIds[environmentId] = id(projectId);
+    }
+  }
   return {
     environmentId: id(value.environmentId),
     projectId: id(value.projectId),
     showAllDone: value.showAllDone === true,
+    captureEnvironmentId: id(value.captureEnvironmentId),
+    captureProjectIds,
   };
 }
 
-/** Picking another machine drops the project filter, which named one of the old machine's. */
-export function selectTaskMachine(state: TasksTabState, environmentId: string): TasksTabState {
+/**
+ * Picking another machine (or every machine) drops the project filter, which
+ * named one of the old machine's.
+ */
+export function selectTaskMachine(
+  state: TasksTabState,
+  environmentId: string | null,
+): TasksTabState {
   if (state.environmentId === environmentId) return state;
   return { ...state, environmentId, projectId: null };
+}
+
+/** Filters to one machine's project (picking the machine with it), or clears the project filter. */
+export function selectTaskProject(
+  state: TasksTabState,
+  target: { readonly environmentId: string; readonly projectId: string } | null,
+): TasksTabState {
+  if (target === null) return state.projectId === null ? state : { ...state, projectId: null };
+  return { ...state, environmentId: target.environmentId, projectId: target.projectId };
 }
 
 /** The project filter, kept only while the machine still has the project. */

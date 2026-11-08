@@ -35,6 +35,7 @@ import {
 import { purgeEnvironmentDeviceData } from "./environmentDevicePurge";
 import { setPullRequestReadStore } from "../rpc/pullRequestAtoms";
 import { createPullRequestReadStore, pullRequestReadsBytes } from "./pullRequestPersistence";
+import { purgeTaskCache } from "../features/tasks/taskCacheKeys";
 import { createSnapshotDb, payloadByteLength, type SnapshotDb } from "./snapshotDb";
 
 /**
@@ -223,6 +224,8 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
   const removeStoredSnapshot = async (environmentId: EnvironmentId): Promise<void> => {
     written.delete(environmentId);
     serializers.delete(environmentId);
+    // The machine's task list copy goes with the rest of its cached content.
+    purgeTaskCache(environmentId);
     try {
       await deps.db.removeEnvironmentSnapshot(environmentId);
     } finally {
@@ -698,6 +701,7 @@ export function purgeEnvironmentSnapshot(environmentId: EnvironmentId): void {
     void runtime.purgeEnvironment(environmentId).catch(warn("could not purge snapshot"));
     return;
   }
+  purgeTaskCache(environmentId);
   void getSharedSnapshotDb()
     .removeEnvironmentSnapshot(environmentId)
     .catch(warn("could not purge snapshot"));
@@ -799,6 +803,7 @@ export async function listEnvironmentCacheStorage() {
 export async function clearEnvironmentSnapshotCache(environmentId: EnvironmentId): Promise<void> {
   if (activeRuntime) await activeRuntime.purgeEnvironment(environmentId);
   else {
+    purgeTaskCache(environmentId);
     await Promise.all([
       getSharedSnapshotDb().removeEnvironmentSnapshot(environmentId),
       purgeEnvironmentDeviceData(environmentId),

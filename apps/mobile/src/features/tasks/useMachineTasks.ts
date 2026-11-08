@@ -12,6 +12,8 @@ import { excludeChatProjects } from "@ryco/shared/projectKind";
 import { useEffect, useMemo } from "react";
 import { useShallow } from "zustand/react/shallow";
 
+import { mobileHostedConnectionScopes } from "../../connection/hostedConnectionScopes";
+import { useHostedHubStore } from "../../hostedHub/state";
 import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
 import {
   fullThreadEntry,
@@ -37,9 +39,21 @@ export function useTaskMachines(): ReadonlyArray<TaskMachine> {
   }, [configs, environments, forbidden]);
 }
 
-/** Keeps each machine's tasks live while mounted. */
-export function useRetainLocalTasks(environmentIds: ReadonlyArray<EnvironmentId>): void {
+/**
+ * Keeps each machine's tasks live while mounted. With `demand`, a machine
+ * reached through the Hub is also asked for: its relay connection opens on
+ * demand within the bounded warm set (pre-emptible, below thread work), so a
+ * visible Tasks surface reads every machine's list and follows its changes.
+ */
+export function useRetainLocalTasks(
+  environmentIds: ReadonlyArray<EnvironmentId>,
+  options?: { readonly demand?: boolean },
+): void {
   const key = environmentIds.join("\u0000");
+  const demand = options?.demand === true;
+  const hostedKey = useHostedHubStore(
+    useShallow((state) => state.nodes.map((node) => node.environmentId as string)),
+  ).join("\u0000");
   useEffect(() => {
     if (key.length === 0) return undefined;
     const releases = key.split("\u0000").map((id) => retainMobileLocalTasks(id as EnvironmentId));
@@ -47,6 +61,19 @@ export function useRetainLocalTasks(environmentIds: ReadonlyArray<EnvironmentId>
       for (const release of releases) release();
     };
   }, [key]);
+  useEffect(() => {
+    if (!demand || key.length === 0 || hostedKey.length === 0) return undefined;
+    const hosted = new Set(hostedKey.split("\u0000"));
+    const releases = key
+      .split("\u0000")
+      .filter((id) => hosted.has(id))
+      .map((id) =>
+        mobileHostedConnectionScopes.retain(id as EnvironmentId, { type: "local-tasks" }),
+      );
+    return () => {
+      for (const release of releases) release();
+    };
+  }, [demand, hostedKey, key]);
 }
 
 /** Every task of one machine's list as shown (open first, then done), from its store slice. */
@@ -82,7 +109,7 @@ const NO_SUMMARIES: ThreadSummaries = {};
 
 /** One machine's tasks, kept live while mounted, with what their rows need. */
 export function useMachineTasks(environmentId: EnvironmentId | null): MachineTasks {
-  useRetainLocalTasks(environmentId === null ? [] : [environmentId]);
+  useRetainLocalTasks(environmentId === null ? [] : [environmentId], { demand: true });
   const environment = useLocalTasksStore((state) =>
     environmentId === null
       ? selectLocalTasksEnvironment(state, "" as EnvironmentId)
@@ -108,4 +135,57 @@ export function useMachineTasks(environmentId: EnvironmentId | null): MachineTas
     [summaries],
   );
   return { environment, tasks, projects, getSummary, summaries };
+}
+
+/** One machine's part of the merged list. */
+export interface MachineTaskSlice {
+  readonly machine: TaskMachine;
+  readonly environment: LocalTasksEnvironmentState;
+  readonly tasks: ReadonlyArray<LocalTaskView>;
+  readonly projects: ReadonlyArray<Project>;
+  readonly getSummary: LocalTaskThreadSummaryReader;
+}
+
+/**
+ * Every machine's tasks, kept live while mounted: directly paired machines and
+ * the ones reached through the Hub alike (each through its own connection).
+ */
+export function useTasksAcrossMachines(
+  machines: ReadonlyArray<TaskMachine>,
+  options?: { readonly demand?: boolean },
+): ReadonlyArray<MachineTaskSlice> {
+  useRetainLocalTasks(
+    machines.map((machine) => machine.environmentId),
+    options,
+  );
+  const environments = useLocalTasksStore(
+    useShallow((state) =>
+      machines.map((machine) => selectLocalTasksEnvironment(state, machine.environmentId)),
+    ),
+  );
+  const summaries = useStore(
+    useShallow((state) =>
+      machines.map(
+        (machine) => selectEnvironmentState(state, machine.environmentId).sidebarThreadSummaryById,
+      ),
+    ),
+  );
+  const allProjects = useStore(useShallow(selectProjectsAcrossEnvironments));
+  return useMemo(
+    () =>
+      machines.map((machine, index) => {
+        const environment = environments[index]!;
+        const machineSummaries = summaries[index] ?? NO_SUMMARIES;
+        return {
+          machine,
+          environment,
+          tasks: taskViewsOf(machine.environmentId, environment),
+          projects: excludeChatProjects(
+            allProjects.filter((project) => project.environmentId === machine.environmentId),
+          ),
+          getSummary: (threadId) => fullThreadEntry(machineSummaries[threadId]),
+        };
+      }),
+    [allProjects, environments, machines, summaries],
+  );
 }

@@ -11,6 +11,7 @@ import {
   type LocalTaskView,
 } from "@ryco/client-runtime/state/tasks";
 import type {
+  EnvironmentId,
   LocalTaskDelegationStatus,
   LocalTaskLink,
   ProjectId,
@@ -78,7 +79,14 @@ export type TaskChatAction =
   | null;
 
 export interface TaskRowModel {
+  /** Unique across machines: `<environmentId>:<taskId>`. */
+  readonly key: string;
+  readonly environmentId: EnvironmentId;
   readonly taskId: string;
+  /** The machine's name, when the list shows several machines' tasks. */
+  readonly machineLabel: string | null;
+  /** The machine is offline: the task shows as last read and cannot change. */
+  readonly offline: boolean;
   readonly title: string;
   readonly done: boolean;
   readonly priority: TaskPriority;
@@ -192,6 +200,10 @@ function dueMeta(label: string): string {
 }
 
 export interface TaskRowContext {
+  readonly environmentId: EnvironmentId;
+  /** The machine's name to show on the row; null when the list shows one machine. */
+  readonly machineLabel: string | null;
+  readonly offline: boolean;
   readonly nowMs: number;
   readonly projectNames: ReadonlyMap<string, string>;
   readonly getSummary: LocalTaskThreadSummaryReader;
@@ -206,19 +218,27 @@ export function buildTaskRow(task: LocalTaskView, context: TaskRowContext): Task
   const label = task.dueAt === null ? null : dueLabel(task.dueAt, context.nowMs);
   const projectName =
     task.projectId === null ? null : (context.projectNames.get(task.projectId) ?? null);
-  const metaParts = [projectName, label === null || done ? null : dueMeta(label)].filter(
-    (part): part is string => part !== null,
-  );
+  const metaParts = [
+    context.machineLabel,
+    projectName,
+    context.offline ? "offline" : null,
+    label === null || done ? null : dueMeta(label),
+  ].filter((part): part is string => part !== null);
   const first = openable[0];
+  // An offline machine's chat can still be read; nothing new starts there.
   const chatAction: TaskChatAction = done
     ? null
     : first
       ? { kind: "open", threadId: first.threadId }
-      : context.canStart
+      : context.canStart && !context.offline
         ? { kind: "start" }
         : null;
   return {
+    key: `${context.environmentId}:${task.taskId}`,
+    environmentId: context.environmentId,
     taskId: task.taskId,
+    machineLabel: context.machineLabel,
+    offline: context.offline,
     title: task.title,
     done,
     priority: task.priority,
@@ -280,44 +300,64 @@ export function taskMatchesQuery(task: LocalTaskView, query: string): boolean {
 }
 
 export interface TaskListFilter {
-  /** One project's tasks; null for all. */
+  /** One machine's tasks; null for every machine's. */
+  readonly environmentId: EnvironmentId | null;
+  /** One project's tasks (of the filtered machine); null for all. */
   readonly projectId: ProjectId | null;
   readonly query: string;
 }
 
+/** One task of the merged list, with the machine it lives on. */
+export interface TaskEntry {
+  readonly environmentId: EnvironmentId;
+  readonly task: LocalTaskView;
+}
+
 /**
  * The list's sections in order: Today (overdue included), Upcoming, No date,
- * then Done. An empty open section is left out; Done shows while it has any.
+ * then Done, every machine's tasks merged. An empty section is left out.
  */
 export function buildTaskSections(
-  tasks: ReadonlyArray<LocalTaskView>,
+  entries: ReadonlyArray<TaskEntry>,
   filter: TaskListFilter,
-  context: TaskRowContext,
+  contextOf: (environmentId: EnvironmentId) => TaskRowContext,
 ): ReadonlyArray<TaskSectionModel> {
-  const buckets: Record<TaskSectionKey, LocalTaskView[]> = {
+  const buckets: Record<TaskSectionKey, TaskEntry[]> = {
     today: [],
     upcoming: [],
     none: [],
     done: [],
   };
-  for (const task of tasks) {
+  const nowMs = entries.length > 0 ? contextOf(entries[0]!.environmentId).nowMs : 0;
+  for (const entry of entries) {
+    const { task } = entry;
+    if (filter.environmentId !== null && entry.environmentId !== filter.environmentId) continue;
     if (filter.projectId !== null && task.projectId !== filter.projectId) continue;
     if (!taskMatchesQuery(task, filter.query)) continue;
-    if (task.state === "done") buckets.done.push(task);
-    else buckets[taskDueBucket(task.dueAt, context.nowMs)].push(task);
+    if (task.state === "done") buckets.done.push(entry);
+    else buckets[taskDueBucket(task.dueAt, nowMs)].push(entry);
   }
   const sections: TaskSectionModel[] = [];
   for (const key of ["today", "upcoming", "none", "done"] as const) {
     const list = buckets[key];
     if (list.length === 0) continue;
-    list.sort(key === "done" ? compareDoneTasks : compareOpenTaskRows);
-    // Start sits on what is due now; later tasks start from their sheet, which keeps the list calm.
-    const rowContext = key === "today" ? context : { ...context, canStart: false };
+    list.sort((left, right) =>
+      key === "done"
+        ? compareDoneTasks(left.task, right.task)
+        : compareOpenTaskRows(left.task, right.task),
+    );
     sections.push({
       key,
       title: TASK_SECTION_TITLES[key],
       count: list.length,
-      rows: list.map((task) => buildTaskRow(task, rowContext)),
+      rows: list.map((entry) => {
+        const context = contextOf(entry.environmentId);
+        // Start sits on what is due now; later tasks start from their sheet, which keeps the list calm.
+        return buildTaskRow(
+          entry.task,
+          key === "today" ? context : { ...context, canStart: false },
+        );
+      }),
     });
   }
   return sections;
