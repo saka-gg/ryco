@@ -41,7 +41,7 @@ function SheetHeader(props: {
   readonly onAction: () => void;
 }) {
   return (
-    <View className="flex-row items-center gap-3 px-4 pb-2 pt-4">
+    <View className="flex-row items-center gap-3 px-4 pb-2 pt-6">
       <Pressable
         accessibilityRole="button"
         onPress={props.onCancel}
