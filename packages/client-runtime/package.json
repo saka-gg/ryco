@@ -479,6 +479,10 @@
     "./projectCopy/folderPicker": {
       "types": "./src/projectCopy/folderPicker.ts",
       "import": "./src/projectCopy/folderPicker.ts"
+    },
+    "./projectCopy/manager": {
+      "types": "./src/projectCopy/manager.ts",
+      "import": "./src/projectCopy/manager.ts"
     }
   },
   "scripts": {
