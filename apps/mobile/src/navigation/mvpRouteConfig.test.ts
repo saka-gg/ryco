@@ -65,6 +65,7 @@ describe("MVP route config", () => {
         "ProjectPullRequest",
         "ProjectPullRequestFile",
         "ProjectPullRequests",
+        "ProjectSettings",
         "ProjectSourceControl",
         "ProjectBranches",
         "ProjectCommit",
@@ -113,6 +114,9 @@ describe("MVP route config", () => {
     expect(MVP_ROOT_ROUTES.Home.linking).toBe("");
     expect(MVP_ROOT_ROUTES.AddProject.linking).toBe("projects/new");
     expect(MVP_ROOT_ROUTES.Project.linking).toBe("projects/:environmentId/:projectId");
+    expect(MVP_ROOT_ROUTES.ProjectSettings.linking).toBe(
+      "projects/:environmentId/:projectId/settings",
+    );
     expect(MVP_ROOT_ROUTES.ProjectSourceControl.linking).toBe(
       "projects/:environmentId/:projectId/source-control/:worktreeId?",
     );

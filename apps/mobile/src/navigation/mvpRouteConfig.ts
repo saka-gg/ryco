@@ -87,6 +87,15 @@ export const MVP_ROOT_ROUTES = {
     ios: { presentation: "card" },
     android: { presentation: "card" },
   },
+  /** One project's settings on its machine (the web's project page). */
+  ProjectSettings: {
+    linking: `${PROJECT}/settings`,
+    overlay: false,
+    headerPreset: "glass",
+    headerAction: "back",
+    ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
   ProjectSourceControl: {
     linking: `${PROJECT}/source-control/:worktreeId?`,
     overlay: false,

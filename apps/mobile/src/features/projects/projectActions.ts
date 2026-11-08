@@ -1,3 +1,4 @@
+import { buildProjectMetaUpdateCommand } from "@ryco/client-runtime/projectSettings/commands";
 import {
   type ClientOrchestrationCommand,
   type CommandId,
@@ -138,12 +139,11 @@ export function buildProjectRenameCommand(input: {
   readonly projectId: ProjectId;
   readonly title: string;
 }): ProjectMetaUpdateCommand {
-  return {
-    type: "project.meta.update",
+  return buildProjectMetaUpdateCommand({
     commandId: input.commandId,
     projectId: input.projectId,
-    title: requiredTrimmed(input.title, "title-required"),
-  };
+    patch: { title: requiredTrimmed(input.title, "title-required") },
+  });
 }
 
 export function buildWorktreeCreateCommand(input: {

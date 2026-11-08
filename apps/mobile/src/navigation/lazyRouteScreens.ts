@@ -109,6 +109,13 @@ export const AddProjectRouteScreen = lazyScreen(
       require("../features/projects/AddProjectRouteScreen") as typeof import("../features/projects/AddProjectRouteScreen")
     ).AddProjectRouteScreen,
 );
+export const ProjectSettingsRouteScreen = lazyScreen(
+  "ProjectSettingsRouteScreen",
+  () =>
+    (
+      require("../features/projects/ProjectSettingsRouteScreen") as typeof import("../features/projects/ProjectSettingsRouteScreen")
+    ).ProjectSettingsRouteScreen,
+);
 export const ProjectRouteScreen = lazyScreen(
   "ProjectRouteScreen",
   () =>

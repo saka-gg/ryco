@@ -38,6 +38,7 @@ import {
   NativeIdentityScreen,
   NewTaskRouteScreen,
   ProjectRouteScreen,
+  ProjectSettingsRouteScreen,
   PullRequestFileRouteScreen,
   PullRequestRouteScreen,
   PullRequestsRouteScreen,
@@ -315,6 +316,11 @@ export const ROOT_STACK_SCREENS = {
     screen: ProjectRouteScreen,
     linking: MVP_ROOT_ROUTES.Project.linking,
     options: routeOptions("Project", { title: "Project" }),
+  }),
+  ProjectSettings: createNativeStackScreen({
+    screen: ProjectSettingsRouteScreen,
+    linking: MVP_ROOT_ROUTES.ProjectSettings.linking,
+    options: routeOptions("ProjectSettings", { title: "Project settings" }),
   }),
   ProjectSourceControl: createNativeStackScreen({
     screen: SourceControlRouteScreen,
