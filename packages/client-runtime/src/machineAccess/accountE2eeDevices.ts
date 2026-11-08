@@ -1,5 +1,5 @@
 import { NATIVE_E2EE_DEVICE_LABEL_MAX_CHARS } from "@ryco/contracts/native-e2ee";
-import type { HostedAccountE2eeDevice } from "@ryco/client-runtime/authorization";
+import type { HostedAccountE2eeDevice } from "../authorization/types.ts";
 
 export const ACCOUNT_E2EE_TRUST_EXPLANATION =
   "Signed-in native apps use these device keys to establish encrypted connections automatically. " +

@@ -131,7 +131,6 @@ export const WEB_PURE_TEST_FILES = [
   "src/components/pullRequests/rail/peopleFacts.logic.test.ts",
   "src/components/pullRequests/rail/stackFacts.logic.test.ts",
   "src/components/pullRequests/threads/reviewThread.logic.test.ts",
-  "src/components/settings/AccountE2eeDevices.logic.test.ts",
   "src/components/settings/AccountSettings.logic.test.ts",
   "src/components/settings/ConnectionsSettings.logic.test.ts",
   "src/components/settings/DiagnosticsPanel.logic.test.ts",

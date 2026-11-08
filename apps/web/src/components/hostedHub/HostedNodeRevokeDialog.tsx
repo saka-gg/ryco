@@ -3,7 +3,7 @@
 //
 // It holds no copy and makes no decision of its own — every sentence, the
 // failure mapping, and whether a failure leaves anything worth retrying come
-// from `HostedNodeRevoke.logic.ts`, so they stay reachable by the node suite's
+// from `@ryco/client-runtime/machineAccess/hostedNodeRevoke`, so they stay reachable by the node suite's
 // prohibited-phrase scan. What lives here is only the shape: the node it names,
 // the busy states, and where the error goes when the mutation is refused. The
 // mutation itself, and the reason code it carries, belong to the directory.
@@ -28,7 +28,7 @@ import {
   hostedNodeRevokeFailure,
   hostedNodeRevokeRetryable,
   type HostedNodeRevokeFailure,
-} from "./HostedNodeRevoke.logic";
+} from "@ryco/client-runtime/machineAccess/hostedNodeRevoke";
 import { platformLabel } from "./HostedNodeDisplay.logic";
 
 export function HostedNodeRevokeDialog({

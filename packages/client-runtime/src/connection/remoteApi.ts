@@ -45,7 +45,12 @@ async function readRemoteAuthErrorMessage(
   return text;
 }
 
-async function fetchRemoteJson<T>(
+/**
+ * One JSON request to a node's HTTP API, with the control-plane deadline. A
+ * non-2xx answer throws `RemoteEnvironmentAuthHttpError` carrying the node's
+ * own message and status.
+ */
+export async function fetchRemoteJson<T>(
   httpClient: HttpClientService,
   input: {
     readonly httpBaseUrl: string;

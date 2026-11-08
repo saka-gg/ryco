@@ -17,7 +17,7 @@ import {
   hostedNodeRevokeRetryable,
   HOSTED_NODE_REVOKE_CONSEQUENCES,
   HOSTED_NODE_REVOKE_REASON_CODE,
-} from "./HostedNodeRevoke.logic";
+} from "./hostedNodeRevoke.ts";
 
 const NODE = {
   id: "node_aaaaaaaaaaaaaaaaaaaaaa",
@@ -327,5 +327,34 @@ describe("failure mapping", () => {
     expect(hostedNodeRevokeFailure(null).outcome).toBe("unchanged");
     expect(hostedNodeRevokeFailure(undefined).outcome).toBe("unchanged");
     expect(hostedNodeRevokeFailure("403").outcome).toBe("unchanged");
+  });
+});
+
+describe("app surface", () => {
+  it("names the device and the screen, never a browser or a page", () => {
+    for (const { id, probe } of everyHostedNodeRevokeFailureProbe()) {
+      const message = hostedNodeRevokeFailure(probe, "app").message.toLowerCase();
+      expect(message, `${id} names a browser`).not.toContain("browser");
+      expect(message, `${id} names a page`).not.toContain("page");
+    }
+  });
+
+  it("claims exactly the outcome the browser wording claims", () => {
+    for (const { id, probe } of everyHostedNodeRevokeFailureProbe()) {
+      expect(hostedNodeRevokeFailure(probe, "app").outcome, id).toBe(
+        hostedNodeRevokeFailure(probe).outcome,
+      );
+    }
+    const transport = hostedNodeRevokeFailure({ code: "unavailable", status: 0 }, "app");
+    expect(transport.message.toLowerCase()).toContain("this device");
+    expect(transport.message.toLowerCase()).toContain("not known");
+    expect(hostedNodeRevokeRetryable(transport)).toBe(false);
+  });
+
+  it("is scanned with the browser wording", () => {
+    const scanned = new Set(everyHostedNodeRevokeString().map((entry) => entry.where));
+    for (const { id } of everyHostedNodeRevokeFailureProbe()) {
+      expect(scanned).toContain(`appFailure(${id})`);
+    }
   });
 });

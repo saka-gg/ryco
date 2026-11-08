@@ -126,6 +126,30 @@
       "types": "./src/authorization/nodeMutationLease.ts",
       "import": "./src/authorization/nodeMutationLease.ts"
     },
+    "./machineAccess/accountE2eeDevices": {
+      "types": "./src/machineAccess/accountE2eeDevices.ts",
+      "import": "./src/machineAccess/accountE2eeDevices.ts"
+    },
+    "./machineAccess/addDeviceCode": {
+      "types": "./src/machineAccess/addDeviceCode.ts",
+      "import": "./src/machineAccess/addDeviceCode.ts"
+    },
+    "./machineAccess/advertisedEndpoints": {
+      "types": "./src/machineAccess/advertisedEndpoints.ts",
+      "import": "./src/machineAccess/advertisedEndpoints.ts"
+    },
+    "./machineAccess/authAccess": {
+      "types": "./src/machineAccess/authAccess.ts",
+      "import": "./src/machineAccess/authAccess.ts"
+    },
+    "./machineAccess/hostedNodeRevoke": {
+      "types": "./src/machineAccess/hostedNodeRevoke.ts",
+      "import": "./src/machineAccess/hostedNodeRevoke.ts"
+    },
+    "./machineAccess/remoteMachineAccess": {
+      "types": "./src/machineAccess/remoteMachineAccess.ts",
+      "import": "./src/machineAccess/remoteMachineAccess.ts"
+    },
     "./notifications/push": {
       "types": "./src/notifications/push/index.ts",
       "import": "./src/notifications/push/index.ts"

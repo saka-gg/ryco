@@ -37,7 +37,7 @@ import {
 import { NodePresence } from "./HostedConnectionControls";
 import { HostedNodeRenameDialog } from "./HostedNodeRenameDialog";
 import { HostedNodeRevokeDialog } from "./HostedNodeRevokeDialog";
-import { HOSTED_NODE_REVOKE_ACTION_LABEL } from "./HostedNodeRevoke.logic";
+import { HOSTED_NODE_REVOKE_ACTION_LABEL } from "@ryco/client-runtime/machineAccess/hostedNodeRevoke";
 import {
   formatEpoch,
   nodeMetaLine,

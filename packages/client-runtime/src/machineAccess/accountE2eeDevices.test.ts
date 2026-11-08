@@ -1,4 +1,4 @@
-import type { HostedAccountE2eeDevice } from "@ryco/client-runtime/authorization";
+import type { HostedAccountE2eeDevice } from "../authorization/types.ts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -7,7 +7,7 @@ import {
   accountE2eeDeviceFacts,
   accountE2eeDeviceStatusLabel,
   normalizeAccountE2eeDeviceLabel,
-} from "./AccountE2eeDevices.logic";
+} from "./accountE2eeDevices.ts";
 
 const device: HostedAccountE2eeDevice = {
   enrollmentId: `enr_${"e".repeat(22)}` as never,

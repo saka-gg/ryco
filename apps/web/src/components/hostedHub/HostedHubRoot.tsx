@@ -116,7 +116,10 @@ import {
   sortNodes,
 } from "./HostedNodeDisplay.logic";
 import { HostedNodeEnrollmentFlow } from "./HostedNodeEnrollment";
-import { hostedNodeRevokedNotice, HOSTED_NODE_REVOKE_REASON_CODE } from "./HostedNodeRevoke.logic";
+import {
+  hostedNodeRevokedNotice,
+  HOSTED_NODE_REVOKE_REASON_CODE,
+} from "@ryco/client-runtime/machineAccess/hostedNodeRevoke";
 import { HostedPwaControls } from "./HostedPwaControls";
 import {
   ExternalIdentitySignupFlow,

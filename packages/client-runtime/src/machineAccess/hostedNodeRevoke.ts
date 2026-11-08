@@ -1,10 +1,12 @@
 // Every decision and every owner-facing sentence behind revoking a node from
-// the hosted directory.
+// the hosted directory, shared by the web directory and the phone's machine
+// access screen so both say the same thing about an irreversible action.
 //
-// A `.logic.ts` sibling for the reason `HostedRelayTrustNotice.logic.ts` and
+// Pure for the reason `HostedRelayTrustNotice.logic.ts` and
 // `NodeSecuritySettings.logic.ts` are: a claim that could mislead an owner about
 // what an irreversible action did belongs somewhere a node test can read it
-// without a DOM, and under a prohibited-phrase scan. Nothing here imports React.
+// without a DOM, and under a prohibited-phrase scan. Nothing here imports React
+// or React Native.
 //
 // ─────────────────────────────────────────────────────────────────────────────
 // WHAT REVOKING A NODE ACTUALLY DOES, READ OFF THE HUB
@@ -273,7 +275,19 @@ interface HostedNodeRevokeFailureBranch {
   readonly probe: unknown;
   readonly selects: (status: number | null, code: string | null) => boolean;
   readonly failure: HostedNodeRevokeFailure;
+  /**
+   * The same claim worded for the native app, where only the wording that names
+   * a browser or a page differs. The outcome is never different: what the Hub
+   * did does not depend on which client asked.
+   */
+  readonly appFailure?: HostedNodeRevokeFailure;
 }
+
+/**
+ * Which client is asking. The web says "this browser" and "refresh the page";
+ * the phone has neither, so its sentences name the device and the screen.
+ */
+export type HostedNodeRevokeSurface = "browser" | "app";
 
 /**
  * The Hub's answer, as one bounded sentence and one claim about what happened.
@@ -341,6 +355,11 @@ const HOSTED_NODE_REVOKE_FAILURE_BRANCHES: ReadonlyArray<HostedNodeRevokeFailure
           "The request left this browser and no answer came back, so whether this node was revoked is not known here. Check your connection, then refresh the list and look before trying again.",
         outcome: "unknown" as const,
       }),
+      appFailure: Object.freeze({
+        message:
+          "The request left this device and no answer came back, so whether this node was revoked is not known here. Check your connection, then refresh the list and look before trying again.",
+        outcome: "unknown" as const,
+      }),
     }),
     branch({
       id: "csrf",
@@ -354,6 +373,11 @@ const HOSTED_NODE_REVOKE_FAILURE_BRANCHES: ReadonlyArray<HostedNodeRevokeFailure
       failure: Object.freeze({
         message:
           "This request could not be verified, so nothing was changed. Refresh the page and try again.",
+        outcome: "unchanged" as const,
+      }),
+      appFailure: Object.freeze({
+        message:
+          "This request could not be verified, so nothing was changed. Close this screen and try again.",
         outcome: "unchanged" as const,
       }),
     }),
@@ -432,11 +456,15 @@ const HOSTED_NODE_REVOKE_FALLBACK_FAILURE: HostedNodeRevokeFailure = Object.free
   outcome: "unchanged" as const,
 });
 
-export function hostedNodeRevokeFailure(cause: unknown): HostedNodeRevokeFailure {
+export function hostedNodeRevokeFailure(
+  cause: unknown,
+  surface: HostedNodeRevokeSurface = "browser",
+): HostedNodeRevokeFailure {
   const status = errorStatus(cause);
   const code = errorCode(cause);
   for (const branch of HOSTED_NODE_REVOKE_FAILURE_BRANCHES) {
-    if (branch.selects(status, code)) return branch.failure;
+    if (!branch.selects(status, code)) continue;
+    return surface === "app" ? (branch.appFailure ?? branch.failure) : branch.failure;
   }
   return HOSTED_NODE_REVOKE_FALLBACK_FAILURE;
 }
@@ -516,6 +544,7 @@ export function everyHostedNodeRevokeString(): ReadonlyArray<{
 
   for (const { id, probe } of everyHostedNodeRevokeFailureProbe()) {
     push(`failure(${id})`, hostedNodeRevokeFailure(probe).message);
+    push(`appFailure(${id})`, hostedNodeRevokeFailure(probe, "app").message);
   }
   // The one message with no branch of its own, so it cannot be reached by a
   // probe: anything this module does not recognise lands here.
