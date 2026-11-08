@@ -1,5 +1,3 @@
-import type { HomeMode } from "./homeMode";
-
 /**
  * Where each Home list was scrolled to, kept outside React state.
  *
@@ -11,12 +9,12 @@ import type { HomeMode } from "./homeMode";
  * its position, exactly as the reducer used to reset it.
  */
 export interface HomeScrollMemory {
-  readonly offsetFor: (mode: HomeMode, filterKey: string) => number;
-  readonly record: (mode: HomeMode, filterKey: string, offset: number) => void;
+  readonly offsetFor: (mode: string, filterKey: string) => number;
+  readonly record: (mode: string, filterKey: string, offset: number) => void;
 }
 
 export function createHomeScrollMemory(): HomeScrollMemory {
-  const byMode = new Map<HomeMode, { readonly filterKey: string; readonly offset: number }>();
+  const byMode = new Map<string, { readonly filterKey: string; readonly offset: number }>();
   return {
     offsetFor: (mode, filterKey) => {
       const entry = byMode.get(mode);
@@ -26,9 +24,4 @@ export function createHomeScrollMemory(): HomeScrollMemory {
       byMode.set(mode, { filterKey, offset: Math.max(0, offset) });
     },
   };
-}
-
-/** The key a Home list is mounted under: a new search or node scope remounts it at the top. */
-export function homeListFilterKey(query: string, nodeScope: string | null): string {
-  return JSON.stringify([query, nodeScope]);
 }

@@ -4,7 +4,7 @@ import {
   type LegendListRef,
   type LegendListRenderItemProps,
 } from "@legendapp/list/react-native";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import {
   Pressable,
   useWindowDimensions,
@@ -33,7 +33,7 @@ import {
   snoozeMenuPresetsKey,
   type InboxSnoozeMenuPreset,
 } from "./inboxRowActions";
-import { HOME_LIST_PADDING_BOTTOM } from "../home/homeChromeModel";
+import { listBottomPadding } from "../home/homeChromeModel";
 import {
   THREAD_JUMP_COMMANDS,
   threadJumpIndex,
@@ -90,6 +90,8 @@ export const InboxThreadMenuRow = memo(function InboxThreadMenuRow(props: {
   readonly row: InboxThreadRow;
   readonly snoozeMenuPresets: ReadonlyArray<InboxSnoozeMenuPreset>;
   readonly onOpenThread: (row: InboxThreadRow) => void;
+  /** A delegated child inside its parent's open group: indented, and no "from" line. */
+  readonly nested?: boolean;
 }) {
   const { row, snoozeMenuPresets, onOpenThread } = props;
   const { width } = useWindowDimensions();
@@ -110,7 +112,7 @@ export const InboxThreadMenuRow = memo(function InboxThreadMenuRow(props: {
   return (
     <ThreadSwipeable
       backgroundColor={background}
-      containerStyle={INBOX_ROW_CONTAINER_STYLE}
+      containerStyle={props.nested ? INBOX_NESTED_ROW_CONTAINER_STYLE : INBOX_ROW_CONTAINER_STYLE}
       fullSwipeWidth={width - 32}
       threadKey={row.key}
       resetKey={inboxRowResetKey(row)}
@@ -119,13 +121,14 @@ export const InboxThreadMenuRow = memo(function InboxThreadMenuRow(props: {
       secondaryAction={swipe.secondary}
     >
       <MenuView shouldOpenOnLongPress actions={actions} onPressAction={onPressAction}>
-        <ThreadRow row={row} onPress={onPress} />
+        <ThreadRow row={row} onPress={onPress} showParent={props.nested !== true} />
       </MenuView>
     </ThreadSwipeable>
   );
 });
 
 const INBOX_ROW_CONTAINER_STYLE = { marginHorizontal: 16, marginBottom: 8, borderRadius: 16 };
+const INBOX_NESTED_ROW_CONTAINER_STYLE = { ...INBOX_ROW_CONTAINER_STYLE, marginLeft: 36 };
 
 /** What a row's swipes offer: Pin or Unpin, Archive, and Snooze's presets. */
 export function buildInboxSwipeActions(
@@ -202,10 +205,32 @@ export const InboxScreen = memo(function InboxScreen(props: {
   /** Archived tasks on the machines in view; the list ends with a link to them. */
   readonly archivedCount?: number;
   readonly onOpenArchived?: () => void;
+  /** Rendered first, scrolling with the list: a tab's large title and chips. */
+  readonly listHeader?: ReactElement;
+  /** The list scrolls under the glass header and tab bar; these keep its ends clear. */
+  readonly contentInsets?: { readonly top: number; readonly bottom: number };
+  /** Every scroll event, for a tab's collapsing large title. */
+  readonly onScroll?: (event: NativeSyntheticEvent<NativeScrollEvent>) => void;
+  /** The settled shelf starts open (Chats' Done chip lists only it). */
+  readonly settledStartsOpen?: boolean;
 }) {
   const { nowMs, onOpenThread, onScrollOffset } = props;
+  const onScrollEvent = props.onScroll;
   const [snoozedOpen, setSnoozedOpen] = useState(false);
-  const [settledOpen, setSettledOpen] = useState(false);
+  const [settledOpen, setSettledOpen] = useState(props.settledStartsOpen === true);
+  const [openDelegatedHostKeys, setOpenDelegatedHostKeys] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const toggleDelegatedGroup = useCallback(
+    (hostKey: string) =>
+      setOpenDelegatedHostKeys((open) => {
+        const next = new Set(open);
+        if (next.has(hostKey)) next.delete(hostKey);
+        else next.add(hostKey);
+        return next;
+      }),
+    [],
+  );
   const [hiddenOpen, setHiddenOpen] = useState(false);
   const [settledVisibleCount, setSettledVisibleCount] = useState(MOBILE_SETTLED_PAGE_SIZE);
   const data = useMemo(
@@ -216,8 +241,16 @@ export const InboxScreen = memo(function InboxScreen(props: {
         snoozedOpen,
         hiddenOpen,
         settledVisibleCount,
+        openDelegatedHostKeys,
       }),
-    [props.sections, settledOpen, settledVisibleCount, snoozedOpen, hiddenOpen],
+    [
+      props.sections,
+      settledOpen,
+      settledVisibleCount,
+      snoozedOpen,
+      hiddenOpen,
+      openDelegatedHostKeys,
+    ],
   );
   // Command-1…9 open the first nine thread rows as this list shows them now.
   const jumpToThread = useCallback(
@@ -286,6 +319,34 @@ export const InboxScreen = memo(function InboxScreen(props: {
           </View>
         );
       }
+      if (item.kind === "delegated-group") {
+        return (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`${item.summary}, from ${item.hostTitle}`}
+            accessibilityHint={item.expanded ? "Hides them" : "Shows them"}
+            accessibilityState={{ expanded: item.expanded }}
+            className="-mt-1 mb-2 ml-9 mr-4 min-h-9 flex-row items-center gap-1.5 rounded-xl px-2 active:bg-subtle"
+            onPress={() => toggleDelegatedGroup(item.hostKey)}
+          >
+            <SymbolView
+              name={item.expanded ? "chevron.down" : "chevron.right"}
+              size={11}
+              tintColor={mutedColor}
+              type="monochrome"
+            />
+            <SymbolView
+              name="arrow.triangle.branch"
+              size={12}
+              tintColor={mutedColor}
+              type="monochrome"
+            />
+            <Text className="min-w-0 flex-1 text-xs text-foreground-muted" numberOfLines={1}>
+              {item.summary}
+            </Text>
+          </Pressable>
+        );
+      }
       if (item.kind === "show-more") {
         return (
           <Pressable
@@ -304,10 +365,11 @@ export const InboxScreen = memo(function InboxScreen(props: {
           row={item.row}
           snoozeMenuPresets={snoozeMenuPresets}
           onOpenThread={onOpenThread}
+          nested={item.nested}
         />
       );
     },
-    [mutedColor, onOpenThread, snoozeMenuPresets],
+    [mutedColor, onOpenThread, snoozeMenuPresets, toggleDelegatedGroup],
   );
   const listRef = useRef<LegendListRef>(null);
   const offsetRef = useRef(props.initialScrollOffset ?? 0);
@@ -315,8 +377,9 @@ export const InboxScreen = memo(function InboxScreen(props: {
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       offsetRef.current = event.nativeEvent.contentOffset.y;
       onScrollOffset?.(event.nativeEvent.contentOffset.y);
+      onScrollEvent?.(event);
     },
-    [onScrollOffset],
+    [onScrollEvent, onScrollOffset],
   );
   // A newly pinned thread lands above the rows in view; from the top of the list, show it.
   const pinnedCount = props.sections.find((section) => section.key === "pinned")?.rows.length ?? 0;
@@ -346,8 +409,16 @@ export const InboxScreen = memo(function InboxScreen(props: {
         keyboardDismissMode="on-drag"
         keyboardShouldPersistTaps="handled"
         contentInsetAdjustmentBehavior="never"
-        contentContainerStyle={{ paddingBottom: HOME_LIST_PADDING_BOTTOM }}
-        ListHeaderComponent={<WorkspaceConnectionStatus />}
+        contentContainerStyle={{
+          paddingTop: props.contentInsets?.top ?? 0,
+          paddingBottom: listBottomPadding(props.contentInsets),
+        }}
+        ListHeaderComponent={
+          <View>
+            {props.listHeader}
+            <WorkspaceConnectionStatus />
+          </View>
+        }
         ListFooterComponent={
           props.archivedCount && props.onOpenArchived && data.length > 0 ? (
             <Pressable

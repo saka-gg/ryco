@@ -1,75 +1,76 @@
-import { KeyboardAvoidingView } from "react-native-keyboard-controller";
+import { MenuView } from "@react-native-menu/menu";
 import { useIsFocused, useNavigation } from "@react-navigation/native";
-import { useHeaderHeight } from "@react-navigation/elements";
-import {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useReducer,
-  useRef,
-  useState,
-} from "react";
-import { AppState, Pressable, View, type TextInput } from "react-native";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { AppState, View } from "react-native";
 
+import { scopedProjectKey, scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { pinnedThreadKeyList } from "@ryco/client-runtime/state/threads/threadPins";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import { excludeChatProjects } from "@ryco/shared/projectKind";
 
-import { HomeModeControl } from "../../components/HomeModeControl";
-import { HomeBottomToolbar } from "../../components/HomeBottomToolbar";
-import { RycoWordmark } from "../../components/RycoWordmark";
-import { SymbolView } from "../../components/AppSymbol";
+import { ChipBar } from "../../components/ChipBar";
+import { FloatingActionButton } from "../../components/FloatingActionButton";
+import { HeaderIconButton } from "../../components/HeaderIconButton";
+import { MachinePickerButton } from "../../components/MachinePickerButton";
 import { useDirectoryPresenceDemand } from "../../hostedHub/directoryDemand";
-import { useThemeColor } from "../../lib/useThemeColor";
 import { openThread as openThreadOverSheets } from "../../navigation/openThread";
+import { MAIN_TABS } from "../../navigation/tabs/mainTabsModel";
+import {
+  TabLargeTitle,
+  useLargeTitleCollapse,
+  useTabContentInsets,
+  useTabStackHeader,
+} from "../../navigation/tabs/TabScreenChrome";
 import { resolveHomeGroupingMode } from "../../state/homeGrouping";
 import { usePreferences } from "../../state/preferencesStore";
 import { markSnoozeWokeSeen } from "../../state/snoozeWokeSeen";
 import { useThreadPins } from "../../state/threadPins";
-import { pinnedThreadKeyList } from "@ryco/client-runtime/state/threads/threadPins";
-import { useStore } from "../../state/threadsRuntime";
 import {
   buildInboxSections,
   createInboxSectionStabilizer,
   resolveInboxEmptyState,
   type InboxEmptyState,
-  type InboxSection,
   type InboxThreadRow,
 } from "../inbox/inboxModel";
+import { nestDelegatedInboxRows } from "../inbox/inboxDelegationModel";
 import { CustomSnoozeSheetHost } from "../inbox/CustomSnoozeSheet";
 import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
 import { InboxScreen } from "../inbox/InboxScreen";
-import { useInboxMessageSearch } from "../inbox/useInboxMessageSearch";
 import { countArchivedThreads } from "../archive/archivedThreadsModel";
 import { buildProjectRows, type ProjectListRow } from "../projects/projectsModel";
 import { ProjectsScreen } from "../projects/ProjectsScreen";
-import { buildHomeChromeModel } from "./homeChromeModel";
-import { createHomeModeState, reduceHomeModeState, type HomeMode } from "./homeMode";
-import { createHomeScrollMemory, homeListFilterKey } from "./homeScrollMemory";
+import { buildChatsFilterChips, buildChatsSections, type ChatsFilter } from "./chatsListModel";
+import { chatsHasScope, chatsListKey, createChatsState, reduceChatsState } from "./chatsState";
+import { createHomeScrollMemory } from "./homeScrollMemory";
 import { useAutoSettleRuleHandOver } from "./useAutoSettleRuleHandOver";
 import { useInboxSource } from "./useInboxSource";
 import { useHostedWorkspaceDiscovery } from "./useHostedWorkspaceDiscovery";
 import { NeedsVerificationSection } from "./NeedsVerificationSection";
 import { QueuedTasksSection } from "../newTask/QueuedTasksSection";
 
-const NO_INBOX_SECTIONS: ReadonlyArray<InboxSection> = [];
-const NO_PROJECT_ROWS: ReadonlyArray<ProjectListRow> = [];
+const PROJECT_FILTER_PREFIX = "project:";
+const CLEAR_FILTERS = "clear";
 
+/**
+ * Chats, the first tab: every machine's threads by what they need — Needs you,
+ * Working, Recent — with status chips, the machine picker, search and a
+ * project filter in the header, and New task floating above the tab bar.
+ * "By project" lists projects instead. Rows keep their swipe actions, pins and
+ * long-press menus; delegated tasks fold under the chat that started them.
+ */
 export function HomeScreen() {
   const navigation = useNavigation();
-  const headerHeight = useHeaderHeight();
-  const [home, dispatch] = useReducer(reduceHomeModeState, undefined, () => createHomeModeState());
+  const [chats, dispatch] = useReducer(reduceChatsState, undefined, createChatsState);
   // Stable per screen. Scroll offsets never enter React state, and the inbox
   // keeps row identity across rebuilds so memoized rows skip unchanged content.
   const [scrollMemory] = useState(createHomeScrollMemory);
   const [stabilizeInboxSections] = useState(createInboxSectionStabilizer);
-  const iconColor = useThemeColor("--color-icon");
   const isFocused = useIsFocused();
   useHostedWorkspaceDiscovery(isFocused);
   useDirectoryPresenceDemand(isFocused);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const clockStaleRef = useRef(false);
-  // The clock only runs while Home is the focused screen: a covered Home would
+  // The clock only runs while Chats is the focused screen: a covered list would
   // otherwise rebuild its whole model every tick for content nobody sees. It is
   // read again on the way back, since it stood still in between.
   useEffect(() => {
@@ -101,164 +102,179 @@ export function HomeScreen() {
   } = useInboxSource(nowMs);
   const preferences = usePreferences();
   const pins = useThreadPins();
-  const searchEnvironmentIds = useMemo(
-    () =>
-      home.mode === "inbox"
-        ? environments
-            .filter(
-              (environment) =>
-                environment.connectionState === "connected" &&
-                (home.nodeScopeByMode.inbox === null ||
-                  environment.environmentId === home.nodeScopeByMode.inbox),
-            )
-            .map((environment) => environment.environmentId)
-        : [],
-    [environments, home.mode, home.nodeScopeByMode.inbox],
-  );
-  const messageMatches = useInboxMessageSearch(home.queryByMode.inbox, searchEnvironmentIds);
   const pinnedThreadKeys = useMemo(() => pinnedThreadKeyList(pins), [pins]);
   useAutoSettleRuleHandOver(environments, preferences.sidebarAutoSettleAfterDays);
   const groupingMode = resolveHomeGroupingMode(preferences.projectGroupingEnabled);
+  const byProject = chats.filter === "by-project";
 
-  const currentQuery = home.queryByMode[home.mode];
-  const currentNodeScope = home.nodeScopeByMode[home.mode];
-  const inboxFilterKey = homeListFilterKey(home.queryByMode.inbox, home.nodeScopeByMode.inbox);
-  const projectsFilterKey = homeListFilterKey(
-    home.queryByMode.projects,
-    home.nodeScopeByMode.projects,
+  // Every thread's lineage, so a delegated child finds its host through
+  // ancestors the list does not show.
+  const lineageByKey = useMemo(
+    () =>
+      new Map(
+        threads.map((thread) => [
+          scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+          "lineage" in thread ? thread.lineage : null,
+        ]),
+      ),
+    [threads],
   );
-  // Only the visible mode's model is built; the other is rebuilt on switch.
   const inboxSections = useMemo(
     () =>
-      home.mode === "inbox"
-        ? stabilizeInboxSections(
-            buildInboxSections({
-              projects,
-              worktrees,
-              threads,
-              environments,
-              query: home.queryByMode.inbox,
-              nodeScope: home.nodeScopeByMode.inbox,
-              localQueuedThreadIds,
-              autoSettleAfterDays: preferences.sidebarAutoSettleAfterDays,
-              nowMs,
-              wokeSeenAtByThreadKey: wokeSeen,
-              pinnedThreadKeys,
-              messageMatches,
-            }),
-          )
-        : NO_INBOX_SECTIONS,
+      byProject
+        ? []
+        : nestDelegatedInboxRows(
+            stabilizeInboxSections(
+              buildInboxSections({
+                projects,
+                worktrees,
+                threads,
+                environments,
+                nodeScope: chats.nodeScope,
+                projectScope: chats.projectScope,
+                localQueuedThreadIds,
+                autoSettleAfterDays: preferences.sidebarAutoSettleAfterDays,
+                nowMs,
+                wokeSeenAtByThreadKey: wokeSeen,
+                pinnedThreadKeys,
+              }),
+            ),
+            lineageByKey,
+          ),
     [
-      wokeSeen,
-      pinnedThreadKeys,
-      messageMatches,
+      byProject,
+      chats.nodeScope,
+      chats.projectScope,
       environments,
-      home.mode,
-      home.nodeScopeByMode.inbox,
-      home.queryByMode.inbox,
+      lineageByKey,
       localQueuedThreadIds,
       nowMs,
+      pinnedThreadKeys,
       preferences.sidebarAutoSettleAfterDays,
       projects,
       stabilizeInboxSections,
       threads,
+      wokeSeen,
       worktrees,
     ],
   );
+  const listedSections = useMemo(
+    () => buildChatsSections(inboxSections, chats.filter),
+    [chats.filter, inboxSections],
+  );
+  const chips = useMemo(
+    () => buildChatsFilterChips(inboxSections, chats.filter),
+    [chats.filter, inboxSections],
+  );
   const projectRows = useMemo(
     () =>
-      home.mode === "projects"
+      byProject
         ? buildProjectRows({
             projects,
             worktrees,
             threads,
             environments,
-            query: home.queryByMode.projects,
-            nodeScope: home.nodeScopeByMode.projects,
+            nodeScope: chats.nodeScope,
             groupingMode,
           })
-        : NO_PROJECT_ROWS,
-    [
-      environments,
-      groupingMode,
-      home.mode,
-      home.nodeScopeByMode.projects,
-      home.queryByMode.projects,
-      projects,
-      threads,
-      worktrees,
-    ],
-  );
-  // Read when a list (re)mounts: on a mode switch or a changed filter key. Each
-  // list records under its own mode and key, so a late scroll event from the
-  // list being replaced can never land on the other one.
-  const initialScrollOffset = useMemo(
-    () =>
-      home.mode === "inbox"
-        ? scrollMemory.offsetFor("inbox", inboxFilterKey)
-        : scrollMemory.offsetFor("projects", projectsFilterKey),
-    [home.mode, inboxFilterKey, projectsFilterKey, scrollMemory],
-  );
-  const recordInboxScrollOffset = useCallback(
-    (offset: number) => scrollMemory.record("inbox", inboxFilterKey, offset),
-    [inboxFilterKey, scrollMemory],
-  );
-  const recordProjectsScrollOffset = useCallback(
-    (offset: number) => scrollMemory.record("projects", projectsFilterKey, offset),
-    [projectsFilterKey, scrollMemory],
+        : [],
+    [byProject, chats.nodeScope, environments, groupingMode, projects, threads, worktrees],
   );
 
-  const chrome = useMemo(() => buildHomeChromeModel({ mode: home.mode }), [home.mode]);
+  // Read when a list (re)mounts: on a chip switch or a changed scope. Each list
+  // records under its own key, so a late scroll event from the list being
+  // replaced can never land on the other one.
+  const listKey = chatsListKey(chats);
+  const initialScrollOffset = scrollMemory.offsetFor(chats.filter, listKey);
+  const recordScrollOffset = useCallback(
+    (offset: number) => scrollMemory.record(chats.filter, listKey, offset),
+    [chats.filter, listKey, scrollMemory],
+  );
 
   const openNewTask = useCallback(
-    () =>
-      navigation.navigate("NewTask", {
-        environmentId: currentNodeScope ?? undefined,
-      }),
-    [currentNodeScope, navigation],
+    () => navigation.navigate("NewTask", { environmentId: chats.nodeScope ?? undefined }),
+    [chats.nodeScope, navigation],
   );
-
   const openMachines = useCallback(() => navigation.navigate("Connections"), [navigation]);
+  const openSearch = useCallback(() => navigation.navigate("Search"), [navigation]);
 
-  // Command-F and Command-N do what the toolbar's search field and New Task
-  // button do, while Home is the screen in front.
-  const searchInputRef = useRef<TextInput>(null);
-  const focusSearch = useCallback(() => searchInputRef.current?.focus(), []);
-  useHardwareKeyboardCommand("focusSearch", isFocused ? focusSearch : undefined);
+  // Command-F opens Search and Command-N New task while Chats is in front.
+  useHardwareKeyboardCommand("focusSearch", isFocused ? openSearch : undefined);
   useHardwareKeyboardCommand("newTask", isFocused ? openNewTask : undefined);
 
-  useLayoutEffect(() => {
-    navigation.setOptions({
-      title: chrome.title,
-      headerLeft: () => (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={chrome.headerLeft.accessibilityLabel}
-          className="h-11 w-11 items-center justify-center rounded-full active:bg-subtle-strong"
-          onPress={() => dispatch({ type: "select-mode", mode: chrome.headerLeftTargetMode })}
-        >
-          <RycoWordmark compact />
-        </Pressable>
+  // Projects the filter menu offers: the machine in view's, without "No project" chats.
+  const filterProjects = useMemo(
+    () =>
+      excludeChatProjects(projects).filter(
+        (project) => chats.nodeScope === null || project.environmentId === chats.nodeScope,
       ),
-      headerRight: () => (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={chrome.headerRight[0].accessibilityLabel}
-          className="h-11 w-11 items-center justify-center rounded-full active:bg-subtle-strong"
-          onPress={() => navigation.navigate("SettingsSheet")}
+    [chats.nodeScope, projects],
+  );
+  const projectFilterActive = chats.projectScope !== null;
+  const { collapsed, onScroll } = useLargeTitleCollapse();
+  const contentInsets = useTabContentInsets();
+  useTabStackHeader({
+    title: collapsed ? MAIN_TABS.Chats.title : "",
+    headerLeft: () => (
+      <MachinePickerButton
+        environments={environments}
+        selected={chats.nodeScope}
+        onSelect={(environmentId) => dispatch({ type: "set-node-scope", environmentId })}
+        onManage={openMachines}
+      />
+    ),
+    headerRight: () => (
+      <View className="flex-row items-center gap-1">
+        <HeaderIconButton icon="magnifyingglass" accessibilityLabel="Search" onPress={openSearch} />
+        <MenuView
+          title="Show chats from"
+          actions={[
+            {
+              id: CLEAR_FILTERS,
+              title: "All projects",
+              state: projectFilterActive ? "off" : "on",
+            },
+            ...filterProjects.map((project) => {
+              const key = scopedProjectKey({
+                environmentId: project.environmentId,
+                projectId: project.id,
+              });
+              return {
+                id: `${PROJECT_FILTER_PREFIX}${key}`,
+                title: project.name,
+                state: key === chats.projectScope ? ("on" as const) : ("off" as const),
+              };
+            }),
+          ]}
+          onPressAction={({ nativeEvent }) => {
+            const projectKey = nativeEvent.event.startsWith(PROJECT_FILTER_PREFIX)
+              ? nativeEvent.event.slice(PROJECT_FILTER_PREFIX.length)
+              : null;
+            dispatch({ type: "set-project-scope", projectKey });
+          }}
         >
-          <SymbolView name="gearshape" size={20} tintColor={iconColor} type="monochrome" />
-        </Pressable>
-      ),
-    });
-  }, [chrome, iconColor, navigation]);
-
-  const selectMode = useCallback((mode: HomeMode) => {
-    dispatch({ type: "select-mode", mode });
-  }, []);
+          <View
+            accessible
+            accessibilityRole="button"
+            accessibilityLabel={projectFilterActive ? "Filter, one project" : "Filter by project"}
+          >
+            <HeaderIconButton
+              icon={
+                projectFilterActive
+                  ? "line.3.horizontal.decrease.circle.fill"
+                  : "line.3.horizontal.decrease.circle"
+              }
+              accessibilityLabel="Filter"
+              active={projectFilterActive}
+            />
+          </View>
+        </MenuView>
+      </View>
+    ),
+  });
 
   // A row tap pushes the thread; a thread jump (Command-1…9) can come while a
-  // sheet covers Home or a thread is open, and closes or replaces those.
+  // sheet covers Chats or a thread is open, and closes or replaces those.
   const openThread = useCallback(
     (thread: {
       readonly environmentId: EnvironmentId;
@@ -271,28 +287,22 @@ export function HomeScreen() {
     (row: InboxThreadRow) => {
       // Opening a woken thread clears its "Woke" mark.
       if (row.wokeAt) markSnoozeWokeSeen(row.key, row.wokeAt);
-      // A message search hit opens the thread at the message it found.
-      openThread({
-        environmentId: row.environmentId,
-        threadId: row.threadId,
-        messageId: row.messageMatch?.messageId,
-      });
+      openThread({ environmentId: row.environmentId, threadId: row.threadId });
     },
     [openThread],
+  );
+  const selectFilter = useCallback(
+    (filter: ChatsFilter) => dispatch({ type: "select-filter", filter }),
+    [],
   );
 
   const handleInboxEmptyAction = useCallback(
     (state: Exclude<InboxEmptyState, null>) => {
-      if (state === "connect-node") {
-        openMachines();
-      } else if (state === "clear-filter") {
-        dispatch({ type: "set-query", mode: "inbox", query: "" });
-        dispatch({ type: "set-node-scope", mode: "inbox", environmentId: null });
-      } else {
-        selectMode("projects");
-      }
+      if (state === "connect-node") openMachines();
+      else if (state === "clear-filter") dispatch({ type: "clear-filters" });
+      else selectFilter("by-project");
     },
-    [openMachines, selectMode],
+    [openMachines, selectFilter],
   );
   const addProject = useCallback(() => navigation.navigate("AddProject"), [navigation]);
   const openProject = useCallback(
@@ -311,67 +321,78 @@ export function HomeScreen() {
     [threads],
   );
   const archivedCount = useMemo(
-    () => countArchivedThreads(threads, home.nodeScopeByMode.inbox),
-    [home.nodeScopeByMode.inbox, threads],
+    () => countArchivedThreads(threads, chats.nodeScope),
+    [chats.nodeScope, threads],
   );
-  const openArchived = useCallback(
-    () => navigation.navigate("SettingsSheet", { screen: "SettingsArchived" }),
-    [navigation],
-  );
+  const openArchived = useCallback(() => navigation.navigate("SettingsArchived"), [navigation]);
   const inboxEmptyState = resolveInboxEmptyState({
     environmentCount: environments.length,
     projectCount,
     threadCount: unarchivedThreadCount,
-    hasFilter: home.queryByMode.inbox.length > 0 || home.nodeScopeByMode.inbox !== null,
+    hasFilter: chatsHasScope(chats) || chats.filter !== "all",
   });
 
-  return (
-    <KeyboardAvoidingView behavior="padding" automaticOffset style={{ flex: 1 }}>
-      <View className="flex-1 bg-screen" style={{ paddingTop: headerHeight }}>
-        <HomeModeControl mode={home.mode} onSelect={selectMode} />
-        <View className="min-h-0 flex-1">
-          <NeedsVerificationSection />
-          <QueuedTasksSection machines={environments} />
-          <CustomSnoozeSheetHost />
-          {home.mode === "inbox" ? (
-            <InboxScreen
-              filterKey={inboxFilterKey}
-              sections={inboxSections}
-              emptyState={inboxEmptyState}
-              nowMs={nowMs}
-              initialScrollOffset={initialScrollOffset}
-              onScrollOffset={recordInboxScrollOffset}
-              onOpenThread={openInboxThread}
-              onEmptyAction={handleInboxEmptyAction}
-              archivedCount={archivedCount}
-              onOpenArchived={openArchived}
-            />
-          ) : (
-            <ProjectsScreen
-              filterKey={projectsFilterKey}
-              rows={projectRows}
-              hasMachines={environments.length > 0}
-              initialScrollOffset={initialScrollOffset}
-              onScrollOffset={recordProjectsScrollOffset}
-              onAddProject={addProject}
-              onOpenProject={openProject}
-              onAddMachine={openMachines}
-            />
-          )}
-        </View>
-        <HomeBottomToolbar
-          query={currentQuery}
-          searchLabel={chrome.search.accessibilityLabel}
-          onQueryChange={(query) => dispatch({ type: "set-query", mode: home.mode, query })}
-          machines={environments}
-          selectedMachine={currentNodeScope}
-          onSelectMachine={(environmentId) =>
-            dispatch({ type: "set-node-scope", mode: home.mode, environmentId })
-          }
-          onNewTask={openNewTask}
-          searchInputRef={searchInputRef}
+  const listHeader = (
+    <View>
+      <TabLargeTitle title={MAIN_TABS.Chats.title}>
+        <ChipBar
+          accessibilityLabel="Show chats"
+          items={chips.map((chip) => ({
+            key: chip.filter,
+            label: chip.label,
+            count: chip.count,
+            selected: chip.selected,
+            accessibilityLabel: chip.accessibilityLabel,
+          }))}
+          onSelect={(key) => selectFilter(key as ChatsFilter)}
         />
-      </View>
-    </KeyboardAvoidingView>
+      </TabLargeTitle>
+      <NeedsVerificationSection />
+      <QueuedTasksSection machines={environments} />
+    </View>
+  );
+
+  return (
+    <View className="flex-1 bg-screen">
+      <CustomSnoozeSheetHost />
+      {byProject ? (
+        <ProjectsScreen
+          filterKey={listKey}
+          rows={projectRows}
+          hasMachines={environments.length > 0}
+          initialScrollOffset={initialScrollOffset}
+          onScrollOffset={recordScrollOffset}
+          onScroll={onScroll}
+          listHeader={listHeader}
+          contentInsets={contentInsets}
+          onAddProject={addProject}
+          onOpenProject={openProject}
+          onAddMachine={openMachines}
+        />
+      ) : (
+        <InboxScreen
+          filterKey={listKey}
+          sections={listedSections}
+          emptyState={inboxEmptyState}
+          nowMs={nowMs}
+          initialScrollOffset={initialScrollOffset}
+          onScrollOffset={recordScrollOffset}
+          onScroll={onScroll}
+          listHeader={listHeader}
+          contentInsets={contentInsets}
+          settledStartsOpen={chats.filter === "done"}
+          onOpenThread={openInboxThread}
+          onEmptyAction={handleInboxEmptyAction}
+          archivedCount={archivedCount}
+          onOpenArchived={openArchived}
+        />
+      )}
+      <FloatingActionButton
+        icon="plus"
+        accessibilityLabel="New task"
+        onPress={openNewTask}
+        bottom={contentInsets.bottom + 16}
+      />
+    </View>
   );
 }

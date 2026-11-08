@@ -1,3 +1,4 @@
+import { summarizeDelegatedGroup } from "./inboxDelegationModel";
 import type { InboxSection, InboxThreadRow } from "./inboxModel";
 
 export type InboxListItem =
@@ -9,7 +10,23 @@ export type InboxListItem =
       readonly count: number;
       readonly expanded: boolean;
     }
-  | { readonly kind: "thread"; readonly key: string; readonly row: InboxThreadRow }
+  | {
+      readonly kind: "thread";
+      readonly key: string;
+      readonly row: InboxThreadRow;
+      /** A delegated child shown inside its open parent's group. */
+      readonly nested?: boolean;
+    }
+  | {
+      /** The folded line under a parent: "3 delegated · 2 working · 1 done". */
+      readonly kind: "delegated-group";
+      readonly key: string;
+      readonly hostKey: string;
+      readonly hostTitle: string;
+      readonly summary: string;
+      readonly count: number;
+      readonly expanded: boolean;
+    }
   | { readonly kind: "show-more"; readonly key: string; readonly remaining: number };
 
 export const MOBILE_SETTLED_PAGE_SIZE = 20;
@@ -21,7 +38,34 @@ export function flattenInboxSections(input: {
   /** The Hidden shelf starts collapsed, like Snoozed. */
   readonly hiddenOpen?: boolean;
   readonly settledVisibleCount: number;
+  /** Parents whose delegated group is open; every group starts folded. */
+  readonly openDelegatedHostKeys?: ReadonlySet<string>;
 }): ReadonlyArray<InboxListItem> {
+  const threadItems = (row: InboxThreadRow): ReadonlyArray<InboxListItem> => {
+    const children = row.delegatedChildren ?? [];
+    if (children.length === 0) return [{ kind: "thread", key: row.key, row }];
+    const open = input.openDelegatedHostKeys?.has(row.key) === true;
+    return [
+      { kind: "thread", key: row.key, row },
+      {
+        kind: "delegated-group",
+        key: `delegated:${row.key}`,
+        hostKey: row.key,
+        hostTitle: row.title,
+        summary: summarizeDelegatedGroup(children).text,
+        count: children.length,
+        expanded: open,
+      },
+      ...(open
+        ? children.map((child) => ({
+            kind: "thread" as const,
+            key: child.key,
+            row: child,
+            nested: true,
+          }))
+        : []),
+    ];
+  };
   return input.sections.flatMap((section): ReadonlyArray<InboxListItem> => {
     const expanded =
       section.key === "snoozed"
@@ -40,9 +84,7 @@ export function flattenInboxSections(input: {
         count: section.rows.length,
         expanded,
       },
-      ...(expanded
-        ? visibleRows.map((row) => ({ kind: "thread" as const, key: row.key, row }))
-        : []),
+      ...(expanded ? visibleRows.flatMap(threadItems) : []),
       ...(section.key === "settled" && expanded && visibleRows.length < section.rows.length
         ? [
             {

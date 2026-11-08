@@ -38,16 +38,23 @@ vi.mock("@react-navigation/elements", () => ({ useHeaderHeight: () => 96 }));
 vi.mock("zustand/react/shallow", () => ({ useShallow: (selector: unknown) => selector }));
 vi.mock("../../lib/useThemeColor", () => ({ useThemeColor: () => "#ededed" }));
 vi.mock("../../components/AppSymbol", () => ({ SymbolView: "SymbolView" }));
-vi.mock("../../components/RycoWordmark", () => ({ RycoWordmark: "RycoWordmark" }));
-// Keep native glass, menus, and safe-area hooks outside the Node test environment.
-vi.mock("../../components/HomeBottomToolbar", () => ({ HomeBottomToolbar: "HomeBottomToolbar" }));
-vi.mock("react-native-keyboard-controller", () => ({
-  KeyboardAvoidingView: "KeyboardAvoidingView",
+// Keep native menus, chips and safe-area hooks outside the Node test environment.
+vi.mock("@react-native-menu/menu", () => ({ MenuView: "MenuView" }));
+vi.mock("../../components/ChipBar", () => ({ ChipBar: "ChipBar" }));
+vi.mock("../../components/FloatingActionButton", () => ({
+  FloatingActionButton: "FloatingActionButton",
 }));
-vi.mock("../../components/HomeModeControl", () => ({ HomeModeControl: "HomeModeControl" }));
-vi.mock("../../components/NodeScopeControl", () => ({ NodeScopeControl: "NodeScopeControl" }));
+vi.mock("../../components/HeaderIconButton", () => ({ HeaderIconButton: "HeaderIconButton" }));
+vi.mock("../../components/MachinePickerButton", () => ({
+  MachinePickerButton: "MachinePickerButton",
+}));
+vi.mock("../../navigation/tabs/TabScreenChrome", () => ({
+  TabLargeTitle: "TabLargeTitle",
+  useLargeTitleCollapse: () => ({ collapsed: false, onScroll: () => undefined }),
+  useTabContentInsets: () => ({ top: 100, bottom: 83 }),
+  useTabStackHeader: (header: unknown) => navigationMock.setOptions({ stackHeader: header }),
+}));
 vi.mock("../inbox/InboxScreen", () => ({ InboxScreen: "InboxScreen" }));
-vi.mock("../inbox/useInboxMessageSearch", () => ({ useInboxMessageSearch: () => new Map() }));
 vi.mock("../../state/threadPins", () => ({ useThreadPins: () => ({}) }));
 vi.mock("../projects/ProjectsScreen", () => ({ ProjectsScreen: "ProjectsScreen" }));
 vi.mock("./NeedsVerificationSection", () => ({
@@ -103,10 +110,32 @@ function renderHeaderOptions(): HeaderOptions {
   HomeScreen();
   const calls = navigationMock.setOptions.mock.calls;
   expect(calls.length).toBeGreaterThan(0);
-  return calls[calls.length - 1]?.[0] as HeaderOptions;
+  const last = calls.at(-1)?.[0] as { stackHeader: HeaderOptions } | undefined;
+  if (last === undefined) throw new Error("no header options");
+  return last.stackHeader;
 }
 
-describe("C1 Home header", () => {
+type Element = ReactElement<Record<string, unknown> & { children?: unknown }>;
+
+function findByType(node: unknown, type: string): Element | null {
+  if (node === null || typeof node !== "object") return null;
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findByType(child, type);
+      if (found) return found;
+    }
+    return null;
+  }
+  const element = node as Element;
+  if (element.type === type) return element;
+  for (const value of Object.values(element.props ?? {})) {
+    const found = findByType(value, type);
+    if (found) return found;
+  }
+  return null;
+}
+
+describe("Chats", () => {
   beforeEach(() => {
     navigationMock.setOptions.mockClear();
     navigationMock.navigate.mockClear();
@@ -121,82 +150,56 @@ describe("C1 Home header", () => {
     expect(workspaceDiscoveryMock).toHaveBeenCalledWith(true);
   });
 
-  it("labels the initial workspace Inbox and registers both header sides", () => {
+  it("keeps the small title empty while the large title shows, and fills both header sides", () => {
     const options = renderHeaderOptions();
-    expect(options.title).toBe("Inbox");
-    expect(typeof options.headerLeft).toBe("function");
+    expect(options.title).toBe("");
+    expect(findByType(options.headerLeft?.(), "MachinePickerButton")).not.toBeNull();
     expect(typeof options.headerRight).toBe("function");
   });
 
-  it("renders the R-only compact mark in a 44-point Inbox button", () => {
-    const element = renderHeaderOptions().headerLeft?.() as ReactElement<{
-      accessibilityRole: string;
+  it("opens Search from the header's search button", () => {
+    const right = renderHeaderOptions().headerRight?.();
+    const search = findByType(right, "HeaderIconButton") as ReactElement<{
       accessibilityLabel: string;
-      className: string;
-      children: ReactElement<{ compact: boolean }>;
-    }>;
-    expect(element.type).toBe("Pressable");
-    expect(element.props.accessibilityRole).toBe("button");
-    expect(element.props.accessibilityLabel).toBe("Open Inbox");
-    expect(element.props.className).toContain("h-11");
-    expect(element.props.className).toContain("w-11");
-    expect(element.props.children.type).toBe("RycoWordmark");
-    expect(element.props.children.props.compact).toBe(true);
-  });
-
-  it("keeps only Settings in the header", () => {
-    const element = renderHeaderOptions().headerRight?.() as ReactElement<{
-      className: string;
-      accessibilityLabel: string;
-    }>;
-    expect(element.props.accessibilityLabel).toBe("Settings");
-    expect(element.props.className).toContain("h-11");
-    expect(element.props.className).toContain("w-11");
-  });
-
-  it("switches the R button to Inbox without opening another navigation layer", () => {
-    const element = renderHeaderOptions().headerLeft?.() as ReactElement<{
       onPress: () => void;
     }>;
-    element.props.onPress();
-
-    expect(dispatchMock).toHaveBeenCalledWith({ type: "select-mode", mode: "inbox" });
-    expect(navigationMock.navigate).not.toHaveBeenCalled();
+    expect(search.props.accessibilityLabel).toBe("Search");
+    search.props.onPress();
+    expect(navigationMock.navigate).toHaveBeenCalledWith("Search");
   });
 
-  it("opens Settings straight from the header", () => {
-    const element = renderHeaderOptions().headerRight?.() as ReactElement<{
-      onPress: () => void;
-    }>;
-    element.props.onPress();
-
-    expect(navigationMock.navigate).toHaveBeenCalledWith("SettingsSheet");
-  });
-
-  it("wires bottom search, machine filtering, and New Task into the current view", () => {
-    const root = HomeScreen() as ReactElement<{
-      children: ReactElement<{ children: ReadonlyArray<ReactElement | null> }>;
-    }>;
-    const toolbar = root.props.children.props.children.find(
-      (child) => child?.type === "HomeBottomToolbar",
+  it("narrows to a machine from the picker and opens Machines from it", () => {
+    const picker = findByType(
+      renderHeaderOptions().headerLeft?.(),
+      "MachinePickerButton",
     ) as ReactElement<{
-      query: string;
-      searchLabel: string;
-      onQueryChange: (query: string) => void;
-      onSelectMachine: (environmentId: string | null) => void;
-      onNewTask: () => void;
-    }>;
-    expect(toolbar.props.searchLabel).toBe("Search Inbox");
-    expect(toolbar.props.query).toBe("");
-    toolbar.props.onQueryChange("fix");
-    expect(dispatchMock).toHaveBeenCalledWith({ type: "set-query", mode: "inbox", query: "fix" });
-    toolbar.props.onSelectMachine("machine-a");
+      onSelect: (environmentId: string | null) => void;
+      onManage: () => void;
+    }> | null;
+    picker?.props.onSelect("machine-a");
     expect(dispatchMock).toHaveBeenCalledWith({
       type: "set-node-scope",
-      mode: "inbox",
       environmentId: "machine-a",
     });
-    toolbar.props.onNewTask();
+    picker?.props.onManage();
+    expect(navigationMock.navigate).toHaveBeenCalledWith("Connections");
+  });
+
+  it("selects a status chip and starts a New task from the floating button", () => {
+    const root = HomeScreen();
+    const chips = findByType(root, "ChipBar") as ReactElement<{
+      onSelect: (key: string) => void;
+    }>;
+    chips.props.onSelect("needs-you");
+    expect(dispatchMock).toHaveBeenCalledWith({ type: "select-filter", filter: "needs-you" });
+    const fab = findByType(root, "FloatingActionButton") as ReactElement<{
+      accessibilityLabel: string;
+      onPress: () => void;
+      bottom: number;
+    }>;
+    expect(fab.props.accessibilityLabel).toBe("New task");
+    expect(fab.props.bottom).toBe(83 + 16);
+    fab.props.onPress();
     expect(navigationMock.navigate).toHaveBeenCalledWith("NewTask", { environmentId: undefined });
   });
 });

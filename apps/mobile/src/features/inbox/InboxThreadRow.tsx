@@ -6,11 +6,12 @@ import { memo } from "react";
 import { Pressable, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
+import { SymbolView } from "../../components/AppSymbol";
 import { ChangeRequestBadge } from "../../components/ChangeRequestBadge";
 import { FollowUpQueueMark } from "../../components/FollowUpQueueMark";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { relativeTime } from "../../lib/time";
-import { splitSnippet } from "./inboxMessageSearchModel";
+import { HighlightedText } from "../../components/HighlightedText";
 import type { InboxThreadRow as InboxThreadRowModel, InboxThreadState } from "./inboxModel";
 
 function statusDotClassName(state: InboxThreadState): string {
@@ -58,8 +59,11 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
   readonly row: InboxThreadRowModel;
   readonly onPress: () => void;
   readonly onLongPress?: (() => void) | undefined;
+  /** Name the delegating chat on a child listed on its own; its parent's group already does. */
+  readonly showParent?: boolean;
 }) {
   const row = props.row;
+  const parentTitle = props.showParent !== false ? (row.parentTitle ?? null) : null;
   const iconColor = useThemeColor("--color-icon-subtle");
   // A chat works in one plain folder: no branch or worktree glyph to imply Git.
   const WorkspaceIcon = row.isChat ? IconFolder : row.isWorktree ? IconGitFork : IconGitBranch;
@@ -68,6 +72,7 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
   const woke = row.woke === true;
   const accessibilityLabel = [
     row.title,
+    parentTitle ? `Delegated from ${parentTitle}` : null,
     row.contextLabel,
     row.isChat ? null : row.isWorktree ? "Worktree" : "Original directory",
     woke ? "Woke from snooze" : row.statusLabel,
@@ -108,6 +113,19 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
           {relativeTime(row.updatedAt)}
         </Text>
       </View>
+      {parentTitle ? (
+        <View className="-mt-1 flex-row items-center gap-1 pl-4">
+          <SymbolView
+            name="arrow.turn.left.up"
+            size={10}
+            tintColor={iconColor as string}
+            type="monochrome"
+          />
+          <Text className="min-w-0 flex-1 text-2xs text-foreground-tertiary" numberOfLines={1}>
+            from {parentTitle}
+          </Text>
+        </View>
+      ) : null}
       {row.messageMatch ? (
         <MessageMatchExcerpt snippet={row.messageMatch.snippet} query={row.messageMatch.query} />
       ) : null}
@@ -188,20 +206,13 @@ function MessageMatchExcerpt(props: { readonly snippet: string; readonly query: 
       <View className="h-4 w-4 items-center justify-center pt-0.5">
         <IconMessage size={12} strokeWidth={1.75} color={iconColor as string} />
       </View>
-      <Text className="min-w-0 flex-1 text-xs text-foreground-muted" numberOfLines={2}>
-        {splitSnippet(props.snippet, props.query).map((part) => (
-          <Text
-            key={part.start}
-            className={
-              part.highlighted
-                ? "font-ryco-bold text-xs text-foreground"
-                : "text-xs text-foreground-muted"
-            }
-          >
-            {part.text}
-          </Text>
-        ))}
-      </Text>
+      <HighlightedText
+        text={props.snippet}
+        query={props.query}
+        numberOfLines={2}
+        className="min-w-0 flex-1 text-xs text-foreground-muted"
+        highlightClassName="font-ryco-bold text-xs text-foreground"
+      />
     </View>
   );
 }
