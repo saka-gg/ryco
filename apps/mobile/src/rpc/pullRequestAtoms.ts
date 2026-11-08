@@ -24,7 +24,9 @@ import type {
   ChangeRequestActivity,
   ChangeRequestInvolvement,
   EnvironmentId,
+  SourceControlAssigneeCandidate,
   SourceControlChangeRequestDetail,
+  SourceControlLabel,
 } from "@ryco/contracts";
 import { KEY_SEP } from "@ryco/client-runtime/rpc";
 import type {
@@ -48,6 +50,10 @@ const DIFF_STALE_TIME_MS = 60_000;
 export const PULL_REQUEST_LIST_RETAINED_KEY_LIMIT = 6;
 export const PULL_REQUEST_DETAIL_RETAINED_KEY_LIMIT = 8;
 export const PULL_REQUEST_DIFF_RETAINED_KEY_LIMIT = 2;
+/** People and labels of a repository, for the pickers and `@` completion. */
+export const PULL_REQUEST_REPOSITORY_RETAINED_KEY_LIMIT = 4;
+// A repository's people and labels change rarely; a reconnect reads them again.
+const REPOSITORY_STALE_TIME_MS = 10 * 60_000;
 
 const pullRequestCache = createMobileQueryCache("pull-requests");
 
@@ -284,6 +290,64 @@ export const pullRequestDiffQuery = pullRequestCache.defineQuery<PullRequestDiff
       reference: String(input.number),
       ...(input.headSha ? { expectedHeadSha: input.headSha } : {}),
     }),
+});
+
+// ---------------------------------------------------------------------------
+// A repository's people and labels (pickers, `@` completion)
+// ---------------------------------------------------------------------------
+
+// In this cache like every other read of the node's pull requests: bounded,
+// dropped with the node, counted and cleared in Storage. Never saved on the
+// device.
+
+export interface PullRequestRepositoryInput {
+  readonly environmentId: EnvironmentId | null;
+  readonly cwd: string | null;
+  readonly enabled?: boolean;
+}
+
+function repositoryEnabled(input: PullRequestRepositoryInput): boolean {
+  return (input.enabled ?? true) && input.environmentId !== null && input.cwd !== null;
+}
+
+function repositoryKey(input: PullRequestRepositoryInput): string {
+  return `${input.environmentId}${KEY_SEP}${input.cwd}`;
+}
+
+export const pullRequestRepositoryPeopleQuery = pullRequestCache.defineQuery<
+  PullRequestRepositoryInput,
+  ReadonlyArray<SourceControlAssigneeCandidate>
+>({
+  label: "people",
+  staleTime: REPOSITORY_STALE_TIME_MS,
+  retainedKeyLimit: PULL_REQUEST_REPOSITORY_RETAINED_KEY_LIMIT,
+  isEnabled: repositoryEnabled,
+  buildKey: repositoryKey,
+  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  run: (input) =>
+    runWithRetry(() =>
+      sourceControlClient(input.environmentId as EnvironmentId).listIssueAssignees({
+        cwd: input.cwd as string,
+      }),
+    ),
+});
+
+export const pullRequestRepositoryLabelsQuery = pullRequestCache.defineQuery<
+  PullRequestRepositoryInput,
+  ReadonlyArray<SourceControlLabel>
+>({
+  label: "labels",
+  staleTime: REPOSITORY_STALE_TIME_MS,
+  retainedKeyLimit: PULL_REQUEST_REPOSITORY_RETAINED_KEY_LIMIT,
+  isEnabled: repositoryEnabled,
+  buildKey: repositoryKey,
+  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  run: (input) =>
+    runWithRetry(() =>
+      sourceControlClient(input.environmentId as EnvironmentId).listIssueLabels({
+        cwd: input.cwd as string,
+      }),
+    ),
 });
 
 // ---------------------------------------------------------------------------

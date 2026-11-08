@@ -14,7 +14,11 @@ vi.mock("../connection/environmentApi", () => ({
 }));
 
 import {
+  clearPullRequestCache,
   clearPullRequestStateForEnvironment,
+  pullRequestCacheBytes,
+  pullRequestRepositoryLabelsQuery,
+  pullRequestRepositoryPeopleQuery,
   pullRequestDetailQuery,
   pullRequestDiffQuery,
   pullRequestListQuery,
@@ -280,5 +284,36 @@ describe("teardown", () => {
         .getSnapshot(pullRequestListQuery.keyOf(theirs))
         .data?.map((e) => e.number),
     ).toEqual([2]);
+  });
+});
+
+describe("repository people and labels", () => {
+  it("are kept in the pull request cache: counted and cleared in Storage, dropped with the node", async () => {
+    setSourceControl(ENV, {
+      listIssueAssignees: async () => [{ login: "ada" }],
+      listIssueLabels: async () => [{ name: "bug", color: "d73a4a" }],
+    });
+    const input = { environmentId: ENV, cwd: CWD } as const;
+    const releasePeople = pullRequestRepositoryPeopleQuery.watch(input);
+    const releaseLabels = pullRequestRepositoryLabelsQuery.watch(input);
+    await flush();
+    const peopleKey = pullRequestRepositoryPeopleQuery.keyOf(input);
+    const labelsKey = pullRequestRepositoryLabelsQuery.keyOf(input);
+    expect(pullRequestRepositoryPeopleQuery.getSnapshot(peopleKey).data).toEqual([
+      { login: "ada" },
+    ]);
+    releasePeople();
+    releaseLabels();
+    expect(pullRequestCacheBytes(ENV)).toBeGreaterThan(0);
+
+    clearPullRequestCache(ENV);
+    expect(pullRequestRepositoryPeopleQuery.getSnapshot(peopleKey).data).toBeNull();
+    expect(pullRequestCacheBytes(ENV)).toBe(0);
+
+    const again = pullRequestRepositoryLabelsQuery.watch(input);
+    await flush();
+    again();
+    clearPullRequestStateForEnvironment(ENV);
+    expect(pullRequestRepositoryLabelsQuery.getSnapshot(labelsKey).data).toBeNull();
   });
 });

@@ -83,6 +83,8 @@ function control(overrides: Partial<PullRequestActionsControl> = {}): PullReques
     notice: null,
     draftKey: "draft",
     headSha: "h1",
+    newCommits: false,
+    showNewCommits: () => undefined,
     reviewEventFor: () => "comment",
     setMethod: () => undefined,
     deleteBranch: null,

@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildPullRequestMergeInput,
   canMarkPullRequestFilesViewed,
+  pullRequestReviewedHead,
   buildPullRequestUpdateBranchInput,
   derivePullRequestActions,
   describePullRequestActionError,
@@ -285,5 +286,15 @@ describe("canMarkPullRequestFilesViewed", () => {
     expect(canMarkPullRequestFilesViewed({ mutationReady: true, role: undefined })).toBe(true);
     expect(canMarkPullRequestFilesViewed({ mutationReady: false, role: "owner" })).toBe(false);
     expect(canMarkPullRequestFilesViewed({ mutationReady: true, role: "viewer" })).toBe(false);
+  });
+});
+
+describe("pullRequestReviewedHead", () => {
+  it("keeps the head the reader opened with and flags commits pushed since", () => {
+    expect(pullRequestReviewedHead(null, null)).toEqual({ headSha: null, newCommits: false });
+    expect(pullRequestReviewedHead(null, "a")).toEqual({ headSha: "a", newCommits: false });
+    expect(pullRequestReviewedHead("a", "a")).toEqual({ headSha: "a", newCommits: false });
+    // Live checks read the pull request again and its head moved: approve stays on "a".
+    expect(pullRequestReviewedHead("a", "b")).toEqual({ headSha: "a", newCommits: true });
   });
 });

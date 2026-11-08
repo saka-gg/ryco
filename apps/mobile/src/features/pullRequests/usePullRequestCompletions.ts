@@ -9,6 +9,11 @@ import { useEffect, useState } from "react";
 
 import { readRpcClient } from "../../connection/environmentApi";
 import {
+  pullRequestRepositoryLabelsQuery,
+  pullRequestRepositoryPeopleQuery,
+} from "../../rpc/pullRequestAtoms";
+import { useMobileQuery } from "../../rpc/useMobileQuery";
+import {
   rankPeople,
   rankReferences,
   type CompletionSuggestion,
@@ -16,91 +21,46 @@ import {
 } from "./pullRequestCompletionModel";
 
 /**
- * The repository's people and labels for the pickers and `@` completion, and
- * `#` references searched on the host. Read once per checkout while the app
- * runs (memory only), through the node's own session.
+ * The repository's people and labels for the pickers and `@` completion, read
+ * through the bounded pull request cache (`pullRequestRepositoryPeopleQuery`),
+ * and `#` references searched on the host.
  */
-
-const peopleByCheckout = new Map<string, Promise<ReadonlyArray<SourceControlAssigneeCandidate>>>();
-const labelsByCheckout = new Map<string, Promise<ReadonlyArray<SourceControlLabel>>>();
-
-const OFFLINE = "This node is not connected.";
-
-function sourceControl(environmentId: EnvironmentId) {
-  const client = readRpcClient(environmentId);
-  if (client === null) throw new Error(OFFLINE);
-  return client.sourceControl;
-}
-
-function cached<T>(
-  cache: Map<string, Promise<T>>,
-  key: string,
-  read: () => Promise<T>,
-): Promise<T> {
-  const existing = cache.get(key);
-  if (existing) return existing;
-  const next = read();
-  cache.set(key, next);
-  // A failed read is asked again next time.
-  next.catch(() => cache.delete(key));
-  return next;
-}
-
-export function readRepositoryPeople(
-  environmentId: EnvironmentId,
-  cwd: string,
-): Promise<ReadonlyArray<SourceControlAssigneeCandidate>> {
-  return cached(peopleByCheckout, `${environmentId}\u0000${cwd}`, async () =>
-    sourceControl(environmentId).listIssueAssignees({ cwd }),
-  );
-}
-
-export function readRepositoryLabels(
-  environmentId: EnvironmentId,
-  cwd: string,
-): Promise<ReadonlyArray<SourceControlLabel>> {
-  return cached(labelsByCheckout, `${environmentId}\u0000${cwd}`, async () =>
-    sourceControl(environmentId).listIssueLabels({ cwd }),
-  );
-}
 
 export interface LoadState<T> {
   readonly data: T | null;
   readonly error: string | null;
 }
 
-/** One of the reads above while `enabled`, as state. */
-export function useRepositoryRead<T>(
-  read: (environmentId: EnvironmentId, cwd: string) => Promise<T>,
+function loadState<T>(result: { readonly data: T | null; readonly error: Error | null }) {
+  return { data: result.data, error: result.error?.message ?? null } satisfies LoadState<T>;
+}
+
+export function useRepositoryPeople(
   environmentId: EnvironmentId | null,
   cwd: string | null,
   enabled: boolean,
-): LoadState<T> {
-  const [state, setState] = useState<{ readonly key: string; readonly value: LoadState<T> } | null>(
-    null,
+): LoadState<ReadonlyArray<SourceControlAssigneeCandidate>> {
+  return loadState(
+    useMobileQuery(
+      pullRequestRepositoryPeopleQuery,
+      { environmentId, cwd, enabled },
+      environmentId,
+    ),
   );
-  const key = `${environmentId}\u0000${cwd}`;
-  useEffect(() => {
-    if (!enabled || environmentId === null || cwd === null) return;
-    let cancelled = false;
-    read(environmentId, cwd).then(
-      (data) => {
-        if (!cancelled) setState({ key, value: { data, error: null } });
-      },
-      (error: unknown) => {
-        if (!cancelled) {
-          setState({
-            key,
-            value: { data: null, error: error instanceof Error ? error.message : String(error) },
-          });
-        }
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [cwd, enabled, environmentId, key, read]);
-  return state?.key === key ? state.value : { data: null, error: null };
+}
+
+export function useRepositoryLabels(
+  environmentId: EnvironmentId | null,
+  cwd: string | null,
+  enabled: boolean,
+): LoadState<ReadonlyArray<SourceControlLabel>> {
+  return loadState(
+    useMobileQuery(
+      pullRequestRepositoryLabelsQuery,
+      { environmentId, cwd, enabled },
+      environmentId,
+    ),
+  );
 }
 
 const REFERENCE_DELAY_MS = 250;
@@ -112,12 +72,7 @@ export function usePullRequestCompletions(input: {
   readonly token: CompletionToken | null;
 }): ReadonlyArray<CompletionSuggestion> {
   const { environmentId, cwd, token } = input;
-  const people = useRepositoryRead(
-    readRepositoryPeople,
-    environmentId,
-    cwd,
-    token !== null && token.trigger === "@",
-  );
+  const people = useRepositoryPeople(environmentId, cwd, token !== null && token.trigger === "@");
   const [references, setReferences] = useState<{
     readonly query: string;
     readonly items: ReadonlyArray<CompletionSuggestion>;

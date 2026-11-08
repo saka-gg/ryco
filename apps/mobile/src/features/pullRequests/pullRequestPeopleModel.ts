@@ -13,6 +13,26 @@ export interface PullRequestListEdit {
   readonly remove: ReadonlyArray<string>;
 }
 
+/**
+ * The title/description edit from what the sheet opened with to what it
+ * holds now: only the fields the reader changed, so a field someone else
+ * changed meanwhile is left as they made it. Null when nothing changed.
+ */
+export function pullRequestDetailsEdit(
+  start: { readonly title: string; readonly body: string },
+  now: { readonly title: string; readonly body: string },
+): { readonly kind: "edit"; readonly title?: string; readonly body?: string } | null {
+  const title = now.title.trim();
+  const titleChanged = title !== start.title;
+  const bodyChanged = now.body !== start.body;
+  if (!titleChanged && !bodyChanged) return null;
+  return {
+    kind: "edit",
+    ...(titleChanged ? { title } : {}),
+    ...(bodyChanged ? { body: now.body } : {}),
+  };
+}
+
 /** The edit that turns `current` into `chosen`; null when nothing changed. */
 export function pullRequestListEdit(
   current: ReadonlyArray<string>,

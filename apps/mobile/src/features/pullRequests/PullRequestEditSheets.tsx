@@ -14,13 +14,13 @@ import { cn } from "../../lib/cn";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { PullRequestCompletingInput } from "./PullRequestCompletingInput";
 import { pullRequestLabelColor } from "./pullRequestGlyphModel";
-import { pullRequestListEdit, requestedReviewerLogins } from "./pullRequestPeopleModel";
-import type { PullRequestActionsControl } from "./usePullRequestActions";
 import {
-  readRepositoryLabels,
-  readRepositoryPeople,
-  useRepositoryRead,
-} from "./usePullRequestCompletions";
+  pullRequestDetailsEdit,
+  pullRequestListEdit,
+  requestedReviewerLogins,
+} from "./pullRequestPeopleModel";
+import type { PullRequestActionsControl } from "./usePullRequestActions";
+import { useRepositoryLabels, useRepositoryPeople } from "./usePullRequestCompletions";
 
 export type PullRequestEditSheet = "edit" | "reviewers" | "labels" | "comment";
 
@@ -66,30 +66,28 @@ function SheetHeader(props: {
   );
 }
 
+// Each sheet edits from the values it opened with, not the latest read: the
+// pull request is read again while a sheet is open (live checks), and diffing
+// against a fresh read would send back someone else's change undone.
+
 function EditDetailsSheet(props: SheetProps) {
-  const [title, setTitle] = useState(props.detail.title);
-  const [body, setBody] = useState(props.detail.body);
+  const [start] = useState(() => ({ title: props.detail.title, body: props.detail.body }));
+  const [title, setTitle] = useState(start.title);
+  const [body, setBody] = useState(start.body);
   const placeholder = useThemeColor("--color-placeholder") as string;
   const text = useThemeColor("--color-foreground") as string;
-  const changed = title.trim() !== props.detail.title || body !== props.detail.body;
+  const edit = pullRequestDetailsEdit(start, { title, body });
   const busy = props.control.pending === "update";
-  const save = () =>
-    props.control.runUpdate(
-      {
-        kind: "edit",
-        ...(title.trim() !== props.detail.title ? { title: title.trim() } : {}),
-        ...(body !== props.detail.body ? { body } : {}),
-      },
-      "Saved.",
-      props.onClose,
-    );
+  const save = () => {
+    if (edit !== null) props.control.runUpdate(edit, "Saved.", props.onClose);
+  };
   return (
     <View className="flex-1 bg-screen">
       <SheetHeader
         title="Edit"
         action="Save"
         busy={busy}
-        disabled={!changed || title.trim().length === 0}
+        disabled={edit === null || title.trim().length === 0}
         onCancel={props.onClose}
         onAction={save}
       />
@@ -267,8 +265,8 @@ function labelItem(label: SourceControlLabel): PickerItem {
 }
 
 function ReviewersSheet(props: SheetProps) {
-  const people = useRepositoryRead(readRepositoryPeople, props.environmentId, props.cwd, true);
-  const initial = requestedReviewerLogins(props.detail);
+  const people = useRepositoryPeople(props.environmentId, props.cwd, true);
+  const [initial] = useState(() => requestedReviewerLogins(props.detail));
   const author = props.detail.author;
   return (
     <PickerSheet
@@ -298,8 +296,8 @@ function ReviewersSheet(props: SheetProps) {
 }
 
 function LabelsSheet(props: SheetProps) {
-  const labels = useRepositoryRead(readRepositoryLabels, props.environmentId, props.cwd, true);
-  const initial = (props.detail.labels ?? []).map((label) => label.name);
+  const labels = useRepositoryLabels(props.environmentId, props.cwd, true);
+  const [initial] = useState(() => (props.detail.labels ?? []).map((label) => label.name));
   return (
     <PickerSheet
       title="Labels"

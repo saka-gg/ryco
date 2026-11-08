@@ -8,7 +8,11 @@ import {
   rankPeople,
   rankReferences,
 } from "./pullRequestCompletionModel";
-import { derivePullRequestReviewers, pullRequestListEdit } from "./pullRequestPeopleModel";
+import {
+  derivePullRequestReviewers,
+  pullRequestDetailsEdit,
+  pullRequestListEdit,
+} from "./pullRequestPeopleModel";
 
 describe("completion", () => {
   it("finds the @ or # token at the cursor, and nothing inside a word", () => {
@@ -71,6 +75,25 @@ describe("people", () => {
   it("computes the add/remove edit, or null when nothing changed", () => {
     expect(pullRequestListEdit(["a", "b"], ["b", "c"])).toEqual({ add: ["c"], remove: ["a"] });
     expect(pullRequestListEdit(["a"], ["a"])).toBeNull();
+  });
+
+  it("edits from what the picker opened with, so a label added meanwhile stays", () => {
+    // Opened with [bug]; someone adds "urgent" while the sheet is open; the
+    // reader adds "ui". Diffing against the opening list leaves "urgent" alone.
+    expect(pullRequestListEdit(["bug"], ["bug", "ui"])).toEqual({ add: ["ui"], remove: [] });
+  });
+
+  it("sends only the title or description the reader changed", () => {
+    const start = { title: "Fix login", body: "Old body" };
+    expect(pullRequestDetailsEdit(start, { title: " Fix login now ", body: "Old body" })).toEqual({
+      kind: "edit",
+      title: "Fix login now",
+    });
+    expect(pullRequestDetailsEdit(start, { title: "Fix login", body: "New" })).toEqual({
+      kind: "edit",
+      body: "New",
+    });
+    expect(pullRequestDetailsEdit(start, { title: "Fix login ", body: "Old body" })).toBeNull();
   });
 
   it("lists reviewers with their state, requested ones as pending", () => {

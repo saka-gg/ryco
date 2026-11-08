@@ -279,3 +279,21 @@ export function derivePullRequestEdits(input: {
     comment: capabilities.comment && roleAllows(WS_METHODS.sourceControlAddChangeRequestComment),
   };
 }
+
+export const PULL_REQUEST_NEW_COMMITS =
+  "New commits were pushed since you opened this. Look at them, then approve or merge.";
+
+/**
+ * The head the reader's review and merge are for. The pull request is read
+ * again while its screen is open (live checks), so its head can move under
+ * the reader; approving or merging then would cover commits they never saw.
+ * The head they opened with stays theirs until they choose to see the new
+ * ones (`seen` is that head, null until the first read).
+ */
+export function pullRequestReviewedHead(
+  seen: string | null,
+  live: string | null,
+): { readonly headSha: string | null; readonly newCommits: boolean } {
+  const headSha = seen ?? live;
+  return { headSha, newCommits: headSha !== null && live !== null && headSha !== live };
+}
