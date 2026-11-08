@@ -83,6 +83,54 @@ export const MVP_ROOT_ROUTES = {
     ios: { presentation: "card" },
     android: { presentation: "card" },
   },
+  /** Switch the checkout's branch or create one. */
+  ProjectBranches: {
+    linking: `${PROJECT}/git/branches/:worktreeId?`,
+    overlay: true,
+    headerPreset: "sheet-solid",
+    headerAction: "close",
+    ios: { presentation: "formSheet", sheetAllowedDetents: [0.6, 0.95], sheetGrabberVisible: true },
+    android: { presentation: "card" },
+  },
+  /** Commit every change with an own message, optionally pushing and opening a PR. */
+  ProjectCommit: {
+    linking: `${PROJECT}/git/commit/:worktreeId?`,
+    overlay: true,
+    headerPreset: "sheet-solid",
+    headerAction: "close",
+    ios: { presentation: "formSheet", sheetAllowedDetents: [0.7, 0.95], sheetGrabberVisible: true },
+    android: { presentation: "card" },
+  },
+  /**
+   * Stage and unstage files and hunks, and commit exactly the staged ones. A
+   * solid header: diff rows scroll sideways under it.
+   */
+  ProjectChanges: {
+    linking: `${PROJECT}/git/changes/:worktreeId?`,
+    overlay: false,
+    headerPreset: "solid",
+    headerAction: "back",
+    ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
+  /** Compare the checkout with another ref; long-press a line for blame. */
+  ProjectCompare: {
+    linking: `${PROJECT}/git/compare/:worktreeId?`,
+    overlay: false,
+    headerPreset: "solid",
+    headerAction: "back",
+    ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
+  /** Create the repository on a host and push the checkout there. */
+  ProjectPublish: {
+    linking: `${PROJECT}/git/publish/:worktreeId?`,
+    overlay: true,
+    headerPreset: "sheet-solid",
+    headerAction: "close",
+    ios: { presentation: "formSheet", sheetAllowedDetents: [0.8, 0.95], sheetGrabberVisible: true },
+    android: { presentation: "card" },
+  },
   /** One repository's pull requests: the list a project's checkout reads through. */
   ProjectPullRequests: {
     linking: `${PROJECT}/pull-requests`,
@@ -194,6 +242,27 @@ export const MVP_ROOT_ROUTES = {
    */
   ThreadFile: {
     linking: `${THREAD}/files/:path*`,
+    overlay: false,
+    headerPreset: "solid",
+    headerAction: "back",
+    ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
+  /**
+   * A plain editor for one workspace file (`projects.writeFile`). `:path*` is a
+   * segment wildcard like ThreadFile's; a solid header holds the Save button.
+   */
+  ThreadFileEdit: {
+    linking: `${THREAD}/edit/:path*`,
+    overlay: false,
+    headerPreset: "solid",
+    headerAction: "back",
+    ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
+  /** Find in files across the thread's workspace (`projects.searchContent`). */
+  ThreadFileSearch: {
+    linking: `${THREAD}/find`,
     overlay: false,
     headerPreset: "solid",
     headerAction: "back",

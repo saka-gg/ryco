@@ -294,7 +294,22 @@ export function ThreadFilesScreen(props: {
       // is active. Restore the route's own chrome when a resize brings the
       // compact browser back on this SAME route.
       title: "Files",
-      headerRight: undefined,
+      headerRight: () => (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Find in files"
+          hitSlop={6}
+          onPress={() => navigation.navigate("ThreadFileSearch", { environmentId, threadId })}
+          className="h-11 w-11 items-center justify-center rounded-full active:bg-subtle-strong"
+        >
+          <SymbolView
+            name="text.magnifyingglass"
+            size={18}
+            tintColor={iconColor as string}
+            type="monochrome"
+          />
+        </Pressable>
+      ),
       headerLeft: () => (
         <NavigationHeaderButton
           action="back"
@@ -303,7 +318,7 @@ export function ThreadFilesScreen(props: {
         />
       ),
     });
-  }, [goToThread, iconColor, navigation, presentation]);
+  }, [environmentId, goToThread, iconColor, navigation, presentation, threadId]);
 
   const closeInspector = useCallback(() => {
     if (navigation.canGoBack()) {

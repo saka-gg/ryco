@@ -53,9 +53,16 @@ import {
   GlobalSearchRouteScreen,
   ArchivedThreadsRouteScreen,
   SettingsWorkspaceRouteScreen,
+  SourceControlBranchesRouteScreen,
+  SourceControlChangesRouteScreen,
+  SourceControlCommitRouteScreen,
+  SourceControlCompareRouteScreen,
+  SourceControlPublishRouteScreen,
   SourceControlRouteScreen,
   TaskDetailRouteScreen,
+  ThreadFileEditRouteScreen,
   ThreadFileRouteScreen,
+  ThreadFileSearchRouteScreen,
   ThreadFilesRouteScreen,
   ThreadRouteScreen,
   ThreadTerminalRouteScreen,
@@ -286,6 +293,31 @@ export const ROOT_STACK_SCREENS = {
     linking: MVP_ROOT_ROUTES.ProjectSourceControl.linking,
     options: routeOptions("ProjectSourceControl", { title: "Source Control" }),
   }),
+  ProjectBranches: createNativeStackScreen({
+    screen: SourceControlBranchesRouteScreen,
+    linking: MVP_ROOT_ROUTES.ProjectBranches.linking,
+    options: routeOptions("ProjectBranches", { title: "Branches", gestureEnabled: true }),
+  }),
+  ProjectCommit: createNativeStackScreen({
+    screen: SourceControlCommitRouteScreen,
+    linking: MVP_ROOT_ROUTES.ProjectCommit.linking,
+    options: routeOptions("ProjectCommit", { title: "Commit", gestureEnabled: true }),
+  }),
+  ProjectChanges: createNativeStackScreen({
+    screen: SourceControlChangesRouteScreen,
+    linking: MVP_ROOT_ROUTES.ProjectChanges.linking,
+    options: routeOptions("ProjectChanges", { title: "Changes" }),
+  }),
+  ProjectCompare: createNativeStackScreen({
+    screen: SourceControlCompareRouteScreen,
+    linking: MVP_ROOT_ROUTES.ProjectCompare.linking,
+    options: routeOptions("ProjectCompare", { title: "Compare" }),
+  }),
+  ProjectPublish: createNativeStackScreen({
+    screen: SourceControlPublishRouteScreen,
+    linking: MVP_ROOT_ROUTES.ProjectPublish.linking,
+    options: routeOptions("ProjectPublish", { title: "Publish", gestureEnabled: true }),
+  }),
   ProjectPullRequests: createNativeStackScreen({
     screen: PullRequestsRouteScreen,
     linking: MVP_ROOT_ROUTES.ProjectPullRequests.linking,
@@ -339,6 +371,17 @@ export const ROOT_STACK_SCREENS = {
     // The title is the file's basename, which only the screen knows; it sets it
     // through `navigation.setOptions` once the path param has been normalized.
     options: routeOptions("ThreadFile"),
+  }),
+  ThreadFileEdit: createNativeStackScreen({
+    screen: ThreadFileEditRouteScreen,
+    linking: MVP_ROOT_ROUTES.ThreadFileEdit.linking,
+    // The title is the file's basename, which the screen sets.
+    options: routeOptions("ThreadFileEdit"),
+  }),
+  ThreadFileSearch: createNativeStackScreen({
+    screen: ThreadFileSearchRouteScreen,
+    linking: MVP_ROOT_ROUTES.ThreadFileSearch.linking,
+    options: routeOptions("ThreadFileSearch", { title: "Find in files" }),
   }),
   ThreadDevice: createNativeStackScreen({
     screen: ThreadDeviceRouteScreen,

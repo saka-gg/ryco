@@ -32,18 +32,6 @@ export interface GitQuickAction {
   hint?: string;
 }
 
-export interface DefaultBranchActionDialogCopy {
-  title: string;
-  description: string;
-  continueLabel: string;
-}
-
-export type DefaultBranchConfirmableAction =
-  | "push"
-  | "create_pr"
-  | "commit_push"
-  | "commit_push_pr";
-
 /**
  * The overview can discover the current branch's change request before the
  * remote portion of the streamed Git status catches up. Reconcile that richer
@@ -588,57 +576,12 @@ export function resolvePullAvailability(
   return { disabledReason: !gitStatus.hasUpstream || behind === 0 ? detail : null, detail };
 }
 
-export function requiresDefaultBranchConfirmation(
-  action: GitStackedAction,
-  isDefaultRef: boolean,
-): boolean {
-  if (!isDefaultRef) return false;
-  return (
-    action === "push" ||
-    action === "create_pr" ||
-    action === "commit_push" ||
-    action === "commit_push_pr"
-  );
-}
-
-export function resolveDefaultBranchActionDialogCopy(input: {
-  action: DefaultBranchConfirmableAction;
-  branchName: string;
-  includesCommit: boolean;
-  terminology?: ChangeRequestTerminology;
-}): DefaultBranchActionDialogCopy {
-  const branchLabel = input.branchName;
-  const suffix = ` on "${branchLabel}". You can continue on this ref or create a feature ref and run the same action there.`;
-  const terminology = input.terminology ?? DEFAULT_CHANGE_REQUEST_TERMINOLOGY;
-
-  if (input.action === "push" || input.action === "commit_push") {
-    if (input.includesCommit) {
-      return {
-        title: "Commit & push to default ref?",
-        description: `This action will commit and push changes${suffix}`,
-        continueLabel: `Commit & push to ${branchLabel}`,
-      };
-    }
-    return {
-      title: "Push to default ref?",
-      description: `This action will push local commits${suffix}`,
-      continueLabel: `Push to ${branchLabel}`,
-    };
-  }
-
-  if (input.includesCommit) {
-    return {
-      title: `Commit, push & create ${terminology.shortLabel} from default ref?`,
-      description: `This action will commit, push, and create a ${terminology.singular}${suffix}`,
-      continueLabel: `Commit, push & create ${terminology.shortLabel}`,
-    };
-  }
-  return {
-    title: `Push & create ${terminology.shortLabel} from default ref?`,
-    description: `This action will push local commits and create a ${terminology.singular}${suffix}`,
-    continueLabel: `Push & create ${terminology.shortLabel}`,
-  };
-}
+export {
+  requiresDefaultBranchConfirmation,
+  resolveDefaultBranchActionDialogCopy,
+  type DefaultBranchActionDialogCopy,
+  type DefaultBranchConfirmableAction,
+} from "@ryco/shared/gitDefaultBranch";
 
 export function resolveThreadBranchUpdate(
   result: GitRunStackedActionResult,

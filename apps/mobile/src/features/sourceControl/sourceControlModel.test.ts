@@ -2,7 +2,11 @@ import { describe, expect, it } from "vite-plus/test";
 
 import type { VcsStatusResult } from "@ryco/contracts";
 
-import { sourceControlActionAvailability, sourceControlStatusLine } from "./sourceControlModel";
+import {
+  sourceControlActionAvailability,
+  sourceControlStatusLine,
+  sourceControlSyncLine,
+} from "./sourceControlModel";
 
 const status = {
   isRepo: true,
@@ -52,5 +56,13 @@ describe("mobile source control model", () => {
         },
       }),
     ).toContain("PR #42 open");
+  });
+
+  it("leaves the branch to the chip and says when nothing is out of sync", () => {
+    expect(sourceControlSyncLine(status)).toBe("2 ahead · 1 behind");
+    expect(sourceControlSyncLine({ ...status, aheadCount: 0, behindCount: 0 })).toBe("Up to date");
+    expect(
+      sourceControlSyncLine({ ...status, aheadCount: 0, behindCount: 0, hasUpstream: false }),
+    ).toBe("Not pushed yet");
   });
 });
