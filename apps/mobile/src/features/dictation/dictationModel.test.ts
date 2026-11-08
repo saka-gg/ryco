@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   applyDictationResult,
+  chooseDictationLocale,
   composeDictationDraft,
   describeDictationError,
   DICTATION_LEVEL_SAMPLES,
@@ -10,6 +11,7 @@ import {
   formatDictationElapsed,
   normalizeDictationVolume,
   pushDictationLevel,
+  dictationLocaleCandidates,
   resolveDictationLocale,
 } from "./dictationModel";
 
@@ -76,6 +78,50 @@ describe("resolveDictationLocale", () => {
     expect(resolveDictationLocale(["de-AT"], supported)).toBe("de-DE");
     expect(resolveDictationLocale(["xx-YY", "fr"], supported)).toBe("fr-FR");
     expect(resolveDictationLocale(["xx"], supported)).toBeNull();
+  });
+
+  it("picks the region, then the language's home locale, not the first of the list", () => {
+    const supported = ["de-AT", "de-CH", "de-DE", "en-AE", "en-AU", "en-GB", "en-US"];
+    expect(resolveDictationLocale(["en-DE"], supported)).toBe("en-US");
+    expect(resolveDictationLocale(["de-CH"], supported)).toBe("de-CH");
+    expect(resolveDictationLocale(["de"], supported)).toBe("de-DE");
+    expect(resolveDictationLocale(["en-GB"], supported)).toBe("en-GB");
+  });
+});
+
+describe("chooseDictationLocale", () => {
+  it("needs an on-device locale and follows the system languages", () => {
+    expect(chooseDictationLocale({ locales: ["en-US"] }, null)).toEqual({
+      ok: false,
+      code: "service-not-allowed",
+    });
+    expect(
+      chooseDictationLocale(
+        {
+          locales: [],
+          onDeviceLocales: ["de-DE", "en-US"],
+          preferredLanguages: ["de-DE", "en-DE"],
+        },
+        "en-DE",
+      ),
+    ).toEqual({ ok: true, lang: "de-DE" });
+    expect(
+      chooseDictationLocale(
+        { locales: [], onDeviceLocales: ["ja-JP"], preferredLanguages: ["de-DE"] },
+        "en-DE",
+      ),
+    ).toEqual({ ok: false, code: "language-not-supported" });
+  });
+});
+
+describe("dictationLocaleCandidates", () => {
+  it("tries the system languages first, then the app locale, then English", () => {
+    expect(dictationLocaleCandidates(["de-DE", "en-DE"], "en-DE")).toEqual([
+      "de-DE",
+      "en-DE",
+      "en-US",
+    ]);
+    expect(dictationLocaleCandidates(undefined, null)).toEqual(["en-US"]);
   });
 });
 

@@ -88,8 +88,10 @@ export function formatDictationElapsed(seconds: number): string {
 }
 
 /**
- * The recognizer locale for the phone's language: the exact one, else the
- * first of the same language (`de` → `de-DE`), else none.
+ * The recognizer locale for the person's languages, in their order: the exact
+ * one, else one of the same language (`de-AT` → `de-DE`, `en-DE` → `en-US`),
+ * else none. Only locales in `supported` count, so pass the ones that can
+ * recognize on the device.
  */
 export function resolveDictationLocale(
   preferred: ReadonlyArray<string>,
@@ -101,11 +103,62 @@ export function resolveDictationLocale(
     const key = normalize(candidate);
     const exact = available.find((entry) => entry.key === key);
     if (exact) return exact.locale;
-    const language = key.split("-")[0];
-    const sameLanguage = available.find((entry) => entry.key.split("-")[0] === language);
-    if (sameLanguage) return sameLanguage.locale;
+    const parts = key.split("-");
+    const language = parts[0];
+    const sameLanguage = available.filter((entry) => entry.key.split("-")[0] === language);
+    if (sameLanguage.length === 0) continue;
+    // Same region first (`zh-Hant-TW` → `zh-TW`), then the language's home
+    // locale (`de-DE`, `fr-FR`, `en-US`), then whatever is left.
+    const region = parts.length > 1 ? parts[parts.length - 1] : null;
+    const home = language === "en" ? "en-us" : `${language}-${language}`;
+    const pick =
+      (region ? sameLanguage.find((entry) => entry.key.endsWith(`-${region}`)) : undefined) ??
+      sameLanguage.find((entry) => entry.key === home) ??
+      sameLanguage[0];
+    if (pick) return pick.locale;
   }
   return null;
+}
+
+/**
+ * The languages to try, best first: the person's preferred languages from the
+ * system (Settings > Language & Region), then the app's own locale, then English.
+ */
+export function dictationLocaleCandidates(
+  preferredLanguages: ReadonlyArray<string> | undefined,
+  appLocale: string | null,
+): string[] {
+  const candidates = [...(preferredLanguages ?? [])];
+  if (appLocale) candidates.push(appLocale);
+  candidates.push("en-US");
+  return [...new Set(candidates)];
+}
+
+/** iOS's answer, with the fields Ryco's patch adds (patches/expo-speech-recognition@57.1.1.patch). */
+export interface DictationLocaleAnswer {
+  readonly locales: ReadonlyArray<string>;
+  readonly onDeviceLocales?: ReadonlyArray<string>;
+  readonly preferredLanguages?: ReadonlyArray<string>;
+}
+
+/**
+ * The locale to dictate in, or the error to show. Asks per locale: the app's own
+ * locale (en_DE for this English-only app on a German phone) has no recognizer,
+ * so a locale-less "supports on-device?" check always says no.
+ */
+export function chooseDictationLocale(
+  answer: DictationLocaleAnswer,
+  appLocale: string | null,
+):
+  | { readonly ok: true; readonly lang: string }
+  | { readonly ok: false; readonly code: "service-not-allowed" | "language-not-supported" } {
+  const onDevice = answer.onDeviceLocales ?? [];
+  if (onDevice.length === 0) return { ok: false, code: "service-not-allowed" };
+  const lang = resolveDictationLocale(
+    dictationLocaleCandidates(answer.preferredLanguages, appLocale),
+    onDevice,
+  );
+  return lang ? { ok: true, lang } : { ok: false, code: "language-not-supported" };
 }
 
 /**

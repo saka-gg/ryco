@@ -13,7 +13,7 @@ import {
   EMPTY_DICTATION_TRANSCRIPT,
   normalizeDictationVolume,
   pushDictationLevel,
-  resolveDictationLocale,
+  chooseDictationLocale,
   type DictationAnchor,
   type DictationState,
 } from "./dictationModel";
@@ -53,15 +53,12 @@ function releaseAudioSession(): void {
   }
 }
 
-function preferredLocales(): string[] {
-  const locales: string[] = [];
+function appLocale(): string | null {
   try {
-    locales.push(Intl.DateTimeFormat().resolvedOptions().locale);
+    return Intl.DateTimeFormat().resolvedOptions().locale;
   } catch {
-    // Fall through to English below.
+    return null;
   }
-  locales.push("en-US");
-  return locales;
 }
 
 /**
@@ -171,12 +168,12 @@ export function useComposerDictation(input: {
         }
         const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
         if (!permission.granted) return failCurrent("not-allowed");
-        if (!ExpoSpeechRecognitionModule.supportsOnDeviceRecognition()) {
-          return failCurrent("service-not-allowed");
-        }
-        const { locales } = await ExpoSpeechRecognitionModule.getSupportedLocales({});
-        const lang = resolveDictationLocale(preferredLocales(), locales);
-        if (!lang) return failCurrent("language-not-supported");
+        const choice = chooseDictationLocale(
+          await ExpoSpeechRecognitionModule.getSupportedLocales({}),
+          appLocale(),
+        );
+        if (!choice.ok) return failCurrent(choice.code);
+        const lang = choice.lang;
         if (!current()) return;
         const selection = latest.current.readSelection();
         anchor.current = { text: latest.current.text, start: selection.start, end: selection.end };
