@@ -971,10 +971,12 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
   const followUpQueueSummaryColumn = sql`(
     SELECT json_object(
       'count', COUNT(*),
-      'hold', (
-        SELECT json(hold_rows.hold_json) FROM projection_thread_queue_holds hold_rows
+      -- json() must wrap the scalar subquery, not sit inside it: SQLite 3.54 drops the JSON
+      -- subtype at the subquery boundary, so json_object would embed the hold as a string.
+      'hold', json((
+        SELECT hold_rows.hold_json FROM projection_thread_queue_holds hold_rows
         WHERE hold_rows.thread_id = projection_threads.thread_id
-      ),
+      )),
       'headStatus', (
         SELECT head.status FROM projection_thread_queue_entries head
         WHERE head.thread_id = projection_threads.thread_id
