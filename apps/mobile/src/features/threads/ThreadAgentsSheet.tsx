@@ -13,7 +13,7 @@ import {
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import type { AgentControlProposalView } from "@ryco/contracts/agent-control";
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Alert, Modal, Platform, Pressable, ScrollView, View } from "react-native";
 import { useShallow } from "zustand/react/shallow";
 
@@ -41,6 +41,7 @@ import {
   type ThreadAgentElapsed,
   type ThreadAgentRow,
   type ThreadAgentsEntry,
+  type ThreadAgentsSheetModel,
   type ThreadAgentSection,
   type ThreadAgentsSheetInput,
   type ThreadAgentTone,
@@ -52,6 +53,7 @@ import {
   openThreadAgentsSheet,
   THREAD_AGENTS_SHEET_CLOSED,
   threadAgentsSheetDismissed,
+  type ThreadAgentsSheetState,
 } from "./threadAgentsSheetState";
 
 const DOT_CLASS: Readonly<Record<ThreadAgentTone, string>> = {
@@ -330,14 +332,23 @@ function SectionView(props: {
   );
 }
 
+export interface ThreadAgentsControl {
+  readonly model: ThreadAgentsSheetModel;
+  /** The way into the sheet; null while the chat set no agents working. */
+  readonly entry: ThreadAgentsEntry | null;
+  readonly open: () => void;
+  /** The sheet itself: render it once, anywhere on the screen. */
+  readonly sheet: ReactNode;
+}
+
 /**
- * Everything a chat set working, behind one control under its context bar: provider subagents
- * (Claude subagents, Codex collaboration agents, workflow members) with live elapsed time and
- * status, and the Ryco tasks it delegated, which open their own thread (Back returns here).
- * Renders nothing while the chat set no agents working. Key it by thread: its sheet state
+ * Everything a chat set working: provider subagents (Claude subagents, Codex collaboration
+ * agents, workflow members) with live elapsed time and status, and the Ryco tasks it delegated,
+ * which open their own thread (Back returns here). The screen shows `entry` where it fits (the
+ * floating status row) and renders `sheet` once. Key the screen's use by thread: its sheet state
  * belongs to one chat.
  */
-export function ThreadAgents(props: {
+export function useThreadAgents(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly thread: Thread | undefined;
@@ -351,7 +362,20 @@ export function ThreadAgents(props: {
   readonly onOpenThread: (threadId: ThreadId) => void;
 }) {
   const source = useThreadAgentsSource(props);
-  const [sheet, setSheet] = useState(THREAD_AGENTS_SHEET_CLOSED);
+  // Kept per chat: a screen retargeted to another chat (by a link) reads its sheet as closed.
+  const sheetThreadKey = `${props.environmentId}\u0000${props.threadId}`;
+  const [sheetEntry, setSheetEntry] = useState({
+    key: sheetThreadKey,
+    sheet: THREAD_AGENTS_SHEET_CLOSED,
+  });
+  const sheet = sheetEntry.key === sheetThreadKey ? sheetEntry.sheet : THREAD_AGENTS_SHEET_CLOSED;
+  const setSheet = (
+    next: ThreadAgentsSheetState | ((current: ThreadAgentsSheetState) => ThreadAgentsSheetState),
+  ) =>
+    setSheetEntry((current) => {
+      const shown = current.key === sheetThreadKey ? current.sheet : THREAD_AGENTS_SHEET_CLOSED;
+      return { key: sheetThreadKey, sheet: typeof next === "function" ? next(shown) : next };
+    });
   const [expandedKeys, setExpandedKeys] = useState<ReadonlySet<string>>(() => new Set());
   const runtimeSessionId = props.thread?.session?.runtimeSessionId ?? null;
   const model = useMemo(
@@ -369,7 +393,12 @@ export function ThreadAgents(props: {
   const hasAgents = entry !== null;
   // A chat that runs out of agents closes the sheet, so its next agent never reopens it.
   useEffect(() => {
-    if (!hasAgents) setSheet(closeThreadAgentsSheet);
+    if (!hasAgents) {
+      setSheetEntry((current) => ({
+        key: current.key,
+        sheet: closeThreadAgentsSheet(current.sheet),
+      }));
+    }
   }, [hasAgents]);
   // A stop stays pending, across sheets and reopenings, until its agent settles or it times out.
   const threadRef = useMemo(
@@ -391,8 +420,6 @@ export function ThreadAgents(props: {
       for (const stopWatching of unwatch) stopWatching();
     };
   }, [shownStopKeys]);
-
-  if (!isThreadAgentsSheetMounted(sheet, hasAgents)) return null;
 
   const close = () => setSheet(closeThreadAgentsSheet);
   const onRowPress = (row: ThreadAgentRow) => {
@@ -426,11 +453,8 @@ export function ThreadAgents(props: {
     });
   };
 
-  return (
+  const sheetElement = !isThreadAgentsSheetMounted(sheet, hasAgents) ? null : (
     <>
-      {entry ? (
-        <ThreadAgentsButton entry={entry} onPress={() => setSheet(openThreadAgentsSheet())} />
-      ) : null}
       <Modal
         visible={sheet.open}
         animationType="slide"
@@ -479,4 +503,10 @@ export function ThreadAgents(props: {
       </Modal>
     </>
   );
+  return {
+    model,
+    entry,
+    open: () => setSheet(openThreadAgentsSheet()),
+    sheet: sheetElement,
+  };
 }

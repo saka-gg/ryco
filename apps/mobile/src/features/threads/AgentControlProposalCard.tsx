@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigation } from "@react-navigation/native";
 import { Pressable, View } from "react-native";
 
-import type { AgentControlProposalView, EnvironmentId } from "@ryco/contracts";
+import type { AgentControlProposalView, EnvironmentId, ThreadId } from "@ryco/contracts";
 
 import { AppText as Text } from "../../components/AppText";
 import { ensureEnvironmentApi } from "../../connection/environmentApi";
@@ -26,12 +26,18 @@ export function AgentControlProposalCard(props: {
   readonly proposal: AgentControlProposalView;
   /** Cached/degraded threads render the proposal but cannot decide it. */
   readonly disabled?: boolean;
+  /** Opens a thread the receipt links to; defaults to pushing it (a sheet closes first). */
+  readonly onOpenThread?: (threadId: ThreadId) => void;
 }) {
   const navigation = useNavigation();
   const [pending, setPending] = useState<"accept" | "reject" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const model = buildAgentControlProposalCardModel(props.proposal);
   const decisions = agentControlCardDecisions(model, null);
+  const openThread = (threadId: ThreadId) =>
+    props.onOpenThread
+      ? props.onOpenThread(threadId)
+      : navigation.navigate("Thread", { environmentId: props.environmentId, threadId });
 
   const decide = async (decision: "accept" | "reject") => {
     if (decision === "accept" && !decisions.canApprove) return;
@@ -92,31 +98,21 @@ export function AgentControlProposalCard(props: {
         </Text>
       ) : null}
       {model.completionReturns?.map((result) => (
-        <View key={result.childThreadId} className="mt-2 border-l-2 border-border pl-2">
+        <View key={result.childThreadId} className="mt-2 rounded-xl bg-subtle px-3 py-2">
           <Text className="font-ryco-bold text-sm text-foreground">
             Completion return · {result.status}
           </Text>
           <Text className="font-sans text-sm text-foreground-muted">{result.detail}</Text>
           <Pressable
             accessibilityRole="link"
-            onPress={() =>
-              navigation.navigate("Thread", {
-                environmentId: props.environmentId,
-                threadId: result.childThreadId,
-              })
-            }
+            onPress={() => openThread(result.childThreadId)}
             className="min-h-11 justify-center"
           >
             <Text className="text-sm text-primary">Open child task</Text>
           </Pressable>
           <Pressable
             accessibilityRole="link"
-            onPress={() =>
-              navigation.navigate("Thread", {
-                environmentId: props.environmentId,
-                threadId: result.parentThreadId,
-              })
-            }
+            onPress={() => openThread(result.parentThreadId)}
             className="min-h-11 justify-center"
           >
             <Text className="text-sm text-primary">Open originating chat</Text>

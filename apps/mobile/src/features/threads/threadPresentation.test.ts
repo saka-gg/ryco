@@ -23,7 +23,7 @@ describe("thread presentation", () => {
   it("uses semantic plan tokens instead of a raw palette", () => {
     const presentation = proposedPlanPresentation();
 
-    expect(presentation.containerClassName).toContain("border-plan-border");
+    expect(presentation.containerClassName).not.toContain("border");
     expect(presentation.containerClassName).toContain("bg-plan-bg");
     expect(presentation.labelClassName).toBe("text-plan");
     expect(JSON.stringify(presentation)).not.toMatch(/violet|purple/);

@@ -51,7 +51,7 @@ export function SecretRequestCard(props: {
   };
 
   return (
-    <View className="mx-4 my-2 rounded-2xl border border-accent-border bg-accent-bg p-4">
+    <View className="mx-4 my-1.5 rounded-2xl bg-accent-bg p-4">
       <Text className="text-xs font-ryco-bold uppercase tracking-wide text-accent-strong">
         Secret requested
       </Text>

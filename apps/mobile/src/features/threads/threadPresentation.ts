@@ -23,7 +23,7 @@ export function threadMessagePresentation(role: "user" | "assistant"): ThreadMes
 
 export function proposedPlanPresentation(): ThreadCalloutPresentation {
   return {
-    containerClassName: "border border-plan-border bg-plan-bg",
+    containerClassName: "bg-plan-bg",
     labelClassName: "text-plan",
   };
 }

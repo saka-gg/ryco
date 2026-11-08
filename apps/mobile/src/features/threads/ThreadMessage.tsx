@@ -226,7 +226,7 @@ function SentMessageContexts(props: {
           }
           className="gap-0.5"
         >
-          <View className="flex-row items-center gap-1 self-start rounded-full border border-border bg-card-translucent px-2 py-1">
+          <View className="flex-row items-center gap-1 self-start rounded-full bg-subtle px-2 py-1">
             <SymbolView name="globe" size={11} tintColor={subtle} type="monochrome" />
             <Text className="text-[11px] font-ryco-medium text-foreground-muted" numberOfLines={1}>
               {formatBrowserElementLabel(element)}
@@ -250,7 +250,7 @@ function SentMessageContexts(props: {
           }
           className="gap-0.5"
         >
-          <View className="flex-row items-center gap-1 self-start rounded-full border border-border bg-card-translucent px-2 py-1">
+          <View className="flex-row items-center gap-1 self-start rounded-full bg-subtle px-2 py-1">
             <SymbolView name="doc.text" size={11} tintColor={subtle} type="monochrome" />
             <Text className="text-[11px] font-ryco-medium text-foreground-muted" numberOfLines={1}>
               {formatFileReferenceLabel(reference)}
@@ -268,7 +268,7 @@ function SentMessageContexts(props: {
           key={context.header}
           accessibilityRole="text"
           accessibilityLabel={context.header}
-          className="flex-row items-center gap-1 self-start rounded-full border border-border bg-card-translucent px-2 py-1"
+          className="flex-row items-center gap-1 self-start rounded-full bg-subtle px-2 py-1"
         >
           <SymbolView name="terminal" size={11} tintColor={subtle} type="monochrome" />
           <Text className="text-[11px] font-ryco-medium text-foreground-muted" numberOfLines={1}>
@@ -365,7 +365,7 @@ export function ThreadMessage(props: {
           accessibilityState={{ expanded: false }}
           accessibilityLabel={`${agentFold.label}${agentFold.summary ? `: ${agentFold.summary}` : ""}`}
           onPress={() => setAgentFoldOpen(true)}
-          className="max-w-[88%] flex-row items-center gap-2 rounded-2xl border border-border px-3 py-2 active:opacity-70"
+          className="max-w-[88%] flex-row items-center gap-2 rounded-2xl bg-subtle px-3 py-2 active:opacity-70"
         >
           <Text className="text-xs font-ryco-medium text-foreground-muted">{agentFold.label}</Text>
           {agentFold.summary ? (

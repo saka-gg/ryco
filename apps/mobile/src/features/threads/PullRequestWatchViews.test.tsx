@@ -10,9 +10,9 @@ import {
 } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-// The sheet invoked as a plain function with react-native mocked (no React renderer exists in
-// this suite), hooks answering their first render: what it proves is the pull request watch
-// section's wiring. The switch, Resume and Stop watching send the watch RPC through the
+// The section invoked as a plain function with react-native mocked (no React renderer exists in
+// this suite), its control hook answering its first render: what it proves is the pull request
+// watch section's wiring. The switch, Resume and Stop watching send the watch RPC through the
 // environment's API; the section shows each state and stays out of the way without a watch.
 
 const api = vi.hoisted(() => ({
@@ -35,22 +35,12 @@ vi.mock("react", async (importOriginal) => {
   };
 });
 vi.mock("react-native", () => ({
-  Modal: "Modal",
   Pressable: "Pressable",
-  ScrollView: "ScrollView",
   Switch: "Switch",
-  TextInput: "TextInput",
   View: "View",
 }));
 vi.mock("../../components/AppText", () => ({ AppText: "Text" }));
 vi.mock("../../components/AppSymbol", () => ({ SymbolView: "SymbolView" }));
-vi.mock("../../components/DeviceIcon", () => ({ DeviceIcon: "DeviceIcon" }));
-const copied = vi.hoisted(() => [] as Array<{ value: string; target?: string }>);
-vi.mock("../../lib/copyTextWithHaptic", () => ({
-  copyTextWithHaptic: (value: string, options: { target?: string } = {}) =>
-    copied.push({ value, ...(options.target === undefined ? {} : { target: options.target }) }),
-}));
-vi.mock("../../components/ErrorBanner", () => ({ ErrorBanner: "ErrorBanner" }));
 vi.mock("../../lib/useThemeColor", () => ({ useThemeColor: () => "#888888" }));
 vi.mock("../../connection/environmentApi", () => ({
   readEnvironmentApi: () =>
@@ -59,7 +49,8 @@ vi.mock("../../connection/environmentApi", () => ({
       : { sourceControl: { setPullRequestWatch: api.setPullRequestWatch } },
 }));
 
-import { PullRequestWatchSection, ThreadActionsSheet } from "./ThreadActionsSheet";
+import { PullRequestWatchSection } from "./PullRequestWatchViews";
+import { usePullRequestWatchControl } from "./usePullRequestWatchControl";
 import { buildThreadHeaderModel, type ThreadHeaderModel } from "./threadHeaderModel";
 
 const environmentId = EnvironmentId.make("env-sheet");
@@ -161,27 +152,14 @@ function headerModel(input: {
 }
 
 function render(model: ThreadHeaderModel, mutationReady = true) {
-  const sheet = ThreadActionsSheet({
-    visible: true,
-    model,
+  const control = usePullRequestWatchControl({
     environmentId,
     threadId,
-    mutationReady,
-    busy: false,
-    error: null,
-    onClose: () => undefined,
-    onRename: () => undefined,
-    onStop: () => undefined,
-    onToggleSettlement: () => undefined,
-    onToggleArchive: () => undefined,
-    onReview: () => undefined,
-    onCompact: () => undefined,
+    watch: model.pullRequestWatch,
+    ready: mutationReady,
   });
-  const section = elements(sheet).find((element) => element.type === PullRequestWatchSection);
-  if (!section) return null;
-  const body = PullRequestWatchSection(
-    section.props as Parameters<typeof PullRequestWatchSection>[0],
-  );
+  if (control === null) return null;
+  const body = PullRequestWatchSection({ control });
   if (body === null) return null;
   const nodes = elements(body);
   const rows = nodes.filter((element) => typeof element.type === "function");
@@ -213,7 +191,7 @@ function recordRequests() {
   return sent;
 }
 
-describe("thread actions sheet pull request watch", () => {
+describe("pull request watch section", () => {
   it("turns Auto-fix CI on for the task's pull request", () => {
     const sent = recordRequests();
     const view = render(headerModel({}));
@@ -376,64 +354,5 @@ describe("thread actions sheet pull request watch", () => {
 
   it("is absent on a node without pull request watches", () => {
     expect(render(headerModel({ available: false }))).toBeNull();
-  });
-});
-
-describe("task sheet pull request row", () => {
-  function sheetRows(onOpenPullRequest?: () => void, model: ThreadHeaderModel = headerModel({})) {
-    const sheet = ThreadActionsSheet({
-      visible: true,
-      model,
-      environmentId,
-      threadId,
-      mutationReady: true,
-      busy: false,
-      error: null,
-      onClose: () => undefined,
-      onRename: () => undefined,
-      onStop: () => undefined,
-      onToggleSettlement: () => undefined,
-      onToggleArchive: () => undefined,
-      onReview: () => undefined,
-      onCompact: () => undefined,
-      onOpenPullRequest,
-    });
-    return elements(sheet).filter((element) => typeof element.props.label === "string");
-  }
-
-  it("opens the worktree's pull request on the phone", () => {
-    const opened: string[] = [];
-    const row = sheetRows(() => opened.push("open")).find(
-      (element) => element.props.label === "Open pull request #42",
-    );
-    press(row);
-    expect(opened).toEqual(["open"]);
-  });
-
-  it("copies the task's ID, and the pull request link when one is known", () => {
-    copied.length = 0;
-    const row = (rows: ReturnType<typeof sheetRows>, label: string) =>
-      rows.find((element) => element.props.label === label);
-    press(row(sheetRows(), "Copy task ID"));
-    expect(copied).toEqual([{ value: threadId, target: "task ID" }]);
-    expect(row(sheetRows(), "Copy link to pull request")).toBeUndefined();
-
-    copied.length = 0;
-    const withLink = sheetRows(
-      undefined,
-      headerModel({ pullRequestUrl: "https://github.com/saka-gg/ryco/pull/42" }),
-    );
-    press(row(withLink, "Copy link to pull request"));
-    press(row(withLink, "Copy task ID"));
-    expect(copied).toEqual([
-      { value: "https://github.com/saka-gg/ryco/pull/42", target: "pull request link" },
-      { value: threadId, target: "task ID" },
-    ]);
-  });
-
-  it("is absent without a project to read it through", () => {
-    expect(sheetRows().some((element) => element.props.label === "Open pull request #42")).toBe(
-      false,
-    );
   });
 });

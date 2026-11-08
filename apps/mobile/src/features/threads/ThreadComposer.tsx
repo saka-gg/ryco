@@ -81,6 +81,8 @@ export function ThreadComposer(props: {
   /** Claude Code's Fast mode when it differs from the selection's (`deriveClaudeFastModeNotice`). */
   readonly fastModeNotice?: FastModeNotice | null;
   readonly onSelectModel: (selection: ModelSelection) => void;
+  /** Claude's observed prompt cache sits behind an ⓘ beside the model chip (web's meter). */
+  readonly onOpenCacheInfo?: () => void;
   readonly onOpenSideChat?: () => void;
   /** What the next message's context handoff is (`derivePendingComposerHandoff`). */
   readonly pendingHandoff?: PendingComposerHandoff | null;
@@ -187,7 +189,11 @@ export function ThreadComposer(props: {
   };
 
   return (
-    <View className="px-4 pt-1" style={{ paddingBottom: Math.max(8, safeAreaInsets.bottom) }}>
+    <View
+      className="px-4 pt-1"
+      // The keyboard covers the home indicator: its inset would only float the composer above it.
+      style={{ paddingBottom: keyboardVisible ? 8 : Math.max(8, safeAreaInsets.bottom) }}
+    >
       {visibleAttachmentError ? (
         <Text className="px-3 pb-1.5 text-xs font-ryco-medium text-danger-foreground">
           {visibleAttachmentError}
@@ -252,6 +258,22 @@ export function ThreadComposer(props: {
                       />
                     )}
                   </ComposerModelMenu>
+                ) : null}
+                {props.onOpenCacheInfo ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Claude prompt cache"
+                    onPress={props.onOpenCacheInfo}
+                    hitSlop={6}
+                    className="-ml-1 h-8 w-8 items-center justify-center rounded-full active:bg-subtle-strong"
+                  >
+                    <SymbolView
+                      name="info.circle"
+                      size={15}
+                      tintColor={iconSubtle as string}
+                      type="monochrome"
+                    />
+                  </Pressable>
                 ) : null}
                 {props.onOpenSideChat ? (
                   <ComposerToolbarButton
