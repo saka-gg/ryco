@@ -79,10 +79,17 @@ export function Choice(props: {
     </MenuView>
   );
 }
+/**
+ * A segmented switch with a sliding selection. `compact` is the smaller one
+ * for a secondary choice under the main switch, such as a date window.
+ */
 export function Tabs<T extends string>(props: {
   value: T;
-  options: readonly { value: T; label: string }[];
+  options: readonly { value: T; label: string; accessibilityLabel?: string }[];
   onChange: (value: T) => void;
+  /** Names the switch for VoiceOver. */
+  label?: string;
+  compact?: boolean;
 }) {
   const [width, setWidth] = useState(0);
   const index = props.options.findIndex((option) => option.value === props.value);
@@ -99,9 +106,10 @@ export function Tabs<T extends string>(props: {
     <View
       onLayout={(event) => setWidth(event.nativeEvent.layout.width)}
       accessibilityRole="tablist"
+      accessibilityLabel={props.label}
       className="flex-row rounded-full bg-card p-1 border border-border"
     >
-      {width > 0 ? (
+      {width > 0 && index >= 0 ? (
         <Animated.View
           pointerEvents="none"
           style={[
@@ -122,11 +130,20 @@ export function Tabs<T extends string>(props: {
         <Pressable
           key={option.value}
           accessibilityRole="tab"
+          accessibilityLabel={option.accessibilityLabel ?? option.label}
           accessibilityState={{ selected: props.value === option.value }}
           onPress={() => props.onChange(option.value)}
-          className="flex-1 items-center rounded-full py-2"
+          className={`flex-1 items-center rounded-full active:opacity-70 ${props.compact ? "py-1.5" : "py-2"}`}
         >
-          <Text className="text-sm font-ryco-medium text-foreground">{option.label}</Text>
+          <Text
+            className={`${props.compact ? "text-xs" : "text-sm"} ${
+              props.value === option.value
+                ? "font-ryco-bold text-foreground"
+                : "font-ryco-medium text-foreground-muted"
+            }`}
+          >
+            {option.label}
+          </Text>
         </Pressable>
       ))}
     </View>

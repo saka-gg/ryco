@@ -72,6 +72,16 @@ aggregate row); and the Live Activity push timings documented in
 `docs/live-activity-push.md` (ten-minute stale date, end dismissal windows, from
 upstream's relay APNs client).
 
+The Usage tab (round 2, 2026-11) follows the layout and mechanisms of the same
+upstream's phone Usage screen at `e455200077`, rewritten for Ryco's statistics
+components rather than copied: the view switch above a date-window switch, the
+keyed fade-in per view, the loading, empty and per-device error states, the
+delayed dimming while devices answer a refresh, and refreshing limits when they
+come back into view at most once per five minutes plus on pull
+(`src/features/usage/UsageTabScreen.tsx`, `usageTabModel.ts`,
+`useLimitsFocusRefresh.ts`, from upstream's `features/usage/UsageRouteScreen.tsx`,
+`UsageLimitsSection.tsx` and `usageLimitsRefresh.ts`).
+
 `pingdotgg/t3code` is Copyright (c) 2026 T3 Tools Inc. and licensed under the MIT
 License; that notice is retained below as required. The four vendored native
 modules under `modules/*` carry their own `LICENSE` / `UPSTREAM.md` notices
