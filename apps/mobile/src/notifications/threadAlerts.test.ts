@@ -212,6 +212,7 @@ describe("mobile thread alerts", () => {
       {
         identifier: threadNotificationTag(ref("b")),
         title: "Finished",
+        subtitle: null,
         body: "Thread b",
         sound: false,
         ref: ref("b"),
@@ -259,6 +260,23 @@ describe("mobile thread alerts", () => {
     test.accept(finished("c"));
     await test.settle();
     expect(test.presented.map((alert) => alert.ref)).toEqual([ref("c")]);
+  });
+
+  it("names a delegated thread's parent on its alert", async () => {
+    const lineage = {
+      parentThreadId: ThreadId.make("parent"),
+      rootThreadId: ThreadId.make("parent"),
+      relationship: "delegated",
+    };
+    const test = harness({
+      threads: [shell("parent", { title: "Fix login redirect loop" }), shell("child", { lineage })],
+    });
+    test.start();
+    test.accept(shell("child", { lineage, hasPendingApprovals: true }));
+    await test.settle();
+    expect(test.presented).toMatchObject([
+      { title: "Needs approval", subtitle: "From Fix login redirect loop", body: "Thread child" },
+    ]);
   });
 
   it("plays the sound when alert sound is on", async () => {

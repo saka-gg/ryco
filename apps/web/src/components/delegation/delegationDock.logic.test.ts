@@ -144,6 +144,7 @@ describe("buildDelegationDockChildren", () => {
       working: 1,
       needsYou: 1,
       failed: 1,
+      done: 0,
       returned: 1,
       returning: 3,
     });

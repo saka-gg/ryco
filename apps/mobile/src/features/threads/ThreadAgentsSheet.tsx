@@ -23,6 +23,8 @@ import { ensureEnvironmentApi } from "../../connection/environmentApi";
 import { cn } from "../../lib/cn";
 import { secondClock } from "../../lib/secondClock";
 import { useThemeColor } from "../../lib/useThemeColor";
+import { agentActivityModelName } from "../../liveActivity/agentActivityModel";
+import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
 import {
   isArchivedThreadStub,
   selectDelegatedChildThreadsForThreadRef,
@@ -155,11 +157,15 @@ export function ThreadAgentsButton(props: {
       />
       <Text
         className={cn(
-          "text-xs font-ryco-medium",
+          "shrink text-xs font-ryco-medium",
           props.entry.live ? "text-accent-strong" : "text-foreground-muted",
         )}
+        numberOfLines={1}
       >
         {props.entry.label}
+        {props.entry.detail ? (
+          <Text className="font-sans text-foreground-tertiary">{` · ${props.entry.detail}`}</Text>
+        ) : null}
       </Text>
       <SymbolView
         name="chevron.right"
@@ -354,6 +360,8 @@ export function ThreadAgents(props: {
   const [sheet, setSheet] = useState(THREAD_AGENTS_SHEET_CLOSED);
   const [expandedKeys, setExpandedKeys] = useState<ReadonlySet<string>>(() => new Set());
   const runtimeSessionId = props.thread?.session?.runtimeSessionId ?? null;
+  // A delegated task's row names its model as the node's catalog does.
+  const serverConfigs = useEnvironmentServerConfigs();
   const model = useMemo(
     () =>
       buildThreadAgentsSheetModel({
@@ -362,8 +370,9 @@ export function ThreadAgents(props: {
         runtimeSessionId,
         stopReady: props.stopReady,
         offline: props.offline,
+        modelNameOf: (thread) => agentActivityModelName(thread, serverConfigs),
       }),
-    [props.environment, props.offline, props.stopReady, runtimeSessionId, source],
+    [props.environment, props.offline, props.stopReady, runtimeSessionId, serverConfigs, source],
   );
   const entry = buildThreadAgentsEntry(model);
   const hasAgents = entry !== null;

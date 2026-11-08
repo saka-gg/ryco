@@ -32,6 +32,8 @@ export interface MobileThreadAlert {
   /** The thread's notification tag: a newer alert replaces the one before. */
   readonly identifier: string;
   readonly title: string;
+  /** A delegated thread's parent ("From Fix login redirect loop"); null for any other thread. */
+  readonly subtitle: string | null;
   readonly body: string;
   readonly sound: boolean;
   readonly ref: ScopedThreadRef;
@@ -58,7 +60,7 @@ export function planMobileThreadAlert(input: {
   /** The kinds the person wants (`wantedThreadAlertKinds`); every kind when absent. */
   readonly wantedKinds?: ReadonlyArray<PushAlertKind>;
 }): MobileThreadAlert | null {
-  const { event, delegated } = input.candidate;
+  const { event, delegated, parentTitle } = input.candidate;
   if (!input.appActive && input.pushCovers === true) return null;
   if (input.wantedKinds !== undefined && !input.wantedKinds.includes(event.kind)) return null;
   const plan = planThreadAlert({
@@ -74,6 +76,7 @@ export function planMobileThreadAlert(input: {
   return {
     identifier: threadNotificationTag(event.ref),
     title: THREAD_ALERT_COPY[event.kind].title,
+    subtitle: threadAlertSubtitle(parentTitle),
     body: event.title,
     sound: plan.sound,
     ref: event.ref,
@@ -81,6 +84,12 @@ export function planMobileThreadAlert(input: {
     turnId: event.turnId,
     approvalRequestId: event.kind === "approval" ? event.approvalRequestId : null,
   };
+}
+
+/** The line naming a delegated thread's parent, so a child's alert says whose work it is. */
+export function threadAlertSubtitle(parentTitle: string | null | undefined): string | null {
+  const title = parentTitle?.trim();
+  return title ? `From ${title}` : null;
 }
 
 /** The deep link path of the thread route, which a tapped alert opens. */

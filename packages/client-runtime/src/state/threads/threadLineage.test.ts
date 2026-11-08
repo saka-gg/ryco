@@ -3,6 +3,7 @@ import { EnvironmentId, MessageId, ThreadId, TurnId, type ThreadLineage } from "
 
 import { scopedThreadKey, scopeThreadRef } from "../../scoped.ts";
 import {
+  delegatedParentTitle,
   isDelegatedThreadLineage,
   isThreadLineage,
   planDelegatedNesting,
@@ -299,6 +300,19 @@ describe("thread lineage helpers", () => {
       parent,
     );
     expect(children.map((child) => child.id)).toEqual(["earlier", "later"]);
+  });
+
+  it("names a delegated thread's parent by its title, and no one else's", () => {
+    const titles = new Map([
+      ["a", "  Fix login redirect loop "],
+      ["blank", "   "],
+    ]);
+    const titleOf = (threadId: ThreadId) => titles.get(threadId);
+    expect(delegatedParentTitle(delegated("a"), titleOf)).toBe("Fix login redirect loop");
+    expect(delegatedParentTitle(delegated("blank"), titleOf)).toBeNull();
+    expect(delegatedParentTitle(delegated("unknown"), titleOf)).toBeNull();
+    expect(delegatedParentTitle(forked("a"), titleOf)).toBeNull();
+    expect(delegatedParentTitle(null, titleOf)).toBeNull();
   });
 
   it("treats null and undefined lineage as equal", () => {

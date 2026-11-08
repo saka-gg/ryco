@@ -135,6 +135,7 @@ describe("thread agents sheet", () => {
       total: 0,
       live: 0,
       offline: false,
+      delegation: null,
     });
     expect(buildThreadAgentsEntry(model)).toBeNull();
   });
@@ -266,7 +267,7 @@ describe("thread agents sheet", () => {
       ],
     });
     expect(model.sections.map((section) => [section.title, section.status])).toEqual([
-      ["Delegated tasks", "1 working"],
+      ["Delegated tasks", "1 working · 1 needs you · 1 done"],
     ]);
     const [working, done, asking] = model.sections[0]!.rows;
     expect(working).toMatchObject({
@@ -286,6 +287,62 @@ describe("thread agents sheet", () => {
     });
     expect(asking).toMatchObject({ statusLabel: "Needs input", tone: "attention", elapsed: null });
     expect(model).toMatchObject({ total: 3, live: 2 });
+    expect(buildThreadAgentsEntry(model)).toEqual({
+      label: "3 delegated · 1 working · 1 needs you · 1 done",
+      detail: null,
+      live: true,
+      accessibilityLabel: "3 delegated · 1 working · 1 needs you · 1 done. Show agents.",
+    });
+  });
+
+  it("names each delegated task's model as the node's catalog does", () => {
+    const model = build({
+      delegatedChildren: [
+        child("a", { modelSelection: { instanceId: "claude", model: "opus" } as never }),
+        child("b"),
+      ],
+      modelNameOf: (thread) => (thread.modelSelection ? "Opus 5.5" : null),
+    });
+    expect(model.sections[0]!.rows.map((row) => row.role)).toEqual(["Opus 5.5", null]);
+  });
+
+  it("says how many delegated results came back, after the chat's own agents", () => {
+    const completionReturn = (childId: string, status: AgentControlCompletionReturn["status"]) =>
+      ({ revision: 1, childThreadId: childId, status, detail: "" }) as never;
+    const finished = (id: string) =>
+      child(id, {
+        latestTurn: turn("completed", "2026-08-10T09:50:00.000Z", "2026-08-10T09:52:05.000Z"),
+      });
+    const model = build({
+      panel: deriveAgentPanelModel({ agents: [agent("a")] }),
+      delegatedChildren: [
+        finished("one"),
+        finished("two"),
+        child("three", { latestTurn: turn("running", "2026-08-10T10:00:30.000Z", null) }),
+      ],
+      completionReturns: new Map<ThreadId, AgentControlCompletionReturn>([
+        ["one" as ThreadId, completionReturn("one", "delivered")],
+        ["two" as ThreadId, completionReturn("two", "delivered")],
+        ["three" as ThreadId, completionReturn("three", "waiting")],
+      ]),
+    });
+    expect(model.delegation).toEqual({
+      total: 3,
+      working: 1,
+      needsYou: 0,
+      failed: 0,
+      done: 2,
+      returned: 2,
+      returning: 3,
+    });
+    expect(model.sections.at(-1)!.status).toBe("1 working · 2 done · 2 of 3 returned");
+    expect(buildThreadAgentsEntry(model)).toEqual({
+      label: "1 agent active · 3 delegated · 1 working · 2 done",
+      detail: "2 of 3 returned",
+      live: true,
+      accessibilityLabel:
+        "1 agent active · 3 delegated · 1 working · 2 done, 2 of 3 returned. Show agents.",
+    });
   });
 
   it("offers Stop only for a live subagent of the current runtime while the node takes changes", () => {
@@ -313,6 +370,7 @@ describe("thread agents sheet", () => {
     });
     expect(buildThreadAgentsEntry(live)).toEqual({
       label: "1 agent active",
+      detail: null,
       live: true,
       accessibilityLabel: "1 agent active, 2 in all. Show agents.",
     });
@@ -323,6 +381,7 @@ describe("thread agents sheet", () => {
     });
     expect(buildThreadAgentsEntry(settled)).toEqual({
       label: "2 agents",
+      detail: null,
       live: false,
       accessibilityLabel: "2 agents. Show agents.",
     });
@@ -370,7 +429,7 @@ describe("thread agents sheet", () => {
     });
     expect(returned).toMatchObject({ activity: "Returned", activityFailed: false });
     // A blocked return counts as failed, as the dock counts it.
-    expect(model.sections[0]!.status).toBe("1 failed");
+    expect(model.sections[0]!.status).toBe("1 failed · 2 done · 1 of 2 returned");
   });
 
   it("shows an offline chat's agents as last known: nothing live, no clock, no Stop", () => {
@@ -410,9 +469,10 @@ describe("thread agents sheet", () => {
     expect(model.sections.map((section) => section.status)).toEqual([null, null]);
     expect(model).toMatchObject({ live: 0, total: 4, offline: true });
     expect(buildThreadAgentsEntry(model)).toEqual({
-      label: "4 agents",
+      label: "2 agents · 2 delegated · 1 done",
+      detail: null,
       live: false,
-      accessibilityLabel: "4 agents, offline. Show agents.",
+      accessibilityLabel: "2 agents · 2 delegated · 1 done, offline. Show agents.",
     });
     expect(threadAgentsSheetSummary(model)).toBe("Offline · 4 in all");
   });
@@ -421,7 +481,7 @@ describe("thread agents sheet", () => {
     const model = build({ delegatedChildren: [limitedChild("limited")] });
     expect(model.sections[0]!.rows[0]).toMatchObject({ statusLabel: "Limited", tone: "attention" });
     expect(model.live).toBe(0);
-    expect(buildThreadAgentsEntry(model)).toMatchObject({ label: "1 agent", live: false });
+    expect(buildThreadAgentsEntry(model)).toMatchObject({ label: "1 delegated", live: false });
   });
 
   it("never reads the time: only a working row's label measures its start to the clock", () => {

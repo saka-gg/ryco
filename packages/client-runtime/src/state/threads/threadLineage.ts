@@ -33,6 +33,20 @@ export function isDelegatedThreadLineage(
   );
 }
 
+/**
+ * The title of the thread that delegated this one, as this device knows it: what a child's alert
+ * and glance row name it by. Null for a thread nobody delegated, and for a parent this device has
+ * no title for.
+ */
+export function delegatedParentTitle(
+  lineage: ThreadLineage | null | undefined,
+  titleOf: (threadId: ThreadId) => string | null | undefined,
+): string | null {
+  if (!isDelegatedThreadLineage(lineage)) return null;
+  const title = titleOf(lineage.parentThreadId)?.trim();
+  return title ? title : null;
+}
+
 /** Null and undefined both mean "no lineage" and compare equal. */
 export function threadLineagesEqual(
   left: ThreadLineage | null | undefined,

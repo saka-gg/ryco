@@ -132,6 +132,8 @@ export function createExpoThreadAlertsPlatform(
         identifier: alert.identifier,
         content: {
           title: alert.title,
+          // iOS shows it between the title and the body; Android as the notification's subtext.
+          ...(alert.subtitle === null ? {} : { subtitle: alert.subtitle }),
           body: alert.body,
           // Always set: left out, the default sound plays.
           sound: alert.sound,

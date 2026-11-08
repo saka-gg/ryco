@@ -224,15 +224,18 @@ describe("mobile launch graph boundaries", () => {
     expect(staticValueImports(ios).some((specifier) => specifier.includes("icons"))).toBe(false);
   });
 
-  it("registers only Home eagerly in the workspace stack", () => {
+  it("registers only Chats eagerly: the stack's screens and the other tabs load lazily", () => {
     const featureImports = staticValueImports(read("Stack.tsx")).filter((specifier) =>
       specifier.startsWith("./features/"),
     );
     expect(featureImports.toSorted()).toEqual([
-      "./features/home/HomeRouteScreen",
       "./features/keyboard/HardwareKeyboardCommandProvider",
       "./features/workspace/ThreadWorkspaceLayout",
     ]);
+    const tabImports = staticValueImports(read("navigation/tabs/MainTabs.tsx")).filter(
+      (specifier) => specifier.includes("/features/"),
+    );
+    expect(tabImports).toEqual(["../../features/home/HomeRouteScreen"]);
   });
 
   it("keeps the locked stack's identity (WebView) and pairing (camera) screens lazy", () => {

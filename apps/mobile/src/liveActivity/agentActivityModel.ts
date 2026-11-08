@@ -1,6 +1,7 @@
 import {
   type AgentActivityPhase,
   agentActivityThreadFields,
+  delegatedParentTitle,
   isArchivedThreadStub,
   type AgentActivitySummary,
   type AgentActivityThread,
@@ -39,6 +40,10 @@ export const AGENT_ACTIVITY_STATE_BUDGET_BYTES = 3584;
 /** One thread on the card. */
 export interface AgentActivityContentRow {
   readonly title: string;
+  /**
+   * The row's second line, before the model: the project, or for a delegated thread the thread
+   * it works for ("from Fix login redirect loop"), which says more than the project they share.
+   */
   readonly project: string | null;
   /** The model it works with; absent from states of earlier app versions. */
   readonly model: string | null;
@@ -155,7 +160,7 @@ export function agentActivityContentState(
     counts: summary.counts,
     rows: summary.rows.map((row) => ({
       title: row.title,
-      project: row.projectName,
+      project: row.parentTitle ? `from ${row.parentTitle}` : row.projectName,
       model: row.modelName,
       phase: row.phase,
       status: agentActivityStatus(row.phase),
@@ -283,6 +288,10 @@ export function agentActivityThreads(input: {
         : [[`${thread.environmentId}:${thread.id}`, thread] as const],
     ),
   );
+  // Titles of every thread, archived ones too: a delegated row names the thread it works for.
+  const titlesByKey = new Map(
+    input.threads.map((thread) => [`${thread.environmentId}:${thread.id}`, thread.title] as const),
+  );
   const environments = new Map(
     input.environments.map((environment) => [environment.environmentId, environment]),
   );
@@ -310,6 +319,9 @@ export function agentActivityThreads(input: {
           state: row.state,
           resting: row.attentionState !== "active",
           unseen: true,
+          parentTitle: delegatedParentTitle(thread.lineage, (parentId) =>
+            titlesByKey.get(`${thread.environmentId}:${parentId}`),
+          ),
           modelName: input.modelNameOf?.(thread) ?? null,
           // The row's own time: a settled row shows when it settled.
           updatedAtMs: Number.isFinite(updatedAtMs) ? updatedAtMs : 0,

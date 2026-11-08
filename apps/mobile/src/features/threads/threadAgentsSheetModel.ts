@@ -25,6 +25,9 @@ import {
 import { completionReturnPresentation } from "@ryco/client-runtime/state/agentControl";
 import {
   resolveDelegatedTaskStatus,
+  summarizeDelegatedTasks,
+  type DelegatedTasksSummary,
+  type DelegatedTaskSummaryInput,
   type DelegatedTaskTone,
   type SidebarThreadSummary,
 } from "@ryco/client-runtime/state/threads";
@@ -77,7 +80,7 @@ function frozenElapsed(text: string | null): ThreadAgentElapsed | null {
 export interface ThreadAgentRow {
   readonly key: string;
   readonly label: string;
-  /** The agent's role, when it says more than its label. */
+  /** The agent's role, when it says more than its label; a delegated task's model. */
   readonly role: string | null;
   readonly statusLabel: string;
   readonly tone: ThreadAgentTone;
@@ -103,6 +106,11 @@ export interface ThreadAgentSection {
   readonly rows: ReadonlyArray<ThreadAgentRow>;
 }
 
+/** The chat's delegated tasks in counts, by web's dock rules (`summarizeDelegatedTasks`). */
+export interface ThreadDelegationSummary extends DelegatedTasksSummary {
+  readonly total: number;
+}
+
 export interface ThreadAgentsSheetModel {
   readonly sections: ReadonlyArray<ThreadAgentSection>;
   /** Agents and delegated tasks that do (or did) work. */
@@ -111,6 +119,8 @@ export interface ThreadAgentsSheetModel {
   readonly live: number;
   /** The chat shows last-known state: nothing reads as live, and no clock runs. */
   readonly offline: boolean;
+  /** Null while the chat delegated nothing. */
+  readonly delegation: ThreadDelegationSummary | null;
 }
 
 export interface ThreadAgentsSheetInput {
@@ -131,6 +141,8 @@ export interface ThreadAgentsSheetInput {
   readonly offline: boolean;
   /** Result returns of the chat's delegated tasks, by child (`selectCompletionReturnsByChildThreadId`). */
   readonly completionReturns: ReadonlyMap<ThreadId, AgentControlCompletionReturn>;
+  /** A delegated task's model as people read it (`agentActivityModelName`); null when unknown. */
+  readonly modelNameOf?: (thread: SidebarThreadSummary) => string | null;
 }
 
 const SUBAGENT_TONE: Readonly<Record<RuntimeSubagentStatus, ThreadAgentTone>> = {
@@ -215,9 +227,8 @@ const DELEGATED_TONE: Readonly<Record<DelegatedTaskTone, ThreadAgentTone>> = {
 
 interface DelegatedRow {
   readonly row: ThreadAgentRow;
-  /** Working, or waiting on the user: what the dock counts as working and needing you. */
-  readonly live: boolean;
-  readonly failed: boolean;
+  /** What the dock's counts read of it. */
+  readonly summary: DelegatedTaskSummaryInput;
 }
 
 function delegatedRow(thread: SidebarThreadSummary, input: ThreadAgentsSheetInput): DelegatedRow {
@@ -245,7 +256,7 @@ function delegatedRow(thread: SidebarThreadSummary, input: ThreadAgentsSheetInpu
     row: {
       key: `thread:${thread.id}`,
       label: thread.title.trim() || "Untitled task",
-      role: null,
+      role: input.modelNameOf?.(thread) ?? null,
       statusLabel: task.label ?? inboxLabel,
       tone: DELEGATED_TONE[task.tone],
       // Where its result to this chat stands, as the dock's pill says it.
@@ -256,18 +267,44 @@ function delegatedRow(thread: SidebarThreadSummary, input: ThreadAgentsSheetInpu
       details: null,
       stop: null,
     },
-    // A task held by a usage limit waits on neither: it is not active.
-    live: state === "working" || state === "needs-input",
-    failed: task.failed,
+    summary: {
+      state,
+      tone: task.tone,
+      failed: task.failed,
+      result:
+        completionReturn === undefined
+          ? null
+          : { delivered: completionReturn.status === "delivered" },
+    },
   };
 }
 
-function progressWords(working: number, failed = 0): string | null {
+/** Working, or waiting on the user; a task held by a usage limit waits on neither. */
+function delegatedLiveCount(summary: DelegatedTasksSummary): number {
+  return summary.working + summary.needsYou;
+}
+
+/**
+ * The delegated tasks' state words, in the dock's order: "2 working · 1 needs you · 1 failed ·
+ * 1 done". Null when none applies.
+ */
+export function delegatedTasksStateWords(summary: DelegatedTasksSummary): string | null {
   const words = [
-    working > 0 ? `${working} working` : null,
-    failed > 0 ? `${failed} failed` : null,
+    summary.working > 0 ? `${summary.working} working` : null,
+    summary.needsYou > 0 ? `${summary.needsYou} needs you` : null,
+    summary.failed > 0 ? `${summary.failed} failed` : null,
+    summary.done > 0 ? `${summary.done} done` : null,
   ].filter((word): word is string => word !== null);
   return words.length > 0 ? words.join(" · ") : null;
+}
+
+/** "2 of 3 returned", counting only tasks whose result returns here; null when none does. */
+export function delegatedTasksReturnedWords(summary: DelegatedTasksSummary): string | null {
+  return summary.returning > 0 ? `${summary.returned} of ${summary.returning} returned` : null;
+}
+
+function workingWords(working: number): string | null {
+  return working > 0 ? `${working} working` : null;
 }
 
 /** Every section of the sheet, in roster order: workflows, then subagents, then delegated tasks. */
@@ -293,7 +330,7 @@ export function buildThreadAgentsSheetModel(input: ThreadAgentsSheetInput): Thre
       title: "Subagents",
       status: input.offline
         ? null
-        : progressWords(
+        : workingWords(
             input.panel.directAgents.filter((agent) => isActiveSubagentStatus(agent.status)).length,
           ),
       rows: input.panel.directAgents.map((agent) => subagentRow(agent, roster, input)),
@@ -301,45 +338,79 @@ export function buildThreadAgentsSheetModel(input: ThreadAgentsSheetInput): Thre
   }
   const children = input.delegatedChildren.map((thread) => delegatedRow(thread, input));
   const childRows = children.map((child) => child.row);
-  if (childRows.length > 0) {
+  const counts = summarizeDelegatedTasks(children.map((child) => child.summary));
+  const delegation = childRows.length > 0 ? { ...counts, total: childRows.length } : null;
+  if (delegation !== null) {
+    const words = [delegatedTasksStateWords(delegation), delegatedTasksReturnedWords(delegation)];
     sections.push({
       key: "delegated",
       title: "Delegated tasks",
       status: input.offline
         ? null
-        : progressWords(
-            childRows.filter((row) => row.tone === "working").length,
-            children.filter((child) => child.failed).length,
-          ),
+        : words.filter((word): word is string => word !== null).join(" · ") || null,
       rows: childRows,
     });
   }
   return {
     sections,
     total: agentPanelAgentCount(input.panel) + childRows.length,
-    live: input.offline ? 0 : input.panel.liveCount + children.filter((child) => child.live).length,
+    live: input.offline ? 0 : input.panel.liveCount + delegatedLiveCount(counts),
     offline: input.offline,
+    delegation,
   };
 }
 
 export interface ThreadAgentsEntry {
   readonly label: string;
+  /** Where the delegated tasks' results stand ("2 of 3 returned"), after the label; or null. */
+  readonly detail: string | null;
   /** Something works or waits now: the control reads as live. */
   readonly live: boolean;
   readonly accessibilityLabel: string;
 }
 
+const agentNoun = (count: number) => (count === 1 ? "agent" : "agents");
+
+/** The provider agents' part of the label: what is active now, else how many there were. */
+function agentsWords(total: number, live: number): string {
+  // Active: working, or waiting on someone (web's Agents footer word).
+  return live > 0 ? `${live} ${agentNoun(live)} active` : `${total} ${agentNoun(total)}`;
+}
+
+function delegationEntry(
+  model: ThreadAgentsSheetModel,
+  delegation: ThreadDelegationSummary,
+): ThreadAgentsEntry {
+  const agents = model.total - delegation.total;
+  const agentsLive = model.offline ? 0 : model.live - delegatedLiveCount(delegation);
+  // "3 delegated · 2 working · 1 done", after the chat's own agents when it has any.
+  const label = [
+    agents > 0 ? agentsWords(agents, agentsLive) : null,
+    `${delegation.total} delegated`,
+    delegatedTasksStateWords(delegation),
+  ]
+    .filter((word): word is string => word !== null)
+    .join(" · ");
+  const detail = delegatedTasksReturnedWords(delegation);
+  const spoken = detail === null ? label : `${label}, ${detail}`;
+  return {
+    label,
+    detail,
+    live: model.live > 0,
+    accessibilityLabel: model.offline
+      ? `${spoken}, offline. Show agents.`
+      : `${spoken}. Show agents.`,
+  };
+}
+
 /** The thread screen's way into the sheet; null while the chat set no agents working. */
 export function buildThreadAgentsEntry(model: ThreadAgentsSheetModel): ThreadAgentsEntry | null {
   if (model.sections.length === 0) return null;
-  const noun = (count: number) => (count === 1 ? "agent" : "agents");
-  // Active: working, or waiting on someone (web's Agents footer word).
-  const label =
-    model.live > 0
-      ? `${model.live} ${noun(model.live)} active`
-      : `${model.total} ${noun(model.total)}`;
+  if (model.delegation !== null) return delegationEntry(model, model.delegation);
+  const label = agentsWords(model.total, model.live);
   return {
     label,
+    detail: null,
     live: model.live > 0,
     accessibilityLabel:
       model.live > 0

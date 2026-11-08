@@ -188,6 +188,22 @@ describe("summarizeAgentActivity", () => {
     // A client that does not know when the turn started shows no time.
     expect(summarizeAgentActivity([thread()], NOW).rows[0]?.sinceMs).toBeNull();
   });
+
+  it("names a delegated child's parent, shortened", () => {
+    const rows = summarizeAgentActivity(
+      [
+        thread({ title: "Child", delegated: true, parentTitle: `  ${"p".repeat(40)}  ` }),
+        thread({ title: "Root", parentTitle: "   " }),
+        thread({ title: "Old client" }),
+      ],
+      NOW,
+    ).rows;
+    expect(rows.map((row) => [row.title, row.parentTitle])).toEqual([
+      ["Child", `${"p".repeat(31)}…`],
+      ["Root", null],
+      ["Old client", null],
+    ]);
+  });
 });
 
 describe("the shared thread → activity row fields", () => {

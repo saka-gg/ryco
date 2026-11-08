@@ -296,6 +296,7 @@ import { buildModelPickerModel, listModelPickerEntries } from "./modelPickerMode
 import { buildSessionPolicyModel, resolveSessionPolicySelection } from "./sessionPolicyModel";
 import { ThreadActionsSheet } from "./ThreadActionsSheet";
 import { ThreadAgents } from "./ThreadAgentsSheet";
+import { ThreadOriginBreadcrumb } from "./ThreadOriginBreadcrumb";
 import { useThreadWorkspaceRoot } from "../files/useThreadWorkspaceRoot";
 import { ThreadComposer } from "./ThreadComposer";
 import { SideChatCard } from "./SideChatCard";
@@ -2702,6 +2703,12 @@ export function ThreadDetailScreen(props: {
           }}
         />
       ) : null}
+      <ThreadOriginBreadcrumb
+        environmentId={environmentId}
+        threadId={threadId}
+        agentControlQueue={agentControlEnabled ? agentControlQueue : null}
+        onOpenThread={openThread}
+      />
       <ThreadAgents
         key={outboxThreadKey}
         environmentId={environmentId}

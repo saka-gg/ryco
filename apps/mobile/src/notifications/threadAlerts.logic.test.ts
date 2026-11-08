@@ -14,6 +14,7 @@ import {
   threadAlertLinkPath,
   threadAlertModeOf,
   threadAlertRefOf,
+  threadAlertSubtitle,
 } from "./threadAlerts.logic";
 
 const ref = (threadId: string): ScopedThreadRef => ({
@@ -23,7 +24,11 @@ const ref = (threadId: string): ScopedThreadRef => ({
 
 function candidate(
   kind: ThreadNotificationKind,
-  input: { readonly threadId?: string; readonly delegated?: boolean } = {},
+  input: {
+    readonly threadId?: string;
+    readonly delegated?: boolean;
+    readonly parentTitle?: string | null;
+  } = {},
 ): ThreadNotificationCandidate {
   const threadRef = ref(input.threadId ?? "thread-b");
   return {
@@ -39,6 +44,7 @@ function candidate(
       generation: {},
     },
     delegated: input.delegated ?? false,
+    parentTitle: input.parentTitle ?? null,
   };
 }
 
@@ -81,6 +87,7 @@ describe("planMobileThreadAlert", () => {
       ).toEqual({
         identifier: threadNotificationTag(ref("thread-b")),
         title,
+        subtitle: null,
         body: "Fix the login form",
         sound: false,
         ref: ref("thread-b"),
@@ -192,6 +199,25 @@ describe("planMobileThreadAlert", () => {
         }),
       ).not.toBeNull();
     }
+  });
+
+  it("names a delegated thread's parent under the alert's title", () => {
+    const alert = planMobileThreadAlert({
+      candidate: candidate("approval", {
+        delegated: true,
+        parentTitle: " Fix login redirect loop ",
+      }),
+      mode: "notifications",
+      appActive: false,
+      visibleThread: null,
+    });
+    expect(alert).toMatchObject({
+      title: "Needs approval",
+      subtitle: "From Fix login redirect loop",
+      body: "Fix the login form",
+    });
+    expect(threadAlertSubtitle("   ")).toBeNull();
+    expect(threadAlertSubtitle(null)).toBeNull();
   });
 });
 

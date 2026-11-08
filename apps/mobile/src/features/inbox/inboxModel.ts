@@ -10,7 +10,7 @@ import type {
 } from "@ryco/client-runtime/state/threads";
 import {
   buildThreadInbox,
-  isDelegatedThreadLineage,
+  delegatedParentTitle,
   resolveThreadHideAvailability,
   resolveThreadLifecycleAvailability,
   threadInboxConnectionBlocker,
@@ -332,10 +332,9 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
     ),
   );
   const parentTitleOf = (thread: SidebarThreadSummary): string | null =>
-    isDelegatedThreadLineage(thread.lineage)
-      ? (titleByThreadKey.get(scopedKey(thread.environmentId, thread.lineage.parentThreadId)) ??
-        null)
-      : null;
+    delegatedParentTitle(thread.lineage, (parentId) =>
+      titleByThreadKey.get(scopedKey(thread.environmentId, parentId)),
+    );
 
   const searchedText = input.query?.trim() ?? "";
   const messageMatchFor = (key: string) => {

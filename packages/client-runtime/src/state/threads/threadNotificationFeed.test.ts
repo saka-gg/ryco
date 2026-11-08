@@ -438,7 +438,35 @@ describe("thread notification feed", () => {
 
     test.enqueue(upsert(11, shell("child", { lineage, hasPendingUserInput: true })));
     test.flush();
-    expect((await test.settle()).map((candidate) => candidate.delegated)).toEqual([true]);
+    expect(
+      (await test.settle()).map((candidate) => [candidate.delegated, candidate.parentTitle]),
+    ).toEqual([[true, null]]);
+  });
+
+  it("names a delegated thread's parent by its current title", async () => {
+    const test = harness();
+    test.register();
+    test.connect([shell("parent", { latestTurn: null }), shell("child"), shell("root")], 10);
+    test.startFeed();
+    const lineage: ThreadLineage = {
+      parentThreadId: ThreadId.make("parent"),
+      rootThreadId: ThreadId.make("parent"),
+      relationship: "delegated",
+    };
+    const forked: ThreadLineage = { ...lineage, relationship: "forked" };
+
+    test.enqueue(
+      upsert(11, shell("parent", { latestTurn: null, title: "  Fix login redirect loop  " })),
+      upsert(12, shell("child", { lineage, hasPendingUserInput: true })),
+      upsert(13, shell("root", { lineage: forked, hasPendingUserInput: true })),
+    );
+    test.flush();
+    expect(
+      (await test.settle()).map((candidate) => [candidate.delegated, candidate.parentTitle]),
+    ).toEqual([
+      [true, "Fix login redirect loop"],
+      [false, null],
+    ]);
   });
 
   it("delivers nothing more once stopped", async () => {

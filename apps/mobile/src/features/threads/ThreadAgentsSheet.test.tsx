@@ -101,6 +101,7 @@ describe("thread agents control", () => {
       ThreadAgentsButton({
         entry: {
           label: "2 agents active",
+          detail: null,
           live: true,
           accessibilityLabel: "2 agents active. Show agents.",
         },
@@ -115,6 +116,24 @@ describe("thread agents control", () => {
     );
     (button.props.onPress as () => void)();
     expect(onPress).toHaveBeenCalledTimes(1);
+  });
+
+  it("follows delegated work with how many results came back, quieter", () => {
+    const nodes = elements(
+      ThreadAgentsButton({
+        entry: {
+          label: "3 delegated · 2 working · 1 done",
+          detail: "1 of 3 returned",
+          live: true,
+          accessibilityLabel: "3 delegated · 2 working · 1 done, 1 of 3 returned. Show agents.",
+        },
+        onPress: () => undefined,
+      }),
+    );
+    const [label, detail] = nodes.filter((node) => node.type === "Text");
+    expect((label!.props.children as unknown[])[0]).toBe("3 delegated · 2 working · 1 done");
+    expect(detail!.props.children).toBe(" · 1 of 3 returned");
+    expect(String(detail!.props.className)).toContain("text-foreground-tertiary");
   });
 });
 

@@ -5,6 +5,8 @@ import {
 } from "@ryco/client-runtime/state/agentControl";
 import {
   resolveDelegatedTaskStatus,
+  summarizeDelegatedTasks,
+  type DelegatedTasksSummary,
   type DelegatedTaskTone,
   type SidebarThreadSummary,
 } from "@ryco/client-runtime/state/threads";
@@ -48,15 +50,8 @@ export interface DelegationDockChild {
   readonly failed: boolean;
 }
 
-export interface DelegationDockSummary {
-  readonly working: number;
-  readonly needsYou: number;
-  /** Children in error, or whose result return is blocked, failed or uncertain. */
-  readonly failed: number;
-  readonly returned: number;
-  /** Children whose result returns here; "N of M returned" counts only these. */
-  readonly returning: number;
-}
+/** The dock's summary line: the shared counts the phone's agents entry reads too. */
+export type DelegationDockSummary = DelegatedTasksSummary;
 
 export interface DelegationDockLogRow {
   readonly proposal: AgentControlProposalView;
@@ -103,19 +98,7 @@ export function buildDelegationDockChildren(
 export function summarizeDelegationDock(
   children: ReadonlyArray<DelegationDockChild>,
 ): DelegationDockSummary {
-  let working = 0;
-  let needsYou = 0;
-  let failed = 0;
-  let returned = 0;
-  let returning = 0;
-  for (const child of children) {
-    if (child.state === "working") working += 1;
-    if (child.state === "needs-input") needsYou += 1;
-    if (child.failed) failed += 1;
-    if (child.result !== null) returning += 1;
-    if (child.result?.delivered) returned += 1;
-  }
-  return { working, needsYou, failed, returned, returning };
+  return summarizeDelegatedTasks(children);
 }
 
 /** The thread's own Agent Control actions, newest first, as one line each. */
