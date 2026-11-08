@@ -475,7 +475,7 @@ export function TasksTabScreen() {
       accessibilityLabel: `Delete ${row.title}`,
       icon: "trash",
       label: "Delete",
-      tone: "primary",
+      tone: "danger",
       onPress: () => void confirmDeleteTask(row.environmentId, row),
     };
     const menu = dueSwipeMenu(nowMs);
