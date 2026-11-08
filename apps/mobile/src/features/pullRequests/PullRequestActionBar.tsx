@@ -1,5 +1,8 @@
 import { MenuView, type MenuAction, type NativeActionEvent } from "@react-native-menu/menu";
-import { EMPTY_REVIEW_DRAFT } from "@ryco/client-runtime/state/pull-request-review";
+import {
+  EMPTY_REVIEW_DRAFT,
+  selectReviewDraft,
+} from "@ryco/client-runtime/state/pull-request-review";
 import type { SourceControlChangeRequestMergeMethod } from "@ryco/contracts";
 import * as Haptics from "expo-haptics";
 import { useState } from "react";
@@ -13,6 +16,7 @@ import { cn } from "../../lib/cn";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { MergeSheet, ReviewSheet } from "./PullRequestActionsPanel";
 import { pullRequestActionBarModel } from "./pullRequestActionBarModel";
+import { usePullRequestReviewDrafts } from "./pullRequestReviewDrafts";
 import {
   shownPullRequestActionSheet,
   type PullRequestActionSheet,
@@ -76,6 +80,10 @@ export function PullRequestActionBar(props: {
   const icon = useThemeColor("--color-primary-foreground") as string;
   const barTint = useThemeColor("--color-glass-surface") as string;
   const [openedSheet, setSheet] = useState<PullRequestActionSheet | null>(null);
+  const draftKey = control.draftKey;
+  const draftComments = usePullRequestReviewDrafts((state) =>
+    draftKey === null ? 0 : selectReviewDraft(state, draftKey).comments.length,
+  );
   const sheet = shownPullRequestActionSheet(openedSheet, control);
   if (sheet !== openedSheet) setSheet(sheet);
   const bar = pullRequestActionBarModel(control);
@@ -83,17 +91,28 @@ export function PullRequestActionBar(props: {
   const busy = control.pending !== null;
   const blocked = control.blockedReason !== null;
 
+  // The draft is read on press: approving sends its line comments and summary too.
   const approve = () =>
-    Alert.alert(`Approve #${props.number}?`, "Sends an approving review with no comment.", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Approve",
-        onPress: () => {
-          void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-          control.submitReview({ ...EMPTY_REVIEW_DRAFT, event: "approve" }, () => undefined);
+    Alert.alert(
+      `Approve #${props.number}?`,
+      draftComments > 0
+        ? `Sends an approving review with your ${draftComments} line ${draftComments === 1 ? "comment" : "comments"}.`
+        : "Sends an approving review.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Approve",
+          onPress: () => {
+            const draft =
+              draftKey === null
+                ? EMPTY_REVIEW_DRAFT
+                : selectReviewDraft(usePullRequestReviewDrafts.getState(), draftKey);
+            void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+            control.submitReview({ ...draft, event: "approve" }, () => undefined);
+          },
         },
-      },
-    ]);
+      ],
+    );
   const confirmUpdate = () =>
     Alert.alert(
       "Update the branch?",
@@ -140,7 +159,13 @@ export function PullRequestActionBar(props: {
         <View className="flex-row items-center gap-1.5">
           {bar.review ? (
             <BarButton
-              label={control.pending === "review" ? "Sending…" : "Review"}
+              label={
+                control.pending === "review"
+                  ? "Sending…"
+                  : draftComments > 0
+                    ? `Review · ${draftComments}`
+                    : "Review"
+              }
               tone="secondary"
               disabled={blocked || busy}
               onPress={() => setSheet("review")}

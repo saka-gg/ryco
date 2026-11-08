@@ -117,6 +117,12 @@ export function ReviewSheet(props: {
           />
         ))}
       </View>
+      {draft.comments > 0 ? (
+        <Text className="text-sm text-foreground-muted">
+          {draft.comments} line {draft.comments === 1 ? "comment" : "comments"} will be sent with
+          this review.
+        </Text>
+      ) : null}
       {review.authorNote ? (
         <Text className="text-xs text-foreground-muted">{review.authorNote}</Text>
       ) : null}

@@ -3,15 +3,23 @@ import { useNavigation, type StaticScreenProps } from "@react-navigation/native"
 import { relativePathToRouteSegments, routeFilePathParam } from "@ryco/client-runtime/state/files";
 import {
   adjacentFilePath,
+  EMPTY_REVIEW_DRAFT,
   FILE_STATUS_LABEL,
+  isReviewDraftCommentOutdated,
+  reviewDraftKey,
   splitFilePath,
+  type ReviewDraftComment,
 } from "@ryco/client-runtime/state/pull-request-review";
+import * as Haptics from "expo-haptics";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { resolveChangeRequestPresentationForKind } from "@ryco/shared/sourceControl";
 import { EnvironmentId, ProjectId } from "@ryco/contracts/base-schemas";
 import { useEffect, useMemo, useState } from "react";
 import { Pressable, ScrollView, useColorScheme, useWindowDimensions, View } from "react-native";
 
+import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
+import { GlassSurface } from "../../components/GlassSurface";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingStrip } from "../../components/LoadingStrip";
 import { resolveMobileCodeSurface } from "../../lib/appearancePreferences";
@@ -34,17 +42,34 @@ import {
   type PullRequestDiffRow,
 } from "./pullRequestDiffModel";
 import {
+  usePullRequest,
   usePullRequestCheckout,
   usePullRequestDiff,
-  usePullRequestDetail,
   useSourceControlProvider,
 } from "./usePullRequestData";
+import {
+  derivePullRequestReviewProgress,
+  interleavePullRequestFileComments,
+  nextUnviewedPath,
+  pullRequestDiffRowAnchor,
+  type PullRequestFileDiffItem,
+} from "./pullRequestFileReviewModel";
+import {
+  DraftCommentCard,
+  LineCommentSheet,
+  ThreadCard,
+  type LineCommentTarget,
+} from "./PullRequestLineComments";
+import { usePullRequestReviewDrafts } from "./pullRequestReviewDrafts";
+import { usePullRequestFilesViewed } from "./usePullRequestFilesViewed";
 
 type PullRequestFileRouteProps = StaticScreenProps<{
   readonly environmentId: string;
   readonly projectId: string;
   readonly number: string;
   readonly path: string | readonly string[];
+  /** "1" while stepping through the files in review order. */
+  readonly review?: string;
 }>;
 
 function firstParam(value: string | string[] | undefined): string | null {
@@ -107,9 +132,26 @@ export function PullRequestFileRouteScreen(props: PullRequestFileRouteProps) {
   const path = routeFilePathParam(props.route.params.path);
   const checkout = usePullRequestCheckout(environmentId, projectId);
   const provider = useSourceControlProvider(environmentId, checkout.cwd);
-  // The detail only (head, host, link): this screen shows none of the activity.
-  const pullRequest = usePullRequestDetail({ environmentId, cwd: checkout.cwd, number, provider });
+  // The activity too: its review threads show under their lines.
+  const pullRequest = usePullRequest({ environmentId, cwd: checkout.cwd, number, provider });
   const detail = pullRequest.detail.data;
+  const reviewMode = firstParam(props.route.params.review) === "1";
+  const insets = useSafeAreaInsets();
+  const filesViewed = usePullRequestFilesViewed({
+    environmentId,
+    cwd: checkout.cwd,
+    number,
+    headSha: detail?.headSha ?? null,
+    active: true,
+  });
+  const draftKey =
+    environmentId !== null && checkout.cwd !== null && number !== null
+      ? reviewDraftKey({ environmentId, cwd: checkout.cwd, number })
+      : null;
+  const draft = usePullRequestReviewDrafts((state) =>
+    draftKey === null ? EMPTY_REVIEW_DRAFT : (state.draftsByKey[draftKey] ?? EMPTY_REVIEW_DRAFT),
+  );
+  const [commentTarget, setCommentTarget] = useState<LineCommentTarget | null>(null);
   const diff = usePullRequestDiff({
     environmentId,
     cwd: checkout.cwd,
@@ -123,12 +165,27 @@ export function PullRequestFileRouteScreen(props: PullRequestFileRouteProps) {
   const presentation = view?.presentation ?? null;
   const parsed = view?.rows ?? null;
   const sides = view?.sides ?? null;
+  const threads = pullRequest.activity.data?.reviewThreads;
+  const items = useMemo(
+    () =>
+      parsed === null || path === null
+        ? null
+        : interleavePullRequestFileComments({
+            path,
+            rows: parsed.rows,
+            drafts: draft.comments,
+            threads: threads ?? [],
+          }),
+    [draft.comments, parsed, path, threads],
+  );
 
   const theme: ReviewDiffTheme = useColorScheme() === "light" ? "light" : "dark";
   const { appearance } = useAppearancePreferences();
   const surface = resolveMobileCodeSurface(appearance.codeFontSize);
   const { width: windowWidth } = useWindowDimensions();
   const foregroundColor = String(useThemeColor("--color-foreground"));
+  const successColor = String(useThemeColor("--color-success"));
+  const mutedIconColor = String(useThemeColor("--color-icon-muted"));
   const [highlight, setHighlight] = useState<HighlightedSides | null>(null);
   const [surfaceHeight, setSurfaceHeight] = useState(0);
 
@@ -185,34 +242,83 @@ export function PullRequestFileRouteScreen(props: PullRequestFileRouteProps) {
       Math.ceil((parsed?.maxLineLength ?? 0) * surface.fontSize * MONOSPACE_ADVANCE_RATIO),
   );
 
-  const renderRow = ({ item, index }: LegendListRenderItemProps<PullRequestDiffRow>) => {
+  const headSha = detail?.headSha ?? null;
+  const canComment = pullRequest.capabilities.lineComments && headSha !== null && draftKey !== null;
+  const openComment = (row: PullRequestDiffRow) => {
+    const anchor = pullRequestDiffRowAnchor(row);
+    if (!canComment || anchor === null) return;
+    void Haptics.selectionAsync();
+    setCommentTarget({ kind: "new", line: anchor.line, side: anchor.side, code: row.text });
+  };
+  const editComment = (comment: ReviewDraftComment) =>
+    setCommentTarget({ kind: "edit", comment, code: null });
+  const saveComment = (target: LineCommentTarget, body: string) => {
+    if (draftKey === null || headSha === null) return;
+    const store = usePullRequestReviewDrafts.getState();
+    if (target.kind === "new") {
+      store.addComment(draftKey, {
+        path,
+        line: target.line,
+        side: target.side,
+        body,
+        headSha,
+      });
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } else {
+      store.updateComment(draftKey, target.comment.id, { body });
+    }
+    setCommentTarget(null);
+  };
+  const deleteComment = (comment: ReviewDraftComment) => {
+    if (draftKey !== null)
+      usePullRequestReviewDrafts.getState().removeComment(draftKey, comment.id);
+    setCommentTarget(null);
+  };
+
+  const progress = derivePullRequestReviewProgress(paths, filesViewed.data);
+  const viewedState = progress.supported ? (progress.stateByPath.get(path) ?? "unviewed") : null;
+  const viewed = viewedState === "viewed";
+  const position = paths.indexOf(path) + 1;
+  const nextToReview = nextUnviewedPath(paths, progress.stateByPath, path);
+  const markViewedAndContinue = () => {
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    if (progress.supported && !viewed) void filesViewed.setViewed(path, true);
+    if (nextToReview !== null) openSibling(nextToReview);
+    else navigation.goBack();
+  };
+
+  const renderRow = (row: PullRequestDiffRow, index: number) => {
     const rowTokens =
       tokens === null
         ? null
         : pullRequestDiffRowTokens(sides?.sources[index], tokens.old, tokens.new);
-    const muted = item.kind === "hunk" || item.kind === "notice";
+    const muted = row.kind === "hunk" || row.kind === "notice";
+    const commentable = canComment && pullRequestDiffRowAnchor(row) !== null;
     return (
-      <View
-        className={cn("flex-row", ROW_BACKGROUND[item.kind])}
+      <Pressable
+        disabled={!commentable}
+        onPress={() => openComment(row)}
+        accessibilityHint={commentable ? "Comment on this line." : undefined}
+        className={cn("flex-row", ROW_BACKGROUND[row.kind], commentable && "active:opacity-60")}
         style={{ width: contentWidth, minHeight: surface.rowHeight }}
       >
         <Text
           className="text-right font-mono text-foreground-tertiary"
           style={{ width: 34, fontSize: surface.lineNumberFontSize, lineHeight: surface.rowHeight }}
         >
-          {item.oldLine ?? ""}
+          {row.oldLine ?? ""}
         </Text>
         <Text
           className="text-right font-mono text-foreground-tertiary"
           style={{ width: 34, fontSize: surface.lineNumberFontSize, lineHeight: surface.rowHeight }}
         >
-          {item.newLine ?? ""}
+          {row.newLine ?? ""}
         </Text>
         <Text
           className="text-center font-mono text-foreground-muted"
           style={{ width: 16, fontSize: surface.fontSize, lineHeight: surface.rowHeight }}
         >
-          {pullRequestDiffRowMarker(item.kind)}
+          {pullRequestDiffRowMarker(row.kind)}
         </Text>
         <Text
           className={cn("flex-1 font-mono", muted ? "text-foreground-muted" : "text-foreground")}
@@ -224,12 +330,33 @@ export function PullRequestFileRouteScreen(props: PullRequestFileRouteProps) {
           numberOfLines={1}
           // Clipped rather than ellipsized: a "…" in the middle of code would read as code.
           ellipsizeMode="clip"
-          selectable
+          // Selecting would fight the tap that comments on the line.
+          selectable={!commentable}
         >
-          <RowText text={item.text} tokens={rowTokens} color={foregroundColor} />
+          <RowText text={row.text} tokens={rowTokens} color={foregroundColor} />
         </Text>
-      </View>
+      </Pressable>
     );
+  };
+
+  const renderItem = ({ item }: LegendListRenderItemProps<PullRequestFileDiffItem>) => {
+    switch (item.kind) {
+      case "row": {
+        const row = parsed?.rows[item.index];
+        return row === undefined ? null : renderRow(row, item.index);
+      }
+      case "draft":
+        return (
+          <DraftCommentCard
+            comment={item.comment}
+            outdated={headSha !== null && isReviewDraftCommentOutdated(item.comment, headSha)}
+            width={windowWidth}
+            onPress={editComment}
+          />
+        );
+      case "thread":
+        return <ThreadCard thread={item.thread} width={windowWidth} />;
+    }
   };
 
   return (
@@ -246,7 +373,40 @@ export function PullRequestFileRouteScreen(props: PullRequestFileRouteProps) {
               {file.binary ? "" : ` · ${formatPullRequestDiffStat(file.additions, file.deletions)}`}
             </Text>
           ) : null}
-          <View className="ml-auto flex-row gap-4">
+          <View className="ml-auto flex-row items-center gap-4">
+            {viewedState !== null ? (
+              <Pressable
+                accessibilityRole="checkbox"
+                accessibilityLabel="Viewed"
+                accessibilityState={{
+                  checked: viewed,
+                  busy: filesViewed.pendingPaths.has(path),
+                }}
+                disabled={filesViewed.pendingPaths.has(path)}
+                onPress={() => {
+                  void Haptics.selectionAsync();
+                  void filesViewed.setViewed(path, !viewed);
+                }}
+                className={cn(
+                  "flex-row items-center gap-1 rounded-full px-2.5 py-1 active:opacity-70",
+                  viewed ? "bg-success-bg" : "bg-subtle",
+                )}
+              >
+                <SymbolView
+                  name={(viewed ? "checkmark.circle.fill" : "circle") as never}
+                  size={12}
+                  tintColor={viewed ? successColor : mutedIconColor}
+                />
+                <Text
+                  className={cn(
+                    "text-2xs font-ryco-bold",
+                    viewed ? "text-success" : "text-foreground-muted",
+                  )}
+                >
+                  Viewed
+                </Text>
+              </Pressable>
+            ) : null}
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Previous file"
@@ -327,22 +487,69 @@ export function PullRequestFileRouteScreen(props: PullRequestFileRouteProps) {
                 content-driven, so a percentage would resolve against nothing.
               */}
               <LegendList
-                data={parsed.rows}
-                renderItem={renderRow}
-                keyExtractor={(_row, index) => String(index)}
+                data={items ?? []}
+                renderItem={renderItem}
+                keyExtractor={(item) => item.key}
                 // The rows keep their identity when the tokens resolve; without
                 // this the recycler never re-renders visible rows.
                 extraData={tokens}
                 recycleItems
                 estimatedItemSize={surface.rowHeight}
                 contentInsetAdjustmentBehavior="never"
-                contentContainerStyle={{ paddingVertical: 8 }}
+                contentContainerStyle={{
+                  paddingTop: 8,
+                  paddingBottom: reviewMode ? 110 + insets.bottom : 24 + insets.bottom,
+                }}
                 style={{ width: contentWidth, height: surfaceHeight }}
               />
             </ScrollView>
           ) : null}
         </View>
       ) : null}
+      {reviewMode && diff.status === "ready" ? (
+        <View
+          pointerEvents="box-none"
+          className="absolute inset-x-0 bottom-0 px-3"
+          style={{ paddingBottom: Math.max(insets.bottom, 12) }}
+        >
+          <GlassSurface radius={30} style={{ padding: 6 }}>
+            <View className="flex-row items-center gap-2">
+              <View className="min-w-0 flex-1 pl-3">
+                <Text className="text-xs font-ryco-bold text-foreground">
+                  File {position} of {paths.length}
+                </Text>
+                <Text className="text-2xs text-foreground-muted" numberOfLines={1}>
+                  {progress.supported
+                    ? `${progress.viewed} viewed${draft.comments.length > 0 ? ` · ${draft.comments.length} draft ${draft.comments.length === 1 ? "comment" : "comments"}` : ""}`
+                    : "Tap a line to comment"}
+                </Text>
+              </View>
+              <Pressable
+                accessibilityRole="button"
+                onPress={markViewedAndContinue}
+                className="h-12 flex-row items-center gap-1.5 rounded-full bg-primary px-5 active:opacity-80"
+              >
+                <Text className="text-sm font-ryco-bold text-primary-foreground">
+                  {nextToReview === null
+                    ? progress.supported && !viewed
+                      ? "Viewed · Finish"
+                      : "Finish"
+                    : progress.supported && !viewed
+                      ? "Viewed · Next"
+                      : "Next file"}
+                </Text>
+              </Pressable>
+            </View>
+          </GlassSurface>
+        </View>
+      ) : null}
+      <LineCommentSheet
+        target={commentTarget}
+        path={path}
+        onSave={saveComment}
+        onDelete={deleteComment}
+        onClose={() => setCommentTarget(null)}
+      />
     </View>
   );
 }

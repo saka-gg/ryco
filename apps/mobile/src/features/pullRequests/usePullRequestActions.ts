@@ -271,6 +271,8 @@ export function usePullRequestActions(input: {
 
 export interface PullRequestReviewDraftControl {
   readonly summary: string;
+  /** Line comments in the draft; they are sent with the review. */
+  readonly comments: number;
   /** The verdict the review sends: the draft's pick where the rules allow it. */
   readonly event: ChangeRequestReviewEvent;
   readonly setSummary: (summary: string) => void;
@@ -293,6 +295,7 @@ export function usePullRequestReviewDraft(
   const setDraftEvent = usePullRequestReviewDrafts((state) => state.setEvent);
   return {
     summary: draft.summary,
+    comments: draft.comments.length,
     event: control.reviewEventFor(draft.event),
     setSummary: (summary) => {
       if (draftKey !== null) setDraftSummary(draftKey, summary);
