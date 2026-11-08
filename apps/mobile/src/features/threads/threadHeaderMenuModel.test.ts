@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { buildThreadHeaderMenu, type ThreadHeaderMenuInput } from "./threadHeaderMenuModel";
+import {
+  buildThreadHeaderMenu,
+  flattenThreadHeaderMenu,
+  resolveThreadRename,
+  type ThreadHeaderMenuInput,
+} from "./threadHeaderMenuModel";
 import type { ThreadHeaderModel } from "./threadHeaderModel";
 
 function model(overrides: Partial<ThreadHeaderModel> = {}): ThreadHeaderModel {
@@ -119,5 +124,41 @@ describe("thread header menu", () => {
       ["settlement", "Settle task", "Resolve the pending approval first."],
       ["archive", "Restore", undefined],
     ]);
+  });
+
+  it("notes a running command and extra sessions under Terminal", () => {
+    const terminal = (terminalSubtitle: string | null) =>
+      menu({ terminalSubtitle })
+        .flatMap((section) => section.actions)
+        .find((action) => action.id === "terminal");
+    expect(terminal("Command running · 2 sessions")?.subtitle).toBe("Command running · 2 sessions");
+    expect(terminal(null)).not.toHaveProperty("subtitle");
+  });
+
+  it("is one list of real items on Android, in the iOS order, with no group rows", () => {
+    const sections = menu();
+    const flat = flattenThreadHeaderMenu(sections);
+    expect(flat.map((action) => action.id)).toEqual([
+      "files",
+      "terminal",
+      "source-control",
+      "review",
+      "side-chat",
+      "fork",
+      "rename",
+      "copy-reference",
+      "archive",
+    ]);
+    // Every row is an action with a title: none is an untitled group (a blank submenu).
+    expect(flat.every((action) => action.title.length > 0)).toBe(true);
+  });
+});
+
+describe("thread rename", () => {
+  it("saves a trimmed new title and nothing for an empty or unchanged one", () => {
+    expect(resolveThreadRename("Fix CI", "  Fix the CI  ")).toBe("Fix the CI");
+    expect(resolveThreadRename("Fix CI", " Fix CI ")).toBeNull();
+    expect(resolveThreadRename("Fix CI", "   ")).toBeNull();
+    expect(resolveThreadRename("Fix CI", undefined)).toBeNull();
   });
 });

@@ -28,7 +28,13 @@ export function threadStatusTone(statusLabel: ThreadHeaderModel["statusLabel"]):
 }
 
 /** The pill's spoken label: title, status and where it works. */
-export function threadTitlePillAccessibilityLabel(model: ThreadHeaderModel): string {
+/** What the header's title pill shows: kept this small so the header only rebuilds for it. */
+export type ThreadTitlePillView = Pick<
+  ThreadHeaderModel,
+  "title" | "statusLabel" | "projectLabel" | "worktreeLabel"
+>;
+
+export function threadTitlePillAccessibilityLabel(model: ThreadTitlePillView): string {
   return `${model.title}. ${model.statusLabel}. ${model.projectLabel}, ${model.worktreeLabel}. Show details.`;
 }
 

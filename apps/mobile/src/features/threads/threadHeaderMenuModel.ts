@@ -2,7 +2,8 @@ import type { ThreadHeaderModel } from "./threadHeaderModel";
 
 /**
  * The thread header's one ⋯ menu: everything the old header buttons (Review, Files, Terminal)
- * and the old "Task details" sheet offered, as a native menu in three inline groups. The title
+ * and the old "Task details" sheet offered, as a native menu in three inline groups (iOS; Android
+ * menus have no inline groups, so there it is one list: `flattenThreadHeaderMenu`). The title
  * pill opens the context sheet for what is read rather than done (machine, project, branch,
  * status, cache, delegated chats).
  */
@@ -43,6 +44,8 @@ export interface ThreadHeaderMenuInput {
   readonly model: ThreadHeaderModel;
   /** The thread's project has a checkout the source-control screen reads. */
   readonly sourceControlAvailable: boolean;
+  /** The Terminal item's note: "Command running · 2 sessions", or null. */
+  readonly terminalSubtitle?: string | null;
   /** A simulator or emulator is attached to the thread. */
   readonly deviceAvailable: boolean;
   /** The composer has a model a side question could ask. */
@@ -62,7 +65,12 @@ export function buildThreadHeaderMenu(
   const workspace: ThreadHeaderMenuAction[] = [];
   if (model.filesVisible) workspace.push({ id: "files", title: "Files", icon: "folder" });
   if (model.terminalVisible) {
-    workspace.push({ id: "terminal", title: "Terminal", icon: "apple.terminal" });
+    workspace.push({
+      id: "terminal",
+      title: "Terminal",
+      icon: "apple.terminal",
+      ...(input.terminalSubtitle ? { subtitle: input.terminalSubtitle } : {}),
+    });
   }
   if (input.deviceAvailable) workspace.push({ id: "device", title: "Device", icon: "iphone" });
   if (input.sourceControlAvailable) {
@@ -153,4 +161,21 @@ export function buildThreadHeaderMenu(
   sections.push({ id: "chat", actions: chat });
   sections.push({ id: "state", actions: state });
   return sections;
+}
+
+/**
+ * The menu as one list, for Android. `@react-native-menu/menu` ignores `displayInline` there and
+ * turns every group into a submenu, which with an empty title reads as a blank row; Android's
+ * popup menu has no inline groups to begin with, so the groups are concatenated in order.
+ */
+export function flattenThreadHeaderMenu(
+  sections: ReadonlyArray<ThreadHeaderMenuSection>,
+): ReadonlyArray<ThreadHeaderMenuAction> {
+  return sections.flatMap((section) => section.actions);
+}
+
+/** The title a rename saves: trimmed, or null when it is empty or unchanged (nothing to send). */
+export function resolveThreadRename(current: string, value: string | undefined): string | null {
+  const title = value?.trim() ?? "";
+  return title.length === 0 || title === current ? null : title;
 }

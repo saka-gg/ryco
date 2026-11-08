@@ -9,8 +9,8 @@ import {
   threadStatusTone,
   threadTitlePillAccessibilityLabel,
   type ThreadStatusTone,
+  type ThreadTitlePillView,
 } from "./threadContextSheetModel";
-import type { ThreadHeaderModel } from "./threadHeaderModel";
 
 const DOT_CLASS: Readonly<Record<ThreadStatusTone, string>> = {
   working: "bg-accent",
@@ -28,7 +28,7 @@ const PILL_HEIGHT = 40;
  * a small project hint. The messages scroll under it. Tapping it opens the context sheet.
  */
 export function ThreadTitlePill(props: {
-  readonly model: ThreadHeaderModel;
+  readonly model: ThreadTitlePillView;
   readonly onPress: () => void;
 }) {
   const { width } = useWindowDimensions();

@@ -1,5 +1,13 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Modal, Pressable, ScrollView, useWindowDimensions, View } from "react-native";
+import {
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  useWindowDimensions,
+  View,
+} from "react-native";
 import { Gesture, GestureDetector, GestureHandlerRootView } from "react-native-gesture-handler";
 import Animated, {
   Easing,
@@ -97,7 +105,11 @@ export function BottomSheet(props: {
       statusBarTranslucent
     >
       <GestureHandlerRootView style={{ flex: 1 }}>
-        <View className="flex-1 justify-end">
+        {/* A field in the card stays above the keyboard (Android's modal window resizes itself). */}
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          className="flex-1 justify-end"
+        >
           <Animated.View
             pointerEvents="none"
             className="absolute inset-0 bg-black"
@@ -142,7 +154,7 @@ export function BottomSheet(props: {
               {props.children}
             </ScrollView>
           </Animated.View>
-        </View>
+        </KeyboardAvoidingView>
       </GestureHandlerRootView>
     </Modal>
   );

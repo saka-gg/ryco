@@ -119,12 +119,6 @@ export function foldRecapLabel(summary: ToolCallGroupSummary): string {
     .join(" · ");
 }
 
-/**
- * What a settled fold did, in one line: web's tool-group recap of its tool steps ("Read 3 files
- * · ran 2 commands"), or the one step's own heading, with its notes counted ("· 1 note"). The
- * agent's thinking is not work to recap. A failure keeps the fold on its duration ("Worked for
- * 12s"), so it is never hidden behind "Ran 9 commands".
- */
 /** A single step's own heading ("Read README.md"); not the generic "Tool call" fallback. */
 function loneStepHeading(tools: ReadonlyArray<WorkLogEntry>): string | null {
   const [only] = tools;
@@ -133,6 +127,12 @@ function loneStepHeading(tools: ReadonlyArray<WorkLogEntry>): string | null {
   return heading === only.label ? null : heading;
 }
 
+/**
+ * What a settled fold did, in one line: web's tool-group recap of its tool steps ("Read 3 files
+ * · ran 2 commands"), or the one step's own heading, with its notes counted ("· 1 note"). The
+ * agent's thinking is not work to recap. A failure keeps the fold on its duration ("Worked for
+ * 12s"), so it is never hidden behind "Ran 9 commands".
+ */
 function settledFoldRecap(group: ReadonlyArray<WorkLogEntry>): string | null {
   if (group.some((entry) => entry.tone === "error")) return null;
   const tools = group.filter((entry) => entry.tone === "tool");
@@ -264,8 +264,7 @@ export function buildThreadTimelineRows(input: {
         : elapsedMs(startedAt, running ? input.now : (endedAt ?? input.now));
 
     if (running) runningFolds.push({ index: rows.length, entries: group });
-    // A recap only accounts for plain tool rows: a failure or a note keeps the duration label,
-    // so it is not hidden behind "Ran 9 commands".
+    // A failure keeps the duration label, so it is not hidden behind "Ran 9 commands".
     const recap = running ? null : settledFoldRecap(group);
     rows.push({
       kind: "activity-fold",

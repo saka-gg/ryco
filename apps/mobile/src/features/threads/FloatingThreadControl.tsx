@@ -17,6 +17,7 @@ import { cn } from "../../lib/cn";
 import { secondClock } from "../../lib/secondClock";
 import { useThemeColor } from "../../lib/useThemeColor";
 import {
+  floatingThreadControlTicks,
   resolveFloatingThreadControl,
   type FloatingThreadAttention,
   type FloatingThreadStatus,
@@ -78,7 +79,7 @@ export function FloatingThreadControl(props: {
   readonly onOpenThread: (threadId: string) => void;
   readonly onOpenAgents: () => void;
 }) {
-  const running = props.runningSince !== null && props.attention === null;
+  const running = floatingThreadControlTicks(props);
   const nowMs = useSyncExternalStore(
     running ? secondClock.subscribe : subscribeToNothing,
     running ? secondClock.read : readNoClock,

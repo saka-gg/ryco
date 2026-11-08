@@ -193,7 +193,11 @@ import {
 import { useThreadStreamHaptics } from "./threadStreamHaptics";
 import { FloatingThreadControl } from "./FloatingThreadControl";
 import { ImageGalleryProvider } from "./ImageGalleryModal";
-import { FLOATING_CONTROL_CLEARANCE, isFollowingLatest } from "./floatingThreadControlModel";
+import {
+  FLOATING_CONTROL_CLEARANCE,
+  isFollowingLatest,
+  showsFloatingThreadCapsule,
+} from "./floatingThreadControlModel";
 import {
   resolveThreadFeedLiveFollow,
   type ThreadFeedLiveFollowEvent,
@@ -303,7 +307,15 @@ import { buildSessionPolicyModel, resolveSessionPolicySelection } from "./sessio
 import { useThreadAgents } from "./ThreadAgentsSheet";
 import { ThreadContextSheet } from "./ThreadContextSheet";
 import { buildThreadParentLink } from "./threadContextSheetModel";
-import { buildThreadHeaderMenu, type ThreadHeaderMenuActionId } from "./threadHeaderMenuModel";
+import {
+  buildThreadHeaderMenu,
+  flattenThreadHeaderMenu,
+  resolveThreadRename,
+  type ThreadHeaderMenuActionId,
+  type ThreadHeaderMenuSection,
+} from "./threadHeaderMenuModel";
+import { ThreadRenameSheet } from "./ThreadRenameSheet";
+import { useTerminalHeaderActivity } from "../terminal/useTerminalHeaderActivity";
 import { ThreadTitlePill } from "./ThreadTitlePill";
 import { usePullRequestWatchControl } from "./usePullRequestWatchControl";
 import { useThreadDevice } from "../devices/useThreadDevice";
@@ -2649,6 +2661,14 @@ export function ThreadDetailScreen(props: {
   const [bannerHeight, setBannerHeight] = useState(0);
   const feedTopInset = headerHeight + 6 + (hasBanners ? bannerHeight + 4 : 0);
 
+  // What the floating status capsule over the composer says; the feed keeps room for it.
+  const floatingAttention =
+    pendingApprovals.length > 0 || pendingAgentControlProposals.length > 0
+      ? ("approval" as const)
+      : pendingUserInputs.length > 0 || secretRequests.requests.length > 0
+        ? ("question" as const)
+        : null;
+
   // ── Header: the title pill, its context sheet, and one ⋯ menu ─────────────────────────────
   // Which chat a sheet was opened for: the screen is reused when a link retargets it, and
   // another chat's sheets read as closed.
@@ -2681,6 +2701,12 @@ export function ThreadDetailScreen(props: {
     childAttentionRow?.childThreadId != null
       ? { threadId: childAttentionRow.childThreadId, title: childAttentionRow.label }
       : null;
+  const floatingCapsuleShown = showsFloatingThreadCapsule({
+    runningSince,
+    attention: floatingAttention,
+    childAttention,
+    agentsLive: threadAgents.entry?.live === true,
+  });
   // A delegated chat links back to the chat that started it, with where its result stands.
   const threadLineage = thread?.lineage;
   const parentThreadId = isDelegatedThreadLineage(threadLineage)
@@ -2826,13 +2852,17 @@ export function ThreadDetailScreen(props: {
             : sidebarUndo.dispatch({ environmentId, threadId }, command),
       );
     });
+  // Android has no native text prompt: its rename is a small sheet (kept per chat, like the others).
+  const [renameSheetFor, setRenameSheetFor] = useState<string | null>(null);
+  const renameSheetVisible = renameSheetFor === outboxThreadKey;
+  const saveThreadTitle = (title: string) =>
+    void runAction(() => renameThread(ensureEnvironmentApi(environmentId), threadId, title));
   const renameCurrentThread = () => {
     if (!headerModel) return;
     const current = headerModel.title;
     const save = (value: string | undefined) => {
-      const title = value?.trim() ?? "";
-      if (title.length === 0 || title === current) return;
-      void runAction(() => renameThread(ensureEnvironmentApi(environmentId), threadId, title));
+      const title = resolveThreadRename(current, value);
+      if (title !== null) saveThreadTitle(title);
     };
     if (Platform.OS === "ios") {
       Alert.prompt(
@@ -2846,16 +2876,18 @@ export function ThreadDetailScreen(props: {
         current,
       );
     } else {
-      setContextSheetVisible(true);
+      setRenameSheetFor(outboxThreadKey);
     }
   };
   const openSideChat = selectedModelSelection
     ? () => sideChatStore.getState().open(sideChatKey, selectedModelSelection)
     : undefined;
 
-  const headerMenu = headerModel
+  const terminalSubtitle = useTerminalHeaderActivity(environmentId, threadId);
+  const builtHeaderMenu = headerModel
     ? buildThreadHeaderMenu({
         model: headerModel,
+        terminalSubtitle,
         sourceControlAvailable: openSourceControl !== undefined,
         deviceAvailable: devicePreview !== null,
         sideChatAvailable: openSideChat !== undefined,
@@ -2864,6 +2896,22 @@ export function ThreadDetailScreen(props: {
         busy: mutationBusy,
       })
     : null;
+  // The header model is rebuilt on every change to the thread (each streamed activity), but the
+  // native header must only be rebuilt when what it shows changes: a new menu or pill while the
+  // ⋯ menu is open can flicker or close it. So the menu is keyed on its content and the pill on
+  // its four strings.
+  const headerMenuSignature = builtHeaderMenu === null ? null : JSON.stringify(builtHeaderMenu);
+  const headerMenu = useMemo(
+    () =>
+      headerMenuSignature === null
+        ? null
+        : (JSON.parse(headerMenuSignature) as ReadonlyArray<ThreadHeaderMenuSection>),
+    [headerMenuSignature],
+  );
+  const pillTitle = headerModel?.title ?? null;
+  const pillStatus = headerModel?.statusLabel ?? null;
+  const pillProject = headerModel?.projectLabel ?? null;
+  const pillWorktree = headerModel?.worktreeLabel ?? null;
   const onHeaderMenuAction = (id: ThreadHeaderMenuActionId) => {
     switch (id) {
       case "files":
@@ -2926,11 +2974,18 @@ export function ThreadDetailScreen(props: {
   useLayoutEffect(() => {
     const runMenuAction = (id: ThreadHeaderMenuActionId) => onHeaderMenuActionRef.current(id);
     const openContext = () => setContextSheetFor(outboxThreadKey);
+    const pill =
+      pillTitle === null || pillStatus === null || pillProject === null || pillWorktree === null
+        ? null
+        : {
+            title: pillTitle,
+            statusLabel: pillStatus,
+            projectLabel: pillProject,
+            worktreeLabel: pillWorktree,
+          };
     navigation.setOptions({
-      title: headerModel?.title ?? "Task",
-      headerTitle: headerModel
-        ? () => <ThreadTitlePill model={headerModel} onPress={openContext} />
-        : undefined,
+      title: pillTitle ?? "Task",
+      headerTitle: pill ? () => <ThreadTitlePill model={pill} onPress={openContext} /> : undefined,
       ...(headerMenu === null
         ? { headerRight: undefined }
         : Platform.OS === "ios"
@@ -2963,19 +3018,15 @@ export function ThreadDetailScreen(props: {
           : {
               headerRight: () => (
                 <MenuView
-                  actions={headerMenu.map((section) => ({
-                    id: `section:${section.id}`,
-                    title: "",
-                    displayInline: true,
-                    subactions: section.actions.map((action) => ({
-                      id: action.id,
-                      title: action.title,
-                      ...(action.subtitle ? { subtitle: action.subtitle } : {}),
-                      attributes: {
-                        disabled: action.disabled ?? false,
-                        destructive: action.destructive ?? false,
-                      },
-                    })),
+                  // One flat list: Android draws each inline group as an untitled submenu.
+                  actions={flattenThreadHeaderMenu(headerMenu).map((action) => ({
+                    id: action.id,
+                    title: action.title,
+                    ...(action.subtitle ? { subtitle: action.subtitle } : {}),
+                    attributes: {
+                      disabled: action.disabled ?? false,
+                      destructive: action.destructive ?? false,
+                    },
                   }))}
                   onPressAction={({ nativeEvent }: NativeActionEvent) =>
                     runMenuAction(nativeEvent.event as ThreadHeaderMenuActionId)
@@ -2992,7 +3043,16 @@ export function ThreadDetailScreen(props: {
               ),
             }),
     });
-  }, [headerMenu, headerModel, iconColor, navigation, outboxThreadKey]);
+  }, [
+    headerMenu,
+    iconColor,
+    navigation,
+    outboxThreadKey,
+    pillProject,
+    pillStatus,
+    pillTitle,
+    pillWorktree,
+  ]);
 
   return (
     <KeyboardAvoidingView
@@ -3026,10 +3086,10 @@ export function ThreadDetailScreen(props: {
               // The header floats over the feed: the first message starts under it (and under any
               // banner), and scrolls up beneath its glass.
               contentContainerStyle={{ paddingBottom: 10 }}
-              scrollIndicatorInsets={{ top: headerHeight }}
-              // Room under the newest message for the floating Working pill.
+              scrollIndicatorInsets={{ top: feedTopInset }}
+              // Room under the newest message whenever the floating status capsule shows.
               ListFooterComponent={
-                runningSince !== null ? (
+                floatingCapsuleShown ? (
                   <View style={{ height: FLOATING_CONTROL_CLEARANCE }} />
                 ) : null
               }
@@ -3185,13 +3245,7 @@ export function ThreadDetailScreen(props: {
             <FloatingThreadControl
               runningSince={runningSince}
               followingLatest={followingLatest}
-              attention={
-                pendingApprovals.length > 0 || pendingAgentControlProposals.length > 0
-                  ? "approval"
-                  : pendingUserInputs.length > 0 || secretRequests.requests.length > 0
-                    ? "question"
-                    : null
-              }
+              attention={floatingAttention}
               childAttention={childAttention}
               agents={threadAgents.entry}
               onJumpToLatest={jumpToLatest}
@@ -3448,6 +3502,14 @@ export function ThreadDetailScreen(props: {
             openAgents: threadAgents.open,
             openThread: (target) => openThread(ThreadId.make(target)),
           }}
+        />
+      ) : null}
+      {headerModel ? (
+        <ThreadRenameSheet
+          visible={renameSheetVisible}
+          currentTitle={headerModel.title}
+          onClose={() => setRenameSheetFor(null)}
+          onSave={saveThreadTitle}
         />
       ) : null}
       <ClaudeCacheSheet

@@ -136,43 +136,6 @@ function useThreadAgentsSource(input: {
   return { panel, delegatedChildren, completionReturns };
 }
 
-/** The thread screen's way into the sheet: how many agents work, or worked, for this chat. */
-export function ThreadAgentsButton(props: {
-  readonly entry: ThreadAgentsEntry;
-  readonly onPress: () => void;
-}) {
-  const iconColor = useThemeColor("--color-icon-muted");
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={props.entry.accessibilityLabel}
-      onPress={props.onPress}
-      className="mx-4 mb-1 min-h-9 flex-row items-center gap-2 self-start rounded-full border border-border bg-card-translucent px-3 py-1.5 active:bg-card-alt"
-    >
-      <View
-        className={cn(
-          "h-1.5 w-1.5 rounded-full",
-          props.entry.live ? DOT_CLASS.working : DOT_CLASS.muted,
-        )}
-      />
-      <Text
-        className={cn(
-          "text-xs font-ryco-medium",
-          props.entry.live ? "text-accent-strong" : "text-foreground-muted",
-        )}
-      >
-        {props.entry.label}
-      </Text>
-      <SymbolView
-        name="chevron.right"
-        size={10}
-        tintColor={iconColor as string}
-        type="monochrome"
-      />
-    </Pressable>
-  );
-}
-
 /** One agent or delegated task: what it is, its status and time, and what it is doing. */
 export function ThreadAgentRowView(props: {
   readonly row: ThreadAgentRow;
@@ -345,9 +308,11 @@ export interface ThreadAgentsControl {
  * Everything a chat set working: provider subagents (Claude subagents, Codex collaboration
  * agents, workflow members) with live elapsed time and status, and the Ryco tasks it delegated,
  * which open their own thread (Back returns here). The screen shows `entry` where it fits (the
- * floating status row) and renders `sheet` once. Key the screen's use by thread: its sheet state
- * belongs to one chat.
+ * floating status row) and renders `sheet` once. Its sheet and expanded rows are kept per chat,
+ * so a screen a link retargets to another chat starts that chat's closed and folded.
  */
+const NO_EXPANDED_ROWS: ReadonlySet<string> = new Set();
+
 export function useThreadAgents(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
@@ -376,7 +341,11 @@ export function useThreadAgents(props: {
       const shown = current.key === sheetThreadKey ? current.sheet : THREAD_AGENTS_SHEET_CLOSED;
       return { key: sheetThreadKey, sheet: typeof next === "function" ? next(shown) : next };
     });
-  const [expandedKeys, setExpandedKeys] = useState<ReadonlySet<string>>(() => new Set());
+  const [expandedEntry, setExpandedEntry] = useState<{
+    readonly key: string;
+    readonly rows: ReadonlySet<string>;
+  }>(() => ({ key: sheetThreadKey, rows: NO_EXPANDED_ROWS }));
+  const expandedKeys = expandedEntry.key === sheetThreadKey ? expandedEntry.rows : NO_EXPANDED_ROWS;
   const runtimeSessionId = props.thread?.session?.runtimeSessionId ?? null;
   const model = useMemo(
     () =>
@@ -430,10 +399,10 @@ export function useThreadAgents(props: {
       if (next.openNow !== null) props.onOpenThread(next.openNow);
       return;
     }
-    setExpandedKeys((current) => {
-      const next = new Set(current);
+    setExpandedEntry((current) => {
+      const next = new Set(current.key === sheetThreadKey ? current.rows : NO_EXPANDED_ROWS);
       if (!next.delete(row.key)) next.add(row.key);
-      return next;
+      return { key: sheetThreadKey, rows: next };
     });
   };
   const onDismiss = () => {

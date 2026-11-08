@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  floatingThreadControlTicks,
   formatElapsed,
   isFollowingLatest,
   resolveFloatingThreadControl,
+  showsFloatingThreadCapsule,
 } from "./floatingThreadControlModel";
 
 const START = "2026-11-07T10:00:00.000Z";
@@ -24,17 +26,6 @@ describe("floating thread control", () => {
     expect(isFollowingLatest({ offsetY: 800, viewportHeight: 600, contentHeight: 1600 })).toBe(
       false,
     );
-  });
-
-  it("counts the list's bottom inset as part of the end", () => {
-    expect(
-      isFollowingLatest({
-        offsetY: 800,
-        viewportHeight: 600,
-        contentHeight: 1500,
-        bottomInset: 60,
-      }),
-    ).toBe(true);
   });
 
   const base = {
@@ -97,5 +88,30 @@ describe("floating thread control", () => {
     expect(
       resolveFloatingThreadControl({ ...base, attention: "question", childAttention: child }),
     ).toMatchObject({ status: { kind: "attention" } });
+  });
+
+  it("keeps room under the newest message whenever the capsule shows, not only while working", () => {
+    const idle = { runningSince: null, attention: null, childAttention: null, agentsLive: false };
+    expect(showsFloatingThreadCapsule(idle)).toBe(false);
+    expect(showsFloatingThreadCapsule({ ...idle, runningSince: START })).toBe(true);
+    expect(showsFloatingThreadCapsule({ ...idle, attention: "approval" })).toBe(true);
+    expect(showsFloatingThreadCapsule({ ...idle, attention: "question" })).toBe(true);
+    expect(
+      showsFloatingThreadCapsule({
+        ...idle,
+        childAttention: { threadId: "child-1", title: "Fix the relay" },
+      }),
+    ).toBe(true);
+    expect(showsFloatingThreadCapsule({ ...idle, agentsLive: true })).toBe(true);
+  });
+
+  it("reads the clock only while the label shows the elapsed time", () => {
+    const child = { threadId: "child-1", title: "Fix the relay" };
+    const running = { runningSince: START, attention: null, childAttention: null };
+    expect(floatingThreadControlTicks(running)).toBe(true);
+    expect(floatingThreadControlTicks({ ...running, runningSince: null })).toBe(false);
+    expect(floatingThreadControlTicks({ ...running, attention: "approval" })).toBe(false);
+    // "Delegated chat needs you" has no time in it.
+    expect(floatingThreadControlTicks({ ...running, childAttention: child })).toBe(false);
   });
 });

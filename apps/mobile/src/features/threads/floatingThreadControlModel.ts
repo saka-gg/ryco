@@ -45,13 +45,8 @@ export function isFollowingLatest(input: {
   readonly offsetY: number;
   readonly viewportHeight: number;
   readonly contentHeight: number;
-  /** Space under the content the list scrolls through as well (its bottom inset). */
-  readonly bottomInset?: number;
 }): boolean {
-  return (
-    input.contentHeight + (input.bottomInset ?? 0) - (input.offsetY + input.viewportHeight) <=
-    FOLLOWING_DISTANCE
-  );
+  return input.contentHeight - (input.offsetY + input.viewportHeight) <= FOLLOWING_DISTANCE;
 }
 
 /** "42s", "3:07", "1:02:09": the elapsed time of the running turn. */
@@ -71,6 +66,36 @@ const ATTENTION_LABEL: Readonly<Record<NonNullable<FloatingThreadAttention>, str
   approval: "Needs your approval",
   question: "Waiting for your answer",
 };
+
+/** What decides whether the capsule shows and what it says. */
+export interface FloatingThreadStatusInput {
+  /** When the running turn started; null while nothing runs. */
+  readonly runningSince: string | null;
+  readonly attention: FloatingThreadAttention;
+  /** The first delegated chat that waits on the reader, when one does. */
+  readonly childAttention: { readonly threadId: string; readonly title: string } | null;
+}
+
+/**
+ * Whether the capsule floats over the feed's end: a status, or the live agents count. The feed
+ * keeps FLOATING_CONTROL_CLEARANCE under its newest message exactly then, so the capsule never
+ * covers it. (The jump button alone shows only while the reader is away from the end.)
+ */
+export function showsFloatingThreadCapsule(
+  input: FloatingThreadStatusInput & { readonly agentsLive: boolean },
+): boolean {
+  return (
+    input.attention !== null ||
+    input.childAttention !== null ||
+    input.runningSince !== null ||
+    input.agentsLive
+  );
+}
+
+/** Whether the capsule reads the clock: only while it shows "Working · 1:24". */
+export function floatingThreadControlTicks(input: FloatingThreadStatusInput): boolean {
+  return input.runningSince !== null && input.attention === null && input.childAttention === null;
+}
 
 export function resolveFloatingThreadControl(input: {
   /** When the running turn started; null while nothing runs. */

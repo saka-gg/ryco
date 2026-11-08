@@ -16,11 +16,12 @@ export interface TerminalTabModel {
   readonly exitCode: number | null;
 }
 
+/** What the thread's ⋯ menu says under its Terminal item: the sessions and a running command. */
 export interface TerminalHeaderActivityModel {
   readonly sessionCount: number;
   readonly hasRunningSubprocess: boolean;
-  readonly badgeLabel: string | null;
-  readonly accessibilityLabel: string;
+  /** "Command running · 2 sessions"; null when there is nothing worth saying. */
+  readonly subtitle: string | null;
 }
 
 /** The thread's terminal state as the shared store keeps it, or `null` for none recorded. */
@@ -155,14 +156,13 @@ export function buildTerminalHeaderActivity(input: {
 }): TerminalHeaderActivityModel {
   const sessionCount = new Set(input.terminalIds).size;
   const hasRunningSubprocess = input.runningTerminalIds.length > 0;
-  const sessionCopy = `${sessionCount} terminal ${sessionCount === 1 ? "session" : "sessions"}`;
+  const parts: string[] = [];
+  if (hasRunningSubprocess) parts.push("Command running");
+  // One session is the default the Terminal item opens; more are worth counting.
+  if (sessionCount > 1) parts.push(`${sessionCount > 99 ? "99+" : sessionCount} sessions`);
   return {
     sessionCount,
     hasRunningSubprocess,
-    badgeLabel: sessionCount > 1 ? (sessionCount > 99 ? "99+" : String(sessionCount)) : null,
-    accessibilityLabel:
-      sessionCount === 0
-        ? "Open terminal. No terminal sessions."
-        : `Open terminal. ${sessionCopy}.${hasRunningSubprocess ? " A subprocess is running." : ""}`,
+    subtitle: parts.length === 0 ? null : parts.join(" · "),
   };
 }
