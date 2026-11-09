@@ -21,6 +21,7 @@ export * from "./providerModels.ts";
 export * from "./providerSelectionPolicy.ts";
 export * from "./providerState.ts";
 export * from "./planImplementationPrompt.ts";
+export * from "./proposedPlan.ts";
 export * from "./promptContext.ts";
 export * from "./promptStash.ts";
 export * from "./sendEngine.ts";

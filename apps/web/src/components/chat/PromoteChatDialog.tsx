@@ -143,7 +143,7 @@ import {
   resolvePromotionSubmitBlocker,
   retargetDestinationForName,
   shouldShowGitIdentityNotice,
-} from "./PromoteChatDialog.logic";
+} from "@ryco/client-runtime/state/chats";
 
 const PROMOTE_FORM_ID = "promote-chat-form";
 const PROMOTE_NAME_INPUT_ID = "promote-chat-name";

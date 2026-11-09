@@ -191,6 +191,11 @@
       "import": "./src/model.ts",
       "require": "./src/model.ts"
     },
+    "./thread-goal": {
+      "types": "./src/threadGoal.ts",
+      "import": "./src/threadGoal.ts",
+      "require": "./src/threadGoal.ts"
+    },
     "./orchestration": {
       "types": "./src/orchestration.ts",
       "import": "./src/orchestration.ts",

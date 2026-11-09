@@ -466,6 +466,10 @@
       "types": "./src/state/terminal/replayGate.ts",
       "import": "./src/state/terminal/replayGate.ts"
     },
+    "./state/chats": {
+      "types": "./src/state/chats/index.ts",
+      "import": "./src/state/chats/index.ts"
+    },
     "./state/composer": {
       "types": "./src/state/composer/index.ts",
       "import": "./src/state/composer/index.ts"
