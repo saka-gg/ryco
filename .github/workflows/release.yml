@@ -20,6 +20,11 @@ on:
         required: false
         default: false
         type: boolean
+      skip_release_notes_check:
+        description: "Release without notes in packages/shared/src/releaseNotes.ts (stable only; see docs/release-notes.md)"
+        required: false
+        default: false
+        type: boolean
 
 # Every job starts read-only and is granted only what it needs. In particular,
 # id-token: write lets a job mint the OIDC token npm trusted publishing accepts,
@@ -129,6 +134,15 @@ jobs:
             echo "ryco-cli@$version already exists on npm. Choose a new release version." >&2
             exit 1
           fi
+
+      # Stable releases open their GitHub release with the same notes as the
+      # changelog and the app's What's new, so they need an entry before the
+      # long build starts (docs/release-notes.md).
+      - name: Check release notes
+        if: steps.release_meta.outputs.release_channel == 'stable' && github.event.inputs.skip_release_notes_check != 'true'
+        env:
+          RELEASE_VERSION: ${{ steps.release_meta.outputs.version }}
+        run: node scripts/release-notes.ts check --version "$RELEASE_VERSION"
 
       - id: previous_tag
         name: Resolve previous release tag
@@ -778,10 +792,21 @@ jobs:
             exit 1
           fi
 
+      # Stable releases open with their notes from the changelog (the same text
+      # as the marketing site and the app's What's new); GitHub's generated
+      # pull-request list follows the install notes.
       - name: Prepare release notes body
         shell: bash
+        env:
+          RELEASE_CHANNEL: ${{ needs.resolve.outputs.release_channel }}
+          RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
         run: |
-          cat > release-assets/release-body.md <<'EOF'
+          : > release-assets/release-body.md
+          if [[ "$RELEASE_CHANNEL" == "stable" ]] && node scripts/release-notes.ts check --version "$RELEASE_VERSION" > /dev/null 2>&1; then
+            node scripts/release-notes.ts render --version "$RELEASE_VERSION" >> release-assets/release-body.md
+            printf '\n' >> release-assets/release-body.md
+          fi
+          cat >> release-assets/release-body.md <<'EOF'
           ## macOS install
 
           Download the `.dmg`, open it, and drag Ryco to `/Applications`.
