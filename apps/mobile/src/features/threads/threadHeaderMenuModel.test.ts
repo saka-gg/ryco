@@ -146,6 +146,7 @@ describe("thread header menu", () => {
       "side-chat",
       "fork",
       "rename",
+      "add-task",
       "copy-reference",
       "archive",
     ]);
