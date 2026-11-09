@@ -84,6 +84,7 @@ export function PullRequestActionBar(props: {
   const insets = useSafeAreaInsets();
   const icon = useThemeColor("--color-primary-foreground") as string;
   const barTint = useThemeColor("--color-glass-surface") as string;
+  const warning = useThemeColor("--color-warning") as string;
   const [openedSheet, setSheet] = useState<PullRequestActionSheet | null>(null);
   const draftKey = control.draftKey;
   const draftComments = usePullRequestReviewDrafts(
@@ -159,7 +160,22 @@ export function PullRequestActionBar(props: {
       className="absolute inset-x-0 bottom-0 px-3"
       style={{ paddingBottom: Math.max(insets.bottom, 12) }}
     >
-      {control.error && sheet === null ? (
+      {control.newCommits ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="New commits since you opened this. Show them."
+          onPress={() => {
+            void Haptics.selectionAsync();
+            control.showNewCommits();
+          }}
+          className="mb-2 flex-row items-center gap-2 self-center rounded-full bg-warning-bg px-4 py-2 active:opacity-70"
+        >
+          <SymbolView name="arrow.triangle.2.circlepath" size={12} tintColor={warning} />
+          <Text className="text-xs font-ryco-bold text-warning">
+            New commits since you opened this · Show
+          </Text>
+        </Pressable>
+      ) : control.error && sheet === null ? (
         <View className="mb-2 rounded-2xl bg-danger px-4 py-2.5">
           <Text className="text-xs text-danger-foreground">{control.error}</Text>
         </View>

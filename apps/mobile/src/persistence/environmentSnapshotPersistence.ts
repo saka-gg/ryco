@@ -33,6 +33,8 @@ import {
   ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION,
 } from "./environmentSnapshotCodec";
 import { purgeEnvironmentDeviceData } from "./environmentDevicePurge";
+import { setPullRequestReadStore } from "../rpc/pullRequestAtoms";
+import { createPullRequestReadStore, pullRequestReadsBytes } from "./pullRequestPersistence";
 import { createSnapshotDb, payloadByteLength, type SnapshotDb } from "./snapshotDb";
 
 /**
@@ -417,6 +419,8 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
         contentWasEnabled = enabled;
         if (!enabled) {
           void purgeAllStoredContent().catch(warn("could not remove stored conversation text"));
+          // Saved pull requests follow the same setting.
+          void deps.db.clearPullRequestReads().catch(warn("could not remove saved pull requests"));
           return;
         }
         for (const [environmentId, state] of Object.entries(
@@ -744,6 +748,14 @@ export async function initializeMobileSnapshotPersistence(deps: {
     ...(deps.subscribeBackground ? { subscribeBackground: deps.subscribeBackground } : {}),
   });
   activeRuntime = runtime;
+  setPullRequestReadStore(
+    createPullRequestReadStore({
+      db: getSharedSnapshotDb(),
+      isEnabled: contentCache.isEnabled,
+      ...(contentCache.ready ? { ready: contentCache.ready } : {}),
+      now: () => Date.now(),
+    }),
+  );
   for (const environmentId of dirtyBeforeInitialization) runtime.markDirty(environmentId);
   dirtyBeforeInitialization.clear();
   await runtime.hydrate();
@@ -751,12 +763,18 @@ export async function initializeMobileSnapshotPersistence(deps: {
 }
 
 export function resetMobileSnapshotPersistenceForTests(): void {
+  setPullRequestReadStore(null);
   activeRuntime?.dispose();
   activeRuntime = null;
   dirtyBeforeInitialization.clear();
   sharedDb = null;
   uninstallSelectionPersistence?.();
   uninstallSelectionPersistence = null;
+}
+
+/** Bytes of one environment's saved pull requests (Settings' device cache sizes). */
+export function savedPullRequestBytes(environmentId: EnvironmentId): Promise<number> {
+  return pullRequestReadsBytes(getSharedSnapshotDb(), environmentId);
 }
 
 /** Storage settings reports stored payload bytes, not SQLite allocation or free disk space. */

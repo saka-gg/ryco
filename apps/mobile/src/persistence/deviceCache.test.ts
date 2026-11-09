@@ -11,10 +11,12 @@ const mocks = vi.hoisted(() => ({
   clearIcons: vi.fn(),
   pullRequests: vi.fn(),
   clearPullRequests: vi.fn(),
+  savedPullRequests: vi.fn(),
 }));
 vi.mock("./environmentSnapshotPersistence", () => ({
   listEnvironmentCacheStorage: mocks.snapshots,
   clearEnvironmentSnapshotCache: mocks.purge,
+  savedPullRequestBytes: mocks.savedPullRequests,
 }));
 vi.mock("../rpc/projectFilesAtoms", () => ({
   projectFilesCacheStats: mocks.files,
@@ -41,11 +43,14 @@ beforeEach(() => {
   mocks.diffs.mockReturnValue(40);
   mocks.icons.mockReturnValue(10);
   mocks.pullRequests.mockReturnValue(5);
+  mocks.savedPullRequests.mockResolvedValue(0);
 });
 it("accounts for each category and includes snapshots from devices no longer in the catalog", async () => {
   mocks.snapshots.mockResolvedValue([
-    { environmentId: device, payloadBytes: 100, threads: 2, projects: 1 },
+    { environmentId: device, payloadBytes: 60, threads: 2, projects: 1 },
   ]);
+  // Saved pull requests are stored beside the snapshot and count with it.
+  mocks.savedPullRequests.mockResolvedValue(40);
   expect(await readDeviceCacheUsage([])).toEqual([
     {
       environmentId: device,

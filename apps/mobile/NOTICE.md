@@ -103,7 +103,9 @@ position line, labels, checks, review verdict and diff size;
 `pull-requests/PullRequestListRow.tsx`), the label colour handling
 (`pullRequestGlyphModel.ts`, after upstream's `pullRequestList.ts`), the stack
 navigator on the pull request screen (`pullRequestStackModel.ts`, after upstream's
-`PullRequestStackCard.tsx`).
+`PullRequestStackCard.tsx`), and the live checks refresh intervals (45 s while checks
+run, 60 s otherwise; `pullRequestLiveChecksIntervalMs`, from upstream's client-runtime
+`pullRequestChecks.ts`).
 
 `pingdotgg/t3code` is Copyright (c) 2026 T3 Tools Inc. and licensed under the MIT
 License; that notice is retained below as required. The four vendored native

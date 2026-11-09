@@ -14,13 +14,19 @@ vi.mock("../connection/environmentApi", () => ({
 }));
 
 import {
+  clearPullRequestCache,
   clearPullRequestStateForEnvironment,
+  pullRequestCacheBytes,
+  pullRequestRepositoryLabelsQuery,
+  pullRequestRepositoryPeopleQuery,
   pullRequestDetailQuery,
   pullRequestDiffQuery,
   pullRequestListQuery,
   PullRequestNodeOfflineError,
   refreshPullRequestReads,
   resetPullRequestAtomsForTests,
+  setPullRequestReadStore,
+  type PullRequestReadStore,
 } from "./pullRequestAtoms";
 
 const ENV = "env-a" as EnvironmentId;
@@ -61,6 +67,7 @@ const PATCH = [
 
 beforeEach(() => {
   resetPullRequestAtomsForTests();
+  setPullRequestReadStore(null);
   mocks.clients.clear();
 });
 
@@ -145,6 +152,59 @@ describe("pull request reads", () => {
     release();
   });
 
+  it("keeps each live read and answers from it while the node is offline", async () => {
+    const saved = new Map<string, unknown>();
+    const store: PullRequestReadStore = {
+      save: (kind, environmentId, key, data) => saved.set(`${kind}|${environmentId}|${key}`, data),
+      load: async (kind, environmentId, key) =>
+        saved.get(`${kind}|${environmentId}|${key}`) ?? null,
+    };
+    setPullRequestReadStore(store);
+    const input = {
+      environmentId: ENV,
+      cwd: CWD,
+      state: "open",
+      limit: PULL_REQUESTS_LIST_LIMIT,
+    } as const;
+    setSourceControl(ENV, { listChangeRequests: vi.fn(async () => [row(1)]) });
+    const live = pullRequestListQuery.watch(input);
+    await flush();
+    live();
+    expect(saved.size).toBe(1);
+
+    // The node goes away; a fresh cache reads again and gets the kept copy.
+    resetPullRequestAtomsForTests();
+    mocks.clients.clear();
+    const offline = pullRequestListQuery.watch(input);
+    await flush();
+    const state = pullRequestListQuery.getSnapshot(pullRequestListQuery.keyOf(input));
+    expect(state.data).toEqual([row(1)]);
+    expect(state.error).toBeNull();
+    offline();
+
+    // An error the node answered with is shown, not covered by the kept copy.
+    resetPullRequestAtomsForTests();
+    const refused = Object.assign(new Error("Bad credentials"), {
+      _tag: "SourceControlProviderError",
+    });
+    setSourceControl(ENV, { listChangeRequests: vi.fn(async () => Promise.reject(refused)) });
+    const answered = pullRequestListQuery.watch(input);
+    await flush();
+    await flush();
+    expect(pullRequestListQuery.getSnapshot(pullRequestListQuery.keyOf(input)).error).toBe(refused);
+    answered();
+    mocks.clients.clear();
+
+    // Nothing kept for a pull request: the offline error stays.
+    const detail = { environmentId: ENV, cwd: CWD, number: 9 };
+    const releaseDetail = pullRequestDetailQuery.watch(detail);
+    await flush();
+    expect(
+      pullRequestDetailQuery.getSnapshot(pullRequestDetailQuery.keyOf(detail)).error,
+    ).toBeInstanceOf(PullRequestNodeOfflineError);
+    releaseDetail();
+  });
+
   it("has no key until the checkout and number are known", () => {
     expect(pullRequestDetailQuery.keyOf({ environmentId: ENV, cwd: null, number: 7 })).toBeNull();
     expect(pullRequestDetailQuery.keyOf({ environmentId: ENV, cwd: CWD, number: null })).toBeNull();
@@ -224,5 +284,36 @@ describe("teardown", () => {
         .getSnapshot(pullRequestListQuery.keyOf(theirs))
         .data?.map((e) => e.number),
     ).toEqual([2]);
+  });
+});
+
+describe("repository people and labels", () => {
+  it("are kept in the pull request cache: counted and cleared in Storage, dropped with the node", async () => {
+    setSourceControl(ENV, {
+      listIssueAssignees: async () => [{ login: "ada" }],
+      listIssueLabels: async () => [{ name: "bug", color: "d73a4a" }],
+    });
+    const input = { environmentId: ENV, cwd: CWD } as const;
+    const releasePeople = pullRequestRepositoryPeopleQuery.watch(input);
+    const releaseLabels = pullRequestRepositoryLabelsQuery.watch(input);
+    await flush();
+    const peopleKey = pullRequestRepositoryPeopleQuery.keyOf(input);
+    const labelsKey = pullRequestRepositoryLabelsQuery.keyOf(input);
+    expect(pullRequestRepositoryPeopleQuery.getSnapshot(peopleKey).data).toEqual([
+      { login: "ada" },
+    ]);
+    releasePeople();
+    releaseLabels();
+    expect(pullRequestCacheBytes(ENV)).toBeGreaterThan(0);
+
+    clearPullRequestCache(ENV);
+    expect(pullRequestRepositoryPeopleQuery.getSnapshot(peopleKey).data).toBeNull();
+    expect(pullRequestCacheBytes(ENV)).toBe(0);
+
+    const again = pullRequestRepositoryLabelsQuery.watch(input);
+    await flush();
+    again();
+    clearPullRequestStateForEnvironment(ENV);
+    expect(pullRequestRepositoryLabelsQuery.getSnapshot(labelsKey).data).toBeNull();
   });
 });

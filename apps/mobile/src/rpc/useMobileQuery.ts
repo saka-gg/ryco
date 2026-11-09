@@ -42,11 +42,14 @@ export function useMobileQuery<TInput, TData>(
   // read through a ref so a fresh object per render never re-subscribes.
   const inputRef = useRef(input);
   inputRef.current = input;
-  const lastConnectionRef = useRef<EnvironmentConnection | null>(null);
+  // `undefined` until the first effect: "not looked yet" is not "was offline".
+  const lastConnectionRef = useRef<EnvironmentConnection | null | undefined>(undefined);
 
   useEffect(() => {
-    const isReconnect =
-      lastConnectionRef.current !== null && lastConnectionRef.current !== connection;
+    const previous = lastConnectionRef.current;
+    // A new client after an old one, or the first client after the screen saw
+    // the node offline (whatever it read then was an error or a saved copy).
+    const isReconnect = previous !== undefined && previous !== connection;
     lastConnectionRef.current = connection;
     const release = query.watch(inputRef.current);
     // staleTime alone would keep answering with what the dead client returned,

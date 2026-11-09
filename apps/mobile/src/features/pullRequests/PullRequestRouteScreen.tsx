@@ -28,13 +28,16 @@ import {
 } from "./pullRequestFileReviewModel";
 import { usePullRequestReviewDrafts } from "./pullRequestReviewDrafts";
 import { usePullRequestFilesViewed } from "./usePullRequestFilesViewed";
+import { PullRequestEditSheets, type PullRequestEditSheet } from "./PullRequestEditSheets";
+import { PullRequestPeopleCard } from "./PullRequestPeopleCard";
+import { derivePullRequestReviewers } from "./pullRequestPeopleModel";
+import { usePullRequestLiveChecks } from "./usePullRequestLiveChecks";
 import { PullRequestCheckRing } from "./PullRequestCheckRing";
 import { describeCheckCounts, shortCheckCounts } from "./pullRequestCheckRingModel";
 import { PULL_REQUEST_STACK_SYMBOL, pullRequestStateGlyph } from "./pullRequestGlyphModel";
 import { pullRequestCheckCounts, type PullRequestCheckCounts } from "./pullRequestListModel";
 import {
   PullRequestDiffStats,
-  PullRequestLabelChip,
   PullRequestStateIcon,
   usePullRequestToneColor,
 } from "./PullRequestPresentation";
@@ -94,6 +97,7 @@ function Header(props: {
   readonly additions: number | null;
   readonly deletions: number | null;
   readonly changedFiles: number | null;
+  readonly onEdit: (() => void) | null;
 }) {
   const { header } = props;
   const glyph = pullRequestStateGlyph({
@@ -102,6 +106,7 @@ function Header(props: {
     isDraft: header.stateTone === "draft",
   });
   const toneColor = usePullRequestToneColor(glyph.tone);
+  const editIconColor = useThemeColor("--color-icon") as string;
   return (
     <View className="gap-2.5 px-4 pt-2">
       <View className="flex-row items-center gap-2">
@@ -122,9 +127,25 @@ function Header(props: {
           </Text>
         </View>
       </View>
-      <Text className="text-[22px] leading-7 font-ryco-bold text-foreground" selectable>
-        {header.title}
-      </Text>
+      <View className="flex-row items-start gap-2">
+        <Text
+          className="min-w-0 flex-1 text-[22px] leading-7 font-ryco-bold text-foreground"
+          selectable
+        >
+          {header.title}
+        </Text>
+        {props.onEdit ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Edit title and description"
+            hitSlop={8}
+            onPress={props.onEdit}
+            className="mt-0.5 h-8 w-8 items-center justify-center rounded-full bg-subtle active:bg-subtle-strong"
+          >
+            <SymbolView name="pencil" size={13} tintColor={editIconColor} />
+          </Pressable>
+        ) : null}
+      </View>
       <View className="flex-row flex-wrap items-center gap-x-2 gap-y-1">
         <Text className="shrink font-mono text-xs text-foreground-muted" numberOfLines={1}>
           {header.headRefName} → {header.baseRefName}
@@ -153,13 +174,6 @@ function Header(props: {
               <Text className="text-xs font-ryco-bold text-primary">Open on {props.hostName}</Text>
             </Pressable>
           ) : null}
-        </View>
-      ) : null}
-      {header.labels.length > 0 ? (
-        <View className="flex-row flex-wrap gap-1.5">
-          {header.labels.map((label) => (
-            <PullRequestLabelChip key={label.name} label={label} />
-          ))}
         </View>
       ) : null}
       {props.nextStep ? (
@@ -575,7 +589,20 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
   const number = parsePullRequestNumberParam(props.route.params.number);
   const checkout = usePullRequestCheckout(environmentId, projectId);
   const provider = useSourceControlProvider(environmentId, checkout.cwd);
-  const pullRequest = usePullRequest({ environmentId, cwd: checkout.cwd, number, provider });
+  const environments = useHomeEnvironments();
+  const environment = environments.find((entry) => entry.environmentId === environmentId);
+  // A pull request read while the node is away is the copy kept on this phone.
+  const offline =
+    environment !== undefined &&
+    environment.connectionState !== "connected" &&
+    environment.connectionState !== "read-only";
+  const pullRequest = usePullRequest({
+    environmentId,
+    cwd: checkout.cwd,
+    number,
+    provider,
+    offline,
+  });
   const [tab, setTab] = useState<PullRequestDetailTab>("conversation");
   const diff = usePullRequestDiff({
     environmentId,
@@ -620,8 +647,6 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
       ? selectProjectByRef(state, scopeProjectRef(environmentId, projectId))
       : undefined,
   );
-  const environments = useHomeEnvironments();
-  const environment = environments.find((entry) => entry.environmentId === environmentId);
   const actions = usePullRequestActions({
     environmentId,
     cwd: checkout.cwd,
@@ -636,6 +661,14 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
     hostPendingComments: pullRequest.capabilities.submitReview.pendingReview
       ? (pullRequest.activity.data?.pendingReview?.commentsCount ?? 0)
       : 0,
+  });
+
+  const [editSheet, setEditSheet] = useState<PullRequestEditSheet | null>(null);
+  const mutedIcon = useThemeColor("--color-icon-muted") as string;
+  usePullRequestLiveChecks({
+    overall: pullRequest.checks.overall,
+    open: detail?.state === "open",
+    refresh: pullRequest.refreshDetail,
   });
 
   useEffect(() => {
@@ -691,6 +724,14 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
   };
   const listHeader = (
     <View className="gap-3 pb-2">
+      {offline && detail !== null ? (
+        <View className="mx-4 mt-2 flex-row items-center gap-2 rounded-xl bg-subtle px-3 py-2.5">
+          <SymbolView name="wifi.slash" size={14} tintColor={mutedIcon} />
+          <Text className="min-w-0 flex-1 text-xs text-foreground-muted">
+            {environment.label} is offline. This is the copy saved on this phone.
+          </Text>
+        </View>
+      ) : null}
       {header ? (
         <Header
           header={header}
@@ -704,6 +745,7 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
           additions={detail?.additions ?? null}
           deletions={detail?.deletions ?? null}
           changedFiles={detail?.changedFiles ?? null}
+          onEdit={actions.edits.edit ? () => setEditSheet("edit") : null}
         />
       ) : null}
       {loadError && detail === null ? (
@@ -718,6 +760,16 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
           onPress={() => selectTab("checks")}
         />
       ) : null}
+      {detail ? (
+        <PullRequestPeopleCard
+          reviewers={derivePullRequestReviewers(detail)}
+          labels={detail.labels ?? []}
+          canEditReviewers={actions.edits.reviewers}
+          canEditLabels={actions.edits.labels}
+          onEditReviewers={() => setEditSheet("reviewers")}
+          onEditLabels={() => setEditSheet("labels")}
+        />
+      ) : null}
       {stack ? <StackNavigator stack={stack} onOpen={openLayer} /> : null}
       <DetailSegments
         selected={tab}
@@ -728,6 +780,16 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
         }}
         onSelect={selectTab}
       />
+      {tab === "conversation" && actions.edits.comment ? (
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => setEditSheet("comment")}
+          className="mx-4 flex-row items-center gap-2.5 rounded-2xl bg-card px-4 py-3 active:bg-card-alt"
+        >
+          <SymbolView name="bubble.left" size={15} tintColor={mutedIcon} />
+          <Text className="text-sm text-foreground-muted">Write a comment…</Text>
+        </Pressable>
+      ) : null}
       {tab === "files" && diff.status === "ready" ? (
         <ReviewProgressCard
           progress={reviewProgress}
@@ -799,6 +861,14 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
         contentContainerStyle={{ paddingBottom: PULL_REQUEST_ACTION_BAR_HEIGHT + 48 }}
       />
       <PullRequestActionBar control={actions} number={number} />
+      <PullRequestEditSheets
+        sheet={editSheet}
+        control={actions}
+        detail={detail}
+        environmentId={environmentId}
+        cwd={checkout.cwd}
+        onClose={() => setEditSheet(null)}
+      />
     </View>
   );
 }

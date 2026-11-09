@@ -9,6 +9,7 @@ import { clearPullRequestCache, pullRequestCacheBytes } from "../rpc/pullRequest
 import {
   clearEnvironmentSnapshotCache,
   listEnvironmentCacheStorage,
+  savedPullRequestBytes,
 } from "./environmentSnapshotPersistence";
 
 export interface DeviceCacheUsage {
@@ -29,6 +30,14 @@ export async function readDeviceCacheUsage(
   for (const snapshot of snapshots)
     if (!byId.has(snapshot.environmentId as EnvironmentId))
       byId.set(snapshot.environmentId as EnvironmentId, "Cached device");
+  const savedPullRequests = new Map(
+    await Promise.all(
+      [...byId.keys()].map(
+        async (environmentId) =>
+          [environmentId, await savedPullRequestBytes(environmentId)] as const,
+      ),
+    ),
+  );
   return [...byId]
     .map(([environmentId, label]) => {
       const snapshot = snapshots.find((item) => item.environmentId === environmentId);
@@ -38,7 +47,9 @@ export async function readDeviceCacheUsage(
         previews.files +
         checkpointDiffCacheBytes(environmentId) +
         pullRequestCacheBytes(environmentId);
-      const snapshotBytes = snapshot?.payloadBytes ?? 0;
+      // Saved pull requests live beside the snapshot and are cleared with it.
+      const snapshotBytes =
+        (snapshot?.payloadBytes ?? 0) + (savedPullRequests.get(environmentId) ?? 0);
       return {
         environmentId,
         label,

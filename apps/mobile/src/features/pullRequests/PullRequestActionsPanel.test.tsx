@@ -83,6 +83,8 @@ function control(overrides: Partial<PullRequestActionsControl> = {}): PullReques
     notice: null,
     draftKey: "draft",
     headSha: "h1",
+    newCommits: false,
+    showNewCommits: () => undefined,
     reviewEventFor: () => "comment",
     setMethod: () => undefined,
     deleteBranch: null,
@@ -90,6 +92,9 @@ function control(overrides: Partial<PullRequestActionsControl> = {}): PullReques
     submitReview: () => undefined,
     runMerge: () => undefined,
     runUpdateBranch: () => undefined,
+    edits: { edit: false, reviewers: false, labels: false, comment: false },
+    runUpdate: () => undefined,
+    addComment: () => undefined,
     ...overrides,
   };
 }

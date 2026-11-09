@@ -71,6 +71,27 @@ export interface SnapshotDb {
     readonly updatedAt: number;
   }) => Promise<void>;
   readonly clearAll: () => Promise<void>;
+  /**
+   * Pull request reads kept for offline viewing, one row per read (`key`),
+   * under the same rules as the environment's snapshot: removing the
+   * environment's snapshot removes them too.
+   */
+  readonly loadPullRequestRead: (
+    environmentId: string,
+    key: string,
+  ) => Promise<StoredSnapshotRow | null>;
+  readonly savePullRequestRead: (input: {
+    readonly environmentId: string;
+    readonly key: string;
+    readonly schemaVersion: number;
+    readonly payload: string;
+    readonly updatedAt: number;
+    /** Keep at most this many reads for the environment, newest first. */
+    readonly keep: number;
+  }) => Promise<void>;
+  readonly pullRequestReadBytes: (environmentId: string) => Promise<number>;
+  /** Every environment's pull request reads (the device setting was turned off). */
+  readonly clearPullRequestReads: () => Promise<void>;
 }
 
 async function openExpoSqliteHandle(): Promise<SnapshotDbHandle> {
@@ -116,6 +137,15 @@ CREATE TABLE IF NOT EXISTS environment_snapshots (
   payload TEXT NOT NULL,
   payload_bytes INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS pull_request_reads (
+  environment_id TEXT NOT NULL,
+  read_key TEXT NOT NULL,
+  schema_version INTEGER NOT NULL,
+  payload TEXT NOT NULL,
+  payload_bytes INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (environment_id, read_key)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS hub_node_roster (
   singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
@@ -206,6 +236,9 @@ export function createSnapshotDb(
       await handle.runAsync("DELETE FROM environment_snapshots WHERE environment_id = ?", [
         environmentId,
       ]);
+      await handle.runAsync("DELETE FROM pull_request_reads WHERE environment_id = ?", [
+        environmentId,
+      ]);
     },
     listEnvironmentSnapshotStats: async () => {
       const handle = await acquire();
@@ -243,7 +276,62 @@ export function createSnapshotDb(
     clearAll: async () => {
       const handle = await acquire();
       await handle.runAsync("DELETE FROM environment_snapshots", []);
+      await handle.runAsync("DELETE FROM pull_request_reads", []);
       await handle.runAsync("DELETE FROM hub_node_roster", []);
+    },
+    loadPullRequestRead: async (environmentId, key) => {
+      const handle = await acquire();
+      const row = await handle.getFirstAsync<{ schema_version: number; payload: string }>(
+        `SELECT schema_version, payload
+           FROM pull_request_reads
+          WHERE environment_id = ? AND read_key = ?`,
+        [environmentId, key],
+      );
+      return row ? { schemaVersion: row.schema_version, payload: row.payload } : null;
+    },
+    savePullRequestRead: async (input) => {
+      const handle = await acquire();
+      await handle.runAsync(
+        `INSERT INTO pull_request_reads
+           (environment_id, read_key, schema_version, payload, payload_bytes, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT (environment_id, read_key) DO UPDATE SET
+           schema_version = excluded.schema_version,
+           payload = excluded.payload,
+           payload_bytes = excluded.payload_bytes,
+           updated_at = excluded.updated_at`,
+        [
+          input.environmentId,
+          input.key,
+          input.schemaVersion,
+          input.payload,
+          payloadByteLength(input.payload),
+          input.updatedAt,
+        ],
+      );
+      await handle.runAsync(
+        `DELETE FROM pull_request_reads
+          WHERE environment_id = ?
+            AND read_key NOT IN (
+              SELECT read_key FROM pull_request_reads
+               WHERE environment_id = ?
+               ORDER BY updated_at DESC
+               LIMIT ?
+            )`,
+        [input.environmentId, input.environmentId, input.keep],
+      );
+    },
+    pullRequestReadBytes: async (environmentId) => {
+      const handle = await acquire();
+      const row = await handle.getFirstAsync<{ bytes: number | null }>(
+        "SELECT SUM(payload_bytes) AS bytes FROM pull_request_reads WHERE environment_id = ?",
+        [environmentId],
+      );
+      return row?.bytes ?? 0;
+    },
+    clearPullRequestReads: async () => {
+      const handle = await acquire();
+      await handle.runAsync("DELETE FROM pull_request_reads", []);
     },
   };
 }
