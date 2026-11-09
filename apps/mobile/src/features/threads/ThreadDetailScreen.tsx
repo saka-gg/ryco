@@ -149,6 +149,11 @@ import { isChatProject } from "@ryco/shared/projectKind";
 import { listThreadLifecycleActions } from "@ryco/client-runtime/state/lifecycle";
 import { goBackOrHome } from "../../navigation/goBackOrHome";
 import { ThreadUsageLimitBanner } from "./ThreadUsageLimitBanner";
+import { ThreadFindBar } from "./ThreadFindBar";
+import { ThreadArtifactsSheet } from "./ThreadArtifactsSheet";
+import { summarizeContextWindow } from "./contextWindowSummary";
+import { deriveContextWindowUsage } from "@ryco/client-runtime/state/session/contextWindow";
+import type { ThreadFindMessage } from "./threadFindModel";
 import { threadSnoozeWokeAt } from "@ryco/shared/threadSnooze";
 import type { CommandId, ThreadForkResult } from "@ryco/contracts";
 import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts/base-schemas";
@@ -327,6 +332,8 @@ import type { ThreadGoalActions } from "./ThreadGoalSection";
 import {
   buildThreadHeaderMenu,
   flattenThreadHeaderMenu,
+  THREAD_HEADER_MORE_ICON,
+  THREAD_HEADER_MORE_TITLE,
   resolveThreadRename,
   type ThreadHeaderMenuAction,
   type ThreadHeaderMenuActionId,
@@ -391,6 +398,8 @@ const NO_FORKABLE_MESSAGES: ReadonlySet<MessageId> = new Set();
 const NO_PENDING_APPROVALS: PendingApproval[] = [];
 const NO_REVERT_TARGETS: ReadonlyMap<MessageId, number> = new Map();
 const NO_PENDING_FOLLOW_UPS: ReadonlyArray<PendingFollowUpAdd> = [];
+const NO_FIND_MESSAGES: ReadonlyArray<ThreadFindMessage> = [];
+const NO_ARTIFACT_MESSAGES: ReadonlyArray<ChatMessage> = [];
 const SERVER_QUEUE_EDIT_IN_PROGRESS = "Save or cancel the message you are editing first.";
 /** How long the message a link opened the thread at stays highlighted. */
 const MESSAGE_ANCHOR_HIGHLIGHT_MS = 2_500;
@@ -599,7 +608,25 @@ export function ThreadDetailScreen(props: {
   readonly targetMessageId?: MessageId | null;
 }) {
   const { environmentId, threadId } = props;
-  const targetMessageId = props.targetMessageId ?? null;
+  // Find in chat steps through messages by anchoring at each, the way a link to a message does;
+  // the step counter lets a message found again scroll back to it.
+  // It belongs to the chat and the link it was found under: another chat, or a new link to a
+  // message, drops it.
+  const [findTargetEntry, setFindTargetEntry] = useState<{
+    readonly key: string;
+    readonly messageId: MessageId;
+    readonly step: number;
+  } | null>(null);
+  const findTargetKey = `${environmentId}\u0000${threadId}\u0000${props.targetMessageId ?? ""}`;
+  const findTarget = findTargetEntry?.key === findTargetKey ? findTargetEntry : null;
+  const goToFoundMessage = (messageId: MessageId) =>
+    setFindTargetEntry((current) => ({
+      key: findTargetKey,
+      messageId,
+      step: (current?.step ?? 0) + 1,
+    }));
+  const targetMessageId = findTarget?.messageId ?? props.targetMessageId ?? null;
+  const targetStep = findTarget?.step ?? 0;
   const [sideChatStore] = useState(createSideChatStore);
   const [dismissedFailedTurnId, setDismissedFailedTurnId] = useState<string | null>(null);
   const sideChatKey = JSON.stringify([environmentId, threadId]);
@@ -1256,6 +1283,27 @@ export function ThreadDetailScreen(props: {
     ],
   );
   const threadActivities = thread?.activities;
+  // The context window, for the context sheet: the provider's latest report, against the model's
+  // limit (the model option, else what the provider says the model holds).
+  const contextWindowModelLimit =
+    serverConfig?.providers
+      .find((provider) => provider.instanceId === selectedModelSelection?.instanceId)
+      ?.models.find((model) => model.slug === selectedModelSelection?.model)?.maxContextTokens ??
+    null;
+  const contextWindowOption = selectedModelSelection?.options?.find(
+    (option) => option.id === "contextWindow",
+  )?.value;
+  const contextWindow = useMemo(
+    () =>
+      summarizeContextWindow(
+        deriveContextWindowUsage(
+          threadActivities ?? [],
+          typeof contextWindowOption === "string" ? contextWindowOption : null,
+          contextWindowModelLimit,
+        ),
+      ),
+    [contextWindowModelLimit, contextWindowOption, threadActivities],
+  );
   const secretRequests = useMemo(
     () =>
       mobileSecretRequestCards({
@@ -2593,7 +2641,7 @@ export function ThreadDetailScreen(props: {
   const historyReady = messageHistory !== undefined;
   useEffect(() => {
     if (targetMessageId === null) return;
-    const key = `${environmentId}\u0000${threadId}\u0000${targetMessageId}`;
+    const key = `${environmentId}\u0000${threadId}\u0000${targetMessageId}\u0000${targetStep}`;
     if (anchorProgress.current?.key !== key) {
       anchorProgress.current = { key, loadRequested: false, scrolled: false };
     }
@@ -2625,7 +2673,7 @@ export function ThreadDetailScreen(props: {
       });
       setMessageAnchor({ messageId: targetMessageId, index: step.index });
     }
-  }, [environmentId, historyReady, targetMessageId, threadId, timelineRows]);
+  }, [environmentId, historyReady, targetMessageId, targetStep, threadId, timelineRows]);
   useEffect(() => {
     if (messageAnchor === null) return;
     // One frame late: the list has to have laid the row out before its index is a position.
@@ -2791,8 +2839,16 @@ export function ThreadDetailScreen(props: {
     }).kind === "decline";
 
   // Notices float under the header with the feed starting below them.
+  const [findOpenFor, setFindOpenFor] = useState<string | null>(null);
+  const [artifactsOpenFor, setArtifactsOpenFor] = useState<string | null>(null);
+  const findOpen = findOpenFor === outboxThreadKey;
   const hasBanners = Boolean(
-    cachedView.banner || deliveryNotice || errorBannerMessage || failedNotice || restartNotice,
+    findOpen ||
+    cachedView.banner ||
+    deliveryNotice ||
+    errorBannerMessage ||
+    failedNotice ||
+    restartNotice,
   );
   const [bannerHeight, setBannerHeight] = useState(0);
   const feedTopInset = headerHeight + 6 + (hasBanners ? bannerHeight + 4 : 0);
@@ -3058,10 +3114,15 @@ export function ThreadDetailScreen(props: {
         sideChatAvailable: openSideChat !== undefined,
         forkAvailable: latestForkableReply !== undefined,
         addTaskAvailable: thread !== undefined,
+        findAvailable: thread !== undefined,
         promoteChatAvailable: thread !== undefined && project !== null && isChatProject(project),
+        // The live thread, not its list row: the row's session lags a Stop.
         sessionStoppable:
+          thread !== undefined &&
           sidebarThread !== undefined &&
-          listThreadLifecycleActions(sidebarThread).some((action) => action.id === "stop-session"),
+          listThreadLifecycleActions({ ...sidebarThread, session: thread.session }).some(
+            (action) => action.id === "stop-session",
+          ),
         busy: mutationBusy,
       })
     : null;
@@ -3140,9 +3201,6 @@ export function ThreadDetailScreen(props: {
       case "notes":
         if (checkoutParams) navigation.navigate("ProjectNotes", checkoutParams);
         return;
-      case "more-tools":
-        // A submenu: its items run on their own.
-        return;
       case "review":
         return openReview();
       case "pull-request":
@@ -3154,6 +3212,10 @@ export function ThreadDetailScreen(props: {
         return;
       case "rename":
         return renameCurrentThread();
+      case "find":
+        return setFindOpenFor(outboxThreadKey);
+      case "artifacts":
+        return setArtifactsOpenFor(outboxThreadKey);
       case "turn-into-project":
         return navigation.navigate("ThreadPromoteChat", { environmentId, threadId });
       case "add-task":
@@ -3356,7 +3418,6 @@ export function ThreadDetailScreen(props: {
       id: action.id,
       title: action.title,
       ...(action.subtitle ? { subtitle: action.subtitle } : {}),
-      ...(action.children ? { subactions: action.children.map(androidMenuAction) } : {}),
       attributes: {
         disabled: action.disabled ?? false,
         destructive: action.destructive ?? false,
@@ -3389,18 +3450,31 @@ export function ThreadDetailScreen(props: {
                   menu: {
                     items: headerMenu.map((section) => ({
                       type: "submenu" as const,
-                      label: "",
-                      inline: true,
-                      items: section.actions.map((action) =>
-                        action.children
-                          ? {
-                              type: "submenu" as const,
-                              label: action.title,
-                              icon: { type: "sfSymbol" as const, name: action.icon as never },
-                              items: action.children.map((child) => nativeMenuItem(child)),
-                            }
-                          : nativeMenuItem(action),
-                      ),
+                      label: section.collapsed?.title ?? "",
+                      ...(section.collapsed
+                        ? {
+                            icon: {
+                              type: "sfSymbol" as const,
+                              name: section.collapsed.icon as never,
+                            },
+                          }
+                        : { inline: true }),
+                      items: [
+                        ...section.actions.map((action) => nativeMenuItem(action)),
+                        ...(section.more && section.more.length > 0
+                          ? [
+                              {
+                                type: "submenu" as const,
+                                label: THREAD_HEADER_MORE_TITLE,
+                                icon: {
+                                  type: "sfSymbol" as const,
+                                  name: THREAD_HEADER_MORE_ICON as never,
+                                },
+                                items: section.more.map((action) => nativeMenuItem(action)),
+                              },
+                            ]
+                          : []),
+                      ],
                     })),
                   },
                 },
@@ -3567,6 +3641,18 @@ export function ThreadDetailScreen(props: {
                 style={{ top: headerHeight + 4 }}
                 onLayout={(event) => setBannerHeight(event.nativeEvent.layout.height)}
               >
+                {findOpen ? (
+                  <ThreadFindBar
+                    environmentId={environmentId}
+                    threadId={threadId}
+                    messages={thread?.messages ?? NO_FIND_MESSAGES}
+                    onGoTo={goToFoundMessage}
+                    onClose={() => {
+                      setFindOpenFor(null);
+                      setFindTargetEntry(null);
+                    }}
+                  />
+                ) : null}
                 {cachedView.banner ? (
                   <ThreadCachedBanner text={cachedView.banner.text} tone={cachedView.banner.tone} />
                 ) : null}
@@ -3898,6 +3984,7 @@ export function ThreadDetailScreen(props: {
           agents={threadAgents.entry}
           pullRequestWatch={pullRequestWatch}
           agentControlReceipts={settledAgentControlProposals}
+          contextWindow={contextWindow}
           actions={{
             openMachines: () => navigation.navigate("Connections"),
             openProject: openProjectScreen,
@@ -3921,6 +4008,14 @@ export function ThreadDetailScreen(props: {
           onSave={saveThreadTitle}
         />
       ) : null}
+      <ThreadArtifactsSheet
+        visible={artifactsOpenFor === outboxThreadKey}
+        environmentId={environmentId}
+        threadId={threadId}
+        messages={thread?.messages ?? NO_ARTIFACT_MESSAGES}
+        onShowInThread={goToFoundMessage}
+        onClose={() => setArtifactsOpenFor(null)}
+      />
       <ClaudeCacheSheet
         visible={cacheSheetVisible}
         observation={claudeCacheObservation}

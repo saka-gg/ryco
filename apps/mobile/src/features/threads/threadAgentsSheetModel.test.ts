@@ -307,6 +307,24 @@ describe("thread agents sheet", () => {
     ).toBe(true);
   });
 
+  it("offers a message box only to live agents of the current runtime that can read one", () => {
+    const panel = deriveAgentPanelModel({
+      agents: [
+        agent("a", { canMessage: true, runtimeSessionId: "rt-1", attempt: 1 }),
+        agent("b", { canMessage: false, runtimeSessionId: "rt-1" }),
+        agent("old", { canMessage: true, runtimeSessionId: "rt-0" }),
+      ],
+    });
+    expect(build({ panel }).sections[0]!.rows.map((row) => row.message ?? null)).toEqual([
+      { taskId: "a", runtimeSessionId: "rt-1", attempt: 1 },
+      null,
+      null,
+    ]);
+    expect(build({ panel, offline: true }).sections[0]!.rows.every((row) => !row.message)).toBe(
+      true,
+    );
+  });
+
   it("names the way in by what is active now, else by how many there were", () => {
     const live = build({
       panel: deriveAgentPanelModel({ agents: [agent("a"), agent("b", { status: "completed" })] }),

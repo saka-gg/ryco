@@ -20,6 +20,7 @@ import { showConfirmDialog } from "../../components/ConfirmDialogHost";
 import type { DraftComposerAttachment } from "../../lib/composerFiles";
 import { newCommandId } from "../../lib/ids";
 import { uuidv4 } from "../../lib/uuid";
+import { encodeBytesBase64 } from "../../lib/base64";
 
 // "Edit from here" on mobile, over the shared revert (`runCheckpointRevert`):
 // the choice dialog, the sent message's attachments turned back into composer
@@ -67,16 +68,6 @@ export function chooseCheckpointRevertMode(input: {
 /** What one sent message returns to the composer with on mobile. */
 export type ReturnedSentMessageDrafts = ReturnedSentMessage<DraftComposerAttachment>;
 
-const BASE64_CHUNK_BYTES = 0x8000;
-
-function encodeBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (let offset = 0; offset < bytes.length; offset += BASE64_CHUNK_BYTES) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + BASE64_CHUNK_BYTES));
-  }
-  return btoa(binary);
-}
-
 /** Keeps a returned file in the app cache, where picked files live too, until it uploads. */
 async function writeReturnedFile(name: string, bytes: Uint8Array): Promise<string> {
   const { Directory, File, Paths } = await import("expo-file-system");
@@ -107,7 +98,7 @@ export function loadSentMessageDrafts(input: {
     load: async (attachment) => {
       const bytes = await input.readBytes(attachment);
       if (attachment.type === "image") {
-        const dataUrl = `data:${attachment.mimeType};base64,${encodeBase64(bytes)}`;
+        const dataUrl = `data:${attachment.mimeType};base64,${encodeBytesBase64(bytes)}`;
         return {
           type: "image",
           id: uuidv4(),

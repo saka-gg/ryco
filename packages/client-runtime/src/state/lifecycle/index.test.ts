@@ -35,6 +35,8 @@ describe("conversation lifecycle actions", () => {
       "delete",
     ]);
     expect(ids(thread({ session: { status: "stopped" } }))).toEqual(["archive", "delete"]);
+    // Clients hold a stopped session as "closed": nothing left to stop.
+    expect(ids(thread({ session: { status: "closed" } }))).toEqual(["archive", "delete"]);
     expect(ids(thread({ archivedAt: "2026-10-01T00:00:00.000Z" }))).toEqual([
       "unarchive",
       "delete",

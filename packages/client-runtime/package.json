@@ -366,6 +366,14 @@
       "types": "./src/state/session/index.ts",
       "import": "./src/state/session/index.ts"
     },
+    "./state/session/threadMessageSearch": {
+      "types": "./src/state/session/threadMessageSearch.ts",
+      "import": "./src/state/session/threadMessageSearch.ts"
+    },
+    "./state/session/contextWindow": {
+      "types": "./src/state/session/contextWindow.ts",
+      "import": "./src/state/session/contextWindow.ts"
+    },
     "./state/session/subagentMessage": {
       "types": "./src/state/session/subagentMessage.ts",
       "import": "./src/state/session/subagentMessage.ts"

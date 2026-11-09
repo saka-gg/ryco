@@ -32,6 +32,11 @@ import {
 } from "../../state/threadsRuntime";
 import type { InboxEnvironment } from "../inbox/inboxModel";
 import { stopThreadSubagent } from "./sessionActions";
+import { AgentMessageBox } from "./AgentMessageBox";
+import {
+  subagentMessageRequest,
+  type SubagentMessageIdentity,
+} from "@ryco/client-runtime/state/session/subagentMessage";
 import { startSubagentStop, subagentStopRequests } from "./subagentStopRequests";
 import {
   buildThreadAgentsEntry,
@@ -145,6 +150,8 @@ export function ThreadAgentRowView(props: {
   readonly stopping: boolean;
   readonly onPress: () => void;
   readonly onStop: () => void;
+  /** Sends the agent a message; present on an expanded agent that can read one. */
+  readonly onMessage?: ((text: string) => Promise<void>) | undefined;
 }) {
   const iconColor = useThemeColor("--color-icon-muted");
   const { row } = props;
@@ -232,6 +239,11 @@ export function ThreadAgentRowView(props: {
           ) : null}
         </View>
       ) : null}
+      {props.expanded && row.message && props.onMessage ? (
+        <View className="px-4 pb-3 pl-9">
+          <AgentMessageBox agentLabel={row.label} send={props.onMessage} />
+        </View>
+      ) : null}
       {row.stop ? (
         <View className="flex-row px-4 pb-3 pl-9">
           <Pressable
@@ -265,6 +277,7 @@ function SectionView(props: {
   readonly isStopping: (row: ThreadAgentRow) => boolean;
   readonly onRowPress: (row: ThreadAgentRow) => void;
   readonly onStop: (row: ThreadAgentRow, stop: SubagentStopIdentity) => void;
+  readonly onMessage: (identity: SubagentMessageIdentity, text: string) => Promise<void>;
 }) {
   return (
     <View className="gap-2">
@@ -285,6 +298,7 @@ function SectionView(props: {
             expanded={props.expandedKeys.has(row.key)}
             stopping={props.isStopping(row)}
             onPress={() => props.onRowPress(row)}
+            onMessage={row.message ? (text) => props.onMessage(row.message!, text) : undefined}
             onStop={() => {
               if (row.stop) props.onStop(row, row.stop);
             }}
@@ -422,6 +436,9 @@ export function useThreadAgents(props: {
     });
   };
 
+  const onMessage = (identity: SubagentMessageIdentity, text: string) =>
+    sendSubagentMessage(props.environmentId, props.threadId, identity, text);
+
   const sheetElement = !isThreadAgentsSheetMounted(sheet, hasAgents) ? null : (
     <>
       <Modal
@@ -466,6 +483,7 @@ export function useThreadAgents(props: {
               isStopping={isStopping}
               onRowPress={onRowPress}
               onStop={onStop}
+              onMessage={onMessage}
             />
           ))}
         </ScrollView>
@@ -478,4 +496,16 @@ export function useThreadAgents(props: {
     open: () => setSheet(openThreadAgentsSheet()),
     sheet: sheetElement,
   };
+}
+
+/** Queues `text` for the agent's next step on the node; rejects with the node's reason. */
+async function sendSubagentMessage(
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+  identity: SubagentMessageIdentity,
+  text: string,
+): Promise<void> {
+  const message = ensureEnvironmentApi(environmentId).orchestration.messageBackgroundTask;
+  if (!message) throw new Error("This machine can't send messages to agents.");
+  await message(subagentMessageRequest(threadId, identity, text));
 }

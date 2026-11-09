@@ -45,18 +45,28 @@ function menu(overrides: Partial<ThreadHeaderMenuInput> = {}) {
   });
 }
 
+/** Each group as [id, its rows, its More rows]. */
 const ids = (sections: ReturnType<typeof menu>) =>
-  sections.map((section) => [section.id, section.actions.map((action) => action.id)]);
+  sections.map((section) => [
+    section.id,
+    section.actions.map((action) => action.id),
+    (section.more ?? []).map((action) => action.id),
+  ]);
+
+const all = (sections: ReturnType<typeof menu>) => flattenThreadHeaderMenu(sections);
 
 const allTools = { findInFiles: true, scripts: true, servers: true, notes: true, devices: true };
 
 describe("thread header menu", () => {
-  it("gathers the old header buttons and the task sheet's actions in three groups", () => {
-    expect(ids(menu())).toEqual([
-      ["workspace", ["files", "terminal", "source-control", "review"]],
-      ["chat", ["side-chat", "fork", "rename", "add-task", "copy-reference"]],
-      ["state", ["archive", "delete"]],
+  it("keeps the top level short: tools behind Workspace, rare actions behind More", () => {
+    const sections = menu({ findAvailable: true });
+    expect(ids(sections)).toEqual([
+      ["workspace", ["files", "terminal", "source-control", "review"], []],
+      ["chat", ["find", "side-chat", "fork", "rename"], []],
+      ["state", ["archive"], ["artifacts", "add-task", "copy-reference", "delete"]],
     ]);
+    expect(sections[0]?.collapsed).toEqual({ title: "Workspace", icon: "folder" });
+    expect(sections.slice(1).every((section) => section.collapsed === undefined)).toBe(true);
   });
 
   it("adds the device, the pull request and its link, and the running turn's Stop", () => {
@@ -69,49 +79,59 @@ describe("thread header menu", () => {
       }),
     });
     expect(ids(sections)).toEqual([
-      ["workspace", ["files", "terminal", "device", "source-control", "review", "pull-request"]],
-      ["chat", ["side-chat", "fork", "rename", "add-task", "copy-reference", "copy-task-id"]],
-      ["state", ["stop", "archive", "delete"]],
+      [
+        "workspace",
+        ["files", "terminal", "device", "source-control", "review", "pull-request"],
+        [],
+      ],
+      ["chat", ["side-chat", "fork", "rename"], []],
+      ["state", ["stop", "archive"], ["add-task", "copy-reference", "copy-task-id", "delete"]],
     ]);
-    const all = sections.flatMap((section) => section.actions);
-    expect(all.find((action) => action.id === "pull-request")?.title).toBe("Pull request #42");
-    expect(all.find((action) => action.id === "copy-reference")?.title).toBe(
+    expect(all(sections).find((action) => action.id === "pull-request")?.title).toBe(
+      "Pull request #42",
+    );
+    expect(all(sections).find((action) => action.id === "copy-reference")?.title).toBe(
       "Copy pull request link",
     );
     // A running turn must stop before the chat can be archived.
-    expect(all.find((action) => action.id === "archive")).toMatchObject({
+    expect(all(sections).find((action) => action.id === "archive")).toMatchObject({
       disabled: true,
       subtitle: "Stop the current turn first.",
     });
   });
 
-  it("puts the workspace tools behind one More tools submenu when the group would run long", () => {
-    const sections = menu({ tools: allTools });
+  it("puts every workspace tool in the one Workspace submenu, only the available ones", () => {
+    const sections = menu({ tools: allTools, deviceAvailable: true });
     expect(ids(sections)[0]).toEqual([
       "workspace",
-      ["files", "terminal", "source-control", "review", "more-tools"],
+      [
+        "files",
+        "terminal",
+        "device",
+        "source-control",
+        "review",
+        "find-in-files",
+        "scripts",
+        "servers",
+        "notes",
+        "devices",
+      ],
+      [],
     ]);
-    const more = sections[0]?.actions.at(-1);
-    expect(more?.title).toBe("More tools");
-    expect(more?.children?.map((action) => action.id)).toEqual([
-      "find-in-files",
-      "scripts",
-      "servers",
-      "notes",
-      "devices",
-    ]);
-  });
-
-  it("keeps the tools inline while the group stays short, and only the available ones", () => {
-    const sections = menu({
-      tools: { ...allTools, servers: false, devices: false },
-      model: model({ reviewVisible: false }),
-    });
-    expect(ids(sections)[0]).toEqual([
+    expect(
+      ids(
+        menu({
+          tools: { ...allTools, servers: false, devices: false },
+          model: model({ reviewVisible: false }),
+        }),
+      )[0],
+    ).toEqual([
       "workspace",
       ["files", "terminal", "source-control", "find-in-files", "scripts", "notes"],
+      [],
     ]);
-    expect(sections[0]?.actions.every((action) => action.children === undefined)).toBe(true);
+    // One submenu for the tools: no "More tools" inside Workspace.
+    expect(all(sections).some((action) => action.title === "More tools")).toBe(false);
   });
 
   it("drops the workspace group without a checkout and gates changes while busy", () => {
@@ -124,12 +144,14 @@ describe("thread header menu", () => {
       model: model({ reviewVisible: false, filesVisible: false, terminalVisible: false }),
     });
     expect(ids(sections)).toEqual([
-      ["chat", ["rename", "copy-reference"]],
-      ["state", ["archive", "delete"]],
+      ["chat", ["rename"], []],
+      ["state", ["archive"], ["copy-reference", "delete"]],
     ]);
-    const all = sections.flatMap((section) => section.actions);
-    expect(all.find((action) => action.id === "rename")?.disabled).toBe(true);
-    expect(all.find((action) => action.id === "copy-reference")?.disabled).toBeUndefined();
+    expect(all(sections).find((action) => action.id === "rename")?.disabled).toBe(true);
+    expect(all(sections).find((action) => action.id === "delete")?.disabled).toBe(true);
+    expect(
+      all(sections).find((action) => action.id === "copy-reference")?.disabled,
+    ).toBeUndefined();
   });
 
   it("says why compacting or settling cannot run, and restores an archived chat", () => {
@@ -149,83 +171,86 @@ describe("thread header menu", () => {
         },
       }),
     });
-    const state = sections.find((section) => section.id === "state")?.actions ?? [];
-    expect(state.map((action) => [action.id, action.title, action.subtitle])).toEqual([
-      ["compact", "Compact conversation", "Wait for the agent to finish."],
+    const state = sections.find((section) => section.id === "state");
+    expect(state?.actions.map((action) => [action.id, action.title, action.subtitle])).toEqual([
       ["settlement", "Settle task", "Resolve the pending approval first."],
       ["archive", "Restore", undefined],
-      ["delete", "Delete…", undefined],
     ]);
+    expect(state?.more?.find((action) => action.id === "compact")).toMatchObject({
+      subtitle: "Wait for the agent to finish.",
+      disabled: true,
+    });
   });
 
   it("offers a chat without a project to become one, after Rename", () => {
-    const sections = menu({
-      promoteChatAvailable: true,
-      sourceControlAvailable: false,
-      model: model({ reviewVisible: false, filesVisible: true, terminalVisible: true }),
-    });
-    expect(ids(sections)).toEqual([
-      ["workspace", ["files", "terminal"]],
-      ["chat", ["side-chat", "fork", "rename", "turn-into-project", "add-task", "copy-reference"]],
-      ["state", ["archive", "delete"]],
+    const sections = menu({ promoteChatAvailable: true });
+    expect(sections.find((section) => section.id === "chat")?.actions.map((a) => a.id)).toEqual([
+      "side-chat",
+      "fork",
+      "rename",
+      "turn-into-project",
     ]);
     expect(
-      menu({ promoteChatAvailable: true, busy: true })
-        .flatMap((section) => section.actions)
-        .find((action) => action.id === "turn-into-project")?.disabled,
+      all(menu({ promoteChatAvailable: true, busy: true })).find(
+        (action) => action.id === "turn-into-project",
+      )?.disabled,
     ).toBe(true);
   });
 
-  it("offers Stop session only while no turn runs, and Delete always", () => {
-    const state = (overrides: Partial<ThreadHeaderMenuInput>) =>
+  it("offers Stop session only while no turn runs, behind More, and Delete last", () => {
+    const more = (overrides: Partial<ThreadHeaderMenuInput>) =>
       menu(overrides)
         .find((section) => section.id === "state")
-        ?.actions.map((action) => action.id);
-    expect(state({ sessionStoppable: true })).toEqual(["stop-session", "archive", "delete"]);
+        ?.more?.map((action) => action.id);
+    expect(more({ sessionStoppable: true })).toEqual([
+      "add-task",
+      "copy-reference",
+      "stop-session",
+      "delete",
+    ]);
     expect(
-      state({
+      more({
         sessionStoppable: true,
         model: model({ moreActions: ["rename", "archive", "stop", "details"] }),
       }),
-    ).toEqual(["stop", "archive", "delete"]);
-    const remove = menu({ busy: true })
-      .flatMap((section) => section.actions)
-      .find((action) => action.id === "delete");
-    expect(remove).toMatchObject({ destructive: true, disabled: true });
+    ).toEqual(["add-task", "copy-reference", "delete"]);
+    expect(all(menu({})).find((action) => action.id === "delete")).toMatchObject({
+      destructive: true,
+    });
   });
 
   it("notes a running command and extra sessions under Terminal", () => {
     const terminal = (terminalSubtitle: string | null) =>
-      menu({ terminalSubtitle })
-        .flatMap((section) => section.actions)
-        .find((action) => action.id === "terminal");
+      all(menu({ terminalSubtitle })).find((action) => action.id === "terminal");
     expect(terminal("Command running · 2 sessions")?.subtitle).toBe("Command running · 2 sessions");
     expect(terminal(null)).not.toHaveProperty("subtitle");
   });
 
-  it("is one list of real items on Android, in the iOS order, with no group rows", () => {
-    const sections = menu({ tools: allTools });
-    const flat = flattenThreadHeaderMenu(sections);
+  it("is one list of real items on Android, in the iOS order, More rows after their group", () => {
+    const flat = all(menu({ tools: allTools, findAvailable: true, sessionStoppable: true }));
     expect(flat.map((action) => action.id)).toEqual([
       "files",
       "terminal",
       "source-control",
       "review",
-      "more-tools",
+      "find-in-files",
+      "scripts",
+      "servers",
+      "notes",
+      "devices",
+      "find",
       "side-chat",
       "fork",
       "rename",
+      "archive",
+      "artifacts",
       "add-task",
       "copy-reference",
-      "archive",
+      "stop-session",
       "delete",
     ]);
-    // Every row is an action with a title: none is an untitled group (a blank submenu). The one
-    // submenu Android draws is "More tools", titled, holding the tools.
+    // Every row is an action with a title: none is an untitled group (a blank submenu).
     expect(flat.every((action) => action.title.length > 0)).toBe(true);
-    expect(flat.filter((action) => action.children).map((action) => action.title)).toEqual([
-      "More tools",
-    ]);
   });
 });
 

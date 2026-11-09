@@ -25,6 +25,7 @@ import {
 import type { ThreadAgentRow, ThreadAgentsEntry, ThreadAgentTone } from "./threadAgentsSheetModel";
 import { ThreadGoalSection, type ThreadGoalActions } from "./ThreadGoalSection";
 import type { ThreadHeaderModel } from "./threadHeaderModel";
+import type { ContextWindowSummary } from "./contextWindowSummary";
 import type { PullRequestWatchControl } from "./usePullRequestWatchControl";
 
 const STATUS_TEXT: Readonly<Record<ThreadStatusTone, string>> = {
@@ -176,6 +177,8 @@ export function ThreadContextSheet(props: {
   readonly pullRequestWatch: PullRequestWatchControl | null;
   /** Settled Agent Control receipts of this chat (pending ones sit over the composer). */
   readonly agentControlReceipts: ReadonlyArray<AgentControlProposalView>;
+  /** How full the conversation's context window is; null until the provider reported usage. */
+  readonly contextWindow?: ContextWindowSummary | null;
   /** The goal the agent pursues (`/goal`), with its controls; null when it has none. */
   readonly goal: {
     readonly goal: ThreadGoal;
@@ -243,6 +246,33 @@ export function ThreadContextSheet(props: {
             {model.pullRequestWatch?.chip ? (
               <PullRequestWatchChip chip={model.pullRequestWatch.chip} />
             ) : null}
+          </InfoRow>
+        ) : null}
+        {props.contextWindow ? (
+          <InfoRow
+            label="Context"
+            accessibilityLabel={`Context window ${props.contextWindow.label}${
+              props.contextWindow.detail ? `, ${props.contextWindow.detail}` : ""
+            }${props.contextWindow.compactsAutomatically ? ". Compacts automatically." : ""}`}
+          >
+            <View className="min-w-0 shrink items-end gap-1">
+              <ValueText className="font-sans">
+                {props.contextWindow.detail
+                  ? `${props.contextWindow.label} · ${props.contextWindow.detail}`
+                  : props.contextWindow.label}
+              </ValueText>
+              {props.contextWindow.fraction !== null ? (
+                <View className="h-1 w-24 overflow-hidden rounded-full bg-subtle">
+                  <View
+                    className={cn(
+                      "h-1 rounded-full",
+                      props.contextWindow.fraction >= 0.9 ? "bg-warning" : "bg-foreground-muted",
+                    )}
+                    style={{ width: `${Math.round(props.contextWindow.fraction * 100)}%` }}
+                  />
+                </View>
+              ) : null}
+            </View>
           </InfoRow>
         ) : null}
         {props.cacheSummary !== null ? (

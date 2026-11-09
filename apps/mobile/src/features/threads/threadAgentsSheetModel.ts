@@ -22,6 +22,10 @@ import {
   subagentStopIdentity,
   type SubagentStopIdentity,
 } from "@ryco/client-runtime/state/session/subagentStop";
+import {
+  subagentMessageIdentity,
+  type SubagentMessageIdentity,
+} from "@ryco/client-runtime/state/session/subagentMessage";
 import { completionReturnPresentation } from "@ryco/client-runtime/state/agentControl";
 import {
   resolveDelegatedTaskStatus,
@@ -93,6 +97,11 @@ export interface ThreadAgentRow {
   readonly details: ThreadAgentDetails | null;
   /** Offered while the node takes changes and the provider can stop this one task. */
   readonly stop: SubagentStopIdentity | null;
+  /**
+   * Offered while the node takes changes and the provider lets this agent read a message at its
+   * next step (`subagentMessageIdentity`); absent on delegated tasks.
+   */
+  readonly message?: SubagentMessageIdentity | null;
 }
 
 export interface ThreadAgentSection {
@@ -201,6 +210,10 @@ function subagentRow(
     stop:
       input.stopReady && !input.offline
         ? subagentStopIdentity(agent, input.runtimeSessionId)
+        : null,
+    message:
+      input.stopReady && !input.offline
+        ? subagentMessageIdentity(agent, input.runtimeSessionId)
         : null,
   };
 }
