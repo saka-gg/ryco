@@ -154,6 +154,63 @@ describe("machine picker model", () => {
     expect(model.faceKey).toBe("all");
   });
 
+  it("names what the tab shows in its heading and label", () => {
+    const model = buildMachinePickerModel({
+      environments: MACHINES,
+      selected: null,
+      factsOf,
+      now: NOW,
+      title: "Show tasks from",
+    });
+    expect(model.title).toBe("Show tasks from");
+    expect(model.accessibilityLabel).toBe("Machine: All machines, 3 online. Show tasks from");
+  });
+
+  it("without All machines, shows the first online machine when none is picked", () => {
+    const offlineFirst = [MACHINES[3]!, ...MACHINES.slice(0, 3)];
+    const model = buildMachinePickerModel({
+      environments: offlineFirst,
+      selected: null,
+      factsOf,
+      now: NOW,
+      allowAll: false,
+    });
+    expect(model.allowAll).toBe(false);
+    expect(model.allSelected).toBe(false);
+    expect(model.faceKey).toBe("machine:mac");
+    expect(model.rows.filter((row) => row.selected).map((row) => row.environmentId)).toEqual([MAC]);
+  });
+
+  it("without All machines, keeps a picked machine and falls back when it is gone", () => {
+    const picked = buildMachinePickerModel({
+      environments: MACHINES,
+      selected: CLOUD,
+      factsOf,
+      now: NOW,
+      allowAll: false,
+    });
+    expect(picked.faceKey).toBe("machine:cloud");
+    const gone = buildMachinePickerModel({
+      environments: MACHINES,
+      selected: "gone" as EnvironmentId,
+      factsOf,
+      now: NOW,
+      allowAll: false,
+    });
+    expect(gone.faceKey).toBe("machine:mac");
+  });
+
+  it("without All machines and every machine offline, shows the first one", () => {
+    const model = buildMachinePickerModel({
+      environments: [MACHINES[3]!],
+      selected: null,
+      factsOf,
+      now: NOW,
+      allowAll: false,
+    });
+    expect(model.faceKey).toBe("machine:cloud");
+  });
+
   it("says Offline without a time when it never saw the machine", () => {
     const model = buildMachinePickerModel({
       environments: [{ environmentId: CLOUD, label: "Ryco Cloud", connectionState: "offline" }],

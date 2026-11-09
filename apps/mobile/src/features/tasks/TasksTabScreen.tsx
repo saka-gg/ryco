@@ -22,6 +22,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { SymbolView } from "../../components/AppSymbol";
 import { HeaderIconButton } from "../../components/HeaderIconButton";
+import { MachinePickerButton } from "../../components/MachinePickerButton";
 import { AppText as Text } from "../../components/AppText";
 import { EmptyState } from "../../components/EmptyState";
 import { cn } from "../../lib/cn";
@@ -56,11 +57,14 @@ import {
   resolveTaskProjectFilter,
   selectTaskMachine,
   selectTaskProject,
-  type TaskMachine,
 } from "./tasksMachinesModel";
 import { TaskUndoToast } from "./TaskUndoToast";
 import { rereadTaskMachines } from "./taskConnectionDemand";
-import { useTaskMachines, useTasksAcrossMachines } from "./useMachineTasks";
+import {
+  useTaskMachines,
+  useTaskPickerEnvironments,
+  useTasksAcrossMachines,
+} from "./useMachineTasks";
 import { updateTasksTabState, useTasksTabState, useTasksTabStateLoaded } from "./useTasksTabState";
 
 /** How long a checked row stays in place, checked, before it moves to Done (or back). */
@@ -96,92 +100,54 @@ interface PickerProject {
 }
 
 /**
- * Top-left: every machine's tasks or one machine's (when there are several),
- * and one project's. A project belongs to a machine: picking one picks it.
+ * The project filter beside search. A project belongs to a machine: picking
+ * one also picks its machine in the machine picker.
  */
-function ScopePicker(props: {
-  readonly machines: ReadonlyArray<TaskMachine>;
-  readonly machine: TaskMachine | null;
+function ProjectFilterButton(props: {
   readonly projects: ReadonlyArray<PickerProject>;
   readonly projectId: ProjectId | null;
-  readonly onMachine: (environmentId: EnvironmentId | null) => void;
+  /** Every machine's projects are listed: say which machine each is on. */
+  readonly showMachine: boolean;
   readonly onProject: (project: PickerProject | null) => void;
 }) {
-  const icon = useThemeColor("--color-icon-muted") as string;
-  const several = props.machines.length > 1;
-  const project = props.projects.find((candidate) => candidate.id === props.projectId) ?? null;
-  const machineLabel = props.machine?.label ?? "All machines";
-  const label = project
-    ? several
-      ? `${machineLabel} · ${project.name}`
-      : project.name
-    : several
-      ? machineLabel
-      : "All projects";
-  const actions: MenuAction[] = [];
-  if (several)
-    actions.push({
-      id: "machines",
-      title: "Machine",
-      displayInline: true,
-      subactions: [
-        { id: "machine:", title: "All machines", state: props.machine === null ? "on" : "off" },
-        ...props.machines.map((machine) => ({
-          id: `machine:${machine.environmentId}`,
-          title: machine.label,
-          ...(machine.reachable ? {} : { subtitle: "Offline" }),
-          state:
-            machine.environmentId === props.machine?.environmentId
-              ? ("on" as const)
-              : ("off" as const),
-        })),
-      ],
-    });
-  if (props.projects.length > 0)
-    actions.push({
-      id: "projects",
-      title: "Project",
-      displayInline: true,
-      subactions: [
-        { id: "project:", title: "All projects", state: props.projectId === null ? "on" : "off" },
-        ...props.projects.map((candidate) => ({
-          id: `project:${candidate.environmentId}:${candidate.id}`,
-          title: candidate.name,
-          // Every machine shows: say which machine a project is on.
-          ...(several && props.machine === null ? { subtitle: candidate.machineLabel } : {}),
-          state: candidate.id === props.projectId ? ("on" as const) : ("off" as const),
-        })),
-      ],
-    });
+  const active = props.projectId !== null;
+  const actions: MenuAction[] = [
+    { id: "project:", title: "All projects", state: active ? "off" : "on" },
+    ...props.projects.map((candidate) => ({
+      id: `project:${candidate.environmentId}:${candidate.id}`,
+      title: candidate.name,
+      ...(props.showMachine ? { subtitle: candidate.machineLabel } : {}),
+      state: candidate.id === props.projectId ? ("on" as const) : ("off" as const),
+    })),
+  ];
   const onPressAction = (event: NativeActionEvent) => {
-    const id = event.nativeEvent.event;
+    const rest = event.nativeEvent.event.slice("project:".length);
     void Haptics.selectionAsync();
-    if (id.startsWith("machine:")) {
-      const environmentId = id.slice("machine:".length);
-      props.onMachine(environmentId.length > 0 ? (environmentId as EnvironmentId) : null);
-    } else if (id.startsWith("project:")) {
-      const rest = id.slice("project:".length);
-      props.onProject(
-        rest.length === 0
-          ? null
-          : (props.projects.find(
-              (candidate) => `${candidate.environmentId}:${candidate.id}` === rest,
-            ) ?? null),
-      );
-    }
+    props.onProject(
+      rest.length === 0
+        ? null
+        : (props.projects.find(
+            (candidate) => `${candidate.environmentId}:${candidate.id}` === rest,
+          ) ?? null),
+    );
   };
+  const project = props.projects.find((candidate) => candidate.id === props.projectId);
   return (
     <MenuView title="Show tasks of" actions={actions} onPressAction={onPressAction}>
-      <Pressable
+      <View
+        accessible
         accessibilityRole="button"
-        accessibilityLabel={`Showing ${label}. Change.`}
-        className="h-10 max-w-64 flex-row items-center gap-1.5 rounded-full bg-subtle px-3.5 active:bg-subtle-strong"
+        accessibilityLabel={project ? `Project filter, ${project.name}` : "Filter by project"}
       >
-        <Text className="shrink text-sm font-ryco-bold text-foreground" numberOfLines={1}>
-          {label}
-        </Text>
-        <SymbolView name="chevron.down" size={11} tintColor={icon} />
-      </Pressable>
+        <HeaderIconButton
+          icon={
+            active ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle"
+          }
+          accessibilityLabel="Filter"
+          active={active}
+          filled
+        />
+      </View>
     </MenuView>
   );
 }
@@ -301,6 +267,7 @@ export function TasksTabScreen() {
   const tabState = useTasksTabState();
   const tabStateLoaded = useTasksTabStateLoaded();
   const machines = useTaskMachines();
+  const pickerEnvironments = useTaskPickerEnvironments(machines);
   // Hub machines are asked for only while the tab is in front.
   const focused = useIsFocused();
   const filterMachine = resolveTaskMachineFilter(machines, tabState.environmentId);
@@ -548,12 +515,28 @@ export function TasksTabScreen() {
       ) : (
         <View className="flex-row items-center gap-2 px-4">
           {machines.length > 0 ? (
-            <ScopePicker
-              machines={machines}
-              machine={filterMachine}
+            <MachinePickerButton
+              environments={pickerEnvironments}
+              selected={filterMachine?.environmentId ?? null}
+              title="Show tasks from"
+              onSelect={(id) => updateTasksTabState((state) => selectTaskMachine(state, id))}
+              onManage={() => navigation.navigate("Connections")}
+            />
+          ) : null}
+          <View className="flex-1" />
+          {machines.length > 0 ? (
+            <HeaderIconButton
+              icon="magnifyingglass"
+              accessibilityLabel="Search tasks"
+              filled
+              onPress={() => setSearching(true)}
+            />
+          ) : null}
+          {pickerProjects.length > 0 ? (
+            <ProjectFilterButton
               projects={pickerProjects}
               projectId={projectFilter}
-              onMachine={(id) => updateTasksTabState((state) => selectTaskMachine(state, id))}
+              showMachine={machines.length > 1 && filterMachine === null}
               onProject={(project) =>
                 updateTasksTabState((state) =>
                   selectTaskProject(
@@ -564,15 +547,6 @@ export function TasksTabScreen() {
                   ),
                 )
               }
-            />
-          ) : null}
-          <View className="flex-1" />
-          {machines.length > 0 ? (
-            <HeaderIconButton
-              icon="magnifyingglass"
-              accessibilityLabel="Search tasks"
-              filled
-              onPress={() => setSearching(true)}
             />
           ) : null}
         </View>

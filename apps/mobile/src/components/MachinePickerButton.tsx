@@ -21,6 +21,7 @@ import Animated, {
 import {
   ALL_MACHINES_SYMBOL,
   buildMachinePickerModel,
+  DEFAULT_MACHINE_PICKER_TITLE,
   type MachinePickerEnvironment,
   type MachinePickerModel,
   type MachinePickerRow,
@@ -379,6 +380,10 @@ export function MachinePickerButton(props: {
   readonly selected: EnvironmentId | null;
   readonly onSelect: (environmentId: EnvironmentId | null) => void;
   readonly onManage: () => void;
+  /** Offer "All machines" (the default); a tab that reads one machine at a time leaves it out. */
+  readonly allowAll?: boolean;
+  /** The popover's heading, naming what the tab shows ("Show tasks from"). */
+  readonly title?: string;
 }) {
   const palette = usePalette();
   const popoverColor = useThemeColor("--color-popover") as string;
@@ -389,6 +394,8 @@ export function MachinePickerButton(props: {
     selected: props.selected,
     factsOf,
     now: Date.now(),
+    allowAll: props.allowAll ?? true,
+    title: props.title ?? DEFAULT_MACHINE_PICKER_TITLE,
   });
 
   const buttonRef = useRef<View>(null);
@@ -454,7 +461,9 @@ export function MachinePickerButton(props: {
     if (closingRef.current) return;
     void Haptics.selectionAsync().catch(() => undefined);
     close();
-    if (environmentId !== props.selected) props.onSelect(environmentId);
+    // Without "All machines" the button can show a machine nobody picked yet: picking it saves it.
+    // Without "All machines" the button can show a machine nobody picked yet: picking it saves it.
+    if (environmentId !== props.selected || props.allowAll === false) props.onSelect(environmentId);
   };
   const manage = () => {
     if (closingRef.current) return;
@@ -568,7 +577,7 @@ export function MachinePickerButton(props: {
               <Animated.View
                 accessibilityViewIsModal
                 accessibilityRole="menu"
-                accessibilityLabel="Show work from"
+                accessibilityLabel={model.title}
                 onAccessibilityEscape={close}
                 style={[
                   {
@@ -589,30 +598,32 @@ export function MachinePickerButton(props: {
                   ref={titleRef}
                   accessible
                   accessibilityRole="header"
-                  accessibilityLabel="Show work from"
+                  accessibilityLabel={model.title}
                   style={{ paddingTop: 6, paddingBottom: 4, paddingHorizontal: 10 }}
                 >
                   <Text className="text-[12px] leading-[16px]" style={{ color: palette.muted }}>
-                    Show work from
+                    {model.title}
                   </Text>
                 </View>
-                <PopoverRow
-                  index={0}
-                  animate={animateRows}
-                  palette={palette}
-                  selected={model.allSelected}
-                  accessibilityLabel={`All machines, ${model.allDetail}`}
-                  onPress={() => choose(null)}
-                  avatar={
-                    <MachineAvatar symbol={ALL_MACHINES_SYMBOL} tone={null} size={AVATAR_SIZE} />
-                  }
-                  title="All machines"
-                  detail={<RowDetail palette={palette} text={model.allDetail} />}
-                />
+                {model.allowAll ? (
+                  <PopoverRow
+                    index={0}
+                    animate={animateRows}
+                    palette={palette}
+                    selected={model.allSelected}
+                    accessibilityLabel={`All machines, ${model.allDetail}`}
+                    onPress={() => choose(null)}
+                    avatar={
+                      <MachineAvatar symbol={ALL_MACHINES_SYMBOL} tone={null} size={AVATAR_SIZE} />
+                    }
+                    title="All machines"
+                    detail={<RowDetail palette={palette} text={model.allDetail} />}
+                  />
+                ) : null}
                 {model.rows.map((row: MachinePickerRow, index) => (
                   <PopoverRow
                     key={row.environmentId}
-                    index={index + 1}
+                    index={index + (model.allowAll ? 1 : 0)}
                     animate={animateRows}
                     palette={palette}
                     selected={row.selected}
@@ -639,7 +650,7 @@ export function MachinePickerButton(props: {
                   }}
                 />
                 <PopoverRow
-                  index={model.rows.length + 1}
+                  index={model.rows.length + (model.allowAll ? 1 : 0)}
                   animate={animateRows}
                   palette={palette}
                   selected={false}

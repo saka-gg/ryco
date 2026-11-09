@@ -38,6 +38,9 @@ export type MachineSymbol = (typeof MACHINE_KIND_SYMBOL)[EnvironmentMachineKind]
 /** "All machines" in the popover. */
 export const ALL_MACHINES_SYMBOL = "square.grid.2x2";
 
+/** The popover's heading on Chats; other tabs name what they show. */
+export const DEFAULT_MACHINE_PICKER_TITLE = "Show work from";
+
 /** At most this many online machines stack on the "All machines" button. */
 export const MACHINE_STACK_LIMIT = 3;
 
@@ -81,11 +84,28 @@ export interface MachinePickerModel {
   readonly face: MachinePickerButtonFace;
   /** Changes whenever the button shows another machine: keys its morph. */
   readonly faceKey: string;
+  /** The popover's heading. */
+  readonly title: string;
+  /** Whether the popover offers "All machines": a tab that needs one machine leaves it out. */
+  readonly allowAll: boolean;
   readonly allSelected: boolean;
   /** "2 of 4 online", under "All machines" in the popover. */
   readonly allDetail: string;
   readonly rows: ReadonlyArray<MachinePickerRow>;
   readonly accessibilityLabel: string;
+}
+
+/**
+ * The machines a tab lists in its picker: those of `environments` it has
+ * content for (`ids`), in the app's machine order. A tab whose rules leave
+ * machines out (Tasks lists the ones with tasks) shares the picker this way.
+ */
+export function machinePickerEnvironmentsAmong<T extends MachinePickerEnvironment>(
+  environments: ReadonlyArray<T>,
+  ids: Iterable<EnvironmentId>,
+): ReadonlyArray<T> {
+  const wanted = new Set(ids);
+  return environments.filter((environment) => wanted.has(environment.environmentId));
 }
 
 /**
@@ -152,12 +172,24 @@ export function fallbackMachineFacts(label: string): MachinePickerFacts {
   return { kind: inferEnvironmentMachineKind(undefined, label), reach: "hub", lastSeenAt: null };
 }
 
+/**
+ * The picker as a tab shows it. Each tab keeps its own rules: which machines
+ * it lists, and whether it can show every machine at once (`allowAll`, the
+ * default). A tab that reads one machine at a time passes `allowAll: false`;
+ * with nothing (or a machine no longer listed) picked, its button then shows
+ * the first online machine, else the first one, which is the one it reads.
+ */
 export function buildMachinePickerModel(input: {
   readonly environments: ReadonlyArray<MachinePickerEnvironment>;
   readonly selected: EnvironmentId | null;
   readonly factsOf: (environmentId: EnvironmentId, label: string) => MachinePickerFacts;
   readonly now: number;
+  readonly allowAll?: boolean;
+  /** The popover's heading, as the tab says it ("Show tasks from"). */
+  readonly title?: string;
 }): MachinePickerModel {
+  const allowAll = input.allowAll ?? true;
+  const title = input.title ?? DEFAULT_MACHINE_PICKER_TITLE;
   const rows = input.environments.map((environment): MachinePickerRow => {
     const facts = input.factsOf(environment.environmentId, environment.label);
     const tone = machineTone(environment);
@@ -174,17 +206,24 @@ export function buildMachinePickerModel(input: {
       accessibilityLabel: `${environment.label}, ${detail}`,
     };
   });
-  const selected = rows.find((row) => row.selected);
   const online = rows.filter((row) => row.tone !== "offline");
+  let selected = rows.find((row) => row.selected);
+  const fallback = allowAll || selected ? undefined : (online[0] ?? rows[0]);
+  if (fallback) {
+    selected = { ...fallback, selected: true };
+    rows[rows.indexOf(fallback)] = selected;
+  }
   const allDetail = `${online.length} of ${rows.length} online`;
   if (selected) {
     return {
       face: { kind: "machine", machine: selected },
       faceKey: `machine:${selected.environmentId}`,
+      title,
+      allowAll,
       allSelected: false,
       allDetail,
       rows,
-      accessibilityLabel: `Machine: ${selected.label}, ${selected.status}. Show work from`,
+      accessibilityLabel: `Machine: ${selected.label}, ${selected.status}. ${title}`,
     };
   }
   return {
@@ -195,10 +234,12 @@ export function buildMachinePickerModel(input: {
       tone: combinedMachineTone(rows.map((row) => row.tone)),
     },
     faceKey: "all",
+    title,
+    allowAll,
     allSelected: true,
     allDetail,
     rows,
-    accessibilityLabel: `Machine: All machines, ${online.length} online. Show work from`,
+    accessibilityLabel: `Machine: All machines, ${online.length} online. ${title}`,
   };
 }
 

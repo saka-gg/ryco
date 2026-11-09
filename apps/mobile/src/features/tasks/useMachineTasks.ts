@@ -20,6 +20,7 @@ import {
   useStore,
   type Project,
 } from "../../state/threadsRuntime";
+import { machinePickerEnvironmentsAmong } from "../home/machinePickerModel";
 import { useHomeEnvironments } from "../home/useHomeEnvironments";
 import { useHostedDemandCandidates } from "../home/useHostedDemandCandidates";
 import {
@@ -42,6 +43,20 @@ export function useTaskMachines(): ReadonlyArray<TaskMachine> {
       supported.set(environmentId, config.environment.capabilities.localTasks === true);
     return deriveTaskMachines({ environments, supported, forbidden, reachable });
   }, [configs, environments, forbidden, reachable]);
+}
+
+/** The task machines as the shared machine picker lists them, with their connection. */
+export function useTaskPickerEnvironments(machines: ReadonlyArray<TaskMachine>) {
+  const environments = useHomeEnvironments();
+  const key = machines.map((machine) => machine.environmentId).join("\u0000");
+  return useMemo(
+    () =>
+      machinePickerEnvironmentsAmong(
+        environments,
+        key.length === 0 ? [] : (key.split("\u0000") as EnvironmentId[]),
+      ),
+    [environments, key],
+  );
 }
 
 /**

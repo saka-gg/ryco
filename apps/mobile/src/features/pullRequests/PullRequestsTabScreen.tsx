@@ -13,6 +13,7 @@ import { useShallow } from "zustand/react/shallow";
 
 import { SymbolView } from "../../components/AppSymbol";
 import { HeaderIconButton } from "../../components/HeaderIconButton";
+import { MachinePickerButton } from "../../components/MachinePickerButton";
 import { AppText as Text } from "../../components/AppText";
 import { EmptyState } from "../../components/EmptyState";
 import { ErrorBanner } from "../../components/ErrorBanner";
@@ -21,6 +22,7 @@ import { cn } from "../../lib/cn";
 import { openWebLink } from "../../lib/openWebLink";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { selectProjectsAcrossEnvironments, useStore } from "../../state/threadsRuntime";
+import { machinePickerEnvironmentsAmong } from "../home/machinePickerModel";
 import { useHomeEnvironments } from "../home/useHomeEnvironments";
 import { PullRequestFilterSheet } from "./PullRequestFilterSheet";
 import {
@@ -34,7 +36,6 @@ import {
 } from "./pullRequestListModel";
 import {
   pullRequestRepositoryMachineNote,
-  resolvePullRequestRepositoryChoice,
   type PullRequestRepositoryChoice,
 } from "./pullRequestRepositoriesModel";
 import {
@@ -42,17 +43,13 @@ import {
   PullRequestTabRow,
   type PullRequestRowAction,
 } from "./PullRequestTabRow";
-import { selectPullRequestRepository } from "./pullRequestTabStateModel";
+import { selectPullRequestMachine, selectPullRequestRepository } from "./pullRequestTabStateModel";
 import { usePullRequestList, useSourceControlProvider } from "./usePullRequestData";
 import {
   readablePullRequestConnection,
-  usePullRequestRepositoryChoices,
+  usePullRequestTabChoice,
 } from "./usePullRequestRepositoryChoices";
-import {
-  updatePullRequestTabState,
-  usePullRequestTabState,
-  usePullRequestTabStateLoaded,
-} from "./usePullRequestTabState";
+import { updatePullRequestTabState, usePullRequestTabState } from "./usePullRequestTabState";
 
 function RepositoryPicker(props: {
   readonly choices: ReadonlyArray<PullRequestRepositoryChoice>;
@@ -207,11 +204,16 @@ export interface PullRequestsListScreenProps {
 export function PullRequestsListScreen(props: PullRequestsListScreenProps) {
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
-  const choices = usePullRequestRepositoryChoices();
+  const tabChoice = usePullRequestTabChoice();
+  const { choices } = tabChoice;
   const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
   const environments = useHomeEnvironments();
+  const pickerEnvironments = useMemo(
+    () => machinePickerEnvironmentsAmong(environments, tabChoice.machineIds),
+    [environments, tabChoice.machineIds],
+  );
   const tabState = usePullRequestTabState();
-  const tabStateLoaded = usePullRequestTabStateLoaded();
+  const tabStateLoaded = tabChoice.loaded;
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState("");
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -227,9 +229,7 @@ export function PullRequestsListScreen(props: PullRequestsListScreenProps) {
         ) ?? null);
   const choice: PullRequestRepositoryChoice | null =
     fixed === undefined
-      ? tabStateLoaded
-        ? resolvePullRequestRepositoryChoice(choices, tabState.repositoryKey)
-        : null
+      ? tabChoice.choice
       : fixedProject === null
         ? null
         : {
@@ -291,6 +291,8 @@ export function PullRequestsListScreen(props: PullRequestsListScreenProps) {
     void Haptics.selectionAsync();
     updatePullRequestTabState((state) => selectPullRequestRepository(state, key));
   };
+  const selectMachine = (environmentId: EnvironmentId | null) =>
+    updatePullRequestTabState((state) => selectPullRequestMachine(state, environmentId));
   const patchFilters = (patch: Partial<PullRequestTabFilters>) =>
     updatePullRequestTabState((state) => {
       const next: Record<string, unknown> = { ...state.filters, ...patch };
@@ -342,8 +344,14 @@ export function PullRequestsListScreen(props: PullRequestsListScreenProps) {
         />
       ) : (
         <View className="flex-row items-center gap-2 px-4">
-          {props.variant === "tab" ? (
-            <RepositoryPicker choices={choices} selected={choice} onSelect={selectRepository} />
+          {props.variant === "tab" && pickerEnvironments.length > 0 ? (
+            <MachinePickerButton
+              environments={pickerEnvironments}
+              selected={tabChoice.environmentId}
+              title="Show pull requests from"
+              onSelect={selectMachine}
+              onManage={() => navigation.navigate("Connections")}
+            />
           ) : null}
           <View className="flex-1" />
           <HeaderIconButton
@@ -362,9 +370,16 @@ export function PullRequestsListScreen(props: PullRequestsListScreenProps) {
         </View>
       )}
       {props.variant === "tab" && !searching ? (
-        <Text className="px-4 text-[32px] leading-[38px] font-ryco-bold text-foreground">
-          Pull requests
-        </Text>
+        <View className="gap-2">
+          <Text className="px-4 text-[32px] leading-[38px] font-ryco-bold text-foreground">
+            Pull requests
+          </Text>
+          {choices.length > 0 ? (
+            <View className="flex-row px-4">
+              <RepositoryPicker choices={choices} selected={choice} onSelect={selectRepository} />
+            </View>
+          ) : null}
+        </View>
       ) : null}
       <Segments
         selected={screen.involvementSupported ? filters.segment : "all"}

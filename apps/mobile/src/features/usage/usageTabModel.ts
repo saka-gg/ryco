@@ -3,6 +3,7 @@
 // back to Limits asks the providers again.
 
 import type { StatRange } from "@ryco/client-runtime/usage";
+import type { EnvironmentId } from "@ryco/contracts";
 
 import type { InboxEnvironment } from "../inbox/inboxModel";
 import { statisticsTabParam, type StatisticsTab } from "../settings/statistics/statisticsRoute";
@@ -83,41 +84,25 @@ export function scopeUsageEnvironments(
   };
 }
 
-export interface UsageDeviceMenu {
-  readonly title: string;
-  /** The picked option. */
-  readonly value: string;
-  /** What the filter shows now, for the line under the title and the button's label. */
-  readonly label: string;
-  /** Whether one device is picked, so the button shows that the view is narrowed. */
-  readonly filtered: boolean;
-  readonly options: ReadonlyArray<{ readonly value: string; readonly label: string }>;
+/** What the machine picker at the top left shows for the view. */
+export interface UsageMachinePick {
+  /** The machine the button shows; null for every connected one. */
+  readonly selected: EnvironmentId | null;
+  /** Activity reads one device at a time, so its picker leaves "All machines" out. */
+  readonly allowAll: boolean;
 }
 
-/** The device filter: every connected device (or Activity's device), then each device. */
-export function usageDeviceMenu(
-  environments: readonly InboxEnvironment[],
-  scope: UsageScope,
-  view: UsageView,
-): UsageDeviceMenu {
-  const allLabel =
-    view === "activity"
-      ? (scope.activityDevice?.label ?? "No device connected")
-      : "All connected devices";
-  const options = [
-    { value: ALL_DEVICES, label: allLabel },
-    ...environments.map((environment) => ({
-      value: environment.environmentId as string,
-      label: environment.label,
-    })),
-  ];
-  const current = options.find((option) => option.value === scope.device);
+/**
+ * The machine picker's state: the picked device, or every connected one; in
+ * Activity the one device it reads (the picked one, else the first connected).
+ */
+export function usageMachinePick(scope: UsageScope, view: UsageView): UsageMachinePick {
+  if (view === "activity") {
+    return { selected: scope.scoped[0]?.environmentId ?? null, allowAll: false };
+  }
   return {
-    title: "Devices",
-    value: scope.device,
-    label: current === undefined ? allLabel : current.label,
-    filtered: scope.device !== ALL_DEVICES,
-    options,
+    selected: scope.device === ALL_DEVICES ? null : (scope.device as EnvironmentId),
+    allowAll: true,
   };
 }
 

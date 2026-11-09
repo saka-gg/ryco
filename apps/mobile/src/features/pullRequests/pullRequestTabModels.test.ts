@@ -10,6 +10,7 @@ import { countPullRequestTabFilters, pullRequestTabListFilters } from "./pullReq
 import {
   DEFAULT_PULL_REQUEST_TAB_STATE,
   sanitizePullRequestTabState,
+  selectPullRequestMachine,
   selectPullRequestRepository,
 } from "./pullRequestTabStateModel";
 
@@ -99,20 +100,41 @@ describe("tab state", () => {
         },
       }),
     ).toEqual({
+      environmentId: null,
       repositoryKey: "github.com/acme/app",
       filters: { segment: "review", sort: "updated", label: ["bug"], failingOnly: true },
     });
+    expect(sanitizePullRequestTabState({ environmentId: "mini", filters: {} }).environmentId).toBe(
+      "mini",
+    );
+    expect(sanitizePullRequestTabState({ environmentId: 7 }).environmentId).toBeNull();
   });
 
   it("drops labels when the repository changes", () => {
     const state = {
+      environmentId: "mini",
       repositoryKey: "a",
       filters: { segment: "mine" as const, label: ["bug"], hideDrafts: true },
     };
     expect(selectPullRequestRepository(state, "a")).toBe(state);
     expect(selectPullRequestRepository(state, "b")).toEqual({
+      environmentId: "mini",
       repositoryKey: "b",
       filters: { segment: "mine", hideDrafts: true },
+    });
+  });
+
+  it("keeps the repository and drops its labels when the machine changes", () => {
+    const state = {
+      environmentId: null,
+      repositoryKey: "a",
+      filters: { segment: "all" as const, label: ["bug"] },
+    };
+    expect(selectPullRequestMachine(state, null)).toBe(state);
+    expect(selectPullRequestMachine(state, "mini")).toEqual({
+      environmentId: "mini",
+      repositoryKey: "a",
+      filters: { segment: "all" },
     });
   });
 });
