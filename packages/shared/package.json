@@ -422,6 +422,10 @@
       "types": "./src/path.ts",
       "import": "./src/path.ts"
     },
+    "./attachmentPreview": {
+      "types": "./src/attachmentPreview.ts",
+      "import": "./src/attachmentPreview.ts"
+    },
     "./perf": {
       "types": "./src/perf.ts",
       "import": "./src/perf.ts"

@@ -55,6 +55,11 @@ import {
 import { useImageGallery } from "./ImageGalleryModal";
 import { messageImageGallery } from "./messageImageGallery";
 import { threadMessagePresentation } from "./threadPresentation";
+import {
+  AttachmentPreviewModal,
+  canPreviewAttachment,
+  type PreviewableAttachment,
+} from "./AttachmentPreviewModal";
 
 const sentTimeFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
@@ -319,6 +324,8 @@ export function ThreadMessage(props: {
   const attachments = props.message.attachments ?? [];
   const galleryImages = messageImageGallery(props.message.attachments);
   const gallery = useImageGallery();
+  // A PDF, Markdown or text file opens in place; anything else goes to the share sheet.
+  const [previewing, setPreviewing] = useState<PreviewableAttachment | null>(null);
   const hasVideoPlaybackSource = (
     attachment: ChatFileAttachment | ChatImageAttachment | ChatUnknownAttachment,
   ): attachment is ChatFileAttachment =>
@@ -492,7 +499,20 @@ export function ThreadMessage(props: {
                     key={attachment.id}
                     accessibilityRole="button"
                     accessibilityLabel={`Open ${attachment.name}`}
-                    onPress={() => void shareAttachmentFile(attachment.previewUrl!)}
+                    onPress={() =>
+                      canPreviewAttachment(attachment)
+                        ? setPreviewing({
+                            environmentId: props.environmentId,
+                            threadId: props.threadId,
+                            messageId: props.message.id,
+                            attachmentId: attachment.id,
+                            name: attachment.name,
+                            mimeType: attachment.mimeType,
+                            sizeBytes: attachment.sizeBytes,
+                            previewUrl: attachment.previewUrl!,
+                          })
+                        : void shareAttachmentFile(attachment.previewUrl!)
+                    }
                     className="min-h-20 w-44 justify-center rounded-2xl bg-subtle px-3 py-2"
                   >
                     <Text className="font-ryco-bold text-sm text-foreground" numberOfLines={2}>
@@ -523,6 +543,9 @@ export function ThreadMessage(props: {
               )}
             </View>
           </ScrollView>
+        ) : null}
+        {previewing ? (
+          <AttachmentPreviewModal attachment={previewing} onClose={() => setPreviewing(null)} />
         ) : null}
         {!isUser && props.turnHtmlRenders !== undefined && props.turnHtmlRenders.length > 0 ? (
           <HtmlRenderCards

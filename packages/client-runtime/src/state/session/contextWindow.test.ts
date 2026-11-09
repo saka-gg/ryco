@@ -6,7 +6,7 @@ import {
   deriveContextWindowUsage,
   deriveLatestContextWindowSnapshot,
   parseContextWindowTokenLimit,
-} from "./contextWindow";
+} from "./contextWindow.ts";
 
 function makeActivity(id: string, kind: string, payload: unknown): OrchestrationThreadActivity {
   return {

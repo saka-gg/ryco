@@ -68,6 +68,10 @@ vi.mock("expo-video", () => ({
   VideoView: "VideoView",
 }));
 vi.mock("../../components/AppText", () => ({ AppText: "AppText" }));
+vi.mock("./AttachmentPreviewModal", () => ({
+  AttachmentPreviewModal: "AttachmentPreviewModal",
+  canPreviewAttachment: () => false,
+}));
 vi.mock("../../components/AppSymbol", () => ({ SymbolView: "SymbolView" }));
 vi.mock("../../components/CopyTextButton", () => ({ CopyTextButton: "CopyTextButton" }));
 vi.mock("../../lib/appearancePreferences", () => ({

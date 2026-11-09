@@ -194,6 +194,20 @@ describe("thread header menu", () => {
     expect(remove).toMatchObject({ destructive: true, disabled: true });
   });
 
+  it("puts Find in chat and Artifacts first in the chat group, on Android too", () => {
+    const sections = menu({ findAvailable: true });
+    expect(sections.find((section) => section.id === "chat")?.actions[0]).toMatchObject({
+      id: "find",
+      title: "Find in chat",
+    });
+    const flat = flattenThreadHeaderMenu(sections).map((action) => action.id);
+    expect(flat.slice(flat.indexOf("find"), flat.indexOf("side-chat") + 1)).toEqual([
+      "find",
+      "artifacts",
+      "side-chat",
+    ]);
+  });
+
   it("notes a running command and extra sessions under Terminal", () => {
     const terminal = (terminalSubtitle: string | null) =>
       menu({ terminalSubtitle })

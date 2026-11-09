@@ -20,6 +20,8 @@ export type ThreadHeaderMenuActionId =
   | "more-tools"
   | "review"
   | "pull-request"
+  | "find"
+  | "artifacts"
   | "side-chat"
   | "fork"
   | "rename"
@@ -71,6 +73,8 @@ export interface ThreadHeaderMenuInput {
   readonly sideChatAvailable: boolean;
   /** A reply can be forked right now (the latest forkable one). */
   readonly forkAvailable: boolean;
+  /** The thread is loaded, so its messages can be searched ("Find in chat"). */
+  readonly findAvailable?: boolean;
   /** The thread is loaded, so a task can link to it ("Add to Tasks"). */
   readonly addTaskAvailable: boolean;
   /** The thread is a chat without a project, which can become one ("Turn into project"). */
@@ -149,6 +153,10 @@ export function buildThreadHeaderMenu(
   }
 
   const chat: ThreadHeaderMenuAction[] = [];
+  if (input.findAvailable) {
+    chat.push({ id: "find", title: "Find in chat", icon: "magnifyingglass" });
+    chat.push({ id: "artifacts", title: "Artifacts", icon: "square.stack" });
+  }
   if (input.sideChatAvailable) {
     chat.push({ id: "side-chat", title: "Side chat", icon: "bubble.left.and.bubble.right" });
   }
