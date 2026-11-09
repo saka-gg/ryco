@@ -542,7 +542,7 @@ export function HostedConnectionSheet({
           </Button>
         </div>
         <div className="mt-3 space-y-3 border-t border-border pt-3">
-          <HostedPwaControls variant="compact" />
+          <HostedPwaControls compact />
         </div>
       </MobileSheetPanel>
     </MobileSheet>

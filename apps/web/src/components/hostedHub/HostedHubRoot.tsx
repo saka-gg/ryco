@@ -1235,12 +1235,7 @@ export function HostedAuthenticationSurface({
       }
       actions={signInActions}
       trailing={signInTrailing}
-      aside={
-        <>
-          <HostedRelayTrustNotice variant="disclosure" />
-          <HostedPwaControls variant="subtle" />
-        </>
-      }
+      aside={<HostedRelayTrustNotice variant="disclosure" />}
       scrollRef={surfaceScrollRef}
       titleRef={headingRef}
     >

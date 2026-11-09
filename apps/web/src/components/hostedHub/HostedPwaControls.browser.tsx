@@ -80,32 +80,6 @@ describe("HostedPwaControls", () => {
     expect(native.promptInstall).toHaveBeenCalledOnce();
   });
 
-  it("offers a single quiet install action in the subtle variant", async () => {
-    const native = lifecycle({
-      ...baseSnapshot,
-      installState: "native-available",
-      platform: "other",
-    });
-    render(<HostedPwaControls lifecycle={native} variant="subtle" />);
-
-    await page.getByRole("button", { name: "Install app" }).click();
-    expect(native.promptInstall).toHaveBeenCalledOnce();
-  });
-
-  it("shows manual steps from the subtle variant without repeating the trust notice", async () => {
-    // The gateway draws the trust notice beside this row already; the subtle
-    // variant must not stack a second copy of it inside the instructions.
-    render(<HostedPwaControls lifecycle={lifecycle(baseSnapshot)} variant="subtle" />);
-    const install = page.getByRole("button", { name: "Install app" });
-    await expect.element(install).toHaveAttribute("aria-expanded", "false");
-    await install.click();
-
-    await expect.element(page.getByText(/Add to Home Screen/)).toBeVisible();
-    expect(document.querySelector("[data-hosted-relay-trust-notice]")).toBeNull();
-    await page.getByRole("button", { name: "Close install instructions" }).click();
-    await expect.element(page.getByText(/Add to Home Screen/)).not.toBeInTheDocument();
-  });
-
   it("hides install guidance in standalone mode", async () => {
     render(
       <HostedPwaControls lifecycle={lifecycle({ ...baseSnapshot, installState: "installed" })} />,
