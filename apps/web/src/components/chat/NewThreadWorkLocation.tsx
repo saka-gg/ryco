@@ -14,7 +14,11 @@ import { ProjectSwitcher } from "../ProjectSwitcher";
 import { RollingText, useTravelDirection, type RollDirection } from "./RollingText";
 import { useFlipLayout } from "./useFlipLayout";
 import { NewThreadSourcePicker, type NewThreadSource } from "./NewThreadSourcePicker";
-import type { DraftWorktreeSource } from "@ryco/client-runtime/state/composer";
+import {
+  issueWorktreeSource,
+  workItemWorktreeSource,
+  type DraftWorktreeSource,
+} from "@ryco/client-runtime/state/composer";
 import { newWorktreeBaseBranch } from "@ryco/client-runtime/state/worktree-setup";
 import {
   Combobox,
@@ -348,24 +352,8 @@ function toDraftWorktreeSource(
   if (source.kind === "pr") {
     return pullRequestWorktreeSource(source.changeRequest.number, source.changeRequest.title);
   }
-  if (source.kind === "issue") {
-    return {
-      kind: "issue",
-      number: source.issue.number,
-      title: source.issue.title,
-      label: `#${source.issue.number} ${source.issue.title}`,
-    };
-  }
-  return {
-    kind: "workItem",
-    provider: source.workItem.provider,
-    key: source.workItem.key,
-    title: source.workItem.title,
-    ...(source.workItem.state ? { state: source.workItem.state } : {}),
-    ...(source.workItem.stateName ? { stateName: source.workItem.stateName } : {}),
-    ...(source.workItem.url ? { url: source.workItem.url } : {}),
-    label: `${source.workItem.key} ${source.workItem.title}`,
-  };
+  if (source.kind === "issue") return issueWorktreeSource(source.issue);
+  return workItemWorktreeSource(source.workItem);
 }
 
 function SentenceValue({ children }: { readonly children: React.ReactNode }) {

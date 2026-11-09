@@ -6,7 +6,11 @@ import {
 } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { deriveUsageLimitBanner, deriveUsageLimitStatus } from "./usageLimit.ts";
+import {
+  deriveUsageLimitBanner,
+  deriveUsageLimitStatus,
+  usageLimitBannerDescription,
+} from "./usageLimit.ts";
 
 const claude = ProviderInstanceId.make("claudeAgent");
 const LIMITED_AT = "2026-10-04T10:00:00.000Z";
@@ -127,5 +131,20 @@ describe("deriveUsageLimitBanner", () => {
       autoResume: null,
       snoozeUntilReset: false,
     });
+  });
+});
+
+describe("usageLimitBannerDescription", () => {
+  it("says when the limit resets, whether the thread resumes, or that the reset passed", () => {
+    expect(usageLimitBannerDescription(banner()!, "en-GB")).toMatch(/^Resets \w{3} \d{2}:\d{2}$/);
+    expect(usageLimitBannerDescription(banner({ nodeAutoResume: true })!, "en-GB")).toMatch(
+      / · resumes automatically$/,
+    );
+    expect(usageLimitBannerDescription(banner({ limit: { resetAt: null } })!)).toBe(
+      "Reset time unknown. Resume when your limit resets.",
+    );
+    expect(usageLimitBannerDescription(banner({ nowMs: RESET_MS + 1 })!)).toBe(
+      "Resume to continue this thread.",
+    );
   });
 });

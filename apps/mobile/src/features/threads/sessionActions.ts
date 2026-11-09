@@ -220,3 +220,23 @@ export async function clearThreadGoal(api: EnvironmentApi, threadId: ThreadId): 
     createdAt: new Date().toISOString(),
   });
 }
+
+/** Ends the thread's provider session and keeps the conversation (web's "Stop session"). */
+export async function stopThreadSession(api: EnvironmentApi, threadId: ThreadId): Promise<void> {
+  await api.orchestration.dispatchCommand({
+    type: "thread.session.stop",
+    commandId: newCommandId(),
+    threadId,
+    userStop: true,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+/** Moves the thread to the node's trash; the node purges it for good shortly after. */
+export async function trashThread(api: EnvironmentApi, threadId: ThreadId): Promise<void> {
+  await api.orchestration.dispatchCommand({
+    type: "thread.trash",
+    commandId: newCommandId(),
+    threadId,
+  });
+}

@@ -28,9 +28,11 @@ export type ThreadHeaderMenuActionId =
   | "copy-reference"
   | "copy-task-id"
   | "stop"
+  | "stop-session"
   | "compact"
   | "settlement"
-  | "archive";
+  | "archive"
+  | "delete";
 
 export interface ThreadHeaderMenuAction {
   readonly id: ThreadHeaderMenuActionId;
@@ -73,6 +75,11 @@ export interface ThreadHeaderMenuInput {
   readonly addTaskAvailable: boolean;
   /** The thread is a chat without a project, which can become one ("Turn into project"). */
   readonly promoteChatAvailable?: boolean;
+  /**
+   * No turn runs but the provider session is still up (`listThreadLifecycleActions`): Stop
+   * session ends it and keeps the conversation.
+   */
+  readonly sessionStoppable?: boolean;
   /** A rename, stop, archive and the like cannot be sent now (busy, cached or offline). */
   readonly busy: boolean;
 }
@@ -180,6 +187,9 @@ export function buildThreadHeaderMenu(
       disabled: busy,
     });
   }
+  if (!turnRunning && input.sessionStoppable) {
+    state.push({ id: "stop-session", title: "Stop session", icon: "power", disabled: busy });
+  }
   if (model.compactAction) {
     state.push({
       id: "compact",
@@ -208,6 +218,7 @@ export function buildThreadHeaderMenu(
     destructive: archive,
     disabled: busy || turnRunning,
   });
+  state.push({ id: "delete", title: "Delete…", icon: "trash", destructive: true, disabled: busy });
 
   const sections: ThreadHeaderMenuSection[] = [];
   if (workspace.length > 0) sections.push({ id: "workspace", actions: workspace });

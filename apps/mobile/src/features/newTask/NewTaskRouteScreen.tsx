@@ -13,12 +13,14 @@ import { Alert, Pressable, ScrollView, TextInput, View } from "react-native";
 
 import {
   CHAT_PROJECT_LABEL,
+  worktreeSourceIntent,
+  type DraftWorktreeSource,
   getAutoRuntimeModeUnavailableReason,
   normalizeInteractionModeForProviderTarget,
   resolveChatsAvailability,
 } from "@ryco/client-runtime/state/composer";
 import { newWorktreeBaseBranch } from "@ryco/client-runtime/state/worktree-setup";
-import { EnvironmentId, ProjectId } from "@ryco/contracts/base-schemas";
+import { EnvironmentId, ProjectId, type ThreadId } from "@ryco/contracts/base-schemas";
 import {
   DEFAULT_AGENT_TOKEN_MODE,
   type ModelSelection,
@@ -49,7 +51,7 @@ import { useThemeColor } from "../../lib/useThemeColor";
 import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
 import { useHomeWorkspaceData } from "../../state/homeData";
 import { useStore } from "../../state/threadsRuntime";
-import { ensureEnvironmentApi } from "../../connection/environmentApi";
+import { ensureEnvironmentApi, readEnvironmentApi } from "../../connection/environmentApi";
 import { useHomeEnvironments } from "../home/useHomeEnvironments";
 import { inferNodeProjectTitle, validateNodeWorkspacePath } from "../projects/projectActions";
 import {
@@ -82,6 +84,7 @@ import {
   planMobilePromptLink,
 } from "./promptLinkModel";
 import { useNewTaskRepository } from "./useNewTaskRepository";
+import { sourceLocationLabel } from "./newTaskSourceModel";
 import {
   keepsTaskLink,
   nextFreeTaskChatBranch,
@@ -116,6 +119,30 @@ type NewTaskRouteScreenProps = StaticScreenProps<{
   /** `1`: start a chat without a project (Chats' compose menu). */
   readonly chat?: string | string[];
 }>;
+
+/** Why a task that starts from a pull request, issue or Jira item cannot be sent yet. */
+function sourceSendBlockReason(input: {
+  readonly connected: boolean;
+  readonly hasFiles: boolean;
+  readonly starting: boolean;
+}): string | null {
+  if (input.starting) return "Creating the worktree…";
+  if (!input.connected)
+    return "Connect the machine to start from a pull request, issue or Jira item.";
+  if (input.hasFiles) return "Attach files once the chat has started.";
+  return null;
+}
+
+/** The worktree (and the thread in it) the node makes for a picked source. */
+async function createSourceWorktree(
+  environmentId: EnvironmentId,
+  projectId: ProjectId,
+  source: DraftWorktreeSource,
+) {
+  const create = readEnvironmentApi(environmentId)?.git.createWorktreeForProject;
+  if (!create) throw new Error("Worktree creation is unavailable on this machine.");
+  return create({ projectId, intent: worktreeSourceIntent(source), fetchOrigin: true });
+}
 
 /** A task for a new project needs a usable path on its machine; a chat or a known project does not. */
 function validateNewProjectPath(input: {
@@ -214,6 +241,18 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
   );
   const [worktreeSelection, setWorktreeSelection] = useState<NewTaskWorktreeSelection>(
     restored?.worktree ?? { kind: "local" },
+  );
+  // A pull request, issue or Jira item to start from: the node makes its worktree (and the
+  // thread in it) when the task is sent, as web's first send does.
+  const [worktreeSource, setWorktreeSource] = useState<DraftWorktreeSource | null>(null);
+  const [startingFromSource, setStartingFromSource] = useState(false);
+  // A source's worktree can take a while; the sheet may be closed before it answers.
+  const mounted = useRef(true);
+  useEffect(
+    () => () => {
+      mounted.current = false;
+    },
+    [],
   );
   const [newProjectPath, setNewProjectPath] = useState(restored?.newProjectPath ?? "");
   const [newProjectTitle, setNewProjectTitle] = useState(restored?.newProjectTitle ?? "");
@@ -433,8 +472,9 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
   } catch {
     // Keep the neutral label until the user enters a complete node path.
   }
-  const locationLabel =
-    worktreeSelection.kind === "existing"
+  const locationLabel = worktreeSource
+    ? sourceLocationLabel(worktreeSource)
+    : worktreeSelection.kind === "existing"
       ? worktree
         ? worktree.title?.trim() && worktree.title.trim() !== worktree.branch
           ? worktree.title.trim()
@@ -443,8 +483,9 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
       : worktreeSelection.kind === "new"
         ? "New worktree"
         : "Project root";
-  const branchLabel =
-    worktreeSelection.kind === "existing"
+  const branchLabel = worktreeSource
+    ? null
+    : worktreeSelection.kind === "existing"
       ? (worktree?.branch ?? null)
       : worktreeSelection.kind === "new"
         ? baseBranch.trim() || repository?.refName || "current branch"
@@ -490,6 +531,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
     );
     setEnvironmentId(nextEnvironmentId);
     setProjectId(nextProject?.id ?? null);
+    setWorktreeSource(null);
     setWorktreeSelection({ kind: "local" });
     setBaseBranch("");
     setNewBranch("");
@@ -514,6 +556,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
       : null;
     if (target && !nextProject) return;
     setChatMode(false);
+    setWorktreeSource(null);
     if (
       taskLink &&
       !keepsTaskLink(taskLink, { environmentId: nextEnvironmentId, projectId: nextProjectId })
@@ -538,6 +581,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
     if (taskLink) setTaskLink(null);
     locationEdited.current = true;
     setChatMode(true);
+    setWorktreeSource(null);
     setWorktreeSelection({ kind: "local" });
     resetAttempt();
   };
@@ -633,24 +677,35 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
     queueing,
     nowMs: Date.now(),
   });
+  const sourceSendBlock = worktreeSource
+    ? sourceSendBlockReason({
+        connected,
+        hasFiles: attachments.some((attachment) => attachment.type === "file"),
+        starting: startingFromSource,
+      })
+    : null;
   const canSend =
     draftComplete &&
+    !startingFromSource &&
     attachmentSendBlock === null &&
+    sourceSendBlock === null &&
     (connected ? tokenModeReady && preferencesReady : queueing);
-  const sendDisabledReason = attachmentSendBlock
-    ? attachmentSendBlock
-    : connected
-      ? !tokenModeReady || !preferencesReady
-        ? "Loading node settings"
-        : null
-      : queueing || environments.some((candidate) => candidate.connectionState === "connected")
-        ? null
-        : "No verified machine available";
+  const sendDisabledReason = sourceSendBlock
+    ? sourceSendBlock
+    : attachmentSendBlock
+      ? attachmentSendBlock
+      : connected
+        ? !tokenModeReady || !preferencesReady
+          ? "Loading node settings"
+          : null
+        : queueing || environments.some((candidate) => candidate.connectionState === "connected")
+          ? null
+          : "No verified machine available";
   const queueNotice = queueing
     ? `${environment.label} is not connected. The task starts when it is back.`
     : null;
 
-  const createAttempt = (): NewTaskAttempt => {
+  const createAttempt = (threadId: ThreadId = draftThreadId): NewTaskAttempt => {
     if (!environment) throw new Error("Choose a connected node.");
     const projectContext: NewTaskProjectContext = chatDraft
       ? { kind: "chat" }
@@ -699,7 +754,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
       ids: {
         projectId: newProjectId(),
         projectCommandId: newCommandId(),
-        threadId: draftThreadId,
+        threadId,
         threadCommandId: newCommandId(),
         attachCommandId: newCommandId(),
         turnCommandId: newCommandId(),
@@ -713,8 +768,76 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
    * launch: the node's setup stages while it prepares a worktree, then the
    * agent's turn, or the failure with Retry and Edit task.
    */
+  /**
+   * A task started from a pull request, issue or Jira item: the node makes the worktree and its
+   * thread first (`git.createWorktreeForProject`), then the task's first turn goes into that
+   * thread through the same launch as any other task.
+   */
+  const sendFromSource = (source: DraftWorktreeSource) => {
+    if (!environment || !project) return;
+    setStartingFromSource(true);
+    setFailure(null);
+    void createSourceWorktree(environment.environmentId, project.id, source).then(
+      (created) => {
+        // The node made the worktree and its thread: the task goes into it even when the sheet
+        // was closed meanwhile, so no empty chat is left behind.
+        if (mounted.current) setStartingFromSource(false);
+        const attempt: NewTaskAttempt = {
+          ...createAttempt(created.sessionId),
+          worktree: { kind: "local" },
+          threadCommandAccepted: true,
+          threadReady: true,
+          worktreeAttached: true,
+        };
+        const draft: NewTaskLaunchDraft = {
+          environmentId: attempt.environmentId,
+          projectId,
+          newProjectPath: "",
+          newProjectTitle: "",
+          worktree: { kind: "local" },
+          newBranch: "",
+          baseBranch: "",
+          prompt,
+          attachments: newTaskDraftImages(attachments),
+          modelSelection,
+          runtimeMode,
+          interactionMode: selectedInteractionMode,
+          ...(taskLink ? { task: taskLink } : {}),
+        };
+        startNewTaskLaunch({
+          attempt,
+          draft,
+          deps: createNewTaskLaunchDeps(attempt.environmentId),
+        });
+        if (restored && editLaunchKey) discardNewTaskLaunch(editLaunchKey);
+        if (!mounted.current) return;
+        useStore.getState().setActiveEnvironmentId(attempt.environmentId);
+        navigation.dispatch(
+          StackActions.replace("Thread", {
+            environmentId: attempt.environmentId,
+            threadId: attempt.threadId,
+          }),
+        );
+      },
+      (error: unknown) => {
+        if (!mounted.current) return;
+        setStartingFromSource(false);
+        setFailure({
+          message:
+            error instanceof Error && error.message.trim().length > 0
+              ? error.message
+              : "The worktree could not be created. Your draft is still here.",
+        });
+      },
+    );
+  };
+
   const send = () => {
-    if (!canSend) return;
+    if (!canSend || startingFromSource) return;
+    if (worktreeSource && !chatDraft) {
+      sendFromSource(worktreeSource);
+      return;
+    }
     let attempt: NewTaskAttempt;
     try {
       validateNewProjectPath({ hasProject: project !== undefined, chatDraft, newProjectPath });
@@ -993,7 +1116,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
             branchLabel={branchLabel}
             newWorktree={worktreeSelection.kind === "new"}
             newBranchName={worktreeSelection.kind === "new" ? newBranch.trim() : null}
-            usesWorktree={worktreeSelection.kind !== "local"}
+            usesWorktree={worktreeSelection.kind !== "local" || worktreeSource !== null}
             modelProviderDriver={selectedModelOption?.providerDriver ?? null}
             machineLabel={environment?.label ?? "No verified machine available"}
             modelLabel={modelLabel}
@@ -1006,7 +1129,8 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
               setInteractionMode(mode);
               resetAttempt();
             }}
-            busy={false}
+            // Nothing about the task changes while the node makes a source's worktree.
+            busy={startingFromSource}
             canSend={canSend}
             sendDisabledReason={sendDisabledReason}
             queueNotice={queueNotice}
@@ -1063,12 +1187,22 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
         newBranch={newBranch}
         onSelectWorktree={(selection) => {
           locationEdited.current = true;
+          setWorktreeSource(null);
           setWorktreeSelection(selection);
           resetAttempt();
         }}
         onChangeNewBranch={(branch) => {
           locationEdited.current = true;
           setNewBranch(branch);
+          resetAttempt();
+        }}
+        // A task's chat brings its own branch; it does not start from another source.
+        cwd={taskLink === null && !chatDraft ? (project?.cwd ?? null) : null}
+        source={worktreeSource}
+        onSelectSource={(source) => {
+          locationEdited.current = true;
+          setWorktreeSource(source);
+          if (source) setWorktreeSelection({ kind: "local" });
           resetAttempt();
         }}
         onClose={() => setWorkspacePickerVisible(false)}

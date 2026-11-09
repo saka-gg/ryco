@@ -80,6 +80,21 @@ export interface UsageLimitBannerModel {
   };
 }
 
+/** The banner's line under its title: when the limit resets, and whether the thread resumes. */
+export function usageLimitBannerDescription(model: UsageLimitBannerModel, locale?: string): string {
+  const resets = model.resetAt ? `Resets ${formatUsageLimitReset(model.resetAt, locale)}` : null;
+  switch (model.description) {
+    case "resets-at":
+      return resets ?? "Resume when your limit resets.";
+    case "resuming-at-reset":
+      return `${resets ?? "Resets soon"} · resumes automatically`;
+    case "unknown-reset":
+      return "Reset time unknown. Resume when your limit resets.";
+    case "reset-passed":
+      return "Resume to continue this thread.";
+  }
+}
+
 export function usageLimitProviderLabel(limit: Pick<ThreadUsageLimit, "provider">): string {
   return PROVIDER_DISPLAY_NAMES[limit.provider] ?? limit.provider;
 }
