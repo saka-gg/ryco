@@ -48,6 +48,8 @@ function menu(overrides: Partial<ThreadHeaderMenuInput> = {}) {
 const ids = (sections: ReturnType<typeof menu>) =>
   sections.map((section) => [section.id, section.actions.map((action) => action.id)]);
 
+const allTools = { findInFiles: true, scripts: true, servers: true, notes: true, devices: true };
+
 describe("thread header menu", () => {
   it("gathers the old header buttons and the task sheet's actions in three groups", () => {
     expect(ids(menu())).toEqual([
@@ -81,6 +83,35 @@ describe("thread header menu", () => {
       disabled: true,
       subtitle: "Stop the current turn first.",
     });
+  });
+
+  it("puts the workspace tools behind one More tools submenu when the group would run long", () => {
+    const sections = menu({ tools: allTools });
+    expect(ids(sections)[0]).toEqual([
+      "workspace",
+      ["files", "terminal", "source-control", "review", "more-tools"],
+    ]);
+    const more = sections[0]?.actions.at(-1);
+    expect(more?.title).toBe("More tools");
+    expect(more?.children?.map((action) => action.id)).toEqual([
+      "find-in-files",
+      "scripts",
+      "servers",
+      "notes",
+      "devices",
+    ]);
+  });
+
+  it("keeps the tools inline while the group stays short, and only the available ones", () => {
+    const sections = menu({
+      tools: { ...allTools, servers: false, devices: false },
+      model: model({ reviewVisible: false }),
+    });
+    expect(ids(sections)[0]).toEqual([
+      "workspace",
+      ["files", "terminal", "source-control", "find-in-files", "scripts", "notes"],
+    ]);
+    expect(sections[0]?.actions.every((action) => action.children === undefined)).toBe(true);
   });
 
   it("drops the workspace group without a checkout and gates changes while busy", () => {
@@ -136,13 +167,14 @@ describe("thread header menu", () => {
   });
 
   it("is one list of real items on Android, in the iOS order, with no group rows", () => {
-    const sections = menu();
+    const sections = menu({ tools: allTools });
     const flat = flattenThreadHeaderMenu(sections);
     expect(flat.map((action) => action.id)).toEqual([
       "files",
       "terminal",
       "source-control",
       "review",
+      "more-tools",
       "side-chat",
       "fork",
       "rename",
@@ -150,8 +182,12 @@ describe("thread header menu", () => {
       "copy-reference",
       "archive",
     ]);
-    // Every row is an action with a title: none is an untitled group (a blank submenu).
+    // Every row is an action with a title: none is an untitled group (a blank submenu). The one
+    // submenu Android draws is "More tools", titled, holding the tools.
     expect(flat.every((action) => action.title.length > 0)).toBe(true);
+    expect(flat.filter((action) => action.children).map((action) => action.title)).toEqual([
+      "More tools",
+    ]);
   });
 });
 

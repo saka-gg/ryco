@@ -141,6 +141,8 @@ function StatusValue(props: {
 export interface ThreadContextSheetActions {
   readonly openMachines: () => void;
   readonly openProject: (() => void) | undefined;
+  /** The repository's issues, Actions runs and Jira items. */
+  readonly openExplorer?: (() => void) | undefined;
   readonly openSourceControl: (() => void) | undefined;
   readonly openFiles: (() => void) | undefined;
   readonly openTerminal: (() => void) | undefined;
@@ -213,6 +215,11 @@ export function ThreadContextSheet(props: {
         <InfoRow label="Project" onPress={go(actions.openProject)}>
           <ValueText>{model.projectLabel}</ValueText>
         </InfoRow>
+        {actions.openExplorer ? (
+          <InfoRow label="Repository" onPress={go(actions.openExplorer)}>
+            <ValueText>Issues · Actions</ValueText>
+          </InfoRow>
+        ) : null}
         <InfoRow
           label={model.contextHeading === "Project · Folder" ? "Folder" : "Worktree · branch"}
           onPress={go(actions.openSourceControl)}

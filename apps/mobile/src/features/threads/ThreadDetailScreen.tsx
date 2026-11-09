@@ -311,6 +311,7 @@ import {
   buildThreadHeaderMenu,
   flattenThreadHeaderMenu,
   resolveThreadRename,
+  type ThreadHeaderMenuAction,
   type ThreadHeaderMenuActionId,
   type ThreadHeaderMenuSection,
 } from "./threadHeaderMenuModel";
@@ -322,7 +323,7 @@ import { useThreadDevice } from "../devices/useThreadDevice";
 import { copyTextWithHaptic } from "../../lib/copyTextWithHaptic";
 import { selectCompletionReturnsByChildThreadId } from "@ryco/client-runtime/state/agentControl";
 import { isDelegatedThreadLineage } from "@ryco/client-runtime/state/threads";
-import { MenuView, type NativeActionEvent } from "@react-native-menu/menu";
+import { MenuView, type MenuAction, type NativeActionEvent } from "@react-native-menu/menu";
 import type { NativeStackHeaderItem } from "@react-navigation/native-stack";
 import { openTaskCapture } from "../tasks/taskCaptureStore";
 import { useThreadWorkspaceRoot } from "../files/useThreadWorkspaceRoot";
@@ -2752,7 +2753,10 @@ export function ThreadDetailScreen(props: {
     watch: headerModel?.pullRequestWatch ?? null,
     ready: (environmentRow?.mutationReady ?? false) && !cachedView.actionsDisabled,
   });
-  const { preview: devicePreview } = useThreadDevice(environmentId, threadId);
+  const { preview: devicePreview, threadState: threadDeviceState } = useThreadDevice(
+    environmentId,
+    threadId,
+  );
   const projectId = thread?.projectId ?? null;
   const openProjectScreen =
     projectId === null
@@ -2766,6 +2770,31 @@ export function ThreadDetailScreen(props: {
             environmentId,
             projectId,
             ...(worktree?.id ? { worktreeId: worktree.id } : {}),
+          });
+  // The workspace tools of a real checkout (a project-less chat has no repository).
+  const checkoutParams =
+    openSourceControl === undefined || projectId === null
+      ? null
+      : { environmentId, projectId, ...(worktree?.id ? { worktreeId: worktree.id } : {}) };
+  const serverCapabilities = environmentServerConfig?.environment.capabilities;
+  const workspaceTools = {
+    findInFiles:
+      headerModel?.filesVisible === true && serverCapabilities?.projectContentSearch === true,
+    scripts: headerModel?.terminalVisible === true && project !== null,
+    servers:
+      serverCapabilities?.threadLocalServers === true ||
+      environmentServerConfig?.nodeBrowser?.available === true,
+    notes: checkoutParams !== null && serverCapabilities?.worktreeNotes === true,
+    devices:
+      threadDeviceState !== null && threadDeviceState.availability.kind !== "unsupported-platform",
+  };
+  const openExplorer =
+    checkoutParams === null
+      ? undefined
+      : () =>
+          navigation.navigate("ProjectExplorer", {
+            environmentId: checkoutParams.environmentId,
+            projectId: checkoutParams.projectId,
           });
   const openPullRequest =
     projectId !== null && headerModel?.pullRequestNumber != null
@@ -2890,6 +2919,7 @@ export function ThreadDetailScreen(props: {
         terminalSubtitle,
         sourceControlAvailable: openSourceControl !== undefined,
         deviceAvailable: devicePreview !== null,
+        tools: workspaceTools,
         sideChatAvailable: openSideChat !== undefined,
         forkAvailable: latestForkableReply !== undefined,
         addTaskAvailable: thread !== undefined,
@@ -2922,6 +2952,20 @@ export function ThreadDetailScreen(props: {
         return openDevice();
       case "source-control":
         return openSourceControl?.();
+      case "find-in-files":
+        return navigation.navigate("ThreadFileSearch", { environmentId, threadId });
+      case "scripts":
+        return navigation.navigate("ThreadScripts", { environmentId, threadId });
+      case "servers":
+        return navigation.navigate("ThreadServers", { environmentId, threadId });
+      case "devices":
+        return navigation.navigate("ThreadDevices", { environmentId, threadId });
+      case "notes":
+        if (checkoutParams) navigation.navigate("ProjectNotes", checkoutParams);
+        return;
+      case "more-tools":
+        // A submenu: its items run on their own.
+        return;
       case "review":
         return openReview();
       case "pull-request":
@@ -2973,6 +3017,25 @@ export function ThreadDetailScreen(props: {
 
   useLayoutEffect(() => {
     const runMenuAction = (id: ThreadHeaderMenuActionId) => onHeaderMenuActionRef.current(id);
+    const nativeMenuItem = (action: ThreadHeaderMenuAction) => ({
+      type: "action" as const,
+      label: action.title,
+      icon: { type: "sfSymbol" as const, name: action.icon as never },
+      ...(action.subtitle ? { description: action.subtitle } : {}),
+      disabled: action.disabled ?? false,
+      destructive: action.destructive ?? false,
+      onPress: () => runMenuAction(action.id),
+    });
+    const androidMenuAction = (action: ThreadHeaderMenuAction): MenuAction => ({
+      id: action.id,
+      title: action.title,
+      ...(action.subtitle ? { subtitle: action.subtitle } : {}),
+      ...(action.children ? { subactions: action.children.map(androidMenuAction) } : {}),
+      attributes: {
+        disabled: action.disabled ?? false,
+        destructive: action.destructive ?? false,
+      },
+    });
     const openContext = () => setContextSheetFor(outboxThreadKey);
     const pill =
       pillTitle === null || pillStatus === null || pillProject === null || pillWorktree === null
@@ -3001,15 +3064,16 @@ export function ThreadDetailScreen(props: {
                       type: "submenu" as const,
                       label: "",
                       inline: true,
-                      items: section.actions.map((action) => ({
-                        type: "action" as const,
-                        label: action.title,
-                        icon: { type: "sfSymbol" as const, name: action.icon as never },
-                        ...(action.subtitle ? { description: action.subtitle } : {}),
-                        disabled: action.disabled ?? false,
-                        destructive: action.destructive ?? false,
-                        onPress: () => runMenuAction(action.id),
-                      })),
+                      items: section.actions.map((action) =>
+                        action.children
+                          ? {
+                              type: "submenu" as const,
+                              label: action.title,
+                              icon: { type: "sfSymbol" as const, name: action.icon as never },
+                              items: action.children.map((child) => nativeMenuItem(child)),
+                            }
+                          : nativeMenuItem(action),
+                      ),
                     })),
                   },
                 },
@@ -3019,15 +3083,7 @@ export function ThreadDetailScreen(props: {
               headerRight: () => (
                 <MenuView
                   // One flat list: Android draws each inline group as an untitled submenu.
-                  actions={flattenThreadHeaderMenu(headerMenu).map((action) => ({
-                    id: action.id,
-                    title: action.title,
-                    ...(action.subtitle ? { subtitle: action.subtitle } : {}),
-                    attributes: {
-                      disabled: action.disabled ?? false,
-                      destructive: action.destructive ?? false,
-                    },
-                  }))}
+                  actions={flattenThreadHeaderMenu(headerMenu).map(androidMenuAction)}
                   onPressAction={({ nativeEvent }: NativeActionEvent) =>
                     runMenuAction(nativeEvent.event as ThreadHeaderMenuActionId)
                   }
@@ -3493,6 +3549,7 @@ export function ThreadDetailScreen(props: {
           actions={{
             openMachines: () => navigation.navigate("Connections"),
             openProject: openProjectScreen,
+            openExplorer,
             openSourceControl,
             openFiles: headerModel.filesVisible ? openFiles : undefined,
             openTerminal: headerModel.terminalVisible ? openTerminal : undefined,

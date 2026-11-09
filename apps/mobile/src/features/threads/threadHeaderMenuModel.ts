@@ -9,9 +9,15 @@ import type { ThreadHeaderModel } from "./threadHeaderModel";
  */
 export type ThreadHeaderMenuActionId =
   | "files"
+  | "find-in-files"
   | "terminal"
+  | "scripts"
+  | "servers"
   | "device"
+  | "devices"
   | "source-control"
+  | "notes"
+  | "more-tools"
   | "review"
   | "pull-request"
   | "side-chat"
@@ -33,6 +39,8 @@ export interface ThreadHeaderMenuAction {
   readonly subtitle?: string;
   readonly destructive?: boolean;
   readonly disabled?: boolean;
+  /** A submenu's items ("More tools"); its own id is never run. */
+  readonly children?: ReadonlyArray<ThreadHeaderMenuAction>;
 }
 
 export interface ThreadHeaderMenuSection {
@@ -48,6 +56,14 @@ export interface ThreadHeaderMenuInput {
   readonly terminalSubtitle?: string | null;
   /** A simulator or emulator is attached to the thread. */
   readonly deviceAvailable: boolean;
+  /** The workspace tools the node and the thread can run; each shows only when true. */
+  readonly tools?: {
+    readonly findInFiles: boolean;
+    readonly scripts: boolean;
+    readonly servers: boolean;
+    readonly notes: boolean;
+    readonly devices: boolean;
+  };
   /** The composer has a model a side question could ask. */
   readonly sideChatAvailable: boolean;
   /** A reply can be forked right now (the latest forkable one). */
@@ -57,6 +73,9 @@ export interface ThreadHeaderMenuInput {
   /** A rename, stop, archive and the like cannot be sent now (busy, cached or offline). */
   readonly busy: boolean;
 }
+
+/** The workspace group's longest inline list; past it the extra tools collapse into one submenu. */
+export const WORKSPACE_GROUP_MAX = 7;
 
 export function buildThreadHeaderMenu(
   input: ThreadHeaderMenuInput,
@@ -93,6 +112,29 @@ export function buildThreadHeaderMenu(
       id: "pull-request",
       title: `Pull request #${model.pullRequestNumber}`,
       icon: "arrow.triangle.pull",
+    });
+  }
+
+  // The less frequent tools join the group while it stays short, else sit behind "More tools".
+  const tools: ThreadHeaderMenuAction[] = [];
+  if (input.tools?.findInFiles) {
+    tools.push({ id: "find-in-files", title: "Find in files", icon: "text.magnifyingglass" });
+  }
+  if (input.tools?.scripts) tools.push({ id: "scripts", title: "Run script", icon: "play" });
+  if (input.tools?.servers) {
+    tools.push({ id: "servers", title: "Servers & preview", icon: "safari" });
+  }
+  if (input.tools?.notes) tools.push({ id: "notes", title: "Notes", icon: "note.text" });
+  if (input.tools?.devices) {
+    tools.push({ id: "devices", title: "Simulators", icon: "iphone.gen3" });
+  }
+  if (workspace.length + tools.length <= WORKSPACE_GROUP_MAX) workspace.push(...tools);
+  else if (tools.length > 0) {
+    workspace.push({
+      id: "more-tools",
+      title: "More tools",
+      icon: "ellipsis.circle",
+      children: tools,
     });
   }
 
@@ -166,7 +208,8 @@ export function buildThreadHeaderMenu(
 /**
  * The menu as one list, for Android. `@react-native-menu/menu` ignores `displayInline` there and
  * turns every group into a submenu, which with an empty title reads as a blank row; Android's
- * popup menu has no inline groups to begin with, so the groups are concatenated in order.
+ * popup menu has no inline groups to begin with, so the groups are concatenated in order. "More
+ * tools" stays one titled submenu.
  */
 export function flattenThreadHeaderMenu(
   sections: ReadonlyArray<ThreadHeaderMenuSection>,
