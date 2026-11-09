@@ -2,8 +2,9 @@
  * `ryco_device`: routine input on the device attached to the caller's thread,
  * for private Agent Control sessions.
  *
- * Lifecycle, install, URL and recording changes stay one approved proposal
- * each (`ryco_propose_device_*`). Routine input (tap, swipe, type, buttons,
+ * Lifecycle, install, URL and recording changes stay one proposal each
+ * (`ryco_propose_device_*`), approved by the user; boot and attach are
+ * routine for a full-access thread (`routineActions.ts`). Routine input (tap, swipe, type, buttons,
  * scroll to element, launch, simulator settings) runs directly through the
  * provider gateway's shared device core (`callDeviceTool`) after one approved
  * `deviceControlConsent` per task; full-access threads skip it, as Computer Use
@@ -130,7 +131,7 @@ const ARGUMENT_NAMES = new Set(Object.keys(ACTION_PROPERTIES));
 const DESCRIPTOR: AgentControlMcpToolDescriptor = {
   name: RYCO_DEVICE_TOOL,
   description:
-    "Drive the simulator or emulator attached to this thread. Actions tap, swipe, type, press_button, scroll_to_element, launch and configure ask the user once per task. describe, wait and logs only read. Inputs return the settled screen as text; pass screenshot:true for pixels. Boot, attach, install, URLs and shutdown use ryco_propose_device_*.",
+    "Drive the simulator or emulator attached to this thread. Actions tap, swipe, type, press_button, scroll_to_element, launch and configure ask the user once per task (never in a Full access thread). describe, wait and logs only read. Inputs return the settled screen as text; pass screenshot:true for pixels. Boot, attach, install, URLs and shutdown use ryco_propose_device_* (boot and attach run without asking in a Full access thread).",
   inputSchema: {
     type: "object",
     properties: {
@@ -164,7 +165,7 @@ export const AGENT_CONTROL_GUIDE_NAMES: DeviceGuideNames = {
 };
 
 const AGENT_CONTROL_GUIDE_TRAILER = [
-  'Input asks the user once per task. If a result says permission is pending, call ryco_wait_for_control_request with its proposalId (waitFor "terminal"), then repeat the call. If it was declined, do not retry. Installing, opening URLs, booting, attaching and shutting down use ryco_propose_device_* and are approved one by one.',
+  'Input asks the user once per task. If a result says permission is pending, call ryco_wait_for_control_request with its proposalId (waitFor "terminal"), then repeat the call. If it was declined, do not retry. Installing, opening URLs and shutting down use ryco_propose_device_* and are approved one by one; booting and attaching do too, except in a Full access thread, where they run without asking (still confirm each with ryco_wait_for_control_request).',
   "A call that fails with Request cancelled hit the 60 s limit and may still have acted: describe the screen before repeating input.",
 ] as const;
 

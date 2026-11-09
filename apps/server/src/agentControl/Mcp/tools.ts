@@ -309,6 +309,13 @@ const deviceMutationTargetProperties = {
   expectedRecording: { type: "boolean" },
 } as const;
 
+/** Boot and attach are routine for a Full access caller (`routineActions.ts`). */
+const FULL_ACCESS_DEVICE_ROUTINE =
+  "In a Full access thread it runs without asking the user; otherwise it waits for their approval. It never runs inline: confirm with ryco_wait_for_control_request.";
+
+const deviceApprovalDescription = (operation: string) =>
+  `Request approval to ${operation} one exact simulator or emulator. This creates a proposal and does not mutate the device inline.`;
+
 const pullRequestWatchInputSchema = {
   type: "object",
   properties: {
@@ -383,14 +390,22 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
       additionalProperties: false,
     },
   },
-  ...[
-    [AGENT_CONTROL_MCP_TOOLS.proposeDeviceBoot, "boot"],
-    [AGENT_CONTROL_MCP_TOOLS.proposeDeviceAttach, "attach"],
-    [AGENT_CONTROL_MCP_TOOLS.proposeDeviceDetach, "detach"],
-    [AGENT_CONTROL_MCP_TOOLS.proposeDeviceShutdown, "shut down"],
-  ].map(([name, operation]) => ({
-    name: name!,
-    description: `Request approval to ${operation} one exact simulator or emulator. This creates a proposal and does not mutate the device inline.`,
+  ...(
+    [
+      [
+        AGENT_CONTROL_MCP_TOOLS.proposeDeviceBoot,
+        `Boot one exact simulator or emulator. ${FULL_ACCESS_DEVICE_ROUTINE}`,
+      ],
+      [
+        AGENT_CONTROL_MCP_TOOLS.proposeDeviceAttach,
+        `Attach one exact booted simulator or emulator to this thread. ${FULL_ACCESS_DEVICE_ROUTINE}`,
+      ],
+      [AGENT_CONTROL_MCP_TOOLS.proposeDeviceDetach, deviceApprovalDescription("detach")],
+      [AGENT_CONTROL_MCP_TOOLS.proposeDeviceShutdown, deviceApprovalDescription("shut down")],
+    ] as const
+  ).map(([name, description]) => ({
+    name,
+    description,
     inputSchema: {
       type: "object",
       properties: deviceMutationTargetProperties,
