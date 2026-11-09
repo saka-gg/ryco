@@ -1,6 +1,7 @@
 import {
   createHostedMutationLeases,
   getHostedEnvironmentSessions,
+  hostedCatalogAllowsMutation,
   hostedHubStore,
   hostedSessionMutationReadiness,
 } from "@ryco/client-runtime/authorization";
@@ -25,7 +26,12 @@ import { mobileHostedConnectionScopes } from "../../connection/hostedConnectionS
 import { getCachedHubNodeRoster } from "../../hostedHub/nodeRoster";
 import { uuidv4 } from "../../lib/uuid";
 import { createMobileConnectionRegistry } from "../../runtime/bootstrap";
-import { readMobileNodeCatalog } from "./mobileNodeCatalog";
+import { subscribeHubLeaseInputs } from "./hubLeaseInputs";
+import {
+  readMobileHostedMachines,
+  readMobileNodeCatalog,
+  subscribeMobileHostedMachines,
+} from "./mobileNodeCatalog";
 
 /**
  * Acquiring a node for a cross-node project copy on the phone: the shared
@@ -37,11 +43,11 @@ import { readMobileNodeCatalog } from "./mobileNodeCatalog";
  * then goes through the connection acquired: a replaced connection fails the
  * call before it is sent, and the copy acquires again and resumes.
  *
- * A Hub machine also waits for its session's mutation lease, as the hosted web
- * does: an owner session that is adoptable (its own fresh relay attempt and
- * accepted snapshot) and whose shell the phone holds. Every call revalidates
- * it; a renewed, downgraded or interrupted session fails the call and the copy
- * acquires again.
+ * A Hub machine also waits for its session's mutation lease, by the hosted
+ * web's rule: an owner session whose directory is current, whose relay is
+ * online, whose node is listed, connectable and not revoked, and whose shell
+ * snapshot the phone holds. Every call revalidates it; a renewed, downgraded
+ * or interrupted session fails the call and the copy acquires again.
  */
 
 const NO_HOLD = { release: () => undefined } as const;
@@ -58,30 +64,66 @@ const CONNECTIONS: NodeConnectionRegistry<EnvironmentConnection> = {
   apiOf: (_environmentId, connection) => createEnvironmentApi(connection.client),
 };
 
-/** Each Hub session's mutation lease, read from the shared session records. */
+/** Each Hub session's shell snapshot held by the phone: its connection, while it is a Hub one. */
+function hubShellHeld(environmentId: EnvironmentId): boolean {
+  const connection = CONNECTIONS.read(environmentId);
+  return (
+    connection?.knownEnvironment.source === "hub-hosted" &&
+    connection.shellSnapshotReadiness.read() !== null
+  );
+}
+
+/**
+ * Each Hub session's mutation lease, by the hosted web's own rule
+ * (`hostedSessionMutationReadiness` for a native client): granted only while
+ * the published Hub machines show it connected and open to changes.
+ */
 const HOSTED_MUTATION_LEASES = createHostedMutationLeases({
   readAll: () => {
     const hub = hostedHubStore.getState();
+    const machines = readMobileHostedMachines();
     return getHostedEnvironmentSessions()
       .list()
       .map((record) => {
-        const connection = CONNECTIONS.read(record.environmentId);
-        const shellReady =
-          connection?.knownEnvironment.source === "hub-hosted" &&
-          connection.shellSnapshotReadiness.read() !== null;
-        return hostedSessionMutationReadiness(record, hub, shellReady);
+        const current = hostedSessionMutationReadiness({
+          hub,
+          record,
+          client: "native",
+          shellHeld: hubShellHeld(record.environmentId),
+        });
+        return {
+          environmentId: record.environmentId,
+          snapshotGeneration: record.generation,
+          effectiveRole: record.effectiveRole,
+          directoryReady: current.directoryReady,
+          relayReady: current.relayReady,
+          shellReady:
+            current.shellReady && hostedCatalogAllowsMutation(machines, record.environmentId),
+        };
       });
   },
-  subscribe: (listener) => {
-    const unsubscribes = [
-      getHostedEnvironmentSessions().subscribe(listener),
-      hostedHubStore.subscribe(listener),
-      CONNECTIONS.subscribe(listener),
-    ];
-    return () => {
-      for (const unsubscribe of unsubscribes) unsubscribe();
-    };
-  },
+  subscribe: (listener) =>
+    subscribeHubLeaseInputs(
+      {
+        environmentIds: () =>
+          getHostedEnvironmentSessions()
+            .list()
+            .map((record) => record.environmentId),
+        readConnection: (environmentId) => CONNECTIONS.read(environmentId),
+        sources: [
+          (onChange) => getHostedEnvironmentSessions().subscribe(onChange),
+          (onChange) => {
+            const unsubscribe = hostedHubStore.subscribe(onChange);
+            return () => {
+              unsubscribe();
+            };
+          },
+          (onChange) => CONNECTIONS.subscribe(onChange),
+          subscribeMobileHostedMachines,
+        ],
+      },
+      listener,
+    ),
 });
 
 /** Calls `listener` whenever a node's connection is registered, replaced or removed. */

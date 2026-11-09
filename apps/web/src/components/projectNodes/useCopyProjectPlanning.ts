@@ -9,7 +9,6 @@
 // Layer: Web data hooks for `CopyProjectDialog`; loaded with the dialog.
 
 import {
-  joinNodePath,
   judgeCopyDestination,
   nodePathBasename,
   planProjectCopyOptions,
@@ -34,7 +33,11 @@ import {
   type ServerConfig,
 } from "@ryco/contracts";
 import type { NodePathHints, ProjectCheckRemoteAccessResult } from "@ryco/contracts/project-copy";
-import { legacyCopyProject, legacySourceHints } from "@ryco/client-runtime/projectCopy/form";
+import {
+  copyExplicitDestinationPath,
+  legacyCopyProject,
+  legacySourceHints,
+} from "@ryco/client-runtime/projectCopy/form";
 import { useEffect, useMemo, useState } from "react";
 
 import { acquireNode } from "../../environments/acquireNode";
@@ -290,8 +293,11 @@ export function useCopyDestination(input: {
   readonly supported: boolean;
   readonly source: CopySourceState;
   readonly manualParent: string | null;
+  /** A stopped copy's own folder: previewed as it is, never renamed. */
+  readonly exactPath?: string | null;
 }): CopyDestinationState {
   const { environmentId, source, manualParent } = input;
+  const exactPath = input.exactPath ?? null;
   const api = useNodeEnvironmentApi(environmentId);
   const hints = useNodePathHints({ environmentId, supported: input.supported }).data ?? null;
   const preview = api?.projects.previewDestination;
@@ -320,15 +326,20 @@ export function useCopyDestination(input: {
           leaf,
           canonicalKey ?? "",
           manualParent ?? "",
+          exactPath ?? "",
         ].join("\u0000")
       : null,
     request && preview
       ? async () => {
-          if (manualParent !== null && leaf !== null) {
+          const explicitPath = copyExplicitDestinationPath({
+            exactPath,
+            manualParent,
+            leaf,
+            pathSeparator: hints!.pathSeparator,
+          });
+          if (explicitPath !== null) {
             return judgeCopyDestination({
-              preview: await preview({
-                path: joinNodePath(manualParent, [leaf], hints!.pathSeparator),
-              }),
+              preview: await preview({ path: explicitPath }),
               sourceCanonicalKey: canonicalKey,
               basis: "explicit",
             });

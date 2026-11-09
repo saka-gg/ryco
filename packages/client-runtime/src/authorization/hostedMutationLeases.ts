@@ -1,14 +1,15 @@
 // FILE: hostedMutationLeases.ts
-// Purpose: Mutation leases for Hub environments a client holds several of at
-//          once (the phone): each environment session's readiness from the
-//          shared session record, and a registry that grants a lease once that
-//          readiness holds and revalidates it at the instant of each call.
+// Purpose: The one rule for when a Hub environment session may hold a mutation
+//          lease (the hosted web's coordinator and the phone both read it), and
+//          a lease registry for a client that holds several Hub sessions at
+//          once (the phone): it grants a lease once that readiness holds and
+//          revalidates it at the instant of each call.
 // Layer: Client runtime, no platform code.
 
 import type { EnvironmentId } from "@ryco/contracts";
 
+import { hostedSessionConnectionState } from "../state/workspace/hostedNodeCatalogInput.ts";
 import {
-  canAdoptHostedEnvironmentSession,
   hostedBrowserRevalidated,
   type HostedEnvironmentSessionRecord,
 } from "./hostedEnvironmentSessions.ts";
@@ -18,29 +19,68 @@ import {
   type NodeMutationReadiness,
 } from "./nodeMutationLease.ts";
 import type { HostedHubState } from "./state.ts";
+import type { HostedHubNode } from "./types.ts";
 
 export type HostedMutationReadiness = Omit<NodeMutationReadiness, "selectionGeneration">;
 
+/** Which client opens the connection: the hosted web may not open a node that needs a native client. */
+export type HostedConnectingClient = "web" | "native";
+
+/** A directory node this client may open a connection to right now: not revoked, online, and open to it. */
+export function isHostedConnectableNode(
+  node: HostedHubNode,
+  client: HostedConnectingClient,
+): boolean {
+  return (
+    node.revokedAt === null &&
+    node.presence.online &&
+    (client === "native" || node.capabilities?.nativeClientRequired !== true)
+  );
+}
+
 /**
- * One Hub environment session's mutation readiness: the account's directory is
- * current, the session is adoptable (its own fresh relay attempt and accepted
- * snapshot, `canAdoptHostedEnvironmentSession`), and the client holds that
- * snapshot's shell. The role and generation are the record's own, so a
- * renewed or downgraded session never keeps an older lease.
+ * What a session's lease may hold right now, read from the current directory,
+ * the record itself and whether this client holds the session's shell
+ * snapshot, never from a published catalog (which can trail a change):
+ * - directory: the account's directory is ready and its browser revalidated;
+ * - relay: the session's relay is online and its session established;
+ * - shell: the snapshot is held, the node is in the directory and connectable
+ *   by this client, and the session is connected.
  */
-export function hostedSessionMutationReadiness(
-  record: HostedEnvironmentSessionRecord,
-  hub: Pick<HostedHubState, "directoryStatus" | "browserStatus">,
-  shellReady: boolean,
-): HostedMutationReadiness {
+export function hostedSessionMutationReadiness(input: {
+  readonly hub: Pick<HostedHubState, "directoryStatus" | "browserStatus" | "nodes">;
+  readonly record: HostedEnvironmentSessionRecord;
+  readonly client: HostedConnectingClient;
+  readonly shellHeld: boolean;
+}): Pick<HostedMutationReadiness, "directoryReady" | "relayReady" | "shellReady"> {
+  const { hub, record } = input;
+  const node = hub.nodes.find((entry) => entry.environmentId === record.environmentId);
   return {
-    environmentId: record.environmentId,
-    snapshotGeneration: record.generation,
-    effectiveRole: record.effectiveRole,
     directoryReady: hub.directoryStatus === "ready" && hostedBrowserRevalidated(hub.browserStatus),
-    relayReady: canAdoptHostedEnvironmentSession(record),
-    shellReady: shellReady && record.snapshotAcceptedAt !== null,
+    relayReady: record.transportStatus === "online" && record.sessionEstablished,
+    shellReady:
+      input.shellHeld &&
+      node !== undefined &&
+      isHostedConnectableNode(node, input.client) &&
+      hostedSessionConnectionState(record) === "connected",
   };
+}
+
+/** A published machine catalog shows the environment connected and open to changes: a lease may be granted. */
+export function hostedCatalogAllowsMutation(
+  machines: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly connectionState: string;
+    readonly canMutate: boolean;
+  }>,
+  environmentId: EnvironmentId,
+): boolean {
+  return machines.some(
+    (machine) =>
+      machine.environmentId === environmentId &&
+      machine.connectionState === "connected" &&
+      machine.canMutate,
+  );
 }
 
 export interface HostedMutationLeaseSource {

@@ -24,10 +24,11 @@ import {
   copyDestinationUsable,
   copyFormBlockedReason,
   copyProgressContextOf,
+  copyResumeMismatch,
   copyResumeNotice,
+  copyResumePin,
   DEFAULT_COPY_USER_CHOICES,
   planCopyOptions,
-  requestedCopyTarget,
   resumableCopyRecord,
   type CopyUserChoices,
 } from "@ryco/client-runtime/projectCopy/form";
@@ -180,7 +181,8 @@ function CopyProjectForm(props: {
   });
   const title = sourceProject?.name ?? members[0]?.name ?? "Project";
   const sourceLabel = sourceRow?.label ?? "the source";
-  const [resumeRecord] = useState(() =>
+  // A copy whose upload stopped, until the user discards it to start over.
+  const [resumeRecord, setResumeRecord] = useState(() =>
     props.resumeCopyId ? readProjectCopyRecord(props.resumeCopyId) : null,
   );
   // Where this checkout was copied to last time (a small synchronous read).
@@ -195,13 +197,21 @@ function CopyProjectForm(props: {
   const cards = useMemo(() => copyTargetCards({ nodes, members, nowMs }), [members, nodes, nowMs]);
   const [pickedTargetId, setPickedTargetId] = useState<EnvironmentId | null>(null);
   const pickedCard = cards.find((card) => card.node.environmentId === pickedTargetId);
-  const targetId = pickedCard?.selectable
-    ? pickedCard.node.environmentId
-    : initialCopyTarget(
-        cards,
-        requestedCopyTarget(props.targetEnvironmentId, resumeRecord),
-        remembered?.targetEnvironmentId ?? null,
-      );
+  // A stopped copy goes on only to its own machine, waiting for it if it is not back yet.
+  const resumeLabel =
+    nodes.find((node) => node.environmentId === resumeRecord?.targetEnvironmentId)?.label ??
+    "its machine";
+  const pin = copyResumePin({ record: resumeRecord, cards, targetLabel: resumeLabel });
+  const targetId =
+    pin !== null
+      ? pin.targetEnvironmentId
+      : pickedCard?.selectable
+        ? pickedCard.node.environmentId
+        : initialCopyTarget(
+            cards,
+            props.targetEnvironmentId,
+            remembered?.targetEnvironmentId ?? null,
+          );
   const targetNode = cards.find((card) => card.node.environmentId === targetId)?.node ?? null;
   const targetLabel = targetNode?.label ?? "the destination";
   const targetHold = useHeldNode(targetId);
@@ -214,13 +224,19 @@ function CopyProjectForm(props: {
   } | null>(null);
   const [folderDraft, setFolderDraft] = useState<string | null>(null);
   // The parent picked last time on this destination, until the user picks one now.
-  const parentFolder = copyParentFolderOf({ targetId, picked: manualParent, remembered });
+  // A stopped copy goes on into its own folder.
+  const parentFolder =
+    pin === null
+      ? copyParentFolderOf({ targetId, picked: manualParent, remembered })
+      : { path: null, remembered: false };
   const manualPath = parentFolder.path;
+  const exactPath = pin?.destinationPath ?? null;
   const destination = useCopyDestination({
     environmentId: targetId,
     supported: targetSupport === "yes",
     source,
     manualParent: manualPath,
+    exactPath,
   });
   const target = useCopyTargetConfig(targetId, targetHold.status === "held");
 
@@ -276,7 +292,7 @@ function CopyProjectForm(props: {
   const setupInvalid = runSetup && command.trim().length === 0;
   const followUpInvalid =
     followUpEnabled && (modelSelection === null || prompt.trim().length === 0);
-  const blockedReason = copyFormBlockedReason({
+  const formBlockedReason = copyFormBlockedReason({
     title,
     sourceLabel,
     targetLabel,
@@ -295,6 +311,7 @@ function CopyProjectForm(props: {
       ? (followUpDefaults.unavailableReason ?? "Write what the agent should do.")
       : null,
   });
+  const blockedReason = pin?.waitingReason ?? formBlockedReason;
   const canStart =
     options !== null &&
     blockedReason === null &&
@@ -327,12 +344,19 @@ function CopyProjectForm(props: {
       setStartError(built.reason);
       return;
     }
-    setStarting(true);
-    setStartError(null);
     const resume = resumableCopyRecord(resumeRecord, {
       sourceRef: sourceRow?.ref ?? null,
       targetEnvironmentId: targetId,
+      destinationPath: built.plan.destinationPath,
     });
+    // Never a new copy in place of the stopped one: that takes discarding it first.
+    const mismatch = copyResumeMismatch(pin, resume);
+    if (mismatch !== null) {
+      setStartError(mismatch);
+      return;
+    }
+    setStarting(true);
+    setStartError(null);
     const context: CopyProgressContext = copyProgressContextOf({
       plan: built.plan,
       options,
@@ -347,7 +371,6 @@ function CopyProjectForm(props: {
       resume,
     }).then(
       (copy) => {
-        if (resumeRecord !== null && resume === null) discardProjectCopy(resumeRecord.copyId);
         if (sourceRow) {
           copyDestinationMemory.remember(sourceRow.ref, {
             targetEnvironmentId: targetId,
@@ -391,7 +414,7 @@ function CopyProjectForm(props: {
   const tag = copyFolderTag(suggestion);
   const note = copyFolderNote({
     suggestion,
-    manual: manualPath !== null,
+    manual: manualPath !== null || exactPath !== null,
     remembered: parentFolder.remembered,
     sourceLabel,
     targetLabel,
@@ -414,7 +437,7 @@ function CopyProjectForm(props: {
         }),
       )
     : null;
-  const shownError = startError ?? (noTarget ? null : blockedReason);
+  const shownError = startError ?? (noTarget && pin === null ? null : blockedReason);
 
   return (
     <ScrollView
@@ -427,18 +450,27 @@ function CopyProjectForm(props: {
         <View className="mx-5 mt-4">
           <ErrorBanner message={props.notice} />
         </View>
-      ) : resumeRecord !== null ? (
-        <View className="mx-5 mt-4 rounded-xl bg-subtle p-3">
+      ) : pin !== null ? (
+        <View className="mx-5 mt-4 gap-2 rounded-xl bg-subtle p-3">
           <Text className="font-sans text-sm text-foreground-muted">
-            {copyResumeNotice(
-              nodes.find((node) => node.environmentId === resumeRecord.targetEnvironmentId)
-                ?.label ?? "the destination",
-            )}
+            {copyResumeNotice(resumeLabel)}
           </Text>
+          <Pressable
+            accessibilityRole="button"
+            disabled={starting}
+            onPress={() => {
+              discardProjectCopy(pin.record.copyId);
+              setResumeRecord(null);
+              setStartError(null);
+            }}
+            className="self-start active:opacity-70 disabled:opacity-40"
+          >
+            <Text className="font-sans text-sm text-primary">Discard it and start over</Text>
+          </Pressable>
         </View>
       ) : null}
 
-      {sourceRows.length > 1 ? (
+      {sourceRows.length > 1 && pin === null ? (
         <View className="mt-4 gap-2 px-5">
           <Text className="pb-0.5 text-sm font-ryco-medium text-foreground-muted">From</Text>
           {sourceRows.map((row) => (
@@ -463,7 +495,15 @@ function CopyProjectForm(props: {
 
       <View className="mt-6 gap-2 px-5">
         <Text className="pb-0.5 text-sm font-ryco-medium text-foreground-muted">To</Text>
-        {noTarget ? (
+        {pin !== null ? (
+          <OptionRow
+            label={resumeLabel}
+            detail={pin.waitingReason === null ? "Where this copy was going" : "Not reachable yet"}
+            selected
+            disabled={pin.waitingReason !== null}
+            onPress={() => undefined}
+          />
+        ) : noTarget ? (
           <Text className="font-sans text-sm leading-5 text-foreground-muted">
             {copyNoTargetMessage(title, cards)}
           </Text>
@@ -486,7 +526,7 @@ function CopyProjectForm(props: {
         ) : null}
       </View>
 
-      {noTarget ? null : (
+      {noTarget && pin === null ? null : (
         <>
           <SettingsSection title="Folder">
             <View className="gap-1.5 px-5 py-3.5">
@@ -518,7 +558,7 @@ function CopyProjectForm(props: {
                 }`}
               />
             </View>
-            {folderDraft === null ? (
+            {exactPath !== null ? null : folderDraft === null ? (
               <Pressable
                 accessibilityRole="button"
                 disabled={destination.hints === null}

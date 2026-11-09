@@ -1,5 +1,6 @@
 import { getEnvironmentServerConfigsSnapshot } from "@ryco/client-runtime/rpc";
 import type { NodeCatalogSnapshot } from "@ryco/client-runtime/state/nodes";
+import type { WorkspaceMachineCatalogEntry } from "@ryco/client-runtime/state/workspace";
 import { useEffect, useMemo, useSyncExternalStore } from "react";
 import { useShallow } from "zustand/react/shallow";
 
@@ -41,6 +42,33 @@ function publishMobileNodeCatalog(next: NodeCatalogSnapshot): void {
   snapshot = stable;
   for (const listener of Array.from(listeners)) listener();
 }
+
+/**
+ * The Hub machines as last published (empty when signed out): a Hub session's
+ * mutation lease is granted only while its machine shows connected and open to
+ * changes here (`hostedCatalogAllowsMutation`), as on the hosted web.
+ */
+let hostedMachines: ReadonlyArray<WorkspaceMachineCatalogEntry> = [];
+const hostedMachineListeners = new Set<() => void>();
+
+export function readMobileHostedMachines(): ReadonlyArray<WorkspaceMachineCatalogEntry> {
+  return hostedMachines;
+}
+
+export function subscribeMobileHostedMachines(listener: () => void): () => void {
+  hostedMachineListeners.add(listener);
+  return () => {
+    hostedMachineListeners.delete(listener);
+  };
+}
+
+function publishMobileHostedMachines(next: ReadonlyArray<WorkspaceMachineCatalogEntry>): void {
+  if (next === hostedMachines) return;
+  hostedMachines = next;
+  for (const listener of Array.from(hostedMachineListeners)) listener();
+}
+
+const NO_HOSTED_MACHINES: ReadonlyArray<WorkspaceMachineCatalogEntry> = [];
 
 /** The catalog, subscribed. */
 export function useMobileNodeCatalog(): NodeCatalogSnapshot {
@@ -100,6 +128,7 @@ export function usePublishMobileNodeCatalog(): void {
     [configs, hostedCatalog, rows],
   );
   useEffect(() => {
+    publishMobileHostedMachines(hostedCatalog ?? NO_HOSTED_MACHINES);
     publishMobileNodeCatalog(next);
-  }, [next]);
+  }, [hostedCatalog, next]);
 }

@@ -2,6 +2,9 @@ import {
   canAdoptHostedEnvironmentSession,
   createNodeMutationLeaseAuthority,
   hostedBrowserRevalidated,
+  hostedCatalogAllowsMutation,
+  hostedSessionMutationReadiness,
+  isHostedConnectableNode,
   isHostedEnvironmentConnectBlocked,
   isHostedEnvironmentSessionLive,
   isJoinableHostedEnvironmentSession,
@@ -19,7 +22,6 @@ import {
   createConnectionDemandExecutor,
   createWorkspaceConnectionDemandState,
   hostedNodeCatalogInput,
-  hostedSessionConnectionState,
   isWarmRestoreForegroundSettled,
   reconcileWorkspaceMachineCatalog,
   warmRestoreWaitsForForeground,
@@ -615,7 +617,7 @@ export function hostedNodeRequiresNativeClient(node: HostedHubNode): boolean {
 
 /** A directory node Hosted Web may open a connection to right now. */
 function isHostedWebConnectableNode(node: HostedHubNode): boolean {
-  return node.revokedAt === null && node.presence.online && !hostedNodeRequiresNativeClient(node);
+  return isHostedConnectableNode(node, "web");
 }
 
 /**
@@ -1114,19 +1116,13 @@ export function startHostedWorkspaceCoordinator(input?: {
   const currentMutationReadiness = (
     state: HostedHubState,
     record: HostedEnvironmentSessionRecord,
-  ) => {
-    const node = state.nodes.find((entry) => entry.environmentId === record.environmentId);
-    return {
-      directoryReady:
-        state.directoryStatus === "ready" && hostedBrowserRevalidated(state.browserStatus),
-      relayReady: record.transportStatus === "online" && record.sessionEstablished,
-      shellReady:
-        snapshots.has(record.environmentId) &&
-        node !== undefined &&
-        isHostedWebConnectableNode(node) &&
-        hostedSessionConnectionState(record) === "connected",
-    };
-  };
+  ) =>
+    hostedSessionMutationReadiness({
+      hub: state,
+      record,
+      client: "web",
+      shellHeld: snapshots.has(record.environmentId),
+    });
 
   // Each environment session earns its lease with its own relay attempt and
   // accepted snapshot, and the lease names the record generation that did.
@@ -1137,12 +1133,7 @@ export function startHostedWorkspaceCoordinator(input?: {
     machines: ReadonlyArray<WorkspaceMachineCatalogEntry>,
   ) => {
     const publishedShell = (environmentId: EnvironmentId) =>
-      machines.some(
-        (machine) =>
-          machine.environmentId === environmentId &&
-          machine.connectionState === "connected" &&
-          machine.canMutate,
-      );
+      hostedCatalogAllowsMutation(machines, environmentId);
     const kept = new Set<EnvironmentId>();
     for (const record of sessions.list()) {
       kept.add(record.environmentId);

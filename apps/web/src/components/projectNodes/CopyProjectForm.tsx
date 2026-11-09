@@ -109,8 +109,9 @@ import {
   copyDestinationUsable,
   copyFormBlockedReason,
   copyProgressContextOf,
+  copyResumeMismatch,
   copyResumeNotice,
-  requestedCopyTarget,
+  copyResumePin,
   resumableCopyRecord,
 } from "@ryco/client-runtime/projectCopy/form";
 import { copyParentFolderOf } from "@ryco/client-runtime/projectCopy/destinationMemory";
@@ -493,8 +494,9 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
     sourceRow?.ref.environmentId ?? null,
     sourceRow?.ref.projectId ?? null,
   );
-  // A copy whose upload stopped when Ryco closed, picked up again from here.
-  const [resumeRecord] = useState(() =>
+  // A copy whose upload stopped when Ryco closed, picked up again from here
+  // (until the user discards it to start over).
+  const [resumeRecord, setResumeRecord] = useState(() =>
     request.resumeCopyId ? readProjectCopyRecord(request.resumeCopyId) : null,
   );
 
@@ -503,13 +505,19 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
   const cards = useMemo(() => copyTargetCards({ nodes, members, nowMs }), [members, nodes, nowMs]);
   const [pickedTargetId, setPickedTargetId] = useState<EnvironmentId | null>(null);
   const pickedCard = cards.find((card) => card.node.environmentId === pickedTargetId);
-  const targetId = pickedCard?.selectable
-    ? pickedCard.node.environmentId
-    : initialCopyTarget(
-        cards,
-        requestedCopyTarget(request.targetEnvironmentId, resumeRecord),
-        remembered?.targetEnvironmentId ?? null,
-      );
+  // A stopped copy goes on only to its own node, waiting for it if it is not back yet.
+  const resumeLabel = resumeRecord ? nodeLabelOf(nodes)(resumeRecord.targetEnvironmentId) : "";
+  const pin = copyResumePin({ record: resumeRecord, cards, targetLabel: resumeLabel });
+  const targetId =
+    pin !== null
+      ? pin.targetEnvironmentId
+      : pickedCard?.selectable
+        ? pickedCard.node.environmentId
+        : initialCopyTarget(
+            cards,
+            request.targetEnvironmentId,
+            remembered?.targetEnvironmentId ?? null,
+          );
   const targetCard = cards.find((card) => card.node.environmentId === targetId) ?? null;
   const targetNode = targetCard?.node ?? null;
   const targetLabel = targetNode?.label ?? "the destination";
@@ -523,13 +531,19 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
   } | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   // The parent picked last time on this destination, until the user picks one now.
-  const parentFolder = copyParentFolderOf({ targetId, picked: manualParent, remembered });
+  // A stopped copy goes on into its own folder.
+  const parentFolder =
+    pin === null
+      ? copyParentFolderOf({ targetId, picked: manualParent, remembered })
+      : { path: null, remembered: false };
   const manualPath = parentFolder.path;
+  const exactPath = pin?.destinationPath ?? null;
   const destination = useCopyDestination({
     environmentId: targetId,
     supported: targetSupport === "yes",
     source,
     manualParent: manualPath,
+    exactPath,
   });
 
   // The target's config: its agents for the setup agent, and whether it unpacks plain folders.
@@ -628,7 +642,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
   // A node not connected yet is checked once held (A23); a known one reads right away.
   const checking =
     targetNode !== null && targetHold.status !== "failed" && targetSupport === "unknown";
-  const blockedReason = copyFormBlockedReason({
+  const formBlockedReason = copyFormBlockedReason({
     title,
     sourceLabel,
     targetLabel,
@@ -646,6 +660,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
       ? (followUpDefaults.unavailableReason ?? "Write what the agent should do.")
       : null,
   });
+  const blockedReason = pin?.waitingReason ?? formBlockedReason;
   const canStart =
     options !== null &&
     blockedReason === null &&
@@ -678,16 +693,21 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
       setStartError(built.reason);
       return;
     }
-    setStarting(true);
-    setStartError(null);
     const resume = resumableCopyRecord(resumeRecord, {
       sourceRef: sourceRow?.ref ?? null,
       targetEnvironmentId: targetId,
+      destinationPath: built.plan.destinationPath,
     });
+    // Never a new copy in place of the stopped one: that takes discarding it first.
+    const mismatch = copyResumeMismatch(pin, resume);
+    if (mismatch !== null) {
+      setStartError(mismatch);
+      return;
+    }
+    setStarting(true);
+    setStartError(null);
     try {
       const started = await services.startCopy(built.plan, sourceRow?.ref ?? null, resume);
-      // A stopped copy this one replaces cleans up what it sent.
-      if (resumeRecord !== null && resume === null) discardProjectCopy(resumeRecord.copyId);
       if (sourceRow) {
         rememberCopyDestination(sourceRow.ref, {
           targetEnvironmentId: targetId,
@@ -714,7 +734,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
     }
   };
 
-  const noTarget = cards.every((card) => !card.selectable);
+  const noTarget = pin === null && cards.every((card) => !card.selectable);
   // "Update Ryco on X", with the node's own update, wherever an outdated node shows (A23).
   const updateOffers = cards
     .filter((card) => card.state === "outdated")
@@ -784,7 +804,10 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
     );
   }
 
-  const destinationCards = copyDestinationCards(cards);
+  const destinationCards =
+    pin === null
+      ? copyDestinationCards(cards)
+      : cards.filter((card) => card.node.environmentId === pin.targetEnvironmentId);
   const alreadyOn = copyAlreadyOn(cards);
   const unpushedCount = options?.bringCommits.unpushedCommitCount ?? 0;
   const changeCount = inspection
@@ -826,7 +849,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
       : null;
   const note = copyFolderNote({
     suggestion: checking ? null : suggestion,
-    manual: manualPath !== null,
+    manual: manualPath !== null || exactPath !== null,
     remembered: parentFolder.remembered,
     sourceLabel,
     targetLabel,
@@ -845,13 +868,26 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
             {props.notice}
           </p>
         ) : null}
-        {resumeRecord !== null && !props.notice ? (
-          <p
-            className="m-0 rounded-lg bg-muted px-2.5 py-2 text-[12px] text-muted-foreground"
+        {pin !== null && !props.notice ? (
+          <div
+            className="flex items-start gap-2 rounded-lg bg-muted px-2.5 py-2 text-[12px] text-muted-foreground"
             data-testid="copy-resume-notice"
           >
-            {copyResumeNotice(nodeLabelOf(nodes)(resumeRecord.targetEnvironmentId))}
-          </p>
+            <p className="m-0 min-w-0 flex-1">{copyResumeNotice(resumeLabel)}</p>
+            <Button
+              size="xs"
+              variant="ghost"
+              disabled={starting}
+              data-testid="copy-resume-discard"
+              onClick={() => {
+                discardProjectCopy(pin.record.copyId);
+                setResumeRecord(null);
+                setStartError(null);
+              }}
+            >
+              Discard and start over
+            </Button>
+          </div>
         ) : null}
         <CopyField label="From" labelId={ids.from}>
           <SourceList
@@ -935,7 +971,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
             <Button
               size="xs"
               variant="outline"
-              disabled={targetSupport !== "yes" || destination.hints === null}
+              disabled={targetSupport !== "yes" || destination.hints === null || exactPath !== null}
               aria-expanded={pickerOpen}
               onClick={() => setPickerOpen((open) => !open)}
             >

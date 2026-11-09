@@ -14,9 +14,10 @@ import type { EnvironmentId, ScopedProjectRef } from "@ryco/contracts";
 
 import type { NodeProjectCopySupport } from "../state/nodes/types.ts";
 import type { Project } from "../state/threads/types.ts";
-import type { CopyProgressContext } from "./dialog.ts";
+import type { CopyProgressContext, CopyTargetCard } from "./dialog.ts";
 import type { ProjectCopyJobRecord } from "./jobRecord.ts";
 import {
+  joinNodePath,
   planProjectCopyOptions,
   type CopyDestinationSuggestion,
   type ProjectCopyChoices,
@@ -109,30 +110,89 @@ export function copyDestinationUsable(suggestion: CopyDestinationSuggestion | nu
 
 /**
  * The stopped copy a start goes on with: only the same checkout to the same
- * node. Any other choice starts a new copy, and the caller discards the stopped
- * one (it cleans up what already reached its node).
+ * node, into the same folder. A record from before copies kept their folder
+ * matches on its checkout and node alone. Anything else is not this copy: a
+ * form pinned to it ({@link copyResumePin}) refuses to start rather than
+ * discarding what already reached its node.
  */
 export function resumableCopyRecord(
   record: ProjectCopyJobRecord | null,
   start: {
     readonly sourceRef: ScopedProjectRef | null;
     readonly targetEnvironmentId: EnvironmentId | null;
+    readonly destinationPath: string | null;
   },
 ): ProjectCopyJobRecord | null {
   if (record === null || start.sourceRef === null) return null;
   return record.targetEnvironmentId === start.targetEnvironmentId &&
     record.sourceEnvironmentId === start.sourceRef.environmentId &&
-    record.sourceProjectId === start.sourceRef.projectId
+    record.sourceProjectId === start.sourceRef.projectId &&
+    (record.destinationPath === undefined || record.destinationPath === start.destinationPath)
     ? record
     : null;
 }
 
-/** The node a copy form starts on: the one asked for, else the stopped copy's own. */
-export function requestedCopyTarget(
-  requested: EnvironmentId | null,
+/** A copy form opened on a stopped copy: it goes on only where it was going. */
+export interface CopyResumePin {
+  readonly record: ProjectCopyJobRecord;
+  /** The only node the form offers. */
+  readonly targetEnvironmentId: EnvironmentId;
+  /** The folder it goes on into; null for a record from before copies kept it. */
+  readonly destinationPath: string | null;
+  /** Why it can't go on yet (its node is offline or not reachable here); null when it can. */
+  readonly waitingReason: string | null;
+}
+
+/**
+ * Pins a copy form to its stopped copy: its node, whether or not that node can
+ * take it right now (the form waits for it rather than offering another), and
+ * its folder. Starting over somewhere else takes discarding the stopped copy
+ * first, which the form offers explicitly.
+ */
+export function copyResumePin(input: {
+  readonly record: ProjectCopyJobRecord | null;
+  readonly cards: ReadonlyArray<CopyTargetCard>;
+  readonly targetLabel: string;
+}): CopyResumePin | null {
+  const { record } = input;
+  if (record === null) return null;
+  const card = input.cards.find((entry) => entry.node.environmentId === record.targetEnvironmentId);
+  const waitingReason = card?.selectable
+    ? null
+    : `Waiting for ${input.targetLabel}${card?.reason ? ` (${card.reason})` : ""}. The copy goes on there once it is back, or discard it to start over.`;
+  return {
+    record,
+    targetEnvironmentId: record.targetEnvironmentId,
+    destinationPath: record.destinationPath ?? null,
+    waitingReason,
+  };
+}
+
+/** Why a start that should resume `pin` does not match it; null when it does (or nothing is pinned). */
+export function copyResumeMismatch(
+  pin: CopyResumePin | null,
   resume: ProjectCopyJobRecord | null,
-): EnvironmentId | null {
-  return requested ?? resume?.targetEnvironmentId ?? null;
+): string | null {
+  return pin !== null && resume === null
+    ? "This is no longer the copy that stopped. Discard it to start a new one."
+    : null;
+}
+
+/**
+ * The exact folder a form previews on the destination: a stopped copy's own,
+ * else the picked parent plus the source's folder name; null lets the node
+ * suggest one.
+ */
+export function copyExplicitDestinationPath(input: {
+  readonly exactPath: string | null;
+  readonly manualParent: string | null;
+  readonly leaf: string | null;
+  readonly pathSeparator: "/" | "\\";
+}): string | null {
+  if (input.exactPath !== null) return input.exactPath;
+  return input.manualParent !== null && input.leaf !== null
+    ? joinNodePath(input.manualParent, [input.leaf], input.pathSeparator)
+    : null;
 }
 
 /** The note a form shows over a stopped copy it was opened to resume. */

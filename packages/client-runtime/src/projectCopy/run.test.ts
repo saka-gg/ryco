@@ -799,8 +799,10 @@ describe("startProjectCopy", () => {
     const seen = track();
     const run = startProjectCopy({ io, plan: plan(), copyId: "copy-claimed", ...seen });
     expect(run.copyId).toBe("copy-claimed");
-    // The first record the app stores already carries it.
+    // The first record the app stores already carries it, and the folder it goes into
+    // (a stopped copy resumes only there).
     expect(seen.records[0]?.copyId).toBe("copy-claimed");
+    expect(seen.records[0]?.destinationPath).toBe("/home/ada/Code/app");
     await run.done;
   });
 

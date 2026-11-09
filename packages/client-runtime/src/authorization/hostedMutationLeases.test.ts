@@ -4,9 +4,12 @@ import { describe, expect, it } from "vite-plus/test";
 import type { HostedEnvironmentSessionRecord } from "./hostedEnvironmentSessions.ts";
 import {
   createHostedMutationLeases,
+  hostedCatalogAllowsMutation,
   hostedSessionMutationReadiness,
+  isHostedConnectableNode,
   type HostedMutationReadiness,
 } from "./hostedMutationLeases.ts";
+import type { HostedHubNode } from "./types.ts";
 
 const MINI = EnvironmentId.make("environment-mini");
 
@@ -44,27 +47,66 @@ describe("hostedSessionMutationReadiness", () => {
     effectiveRole: "owner",
     transportStatus: "online",
     sessionEstablished: true,
-    suspended: false,
-    relayGap: false,
-    snapshotAcceptedAt: 1_000,
     sessionStatus: "ready",
-    sessionRecoveredAfterUnknown: false,
   } as HostedEnvironmentSessionRecord;
-  const hub = { directoryStatus: "ready", browserStatus: "current" } as const;
+  const node = {
+    environmentId: MINI,
+    revokedAt: null,
+    presence: { online: true },
+    capabilities: null,
+  } as unknown as HostedHubNode;
+  const hub = { directoryStatus: "ready", browserStatus: "current", nodes: [node] } as const;
+  const ready = { directoryReady: true, relayReady: true, shellReady: true };
 
-  it("is ready only for an adoptable session whose shell the client holds", () => {
-    expect(hostedSessionMutationReadiness(record, hub, true)).toEqual(READY);
-    expect(hostedSessionMutationReadiness(record, hub, false).shellReady).toBe(false);
+  it("is ready for a connected session on a listed, connectable node whose shell is held", () => {
+    expect(hostedSessionMutationReadiness({ hub, record, client: "web", shellHeld: true })).toEqual(
+      ready,
+    );
+  });
+
+  it("is not ready once anything the web coordinator checks is missing", () => {
+    const shell = (input: Partial<Parameters<typeof hostedSessionMutationReadiness>[0]>) =>
+      hostedSessionMutationReadiness({ hub, record, client: "web", shellHeld: true, ...input })
+        .shellReady;
+    expect(shell({ shellHeld: false })).toBe(false);
+    expect(shell({ hub: { ...hub, nodes: [] } })).toBe(false);
+    expect(shell({ hub: { ...hub, nodes: [{ ...node, revokedAt: 1_000 }] } })).toBe(false);
     expect(
-      hostedSessionMutationReadiness({ ...record, relayGap: true }, hub, true).relayReady,
+      shell({ hub: { ...hub, nodes: [{ ...node, presence: { online: false } }] } as never }),
+    ).toBe(false);
+    expect(shell({ record: { ...record, sessionStatus: "replaying" } })).toBe(false);
+    expect(
+      hostedSessionMutationReadiness({
+        hub,
+        record: { ...record, sessionEstablished: false },
+        client: "web",
+        shellHeld: true,
+      }).relayReady,
     ).toBe(false);
     expect(
-      hostedSessionMutationReadiness({ ...record, snapshotAcceptedAt: null }, hub, true).shellReady,
+      hostedSessionMutationReadiness({
+        hub: { ...hub, browserStatus: "error" } as never,
+        record,
+        client: "web",
+        shellHeld: true,
+      }).directoryReady,
     ).toBe(false);
-    expect(
-      hostedSessionMutationReadiness(record, { ...hub, browserStatus: "error" } as never, true)
-        .directoryReady,
-    ).toBe(false);
+  });
+
+  it("lets only a native client hold a node that needs one", () => {
+    const nativeOnly = { ...node, capabilities: { nativeClientRequired: true } } as HostedHubNode;
+    expect(isHostedConnectableNode(nativeOnly, "web")).toBe(false);
+    expect(isHostedConnectableNode(nativeOnly, "native")).toBe(true);
+  });
+
+  it("grants only while the published catalog shows the machine connected and open to changes", () => {
+    const machine = { environmentId: MINI, connectionState: "connected", canMutate: true };
+    expect(hostedCatalogAllowsMutation([machine], MINI)).toBe(true);
+    expect(hostedCatalogAllowsMutation([{ ...machine, canMutate: false }], MINI)).toBe(false);
+    expect(hostedCatalogAllowsMutation([{ ...machine, connectionState: "connecting" }], MINI)).toBe(
+      false,
+    );
+    expect(hostedCatalogAllowsMutation([], MINI)).toBe(false);
   });
 });
 

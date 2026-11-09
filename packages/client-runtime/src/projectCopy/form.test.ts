@@ -6,12 +6,15 @@ import type { ProjectImportId } from "@ryco/contracts/project-copy";
 import {
   copyDestinationUsable,
   copyFormBlockedReason,
+  copyExplicitDestinationPath,
+  copyResumeMismatch,
   copyResumeNotice,
+  copyResumePin,
   legacySourceHints,
-  requestedCopyTarget,
   resumableCopyRecord,
   type CopyFormReadinessInput,
 } from "./form.ts";
+import type { CopyTargetCard } from "./dialog.ts";
 import { createProjectCopyJobRecord } from "./jobRecord.ts";
 import type { CopyDestinationSuggestion } from "./plan.ts";
 
@@ -101,34 +104,95 @@ describe("resuming a stopped copy", () => {
     targetEnvironmentId: LAPTOP,
     projectId: "project-new" as ProjectId,
     importId: "import-1" as ProjectImportId,
+    destinationPath: "/code/notes",
   });
   const source = { environmentId: MINI, projectId: NOTES };
+  const same = { sourceRef: source, targetEnvironmentId: LAPTOP, destinationPath: "/code/notes" };
+  const card = (environmentId: EnvironmentId, selectable: boolean, reason: string | null = null) =>
+    ({ node: { environmentId }, selectable, reason }) as unknown as CopyTargetCard;
 
-  it("goes on only with the same checkout to the same node", () => {
-    expect(resumableCopyRecord(stopped, { sourceRef: source, targetEnvironmentId: LAPTOP })).toBe(
-      stopped,
-    );
+  it("goes on only with the same checkout to the same node and folder", () => {
+    expect(resumableCopyRecord(stopped, same)).toBe(stopped);
+    expect(resumableCopyRecord(stopped, { ...same, targetEnvironmentId: SERVER })).toBeNull();
     expect(
-      resumableCopyRecord(stopped, { sourceRef: source, targetEnvironmentId: SERVER }),
+      resumableCopyRecord(stopped, { ...same, destinationPath: "/elsewhere/notes" }),
     ).toBeNull();
     expect(
       resumableCopyRecord(stopped, {
+        ...same,
         sourceRef: { environmentId: SERVER, projectId: NOTES },
-        targetEnvironmentId: LAPTOP,
       }),
     ).toBeNull();
-    expect(
-      resumableCopyRecord(stopped, { sourceRef: null, targetEnvironmentId: LAPTOP }),
-    ).toBeNull();
-    expect(
-      resumableCopyRecord(null, { sourceRef: source, targetEnvironmentId: LAPTOP }),
-    ).toBeNull();
+    expect(resumableCopyRecord(stopped, { ...same, sourceRef: null })).toBeNull();
+    expect(resumableCopyRecord(null, same)).toBeNull();
   });
 
-  it("starts the form on the stopped copy's node unless another was asked for", () => {
-    expect(requestedCopyTarget(null, stopped)).toBe(LAPTOP);
-    expect(requestedCopyTarget(SERVER, stopped)).toBe(SERVER);
-    expect(requestedCopyTarget(null, null)).toBeNull();
+  it("matches a record from before copies kept their folder on its checkout and node", () => {
+    const { destinationPath: _kept, ...legacy } = stopped;
+    expect(resumableCopyRecord(legacy, { ...same, destinationPath: "/any/notes" })).toBe(legacy);
+  });
+
+  it("pins the form to the stopped copy's node and folder, waiting while it is away", () => {
+    const pinned = copyResumePin({
+      record: stopped,
+      cards: [card(SERVER, true), card(LAPTOP, true)],
+      targetLabel: "Laptop",
+    });
+    expect(pinned).toMatchObject({
+      targetEnvironmentId: LAPTOP,
+      destinationPath: "/code/notes",
+      waitingReason: null,
+    });
+    const away = copyResumePin({
+      record: stopped,
+      cards: [card(SERVER, true), card(LAPTOP, false, "offline since 09:05")],
+      targetLabel: "Laptop",
+    });
+    // Another node being ready never takes its place.
+    expect(away?.targetEnvironmentId).toBe(LAPTOP);
+    expect(away?.waitingReason).toContain("Waiting for Laptop (offline since 09:05)");
+    expect(
+      copyResumePin({ record: stopped, cards: [], targetLabel: "Laptop" })?.waitingReason,
+    ).toContain("Waiting for Laptop");
+    expect(copyResumePin({ record: null, cards: [], targetLabel: "" })).toBeNull();
+  });
+
+  it("refuses a start that is not the pinned copy instead of replacing it", () => {
+    const pinned = copyResumePin({
+      record: stopped,
+      cards: [card(LAPTOP, true)],
+      targetLabel: "Laptop",
+    });
+    expect(copyResumeMismatch(pinned, stopped)).toBeNull();
+    expect(copyResumeMismatch(pinned, null)).toContain("Discard it to start a new one");
+    expect(copyResumeMismatch(null, null)).toBeNull();
+  });
+
+  it("previews a stopped copy's own folder as it is", () => {
+    expect(
+      copyExplicitDestinationPath({
+        exactPath: "/code/notes-2",
+        manualParent: "/elsewhere",
+        leaf: "notes",
+        pathSeparator: "/",
+      }),
+    ).toBe("/code/notes-2");
+    expect(
+      copyExplicitDestinationPath({
+        exactPath: null,
+        manualParent: "/elsewhere",
+        leaf: "notes",
+        pathSeparator: "/",
+      }),
+    ).toBe("/elsewhere/notes");
+    expect(
+      copyExplicitDestinationPath({
+        exactPath: null,
+        manualParent: null,
+        leaf: "notes",
+        pathSeparator: "/",
+      }),
+    ).toBeNull();
   });
 
   it("says what is not sent again", () => {
