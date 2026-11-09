@@ -10,7 +10,11 @@ import { useEffect, useRef } from "react";
 
 import { useEvent } from "../../../hooks/useEvent";
 import { toastManager } from "../../ui/toast";
-import { approvalOutcome, type ApprovalKind, type DialogQueueInput } from "./dialogModel.logic";
+import {
+  approvalOutcome,
+  type ApprovalKind,
+  type DialogQueueInput,
+} from "@ryco/client-runtime/state/automations/dialogModel";
 
 interface WatchedApproval {
   readonly checkoutKey: string;

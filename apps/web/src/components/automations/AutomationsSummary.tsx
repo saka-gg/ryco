@@ -9,9 +9,9 @@ import { CalendarClockIcon } from "lucide-react";
 
 import { Button } from "../ui/button";
 import { openAutomationsDialog } from "./automationsDialogStore";
-import { checkoutAutomationCounts } from "./data/automationProjectCounts.logic";
+import { checkoutAutomationCounts } from "@ryco/client-runtime/state/automations/projectCounts";
+import { plural } from "@ryco/client-runtime/state/automations/words";
 import { useMinuteNow } from "./dialog/clock";
-import { plural } from "./dialog/dialogWords";
 import { useAutomationCentre } from "./useAutomationCentre";
 
 /** "No schedules yet" · "3 schedules · 1 waiting for approval" · "Loading schedules…" */

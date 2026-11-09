@@ -397,14 +397,15 @@ describe("standard build static import graph", () => {
     // the build.
     expect(
       forbiddenChains("components/RootAppShell.tsx", [
-        /^apps\/web\/src\/components\/automations\/(?:dialog\/|missedRunsNotice\.logic\.ts$)/u,
+        /^apps\/web\/src\/components\/automations\/dialog\//u,
+        /^packages\/client-runtime\/src\/state\/automations\//u,
       ]),
     ).toEqual([]);
     expect(
       parseImports(
         path.join(srcRoot, "components/automations/MissedAutomationRunsNotice.tsx"),
       ).dynamicImports.map(display),
-    ).toContain("apps/web/src/components/automations/missedRunsNotice.logic.ts");
+    ).toContain("packages/client-runtime/src/state/automations/missedRunsNotice.ts");
   });
 
   it("keeps the diff renderer out of the pull requests page until the Files tab", () => {

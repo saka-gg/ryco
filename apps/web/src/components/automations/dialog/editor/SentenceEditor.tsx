@@ -30,9 +30,9 @@ import { ChatToken } from "./ChatToken";
 import {
   calendarChoiceOf,
   type CalendarChoice,
-  type EditorTokenKind,
   type SentenceWords,
-} from "./editorModel.logic";
+} from "@ryco/client-runtime/state/automations/editor";
+import type { EditorTokenKind } from "./editorModel.logic";
 import { RefToken } from "./RefToken";
 import { TokenMenu, TokenPopover } from "./tokenPopups";
 

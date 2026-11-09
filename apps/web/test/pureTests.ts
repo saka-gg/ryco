@@ -41,7 +41,6 @@ export const WEB_PURE_TEST_FILES = [
   "src/components/agent-control/agentControlSyncGate.test.ts",
   "src/components/artifacts/earlierThreadArtifacts.test.ts",
   "src/components/automations/data/automationsDialogProject.logic.test.ts",
-  "src/components/automations/missedRunsNotice.logic.test.ts",
   "src/components/chat/ChangedFilesTree.test.tsx",
   "src/components/chat/ChatHeader.test.ts",
   "src/components/chat/ChatOverviewPanel.test.ts",

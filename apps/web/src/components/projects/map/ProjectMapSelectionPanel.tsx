@@ -29,7 +29,7 @@ import { useState, type ReactNode } from "react";
 
 import { useThreadActions } from "../../../hooks/useThreadActions";
 import { hostedCapabilityCopy } from "../../../hostedHub/switchTarget";
-import { formatCount } from "../../../lib/formatCount";
+import { formatCount } from "@ryco/shared/String";
 import { cn, isMacPlatform } from "../../../lib/utils";
 import {
   runWorkspaceLifecycleBatch,

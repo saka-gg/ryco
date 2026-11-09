@@ -9,7 +9,7 @@ import type { MouseEvent, ReactElement, ReactNode, Ref } from "react";
 import { cn } from "../../../lib/utils";
 import { Button } from "../../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../../ui/tooltip";
-import type { DialogRow } from "./dialogModel.logic";
+import type { DialogRow } from "@ryco/client-runtime/state/automations/dialogModel";
 
 /**
  * Everything the list and detail can ask the dialog to do. Each member keeps

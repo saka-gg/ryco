@@ -8,17 +8,11 @@ import {
   getProviderOptionCurrentValue,
   getProviderOptionDescriptors,
   isClaudeUltrathinkPrompt,
+  REASONING_DESCRIPTOR_IDS,
 } from "@ryco/shared/model";
 
 export type SelectDescriptor = Extract<ProviderOptionDescriptor, { type: "select" }>;
 export type BooleanDescriptor = Extract<ProviderOptionDescriptor, { type: "boolean" }>;
-
-/** Reasoning effort descriptor ids: Claude → "effort", Codex → "reasoningEffort", Cursor → "reasoning". */
-export const REASONING_DESCRIPTOR_IDS: ReadonlySet<string> = new Set([
-  "effort",
-  "reasoningEffort",
-  "reasoning",
-]);
 
 const ULTRATHINK_PREFIX_PATTERN = /^Ultrathink:\s*/i;
 

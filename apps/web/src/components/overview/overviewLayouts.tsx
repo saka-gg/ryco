@@ -1,6 +1,6 @@
 import { LayersIcon } from "lucide-react";
 
-import { formatCount } from "~/lib/formatCount";
+import { formatCount } from "@ryco/shared/String";
 import { cn } from "~/lib/utils";
 
 import { changeRequestStateKind, StateBadge } from "../projectExplorer/StateBadge";

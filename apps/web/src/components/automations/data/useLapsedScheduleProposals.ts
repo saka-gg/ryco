@@ -14,7 +14,7 @@ import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 
 import { projectCheckoutKey } from "../../../projectCheckouts.logic";
-import type { AutomationCheckoutRef } from "./automationProjectCounts.logic";
+import type { AutomationCheckoutRef } from "@ryco/client-runtime/state/automations/projectCounts";
 import {
   retainScheduleProposalHistory,
   useScheduleProposalHistoryStore,

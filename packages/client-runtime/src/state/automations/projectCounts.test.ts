@@ -12,7 +12,7 @@ import {
   createAutomationCountsLoader,
   projectAutomationCounts,
   type AutomationCheckoutRef,
-} from "./automationProjectCounts.logic";
+} from "./projectCounts.ts";
 
 const LOCAL = EnvironmentId.make("env-local");
 const STUDIO = EnvironmentId.make("env-studio");
@@ -145,7 +145,12 @@ describe("projectAutomationCounts", () => {
     const entries = new Map([
       [
         `${LOCAL}\0p-local`,
-        { status: "ready" as const, counts: { schedules: 2, waiting: 1 }, fetchedAt: 0 },
+        {
+          status: "ready" as const,
+          snapshot: snapshot({}),
+          counts: { schedules: 2, waiting: 1 },
+          fetchedAt: 0,
+        },
       ],
       [`${STUDIO}\0p-studio`, { status: "unavailable" as const, fetchedAt: 0 }],
     ]);

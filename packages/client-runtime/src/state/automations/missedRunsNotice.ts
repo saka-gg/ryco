@@ -3,10 +3,10 @@
  * on after its server was not running. Pure; times use the dialog's
  * vocabulary (`when`), counts its `plural`.
  */
-import type { MissedAutomationRun } from "@ryco/client-runtime/state/agentControl";
+import type { MissedAutomationRun } from "../agentControl/index.ts";
 import { when } from "@ryco/shared/automationSchedule";
 
-import { plural } from "./dialog/dialogWords";
+import { plural } from "./words.ts";
 
 export interface MissedRunsNoticeView {
   readonly title: string;

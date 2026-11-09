@@ -71,7 +71,7 @@ import {
   resolveDialogSelection,
   type ApprovalKind,
   type DialogRow,
-} from "./dialogModel.logic";
+} from "@ryco/client-runtime/state/automations/dialogModel";
 import type {
   ScheduleEditorConfirm,
   ScheduleEditorDraftState,

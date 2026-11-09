@@ -20,7 +20,7 @@ import {
   scheduleProposalFailure,
   type ScheduleDueRun,
   type ScheduleRow,
-} from "@ryco/client-runtime/state/agentControl";
+} from "../agentControl/index.ts";
 import { AUTOMATION_LIMITS } from "@ryco/shared/automationSchedule";
 
 /** What the model needs of a checkout (`ProjectAutomationsCheckout` fits). */

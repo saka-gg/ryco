@@ -32,7 +32,10 @@ import { openAutomationsDialog } from "./automationsDialogStore";
 import { useAutomationProposalSync } from "./data/useAutomationProposalSync";
 import { useAgentControlSyncEnvironmentIds } from "../agent-control/agentControlSyncGate";
 import { useConnectedEnvironmentIds } from "./data/useConnectedEnvironmentIds";
-import type { MissedRunsNoticeView, missedRunsNoticeView } from "./missedRunsNotice.logic";
+import type {
+  MissedRunsNoticeView,
+  missedRunsNoticeView,
+} from "@ryco/client-runtime/state/automations/missedRunsNotice";
 
 const NOTICED_STORAGE_KEY = "ryco:missed-automation-runs:v1";
 /** Runs remembered as noticed; the oldest are let go well after their notice window. */
@@ -80,7 +83,7 @@ let noticeWordsLoad: Promise<NoticeWords | null> | null = null;
  * need. A failed load is forgotten, so the next call tries again.
  */
 function loadNoticeWords(): Promise<NoticeWords | null> {
-  noticeWordsLoad ??= import("./missedRunsNotice.logic").then(
+  noticeWordsLoad ??= import("@ryco/client-runtime/state/automations/missedRunsNotice").then(
     (module) => {
       loadedNoticeWords = module.missedRunsNoticeView;
       return loadedNoticeWords;

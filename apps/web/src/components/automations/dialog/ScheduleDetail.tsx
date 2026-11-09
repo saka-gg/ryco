@@ -32,9 +32,9 @@ import { ActiveRunBlock, DueRunBlock, LapsedBlock, ProposalBlock, hasBlocks } fr
 import { RunHistory } from "./RunHistory";
 import { RelativeTime } from "./Ticking";
 import { DialogButton, Tip, type ScheduleDialogActions } from "./dialogControls";
-import type { DialogRow } from "./dialogModel.logic";
+import type { DialogRow } from "@ryco/client-runtime/state/automations/dialogModel";
+import { detailVerb, scheduleWhenLine } from "@ryco/client-runtime/state/automations/words";
 import { heartbeatChatWords } from "./heartbeatChats.logic";
-import { detailVerb, scheduleWhenLine } from "./dialogWords";
 
 /** The prompt clamps to three lines past this many characters. */
 const PROMPT_CLAMP_CHARS = 220;

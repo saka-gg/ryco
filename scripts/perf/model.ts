@@ -322,8 +322,12 @@ const AUTOMATION_SCHEDULE_SOURCES: readonly ForbiddenBundleSource[] = [
     reason: "Automations dialog schedule rows",
   },
   {
-    pattern: /^apps\/web\/src\/components\/automations\/(?:dialog\/|missedRunsNotice\.logic\.ts$)/u,
-    reason: "Automations dialog or the missed-runs notice's words",
+    pattern: /^apps\/web\/src\/components\/automations\/dialog\//u,
+    reason: "Automations dialog",
+  },
+  {
+    pattern: /^packages\/client-runtime\/src\/state\/automations\//u,
+    reason: "Automations dialog model or the missed-runs notice's words",
   },
 ];
 

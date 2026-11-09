@@ -57,9 +57,9 @@ import {
 } from "../../../workspaceLifecycle";
 import { DeviceIcon } from "../../DeviceIcon";
 import { openAutomationsDialog } from "../../automations/automationsDialogStore";
-import { checkoutAutomationCounts } from "../../automations/data/automationProjectCounts.logic";
+import { checkoutAutomationCounts } from "@ryco/client-runtime/state/automations/projectCounts";
+import { PROPOSAL_HEAD, plural } from "@ryco/client-runtime/state/automations/words";
 import { useMinuteNow } from "../../automations/dialog/clock";
-import { PROPOSAL_HEAD, plural } from "../../automations/dialog/dialogWords";
 import { InboxStatusGlyph } from "../../inboxSidebar/InboxStatusGlyph";
 import { RelativeTime } from "../../pullRequests/primitives";
 import {

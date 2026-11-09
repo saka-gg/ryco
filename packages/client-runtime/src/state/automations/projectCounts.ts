@@ -1,7 +1,5 @@
 import type { AutomationCentreSnapshot, EnvironmentId, ProjectId } from "@ryco/contracts";
-import { deriveScheduleRows, dueScheduleRuns } from "@ryco/client-runtime/state/agentControl";
-
-import { projectCheckoutKey } from "../../../projectCheckouts.logic";
+import { deriveScheduleRows, dueScheduleRuns } from "../agentControl/index.ts";
 
 /** What the project switcher says about a project. */
 export interface AutomationProjectCounts {
@@ -22,6 +20,11 @@ export function checkoutAutomationCounts(input: {
   return { schedules: rows.length, waiting: dueScheduleRuns(rows).length };
 }
 
+/** The key of one project's checkout on one device (the same as the web's `projectCheckoutKey`). */
+export function automationCheckoutKey(environmentId: string, projectId: string): string {
+  return `${environmentId}\0${projectId}`;
+}
+
 export interface AutomationCheckoutRef {
   readonly environmentId: EnvironmentId;
   readonly projectId: ProjectId;
@@ -30,6 +33,8 @@ export interface AutomationCheckoutRef {
 export type AutomationCountsEntry =
   | {
       readonly status: "ready";
+      /** The snapshot as read (the phone's Scheduled list derives its rows from it). */
+      readonly snapshot: AutomationCentreSnapshot;
       readonly counts: AutomationProjectCounts;
       readonly fetchedAt: number;
     }
@@ -48,7 +53,7 @@ export function projectAutomationCounts(
   let schedules = 0;
   let waiting = 0;
   for (const checkout of checkouts) {
-    const entry = entries.get(projectCheckoutKey(checkout.environmentId, checkout.projectId));
+    const entry = entries.get(automationCheckoutKey(checkout.environmentId, checkout.projectId));
     if (entry?.status !== "ready") continue;
     known = true;
     schedules += entry.counts.schedules;
@@ -59,7 +64,7 @@ export function projectAutomationCounts(
 
 /** Everything the loader knows, replaced as a whole on every change. */
 export interface AutomationCountsState {
-  /** By `projectCheckoutKey`. */
+  /** By `automationCheckoutKey`. */
   readonly entries: ReadonlyMap<string, AutomationCountsEntry>;
   /** A read is in flight. */
   readonly loading: boolean;
@@ -119,7 +124,7 @@ export function createAutomationCountsLoader(input: {
       const epoch = generation;
       let entries = state.entries;
       for (const checkout of checkouts) {
-        const key = projectCheckoutKey(checkout.environmentId, checkout.projectId);
+        const key = automationCheckoutKey(checkout.environmentId, checkout.projectId);
         const entry = entries.get(key);
         if (inFlight.has(key) || (entry && now() - entry.fetchedAt < maxAgeMs)) continue;
         let read: Promise<AutomationCentreSnapshot> | null;
@@ -139,6 +144,7 @@ export function createAutomationCountsLoader(input: {
           (snapshot) =>
             settle(key, epoch, {
               status: "ready",
+              snapshot,
               counts: checkoutAutomationCounts({
                 projectId: checkout.projectId,
                 snapshot,
