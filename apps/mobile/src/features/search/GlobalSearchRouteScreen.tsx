@@ -16,6 +16,7 @@ import {
   searchEmptyState,
   searchQueryOf,
   searchScopeChips,
+  searchSourcesLive,
   scopesForFilter,
   type SearchResult,
   type SearchScopeFilter,
@@ -28,19 +29,20 @@ const SEARCH_FIELD_HEIGHT = 40;
  * One search across chats, message text, pull requests and tasks: a field,
  * scope chips, and results grouped by scope with the query's words
  * highlighted. Each scope comes from a search source (`searchSources.ts`).
+ *
+ * Opening it must feel instant, so its first frame is only the field and the
+ * chips: the sources (every machine's threads, tasks, the PRs repository)
+ * mount with the first keystroke (`searchSourcesLive`) and stay mounted from
+ * then on, each answering progressively.
  */
 export function GlobalSearchRouteScreen() {
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
   const [text, setText] = useState("");
   const [filter, setFilter] = useState<SearchScopeFilter>("everything");
+  const [live, setLive] = useState(false);
   const query = searchQueryOf(text);
-  const groups = useSearchSources({
-    query,
-    scopes: scopesForFilter(filter, AVAILABLE_SEARCH_SCOPES),
-  });
-  const sections = buildSearchSections(groups, filter);
-  const empty = searchEmptyState({ query, sections });
+  if (searchSourcesLive(live, query) !== live) setLive(true);
   const placeholderColor = useThemeColor("--color-foreground-muted");
   const textColor = useThemeColor("--color-foreground");
   // A cold ryco://search link has nothing beneath: Cancel then opens the tabs.
@@ -95,64 +97,94 @@ export function GlobalSearchRouteScreen() {
         keyboardShouldPersistTaps="handled"
         contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
       >
-        {sections.map((section) => (
-          <View key={section.scope} className="pt-3">
-            <View className="flex-row items-center gap-2 px-5 pb-2">
-              <Text className="text-xs font-ryco-medium uppercase tracking-wide text-foreground-tertiary">
-                {section.title}
-              </Text>
-              {section.loading ? <ActivityIndicator size="small" /> : null}
-            </View>
-            {section.results.length > 0 ? (
-              <View className="mx-4 overflow-hidden rounded-2xl bg-card">
-                {section.results.map((result, index) => (
-                  <SearchResultRow
-                    key={result.key}
-                    result={result}
-                    query={query ?? ""}
-                    first={index === 0}
-                  />
-                ))}
-              </View>
-            ) : null}
-            {section.hiddenCount > 0 ? (
-              <Pressable
-                accessibilityRole="button"
-                className="mx-4 mt-1 min-h-10 justify-center px-1 active:opacity-60"
-                onPress={() => setFilter(section.scope)}
-              >
-                <Text className="text-sm font-ryco-medium text-accent-strong">
-                  Show all {section.results.length + section.hiddenCount}
-                </Text>
-              </Pressable>
-            ) : null}
-          </View>
-        ))}
-        {empty === "prompt" ? (
-          <View className="px-4 pt-16">
-            <EmptyState
-              variant="plain"
-              title="Search Ryco"
-              detail="Find chats, words inside their messages, pull requests and tasks."
-            />
-          </View>
-        ) : empty === "searching" ? (
-          <View className="items-center pt-16">
-            <ActivityIndicator accessibilityLabel="Searching" />
-          </View>
-        ) : empty === "no-results" ? (
-          <View className="px-4 pt-16">
-            <EmptyState
-              variant="plain"
-              title="No results"
-              detail={`Nothing matches “${query}”${
-                filter === "everything" ? "" : ` in ${SEARCH_SCOPE_CHIP_LABELS[filter]}`
-              }.`}
-            />
-          </View>
-        ) : null}
+        {live ? (
+          <GlobalSearchResults query={query} filter={filter} onFilter={setFilter} />
+        ) : (
+          <SearchPrompt />
+        )}
       </ScrollView>
     </View>
+  );
+}
+
+function SearchPrompt() {
+  return (
+    <View className="px-4 pt-16">
+      <EmptyState
+        variant="plain"
+        title="Search Ryco"
+        detail="Find chats, words inside their messages, pull requests and tasks."
+      />
+    </View>
+  );
+}
+
+/** The sources' groups for the query, mounted once Search has something to search. */
+export function GlobalSearchResults(props: {
+  readonly query: string | null;
+  readonly filter: SearchScopeFilter;
+  readonly onFilter: (filter: SearchScopeFilter) => void;
+}) {
+  const { query, filter } = props;
+  const groups = useSearchSources({
+    query,
+    scopes: scopesForFilter(filter, AVAILABLE_SEARCH_SCOPES),
+  });
+  const sections = buildSearchSections(groups, filter);
+  const empty = searchEmptyState({ query, sections });
+  return (
+    <>
+      {sections.map((section) => (
+        <View key={section.scope} className="pt-3">
+          <View className="flex-row items-center gap-2 px-5 pb-2">
+            <Text className="text-xs font-ryco-medium uppercase tracking-wide text-foreground-tertiary">
+              {section.title}
+            </Text>
+            {section.loading ? <ActivityIndicator size="small" /> : null}
+          </View>
+          {section.results.length > 0 ? (
+            <View className="mx-4 overflow-hidden rounded-2xl bg-card">
+              {section.results.map((result, index) => (
+                <SearchResultRow
+                  key={result.key}
+                  result={result}
+                  query={query ?? ""}
+                  first={index === 0}
+                />
+              ))}
+            </View>
+          ) : null}
+          {section.hiddenCount > 0 ? (
+            <Pressable
+              accessibilityRole="button"
+              className="mx-4 mt-1 min-h-10 justify-center px-1 active:opacity-60"
+              onPress={() => props.onFilter(section.scope)}
+            >
+              <Text className="text-sm font-ryco-medium text-accent-strong">
+                Show all {section.results.length + section.hiddenCount}
+              </Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ))}
+      {empty === "prompt" ? (
+        <SearchPrompt />
+      ) : empty === "searching" ? (
+        <View className="items-center pt-16">
+          <ActivityIndicator accessibilityLabel="Searching" />
+        </View>
+      ) : empty === "no-results" ? (
+        <View className="px-4 pt-16">
+          <EmptyState
+            variant="plain"
+            title="No results"
+            detail={`Nothing matches “${query}”${
+              filter === "everything" ? "" : ` in ${SEARCH_SCOPE_CHIP_LABELS[filter]}`
+            }.`}
+          />
+        </View>
+      ) : null}
+    </>
   );
 }
 

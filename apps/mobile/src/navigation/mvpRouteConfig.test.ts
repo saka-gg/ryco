@@ -14,6 +14,7 @@ import {
   MVP_ALL_ROOT_ROUTES,
   MVP_ROOT_ROUTES,
   MVP_SETTINGS_ROUTES,
+  SEARCH_TRANSITION_MS,
   WORKSPACE_OVERLAY_ROUTE_NAMES,
   type MvpAnyRootRouteName,
 } from "./mvpRouteConfig";
@@ -421,6 +422,27 @@ describe("the root navigator matches the route table", () => {
       (match) => match[1]!,
     );
   }
+
+  it("opens and closes Search with a short fade, not the 500 ms native default", () => {
+    expect(SEARCH_TRANSITION_MS).toBeLessThanOrEqual(200);
+    const search = stack.slice(stack.indexOf("  Search: createNativeStackScreen({"));
+    expect(search.slice(0, search.indexOf("  }),"))).toContain(
+      "animationDuration: SEARCH_TRANSITION_MS",
+    );
+  });
+
+  it("keeps Search's first frame free of its sources: they mount with the first query", () => {
+    const screen = readFileSync(
+      join(SRC, "features", "search", "GlobalSearchRouteScreen.tsx"),
+      "utf8",
+    );
+    const shell = screen.slice(
+      screen.indexOf("export function GlobalSearchRouteScreen("),
+      screen.indexOf("export function GlobalSearchResults("),
+    );
+    expect(shell).toContain("searchSourcesLive(");
+    expect(shell).not.toContain("useSearchSources(");
+  });
 
   it("registers exactly the routes the table declares", () => {
     expect(registeredRootScreens().toSorted()).toEqual(Object.keys(MVP_ALL_ROOT_ROUTES).toSorted());
