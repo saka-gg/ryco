@@ -26,6 +26,7 @@ import {
   INTERVAL_PRESETS,
   UNTIL_PRESETS,
   untilLimit,
+  WEBHOOK_TRIGGER_WORDS,
   when,
 } from "@ryco/shared/automationSchedule";
 import { parseWhen, whenQuickPicks } from "@ryco/shared/automationWhenParser";
@@ -452,97 +453,120 @@ function Editor(props: {
         ) : null}
       </Card>
 
-      <Card title="When">
-        <View className="px-4 py-3">
-          <Segmented<ScheduleRepeat>
-            value={repeat}
-            options={[
-              { value: "interval", label: "Repeat" },
-              { value: "days", label: "Days" },
-              { value: "once", label: "Once" },
-            ]}
-            onChange={(next) => change(withRepeat(draft, next))}
-          />
-        </View>
-        {repeat === "interval" ? (
-          <View className="flex-row flex-wrap gap-2 px-4 pb-3">
-            {INTERVAL_PRESETS.map((preset) => (
-              <Chip
-                key={preset.label}
-                label={preset.label}
-                selected={draft.intervalMs === preset.ms}
-                onPress={() => change({ ...draft, intervalMs: preset.ms })}
-              />
-            ))}
-          </View>
-        ) : null}
-        {repeat === "days" ? (
-          <View className="flex-row flex-wrap gap-2 px-4 pb-3">
-            {(["daily", "weekdays", "weekly"] as const).map((choice) => (
-              <Chip
-                key={choice}
-                label={
-                  choice === "daily"
-                    ? "Every day"
-                    : choice === "weekdays"
-                      ? "Weekdays"
-                      : "Once a week"
-                }
-                selected={calendarChoice === choice}
-                onPress={() => change(withCalendarChoice(draft, choice))}
-              />
-            ))}
-          </View>
-        ) : null}
-        {messageView("interval")}
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={words.startLabel}
-          onPress={() => setEditing(editing === "start" ? null : "start")}
-          className="min-h-[50px] flex-row items-center gap-3 border-t border-border-subtle px-4 py-3 active:bg-subtle"
-        >
-          <Text className="text-[16px] text-foreground">
-            {repeat === "once" ? "Runs at" : repeat === "days" ? "Time and first day" : "First run"}
+      {repeat === "webhook" ? (
+        <>
+          <Card title="When">
+            <View className="min-h-[50px] justify-center px-4 py-3">
+              <Text className="text-[16px] text-foreground">{WEBHOOK_TRIGGER_WORDS}</Text>
+            </View>
+          </Card>
+          <Text className="px-6 pt-2 text-[13px] leading-[18px] text-foreground-muted">
+            Each call starts one run, with the request body as untrusted input. Its URL, secret and
+            trigger are changed in Ryco on a computer.
           </Text>
-          <Text className="flex-1 text-right text-[15px] text-foreground-muted" numberOfLines={1}>
-            {words.start}
-          </Text>
-        </Pressable>
-        {editing === "start" ? (
-          <StartPicker
-            draft={draft}
-            nowMs={nowMs}
-            onChange={(startMs) => change(withStart(draft, startMs))}
-          />
-        ) : null}
-        {messageView("start")}
-        {repeat !== "once" ? (
-          <View className="gap-2 border-t border-border-subtle px-4 py-3">
-            <Text className="text-[13px] text-foreground-muted">{`Ends · ${words.endWord} ${words.end}`}</Text>
-            <View className="flex-row flex-wrap gap-2">
-              {UNTIL_PRESETS.map((preset) => (
-                <Chip
-                  key={preset.label}
-                  label={preset.label}
-                  selected={endPresetSelected(preset.ms)}
-                  onPress={() => change({ ...draft, endsAt: endFor(draft.start, preset.ms) })}
-                />
-              ))}
-              <Chip
-                label="90 days"
-                selected={Math.abs(draft.endsAt - maxEnd) < 60_000}
-                onPress={() => change({ ...draft, endsAt: maxEnd })}
+        </>
+      ) : (
+        <>
+          <Card title="When">
+            <View className="px-4 py-3">
+              <Segmented<ScheduleRepeat>
+                value={repeat}
+                options={[
+                  { value: "interval", label: "Repeat" },
+                  { value: "days", label: "Days" },
+                  { value: "once", label: "Once" },
+                ]}
+                onChange={(next) => change(withRepeat(draft, next))}
               />
             </View>
-          </View>
-        ) : null}
-        {messageView("end")}
-      </Card>
-      <Text className="px-6 pt-2 text-[13px] leading-[18px] text-foreground-muted">
-        {repeat === "once"
-          ? `Once, ${words.start}.`
-          : `Every ${words.interval}, from ${words.start} ${words.endWord} ${words.end}.`}
-      </Text>
+            {repeat === "interval" ? (
+              <View className="flex-row flex-wrap gap-2 px-4 pb-3">
+                {INTERVAL_PRESETS.map((preset) => (
+                  <Chip
+                    key={preset.label}
+                    label={preset.label}
+                    selected={draft.intervalMs === preset.ms}
+                    onPress={() => change({ ...draft, intervalMs: preset.ms })}
+                  />
+                ))}
+              </View>
+            ) : null}
+            {repeat === "days" ? (
+              <View className="flex-row flex-wrap gap-2 px-4 pb-3">
+                {(["daily", "weekdays", "weekly"] as const).map((choice) => (
+                  <Chip
+                    key={choice}
+                    label={
+                      choice === "daily"
+                        ? "Every day"
+                        : choice === "weekdays"
+                          ? "Weekdays"
+                          : "Once a week"
+                    }
+                    selected={calendarChoice === choice}
+                    onPress={() => change(withCalendarChoice(draft, choice))}
+                  />
+                ))}
+              </View>
+            ) : null}
+            {messageView("interval")}
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={words.startLabel}
+              onPress={() => setEditing(editing === "start" ? null : "start")}
+              className="min-h-[50px] flex-row items-center gap-3 border-t border-border-subtle px-4 py-3 active:bg-subtle"
+            >
+              <Text className="text-[16px] text-foreground">
+                {repeat === "once"
+                  ? "Runs at"
+                  : repeat === "days"
+                    ? "Time and first day"
+                    : "First run"}
+              </Text>
+              <Text
+                className="flex-1 text-right text-[15px] text-foreground-muted"
+                numberOfLines={1}
+              >
+                {words.start}
+              </Text>
+            </Pressable>
+            {editing === "start" ? (
+              <StartPicker
+                draft={draft}
+                nowMs={nowMs}
+                onChange={(startMs) => change(withStart(draft, startMs))}
+              />
+            ) : null}
+            {messageView("start")}
+            {repeat !== "once" ? (
+              <View className="gap-2 border-t border-border-subtle px-4 py-3">
+                <Text className="text-[13px] text-foreground-muted">{`Ends · ${words.endWord} ${words.end}`}</Text>
+                <View className="flex-row flex-wrap gap-2">
+                  {UNTIL_PRESETS.map((preset) => (
+                    <Chip
+                      key={preset.label}
+                      label={preset.label}
+                      selected={endPresetSelected(preset.ms)}
+                      onPress={() => change({ ...draft, endsAt: endFor(draft.start, preset.ms) })}
+                    />
+                  ))}
+                  <Chip
+                    label="90 days"
+                    selected={Math.abs(draft.endsAt - maxEnd) < 60_000}
+                    onPress={() => change({ ...draft, endsAt: maxEnd })}
+                  />
+                </View>
+              </View>
+            ) : null}
+            {messageView("end")}
+          </Card>
+          <Text className="px-6 pt-2 text-[13px] leading-[18px] text-foreground-muted">
+            {repeat === "once"
+              ? `Once, ${words.start}.`
+              : `Every ${words.interval}, from ${words.start} ${words.endWord} ${words.end}.`}
+          </Text>
+        </>
+      )}
 
       <Card title="Each run">
         <MenuRow
@@ -656,7 +680,9 @@ function Editor(props: {
           : `${props.opening.isNew ? "Nothing runs" : "Nothing changes"} until you approve it. Saving proposes it to ${checkout.machineLabel}.`}
       </Text>
       <Text className="px-6 pt-1 text-[12px] text-foreground-tertiary">
-        {`${checkout.projectName} · next run ${when(draft.start, nowMs)}`}
+        {repeat === "webhook"
+          ? `${checkout.projectName} · ${WEBHOOK_TRIGGER_WORDS.toLowerCase()}`
+          : `${checkout.projectName} · next run ${when(draft.start, nowMs)}`}
       </Text>
     </ScrollView>
   );

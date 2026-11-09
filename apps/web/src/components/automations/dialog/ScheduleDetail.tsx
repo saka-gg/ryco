@@ -6,6 +6,7 @@
 import {
   activeScheduleCount,
   runsInWords,
+  isScheduleActive,
   isSchedulePaused,
   scheduleModelLabel,
   type ScheduleRow,
@@ -35,6 +36,7 @@ import { DialogButton, Tip, type ScheduleDialogActions } from "./dialogControls"
 import type { DialogRow } from "@ryco/client-runtime/state/automations/dialogModel";
 import { detailVerb, scheduleWhenLine } from "@ryco/client-runtime/state/automations/words";
 import { heartbeatChatWords } from "./heartbeatChats.logic";
+import { WebhookPanel } from "./webhook/WebhookPanel";
 
 /** The prompt clamps to three lines past this many characters. */
 const PROMPT_CLAMP_CHARS = 220;
@@ -183,7 +185,8 @@ export function ScheduleDetail(props: ScheduleDetailProps) {
           ) : null}
           {automation && !automation.cancelled ? (
             <>
-              {automation.enabled && automation.nextRunAt !== null ? (
+              {/* A webhook schedule has no next run but takes requests until paused. */}
+              {isScheduleActive(automation) ? (
                 <DialogButton
                   offReason={lockedReason}
                   dataAct="pause"
@@ -302,6 +305,26 @@ export function ScheduleDetail(props: ScheduleDetailProps) {
           </p>
         ) : null}
       </section>
+      {def.schedule.kind === "webhook" ? (
+        automation && !automation.cancelled ? (
+          <WebhookPanel
+            key={`${checkout.key}|${automation.automationId}`}
+            environmentId={checkout.environmentId}
+            projectId={checkout.projectId}
+            automationId={automation.automationId}
+            refreshKey={`${automation.revision}|${automation.enabled}|${row.runs.length}|${row.lastRun?.run.runId ?? ""}`}
+            lockedReason={lockedReason}
+          />
+        ) : !automation ? (
+          <section className="ad-sec ad-hook">
+            <h4 className="ad-sec-h">Webhook</h4>
+            <p className="ad-muted ad-hook-p">
+              Its URL and secret appear once you approve it. Each call then starts one run, with the
+              request body as untrusted input.
+            </p>
+          </section>
+        ) : null
+      ) : null}
       <section className="ad-sec">
         <h4 className="ad-sec-h">Prompt</h4>
         <p className="ad-prompt" data-clamped={longPrompt && !props.promptOpen ? "" : undefined}>

@@ -73,11 +73,13 @@ export function RunPreview(props: RunPreviewProps) {
   const note = runPreviewNote(scheduleMs, nowMs, props.approvals ?? "auto");
   const sig = !scheduleMs
     ? ""
-    : scheduleMs.kind === "once"
-      ? `once|${scheduleMs.runAt}`
-      : scheduleMs.kind === "calendar"
-        ? `calendar|${scheduleMs.startsAt}|${scheduleMs.timeZone}|${scheduleMs.minutes}|${scheduleMs.weekdays.join()}|${scheduleMs.endsAt}`
-        : `interval|${scheduleMs.startsAt}|${scheduleMs.intervalMs}|${scheduleMs.endsAt}`;
+    : scheduleMs.kind === "webhook"
+      ? "webhook"
+      : scheduleMs.kind === "once"
+        ? `once|${scheduleMs.runAt}`
+        : scheduleMs.kind === "calendar"
+          ? `calendar|${scheduleMs.startsAt}|${scheduleMs.timeZone}|${scheduleMs.minutes}|${scheduleMs.weekdays.join()}|${scheduleMs.endsAt}`
+          : `interval|${scheduleMs.startsAt}|${scheduleMs.intervalMs}|${scheduleMs.endsAt}`;
 
   const rows: PreviewRow[] = (preview?.next ?? []).map((ms, index, next) => {
     const previous = index > 0 ? next[index - 1] : undefined;
