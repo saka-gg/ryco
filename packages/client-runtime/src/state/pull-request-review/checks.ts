@@ -107,3 +107,64 @@ export function formatWorkflowDuration(ms: number | null | undefined): string | 
   const remainderMinutes = minutes % 60;
   return remainderMinutes > 0 ? `${hours}h ${remainderMinutes}m` : `${hours}h`;
 }
+
+// ── Workflow errors ──────────────────────────────────────────────────
+
+const PROVIDER_FAILURE_PREFIX = /^Source control provider [^ ]+ failed in [^:]+:\s*(.*)$/u;
+
+/**
+ * A source-control read or change's failure as the reader sees it: the host's
+ * own words without the server's "Source control provider … failed in …:"
+ * prefix, or `fallback` when the failure carries no message.
+ */
+export function describeSourceControlError(error: unknown, fallback: string): string {
+  const raw = error instanceof Error && error.message.trim() ? error.message : fallback;
+  return PROVIDER_FAILURE_PREFIX.exec(raw)?.[1] ?? raw;
+}
+
+export type WorkflowRerunFeedbackTone =
+  | "success"
+  | "permission-denied"
+  | "not-rerunnable"
+  | "error";
+
+export interface WorkflowRerunFeedback {
+  readonly tone: WorkflowRerunFeedbackTone;
+  readonly message: string;
+}
+
+/** Why the host refused a workflow re-run, in the reader's terms. */
+export function describeWorkflowRerunError(error: unknown): WorkflowRerunFeedback {
+  const message = describeSourceControlError(error, "Failed to request workflow rerun.");
+  const lower = message.toLowerCase();
+
+  if (
+    lower.includes("not accessible") ||
+    lower.includes("permission") ||
+    lower.includes("forbidden") ||
+    lower.includes("actions write") ||
+    lower.includes("token")
+  ) {
+    return {
+      tone: "permission-denied",
+      message:
+        "GitHub refused the rerun. Check repository permissions and that the token has Actions write access.",
+    };
+  }
+
+  if (
+    lower.includes("cannot rerun") ||
+    lower.includes("cannot re-run") ||
+    lower.includes("current state") ||
+    lower.includes("no failed jobs") ||
+    lower.includes("unprocessable") ||
+    lower.includes("422")
+  ) {
+    return {
+      tone: "not-rerunnable",
+      message: "GitHub says this workflow run or job is not rerunnable in its current state.",
+    };
+  }
+
+  return { tone: "error", message };
+}

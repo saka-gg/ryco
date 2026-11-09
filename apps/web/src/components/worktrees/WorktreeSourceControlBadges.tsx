@@ -7,7 +7,7 @@ import { AtlassianJiraIcon } from "../Icons";
 import { openExternalLink } from "~/lib/openExternalLink";
 import { cn } from "~/lib/utils";
 import { prefersExternalPullRequestLink } from "~/pullRequestsRoute";
-import { workItemStateLabel } from "~/lib/workItemState";
+import { workItemStateLabel } from "@ryco/shared/workItemState";
 import {
   resolveStateBadgeVariant,
   type StateBadgeVariant,

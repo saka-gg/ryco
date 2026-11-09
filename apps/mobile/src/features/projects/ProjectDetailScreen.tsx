@@ -359,6 +359,35 @@ export function ProjectDetailScreen(props: {
           </Pressable>
         </View>
 
+        <View className="flex-row gap-3">
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Open the project's issues, Actions runs and Jira items"
+            onPress={() =>
+              navigation.navigate("ProjectExplorer", {
+                environmentId: props.environmentId,
+                projectId: props.projectId,
+              })
+            }
+            className="h-12 flex-1 items-center justify-center rounded-full bg-card px-4 active:bg-card-alt"
+          >
+            <Text className="text-sm font-ryco-bold text-foreground">Issues · Actions</Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Open the project's notes"
+            onPress={() =>
+              navigation.navigate("ProjectNotes", {
+                environmentId: props.environmentId,
+                projectId: props.projectId,
+              })
+            }
+            className="h-12 flex-1 items-center justify-center rounded-full bg-card px-4 active:bg-card-alt"
+          >
+            <Text className="text-sm font-ryco-bold text-foreground">Notes</Text>
+          </Pressable>
+        </View>
+
         <View className="gap-3">
           <Text className="px-1 text-sm font-ryco-bold text-foreground-muted">Worktrees</Text>
           {visiblePendingWorktree ? (

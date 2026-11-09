@@ -1,3 +1,4 @@
+// Jira work item states in the words every client shows.
 import type { WorkItemState } from "@ryco/contracts";
 
 export function normalizedWorkItemStateLabel(state: WorkItemState): string {

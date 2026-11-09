@@ -13,6 +13,8 @@ const mocks = vi.hoisted(() => ({
   clearPullRequests: vi.fn(),
   savedPullRequests: vi.fn(),
   taskBytes: vi.fn(),
+  explorer: vi.fn(),
+  clearExplorer: vi.fn(),
 }));
 vi.mock("./environmentSnapshotPersistence", () => ({
   listEnvironmentCacheStorage: mocks.snapshots,
@@ -30,6 +32,10 @@ vi.mock("../rpc/checkpointDiffAtoms", () => ({
 vi.mock("../rpc/pullRequestAtoms", () => ({
   pullRequestCacheBytes: mocks.pullRequests,
   clearPullRequestCache: mocks.clearPullRequests,
+}));
+vi.mock("../rpc/projectExplorerAtoms", () => ({
+  projectExplorerCacheBytes: mocks.explorer,
+  clearProjectExplorerCache: mocks.clearExplorer,
 }));
 vi.mock("@ryco/client-runtime/connection", () => ({
   projectIconCacheBytes: mocks.icons,
@@ -49,6 +55,7 @@ beforeEach(() => {
   mocks.pullRequests.mockReturnValue(5);
   mocks.savedPullRequests.mockResolvedValue(0);
   mocks.taskBytes.mockResolvedValue(0);
+  mocks.explorer.mockReturnValue(0);
 });
 it("accounts for each category and includes snapshots from devices no longer in the catalog", async () => {
   mocks.snapshots.mockResolvedValue([
@@ -86,6 +93,7 @@ it("clears only the selected device and its own image source cache", async () =>
     mocks.clearFiles,
     mocks.clearDiffs,
     mocks.clearPullRequests,
+    mocks.clearExplorer,
     mocks.clearIcons,
   ]) {
     expect(clear).toHaveBeenCalledExactlyOnceWith(device);

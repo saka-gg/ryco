@@ -45,6 +45,11 @@ import {
   sourceControlOptionValue,
 } from "./prCheckStatus";
 import { usePrCheckPassNotifications } from "./usePrCheckPassNotifications";
+import {
+  describeSourceControlError,
+  describeWorkflowRerunError,
+  type WorkflowRerunFeedback,
+} from "@ryco/client-runtime/state/pull-request-review";
 import { groupWorkflowRunsBySource, type WorkflowRunGroup } from "./workflowRunGroups";
 
 const dateTimeFmt = new Intl.DateTimeFormat(undefined, {
@@ -65,13 +70,6 @@ interface WorkflowRunsSectionProps {
   title?: string;
   description?: string;
   groupRunsBySource?: boolean;
-}
-
-type WorkflowRerunFeedbackTone = "success" | "permission-denied" | "not-rerunnable" | "error";
-
-interface WorkflowRerunFeedback {
-  readonly tone: WorkflowRerunFeedbackTone;
-  readonly message: string;
 }
 
 type WorkflowRerunPayload =
@@ -100,49 +98,8 @@ function formatDuration(value: Option.Option<number>): string | null {
   return remainderMinutes > 0 ? `${hours}h ${remainderMinutes}m` : `${hours}h`;
 }
 
-function errorMessage(error: unknown, fallback: string): string {
-  const raw = error instanceof Error ? error.message : fallback;
-  const providerMatch = /^Source control provider [^ ]+ failed in [^:]+:\s*(.*)$/u.exec(raw);
-  return providerMatch?.[1] ?? raw;
-}
-
 function workflowRerunTargetKey(payload: WorkflowRerunPayload): string {
   return payload.target === "job" ? `job:${payload.jobId}` : "failed-jobs";
-}
-
-function workflowRerunErrorFeedback(error: unknown): WorkflowRerunFeedback {
-  const message = errorMessage(error, "Failed to request workflow rerun.");
-  const lower = message.toLowerCase();
-
-  if (
-    lower.includes("not accessible") ||
-    lower.includes("permission") ||
-    lower.includes("forbidden") ||
-    lower.includes("actions write") ||
-    lower.includes("token")
-  ) {
-    return {
-      tone: "permission-denied",
-      message:
-        "GitHub refused the rerun. Check repository permissions and that the token has Actions write access.",
-    };
-  }
-
-  if (
-    lower.includes("cannot rerun") ||
-    lower.includes("cannot re-run") ||
-    lower.includes("current state") ||
-    lower.includes("no failed jobs") ||
-    lower.includes("unprocessable") ||
-    lower.includes("422")
-  ) {
-    return {
-      tone: "not-rerunnable",
-      message: "GitHub says this workflow run or job is not rerunnable in its current state.",
-    };
-  }
-
-  return { tone: "error", message };
 }
 
 function useWorkflowRerunAction(input: {
@@ -166,7 +123,7 @@ function useWorkflowRerunAction(input: {
       await rerunMutation.mutateAsync(payload);
       setFeedback({ tone: "success", message: successMessage });
     } catch (error) {
-      setFeedback(workflowRerunErrorFeedback(error));
+      setFeedback(describeWorkflowRerunError(error));
     } finally {
       pendingTargetRef.current = null;
       setPendingTarget(null);
@@ -375,7 +332,7 @@ export function WorkflowRunsSection(props: WorkflowRunsSectionProps) {
         ) : runsQuery.error ? (
           <WorkflowStateMessage
             tone="error"
-            message={errorMessage(runsQuery.error, "Failed to load workflow runs.")}
+            message={describeSourceControlError(runsQuery.error, "Failed to load workflow runs.")}
           />
         ) : runs.length === 0 ? (
           <WorkflowStateMessage
@@ -727,7 +684,7 @@ function WorkflowRunJobsPanel(props: {
       ) : jobsQuery.error ? (
         <WorkflowStateMessage
           tone="error"
-          message={errorMessage(jobsQuery.error, "Failed to load workflow jobs.")}
+          message={describeSourceControlError(jobsQuery.error, "Failed to load workflow jobs.")}
           compact
         />
       ) : jobs.length === 0 ? (
@@ -909,7 +866,7 @@ function WorkflowJobLog(props: {
       ) : logQuery.error ? (
         <WorkflowStateMessage
           tone="error"
-          message={errorMessage(logQuery.error, "Failed to load workflow log.")}
+          message={describeSourceControlError(logQuery.error, "Failed to load workflow log.")}
           compact
         />
       ) : logQuery.data && logQuery.data.log.length > 0 ? (

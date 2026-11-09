@@ -5,6 +5,7 @@ import {
   checkpointDiffCacheBytes,
   clearCheckpointDiffCacheForEnvironment,
 } from "../rpc/checkpointDiffAtoms";
+import { clearProjectExplorerCache, projectExplorerCacheBytes } from "../rpc/projectExplorerAtoms";
 import { clearPullRequestCache, pullRequestCacheBytes } from "../rpc/pullRequestAtoms";
 import { readTaskCacheBytes } from "../features/tasks/taskCacheKeys";
 import {
@@ -54,7 +55,8 @@ export async function readDeviceCacheUsage(
       const fileBytes =
         previews.files +
         checkpointDiffCacheBytes(environmentId) +
-        pullRequestCacheBytes(environmentId);
+        pullRequestCacheBytes(environmentId) +
+        projectExplorerCacheBytes(environmentId);
       // Saved pull requests and the machine's task list copy live beside the
       // snapshot and are cleared with it.
       const snapshotBytes =
@@ -80,5 +82,6 @@ export async function clearDeviceCache(environmentId: EnvironmentId): Promise<vo
   clearProjectFileCache(environmentId);
   clearCheckpointDiffCacheForEnvironment(environmentId);
   clearPullRequestCache(environmentId);
+  clearProjectExplorerCache(environmentId);
   clearProjectIconCache(environmentId);
 }

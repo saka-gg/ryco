@@ -22,7 +22,7 @@ import {
 } from "lucide-react";
 import { useAtlassianProjectLink } from "~/rpc/useAtlassian";
 import { useWorkItemList } from "~/rpc/useWorkItems";
-import { workItemStateLabel } from "~/lib/workItemState";
+import { workItemStateLabel } from "@ryco/shared/workItemState";
 import { cn } from "~/lib/utils";
 import { AtlassianJiraIcon } from "../Icons";
 import { Button } from "../ui/button";

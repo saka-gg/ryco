@@ -230,9 +230,21 @@
       "types": "./src/sourceControl.ts",
       "import": "./src/sourceControl.ts"
     },
+    "./sourceControlLabelColors": {
+      "types": "./src/sourceControlLabelColors.ts",
+      "import": "./src/sourceControlLabelColors.ts"
+    },
+    "./sourceControlSearch": {
+      "types": "./src/sourceControlSearch.ts",
+      "import": "./src/sourceControlSearch.ts"
+    },
     "./sourceControlPublish": {
       "types": "./src/sourceControlPublish.ts",
       "import": "./src/sourceControlPublish.ts"
+    },
+    "./browserUrl": {
+      "types": "./src/browserUrl.ts",
+      "import": "./src/browserUrl.ts"
     },
     "./gitDefaultBranch": {
       "types": "./src/gitDefaultBranch.ts",
@@ -241,6 +253,10 @@
     "./sourceControlHost": {
       "types": "./src/sourceControlHost.ts",
       "import": "./src/sourceControlHost.ts"
+    },
+    "./workItemState": {
+      "types": "./src/workItemState.ts",
+      "import": "./src/workItemState.ts"
     },
     "./sourceControlFailure": {
       "types": "./src/sourceControlFailure.ts",

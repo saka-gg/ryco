@@ -7,6 +7,8 @@ import {
   checkStateOverall,
   classifyCheckState,
   checkStateGroup,
+  describeSourceControlError,
+  describeWorkflowRerunError,
   formatWorkflowDuration,
   pullRequestCheckJobParam,
   summarizeChangeRequestChecks,
@@ -128,5 +130,42 @@ describe("formatWorkflowDuration", () => {
     expect(formatWorkflowDuration(131_000)).toBe("2m 11s");
     expect(formatWorkflowDuration(120_000)).toBe("2m");
     expect(formatWorkflowDuration(3_840_000)).toBe("1h 4m");
+  });
+});
+
+describe("describeSourceControlError", () => {
+  it("drops the server's provider prefix", () => {
+    expect(
+      describeSourceControlError(
+        new Error("Source control provider github failed in listWorkflowRuns: HTTP 404"),
+        "fallback",
+      ),
+    ).toBe("HTTP 404");
+  });
+
+  it("falls back when the failure has no message", () => {
+    expect(describeSourceControlError("nope", "Failed to load.")).toBe("Failed to load.");
+    expect(describeSourceControlError(new Error("  "), "Failed to load.")).toBe("Failed to load.");
+  });
+});
+
+describe("describeWorkflowRerunError", () => {
+  it("names a permission refusal", () => {
+    expect(
+      describeWorkflowRerunError(new Error("Resource not accessible by integration")).tone,
+    ).toBe("permission-denied");
+  });
+
+  it("names a run that cannot be re-run now", () => {
+    expect(
+      describeWorkflowRerunError(new Error("This workflow run cannot be rerun (HTTP 422)")).tone,
+    ).toBe("not-rerunnable");
+  });
+
+  it("keeps any other failure's message", () => {
+    expect(describeWorkflowRerunError(new Error("socket hang up"))).toEqual({
+      tone: "error",
+      message: "socket hang up",
+    });
   });
 });
