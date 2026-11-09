@@ -1,6 +1,7 @@
 import type { ReactNode, Ref, RefObject } from "react";
 
 import { cn } from "~/lib/utils";
+import { HubBrandPanel } from "./HubBrandPanel";
 import { HubFooter } from "./HubFooter";
 import { HubWordmark } from "./HubWordmark";
 import {
@@ -71,18 +72,31 @@ export function HubGateway({
 }) {
   return (
     <main ref={scrollRef} className={cn(HUB_SCROLL_TRACK_CLASS_NAME, "hub-ambient")}>
-      <div className={cn(HUB_CENTERED_TRACK_CLASS_NAME, HUB_EDGE_PADDING_CLASS_NAME, "py-10")}>
+      {/* Wide screens split the page: the brand panel holds the left half and
+          stays put while the ceremony on the right scrolls. Below `lg`, and on
+          the frozen phone tier, the panel is not rendered and the page is the
+          single centred column it always was. */}
+      <div className="flex min-h-full">
+        <HubBrandPanel />
         <div
           className={cn(
-            "my-auto w-full self-center phone:my-0 phone:flex phone:max-w-none phone:flex-1 phone:flex-col",
-            HUB_MEASURE_CLASS_NAME[measure],
+            HUB_CENTERED_TRACK_CLASS_NAME,
+            HUB_EDGE_PADDING_CLASS_NAME,
+            "hub-gateway-column min-w-0 flex-1 py-10",
           )}
         >
-          <div className="mb-8 flex justify-center phone:mb-6 phone:justify-start">
-            <HubWordmark size="lg" />
-          </div>
+          <div
+            className={cn(
+              "my-auto w-full self-center phone:my-0 phone:flex phone:max-w-none phone:flex-1 phone:flex-col",
+              HUB_MEASURE_CLASS_NAME[measure],
+            )}
+          >
+            {/* The brand panel carries the wordmark where it is shown. */}
+            <div className="mb-8 flex justify-center lg:hidden phone:mb-6 phone:flex phone:justify-start">
+              <HubWordmark size="lg" />
+            </div>
 
-          {/* The panel.
+            {/* The panel.
               `app-surface` rather than the flat `bg-card` plate this replaces:
               it is the same material the app's dialogs, popovers and sheets
               already use, so the Hub inherits the shared surface
@@ -95,23 +109,24 @@ export function HubGateway({
 
               On the phone tier the panel recedes entirely and the page fills
               the viewport, which is what lets the action group bottom-anchor. */}
-          <section className="hub-gateway-panel app-surface relative rounded-2xl border p-6 not-dark:bg-clip-padding shadow-lg/5 before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-2xl)-1px)] before:shadow-[0_1px_--theme(--color-black/4%)] sm:p-8 phone:flex phone:flex-1 phone:flex-col phone:rounded-none phone:border-0 phone:p-0 phone:shadow-none phone:before:hidden dark:before:shadow-[0_-1px_--theme(--color-white/6%)]">
-            <h1
-              ref={titleRef}
-              tabIndex={-1}
-              className="font-semibold text-2xl tracking-tight outline-none"
-            >
-              {title}
-            </h1>
-            {description === undefined ? null : (
-              <p className="mt-2 text-muted-foreground text-sm leading-relaxed">{description}</p>
-            )}
-            <div className="mt-6 phone:flex phone:flex-1 phone:flex-col">{children}</div>
-            {actions}
-            {trailing}
-          </section>
+            <section className="hub-gateway-panel app-surface relative rounded-2xl border p-6 not-dark:bg-clip-padding shadow-lg/5 before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-2xl)-1px)] before:shadow-[0_1px_--theme(--color-black/4%)] sm:p-8 lg:rounded-none lg:border-0 lg:p-0 lg:shadow-none lg:before:hidden phone:flex phone:flex-1 phone:flex-col phone:rounded-none phone:border-0 phone:p-0 phone:shadow-none phone:before:hidden dark:before:shadow-[0_-1px_--theme(--color-white/6%)]">
+              <h1
+                ref={titleRef}
+                tabIndex={-1}
+                className="font-semibold text-2xl tracking-tight outline-none"
+              >
+                {title}
+              </h1>
+              {description === undefined ? null : (
+                <p className="mt-2 text-muted-foreground text-sm leading-relaxed">{description}</p>
+              )}
+              <div className="mt-6 phone:flex phone:flex-1 phone:flex-col">{children}</div>
+              {actions}
+              {trailing}
+            </section>
 
-          <HubFooter />
+            <HubFooter />
+          </div>
         </div>
       </div>
     </main>

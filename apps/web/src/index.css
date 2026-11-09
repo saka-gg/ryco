@@ -1056,6 +1056,44 @@ code {
     backdrop-filter: none;
   }
 
+  /* The split gateway's form side. Beside the brand panel the form needs no
+     plate of its own — the half-page is its frame — so the panel material is
+     reset the same way the phone dissolve resets it. Its border, radius,
+     padding and shadow are reset by the panel's own `lg:` utilities. */
+  @media (width >= 64rem) {
+    :root:not([data-tier="phone"]) .hub-gateway-panel {
+      background-color: transparent;
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+    }
+  }
+
+  /* The brand panel's surface. A deep, scheme-independent tone with a glow of
+     the theme's primary, so the brand reads the same in light and dark mode
+     and a half-screen never glares. */
+  .hub-brand-panel {
+    background:
+      radial-gradient(
+        80% 55% at 0% 100%,
+        color-mix(in srgb, var(--primary) 26%, transparent),
+        transparent 70%
+      ),
+      radial-gradient(60% 45% at 100% 0%, rgb(255 255 255 / 0.06), transparent 70%), #0c0c0e;
+  }
+
+  .dark .hub-brand-panel {
+    background-color: #131316;
+    box-shadow: inset -1px 0 0 rgb(255 255 255 / 0.07);
+  }
+
+  @media (forced-colors: active) {
+    .hub-brand-panel {
+      background: Canvas;
+      color: CanvasText;
+      border-right: 1px solid CanvasText;
+    }
+  }
+
   /* A morphing popup's surface is carried by its ghost (`surfaceMorph.ts`).
      While the two overlap, the surface paints only its content — otherwise
      two translucent plates, frosts and shadows stack, and the popup visibly

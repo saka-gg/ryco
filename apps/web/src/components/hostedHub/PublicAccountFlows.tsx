@@ -12,7 +12,7 @@ import {
   type PublicSignupVerifyResponse,
 } from "@ryco/contracts/hosted-identity";
 import { KeyRoundIcon, Loader2Icon, MailIcon, ShieldCheckIcon } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { hostedHubApi, HostedHubApiError } from "../../hostedHub/api";
 import { encodeBase64Url } from "../../hostedHub/base64url";
@@ -88,11 +88,14 @@ export function PublicSignupFlow({
   initialLink,
   onConsumeLink,
   onCancel,
+  detailsFooter,
 }: {
   readonly config: EnabledSignupConfig | null;
   readonly initialLink: HostedIdentityLink | null;
   readonly onConsumeLink: () => void;
   readonly onCancel: () => void;
+  /** Shown under the first step only, for side paths such as invitations. */
+  readonly detailsFooter?: ReactNode;
 }) {
   const [stage, setStage] = useState<
     "details" | "check-email" | "verifying" | "credential" | "password"
@@ -314,6 +317,7 @@ export function PublicSignupFlow({
             submitLabel="Send verification email"
             submitDisabled={config === null}
           />
+          {detailsFooter}
         </form>
       ) : stage === "check-email" ? (
         <form className="space-y-4" onSubmit={(event) => void verifyCode(event)}>

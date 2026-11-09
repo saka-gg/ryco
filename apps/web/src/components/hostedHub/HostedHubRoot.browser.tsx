@@ -251,6 +251,59 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
     await expect.element(page.getByRole("button", { name: "Continue with GitHub" })).toBeVisible();
   });
 
+  it("shows the brand panel beside the gateway only on wide screens", async () => {
+    const headline = /Your coding agents, on every machine you work on/;
+    try {
+      await page.viewport(1_440, 900);
+      mounted = await render(<HostedHubRoot />);
+      await expect.element(page.getByText(headline)).toBeVisible();
+      // The panel is not the gateway's `section`: the phone suites resolve the
+      // content column as `main section`, and that must stay the form panel.
+      const panel = document.querySelector<HTMLElement>("main aside");
+      expect(panel?.textContent).toMatch(headline);
+      expect(document.querySelector("main section")?.contains(panel!)).toBe(false);
+      // The illustration is not announced as a list of the visitor's machines.
+      const illustration = [...panel!.querySelectorAll<HTMLElement>('[aria-hidden="true"]')].find(
+        (element) => element.textContent?.includes("Workstation"),
+      );
+      expect(illustration, "the node illustration is hidden from assistive tech").toBeDefined();
+      await mounted.unmount();
+
+      await page.viewport(900, 860);
+      mounted = await render(<HostedHubRoot />);
+      await expect
+        .element(page.getByRole("heading", { name: "Connect to your Ryco nodes" }))
+        .toBeVisible();
+      await expect.element(page.getByText(headline)).not.toBeVisible();
+    } finally {
+      await page.viewport(1_280, 720);
+    }
+  });
+
+  it("moves invitation redemption onto the create-account page when signup is open", async () => {
+    vi.mocked(hostedHubApi.getPublicSignupConfiguration).mockResolvedValue({
+      status: "enabled",
+      antiBot: { provider: "bypass" },
+    });
+    mounted = await render(<HostedHubRoot />);
+
+    // With open signup the landing offers one newcomer path, not two.
+    const createAccount = page.getByRole("button", { name: "Create account" });
+    await expect.element(createAccount).toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "Redeem invitation" }))
+      .not.toBeInTheDocument();
+
+    // An invitation holder still has a way in, on the page they would open.
+    await createAccount.click();
+    await expect.element(page.getByRole("heading", { name: "Create your account" })).toBeVisible();
+    await page.getByRole("button", { name: "Redeem invitation" }).click();
+    await expect
+      .element(page.getByRole("heading", { name: "Redeem your invitation" }))
+      .toBeVisible();
+    expect(window.location.pathname).toBe("/invitation");
+  });
+
   it("renders the typed Hub failure title and actionable bounded message", async () => {
     useHostedHubStore.setState({
       accountStatus: "unavailable",
@@ -498,12 +551,11 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
       .element(page.getByRole("heading", { name: "Connect to your Ryco nodes" }))
       .toBeVisible();
     await expect.element(page.getByRole("button", { name: "Sign in with passkey" })).toBeVisible();
-    // No node is selected here, so no §4 channel exists: the disclosure states
-    // the no-channel claim and never the retired sentence, which asserts the
-    // opposite of what a locked NX channel makes true (§2.2).
-    await expect
-      .element(page.getByText(hostedRelayTrustDisclosure("unavailable").body))
-      .toBeVisible();
+    // Sign-in precedes any node channel, so the gateway carries no relay-trust
+    // notice of its own; the signed-in surfaces that sit beside node traffic
+    // (directory, connection controls, node security) state the claim. The
+    // retired sentence must not reappear here either.
+    expect(document.querySelector("[data-hosted-relay-trust-notice]")).toBeNull();
     expect(document.body.textContent).not.toContain(RETIRED_HOSTED_RELAY_TRUST_SENTENCE);
 
     await page.getByRole("button", { name: "Redeem invitation" }).click();
@@ -565,7 +617,7 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
       .mockResolvedValue();
     mounted = await render(<HostedHubRoot />);
 
-    await page.getByRole("button", { name: "Password, recovery code, or reset" }).click();
+    await page.getByRole("button", { name: "Other ways to sign in" }).click();
     const recoveryChoice = page.getByRole("button", { name: "Use recovery code" });
     const resetChoice = page.getByRole("button", { name: "Forgot password?" });
     await expect.element(recoveryChoice).toBeVisible();
@@ -624,7 +676,9 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
   });
 
   it("creates a public password account after mailbox verification and preserves recovery codes", async () => {
-    await page.viewport(320, 568);
+    // Short enough that the sign-in landing overflows, so the scroll reset on
+    // entering signup below is measured against a page that actually scrolled.
+    await page.viewport(320, 480);
     vi.mocked(hostedHubApi.getPublicSignupConfiguration).mockResolvedValue({
       status: "enabled",
       antiBot: { provider: "bypass" },
@@ -1327,7 +1381,7 @@ describe("hosted Hub routes", () => {
   it("gives each signed-out ceremony its own address and restores it on reload", async () => {
     for (const [control, pathname, heading] of [
       ["Redeem invitation", "/invitation", "Redeem your invitation"],
-      ["Password, recovery code, or reset", "/sign-in/password", "Sign in with a password"],
+      ["Other ways to sign in", "/sign-in/password", "Sign in with a password"],
     ] as const) {
       mounted = await render(<HostedHubRoot />);
       await page.getByRole("button", { name: control }).click();
