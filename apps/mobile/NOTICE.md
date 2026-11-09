@@ -59,6 +59,16 @@ recognizes speech on the device instead of transcribing on a server), and the
 incoming-share model (`src/features/sharing/incomingShareModel.ts`, after upstream's
 `sharing/incoming-share-model.ts` and `incoming-share-native.ts`).
 
+The chat-screen round (2026-11) ports further pieces from `pingdotgg/t3code` at commit
+`ade473018d`, adapted to Ryco's thread screen: the feed's live follow
+(`src/features/threads/threadFeedLiveFollow.ts`, from upstream's
+`features/threads/thread-feed-live-follow.ts`, and the follow-dependent
+`maintainScrollAtEnd` / `maintainVisibleContentPosition` switch of upstream's
+`ThreadFeed.tsx`), the floating status capsule with its separating scroll-to-end button and
+their timings (`src/features/threads/FloatingThreadControl.tsx`, after upstream's
+`floating-working-control.tsx`), and the native header menu of the thread screen (after
+upstream's `ThreadHeader.tsx` / `components/ui/AppBar.tsx` toolbar menus).
+
 The notification and Live Activity work ports mechanisms and numbers from the same
 upstream at a later commit (`e4552000`), rewritten for Ryco rather than copied: the
 foreground rule that keeps an alert for the thread on screen quiet and the

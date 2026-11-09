@@ -763,12 +763,15 @@ describe("mobile React Compiler coverage", () => {
     ["src/features/threads/ThreadDetailScreen.tsx", ["ThreadDetailScreen", "TimelineRow"]],
     ["src/features/threads/ThreadComposer.tsx", ["ThreadComposer"]],
     ["src/features/threads/useThreadChecks.ts", ["useThreadChecks"]],
-    // The header and task sheet re-render with every watch change the shell brings.
-    ["src/features/threads/ThreadContextBar.tsx", ["ThreadContextBar", "PullRequestWatchChip"]],
+    // The header pill and context sheet re-render with every watch change the shell brings.
+    ["src/features/threads/ThreadTitlePill.tsx", ["ThreadTitlePill"]],
+    ["src/features/threads/ThreadContextSheet.tsx", ["ThreadContextSheet"]],
     [
-      "src/features/threads/ThreadActionsSheet.tsx",
-      ["ThreadActionsSheet", "PullRequestWatchSection"],
+      "src/features/threads/PullRequestWatchViews.tsx",
+      ["PullRequestWatchChip", "PullRequestWatchSection"],
     ],
+    // The live status re-renders every second while a turn runs.
+    ["src/features/threads/FloatingThreadControl.tsx", ["FloatingThreadControl"]],
     ["src/features/threads/usePullRequestWatchControl.ts", ["usePullRequestWatchControl"]],
     ["src/features/threads/ThreadActivityFoldRow.tsx", ["ThreadActivityFoldRow"]],
     ["src/features/threads/PendingApprovalCard.tsx", ["PendingApprovalCard"]],

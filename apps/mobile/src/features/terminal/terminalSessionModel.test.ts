@@ -130,13 +130,19 @@ describe("terminal session policy", () => {
     ]);
   });
 
-  it("derives a truthful header count and activity", () => {
+  it("says the sessions and a running command under the menu's Terminal item", () => {
     expect(buildTerminalHeaderActivity({ terminalIds: [], runningTerminalIds: [] })).toEqual({
       sessionCount: 0,
       hasRunningSubprocess: false,
-      badgeLabel: null,
-      accessibilityLabel: "Open terminal. No terminal sessions.",
+      subtitle: null,
     });
+    expect(
+      buildTerminalHeaderActivity({ terminalIds: ["default"], runningTerminalIds: [] }).subtitle,
+    ).toBeNull();
+    expect(
+      buildTerminalHeaderActivity({ terminalIds: ["default"], runningTerminalIds: ["default"] })
+        .subtitle,
+    ).toBe("Command running");
     expect(
       buildTerminalHeaderActivity({
         terminalIds: ["default", "tests"],
@@ -145,8 +151,7 @@ describe("terminal session policy", () => {
     ).toEqual({
       sessionCount: 2,
       hasRunningSubprocess: true,
-      badgeLabel: "2",
-      accessibilityLabel: "Open terminal. 2 terminal sessions. A subprocess is running.",
+      subtitle: "Command running · 2 sessions",
     });
   });
 });

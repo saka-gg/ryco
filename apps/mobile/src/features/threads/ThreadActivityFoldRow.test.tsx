@@ -44,6 +44,7 @@ function fold(liveThought: ActivityFold["liveThought"], expanded = true): Activi
     turnId: "turn-1",
     status: "running",
     label: "Working…",
+    durationLabel: null,
     rows: [activityRow("a"), activityRow("b")],
     expanded,
     liveThought,

@@ -41,7 +41,7 @@ vi.mock("../../state/threadsRuntime", () => ({
 }));
 vi.mock("./sessionActions", () => ({ stopThreadSubagent: async () => undefined }));
 
-import { ThreadAgentRowView, ThreadAgentsButton } from "./ThreadAgentsSheet";
+import { ThreadAgentRowView } from "./ThreadAgentsSheet";
 import type { ThreadAgentRow } from "./threadAgentsSheetModel";
 
 function elements(node: unknown): ReactElement<Record<string, unknown>>[] {
@@ -93,30 +93,6 @@ function renderRow(overrides: Partial<Parameters<typeof ThreadAgentRowView>[0]> 
     }),
   );
 }
-
-describe("thread agents control", () => {
-  it("says how many agents are active, in the live color", () => {
-    const onPress = vi.fn();
-    const nodes = elements(
-      ThreadAgentsButton({
-        entry: {
-          label: "2 agents active",
-          live: true,
-          accessibilityLabel: "2 agents active. Show agents.",
-        },
-        onPress,
-      }),
-    );
-    const button = nodes[0]!;
-    expect(button.props.accessibilityLabel).toBe("2 agents active. Show agents.");
-    expect(texts(nodes)).toEqual(["2 agents active"]);
-    expect(String(nodes.find((node) => node.type === "Text")?.props.className)).toContain(
-      "text-accent-strong",
-    );
-    (button.props.onPress as () => void)();
-    expect(onPress).toHaveBeenCalledTimes(1);
-  });
-});
 
 describe("thread agent row", () => {
   it("leads with the agent, its status and live time, and what it is doing", () => {

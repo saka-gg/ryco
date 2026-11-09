@@ -1,5 +1,7 @@
 import { sidebarUndo } from "../../state/sidebarUndo";
-import { ClaudeCacheDetails } from "./ClaudeCacheDetails";
+import { ClaudeCacheSheet } from "./ClaudeCacheSheet";
+import { claudeCacheSummaryLabel } from "./claudeCacheSummary";
+import { latestClaudeCacheObservation } from "@ryco/shared/claudeCacheReview";
 import { mobileClaudeCacheReview } from "./claudeCacheReview";
 import { mobileConfirmStopBackgroundWork } from "./stopBackgroundWork";
 import { prewarmThreadProviderSession } from "./threadSessionPrewarm";
@@ -36,6 +38,7 @@ import {
 } from "react";
 import {
   Alert,
+  Platform,
   Pressable,
   ScrollView,
   View,
@@ -190,7 +193,15 @@ import {
 import { useThreadStreamHaptics } from "./threadStreamHaptics";
 import { FloatingThreadControl } from "./FloatingThreadControl";
 import { ImageGalleryProvider } from "./ImageGalleryModal";
-import { FLOATING_CONTROL_CLEARANCE, isFollowingLatest } from "./floatingThreadControlModel";
+import {
+  FLOATING_CONTROL_CLEARANCE,
+  isFollowingLatest,
+  showsFloatingThreadCapsule,
+} from "./floatingThreadControlModel";
+import {
+  resolveThreadFeedLiveFollow,
+  type ThreadFeedLiveFollowEvent,
+} from "./threadFeedLiveFollow";
 import { markSnoozeWokeSeen } from "../../state/snoozeWokeSeen";
 import {
   useWsConnectionStatusForEnvironment,
@@ -240,7 +251,6 @@ import {
 } from "../../state/threadsRuntime";
 import { useHomeEnvironments } from "../home/useHomeEnvironments";
 import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
-import { TerminalHeaderButton } from "../terminal/TerminalHeaderButton";
 import { useRepositoryStatus } from "../newTask/useNewTaskRepository";
 import { NewTaskLaunchCard } from "../newTask/NewTaskLaunchCard";
 import { useWorktreeLaunchStore } from "@ryco/client-runtime/state/worktree-setup";
@@ -294,10 +304,27 @@ import {
 } from "../../state/composerFileUpload";
 import { buildModelPickerModel, listModelPickerEntries } from "./modelPickerModel";
 import { buildSessionPolicyModel, resolveSessionPolicySelection } from "./sessionPolicyModel";
-import { ThreadActionsSheet } from "./ThreadActionsSheet";
+import { useThreadAgents } from "./ThreadAgentsSheet";
+import { ThreadContextSheet } from "./ThreadContextSheet";
+import { buildThreadParentLink } from "./threadContextSheetModel";
+import {
+  buildThreadHeaderMenu,
+  flattenThreadHeaderMenu,
+  resolveThreadRename,
+  type ThreadHeaderMenuActionId,
+  type ThreadHeaderMenuSection,
+} from "./threadHeaderMenuModel";
+import { ThreadRenameSheet } from "./ThreadRenameSheet";
+import { useTerminalHeaderActivity } from "../terminal/useTerminalHeaderActivity";
+import { ThreadTitlePill } from "./ThreadTitlePill";
+import { usePullRequestWatchControl } from "./usePullRequestWatchControl";
+import { useThreadDevice } from "../devices/useThreadDevice";
+import { copyTextWithHaptic } from "../../lib/copyTextWithHaptic";
+import { selectCompletionReturnsByChildThreadId } from "@ryco/client-runtime/state/agentControl";
+import { isDelegatedThreadLineage } from "@ryco/client-runtime/state/threads";
+import { MenuView, type NativeActionEvent } from "@react-native-menu/menu";
+import type { NativeStackHeaderItem } from "@react-navigation/native-stack";
 import { openTaskCapture } from "../tasks/taskCaptureStore";
-
-import { ThreadAgents } from "./ThreadAgentsSheet";
 import { useThreadWorkspaceRoot } from "../files/useThreadWorkspaceRoot";
 import { ThreadComposer } from "./ThreadComposer";
 import { SideChatCard } from "./SideChatCard";
@@ -310,13 +337,8 @@ import {
 import { ThreadQueuedMessages } from "./ThreadQueuedMessages";
 import { clearCancelledServerQueueEdit } from "./serverQueueEdit";
 import type { ThreadComposerHandle } from "./ThreadComposer";
-import { ThreadContextBar } from "./ThreadContextBar";
 import { ThreadDevicePill } from "../devices/ThreadDevicePill";
-import {
-  buildThreadHeaderModel,
-  findThreadWorktree,
-  type ThreadHeaderModel,
-} from "./threadHeaderModel";
+import { buildThreadHeaderModel, findThreadWorktree } from "./threadHeaderModel";
 import { ThreadMessage } from "./ThreadMessage";
 import { proposedPlanPresentation } from "./threadPresentation";
 import { ContextHandoffMarkerRow } from "./ContextHandoffMarkerRow";
@@ -337,9 +359,6 @@ import {
   type ThreadListRow,
 } from "./threadTimelineList";
 
-/** How long the page-sheet actions take to close before another sheet can open. */
-const TASK_CAPTURE_AFTER_SHEET_MS = 450;
-
 const NO_FORKABLE_MESSAGES: ReadonlySet<MessageId> = new Set();
 const NO_PENDING_APPROVALS: PendingApproval[] = [];
 const NO_REVERT_TARGETS: ReadonlyMap<MessageId, number> = new Map();
@@ -355,6 +374,11 @@ const MESSAGE_ANCHOR_HIGHLIGHT_MS = 2_500;
  * `Date.now()` once per screen instance, so every input change would evaluate
  * settle, snooze and auto-settle against the time the screen opened.
  */
+/** An action's failure, as its alert says it (kept out of the component for React Compiler). */
+function actionFailureMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "The request failed.";
+}
+
 function buildThreadSettlementModel(
   input: Omit<BuildThreadInboxInput, "nowMs">,
   notBeforeMs: number,
@@ -463,9 +487,7 @@ function ThreadCachedBanner(props: {
     <View
       accessibilityRole="alert"
       testID={props.testID ?? "thread-cached-banner"}
-      className={`mx-4 mb-1 rounded-2xl border px-3.5 py-3 ${
-        warning ? "border-warning-border bg-warning-bg" : "border-border bg-card-translucent"
-      }`}
+      className={`mx-4 rounded-2xl px-3.5 py-3 ${warning ? "bg-warning-bg" : "bg-card"}`}
     >
       <Text
         className={`font-ryco-medium text-sm ${warning ? "text-warning" : "text-foreground-muted"}`}
@@ -490,7 +512,7 @@ function ThreadDeliveryBanner(props: {
     <View
       accessibilityRole="alert"
       testID="thread-delivery-banner"
-      className="mx-4 mb-1 rounded-2xl border border-warning-border bg-warning-bg px-3.5 py-3"
+      className="mx-4 rounded-2xl bg-warning-bg px-3.5 py-3"
     >
       <Text className="font-ryco-bold text-sm text-warning">{notice.title}</Text>
       <Text className="mt-1 font-ryco-medium text-sm text-warning">{notice.description}</Text>
@@ -504,58 +526,6 @@ function ThreadDeliveryBanner(props: {
         }`}
       >
         <Text className="font-ryco-bold text-sm text-foreground">{notice.actionLabel}</Text>
-      </Pressable>
-    </View>
-  );
-}
-
-function HeaderActions(props: {
-  readonly environmentId: EnvironmentId;
-  readonly threadId: ThreadId;
-  readonly model: ThreadHeaderModel;
-  readonly iconColor: string;
-  readonly onReview: () => void;
-  readonly onFiles: () => void;
-  readonly onTerminal: () => void;
-  readonly onMore: () => void;
-}) {
-  return (
-    <View className="flex-row items-center gap-1">
-      {props.model.reviewVisible ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Review changes"
-          onPress={props.onReview}
-          className="h-11 items-center justify-center rounded-full px-3 active:bg-subtle-strong"
-        >
-          <Text className="text-sm font-ryco-bold text-foreground">Review</Text>
-        </Pressable>
-      ) : null}
-      {props.model.filesVisible ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Open files"
-          onPress={props.onFiles}
-          className="h-11 w-11 items-center justify-center rounded-full active:bg-subtle-strong"
-        >
-          <SymbolView name="folder" size={21} tintColor={props.iconColor} type="monochrome" />
-        </Pressable>
-      ) : null}
-      {props.model.terminalVisible ? (
-        <TerminalHeaderButton
-          environmentId={props.environmentId}
-          threadId={props.threadId}
-          iconColor={props.iconColor}
-          onPress={props.onTerminal}
-        />
-      ) : null}
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="More task actions"
-        onPress={props.onMore}
-        className="h-11 w-11 items-center justify-center rounded-full active:bg-subtle-strong"
-      >
-        <SymbolView name="ellipsis" size={21} tintColor={props.iconColor} type="monochrome" />
       </Pressable>
     </View>
   );
@@ -576,13 +546,13 @@ export function ThreadDetailScreen(props: {
   const navigation = useNavigation();
   const headerHeight = useHeaderHeight();
   const iconColor = String(useThemeColor("--color-icon"));
+  // A 6-digit hex (global.css), so the fade under the header can append its alpha.
+  const screenColor = String(useThemeColor("--color-screen"));
   const preferences = usePreferences();
   const [settlementNowMs, setSettlementNowMs] = useState(() => Date.now());
   const [sendError, setSendError] = useState<string | null>(null);
   const composerRef = useRef<ThreadComposerHandle>(null);
-  const [actionsVisible, setActionsVisible] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
-  const [actionError, setActionError] = useState<string | null>(null);
   const [policyBusy, setPolicyBusy] = useState(false);
   const [stagedModelSelection, setStagedModelSelection] = useState<ModelSelection | null>(null);
   const [sendBusy, setSendBusy] = useState(false);
@@ -883,6 +853,16 @@ export function ThreadDetailScreen(props: {
         ? selectAgentControlProposalsForThread(agentControlQueue, threadId)
         : [],
     [agentControlEnabled, agentControlQueue, threadId],
+  );
+  // Proposals waiting on the reader sit with the other prompts over the composer; settled
+  // receipts live in the context sheet, out of the conversation's way.
+  const pendingAgentControlProposals = useMemo(
+    () => agentControlProposals.filter((proposal) => proposal.status === "pending-user-approval"),
+    [agentControlProposals],
+  );
+  const settledAgentControlProposals = useMemo(
+    () => agentControlProposals.filter((proposal) => proposal.status !== "pending-user-approval"),
+    [agentControlProposals],
   );
   const worktree = useMemo(
     () => (thread ? findThreadWorktree(thread, worktrees) : null),
@@ -1735,38 +1715,6 @@ export function ThreadDetailScreen(props: {
   useHardwareKeyboardCommand("files", headerModel?.filesVisible ? openFiles : undefined);
   useHardwareKeyboardCommand("terminal", headerModel?.terminalVisible ? openTerminal : undefined);
 
-  useLayoutEffect(() => {
-    navigation.setOptions({
-      title: headerModel?.title ?? "Task",
-      headerRight: headerModel
-        ? () => (
-            <HeaderActions
-              environmentId={environmentId}
-              threadId={threadId}
-              model={headerModel}
-              iconColor={iconColor}
-              onReview={openReview}
-              onFiles={openFiles}
-              onTerminal={openTerminal}
-              onMore={() => {
-                setActionError(null);
-                setActionsVisible(true);
-              }}
-            />
-          )
-        : undefined,
-    });
-  }, [
-    environmentId,
-    headerModel,
-    iconColor,
-    navigation,
-    openFiles,
-    openReview,
-    openTerminal,
-    threadId,
-  ]);
-
   const enqueueFileUpload = useCallback(
     (attachment: DraftComposerFileAttachment) => {
       ownedUploadIds.current.add(attachment.id);
@@ -2446,32 +2394,17 @@ export function ThreadDetailScreen(props: {
     });
   };
 
-  const runAction = (action: () => Promise<void>, closeAfter = true) => {
-    setActionError(null);
-    return runWhileBusy(setActionBusy, async () => {
+  const runAction = (action: () => Promise<void>, failureTitle = "Could not do that") =>
+    runWhileBusy(setActionBusy, async () => {
       try {
         await action();
-        if (closeAfter) setActionsVisible(false);
       } catch (error) {
-        setActionError(error instanceof Error ? error.message : "The task action failed.");
+        Alert.alert(failureTitle, actionFailureMessage(error));
       }
     });
-  };
 
-  const runSidebarAction = (action: () => Promise<void>) => {
-    setActionsVisible(false);
-    return runAction(async () => {
-      try {
-        await action();
-      } catch (error) {
-        Alert.alert(
-          "Could not update task",
-          error instanceof Error ? error.message : "The request failed.",
-        );
-        throw error;
-      }
-    }, false);
-  };
+  const runSidebarAction = (action: () => Promise<void>) =>
+    runAction(action, "Could not update task");
 
   // Gated the same way the header is: a snapshot captured mid-turn preserves a
   // "running" latestTurn, and a cached thread rendering a live "Working…" fold
@@ -2505,18 +2438,45 @@ export function ThreadDetailScreen(props: {
   const runningSince = agentRunning
     ? (thread?.latestTurn?.startedAt ?? thread?.latestTurn?.requestedAt ?? "")
     : null;
-  // Whether the reader follows the end of the feed; set only when it changes.
-  const [followingLatest, setFollowingLatest] = useState(true);
-  const onFeedScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+  // Whether the feed follows its end as messages arrive (t3code's live follow): only the
+  // reader's own drag stops it; reaching the end again, or "jump to latest", resumes it.
+  // Kept per chat: a retargeted screen starts out following the new chat's end.
+  const [follow, setFollow] = useState({ key: outboxThreadKey, following: true });
+  const followingLatest = follow.key === outboxThreadKey ? follow.following : true;
+  const setFollowingLatest = (following: boolean) => setFollow({ key: outboxThreadKey, following });
+  const userScrollSession = useRef(false);
+  const transitionFollow = (event: ThreadFeedLiveFollowEvent) => {
+    const next = resolveThreadFeedLiveFollow(followingLatest, event);
+    if (next !== followingLatest) setFollowingLatest(next);
+  };
+  const feedIsAtEnd = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, layoutMeasurement, contentSize } = event.nativeEvent;
-    const next = isFollowingLatest({
+    return isFollowingLatest({
       offsetY: contentOffset.y,
       viewportHeight: layoutMeasurement.height,
       contentHeight: contentSize.height,
     });
-    if (next !== followingLatest) setFollowingLatest(next);
+  };
+  const onFeedScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) =>
+    transitionFollow({
+      type: "scroll",
+      isAtEnd: feedIsAtEnd(event),
+      userScrollSessionActive: userScrollSession.current,
+    });
+  const onFeedScrollBeginDrag = () => {
+    userScrollSession.current = true;
+    transitionFollow({ type: "user-scroll-begin" });
+  };
+  const onFeedScrollSettled = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    transitionFollow({
+      type: "user-scroll-end",
+      isAtEnd: feedIsAtEnd(event),
+      userScrollSessionActive: userScrollSession.current,
+    });
+    userScrollSession.current = false;
   };
   const jumpToLatest = () => {
+    transitionFollow({ type: "reset" });
     void listRef.current?.scrollToEnd({ animated: true });
   };
 
@@ -2557,6 +2517,11 @@ export function ThreadDetailScreen(props: {
       }
     } else if (step.kind === "scroll") {
       progress.scrolled = true;
+      // Reading at a linked message, not following the end.
+      setFollow({
+        key: scopedThreadKey(scopeThreadRef(environmentId, threadId)),
+        following: false,
+      });
       setMessageAnchor({ messageId: targetMessageId, index: step.index });
     }
   }, [environmentId, historyReady, targetMessageId, threadId, timelineRows]);
@@ -2667,7 +2632,7 @@ export function ThreadDetailScreen(props: {
     pendingUserInputs.length > 0 ||
     optionalUserInputs.length > 0 ||
     secretRequests.requests.length > 0 ||
-    agentControlProposals.length > 0;
+    pendingAgentControlProposals.length > 0;
   // While approvals wait on a turn this message could steer, a send declines them and
   // redirects it: the same decision the send makes, from the composer's current selection.
   const sendRedirectsApprovals =
@@ -2689,86 +2654,413 @@ export function ThreadDetailScreen(props: {
       redirectedTurnId: approvalRedirectedTurnId,
     }).kind === "decline";
 
+  // Notices float under the header with the feed starting below them.
+  const hasBanners = Boolean(
+    cachedView.banner || deliveryNotice || errorBannerMessage || failedNotice || restartNotice,
+  );
+  const [bannerHeight, setBannerHeight] = useState(0);
+  const feedTopInset = headerHeight + 6 + (hasBanners ? bannerHeight + 4 : 0);
+
+  // What the floating status capsule over the composer says; the feed keeps room for it.
+  const floatingAttention =
+    pendingApprovals.length > 0 || pendingAgentControlProposals.length > 0
+      ? ("approval" as const)
+      : pendingUserInputs.length > 0 || secretRequests.requests.length > 0
+        ? ("question" as const)
+        : null;
+
+  // ── Header: the title pill, its context sheet, and one ⋯ menu ─────────────────────────────
+  // Which chat a sheet was opened for: the screen is reused when a link retargets it, and
+  // another chat's sheets read as closed.
+  const [contextSheetFor, setContextSheetFor] = useState<string | null>(null);
+  const [cacheSheetFor, setCacheSheetFor] = useState<string | null>(null);
+  const contextSheetVisible = contextSheetFor === outboxThreadKey;
+  const cacheSheetVisible = cacheSheetFor === outboxThreadKey;
+  const setContextSheetVisible = (open: boolean) =>
+    setContextSheetFor(open ? outboxThreadKey : null);
+  const setCacheSheetVisible = (open: boolean) => setCacheSheetFor(open ? outboxThreadKey : null);
+  const threadAgents = useThreadAgents({
+    environmentId,
+    threadId,
+    thread,
+    environment: environmentRow,
+    stopReady: (environmentRow?.mutationReady ?? false) && !cachedView.actionsDisabled,
+    offline: cachedView.headerForcedOffline,
+    agentControlProposals,
+    onOpenThread: openThread,
+  });
+  const delegatedRows = useMemo(
+    () => threadAgents.model.sections.find((section) => section.key === "delegated")?.rows ?? [],
+    [threadAgents.model.sections],
+  );
+  // The first delegated chat that waits on the reader, for the floating status.
+  const childAttentionRow = delegatedRows.find(
+    (row) => row.tone === "attention" && row.childThreadId !== null,
+  );
+  const childAttention =
+    childAttentionRow?.childThreadId != null
+      ? { threadId: childAttentionRow.childThreadId, title: childAttentionRow.label }
+      : null;
+  const floatingCapsuleShown = showsFloatingThreadCapsule({
+    runningSince,
+    attention: floatingAttention,
+    childAttention,
+    agentsLive: threadAgents.entry?.live === true,
+  });
+  // A delegated chat links back to the chat that started it, with where its result stands.
+  const threadLineage = thread?.lineage;
+  const parentThreadId = isDelegatedThreadLineage(threadLineage)
+    ? threadLineage.parentThreadId
+    : null;
+  const parentTitle = useStore((state) =>
+    parentThreadId === null
+      ? null
+      : (selectThreadByRef(state, scopeThreadRef(environmentId, parentThreadId))?.title ?? null),
+  );
+  const parentLink = useMemo(
+    () =>
+      buildThreadParentLink({
+        lineage: threadLineage,
+        parentTitle,
+        completionReturn:
+          parentThreadId !== null && agentControlEnabled && agentControlQueue !== null
+            ? selectCompletionReturnsByChildThreadId(
+                selectAgentControlProposalsForThread(agentControlQueue, parentThreadId),
+                parentThreadId,
+              ).get(threadId)
+            : undefined,
+      }),
+    [agentControlEnabled, agentControlQueue, parentThreadId, parentTitle, threadId, threadLineage],
+  );
+  const claudeCacheObservation = useMemo(
+    () =>
+      canonicalProviderDriver === "claudeAgent" && threadActivities
+        ? latestClaudeCacheObservation(threadActivities)
+        : undefined,
+    [canonicalProviderDriver, threadActivities],
+  );
+  const cacheSummary =
+    canonicalProviderDriver !== "claudeAgent"
+      ? null
+      : claudeCacheObservation
+        ? claudeCacheSummaryLabel(claudeCacheObservation)
+        : "Unknown";
+  // Here, outside the sheet, so a change in flight outlives closing it.
+  const pullRequestWatch = usePullRequestWatchControl({
+    environmentId,
+    threadId,
+    watch: headerModel?.pullRequestWatch ?? null,
+    ready: (environmentRow?.mutationReady ?? false) && !cachedView.actionsDisabled,
+  });
+  const { preview: devicePreview } = useThreadDevice(environmentId, threadId);
+  const projectId = thread?.projectId ?? null;
+  const openProjectScreen =
+    projectId === null
+      ? undefined
+      : () => navigation.navigate("Project", { environmentId, projectId });
+  const openSourceControl =
+    projectId === null || project === null || isChatProject(project)
+      ? undefined
+      : () =>
+          navigation.navigate("ProjectSourceControl", {
+            environmentId,
+            projectId,
+            ...(worktree?.id ? { worktreeId: worktree.id } : {}),
+          });
+  const openPullRequest =
+    projectId !== null && headerModel?.pullRequestNumber != null
+      ? () =>
+          navigation.navigate("ProjectPullRequest", {
+            environmentId,
+            projectId,
+            number: String(headerModel.pullRequestNumber),
+          })
+      : undefined;
+  const latestForkableReply = (threadMessages ?? []).findLast((message) =>
+    forkableMessageIds.has(message.id),
+  );
+  const mutationBusy = actionBusy || cachedView.actionsDisabled;
+
+  const stopTurn = () => {
+    // Stop means stop: hold the queue before the turn can settle, and undo only if the
+    // interrupt never reached the server. A node that keeps the follow-up queue holds its own
+    // in the same batch.
+    const held = holdThreadOutboxForInterrupt(
+      outboxThreadKey,
+      selectThreadByRef(useStore.getState(), scopeThreadRef(environmentId, threadId))?.session
+        ?.activeTurnId ?? null,
+    );
+    const holdQueue = serverFollowUpQueueSupported;
+    void runAction(async () => {
+      try {
+        await interruptThreadTurn(ensureEnvironmentApi(environmentId), threadId, { holdQueue });
+      } catch (error) {
+        held.undo();
+        throw error;
+      }
+      offerToStopDelegatedTasks(environmentId, threadId);
+    });
+  };
+  const compactNow = () => {
+    if (!headerModel?.compactAction || headerModel.compactAction.disabled) return;
+    // Readiness is captured at the tap, as for a send: a connection that changes before the
+    // turn is sent refuses it rather than compacting on another shell.
+    const assertMutationReady = captureReviewedSendReadiness(
+      environmentId,
+      () => createMobileConnectionRegistry().driver.supervisor.read(environmentId),
+      "The connection changed. Reconnect and try again.",
+    );
+    void runAction(() =>
+      compactThreadNow(ensureEnvironmentApi(environmentId), threadId, assertMutationReady),
+    );
+  };
+  const toggleSettlement = () => {
+    const action = headerModel?.settlementAction;
+    if (!action || action.disabled) return;
+    void runSidebarAction(() =>
+      setThreadSettled(
+        ensureEnvironmentApi(environmentId),
+        threadId,
+        action.kind === "settle",
+        (command) => sidebarUndo.dispatch({ environmentId, threadId }, command),
+      ),
+    );
+  };
+  const toggleArchive = () =>
+    void runSidebarAction(async () => {
+      const shouldArchive = thread?.archivedAt === null;
+      await setThreadArchived(
+        ensureEnvironmentApi(environmentId),
+        threadId,
+        shouldArchive,
+        (command) =>
+          command.type === "thread.archive"
+            ? sidebarUndo.archive({ environmentId, threadId }, command.commandId, {
+                currentRoute: () => {
+                  const state = navigation.getState();
+                  return state?.routes[state.index]?.key ?? null;
+                },
+                shouldLeave: () => navigation.canGoBack(),
+                leave: async () => {
+                  const state = navigation.getState();
+                  const fallbackKey = state?.routes[state.index - 1]?.key ?? null;
+                  navigation.goBack();
+                  return fallbackKey;
+                },
+                reopen: () => navigation.navigate("Thread", { environmentId, threadId }),
+              })
+            : sidebarUndo.dispatch({ environmentId, threadId }, command),
+      );
+    });
+  // Android has no native text prompt: its rename is a small sheet (kept per chat, like the others).
+  const [renameSheetFor, setRenameSheetFor] = useState<string | null>(null);
+  const renameSheetVisible = renameSheetFor === outboxThreadKey;
+  const saveThreadTitle = (title: string) =>
+    void runAction(() => renameThread(ensureEnvironmentApi(environmentId), threadId, title));
+  const renameCurrentThread = () => {
+    if (!headerModel) return;
+    const current = headerModel.title;
+    const save = (value: string | undefined) => {
+      const title = resolveThreadRename(current, value);
+      if (title !== null) saveThreadTitle(title);
+    };
+    if (Platform.OS === "ios") {
+      Alert.prompt(
+        "Rename chat",
+        undefined,
+        [
+          { text: "Cancel", style: "cancel" },
+          { text: "Save", onPress: save },
+        ],
+        "plain-text",
+        current,
+      );
+    } else {
+      setRenameSheetFor(outboxThreadKey);
+    }
+  };
+  const openSideChat = selectedModelSelection
+    ? () => sideChatStore.getState().open(sideChatKey, selectedModelSelection)
+    : undefined;
+
+  const terminalSubtitle = useTerminalHeaderActivity(environmentId, threadId);
+  const builtHeaderMenu = headerModel
+    ? buildThreadHeaderMenu({
+        model: headerModel,
+        terminalSubtitle,
+        sourceControlAvailable: openSourceControl !== undefined,
+        deviceAvailable: devicePreview !== null,
+        sideChatAvailable: openSideChat !== undefined,
+        forkAvailable: latestForkableReply !== undefined,
+        addTaskAvailable: thread !== undefined,
+        busy: mutationBusy,
+      })
+    : null;
+  // The header model is rebuilt on every change to the thread (each streamed activity), but the
+  // native header must only be rebuilt when what it shows changes: a new menu or pill while the
+  // ⋯ menu is open can flicker or close it. So the menu is keyed on its content and the pill on
+  // its four strings.
+  const headerMenuSignature = builtHeaderMenu === null ? null : JSON.stringify(builtHeaderMenu);
+  const headerMenu = useMemo(
+    () =>
+      headerMenuSignature === null
+        ? null
+        : (JSON.parse(headerMenuSignature) as ReadonlyArray<ThreadHeaderMenuSection>),
+    [headerMenuSignature],
+  );
+  const pillTitle = headerModel?.title ?? null;
+  const pillStatus = headerModel?.statusLabel ?? null;
+  const pillProject = headerModel?.projectLabel ?? null;
+  const pillWorktree = headerModel?.worktreeLabel ?? null;
+  const onHeaderMenuAction = (id: ThreadHeaderMenuActionId) => {
+    switch (id) {
+      case "files":
+        return openFiles();
+      case "terminal":
+        return openTerminal();
+      case "device":
+        return openDevice();
+      case "source-control":
+        return openSourceControl?.();
+      case "review":
+        return openReview();
+      case "pull-request":
+        return openPullRequest?.();
+      case "side-chat":
+        return openSideChat?.();
+      case "fork":
+        if (latestForkableReply) openForkSheet(latestForkableReply);
+        return;
+      case "rename":
+        return renameCurrentThread();
+      case "add-task":
+        if (thread && headerModel) {
+          openTaskCapture({
+            environmentId,
+            projectId: thread.projectId,
+            link: { kind: "thread", threadId },
+            linkLabel: `Chat: ${headerModel.title}`,
+            openDetails: (taskEnvironmentId, taskId) =>
+              navigation.navigate("TaskDetail", { environmentId: taskEnvironmentId, taskId }),
+          });
+        }
+        return;
+      case "copy-reference":
+        if (headerModel) {
+          copyTextWithHaptic(headerModel.copyReference.value, {
+            target:
+              headerModel.copyReference.kind === "pull-request" ? "pull request link" : "task ID",
+          });
+        }
+        return;
+      case "copy-task-id":
+        if (headerModel) copyTextWithHaptic(headerModel.taskId, { target: "task ID" });
+        return;
+      case "stop":
+        return stopTurn();
+      case "compact":
+        return compactNow();
+      case "settlement":
+        return toggleSettlement();
+      case "archive":
+        return toggleArchive();
+    }
+  };
+  const onHeaderMenuActionRef = useRef(onHeaderMenuAction);
+  useLayoutEffect(() => {
+    onHeaderMenuActionRef.current = onHeaderMenuAction;
+  });
+
+  useLayoutEffect(() => {
+    const runMenuAction = (id: ThreadHeaderMenuActionId) => onHeaderMenuActionRef.current(id);
+    const openContext = () => setContextSheetFor(outboxThreadKey);
+    const pill =
+      pillTitle === null || pillStatus === null || pillProject === null || pillWorktree === null
+        ? null
+        : {
+            title: pillTitle,
+            statusLabel: pillStatus,
+            projectLabel: pillProject,
+            worktreeLabel: pillWorktree,
+          };
+    navigation.setOptions({
+      title: pillTitle ?? "Task",
+      headerTitle: pill ? () => <ThreadTitlePill model={pill} onPress={openContext} /> : undefined,
+      ...(headerMenu === null
+        ? { headerRight: undefined }
+        : Platform.OS === "ios"
+          ? {
+              unstable_headerRightItems: (): NativeStackHeaderItem[] => [
+                {
+                  type: "menu",
+                  label: "",
+                  accessibilityLabel: "More chat actions",
+                  icon: { type: "sfSymbol", name: "ellipsis" },
+                  menu: {
+                    items: headerMenu.map((section) => ({
+                      type: "submenu" as const,
+                      label: "",
+                      inline: true,
+                      items: section.actions.map((action) => ({
+                        type: "action" as const,
+                        label: action.title,
+                        icon: { type: "sfSymbol" as const, name: action.icon as never },
+                        ...(action.subtitle ? { description: action.subtitle } : {}),
+                        disabled: action.disabled ?? false,
+                        destructive: action.destructive ?? false,
+                        onPress: () => runMenuAction(action.id),
+                      })),
+                    })),
+                  },
+                },
+              ],
+            }
+          : {
+              headerRight: () => (
+                <MenuView
+                  // One flat list: Android draws each inline group as an untitled submenu.
+                  actions={flattenThreadHeaderMenu(headerMenu).map((action) => ({
+                    id: action.id,
+                    title: action.title,
+                    ...(action.subtitle ? { subtitle: action.subtitle } : {}),
+                    attributes: {
+                      disabled: action.disabled ?? false,
+                      destructive: action.destructive ?? false,
+                    },
+                  }))}
+                  onPressAction={({ nativeEvent }: NativeActionEvent) =>
+                    runMenuAction(nativeEvent.event as ThreadHeaderMenuActionId)
+                  }
+                >
+                  <View
+                    accessibilityRole="button"
+                    accessibilityLabel="More chat actions"
+                    className="h-11 w-11 items-center justify-center rounded-full"
+                  >
+                    <SymbolView name="ellipsis" size={21} tintColor={iconColor} type="monochrome" />
+                  </View>
+                </MenuView>
+              ),
+            }),
+    });
+  }, [
+    headerMenu,
+    iconColor,
+    navigation,
+    outboxThreadKey,
+    pillProject,
+    pillStatus,
+    pillTitle,
+    pillWorktree,
+  ]);
+
   return (
     <KeyboardAvoidingView
       behavior="padding"
       automaticOffset
-      style={{ flex: 1, paddingTop: headerHeight }}
+      style={{ flex: 1 }}
       className="bg-screen"
     >
-      {headerModel ? (
-        <ThreadContextBar
-          environmentId={environmentId}
-          model={headerModel}
-          checks={checks}
-          onPress={() => {
-            setActionError(null);
-            setActionsVisible(true);
-          }}
-        />
-      ) : null}
-      <ThreadAgents
-        key={outboxThreadKey}
-        environmentId={environmentId}
-        threadId={threadId}
-        thread={thread}
-        environment={environmentRow}
-        stopReady={(environmentRow?.mutationReady ?? false) && !cachedView.actionsDisabled}
-        offline={cachedView.headerForcedOffline}
-        agentControlProposals={agentControlProposals}
-        onOpenThread={openThread}
-      />
-      {cachedView.banner ? (
-        <ThreadCachedBanner text={cachedView.banner.text} tone={cachedView.banner.tone} />
-      ) : null}
-      {deliveryNotice ? (
-        <ThreadDeliveryBanner
-          notice={deliveryNotice}
-          onContinue={() =>
-            acknowledgeThreadDelivery(getMobileHostedConnectionCoordinator(), environmentId)
-          }
-        />
-      ) : null}
-      {errorBannerMessage ? <ErrorBanner message={errorBannerMessage} /> : null}
-      {failedNotice ? (
-        <View
-          accessibilityRole="alert"
-          testID="thread-failed-turn-banner"
-          className="mx-4 mb-1 gap-2 rounded-2xl border border-danger-border bg-danger px-3.5 py-3"
-        >
-          <Text className="font-ryco-medium text-sm text-danger-foreground">
-            {failedNotice.title}
-          </Text>
-          {failedNotice.detail ? (
-            <Text className="text-xs text-foreground-muted" numberOfLines={4}>
-              {failedNotice.detail}
-            </Text>
-          ) : null}
-          <Text className="text-2xs text-foreground-tertiary">
-            To try another model, pick it in the composer first.
-          </Text>
-          <View className="flex-row gap-2">
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => void onSend(CONTINUE_AFTER_FAILURE_PROMPT, [])}
-              className="rounded-full bg-foreground px-3 py-1.5 active:opacity-70"
-            >
-              <Text className="font-ryco-medium text-xs text-background">Continue</Text>
-            </Pressable>
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => setDismissedFailedTurnId(failedNotice.turnId)}
-              className="rounded-full border border-border px-3 py-1.5 active:opacity-70"
-            >
-              <Text className="font-ryco-medium text-xs text-foreground">Dismiss</Text>
-            </Pressable>
-          </View>
-        </View>
-      ) : null}
-      {restartNotice ? (
-        <ThreadCachedBanner text={restartNotice} tone="info" testID="thread-restart-banner" />
-      ) : null}
-
       {/* One full-screen view for every page in the feed: it outlives the row that opened it. */}
       <HtmlRenderFullScreenProvider>
         <ImageGalleryProvider>
@@ -2780,42 +3072,56 @@ export function ThreadDetailScreen(props: {
               keyExtractor={(row) => row.id}
               alignItemsAtEnd
               initialScrollAtEnd
-              maintainScrollAtEnd={{
-                animated: true,
-                on: { dataChange: true, itemLayout: true },
-              }}
-              maintainVisibleContentPosition
+              // Following, the measured end is kept at once (animating estimates races row
+              // measurement); reading back, the rows on screen stay put as others load.
+              maintainScrollAtEnd={
+                followingLatest
+                  ? { animated: false, on: { dataChange: true, itemLayout: true, layout: true } }
+                  : false
+              }
+              maintainVisibleContentPosition={!followingLatest}
               keyboardDismissMode="interactive"
               keyboardShouldPersistTaps="handled"
               contentInsetAdjustmentBehavior="never"
-              contentContainerStyle={{ paddingVertical: 10 }}
-              // Room under the newest message for the floating Working pill.
+              // The header floats over the feed: the first message starts under it (and under any
+              // banner), and scrolls up beneath its glass.
+              contentContainerStyle={{ paddingBottom: 10 }}
+              scrollIndicatorInsets={{ top: feedTopInset }}
+              // Room under the newest message whenever the floating status capsule shows.
               ListFooterComponent={
-                runningSince !== null ? (
+                floatingCapsuleShown ? (
                   <View style={{ height: FLOATING_CONTROL_CLEARANCE }} />
                 ) : null
               }
               onStartReached={loadOlderMessages}
               onStartReachedThreshold={0.35}
               onScroll={onFeedScroll}
+              onScrollBeginDrag={onFeedScrollBeginDrag}
+              onScrollEndDrag={onFeedScrollSettled}
+              onMomentumScrollEnd={onFeedScrollSettled}
               scrollEventThrottle={64}
+              // A spacer the list measures (unlike contentContainerStyle padding), so following
+              // the end and anchoring still add up.
               ListHeaderComponent={
-                messageHistory?.hasMoreBefore || messageHistoryLoad?.status === "loading" ? (
-                  <Pressable
-                    accessibilityRole="button"
-                    disabled={messageHistoryLoad?.status === "loading"}
-                    onPress={loadOlderMessages}
-                    className="items-center px-4 py-3"
-                  >
-                    <Text className="text-xs text-muted-foreground">
-                      {messageHistoryLoad?.status === "loading"
-                        ? "Loading earlier history…"
-                        : messageHistoryLoad?.status === "error"
-                          ? "Retry earlier history"
-                          : "Load earlier history"}
-                    </Text>
-                  </Pressable>
-                ) : null
+                <>
+                  <View style={{ height: feedTopInset }} />
+                  {messageHistory?.hasMoreBefore || messageHistoryLoad?.status === "loading" ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      disabled={messageHistoryLoad?.status === "loading"}
+                      onPress={loadOlderMessages}
+                      className="items-center px-4 py-3"
+                    >
+                      <Text className="text-xs text-muted-foreground">
+                        {messageHistoryLoad?.status === "loading"
+                          ? "Loading earlier history…"
+                          : messageHistoryLoad?.status === "error"
+                            ? "Retry earlier history"
+                            : "Load earlier history"}
+                      </Text>
+                    </Pressable>
+                  ) : null}
+                </>
               }
               ListEmptyComponent={
                 launchView ? (
@@ -2860,10 +3166,91 @@ export function ThreadDetailScreen(props: {
                 )
               }
             />
+            {/* The header's glass floats over the feed: a fade under it keeps the title and
+                the buttons readable while messages scroll beneath. */}
+            <View
+              pointerEvents="none"
+              className="absolute left-0 right-0 top-0"
+              style={{
+                height: headerHeight + 20,
+                experimental_backgroundImage: `linear-gradient(to bottom, ${screenColor} 0%, ${screenColor}f5 72%, ${screenColor}00 100%)`,
+              }}
+            />
+            {hasBanners ? (
+              <View
+                pointerEvents="box-none"
+                className="absolute left-0 right-0 gap-1"
+                style={{ top: headerHeight + 4 }}
+                onLayout={(event) => setBannerHeight(event.nativeEvent.layout.height)}
+              >
+                {cachedView.banner ? (
+                  <ThreadCachedBanner text={cachedView.banner.text} tone={cachedView.banner.tone} />
+                ) : null}
+                {deliveryNotice ? (
+                  <ThreadDeliveryBanner
+                    notice={deliveryNotice}
+                    onContinue={() =>
+                      acknowledgeThreadDelivery(
+                        getMobileHostedConnectionCoordinator(),
+                        environmentId,
+                      )
+                    }
+                  />
+                ) : null}
+                {errorBannerMessage ? <ErrorBanner message={errorBannerMessage} /> : null}
+                {failedNotice ? (
+                  <View
+                    accessibilityRole="alert"
+                    testID="thread-failed-turn-banner"
+                    className="mx-4 gap-2 rounded-2xl bg-danger px-3.5 py-3"
+                  >
+                    <Text className="font-ryco-medium text-sm text-danger-foreground">
+                      {failedNotice.title}
+                    </Text>
+                    {failedNotice.detail ? (
+                      <Text className="text-xs text-foreground-muted" numberOfLines={4}>
+                        {failedNotice.detail}
+                      </Text>
+                    ) : null}
+                    <Text className="text-2xs text-foreground-tertiary">
+                      To try another model, pick it in the composer first.
+                    </Text>
+                    <View className="flex-row gap-2">
+                      <Pressable
+                        accessibilityRole="button"
+                        onPress={() => void onSend(CONTINUE_AFTER_FAILURE_PROMPT, [])}
+                        className="rounded-full bg-foreground px-3 py-1.5 active:opacity-70"
+                      >
+                        <Text className="font-ryco-medium text-xs text-background">Continue</Text>
+                      </Pressable>
+                      <Pressable
+                        accessibilityRole="button"
+                        onPress={() => setDismissedFailedTurnId(failedNotice.turnId)}
+                        className="rounded-full border border-border px-3 py-1.5 active:opacity-70"
+                      >
+                        <Text className="font-ryco-medium text-xs text-foreground">Dismiss</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                ) : null}
+                {restartNotice ? (
+                  <ThreadCachedBanner
+                    text={restartNotice}
+                    tone="info"
+                    testID="thread-restart-banner"
+                  />
+                ) : null}
+              </View>
+            ) : null}
             <FloatingThreadControl
               runningSince={runningSince}
               followingLatest={followingLatest}
+              attention={floatingAttention}
+              childAttention={childAttention}
+              agents={threadAgents.entry}
               onJumpToLatest={jumpToLatest}
+              onOpenThread={(target) => openThread(ThreadId.make(target))}
+              onOpenAgents={threadAgents.open}
             />
           </View>
         </ImageGalleryProvider>
@@ -2871,7 +3258,7 @@ export function ThreadDetailScreen(props: {
 
       {hasPrompts ? (
         <ScrollView
-          className="grow-0 border-t border-border"
+          className="grow-0"
           style={{ maxHeight: "42%" }}
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={{ paddingVertical: 4 }}
@@ -2905,7 +3292,7 @@ export function ThreadDetailScreen(props: {
               disabledReason={secretRequests.access.reason}
             />
           ))}
-          {agentControlProposals.map((proposal) => (
+          {pendingAgentControlProposals.map((proposal) => (
             <AgentControlProposalCard
               key={proposal.proposalId}
               environmentId={environmentId}
@@ -2915,10 +3302,6 @@ export function ThreadDetailScreen(props: {
           ))}
         </ScrollView>
       ) : null}
-
-      {canonicalProviderDriver === "claudeAgent" && (
-        <ClaudeCacheDetails activities={thread?.activities ?? []} />
-      )}
 
       <ThreadQueuedMessages
         steerRestarts={activeProviderSteering === "restart"}
@@ -3049,6 +3432,7 @@ export function ThreadDetailScreen(props: {
         modelPicker={modelPicker}
         modelSelection={selectedModelSelection}
         fastModeNotice={fastModeNotice}
+        {...(cacheSummary !== null ? { onOpenCacheInfo: () => setCacheSheetVisible(true) } : {})}
         onSelectModel={(selection) => {
           if (policyBusy || cachedView.actionsDisabled) return;
           const entry = (modelPicker ? listModelPickerEntries(modelPicker) : []).find(
@@ -3093,140 +3477,47 @@ export function ThreadDetailScreen(props: {
       />
 
       {headerModel ? (
-        <ThreadActionsSheet
+        <ThreadContextSheet
+          visible={contextSheetVisible}
+          onClose={() => setContextSheetVisible(false)}
           environmentId={environmentId}
-          threadId={threadId}
-          visible={actionsVisible}
           model={headerModel}
-          mutationReady={(environmentRow?.mutationReady ?? false) && !cachedView.actionsDisabled}
-          // Rename / stop / archive all call ensureEnvironmentApi, which throws
-          // without a connection, so the sheet's rows are disabled rather than
-          // left to surface an internal error. The sheet still opens: node,
-          // project and worktree stay readable on a cached thread. `busy` is
-          // the existing seam for that; it over-gates "Review changes" by one
-          // row, which is acceptable — the review screen needs the same
-          // connection this thread does not have.
-          busy={actionBusy || cachedView.actionsDisabled}
-          error={actionError}
-          onClose={() => setActionsVisible(false)}
-          onRename={(title) =>
-            void runAction(() => renameThread(ensureEnvironmentApi(environmentId), threadId, title))
-          }
-          onStop={() => {
-            // Stop means stop: hold the queue before the turn can settle, and
-            // undo only if the interrupt never reached the server. A node that
-            // keeps the follow-up queue holds its own in the same batch.
-            const held = holdThreadOutboxForInterrupt(
-              outboxThreadKey,
-              selectThreadByRef(useStore.getState(), scopeThreadRef(environmentId, threadId))
-                ?.session?.activeTurnId ?? null,
-            );
-            const holdQueue = serverFollowUpQueueSupported;
-            void runAction(async () => {
-              try {
-                await interruptThreadTurn(ensureEnvironmentApi(environmentId), threadId, {
-                  holdQueue,
-                });
-              } catch (error) {
-                held.undo();
-                throw error;
-              }
-              offerToStopDelegatedTasks(environmentId, threadId);
-            });
+          runningSince={runningSince}
+          checks={checks}
+          cacheSummary={cacheSummary}
+          parent={parentLink}
+          delegated={delegatedRows}
+          agents={threadAgents.entry}
+          pullRequestWatch={pullRequestWatch}
+          agentControlReceipts={settledAgentControlProposals}
+          actions={{
+            openMachines: () => navigation.navigate("Connections"),
+            openProject: openProjectScreen,
+            openSourceControl,
+            openFiles: headerModel.filesVisible ? openFiles : undefined,
+            openTerminal: headerModel.terminalVisible ? openTerminal : undefined,
+            openReview: headerModel.reviewVisible ? openReview : undefined,
+            openPullRequest,
+            openCacheInfo: cacheSummary === null ? undefined : () => setCacheSheetVisible(true),
+            openAgents: threadAgents.open,
+            openThread: (target) => openThread(ThreadId.make(target)),
           }}
-          onCompact={() => {
-            if (!headerModel.compactAction || headerModel.compactAction.disabled) return;
-            // Readiness is captured at the tap, as for a send: a connection that changes
-            // before the turn is sent refuses it rather than compacting on another shell.
-            const assertMutationReady = captureReviewedSendReadiness(
-              environmentId,
-              () => createMobileConnectionRegistry().driver.supervisor.read(environmentId),
-              "The connection changed. Reconnect and try again.",
-            );
-            void runAction(() =>
-              compactThreadNow(ensureEnvironmentApi(environmentId), threadId, assertMutationReady),
-            );
-          }}
-          onToggleSettlement={() => {
-            const action = headerModel.settlementAction;
-            if (!action || action.disabled) return;
-            void runSidebarAction(() =>
-              setThreadSettled(
-                ensureEnvironmentApi(environmentId),
-                threadId,
-                action.kind === "settle",
-                (command) => sidebarUndo.dispatch({ environmentId, threadId }, command),
-              ),
-            );
-          }}
-          onToggleArchive={() =>
-            void runSidebarAction(async () => {
-              const shouldArchive = thread?.archivedAt === null;
-              await setThreadArchived(
-                ensureEnvironmentApi(environmentId),
-                threadId,
-                shouldArchive,
-                (command) =>
-                  command.type === "thread.archive"
-                    ? sidebarUndo.archive({ environmentId, threadId }, command.commandId, {
-                        currentRoute: () => {
-                          const state = navigation.getState();
-                          return state?.routes[state.index]?.key ?? null;
-                        },
-                        shouldLeave: () => navigation.canGoBack(),
-                        leave: async () => {
-                          const state = navigation.getState();
-                          const fallbackKey = state?.routes[state.index - 1]?.key ?? null;
-                          navigation.goBack();
-                          return fallbackKey;
-                        },
-                        reopen: () => navigation.navigate("Thread", { environmentId, threadId }),
-                      })
-                    : sidebarUndo.dispatch({ environmentId, threadId }, command),
-              );
-            })
-          }
-          onReview={() => {
-            setActionsVisible(false);
-            openReview();
-          }}
-          onOpenPullRequest={
-            thread && headerModel.pullRequestNumber !== null
-              ? () => {
-                  setActionsVisible(false);
-                  navigation.navigate("ProjectPullRequest", {
-                    environmentId,
-                    projectId: thread.projectId,
-                    number: String(headerModel.pullRequestNumber),
-                  });
-                }
-              : undefined
-          }
-          onAddTask={
-            thread
-              ? () => {
-                  setActionsVisible(false);
-                  // The actions sheet finishes closing before the capture sheet opens over it.
-                  setTimeout(
-                    () =>
-                      openTaskCapture({
-                        environmentId,
-                        projectId: thread.projectId,
-                        link: { kind: "thread", threadId },
-                        linkLabel: `Chat: ${headerModel.title}`,
-                        openDetails: (taskEnvironmentId, taskId) =>
-                          navigation.navigate("TaskDetail", {
-                            environmentId: taskEnvironmentId,
-                            taskId,
-                          }),
-                      }),
-                    TASK_CAPTURE_AFTER_SHEET_MS,
-                  );
-                }
-              : undefined
-          }
         />
       ) : null}
+      {headerModel ? (
+        <ThreadRenameSheet
+          visible={renameSheetVisible}
+          currentTitle={headerModel.title}
+          onClose={() => setRenameSheetFor(null)}
+          onSave={saveThreadTitle}
+        />
+      ) : null}
+      <ClaudeCacheSheet
+        visible={cacheSheetVisible}
+        observation={claudeCacheObservation}
+        onClose={() => setCacheSheetVisible(false)}
+      />
+      {threadAgents.sheet}
 
       {forkSheet ? (
         <ForkDestinationSheet

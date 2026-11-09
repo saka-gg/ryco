@@ -177,8 +177,14 @@ export function ThreadActivityFoldRow(props: {
   const iconColor = useThemeColor("--color-icon-muted");
   const { fold } = props;
 
+  // A recap already says what the steps were; only "Working…" and "Worked for" need a count.
+  const stepCount =
+    fold.durationLabel === null
+      ? `${fold.rows.length} ${fold.rows.length === 1 ? "step" : "steps"}`
+      : null;
+
   return (
-    <View className="mx-4 my-1.5">
+    <View className="mx-4 my-0.5">
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={`${fold.label}. ${fold.rows.length} ${
@@ -186,21 +192,26 @@ export function ThreadActivityFoldRow(props: {
         }. ${fold.expanded ? "Collapse" : "Expand"}.`}
         accessibilityState={{ expanded: fold.expanded }}
         onPress={props.onToggle}
-        className="min-h-9 flex-row items-center gap-2 rounded-xl px-2 py-1.5 active:bg-subtle"
+        hitSlop={{ top: 4, bottom: 4 }}
+        className="min-h-8 flex-row items-center gap-1.5 rounded-lg py-1 pr-2 active:opacity-60"
       >
-        <Text className="text-xs font-ryco-medium text-foreground-muted">{fold.label}</Text>
-        <Text className="text-2xs text-foreground-tertiary">
-          {fold.rows.length} {fold.rows.length === 1 ? "step" : "steps"}
-        </Text>
         <SymbolView
           name={fold.expanded ? "chevron.down" : "chevron.right"}
-          size={10}
+          size={9}
           tintColor={iconColor as string}
           type="monochrome"
         />
+        <Text className="shrink text-xs text-foreground-muted" numberOfLines={1}>
+          {fold.label}
+        </Text>
+        {fold.durationLabel !== null || stepCount !== null ? (
+          <Text className="text-2xs text-foreground-tertiary">
+            {fold.durationLabel ?? stepCount}
+          </Text>
+        ) : null}
       </Pressable>
       {fold.expanded ? (
-        <View className="mt-0.5 gap-0.5 border-l border-border pl-3 ml-2">
+        <View className="mb-1 ml-1 gap-0.5 pl-3">
           {fold.rows.map((row) => (
             <Fragment key={row.id}>
               {fold.liveThought?.beforeRowId === row.id ? (

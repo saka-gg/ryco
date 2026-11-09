@@ -42,7 +42,10 @@ import {
 import { deriveForkableReplyMessageIds } from "@ryco/client-runtime/state/threads";
 import { isHtmlRenderOnlyMessage, readHtmlRenderAttachment } from "./htmlRender.logic";
 import type { ThreadMessageSearchOccurrence } from "./ThreadMessageSearch.logic";
-import { summarizeToolCallGroup, type ToolCallGroupSummary } from "./toolCallGroup.logic";
+import {
+  summarizeToolCallGroup,
+  type ToolCallGroupSummary,
+} from "@ryco/client-runtime/state/session";
 import { classifyChapterStep } from "./workChapters.logic";
 
 const MIN_COLLAPSIBLE_WORK_LOG_ENTRIES = 2;

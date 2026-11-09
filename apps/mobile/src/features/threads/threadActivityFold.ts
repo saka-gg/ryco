@@ -8,7 +8,9 @@ import {
   isHtmlRenderOnlyMessage,
   isLiveWorkStep,
   placeRepliesAfterHtmlRenders,
+  summarizeToolCallGroup,
   type HtmlRenderAttachment,
+  type ToolCallGroupSummary,
   type TimelineEntry,
   type WorkLogEntry,
 } from "@ryco/client-runtime/state/session";
@@ -65,8 +67,13 @@ export interface ActivityFold {
   readonly id: string;
   readonly turnId: string | null;
   readonly status: "running" | "settled";
-  /** "Working…" while live, "Worked for 12s" once settled. */
+  /**
+   * "Working…" while live. Once settled, what the work was ("Read 3 files · ran 2 commands",
+   * web's tool-group recap) or, when a failure or a note is among it, "Worked for 12s".
+   */
   readonly label: string;
+  /** How long a settled fold that reads as a recap took ("12s"); its label says the rest. */
+  readonly durationLabel: string | null;
   readonly rows: ReadonlyArray<ActivityRow>;
   readonly expanded: boolean;
   /**
@@ -99,6 +106,42 @@ export interface TimelineEntryRow {
 }
 
 export type ThreadTimelineRow = TimelineEntryRow | ActivityFold;
+
+/**
+ * Web's recap ("Read 3 files, Ran 2 commands") as one quiet phone line: "Read 3 files · ran 2
+ * commands".
+ */
+export function foldRecapLabel(summary: ToolCallGroupSummary): string {
+  return summary.parts
+    .map((part, index) =>
+      index === 0 ? part.label : `${part.label.charAt(0).toLowerCase()}${part.label.slice(1)}`,
+    )
+    .join(" · ");
+}
+
+/** A single step's own heading ("Read README.md"); not the generic "Tool call" fallback. */
+function loneStepHeading(tools: ReadonlyArray<WorkLogEntry>): string | null {
+  const [only] = tools;
+  if (only === undefined || tools.length !== 1) return null;
+  const heading = toRow(only, false).heading;
+  return heading === only.label ? null : heading;
+}
+
+/**
+ * What a settled fold did, in one line: web's tool-group recap of its tool steps ("Read 3 files
+ * · ran 2 commands"), or the one step's own heading, with its notes counted ("· 1 note"). The
+ * agent's thinking is not work to recap. A failure keeps the fold on its duration ("Worked for
+ * 12s"), so it is never hidden behind "Ran 9 commands".
+ */
+function settledFoldRecap(group: ReadonlyArray<WorkLogEntry>): string | null {
+  if (group.some((entry) => entry.tone === "error")) return null;
+  const tools = group.filter((entry) => entry.tone === "tool");
+  const notes = group.filter((entry) => entry.tone === "info").length;
+  const summary = summarizeToolCallGroup(tools);
+  const work = summary !== null ? foldRecapLabel(summary) : loneStepHeading(tools);
+  if (work === null) return null;
+  return notes === 0 ? work : `${work} · ${notes} ${notes === 1 ? "note" : "notes"}`;
+}
 
 function firstLine(value: string | undefined): string | null {
   if (!value) return null;
@@ -221,6 +264,8 @@ export function buildThreadTimelineRows(input: {
         : elapsedMs(startedAt, running ? input.now : (endedAt ?? input.now));
 
     if (running) runningFolds.push({ index: rows.length, entries: group });
+    // A failure keeps the duration label, so it is not hidden behind "Ran 9 commands".
+    const recap = running ? null : settledFoldRecap(group);
     rows.push({
       kind: "activity-fold",
       id: foldId,
@@ -228,9 +273,12 @@ export function buildThreadTimelineRows(input: {
       status: running ? "running" : "settled",
       label: running
         ? "Working…"
-        : duration === null
-          ? "Worked"
-          : `Worked for ${formatDuration(duration)}`,
+        : recap !== null
+          ? recap
+          : duration === null
+            ? "Worked"
+            : `Worked for ${formatDuration(duration)}`,
+      durationLabel: recap !== null && duration !== null ? formatDuration(duration) : null,
       rows: group.map((entry) => toRow(entry, running)),
       // Settled folds collapse to save space; the RUNNING one stays open,
       // because live progress is the main reason to have the phone open.

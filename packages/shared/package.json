@@ -30,6 +30,10 @@
       "types": "./src/claudeCacheReview.ts",
       "import": "./src/claudeCacheReview.ts"
     },
+    "./tokenCount": {
+      "types": "./src/tokenCount.ts",
+      "import": "./src/tokenCount.ts"
+    },
     "./claudeAutoCompact": {
       "types": "./src/claudeAutoCompact.ts",
       "import": "./src/claudeAutoCompact.ts"

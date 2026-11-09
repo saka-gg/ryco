@@ -122,10 +122,45 @@ describe("thread activity folds", () => {
     expect(folds(rows)[0]?.label).toBe("Working…");
   });
 
-  it("says how long a settled turn took", () => {
-    const rows = build([work("a"), work("b", { createdAt: T12 })]);
+  it("says how long a settled turn took when a step failed", () => {
+    const rows = build([work("a"), work("b", { createdAt: T12, tone: "error" })]);
     expect(folds(rows)[0]?.status).toBe("settled");
     expect(folds(rows)[0]?.label).toBe("Worked for 12s");
+    expect(folds(rows)[0]?.durationLabel).toBeNull();
+  });
+
+  it("recaps settled tool work as one line, with its duration beside it", () => {
+    const rows = build([
+      work("a", { itemType: "command_execution", command: "cat src/a.ts" }),
+      work("b", { itemType: "command_execution", command: "cat src/b.ts" }),
+      work("c", { itemType: "command_execution", command: "bun run test", createdAt: T12 }),
+    ]);
+    expect(folds(rows)[0]?.label).toBe("Ran 1 command · read 2 files");
+    expect(folds(rows)[0]?.durationLabel).toBe("12s");
+  });
+
+  it("names a lone step and counts the notes beside the work", () => {
+    const rows = build([
+      work("n1", { tone: "info", label: "Runtime warning" }),
+      work("a", { itemType: "command_execution", command: "cat README.md" }),
+      work("n2", { tone: "info", label: "Runtime warning" }),
+    ]);
+    expect(folds(rows)[0]?.label).toBe("Read README.md · 2 notes");
+  });
+
+  it("leaves the agent's thinking out of the recap", () => {
+    const rows = build([
+      work("t", { tone: "thinking", itemType: "reasoning", label: "Reasoning" }),
+      work("a", { itemType: "command_execution", command: "cat src/a.ts" }),
+      work("b", { itemType: "command_execution", command: "cat src/b.ts" }),
+    ]);
+    expect(folds(rows)[0]?.label).toBe("Read 2 files");
+  });
+
+  it("keeps Working… on a running fold, never a recap", () => {
+    const rows = build([work("a"), work("b")], { runningTurnId: "turn-1" });
+    expect(folds(rows)[0]?.label).toBe("Working…");
+    expect(folds(rows)[0]?.durationLabel).toBeNull();
   });
 
   it("degrades to a bare Worked when timestamps are unusable", () => {
