@@ -767,7 +767,10 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // 7.214 MB on 2026-11-09: Full access chats running every device action without asking
     // (#1159, #1161) measured 7.212145 MB; each fit alone, together they passed the cap.
     // 7.216 MB on 2026-11-09: the Claude Fable 5.2 model entries (#1169) measured 7.214311 MB.
-    expect(bytes).toBeLessThan(7_216_000);
+    // 7.218 MB on 2026-11-09: Statistics recording cache writes and Fast mode per turn and
+    // asking usage to price them (#1172) measured 7.216845 MB; the pricing itself loads with
+    // the usage pipeline through import().
+    expect(bytes).toBeLessThan(7_218_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.
