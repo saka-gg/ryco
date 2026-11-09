@@ -664,23 +664,21 @@ function NewToThisHubOptions({
         New to this Hub?
       </div>
       <h2 className="sr-only">New to this Hub?</h2>
-      <div className="mt-4 flex flex-col gap-1">
+      <div className="mt-4 flex flex-col gap-2">
+        {/* With open signup, Create account is the one path a newcomer needs;
+            invitation holders find their code entry on that page instead. */}
         {publicSignupEnabled ? (
-          <Button
-            variant="outline"
-            size="lg"
-            className="mb-2 phone:min-h-11"
-            onClick={onCreateAccount}
-          >
+          <Button variant="outline" size="lg" className="phone:min-h-11" onClick={onCreateAccount}>
             <UserPlusIcon aria-hidden />
             Create account
           </Button>
-        ) : null}
-        <HubInlineChoice
-          hint={publicSignupEnabled ? "Have an invitation code?" : "Accounts here are invite-only."}
-          label="Redeem invitation"
-          onClick={onRedeemInvitation}
-        />
+        ) : (
+          <HubInlineChoice
+            hint="Accounts here are invite-only."
+            label="Redeem invitation"
+            onClick={onRedeemInvitation}
+          />
+        )}
         {bootstrapAvailable ? (
           <HubInlineChoice
             hint="Setting up a brand-new Hub?"
@@ -1141,6 +1139,16 @@ export function HostedAuthenticationSurface({
               clearIdentityLink();
               setRegistrationMode(null);
             }}
+            detailsFooter={
+              <HubInlineChoice
+                hint="Have an invitation code?"
+                label="Redeem invitation"
+                onClick={() => {
+                  clearIdentityLink();
+                  setRegistrationMode("invitation");
+                }}
+              />
+            }
           />
         )}
       </HubGateway>
@@ -1235,7 +1243,6 @@ export function HostedAuthenticationSurface({
       }
       actions={signInActions}
       trailing={signInTrailing}
-      aside={<HostedRelayTrustNotice variant="disclosure" />}
       scrollRef={surfaceScrollRef}
       titleRef={headingRef}
     >

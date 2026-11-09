@@ -124,7 +124,7 @@ function InstallInstructions({
         </Button>
       </div>
       <div className="mt-3 border-t border-border pt-3">
-        <HostedRelayTrustNotice variant="inline" />
+        <HostedRelayTrustNotice compact />
       </div>
     </div>
   );

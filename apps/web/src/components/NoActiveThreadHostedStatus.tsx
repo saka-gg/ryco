@@ -21,7 +21,7 @@ export function NoActiveThreadHostedStatus() {
       <Button variant="outline" onClick={() => navigateHub({ kind: "nodes" })}>
         Manage nodes
       </Button>
-      <HostedRelayTrustNotice variant="inline" />
+      <HostedRelayTrustNotice compact />
     </div>
   );
 }
