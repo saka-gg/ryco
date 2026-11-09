@@ -15,6 +15,11 @@
  * and the send path can't drift apart.
  */
 
+import { pullRequestWorktreeSource } from "@ryco/client-runtime/state/composer";
+
+// Shared with the phone's New Task (`@ryco/client-runtime/state/composer/worktreeSource`).
+export { pullRequestWorktreeSource };
+
 export type WorkLocationKind = "projectRoot" | "existingWorktree" | "newWorktree";
 
 export interface WorktreeChoice {
@@ -95,15 +100,6 @@ export function workLocationDraftPatch(location: WorkLocation): {
       // actually live in the project directory.
       return { envMode: "local", worktreePath: null, branch: null, worktreeSource: null };
   }
-}
-
-/** The source a picked pull request records, labelled `#N title` (`#N` without a title). */
-export function pullRequestWorktreeSource(
-  number: number,
-  title: string | null,
-): { readonly kind: "pr"; readonly number: number; readonly label: string } {
-  const trimmed = title?.trim();
-  return { kind: "pr", number, label: trimmed ? `#${number} ${trimmed}` : `#${number}` };
 }
 
 /**

@@ -55,7 +55,7 @@ describe("thread header menu", () => {
     expect(ids(menu())).toEqual([
       ["workspace", ["files", "terminal", "source-control", "review"]],
       ["chat", ["side-chat", "fork", "rename", "add-task", "copy-reference"]],
-      ["state", ["archive"]],
+      ["state", ["archive", "delete"]],
     ]);
   });
 
@@ -71,7 +71,7 @@ describe("thread header menu", () => {
     expect(ids(sections)).toEqual([
       ["workspace", ["files", "terminal", "device", "source-control", "review", "pull-request"]],
       ["chat", ["side-chat", "fork", "rename", "add-task", "copy-reference", "copy-task-id"]],
-      ["state", ["stop", "archive"]],
+      ["state", ["stop", "archive", "delete"]],
     ]);
     const all = sections.flatMap((section) => section.actions);
     expect(all.find((action) => action.id === "pull-request")?.title).toBe("Pull request #42");
@@ -125,7 +125,7 @@ describe("thread header menu", () => {
     });
     expect(ids(sections)).toEqual([
       ["chat", ["rename", "copy-reference"]],
-      ["state", ["archive"]],
+      ["state", ["archive", "delete"]],
     ]);
     const all = sections.flatMap((section) => section.actions);
     expect(all.find((action) => action.id === "rename")?.disabled).toBe(true);
@@ -154,6 +154,7 @@ describe("thread header menu", () => {
       ["compact", "Compact conversation", "Wait for the agent to finish."],
       ["settlement", "Settle task", "Resolve the pending approval first."],
       ["archive", "Restore", undefined],
+      ["delete", "Delete…", undefined],
     ]);
   });
 
@@ -166,13 +167,31 @@ describe("thread header menu", () => {
     expect(ids(sections)).toEqual([
       ["workspace", ["files", "terminal"]],
       ["chat", ["side-chat", "fork", "rename", "turn-into-project", "add-task", "copy-reference"]],
-      ["state", ["archive"]],
+      ["state", ["archive", "delete"]],
     ]);
     expect(
       menu({ promoteChatAvailable: true, busy: true })
         .flatMap((section) => section.actions)
         .find((action) => action.id === "turn-into-project")?.disabled,
     ).toBe(true);
+  });
+
+  it("offers Stop session only while no turn runs, and Delete always", () => {
+    const state = (overrides: Partial<ThreadHeaderMenuInput>) =>
+      menu(overrides)
+        .find((section) => section.id === "state")
+        ?.actions.map((action) => action.id);
+    expect(state({ sessionStoppable: true })).toEqual(["stop-session", "archive", "delete"]);
+    expect(
+      state({
+        sessionStoppable: true,
+        model: model({ moreActions: ["rename", "archive", "stop", "details"] }),
+      }),
+    ).toEqual(["stop", "archive", "delete"]);
+    const remove = menu({ busy: true })
+      .flatMap((section) => section.actions)
+      .find((action) => action.id === "delete");
+    expect(remove).toMatchObject({ destructive: true, disabled: true });
   });
 
   it("notes a running command and extra sessions under Terminal", () => {
@@ -199,6 +218,7 @@ describe("thread header menu", () => {
       "add-task",
       "copy-reference",
       "archive",
+      "delete",
     ]);
     // Every row is an action with a title: none is an untitled group (a blank submenu). The one
     // submenu Android draws is "More tools", titled, holding the tools.

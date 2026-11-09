@@ -5502,6 +5502,115 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("makes a source worktree's thread under the client's id, and finds it on a retry", () =>
+    Effect.gen(function* () {
+      const dispatchedCommands: Array<OrchestrationCommand> = [];
+      const clientThreadId = ThreadId.make("thread-client-chosen");
+      let made: OrchestrationThreadShell | null = null;
+      const createWorktree = vi.fn(
+        (input: Parameters<GitVcsDriver.GitVcsDriverShape["createWorktree"]>[0]) =>
+          Effect.succeed({
+            worktree: {
+              refName: input.newRefName ?? input.refName,
+              path: "/tmp/project-client-thread-worktree",
+            },
+          }),
+      );
+
+      yield* buildAppUnderTest({
+        layers: {
+          gitVcsDriver: { createWorktree },
+          vcsStatusBroadcaster: {
+            refreshStatus: () =>
+              Effect.succeed({
+                isRepo: true,
+                hasPrimaryRemote: true,
+                isDefaultRef: false,
+                refName: "feature/KAN-5",
+                hasWorkingTreeChanges: false,
+                workingTree: { files: [], insertions: 0, deletions: 0 },
+                hasUpstream: false,
+                aheadCount: 0,
+                behindCount: 0,
+                aheadOfDefaultCount: 0,
+                pr: null,
+              }),
+          },
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatchedCommands.push(command);
+                if (command.type === "thread.attach-to-worktree") {
+                  made = makeDefaultOrchestrationThreadShell({
+                    id: command.threadId,
+                    worktreeId: command.worktreeId,
+                  });
+                }
+                return { sequence: dispatchedCommands.length };
+              }),
+          },
+          projectionSnapshotQuery: {
+            getThreadShellById: () => Effect.succeed(Option.fromNullishOr(made)),
+            getProjectShellById: () =>
+              Effect.succeed(
+                Option.some({
+                  id: defaultProjectId,
+                  title: "Default Project",
+                  workspaceRoot: "/tmp/project",
+                  projectMetadataDir: ".ryco",
+                  repositoryIdentity: null,
+                  defaultModelSelection,
+                  customSystemPrompt: null,
+                  customAvatarContentHash: null,
+                  preferredRemoteName: null,
+                  scripts: [],
+                  createdAt: "2026-05-10T00:00:00.000Z",
+                  updatedAt: "2026-05-10T00:00:00.000Z",
+                }),
+              ),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const create = () =>
+        Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[WS_METHODS.gitCreateWorktreeForProject]({
+              projectId: defaultProjectId,
+              threadId: clientThreadId,
+              intent: {
+                kind: "workItem",
+                provider: "jira",
+                key: "KAN-5",
+                title: "Retry me",
+                state: "open",
+                stateName: "To do",
+                url: "https://ryco-app.atlassian.net/browse/KAN-5",
+                branchSource: "existing",
+                branchName: "feature/KAN-5",
+              },
+            }),
+          ),
+        );
+
+      const first = yield* create();
+      assert.equal(first.sessionId, clientThreadId);
+      const threadCreate = dispatchedCommands.find((command) => command.type === "thread.create");
+      assert.equal(
+        threadCreate?.type === "thread.create" ? threadCreate.threadId : null,
+        clientThreadId,
+      );
+      const dispatchedBeforeRetry = dispatchedCommands.length;
+
+      // The reply was lost and the client asks again: nothing new is made.
+      const retry = yield* create();
+      assert.deepEqual(retry, { worktreeId: first.worktreeId, sessionId: clientThreadId });
+      assert.equal(createWorktree.mock.calls.length, 1);
+      assert.equal(dispatchedCommands.length, dispatchedBeforeRetry);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("uses branchName and baseBranch overrides when provided on issue intent", () =>
     Effect.gen(function* () {
       const dispatchedCommands: Array<OrchestrationCommand> = [];

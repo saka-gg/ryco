@@ -6,8 +6,7 @@ import {
 } from "@ryco/client-runtime/state/composer";
 import {
   deriveUsageLimitBanner,
-  formatUsageLimitReset,
-  type UsageLimitBannerModel,
+  usageLimitBannerDescription,
 } from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId, ServerConfig, ThreadUsageLimit } from "@ryco/contracts";
 import { GaugeIcon } from "lucide-react";
@@ -36,19 +35,7 @@ interface PendingRun {
   readonly action: PendingAction;
 }
 
-export function usageLimitBannerDescription(model: UsageLimitBannerModel): string {
-  const resets = model.resetAt ? `Resets ${formatUsageLimitReset(model.resetAt)}` : null;
-  switch (model.description) {
-    case "resets-at":
-      return resets ?? "Resume when your limit resets.";
-    case "resuming-at-reset":
-      return `${resets ?? "Resets soon"} · resumes automatically`;
-    case "unknown-reset":
-      return "Reset time unknown. Resume when your limit resets.";
-    case "reset-passed":
-      return "Resume to continue this thread.";
-  }
-}
+export { usageLimitBannerDescription };
 
 const readNowMs = () => Date.now();
 

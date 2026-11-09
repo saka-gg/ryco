@@ -146,6 +146,9 @@ import {
   type ProposedPlan,
 } from "@ryco/client-runtime/state/threads";
 import { isChatProject } from "@ryco/shared/projectKind";
+import { listThreadLifecycleActions } from "@ryco/client-runtime/state/lifecycle";
+import { goBackOrHome } from "../../navigation/goBackOrHome";
+import { ThreadUsageLimitBanner } from "./ThreadUsageLimitBanner";
 import { threadSnoozeWokeAt } from "@ryco/shared/threadSnooze";
 import type { CommandId, ThreadForkResult } from "@ryco/contracts";
 import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts/base-schemas";
@@ -294,6 +297,8 @@ import { runUndoFileChanges } from "./undoFileChanges";
 import {
   clearThreadGoal,
   compactThreadNow,
+  stopThreadSession,
+  trashThread,
   interruptThreadTurn,
   renameThread,
   setThreadGoal,
@@ -1001,6 +1006,8 @@ export function ThreadDetailScreen(props: {
     settlementModel?.snoozed[0] ??
     settlementModel?.hidden[0] ??
     null;
+  // The inbox's own rule for whether this chat can be snoozed (the usage-limit banner's Snooze).
+  const usageLimitSnoozeEligible = settlementEntry?.canSnooze === true;
   const cachedView = useMemo(
     () =>
       deriveThreadCachedView({
@@ -3052,6 +3059,9 @@ export function ThreadDetailScreen(props: {
         forkAvailable: latestForkableReply !== undefined,
         addTaskAvailable: thread !== undefined,
         promoteChatAvailable: thread !== undefined && project !== null && isChatProject(project),
+        sessionStoppable:
+          sidebarThread !== undefined &&
+          listThreadLifecycleActions(sidebarThread).some((action) => action.id === "stop-session"),
         busy: mutationBusy,
       })
     : null;
@@ -3177,6 +3187,13 @@ export function ThreadDetailScreen(props: {
         return toggleSettlement();
       case "archive":
         return toggleArchive();
+      case "stop-session":
+        return void runAction(
+          () => stopThreadSession(ensureEnvironmentApi(environmentId), threadId),
+          "Could not stop the session",
+        );
+      case "delete":
+        return deleteCurrentThread();
     }
   };
   // A proposed plan's buttons (`ProposedPlanCard`): implement here or in a new chat, or take the
@@ -3296,6 +3313,28 @@ export function ThreadDetailScreen(props: {
   useLayoutEffect(() => {
     planHandlersRef.current = planHandlers;
   });
+
+  // Delete: the node trashes the chat and purges it shortly after, with its attachments and
+  // terminal history.
+  const deleteCurrentThread = () => {
+    const title = headerModel?.title ?? "this chat";
+    Alert.alert(
+      `Delete "${title}"?`,
+      "The chat, its attachments and its terminal history are removed for good.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () =>
+            void runAction(async () => {
+              await trashThread(ensureEnvironmentApi(environmentId), threadId);
+              goBackOrHome(navigation);
+            }, "Could not delete the chat"),
+        },
+      ],
+    );
+  };
 
   const onHeaderMenuActionRef = useRef(onHeaderMenuAction);
   useLayoutEffect(() => {
@@ -3747,6 +3786,20 @@ export function ThreadDetailScreen(props: {
           onSend={sendSideQuestion}
           onCancel={() => sideChatStore.getState().cancel(sideChatKey)}
           onClear={() => sideChatStore.getState().clear(sideChatKey)}
+        />
+      ) : null}
+
+      {thread?.usageLimit ? (
+        <ThreadUsageLimitBanner
+          key={outboxThreadKey}
+          environmentId={environmentId}
+          thread={thread}
+          dispatchAllowed={
+            connectionUiState === "connected" &&
+            (environmentRow?.mutationReady ?? false) &&
+            !cachedView.actionsDisabled
+          }
+          canSnooze={usageLimitSnoozeEligible}
         />
       ) : null}
 

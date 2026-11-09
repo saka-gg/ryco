@@ -56,6 +56,7 @@ import {
   describeNativeCompactionBlocker,
   nativeCompactionAdvertised,
   nativeCompactionBlockerForSession,
+  worktreeSourceIntent,
 } from "@ryco/client-runtime/state/composer";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { flushPreviewFiles, hasUnsavedPreviewFiles } from "./previewFileSessions";
@@ -5412,26 +5413,7 @@ export default function ChatView(props: ChatViewProps) {
         const created = await createWorktree({
           fetchOrigin: draftThread?.fetchOrigin ?? true,
           projectId: activeProject.id,
-          intent:
-            pendingWorktreeSource.kind === "pr"
-              ? { kind: "pr", number: pendingWorktreeSource.number }
-              : pendingWorktreeSource.kind === "issue"
-                ? {
-                    kind: "issue",
-                    number: pendingWorktreeSource.number,
-                    title: pendingWorktreeSource.title,
-                  }
-                : {
-                    kind: "workItem",
-                    provider: pendingWorktreeSource.provider,
-                    key: pendingWorktreeSource.key,
-                    title: pendingWorktreeSource.title,
-                    ...(pendingWorktreeSource.state ? { state: pendingWorktreeSource.state } : {}),
-                    ...(pendingWorktreeSource.stateName
-                      ? { stateName: pendingWorktreeSource.stateName }
-                      : {}),
-                    ...(pendingWorktreeSource.url ? { url: pendingWorktreeSource.url } : {}),
-                  },
+          intent: worktreeSourceIntent(pendingWorktreeSource),
         });
         notifyWorktreeSubmoduleSetup(created.submoduleInitialization);
         sourceThreadRef = scopeThreadRef(environmentId, created.sessionId);

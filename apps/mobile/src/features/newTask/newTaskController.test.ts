@@ -530,6 +530,64 @@ describe("New Task controller", () => {
     expect(result.attempt.threadReady).toBe(true);
     expect(result.attempt.prompt).toBe("Do not lose this");
   });
+
+  it("writes the chosen modes to a thread the node created before its first turn", async () => {
+    // A task started from a pull request: `git.createWorktreeForProject` made the thread in
+    // full access and default mode, and the node runs a turn in the thread's modes.
+    const attempt = {
+      ...createNewTaskAttempt({
+        environmentId,
+        prompt: "Review the PR",
+        project: { kind: "existing", projectId: existingProjectId, workspaceRoot: "/code/ryco" },
+        worktree: { kind: "local" },
+        runtimeMode: "approval-required",
+        interactionMode: "plan",
+        tokenMode: "balanced",
+        createdAt,
+        ids,
+      }),
+      threadCommandAccepted: true,
+      threadReady: true,
+      worktreeAttached: true,
+      threadSettingsPending: true,
+    };
+    const failing = deps({
+      dispatch: async (command) => {
+        if (command.type === "thread.interaction-mode.set") throw nodeRefusal("Thread is gone.");
+      },
+    });
+    const refused = await runNewTaskAttempt(attempt, failing);
+    if (refused.ok) throw new Error("expected failure");
+    // Never a turn in the node's modes.
+    expect(refused.step).toBe("turn");
+    expect(refused.attempt.turnStarted).toBe(false);
+    expect(refused.attempt.threadSettingsPending).toBe(true);
+
+    const runtime = deps();
+    const result = await runNewTaskAttempt(attempt, runtime);
+    expect(result.ok).toBe(true);
+    expect(runtime.commands).toEqual([
+      expect.objectContaining({
+        type: "thread.runtime-mode.set",
+        commandId: "command-turn:runtime-mode",
+        threadId: ids.threadId,
+        runtimeMode: "approval-required",
+      }),
+      expect.objectContaining({
+        type: "thread.interaction-mode.set",
+        commandId: "command-turn:interaction-mode",
+        interactionMode: "plan",
+      }),
+      expect.objectContaining({
+        type: "thread.token-mode.set",
+        commandId: "command-turn:token-mode",
+        tokenMode: "balanced",
+      }),
+      expect.objectContaining({ type: "thread.turn.start", interactionMode: "plan" }),
+    ]);
+    if (!result.ok) throw new Error("expected success");
+    expect(result.attempt.threadSettingsPending).toBe(false);
+  });
 });
 
 describe("New Task controller for a task's chat", () => {
