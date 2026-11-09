@@ -234,6 +234,7 @@ export function ThreadContextCard(props: {
   const [mounted, setMounted] = useState(visible);
   const progress = useSharedValue(0);
   const dark = useColorScheme() === "dark";
+  const popoverColor = useThemeColor("--color-popover") as string;
   const iconColor = useThemeColor("--color-icon-muted");
   const subtleIcon = useThemeColor("--color-icon-subtle");
   const separator = useThemeColor("--color-border");
@@ -318,12 +319,7 @@ export function ThreadContextCard(props: {
             tint={dark ? "systemMaterialDark" : "systemMaterialLight"}
             style={StyleSheet.absoluteFill}
           />
-          <View
-            style={[
-              StyleSheet.absoluteFill,
-              { backgroundColor: dark ? "rgba(40,40,46,0.94)" : "rgba(255,255,255,0.94)" },
-            ]}
-          />
+          <View style={[StyleSheet.absoluteFill, { backgroundColor: popoverColor }]} />
 
           <View className="flex-row items-center" style={{ gap: 10 }}>
             <Pressable

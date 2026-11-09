@@ -1,10 +1,8 @@
 import type { EnvironmentId, ProjectId } from "@ryco/contracts";
 
 import { pullRequestTabListFilters, type PullRequestListItemModel } from "./pullRequestListModel";
-import { resolvePullRequestRepositoryChoice } from "./pullRequestRepositoriesModel";
 import { usePullRequestList, useSourceControlProvider } from "./usePullRequestData";
-import { usePullRequestRepositoryChoices } from "./usePullRequestRepositoryChoices";
-import { usePullRequestTabState } from "./usePullRequestTabState";
+import { usePullRequestTabChoice } from "./usePullRequestRepositoryChoices";
 
 /**
  * The PRs scope of the app's global search: pull requests of the repository
@@ -45,13 +43,12 @@ const STATE_WORD: Readonly<Record<string, string>> = {
 export const PULL_REQUEST_SEARCH_LIMIT = 20;
 
 export function usePullRequestSearch(query: string): PullRequestSearch {
-  const choices = usePullRequestRepositoryChoices();
-  const tabState = usePullRequestTabState();
-  const choice = resolvePullRequestRepositoryChoice(choices, tabState.repositoryKey);
+  const { choice } = usePullRequestTabChoice();
+  const trimmed = query.trim();
   const environmentId = choice?.environmentId ?? null;
   const cwd = choice?.cwd ?? null;
-  const provider = useSourceControlProvider(environmentId, cwd);
-  const trimmed = query.trim();
+  // The host is asked only once there is something to search: opening Search reads nothing.
+  const provider = useSourceControlProvider(trimmed.length > 0 ? environmentId : null, cwd);
   const list = usePullRequestList({
     environmentId: trimmed.length > 0 ? environmentId : null,
     cwd,

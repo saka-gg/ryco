@@ -116,6 +116,15 @@ export function buildSearchSections(
   return sections;
 }
 
+/**
+ * Whether Search's sources are mounted: from the first query on, and for the
+ * rest of the visit. Until then the screen is only its field and chips, so
+ * opening it never waits on every machine's threads, tasks or the PRs host.
+ */
+export function searchSourcesLive(live: boolean, query: string | null): boolean {
+  return live || query !== null;
+}
+
 export type SearchEmptyState = "prompt" | "searching" | "no-results" | null;
 
 /** What Search shows when it has no results to list. */

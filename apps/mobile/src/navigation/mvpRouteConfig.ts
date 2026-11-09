@@ -32,6 +32,13 @@ export interface MvpRouteDescriptor {
 const THREAD = "threads/:environmentId/:threadId";
 const PROJECT = "projects/:environmentId/:projectId";
 
+/**
+ * Search's fade, open and close. The native default is 500 ms each way, which
+ * made Search feel slow to open and to leave; its first frame is only the
+ * field and chips, so a short fade is all it needs.
+ */
+export const SEARCH_TRANSITION_MS = 180;
+
 // Flat root routes (Thread lives here, NOT in a nested navigator — required for
 // the iOS-26 shared-header morph). Order is the source order for the tree.
 export const MVP_ROOT_ROUTES = {

@@ -122,7 +122,7 @@ function MenuBackdrop({ dark }: { readonly dark: boolean }) {
           style={StyleSheet.absoluteFill}
         />
       ) : null}
-      <View style={StyleSheet.absoluteFill} className="bg-card-translucent" />
+      <View style={StyleSheet.absoluteFill} className="bg-popover" />
     </View>
   );
 }

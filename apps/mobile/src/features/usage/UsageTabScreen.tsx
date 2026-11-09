@@ -1,5 +1,4 @@
-import { MenuView } from "@react-native-menu/menu";
-import { useIsFocused, type StaticScreenProps } from "@react-navigation/native";
+import { useIsFocused, useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import type { EnvironmentId } from "@ryco/contracts";
 import type { StatRange } from "@ryco/client-runtime/usage";
 import { useEffect, useState, type ReactNode } from "react";
@@ -14,9 +13,9 @@ import Animated, {
 } from "react-native-reanimated";
 
 import { SymbolView } from "../../components/AppSymbol";
-import { HeaderIconButton } from "../../components/HeaderIconButton";
 import { AppText as Text } from "../../components/AppText";
 import { EmptyState } from "../../components/EmptyState";
+import { MachinePickerButton } from "../../components/MachinePickerButton";
 import { MotionReveal } from "../../components/MotionReveal";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { MAIN_TABS } from "../../navigation/tabs/mainTabsModel";
@@ -44,9 +43,8 @@ import {
   USAGE_VIEW_OPTIONS,
   scopeUsageEnvironments,
   usageContentState,
-  usageDeviceMenu,
+  usageMachinePick,
   usageViewHasRange,
-  type UsageDeviceMenu,
   type UsageDeviceNotice,
   type UsageView,
 } from "./usageTabModel";
@@ -71,6 +69,7 @@ export function UsageTabScreen(
     | undefined
   >,
 ) {
+  const navigation = useNavigation();
   const environments = useHomeEnvironments();
   const params = props.route.params;
   const [view, setView] = useState<UsageView>(
@@ -86,7 +85,7 @@ export function UsageTabScreen(
   const [range, setRange] = useState<StatRange>(DEFAULT_USAGE_RANGE);
   const [device, setDevice] = useState(ALL_DEVICES);
   const scope = scopeUsageEnvironments(environments, device, view);
-  const menu = usageDeviceMenu(environments, scope, view);
+  const pick = usageMachinePick(scope, view);
   const data = useStatisticsData(scope.scoped, view, range);
   const limitNodes = providerLimitsNodes(data.nodes);
 
@@ -102,15 +101,26 @@ export function UsageTabScreen(
   };
 
   const { collapsed, onScroll } = useLargeTitleCollapse();
-  const showDeviceFilter = environments.length > 1;
-  useTabStackHeader(
-    showDeviceFilter
-      ? {
-          title: collapsed ? TITLE : "",
-          headerRight: () => <DeviceFilterButton menu={menu} onChange={setDevice} />,
-        }
-      : { title: collapsed ? TITLE : "" },
-  );
+  useTabStackHeader({
+    title: collapsed ? TITLE : "",
+    // The machine picker every tab shares; Activity reads one device, so it has no "All machines".
+    unstable_headerLeftItems: () => [
+      {
+        type: "custom",
+        hidesSharedBackground: true,
+        element: (
+          <MachinePickerButton
+            environments={environments}
+            selected={pick.selected}
+            allowAll={pick.allowAll}
+            title="Show usage from"
+            onSelect={(environmentId) => setDevice(environmentId ?? ALL_DEVICES)}
+            onManage={() => navigation.navigate("Connections")}
+          />
+        ),
+      },
+    ],
+  });
 
   // Reset credits are spent only through a connected, mutation-ready owner session.
   const canRedeem = (environmentId: EnvironmentId) =>
@@ -149,10 +159,7 @@ export function UsageTabScreen(
       refreshControl={<RefreshControl refreshing={pulled} onRefresh={refresh} />}
     >
       <TabLargeTitle title={TITLE}>
-        <View className="h-5 flex-row items-center gap-3 px-4">
-          <Text className="flex-1 text-sm text-foreground-muted" numberOfLines={1}>
-            {menu.label}
-          </Text>
+        <View className="h-5 flex-row items-center px-4">
           {updating ? <UpdatingLabel /> : null}
         </View>
       </TabLargeTitle>
@@ -219,39 +226,6 @@ function failedDetail(notices: readonly UsageDeviceNotice[]): string {
   const [only] = notices;
   if (notices.length === 1 && only !== undefined) return only.message;
   return notices.map((notice) => `${notice.label}: ${notice.message}`).join("\n");
-}
-
-/** The header's device filter; its icon fills while one device is picked. */
-function DeviceFilterButton(props: {
-  readonly menu: UsageDeviceMenu;
-  readonly onChange: (device: string) => void;
-}) {
-  return (
-    <MenuView
-      title={props.menu.title}
-      actions={props.menu.options.map((option) => ({
-        id: option.value,
-        title: option.label,
-        state: option.value === props.menu.value ? "on" : "off",
-      }))}
-      onPressAction={({ nativeEvent }) => props.onChange(nativeEvent.event)}
-    >
-      <View
-        accessible
-        accessibilityRole="button"
-        accessibilityLabel={`Devices: ${props.menu.label}`}
-      >
-        <HeaderIconButton
-          icon={
-            props.menu.filtered
-              ? "line.3.horizontal.decrease.circle.fill"
-              : "line.3.horizontal.decrease.circle"
-          }
-          accessibilityLabel="Devices"
-        />
-      </View>
-    </MenuView>
-  );
 }
 
 function LoadingState(props: { readonly label: string }) {

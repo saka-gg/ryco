@@ -121,6 +121,22 @@ export function derivePullRequestRepositoryChoices(input: {
 }
 
 /**
+ * The machines the PRs tab's machine picker lists: those with a checkout of a
+ * repository that has a remote (a chat or a folder without one has no pull
+ * requests).
+ */
+export function pullRequestMachineIds(
+  projects: ReadonlyArray<PullRequestRepositoryProject>,
+): ReadonlySet<EnvironmentId> {
+  const ids = new Set<EnvironmentId>();
+  for (const project of projects) {
+    if (project.repositoryIdentity?.canonicalKey !== undefined && !isChatProject(project))
+      ids.add(project.environmentId);
+  }
+  return ids;
+}
+
+/**
  * The choice to show: the one the reader picked last while it still exists,
  * else the first repository whose machine can act, else the first connected
  * one, else the first one.

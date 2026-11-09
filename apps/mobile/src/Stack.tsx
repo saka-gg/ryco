@@ -98,6 +98,7 @@ import {
   MVP_ALL_ROOT_ROUTES,
   MVP_ROOT_ROUTES,
   MVP_SETTINGS_ROUTES,
+  SEARCH_TRANSITION_MS,
   WORKSPACE_OVERLAY_ROUTE_NAMES,
   type HeaderPreset,
   type MvpAnyRootRouteName,
@@ -520,8 +521,12 @@ export const ROOT_STACK_SCREENS = {
   Search: createNativeStackScreen({
     screen: GlobalSearchRouteScreen,
     linking: MVP_ROOT_ROUTES.Search.linking,
-    // The field takes the place of the header; the list fades in under it.
-    options: routeOptions("Search", { animation: "fade", headerShown: false }),
+    // The field takes the place of the header; the list fades in under it, quickly.
+    options: routeOptions("Search", {
+      animation: "fade",
+      animationDuration: SEARCH_TRANSITION_MS,
+      headerShown: false,
+    }),
   }),
   SettingsHub: createNativeStackScreen({
     screen: SettingsHubRouteScreen,

@@ -8,7 +8,7 @@ import {
   limitsFocusRefresh,
   scopeUsageEnvironments,
   usageContentState,
-  usageDeviceMenu,
+  usageMachinePick,
   usageViewHasRange,
   linkedUsageViewToOpen,
 } from "./usageTabModel";
@@ -56,39 +56,33 @@ describe("scopeUsageEnvironments", () => {
   });
 });
 
-describe("usageDeviceMenu", () => {
-  it("names all devices, then each device, and marks a narrowed filter", () => {
-    const all = usageDeviceMenu(
-      [mac, mini],
-      scopeUsageEnvironments([mac, mini], "all", "usage"),
-      "usage",
-    );
-    expect(all.options.map((option) => option.label)).toEqual([
-      "All connected devices",
-      "MAC",
-      "MINI",
-    ]);
-    expect(all).toMatchObject({
-      value: ALL_DEVICES,
-      label: "All connected devices",
-      filtered: false,
-    });
-
-    const picked = usageDeviceMenu(
-      [mac, mini],
-      scopeUsageEnvironments([mac, mini], "mini", "limits"),
-      "limits",
-    );
-    expect(picked).toMatchObject({ value: "mini", label: "MINI", filtered: true });
+describe("usageMachinePick", () => {
+  it("shows every connected device, or the picked one, with All machines offered", () => {
+    expect(
+      usageMachinePick(scopeUsageEnvironments([mac, mini], ALL_DEVICES, "usage"), "usage"),
+    ).toEqual({ selected: null, allowAll: true });
+    expect(
+      usageMachinePick(scopeUsageEnvironments([mac, mini], "mini", "limits"), "limits"),
+    ).toEqual({ selected: "mini", allowAll: true });
   });
 
-  it("names Activity's device for the unfiltered choice", () => {
-    const menu = usageDeviceMenu(
-      [mini, mac],
-      scopeUsageEnvironments([mini, mac], ALL_DEVICES, "activity"),
-      "activity",
-    );
-    expect(menu.label).toBe("MINI");
+  it("shows Activity's one device and leaves All machines out", () => {
+    expect(
+      usageMachinePick(
+        scopeUsageEnvironments([offline, mini, mac], ALL_DEVICES, "activity"),
+        "activity",
+      ),
+    ).toEqual({ selected: "mini", allowAll: false });
+    expect(
+      usageMachinePick(scopeUsageEnvironments([mini, mac], "mac", "activity"), "activity"),
+    ).toEqual({ selected: "mac", allowAll: false });
+  });
+
+  it("shows a picked device that went away as every device", () => {
+    expect(usageMachinePick(scopeUsageEnvironments([mac], "gone", "limits"), "limits")).toEqual({
+      selected: null,
+      allowAll: true,
+    });
   });
 });
 

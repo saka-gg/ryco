@@ -11,6 +11,8 @@ import type { PullRequestsSegment, PullRequestTabFilters } from "./pullRequestLi
  * request content.
  */
 export interface PullRequestTabState {
+  /** The machine picker: repositories of one machine, read there; null for every machine. */
+  readonly environmentId: string | null;
   readonly repositoryKey: string | null;
   readonly filters: Omit<PullRequestTabFilters, "q">;
 }
@@ -18,6 +20,7 @@ export interface PullRequestTabState {
 export const PULL_REQUEST_TAB_STATE_KEY = "ryco.pullRequests.tab.v1";
 
 export const DEFAULT_PULL_REQUEST_TAB_STATE: PullRequestTabState = {
+  environmentId: null,
   repositoryKey: null,
   filters: { segment: "all" },
 };
@@ -61,6 +64,12 @@ export function sanitizePullRequestTabState(parsed: unknown): PullRequestTabStat
         .slice(0, MAX_LABELS)
     : [];
   return {
+    environmentId:
+      typeof root.environmentId === "string" &&
+      root.environmentId.length > 0 &&
+      root.environmentId.length <= 256
+        ? root.environmentId
+        : null,
     repositoryKey:
       typeof root.repositoryKey === "string" && root.repositoryKey.length > 0
         ? root.repositoryKey
@@ -83,5 +92,19 @@ export function selectPullRequestRepository(
 ): PullRequestTabState {
   if (state.repositoryKey === repositoryKey) return state;
   const { label: _label, ...filters } = state.filters;
-  return { repositoryKey, filters };
+  return { ...state, repositoryKey, filters };
+}
+
+/**
+ * Picking a machine (or every machine) in the picker. The repository stays
+ * when that machine has it too; its labels go, as the list may now read
+ * another repository.
+ */
+export function selectPullRequestMachine(
+  state: PullRequestTabState,
+  environmentId: string | null,
+): PullRequestTabState {
+  if (state.environmentId === environmentId) return state;
+  const { label: _label, ...filters } = state.filters;
+  return { ...state, environmentId, filters };
 }

@@ -5,6 +5,7 @@ import {
   searchEmptyState,
   searchQueryOf,
   searchScopeChips,
+  searchSourcesLive,
   scopesForFilter,
   SEARCH_EVERYTHING_RESULTS_PER_SCOPE,
   type SearchGroup,
@@ -70,6 +71,15 @@ describe("buildSearchSections", () => {
         section.results.length,
       ]),
     ).toEqual([["messages", 5]]);
+  });
+});
+
+describe("searchSourcesLive", () => {
+  it("keeps the sources unmounted until the first query, then for the rest of the visit", () => {
+    expect(searchSourcesLive(false, null)).toBe(false);
+    expect(searchSourcesLive(false, "fix")).toBe(true);
+    // Clearing the field keeps them: typing again must not pay their mount twice.
+    expect(searchSourcesLive(true, null)).toBe(true);
   });
 });
 

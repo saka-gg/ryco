@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   derivePullRequestRepositoryChoices,
+  pullRequestMachineIds,
   pullRequestRepositoryMachineNote,
   resolvePullRequestRepositoryChoice,
   type PullRequestRepositoryProject,
@@ -94,6 +95,17 @@ describe("derivePullRequestRepositoryChoices", () => {
     });
     expect(choice).toMatchObject({ projectId: "mini", canAct: true, machines: 2 });
     expect(choice && pullRequestRepositoryMachineNote(choice, 2)).toBe("Mac mini");
+  });
+});
+
+describe("pullRequestMachineIds", () => {
+  it("lists the machines with a checkout of a repository that has a remote", () => {
+    const ids = pullRequestMachineIds([
+      project("plain", MAC, "/w/notes", null),
+      project("chat", MAC, "/w/chat", identity("github.com/acme/chat"), { kind: "chat" }),
+      project("tools", MINI, "/x/tools", identity("github.com/acme/tools")),
+    ]);
+    expect([...ids]).toEqual([MINI]);
   });
 });
 
