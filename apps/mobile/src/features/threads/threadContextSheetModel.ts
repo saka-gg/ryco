@@ -3,7 +3,7 @@ import {
   type AgentControlStatusTone,
 } from "@ryco/client-runtime/state/agentControl";
 import { isDelegatedThreadLineage } from "@ryco/client-runtime/state/threads";
-import type { ThreadGoalStatus, ThreadId } from "@ryco/contracts";
+import type { EnvironmentId, ProjectId, ThreadGoalStatus, ThreadId } from "@ryco/contracts";
 import type { AgentControlCompletionReturn } from "@ryco/contracts/agent-control";
 import type { ThreadLineage } from "@ryco/contracts/orchestration";
 
@@ -31,11 +31,20 @@ export function threadStatusTone(statusLabel: ThreadHeaderModel["statusLabel"]):
 /** What the header's title pill shows: kept this small so the header only rebuilds for it. */
 export type ThreadTitlePillView = Pick<
   ThreadHeaderModel,
-  "title" | "statusLabel" | "projectLabel" | "worktreeLabel"
+  "title" | "statusLabel" | "projectLabel" | "worktreeLabel" | "branchLabel"
 > & {
-  /** A goal the agent pursues: a small target in the pill, the goal itself in the sheet. */
+  /** A goal the agent pursues: spoken with the pill, the goal itself in the context card. */
   readonly goal?: ThreadTitlePillGoal | null;
+  readonly badge: ThreadProjectBadgeView;
 };
+
+/** What the project's colored badge needs: its icon if it has one, else its initial. */
+export interface ThreadProjectBadgeView {
+  readonly environmentId: EnvironmentId;
+  readonly projectId: ProjectId | null;
+  readonly customAvatarContentHash: string | null;
+  readonly name: string;
+}
 
 export type ThreadTitlePillGoal = "active" | "stopped" | "complete";
 
@@ -54,7 +63,12 @@ const PILL_GOAL_LABEL: Readonly<Record<ThreadTitlePillGoal, string>> = {
   complete: "Goal achieved",
 };
 
-export function threadTitlePillAccessibilityLabel(model: ThreadTitlePillView): string {
+export function threadTitlePillAccessibilityLabel(
+  model: Pick<
+    ThreadTitlePillView,
+    "title" | "statusLabel" | "projectLabel" | "worktreeLabel" | "goal"
+  >,
+): string {
   const goal = model.goal ? ` ${PILL_GOAL_LABEL[model.goal]}.` : "";
   return `${model.title}. ${model.statusLabel}.${goal} ${model.projectLabel}, ${model.worktreeLabel}. Show details.`;
 }

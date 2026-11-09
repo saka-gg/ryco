@@ -1,21 +1,23 @@
-import { useImperativeHandle, useLayoutEffect, useRef, useState, type Ref } from "react";
+import { useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type Ref } from "react";
 import { useKeyboardState } from "react-native-keyboard-controller";
 import type { ModelSelection, RuntimeMode, ProviderInteractionMode } from "@ryco/contracts";
 import type { FastModeNotice } from "@ryco/client-runtime/state/session";
-import { resolveModelPillFastMode, type ModelPickerModel } from "./modelPickerModel";
+import type { ModelPickerModel } from "./modelPickerModel";
 import type { SessionPolicyModel } from "./sessionPolicyModel";
-import { ComposerModelMenu } from "./ComposerModelMenu";
-import { ComposerAccessMenu } from "./ComposerAccessMenu";
+import { ComposerCaption } from "./ComposerCaption";
+import { composerShrinkHeld } from "./composerShrinkModel";
+import { composerPrimaryAction } from "./composerCaptionModel";
+import { COMPOSER_SIDE_INSET } from "./ComposerShrunkBubble";
+import type { ComposerShrinkBinding } from "./useComposerShrink";
 import { Pressable, View } from "react-native";
+import Animated, { useAnimatedStyle } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
 import { ComposerAttachmentStrip } from "../../components/ComposerAttachmentStrip";
-import { ComposerToolbarButton, ComposerToolbarRow } from "../../components/ComposerToolbarTrigger";
 import type { AnchoredMenuHandle } from "../../components/AnchoredMenu";
 import { GlassSurface } from "../../components/GlassSurface";
-import { ProviderIcon } from "../../components/ProviderIcon";
 import { ComposerAttachMenu } from "../../components/ComposerAttachMenu";
 import type { ComposerAttachmentSource, DraftComposerAttachment } from "../../lib/composerFiles";
 import type { ChatFileUploadRecord } from "../../state/composerFileUpload";
@@ -38,11 +40,21 @@ import { useComposerDictation } from "../dictation/useComposerDictation";
 import type { ComposerCommandAction } from "./composerCommandMenuModel";
 import { useComposerCommandMenu, type ComposerCommandMenuContext } from "./useComposerCommandMenu";
 
-// Floating glass composer capsule (§3.5.2, §5). It uses the shared native
-// ComposerEditor so mentions/skills, hardware-keyboard submit, and pasted images
-// behave like the desktop composer while preserving a compact phone footprint.
-// Attachment state (images + streamed files) lives in the owning screen, which
-// knows the environment/thread context the upload engine needs.
+// The chat composer: a quiet icon caption (model, effort, mode, access) over a one-line glass
+// capsule (+ · text · mic, send or stop). While the reader scrolls back through the chat it
+// shrinks away into the screen's "Message" bubble (`useComposerShrink`). It uses the shared
+// native ComposerEditor so mentions/skills, hardware-keyboard submit, and pasted images behave
+// like the desktop composer. Attachment state (images + streamed files) lives in the owning
+// screen, which knows the environment/thread context the upload engine needs.
+
+const CAPSULE_RADIUS = 24;
+const CAPSULE_PADDING = 5;
+const BUTTON = 32;
+const TEXT_SIZE = 15.5;
+const LINE_HEIGHT = 21;
+const TEXT_INSET = 6;
+/** Five lines, then the field scrolls. */
+const MAX_FIELD_HEIGHT = LINE_HEIGHT * 5 + TEXT_INSET * 2;
 export interface ThreadComposerHandle {
   /** The composer holds typed text (attachments live in the owning screen). */
   readonly hasText: () => boolean;
@@ -81,8 +93,14 @@ export function ThreadComposer(props: {
   /** Claude Code's Fast mode when it differs from the selection's (`deriveClaudeFastModeNotice`). */
   readonly fastModeNotice?: FastModeNotice | null;
   readonly onSelectModel: (selection: ModelSelection) => void;
-  /** Claude's observed prompt cache sits behind an ⓘ beside the model chip (web's meter). */
+  /** Claude's observed prompt cache, a row inside the model menu (web's meter). */
   readonly onOpenCacheInfo?: () => void;
+  /** A turn runs: an empty composer offers Stop instead of the mic. */
+  readonly running?: boolean;
+  /** Stops the running turn; absent while it cannot be stopped from here. */
+  readonly onStop?: (() => void) | undefined;
+  /** The shrink-away while the reader scrolls back; absent, the composer always shows. */
+  readonly shrink?: ComposerShrinkBinding | undefined;
   readonly onOpenSideChat?: () => void;
   /** The thread can take a goal: the `/` menu offers `/goal`, which the send reads. */
   readonly goalAvailable?: boolean;
@@ -120,11 +138,13 @@ export function ThreadComposer(props: {
   const primaryFg = useThemeColor("--color-primary-foreground");
   const iconSubtle = useThemeColor("--color-icon-subtle");
   const iconColor = useThemeColor("--color-icon");
-  const accessColor = useThemeColor("--color-access-caution");
-  const warningColor = useThemeColor("--color-warning");
-  const pillFastMode = modelPicker
-    ? resolveModelPillFastMode(modelPicker, props.fastModeNotice)
-    : null;
+  const [focused, setFocused] = useState(false);
+  // The field grows with its text up to five lines, then scrolls.
+  const [fieldContentHeight, setFieldContentHeight] = useState<number | null>(null);
+  const fieldHeight = Math.min(
+    MAX_FIELD_HEIGHT,
+    Math.max(BUTTON + 2, Math.ceil(fieldContentHeight ?? 0)),
+  );
 
   const visibleAttachmentError = props.attachmentError ?? props.sendBlock;
   const canSend =
@@ -191,158 +211,168 @@ export function ThreadComposer(props: {
     await props.onPasteImages(uris);
   };
 
+  // `/` and `@` from the + menu: the trigger goes in at the caret, after a space when the caret
+  // follows a word, and the command popover takes it from there.
+  const insertTrigger = (trigger: "/" | "@") => {
+    const caret = caretRef.current;
+    const before = text.slice(0, caret.start);
+    const after = text.slice(caret.end);
+    const lead = before.length > 0 && !/\s$/.test(before) ? " " : "";
+    const next = `${before}${lead}${trigger}${after}`;
+    const position = before.length + lead.length + 1;
+    setText(next);
+    commandMenu.onSelectionChange({ start: position, end: position });
+    // After the menu let go of the keyboard: focus once its close finished.
+    setTimeout(() => editorRef.current?.focus(), 250);
+  };
+
+  const commandMenuOpen =
+    commandMenu.trigger !== null &&
+    (commandMenu.items.length > 0 || commandMenu.trigger.kind === "path");
+  const held = composerShrinkHeld({
+    focused,
+    hasText: text.trim().length > 0,
+    hasAttachments: props.attachments.length > 0,
+    dictating,
+    commandMenuOpen,
+  });
+  const shrink = props.shrink;
+  const onHeldChangeRef = useRef(shrink?.onHeldChange);
+  useLayoutEffect(() => {
+    onHeldChangeRef.current = shrink?.onHeldChange;
+  });
+  useEffect(() => {
+    onHeldChangeRef.current?.(held);
+  }, [held]);
+
+  // Shrunk, the composer hands the feed its room (a negative top margin as tall as itself, so
+  // its own place stays put) and folds toward the bubble at the bottom right.
+  const progress = shrink?.progress;
+  const measuredHeight = shrink?.height;
+  const roomStyle = useAnimatedStyle(() => {
+    const value = progress?.get() ?? 0;
+    return { marginTop: -(measuredHeight?.get() ?? 0) * value };
+  });
+  const foldStyle = useAnimatedStyle(() => {
+    const value = progress?.get() ?? 0;
+    return {
+      opacity: Math.min(1, Math.max(0, 1 - value * 1.5)),
+      transform: [{ scale: 1 - 0.3 * value }],
+    };
+  });
+
+  const hasContent = text.trim().length > 0 || props.attachments.length > 0;
+  const primaryAction = composerPrimaryAction({
+    dictating,
+    hasContent,
+    running: props.running === true,
+    canStop: props.onStop !== undefined,
+  });
+  const collapsed = shrink?.collapsed === true;
+
   return (
-    <View
-      className="px-4 pt-1"
-      // The keyboard covers the home indicator: its inset would only float the composer above it.
-      style={{ paddingBottom: keyboardVisible ? 8 : Math.max(8, safeAreaInsets.bottom) }}
+    <Animated.View
+      pointerEvents={collapsed ? "none" : "auto"}
+      accessibilityElementsHidden={collapsed}
+      importantForAccessibility={collapsed ? "no-hide-descendants" : "auto"}
+      style={[
+        {
+          paddingHorizontal: COMPOSER_SIDE_INSET,
+          paddingTop: 4,
+          // The keyboard covers the home indicator: its inset would only float the composer above it.
+          paddingBottom: keyboardVisible ? 8 : Math.max(8, safeAreaInsets.bottom),
+        },
+        roomStyle,
+      ]}
     >
-      {visibleAttachmentError ? (
-        <Text className="px-3 pb-1.5 text-xs font-ryco-medium text-danger-foreground">
-          {visibleAttachmentError}
-        </Text>
-      ) : null}
-      <ComposerDictationError dictation={dictation} />
-      {props.pendingHandoff?.kind === "fork" ? (
-        <PendingForkHandoffChip />
-      ) : props.pendingHandoff?.kind === "model-change" ? (
-        <PendingContextHandoffChip {...props.pendingHandoff} />
-      ) : null}
-      <View>
-        {commandMenu.trigger &&
-        (commandMenu.items.length > 0 || commandMenu.trigger.kind === "path") ? (
-          <View className="absolute inset-x-0 bottom-full z-10 mb-2">
-            <ComposerCommandPopover
-              items={commandMenu.items}
-              triggerKind={commandMenu.trigger.kind}
-              isLoading={commandMenu.isLoading}
-              onSelect={commandMenu.onSelect}
-            />
-          </View>
+      <Animated.View
+        onLayout={(event) => measuredHeight?.set(event.nativeEvent.layout.height)}
+        style={[{ transformOrigin: "bottom right" }, foldStyle]}
+      >
+        {visibleAttachmentError ? (
+          <Text className="px-3 pb-1.5 text-xs font-ryco-medium text-danger-foreground">
+            {visibleAttachmentError}
+          </Text>
         ) : null}
-        <GlassSurface
-          radius={26}
-          glassEffectStyle="regular"
-          style={{ paddingHorizontal: 6, paddingVertical: 6 }}
-        >
-          <View className="gap-1">
-            {dictating ? (
-              <View className="px-0.5">
-                <ComposerDictationBar dictation={dictation} />
-              </View>
-            ) : policyModel ? (
-              <ComposerToolbarRow paddingTop={2} paddingBottom={2} paddingHorizontal={2}>
-                {modelPicker && props.modelSelection ? (
-                  <ComposerModelMenu
-                    ref={modelMenuRef}
-                    model={modelPicker}
-                    selection={props.modelSelection}
-                    disabled={props.policyDisabled ?? false}
-                    onSelect={props.onSelectModel}
-                    onClose={restoreFocus}
-                  >
-                    {(open) => (
-                      <ComposerToolbarButton
-                        iconNode={
-                          <ProviderIcon provider={modelPicker.pillProviderDriver} size={14} />
-                        }
-                        label={modelPicker.pillLabel}
-                        suffixLabel={modelPicker.pillReasoningLabel ?? undefined}
-                        suffixIcon={pillFastMode?.icon}
-                        suffixIconColor={
-                          (pillFastMode?.muted ? iconSubtle : warningColor) as string
-                        }
-                        accessibilityLabel={
-                          pillFastMode?.accessibilityLabel ?? modelPicker.pillLabel
-                        }
-                        disabled={props.policyDisabled}
-                        onPress={open}
-                        className="max-w-full flex-1"
-                      />
-                    )}
-                  </ComposerModelMenu>
-                ) : null}
-                {props.onOpenCacheInfo ? (
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel="Claude prompt cache"
-                    onPress={props.onOpenCacheInfo}
-                    hitSlop={6}
-                    className="-ml-1 h-8 w-8 items-center justify-center rounded-full active:bg-subtle-strong"
-                  >
-                    <SymbolView
-                      name="info.circle"
-                      size={15}
-                      tintColor={iconSubtle as string}
-                      type="monochrome"
-                    />
-                  </Pressable>
-                ) : null}
-                {props.onOpenSideChat ? (
-                  <ComposerToolbarButton
-                    icon="bubble.left.and.bubble.right"
-                    accessibilityLabel="Open side chat"
-                    showChevron={false}
-                    onPress={props.onOpenSideChat}
-                  />
-                ) : null}
-                <ComposerAccessMenu
-                  model={policyModel}
-                  disabled={props.policyDisabled ?? false}
-                  onSelectRuntimeMode={props.onSelectRuntimeMode}
-                  onSelectInteractionMode={props.onSelectInteractionMode}
-                  onClose={restoreFocus}
-                >
-                  {(open) => (
-                    <ComposerToolbarButton
-                      iconNode={
-                        <SymbolView
-                          name={policyModel.pillIcon ?? "lock"}
-                          size={16}
-                          tintColor={
-                            (policyModel.pillTone === "caution" ? accessColor : iconColor) as string
-                          }
-                          type="monochrome"
-                        />
-                      }
-                      accessibilityLabel={policyModel.pillAccessibilityLabel}
-                      active={policyModel.pillTone === "caution"}
-                      disabled={props.policyDisabled}
-                      showChevron={false}
-                      onPress={open}
-                    />
-                  )}
-                </ComposerAccessMenu>
-              </ComposerToolbarRow>
-            ) : null}
-            <View className="px-2">
-              <ComposerAttachmentStrip
-                attachments={props.attachments}
-                fileUploadRecords={props.fileUploadRecords}
-                imageSize={58}
-                imageBorderRadius={13}
-                onRemove={props.onRemoveAttachment}
-                onRetryFileUpload={props.onRetryFileUpload}
-                onReattachFile={props.onReattachFile}
+        <ComposerDictationError dictation={dictation} />
+        {props.pendingHandoff?.kind === "fork" ? (
+          <PendingForkHandoffChip />
+        ) : props.pendingHandoff?.kind === "model-change" ? (
+          <PendingContextHandoffChip {...props.pendingHandoff} />
+        ) : null}
+        <View>
+          {commandMenuOpen && commandMenu.trigger ? (
+            <View className="absolute inset-x-0 bottom-full z-10 mb-2">
+              <ComposerCommandPopover
+                items={commandMenu.items}
+                triggerKind={commandMenu.trigger.kind}
+                isLoading={commandMenu.isLoading}
+                onSelect={commandMenu.onSelect}
               />
             </View>
-            <View className="flex-row items-end gap-1">
+          ) : null}
+          {dictating ? (
+            <View className="px-1 pb-1">
+              <ComposerDictationBar dictation={dictation} />
+            </View>
+          ) : policyModel ? (
+            <ComposerCaption
+              ref={modelMenuRef}
+              policyModel={policyModel}
+              policyDisabled={props.policyDisabled ?? false}
+              modelPicker={modelPicker ?? null}
+              modelSelection={props.modelSelection ?? null}
+              fastModeNotice={props.fastModeNotice}
+              onSelectModel={props.onSelectModel}
+              onSelectRuntimeMode={props.onSelectRuntimeMode}
+              onSelectInteractionMode={props.onSelectInteractionMode}
+              onOpenCacheInfo={props.onOpenCacheInfo}
+              onMenuClose={restoreFocus}
+            />
+          ) : null}
+          <GlassSurface
+            radius={CAPSULE_RADIUS}
+            glassEffectStyle="regular"
+            style={{ padding: CAPSULE_PADDING }}
+          >
+            {props.attachments.length > 0 ? (
+              <View className="px-1 pb-1 pt-0.5">
+                <ComposerAttachmentStrip
+                  attachments={props.attachments}
+                  fileUploadRecords={props.fileUploadRecords}
+                  imageSize={58}
+                  imageBorderRadius={13}
+                  onRemove={props.onRemoveAttachment}
+                  onRetryFileUpload={props.onRetryFileUpload}
+                  onReattachFile={props.onReattachFile}
+                />
+              </View>
+            ) : null}
+            <View className="flex-row items-end" style={{ gap: 4 }}>
               <ComposerAttachMenu
                 disabled={sending || (props.disabled ?? false)}
                 onPick={(source) => void props.onPickAttachments(source)}
+                {...(props.commandMenuContext
+                  ? {
+                      onInsertCommand: () => insertTrigger("/"),
+                      onInsertMention: () => insertTrigger("@"),
+                    }
+                  : {})}
+                onOpenSideChat={props.onOpenSideChat}
                 onClose={restoreFocus}
               >
                 {(open) => (
                   <Pressable
-                    disabled={sending || props.disabled}
                     onPress={open}
                     accessibilityRole="button"
-                    accessibilityLabel="Attach files"
-                    className="h-11 w-11 items-center justify-center rounded-full active:bg-subtle-strong disabled:opacity-40"
+                    accessibilityLabel="Attach, commands and side chat"
+                    className="items-center justify-center rounded-full bg-subtle-strong active:opacity-70"
+                    style={{ width: BUTTON, height: BUTTON, marginBottom: 1 }}
                   >
                     <SymbolView
-                      name="paperclip"
-                      size={18}
+                      name="plus"
+                      size={17}
+                      weight="semibold"
                       tintColor={iconColor as string}
                       type="monochrome"
                     />
@@ -360,37 +390,64 @@ export function ThreadComposer(props: {
                   if (text.length === 0 && nextText.length > 0) props.onComposerIntent?.();
                   setText(nextText);
                 }}
-                onFocus={props.onComposerIntent}
+                onFocus={() => {
+                  setFocused(true);
+                  props.onComposerIntent?.();
+                }}
+                onBlur={() => setFocused(false)}
                 placeholder={props.placeholder ?? "Message"}
                 multiline
                 editable={!props.disabled && !sending && !dictating}
-                contentInsetVertical={10}
-                style={{ minHeight: 44, maxHeight: 128, flex: 1 }}
+                contentInsetVertical={TEXT_INSET}
+                textStyle={{ fontSize: TEXT_SIZE, lineHeight: LINE_HEIGHT }}
+                onContentHeightChange={setFieldContentHeight}
+                style={{ height: fieldHeight, flex: 1 }}
                 onPasteImages={(uris) => void pasteImages(uris)}
                 onSubmit={() => void send()}
               />
-              <ComposerDictationButton
-                dictation={dictation}
-                disabled={props.disabled === true || sending}
-              />
-              <Pressable
-                disabled={!canSend || dictating}
-                onPress={() => void send()}
-                accessibilityRole="button"
-                accessibilityLabel="Send"
-                className="h-11 w-11 items-center justify-center rounded-full bg-primary active:opacity-70 disabled:opacity-40"
-              >
-                <SymbolView
-                  name="arrow.up"
-                  size={18}
-                  tintColor={(canSend ? primaryFg : iconSubtle) as string}
-                  type="monochrome"
-                />
-              </Pressable>
+              <View style={{ marginBottom: 1 }}>
+                {primaryAction === "mic" ? (
+                  <ComposerDictationButton
+                    dictation={dictation}
+                    disabled={props.disabled === true || sending}
+                    size={BUTTON}
+                  />
+                ) : primaryAction === "stop" ? (
+                  <Pressable
+                    onPress={props.onStop}
+                    accessibilityRole="button"
+                    accessibilityLabel="Stop"
+                    className="items-center justify-center rounded-full bg-primary active:opacity-70"
+                    style={{ width: BUTTON, height: BUTTON }}
+                  >
+                    <View
+                      style={{ width: 11, height: 11, borderRadius: 3 }}
+                      className="bg-primary-foreground"
+                    />
+                  </Pressable>
+                ) : (
+                  <Pressable
+                    disabled={!canSend || dictating}
+                    onPress={() => void send()}
+                    accessibilityRole="button"
+                    accessibilityLabel="Send"
+                    className="items-center justify-center rounded-full bg-primary active:opacity-70 disabled:opacity-40"
+                    style={{ width: BUTTON, height: BUTTON }}
+                  >
+                    <SymbolView
+                      name="arrow.up"
+                      size={15}
+                      weight="bold"
+                      tintColor={(canSend ? primaryFg : iconSubtle) as string}
+                      type="monochrome"
+                    />
+                  </Pressable>
+                )}
+              </View>
             </View>
-          </View>
-        </GlassSurface>
-      </View>
-    </View>
+          </GlassSurface>
+        </View>
+      </Animated.View>
+    </Animated.View>
   );
 }

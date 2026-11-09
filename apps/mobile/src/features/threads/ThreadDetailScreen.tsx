@@ -42,10 +42,12 @@ import {
   Pressable,
   ScrollView,
   Share,
+  StyleSheet,
   View,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
 } from "react-native";
+import Animated, { useAnimatedStyle } from "react-native-reanimated";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 
 import type { HostedDeliveryNotice } from "@ryco/client-runtime/authorization";
@@ -342,6 +344,15 @@ import {
 import { ThreadRenameSheet } from "./ThreadRenameSheet";
 import { useTerminalHeaderActivity } from "../terminal/useTerminalHeaderActivity";
 import { ThreadTitlePill } from "./ThreadTitlePill";
+import { ThreadContextCard } from "./ThreadContextCard";
+import { machineStatusTone, threadContextCardRows } from "./threadContextCardModel";
+import { composerCaptionLabel } from "./composerCaptionModel";
+import {
+  COMPOSER_BUBBLE_HEIGHT,
+  ComposerShrinkFade,
+  ComposerShrunkBubble,
+} from "./ComposerShrunkBubble";
+import { useComposerShrink } from "./useComposerShrink";
 import { usePullRequestWatchControl } from "./usePullRequestWatchControl";
 import { useThreadDevice } from "../devices/useThreadDevice";
 import { copyTextWithHaptic } from "../../lib/copyTextWithHaptic";
@@ -2606,12 +2617,20 @@ export function ThreadDetailScreen(props: {
       contentHeight: contentSize.height,
     });
   };
-  const onFeedScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) =>
+  const composerShrink = useComposerShrink(outboxThreadKey);
+  // The live status capsule rises above the "Message" bubble while the composer is shrunk.
+  const bubbleProgress = composerShrink.bubbleProgress;
+  const floatingLiftStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: -(COMPOSER_BUBBLE_HEIGHT + 10) * bubbleProgress.get() }],
+  }));
+  const onFeedScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    composerShrink.onScroll(event.nativeEvent, userScrollSession.current);
     transitionFollow({
       type: "scroll",
       isAtEnd: feedIsAtEnd(event),
       userScrollSessionActive: userScrollSession.current,
     });
+  };
   const onFeedScrollBeginDrag = () => {
     userScrollSession.current = true;
     transitionFollow({ type: "user-scroll-begin" });
@@ -2865,6 +2884,13 @@ export function ThreadDetailScreen(props: {
   // Which chat a sheet was opened for: the screen is reused when a link retargets it, and
   // another chat's sheets read as closed.
   const [contextSheetFor, setContextSheetFor] = useState<string | null>(null);
+  // The title pill's context card; "More details" in it opens the full sheet.
+  const [contextCard, setContextCard] = useState<{
+    readonly key: string;
+    /** Window y of the pill's bottom edge when it was tapped. */
+    readonly pillBottom: number | null;
+  } | null>(null);
+  const contextCardVisible = contextCard?.key === outboxThreadKey;
   const [cacheSheetFor, setCacheSheetFor] = useState<string | null>(null);
   const contextSheetVisible = contextSheetFor === outboxThreadKey;
   const cacheSheetVisible = cacheSheetFor === outboxThreadKey;
@@ -3179,6 +3205,10 @@ export function ThreadDetailScreen(props: {
   const pillStatus = headerModel?.statusLabel ?? null;
   const pillProject = headerModel?.projectLabel ?? null;
   const pillWorktree = headerModel?.worktreeLabel ?? null;
+  const pillBranch = headerModel?.branchLabel ?? null;
+  const pillBadgeName = project?.name ?? headerModel?.projectLabel ?? null;
+  const pillBadgeProjectId = project?.id ?? null;
+  const pillBadgeAvatar = project?.customAvatarContentHash ?? null;
   const pillGoal = threadTitlePillGoal(thread?.goal);
   const onHeaderMenuAction = (id: ThreadHeaderMenuActionId) => {
     switch (id) {
@@ -3423,20 +3453,42 @@ export function ThreadDetailScreen(props: {
         destructive: action.destructive ?? false,
       },
     });
-    const openContext = () => setContextSheetFor(outboxThreadKey);
+    const toggleContextCard = (pillBottom: number | null) =>
+      setContextCard((current) =>
+        current?.key === outboxThreadKey ? null : { key: outboxThreadKey, pillBottom },
+      );
     const pill =
-      pillTitle === null || pillStatus === null || pillProject === null || pillWorktree === null
+      pillTitle === null ||
+      pillStatus === null ||
+      pillProject === null ||
+      pillWorktree === null ||
+      pillBadgeName === null
         ? null
         : {
             title: pillTitle,
             statusLabel: pillStatus,
             projectLabel: pillProject,
             worktreeLabel: pillWorktree,
+            branchLabel: pillBranch,
             goal: pillGoal,
+            badge: {
+              environmentId,
+              projectId: pillBadgeProjectId,
+              customAvatarContentHash: pillBadgeAvatar,
+              name: pillBadgeName,
+            },
           };
     navigation.setOptions({
       title: pillTitle ?? "Task",
-      headerTitle: pill ? () => <ThreadTitlePill model={pill} onPress={openContext} /> : undefined,
+      headerTitle: pill
+        ? () => (
+            <ThreadTitlePill
+              model={pill}
+              expanded={contextCardVisible}
+              onPress={toggleContextCard}
+            />
+          )
+        : undefined,
       ...(headerMenu === null
         ? { headerRight: undefined }
         : Platform.OS === "ios"
@@ -3505,6 +3557,12 @@ export function ThreadDetailScreen(props: {
     iconColor,
     navigation,
     outboxThreadKey,
+    contextCardVisible,
+    environmentId,
+    pillBadgeAvatar,
+    pillBadgeName,
+    pillBadgeProjectId,
+    pillBranch,
     pillGoal,
     pillProject,
     pillStatus,
@@ -3712,15 +3770,30 @@ export function ThreadDetailScreen(props: {
                 ) : null}
               </View>
             ) : null}
-            <FloatingThreadControl
-              runningSince={runningSince}
-              followingLatest={followingLatest}
-              attention={floatingAttention}
-              childAttention={childAttention}
-              agents={threadAgents.entry}
-              onJumpToLatest={jumpToLatest}
-              onOpenThread={(target) => openThread(ThreadId.make(target))}
-              onOpenAgents={threadAgents.open}
+            <ComposerShrinkFade progress={composerShrink.binding.progress} />
+            <Animated.View
+              pointerEvents="box-none"
+              style={[StyleSheet.absoluteFill, floatingLiftStyle]}
+            >
+              <FloatingThreadControl
+                runningSince={runningSince}
+                followingLatest={followingLatest}
+                attention={floatingAttention}
+                childAttention={childAttention}
+                agents={threadAgents.entry}
+                onJumpToLatest={jumpToLatest}
+                onOpenThread={(target) => openThread(ThreadId.make(target))}
+                onOpenAgents={threadAgents.open}
+              />
+            </Animated.View>
+            <ComposerShrunkBubble
+              progress={composerShrink.bubbleProgress}
+              visible={composerShrink.collapsed}
+              onPress={() => {
+                composerShrink.expand();
+                jumpToLatest();
+                composerRef.current?.focus();
+              }}
             />
           </View>
         </ImageGalleryProvider>
@@ -3893,6 +3966,9 @@ export function ThreadDetailScreen(props: {
 
       <ThreadComposer
         ref={composerRef}
+        shrink={composerShrink.binding}
+        running={headerModel?.moreActions.includes("stop") === true}
+        onStop={mutationBusy ? undefined : stopTurn}
         goalAvailable={thread !== undefined}
         onOpenSideChat={
           selectedModelSelection
@@ -3961,6 +4037,55 @@ export function ThreadDetailScreen(props: {
         }
       />
 
+      {headerModel && pillBadgeName !== null ? (
+        <ThreadContextCard
+          visible={contextCardVisible}
+          onClose={() => setContextCard(null)}
+          // The prototype's 6pt under the pill; the header's bottom before it was measured.
+          top={(contextCard?.pillBottom ?? headerHeight) + 6}
+          environmentId={environmentId}
+          badge={{
+            environmentId,
+            projectId: pillBadgeProjectId,
+            customAvatarContentHash: pillBadgeAvatar,
+            name: pillBadgeName,
+          }}
+          model={headerModel}
+          machineStatus={
+            cachedView.headerForcedOffline ? "offline" : machineStatusTone(connectionUiState)
+          }
+          modelRow={
+            modelPicker
+              ? {
+                  providerDriver: modelPicker.pillProviderDriver,
+                  label: composerCaptionLabel(modelPicker),
+                }
+              : null
+          }
+          contextFraction={contextWindow?.fraction ?? null}
+          rows={threadContextCardRows({
+            goal: thread?.goal ?? null,
+            parent: parentLink,
+            delegatedCount: delegatedRows.length,
+            agents: delegatedRows.length === 0 ? threadAgents.entry : null,
+            cacheSummary,
+            receiptCount: settledAgentControlProposals.length,
+            watchLabel: headerModel.pullRequestWatch?.chip?.label ?? null,
+          })}
+          actions={{
+            openProject: openProjectScreen,
+            openMachines: () => navigation.navigate("Connections"),
+            openSourceControl,
+            openFiles: headerModel.filesVisible ? openFiles : undefined,
+            openReview: headerModel.reviewVisible ? openReview : undefined,
+            openPullRequest,
+            openParent: parentLink ? () => openThread(parentLink.threadId) : undefined,
+            openAgents: threadAgents.open,
+            openCacheInfo: cacheSummary === null ? undefined : () => setCacheSheetVisible(true),
+            openDetails: () => setContextSheetVisible(true),
+          }}
+        />
+      ) : null}
       {headerModel ? (
         <ThreadContextSheet
           goal={

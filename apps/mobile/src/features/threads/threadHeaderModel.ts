@@ -89,6 +89,10 @@ export interface ThreadHeaderModel {
   readonly nodeLabel: string;
   readonly projectLabel: string;
   readonly worktreeLabel: string;
+  /** The git branch the chat works on; null for a plain chat folder or before it is known. */
+  readonly branchLabel: string | null;
+  /** The chat works in a worktree of its own rather than the project's checkout. */
+  readonly inWorktree: boolean;
   /** Heading over `projectLabel · worktreeLabel`; a chat works in a folder, not a worktree. */
   readonly contextHeading: "Project · Worktree" | "Project · Folder";
   readonly statusLabel:
@@ -390,6 +394,10 @@ export function buildThreadHeaderModel(input: {
     nodeLabel,
     projectLabel,
     worktreeLabel,
+    branchLabel: isChat
+      ? null
+      : input.worktree?.branch.trim() || input.thread.branch?.trim() || null,
+    inWorktree: !isChat && Boolean(input.thread.worktreePath),
     contextHeading: isChat ? "Project · Folder" : "Project · Worktree",
     statusLabel,
     // The context bar is one button, so a screen reader reaches nothing inside it: the
