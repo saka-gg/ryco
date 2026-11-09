@@ -764,7 +764,9 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // testing actions. The iOS and Android read-back and the SSH probe load through import().
     // 7.212 MB on 2026-11-07 for the simulator program's merge train: the device tools,
     // live input, device tabs, relay video and setup on top of Computer Use measured 7.209 MB.
-    expect(bytes).toBeLessThan(7_212_000);
+    // 7.214 MB on 2026-11-09: Full access chats running every device action without asking
+    // (#1159, #1161) measured 7.212145 MB; each fit alone, together they passed the cap.
+    expect(bytes).toBeLessThan(7_214_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.
