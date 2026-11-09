@@ -1,4 +1,9 @@
-import { hasTaskLink } from "@ryco/client-runtime/state/tasks";
+import {
+  hasTaskLink,
+  describeTaskLink,
+  parseTaskLinkPaste,
+  taskLinkFromSource,
+} from "@ryco/client-runtime/state/tasks";
 import type { LocalTaskLink, ThreadId } from "@ryco/contracts";
 import { LOCAL_TASK_MAX_LINKS } from "@ryco/contracts/local-tasks";
 import { LinkIcon, MessageSquareIcon, SearchIcon } from "lucide-react";
@@ -13,7 +18,6 @@ import {
 import { Input } from "../ui/input";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { toastManager } from "../ui/toast";
-import { describeTaskLink, parseTaskLinkPaste, taskLinkFromSource } from "./taskLinks.logic";
 import { TASK_CHIP_CLASS, TASK_MENU_DETAIL_CLASS, TASK_POPOVER_ITEM_CLASS } from "./tasksUi";
 import type {
   TaskChatOption,

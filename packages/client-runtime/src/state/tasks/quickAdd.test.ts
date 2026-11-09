@@ -1,24 +1,16 @@
-import { EnvironmentId, ProjectId } from "@ryco/contracts";
+import { ProjectId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { dueAtForDay } from "./taskDue.logic";
-import {
-  parseTaskQuickAdd,
-  resolveQuickAddProject,
-  splitPastedTaskLines,
-} from "./taskQuickAdd.logic";
-import type { TaskProjectOption } from "./tasksViewModel";
+import { dueAtForDay } from "./due.ts";
+import { parseTaskQuickAdd, resolveQuickAddProject, splitPastedTaskLines } from "./quickAdd.ts";
 
 // Sunday, Oct 18 2026.
 const NOW = new Date(2026, 9, 18, 10).getTime();
 const day = (date: number) => dueAtForDay(new Date(2026, 9, date).getTime());
 
-const project = (id: string, name: string): TaskProjectOption => ({
+const project = (id: string, name: string) => ({
   projectId: ProjectId.make(id),
   name,
-  environmentId: EnvironmentId.make("environment-test"),
-  cwd: `/tmp/${id}`,
-  avatarHash: null,
 });
 const RYCO = project("p-ryco", "ryco");
 const INSPECT = project("p-inspect", "cs2inspect-web");

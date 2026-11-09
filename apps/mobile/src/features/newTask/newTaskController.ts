@@ -33,6 +33,7 @@ import { ProviderInstanceId } from "@ryco/contracts/provider-instance";
 
 import { inferNodeProjectTitle, validateNodeWorkspacePath } from "../projects/projectActions";
 import type { ProjectEnvironment } from "../projects/projectsModel";
+import { isTaskChatStartError, TaskChatStartError } from "../tasks/taskChatStartError";
 import { inferTaskTitle } from "./newTaskModel";
 
 function projectLastUsedAt(
@@ -211,6 +212,12 @@ export interface NewTaskAttempt {
   /** The attach command was answered; only its confirmation may still be missing. */
   readonly attachCommandAccepted?: boolean;
   readonly turnStarted: boolean;
+  /**
+   * The task (the user's to-do list) this chat is started for: its first turn
+   * goes out as the task's (`delegate`), so the machine records the chat under
+   * the task and hands it the task's files. Absent for a plain chat.
+   */
+  readonly localTaskId?: string;
 }
 
 export type NewTaskFailureStep = "project" | "worktree" | "thread" | "turn";
@@ -227,6 +234,13 @@ export type NewTaskRunResult =
 
 export interface NewTaskControllerDeps {
   readonly dispatch: (command: ClientOrchestrationCommand) => Promise<unknown>;
+  /** Sends a task chat's first turn as the task's (`server.delegateLocalTask`). */
+  readonly delegate?: (taskId: string, command: TurnStartCommand) => Promise<unknown>;
+  /**
+   * Checks a task can still take a chat (not deleted, not done), sending
+   * nothing, before the project, thread or worktree are created for it.
+   */
+  readonly preflightTask?: (taskId: string) => Promise<void>;
   /**
    * Whether the node shows this thread with its first turn under way. A turn
    * start that prepares a worktree is not answered from a command receipt:
@@ -254,6 +268,7 @@ export function createNewTaskAttempt(input: {
   readonly tokenMode?: AgentTokenMode;
   readonly createdAt: string;
   readonly ids: NewTaskStableIds;
+  readonly localTaskId?: string | null;
 }): NewTaskAttempt {
   const existingProject = input.project.kind === "existing";
   const existingWorktree = input.worktree.kind === "existing";
@@ -282,6 +297,7 @@ export function createNewTaskAttempt(input: {
     threadReady: false,
     worktreeAttached: !existingWorktree,
     turnStarted: false,
+    ...(input.localTaskId ? { localTaskId: input.localTaskId } : {}),
   };
 }
 
@@ -331,6 +347,8 @@ function refused(
   step: NewTaskFailureStep,
   error: unknown,
 ): NewTaskRunResult {
+  // A task chat's start says itself whether it went out; the machine's reason is shown either way.
+  if (isTaskChatStartError(error)) return failed(attempt, step, error.sent, errorMessage(error));
   if (!isDefiniteDispatchFailure(error)) return failed(attempt, step, true);
   return failed(attempt, step, false, errorMessage(error));
 }
@@ -361,6 +379,20 @@ function turnStartCommand(
     createdAt: attempt.createdAt,
   });
   return command as TurnStartCommand;
+}
+
+/** The turn start goes out as the task's when the attempt is for a task, else as a plain command. */
+function sendTurnStart(
+  attempt: NewTaskAttempt,
+  command: TurnStartCommand,
+  deps: NewTaskControllerDeps,
+): Promise<unknown> {
+  if (attempt.localTaskId === undefined) return deps.dispatch(command);
+  if (!deps.delegate)
+    return Promise.reject(
+      new TaskChatStartError("This chat can’t be started for its task here.", false),
+    );
+  return deps.delegate(attempt.localTaskId, command);
 }
 
 /**
@@ -408,6 +440,16 @@ export async function runNewTaskAttempt(
   deps: NewTaskControllerDeps,
 ): Promise<NewTaskRunResult> {
   let next = attempt;
+
+  // A task's chat checks its task before anything is created for it. Once its
+  // turn went out (a retry after a lost reply) the node's receipt decides instead.
+  if (next.localTaskId !== undefined && !next.turnStarted && deps.preflightTask) {
+    try {
+      await deps.preflightTask(next.localTaskId);
+    } catch (error) {
+      return invalid(next, next.projectReady ? "turn" : "project", error);
+    }
+  }
 
   if (!next.projectReady) {
     let workspaceRoot: string;
@@ -460,7 +502,8 @@ export async function runNewTaskAttempt(
         return invalid(next, "worktree", error);
       }
       try {
-        await deps.dispatch(
+        await sendTurnStart(
+          next,
           turnStartCommand(next, {
             createThread: {
               projectId: next.projectId,
@@ -480,6 +523,7 @@ export async function runNewTaskAttempt(
               fetchOrigin: worktree.fetchOrigin,
             },
           }),
+          deps,
         );
       } catch (error) {
         return refused(next, "worktree", error);
@@ -550,7 +594,7 @@ export async function runNewTaskAttempt(
 
   if (!next.turnStarted) {
     try {
-      await deps.dispatch(turnStartCommand(next));
+      await sendTurnStart(next, turnStartCommand(next), deps);
       next = { ...next, turnStarted: true };
     } catch (error) {
       return refused(next, "turn", error);

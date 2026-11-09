@@ -1,4 +1,9 @@
-import { taskLinkKey } from "@ryco/client-runtime/state/tasks";
+import {
+  taskLinkKey,
+  dueLabel,
+  isDueSoon,
+  taskLinkLabelIn,
+} from "@ryco/client-runtime/state/tasks";
 import { PaperclipIcon } from "lucide-react";
 
 import { cn } from "~/lib/utils";
@@ -6,8 +11,6 @@ import { cn } from "~/lib/utils";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { TaskLinkIcon } from "./TaskLinkIcon";
 import { TaskStatus } from "./TaskStatus";
-import { dueLabel, isDueSoon } from "./taskDue.logic";
-import { taskLinkLabelIn } from "./taskLinks.logic";
 import type { TaskProjectOption, TaskView } from "./tasksViewModel";
 
 /** A project's logo (its coloured initials without one), as the sidebar shows it. */

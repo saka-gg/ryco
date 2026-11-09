@@ -6,7 +6,7 @@ import type {
   ThreadId,
 } from "@ryco/contracts";
 
-import type { TaskStartHint } from "./taskDraft.logic";
+import type { TaskStartHint } from "@ryco/client-runtime/state/tasks";
 
 /**
  * The Tasks page's view model: everything the presentational components

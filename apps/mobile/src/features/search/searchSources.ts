@@ -5,6 +5,8 @@ import {
   type PullRequestSearchResult,
 } from "../pullRequests/usePullRequestSearch";
 import { pullRequestSearchGroup } from "./pullRequestSearchSource";
+import { useTaskSearch } from "../tasks/useTaskSearch";
+import { taskSearchGroup } from "./taskSearchSource";
 import { useThreadSearch } from "./useThreadSearch";
 import type { SearchGroup, SearchScope } from "./searchModel";
 
@@ -33,6 +35,7 @@ export const AVAILABLE_SEARCH_SCOPES: ReadonlySet<SearchScope> = new Set<SearchS
   "chats",
   "messages",
   "pullRequests",
+  "tasks",
 ]);
 
 /**
@@ -46,15 +49,22 @@ export function useSearchSources(input: SearchSourceInput): ReadonlyArray<Search
   const pullRequests = usePullRequestSearch(
     input.scopes.has("pullRequests") ? (input.query ?? "") : "",
   );
-  if (!input.scopes.has("pullRequests")) return threads;
-  return [
-    ...threads,
-    // Every PRs result opens the pull request screen; its params are the route's.
-    pullRequestSearchGroup(pullRequests, (route) =>
-      navigation.navigate(
-        "ProjectPullRequest",
-        route.params as PullRequestSearchResult["route"]["params"],
-      ),
-    ),
-  ];
+  // Asks the Hub machines for their tasks only while Tasks is searched.
+  const tasks = useTaskSearch(input.scopes.has("tasks") ? (input.query ?? "") : "");
+  const pullRequestGroups = input.scopes.has("pullRequests")
+    ? [
+        // Every PRs result opens the pull request screen; its params are the route's.
+        pullRequestSearchGroup(pullRequests, (route) =>
+          navigation.navigate(
+            "ProjectPullRequest",
+            route.params as PullRequestSearchResult["route"]["params"],
+          ),
+        ),
+      ]
+    : [];
+  const taskGroups =
+    input.scopes.has("tasks") && input.query !== null
+      ? [taskSearchGroup(tasks, (route) => navigation.navigate(route.name, route.params))]
+      : [];
+  return [...threads, ...pullRequestGroups, ...taskGroups];
 }

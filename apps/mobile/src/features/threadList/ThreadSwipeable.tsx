@@ -55,7 +55,8 @@ import {
   type SwipeSide,
 } from "./threadSwipeModel";
 
-export type ThreadSwipeActionTone = "primary" | "secondary" | "accent";
+/** `danger` is for destructive actions (Delete): solid red with a white glyph. */
+export type ThreadSwipeActionTone = "primary" | "secondary" | "accent" | "danger";
 
 export interface ThreadSwipeAction {
   readonly accessibilityLabel: string;
@@ -512,13 +513,18 @@ const TONE_CLASS: Record<ThreadSwipeActionTone, string> = {
   primary: "bg-primary",
   secondary: "bg-subtle-strong",
   accent: "bg-accent",
+  // The danger token's solid red; `bg-danger` itself is only a faint tint.
+  danger: "bg-danger-foreground",
 };
-const TONE_FOREGROUND: Record<Exclude<ThreadSwipeActionTone, "accent">, `--color-${string}`> = {
+type ThemedTone = Exclude<ThreadSwipeActionTone, "accent" | "danger">;
+const TONE_FOREGROUND: Record<ThemedTone, `--color-${string}`> = {
   primary: "--color-primary-foreground",
   secondary: "--color-foreground",
 };
-/** The accent is a mid blue in both themes; white reads on it in either. */
-const ACCENT_FOREGROUND = "#ffffff";
+/** The accent (mid blue) and danger (red) fills are saturated in both themes; white reads on either. */
+const WHITE_FOREGROUND = "#ffffff";
+const hasWhiteForeground = (tone: ThreadSwipeActionTone): tone is "accent" | "danger" =>
+  tone === "accent" || tone === "danger";
 
 function SwipeActionButton(props: {
   readonly action: ThreadSwipeAction;
@@ -542,9 +548,9 @@ function SwipeActionButton(props: {
   const sign = side === "trailing" ? -1 : 1;
   const circleSize = SWIPE_ACTION_CIRCLE_SIZE;
   const themed = useThemeColor(
-    action.tone === "accent" ? "--color-primary-foreground" : TONE_FOREGROUND[action.tone],
+    hasWhiteForeground(action.tone) ? "--color-primary-foreground" : TONE_FOREGROUND[action.tone],
   );
-  const foreground = action.tone === "accent" ? ACCENT_FOREGROUND : themed;
+  const foreground = hasWhiteForeground(action.tone) ? WHITE_FOREGROUND : themed;
   const actionStyle = useAnimatedStyle(() => {
     const reveal = Math.max(sign * translation.value, 0);
     const entryProgress = interpolate(

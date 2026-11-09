@@ -32,9 +32,13 @@ export interface LocalTaskWriterOptions {
   /**
    * The node's task methods, or a getter for the current connection's. Prefer
    * the getter: a write queued across a reconnect then goes out on the new
-   * connection instead of failing on the old one.
+   * connection instead of failing on the old one. The getter may return a
+   * promise to wait for a connection on its way (a machine whose connection
+   * slot went to another); a write then goes out once it resolves.
    */
-  readonly api: LocalTasksApi | (() => LocalTasksApi | null | undefined);
+  readonly api:
+    | LocalTasksApi
+    | (() => LocalTasksApi | null | undefined | Promise<LocalTasksApi | null | undefined>);
   readonly environmentId: EnvironmentId;
   /**
    * A write the node refused or never confirmed, after its change was rolled
@@ -252,10 +256,18 @@ export function createLocalTaskWriter(options: LocalTaskWriterOptions): LocalTas
   const queues = new Map<string, TaskQueue>();
   const store = () => useLocalTasksStore.getState();
 
-  const currentApi = (): LocalTasksApi => {
-    const api = typeof options.api === "function" ? options.api() : options.api;
+  const connectedApi = (api: LocalTasksApi | null | undefined): LocalTasksApi => {
     if (!api) throw new Error("The node is not connected.");
     return api;
+  };
+  /** Sends on the current connection at once, or once a connection on its way arrives. */
+  const currentApi = (): LocalTasksApi | Promise<LocalTasksApi> => {
+    const api = typeof options.api === "function" ? options.api() : options.api;
+    return api instanceof Promise ? api.then(connectedApi) : connectedApi(api);
+  };
+  const call = <T>(use: (api: LocalTasksApi) => Promise<T>): Promise<T> => {
+    const api = currentApi();
+    return api instanceof Promise ? api.then(use) : use(api);
   };
 
   const queueFor = (taskId: string): TaskQueue => {
@@ -325,7 +337,7 @@ export function createLocalTaskWriter(options: LocalTaskWriterOptions): LocalTas
   };
 
   const fetchTask = async (taskId: string): Promise<LocalTask> => {
-    const task = await requireLocalTaskMethod(currentApi(), "getLocalTask")({ taskId });
+    const task = await call((api) => requireLocalTaskMethod(api, "getLocalTask")({ taskId }));
     store().applyTask(environmentId, task);
     return task;
   };
@@ -361,7 +373,9 @@ export function createLocalTaskWriter(options: LocalTaskWriterOptions): LocalTas
     switch (write.kind) {
       case "create": {
         try {
-          const task = await requireLocalTaskMethod(currentApi(), "createLocalTask")(write.input);
+          const task = await call((api) =>
+            requireLocalTaskMethod(api, "createLocalTask")(write.input),
+          );
           store().applyTask(environmentId, task);
           write.settle(task);
         } catch (cause) {
@@ -389,15 +403,17 @@ export function createLocalTaskWriter(options: LocalTaskWriterOptions): LocalTas
             const { links: _shownLinks, ...fields }: LocalTaskPatch = queue.sent ?? {};
             // A whole list would undo a link someone else added since this client read it.
             const links = queue.sentLinks ? applyLinkChanges(base.links, queue.sentLinks) : null;
-            return requireLocalTaskMethod(
-              currentApi(),
-              "updateLocalTask",
-            )({
-              taskId,
-              expectedRevision: base.revision,
-              ...fields,
-              ...(links ? { links } : {}),
-            });
+            return call((api) =>
+              requireLocalTaskMethod(
+                api,
+                "updateLocalTask",
+              )({
+                taskId,
+                expectedRevision: base.revision,
+                ...fields,
+                ...(links ? { links } : {}),
+              }),
+            );
           });
           queue.sent = null;
           queue.sentLinks = null;
@@ -419,26 +435,31 @@ export function createLocalTaskWriter(options: LocalTaskWriterOptions): LocalTas
         try {
           let added: LocalTaskFile | undefined;
           const task = await sendWithRevision(taskId, async (base) => {
-            const result = await requireLocalTaskMethod(
-              currentApi(),
-              "addLocalTaskFile",
-            )({
-              ...write.request,
-              taskId,
-              expectedRevision: base.revision,
-            });
+            const result = await call((api) =>
+              requireLocalTaskMethod(
+                api,
+                "addLocalTaskFile",
+              )({
+                ...write.request,
+                taskId,
+                expectedRevision: base.revision,
+              }),
+            );
             added = addedFile(base, result, write.request);
             return result;
           });
           if (write.signal?.aborted && added) {
             // Cancelled while it was on its way: take it off again before it shows.
+            const fileId = added.fileId;
             try {
               store().applyTask(
                 environmentId,
-                await requireLocalTaskMethod(
-                  currentApi(),
-                  "removeLocalTaskFile",
-                )({ taskId, expectedRevision: task.revision, fileId: added.fileId }),
+                await call((api) =>
+                  requireLocalTaskMethod(
+                    api,
+                    "removeLocalTaskFile",
+                  )({ taskId, expectedRevision: task.revision, fileId }),
+                ),
               );
             } catch (cause) {
               store().applyTask(environmentId, task);
@@ -460,14 +481,16 @@ export function createLocalTaskWriter(options: LocalTaskWriterOptions): LocalTas
       case "removeFile": {
         try {
           const task = await sendWithRevision(taskId, (base) =>
-            requireLocalTaskMethod(
-              currentApi(),
-              "removeLocalTaskFile",
-            )({
-              taskId,
-              expectedRevision: base.revision,
-              fileId: write.fileId,
-            }),
+            call((api) =>
+              requireLocalTaskMethod(
+                api,
+                "removeLocalTaskFile",
+              )({
+                taskId,
+                expectedRevision: base.revision,
+                fileId: write.fileId,
+              }),
+            ),
           );
           store().applyTask(environmentId, task);
           write.settle(task);
@@ -480,10 +503,12 @@ export function createLocalTaskWriter(options: LocalTaskWriterOptions): LocalTas
       case "remove": {
         try {
           await sendWithRevision(taskId, (base) =>
-            requireLocalTaskMethod(
-              currentApi(),
-              "deleteLocalTask",
-            )({ taskId, expectedRevision: base.revision }),
+            call((api) =>
+              requireLocalTaskMethod(
+                api,
+                "deleteLocalTask",
+              )({ taskId, expectedRevision: base.revision }),
+            ),
           );
           store().removeTask(environmentId, taskId);
           write.settle(true);
@@ -631,13 +656,15 @@ export function createLocalTaskWriter(options: LocalTaskWriterOptions): LocalTas
           throw new Error("The task could not be saved, so its chat was not started.");
         // The node gives the chat the files the task holds when the start arrives.
         await Promise.all(fileWrites.get(taskId) ?? []);
-        const task = await requireLocalTaskMethod(
-          currentApi(),
-          "delegateLocalTask",
-        )({
-          taskId,
-          command,
-        });
+        const task = await call((api) =>
+          requireLocalTaskMethod(
+            api,
+            "delegateLocalTask",
+          )({
+            taskId,
+            command,
+          }),
+        );
         store().applyTask(environmentId, task);
         return task;
       } catch (cause) {
@@ -656,6 +683,6 @@ export function createLocalTaskWriter(options: LocalTaskWriterOptions): LocalTas
       }
     },
     createFileUpload: async (input) =>
-      requireLocalTaskMethod(currentApi(), "createLocalTaskFileUpload")(input),
+      call((api) => requireLocalTaskMethod(api, "createLocalTaskFileUpload")(input)),
   };
 }

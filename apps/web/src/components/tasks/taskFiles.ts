@@ -1,4 +1,9 @@
-import type { LocalTaskWriter } from "@ryco/client-runtime/state/tasks";
+import {
+  planTaskFileAdds,
+  TASK_FILE_INLINE_MAX_BYTES,
+  type LocalTaskWriter,
+  type TaskFileCandidate,
+} from "@ryco/client-runtime/state/tasks";
 import { resolveFileUploadMaxBytes } from "@ryco/client-runtime/state/composer";
 import type { EnvironmentId, LocalTaskFile } from "@ryco/contracts";
 import { create } from "zustand";
@@ -9,11 +14,6 @@ import { randomUUID } from "~/lib/utils";
 import { webChatFileUploadTransport } from "~/platform/attachmentUpload";
 
 import { toastManager } from "../ui/toast";
-import {
-  planTaskFileAdds,
-  TASK_FILE_INLINE_MAX_BYTES,
-  type TaskFileCandidate,
-} from "./taskFiles.logic";
 import type { TaskFileView } from "./tasksViewModel";
 
 /**
@@ -145,7 +145,7 @@ async function sendTaskFile(input: {
   readonly writer: LocalTaskWriter;
   readonly taskId: string;
   readonly key: string;
-  readonly candidate: TaskFileCandidate;
+  readonly candidate: TaskFileCandidate<File>;
   readonly streams: boolean;
   readonly signal: AbortSignal;
 }): Promise<void> {

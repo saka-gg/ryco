@@ -12,7 +12,7 @@ import {
 import { useGitStatus } from "~/lib/gitStatusState";
 import { hasNoShortcutModifiers } from "~/keybindings";
 import { cn } from "~/lib/utils";
-import { parsePullRequestReference } from "~/pullRequestReference";
+import { parsePullRequestReference } from "@ryco/shared/pullRequestReference";
 import { getSourceControlPresentation } from "~/sourceControlPresentation";
 import { Button } from "./ui/button";
 import {

@@ -8,7 +8,8 @@ import {
   isDueSoon,
   isOverdue,
   nextWeekdayDayStart,
-} from "./taskDue.logic";
+  taskDueBucket,
+} from "./due.ts";
 
 // Sunday, Oct 18 2026, mid-afternoon local time.
 const NOW = new Date(2026, 9, 18, 15, 30).getTime();
@@ -76,5 +77,19 @@ describe("due days", () => {
     ]);
     const monday = new Date(2026, 9, 19, 9).getTime();
     expect(dueQuickPicks(monday)[2]?.dayMs).toBe(new Date(2026, 9, 26).getTime());
+  });
+});
+
+describe("taskDueBucket", () => {
+  it("files overdue and today under today, later days as upcoming", () => {
+    expect(taskDueBucket(dueIn(-3), NOW)).toBe("today");
+    expect(taskDueBucket(dueIn(0), NOW)).toBe("today");
+    expect(taskDueBucket(dueIn(1), NOW)).toBe("upcoming");
+    expect(taskDueBucket(dueIn(30), NOW)).toBe("upcoming");
+  });
+
+  it("has no bucket without a readable date", () => {
+    expect(taskDueBucket(null, NOW)).toBe("none");
+    expect(taskDueBucket("not a date", NOW)).toBe("none");
   });
 });

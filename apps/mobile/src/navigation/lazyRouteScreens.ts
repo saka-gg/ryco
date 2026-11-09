@@ -74,6 +74,13 @@ export const NewTaskRouteScreen = lazyScreen(
       require("../features/newTask/NewTaskRouteScreen") as typeof import("../features/newTask/NewTaskRouteScreen")
     ).NewTaskRouteScreen,
 );
+export const TaskDetailRouteScreen = lazyScreen(
+  "TaskDetailRouteScreen",
+  () =>
+    (
+      require("../features/tasks/TaskDetailRouteScreen") as typeof import("../features/tasks/TaskDetailRouteScreen")
+    ).TaskDetailRouteScreen,
+);
 export const AddProjectRouteScreen = lazyScreen(
   "AddProjectRouteScreen",
   () =>
@@ -210,8 +217,9 @@ export const UsageTabScreen = lazyScreen(
 export const TasksTabScreen = lazyScreen(
   "TasksTabScreen",
   () =>
-    (require("./tabs/TasksTabPlaceholder") as typeof import("./tabs/TasksTabPlaceholder"))
-      .TasksTabScreen,
+    (
+      require("../features/tasks/TasksTabScreen") as typeof import("../features/tasks/TasksTabScreen")
+    ).TasksTabScreen,
 );
 // The PRs tab draws its own header (`stackHeader: { headerShown: false }` in
 // `navigation/tabs/MainTabs.tsx`).

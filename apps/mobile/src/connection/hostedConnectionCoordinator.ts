@@ -234,6 +234,8 @@ function scopeDemand(
             : { type: "provider-status", instanceId: scope.instanceId },
       };
     case "node-pairing":
+    // A Tasks surface wants every machine's list but never at the cost of thread work.
+    case "local-tasks":
       return { environmentId, scope: { type: "interactive" }, preemptible: true };
   }
 }

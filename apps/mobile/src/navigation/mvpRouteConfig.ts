@@ -125,6 +125,23 @@ export const MVP_ROOT_ROUTES = {
     },
     android: { presentation: "card" },
   },
+  /**
+   * One of the user's Tasks (a machine's to-do list): title, notes, priority,
+   * due day, project, links, files and its chats. A sheet that opens tall
+   * enough for the notes and expands for the rest.
+   */
+  TaskDetail: {
+    linking: "todo/:environmentId/:taskId",
+    overlay: true,
+    headerPreset: "sheet-solid",
+    headerAction: "close",
+    ios: {
+      presentation: "formSheet",
+      sheetAllowedDetents: [0.7, 0.94],
+      sheetGrabberVisible: true,
+    },
+    android: { presentation: "card" },
+  },
   Thread: {
     linking: THREAD,
     overlay: false,

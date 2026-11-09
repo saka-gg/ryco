@@ -15,7 +15,10 @@ import {
 
 import { openExternalLink } from "~/lib/openExternalLink";
 import { cn } from "~/lib/utils";
-import { parsePullRequestReference, parsePullRequestReferenceNumber } from "~/pullRequestReference";
+import {
+  parsePullRequestReference,
+  parsePullRequestReferenceNumber,
+} from "@ryco/shared/pullRequestReference";
 import { prefersExternalPullRequestLink } from "~/pullRequestsRoute";
 import { useResolvePullRequest } from "~/rpc/useGit";
 import { useOverviewChangeRequestList } from "~/rpc/useOverview";

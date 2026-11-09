@@ -37,6 +37,13 @@ export interface NewTaskLaunchDraft {
   readonly modelSelection: ModelSelection;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
+  /** The task this chat is started for (`NewTaskAttempt.localTaskId`); absent for a plain chat. */
+  readonly task?: {
+    readonly environmentId: EnvironmentId;
+    readonly taskId: string;
+    readonly title: string;
+    readonly projectId: ProjectId | null;
+  };
 }
 
 export interface NewTaskLaunchFailure {

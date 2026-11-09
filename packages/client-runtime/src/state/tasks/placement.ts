@@ -1,20 +1,21 @@
-import type { DraftWorktreeSource } from "@ryco/client-runtime/state/composer";
-import { nextTaskBranchName, taskBranchSlug } from "@ryco/client-runtime/state/tasks";
-import {
-  PROVIDER_SEND_TURN_MAX_SOURCE_CONTROL_CONTEXTS,
-  type ComposerSourceControlContext,
-  type LocalTaskLink,
-  type RepositoryIdentity,
-  type SourceControlChangeRequestDetail,
-  type SourceControlIssueDetail,
+import type {
+  ComposerSourceControlContext,
+  LocalTaskLink,
+  RepositoryIdentity,
+  SourceControlChangeRequestDetail,
+  SourceControlIssueDetail,
 } from "@ryco/contracts";
+import { PROVIDER_SEND_TURN_MAX_SOURCE_CONTROL_CONTEXTS } from "@ryco/contracts/provider";
 import { normalizeGitRemoteUrl } from "@ryco/shared/git";
-import { DateTime } from "effect";
+import * as DateTime from "effect/DateTime";
+
+import type { DraftWorktreeSource } from "../composer/draftStore.ts";
+import { nextTaskBranchName, taskBranchSlug } from "./logic.ts";
 
 /**
- * The pure half of starting a chat from a task: the draft it opens with
- * (where its worktree comes from, what it is called) and the linked pull
- * requests and issues it attaches. `taskDraft.ts` does the reads and writes
+ * The pure half of starting a chat from a task, on every client: the draft it
+ * opens with (where its worktree comes from, what it is called) and the linked
+ * pull requests and issues it attaches. Each client does the reads and writes
  * around it.
  */
 

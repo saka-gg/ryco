@@ -80,6 +80,12 @@ import {
   planMobilePromptLink,
 } from "./promptLinkModel";
 import { useNewTaskRepository } from "./useNewTaskRepository";
+import {
+  keepsTaskLink,
+  nextFreeTaskChatBranch,
+  useTaskChatSeed,
+  type NewTaskTaskLink,
+} from "../tasks/useTaskChatSeed";
 import { releaseIncomingShareCopy, takeIncomingShare } from "../sharing/incomingShare";
 import { mergeIncomingShareText } from "../sharing/incomingShareModel";
 import {
@@ -103,6 +109,8 @@ type NewTaskRouteScreenProps = StaticScreenProps<{
   readonly model?: string | string[];
   /** `incoming`: what another app shared through the share extension becomes this draft. */
   readonly share?: string | string[];
+  /** A task (the user's to-do list) to start this chat for: see `features/tasks/taskChatStart.ts`. */
+  readonly localTaskId?: string | string[];
 }>;
 
 function firstParam(value: string | string[] | undefined): string | null {
@@ -213,6 +221,13 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   // A prompt link's notice (`promptLinkModel.ts`), until the user dismisses it.
   const [linkNotice, setLinkNotice] = useState<string | null>(null);
+  // A chat started for a task: seeded once from the task, then sent as the task's.
+  const taskSeed = useTaskChatSeed(
+    launch.environmentId,
+    firstParam(props.route.params?.localTaskId),
+  );
+  const [taskLink, setTaskLink] = useState<NewTaskTaskLink | null>(restored?.task ?? null);
+  const taskSeeded = useRef(restored !== null);
   const placeholderColor = useThemeColor("--color-placeholder");
   const textColor = useThemeColor("--color-foreground");
   const serverConfigs = useEnvironmentServerConfigs();
@@ -237,6 +252,24 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
     setModelSelection(defaults.modelSelection);
     setRuntimeMode(defaults.runtimeMode);
   }, [defaults, resolvedDefaultTarget]);
+
+  useEffect(() => {
+    if (taskSeeded.current || taskSeed === null || launch.environmentId === null) return;
+    if (!initialized.current) return;
+    taskSeeded.current = true;
+    // The task says where its chat runs: a new worktree on its own branch.
+    locationEdited.current = true;
+    setPrompt(taskSeed.prompt);
+    setWorktreeSelection({ kind: "new" });
+    setNewBranch(taskSeed.branch);
+    setBaseBranch(taskSeed.baseBranch);
+    setTaskLink({
+      environmentId: launch.environmentId,
+      taskId: taskSeed.taskId,
+      title: taskSeed.title,
+      projectId: taskSeed.projectId,
+    });
+  }, [defaults.environment, launch.environmentId, taskSeed]);
 
   useEffect(() => {
     if (environmentId) useStore.getState().setActiveEnvironmentId(environmentId);
@@ -349,6 +382,24 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
 
   const repository = useNewTaskRepository(environmentId, project?.cwd ?? null);
 
+  // A task's branch may exist in the project already (an earlier chat, a manual
+  // checkout): move past it, like the desktop does, while the field still holds
+  // the name filled in for it. Checked once per project.
+  const checkedTaskBranch = useRef<string | null>(null);
+  const taskCwd =
+    taskLink !== null && worktreeSelection.kind === "new" ? (project?.cwd ?? null) : null;
+  useEffect(() => {
+    if (taskSeed === null || environmentId === null || taskCwd === null) return;
+    const seeded = newBranch;
+    if (seeded.length === 0 || !seeded.startsWith("task/")) return;
+    const key = JSON.stringify([environmentId, taskCwd, taskSeed.taskId]);
+    if (checkedTaskBranch.current === key) return;
+    checkedTaskBranch.current = key;
+    void nextFreeTaskChatBranch(environmentId, taskCwd, taskSeed).then((next) => {
+      if (next !== null) setNewBranch((current) => (current === seeded ? next : current));
+    });
+  }, [environmentId, newBranch, taskCwd, taskSeed]);
+
   let draftProjectTitle = newProjectTitle.trim() || "New project";
   try {
     if (!newProjectTitle.trim()) {
@@ -398,6 +449,14 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
               candidate.id === target.target.projectId,
           )
         : projects.find((candidate) => candidate.environmentId === nextEnvironmentId);
+    if (
+      taskLink &&
+      !keepsTaskLink(taskLink, {
+        environmentId: nextEnvironmentId,
+        projectId: nextProject?.id ?? null,
+      })
+    )
+      setTaskLink(null);
     modelEdited.current = false;
     locationEdited.current = false;
     setPreferencesReady(false);
@@ -429,6 +488,11 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
       ? resolveNewTaskProjectChoice({ target, projects, environments })
       : null;
     if (target && !nextProject) return;
+    if (
+      taskLink &&
+      !keepsTaskLink(taskLink, { environmentId: nextEnvironmentId, projectId: nextProjectId })
+    )
+      setTaskLink(null);
     modelEdited.current = false;
     locationEdited.current = false;
     setPreferencesReady(false);
@@ -588,6 +652,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
       interactionMode,
       tokenMode,
       createdAt: new Date().toISOString(),
+      localTaskId: taskLink?.taskId ?? null,
       ids: {
         projectId: newProjectId(),
         projectCommandId: newCommandId(),
@@ -633,6 +698,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
       modelSelection,
       runtimeMode,
       interactionMode: selectedInteractionMode,
+      ...(taskLink ? { task: taskLink } : {}),
     };
     if (queueing) queueNewTaskLaunch({ attempt, draft });
     else
@@ -800,6 +866,26 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
           {attachmentError ? (
             <View className="mb-4">
               <ErrorBanner message={attachmentError} />
+            </View>
+          ) : null}
+          {taskLink ? (
+            <View className="mb-4 flex-row items-center gap-3 rounded-2xl border border-border bg-card px-3.5 py-3">
+              <View className="min-w-0 flex-1 gap-0.5">
+                <Text className="text-xs font-sans text-foreground-muted">
+                  Starts a chat for the task
+                </Text>
+                <Text className="font-ryco-medium text-sm text-foreground" numberOfLines={2}>
+                  {taskLink.title}
+                </Text>
+              </View>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityHint="Sends this as a plain chat, not the task's"
+                hitSlop={8}
+                onPress={() => setTaskLink(null)}
+              >
+                <Text className="font-ryco-medium text-sm text-foreground">Unlink</Text>
+              </Pressable>
             </View>
           ) : null}
           {linkNotice ? (

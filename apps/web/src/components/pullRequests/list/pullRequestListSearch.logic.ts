@@ -1,6 +1,6 @@
 import { normalizeGitRemoteUrl, parseChangeRequestUrl } from "@ryco/shared/git";
 
-import { parsePullRequestReference } from "../../../pullRequestReference";
+import { parsePullRequestReference } from "@ryco/shared/pullRequestReference";
 import type { ProjectCheckoutOption } from "../../../projectCheckouts.logic";
 
 /**

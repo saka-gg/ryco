@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { parsePullRequestReference, parsePullRequestReferenceNumber } from "./pullRequestReference";
+import {
+  parsePullRequestReference,
+  parsePullRequestReferenceNumber,
+} from "./pullRequestReference.ts";
 
 describe("parsePullRequestReference", () => {
   it("accepts GitHub pull request URLs", () => {

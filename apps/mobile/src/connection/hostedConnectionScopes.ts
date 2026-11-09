@@ -17,7 +17,9 @@ export type MobileHostedConnectionScope =
   | { readonly type: "vcs-status"; readonly cwd: string }
   | { readonly type: "provider-status"; readonly instanceId?: string }
   /** Exact-machine trust ceremony; never acquired by list rendering or prefetch. */
-  | { readonly type: "node-pairing"; readonly nodeId: string };
+  | { readonly type: "node-pairing"; readonly nodeId: string }
+  /** A visible Tasks surface reading the machine's task list; yields to thread work. */
+  | { readonly type: "local-tasks" };
 
 export interface RetainedMobileHostedConnectionScope {
   readonly environmentId: EnvironmentId;
@@ -48,6 +50,7 @@ export interface MobileHostedScopeLeaseStore {
 function stableScopeKey(environmentId: EnvironmentId, scope: MobileHostedConnectionScope): string {
   switch (scope.type) {
     case "workspace-discovery":
+    case "local-tasks":
       return JSON.stringify([environmentId, scope.type]);
     case "thread-detail":
     case "terminal":

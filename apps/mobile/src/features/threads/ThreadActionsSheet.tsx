@@ -163,6 +163,8 @@ export function ThreadActionsSheet(props: {
   readonly onReview: () => void;
   /** Opens the worktree's pull request; absent where the thread has no project to read it through. */
   readonly onOpenPullRequest?: (() => void) | undefined;
+  /** Adds a to-do to the Tasks list, linked to this chat; absent where it can't be added. */
+  readonly onAddTask?: (() => void) | undefined;
 }) {
   const [title, setTitle] = useState(props.model.title);
   const placeholderColor = useThemeColor("--color-placeholder");
@@ -269,6 +271,14 @@ export function ThreadActionsSheet(props: {
         </View>
 
         <View className="overflow-hidden rounded-2xl bg-card">
+          {props.onAddTask ? (
+            <ActionRow
+              icon="checklist"
+              label="Add to Tasks"
+              detail="A to-do on your Tasks list, linked to this chat."
+              onPress={props.onAddTask}
+            />
+          ) : null}
           {props.model.pullRequestNumber !== null && props.onOpenPullRequest ? (
             <ActionRow
               icon="arrow.triangle.pull"

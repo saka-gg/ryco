@@ -307,6 +307,27 @@ describe("mobile hosted connection coordinator", () => {
     expect(peak).toBeLessThanOrEqual(MAX_MOBILE_HOSTED_CONNECTIONS);
   });
 
+  it("connects the Hub machines a Tasks surface asks for, within the shared bound", async () => {
+    const releases = nodes.map((node) =>
+      scopes.retain(node.environmentId, { type: "local-tasks" }),
+    );
+    for (let index = 0; index < nodes.length; index += 1) {
+      await flush();
+      await vi.advanceTimersByTimeAsync(MOBILE_HOSTED_WAKE_STAGGER_MS);
+      await flush();
+    }
+    // Relay connections, not a selected node: the task lists read through each one.
+    expect(hostedHubStore.getState().selectedNode).toBeNull();
+    const connected = new Set(connects.map((call) => call.environmentId));
+    expect(connected.size).toBe(Math.min(nodes.length, MAX_MOBILE_HOSTED_CONNECTIONS));
+    expect([...connected].every((id) => nodes.some((node) => node.environmentId === id))).toBe(
+      true,
+    );
+    expect(peak).toBeLessThanOrEqual(MAX_MOBILE_HOSTED_CONNECTIONS);
+    for (const release of releases) release();
+    await flush();
+  });
+
   it("re-selects a warm node without a lifecycle call, ready in the same tick", async () => {
     await coordinator.acquireNode(nodeA.id);
     await coordinator.acquireNode(nodeB.id);

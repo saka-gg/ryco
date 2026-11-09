@@ -1,8 +1,29 @@
-import { LOCAL_TASK_LINK_TITLE_MAX_LENGTH, type LocalTaskLink } from "@ryco/contracts";
+import type {
+  ChangeRequest,
+  LocalTaskLink,
+  SourceControlIssueSummary,
+  WorkItemSummary,
+} from "@ryco/contracts";
+import { LOCAL_TASK_LINK_TITLE_MAX_LENGTH } from "@ryco/contracts/local-tasks";
+import { parsePullRequestReferenceNumber } from "@ryco/shared/pullRequestReference";
 
-import { parsePullRequestReferenceNumber } from "../../pullRequestReference";
-import type { NewThreadSource } from "../chat/SourcePickerPanel";
-import type { TaskChatView } from "./tasksViewModel";
+/**
+ * How a task's links are made and named, on every client: from a pasted URL
+ * or key, from a pick in a source picker, and the words a link shows as.
+ */
+
+/** A pick a source picker hands over: a branch, a pull request, an issue or a Jira item. */
+export type TaskLinkSource =
+  | { readonly kind: "branch"; readonly branchName: string }
+  | { readonly kind: "pr"; readonly changeRequest: Pick<ChangeRequest, "number" | "url" | "title"> }
+  | {
+      readonly kind: "issue";
+      readonly issue: Pick<SourceControlIssueSummary, "number" | "url" | "title">;
+    }
+  | {
+      readonly kind: "workItem";
+      readonly workItem: Pick<WorkItemSummary, "provider" | "key" | "url" | "title">;
+    };
 
 // Mirrors the contract's URL and work item key checks, so a parsed link always encodes.
 const MAX_URL_LENGTH = 2048;
@@ -49,7 +70,7 @@ function linkTitle(title: string | undefined): { readonly title: string } | Reco
  * request, issue or Jira item with its URL and its title as it reads now.
  * `null` for a pick the task can't hold (a name git would refuse).
  */
-export function taskLinkFromSource(source: NewThreadSource): LocalTaskLink | null {
+export function taskLinkFromSource(source: TaskLinkSource): LocalTaskLink | null {
   switch (source.kind) {
     case "branch":
       return isTaskBranchName(source.branchName)
@@ -161,7 +182,7 @@ export function describeTaskLink(link: LocalTaskLink): string {
  */
 export function taskLinkLabelIn(
   link: LocalTaskLink,
-  chats: ReadonlyArray<Pick<TaskChatView, "threadId" | "title">>,
+  chats: ReadonlyArray<{ readonly threadId: string; readonly title: string | null }>,
 ): string {
   const title =
     link.kind === "thread"

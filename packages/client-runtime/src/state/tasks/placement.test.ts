@@ -15,7 +15,7 @@ import {
   taskStartHint,
   taskWorktreeBranch,
   type TaskDraftPlacementInput,
-} from "./taskDraft.logic";
+} from "./placement.ts";
 
 const TITLE = "Fix the login redirect loop on hosted Hub";
 

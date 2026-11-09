@@ -66,6 +66,7 @@ describe("MVP route config", () => {
         "ProjectPullRequests",
         "ProjectSourceControl",
         "Search",
+        "TaskDetail",
         "Thread",
         "ThreadFile",
         "ThreadFiles",
@@ -141,6 +142,17 @@ describe("MVP route config", () => {
     });
     expect(MVP_ROOT_ROUTES.NewTask.headerAction).toBe("close");
     expect(WORKSPACE_OVERLAY_ROUTE_NAMES).toContain("NewTask");
+  });
+
+  it("presents a task as an expandable iOS sheet with an explicit close action", () => {
+    expect(MVP_ROOT_ROUTES.TaskDetail.linking).toBe("todo/:environmentId/:taskId");
+    expect(MVP_ROOT_ROUTES.TaskDetail.ios).toEqual({
+      presentation: "formSheet",
+      sheetAllowedDetents: [0.7, 0.94],
+      sheetGrabberVisible: true,
+    });
+    expect(MVP_ROOT_ROUTES.TaskDetail.headerAction).toBe("close");
+    expect(WORKSPACE_OVERLAY_ROUTE_NAMES).toContain("TaskDetail");
   });
 
   it("presents the review-comment sheet with detents on iOS and fullScreenModal on Android", () => {

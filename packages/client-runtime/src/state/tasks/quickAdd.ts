@@ -1,8 +1,7 @@
 import type { ProjectId } from "@ryco/contracts";
 import { addDays, dayStart } from "@ryco/shared/automationSchedule";
 
-import { dueAtForDay, nextWeekdayDayStart } from "./taskDue.logic";
-import type { TaskProjectOption } from "./tasksViewModel";
+import { dueAtForDay, nextWeekdayDayStart } from "./due.ts";
 
 /**
  * The add row's shorthand: `#project` files the task under a project and
@@ -11,15 +10,21 @@ import type { TaskProjectOption } from "./tasksViewModel";
  * as typed, so "Fix #231" keeps its issue number.
  */
 
-export type TaskQuickAddChip =
-  | { readonly kind: "project"; readonly project: TaskProjectOption }
+/** What a `#token` is matched against: a project and the name it is typed as. */
+export interface TaskQuickAddProject {
+  readonly projectId: ProjectId;
+  readonly name: string;
+}
+
+export type TaskQuickAddChip<P extends TaskQuickAddProject = TaskQuickAddProject> =
+  | { readonly kind: "project"; readonly project: P }
   | { readonly kind: "due"; readonly dueAt: string };
 
-export interface TaskQuickAdd {
+export interface TaskQuickAdd<P extends TaskQuickAddProject = TaskQuickAddProject> {
   readonly title: string;
   readonly projectId: ProjectId | null;
   readonly dueAt: string | null;
-  readonly chips: ReadonlyArray<TaskQuickAddChip>;
+  readonly chips: ReadonlyArray<TaskQuickAddChip<P>>;
 }
 
 // A dot may join words ("ryco.app") but never ends a token, so "#ryco." keeps its full stop.
@@ -46,15 +51,15 @@ function projectTokenName(name: string): string {
  * order when names repeat), else the one project whose name starts with it.
  * An ambiguous prefix names nothing.
  */
-export function resolveQuickAddProject(
+export function resolveQuickAddProject<P extends TaskQuickAddProject>(
   token: string,
-  projects: ReadonlyArray<TaskProjectOption>,
-): TaskProjectOption | null {
+  projects: ReadonlyArray<P>,
+): P | null {
   const typed = token.toLowerCase();
   if (typed.length === 0) return null;
   const exact = projects.find((project) => projectTokenName(project.name) === typed);
   if (exact) return exact;
-  let match: TaskProjectOption | null = null;
+  let match: P | null = null;
   for (const project of projects) {
     if (!projectTokenName(project.name).startsWith(typed)) continue;
     if (match !== null) return null;
@@ -72,13 +77,13 @@ function dueDayFor(word: string, nowMs: number): number {
 }
 
 /** Reads the add row's text: the title without its tokens, the project and due day they name. */
-export function parseTaskQuickAdd(
+export function parseTaskQuickAdd<P extends TaskQuickAddProject>(
   raw: string,
-  projects: ReadonlyArray<TaskProjectOption>,
+  projects: ReadonlyArray<P>,
   nowMs: number,
-): TaskQuickAdd {
+): TaskQuickAdd<P> {
   // The last token of each kind wins; every recognised one leaves the title.
-  const found: { project: TaskProjectOption | null; dueAt: string | null } = {
+  const found: { project: P | null; dueAt: string | null } = {
     project: null,
     dueAt: null,
   };
@@ -92,7 +97,7 @@ export function parseTaskQuickAdd(
     found.dueAt = dueAtForDay(dueDayFor(word, nowMs));
     return lead;
   });
-  const chips: TaskQuickAddChip[] = [];
+  const chips: TaskQuickAddChip<P>[] = [];
   if (found.project) chips.push({ kind: "project", project: found.project });
   if (found.dueAt) chips.push({ kind: "due", dueAt: found.dueAt });
   return {

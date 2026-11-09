@@ -58,7 +58,8 @@ export const MainTabs = createNativeTabsNavigator({
     Tasks: createNativeTabScreen({
       screen: TasksTabScreen,
       linking: MAIN_TABS.Tasks.linking,
-      options: tabOptions("Tasks"),
+      // The Tasks screen draws its own large title, machine picker and search.
+      options: { ...tabOptions("Tasks"), stackHeader: { headerShown: false } },
     }),
     PullRequests: createNativeTabScreen({
       screen: PullRequestsTabScreen,
