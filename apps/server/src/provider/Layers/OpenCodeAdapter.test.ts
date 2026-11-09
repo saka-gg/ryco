@@ -3191,6 +3191,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
           requestId: "root-message-1",
           inputTokens: 130,
           cachedInputTokens: 25,
+          cacheWriteInputTokens: 5,
           outputTokens: 50,
           reasoningOutputTokens: 10,
           totalTokens: 180,

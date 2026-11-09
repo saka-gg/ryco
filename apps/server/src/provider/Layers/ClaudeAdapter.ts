@@ -1019,6 +1019,13 @@ function normalizeTaskUsage(usage: unknown): RuntimeTaskUsage | undefined {
   };
 }
 
+/** The cache writes a Claude usage record reports (already counted in its input). */
+function claudeCacheWriteInputTokens(usage: unknown): number {
+  if (typeof usage !== "object" || usage === null) return 0;
+  const value = (usage as Record<string, unknown>).cache_creation_input_tokens;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
 /** SDK task_updated patch status → the shared wire vocabulary. */
 const CLAUDE_TASK_PATCH_STATUS: Record<string, RuntimeTaskStatus> = {
   pending: "pending",
@@ -3118,6 +3125,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                     scope: "turn" as const,
                     inputTokens: accumulatedSnapshot.inputTokens ?? 0,
                     cachedInputTokens: accumulatedSnapshot.cachedInputTokens ?? 0,
+                    cacheWriteInputTokens: claudeCacheWriteInputTokens(result?.usage),
                     outputTokens: accumulatedSnapshot.outputTokens ?? 0,
                     reasoningOutputTokens: accumulatedSnapshot.reasoningOutputTokens ?? 0,
                     totalTokens:

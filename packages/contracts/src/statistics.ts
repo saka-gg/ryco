@@ -2,6 +2,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import { IsoDateTime, ProjectId } from "./baseSchemas.ts";
+import { UsagePricingState } from "./usage.ts";
 import { PullRequestState, WorktreeId } from "./worktree.ts";
 
 /**
@@ -57,15 +58,32 @@ export type StatisticsProjectRef = typeof StatisticsProjectRef.Type;
  * numbers (sums) to stay permissive — a provider that reports fractional usage
  * will not fail decoding.
  */
+/** The billing speed a turn ran at; absent means standard. */
+export const StatisticsSpeed = Schema.Literals(["fast", "ultrafast"]);
+export type StatisticsSpeed = typeof StatisticsSpeed.Type;
+
 export const StatisticsDailyBucket = Schema.Struct({
   /** Calendar day in UTC, formatted YYYY-MM-DD. */
   date: Schema.String,
   projectId: ProjectId,
   model: Schema.String,
   provider: Schema.optional(Schema.String),
+  /**
+   * Usage run at a faster, pricier speed gets its own bucket. Pivots add buckets up, so a
+   * `(date, project, provider, model)` may have one bucket per speed.
+   */
+  speed: Schema.optional(StatisticsSpeed),
+  /** Includes cache reads (`cachedInputTokens`) and, where reported, cache writes. */
   inputTokens: Schema.Number,
   outputTokens: Schema.Number,
   cachedInputTokens: Schema.Number,
+  /** Cache writes within `inputTokens`. Absent from nodes that do not record them. */
+  cacheWriteInputTokens: Schema.optional(Schema.Number),
+  /**
+   * Estimated USD at published rates (the node's usage price list and custom prices). Absent
+   * when the bucket has no tokens or its model has no known price.
+   */
+  costUsd: Schema.optional(Schema.Number),
   reasoningTokens: Schema.Number,
   /** Provider-reported total when available; may exceed known input/output split. */
   totalTokens: Schema.Number,
@@ -150,6 +168,8 @@ export const StatisticsSnapshot = Schema.Struct({
   worktrees: StatisticsWorktreeSummary,
   totals: StatisticsTotals,
   tokenAttribution: Schema.optional(StatisticsTokenAttribution),
+  /** Where `costUsd` came from. Absent from nodes that do not price statistics. */
+  pricing: Schema.optional(UsagePricingState),
   recentPullRequests: Schema.Array(StatisticsRecentPullRequest).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),

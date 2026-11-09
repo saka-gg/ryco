@@ -103,3 +103,34 @@ it("counts OpenCode requests separately and replaces repeated snapshots of one r
   expect(result.entries.map((entry) => entry.totalTokens)).toEqual([1500, 3000]);
   expect(result.entries.reduce((n, entry) => n + entry.outputTokens, 0)).toBe(200);
 });
+
+it("carries a turn's cache writes and the speed ingestion stamped", () => {
+  const result = collectProcessedTokenUsage(
+    [
+      row(0, {
+        usedTokens: 100,
+        statisticsSpeed: "fast",
+        processedUsage: {
+          scope: "turn",
+          inputTokens: 900,
+          cachedInputTokens: 600,
+          cacheWriteInputTokens: 250,
+          outputTokens: 100,
+          reasoningOutputTokens: 0,
+          totalTokens: 1000,
+        },
+      }),
+      row(
+        1,
+        { usedTokens: 100, statisticsSpeed: "turbo", processedUsage: session(500).processedUsage },
+        "turn-b",
+      ),
+    ],
+    () => "claudeAgent",
+  );
+  // Session deltas come first, final turn counters after them.
+  expect(result.entries.map((entry) => [entry.cacheWriteInputTokens, entry.speed])).toEqual([
+    [0, undefined],
+    [250, "fast"],
+  ]);
+});

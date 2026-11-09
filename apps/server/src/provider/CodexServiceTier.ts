@@ -4,11 +4,15 @@
 // preference keeps working; Ultrafast wins if both are ever set.
 
 import type { ModelSelection, ProviderOptionDescriptor } from "@ryco/contracts";
-import { getModelSelectionBooleanOptionValue } from "@ryco/shared/model";
+import {
+  FAST_MODE_OPTION_ID,
+  modelSelectionSpeed,
+  ULTRAFAST_MODE_OPTION_ID,
+} from "@ryco/shared/model";
 import type * as CodexSchema from "effect-codex-app-server/schema";
 
-export const CODEX_FAST_MODE_OPTION_ID = "fastMode";
-export const CODEX_ULTRAFAST_MODE_OPTION_ID = "ultrafastMode";
+export const CODEX_FAST_MODE_OPTION_ID = FAST_MODE_OPTION_ID;
+export const CODEX_ULTRAFAST_MODE_OPTION_ID = ULTRAFAST_MODE_OPTION_ID;
 
 export type CodexRequestedServiceTier = "fast" | "ultrafast";
 
@@ -41,12 +45,5 @@ export function codexSpeedOptionDescriptors(
 export function codexServiceTierForSelection(
   selection: ModelSelection | null | undefined,
 ): CodexRequestedServiceTier | undefined {
-  if (!selection) return undefined;
-  if (getModelSelectionBooleanOptionValue(selection, CODEX_ULTRAFAST_MODE_OPTION_ID) === true) {
-    return "ultrafast";
-  }
-  if (getModelSelectionBooleanOptionValue(selection, CODEX_FAST_MODE_OPTION_ID) === true) {
-    return "fast";
-  }
-  return undefined;
+  return modelSelectionSpeed(selection);
 }

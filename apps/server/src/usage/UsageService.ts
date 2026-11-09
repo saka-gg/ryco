@@ -8,6 +8,7 @@ import {
   type UsageDailyBucket,
   type UsageImportedMetric,
   type UsagePriceOverrides,
+  type StatisticsSnapshot,
   type UsagePricingStatus,
   type UsageProviderKind,
   type UsageSourceCoverage,
@@ -75,6 +76,7 @@ import {
   type CursorExportSource,
 } from "./cursorExportUsageReader.ts";
 import { readOpenCodeUsage } from "./opencodeUsageReader.ts";
+import { priceStatisticsSnapshot } from "./statisticsPricing.ts";
 import { resolveNativeUsageSources } from "./usageNativeSources.ts";
 import { resolveUsageSourceIdentity } from "./usageSourceIdentity.ts";
 import {
@@ -1252,7 +1254,56 @@ export const makeUsageService = Effect.fnUntraced(function* (options: UsageServi
       );
     });
 
-  return { readSummary } satisfies UsageServiceShape;
+  // Statistics reopen with the same cached snapshot: reprice only when it, the rates or the
+  // custom prices change.
+  let pricedStatistics:
+    | {
+        readonly snapshot: StatisticsSnapshot;
+        readonly generation: number;
+        readonly overridesRevision: string;
+        readonly state: UsagePricingStatus["state"];
+        readonly priced: StatisticsSnapshot;
+      }
+    | undefined;
+  const priceStatistics = (snapshot: StatisticsSnapshot) =>
+    Effect.gen(function* () {
+      const refresh = yield* startRatesRefresh;
+      if (refresh !== null && rates.size === 0) {
+        yield* Deferred.await(refresh).pipe(
+          Effect.timeoutOption(Duration.millis(RATES_FIRST_FETCH_WAIT_MS)),
+        );
+      }
+      const settings = yield* readSettings;
+      const overrides = compileOverrides(settings.usagePriceOverrides);
+      const previous = pricedStatistics;
+      if (
+        previous?.snapshot === snapshot &&
+        previous.generation === ratesGeneration &&
+        previous.overridesRevision === overrides.revision &&
+        previous.state === ratesState
+      ) {
+        return previous.priced;
+      }
+      const priced = priceStatisticsSnapshot(
+        snapshot,
+        makeUsagePricingPolicy(rates, overrides.tables),
+        ratesState,
+      );
+      pricedStatistics = {
+        snapshot,
+        generation: ratesGeneration,
+        overridesRevision: overrides.revision,
+        state: ratesState,
+        priced,
+      };
+      return priced;
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeed(snapshot),
+      ),
+    );
+
+  return { readSummary, priceStatistics } satisfies UsageServiceShape;
 });
 
 /** The pipeline built with its layer. The server uses `UsageServiceDeferredLive`. */

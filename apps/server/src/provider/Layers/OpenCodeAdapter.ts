@@ -595,6 +595,7 @@ function threadTokenUsageFromOpenCodeTokens(
       requestId,
       inputTokens,
       cachedInputTokens: nonNegative(record.cache?.read),
+      cacheWriteInputTokens: nonNegative(record.cache?.write),
       outputTokens: outputTokens + reasoningTokens,
       reasoningOutputTokens: reasoningTokens,
       totalTokens: usedTokens,

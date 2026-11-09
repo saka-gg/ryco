@@ -110,6 +110,13 @@ export const makeUsageServiceDeferred = Effect.fnUntraced(function* (
 
   return UsageService.of({
     readSummary: (input) => Effect.flatMap(serviceForSummary, (usage) => usage.readSummary(input)),
+    // Statistics stay readable when the pipeline cannot load: their buckets are just unpriced.
+    priceStatistics: (snapshot) =>
+      Effect.flatMap(serviceForSummary, (usage) => usage.priceStatistics(snapshot)).pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeed(snapshot),
+        ),
+      ),
   });
 });
 

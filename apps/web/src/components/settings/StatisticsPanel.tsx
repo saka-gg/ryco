@@ -16,9 +16,9 @@ import {
 
 import { Button } from "../ui/button";
 import { chartColor } from "../ui/chart";
-import { formatUsd } from "~/lib/modelPricing";
 import {
   formatDuration,
+  formatEstimatedUsd,
   formatInteger,
   formatModelLabel,
   formatProviderLabel,
@@ -40,7 +40,7 @@ import {
   aggregateByModel,
   aggregateByProject,
   aggregateByProvider,
-  aggregateCostForModels,
+  aggregateCost,
   buildProjectTitleMap,
   buildTimeSeries,
   filterBuckets,
@@ -76,7 +76,8 @@ export function StatisticsPanel() {
       providers: aggregateByProvider(filtered),
       projects: aggregateByProject(filtered, projectTitle),
       series: buildTimeSeries(snapshot, filtered, filter.range),
-      cost: aggregateCostForModels(models),
+      cost: aggregateCost(filtered),
+      pricing: snapshot.pricing,
     };
   }, [snapshot, filter]);
 
@@ -110,7 +111,8 @@ export function StatisticsPanel() {
   }
 
   const hasAnyData = snapshot.dailyBuckets.length > 0;
-  const { totals, previous, models, totalsAllModels, providers, projects, series, cost } = derived;
+  const { totals, previous, models, totalsAllModels, providers, projects, series, cost, pricing } =
+    derived;
   const topModel = models[0];
   const topModelShare =
     topModel && totalsAllModels > 0
@@ -184,8 +186,18 @@ export function StatisticsPanel() {
             <StatCard
               label="Est. cost"
               icon={DollarSignIcon}
-              value={`~${formatUsd(cost.usd)}`}
-              sub={cost.hasUnpriced ? "excludes unpriced models" : "estimated spend"}
+              value={cost.priced ? `~${formatEstimatedUsd(cost.usd)}` : "—"}
+              sub={
+                pricing === undefined
+                  ? "update this node to estimate"
+                  : !cost.priced && cost.hasUnpriced
+                    ? pricing === "unavailable"
+                      ? "price list unavailable"
+                      : "no known prices"
+                    : cost.hasUnpriced
+                      ? "excludes unpriced models"
+                      : "estimated spend"
+              }
             />
             <StatCard
               label="Most used model"
@@ -294,8 +306,9 @@ export function StatisticsPanel() {
           </div>
 
           <p className="px-1 text-[11px] text-muted-foreground/80">
-            {attributionNote} Costs are rough estimates from a built-in price table and exclude
-            subscription-billed or breakdown-less usage.
+            {attributionNote} Costs are estimates at published API rates, from the same price list
+            and custom prices as Usage. They include cache writes and Fast mode where recorded, and
+            exclude models without a known price.
           </p>
         </>
       )}
