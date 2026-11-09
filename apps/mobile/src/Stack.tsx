@@ -82,6 +82,7 @@ import {
   SettingsMachineWorkRouteScreen,
   SettingsMachineSystemRouteScreen,
   SettingsMachineUsagePricesRouteScreen,
+  SettingsMachineImportRouteScreen,
   ThreadFileRouteScreen,
   ThreadFileSearchRouteScreen,
   ThreadFilesRouteScreen,
@@ -581,6 +582,11 @@ export const ROOT_STACK_SCREENS = {
     screen: SettingsMachineUsagePricesRouteScreen,
     linking: MVP_SETTINGS_ROUTES.SettingsMachineUsagePrices.linking,
     options: routeOptions("SettingsMachineUsagePrices", { title: "Usage prices" }),
+  }),
+  SettingsMachineImport: createNativeStackScreen({
+    screen: SettingsMachineImportRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsMachineImport.linking,
+    options: routeOptions("SettingsMachineImport", { title: "Import conversations" }),
   }),
   SettingsNodeSecurity: createNativeStackScreen({
     screen: E2eeNodeSecurityRouteScreen,

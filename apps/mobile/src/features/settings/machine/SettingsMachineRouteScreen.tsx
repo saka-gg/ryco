@@ -27,7 +27,8 @@ export function SettingsMachineRouteScreen(props: SettingsMachineRouteScreenProp
       | "SettingsMachineProviders"
       | "SettingsMachineAgents"
       | "SettingsMachineWork"
-      | "SettingsMachineSystem",
+      | "SettingsMachineSystem"
+      | "SettingsMachineImport",
   ) => navigation.navigate(route, { environmentId });
   return (
     <ScrollView
@@ -70,6 +71,15 @@ export function SettingsMachineRouteScreen(props: SettingsMachineRouteScreenProp
           label="Machine"
           detail="Simulators, power and restarts"
           onPress={() => open("SettingsMachineSystem")}
+        />
+      </SettingsSection>
+      <SettingsSection>
+        <SettingsRow
+          first
+          icon="square.and.arrow.down"
+          label="Import conversations"
+          detail="Bring Codex or Claude Code history into Ryco"
+          onPress={() => open("SettingsMachineImport")}
         />
       </SettingsSection>
     </ScrollView>

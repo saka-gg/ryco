@@ -495,3 +495,10 @@ export const SettingsMachineUsagePricesRouteScreen = lazyScreen(
       require("../features/settings/machine/SettingsMachineUsagePricesRouteScreen") as typeof import("../features/settings/machine/SettingsMachineUsagePricesRouteScreen")
     ).SettingsMachineUsagePricesRouteScreen,
 );
+export const SettingsMachineImportRouteScreen = lazyScreen(
+  "SettingsMachineImportRouteScreen",
+  () =>
+    (
+      require("../features/settings/machine/SettingsMachineImportRouteScreen") as typeof import("../features/settings/machine/SettingsMachineImportRouteScreen")
+    ).SettingsMachineImportRouteScreen,
+);

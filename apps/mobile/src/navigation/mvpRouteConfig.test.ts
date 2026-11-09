@@ -301,6 +301,7 @@ describe("MVP route config", () => {
         "SettingsInbox",
         "SettingsMachine",
         "SettingsMachineAgents",
+        "SettingsMachineImport",
         "SettingsMachineProvider",
         "SettingsMachineProviders",
         "SettingsMachineSystem",
