@@ -14,6 +14,7 @@ export function ComposerEditor({
   threadTitles: _threadTitles,
   selection,
   onPasteImages,
+  onContentHeightChange,
   style,
   textStyle,
   contentInsetVertical = 0,
@@ -45,6 +46,9 @@ export function ComposerEditor({
         {...props}
         selection={selection}
         onSelectionChange={(event) => props.onSelectionChange?.(event.nativeEvent.selection)}
+        onContentSizeChange={(event) =>
+          onContentHeightChange?.(event.nativeEvent.contentSize.height + contentInsetVertical * 2)
+        }
         multiline={props.multiline ?? true}
         placeholderTextColor={placeholderColor}
         style={[

@@ -165,7 +165,10 @@ export function ComposerDictationBar(props: { readonly dictation: ComposerDictat
 export function ComposerDictationButton(props: {
   readonly dictation: ComposerDictation;
   readonly disabled: boolean;
+  /** The round target's diameter; 44 by default. */
+  readonly size?: number;
 }) {
+  const size = props.size ?? 44;
   const { dictation } = props;
   const iconColor = useThemeColor("--color-icon");
   const accentColor = useThemeColor("--color-primary");
@@ -190,11 +193,12 @@ export function ComposerDictationButton(props: {
         holding.current = false;
         dictation.finish();
       }}
-      className="h-11 w-11 items-center justify-center rounded-full active:bg-subtle-strong disabled:opacity-40"
+      className="items-center justify-center rounded-full active:bg-subtle-strong disabled:opacity-40"
+      style={{ width: size, height: size }}
     >
       <SymbolView
         name={dictation.active ? "mic.fill" : "mic"}
-        size={18}
+        size={size < 44 ? 17 : 18}
         tintColor={(dictation.active ? accentColor : iconColor) as string}
         type="monochrome"
       />

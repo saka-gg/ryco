@@ -20,11 +20,15 @@ import { ComposerModelOptions } from "./ComposerModelOptions";
 import type { ReactNode, Ref } from "react";
 import { AnchoredMenu, type AnchoredMenuHandle } from "../../components/AnchoredMenu";
 import { ProviderIcon } from "../../components/ProviderIcon";
+import { SymbolView } from "../../components/AppSymbol";
+import { useThemeColor } from "../../lib/useThemeColor";
 
 // Model keys are `instance:slug` and instance ids start with a letter, so a
 // `#` id never collides with a model row.
 const LEGACY_SUBMENU_PREFIX = "#legacy:";
 const UPDATE_NOTICE_PREFIX = "#update:";
+const CACHE_INFO_ID = "#cache-info";
+const CLOSING_IDS: ReadonlySet<string> = new Set([CACHE_INFO_ID]);
 
 export function ComposerModelMenu({
   ref,
@@ -36,6 +40,10 @@ export function ComposerModelMenu({
   readonly disabled: boolean;
   readonly onSelect: (selection: ModelSelection) => void;
   readonly onClose: () => void;
+  /** Claude's observed prompt cache, as a row at the end of the menu. */
+  readonly onOpenCacheInfo?: (() => void) | undefined;
+  /** The anchor wrapper's layout; it fills a toolbar by default. */
+  readonly anchorClassName?: string;
   readonly children: (
     open: () => void,
     settings: {
@@ -46,6 +54,7 @@ export function ComposerModelMenu({
   ) => ReactNode;
 }) {
   const favorites = usePreferences().favorites ?? [];
+  const iconColor = useThemeColor("--color-icon");
   const groups = props.model.groups;
   const entries = listModelPickerEntries(props.model);
   const selectedKey = `${props.selection.instanceId}:${props.selection.model}`;
@@ -158,6 +167,8 @@ export function ComposerModelMenu({
         };
       }),
     });
+  if (props.onOpenCacheInfo)
+    actions.push({ id: CACHE_INFO_ID, title: "Prompt cache", subtitle: "What Claude reused" });
   actions.push({
     id: "toggle-favorite",
     title: currentFavoriteSaved
@@ -175,6 +186,7 @@ export function ComposerModelMenu({
       submenuWidth={320}
       searchable
       closeOnSelect={false}
+      closeOnSelectIds={CLOSING_IDS}
       footer={
         <ComposerModelOptions
           modelLabel={selectedOption?.label ?? props.selection.model}
@@ -188,10 +200,14 @@ export function ComposerModelMenu({
           }}
         />
       }
-      className="min-w-0 flex-1"
+      className={props.anchorClassName ?? "min-w-0 flex-1"}
       onClose={props.onClose}
       renderIcon={(action) => {
         if (action.id?.startsWith(UPDATE_NOTICE_PREFIX)) return null;
+        if (action.id === CACHE_INFO_ID)
+          return (
+            <SymbolView name="info.circle" size={16} tintColor={iconColor} type="monochrome" />
+          );
         const group = groups.find(
           (candidate) =>
             action.id === `provider:${candidate.providerKey}` ||
@@ -203,6 +219,10 @@ export function ComposerModelMenu({
         return <ProviderIcon provider={driver} size={16} />;
       }}
       onPressAction={({ nativeEvent }) => {
+        if (nativeEvent.event === CACHE_INFO_ID) {
+          props.onOpenCacheInfo?.();
+          return;
+        }
         if (props.disabled) return;
         const removed = favorites.find(
           (favorite) => `remove:${modelFavoriteKey(favorite)}` === nativeEvent.event,

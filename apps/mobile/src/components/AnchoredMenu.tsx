@@ -66,6 +66,10 @@ export type AnchoredMenuProps = {
   readonly headerAction?: MenuAction;
   readonly footer?: ReactNode;
   readonly closeOnSelect?: boolean;
+  /** Actions that close the menu even when `closeOnSelect` is false (they open something else). */
+  readonly closeOnSelectIds?: ReadonlySet<string>;
+  /** Actions with a thin divider above them, grouping the list. */
+  readonly separatorBeforeIds?: ReadonlySet<string>;
   readonly menuWidth?: number;
   readonly submenuWidth?: number;
   readonly initialSubmenuId?: string;
@@ -125,7 +129,7 @@ function MenuBackdrop({ dark }: { readonly dark: boolean }) {
 
 /** In-window dropdown for composer controls. Opening it preserves keyboard focus. */
 export function AnchoredMenu({ ref, ...props }: AnchoredMenuProps) {
-  const { onClose, onPressAction, closeOnSelect = true } = props;
+  const { onClose, onPressAction, closeOnSelect = true, closeOnSelectIds } = props;
   const insets = useSafeAreaInsets();
   const [query, setQuery] = useState("");
   const [anchor, setAnchor] = useState<AnchorSnapshot | null>(null);
@@ -391,7 +395,7 @@ export function AnchoredMenu({ ref, ...props }: AnchoredMenuProps) {
         navigate([...path, action], 1);
         return;
       }
-      if (closeOnSelect) close();
+      if (closeOnSelect || (action.id !== undefined && closeOnSelectIds?.has(action.id))) close();
       // A nested submenu folds part of its parent's list, so a pick that keeps
       // the menu open returns to that list, where the choice now shows.
       else if (path.length > 1) navigate(path.slice(0, -1), -1);
@@ -401,7 +405,7 @@ export function AnchoredMenu({ ref, ...props }: AnchoredMenuProps) {
         } as Parameters<NonNullable<MenuComponentProps["onPressAction"]>>[0]);
       }
     },
-    [close, onPressAction, closeOnSelect, navigate, path],
+    [close, onPressAction, closeOnSelect, closeOnSelectIds, navigate, path],
   );
 
   return (
@@ -558,81 +562,87 @@ export function AnchoredMenu({ ref, ...props }: AnchoredMenuProps) {
                       const destructive = action.attributes?.destructive ?? false;
                       const disabled = action.attributes?.disabled ?? false;
                       const hasSubmenu = (action.subactions?.length ?? 0) > 0;
+                      const separated =
+                        index > 0 &&
+                        action.id !== undefined &&
+                        (props.separatorBeforeIds?.has(action.id) ?? false);
                       return (
-                        <Pressable
-                          key={action.id ?? `${index}-${action.title}`}
-                          android_ripple={{ color: rippleColor }}
-                          accessibilityRole={
-                            hasSubmenu || action.state === undefined ? "button" : "radio"
-                          }
-                          accessibilityLabel={[action.title, action.subtitle]
-                            .filter(Boolean)
-                            .join(", ")}
-                          accessibilityState={{
-                            ...(action.state !== undefined && !hasSubmenu
-                              ? { checked: action.state === "on" }
-                              : {}),
-                            disabled,
-                          }}
-                          disabled={disabled}
-                          className={cn(
-                            "min-h-11 flex-row items-center gap-2.5 px-3.5 py-2.5",
-                            disabled && "opacity-45",
-                          )}
-                          onPress={() => onPressItem(action)}
-                        >
-                          {props.renderIcon?.(action)}
-                          <View className="flex-1 gap-0.5">
-                            {props.renderTitle ? (
-                              props.renderTitle(action)
-                            ) : (
-                              <Text
-                                style={
-                                  action.titleColor === undefined
-                                    ? undefined
-                                    : { color: action.titleColor as ColorValue }
-                                }
-                                className={cn(
-                                  // Same face as the pill labels that open these menus.
-                                  "text-sm font-ryco-bold",
-                                  destructive && "text-danger-foreground",
-                                )}
-                              >
-                                {action.title}
-                              </Text>
+                        <View key={action.id ?? `${index}-${action.title}`}>
+                          {separated ? <View className="mx-3 my-1 h-px bg-border" /> : null}
+                          <Pressable
+                            android_ripple={{ color: rippleColor }}
+                            accessibilityRole={
+                              hasSubmenu || action.state === undefined ? "button" : "radio"
+                            }
+                            accessibilityLabel={[action.title, action.subtitle]
+                              .filter(Boolean)
+                              .join(", ")}
+                            accessibilityState={{
+                              ...(action.state !== undefined && !hasSubmenu
+                                ? { checked: action.state === "on" }
+                                : {}),
+                              disabled,
+                            }}
+                            disabled={disabled}
+                            className={cn(
+                              "min-h-11 flex-row items-center gap-2.5 px-3.5 py-2.5",
+                              disabled && "opacity-45",
                             )}
-                            {action.subtitle && !props.renderTitle ? (
-                              <Text
-                                style={props.subtitleStyle}
-                                className="text-xs leading-snug text-foreground-muted"
-                              >
-                                {action.subtitle}
-                              </Text>
+                            onPress={() => onPressItem(action)}
+                          >
+                            {props.renderIcon?.(action)}
+                            <View className="flex-1 gap-0.5">
+                              {props.renderTitle ? (
+                                props.renderTitle(action)
+                              ) : (
+                                <Text
+                                  style={
+                                    action.titleColor === undefined
+                                      ? undefined
+                                      : { color: action.titleColor as ColorValue }
+                                  }
+                                  className={cn(
+                                    // Same face as the pill labels that open these menus.
+                                    "text-sm font-ryco-bold",
+                                    destructive && "text-danger-foreground",
+                                  )}
+                                >
+                                  {action.title}
+                                </Text>
+                              )}
+                              {action.subtitle && !props.renderTitle ? (
+                                <Text
+                                  style={props.subtitleStyle}
+                                  className="text-xs leading-snug text-foreground-muted"
+                                >
+                                  {action.subtitle}
+                                </Text>
+                              ) : null}
+                            </View>
+                            {hasSubmenu ? (
+                              <SymbolView
+                                name="chevron.right"
+                                size={13}
+                                tintColor={iconSubtleColor}
+                                type="monochrome"
+                              />
+                            ) : action.state === "on" ? (
+                              <SymbolView
+                                name="checkmark"
+                                size={15}
+                                tintColor={iconColor}
+                                type="monochrome"
+                              />
+                            ) : action.image ? (
+                              <SymbolView
+                                name={action.image as AppSymbolName}
+                                size={15}
+                                tintColor={destructive ? dangerColor : iconColor}
+                                type="monochrome"
+                              />
                             ) : null}
-                          </View>
-                          {hasSubmenu ? (
-                            <SymbolView
-                              name="chevron.right"
-                              size={13}
-                              tintColor={iconSubtleColor}
-                              type="monochrome"
-                            />
-                          ) : action.state === "on" ? (
-                            <SymbolView
-                              name="checkmark"
-                              size={15}
-                              tintColor={iconColor}
-                              type="monochrome"
-                            />
-                          ) : action.image ? (
-                            <SymbolView
-                              name={action.image as AppSymbolName}
-                              size={15}
-                              tintColor={destructive ? dangerColor : iconColor}
-                              type="monochrome"
-                            />
-                          ) : null}
-                        </Pressable>
+                          </Pressable>
+                        </View>
                       );
                     })}
                   </ScrollView>
