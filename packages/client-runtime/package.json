@@ -394,8 +394,7 @@
     "./state/lifecycle": "./src/state/lifecycle/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit --incremental && tsc --noEmit --incremental -p tsconfig.test.json",
-    "typecheck:fast": "tsc-rs --noEmit --incremental --tsBuildInfoFile .turbo/tsc-rs.tsbuildinfo && tsc-rs --noEmit -p tsconfig.test.json --incremental --tsBuildInfoFile .turbo/tsc-rs.test.tsbuildinfo",
+    "typecheck": "effect-tsgo tsrs --noEmit --incremental && effect-tsgo tsrs --noEmit --incremental -p tsconfig.test.json",
     "test": "vp test run"
   },
   "dependencies": {
@@ -408,7 +407,6 @@
     "@noble/curves": "catalog:",
     "@noble/hashes": "catalog:",
     "fast-check": "catalog:",
-    "typescript": "catalog:",
     "vite-plus": "catalog:",
     "vitest": "catalog:"
   }

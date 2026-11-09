@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off
 import { createHash } from "node:crypto";
 
 import type { UsageProviderKind } from "@ryco/contracts";

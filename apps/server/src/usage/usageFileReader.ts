@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off
 import * as FS from "node:fs/promises";
 import { REGULAR_FILE_READ_FLAGS } from "@ryco/shared/regularFile";
 

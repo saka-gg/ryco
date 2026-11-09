@@ -1,4 +1,3 @@
-// @effect-diagnostics globalDate:off
 /**
  * How every client reads a node's CLIProxyAPI hubs: the web composer and Limits page, the
  * phone's Limits tab, and later its widgets. One policy, so the surfaces cannot drift.

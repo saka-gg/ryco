@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off - builds raw ZIP bytes for tests.
 import * as NodeZlib from "node:zlib";
 
 export interface ZipFixtureEntry {

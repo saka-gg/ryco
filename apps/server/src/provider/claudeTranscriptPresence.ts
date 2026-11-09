@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off
 /**
  * Whether Claude still keeps a session's transcript, read before a resume.
  *

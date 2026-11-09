@@ -106,16 +106,8 @@ jobs:
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: bun run lint
 
-      # fmt/lint stay repo-wide (fast); only the typechecks scope to affected.
-      # tsc-rs is an early, non-authoritative signal; the TS7 + Effect typecheck
-      # below stays the gate. tsc-rs tracks a newer TypeScript and can disagree
-      # with TS7 (docs/typescript.md), so its failures show on the step but
-      # never fail the job.
-      - name: Typecheck (tsc-rs)
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
-        continue-on-error: true
-        run: bun run typecheck:fast --summarize ${{ inputs['affected-base'] != '' && '--affected' || '' }}
-
+      # fmt/lint stay repo-wide (fast); only the typecheck scopes to affected.
+      # One pass of tsrs with Effect's diagnostics (docs/typescript.md).
       - name: Typecheck
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: bun run typecheck --summarize ${{ inputs['affected-base'] != '' && '--affected' || '' }}

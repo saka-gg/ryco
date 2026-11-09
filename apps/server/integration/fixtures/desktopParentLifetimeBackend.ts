@@ -14,7 +14,6 @@
  * It writes into <stateDir>: `ready` (its pid, once running), `finalizer-started`,
  * `finalized`, `log` (every log line) and `exit-code`.
  */
-// @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFS from "node:fs";
 import { Socket } from "node:net";
 import * as NodePath from "node:path";

@@ -1,5 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off
-// @effect-diagnostics globalDate:off
 import { createHash } from "node:crypto";
 import * as FS from "node:fs/promises";
 import * as Path from "node:path";

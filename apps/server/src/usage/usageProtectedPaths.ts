@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off
 import * as OS from "node:os";
 import * as Path from "node:path";
 import type { ProviderInstanceConfigMap, ServerSettings } from "@ryco/contracts";

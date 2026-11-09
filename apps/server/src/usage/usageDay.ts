@@ -1,5 +1,3 @@
-// @effect-diagnostics globalDate:off
-
 /** Formats a timestamp as the `YYYY-MM-DD` calendar day it falls on in `timeZone`. */
 export function makeUsageDayFormatter(timeZone: string): (timestampMs: number) => string {
   const formatter = new Intl.DateTimeFormat("en-CA", {

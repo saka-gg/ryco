@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off
 import { basename } from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";

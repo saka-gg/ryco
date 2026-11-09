@@ -1,5 +1,3 @@
-// @effect-diagnostics globalDate:off
-
 /**
  * How long a prefetched answer waits for the view it was fetched for. It
  * matches the router's default freshness for intent preloads, so a hover that

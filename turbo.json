@@ -124,16 +124,10 @@
     "typecheck": {
       "dependsOn": ["typecheck:deps"],
       "outputs": [],
-      // Cacheable: tsc is deterministic, so an unchanged package's pass/fail can
-      // be memoized by input hash and skipped on reruns. Keep test files in the
-      // input set (they're type-checked); only docs are irrelevant.
-      "inputs": ["$TURBO_DEFAULT$", "!**/*.md"]
-    },
-    // tsc-rs pre-check; same cache rules as typecheck. Its incremental build
-    // info lives in each package's gitignored .turbo/, outside the inputs.
-    "typecheck:fast": {
-      "dependsOn": ["typecheck:deps"],
-      "outputs": [],
+      // Cacheable: the checker is deterministic, so an unchanged package's
+      // pass/fail can be memoized by input hash and skipped on reruns. Keep test
+      // files in the input set (they're type-checked); only docs are irrelevant.
+      // The incremental build info is gitignored, so it never enters the hash.
       "inputs": ["$TURBO_DEFAULT$", "!**/*.md"]
     },
     "test": {

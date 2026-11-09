@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off - the socket's send buffer is Node's.
 /**
  * The node browser's frame socket (`@ryco/shared/nodeBrowserFrame`): live
  * JPEG frames of one tab, authenticated like the RPC socket. Watching a tab

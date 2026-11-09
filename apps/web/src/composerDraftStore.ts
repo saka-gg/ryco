@@ -1,5 +1,6 @@
 import {
   createComposerDraftStore,
+  type ComposerDraftStoreBundle,
   type ComposerDraftStoreState as RuntimeComposerDraftStoreState,
   type ComposerThreadDraftState as RuntimeComposerThreadDraftState,
 } from "@ryco/client-runtime/state/composer";
@@ -69,7 +70,8 @@ const composerDraftStore = createComposerDraftStore<ComposerImageAttachment>({
   readPersistedAttachmentIds: readPersistedAttachmentIdsFromStorage,
 });
 
-export const useComposerDraftStore = composerDraftStore.useComposerDraftStore;
+export const useComposerDraftStore: ComposerDraftStoreBundle<ComposerImageAttachment>["useComposerDraftStore"] =
+  composerDraftStore.useComposerDraftStore;
 export const markPromotedDraftThread = composerDraftStore.markPromotedDraftThread;
 export const markPromotedDraftThreadByRef = composerDraftStore.markPromotedDraftThreadByRef;
 export const markPromotedDraftThreads = composerDraftStore.markPromotedDraftThreads;

@@ -7,8 +7,6 @@
 // Reads optional `.env` / `.env.local` from the monorepo root before an Effect
 // runtime exists (build bootstrap), and exposes only the bounded set of
 // public env the Ryco mobile app config needs.
-//
-// @effect-diagnostics nodeBuiltinImport:off - build bootstrap runs before Effect.
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";

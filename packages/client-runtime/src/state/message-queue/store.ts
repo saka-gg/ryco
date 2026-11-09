@@ -348,3 +348,7 @@ export function createMessageQueueStore<Composer = unknown, Settings = unknown>(
       })),
   }));
 }
+
+export type MessageQueueStore<Composer = unknown, Settings = unknown> = ReturnType<
+  typeof createMessageQueueStore<Composer, Settings>
+>;

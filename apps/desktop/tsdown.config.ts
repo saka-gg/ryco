@@ -8,7 +8,11 @@ const shared = {
   outDir: "dist-electron",
   sourcemap: buildSourcemap,
   outExtensions: () => ({ js: ".cjs" }),
-  tsconfig: "tsconfig.build.json",
+  tsconfig: "tsconfig.json",
+  // The composite tsconfig turns on `declaration`, which would make tsdown emit
+  // empty .d.cts stubs for these entry bundles, and its declaration pass needs a
+  // `typescript` package the repo no longer installs. Nothing consumes them.
+  dts: false,
 };
 
 export default defineConfig([

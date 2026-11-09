@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off - the copy needs lstat, realpath, no-follow opens, copy-on-write clones and synchronous renames, which Effect's FileSystem does not offer.
 /**
  * flavorImport/consumeFlavorImport - Ryco Nightly takes over a copy of Ryco's data when Ryco
  * asked for one (port of Synara's `betaImport.ts`).

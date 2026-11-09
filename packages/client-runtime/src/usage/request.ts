@@ -1,4 +1,3 @@
-// @effect-diagnostics globalDate:off
 import {
   USAGE_CONTRACT_VERSION,
   type UsageCalendarDate,

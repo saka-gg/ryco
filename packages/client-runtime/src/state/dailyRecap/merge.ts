@@ -1,4 +1,3 @@
-// @effect-diagnostics globalDate:off
 import type { EnvironmentId } from "@ryco/contracts";
 import {
   DAILY_RECAP_TOP_PROJECTS,

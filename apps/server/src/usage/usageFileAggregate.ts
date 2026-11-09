@@ -1,4 +1,3 @@
-// @effect-diagnostics globalDate:off
 /**
  * Usage of one transcript file folded into 15-minute slots, so the scan cache holds per-file
  * aggregates instead of every parsed response and a summary costs O(slots), not O(records).

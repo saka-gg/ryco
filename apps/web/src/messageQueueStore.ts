@@ -1,5 +1,6 @@
 import {
   createMessageQueueStore,
+  type MessageQueueStore,
   type QueuedMessage,
 } from "@ryco/client-runtime/state/message-queue";
 
@@ -13,9 +14,7 @@ import type { SendTurnComposerSnapshot, SendTurnSettings } from "./hooks/execute
 // (module-level store), which is the required behavior.
 // ---------------------------------------------------------------------------
 
-export const useMessageQueueStore = createMessageQueueStore<
-  SendTurnComposerSnapshot,
-  SendTurnSettings
->();
+export const useMessageQueueStore: MessageQueueStore<SendTurnComposerSnapshot, SendTurnSettings> =
+  createMessageQueueStore<SendTurnComposerSnapshot, SendTurnSettings>();
 
 export type WebQueuedMessage = QueuedMessage<SendTurnComposerSnapshot, SendTurnSettings>;

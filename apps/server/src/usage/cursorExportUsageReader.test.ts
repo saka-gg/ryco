@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";

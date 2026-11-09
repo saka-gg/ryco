@@ -1,4 +1,3 @@
-// @effect-diagnostics globalDate:off
 import type { DailyRecapRequest } from "@ryco/contracts/daily-recap";
 import type { UsageCalendarDate } from "@ryco/contracts/usage";
 

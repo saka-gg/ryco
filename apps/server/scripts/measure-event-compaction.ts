@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off
 /**
  * Measures event-log compaction on a copy of a database; run with Node (server runtime).
  *

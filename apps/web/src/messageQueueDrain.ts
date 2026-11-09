@@ -8,6 +8,7 @@ import {
   MOVED_FAILED_ENTRY_FAILURE,
   type FollowUpQueueAddOutcome,
   type FollowUpQueueCommand,
+  type FollowUpQueuePendingStore,
   type FollowUpQueueEntryContent,
   type MessageQueueDrainCoordinator,
   type MessageQueueDrainPlatform,
@@ -132,7 +133,8 @@ function notifySteerRejected(_threadKey: string, rejection: QueueDrainSteerRejec
  * `thread.queue.add`s this tab sent, shown as "Queuing…" until their entries
  * arrive with the thread detail. Not in `messageQueueStore`, which boot loads.
  */
-export const useFollowUpQueuePendingStore = createFollowUpQueuePendingStore();
+export const useFollowUpQueuePendingStore: FollowUpQueuePendingStore =
+  createFollowUpQueuePendingStore();
 // An account teardown (`useMessageQueueStore.reset`) drops the adds on their way too.
 useMessageQueueStore.subscribe((state, previous) => {
   if (state.epoch !== previous.epoch) useFollowUpQueuePendingStore.getState().reset();
