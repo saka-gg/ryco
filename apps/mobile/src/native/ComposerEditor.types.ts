@@ -39,6 +39,8 @@ export interface ComposerEditorProps {
   readonly onChangeText: (value: string) => void;
   readonly onSelectionChange?: (selection: ComposerEditorSelection) => void;
   readonly onPasteImages?: (uris: ReadonlyArray<string>) => void;
+  /** The text's full height, insets included, as it changes: an owner can grow the field. */
+  readonly onContentHeightChange?: (height: number) => void;
   readonly onFocus?: () => void;
   readonly onBlur?: () => void;
   /**

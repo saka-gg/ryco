@@ -8,7 +8,7 @@ import { useEnvironmentServerConfigs } from "../state/environmentServerConfigs";
 import { useWsConnectionStatusForEnvironment } from "../rpc/wsConnectionState";
 import { SymbolView } from "./AppSymbol";
 import { Image } from "expo-image";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { View } from "react-native";
 import type { EnvironmentId, ProjectId } from "@ryco/contracts";
 import { useThemeColor } from "../lib/useThemeColor";
@@ -35,6 +35,10 @@ export function ProjectFavicon(props: {
   readonly size?: number;
   readonly projectTitle: string;
   readonly workspaceRoot?: string | null;
+  /** Shown while there is no artwork, instead of the folder glyph. */
+  readonly fallback?: ReactNode;
+  /** Corner radius of the artwork; a sixth of its size by default. */
+  readonly radius?: number;
 }) {
   const size = props.size ?? 42;
   const configs = useEnvironmentServerConfigs();
@@ -100,6 +104,8 @@ export function ProjectFavicon(props: {
       open={props.open}
       projectTitle={props.projectTitle}
       size={size}
+      fallback={props.fallback}
+      radius={props.radius}
     />
   );
 }
@@ -109,6 +115,8 @@ function ProjectFaviconImage(props: {
   readonly open?: boolean;
   readonly projectTitle: string;
   readonly size: number;
+  readonly fallback?: ReactNode;
+  readonly radius?: number | undefined;
 }) {
   const iconMuted = useThemeColor("--color-icon-subtle");
 
@@ -126,7 +134,8 @@ function ProjectFaviconImage(props: {
       }}
     >
       {/* Folder icon fallback (matches web's FolderIcon) */}
-      {!showImage ? (
+      {!showImage && props.fallback !== undefined ? props.fallback : null}
+      {!showImage && props.fallback === undefined ? (
         <SymbolView
           name={{ ios: "folder.fill", android: props.open ? "folder_open" : "folder" }}
           size={props.size * 0.78}
@@ -145,7 +154,7 @@ function ProjectFaviconImage(props: {
           style={{
             width: props.size,
             height: props.size,
-            borderRadius: props.size * 0.16,
+            borderRadius: props.radius ?? props.size * 0.16,
             ...(showImage ? {} : { position: "absolute" as const, opacity: 0 }),
           }}
           contentFit="contain"

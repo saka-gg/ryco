@@ -14,6 +14,8 @@ function model(overrides: Partial<ThreadHeaderModel> = {}): ThreadHeaderModel {
     nodeLabel: "Studio",
     projectLabel: "Ryco",
     worktreeLabel: "feat/ci",
+    branchLabel: "feat/ci",
+    inWorktree: true,
     contextHeading: "Project · Worktree",
     statusLabel: "Ready",
     contextAccessibilityLabel: "",

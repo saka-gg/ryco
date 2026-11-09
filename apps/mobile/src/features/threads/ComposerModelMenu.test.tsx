@@ -12,6 +12,8 @@ vi.mock("../../state/preferencesStore", () => ({
 }));
 vi.mock("../../components/AnchoredMenu", () => ({ AnchoredMenu: "AnchoredMenu" }));
 vi.mock("../../components/ProviderIcon", () => ({ ProviderIcon: "ProviderIcon" }));
+vi.mock("../../components/AppSymbol", () => ({ SymbolView: "SymbolView" }));
+vi.mock("../../lib/useThemeColor", () => ({ useThemeColor: () => "#000000" }));
 vi.mock("./ComposerModelOptions", () => ({ ComposerModelOptions: "ComposerModelOptions" }));
 import { ComposerModelMenu } from "./ComposerModelMenu";
 import { buildModelPickerModelFromOptions } from "./modelPickerModel";
@@ -71,17 +73,20 @@ function menu(
       },
     ],
   });
+  const onOpenCacheInfo = vi.fn();
   const tree = ComposerModelMenu({
     model,
     selection: activeSelection,
     disabled,
     onSelect,
     onClose: vi.fn(),
+    onOpenCacheInfo,
     children: () => null,
   }) as ReactElement<ComponentProps<typeof AnchoredMenu>>;
   return {
     props: tree.props,
     onSelect,
+    onOpenCacheInfo,
     press: (event: string) => tree.props.onPressAction?.({ nativeEvent: { event } }),
   };
 }
@@ -225,4 +230,15 @@ describe("native legacy models", () => {
     tree.props.onPressAction?.({ nativeEvent: { event: `#update:${claude}` } });
     expect(onSelect).not.toHaveBeenCalled();
   });
+});
+
+it("native model menu carries the prompt cache, which closes the menu even while disabled", () => {
+  const mounted = menu(true);
+  const ids = mounted.props.actions.map((action) => action.id);
+  expect(ids).toContain("#cache-info");
+  expect(ids.indexOf("#cache-info")).toBe(ids.indexOf("toggle-favorite") - 1);
+  expect(mounted.props.closeOnSelectIds?.has("#cache-info")).toBe(true);
+  mounted.press("#cache-info");
+  expect(mounted.onOpenCacheInfo).toHaveBeenCalledTimes(1);
+  expect(mounted.onSelect).not.toHaveBeenCalled();
 });

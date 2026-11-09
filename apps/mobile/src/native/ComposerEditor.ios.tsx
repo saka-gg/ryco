@@ -71,6 +71,9 @@ interface NativeComposerEditorProps extends ViewProps {
   readonly submitsOnReturn: boolean;
   readonly onComposerChange: (event: NativeEditorEvent) => void;
   readonly onComposerSelectionChange?: (event: NativeSelectionEvent) => void;
+  readonly onComposerContentSizeChange?: (event: {
+    readonly nativeEvent: { readonly width: number; readonly height: number };
+  }) => void;
   readonly onComposerPasteImages?: (event: NativePasteImagesEvent) => void;
   readonly onComposerFocus?: () => void;
   readonly onComposerBlur?: () => void;
@@ -93,6 +96,7 @@ export function ComposerEditor({
   onChangeText,
   onSelectionChange,
   onPasteImages,
+  onContentHeightChange,
   onFocus,
   onBlur,
   onSubmit,
@@ -247,6 +251,7 @@ export function ComposerEditor({
         setMostRecentEventCount(acknowledgedEventCount);
         setNativeEventSequence((sequence) => sequence + 1);
       }}
+      onComposerContentSizeChange={(event) => onContentHeightChange?.(event.nativeEvent.height)}
       onComposerSelectionChange={(event) => {
         const acknowledgedEventCount = acceptNativeEvent(
           event.nativeEvent.eventCount,
