@@ -14,9 +14,9 @@ import type {
 
 import {
   WORKSPACE_LIFECYCLE_ACTION_LABELS,
-  workspaceLifecycleIncompleteTitle,
   type WorkspaceReviewAction,
 } from "../state/lifecycle/index.ts";
+import { workspaceLifecycleIncompleteTitle } from "../state/lifecycle/outcome.ts";
 import { workspaceLostWorkFacts, type WorkspaceFact } from "./workspaces.ts";
 
 /** One answer to a preview request. */

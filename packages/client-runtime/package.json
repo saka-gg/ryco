@@ -278,6 +278,10 @@
       "types": "./src/projectSettings/scripts.ts",
       "import": "./src/projectSettings/scripts.ts"
     },
+    "./projectSettings/sectionIds": {
+      "types": "./src/projectSettings/sectionIds.ts",
+      "import": "./src/projectSettings/sectionIds.ts"
+    },
     "./projectSettings/sections": {
       "types": "./src/projectSettings/sections.ts",
       "import": "./src/projectSettings/sections.ts"
@@ -528,6 +532,7 @@
     },
     "./state/storage": "./src/state/storage/index.ts",
     "./state/lifecycle": "./src/state/lifecycle/index.ts",
+    "./state/lifecycle/outcome": "./src/state/lifecycle/outcome.ts",
     "./projectCopy/progressView": {
       "types": "./src/projectCopy/progressView.ts",
       "import": "./src/projectCopy/progressView.ts"

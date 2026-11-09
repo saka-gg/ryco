@@ -1,8 +1,6 @@
 import type {
   WorkspaceCheckoutState,
-  WorkspaceLifecycleOutcome,
   WorkspaceLifecycleRequest,
-  WorkspaceLifecycleResult,
   WorktreeCheckoutRemovalReason,
 } from "@ryco/contracts";
 import { threadHasConversation } from "@ryco/shared/threadFork";
@@ -207,19 +205,6 @@ export function listWorkspaceLifecycleActions(
       destructive: true,
     },
   ];
-}
-
-/** Whether a run recreated the workspace's checkout (Restore does when it was removed). */
-export const recreatedCheckout = (result: WorkspaceLifecycleResult): boolean =>
-  result.steps.some((step) => step.id === "recreate-checkout" && step.status === "done");
-
-/** The heading of a run that did not complete: "… partly completed" or "… did not run". */
-export function workspaceLifecycleIncompleteTitle(
-  action: WorkspaceActionId,
-  outcome: Exclude<WorkspaceLifecycleOutcome, "completed">,
-): string {
-  const label = WORKSPACE_LIFECYCLE_ACTION_LABELS[action];
-  return outcome === "partial" ? `${label} partly completed` : `${label} did not run`;
 }
 
 /** Retention copy shown wherever archived conversations are listed or deleted. */

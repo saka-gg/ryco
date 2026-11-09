@@ -7,7 +7,10 @@ import {
 } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { recreatedCheckout, workspaceLifecycleIncompleteTitle } from "../state/lifecycle/index.ts";
+import {
+  recreatedCheckout,
+  workspaceLifecycleIncompleteTitle,
+} from "../state/lifecycle/outcome.ts";
 import {
   resolveWorkspaceReview,
   WORKSPACE_REVIEW_OUTDATED,

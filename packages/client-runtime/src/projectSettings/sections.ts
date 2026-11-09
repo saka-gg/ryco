@@ -4,20 +4,9 @@
  * sections under the same names; each surface leaves out what it cannot edit.
  */
 
-/** Every section of a project's page, in page order. */
-export const PROJECT_SECTIONS = [
-  "devices",
-  "location",
-  "repository",
-  "workspaces",
-  "defaults",
-  "actions",
-  "instructions",
-  "automations",
-  "integrations",
-  "danger",
-] as const;
-export type ProjectSection = (typeof PROJECT_SECTIONS)[number];
+import type { ProjectSection } from "./sectionIds.ts";
+
+export { PROJECT_SECTIONS, type ProjectSection } from "./sectionIds.ts";
 
 export const PROJECT_SECTION_LABELS: Record<ProjectSection, string> = {
   devices: "Devices",

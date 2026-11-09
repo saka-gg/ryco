@@ -13,7 +13,7 @@ import {
 import {
   PROJECT_SECTIONS,
   type ProjectSection,
-} from "@ryco/client-runtime/projectSettings/sections";
+} from "@ryco/client-runtime/projectSettings/sectionIds";
 
 export { isWorkspaceReviewAction, type WorkspaceReviewAction };
 export { PROJECT_SECTIONS, type ProjectSection };

@@ -1,11 +1,13 @@
 import {
   isWorkspaceReviewAction,
-  recreatedCheckout,
   WORKSPACE_LIFECYCLE_ACTION_LABELS,
-  workspaceLifecycleIncompleteTitle,
   type WorkspaceActionId,
   type WorkspaceReviewAction,
 } from "@ryco/client-runtime/state/lifecycle";
+import {
+  recreatedCheckout,
+  workspaceLifecycleIncompleteTitle,
+} from "@ryco/client-runtime/state/lifecycle/outcome";
 import type {
   EnvironmentId,
   ProjectId,
