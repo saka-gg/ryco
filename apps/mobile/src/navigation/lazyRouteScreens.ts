@@ -213,15 +213,13 @@ export const TasksTabScreen = lazyScreen(
     (require("./tabs/TasksTabPlaceholder") as typeof import("./tabs/TasksTabPlaceholder"))
       .TasksTabScreen,
 );
-// PRs tab mount point: once the PRs round (#1138) is on main, require
-// "../features/pullRequests/PullRequestsTabScreen" here instead of the placeholder
-// It draws its own header, so give its tab `stackHeader: { headerShown: false }`
-// in `navigation/tabs/MainTabs.tsx`.
+// The PRs tab draws its own header (`stackHeader: { headerShown: false }` in
+// `navigation/tabs/MainTabs.tsx`).
 export const PullRequestsTabScreen = lazyScreen(
   "PullRequestsTabScreen",
   () =>
     (
-      require("./tabs/PullRequestsTabPlaceholder") as typeof import("./tabs/PullRequestsTabPlaceholder")
+      require("../features/pullRequests/PullRequestsTabScreen") as typeof import("../features/pullRequests/PullRequestsTabScreen")
     ).PullRequestsTabScreen,
 );
 export const GlobalSearchRouteScreen = lazyScreen(

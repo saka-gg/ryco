@@ -95,6 +95,16 @@ copied: grouped cards with quiet headers, one plain leading symbol per row, the 
 right with a chevron, and the rarely used pages in an untitled group at the bottom
 (`src/features/settings/SettingsRouteScreen.tsx`, `settingsListModel.ts`, `components/*`).
 
+The pull requests round (2026-11) ports mechanisms and numbers from the same upstream
+(commit `ade473018d`), rewritten over Ryco's shared pull request rules rather than
+copied: the list row's layout (state glyph with a conflict mark, number and stack
+position line, labels, checks, review verdict and diff size;
+`src/features/pullRequests/PullRequestTabRow.tsx`, after upstream's
+`pull-requests/PullRequestListRow.tsx`), the label colour handling
+(`pullRequestGlyphModel.ts`, after upstream's `pullRequestList.ts`), the stack
+navigator on the pull request screen (`pullRequestStackModel.ts`, after upstream's
+`PullRequestStackCard.tsx`).
+
 `pingdotgg/t3code` is Copyright (c) 2026 T3 Tools Inc. and licensed under the MIT
 License; that notice is retained below as required. The four vendored native
 modules under `modules/*` carry their own `LICENSE` / `UPSTREAM.md` notices

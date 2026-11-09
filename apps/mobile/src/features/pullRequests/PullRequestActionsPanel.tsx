@@ -76,7 +76,7 @@ function SheetHeader(props: {
   );
 }
 
-function ReviewSheet(props: {
+export function ReviewSheet(props: {
   readonly control: PullRequestActionsControl;
   readonly onClose: () => void;
 }) {
@@ -135,7 +135,7 @@ function ReviewSheet(props: {
   );
 }
 
-function MergeSheet(props: {
+export function MergeSheet(props: {
   readonly control: PullRequestActionsControl;
   readonly onClose: () => void;
 }) {

@@ -63,7 +63,8 @@ export const MainTabs = createNativeTabsNavigator({
     PullRequests: createNativeTabScreen({
       screen: PullRequestsTabScreen,
       linking: MAIN_TABS.PullRequests.linking,
-      options: tabOptions("PullRequests"),
+      // The PRs tab draws its own header: repository picker, search and filters.
+      options: { ...tabOptions("PullRequests"), stackHeader: { headerShown: false } },
     }),
     Usage: createNativeTabScreen({
       screen: UsageTabScreen,
