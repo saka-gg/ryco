@@ -219,6 +219,7 @@ import {
   reduceThreadFeedFollow,
   THREAD_FEED_FOLLOW_INITIAL,
   THREAD_FEED_USER_SCROLL_SETTLE_MS,
+  threadFeedEndMaintenance,
   type ThreadFeedFollowEvent,
   type ThreadFeedFollowState,
 } from "./threadFeedLiveFollow";
@@ -2662,6 +2663,7 @@ export function ThreadDetailScreen(props: {
   };
   const onFeedMomentumScrollEnd = () =>
     transitionFollow({ type: "momentum-end", isAtEnd: feedIsAtEnd() });
+  const feedEndMaintenance = threadFeedEndMaintenance(followingLatest);
   const jumpToLatest = () => {
     clearFollowSettleTimer();
     transitionFollow({ type: "reset" });
@@ -3608,14 +3610,8 @@ export function ThreadDetailScreen(props: {
               keyExtractor={(row) => row.id}
               alignItemsAtEnd
               initialScrollAtEnd
-              // Following, the measured end is kept at once (animating estimates races row
-              // measurement); reading back, the rows on screen stay put as others load.
-              maintainScrollAtEnd={
-                followingLatest
-                  ? { animated: false, on: { dataChange: true, itemLayout: true, layout: true } }
-                  : false
-              }
-              maintainVisibleContentPosition={!followingLatest}
+              // Following keeps the end from any distance; reading back, the rows on screen stay put.
+              {...feedEndMaintenance}
               keyboardDismissMode="interactive"
               keyboardShouldPersistTaps="handled"
               contentInsetAdjustmentBehavior="never"

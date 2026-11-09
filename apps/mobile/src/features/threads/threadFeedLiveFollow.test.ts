@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   reduceThreadFeedFollow,
+  threadFeedEndMaintenance,
   THREAD_FEED_FOLLOW_INITIAL,
   type ThreadFeedFollowEvent,
   type ThreadFeedFollowState,
@@ -92,5 +93,51 @@ describe("thread feed live follow", () => {
     expect(run([{ type: "drag-begin" }, { type: "reset" }, { type: "settle-timeout" }])).toEqual(
       THREAD_FEED_FOLLOW_INITIAL,
     );
+  });
+
+  // The phone bug: a turn that started while the chat sat at the end grew the list below it (the
+  // finished reply re-laid out 217 points taller, then the next turn's rows); the list did not
+  // follow and the feed still counted as following, so nothing showed the way down.
+  it("keeps following while a new turn grows the list below the reader", () => {
+    const state = run([
+      { type: "scroll", isAtEnd: false },
+      { type: "scroll", isAtEnd: false },
+      { type: "momentum-end", isAtEnd: false },
+      { type: "settle-timeout" },
+    ]);
+    expect(state.following).toBe(true);
+  });
+});
+
+/** LegendList's rule for keeping the end on a change (`distanceFromEnd <= threshold * viewport`). */
+const listKeepsEnd = (threshold: number, distanceFromEnd: number, viewport: number) =>
+  distanceFromEnd <= threshold * viewport;
+
+describe("thread feed end maintenance", () => {
+  it("keeps the end from any distance and on every change while following", () => {
+    const following = threadFeedEndMaintenance(true);
+    expect(following.maintainScrollAtEnd).toEqual({
+      animated: false,
+      on: { dataChange: true, itemLayout: true, layout: true, footerLayout: true },
+    });
+    expect(following.maintainVisibleContentPosition).toBe(false);
+    // The distances the simulator logged when the list lost the end: a finished reply's reflow,
+    // then the next turn's rows, in a 758-point viewport.
+    for (const distance of [217, 2807, 8009]) {
+      expect(listKeepsEnd(following.maintainScrollAtEndThreshold, distance, 758)).toBe(true);
+    }
+    // LegendList's default would have let them go.
+    expect(listKeepsEnd(0.1, 217, 758)).toBe(false);
+  });
+
+  it("leaves the end alone and holds the rows on screen while reading back", () => {
+    const reading = threadFeedEndMaintenance(false);
+    expect(reading.maintainScrollAtEnd).toBe(false);
+    expect(reading.maintainVisibleContentPosition).toBe(true);
+  });
+
+  it("hands the list the same props while the state holds", () => {
+    expect(threadFeedEndMaintenance(true)).toBe(threadFeedEndMaintenance(true));
+    expect(threadFeedEndMaintenance(false)).toBe(threadFeedEndMaintenance(false));
   });
 });
