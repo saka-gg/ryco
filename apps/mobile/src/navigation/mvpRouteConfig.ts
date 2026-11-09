@@ -87,6 +87,15 @@ export const MVP_ROOT_ROUTES = {
     ios: { presentation: "card" },
     android: { presentation: "card" },
   },
+  /** One project's settings on its machine (the web's project page). */
+  ProjectSettings: {
+    linking: `${PROJECT}/settings`,
+    overlay: false,
+    headerPreset: "glass",
+    headerAction: "back",
+    ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
   ProjectSourceControl: {
     linking: `${PROJECT}/source-control/:worktreeId?`,
     overlay: false,
@@ -448,6 +457,19 @@ export const MVP_ROOT_ROUTES = {
     linking: "connections/new",
     overlay: true,
     headerPreset: "sheet-solid",
+    headerAction: "back",
+    ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
+  /**
+   * One machine's access: pairing links, paired clients, network exposure and
+   * Hub revocation. Pushed from a machine's row in the Machines sheet, like
+   * ConnectionsNew, so it floats over the workspace too.
+   */
+  MachineAccess: {
+    linking: "machines/:environmentId/access",
+    overlay: true,
+    headerPreset: "glass",
     headerAction: "back",
     ios: { presentation: "card" },
     android: { presentation: "card" },

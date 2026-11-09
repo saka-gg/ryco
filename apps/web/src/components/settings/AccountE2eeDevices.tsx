@@ -34,7 +34,7 @@ import {
   accountE2eeDevicePlatformLabel,
   accountE2eeDeviceStatusLabel,
   normalizeAccountE2eeDeviceLabel,
-} from "./AccountE2eeDevices.logic";
+} from "@ryco/client-runtime/machineAccess/accountE2eeDevices";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 
 const timestampFormatter = new Intl.DateTimeFormat(undefined, {

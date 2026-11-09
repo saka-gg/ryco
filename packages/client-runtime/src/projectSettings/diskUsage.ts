@@ -4,8 +4,7 @@
  * so both surfaces state the same number the same way.
  */
 import type { WorkspaceDiskUsage } from "@ryco/contracts";
-
-import { formatBytes } from "../../settings/DiagnosticsSettings.logic";
+import { formatBytes } from "@ryco/shared/byteSize";
 
 /** Space on a device's disk; `partial` makes `bytes` a lower bound. */
 export interface DiskSize {

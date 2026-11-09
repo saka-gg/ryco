@@ -1,11 +1,22 @@
 import {
+  resolveWorkspaceReview,
+  WORKSPACE_REVIEW_APPLY_FAILED,
+  WORKSPACE_REVIEW_PREVIEW_FAILED,
+  workspaceReviewApplyError,
+  workspaceReviewConfirmLabel,
+  workspaceReviewDeletedConversationIds,
+  workspaceReviewEffectParts,
+  workspaceReviewErrorMessage as errorMessage,
+  workspaceReviewResultFailure,
+  type WorkspaceReviewPreview as Preview,
+} from "@ryco/client-runtime/projectSettings/workspaceReview";
+import {
   WORKSPACE_LIFECYCLE_ACTION_LABELS,
   workspaceActionRequest,
 } from "@ryco/client-runtime/state/lifecycle";
 import type {
   EnvironmentId,
   ProjectId,
-  WorkspaceLifecyclePreview,
   WorkspaceLifecycleResult,
   WorktreeId,
 } from "@ryco/contracts";
@@ -23,20 +34,12 @@ import { Checkbox } from "../../ui/checkbox";
 import { Skeleton } from "../../ui/skeleton";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
 import type { WorkspaceReviewAction } from "../projectsSearch";
-import { workspaceLostWorkFacts } from "./projectWorkspaces.logic";
-
-type Preview =
-  | { readonly status: "ready"; readonly preview: WorkspaceLifecyclePreview }
-  | { readonly status: "error"; readonly message: string };
 
 type Phase =
   | { readonly kind: "review" }
   | { readonly kind: "applying" }
   | { readonly kind: "result"; readonly result: WorkspaceLifecycleResult }
   | { readonly kind: "apply-error"; readonly message: string };
-
-const errorMessage = (error: unknown, fallback: string) =>
-  error instanceof Error && error.message ? error.message : fallback;
 
 const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
 
@@ -108,7 +111,7 @@ export function WorkspaceReview(props: {
         (preview): Preview => ({ status: "ready", preview }),
         (error: unknown): Preview => ({
           status: "error",
-          message: errorMessage(error, "The workspace could not be inspected."),
+          message: errorMessage(error, WORKSPACE_REVIEW_PREVIEW_FAILED),
         }),
       )
       .then((value) => {
@@ -119,32 +122,17 @@ export function WorkspaceReview(props: {
     };
   }, [action, deleteConversations, lifecycle, previewKey, worktreeId]);
 
-  const loadedView = loaded?.key === previewKey ? loaded.value : null;
-  const view: Preview | null =
-    props.previewDenied !== null
-      ? { status: "error", message: props.previewDenied }
-      : !lifecycle
-        ? { status: "error", message: "This device does not support workspace actions." }
-        : // A node that predates deleting answers with an ordinary removal.
-          loadedView?.status === "ready" && loadedView.preview.effects.discard !== true
-          ? {
-              status: "error",
-              message: "This device's Ryco cannot delete workspaces yet. Update it, then retry.",
-            }
-          : loadedView;
   // Only the current preview can be confirmed. While options re-inspect, the
   // last one stays on screen (dimmed) so the controls never jump away.
-  const preview = view?.status === "ready" ? view.preview : null;
-  const shown =
-    preview ?? (view === null && loaded?.value.status === "ready" ? loaded.value.preview : null);
-  const refreshing = preview === null && shown !== null;
-  const blocked = preview !== null && preview.blockers.length > 0;
+  const { view, preview, shown, refreshing, blocked, lostWork, losesWork, conversationCount } =
+    resolveWorkspaceReview({
+      previewDenied: props.previewDenied,
+      lifecycleAvailable: lifecycle !== undefined,
+      current: loaded?.key === previewKey ? loaded.value : null,
+      last: loaded?.value ?? null,
+    });
   const busy = phase.kind === "applying";
-  const lostWork = shown ? workspaceLostWorkFacts(shown.workspace) : [];
-  const losesWork = shown !== null && (shown.effects.discardsWork === true || lostWork.length > 0);
-  const conversationCount = shown
-    ? shown.workspace.conversations.active + shown.workspace.conversations.archived
-    : 0;
+  const effect = shown ? workspaceReviewEffectParts(shown) : null;
 
   // The AI description of what would be lost: asked once per open, only when
   // something would be lost and the node can describe it. Informational only;
@@ -184,10 +172,7 @@ export function WorkspaceReview(props: {
     if (!preview || !lifecycle) return;
     setPhase({ kind: "applying" });
     // Conversations this run deletes stay restorable for a few seconds.
-    const deletedConversationIds =
-      preview.request.deleteConversations === true
-        ? (preview.effects.trashConversationIds ?? [])
-        : [];
+    const deletedConversationIds = workspaceReviewDeletedConversationIds(preview);
     try {
       const result = await lifecycle.applyWorkspace({
         ...preview.request,
@@ -203,7 +188,7 @@ export function WorkspaceReview(props: {
       useWorkspaceLifecycleChanges.getState().markChanged();
       setPhase({ kind: "result", result });
     } catch (error) {
-      const message = errorMessage(error, "The action could not be applied.");
+      const message = errorMessage(error, WORKSPACE_REVIEW_APPLY_FAILED);
       if (mountedRef.current) {
         setPhase({ kind: "apply-error", message });
         return;
@@ -221,17 +206,9 @@ export function WorkspaceReview(props: {
 
   const failure =
     phase.kind === "result"
-      ? {
-          title:
-            phase.result.outcome === "partial"
-              ? `${label} partly completed`
-              : `${label} did not run`,
-          message: phase.result.message,
-          detail: phase.result.steps.find((step) => step.status === "failed")?.detail ?? null,
-          tone: phase.result.outcome === "partial" ? "warning" : "destructive",
-        }
+      ? workspaceReviewResultFailure(action, phase.result)
       : phase.kind === "apply-error"
-        ? { title: `${label} failed`, message: phase.message, detail: null, tone: "destructive" }
+        ? workspaceReviewApplyError(action, phase.message)
         : null;
 
   const branch = shown?.workspace.branch ?? null;
@@ -301,13 +278,11 @@ export function WorkspaceReview(props: {
           )}
         >
           <p data-testid="workspace-review-summary" className="text-xs text-muted-foreground">
-            {shown.effects.removeCheckout
-              ? "Removes the checkout from disk"
-              : "Removes the workspace"}
-            {shown.effects.deleteBranch ? (
+            {effect?.action}
+            {effect?.deletesBranch != null ? (
               <>
                 {" "}
-                and deletes branch <span className="font-mono">{shown.effects.branch}</span>
+                and deletes branch <span className="font-mono">{effect.deletesBranch}</span>
               </>
             ) : null}
             .
@@ -399,7 +374,7 @@ export function WorkspaceReview(props: {
             onClick={() => void apply()}
           >
             {busy ? <LoaderCircleIcon aria-hidden className="size-3.5 animate-spin" /> : null}
-            {losesWork ? "Delete anyway" : "Delete workspace"}
+            {workspaceReviewConfirmLabel(losesWork)}
           </Button>
         )}
       </div>

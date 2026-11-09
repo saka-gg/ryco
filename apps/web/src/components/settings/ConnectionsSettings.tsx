@@ -9,15 +9,12 @@ import {
 } from "lucide-react";
 import { type ReactNode, memo, useCallback, useEffect, useMemo, useState } from "react";
 import {
-  type AuthClientSession,
-  type AuthPairingLink,
   type AdvertisedEndpoint,
   type DesktopDiscoveredSshHost,
   type DesktopSshEnvironmentTarget,
   type DesktopServerExposureState,
   type EnvironmentId,
 } from "@ryco/contracts";
-import { DateTime } from "effect";
 import {
   describeHostFreeze,
   isSavedEnvironmentSwitchedOff,
@@ -73,19 +70,40 @@ import { DesktopKeepAwakeRow } from "./DesktopKeepAwakeRow";
 import { PAIRING_LINK_TARGET_ID } from "./settingsSearchReveal";
 import { savedChangeRelaunch, useDesktopRelaunchGuard } from "./useDesktopRelaunchGuard";
 import {
-  endpointDefaultPreferenceKey,
   isHostedAppPairingUrl,
-  isQrShareableBaseUrl,
-  isTailscaleHttpsEndpoint,
   resolveAdvertisedEndpointPairingUrl,
   savedBackendConnectionActionLabel,
   savedBackendNeedsRepair,
   savedBackendRepairHost,
   savedPairingLifetimeNote,
+} from "./ConnectionsSettings.logic";
+import {
+  endpointDefaultPreferenceKey,
+  isQrShareableBaseUrl,
+  isTailscaleHttpsEndpoint,
   selectPairingEndpoint,
   selectQrEndpoint,
-} from "./ConnectionsSettings.logic";
-import type { AddDeviceCode, AddDeviceOperations } from "./AddDeviceDialog.logic";
+} from "@ryco/client-runtime/machineAccess/advertisedEndpoints";
+import {
+  addDeviceCodeFromCredential,
+  type AddDeviceOperations,
+} from "@ryco/client-runtime/machineAccess/addDeviceCode";
+import {
+  accessRoleLabel,
+  clientSessionDetail,
+  clientSessionIsLive,
+  clientSessionPrimaryLabel,
+  pairingLinkCanShare,
+  pairingLinkPrimaryLabel,
+  removeClientSession,
+  removePairingLink,
+  sortClientSessions,
+  sortPairingLinks,
+  toServerClientSessionRecord,
+  toServerPairingLinkRecord,
+  upsertClientSession,
+  upsertPairingLink,
+} from "@ryco/client-runtime/machineAccess/authAccess";
 import { AddDeviceButton, AddDeviceDialogHost } from "./AddDeviceEntry";
 import { useLocalSessionAccess } from "./localSessionAccess";
 import {
@@ -376,83 +394,6 @@ function endpointRowClassName(presentation: AccessSectionPresentation, isAvailab
   return cn(ENDPOINT_ROW_CLASSNAME, !isAvailable && "bg-muted/24");
 }
 
-function sortDesktopPairingLinks(links: ReadonlyArray<ServerPairingLinkRecord>) {
-  return [...links].toSorted(
-    (left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime(),
-  );
-}
-
-function sortDesktopClientSessions(sessions: ReadonlyArray<ServerClientSessionRecord>) {
-  return [...sessions].toSorted((left, right) => {
-    if (left.current !== right.current) {
-      return left.current ? -1 : 1;
-    }
-    if (left.connected !== right.connected) {
-      return left.connected ? -1 : 1;
-    }
-    return new Date(right.issuedAt).getTime() - new Date(left.issuedAt).getTime();
-  });
-}
-
-function toDesktopPairingLinkRecord(pairingLink: AuthPairingLink): ServerPairingLinkRecord {
-  return {
-    ...pairingLink,
-    createdAt: DateTime.formatIso(pairingLink.createdAt),
-    expiresAt: DateTime.formatIso(pairingLink.expiresAt),
-  };
-}
-
-function toDesktopClientSessionRecord(clientSession: AuthClientSession): ServerClientSessionRecord {
-  return {
-    ...clientSession,
-    issuedAt: DateTime.formatIso(clientSession.issuedAt),
-    expiresAt: DateTime.formatIso(clientSession.expiresAt),
-    lastConnectedAt:
-      clientSession.lastConnectedAt === null
-        ? null
-        : DateTime.formatIso(clientSession.lastConnectedAt),
-  };
-}
-
-function upsertDesktopPairingLink(
-  current: ReadonlyArray<ServerPairingLinkRecord>,
-  next: ServerPairingLinkRecord,
-) {
-  const existingIndex = current.findIndex((pairingLink) => pairingLink.id === next.id);
-  if (existingIndex === -1) {
-    return sortDesktopPairingLinks([...current, next]);
-  }
-  const updated = [...current];
-  updated[existingIndex] = next;
-  return sortDesktopPairingLinks(updated);
-}
-
-function removeDesktopPairingLink(current: ReadonlyArray<ServerPairingLinkRecord>, id: string) {
-  return current.filter((pairingLink) => pairingLink.id !== id);
-}
-
-function upsertDesktopClientSession(
-  current: ReadonlyArray<ServerClientSessionRecord>,
-  next: ServerClientSessionRecord,
-) {
-  const existingIndex = current.findIndex(
-    (clientSession) => clientSession.sessionId === next.sessionId,
-  );
-  if (existingIndex === -1) {
-    return sortDesktopClientSessions([...current, next]);
-  }
-  const updated = [...current];
-  updated[existingIndex] = next;
-  return sortDesktopClientSessions(updated);
-}
-
-function removeDesktopClientSession(
-  current: ReadonlyArray<ServerClientSessionRecord>,
-  sessionId: ServerClientSessionRecord["sessionId"],
-) {
-  return current.filter((clientSession) => clientSession.sessionId !== sessionId);
-}
-
 function hostedHttpsCompatibilityLabel(
   compatibility: AdvertisedEndpoint["compatibility"]["hostedHttpsApp"],
 ): string | null {
@@ -479,26 +420,10 @@ function hostedHttpsCompatibilityDescription(
   }
 }
 
-/**
- * A minted pairing code for the "Add a device" dialog. The response is read
- * off JSON undecoded, so `expiresAt` arrives as an ISO string.
- */
-function toAddDeviceCode(
-  result: Awaited<ReturnType<typeof createServerPairingCredential>>,
-): AddDeviceCode {
-  const expiresAt: unknown = result.expiresAt;
-  return {
-    id: result.id,
-    credential: result.credential,
-    label: result.label ?? null,
-    expiresAt: typeof expiresAt === "string" ? expiresAt : DateTime.formatIso(result.expiresAt),
-  };
-}
-
 /** The dialog's only reach into the node: mint a client code, revoke one code. */
 const ADD_DEVICE_OPERATIONS: AddDeviceOperations = {
   createCode: async (label) =>
-    toAddDeviceCode(await createServerPairingCredential(label ?? undefined)),
+    addDeviceCodeFromCredential(await createServerPairingCredential(label ?? undefined)),
   revokeCode: (id) => revokeServerPairingLink(id),
 };
 
@@ -660,12 +585,9 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
 
   const expiresAbsolute = formatAccessTimestamp(pairingLink.expiresAt);
 
-  const roleLabel = pairingLink.role === "owner" ? "Owner" : "Client";
-  const primaryLabel = pairingLink.label ?? `${roleLabel} link`;
-  // An owner link grants full access to this node. It is created in a
-  // terminal (`ryco auth pairing create --role owner`, `ryco setup`) and stays
-  // there: it is listed only so it can be revoked, never shown or shared again.
-  const canShare = pairingLink.role !== "owner";
+  const roleLabel = accessRoleLabel(pairingLink.role);
+  const primaryLabel = pairingLinkPrimaryLabel(pairingLink);
+  const canShare = pairingLinkCanShare(pairingLink);
   const defaultEndpointCopyOption =
     endpointCopyOptions.find((option) => option.key === defaultEndpointKey) ??
     endpointCopyOptions[0] ??
@@ -939,7 +861,7 @@ const ConnectedClientListRow = memo(function ConnectedClientListRow({
   onRevokeSession,
 }: ConnectedClientListRowProps) {
   const nowMs = useRelativeTimeTick(1_000);
-  const isLive = clientSession.current || clientSession.connected;
+  const isLive = clientSessionIsLive(clientSession);
   const lastConnectedAt = clientSession.lastConnectedAt;
   const statusTooltip = isLive
     ? lastConnectedAt
@@ -948,19 +870,7 @@ const ConnectedClientListRow = memo(function ConnectedClientListRow({
     : lastConnectedAt
       ? `Last connected at ${formatAccessTimestamp(lastConnectedAt)}`
       : "Not connected yet.";
-  const roleLabel = clientSession.role === "owner" ? "Owner" : "Client";
-  const deviceInfoBits = [
-    clientSession.client.deviceType !== "unknown"
-      ? clientSession.client.deviceType[0]?.toUpperCase() + clientSession.client.deviceType.slice(1)
-      : null,
-    clientSession.client.os ?? null,
-    clientSession.client.browser ?? null,
-    clientSession.client.ipAddress ?? null,
-  ].filter((value): value is string => value !== null);
-  const primaryLabel =
-    clientSession.client.label ??
-    ([clientSession.client.os, clientSession.client.browser].filter(Boolean).join(" · ") ||
-      clientSession.subject);
+  const primaryLabel = clientSessionPrimaryLabel(clientSession);
 
   return (
     <div className={accessRowClassName(presentation)}>
@@ -981,9 +891,7 @@ const ConnectedClientListRow = memo(function ConnectedClientListRow({
               </Badge>
             ) : null}
           </div>
-          <p className="text-xs text-muted-foreground">
-            {[roleLabel, ...deviceInfoBits].join(" · ")}
-          </p>
+          <p className="text-xs text-muted-foreground">{clientSessionDetail(clientSession)}</p>
         </div>
         <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
           {!clientSession.current ? (
@@ -1933,38 +1841,28 @@ function useLocalBackendAccess() {
           switch (event.type) {
             case "snapshot":
               setDesktopPairingLinks(
-                sortDesktopPairingLinks(
-                  event.payload.pairingLinks.map((pairingLink: AuthPairingLink) =>
-                    toDesktopPairingLinkRecord(pairingLink),
-                  ),
-                ),
+                sortPairingLinks(event.payload.pairingLinks.map(toServerPairingLinkRecord)),
               );
               setDesktopClientSessions(
-                sortDesktopClientSessions(
-                  event.payload.clientSessions.map((clientSession: AuthClientSession) =>
-                    toDesktopClientSessionRecord(clientSession),
-                  ),
-                ),
+                sortClientSessions(event.payload.clientSessions.map(toServerClientSessionRecord)),
               );
               break;
             case "pairingLinkUpserted":
               setDesktopPairingLinks((current) =>
-                upsertDesktopPairingLink(current, toDesktopPairingLinkRecord(event.payload)),
+                upsertPairingLink(current, toServerPairingLinkRecord(event.payload)),
               );
               break;
             case "pairingLinkRemoved":
-              setDesktopPairingLinks((current) =>
-                removeDesktopPairingLink(current, event.payload.id),
-              );
+              setDesktopPairingLinks((current) => removePairingLink(current, event.payload.id));
               break;
             case "clientUpserted":
               setDesktopClientSessions((current) =>
-                upsertDesktopClientSession(current, toDesktopClientSessionRecord(event.payload)),
+                upsertClientSession(current, toServerClientSessionRecord(event.payload)),
               );
               break;
             case "clientRemoved":
               setDesktopClientSessions((current) =>
-                removeDesktopClientSession(current, event.payload.sessionId),
+                removeClientSession(current, event.payload.sessionId),
               );
               break;
           }

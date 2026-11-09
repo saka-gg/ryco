@@ -71,8 +71,43 @@ export function NodeNewTaskDefaults() {
   );
 }
 
+/**
+ * One project's "New tasks" overrides on its node, as the project's settings show them: the
+ * same panel and rules, fixed to that project. Only the node's owner sees it there.
+ */
+export function ProjectNewTaskDefaults(props: {
+  readonly environmentId: EnvironmentId;
+  readonly projectId: ProjectId;
+}) {
+  const nodes = useHomeEnvironments();
+  const configs = useEnvironmentServerConfigs();
+  const targets = useMemo(
+    () => homeNodeSettingsTargets({ nodes, configs, write: updateEnvironmentServerSettings }),
+    [configs, nodes],
+  );
+  const node = nodes.find((candidate) => candidate.environmentId === props.environmentId);
+  if (!node) return null;
+  return (
+    <NodeNewTaskDefaultsPanel
+      environmentId={node.environmentId}
+      label={node.label}
+      title="New tasks"
+      projectId={props.projectId}
+      config={configs.get(node.environmentId) ?? null}
+      readable={nodeConnected(node)}
+      editable={canChangeNodeSettings(node)}
+      readOnly={nodeSettingsReadOnlyReason(node)}
+      targets={targets}
+    />
+  );
+}
+
 function NodeNewTaskDefaultsPanel(props: {
   readonly environmentId: EnvironmentId;
+  /** The section's title; the node's name by default. */
+  readonly title?: string;
+  /** Fixed to one project: no scope chips, its overrides only. */
+  readonly projectId?: ProjectId;
   readonly label: string;
   readonly config: ServerConfig | null;
   readonly readable: boolean;
@@ -105,7 +140,7 @@ function NodeNewTaskDefaultsPanel(props: {
     useShallow((state) => selectProjectsForEnvironment(state, environmentId)),
   );
   const scopes = newTaskDefaultsScopes(projects);
-  const [selected, setSelected] = useState<ProjectId | null>(null);
+  const [selected, setSelected] = useState<ProjectId | null>(props.projectId ?? null);
   const projectId = resolveNewTaskDefaultsScope(selected, scopes);
   useLayoutEffect(() => {
     controller.setInput({ label, config, api, editable, projectId, targets: props.targets });
@@ -125,7 +160,10 @@ function NodeNewTaskDefaultsPanel(props: {
   const [applyOpen, setApplyOpen] = useState(false);
 
   const showScopes =
-    scopes.length > 1 && state.phase !== "offline" && state.phase !== "unsupported";
+    props.projectId === undefined &&
+    scopes.length > 1 &&
+    state.phase !== "offline" &&
+    state.phase !== "unsupported";
   const leading = showScopes || view.notice !== null;
   const modelRow = view.rows.find((row) => row.kind === "model");
   const picker = modelRow
@@ -140,9 +178,11 @@ function NodeNewTaskDefaultsPanel(props: {
     setPickerScope(null);
     setQuery("");
   };
+  // A panel fixed to a project that is gone shows nothing rather than the node's defaults.
+  if (props.projectId !== undefined && projectId !== props.projectId) return null;
 
   return (
-    <SettingsSection title={`New tasks · ${label}`}>
+    <SettingsSection title={props.title ?? `New tasks · ${label}`}>
       {showScopes ? (
         <View className="px-5 py-3">
           <ScrollView horizontal showsHorizontalScrollIndicator={false}>

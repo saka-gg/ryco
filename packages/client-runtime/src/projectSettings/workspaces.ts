@@ -1,8 +1,12 @@
-import {
-  listWorkspaceLifecycleActions,
-  type WorkspaceActionId,
-} from "@ryco/client-runtime/state/lifecycle";
+/**
+ * What a project's workspaces state about themselves: the actions each offers,
+ * the facts an inspection found (and what deleting would lose), and which
+ * cleanup suggestions belong to the project. Shared by the web projects page
+ * and the phone's project settings.
+ */
 import type { LifecycleSuggestions, WorkspaceLifecycleSummary } from "@ryco/contracts";
+
+import { listWorkspaceLifecycleActions, type WorkspaceActionId } from "../state/lifecycle/index.ts";
 
 /**
  * The actions a workspace offers, in menu order: Archive or Restore, then

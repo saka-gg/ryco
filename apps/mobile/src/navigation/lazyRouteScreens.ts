@@ -74,6 +74,13 @@ export const HostedAccountRouteScreen = lazyScreen(
       require("../features/hostedHub/HostedAccountRouteScreen") as typeof import("../features/hostedHub/HostedAccountRouteScreen")
     ).HostedAccountRouteScreen,
 );
+export const MachineAccessRouteScreen = lazyScreen(
+  "MachineAccessRouteScreen",
+  () =>
+    (
+      require("../features/machineAccess/MachineAccessRouteScreen") as typeof import("../features/machineAccess/MachineAccessRouteScreen")
+    ).MachineAccessRouteScreen,
+);
 export const NativeIdentityScreen = lazyScreen(
   "NativeIdentityScreen",
   () =>
@@ -108,6 +115,13 @@ export const AddProjectRouteScreen = lazyScreen(
     (
       require("../features/projects/AddProjectRouteScreen") as typeof import("../features/projects/AddProjectRouteScreen")
     ).AddProjectRouteScreen,
+);
+export const ProjectSettingsRouteScreen = lazyScreen(
+  "ProjectSettingsRouteScreen",
+  () =>
+    (
+      require("../features/projects/ProjectSettingsRouteScreen") as typeof import("../features/projects/ProjectSettingsRouteScreen")
+    ).ProjectSettingsRouteScreen,
 );
 export const ProjectRouteScreen = lazyScreen(
   "ProjectRouteScreen",

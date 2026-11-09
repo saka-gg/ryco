@@ -12,7 +12,10 @@ import { render } from "vitest-browser-react";
 
 import { syncDocumentPresentationTier } from "../../lib/presentationTier";
 import { useTierOverrideStore } from "../../tierOverrideStore";
-import type { AddDeviceCode, AddDeviceOperations } from "./AddDeviceDialog.logic";
+import type {
+  AddDeviceCode,
+  AddDeviceOperations,
+} from "@ryco/client-runtime/machineAccess/addDeviceCode";
 import { AddDeviceButton, AddDeviceDialogHost } from "./AddDeviceEntry";
 
 const QR_TITLE = "Pairing link — scan to open on another device";

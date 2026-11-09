@@ -31,9 +31,11 @@ import {
   type PendingWorktreeRow,
   type WorkspaceMutationReadiness,
 } from "./projectActions";
+import { projectSettingsAccess } from "./projectSettingsModel";
 import { buildProjectDetail } from "./projectsModel";
 import { ProjectThreadRow } from "./ProjectThreadRow";
 import { WorktreeEditorSheet } from "./WorktreeEditorSheet";
+import { WorkspaceReviewSheet, type WorkspaceReviewTarget } from "./WorkspaceReviewSheet";
 import { WorktreeRow } from "./WorktreeRow";
 
 type Editor =
@@ -100,8 +102,51 @@ export function ProjectDetailScreen(props: {
   }, [visiblePendingWorktree]);
 
   useLayoutEffect(() => {
-    navigation.setOptions({ title: detail?.project.name ?? "Project" });
-  }, [detail?.project.name, navigation]);
+    navigation.setOptions({
+      title: detail?.project.name ?? "Project",
+      headerRight: () => (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Project settings"
+          className="h-11 w-11 items-center justify-center rounded-full active:bg-subtle-strong"
+          onPress={() =>
+            navigation.navigate("ProjectSettings", {
+              environmentId: props.environmentId,
+              projectId: props.projectId,
+            })
+          }
+        >
+          <SymbolView
+            name="gearshape"
+            size={20}
+            tintColor={iconColor as string}
+            type="monochrome"
+          />
+        </Pressable>
+      ),
+    });
+  }, [detail?.project.name, iconColor, navigation, props.environmentId, props.projectId]);
+  const [review, setReview] = useState<{
+    readonly open: boolean;
+    readonly target: WorkspaceReviewTarget | null;
+    readonly token: number;
+  }>({ open: false, target: null, token: 0 });
+  const openReview = (worktree: SidebarWorktreeSummary) =>
+    setReview((current) => ({
+      open: true,
+      target: {
+        environmentId: props.environmentId,
+        worktreeId: worktree.id,
+        title: worktree.title?.trim() || worktree.branch,
+      },
+      token: current.token + 1,
+    }));
+  const access = projectSettingsAccess(
+    environments.find((environment) => environment.environmentId === props.environmentId),
+  );
+  // The project's own folder is never a disposable workspace; only worktrees are deleted.
+  const deletable = (worktree: SidebarWorktreeSummary) =>
+    access.canChangeWorkspaces && worktree.worktreePath !== null;
 
   if (!detail) {
     return (
@@ -441,6 +486,7 @@ export function ProjectDetailScreen(props: {
                         })
                 }
                 onArchive={readOnly ? undefined : () => archiveWorktree(group.worktree)}
+                onDelete={deletable(group.worktree) ? () => openReview(group.worktree) : undefined}
                 onSourceControl={() =>
                   navigation.navigate("ProjectSourceControl", {
                     environmentId: props.environmentId,
@@ -502,6 +548,9 @@ export function ProjectDetailScreen(props: {
                     worktree={group.worktree}
                     threadCount={group.threads.length}
                     onRestore={readOnly ? undefined : () => restoreWorktree(group.worktree)}
+                    onDelete={
+                      deletable(group.worktree) ? () => openReview(group.worktree) : undefined
+                    }
                   />
                 ))
               : null}
@@ -530,6 +579,16 @@ export function ProjectDetailScreen(props: {
           }
         }}
         onSubmit={(value) => void submitEditor(value)}
+      />
+      <WorkspaceReviewSheet
+        visible={review.open}
+        target={review.target}
+        token={review.token}
+        canApply={access.canChangeWorkspaces}
+        previewDenied={null}
+        accessReason={access.reason}
+        onClose={() => setReview((current) => ({ ...current, open: false }))}
+        onChanged={() => undefined}
       />
     </>
   );

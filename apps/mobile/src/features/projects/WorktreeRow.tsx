@@ -41,6 +41,8 @@ export function WorktreeRow(props: {
   readonly onArchive?: () => void;
   readonly onRestore?: () => void;
   readonly onSourceControl?: () => void;
+  /** Opens the "Delete workspace" review. */
+  readonly onDelete?: () => void;
 }) {
   const iconColor = useThemeColor("--color-icon-muted");
   const title = props.worktree.title?.trim() || props.worktree.branch;
@@ -81,7 +83,12 @@ export function WorktreeRow(props: {
       </View>
       <View className="mt-3 flex-row flex-wrap gap-2">
         {archived && props.onRestore ? (
-          <SmallAction label="Restore" onPress={props.onRestore} />
+          <>
+            <SmallAction label="Restore" onPress={props.onRestore} />
+            {props.onDelete ? (
+              <SmallAction label="Delete…" destructive onPress={props.onDelete} />
+            ) : null}
+          </>
         ) : (
           <>
             {props.onNewTask ? <SmallAction label="New task" onPress={props.onNewTask} /> : null}
@@ -91,6 +98,9 @@ export function WorktreeRow(props: {
             {props.onRename ? <SmallAction label="Rename" onPress={props.onRename} /> : null}
             {props.onArchive ? (
               <SmallAction label="Archive" destructive onPress={props.onArchive} />
+            ) : null}
+            {props.onDelete ? (
+              <SmallAction label="Delete…" destructive onPress={props.onDelete} />
             ) : null}
           </>
         )}

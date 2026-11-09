@@ -16,7 +16,7 @@ import {
   workspaceFacts,
   workspaceInspectionSignature,
   workspaceLostWorkFacts,
-} from "./projectWorkspaces.logic";
+} from "./workspaces.ts";
 
 function summary(overrides: Partial<WorkspaceLifecycleSummary> = {}): WorkspaceLifecycleSummary {
   return {

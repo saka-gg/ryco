@@ -4,7 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import type {
   ServerClientSessionRecord,
   ServerPairingLinkRecord,
-} from "@ryco/client-runtime/connection";
+} from "../connection/primaryAuth.ts";
 import {
   type AddDeviceCode,
   type AddDeviceOperations,
@@ -16,7 +16,7 @@ import {
   resolveAddDeviceView,
   type ShownCode,
   showCode,
-} from "./AddDeviceDialog.logic";
+} from "./addDeviceCode.ts";
 
 const CREATED_AT = "2036-04-07T10:00:00.000Z";
 const CREATED_MS = Date.parse(CREATED_AT);

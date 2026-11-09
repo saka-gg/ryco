@@ -1,7 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
-import { PROJECT_SECTIONS } from "../projectsSearch";
-import { PROJECT_SECTION_GROUPS, visibleProjectSections } from "./projectSectionTypes";
+import { PROJECT_SECTIONS, PROJECT_SECTION_GROUPS, visibleProjectSections } from "./sections.ts";
 
 describe("project sections", () => {
   it("groups every section once, in page order", () => {

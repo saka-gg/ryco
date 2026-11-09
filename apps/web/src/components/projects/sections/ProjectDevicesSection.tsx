@@ -39,7 +39,11 @@ import {
 } from "../projectsModel.logic";
 import { useProjectsPage, useProjectsSelection } from "../ProjectsPageContext";
 import { useEnvironmentPresence, type EnvironmentPresenceStatus } from "../useEnvironmentPresence";
-import { formatDiskSize, LOWER_BOUND_NOTE, readingTotal } from "./projectDiskUsage.logic";
+import {
+  formatDiskSize,
+  LOWER_BOUND_NOTE,
+  readingTotal,
+} from "@ryco/client-runtime/projectSettings/diskUsage";
 import { ProjectSection, useSavedFlash } from "./ProjectSection";
 import type { ProjectSectionProps } from "./projectSectionTypes";
 import { useCheckoutDiskUsage } from "./useProjectDiskUsage";

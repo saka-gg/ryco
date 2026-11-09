@@ -126,6 +126,30 @@
       "types": "./src/authorization/nodeMutationLease.ts",
       "import": "./src/authorization/nodeMutationLease.ts"
     },
+    "./machineAccess/accountE2eeDevices": {
+      "types": "./src/machineAccess/accountE2eeDevices.ts",
+      "import": "./src/machineAccess/accountE2eeDevices.ts"
+    },
+    "./machineAccess/addDeviceCode": {
+      "types": "./src/machineAccess/addDeviceCode.ts",
+      "import": "./src/machineAccess/addDeviceCode.ts"
+    },
+    "./machineAccess/advertisedEndpoints": {
+      "types": "./src/machineAccess/advertisedEndpoints.ts",
+      "import": "./src/machineAccess/advertisedEndpoints.ts"
+    },
+    "./machineAccess/authAccess": {
+      "types": "./src/machineAccess/authAccess.ts",
+      "import": "./src/machineAccess/authAccess.ts"
+    },
+    "./machineAccess/hostedNodeRevoke": {
+      "types": "./src/machineAccess/hostedNodeRevoke.ts",
+      "import": "./src/machineAccess/hostedNodeRevoke.ts"
+    },
+    "./machineAccess/remoteMachineAccess": {
+      "types": "./src/machineAccess/remoteMachineAccess.ts",
+      "import": "./src/machineAccess/remoteMachineAccess.ts"
+    },
     "./notifications/push": {
       "types": "./src/notifications/push/index.ts",
       "import": "./src/notifications/push/index.ts"
@@ -229,6 +253,50 @@
     "./projectCopy": {
       "types": "./src/projectCopy/index.ts",
       "import": "./src/projectCopy/index.ts"
+    },
+    "./projectSettings/atlassianLink": {
+      "types": "./src/projectSettings/atlassianLink.ts",
+      "import": "./src/projectSettings/atlassianLink.ts"
+    },
+    "./projectSettings/commands": {
+      "types": "./src/projectSettings/commands.ts",
+      "import": "./src/projectSettings/commands.ts"
+    },
+    "./projectSettings/diskUsage": {
+      "types": "./src/projectSettings/diskUsage.ts",
+      "import": "./src/projectSettings/diskUsage.ts"
+    },
+    "./projectSettings/removal": {
+      "types": "./src/projectSettings/removal.ts",
+      "import": "./src/projectSettings/removal.ts"
+    },
+    "./projectSettings/remotes": {
+      "types": "./src/projectSettings/remotes.ts",
+      "import": "./src/projectSettings/remotes.ts"
+    },
+    "./projectSettings/scripts": {
+      "types": "./src/projectSettings/scripts.ts",
+      "import": "./src/projectSettings/scripts.ts"
+    },
+    "./projectSettings/sectionIds": {
+      "types": "./src/projectSettings/sectionIds.ts",
+      "import": "./src/projectSettings/sectionIds.ts"
+    },
+    "./projectSettings/sections": {
+      "types": "./src/projectSettings/sections.ts",
+      "import": "./src/projectSettings/sections.ts"
+    },
+    "./projectSettings/workspaceReview": {
+      "types": "./src/projectSettings/workspaceReview.ts",
+      "import": "./src/projectSettings/workspaceReview.ts"
+    },
+    "./projectSettings/workspaceActions": {
+      "types": "./src/projectSettings/workspaceActions.ts",
+      "import": "./src/projectSettings/workspaceActions.ts"
+    },
+    "./projectSettings/workspaces": {
+      "types": "./src/projectSettings/workspaces.ts",
+      "import": "./src/projectSettings/workspaces.ts"
     },
     "./state/providerSignIn": {
       "types": "./src/state/providerSignIn/index.ts",
@@ -464,6 +532,7 @@
     },
     "./state/storage": "./src/state/storage/index.ts",
     "./state/lifecycle": "./src/state/lifecycle/index.ts",
+    "./state/lifecycle/outcome": "./src/state/lifecycle/outcome.ts",
     "./projectCopy/progressView": {
       "types": "./src/projectCopy/progressView.ts",
       "import": "./src/projectCopy/progressView.ts"

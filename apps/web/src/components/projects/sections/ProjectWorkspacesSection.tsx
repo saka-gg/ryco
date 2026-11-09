@@ -41,7 +41,7 @@ import {
   formatDiskSize,
   LOWER_BOUND_NOTE,
   readingTotal,
-} from "./projectDiskUsage.logic";
+} from "@ryco/client-runtime/projectSettings/diskUsage";
 import { ProjectNodeSettingsScope } from "./ProjectNodeSettingsScope";
 import { ProjectSection } from "./ProjectSection";
 import type { ProjectSectionProps } from "./projectSectionTypes";
@@ -50,7 +50,7 @@ import {
   projectSuggestions,
   workspaceFacts,
   workspaceInspectionSignature,
-} from "./projectWorkspaces.logic";
+} from "@ryco/client-runtime/projectSettings/workspaces";
 import { useCheckoutDiskUsage } from "./useProjectDiskUsage";
 import {
   useProjectWorkspaceInspection,

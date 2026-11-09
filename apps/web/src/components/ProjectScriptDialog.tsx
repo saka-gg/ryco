@@ -1,3 +1,7 @@
+import {
+  PROJECT_SCRIPT_ICONS,
+  projectScriptDraftError,
+} from "@ryco/client-runtime/projectSettings/scripts";
 import type { ProjectScript, ProjectScriptIcon, ResolvedKeybindingsConfig } from "@ryco/contracts";
 import React, {
   type FormEvent,
@@ -41,14 +45,7 @@ import type { SurfaceMorph } from "./ui/surfaceMorph";
 import { Switch } from "./ui/switch";
 import { Textarea } from "./ui/textarea";
 
-export const SCRIPT_ICONS: Array<{ id: ProjectScriptIcon; label: string }> = [
-  { id: "play", label: "Play" },
-  { id: "test", label: "Test" },
-  { id: "lint", label: "Lint" },
-  { id: "configure", label: "Configure" },
-  { id: "build", label: "Build" },
-  { id: "debug", label: "Debug" },
-];
+export const SCRIPT_ICONS = PROJECT_SCRIPT_ICONS;
 
 /**
  * Filled fields for the action dialog: tone instead of an outline, matching
@@ -219,12 +216,9 @@ export function ProjectScriptDialog(props: ProjectScriptDialogProps) {
     event.preventDefault();
     const trimmedName = name.trim();
     const trimmedCommand = command.trim();
-    if (trimmedName.length === 0) {
-      setValidationError("Name is required.");
-      return;
-    }
-    if (trimmedCommand.length === 0) {
-      setValidationError("Command is required.");
+    const draftError = projectScriptDraftError({ name: trimmedName, command: trimmedCommand });
+    if (draftError) {
+      setValidationError(draftError);
       return;
     }
 

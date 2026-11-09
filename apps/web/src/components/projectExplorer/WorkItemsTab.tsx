@@ -20,7 +20,7 @@ import { readEnvironmentApi } from "~/environmentApi";
 import {
   buildJiraProjectLinkInput,
   buildJiraProjectUnlinkInput,
-} from "~/lib/atlassianProjectLinks";
+} from "@ryco/client-runtime/projectSettings/atlassianLink";
 import {
   findLinkedWorkItemBranches,
   findLinkedWorkItemWorktrees,

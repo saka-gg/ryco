@@ -59,12 +59,14 @@ describe("MVP route config", () => {
         "ConnectionsNew",
         "CopyProject",
         "Home",
+        "MachineAccess",
         "NewTask",
         "NotFound",
         "Project",
         "ProjectPullRequest",
         "ProjectPullRequestFile",
         "ProjectPullRequests",
+        "ProjectSettings",
         "ProjectSourceControl",
         "ProjectBranches",
         "ProjectCommit",
@@ -113,6 +115,9 @@ describe("MVP route config", () => {
     expect(MVP_ROOT_ROUTES.Home.linking).toBe("");
     expect(MVP_ROOT_ROUTES.AddProject.linking).toBe("projects/new");
     expect(MVP_ROOT_ROUTES.Project.linking).toBe("projects/:environmentId/:projectId");
+    expect(MVP_ROOT_ROUTES.ProjectSettings.linking).toBe(
+      "projects/:environmentId/:projectId/settings",
+    );
     expect(MVP_ROOT_ROUTES.ProjectSourceControl.linking).toBe(
       "projects/:environmentId/:projectId/source-control/:worktreeId?",
     );
@@ -143,6 +148,7 @@ describe("MVP route config", () => {
     expect(MVP_ROOT_ROUTES.Connections.linking).toBe("connections");
     expect(MVP_ROOT_ROUTES.ConnectionsNew.linking).toBe("connections/new");
     expect(MVP_ROOT_ROUTES.Search.linking).toBe("search");
+    expect(MVP_ROOT_ROUTES.MachineAccess.linking).toBe("machines/:environmentId/access");
     expect(MVP_ROOT_ROUTES.Access.linking).toBe("account/access");
     // NotFound is the sanctioned deep-link catch-all.
     expect(MVP_ROOT_ROUTES.NotFound.linking).toBe("*");
@@ -198,6 +204,7 @@ describe("MVP route config", () => {
     for (const overlay of [
       "Connections",
       "ConnectionsNew",
+      "MachineAccess",
       "AddProject",
       "CopyProject",
       "ThreadReviewComment",

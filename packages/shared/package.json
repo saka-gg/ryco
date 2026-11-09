@@ -382,6 +382,10 @@
       "types": "./src/projectScripts.ts",
       "import": "./src/projectScripts.ts"
     },
+    "./byteSize": {
+      "types": "./src/byteSize.ts",
+      "import": "./src/byteSize.ts"
+    },
     "./projectKind": {
       "types": "./src/projectKind.ts",
       "import": "./src/projectKind.ts"

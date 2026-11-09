@@ -4,6 +4,10 @@ import {
   type WorkspaceActionId,
   type WorkspaceReviewAction,
 } from "@ryco/client-runtime/state/lifecycle";
+import {
+  recreatedCheckout,
+  workspaceLifecycleIncompleteTitle,
+} from "@ryco/client-runtime/state/lifecycle/outcome";
 import type {
   EnvironmentId,
   ProjectId,
@@ -11,6 +15,10 @@ import type {
   WorkspaceLifecycleResult,
   WorktreeId,
 } from "@ryco/contracts";
+import {
+  runDirectWorkspaceAction,
+  type WorkspaceDirectAction,
+} from "@ryco/client-runtime/projectSettings/workspaceActions";
 import { THREAD_DELETE_UNDO_MS } from "@ryco/shared/workspaceLifecycle";
 import { create } from "zustand";
 
@@ -102,9 +110,7 @@ export function buildWorkspaceLocation(input: {
   });
 }
 
-/** Whether a run recreated the workspace's checkout (Restore does when it was removed). */
-export const recreatedCheckout = (result: WorkspaceLifecycleResult): boolean =>
-  result.steps.some((step) => step.id === "recreate-checkout" && step.status === "done");
+export { recreatedCheckout };
 
 export function announceWorkspaceLifecycleResult(
   target: WorkspaceLifecycleTarget,
@@ -157,18 +163,14 @@ export function announceWorkspaceLifecycleResult(
   toastManager.add(
     stackedThreadToast({
       type: result.outcome === "partial" ? "warning" : "error",
-      title:
-        result.outcome === "partial"
-          ? `${WORKSPACE_LIFECYCLE_ACTION_LABELS[target.action]} partly completed`
-          : `${WORKSPACE_LIFECYCLE_ACTION_LABELS[target.action]} did not run`,
+      title: workspaceLifecycleIncompleteTitle(target.action, result.outcome),
       description: failedStep ? `${result.message}\n\n${failedStep.detail}` : result.message,
       actionProps: { children: "Retry", onClick: retry },
     }),
   );
 }
 
-/** A workspace action that runs without a review: hiding or restoring the record. */
-export type WorkspaceDirectAction = Exclude<WorkspaceActionId, WorkspaceReviewAction>;
+export type { WorkspaceDirectAction };
 
 const DIRECT_ACTION_DONE: Readonly<Record<WorkspaceDirectAction, string>> = {
   archive: "Archived",
@@ -197,18 +199,12 @@ export async function runWorkspaceLifecycleBatch(
       continue;
     }
     try {
-      const preview = await lifecycle.previewWorkspace({
-        worktreeId: target.worktreeId,
-        action: target.action,
-      });
-      if (preview.blockers.length > 0) {
-        failed.push({ target, reason: preview.blockers.join(" ") });
+      const outcome = await runDirectWorkspaceAction(lifecycle, target);
+      if (outcome.kind === "blocked") {
+        failed.push({ target, reason: outcome.blockers.join(" ") });
         continue;
       }
-      const result = await lifecycle.applyWorkspace({
-        ...preview.request,
-        expectedFingerprint: preview.fingerprint,
-      });
+      const { result } = outcome;
       if (result.outcome === "completed") {
         done += 1;
         if (recreatedCheckout(result)) recreated += 1;
@@ -277,22 +273,21 @@ export async function runWorkspaceLifecycleAction(
     return;
   }
   try {
-    const preview = await lifecycle.previewWorkspace({ worktreeId: target.worktreeId, action });
-    if (preview.blockers.length > 0) {
+    const outcome = await runDirectWorkspaceAction(lifecycle, {
+      worktreeId: target.worktreeId,
+      action,
+    });
+    if (outcome.kind === "blocked") {
       toastManager.add(
         stackedThreadToast({
           type: "warning",
           title: `${WORKSPACE_LIFECYCLE_ACTION_LABELS[target.action]} is not available`,
-          description: preview.blockers.join("\n"),
+          description: outcome.blockers.join("\n"),
         }),
       );
       return;
     }
-    const result = await lifecycle.applyWorkspace({
-      ...preview.request,
-      expectedFingerprint: preview.fingerprint,
-    });
-    announceWorkspaceLifecycleResult(target, result, retry);
+    announceWorkspaceLifecycleResult(target, outcome.result, retry);
   } catch (error) {
     toastManager.add(
       stackedThreadToast({

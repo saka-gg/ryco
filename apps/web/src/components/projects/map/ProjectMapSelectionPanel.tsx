@@ -41,7 +41,7 @@ import { InboxStatusGlyph } from "../../inboxSidebar/InboxStatusGlyph";
 import type { SidebarTreeThread } from "../../sidebar/hooks/useSidebarTree";
 import { Button } from "../../ui/button";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
-import { availableWorkspaceActions } from "../sections/projectWorkspaces.logic";
+import { availableWorkspaceActions } from "@ryco/client-runtime/projectSettings/workspaces";
 import type { MapAutomation, MapThread, MapWorkspace } from "./projectMap.logic";
 import {
   itemKey,

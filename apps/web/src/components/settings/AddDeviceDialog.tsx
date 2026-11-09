@@ -21,7 +21,6 @@ import { SlidingTabs } from "../ui/sliding-tabs";
 import { Spinner } from "../ui/spinner";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import {
-  type AddDeviceDialogProps,
   type AddDeviceView,
   groupPairingCode,
   observeAccess,
@@ -29,13 +28,14 @@ import {
   resolveAddDeviceView,
   type ShownCode,
   showCode,
-} from "./AddDeviceDialog.logic";
+} from "@ryco/client-runtime/machineAccess/addDeviceCode";
 import {
   endpointShareHint,
   isQrShareableEndpoint,
-  resolveAdvertisedEndpointPairingUrl,
   selectQrEndpoint,
-} from "./ConnectionsSettings.logic";
+} from "@ryco/client-runtime/machineAccess/advertisedEndpoints";
+import type { AddDeviceDialogProps } from "./AddDeviceDialog.logic";
+import { resolveAdvertisedEndpointPairingUrl } from "./ConnectionsSettings.logic";
 import { useRelativeTimeTick } from "./settingsLayout";
 
 type DeviceTab = "phone" | "computer";
