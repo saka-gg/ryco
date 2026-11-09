@@ -90,6 +90,8 @@ import {
   AutomationCentreInput,
   AutomationCentreCommand,
   AutomationCentreSnapshot,
+  AutomationHookInput,
+  AutomationHookView,
 } from "./automationCentre.ts";
 import { ModelSelection } from "./orchestration.ts";
 import {
@@ -2617,6 +2619,11 @@ export const WsAutomationCommandRpc = Rpc.make(AGENT_CONTROL_WS_METHODS.automati
   success: AutomationCentreSnapshot,
   error: Schema.Union([AgentControlRpcError, AuthRpcError]),
 });
+export const WsAutomationHookRpc = Rpc.make(AGENT_CONTROL_WS_METHODS.automationHook, {
+  payload: AutomationHookInput,
+  success: AutomationHookView,
+  error: Schema.Union([AgentControlRpcError, AuthRpcError]),
+});
 
 // The proposal reads, the stream and the decisions answer with the tolerant
 // views, so a plan kind this build does not know arrives as `unsupported`.
@@ -2952,6 +2959,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsNodeBrowserSubscribeRpc
   | typeof WsAutomationCentreRpc
   | typeof WsAutomationCommandRpc
+  | typeof WsAutomationHookRpc
   | typeof WsAgentControlListProposalsRpc
   | typeof WsAgentControlGetProposalRpc
   | typeof WsAgentControlAcceptProposalRpc
@@ -3196,6 +3204,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsNodeBrowserSubscribeRpc,
   WsAutomationCentreRpc,
   WsAutomationCommandRpc,
+  WsAutomationHookRpc,
   WsAgentControlListProposalsRpc,
   WsAgentControlGetProposalRpc,
   WsAgentControlAcceptProposalRpc,

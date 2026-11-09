@@ -78,6 +78,8 @@ import { hubConnectorRoutesLayer } from "./hubConnector/http.ts";
 import { desktopLocalIntroductionRoutesLayer } from "./hubConnector/localIntroductionHttp.ts";
 import { desktopHubReachabilityRouteLayer } from "./hubConnector/desktopHubReachabilityHttp.ts";
 import { directRouteIdentityRouteLayer } from "./hubConnector/directRouteIdentityHttp.ts";
+import { automationHookRouteLayer } from "./automationHooks/automationHookHttp.ts";
+import { AutomationHookStoreLive } from "./automationHooks/Layers/AutomationHookStore.ts";
 import { desktopNativeNodeClaimRoutesLayer } from "./hubConnector/desktopNativeNodeClaimHttp.ts";
 import { OpenLive } from "./open.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
@@ -438,6 +440,9 @@ const AgentControlLayerLive = Layer.mergeAll(
   Layer.provideMerge(AgentControlExternalRepositoryLive),
   Layer.provideMerge(AgentControlAutomationRepositoryLive),
   Layer.provideMerge(AgentControlMcpInstallationRepositoryLive),
+  // Webhook schedules' hooks: kept in step by the automation lifecycle, read by the hook
+  // endpoint, the owner's hook RPC and the Hub sync.
+  Layer.provideMerge(AutomationHookStoreLive.pipe(Layer.provide(ServerSecretStoreLive))),
   // One process-wide external topology: the external integration surface, its
   // listener, and the Hub connector (which hands the process over before its
   // first relay connection) must all read the same value.
@@ -846,6 +851,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   desktopNativeNodeClaimRoutesLayer,
   desktopHubReachabilityRouteLayer,
   directRouteIdentityRouteLayer,
+  automationHookRouteLayer,
 ).pipe(Layer.provide(browserApiCorsLayer));
 
 export const makeServerLayer = Layer.unwrap(

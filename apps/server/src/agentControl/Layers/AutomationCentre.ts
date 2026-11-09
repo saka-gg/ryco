@@ -19,6 +19,8 @@ import { AgentControlAutomationRepository } from "../../persistence/Services/Age
 import { AgentControlProposalRepository } from "../../persistence/Services/AgentControlProposals.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { computeAgentControlPlanDigest } from "../planDigest.ts";
+import { AutomationHookStore } from "../../automationHooks/Services/AutomationHookStore.ts";
+import { ServerConfig } from "../../config.ts";
 import { agentControlPrincipalScope } from "../principal.ts";
 
 /** Schedules per snapshot; above the per-project active limit, which they all fit in. */
@@ -55,6 +57,8 @@ export const AutomationCentreLive = Layer.effect(
     const validator = yield* AgentControlActionValidator;
     const policy = yield* AgentControlPolicy;
     const projections = yield* ProjectionSnapshotQuery;
+    const hookStore = yield* Effect.serviceOption(AutomationHookStore);
+    const serverConfig = yield* Effect.serviceOption(ServerConfig);
 
     const checkProject = (
       projectId: Parameters<AutomationCentreShape["snapshot"]>[0]["projectId"],
@@ -145,6 +149,7 @@ export const AutomationCentreLive = Layer.effect(
           historyLimit: 50,
           runWithoutAsking: true as const,
           heartbeats: true as const,
+          ...(Option.isSome(hookStore) ? { webhooks: true as const } : {}),
           proposals: active.filter((proposal) => {
             const plan = proposal.plan;
             return plan.kind === "createAutomation"
@@ -297,6 +302,25 @@ export const AutomationCentreLive = Layer.effect(
         });
         return yield* snapshot(input);
       }).pipe(Effect.mapError(toError));
-    return { snapshot, command };
+    // The hook view loads with the owner's first read of a webhook schedule's hook.
+    const hook: AutomationCentreShape["hook"] = (input) =>
+      Effect.gen(function* () {
+        yield* checkProject(input.projectId);
+        if (Option.isNone(hookStore)) return yield* conflict("Webhook triggers are unavailable.");
+        const automation = yield* automations.get(input.automationId, {
+          projectId: input.projectId,
+        });
+        const view = yield* Effect.promise(
+          () => import("../../automationHooks/automationHookView.ts"),
+        );
+        const hub = Option.getOrUndefined(serverConfig)?.hubConnector;
+        return yield* view.automationHookView({
+          store: hookStore.value,
+          automation,
+          action: input.action,
+          hubOrigin: hub?.enabled && hub.origin ? hub.origin : null,
+        });
+      }).pipe(Effect.mapError(toError));
+    return { snapshot, command, hook };
   }),
 );

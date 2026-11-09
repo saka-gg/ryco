@@ -272,6 +272,7 @@ const checks: Record<CompatibilityRepairKey, (c: SchemaCatalog) => RepairApplied
     columnsUnlessAbsent(c, "projection_threads", ["hidden_at", "settle_when_idle_at"]),
   // The table only, as the repair's own guard: its two indexes commit with it. No backfill.
   "project-imports": (c) => c.has("table", "project_imports"),
+  "automation-hooks": (c) => c.has("table", "automation_hooks"),
 };
 
 /** Of `keys`, the repairs whose effect this database already has, read without writing. */

@@ -6,6 +6,7 @@ import {
   AGENT_CONTROL_AUTOMATION_MIN_INTERVAL_MS,
   AGENT_CONTROL_AUTOMATION_PROPOSAL_TTL_MS,
   AGENT_CONTROL_AUTOMATION_RUN_HISTORY_MAX,
+  AgentControlAutomationRunId,
   AgentControlRequestId,
   type AgentControlAutomation,
   type AgentControlAutomationDefinition,
@@ -15,11 +16,15 @@ import {
 } from "@ryco/contracts";
 import { Duration, Effect, Layer, Option, Schedule, Stream } from "effect";
 
+import { isActiveAutomation } from "../../persistence/Layers/AgentControlAutomations.ts";
 import { AgentControlAutomationRepository } from "../../persistence/Services/AgentControlAutomations.ts";
+import { AutomationHookStore } from "../../automationHooks/Services/AutomationHookStore.ts";
 import { AgentControlPlanValidationError } from "../Errors.ts";
 import {
   AgentControlAutomationService,
   UNATTENDED_OWNER_ONLY,
+  WEBHOOK_OWNER_ONLY,
+  planAddsWebhookTrigger,
   type AgentControlAutomationShape,
   type AgentControlAutomationServiceError,
 } from "../Services/AgentControlAutomation.ts";
@@ -49,10 +54,15 @@ const revisionState = (automation: AgentControlAutomation) => ({
 const loadCalendarSchedules = Effect.promise(() => import("../calendarSchedules.ts"));
 
 /** The first run: a calendar schedule's first time at or after its start. */
-const firstRunAt = (schedule: AgentControlAutomationDefinition["schedule"]) =>
+const firstRunAt = (
+  schedule: AgentControlAutomationDefinition["schedule"],
+): Effect.Effect<string | null> =>
   schedule.kind === "calendar"
     ? loadCalendarSchedules.pipe(Effect.map((calendar) => calendar.firstCalendarRun(schedule)))
-    : Effect.succeed(schedule.kind === "once" ? schedule.runAt : schedule.startsAt);
+    : schedule.kind === "webhook"
+      ? // Runs when its webhook is called: never due.
+        Effect.succeed(null)
+      : Effect.succeed(schedule.kind === "once" ? schedule.runAt : schedule.startsAt);
 
 const nextRunAt = (definition: AgentControlAutomationDefinition) =>
   definition.enabled ? firstRunAt(definition.schedule) : Effect.succeed(null);
@@ -111,6 +121,24 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
       const externalIntegrations = yield* Effect.serviceOption(
         AgentControlExternalIntegrationService,
       );
+      // Webhook schedules' hooks follow their definitions; optional so tests without hooks run.
+      const hookStore = yield* Effect.serviceOption(AutomationHookStore);
+      /**
+       * Keeps the automation's hook in step after a lifecycle change. A failure leaves the change
+       * applied: the owner's next read of the hook creates a missing one.
+       */
+      const syncHook = (automation: AgentControlAutomation) =>
+        Option.isNone(hookStore)
+          ? Effect.void
+          : hookStore.value.reconcile(automation).pipe(
+              Effect.asVoid,
+              Effect.catch((error) =>
+                Effect.logWarning("agent-control.automation-hook-sync-failed", {
+                  automationId: automation.automationId,
+                  error: error.message,
+                }),
+              ),
+            );
 
       const validateDefinition: AgentControlAutomationShape["validateDefinition"] = (
         definition,
@@ -119,6 +147,8 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
         Effect.gen(function* () {
           const nowMs = Date.parse(now);
           const schedule = definition.schedule;
+          // No times to check: it runs when its webhook is called.
+          if (schedule.kind === "webhook") return;
           if (schedule.kind === "calendar") {
             const problem = (yield* loadCalendarSchedules).calendarScheduleProblem(schedule);
             if (problem !== null) return yield* invalid("schedule-invalid", problem);
@@ -224,8 +254,7 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
               return yield* invalid("automation-stale", "Automation project scope cannot change.");
             }
             yield* validateDefinition(plan.after, new Date().toISOString());
-            const wasActive =
-              current.value.enabled && !current.value.cancelled && current.value.nextRunAt !== null;
+            const wasActive = isActiveAutomation(current.value);
             if (plan.after.enabled && !wasActive) {
               const active = yield* repository.countActiveAutomations(
                 plan.after.execution.projectId,
@@ -305,6 +334,7 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
                   current.revision === plan.expected.revision + 1 &&
                   current.cancelled))
             ) {
+              yield* syncHook(current);
               return current;
             }
           }
@@ -320,6 +350,9 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
             proposal.principal.kind !== "automation-owner"
           ) {
             return yield* invalid("privilege-escalation", UNATTENDED_OWNER_ONLY);
+          }
+          if (planAddsWebhookTrigger(plan) && proposal.principal.kind !== "automation-owner") {
+            return yield* invalid("privilege-escalation", WEBHOOK_OWNER_ONLY);
           }
           const now = new Date().toISOString();
           if (plan.kind === "createAutomation") {
@@ -340,6 +373,7 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
             if (!(yield* repository.insertAutomation(automation))) {
               return yield* invalid("automation-stale", "Automation ID already exists.");
             }
+            yield* syncHook(automation);
             return automation;
           }
           const current = yield* repository.getAutomation(plan.automationId);
@@ -379,6 +413,7 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
             return yield* invalid("automation-stale", "Automation revision changed.");
           }
           yield* cancelPendingRun(updated);
+          yield* syncHook(updated);
           return updated;
         });
 
@@ -480,6 +515,8 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
             expectedCancelled: false,
           });
           if (!paused) return;
+          // A paused webhook schedule leaves the Hub's list.
+          if (Option.isSome(hookStore)) hookStore.value.notifyChanged();
           yield* repository.transitionRun({
             runId: recent[0]!.runId,
             expectedStatuses: ["failed"],
@@ -557,7 +594,14 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
             }
           }
           const now = new Date();
-          const execution = automation.value.definition.execution;
+          // A run a webhook request started carries the request in its prompt.
+          const triggeredPrompt = Option.getOrUndefined(
+            yield* repository.getTriggeredPrompt(run.runId),
+          );
+          const execution =
+            triggeredPrompt === undefined
+              ? automation.value.definition.execution
+              : { ...automation.value.definition.execution, prompt: triggeredPrompt };
           const plan = {
             kind: "automationRun" as const,
             automationId: run.automationId,
@@ -573,10 +617,11 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
             plan,
             // A heartbeat's run queues into its chat and creates none.
             riskTags: agentControlRiskTagsForPlan(plan),
-            promptSummary:
+            promptSummary: `${triggeredPrompt === undefined ? "Scheduled" : "Webhook"} run for ${execution.title}${
               execution.target === undefined
-                ? `Scheduled run for ${execution.title}`
-                : `Scheduled run for ${execution.title}, queued in thread ${execution.target.threadId}`,
+                ? ""
+                : `, queued in thread ${execution.target.threadId}`
+            }`,
             now: now.toISOString(),
             expiresAt: new Date(
               now.getTime() + AGENT_CONTROL_AUTOMATION_PROPOSAL_TTL_MS,
@@ -660,6 +705,60 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
         },
       );
 
+      const triggerWebhookRun: AgentControlAutomationShape["triggerWebhookRun"] = (input) =>
+        Effect.gen(function* () {
+          if (!(yield* policy.isEnabled)) return "not-accepting" as const;
+          const found = yield* repository.getAutomation(input.automationId);
+          if (Option.isNone(found)) return "not-accepting" as const;
+          const automation = found.value;
+          if (
+            automation.cancelled ||
+            !automation.enabled ||
+            automation.definition.schedule.kind !== "webhook"
+          ) {
+            return "not-accepting" as const;
+          }
+          const now = new Date().toISOString();
+          const run: AgentControlAutomationRun = {
+            runId: AgentControlAutomationRunId.make(crypto.randomUUID()),
+            automationId: automation.automationId,
+            automationRevision: automation.revision,
+            projectId: automation.projectId,
+            providerInstanceId: automation.providerInstanceId,
+            scheduledFor: input.receivedAt,
+            coalescedOccurrences: 0,
+            status: "materializing",
+            proposalId: null,
+            safeFailureDetail: null,
+            createdAt: now,
+            updatedAt: now,
+            completedAt: null,
+          };
+          // One run of a schedule at a time: the runs table holds at most one that is still
+          // materializing, waiting for approval, approved or executing.
+          const inFlight = (yield* repository.listRuns({
+            automationId: automation.automationId,
+            limit: AGENT_CONTROL_AUTOMATION_RUN_HISTORY_MAX,
+          })).some((existing) =>
+            ["materializing", "pending-approval", "approved", "executing"].includes(
+              existing.status,
+            ),
+          );
+          if (inFlight || !(yield* repository.insertTriggeredRun({ run, prompt: input.prompt }))) {
+            return "busy" as const;
+          }
+          // Exactly the timed path: an approval request, or approved at once for a schedule
+          // that runs without asking.
+          yield* materialize(run).pipe(Effect.catch(isolateCorruptRun(run)));
+          const after = yield* repository.getRun(run.runId);
+          const status = Option.isSome(after) ? after.value.status : "cancelled";
+          return status === "pending-approval"
+            ? ("awaiting-approval" as const)
+            : status === "materializing" || status === "cancelled"
+              ? ("not-accepting" as const)
+              : ("started" as const);
+        });
+
       if (options?.disableBackground !== true) {
         yield* Effect.forkScoped(
           policy.isEnabled.pipe(
@@ -709,6 +808,7 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
         materializeDue,
         recover,
         reconcileProposal: syncRun,
+        triggerWebhookRun,
       } satisfies AgentControlAutomationShape;
     }),
   );

@@ -666,6 +666,7 @@ export interface WsRpcClient {
   readonly automationCentre: {
     readonly snapshot: RpcUnaryMethod<typeof AGENT_CONTROL_WS_METHODS.automationCentre>;
     readonly command: RpcUnaryMethod<typeof AGENT_CONTROL_WS_METHODS.automationCommand>;
+    readonly hook: RpcUnaryMethod<typeof AGENT_CONTROL_WS_METHODS.automationHook>;
   };
   readonly notes: {
     readonly list: RpcUnaryMethod<typeof WS_METHODS.notesList>;
@@ -1512,6 +1513,8 @@ export function createWsRpcClient(
         transport.request((client) => client[AGENT_CONTROL_WS_METHODS.automationCentre](input)),
       command: (input) =>
         transport.request((client) => client[AGENT_CONTROL_WS_METHODS.automationCommand](input)),
+      hook: (input) =>
+        transport.request((client) => client[AGENT_CONTROL_WS_METHODS.automationHook](input)),
     },
     notes: {
       list: (input) => transport.request((client) => client[WS_METHODS.notesList](input)),

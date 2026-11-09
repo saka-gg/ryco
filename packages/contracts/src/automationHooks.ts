@@ -68,10 +68,11 @@ export const AUTOMATION_HOOK_NODE_PATH_PREFIX = "/api/automation-hooks/";
 
 /**
  * The answer to a hook request that was taken (HTTP 202). Through the Hub,
- * `queued` means the Hub holds it for the node; `nodeOnline` says whether the
- * node is connected now (an offline node collects it when it comes back, within
- * a day). Directly, the node answers `queued: false` once it has started the run
- * or the run's approval request.
+ * `queued` means the Hub holds it for the node; `nodeOnline` says whether the Hub
+ * sent the node the `node.automation-hooks.pending` nudge (connected, ready, listed
+ * `automation-hooks`, minor 3); an offline node collects it when it comes back,
+ * within a day. Directly, the node answers `queued: false` once it has started the
+ * run or the run's approval request.
  */
 export const AutomationHookAccepted = Schema.Struct({
   deliveryId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(64)),

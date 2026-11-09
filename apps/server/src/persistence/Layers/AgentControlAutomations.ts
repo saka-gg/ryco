@@ -53,6 +53,15 @@ const toAutomation = (row: typeof AutomationDbRow.Type): AgentControlAutomation 
   cancelled: row.cancelled === 1,
 });
 
+/**
+ * Counts against the per-project limit: enabled, not cancelled, and with a next run or a
+ * webhook trigger (which has no times). The SQL checks repeat it.
+ */
+export const isActiveAutomation = (automation: AgentControlAutomation): boolean =>
+  automation.enabled &&
+  !automation.cancelled &&
+  (automation.nextRunAt !== null || automation.definition.schedule.kind === "webhook");
+
 /** Calendar schedule rules, loaded the first time one is due so they stay off boot. */
 const loadCalendarSchedules = Effect.promise(
   () => import("../../agentControl/calendarSchedules.ts"),
@@ -64,7 +73,11 @@ function nextOccurrence(
   calendar: typeof import("../../agentControl/calendarSchedules.ts") | null,
 ): { readonly nextRunAt: IsoDateTime | null; readonly coalescedOccurrences: number } {
   const dueAt = automation.nextRunAt;
-  if (dueAt === null || automation.definition.schedule.kind === "once") {
+  if (
+    dueAt === null ||
+    automation.definition.schedule.kind === "once" ||
+    automation.definition.schedule.kind === "webhook"
+  ) {
     return { nextRunAt: null, coalescedOccurrences: 0 };
   }
   const schedule = automation.definition.schedule;
@@ -171,7 +184,7 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
       FROM agent_control_automations
       WHERE project_id = ${projectId} AND cancelled = 0
         AND NOT EXISTS (SELECT 1 FROM agent_control_automation_quarantine q WHERE q.kind = 'automation' AND q.id = agent_control_automations.automation_id)
-      ORDER BY (enabled = 1 AND next_run_at IS NOT NULL) DESC, updated_at DESC, automation_id ASC
+      ORDER BY (enabled = 1 AND (next_run_at IS NOT NULL OR json_extract(definition_json, '$.schedule.kind') = 'webhook')) DESC, updated_at DESC, automation_id ASC
       LIMIT ${limit}
     `,
   });
@@ -289,11 +302,12 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
         ${automation.providerInstanceId}, ${JSON.stringify(automation.definition)},
         ${automation.revision}, ${automation.enabled ? 1 : 0}, ${automation.cancelled ? 1 : 0},
         ${automation.cancelledAt}, ${automation.nextRunAt}, ${automation.createdAt}, ${automation.updatedAt}
-      WHERE ${automation.enabled && !automation.cancelled && automation.nextRunAt !== null ? 1 : 0} = 0
+      WHERE ${isActiveAutomation(automation) ? 1 : 0} = 0
         OR (
           SELECT COUNT(*) FROM agent_control_automations
           WHERE project_id = ${automation.projectId}
-            AND enabled = 1 AND cancelled = 0 AND next_run_at IS NOT NULL
+            AND enabled = 1 AND cancelled = 0
+            AND (next_run_at IS NOT NULL OR json_extract(definition_json, '$.schedule.kind') = 'webhook')
         ) < ${AGENT_CONTROL_AUTOMATION_MAX_ACTIVE_PER_PROJECT}
       ON CONFLICT DO NOTHING RETURNING automation_id AS "automationId"
     `.pipe(
@@ -351,7 +365,8 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
   ) =>
     sql<{ readonly count: number }>`
         SELECT COUNT(*) AS count FROM agent_control_automations
-        WHERE project_id = ${projectId} AND enabled = 1 AND cancelled = 0 AND next_run_at IS NOT NULL
+        WHERE project_id = ${projectId} AND enabled = 1 AND cancelled = 0
+          AND (next_run_at IS NOT NULL OR json_extract(definition_json, '$.schedule.kind') = 'webhook')
       `.pipe(
       Effect.map((rows) => rows[0]?.count ?? 0),
       Effect.mapError(
@@ -374,12 +389,13 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
         AND revision = ${input.expectedRevision}
         AND cancelled = ${input.expectedCancelled ? 1 : 0}
         AND (
-          ${input.automation.enabled && !input.automation.cancelled && input.automation.nextRunAt !== null ? 1 : 0} = 0
-          OR (enabled = 1 AND cancelled = 0 AND next_run_at IS NOT NULL)
+          ${isActiveAutomation(input.automation) ? 1 : 0} = 0
+          OR (enabled = 1 AND cancelled = 0 AND (next_run_at IS NOT NULL OR json_extract(definition_json, '$.schedule.kind') = 'webhook'))
           OR (
             SELECT COUNT(*) FROM agent_control_automations
             WHERE project_id = ${input.automation.projectId}
-              AND enabled = 1 AND cancelled = 0 AND next_run_at IS NOT NULL
+              AND enabled = 1 AND cancelled = 0
+              AND (next_run_at IS NOT NULL OR json_extract(definition_json, '$.schedule.kind') = 'webhook')
           ) < ${AGENT_CONTROL_AUTOMATION_MAX_ACTIVE_PER_PROJECT}
         )
       RETURNING automation_id AS "automationId"
@@ -534,6 +550,42 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
       Effect.mapError(toPersistenceSqlError("AgentControlAutomationRepository.transitionRun")),
     );
 
+  const insertTriggeredRun: AgentControlAutomationRepositoryShape["insertTriggeredRun"] = ({
+    run,
+    prompt,
+  }) =>
+    sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const inserted = yield* sql<{ readonly runId: string }>`
+            INSERT INTO agent_control_automation_runs (
+              run_id, automation_id, automation_revision, project_id, provider_instance_id,
+              scheduled_for, coalesced_occurrences, status, proposal_id, safe_failure_detail,
+              created_at, updated_at, completed_at
+            ) VALUES (
+              ${run.runId}, ${run.automationId}, ${run.automationRevision}, ${run.projectId},
+              ${run.providerInstanceId}, ${run.scheduledFor}, ${run.coalescedOccurrences},
+              'materializing', NULL, NULL, ${run.createdAt}, ${run.updatedAt}, NULL
+            ) ON CONFLICT DO NOTHING RETURNING run_id AS "runId"
+          `;
+          if (inserted.length !== 1) return false;
+          yield* sql`INSERT INTO automation_hook_run_prompts (run_id, prompt)
+            VALUES (${run.runId}, ${prompt})`;
+          return true;
+        }),
+      )
+      .pipe(
+        Effect.mapError(
+          toPersistenceSqlError("AgentControlAutomationRepository.insertTriggeredRun"),
+        ),
+      );
+  const getTriggeredPrompt: AgentControlAutomationRepositoryShape["getTriggeredPrompt"] = (runId) =>
+    sql<{ readonly prompt: string }>`
+      SELECT prompt FROM automation_hook_run_prompts WHERE run_id = ${runId} LIMIT 1
+    `.pipe(
+      Effect.map((rows) => Option.fromNullishOr(rows[0]?.prompt)),
+      Effect.mapError(toPersistenceSqlError("AgentControlAutomationRepository.getTriggeredPrompt")),
+    );
   const pruneRuns: AgentControlAutomationRepositoryShape["pruneRuns"] = (input) =>
     sql`
       DELETE FROM agent_control_automation_runs
@@ -548,6 +600,10 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
       Effect.flatMap(
         () =>
           sql`DELETE FROM agent_control_automation_read_state WHERE run_id NOT IN (SELECT run_id FROM agent_control_automation_runs)`,
+      ),
+      Effect.flatMap(
+        () =>
+          sql`DELETE FROM automation_hook_run_prompts WHERE run_id NOT IN (SELECT run_id FROM agent_control_automation_runs)`,
       ),
       Effect.asVoid,
       Effect.mapError(toPersistenceSqlError("AgentControlAutomationRepository.pruneRuns")),
@@ -604,7 +660,12 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
       AND EXISTS (SELECT 1 FROM agent_control_automations a WHERE a.automation_id = agent_control_automation_runs.automation_id
         AND a.cancelled = 0 AND a.revision = ${input.source.automationRevision})
       ON CONFLICT DO NOTHING RETURNING run_id`;
-          return rows.length === 1;
+          if (rows.length !== 1) return false;
+          // A webhook run's retry runs the same request again.
+          yield* sql`INSERT OR IGNORE INTO automation_hook_run_prompts (run_id, prompt)
+            SELECT ${input.runId}, prompt FROM automation_hook_run_prompts
+            WHERE run_id = ${input.source.runId}`;
+          return true;
         }),
       )
       .pipe(Effect.mapError(toPersistenceSqlError("AutomationCentre.retryRun")));
@@ -631,6 +692,8 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
     );
 
   return {
+    insertTriggeredRun,
+    getTriggeredPrompt,
     listProjectRuns,
     activeProposalIds,
     quarantineRecord,

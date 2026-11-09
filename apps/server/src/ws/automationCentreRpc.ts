@@ -26,5 +26,11 @@ export const makeAutomationCentreHandlers = (ctx: WsRpcContext) => {
         AGENT_CONTROL_WS_METHODS.automationCommand,
         service().pipe(Effect.flatMap((centre) => centre.command(input))),
       ),
+    // Owner only: the answer carries the hook's secret.
+    [AGENT_CONTROL_WS_METHODS.automationHook]: (input) =>
+      ctx.ownerEffect(
+        AGENT_CONTROL_WS_METHODS.automationHook,
+        service().pipe(Effect.flatMap((centre) => centre.hook(input))),
+      ),
   });
 };

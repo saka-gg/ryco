@@ -21,6 +21,7 @@ import {
   lastRun,
   nextRun,
   scheduleToMs,
+  WEBHOOK_TRIGGER_WORDS,
   when,
 } from "@ryco/shared/automationSchedule";
 
@@ -133,6 +134,14 @@ export type ScheduleWhenLine =
 export function scheduleWhenLine(row: ScheduleRow, nowMs: number): ScheduleWhenLine {
   const s = scheduleToMs(row.def.schedule);
   const automation = row.automation;
+  if (s.kind === "webhook") {
+    return {
+      kind: "quiet",
+      text: isSchedulePaused(automation)
+        ? "Paused: its webhook refuses requests."
+        : `${WEBHOOK_TRIGGER_WORDS}.`,
+    };
+  }
   if (row.state === "pending-create" || row.state === "lapsed" || !automation) {
     return {
       kind: "first",

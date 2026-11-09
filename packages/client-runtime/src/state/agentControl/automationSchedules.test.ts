@@ -128,8 +128,9 @@ function automation(
   } = {},
 ): AgentControlAutomation {
   const s = def.schedule;
-  const first = s.kind === "once" ? s.runAt : s.startsAt;
-  const nextRunAt = patch.nextRunAt === undefined ? Date.parse(first) : patch.nextRunAt;
+  const first = s.kind === "webhook" ? "" : s.kind === "once" ? s.runAt : s.startsAt;
+  const nextRunAt =
+    patch.nextRunAt === undefined ? (first === "" ? null : Date.parse(first)) : patch.nextRunAt;
   return {
     automationId: aid(id),
     principal: {

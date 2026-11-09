@@ -85,7 +85,20 @@ export type ScheduleMs =
       readonly kind: "calendar";
       readonly startsAt: number;
       readonly endsAt: number;
-    } & CalendarRule);
+    } & CalendarRule)
+  /** Runs when its webhook is called: no times at all (`docs/automation-webhooks.md`). */
+  | { readonly kind: "webhook" };
+
+/** A schedule that runs at times. */
+export type TimedScheduleMs = Exclude<ScheduleMs, { kind: "webhook" }>;
+
+/** The words for a webhook trigger, wherever a schedule is described. */
+export const WEBHOOK_TRIGGER_WORDS = "Runs when its webhook is called";
+
+/** Whether a schedule runs when its webhook is called (no next run, no end). */
+export function isWebhookSchedule(schedule: ScheduleInput | null | undefined): boolean {
+  return schedule?.kind === "webhook";
+}
 
 type CalendarScheduleMs = Extract<ScheduleMs, { kind: "calendar" }>;
 
@@ -105,6 +118,7 @@ export function isoFromMs(ms: number): string {
 }
 
 export function scheduleToMs(schedule: ScheduleInput): ScheduleMs {
+  if (schedule.kind === "webhook") return { kind: "webhook" };
   if (schedule.kind === "once") return { kind: "once", runAt: toMs(schedule.runAt) };
   if (schedule.kind === "calendar") {
     const minutes =
@@ -129,6 +143,7 @@ export function scheduleToMs(schedule: ScheduleInput): ScheduleMs {
 /** The contract shape (ISO strings, integer interval) for a millisecond schedule. */
 export function scheduleToContract(schedule: ScheduleInput): AgentControlAutomationSchedule {
   const s = scheduleToMs(schedule);
+  if (s.kind === "webhook") return { kind: "webhook" };
   if (s.kind === "once") return { kind: "once", runAt: isoFromMs(s.runAt) };
   if (s.kind === "calendar") {
     return {
@@ -408,6 +423,7 @@ function calendarOccurrences(
 /** The first run: `runAt`, `startsAt`, or a calendar's first time at or after `startsAt`. */
 export function firstRun(schedule: ScheduleInput): number {
   const s = scheduleToMs(schedule);
+  if (s.kind === "webhook") return Number.NaN;
   if (s.kind === "calendar") {
     return calendarOccurrences(s, s.startsAt, s.endsAt, 1)[0] ?? s.startsAt;
   }
@@ -417,6 +433,7 @@ export function firstRun(schedule: ScheduleInput): number {
 /** The last run inside the end (the end is inclusive). */
 export function lastRun(schedule: ScheduleInput): number {
   const s = scheduleToMs(schedule);
+  if (s.kind === "webhook") return Number.NaN;
   if (s.kind === "once") return s.runAt;
   if (s.kind === "calendar") {
     return calendarOccurrences(s, s.startsAt, s.endsAt, 1_000).at(-1) ?? s.startsAt;
@@ -434,6 +451,7 @@ export function scheduleOccurrences(
 ): number[] {
   if (!schedule) return [];
   const s = scheduleToMs(schedule);
+  if (s.kind === "webhook") return [];
   if (s.kind === "once")
     return s.runAt >= fromMs && s.runAt <= untilMs && limit > 0 ? [s.runAt] : [];
   if (s.kind === "calendar") return calendarOccurrences(s, fromMs, untilMs, limit);
@@ -452,6 +470,7 @@ export function scheduleOccurrences(
 export function nextRun(schedule: ScheduleInput | null | undefined, nowMs: number): number | null {
   if (!schedule) return null;
   const s = scheduleToMs(schedule);
+  if (s.kind === "webhook") return null;
   if (s.kind === "once") return s.runAt > nowMs ? s.runAt : null;
   return scheduleOccurrences(s, nowMs + 1, Number.POSITIVE_INFINITY, 1)[0] ?? null;
 }
@@ -463,6 +482,7 @@ export function countRuns(
 ): number {
   if (!schedule) return 0;
   const s = scheduleToMs(schedule);
+  if (s.kind === "webhook") return 0;
   if (s.kind === "once") return s.runAt >= fromMs ? 1 : 0;
   if (s.kind === "calendar") {
     return countCalendarRuns(s, Math.max(fromMs, s.startsAt), s.endsAt);
@@ -489,7 +509,7 @@ export function rollForward(
 ): ScheduleMs {
   const s = scheduleToMs(schedule);
   const after = nowMs + Math.max(0, options.leadMs ?? 0);
-  if (s.kind === "once" || s.startsAt > after) return s;
+  if (s.kind === "webhook" || s.kind === "once" || s.startsAt > after) return s;
   const next = nextRun(s, after) ?? (s.startsAt > nowMs ? null : nextRun(s, nowMs));
   return next == null ? s : { ...s, startsAt: next };
 }
@@ -588,6 +608,7 @@ function anchorOf(s: Extract<ScheduleMs, { kind: "fixed-interval" }>, nowMs: num
 export function cadence(schedule: ScheduleInput | null | undefined, nowMs: number): string {
   if (!schedule) return "";
   const s = scheduleToMs(schedule);
+  if (s.kind === "webhook") return "On webhook";
   if (s.kind === "once") return "Once";
   if (s.kind === "calendar") return capitalize(calendarWords(s, localTimeZone()));
   const i = s.intervalMs;
@@ -604,6 +625,7 @@ export function cadence(schedule: ScheduleInput | null | undefined, nowMs: numbe
 export function scheduleLabel(schedule: ScheduleInput | null | undefined, nowMs: number): string {
   if (!schedule) return "";
   const s = scheduleToMs(schedule);
+  if (s.kind === "webhook") return WEBHOOK_TRIGGER_WORDS;
   if (s.kind === "once") return `Once · ${dayTime(s.runAt, nowMs)}`;
   return `${cadence(s, nowMs)} · until ${formatDate(s.endsAt, nowMs)}`;
 }
@@ -621,6 +643,7 @@ export function phrase(
 ): string {
   if (!schedule) return "";
   const s = scheduleToMs(schedule);
+  if (s.kind === "webhook") return "when its webhook is called";
   if (s.kind === "once") {
     const n = calendarDayDiff(nowMs, s.runAt);
     const t = formatTime(s.runAt);
@@ -813,6 +836,7 @@ export function runPreviewNote(
     }
   }
   if (approvals === false) return "";
+  if (s.kind === "webhook") return "";
   if (s.kind === "once")
     return approvals === true ? "It waits up to 15 min for your approval when it's due." : "";
   if (s.kind === "calendar")
@@ -1023,7 +1047,9 @@ export function validateScheduleDefinition(
   if (!definition.schedule) errors.start = "Pick when it runs.";
   else {
     const s = scheduleToMs(definition.schedule);
-    if (s.kind === "once") {
+    if (s.kind === "webhook") {
+      // No times to check: it runs when its webhook is called.
+    } else if (s.kind === "once") {
       if (!Number.isFinite(s.runAt)) errors.start = "Pick a date and time.";
       else if (s.runAt <= nowMs)
         errors.start = `That time has passed. Pick a time after ${dayTime(nowMs, nowMs)}.`;

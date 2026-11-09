@@ -757,7 +757,8 @@ export const AgentControlAutomationExecutionTemplate = Schema.Struct({
 export type AgentControlAutomationExecutionTemplate =
   typeof AgentControlAutomationExecutionTemplate.Type;
 
-export const AgentControlAutomationSchedule = Schema.Union([
+/** The schedules that run at times: the triggers agents may create or switch to. */
+export const AGENT_CONTROL_AUTOMATION_TIMED_SCHEDULES = [
   Schema.Struct({
     kind: Schema.Literal("once"),
     runAt: IsoDateTime,
@@ -789,6 +790,16 @@ export const AgentControlAutomationSchedule = Schema.Union([
     /** Required finite end, like a fixed interval's. */
     endsAt: IsoDateTime,
   }).pipe(rejectExcessProperties),
+] as const;
+
+export const AgentControlAutomationSchedule = Schema.Union([
+  ...AGENT_CONTROL_AUTOMATION_TIMED_SCHEDULES,
+  /**
+   * Runs when its webhook is called (`docs/automation-webhooks.md`): no next run and no end.
+   * The hook (its id and secret) is node state, never part of the definition. Only the owner
+   * creates one or switches a schedule to it; agents read it but never see the hook.
+   */
+  Schema.Struct({ kind: Schema.Literal("webhook") }).pipe(rejectExcessProperties),
 ]);
 export type AgentControlAutomationSchedule = typeof AgentControlAutomationSchedule.Type;
 
@@ -1506,6 +1517,7 @@ export type AgentControlProposal = typeof AgentControlProposal.Type;
 export const AGENT_CONTROL_WS_METHODS = {
   automationCentre: "agentControl.automationCentre",
   automationCommand: "agentControl.automationCommand",
+  automationHook: "agentControl.automationHook",
   listProposals: "agentControl.listProposals",
   getProposal: "agentControl.getProposal",
   acceptProposal: "agentControl.acceptProposal",

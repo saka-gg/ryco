@@ -133,6 +133,18 @@ export interface AgentControlAutomationRepositoryShape {
     readonly updatedAt: IsoDateTime;
     readonly completedAt: IsoDateTime | null;
   }) => Effect.Effect<boolean, AgentControlAutomationRepositoryError>;
+  /**
+   * A run a webhook request started, materializing, with its framed prompt beside it (both or
+   * neither). `false` when the run id exists.
+   */
+  readonly insertTriggeredRun: (input: {
+    readonly run: AgentControlAutomationRun;
+    readonly prompt: string;
+  }) => Effect.Effect<boolean, AgentControlAutomationRepositoryError>;
+  /** The framed prompt of a run a webhook request started; none for a timed run. */
+  readonly getTriggeredPrompt: (
+    runId: AgentControlAutomationRunId,
+  ) => Effect.Effect<Option.Option<string>, AgentControlAutomationRepositoryError>;
   readonly pruneRuns: (input: {
     readonly automationId: AgentControlAutomationId;
     readonly keepNewest: number;

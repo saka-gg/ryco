@@ -547,6 +547,10 @@ const TRACING_EXPORTER_SOURCES: readonly ForbiddenBundleSource[] = [
  * SSH host settings and Test connection, the new testing actions), whose
  * schemas the boot RPC client and settings decoder carry. The wizard, drawer
  * and host editor load with the device panel and the settings page.
+ * 529 KiB on 2026-11-09 (boot 527.97 → 528.1 KiB): webhook-triggered
+ * automations, whose `webhook` schedule, owner hook RPC and hook view schemas the
+ * boot RPC client carries (about 0.13 KiB). The trigger choice, the webhook
+ * panel and its snippets load with the Automations dialog.
  */
 export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
   bootChunk: "main",
@@ -555,7 +559,7 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       name: "boot",
       chunk: "main",
       beyondBoot: false,
-      maxGzipBytes: 528 * KIB,
+      maxGzipBytes: 529 * KIB,
       forbiddenSources: [
         ...HOSTED_RUNTIME_SOURCES,
         ...MARKDOWN_SOURCES,
