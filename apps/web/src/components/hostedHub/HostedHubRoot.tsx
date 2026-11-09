@@ -11,25 +11,23 @@ import {
 import type { EnvironmentId } from "@ryco/contracts";
 import type { ExternalIdentityPendingResponse } from "@ryco/contracts/hosted-identity";
 import {
-  ChevronDownIcon,
   ChevronRightIcon,
   CheckIcon,
   CopyIcon,
   KeyRoundIcon,
   LayoutGridIcon,
-  LifeBuoyIcon,
   Loader2Icon,
   LogOutIcon,
   RefreshCwIcon,
   ServerIcon,
   ShieldCheckIcon,
   TriangleAlertIcon,
+  UserPlusIcon,
   UserRoundIcon,
 } from "lucide-react";
 import {
   useCallback,
   useEffect,
-  useId,
   useMemo,
   useRef,
   useState,
@@ -636,62 +634,91 @@ function HostedNodeStartingSurface({ node }: { readonly node: HostedHubNode }) {
 }
 
 /**
- * What a person who has never seen this Hub needs, kept behind one 32px row so
- * the returning user — who is nearly everyone, nearly every time — pays a line
- * of text for it rather than a screen of it.
+ * The ways in for someone who has no account yet, grouped under one quiet
+ * divider so the returning user — who is nearly everyone, nearly every time —
+ * reads past a single line to reach the sign-in action they came for.
+ *
+ * Each path carries its own one-line reason instead of sitting behind a
+ * disclosure: a cold visitor should not have to open a panel to learn which of
+ * three equally weighted buttons is theirs.
  */
-function NewToThisHubDisclosure({
+function NewToThisHubOptions({
   bootstrapAvailable,
   publicSignupEnabled,
+  onCreateAccount,
+  onRedeemInvitation,
+  onSetUpFirstOwner,
 }: {
   readonly bootstrapAvailable: boolean;
   readonly publicSignupEnabled: boolean;
+  readonly onCreateAccount: () => void;
+  readonly onRedeemInvitation: () => void;
+  readonly onSetUpFirstOwner: () => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const panelId = useId();
   return (
-    <div className="mt-4">
-      <Button
-        variant="ghost"
-        size="sm"
-        aria-expanded={open}
-        aria-controls={panelId}
-        // `whitespace-nowrap` is baked into every button variant, and a
-        // one-line label whose font has doubled is a label wider than a 320px
-        // phone. It wraps instead, and the box grows with it rather than
-        // clipping the second line against `h-8`.
-        className="-mx-2 h-auto min-h-8 max-w-full whitespace-normal py-1.5 text-left phone:min-h-11"
-        onClick={() => setOpen((current) => !current)}
+    <div className="mt-6">
+      <div
+        aria-hidden
+        className="flex items-center gap-3 text-muted-foreground text-xs before:h-px before:flex-1 before:bg-border after:h-px after:flex-1 after:bg-border"
       >
         New to this Hub?
-        <ChevronDownIcon
-          aria-hidden
-          className={`transition-transform ${open ? "rotate-180" : ""}`}
+      </div>
+      <h2 className="sr-only">New to this Hub?</h2>
+      <div className="mt-4 flex flex-col gap-1">
+        {publicSignupEnabled ? (
+          <Button
+            variant="outline"
+            size="lg"
+            className="mb-2 phone:min-h-11"
+            onClick={onCreateAccount}
+          >
+            <UserPlusIcon aria-hidden />
+            Create account
+          </Button>
+        ) : null}
+        <HubInlineChoice
+          hint={publicSignupEnabled ? "Have an invitation code?" : "Accounts here are invite-only."}
+          label="Redeem invitation"
+          onClick={onRedeemInvitation}
         />
-      </Button>
-      {open ? (
-        <div id={panelId} className="mt-2 space-y-2 text-xs leading-relaxed text-muted-foreground">
-          <p>
-            <span className="font-medium text-foreground">Getting access.</span> Accounts are
-            {publicSignupEnabled
-              ? " open to signup on this Hub. Verify your email, then choose a passkey or password."
-              : " created by invitation. An owner sends you an invitation code; redeem it below to create your account."}
-          </p>
-          <p>
-            <span className="font-medium text-foreground">What a passkey is here.</span> The passkey
-            is created by your browser or password manager and never leaves it. It is the only
-            credential this Hub treats as strong.
-          </p>
-          {bootstrapAvailable ? (
-            <p>
-              <span className="font-medium text-foreground">If this Hub is brand new.</span> No
-              owner exists yet. “Set up first owner” claims this Hub with a bootstrap credential
-              from whoever deployed it.
-            </p>
-          ) : null}
-        </div>
-      ) : null}
+        {bootstrapAvailable ? (
+          <HubInlineChoice
+            hint="Setting up a brand-new Hub?"
+            label="Set up first owner"
+            onClick={onSetUpFirstOwner}
+          />
+        ) : null}
+      </div>
     </div>
+  );
+}
+
+/**
+ * A one-line "question → action" row: muted context, then a link-weight
+ * button. The button's accessible name is its label alone, so the hint never
+ * leaks into what a screen reader or a test calls the control.
+ */
+function HubInlineChoice({
+  hint,
+  label,
+  onClick,
+}: {
+  readonly hint: string;
+  readonly label: string;
+  readonly onClick: () => void;
+}) {
+  return (
+    <p className="flex flex-wrap items-center justify-center gap-x-1 text-center text-muted-foreground text-sm">
+      <span>{hint}</span>
+      <Button
+        variant="link"
+        size="sm"
+        className="h-auto min-h-8 whitespace-normal px-1 font-medium text-foreground underline-offset-4 hover:underline phone:min-h-11"
+        onClick={onClick}
+      >
+        {label}
+      </Button>
+    </p>
   );
 }
 
@@ -738,6 +765,7 @@ export function HostedAuthenticationSurface({
   // `/password-reset` are the Hub server's own mail pathnames — so a reload of
   // one now lands on the page that ceremony belongs to rather than reporting an
   // expired link.
+  const isPhoneTier = usePresentationTier() === "phone";
   const hubRoute = useHubRoute();
   const registrationMode =
     hubRoute?.kind === "sign-up" || hubRoute?.kind === "sign-up-verify"
@@ -915,36 +943,32 @@ export function HostedAuthenticationSurface({
       </div>
     ) : null;
 
-  const signInActions =
+  // The landing page's actions: the primary sign-in stack, which is the only
+  // part that bottom-anchors on the phone tier, and the quieter secondary paths.
+  // Passkey leads because it is the one credential this Hub treats as strong;
+  // GitHub follows at outline weight so two filled buttons never compete for
+  // the same click.
+  //
+  // Where the secondary paths go is a tier fork, made once here. On desktop
+  // they read after the action they support. On the frozen phone tier the
+  // primary stack is pinned to the bottom of the viewport, so anything after it
+  // in the DOM would sit below the pinned group — out of view at rest and out
+  // of step with focus order — and they go above it instead.
+  const signInPrimaryActions =
     registrationMode || fallbackMode ? null : (
       <div className={`phone:mt-auto ${PHONE_ANCHORED_ACTIONS_CLASS_NAME}`}>
-        <div className="mt-6 flex flex-col gap-3">
-          {githubIdentityPolicy?.login ? (
-            <Button
-              size="lg"
-              className="phone:min-h-11"
-              disabled={
-                externalAuthorizationPending ||
-                status === "authenticating" ||
-                status === "signing-out"
-              }
-              onClick={() => void startGitHubSignIn()}
-            >
-              {externalAuthorizationPending ? (
-                <Loader2Icon aria-hidden className="animate-spin" />
-              ) : (
-                <GitHubIcon aria-hidden />
-              )}
-              {externalAuthorizationPending ? "Opening GitHub…" : "Continue with GitHub"}
-            </Button>
-          ) : null}
+        <div className="flex flex-col gap-2.5">
           <Button
             size="lg"
             className="phone:min-h-11"
             disabled={status === "authenticating" || status === "signing-out"}
             onClick={() => void hostedHubController.signIn()}
           >
-            <KeyRoundIcon aria-hidden />
+            {status === "authenticating" ? (
+              <Loader2Icon aria-hidden className="animate-spin motion-reduce:animate-none" />
+            ) : (
+              <KeyRoundIcon aria-hidden />
+            )}
             {status === "authenticating" ? "Waiting for passkey…" : "Sign in with passkey"}
           </Button>
           {status === "authenticating" ? (
@@ -956,45 +980,55 @@ export function HostedAuthenticationSurface({
             >
               Cancel
             </Button>
-          ) : (
-            <>
-              {/* The cold visitor's real path, so it stays an outline rather than
-                sinking to ghost. */}
-              {publicSignupConfig?.status === "enabled" ? (
-                <Button
-                  variant="outline"
-                  size="lg"
-                  className="phone:min-h-11"
-                  onClick={() => setRegistrationMode("public")}
-                >
-                  Create account
-                </Button>
-              ) : null}
-              <Button
-                variant="ghost"
-                size="lg"
-                className="phone:min-h-11"
-                onClick={() => setRegistrationMode("invitation")}
-              >
-                Redeem invitation
-              </Button>
-              {bootstrapAvailable ? (
-                // Once per Hub, ever. Reducing its weight does not change its
-                // height, so the anchoring geometry is untouched.
-                <Button
-                  variant="ghost"
-                  size="lg"
-                  className="phone:min-h-11"
-                  onClick={() => setRegistrationMode("bootstrap")}
-                >
-                  Set up first owner
-                </Button>
-              ) : null}
-            </>
-          )}
+          ) : githubIdentityPolicy?.login ? (
+            <Button
+              variant="outline"
+              size="lg"
+              className="phone:min-h-11"
+              disabled={externalAuthorizationPending || status === "signing-out"}
+              onClick={() => void startGitHubSignIn()}
+            >
+              {externalAuthorizationPending ? (
+                <Loader2Icon aria-hidden className="animate-spin motion-reduce:animate-none" />
+              ) : (
+                <GitHubIcon aria-hidden />
+              )}
+              {externalAuthorizationPending ? "Opening GitHub…" : "Continue with GitHub"}
+            </Button>
+          ) : null}
         </div>
       </div>
     );
+  const signInSecondaryActions =
+    registrationMode || fallbackMode || status === "authenticating" ? null : (
+      <div className="phone:mb-6">
+        <div className="mt-3 flex justify-center phone:mt-0">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-auto min-h-8 whitespace-normal text-muted-foreground hover:text-foreground phone:min-h-11"
+            onClick={() => setFallbackMode("password")}
+          >
+            Other ways to sign in
+          </Button>
+        </div>
+        <NewToThisHubOptions
+          bootstrapAvailable={bootstrapAvailable}
+          publicSignupEnabled={publicSignupConfig?.status === "enabled"}
+          onCreateAccount={() => setRegistrationMode("public")}
+          onRedeemInvitation={() => setRegistrationMode("invitation")}
+          onSetUpFirstOwner={() => setRegistrationMode("bootstrap")}
+        />
+      </div>
+    );
+  const signInActions = isPhoneTier ? (
+    signInPrimaryActions
+  ) : (
+    <>
+      {signInPrimaryActions}
+      {signInSecondaryActions}
+    </>
+  );
 
   // Both of these must mount in EVERY account state, including while the
   // registration form is open. Redeeming an invitation and bootstrapping the
@@ -1195,31 +1229,26 @@ export function HostedAuthenticationSurface({
       description={
         context === "native-authorization"
           ? "Authenticate in this browser first. Ryco will ask again before it authorizes the mobile app."
-          : "Ryco Hub reaches the developer machines an owner has authorized for your account. Your session lives in an HttpOnly cookie — nothing about it is readable by this page."
+          : status === "session-expired"
+            ? "Sign in again to pick up where you left off."
+            : "Sign in to reach the machines shared with your account."
       }
       actions={signInActions}
       trailing={signInTrailing}
+      aside={
+        <>
+          <HostedRelayTrustNotice variant="disclosure" />
+          <HostedPwaControls variant="subtle" />
+        </>
+      }
       scrollRef={surfaceScrollRef}
       titleRef={headingRef}
     >
-      <HostedRelayTrustNotice />
-      <NewToThisHubDisclosure
-        bootstrapAvailable={bootstrapAvailable}
-        publicSignupEnabled={publicSignupConfig?.status === "enabled"}
-      />
-      {status !== "authenticating" ? (
-        <Button
-          variant="ghost"
-          size="sm"
-          className="-ml-2 mt-2 h-auto min-h-8 whitespace-normal phone:min-h-11"
-          onClick={() => setFallbackMode("password")}
-        >
-          <LifeBuoyIcon aria-hidden />
-          Password, recovery code, or reset
-        </Button>
-      ) : null}
-      <HostedPwaControls />
-      {authError}
+      {/* The error sits between the heading and the action that produced it,
+          with its own bottom spacing because the action group follows it
+          directly. */}
+      {authError ? <div className="mb-6 *:mt-0">{authError}</div> : null}
+      {isPhoneTier ? signInSecondaryActions : null}
     </HubGateway>
   );
 }

@@ -500,7 +500,12 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
     await expect.element(page.getByRole("button", { name: "Sign in with passkey" })).toBeVisible();
     // No node is selected here, so no §4 channel exists: the disclosure states
     // the no-channel claim and never the retired sentence, which asserts the
-    // opposite of what a locked NX channel makes true (§2.2).
+    // opposite of what a locked NX channel makes true (§2.2). The gateway folds
+    // it behind a neutral row; expanded, the claim is the unabridged body.
+    const disclosureToggle = page.getByRole("button", { name: "How this connection works" });
+    await expect.element(disclosureToggle).toHaveAttribute("aria-expanded", "false");
+    expect(document.body.textContent).not.toContain(hostedRelayTrustDisclosure("unavailable").body);
+    await disclosureToggle.click();
     await expect
       .element(page.getByText(hostedRelayTrustDisclosure("unavailable").body))
       .toBeVisible();
@@ -565,7 +570,7 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
       .mockResolvedValue();
     mounted = await render(<HostedHubRoot />);
 
-    await page.getByRole("button", { name: "Password, recovery code, or reset" }).click();
+    await page.getByRole("button", { name: "Other ways to sign in" }).click();
     const recoveryChoice = page.getByRole("button", { name: "Use recovery code" });
     const resetChoice = page.getByRole("button", { name: "Forgot password?" });
     await expect.element(recoveryChoice).toBeVisible();
@@ -1327,7 +1332,7 @@ describe("hosted Hub routes", () => {
   it("gives each signed-out ceremony its own address and restores it on reload", async () => {
     for (const [control, pathname, heading] of [
       ["Redeem invitation", "/invitation", "Redeem your invitation"],
-      ["Password, recovery code, or reset", "/sign-in/password", "Sign in with a password"],
+      ["Other ways to sign in", "/sign-in/password", "Sign in with a password"],
     ] as const) {
       mounted = await render(<HostedHubRoot />);
       await page.getByRole("button", { name: control }).click();

@@ -37,6 +37,7 @@ export function HubGateway({
   description,
   actions,
   trailing,
+  aside,
   scrollRef,
   titleRef,
   measure = "form",
@@ -59,6 +60,12 @@ export function HubGateway({
    * that only applies to the action group cannot swallow it.
    */
   readonly trailing?: ReactNode;
+  /**
+   * Quiet, page-level extras drawn under the panel rather than inside it —
+   * transport details, app installation. They inform the visit without
+   * competing with the page's own action.
+   */
+  readonly aside?: ReactNode;
   /** Owner for flow changes that must reset this surface's scroll position. */
   readonly scrollRef?: RefObject<HTMLElement | null>;
   /**
@@ -110,6 +117,10 @@ export function HubGateway({
             {actions}
             {trailing}
           </section>
+
+          {aside === undefined ? null : (
+            <div className="mt-4 flex flex-wrap items-center justify-center gap-x-3">{aside}</div>
+          )}
 
           <HubFooter />
         </div>

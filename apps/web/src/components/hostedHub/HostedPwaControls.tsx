@@ -10,24 +10,35 @@ import {
 import { useHostedPwaSnapshot } from "../../pwa/useHostedPwaSnapshot";
 import { HostedRelayTrustNotice } from "./HostedRelayTrustNotice";
 
+/**
+ * - `default`: outline buttons in the page's own flow (node directory, account).
+ * - `compact`: the same, sized for the connection menu.
+ * - `subtle`: one muted text-weight row for the signed-out gateway, where
+ *   installing is an aside to signing in and must not compete with it. The
+ *   gateway draws the relay trust notice beside this row already, so the
+ *   install instructions do not repeat it here.
+ */
+export type HostedPwaControlsVariant = "default" | "compact" | "subtle";
+
 export function HostedPwaControls({
-  compact = false,
+  variant = "default",
   lifecycle = hostedPwaLifecycle,
 }: {
-  readonly compact?: boolean;
+  readonly variant?: HostedPwaControlsVariant;
   readonly lifecycle?: HostedPwaLifecycle | null;
 }) {
-  return lifecycle ? <ConnectedHostedPwaControls compact={compact} lifecycle={lifecycle} /> : null;
+  return lifecycle ? <ConnectedHostedPwaControls variant={variant} lifecycle={lifecycle} /> : null;
 }
 
 function ConnectedHostedPwaControls({
-  compact,
+  variant,
   lifecycle,
 }: {
-  readonly compact: boolean;
+  readonly variant: HostedPwaControlsVariant;
   readonly lifecycle: HostedPwaLifecycle;
 }) {
   const snapshot = useHostedPwaSnapshot(lifecycle);
+  const compact = variant === "compact";
   const [showInstructions, setShowInstructions] = useState(false);
   const installAvailable =
     snapshot.installState === "native-available" || snapshot.installState === "manual-available";
@@ -38,6 +49,67 @@ function ConnectedHostedPwaControls({
     snapshot.registrationState !== "unavailable"
   ) {
     return null;
+  }
+
+  if (variant === "subtle") {
+    const subtleClassName =
+      "inline-flex min-h-8 cursor-pointer items-center gap-1.5 rounded-md px-2 text-muted-foreground text-xs outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-64 phone:min-h-11 [&_svg]:size-3.5 [&_svg]:shrink-0";
+    return (
+      // `contents` for the same reason as the trust notice's disclosure row:
+      // the buttons sit in the page's aside row, and anything expanded drops
+      // to its own full-width line beneath it.
+      <section className="contents" aria-label="Ryco app installation">
+        <>
+          {snapshot.installState === "native-available" ? (
+            <button
+              type="button"
+              className={subtleClassName}
+              onClick={() => void lifecycle.promptInstall()}
+            >
+              <DownloadIcon aria-hidden /> Install app
+            </button>
+          ) : null}
+          {snapshot.installState === "manual-available" ? (
+            <button
+              type="button"
+              className={subtleClassName}
+              aria-expanded={showInstructions}
+              onClick={() => setShowInstructions((visible) => !visible)}
+            >
+              <DownloadIcon aria-hidden /> Install app
+            </button>
+          ) : null}
+          {snapshot.updateState !== "idle" ? (
+            <button
+              type="button"
+              className={subtleClassName}
+              disabled={snapshot.updateState === "activating"}
+              onClick={() => lifecycle.activateUpdate()}
+            >
+              <RefreshCwIcon aria-hidden />
+              {snapshot.updateState === "activating" ? "Updating…" : "Update ready"}
+            </button>
+          ) : null}
+        </>
+        {showInstructions ? (
+          <div className="order-last mt-2 basis-full">
+            <InstallInstructions
+              snapshot={snapshot}
+              showTrustNotice={false}
+              onClose={() => setShowInstructions(false)}
+            />
+          </div>
+        ) : null}
+        {snapshot.registrationState === "unavailable" && snapshot.errorMessage ? (
+          <p
+            role="status"
+            className="order-last mt-1 basis-full text-center text-muted-foreground text-xs"
+          >
+            {snapshot.errorMessage}
+          </p>
+        ) : null}
+      </section>
+    );
   }
 
   return (
@@ -95,9 +167,11 @@ function ConnectedHostedPwaControls({
 function InstallInstructions({
   snapshot,
   onClose,
+  showTrustNotice = true,
 }: {
   readonly snapshot: HostedPwaSnapshot;
   readonly onClose: () => void;
+  readonly showTrustNotice?: boolean;
 }) {
   return (
     <div
@@ -123,9 +197,11 @@ function InstallInstructions({
           <XIcon aria-hidden /> <span className="sr-only">Close install instructions</span>
         </Button>
       </div>
-      <div className="mt-3 border-t border-border pt-3">
-        <HostedRelayTrustNotice compact />
-      </div>
+      {showTrustNotice ? (
+        <div className="mt-3 border-t border-border pt-3">
+          <HostedRelayTrustNotice variant="inline" />
+        </div>
+      ) : null}
     </div>
   );
 }
