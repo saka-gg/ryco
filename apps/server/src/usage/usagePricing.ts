@@ -297,7 +297,10 @@ export interface UsageSlotTotals {
 }
 
 /** A speed without its own published tier is billed at standard rates. */
-function resolveSpeedRate(standard: UsageModelRate, speed: UsageSpeed | undefined): UsageTokenRate {
+export function resolveSpeedRate(
+  standard: UsageModelRate,
+  speed: UsageSpeed | undefined,
+): UsageTokenRate {
   return (
     (speed === "fast" ? standard.fast : speed === "ultrafast" ? standard.ultrafast : null) ??
     standard

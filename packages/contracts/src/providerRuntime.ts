@@ -350,6 +350,8 @@ export const ProcessedTokenUsage = Schema.Struct({
   /** Includes cache reads and writes. */
   inputTokens: NonNegativeInt,
   cachedInputTokens: NonNegativeInt,
+  /** Cache writes within `inputTokens`. Absent when the provider does not report them. */
+  cacheWriteInputTokens: Schema.optional(NonNegativeInt),
   /** Includes reasoning output; reasoning is not charged a second time. */
   outputTokens: NonNegativeInt,
   reasoningOutputTokens: NonNegativeInt,

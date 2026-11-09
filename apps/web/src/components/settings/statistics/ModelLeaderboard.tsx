@@ -1,6 +1,10 @@
 import { chartColor } from "~/components/ui/chart";
-import { formatUsd } from "~/lib/modelPricing";
-import { formatModelLabel, formatProviderLabel, formatTokens } from "~/lib/statisticsFormat";
+import {
+  formatEstimatedUsd,
+  formatModelLabel,
+  formatProviderLabel,
+  formatTokens,
+} from "~/lib/statisticsFormat";
 
 import type { ModelAggregate } from "./selectors";
 
@@ -42,7 +46,7 @@ export function ModelLeaderboard({ models }: { models: ReadonlyArray<ModelAggreg
               <div className="mt-1 flex items-center justify-between text-[11px] text-muted-foreground">
                 <span className="truncate">{formatProviderLabel(entry.provider)}</span>
                 <span className="shrink-0 tabular-nums">
-                  {entry.costUsd === null ? "—" : `~${formatUsd(entry.costUsd)}`}
+                  {entry.costUsd === null ? "—" : `~${formatEstimatedUsd(entry.costUsd)}`}
                 </span>
               </div>
             </div>

@@ -17,10 +17,11 @@ export const makeStatisticsHandlers = (ctx: WsRpcContext) => {
         ownerEffect(
           WS_METHODS.serverGetStatistics,
           // A reopen gets the previous snapshot at once when the refresh is slow; the
-          // refresh keeps running, so the next request is current.
+          // refresh keeps running, so the next request is current. Costs come from the
+          // usage price list, so both views price a model alike.
           statisticsQuery
             .getStatistics({ maxWaitMs: STATISTICS_STALE_WHILE_REVALIDATE_WAIT_MS })
-            .pipe(Effect.orDie),
+            .pipe(Effect.orDie, Effect.flatMap(usageService.priceStatistics)),
         ),
         { "rpc.aggregate": "server" },
       ),

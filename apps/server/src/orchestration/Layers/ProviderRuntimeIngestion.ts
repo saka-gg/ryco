@@ -18,6 +18,7 @@ import {
   DEFAULT_AGENT_TOKEN_MODE,
   EventId,
   MessageId,
+  type ModelSelection,
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationMessage,
@@ -66,6 +67,7 @@ import {
   taskUsageActivityId,
   toolProgressActivityId,
 } from "@ryco/shared/latestStateActivities";
+import { modelSelectionSpeed } from "@ryco/shared/model";
 import { readEnv } from "@ryco/shared/runtimeEnv";
 import { classifyTaskAgentKind } from "@ryco/shared/taskClassification";
 import { redactToolParameterCredentials } from "@ryco/shared/toolParameterRedaction";
@@ -112,6 +114,14 @@ import {
   usageLimitRecordCommandId,
   usageLimitResetFillCommandId,
 } from "@ryco/shared/usageLimit";
+
+/** Statistics price usage at the speed tier the thread's selection asked for. */
+function statisticsSpeedField(modelSelection: ModelSelection): {
+  readonly statisticsSpeed?: "fast" | "ultrafast";
+} {
+  const speed = modelSelectionSpeed(modelSelection);
+  return speed === undefined ? {} : { statisticsSpeed: speed };
+}
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 const providerTaskKey = (threadId: ThreadId, taskId: string) => `${threadId}:${taskId}`;
@@ -3776,6 +3786,7 @@ const make = Effect.gen(function* () {
                   payload: {
                     ...(activity.payload as Record<string, unknown>),
                     statisticsModel: thread.modelSelection.model,
+                    ...statisticsSpeedField(thread.modelSelection),
                   },
                 }
               : activity,

@@ -1,7 +1,5 @@
 import { PROVIDER_DISPLAY_NAMES } from "@ryco/contracts";
 
-import { canonicalizeModel } from "./modelPricing";
-
 const compactNumber = new Intl.NumberFormat("en-US", {
   notation: "compact",
   maximumFractionDigits: 1,
@@ -29,6 +27,14 @@ const usd = new Intl.NumberFormat("en-US", {
 /** US dollars, e.g. "$12.40". */
 export function formatUsd(value: number): string {
   return usd.format(value);
+}
+
+/** An estimate in US dollars: "<$0.01" for a fraction of a cent, whole dollars from $1,000. */
+export function formatEstimatedUsd(amount: number): string {
+  if (amount <= 0) return "$0.00";
+  if (amount < 0.01) return "<$0.01";
+  if (amount < 1000) return `$${amount.toFixed(2)}`;
+  return `$${Math.round(amount).toLocaleString("en-US")}`;
 }
 
 /** An estimated cost, or "Unavailable" when nothing had a price. */
@@ -92,8 +98,8 @@ export function formatProviderLabel(provider: string | undefined): string {
 
 /** Pretty model name from a slug, e.g. "claude-opus-4-8" → "Claude Opus 4.8". */
 export function formatModelLabel(model: string): string {
-  const canonical = canonicalizeModel(model);
-  const base = canonical.includes("/") ? (canonical.split("/").pop() ?? canonical) : canonical;
+  const trimmed = model.trim();
+  const base = trimmed.includes("/") ? (trimmed.split("/").pop() ?? trimmed) : trimmed;
   const segments = base.split("-").reduce<Array<string>>((acc, segment) => {
     const previous = acc[acc.length - 1];
     if (/^\d+$/.test(segment) && previous !== undefined && /\d$/.test(previous)) {

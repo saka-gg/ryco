@@ -132,7 +132,7 @@ interface StatisticsState {
  * Bump whenever {@link computeStatisticsThreadPartial} would produce different
  * partials for the same rows: persisted partials of another version are dropped.
  */
-export const STATISTICS_PARTIAL_FORMAT_VERSION = 1;
+export const STATISTICS_PARTIAL_FORMAT_VERSION = 2;
 
 /** How long the RPC waits for a refresh before it answers with the previous snapshot. */
 export const STATISTICS_STALE_WHILE_REVALIDATE_WAIT_MS = 250;

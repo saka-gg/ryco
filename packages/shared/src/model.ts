@@ -116,6 +116,26 @@ export function getModelSelectionBooleanOptionValue(
   return getProviderOptionBooleanSelectionValue(modelSelection?.options, id);
 }
 
+/** Model option ids that ask a provider for a faster, pricier speed tier. */
+export const FAST_MODE_OPTION_ID = "fastMode";
+export const ULTRAFAST_MODE_OPTION_ID = "ultrafastMode";
+
+/**
+ * The speed tier a selection asks for, or undefined for standard. Ultrafast wins when both
+ * options are set.
+ */
+export function modelSelectionSpeed(
+  modelSelection: ModelSelection | null | undefined,
+): "fast" | "ultrafast" | undefined {
+  if (getModelSelectionBooleanOptionValue(modelSelection, ULTRAFAST_MODE_OPTION_ID) === true) {
+    return "ultrafast";
+  }
+  if (getModelSelectionBooleanOptionValue(modelSelection, FAST_MODE_OPTION_ID) === true) {
+    return "fast";
+  }
+  return undefined;
+}
+
 function resolveDescriptorChoiceValue(
   descriptor: Extract<ProviderOptionDescriptor, { type: "select" }>,
   raw: string | null | undefined,

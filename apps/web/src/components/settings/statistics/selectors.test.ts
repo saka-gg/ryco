@@ -1,7 +1,13 @@
 import { ProjectId, type StatisticsDailyBucket, type StatisticsSnapshot } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { aggregateByModel, buildTimeSeries, filterBuckets, previousTotals } from "./selectors";
+import {
+  aggregateByModel,
+  aggregateCost,
+  buildTimeSeries,
+  filterBuckets,
+  previousTotals,
+} from "./selectors";
 
 const PROJECT = ProjectId.make("project-1");
 
@@ -173,6 +179,7 @@ describe("aggregateByModel", () => {
         inputTokens: 100,
         outputTokens: 10,
         totalTokens: 110,
+        costUsd: 0.0004,
       }),
       makeBucket("2026-06-26", {
         model: "gpt-5.4",
@@ -180,6 +187,7 @@ describe("aggregateByModel", () => {
         inputTokens: 100,
         outputTokens: 10,
         totalTokens: 500,
+        costUsd: 0.000225,
       }),
     ];
 
@@ -192,5 +200,53 @@ describe("aggregateByModel", () => {
     ]);
     expect(models[0]?.costUsd).toBeCloseTo(0.000225, 8);
     expect(models[1]?.costUsd).toBeCloseTo(0.0004, 8);
+  });
+});
+
+describe("node-priced costs", () => {
+  it("sums each model's bucket costs, speed buckets included", () => {
+    const models = aggregateByModel([
+      makeBucket("2026-06-26", {
+        model: "claude-opus-5-5",
+        provider: "claudeAgent",
+        inputTokens: 100,
+        totalTokens: 100,
+        costUsd: 1,
+      }),
+      makeBucket("2026-06-27", {
+        model: "claude-opus-5-5",
+        provider: "claudeAgent",
+        speed: "fast",
+        inputTokens: 100,
+        totalTokens: 100,
+        costUsd: 2,
+      }),
+    ]);
+    expect(models).toHaveLength(1);
+    expect(models[0]?.totalTokens).toBe(200);
+    expect(models[0]?.costUsd).toBe(3);
+  });
+
+  it("leaves a model unpriced when any of its usage has no price", () => {
+    const models = aggregateByModel([
+      makeBucket("2026-06-26", { model: "x", inputTokens: 10, totalTokens: 10, costUsd: 1 }),
+      makeBucket("2026-06-27", { model: "x", inputTokens: 10, totalTokens: 10 }),
+    ]);
+    expect(models[0]?.costUsd).toBeNull();
+  });
+
+  it("totals priced usage and flags unpriced usage, ignoring token-less buckets", () => {
+    expect(
+      aggregateCost([
+        makeBucket("2026-06-26", { model: "a", inputTokens: 10, totalTokens: 10, costUsd: 1.5 }),
+        makeBucket("2026-06-26", { model: "b", inputTokens: 10, totalTokens: 10 }),
+        makeBucket("2026-06-27", { model: "c" }),
+      ]),
+    ).toEqual({ usd: 1.5, hasUnpriced: true, priced: true });
+    expect(aggregateCost([makeBucket("2026-06-27", { model: "c" })])).toEqual({
+      usd: 0,
+      hasUnpriced: false,
+      priced: false,
+    });
   });
 });

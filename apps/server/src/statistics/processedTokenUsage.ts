@@ -9,6 +9,8 @@ export interface TokenActivity {
 interface Counters {
   readonly inputTokens: number;
   readonly cachedInputTokens: number;
+  /** Cache writes within `inputTokens` (0 when the payload did not report them). */
+  readonly cacheWriteInputTokens: number;
   readonly outputTokens: number;
   readonly reasoningTokens: number;
   readonly totalTokens: number;
@@ -18,7 +20,16 @@ export interface ProcessedUsageEntry extends Counters {
   readonly row: TokenActivity;
   readonly provider?: string;
   readonly model?: string;
+  readonly speed?: "fast" | "ultrafast";
   readonly approximate: boolean;
+}
+
+/** The speed tier ingestion stamped on a usage payload, if any. */
+export function statisticsSpeedOf(
+  payload: Record<string, unknown> | undefined,
+): "fast" | "ultrafast" | undefined {
+  const speed = payload?.statisticsSpeed;
+  return speed === "fast" || speed === "ultrafast" ? speed : undefined;
 }
 
 function count(value: unknown): number {
@@ -94,7 +105,8 @@ export function collectParsedProcessedTokenUsage(
     const providerValue = payload.statisticsProvider ?? providerForThread(row.threadId);
     const provider = typeof providerValue === "string" ? providerValue : undefined;
     const model = typeof payload.statisticsModel === "string" ? payload.statisticsModel : undefined;
-    const modelFields = model ? { model } : {};
+    const speed = statisticsSpeedOf(payload);
+    const modelFields = { ...(model ? { model } : {}), ...(speed ? { speed } : {}) };
     const turnKey = `${row.threadId}\0${row.turnId ?? ""}`;
     if (
       processed?.scope === "turn" ||
@@ -107,6 +119,7 @@ export function collectParsedProcessedTokenUsage(
         approximate: false,
         inputTokens: count(processed.inputTokens),
         cachedInputTokens: count(processed.cachedInputTokens),
+        cacheWriteInputTokens: count(processed.cacheWriteInputTokens),
         outputTokens: count(processed.outputTokens),
         reasoningTokens: count(processed.reasoningOutputTokens),
         totalTokens: count(processed.totalTokens),
@@ -135,6 +148,7 @@ export function collectParsedProcessedTokenUsage(
       const cumulative: Counters = {
         inputTokens: count(processed?.inputTokens),
         cachedInputTokens: count(processed?.cachedInputTokens),
+        cacheWriteInputTokens: count(processed?.cacheWriteInputTokens),
         outputTokens: count(processed?.outputTokens),
         reasoningTokens: count(processed?.reasoningOutputTokens),
         totalTokens,
@@ -151,6 +165,12 @@ export function collectParsedProcessedTokenUsage(
         cachedInputTokens: exact
           ? Math.max(0, cumulative.cachedInputTokens - (reset ? 0 : previous.cachedInputTokens))
           : count(payload.lastCachedInputTokens ?? payload.cachedInputTokens),
+        cacheWriteInputTokens: exact
+          ? Math.max(
+              0,
+              cumulative.cacheWriteInputTokens - (reset ? 0 : previous.cacheWriteInputTokens),
+            )
+          : 0,
         outputTokens: exact
           ? Math.max(0, cumulative.outputTokens - (reset ? 0 : previous.outputTokens))
           : count(payload.lastOutputTokens ?? payload.outputTokens),
@@ -171,6 +191,7 @@ export function collectParsedProcessedTokenUsage(
         totalTokens: count(payload.totalProcessedTokens),
         inputTokens: count(payload.inputTokens),
         cachedInputTokens: count(payload.cachedInputTokens),
+        cacheWriteInputTokens: 0,
         outputTokens: count(payload.outputTokens),
         reasoningTokens: count(payload.reasoningOutputTokens),
       });

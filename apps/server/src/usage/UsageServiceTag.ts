@@ -9,6 +9,7 @@
  * @module UsageServiceTag
  */
 import {
+  type StatisticsSnapshot,
   USAGE_CONTRACT_VERSION,
   type UsageReadError,
   type UsageSummary,
@@ -18,6 +19,11 @@ import { Context, Effect, type Path } from "effect";
 
 export interface UsageServiceShape {
   readonly readSummary: (input: UsageSummaryRequest) => Effect.Effect<UsageSummary, UsageReadError>;
+  /**
+   * Settings → Statistics with each bucket's `costUsd` at the rates and custom prices usage
+   * uses. Never fails: without rates the buckets stay unpriced.
+   */
+  readonly priceStatistics: (snapshot: StatisticsSnapshot) => Effect.Effect<StatisticsSnapshot>;
 }
 
 export class UsageService extends Context.Service<UsageService, UsageServiceShape>()(
@@ -42,6 +48,7 @@ export const makeEmptyUsageSummary = (input: UsageSummaryRequest): UsageSummary 
 
 export const UsageServiceTest = UsageService.of({
   readSummary: (input) => Effect.succeed(makeEmptyUsageSummary(input)),
+  priceStatistics: (snapshot) => Effect.succeed(snapshot),
 });
 
 /** Refresh stale cached rates once shortly after boot, before a summary needs them. */

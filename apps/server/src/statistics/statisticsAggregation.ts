@@ -16,6 +16,7 @@ import {
   type StatisticsProjectRef,
   type StatisticsRecentPullRequest,
   type StatisticsSnapshot,
+  type StatisticsSpeed,
   type StatisticsTokenAttribution,
   WorktreeId,
   WorktreePullRequestLink,
@@ -27,6 +28,7 @@ import {
   collectParsedProcessedTokenUsage,
   parseTokenActivityPayload,
   type ParsedTokenActivity,
+  statisticsSpeedOf,
 } from "./processedTokenUsage.ts";
 
 export const StatisticsThreadRow = Schema.Struct({
@@ -119,6 +121,7 @@ interface BucketCounters {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
+  cacheWriteInputTokens: number;
   reasoningTokens: number;
   totalTokens: number;
   turns: number;
@@ -136,6 +139,8 @@ interface MutableBucket extends BucketCounters {
   projectId: ProjectId;
   model: string;
   provider: string | undefined;
+  /** Absent for standard speed. */
+  speed?: StatisticsSpeed;
 }
 
 interface MutableSnapshotBucket extends MutableBucket {
@@ -191,6 +196,7 @@ function emptyCounters(): BucketCounters {
     inputTokens: 0,
     outputTokens: 0,
     cachedInputTokens: 0,
+    cacheWriteInputTokens: 0,
     reasoningTokens: 0,
     totalTokens: 0,
     turns: 0,
@@ -204,8 +210,27 @@ function emptyCounters(): BucketCounters {
   };
 }
 
-function bucketKey(date: string, projectId: string, model: string, provider: string | undefined) {
-  return `${date}\u0000${projectId}\u0000${provider ?? ""}\u0000${model}`;
+function bucketKey(
+  date: string,
+  projectId: string,
+  model: string,
+  provider: string | undefined,
+  speed: StatisticsSpeed | undefined,
+) {
+  return `${date}\u0000${projectId}\u0000${provider ?? ""}\u0000${model}\u0000${speed ?? ""}`;
+}
+
+/** A bucket's identity fields, with `speed` only when it is not standard. */
+function bucketIdentity(
+  date: string,
+  projectId: ProjectId,
+  model: string,
+  provider: string | undefined,
+  speed: StatisticsSpeed | undefined,
+) {
+  return speed === undefined
+    ? { date, projectId, model, provider }
+    : { date, projectId, model, provider, speed };
 }
 
 type Payload = Record<string, unknown> | undefined;
@@ -304,11 +329,12 @@ export function computeStatisticsThreadPartial(
     projectId: ProjectId,
     model: string,
     provider: string | undefined,
+    speed?: StatisticsSpeed,
   ): MutableBucket => {
-    const key = bucketKey(date, projectId, model, provider);
+    const key = bucketKey(date, projectId, model, provider, speed);
     let bucket = buckets.get(key);
     if (bucket === undefined) {
-      bucket = { date, projectId, model, provider, ...emptyCounters() };
+      bucket = { ...bucketIdentity(date, projectId, model, provider, speed), ...emptyCounters() };
       buckets.set(key, bucket);
     }
     return bucket;
@@ -329,9 +355,11 @@ export function computeStatisticsThreadPartial(
       meta.projectId,
       entry.model ?? meta.model,
       entry.provider ?? meta.provider,
+      entry.speed,
     );
     bucket.inputTokens += entry.inputTokens;
     bucket.cachedInputTokens += entry.cachedInputTokens;
+    bucket.cacheWriteInputTokens += entry.cacheWriteInputTokens;
     bucket.outputTokens += entry.outputTokens;
     bucket.reasoningTokens += entry.reasoningTokens;
     bucket.totalTokens += entry.totalTokens;
@@ -376,14 +404,23 @@ export function computeStatisticsThreadPartial(
     if (!hasExactPerTurnBreakdown(entry.payload)) continue;
     const date = dayOf(entry.row.createdAt);
     if (!meta || !date) continue;
-    addPerTurnUsage(getBucket(date, meta.projectId, meta.model, meta.provider), entry.payload);
+    addPerTurnUsage(
+      getBucket(date, meta.projectId, meta.model, meta.provider, statisticsSpeedOf(entry.payload)),
+      entry.payload,
+    );
     usedExactPerTurn = true;
   }
   if (cumulativeFallback) {
     const date = dayOf(cumulativeFallback.row.createdAt);
     if (meta && date && bestCumulativeTotalTokenCount(cumulativeFallback.payload) > 0) {
       addCumulativeUsage(
-        getBucket(date, meta.projectId, meta.model, meta.provider),
+        getBucket(
+          date,
+          meta.projectId,
+          meta.model,
+          meta.provider,
+          statisticsSpeedOf(cumulativeFallback.payload),
+        ),
         cumulativeFallback.payload,
       );
       usedCumulativeFallback = true;
@@ -450,14 +487,23 @@ export function mergeStatisticsThreadPartials(
       earliest = partial.earliest;
     }
     for (const source of partial.buckets) {
-      const key = bucketKey(source.date, source.projectId, source.model, source.provider);
+      const key = bucketKey(
+        source.date,
+        source.projectId,
+        source.model,
+        source.provider,
+        source.speed,
+      );
       let bucket = buckets.get(key);
       if (bucket === undefined) {
         bucket = {
-          date: source.date,
-          projectId: source.projectId,
-          model: source.model,
-          provider: source.provider,
+          ...bucketIdentity(
+            source.date,
+            source.projectId,
+            source.model,
+            source.provider,
+            source.speed,
+          ),
           ...emptyCounters(),
         };
         buckets.set(key, bucket);
@@ -489,15 +535,18 @@ export function normalizeStatisticsThreadPartial(
   const buckets: Array<MutableBucket> = [];
   for (const source of value.buckets) {
     if (!isRecord(source)) continue;
-    const { date, projectId, model, provider } = source;
+    const { date, projectId, model, provider, speed } = source;
     if (typeof date !== "string" || typeof projectId !== "string" || typeof model !== "string") {
       continue;
     }
     const bucket: MutableBucket = {
-      date,
-      projectId: ProjectId.make(projectId),
-      model,
-      provider: typeof provider === "string" ? provider : undefined,
+      ...bucketIdentity(
+        date,
+        ProjectId.make(projectId),
+        model,
+        typeof provider === "string" ? provider : undefined,
+        speed === "fast" || speed === "ultrafast" ? speed : undefined,
+      ),
       ...emptyCounters(),
     };
     for (const counter of COUNTER_KEYS) bucket[counter] = num(source[counter]);
@@ -532,12 +581,17 @@ export function assembleStatisticsSnapshot(input: {
     projectId: ProjectId,
     model: string,
     provider: string | undefined,
+    speed?: StatisticsSpeed,
   ): MutableSnapshotBucket => {
     addModelRef(model, provider);
-    const key = bucketKey(date, projectId, model, provider);
+    const key = bucketKey(date, projectId, model, provider, speed);
     let bucket = buckets.get(key);
     if (!bucket) {
-      bucket = { date, projectId, model, provider, ...emptyCounters(), threadsCreated: 0 };
+      bucket = {
+        ...bucketIdentity(date, projectId, model, provider, speed),
+        ...emptyCounters(),
+        threadsCreated: 0,
+      };
       buckets.set(key, bucket);
     }
     return bucket;
@@ -557,10 +611,17 @@ export function assembleStatisticsSnapshot(input: {
     if (partial.usedExactPerTurn) usedExactPerTurn = true;
     if (partial.usedCumulativeFallback) usedCumulativeFallback = true;
     for (const source of partial.buckets) {
-      const bucket = getBucket(source.date, source.projectId, source.model, source.provider);
+      const bucket = getBucket(
+        source.date,
+        source.projectId,
+        source.model,
+        source.provider,
+        source.speed,
+      );
       bucket.inputTokens += source.inputTokens;
       bucket.outputTokens += source.outputTokens;
       bucket.cachedInputTokens += source.cachedInputTokens;
+      bucket.cacheWriteInputTokens += source.cacheWriteInputTokens;
       bucket.reasoningTokens += source.reasoningTokens;
       bucket.totalTokens += source.totalTokens;
       bucket.turns += source.turns;
@@ -608,8 +669,9 @@ export function assembleStatisticsSnapshot(input: {
 
   // ── Assemble output ───────────────────────────────────────────────────
   const dailyBuckets: Array<StatisticsDailyBucket> = [];
+  const { cacheWriteInputTokens: _cacheWrites, ...totalCounters } = emptyCounters();
   const totals = {
-    ...emptyCounters(),
+    ...totalCounters,
     threads: threadMeta.size,
     projects: 0,
   };
@@ -633,7 +695,9 @@ export function assembleStatisticsSnapshot(input: {
   dailyBuckets.sort((a, b) =>
     a.date === b.date
       ? a.projectId === b.projectId
-        ? (a.provider ?? "").localeCompare(b.provider ?? "") || a.model.localeCompare(b.model)
+        ? (a.provider ?? "").localeCompare(b.provider ?? "") ||
+          a.model.localeCompare(b.model) ||
+          (a.speed ?? "").localeCompare(b.speed ?? "")
         : a.projectId.localeCompare(b.projectId)
       : a.date.localeCompare(b.date),
   );
