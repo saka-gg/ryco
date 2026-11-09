@@ -213,14 +213,21 @@ export function HomeScreen() {
   const contentInsets = useTabContentInsets();
   useTabStackHeader({
     title: collapsed ? MAIN_TABS.Chats.title : "",
-    headerLeft: () => (
-      <MachinePickerButton
-        environments={environments}
-        selected={chats.nodeScope}
-        onSelect={(environmentId) => dispatch({ type: "set-node-scope", environmentId })}
-        onManage={openMachines}
-      />
-    ),
+    // A custom item without the shared glass, so the picker draws its own avatar and pill.
+    unstable_headerLeftItems: () => [
+      {
+        type: "custom",
+        hidesSharedBackground: true,
+        element: (
+          <MachinePickerButton
+            environments={environments}
+            selected={chats.nodeScope}
+            onSelect={(environmentId) => dispatch({ type: "set-node-scope", environmentId })}
+            onManage={openMachines}
+          />
+        ),
+      },
+    ],
     headerRight: () => (
       <View className="flex-row items-center gap-1">
         <HeaderIconButton icon="magnifyingglass" accessibilityLabel="Search" onPress={openSearch} />

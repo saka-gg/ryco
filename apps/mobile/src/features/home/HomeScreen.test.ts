@@ -102,8 +102,19 @@ import { HomeScreen } from "./HomeScreen";
 
 interface HeaderOptions {
   readonly title?: string;
-  readonly headerLeft?: () => ReactElement;
+  readonly unstable_headerLeftItems?: (props: {
+    readonly tintColor?: string;
+    readonly canGoBack: boolean;
+  }) => ReadonlyArray<{
+    readonly type: string;
+    readonly element?: ReactElement;
+    readonly hidesSharedBackground?: boolean;
+  }>;
   readonly headerRight?: () => ReactElement;
+}
+
+function headerLeftItems(options: HeaderOptions) {
+  return options.unstable_headerLeftItems?.({ canGoBack: false }) ?? [];
 }
 
 function renderHeaderOptions(): HeaderOptions {
@@ -153,7 +164,11 @@ describe("Chats", () => {
   it("keeps the small title empty while the large title shows, and fills both header sides", () => {
     const options = renderHeaderOptions();
     expect(options.title).toBe("");
-    expect(findByType(options.headerLeft?.(), "MachinePickerButton")).not.toBeNull();
+    const left = headerLeftItems(options);
+    expect(left).toHaveLength(1);
+    // The picker draws its own pill, so it opts out of the bar's shared glass.
+    expect(left[0]).toMatchObject({ type: "custom", hidesSharedBackground: true });
+    expect(findByType(left[0]?.element, "MachinePickerButton")).not.toBeNull();
     expect(typeof options.headerRight).toBe("function");
   });
 
@@ -170,7 +185,7 @@ describe("Chats", () => {
 
   it("narrows to a machine from the picker and opens Machines from it", () => {
     const picker = findByType(
-      renderHeaderOptions().headerLeft?.(),
+      headerLeftItems(renderHeaderOptions())[0]?.element,
       "MachinePickerButton",
     ) as ReactElement<{
       onSelect: (environmentId: string | null) => void;

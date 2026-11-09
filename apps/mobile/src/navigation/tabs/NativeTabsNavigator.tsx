@@ -39,13 +39,19 @@ import { tabBarItemTitle } from "./mainTabsModel";
  */
 export type NativeTabStackHeaderOptions = Pick<
   NativeStackNavigationOptions,
-  "title" | "headerTitle" | "headerLeft" | "headerRight" | "headerShown"
+  | "title"
+  | "headerTitle"
+  | "headerLeft"
+  | "unstable_headerLeftItems"
+  | "headerRight"
+  | "headerShown"
 >;
 
 const FORWARDED_HEADER_RESET: Record<keyof NativeTabStackHeaderOptions, undefined> = {
   title: undefined,
   headerTitle: undefined,
   headerLeft: undefined,
+  unstable_headerLeftItems: undefined,
   headerRight: undefined,
   headerShown: undefined,
 };
