@@ -121,11 +121,11 @@ const agentControlLocksByThread = new Map<string, AgentControlDeviceLock>();
 export const AGENT_CONTROL_DEVICE_TOOL = "ryco_device";
 
 /** Added to `device_list` while Agent Control drives this session's devices. */
-export const AGENT_CONTROL_DEVICE_POINTER = `Agent Control is on for this session: drive the attached device with ${AGENT_CONTROL_DEVICE_TOOL} and request boot, attach, install, URLs or shutdown with ryco_propose_device_* (boot and attach run without asking in a Full access thread).`;
+export const AGENT_CONTROL_DEVICE_POINTER = `Agent Control is on for this session: drive the attached device with ${AGENT_CONTROL_DEVICE_TOOL} and request boot, attach, install, URLs or shutdown with ryco_propose_device_* (they run without asking in a Full access thread).`;
 
 const agentControlRefusal = (lock: AgentControlDeviceLock): string =>
   lock.agentControlDevices
-    ? `Agent Control drives devices in this session: use ${AGENT_CONTROL_DEVICE_TOOL} for input on the device attached to this thread (it asks the user once per task) and ryco_propose_device_* for boot, attach, install, URLs and shutdown.`
+    ? `Agent Control drives devices in this session: use ${AGENT_CONTROL_DEVICE_TOOL} for input on the device attached to this thread (it asks the user once per task, never in a Full access thread) and ryco_propose_device_* for boot, attach, install, URLs and shutdown (they run without asking in a Full access thread).`
     : // A Computer Use lease (OpenCode) offers no device tools at all.
       "Device tools are unavailable in this session while Agent Control runs Computer Use.";
 

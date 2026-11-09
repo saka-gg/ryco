@@ -1,4 +1,5 @@
 import {
+  AGENT_CONTROL_DEVICE_ACTION_KINDS,
   type AgentControlActionPlan,
   type AgentControlDevicePlanTarget,
   type AgentControlPrincipal,
@@ -45,9 +46,9 @@ const session = (originRuntimeMode?: RuntimeMode): AgentControlPrincipal => ({
 const plan = (kind: AgentControlActionPlan["kind"]) =>
   ({ kind, ...target }) as AgentControlActionPlan;
 
-describe("routine device lifecycle", () => {
-  it("boots and attaches without approval only for a full-access chat", () => {
-    for (const kind of ["deviceBoot", "deviceAttach"] as const) {
+describe("routine device control", () => {
+  it("runs every device change without approval only for a full-access chat", () => {
+    for (const kind of AGENT_CONTROL_DEVICE_ACTION_KINDS) {
       expect(isRoutineAgentControlAction(session("full-access"), plan(kind))).toBe(true);
       for (const mode of ["approval-required", "auto-accept-edits", "auto"] as const) {
         expect(isRoutineAgentControlAction(session(mode), plan(kind))).toBe(false);
@@ -57,17 +58,10 @@ describe("routine device lifecycle", () => {
     }
   });
 
-  it("keeps every other device change for the user, even in full access", () => {
-    for (const kind of ["deviceDetach", "deviceShutdown"] as const) {
-      expect(isRoutineAgentControlAction(session("full-access"), plan(kind))).toBe(false);
-    }
-    expect(
-      isRoutineAgentControlAction(session("full-access"), {
-        ...target,
-        kind: "deviceInstall",
-        artifactPath: "build/App.app",
-      } as AgentControlActionPlan),
-    ).toBe(false);
+  it("never lets the agent grant itself the per-task input consent", () => {
+    expect(isRoutineAgentControlAction(session("full-access"), plan("deviceControlConsent"))).toBe(
+      false,
+    );
   });
 
   it("never auto-approves for a separately paired integration", () => {

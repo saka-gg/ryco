@@ -32,9 +32,20 @@ export const isRoutineAgentControlAction = (
       );
     case "deviceBoot":
     case "deviceAttach":
-      // A Full access chat may bring up a simulator or emulator for its own work: the validator
-      // keeps the plan to the caller's own thread, project and provider, and execution rechecks
-      // the device state the agent saw. Everything else on a device stays the user's call.
+    case "deviceDetach":
+    case "deviceShutdown":
+    case "deviceInstall":
+    case "deviceLaunch":
+    case "deviceOpenUrl":
+    case "deviceTap":
+    case "deviceSwipe":
+    case "devicePressButton":
+    case "deviceStartRecording":
+    case "deviceStopRecording":
+      // A Full access chat controls simulators and emulators without asking, as it drives
+      // `ryco_device` input without a consent: the validator keeps each plan to the caller's own
+      // thread, project and provider (installs to its workspace, URLs to the safe-URL policy),
+      // and execution rechecks the device state the agent saw. Other modes ask the user.
       return principal.originRuntimeMode === "full-access";
     case "importProject":
     case "copyProjectToNode":
@@ -43,7 +54,7 @@ export const isRoutineAgentControlAction = (
       return false;
     default:
       // Includes `deviceControlConsent`: the user grants routine device input for a task,
-      // never the agent itself (a Full access chat skips asking for it in `ryco_device`).
+      // never the agent itself (a Full access chat never asks for it in `ryco_device`).
       return false;
   }
 };
