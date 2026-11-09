@@ -332,6 +332,8 @@ import type { ThreadGoalActions } from "./ThreadGoalSection";
 import {
   buildThreadHeaderMenu,
   flattenThreadHeaderMenu,
+  THREAD_HEADER_MORE_ICON,
+  THREAD_HEADER_MORE_TITLE,
   resolveThreadRename,
   type ThreadHeaderMenuAction,
   type ThreadHeaderMenuActionId,
@@ -3114,9 +3116,13 @@ export function ThreadDetailScreen(props: {
         addTaskAvailable: thread !== undefined,
         findAvailable: thread !== undefined,
         promoteChatAvailable: thread !== undefined && project !== null && isChatProject(project),
+        // The live thread, not its list row: the row's session lags a Stop.
         sessionStoppable:
+          thread !== undefined &&
           sidebarThread !== undefined &&
-          listThreadLifecycleActions(sidebarThread).some((action) => action.id === "stop-session"),
+          listThreadLifecycleActions({ ...sidebarThread, session: thread.session }).some(
+            (action) => action.id === "stop-session",
+          ),
         busy: mutationBusy,
       })
     : null;
@@ -3194,9 +3200,6 @@ export function ThreadDetailScreen(props: {
         return navigation.navigate("ThreadDevices", { environmentId, threadId });
       case "notes":
         if (checkoutParams) navigation.navigate("ProjectNotes", checkoutParams);
-        return;
-      case "more-tools":
-        // A submenu: its items run on their own.
         return;
       case "review":
         return openReview();
@@ -3415,7 +3418,6 @@ export function ThreadDetailScreen(props: {
       id: action.id,
       title: action.title,
       ...(action.subtitle ? { subtitle: action.subtitle } : {}),
-      ...(action.children ? { subactions: action.children.map(androidMenuAction) } : {}),
       attributes: {
         disabled: action.disabled ?? false,
         destructive: action.destructive ?? false,
@@ -3448,18 +3450,31 @@ export function ThreadDetailScreen(props: {
                   menu: {
                     items: headerMenu.map((section) => ({
                       type: "submenu" as const,
-                      label: "",
-                      inline: true,
-                      items: section.actions.map((action) =>
-                        action.children
-                          ? {
-                              type: "submenu" as const,
-                              label: action.title,
-                              icon: { type: "sfSymbol" as const, name: action.icon as never },
-                              items: action.children.map((child) => nativeMenuItem(child)),
-                            }
-                          : nativeMenuItem(action),
-                      ),
+                      label: section.collapsed?.title ?? "",
+                      ...(section.collapsed
+                        ? {
+                            icon: {
+                              type: "sfSymbol" as const,
+                              name: section.collapsed.icon as never,
+                            },
+                          }
+                        : { inline: true }),
+                      items: [
+                        ...section.actions.map((action) => nativeMenuItem(action)),
+                        ...(section.more && section.more.length > 0
+                          ? [
+                              {
+                                type: "submenu" as const,
+                                label: THREAD_HEADER_MORE_TITLE,
+                                icon: {
+                                  type: "sfSymbol" as const,
+                                  name: THREAD_HEADER_MORE_ICON as never,
+                                },
+                                items: section.more.map((action) => nativeMenuItem(action)),
+                              },
+                            ]
+                          : []),
+                      ],
                     })),
                   },
                 },

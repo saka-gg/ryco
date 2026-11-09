@@ -54,6 +54,8 @@ export const isThreadArchiveBlockedByTurn = (
 export const isThreadSessionLive = (thread: ThreadLifecycleSubject): boolean =>
   thread.session !== null &&
   thread.session.status !== "stopped" &&
+  // Clients read a stopped session as "closed" (`ThreadSession.status`).
+  thread.session.status !== "closed" &&
   thread.session.status !== "error";
 
 export function listThreadLifecycleActions(

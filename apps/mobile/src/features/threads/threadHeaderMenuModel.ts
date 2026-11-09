@@ -2,10 +2,11 @@ import type { ThreadHeaderModel } from "./threadHeaderModel";
 
 /**
  * The thread header's one ⋯ menu: everything the old header buttons (Review, Files, Terminal)
- * and the old "Task details" sheet offered, as a native menu in three inline groups (iOS; Android
- * menus have no inline groups, so there it is one list: `flattenThreadHeaderMenu`). The title
- * pill opens the context sheet for what is read rather than done (machine, project, branch,
- * status, cache, delegated chats).
+ * and the old "Task details" sheet offered, as a native menu. iOS: one "Workspace" submenu with
+ * every workspace tool, then the chat and state groups inline with one "More" submenu for rare
+ * items, so the menu fits on a phone screen. Android menus have no inline groups, so there it is
+ * one list (`flattenThreadHeaderMenu`). The title pill opens the context sheet for what is read
+ * rather than done (machine, project, branch, status, cache, delegated chats).
  */
 export type ThreadHeaderMenuActionId =
   | "files"
@@ -17,7 +18,6 @@ export type ThreadHeaderMenuActionId =
   | "devices"
   | "source-control"
   | "notes"
-  | "more-tools"
   | "review"
   | "pull-request"
   | "find"
@@ -44,14 +44,26 @@ export interface ThreadHeaderMenuAction {
   readonly subtitle?: string;
   readonly destructive?: boolean;
   readonly disabled?: boolean;
-  /** A submenu's items ("More tools"); its own id is never run. */
-  readonly children?: ReadonlyArray<ThreadHeaderMenuAction>;
 }
 
 export interface ThreadHeaderMenuSection {
   readonly id: "workspace" | "chat" | "state";
   readonly actions: ReadonlyArray<ThreadHeaderMenuAction>;
+  /**
+   * Rarer actions behind one "More" row at the end of the group, so the menu fits on a phone
+   * screen without scrolling (a scrolled menu hides its last rows).
+   */
+  readonly more?: ReadonlyArray<ThreadHeaderMenuAction>;
+  /**
+   * The whole group sits behind one row with this title and SF Symbol (iOS). The workspace tools
+   * do: there are many of them, and the menu must fit on a phone screen without scrolling.
+   */
+  readonly collapsed?: { readonly title: string; readonly icon: string };
 }
+
+/** The "More" row's title and SF Symbol. */
+export const THREAD_HEADER_MORE_TITLE = "More";
+export const THREAD_HEADER_MORE_ICON = "ellipsis.circle";
 
 export interface ThreadHeaderMenuInput {
   readonly model: ThreadHeaderModel;
@@ -87,9 +99,6 @@ export interface ThreadHeaderMenuInput {
   /** A rename, stop, archive and the like cannot be sent now (busy, cached or offline). */
   readonly busy: boolean;
 }
-
-/** The workspace group's longest inline list; past it the extra tools collapse into one submenu. */
-export const WORKSPACE_GROUP_MAX = 7;
 
 export function buildThreadHeaderMenu(
   input: ThreadHeaderMenuInput,
@@ -129,33 +138,22 @@ export function buildThreadHeaderMenu(
     });
   }
 
-  // The less frequent tools join the group while it stays short, else sit behind "More tools".
-  const tools: ThreadHeaderMenuAction[] = [];
+  // The node's workspace tools, in the same Workspace submenu.
   if (input.tools?.findInFiles) {
-    tools.push({ id: "find-in-files", title: "Find in files", icon: "text.magnifyingglass" });
+    workspace.push({ id: "find-in-files", title: "Find in files", icon: "text.magnifyingglass" });
   }
-  if (input.tools?.scripts) tools.push({ id: "scripts", title: "Run script", icon: "play" });
+  if (input.tools?.scripts) workspace.push({ id: "scripts", title: "Run script", icon: "play" });
   if (input.tools?.servers) {
-    tools.push({ id: "servers", title: "Servers & preview", icon: "safari" });
+    workspace.push({ id: "servers", title: "Servers & preview", icon: "safari" });
   }
-  if (input.tools?.notes) tools.push({ id: "notes", title: "Notes", icon: "note.text" });
+  if (input.tools?.notes) workspace.push({ id: "notes", title: "Notes", icon: "note.text" });
   if (input.tools?.devices) {
-    tools.push({ id: "devices", title: "Simulators", icon: "iphone.gen3" });
-  }
-  if (workspace.length + tools.length <= WORKSPACE_GROUP_MAX) workspace.push(...tools);
-  else if (tools.length > 0) {
-    workspace.push({
-      id: "more-tools",
-      title: "More tools",
-      icon: "ellipsis.circle",
-      children: tools,
-    });
+    workspace.push({ id: "devices", title: "Simulators", icon: "iphone.gen3" });
   }
 
   const chat: ThreadHeaderMenuAction[] = [];
   if (input.findAvailable) {
     chat.push({ id: "find", title: "Find in chat", icon: "magnifyingglass" });
-    chat.push({ id: "artifacts", title: "Artifacts", icon: "square.stack" });
   }
   if (input.sideChatAvailable) {
     chat.push({ id: "side-chat", title: "Side chat", icon: "bubble.left.and.bubble.right" });
@@ -172,16 +170,19 @@ export function buildThreadHeaderMenu(
       disabled: busy,
     });
   }
+  // Rarer actions, behind "More" at the end of the menu.
+  const more: ThreadHeaderMenuAction[] = [];
+  if (input.findAvailable) more.push({ id: "artifacts", title: "Artifacts", icon: "square.stack" });
   if (input.addTaskAvailable) {
-    chat.push({ id: "add-task", title: "Add to Tasks", icon: "checklist" });
+    more.push({ id: "add-task", title: "Add to Tasks", icon: "checklist" });
   }
-  chat.push(
+  more.push(
     model.copyReference.kind === "pull-request"
       ? { id: "copy-reference", title: "Copy pull request link", icon: "link" }
       : { id: "copy-reference", title: "Copy task ID", icon: "doc.on.doc" },
   );
   if (model.copyReference.kind === "pull-request") {
-    chat.push({ id: "copy-task-id", title: "Copy task ID", icon: "doc.on.doc" });
+    more.push({ id: "copy-task-id", title: "Copy task ID", icon: "doc.on.doc" });
   }
 
   const state: ThreadHeaderMenuAction[] = [];
@@ -196,10 +197,10 @@ export function buildThreadHeaderMenu(
     });
   }
   if (!turnRunning && input.sessionStoppable) {
-    state.push({ id: "stop-session", title: "Stop session", icon: "power", disabled: busy });
+    more.push({ id: "stop-session", title: "Stop session", icon: "power", disabled: busy });
   }
   if (model.compactAction) {
-    state.push({
+    more.push({
       id: "compact",
       title: model.compactAction.label,
       icon: "arrow.down.right.and.arrow.up.left",
@@ -226,25 +227,31 @@ export function buildThreadHeaderMenu(
     destructive: archive,
     disabled: busy || turnRunning,
   });
-  state.push({ id: "delete", title: "Delete…", icon: "trash", destructive: true, disabled: busy });
+  more.push({ id: "delete", title: "Delete…", icon: "trash", destructive: true, disabled: busy });
 
   const sections: ThreadHeaderMenuSection[] = [];
-  if (workspace.length > 0) sections.push({ id: "workspace", actions: workspace });
+  if (workspace.length > 0) {
+    sections.push({
+      id: "workspace",
+      actions: workspace,
+      collapsed: { title: "Workspace", icon: "folder" },
+    });
+  }
   sections.push({ id: "chat", actions: chat });
-  sections.push({ id: "state", actions: state });
+  sections.push({ id: "state", actions: state, more });
   return sections;
 }
 
 /**
  * The menu as one list, for Android. `@react-native-menu/menu` ignores `displayInline` there and
  * turns every group into a submenu, which with an empty title reads as a blank row; Android's
- * popup menu has no inline groups to begin with, so the groups are concatenated in order. "More
- * tools" stays one titled submenu.
+ * popup menu has no inline groups to begin with, so the groups are concatenated in order, each
+ * group's "More" rows after it.
  */
 export function flattenThreadHeaderMenu(
   sections: ReadonlyArray<ThreadHeaderMenuSection>,
 ): ReadonlyArray<ThreadHeaderMenuAction> {
-  return sections.flatMap((section) => section.actions);
+  return sections.flatMap((section) => [...section.actions, ...(section.more ?? [])]);
 }
 
 /** The title a rename saves: trimmed, or null when it is empty or unchanged (nothing to send). */
