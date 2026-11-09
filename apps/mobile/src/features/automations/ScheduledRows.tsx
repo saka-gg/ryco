@@ -168,6 +168,8 @@ export function WaitingRunRow(props: {
   readonly waiting: DueDialogRow & { readonly place: string | null };
   readonly nowMs: number;
   readonly first: boolean;
+  /** Why this device may not decide it now (`scheduleAccessOf`), or null. */
+  readonly readOnlyReason: string | null;
   readonly onOpen: () => void;
 }) {
   const { waiting } = props;
@@ -208,17 +210,20 @@ export function WaitingRunRow(props: {
           <DecisionButton
             label="Reject"
             busy={pending === "reject"}
-            disabled={pending !== null}
+            disabled={pending !== null || props.readOnlyReason !== null}
             onPress={() => void decide({ ...target, proposalId }, "reject")}
           />
           <DecisionButton
             label="Run now"
             primary
             busy={pending === "accept"}
-            disabled={pending !== null}
+            disabled={pending !== null || props.readOnlyReason !== null}
             onPress={() => void decide({ ...target, proposalId }, "accept")}
           />
         </View>
+      ) : null}
+      {props.readOnlyReason !== null ? (
+        <Text className="text-xs text-foreground-muted">{props.readOnlyReason}</Text>
       ) : null}
       {error ? <Text className="text-xs text-danger-foreground">{error}</Text> : null}
     </View>
@@ -233,6 +238,8 @@ export function MissedRunsNotice(props: {
   readonly missed: ScheduledMissedRuns;
   readonly nowMs: number;
   readonly showMachine: boolean;
+  /** Why this device may not run it now (`scheduleAccessOf`), or null. */
+  readonly readOnlyReason: string | null;
 }) {
   const { missed } = props;
   const view = missedRunsNoticeView(missed.runs, {
@@ -268,7 +275,7 @@ export function MissedRunsNotice(props: {
             label="Run now"
             primary
             busy={pending === "accept"}
-            disabled={pending !== null}
+            disabled={pending !== null || props.readOnlyReason !== null}
             onPress={() =>
               void decide(
                 {
@@ -282,6 +289,9 @@ export function MissedRunsNotice(props: {
           />
         ) : null}
       </View>
+      {props.readOnlyReason !== null ? (
+        <Text className="text-xs text-foreground-muted">{props.readOnlyReason}</Text>
+      ) : null}
       {error ? <Text className="text-xs text-danger-foreground">{error}</Text> : null}
     </View>
   );

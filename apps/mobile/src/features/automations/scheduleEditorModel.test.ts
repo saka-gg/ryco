@@ -1,4 +1,5 @@
-import type { ProjectId, ServerProvider } from "@ryco/contracts";
+import { definitionFromDraft, type ScheduleRow } from "@ryco/client-runtime/state/agentControl";
+import type { AgentControlAutomation, ProjectId, ServerProvider } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -119,5 +120,50 @@ describe("the phone's schedule editor", () => {
     expect(scheduleEffortChoices(providers, haiku.modelSelection)).toBeNull();
     const back = withModelChoice(haiku, providers, "claude\u001fclaude-sonnet-5-5");
     expect(back.modelSelection.options).toEqual([{ id: "effort", value: "medium" }]);
+  });
+
+  it("leaves a local schedule's branch to the node when it is switched to a worktree", () => {
+    const definition = {
+      execution: {
+        projectId: PROJECT,
+        title: "Nightly",
+        prompt: "Check things.",
+        modelSelection: { instanceId: "claude", model: "claude-sonnet-5-5" },
+        runtimeMode: "approval-required",
+        envMode: "local",
+      },
+      schedule: {
+        kind: "fixed-interval",
+        startsAt: new Date(NOW_MS + 60 * 60_000).toISOString(),
+        intervalMs: 24 * 60 * 60_000,
+        endsAt: new Date(NOW_MS + 20 * 24 * 60 * 60_000).toISOString(),
+      },
+      enabled: true,
+    };
+    const automation = {
+      automationId: "a-local",
+      projectId: PROJECT,
+      definition,
+      revision: 1,
+      enabled: true,
+      cancelled: false,
+      nextRunAt: definition.schedule.startsAt,
+    } as unknown as AgentControlAutomation;
+    const row = {
+      id: "a-local",
+      automation,
+      proposal: null,
+      lapsed: null,
+    } as unknown as ScheduleRow;
+    const opening = scheduleEditorOpening({
+      mode: "edit",
+      projectId: PROJECT,
+      row,
+      providers,
+      nowMs: NOW_MS,
+    });
+    expect(opening?.draft.baseRef).toBe("");
+    const saved = definitionFromDraft({ ...opening!.draft, envMode: "worktree" });
+    expect(saved.execution).not.toHaveProperty("baseRef");
   });
 });

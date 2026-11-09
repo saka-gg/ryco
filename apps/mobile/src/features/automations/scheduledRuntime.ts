@@ -22,6 +22,7 @@ import { create } from "zustand";
 import { readEnvironmentApi } from "../../connection/environmentApi";
 import { uuidv4 } from "../../lib/uuid";
 import { useAgentControlStore } from "../../state/agentControlRuntime";
+import { readEnvironmentMutationReady } from "../../state/environmentMutationReady";
 import { changedAutomationProjects } from "./scheduledModel";
 
 /** Said when the machine has no connection to send a change through. */
@@ -108,7 +109,9 @@ export async function sendScheduleCommand(
   draft: AutomationCommandDraft,
 ): Promise<ScheduleActionResult> {
   const api = readEnvironmentApi(environmentId)?.automationCentre;
-  if (!api) return { ok: false, error: SCHEDULE_RECONNECT };
+  // The screens gate on `scheduleAccessOf`; this holds when one acted on a stale render.
+  if (!api || !readEnvironmentMutationReady(environmentId))
+    return { ok: false, error: SCHEDULE_RECONNECT };
   const result = await sendAutomationCommand({
     ids: requestIds,
     command: (command) => api.command(command),
@@ -126,7 +129,8 @@ export async function decideScheduleProposal(input: {
   readonly decision: "accept" | "reject";
 }): Promise<ScheduleActionResult> {
   const api = readEnvironmentApi(input.environmentId)?.agentControl;
-  if (!api) return { ok: false, error: SCHEDULE_RECONNECT };
+  if (!api || !readEnvironmentMutationReady(input.environmentId))
+    return { ok: false, error: SCHEDULE_RECONNECT };
   try {
     await (input.decision === "accept"
       ? api.acceptProposal({ proposalId: input.proposalId })

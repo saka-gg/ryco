@@ -3,12 +3,11 @@ import {
   subscribeEnvironmentServerConfigs,
 } from "./environmentServerConfigs";
 import { createMobileConnectionRegistry } from "../runtime/bootstrap";
+import { readEnvironmentMutationReady, readEnvironmentShellLive } from "./environmentMutationReady";
 import { useEffect } from "react";
 
 import {
   appAtomRegistry,
-  getWsConnectionStatusForEnvironment,
-  getWsConnectionUiState,
   wsConnectionOpenedCountAtom,
   wsConnectionStatusAtom,
 } from "@ryco/client-runtime/rpc";
@@ -50,12 +49,7 @@ import {
 import { isClaudeResumeReviewEnabled } from "./preferencesStore";
 import { buildQueuedThreadMessageAttachments } from "./queuedThreadMessageAttachments";
 import type { QueuedThreadMessage } from "./threadOutboxModel";
-import {
-  selectEnvironmentShellLive,
-  selectSubscribedClaudeReviewState,
-  selectThreadByRef,
-  useStore,
-} from "./threadsRuntime";
+import { selectSubscribedClaudeReviewState, selectThreadByRef, useStore } from "./threadsRuntime";
 import { useWsConnectionOpenedCount } from "../rpc/wsConnectionState";
 
 // §3-14: dispatch a queued turn for an EXISTING thread through the runtime send
@@ -132,18 +126,12 @@ export async function sendQueuedThreadMessage(
 export function readThreadOutboxEnvironment(
   environmentId: ScopedThreadRef["environmentId"],
 ): QueueEnvironmentReadiness {
-  const state = useStore.getState();
-  // Wave 2: rows hydrated from the snapshot cache (or demoted after a
-  // disconnect) are last-known state, not evidence of what the node holds now.
-  // The socket can open one RTT before the live shell snapshot lands, and in
-  // that window a cached idle row would read as "exists, not busy" and
-  // dispatch a queued message into a thread that is actually mid-turn.
-  const shellLive = selectEnvironmentShellLive(state, environmentId);
-  const connected =
-    getWsConnectionUiState(getWsConnectionStatusForEnvironment(environmentId)) === "connected";
+  // Readiness is the shared reading (`environmentMutationReady.ts`): cached rows are not
+  // evidence of what the node holds now.
+  const shellLive = readEnvironmentShellLive(environmentId);
   return {
     shellLive,
-    mutationReady: shellLive && connected,
+    mutationReady: readEnvironmentMutationReady(environmentId),
     // A node that keeps follow-up queues itself takes the outbox's messages into its queue.
     ...(readServerFollowUpQueueSupported(environmentId) ? { serverQueue: true } : {}),
   };

@@ -10,6 +10,7 @@ import { EmptyState } from "../../components/EmptyState";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { openSchedule, openScheduleEditor } from "./scheduledNavigation";
 import { MissedRunsNotice, ScheduleListRow, WaitingRunRow } from "./ScheduledRows";
+import { useScheduleAccess } from "./scheduleAccess";
 import { ScheduledQueueSync, useScheduledTasks, type ScheduledMachine } from "./useScheduledTasks";
 
 type ScheduledRouteScreenProps = StaticScreenProps<{
@@ -93,6 +94,7 @@ export function ScheduledRouteScreen(props: ScheduledRouteScreenProps) {
     }),
     [params.environmentId, params.projectId],
   );
+  const accessOf = useScheduleAccess();
   const { list, machines, loading, nowMs, refresh } = useScheduledTasks({
     filter,
     active: focused,
@@ -145,7 +147,12 @@ export function ScheduledRouteScreen(props: ScheduledRouteScreenProps) {
       {focused ? <ScheduledQueueSync machines={machines} /> : null}
       {list.missed.map((missed) => (
         <View key={missed.environmentId} className="mx-4 mb-3">
-          <MissedRunsNotice missed={missed} nowMs={nowMs} showMachine={machines.length > 1} />
+          <MissedRunsNotice
+            missed={missed}
+            nowMs={nowMs}
+            showMachine={machines.length > 1}
+            readOnlyReason={accessOf(missed.environmentId).reason}
+          />
         </View>
       ))}
       {list.waiting.length > 0 ? (
@@ -159,6 +166,7 @@ export function ScheduledRouteScreen(props: ScheduledRouteScreenProps) {
                 key={waiting.key}
                 waiting={waiting}
                 nowMs={nowMs}
+                readOnlyReason={accessOf(waiting.environmentId).reason}
                 first={index === 0}
                 onOpen={() =>
                   openSchedule(navigation, {

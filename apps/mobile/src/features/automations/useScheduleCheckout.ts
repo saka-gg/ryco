@@ -25,6 +25,7 @@ import {
   useScheduledEntries,
 } from "./scheduledRuntime";
 import { useTaskMachines } from "../tasks/useMachineTasks";
+import { useScheduleAccess } from "./scheduleAccess";
 
 const NO_PROVIDERS: ReadonlyArray<ServerProvider> = [];
 const NO_PROPOSALS: ReadonlyArray<AgentControlProposalView> = [];
@@ -43,8 +44,15 @@ export interface ScheduleCheckout {
   readonly queueProposals: ReadonlyArray<AgentControlProposalView>;
   /** Expired or failed proposals dismissed this session. */
   readonly dismissed: ReadonlySet<AgentControlProposalId>;
-  /** Connected now: changes can be sent. */
+  /** Connected now: its schedules can be read. */
   readonly connected: boolean;
+  /**
+   * This device may change its schedules and decide their proposals now (owner, connected,
+   * writes synchronized: `scheduleAccessOf`).
+   */
+  readonly editable: boolean;
+  /** Why changes are off, or null when they are on. */
+  readonly readOnlyReason: string | null;
   readonly nowMs: number;
   readonly refresh: () => void;
 }
@@ -62,6 +70,7 @@ export function useScheduleCheckout(
   const configs = useEnvironmentServerConfigs();
   const config = configs.get(environmentId);
   const connected = machine?.connected ?? false;
+  const access = useScheduleAccess()(environmentId);
   useAgentControlSync(environmentId, connected && config?.settings.agentControl.enabled !== false);
   const project = useStore(
     useShallow((state) =>
@@ -123,6 +132,8 @@ export function useScheduleCheckout(
     queueProposals,
     dismissed,
     connected,
+    editable: access.editable,
+    readOnlyReason: access.reason,
     nowMs,
     refresh: () => requestScheduled([{ environmentId, projectId }], { fresh: true }),
   };

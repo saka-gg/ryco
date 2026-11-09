@@ -312,7 +312,7 @@ function Editor(props: {
   ].filter((message): message is string => typeof message === "string" && message.length > 0);
 
   const save = async () => {
-    if (saving) return;
+    if (saving || !checkout.editable) return;
     const current = validateScheduleDraft(draft, {
       nowMs: Date.now(),
       snapshot: checkout.snapshot,
@@ -363,14 +363,14 @@ function Editor(props: {
             accessibilityRole="button"
             accessibilityLabel="Save for approval"
             hitSlop={8}
-            disabled={!checkout.connected}
+            disabled={!checkout.editable}
             onPress={() => void save()}
             className="px-1 active:opacity-60"
           >
             <Text
               className={cn(
                 "text-[16px] font-ryco-bold",
-                checkout.connected ? "text-primary" : "text-foreground-muted",
+                checkout.editable ? "text-primary" : "text-foreground-muted",
               )}
             >
               Save
@@ -651,8 +651,8 @@ function Editor(props: {
         <Text className="px-6 pt-2 text-[13px] text-danger-foreground">{refused}</Text>
       ) : null}
       <Text className="px-6 pt-3 text-[13px] text-foreground-muted">
-        {!checkout.connected
-          ? "Reconnect to this machine to save."
+        {checkout.readOnlyReason !== null
+          ? checkout.readOnlyReason
           : `${props.opening.isNew ? "Nothing runs" : "Nothing changes"} until you approve it. Saving proposes it to ${checkout.machineLabel}.`}
       </Text>
       <Text className="px-6 pt-1 text-[12px] text-foreground-tertiary">

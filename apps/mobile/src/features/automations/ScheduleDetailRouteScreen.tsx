@@ -139,14 +139,14 @@ function ProposalBlock(props: {
         <DecisionButton
           label={rejectProposalLabel(proposal.kind)}
           busy={pending === "reject"}
-          disabled={pending !== null || !checkout.connected}
+          disabled={pending !== null || !checkout.editable}
           onPress={() => void decide(target, "reject")}
         />
         <DecisionButton
           label={approveProposalLabel(proposal.kind)}
           primary
           busy={pending === "accept"}
-          disabled={pending !== null || !checkout.connected}
+          disabled={pending !== null || !checkout.editable}
           onPress={() => void decide(target, "accept")}
         />
       </View>
@@ -182,7 +182,7 @@ function DueRunBlock(props: { readonly checkout: ScheduleCheckout; readonly item
           <DecisionButton
             label="Reject"
             busy={pending === "reject"}
-            disabled={pending !== null || !checkout.connected}
+            disabled={pending !== null || !checkout.editable}
             onPress={() =>
               void decide(
                 {
@@ -198,7 +198,7 @@ function DueRunBlock(props: { readonly checkout: ScheduleCheckout; readonly item
             label="Run now"
             primary
             busy={pending === "accept"}
-            disabled={pending !== null || !checkout.connected}
+            disabled={pending !== null || !checkout.editable}
             onPress={() =>
               void decide(
                 {
@@ -344,7 +344,7 @@ export function ScheduleDetailRouteScreen(props: ScheduleDetailRouteScreenProps)
       }).filter((proposal) => proposal.automationId === row.id)
     : [];
   const scheduleRows = checkout.group?.scheduleRows ?? [];
-  const changesOpen = automation !== null && row.proposal === null && checkout.connected;
+  const changesOpen = automation !== null && row.proposal === null && checkout.editable;
 
   // A proposed change shows as the schedule's tag and its approval card once it lands.
   const run = async (key: string, draft: AutomationCommandDraft) => {
@@ -423,6 +423,9 @@ export function ScheduleDetailRouteScreen(props: ScheduleDetailRouteScreenProps)
         <Text className="text-[15px] text-foreground">
           {`${detailVerb(row.state)} ${phrase(def.schedule, nowMs)}.`}
         </Text>
+        {checkout.readOnlyReason !== null ? (
+          <Text className="text-xs text-foreground-muted">{checkout.readOnlyReason}</Text>
+        ) : null}
       </View>
 
       <DueRunBlock checkout={checkout} item={item} />
@@ -457,7 +460,7 @@ export function ScheduleDetailRouteScreen(props: ScheduleDetailRouteScreenProps)
               label="Propose again"
               primary
               busy={false}
-              disabled={!checkout.connected}
+              disabled={!checkout.editable}
               onPress={() =>
                 openScheduleEditor(navigation, {
                   mode: "repropose",
@@ -535,8 +538,8 @@ export function ScheduleDetailRouteScreen(props: ScheduleDetailRouteScreenProps)
         <SettingsSection
           {...(row.proposal
             ? { footer: "Decide the change waiting above before proposing another." }
-            : !checkout.connected
-              ? { footer: "Reconnect to this machine to change the schedule." }
+            : checkout.readOnlyReason !== null
+              ? { footer: checkout.readOnlyReason }
               : { footer: "Every change waits for your approval before it applies." })}
         >
           <SettingsRow

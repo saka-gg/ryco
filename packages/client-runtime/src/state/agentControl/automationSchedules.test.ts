@@ -1123,6 +1123,12 @@ describe("drafts", () => {
     expect(definitionFromDraft({ ...localDraft, envMode: "worktree" }).execution.baseRef).toBe(
       "master",
     );
+    // "" leaves the branch to the node: a switch to a worktree names none (not "main").
+    const nodeDefault = draftOfLatest(automation("a-local", local), NOW, { defaultBaseRef: "" });
+    expect(nodeDefault.baseRef).toBe("");
+    expect(
+      definitionFromDraft({ ...nodeDefault, envMode: "worktree" }).execution,
+    ).not.toHaveProperty("baseRef");
   });
 
   it("starts a blank draft tomorrow at 09:00, every 24 hours, for 30 days", () => {

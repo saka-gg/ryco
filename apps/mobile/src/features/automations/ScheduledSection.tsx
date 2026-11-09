@@ -9,6 +9,7 @@ import { useThemeColor } from "../../lib/useThemeColor";
 import { scheduledPreview } from "./scheduledModel";
 import { openSchedule, openScheduledList } from "./scheduledNavigation";
 import { MissedRunsNotice, ScheduleListRow, WaitingRunRow } from "./ScheduledRows";
+import { useScheduleAccess } from "./scheduleAccess";
 import { ScheduledQueueSync, useScheduledTasks } from "./useScheduledTasks";
 
 /** Schedules previewed in the Tasks tab besides the runs waiting for approval. */
@@ -27,6 +28,7 @@ export function ScheduledSection(props: {
 }) {
   const navigation = useNavigation();
   const { environmentId, projectId } = props;
+  const accessOf = useScheduleAccess();
   const { list, machines, nowMs } = useScheduledTasks({
     filter: { environmentId, projectId },
     active: props.focused,
@@ -63,7 +65,12 @@ export function ScheduledSection(props: {
       </View>
       {list.missed.map((missed) => (
         <View key={missed.environmentId} className="mx-4">
-          <MissedRunsNotice missed={missed} nowMs={nowMs} showMachine={machines.length > 1} />
+          <MissedRunsNotice
+            missed={missed}
+            nowMs={nowMs}
+            showMachine={machines.length > 1}
+            readOnlyReason={accessOf(missed.environmentId).reason}
+          />
         </View>
       ))}
       <View className="mx-4 overflow-hidden rounded-2xl bg-card">
@@ -72,6 +79,7 @@ export function ScheduledSection(props: {
             key={waiting.key}
             waiting={waiting}
             nowMs={nowMs}
+            readOnlyReason={accessOf(waiting.environmentId).reason}
             first={index === 0}
             onOpen={() =>
               openSchedule(navigation, {
