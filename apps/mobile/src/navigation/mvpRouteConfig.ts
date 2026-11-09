@@ -242,6 +242,37 @@ export const MVP_ROOT_ROUTES = {
     },
     android: { presentation: "card" },
   },
+  /** Every schedule (scheduled task) the phone reaches, by project; the Tasks tab opens it. */
+  Scheduled: {
+    linking: "todo/scheduled",
+    overlay: false,
+    headerPreset: "glass",
+    headerAction: "back",
+    ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
+  /** One schedule: approvals, when it runs, what it does, its actions and run history. */
+  ScheduleDetail: {
+    linking: "todo/scheduled/:environmentId/:projectId/:automationId",
+    overlay: false,
+    headerPreset: "glass",
+    headerAction: "back",
+    ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
+  /** The schedule editor: a new schedule, a change, or an expired proposal proposed again. */
+  ScheduleEditor: {
+    linking: "todo/schedule-editor/:environmentId/:projectId/:mode/:automationId?",
+    overlay: true,
+    headerPreset: "sheet-solid",
+    headerAction: "close",
+    ios: {
+      presentation: "formSheet",
+      sheetAllowedDetents: [0.94],
+      sheetGrabberVisible: true,
+    },
+    android: { presentation: "card" },
+  },
   Thread: {
     linking: THREAD,
     overlay: false,

@@ -24,6 +24,7 @@ import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
 import { EmptyState } from "../../components/EmptyState";
 import { cn } from "../../lib/cn";
+import { ScheduledSection } from "../automations/ScheduledSection";
 import { useThemeColor } from "../../lib/useThemeColor";
 import {
   SwipeableScrollGateProvider,
@@ -610,6 +611,13 @@ export function TasksTabScreen() {
       {readError !== null && !firstRead ? (
         <Text className="px-5 text-xs text-danger-foreground">{readError.message}</Text>
       ) : null}
+      {searching ? null : (
+        <ScheduledSection
+          environmentId={filterMachine?.environmentId ?? null}
+          projectId={projectFilter}
+          focused={focused}
+        />
+      )}
     </View>
   );
 

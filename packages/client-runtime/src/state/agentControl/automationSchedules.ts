@@ -320,7 +320,9 @@ function failureWords(reason: string, detail: string): string | null {
  * (the lab's "The first run time passed before approval…"), else the
  * server's own detail; null unless the proposal failed.
  */
-export function scheduleProposalFailure(proposal: AgentControlProposal): string | null {
+export function scheduleProposalFailure(
+  proposal: Pick<AgentControlProposalView, "status" | "result">,
+): string | null {
   if (proposal.status !== "failed") return null;
   const result = proposal.result;
   const message = result?.outcome === "failed" ? result.error.message.trim() : "";

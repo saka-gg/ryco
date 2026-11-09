@@ -235,4 +235,21 @@ describe("createAutomationCountsLoader", () => {
     await Promise.resolve();
     expect(loader.getState().entries.get(`${LOCAL}\0p-local`)?.status).toBe("unavailable");
   });
+
+  it("reads once more after the read in flight when asked afresh meanwhile", async () => {
+    const first = deferred<AutomationCentreSnapshot>();
+    const second = deferred<AutomationCentreSnapshot>();
+    const pending = [first, second];
+    const loader = createAutomationCountsLoader({ readSnapshot: () => pending.shift()!.promise });
+    loader.request([local]);
+    loader.request([local], { maxAgeMs: 0 });
+    first.resolve(snapshot({ automations: [{ id: "before" }] }));
+    await Promise.resolve();
+    expect(loader.getState().loading).toBe(true);
+    second.resolve(snapshot({ automations: [{ id: "a" }, { id: "b" }] }));
+    await Promise.resolve();
+    const entry = loader.getState().entries.get(`${LOCAL}\0p-local`);
+    expect(entry?.status === "ready" ? entry.snapshot.automations.length : null).toBe(2);
+    expect(loader.getState().loading).toBe(false);
+  });
 });
