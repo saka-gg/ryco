@@ -74,6 +74,13 @@ export interface ReviewDraftStoreState {
   markHead(key: string, headSha: string): void;
   clear(key: string): void;
   /**
+   * Remove every draft written against one environment's checkouts: the node
+   * was forgotten, the account signed out, or the device cache was cleared.
+   */
+  clearEnvironment(environmentId: string): void;
+  /** Remove every draft. */
+  clearAll(): void;
+  /**
    * Remove exactly what the host accepted: the submitted comments, and the
    * summary/verdict only if they still equal what was sent (the form stays
    * editable while the request is in flight).
@@ -124,6 +131,16 @@ export function reviewDraftKey(input: {
   readonly number: number;
 }): string {
   return JSON.stringify([input.environmentId, input.cwd, input.number]);
+}
+
+/** The environment a `reviewDraftKey` belongs to; null for a key in another shape. */
+export function reviewDraftKeyEnvironment(key: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(key);
+    return Array.isArray(parsed) && typeof parsed[0] === "string" ? parsed[0] : null;
+  } catch {
+    return null;
+  }
 }
 
 export function selectReviewDraft(
@@ -373,6 +390,26 @@ let fallbackIdSequence = 0;
 
 export type ReviewDraftStore = UseBoundStore<StoreApi<ReviewDraftStoreState>>;
 
+/**
+ * Resolves once a store with storage has read it back (at once for a
+ * memory-only store). Clear after this: a clear that lands before hydration
+ * would be undone when the stored drafts merge in.
+ */
+export function whenReviewDraftsHydrated(store: ReviewDraftStore): Promise<void> {
+  const persisted = (
+    store as {
+      persist?: { hasHydrated: () => boolean; onFinishHydration: (fn: () => void) => () => void };
+    }
+  ).persist;
+  if (persisted === undefined || persisted.hasHydrated()) return Promise.resolve();
+  return new Promise((resolve) => {
+    const unsubscribe = persisted.onFinishHydration(() => {
+      unsubscribe();
+      resolve();
+    });
+  });
+}
+
 export function createReviewDraftStore(
   options: CreateReviewDraftStoreOptions = {},
 ): ReviewDraftStore {
@@ -475,6 +512,17 @@ export function createReviewDraftStore(
           const { [key]: _removed, ...rest } = state.draftsByKey;
           return { draftsByKey: rest };
         }),
+      clearEnvironment: (environmentId) =>
+        set((state) => {
+          const kept = Object.entries(state.draftsByKey).filter(
+            ([key]) => reviewDraftKeyEnvironment(key) !== environmentId,
+          );
+          return kept.length === Object.keys(state.draftsByKey).length
+            ? state
+            : { draftsByKey: Object.fromEntries(kept) };
+        }),
+      clearAll: () =>
+        set((state) => (Object.keys(state.draftsByKey).length === 0 ? state : { draftsByKey: {} })),
       clearSubmitted: (key, submitted) => {
         const ids = new Set(submitted.commentIds);
         updateDraft(key, (draft) => {

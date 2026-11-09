@@ -1,10 +1,14 @@
 import { MenuView, type MenuAction, type NativeActionEvent } from "@react-native-menu/menu";
-import { EMPTY_REVIEW_DRAFT } from "@ryco/client-runtime/state/pull-request-review";
+import {
+  EMPTY_REVIEW_DRAFT,
+  selectReviewDraft,
+} from "@ryco/client-runtime/state/pull-request-review";
 import type { SourceControlChangeRequestMergeMethod } from "@ryco/contracts";
 import * as Haptics from "expo-haptics";
 import { useState } from "react";
 import { Alert, Modal, Pressable, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useShallow } from "zustand/react/shallow";
 
 import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
@@ -13,6 +17,11 @@ import { cn } from "../../lib/cn";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { MergeSheet, ReviewSheet } from "./PullRequestActionsPanel";
 import { pullRequestActionBarModel } from "./pullRequestActionBarModel";
+import {
+  describeOutdatedDraftComments,
+  splitDraftCommentsByHead,
+} from "./pullRequestFileReviewModel";
+import { usePullRequestReviewDrafts } from "./pullRequestReviewDrafts";
 import {
   shownPullRequestActionSheet,
   type PullRequestActionSheet,
@@ -76,6 +85,17 @@ export function PullRequestActionBar(props: {
   const icon = useThemeColor("--color-primary-foreground") as string;
   const barTint = useThemeColor("--color-glass-surface") as string;
   const [openedSheet, setSheet] = useState<PullRequestActionSheet | null>(null);
+  const draftKey = control.draftKey;
+  const draftComments = usePullRequestReviewDrafts(
+    useShallow((state) => {
+      const comments = draftKey === null ? [] : selectReviewDraft(state, draftKey).comments;
+      const byHead = splitDraftCommentsByHead(comments, control.headSha);
+      return {
+        current: byHead.current,
+        outdatedNote: describeOutdatedDraftComments(byHead.outdated),
+      };
+    }),
+  );
   const sheet = shownPullRequestActionSheet(openedSheet, control);
   if (sheet !== openedSheet) setSheet(sheet);
   const bar = pullRequestActionBarModel(control);
@@ -83,17 +103,33 @@ export function PullRequestActionBar(props: {
   const busy = control.pending !== null;
   const blocked = control.blockedReason !== null;
 
+  // The draft is read on press: approving sends its line comments and summary too.
   const approve = () =>
-    Alert.alert(`Approve #${props.number}?`, "Sends an approving review with no comment.", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Approve",
-        onPress: () => {
-          void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-          control.submitReview({ ...EMPTY_REVIEW_DRAFT, event: "approve" }, () => undefined);
+    Alert.alert(
+      `Approve #${props.number}?`,
+      [
+        draftComments.current > 0
+          ? `Sends an approving review with your ${draftComments.current} line ${draftComments.current === 1 ? "comment" : "comments"}.`
+          : "Sends an approving review.",
+        draftComments.outdatedNote,
+      ]
+        .filter((line) => line !== null)
+        .join(" "),
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Approve",
+          onPress: () => {
+            const draft =
+              draftKey === null
+                ? EMPTY_REVIEW_DRAFT
+                : selectReviewDraft(usePullRequestReviewDrafts.getState(), draftKey);
+            void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+            control.submitReview({ ...draft, event: "approve" }, () => undefined);
+          },
         },
-      },
-    ]);
+      ],
+    );
   const confirmUpdate = () =>
     Alert.alert(
       "Update the branch?",
@@ -140,7 +176,13 @@ export function PullRequestActionBar(props: {
         <View className="flex-row items-center gap-1.5">
           {bar.review ? (
             <BarButton
-              label={control.pending === "review" ? "Sending…" : "Review"}
+              label={
+                control.pending === "review"
+                  ? "Sending…"
+                  : draftComments.current > 0
+                    ? `Review · ${draftComments.current}`
+                    : "Review"
+              }
               tone="secondary"
               disabled={blocked || busy}
               onPress={() => setSheet("review")}

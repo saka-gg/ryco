@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildPullRequestMergeInput,
+  canMarkPullRequestFilesViewed,
   buildPullRequestUpdateBranchInput,
   derivePullRequestActions,
   describePullRequestActionError,
@@ -275,5 +276,14 @@ describe("change inputs", () => {
     expect(describePullRequestActionError("weird")).toBe(
       "The change did not go through. Try again.",
     );
+  });
+});
+
+describe("canMarkPullRequestFilesViewed", () => {
+  it("needs a node that takes changes and a role that may mark files", () => {
+    expect(canMarkPullRequestFilesViewed({ mutationReady: true, role: "owner" })).toBe(true);
+    expect(canMarkPullRequestFilesViewed({ mutationReady: true, role: undefined })).toBe(true);
+    expect(canMarkPullRequestFilesViewed({ mutationReady: false, role: "owner" })).toBe(false);
+    expect(canMarkPullRequestFilesViewed({ mutationReady: true, role: "viewer" })).toBe(false);
   });
 });

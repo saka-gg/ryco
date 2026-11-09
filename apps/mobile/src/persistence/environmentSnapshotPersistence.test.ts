@@ -47,6 +47,10 @@ import {
 } from "../hostedHub/nodeRoster";
 import { useStore } from "../state/threadsRuntime";
 import {
+  registerEnvironmentDevicePurge,
+  resetEnvironmentDevicePurgesForTests,
+} from "./environmentDevicePurge";
+import {
   boundStoredEnvironmentSnapshot,
   decodeStoredEnvironmentSnapshot,
   ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION,
@@ -680,6 +684,10 @@ describe("environment snapshot persistence", () => {
       now: () => 200,
       hasDirectEnvironment: () => false,
     });
+    const purgedDeviceData: string[] = [];
+    registerEnvironmentDevicePurge((id) => {
+      purgedDeviceData.push(id);
+    });
     runtime.installHostedRosterMirror(hostedStore);
 
     // Sign-out teardown patches back to the initial state: signed out, idle
@@ -689,6 +697,9 @@ describe("environment snapshot persistence", () => {
     await vi.advanceTimersByTimeAsync(10);
 
     expect(snapshots.has(environmentId)).toBe(false);
+    // Device data kept outside the database (pull request drafts) goes with it.
+    expect(purgedDeviceData).toEqual([environmentId]);
+    resetEnvironmentDevicePurgesForTests();
     expect(useStore.getState().environmentStateById[environmentId]).toBeUndefined();
     expect(getCachedHubNodeRoster()).toEqual([]);
     expect(getRoster()?.payload).toContain('"nodes":[]');

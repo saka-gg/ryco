@@ -3,6 +3,11 @@ import { relativePathToRouteSegments } from "@ryco/client-runtime/state/files";
 import { resolveChangeRequestPresentationForKind } from "@ryco/shared/sourceControl";
 import { EnvironmentId, ProjectId } from "@ryco/contracts/base-schemas";
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
+import {
+  reviewDraftKey,
+  splitFilePath,
+  type ViewedFileState,
+} from "@ryco/client-runtime/state/pull-request-review";
 import * as Haptics from "expo-haptics";
 import { useEffect, useState } from "react";
 import { FlatList, Pressable, RefreshControl, ScrollView, View } from "react-native";
@@ -17,6 +22,12 @@ import { openWebLink } from "../../lib/openWebLink";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { selectProjectByRef, useStore } from "../../state/threadsRuntime";
 import { PULL_REQUEST_ACTION_BAR_HEIGHT, PullRequestActionBar } from "./PullRequestActionBar";
+import {
+  derivePullRequestReviewProgress,
+  type PullRequestReviewProgress,
+} from "./pullRequestFileReviewModel";
+import { usePullRequestReviewDrafts } from "./pullRequestReviewDrafts";
+import { usePullRequestFilesViewed } from "./usePullRequestFilesViewed";
 import { PullRequestCheckRing } from "./PullRequestCheckRing";
 import { describeCheckCounts, shortCheckCounts } from "./pullRequestCheckRingModel";
 import { PULL_REQUEST_STACK_SYMBOL, pullRequestStateGlyph } from "./pullRequestGlyphModel";
@@ -422,32 +433,132 @@ function CheckRow(props: { readonly row: PullRequestCheckRow }) {
 
 function FileRow(props: {
   readonly row: PullRequestFileRow;
+  readonly viewedState: ViewedFileState | null;
+  readonly pending: boolean;
+  /** False when this session may not mark files (read-only node or role): the box only shows. */
+  readonly canToggle: boolean;
   readonly onPress: (path: string) => void;
+  readonly onToggleViewed: (path: string, viewed: boolean) => void;
 }) {
   const { row } = props;
+  const viewed = props.viewedState === "viewed";
+  const success = useThemeColor("--color-success") as string;
+  const muted = useThemeColor("--color-icon-subtle") as string;
   return (
-    <Pressable
-      accessibilityRole="button"
-      onPress={() => props.onPress(row.path)}
-      className="mx-4 mb-1.5 flex-row items-center gap-3 rounded-xl border border-border bg-card px-3.5 py-2.5 active:bg-card-alt"
-    >
-      <Text className="w-4 text-center font-mono text-xs font-ryco-bold text-foreground-muted">
-        {row.statusLetter ?? "·"}
-      </Text>
-      <View className="min-w-0 flex-1">
-        <Text className="font-mono text-xs text-foreground" numberOfLines={2}>
-          {row.path}
+    <View className="mx-4 mb-1.5 flex-row items-center overflow-hidden rounded-xl bg-card">
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`${row.path}${viewed ? ", viewed" : ""}`}
+        onPress={() => props.onPress(row.path)}
+        className="min-w-0 flex-1 flex-row items-center gap-3 py-2.5 pl-3.5 active:bg-card-alt"
+      >
+        <Text className="w-4 text-center font-mono text-xs font-ryco-bold text-foreground-muted">
+          {row.statusLetter ?? "·"}
         </Text>
-        {row.previousPath ? (
-          <Text className="font-mono text-2xs text-foreground-tertiary" numberOfLines={1}>
-            from {row.previousPath}
+        <View className="min-w-0 flex-1">
+          <Text
+            className={cn(
+              "font-mono text-sm",
+              viewed ? "text-foreground-muted" : "text-foreground",
+            )}
+            numberOfLines={1}
+          >
+            {splitFilePath(row.path).name}
           </Text>
-        ) : null}
+          {splitFilePath(row.path).directory ? (
+            <Text className="font-mono text-2xs text-foreground-tertiary" numberOfLines={1}>
+              {splitFilePath(row.path).directory}
+            </Text>
+          ) : null}
+          {row.previousPath ? (
+            <Text className="font-mono text-2xs text-foreground-tertiary" numberOfLines={1}>
+              from {row.previousPath}
+            </Text>
+          ) : props.viewedState === "stale" ? (
+            <Text className="text-2xs text-warning">Changed since you viewed it</Text>
+          ) : null}
+        </View>
+        <Text className="font-mono text-2xs text-foreground-tertiary">
+          {row.binary ? "binary" : row.diffStat}
+        </Text>
+      </Pressable>
+      {props.viewedState !== null ? (
+        <Pressable
+          accessibilityRole="checkbox"
+          accessibilityLabel="Viewed"
+          accessibilityState={{
+            checked: viewed,
+            busy: props.pending,
+            disabled: !props.canToggle,
+          }}
+          disabled={props.pending || !props.canToggle}
+          hitSlop={6}
+          onPress={() => {
+            void Haptics.selectionAsync();
+            props.onToggleViewed(row.path, !viewed);
+          }}
+          className={cn(
+            "w-12 items-center justify-center self-stretch active:opacity-60",
+            !props.canToggle && "opacity-50",
+          )}
+        >
+          <SymbolView
+            name={(viewed ? "checkmark.circle.fill" : "circle") as never}
+            size={20}
+            tintColor={viewed ? success : muted}
+          />
+        </Pressable>
+      ) : (
+        <View className="w-3" />
+      )}
+    </View>
+  );
+}
+
+/** How far the review is, and the way into the next file to read. */
+function ReviewProgressCard(props: {
+  readonly progress: PullRequestReviewProgress;
+  readonly draftComments: number;
+  readonly onReview: () => void;
+}) {
+  const { progress } = props;
+  const done = progress.total > 0 && progress.viewed === progress.total;
+  const share = progress.total === 0 ? 0 : progress.viewed / progress.total;
+  return (
+    <View className="mx-4 gap-3 rounded-2xl bg-card px-4 py-3.5">
+      <View className="flex-row items-center gap-3">
+        <View className="min-w-0 flex-1">
+          <Text className="text-sm font-ryco-bold text-foreground">
+            Files viewed {progress.viewed} / {progress.total}
+          </Text>
+          <Text className="text-xs text-foreground-muted" numberOfLines={1}>
+            {done
+              ? "Every file is viewed."
+              : progress.supported
+                ? "Marked on the host, so it matches the web."
+                : "Open each file to read its changes."}
+            {props.draftComments > 0
+              ? ` ${props.draftComments} draft ${props.draftComments === 1 ? "comment" : "comments"}.`
+              : ""}
+          </Text>
+        </View>
+        <Pressable
+          accessibilityRole="button"
+          onPress={props.onReview}
+          disabled={progress.total === 0}
+          className="h-9 flex-row items-center gap-1 rounded-full bg-primary px-4 active:opacity-80 disabled:opacity-40"
+        >
+          <Text className="text-sm font-ryco-bold text-primary-foreground">
+            {done ? "Read again" : progress.viewed > 0 ? "Continue" : "Review"}
+          </Text>
+        </Pressable>
       </View>
-      <Text className="font-mono text-2xs text-foreground-tertiary">
-        {row.binary ? "binary" : row.diffStat}
-      </Text>
-    </Pressable>
+      {progress.supported ? (
+        <View className="h-1.5 overflow-hidden rounded-full bg-subtle">
+          <View className="h-full rounded-full bg-success" style={{ width: `${share * 100}%` }} />
+        </View>
+      ) : null}
+    </View>
   );
 }
 
@@ -474,6 +585,22 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
     enabled: tab === "files" && pullRequest.capabilities.diff,
   });
   const detail = pullRequest.detail.data;
+  const filesViewed = usePullRequestFilesViewed({
+    environmentId,
+    cwd: checkout.cwd,
+    number,
+    headSha: detail?.headSha ?? null,
+    active: tab === "files",
+  });
+  const reviewPaths = diff.files?.map((file) => file.path) ?? [];
+  const reviewProgress = derivePullRequestReviewProgress(reviewPaths, filesViewed.data);
+  const draftKey =
+    environmentId !== null && checkout.cwd !== null && number !== null
+      ? reviewDraftKey({ environmentId, cwd: checkout.cwd, number })
+      : null;
+  const draftComments = usePullRequestReviewDrafts((state) =>
+    draftKey === null ? 0 : (state.draftsByKey[draftKey]?.comments.length ?? 0),
+  );
   const hostName = resolveChangeRequestPresentationForKind(
     detail?.provider ?? "github",
   ).providerName;
@@ -529,13 +656,18 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
 
   const header = derivePullRequestHeader(detail, null);
 
-  const openFile = (path: string) =>
+  const openFile = (path: string, review = false) =>
     navigation.navigate("ProjectPullRequestFile", {
       environmentId,
       projectId,
       number: String(number),
       path: [...relativePathToRouteSegments(path)],
+      ...(review ? { review: "1" } : {}),
     });
+  const startReview = () => {
+    const first = reviewProgress.firstUnviewed ?? reviewPaths[0];
+    if (first !== undefined) openFile(first, true);
+  };
 
   const loadError = pullRequest.detail.error?.message ?? null;
   const refreshing =
@@ -596,6 +728,16 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
         }}
         onSelect={selectTab}
       />
+      {tab === "files" && diff.status === "ready" ? (
+        <ReviewProgressCard
+          progress={reviewProgress}
+          draftComments={draftComments}
+          onReview={startReview}
+        />
+      ) : null}
+      {tab === "files" && filesViewed.error ? (
+        <Text className="px-5 text-xs text-warning">{filesViewed.error}</Text>
+      ) : null}
       {pullRequest.detail.isLoading ||
       (tab === "conversation" && pullRequest.activity.isLoading) ||
       (tab === "files" && diff.status === "loading") ? (
@@ -627,7 +769,20 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
             case "check":
               return <CheckRow row={item.row} />;
             case "file":
-              return <FileRow row={item.row} onPress={openFile} />;
+              return (
+                <FileRow
+                  row={item.row}
+                  viewedState={
+                    reviewProgress.supported
+                      ? (reviewProgress.stateByPath.get(item.row.path) ?? "unviewed")
+                      : null
+                  }
+                  pending={filesViewed.pendingPaths.has(item.row.path)}
+                  canToggle={filesViewed.canMark}
+                  onPress={openFile}
+                  onToggleViewed={(path, next) => void filesViewed.setViewed(path, next)}
+                />
+              );
             case "note":
               return <Text className="px-5 pb-2 text-xs text-foreground-muted">{item.text}</Text>;
           }

@@ -228,3 +228,18 @@ export function describePullRequestActionError(error: unknown): string {
   if (error instanceof Error && error.message.trim()) return error.message;
   return "The change did not go through. Try again.";
 }
+
+/**
+ * Whether this session may mark files viewed: the same rule the review and
+ * merge actions follow (the node takes changes, the role allows it).
+ */
+export function canMarkPullRequestFilesViewed(input: {
+  readonly mutationReady: boolean;
+  readonly role: NodeSessionRole | undefined;
+}): boolean {
+  return (
+    input.mutationReady &&
+    (input.role === undefined ||
+      nodeRoleAllows(input.role, WS_METHODS.sourceControlSetChangeRequestFileViewed))
+  );
+}

@@ -32,6 +32,7 @@ import {
   withoutStoredContent,
   ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION,
 } from "./environmentSnapshotCodec";
+import { purgeEnvironmentDeviceData } from "./environmentDevicePurge";
 import { createSnapshotDb, payloadByteLength, type SnapshotDb } from "./snapshotDb";
 
 /**
@@ -360,7 +361,10 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
       dirtyTimers.delete(environmentId);
     }
     dirtySince.delete(environmentId);
-    await serialize(environmentId, () => removeStoredSnapshot(environmentId));
+    await Promise.all([
+      serialize(environmentId, () => removeStoredSnapshot(environmentId)),
+      purgeEnvironmentDeviceData(environmentId),
+    ]);
   };
 
   /**
@@ -693,6 +697,7 @@ export function purgeEnvironmentSnapshot(environmentId: EnvironmentId): void {
   void getSharedSnapshotDb()
     .removeEnvironmentSnapshot(environmentId)
     .catch(warn("could not purge snapshot"));
+  void purgeEnvironmentDeviceData(environmentId);
 }
 
 /** The device setting as persistence reads it: off until the preferences have loaded. */
@@ -775,7 +780,12 @@ export async function listEnvironmentCacheStorage() {
 }
 export async function clearEnvironmentSnapshotCache(environmentId: EnvironmentId): Promise<void> {
   if (activeRuntime) await activeRuntime.purgeEnvironment(environmentId);
-  else await getSharedSnapshotDb().removeEnvironmentSnapshot(environmentId);
+  else {
+    await Promise.all([
+      getSharedSnapshotDb().removeEnvironmentSnapshot(environmentId),
+      purgeEnvironmentDeviceData(environmentId),
+    ]);
+  }
   // Evict only offline-hydrated presentation state. Live synchronization retains ownership.
   const state = useStore.getState();
   if (state.environmentStateById[environmentId]?.hydratedFromCacheAt !== undefined) {

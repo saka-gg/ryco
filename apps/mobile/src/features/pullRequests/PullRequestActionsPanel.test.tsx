@@ -82,6 +82,7 @@ function control(overrides: Partial<PullRequestActionsControl> = {}): PullReques
     error: null,
     notice: null,
     draftKey: "draft",
+    headSha: "h1",
     reviewEventFor: () => "comment",
     setMethod: () => undefined,
     deleteBranch: null,

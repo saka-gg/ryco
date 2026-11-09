@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 // The file screen shows one file's diff; it reads the pull request's detail
-// (for the head and the host link) and its diff, never the activity. Rendered
+// (for the head and the host link), its diff, and its activity (the review
+// threads shown under their lines). Rendered
 // as a plain function over a tiny hook runtime (no React renderer exists in
 // this suite): state persists across renders and effects run after each one,
 // so the node's git status can name the host before the second render.
@@ -48,6 +49,39 @@ vi.mock("react-native", () => ({
   View: "View",
 }));
 vi.mock("@legendapp/list/react-native", () => ({ LegendList: "LegendList" }));
+vi.mock("expo-haptics", () => ({
+  selectionAsync: async () => undefined,
+  impactAsync: async () => undefined,
+  notificationAsync: async () => undefined,
+  ImpactFeedbackStyle: { Light: "light" },
+  NotificationFeedbackType: { Success: "success" },
+}));
+vi.mock("react-native-safe-area-context", () => ({
+  useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }),
+}));
+vi.mock("../../components/AppSymbol", () => ({ SymbolView: "SymbolView" }));
+vi.mock("../../components/GlassSurface", () => ({ GlassSurface: "GlassSurface" }));
+vi.mock("./PullRequestLineComments", () => ({
+  DraftCommentCard: "DraftCommentCard",
+  LineCommentSheet: "LineCommentSheet",
+  ThreadCard: "ThreadCard",
+}));
+vi.mock("./pullRequestReviewDrafts", () => {
+  const store = (selector: (state: unknown) => unknown) => selector({ draftsByKey: {} });
+  store.getState = () => ({ draftsByKey: {} });
+  return { usePullRequestReviewDrafts: store };
+});
+vi.mock("./usePullRequestFilesViewed", () => ({
+  usePullRequestFilesViewed: () => ({
+    data: null,
+    error: null,
+    pendingPaths: new Set(),
+    isLoading: false,
+    refresh: async () => undefined,
+    canMark: true,
+    setViewed: async () => undefined,
+  }),
+}));
 vi.mock("@react-navigation/native", () => ({
   useNavigation: () => ({ setOptions: () => undefined, setParams: () => undefined }),
 }));
@@ -131,12 +165,12 @@ describe("PullRequestFileRouteScreen reads", () => {
     hoisted.reads.length = 0;
   });
 
-  it("reads the detail and the diff, never the activity, once the host is known", () => {
+  it("reads the detail, the diff and the activity once the host is known", () => {
     render();
     hoisted.reads.length = 0;
     // The git status named GitHub, which serves activity reads.
     render();
     const enabled = hoisted.reads.filter((read) => read.input.enabled !== false);
-    expect(enabled.map((read) => read.query).toSorted()).toEqual(["detail", "diff"]);
+    expect(enabled.map((read) => read.query).toSorted()).toEqual(["activity", "detail", "diff"]);
   });
 });
