@@ -309,12 +309,9 @@ const deviceMutationTargetProperties = {
   expectedRecording: { type: "boolean" },
 } as const;
 
-/** Boot and attach are routine for a Full access caller (`routineActions.ts`). */
+/** Every device change is routine for a Full access caller (`routineActions.ts`). */
 const FULL_ACCESS_DEVICE_ROUTINE =
   "In a Full access thread it runs without asking the user; otherwise it waits for their approval. It never runs inline: confirm with ryco_wait_for_control_request.";
-
-const deviceApprovalDescription = (operation: string) =>
-  `Request approval to ${operation} one exact simulator or emulator. This creates a proposal and does not mutate the device inline.`;
 
 const pullRequestWatchInputSchema = {
   type: "object",
@@ -400,8 +397,14 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
         AGENT_CONTROL_MCP_TOOLS.proposeDeviceAttach,
         `Attach one exact booted simulator or emulator to this thread. ${FULL_ACCESS_DEVICE_ROUTINE}`,
       ],
-      [AGENT_CONTROL_MCP_TOOLS.proposeDeviceDetach, deviceApprovalDescription("detach")],
-      [AGENT_CONTROL_MCP_TOOLS.proposeDeviceShutdown, deviceApprovalDescription("shut down")],
+      [
+        AGENT_CONTROL_MCP_TOOLS.proposeDeviceDetach,
+        `Detach one exact simulator or emulator from this thread. ${FULL_ACCESS_DEVICE_ROUTINE}`,
+      ],
+      [
+        AGENT_CONTROL_MCP_TOOLS.proposeDeviceShutdown,
+        `Shut down one exact simulator or emulator. ${FULL_ACCESS_DEVICE_ROUTINE}`,
+      ],
     ] as const
   ).map(([name, description]) => ({
     name,
@@ -415,8 +418,7 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
   })),
   {
     name: AGENT_CONTROL_MCP_TOOLS.proposeDeviceInstall,
-    description:
-      "Request approval to install one exact workspace-contained .app or .apk artifact on the attached device. No install occurs inline.",
+    description: `Install one exact workspace-contained .app or .apk artifact on the attached device. ${FULL_ACCESS_DEVICE_ROUTINE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -429,8 +431,7 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
   },
   {
     name: AGENT_CONTROL_MCP_TOOLS.proposeDeviceLaunch,
-    description:
-      "Request approval to launch one exact installed bundle without launch arguments on the attached Simulator. No launch occurs inline.",
+    description: `Launch one exact installed bundle without launch arguments on the attached Simulator. ${FULL_ACCESS_DEVICE_ROUTINE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -443,8 +444,7 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
   },
   {
     name: AGENT_CONTROL_MCP_TOOLS.proposeDeviceOpenUrl,
-    description:
-      "Request high-risk approval to open one exact safe URL or deep link on the attached Simulator. No URL is opened inline.",
+    description: `Open one exact safe URL or deep link on the attached Simulator. ${FULL_ACCESS_DEVICE_ROUTINE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -457,8 +457,7 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
   },
   {
     name: AGENT_CONTROL_MCP_TOOLS.proposeDeviceInput,
-    description:
-      "Request approval for one exact bounded coordinate tap, swipe, or hardware-button action. Text typing and UI-label targeting are intentionally unavailable.",
+    description: `One exact bounded coordinate tap, swipe, or hardware-button action; prefer ryco_device, which types and targets labels. ${FULL_ACCESS_DEVICE_ROUTINE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -509,8 +508,7 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
   },
   {
     name: AGENT_CONTROL_MCP_TOOLS.proposeDeviceRecording,
-    description:
-      "Request approval to start or stop Simulator recording. Recording paths never enter proposal, audit, or tool output.",
+    description: `Start or stop Simulator recording. Recording paths never enter proposal, audit, or tool output. ${FULL_ACCESS_DEVICE_ROUTINE}`,
     inputSchema: {
       type: "object",
       properties: {
