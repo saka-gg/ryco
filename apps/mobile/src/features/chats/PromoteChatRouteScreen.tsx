@@ -36,6 +36,7 @@ import {
   type SidebarThreadSummary,
 } from "@ryco/client-runtime/state/threads";
 import { EnvironmentId, ThreadId } from "@ryco/contracts/base-schemas";
+import { WS_METHODS } from "@ryco/contracts/rpc";
 import { isChatProject } from "@ryco/shared/projectKind";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Switch, TextInput, View } from "react-native";
@@ -45,6 +46,7 @@ import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
 import { EmptyState } from "../../components/EmptyState";
 import { ErrorBanner } from "../../components/ErrorBanner";
+import { nodeMethodBlockReason } from "../../connection/nodeRoleAccess";
 import { useEnvironmentApi } from "../../connection/useEnvironmentApi";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
@@ -54,6 +56,7 @@ import {
   selectThreadByRef,
   useStore,
 } from "../../state/threadsRuntime";
+import { useHomeEnvironments } from "../home/useHomeEnvironments";
 import { interruptThreadTurn } from "../threads/sessionActions";
 import {
   findFreeDestination,
@@ -123,6 +126,17 @@ export function PromoteChatRouteScreen(props: PromoteChatRouteScreenProps) {
     [chatThreads],
   );
   const providers = useEnvironmentServerConfigs().get(environmentId)?.providers ?? [];
+  const environmentRow = useHomeEnvironments().find(
+    (candidate) => candidate.environmentId === environmentId,
+  );
+  // The node's own access rule for the move, on a connection whose writes are synchronized.
+  const accessBlock = environmentRow
+    ? nodeMethodBlockReason(
+        environmentRow,
+        WS_METHODS.projectsPromoteChat,
+        "turn chats into projects",
+      )
+    : "Reconnect the machine to turn chats into projects.";
 
   const [name, setName] = useState(() => (project?.name ?? thread?.title ?? "").trim());
   const [destination, setDestination] = useState("");
@@ -236,7 +250,7 @@ export function PromoteChatRouteScreen(props: PromoteChatRouteScreenProps) {
 
   const submit = () => {
     const promoteChat = api?.projects.promoteChat;
-    if (!promoteChat || !projectId || !preview || blocker !== null) return;
+    if (!promoteChat || !projectId || !preview || blocker !== null || accessBlock !== null) return;
     const submitted = trimmedDestination;
     setFailure(null);
     setPhase({ kind: "running", steps: planPromotionSteps(effectiveGit, preview) });
@@ -508,14 +522,16 @@ export function PromoteChatRouteScreen(props: PromoteChatRouteScreenProps) {
 
       <Pressable
         accessibilityRole="button"
-        accessibilityHint={blocker?.reason}
-        disabled={blocker !== null}
+        accessibilityHint={accessBlock ?? blocker?.reason}
+        disabled={blocker !== null || accessBlock !== null}
         onPress={submit}
         className="h-12 items-center justify-center rounded-full bg-primary px-5 active:opacity-80 disabled:opacity-40"
       >
         <Text className="text-base font-ryco-bold text-primary-foreground">Turn into project</Text>
       </Pressable>
-      {blocker && blocker.field !== "pending" && blocker.reason !== BUSY_CHAT_REASON ? (
+      {accessBlock ? (
+        <Text className="-mt-2 px-1 text-center text-xs text-foreground-muted">{accessBlock}</Text>
+      ) : blocker && blocker.field !== "pending" && blocker.reason !== BUSY_CHAT_REASON ? (
         <Text className="-mt-2 px-1 text-center text-xs text-foreground-muted">
           {blocker.reason}
         </Text>
