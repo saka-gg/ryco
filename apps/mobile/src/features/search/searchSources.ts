@@ -1,3 +1,10 @@
+import { useNavigation } from "@react-navigation/native";
+
+import {
+  usePullRequestSearch,
+  type PullRequestSearchResult,
+} from "../pullRequests/usePullRequestSearch";
+import { pullRequestSearchGroup } from "./pullRequestSearchSource";
 import { useThreadSearch } from "./useThreadSearch";
 import type { SearchGroup, SearchScope } from "./searchModel";
 
@@ -25,6 +32,7 @@ export type SearchSourceHook = (input: SearchSourceInput) => ReadonlyArray<Searc
 export const AVAILABLE_SEARCH_SCOPES: ReadonlySet<SearchScope> = new Set<SearchScope>([
   "chats",
   "messages",
+  "pullRequests",
 ]);
 
 /**
@@ -32,10 +40,21 @@ export const AVAILABLE_SEARCH_SCOPES: ReadonlySet<SearchScope> = new Set<SearchS
  * a fixed order, so hook order never changes between renders.
  */
 export function useSearchSources(input: SearchSourceInput): ReadonlyArray<SearchGroup> {
+  const navigation = useNavigation();
   const threads = useThreadSearch(input);
-  // PRs mount point, once the PRs round (#1138) is on main: add "pullRequests" to
-  // AVAILABLE_SEARCH_SCOPES, then
-  //   const prs = usePullRequestSearch(input.scopes.has("pullRequests") ? (input.query ?? "") : "");
-  //   return [...threads, pullRequestSearchGroup(prs, (route) => navigation.navigate(route.name, route.params))];
-  return threads;
+  // An empty query reads nothing: the PRs scope asks its node only while asked.
+  const pullRequests = usePullRequestSearch(
+    input.scopes.has("pullRequests") ? (input.query ?? "") : "",
+  );
+  if (!input.scopes.has("pullRequests")) return threads;
+  return [
+    ...threads,
+    // Every PRs result opens the pull request screen; its params are the route's.
+    pullRequestSearchGroup(pullRequests, (route) =>
+      navigation.navigate(
+        "ProjectPullRequest",
+        route.params as PullRequestSearchResult["route"]["params"],
+      ),
+    ),
+  ];
 }
