@@ -12,6 +12,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useShallow } from "zustand/react/shallow";
 
 import { SymbolView } from "../../components/AppSymbol";
+import { HeaderIconButton } from "../../components/HeaderIconButton";
 import { AppText as Text } from "../../components/AppText";
 import { EmptyState } from "../../components/EmptyState";
 import { ErrorBanner } from "../../components/ErrorBanner";
@@ -52,31 +53,6 @@ import {
   usePullRequestTabState,
   usePullRequestTabStateLoaded,
 } from "./usePullRequestTabState";
-
-function HeaderIconButton(props: {
-  readonly symbol: string;
-  readonly label: string;
-  readonly badge?: number;
-  readonly onPress: () => void;
-}) {
-  const icon = useThemeColor("--color-icon") as string;
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={props.badge ? `${props.label}, ${props.badge} on` : props.label}
-      hitSlop={6}
-      onPress={props.onPress}
-      className="h-10 w-10 items-center justify-center rounded-full bg-subtle active:bg-subtle-strong"
-    >
-      <SymbolView name={props.symbol as never} size={17} tintColor={icon} />
-      {props.badge ? (
-        <View className="absolute -right-0.5 -top-0.5 h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1">
-          <Text className="text-[10px] font-ryco-bold text-primary-foreground">{props.badge}</Text>
-        </View>
-      ) : null}
-    </Pressable>
-  );
-}
 
 function RepositoryPicker(props: {
   readonly choices: ReadonlyArray<PullRequestRepositoryChoice>;
@@ -371,14 +347,16 @@ export function PullRequestsListScreen(props: PullRequestsListScreenProps) {
           ) : null}
           <View className="flex-1" />
           <HeaderIconButton
-            symbol="magnifyingglass"
-            label="Search pull requests"
+            icon="magnifyingglass"
+            accessibilityLabel="Search pull requests"
+            filled
             onPress={() => setSearching(true)}
           />
           <HeaderIconButton
-            symbol="line.3.horizontal.decrease"
-            label="Filters"
+            icon="line.3.horizontal.decrease"
+            accessibilityLabel="Filters"
             badge={activeFilters}
+            filled
             onPress={() => setFiltersOpen(true)}
           />
         </View>
