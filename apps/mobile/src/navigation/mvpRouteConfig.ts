@@ -541,6 +541,10 @@ export const MVP_SETTINGS_ROUTES = {
     linking: `${SETTINGS}/machines/:environmentId/usage-prices`,
     ...SETTINGS_PAGE,
   },
+  SettingsMachineImport: {
+    linking: `${SETTINGS}/machines/:environmentId/import`,
+    ...SETTINGS_PAGE,
+  },
   SettingsMachineSystem: {
     linking: `${SETTINGS}/machines/:environmentId/machine`,
     ...SETTINGS_PAGE,

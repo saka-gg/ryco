@@ -24,6 +24,7 @@ describe("Settings list", () => {
       "SettingsMachineWork",
       "SettingsMachineSystem",
       "SettingsMachineUsagePrices",
+      "SettingsMachineImport",
     ]);
     for (const route of Object.keys(MVP_SETTINGS_ROUTES)) {
       if (reachedElsewhere.has(route)) continue;
