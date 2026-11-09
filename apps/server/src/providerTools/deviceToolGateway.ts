@@ -121,7 +121,7 @@ const agentControlLocksByThread = new Map<string, AgentControlDeviceLock>();
 export const AGENT_CONTROL_DEVICE_TOOL = "ryco_device";
 
 /** Added to `device_list` while Agent Control drives this session's devices. */
-export const AGENT_CONTROL_DEVICE_POINTER = `Agent Control is on for this session: drive the attached device with ${AGENT_CONTROL_DEVICE_TOOL} and request boot, attach, install, URLs or shutdown with ryco_propose_device_*.`;
+export const AGENT_CONTROL_DEVICE_POINTER = `Agent Control is on for this session: drive the attached device with ${AGENT_CONTROL_DEVICE_TOOL} and request boot, attach, install, URLs or shutdown with ryco_propose_device_* (boot and attach run without asking in a Full access thread).`;
 
 const agentControlRefusal = (lock: AgentControlDeviceLock): string =>
   lock.agentControlDevices

@@ -30,6 +30,12 @@ export const isRoutineAgentControlAction = (
         JSON.stringify(plan.after.scripts) === JSON.stringify(plan.before.scripts) &&
         plan.after.customSystemPrompt === plan.before.customSystemPrompt
       );
+    case "deviceBoot":
+    case "deviceAttach":
+      // A Full access chat may bring up a simulator or emulator for its own work: the validator
+      // keeps the plan to the caller's own thread, project and provider, and execution rechecks
+      // the device state the agent saw. Everything else on a device stays the user's call.
+      return principal.originRuntimeMode === "full-access";
     case "importProject":
     case "copyProjectToNode":
       // Always the user's decision: a network clone into a new folder, setup commands, and
@@ -37,7 +43,7 @@ export const isRoutineAgentControlAction = (
       return false;
     default:
       // Includes `deviceControlConsent`: the user grants routine device input for a task,
-      // never the agent itself.
+      // never the agent itself (a Full access chat skips asking for it in `ryco_device`).
       return false;
   }
 };
