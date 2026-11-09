@@ -1,4 +1,8 @@
 // The three steps follow t3code's device setup (MIT); see THIRD_PARTY_NOTICES.md.
+import {
+  DEVICE_PLATFORM_LABELS,
+  devicePlatformSummary,
+} from "@ryco/client-runtime/state/device/picker";
 import type {
   DeviceAvailability,
   DeviceListResult,
@@ -11,11 +15,6 @@ import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
 import { errorMessage } from "./deviceControls";
-
-const PLATFORM_LABELS: Record<DevicePlatform, string> = {
-  "ios-simulator": "iOS Simulator",
-  "android-emulator": "Android Emulator",
-};
 
 export interface DeviceSetupValues {
   readonly devicesEnabled: boolean;
@@ -229,40 +228,8 @@ export function PlatformStatus(props: {
   readonly availability: DeviceAvailability;
 }) {
   const { availability } = props;
-  const label = PLATFORM_LABELS[props.platform];
-  let tone: "ready" | "warn" | "off";
-  let summary: string;
-  switch (availability.kind) {
-    case "available":
-      tone = "ready";
-      summary = "Ready";
-      break;
-    case "degraded":
-      tone = "warn";
-      summary = `Ready, limited by this Xcode: ${availability.capabilities
-        .filter((capability) => !capability.ok)
-        .map((capability) => capability.id)
-        .join(", ")}`;
-      break;
-    case "setup-required": {
-      const remaining = availability.steps.filter((step) => !step.done);
-      // The helper builds itself the first time a device opens.
-      const onlyHelper = remaining.every((step) => step.id === "build-device-helper");
-      tone = onlyHelper ? "ready" : "warn";
-      summary = onlyHelper
-        ? "Ready; the Ryco helper builds the first time you open a device"
-        : `${remaining.length} step${remaining.length === 1 ? "" : "s"} left`;
-      break;
-    }
-    case "unsupported-platform":
-      tone = "off";
-      summary = `Not available on ${availability.platform}`;
-      break;
-    case "helper-unavailable":
-      tone = "warn";
-      summary = availability.message;
-      break;
-  }
+  const label = DEVICE_PLATFORM_LABELS[props.platform];
+  const { tone, summary } = devicePlatformSummary(availability);
   return (
     <div
       className="rounded-lg border border-border/70 p-3"

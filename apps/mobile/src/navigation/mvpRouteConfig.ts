@@ -131,6 +131,15 @@ export const MVP_ROOT_ROUTES = {
     ios: { presentation: "formSheet", sheetAllowedDetents: [0.8, 0.95], sheetGrabberVisible: true },
     android: { presentation: "card" },
   },
+  /** The checkout's and the project's notes (the desktop's Notes pane). */
+  ProjectNotes: {
+    linking: `${PROJECT}/notes/:worktreeId?`,
+    overlay: false,
+    headerPreset: "solid",
+    headerAction: "back",
+    ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
   /** One repository's pull requests: the list a project's checkout reads through. */
   ProjectPullRequests: {
     linking: `${PROJECT}/pull-requests`,
@@ -267,6 +276,24 @@ export const MVP_ROOT_ROUTES = {
     headerPreset: "solid",
     headerAction: "back",
     ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
+  /** Run a project script or a one-off command in a new terminal of the thread. */
+  ThreadScripts: {
+    linking: `${THREAD}/scripts`,
+    overlay: true,
+    headerPreset: "sheet-solid",
+    headerAction: "close",
+    ios: { presentation: "formSheet", sheetAllowedDetents: [0.6, 0.95], sheetGrabberVisible: true },
+    android: { presentation: "card" },
+  },
+  /** Pick, boot and attach a simulator or emulator; install and launch apps; record. */
+  ThreadDevices: {
+    linking: `${THREAD}/devices`,
+    overlay: true,
+    headerPreset: "sheet-solid",
+    headerAction: "close",
+    ios: { presentation: "formSheet", sheetAllowedDetents: [0.6, 0.95], sheetGrabberVisible: true },
     android: { presentation: "card" },
   },
   /**

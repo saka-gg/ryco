@@ -1,4 +1,5 @@
 import { useDeviceStateStore } from "@ryco/client-runtime/state/device";
+import { threadAttachments } from "@ryco/client-runtime/state/device/threadAttachments";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import type { RefObject } from "react";
 
@@ -18,7 +19,6 @@ import {
 import { Button } from "../ui/button";
 import { deviceFrameMetrics } from "./deviceFrameMetrics";
 import { DeviceViewer } from "./DeviceViewer";
-import { threadAttachments } from "./threadAttachments";
 import { useDeviceRuntime } from "./useDeviceRuntime";
 
 /** The floating viewer's rail plus its padding: what does not scale with the window. */

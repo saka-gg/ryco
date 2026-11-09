@@ -117,6 +117,12 @@ export interface TerminalControllerInputs {
   readonly cwd: string | null;
   readonly worktreePath: string | null;
   /**
+   * The project-script variables every client opens a thread's terminals with
+   * (`projectScriptRuntimeEnv`). The node relaunches a shell opened with other
+   * variables, so the phone sends the same ones as the desktop.
+   */
+  readonly runtimeEnv?: Readonly<Record<string, string>> | null;
+  /**
    * The environment's live API, or `undefined` without a connection. Its
    * identity is the connection's: every response is fenced by it, so a
    * replaced connection can never publish an old answer.
@@ -693,7 +699,7 @@ export class TerminalController {
     if (this.#opening !== null || this.#suspended || this.#rendererPhase !== "ready") return;
     const surface = this.#surface(terminalId);
     const fence = this.#fence();
-    const { cwd, worktreePath } = this.#inputs;
+    const { cwd, worktreePath, runtimeEnv } = this.#inputs;
     if (cwd === null || fence === null || !this.#inputs.mutationReady) return;
     if (surface.dimensions === null) return; // The renderer reports a size after activation.
     this.#pendingOpen.delete(terminalId);
@@ -707,6 +713,7 @@ export class TerminalController {
         terminalId,
         cwd,
         worktreePath,
+        ...(runtimeEnv ? { env: { ...runtimeEnv } } : {}),
         cols: dimensions.cols,
         rows: dimensions.rows,
       })
@@ -907,7 +914,7 @@ export class TerminalController {
   async #runSessionAction(action: TerminalBusyAction, deleteHistory = false): Promise<boolean> {
     const terminalId = this.#activeTerminalId();
     const fence = this.#fence();
-    const { cwd, worktreePath } = this.#inputs;
+    const { cwd, worktreePath, runtimeEnv } = this.#inputs;
     if (terminalId === null || fence === null || cwd === null || !this.#canMutate()) return false;
     if (this.#busyAction !== null) return false;
     const surface = this.#surface(terminalId);
@@ -926,6 +933,7 @@ export class TerminalController {
           ...input,
           cwd,
           worktreePath,
+          ...(runtimeEnv ? { env: { ...runtimeEnv } } : {}),
           cols: dimensions.cols,
           rows: dimensions.rows,
         });

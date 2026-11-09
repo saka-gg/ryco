@@ -192,6 +192,17 @@ describe("terminal controller", () => {
     expect(context.server.terminal.open).not.toHaveBeenCalled();
   });
 
+  it("opens with the project-script variables the desktop uses, so the node keeps the shell", async () => {
+    const context = setup();
+    context.update({ runtimeEnv: { RYCO_PROJECT_ROOT: "/repo" } });
+    await startHydrated(context);
+
+    expect(context.server.opens[0]!.input).toMatchObject({
+      cwd: "/repo",
+      env: { RYCO_PROJECT_ROOT: "/repo" },
+    });
+  });
+
   it("opens an explicitly started session with the workspace and the renderer's size", async () => {
     const context = setup();
     const hydrate = await startHydrated(context, "hello\r\n$ ");

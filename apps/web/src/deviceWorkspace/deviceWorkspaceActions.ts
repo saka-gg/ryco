@@ -1,8 +1,8 @@
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { useDeviceStateStore } from "@ryco/client-runtime/state/device";
+import { threadAttachments } from "@ryco/client-runtime/state/device/threadAttachments";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 
-import { threadAttachments } from "../components/device/threadAttachments";
 import { readEnvironmentApi } from "../environmentApi";
 import { activeDeviceTab } from "./deviceTabs.logic";
 import { selectThreadDeviceTabs, useDeviceTabsStore } from "./deviceTabsStore";

@@ -4,7 +4,10 @@ import {
   type TerminalSessionSnapshot,
   type ThreadId,
 } from "@ryco/contracts";
-import { projectScriptCwd, projectScriptRuntimeEnv } from "@ryco/shared/projectScripts";
+import {
+  resolveThreadTerminalLaunch,
+  type ThreadTerminalLaunch,
+} from "@ryco/client-runtime/state/terminal";
 import { Schema } from "effect";
 
 import { readEnvironmentApi } from "./environmentApi";
@@ -20,36 +23,7 @@ import { getLocalStorageItem, setLocalStorageItem } from "./hooks/useLocalStorag
  * which force-opens the drawer. This module stays free of xterm imports.
  */
 
-export interface ThreadTerminalLaunch {
-  readonly cwd: string;
-  readonly worktreePath: string | null;
-  readonly runtimeEnv: Record<string, string>;
-}
-
-/**
- * The one resolver for where a thread terminal starts, shared by the chat
- * drawer, the workspace terminal tab and the early prepare. They must agree
- * exactly: the server restarts a live PTY and wipes its history when open()
- * arrives with another cwd or environment. A server-reported launch context
- * (the terminal's actual start) wins over the thread's current worktree.
- */
-export function resolveThreadTerminalLaunch(input: {
-  readonly projectCwd: string | null;
-  readonly threadWorktreePath: string | null;
-  readonly launchContext: { readonly cwd: string; readonly worktreePath: string | null } | null;
-}): ThreadTerminalLaunch | null {
-  const worktreePath =
-    input.launchContext !== null ? input.launchContext.worktreePath : input.threadWorktreePath;
-  if (input.projectCwd === null) {
-    return null;
-  }
-  const project = { cwd: input.projectCwd };
-  return {
-    cwd: input.launchContext?.cwd ?? projectScriptCwd({ project, worktreePath }),
-    worktreePath,
-    runtimeEnv: projectScriptRuntimeEnv({ project, worktreePath }),
-  };
-}
+export { resolveThreadTerminalLaunch, type ThreadTerminalLaunch };
 
 /** Identity of a launch: a prepared open is only reused for the same one. */
 export function terminalLaunchKey(launch: {

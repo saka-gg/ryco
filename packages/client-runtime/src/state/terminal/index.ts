@@ -1,6 +1,7 @@
 export * from "./admission.ts";
 export * from "./activity.ts";
 export * from "./cleanup.ts";
+export * from "./launch.ts";
 export * from "./store.ts";
 export * from "./reconciliation.ts";
 export * from "./replayGate.ts";

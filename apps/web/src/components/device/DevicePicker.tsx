@@ -1,5 +1,10 @@
 // The grouped Start/Open list follows t3code's device panel (pingdotgg/t3code, MIT); see
 // THIRD_PARTY_NOTICES.md.
+import {
+  DEVICE_PICKER_STATUS_LABELS,
+  devicePickerStatus,
+  groupPickerDevices,
+} from "@ryco/client-runtime/state/device/picker";
 import type { DeviceDescriptor, DeviceHostSummary } from "@ryco/contracts";
 import { LoaderCircleIcon, RefreshCwIcon, SmartphoneIcon, TabletIcon } from "lucide-react";
 import { useMemo } from "react";
@@ -7,18 +12,6 @@ import { useMemo } from "react";
 import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 import { deviceKindFor } from "./DeviceFrame";
-import {
-  devicePickerStatus,
-  groupPickerDevices,
-  type DevicePickerStatus,
-} from "./devicePicker.logic";
-
-const STATUS_LABEL: Record<DevicePickerStatus, string> = {
-  running: "Running",
-  starting: "Starting",
-  stopping: "Shutting down",
-  stopped: "Stopped",
-};
 
 /**
  * Every device the node can run, grouped per platform (and per host once SSH
@@ -95,7 +88,7 @@ export function DevicePicker(props: {
                               status === "starting" && "text-sky-600 dark:text-sky-400",
                             )}
                           >
-                            {STATUS_LABEL[status]}
+                            {DEVICE_PICKER_STATUS_LABELS[status]}
                           </span>
                           {props.openUdids.has(device.udid) ? (
                             <>

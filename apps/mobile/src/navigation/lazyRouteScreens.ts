@@ -122,6 +122,27 @@ export const ReviewSheet = lazyScreen(
     (require("../features/review/ReviewSheet") as typeof import("../features/review/ReviewSheet"))
       .ReviewSheet,
 );
+export const ProjectNotesRouteScreen = lazyScreen(
+  "ProjectNotesRouteScreen",
+  () =>
+    (
+      require("../features/notes/ProjectNotesRouteScreen") as typeof import("../features/notes/ProjectNotesRouteScreen")
+    ).ProjectNotesRouteScreen,
+);
+export const ThreadScriptsRouteScreen = lazyScreen(
+  "ThreadScriptsRouteScreen",
+  () =>
+    (
+      require("../features/scripts/ThreadScriptsRouteScreen") as typeof import("../features/scripts/ThreadScriptsRouteScreen")
+    ).ThreadScriptsRouteScreen,
+);
+export const ThreadDevicesRouteScreen = lazyScreen(
+  "ThreadDevicesRouteScreen",
+  () =>
+    (
+      require("../features/devices/ThreadDevicesRouteScreen") as typeof import("../features/devices/ThreadDevicesRouteScreen")
+    ).ThreadDevicesRouteScreen,
+);
 export const SourceControlBranchesRouteScreen = lazyScreen(
   "SourceControlBranchesRouteScreen",
   () =>

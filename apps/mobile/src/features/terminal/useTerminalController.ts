@@ -43,9 +43,10 @@ export function useTerminalController(input: {
   readonly threadId: ThreadId;
   readonly cwd: string | null;
   readonly worktreePath: string | null;
+  readonly runtimeEnv: Readonly<Record<string, string>> | null;
   readonly fontSize: number;
 }) {
-  const { environmentId, threadId, cwd, worktreePath, fontSize } = input;
+  const { environmentId, threadId, cwd, worktreePath, runtimeEnv, fontSize } = input;
   const controller = useMemo(
     () => new TerminalController(environmentId, threadId, PORTS),
     [environmentId, threadId],
@@ -60,12 +61,22 @@ export function useTerminalController(input: {
     controller.update({
       cwd,
       worktreePath,
+      runtimeEnv,
       api,
       connectionState: access.connectionState,
       mutationReady: access.mutationReady,
       fontSize,
     });
-  }, [access.connectionState, access.mutationReady, api, controller, cwd, fontSize, worktreePath]);
+  }, [
+    access.connectionState,
+    access.mutationReady,
+    api,
+    controller,
+    cwd,
+    fontSize,
+    runtimeEnv,
+    worktreePath,
+  ]);
 
   useEffect(() => controller.attach(), [controller]);
 
