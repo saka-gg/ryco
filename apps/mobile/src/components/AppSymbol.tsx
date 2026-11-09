@@ -18,9 +18,11 @@ import IconArrowsMaximize from "@tabler/icons-react-native/IconArrowsMaximize";
 import IconArrowsMinimize from "@tabler/icons-react-native/IconArrowsMinimize";
 import IconBellRinging from "@tabler/icons-react-native/IconBellRinging";
 import IconBolt from "@tabler/icons-react-native/IconBolt";
+import IconBrandWindows from "@tabler/icons-react-native/IconBrandWindows";
 import IconCamera from "@tabler/icons-react-native/IconCamera";
 import IconCheck from "@tabler/icons-react-native/IconCheck";
 import IconChevronDown from "@tabler/icons-react-native/IconChevronDown";
+import IconCloud from "@tabler/icons-react-native/IconCloud";
 import IconCode from "@tabler/icons-react-native/IconCode";
 import IconChevronLeft from "@tabler/icons-react-native/IconChevronLeft";
 import IconChevronRight from "@tabler/icons-react-native/IconChevronRight";
@@ -30,6 +32,7 @@ import IconCircleXFilled from "@tabler/icons-react-native/IconCircleXFilled";
 import IconClipboardList from "@tabler/icons-react-native/IconClipboardList";
 import IconCopy from "@tabler/icons-react-native/IconCopy";
 import IconDeviceDesktop from "@tabler/icons-react-native/IconDeviceDesktop";
+import IconDeviceLaptop from "@tabler/icons-react-native/IconDeviceLaptop";
 import IconDeviceMobile from "@tabler/icons-react-native/IconDeviceMobile";
 import IconDeviceTablet from "@tabler/icons-react-native/IconDeviceTablet";
 import IconDots from "@tabler/icons-react-native/IconDots";
@@ -52,6 +55,7 @@ import IconInfoCircle from "@tabler/icons-react-native/IconInfoCircle";
 import IconKeyboard from "@tabler/icons-react-native/IconKeyboard";
 import IconKeyboardHide from "@tabler/icons-react-native/IconKeyboardHide";
 import IconLayoutColumns from "@tabler/icons-react-native/IconLayoutColumns";
+import IconLayoutGrid from "@tabler/icons-react-native/IconLayoutGrid";
 import IconLayoutSidebar from "@tabler/icons-react-native/IconLayoutSidebar";
 import IconLetterSpacing from "@tabler/icons-react-native/IconLetterSpacing";
 import IconLink from "@tabler/icons-react-native/IconLink";
@@ -108,6 +112,7 @@ const ANDROID_ICON_BY_SF_SYMBOL: Partial<Record<SFSymbol, Icon>> = {
   "bolt.circle": IconBolt,
   "bolt.horizontal.circle": IconBolt,
   camera: IconCamera,
+  cloud: IconCloud,
   checkmark: IconCheck,
   "checkmark.circle": IconCircleCheck,
   "checkmark.shield": IconShieldCheck,
@@ -132,6 +137,7 @@ const ANDROID_ICON_BY_SF_SYMBOL: Partial<Record<SFSymbol, Icon>> = {
   hammer: IconHammer,
   "info.circle": IconInfoCircle,
   ipad: IconDeviceTablet,
+  laptopcomputer: IconDeviceLaptop,
   iphone: IconDeviceMobile,
   link: IconLink,
   "line.3.horizontal.decrease": IconFilter,
@@ -140,6 +146,8 @@ const ANDROID_ICON_BY_SF_SYMBOL: Partial<Record<SFSymbol, Icon>> = {
   "list.clipboard": IconClipboardList,
   lock: IconLock,
   "lock.open": IconLockOpen,
+  macmini: IconServer,
+  "macpro.gen3": IconDeviceDesktop,
   macwindow: IconAppWindow,
   magnifyingglass: IconSearch,
   paintbrush: IconPalette,
@@ -148,6 +156,7 @@ const ANDROID_ICON_BY_SF_SYMBOL: Partial<Record<SFSymbol, Icon>> = {
   plus: IconPlus,
   "questionmark.circle": IconHelpCircle,
   "qrcode.viewfinder": IconQrcode,
+  pc: IconBrandWindows,
   "point.3.connected.trianglepath.dotted": IconNetwork,
   "point.topleft.down.curvedto.point.bottomright.up": IconGitMerge,
   safari: IconExternalLink,
@@ -157,6 +166,7 @@ const ANDROID_ICON_BY_SF_SYMBOL: Partial<Record<SFSymbol, Icon>> = {
   "slider.horizontal.3": IconAdjustmentsHorizontal,
   "square.and.arrow.up": IconShare,
   "square.and.pencil": IconEdit,
+  "square.grid.2x2": IconLayoutGrid,
   "square.split.2x1": IconLayoutColumns,
   "stop.fill": IconPlayerStopFilled,
   terminal: IconTerminal2,
