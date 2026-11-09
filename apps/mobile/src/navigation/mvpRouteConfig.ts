@@ -520,6 +520,31 @@ export const MVP_SETTINGS_ROUTES = {
     linking: `${SETTINGS}/node-verification/:environmentId/:nodeId`,
     ...SETTINGS_PAGE,
   },
+  /** The machines whose own settings this device may open (one goes straight to it). */
+  SettingsMachines: { linking: `${SETTINGS}/machines`, ...SETTINGS_PAGE },
+  /** One machine's own settings, grouped: Providers, Agents, Work, Machine. */
+  SettingsMachine: { linking: `${SETTINGS}/machines/:environmentId`, ...SETTINGS_PAGE },
+  SettingsMachineProviders: {
+    linking: `${SETTINGS}/machines/:environmentId/providers`,
+    ...SETTINGS_PAGE,
+  },
+  SettingsMachineProvider: {
+    linking: `${SETTINGS}/machines/:environmentId/providers/:instanceId`,
+    ...SETTINGS_PAGE,
+  },
+  SettingsMachineAgents: {
+    linking: `${SETTINGS}/machines/:environmentId/agents`,
+    ...SETTINGS_PAGE,
+  },
+  SettingsMachineWork: { linking: `${SETTINGS}/machines/:environmentId/work`, ...SETTINGS_PAGE },
+  SettingsMachineUsagePrices: {
+    linking: `${SETTINGS}/machines/:environmentId/usage-prices`,
+    ...SETTINGS_PAGE,
+  },
+  SettingsMachineSystem: {
+    linking: `${SETTINGS}/machines/:environmentId/machine`,
+    ...SETTINGS_PAGE,
+  },
   SettingsAppearance: { linking: `${SETTINGS}/appearance`, ...SETTINGS_PAGE },
   SettingsClientStorage: { linking: `${SETTINGS}/client-storage`, ...SETTINGS_PAGE },
   SettingsAbout: { linking: `${SETTINGS}/about`, ...SETTINGS_PAGE },

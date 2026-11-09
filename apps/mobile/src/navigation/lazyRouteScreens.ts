@@ -439,3 +439,59 @@ export const ScheduleEditorRouteScreen = lazyScreen(
       require("../features/automations/ScheduleEditorRouteScreen") as typeof import("../features/automations/ScheduleEditorRouteScreen")
     ).ScheduleEditorRouteScreen,
 );
+export const SettingsMachinesRouteScreen = lazyScreen(
+  "SettingsMachinesRouteScreen",
+  () =>
+    (
+      require("../features/settings/machine/SettingsMachinesRouteScreen") as typeof import("../features/settings/machine/SettingsMachinesRouteScreen")
+    ).SettingsMachinesRouteScreen,
+);
+export const SettingsMachineRouteScreen = lazyScreen(
+  "SettingsMachineRouteScreen",
+  () =>
+    (
+      require("../features/settings/machine/SettingsMachineRouteScreen") as typeof import("../features/settings/machine/SettingsMachineRouteScreen")
+    ).SettingsMachineRouteScreen,
+);
+export const SettingsMachineProvidersRouteScreen = lazyScreen(
+  "SettingsMachineProvidersRouteScreen",
+  () =>
+    (
+      require("../features/settings/machine/SettingsMachineProvidersRouteScreen") as typeof import("../features/settings/machine/SettingsMachineProvidersRouteScreen")
+    ).SettingsMachineProvidersRouteScreen,
+);
+export const SettingsMachineProviderRouteScreen = lazyScreen(
+  "SettingsMachineProviderRouteScreen",
+  () =>
+    (
+      require("../features/settings/machine/SettingsMachineProviderRouteScreen") as typeof import("../features/settings/machine/SettingsMachineProviderRouteScreen")
+    ).SettingsMachineProviderRouteScreen,
+);
+export const SettingsMachineAgentsRouteScreen = lazyScreen(
+  "SettingsMachineAgentsRouteScreen",
+  () =>
+    (
+      require("../features/settings/machine/SettingsMachineAgentsRouteScreen") as typeof import("../features/settings/machine/SettingsMachineAgentsRouteScreen")
+    ).SettingsMachineAgentsRouteScreen,
+);
+export const SettingsMachineWorkRouteScreen = lazyScreen(
+  "SettingsMachineWorkRouteScreen",
+  () =>
+    (
+      require("../features/settings/machine/SettingsMachineWorkRouteScreen") as typeof import("../features/settings/machine/SettingsMachineWorkRouteScreen")
+    ).SettingsMachineWorkRouteScreen,
+);
+export const SettingsMachineSystemRouteScreen = lazyScreen(
+  "SettingsMachineSystemRouteScreen",
+  () =>
+    (
+      require("../features/settings/machine/SettingsMachineSystemRouteScreen") as typeof import("../features/settings/machine/SettingsMachineSystemRouteScreen")
+    ).SettingsMachineSystemRouteScreen,
+);
+export const SettingsMachineUsagePricesRouteScreen = lazyScreen(
+  "SettingsMachineUsagePricesRouteScreen",
+  () =>
+    (
+      require("../features/settings/machine/SettingsMachineUsagePricesRouteScreen") as typeof import("../features/settings/machine/SettingsMachineUsagePricesRouteScreen")
+    ).SettingsMachineUsagePricesRouteScreen,
+);

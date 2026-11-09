@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { EMPTY_DRAFT, hostFromDraft, toDraft } from "./deviceHosts.logic";
+import { EMPTY_DRAFT, hostFromDraft, toDraft } from "./deviceHosts.ts";
 
 describe("SSH host editor fields", () => {
   it("builds a host, naming it after its destination when no name is given", () => {

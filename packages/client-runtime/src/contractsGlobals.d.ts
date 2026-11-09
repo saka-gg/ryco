@@ -5,7 +5,7 @@
  * cross-platform web-interop globals (File/Blob/TextEncoder/TextDecoder for
  * contracts; URL and URLSearchParams, timers, console, AbortController/
  * AbortSignal, and structural WebSocket/CloseEvent shapes for the transport;
- * URLSearchParams also for the shared prompt link parser); declare them minimally here
+ * URLSearchParams also for the shared prompt link parser and settings secret redaction); declare them minimally here
  * instead of readmitting the entire DOM lib. The WebSocket interface
  * deliberately has no constructor — sockets can only enter through the
  * platform Socket contract. These shims are visible only to this package's
@@ -62,6 +62,8 @@ declare class URL {
 
 declare class URLSearchParams {
   constructor(init?: string);
+  append(name: string, value: string): void;
+  [Symbol.iterator](): IterableIterator<[string, string]>;
   get(name: string): string | null;
   getAll(name: string): string[];
   has(name: string): boolean;

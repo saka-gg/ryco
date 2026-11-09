@@ -4,7 +4,11 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   applyMcpInstallationList,
   applyMcpInstallationMutation,
+  automaticAgentControlStatus,
   emptyMcpInstallationSettingsState,
+  installableAgentControlWorkspaces,
+  latestMcpInstallation,
+  mcpInstallationStatus,
 } from "./mcpInstallations.ts";
 
 const installation = (
@@ -46,5 +50,39 @@ describe("MCP installation settings state", () => {
         installation: installation(2, "verifying"),
       }),
     ).toBe(current);
+  });
+});
+
+describe("Agent Control installation presentation", () => {
+  it("picks the workspace's most recently updated installation", () => {
+    const older = installation(1, "disconnected");
+    const newer = {
+      ...installation(2, "connected"),
+      installationId: "installation-2" as AgentControlMcpInstallation["installationId"],
+    };
+    expect(latestMcpInstallation([older, newer], older.workspaceId)).toBe(newer);
+    expect(
+      latestMcpInstallation([older], "other" as AgentControlMcpInstallation["workspaceId"]),
+    ).toBeUndefined();
+  });
+
+  it("names each installation state", () => {
+    expect(mcpInstallationStatus(undefined)).toEqual({ label: "Not connected", tone: "outline" });
+    expect(mcpInstallationStatus(installation(1, "connected")).label).toBe("Connected");
+    expect(mcpInstallationStatus(installation(1, "repair-needed")).tone).toBe("error");
+    expect(mcpInstallationStatus(installation(1, "verifying")).label).toBe("Connecting");
+  });
+
+  it("lists installable workspaces and automatic providers", () => {
+    const workspace = (externalAgentControl: string) =>
+      ({ capabilities: { externalAgentControl } }) as never;
+    expect(
+      installableAgentControlWorkspaces([workspace("available"), workspace("unavailable")]),
+    ).toHaveLength(1);
+    const provider = (enabled: boolean, automaticAgentControl: string) =>
+      ({ enabled, capabilities: { automaticAgentControl } }) as never;
+    expect(automaticAgentControlStatus(provider(true, "available")).automatic).toBe(true);
+    expect(automaticAgentControlStatus(provider(true, "unavailable")).label).toBe("Unavailable");
+    expect(automaticAgentControlStatus(provider(false, "available")).label).toBe("Disabled");
   });
 });

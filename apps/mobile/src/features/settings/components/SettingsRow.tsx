@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Pressable, View } from "react-native";
 
 import { SymbolView, type AppSymbolName } from "../../../components/AppSymbol";
@@ -15,6 +16,8 @@ export function SettingsRow(props: {
   readonly detail?: string;
   /** A plain leading SF Symbol, tinted like the rest of the app's icons. */
   readonly icon?: AppSymbolName;
+  /** A leading mark other than an SF Symbol, such as a provider's logo; wins over `icon`. */
+  readonly leading?: ReactNode;
   readonly onPress?: () => void;
   readonly first?: boolean;
   readonly destructive?: boolean;
@@ -30,7 +33,9 @@ export function SettingsRow(props: {
       // The separator starts after the icon, as in a grouped iOS list.
       className={`flex-row items-center gap-3 pl-4 ${props.disabled ? "opacity-40" : ""}`}
     >
-      {props.icon ? (
+      {props.leading ? (
+        <View className="h-6 w-6 items-center justify-center">{props.leading}</View>
+      ) : props.icon ? (
         <View className="h-6 w-6 items-center justify-center">
           <SymbolView name={props.icon} size={20} tintColor={iconColor} type="monochrome" />
         </View>

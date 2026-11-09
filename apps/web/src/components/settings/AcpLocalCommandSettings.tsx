@@ -12,7 +12,7 @@ import {
   sameLocalCommand,
   settlePublishedCommands,
   type AcpLocalCommand,
-} from "./acpAgentConfig.logic";
+} from "@ryco/client-runtime/state/settings/acpAgentConfig";
 
 interface ArgumentRow {
   readonly id: string;

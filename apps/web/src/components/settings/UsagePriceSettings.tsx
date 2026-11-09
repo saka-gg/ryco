@@ -21,6 +21,7 @@ import {
 import { isNodeSettingsTargetReadOnly } from "./settingsSections.logic";
 import { SharedSettingRow, type SharedSettingControl } from "./sharedSettings/SharedSettingRow";
 import {
+  applyUsagePricePatch,
   listsUsagePriceModel,
   resolveUsagePriceDrafts,
   upsertUsagePriceDraft,
@@ -29,7 +30,7 @@ import {
   type UsagePriceField,
   type UsagePriceMode,
   type UsagePriceRow,
-} from "./usagePriceSettings.logic";
+} from "@ryco/client-runtime/state/settings/usagePrices";
 import {
   takeUsagePriceRow,
   USAGE_PRICE_SECTION_TITLE,
@@ -75,19 +76,6 @@ export function UsagePriceSettings() {
 
 const nodeKeepsUsagePrices = (config: NodeSettingsConfig): boolean =>
   config.environment.capabilities.usagePriceOverrides === true;
-
-/** The overrides after a patch of the editor (`null` removes a model). */
-function applyUsagePricePatch(
-  saved: UsagePriceOverrides,
-  patch: Readonly<Record<string, UsagePriceOverrides[string] | null>>,
-): UsagePriceOverrides {
-  const next: Record<string, UsagePriceOverrides[string]> = { ...saved };
-  for (const [model, entry] of Object.entries(patch)) {
-    if (entry === null) delete next[model];
-    else next[model] = entry;
-  }
-  return next;
-}
 
 function UsagePriceEditor({
   control,

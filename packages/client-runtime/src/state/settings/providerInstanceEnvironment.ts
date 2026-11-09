@@ -1,8 +1,8 @@
 import {
   ProviderInstanceEnvironmentVariableName,
   type ProviderInstanceEnvironmentVariable,
-} from "@ryco/contracts";
-import { Schema } from "effect";
+} from "@ryco/contracts/provider-instance";
+import * as Schema from "effect/Schema";
 
 const isEnvironmentVariableName = Schema.is(ProviderInstanceEnvironmentVariableName);
 // Only for the error message; `ProviderInstanceEnvironmentVariableName` decides what is valid.

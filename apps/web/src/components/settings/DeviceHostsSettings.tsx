@@ -15,7 +15,12 @@ import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 import { SettingsSection } from "./settingsLayout";
 import { isNodeSettingsTargetReadOnly } from "./settingsSections.logic";
-import { EMPTY_DRAFT, hostFromDraft, toDraft, type Draft } from "./deviceHosts.logic";
+import {
+  EMPTY_DRAFT,
+  hostFromDraft,
+  toDraft,
+  type Draft,
+} from "@ryco/client-runtime/state/settings/deviceHosts";
 
 const fieldClass =
   "h-8 w-full rounded-md border border-border bg-background px-2 text-xs disabled:opacity-60";

@@ -236,6 +236,11 @@
       "import": "./src/providerInstance.ts",
       "require": "./src/providerInstance.ts"
     },
+    "./acp-registry": {
+      "types": "./src/acpRegistry.ts",
+      "import": "./src/acpRegistry.ts",
+      "require": "./src/acpRegistry.ts"
+    },
     "./provider-runtime": {
       "types": "./src/providerRuntime.ts",
       "import": "./src/providerRuntime.ts",

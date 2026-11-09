@@ -10,6 +10,9 @@ import {
   type UsagePriceOverrideIssueKind,
 } from "@ryco/shared/usagePriceOverrides";
 
+// The usage price editor's rules: node-wide custom prices and model mappings for usage cost,
+// shared by the web's and the phone's settings.
+
 /** Prices in USD per million tokens; blank cache prices charge the input price. */
 export const USAGE_PRICE_FIELDS = [
   { key: "inputUsdPerMillion", label: "Input", optional: false },
@@ -264,4 +267,17 @@ export function upsertUsagePriceDraft(
 ): readonly UsagePriceDraft[] {
   const index = drafts.findIndex((entry) => entry.id === draft.id);
   return index === -1 ? [...drafts, draft] : drafts.with(index, draft);
+}
+
+/** The overrides after a patch of the editor (`null` removes a model). */
+export function applyUsagePricePatch(
+  saved: UsagePriceOverrides,
+  patch: Readonly<Record<string, UsagePriceOverride | null>>,
+): UsagePriceOverrides {
+  const next: Record<string, UsagePriceOverride> = { ...saved };
+  for (const [model, entry] of Object.entries(patch)) {
+    if (entry === null) delete next[model];
+    else next[model] = entry;
+  }
+  return next;
 }

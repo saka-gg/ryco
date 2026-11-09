@@ -1,19 +1,18 @@
 import { describe, expect, it } from "vite-plus/test";
-import { ProviderDriverKind } from "@ryco/contracts";
 import { REDACTED_SETTING_SECRET } from "@ryco/shared/settingsSecrets";
 
-import { DRIVER_OPTION_BY_VALUE } from "./providerDriverMeta";
+import { getProviderDriverDefinition } from "./providerDrivers.ts";
 import {
   deriveProviderSettingsFields,
   nextProviderConfigWithFieldValue,
   providerSettingsTextFieldDisplay,
   readProviderConfigBoolean,
   readProviderConfigString,
-} from "./ProviderSettingsForm";
+} from "./providerSettingsFields.ts";
 
-describe("ProviderSettingsForm helpers", () => {
+describe("provider settings fields", () => {
   it("derives visible provider config fields from the client definition schema", () => {
-    const codex = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("codex")];
+    const codex = getProviderDriverDefinition("codex");
 
     expect(codex).toBeDefined();
     expect(deriveProviderSettingsFields(codex!).map((field) => field.key)).toEqual([
@@ -24,7 +23,7 @@ describe("ProviderSettingsForm helpers", () => {
   });
 
   it("sources labels and descriptions from schema annotations", () => {
-    const opencode = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("opencode")];
+    const opencode = getProviderDriverDefinition("opencode");
     expect(opencode).toBeDefined();
 
     const serverPassword = deriveProviderSettingsFields(opencode!).find(
@@ -39,7 +38,7 @@ describe("ProviderSettingsForm helpers", () => {
   });
 
   it("derives a select with its choices and default from the schema", () => {
-    const claude = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("claudeAgent")];
+    const claude = getProviderDriverDefinition("claudeAgent");
     expect(claude).toBeDefined();
     const fields = deriveProviderSettingsFields(claude!);
 
@@ -68,7 +67,7 @@ describe("ProviderSettingsForm helpers", () => {
   });
 
   it("stores a non-default select choice and omits the default", () => {
-    const claude = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("claudeAgent")];
+    const claude = getProviderDriverDefinition("claudeAgent");
     const autoCompact = deriveProviderSettingsFields(claude!).find(
       (field) => field.key === "autoCompact",
     )!;
@@ -89,14 +88,14 @@ describe("ProviderSettingsForm helpers", () => {
   });
 
   it("exposes Grok as an early-access provider with a binary path field", () => {
-    const grok = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("grok")];
+    const grok = getProviderDriverDefinition("grok");
 
     expect(grok).toMatchObject({ label: "Grok", badgeLabel: "Early Access" });
     expect(deriveProviderSettingsFields(grok!).map((field) => field.key)).toEqual(["binaryPath"]);
   });
 
   it("exposes ACP Registry without editable installation identity fields", () => {
-    const registry = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("acpRegistry")];
+    const registry = getProviderDriverDefinition("acpRegistry");
 
     expect(registry).toMatchObject({ label: "ACP Registry" });
     // Installation identity must come from the explicit verified install flow.
@@ -104,7 +103,7 @@ describe("ProviderSettingsForm helpers", () => {
   });
 
   it("preserves unknown config keys while omitting empty configurable fields", () => {
-    const opencode = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("opencode")];
+    const opencode = getProviderDriverDefinition("opencode");
     expect(opencode).toBeDefined();
 
     const serverUrl = deriveProviderSettingsFields(opencode!).find(

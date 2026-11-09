@@ -24,7 +24,6 @@ import {
   type ProviderInstanceEnvironmentVariable,
   type ProviderInstanceId,
   type ServerProvider,
-  type ServerProviderModel,
   type ServerProviderRateLimits,
 } from "@ryco/contracts";
 
@@ -44,7 +43,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { DriverOption } from "./providerDriverMeta";
 import { AcpRegistryAuthentication } from "./AcpRegistryAuthentication";
 import { AcpRegistrySettings } from "./AcpRegistrySettings";
-import { readAcpAgentConfig } from "./acpAgentConfig.logic";
+import { readAcpAgentConfig } from "@ryco/client-runtime/state/settings/acpAgentConfig";
 import { ProviderSettingsForm } from "./ProviderSettingsForm";
 import { ProviderModelsSection } from "./ProviderModelsSection";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
@@ -67,7 +66,16 @@ import {
   sameEnvironment,
   withEnvironmentDraftValue,
   type EnvironmentDraftRow,
-} from "./ProviderInstanceEnvironment.logic";
+} from "@ryco/client-runtime/state/settings/providerInstanceEnvironment";
+import {
+  deriveProviderModelsForDisplay,
+  readProviderConfigStringArray,
+  withProviderInstanceAccentColor,
+  withProviderInstanceConfig,
+  withProviderInstanceCustomModels,
+  withProviderInstanceDisplayName,
+  withProviderInstanceEnvironment,
+} from "@ryco/client-runtime/state/settings/providerInstanceSettings";
 
 const PROVIDER_ACCENT_SWATCHES = [
   "#2563eb",
@@ -79,60 +87,6 @@ const PROVIDER_ACCENT_SWATCHES = [
 ] as const;
 
 const EMPTY_ENVIRONMENT: ReadonlyArray<ProviderInstanceEnvironmentVariable> = [];
-
-/**
- * Read a string[] at `key` from the opaque config blob, filtering out
- * non-string entries. Used for `customModels`, which is always typed as
- * `string[]` by the concrete driver schemas but arrives here as
- * `Schema.Unknown`.
- */
-function readConfigStringArray(config: unknown, key: string): ReadonlyArray<string> {
-  if (config === null || typeof config !== "object") return [];
-  const value = (config as Record<string, unknown>)[key];
-  if (!Array.isArray(value)) return [];
-  return value.filter((entry): entry is string => typeof entry === "string");
-}
-
-/**
- * Set `key` to an arbitrary value on the opaque config blob. Unlike
- * provider settings field updates, does not drop empty-looking values — the
- * caller is responsible for deciding whether an empty array / empty
- * object should be stored explicitly (e.g. `customModels: []` is a
- * meaningful "user cleared their custom list" state distinct from
- * "driver default").
- */
-function nextConfigBlobWithValue(
-  config: unknown,
-  key: string,
-  value: unknown,
-): Record<string, unknown> {
-  const base: Record<string, unknown> =
-    config !== null && typeof config === "object" ? { ...(config as Record<string, unknown>) } : {};
-  base[key] = value;
-  return base;
-}
-
-export function deriveProviderModelsForDisplay(input: {
-  readonly liveModels: ReadonlyArray<ServerProviderModel> | undefined;
-  readonly customModels: ReadonlyArray<string>;
-}): ReadonlyArray<ServerProviderModel> {
-  const liveCustomModelsBySlug = new Map(
-    (input.liveModels ?? [])
-      .filter((model) => model.isCustom)
-      .map((model) => [model.slug, model] as const),
-  );
-  const serverModels = input.liveModels?.filter((model) => !model.isCustom) ?? [];
-  const customModels = input.customModels.map(
-    (slug) =>
-      liveCustomModelsBySlug.get(slug) ?? {
-        slug,
-        name: slug,
-        isCustom: true,
-        capabilities: null,
-      },
-  );
-  return [...serverModels, ...customModels];
-}
 
 function ProviderAccentColorPicker(props: {
   readonly displayName: string;
@@ -486,7 +440,7 @@ export function ProviderInstanceCard({
     },
   });
 
-  const customModels = readConfigStringArray(instance.config, "customModels");
+  const customModels = readProviderConfigStringArray(instance.config, "customModels");
   // Server-returned models may lag behind settings writes. Treat probe
   // models as the source for built-ins only; custom rows come directly
   // from the current instance config so add/remove reflects immediately.
@@ -495,53 +449,24 @@ export function ProviderInstanceCard({
     customModels,
   });
 
-  const updateDisplayName = (value: string) => {
-    const trimmed = value.trim();
-    const { displayName: _omit, ...rest } = instance;
-    onUpdate(
-      trimmed.length > 0
-        ? ({ ...rest, displayName: trimmed } as ProviderInstanceConfig)
-        : (rest as ProviderInstanceConfig),
-    );
-  };
+  const updateDisplayName = (value: string) =>
+    onUpdate(withProviderInstanceDisplayName(instance, value));
 
   const updateEnabled = (value: boolean) => {
     onUpdate({ ...instance, enabled: value });
   };
 
-  const updateAccentColor = (value: string) => {
-    const normalized = normalizeProviderAccentColor(value);
-    const { accentColor: _omit, ...rest } = instance;
-    onUpdate(
-      normalized
-        ? ({ ...rest, accentColor: normalized } as ProviderInstanceConfig)
-        : (rest as ProviderInstanceConfig),
-    );
-  };
+  const updateAccentColor = (value: string) =>
+    onUpdate(withProviderInstanceAccentColor(instance, value));
 
-  const updateConfig = (nextConfig: Record<string, unknown> | undefined) => {
-    const { config: _omit, ...rest } = instance;
-    onUpdate(
-      nextConfig !== undefined
-        ? ({ ...rest, config: nextConfig } as ProviderInstanceConfig)
-        : (rest as ProviderInstanceConfig),
-    );
-  };
+  const updateConfig = (nextConfig: Record<string, unknown> | undefined) =>
+    onUpdate(withProviderInstanceConfig(instance, nextConfig));
 
-  const updateCustomModels = (next: ReadonlyArray<string>) => {
-    const nextConfig = nextConfigBlobWithValue(instance.config, "customModels", [...next]);
-    const { config: _omit, ...rest } = instance;
-    onUpdate({ ...rest, config: nextConfig } as ProviderInstanceConfig);
-  };
+  const updateCustomModels = (next: ReadonlyArray<string>) =>
+    onUpdate(withProviderInstanceCustomModels(instance, next));
 
-  const updateEnvironment = (environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>) => {
-    const { environment: _omit, ...rest } = instance;
-    onUpdate(
-      environment.length > 0
-        ? ({ ...rest, environment } as ProviderInstanceConfig)
-        : (rest as ProviderInstanceConfig),
-    );
-  };
+  const updateEnvironment = (environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>) =>
+    onUpdate(withProviderInstanceEnvironment(instance, environment));
 
   const titleIconNode = driverKind ? (
     <ProviderInstanceIcon

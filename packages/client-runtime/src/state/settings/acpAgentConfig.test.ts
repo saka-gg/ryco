@@ -8,7 +8,7 @@ import {
   registryAgentConfig,
   sameArguments,
   settlePublishedCommands,
-} from "./acpAgentConfig.logic";
+} from "./acpAgentConfig.ts";
 
 describe("readAcpAgentConfig", () => {
   it("reads saved registry configs, including ones from before local commands", () => {

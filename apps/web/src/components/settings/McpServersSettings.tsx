@@ -33,11 +33,18 @@ import {
   configFromMcpServerForm,
   createEmptyMcpServerForm,
   formFromMcpServer,
+  isMcpServerWritable,
+  mcpProviderSupportStatus,
+  mcpServerAuthLabel,
+  mcpServerInventoryLabel,
+  mcpServerSourceLabel,
+  mcpServerStatus,
+  mcpWorkspaceLimits,
   secretMutationsFromMcpServerForm,
   summarizeMcpServerConnection,
   validateMcpServerForm,
   type McpServerFormState,
-} from "../../mcpServers";
+} from "@ryco/client-runtime/state/settings/mcpServers";
 import { formatProviderDriverKindLabel } from "../../providerModels";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -87,58 +94,6 @@ function showErrorToast(title: string, error: unknown) {
       description: error instanceof Error ? error.message : "An error occurred.",
     }),
   );
-}
-
-function sourceLabel(source: McpServer["source"]): string {
-  switch (source) {
-    case "user":
-      return "User config";
-    case "project":
-      return "Project";
-    case "system":
-      return "System";
-    case "managed":
-      return "Managed";
-    case "mixed":
-      return "Mixed";
-    case "unknown":
-      return "Unknown";
-  }
-}
-
-function statusVariant(server: McpServer): "success" | "warning" | "error" | "outline" {
-  if (server.startupStatus === "failed") return "error";
-  if (server.startupStatus === "disabled") return "outline";
-  if (server.authStatus === "notLoggedIn") return "warning";
-  if (server.startupStatus === "ready") return "success";
-  return "outline";
-}
-
-function statusLabel(server: McpServer): string {
-  if (server.startupStatus === "disabled") return "Disabled";
-  if (server.startupStatus === "failed") return "Failed";
-  if (server.authStatus === "notLoggedIn") return "Login needed";
-  if (server.startupStatus === "ready") return "Ready";
-  return "Unknown";
-}
-
-function providerSupportVariant(provider: McpProviderSupport): "success" | "warning" | "outline" {
-  if (!provider.enabled) return "outline";
-  if (provider.status === "managed") return "success";
-  if (provider.status === "external") return "warning";
-  return "outline";
-}
-
-function providerSupportLabel(provider: McpProviderSupport): string {
-  if (!provider.enabled) return "Disabled";
-  switch (provider.status) {
-    case "managed":
-      return "Managed";
-    case "external":
-      return "External config";
-    case "unsupported":
-      return "Not wired";
-  }
 }
 
 function providerDisplayName(provider: McpProviderSupport): string {
@@ -580,8 +535,8 @@ function ProviderSupportSection({
             description={provider.message}
             control={
               <>
-                <Badge size="sm" variant={providerSupportVariant(provider)}>
-                  {providerSupportLabel(provider)}
+                <Badge size="sm" variant={mcpProviderSupportStatus(provider).tone}>
+                  {mcpProviderSupportStatus(provider).label}
                 </Badge>
                 {provider.workspaceId ? (
                   <Button
@@ -677,14 +632,6 @@ function InventoryList({ server }: { readonly server: McpServer }) {
   );
 }
 
-const AUTH_STATUS_LABELS: Record<McpServer["authStatus"], string | null> = {
-  unsupported: null,
-  notLoggedIn: "Signed out",
-  bearerToken: "Bearer token",
-  oAuth: "OAuth",
-  unknown: null,
-};
-
 function McpServerCard({
   server,
   capabilities,
@@ -707,12 +654,12 @@ function McpServerCard({
   const [expanded, setExpanded] = useState(false);
   const connection = summarizeMcpServerConnection(server);
   const inventoryAvailable = capabilities.inventory === "available";
-  const inventoryLabel = inventoryAvailable
-    ? `${server.tools.length} tools · ${server.resources.length + server.resourceTemplates.length} resources`
-    : "Inventory not available";
-
-  const authLabel = AUTH_STATUS_LABELS[server.authStatus];
-  const meta = [server.config.transport.toUpperCase(), inventoryLabel, authLabel].filter(Boolean);
+  const status = mcpServerStatus(server);
+  const meta = [
+    server.config.transport.toUpperCase(),
+    mcpServerInventoryLabel(server, capabilities),
+    mcpServerAuthLabel(server),
+  ].filter(Boolean);
 
   return (
     <div
@@ -735,11 +682,11 @@ function McpServerCard({
             <h3 className="min-w-0 truncate text-[13px] font-medium text-foreground">
               {server.name}
             </h3>
-            <Badge size="sm" variant={statusVariant(server)}>
-              {statusLabel(server)}
+            <Badge size="sm" variant={status.tone}>
+              {status.label}
             </Badge>
             <Badge size="sm" variant="outline">
-              {sourceLabel(server.source)}
+              {mcpServerSourceLabel(server.source)}
             </Badge>
           </div>
           <p
@@ -1034,17 +981,7 @@ export function McpServersSettings() {
   };
 
   const limits = selectedWorkspace
-    ? [
-        selectedWorkspace.capabilities.health !== "available"
-          ? `${selectedProviderName} doesn't report live health`
-          : null,
-        selectedWorkspace.capabilities.inventory !== "available"
-          ? "tool inventory unavailable"
-          : null,
-        selectedWorkspace.capabilities.enableDisable !== "available"
-          ? "no per-server toggle"
-          : null,
-      ].filter((entry): entry is string => entry !== null)
+    ? mcpWorkspaceLimits(selectedWorkspace, selectedProviderName)
     : [];
 
   return (
@@ -1180,10 +1117,7 @@ export function McpServersSettings() {
                     scopes: [],
                   }
                 }
-                writable={
-                  server.source === "user" ||
-                  (server.source === "project" && selectedWorkspace?.nativeScope === "project")
-                }
+                writable={isMcpServerWritable(server, selectedWorkspace)}
                 mutating={mutatingName === server.name}
                 onToggleEnabled={(target, enabled) => void toggleEnabled(target, enabled)}
                 onEdit={openEditDialog}

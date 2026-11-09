@@ -11,10 +11,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentTokenMode,
   OpinionatedPluginCatalogItem,
-  OpinionatedPluginId,
   OpinionatedPluginStatus,
 } from "@ryco/contracts";
 import { DEFAULT_AGENT_TOKEN_MODE } from "@ryco/contracts";
+import {
+  canInstallOpinionatedPlugin,
+  groupOpinionatedPluginStatuses,
+  opinionatedPluginImpactLabel,
+  opinionatedPluginName,
+  opinionatedPluginScopeLabel,
+  opinionatedPluginStatus,
+  opinionatedPluginStatusKey,
+  opinionatedPluginTargetLabel,
+  replaceOpinionatedPluginStatus,
+  sortOpinionatedPlugins,
+} from "@ryco/client-runtime/state/settings/opinionatedPlugins";
 
 import { readEnvironmentApi } from "../../environmentApi";
 import { ensureLocalApi } from "../../localApi";
@@ -37,36 +48,6 @@ import {
   SettingsBlock,
 } from "./settingsLayout";
 
-function pluginStatusKey(status: OpinionatedPluginStatus): string {
-  return `${status.pluginId}:${status.targetKind}:${status.providerInstanceId ?? "global"}`;
-}
-
-function statusLabel(status: OpinionatedPluginStatus): string {
-  switch (status.state) {
-    case "installed":
-      return "Installed";
-    case "not-installed":
-      return "Not installed";
-    case "unsupported":
-      return "Unsupported";
-    case "error":
-      return "Error";
-  }
-}
-
-function statusVariant(status: OpinionatedPluginStatus) {
-  switch (status.state) {
-    case "installed":
-      return "success" as const;
-    case "not-installed":
-      return "outline" as const;
-    case "unsupported":
-      return "warning" as const;
-    case "error":
-      return "error" as const;
-  }
-}
-
 function statusIcon(status: OpinionatedPluginStatus) {
   switch (status.state) {
     case "installed":
@@ -79,40 +60,6 @@ function statusIcon(status: OpinionatedPluginStatus) {
   }
 }
 
-function targetLabel(status: OpinionatedPluginStatus): string {
-  if (status.targetKind === "global") {
-    return "System";
-  }
-  return status.providerDisplayName ?? String(status.providerInstanceId ?? "Provider");
-}
-
-function impactLabel(plugin: OpinionatedPluginCatalogItem): string {
-  return plugin.impact === "tool-output" ? "Tool output" : "Assistant output";
-}
-
-function scopeLabel(plugin: OpinionatedPluginCatalogItem): string {
-  return plugin.scope === "global" ? "Global" : "Provider";
-}
-
-function pluginSortValue(pluginId: OpinionatedPluginId): number {
-  switch (pluginId) {
-    case "rtk":
-      return 0;
-    case "caveman":
-      return 1;
-    case "token-optimizer":
-      return 2;
-    case "token-savior":
-      return 3;
-    case "lean-ctx":
-      return 4;
-  }
-}
-
-function targetSortValue(status: OpinionatedPluginStatus): string {
-  return `${status.targetKind === "global" ? "0" : "1"}:${targetLabel(status).toLowerCase()}`;
-}
-
 function PluginTargetRow({
   status,
   isInstalling,
@@ -122,17 +69,18 @@ function PluginTargetRow({
   isInstalling: boolean;
   onInstall: (status: OpinionatedPluginStatus) => void;
 }) {
-  const canInstall = status.canInstall && status.state !== "installed";
+  const canInstall = canInstallOpinionatedPlugin(status);
+  const presentation = opinionatedPluginStatus(status);
   return (
     <div className="flex flex-col gap-3 border-t border-border/60 py-3 first:border-t-0 sm:flex-row sm:items-center sm:justify-between">
       <div className="min-w-0 space-y-1">
         <div className="flex min-h-5 flex-wrap items-center gap-2">
           {statusIcon(status)}
           <span className="truncate text-[13px] font-medium text-foreground">
-            {targetLabel(status)}
+            {opinionatedPluginTargetLabel(status)}
           </span>
-          <Badge variant={statusVariant(status)} size="sm">
-            {statusLabel(status)}
+          <Badge variant={presentation.tone} size="sm">
+            {presentation.label}
           </Badge>
           {status.version ? (
             <span className="font-mono text-[11px] text-muted-foreground/70">{status.version}</span>
@@ -244,9 +192,7 @@ export function OpinionatedPluginsSettingsPanel() {
     }
     void Promise.all([server.listOpinionatedPlugins(), server.checkOpinionatedPlugins()])
       .then(([catalog, statusResult]) => {
-        setPlugins(
-          catalog.plugins.toSorted((a, b) => pluginSortValue(a.id) - pluginSortValue(b.id)),
-        );
+        setPlugins(sortOpinionatedPlugins(catalog.plugins));
         setStatuses(statusResult.statuses);
       })
       .catch((error: unknown) => {
@@ -268,22 +214,7 @@ export function OpinionatedPluginsSettingsPanel() {
     loadPlugins();
   }, [loadPlugins]);
 
-  const statusesByPlugin = useMemo(() => {
-    const map = new Map<OpinionatedPluginId, OpinionatedPluginStatus[]>();
-    for (const status of statuses) {
-      const list = map.get(status.pluginId) ?? [];
-      list.push(status);
-      map.set(status.pluginId, list);
-    }
-    const sortedMap = new Map<OpinionatedPluginId, OpinionatedPluginStatus[]>();
-    for (const [pluginId, list] of map) {
-      sortedMap.set(
-        pluginId,
-        list.toSorted((a, b) => targetSortValue(a).localeCompare(targetSortValue(b))),
-      );
-    }
-    return sortedMap;
-  }, [statuses]);
+  const statusesByPlugin = useMemo(() => groupOpinionatedPluginStatuses(statuses), [statuses]);
 
   const openDocs = (plugin: OpinionatedPluginCatalogItem) => {
     const url = plugin.docsUrl ?? plugin.homepageUrl;
@@ -315,14 +246,15 @@ export function OpinionatedPluginsSettingsPanel() {
       );
       return;
     }
-    const label = targetLabel(status);
+    const label = opinionatedPluginTargetLabel(status);
+    const pluginName = opinionatedPluginName(plugins, status.pluginId);
     void localApi.dialogs
       .confirm(
-        `Install ${status.pluginId === "rtk" ? "RTK" : "Caveman"} for ${label}?\n\nThis may run networked CLI installation commands on this machine.`,
+        `Install ${pluginName} for ${label}?\n\nThis may run networked CLI installation commands on this machine.`,
       )
       .then((confirmed) => {
         if (!confirmed) return;
-        const key = pluginStatusKey(status);
+        const key = opinionatedPluginStatusKey(status);
         setInstallingKey(key);
         return server
           .installOpinionatedPlugin({
@@ -330,13 +262,10 @@ export function OpinionatedPluginsSettingsPanel() {
             ...(status.providerInstanceId ? { providerInstanceId: status.providerInstanceId } : {}),
           })
           .then((result) => {
-            setStatuses((current) => {
-              const next = current.filter((candidate) => pluginStatusKey(candidate) !== key);
-              return [...next, result.status];
-            });
+            setStatuses((current) => replaceOpinionatedPluginStatus(current, result.status));
             toastManager.add({
               type: "success",
-              title: `${status.pluginId === "rtk" ? "RTK" : "Caveman"} installed`,
+              title: `${pluginName} installed`,
               description:
                 result.commands.length > 0 ? result.commands[result.commands.length - 1] : label,
             });
@@ -427,10 +356,10 @@ export function OpinionatedPluginsSettingsPanel() {
               status={
                 <span className="flex flex-wrap gap-1.5">
                   <Badge variant="info" size="sm">
-                    {impactLabel(plugin)}
+                    {opinionatedPluginImpactLabel(plugin)}
                   </Badge>
                   <Badge variant="outline" size="sm">
-                    {scopeLabel(plugin)}
+                    {opinionatedPluginScopeLabel(plugin)}
                   </Badge>
                 </span>
               }
@@ -449,9 +378,9 @@ export function OpinionatedPluginsSettingsPanel() {
                 ) : (
                   pluginStatuses.map((status) => (
                     <PluginTargetRow
-                      key={pluginStatusKey(status)}
+                      key={opinionatedPluginStatusKey(status)}
                       status={status}
-                      isInstalling={installingKey === pluginStatusKey(status)}
+                      isInstalling={installingKey === opinionatedPluginStatusKey(status)}
                       onInstall={install}
                     />
                   ))

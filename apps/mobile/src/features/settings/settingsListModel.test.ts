@@ -13,8 +13,18 @@ describe("Settings list", () => {
 
   it("keeps every settings page reachable from the list or from the page that owns it", () => {
     // The account page opens from Hub and account (the summary card); the verification
-    // ceremony from Node security.
-    const reachedElsewhere = new Set(["SettingsAccount", "SettingsNodeVerification"]);
+    // ceremony from Node security; one machine's pages from Machine settings.
+    const reachedElsewhere = new Set([
+      "SettingsAccount",
+      "SettingsNodeVerification",
+      "SettingsMachine",
+      "SettingsMachineProviders",
+      "SettingsMachineProvider",
+      "SettingsMachineAgents",
+      "SettingsMachineWork",
+      "SettingsMachineSystem",
+      "SettingsMachineUsagePrices",
+    ]);
     for (const route of Object.keys(MVP_SETTINGS_ROUTES)) {
       if (reachedElsewhere.has(route)) continue;
       const id = route === "SettingsNodeSecurity" ? "NodeSecurity" : route;

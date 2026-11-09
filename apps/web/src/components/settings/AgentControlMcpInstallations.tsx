@@ -7,7 +7,11 @@ import {
 import {
   applyMcpInstallationList,
   applyMcpInstallationMutation,
+  automaticAgentControlStatus,
   emptyMcpInstallationSettingsState,
+  installableAgentControlWorkspaces,
+  latestMcpInstallation,
+  mcpInstallationStatus,
 } from "@ryco/client-runtime/state/settings";
 import {
   BotIcon,
@@ -76,38 +80,6 @@ function formFor(workspace: McpWorkspace): AgentControlIntegrationForm {
     displayName: `${workspaceLabel(workspace)} Agent Control`,
     clientKind: clientKindFor(workspace),
   };
-}
-
-function latestInstallation(
-  installations: ReadonlyArray<AgentControlMcpInstallation>,
-  workspaceId: McpWorkspace["id"],
-): AgentControlMcpInstallation | undefined {
-  return installations
-    .filter((entry) => entry.workspaceId === workspaceId)
-    .toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
-}
-
-function installationStatus(installation: AgentControlMcpInstallation | undefined): {
-  readonly label: string;
-  readonly variant: "success" | "warning" | "error" | "outline";
-} {
-  if (!installation) return { label: "Not connected", variant: "outline" };
-  switch (installation.state) {
-    case "connected":
-      return { label: "Connected", variant: "success" };
-    case "repair-needed":
-      return { label: "Needs repair", variant: "error" };
-    case "disconnected":
-    case "revoked":
-      return { label: "Disconnected", variant: "outline" };
-    case "disconnecting":
-      return { label: "Disconnecting", variant: "warning" };
-    case "planned":
-    case "credential-written":
-    case "provider-written":
-    case "verifying":
-      return { label: "Connecting", variant: "warning" };
-  }
 }
 
 function successToast(title: string, description?: string) {
@@ -237,9 +209,7 @@ export function AgentControlMcpInstallations() {
     }
   };
 
-  const installableWorkspaces = workspaces.filter(
-    (workspace) => workspace.capabilities.externalAgentControl === "available",
-  );
+  const installableWorkspaces = installableAgentControlWorkspaces(workspaces);
 
   return (
     <div data-testid="agent-control-mcp-installations" className="contents">
@@ -262,8 +232,7 @@ export function AgentControlMcpInstallations() {
           providers.map((provider) => {
             const driver = getDriverOption(provider.driver);
             const Icon = driver?.icon ?? BotIcon;
-            const automatic =
-              provider.enabled && provider.capabilities.automaticAgentControl === "available";
+            const automatic = automaticAgentControlStatus(provider);
             return (
               <SettingsRow
                 key={provider.instanceId}
@@ -276,16 +245,10 @@ export function AgentControlMcpInstallations() {
                     </span>
                   </span>
                 }
-                description={
-                  automatic
-                    ? "Available in every new Ryco-managed session."
-                    : provider.enabled
-                      ? "This provider does not expose automatic Agent Control yet."
-                      : "This provider instance is disabled."
-                }
+                description={automatic.description}
                 control={
-                  <Badge size="sm" variant={automatic ? "success" : "outline"}>
-                    {automatic ? "Automatic" : provider.enabled ? "Unavailable" : "Disabled"}
+                  <Badge size="sm" variant={automatic.tone}>
+                    {automatic.label}
                   </Badge>
                 }
               />
@@ -341,8 +304,8 @@ export function AgentControlMcpInstallations() {
           />
         ) : (
           installableWorkspaces.map((workspace) => {
-            const installation = latestInstallation(installations.installations, workspace.id);
-            const status = installationStatus(installation);
+            const installation = latestMcpInstallation(installations.installations, workspace.id);
+            const status = mcpInstallationStatus(installation);
             const connected = installation?.state === "connected";
             const repairNeeded = installation?.state === "repair-needed";
             const working = busyId === workspace.id;
@@ -361,7 +324,7 @@ export function AgentControlMcpInstallations() {
                   <span className="flex min-w-0 items-center gap-2">
                     <Icon className="size-4 shrink-0 text-muted-foreground" />
                     <span className="truncate">{workspaceLabel(workspace)}</span>
-                    <Badge size="sm" variant={status.variant}>
+                    <Badge size="sm" variant={status.tone}>
                       {status.label}
                     </Badge>
                   </span>
