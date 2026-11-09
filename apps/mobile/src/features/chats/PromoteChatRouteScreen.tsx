@@ -1,6 +1,7 @@
 import { StackActions, type StaticScreenProps, useNavigation } from "@react-navigation/native";
 import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import {
+  advancePromotionStepsAfterMove,
   BUSY_CHAT_REASON,
   chatActivitySignature,
   chatConversationContinuity,
@@ -270,32 +271,15 @@ export function PromoteChatRouteScreen(props: PromoteChatRouteScreenProps) {
     });
   };
 
-  if (!thread || !project || !isChatProject(project)) {
-    return (
-      <View className="flex-1 bg-screen p-5">
-        <EmptyState
-          variant="plain"
-          title={project && !isChatProject(project) ? "Already a project" : "Chat not found"}
-          detail={
-            project && !isChatProject(project)
-              ? "This chat already lives in a project."
-              : "It may have been deleted on another device."
-          }
-        />
-      </View>
-    );
-  }
-  if (!previewApi) {
-    const unavailable = describePromotionUnavailable();
-    return (
-      <View className="flex-1 bg-screen p-5">
-        <EmptyState variant="plain" title={unavailable.title} detail={unavailable.message} />
-      </View>
-    );
-  }
-
+  // While and after it moves, the project is no longer a chat: the steps stay on screen.
   if (phase.kind !== "edit") {
     const warnings = phase.kind === "done" && promotionHasWarnings(phase.steps);
+    // The node re-points the project before it sets up Git, and the stream can say so before
+    // the request answers: the move then shows as done.
+    const steps =
+      phase.kind === "running" && project && !isChatProject(project)
+        ? advancePromotionStepsAfterMove(phase.steps, project.cwd)
+        : phase.steps;
     return (
       <ScrollView
         className="flex-1 bg-screen"
@@ -310,7 +294,7 @@ export function PromoteChatRouteScreen(props: PromoteChatRouteScreenProps) {
               : "Project created"}
         </Text>
         <View className="gap-3 rounded-2xl border border-border bg-card p-4">
-          {phase.steps.map((step) => (
+          {steps.map((step) => (
             <View key={step.id} className="flex-row gap-3">
               {step.status === "running" ? (
                 <ActivityIndicator size="small" />
@@ -345,6 +329,29 @@ export function PromoteChatRouteScreen(props: PromoteChatRouteScreenProps) {
       </ScrollView>
     );
   }
+  if (!thread || !project || !isChatProject(project)) {
+    return (
+      <View className="flex-1 bg-screen p-5">
+        <EmptyState
+          variant="plain"
+          title={project && !isChatProject(project) ? "Already a project" : "Chat not found"}
+          detail={
+            project && !isChatProject(project)
+              ? "This chat already lives in a project."
+              : "It may have been deleted on another device."
+          }
+        />
+      </View>
+    );
+  }
+  if (!previewApi) {
+    const unavailable = describePromotionUnavailable();
+    return (
+      <View className="flex-1 bg-screen p-5">
+        <EmptyState variant="plain" title={unavailable.title} detail={unavailable.message} />
+      </View>
+    );
+  }
 
   const status = describeDestinationStatus(destinationState);
   const movePlan = preview ? describeMovePlan(preview) : null;
@@ -360,7 +367,7 @@ export function PromoteChatRouteScreen(props: PromoteChatRouteScreenProps) {
       className="flex-1 bg-screen"
       keyboardShouldPersistTaps="handled"
       contentInsetAdjustmentBehavior="automatic"
-      contentContainerStyle={{ padding: 20, gap: 18 }}
+      contentContainerStyle={{ padding: 20, gap: 18, paddingBottom: 56 }}
     >
       <Text className="text-sm text-foreground-muted">
         The chat&apos;s folder moves to a place of its own and becomes a project: branches,
