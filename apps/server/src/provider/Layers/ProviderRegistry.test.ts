@@ -2555,6 +2555,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           assert.deepStrictEqual(status.updateRequiredModels, [
             { slug: "claude-opus-5", name: "Claude Opus 5", minVersion: "2.1.219" },
             { slug: "claude-fable-5-1", name: "Claude Fable 5.1", minVersion: "2.1.257" },
+            { slug: "claude-fable-5-2", name: "Claude Fable 5.2", minVersion: "2.1.321" },
           ]);
         }).pipe(
           Effect.provide(
@@ -2584,7 +2585,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             assert.strictEqual(status.status, "warning");
             assert.deepStrictEqual(
               status.updateRequiredModels?.map((model) => model.slug),
-              ["claude-opus-5", "claude-fable-5-1"],
+              ["claude-opus-5", "claude-fable-5-1", "claude-fable-5-2"],
             );
             assert.strictEqual(
               status.models.some((model) => model.slug === "claude-opus-5"),
@@ -2613,7 +2614,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           );
           assert.deepStrictEqual(
             status.updateRequiredModels?.map((model) => model.slug),
-            ["claude-fable-5-1"],
+            ["claude-fable-5-1", "claude-fable-5-2"],
           );
         }).pipe(
           Effect.provide(
@@ -2635,14 +2636,14 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           assert.strictEqual(status.status, "ready");
           assert.strictEqual("updateRequiredModels" in status, false);
           assert.strictEqual(
-            status.models.some((model) => model.slug === "claude-fable-5-1"),
+            status.models.some((model) => model.slug === "claude-fable-5-2"),
             true,
           );
         }).pipe(
           Effect.provide(
             mockSpawnerLayer((args) => {
               const joined = args.join(" ");
-              if (joined === "--version") return { stdout: "2.1.257\n", stderr: "", code: 0 };
+              if (joined === "--version") return { stdout: "2.1.321\n", stderr: "", code: 0 };
               throw new Error(`Unexpected args: ${joined}`);
             }),
           ),

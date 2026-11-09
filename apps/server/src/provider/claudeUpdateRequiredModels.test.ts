@@ -31,20 +31,21 @@ describe("resolveClaudeUpdateRequiredModels", () => {
     assert.deepStrictEqual(resolveClaudeUpdateRequiredModels(catalog, "2.1.218"), [
       { slug: "claude-opus-5", name: "Claude Opus 5", minVersion: "2.1.219" },
       { slug: "claude-fable-5-1", name: "Claude Fable 5.1", minVersion: "2.1.257" },
+      { slug: "claude-fable-5-2", name: "Claude Fable 5.2", minVersion: "2.1.321" },
     ]);
   });
 
   it("leaves out legacy models the CLI is also too old for", () => {
     const slugs = resolveClaudeUpdateRequiredModels(catalog, "2.1.100").map((model) => model.slug);
 
-    assert.deepStrictEqual(slugs, ["claude-opus-5", "claude-fable-5-1"]);
+    assert.deepStrictEqual(slugs, ["claude-opus-5", "claude-fable-5-1", "claude-fable-5-2"]);
     for (const legacy of ["claude-fable-5", "claude-opus-4-8", "claude-opus-4-7"]) {
       assert.equal(slugs.includes(legacy), false, legacy);
     }
   });
 
   it("lists nothing once the CLI meets every minimum", () => {
-    assert.deepStrictEqual(resolveClaudeUpdateRequiredModels(catalog, "2.1.257"), []);
+    assert.deepStrictEqual(resolveClaudeUpdateRequiredModels(catalog, "2.1.321"), []);
   });
 
   it("never lists a model blocked only by a maximum, which an update cannot fix", () => {

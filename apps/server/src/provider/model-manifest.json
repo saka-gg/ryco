@@ -3,6 +3,7 @@
   "currentModels": {
     "codex": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
     "claudeAgent": [
+      "claude-fable-5-2",
       "claude-fable-5-1",
       "claude-opus-5-5",
       "claude-opus-5",
@@ -45,6 +46,42 @@
         "chat": "claude-opus-5"
       },
       "profiles": {
+        "fable-5-2": {
+          "capabilities": {
+            "optionDescriptors": [
+              {
+                "id": "effort",
+                "label": "Reasoning",
+                "type": "select",
+                "options": [
+                  { "id": "low", "label": "Low" },
+                  { "id": "medium", "label": "Medium", "isDefault": true },
+                  { "id": "high", "label": "High" },
+                  { "id": "xhigh", "label": "Extra High" },
+                  { "id": "max", "label": "Max" },
+                  { "id": "ultracode", "label": "Ultracode" }
+                ]
+              },
+              { "id": "fastMode", "label": "Fast Mode", "type": "boolean" },
+              {
+                "id": "contextWindow",
+                "label": "Context Window",
+                "type": "select",
+                "options": [
+                  { "id": "200k", "label": "200k" },
+                  { "id": "1m", "label": "1M", "isDefault": true }
+                ]
+              }
+            ]
+          },
+          "adapter": {
+            "claudeCode": {
+              "effortMap": { "ultracode": "xhigh", "ultrathink": null },
+              "modelSuffixes": { "contextWindow": { "1m": "[1m]" } },
+              "contextWindowTokens": { "200k": 200000, "1m": 1000000 }
+            }
+          }
+        },
         "fable-5-1": {
           "capabilities": {
             "optionDescriptors": [
@@ -430,10 +467,19 @@
       },
       "models": [
         {
+          "slug": "claude-fable-5-2",
+          "name": "Claude Fable 5.2",
+          "shortName": "Fable 5.2",
+          "aliases": ["fable", "fable-5.2", "claude-fable-5.2"],
+          "status": "current",
+          "profile": "fable-5-2",
+          "adapter": { "claudeCode": { "minVersion": "2.1.321" } }
+        },
+        {
           "slug": "claude-fable-5-1",
           "name": "Claude Fable 5.1",
           "shortName": "Fable 5.1",
-          "aliases": ["fable", "fable-5.1", "claude-fable-5.1"],
+          "aliases": ["fable-5.1", "claude-fable-5.1"],
           "status": "current",
           "profile": "fable-5-1",
           "adapter": { "claudeCode": { "minVersion": "2.1.257" } }
