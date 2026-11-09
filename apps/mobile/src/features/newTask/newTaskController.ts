@@ -9,20 +9,15 @@ import {
   buildTurnStartCommand,
   composeOutgoingPrompt,
   isChatProjectRetiredError,
+  persistThreadSettingsForNextTurn,
   resolveChatProjectTitleSeed,
   type SendTurnBootstrap,
   type SendTurnDispatchAttachment,
 } from "@ryco/client-runtime/state/composer";
 import { isDefiniteDispatchFailure } from "@ryco/client-runtime/rpc";
 import type { Project, SidebarThreadOrStub } from "@ryco/client-runtime/state/threads";
-import type {
-  CommandId,
-  EnvironmentId,
-  MessageId,
-  ProjectId,
-  ThreadId,
-  WorktreeId,
-} from "@ryco/contracts";
+import type { EnvironmentId, MessageId, ProjectId, ThreadId, WorktreeId } from "@ryco/contracts";
+import { CommandId } from "@ryco/contracts/base-schemas";
 import { DEFAULT_MODEL } from "@ryco/contracts/model";
 import {
   DEFAULT_AGENT_TOKEN_MODE,
@@ -220,6 +215,12 @@ export interface NewTaskAttempt {
   readonly worktreeAttached: boolean;
   /** The attach command was answered; only its confirmation may still be missing. */
   readonly attachCommandAccepted?: boolean;
+  /**
+   * The node created the thread in its own defaults (a task started from a pull request, issue
+   * or Jira item: `git.createWorktreeForProject`), and the turn runs in the thread's modes, so
+   * the chosen runtime, interaction and token modes are written to it before the first turn.
+   */
+  readonly threadSettingsPending?: boolean;
   readonly turnStarted: boolean;
   /**
    * The task (the user's to-do list) this chat is started for: its first turn
@@ -690,6 +691,28 @@ export async function runNewTaskAttempt(
     } catch (error) {
       if (next.attachCommandAccepted === true) return failed(next, "thread", false);
       return refused(next, "thread", error);
+    }
+  }
+
+  if (!next.turnStarted && next.threadSettingsPending === true) {
+    const turnCommandId = next.ids.turnCommandId;
+    try {
+      await persistThreadSettingsForNextTurn(
+        deps.dispatch,
+        null,
+        {
+          threadId: next.threadId,
+          createdAt: next.createdAt,
+          runtimeMode: next.runtimeMode,
+          interactionMode: next.interactionMode,
+          tokenMode: next.tokenMode,
+        },
+        // Stable per attempt: a retry is answered from the command's receipt.
+        (kind) => CommandId.make(`${turnCommandId}:${kind}`),
+      );
+      next = { ...next, threadSettingsPending: false };
+    } catch (error) {
+      return refused(next, "turn", error);
     }
   }
 

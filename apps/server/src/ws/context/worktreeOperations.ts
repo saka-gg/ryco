@@ -337,6 +337,23 @@ export const makeWorktreeOperations = (deps: {
   const createWorktreeForProject = (input: GitCreateWorktreeForProjectInput) =>
     Effect.gen(function* () {
       const operation = "git.createWorktreeForProject";
+      // A retry after a lost reply: the first call already made the worktree and its thread.
+      if (input.threadId !== undefined) {
+        const made = yield* projectionSnapshotQuery
+          .getThreadShellById(input.threadId)
+          .pipe(
+            Effect.mapError((cause) =>
+              toGitManagerError(operation, "Failed to read the thread.", cause),
+            ),
+          );
+        if (Option.isSome(made)) {
+          const thread = made.value;
+          if (thread.projectId !== input.projectId || !thread.worktreeId) {
+            return yield* failGitWorkflow(operation, "That thread ID is already in use.");
+          }
+          return { worktreeId: thread.worktreeId, sessionId: thread.id };
+        }
+      }
       if (
         input.intent.kind === "pr" ||
         input.intent.kind === "issue" ||
@@ -380,7 +397,7 @@ export const makeWorktreeOperations = (deps: {
           const modelSelection = resolveProjectPreferences({ settings, project })
             .initialModelSelection.value;
           const now = new Date().toISOString();
-          const threadId = ThreadId.make(`thread-${crypto.randomUUID()}`);
+          const threadId = input.threadId ?? ThreadId.make(`thread-${crypto.randomUUID()}`);
           yield* dispatchWorktreeCommand(
             {
               type: "thread.create",
@@ -428,7 +445,7 @@ export const makeWorktreeOperations = (deps: {
       const modelSelection = effective.initialModelSelection.value;
       const now = new Date().toISOString();
       const worktreeId = WorktreeId.make(`worktree-${crypto.randomUUID()}`);
-      const threadId = ThreadId.make(`thread-${crypto.randomUUID()}`);
+      const threadId = input.threadId ?? ThreadId.make(`thread-${crypto.randomUUID()}`);
       let branch: string;
       let refName: string;
       let newRefName: string | undefined;

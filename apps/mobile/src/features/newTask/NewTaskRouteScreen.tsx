@@ -21,6 +21,8 @@ import {
 } from "@ryco/client-runtime/state/composer";
 import { newWorktreeBaseBranch } from "@ryco/client-runtime/state/worktree-setup";
 import { EnvironmentId, ProjectId, type ThreadId } from "@ryco/contracts/base-schemas";
+import { WS_METHODS } from "@ryco/contracts/rpc";
+import type { CreateWorktreeIntent } from "@ryco/contracts/worktree";
 import {
   DEFAULT_AGENT_TOKEN_MODE,
   type ModelSelection,
@@ -52,6 +54,7 @@ import { useEnvironmentServerConfigs } from "../../state/environmentServerConfig
 import { useHomeWorkspaceData } from "../../state/homeData";
 import { useStore } from "../../state/threadsRuntime";
 import { ensureEnvironmentApi, readEnvironmentApi } from "../../connection/environmentApi";
+import { nodeMethodBlockReason } from "../../connection/nodeRoleAccess";
 import { useHomeEnvironments } from "../home/useHomeEnvironments";
 import { inferNodeProjectTitle, validateNodeWorkspacePath } from "../projects/projectActions";
 import {
@@ -122,26 +125,36 @@ type NewTaskRouteScreenProps = StaticScreenProps<{
 
 /** Why a task that starts from a pull request, issue or Jira item cannot be sent yet. */
 function sourceSendBlockReason(input: {
-  readonly connected: boolean;
+  readonly environment: Parameters<typeof nodeMethodBlockReason>[0] | undefined;
   readonly hasFiles: boolean;
   readonly starting: boolean;
 }): string | null {
   if (input.starting) return "Creating the worktree…";
-  if (!input.connected)
-    return "Connect the machine to start from a pull request, issue or Jira item.";
+  const blocked = input.environment
+    ? nodeMethodBlockReason(
+        input.environment,
+        WS_METHODS.gitCreateWorktreeForProject,
+        "start from a pull request, issue or Jira item",
+      )
+    : "Choose a machine to start from a pull request, issue or Jira item.";
+  if (blocked) return blocked;
   if (input.hasFiles) return "Attach files once the chat has started.";
   return null;
 }
 
-/** The worktree (and the thread in it) the node makes for a picked source. */
+/**
+ * The worktree (and the thread in it) the node makes for a picked source, under `threadId`: sent
+ * again after a lost reply, the node answers with the thread it already made.
+ */
 async function createSourceWorktree(
   environmentId: EnvironmentId,
   projectId: ProjectId,
-  source: DraftWorktreeSource,
+  intent: CreateWorktreeIntent,
+  threadId: ThreadId,
 ) {
   const create = readEnvironmentApi(environmentId)?.git.createWorktreeForProject;
   if (!create) throw new Error("Worktree creation is unavailable on this machine.");
-  return create({ projectId, intent: worktreeSourceIntent(source), fetchOrigin: true });
+  return create({ projectId, intent, threadId, fetchOrigin: true });
 }
 
 /** A task for a new project needs a usable path on its machine; a chat or a known project does not. */
@@ -248,6 +261,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
   const [startingFromSource, setStartingFromSource] = useState(false);
   // A source's worktree can take a while; the sheet may be closed before it answers.
   const mounted = useRef(true);
+  const sourceThread = useRef<{ readonly key: string; readonly threadId: ThreadId } | null>(null);
   useEffect(
     () => () => {
       mounted.current = false;
@@ -679,7 +693,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
   });
   const sourceSendBlock = worktreeSource
     ? sourceSendBlockReason({
-        connected,
+        environment,
         hasFiles: attachments.some((attachment) => attachment.type === "file"),
         starting: startingFromSource,
       })
@@ -775,9 +789,16 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
    */
   const sendFromSource = (source: DraftWorktreeSource) => {
     if (!environment || !project) return;
+    // One thread id per source and project: a retry of the same one finds what the node made,
+    // another source gets its own.
+    const intent = worktreeSourceIntent(source);
+    const sourceKey = JSON.stringify([environment.environmentId, project.id, intent]);
+    const previous = sourceThread.current;
+    const threadId = previous?.key === sourceKey ? previous.threadId : newThreadId();
+    sourceThread.current = { key: sourceKey, threadId };
     setStartingFromSource(true);
     setFailure(null);
-    void createSourceWorktree(environment.environmentId, project.id, source).then(
+    void createSourceWorktree(environment.environmentId, project.id, intent, threadId).then(
       (created) => {
         // The node made the worktree and its thread: the task goes into it even when the sheet
         // was closed meanwhile, so no empty chat is left behind.
@@ -788,6 +809,9 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
           threadCommandAccepted: true,
           threadReady: true,
           worktreeAttached: true,
+          // The node made the thread in full access and default modes: the chosen ones are
+          // written to it before the first turn.
+          threadSettingsPending: true,
         };
         const draft: NewTaskLaunchDraft = {
           environmentId: attempt.environmentId,

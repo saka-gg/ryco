@@ -1,15 +1,16 @@
 import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
-  type AgentTokenMode,
   type ComposerSourceControlContext,
   type EnvironmentApi,
   type EnvironmentId,
   type ProviderDriverKind,
-  type ProviderInteractionMode,
-  type RuntimeMode,
   type ServerProvider,
   type ThreadId,
 } from "@ryco/contracts";
+import {
+  persistThreadSettingsForNextTurn as persistThreadSettingsForNextTurnShared,
+  type ThreadTurnModes,
+} from "@ryco/client-runtime/state/composer";
 import { applyClaudePromptEffortPrefix, resolvePromptInjectedEffort } from "@ryco/shared/model";
 import { DateTime } from "effect";
 
@@ -26,7 +27,7 @@ import {
 import { newCommandId } from "../lib/utils";
 import { getProviderModelCapabilities } from "../providerModels";
 import type { QueryClient } from "../rpc/queryClient";
-import { DEFAULT_AGENT_TOKEN_MODE, DEFAULT_INTERACTION_MODE } from "../types";
+import { DEFAULT_INTERACTION_MODE } from "../types";
 import { useUiStateStore } from "../uiStateStore";
 import type {
   SendTurnComposerSnapshot,
@@ -58,44 +59,17 @@ type PersistThreadSettingsInput = Parameters<
 >[0];
 
 /** Writes only the modes that differ from the thread's current settings. */
-export async function persistThreadSettingsForNextTurn(
+export function persistThreadSettingsForNextTurn(
   api: EnvironmentApi,
-  current: {
-    readonly runtimeMode: RuntimeMode;
-    readonly interactionMode: ProviderInteractionMode;
-    readonly tokenMode?: AgentTokenMode | undefined;
-  },
+  current: ThreadTurnModes,
   input: PersistThreadSettingsInput,
 ): Promise<void> {
-  if (input.runtimeMode !== current.runtimeMode) {
-    await api.orchestration.dispatchCommand({
-      type: "thread.runtime-mode.set",
-      commandId: newCommandId(),
-      threadId: input.threadId,
-      runtimeMode: input.runtimeMode,
-      createdAt: input.createdAt,
-    });
-  }
-
-  if (input.interactionMode !== current.interactionMode) {
-    await api.orchestration.dispatchCommand({
-      type: "thread.interaction-mode.set",
-      commandId: newCommandId(),
-      threadId: input.threadId,
-      interactionMode: input.interactionMode,
-      createdAt: input.createdAt,
-    });
-  }
-
-  if (input.tokenMode !== (current.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE)) {
-    await api.orchestration.dispatchCommand({
-      type: "thread.token-mode.set",
-      commandId: newCommandId(),
-      threadId: input.threadId,
-      tokenMode: input.tokenMode,
-      createdAt: input.createdAt,
-    });
-  }
+  return persistThreadSettingsForNextTurnShared(
+    (command) => api.orchestration.dispatchCommand(command),
+    current,
+    input,
+    newCommandId,
+  );
 }
 
 /** Refreshes a stale issue / change-request context before it is sent. */

@@ -740,6 +740,10 @@ export const GitCreateWorktreeForProjectInput = Schema.Struct({
   fetchOrigin: Schema.optional(Schema.Boolean),
   projectId: ProjectId,
   intent: CreateWorktreeIntent,
+  // The id for the thread made in the worktree, chosen by the client so a retry after a lost
+  // reply finds the thread the first call made instead of making a second one. Older nodes
+  // ignore it and pick their own.
+  threadId: Schema.optional(ThreadId),
   // "projectMetadata" preserves the legacy project-local checkout location.
   // New worktrees should use the default app-managed location.
   worktreeLocation: Schema.optional(WorktreeCheckoutLocation),
