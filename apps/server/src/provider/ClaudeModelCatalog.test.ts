@@ -28,6 +28,15 @@ function modelSelection(model: string, options?: Record<string, string | boolean
 
 describe("ClaudeModelCatalog", () => {
   describe("version gating", () => {
+    it("shows Fable 5.2 at the minimum CLI version and hides it below", () => {
+      const at321 = resolveClaudeModelsForVersion(catalog, "2.1.321").map((model) => model.slug);
+      assert.equal(at321.includes("claude-fable-5-2"), true);
+
+      const at320 = resolveClaudeModelsForVersion(catalog, "2.1.320").map((model) => model.slug);
+      assert.equal(at320.includes("claude-fable-5-2"), false);
+      assert.equal(at320.includes("claude-fable-5-1"), true);
+    });
+
     it("shows Fable 5.1 at the minimum CLI version and hides it below", () => {
       const at257 = resolveClaudeModelsForVersion(catalog, "2.1.257").map((model) => model.slug);
       assert.equal(at257.includes("claude-fable-5-1"), true);
@@ -57,6 +66,7 @@ describe("ClaudeModelCatalog", () => {
       assert.equal(slugs.includes("claude-sonnet-5"), true);
       assert.equal(slugs.includes("claude-haiku-4-5"), true);
       assert.equal(slugs.includes("claude-fable-5-1"), false);
+      assert.equal(slugs.includes("claude-fable-5-2"), false);
     });
   });
 
@@ -68,21 +78,29 @@ describe("ClaudeModelCatalog", () => {
       );
     });
 
-    it("nudges toward Fable 5.1 when it is the only gated model left", () => {
+    it("nudges toward Fable 5.1 when it is the lowest unmet minimum", () => {
       assert.equal(
         formatClaudeVersionUpgradeMessage(catalog, "2.1.256"),
         "Claude Code v2.1.256 is too old for Claude Fable 5.1. Upgrade to v2.1.257 or newer to access it.",
       );
     });
 
+    it("nudges toward Fable 5.2 when it is the only gated model left", () => {
+      assert.equal(
+        formatClaudeVersionUpgradeMessage(catalog, "2.1.320"),
+        "Claude Code v2.1.320 is too old for Claude Fable 5.2. Upgrade to v2.1.321 or newer to access it.",
+      );
+    });
+
     it("returns undefined when every model is available", () => {
-      assert.equal(formatClaudeVersionUpgradeMessage(catalog, "2.1.257"), undefined);
+      assert.equal(formatClaudeVersionUpgradeMessage(catalog, "2.1.321"), undefined);
     });
   });
 
   describe("alias resolution", () => {
-    it("resolves `fable` to Fable 5.1", () => {
-      assert.equal(resolveClaudeCatalogModel(catalog, "fable")?.model.slug, "claude-fable-5-1");
+    it("resolves `fable` to Fable 5.2", () => {
+      assert.equal(resolveClaudeCatalogModel(catalog, "fable")?.model.slug, "claude-fable-5-2");
+      assert.equal(resolveClaudeCatalogModel(catalog, "fable-5.1")?.model.slug, "claude-fable-5-1");
     });
 
     it("prefers exact slugs over aliases", () => {
@@ -96,6 +114,7 @@ describe("ClaudeModelCatalog", () => {
   describe("effort normalization", () => {
     it("maps ultracode to xhigh on models that support it", () => {
       for (const model of [
+        "claude-fable-5-2",
         "claude-fable-5-1",
         "claude-fable-5",
         "claude-opus-5",

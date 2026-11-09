@@ -100,6 +100,7 @@ describe("ModelManifest", () => {
     // its cross-reference checks.
     assert.equal(BUNDLED_MODEL_MANIFEST.version, 1);
     assert.deepEqual(BUNDLED_MODEL_MANIFEST.currentModels["claudeAgent"], [
+      "claude-fable-5-2",
       "claude-fable-5-1",
       "claude-opus-5-5",
       "claude-opus-5",
@@ -114,13 +115,19 @@ describe("ModelManifest", () => {
     assert.notEqual(catalog, null);
     if (!catalog) return;
 
+    const fable52 = catalog.models.find((entry) => entry.model.slug === "claude-fable-5-2");
+    assert.equal(fable52?.model.name, "Claude Fable 5.2");
+    assert.equal(fable52?.model.shortName, "Fable 5.2");
+    assert.deepEqual(fable52?.model.aliases, ["fable", "fable-5.2", "claude-fable-5.2"]);
+    assert.notEqual(fable52?.model.capabilities, null);
+
     const fable51 = catalog.models.find((entry) => entry.model.slug === "claude-fable-5-1");
     assert.notEqual(fable51, undefined);
     assert.equal(fable51?.model.name, "Claude Fable 5.1");
     assert.equal(fable51?.model.shortName, "Fable 5.1");
     assert.equal(fable51?.model.isCustom, false);
     assert.equal(fable51?.model.isLegacy, undefined);
-    assert.deepEqual(fable51?.model.aliases, ["fable", "fable-5.1", "claude-fable-5.1"]);
+    assert.deepEqual(fable51?.model.aliases, ["fable-5.1", "claude-fable-5.1"]);
     assert.notEqual(fable51?.model.capabilities, null);
 
     const opus5 = catalog.models.find((entry) => entry.model.slug === "claude-opus-5");

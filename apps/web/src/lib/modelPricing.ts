@@ -86,6 +86,7 @@ export const MODEL_PRICES: Record<string, ModelPrice> = {
   "claude-sonnet-4-6": { inputPer1M: 3, cachedInputPer1M: 0.3, outputPer1M: 15 },
   "claude-sonnet-4-5": { inputPer1M: 3, cachedInputPer1M: 0.3, outputPer1M: 15 },
   "claude-haiku-4-5": { inputPer1M: 1, cachedInputPer1M: 0.1, outputPer1M: 5 },
+  "claude-fable-5-2": { inputPer1M: 8, cachedInputPer1M: 0.2, outputPer1M: 40 },
   "claude-fable-5": { inputPer1M: 10, cachedInputPer1M: 1, outputPer1M: 50 },
   "claude-mythos-5": { inputPer1M: 10, cachedInputPer1M: 1, outputPer1M: 50 },
   // ── Google Gemini (tiered models use the <200k tier) ──
