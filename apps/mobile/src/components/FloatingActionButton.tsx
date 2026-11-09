@@ -1,3 +1,4 @@
+import { MenuView, type MenuAction, type NativeActionEvent } from "@react-native-menu/menu";
 import { Pressable, View } from "react-native";
 
 import { useThemeColor } from "../lib/useThemeColor";
@@ -10,22 +11,44 @@ export function FloatingActionButton(props: {
   readonly onPress: () => void;
   /** Distance from the screen's bottom edge: the tab bar's inset plus a gap. */
   readonly bottom: number;
+  /** Other ways to start, behind a touch and hold (a tap still does `onPress`). */
+  readonly longPressMenu?: {
+    readonly actions: ReadonlyArray<MenuAction>;
+    readonly onPressAction: (id: string) => void;
+  };
 }) {
   const iconColor = useThemeColor("--color-primary-foreground");
+  const button = (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={props.accessibilityLabel}
+      {...(props.longPressMenu ? { accessibilityHint: "Touch and hold for more." } : {})}
+      onPress={props.onPress}
+      className="h-14 w-14 items-center justify-center rounded-full bg-primary active:opacity-80"
+      style={FAB_SHADOW}
+    >
+      <SymbolView name={props.icon} size={22} tintColor={iconColor} type="monochrome" />
+    </Pressable>
+  );
+  const menu = props.longPressMenu;
   return (
     <View
       pointerEvents="box-none"
       style={{ position: "absolute", right: 20, bottom: props.bottom }}
     >
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={props.accessibilityLabel}
-        onPress={props.onPress}
-        className="h-14 w-14 items-center justify-center rounded-full bg-primary active:opacity-80"
-        style={FAB_SHADOW}
-      >
-        <SymbolView name={props.icon} size={22} tintColor={iconColor} type="monochrome" />
-      </Pressable>
+      {menu ? (
+        <MenuView
+          shouldOpenOnLongPress
+          actions={[...menu.actions]}
+          onPressAction={({ nativeEvent }: NativeActionEvent) =>
+            menu.onPressAction(nativeEvent.event)
+          }
+        >
+          {button}
+        </MenuView>
+      ) : (
+        button
+      )}
     </View>
   );
 }

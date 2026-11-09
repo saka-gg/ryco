@@ -157,6 +157,24 @@ describe("thread header menu", () => {
     ]);
   });
 
+  it("offers a chat without a project to become one, after Rename", () => {
+    const sections = menu({
+      promoteChatAvailable: true,
+      sourceControlAvailable: false,
+      model: model({ reviewVisible: false, filesVisible: true, terminalVisible: true }),
+    });
+    expect(ids(sections)).toEqual([
+      ["workspace", ["files", "terminal"]],
+      ["chat", ["side-chat", "fork", "rename", "turn-into-project", "add-task", "copy-reference"]],
+      ["state", ["archive"]],
+    ]);
+    expect(
+      menu({ promoteChatAvailable: true, busy: true })
+        .flatMap((section) => section.actions)
+        .find((action) => action.id === "turn-into-project")?.disabled,
+    ).toBe(true);
+  });
+
   it("notes a running command and extra sessions under Terminal", () => {
     const terminal = (terminalSubtitle: string | null) =>
       menu({ terminalSubtitle })

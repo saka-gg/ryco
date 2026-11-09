@@ -92,6 +92,7 @@ import {
   ThreadRouteScreen,
   ThreadTerminalRouteScreen,
   ThreadDeviceRouteScreen,
+  PromoteChatRouteScreen,
 } from "./navigation/lazyRouteScreens";
 import {
   MVP_ALL_ROOT_ROUTES,
@@ -495,6 +496,11 @@ export const ROOT_STACK_SCREENS = {
       workspaceInspectorSupported()
         ? routeOptions("ThreadTerminal", { title: "Device" })
         : routeOptions("ThreadDevice", { title: "Device" }),
+  }),
+  ThreadPromoteChat: createNativeStackScreen({
+    screen: PromoteChatRouteScreen,
+    linking: MVP_ROOT_ROUTES.ThreadPromoteChat.linking,
+    options: routeOptions("ThreadPromoteChat", { title: "Turn into Project" }),
   }),
   ThreadTerminal: createNativeStackScreen({
     screen: ThreadTerminalRouteScreen,

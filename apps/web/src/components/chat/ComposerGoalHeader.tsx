@@ -9,40 +9,16 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import { memo, useEffect, useState } from "react";
+import {
+  formatThreadGoalElapsed as formatElapsed,
+  THREAD_GOAL_REMINDER_NOTE,
+  threadGoalCanResume,
+  threadGoalElapsedSeconds as elapsedSeconds,
+  threadGoalHeading,
+} from "@ryco/client-runtime/state/threads";
 
 import { visibleSecondTicker } from "~/lib/perf/ticker";
 import { cn } from "~/lib/utils";
-
-const STATUS_LABEL: Record<ThreadGoalStatus, string> = {
-  active: "Pursuing goal",
-  paused: "Goal paused",
-  blocked: "Goal blocked",
-  usageLimited: "Usage limit reached",
-  budgetLimited: "Goal budget reached",
-  complete: "Goal achieved",
-};
-
-function elapsedSeconds(
-  goal: ThreadGoal,
-  now: number,
-  runningSince: number,
-  isRunning: boolean,
-): number {
-  const liveSeconds =
-    goal.status === "active" && isRunning && goal.synchronization === undefined
-      ? Math.max(0, Math.floor((now - runningSince) / 1_000))
-      : 0;
-  return goal.timeUsedSeconds + liveSeconds;
-}
-
-function formatElapsed(seconds: number): string {
-  const hours = Math.floor(seconds / 3_600);
-  const minutes = Math.floor((seconds % 3_600) / 60);
-  const remainder = seconds % 60;
-  return hours > 0
-    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`
-    : `${minutes}:${String(remainder).padStart(2, "0")}`;
-}
 
 const numberFormatter = new Intl.NumberFormat(undefined, { notation: "compact" });
 
@@ -95,11 +71,7 @@ export const ComposerGoalHeader = memo(function ComposerGoalHeader(props: {
     return visibleSecondTicker.subscribe(setNow);
   }, [props.goal.status, props.goal.updatedAt, props.isRunning]);
 
-  const canResume =
-    props.goal.status === "paused" ||
-    props.goal.status === "blocked" ||
-    props.goal.status === "usageLimited" ||
-    props.goal.status === "budgetLimited";
+  const canResume = threadGoalCanResume(props.goal.status);
   const complete = props.goal.status === "complete";
 
   return (
@@ -126,13 +98,7 @@ export const ComposerGoalHeader = memo(function ComposerGoalHeader(props: {
           aria-expanded={expanded}
         >
           <span className="flex items-center gap-2 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
-            {pending
-              ? "Updating goal…"
-              : synchronization?.state === "failed"
-                ? "Goal change failed"
-                : reminder && props.goal.status === "active"
-                  ? "Goal reminder"
-                  : STATUS_LABEL[props.goal.status]}
+            {threadGoalHeading(props.goal)}
             <span className="font-mono font-normal tracking-normal normal-case">
               {formatElapsed(elapsedSeconds(props.goal, now, runningSince, props.isRunning))}
             </span>
@@ -201,10 +167,7 @@ export const ComposerGoalHeader = memo(function ComposerGoalHeader(props: {
         </p>
       ) : null}
       {reminder ? (
-        <p className="mt-2 text-xs text-muted-foreground">
-          While active, this provider receives the goal with each message. Automatic continuation
-          and goal usage tracking are unavailable.
-        </p>
+        <p className="mt-2 text-xs text-muted-foreground">{THREAD_GOAL_REMINDER_NOTE}</p>
       ) : null}
       {expanded && !reminder ? (
         <form

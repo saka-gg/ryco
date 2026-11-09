@@ -10,6 +10,7 @@ import type {
   ModelSwitchBlockedByBackgroundWork,
   LocalTaskDelegateInput,
   OptionalQuestionTurnAnswer,
+  OrchestrationProposedPlanId,
   UsageLimitResumeGuard,
 } from "@ryco/contracts";
 import { rejectRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
@@ -551,6 +552,10 @@ export interface TurnStartCommandInput {
   /** A turn start sent again past background work (see `startTurnPastBackgroundWork`). */
   readonly retryPastBackgroundWork?: { readonly createdAt: string } | undefined;
   readonly optionalAnswer?: OptionalQuestionTurnAnswer | undefined;
+  /** The proposed plan this turn implements (Implement, Implement in a new thread). */
+  readonly sourceProposedPlan?:
+    | { readonly threadId: ThreadId; readonly planId: OrchestrationProposedPlanId }
+    | undefined;
   readonly createdAt: string;
 }
 
@@ -587,6 +592,7 @@ export function buildTurnStartCommand(
     ...(sourceControlContexts.length > 0 ? { sourceControlContexts } : {}),
     ...(threadReferences.length > 0 ? { threadReferences } : {}),
     ...(input.optionalAnswer ? { optionalAnswer: input.optionalAnswer } : {}),
+    ...(input.sourceProposedPlan ? { sourceProposedPlan: input.sourceProposedPlan } : {}),
     // Every caller handles the node's refusal (the choice, a held queue message, or a failed
     // send that keeps the draft), so each turn start asks for it until the user chose to stop.
     ...(input.retryPastBackgroundWork

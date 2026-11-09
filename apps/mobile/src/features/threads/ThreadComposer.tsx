@@ -84,6 +84,8 @@ export function ThreadComposer(props: {
   /** Claude's observed prompt cache sits behind an ⓘ beside the model chip (web's meter). */
   readonly onOpenCacheInfo?: () => void;
   readonly onOpenSideChat?: () => void;
+  /** The thread can take a goal: the `/` menu offers `/goal`, which the send reads. */
+  readonly goalAvailable?: boolean;
   /** What the next message's context handoff is (`derivePendingComposerHandoff`). */
   readonly pendingHandoff?: PendingComposerHandoff | null;
   /**
@@ -152,6 +154,7 @@ export function ThreadComposer(props: {
       interactionMode:
         policyEditable && policyModel?.mode !== undefined && policyModel?.mode !== null,
       sideChat: props.onOpenSideChat !== undefined,
+      goal: props.goalAvailable === true,
     },
     enabled: !props.disabled && !sending && !dictating,
     onAction: (action: ComposerCommandAction) => {

@@ -5,7 +5,7 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@ryco/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import {
   advancePromotionStepsAfterMove,
@@ -39,7 +39,7 @@ import {
   resolvePromotionSubmitBlocker,
   retargetDestinationForName,
   shouldShowGitIdentityNotice,
-} from "./PromoteChatDialog.logic";
+} from "./promoteChat.ts";
 
 const ALL_GIT = { initializeGit: true, initialCommit: true, writeGitignore: true } as const;
 const NO_GIT = { initializeGit: false, initialCommit: true, writeGitignore: true } as const;

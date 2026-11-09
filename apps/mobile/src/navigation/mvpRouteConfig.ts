@@ -438,6 +438,19 @@ export const MVP_ROOT_ROUTES = {
     ios: { presentation: "fullScreenModal" },
     android: { presentation: "fullScreenModal", headerShown: false },
   },
+  /** "Turn into project": a chat without a project moves to its own folder and becomes one. */
+  ThreadPromoteChat: {
+    linking: `${THREAD}/turn-into-project`,
+    overlay: true,
+    headerPreset: "sheet-solid",
+    headerAction: "close",
+    ios: {
+      presentation: "formSheet",
+      sheetAllowedDetents: [0.94],
+      sheetGrabberVisible: true,
+    },
+    android: { presentation: "card" },
+  },
   Connections: {
     linking: "connections",
     overlay: true,

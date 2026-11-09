@@ -3,7 +3,7 @@ import {
   type AgentControlStatusTone,
 } from "@ryco/client-runtime/state/agentControl";
 import { isDelegatedThreadLineage } from "@ryco/client-runtime/state/threads";
-import type { ThreadId } from "@ryco/contracts";
+import type { ThreadGoalStatus, ThreadId } from "@ryco/contracts";
 import type { AgentControlCompletionReturn } from "@ryco/contracts/agent-control";
 import type { ThreadLineage } from "@ryco/contracts/orchestration";
 
@@ -32,10 +32,31 @@ export function threadStatusTone(statusLabel: ThreadHeaderModel["statusLabel"]):
 export type ThreadTitlePillView = Pick<
   ThreadHeaderModel,
   "title" | "statusLabel" | "projectLabel" | "worktreeLabel"
->;
+> & {
+  /** A goal the agent pursues: a small target in the pill, the goal itself in the sheet. */
+  readonly goal?: ThreadTitlePillGoal | null;
+};
+
+export type ThreadTitlePillGoal = "active" | "stopped" | "complete";
+
+/** How the pill hints at the chat's goal: pursued, stopped (paused, blocked, limited) or done. */
+export function threadTitlePillGoal(
+  goal: { readonly status: ThreadGoalStatus } | null | undefined,
+): ThreadTitlePillGoal | null {
+  if (!goal) return null;
+  if (goal.status === "active") return "active";
+  return goal.status === "complete" ? "complete" : "stopped";
+}
+
+const PILL_GOAL_LABEL: Readonly<Record<ThreadTitlePillGoal, string>> = {
+  active: "Pursuing a goal",
+  stopped: "Goal paused",
+  complete: "Goal achieved",
+};
 
 export function threadTitlePillAccessibilityLabel(model: ThreadTitlePillView): string {
-  return `${model.title}. ${model.statusLabel}. ${model.projectLabel}, ${model.worktreeLabel}. Show details.`;
+  const goal = model.goal ? ` ${PILL_GOAL_LABEL[model.goal]}.` : "";
+  return `${model.title}. ${model.statusLabel}.${goal} ${model.projectLabel}, ${model.worktreeLabel}. Show details.`;
 }
 
 /** A delegated chat's way back to the chat that started it, and where its result stands. */

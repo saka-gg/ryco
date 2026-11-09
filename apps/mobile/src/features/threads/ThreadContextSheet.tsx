@@ -1,4 +1,4 @@
-import type { EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId, ThreadGoal } from "@ryco/contracts";
 import type { AppSymbolName } from "../../components/AppSymbol";
 import type { AgentControlProposalView } from "@ryco/contracts/agent-control";
 import { useRef, useState, useSyncExternalStore, type ReactNode } from "react";
@@ -23,6 +23,7 @@ import {
   type ThreadStatusTone,
 } from "./threadContextSheetModel";
 import type { ThreadAgentRow, ThreadAgentsEntry, ThreadAgentTone } from "./threadAgentsSheetModel";
+import { ThreadGoalSection, type ThreadGoalActions } from "./ThreadGoalSection";
 import type { ThreadHeaderModel } from "./threadHeaderModel";
 import type { PullRequestWatchControl } from "./usePullRequestWatchControl";
 
@@ -175,6 +176,12 @@ export function ThreadContextSheet(props: {
   readonly pullRequestWatch: PullRequestWatchControl | null;
   /** Settled Agent Control receipts of this chat (pending ones sit over the composer). */
   readonly agentControlReceipts: ReadonlyArray<AgentControlProposalView>;
+  /** The goal the agent pursues (`/goal`), with its controls; null when it has none. */
+  readonly goal: {
+    readonly goal: ThreadGoal;
+    readonly busy: boolean;
+    readonly actions: ThreadGoalActions;
+  } | null;
   readonly actions: ThreadContextSheetActions;
 }) {
   const [receiptsOpen, setReceiptsOpen] = useState(false);
@@ -274,6 +281,15 @@ export function ThreadContextSheet(props: {
           </InfoRow>
         ) : null}
       </View>
+
+      {props.goal ? (
+        <ThreadGoalSection
+          goal={props.goal.goal}
+          runningSince={props.runningSince}
+          busy={props.goal.busy}
+          actions={props.goal.actions}
+        />
+      ) : null}
 
       {props.delegated.length > 0 ? (
         <View className="gap-2">

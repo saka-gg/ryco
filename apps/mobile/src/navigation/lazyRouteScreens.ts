@@ -398,6 +398,13 @@ export const ThreadDeviceRouteScreen = lazyScreen(
       require("../features/devices/ThreadDeviceRouteScreen") as typeof import("../features/devices/ThreadDeviceRouteScreen")
     ).ThreadDeviceRouteScreen,
 );
+export const PromoteChatRouteScreen = lazyScreen(
+  "PromoteChatRouteScreen",
+  () =>
+    (
+      require("../features/chats/PromoteChatRouteScreen") as typeof import("../features/chats/PromoteChatRouteScreen")
+    ).PromoteChatRouteScreen,
+);
 export const ThreadRouteScreen = lazyScreen(
   "ThreadRouteScreen",
   () =>

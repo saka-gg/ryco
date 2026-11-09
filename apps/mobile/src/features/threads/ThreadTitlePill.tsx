@@ -46,6 +46,15 @@ export function ThreadTitlePill(props: {
       <GlassSurface radius={PILL_HEIGHT / 2}>
         <View className="flex-row items-center gap-2 px-3.5" style={{ height: PILL_HEIGHT }}>
           <View className={cn("h-2 w-2 rounded-full", DOT_CLASS[tone])} />
+          {props.model.goal ? (
+            // Quiet: the goal itself is in the context sheet.
+            <SymbolView
+              name={props.model.goal === "complete" ? "checkmark.circle" : "scope"}
+              size={12}
+              tintColor={iconColor}
+              type="monochrome"
+            />
+          ) : null}
           <Text className="shrink font-ryco-bold text-[15px] text-foreground" numberOfLines={1}>
             {props.model.title}
           </Text>

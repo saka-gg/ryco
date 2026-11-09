@@ -1,28 +1,21 @@
-// FILE: PromoteChatDialog.logic.ts
-// Purpose: Pure rules behind "Turn into project…": the destination field's
-//          name-following leaf, the plan and per-step results shown while and
-//          after the chat is promoted, and friendly copy for every server
-//          verdict (destination status, `ProjectChatError` reasons).
-// Layer: Web UI logic (no React, no I/O), consumed by `PromoteChatDialog.tsx`.
+// Pure rules behind "Turn into project…": the destination field's
+// name-following leaf, the plan and per-step results shown while and after the
+// chat is promoted, and friendly copy for every server verdict (destination
+// status, `ProjectChatError` reasons). No UI and no I/O: web's
+// `PromoteChatDialog` and the phone's Turn into project screen both read them.
 
-import {
-  CHAT_PROJECT_TITLE_MAX_CHARS,
-  ProjectChatErrorReason,
-  type ProjectChatDestinationStatus,
-  type ProjectsPromoteChatPreviewResult,
-  type ProjectsPromoteChatResult,
-  ProviderDriverKind,
-  type ServerProvider,
-  type ThreadId,
+import type {
+  ProjectChatDestinationStatus,
+  ProjectsPromoteChatPreviewResult,
+  ProjectsPromoteChatResult,
+  ServerProvider,
+  ThreadId,
 } from "@ryco/contracts";
-import {
-  deriveThreadActivityStatus,
-  type ThreadActivityStatus,
-} from "@ryco/client-runtime/state/threads";
+import { CHAT_PROJECT_TITLE_MAX_CHARS } from "@ryco/contracts/orchestration";
+import { ProjectChatErrorReason } from "@ryco/contracts/project";
+import { ProviderDriverKind } from "@ryco/contracts/provider-instance";
 import { directorySlug } from "@ryco/shared/directorySlug";
-import { isTagged } from "effect/Predicate";
-import * as Schema from "effect/Schema";
-
+import { formatBytes } from "@ryco/shared/byteSize";
 import {
   ensureBrowseDirectoryPath,
   getBrowseDirectoryPath,
@@ -30,8 +23,14 @@ import {
   hasTrailingPathSeparator,
   normalizeProjectPathForDispatch,
 } from "@ryco/shared/projectPaths";
-import type { SidebarThreadSummary } from "../../types";
-import { formatBytes } from "../settings/DiagnosticsSettings.logic";
+import { isTagged } from "effect/Predicate";
+import * as Schema from "effect/Schema";
+
+import {
+  deriveThreadActivityStatus,
+  type ThreadActivityStatus,
+} from "../threads/threadActivityStatus.ts";
+import type { SidebarThreadSummary } from "../threads/types.ts";
 
 /** The folder-name fallback the server also uses for its default destination. */
 const PROJECT_LEAF_FALLBACK = "project";

@@ -11,7 +11,12 @@ import {
   type ComposerCommandOffers,
 } from "./composerCommandMenuModel";
 
-const ALL_OFFERS: ComposerCommandOffers = { model: true, interactionMode: true, sideChat: true };
+const ALL_OFFERS: ComposerCommandOffers = {
+  model: true,
+  interactionMode: true,
+  sideChat: true,
+  goal: true,
+};
 
 function skill(name: string, extra: Partial<ServerProviderSkill> = {}): ServerProviderSkill {
   return { name, path: `/skills/${name}/SKILL.md`, enabled: true, ...extra };
@@ -39,6 +44,7 @@ describe("buildComposerCommandItems", () => {
       "/model",
       "/plan",
       "/default",
+      "/goal",
       "/btw",
       "/review",
       "/compact",
@@ -60,6 +66,7 @@ describe("buildComposerCommandItems", () => {
     expect(labels).not.toContain("/model");
     expect(labels).not.toContain("/plan");
     expect(labels).not.toContain("/btw");
+    expect(labels).not.toContain("/goal");
     expect(labels).toContain("/review");
   });
 
@@ -169,5 +176,10 @@ describe("resolveComposerCommandSelection", () => {
     });
     const model = items("/mod").find((item) => item.id === "cmd:model")!;
     expect(pick("/mod", 4, model).action).toEqual({ kind: "open-model-picker" });
+  });
+
+  it("writes /goal out so its objective can follow", () => {
+    const goal = items("/go").find((item) => item.id === "cmd:goal")!;
+    expect(pick("/go", 3, goal)).toEqual({ text: "/goal ", cursor: 6, action: null });
   });
 });

@@ -2,7 +2,7 @@
 // what picking one does to the draft. Trigger detection and the ranking are the
 // web composer's (`detectComposerTrigger`, `@ryco/shared/composerCommandSearch`),
 // so both clients read the same prompt the same way; only the phone's set of
-// built-in commands differs (it has no `/goal` or `/computer-use`).
+// built-in commands differs (it has no `/computer-use`, which needs the desktop).
 import {
   formatThreadMentionPath,
   replaceTextRange,
@@ -21,7 +21,7 @@ import {
   searchSlashCommandItems,
 } from "@ryco/shared/composerCommandSearch";
 
-export type ComposerBuiltInCommand = "model" | "plan" | "default" | "btw";
+export type ComposerBuiltInCommand = "model" | "plan" | "default" | "goal" | "btw";
 
 export type ComposerCommandItem =
   | {
@@ -75,6 +75,8 @@ export interface ComposerCommandOffers {
   readonly model: boolean;
   readonly interactionMode: boolean;
   readonly sideChat: boolean;
+  /** A thread on the node can take a goal (`/goal`); absent on the New Task sheet. */
+  readonly goal?: boolean;
 }
 
 /** Rows the menu lists at most, so a large skill or file list stays one short scroll. */
@@ -96,6 +98,11 @@ const BUILT_IN_COMMANDS: ReadonlyArray<{
     command: "default",
     description: "Switch this thread back to normal build mode",
     offeredBy: "interactionMode",
+  },
+  {
+    command: "goal",
+    description: "Set a goal the agent keeps pursuing (pause, resume, clear)",
+    offeredBy: "goal",
   },
   { command: "btw", description: "Ask a side question in a side chat", offeredBy: "sideChat" },
 ];
@@ -188,15 +195,15 @@ export function buildComposerCommandItems(input: {
   if (!trigger) return [];
   switch (trigger.kind) {
     case "slash-command": {
-      const builtIns = BUILT_IN_COMMANDS.filter((entry) => input.offers[entry.offeredBy]).map(
-        (entry) => ({
-          id: `cmd:${entry.command}`,
-          type: "slash-command" as const,
-          command: entry.command,
-          label: `/${entry.command}`,
-          description: entry.description,
-        }),
-      );
+      const builtIns = BUILT_IN_COMMANDS.filter(
+        (entry) => input.offers[entry.offeredBy] === true,
+      ).map((entry) => ({
+        id: `cmd:${entry.command}`,
+        type: "slash-command" as const,
+        command: entry.command,
+        label: `/${entry.command}`,
+        description: entry.description,
+      }));
       // A provider expands its commands only at the start of the message.
       const providerCommands =
         trigger.rangeStart === 0
@@ -261,7 +268,8 @@ function insertionFor(item: ComposerCommandItem): string | null {
     case "provider-slash-command":
       return `/${item.command.name} `;
     case "slash-command":
-      return null;
+      // `/goal` is written out: its objective follows it, and the send reads it.
+      return item.command === "goal" ? "/goal " : null;
   }
 }
 
@@ -275,6 +283,8 @@ function actionFor(item: ComposerCommandItem): ComposerCommandAction | null {
       return { kind: "open-model-picker" };
     case "btw":
       return { kind: "open-side-chat" };
+    case "goal":
+      return null;
   }
 }
 

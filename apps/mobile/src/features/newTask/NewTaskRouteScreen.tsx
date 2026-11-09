@@ -12,8 +12,10 @@ import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { Alert, Pressable, ScrollView, TextInput, View } from "react-native";
 
 import {
+  CHAT_PROJECT_LABEL,
   getAutoRuntimeModeUnavailableReason,
   normalizeInteractionModeForProviderTarget,
+  resolveChatsAvailability,
 } from "@ryco/client-runtime/state/composer";
 import { newWorktreeBaseBranch } from "@ryco/client-runtime/state/worktree-setup";
 import { EnvironmentId, ProjectId } from "@ryco/contracts/base-schemas";
@@ -111,7 +113,19 @@ type NewTaskRouteScreenProps = StaticScreenProps<{
   readonly share?: string | string[];
   /** A task (the user's to-do list) to start this chat for: see `features/tasks/taskChatStart.ts`. */
   readonly localTaskId?: string | string[];
+  /** `1`: start a chat without a project (Chats' compose menu). */
+  readonly chat?: string | string[];
 }>;
+
+/** A task for a new project needs a usable path on its machine; a chat or a known project does not. */
+function validateNewProjectPath(input: {
+  readonly hasProject: boolean;
+  readonly chatDraft: boolean;
+  readonly newProjectPath: string;
+}): void {
+  if (input.hasProject || input.chatDraft) return;
+  validateNodeWorkspacePath(input.newProjectPath);
+}
 
 function firstParam(value: string | string[] | undefined): string | null {
   if (Array.isArray(value)) return value[0] ?? null;
@@ -193,6 +207,11 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
     restored?.environmentId ?? null,
   );
   const [projectId, setProjectId] = useState<ProjectId | null>(restored?.projectId ?? null);
+  // A chat without a project: the node makes its folder on the first send. The project
+  // choice is kept underneath, so picking a project again goes back to it.
+  const [chatMode, setChatMode] = useState(
+    () => restored?.chat ?? firstParam(props.route.params?.chat) === "1",
+  );
   const [worktreeSelection, setWorktreeSelection] = useState<NewTaskWorktreeSelection>(
     restored?.worktree ?? { kind: "local" },
   );
@@ -292,9 +311,14 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
   }, [linkKey, linkLookupSettled]);
 
   const environment = environments.find((candidate) => candidate.environmentId === environmentId);
-  const project = projects.find(
-    (candidate) => candidate.environmentId === environmentId && candidate.id === projectId,
-  );
+  const chatsAvailable = resolveChatsAvailability(serverConfig).available;
+  // A machine that cannot hold chats (older, or its chats folder is unusable) gets no chat draft.
+  const chatDraft = chatMode && (chatsAvailable || serverConfig === undefined);
+  const project = chatDraft
+    ? undefined
+    : projects.find(
+        (candidate) => candidate.environmentId === environmentId && candidate.id === projectId,
+      );
   const worktree =
     worktreeSelection.kind === "existing"
       ? worktrees.find(
@@ -315,7 +339,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
         readEffectiveProjectPreferences({
           api: ensureEnvironmentApi(environmentId),
           config: serverConfig,
-          ...(projectId ? { projectId } : {}),
+          ...(projectId && !chatDraft ? { projectId } : {}),
         }),
       )
       .then((effective) => {
@@ -353,6 +377,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
   }, [
     environmentId,
     projectId,
+    chatDraft,
     serverConfig,
     environment?.connectionState,
     defaults.worktree,
@@ -488,6 +513,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
       ? resolveNewTaskProjectChoice({ target, projects, environments })
       : null;
     if (target && !nextProject) return;
+    setChatMode(false);
     if (
       taskLink &&
       !keepsTaskLink(taskLink, { environmentId: nextEnvironmentId, projectId: nextProjectId })
@@ -506,6 +532,18 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
     setNewBranch("");
     resetAttempt();
   };
+
+  /** "No project": a chat on the chosen machine. A task's chat keeps its project. */
+  const selectChat = () => {
+    if (taskLink) setTaskLink(null);
+    locationEdited.current = true;
+    setChatMode(true);
+    setWorktreeSelection({ kind: "local" });
+    resetAttempt();
+  };
+  useEffect(() => {
+    navigation.setOptions({ title: chatDraft ? "New Chat" : "New Task" });
+  }, [chatDraft, navigation]);
 
   const openPromptLink = useEffectEvent((search: URLSearchParams) => {
     navigation.setParams(CLEARED_PROMPT_LINK_PARAMS as never);
@@ -585,8 +623,10 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
   const queueing = environment !== undefined && !connected && canQueueNewTaskFor(environment);
   const draftComplete =
     prompt.trim().length > 0 &&
-    (project !== undefined || newProjectPath.trim().length > 0) &&
-    (worktreeSelection.kind !== "new" || newBranch.trim().length > 0);
+    (chatDraft
+      ? chatsAvailable
+      : (project !== undefined || newProjectPath.trim().length > 0) &&
+        (worktreeSelection.kind !== "new" || newBranch.trim().length > 0));
   const attachmentSendBlock = newTaskAttachmentSendBlock({
     attachments,
     getRecord: (id) => fileUploadRecords.get(id) ?? null,
@@ -612,15 +652,18 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
 
   const createAttempt = (): NewTaskAttempt => {
     if (!environment) throw new Error("Choose a connected node.");
-    const projectContext: NewTaskProjectContext = project
-      ? { kind: "existing", projectId: project.id, workspaceRoot: project.cwd }
-      : {
-          kind: "new",
-          workspaceRoot: newProjectPath,
-          title: newProjectTitle.trim() || undefined,
-        };
-    const worktreeContext: NewTaskWorktreeContext =
-      worktreeSelection.kind === "existing" && worktree
+    const projectContext: NewTaskProjectContext = chatDraft
+      ? { kind: "chat" }
+      : project
+        ? { kind: "existing", projectId: project.id, workspaceRoot: project.cwd }
+        : {
+            kind: "new",
+            workspaceRoot: newProjectPath,
+            title: newProjectTitle.trim() || undefined,
+          };
+    const worktreeContext: NewTaskWorktreeContext = chatDraft
+      ? { kind: "local" }
+      : worktreeSelection.kind === "existing" && worktree
         ? {
             kind: "existing",
             worktreeId: worktree.id,
@@ -674,7 +717,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
     if (!canSend) return;
     let attempt: NewTaskAttempt;
     try {
-      if (!project) validateNodeWorkspacePath(newProjectPath);
+      validateNewProjectPath({ hasProject: project !== undefined, chatDraft, newProjectPath });
       attempt = createAttempt();
     } catch (error) {
       setFailure({
@@ -688,6 +731,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
     const draft: NewTaskLaunchDraft = {
       environmentId: attempt.environmentId,
       projectId,
+      ...(chatDraft ? { chat: true } : {}),
       newProjectPath,
       newProjectTitle,
       worktree: worktreeSelection,
@@ -898,7 +942,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
             </View>
           ) : null}
 
-          {projectId === null ? (
+          {projectId === null && !chatDraft ? (
             <View className="mb-5 gap-3 rounded-[22px] border border-border bg-card p-4">
               <View className="gap-1">
                 <Text className="text-base font-ryco-bold text-foreground">New project</Text>
@@ -940,8 +984,10 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
             environments={environments}
             projects={projects}
             onSelectProject={selectProject}
-            projectId={projectId}
-            projectTitle={project?.name ?? draftProjectTitle}
+            projectId={chatDraft ? null : projectId}
+            chat={chatDraft}
+            onSelectChat={chatsAvailable && taskLink === null ? selectChat : undefined}
+            projectTitle={chatDraft ? CHAT_PROJECT_LABEL : (project?.name ?? draftProjectTitle)}
             customAvatarContentHash={project?.customAvatarContentHash}
             locationLabel={locationLabel}
             branchLabel={branchLabel}

@@ -10,6 +10,7 @@ import {
   type ProviderApprovalDecision,
   type ProviderInteractionMode,
   type RuntimeMode,
+  type ThreadGoalUpdate,
   type ThreadId,
 } from "@ryco/contracts";
 
@@ -188,5 +189,34 @@ export async function respondToThreadUserInput(input: {
         ...(input.userInputIdentity ? { userInputIdentity: input.userInputIdentity } : {}),
         createdAt: new Date().toISOString(),
       }),
+  });
+}
+
+/**
+ * Sets or changes the thread's goal (web's `dispatchThreadGoalUpdate`). `startTurn` asks the node
+ * to start the turn that pursues it, for a thread that is idle.
+ */
+export async function setThreadGoal(
+  api: EnvironmentApi,
+  threadId: ThreadId,
+  update: ThreadGoalUpdate,
+  options?: { readonly startTurn?: boolean },
+): Promise<void> {
+  await api.orchestration.dispatchCommand({
+    type: "thread.goal.set",
+    commandId: newCommandId(),
+    threadId,
+    ...update,
+    ...(options?.startTurn ? { startTurn: true } : {}),
+    createdAt: new Date().toISOString(),
+  });
+}
+
+export async function clearThreadGoal(api: EnvironmentApi, threadId: ThreadId): Promise<void> {
+  await api.orchestration.dispatchCommand({
+    type: "thread.goal.clear",
+    commandId: newCommandId(),
+    threadId,
+    createdAt: new Date().toISOString(),
   });
 }

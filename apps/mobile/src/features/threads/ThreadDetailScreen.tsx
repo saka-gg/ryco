@@ -41,6 +41,7 @@ import {
   Platform,
   Pressable,
   ScrollView,
+  Share,
   View,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
@@ -67,6 +68,7 @@ import {
   getProviderSupportsAskMode,
   normalizeInteractionModeForProviderTarget,
   noteApprovalRedirectEnd,
+  parseThreadGoalSlashCommand,
   pendingApprovalSourceFromStore,
   recordApprovalSightings,
   resolveApprovalRedirect,
@@ -74,6 +76,7 @@ import {
   type ApprovalRedirectedTurns,
   type ApprovalRedirectRefusal,
   type ApprovalSightings,
+  type ThreadGoalSlashCommand,
 } from "@ryco/client-runtime/state/composer";
 import { scopeProjectRef, scopeThreadRef, scopedThreadKey } from "@ryco/client-runtime/scoped";
 import {
@@ -81,6 +84,9 @@ import {
   deriveRevertTurnCountByUserMessageId,
   inferCheckpointTurnCountByTurnId,
   readCheckpointRevertPhase,
+  findLatestProposedPlan,
+  hasActionableProposedPlan,
+  isLatestTurnSettled,
   revertKeptChangesDiscardedBy,
   selectConversationRevertSupported,
   selectFilesRevertSupported,
@@ -137,11 +143,13 @@ import {
   threadForkBoundaryQuote,
   threadForkReplyExcerpt,
   type ChatMessage,
+  type ProposedPlan,
 } from "@ryco/client-runtime/state/threads";
 import { isChatProject } from "@ryco/shared/projectKind";
 import { threadSnoozeWokeAt } from "@ryco/shared/threadSnooze";
 import type { CommandId, ThreadForkResult } from "@ryco/contracts";
 import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts/base-schemas";
+import type { EnvironmentApi, ThreadGoal } from "@ryco/contracts";
 import { DEFAULT_AGENT_TOKEN_MODE, type ModelSelection } from "@ryco/contracts/orchestration";
 import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
@@ -174,7 +182,7 @@ import {
   readComposerFileBytes,
 } from "../../lib/composerFiles";
 import { convertPastedImagesToAttachments } from "../../lib/composerImages";
-import { newCommandId, newMessageId } from "../../lib/ids";
+import { newCommandId, newMessageId, newThreadId } from "../../lib/ids";
 import { runWhileBusy } from "../../lib/runWhileBusy";
 import { useThemeColor } from "../../lib/useThemeColor";
 import {
@@ -245,6 +253,7 @@ import {
   selectSubscribedClaudeReviewState,
   selectThreadByRef,
   selectThreadDetailLoaded,
+  selectThreadExistsByRef,
   selectThreadLiveDetailLoaded,
   selectWorkingDelegatedDescendants,
   useStore,
@@ -283,9 +292,11 @@ import { mobileSecretRequestCards } from "./secretRequestCardModel";
 import { sendThreadTurn } from "./sendThreadTurn";
 import { runUndoFileChanges } from "./undoFileChanges";
 import {
+  clearThreadGoal,
   compactThreadNow,
   interruptThreadTurn,
   renameThread,
+  setThreadGoal,
   setThreadArchived,
   setThreadSettled,
   setThreadInteractionMode,
@@ -306,7 +317,8 @@ import { buildModelPickerModel, listModelPickerEntries } from "./modelPickerMode
 import { buildSessionPolicyModel, resolveSessionPolicySelection } from "./sessionPolicyModel";
 import { useThreadAgents } from "./ThreadAgentsSheet";
 import { ThreadContextSheet } from "./ThreadContextSheet";
-import { buildThreadParentLink } from "./threadContextSheetModel";
+import { buildThreadParentLink, threadTitlePillGoal } from "./threadContextSheetModel";
+import type { ThreadGoalActions } from "./ThreadGoalSection";
 import {
   buildThreadHeaderMenu,
   flattenThreadHeaderMenu,
@@ -322,7 +334,11 @@ import { usePullRequestWatchControl } from "./usePullRequestWatchControl";
 import { useThreadDevice } from "../devices/useThreadDevice";
 import { copyTextWithHaptic } from "../../lib/copyTextWithHaptic";
 import { selectCompletionReturnsByChildThreadId } from "@ryco/client-runtime/state/agentControl";
-import { isDelegatedThreadLineage } from "@ryco/client-runtime/state/threads";
+import {
+  isDelegatedThreadLineage,
+  planThreadGoalCommand,
+  type ThreadGoalCommandPlan,
+} from "@ryco/client-runtime/state/threads";
 import { MenuView, type MenuAction, type NativeActionEvent } from "@react-native-menu/menu";
 import type { NativeStackHeaderItem } from "@react-navigation/native-stack";
 import { openTaskCapture } from "../tasks/taskCaptureStore";
@@ -341,7 +357,13 @@ import type { ThreadComposerHandle } from "./ThreadComposer";
 import { ThreadDevicePill } from "../devices/ThreadDevicePill";
 import { buildThreadHeaderModel, findThreadWorktree } from "./threadHeaderModel";
 import { ThreadMessage } from "./ThreadMessage";
-import { proposedPlanPresentation } from "./threadPresentation";
+import { ProposedPlanCard, type ProposedPlanCardActions } from "./ProposedPlanCard";
+import {
+  implementPlanHere,
+  implementPlanInNewThread,
+  planMarkdownExport,
+  resolvePlanSavePath,
+} from "./proposedPlanActions";
 import { ContextHandoffMarkerRow } from "./ContextHandoffMarkerRow";
 import { derivePendingComposerHandoff } from "./contextHandoffModel";
 import { ForkDestinationSheet } from "./ForkDestinationSheet";
@@ -376,6 +398,42 @@ const MESSAGE_ANCHOR_HIGHLIGHT_MS = 2_500;
  * settle, snooze and auto-settle against the time the screen opened.
  */
 /** An action's failure, as its alert says it (kept out of the component for React Compiler). */
+/** Runs one plan implementation; a tap while one is on its way does nothing. */
+async function guardPlanImplementation(
+  inFlight: { current: boolean },
+  run: () => Promise<void>,
+): Promise<void> {
+  if (inFlight.current) return;
+  inFlight.current = true;
+  try {
+    await run();
+  } finally {
+    inFlight.current = false;
+  }
+}
+
+/** Resolves once the node's new thread reached this device (a few seconds at most). */
+async function waitForThreadInStore(environmentId: EnvironmentId, threadId: ThreadId) {
+  const deadline = Date.now() + 12_000;
+  while (Date.now() < deadline) {
+    if (selectThreadExistsByRef(useStore.getState(), scopeThreadRef(environmentId, threadId))) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+/** Sends what a `/goal` message asked for (a plan that changes something). */
+async function sendGoalPlan(
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+  plan: Extract<ThreadGoalCommandPlan, { kind: "set" | "clear" }>,
+): Promise<void> {
+  const api = ensureEnvironmentApi(environmentId);
+  if (plan.kind === "clear") await clearThreadGoal(api, threadId);
+  else await setThreadGoal(api, threadId, plan.update, { startTurn: plan.startTurn });
+}
+
 function actionFailureMessage(error: unknown): string {
   return error instanceof Error ? error.message : "The request failed.";
 }
@@ -403,6 +461,9 @@ function TimelineRow(props: {
   readonly onOpenThread: (threadId: ThreadId, messageId: MessageId | null) => void;
   /** The message a link opened this thread at. */
   readonly highlighted?: boolean | undefined;
+  /** This row's plan can be implemented now. */
+  readonly planActionable?: boolean | undefined;
+  readonly planActions?: ProposedPlanCardActions | undefined;
 }) {
   const { entry, onForkFromMessage, onEditFromMessage, onUndoFileChangesOfReply, forkReply } =
     props;
@@ -427,18 +488,12 @@ function TimelineRow(props: {
     return props.highlighted ? <View className="bg-primary/10">{message}</View> : message;
   }
   if (entry.kind === "proposed-plan") {
-    const presentation = proposedPlanPresentation();
     return (
-      <View className={`mx-4 my-2 rounded-2xl p-4 ${presentation.containerClassName}`}>
-        <Text
-          className={`text-xs font-ryco-bold uppercase tracking-wide ${presentation.labelClassName}`}
-        >
-          Proposed plan
-        </Text>
-        <Text className="mt-1 font-sans text-sm text-foreground" selectable>
-          {entry.proposedPlan.planMarkdown}
-        </Text>
-      </View>
+      <ProposedPlanCard
+        plan={entry.proposedPlan}
+        actionable={props.planActionable === true}
+        actions={props.planActions}
+      />
     );
   }
   if (entry.kind === "context-compaction") {
@@ -2061,6 +2116,42 @@ export function ThreadDetailScreen(props: {
     if (attempt) endSteerAttempt(row.id, attempt.commandId);
   };
 
+  // `/goal …`: set, pause, resume or clear the goal the agent pursues (`planThreadGoalCommand`).
+  const runGoalCommand = async (
+    command: ThreadGoalSlashCommand,
+    attachmentCount: number,
+  ): Promise<boolean> => {
+    const plan = planThreadGoalCommand(command, {
+      hasGoal: (thread?.goal ?? null) !== null,
+      running: thread?.latestTurn?.state === "running",
+    });
+    if (plan.kind === "show") {
+      setContextSheetFor(outboxThreadKey);
+      return true;
+    }
+    if (plan.kind === "refuse") {
+      setSendError(`${plan.title}. ${plan.message}`);
+      return false;
+    }
+    if (attachmentCount > 0) {
+      setSendError("A goal is text only. Remove the attachments first.");
+      return false;
+    }
+    if (connectionUiState !== "connected") {
+      setSendError("Reconnect to change the goal.");
+      return false;
+    }
+    return runWhileBusy(setSendBusy, () =>
+      sendGoalPlan(environmentId, threadId, plan).then(
+        () => true,
+        (error: unknown) => {
+          setSendError(actionFailureMessage(error));
+          return false;
+        },
+      ),
+    );
+  };
+
   const onSend = async (
     text: string,
     attachments: ReadonlyArray<DraftComposerAttachment>,
@@ -2078,6 +2169,8 @@ export function ThreadDetailScreen(props: {
       setSendError("The reply was not sent: a queued message is being edited here.");
       return false;
     }
+    const goalCommand = notificationReply ? null : parseThreadGoalSlashCommand(text);
+    if (goalCommand !== null) return runGoalCommand(goalCommand, attachments.length);
     const sideQuestion = notificationReply ? null : parseSideQuestionCommand(text);
     if (sideQuestion !== null) {
       if (attachments.length > 0) {
@@ -2549,6 +2642,37 @@ export function ThreadDetailScreen(props: {
   // Fork eligibility and the anchored message live outside the timeline; they go onto the rows
   // so LegendList re-renders the rows they change (it never re-renders on a new renderItem).
   const [annotateRows] = useState(createThreadListRowAnnotator);
+  // The plan the settled latest turn proposed and nobody implemented: Implement is offered on it
+  // while the chat can take a turn (the shared rule web's plan follow-up reads).
+  const latestTurnSettled = thread
+    ? isLatestTurnSettled(thread.latestTurn, thread.session ?? null)
+    : false;
+  const latestPlan =
+    thread && latestTurnSettled
+      ? findLatestProposedPlan(thread.proposedPlans, thread.latestTurn?.turnId ?? null)
+      : null;
+  const actionablePlanId =
+    latestPlan !== null &&
+    hasActionableProposedPlan(latestPlan) &&
+    pendingUserInputs.length === 0 &&
+    !cachedView.composerDisabled &&
+    !actionBusy &&
+    !sendBusy &&
+    connectionUiState === "connected"
+      ? latestPlan.id
+      : null;
+  // One object for every plan row: LegendList keeps mounted rows, so the row calls through it
+  // into this render's handlers instead of holding an old closure.
+  const planHandlersRef = useRef<ProposedPlanCardActions | null>(null);
+  // One implementation at a time: a second tap before the node answers would send it twice.
+  const planImplementing = useRef(false);
+  const [planCardActions] = useState<ProposedPlanCardActions>(() => ({
+    implement: (plan) => planHandlersRef.current?.implement(plan),
+    implementInNewThread: (plan) => planHandlersRef.current?.implementInNewThread(plan),
+    copy: (plan) => planHandlersRef.current?.copy(plan),
+    save: (plan) => planHandlersRef.current?.save(plan),
+    share: (plan) => planHandlersRef.current?.share(plan),
+  }));
   const highlightedMessageId = messageAnchor?.messageId ?? null;
   const listRows = useMemo(
     () =>
@@ -2557,8 +2681,10 @@ export function ThreadDetailScreen(props: {
         editableMessageIds,
         undoableMessageIds,
         highlightedMessageId,
+        actionablePlanId,
       }),
     [
+      actionablePlanId,
       annotateRows,
       editableMessageIds,
       forkableMessageIds,
@@ -2587,6 +2713,8 @@ export function ThreadDetailScreen(props: {
         onUndoFileChangesOfReply={item.undoable ? onUndoFileChangesOfReply : undefined}
         forkReply={item.forkReply}
         highlighted={item.highlighted}
+        planActionable={item.planActionable}
+        planActions={planCardActions}
         onOpenThread={openThread}
       />
     );
@@ -2923,6 +3051,7 @@ export function ThreadDetailScreen(props: {
         sideChatAvailable: openSideChat !== undefined,
         forkAvailable: latestForkableReply !== undefined,
         addTaskAvailable: thread !== undefined,
+        promoteChatAvailable: thread !== undefined && project !== null && isChatProject(project),
         busy: mutationBusy,
       })
     : null;
@@ -2938,10 +3067,48 @@ export function ThreadDetailScreen(props: {
         : (JSON.parse(headerMenuSignature) as ReadonlyArray<ThreadHeaderMenuSection>),
     [headerMenuSignature],
   );
+  const goalRunning = thread?.latestTurn?.state === "running";
+  const runGoalAction = (send: (api: EnvironmentApi) => Promise<void>) =>
+    void runAction(() => send(ensureEnvironmentApi(environmentId)), "Could not update the goal");
+  const clearGoal = () =>
+    Alert.alert("Clear goal?", "The agent stops pursuing it.", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Clear",
+        style: "destructive",
+        onPress: () => runGoalAction((api) => clearThreadGoal(api, threadId)),
+      },
+    ]);
+  const goalSheetActions = (goal: ThreadGoal): ThreadGoalActions => ({
+    edit: () => {
+      setContextSheetVisible(false);
+      composerRef.current?.setText(`/goal ${goal.objective}`);
+      composerRef.current?.focus();
+    },
+    pause: () => runGoalAction((api) => setThreadGoal(api, threadId, { status: "paused" })),
+    resume: () =>
+      runGoalAction((api) =>
+        setThreadGoal(api, threadId, { status: "active" }, { startTurn: !goalRunning }),
+      ),
+    clear: clearGoal,
+    // The last change again: a clear is cleared again, anything else is sent as it stands.
+    retry: () =>
+      goal.synchronization?.action === "clear"
+        ? runGoalAction((api) => clearThreadGoal(api, threadId))
+        : runGoalAction((api) =>
+            setThreadGoal(
+              api,
+              threadId,
+              {},
+              { startTurn: goal.status === "active" && !goalRunning },
+            ),
+          ),
+  });
   const pillTitle = headerModel?.title ?? null;
   const pillStatus = headerModel?.statusLabel ?? null;
   const pillProject = headerModel?.projectLabel ?? null;
   const pillWorktree = headerModel?.worktreeLabel ?? null;
+  const pillGoal = threadTitlePillGoal(thread?.goal);
   const onHeaderMenuAction = (id: ThreadHeaderMenuActionId) => {
     switch (id) {
       case "files":
@@ -2977,6 +3144,8 @@ export function ThreadDetailScreen(props: {
         return;
       case "rename":
         return renameCurrentThread();
+      case "turn-into-project":
+        return navigation.navigate("ThreadPromoteChat", { environmentId, threadId });
       case "add-task":
         if (thread && headerModel) {
           openTaskCapture({
@@ -3010,6 +3179,124 @@ export function ThreadDetailScreen(props: {
         return toggleArchive();
     }
   };
+  // A proposed plan's buttons (`ProposedPlanCard`): implement here or in a new chat, or take the
+  // plan out as Markdown.
+  const planTurnSettings = () =>
+    thread
+      ? {
+          modelSelection: stagedModelSelection ?? thread.modelSelection,
+          runtimeMode: thread.runtimeMode,
+          tokenMode: thread.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
+        }
+      : null;
+  const planSourceOf = (plan: ProposedPlan) => ({
+    threadId,
+    planId: plan.id,
+    planMarkdown: plan.planMarkdown,
+  });
+  const planWorkspaceRoot = thread?.worktreePath ?? project?.cwd ?? null;
+  const planIds = { newCommandId, newMessageId };
+  const savePlan = (plan: ProposedPlan) => {
+    const root = planWorkspaceRoot;
+    if (!root) {
+      Alert.alert("Can't save the plan", "This chat has no folder on its machine yet.");
+      return;
+    }
+    const { filename, contents } = planMarkdownExport(plan.planMarkdown);
+    const write = (typed: string | undefined) => {
+      const relativePath = resolvePlanSavePath(typed);
+      if (relativePath === null) {
+        Alert.alert("Can't save there", "Use a path inside the chat's folder.");
+        return;
+      }
+      void runAction(async () => {
+        await ensureEnvironmentApi(environmentId).projects.writeFile({
+          cwd: root,
+          relativePath,
+          contents,
+        });
+        Alert.alert("Plan saved", relativePath);
+      }, "Could not save the plan");
+    };
+    if (Platform.OS === "ios") {
+      Alert.prompt(
+        "Save plan",
+        "A path inside the chat's folder. A file already there is replaced.",
+        [
+          { text: "Cancel", style: "cancel" },
+          { text: "Save", onPress: write },
+        ],
+        "plain-text",
+        filename,
+      );
+    } else {
+      // Android has no text prompt: it saves under the plan's own name, once confirmed.
+      Alert.alert(
+        "Save plan?",
+        `As ${filename} in the chat's folder. A file already there is replaced.`,
+        [
+          { text: "Cancel", style: "cancel" },
+          { text: "Save", onPress: () => write(filename) },
+        ],
+      );
+    }
+  };
+  const planHandlers: ProposedPlanCardActions = {
+    implement: (plan) => {
+      const settings = planTurnSettings();
+      if (!settings || !thread) return;
+      void runAction(
+        () =>
+          guardPlanImplementation(planImplementing, () =>
+            implementPlanHere({
+              api: ensureEnvironmentApi(environmentId),
+              plan: planSourceOf(plan),
+              titleSeed: thread.title,
+              interactionMode: thread.interactionMode,
+              setInteractionMode: (mode) =>
+                setThreadInteractionMode(ensureEnvironmentApi(environmentId), threadId, mode),
+              settings,
+              ids: planIds,
+            }),
+          ),
+        "Could not start the plan",
+      );
+    },
+    implementInNewThread: (plan) => {
+      const settings = planTurnSettings();
+      if (!settings || !thread) return;
+      const nextThreadId = newThreadId();
+      void runAction(
+        () =>
+          guardPlanImplementation(planImplementing, async () => {
+            await implementPlanInNewThread({
+              api: ensureEnvironmentApi(environmentId),
+              plan: planSourceOf(plan),
+              newThreadId: nextThreadId,
+              projectId: thread.projectId,
+              branch: thread.branch,
+              worktreePath: thread.worktreePath,
+              settings,
+              ids: planIds,
+            });
+            await waitForThreadInStore(environmentId, nextThreadId);
+            navigation.navigate("Thread", { environmentId, threadId: nextThreadId });
+          }),
+        "Could not start the implementation chat",
+      );
+    },
+    copy: (plan) =>
+      copyTextWithHaptic(planMarkdownExport(plan.planMarkdown).contents, { target: "plan" }),
+    save: savePlan,
+    share: (plan) => {
+      const { filename, contents } = planMarkdownExport(plan.planMarkdown);
+      void Share.share({ message: contents, title: filename });
+    },
+  };
+  useLayoutEffect(() => {
+    planHandlersRef.current = planHandlers;
+  });
+
   const onHeaderMenuActionRef = useRef(onHeaderMenuAction);
   useLayoutEffect(() => {
     onHeaderMenuActionRef.current = onHeaderMenuAction;
@@ -3045,6 +3332,7 @@ export function ThreadDetailScreen(props: {
             statusLabel: pillStatus,
             projectLabel: pillProject,
             worktreeLabel: pillWorktree,
+            goal: pillGoal,
           };
     navigation.setOptions({
       title: pillTitle ?? "Task",
@@ -3104,6 +3392,7 @@ export function ThreadDetailScreen(props: {
     iconColor,
     navigation,
     outboxThreadKey,
+    pillGoal,
     pillProject,
     pillStatus,
     pillTitle,
@@ -3465,6 +3754,7 @@ export function ThreadDetailScreen(props: {
 
       <ThreadComposer
         ref={composerRef}
+        goalAvailable={thread !== undefined}
         onOpenSideChat={
           selectedModelSelection
             ? () => sideChatStore.getState().open(sideChatKey, selectedModelSelection)
@@ -3534,6 +3824,15 @@ export function ThreadDetailScreen(props: {
 
       {headerModel ? (
         <ThreadContextSheet
+          goal={
+            thread?.goal
+              ? {
+                  goal: thread.goal,
+                  busy: mutationBusy,
+                  actions: goalSheetActions(thread.goal),
+                }
+              : null
+          }
           visible={contextSheetVisible}
           onClose={() => setContextSheetVisible(false)}
           environmentId={environmentId}

@@ -61,6 +61,10 @@ export function NewTaskComposer(props: {
     project: { environmentId: EnvironmentId; projectId: ProjectId } | null,
   ) => void;
   readonly customAvatarContentHash?: string | null;
+  /** The draft is a chat without a project: no project icon, no workspace or branch to pick. */
+  readonly chat?: boolean;
+  /** Offers "No project" in the project menu (the machine can hold chats). */
+  readonly onSelectChat?: (() => void) | undefined;
   readonly prompt: string;
   readonly attachments: ReadonlyArray<DraftComposerAttachment>;
   readonly fileUploadRecords?: ReadonlyMap<string, ChatFileUploadRecord>;
@@ -149,6 +153,11 @@ export function NewTaskComposer(props: {
             projectId={props.projectId}
             disabled={props.busy}
             onSelect={props.onSelectProject}
+            chat={
+              props.onSelectChat
+                ? { selected: props.chat === true, onSelect: props.onSelectChat }
+                : undefined
+            }
             onClose={() => {
               if (keyboardVisible) promptRef.current?.focus();
             }}
@@ -161,7 +170,14 @@ export function NewTaskComposer(props: {
                 onPress={open}
                 className="min-h-12 max-w-full flex-row items-center gap-2 rounded-2xl px-2 py-1 active:bg-subtle disabled:opacity-40"
               >
-                {props.environmentId && props.projectId ? (
+                {props.chat ? (
+                  <SymbolView
+                    name="bubble.left"
+                    size={26}
+                    tintColor={iconColor}
+                    type="monochrome"
+                  />
+                ) : props.environmentId && props.projectId ? (
                   <ProjectFavicon
                     environmentId={props.environmentId}
                     projectId={props.projectId}
@@ -222,36 +238,44 @@ export function NewTaskComposer(props: {
       </View>
 
       <View className="gap-3">
-        <View className="flex-row flex-wrap items-center justify-center gap-2">
-          <ComposerToolbarButton
-            icon={props.usesWorktree ? undefined : "folder"}
-            iconNode={
-              props.usesWorktree ? <IconGitFork size={16} color={iconColor as string} /> : undefined
-            }
-            label={props.locationLabel}
-            accessibilityLabel={`Workspace: ${props.locationLabel}`}
-            maxWidth={280}
-            disabled={props.busy}
-            onPress={props.onOpenWorkspace}
-          />
-          {props.branchLabel ? (
-            <>
-              {props.newWorktree ? (
-                <Text className="text-sm text-foreground-muted">from</Text>
-              ) : null}
-              <ComposerToolbarButton
-                iconNode={<IconGitBranch size={16} color={iconColor as string} />}
-                label={props.branchLabel}
-                accessibilityLabel={`${props.newWorktree ? "Base branch" : "Branch"}: ${props.branchLabel}`}
-                maxWidth={280}
-                disabled={props.busy}
-                onPress={props.onOpenWorkspace}
-              />
-            </>
-          ) : null}
-        </View>
+        {props.chat ? (
+          <Text className="text-center text-xs text-foreground-muted">
+            Its own folder on this machine. Turn it into a project any time.
+          </Text>
+        ) : (
+          <View className="flex-row flex-wrap items-center justify-center gap-2">
+            <ComposerToolbarButton
+              icon={props.usesWorktree ? undefined : "folder"}
+              iconNode={
+                props.usesWorktree ? (
+                  <IconGitFork size={16} color={iconColor as string} />
+                ) : undefined
+              }
+              label={props.locationLabel}
+              accessibilityLabel={`Workspace: ${props.locationLabel}`}
+              maxWidth={280}
+              disabled={props.busy}
+              onPress={props.onOpenWorkspace}
+            />
+            {props.branchLabel ? (
+              <>
+                {props.newWorktree ? (
+                  <Text className="text-sm text-foreground-muted">from</Text>
+                ) : null}
+                <ComposerToolbarButton
+                  iconNode={<IconGitBranch size={16} color={iconColor as string} />}
+                  label={props.branchLabel}
+                  accessibilityLabel={`${props.newWorktree ? "Base branch" : "Branch"}: ${props.branchLabel}`}
+                  maxWidth={280}
+                  disabled={props.busy}
+                  onPress={props.onOpenWorkspace}
+                />
+              </>
+            ) : null}
+          </View>
+        )}
 
-        {props.newBranchName ? (
+        {props.newBranchName && !props.chat ? (
           <Text className="text-center text-xs text-foreground-muted">
             as <Text className="font-mono text-foreground">{props.newBranchName}</Text>
           </Text>

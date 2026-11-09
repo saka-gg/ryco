@@ -1,4 +1,5 @@
-import { composeOutgoingPrompt, createFileReference } from "@ryco/client-runtime/state/composer";
+import { composeOutgoingPrompt } from "./sendEngine.ts";
+import { createFileReference } from "./fileReference.ts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -11,7 +12,7 @@ import {
   proposedPlanTitle,
   resolvePlanFollowUpSubmission,
   stripDisplayedPlanMarkdown,
-} from "./proposedPlan";
+} from "./proposedPlan.ts";
 
 describe("proposedPlanTitle", () => {
   it("reads the first markdown heading as the plan title", () => {
