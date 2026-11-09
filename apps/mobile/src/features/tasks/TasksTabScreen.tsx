@@ -21,6 +21,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { SymbolView } from "../../components/AppSymbol";
+import { HeaderIconButton } from "../../components/HeaderIconButton";
 import { AppText as Text } from "../../components/AppText";
 import { EmptyState } from "../../components/EmptyState";
 import { cn } from "../../lib/cn";
@@ -86,25 +87,6 @@ type ListItem =
       readonly hidden: number;
       readonly expanded: boolean;
     };
-
-function HeaderIconButton(props: {
-  readonly symbol: string;
-  readonly label: string;
-  readonly onPress: () => void;
-}) {
-  const icon = useThemeColor("--color-icon") as string;
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={props.label}
-      hitSlop={6}
-      onPress={props.onPress}
-      className="h-10 w-10 items-center justify-center rounded-full bg-subtle active:bg-subtle-strong"
-    >
-      <SymbolView name={props.symbol as never} size={17} tintColor={icon} />
-    </Pressable>
-  );
-}
 
 interface PickerProject {
   readonly environmentId: EnvironmentId;
@@ -587,8 +569,9 @@ export function TasksTabScreen() {
           <View className="flex-1" />
           {machines.length > 0 ? (
             <HeaderIconButton
-              symbol="magnifyingglass"
-              label="Search tasks"
+              icon="magnifyingglass"
+              accessibilityLabel="Search tasks"
+              filled
               onPress={() => setSearching(true)}
             />
           ) : null}

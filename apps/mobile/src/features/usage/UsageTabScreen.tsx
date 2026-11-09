@@ -14,6 +14,7 @@ import Animated, {
 } from "react-native-reanimated";
 
 import { SymbolView } from "../../components/AppSymbol";
+import { HeaderIconButton } from "../../components/HeaderIconButton";
 import { AppText as Text } from "../../components/AppText";
 import { EmptyState } from "../../components/EmptyState";
 import { MotionReveal } from "../../components/MotionReveal";
@@ -225,7 +226,6 @@ function DeviceFilterButton(props: {
   readonly menu: UsageDeviceMenu;
   readonly onChange: (device: string) => void;
 }) {
-  const iconColor = useThemeColor("--color-icon");
   return (
     <MenuView
       title={props.menu.title}
@@ -237,19 +237,17 @@ function DeviceFilterButton(props: {
       onPressAction={({ nativeEvent }) => props.onChange(nativeEvent.event)}
     >
       <View
+        accessible
         accessibilityRole="button"
         accessibilityLabel={`Devices: ${props.menu.label}`}
-        className="h-11 w-11 items-center justify-center rounded-full"
       >
-        <SymbolView
-          name={
+        <HeaderIconButton
+          icon={
             props.menu.filtered
               ? "line.3.horizontal.decrease.circle.fill"
               : "line.3.horizontal.decrease.circle"
           }
-          size={20}
-          tintColor={iconColor as string}
-          type="monochrome"
+          accessibilityLabel="Devices"
         />
       </View>
     </MenuView>

@@ -64,7 +64,9 @@ The chat-screen round (2026-11) ports further pieces from `pingdotgg/t3code` at 
 (`src/features/threads/threadFeedLiveFollow.ts`, from upstream's
 `features/threads/thread-feed-live-follow.ts`, and the follow-dependent
 `maintainScrollAtEnd` / `maintainVisibleContentPosition` switch of upstream's
-`ThreadFeed.tsx`), the floating status capsule with its separating scroll-to-end button and
+`ThreadFeed.tsx`; a later fix adds that file's drag/momentum session with its 160 ms settle
+wait and its re-follow only at the list's own end, and upstream's LegendList patch hunk that
+keeps iOS's native anchor on, in `patches/@legendapp%2Flist@3.3.10.patch`), the floating status capsule with its separating scroll-to-end button and
 their timings (`src/features/threads/FloatingThreadControl.tsx`, after upstream's
 `floating-working-control.tsx`), and the native header menu of the thread screen (after
 upstream's `ThreadHeader.tsx` / `components/ui/AppBar.tsx` toolbar menus).
