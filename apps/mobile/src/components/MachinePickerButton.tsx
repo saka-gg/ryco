@@ -56,7 +56,6 @@ const PALETTE = {
     avatar: "rgba(255,255,255,0.08)",
     icon: "#f2f2f4",
     pressed: "rgba(255,255,255,0.06)",
-    popover: "rgba(36,36,42,0.97)",
     popoverShadow: "0px 18px 50px rgba(0,0,0,0.6)",
     rowPressed: "rgba(255,255,255,0.07)",
     divider: "rgba(255,255,255,0.08)",
@@ -69,7 +68,6 @@ const PALETTE = {
     avatar: "rgba(0,0,0,0.06)",
     icon: "#262626",
     pressed: "rgba(0,0,0,0.05)",
-    popover: "rgba(255,255,255,0.97)",
     popoverShadow: "0px 18px 50px rgba(0,0,0,0.18)",
     rowPressed: "rgba(0,0,0,0.05)",
     divider: "rgba(0,0,0,0.08)",
@@ -383,6 +381,7 @@ export function MachinePickerButton(props: {
   readonly onManage: () => void;
 }) {
   const palette = usePalette();
+  const popoverColor = useThemeColor("--color-popover") as string;
   const reduceMotion = useReducedMotion();
   const factsOf = useMachinePickerFacts();
   const model = buildMachinePickerModel({
@@ -579,7 +578,7 @@ export function MachinePickerButton(props: {
                     width,
                     padding: 8,
                     borderRadius: 18,
-                    backgroundColor: palette.popover,
+                    backgroundColor: popoverColor,
                     boxShadow: palette.popoverShadow,
                     transformOrigin: "left top",
                   },
