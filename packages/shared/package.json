@@ -230,6 +230,14 @@
       "types": "./src/sourceControl.ts",
       "import": "./src/sourceControl.ts"
     },
+    "./sourceControlPublish": {
+      "types": "./src/sourceControlPublish.ts",
+      "import": "./src/sourceControlPublish.ts"
+    },
+    "./gitDefaultBranch": {
+      "types": "./src/gitDefaultBranch.ts",
+      "import": "./src/gitDefaultBranch.ts"
+    },
     "./sourceControlHost": {
       "types": "./src/sourceControlHost.ts",
       "import": "./src/sourceControlHost.ts"

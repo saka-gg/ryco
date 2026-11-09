@@ -114,16 +114,25 @@ function readPatchFile(segment: string): PullRequestPatchFile {
 }
 
 /**
+ * The patch's files exactly in the order the patch lists them. Git's own
+ * listings (a checkout's staged and unstaged changes) pair their per-file
+ * metadata with this order.
+ */
+export function readPatchFilesInOrder(patch: string): ReadonlyArray<PullRequestPatchFile> {
+  const normalized = patch.replace(/\r\n/gu, "\n");
+  const starts = segmentStarts(normalized);
+  return starts.map((start, index) =>
+    readPatchFile(normalized.slice(start, starts[index + 1]).replace(/\n+$/u, "")),
+  );
+}
+
+/**
  * The patch's files in reading order: `orderChangeRequestFiles` decides what
  * comes first and each directory groups where its first file appears, exactly
  * like the web's Files tab and its tree.
  */
 export function splitPullRequestPatch(patch: string): ReadonlyArray<PullRequestPatchFile> {
-  const normalized = patch.replace(/\r\n/gu, "\n");
-  const starts = segmentStarts(normalized);
-  const files = starts.map((start, index) =>
-    readPatchFile(normalized.slice(start, starts[index + 1]).replace(/\n+$/u, "")),
-  );
+  const files = readPatchFilesInOrder(patch);
   const byPath = new Map<string, PullRequestPatchFile>();
   for (const file of files) if (!byPath.has(file.path)) byPath.set(file.path, file);
   const tree = buildReviewFileTree(

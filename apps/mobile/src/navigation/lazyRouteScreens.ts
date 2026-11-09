@@ -39,6 +39,20 @@ export const E2eeNodeVerificationRouteScreen = lazyScreen(
       require("../features/e2ee/E2eeNodeVerificationRouteScreen") as typeof import("../features/e2ee/E2eeNodeVerificationRouteScreen")
     ).E2eeNodeVerificationRouteScreen,
 );
+export const ThreadFileEditRouteScreen = lazyScreen(
+  "ThreadFileEditRouteScreen",
+  () =>
+    (
+      require("../features/files/ThreadFileEditRouteScreen") as typeof import("../features/files/ThreadFileEditRouteScreen")
+    ).ThreadFileEditRouteScreen,
+);
+export const ThreadFileSearchRouteScreen = lazyScreen(
+  "ThreadFileSearchRouteScreen",
+  () =>
+    (
+      require("../features/files/ThreadFileSearchRouteScreen") as typeof import("../features/files/ThreadFileSearchRouteScreen")
+    ).ThreadFileSearchRouteScreen,
+);
 export const ThreadFileRouteScreen = lazyScreen(
   "ThreadFileRouteScreen",
   () =>
@@ -107,6 +121,41 @@ export const ReviewSheet = lazyScreen(
   () =>
     (require("../features/review/ReviewSheet") as typeof import("../features/review/ReviewSheet"))
       .ReviewSheet,
+);
+export const SourceControlBranchesRouteScreen = lazyScreen(
+  "SourceControlBranchesRouteScreen",
+  () =>
+    (
+      require("../features/sourceControl/SourceControlBranchesRouteScreen") as typeof import("../features/sourceControl/SourceControlBranchesRouteScreen")
+    ).SourceControlBranchesRouteScreen,
+);
+export const SourceControlCommitRouteScreen = lazyScreen(
+  "SourceControlCommitRouteScreen",
+  () =>
+    (
+      require("../features/sourceControl/SourceControlCommitRouteScreen") as typeof import("../features/sourceControl/SourceControlCommitRouteScreen")
+    ).SourceControlCommitRouteScreen,
+);
+export const SourceControlChangesRouteScreen = lazyScreen(
+  "SourceControlChangesRouteScreen",
+  () =>
+    (
+      require("../features/sourceControl/SourceControlChangesRouteScreen") as typeof import("../features/sourceControl/SourceControlChangesRouteScreen")
+    ).SourceControlChangesRouteScreen,
+);
+export const SourceControlCompareRouteScreen = lazyScreen(
+  "SourceControlCompareRouteScreen",
+  () =>
+    (
+      require("../features/sourceControl/SourceControlCompareRouteScreen") as typeof import("../features/sourceControl/SourceControlCompareRouteScreen")
+    ).SourceControlCompareRouteScreen,
+);
+export const SourceControlPublishRouteScreen = lazyScreen(
+  "SourceControlPublishRouteScreen",
+  () =>
+    (
+      require("../features/sourceControl/SourceControlPublishRouteScreen") as typeof import("../features/sourceControl/SourceControlPublishRouteScreen")
+    ).SourceControlPublishRouteScreen,
 );
 export const SourceControlRouteScreen = lazyScreen(
   "SourceControlRouteScreen",

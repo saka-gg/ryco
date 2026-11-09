@@ -21,6 +21,7 @@ import { WebView } from "react-native-webview";
 import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import {
   classifyWorkspaceFilePath,
+  relativePathToRouteSegments,
   type WorkspaceFileUnavailableReason,
   type WorkspaceFileViewMode,
   type WorkspaceFileViewModeOverride,
@@ -694,6 +695,8 @@ export function ThreadFileScreen(props: {
   );
   const viewSource = useCallback(() => selectMode("source"), [selectMode]);
 
+  // Text the node read as such can be edited; images, binaries and unread files cannot.
+  const editablePath = !readsBinary && read.data && path !== null ? path : null;
   const toggle = model.header.toggle;
   const headerTitle = model.header.title;
   const pathLabel = model.header.pathLabel;
@@ -709,6 +712,28 @@ export function ThreadFileScreen(props: {
               activeIconColor={iconColor}
               onSelect={selectMode}
             />
+          ) : null}
+          {editablePath ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Edit file"
+              hitSlop={6}
+              onPress={() =>
+                navigation.navigate("ThreadFileEdit", {
+                  environmentId,
+                  threadId,
+                  path: relativePathToRouteSegments(editablePath),
+                })
+              }
+              className="h-9 w-9 items-center justify-center rounded-full active:bg-subtle-strong"
+            >
+              <SymbolView
+                name="square.and.pencil"
+                size={16}
+                tintColor={iconColor}
+                type="monochrome"
+              />
+            </Pressable>
           ) : null}
           <CopyTextButton
             accessibilityLabel="Copy file path"
@@ -728,6 +753,8 @@ export function ThreadFileScreen(props: {
       ),
     });
   }, [
+    editablePath,
+    environmentId,
     goToFiles,
     headerTitle,
     iconColor,
@@ -735,6 +762,7 @@ export function ThreadFileScreen(props: {
     navigation,
     pathLabel,
     selectMode,
+    threadId,
     toggle.mode,
     toggle.visible,
   ]);

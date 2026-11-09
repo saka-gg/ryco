@@ -42,3 +42,15 @@ export function sourceControlStatusLine(status: VcsStatusResult | null): string 
   if (status.pr) parts.push(`PR #${status.pr.number} ${status.pr.state}`);
   return parts.join(" · ");
 }
+
+/** The status under the branch chip: sync state and PR, without repeating the branch. */
+export function sourceControlSyncLine(status: VcsStatusResult | null): string {
+  if (!status) return "Loading repository status…";
+  if (!status.isRepo) return "This workspace is not a Git repository.";
+  const parts: string[] = [];
+  if (status.aheadCount > 0) parts.push(`${status.aheadCount} ahead`);
+  if (status.behindCount > 0) parts.push(`${status.behindCount} behind`);
+  if (status.pr) parts.push(`PR #${status.pr.number} ${status.pr.state}`);
+  if (parts.length === 0) parts.push(status.hasUpstream ? "Up to date" : "Not pushed yet");
+  return parts.join(" · ");
+}

@@ -2,14 +2,11 @@ import { selectNodeRecordsThreadBranch } from "@ryco/client-runtime/state/thread
 import type { ChangeRequest, ScopedThreadRef, ServerConfig } from "@ryco/contracts";
 import type {
   SourceControlCloneProtocol,
-  SourceControlProviderDiscoveryItem,
-  SourceControlProviderKind,
   SourceControlPublishRepositoryInput,
   SourceControlPublishRepositoryResult,
   SourceControlRepositoryVisibility,
   VcsStatusResult,
 } from "@ryco/contracts";
-import { Option } from "effect";
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { flushSync } from "react-dom";
 import {
@@ -104,6 +101,14 @@ import {
   useGitActionRunner,
   useThreadBranchPersistence,
 } from "./useGitActionRunner";
+import {
+  getPublishProviderReadiness,
+  isPublishRepositoryPathComplete,
+  PUBLISH_PROVIDER_OPTIONS as SHARED_PUBLISH_PROVIDER_OPTIONS,
+  publishAccountsByProvider,
+  publishProviderOption as sharedPublishProviderOption,
+  type PublishProviderKind,
+} from "@ryco/shared/sourceControlPublish";
 
 export type { GitActionPostPushEvent } from "./useGitActionRunner";
 
@@ -124,101 +129,23 @@ interface GitActionsControlProps {
 
 export type GitActionsControlAppearance = "toolbar" | "block";
 
-type PublishProviderKind = Extract<
-  SourceControlProviderKind,
-  "github" | "gitlab" | "forgejo" | "bitbucket" | "azure-devops"
->;
-
 const GIT_STATUS_WINDOW_REFRESH_DEBOUNCE_MS = 250;
 
-const PUBLISH_PROVIDER_OPTIONS = [
-  {
-    value: "github",
-    label: "GitHub",
-    description: "github.com",
-    host: "github.com",
-    pathPlaceholder: "owner/repo",
-    Icon: GitHubIcon,
-  },
-  {
-    value: "gitlab",
-    label: "GitLab",
-    description: "gitlab.com",
-    host: "gitlab.com",
-    pathPlaceholder: "group/project",
-    Icon: GitLabIcon,
-  },
-  {
-    value: "forgejo",
-    label: "Forgejo",
-    description: "Forgejo instance",
-    host: "configured Forgejo host",
-    pathPlaceholder: "owner/repo",
-    Icon: ForgejoIcon,
-  },
-  {
-    value: "bitbucket",
-    label: "Bitbucket",
-    description: "bitbucket.org",
-    host: "bitbucket.org",
-    pathPlaceholder: "workspace/repository",
-    Icon: BitbucketIcon,
-  },
-  {
-    value: "azure-devops",
-    label: "Azure DevOps",
-    description: "dev.azure.com",
-    host: "dev.azure.com",
-    pathPlaceholder: "project/repository",
-    Icon: AzureDevOpsIcon,
-  },
-] as const satisfies ReadonlyArray<{
-  readonly value: PublishProviderKind;
-  readonly label: string;
-  readonly description: string;
-  readonly host: string;
-  readonly pathPlaceholder: string;
-  readonly Icon: typeof GitHubIcon;
-}>;
+const PUBLISH_PROVIDER_ICONS = {
+  github: GitHubIcon,
+  gitlab: GitLabIcon,
+  forgejo: ForgejoIcon,
+  bitbucket: BitbucketIcon,
+  "azure-devops": AzureDevOpsIcon,
+} as const satisfies Record<PublishProviderKind, typeof GitHubIcon>;
+
+const PUBLISH_PROVIDER_OPTIONS = SHARED_PUBLISH_PROVIDER_OPTIONS.map((option) => ({
+  ...option,
+  Icon: PUBLISH_PROVIDER_ICONS[option.value],
+}));
 
 function publishProviderOption(provider: PublishProviderKind) {
-  return (
-    PUBLISH_PROVIDER_OPTIONS.find((option) => option.value === provider) ??
-    PUBLISH_PROVIDER_OPTIONS[0]
-  );
-}
-
-function isPublishProviderKind(
-  provider: SourceControlProviderKind,
-): provider is PublishProviderKind {
-  return PUBLISH_PROVIDER_OPTIONS.some((option) => option.value === provider);
-}
-
-function getPublishProviderReadiness(input: {
-  provider: PublishProviderKind;
-  sourceControlProviders: ReadonlyArray<SourceControlProviderDiscoveryItem>;
-}): { readonly ready: boolean; readonly hint: string | null } {
-  const discovered = input.sourceControlProviders.find(
-    (provider) => provider.kind === input.provider,
-  );
-  if (!discovered) {
-    return {
-      ready: false,
-      hint: "Provider status unavailable. Open Settings -> Source Control and rescan.",
-    };
-  }
-  if (discovered.status !== "available") {
-    return { ready: false, hint: discovered.installHint };
-  }
-  if (discovered.auth.status === "unauthenticated") {
-    return {
-      ready: false,
-      hint:
-        Option.getOrNull(discovered.auth.detail) ??
-        `${discovered.label} is not authenticated. Open Settings -> Source Control for setup guidance.`,
-    };
-  }
-  return { ready: true, hint: null };
+  return { ...sharedPublishProviderOption(provider), Icon: PUBLISH_PROVIDER_ICONS[provider] };
 }
 
 function getMenuActionDisabledReason({
@@ -393,21 +320,10 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
       props.gitCwd,
     ),
   });
-  const publishAccountByProvider = useMemo(() => {
-    const accounts: Record<PublishProviderKind, string | null> = {
-      github: null,
-      gitlab: null,
-      forgejo: null,
-      bitbucket: null,
-      "azure-devops": null,
-    };
-    for (const provider of sourceControlDiscovery.data?.sourceControlProviders ?? []) {
-      if (isPublishProviderKind(provider.kind)) {
-        accounts[provider.kind] = Option.getOrNull(provider.auth.account);
-      }
-    }
-    return accounts;
-  }, [sourceControlDiscovery.data]);
+  const publishAccountByProvider = useMemo(
+    () => publishAccountsByProvider(sourceControlDiscovery.data?.sourceControlProviders ?? []),
+    [sourceControlDiscovery.data],
+  );
   const publishProviderReadiness = useMemo(() => {
     const sourceControlProviders = sourceControlDiscovery.data?.sourceControlProviders ?? [];
     return Object.fromEntries(
@@ -461,11 +377,7 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
   const canSubmitPublishRepository = useMemo(() => {
     if (!selectedPublishProviderReadiness.ready) return false;
     if (publishRepositoryMutation.isPending) return false;
-    const repositoryParts = publishRepository.trim().split("/");
-    const owner = repositoryParts[0]?.trim() ?? "";
-    const rest = repositoryParts.slice(1);
-    const name = rest.join("/").trim();
-    return owner.length > 0 && name.length > 0;
+    return isPublishRepositoryPathComplete(publishRepository);
   }, [publishRepository, publishRepositoryMutation.isPending, selectedPublishProviderReadiness]);
 
   useEffect(() => {
