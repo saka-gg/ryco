@@ -213,12 +213,14 @@ import { FloatingThreadControl } from "./FloatingThreadControl";
 import { ImageGalleryProvider } from "./ImageGalleryModal";
 import {
   FLOATING_CONTROL_CLEARANCE,
-  isFollowingLatest,
   showsFloatingThreadCapsule,
 } from "./floatingThreadControlModel";
 import {
-  resolveThreadFeedLiveFollow,
-  type ThreadFeedLiveFollowEvent,
+  reduceThreadFeedFollow,
+  THREAD_FEED_FOLLOW_INITIAL,
+  THREAD_FEED_USER_SCROLL_SETTLE_MS,
+  type ThreadFeedFollowEvent,
+  type ThreadFeedFollowState,
 } from "./threadFeedLiveFollow";
 import { markSnoozeWokeSeen } from "../../state/snoozeWokeSeen";
 import {
@@ -2604,46 +2606,64 @@ export function ThreadDetailScreen(props: {
   const [follow, setFollow] = useState({ key: outboxThreadKey, following: true });
   const followingLatest = follow.key === outboxThreadKey ? follow.following : true;
   const setFollowingLatest = (following: boolean) => setFollow({ key: outboxThreadKey, following });
-  const userScrollSession = useRef(false);
-  const transitionFollow = (event: ThreadFeedLiveFollowEvent) => {
-    const next = resolveThreadFeedLiveFollow(followingLatest, event);
-    if (next !== followingLatest) setFollowingLatest(next);
+  // The reader's drag and its momentum, between renders; `followingLatest` stays the rendered truth.
+  const followSession = useRef<{ readonly key: string; state: ThreadFeedFollowState }>({
+    key: outboxThreadKey,
+    state: THREAD_FEED_FOLLOW_INITIAL,
+  });
+  const followSettleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearFollowSettleTimer = () => {
+    if (followSettleTimer.current === null) return;
+    clearTimeout(followSettleTimer.current);
+    followSettleTimer.current = null;
   };
-  const feedIsAtEnd = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const { contentOffset, layoutMeasurement, contentSize } = event.nativeEvent;
-    return isFollowingLatest({
-      offsetY: contentOffset.y,
-      viewportHeight: layoutMeasurement.height,
-      contentHeight: contentSize.height,
-    });
+  useEffect(() => clearFollowSettleTimer, []);
+  const transitionFollow = (event: ThreadFeedFollowEvent) => {
+    const session =
+      followSession.current.key === outboxThreadKey
+        ? followSession.current.state
+        : THREAD_FEED_FOLLOW_INITIAL;
+    const next = reduceThreadFeedFollow({ ...session, following: followingLatest }, event);
+    followSession.current = { key: outboxThreadKey, state: next };
+    if (next.following !== followingLatest) setFollowingLatest(next.following);
   };
+  // The reader's drag or the momentum it threw, not a programmatic scroll or a list adjustment.
+  const readerScrolling = () =>
+    followSession.current.key === outboxThreadKey &&
+    followSession.current.state.userScroll !== "idle";
   const composerShrink = useComposerShrink(outboxThreadKey);
   // The live status capsule rises above the "Message" bubble while the composer is shrunk.
   const bubbleProgress = composerShrink.bubbleProgress;
   const floatingLiftStyle = useAnimatedStyle(() => ({
     transform: [{ translateY: -(COMPOSER_BUBBLE_HEIGHT + 10) * bubbleProgress.get() }],
   }));
+  // The list's own end (it knows its insets and footer), not a band near it.
+  const feedIsAtEnd = () => listRef.current?.getState().isAtEnd ?? false;
   const onFeedScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-    composerShrink.onScroll(event.nativeEvent, userScrollSession.current);
-    transitionFollow({
-      type: "scroll",
-      isAtEnd: feedIsAtEnd(event),
-      userScrollSessionActive: userScrollSession.current,
-    });
+    composerShrink.onScroll(event.nativeEvent, readerScrolling());
+    transitionFollow({ type: "scroll", isAtEnd: feedIsAtEnd() });
   };
   const onFeedScrollBeginDrag = () => {
-    userScrollSession.current = true;
-    transitionFollow({ type: "user-scroll-begin" });
+    clearFollowSettleTimer();
+    transitionFollow({ type: "drag-begin" });
   };
-  const onFeedScrollSettled = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-    transitionFollow({
-      type: "user-scroll-end",
-      isAtEnd: feedIsAtEnd(event),
-      userScrollSessionActive: userScrollSession.current,
-    });
-    userScrollSession.current = false;
+  // A release can still throw momentum: wait for it before the drag counts as over.
+  const onFeedScrollEndDrag = () => {
+    clearFollowSettleTimer();
+    transitionFollow({ type: "drag-end", isAtEnd: feedIsAtEnd() });
+    followSettleTimer.current = setTimeout(() => {
+      followSettleTimer.current = null;
+      transitionFollow({ type: "settle-timeout" });
+    }, THREAD_FEED_USER_SCROLL_SETTLE_MS);
   };
+  const onFeedMomentumScrollBegin = () => {
+    clearFollowSettleTimer();
+    transitionFollow({ type: "momentum-begin" });
+  };
+  const onFeedMomentumScrollEnd = () =>
+    transitionFollow({ type: "momentum-end", isAtEnd: feedIsAtEnd() });
   const jumpToLatest = () => {
+    clearFollowSettleTimer();
     transitionFollow({ type: "reset" });
     void listRef.current?.scrollToEnd({ animated: true });
   };
@@ -3613,8 +3633,9 @@ export function ThreadDetailScreen(props: {
               onStartReachedThreshold={0.35}
               onScroll={onFeedScroll}
               onScrollBeginDrag={onFeedScrollBeginDrag}
-              onScrollEndDrag={onFeedScrollSettled}
-              onMomentumScrollEnd={onFeedScrollSettled}
+              onScrollEndDrag={onFeedScrollEndDrag}
+              onMomentumScrollBegin={onFeedMomentumScrollBegin}
+              onMomentumScrollEnd={onFeedMomentumScrollEnd}
               scrollEventThrottle={64}
               // A spacer the list measures (unlike contentContainerStyle padding), so following
               // the end and anchoring still add up.

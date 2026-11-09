@@ -38,17 +38,6 @@ export type FloatingThreadAttention = "approval" | "question" | null;
 /** Space the feed keeps under its newest message while the status floats there. */
 export const FLOATING_CONTROL_CLEARANCE = 52;
 
-/** Further than this from the end, the reader is reading back, not following along. */
-export const FOLLOWING_DISTANCE = 160;
-
-export function isFollowingLatest(input: {
-  readonly offsetY: number;
-  readonly viewportHeight: number;
-  readonly contentHeight: number;
-}): boolean {
-  return input.contentHeight - (input.offsetY + input.viewportHeight) <= FOLLOWING_DISTANCE;
-}
-
 /** "42s", "3:07", "1:02:09": the elapsed time of the running turn. */
 export function formatElapsed(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));

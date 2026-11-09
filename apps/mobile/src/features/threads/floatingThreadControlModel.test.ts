@@ -3,7 +3,6 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   floatingThreadControlTicks,
   formatElapsed,
-  isFollowingLatest,
   resolveFloatingThreadControl,
   showsFloatingThreadCapsule,
 } from "./floatingThreadControlModel";
@@ -17,15 +16,6 @@ describe("floating thread control", () => {
     expect(formatElapsed(187_000)).toBe("3:07");
     expect(formatElapsed(3_729_000)).toBe("1:02:09");
     expect(formatElapsed(-5)).toBe("0s");
-  });
-
-  it("follows the end within 160 points", () => {
-    expect(isFollowingLatest({ offsetY: 840, viewportHeight: 600, contentHeight: 1600 })).toBe(
-      true,
-    );
-    expect(isFollowingLatest({ offsetY: 800, viewportHeight: 600, contentHeight: 1600 })).toBe(
-      false,
-    );
   });
 
   const base = {
