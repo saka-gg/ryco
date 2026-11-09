@@ -115,7 +115,8 @@ either side ignores a name it does not know, and a relay that predates the field
 not part of the signed transcript. A frame type that comes with a feature is sent only on a
 connection whose auth listed that feature, never to an older node (an unknown frame type ends the
 node's connection). `linked-access-check` asks for `node.linked-access.changed`
-([hub-linked-access-check.md](hub-linked-access-check.md)).
+([hub-linked-access-check.md](hub-linked-access-check.md)), and `automation-hooks` for
+`node.automation-hooks.pending` ([automation-webhooks.md](automation-webhooks.md)).
 
 Client authentication:
 
@@ -192,7 +193,9 @@ All fields listed without “optional” are required.
 
 Protocol 1.3 adds the E2EE authorization frames of `relay-e2ee-protocol.md` §18.5 and
 `node.linked-access.changed` (no fields beyond the version envelope), which the Hub sends to a node
-that listed the `linked-access-check` feature when a member's access to it may have changed.
+that listed the `linked-access-check` feature when a member's access to it may have changed, and
+`node.automation-hooks.pending` (no fields either), which it sends to a node that listed the
+`automation-hooks` feature when it holds webhook requests for one of the node's automation hooks.
 
 An omitted `channel.close.reason` is an orderly close. When present, it must be one of the stable
 close reasons. `retryAfterMs` is an integer from 0 through 300,000 and is available only in protocol

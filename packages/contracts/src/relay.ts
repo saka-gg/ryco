@@ -80,6 +80,7 @@ export const RELAY_FRAME_TYPES = [
   "e2ee.verifier-keys",
   "e2ee.enrollment-revoked",
   "node.linked-access.changed",
+  "node.automation-hooks.pending",
 ] as const;
 
 export const RELAY_PROTOCOL_ERROR_CODES = [
@@ -434,6 +435,17 @@ export const RelayNodeLinkedAccessChangedFrame = minor3Frame({
 });
 export type RelayNodeLinkedAccessChangedFrame = typeof RelayNodeLinkedAccessChangedFrame.Type;
 
+/**
+ * Hub → node: the Hub holds webhook requests for one of this node's automation hooks. It names
+ * nothing; the node collects them with `POST /api/node/automation-hooks/sync`
+ * (`@ryco/contracts/automation-hooks`). Sent only on a connection whose auth listed the
+ * `automation-hooks` feature, so a node that predates the type never receives it.
+ */
+export const RelayNodeAutomationHooksPendingFrame = minor3Frame({
+  type: Schema.Literal("node.automation-hooks.pending"),
+});
+export type RelayNodeAutomationHooksPendingFrame = typeof RelayNodeAutomationHooksPendingFrame.Type;
+
 export const RelayChannelAcceptFrame = Schema.Struct({
   type: Schema.Literal("channel.accept"),
   ...ProtocolFields,
@@ -569,6 +581,7 @@ export const RelayControlFrame = Schema.Union([
   RelayE2eeVerifierKeysFrame,
   RelayE2eeEnrollmentRevokedFrame,
   RelayNodeLinkedAccessChangedFrame,
+  RelayNodeAutomationHooksPendingFrame,
 ]);
 export type RelayControlFrame = typeof RelayControlFrame.Type;
 
