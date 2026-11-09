@@ -766,7 +766,8 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // live input, device tabs, relay video and setup on top of Computer Use measured 7.209 MB.
     // 7.214 MB on 2026-11-09: Full access chats running every device action without asking
     // (#1159, #1161) measured 7.212145 MB; each fit alone, together they passed the cap.
-    expect(bytes).toBeLessThan(7_214_000);
+    // 7.216 MB on 2026-11-09: the Claude Fable 5.2 model entries (#1169) measured 7.214311 MB.
+    expect(bytes).toBeLessThan(7_216_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.
