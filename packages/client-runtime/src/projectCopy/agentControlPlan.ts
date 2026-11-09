@@ -31,7 +31,7 @@ import {
   type ProjectCopySupport,
   type ProjectCopyTargetFacts,
   type ProjectCopyTransport,
-} from "@ryco/client-runtime/projectCopy";
+} from "./index.ts";
 import type {
   AgentControlCopyProjectToNodePlan,
   EnvironmentApi,
@@ -53,8 +53,8 @@ import { getModelDisplayName } from "@ryco/shared/model";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
-import { deriveProviderInstanceEntries } from "../../providerInstances";
-import type { AgentControlClientExecutionPreview } from "../agent-control/agentControlClientExecutor";
+import { deriveProviderInstanceEntries } from "../state/composer/providerInstances.ts";
+import type { AgentControlClientExecutionPreview } from "./agentControlExecutor.ts";
 
 // ── Facts ──
 

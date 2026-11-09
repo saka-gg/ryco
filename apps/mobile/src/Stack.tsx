@@ -31,6 +31,7 @@ import {
   AddProjectRouteScreen,
   ConnectionsNewRouteScreen,
   ConnectionsRouteScreen,
+  CopyProjectRouteScreen,
   E2eeNodeSecurityRouteScreen,
   E2eeNodeVerificationRouteScreen,
   HostedAccountRouteScreen,
@@ -304,6 +305,11 @@ export const ROOT_STACK_SCREENS = {
     screen: AddProjectRouteScreen,
     linking: MVP_ROOT_ROUTES.AddProject.linking,
     options: routeOptions("AddProject", { title: "Add Project", gestureEnabled: true }),
+  }),
+  CopyProject: createNativeStackScreen({
+    screen: CopyProjectRouteScreen,
+    linking: MVP_ROOT_ROUTES.CopyProject.linking,
+    options: routeOptions("CopyProject", { title: "Copy project", gestureEnabled: true }),
   }),
   Project: createNativeStackScreen({
     screen: ProjectRouteScreen,

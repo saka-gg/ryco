@@ -30,7 +30,7 @@ import {
   isUnsupportedWindowsProjectPath,
   resolveInitialProjectBrowsePath,
   resolveProjectPathForDispatch,
-} from "../../lib/projectPaths";
+} from "@ryco/shared/projectPaths";
 import { getLatestThreadForProject, type ThreadSortInput } from "../../lib/threadSort";
 import { buildProjectCreateCommand } from "../../lib/projectCreateCommand";
 import { isMacPlatform, isWindowsPlatform, newProjectId } from "../../lib/utils";

@@ -19,7 +19,11 @@ export type MobileHostedConnectionScope =
   /** Exact-machine trust ceremony; never acquired by list rendering or prefetch. */
   | { readonly type: "node-pairing"; readonly nodeId: string }
   /** A visible Tasks surface reading the machine's task list; yields to thread work. */
-  | { readonly type: "local-tasks" };
+  | { readonly type: "local-tasks" }
+  /** A cross-node project copy writing to the node: never displaced while it runs. */
+  | { readonly type: "project-copy"; readonly copyId: string }
+  /** Following an import that runs on the node by itself: background demand, displaceable. */
+  | { readonly type: "project-copy-follow"; readonly copyId: string };
 
 export interface RetainedMobileHostedConnectionScope {
   readonly environmentId: EnvironmentId;
@@ -61,6 +65,9 @@ function stableScopeKey(environmentId: EnvironmentId, scope: MobileHostedConnect
       return JSON.stringify([environmentId, scope.type, scope.instanceId ?? null]);
     case "node-pairing":
       return JSON.stringify([environmentId, scope.type, scope.nodeId]);
+    case "project-copy":
+    case "project-copy-follow":
+      return JSON.stringify([environmentId, scope.type, scope.copyId]);
   }
 }
 

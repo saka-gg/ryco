@@ -66,6 +66,12 @@ export const ProjectCopyJobRecord = Schema.Struct({
   targetEnvironmentId: EnvironmentId,
   /** The new project's id on the target. */
   projectId: ProjectId,
+  /**
+   * The repository directory the copy creates on the target, as planned. A
+   * stopped copy resumes only into it. Absent on records written before it was
+   * kept, and on imports tracked without a plan.
+   */
+  destinationPath: Schema.optionalKey(Schema.String),
   exportId: Schema.NullOr(ProjectExportId),
   transfers: Schema.Array(ProjectCopyJobTransfer),
   importId: ProjectImportId,
@@ -100,6 +106,7 @@ export function createProjectCopyJobRecord(input: {
   readonly targetEnvironmentId: EnvironmentId;
   readonly projectId: ProjectId;
   readonly importId: ProjectImportId;
+  readonly destinationPath?: string | null | undefined;
   readonly agentControl?: ProjectCopyJobRecord["agentControl"] | undefined;
 }): ProjectCopyJobRecord {
   return {
@@ -111,6 +118,7 @@ export function createProjectCopyJobRecord(input: {
     sourceProjectId: input.sourceProjectId,
     targetEnvironmentId: input.targetEnvironmentId,
     projectId: input.projectId,
+    ...(input.destinationPath ? { destinationPath: input.destinationPath } : {}),
     exportId: null,
     transfers: [],
     importId: input.importId,

@@ -13,7 +13,7 @@ import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
 import { resetProjectAtomsForTests } from "../../rpc/projectAtoms";
 import { defaultQueryClient } from "../../rpc/queryClient";
 import { FolderPicker, type FolderPickerProps } from "./FolderPicker";
-import type { FolderSelectionStatus } from "./folderPicker.logic";
+import type { FolderSelectionStatus } from "@ryco/client-runtime/projectCopy/folderPicker";
 import { createFakeNodeApi, FAKE_NODE_ID, FAKE_PROJECTS } from "./projectNodesTestFixtures";
 
 function Harness(

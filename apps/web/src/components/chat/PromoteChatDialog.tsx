@@ -57,7 +57,7 @@ import {
   getBrowseDirectoryPath,
   getBrowseLeafPathSegment,
   isFilesystemBrowseQuery,
-} from "../../lib/projectPaths";
+} from "@ryco/shared/projectPaths";
 import { cn } from "../../lib/utils";
 import { readLocalApi } from "../../localApi";
 import { deriveLogicalProjectKeyFromSettings } from "../../logicalProject";
@@ -1002,7 +1002,8 @@ function DestinationField({
   const browse = useFilesystemBrowse({
     environmentId: environmentId,
     partialPath: directory,
-    enabled: popupOpen && directory.length > 0 && isFilesystemBrowseQuery(directory),
+    enabled:
+      popupOpen && directory.length > 0 && isFilesystemBrowseQuery(directory, navigator.platform),
   });
   // Folders beside the destination, matching its last segment as typed:
   // picking one puts the project (named after the project) inside it.

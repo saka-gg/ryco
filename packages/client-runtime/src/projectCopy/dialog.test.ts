@@ -3,7 +3,7 @@ import {
   reduceProjectCopyJobRecord,
   type CopyDestinationSuggestion,
   type ProjectCopyProgress,
-} from "@ryco/client-runtime/projectCopy";
+} from "./index.ts";
 import { describeOfflineSince } from "@ryco/client-runtime/connection";
 import type { NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
 import { EnvironmentId, ProjectId } from "@ryco/contracts";
@@ -32,7 +32,7 @@ import {
   shortSetupCommand,
   type CopyProgressContext,
   type ProjectCopyEntryLike,
-} from "./copyProjectDialog.logic";
+} from "./dialog.ts";
 
 const LAPTOP = EnvironmentId.make("env-laptop");
 const MINI = EnvironmentId.make("env-mini");

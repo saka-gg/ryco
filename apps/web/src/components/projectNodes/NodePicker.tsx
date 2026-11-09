@@ -26,7 +26,7 @@ import {
   type NodePresenceTone,
   type NodePickerRequirements,
   type NodeTone,
-} from "./nodePicker.logic";
+} from "@ryco/client-runtime/projectCopy/nodePicker";
 
 const NODE_TONE_CLASS: Record<NodeTone, string> = {
   info: "text-info bg-info/16 dark:bg-info/24",

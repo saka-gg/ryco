@@ -11,7 +11,7 @@ import {
   folderStatusPath,
   resolveFolderDestination,
   type DescribeFolderSelectionInput,
-} from "./folderPicker.logic";
+} from "./folderPicker.ts";
 
 describe("buildFolderCrumbs", () => {
   it("starts at home for a folder under it", () => {

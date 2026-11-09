@@ -60,7 +60,11 @@ export function projectRepositoryLabel(
 }
 
 // Shared with the sidebar's project menus, so they live with the other path helpers.
-export { displayProjectPath, formatProjectPath, inferHomeDirectory } from "../../lib/projectPaths";
+export {
+  displayProjectPath,
+  formatProjectPath,
+  inferHomeDirectory,
+} from "@ryco/shared/projectPaths";
 
 /** The last two path segments (`Code/ryco`), for one-line subtitles. */
 export function projectPathTail(cwd: string): string {

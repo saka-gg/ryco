@@ -21,7 +21,7 @@ import {
   resolveAgentControlCopy,
   sameAgentControlCopyPreview,
   type AgentControlCopyFacts,
-} from "./agentControlCopyPlan";
+} from "./agentControlPlan.ts";
 
 const SOURCE = "env-laptop" as EnvironmentId;
 const TARGET = "env-mini" as EnvironmentId;

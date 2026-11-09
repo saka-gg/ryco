@@ -1,5 +1,7 @@
 import {
   acquireNodeConnection,
+  awaitBootstrappedNodeConnection,
+  type NodeConnectionRegistry,
   NODE_ACQUIRE_TIMEOUT_MESSAGE,
   projectCopyNodeRefusal,
   type AcquiredNode,
@@ -54,59 +56,22 @@ export type AcquireNodePurpose = "copy" | "follow";
  */
 
 const NO_HOLD = { release: () => undefined } as const;
-/** How long a failed bootstrap is left before it is asked again, unless the connection changes first. */
-const BOOTSTRAP_RETRY_MS = 1_000;
 
-/**
- * Resolves on the next change to the registered connections, after `maxWaitMs`
- * when given, or when `signal` aborts.
- */
-function nextConnectionChange(signal: AbortSignal, maxWaitMs?: number): Promise<void> {
-  return new Promise((resolve) => {
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let unsubscribe: () => void = () => undefined;
-    const done = () => {
-      unsubscribe();
-      signal.removeEventListener("abort", done);
-      if (timer !== null) globalThis.clearTimeout(timer);
-      resolve();
-    };
-    unsubscribe = subscribeEnvironmentConnections(done);
-    signal.addEventListener("abort", done, { once: true });
-    if (maxWaitMs !== undefined) timer = globalThis.setTimeout(done, maxWaitMs);
-  });
-}
+const WEB_CONNECTIONS: NodeConnectionRegistry<
+  NonNullable<ReturnType<typeof readEnvironmentConnection>>
+> = {
+  read: readEnvironmentConnection,
+  subscribe: subscribeEnvironmentConnections,
+  apiOf: (environmentId, connection) =>
+    readEnvironmentApiForConnection(environmentId, connection.client),
+};
 
-/**
- * The node's registered connection once it is bootstrapped. A connection
- * replaced while it bootstraps is never handed out, and one whose bootstrap
- * fails is asked again: its lifecycle owner reconnects it or registers a new
- * one, within the acquisition's budget.
- */
-async function awaitBootstrappedConnection(
+/** The node's registered connection once it is bootstrapped (see `awaitBootstrappedNodeConnection`). */
+function awaitBootstrappedConnection(
   environmentId: EnvironmentId,
   signal: AbortSignal,
 ): Promise<NodeAcquireConnection> {
-  while (!signal.aborted) {
-    const connection = readEnvironmentConnection(environmentId);
-    if (!connection) {
-      await nextConnectionChange(signal);
-      continue;
-    }
-    const bootstrapped = await connection.ensureBootstrapped().then(
-      () => true,
-      () => false,
-    );
-    if (readEnvironmentConnection(environmentId) !== connection) continue;
-    if (!bootstrapped) {
-      await nextConnectionChange(signal, BOOTSTRAP_RETRY_MS);
-      continue;
-    }
-    const api = readEnvironmentApiForConnection(environmentId, connection.client);
-    if (!api) throw new Error("The device's connection has no API.");
-    return { api, isCurrent: () => readEnvironmentConnection(environmentId) === connection };
-  }
-  throw new Error("Stopped waiting for the device to connect.");
+  return awaitBootstrappedNodeConnection(WEB_CONNECTIONS, environmentId, signal);
 }
 
 function timeoutMessageFor(environmentId: EnvironmentId): () => string {

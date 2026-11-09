@@ -27,4 +27,23 @@ describe("client-runtime workspace Metro boundary", () => {
     expect(metroConfig).toContain("context.originModulePath.startsWith(clientRuntimeSourceRoot)");
     expect(metroConfig).toContain('moduleName.endsWith(".js")');
   });
+
+  it("maps parent-relative `.js` specifiers too (the nodes barrel re-exports the workspace catalog)", () => {
+    const nodesIndex = new URL(
+      "../../../../packages/client-runtime/src/state/nodes/index.ts",
+      import.meta.url,
+    );
+    const source = readFileSync(nodesIndex, "utf8");
+    const metroConfig = readFileSync(METRO_CONFIG, "utf8");
+    const parentSpecifiers = Array.from(
+      source.matchAll(/from\s+["'](\.\.\/[^"']+)["']/g),
+      (match) => match[1]!,
+    );
+
+    expect(parentSpecifiers.length).toBeGreaterThan(0);
+    for (const specifier of parentSpecifiers) {
+      expect(existsSync(new URL(`${specifier.slice(0, -3)}.ts`, nodesIndex)), specifier).toBe(true);
+    }
+    expect(metroConfig).toContain('moduleName.startsWith("../")');
+  });
 });

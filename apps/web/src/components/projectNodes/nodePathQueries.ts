@@ -22,7 +22,7 @@ import {
   readEnvironmentConnection,
   subscribeEnvironmentConnections,
 } from "../../environments/runtime";
-import { normalizeProjectPathForComparison } from "../../lib/projectPaths";
+import { normalizeProjectPathForComparison } from "@ryco/shared/projectPaths";
 import { defaultQueryClient, useQuery, type QueryKey } from "../../rpc/queryClient";
 
 /** The node's environment API on its current connection; undefined while it is not connected. */

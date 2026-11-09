@@ -50,7 +50,7 @@ config.resolver = {
     // Node contract intact and adapt only this React Native source boundary.
     if (
       context.originModulePath.startsWith(clientRuntimeSourceRoot) &&
-      moduleName.startsWith("./") &&
+      (moduleName.startsWith("./") || moduleName.startsWith("../")) &&
       moduleName.endsWith(".js")
     ) {
       const sourcePath = path.resolve(

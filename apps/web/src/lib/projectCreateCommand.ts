@@ -1,6 +1,6 @@
 import type { ProjectId } from "@ryco/contracts";
 
-import { inferProjectTitleFromPath } from "./projectPaths";
+import { inferProjectTitleFromPath } from "@ryco/shared/projectPaths";
 import { newCommandId } from "./utils";
 
 /**

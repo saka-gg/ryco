@@ -54,7 +54,7 @@ import {
   isSameFilesystemPath,
   normalizeProjectPathForComparison,
   normalizeProjectPathForDispatch,
-} from "~/lib/projectPaths";
+} from "@ryco/shared/projectPaths";
 import { cn } from "~/lib/utils";
 import { requestFilesystemBrowse } from "~/rpc/projectAtoms";
 import { useFilesystemBrowse } from "~/rpc/useProject";
@@ -81,7 +81,7 @@ import {
   type FolderCrumb,
   type FolderPickerMode,
   type FolderSelectionStatus,
-} from "./folderPicker.logic";
+} from "@ryco/client-runtime/projectCopy/folderPicker";
 import {
   FOLDER_SEARCH_LIMIT,
   useNodeDestinationPreview,
@@ -91,7 +91,7 @@ import {
   useNodeListingAnnotations,
   useNodePathHints,
 } from "./nodePathQueries";
-import { nodeOsLabel } from "./nodePicker.logic";
+import { nodeOsLabel } from "@ryco/client-runtime/projectCopy/nodePicker";
 
 const SEARCH_DEBOUNCE_MS = 200;
 const PREVIEW_DEBOUNCE_MS = 150;

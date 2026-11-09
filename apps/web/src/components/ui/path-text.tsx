@@ -6,7 +6,7 @@
 
 import type { CSSProperties } from "react";
 
-import { splitPathAtSeparators, splitPathForDisplay } from "~/lib/projectPaths";
+import { splitPathAtSeparators, splitPathForDisplay } from "@ryco/shared/projectPaths";
 import { cn } from "~/lib/utils";
 
 /** Parents this short ("/", "C:\") are shown whole; longer ones may ellipsize. */

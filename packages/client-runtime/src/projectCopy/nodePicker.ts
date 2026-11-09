@@ -1,16 +1,16 @@
-// FILE: nodePicker.logic.ts
+// FILE: nodePicker.ts
 // Purpose: What a node picker shows for one node and whether it can be picked: its machine
 //          icon and tone, OS and presence line, project and code-root summary, and the reason
 //          it is disabled.
 // Layer: Web UI logic, pure. The catalog entries come from `@ryco/client-runtime/state/nodes`.
 
-import { describeOfflineSince } from "@ryco/client-runtime/connection";
+import { describeOfflineSince } from "../connection/index.ts";
 import type { EnvironmentId, EnvironmentMachineKind } from "@ryco/contracts";
 import type { NodePathHints } from "@ryco/contracts/project-copy";
-import type { NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
+import type { NodeCatalogEntry } from "../state/nodes/index.ts";
 import { inferEnvironmentMachineKind } from "@ryco/shared/environmentIcon";
 
-import { formatProjectPath } from "../../lib/projectPaths";
+import { formatProjectPath } from "@ryco/shared/projectPaths";
 
 /** What a picker knows about a node beyond the catalog, keyed by environment id. */
 export interface NodePickerNodeExtras {

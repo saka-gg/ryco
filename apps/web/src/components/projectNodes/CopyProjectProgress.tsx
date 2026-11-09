@@ -15,14 +15,14 @@ import { getGitStatusSnapshot } from "../../lib/gitStatusState";
 import type { Project } from "../../types";
 import { Button } from "../ui/button";
 import { DialogTitle } from "../ui/dialog";
-import { projectCopyView } from "./copyRuntime/projectCopyProgress.logic";
+import { projectCopyView } from "@ryco/client-runtime/projectCopy/progressView";
 import type { ProjectCopyEntry } from "./copyRuntime/copyManager";
 import {
   copyCheckoutMeta,
   copyOverallPercent,
   copyProgressFooter,
   copyProgressSteps,
-} from "./copyProjectDialog.logic";
+} from "@ryco/client-runtime/projectCopy/dialog";
 import {
   CopyBar,
   CopyCheckoutMetaLine,
@@ -30,7 +30,7 @@ import {
   CopyRingSpinner,
 } from "./copyProjectDialogParts";
 import type { StartedProjectCopy } from "./CopyProjectForm";
-import { displayProjectPath } from "../../lib/projectPaths";
+import { displayProjectPath } from "@ryco/shared/projectPaths";
 import { NodeBadge } from "./NodePicker";
 import { NODE_LABEL_CELL, NodePathText, useNodeLabelColumn } from "./NodePathText";
 

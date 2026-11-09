@@ -1,11 +1,11 @@
-// FILE: projectCopyProgress.logic.ts
+// FILE: progressView.ts
 // Purpose: What a running or finished cross-node copy says about itself: the
 //          progress toast's title, status line and percent, shared with the
 //          copy dialog's progress view and the Projects page's Copies block so
 //          every surface words a copy the same way.
 // Layer: Pure web presentation over the coordinator's `ProjectCopyProgress`.
 
-import type { ProjectCopyProgress } from "@ryco/client-runtime/projectCopy";
+import type { ProjectCopyProgress } from "./run.ts";
 import type { ProjectImportSnapshot, ProjectImportStepId } from "@ryco/contracts/project-copy";
 
 /**

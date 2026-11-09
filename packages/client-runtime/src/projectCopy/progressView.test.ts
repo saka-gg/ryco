@@ -1,4 +1,4 @@
-import type { ProjectCopyProgress } from "@ryco/client-runtime/projectCopy";
+import type { ProjectCopyProgress } from "./index.ts";
 import type { ProjectImportSnapshot } from "@ryco/contracts/project-copy";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -12,7 +12,7 @@ import {
   projectCopyPercent,
   projectCopyView,
   type ProjectCopyLabels,
-} from "./projectCopyProgress.logic";
+} from "./progressView.ts";
 
 const labels: ProjectCopyLabels = { title: "ryco", sourceLabel: "Laptop", targetLabel: "Mac mini" };
 

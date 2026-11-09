@@ -721,7 +721,11 @@
       "types": "./src/browserElementPickScript.ts",
       "import": "./src/browserElementPickScript.ts"
     },
-    "./savedEnvironmentRecord": "./src/savedEnvironmentRecord.ts"
+    "./savedEnvironmentRecord": "./src/savedEnvironmentRecord.ts",
+    "./projectPaths": {
+      "types": "./src/projectPaths.ts",
+      "import": "./src/projectPaths.ts"
+    }
   },
   "scripts": {
     "typecheck": "effect-tsgo tsrs --noEmit --incremental",

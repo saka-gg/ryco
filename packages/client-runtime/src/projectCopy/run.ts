@@ -269,6 +269,7 @@ function initialRecord(input: StartProjectCopyInput): ProjectCopyJobRecord {
     targetEnvironmentId: plan.target.environmentId,
     projectId: ProjectIdSchema.make(io.uuid()),
     importId: ProjectImportId.make(io.uuid()),
+    destinationPath: plan.destinationPath,
     agentControl: input.agentControl ?? null,
   });
 }

@@ -118,6 +118,10 @@
       "types": "./src/authorization/hostedStores.ts",
       "import": "./src/authorization/hostedStores.ts"
     },
+    "./authorization/hostedMutationLeases": {
+      "types": "./src/authorization/hostedMutationLeases.ts",
+      "import": "./src/authorization/hostedMutationLeases.ts"
+    },
     "./authorization/nodeMutationLease": {
       "types": "./src/authorization/nodeMutationLease.ts",
       "import": "./src/authorization/nodeMutationLease.ts"
@@ -459,7 +463,55 @@
       "import": "./src/state/pull-request-review/index.ts"
     },
     "./state/storage": "./src/state/storage/index.ts",
-    "./state/lifecycle": "./src/state/lifecycle/index.ts"
+    "./state/lifecycle": "./src/state/lifecycle/index.ts",
+    "./projectCopy/progressView": {
+      "types": "./src/projectCopy/progressView.ts",
+      "import": "./src/projectCopy/progressView.ts"
+    },
+    "./projectCopy/agentControlReports": {
+      "types": "./src/projectCopy/agentControlReports.ts",
+      "import": "./src/projectCopy/agentControlReports.ts"
+    },
+    "./projectCopy/dialog": {
+      "types": "./src/projectCopy/dialog.ts",
+      "import": "./src/projectCopy/dialog.ts"
+    },
+    "./projectCopy/nodePicker": {
+      "types": "./src/projectCopy/nodePicker.ts",
+      "import": "./src/projectCopy/nodePicker.ts"
+    },
+    "./projectCopy/folderPicker": {
+      "types": "./src/projectCopy/folderPicker.ts",
+      "import": "./src/projectCopy/folderPicker.ts"
+    },
+    "./projectCopy/manager": {
+      "types": "./src/projectCopy/manager.ts",
+      "import": "./src/projectCopy/manager.ts"
+    },
+    "./projectCopy/nodeIo": {
+      "types": "./src/projectCopy/nodeIo.ts",
+      "import": "./src/projectCopy/nodeIo.ts"
+    },
+    "./projectCopy/destinationMemory": {
+      "types": "./src/projectCopy/destinationMemory.ts",
+      "import": "./src/projectCopy/destinationMemory.ts"
+    },
+    "./projectCopy/form": {
+      "types": "./src/projectCopy/form.ts",
+      "import": "./src/projectCopy/form.ts"
+    },
+    "./projectCopy/agentControlPlan": {
+      "types": "./src/projectCopy/agentControlPlan.ts",
+      "import": "./src/projectCopy/agentControlPlan.ts"
+    },
+    "./projectCopy/agentControlExecutor": {
+      "types": "./src/projectCopy/agentControlExecutor.ts",
+      "import": "./src/projectCopy/agentControlExecutor.ts"
+    },
+    "./projectCopy/addProject": {
+      "types": "./src/projectCopy/addProject.ts",
+      "import": "./src/projectCopy/addProject.ts"
+    }
   },
   "scripts": {
     "typecheck": "effect-tsgo tsrs --noEmit --incremental && effect-tsgo tsrs --noEmit --incremental -p tsconfig.test.json",

@@ -61,7 +61,7 @@ import {
   type AddProjectRemoteSource,
   type ResolvedRemoteRepository,
 } from "./addProjectSources";
-import { displayProjectPath } from "../../lib/projectPaths";
+import { displayProjectPath } from "@ryco/shared/projectPaths";
 import { NodeBadge } from "./NodePicker";
 import { NodePathText } from "./NodePathText";
 import { closeAddProject } from "./projectNodesDialogStore";

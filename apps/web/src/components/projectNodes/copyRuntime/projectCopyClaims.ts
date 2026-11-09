@@ -11,19 +11,16 @@
 //          claims are shared exactly as widely as the records they guard.
 // Layer: Web copy runtime, loaded with `copyManager`.
 
+import {
+  createInMemoryProjectCopyClaims,
+  type ProjectCopyClaim,
+  type ProjectCopyClaims,
+} from "@ryco/client-runtime/projectCopy/manager";
+
 import { appLocalStorage } from "../../../hooks/useLocalStorage";
 import { randomUUID } from "../../../lib/utils";
 
-/** One window's hold on a copy (or an approval); release it when the run ends. */
-export interface ProjectCopyClaim {
-  /** Lets go of the claim; later calls do nothing. */
-  readonly release: () => void;
-}
-
-export interface ProjectCopyClaims {
-  /** Claims `key` for this window; null when a run here or in another window holds it. */
-  readonly tryClaim: (key: string) => Promise<ProjectCopyClaim | null>;
-}
+export type { ProjectCopyClaim, ProjectCopyClaims };
 
 const LOCK_PREFIX = "ryco:project-copy:";
 
@@ -39,16 +36,7 @@ function onceClaim(release: () => void): ProjectCopyClaim {
 }
 
 /** Claims this window keeps to itself (one holder per key here; other windows don't see them). */
-export function createWindowProjectCopyClaims(): ProjectCopyClaims {
-  const held = new Set<string>();
-  return {
-    tryClaim: async (key) => {
-      if (held.has(key)) return null;
-      held.add(key);
-      return onceClaim(() => held.delete(key));
-    },
-  };
-}
+export const createWindowProjectCopyClaims = createInMemoryProjectCopyClaims;
 
 // ── Leases in storage ──
 

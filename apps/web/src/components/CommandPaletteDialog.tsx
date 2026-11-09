@@ -114,7 +114,7 @@ import {
   isFilesystemBrowseQuery,
   isSameFilesystemPath,
   resolveProjectPathForDispatch,
-} from "../lib/projectPaths";
+} from "@ryco/shared/projectPaths";
 import { notifySurfaceLoadFailure } from "./ui/surfaceLoadFailure";
 import { useLazyComponentReady } from "../lib/preloadableLazy";
 import { getLatestThreadForProject } from "../lib/threadSort";

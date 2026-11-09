@@ -65,7 +65,7 @@ import { hostedCapabilityCopy } from "../../hostedHub/switchTarget";
 import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
 import { useLogicalProjectSnapshots } from "../../hooks/useLogicalProjectSnapshots";
 import { useSettings } from "../../hooks/useSettings";
-import { inferProjectTitleFromPath } from "../../lib/projectPaths";
+import { inferProjectTitleFromPath } from "@ryco/shared/projectPaths";
 import { cn, newProjectId, randomUUID } from "../../lib/utils";
 import { readLocalApi } from "../../localApi";
 import { PROJECTS_ROUTE_PATH } from "../../projectsRoute";
@@ -117,10 +117,13 @@ import {
   validateAddProjectPath,
 } from "./addProjectSources";
 import { FolderPicker } from "./FolderPicker";
-import { nodePathLeaf, type FolderSelectionStatus } from "./folderPicker.logic";
+import {
+  nodePathLeaf,
+  type FolderSelectionStatus,
+} from "@ryco/client-runtime/projectCopy/folderPicker";
 import { useNodeEnvironmentApi, useNodePathHints } from "./nodePathQueries";
 import { NodePicker } from "./NodePicker";
-import type { NodePickerExtrasMap } from "./nodePicker.logic";
+import type { NodePickerExtrasMap } from "@ryco/client-runtime/projectCopy/nodePicker";
 import { trackProjectImport } from "./copyRuntime/copyManager";
 import {
   closeAddProject,

@@ -24,7 +24,7 @@ import {
   viewCopiedProject,
   type ProjectCopyEntry,
 } from "./copyRuntime/copyManager";
-import { projectCopyView } from "./copyRuntime/projectCopyProgress.logic";
+import { projectCopyView } from "@ryco/client-runtime/projectCopy/progressView";
 import { CopyProjectForm, type StartedProjectCopy } from "./CopyProjectForm";
 import { CopyProjectProgress } from "./CopyProjectProgress";
 import {

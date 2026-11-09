@@ -1286,4 +1286,48 @@ describe("CopyProjectDialog", () => {
       await screen.unmount();
     }
   });
+
+  it("waits for a stopped copy's own node instead of copying elsewhere, until it is discarded", async () => {
+    const stopped = createProjectCopyJobRecord({
+      copyId: "copy-stopped-away",
+      at: Date.now(),
+      sourceEnvironmentId: LAPTOP,
+      sourceProjectId: SOURCE_ID,
+      // A node this client does not reach right now.
+      targetEnvironmentId: EnvironmentId.make("env-away"),
+      projectId: ProjectId.make("project-new"),
+      importId: ProjectImportId.make(crypto.randomUUID()),
+    });
+    setLocalStorageItem(
+      PROJECT_COPY_RECORDS_STORAGE_KEY,
+      [{ ...stopped, stage: "upload" }],
+      Schema.Unknown,
+    );
+    const { screen, fake } = await mount({
+      request: { targetEnvironmentId: null, resumeCopyId: "copy-stopped-away" },
+    });
+    try {
+      await expect.element(page.getByTestId("copy-resume-notice")).toBeVisible();
+      await expect
+        .element(page.getByTestId("copy-footer-summary"))
+        .toMatchTextContent(/^Waiting for /u);
+      await expect.element(primary()).toBeDisabled();
+      expect(fake.runs).toHaveLength(0);
+
+      await page.getByTestId("copy-resume-discard").click();
+      await expect.element(page.getByTestId("copy-resume-notice")).not.toBeInTheDocument();
+      // Discarding cleans up what reached its node: a run of the stopped copy without a plan.
+      await vi.waitFor(() => expect(fake.runs).toHaveLength(1));
+      expect(fake.runs[0]!.input.resume?.copyId).toBe("copy-stopped-away");
+      expect(fake.runs[0]!.input.plan).toBeNull();
+      await expect.element(primary()).toBeEnabled();
+      await primary().click();
+      // The new copy is one of its own.
+      await vi.waitFor(() => expect(fake.runs).toHaveLength(2));
+      expect(fake.runs[1]!.input.resume ?? null).toBeNull();
+      expect(fake.runs[1]!.input.plan).not.toBeNull();
+    } finally {
+      await screen.unmount();
+    }
+  });
 });

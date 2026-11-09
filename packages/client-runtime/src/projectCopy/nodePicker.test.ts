@@ -12,7 +12,7 @@ import {
   nodeTone,
   NODE_TONES,
   resolveNodePickerAvailability,
-} from "./nodePicker.logic";
+} from "./nodePicker.ts";
 
 function node(overrides: Partial<NodeCatalogEntry> = {}): NodeCatalogEntry {
   return {

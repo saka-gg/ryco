@@ -7,7 +7,7 @@
 import type { ToastManagerAddOptions } from "@base-ui/react/toast";
 
 import { stackedThreadToast, toastManager, type ThreadToastData } from "../../ui/toast";
-import type { ProjectCopyView } from "./projectCopyProgress.logic";
+import type { ProjectCopyView } from "@ryco/client-runtime/projectCopy/progressView";
 
 type ToastId = ReturnType<typeof toastManager.add>;
 

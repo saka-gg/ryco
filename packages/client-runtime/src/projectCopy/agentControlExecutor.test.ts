@@ -1,12 +1,7 @@
-import type { ProjectCopyJobRecord } from "@ryco/client-runtime/projectCopy";
+import type { ProjectCopyJobRecord } from "./index.ts";
+import type { AcquiredNode, NodeCatalogEntry, NodeCatalogSnapshot } from "../state/nodes/index.ts";
 import type {
-  AcquiredNode,
-  NodeCatalogEntry,
-  NodeCatalogSnapshot,
-} from "@ryco/client-runtime/state/nodes";
-import {
-  AgentControlRpcError,
-  type AgentControlCopyProjectToNodePlan,
+  AgentControlCopyProjectToNodePlan,
   AgentControlProposalId,
   AgentControlProposalReceiptView,
   AgentControlProposalStatus,
@@ -17,6 +12,7 @@ import {
   ServerConfig,
   ServerProvider,
 } from "@ryco/contracts";
+import { AgentControlRpcError } from "@ryco/contracts/agent-control";
 import type {
   NodePathHints,
   ProjectDestinationPreview,
@@ -24,17 +20,13 @@ import type {
 } from "@ryco/contracts/project-copy";
 import { describe, expect, it, vi, type Mock } from "vite-plus/test";
 
-vi.mock("../../environments/nodeCatalog", () => ({
-  readNodeCatalogSnapshot: () => ({ nodes: [], ownerEnvironmentIds: new Set() }),
-  subscribeNodeCatalog: () => () => undefined,
-}));
-
-import type { AgentControlClientExecutionPreviewState } from "../agent-control/agentControlClientExecutor";
 import {
+  agentControlCopyNodeReads,
   rebuildAgentControlCopyPlanWith,
   startAgentControlCopyExecutor,
+  type AgentControlClientExecutionPreviewState,
   type AgentControlCopyExecutorDeps,
-} from "./agentControlCopyExecutor";
+} from "./agentControlExecutor.ts";
 
 const LAPTOP = "env-laptop" as EnvironmentId;
 const MINI = "env-mini" as EnvironmentId;
@@ -245,7 +237,7 @@ function harness(overrides: Partial<AgentControlCopyExecutorDeps> = {}) {
     }),
     getProposal: vi.fn(async () => ({ proposal: proposals.get(PROPOSAL) ?? null })),
   };
-  const deps: Partial<AgentControlCopyExecutorDeps> = {
+  const deps: AgentControlCopyExecutorDeps = {
     readCatalog: () => catalog,
     subscribeCatalog: (listener) => {
       catalogListener = listener;
@@ -729,5 +721,59 @@ describe("rebuildAgentControlCopyPlanWith", () => {
         context,
       ),
     ).toBeNull();
+  });
+});
+
+describe("agentControlCopyNodeReads", () => {
+  it("reads the cached server config first, else asks the node", async () => {
+    const getConfig = vi.fn(async () => config);
+    const acquired = { api: { server: { getConfig } } } as unknown as AcquiredNode;
+    const cached = agentControlCopyNodeReads({
+      readEnvironmentApi: () => null,
+      readCachedServerConfig: () => config,
+    });
+    expect(await cached.readServerConfig(MINI, acquired)).toBe(config);
+    expect(getConfig).not.toHaveBeenCalled();
+    const uncached = agentControlCopyNodeReads({
+      readEnvironmentApi: () => null,
+      readCachedServerConfig: () => null,
+    });
+    expect(await uncached.readServerConfig(MINI, acquired)).toBe(config);
+    getConfig.mockRejectedValueOnce(new Error("gone"));
+    expect(await uncached.readServerConfig(MINI, acquired)).toBeNull();
+  });
+
+  it("follows one proposal on the node's proposal stream", () => {
+    let emit: ((event: unknown) => void) | null = null;
+    const stop = vi.fn();
+    const reads = agentControlCopyNodeReads({
+      readEnvironmentApi: () =>
+        ({
+          agentControl: {
+            subscribeProposals: (listener: (event: unknown) => void) => {
+              emit = listener;
+              return stop;
+            },
+          },
+        }) as unknown as EnvironmentApi,
+      readCachedServerConfig: () => null,
+    });
+    const seen: AgentControlProposalView[] = [];
+    const unsubscribe = reads.followProposal(MINI, PROPOSAL, (view) => seen.push(view));
+    const other = { ...proposal(), proposalId: "proposal-2" } as AgentControlProposalView;
+    emit!({ type: "snapshot", queue: { active: [other], recent: [proposal()] } });
+    emit!({ type: "upsert", proposal: other });
+    emit!({ type: "upsert", proposal: proposal(copyPlan(), "executing") });
+    expect(seen.map((view) => view.status)).toEqual(["pending-user-approval", "executing"]);
+    unsubscribe();
+    expect(stop).toHaveBeenCalled();
+  });
+
+  it("follows nothing on a node without Agent Control", () => {
+    const reads = agentControlCopyNodeReads({
+      readEnvironmentApi: () => null,
+      readCachedServerConfig: () => null,
+    });
+    expect(() => reads.followProposal(MINI, PROPOSAL, () => undefined)()).not.toThrow();
   });
 });

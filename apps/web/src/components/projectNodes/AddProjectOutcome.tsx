@@ -10,9 +10,9 @@ import { CheckIcon } from "lucide-react";
 import { useMemo, useRef } from "react";
 
 import { importProgressSteps, type AddedProjectNodeRow } from "./addProjectDialog.logic";
-import type { CopyProgressStep } from "./copyProjectDialog.logic";
+import type { CopyProgressStep } from "@ryco/client-runtime/projectCopy/dialog";
 import { CopyProgressStepList } from "./copyProjectDialogParts";
-import { displayProjectPath } from "../../lib/projectPaths";
+import { displayProjectPath } from "@ryco/shared/projectPaths";
 import { NodeBadge } from "./NodePicker";
 import { NODE_LABEL_CELL, NodePathText, useNodeLabelColumn } from "./NodePathText";
 
