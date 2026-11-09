@@ -31,7 +31,9 @@ never disturbs the pinned Effect/Bun catalog used by `apps/web`.
 ```
 src/
   data/content.ts        copy and product facts (providers, platforms, shots, Cloud, mobile, FAQ)
-  data/changelog.ts      editorial release notes; the first entry also leads What's new
+  data/changelog.ts      re-exports the release notes from packages/shared/src/releaseNotes.ts
+                         (also the app's What's new and the GitHub releases, docs/release-notes.md);
+                         the first entry also leads What's new
   lib/motion.ts          GSAP registration, eases, useGsap(), Lenis, reduced-motion hook
   lib/useMediaQuery.ts   shared narrow-screen query
   site/HomePage.tsx      composes the sections below

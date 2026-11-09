@@ -720,6 +720,20 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     description: "The version of Ryco this app runs.",
     keywords: "about release build check for updates",
   },
+  {
+    section: "about",
+    storage: "app",
+    title: "What's new",
+    description: "The release notes for this version of Ryco and earlier ones.",
+    keywords: "changelog release notes changes new features version history",
+  },
+  {
+    section: "about",
+    storage: "app",
+    title: "What's new after updates",
+    description: "Show the release notes the first time Ryco opens after an update.",
+    keywords: "changelog release notes update popup dialog launch",
+  },
 ];
 
 /**

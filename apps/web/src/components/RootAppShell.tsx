@@ -22,6 +22,8 @@ import { usePromoteChatDialogStore } from "./chat/promoteChatDialogStore";
 import { useForkThreadDialogStore } from "./chat/forkThreadDialogStore";
 import { hasStoredProjectCopyRecords } from "./projectNodes/projectCopyStorage";
 import { useProjectNodesDialogStore } from "./projectNodes/projectNodesDialogStore";
+import { useWhatsNewDialogStore } from "./whatsNew/whatsNewDialogStore";
+import { WhatsNewLaunchCheck } from "./whatsNew/WhatsNewLaunchCheck";
 import { ProviderUpdateLaunchNotification } from "./ProviderUpdateLaunchNotification";
 import { MissedAutomationRunsNotice } from "./automations/MissedAutomationRunsNotice";
 import {
@@ -171,6 +173,8 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
         {chatAvailable ? <ProjectNodesDialogsMount /> : null}
         {chatAvailable ? <SessionImportDialogMount /> : null}
         {chatAvailable ? <MissedAutomationRunsNotice /> : null}
+        <WhatsNewLaunchCheck />
+        <WhatsNewDialogMount />
         {ownsThreadAlerts ? <ThreadAlertsBootstrap /> : null}
         {authGateState.status === "hosted-static" ? <HostedStaticEnvironmentBootstrap /> : null}
         {primaryEnvironmentAuthenticated ? (
@@ -292,6 +296,17 @@ function SessionImportDialogMount() {
   const open = useSessionImportDialogStore((state) => state.open);
   if (!useMountedOnceWanted(SessionImportDialog, open)) return null;
   return <SessionImportDialog />;
+}
+
+const WhatsNewDialog = preloadableLazy(() =>
+  import("./whatsNew/WhatsNewDialog").then((module) => module.WhatsNewDialog),
+);
+
+/** What's new loads, with the release notes, the first time something opens it. */
+function WhatsNewDialogMount() {
+  const open = useWhatsNewDialogStore((state) => state.open);
+  if (!useMountedOnceWanted(WhatsNewDialog, open)) return null;
+  return <WhatsNewDialog />;
 }
 
 const THREAD_ROUTE_ID = "/_chat/$environmentId/$threadId";

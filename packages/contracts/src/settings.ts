@@ -125,6 +125,12 @@ export type ModelFavorite = typeof ModelFavorite.Type;
 export const ClientSettingsSchema = Schema.Struct({
   // Local lifecycle metadata. Optional so restoring default preferences preserves it.
   localOnboardingCompletedEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
+  // The app version whose release notes this device last saw (or skipped, on a fresh
+  // install). What's new opens after an update past it. Local lifecycle metadata, like the
+  // key above.
+  lastSeenReleaseNotesVersion: Schema.optionalKey(TrimmedNonEmptyString),
+  // Open What's new the first time the app starts after an update.
+  whatsNewAfterUpdate: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   confirmThreadArchive: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   confirmThreadDelete: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   confirmThreadUnpin: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
@@ -1315,6 +1321,8 @@ export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 
 export const ClientSettingsPatch = Schema.Struct({
   localOnboardingCompletedEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
+  lastSeenReleaseNotesVersion: Schema.optionalKey(TrimmedNonEmptyString),
+  whatsNewAfterUpdate: Schema.optionalKey(Schema.Boolean),
   confirmThreadArchive: Schema.optionalKey(Schema.Boolean),
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),
   confirmThreadUnpin: Schema.optionalKey(Schema.Boolean),

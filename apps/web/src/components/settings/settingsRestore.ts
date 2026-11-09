@@ -13,6 +13,7 @@ const RESTORABLE_SETTINGS = {
   chatWidth: "Chat width",
   openChatTabs: "Open chat tabs",
   deviceAutoShowFloating: "Float devices agents open",
+  whatsNewAfterUpdate: "What's new after updates",
   gitStatusPollIntervalMs: "Remote Git status",
   sourceControlRefreshMode: "PR & workflow updates",
   responseStreamingMode: "Response streaming",

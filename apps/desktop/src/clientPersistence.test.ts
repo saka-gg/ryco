@@ -64,6 +64,7 @@ const clientSettings: ClientSettings = {
   chatWidth: "comfortable",
   openChatTabs: true,
   deviceAutoShowFloating: true,
+  whatsNewAfterUpdate: true,
   favorites: [],
   providerModelPreferences: {},
   sidebarProjectGroupingMode: "repository_path",
