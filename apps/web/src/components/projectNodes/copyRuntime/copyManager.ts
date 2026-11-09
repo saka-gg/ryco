@@ -13,6 +13,7 @@
 
 import {
   createProjectCopyManager,
+  type ProjectCopyManager,
   projectCopyBadges,
   projectCopyNeedsClient,
   type ProjectCopyEntry,
@@ -78,7 +79,7 @@ function loadWebRuntime(): Promise<ProjectCopyRuntime> {
   }));
 }
 
-const manager = createProjectCopyManager({
+const manager: ProjectCopyManager = createProjectCopyManager({
   storage: {
     readRecords: () => getLocalStorageItem(PROJECT_COPY_RECORDS_STORAGE_KEY, StoredValue),
     writeRecords: (records) =>

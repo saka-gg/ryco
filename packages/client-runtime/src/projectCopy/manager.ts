@@ -410,6 +410,9 @@ const RESUME_CATALOG_WAIT_MS = 60_000;
 const VIEWER_WAIT_MS = 5_000;
 
 /** One client's copy manager; create it once per app. */
+/** The manager's store; named here so the apps' typecheck can name it too. */
+export type ProjectCopyStore = StoreApi<ProjectCopyStoreState>;
+
 export function createProjectCopyManager(ports: ProjectCopyManagerPorts) {
   // ── State ──
 
@@ -435,7 +438,7 @@ export function createProjectCopyManager(ports: ProjectCopyManagerPorts) {
     }
   }
 
-  const store = createStore<ProjectCopyStoreState>()(() => ({
+  const store: ProjectCopyStore = createStore<ProjectCopyStoreState>()(() => ({
     entries: {},
     records: readStoredRecords(),
   }));
