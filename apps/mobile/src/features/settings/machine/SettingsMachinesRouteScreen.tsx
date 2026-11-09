@@ -1,5 +1,4 @@
-import { StackActions, useNavigation, type StaticScreenProps } from "@react-navigation/native";
-import { useLayoutEffect } from "react";
+import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import { ScrollView } from "react-native";
 
 import { EmptyState } from "../../../components/EmptyState";
@@ -12,18 +11,11 @@ type SettingsMachinesRouteScreenProps = StaticScreenProps<undefined>;
 
 /**
  * The machines whose own settings this phone can open: providers, agents, work defaults and
- * the machine itself. With one machine, its page opens in place of this list.
+ * the machine itself. With one machine the Settings row opens its page directly.
  */
 export function SettingsMachinesRouteScreen(_props: SettingsMachinesRouteScreenProps) {
   const navigation = useNavigation();
   const machines = useHomeEnvironments();
-  const only = machines.length === 1 ? machines[0] : undefined;
-  useLayoutEffect(() => {
-    if (only)
-      navigation.dispatch(
-        StackActions.replace("SettingsMachine", { environmentId: only.environmentId }),
-      );
-  }, [navigation, only]);
   if (machines.length === 0) {
     return (
       <ScrollView

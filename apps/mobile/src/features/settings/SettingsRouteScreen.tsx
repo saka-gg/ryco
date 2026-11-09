@@ -54,6 +54,9 @@ export function SettingsTabScreen() {
   const open = (target: SettingsListTarget) => {
     if (target === "Connections") {
       navigation.navigate("Connections");
+    } else if (target === "SettingsMachines" && environments.length === 1 && environments[0]) {
+      // One machine: its own page, without a list of one in between.
+      navigation.navigate("SettingsMachine", { environmentId: environments[0].environmentId });
     } else if (target === "NodeSecurity") {
       // Without a selected Hub node there is no node to inspect: Machines lists them.
       if (selectedNode) {
