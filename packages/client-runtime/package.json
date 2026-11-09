@@ -178,6 +178,30 @@
       "types": "./src/state/agentControl/index.ts",
       "import": "./src/state/agentControl/index.ts"
     },
+    "./state/automations/commands": {
+      "types": "./src/state/automations/commands.ts",
+      "import": "./src/state/automations/commands.ts"
+    },
+    "./state/automations/dialogModel": {
+      "types": "./src/state/automations/dialogModel.ts",
+      "import": "./src/state/automations/dialogModel.ts"
+    },
+    "./state/automations/editor": {
+      "types": "./src/state/automations/editor.ts",
+      "import": "./src/state/automations/editor.ts"
+    },
+    "./state/automations/missedRunsNotice": {
+      "types": "./src/state/automations/missedRunsNotice.ts",
+      "import": "./src/state/automations/missedRunsNotice.ts"
+    },
+    "./state/automations/projectCounts": {
+      "types": "./src/state/automations/projectCounts.ts",
+      "import": "./src/state/automations/projectCounts.ts"
+    },
+    "./state/automations/words": {
+      "types": "./src/state/automations/words.ts",
+      "import": "./src/state/automations/words.ts"
+    },
     "./state/notes": {
       "types": "./src/state/notes/index.ts",
       "import": "./src/state/notes/index.ts"

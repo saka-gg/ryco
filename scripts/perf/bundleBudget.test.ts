@@ -425,8 +425,9 @@ describe("bundle budgets", () => {
     for (const source of [
       "packages/shared/src/automationSchedule.ts",
       "packages/client-runtime/src/state/agentControl/automationSchedules.ts",
-      "apps/web/src/components/automations/dialog/dialogWords.ts",
-      "apps/web/src/components/automations/missedRunsNotice.logic.ts",
+      "apps/web/src/components/automations/dialog/ScheduleDetail.tsx",
+      "packages/client-runtime/src/state/automations/words.ts",
+      "packages/client-runtime/src/state/automations/missedRunsNotice.ts",
     ]) {
       assert.isTrue(forbidden(source), source);
     }

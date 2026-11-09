@@ -23,6 +23,13 @@ export interface ModelPresentationOption {
   readonly subProvider?: string | undefined;
 }
 
+/** Reasoning effort descriptor ids: Claude → "effort", Codex → "reasoningEffort", Cursor → "reasoning". */
+export const REASONING_DESCRIPTOR_IDS: ReadonlySet<string> = new Set([
+  "effort",
+  "reasoningEffort",
+  "reasoning",
+]);
+
 /**
  * Resolve the human-readable model title used by picker surfaces and durable
  * handoff presentation. Provider catalogs are authoritative when they carry a

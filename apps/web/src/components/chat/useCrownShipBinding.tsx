@@ -7,7 +7,7 @@ import {
   type GitActionReporter,
 } from "~/gitActionNotices";
 import { useEvent } from "~/hooks/useEvent";
-import { formatCount } from "~/lib/formatCount";
+import { formatCount } from "@ryco/shared/String";
 import { randomUUID } from "~/lib/utils";
 import {
   type GitShipStep,

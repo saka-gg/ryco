@@ -1,9 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   AGENT_CONTROL_WS_METHODS,
-  AgentControlRequestId,
   type AgentControlProposalId,
-  type AutomationCentreCommand,
   type AutomationCentreSnapshot,
   type EnvironmentId,
   type ProjectId,
@@ -13,7 +11,12 @@ import {
   createAutomationCentreReader,
   useAgentControlStore,
 } from "@ryco/client-runtime/state/agentControl";
-import { isTagged } from "effect/Predicate";
+import {
+  AUTOMATION_DECISION_UNCONFIRMED,
+  createAutomationRequestIds,
+  sendAutomationCommand,
+  type AutomationCommandDraft,
+} from "@ryco/client-runtime/state/automations/commands";
 
 import { readEnvironmentApi, readEnvironmentApiForConnection } from "../../environmentApi";
 import { useEnvironmentServerConfig } from "../../hooks/useChatsAvailability";
@@ -31,15 +34,7 @@ const NO_PROVIDERS: ReadonlyArray<ServerProvider> = [];
 const AGENT_CONTROL_OFF_ERROR =
   "Agent Control is turned off on this device. Turn it on in its settings to use automations.";
 
-type WithoutRequest<T> = T extends unknown ? Omit<T, "requestId"> : never;
-/**
- * A save, cancel, retry or read; the hook adds the request id — a new one
- * per action, reused only to retry an attempt whose answer never arrived.
- */
-export type AutomationCommandDraft = WithoutRequest<AutomationCentreCommand>;
-
-/** The server judged the command; any other failure may not have reached it. */
-const isServerAnswer = (cause: unknown) => isTagged(cause, "AgentControlRpcError");
+export type { AutomationCommandDraft };
 
 export interface AutomationCentreState {
   readonly snapshot: AutomationCentreSnapshot | null;
@@ -88,7 +83,7 @@ export function useAutomationCentre(
   const generation = useRef(0);
   const refresh = useRef<() => Promise<void>>(async () => {});
   /** Request ids of attempts whose answer never arrived, by command, for a faithful retry. */
-  const unanswered = useRef(new Map<string, AgentControlRequestId>());
+  const [requestIds] = useState(() => createAutomationRequestIds(() => crypto.randomUUID()));
 
   useEffect(() => {
     // Off: the returned state says so (below); nothing to bind.
@@ -151,10 +146,7 @@ export function useAutomationCentre(
       if (queue) {
         // An attempt whose answer was lost did land: an identical action
         // from now on is a new one and gets a new request id.
-        for (const [key, requestId] of unanswered.current) {
-          if (Object.values(queue.proposalsById).some((p) => p.requestId === requestId))
-            unanswered.current.delete(key);
-        }
+        requestIds.absorbQueue(Object.values(queue.proposalsById));
         void refresh.current();
       } else {
         // The server refused the queue (Agent Control off or not allowed).
@@ -172,39 +164,29 @@ export function useAutomationCentre(
       releaseSync();
       window.removeEventListener("focus", onFocus);
     };
-  }, [agentControlOff, environmentId, projectId]);
+  }, [agentControlOff, environmentId, projectId, requestIds]);
 
   const command = async (input: AutomationCommandDraft): Promise<boolean> => {
     if (!capability.allowed || agentControlOff || pending.current) return false;
     const api = readEnvironmentApi(environmentId)?.automationCentre;
     if (!api) return false;
     const epoch = generation.current;
-    // Every action is a new request: the server replays an earlier request id
-    // whatever became of its proposal, so reusing one would silently repeat a
-    // rejected or expired proposal. Only a retry of an attempt that got no
-    // answer (the connection dropped) keeps its id, so it cannot land twice.
-    const key = JSON.stringify(input);
-    const requestId =
-      unanswered.current.get(key) ?? AgentControlRequestId.make(crypto.randomUUID());
-    unanswered.current.set(key, requestId);
     pending.current = true;
     setBusy(true);
     setError(null);
     try {
-      await api.command({ ...input, requestId } as AutomationCentreCommand);
-      unanswered.current.delete(key);
+      const result = await sendAutomationCommand({
+        ids: requestIds,
+        command: (command) => api.command(command),
+        draft: input,
+      });
       if (epoch !== generation.current) return false;
+      if (!result.ok) {
+        setError(result.error);
+        return false;
+      }
       await refresh.current();
       return true;
-    } catch (cause) {
-      if (isServerAnswer(cause)) unanswered.current.delete(key);
-      if (epoch === generation.current)
-        setError(
-          cause instanceof Error
-            ? cause.message
-            : "The action could not be confirmed. Refresh before trying again.",
-        );
-      return false;
     } finally {
       if (epoch === generation.current) {
         pending.current = false;
@@ -226,8 +208,7 @@ export function useAutomationCentre(
         : api.rejectProposal({ proposalId }));
       if (epoch === generation.current) await refresh.current();
     } catch {
-      if (epoch === generation.current)
-        setError("Approval could not be confirmed. Refresh to see the current decision.");
+      if (epoch === generation.current) setError(AUTOMATION_DECISION_UNCONFIRMED);
     } finally {
       if (epoch === generation.current) {
         pending.current = false;

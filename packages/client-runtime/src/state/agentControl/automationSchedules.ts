@@ -320,7 +320,9 @@ function failureWords(reason: string, detail: string): string | null {
  * (the lab's "The first run time passed before approval…"), else the
  * server's own detail; null unless the proposal failed.
  */
-export function scheduleProposalFailure(proposal: AgentControlProposal): string | null {
+export function scheduleProposalFailure(
+  proposal: Pick<AgentControlProposalView, "status" | "result">,
+): string | null {
   if (proposal.status !== "failed") return null;
   const result = proposal.result;
   const message = result?.outcome === "failed" ? result.error.message.trim() : "";
@@ -979,8 +981,8 @@ export interface ScheduleDraft {
 
 /**
  * The editor's draft of a definition, as is (no roll-forward). A worktree
- * schedule keeps its branch, or none; `defaultBaseRef` (else "main") only
- * pre-fills a local one's, for a switch to a worktree.
+ * schedule keeps its branch, or none; `defaultBaseRef` (else "main"; "" leaves the branch to
+ * the node) only pre-fills a local one's, for a switch to a worktree.
  */
 export function draftFromDefinition(
   definition: AgentControlAutomationDefinition,
@@ -1116,7 +1118,11 @@ export function draftOfLatest(
   if (!definition) throw new Error("A schedule proposal always carries a definition.");
   const draft = draftFromDefinition(
     { ...definition, schedule: scheduleToContract(rollForward(definition.schedule, nowMs)) },
-    { id, ...(options.defaultBaseRef ? { defaultBaseRef: options.defaultBaseRef } : {}) },
+    // "" is a choice (the node's default branch), not a missing value.
+    {
+      id,
+      ...(options.defaultBaseRef !== undefined ? { defaultBaseRef: options.defaultBaseRef } : {}),
+    },
   );
   return draft;
 }

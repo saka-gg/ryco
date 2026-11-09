@@ -21,8 +21,8 @@ import { ModelPickerContent } from "../../../chat/ModelPickerContent";
 import { ComposerModelTuning } from "../../../chat/ModelTuningDial";
 import { ProviderInstanceIcon } from "../../../chat/ProviderInstanceIcon";
 import { runtimeModeConfig, runtimeModeOptions } from "../../../chat/sessionPolicyPresentation";
+import { modelMissing } from "@ryco/client-runtime/state/automations/editor";
 import type { EditorTokenKind } from "./editorModel.logic";
-import { modelMissing } from "./editorModel.logic";
 import { ModelPickPopover, TokenMenu } from "./tokenPopups";
 
 const noop = () => undefined;

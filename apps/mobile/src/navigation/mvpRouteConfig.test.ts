@@ -80,6 +80,9 @@ describe("MVP route config", () => {
         "ThreadDevices",
         "ThreadServers",
         "ThreadBrowser",
+        "ScheduleDetail",
+        "ScheduleEditor",
+        "Scheduled",
         "Search",
         "TaskDetail",
         "Thread",
@@ -170,6 +173,12 @@ describe("MVP route config", () => {
     });
     expect(MVP_ROOT_ROUTES.TaskDetail.headerAction).toBe("close");
     expect(WORKSPACE_OVERLAY_ROUTE_NAMES).toContain("TaskDetail");
+    // Scheduled tasks: the list and a schedule are pages; the editor is a sheet over them.
+    expect(MVP_ROOT_ROUTES.Scheduled.linking).toBe("todo/scheduled");
+    expect(MVP_ROOT_ROUTES.ScheduleDetail.ios.presentation).toBe("card");
+    expect(MVP_ROOT_ROUTES.ScheduleEditor.ios.presentation).toBe("formSheet");
+    expect(WORKSPACE_OVERLAY_ROUTE_NAMES).toContain("ScheduleEditor");
+    expect(WORKSPACE_OVERLAY_ROUTE_NAMES).not.toContain("ScheduleDetail");
   });
 
   it("presents the review-comment sheet with detents on iOS and fullScreenModal on Android", () => {

@@ -1,7 +1,5 @@
 import type { AutomationCentreSnapshot, EnvironmentId, ProjectId } from "@ryco/contracts";
-import { deriveScheduleRows, dueScheduleRuns } from "@ryco/client-runtime/state/agentControl";
-
-import { projectCheckoutKey } from "../../../projectCheckouts.logic";
+import { deriveScheduleRows, dueScheduleRuns } from "../agentControl/index.ts";
 
 /** What the project switcher says about a project. */
 export interface AutomationProjectCounts {
@@ -22,6 +20,11 @@ export function checkoutAutomationCounts(input: {
   return { schedules: rows.length, waiting: dueScheduleRuns(rows).length };
 }
 
+/** The key of one project's checkout on one device (the same as the web's `projectCheckoutKey`). */
+export function automationCheckoutKey(environmentId: string, projectId: string): string {
+  return `${environmentId}\0${projectId}`;
+}
+
 export interface AutomationCheckoutRef {
   readonly environmentId: EnvironmentId;
   readonly projectId: ProjectId;
@@ -30,6 +33,8 @@ export interface AutomationCheckoutRef {
 export type AutomationCountsEntry =
   | {
       readonly status: "ready";
+      /** The snapshot as read (the phone's Scheduled list derives its rows from it). */
+      readonly snapshot: AutomationCentreSnapshot;
       readonly counts: AutomationProjectCounts;
       readonly fetchedAt: number;
     }
@@ -48,7 +53,7 @@ export function projectAutomationCounts(
   let schedules = 0;
   let waiting = 0;
   for (const checkout of checkouts) {
-    const entry = entries.get(projectCheckoutKey(checkout.environmentId, checkout.projectId));
+    const entry = entries.get(automationCheckoutKey(checkout.environmentId, checkout.projectId));
     if (entry?.status !== "ready") continue;
     known = true;
     schedules += entry.counts.schedules;
@@ -59,7 +64,7 @@ export function projectAutomationCounts(
 
 /** Everything the loader knows, replaced as a whole on every change. */
 export interface AutomationCountsState {
-  /** By `projectCheckoutKey`. */
+  /** By `automationCheckoutKey`. */
   readonly entries: ReadonlyMap<string, AutomationCountsEntry>;
   /** A read is in flight. */
   readonly loading: boolean;
@@ -95,6 +100,8 @@ export function createAutomationCountsLoader(input: {
   let state: AutomationCountsState = { entries: new Map(), loading: false };
   let generation = 0;
   const inFlight = new Set<string>();
+  /** Checkouts asked for afresh (`maxAgeMs: 0`) while being read: read once more after. */
+  const again = new Map<string, AutomationCheckoutRef>();
   const listeners = new Set<() => void>();
   const publish = (entries: ReadonlyMap<string, AutomationCountsEntry>) => {
     const loading = inFlight.size > 0;
@@ -102,15 +109,57 @@ export function createAutomationCountsLoader(input: {
     state = { entries, loading };
     for (const listener of listeners) listener();
   };
-  const withEntry = (key: string, entry: AutomationCountsEntry) => {
-    const next = new Map(state.entries);
+  const withEntry = (
+    entries: ReadonlyMap<string, AutomationCountsEntry>,
+    key: string,
+    entry: AutomationCountsEntry,
+  ) => {
+    const next = new Map(entries);
     next.set(key, entry);
     return next;
   };
-  const settle = (key: string, epoch: number, entry: AutomationCountsEntry) => {
+  /** Starts a read; returns the entries with an "unavailable" entry when none could start. */
+  const read = (
+    checkout: AutomationCheckoutRef,
+    key: string,
+    epoch: number,
+    entries: ReadonlyMap<string, AutomationCountsEntry>,
+  ): ReadonlyMap<string, AutomationCountsEntry> => {
+    let snapshotRead: Promise<AutomationCentreSnapshot> | null;
+    try {
+      snapshotRead = input.readSnapshot(checkout);
+    } catch {
+      snapshotRead = null;
+    }
+    if (!snapshotRead) return withEntry(entries, key, { status: "unavailable", fetchedAt: now() });
+    inFlight.add(key);
+    snapshotRead.then(
+      (snapshot) =>
+        settle(checkout, key, epoch, {
+          status: "ready",
+          snapshot,
+          counts: checkoutAutomationCounts({
+            projectId: checkout.projectId,
+            snapshot,
+            nowMs: now(),
+          }),
+          fetchedAt: now(),
+        }),
+      () => settle(checkout, key, epoch, { status: "unavailable", fetchedAt: now() }),
+    );
+    return entries;
+  };
+  const settle = (
+    checkout: AutomationCheckoutRef,
+    key: string,
+    epoch: number,
+    entry: AutomationCountsEntry,
+  ) => {
     if (epoch !== generation) return;
     inFlight.delete(key);
-    publish(withEntry(key, entry));
+    let entries: ReadonlyMap<string, AutomationCountsEntry> = withEntry(state.entries, key, entry);
+    if (again.delete(key)) entries = read(checkout, key, epoch, entries);
+    publish(entries);
   };
 
   return {
@@ -119,35 +168,15 @@ export function createAutomationCountsLoader(input: {
       const epoch = generation;
       let entries = state.entries;
       for (const checkout of checkouts) {
-        const key = projectCheckoutKey(checkout.environmentId, checkout.projectId);
-        const entry = entries.get(key);
-        if (inFlight.has(key) || (entry && now() - entry.fetchedAt < maxAgeMs)) continue;
-        let read: Promise<AutomationCentreSnapshot> | null;
-        try {
-          read = input.readSnapshot(checkout);
-        } catch {
-          read = null;
-        }
-        if (!read) {
-          const next = new Map(entries);
-          next.set(key, { status: "unavailable", fetchedAt: now() });
-          entries = next;
+        const key = automationCheckoutKey(checkout.environmentId, checkout.projectId);
+        if (inFlight.has(key)) {
+          // What changed may have landed after the read in flight began.
+          if (maxAgeMs <= 0) again.set(key, checkout);
           continue;
         }
-        inFlight.add(key);
-        read.then(
-          (snapshot) =>
-            settle(key, epoch, {
-              status: "ready",
-              counts: checkoutAutomationCounts({
-                projectId: checkout.projectId,
-                snapshot,
-                nowMs: now(),
-              }),
-              fetchedAt: now(),
-            }),
-          () => settle(key, epoch, { status: "unavailable", fetchedAt: now() }),
-        );
+        const entry = entries.get(key);
+        if (entry && now() - entry.fetchedAt < maxAgeMs) continue;
+        entries = read(checkout, key, epoch, entries);
       }
       publish(entries);
     },
@@ -155,6 +184,7 @@ export function createAutomationCountsLoader(input: {
       if (inFlight.size === 0) return;
       generation += 1;
       inFlight.clear();
+      again.clear();
       publish(state.entries);
     },
     getState: () => state,

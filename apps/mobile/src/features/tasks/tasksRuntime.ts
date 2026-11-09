@@ -16,6 +16,7 @@ import { Alert } from "react-native";
 import { subscribeAppStateResume } from "../../connection/appStateResume";
 import { readEnvironmentApi, subscribeEnvironmentApis } from "../../connection/environmentApi";
 import { createMobileConnectionRegistry } from "../../runtime/bootstrap";
+import { readEnvironmentMutationReady } from "../../state/environmentMutationReady";
 import { useStore } from "../../state/threadsRuntime";
 import { hydrateTaskCache, installTaskCache } from "./taskCache";
 import { isTaskMachineReachable, promoteTaskMachine } from "./taskConnectionDemand";
@@ -68,30 +69,41 @@ const writers = new Map<EnvironmentId, LocalTaskWriter>();
 const CONNECT_WAIT_MS = 20_000;
 
 /**
- * The machine's task methods on its current connection. A Hub machine that is
- * online but whose connection slot went to another machine is asked for
- * (`promoteTaskMachine`), and the write waits for it; any other machine
- * without a connection fails the write at once.
+ * The machine's task methods on its current connection, once it takes changes
+ * (`readEnvironmentMutationReady`: connected, its live shell snapshot landed, not
+ * a cached copy). A Hub machine that is online but whose connection slot went
+ * to another machine is asked for (`promoteTaskMachine`), and the write waits
+ * for it; any other machine without a ready connection fails the write at once.
  */
 type TaskApi = NonNullable<ReturnType<typeof readEnvironmentApi>>["server"];
+
+function readyTaskApi(environmentId: EnvironmentId): TaskApi | undefined {
+  return readEnvironmentMutationReady(environmentId)
+    ? readEnvironmentApi(environmentId)?.server
+    : undefined;
+}
 
 function taskApi(environmentId: EnvironmentId): TaskApi | undefined | Promise<TaskApi | undefined> {
   const reachable = isTaskMachineReachable(environmentId);
   // Writing keeps it live, so the next write in the queue finds it connected.
   if (reachable) promoteTaskMachine(environmentId);
-  const current: TaskApi | undefined = readEnvironmentApi(environmentId)?.server;
+  const current = readyTaskApi(environmentId);
   if (current || !reachable) return current;
   return new Promise<TaskApi | undefined>((resolve) => {
     const finish = (api: TaskApi | undefined) => {
       clearTimeout(timer);
-      unsubscribe();
+      unsubscribeApis();
+      unsubscribeShell();
       resolve(api);
     };
-    const timer = setTimeout(() => finish(undefined), CONNECT_WAIT_MS);
-    const unsubscribe = subscribeEnvironmentApis(() => {
-      const api = readEnvironmentApi(environmentId)?.server;
+    const check = () => {
+      const api = readyTaskApi(environmentId);
       if (api) finish(api);
-    });
+    };
+    const timer = setTimeout(() => finish(undefined), CONNECT_WAIT_MS);
+    // The connection comes first; the live shell snapshot a round trip later.
+    const unsubscribeApis = subscribeEnvironmentApis(check);
+    const unsubscribeShell = useStore.subscribe(check);
   });
 }
 

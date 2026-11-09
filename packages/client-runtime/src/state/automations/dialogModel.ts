@@ -8,8 +8,8 @@
  */
 import type {
   AgentControlAutomationId,
-  AgentControlProposal,
   AgentControlProposalId,
+  AgentControlProposalView,
   AutomationCentreSnapshot,
   EnvironmentId,
   ProjectId,
@@ -20,7 +20,7 @@ import {
   scheduleProposalFailure,
   type ScheduleDueRun,
   type ScheduleRow,
-} from "@ryco/client-runtime/state/agentControl";
+} from "../agentControl/index.ts";
 import { AUTOMATION_LIMITS } from "@ryco/shared/automationSchedule";
 
 /** What the model needs of a checkout (`ProjectAutomationsCheckout` fits). */
@@ -34,7 +34,7 @@ export interface DialogCheckoutInput {
 
 /** What the model needs of a checkout's device queue (`CheckoutProposalQueue` fits). */
 export interface DialogQueueInput {
-  readonly queueProposals: readonly AgentControlProposal[];
+  readonly queueProposals: readonly AgentControlProposalView[];
   readonly dismissed: ReadonlySet<AgentControlProposalId>;
 }
 
@@ -326,7 +326,7 @@ export type ApprovalOutcome =
  * change as the schedule, an expired change as "Proposal expired".
  */
 export function approvalOutcome(
-  proposal: AgentControlProposal | undefined,
+  proposal: AgentControlProposalView | undefined,
   kind: ApprovalKind,
 ): ApprovalOutcome {
   if (!proposal || proposal.status === "pending-user-approval") return { kind: "pending" };

@@ -12,7 +12,10 @@ import { Fragment, memo, useLayoutEffect, useRef } from "react";
 
 import { DeviceIcon } from "../../DeviceIcon";
 import { RelativeTime } from "./Ticking";
-import type { DialogListSection, DialogRow } from "./dialogModel.logic";
+import type {
+  DialogListSection,
+  DialogRow,
+} from "@ryco/client-runtime/state/automations/dialogModel";
 import { settle } from "./paneMotion";
 
 /** Marks a row element; its value is the row's key. */

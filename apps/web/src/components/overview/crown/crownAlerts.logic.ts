@@ -1,6 +1,6 @@
 import type { OrchestrationLatestTurnState } from "@ryco/contracts";
 
-import { formatCount } from "~/lib/formatCount";
+import { formatCount } from "@ryco/shared/String";
 import type { TurnCompletionOutcome } from "~/lib/turnCompletion.logic";
 
 import type { PrCheckStatusKind } from "../../projectExplorer/prCheckStatus";

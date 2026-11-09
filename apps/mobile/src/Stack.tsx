@@ -71,6 +71,9 @@ import {
   SourceControlRouteScreen,
   TaskDetailRouteScreen,
   ThreadFileEditRouteScreen,
+  ScheduledRouteScreen,
+  ScheduleDetailRouteScreen,
+  ScheduleEditorRouteScreen,
   ThreadFileRouteScreen,
   ThreadFileSearchRouteScreen,
   ThreadFilesRouteScreen,
@@ -384,6 +387,22 @@ export const ROOT_STACK_SCREENS = {
     screen: TaskDetailRouteScreen,
     linking: MVP_ROOT_ROUTES.TaskDetail.linking,
     options: routeOptions("TaskDetail", { title: "Task" }),
+  }),
+  Scheduled: createNativeStackScreen({
+    screen: ScheduledRouteScreen,
+    linking: MVP_ROOT_ROUTES.Scheduled.linking,
+    options: routeOptions("Scheduled", { title: "Scheduled" }),
+  }),
+  ScheduleDetail: createNativeStackScreen({
+    screen: ScheduleDetailRouteScreen,
+    linking: MVP_ROOT_ROUTES.ScheduleDetail.linking,
+    // The title is the schedule's, which the screen sets once it is read.
+    options: routeOptions("ScheduleDetail", { title: "Schedule" }),
+  }),
+  ScheduleEditor: createNativeStackScreen({
+    screen: ScheduleEditorRouteScreen,
+    linking: MVP_ROOT_ROUTES.ScheduleEditor.linking,
+    options: routeOptions("ScheduleEditor", { title: "Schedule" }),
   }),
   Thread: createNativeStackScreen({
     screen: ThreadRouteScreen,

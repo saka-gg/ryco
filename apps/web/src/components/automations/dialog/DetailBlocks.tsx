@@ -12,7 +12,7 @@ import { ChevronRightIcon } from "lucide-react";
 import { runtimeModeConfig } from "../../chat/sessionPolicyPresentation";
 import { Countdown, DrainLine } from "./Ticking";
 import { DialogButton, type ScheduleDialogActions } from "./dialogControls";
-import type { DialogRow } from "./dialogModel.logic";
+import type { DialogRow } from "@ryco/client-runtime/state/automations/dialogModel";
 import {
   PROPOSAL_HEAD,
   approveProposalLabel,
@@ -21,7 +21,7 @@ import {
   proposalNote,
   rejectProposalLabel,
   runStatusLabel,
-} from "./dialogWords";
+} from "@ryco/client-runtime/state/automations/words";
 
 interface BlockProps {
   readonly item: DialogRow;

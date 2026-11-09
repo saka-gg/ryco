@@ -418,3 +418,24 @@ export function scheduleWorkspaceRoutePrewarm(): void {
     });
   });
 }
+export const ScheduledRouteScreen = lazyScreen(
+  "ScheduledRouteScreen",
+  () =>
+    (
+      require("../features/automations/ScheduledRouteScreen") as typeof import("../features/automations/ScheduledRouteScreen")
+    ).ScheduledRouteScreen,
+);
+export const ScheduleDetailRouteScreen = lazyScreen(
+  "ScheduleDetailRouteScreen",
+  () =>
+    (
+      require("../features/automations/ScheduleDetailRouteScreen") as typeof import("../features/automations/ScheduleDetailRouteScreen")
+    ).ScheduleDetailRouteScreen,
+);
+export const ScheduleEditorRouteScreen = lazyScreen(
+  "ScheduleEditorRouteScreen",
+  () =>
+    (
+      require("../features/automations/ScheduleEditorRouteScreen") as typeof import("../features/automations/ScheduleEditorRouteScreen")
+    ).ScheduleEditorRouteScreen,
+);

@@ -1,6 +1,6 @@
 import { isChatProject } from "@ryco/shared/projectKind";
 
-import { formatCount } from "~/lib/formatCount";
+import { formatCount } from "@ryco/shared/String";
 
 import { isPullOnlyShip } from "../../GitActionsControl.logic";
 import { getOverviewSummary } from "../overviewSummary.logic";

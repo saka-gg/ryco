@@ -9,7 +9,7 @@ import {
   projectAutomationCounts,
   type AutomationCheckoutRef,
   type AutomationProjectCounts,
-} from "./automationProjectCounts.logic";
+} from "@ryco/client-runtime/state/automations/projectCounts";
 
 export type { AutomationProjectCounts };
 

@@ -1,7 +1,7 @@
 import type { ThreadLocalServer } from "@ryco/contracts";
 import { ExternalLinkIcon, LoaderCircleIcon, PanelRightOpenIcon, SquareIcon } from "lucide-react";
 
-import { formatCount } from "~/lib/formatCount";
+import { formatCount } from "@ryco/shared/String";
 
 import type { CrownServersBinding } from "../crownTypes";
 import { CrownDetailEmpty, CrownDetailFootnote, CrownDetailHeading } from "./crownDetailPrimitives";

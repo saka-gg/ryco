@@ -54,8 +54,6 @@ import { AgentPicks } from "./AgentPicks";
 import {
   applyDraftFix,
   defaultScheduleModel,
-  editorHint,
-  editorOpening,
   emptyModelSelection,
   firstInvalidField,
   modelMissing,
@@ -66,8 +64,8 @@ import {
   calendarChoiceWeekdays,
   withStart,
   type EditorFocusField,
-  type EditorTokenKind,
-} from "./editorModel.logic";
+} from "@ryco/client-runtime/state/automations/editor";
+import { editorHint, editorOpening, type EditorTokenKind } from "./editorModel.logic";
 import { animateEditorIn } from "./editorMotion";
 import {
   SentenceEditor,

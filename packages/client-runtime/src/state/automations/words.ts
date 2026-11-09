@@ -13,7 +13,7 @@ import {
   type ScheduleProposalKind,
   type ScheduleRow,
   type ScheduleRowState,
-} from "@ryco/client-runtime/state/agentControl";
+} from "../agentControl/index.ts";
 import {
   countRuns,
   firstRun,
@@ -24,7 +24,7 @@ import {
   when,
 } from "@ryco/shared/automationSchedule";
 
-import { formatCount } from "~/lib/formatCount";
+import { formatCount } from "@ryco/shared/String";
 
 /** "1 run" · "3 runs" · "2 missed" */
 export const plural = formatCount;

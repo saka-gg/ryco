@@ -1,7 +1,7 @@
-import type { MissedAutomationRun } from "@ryco/client-runtime/state/agentControl";
+import type { MissedAutomationRun } from "../agentControl/index.ts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { missedRunsNoticeView } from "./missedRunsNotice.logic";
+import { missedRunsNoticeView } from "./missedRunsNotice.ts";
 
 const NOW = new Date(2026, 9, 7, 9, 0).getTime();
 

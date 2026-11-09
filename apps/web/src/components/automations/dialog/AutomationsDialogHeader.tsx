@@ -15,8 +15,15 @@ import { useAutomationProjectCounts } from "../data/useAutomationProjectCounts";
 import { Countdown } from "./Ticking";
 import { DialogButton, Tip } from "./dialogControls";
 import { focusCheckedItemOnEntry } from "./menuFocus";
-import type { DialogLimit, DialogQueueLine } from "./dialogModel.logic";
-import { plural, queueChangesLabel, queueRunsLabel } from "./dialogWords";
+import type {
+  DialogLimit,
+  DialogQueueLine,
+} from "@ryco/client-runtime/state/automations/dialogModel";
+import {
+  plural,
+  queueChangesLabel,
+  queueRunsLabel,
+} from "@ryco/client-runtime/state/automations/words";
 
 export interface AutomationsDialogHeaderProps {
   readonly project: SidebarProjectSnapshot;

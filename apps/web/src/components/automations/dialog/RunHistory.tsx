@@ -18,8 +18,12 @@ import { useId } from "react";
 import { cn } from "../../../lib/utils";
 import { selectSidebarThreadSummaryByRef, useStore } from "../../../store";
 import { DialogButton, type ScheduleDialogActions } from "./dialogControls";
-import type { DialogRow } from "./dialogModel.logic";
-import { runAriaLabel, runHistoryText, runStatusLabel } from "./dialogWords";
+import type { DialogRow } from "@ryco/client-runtime/state/automations/dialogModel";
+import {
+  runAriaLabel,
+  runHistoryText,
+  runStatusLabel,
+} from "@ryco/client-runtime/state/automations/words";
 
 /** How many runs show before "Show all". */
 export const RUN_HISTORY_PREVIEW = 6;

@@ -10,7 +10,7 @@ import {
   type AutomationCentreRun,
   type AutomationCentreSnapshot,
 } from "@ryco/contracts";
-import { deriveScheduleRows } from "@ryco/client-runtime/state/agentControl";
+import { deriveScheduleRows } from "../agentControl/index.ts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -27,7 +27,7 @@ import {
   resolveDialogSelection,
   type DialogCheckoutInput,
   type DialogQueueInput,
-} from "./dialogModel.logic";
+} from "./dialogModel.ts";
 import {
   detailVerb,
   lapsedWords,
@@ -38,7 +38,7 @@ import {
   runAriaLabel,
   runHistoryText,
   scheduleWhenLine,
-} from "./dialogWords";
+} from "./words.ts";
 
 const NOW_MS = Date.parse("2026-10-07T08:42:00.000Z"); // Wed 10:42 in Berlin
 const at = (minutes: number) => new Date(NOW_MS + minutes * 60_000).toISOString();
