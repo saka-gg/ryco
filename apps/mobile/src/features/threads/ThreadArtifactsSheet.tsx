@@ -9,8 +9,11 @@ import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
 import { cn } from "../../lib/cn";
 import { useThemeColor } from "../../lib/useThemeColor";
-import { AttachmentPreviewModal, type PreviewableAttachment } from "./AttachmentPreviewModal";
-import { canPreviewAttachment } from "./attachmentPreviewModel";
+import {
+  AttachmentPreviewModal,
+  canPreviewAttachment,
+  type PreviewableAttachment,
+} from "./AttachmentPreviewModal";
 
 /**
  * What the agent published in this chat (web's Artifacts panel): pages it rendered and files it

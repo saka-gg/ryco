@@ -5,17 +5,62 @@ import {
   attachmentPreviewKind,
   formatAttachmentBytes,
 } from "@ryco/shared/attachmentPreview";
+import { Directory, File, Paths } from "expo-file-system";
 import { useEffect, useState } from "react";
-import { ActivityIndicator, Modal, Pressable, ScrollView, Share, View } from "react-native";
+import {
+  ActivityIndicator,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  Share,
+  View,
+} from "react-native";
 import { WebView } from "react-native-webview";
 
 import { AppText as Text } from "../../components/AppText";
 import { readEnvironmentApi } from "../../connection/environmentApi";
-import { encodeBytesBase64 } from "../../lib/base64";
 import { useThemeColor } from "../../lib/useThemeColor";
-import { canPreviewAttachment } from "./attachmentPreviewModel";
+import { canPreviewAttachment as canPreviewAttachmentOn } from "./attachmentPreviewModel";
 
-export { canPreviewAttachment };
+/**
+ * Only iOS's web view renders PDFs; Android's has no PDF viewer and would show a blank sheet, so a
+ * PDF there goes to the share sheet.
+ */
+const PDF_PREVIEW_SUPPORTED = Platform.OS === "ios";
+
+/** Whether a file attachment opens in place here rather than in the share sheet. */
+export function canPreviewAttachment(
+  attachment: Parameters<typeof canPreviewAttachmentOn>[0],
+): boolean {
+  return canPreviewAttachmentOn(attachment, { pdf: PDF_PREVIEW_SUPPORTED });
+}
+
+/**
+ * The cache folder holding the PDF the web view reads. Node-owned content, so it lives only while
+ * the preview is open: deleted when it closes, and a copy a crash left behind is cleared by the
+ * next preview.
+ */
+const PDF_PREVIEW_DIRECTORY = "attachment-preview";
+
+function clearPdfPreviewFiles(): void {
+  try {
+    const directory = new Directory(Paths.cache, PDF_PREVIEW_DIRECTORY);
+    if (directory.exists) directory.delete();
+  } catch {
+    // The next preview clears it.
+  }
+}
+
+/** Writes the PDF to the cache folder (the bytes once, no base64 copies) and returns its URL. */
+function writePdfPreviewFile(attachmentId: string, bytes: Uint8Array): string {
+  clearPdfPreviewFiles();
+  const directory = new Directory(Paths.cache, PDF_PREVIEW_DIRECTORY);
+  directory.create({ intermediates: true, idempotent: true });
+  const file = new File(directory, `${attachmentId.replace(/[^A-Za-z0-9_-]/g, "_")}.pdf`);
+  file.write(bytes);
+  return file.uri;
+}
 import {
   hasNativeSelectableMarkdownText,
   SelectableMarkdownText,
@@ -35,7 +80,7 @@ export interface PreviewableAttachment {
 }
 
 type Loaded =
-  | { readonly kind: "pdf"; readonly dataUrl: string }
+  | { readonly kind: "pdf"; readonly uri: string; readonly directoryUri: string }
   | { readonly kind: "markdown" | "text"; readonly text: string }
   | { readonly kind: "too-large" }
   | { readonly kind: "failed"; readonly message: string };
@@ -62,7 +107,12 @@ async function loadPreview(
       currentTransport: () => readEnvironmentApi(attachment.environmentId)?.attachments,
     });
     if (kind === "pdf") {
-      return { kind, dataUrl: `data:application/pdf;base64,${encodeBytesBase64(bytes)}` };
+      if (signal.aborted) return { kind: "failed", message: "The preview was closed." };
+      return {
+        kind,
+        uri: writePdfPreviewFile(attachment.attachmentId, bytes),
+        directoryUri: new Directory(Paths.cache, PDF_PREVIEW_DIRECTORY).uri,
+      };
     }
     const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     if (text.includes("\0")) return { kind: "failed", message: "This file is not text." };
@@ -101,9 +151,16 @@ export function AttachmentPreviewModal(props: {
     if (!attachment || key === null) return;
     const controller = new AbortController();
     void loadPreview(attachment, controller.signal).then((value) => {
-      if (!controller.signal.aborted) setLoaded({ key, value });
+      if (controller.signal.aborted) {
+        if (value.kind === "pdf") clearPdfPreviewFiles();
+        return;
+      }
+      setLoaded({ key, value });
     });
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      clearPdfPreviewFiles();
+    };
   }, [attachment, key]);
 
   const value = loaded !== null && loaded.key === key ? loaded.value : null;
@@ -152,8 +209,9 @@ export function AttachmentPreviewModal(props: {
           </View>
         ) : value.kind === "pdf" ? (
           <WebView
-            source={{ uri: value.dataUrl }}
-            originWhitelist={["data:*"]}
+            source={{ uri: value.uri }}
+            originWhitelist={["file://*"]}
+            allowingReadAccessToURL={value.directoryUri}
             javaScriptEnabled={false}
             style={{ flex: 1, backgroundColor }}
           />
