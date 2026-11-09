@@ -8,7 +8,7 @@ import {
   reconcileEnvironmentDraftRows,
   resolveEnvironmentDrafts,
   withEnvironmentDraftValue,
-} from "./ProviderInstanceEnvironment.logic";
+} from "./providerInstanceEnvironment.ts";
 
 const plain = (name: string, value: string): ProviderInstanceEnvironmentVariable => ({
   name,

@@ -299,6 +299,14 @@ describe("MVP route config", () => {
         "SettingsDiagnostics",
         "SettingsHub",
         "SettingsInbox",
+        "SettingsMachine",
+        "SettingsMachineAgents",
+        "SettingsMachineProvider",
+        "SettingsMachineProviders",
+        "SettingsMachineSystem",
+        "SettingsMachineUsagePrices",
+        "SettingsMachineWork",
+        "SettingsMachines",
         "SettingsNotifications",
         "SettingsProviderAccounts",
         "SettingsNodeSecurity",
@@ -315,6 +323,10 @@ describe("MVP route config", () => {
     expect(MVP_SETTINGS_ROUTES.SettingsProviderAccounts.linking).toBe("settings/provider-accounts");
     expect(MVP_SETTINGS_ROUTES.SettingsDiagnostics.linking).toBe("settings/diagnostics");
     expect(MVP_SETTINGS_ROUTES.SettingsAccount.linking).toBe("settings/account");
+    expect(MVP_SETTINGS_ROUTES.SettingsMachine.linking).toBe("settings/machines/:environmentId");
+    expect(MVP_SETTINGS_ROUTES.SettingsMachineProvider.linking).toBe(
+      "settings/machines/:environmentId/providers/:instanceId",
+    );
     expect("HostedSignIn" in MVP_ALL_ROOT_ROUTES).toBe(false);
   });
 

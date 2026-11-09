@@ -16,11 +16,10 @@ import {
   type ProviderInstanceId,
   type ServerProviderModel,
 } from "@ryco/contracts";
-import { normalizeModelSlug } from "@ryco/shared/model";
+import { resolveCustomModelSlug } from "@ryco/client-runtime/state/settings/providerInstanceSettings";
 
 import { cn } from "../../lib/utils";
 import { sortModelsForProviderInstance } from "../../modelOrdering";
-import { MAX_CUSTOM_MODEL_LENGTH } from "../../modelSelection";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -112,25 +111,13 @@ export function ProviderModelsSection({
   }, [favoriteModelSet, modelOrder, models]);
 
   const handleAdd = () => {
-    const normalized = driverKind ? normalizeModelSlug(input, driverKind) : input.trim() || null;
-    if (!normalized) {
-      setError("Enter a model slug.");
-      return;
-    }
-    if (models.some((model) => !model.isCustom && model.slug === normalized)) {
-      setError("That model is already built in.");
-      return;
-    }
-    if (normalized.length > MAX_CUSTOM_MODEL_LENGTH) {
-      setError(`Model slugs must be ${MAX_CUSTOM_MODEL_LENGTH} characters or less.`);
-      return;
-    }
-    if (customModels.includes(normalized)) {
-      setError("That custom model is already saved.");
+    const resolved = resolveCustomModelSlug({ text: input, driverKind, models, customModels });
+    if (!resolved.ok) {
+      setError(resolved.error);
       return;
     }
 
-    onChange([...customModels, normalized]);
+    onChange([...customModels, resolved.slug]);
     setInput("");
     setError(null);
 

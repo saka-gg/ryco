@@ -11,7 +11,7 @@ import type { UnifiedSettings } from "@ryco/contracts/settings";
 import { isProviderReady } from "@ryco/shared/providerCapabilities";
 
 import { getDriverOption } from "./providerDriverMeta";
-import { deriveProviderSettingsInstanceRows } from "./providerSettingsInstances";
+import { deriveProviderSettingsInstanceRows } from "@ryco/client-runtime/state/settings/providerInstanceSettings";
 
 /** A device as the table reads it: its last known config, and whether this client may edit it. */
 export interface ProviderTableDevice {

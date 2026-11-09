@@ -74,6 +74,14 @@ import {
   ScheduledRouteScreen,
   ScheduleDetailRouteScreen,
   ScheduleEditorRouteScreen,
+  SettingsMachinesRouteScreen,
+  SettingsMachineRouteScreen,
+  SettingsMachineProvidersRouteScreen,
+  SettingsMachineProviderRouteScreen,
+  SettingsMachineAgentsRouteScreen,
+  SettingsMachineWorkRouteScreen,
+  SettingsMachineSystemRouteScreen,
+  SettingsMachineUsagePricesRouteScreen,
   ThreadFileRouteScreen,
   ThreadFileSearchRouteScreen,
   ThreadFilesRouteScreen,
@@ -534,6 +542,46 @@ export const ROOT_STACK_SCREENS = {
   }),
   // docs/relay-e2ee-protocol.md §13.1.1's security UI and §13.2's ceremony.
   // Both are pushes on both platforms (see `mvpRouteConfig.ts`).
+  SettingsMachines: createNativeStackScreen({
+    screen: SettingsMachinesRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsMachines.linking,
+    options: routeOptions("SettingsMachines", { title: "Machine settings" }),
+  }),
+  SettingsMachine: createNativeStackScreen({
+    screen: SettingsMachineRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsMachine.linking,
+    options: routeOptions("SettingsMachine", { title: "Machine" }),
+  }),
+  SettingsMachineProviders: createNativeStackScreen({
+    screen: SettingsMachineProvidersRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsMachineProviders.linking,
+    options: routeOptions("SettingsMachineProviders", { title: "Providers" }),
+  }),
+  SettingsMachineProvider: createNativeStackScreen({
+    screen: SettingsMachineProviderRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsMachineProvider.linking,
+    options: routeOptions("SettingsMachineProvider", { title: "Provider" }),
+  }),
+  SettingsMachineAgents: createNativeStackScreen({
+    screen: SettingsMachineAgentsRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsMachineAgents.linking,
+    options: routeOptions("SettingsMachineAgents", { title: "Agents" }),
+  }),
+  SettingsMachineWork: createNativeStackScreen({
+    screen: SettingsMachineWorkRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsMachineWork.linking,
+    options: routeOptions("SettingsMachineWork", { title: "Work" }),
+  }),
+  SettingsMachineSystem: createNativeStackScreen({
+    screen: SettingsMachineSystemRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsMachineSystem.linking,
+    options: routeOptions("SettingsMachineSystem", { title: "Machine" }),
+  }),
+  SettingsMachineUsagePrices: createNativeStackScreen({
+    screen: SettingsMachineUsagePricesRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsMachineUsagePrices.linking,
+    options: routeOptions("SettingsMachineUsagePrices", { title: "Usage prices" }),
+  }),
   SettingsNodeSecurity: createNativeStackScreen({
     screen: E2eeNodeSecurityRouteScreen,
     linking: MVP_SETTINGS_ROUTES.SettingsNodeSecurity.linking,

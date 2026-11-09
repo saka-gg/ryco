@@ -1,14 +1,8 @@
+import type { ProviderDriverKind } from "@ryco/contracts";
 import {
-  AcpRegistrySettings,
-  ClaudeSettings,
-  CopilotSettings,
-  CodexSettings,
-  CursorSettings,
-  GrokSettings,
-  OpenCodeSettings,
-  ProviderDriverKind,
-} from "@ryco/contracts";
-import type { Schema } from "effect";
+  PROVIDER_DRIVER_DEFINITIONS,
+  type ProviderDriverDefinition,
+} from "@ryco/client-runtime/state/settings/providerDrivers";
 import {
   ACPRegistryIcon,
   ClaudeAI,
@@ -20,77 +14,28 @@ import {
   OpenCodeIcon,
 } from "../Icons";
 
-type ProviderSettingsSchema = {
-  readonly fields: Readonly<Record<string, Schema.Top>>;
-} & Schema.Top;
-
 /**
- * Browser-safe provider definition. This is deliberately shaped like the
- * future provider package client export: the core web app gets a schema with
- * field annotations plus provider-level presentation metadata, then renders
- * settings generically.
+ * A provider driver as the web presents it: the shared definition (label, settings schema with
+ * field annotations, early-access marker) from `@ryco/client-runtime`, plus its icon.
  */
-export interface ProviderClientDefinition {
-  readonly value: ProviderDriverKind;
-  readonly label: string;
+export interface ProviderClientDefinition extends ProviderDriverDefinition {
   readonly icon: Icon;
-  readonly settingsSchema: ProviderSettingsSchema;
-  /**
-   * Optional short label rendered as a `variant="warning"` badge next to
-   * the instance title. Used to flag drivers that still ship under an
-   * early-access or preview gate — the flag is a property of the driver
-   * kind (not a specific instance), so every instance of that driver —
-   * built-in default or custom — advertises the same marker.
-   */
-  readonly badgeLabel?: string;
 }
 
-export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = [
-  {
-    value: ProviderDriverKind.make("codex"),
-    label: "Codex",
-    icon: OpenAI,
-    settingsSchema: CodexSettings,
-  },
-  {
-    value: ProviderDriverKind.make("claudeAgent"),
-    label: "Claude",
-    icon: ClaudeAI,
-    settingsSchema: ClaudeSettings,
-  },
-  {
-    value: ProviderDriverKind.make("copilot"),
-    label: "GitHub Copilot",
-    icon: GithubCopilotIcon,
-    settingsSchema: CopilotSettings,
-  },
-  {
-    value: ProviderDriverKind.make("cursor"),
-    label: "Cursor",
-    icon: CursorIcon,
-    badgeLabel: "Early Access",
-    settingsSchema: CursorSettings,
-  },
-  {
-    value: ProviderDriverKind.make("grok"),
-    label: "Grok",
-    icon: GrokIcon,
-    badgeLabel: "Early Access",
-    settingsSchema: GrokSettings,
-  },
-  {
-    value: ProviderDriverKind.make("opencode"),
-    label: "OpenCode",
-    icon: OpenCodeIcon,
-    settingsSchema: OpenCodeSettings,
-  },
-  {
-    value: ProviderDriverKind.make("acpRegistry"),
-    label: "ACP Registry",
-    icon: ACPRegistryIcon,
-    settingsSchema: AcpRegistrySettings,
-  },
-];
+const ICON_BY_DRIVER: Readonly<Record<string, Icon>> = {
+  codex: OpenAI,
+  claudeAgent: ClaudeAI,
+  copilot: GithubCopilotIcon,
+  cursor: CursorIcon,
+  grok: GrokIcon,
+  opencode: OpenCodeIcon,
+  acpRegistry: ACPRegistryIcon,
+};
+
+export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] =
+  PROVIDER_DRIVER_DEFINITIONS.map((definition) =>
+    Object.assign({}, definition, { icon: ICON_BY_DRIVER[definition.value]! }),
+  );
 
 export const PROVIDER_CLIENT_DEFINITION_BY_VALUE: Partial<
   Record<ProviderDriverKind, ProviderClientDefinition>
@@ -103,9 +48,9 @@ export const DRIVER_OPTION_BY_VALUE = PROVIDER_CLIENT_DEFINITION_BY_VALUE;
 export type DriverOption = ProviderClientDefinition;
 
 /**
- * Look up the driver metadata for an instance's `driver` field. Accepts
- * Returns `undefined` for fork / unknown drivers so callers can decide how
- * to render them — typically by falling back to a generic card.
+ * Look up the driver metadata for an instance's `driver` field. Returns `undefined` for fork /
+ * unknown drivers so callers can decide how to render them — typically by falling back to a
+ * generic card.
  */
 export function getDriverOption(driver: ProviderDriverKind | undefined): DriverOption | undefined {
   if (driver === undefined) return undefined;

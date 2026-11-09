@@ -13,6 +13,7 @@ export type SettingsListTarget =
   | "SettingsInbox"
   | "SettingsProviderAccounts"
   | "SettingsWorkspace"
+  | "SettingsMachines"
   | "SettingsArchived"
   | "SettingsClientStorage"
   | "SettingsDiagnostics"
@@ -106,7 +107,15 @@ export function buildSettingsSections(input: {
     {
       key: "machines",
       title: "Machines",
-      rows: [{ id: "NodeSecurity", icon: "lock.shield", label: "Node security" }],
+      rows: [
+        {
+          id: "SettingsMachines",
+          icon: "gearshape.2",
+          label: "Machine settings",
+          value: "Providers, agents, work",
+        },
+        { id: "NodeSecurity", icon: "lock.shield", label: "Node security" },
+      ],
     },
     {
       key: "more",

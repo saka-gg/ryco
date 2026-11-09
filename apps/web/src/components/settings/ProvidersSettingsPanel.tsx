@@ -69,12 +69,16 @@ import { ProviderInstanceListItem } from "./ProviderInstanceListItem";
 import { instanceOffersSignIn } from "./ProviderSignInOffer.logic";
 import { ProviderSignInSection } from "./ProviderSignInSection";
 import { getDriverOption } from "./providerDriverMeta";
+import { resolveProviderSettingsListNavigationIndex } from "./providerSettingsInstances";
 import {
+  buildProviderDefaultResetPatch,
+  buildProviderInstanceDeletePatch,
+  buildProviderInstanceUpdatePatch,
   deriveProviderSettingsInstanceRows,
-  resolveProviderSettingsListNavigationIndex,
   resolveSelectedProviderSettingsInstance,
-} from "./providerSettingsInstances";
-import { buildProviderInstanceUpdatePatch } from "./SettingsPanels.logic";
+  textGenerationSelectionAfterInstanceEdit,
+  withoutProviderInstanceEntry,
+} from "@ryco/client-runtime/state/settings/providerInstanceSettings";
 import {
   SettingResetButton,
   SettingsEmpty,
@@ -98,15 +102,6 @@ type PendingProviderDestructiveAction =
       readonly driver: ProviderDriverKind;
       readonly displayName: string;
     };
-
-function withoutProviderInstanceKey<V>(
-  record: Readonly<Record<ProviderInstanceId, V>> | undefined,
-  key: ProviderInstanceId,
-): Record<ProviderInstanceId, V> {
-  const next = { ...record } as Record<ProviderInstanceId, V>;
-  delete next[key];
-  return next;
-}
 
 function withoutProviderInstanceFavorites(
   favorites: ReadonlyArray<{
@@ -300,13 +295,12 @@ export function ProvidersSettingsPanel() {
   const deleteProviderInstance = (id: ProviderInstanceId) => {
     updateClientModelFavorites((favorites) => withoutProviderInstanceFavorites(favorites, id));
     updateSettings({
-      providerInstances: withoutProviderInstanceKey(settings.providerInstances, id),
-      providerModelPreferences: withoutProviderInstanceKey(settings.providerModelPreferences, id),
-      ...(textGenInstanceId === id
-        ? {
-            textGenerationModelSelection: DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
-          }
-        : {}),
+      ...buildProviderInstanceDeletePatch({
+        settings,
+        instanceId: id,
+        textGenerationInstanceId: textGenInstanceId,
+      }),
+      providerModelPreferences: withoutProviderInstanceEntry(settings.providerModelPreferences, id),
     });
   };
 
@@ -319,7 +313,7 @@ export function ProvidersSettingsPanel() {
   ) => {
     const hiddenModels = [...new Set(next.hiddenModels.filter((slug) => slug.trim().length > 0))];
     const modelOrder = [...new Set(next.modelOrder.filter((slug) => slug.trim().length > 0))];
-    const rest = withoutProviderInstanceKey(settings.providerModelPreferences, instanceId);
+    const rest = withoutProviderInstanceEntry(settings.providerModelPreferences, instanceId);
     updateSettings({
       providerModelPreferences:
         hiddenModels.length === 0 && modelOrder.length === 0
@@ -385,32 +379,22 @@ export function ProvidersSettingsPanel() {
    * load. Safe to call on drivers that have never been edited.
    */
   const resetDefaultInstance = (driverKind: ProviderDriverKind) => {
-    type LegacyProviderSettings = (typeof settings.providers)[keyof typeof settings.providers];
-    const defaultLegacyProviders = DEFAULT_UNIFIED_SETTINGS.providers as Record<
-      string,
-      LegacyProviderSettings | undefined
-    >;
+    const patch = buildProviderDefaultResetPatch({
+      settings,
+      driver: driverKind,
+      textGenerationInstanceId: textGenInstanceId,
+    });
+    if (patch === null) return;
     const defaultInstanceId = defaultInstanceIdForDriver(driverKind);
-    const defaultLegacyProvider = defaultLegacyProviders[driverKind];
-    if (defaultLegacyProvider === undefined) return;
     updateClientModelFavorites((favorites) =>
       withoutProviderInstanceFavorites(favorites, defaultInstanceId),
     );
     updateSettings({
-      providers: {
-        ...settings.providers,
-        [driverKind]: defaultLegacyProvider,
-      } as typeof settings.providers,
-      providerInstances: withoutProviderInstanceKey(settings.providerInstances, defaultInstanceId),
-      providerModelPreferences: withoutProviderInstanceKey(
+      ...patch,
+      providerModelPreferences: withoutProviderInstanceEntry(
         settings.providerModelPreferences,
         defaultInstanceId,
       ),
-      ...(textGenInstanceId === defaultInstanceId
-        ? {
-            textGenerationModelSelection: DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
-          }
-        : {}),
     });
   };
 
@@ -701,27 +685,18 @@ export function ProvidersSettingsPanel() {
                 driverOption={selectedDriverOption}
                 liveProvider={selectedLiveProvider}
                 isDefault={selectedRow.isDefault}
-                onUpdate={(next) => {
-                  // When the user disables the exact instance the text-gen
-                  // selection points at, fall back to the global default so we
-                  // don't leave the selection dangling on a disabled instance.
-                  // Prior kind-level behavior cleared on any kind-matching
-                  // disable; instance-level addressing makes this narrower and
-                  // more accurate (other instances of the same kind stay
-                  // untouched).
-                  const wasEnabled = selectedRow.instance.enabled ?? true;
-                  const isDisabling = next.enabled === false && wasEnabled;
-                  const shouldClearTextGen =
-                    isDisabling && textGenInstanceId === selectedRow.instanceId;
-                  if (shouldClearTextGen) {
-                    updateProviderInstance(selectedRow, next, {
-                      textGenerationModelSelection:
-                        DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
-                    });
-                  } else {
-                    updateProviderInstance(selectedRow, next);
-                  }
-                }}
+                onUpdate={(next) =>
+                  // Disabling the exact instance text generation uses falls back to the default,
+                  // so the selection never dangles on a disabled instance.
+                  updateProviderInstance(selectedRow, next, {
+                    textGenerationModelSelection: textGenerationSelectionAfterInstanceEdit({
+                      instanceId: selectedRow.instanceId,
+                      previous: selectedRow.instance,
+                      next,
+                      textGenerationInstanceId: textGenInstanceId,
+                    }),
+                  })
+                }
                 onDelete={
                   selectedRow.isDefault
                     ? undefined

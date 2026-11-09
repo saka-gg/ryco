@@ -14,7 +14,7 @@ import {
   readAcpAgentConfig,
   registryAgentConfig,
   type AcpAgentConfig,
-} from "./acpAgentConfig.logic";
+} from "@ryco/client-runtime/state/settings/acpAgentConfig";
 import { AcpLocalCommandSettings } from "./AcpLocalCommandSettings";
 
 /**

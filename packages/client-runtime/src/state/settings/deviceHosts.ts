@@ -1,5 +1,8 @@
-import { DeviceSshHost } from "@ryco/contracts";
-import { Schema } from "effect";
+import { DeviceSshHost } from "@ryco/contracts/device";
+import * as Schema from "effect/Schema";
+
+// The SSH host editor's rules (simulators on another Mac, reached over SSH), shared by the
+// web's and the phone's device host settings.
 
 const isHost = Schema.is(DeviceSshHost);
 

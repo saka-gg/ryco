@@ -326,6 +326,22 @@
       "types": "./src/state/settings/projectPreferenceEditing.ts",
       "import": "./src/state/settings/projectPreferenceEditing.ts"
     },
+    "./state/settings/deviceHosts": {
+      "types": "./src/state/settings/deviceHosts.ts",
+      "import": "./src/state/settings/deviceHosts.ts"
+    },
+    "./state/settings/mcpServers": {
+      "types": "./src/state/settings/mcpServers.ts",
+      "import": "./src/state/settings/mcpServers.ts"
+    },
+    "./state/settings/opinionatedPlugins": {
+      "types": "./src/state/settings/opinionatedPlugins.ts",
+      "import": "./src/state/settings/opinionatedPlugins.ts"
+    },
+    "./state/settings/usagePrices": {
+      "types": "./src/state/settings/usagePrices.ts",
+      "import": "./src/state/settings/usagePrices.ts"
+    },
     "./state/settings/nodeSettingsTargets": {
       "types": "./src/state/settings/nodeSettingsTargets.ts",
       "import": "./src/state/settings/nodeSettingsTargets.ts"
@@ -349,6 +365,26 @@
     "./state/settings/sharedDeviceSettingsRunner": {
       "types": "./src/state/settings/sharedDeviceSettingsRunner.ts",
       "import": "./src/state/settings/sharedDeviceSettingsRunner.ts"
+    },
+    "./state/settings/acpAgentConfig": {
+      "types": "./src/state/settings/acpAgentConfig.ts",
+      "import": "./src/state/settings/acpAgentConfig.ts"
+    },
+    "./state/settings/providerDrivers": {
+      "types": "./src/state/settings/providerDrivers.ts",
+      "import": "./src/state/settings/providerDrivers.ts"
+    },
+    "./state/settings/providerInstanceEnvironment": {
+      "types": "./src/state/settings/providerInstanceEnvironment.ts",
+      "import": "./src/state/settings/providerInstanceEnvironment.ts"
+    },
+    "./state/settings/providerInstanceSettings": {
+      "types": "./src/state/settings/providerInstanceSettings.ts",
+      "import": "./src/state/settings/providerInstanceSettings.ts"
+    },
+    "./state/settings/providerSettingsFields": {
+      "types": "./src/state/settings/providerSettingsFields.ts",
+      "import": "./src/state/settings/providerSettingsFields.ts"
     },
     "./state/terminal": {
       "types": "./src/state/terminal/index.ts",

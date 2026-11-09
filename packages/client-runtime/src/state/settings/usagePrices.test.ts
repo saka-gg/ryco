@@ -9,7 +9,7 @@ import {
   upsertUsagePriceDraft,
   usagePriceForm,
   type UsagePriceDraft,
-} from "./usagePriceSettings.logic";
+} from "./usagePrices.ts";
 
 const SAVED: UsagePriceOverrides = {
   "claude-preview-x": {

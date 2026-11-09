@@ -3,11 +3,7 @@
 import { CheckIcon } from "lucide-react";
 import { Radio as RadioPrimitive } from "@base-ui/react/radio";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  ProviderInstanceId,
-  ProviderDriverKind,
-  type ProviderInstanceConfig,
-} from "@ryco/contracts";
+import { ProviderInstanceId, ProviderDriverKind } from "@ryco/contracts";
 
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import { ColorSwatchPicker } from "./ColorSwatchPicker";
@@ -28,9 +24,15 @@ import { Input } from "../ui/input";
 import { RadioGroup } from "../ui/radio-group";
 import { toastManager } from "../ui/toast";
 import { DRIVER_OPTION_BY_VALUE, DRIVER_OPTIONS } from "./providerDriverMeta";
-import { ProviderSettingsForm, deriveProviderSettingsFields } from "./ProviderSettingsForm";
+import { ProviderSettingsForm } from "./ProviderSettingsForm";
 import { AcpRegistrySettings } from "./AcpRegistrySettings";
-import { isAcpAgentConfigComplete } from "./acpAgentConfig.logic";
+import { isAcpAgentConfigComplete } from "@ryco/client-runtime/state/settings/acpAgentConfig";
+import {
+  newProviderInstanceConfig,
+  providerInstanceIdError,
+  providerInstanceIdForLabel,
+} from "@ryco/client-runtime/state/settings/providerInstanceSettings";
+import { deriveProviderSettingsFields } from "@ryco/client-runtime/state/settings/providerSettingsFields";
 import { AnimatedHeight } from "../AnimatedHeight";
 
 const PROVIDER_ACCENT_SWATCHES = [
@@ -42,28 +44,6 @@ const PROVIDER_ACCENT_SWATCHES = [
   "#0891b2",
 ] as const;
 
-/**
- * Normalize a user-provided label into a slug suffix for the instance id.
- * The full id is formed by prefixing the driver slug — e.g. label "Work" on
- * driver "codex" becomes `codex_work`. Output is trimmed to 48 chars so the
- * final composed id stays under the 64-char slug cap enforced by
- * `ProviderInstanceId` in `@ryco/contracts`.
- */
-function slugifyLabel(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 48);
-}
-
-function deriveInstanceId(driver: ProviderDriverKind, label: string): string {
-  const slug = slugifyLabel(label);
-  return slug ? `${driver}_${slug}` : "";
-}
-
-const INSTANCE_ID_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
 const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
 const DEFAULT_DRIVER_OPTION = DRIVER_OPTIONS[0]!;
 const EMPTY_CONFIG_DRAFT: Record<string, unknown> = {};
@@ -85,21 +65,6 @@ const COMING_SOON_DRIVER_OPTIONS: readonly ComingSoonDriverOption[] = [
     icon: PiAgentIcon,
   },
 ];
-
-/**
- * Validate an instance id against the same slug rules the server applies in
- * `ProviderInstanceId` (see `packages/contracts/src/providerInstance.ts`).
- * Returns a user-facing error string, or `null` if valid.
- */
-function validateInstanceId(id: string, existing: ReadonlySet<string>): string | null {
-  if (id.length === 0) return "Instance ID is required.";
-  if (id.length > 64) return "Instance ID must be 64 characters or fewer.";
-  if (!INSTANCE_ID_PATTERN.test(id)) {
-    return "Instance ID must start with a letter and use only letters, digits, '-', or '_'.";
-  }
-  if (existing.has(id)) return `An instance named '${id}' already exists.`;
-  return null;
-}
 
 /** A provider another device has, to add here under the same id and name (no config, no secrets). */
 export interface AddProviderInstancePreset {
@@ -170,7 +135,7 @@ export function AddProviderInstanceDialog({
   // in the Instance ID field directly (after which they own its value).
   useEffect(() => {
     if (instanceIdDirty) return;
-    setInstanceId(deriveInstanceId(driver, label));
+    setInstanceId(providerInstanceIdForLabel(driver, label));
   }, [driver, label, instanceIdDirty]);
 
   const driverOption = DRIVER_OPTION_BY_VALUE[driver] ?? DEFAULT_DRIVER_OPTION;
@@ -178,7 +143,7 @@ export function AddProviderInstanceDialog({
     () => deriveProviderSettingsFields(driverOption),
     [driverOption],
   );
-  const instanceIdError = validateInstanceId(instanceId, existingIds);
+  const instanceIdError = providerInstanceIdError(instanceId, existingIds);
   const showInstanceIdError = hasAttemptedSubmit && instanceIdError !== null;
   const previewLabel = label.trim() || `${driverOption.label} Workspace`;
   const wizardSteps = ["Driver", "Identity", "Config"] as const;
@@ -205,17 +170,12 @@ export function AddProviderInstanceDialog({
     if (instanceIdError !== null) return;
     if (driver === "acpRegistry" && !isAcpAgentConfigComplete(configDraft)) return;
 
-    const config = configByDriver[driver] ?? {};
-    const hasConfig = Object.keys(config).length > 0;
-    const normalizedAccentColor = normalizeProviderAccentColor(accentColor);
-
-    const nextInstance: ProviderInstanceConfig = {
+    const nextInstance = newProviderInstanceConfig({
       driver,
-      enabled: true,
-      ...(label.trim().length > 0 ? { displayName: label.trim() } : {}),
-      ...(normalizedAccentColor ? { accentColor: normalizedAccentColor } : {}),
-      ...(hasConfig ? { config } : {}),
-    };
+      label,
+      accentColor,
+      config: configByDriver[driver],
+    });
     // `ProviderInstanceId.make` revalidates the slug; we've already checked
     // it via `validateInstanceId`, but going through the brand constructor
     // keeps the type boundary honest and guards against any future drift in
