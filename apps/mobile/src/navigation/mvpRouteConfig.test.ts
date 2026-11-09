@@ -97,6 +97,7 @@ describe("MVP route config", () => {
         "ThreadReviewComment",
         "ThreadTerminal",
         "ThreadDevice",
+        "ThreadPromoteChat",
       ].toSorted(),
     );
     // Deferred routes must be absent from the tree.

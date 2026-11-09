@@ -24,6 +24,8 @@ import { inferTaskTitle } from "./newTaskModel";
 export interface NewTaskLaunchDraft {
   readonly environmentId: EnvironmentId;
   readonly projectId: ProjectId | null;
+  /** A chat without a project (`projectId` is null and no new project path is used). */
+  readonly chat?: boolean;
   readonly newProjectPath: string;
   readonly newProjectTitle: string;
   readonly worktree:

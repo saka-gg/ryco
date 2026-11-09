@@ -188,6 +188,11 @@ export function HomeScreen() {
     () => navigation.navigate("NewTask", { environmentId: chats.nodeScope ?? undefined }),
     [chats.nodeScope, navigation],
   );
+  const openNewChat = useCallback(
+    () =>
+      navigation.navigate("NewTask", { environmentId: chats.nodeScope ?? undefined, chat: "1" }),
+    [chats.nodeScope, navigation],
+  );
   const openMachines = useCallback(() => navigation.navigate("Connections"), [navigation]);
   const openSearch = useCallback(() => navigation.navigate("Search"), [navigation]);
 
@@ -387,7 +392,17 @@ export function HomeScreen() {
         accessibilityLabel="New task"
         onPress={openNewTask}
         bottom={contentInsets.bottom + 16}
+        longPressMenu={{
+          actions: NEW_CHAT_MENU_ACTIONS,
+          onPressAction: (id) => (id === "new-chat" ? openNewChat() : openNewTask()),
+        }}
       />
     </View>
   );
 }
+
+/** The + button's touch-and-hold menu: a task in a project, or a chat without one. */
+const NEW_CHAT_MENU_ACTIONS = [
+  { id: "new-task", title: "New task", subtitle: "In a project", image: "folder" },
+  { id: "new-chat", title: "New chat", subtitle: "No project", image: "bubble.left" },
+] as const;

@@ -21,6 +21,8 @@ export type ThreadListRow = ThreadTimelineRow & {
   readonly undoable?: true;
   /** The message a link opened this thread at, highlighted briefly. */
   readonly highlighted?: true;
+  /** The proposed plan that can be implemented now (Implement, Implement in a new chat). */
+  readonly planActionable?: true;
 };
 
 export interface ThreadListRowFlags {
@@ -30,6 +32,14 @@ export interface ThreadListRowFlags {
   /** Replies whose turn's file changes can be undone right now. */
   readonly undoableMessageIds?: ReadonlySet<MessageId> | undefined;
   readonly highlightedMessageId: MessageId | null;
+  /** The plan the thread's settled latest turn proposed and nobody implemented yet. */
+  readonly actionablePlanId?: string | null;
+}
+
+function planIdOfRow(row: ThreadTimelineRow): string | null {
+  return row.kind === "entry" && row.entry.kind === "proposed-plan"
+    ? row.entry.proposedPlan.id
+    : null;
 }
 
 function messageIdOfRow(row: ThreadTimelineRow): MessageId | null {
@@ -76,14 +86,17 @@ export function createThreadListRowAnnotator(): (
       const undoable =
         forkMessageId !== null && flags.undoableMessageIds?.has(forkMessageId) === true;
       const highlighted = timelineRowShowsMessage(messagesOfRow(row), flags.highlightedMessageId);
-      if (!forkable && !editable && !undoable && !highlighted) return row;
+      const planId = planIdOfRow(row);
+      const planActionable = planId !== null && (flags.actionablePlanId ?? null) === planId;
+      if (!forkable && !editable && !undoable && !highlighted && !planActionable) return row;
       const kept = annotated.get(row);
       if (
         kept &&
         (kept.forkable === true) === forkable &&
         (kept.editable === true) === editable &&
         (kept.undoable === true) === undoable &&
-        (kept.highlighted === true) === highlighted
+        (kept.highlighted === true) === highlighted &&
+        (kept.planActionable === true) === planActionable
       ) {
         return kept;
       }
@@ -93,6 +106,7 @@ export function createThreadListRowAnnotator(): (
         ...(editable ? { editable: true as const } : {}),
         ...(undoable ? { undoable: true as const } : {}),
         ...(highlighted ? { highlighted: true as const } : {}),
+        ...(planActionable ? { planActionable: true as const } : {}),
       };
       annotated.set(row, next);
       return next;

@@ -374,7 +374,15 @@ export function deriveNewTaskLaunchView(input: {
       percent: null,
     });
   }
-  if (attempt.worktree.kind === "new") {
+  if (attempt.project.kind === "chat") {
+    // One turn start makes the chat's folder, its thread and its first turn.
+    steps.push({
+      id: "turn",
+      label: "Start chat",
+      status: stepStatus(attempt.turnStarted, "turn", true),
+      percent: null,
+    });
+  } else if (attempt.worktree.kind === "new") {
     const stages = resolveWorktreeSetupStages(
       input.worktreeLaunch ?? {
         snapshot: null,

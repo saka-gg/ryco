@@ -23,6 +23,7 @@ export type ThreadHeaderMenuActionId =
   | "side-chat"
   | "fork"
   | "rename"
+  | "turn-into-project"
   | "add-task"
   | "copy-reference"
   | "copy-task-id"
@@ -70,6 +71,8 @@ export interface ThreadHeaderMenuInput {
   readonly forkAvailable: boolean;
   /** The thread is loaded, so a task can link to it ("Add to Tasks"). */
   readonly addTaskAvailable: boolean;
+  /** The thread is a chat without a project, which can become one ("Turn into project"). */
+  readonly promoteChatAvailable?: boolean;
   /** A rename, stop, archive and the like cannot be sent now (busy, cached or offline). */
   readonly busy: boolean;
 }
@@ -146,6 +149,14 @@ export function buildThreadHeaderMenu(
     chat.push({ id: "fork", title: "Fork from latest reply", icon: "arrow.triangle.branch" });
   }
   chat.push({ id: "rename", title: "Rename…", icon: "pencil", disabled: busy });
+  if (input.promoteChatAvailable) {
+    chat.push({
+      id: "turn-into-project",
+      title: "Turn into project…",
+      icon: "folder.badge.plus",
+      disabled: busy,
+    });
+  }
   if (input.addTaskAvailable) {
     chat.push({ id: "add-task", title: "Add to Tasks", icon: "checklist" });
   }

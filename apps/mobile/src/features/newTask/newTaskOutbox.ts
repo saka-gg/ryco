@@ -31,7 +31,7 @@ function nonEmptyString(value: unknown): value is string {
 }
 
 const FAILURE_STEPS = new Set(["project", "worktree", "thread", "turn"]);
-const PROJECT_KINDS = new Set(["existing", "new"]);
+const PROJECT_KINDS = new Set(["existing", "new", "chat"]);
 const WORKTREE_KINDS = new Set(["local", "existing", "new"]);
 
 /** What is stored: the draft's images are the attempt's, so they are stored once. */

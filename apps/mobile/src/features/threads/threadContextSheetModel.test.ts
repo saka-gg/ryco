@@ -3,7 +3,12 @@ import { describe, expect, it } from "vite-plus/test";
 import { MessageId, ThreadId, TurnId } from "@ryco/contracts/base-schemas";
 import type { AgentControlCompletionReturn } from "@ryco/contracts/agent-control";
 
-import { buildThreadParentLink, threadStatusTone } from "./threadContextSheetModel";
+import {
+  buildThreadParentLink,
+  threadStatusTone,
+  threadTitlePillAccessibilityLabel,
+  threadTitlePillGoal,
+} from "./threadContextSheetModel";
 
 const parentThreadId = ThreadId.make("parent-1");
 const lineage = { parentThreadId, rootThreadId: parentThreadId, relationship: "delegated" };
@@ -63,5 +68,23 @@ describe("thread context sheet model", () => {
         completionReturn: undefined,
       }),
     ).toBeNull();
+  });
+});
+
+describe("title pill goal hint", () => {
+  it("reads a goal as pursued, stopped or done, and says so to VoiceOver", () => {
+    expect(threadTitlePillGoal(null)).toBeNull();
+    expect(threadTitlePillGoal({ status: "active" })).toBe("active");
+    expect(threadTitlePillGoal({ status: "usageLimited" })).toBe("stopped");
+    expect(threadTitlePillGoal({ status: "complete" })).toBe("complete");
+    expect(
+      threadTitlePillAccessibilityLabel({
+        title: "Fix CI",
+        statusLabel: "Running",
+        projectLabel: "Ryco",
+        worktreeLabel: "main",
+        goal: "active",
+      }),
+    ).toBe("Fix CI. Running. Pursuing a goal. Ryco, main. Show details.");
   });
 });

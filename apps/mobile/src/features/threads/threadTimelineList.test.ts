@@ -193,6 +193,34 @@ describe("createThreadListRowAnnotator", () => {
     });
   });
 
+  it("flags only the plan that can be implemented now", () => {
+    const plan = (id: string): ThreadTimelineRow => {
+      const entry = {
+        id: `proposed-plan:${id}`,
+        kind: "proposed-plan",
+        createdAt: "2026-10-11T10:00:00.000Z",
+        proposedPlan: { id, turnId: null, planMarkdown: "# Plan", implementedAt: null },
+      };
+      return { kind: "entry", id: entry.id, entry: entry as unknown as TimelineEntry };
+    };
+    const planRows = [plan("plan-1"), messageRow("reply-1"), plan("plan-2")];
+    const annotate = createThreadListRowAnnotator();
+    const live = annotate(planRows, {
+      forkableMessageIds: NONE,
+      highlightedMessageId: null,
+      actionablePlanId: "plan-2",
+    });
+    expect(live[0]).toBe(planRows[0]);
+    expect(live[2]).toMatchObject({ planActionable: true });
+    // Implemented (or a new turn started): the buttons go, a new item for that row alone.
+    const done = annotate(planRows, {
+      forkableMessageIds: NONE,
+      highlightedMessageId: null,
+      actionablePlanId: null,
+    });
+    expect(done[2]).toBe(planRows[2]);
+  });
+
   it("flags the anchored message for its highlight", () => {
     const annotate = createThreadListRowAnnotator();
     const shown = annotate(rows, {

@@ -3,7 +3,7 @@ import { isArchivedThreadStub } from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 
 import { ensureEnvironmentApi } from "../../connection/environmentApi";
-import { newCommandId } from "../../lib/ids";
+import { newCommandId, newProjectId } from "../../lib/ids";
 import {
   selectProjectByRef,
   selectSidebarThreadSummaryByRef,
@@ -50,6 +50,7 @@ export function createNewTaskLaunchDeps(environmentId: EnvironmentId): NewTaskLa
       delegate: (taskId, command) => delegateTaskChatStart(environmentId, taskId, command),
       preflightTask: (taskId) => preflightTaskChatStart(environmentId, taskId),
       threadStarted: (threadId) => isNewTaskThreadStarted(environmentId, threadId),
+      freshChatIds: () => ({ projectId: newProjectId(), turnCommandId: newCommandId() }),
       waitForProject: (projectId) =>
         waitForAuthoritative(
           () =>

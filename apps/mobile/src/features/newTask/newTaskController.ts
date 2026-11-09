@@ -5,8 +5,11 @@ import {
   type WorkspacePhysicalProjectVariant,
 } from "@ryco/client-runtime/state/workspace";
 import {
+  buildSendTurnBootstrap,
   buildTurnStartCommand,
   composeOutgoingPrompt,
+  isChatProjectRetiredError,
+  resolveChatProjectTitleSeed,
   type SendTurnBootstrap,
   type SendTurnDispatchAttachment,
 } from "@ryco/client-runtime/state/composer";
@@ -159,7 +162,13 @@ export type NewTaskProjectContext =
       readonly kind: "new";
       readonly workspaceRoot: string;
       readonly title?: string;
-    };
+    }
+  /**
+   * A chat without a project: the node creates its folder (a "chat project") in the first
+   * turn start, together with the thread, as web's first chat send does. It never uses a
+   * worktree or a branch.
+   */
+  | { readonly kind: "chat" };
 
 export type NewTaskWorktreeContext =
   | { readonly kind: "local" }
@@ -250,6 +259,15 @@ export interface NewTaskControllerDeps {
    */
   readonly threadStarted?: (threadId: ThreadId) => boolean;
   readonly waitForProject: (projectId: ProjectId) => Promise<void>;
+  /**
+   * Fresh ids for a chat whose draft project id the node retired (`chat-project-retired`):
+   * nothing was created under it and it can never be used again, and the refused turn start's
+   * command id would only be refused again from its receipt.
+   */
+  readonly freshChatIds?: () => {
+    readonly projectId: ProjectId;
+    readonly turnCommandId: CommandId;
+  };
   readonly waitForThread: (input: {
     readonly threadId: ThreadId;
     readonly worktreeId?: WorktreeId | null;
@@ -435,6 +453,87 @@ export function prepareNewTaskRetry(
   }
 }
 
+/** Where an existing or new project lives; a chat has no folder of its own until the node makes it. */
+function projectWorkspaceRoot(project: NewTaskProjectContext): string {
+  if (project.kind === "chat") throw new Error("A chat without a project has no workspace path.");
+  return project.workspaceRoot;
+}
+
+/** The attempt's turn start creating its chat project and thread (`buildSendTurnBootstrap`). */
+function chatTurnBootstrap(attempt: NewTaskAttempt): NonNullable<SendTurnBootstrap> {
+  const bootstrap = buildSendTurnBootstrap({
+    isLocalDraftThread: true,
+    baseBranchForWorktree: null,
+    shouldMaterializeLegacyBranchWorktree: false,
+    projectId: attempt.projectId,
+    projectCwd: "",
+    title: inferTaskTitle(attempt.prompt),
+    threadCreateModelSelection: attempt.modelSelection,
+    runtimeMode: attempt.runtimeMode,
+    interactionMode: attempt.interactionMode,
+    tokenMode: attempt.tokenMode,
+    activeThreadBranch: null,
+    worktreePath: null,
+    threadCreatedAt: attempt.createdAt,
+    createChatProject: {
+      projectId: attempt.projectId,
+      // The chat's name (and folder name) seed; an attachment-only first message has none.
+      titleSeed: resolveChatProjectTitleSeed(attempt.prompt) ?? inferTaskTitle(attempt.prompt),
+    },
+  });
+  if (!bootstrap) throw new Error("The chat could not be prepared.");
+  return bootstrap;
+}
+
+/**
+ * A chat without a project: one turn start creates its folder, its thread and its first turn,
+ * so there is no project or thread step to confirm on the way. A retired draft id (the node
+ * cleaned it up) created nothing: the chat goes again once under a fresh id.
+ */
+async function runChatAttempt(
+  attempt: NewTaskAttempt,
+  deps: NewTaskControllerDeps,
+): Promise<NewTaskRunResult> {
+  let next = attempt;
+  if (!next.turnStarted && deps.threadStarted?.(next.threadId) === true) {
+    next = { ...next, turnStarted: true };
+  }
+  if (!next.turnStarted) {
+    if (next.worktree.kind !== "local") {
+      return invalid(next, "turn", new Error("A chat without a project cannot use a worktree."));
+    }
+    for (let retiredRetry = 0; ; retiredRetry += 1) {
+      try {
+        await sendTurnStart(next, turnStartCommand(next, chatTurnBootstrap(next)), deps);
+        break;
+      } catch (error) {
+        if (retiredRetry === 0 && deps.freshChatIds && isChatProjectRetiredError(error)) {
+          const fresh = deps.freshChatIds();
+          next = {
+            ...next,
+            projectId: fresh.projectId,
+            ids: { ...next.ids, projectId: fresh.projectId, turnCommandId: fresh.turnCommandId },
+          };
+          continue;
+        }
+        return refused(next, "turn", error);
+      }
+    }
+    next = { ...next, turnStarted: true };
+  }
+  return {
+    ok: true,
+    attempt: {
+      ...next,
+      projectCommandAccepted: true,
+      projectReady: true,
+      threadCommandAccepted: true,
+      threadReady: true,
+      worktreeAttached: true,
+    },
+  };
+}
+
 export async function runNewTaskAttempt(
   attempt: NewTaskAttempt,
   deps: NewTaskControllerDeps,
@@ -451,10 +550,12 @@ export async function runNewTaskAttempt(
     }
   }
 
+  if (next.project.kind === "chat") return runChatAttempt(next, deps);
+
   if (!next.projectReady) {
     let workspaceRoot: string;
     try {
-      workspaceRoot = validateNodeWorkspacePath(next.project.workspaceRoot);
+      workspaceRoot = validateNodeWorkspacePath(projectWorkspaceRoot(next.project));
     } catch (error) {
       return invalid(next, "project", error);
     }
@@ -497,7 +598,7 @@ export async function runNewTaskAttempt(
       if (!branch) return failed(next, "worktree", false);
       let projectCwd: string;
       try {
-        projectCwd = validateNodeWorkspacePath(next.project.workspaceRoot);
+        projectCwd = validateNodeWorkspacePath(projectWorkspaceRoot(next.project));
       } catch (error) {
         return invalid(next, "worktree", error);
       }

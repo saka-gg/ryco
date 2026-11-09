@@ -644,4 +644,102 @@ describe("New Task controller for a task's chat", () => {
     const result = await runNewTaskAttempt(taskAttempt("local"), deps());
     expect(result).toMatchObject({ ok: false, step: "turn", deliveryUncertain: false });
   });
+
+  it("starts a chat without a project in one turn start that creates its folder and thread", async () => {
+    const attempt = createNewTaskAttempt({
+      environmentId,
+      prompt: "  Plan a trip to   Lisbon ",
+      project: { kind: "chat" },
+      worktree: { kind: "local" },
+      createdAt,
+      ids,
+    });
+    const runtime = deps();
+    const result = await runNewTaskAttempt(attempt, runtime);
+
+    expect(result.ok).toBe(true);
+    expect(runtime.commands.map((command) => command.type)).toEqual(["thread.turn.start"]);
+    const turn = runtime.commands[0] as Extract<
+      ClientOrchestrationCommand,
+      { type: "thread.turn.start" }
+    >;
+    expect(turn.commandId).toBe(ids.turnCommandId);
+    expect(turn.bootstrap?.createChatProject).toEqual({
+      projectId: ids.projectId,
+      titleSeed: "Plan a trip to Lisbon",
+    });
+    expect(turn.bootstrap?.createThread).toMatchObject({
+      projectId: ids.projectId,
+      branch: null,
+      worktreePath: null,
+    });
+    expect(turn.bootstrap?.prepareWorktree).toBeUndefined();
+    if (result.ok) {
+      expect(result.attempt).toMatchObject({
+        projectReady: true,
+        threadReady: true,
+        turnStarted: true,
+      });
+    }
+  });
+
+  it("starts a retired chat draft again under fresh ids, once", async () => {
+    const retired = Object.assign(new Error("retired"), {
+      _tag: "OrchestrationDispatchCommandError",
+      reason: "chat-project-retired",
+    });
+    const freshProjectId = ProjectId.make("project-fresh");
+    const freshCommandId = CommandId.make("command-turn-fresh");
+    const sent: ClientOrchestrationCommand[] = [];
+    const runtime = deps({
+      dispatch: async (command) => {
+        sent.push(command);
+        if (sent.length === 1) throw retired;
+      },
+      freshChatIds: () => ({ projectId: freshProjectId, turnCommandId: freshCommandId }),
+    });
+    const attempt = createNewTaskAttempt({
+      environmentId,
+      prompt: "Plan a trip",
+      project: { kind: "chat" },
+      worktree: { kind: "local" },
+      createdAt,
+      ids,
+    });
+    const result = await runNewTaskAttempt(attempt, runtime);
+
+    expect(result.ok).toBe(true);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toMatchObject({
+      commandId: freshCommandId,
+      bootstrap: {
+        createChatProject: { projectId: freshProjectId },
+        createThread: { projectId: freshProjectId },
+      },
+    });
+
+    const again = deps({
+      dispatch: async () => {
+        throw retired;
+      },
+      freshChatIds: () => ({ projectId: freshProjectId, turnCommandId: freshCommandId }),
+    });
+    const failed = await runNewTaskAttempt(attempt, again);
+    expect(failed).toMatchObject({ ok: false, step: "turn", deliveryUncertain: false });
+  });
+
+  it("does not send a chat's turn again once the node shows it started", async () => {
+    const runtime = deps({ threadStarted: () => true });
+    const attempt = createNewTaskAttempt({
+      environmentId,
+      prompt: "Plan a trip",
+      project: { kind: "chat" },
+      worktree: { kind: "local" },
+      createdAt,
+      ids,
+    });
+    const result = await runNewTaskAttempt(attempt, runtime);
+    expect(result.ok).toBe(true);
+    expect(runtime.commands).toEqual([]);
+  });
 });
