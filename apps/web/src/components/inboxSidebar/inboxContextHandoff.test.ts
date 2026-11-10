@@ -27,6 +27,8 @@ const older = {
   modelSlug: "older-model",
   modelDisplayName: "Older model",
 };
+const makeActivity = activity;
+const makeRelocation = (sequence: number) => relocation(sequence);
 function activity(
   sequence: number,
   status = "consumed",
@@ -40,7 +42,7 @@ function activity(
     summary: "Context handoff",
     turnId: null,
     sequence,
-    createdAt: "2026-09-05T00:00:00.000Z",
+    createdAt: `2026-09-05T00:00:${String(sequence).padStart(2, "0")}.000Z`,
     payload: {
       schemaVersion: 1,
       handoffId: `handoff-${sequence}`,
@@ -147,6 +149,14 @@ describe("inbox context handoff", () => {
     expect(await load(apiWith([]))).toBeNull();
   });
   it("reads only the newest window on a later hover of the same thread (D10)", async () => {
+    // Windows and history pages carry no `sequence`: the place is the creation time.
+    const withoutSequence = (item: OrchestrationThreadActivity): OrchestrationThreadActivity => {
+      const { sequence: _sequence, ...rest } = item;
+      return rest;
+    };
+    const activity = (...args: Parameters<typeof makeActivity>) =>
+      withoutSequence(makeActivity(...args));
+    const relocation = (sequence: number) => withoutSequence(makeRelocation(sequence));
     const api = apiWith([]);
     const page = (items: ReadonlyArray<OrchestrationThreadActivity>, more: boolean) => ({
       collection: "activities",

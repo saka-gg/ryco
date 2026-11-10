@@ -60,15 +60,40 @@ function displayEndpoint(endpoint: ContextHandoffEndpointSnapshot): ContextHando
 type HandoffPayload = NonNullable<ReturnType<typeof latestInboxContextHandoff>>;
 
 /**
+ * Where an activity sits in the thread. Activities are only appended, so a
+ * later one sorts after every earlier one. Windows and history pages carry no
+ * `sequence`, so the place is the creation time, then the id.
+ */
+interface ActivityPlace {
+  readonly createdAt: string;
+  readonly id: string;
+}
+
+function isAfter(activity: ActivityPlace, place: ActivityPlace): boolean {
+  return (
+    activity.createdAt > place.createdAt ||
+    (activity.createdAt === place.createdAt && activity.id > place.id)
+  );
+}
+
+function newestPlace(activities: ReadonlyArray<ActivityPlace>): ActivityPlace | null {
+  let newest: ActivityPlace | null = null;
+  for (const activity of activities) {
+    if (newest === null || isAfter(activity, newest)) newest = activity;
+  }
+  return newest === null ? null : { createdAt: newest.createdAt, id: newest.id };
+}
+
+/**
  * What a hover already learned about one thread: the latest model transfer
- * among every activity up to `throughSequence`. Activities are only appended,
- * so a later hover reads the newest window and stops at the first activity it
- * has seen before, instead of paging through the whole history again (the
- * owner's trace: 2,545 history pages in 103 hovers, up to 57 pages each).
+ * among every activity up to `through`. A later hover reads the newest window
+ * and stops at the first activity it has seen before, instead of paging
+ * through the whole history again (the owner's trace: 2,545 history pages in
+ * 103 hovers, up to 57 pages each).
  */
 interface HandoffScan {
   readonly latest: HandoffPayload | null;
-  readonly throughSequence: number;
+  readonly through: ActivityPlace;
 }
 
 const MAX_REMEMBERED_THREADS = 200;
@@ -89,16 +114,6 @@ function rememberScan(api: EnvironmentApi, threadId: ThreadId, scan: HandoffScan
   }
 }
 
-/** The newest sequence of `activities`, or null when one has none (nothing can be remembered). */
-function newestSequence(activities: ReadonlyArray<OrchestrationThreadActivity>): number | null {
-  let newest = -1;
-  for (const activity of activities) {
-    if (activity.sequence === undefined) return null;
-    newest = Math.max(newest, activity.sequence);
-  }
-  return newest;
-}
-
 /** The latest model transfer, or undefined when the read stopped without an answer. */
 async function scanLatestHandoff(
   api: EnvironmentApi,
@@ -111,21 +126,17 @@ async function scanLatestHandoff(
     limits: { messages: 1, proposedPlans: 1, activities: 100, checkpoints: 1 },
   });
   const known = scansByApi.get(api)?.get(threadId);
-  const throughSequence = newestSequence(snapshot.thread.activities);
+  const newest = newestPlace(snapshot.thread.activities);
   const finish = (latest: HandoffPayload | null) => {
-    if (throughSequence !== null) {
-      rememberScan(api, threadId, {
-        latest,
-        throughSequence: Math.max(throughSequence, known?.throughSequence ?? -1),
-      });
-    }
+    const through = newest ?? known?.through;
+    if (through) rememberScan(api, threadId, { latest, through });
     return latest;
   };
   let activities = snapshot.thread.activities;
   let page = snapshot.history.activities;
   while (!cancelled()) {
     const unseen = known
-      ? activities.filter((activity) => (activity.sequence ?? -1) > known.throughSequence)
+      ? activities.filter((activity) => isAfter(activity, known.through))
       : activities;
     const latest = latestInboxContextHandoff(unseen);
     if (latest) return finish(latest);
