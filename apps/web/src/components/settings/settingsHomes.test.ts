@@ -18,7 +18,6 @@ import { SETTINGS_SEARCH_INDEX } from "./settingsSearchIndex";
  */
 const CLIENT_SETTING_HOMES = {
   localOnboardingCompletedEnvironmentIds: null,
-  lastSeenReleaseNotesVersion: null,
   whatsNewAfterUpdate: "about",
   confirmThreadArchive: "inbox",
   confirmThreadDelete: "inbox",

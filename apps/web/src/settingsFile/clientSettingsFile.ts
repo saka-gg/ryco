@@ -51,7 +51,6 @@ export const MAX_IMPORTED_THEMES = 100;
  */
 export const CLIENT_SETTINGS_FILE_SCOPE = {
   localOnboardingCompletedEnvironmentIds: false,
-  lastSeenReleaseNotesVersion: false,
   whatsNewAfterUpdate: true,
   confirmThreadArchive: true,
   confirmThreadDelete: true,
