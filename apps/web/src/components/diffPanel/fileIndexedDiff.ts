@@ -161,6 +161,76 @@ checkpointDiffFilePatches.subscribe(() => {
 });
 const readStoreVersion = () => storeVersion;
 
+interface FileIndexedView {
+  readonly files: FileDiffMetadata[];
+  readonly totals: FileIndexedDiff["totals"];
+  readonly pendingCount: number;
+}
+
+/** The last view built per file index, rebuilt when the store or the input moved. */
+const viewByIndex = new WeakMap<
+  CheckpointDiffFileIndex,
+  {
+    readonly input: CheckpointDiffInput;
+    readonly placeholders: ReadonlyArray<KeyedFileDiff>;
+    readonly version: number;
+    readonly view: FileIndexedView;
+  }
+>();
+
+/**
+ * Every file of the index, parsed when its patch is held and a placeholder
+ * otherwise. `version` is the patch store's version: the same version, input
+ * and placeholders answer the same view (and arrays), so the panel's memos hold.
+ */
+function readFileIndexedView(
+  input: CheckpointDiffInput,
+  index: CheckpointDiffFileIndex,
+  placeholders: ReadonlyArray<KeyedFileDiff>,
+  version: number,
+): FileIndexedView {
+  const cached = viewByIndex.get(index);
+  if (
+    cached &&
+    cached.version === version &&
+    cached.input === input &&
+    cached.placeholders === placeholders
+  ) {
+    return cached.view;
+  }
+  const files: FileDiffMetadata[] = [];
+  let pendingCount = 0;
+  let additions = 0;
+  let deletions = 0;
+  index.files.forEach((file, position) => {
+    additions += file.additions;
+    deletions += file.deletions;
+    const placeholder = placeholders[position]!;
+    const key = checkpointDiffFilePatches.filePatchKey(input, index, file.index);
+    const state = checkpointDiffFilePatches.readFilePatch(key);
+    const parsed =
+      state.patch !== null ? parsedFiles(key, state.patch, placeholder.renderKey ?? key) : null;
+    if (parsed && parsed.length > 0) {
+      files.push(...parsed);
+      return;
+    }
+    pendingCount += 1;
+    pendingByPlaceholder.set(placeholder, {
+      file,
+      loading: state.isLoading,
+      error: state.error ?? (state.patch !== null ? "This file's patch could not be read." : null),
+    });
+    files.push(placeholder);
+  });
+  const view: FileIndexedView = {
+    files: files.toSorted(compareFiles),
+    totals: { files: index.files.length, additions, deletions },
+    pendingCount,
+  };
+  viewByIndex.set(index, { input, placeholders, version, view });
+  return view;
+}
+
 /**
  * The diff read file by file, or null when the node sent the whole diff (an
  * older node, or no file index was asked for): the panel then parses `diff`
@@ -183,41 +253,7 @@ export function useFileIndexedDiff(
       ) ?? [],
     [index],
   );
-
-  const view = useMemo(() => {
-    if (!index) return null;
-    const files: FileDiffMetadata[] = [];
-    let pendingCount = 0;
-    let additions = 0;
-    let deletions = 0;
-    index.files.forEach((file, position) => {
-      additions += file.additions;
-      deletions += file.deletions;
-      const placeholder = placeholders[position]!;
-      const key = checkpointDiffFilePatches.filePatchKey(input, index, file.index);
-      const state = checkpointDiffFilePatches.readFilePatch(key);
-      const parsed =
-        state.patch !== null ? parsedFiles(key, state.patch, placeholder.renderKey ?? key) : null;
-      if (parsed && parsed.length > 0) {
-        files.push(...parsed);
-        return;
-      }
-      pendingCount += 1;
-      pendingByPlaceholder.set(placeholder, {
-        file,
-        loading: state.isLoading,
-        error:
-          state.error ?? (state.patch !== null ? "This file's patch could not be read." : null),
-      });
-      files.push(placeholder);
-    });
-    return {
-      files: files.toSorted(compareFiles),
-      totals: { files: index.files.length, additions, deletions },
-      pendingCount,
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- `version` stands for the store: a file's patch arrived or failed.
-  }, [index, placeholders, version, input.environmentId, input.ignoreWhitespace]);
+  const view = index ? readFileIndexedView(input, index, placeholders, version) : null;
 
   const request = useCallback(
     (fileDiffs: ReadonlyArray<FileDiffMetadata>) => {
@@ -229,8 +265,7 @@ export function useFileIndexedDiff(
         }
       }
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- the input's identity fields; the object is rebuilt per render.
-    [index, input.environmentId, input.threadId, input.fromTurnCount, input.toTurnCount],
+    [index, input],
   );
   const requestAll = useCallback(() => {
     if (!view) return;
@@ -243,12 +278,12 @@ export function useFileIndexedDiff(
     let chars = 0;
     for (const file of index.files) chars += file.patchChars;
     if (chars < FILE_BY_FILE_LOAD_ALL_BELOW_CHARS) {
+      // Idempotent: held or loading patches are left alone.
       for (const file of index.files) {
         checkpointDiffFilePatches.loadFilePatch(input, index, file.index);
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- once per file index; the input it belongs to comes with it.
-  }, [index]);
+  }, [index, input]);
 
   return useMemo(
     () =>
