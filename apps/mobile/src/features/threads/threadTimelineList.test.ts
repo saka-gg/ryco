@@ -12,6 +12,8 @@ import {
   createThreadListRowAnnotator,
   nextThreadMessageAnchorStep,
   resolveOpenThreadNavigation,
+  THREAD_LIST_ESTIMATED_ROW_SIZE,
+  threadListRowType,
   threadMessageRowIndex,
 } from "./threadTimelineList";
 
@@ -325,5 +327,76 @@ describe("resolveOpenThreadNavigation", () => {
         messageId,
       }).kind,
     ).toBe("push");
+  });
+});
+
+describe("threadListRowType", () => {
+  const fold = (expanded: boolean): ThreadTimelineRow => ({
+    kind: "activity-fold",
+    id: `fold-${String(expanded)}`,
+    turnId: null,
+    status: "settled",
+    label: "Read 3 files",
+    durationLabel: null,
+    rows: [],
+    expanded,
+    liveThought: null,
+  });
+
+  it("names each row kind the feed shows", () => {
+    expect(
+      [messageRow("u", "user"), messageRow("r"), fold(false), fold(true)].map(threadListRowType),
+    ).toEqual(["sent", "reply", "fold", "fold-open"]);
+  });
+
+  /**
+   * An older page loads above the reader: the list places its rows by the averages of the rows it
+   * measured. A turn here is a sent message, two closed folds and a reply, at heights from the
+   * rows' styles (80, 36, 36 and 260 pt); the reader has measured the newest 8 turns, one with a
+   * long reply. Total misplacement of the 40 prepended rows, in points.
+   */
+  it("places an older page closer to its real height with an average per kind", () => {
+    const heights: Record<string, number> = { sent: 80, fold: 36, reply: 260 };
+    const turn = [messageRow("u", "user"), fold(false), fold(false), messageRow("r")];
+    const measured = Array.from({ length: 8 }, (_, index) =>
+      turn.map((row) => {
+        const type = threadListRowType(row);
+        return { type, size: type === "reply" && index === 0 ? 900 : heights[type]! };
+      }),
+    ).flat();
+    const older = Array.from({ length: 10 }, () => turn).flat();
+    const real = older.reduce((sum, row) => sum + heights[threadListRowType(row)]!, 0);
+
+    const average = (sizes: ReadonlyArray<number>) =>
+      sizes.reduce((sum, size) => sum + size, 0) / sizes.length;
+    const single = average(measured.map((row) => row.size)) * older.length;
+    const perKind = older.reduce(
+      (sum, row) =>
+        sum +
+        average(
+          measured.filter((entry) => entry.type === threadListRowType(row)).map((e) => e.size),
+        ),
+      0,
+    );
+    // The whole page is off by the same amount either way (the long reply skews both)...
+    expect(Math.round(Math.abs(single - real))).toBe(Math.round(Math.abs(perKind - real)));
+    // ...but row by row, which is what jumps while the reader scrolls into the page, a single
+    // average (123 pt) makes every fold ~90 pt too tall and every reply ~140 pt too short, while
+    // per kind only the replies carry the long one's share (340 pt).
+    const rowError = (estimate: (type: string) => number) =>
+      older.reduce((sum, row) => {
+        const type = threadListRowType(row);
+        return sum + Math.abs(estimate(type) - heights[type]!);
+      }, 0);
+    const singleAverage = average(measured.map((row) => row.size));
+    expect(Math.round(rowError(() => singleAverage))).toBe(3_540);
+    expect(
+      Math.round(
+        rowError((type) =>
+          average(measured.filter((entry) => entry.type === type).map((e) => e.size)),
+        ),
+      ),
+    ).toBe(800);
+    expect(THREAD_LIST_ESTIMATED_ROW_SIZE).toBeGreaterThanOrEqual(36);
   });
 });

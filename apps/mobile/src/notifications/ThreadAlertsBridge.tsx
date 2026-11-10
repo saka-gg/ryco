@@ -11,12 +11,14 @@ import { readVisibleThread } from "./visibleThread";
 
 type ThreadAlertsModule = typeof import("./threadAlerts");
 type BackgroundAlertsModule = typeof import("./push/backgroundAlertsRuntime");
+type AppBadgeModule = typeof import("./badge/AppBadgeFeed");
 
 // At module scope: the React Compiler cannot compile a component that calls import() itself.
 const loadThreadAlerts = (): Promise<ThreadAlertsModule> => import("./threadAlerts");
 const loadBackgroundAlerts = (): Promise<BackgroundAlertsModule> =>
   import("./push/backgroundAlertsRuntime");
 const loadPushKeyCustody = () => import("./push/pushKeyCustody");
+const loadAppBadge = (): Promise<AppBadgeModule> => import("./badge/AppBadgeFeed");
 
 /**
  * Loads thread alerts once they have ever been turned on, which keeps
@@ -41,6 +43,9 @@ export function ThreadAlertsBridge() {
   const [alertsModule, setAlertsModule] = useState<ThreadAlertsModule | null>(null);
   const [backgroundModule, setBackgroundModule] = useState<BackgroundAlertsModule | null>(null);
   const backgroundRef = useRef<BackgroundAlertsModule | null>(null);
+  // The app icon badge follows the "needs you" count while alerts are on.
+  const badgeWanted = preferences.threadAlerts === true;
+  const [badgeModule, setBadgeModule] = useState<AppBadgeModule | null>(null);
 
   useEffect(() => {
     void loadPushKeyCustody()
@@ -78,6 +83,19 @@ export function ThreadAlertsBridge() {
   }, [backgroundEnabled, backgroundModule]);
 
   useEffect(() => {
+    if (!badgeWanted || badgeModule !== null) return;
+    let active = true;
+    void loadAppBadge()
+      .then((loaded) => {
+        if (active) setBadgeModule(loaded);
+      })
+      .catch((error: unknown) => console.warn("The app badge failed to load.", error));
+    return () => {
+      active = false;
+    };
+  }, [badgeModule, badgeWanted]);
+
+  useEffect(() => {
     if (backgroundModule === null) return;
     backgroundRef.current = backgroundModule;
     return backgroundModule.getMobileBackgroundAlerts().start();
@@ -108,5 +126,6 @@ export function ThreadAlertsBridge() {
     return () => alerts.stop();
   }, [alertsModule, driver]);
 
-  return null;
+  const AppBadgeFeed = badgeWanted ? badgeModule?.AppBadgeFeed : undefined;
+  return AppBadgeFeed === undefined ? null : <AppBadgeFeed />;
 }

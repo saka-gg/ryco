@@ -41,6 +41,8 @@ const worstBase = (excerptKind: "approval" | "input") =>
     ...(excerptKind === "approval" ? { rq: "r".repeat(PUSH_ALERT_REQUEST_ID_MAX_LENGTH) } : {}),
     q: Number.MAX_SAFE_INTEGER,
     at: Number.MAX_SAFE_INTEGER,
+    // The badge count (`b`) sits in the base, which always goes: the excerpt yields to it.
+    b: Number.MAX_SAFE_INTEGER,
   }) as const;
 
 const longCommand = `npm run build && ${"node scripts/check.mjs --all ".repeat(200)}`;
@@ -194,6 +196,7 @@ describe("alert excerpts", () => {
         recipients: [{ registration, candidate }],
         excerpts,
         sealedMaxLength,
+        needsYou: Number.MAX_SAFE_INTEGER,
       });
       expect(delivery!.sealed.length).toBeLessThanOrEqual(sealedMaxLength);
       const opened = openPushPayload({
@@ -207,6 +210,7 @@ describe("alert excerpts", () => {
       });
       const payload = decodePlaintext(JSON.parse(new TextDecoder().decode(opened!)));
       expect(payload.x).toMatchObject({ a: { k: "command" } });
+      expect(payload.b).toBe(Number.MAX_SAFE_INTEGER);
     }
   });
 });

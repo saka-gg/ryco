@@ -1,6 +1,7 @@
 import type { EnvironmentId } from "@ryco/contracts/base-schemas";
 import type {
   PushAlertKind,
+  PushDeviceStatus,
   PushKeyId,
   PushPresence,
   PushPublicKey,
@@ -16,8 +17,9 @@ import {
   HUB_PUSH_CAPABILITY_RECHECK_MS,
   HUB_PUSH_CAPABILITY_RETRY_MS,
   NODE_PUSH_RETRY_MS,
-  PUSH_PRESENCE_REFRESH_MS,
+  PUSH_REGISTRATION_REFRESH_MS,
   awaitsHubDelivery,
+  pushPresenceRefreshMs,
   environmentPushStateFromError,
   environmentPushStateFromStatus,
   hubRegistrationFailure,
@@ -144,6 +146,15 @@ export interface BackgroundAlertsPorts {
   readonly earlierInstallKey: {
     readonly read: () => Promise<PushKey | null>;
   };
+  /**
+   * Survives a restart (optional): the registration each node last confirmed, so a connect asks
+   * the node with its presence whether it still holds it instead of registering again. Opaque
+   * text, written whenever it changes; null when there is none.
+   */
+  readonly nodeRegistrations?: {
+    readonly read: () => Promise<string | null>;
+    readonly write: (value: string | null) => Promise<void>;
+  };
   readonly notifications: {
     readonly readPermission: () => Promise<boolean>;
     /** The APNs device token, hex. */
@@ -191,6 +202,12 @@ interface NodeAttempt {
   readonly kinds: string;
   /** It was told the Live Activity takes push updates. */
   readonly liveActivity: boolean;
+  /** The exact registration: enrollment, key and settings (`registrationOf`). */
+  readonly registration: string;
+  /** When that registration was last sent to the node. */
+  readonly registeredAt: number;
+  /** The foreground hold the node announced, or null when it announced none (an older node). */
+  readonly foregroundHoldMs: number | null;
   readonly state: EnvironmentPushState;
   /** When it ran, or null once a presence tick or a foreground asked for it again. */
   readonly at: number | null;
@@ -200,6 +217,53 @@ interface NodeAttempt {
    * nothing and is asked again until its Hub confirmed delivery.
    */
   readonly reportsStatus: boolean;
+}
+
+/** A registration a node confirmed, as remembered across connects and restarts. */
+interface ConfirmedRegistration {
+  readonly registration: string;
+  readonly registeredAt: number;
+}
+
+/** What a node is asked to hold for this device; any difference registers again. */
+function registrationOf(
+  pushKey: PushKey,
+  sound: boolean,
+  kinds: string,
+  liveActivity: boolean,
+): string {
+  return [
+    pushKey.enrollmentId ?? "",
+    pushKey.keyId,
+    String(sound),
+    kinds,
+    String(liveActivity),
+  ].join("\n");
+}
+
+function decodeConfirmedRegistrations(
+  raw: string | null,
+): Map<EnvironmentId, ConfirmedRegistration> {
+  const confirmed = new Map<EnvironmentId, ConfirmedRegistration>();
+  if (raw === null) return confirmed;
+  try {
+    const entries: unknown = JSON.parse(raw);
+    if (!Array.isArray(entries)) return confirmed;
+    for (const entry of entries) {
+      if (!Array.isArray(entry)) continue;
+      const [environmentId, registration, registeredAt] = entry as unknown[];
+      if (
+        typeof environmentId === "string" &&
+        typeof registration === "string" &&
+        typeof registeredAt === "number"
+      ) {
+        confirmed.set(environmentId as EnvironmentId, { registration, registeredAt });
+      }
+    }
+  } catch {
+    // Unreadable: every node is registered again, as before.
+  }
+  return confirmed;
 }
 
 /**
@@ -257,7 +321,10 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
   let running = false;
   let rerun = false;
   let started = 0;
-  let presenceTimer: unknown = null;
+  /** One presence timer per cadence the registered nodes need (`pushPresenceRefreshMs`). */
+  const presenceTimers = new Map<number, unknown>();
+  /** The registrations nodes confirmed; undefined until read from the device. */
+  let confirmed: Map<EnvironmentId, ConfirmedRegistration> | undefined;
 
   const report = (context: string, error: unknown) => ports.onError?.(context, error);
 
@@ -308,11 +375,63 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
     return any;
   };
 
+  const saveConfirmed = () => {
+    const entries = [...(confirmed ?? [])].map(([environmentId, entry]) => [
+      environmentId,
+      entry.registration,
+      entry.registeredAt,
+    ]);
+    ports.nodeRegistrations
+      ?.write(entries.length === 0 ? null : JSON.stringify(entries))
+      .catch((error: unknown) =>
+        report("Recording the confirmed node registrations failed", error),
+      );
+  };
+
+  const readConfirmed = async (): Promise<Map<EnvironmentId, ConfirmedRegistration>> => {
+    if (confirmed !== undefined) return confirmed;
+    let raw: string | null = null;
+    try {
+      raw = (await ports.nodeRegistrations?.read()) ?? null;
+    } catch (error) {
+      report("Reading the confirmed node registrations failed", error);
+    }
+    confirmed ??= decodeConfirmedRegistrations(raw);
+    return confirmed;
+  };
+
+  /** The node holds this attempt's registration: a later connect only asks whether it still does. */
+  const confirm = (attempt: NodeAttempt) => {
+    if (confirmed === undefined) return;
+    const environmentId = attempt.connection.environmentId;
+    const known = confirmed.get(environmentId);
+    if (
+      known?.registration === attempt.registration &&
+      known.registeredAt === attempt.registeredAt
+    ) {
+      return;
+    }
+    confirmed.set(environmentId, {
+      registration: attempt.registration,
+      registeredAt: attempt.registeredAt,
+    });
+    saveConfirmed();
+  };
+
+  const unconfirm = (environmentId: EnvironmentId) => {
+    if (confirmed?.delete(environmentId) === true) saveConfirmed();
+  };
+
   const forgetLocally = () => {
     key = null;
     keyRegistration = null;
     hubRegistration = null;
     attempts.clear();
+    // What nodes confirmed belonged to that key: forget it here and on the device.
+    if (confirmed === undefined || confirmed.size > 0) {
+      confirmed = new Map();
+      saveConfirmed();
+    }
     publish({ device: "idle", environments: new Map() });
   };
 
@@ -415,13 +534,22 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
       };
       attempts.set(environmentId, lost);
       setEnvironment(environmentId, lost.state);
+      unconfirm(environmentId);
       syncPresenceTimer();
       request();
       return;
     }
     const state = environmentPushStateFromStatus(status);
-    attempts.set(environmentId, { ...attempt, state, reportsStatus: true });
+    const next: NodeAttempt = {
+      ...attempt,
+      state,
+      reportsStatus: true,
+      foregroundHoldMs: status.foregroundHoldMs ?? null,
+    };
+    attempts.set(environmentId, next);
     setEnvironment(environmentId, state);
+    confirm(next);
+    if (next.foregroundHoldMs !== attempt.foregroundHoldMs) syncPresenceTimer();
   };
 
   const sendPresence = (
@@ -442,18 +570,32 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
   const awaitsReregistration = (attempt: NodeAttempt) =>
     !attempt.reportsStatus && awaitsHubDelivery(attempt.state);
 
+  const cadenceOf = (attempt: NodeAttempt) => pushPresenceRefreshMs(attempt.foregroundHoldMs);
+
+  /**
+   * While in front, each registered node hears `foreground` again within half of the hold it
+   * announced (an older node, which announces none, every 30 s as before): one timer per cadence.
+   */
   const syncPresenceTimer = () => {
-    const wanted = started > 0 && ports.app.isActive() && registeredNodes().length > 0;
-    if (wanted && presenceTimer === null) {
-      presenceTimer = ports.timers.setInterval(() => {
-        // A node that reports its registration answers this; an older one
-        // that could not confirm its Hub's delivery yet is asked again.
-        sendPresence("foreground", registeredNodes());
-        if (askAgain(awaitsReregistration)) request();
-      }, PUSH_PRESENCE_REFRESH_MS);
-    } else if (!wanted && presenceTimer !== null) {
-      ports.timers.clearInterval(presenceTimer);
-      presenceTimer = null;
+    const wanted = started > 0 && ports.app.isActive();
+    const cadences = new Set(wanted ? registeredNodes().map(cadenceOf) : []);
+    for (const [ms, handle] of presenceTimers) {
+      if (cadences.has(ms)) continue;
+      ports.timers.clearInterval(handle);
+      presenceTimers.delete(ms);
+    }
+    for (const ms of cadences) {
+      if (presenceTimers.has(ms)) continue;
+      const due = (attempt: NodeAttempt) => cadenceOf(attempt) === ms;
+      presenceTimers.set(
+        ms,
+        ports.timers.setInterval(() => {
+          // A node that reports its registration answers this; an older one
+          // that could not confirm its Hub's delivery yet is asked again.
+          sendPresence("foreground", registeredNodes().filter(due));
+          if (askAgain((attempt) => due(attempt) && awaitsReregistration(attempt))) request();
+        }, ms),
+      );
     }
   };
 
@@ -570,6 +712,44 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
     attempt.at === null ||
     (attempt.state.status === "failed" && ports.now() - attempt.at >= NODE_PUSH_RETRY_MS);
 
+  /**
+   * Whether the node still holds the registration it last confirmed, asked with this device's
+   * presence (which the app sends on a connect anyway): null when there is none to ask about, it
+   * is due for its daily refresh, the node answers nothing (an older node) or says otherwise.
+   */
+  const verifyRegistration = async (
+    connection: BackgroundAlertsConnection,
+    registration: string,
+    pushKey: PushKey,
+  ): Promise<{
+    readonly status: PushDeviceStatus;
+    readonly registeredAt: number;
+    readonly sentForeground: boolean;
+  } | null> => {
+    const known = (await readConfirmed()).get(connection.environmentId);
+    if (
+      known === undefined ||
+      known.registration !== registration ||
+      ports.now() - known.registeredAt >= PUSH_REGISTRATION_REFRESH_MS
+    ) {
+      return null;
+    }
+    const sentForeground = ports.app.isActive();
+    let status: PushDeviceStatus | undefined;
+    try {
+      status = (
+        await connection.push.setPresence({ state: sentForeground ? "foreground" : "background" })
+      ).status;
+    } catch {
+      return null;
+    }
+    if (status?.registered !== true || status.keyId !== pushKey.keyId) {
+      unconfirm(connection.environmentId);
+      return null;
+    }
+    return { status, registeredAt: known.registeredAt, sentForeground };
+  };
+
   const registerNodes = async (
     sound: boolean,
     kinds: ReadonlyArray<PushAlertKind>,
@@ -597,32 +777,65 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
         attempts.delete(connection.environmentId);
         setEnvironment(connection.environmentId, { status: "registering" });
       }
-      let state: EnvironmentPushState;
-      try {
-        state = environmentPushStateFromStatus(
-          await connection.push.registerDevice({
-            keyId: pushKey.keyId,
-            publicKey: pushKey.publicKey,
-            kinds,
-            sound,
-            // Only when on: an older node then sees the payload it always did.
-            ...(liveActivity ? { liveActivity: true } : {}),
-          }),
-        );
-      } catch (error) {
-        state = environmentPushStateFromError(error);
-        if (state.status === "failed") report("Registering for push with a node failed", error);
-      }
-      // A refresh that did not get through leaves the registration as it was:
-      // the presence keeps going, and the next tick asks again.
-      if (refreshed !== null && state.status === "failed") state = refreshed.state;
-      const attempt: NodeAttempt = {
+      const registration = registrationOf(pushKey, sound, kindsKey, liveActivity);
+      const base = {
         connection,
         ready,
         keyId: pushKey.keyId,
         sound,
         kinds: kindsKey,
         liveActivity,
+      };
+      // A new connect to a node that confirmed exactly this registration: its presence answer
+      // says whether it still holds it, so nothing is registered again.
+      const fresh = previous?.connection !== connection || previous.ready !== ready;
+      const verified = fresh ? await verifyRegistration(connection, registration, pushKey) : null;
+      if (verified !== null) {
+        const attempt: NodeAttempt = {
+          ...base,
+          registration,
+          registeredAt: verified.registeredAt,
+          foregroundHoldMs: verified.status.foregroundHoldMs ?? null,
+          state: environmentPushStateFromStatus(verified.status),
+          at: ports.now(),
+          reportsStatus: true,
+        };
+        attempts.set(connection.environmentId, attempt);
+        setEnvironment(connection.environmentId, attempt.state);
+        // The app came or went while the node was asked.
+        const inFront = ports.app.isActive();
+        if (inFront !== verified.sentForeground) {
+          sendPresence(inFront ? "foreground" : "background", [attempt]);
+        }
+        continue;
+      }
+      let state: EnvironmentPushState;
+      let foregroundHoldMs: number | null = refreshed?.foregroundHoldMs ?? null;
+      try {
+        const status = await connection.push.registerDevice({
+          keyId: pushKey.keyId,
+          publicKey: pushKey.publicKey,
+          kinds,
+          sound,
+          // Only when on: an older node then sees the payload it always did.
+          ...(liveActivity ? { liveActivity: true } : {}),
+        });
+        state = environmentPushStateFromStatus(status);
+        foregroundHoldMs = status.foregroundHoldMs ?? null;
+      } catch (error) {
+        state = environmentPushStateFromError(error);
+        if (state.status === "failed") report("Registering for push with a node failed", error);
+      }
+      // A refresh that did not get through leaves the registration as it was:
+      // the presence keeps going, and the next tick asks again.
+      const keptRefresh = refreshed !== null && state.status === "failed";
+      if (keptRefresh) state = refreshed.state;
+      else if (state.status !== "registered") unconfirm(connection.environmentId);
+      const attempt: NodeAttempt = {
+        ...base,
+        registration,
+        registeredAt: keptRefresh ? refreshed.registeredAt : ports.now(),
+        foregroundHoldMs,
         state,
         at: ports.now(),
         // Known for this connect; a reconnect may reach an updated (or older) node.

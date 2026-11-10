@@ -54,6 +54,13 @@ export interface MobileQuery<TInput, TData> extends KeyedQueryByKey<
     updater: (current: TData | null) => TData | null,
     options?: MobileQueryWriteOptions,
   ) => void;
+  /**
+   * Marks the entry stale and fences a read in flight (it can never publish)
+   * without reading again: a later `refresh` or watch reads from the current
+   * connection. For an entry whose connection was replaced while its screen is
+   * not on screen.
+   */
+  readonly fence: (compositeKey: string | null) => void;
 }
 
 export interface MobileQueryDefinition<TInput, TData> {
@@ -386,7 +393,20 @@ export function createMobileQueryCache(
       if (options?.live === true && controller !== undefined) saveLiveAnswer(controller, next);
     }
 
-    return { ...query, watch, writeData };
+    function fence(compositeKey: string | null): void {
+      if (compositeKey === null) return;
+      const controller = registry.controllers.get(compositeKey);
+      if (controller === undefined || mirrorFamilies.has(controller.family)) return;
+      controller.lastFetchedAt = 0;
+      const wasReading = controller.inFlightPromise !== null;
+      registry.cancel(controller);
+      if (!wasReading) return;
+      // The fenced read never settles this entry: drop its fetching flags.
+      const current = registry.getQueryState(compositeKey);
+      registry.setQueryState(compositeKey, { ...current, isLoading: false, isFetching: false });
+    }
+
+    return { ...query, watch, writeData, fence };
   }
 
   function refreshController(controller: Parameters<typeof registry.cancel>[0]): void {

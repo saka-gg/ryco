@@ -184,6 +184,8 @@ describe("attention publisher", () => {
       th: "thread-1",
       tu: "turn-1",
       q: signal.sequence,
+      // A finished turn waits on nobody.
+      b: 0,
     });
     expect(test.delivery).toContain("available");
     await test.publisher.stop();
@@ -200,7 +202,13 @@ describe("attention publisher", () => {
       2,
     );
     await test.settle();
-    expect(open(test.sent[0]!)).toMatchObject({ k: "approval", tu: "turn-1", rq: "approval-a" });
+    // The thread waiting on the person is the node's one "needs you": the badge count.
+    expect(open(test.sent[0]!)).toMatchObject({
+      k: "approval",
+      tu: "turn-1",
+      rq: "approval-a",
+      b: 1,
+    });
     // A newer approval in the same turn gets its own alert, with its own request.
     await test.update(
       summary({

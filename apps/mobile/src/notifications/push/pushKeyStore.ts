@@ -27,6 +27,17 @@ export interface RycoPushNativeModule {
   readonly readAlertExcerpt?: (environmentId: string, threadId: string) => Promise<string | null>;
   /** Forgets a thread's excerpt. Absent from binaries older than excerpts. */
   readonly removeAlertExcerpt?: (environmentId: string, threadId: string) => Promise<void>;
+  /**
+   * The app icon badge (`PushBadgeStore`): writes the machines' live "needs you" counts over the
+   * ones alerts brought, drops machines not in `listed`, sets the badge to the sum and answers it.
+   * Absent from builds before the badge.
+   */
+  readonly setBadgeCounts?: (
+    live: Readonly<Record<string, number>>,
+    listed: ReadonlyArray<string>,
+  ) => Promise<number>;
+  /** Forgets every machine's count and clears the badge. Absent from builds before the badge. */
+  readonly clearBadge?: () => Promise<void>;
 }
 
 interface NativePushKey {

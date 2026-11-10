@@ -9,7 +9,7 @@ import {
 import { encodeCompressedRelayPayload } from "@ryco/shared/relayPayloadCompression";
 import { describe, expect, it } from "vite-plus/test";
 
-import { fflateRelayPayloadInflater } from "./relayPayloadInflater";
+import { fflateRelayPayloadInflater, selectRelayPayloadInflater } from "./relayPayloadInflater";
 
 function jsonMessage(bytes: number): Uint8Array {
   const items: string[] = [];
@@ -103,5 +103,22 @@ describe("fflate relay payload inflater", () => {
         label,
       ).toEqual(accepted ? ["fulfilled", "fulfilled"] : ["rejected", "rejected"]);
     }
+  });
+});
+
+describe("the relay payload inflater selection", () => {
+  it("uses fflate where the binary has no native inflater", () => {
+    expect(selectRelayPayloadInflater(null)).toBe(fflateRelayPayloadInflater);
+  });
+
+  it("inflates natively, and refuses a native answer beyond the cap", async () => {
+    const native = { inflateRaw: async (_body: Uint8Array, max: number) => new Uint8Array(max) };
+    await expect(
+      selectRelayPayloadInflater(native).inflateRaw(new Uint8Array(1), 4),
+    ).resolves.toEqual(new Uint8Array(4));
+    const oversized = { inflateRaw: async () => new Uint8Array(5).fill(1) };
+    await expect(
+      selectRelayPayloadInflater(oversized).inflateRaw(new Uint8Array(1), 4),
+    ).rejects.toThrow("Inflated relay payload exceeds its cap.");
   });
 });

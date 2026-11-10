@@ -417,6 +417,8 @@ import { useForkSheetState } from "./useForkSheetState";
 import {
   nextThreadMessageAnchorStep,
   resolveOpenThreadNavigation,
+  THREAD_LIST_ESTIMATED_ROW_SIZE,
+  threadListRowType,
   type ThreadListRow,
 } from "./threadTimelineList";
 
@@ -969,9 +971,13 @@ export function ThreadDetailScreen(props: {
     threadId,
     liveLoaded: threadLiveDetailLoaded,
   });
-  const alertPromptsShown = pendingApprovals.length === 0 && pendingUserInputs.length === 0;
-  const alertApprovals = alertPromptsShown ? alertExcerpt.approvals : NO_PENDING_APPROVALS;
-  const alertUserInputs = alertPromptsShown ? alertExcerpt.userInputs : [];
+  // A saved or live card for the same request wins: the alert's card never shows twice.
+  const alertApprovals = alertExcerpt.approvals.filter(
+    (approval) => !pendingApprovals.some((shown) => shown.requestId === approval.requestId),
+  );
+  const alertUserInputs = alertExcerpt.userInputs.filter(
+    (userInput) => !pendingUserInputs.some((shown) => shown.requestId === userInput.requestId),
+  );
   // When each pending approval was first on screen: a send declines only approvals shown long
   // enough to have been read.
   const approvalSightingsRef = useRef<ApprovalSightings>(new Map());
@@ -3749,6 +3755,9 @@ export function ThreadDetailScreen(props: {
               listProps={{
                 renderItem: renderItem,
                 keyExtractor: (row) => row.id,
+                // Size hints per row kind (threadTimelineList.ts).
+                getItemType: threadListRowType,
+                estimatedItemSize: THREAD_LIST_ESTIMATED_ROW_SIZE,
                 alignItemsAtEnd: true,
                 initialScrollAtEnd: true,
                 // Following keeps the end from any distance; reading back, the rows on screen stay put.

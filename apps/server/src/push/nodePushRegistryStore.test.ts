@@ -47,6 +47,7 @@ describe("node push registry store", () => {
       keyId: input.keyId,
       kinds: ["completed"],
       hubDelivery: "available",
+      foregroundHoldMs: PUSH_FOREGROUND_HOLD_MS,
     });
     expect(await run(registry.reserveSequence)).toBe(1_000);
     expect(await run(registry.reserveSequence)).toBe(1_001);
@@ -78,6 +79,24 @@ describe("node push registry store", () => {
     expect(await run(registry.foregroundEnrollments(now.value))).toEqual(new Set());
   });
 
+  it("holds foreground across a phone's 40 s cadence and an older phone's 30 s one, with room for a late tick", async () => {
+    expect(PUSH_FOREGROUND_HOLD_MS).toBe(90_000);
+    for (const cadence of [40_000, 30_000]) {
+      const now = { value: 1_000 };
+      const { registry } = await store(now);
+      const status = await run(registry.setPresence(device, "foreground"));
+      expect(status.foregroundHoldMs).toBe(PUSH_FOREGROUND_HOLD_MS);
+      // Ten ticks; each one may be up to a whole cadence late without a gap.
+      for (let tick = 0; tick < 10; tick += 1) {
+        now.value += cadence;
+        expect(await run(registry.foregroundEnrollments(now.value + cadence - 1))).toEqual(
+          new Set([device.enrollmentId]),
+        );
+        await run(registry.setPresence(device, "foreground"));
+      }
+    }
+  });
+
   it("answers presence with the device's registration as held now, without writing it", async () => {
     const now = { value: 1_000 };
     const { registry, filePath } = await store(now);
@@ -87,6 +106,7 @@ describe("node push registry store", () => {
       keyId: null,
       kinds: [],
       hubDelivery: "offline",
+      foregroundHoldMs: PUSH_FOREGROUND_HOLD_MS,
     });
     await run(registry.register(device, input));
     const written = readFileSync(filePath, "utf8");
@@ -98,6 +118,7 @@ describe("node push registry store", () => {
       keyId: input.keyId,
       kinds: ["completed"],
       hubDelivery: "available",
+      foregroundHoldMs: PUSH_FOREGROUND_HOLD_MS,
     });
     expect(readFileSync(filePath, "utf8")).toBe(written);
     // The node left its Hub: the device hears its registration is gone.

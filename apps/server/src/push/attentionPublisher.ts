@@ -16,7 +16,9 @@
  *   one replaces it: a turn that completes right after an approval sends one
  *   alert.
  * - Per device: the kinds it asked for, minus action kinds for a viewer, and
- *   nothing while it is in front (its local alerts cover the screen).
+ *   nothing while it is in front (its local alerts cover the screen). Each
+ *   sealed alert carries the node's "needs you" count (`b`, the Live Activity's
+ *   rule) for the device's app icon badge.
  * - An approval or question alert carries an excerpt (`alertExcerpt.ts`): the approval's
  *   command or the questions, read once per alert, as much as fits the sealed size the Hub's
  *   last answer allowed (the legacy 1 KB until a Hub says it takes more).
@@ -222,6 +224,8 @@ export function sealAttentionDeliveries(input: {
   readonly recipients: ReadonlyArray<AttentionRecipient>;
   readonly excerpts?: ReadonlyMap<ThreadNotificationEvent, PushAlertExcerpt> | undefined;
   readonly sealedMaxLength?: number | undefined;
+  /** This node's "needs you" count, for the device's app icon badge (`b`). */
+  readonly needsYou?: number | undefined;
 }): ReadonlyArray<PushAttentionDelivery> {
   const maxBytes = maxPlaintextBytes(input.sealedMaxLength ?? PUSH_SEALED_LEGACY_MAX_LENGTH);
   const plaintexts = new Map<ThreadNotificationEvent, Uint8Array>();
@@ -238,6 +242,7 @@ export function sealAttentionDeliveries(input: {
       ...sealedApprovalRequestIdField(candidate),
       q: input.sequence,
       at: input.issuedAt,
+      ...(input.needsYou === undefined ? {} : { b: input.needsYou }),
     };
     const bytes = fitAlertPlaintext({
       base,
@@ -516,6 +521,14 @@ export function startAttentionPublisher(deps: AttentionPublisherDeps): Attention
     });
     const excerpts = await readExcerpts(chunks);
     if (stopped) return;
+    // The rows the passes keep are current for every thread an alert is about.
+    const { needsYou } = countNodeAgentActivity({
+      environmentId,
+      threads: rows.values(),
+      worktrees,
+      autoSettleAfterDays,
+      nowMs: deps.now(),
+    }).counts;
     for (const recipients of chunks) {
       if (stopped) return;
       const sequence = await deps.reserveSequence();
@@ -530,6 +543,7 @@ export function startAttentionPublisher(deps: AttentionPublisherDeps): Attention
           recipients,
           excerpts,
           sealedMaxLength,
+          needsYou,
         }),
       };
       const result = await sendWithRetry(

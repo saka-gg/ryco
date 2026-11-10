@@ -96,6 +96,21 @@ const EXCERPT_CASES = [
   sealedCase("mismatched", { k: "completed", x: { a: { k: "command", d: "ls" } } }),
   sealedCase("malformed", { k: "approval", rq: "a", x: { a: { k: "launch-rockets" } } }),
   sealedCase("none", { k: "approval", rq: "a" }),
+  // The badge count (`b`) and the excerpt travel together or alone; either one malformed leaves
+  // the other intact.
+  sealedCase("excerpt-and-badge", {
+    k: "approval",
+    rq: "approval-2",
+    x: { a: { k: "file-change", d: "src/main.ts" } },
+    b: 4,
+  }),
+  sealedCase("excerpt-bad-badge", {
+    k: "approval",
+    rq: "approval-3",
+    x: { a: { k: "command", d: "make" } },
+    b: "3",
+  }),
+  sealedCase("badge-bad-excerpt", { k: "approval", rq: "approval-4", x: { a: 7 }, b: 2 }),
 ];
 
 interface Vector {
@@ -169,8 +184,9 @@ describe.skipIf(!swiftcAvailable)("the extension's Swift opener", () => {
         readonly requestKindLabels: Readonly<Record<string, string>>;
         readonly excerpts: ReadonlyArray<{
           readonly name: string;
-          readonly alert: Readonly<Record<string, string | null>> | null;
+          readonly alert: Readonly<Record<string, string | number | null>> | null;
         }>;
+        readonly badge: Readonly<Record<string, unknown>>;
       };
 
       // The approval card's words for each request kind.
@@ -186,10 +202,10 @@ describe.skipIf(!swiftcAvailable)("the extension's Swift opener", () => {
         excerptLine: "Run command: npm run deploy -- --prod",
       });
       // Only the keys a node sends reach the app.
-      expect(JSON.parse(excerpts.approval!.excerpt!)).toEqual({
+      expect(JSON.parse(String(excerpts.approval!.excerpt!))).toEqual({
         a: { k: "command", d: "npm run deploy -- --prod", r: "Ships it" },
       });
-      expect(JSON.parse(excerpts.approval!.record!)).toEqual({
+      expect(JSON.parse(String(excerpts.approval!.record!))).toEqual({
         v: 1,
         e: "env_excerpt000000000000",
         th: "thread-1",
@@ -200,7 +216,7 @@ describe.skipIf(!swiftcAvailable)("the extension's Swift opener", () => {
         x: { a: { k: "command", d: "npm run deploy -- --prod", r: "Ships it" } },
       });
       expect(excerpts.question).toMatchObject({ excerptLine: "Where should it deploy?" });
-      expect(JSON.parse(excerpts.question!.excerpt!)).toEqual({
+      expect(JSON.parse(String(excerpts.question!.excerpt!))).toEqual({
         u: {
           rq: "question-1",
           ev: "event-1",
@@ -216,6 +232,24 @@ describe.skipIf(!swiftcAvailable)("the extension's Swift opener", () => {
           c: true,
         },
       });
+      expect(excerpts["excerpt-and-badge"]).toMatchObject({
+        excerptLine: "Change file: src/main.ts",
+        badgeCount: 4,
+      });
+      expect(JSON.parse(String(excerpts["excerpt-and-badge"]!.record!))).toMatchObject({
+        x: { a: { k: "file-change", d: "src/main.ts" } },
+      });
+      expect(excerpts["excerpt-bad-badge"]).toMatchObject({
+        excerptLine: "Run command: make",
+        badgeCount: null,
+      });
+      expect(excerpts["badge-bad-excerpt"]).toMatchObject({
+        excerptLine: null,
+        excerpt: null,
+        record: null,
+        badgeCount: 2,
+      });
+      expect(excerpts.approval).toMatchObject({ badgeCount: null });
       for (const name of ["mismatched", "malformed", "none"]) {
         expect(excerpts[name], name).toMatchObject({
           excerptLine: null,
@@ -227,6 +261,11 @@ describe.skipIf(!swiftcAvailable)("the extension's Swift opener", () => {
       expect(output.kindTitles).toEqual(expectedKindTitles);
       // The extension's categories are the ones the app registers.
       expect(output.kindCategories).toEqual(expectedKindCategories);
+      // The badge is every machine's last known count, the sending one's replaced.
+      expect(output.badge).toEqual({
+        replaced: { counts: { env_a: 0, env_b: 1 }, total: 1 },
+        added: { counts: { env_a: 0, env_b: 1, env_c: 3 }, total: 4 },
+      });
       expect(output.vectors.map((vector) => vector.name)).toEqual(
         vectors.map((vector) => vector.name),
       );
@@ -238,6 +277,7 @@ describe.skipIf(!swiftcAvailable)("the extension's Swift opener", () => {
           readonly th: string;
           readonly tu: string | null;
           readonly rq?: string;
+          readonly b?: number;
         };
         // Only an approval names its request.
         const requestId = plaintext.k === "approval" ? (plaintext.rq ?? null) : null;
@@ -257,6 +297,8 @@ describe.skipIf(!swiftcAvailable)("the extension's Swift opener", () => {
           turnId: plaintext.tu,
           requestId,
           categoryIdentifier: notificationCategoryForKind(plaintext.k),
+          // Older nodes seal no count.
+          badgeCount: plaintext.b ?? null,
         });
         expect(opened.alertRejects).toEqual({
           stale: true,

@@ -18,7 +18,9 @@ import {
 import {
   HUB_PUSH_CAPABILITY_RECHECK_MS,
   NODE_PUSH_RETRY_MS,
+  PUSH_PRESENCE_LONG_REFRESH_MS,
   PUSH_PRESENCE_REFRESH_MS,
+  PUSH_REGISTRATION_REFRESH_MS,
 } from "./backgroundAlertsModel.ts";
 
 const ACCOUNT = "acct_aaaaaaaaaaaaaaaaaaaaaa";
@@ -97,8 +99,12 @@ function harness(
     readonly permission?: boolean;
     readonly account?: BackgroundAlertsAccount;
     readonly storedKey?: PushKey | null;
-    /** What survives a restart: the key and the owed Hub removal. */
-    readonly device?: { storedKey: PushKey | null; hubRemovalOwed: string | null };
+    /** What survives a restart: the key, the owed Hub removal and the confirmed registrations. */
+    readonly device?: {
+      storedKey: PushKey | null;
+      hubRemovalOwed: string | null;
+      nodeRegistrations?: string | null;
+    };
     /** The key an earlier installation left, as the install check saved it. */
     readonly earlierInstallKey?: PushKey | null;
   } = {},
@@ -122,7 +128,11 @@ function harness(
   };
   let active = true;
   let now = 1_800_000_000_000;
-  const device = options.device ?? {
+  const device: {
+    storedKey: PushKey | null;
+    hubRemovalOwed: string | null;
+    nodeRegistrations?: string | null;
+  } = options.device ?? {
     storedKey: options.storedKey ?? null,
     hubRemovalOwed: null,
   };
@@ -132,6 +142,8 @@ function harness(
   const connectionListeners = new Set<() => void>();
   let connections: ReadonlyArray<ReturnType<typeof fakeConnection>> = [];
   const intervals: Array<() => void> = [];
+  /** Each timer's period, by the same index as `intervals`. */
+  const intervalMs: number[] = [];
 
   const hub = {
     getNativePushCapability: vi.fn(async () =>
@@ -157,6 +169,12 @@ function harness(
     read: vi.fn(async () => device.hubRemovalOwed),
     write: vi.fn(async (accountId: string | null) => {
       device.hubRemovalOwed = accountId;
+    }),
+  };
+  const nodeRegistrations = {
+    read: vi.fn(async () => device.nodeRegistrations ?? null),
+    write: vi.fn(async (value: string | null) => {
+      device.nodeRegistrations = value;
     }),
   };
   const earlier = { key: options.earlierInstallKey ?? null };
@@ -204,6 +222,7 @@ function harness(
     },
     hubRemoval,
     earlierInstallKey,
+    nodeRegistrations,
     notifications,
     app: {
       isActive: () => active,
@@ -213,12 +232,13 @@ function harness(
       },
     },
     timers: {
-      setInterval: (callback) => {
+      setInterval: (callback, ms) => {
         intervals.push(callback);
+        intervalMs.push(ms);
         return intervals.length - 1;
       },
       clearInterval: (handle) => {
-        intervals[handle as number] = () => undefined;
+        intervals[handle as number] = function cleared() {};
       },
     },
     now: () => now,
@@ -234,6 +254,12 @@ function harness(
     device,
     notifications,
     intervals,
+    intervalMs,
+    /** The timers still running, with their period. */
+    liveTimers: () =>
+      intervals
+        .map((callback, index) => ({ callback, ms: intervalMs[index]! }))
+        .filter(({ callback }) => callback.name !== "cleared"),
     setConnections: (next: ReadonlyArray<ReturnType<typeof fakeConnection>>) => {
       connections = next;
       for (const listener of connectionListeners) listener();
@@ -887,7 +913,12 @@ describe("turning background alerts off", () => {
     first.hub.unregisterNativePush.mockRejectedValue(new Error("offline"));
     first.setPreferences({ enabled: false });
     await settle();
-    expect(first.device).toEqual({ storedKey: null, hubRemovalOwed: ACCOUNT });
+    expect(first.device).toEqual({
+      storedKey: null,
+      hubRemovalOwed: ACCOUNT,
+      // Turning off forgets what nodes confirmed for the key.
+      nodeRegistrations: null,
+    });
 
     // The next launch finds no key, only the owed removal.
     const next = harness({ enabled: false, device: first.device });
@@ -1075,5 +1106,175 @@ describe("the push key across accounts", () => {
     await settle();
     expect(test.pushKey.deleteKey).not.toHaveBeenCalled();
     expect(test.hub.registerNativePush).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("node registrations and presence cadence", () => {
+  /** A current node: answers presence with the registration it holds and announces its hold. */
+  function currentNode(id: string) {
+    const node = fakeConnection(id);
+    node.answer(async () => nodeStatus({ foregroundHoldMs: 90_000 }));
+    node.presence(async () => ({ status: nodeStatus({ foregroundHoldMs: 90_000 }) }));
+    return node;
+  }
+
+  it("skip the registration on a connect when the node confirmed exactly this one", async () => {
+    const test = harness();
+    const node = currentNode("env-a");
+    test.setConnections([node]);
+    test.alerts.start();
+    await settle();
+    expect(node.push.registerDevice).toHaveBeenCalledTimes(1);
+    expect(node.push.setPresence).toHaveBeenCalledTimes(1);
+
+    node.reconnect();
+    await settle();
+    // The presence the connect sends anyway is the whole check.
+    expect(node.push.registerDevice).toHaveBeenCalledTimes(1);
+    expect(node.push.setPresence).toHaveBeenCalledTimes(2);
+    expect(node.push.setPresence).toHaveBeenLastCalledWith({ state: "foreground" });
+    expect(test.alerts.isConfirmed(env("env-a"), "approval")).toBe(true);
+  });
+
+  it("register again when the node lost it, the settings changed, or a day went by", async () => {
+    const test = harness();
+    const node = currentNode("env-a");
+    test.setConnections([node]);
+    test.alerts.start();
+    await settle();
+
+    node.presence(async () => ({
+      status: nodeStatus({ registered: false, keyId: null, kinds: [], foregroundHoldMs: 90_000 }),
+    }));
+    node.reconnect();
+    await settle();
+    expect(node.push.registerDevice).toHaveBeenCalledTimes(2);
+
+    node.presence(async () => ({ status: nodeStatus({ foregroundHoldMs: 90_000 }) }));
+    test.setPreferences({ sound: true });
+    await settle();
+    expect(node.push.registerDevice).toHaveBeenCalledTimes(3);
+    node.reconnect();
+    await settle();
+    expect(node.push.registerDevice).toHaveBeenCalledTimes(3);
+
+    test.advance(PUSH_REGISTRATION_REFRESH_MS);
+    node.reconnect();
+    await settle();
+    expect(node.push.registerDevice).toHaveBeenCalledTimes(4);
+  });
+
+  it("remember what nodes confirmed across a restart, and forget it with the key", async () => {
+    const device = {
+      storedKey: null as PushKey | null,
+      hubRemovalOwed: null,
+      nodeRegistrations: null,
+    };
+    const first = harness({ device });
+    const node = currentNode("env-a");
+    first.setConnections([node]);
+    const stop = first.alerts.start();
+    await settle();
+    stop();
+    expect(device.nodeRegistrations).not.toBeNull();
+
+    const second = harness({ device });
+    const again = currentNode("env-a");
+    second.setConnections([again]);
+    second.alerts.start();
+    await settle();
+    expect(again.push.registerDevice).not.toHaveBeenCalled();
+    expect(again.push.setPresence).toHaveBeenCalledWith({ state: "foreground" });
+
+    second.setAccount({ status: "signed-out" });
+    await settle();
+    expect(device.nodeRegistrations).toBeNull();
+  });
+
+  it("keep registering an older node on every connect", async () => {
+    const test = harness();
+    const node = fakeConnection("env-a");
+    test.setConnections([node]);
+    test.alerts.start();
+    await settle();
+    node.reconnect();
+    await settle();
+    expect(node.push.registerDevice).toHaveBeenCalledTimes(2);
+  });
+
+  it("repeat presence every 40 s to a node holding it 90 s, and every 30 s to an older node", async () => {
+    const test = harness();
+    const current = currentNode("env-new");
+    const older = fakeConnection("env-old");
+    test.setConnections([current, older]);
+    test.alerts.start();
+    await settle();
+    expect(
+      test
+        .liveTimers()
+        .map((timer) => timer.ms)
+        .toSorted(),
+    ).toEqual([PUSH_PRESENCE_REFRESH_MS, PUSH_PRESENCE_LONG_REFRESH_MS]);
+    // Each timer speaks to its own nodes, well inside each node's hold.
+    expect(PUSH_PRESENCE_LONG_REFRESH_MS * 2).toBeLessThanOrEqual(90_000);
+    expect(PUSH_PRESENCE_REFRESH_MS).toBeLessThan(45_000);
+    const presenceBefore = [current, older].map((node) => node.push.setPresence.mock.calls.length);
+    test
+      .liveTimers()
+      .find((timer) => timer.ms === PUSH_PRESENCE_LONG_REFRESH_MS)!
+      .callback();
+    expect(current.push.setPresence.mock.calls.length).toBe(presenceBefore[0]! + 1);
+    expect(older.push.setPresence.mock.calls.length).toBe(presenceBefore[1]);
+
+    // Leaving stops both; a node that drops its announcement falls back to 30 s.
+    test.setActive(false);
+    expect(test.liveTimers()).toEqual([]);
+  });
+
+  /**
+   * One hour in front with three machines, each reconnecting six times (returns to the app):
+   * every registration and presence message the machines receive.
+   */
+  async function hourWithThreeMachines(nodes: ReadonlyArray<ReturnType<typeof fakeConnection>>) {
+    const test = harness();
+    test.setConnections(nodes);
+    test.alerts.start();
+    await settle();
+    const HOUR = 60 * 60_000;
+    const due = new Map<number, number>();
+    for (let elapsed = 0; elapsed <= HOUR; elapsed += 1_000) {
+      if (elapsed > 0 && elapsed % (HOUR / 6) === 0) {
+        for (const node of nodes) node.reconnect();
+        await settle();
+      }
+      for (const timer of test.liveTimers()) {
+        const next = (due.get(timer.ms) ?? 0) + 1_000;
+        if (next >= timer.ms) {
+          timer.callback();
+          due.set(timer.ms, 0);
+        } else due.set(timer.ms, next);
+      }
+      test.advance(1_000);
+    }
+    await settle();
+    const count = (
+      pick: (node: ReturnType<typeof fakeConnection>) => { mock: { calls: unknown[] } },
+    ) => nodes.reduce((sum, node) => sum + pick(node).mock.calls.length, 0);
+    return {
+      registrations: count((node) => node.push.registerDevice),
+      presence: count((node) => node.push.setPresence),
+    };
+  }
+
+  it("counts the messages of an hour for three current machines", async () => {
+    expect(
+      await hourWithThreeMachines([currentNode("a"), currentNode("b"), currentNode("c")]),
+    ).toEqual({ registrations: 3, presence: 3 + 18 + 270 });
+  });
+
+  it("counts the messages of an hour for three older machines, as before", async () => {
+    expect(
+      await hourWithThreeMachines([fakeConnection("a"), fakeConnection("b"), fakeConnection("c")]),
+    ).toEqual({ registrations: 21, presence: 21 + 360 });
   });
 });

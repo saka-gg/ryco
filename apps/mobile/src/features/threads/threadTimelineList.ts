@@ -47,6 +47,30 @@ function messageIdOfRow(row: ThreadTimelineRow): MessageId | null {
 }
 
 /**
+ * The feed list's first-frame estimate of a row's height, before any row is measured. Legend List
+ * 3 has no per-row estimate (`getEstimatedItemSize` went with v3): it learns one average per item
+ * type (`threadListRowType`) from the rows it measured and uses that for the rows it has not.
+ * This only seeds the first frame. From the rows' styles at the default text size: a collapsed
+ * work fold is 36 pt (`min-h-8` plus `my-0.5`), a one- to three-line sent message 60 to 110 pt
+ * (`py-2` around a `py-2.5` bubble of 24 pt lines), a reply typically 150 to 400 pt. A turn of
+ * a message, one or two folds and a reply averages close to 100 pt.
+ */
+export const THREAD_LIST_ESTIMATED_ROW_SIZE = 100;
+
+/**
+ * A row's kind for the feed list (`getItemType`): rows of a kind share a measured average size,
+ * so an unmeasured fold (36 pt) is not placed as if it were a reply (hundreds of points) when an
+ * older page loads above the reader, and recycled containers go to rows of their own kind. An
+ * open fold is its own kind: its height depends on its steps, not on the closed ones.
+ */
+export function threadListRowType(row: ThreadTimelineRow): string {
+  if (row.kind === "activity-fold") return row.expanded ? "fold-open" : "fold";
+  const entry = row.entry;
+  if (entry.kind === "message") return entry.message.role === "user" ? "sent" : "reply";
+  return entry.kind;
+}
+
+/**
  * The messages a row shows: its own, and the blank reply a page row stands in for (`forkReply`),
  * which renders no row of its own. A link to either lands on the row (the shared rule).
  */

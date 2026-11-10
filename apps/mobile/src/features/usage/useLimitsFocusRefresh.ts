@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
-import { AppState } from "react-native";
 
+import { subscribeAppInFront } from "../../platform/appInFront";
 import { limitsFocusRefresh } from "./usageTabModel";
 
 /**
@@ -21,10 +21,10 @@ export function useLimitsFocusRefresh(active: boolean, reload: () => void) {
       if (next === "reload") reload();
     };
     check();
-    const subscription = AppState.addEventListener("change", (state) => {
-      if (state === "active") check();
+    // A Notification Center pull is no return (`subscribeAppInFront`).
+    return subscribeAppInFront((inFront) => {
+      if (inFront) check();
     });
-    return () => subscription.remove();
   }, [active, reload]);
   return {
     /** A person refreshed the limits; the interval starts again from now. */
